@@ -112,7 +112,9 @@
           "白平衡调整：点击图中应为灰色的地方（如墙面、衣服阴影等）。",
           "调整色温/色调：拖动滑块或输入数值微调颜色。",
           "下载结果：点击“下载校正图像”保存处理后的图片。"
-        ]
+        ],
+        vibranceLabel: "活力",
+        saturationLabel: "饱和度"
       },
       en: {
         title: "Film Negative → Positive (Rotate + Crop + White Balance + Temp/Tint)",
@@ -124,7 +126,9 @@
           "White Balance: Click a gray area in the image (e.g., wall, clothing shadow, etc).",
           "Adjust Temp/Tint: Use sliders or input numbers to fine-tune colors.",
           "Download: Click 'Download Corrected Image' to save the result."
-        ]
+        ],
+        vibranceLabel: "Vibrance",
+        saturationLabel: "Saturation"
       },
       ja: {
         title: "フィルムネガ → ポジ (回転＋トリミング＋ホワイトバランス＋色温度/色合い)",
@@ -136,7 +140,9 @@
           "ホワイトバランス：画像内のグレー部分（壁・服の影など）をクリック。",
           "色温度・色合い調整：スライダーまたは数値入力で微調整。",
           "ダウンロード：「補正画像をダウンロード」で保存。"
-        ]
+        ],
+        vibranceLabel: "バイブランス",
+        saturationLabel: "彩度"
       }
     };
   </script>
@@ -149,6 +155,20 @@
         : navigator.language.startsWith("en") ? "en"
           : "zh";
       const text = i18n[lang];
+      document.querySelector("#rotateControls label").childNodes[0].textContent = text.steps[1].split("：")[0] + ": ";
+      document.getElementById("applyRotate").textContent = lang === "zh" ? "应用旋转" : lang === "en" ? "Apply Rotation" : "回転を適用";
+
+      document.getElementById("startCrop").textContent = lang === "zh" ? "开始剪裁" : lang === "en" ? "Start Crop" : "トリミング開始";
+      document.getElementById("applyCrop").textContent = lang === "zh" ? "应用剪裁" : lang === "en" ? "Apply Crop" : "適用";
+      document.getElementById("cancelCrop").textContent = lang === "zh" ? "取消剪裁" : lang === "en" ? "Cancel Crop" : "トリミングをキャンセル";
+
+      const adjustLabels = document.querySelectorAll("#adjustControls label");
+      adjustLabels[0].childNodes[0].textContent = text.steps[4].split("：")[0] + ": ";
+      adjustLabels[1].childNodes[0].textContent = lang === "zh" ? "色调: " : lang === "en" ? "Tint: " : "色合い: ";
+      adjustLabels[2].childNodes[0].textContent = text.vibranceLabel + ": ";
+      adjustLabels[3].childNodes[0].textContent = text.saturationLabel + ": ";
+
+      document.getElementById("download").textContent = lang === "zh" ? "下载校正图像" : lang === "en" ? "Download Corrected Image" : "補正画像をダウンロード";
       document.getElementById("title").textContent = text.title;
       document.getElementById("guideTitle").textContent = text.guideTitle;
       const list = document.getElementById("steps");
@@ -180,43 +200,64 @@
   <input type="file" id="upload" accept="image/*" class="control"><br>
   <!-- 旋转控件 -->
   <div id="rotateControls" class="control" style="display:none;">
-    <label>旋转: <span id="rotateVal">0</span>°</label>
+    <label>
+      <span data-i18n="rotateLabel"></span>: <span id="rotateVal">0</span>°
+    </label>
     <input type="range" id="rotate" min="-180" max="180" step="1" value="0">
     <input type="number" id="rotateInput" min="-180" max="180" step="1" value="0">
-    <button id="applyRotate">应用旋转</button>
+    <button id="applyRotate" data-i18n="applyRotate"></button>
   </div>
+
   <!-- 剪裁控件 -->
   <div id="cropControls" class="control" style="display:none;">
-    <button id="startCrop">开始剪裁</button>
-    <button id="applyCrop" style="display:none;">应用剪裁</button>
-    <button id="cancelCrop" style="display:none;">取消剪裁</button>
+    <button id="startCrop" data-i18n="startCrop"></button>
+    <button id="applyCrop" style="display:none;" data-i18n="applyCrop"></button>
+    <button id="cancelCrop" style="display:none;" data-i18n="cancelCrop"></button>
   </div>
+
   <!-- canvas 容器 -->
   <div id="canvasContainer">
     <canvas id="canvas"></canvas>
     <div id="cropOverlay"></div>
   </div>
-  <!-- 温度/色调调整 -->
+
+  <!-- 温度/色调/活力/饱和度调整 -->
   <div id="adjustControls" class="control" style="display:none;">
-    <label>温度: <span id="tempVal">0</span></label>
+    <label>
+      <span data-i18n="tempLabel"></span>: <span id="tempVal">0</span>
+    </label>
     <input type="range" id="temp" min="-100" max="100" step="1" value="0">
     <input type="number" id="tempInput" min="-100" max="100" step="1" value="0">
     <br>
-    <label>色调: <span id="tintVal">0</span></label>
+    <label>
+      <span data-i18n="tintLabel"></span>: <span id="tintVal">0</span>
+    </label>
     <input type="range" id="tint" min="-100" max="100" step="1" value="0">
     <input type="number" id="tintInput" min="-100" max="100" step="1" value="0">
+    <br>
+    <label>
+      <span data-i18n="vibranceLabel"></span>: <span id="vibranceVal">0</span>
+    </label>
+    <input type="range" id="vibrance" min="-100" max="100" step="1" value="0">
+    <input type="number" id="vibranceInput" min="-100" max="100" step="1" value="0">
+    <br>
+    <label>
+      <span data-i18n="saturationLabel"></span>: <span id="saturationVal">0</span>
+    </label>
+    <input type="range" id="saturation" min="-100" max="100" step="1" value="0">
+    <input type="number" id="saturationInput" min="-100" max="100" step="1" value="0">
   </div>
   <div class="control" style="display:none;" id="downloadDiv">
-    <button id="download">下载校正图像</button>
+    <button id="download" data-i18n="download"></button>
   </div>
 
   <script>
     $(function () {
       let canvas = $("#canvas")[0],
-          ctx = canvas.getContext("2d");
+        ctx = canvas.getContext("2d");
       // 离屏 canvas 保存变换基底（旋转、剪裁后）
       let transformCanvas = document.createElement("canvas"),
-          transformCtx = transformCanvas.getContext("2d");
+        transformCtx = transformCanvas.getContext("2d");
       let invertedImageData = null; // 当前反转后的图像数据（内部像素）
       let basePixels = null;        // 白平衡校正+归一化后的数据（用于温度/色调调整）
       let cropping = false;         // 剪裁模式标志
@@ -226,7 +267,7 @@
       // 根据内部像素尺寸调整 canvas 与容器的 CSS 显示尺寸
       function adjustCanvasDisplay(w, h) {
         const maxWidth = window.innerWidth - 40,
-              maxHeight = window.innerHeight - 200;
+          maxHeight = window.innerHeight - 200;
         let scale = Math.min(maxWidth / w, maxHeight / h, 1);
         $("#canvas").css({ width: w * scale, height: h * scale });
         $("#canvasContainer").css({ width: w * scale, height: h * scale });
@@ -262,7 +303,7 @@
             } else {
               for (let i = 0; i < raw16.length; i++) {
                 let hi = data[2 * i],
-                    lo = data[2 * i + 1];
+                  lo = data[2 * i + 1];
                 raw16[i] = (hi << 8) | lo;
               }
             }
@@ -331,7 +372,7 @@
               let rawData = ctx.getImageData(0, 0, canvas.width, canvas.height);
               let invertedImageData = ctx.createImageData(rawData);
               for (let i = 0; i < rawData.data.length; i += 4) {
-                invertedImageData.data[i]     = 255 - rawData.data[i];
+                invertedImageData.data[i] = 255 - rawData.data[i];
                 invertedImageData.data[i + 1] = 255 - rawData.data[i + 1];
                 invertedImageData.data[i + 2] = 255 - rawData.data[i + 2];
                 invertedImageData.data[i + 3] = 255;
@@ -357,7 +398,7 @@
         let w = transformCanvas.width, h = transformCanvas.height;
         let cos = Math.abs(Math.cos(angleRad)), sin = Math.abs(Math.sin(angleRad));
         let newW = Math.ceil(w * cos + h * sin),
-            newH = Math.ceil(w * sin + h * cos);
+          newH = Math.ceil(w * sin + h * cos);
         let offCanvas = document.createElement("canvas");
         offCanvas.width = newW;
         offCanvas.height = newH;
@@ -421,9 +462,9 @@
         croppingActive = true;
         let containerOffset = $("#canvasContainer").offset();
         let dispWidth = $("#canvas").width(),
-            dispHeight = $("#canvas").height();
+          dispHeight = $("#canvas").height();
         let scaleX = canvas.width / dispWidth,
-            scaleY = canvas.height / dispHeight;
+          scaleY = canvas.height / dispHeight;
         cropStart = {
           x: (e.pageX - containerOffset.left) * scaleX,
           y: (e.pageY - containerOffset.top) * scaleY
@@ -434,23 +475,23 @@
         if (!cropping || !croppingActive) return;
         let containerOffset = $("#canvasContainer").offset();
         let dispWidth = $("#canvas").width(),
-            dispHeight = $("#canvas").height();
+          dispHeight = $("#canvas").height();
         let scaleX = canvas.width / dispWidth,
-            scaleY = canvas.height / dispHeight;
+          scaleY = canvas.height / dispHeight;
         let current = {
           x: (e.pageX - containerOffset.left) * scaleX,
           y: (e.pageY - containerOffset.top) * scaleY
         };
         let leftInternal = Math.min(cropStart.x, current.x),
-            topInternal = Math.min(cropStart.y, current.y),
-            widthInternal = Math.abs(current.x - cropStart.x),
-            heightInternal = Math.abs(current.y - cropStart.y);
+          topInternal = Math.min(cropStart.y, current.y),
+          widthInternal = Math.abs(current.x - cropStart.x),
+          heightInternal = Math.abs(current.y - cropStart.y);
 
         // 转换为显示坐标
         let leftDisp = leftInternal / scaleX,
-            topDisp = topInternal / scaleY,
-            widthDisp = widthInternal / scaleX,
-            heightDisp = heightInternal / scaleY;
+          topDisp = topInternal / scaleY,
+          widthDisp = widthInternal / scaleX,
+          heightDisp = heightInternal / scaleY;
 
         $("#cropOverlay").css({
           left: leftDisp,
@@ -474,18 +515,18 @@
 
       $("#applyCrop").on("click", function () {
         let dispWidth = $("#canvas").width(),
-            dispHeight = $("#canvas").height();
+          dispHeight = $("#canvas").height();
         let scaleX = canvas.width / dispWidth,
-            scaleY = canvas.height / dispHeight;
+          scaleY = canvas.height / dispHeight;
         let overlay = $("#cropOverlay");
         let leftDisp = parseFloat(overlay.css("left")),
-            topDisp = parseFloat(overlay.css("top")),
-            widthDisp = parseFloat(overlay.css("width")),
-            heightDisp = parseFloat(overlay.css("height"));
+          topDisp = parseFloat(overlay.css("top")),
+          widthDisp = parseFloat(overlay.css("width")),
+          heightDisp = parseFloat(overlay.css("height"));
         let leftInternal = leftDisp * scaleX,
-            topInternal = topDisp * scaleY,
-            widthInternal = widthDisp * scaleX,
-            heightInternal = heightDisp * scaleY;
+          topInternal = topDisp * scaleY,
+          widthInternal = widthDisp * scaleX,
+          heightInternal = heightDisp * scaleY;
 
         if (widthInternal <= 0 || heightInternal <= 0) return;
 
@@ -511,9 +552,9 @@
         if (cropping) return;
         let offset = $("#canvas").offset();
         let scaleX = canvas.width / $("#canvas").width(),
-            scaleY = canvas.height / $("#canvas").height();
+          scaleY = canvas.height / $("#canvas").height();
         let x = Math.floor((e.pageX - offset.left) * scaleX),
-            y = Math.floor((e.pageY - offset.top) * scaleY);
+          y = Math.floor((e.pageY - offset.top) * scaleY);
         let idx = (y * canvas.width + x) * 4;
         let d = invertedImageData.data;
         let clickedR = d[idx], clickedG = d[idx + 1], clickedB = d[idx + 2];
@@ -530,12 +571,12 @@
           corrected[i * 4 + 3] = 255;
         }
         let rMin = Infinity, rMax = -Infinity,
-            gMin = Infinity, gMax = -Infinity,
-            bMin = Infinity, bMax = -Infinity;
+          gMin = Infinity, gMax = -Infinity,
+          bMin = Infinity, bMax = -Infinity;
         for (let i = 0; i < total; i++) {
           let r = corrected[i * 4],
-              g = corrected[i * 4 + 1],
-              b = corrected[i * 4 + 2];
+            g = corrected[i * 4 + 1],
+            b = corrected[i * 4 + 2];
           rMin = Math.min(rMin, r); rMax = Math.max(rMax, r);
           gMin = Math.min(gMin, g); gMax = Math.max(gMax, g);
           bMin = Math.min(bMin, b); bMax = Math.max(bMax, b);
@@ -561,29 +602,99 @@
       });
 
       // 温度 / 色调调整：滑块与数字输入框双向绑定
+      function rgbToHsl(r, g, b) {
+        r /= 255; g /= 255; b /= 255;
+        let max = Math.max(r, g, b), min = Math.min(r, g, b);
+        let h, s, l = (max + min) / 2;
+        if (max === min) {
+          h = s = 0;
+        } else {
+          let d = max - min;
+          s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+          switch (max) {
+            case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+            case g: h = (b - r) / d + 2; break;
+            case b: h = (r - g) / d + 4; break;
+          }
+          h /= 6;
+        }
+        return [h, s, l];
+      }
+
+      function hslToRgb(h, s, l) {
+        let r, g, b;
+        if (s === 0) {
+          r = g = b = l;
+        } else {
+          function hue2rgb(p, q, t) {
+            if (t < 0) t += 1;
+            if (t > 1) t -= 1;
+            if (t < 1 / 6) return p + (q - p) * 6 * t;
+            if (t < 1 / 2) return q;
+            if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+            return p;
+          }
+          let q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+          let p = 2 * l - q;
+          r = hue2rgb(p, q, h + 1 / 3);
+          g = hue2rgb(p, q, h);
+          b = hue2rgb(p, q, h - 1 / 3);
+        }
+        return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
+      }
+
       function updateAdjust() {
         let temp = parseInt($("#temp").val()),
-            tint = parseInt($("#tint").val());
+          tint = parseInt($("#tint").val()),
+          vibranceVal = parseInt($("#vibrance").val()),
+          saturationVal = parseInt($("#saturation").val());
         $("#tempVal").text(temp);
         $("#tintVal").text(tint);
+        $("#vibranceVal").text(vibranceVal);
+        $("#saturationVal").text(saturationVal);
         $("#tempInput").val(temp);
         $("#tintInput").val(tint);
+        $("#vibranceInput").val(vibranceVal);
+        $("#saturationInput").val(saturationVal);
 
         let total = canvas.width * canvas.height;
         let adjusted = ctx.createImageData(canvas.width, canvas.height);
         let tempFactor = temp / 100,
-            tintFactor = tint / 100;
+          tintFactor = tint / 100;
+        // 计算饱和度和活力的调整系数
+        let satFactor = 1 + (saturationVal / 100);
+
         for (let i = 0; i < total; i++) {
           let idx = i * 4;
           let r = basePixels[idx],
-              g = basePixels[idx + 1],
-              b = basePixels[idx + 2];
+            g = basePixels[idx + 1],
+            b = basePixels[idx + 2];
+          // 先应用温度和色调调整
           let newR = r * (1 + tempFactor);
           let newG = g * (1 + tintFactor);
           let newB = b * (1 - tempFactor);
-          adjusted.data[idx]     = Math.min(255, Math.max(0, newR));
-          adjusted.data[idx + 1] = Math.min(255, Math.max(0, newG));
-          adjusted.data[idx + 2] = Math.min(255, Math.max(0, newB));
+          newR = Math.min(255, Math.max(0, newR));
+          newG = Math.min(255, Math.max(0, newG));
+          newB = Math.min(255, Math.max(0, newB));
+
+          // 转换为 HSL
+          let hsl = rgbToHsl(newR, newG, newB);
+          // 调整饱和度：先乘上统一因子
+          hsl[1] *= satFactor;
+          // 再应用活力调整：正值时增加较低饱和度部分，负值时统一缩减
+          let vibFactor = vibranceVal / 100;
+          if (vibFactor >= 0) {
+            hsl[1] += (1 - hsl[1]) * vibFactor;
+          } else {
+            hsl[1] *= (1 + vibFactor);
+          }
+          // 限制饱和度在 [0,1] 范围内
+          hsl[1] = Math.max(0, Math.min(1, hsl[1]));
+
+          let rgb = hslToRgb(hsl[0], hsl[1], hsl[2]);
+          adjusted.data[idx] = rgb[0];
+          adjusted.data[idx + 1] = rgb[1];
+          adjusted.data[idx + 2] = rgb[2];
           adjusted.data[idx + 3] = 255;
         }
         ctx.putImageData(adjusted, 0, 0);
@@ -609,6 +720,26 @@
         $("#tint").val($(this).val());
         updateAdjust();
       });
+      $("#vibrance").on("input", function () {
+        $("#vibranceVal").text($(this).val());
+        $("#vibranceInput").val($(this).val());
+        updateAdjust();
+      });
+      $("#vibranceInput").on("input", function () {
+        $("#vibranceVal").text($(this).val());
+        $("#vibrance").val($(this).val());
+        updateAdjust();
+      });
+      $("#saturation").on("input", function () {
+        $("#saturationVal").text($(this).val());
+        $("#saturationInput").val($(this).val());
+        updateAdjust();
+      });
+      $("#saturationInput").on("input", function () {
+        $("#saturationVal").text($(this).val());
+        $("#saturation").val($(this).val());
+        updateAdjust();
+      });
 
       // 下载
       $("#download").on("click", function () {
@@ -620,4 +751,5 @@
     });
   </script>
 </body>
+
 </html>
