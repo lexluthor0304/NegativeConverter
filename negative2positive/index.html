@@ -255,6 +255,29 @@
     $(function () {
       let canvas = $("#canvas")[0],
         ctx = canvas.getContext("2d");
+      // Cache common jQuery selectors
+      const $canvas = $("#canvas");
+      const $rotate = $("#rotate");
+      const $rotateInput = $("#rotateInput");
+      const $temp = $("#temp");
+      const $tint = $("#tint");
+      const $vibrance = $("#vibrance");
+      const $saturation = $("#saturation");
+      
+      // Create a reusable offscreen canvas for rotation preview
+      let offCanvas = document.createElement("canvas");
+      
+      // Throttle updateAdjust using requestAnimationFrame
+      let updatePending = false;
+      function scheduleUpdateAdjust() {
+        if (!updatePending) {
+          updatePending = true;
+          requestAnimationFrame(() => {
+            updateAdjust();
+            updatePending = false;
+          });
+        }
+      }
       // 离屏 canvas 保存变换基底（旋转、剪裁后）
       let transformCanvas = document.createElement("canvas"),
         transformCtx = transformCanvas.getContext("2d");
@@ -398,15 +421,19 @@
         let w = transformCanvas.width, h = transformCanvas.height;
         let cos = Math.abs(Math.cos(angleRad)), sin = Math.abs(Math.sin(angleRad));
         let newW = Math.ceil(w * cos + h * sin),
-          newH = Math.ceil(w * sin + h * cos);
-        let offCanvas = document.createElement("canvas");
+            newH = Math.ceil(w * sin + h * cos);
+        
+        // Reuse the cached offCanvas
         offCanvas.width = newW;
         offCanvas.height = newH;
         let offCtx = offCanvas.getContext("2d");
+        offCtx.clearRect(0, 0, newW, newH);
+        offCtx.save();
         offCtx.translate(newW / 2, newH / 2);
         offCtx.rotate(angleRad);
         offCtx.drawImage(transformCanvas, -w / 2, -h / 2);
-
+        offCtx.restore();
+        
         canvas.width = newW;
         canvas.height = newH;
         adjustCanvasDisplay(newW, newH);
@@ -703,42 +730,42 @@
       $("#temp").on("input", function () {
         $("#tempVal").text($(this).val());
         $("#tempInput").val($(this).val());
-        updateAdjust();
+        scheduleUpdateAdjust();
       });
       $("#tempInput").on("input", function () {
         $("#tempVal").text($(this).val());
         $("#temp").val($(this).val());
-        updateAdjust();
+        scheduleUpdateAdjust();
       });
       $("#tint").on("input", function () {
         $("#tintVal").text($(this).val());
         $("#tintInput").val($(this).val());
-        updateAdjust();
+        scheduleUpdateAdjust();
       });
       $("#tintInput").on("input", function () {
         $("#tintVal").text($(this).val());
         $("#tint").val($(this).val());
-        updateAdjust();
+        scheduleUpdateAdjust();
       });
       $("#vibrance").on("input", function () {
         $("#vibranceVal").text($(this).val());
         $("#vibranceInput").val($(this).val());
-        updateAdjust();
+        scheduleUpdateAdjust();
       });
       $("#vibranceInput").on("input", function () {
         $("#vibranceVal").text($(this).val());
         $("#vibrance").val($(this).val());
-        updateAdjust();
+        scheduleUpdateAdjust();
       });
       $("#saturation").on("input", function () {
         $("#saturationVal").text($(this).val());
         $("#saturationInput").val($(this).val());
-        updateAdjust();
+        scheduleUpdateAdjust();
       });
       $("#saturationInput").on("input", function () {
         $("#saturationVal").text($(this).val());
         $("#saturation").val($(this).val());
-        updateAdjust();
+        scheduleUpdateAdjust();
       });
 
       // 下载
