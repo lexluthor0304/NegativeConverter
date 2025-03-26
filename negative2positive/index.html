@@ -1,35 +1,40 @@
 <!DOCTYPE html>
 <html lang="zh">
+
 <head>
   <meta charset="UTF-8">
   <title>Film Negative → Positive (旋转+实时剪裁+白平衡+温度/色调)</title>
   <style>
     /* 整体页面样式：黑色背景与霓虹风格字体 */
-    body { 
-      font-family: "Courier New", Courier, monospace; 
-      background: #000; 
-      color: #0ff; 
+    body {
+      font-family: "Courier New", Courier, monospace;
+      background: #000;
+      color: #0ff;
       padding: 20px;
       margin: 0;
       text-align: center;
     }
+
     h2 {
       text-align: center;
       text-shadow: 0 0 10px #ff00ff, 0 0 20px #ff00ff;
       margin: 20px auto;
     }
+
     /* 容器尺寸与 canvas 显示尺寸同步 */
-    #canvasContainer { 
-      position: relative; 
-      display: inline-block; 
+    #canvasContainer {
+      position: relative;
+      display: inline-block;
       border: 2px solid #0ff;
       box-shadow: 0 0 20px #0ff;
       margin-bottom: 20px;
     }
-    canvas { 
-      border: 1px solid #0ff; 
+
+    canvas {
+      border: 1px solid #0ff;
       background: #111;
     }
+
     /* 剪裁覆盖层：霓虹粉色虚线边框与半透明粉色背景 */
     #cropOverlay {
       border: 2px dashed #ff00ff;
@@ -39,23 +44,28 @@
       background: rgba(255, 0, 255, 0.2);
       z-index: 100;
     }
-    .control { 
-      margin-top: 10px; 
+
+    .control {
+      margin-top: 10px;
       text-align: center;
     }
+
     /* 固定滑块长度 */
-    input[type="range"] { 
-      width: 300px; 
+    input[type="range"] {
+      width: 300px;
     }
-    input[type="number"] { 
-      width: 60px; 
-      margin-left: 10px; 
+
+    input[type="number"] {
+      width: 60px;
+      margin-left: 10px;
       background: #222;
       border: 1px solid #0ff;
       color: #0ff;
     }
+
     /* 文件上传、按钮样式 */
-    input[type="file"], button {
+    input[type="file"],
+    button {
       background: #222;
       border: 1px solid #0ff;
       color: #0ff;
@@ -63,15 +73,19 @@
       cursor: pointer;
       transition: all 0.3s ease;
     }
-    input[type="file"]:hover, button:hover {
+
+    input[type="file"]:hover,
+    button:hover {
       background: #0ff;
       color: #000;
     }
+
     /* 滑块样式定制 */
     input[type="range"] {
       -webkit-appearance: none;
       background: #222;
     }
+
     input[type="range"]::-webkit-slider-thumb {
       -webkit-appearance: none;
       width: 15px;
@@ -83,9 +97,83 @@
     }
   </style>
   <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+  <script>
+    const i18n = {
+      zh: {
+        title: "Film Negative → Positive (旋转+实时剪裁+白平衡+温度/色调)",
+        guideTitle: "📘 使用方法（快速上手）",
+        steps: [
+          "上传底片图像：点击“选择文件”，上传扫描好的底片图像。",
+          "旋转图像：使用滑块或输入角度，纠正扫描角度后点击“应用旋转”。",
+          "剪裁图像：点击“开始剪裁”，用鼠标拖出区域后点击“应用剪裁”。",
+          "白平衡调整：点击图中应为灰色的地方（如墙面、衣服阴影等）。",
+          "调整色温/色调：拖动滑块或输入数值微调颜色。",
+          "下载结果：点击“下载校正图像”保存处理后的图片。"
+        ]
+      },
+      en: {
+        title: "Film Negative → Positive (Rotate + Crop + White Balance + Temp/Tint)",
+        guideTitle: "📘 Quick Start Guide",
+        steps: [
+          "Upload a negative: Click 'Choose File' and upload your scanned film.",
+          "Rotate: Use the slider or input box to correct rotation, then click 'Apply Rotation'.",
+          "Crop: Click 'Start Crop', drag a region, then click 'Apply Crop'.",
+          "White Balance: Click a gray area in the image (e.g., wall, clothing shadow, etc).",
+          "Adjust Temp/Tint: Use sliders or input numbers to fine-tune colors.",
+          "Download: Click 'Download Corrected Image' to save the result."
+        ]
+      },
+      ja: {
+        title: "フィルムネガ → ポジ (回転＋トリミング＋ホワイトバランス＋色温度/色合い)",
+        guideTitle: "📘 使い方（簡単）",
+        steps: [
+          "ネガ画像をアップロード：「ファイルを選択」でスキャン済みネガを選択。",
+          "回転：スライダーや数値入力で回転を調整、「回転を適用」をクリック。",
+          "トリミング：「トリミング開始」で範囲を選び、「適用」をクリック。",
+          "ホワイトバランス：画像内のグレー部分（壁・服の影など）をクリック。",
+          "色温度・色合い調整：スライダーまたは数値入力で微調整。",
+          "ダウンロード：「補正画像をダウンロード」で保存。"
+        ]
+      }
+    };
+  </script>
 </head>
+
 <body>
-  <h2>Film Negative → Positive (旋转+实时剪裁+白平衡+温度/色调)</h2>
+  <script>
+    document.addEventListener("DOMContentLoaded", () => {
+      const lang = navigator.language.startsWith("ja") ? "ja"
+        : navigator.language.startsWith("en") ? "en"
+          : "zh";
+      const text = i18n[lang];
+      document.getElementById("title").textContent = text.title;
+      document.getElementById("guideTitle").textContent = text.guideTitle;
+      const list = document.getElementById("steps");
+      list.innerHTML = "";
+      text.steps.forEach(step => {
+        const li = document.createElement("li");
+        const parts = step.split("：");
+        if (parts.length === 2) {
+          li.innerHTML = `<b>${parts[0]}：</b>${parts[1]}`;
+        } else {
+          li.textContent = step;
+        }
+        list.appendChild(li);
+      });
+    });
+  </script>
+  <h2 id="title">Film Negative → Positive (旋转+实时剪裁+白平衡+温度/色调)</h2>
+  <div style="padding:16px; margin-bottom:20px;">
+    <h3 id="guideTitle">📘 使用方法（快速上手）</h3>
+    <ol id="steps" style="padding-left: 20px; line-height: 1.6;">
+      <li><b>上传底片图像：</b>点击“选择文件”，上传扫描好的底片图像。</li>
+      <li><b>旋转图像：</b>使用滑块或输入角度，纠正扫描角度后点击“应用旋转”。</li>
+      <li><b>剪裁图像：</b>点击“开始剪裁”，用鼠标拖出区域后点击“应用剪裁”。</li>
+      <li><b>白平衡调整：</b>点击图中应为灰色的地方（如墙面、衣服阴影等）。</li>
+      <li><b>调整色温/色调：</b>拖动滑块或输入数值微调颜色。</li>
+      <li><b>下载结果：</b>点击“下载校正图像”保存处理后的图片。</li>
+    </ol>
+  </div>
   <input type="file" id="upload" accept="image/*" class="control"><br>
   <!-- 旋转控件 -->
   <div id="rotateControls" class="control" style="display:none;">
@@ -120,12 +208,12 @@
   </div>
 
   <script>
-    $(function(){
+    $(function () {
       let canvas = $("#canvas")[0],
-          ctx = canvas.getContext("2d");
+        ctx = canvas.getContext("2d");
       // 离屏 canvas 保存变换基底（旋转、剪裁后）
       let transformCanvas = document.createElement("canvas"),
-          transformCtx = transformCanvas.getContext("2d");
+        transformCtx = transformCanvas.getContext("2d");
       let invertedImageData = null; // 当前反转后的图像数据（内部像素）
       let basePixels = null;        // 白平衡校正+归一化后的数据（用于温度/色调调整）
       let cropping = false;         // 剪裁模式标志
@@ -135,20 +223,20 @@
       // 根据内部像素尺寸调整 canvas 与容器的 CSS 显示尺寸
       function adjustCanvasDisplay(w, h) {
         const maxWidth = window.innerWidth - 40,
-              maxHeight = window.innerHeight - 200;
+          maxHeight = window.innerHeight - 200;
         let scale = Math.min(maxWidth / w, maxHeight / h, 1);
         $("#canvas").css({ width: w * scale, height: h * scale });
         $("#canvasContainer").css({ width: w * scale, height: h * scale });
       }
 
       // 上传图片，反转 RGB 并更新离屏基底
-      $("#upload").on("change", function(e){
+      $("#upload").on("change", function (e) {
         let file = e.target.files[0];
         if (!file) return;
         let reader = new FileReader();
-        reader.onload = function(event){
+        reader.onload = function (event) {
           let img = new Image();
-          img.onload = function(){
+          img.onload = function () {
             canvas.width = img.width;
             canvas.height = img.height;
             adjustCanvasDisplay(img.width, img.height);
@@ -156,10 +244,10 @@
             let rawData = ctx.getImageData(0, 0, canvas.width, canvas.height);
             invertedImageData = ctx.createImageData(rawData);
             for (let i = 0; i < rawData.data.length; i += 4) {
-              invertedImageData.data[i]   = 255 - rawData.data[i];
-              invertedImageData.data[i+1] = 255 - rawData.data[i+1];
-              invertedImageData.data[i+2] = 255 - rawData.data[i+2];
-              invertedImageData.data[i+3] = 255;
+              invertedImageData.data[i] = 255 - rawData.data[i];
+              invertedImageData.data[i + 1] = 255 - rawData.data[i + 1];
+              invertedImageData.data[i + 2] = 255 - rawData.data[i + 2];
+              invertedImageData.data[i + 3] = 255;
             }
             ctx.putImageData(invertedImageData, 0, 0);
             transformCanvas.width = canvas.width;
@@ -177,13 +265,13 @@
         let w = transformCanvas.width, h = transformCanvas.height;
         let cos = Math.abs(Math.cos(angleRad)), sin = Math.abs(Math.sin(angleRad));
         let newW = Math.ceil(w * cos + h * sin),
-            newH = Math.ceil(w * sin + h * cos);
+          newH = Math.ceil(w * sin + h * cos);
         let offCanvas = document.createElement("canvas");
         offCanvas.width = newW; offCanvas.height = newH;
         let offCtx = offCanvas.getContext("2d");
-        offCtx.translate(newW/2, newH/2);
+        offCtx.translate(newW / 2, newH / 2);
         offCtx.rotate(angleRad);
-        offCtx.drawImage(transformCanvas, -w/2, -h/2);
+        offCtx.drawImage(transformCanvas, -w / 2, -h / 2);
         canvas.width = newW; canvas.height = newH;
         adjustCanvasDisplay(newW, newH);
         ctx.clearRect(0, 0, newW, newH);
@@ -192,13 +280,13 @@
       }
 
       // 旋转滑块与数字输入框双向绑定
-      $("#rotate").on("input", function(){
+      $("#rotate").on("input", function () {
         $("#rotateVal").text($(this).val());
         $("#rotateInput").val($(this).val());
         let angle = parseFloat($(this).val()) * Math.PI / 180;
         previewRotation(angle);
       });
-      $("#rotateInput").on("input", function(){
+      $("#rotateInput").on("input", function () {
         let val = $(this).val();
         $("#rotateVal").text(val);
         $("#rotate").val(val);
@@ -206,7 +294,7 @@
         previewRotation(angle);
       });
 
-      $("#applyRotate").on("click", function(){
+      $("#applyRotate").on("click", function () {
         let newData = ctx.getImageData(0, 0, canvas.width, canvas.height);
         invertedImageData = newData;
         transformCanvas.width = canvas.width;
@@ -218,47 +306,47 @@
       });
 
       // 实时剪裁：点击“开始剪裁”后，通过鼠标拖拽实时显示剪裁区域
-      $("#startCrop").on("click", function(){
+      $("#startCrop").on("click", function () {
         cropping = true;
         $("#cropOverlay").css({ display: "block", left: 0, top: 0, width: 0, height: 0 });
         $("#applyCrop, #cancelCrop").show();
         $(this).hide();
       });
 
-      $("#canvasContainer").on("mousedown", function(e){
+      $("#canvasContainer").on("mousedown", function (e) {
         if (!cropping) return;
         croppingActive = true;
         let containerOffset = $("#canvasContainer").offset();
         let dispWidth = $("#canvas").width(),
-            dispHeight = $("#canvas").height();
+          dispHeight = $("#canvas").height();
         let scaleX = canvas.width / dispWidth,
-            scaleY = canvas.height / dispHeight;
+          scaleY = canvas.height / dispHeight;
         cropStart = {
           x: (e.pageX - containerOffset.left) * scaleX,
           y: (e.pageY - containerOffset.top) * scaleY
         };
       });
 
-      $("#canvasContainer").on("mousemove", function(e){
+      $("#canvasContainer").on("mousemove", function (e) {
         if (!cropping || !croppingActive) return;
         let containerOffset = $("#canvasContainer").offset();
         let dispWidth = $("#canvas").width(),
-            dispHeight = $("#canvas").height();
+          dispHeight = $("#canvas").height();
         let scaleX = canvas.width / dispWidth,
-            scaleY = canvas.height / dispHeight;
+          scaleY = canvas.height / dispHeight;
         let current = {
           x: (e.pageX - containerOffset.left) * scaleX,
           y: (e.pageY - containerOffset.top) * scaleY
         };
         let leftInternal = Math.min(cropStart.x, current.x),
-            topInternal = Math.min(cropStart.y, current.y),
-            widthInternal = Math.abs(current.x - cropStart.x),
-            heightInternal = Math.abs(current.y - cropStart.y);
+          topInternal = Math.min(cropStart.y, current.y),
+          widthInternal = Math.abs(current.x - cropStart.x),
+          heightInternal = Math.abs(current.y - cropStart.y);
         // 转换为显示坐标
         let leftDisp = leftInternal / scaleX,
-            topDisp = topInternal / scaleY,
-            widthDisp = widthInternal / scaleX,
-            heightDisp = heightInternal / scaleY;
+          topDisp = topInternal / scaleY,
+          widthDisp = widthInternal / scaleX,
+          heightDisp = heightInternal / scaleY;
         $("#cropOverlay").css({
           left: leftDisp,
           top: topDisp,
@@ -267,33 +355,33 @@
         });
       });
 
-      $("#canvasContainer").on("mouseup", function(e){
+      $("#canvasContainer").on("mouseup", function (e) {
         if (!cropping) return;
         croppingActive = false;
       });
 
-      $("#cancelCrop").on("click", function(){
+      $("#cancelCrop").on("click", function () {
         cropping = false;
         $("#cropOverlay").hide();
         $("#applyCrop, #cancelCrop").hide();
         $("#startCrop").show();
       });
 
-      $("#applyCrop").on("click", function(){
+      $("#applyCrop").on("click", function () {
         let containerOffset = $("#canvasContainer").offset();
         let dispWidth = $("#canvas").width(),
-            dispHeight = $("#canvas").height();
+          dispHeight = $("#canvas").height();
         let scaleX = canvas.width / dispWidth,
-            scaleY = canvas.height / dispHeight;
+          scaleY = canvas.height / dispHeight;
         let overlay = $("#cropOverlay");
         let leftDisp = parseFloat(overlay.css("left")),
-            topDisp = parseFloat(overlay.css("top")),
-            widthDisp = parseFloat(overlay.css("width")),
-            heightDisp = parseFloat(overlay.css("height"));
+          topDisp = parseFloat(overlay.css("top")),
+          widthDisp = parseFloat(overlay.css("width")),
+          heightDisp = parseFloat(overlay.css("height"));
         let leftInternal = leftDisp * scaleX,
-            topInternal = topDisp * scaleY,
-            widthInternal = widthDisp * scaleX,
-            heightInternal = heightDisp * scaleY;
+          topInternal = topDisp * scaleY,
+          widthInternal = widthDisp * scaleX,
+          heightInternal = heightDisp * scaleY;
         if (widthInternal <= 0 || heightInternal <= 0) return;
         let croppedData = transformCtx.getImageData(leftInternal, topInternal, widthInternal, heightInternal);
         canvas.width = widthInternal;
@@ -311,43 +399,43 @@
       });
 
       // 点击画布执行白平衡校正与通道归一化（剪裁模式下不响应）
-      $("#canvas").on("click", function(e){
+      $("#canvas").on("click", function (e) {
         if (cropping) return;
         let offset = $("#canvas").offset();
         let scaleX = canvas.width / $("#canvas").width(),
-            scaleY = canvas.height / $("#canvas").height();
+          scaleY = canvas.height / $("#canvas").height();
         let x = Math.floor((e.pageX - offset.left) * scaleX),
-            y = Math.floor((e.pageY - offset.top) * scaleY);
+          y = Math.floor((e.pageY - offset.top) * scaleY);
         let idx = (y * canvas.width + x) * 4;
         let d = invertedImageData.data;
-        let clickedR = d[idx], clickedG = d[idx+1], clickedB = d[idx+2];
+        let clickedR = d[idx], clickedG = d[idx + 1], clickedB = d[idx + 2];
         let gray = (clickedR + clickedG + clickedB) / 3;
         let sR = clickedR ? (gray / clickedR) : 1;
         let sG = clickedG ? (gray / clickedG) : 1;
         let sB = clickedB ? (gray / clickedB) : 1;
         let total = canvas.width * canvas.height;
         let corrected = new Float32Array(d.length);
-        for (let i = 0; i < total; i++){
-          corrected[i*4]   = d[i*4] * sR;
-          corrected[i*4+1] = d[i*4+1] * sG;
-          corrected[i*4+2] = d[i*4+2] * sB;
-          corrected[i*4+3] = 255;
+        for (let i = 0; i < total; i++) {
+          corrected[i * 4] = d[i * 4] * sR;
+          corrected[i * 4 + 1] = d[i * 4 + 1] * sG;
+          corrected[i * 4 + 2] = d[i * 4 + 2] * sB;
+          corrected[i * 4 + 3] = 255;
         }
         let rMin = Infinity, rMax = -Infinity,
-            gMin = Infinity, gMax = -Infinity,
-            bMin = Infinity, bMax = -Infinity;
-        for (let i = 0; i < total; i++){
-          let r = corrected[i*4], g = corrected[i*4+1], b = corrected[i*4+2];
+          gMin = Infinity, gMax = -Infinity,
+          bMin = Infinity, bMax = -Infinity;
+        for (let i = 0; i < total; i++) {
+          let r = corrected[i * 4], g = corrected[i * 4 + 1], b = corrected[i * 4 + 2];
           rMin = Math.min(rMin, r); rMax = Math.max(rMax, r);
           gMin = Math.min(gMin, g); gMax = Math.max(gMax, g);
           bMin = Math.min(bMin, b); bMax = Math.max(bMax, b);
         }
         let finalImg = ctx.createImageData(canvas.width, canvas.height);
-        for (let i = 0; i < total; i++){
-          finalImg.data[i*4]   = ((corrected[i*4]-rMin)/(rMax-rMin))*255;
-          finalImg.data[i*4+1] = ((corrected[i*4+1]-gMin)/(gMax-gMin))*255;
-          finalImg.data[i*4+2] = ((corrected[i*4+2]-bMin)/(bMax-bMin))*255;
-          finalImg.data[i*4+3] = 255;
+        for (let i = 0; i < total; i++) {
+          finalImg.data[i * 4] = ((corrected[i * 4] - rMin) / (rMax - rMin)) * 255;
+          finalImg.data[i * 4 + 1] = ((corrected[i * 4 + 1] - gMin) / (gMax - gMin)) * 255;
+          finalImg.data[i * 4 + 2] = ((corrected[i * 4 + 2] - bMin) / (bMax - bMin)) * 255;
+          finalImg.data[i * 4 + 3] = 255;
         }
         ctx.putImageData(finalImg, 0, 0);
         basePixels = new Float32Array(finalImg.data);
@@ -358,9 +446,9 @@
       });
 
       // 温度与色调调整：双向绑定滑块与数字输入框
-      function updateAdjust(){
+      function updateAdjust() {
         let temp = parseInt($("#temp").val()),
-            tint = parseInt($("#tint").val());
+          tint = parseInt($("#tint").val());
         $("#tempVal").text(temp);
         $("#tintVal").text(tint);
         $("#tempInput").val(temp);
@@ -368,41 +456,41 @@
         let total = canvas.width * canvas.height;
         let adjusted = ctx.createImageData(canvas.width, canvas.height);
         let tempFactor = temp / 100, tintFactor = tint / 100;
-        for (let i = 0; i < total; i++){
-          let idx = i*4;
-          let r = basePixels[idx], g = basePixels[idx+1], b = basePixels[idx+2];
+        for (let i = 0; i < total; i++) {
+          let idx = i * 4;
+          let r = basePixels[idx], g = basePixels[idx + 1], b = basePixels[idx + 2];
           let newR = r * (1 + tempFactor);
           let newG = g * (1 + tintFactor);
           let newB = b * (1 - tempFactor);
-          adjusted.data[idx]   = Math.min(255, Math.max(0, newR));
-          adjusted.data[idx+1] = Math.min(255, Math.max(0, newG));
-          adjusted.data[idx+2] = Math.min(255, Math.max(0, newB));
-          adjusted.data[idx+3] = 255;
+          adjusted.data[idx] = Math.min(255, Math.max(0, newR));
+          adjusted.data[idx + 1] = Math.min(255, Math.max(0, newG));
+          adjusted.data[idx + 2] = Math.min(255, Math.max(0, newB));
+          adjusted.data[idx + 3] = 255;
         }
         ctx.putImageData(adjusted, 0, 0);
       }
-      $("#temp").on("input", function(){
+      $("#temp").on("input", function () {
         $("#tempVal").text($(this).val());
         $("#tempInput").val($(this).val());
         updateAdjust();
       });
-      $("#tempInput").on("input", function(){
+      $("#tempInput").on("input", function () {
         $("#tempVal").text($(this).val());
         $("#temp").val($(this).val());
         updateAdjust();
       });
-      $("#tint").on("input", function(){
+      $("#tint").on("input", function () {
         $("#tintVal").text($(this).val());
         $("#tintInput").val($(this).val());
         updateAdjust();
       });
-      $("#tintInput").on("input", function(){
+      $("#tintInput").on("input", function () {
         $("#tintVal").text($(this).val());
         $("#tint").val($(this).val());
         updateAdjust();
       });
 
-      $("#download").on("click", function(){
+      $("#download").on("click", function () {
         let link = document.createElement("a");
         link.download = "corrected_film.png";
         link.href = canvas.toDataURL("image/png");
@@ -411,4 +499,5 @@
     });
   </script>
 </body>
+
 </html>
