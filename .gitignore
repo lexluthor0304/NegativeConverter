@@ -1,0 +1,49 @@
+# Node.js 依赖
+node_modules/
+
+# 构建输出
+dist/
+build/
+
+# 日志文件
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 环境变量
+.env
+.env.*
+
+# 临时文件
+*.tmp
+*.temp
+
+# 操作系统生成的文件
+.DS_Store
+Thumbs.db
+
+# 编辑器相关
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# 包管理器锁文件（如果你只使用 npm 或 yarn 的其中一个，可以删除另一个）
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# 缓存
+.cache/
+*.log
+
+# 本地测试服务器生成的文件
+*.local
+
+# 其他可能的构建工具产物
+out/
+coverage/
+
+# 备份文件
+*.bak
+*.orig
