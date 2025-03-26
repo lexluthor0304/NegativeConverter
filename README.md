@@ -12,11 +12,6 @@ This is a browser-based tool built with HTML and JavaScript that converts scanne
 - 🛡️ **Privacy-friendly**: all image processing happens locally in your browser
 - 💾 **One-click download** of the final corrected image
 
-## 📁 Project Structure
-NegativeConverter/
-├── index.html          # Main application
-└── README.md           # You’re reading this file
-
 ## 🚀 How to Use
 
 1. Open `index.html` in any modern browser (Chrome/Edge/Firefox recommended)
