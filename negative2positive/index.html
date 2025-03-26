@@ -4,23 +4,83 @@
   <meta charset="UTF-8">
   <title>Film Negative → Positive (旋转+实时剪裁+白平衡+温度/色调)</title>
   <style>
-    body { font-family: sans-serif; padding: 20px; }
+    /* 整体页面样式：黑色背景与霓虹风格字体 */
+    body { 
+      font-family: "Courier New", Courier, monospace; 
+      background: #000; 
+      color: #0ff; 
+      padding: 20px;
+      margin: 0;
+      text-align: center;
+    }
+    h2 {
+      text-align: center;
+      text-shadow: 0 0 10px #ff00ff, 0 0 20px #ff00ff;
+      margin: 20px auto;
+    }
     /* 容器尺寸与 canvas 显示尺寸同步 */
-    #canvasContainer { position: relative; display: inline-block; }
-    canvas { border: 1px solid #ccc; }
-    /* 剪裁覆盖层：红色虚线边框与半透明红色背景 */
+    #canvasContainer { 
+      position: relative; 
+      display: inline-block; 
+      border: 2px solid #0ff;
+      box-shadow: 0 0 20px #0ff;
+      margin-bottom: 20px;
+    }
+    canvas { 
+      border: 1px solid #0ff; 
+      background: #111;
+    }
+    /* 剪裁覆盖层：霓虹粉色虚线边框与半透明粉色背景 */
     #cropOverlay {
-      border: 2px dashed red;
+      border: 2px dashed #ff00ff;
       position: absolute;
       pointer-events: none;
       display: none;
-      background: rgba(255, 0, 0, 0.2);
+      background: rgba(255, 0, 255, 0.2);
       z-index: 100;
     }
-    .control { margin-top: 10px; }
+    .control { 
+      margin-top: 10px; 
+      text-align: center;
+    }
     /* 固定滑块长度 */
-    input[type="range"] { width: 300px; }
-    input[type="number"] { width: 60px; margin-left: 10px; }
+    input[type="range"] { 
+      width: 300px; 
+    }
+    input[type="number"] { 
+      width: 60px; 
+      margin-left: 10px; 
+      background: #222;
+      border: 1px solid #0ff;
+      color: #0ff;
+    }
+    /* 文件上传、按钮样式 */
+    input[type="file"], button {
+      background: #222;
+      border: 1px solid #0ff;
+      color: #0ff;
+      padding: 5px 10px;
+      cursor: pointer;
+      transition: all 0.3s ease;
+    }
+    input[type="file"]:hover, button:hover {
+      background: #0ff;
+      color: #000;
+    }
+    /* 滑块样式定制 */
+    input[type="range"] {
+      -webkit-appearance: none;
+      background: #222;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 15px;
+      height: 15px;
+      background: #ff00ff;
+      border: 1px solid #0ff;
+      cursor: pointer;
+      box-shadow: 0 0 5px #ff00ff;
+    }
   </style>
   <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
 </head>
