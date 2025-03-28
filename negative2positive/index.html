@@ -100,6 +100,95 @@
   <!-- 引入 UPNG.js 以支持 PNG 的 16 bit 解析 -->
   <script src="https://cdn.jsdelivr.net/npm/pako/dist/pako.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/upng-js@2.1.0/UPNG.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dcraw"></script>
+  <script src="https://cdn.jsdelivr.net/npm/utif@3.1.0/UTIF.min.js"></script>
+  <script>
+    function demosaicAHD(rawData, width, height) {
+      // 简化的 Adaptive Homogeneity Directed (AHD) 去马赛克算法，假设 Bayer 格式为 RGGB
+      let rgbData = new Uint16Array(width * height * 3);
+
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          let index = y * width + x;
+          let rgbIndex = index * 3;
+          let isEvenRow = (y % 2 === 0);
+          let isEvenCol = (x % 2 === 0);
+          let R, G, B;
+
+          if (isEvenRow && isEvenCol) {
+            // 红色像素
+            R = rawData[index];
+            let gSum = 0, count = 0;
+
+            if (x > 0) { gSum += rawData[index - 1]; count++; }
+            if (x < width - 1) { gSum += rawData[index + 1]; count++; }
+            if (y > 0) { gSum += rawData[index - width]; count++; }
+            if (y < height - 1) { gSum += rawData[index + width]; count++; }
+            G = count ? gSum / count : R;
+
+            let bSum = 0; count = 0;
+            if (x > 0 && y > 0) { bSum += rawData[index - width - 1]; count++; }
+            if (x < width - 1 && y > 0) { bSum += rawData[index - width + 1]; count++; }
+            if (x > 0 && y < height - 1) { bSum += rawData[index + width - 1]; count++; }
+            if (x < width - 1 && y < height - 1) { bSum += rawData[index + width + 1]; count++; }
+            B = count ? bSum / count : R;
+
+          } else if (isEvenRow && !isEvenCol) {
+            // 红色行的绿色像素
+            G = rawData[index];
+            let rSum = 0, count = 0;
+
+            if (x > 0) { rSum += rawData[index - 1]; count++; }
+            if (x < width - 1) { rSum += rawData[index + 1]; count++; }
+            R = count ? rSum / count : G;
+
+            let bSum = 0; count = 0;
+            if (y > 0) { bSum += rawData[index - width]; count++; }
+            if (y < height - 1) { bSum += rawData[index + width]; count++; }
+            B = count ? bSum / count : G;
+
+          } else if (!isEvenRow && isEvenCol) {
+            // 蓝色行的绿色像素
+            G = rawData[index];
+            let rSum = 0, count = 0;
+
+            if (y > 0) { rSum += rawData[index - width]; count++; }
+            if (y < height - 1) { rSum += rawData[index + width]; count++; }
+            R = count ? rSum / count : G;
+
+            let bSum = 0; count = 0;
+            if (x > 0) { bSum += rawData[index - 1]; count++; }
+            if (x < width - 1) { bSum += rawData[index + 1]; count++; }
+            B = count ? bSum / count : G;
+
+          } else {
+            // 蓝色像素
+            B = rawData[index];
+            let gSum = 0, count = 0;
+
+            if (x > 0) { gSum += rawData[index - 1]; count++; }
+            if (x < width - 1) { gSum += rawData[index + 1]; count++; }
+            if (y > 0) { gSum += rawData[index - width]; count++; }
+            if (y < height - 1) { gSum += rawData[index + width]; count++; }
+            G = count ? gSum / count : B;
+
+            let rSum = 0; count = 0;
+            if (x > 0 && y > 0) { rSum += rawData[index - width - 1]; count++; }
+            if (x < width - 1 && y > 0) { rSum += rawData[index - width + 1]; count++; }
+            if (x > 0 && y < height - 1) { rSum += rawData[index + width - 1]; count++; }
+            if (x < width - 1 && y < height - 1) { rSum += rawData[index + width + 1]; count++; }
+            R = count ? rSum / count : B;
+          }
+
+          rgbData[rgbIndex] = R;
+          rgbData[rgbIndex + 1] = G;
+          rgbData[rgbIndex + 2] = B;
+        }
+      }
+
+      return rgbData;
+    }
+  </script>
   <script>
     const i18n = {
       zh: {
@@ -163,7 +252,7 @@
       document.getElementById("cancelCrop").textContent = lang === "zh" ? "取消剪裁" : lang === "en" ? "Cancel Crop" : "トリミングをキャンセル";
 
       const adjustLabels = document.querySelectorAll("#adjustControls label");
-      adjustLabels[0].childNodes[0].textContent = text.steps[4].split("：")[0] + ": ";
+      adjustLabels[0].childNodes[0].textContent = lang === "zh" ? "色温: " : lang === "en" ? "Temp: " : "色温: ";
       adjustLabels[1].childNodes[0].textContent = lang === "zh" ? "色调: " : lang === "en" ? "Tint: " : "色合い: ";
       adjustLabels[2].childNodes[0].textContent = text.vibranceLabel + ": ";
       adjustLabels[3].childNodes[0].textContent = text.saturationLabel + ": ";
@@ -197,7 +286,7 @@
       <li><b>下载结果：</b>点击“下载校正图像”保存处理后的图片。</li>
     </ol>
   </div>
-  <input type="file" id="upload" accept="image/*" class="control"><br>
+  <input type="file" id="upload" accept="image/*,.dng" class="control"><br>
   <!-- 旋转控件 -->
   <div id="rotateControls" class="control" style="display:none;">
     <label>
@@ -246,19 +335,36 @@
     </label>
     <input type="range" id="saturation" min="-100" max="100" step="1" value="0">
     <input type="number" id="saturationInput" min="-100" max="100" step="1" value="0">
+    <br>
+    <label>
+      Cyan: <span id="cyanVal">0</span>
+    </label>
+    <input type="range" id="cyan" min="-100" max="100" step="1" value="0">
+    <input type="number" id="cyanInput" min="-100" max="100" step="1" value="0">
+    <br>
+    <label>
+      Magenta: <span id="magentaVal">0</span>
+    </label>
+    <input type="range" id="magenta" min="-100" max="100" step="1" value="0">
+    <input type="number" id="magentaInput" min="-100" max="100" step="1" value="0">
+    <br>
+    <label>
+      Yellow: <span id="yellowVal">0</span>
+    </label>
+    <input type="range" id="yellow" min="-100" max="100" step="1" value="0">
+    <input type="number" id="yellowInput" min="-100" max="100" step="1" value="0">
+    <div class="control" style="display:none;" id="downloadDiv">
+      <button id="download" data-i18n="download"></button>
+    </div>
   </div>
-  <div class="control" style="display:none;" id="downloadDiv">
-    <button id="download" data-i18n="download"></button>
-  </div>
-
-  <footer className="app-footer">
+  <footer class="app-footer">
     <p>© 2025 Negative Converter. tokugai.com All rights reserved.</p>
   </footer>
 
   <script>
     $(function () {
       let canvas = $("#canvas")[0],
-        ctx = canvas.getContext("2d");
+        ctx = canvas.getContext("2d", { willReadFrequently: true });
       // Cache common jQuery selectors
       const $canvas = $("#canvas");
       const $rotate = $("#rotate");
@@ -267,10 +373,10 @@
       const $tint = $("#tint");
       const $vibrance = $("#vibrance");
       const $saturation = $("#saturation");
-      
+
       // Create a reusable offscreen canvas for rotation preview
       let offCanvas = document.createElement("canvas");
-      
+
       // Throttle updateAdjust using requestAnimationFrame
       let updatePending = false;
       function scheduleUpdateAdjust() {
@@ -295,7 +401,7 @@
       function adjustCanvasDisplay(w, h) {
         const maxWidth = window.innerWidth - 40,
           maxHeight = window.innerHeight - 200;
-        let scale = Math.min(maxWidth / w, maxHeight / h, 1);
+        let scale = Math.min(maxWidth / w, maxHeight / h);
         $("#canvas").css({ width: w * scale, height: h * scale });
         $("#canvasContainer").css({ width: w * scale, height: h * scale });
       }
@@ -305,119 +411,245 @@
         let file = e.target.files[0];
         if (!file) return;
 
-        // 如果是 PNG，使用 UPNG.js 解析（支持 16 bit）
-        if (file.type === "image/png") {
+        if (file.name.toLowerCase().endsWith(".dng")) {
           let reader = new FileReader();
           reader.onload = function (event) {
-            // ---------- UPNG.js 解析部分 ----------
-            const arrayBuffer = event.target.result;
-            const decoded = UPNG.decode(arrayBuffer);
-            const width = decoded.width;
-            const height = decoded.height;
-            const ctype = decoded.ctype; // 通道类型 (RGB, RGBA, 灰度 等)
-            const depth = decoded.depth;
-            const data = decoded.data;
+            let buffer = event.target.result;
+            let ifds = UTIF.decode(buffer);
+            console.log('Decoded ifds:', ifds);
+            // 解码预览图像
+            UTIF.decodeImage(buffer, ifds[0]);
+            let firstPage = ifds[0];
+            console.log('First page data:', firstPage);
+            console.log('firstPage.data length:', firstPage.data ? firstPage.data.length : 0);
+            let width = firstPage.width;
+            let height = firstPage.height;
+            let pixelCount = width * height;
+            let final8;
 
-            const channelCount = (ctype & 2 ? 3 : 1) + (ctype & 4 ? 1 : 0);
-            const pixelCount = width * height;
+            // 检查是否存在 subIFD（通常包含全尺寸原始数据）
+            if (firstPage.subIFD && firstPage.subIFD.length > 0) {
+              console.log('Found subIFD - using full resolution image');
+              let fullResIFD = firstPage.subIFD[0];
+              // 解码全尺寸图像
+              UTIF.decodeImage(buffer, fullResIFD);
+              width = fullResIFD.width;
+              height = fullResIFD.height;
+              pixelCount = width * height;
+              console.log('Full resolution dimensions:', width, 'x', height);
+              console.log('Full resolution data length:', fullResIFD.data.length);
+              let raw16 = new Uint16Array(fullResIFD.data.buffer, fullResIFD.data.byteOffset, fullResIFD.data.length / 2);
+              console.log('raw16 sample:', Array.from(raw16.slice(0, 10)));
+              final8 = new Uint8ClampedArray(pixelCount * 4);
+              let rgbData = demosaicAHD(raw16, fullResIFD.width, fullResIFD.height);
 
-            // 统一转换到 16bit (0..65535) 范围
-            let raw16 = new Uint16Array(pixelCount * channelCount);
-            if (depth <= 8) {
-              for (let i = 0; i < raw16.length; i++) {
-                raw16[i] = data[i] * 257; // 扩展 0..255 => 0..65535
+              if (fullResIFD.data.length === pixelCount * 3) {
+                let rgbData = fullResIFD.data;
+                for (let i = 0; i < pixelCount; i++) {
+                  let idxRGB = i * 3;
+                  let idx8 = i * 4;
+                  final8[idx8] = rgbData[idxRGB];
+                  final8[idx8 + 1] = rgbData[idxRGB + 1];
+                  final8[idx8 + 2] = rgbData[idxRGB + 2];
+                  final8[idx8 + 3] = 255;
+                }
+              } else {
+                console.log('Using demosaicAHD on full resolution data');
+                let rawData = fullResIFD.data;
+                // 将 fullResIFD.data 转换为 Uint16Array（原始 16 位数据）
+                let rgbData = demosaicAHD(new Uint16Array(rawData.buffer, rawData.byteOffset, rawData.length / 2), width, height);
+
+                // 反转负片：负片数据反转成正片（即：最大值减去当前值）
+                for (let i = 0; i < rgbData.length; i++) {
+                  rgbData[i] = 65535 - rgbData[i];
+                }
+
+                // 归一化 rgbData 数值到 0～255
+                let minR = Infinity, maxR = -Infinity;
+                let minG = Infinity, maxG = -Infinity;
+                let minB = Infinity, maxB = -Infinity;
+                for (let i = 0; i < pixelCount; i++) {
+                  let idx16 = i * 3;
+                  let r = rgbData[idx16];
+                  let g = rgbData[idx16 + 1];
+                  let b = rgbData[idx16 + 2];
+                  if (r < minR) minR = r;
+                  if (r > maxR) maxR = r;
+                  if (g < minG) minG = g;
+                  if (g > maxG) maxG = g;
+                  if (b < minB) minB = b;
+                  if (b > maxB) maxB = b;
+                }
+                console.log('Demosaic R:', minR, maxR, 'G:', minG, maxG, 'B:', minB, maxB);
+
+                final8 = new Uint8ClampedArray(pixelCount * 4);
+                for (let i = 0; i < pixelCount; i++) {
+                  let idx16 = i * 3;
+                  let idx8 = i * 4;
+                  final8[idx8]     = Math.round((rgbData[idx16]     - minR) * 255 / (maxR - minR));
+                  final8[idx8 + 1] = Math.round((rgbData[idx16 + 1] - minG) * 255 / (maxG - minG));
+                  final8[idx8 + 2] = Math.round((rgbData[idx16 + 2] - minB) * 255 / (maxB - minB));
+                  final8[idx8 + 3] = 255;
+                }
               }
+              console.log('Final8 sample (full resolution):', Array.from(final8.slice(0, 20)));
             } else {
-              for (let i = 0; i < raw16.length; i++) {
-                let hi = data[2 * i],
-                  lo = data[2 * i + 1];
-                raw16[i] = (hi << 8) | lo;
-              }
-            }
-
-            // 负片 -> 正片
-            for (let i = 0; i < raw16.length; i++) {
-              raw16[i] = 65535 - raw16[i];
-            }
-
-            // 最终显示时需降到 8 bit
-            let final8 = new Uint8ClampedArray(pixelCount * 4);
-            for (let i = 0; i < pixelCount; i++) {
-              let idx16 = i * channelCount;
-              let idx8 = i * 4;
-              // R
-              final8[idx8] = raw16[idx16] >>> 8;
-              // G / B
-              if (channelCount >= 3) {
-                final8[idx8 + 1] = raw16[idx16 + 1] >>> 8;
-                final8[idx8 + 2] = raw16[idx16 + 2] >>> 8;
+              console.log('No subIFD found - using preview image data');
+              final8 = new Uint8ClampedArray(pixelCount * 4);
+              if (firstPage.data.length === pixelCount * 3) {
+                let rgbData = firstPage.data;
+                for (let i = 0; i < pixelCount; i++) {
+                  let idxRGB = i * 3;
+                  let idx8 = i * 4;
+                  final8[idx8] = rgbData[idxRGB];
+                  final8[idx8 + 1] = rgbData[idxRGB + 1];
+                  final8[idx8 + 2] = rgbData[idxRGB + 2];
+                  final8[idx8 + 3] = 255;
+                }
               } else {
-                // 若灰度，则让 G/B 与 R 一致
-                final8[idx8 + 1] = final8[idx8];
-                final8[idx8 + 2] = final8[idx8];
+                console.log('Using demosaicAHD on preview image data');
+                let rawData = firstPage.data;
+                let rgbData = demosaicAHD(rawData, width, height);
+                for (let i = 0; i < pixelCount; i++) {
+                  let idx16 = i * 3;
+                  let idx8 = i * 4;
+                  final8[idx8] = rgbData[idx16] >>> 8;
+                  final8[idx8 + 1] = rgbData[idx16 + 1] >>> 8;
+                  final8[idx8 + 2] = rgbData[idx16 + 2] >>> 8;
+                  final8[idx8 + 3] = 255;
+                }
               }
-              // A
-              if (channelCount === 4) {
-                final8[idx8 + 3] = raw16[idx16 + 3] >>> 8;
-              } else {
-                final8[idx8 + 3] = 255;
-              }
+              console.log('Final8 sample (preview):', Array.from(final8.slice(0, 20)));
             }
 
-            // 写到 canvas
+            console.log('Canvas dimensions:', width, 'x', height);
             canvas.width = width;
             canvas.height = height;
             adjustCanvasDisplay(width, height);
-
             let imageData = ctx.createImageData(width, height);
             imageData.data.set(final8);
             ctx.putImageData(imageData, 0, 0);
-
-            // 同步到 transformCanvas
             invertedImageData = imageData;
             transformCanvas.width = width;
             transformCanvas.height = height;
-            transformCtx.putImageData(invertedImageData, 0, 0);
-
-            // 显示旋转、剪裁控件
+            transformCtx.putImageData(imageData, 0, 0);
             $("#rotateControls, #cropControls").show();
           };
           reader.readAsArrayBuffer(file);
+        } else
+          // 如果是 PNG，使用 UPNG.js 解析（支持 16 bit）
+          if (file.type === "image/png") {
+            let reader = new FileReader();
+            reader.onload = function (event) {
+              // ---------- UPNG.js 解析部分 ----------
+              const arrayBuffer = event.target.result;
+              const decoded = UPNG.decode(arrayBuffer);
+              const width = decoded.width;
+              const height = decoded.height;
+              const ctype = decoded.ctype; // 通道类型 (RGB, RGBA, 灰度 等)
+              const depth = decoded.depth;
+              const data = decoded.data;
 
-        } else {
-          // 若不是 PNG，则直接使用浏览器原生方式 (Image 对象 + drawImage)
-          let reader = new FileReader();
-          reader.onload = function (event) {
-            let img = new Image();
-            img.onload = function () {
-              canvas.width = img.width;
-              canvas.height = img.height;
-              adjustCanvasDisplay(img.width, img.height);
+              const channelCount = (ctype & 2 ? 3 : 1) + (ctype & 4 ? 1 : 0);
+              const pixelCount = width * height;
 
-              // 原生绘制
-              ctx.drawImage(img, 0, 0);
-              let rawData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-              let invertedImageData = ctx.createImageData(rawData);
-              for (let i = 0; i < rawData.data.length; i += 4) {
-                invertedImageData.data[i] = 255 - rawData.data[i];
-                invertedImageData.data[i + 1] = 255 - rawData.data[i + 1];
-                invertedImageData.data[i + 2] = 255 - rawData.data[i + 2];
-                invertedImageData.data[i + 3] = 255;
+              // 统一转换到 16bit (0..65535) 范围
+              let raw16 = new Uint16Array(pixelCount * channelCount);
+              if (depth <= 8) {
+                for (let i = 0; i < raw16.length; i++) {
+                  raw16[i] = data[i] * 257; // 扩展 0..255 => 0..65535
+                }
+              } else {
+                for (let i = 0; i < raw16.length; i++) {
+                  let hi = data[2 * i],
+                    lo = data[2 * i + 1];
+                  raw16[i] = (hi << 8) | lo;
+                }
               }
-              ctx.putImageData(invertedImageData, 0, 0);
+
+              // 负片 -> 正片
+              for (let i = 0; i < raw16.length; i++) {
+                raw16[i] = 65535 - raw16[i];
+              }
+
+              // 最终显示时需降到 8 bit
+              let final8 = new Uint8ClampedArray(pixelCount * 4);
+              for (let i = 0; i < pixelCount; i++) {
+                let idx16 = i * channelCount;
+                let idx8 = i * 4;
+                // R
+                final8[idx8] = raw16[idx16] >>> 8;
+                // G / B
+                if (channelCount >= 3) {
+                  final8[idx8 + 1] = raw16[idx16 + 1] >>> 8;
+                  final8[idx8 + 2] = raw16[idx16 + 2] >>> 8;
+                } else {
+                  // 若灰度，则让 G/B 与 R 一致
+                  final8[idx8 + 1] = final8[idx8];
+                  final8[idx8 + 2] = final8[idx8];
+                }
+                // A
+                if (channelCount === 4) {
+                  final8[idx8 + 3] = raw16[idx16 + 3] >>> 8;
+                } else {
+                  final8[idx8 + 3] = 255;
+                }
+              }
+
+              // 写到 canvas
+              canvas.width = width;
+              canvas.height = height;
+              adjustCanvasDisplay(width, height);
+
+              let imageData = ctx.createImageData(width, height);
+              imageData.data.set(final8);
+              ctx.putImageData(imageData, 0, 0);
 
               // 同步到 transformCanvas
-              transformCanvas.width = canvas.width;
-              transformCanvas.height = canvas.height;
+              invertedImageData = imageData;
+              transformCanvas.width = width;
+              transformCanvas.height = height;
               transformCtx.putImageData(invertedImageData, 0, 0);
 
               // 显示旋转、剪裁控件
               $("#rotateControls, #cropControls").show();
             };
-            img.src = event.target.result;
-          };
-          reader.readAsDataURL(file);
-        }
+            reader.readAsArrayBuffer(file);
+
+          } else {
+            // 若不是 PNG，则直接使用浏览器原生方式 (Image 对象 + drawImage)
+            let reader = new FileReader();
+            reader.onload = function (event) {
+              let img = new Image();
+              img.onload = function () {
+                canvas.width = img.width;
+                canvas.height = img.height;
+                adjustCanvasDisplay(img.width, img.height);
+
+                // 原生绘制
+                ctx.drawImage(img, 0, 0);
+                let rawData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                let invertedImageData = ctx.createImageData(rawData);
+                for (let i = 0; i < rawData.data.length; i += 4) {
+                  invertedImageData.data[i] = 255 - rawData.data[i];
+                  invertedImageData.data[i + 1] = 255 - rawData.data[i + 1];
+                  invertedImageData.data[i + 2] = 255 - rawData.data[i + 2];
+                  invertedImageData.data[i + 3] = 255;
+                }
+                ctx.putImageData(invertedImageData, 0, 0);
+
+                // 同步到 transformCanvas
+                transformCanvas.width = canvas.width;
+                transformCanvas.height = canvas.height;
+                transformCtx.putImageData(invertedImageData, 0, 0);
+
+                // 显示旋转、剪裁控件
+                $("#rotateControls, #cropControls").show();
+              };
+              img.src = event.target.result;
+            };
+            reader.readAsDataURL(file);
+          }
       });
 
       // 旋转预览（不更新离屏基底）
@@ -425,8 +657,8 @@
         let w = transformCanvas.width, h = transformCanvas.height;
         let cos = Math.abs(Math.cos(angleRad)), sin = Math.abs(Math.sin(angleRad));
         let newW = Math.ceil(w * cos + h * sin),
-            newH = Math.ceil(w * sin + h * cos);
-        
+          newH = Math.ceil(w * sin + h * cos);
+
         // Reuse the cached offCanvas
         offCanvas.width = newW;
         offCanvas.height = newH;
@@ -437,7 +669,7 @@
         offCtx.rotate(angleRad);
         offCtx.drawImage(transformCanvas, -w / 2, -h / 2);
         offCtx.restore();
-        
+
         canvas.width = newW;
         canvas.height = newH;
         adjustCanvasDisplay(newW, newH);
@@ -728,6 +960,35 @@
           adjusted.data[idx + 2] = rgb[2];
           adjusted.data[idx + 3] = 255;
         }
+        // CMY 调整
+        let cyanVal = parseInt($("#cyan").val());
+        let magentaVal = parseInt($("#magenta").val());
+        let yellowVal = parseInt($("#yellow").val());
+        $("#cyanVal").text(cyanVal);
+        $("#magentaVal").text(magentaVal);
+        $("#yellowVal").text(yellowVal);
+        $("#cyanInput").val(cyanVal);
+        $("#magentaInput").val(magentaVal);
+        $("#yellowInput").val(yellowVal);
+
+        for (let i = 0; i < total; i++) {
+          let idx = i * 4;
+          let r = adjusted.data[idx],
+            g = adjusted.data[idx + 1],
+            b = adjusted.data[idx + 2];
+          // 将 RGB 转换到 CMY
+          let C = 1 - (r / 255);
+          let M = 1 - (g / 255);
+          let Y = 1 - (b / 255);
+          // 应用 CMY 调整（滑块值 / 100）
+          let newC = Math.max(0, Math.min(1, C + cyanVal / 100));
+          let newM = Math.max(0, Math.min(1, M + magentaVal / 100));
+          let newY = Math.max(0, Math.min(1, Y + yellowVal / 100));
+          // 转换回 RGB
+          adjusted.data[idx] = 255 * (1 - newC);
+          adjusted.data[idx + 1] = 255 * (1 - newM);
+          adjusted.data[idx + 2] = 255 * (1 - newY);
+        }
         ctx.putImageData(adjusted, 0, 0);
       }
 
@@ -771,12 +1032,55 @@
         $("#saturation").val($(this).val());
         scheduleUpdateAdjust();
       });
+      $("#cyan").on("input", function () {
+        $("#cyanVal").text($(this).val());
+        $("#cyanInput").val($(this).val());
+        scheduleUpdateAdjust();
+      });
+      $("#cyanInput").on("input", function () {
+        $("#cyanVal").text($(this).val());
+        $("#cyan").val($(this).val());
+        scheduleUpdateAdjust();
+      });
+      $("#magenta").on("input", function () {
+        $("#magentaVal").text($(this).val());
+        $("#magentaInput").val($(this).val());
+        scheduleUpdateAdjust();
+      });
+      $("#magentaInput").on("input", function () {
+        $("#magentaVal").text($(this).val());
+        $("#magenta").val($(this).val());
+        scheduleUpdateAdjust();
+      });
+      $("#yellow").on("input", function () {
+        $("#yellowVal").text($(this).val());
+        $("#yellowInput").val($(this).val());
+        scheduleUpdateAdjust();
+      });
+      $("#yellowInput").on("input", function () {
+        $("#yellowVal").text($(this).val());
+        $("#yellow").val($(this).val());
+        scheduleUpdateAdjust();
+      });
 
       // 下载
       $("#download").on("click", function () {
+        let blob;
+        if (window.highQualityPngData) {
+          blob = new Blob([window.highQualityPngData], { type: "image/png" });
+        } else {
+          let dataURL = canvas.toDataURL("image/png");
+          // Convert dataURL to Blob
+          let arr = dataURL.split(','), mime = arr[0].match(/:(.*?);/)[1],
+            bstr = atob(arr[1]), n = bstr.length, u8arr = new Uint8Array(n);
+          while (n--) {
+            u8arr[n] = bstr.charCodeAt(n);
+          }
+          blob = new Blob([u8arr], { type: mime });
+        }
         let link = document.createElement("a");
         link.download = "corrected_film.png";
-        link.href = canvas.toDataURL("image/png");
+        link.href = window.URL.createObjectURL(blob);
         link.click();
       });
     });
