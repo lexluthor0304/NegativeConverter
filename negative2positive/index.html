@@ -97,98 +97,15 @@
     }
   </style>
   <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+  <script type="module">
+    import LibRaw from './index.js';
+    window.LibRaw = LibRaw;
+  </script>
   <!-- 引入 UPNG.js 以支持 PNG 的 16 bit 解析 -->
   <script src="https://cdn.jsdelivr.net/npm/pako/dist/pako.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/upng-js@2.1.0/UPNG.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dcraw"></script>
   <script src="https://cdn.jsdelivr.net/npm/utif@3.1.0/UTIF.min.js"></script>
-  <script>
-    function demosaicAHD(rawData, width, height) {
-      // 简化的 Adaptive Homogeneity Directed (AHD) 去马赛克算法，假设 Bayer 格式为 RGGB
-      let rgbData = new Uint16Array(width * height * 3);
-
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          let index = y * width + x;
-          let rgbIndex = index * 3;
-          let isEvenRow = (y % 2 === 0);
-          let isEvenCol = (x % 2 === 0);
-          let R, G, B;
-
-          if (isEvenRow && isEvenCol) {
-            // 红色像素
-            R = rawData[index];
-            let gSum = 0, count = 0;
-
-            if (x > 0) { gSum += rawData[index - 1]; count++; }
-            if (x < width - 1) { gSum += rawData[index + 1]; count++; }
-            if (y > 0) { gSum += rawData[index - width]; count++; }
-            if (y < height - 1) { gSum += rawData[index + width]; count++; }
-            G = count ? gSum / count : R;
-
-            let bSum = 0; count = 0;
-            if (x > 0 && y > 0) { bSum += rawData[index - width - 1]; count++; }
-            if (x < width - 1 && y > 0) { bSum += rawData[index - width + 1]; count++; }
-            if (x > 0 && y < height - 1) { bSum += rawData[index + width - 1]; count++; }
-            if (x < width - 1 && y < height - 1) { bSum += rawData[index + width + 1]; count++; }
-            B = count ? bSum / count : R;
-
-          } else if (isEvenRow && !isEvenCol) {
-            // 红色行的绿色像素
-            G = rawData[index];
-            let rSum = 0, count = 0;
-
-            if (x > 0) { rSum += rawData[index - 1]; count++; }
-            if (x < width - 1) { rSum += rawData[index + 1]; count++; }
-            R = count ? rSum / count : G;
-
-            let bSum = 0; count = 0;
-            if (y > 0) { bSum += rawData[index - width]; count++; }
-            if (y < height - 1) { bSum += rawData[index + width]; count++; }
-            B = count ? bSum / count : G;
-
-          } else if (!isEvenRow && isEvenCol) {
-            // 蓝色行的绿色像素
-            G = rawData[index];
-            let rSum = 0, count = 0;
-
-            if (y > 0) { rSum += rawData[index - width]; count++; }
-            if (y < height - 1) { rSum += rawData[index + width]; count++; }
-            R = count ? rSum / count : G;
-
-            let bSum = 0; count = 0;
-            if (x > 0) { bSum += rawData[index - 1]; count++; }
-            if (x < width - 1) { bSum += rawData[index + 1]; count++; }
-            B = count ? bSum / count : G;
-
-          } else {
-            // 蓝色像素
-            B = rawData[index];
-            let gSum = 0, count = 0;
-
-            if (x > 0) { gSum += rawData[index - 1]; count++; }
-            if (x < width - 1) { gSum += rawData[index + 1]; count++; }
-            if (y > 0) { gSum += rawData[index - width]; count++; }
-            if (y < height - 1) { gSum += rawData[index + width]; count++; }
-            G = count ? gSum / count : B;
-
-            let rSum = 0; count = 0;
-            if (x > 0 && y > 0) { rSum += rawData[index - width - 1]; count++; }
-            if (x < width - 1 && y > 0) { rSum += rawData[index - width + 1]; count++; }
-            if (x > 0 && y < height - 1) { rSum += rawData[index + width - 1]; count++; }
-            if (x < width - 1 && y < height - 1) { rSum += rawData[index + width + 1]; count++; }
-            R = count ? rSum / count : B;
-          }
-
-          rgbData[rgbIndex] = R;
-          rgbData[rgbIndex + 1] = G;
-          rgbData[rgbIndex + 2] = B;
-        }
-      }
-
-      return rgbData;
-    }
-  </script>
   <script>
     const i18n = {
       zh: {
@@ -286,7 +203,7 @@
       <li><b>下载结果：</b>点击“下载校正图像”保存处理后的图片。</li>
     </ol>
   </div>
-  <input type="file" id="upload" accept="image/*,.dng" class="control"><br>
+  <input type="file" id="upload" accept=".cr2,.nef,.arw,.dng,.raw,.rw2,image/*" class="control"><br>
   <!-- 旋转控件 -->
   <div id="rotateControls" class="control" style="display:none;">
     <label>
@@ -411,129 +328,59 @@
         let file = e.target.files[0];
         if (!file) return;
 
-        if (file.name.toLowerCase().endsWith(".dng")) {
+        if ([".cr2", ".nef", ".arw", ".dng", ".raw", ".rw2"].some(ext => file.name.toLowerCase().endsWith(ext))) {
           let reader = new FileReader();
-          reader.onload = function (event) {
+          reader.onload = async function (event) {
             let buffer = event.target.result;
-            let ifds = UTIF.decode(buffer);
-            console.log('Decoded ifds:', ifds);
-            // 解码预览图像
-            UTIF.decodeImage(buffer, ifds[0]);
-            let firstPage = ifds[0];
-            console.log('First page data:', firstPage);
-            console.log('firstPage.data length:', firstPage.data ? firstPage.data.length : 0);
-            let width = firstPage.width;
-            let height = firstPage.height;
-            let pixelCount = width * height;
-            let final8;
-
-            // 检查是否存在 subIFD（通常包含全尺寸原始数据）
-            if (firstPage.subIFD && firstPage.subIFD.length > 0) {
-              console.log('Found subIFD - using full resolution image');
-              let fullResIFD = firstPage.subIFD[0];
-              // 解码全尺寸图像
-              UTIF.decodeImage(buffer, fullResIFD);
-              width = fullResIFD.width;
-              height = fullResIFD.height;
-              pixelCount = width * height;
-              console.log('Full resolution dimensions:', width, 'x', height);
-              console.log('Full resolution data length:', fullResIFD.data.length);
-              let raw16 = new Uint16Array(fullResIFD.data.buffer, fullResIFD.data.byteOffset, fullResIFD.data.length / 2);
-              console.log('raw16 sample:', Array.from(raw16.slice(0, 10)));
-              final8 = new Uint8ClampedArray(pixelCount * 4);
-              let rgbData = demosaicAHD(raw16, fullResIFD.width, fullResIFD.height);
-
-              if (fullResIFD.data.length === pixelCount * 3) {
-                let rgbData = fullResIFD.data;
-                for (let i = 0; i < pixelCount; i++) {
-                  let idxRGB = i * 3;
-                  let idx8 = i * 4;
-                  final8[idx8] = rgbData[idxRGB];
-                  final8[idx8 + 1] = rgbData[idxRGB + 1];
-                  final8[idx8 + 2] = rgbData[idxRGB + 2];
-                  final8[idx8 + 3] = 255;
-                }
-              } else {
-                console.log('Using demosaicAHD on full resolution data');
-                let rawData = fullResIFD.data;
-                // 将 fullResIFD.data 转换为 Uint16Array（原始 16 位数据）
-                let rgbData = demosaicAHD(new Uint16Array(rawData.buffer, rawData.byteOffset, rawData.length / 2), width, height);
-
-                // 反转负片：负片数据反转成正片（即：最大值减去当前值）
-                for (let i = 0; i < rgbData.length; i++) {
-                  rgbData[i] = 65535 - rgbData[i];
-                }
-
-                // 归一化 rgbData 数值到 0～255
-                let minR = Infinity, maxR = -Infinity;
-                let minG = Infinity, maxG = -Infinity;
-                let minB = Infinity, maxB = -Infinity;
-                for (let i = 0; i < pixelCount; i++) {
-                  let idx16 = i * 3;
-                  let r = rgbData[idx16];
-                  let g = rgbData[idx16 + 1];
-                  let b = rgbData[idx16 + 2];
-                  if (r < minR) minR = r;
-                  if (r > maxR) maxR = r;
-                  if (g < minG) minG = g;
-                  if (g > maxG) maxG = g;
-                  if (b < minB) minB = b;
-                  if (b > maxB) maxB = b;
-                }
-                console.log('Demosaic R:', minR, maxR, 'G:', minG, maxG, 'B:', minB, maxB);
-
-                final8 = new Uint8ClampedArray(pixelCount * 4);
-                for (let i = 0; i < pixelCount; i++) {
-                  let idx16 = i * 3;
-                  let idx8 = i * 4;
-                  final8[idx8]     = Math.round((rgbData[idx16]     - minR) * 255 / (maxR - minR));
-                  final8[idx8 + 1] = Math.round((rgbData[idx16 + 1] - minG) * 255 / (maxG - minG));
-                  final8[idx8 + 2] = Math.round((rgbData[idx16 + 2] - minB) * 255 / (maxB - minB));
-                  final8[idx8 + 3] = 255;
-                }
+            console.log("DEBUG: File loaded, byteLength:", buffer.byteLength);
+            try {
+              // 创建 LibRaw 实例
+              const raw = new LibRaw();
+              console.log("DEBUG: LibRaw instance created:", raw);
+              // 打开 RAW 文件，设置基本选项
+              await raw.open(new Uint8Array(buffer), {
+                noInterpolation: false,  // 启用内部去马赛克
+                useAutoWb: true,         // 自动白平衡
+                useCameraWb: true,       // 使用相机白平衡
+                useCameraMatrix: 3,      // 始终使用相机矩阵
+                outputColor: 1,          // 输出 sRGB
+                outputBps: 8             // 每通道 8 位
+              });
+              console.log("DEBUG: raw.open succeeded");
+              // 获取元数据（可选）
+              const meta = await raw.metadata(true);
+              console.log("DEBUG: Metadata:", meta);
+              // 获取解码后的图像数据
+              const imageDataResult = await raw.imageData();
+              console.log("DEBUG: ImageData result:", imageDataResult);
+              const width = imageDataResult.width;
+              const height = imageDataResult.height;
+              // LibRaw 返回的是 3 通道 RGB 数据，转换为 RGBA（不做负片转换）
+              const rgbData = new Uint8ClampedArray(imageDataResult.data);
+              const pixelCount = width * height;
+              const rgbaData = new Uint8ClampedArray(pixelCount * 4);
+              for (let i = 0; i < pixelCount; i++) {
+                rgbaData[i * 4] = 255 - rgbData[i * 3];       // R 通道取反
+                rgbaData[i * 4 + 1] = 255 - rgbData[i * 3 + 1];   // G 通道取反
+                rgbaData[i * 4 + 2] = 255 - rgbData[i * 3 + 2];   // B 通道取反
+                rgbaData[i * 4 + 3] = 255;                        // A 固定为 255
               }
-              console.log('Final8 sample (full resolution):', Array.from(final8.slice(0, 20)));
-            } else {
-              console.log('No subIFD found - using preview image data');
-              final8 = new Uint8ClampedArray(pixelCount * 4);
-              if (firstPage.data.length === pixelCount * 3) {
-                let rgbData = firstPage.data;
-                for (let i = 0; i < pixelCount; i++) {
-                  let idxRGB = i * 3;
-                  let idx8 = i * 4;
-                  final8[idx8] = rgbData[idxRGB];
-                  final8[idx8 + 1] = rgbData[idxRGB + 1];
-                  final8[idx8 + 2] = rgbData[idxRGB + 2];
-                  final8[idx8 + 3] = 255;
-                }
-              } else {
-                console.log('Using demosaicAHD on preview image data');
-                let rawData = firstPage.data;
-                let rgbData = demosaicAHD(rawData, width, height);
-                for (let i = 0; i < pixelCount; i++) {
-                  let idx16 = i * 3;
-                  let idx8 = i * 4;
-                  final8[idx8] = rgbData[idx16] >>> 8;
-                  final8[idx8 + 1] = rgbData[idx16 + 1] >>> 8;
-                  final8[idx8 + 2] = rgbData[idx16 + 2] >>> 8;
-                  final8[idx8 + 3] = 255;
-                }
-              }
-              console.log('Final8 sample (preview):', Array.from(final8.slice(0, 20)));
+              let imageData = new ImageData(rgbaData, width, height);
+              console.log("DEBUG: ImageData created, width:", width, "height:", height);
+              // 更新 canvas
+              canvas.width = width;
+              canvas.height = height;
+              adjustCanvasDisplay(width, height);
+              ctx.putImageData(imageData, 0, 0);
+              console.log("DEBUG: Image displayed on canvas.");
+              // 同步更新 transformCanvas
+              transformCanvas.width = width;
+              transformCanvas.height = height;
+              transformCtx.putImageData(imageData, 0, 0);
+              $("#rotateControls, #cropControls").show();
+            } catch (err) {
+              console.error("DEBUG: Error processing RAW:", err);
             }
-
-            console.log('Canvas dimensions:', width, 'x', height);
-            canvas.width = width;
-            canvas.height = height;
-            adjustCanvasDisplay(width, height);
-            let imageData = ctx.createImageData(width, height);
-            imageData.data.set(final8);
-            ctx.putImageData(imageData, 0, 0);
-            invertedImageData = imageData;
-            transformCanvas.width = width;
-            transformCanvas.height = height;
-            transformCtx.putImageData(imageData, 0, 0);
-            $("#rotateControls, #cropControls").show();
           };
           reader.readAsArrayBuffer(file);
         } else
