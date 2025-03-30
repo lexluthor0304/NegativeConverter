@@ -4,7 +4,7 @@ This is a browser-based tool built with HTML and JavaScript that converts scanne
 
 ## 🌟 Features
 
-- 📷 **Supports PNG/JPG file uploads** (including 16-bit PNGs via UPNG.js and DNG raw files via UTIF.js)
+- 📷 **Supports PNG/JPG file uploads** (including 16-bit PNGs via UPNG.js and .cr2, .nef, .arw, .dng, .raw, .rw2 raw files via LibRaw-Wasm)
 - 🔄 **Rotation correction** via slider or number input
 - ✂️ **Visual cropping** with drag-and-drop overlay
 - ⚖️ **One-click white balance** by clicking a gray area in the image
@@ -30,10 +30,10 @@ This is a browser-based tool built with HTML and JavaScript that converts scanne
 
 ## ⚙️ Technical Highlights
 
-- Uses [`UPNG.js`](https://github.com/photopea/UPNG.js) to decode 16-bit PNGs
-- Uses [`UTIF.js`](https://github.com/photopea/UTIF.js) to decode DNG/RAW files
-- Includes a simplified AHD demosaicing algorithm for Bayer-pattern raw data
-- Color adjustment logic is based on RGB ↔ HSL and RGB ↔ CMY conversions
+- Uses [`UPNG.js`](https://github.com/photopea/UPNG.js) to decode 16-bit PNGs  
+- Uses a custom WebAssembly module based on [`LibRaw-Wasm`](https://github.com/ybouane/LibRaw-Wasm) to support `.cr2`, `.nef`, `.arw`, `.dng`, `.raw`, `.rw2` formats  
+- Includes a simplified AHD demosaicing algorithm for Bayer-pattern raw data  
+- Color adjustment logic is based on RGB ↔ HSL and RGB ↔ CMY conversions  
 - Performance optimizations include:
   - Cached DOM access
   - Offscreen canvas reuse
@@ -51,3 +51,9 @@ This tool is designed to be simple, fast, and modifiable.
 ## 📄 License
 
 MIT License
+
+## 🙏 Acknowledgments
+
+Special thanks to [LibRaw-Wasm by ybouane](https://github.com/ybouane/LibRaw-Wasm),  
+which made it possible to support various raw image formats such as `.cr2`, `.nef`, `.arw`, `.dng`, `.raw`, and `.rw2` directly in the browser via WebAssembly.  
+Your work was an essential reference and greatly accelerated development.
