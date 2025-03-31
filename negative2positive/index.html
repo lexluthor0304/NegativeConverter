@@ -333,6 +333,38 @@
           reader.onload = async function (event) {
             let buffer = event.target.result;
             console.log("DEBUG: File loaded, byteLength:", buffer.byteLength);
+            if (file.name.toLowerCase().endsWith('.dng')) {
+              let textSnippet = new TextDecoder().decode(buffer.slice(0, 1000));
+              if (textSnippet.includes("iPhone")) {
+                try {
+                  const ifds = UTIF.decode(buffer);
+                  UTIF.decodeImage(buffer, ifds[0]);
+                  const rgba = UTIF.toRGBA8(ifds[0]);
+                  // Invert RGB values for negative to positive conversion
+                  for (let i = 0; i < rgba.length; i += 4) {
+                    rgba[i] = 255 - rgba[i];
+                    rgba[i + 1] = 255 - rgba[i + 1];
+                    rgba[i + 2] = 255 - rgba[i + 2];
+                  }
+                  const width = ifds[0].width;
+                  const height = ifds[0].height;
+                  const imageData = new ImageData(new Uint8ClampedArray(rgba), width, height);
+                  canvas.width = width;
+                  canvas.height = height;
+                  adjustCanvasDisplay(width, height);
+                  ctx.putImageData(imageData, 0, 0);
+                  console.log("DEBUG: UTIF.js decoded and inverted iPhone DNG file.");
+                  transformCanvas.width = width;
+                  transformCanvas.height = height;
+                  transformCtx.putImageData(imageData, 0, 0);
+                  $("#rotateControls, #cropControls").show();
+                  return;
+                } catch (err) {
+                  console.error("DEBUG: UTIF.js failed to decode iPhone DNG:", err);
+                  // Fallback to LibRaw processing below.
+                }
+              }
+            }
             try {
               // 创建 LibRaw 实例
               const raw = new LibRaw();
