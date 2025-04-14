@@ -1,11 +1,10 @@
 <!DOCTYPE html>
 <html lang="zh">
-
 <head>
   <meta charset="UTF-8">
   <title>Film Negative → Positive (旋转+实时剪裁+白平衡+温度/色调)</title>
   <style>
-    /* 整体页面样式：黑色背景与霓虹风格字体 */
+    /* ========== Global Style ========== */
     body {
       font-family: "Courier New", Courier, monospace;
       background: #000;
@@ -14,14 +13,11 @@
       margin: 0;
       text-align: center;
     }
-
     h2 {
       text-align: center;
       text-shadow: 0 0 10px #ff00ff, 0 0 20px #ff00ff;
       margin: 20px auto;
     }
-
-    /* 容器尺寸与 canvas 显示尺寸同步 */
     #canvasContainer {
       position: relative;
       display: inline-block;
@@ -29,13 +25,10 @@
       box-shadow: 0 0 20px #0ff;
       margin-bottom: 20px;
     }
-
     canvas {
       border: 1px solid #0ff;
       background: #111;
     }
-
-    /* 剪裁覆盖层：霓虹粉色虚线边框与半透明粉色背景 */
     #cropOverlay {
       border: 2px dashed #ff00ff;
       position: absolute;
@@ -44,48 +37,15 @@
       background: rgba(255, 0, 255, 0.2);
       z-index: 100;
     }
-
     .control {
       margin-top: 10px;
       text-align: center;
     }
-
-    /* 固定滑块长度 */
     input[type="range"] {
       width: 300px;
-    }
-
-    input[type="number"] {
-      width: 60px;
-      margin-left: 10px;
-      background: #222;
-      border: 1px solid #0ff;
-      color: #0ff;
-    }
-
-    /* 文件上传、按钮样式 */
-    input[type="file"],
-    button {
-      background: #222;
-      border: 1px solid #0ff;
-      color: #0ff;
-      padding: 5px 10px;
-      cursor: pointer;
-      transition: all 0.3s ease;
-    }
-
-    input[type="file"]:hover,
-    button:hover {
-      background: #0ff;
-      color: #000;
-    }
-
-    /* 滑块样式定制 */
-    input[type="range"] {
       -webkit-appearance: none;
       background: #222;
     }
-
     input[type="range"]::-webkit-slider-thumb {
       -webkit-appearance: none;
       width: 15px;
@@ -95,18 +55,48 @@
       cursor: pointer;
       box-shadow: 0 0 5px #ff00ff;
     }
+    input[type="number"] {
+      width: 60px;
+      margin-left: 10px;
+      background: #222;
+      border: 1px solid #0ff;
+      color: #0ff;
+    }
+    input[type="file"],
+    button {
+      background: #222;
+      border: 1px solid #0ff;
+      color: #0ff;
+      padding: 5px 10px;
+      cursor: pointer;
+      transition: all 0.3s ease;
+    }
+    input[type="file"]:hover,
+    button:hover {
+      background: #0ff;
+      color: #000;
+    }
+    footer.app-footer {
+      margin-top: 30px;
+    }
   </style>
+
+  <!-- jQuery and other libraries -->
   <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+
+  <!-- LibRaw (index.js), UPNG.js, pako, dcraw, UTIF for parsing RAW/PNG/DNG -->
   <script type="module">
+    /* Make sure index.js (LibRaw build) is in the same directory, or load it differently if needed. */
     import LibRaw from './index.js';
     window.LibRaw = LibRaw;
   </script>
-  <!-- 引入 UPNG.js 以支持 PNG 的 16 bit 解析 -->
   <script src="https://cdn.jsdelivr.net/npm/pako/dist/pako.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/upng-js@2.1.0/UPNG.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dcraw"></script>
   <script src="https://cdn.jsdelivr.net/npm/utif@3.1.0/UTIF.min.js"></script>
+
   <script>
+    /* i18n configuration */
     const i18n = {
       zh: {
         title: "Film Negative → Positive (旋转+实时剪裁+白平衡+温度/色调) 支持 DNG",
@@ -151,35 +141,62 @@
         saturationLabel: "彩度"
       }
     };
+
+    // Simple debounce function to handle post-slider updates
+    function debounce(fn, delay = 300) {
+      let timer = null;
+      return function (...args) {
+        clearTimeout(timer);
+        timer = setTimeout(() => fn.apply(this, args), delay);
+      };
+    }
   </script>
 </head>
 
 <body>
+  <!-- Auto-replace text content based on browser language -->
   <script>
     document.addEventListener("DOMContentLoaded", () => {
-      const lang = navigator.language.startsWith("ja") ? "ja"
-        : navigator.language.startsWith("en") ? "en"
-          : "zh";
+      const lang = navigator.language.startsWith("ja")
+        ? "ja"
+        : navigator.language.startsWith("en")
+        ? "en"
+        : "zh";
       const text = i18n[lang];
-      document.querySelector("#rotateControls label").childNodes[0].textContent = text.steps[1].split("：")[0] + ": ";
-      document.getElementById("applyRotate").textContent = lang === "zh" ? "应用旋转" : lang === "en" ? "Apply Rotation" : "回転を適用";
 
-      document.getElementById("startCrop").textContent = lang === "zh" ? "开始剪裁" : lang === "en" ? "Start Crop" : "トリミング開始";
-      document.getElementById("applyCrop").textContent = lang === "zh" ? "应用剪裁" : lang === "en" ? "Apply Crop" : "適用";
-      document.getElementById("cancelCrop").textContent = lang === "zh" ? "取消剪裁" : lang === "en" ? "Cancel Crop" : "トリミングをキャンセル";
+      document.querySelector("#rotateControls label").childNodes[0].textContent =
+        text.steps[1].split("：")[0] + ": ";
+      document.getElementById("applyRotate").textContent =
+        lang === "zh" ? "应用旋转" : lang === "en" ? "Apply Rotation" : "回転を適用";
+
+      document.getElementById("startCrop").textContent =
+        lang === "zh" ? "开始剪裁" : lang === "en" ? "Start Crop" : "トリミング開始";
+      document.getElementById("applyCrop").textContent =
+        lang === "zh" ? "应用剪裁" : lang === "en" ? "Apply Crop" : "適用";
+      document.getElementById("cancelCrop").textContent =
+        lang === "zh" ? "取消剪裁" : lang === "en" ? "Cancel Crop" : "トリミングをキャンセル";
 
       const adjustLabels = document.querySelectorAll("#adjustControls label");
-      adjustLabels[0].childNodes[0].textContent = lang === "zh" ? "色温: " : lang === "en" ? "Temp: " : "色温: ";
-      adjustLabels[1].childNodes[0].textContent = lang === "zh" ? "色调: " : lang === "en" ? "Tint: " : "色合い: ";
+      adjustLabels[0].childNodes[0].textContent =
+        lang === "zh" ? "色温: " : lang === "en" ? "Temp: " : "色温: ";
+      adjustLabels[1].childNodes[0].textContent =
+        lang === "zh" ? "色调: " : lang === "en" ? "Tint: " : "色合い: ";
       adjustLabels[2].childNodes[0].textContent = text.vibranceLabel + ": ";
       adjustLabels[3].childNodes[0].textContent = text.saturationLabel + ": ";
 
-      document.getElementById("download").textContent = lang === "zh" ? "下载校正图像" : lang === "en" ? "Download Corrected Image" : "補正画像をダウンロード";
+      document.getElementById("download").textContent =
+        lang === "zh"
+          ? "下载校正图像"
+          : lang === "en"
+          ? "Download Corrected Image"
+          : "補正画像をダウンロード";
+
       document.getElementById("title").textContent = text.title;
       document.getElementById("guideTitle").textContent = text.guideTitle;
+
       const list = document.getElementById("steps");
       list.innerHTML = "";
-      text.steps.forEach(step => {
+      text.steps.forEach((step) => {
         const li = document.createElement("li");
         const parts = step.split("：");
         if (parts.length === 2) {
@@ -191,10 +208,13 @@
       });
     });
   </script>
+
+  <!-- Title / Quick Guide -->
   <h2 id="title">Film Negative → Positive (旋转+实时剪裁+白平衡+温度/色调)</h2>
   <div style="padding:16px; margin-bottom:20px;">
     <h3 id="guideTitle">📘 使用方法（快速上手）</h3>
     <ol id="steps" style="padding-left: 20px; line-height: 1.6;">
+      <!-- Default Chinese guide -->
       <li><b>上传底片图像：</b>点击“选择文件”，上传扫描好的底片图像。</li>
       <li><b>旋转图像：</b>使用滑块或输入角度，纠正扫描角度后点击“应用旋转”。</li>
       <li><b>剪裁图像：</b>点击“开始剪裁”，用鼠标拖出区域后点击“应用剪裁”。</li>
@@ -203,346 +223,483 @@
       <li><b>下载结果：</b>点击“下载校正图像”保存处理后的图片。</li>
     </ol>
   </div>
-  <input type="file" id="upload" accept=".cr2,.nef,.arw,.dng,.raw,.rw2,image/*" class="control"><br>
-  <!-- 旋转控件 -->
+
+  <!-- File selection -->
+  <input
+    type="file"
+    id="upload"
+    accept=".cr2,.nef,.arw,.dng,.raw,.rw2,image/*"
+    class="control"
+  >
+  <br>
+
+  <!-- Rotation controls -->
   <div id="rotateControls" class="control" style="display:none;">
     <label>
-      <span data-i18n="rotateLabel"></span>: <span id="rotateVal">0</span>°
+      <span></span>: <span id="rotateVal">0</span>°
     </label>
     <input type="range" id="rotate" min="-180" max="180" step="1" value="0">
     <input type="number" id="rotateInput" min="-180" max="180" step="1" value="0">
-    <button id="applyRotate" data-i18n="applyRotate"></button>
+    <button id="applyRotate"></button>
   </div>
 
-  <!-- 剪裁控件 -->
+  <!-- Crop controls -->
   <div id="cropControls" class="control" style="display:none;">
-    <button id="startCrop" data-i18n="startCrop"></button>
-    <button id="applyCrop" style="display:none;" data-i18n="applyCrop"></button>
-    <button id="cancelCrop" style="display:none;" data-i18n="cancelCrop"></button>
+    <button id="startCrop"></button>
+    <button id="applyCrop" style="display:none;"></button>
+    <button id="cancelCrop" style="display:none;"></button>
   </div>
 
-  <!-- canvas 容器 -->
+  <!-- Main canvas container -->
   <div id="canvasContainer">
     <canvas id="canvas"></canvas>
     <div id="cropOverlay"></div>
   </div>
 
-  <!-- 温度/色调/活力/饱和度调整 -->
+  <!-- Temperature/Tint/Vibrance/Saturation/CMY adjustments -->
   <div id="adjustControls" class="control" style="display:none;">
-    <label>
-      <span data-i18n="tempLabel"></span>: <span id="tempVal">0</span>
-    </label>
-    <input type="range" id="temp" min="-100" max="100" step="1" value="0">
-    <input type="number" id="tempInput" min="-100" max="100" step="1" value="0">
+    <label><span></span>: <span id="tempVal">0</span></label>
+    <input
+      data-role="rangeInput"
+      data-type="temp"
+      type="range"
+      min="-100"
+      max="100"
+      step="1"
+      value="0"
+      id="temp"
+    >
+    <input
+      data-role="numberInput"
+      data-type="temp"
+      type="number"
+      min="-100"
+      max="100"
+      step="1"
+      value="0"
+      id="tempInput"
+    >
     <br>
-    <label>
-      <span data-i18n="tintLabel"></span>: <span id="tintVal">0</span>
-    </label>
-    <input type="range" id="tint" min="-100" max="100" step="1" value="0">
-    <input type="number" id="tintInput" min="-100" max="100" step="1" value="0">
+    <label><span></span>: <span id="tintVal">0</span></label>
+    <input
+      data-role="rangeInput"
+      data-type="tint"
+      type="range"
+      min="-100"
+      max="100"
+      step="1"
+      value="0"
+      id="tint"
+    >
+    <input
+      data-role="numberInput"
+      data-type="tint"
+      type="number"
+      min="-100"
+      max="100"
+      step="1"
+      value="0"
+      id="tintInput"
+    >
     <br>
-    <label>
-      <span data-i18n="vibranceLabel"></span>: <span id="vibranceVal">0</span>
-    </label>
-    <input type="range" id="vibrance" min="-100" max="100" step="1" value="0">
-    <input type="number" id="vibranceInput" min="-100" max="100" step="1" value="0">
+    <label><span></span>: <span id="vibranceVal">0</span></label>
+    <input
+      data-role="rangeInput"
+      data-type="vibrance"
+      type="range"
+      min="-100"
+      max="100"
+      step="1"
+      value="0"
+      id="vibrance"
+    >
+    <input
+      data-role="numberInput"
+      data-type="vibrance"
+      type="number"
+      min="-100"
+      max="100"
+      step="1"
+      value="0"
+      id="vibranceInput"
+    >
     <br>
-    <label>
-      <span data-i18n="saturationLabel"></span>: <span id="saturationVal">0</span>
-    </label>
-    <input type="range" id="saturation" min="-100" max="100" step="1" value="0">
-    <input type="number" id="saturationInput" min="-100" max="100" step="1" value="0">
+    <label><span></span>: <span id="saturationVal">0</span></label>
+    <input
+      data-role="rangeInput"
+      data-type="saturation"
+      type="range"
+      min="-100"
+      max="100"
+      step="1"
+      value="0"
+      id="saturation"
+    >
+    <input
+      data-role="numberInput"
+      data-type="saturation"
+      type="number"
+      min="-100"
+      max="100"
+      step="1"
+      value="0"
+      id="saturationInput"
+    >
     <br>
-    <label>
-      Cyan: <span id="cyanVal">0</span>
-    </label>
-    <input type="range" id="cyan" min="-100" max="100" step="1" value="0">
-    <input type="number" id="cyanInput" min="-100" max="100" step="1" value="0">
+    <label>Cyan: <span id="cyanVal">0</span></label>
+    <input
+      data-role="rangeInput"
+      data-type="cyan"
+      type="range"
+      min="-100"
+      max="100"
+      step="1"
+      value="0"
+      id="cyan"
+    >
+    <input
+      data-role="numberInput"
+      data-type="cyan"
+      type="number"
+      min="-100"
+      max="100"
+      step="1"
+      value="0"
+      id="cyanInput"
+    >
     <br>
-    <label>
-      Magenta: <span id="magentaVal">0</span>
-    </label>
-    <input type="range" id="magenta" min="-100" max="100" step="1" value="0">
-    <input type="number" id="magentaInput" min="-100" max="100" step="1" value="0">
+    <label>Magenta: <span id="magentaVal">0</span></label>
+    <input
+      data-role="rangeInput"
+      data-type="magenta"
+      type="range"
+      min="-100"
+      max="100"
+      step="1"
+      value="0"
+      id="magenta"
+    >
+    <input
+      data-role="numberInput"
+      data-type="magenta"
+      type="number"
+      min="-100"
+      max="100"
+      step="1"
+      value="0"
+      id="magentaInput"
+    >
     <br>
-    <label>
-      Yellow: <span id="yellowVal">0</span>
-    </label>
-    <input type="range" id="yellow" min="-100" max="100" step="1" value="0">
-    <input type="number" id="yellowInput" min="-100" max="100" step="1" value="0">
+    <label>Yellow: <span id="yellowVal">0</span></label>
+    <input
+      data-role="rangeInput"
+      data-type="yellow"
+      type="range"
+      min="-100"
+      max="100"
+      step="1"
+      value="0"
+      id="yellow"
+    >
+    <input
+      data-role="numberInput"
+      data-type="yellow"
+      type="number"
+      min="-100"
+      max="100"
+      step="1"
+      value="0"
+      id="yellowInput"
+    >
+
     <div class="control" style="display:none;" id="downloadDiv">
-      <button id="download" data-i18n="download"></button>
+      <button id="download"></button>
     </div>
   </div>
+
   <footer class="app-footer">
     <p>© 2025 Negative Converter. tokugai.com All rights reserved.</p>
   </footer>
 
   <script>
     $(function () {
-      let canvas = $("#canvas")[0],
-        ctx = canvas.getContext("2d", { willReadFrequently: true });
-      // Cache common jQuery selectors
+      // ===== DOM references =====
       const $canvas = $("#canvas");
+      const $canvasContainer = $("#canvasContainer");
+      const $cropOverlay = $("#cropOverlay");
       const $rotate = $("#rotate");
+      const $rotateVal = $("#rotateVal");
       const $rotateInput = $("#rotateInput");
-      const $temp = $("#temp");
-      const $tint = $("#tint");
-      const $vibrance = $("#vibrance");
-      const $saturation = $("#saturation");
+      const $applyRotate = $("#applyRotate");
+      const $adjustControls = $("#adjustControls");
+      const $downloadDiv = $("#downloadDiv");
+      const $downloadBtn = $("#download");
 
-      // Create a reusable offscreen canvas for rotation preview
-      let offCanvas = document.createElement("canvas");
+      // Main canvas and context
+      let canvas = $canvas[0];
+      let ctx = canvas.getContext("2d", { willReadFrequently: true });
 
-      // Throttle updateAdjust using requestAnimationFrame
+      // Offscreen canvas for storing the final "inverted + rotated + cropped" image
+      let transformCanvas = document.createElement("canvas");
+      let transformCtx = transformCanvas.getContext("2d");
+
+      // ===== Preview canvas for smooth real-time adjustments =====
+      const previewCanvas = document.createElement("canvas");
+      const previewCtx = previewCanvas.getContext("2d");
+      // The scale factor for generating a smaller preview
+      const previewScaleFactor = 4;
+
+      // Arrays to store pixel data
+      let basePixels = null;        // Full-resolution data (after WB normalization)
+      let basePixelsPreview = null; // Downsampled data for the preview canvas
+
+      // Cropping states
+      let cropping = false;
+      let croppingActive = false;
+      let cropStart = null;
+
+      // Flag for requestAnimationFrame-based throttling
       let updatePending = false;
-      function scheduleUpdateAdjust() {
-        if (!updatePending) {
-          updatePending = true;
-          requestAnimationFrame(() => {
-            updateAdjust();
-            updatePending = false;
-          });
-        }
-      }
-      // 离屏 canvas 保存变换基底（旋转、剪裁后）
-      let transformCanvas = document.createElement("canvas"),
-        transformCtx = transformCanvas.getContext("2d");
-      let invertedImageData = null; // 当前反转后的图像数据（内部像素）
-      let basePixels = null;        // 白平衡校正+归一化后的数据（用于温度/色调调整）
-      let cropping = false;         // 剪裁模式标志
-      let cropStart = null;         // 剪裁起点（内部坐标）
-      let croppingActive = false;   // 是否正在拖拽选择
 
-      // 根据内部像素尺寸调整 canvas 与容器的 CSS 显示尺寸
-      function adjustCanvasDisplay(w, h) {
-        const maxWidth = window.innerWidth - 40,
-          maxHeight = window.innerHeight - 200;
-        let scale = Math.min(maxWidth / w, maxHeight / h);
-        $("#canvas").css({ width: w * scale, height: h * scale });
-        $("#canvasContainer").css({ width: w * scale, height: h * scale });
-      }
-
-      // 当选择文件时，根据是否为 PNG，分支处理
+      // ===== File loading =====
       $("#upload").on("change", function (e) {
         let file = e.target.files[0];
         if (!file) return;
 
-        if ([".cr2", ".nef", ".arw", ".dng", ".raw", ".rw2"].some(ext => file.name.toLowerCase().endsWith(ext))) {
-          let reader = new FileReader();
-          reader.onload = async function (event) {
-            let buffer = event.target.result;
-            console.log("DEBUG: File loaded, byteLength:", buffer.byteLength);
-            if (file.name.toLowerCase().endsWith('.dng')) {
+        const fileName = file.name.toLowerCase();
+        let reader = new FileReader();
+
+        reader.onload = async (event) => {
+          let buffer = event.target.result;
+
+          // Handle RAW/DNG
+          if (
+            [".cr2", ".nef", ".arw", ".dng", ".raw", ".rw2"].some((ext) =>
+              fileName.endsWith(ext)
+            )
+          ) {
+            // Check if it's iPhone DNG
+            if (fileName.endsWith(".dng")) {
               let textSnippet = new TextDecoder().decode(buffer.slice(0, 1000));
               if (textSnippet.includes("iPhone")) {
                 try {
                   const ifds = UTIF.decode(buffer);
                   UTIF.decodeImage(buffer, ifds[0]);
                   const rgba = UTIF.toRGBA8(ifds[0]);
-                  // Invert RGB values for negative to positive conversion
+                  // Invert
                   for (let i = 0; i < rgba.length; i += 4) {
                     rgba[i] = 255 - rgba[i];
                     rgba[i + 1] = 255 - rgba[i + 1];
                     rgba[i + 2] = 255 - rgba[i + 2];
                   }
-                  const width = ifds[0].width;
-                  const height = ifds[0].height;
-                  const imageData = new ImageData(new Uint8ClampedArray(rgba), width, height);
+                  let width = ifds[0].width;
+                  let height = ifds[0].height;
+                  let imageData = new ImageData(
+                    new Uint8ClampedArray(rgba),
+                    width,
+                    height
+                  );
                   canvas.width = width;
                   canvas.height = height;
                   adjustCanvasDisplay(width, height);
                   ctx.putImageData(imageData, 0, 0);
-                  console.log("DEBUG: UTIF.js decoded and inverted iPhone DNG file.");
+
                   transformCanvas.width = width;
                   transformCanvas.height = height;
                   transformCtx.putImageData(imageData, 0, 0);
+
+                  setupBasePixels(imageData);
+
                   $("#rotateControls, #cropControls").show();
                   return;
                 } catch (err) {
-                  console.error("DEBUG: UTIF.js failed to decode iPhone DNG:", err);
-                  // Fallback to LibRaw processing below.
+                  // If UTIF fails, fallback to LibRaw
                 }
               }
             }
+
+            // Fallback to LibRaw
             try {
-              // 创建 LibRaw 实例
               const raw = new LibRaw();
-              console.log("DEBUG: LibRaw instance created:", raw);
-              // 打开 RAW 文件，设置基本选项
               await raw.open(new Uint8Array(buffer), {
-                noInterpolation: false,  // 启用内部去马赛克
-                useAutoWb: true,         // 自动白平衡
-                useCameraWb: true,       // 使用相机白平衡
-                useCameraMatrix: 3,      // 始终使用相机矩阵
-                outputColor: 1,          // 输出 sRGB
-                outputBps: 8             // 每通道 8 位
+                noInterpolation: false,
+                useAutoWb: true,
+                useCameraWb: true,
+                useCameraMatrix: 3,
+                outputColor: 1,
+                outputBps: 8
               });
-              console.log("DEBUG: raw.open succeeded");
-              // 获取元数据（可选）
-              const meta = await raw.metadata(true);
-              console.log("DEBUG: Metadata:", meta);
-              // 获取解码后的图像数据
               const imageDataResult = await raw.imageData();
-              console.log("DEBUG: ImageData result:", imageDataResult);
               const width = imageDataResult.width;
               const height = imageDataResult.height;
-              // LibRaw 返回的是 3 通道 RGB 数据，转换为 RGBA（不做负片转换）
               const rgbData = new Uint8ClampedArray(imageDataResult.data);
               const pixelCount = width * height;
               const rgbaData = new Uint8ClampedArray(pixelCount * 4);
+
               for (let i = 0; i < pixelCount; i++) {
-                rgbaData[i * 4] = 255 - rgbData[i * 3];       // R 通道取反
-                rgbaData[i * 4 + 1] = 255 - rgbData[i * 3 + 1];   // G 通道取反
-                rgbaData[i * 4 + 2] = 255 - rgbData[i * 3 + 2];   // B 通道取反
-                rgbaData[i * 4 + 3] = 255;                        // A 固定为 255
+                rgbaData[i * 4] = 255 - rgbData[i * 3];
+                rgbaData[i * 4 + 1] = 255 - rgbData[i * 3 + 1];
+                rgbaData[i * 4 + 2] = 255 - rgbData[i * 3 + 2];
+                rgbaData[i * 4 + 3] = 255;
               }
+
               let imageData = new ImageData(rgbaData, width, height);
-              console.log("DEBUG: ImageData created, width:", width, "height:", height);
-              // 更新 canvas
               canvas.width = width;
               canvas.height = height;
               adjustCanvasDisplay(width, height);
               ctx.putImageData(imageData, 0, 0);
-              console.log("DEBUG: Image displayed on canvas.");
-              // 同步更新 transformCanvas
+
               transformCanvas.width = width;
               transformCanvas.height = height;
               transformCtx.putImageData(imageData, 0, 0);
+
+              setupBasePixels(imageData);
+
               $("#rotateControls, #cropControls").show();
             } catch (err) {
-              console.error("DEBUG: Error processing RAW:", err);
+              console.error("RAW parse failed:", err);
             }
-          };
-          reader.readAsArrayBuffer(file);
-        } else
-          // 如果是 PNG，使用 UPNG.js 解析（支持 16 bit）
-          if (file.type === "image/png") {
-            let reader = new FileReader();
-            reader.onload = function (event) {
-              // ---------- UPNG.js 解析部分 ----------
-              const arrayBuffer = event.target.result;
-              const decoded = UPNG.decode(arrayBuffer);
-              const width = decoded.width;
-              const height = decoded.height;
-              const ctype = decoded.ctype; // 通道类型 (RGB, RGBA, 灰度 等)
-              const depth = decoded.depth;
-              const data = decoded.data;
+          } else if (file.type === "image/png") {
+            // Handle PNG
+            let decoded = UPNG.decode(buffer);
+            let width = decoded.width;
+            let height = decoded.height;
+            let ctype = decoded.ctype;
+            let depth = decoded.depth;
+            let data = decoded.data;
+            let channelCount = (ctype & 2 ? 3 : 1) + (ctype & 4 ? 1 : 0);
+            let pixelCount = width * height;
+            let raw16 = new Uint16Array(pixelCount * channelCount);
 
-              const channelCount = (ctype & 2 ? 3 : 1) + (ctype & 4 ? 1 : 0);
-              const pixelCount = width * height;
-
-              // 统一转换到 16bit (0..65535) 范围
-              let raw16 = new Uint16Array(pixelCount * channelCount);
-              if (depth <= 8) {
-                for (let i = 0; i < raw16.length; i++) {
-                  raw16[i] = data[i] * 257; // 扩展 0..255 => 0..65535
-                }
-              } else {
-                for (let i = 0; i < raw16.length; i++) {
-                  let hi = data[2 * i],
-                    lo = data[2 * i + 1];
-                  raw16[i] = (hi << 8) | lo;
-                }
-              }
-
-              // 负片 -> 正片
+            if (depth <= 8) {
               for (let i = 0; i < raw16.length; i++) {
-                raw16[i] = 65535 - raw16[i];
+                raw16[i] = data[i] * 257;
+              }
+            } else {
+              for (let i = 0; i < raw16.length; i++) {
+                let hi = data[2 * i];
+                let lo = data[2 * i + 1];
+                raw16[i] = (hi << 8) | lo;
+              }
+            }
+
+            // Invert
+            for (let i = 0; i < raw16.length; i++) {
+              raw16[i] = 65535 - raw16[i];
+            }
+
+            let final8 = new Uint8ClampedArray(pixelCount * 4);
+            for (let i = 0; i < pixelCount; i++) {
+              let idx16 = i * channelCount;
+              let idx8 = i * 4;
+              final8[idx8] = raw16[idx16] >>> 8;
+
+              if (channelCount >= 3) {
+                final8[idx8 + 1] = raw16[idx16 + 1] >>> 8;
+                final8[idx8 + 2] = raw16[idx16 + 2] >>> 8;
+              } else {
+                final8[idx8 + 1] = final8[idx8];
+                final8[idx8 + 2] = final8[idx8];
               }
 
-              // 最终显示时需降到 8 bit
-              let final8 = new Uint8ClampedArray(pixelCount * 4);
-              for (let i = 0; i < pixelCount; i++) {
-                let idx16 = i * channelCount;
-                let idx8 = i * 4;
-                // R
-                final8[idx8] = raw16[idx16] >>> 8;
-                // G / B
-                if (channelCount >= 3) {
-                  final8[idx8 + 1] = raw16[idx16 + 1] >>> 8;
-                  final8[idx8 + 2] = raw16[idx16 + 2] >>> 8;
-                } else {
-                  // 若灰度，则让 G/B 与 R 一致
-                  final8[idx8 + 1] = final8[idx8];
-                  final8[idx8 + 2] = final8[idx8];
-                }
-                // A
-                if (channelCount === 4) {
-                  final8[idx8 + 3] = raw16[idx16 + 3] >>> 8;
-                } else {
-                  final8[idx8 + 3] = 255;
-                }
+              final8[idx8 + 3] =
+                channelCount === 4 ? raw16[idx16 + 3] >>> 8 : 255;
+            }
+
+            canvas.width = width;
+            canvas.height = height;
+            adjustCanvasDisplay(width, height);
+
+            let imageData = ctx.createImageData(width, height);
+            imageData.data.set(final8);
+            ctx.putImageData(imageData, 0, 0);
+
+            transformCanvas.width = width;
+            transformCanvas.height = height;
+            transformCtx.putImageData(imageData, 0, 0);
+
+            setupBasePixels(imageData);
+
+            $("#rotateControls, #cropControls").show();
+          } else {
+            // Handle JPG/JPEG
+            let img = new Image();
+            img.onload = function () {
+              canvas.width = img.width;
+              canvas.height = img.height;
+              adjustCanvasDisplay(img.width, img.height);
+              ctx.drawImage(img, 0, 0);
+
+              let rawData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+              let invertedImageData = ctx.createImageData(rawData);
+
+              for (let i = 0; i < rawData.data.length; i += 4) {
+                invertedImageData.data[i] = 255 - rawData.data[i];
+                invertedImageData.data[i + 1] = 255 - rawData.data[i + 1];
+                invertedImageData.data[i + 2] = 255 - rawData.data[i + 2];
+                invertedImageData.data[i + 3] = 255;
               }
 
-              // 写到 canvas
-              canvas.width = width;
-              canvas.height = height;
-              adjustCanvasDisplay(width, height);
+              ctx.putImageData(invertedImageData, 0, 0);
 
-              let imageData = ctx.createImageData(width, height);
-              imageData.data.set(final8);
-              ctx.putImageData(imageData, 0, 0);
-
-              // 同步到 transformCanvas
-              invertedImageData = imageData;
-              transformCanvas.width = width;
-              transformCanvas.height = height;
+              transformCanvas.width = canvas.width;
+              transformCanvas.height = canvas.height;
               transformCtx.putImageData(invertedImageData, 0, 0);
 
-              // 显示旋转、剪裁控件
+              setupBasePixels(invertedImageData);
+
               $("#rotateControls, #cropControls").show();
             };
-            reader.readAsArrayBuffer(file);
-
-          } else {
-            // 若不是 PNG，则直接使用浏览器原生方式 (Image 对象 + drawImage)
-            let reader = new FileReader();
-            reader.onload = function (event) {
-              let img = new Image();
-              img.onload = function () {
-                canvas.width = img.width;
-                canvas.height = img.height;
-                adjustCanvasDisplay(img.width, img.height);
-
-                // 原生绘制
-                ctx.drawImage(img, 0, 0);
-                let rawData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-                let invertedImageData = ctx.createImageData(rawData);
-                for (let i = 0; i < rawData.data.length; i += 4) {
-                  invertedImageData.data[i] = 255 - rawData.data[i];
-                  invertedImageData.data[i + 1] = 255 - rawData.data[i + 1];
-                  invertedImageData.data[i + 2] = 255 - rawData.data[i + 2];
-                  invertedImageData.data[i + 3] = 255;
-                }
-                ctx.putImageData(invertedImageData, 0, 0);
-
-                // 同步到 transformCanvas
-                transformCanvas.width = canvas.width;
-                transformCanvas.height = canvas.height;
-                transformCtx.putImageData(invertedImageData, 0, 0);
-
-                // 显示旋转、剪裁控件
-                $("#rotateControls, #cropControls").show();
-              };
-              img.src = event.target.result;
-            };
-            reader.readAsDataURL(file);
+            img.src = event.target.result;
           }
+        };
+
+        if (fileName.match(/\.(cr2|nef|arw|dng|raw|rw2|png)$/)) {
+          reader.readAsArrayBuffer(file);
+        } else {
+          reader.readAsDataURL(file);
+        }
       });
 
-      // 旋转预览（不更新离屏基底）
-      function previewRotation(angleRad) {
-        let w = transformCanvas.width, h = transformCanvas.height;
-        let cos = Math.abs(Math.cos(angleRad)), sin = Math.abs(Math.sin(angleRad));
-        let newW = Math.ceil(w * cos + h * sin),
-          newH = Math.ceil(w * sin + h * cos);
+      // Creates full-resolution basePixels and a small preview
+      function setupBasePixels(fullImageData) {
+        basePixels = new Float32Array(fullImageData.data);
 
-        // Reuse the cached offCanvas
+        const w = fullImageData.width;
+        const h = fullImageData.height;
+        const pw = Math.max(1, Math.floor(w / previewScaleFactor));
+        const ph = Math.max(1, Math.floor(h / previewScaleFactor));
+
+        previewCanvas.width = pw;
+        previewCanvas.height = ph;
+
+        let tmp = document.createElement("canvas");
+        tmp.width = w;
+        tmp.height = h;
+        tmp.getContext("2d").putImageData(fullImageData, 0, 0);
+
+        previewCtx.clearRect(0, 0, pw, ph);
+        previewCtx.drawImage(tmp, 0, 0, pw, ph);
+
+        let previewData = previewCtx.getImageData(0, 0, pw, ph);
+        basePixelsPreview = new Float32Array(previewData.data);
+      }
+
+      // Rotation preview (without updating transformCanvas)
+      function previewRotation(angleRad) {
+        let w = transformCanvas.width;
+        let h = transformCanvas.height;
+        let cos = Math.abs(Math.cos(angleRad));
+        let sin = Math.abs(Math.sin(angleRad));
+        let newW = Math.ceil(w * cos + h * sin);
+        let newH = Math.ceil(w * sin + h * cos);
+
+        let offCanvas = document.createElement("canvas");
         offCanvas.width = newW;
         offCanvas.height = newH;
         let offCtx = offCanvas.getContext("2d");
         offCtx.clearRect(0, 0, newW, newH);
+
         offCtx.save();
         offCtx.translate(newW / 2, newH / 2);
         offCtx.rotate(angleRad);
@@ -554,41 +711,45 @@
         adjustCanvasDisplay(newW, newH);
         ctx.clearRect(0, 0, newW, newH);
         ctx.drawImage(offCanvas, 0, 0);
-        invertedImageData = ctx.getImageData(0, 0, newW, newH);
       }
 
-      // 旋转滑块与数字输入框双向绑定
-      $("#rotate").on("input", function () {
-        $("#rotateVal").text($(this).val());
-        $("#rotateInput").val($(this).val());
-        let angle = parseFloat($(this).val()) * Math.PI / 180;
-        previewRotation(angle);
-      });
-      $("#rotateInput").on("input", function () {
-        let val = $(this).val();
-        $("#rotateVal").text(val);
-        $("#rotate").val(val);
+      function onRotateChanged(val) {
+        $rotateVal.text(val);
         let angle = parseFloat(val) * Math.PI / 180;
         previewRotation(angle);
+      }
+
+      $rotate.on("input", function () {
+        let v = $(this).val();
+        $rotateInput.val(v);
+        onRotateChanged(v);
       });
 
-      // 应用旋转：更新 transformCanvas
-      $("#applyRotate").on("click", function () {
-        let newData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        invertedImageData = newData;
+      $rotateInput.on("input", function () {
+        let v = $(this).val();
+        $rotate.val(v);
+        onRotateChanged(v);
+      });
+
+      // Apply rotation
+      $applyRotate.on("click", function () {
+        let rotatedData = ctx.getImageData(0, 0, canvas.width, canvas.height);
         transformCanvas.width = canvas.width;
         transformCanvas.height = canvas.height;
-        transformCtx.putImageData(newData, 0, 0);
-        // 重置旋转控件
-        $("#rotate").val(0);
-        $("#rotateInput").val(0);
-        $("#rotateVal").text("0");
+        transformCtx.putImageData(rotatedData, 0, 0);
+
+        // Reset rotation UI
+        $rotate.val(0);
+        $rotateInput.val(0);
+        $rotateVal.text("0");
+
+        setupBasePixels(rotatedData);
       });
 
-      // 剪裁逻辑
+      // ========== Crop logic ==========
       $("#startCrop").on("click", function () {
         cropping = true;
-        $("#cropOverlay").css({
+        $cropOverlay.css({
           display: "block",
           left: 0,
           top: 0,
@@ -599,43 +760,40 @@
         $(this).hide();
       });
 
-      $("#canvasContainer").on("mousedown", function (e) {
+      let containerOffset = null;
+
+      $canvasContainer.on("mousedown", function (e) {
         if (!cropping) return;
         croppingActive = true;
-        let containerOffset = $("#canvasContainer").offset();
-        let dispWidth = $("#canvas").width(),
-          dispHeight = $("#canvas").height();
-        let scaleX = canvas.width / dispWidth,
-          scaleY = canvas.height / dispHeight;
+        containerOffset = $canvasContainer.offset();
+        let scaleX = canvas.width / $canvas.width();
+        let scaleY = canvas.height / $canvas.height();
         cropStart = {
           x: (e.pageX - containerOffset.left) * scaleX,
           y: (e.pageY - containerOffset.top) * scaleY
         };
       });
 
-      $("#canvasContainer").on("mousemove", function (e) {
+      $canvasContainer.on("mousemove", function (e) {
         if (!cropping || !croppingActive) return;
-        let containerOffset = $("#canvasContainer").offset();
-        let dispWidth = $("#canvas").width(),
-          dispHeight = $("#canvas").height();
-        let scaleX = canvas.width / dispWidth,
-          scaleY = canvas.height / dispHeight;
+
+        let scaleX = canvas.width / $canvas.width();
+        let scaleY = canvas.height / $canvas.height();
         let current = {
           x: (e.pageX - containerOffset.left) * scaleX,
           y: (e.pageY - containerOffset.top) * scaleY
         };
-        let leftInternal = Math.min(cropStart.x, current.x),
-          topInternal = Math.min(cropStart.y, current.y),
-          widthInternal = Math.abs(current.x - cropStart.x),
-          heightInternal = Math.abs(current.y - cropStart.y);
+        let leftInternal = Math.min(cropStart.x, current.x);
+        let topInternal = Math.min(cropStart.y, current.y);
+        let widthInternal = Math.abs(current.x - cropStart.x);
+        let heightInternal = Math.abs(current.y - cropStart.y);
 
-        // 转换为显示坐标
-        let leftDisp = leftInternal / scaleX,
-          topDisp = topInternal / scaleY,
-          widthDisp = widthInternal / scaleX,
-          heightDisp = heightInternal / scaleY;
+        let leftDisp = leftInternal / scaleX;
+        let topDisp = topInternal / scaleY;
+        let widthDisp = widthInternal / scaleX;
+        let heightDisp = heightInternal / scaleY;
 
-        $("#cropOverlay").css({
+        $cropOverlay.css({
           left: leftDisp,
           top: topDisp,
           width: widthDisp,
@@ -643,325 +801,465 @@
         });
       });
 
-      $("#canvasContainer").on("mouseup", function () {
+      $canvasContainer.on("mouseup", function () {
         if (!cropping) return;
         croppingActive = false;
       });
 
       $("#cancelCrop").on("click", function () {
         cropping = false;
-        $("#cropOverlay").hide();
+        $cropOverlay.hide();
         $("#applyCrop, #cancelCrop").hide();
         $("#startCrop").show();
       });
 
       $("#applyCrop").on("click", function () {
-        let dispWidth = $("#canvas").width(),
-          dispHeight = $("#canvas").height();
-        let scaleX = canvas.width / dispWidth,
-          scaleY = canvas.height / dispHeight;
-        let overlay = $("#cropOverlay");
-        let leftDisp = parseFloat(overlay.css("left")),
-          topDisp = parseFloat(overlay.css("top")),
-          widthDisp = parseFloat(overlay.css("width")),
-          heightDisp = parseFloat(overlay.css("height"));
-        let leftInternal = leftDisp * scaleX,
-          topInternal = topDisp * scaleY,
-          widthInternal = widthDisp * scaleX,
-          heightInternal = heightDisp * scaleY;
+        let scaleX = canvas.width / $canvas.width();
+        let scaleY = canvas.height / $canvas.height();
+        let overlay = $cropOverlay;
+
+        let leftDisp = parseFloat(overlay.css("left"));
+        let topDisp = parseFloat(overlay.css("top"));
+        let widthDisp = parseFloat(overlay.css("width"));
+        let heightDisp = parseFloat(overlay.css("height"));
+
+        let leftInternal = leftDisp * scaleX;
+        let topInternal = topDisp * scaleY;
+        let widthInternal = widthDisp * scaleX;
+        let heightInternal = heightDisp * scaleY;
 
         if (widthInternal <= 0 || heightInternal <= 0) return;
 
-        let croppedData = transformCtx.getImageData(leftInternal, topInternal, widthInternal, heightInternal);
+        let croppedData = transformCtx.getImageData(
+          leftInternal,
+          topInternal,
+          widthInternal,
+          heightInternal
+        );
         canvas.width = widthInternal;
         canvas.height = heightInternal;
         adjustCanvasDisplay(widthInternal, heightInternal);
         ctx.putImageData(croppedData, 0, 0);
-        invertedImageData = ctx.getImageData(0, 0, widthInternal, heightInternal);
 
         transformCanvas.width = widthInternal;
         transformCanvas.height = heightInternal;
-        transformCtx.putImageData(invertedImageData, 0, 0);
+        transformCtx.putImageData(croppedData, 0, 0);
+
+        setupBasePixels(croppedData);
 
         cropping = false;
-        $("#cropOverlay").hide();
+        $cropOverlay.hide();
         $("#applyCrop, #cancelCrop").hide();
         $("#startCrop").show();
       });
 
-      // 点击画布，做白平衡校正（剪裁模式下不响应）
-      $("#canvas").on("click", function (e) {
+      // ========== White balance by clicking a pixel ==========
+      $canvas.on("click", function (e) {
         if (cropping) return;
-        let offset = $("#canvas").offset();
-        let scaleX = canvas.width / $("#canvas").width(),
-          scaleY = canvas.height / $("#canvas").height();
-        let x = Math.floor((e.pageX - offset.left) * scaleX),
-          y = Math.floor((e.pageY - offset.top) * scaleY);
+
+        let offset = $canvas.offset();
+        let scaleX = canvas.width / $canvas.width();
+        let scaleY = canvas.height / $canvas.height();
+        let x = Math.floor((e.pageX - offset.left) * scaleX);
+        let y = Math.floor((e.pageY - offset.top) * scaleY);
+
+        let data = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        let d = data.data;
         let idx = (y * canvas.width + x) * 4;
-        let d = invertedImageData.data;
-        let clickedR = d[idx], clickedG = d[idx + 1], clickedB = d[idx + 2];
+        let clickedR = d[idx];
+        let clickedG = d[idx + 1];
+        let clickedB = d[idx + 2];
         let gray = (clickedR + clickedG + clickedB) / 3;
-        let sR = clickedR ? (gray / clickedR) : 1;
-        let sG = clickedG ? (gray / clickedG) : 1;
-        let sB = clickedB ? (gray / clickedB) : 1;
+        let sR = clickedR ? gray / clickedR : 1;
+        let sG = clickedG ? gray / clickedG : 1;
+        let sB = clickedB ? gray / clickedB : 1;
+
         let total = canvas.width * canvas.height;
         let corrected = new Float32Array(d.length);
+
         for (let i = 0; i < total; i++) {
           corrected[i * 4] = d[i * 4] * sR;
           corrected[i * 4 + 1] = d[i * 4 + 1] * sG;
           corrected[i * 4 + 2] = d[i * 4 + 2] * sB;
           corrected[i * 4 + 3] = 255;
         }
-        let rMin = Infinity, rMax = -Infinity,
-          gMin = Infinity, gMax = -Infinity,
-          bMin = Infinity, bMax = -Infinity;
+
+        let rMin = Infinity;
+        let rMax = -Infinity;
+        let gMin = Infinity;
+        let gMax = -Infinity;
+        let bMin = Infinity;
+        let bMax = -Infinity;
+
         for (let i = 0; i < total; i++) {
-          let r = corrected[i * 4],
-            g = corrected[i * 4 + 1],
-            b = corrected[i * 4 + 2];
-          rMin = Math.min(rMin, r); rMax = Math.max(rMax, r);
-          gMin = Math.min(gMin, g); gMax = Math.max(gMax, g);
-          bMin = Math.min(bMin, b); bMax = Math.max(bMax, b);
+          let rr = corrected[i * 4];
+          let gg = corrected[i * 4 + 1];
+          let bb = corrected[i * 4 + 2];
+          if (rr < rMin) rMin = rr;
+          if (rr > rMax) rMax = rr;
+          if (gg < gMin) gMin = gg;
+          if (gg > gMax) gMax = gg;
+          if (bb < bMin) bMin = bb;
+          if (bb > bMax) bMax = bb;
         }
+
         let finalImg = ctx.createImageData(canvas.width, canvas.height);
         for (let i = 0; i < total; i++) {
-          finalImg.data[i * 4] =
-            ((corrected[i * 4] - rMin) / (rMax - rMin)) * 255;
+          finalImg.data[i * 4] = ((corrected[i * 4] - rMin) / (rMax - rMin)) * 255;
           finalImg.data[i * 4 + 1] =
             ((corrected[i * 4 + 1] - gMin) / (gMax - gMin)) * 255;
           finalImg.data[i * 4 + 2] =
             ((corrected[i * 4 + 2] - bMin) / (bMax - bMin)) * 255;
           finalImg.data[i * 4 + 3] = 255;
         }
+
         ctx.putImageData(finalImg, 0, 0);
 
-        basePixels = new Float32Array(finalImg.data);
         transformCanvas.width = canvas.width;
         transformCanvas.height = canvas.height;
         transformCtx.putImageData(finalImg, 0, 0);
 
-        $("#adjustControls, #downloadDiv").show();
+        setupBasePixels(finalImg);
+
+        $adjustControls.show();
+        $downloadDiv.show();
       });
 
-      // 温度 / 色调调整：滑块与数字输入框双向绑定
-      function rgbToHsl(r, g, b) {
-        r /= 255; g /= 255; b /= 255;
-        let max = Math.max(r, g, b), min = Math.min(r, g, b);
-        let h, s, l = (max + min) / 2;
-        if (max === min) {
-          h = s = 0;
-        } else {
-          let d = max - min;
-          s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-          switch (max) {
-            case r: h = (g - b) / d + (g < b ? 6 : 0); break;
-            case g: h = (b - r) / d + 2; break;
-            case b: h = (r - g) / d + 4; break;
-          }
-          h /= 6;
-        }
-        return [h, s, l];
-      }
+      // ========== Real-time scaled preview for smoother slider operation ==========
+      function updateAdjustPreview() {
+        if (!basePixelsPreview) return;
 
-      function hslToRgb(h, s, l) {
-        let r, g, b;
-        if (s === 0) {
-          r = g = b = l;
-        } else {
-          function hue2rgb(p, q, t) {
-            if (t < 0) t += 1;
-            if (t > 1) t -= 1;
-            if (t < 1 / 6) return p + (q - p) * 6 * t;
-            if (t < 1 / 2) return q;
-            if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
-            return p;
-          }
-          let q = l < 0.5 ? l * (1 + s) : l + s - l * s;
-          let p = 2 * l - q;
-          r = hue2rgb(p, q, h + 1 / 3);
-          g = hue2rgb(p, q, h);
-          b = hue2rgb(p, q, h - 1 / 3);
-        }
-        return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
-      }
+        let pw = previewCanvas.width;
+        let ph = previewCanvas.height;
+        let total = pw * ph;
+        let adjusted = previewCtx.createImageData(pw, ph);
 
-      function updateAdjust() {
-        let temp = parseInt($("#temp").val()),
-          tint = parseInt($("#tint").val()),
-          vibranceVal = parseInt($("#vibrance").val()),
-          saturationVal = parseInt($("#saturation").val());
+        let temp = parseInt($("#temp").val()) || 0;
+        let tint = parseInt($("#tint").val()) || 0;
+        let vibranceVal = parseInt($("#vibrance").val()) || 0;
+        let saturationVal = parseInt($("#saturation").val()) || 0;
+        let cyanVal = parseInt($("#cyan").val()) || 0;
+        let magentaVal = parseInt($("#magenta").val()) || 0;
+        let yellowVal = parseInt($("#yellow").val()) || 0;
+
         $("#tempVal").text(temp);
-        $("#tintVal").text(tint);
-        $("#vibranceVal").text(vibranceVal);
-        $("#saturationVal").text(saturationVal);
         $("#tempInput").val(temp);
+        $("#tintVal").text(tint);
         $("#tintInput").val(tint);
+        $("#vibranceVal").text(vibranceVal);
         $("#vibranceInput").val(vibranceVal);
+        $("#saturationVal").text(saturationVal);
         $("#saturationInput").val(saturationVal);
+        $("#cyanVal").text(cyanVal);
+        $("#cyanInput").val(cyanVal);
+        $("#magentaVal").text(magentaVal);
+        $("#magentaInput").val(magentaVal);
+        $("#yellowVal").text(yellowVal);
+        $("#yellowInput").val(yellowVal);
 
-        let total = canvas.width * canvas.height;
-        let adjusted = ctx.createImageData(canvas.width, canvas.height);
-        let tempFactor = temp / 100,
-          tintFactor = tint / 100;
-        // 计算饱和度和活力的调整系数
-        let satFactor = 1 + (saturationVal / 100);
+        let tempFactor = temp / 100;
+        let tintFactor = tint / 100;
+        let satFactor = 1 + saturationVal / 100;
+        let vibFactor = vibranceVal / 100;
+
+        function rgbToHsl(r, g, b) {
+          r /= 255;
+          g /= 255;
+          b /= 255;
+          let max = Math.max(r, g, b);
+          let min = Math.min(r, g, b);
+          let h,
+            s,
+            l = (max + min) / 2;
+
+          if (max === min) {
+            h = s = 0;
+          } else {
+            let d = max - min;
+            s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+            switch (max) {
+              case r:
+                h = (g - b) / d + (g < b ? 6 : 0);
+                break;
+              case g:
+                h = (b - r) / d + 2;
+                break;
+              case b:
+                h = (r - g) / d + 4;
+                break;
+            }
+            h /= 6;
+          }
+          return [h, s, l];
+        }
+
+        function hslToRgb(h, s, l) {
+          let r, g, b;
+          if (s === 0) {
+            r = g = b = l;
+          } else {
+            let hue2rgb = (p, q, t) => {
+              if (t < 0) t += 1;
+              if (t > 1) t -= 1;
+              if (t < 1 / 6) return p + (q - p) * 6 * t;
+              if (t < 1 / 2) return q;
+              if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+              return p;
+            };
+            let q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+            let p = 2 * l - q;
+            r = hue2rgb(p, q, h + 1 / 3);
+            g = hue2rgb(p, q, h);
+            b = hue2rgb(p, q, h - 1 / 3);
+          }
+          return [
+            Math.round(r * 255),
+            Math.round(g * 255),
+            Math.round(b * 255)
+          ];
+        }
+
+        let d = basePixelsPreview;
 
         for (let i = 0; i < total; i++) {
           let idx = i * 4;
-          let r = basePixels[idx],
-            g = basePixels[idx + 1],
-            b = basePixels[idx + 2];
-          // 先应用温度和色调调整
+          let r = d[idx];
+          let g = d[idx + 1];
+          let b = d[idx + 2];
+
           let newR = r * (1 + tempFactor);
           let newG = g * (1 + tintFactor);
           let newB = b * (1 - tempFactor);
+
           newR = Math.min(255, Math.max(0, newR));
           newG = Math.min(255, Math.max(0, newG));
           newB = Math.min(255, Math.max(0, newB));
 
-          // 转换为 HSL
           let hsl = rgbToHsl(newR, newG, newB);
-          // 调整饱和度：先乘上统一因子
           hsl[1] *= satFactor;
-          // 再应用活力调整：正值时增加较低饱和度部分，负值时统一缩减
-          let vibFactor = vibranceVal / 100;
+
           if (vibFactor >= 0) {
             hsl[1] += (1 - hsl[1]) * vibFactor;
           } else {
-            hsl[1] *= (1 + vibFactor);
+            hsl[1] *= 1 + vibFactor;
           }
-          // 限制饱和度在 [0,1] 范围内
           hsl[1] = Math.max(0, Math.min(1, hsl[1]));
 
-          let rgb = hslToRgb(hsl[0], hsl[1], hsl[2]);
-          adjusted.data[idx] = rgb[0];
-          adjusted.data[idx + 1] = rgb[1];
-          adjusted.data[idx + 2] = rgb[2];
-          adjusted.data[idx + 3] = 255;
-        }
-        // CMY 调整
-        let cyanVal = parseInt($("#cyan").val());
-        let magentaVal = parseInt($("#magenta").val());
-        let yellowVal = parseInt($("#yellow").val());
-        $("#cyanVal").text(cyanVal);
-        $("#magentaVal").text(magentaVal);
-        $("#yellowVal").text(yellowVal);
-        $("#cyanInput").val(cyanVal);
-        $("#magentaInput").val(magentaVal);
-        $("#yellowInput").val(yellowVal);
+          let [R2, G2, B2] = hslToRgb(hsl[0], hsl[1], hsl[2]);
 
-        for (let i = 0; i < total; i++) {
-          let idx = i * 4;
-          let r = adjusted.data[idx],
-            g = adjusted.data[idx + 1],
-            b = adjusted.data[idx + 2];
-          // 将 RGB 转换到 CMY
-          let C = 1 - (r / 255);
-          let M = 1 - (g / 255);
-          let Y = 1 - (b / 255);
-          // 应用 CMY 调整（滑块值 / 100）
+          let C = 1 - R2 / 255;
+          let M = 1 - G2 / 255;
+          let Y = 1 - B2 / 255;
+
           let newC = Math.max(0, Math.min(1, C + cyanVal / 100));
           let newM = Math.max(0, Math.min(1, M + magentaVal / 100));
           let newY = Math.max(0, Math.min(1, Y + yellowVal / 100));
-          // 转换回 RGB
-          adjusted.data[idx] = 255 * (1 - newC);
-          adjusted.data[idx + 1] = 255 * (1 - newM);
-          adjusted.data[idx + 2] = 255 * (1 - newY);
+
+          let finalR = 255 * (1 - newC);
+          let finalG = 255 * (1 - newM);
+          let finalB = 255 * (1 - newY);
+
+          adjusted.data[idx] = finalR;
+          adjusted.data[idx + 1] = finalG;
+          adjusted.data[idx + 2] = finalB;
+          adjusted.data[idx + 3] = 255;
         }
-        ctx.putImageData(adjusted, 0, 0);
+
+        previewCtx.putImageData(adjusted, 0, 0);
+
+        let W = canvas.width;
+        let H = canvas.height;
+        ctx.clearRect(0, 0, W, H);
+        ctx.imageSmoothingEnabled = true;
+        ctx.drawImage(previewCanvas, 0, 0, W, H);
       }
 
-      $("#temp").on("input", function () {
-        $("#tempVal").text($(this).val());
-        $("#tempInput").val($(this).val());
-        scheduleUpdateAdjust();
-      });
-      $("#tempInput").on("input", function () {
-        $("#tempVal").text($(this).val());
-        $("#temp").val($(this).val());
-        scheduleUpdateAdjust();
-      });
-      $("#tint").on("input", function () {
-        $("#tintVal").text($(this).val());
-        $("#tintInput").val($(this).val());
-        scheduleUpdateAdjust();
-      });
-      $("#tintInput").on("input", function () {
-        $("#tintVal").text($(this).val());
-        $("#tint").val($(this).val());
-        scheduleUpdateAdjust();
-      });
-      $("#vibrance").on("input", function () {
-        $("#vibranceVal").text($(this).val());
-        $("#vibranceInput").val($(this).val());
-        scheduleUpdateAdjust();
-      });
-      $("#vibranceInput").on("input", function () {
-        $("#vibranceVal").text($(this).val());
-        $("#vibrance").val($(this).val());
-        scheduleUpdateAdjust();
-      });
-      $("#saturation").on("input", function () {
-        $("#saturationVal").text($(this).val());
-        $("#saturationInput").val($(this).val());
-        scheduleUpdateAdjust();
-      });
-      $("#saturationInput").on("input", function () {
-        $("#saturationVal").text($(this).val());
-        $("#saturation").val($(this).val());
-        scheduleUpdateAdjust();
-      });
-      $("#cyan").on("input", function () {
-        $("#cyanVal").text($(this).val());
-        $("#cyanInput").val($(this).val());
-        scheduleUpdateAdjust();
-      });
-      $("#cyanInput").on("input", function () {
-        $("#cyanVal").text($(this).val());
-        $("#cyan").val($(this).val());
-        scheduleUpdateAdjust();
-      });
-      $("#magenta").on("input", function () {
-        $("#magentaVal").text($(this).val());
-        $("#magentaInput").val($(this).val());
-        scheduleUpdateAdjust();
-      });
-      $("#magentaInput").on("input", function () {
-        $("#magentaVal").text($(this).val());
-        $("#magenta").val($(this).val());
-        scheduleUpdateAdjust();
-      });
-      $("#yellow").on("input", function () {
-        $("#yellowVal").text($(this).val());
-        $("#yellowInput").val($(this).val());
-        scheduleUpdateAdjust();
-      });
-      $("#yellowInput").on("input", function () {
-        $("#yellowVal").text($(this).val());
-        $("#yellow").val($(this).val());
+      // Full-resolution update after user stops moving sliders
+      const doFullResolutionUpdate = debounce(function () {
+        if (!basePixels) return;
+
+        let w = canvas.width;
+        let h = canvas.height;
+        let total = w * h;
+        let adjusted = ctx.createImageData(w, h);
+
+        let temp = parseInt($("#temp").val()) || 0;
+        let tint = parseInt($("#tint").val()) || 0;
+        let vibranceVal = parseInt($("#vibrance").val()) || 0;
+        let saturationVal = parseInt($("#saturation").val()) || 0;
+        let cyanVal = parseInt($("#cyan").val()) || 0;
+        let magentaVal = parseInt($("#magenta").val()) || 0;
+        let yellowVal = parseInt($("#yellow").val()) || 0;
+
+        let tempFactor = temp / 100;
+        let tintFactor = tint / 100;
+        let satFactor = 1 + saturationVal / 100;
+        let vibFactor = vibranceVal / 100;
+
+        function rgbToHsl(r, g, b) {
+          r /= 255;
+          g /= 255;
+          b /= 255;
+          let max = Math.max(r, g, b);
+          let min = Math.min(r, g, b);
+          let h,
+            s,
+            l = (max + min) / 2;
+
+          if (max === min) {
+            h = s = 0;
+          } else {
+            let d = max - min;
+            s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+            switch (max) {
+              case r:
+                h = (g - b) / d + (g < b ? 6 : 0);
+                break;
+              case g:
+                h = (b - r) / d + 2;
+                break;
+              case b:
+                h = (r - g) / d + 4;
+                break;
+            }
+            h /= 6;
+          }
+          return [h, s, l];
+        }
+
+        function hslToRgb(h, s, l) {
+          let r, g, b;
+          if (s === 0) {
+            r = g = b = l;
+          } else {
+            const hue2rgb = (p, q, t) => {
+              if (t < 0) t += 1;
+              if (t > 1) t -= 1;
+              if (t < 1 / 6) return p + (q - p) * 6 * t;
+              if (t < 1 / 2) return q;
+              if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+              return p;
+            };
+            let q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+            let p = 2 * l - q;
+            r = hue2rgb(p, q, h + 1 / 3);
+            g = hue2rgb(p, q, h);
+            b = hue2rgb(p, q, h - 1 / 3);
+          }
+          return [
+            Math.round(r * 255),
+            Math.round(g * 255),
+            Math.round(b * 255)
+          ];
+        }
+
+        let d = basePixels;
+
+        for (let i = 0; i < total; i++) {
+          let idx = i * 4;
+          let r = d[idx];
+          let g = d[idx + 1];
+          let b = d[idx + 2];
+
+          let newR = r * (1 + tempFactor);
+          let newG = g * (1 + tintFactor);
+          let newB = b * (1 - tempFactor);
+
+          newR = Math.min(255, Math.max(0, newR));
+          newG = Math.min(255, Math.max(0, newG));
+          newB = Math.min(255, Math.max(0, newB));
+
+          let hsl = rgbToHsl(newR, newG, newB);
+          hsl[1] *= satFactor;
+
+          if (vibFactor >= 0) {
+            hsl[1] += (1 - hsl[1]) * vibFactor;
+          } else {
+            hsl[1] *= 1 + vibFactor;
+          }
+          hsl[1] = Math.max(0, Math.min(1, hsl[1]));
+
+          let [R2, G2, B2] = hslToRgb(hsl[0], hsl[1], hsl[2]);
+
+          let C = 1 - R2 / 255;
+          let M = 1 - G2 / 255;
+          let Y = 1 - B2 / 255;
+
+          let newC = Math.max(0, Math.min(1, C + cyanVal / 100));
+          let newM = Math.max(0, Math.min(1, M + magentaVal / 100));
+          let newY = Math.max(0, Math.min(1, Y + yellowVal / 100));
+
+          let finalR = 255 * (1 - newC);
+          let finalG = 255 * (1 - newM);
+          let finalB = 255 * (1 - newY);
+
+          adjusted.data[idx] = finalR;
+          adjusted.data[idx + 1] = finalG;
+          adjusted.data[idx + 2] = finalB;
+          adjusted.data[idx + 3] = 255;
+        }
+
+        ctx.putImageData(adjusted, 0, 0);
+      }, 300);
+
+      // Schedule real-time scaled preview + deferred full-res update
+      function scheduleUpdateAdjust() {
+        if (!updatePending) {
+          updatePending = true;
+          requestAnimationFrame(() => {
+            updateAdjustPreview();
+            updatePending = false;
+          });
+        }
+        doFullResolutionUpdate();
+      }
+
+      // Bind events on both range and number inputs
+      $("[data-role='rangeInput'], [data-role='numberInput']").on("input", function () {
+        let $this = $(this);
+        let type = $this.data("type");
+        let role = $this.data("role");
+        let val = $this.val();
+
+        if (role === "rangeInput") {
+          // Sync numberInput
+          $("[data-role='numberInput'][data-type='" + type + "']").val(val);
+        } else {
+          // Sync rangeInput
+          $("[data-role='rangeInput'][data-type='" + type + "']").val(val);
+        }
+
         scheduleUpdateAdjust();
       });
 
-      // 下载
-      $("#download").on("click", function () {
-        let blob;
-        if (window.highQualityPngData) {
-          blob = new Blob([window.highQualityPngData], { type: "image/png" });
-        } else {
-          let dataURL = canvas.toDataURL("image/png");
-          // Convert dataURL to Blob
-          let arr = dataURL.split(','), mime = arr[0].match(/:(.*?);/)[1],
-            bstr = atob(arr[1]), n = bstr.length, u8arr = new Uint8Array(n);
-          while (n--) {
-            u8arr[n] = bstr.charCodeAt(n);
-          }
-          blob = new Blob([u8arr], { type: mime });
+      // Download handler
+      $downloadBtn.on("click", function () {
+        let dataURL = canvas.toDataURL("image/png");
+        let arr = dataURL.split(",");
+        let mime = arr[0].match(/:(.*?);/)[1];
+        let bstr = atob(arr[1]);
+        let n = bstr.length;
+        let u8arr = new Uint8Array(n);
+
+        while (n--) {
+          u8arr[n] = bstr.charCodeAt(n);
         }
+        let blob = new Blob([u8arr], { type: mime });
         let link = document.createElement("a");
         link.download = "corrected_film.png";
         link.href = window.URL.createObjectURL(blob);
         link.click();
       });
+
+      // Adjust canvas display size to fit in the window
+      function adjustCanvasDisplay(w, h) {
+        const maxWidth = window.innerWidth - 40;
+        const maxHeight = window.innerHeight - 200;
+        let scale = Math.min(maxWidth / w, maxHeight / h);
+
+        $canvas.css({ width: w * scale, height: h * scale });
+        $canvasContainer.css({ width: w * scale, height: h * scale });
+      }
     });
   </script>
 </body>
