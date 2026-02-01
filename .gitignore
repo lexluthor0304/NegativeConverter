@@ -47,3 +47,15 @@ coverage/
 # 备份文件
 *.bak
 *.orig
+
+# RAW 图片文件（测试用）
+*.dng
+*.DNG
+*.cr2
+*.CR2
+*.nef
+*.NEF
+*.arw
+*.ARW
+*.rw2
+*.RW2
