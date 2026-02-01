@@ -1,1264 +1,4093 @@
 <!DOCTYPE html>
 <html lang="zh">
+
 <head>
   <meta charset="UTF-8">
-  <title>Film Negative → Positive (旋转+实时剪裁+白平衡+温度/色调)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Negative Converter</title>
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+
   <style>
-    /* ========== Global Style ========== */
-    body {
-      font-family: "Courier New", Courier, monospace;
-      background: #000;
-      color: #0ff;
-      padding: 20px;
+    :root {
+      --bg-primary: #1a1a1a;
+      --bg-secondary: #252525;
+      --bg-tertiary: #2d2d2d;
+      --bg-hover: #363636;
+      --text-primary: #e0e0e0;
+      --text-secondary: #888;
+      --text-muted: #666;
+      --accent: #4a9eff;
+      --accent-hover: #6db3ff;
+      --accent-dim: #3a7ecc;
+      --danger: #ff6b6b;
+      --success: #4caf50;
+      --warning: #ffb74d;
+      --border: #3a3a3a;
+      --border-light: #444;
+      --shadow: rgba(0, 0, 0, 0.3);
+    }
+
+    * {
+      box-sizing: border-box;
       margin: 0;
-      text-align: center;
+      padding: 0;
     }
-    h2 {
-      text-align: center;
-      text-shadow: 0 0 10px #ff00ff, 0 0 20px #ff00ff;
-      margin: 20px auto;
+
+    html, body {
+      height: 100%;
+      overflow: hidden;
     }
-    #canvasContainer {
-      position: relative;
-      display: inline-block;
-      border: 2px solid #0ff;
-      box-shadow: 0 0 20px #0ff;
-      margin-bottom: 20px;
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      display: flex;
+      flex-direction: column;
     }
-    canvas {
-      border: 1px solid #0ff;
+
+    /* Header */
+    .app-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px 20px;
+      background: var(--bg-secondary);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .app-title {
+      font-size: 18px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .lang-selector {
+      display: flex;
+      gap: 4px;
+    }
+
+    .lang-btn {
+      padding: 6px 12px;
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      cursor: pointer;
+      font-size: 13px;
+      transition: all 0.2s;
+    }
+
+    .lang-btn:hover {
+      background: var(--bg-tertiary);
+      color: var(--text-primary);
+    }
+
+    .lang-btn.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: white;
+    }
+
+    /* Main Layout */
+    .app-main {
+      display: grid;
+      grid-template-columns: 1fr 320px;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    /* Preview Section */
+    .preview-section {
+      display: flex;
+      flex-direction: column;
+      background: var(--bg-primary);
+      padding: 16px;
+      overflow: hidden;
+      height: 100%;
+      max-height: calc(100vh - 120px); /* Account for header and footer */
+    }
+
+    .canvas-container {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
       background: #111;
+      border-radius: 8px;
+      position: relative;
+      overflow: hidden;
+      min-height: 400px;
     }
-    #cropOverlay {
-      border: 2px dashed #ff00ff;
+
+    #canvas {
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
+    }
+
+    .crop-overlay {
+      border: 2px dashed var(--accent);
       position: absolute;
       pointer-events: none;
       display: none;
-      background: rgba(255, 0, 255, 0.2);
+      background: rgba(74, 158, 255, 0.1);
       z-index: 100;
     }
-    .control {
-      margin-top: 10px;
+
+    /* Upload Placeholder */
+    .upload-placeholder {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-secondary);
+      gap: 16px;
+    }
+
+    .upload-placeholder svg {
+      width: 64px;
+      height: 64px;
+      opacity: 0.5;
+    }
+
+    .upload-btn {
+      padding: 12px 24px;
+      background: var(--accent);
+      border: none;
+      border-radius: 6px;
+      color: white;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .upload-btn:hover {
+      background: var(--accent-hover);
+    }
+
+    #fileInput {
+      display: none;
+    }
+
+    /* Preview Toolbar */
+    .preview-toolbar {
+      display: flex;
+      gap: 8px;
+      padding: 12px 0;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .toolbar-btn {
+      padding: 8px 16px;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text-primary);
+      font-size: 13px;
+      cursor: pointer;
+      transition: all 0.2s;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .toolbar-btn:hover {
+      background: var(--bg-tertiary);
+      border-color: var(--border-light);
+    }
+
+    .toolbar-btn.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: white;
+    }
+
+    .toolbar-btn.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: white;
+    }
+
+    .toolbar-btn.primary:hover {
+      background: var(--accent-hover);
+    }
+
+    .toolbar-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .toolbar-btn svg {
+      width: 16px;
+      height: 16px;
+    }
+
+    .toolbar-separator {
+      width: 1px;
+      height: 24px;
+      background: var(--border);
+      margin: 0 4px;
+    }
+
+    /* Status Badge */
+    .status-badge {
+      padding: 4px 10px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .status-badge.step1 {
+      background: rgba(255, 183, 77, 0.2);
+      color: var(--warning);
+    }
+
+    .status-badge.step2 {
+      background: rgba(74, 158, 255, 0.2);
+      color: var(--accent);
+    }
+
+    .status-badge.step3 {
+      background: rgba(76, 175, 80, 0.2);
+      color: var(--success);
+    }
+
+    /* Histogram */
+    .histogram-container {
+      background: var(--bg-secondary);
+      border-radius: 6px;
+      padding: 8px;
+      margin-top: 8px;
+    }
+
+    .histogram-label {
+      font-size: 11px;
+      color: var(--text-secondary);
+      margin-bottom: 4px;
+    }
+
+    #histogramCanvas {
+      width: 100%;
+      height: 60px;
+      background: #111;
+      border-radius: 4px;
+    }
+
+    /* Controls Panel */
+    .controls-panel {
+      background: var(--bg-secondary);
+      border-left: 1px solid var(--border);
+      overflow-y: auto;
+      overflow-x: hidden;
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      max-height: calc(100vh - 120px); /* Account for header and footer */
+    }
+
+    .control-section {
+      border-bottom: 1px solid var(--border);
+      padding: 16px;
+    }
+
+    .section-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+      cursor: pointer;
+    }
+
+    .section-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-primary);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .section-toggle {
+      color: var(--text-secondary);
+      transition: transform 0.2s;
+    }
+
+    .section-toggle.collapsed {
+      transform: rotate(-90deg);
+    }
+
+    .section-content {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .section-content.collapsed {
+      display: none;
+    }
+
+    /* Workflow Steps */
+    .workflow-steps {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 12px;
+      background: var(--bg-tertiary);
+      border-radius: 6px;
+      margin-bottom: 12px;
+    }
+
+    .workflow-step {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px;
+      border-radius: 4px;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .workflow-step.active {
+      background: rgba(74, 158, 255, 0.1);
+      color: var(--accent);
+    }
+
+    .workflow-step.completed {
+      color: var(--success);
+    }
+
+    .step-number {
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      background: var(--bg-secondary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    .workflow-step.active .step-number {
+      background: var(--accent);
+      color: white;
+    }
+
+    .workflow-step.completed .step-number {
+      background: var(--success);
+      color: white;
+    }
+
+    /* Film Type Toggle */
+    .film-type-toggle {
+      display: flex;
+      background: var(--bg-tertiary);
+      border-radius: 6px;
+      padding: 3px;
+    }
+
+    .film-type-btn {
+      flex: 1;
+      padding: 8px;
+      background: transparent;
+      border: none;
+      color: var(--text-secondary);
+      font-size: 13px;
+      cursor: pointer;
+      border-radius: 4px;
+      transition: all 0.2s;
+    }
+
+    .film-type-btn.active {
+      background: var(--accent);
+      color: white;
+    }
+
+    /* Preset Selector */
+    .preset-select {
+      width: 100%;
+      padding: 8px 12px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text-primary);
+      font-size: 13px;
+      cursor: pointer;
+    }
+
+    .preset-select:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    /* Film Base Buttons */
+    .film-base-buttons {
+      display: flex;
+      gap: 8px;
+    }
+
+    .film-base-btn {
+      flex: 1;
+      padding: 8px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text-primary);
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .film-base-btn:hover {
+      background: var(--bg-hover);
+      border-color: var(--border-light);
+    }
+
+    .film-base-btn.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: white;
+    }
+
+    /* Film Base Preview */
+    .film-base-preview {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px;
+      background: var(--bg-tertiary);
+      border-radius: 4px;
+    }
+
+    .film-base-color {
+      width: 32px;
+      height: 32px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+    }
+
+    .film-base-values {
+      font-size: 11px;
+      color: var(--text-secondary);
+      font-family: monospace;
+    }
+
+    /* Slider Control */
+    .slider-control {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .slider-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .slider-label {
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .slider-value {
+      font-size: 12px;
+      color: var(--text-primary);
+      font-family: monospace;
+      min-width: 50px;
+      text-align: right;
+    }
+
+    .slider-input {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 100%;
+      height: 4px;
+      background: var(--bg-tertiary);
+      border-radius: 2px;
+      cursor: pointer;
+    }
+
+    .slider-input::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px;
+      height: 14px;
+      background: var(--accent);
+      border-radius: 50%;
+      cursor: pointer;
+      transition: transform 0.1s;
+    }
+
+    .slider-input::-webkit-slider-thumb:hover {
+      transform: scale(1.2);
+    }
+
+    .slider-input::-moz-range-thumb {
+      width: 14px;
+      height: 14px;
+      background: var(--accent);
+      border: none;
+      border-radius: 50%;
+      cursor: pointer;
+    }
+
+    /* Curve Editor */
+    .curve-editor {
+      background: var(--bg-tertiary);
+      border-radius: 4px;
+      padding: 8px;
+    }
+
+    .curve-hint {
+      font-size: 11px;
+      color: var(--text-secondary);
+      margin: 0 0 8px 0;
+    }
+
+    .curve-tabs {
+      display: flex;
+      gap: 4px;
+      margin-bottom: 8px;
+    }
+
+    .curve-tab.reset {
+      color: var(--text-secondary);
+      margin-left: auto;
+    }
+
+    .curve-tab.reset:hover {
+      color: var(--accent);
+      border-color: var(--accent);
+    }
+
+    .curve-tab {
+      flex: 1;
+      padding: 4px 8px;
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      font-size: 11px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .curve-tab.r { color: #ff6b6b; }
+    .curve-tab.g { color: #69db7c; }
+    .curve-tab.b { color: #74c0fc; }
+
+    .curve-tab.active {
+      background: var(--bg-hover);
+      border-color: var(--border-light);
+    }
+
+    .curve-canvas {
+      width: 100%;
+      height: 120px;
+      background: #111;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      cursor: crosshair;
+      transition: border-color 0.2s;
+    }
+
+    .curve-canvas:hover {
+      border-color: var(--accent);
+    }
+
+    .curve-presets {
+      display: flex;
+      gap: 4px;
+      margin-top: 8px;
+    }
+
+    .curve-preset-btn {
+      flex: 1;
+      padding: 4px;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      color: var(--text-secondary);
+      font-size: 10px;
+      cursor: pointer;
+    }
+
+    .curve-preset-btn:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+
+    /* Footer */
+    .app-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px 20px;
+      background: var(--bg-secondary);
+      border-top: 1px solid var(--border);
+    }
+
+    .footer-left {
+      display: flex;
+      gap: 8px;
+    }
+
+    .footer-btn {
+      padding: 8px 16px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text-primary);
+      font-size: 13px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .footer-btn:hover {
+      background: var(--bg-hover);
+    }
+
+    .footer-btn.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: white;
+    }
+
+    .footer-btn.primary:hover {
+      background: var(--accent-hover);
+    }
+
+    .footer-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    /* Rotate Controls */
+    .rotate-controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .rotate-input {
+      width: 60px;
+      padding: 6px 8px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text-primary);
+      font-size: 13px;
       text-align: center;
     }
-    input[type="range"] {
-      width: 300px;
-      -webkit-appearance: none;
-      background: #222;
+
+    .rotate-input:focus {
+      outline: none;
+      border-color: var(--accent);
     }
-    input[type="range"]::-webkit-slider-thumb {
-      -webkit-appearance: none;
-      width: 15px;
-      height: 15px;
-      background: #ff00ff;
-      border: 1px solid #0ff;
+
+    /* Info Box */
+    .info-box {
+      padding: 10px 12px;
+      background: rgba(74, 158, 255, 0.1);
+      border: 1px solid rgba(74, 158, 255, 0.3);
+      border-radius: 4px;
+      font-size: 12px;
+      color: var(--accent);
+      margin-bottom: 12px;
+    }
+
+    /* File List Panel (Batch Mode) */
+    .file-list-section {
+      max-height: 200px;
+      overflow-y: auto;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .file-list-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 16px;
+      background: var(--bg-tertiary);
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+
+    .file-list-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .file-list-count {
+      font-size: 11px;
+      color: var(--text-secondary);
+    }
+
+    .file-list-items {
+      padding: 4px 0;
+    }
+
+    .file-list-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 12px;
+      font-size: 12px;
       cursor: pointer;
-      box-shadow: 0 0 5px #ff00ff;
+      transition: background 0.15s;
     }
-    input[type="number"] {
-      width: 60px;
-      margin-left: 10px;
-      background: #222;
-      border: 1px solid #0ff;
-      color: #0ff;
+
+    .file-list-item:hover {
+      background: var(--bg-tertiary);
     }
-    input[type="file"],
-    button {
-      background: #222;
-      border: 1px solid #0ff;
-      color: #0ff;
-      padding: 5px 10px;
+
+    .file-list-item.active {
+      background: rgba(74, 158, 255, 0.15);
+    }
+
+    .file-list-checkbox {
+      width: 14px;
+      height: 14px;
       cursor: pointer;
-      transition: all 0.3s ease;
+      accent-color: var(--accent);
     }
-    input[type="file"]:hover,
-    button:hover {
-      background: #0ff;
-      color: #000;
+
+    .file-list-name {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--text-primary);
     }
-    footer.app-footer {
-      margin-top: 30px;
+
+    .file-list-status {
+      font-size: 10px;
+      padding: 2px 6px;
+      border-radius: 8px;
+      white-space: nowrap;
+    }
+
+    .file-list-status.pending {
+      background: rgba(136, 136, 136, 0.2);
+      color: var(--text-secondary);
+    }
+
+    .file-list-status.processing {
+      background: rgba(74, 158, 255, 0.2);
+      color: var(--accent);
+    }
+
+    .file-list-status.done {
+      background: rgba(76, 175, 80, 0.2);
+      color: var(--success);
+    }
+
+    .file-list-status.error {
+      background: rgba(255, 107, 107, 0.2);
+      color: var(--danger);
+    }
+
+    .file-list-actions {
+      display: flex;
+      gap: 4px;
+      padding: 8px 16px;
+      border-top: 1px solid var(--border);
+    }
+
+    .file-list-btn {
+      flex: 1;
+      padding: 6px 8px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text-primary);
+      font-size: 11px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .file-list-btn:hover {
+      background: var(--bg-hover);
+    }
+
+    .file-list-item.has-settings {
+      border-left: 3px solid var(--success);
+    }
+
+    .file-list-settings-badge {
+      font-size: 9px;
+      padding: 1px 4px;
+      background: var(--success);
+      color: white;
+      border-radius: 3px;
+      margin-left: 4px;
+    }
+
+    /* Batch Progress Modal */
+    .batch-progress-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.7);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+    }
+
+    .batch-progress-modal {
+      background: var(--bg-secondary);
+      border-radius: 8px;
+      padding: 24px;
+      min-width: 320px;
+      max-width: 400px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    }
+
+    .batch-progress-title {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 16px;
+      color: var(--text-primary);
+    }
+
+    .batch-progress-bar {
+      height: 8px;
+      background: var(--bg-tertiary);
+      border-radius: 4px;
+      overflow: hidden;
+      margin-bottom: 12px;
+    }
+
+    .batch-progress-fill {
+      height: 100%;
+      background: var(--accent);
+      transition: width 0.3s ease;
+    }
+
+    .batch-progress-text {
+      font-size: 13px;
+      color: var(--text-secondary);
+      text-align: center;
+    }
+
+    .batch-progress-current {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-top: 8px;
+      text-align: center;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    /* Export Dropdown */
+    .export-dropdown {
+      position: relative;
+      display: inline-block;
+    }
+
+    .export-dropdown-menu {
+      position: absolute;
+      bottom: 100%;
+      right: 0;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      min-width: 180px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+      display: none;
+      margin-bottom: 4px;
+      z-index: 100;
+    }
+
+    .export-dropdown-menu.show {
+      display: block;
+    }
+
+    .export-dropdown-item {
+      display: block;
+      width: 100%;
+      padding: 10px 12px;
+      background: none;
+      border: none;
+      color: var(--text-primary);
+      font-size: 13px;
+      text-align: left;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .export-dropdown-item:hover {
+      background: var(--bg-tertiary);
+    }
+
+    .export-dropdown-item:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .export-dropdown-divider {
+      height: 1px;
+      background: var(--border);
+      margin: 4px 0;
+    }
+
+    .export-format-section {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .export-format-label {
+      font-size: 11px;
+      color: var(--text-secondary);
+      margin-bottom: 6px;
+      text-transform: uppercase;
+    }
+
+    .export-format-toggle {
+      display: flex;
+      gap: 4px;
+    }
+
+    .export-format-toggle .format-btn {
+      flex: 1;
+      padding: 6px 12px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .export-format-toggle .format-btn:first-child {
+      border-radius: 4px 0 0 4px;
+    }
+
+    .export-format-toggle .format-btn:last-child {
+      border-radius: 0 4px 4px 0;
+    }
+
+    .export-format-toggle .format-btn.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: white;
+    }
+
+    .export-quality-section {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+      display: none;
+    }
+
+    .export-quality-section.show {
+      display: block;
+    }
+
+    .export-quality-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+
+    .export-quality-label {
+      font-size: 11px;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+    }
+
+    .export-quality-value {
+      font-size: 12px;
+      color: var(--text-primary);
+    }
+
+    .export-quality-slider {
+      width: 100%;
+      height: 4px;
+      -webkit-appearance: none;
+      appearance: none;
+      background: var(--bg-tertiary);
+      border-radius: 2px;
+      outline: none;
+    }
+
+    .export-quality-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 14px;
+      height: 14px;
+      background: var(--accent);
+      border-radius: 50%;
+      cursor: pointer;
+    }
+
+    .export-quality-slider::-moz-range-thumb {
+      width: 14px;
+      height: 14px;
+      background: var(--accent);
+      border-radius: 50%;
+      cursor: pointer;
+      border: none;
+    }
+
+    /* Responsive */
+    @media (max-width: 900px) {
+      .app-main {
+        grid-template-columns: 1fr;
+        grid-template-rows: 1fr auto;
+      }
+
+      .controls-panel {
+        border-left: none;
+        border-top: 1px solid var(--border);
+        max-height: 50vh;
+      }
+    }
+
+    /* Copyright Footer */
+    .copyright {
+      text-align: center;
+      padding: 12px 16px;
+      font-size: 13px;
+      color: var(--text-secondary);
+      background: var(--bg-secondary);
+      border-top: 1px solid var(--border-color);
+    }
+    .copyright a {
+      color: var(--accent-color);
+      text-decoration: none;
+    }
+    .copyright a:hover {
+      text-decoration: underline;
     }
   </style>
 
-  <!-- jQuery and other libraries -->
-  <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
-
-  <!-- LibRaw (index.js), UPNG.js, pako, dcraw, UTIF for parsing RAW/PNG/DNG -->
+  <!-- External Libraries -->
   <script type="module">
-    /* Make sure index.js (LibRaw build) is in the same directory, or load it differently if needed. */
     import LibRaw from './index.js';
     window.LibRaw = LibRaw;
   </script>
   <script src="https://cdn.jsdelivr.net/npm/pako/dist/pako.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/upng-js@2.1.0/UPNG.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/dcraw"></script>
   <script src="https://cdn.jsdelivr.net/npm/utif@3.1.0/UTIF.min.js"></script>
-
-  <script>
-    /* i18n configuration */
-    const i18n = {
-      zh: {
-        title: "Film Negative → Positive (旋转+实时剪裁+白平衡+温度/色调) 支持 DNG",
-        guideTitle: "📘 使用方法（快速上手）",
-        steps: [
-          "上传底片图像：点击“选择文件”，上传扫描好的底片图像。",
-          "旋转图像：使用滑块或输入角度，纠正扫描角度后点击“应用旋转”。",
-          "剪裁图像：点击“开始剪裁”，用鼠标拖出区域后点击“应用剪裁”。",
-          "白平衡调整：点击图中应为灰色的地方（如墙面、衣服阴影等）。",
-          "调整色温/色调：拖动滑块或输入数值微调颜色。",
-          "下载结果：点击“下载校正图像”保存处理后的图片。"
-        ],
-        vibranceLabel: "活力",
-        saturationLabel: "饱和度"
-      },
-      en: {
-        title: "Film Negative → Positive (Rotate + Crop + White Balance + Temp/Tint) support DNG",
-        guideTitle: "📘 Quick Start Guide",
-        steps: [
-          "Upload a negative: Click 'Choose File' and upload your scanned film.",
-          "Rotate: Use the slider or input box to correct rotation, then click 'Apply Rotation'.",
-          "Crop: Click 'Start Crop', drag a region, then click 'Apply Crop'.",
-          "White Balance: Click a gray area in the image (e.g., wall, clothing shadow, etc).",
-          "Adjust Temp/Tint: Use sliders or input numbers to fine-tune colors.",
-          "Download: Click 'Download Corrected Image' to save the result."
-        ],
-        vibranceLabel: "Vibrance",
-        saturationLabel: "Saturation"
-      },
-      ja: {
-        title: "フィルムネガ → ポジ (回転＋トリミング＋ホワイトバランス＋色温度/色合い) DNG対応",
-        guideTitle: "📘 使い方（簡単）",
-        steps: [
-          "ネガ画像をアップロード：「ファイルを選択」でスキャン済みネガを選択。",
-          "回転：スライダーや数値入力で回転を調整、「回転を適用」をクリック。",
-          "トリミング：「トリミング開始」で範囲を選び、「適用」をクリック。",
-          "ホワイトバランス：画像内のグレー部分（壁・服の影など）をクリック。",
-          "色温度・色合い調整：スライダーまたは数値入力で微調整。",
-          "ダウンロード：「補正画像をダウンロード」で保存。"
-        ],
-        vibranceLabel: "バイブランス",
-        saturationLabel: "彩度"
-      }
-    };
-
-    // Simple debounce function to handle post-slider updates
-    function debounce(fn, delay = 300) {
-      let timer = null;
-      return function (...args) {
-        clearTimeout(timer);
-        timer = setTimeout(() => fn.apply(this, args), delay);
-      };
-    }
-  </script>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3/dist/jszip.min.js"></script>
 </head>
 
 <body>
-  <!-- Auto-replace text content based on browser language -->
-  <script>
-    document.addEventListener("DOMContentLoaded", () => {
-      const lang = navigator.language.startsWith("ja")
-        ? "ja"
-        : navigator.language.startsWith("en")
-        ? "en"
-        : "zh";
-      const text = i18n[lang];
+  <!-- Header -->
+  <header class="app-header">
+    <h1 class="app-title" data-i18n="title">Negative Converter</h1>
+    <div class="lang-selector">
+      <button class="lang-btn" data-lang="zh">中文</button>
+      <button class="lang-btn" data-lang="en">EN</button>
+      <button class="lang-btn" data-lang="ja">日本語</button>
+    </div>
+  </header>
 
-      document.querySelector("#rotateControls label").childNodes[0].textContent =
-        text.steps[1].split("：")[0] + ": ";
-      document.getElementById("applyRotate").textContent =
-        lang === "zh" ? "应用旋转" : lang === "en" ? "Apply Rotation" : "回転を適用";
+  <!-- Main Content -->
+  <main class="app-main">
+    <!-- Preview Section -->
+    <section class="preview-section">
+      <div class="canvas-container" id="canvasContainer">
+        <div class="upload-placeholder" id="uploadPlaceholder">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+          </svg>
+          <p data-i18n="dropHint">Drop image here or click to open</p>
+          <button class="upload-btn" id="uploadBtn" data-i18n="selectFile">Select File</button>
+          <button class="upload-btn" id="uploadFolderBtn" style="margin-left: 8px; background: var(--bg-tertiary); border: 1px solid var(--border);" data-i18n="selectFolder">Select Folder</button>
+          <input type="file" id="fileInput" accept=".cr2,.nef,.arw,.dng,.raw,.rw2,image/*" multiple>
+          <input type="file" id="folderInput" accept=".cr2,.nef,.arw,.dng,.raw,.rw2,image/*" webkitdirectory style="display: none;">
+        </div>
+        <canvas id="canvas" style="display: none;"></canvas>
+        <div class="crop-overlay" id="cropOverlay"></div>
+      </div>
 
-      document.getElementById("startCrop").textContent =
-        lang === "zh" ? "开始剪裁" : lang === "en" ? "Start Crop" : "トリミング開始";
-      document.getElementById("applyCrop").textContent =
-        lang === "zh" ? "应用剪裁" : lang === "en" ? "Apply Crop" : "適用";
-      document.getElementById("cancelCrop").textContent =
-        lang === "zh" ? "取消剪裁" : lang === "en" ? "Cancel Crop" : "トリミングをキャンセル";
+      <!-- Toolbar -->
+      <div class="preview-toolbar" id="previewToolbar" style="display: none;">
+        <span class="status-badge step1" id="statusBadge" data-i18n="step1">Step 1: Crop</span>
+        <div class="toolbar-separator"></div>
+        <button class="toolbar-btn" id="rotateLeftBtn" title="Rotate Left">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2.5 2v6h6M2.66 12a10 10 0 11.8 4"/></svg>
+          <span>-90°</span>
+        </button>
+        <button class="toolbar-btn" id="rotateRightBtn" title="Rotate Right">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 12a10 10 0 11-.8 4" transform="scale(-1,1) translate(-24,0)"/></svg>
+          <span>+90°</span>
+        </button>
+        <div class="rotate-controls">
+          <input type="number" class="rotate-input" id="rotateAngle" value="0" min="-180" max="180" step="0.1">
+          <span>°</span>
+          <button class="toolbar-btn" id="applyRotateBtn" data-i18n="applyRotate">Apply</button>
+        </div>
+        <div class="toolbar-separator"></div>
+        <button class="toolbar-btn" id="cropBtn" data-i18n="crop">Crop</button>
+        <button class="toolbar-btn" id="applyCropBtn" style="display: none;" data-i18n="applyCrop">Apply Crop</button>
+        <button class="toolbar-btn" id="cancelCropBtn" style="display: none;" data-i18n="cancelCrop">Cancel</button>
+        <div class="toolbar-separator" id="convertSeparator" style="display: none;"></div>
+        <button class="toolbar-btn primary" id="convertBtn" style="display: none;" data-i18n="convert">Convert Negative</button>
+      </div>
 
-      const adjustLabels = document.querySelectorAll("#adjustControls label");
-      adjustLabels[0].childNodes[0].textContent =
-        lang === "zh" ? "色温: " : lang === "en" ? "Temp: " : "色温: ";
-      adjustLabels[1].childNodes[0].textContent =
-        lang === "zh" ? "色调: " : lang === "en" ? "Tint: " : "色合い: ";
-      adjustLabels[2].childNodes[0].textContent = text.vibranceLabel + ": ";
-      adjustLabels[3].childNodes[0].textContent = text.saturationLabel + ": ";
+      <!-- Histogram -->
+      <div class="histogram-container" id="histogramContainer" style="display: none;">
+        <div class="histogram-label" data-i18n="histogram">Histogram</div>
+        <canvas id="histogramCanvas"></canvas>
+      </div>
+    </section>
 
-      document.getElementById("download").textContent =
-        lang === "zh"
-          ? "下载校正图像"
-          : lang === "en"
-          ? "Download Corrected Image"
-          : "補正画像をダウンロード";
+    <!-- Controls Panel -->
+    <aside class="controls-panel" id="controlsPanel" style="display: none;">
+      <!-- File List (Batch Mode) -->
+      <div class="file-list-section" id="fileListSection" style="display: none;">
+        <div class="file-list-header">
+          <span class="file-list-title" data-i18n="fileList">File List</span>
+          <span class="file-list-count" id="fileListCount">0 / 0</span>
+        </div>
+        <div class="file-list-items" id="fileListItems">
+          <!-- File items dynamically added here -->
+        </div>
+        <div class="file-list-actions">
+          <button class="file-list-btn" id="selectAllBtn" data-i18n="selectAll">All</button>
+          <button class="file-list-btn" id="selectNoneBtn" data-i18n="selectNone">None</button>
+          <button class="file-list-btn" id="addMoreFilesBtn" data-i18n="addFiles">Add</button>
+          <button class="file-list-btn" id="clearFileListBtn" data-i18n="clearList">Clear</button>
+        </div>
+      </div>
 
-      document.getElementById("title").textContent = text.title;
-      document.getElementById("guideTitle").textContent = text.guideTitle;
+      <!-- Workflow Guide -->
+      <div class="control-section">
+        <div class="section-header">
+          <span class="section-title" data-i18n="workflow">Workflow</span>
+        </div>
+        <div class="workflow-steps" id="workflowSteps">
+          <div class="workflow-step active" id="step1">
+            <span class="step-number">1</span>
+            <span data-i18n="stepCrop">Crop image (remove non-film areas)</span>
+          </div>
+          <div class="workflow-step" id="step2">
+            <span class="step-number">2</span>
+            <span data-i18n="stepBase">Sample film base (orange mask)</span>
+          </div>
+          <div class="workflow-step" id="step3">
+            <span class="step-number">3</span>
+            <span data-i18n="stepAdjust">Adjust colors and export</span>
+          </div>
+        </div>
+      </div>
 
-      const list = document.getElementById("steps");
-      list.innerHTML = "";
-      text.steps.forEach((step) => {
-        const li = document.createElement("li");
-        const parts = step.split("：");
-        if (parts.length === 2) {
-          li.innerHTML = `<b>${parts[0]}：</b>${parts[1]}`;
-        } else {
-          li.textContent = step;
-        }
-        list.appendChild(li);
-      });
-    });
-  </script>
+      <!-- Film Settings (Step 2) -->
+      <div class="control-section" id="filmSettingsSection" style="display: none;">
+        <div class="section-header">
+          <span class="section-title" data-i18n="filmSettings">Film Settings</span>
+        </div>
+        <div class="section-content">
+          <div class="film-type-toggle">
+            <button class="film-type-btn active" data-type="color" data-i18n="colorFilm">Color</button>
+            <button class="film-type-btn" data-type="bw" data-i18n="bwFilm">B&W</button>
+          </div>
+          <select class="preset-select" id="filmPreset">
+            <optgroup label="Color" data-i18n-label="colorFilms">
+              <option value="generic_color" data-i18n="genericColor">Generic Color</option>
+              <option value="kodak_portra_400">Kodak Portra 400</option>
+              <option value="kodak_ektar_100">Kodak Ektar 100</option>
+              <option value="fuji_400h">Fuji Pro 400H</option>
+              <option value="fuji_superia">Fuji Superia</option>
+            </optgroup>
+            <optgroup label="B&W" data-i18n-label="bwFilms">
+              <option value="generic_bw" data-i18n="genericBW">Generic B&W</option>
+              <option value="kodak_trix_400">Kodak Tri-X 400</option>
+              <option value="ilford_hp5">Ilford HP5+</option>
+            </optgroup>
+          </select>
+          <div class="info-box" data-i18n="filmBaseInfo">Click on the orange film base area (unexposed edge) to sample the mask color</div>
+          <div class="film-base-buttons">
+            <button class="film-base-btn" id="sampleBaseBtn" data-i18n="sampleBase">Sample Film Base</button>
+            <button class="film-base-btn" id="autoDetectBtn" data-i18n="autoDetect">Auto Detect</button>
+          </div>
+          <div class="film-base-preview" id="filmBasePreview" style="display: none;">
+            <div class="film-base-color" id="filmBaseColor"></div>
+            <div class="film-base-values" id="filmBaseValues">R: 0 G: 0 B: 0</div>
+          </div>
+          <button class="toolbar-btn primary" id="applyConvertBtn" style="margin-top: 8px; width: 100%; justify-content: center;" data-i18n="applyConvert">Apply & Convert</button>
+        </div>
+      </div>
 
-  <!-- Title / Quick Guide -->
-  <h2 id="title">Film Negative → Positive (旋转+实时剪裁+白平衡+温度/色调)</h2>
-  <div style="padding:16px; margin-bottom:20px;">
-    <h3 id="guideTitle">📘 使用方法（快速上手）</h3>
-    <ol id="steps" style="padding-left: 20px; line-height: 1.6;">
-      <!-- Default Chinese guide -->
-      <li><b>上传底片图像：</b>点击“选择文件”，上传扫描好的底片图像。</li>
-      <li><b>旋转图像：</b>使用滑块或输入角度，纠正扫描角度后点击“应用旋转”。</li>
-      <li><b>剪裁图像：</b>点击“开始剪裁”，用鼠标拖出区域后点击“应用剪裁”。</li>
-      <li><b>白平衡调整：</b>点击图中应为灰色的地方（如墙面、衣服阴影等）。</li>
-      <li><b>调整色温/色调：</b>拖动滑块或输入数值微调颜色。</li>
-      <li><b>下载结果：</b>点击“下载校正图像”保存处理后的图片。</li>
-    </ol>
-  </div>
+      <!-- White Balance (Step 3) -->
+      <div class="control-section" id="whiteBalanceSection" style="display: none;">
+        <div class="section-header" data-section="wb">
+          <span class="section-title" data-i18n="whiteBalance">White Balance</span>
+          <span class="section-toggle">▼</span>
+        </div>
+        <div class="section-content" id="wbSection">
+          <div class="info-box" data-i18n="wbInfo">Click on a neutral gray area in the image, or adjust manually</div>
+          <button class="film-base-btn" id="sampleWBBtn" data-i18n="sampleWB">Sample Gray Point</button>
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label">R</span>
+              <span class="slider-value" id="wbRValue">1.00</span>
+            </div>
+            <input type="range" class="slider-input" id="wbR" min="0.5" max="2" step="0.01" value="1">
+          </div>
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label">G</span>
+              <span class="slider-value" id="wbGValue">1.00</span>
+            </div>
+            <input type="range" class="slider-input" id="wbG" min="0.5" max="2" step="0.01" value="1">
+          </div>
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label">B</span>
+              <span class="slider-value" id="wbBValue">1.00</span>
+            </div>
+            <input type="range" class="slider-input" id="wbB" min="0.5" max="2" step="0.01" value="1">
+          </div>
+        </div>
+      </div>
 
-  <!-- File selection -->
-  <input
-    type="file"
-    id="upload"
-    accept=".cr2,.nef,.arw,.dng,.raw,.rw2,image/*"
-    class="control"
-  >
-  <br>
+      <!-- Tone Adjustments (Step 3) -->
+      <div class="control-section" id="toneSection" style="display: none;">
+        <div class="section-header" data-section="tone">
+          <span class="section-title" data-i18n="toneAdjustments">Tone</span>
+          <span class="section-toggle">▼</span>
+        </div>
+        <div class="section-content" id="toneSectionContent">
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="exposure">Exposure</span>
+              <span class="slider-value" id="exposureValue">0 EV</span>
+            </div>
+            <input type="range" class="slider-input" id="exposure" min="-3" max="3" step="0.1" value="0">
+          </div>
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="contrast">Contrast</span>
+              <span class="slider-value" id="contrastValue">0</span>
+            </div>
+            <input type="range" class="slider-input" id="contrast" min="-100" max="100" step="1" value="0">
+          </div>
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="highlights">Highlights</span>
+              <span class="slider-value" id="highlightsValue">0</span>
+            </div>
+            <input type="range" class="slider-input" id="highlights" min="-100" max="100" step="1" value="0">
+          </div>
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="shadows">Shadows</span>
+              <span class="slider-value" id="shadowsValue">0</span>
+            </div>
+            <input type="range" class="slider-input" id="shadows" min="-100" max="100" step="1" value="0">
+          </div>
+        </div>
+      </div>
 
-  <!-- Rotation controls -->
-  <div id="rotateControls" class="control" style="display:none;">
-    <label>
-      <span></span>: <span id="rotateVal">0</span>°
-    </label>
-    <input type="range" id="rotate" min="-180" max="180" step="1" value="0">
-    <input type="number" id="rotateInput" min="-180" max="180" step="1" value="0">
-    <button id="applyRotate"></button>
-  </div>
+      <!-- Color Balance (Step 3) -->
+      <div class="control-section" id="colorSection" style="display: none;">
+        <div class="section-header" data-section="color">
+          <span class="section-title" data-i18n="colorBalance">Color Balance</span>
+          <span class="section-toggle">▼</span>
+        </div>
+        <div class="section-content" id="colorSectionContent">
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="temperature">Temperature</span>
+              <span class="slider-value" id="temperatureValue">0</span>
+            </div>
+            <input type="range" class="slider-input" id="temperature" min="-100" max="100" step="1" value="0">
+          </div>
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="tint">Tint</span>
+              <span class="slider-value" id="tintValue">0</span>
+            </div>
+            <input type="range" class="slider-input" id="tint" min="-100" max="100" step="1" value="0">
+          </div>
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="vibrance">Vibrance</span>
+              <span class="slider-value" id="vibranceValue">0</span>
+            </div>
+            <input type="range" class="slider-input" id="vibrance" min="-100" max="100" step="1" value="0">
+          </div>
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="saturation">Saturation</span>
+              <span class="slider-value" id="saturationValue">0</span>
+            </div>
+            <input type="range" class="slider-input" id="saturation" min="-100" max="100" step="1" value="0">
+          </div>
+        </div>
+      </div>
 
-  <!-- Crop controls -->
-  <div id="cropControls" class="control" style="display:none;">
-    <button id="startCrop"></button>
-    <button id="applyCrop" style="display:none;"></button>
-    <button id="cancelCrop" style="display:none;"></button>
-  </div>
+      <!-- CMY Adjustments (Step 3) -->
+      <div class="control-section" id="cmySection" style="display: none;">
+        <div class="section-header" data-section="cmy">
+          <span class="section-title">CMY</span>
+          <span class="section-toggle">▼</span>
+        </div>
+        <div class="section-content" id="cmySectionContent">
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label">Cyan</span>
+              <span class="slider-value" id="cyanValue">0</span>
+            </div>
+            <input type="range" class="slider-input" id="cyan" min="-100" max="100" step="1" value="0">
+          </div>
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label">Magenta</span>
+              <span class="slider-value" id="magentaValue">0</span>
+            </div>
+            <input type="range" class="slider-input" id="magenta" min="-100" max="100" step="1" value="0">
+          </div>
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label">Yellow</span>
+              <span class="slider-value" id="yellowValue">0</span>
+            </div>
+            <input type="range" class="slider-input" id="yellow" min="-100" max="100" step="1" value="0">
+          </div>
+        </div>
+      </div>
 
-  <!-- Main canvas container -->
-  <div id="canvasContainer">
-    <canvas id="canvas"></canvas>
-    <div id="cropOverlay"></div>
-  </div>
+      <!-- Advanced (Curves) (Step 3) -->
+      <div class="control-section" id="advancedSection" style="display: none;">
+        <div class="section-header" data-section="advanced">
+          <span class="section-title" data-i18n="advanced">Advanced</span>
+          <span class="section-toggle collapsed">▼</span>
+        </div>
+        <div class="section-content collapsed" id="advancedSectionContent">
+          <div class="curve-editor">
+            <p class="curve-hint" data-i18n="curveHint">Click and drag to adjust the curve</p>
+            <div class="curve-tabs">
+              <button class="curve-tab r active" data-channel="r">R</button>
+              <button class="curve-tab g" data-channel="g">G</button>
+              <button class="curve-tab b" data-channel="b">B</button>
+              <button class="curve-tab reset" id="resetCurveBtn" data-i18n="resetCurve">Reset</button>
+            </div>
+            <canvas class="curve-canvas" id="curveCanvas"></canvas>
+            <div class="curve-presets">
+              <button class="curve-preset-btn" data-preset="linear" data-i18n="linear">Linear</button>
+              <button class="curve-preset-btn" data-preset="scurve" data-i18n="sCurve">S-Curve</button>
+              <button class="curve-preset-btn" data-preset="log" data-i18n="log">Log</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </main>
 
-  <!-- Temperature/Tint/Vibrance/Saturation/CMY adjustments -->
-  <div id="adjustControls" class="control" style="display:none;">
-    <label><span></span>: <span id="tempVal">0</span></label>
-    <input
-      data-role="rangeInput"
-      data-type="temp"
-      type="range"
-      min="-100"
-      max="100"
-      step="1"
-      value="0"
-      id="temp"
-    >
-    <input
-      data-role="numberInput"
-      data-type="temp"
-      type="number"
-      min="-100"
-      max="100"
-      step="1"
-      value="0"
-      id="tempInput"
-    >
-    <br>
-    <label><span></span>: <span id="tintVal">0</span></label>
-    <input
-      data-role="rangeInput"
-      data-type="tint"
-      type="range"
-      min="-100"
-      max="100"
-      step="1"
-      value="0"
-      id="tint"
-    >
-    <input
-      data-role="numberInput"
-      data-type="tint"
-      type="number"
-      min="-100"
-      max="100"
-      step="1"
-      value="0"
-      id="tintInput"
-    >
-    <br>
-    <label><span></span>: <span id="vibranceVal">0</span></label>
-    <input
-      data-role="rangeInput"
-      data-type="vibrance"
-      type="range"
-      min="-100"
-      max="100"
-      step="1"
-      value="0"
-      id="vibrance"
-    >
-    <input
-      data-role="numberInput"
-      data-type="vibrance"
-      type="number"
-      min="-100"
-      max="100"
-      step="1"
-      value="0"
-      id="vibranceInput"
-    >
-    <br>
-    <label><span></span>: <span id="saturationVal">0</span></label>
-    <input
-      data-role="rangeInput"
-      data-type="saturation"
-      type="range"
-      min="-100"
-      max="100"
-      step="1"
-      value="0"
-      id="saturation"
-    >
-    <input
-      data-role="numberInput"
-      data-type="saturation"
-      type="number"
-      min="-100"
-      max="100"
-      step="1"
-      value="0"
-      id="saturationInput"
-    >
-    <br>
-    <label>Cyan: <span id="cyanVal">0</span></label>
-    <input
-      data-role="rangeInput"
-      data-type="cyan"
-      type="range"
-      min="-100"
-      max="100"
-      step="1"
-      value="0"
-      id="cyan"
-    >
-    <input
-      data-role="numberInput"
-      data-type="cyan"
-      type="number"
-      min="-100"
-      max="100"
-      step="1"
-      value="0"
-      id="cyanInput"
-    >
-    <br>
-    <label>Magenta: <span id="magentaVal">0</span></label>
-    <input
-      data-role="rangeInput"
-      data-type="magenta"
-      type="range"
-      min="-100"
-      max="100"
-      step="1"
-      value="0"
-      id="magenta"
-    >
-    <input
-      data-role="numberInput"
-      data-type="magenta"
-      type="number"
-      min="-100"
-      max="100"
-      step="1"
-      value="0"
-      id="magentaInput"
-    >
-    <br>
-    <label>Yellow: <span id="yellowVal">0</span></label>
-    <input
-      data-role="rangeInput"
-      data-type="yellow"
-      type="range"
-      min="-100"
-      max="100"
-      step="1"
-      value="0"
-      id="yellow"
-    >
-    <input
-      data-role="numberInput"
-      data-type="yellow"
-      type="number"
-      min="-100"
-      max="100"
-      step="1"
-      value="0"
-      id="yellowInput"
-    >
+  <!-- Footer -->
+  <footer class="app-footer" id="appFooter" style="display: none;">
+    <div class="footer-left">
+      <button class="footer-btn" id="newImageBtn" data-i18n="newImage">New Image</button>
+      <button class="footer-btn" id="resetBtn" data-i18n="reset">Reset</button>
+      <button class="footer-btn" id="startOverBtn" data-i18n="startOver">Start Over</button>
+    </div>
+    <div style="display: flex; gap: 8px;">
+      <button class="footer-btn" id="saveSettingsBtn" style="display: none;" data-i18n="saveSettings">Save Settings</button>
+      <div class="export-dropdown">
+        <button class="footer-btn primary" id="exportBtn" data-i18n="exportPng">Export PNG</button>
+        <div class="export-dropdown-menu" id="exportDropdownMenu">
+          <div class="export-format-section">
+            <div class="export-format-label" data-i18n="exportFormat">Export Format</div>
+            <div class="export-format-toggle">
+              <button class="format-btn active" data-format="png">PNG</button>
+              <button class="format-btn" data-format="jpeg">JPEG</button>
+            </div>
+          </div>
+          <div class="export-quality-section" id="exportQualitySection">
+            <div class="export-quality-header">
+              <span class="export-quality-label" data-i18n="jpegQuality">JPEG Quality</span>
+              <span class="export-quality-value" id="exportQualityValue">92%</span>
+            </div>
+            <input type="range" class="export-quality-slider" id="exportQualitySlider" min="1" max="100" value="92">
+          </div>
+          <button class="export-dropdown-item" id="exportSingleBtn" data-i18n="exportCurrent">Export Current (PNG)</button>
+          <div class="export-dropdown-divider"></div>
+          <button class="export-dropdown-item" id="exportZipBtn" data-i18n="exportZip" disabled>Export All (ZIP)</button>
+          <button class="export-dropdown-item" id="exportAllBtn" data-i18n="exportIndividual" disabled>Download All Individually</button>
+        </div>
+      </div>
+    </div>
+  </footer>
 
-    <div class="control" style="display:none;" id="downloadDiv">
-      <button id="download"></button>
+  <!-- Batch Progress Modal -->
+  <div class="batch-progress-overlay" id="batchProgressOverlay" style="display: none;">
+    <div class="batch-progress-modal">
+      <div class="batch-progress-title" data-i18n="batchProcessing">Batch Processing...</div>
+      <div class="batch-progress-bar">
+        <div class="batch-progress-fill" id="batchProgressFill" style="width: 0%;"></div>
+      </div>
+      <div class="batch-progress-text" id="batchProgressText">0 / 0</div>
+      <div class="batch-progress-current" id="batchProgressCurrent"></div>
     </div>
   </div>
 
-  <footer class="app-footer">
-    <p>© 2025 Negative Converter. tokugai.com All rights reserved.</p>
-  </footer>
+  <div class="copyright">
+    © 2025 Negative Converter. <a href="https://neoanaloglab.com" target="_blank">neoanaloglab.com</a> All rights reserved.
+  </div>
 
   <script>
-    $(function () {
-      // ===== DOM references =====
-      const $canvas = $("#canvas");
-      const $canvasContainer = $("#canvasContainer");
-      const $cropOverlay = $("#cropOverlay");
-      const $rotate = $("#rotate");
-      const $rotateVal = $("#rotateVal");
-      const $rotateInput = $("#rotateInput");
-      const $applyRotate = $("#applyRotate");
-      const $adjustControls = $("#adjustControls");
-      const $downloadDiv = $("#downloadDiv");
-      const $downloadBtn = $("#download");
+    // ===========================================
+    // Internationalization
+    // ===========================================
+    const i18n = {
+      zh: {
+        title: "负片转正片",
+        dropHint: "拖放图片到此处或点击读取",
+        selectFile: "选择文件",
+        applyRotate: "应用",
+        crop: "裁剪",
+        applyCrop: "应用裁剪",
+        cancelCrop: "取消",
+        convert: "转换负片",
+        histogram: "直方图",
+        workflow: "工作流程",
+        stepCrop: "裁剪图像（移除胶片外区域）",
+        stepBase: "采样胶片基底（橙色色罩）",
+        stepAdjust: "调整颜色并导出",
+        step1: "第1步：裁剪",
+        step2: "第2步：色罩",
+        step3: "第3步：调整",
+        filmSettings: "胶片设置",
+        colorFilm: "彩色",
+        bwFilm: "黑白",
+        genericColor: "通用彩色",
+        genericBW: "通用黑白",
+        filmBaseInfo: "点击图像边缘的橙色胶片基底区域来采样色罩颜色",
+        sampleBase: "采样胶片基底",
+        autoDetect: "自动检测",
+        applyConvert: "应用并转换",
+        whiteBalance: "白平衡",
+        wbInfo: "点击图像中应为中性灰的区域，或手动调整",
+        sampleWB: "采样灰点",
+        toneAdjustments: "色调调整",
+        exposure: "曝光",
+        contrast: "对比度",
+        highlights: "高光",
+        shadows: "阴影",
+        colorBalance: "色彩平衡",
+        temperature: "色温",
+        tint: "色调",
+        vibrance: "活力",
+        saturation: "饱和度",
+        advanced: "高级",
+        linear: "线性",
+        sCurve: "S曲线",
+        log: "对数",
+        curveHint: "点击添加控制点，拖动调整，双击删除",
+        resetCurve: "重置",
+        reset: "重置调整",
+        startOver: "重新开始",
+        newImage: "选择新图片",
+        exportPng: "导出 PNG",
+        colorFilms: "彩色负片",
+        bwFilms: "黑白负片",
+        processing: "处理中...",
+        selectFolder: "选择文件夹",
+        fileList: "文件列表",
+        selectAll: "全选",
+        selectNone: "全不选",
+        addFiles: "添加",
+        clearList: "清空",
+        batchProcess: "批量处理",
+        batchProcessing: "批量处理中...",
+        saveSettings: "保存设置",
+        settingsSaved: "当前图片设置已保存",
+        exportCurrent: "导出当前图片 (PNG)",
+        exportZip: "批量导出 (ZIP)",
+        exportIndividual: "逐个下载全部",
+        pending: "等待处理",
+        processingStatus: "处理中",
+        done: "已完成",
+        error: "错误",
+        configured: "已配置",
+        customSettings: "已设置",
+        autoDetect: "自动",
+        finishProcessing: "请先完成当前图片的处理流程（到第3步）",
+        exportFormat: "导出格式",
+        jpegQuality: "JPEG 质量",
+        exportJpeg: "导出 JPEG",
+        exportCurrentJpeg: "导出当前图片 (JPEG)",
+        exportZipJpeg: "批量导出 (ZIP/JPEG)"
+      },
+      en: {
+        title: "Negative Converter",
+        dropHint: "Drop image here or click to open",
+        selectFile: "Select File",
+        applyRotate: "Apply",
+        crop: "Crop",
+        applyCrop: "Apply Crop",
+        cancelCrop: "Cancel",
+        convert: "Convert Negative",
+        histogram: "Histogram",
+        workflow: "Workflow",
+        stepCrop: "Crop image (remove non-film areas)",
+        stepBase: "Sample film base (orange mask)",
+        stepAdjust: "Adjust colors and export",
+        step1: "Step 1: Crop",
+        step2: "Step 2: Mask",
+        step3: "Step 3: Adjust",
+        filmSettings: "Film Settings",
+        colorFilm: "Color",
+        bwFilm: "B&W",
+        genericColor: "Generic Color",
+        genericBW: "Generic B&W",
+        filmBaseInfo: "Click on the orange film base area (unexposed edge) to sample the mask color",
+        sampleBase: "Sample Film Base",
+        autoDetect: "Auto Detect",
+        applyConvert: "Apply & Convert",
+        whiteBalance: "White Balance",
+        wbInfo: "Click on a neutral gray area in the image, or adjust manually",
+        sampleWB: "Sample Gray Point",
+        toneAdjustments: "Tone",
+        exposure: "Exposure",
+        contrast: "Contrast",
+        highlights: "Highlights",
+        shadows: "Shadows",
+        colorBalance: "Color Balance",
+        temperature: "Temperature",
+        tint: "Tint",
+        vibrance: "Vibrance",
+        saturation: "Saturation",
+        advanced: "Advanced",
+        linear: "Linear",
+        sCurve: "S-Curve",
+        log: "Log",
+        curveHint: "Click to add point, drag to adjust, double-click to remove",
+        resetCurve: "Reset",
+        reset: "Reset Adjustments",
+        startOver: "Start Over",
+        newImage: "New Image",
+        exportPng: "Export PNG",
+        colorFilms: "Color Films",
+        bwFilms: "B&W Films",
+        processing: "Processing...",
+        selectFolder: "Select Folder",
+        fileList: "File List",
+        selectAll: "All",
+        selectNone: "None",
+        addFiles: "Add",
+        clearList: "Clear",
+        batchProcess: "Batch Process",
+        batchProcessing: "Batch Processing...",
+        saveSettings: "Save Settings",
+        settingsSaved: "Settings saved for current image",
+        exportCurrent: "Export Current (PNG)",
+        exportZip: "Export All (ZIP)",
+        exportIndividual: "Download All Individually",
+        pending: "Pending",
+        processingStatus: "Processing",
+        done: "Done",
+        error: "Error",
+        configured: "configured",
+        customSettings: "Custom",
+        autoDetect: "Auto",
+        finishProcessing: "Please complete the workflow (step 3) before saving settings",
+        exportFormat: "Export Format",
+        jpegQuality: "JPEG Quality",
+        exportJpeg: "Export JPEG",
+        exportCurrentJpeg: "Export Current (JPEG)",
+        exportZipJpeg: "Export All (ZIP/JPEG)"
+      },
+      ja: {
+        title: "ネガポジ変換",
+        dropHint: "画像をドロップまたはクリックして読み込み",
+        selectFile: "ファイル選択",
+        applyRotate: "適用",
+        crop: "トリミング",
+        applyCrop: "適用",
+        cancelCrop: "キャンセル",
+        convert: "ネガ変換",
+        histogram: "ヒストグラム",
+        workflow: "ワークフロー",
+        stepCrop: "画像をトリミング（フィルム外を除去）",
+        stepBase: "フィルムベースを取得（オレンジマスク）",
+        stepAdjust: "色調整とエクスポート",
+        step1: "ステップ1：トリミング",
+        step2: "ステップ2：マスク",
+        step3: "ステップ3：調整",
+        filmSettings: "フィルム設定",
+        colorFilm: "カラー",
+        bwFilm: "白黒",
+        genericColor: "汎用カラー",
+        genericBW: "汎用白黒",
+        filmBaseInfo: "オレンジ色のフィルムベース部分をクリックしてマスク色を取得",
+        sampleBase: "フィルムベースを取得",
+        autoDetect: "自動検出",
+        applyConvert: "適用して変換",
+        whiteBalance: "ホワイトバランス",
+        wbInfo: "画像内のニュートラルグレー部分をクリック、または手動調整",
+        sampleWB: "グレーポイントを取得",
+        toneAdjustments: "トーン調整",
+        exposure: "露出",
+        contrast: "コントラスト",
+        highlights: "ハイライト",
+        shadows: "シャドウ",
+        colorBalance: "カラーバランス",
+        temperature: "色温度",
+        tint: "色合い",
+        vibrance: "バイブランス",
+        saturation: "彩度",
+        advanced: "詳細",
+        linear: "リニア",
+        sCurve: "Sカーブ",
+        log: "ログ",
+        curveHint: "クリックでポイント追加、ドラッグで調整、ダブルクリックで削除",
+        resetCurve: "リセット",
+        reset: "調整をリセット",
+        startOver: "最初から",
+        newImage: "新しい画像",
+        exportPng: "PNG出力",
+        colorFilms: "カラーフィルム",
+        bwFilms: "白黒フィルム",
+        processing: "処理中...",
+        selectFolder: "フォルダ選択",
+        fileList: "ファイル一覧",
+        selectAll: "全選択",
+        selectNone: "全解除",
+        addFiles: "追加",
+        clearList: "クリア",
+        batchProcess: "一括処理",
+        batchProcessing: "一括処理中...",
+        saveSettings: "設定を保存",
+        settingsSaved: "現在の画像の設定を保存しました",
+        exportCurrent: "現在の画像を出力 (PNG)",
+        exportZip: "一括出力 (ZIP)",
+        exportIndividual: "すべて個別にダウンロード",
+        pending: "待機中",
+        processingStatus: "処理中",
+        done: "完了",
+        error: "エラー",
+        configured: "設定済",
+        customSettings: "設定済",
+        autoDetect: "自動",
+        finishProcessing: "設定を保存する前にワークフロー（ステップ3）を完了してください",
+        exportFormat: "出力形式",
+        jpegQuality: "JPEG品質",
+        exportJpeg: "JPEG出力",
+        exportCurrentJpeg: "現在の画像を出力 (JPEG)",
+        exportZipJpeg: "一括出力 (ZIP/JPEG)"
+      }
+    };
 
-      // Main canvas and context
-      let canvas = $canvas[0];
-      let ctx = canvas.getContext("2d", { willReadFrequently: true });
+    let currentLang = 'en';
 
-      // Offscreen canvas for storing the final "inverted + rotated + cropped" image
-      let transformCanvas = document.createElement("canvas");
-      let transformCtx = transformCanvas.getContext("2d");
+    function setLanguage(lang) {
+      currentLang = lang;
+      document.querySelectorAll('.lang-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.lang === lang);
+      });
+      document.querySelectorAll('[data-i18n]').forEach(el => {
+        const key = el.dataset.i18n;
+        if (i18n[lang][key]) {
+          el.textContent = i18n[lang][key];
+        }
+      });
+    }
 
-      // ===== Preview canvas for smooth real-time adjustments =====
-      const previewCanvas = document.createElement("canvas");
-      const previewCtx = previewCanvas.getContext("2d");
-      // The scale factor for generating a smaller preview
-      const previewScaleFactor = 4;
+    // Detect language
+    const browserLang = navigator.language.startsWith('ja') ? 'ja'
+      : navigator.language.startsWith('zh') ? 'zh' : 'en';
+    setLanguage(browserLang);
 
-      // Arrays to store pixel data
-      let basePixels = null;        // Full-resolution data (after WB normalization)
-      let basePixelsPreview = null; // Downsampled data for the preview canvas
+    // Language selector
+    document.querySelectorAll('.lang-btn').forEach(btn => {
+      btn.addEventListener('click', () => setLanguage(btn.dataset.lang));
+    });
 
-      // Cropping states
-      let cropping = false;
-      let croppingActive = false;
-      let cropStart = null;
+    // ===========================================
+    // Film Presets
+    // ===========================================
+    const FILM_PRESETS = {
+      'kodak_portra_400': {
+        name: 'Kodak Portra 400',
+        type: 'color',
+        baseColor: { r: 0.85, g: 0.55, b: 0.35 },
+        characteristics: { warmth: 0.1, saturation: -0.05, contrast: 0 }
+      },
+      'kodak_ektar_100': {
+        name: 'Kodak Ektar 100',
+        type: 'color',
+        baseColor: { r: 0.82, g: 0.52, b: 0.32 },
+        characteristics: { warmth: 0, saturation: 0.15, contrast: 0.1 }
+      },
+      'fuji_400h': {
+        name: 'Fuji Pro 400H',
+        type: 'color',
+        baseColor: { r: 0.80, g: 0.58, b: 0.40 },
+        characteristics: { warmth: -0.05, saturation: 0, contrast: 0 }
+      },
+      'fuji_superia': {
+        name: 'Fuji Superia',
+        type: 'color',
+        baseColor: { r: 0.78, g: 0.55, b: 0.38 },
+        characteristics: { warmth: 0.05, saturation: 0.1, contrast: 0.05 }
+      },
+      'kodak_trix_400': {
+        name: 'Kodak Tri-X 400',
+        type: 'bw',
+        contrast: 1.1,
+        gamma: 0.9
+      },
+      'ilford_hp5': {
+        name: 'Ilford HP5+',
+        type: 'bw',
+        contrast: 1.0,
+        gamma: 1.0
+      },
+      'generic_color': {
+        name: 'Generic Color',
+        type: 'color',
+        baseColor: { r: 0.82, g: 0.55, b: 0.36 },
+        characteristics: { warmth: 0, saturation: 0, contrast: 0 }
+      },
+      'generic_bw': {
+        name: 'Generic B&W',
+        type: 'bw',
+        contrast: 1.0,
+        gamma: 1.0
+      }
+    };
 
-      // Flag for requestAnimationFrame-based throttling
-      let updatePending = false;
+    // ===========================================
+    // Application State
+    // ===========================================
+    const state = {
+      // Workflow state
+      currentStep: 1,  // 1=crop, 2=film base, 3=adjust
 
-      // ===== File loading =====
-      $("#upload").on("change", function (e) {
-        let file = e.target.files[0];
-        if (!file) return;
+      // Image data
+      originalImageData: null,      // Raw loaded image (negative, untouched)
+      croppedImageData: null,       // After cropping (still negative)
+      processedImageData: null,     // After negative conversion
+      displayImageData: null,       // After all adjustments
 
-        const fileName = file.name.toLowerCase();
-        let reader = new FileReader();
+      // Film settings
+      filmType: 'color',
+      filmPreset: 'generic_color',
+      filmBase: { r: 210, g: 140, b: 90 },
+      filmBaseSet: false,
 
-        reader.onload = async (event) => {
-          let buffer = event.target.result;
+      // White balance multipliers
+      wbR: 1.0,
+      wbG: 1.0,
+      wbB: 1.0,
 
-          // Handle RAW/DNG
-          if (
-            [".cr2", ".nef", ".arw", ".dng", ".raw", ".rw2"].some((ext) =>
-              fileName.endsWith(ext)
-            )
-          ) {
-            // Check if it's iPhone DNG
-            if (fileName.endsWith(".dng")) {
-              let textSnippet = new TextDecoder().decode(buffer.slice(0, 1000));
-              if (textSnippet.includes("iPhone")) {
-                try {
-                  const ifds = UTIF.decode(buffer);
-                  UTIF.decodeImage(buffer, ifds[0]);
-                  const rgba = UTIF.toRGBA8(ifds[0]);
-                  // Invert
-                  for (let i = 0; i < rgba.length; i += 4) {
-                    rgba[i] = 255 - rgba[i];
-                    rgba[i + 1] = 255 - rgba[i + 1];
-                    rgba[i + 2] = 255 - rgba[i + 2];
-                  }
-                  let width = ifds[0].width;
-                  let height = ifds[0].height;
-                  let imageData = new ImageData(
-                    new Uint8ClampedArray(rgba),
-                    width,
-                    height
-                  );
-                  canvas.width = width;
-                  canvas.height = height;
-                  adjustCanvasDisplay(width, height);
-                  ctx.putImageData(imageData, 0, 0);
+      // Tone adjustments
+      exposure: 0,
+      contrast: 0,
+      highlights: 0,
+      shadows: 0,
 
-                  transformCanvas.width = width;
-                  transformCanvas.height = height;
-                  transformCtx.putImageData(imageData, 0, 0);
+      // Color adjustments
+      temperature: 0,
+      tint: 0,
+      vibrance: 0,
+      saturation: 0,
 
-                  setupBasePixels(imageData);
+      // CMY
+      cyan: 0,
+      magenta: 0,
+      yellow: 0,
 
-                  $("#rotateControls, #cropControls").show();
-                  return;
-                } catch (err) {
-                  // If UTIF fails, fallback to LibRaw
-                }
-              }
-            }
+      // Curves (256-value lookup tables)
+      curves: { r: null, g: null, b: null },
+      // Control points for each channel [{x, y}, ...] sorted by x
+      curvePoints: {
+        r: [{ x: 0, y: 0 }, { x: 255, y: 255 }],
+        g: [{ x: 0, y: 0 }, { x: 255, y: 255 }],
+        b: [{ x: 0, y: 0 }, { x: 255, y: 255 }]
+      },
 
-            // Fallback to LibRaw
-            try {
-              const raw = new LibRaw();
-              await raw.open(new Uint8Array(buffer), {
-                noInterpolation: false,
-                useAutoWb: true,
-                useCameraWb: true,
-                useCameraMatrix: 3,
-                outputColor: 1,
-                outputBps: 8
-              });
-              const imageDataResult = await raw.imageData();
-              const width = imageDataResult.width;
-              const height = imageDataResult.height;
-              const rgbData = new Uint8ClampedArray(imageDataResult.data);
-              const pixelCount = width * height;
-              const rgbaData = new Uint8ClampedArray(pixelCount * 4);
+      // UI state
+      cropping: false,
+      cropStart: null,
+      croppingActive: false,
+      samplingMode: null,  // null, 'filmBase', 'whiteBalance'
+      rotation: 0,
 
-              for (let i = 0; i < pixelCount; i++) {
-                rgbaData[i * 4] = 255 - rgbData[i * 3];
-                rgbaData[i * 4 + 1] = 255 - rgbData[i * 3 + 1];
-                rgbaData[i * 4 + 2] = 255 - rgbData[i * 3 + 2];
-                rgbaData[i * 4 + 3] = 255;
-              }
+      // Batch mode state
+      batchMode: false,
+      // fileQueue item: {file, selected, status, error, settings: null | {...}}
+      // settings = null means use auto-detect for film base
+      fileQueue: [],
+      currentFileIndex: 0,
+      // Saved crop region for current image (used when saving settings)
+      cropRegion: null,
 
-              let imageData = new ImageData(rgbaData, width, height);
-              canvas.width = width;
-              canvas.height = height;
-              adjustCanvasDisplay(width, height);
-              ctx.putImageData(imageData, 0, 0);
+      // Export settings
+      exportFormat: 'png',  // 'png' or 'jpeg'
+      jpegQuality: 92       // 1-100
+    };
 
-              transformCanvas.width = width;
-              transformCanvas.height = height;
-              transformCtx.putImageData(imageData, 0, 0);
+    // Initialize curves
+    function initCurves() {
+      state.curves.r = new Uint8Array(256);
+      state.curves.g = new Uint8Array(256);
+      state.curves.b = new Uint8Array(256);
+      // Reset control points to linear
+      state.curvePoints.r = [{ x: 0, y: 0 }, { x: 255, y: 255 }];
+      state.curvePoints.g = [{ x: 0, y: 0 }, { x: 255, y: 255 }];
+      state.curvePoints.b = [{ x: 0, y: 0 }, { x: 255, y: 255 }];
+      // Fill curves with linear values
+      for (let i = 0; i < 256; i++) {
+        state.curves.r[i] = i;
+        state.curves.g[i] = i;
+        state.curves.b[i] = i;
+      }
+    }
+    initCurves();
 
-              setupBasePixels(imageData);
+    // ===========================================
+    // Canvas & Context
+    // ===========================================
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const histogramCanvas = document.getElementById('histogramCanvas');
+    const histogramCtx = histogramCanvas.getContext('2d');
+    const curveCanvas = document.getElementById('curveCanvas');
+    const curveCtx = curveCanvas.getContext('2d');
 
-              $("#rotateControls, #cropControls").show();
-            } catch (err) {
-              console.error("RAW parse failed:", err);
-            }
-          } else if (file.type === "image/png") {
-            // Handle PNG
-            let decoded = UPNG.decode(buffer);
-            let width = decoded.width;
-            let height = decoded.height;
-            let ctype = decoded.ctype;
-            let depth = decoded.depth;
-            let data = decoded.data;
-            let channelCount = (ctype & 2 ? 3 : 1) + (ctype & 4 ? 1 : 0);
-            let pixelCount = width * height;
-            let raw16 = new Uint16Array(pixelCount * channelCount);
+    let transformCanvas = document.createElement('canvas');
+    let transformCtx = transformCanvas.getContext('2d');
 
-            if (depth <= 8) {
-              for (let i = 0; i < raw16.length; i++) {
-                raw16[i] = data[i] * 257;
-              }
-            } else {
-              for (let i = 0; i < raw16.length; i++) {
-                let hi = data[2 * i];
-                let lo = data[2 * i + 1];
-                raw16[i] = (hi << 8) | lo;
-              }
-            }
+    // ===========================================
+    // Workflow Management
+    // ===========================================
+    function updateWorkflowUI() {
+      const steps = ['step1', 'step2', 'step3'];
+      const badge = document.getElementById('statusBadge');
 
-            // Invert
-            for (let i = 0; i < raw16.length; i++) {
-              raw16[i] = 65535 - raw16[i];
-            }
+      steps.forEach((stepId, idx) => {
+        const stepEl = document.getElementById(stepId);
+        stepEl.classList.remove('active', 'completed');
+        if (idx + 1 < state.currentStep) {
+          stepEl.classList.add('completed');
+        } else if (idx + 1 === state.currentStep) {
+          stepEl.classList.add('active');
+        }
+      });
 
-            let final8 = new Uint8ClampedArray(pixelCount * 4);
-            for (let i = 0; i < pixelCount; i++) {
-              let idx16 = i * channelCount;
-              let idx8 = i * 4;
-              final8[idx8] = raw16[idx16] >>> 8;
+      // Update badge
+      badge.className = 'status-badge step' + state.currentStep;
+      badge.setAttribute('data-i18n', 'step' + state.currentStep);
+      badge.textContent = i18n[currentLang]['step' + state.currentStep];
 
-              if (channelCount >= 3) {
-                final8[idx8 + 1] = raw16[idx16 + 1] >>> 8;
-                final8[idx8 + 2] = raw16[idx16 + 2] >>> 8;
-              } else {
-                final8[idx8 + 1] = final8[idx8];
-                final8[idx8 + 2] = final8[idx8];
-              }
+      // Show/hide sections based on step
+      document.getElementById('filmSettingsSection').style.display =
+        state.currentStep >= 2 ? 'block' : 'none';
 
-              final8[idx8 + 3] =
-                channelCount === 4 ? raw16[idx16 + 3] >>> 8 : 255;
-            }
+      const step3Sections = ['whiteBalanceSection', 'toneSection', 'colorSection', 'cmySection', 'advancedSection'];
+      step3Sections.forEach(id => {
+        document.getElementById(id).style.display = state.currentStep >= 3 ? 'block' : 'none';
+      });
 
-            canvas.width = width;
-            canvas.height = height;
-            adjustCanvasDisplay(width, height);
+      // Show convert button after cropping is done
+      document.getElementById('convertSeparator').style.display =
+        state.currentStep === 1 ? 'inline-block' : 'none';
+      document.getElementById('convertBtn').style.display =
+        state.currentStep === 1 ? 'inline-flex' : 'none';
+    }
 
-            let imageData = ctx.createImageData(width, height);
-            imageData.data.set(final8);
-            ctx.putImageData(imageData, 0, 0);
+    function goToStep(step) {
+      state.currentStep = step;
+      updateWorkflowUI();
+    }
 
-            transformCanvas.width = width;
-            transformCanvas.height = height;
-            transformCtx.putImageData(imageData, 0, 0);
+    // ===========================================
+    // Core Negative Processing Algorithm
+    // ===========================================
+    function sampleFilmBase(imageData, x, y, radius = 10) {
+      const { width, height, data } = imageData;
+      let rSum = 0, gSum = 0, bSum = 0, count = 0;
 
-            setupBasePixels(imageData);
+      const startX = Math.max(0, x - radius);
+      const endX = Math.min(width - 1, x + radius);
+      const startY = Math.max(0, y - radius);
+      const endY = Math.min(height - 1, y + radius);
 
-            $("#rotateControls, #cropControls").show();
-          } else {
-            // Handle JPG/JPEG
-            let img = new Image();
-            img.onload = function () {
-              canvas.width = img.width;
-              canvas.height = img.height;
-              adjustCanvasDisplay(img.width, img.height);
-              ctx.drawImage(img, 0, 0);
+      for (let py = startY; py <= endY; py++) {
+        for (let px = startX; px <= endX; px++) {
+          const idx = (py * width + px) * 4;
+          rSum += data[idx];
+          gSum += data[idx + 1];
+          bSum += data[idx + 2];
+          count++;
+        }
+      }
 
-              let rawData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-              let invertedImageData = ctx.createImageData(rawData);
+      return {
+        r: Math.round(rSum / count),
+        g: Math.round(gSum / count),
+        b: Math.round(bSum / count)
+      };
+    }
 
-              for (let i = 0; i < rawData.data.length; i += 4) {
-                invertedImageData.data[i] = 255 - rawData.data[i];
-                invertedImageData.data[i + 1] = 255 - rawData.data[i + 1];
-                invertedImageData.data[i + 2] = 255 - rawData.data[i + 2];
-                invertedImageData.data[i + 3] = 255;
-              }
+    function autoDetectFilmBase(imageData) {
+      const { width, height, data } = imageData;
+      const edgeSize = Math.min(50, Math.floor(Math.min(width, height) * 0.05));
 
-              ctx.putImageData(invertedImageData, 0, 0);
+      let candidates = [];
+      const regions = [
+        { x: width / 2, y: edgeSize / 2 },
+        { x: width / 2, y: height - edgeSize / 2 },
+        { x: edgeSize / 2, y: height / 2 },
+        { x: width - edgeSize / 2, y: height / 2 },
+        { x: edgeSize / 2, y: edgeSize / 2 },
+        { x: width - edgeSize / 2, y: edgeSize / 2 },
+        { x: edgeSize / 2, y: height - edgeSize / 2 },
+        { x: width - edgeSize / 2, y: height - edgeSize / 2 }
+      ];
 
-              transformCanvas.width = canvas.width;
-              transformCanvas.height = canvas.height;
-              transformCtx.putImageData(invertedImageData, 0, 0);
+      for (const region of regions) {
+        const sample = sampleFilmBase(imageData, Math.floor(region.x), Math.floor(region.y), edgeSize);
+        const brightness = (sample.r + sample.g + sample.b) / 3;
+        candidates.push({ ...sample, brightness });
+      }
 
-              setupBasePixels(invertedImageData);
+      candidates.sort((a, b) => b.brightness - a.brightness);
+      return { r: candidates[0].r, g: candidates[0].g, b: candidates[0].b };
+    }
 
-              $("#rotateControls, #cropControls").show();
-            };
-            img.src = event.target.result;
-          }
-        };
+    function convertColorNegative(imageData, filmBase) {
+      const { width, height, data } = imageData;
+      const output = new ImageData(new Uint8ClampedArray(data.length), width, height);
+      const outData = output.data;
 
-        if (fileName.match(/\.(cr2|nef|arw|dng|raw|rw2|png)$/)) {
-          reader.readAsArrayBuffer(file);
+      const baseR = filmBase.r / 255;
+      const baseG = filmBase.g / 255;
+      const baseB = filmBase.b / 255;
+      const eps = 0.001;
+
+      const normalized = new Float32Array(data.length);
+
+      for (let i = 0; i < data.length; i += 4) {
+        let r = data[i] / 255;
+        let g = data[i + 1] / 255;
+        let b = data[i + 2] / 255;
+
+        r = r / Math.max(baseR, eps);
+        g = g / Math.max(baseG, eps);
+        b = b / Math.max(baseB, eps);
+
+        r = Math.min(r, 2);
+        g = Math.min(g, 2);
+        b = Math.min(b, 2);
+
+        r = 1 / Math.max(r, eps);
+        g = 1 / Math.max(g, eps);
+        b = 1 / Math.max(b, eps);
+
+        normalized[i] = r;
+        normalized[i + 1] = g;
+        normalized[i + 2] = b;
+        normalized[i + 3] = 1;
+      }
+
+      let rMin = Infinity, rMax = -Infinity;
+      let gMin = Infinity, gMax = -Infinity;
+      let bMin = Infinity, bMax = -Infinity;
+
+      for (let i = 0; i < normalized.length; i += 4) {
+        rMin = Math.min(rMin, normalized[i]);
+        rMax = Math.max(rMax, normalized[i]);
+        gMin = Math.min(gMin, normalized[i + 1]);
+        gMax = Math.max(gMax, normalized[i + 1]);
+        bMin = Math.min(bMin, normalized[i + 2]);
+        bMax = Math.max(bMax, normalized[i + 2]);
+      }
+
+      const rHist = new Float32Array(1000);
+      const gHist = new Float32Array(1000);
+      const bHist = new Float32Array(1000);
+
+      for (let i = 0; i < normalized.length; i += 4) {
+        const rIdx = Math.min(999, Math.floor((normalized[i] - rMin) / (rMax - rMin + 0.001) * 999));
+        const gIdx = Math.min(999, Math.floor((normalized[i + 1] - gMin) / (gMax - gMin + 0.001) * 999));
+        const bIdx = Math.min(999, Math.floor((normalized[i + 2] - bMin) / (bMax - bMin + 0.001) * 999));
+        rHist[rIdx]++;
+        gHist[gIdx]++;
+        bHist[bIdx]++;
+      }
+
+      const pixelCount = width * height;
+      function findPercentile(hist, target) {
+        let sum = 0;
+        for (let i = 0; i < hist.length; i++) {
+          sum += hist[i];
+          if (sum >= target) return i / 999;
+        }
+        return 1;
+      }
+
+      const rLow = rMin + (rMax - rMin) * findPercentile(rHist, pixelCount * 0.02);
+      const rHigh = rMin + (rMax - rMin) * findPercentile(rHist, pixelCount * 0.98);
+      const gLow = gMin + (gMax - gMin) * findPercentile(gHist, pixelCount * 0.02);
+      const gHigh = gMin + (gMax - gMin) * findPercentile(gHist, pixelCount * 0.98);
+      const bLow = bMin + (bMax - bMin) * findPercentile(bHist, pixelCount * 0.02);
+      const bHigh = bMin + (bMax - bMin) * findPercentile(bHist, pixelCount * 0.98);
+
+      for (let i = 0; i < normalized.length; i += 4) {
+        let r = (normalized[i] - rLow) / (rHigh - rLow + 0.001);
+        let g = (normalized[i + 1] - gLow) / (gHigh - gLow + 0.001);
+        let b = (normalized[i + 2] - bLow) / (bHigh - bLow + 0.001);
+
+        const gamma = 1.1;
+        r = Math.pow(Math.max(0, Math.min(1, r)), gamma);
+        g = Math.pow(Math.max(0, Math.min(1, g)), gamma);
+        b = Math.pow(Math.max(0, Math.min(1, b)), gamma);
+
+        outData[i] = Math.round(r * 255);
+        outData[i + 1] = Math.round(g * 255);
+        outData[i + 2] = Math.round(b * 255);
+        outData[i + 3] = 255;
+      }
+
+      return output;
+    }
+
+    function convertBWNegative(imageData, options = {}) {
+      const { width, height, data } = imageData;
+      const output = new ImageData(new Uint8ClampedArray(data.length), width, height);
+      const outData = output.data;
+
+      const contrast = options.contrast || 1.0;
+      const gamma = options.gamma || 1.0;
+
+      const grayValues = new Float32Array(width * height);
+
+      for (let i = 0; i < data.length; i += 4) {
+        const gray = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) / 255;
+        grayValues[i / 4] = 1 - gray;
+      }
+
+      const sorted = Float32Array.from(grayValues).sort();
+      const p2 = sorted[Math.floor(sorted.length * 0.02)];
+      const p98 = sorted[Math.floor(sorted.length * 0.98)];
+
+      for (let i = 0; i < grayValues.length; i++) {
+        let v = (grayValues[i] - p2) / (p98 - p2 + 0.001);
+        v = Math.max(0, Math.min(1, v));
+        v = ((v - 0.5) * contrast) + 0.5;
+        v = Math.max(0, Math.min(1, v));
+        v = Math.pow(v, gamma);
+
+        const byte = Math.round(v * 255);
+        const idx = i * 4;
+        outData[idx] = byte;
+        outData[idx + 1] = byte;
+        outData[idx + 2] = byte;
+        outData[idx + 3] = 255;
+      }
+
+      return output;
+    }
+
+    function applyAdjustments(imageData) {
+      const { width, height, data } = imageData;
+      const output = new ImageData(new Uint8ClampedArray(data.length), width, height);
+      const outData = output.data;
+
+      const preset = FILM_PRESETS[state.filmPreset];
+      const presetChars = preset.characteristics || {};
+
+      const exposureMult = Math.pow(2, state.exposure);
+      const contrastFactor = 1 + (state.contrast / 100);
+      const tempFactor = (state.temperature + (presetChars.warmth || 0) * 100) / 100;
+      const tintFactor = state.tint / 100;
+      const satFactor = 1 + ((state.saturation + (presetChars.saturation || 0) * 100) / 100);
+      const vibFactor = state.vibrance / 100;
+      const highlightsFactor = state.highlights / 100;
+      const shadowsFactor = state.shadows / 100;
+
+      for (let i = 0; i < data.length; i += 4) {
+        let r = data[i];
+        let g = data[i + 1];
+        let b = data[i + 2];
+
+        // Apply white balance
+        r *= state.wbR;
+        g *= state.wbG;
+        b *= state.wbB;
+
+        // Apply exposure
+        r *= exposureMult;
+        g *= exposureMult;
+        b *= exposureMult;
+
+        // Apply contrast
+        r = ((r / 255 - 0.5) * contrastFactor + 0.5) * 255;
+        g = ((g / 255 - 0.5) * contrastFactor + 0.5) * 255;
+        b = ((b / 255 - 0.5) * contrastFactor + 0.5) * 255;
+
+        // Apply highlights/shadows
+        const luma = (r * 0.299 + g * 0.587 + b * 0.114) / 255;
+        if (luma > 0.5 && highlightsFactor !== 0) {
+          const mult = 1 + highlightsFactor * (luma - 0.5) * 2;
+          r *= mult; g *= mult; b *= mult;
+        }
+        if (luma < 0.5 && shadowsFactor !== 0) {
+          const mult = 1 + shadowsFactor * (0.5 - luma) * 2;
+          r *= mult; g *= mult; b *= mult;
+        }
+
+        // Apply temperature/tint
+        r = r * (1 + tempFactor * 0.3);
+        b = b * (1 - tempFactor * 0.3);
+        g = g * (1 + tintFactor * 0.3);
+
+        r = Math.max(0, Math.min(255, r));
+        g = Math.max(0, Math.min(255, g));
+        b = Math.max(0, Math.min(255, b));
+
+        // HSL for saturation/vibrance
+        let hsl = rgbToHsl(r, g, b);
+        hsl[1] *= satFactor;
+        if (vibFactor >= 0) {
+          hsl[1] += (1 - hsl[1]) * vibFactor;
         } else {
-          reader.readAsDataURL(file);
+          hsl[1] *= (1 + vibFactor);
         }
-      });
+        hsl[1] = Math.max(0, Math.min(1, hsl[1]));
+        [r, g, b] = hslToRgb(hsl[0], hsl[1], hsl[2]);
 
-      // Creates full-resolution basePixels and a small preview
-      function setupBasePixels(fullImageData) {
-        basePixels = new Float32Array(fullImageData.data);
+        // CMY
+        let c = 1 - (r / 255);
+        let m = 1 - (g / 255);
+        let y = 1 - (b / 255);
+        c = Math.max(0, Math.min(1, c + state.cyan / 100));
+        m = Math.max(0, Math.min(1, m + state.magenta / 100));
+        y = Math.max(0, Math.min(1, y + state.yellow / 100));
+        r = (1 - c) * 255;
+        g = (1 - m) * 255;
+        b = (1 - y) * 255;
 
-        const w = fullImageData.width;
-        const h = fullImageData.height;
-        const pw = Math.max(1, Math.floor(w / previewScaleFactor));
-        const ph = Math.max(1, Math.floor(h / previewScaleFactor));
+        // Curves
+        r = state.curves.r[Math.round(Math.max(0, Math.min(255, r)))];
+        g = state.curves.g[Math.round(Math.max(0, Math.min(255, g)))];
+        b = state.curves.b[Math.round(Math.max(0, Math.min(255, b)))];
 
-        previewCanvas.width = pw;
-        previewCanvas.height = ph;
-
-        let tmp = document.createElement("canvas");
-        tmp.width = w;
-        tmp.height = h;
-        tmp.getContext("2d").putImageData(fullImageData, 0, 0);
-
-        previewCtx.clearRect(0, 0, pw, ph);
-        previewCtx.drawImage(tmp, 0, 0, pw, ph);
-
-        let previewData = previewCtx.getImageData(0, 0, pw, ph);
-        basePixelsPreview = new Float32Array(previewData.data);
+        outData[i] = r;
+        outData[i + 1] = g;
+        outData[i + 2] = b;
+        outData[i + 3] = 255;
       }
 
-      // Rotation preview (without updating transformCanvas)
-      function previewRotation(angleRad) {
-        let w = transformCanvas.width;
-        let h = transformCanvas.height;
-        let cos = Math.abs(Math.cos(angleRad));
-        let sin = Math.abs(Math.sin(angleRad));
-        let newW = Math.ceil(w * cos + h * sin);
-        let newH = Math.ceil(w * sin + h * cos);
+      return output;
+    }
 
-        let offCanvas = document.createElement("canvas");
-        offCanvas.width = newW;
-        offCanvas.height = newH;
-        let offCtx = offCanvas.getContext("2d");
-        offCtx.clearRect(0, 0, newW, newH);
+    // ===========================================
+    // Color Space Conversions
+    // ===========================================
+    function rgbToHsl(r, g, b) {
+      r /= 255; g /= 255; b /= 255;
+      const max = Math.max(r, g, b), min = Math.min(r, g, b);
+      let h, s, l = (max + min) / 2;
 
-        offCtx.save();
-        offCtx.translate(newW / 2, newH / 2);
-        offCtx.rotate(angleRad);
-        offCtx.drawImage(transformCanvas, -w / 2, -h / 2);
-        offCtx.restore();
+      if (max === min) {
+        h = s = 0;
+      } else {
+        const d = max - min;
+        s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+        switch (max) {
+          case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+          case g: h = (b - r) / d + 2; break;
+          case b: h = (r - g) / d + 4; break;
+        }
+        h /= 6;
+      }
+      return [h, s, l];
+    }
 
-        canvas.width = newW;
-        canvas.height = newH;
-        adjustCanvasDisplay(newW, newH);
-        ctx.clearRect(0, 0, newW, newH);
-        ctx.drawImage(offCanvas, 0, 0);
+    function hslToRgb(h, s, l) {
+      let r, g, b;
+      if (s === 0) {
+        r = g = b = l;
+      } else {
+        function hue2rgb(p, q, t) {
+          if (t < 0) t += 1;
+          if (t > 1) t -= 1;
+          if (t < 1/6) return p + (q - p) * 6 * t;
+          if (t < 1/2) return q;
+          if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+          return p;
+        }
+        const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+        const p = 2 * l - q;
+        r = hue2rgb(p, q, h + 1/3);
+        g = hue2rgb(p, q, h);
+        b = hue2rgb(p, q, h - 1/3);
+      }
+      return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
+    }
+
+    // ===========================================
+    // Histogram
+    // ===========================================
+    function renderHistogram(imageData) {
+      const { data } = imageData;
+      const histR = new Uint32Array(256);
+      const histG = new Uint32Array(256);
+      const histB = new Uint32Array(256);
+
+      for (let i = 0; i < data.length; i += 4) {
+        histR[data[i]]++;
+        histG[data[i + 1]]++;
+        histB[data[i + 2]]++;
       }
 
-      function onRotateChanged(val) {
-        $rotateVal.text(val);
-        let angle = parseFloat(val) * Math.PI / 180;
-        previewRotation(angle);
+      let maxVal = 0;
+      for (let i = 0; i < 256; i++) {
+        maxVal = Math.max(maxVal, histR[i], histG[i], histB[i]);
       }
 
-      $rotate.on("input", function () {
-        let v = $(this).val();
-        $rotateInput.val(v);
-        onRotateChanged(v);
+      const cw = histogramCanvas.width = histogramCanvas.offsetWidth * 2;
+      const ch = histogramCanvas.height = histogramCanvas.offsetHeight * 2;
+      histogramCtx.fillStyle = '#111';
+      histogramCtx.fillRect(0, 0, cw, ch);
+
+      const barWidth = cw / 256;
+      const scale = ch / maxVal;
+
+      function drawChannel(hist, color) {
+        histogramCtx.fillStyle = color;
+        for (let i = 0; i < 256; i++) {
+          const h = hist[i] * scale;
+          histogramCtx.fillRect(i * barWidth, ch - h, barWidth, h);
+        }
+      }
+
+      histogramCtx.globalAlpha = 0.5;
+      drawChannel(histR, '#ff6b6b');
+      drawChannel(histG, '#69db7c');
+      drawChannel(histB, '#74c0fc');
+      histogramCtx.globalAlpha = 1;
+    }
+
+    // ===========================================
+    // Curve Editor (Lightroom-style with control points)
+    // ===========================================
+    let currentCurveChannel = 'r';
+    let draggingPoint = null;
+    let hoveredPoint = null;
+
+    // Monotonic cubic spline interpolation
+    function computeSpline(points) {
+      const n = points.length;
+      if (n < 2) return (x) => x;
+
+      // Sort points by x
+      points = [...points].sort((a, b) => a.x - b.x);
+
+      const xs = points.map(p => p.x);
+      const ys = points.map(p => p.y);
+
+      // Calculate slopes
+      const dxs = [], dys = [], ms = [];
+      for (let i = 0; i < n - 1; i++) {
+        dxs.push(xs[i + 1] - xs[i]);
+        dys.push(ys[i + 1] - ys[i]);
+        ms.push(dys[i] / dxs[i]);
+      }
+
+      // Calculate degree-1 coefficients
+      const c1s = [ms[0]];
+      for (let i = 0; i < dxs.length - 1; i++) {
+        const m = ms[i], mNext = ms[i + 1];
+        if (m * mNext <= 0) {
+          c1s.push(0);
+        } else {
+          const dx = dxs[i], dxNext = dxs[i + 1], common = dx + dxNext;
+          c1s.push(3 * common / ((common + dxNext) / m + (common + dx) / mNext));
+        }
+      }
+      c1s.push(ms[ms.length - 1]);
+
+      // Calculate degree-2 and degree-3 coefficients
+      const c2s = [], c3s = [];
+      for (let i = 0; i < c1s.length - 1; i++) {
+        const c1 = c1s[i], m = ms[i], invDx = 1 / dxs[i], common = c1 + c1s[i + 1] - 2 * m;
+        c2s.push((m - c1 - common) * invDx);
+        c3s.push(common * invDx * invDx);
+      }
+
+      // Return interpolation function
+      return function(x) {
+        let i = xs.length - 1;
+        if (x <= xs[0]) return ys[0];
+        if (x >= xs[n - 1]) return ys[n - 1];
+
+        // Binary search
+        let low = 0, high = c3s.length - 1;
+        while (low <= high) {
+          const mid = Math.floor((low + high) / 2);
+          if (xs[mid] < x) low = mid + 1;
+          else high = mid - 1;
+        }
+        i = Math.max(0, high);
+
+        const diff = x - xs[i];
+        return ys[i] + c1s[i] * diff + c2s[i] * diff * diff + c3s[i] * diff * diff * diff;
+      };
+    }
+
+    // Update the 256-value curve from control points
+    function updateCurveFromPoints(channel) {
+      const points = state.curvePoints[channel];
+      const curve = state.curves[channel];
+      const spline = computeSpline(points);
+
+      for (let i = 0; i < 256; i++) {
+        curve[i] = Math.max(0, Math.min(255, Math.round(spline(i))));
+      }
+    }
+
+    function renderCurve() {
+      const cw = curveCanvas.width = curveCanvas.offsetWidth * 2;
+      const ch = curveCanvas.height = curveCanvas.offsetHeight * 2;
+
+      curveCtx.fillStyle = '#111';
+      curveCtx.fillRect(0, 0, cw, ch);
+
+      // Grid lines
+      curveCtx.strokeStyle = '#333';
+      curveCtx.lineWidth = 1;
+      for (let i = 0; i <= 4; i++) {
+        const x = (i / 4) * cw;
+        const y = (i / 4) * ch;
+        curveCtx.beginPath();
+        curveCtx.moveTo(x, 0);
+        curveCtx.lineTo(x, ch);
+        curveCtx.stroke();
+        curveCtx.beginPath();
+        curveCtx.moveTo(0, y);
+        curveCtx.lineTo(cw, y);
+        curveCtx.stroke();
+      }
+
+      // Diagonal reference line
+      curveCtx.strokeStyle = '#444';
+      curveCtx.beginPath();
+      curveCtx.moveTo(0, ch);
+      curveCtx.lineTo(cw, 0);
+      curveCtx.stroke();
+
+      // Draw the curve
+      const colors = { r: '#ff6b6b', g: '#69db7c', b: '#74c0fc' };
+      curveCtx.strokeStyle = colors[currentCurveChannel];
+      curveCtx.lineWidth = 2;
+      curveCtx.beginPath();
+
+      const curve = state.curves[currentCurveChannel];
+      for (let i = 0; i < 256; i++) {
+        const x = (i / 255) * cw;
+        const y = ch - (curve[i] / 255) * ch;
+        if (i === 0) curveCtx.moveTo(x, y);
+        else curveCtx.lineTo(x, y);
+      }
+      curveCtx.stroke();
+
+      // Draw control points
+      const points = state.curvePoints[currentCurveChannel];
+      points.forEach((point, index) => {
+        const px = (point.x / 255) * cw;
+        const py = ch - (point.y / 255) * ch;
+        const isHovered = hoveredPoint === index;
+        const isDragging = draggingPoint === index;
+
+        // Point circle
+        curveCtx.beginPath();
+        curveCtx.arc(px, py, isHovered || isDragging ? 8 : 6, 0, Math.PI * 2);
+        curveCtx.fillStyle = isDragging ? '#fff' : (isHovered ? colors[currentCurveChannel] : '#222');
+        curveCtx.fill();
+        curveCtx.strokeStyle = colors[currentCurveChannel];
+        curveCtx.lineWidth = 2;
+        curveCtx.stroke();
       });
+    }
 
-      $rotateInput.on("input", function () {
-        let v = $(this).val();
-        $rotate.val(v);
-        onRotateChanged(v);
+    function setCurvePreset(preset) {
+      let points;
+      switch (preset) {
+        case 'linear':
+          points = [{ x: 0, y: 0 }, { x: 255, y: 255 }];
+          break;
+        case 'scurve':
+          points = [{ x: 0, y: 0 }, { x: 64, y: 48 }, { x: 192, y: 208 }, { x: 255, y: 255 }];
+          break;
+        case 'log':
+          points = [{ x: 0, y: 0 }, { x: 64, y: 128 }, { x: 128, y: 192 }, { x: 255, y: 255 }];
+          break;
+        default:
+          points = [{ x: 0, y: 0 }, { x: 255, y: 255 }];
+      }
+      state.curvePoints[currentCurveChannel] = points;
+      updateCurveFromPoints(currentCurveChannel);
+      renderCurve();
+      scheduleFullUpdate();
+    }
+
+    document.querySelectorAll('.curve-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('.curve-tab').forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+        currentCurveChannel = tab.dataset.channel;
+        draggingPoint = null;
+        hoveredPoint = null;
+        renderCurve();
       });
+    });
 
-      // Apply rotation
-      $applyRotate.on("click", function () {
-        let rotatedData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        transformCanvas.width = canvas.width;
-        transformCanvas.height = canvas.height;
-        transformCtx.putImageData(rotatedData, 0, 0);
+    document.querySelectorAll('.curve-preset-btn').forEach(btn => {
+      btn.addEventListener('click', () => setCurvePreset(btn.dataset.preset));
+    });
 
-        // Reset rotation UI
-        $rotate.val(0);
-        $rotateInput.val(0);
-        $rotateVal.text("0");
-
-        setupBasePixels(rotatedData);
+    document.getElementById('resetCurveBtn').addEventListener('click', () => {
+      // Reset ALL channels, not just the current one
+      ['r', 'g', 'b'].forEach(channel => {
+        state.curvePoints[channel] = [{ x: 0, y: 0 }, { x: 255, y: 255 }];
+        updateCurveFromPoints(channel);
       });
+      renderCurve();
+      scheduleFullUpdate();
+    });
 
-      // ========== Crop logic ==========
-      $("#startCrop").on("click", function () {
-        cropping = true;
-        $cropOverlay.css({
-          display: "block",
-          left: 0,
-          top: 0,
-          width: 0,
-          height: 0
+    // Get canvas position from mouse event
+    function getCurvePosition(e) {
+      const rect = curveCanvas.getBoundingClientRect();
+      const scaleX = curveCanvas.width / rect.width;
+      const scaleY = curveCanvas.height / rect.height;
+      const canvasX = (e.clientX - rect.left) * scaleX;
+      const canvasY = (e.clientY - rect.top) * scaleY;
+      return {
+        x: Math.max(0, Math.min(255, Math.round((canvasX / curveCanvas.width) * 255))),
+        y: Math.max(0, Math.min(255, 255 - Math.round((canvasY / curveCanvas.height) * 255))),
+        canvasX,
+        canvasY
+      };
+    }
+
+    // Find point near position
+    function findNearPoint(canvasX, canvasY, threshold = 15) {
+      const points = state.curvePoints[currentCurveChannel];
+      const cw = curveCanvas.width;
+      const ch = curveCanvas.height;
+
+      for (let i = 0; i < points.length; i++) {
+        const px = (points[i].x / 255) * cw;
+        const py = ch - (points[i].y / 255) * ch;
+        const dist = Math.sqrt((canvasX - px) ** 2 + (canvasY - py) ** 2);
+        if (dist < threshold) return i;
+      }
+      return -1;
+    }
+
+    curveCanvas.addEventListener('mousedown', (e) => {
+      const pos = getCurvePosition(e);
+      const nearPoint = findNearPoint(pos.canvasX, pos.canvasY);
+
+      if (nearPoint >= 0) {
+        // Start dragging existing point
+        draggingPoint = nearPoint;
+      } else {
+        // Add new point
+        const points = state.curvePoints[currentCurveChannel];
+        const newPoint = { x: pos.x, y: pos.y };
+
+        // Insert in sorted order
+        let insertIndex = points.findIndex(p => p.x > pos.x);
+        if (insertIndex === -1) insertIndex = points.length;
+        points.splice(insertIndex, 0, newPoint);
+
+        draggingPoint = insertIndex;
+        updateCurveFromPoints(currentCurveChannel);
+      }
+      renderCurve();
+    });
+
+    curveCanvas.addEventListener('mousemove', (e) => {
+      const pos = getCurvePosition(e);
+
+      if (draggingPoint !== null) {
+        const points = state.curvePoints[currentCurveChannel];
+        const point = points[draggingPoint];
+
+        // Endpoints can only move vertically
+        if (draggingPoint === 0) {
+          point.y = pos.y;
+        } else if (draggingPoint === points.length - 1) {
+          point.y = pos.y;
+        } else {
+          // Middle points: constrain x between neighbors
+          const prevX = points[draggingPoint - 1].x + 1;
+          const nextX = points[draggingPoint + 1].x - 1;
+          point.x = Math.max(prevX, Math.min(nextX, pos.x));
+          point.y = pos.y;
+        }
+
+        updateCurveFromPoints(currentCurveChannel);
+        renderCurve();
+        schedulePreviewUpdate();
+      } else {
+        // Update hover state
+        const nearPoint = findNearPoint(pos.canvasX, pos.canvasY);
+        if (nearPoint !== hoveredPoint) {
+          hoveredPoint = nearPoint;
+          renderCurve();
+        }
+        curveCanvas.style.cursor = nearPoint >= 0 ? 'grab' : 'crosshair';
+      }
+    });
+
+    curveCanvas.addEventListener('mouseup', () => {
+      if (draggingPoint !== null) {
+        draggingPoint = null;
+        scheduleFullUpdate();
+      }
+    });
+
+    curveCanvas.addEventListener('mouseleave', () => {
+      if (draggingPoint !== null) {
+        draggingPoint = null;
+        scheduleFullUpdate();
+      }
+      hoveredPoint = null;
+      renderCurve();
+    });
+
+    // Double-click to remove point (except endpoints)
+    curveCanvas.addEventListener('dblclick', (e) => {
+      const pos = getCurvePosition(e);
+      const nearPoint = findNearPoint(pos.canvasX, pos.canvasY);
+
+      if (nearPoint > 0 && nearPoint < state.curvePoints[currentCurveChannel].length - 1) {
+        state.curvePoints[currentCurveChannel].splice(nearPoint, 1);
+        updateCurveFromPoints(currentCurveChannel);
+        renderCurve();
+        scheduleFullUpdate();
+      }
+    });
+
+    // ===========================================
+    // Image Processing Pipeline
+    // ===========================================
+    let updateScheduled = false;
+    let fullUpdateScheduled = false;
+
+    function schedulePreviewUpdate() {
+      if (!updateScheduled) {
+        updateScheduled = true;
+        requestAnimationFrame(() => {
+          updatePreview();
+          updateScheduled = false;
         });
-        $("#applyCrop, #cancelCrop").show();
-        $(this).hide();
-      });
+      }
+    }
 
-      let containerOffset = null;
+    function scheduleFullUpdate() {
+      if (!fullUpdateScheduled) {
+        fullUpdateScheduled = true;
+        setTimeout(() => {
+          updateFull();
+          fullUpdateScheduled = false;
+        }, 300);
+      }
+    }
 
-      $canvasContainer.on("mousedown", function (e) {
-        if (!cropping) return;
-        croppingActive = true;
-        containerOffset = $canvasContainer.offset();
-        let scaleX = canvas.width / $canvas.width();
-        let scaleY = canvas.height / $canvas.height();
-        cropStart = {
-          x: (e.pageX - containerOffset.left) * scaleX,
-          y: (e.pageY - containerOffset.top) * scaleY
-        };
-      });
+    function updatePreview() {
+      if (!state.processedImageData) return;
+      const adjusted = applyAdjustments(state.processedImageData);
+      state.displayImageData = adjusted;
+      ctx.putImageData(adjusted, 0, 0);
+      renderHistogram(adjusted);
+    }
 
-      $canvasContainer.on("mousemove", function (e) {
-        if (!cropping || !croppingActive) return;
+    function updateFull() {
+      if (!state.processedImageData) return;
+      const adjusted = applyAdjustments(state.processedImageData);
+      state.displayImageData = adjusted;
+      ctx.putImageData(adjusted, 0, 0);
+      renderHistogram(adjusted);
 
-        let scaleX = canvas.width / $canvas.width();
-        let scaleY = canvas.height / $canvas.height();
-        let current = {
-          x: (e.pageX - containerOffset.left) * scaleX,
-          y: (e.pageY - containerOffset.top) * scaleY
-        };
-        let leftInternal = Math.min(cropStart.x, current.x);
-        let topInternal = Math.min(cropStart.y, current.y);
-        let widthInternal = Math.abs(current.x - cropStart.x);
-        let heightInternal = Math.abs(current.y - cropStart.y);
+      transformCanvas.width = canvas.width;
+      transformCanvas.height = canvas.height;
+      transformCtx.putImageData(adjusted, 0, 0);
+    }
 
-        let leftDisp = leftInternal / scaleX;
-        let topDisp = topInternal / scaleY;
-        let widthDisp = widthInternal / scaleX;
-        let heightDisp = heightInternal / scaleY;
+    function processNegative() {
+      const sourceData = state.croppedImageData || state.originalImageData;
+      if (!sourceData) return;
 
-        $cropOverlay.css({
-          left: leftDisp,
-          top: topDisp,
-          width: widthDisp,
-          height: heightDisp
+      let processed;
+      const preset = FILM_PRESETS[state.filmPreset];
+
+      if (state.filmType === 'bw' || preset.type === 'bw') {
+        processed = convertBWNegative(sourceData, {
+          contrast: preset.contrast || 1.0,
+          gamma: preset.gamma || 1.0
         });
-      });
-
-      $canvasContainer.on("mouseup", function () {
-        if (!cropping) return;
-        croppingActive = false;
-      });
-
-      $("#cancelCrop").on("click", function () {
-        cropping = false;
-        $cropOverlay.hide();
-        $("#applyCrop, #cancelCrop").hide();
-        $("#startCrop").show();
-      });
-
-      $("#applyCrop").on("click", function () {
-        let scaleX = canvas.width / $canvas.width();
-        let scaleY = canvas.height / $canvas.height();
-        let overlay = $cropOverlay;
-
-        let leftDisp = parseFloat(overlay.css("left"));
-        let topDisp = parseFloat(overlay.css("top"));
-        let widthDisp = parseFloat(overlay.css("width"));
-        let heightDisp = parseFloat(overlay.css("height"));
-
-        let leftInternal = leftDisp * scaleX;
-        let topInternal = topDisp * scaleY;
-        let widthInternal = widthDisp * scaleX;
-        let heightInternal = heightDisp * scaleY;
-
-        if (widthInternal <= 0 || heightInternal <= 0) return;
-
-        let croppedData = transformCtx.getImageData(
-          leftInternal,
-          topInternal,
-          widthInternal,
-          heightInternal
-        );
-        canvas.width = widthInternal;
-        canvas.height = heightInternal;
-        adjustCanvasDisplay(widthInternal, heightInternal);
-        ctx.putImageData(croppedData, 0, 0);
-
-        transformCanvas.width = widthInternal;
-        transformCanvas.height = heightInternal;
-        transformCtx.putImageData(croppedData, 0, 0);
-
-        setupBasePixels(croppedData);
-
-        cropping = false;
-        $cropOverlay.hide();
-        $("#applyCrop, #cancelCrop").hide();
-        $("#startCrop").show();
-      });
-
-      // ========== White balance by clicking a pixel ==========
-      $canvas.on("click", function (e) {
-        if (cropping) return;
-
-        let offset = $canvas.offset();
-        let scaleX = canvas.width / $canvas.width();
-        let scaleY = canvas.height / $canvas.height();
-        let x = Math.floor((e.pageX - offset.left) * scaleX);
-        let y = Math.floor((e.pageY - offset.top) * scaleY);
-
-        let data = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        let d = data.data;
-        let idx = (y * canvas.width + x) * 4;
-        let clickedR = d[idx];
-        let clickedG = d[idx + 1];
-        let clickedB = d[idx + 2];
-        let gray = (clickedR + clickedG + clickedB) / 3;
-        let sR = clickedR ? gray / clickedR : 1;
-        let sG = clickedG ? gray / clickedG : 1;
-        let sB = clickedB ? gray / clickedB : 1;
-
-        let total = canvas.width * canvas.height;
-        let corrected = new Float32Array(d.length);
-
-        for (let i = 0; i < total; i++) {
-          corrected[i * 4] = d[i * 4] * sR;
-          corrected[i * 4 + 1] = d[i * 4 + 1] * sG;
-          corrected[i * 4 + 2] = d[i * 4 + 2] * sB;
-          corrected[i * 4 + 3] = 255;
-        }
-
-        let rMin = Infinity;
-        let rMax = -Infinity;
-        let gMin = Infinity;
-        let gMax = -Infinity;
-        let bMin = Infinity;
-        let bMax = -Infinity;
-
-        for (let i = 0; i < total; i++) {
-          let rr = corrected[i * 4];
-          let gg = corrected[i * 4 + 1];
-          let bb = corrected[i * 4 + 2];
-          if (rr < rMin) rMin = rr;
-          if (rr > rMax) rMax = rr;
-          if (gg < gMin) gMin = gg;
-          if (gg > gMax) gMax = gg;
-          if (bb < bMin) bMin = bb;
-          if (bb > bMax) bMax = bb;
-        }
-
-        let finalImg = ctx.createImageData(canvas.width, canvas.height);
-        for (let i = 0; i < total; i++) {
-          finalImg.data[i * 4] = ((corrected[i * 4] - rMin) / (rMax - rMin)) * 255;
-          finalImg.data[i * 4 + 1] =
-            ((corrected[i * 4 + 1] - gMin) / (gMax - gMin)) * 255;
-          finalImg.data[i * 4 + 2] =
-            ((corrected[i * 4 + 2] - bMin) / (bMax - bMin)) * 255;
-          finalImg.data[i * 4 + 3] = 255;
-        }
-
-        ctx.putImageData(finalImg, 0, 0);
-
-        transformCanvas.width = canvas.width;
-        transformCanvas.height = canvas.height;
-        transformCtx.putImageData(finalImg, 0, 0);
-
-        setupBasePixels(finalImg);
-
-        $adjustControls.show();
-        $downloadDiv.show();
-      });
-
-      // ========== Real-time scaled preview for smoother slider operation ==========
-      function updateAdjustPreview() {
-        if (!basePixelsPreview) return;
-
-        let pw = previewCanvas.width;
-        let ph = previewCanvas.height;
-        let total = pw * ph;
-        let adjusted = previewCtx.createImageData(pw, ph);
-
-        let temp = parseInt($("#temp").val()) || 0;
-        let tint = parseInt($("#tint").val()) || 0;
-        let vibranceVal = parseInt($("#vibrance").val()) || 0;
-        let saturationVal = parseInt($("#saturation").val()) || 0;
-        let cyanVal = parseInt($("#cyan").val()) || 0;
-        let magentaVal = parseInt($("#magenta").val()) || 0;
-        let yellowVal = parseInt($("#yellow").val()) || 0;
-
-        $("#tempVal").text(temp);
-        $("#tempInput").val(temp);
-        $("#tintVal").text(tint);
-        $("#tintInput").val(tint);
-        $("#vibranceVal").text(vibranceVal);
-        $("#vibranceInput").val(vibranceVal);
-        $("#saturationVal").text(saturationVal);
-        $("#saturationInput").val(saturationVal);
-        $("#cyanVal").text(cyanVal);
-        $("#cyanInput").val(cyanVal);
-        $("#magentaVal").text(magentaVal);
-        $("#magentaInput").val(magentaVal);
-        $("#yellowVal").text(yellowVal);
-        $("#yellowInput").val(yellowVal);
-
-        let tempFactor = temp / 100;
-        let tintFactor = tint / 100;
-        let satFactor = 1 + saturationVal / 100;
-        let vibFactor = vibranceVal / 100;
-
-        function rgbToHsl(r, g, b) {
-          r /= 255;
-          g /= 255;
-          b /= 255;
-          let max = Math.max(r, g, b);
-          let min = Math.min(r, g, b);
-          let h,
-            s,
-            l = (max + min) / 2;
-
-          if (max === min) {
-            h = s = 0;
-          } else {
-            let d = max - min;
-            s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-            switch (max) {
-              case r:
-                h = (g - b) / d + (g < b ? 6 : 0);
-                break;
-              case g:
-                h = (b - r) / d + 2;
-                break;
-              case b:
-                h = (r - g) / d + 4;
-                break;
-            }
-            h /= 6;
-          }
-          return [h, s, l];
-        }
-
-        function hslToRgb(h, s, l) {
-          let r, g, b;
-          if (s === 0) {
-            r = g = b = l;
-          } else {
-            let hue2rgb = (p, q, t) => {
-              if (t < 0) t += 1;
-              if (t > 1) t -= 1;
-              if (t < 1 / 6) return p + (q - p) * 6 * t;
-              if (t < 1 / 2) return q;
-              if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
-              return p;
-            };
-            let q = l < 0.5 ? l * (1 + s) : l + s - l * s;
-            let p = 2 * l - q;
-            r = hue2rgb(p, q, h + 1 / 3);
-            g = hue2rgb(p, q, h);
-            b = hue2rgb(p, q, h - 1 / 3);
-          }
-          return [
-            Math.round(r * 255),
-            Math.round(g * 255),
-            Math.round(b * 255)
-          ];
-        }
-
-        let d = basePixelsPreview;
-
-        for (let i = 0; i < total; i++) {
-          let idx = i * 4;
-          let r = d[idx];
-          let g = d[idx + 1];
-          let b = d[idx + 2];
-
-          let newR = r * (1 + tempFactor);
-          let newG = g * (1 + tintFactor);
-          let newB = b * (1 - tempFactor);
-
-          newR = Math.min(255, Math.max(0, newR));
-          newG = Math.min(255, Math.max(0, newG));
-          newB = Math.min(255, Math.max(0, newB));
-
-          let hsl = rgbToHsl(newR, newG, newB);
-          hsl[1] *= satFactor;
-
-          if (vibFactor >= 0) {
-            hsl[1] += (1 - hsl[1]) * vibFactor;
-          } else {
-            hsl[1] *= 1 + vibFactor;
-          }
-          hsl[1] = Math.max(0, Math.min(1, hsl[1]));
-
-          let [R2, G2, B2] = hslToRgb(hsl[0], hsl[1], hsl[2]);
-
-          let C = 1 - R2 / 255;
-          let M = 1 - G2 / 255;
-          let Y = 1 - B2 / 255;
-
-          let newC = Math.max(0, Math.min(1, C + cyanVal / 100));
-          let newM = Math.max(0, Math.min(1, M + magentaVal / 100));
-          let newY = Math.max(0, Math.min(1, Y + yellowVal / 100));
-
-          let finalR = 255 * (1 - newC);
-          let finalG = 255 * (1 - newM);
-          let finalB = 255 * (1 - newY);
-
-          adjusted.data[idx] = finalR;
-          adjusted.data[idx + 1] = finalG;
-          adjusted.data[idx + 2] = finalB;
-          adjusted.data[idx + 3] = 255;
-        }
-
-        previewCtx.putImageData(adjusted, 0, 0);
-
-        let W = canvas.width;
-        let H = canvas.height;
-        ctx.clearRect(0, 0, W, H);
-        ctx.imageSmoothingEnabled = true;
-        ctx.drawImage(previewCanvas, 0, 0, W, H);
+      } else {
+        processed = convertColorNegative(sourceData, state.filmBase);
       }
 
-      // Full-resolution update after user stops moving sliders
-      const doFullResolutionUpdate = debounce(function () {
-        if (!basePixels) return;
+      state.processedImageData = processed;
+      canvas.width = processed.width;
+      canvas.height = processed.height;
+      updateFull();
 
-        let w = canvas.width;
-        let h = canvas.height;
-        let total = w * h;
-        let adjusted = ctx.createImageData(w, h);
+      goToStep(3);
+    }
 
-        let temp = parseInt($("#temp").val()) || 0;
-        let tint = parseInt($("#tint").val()) || 0;
-        let vibranceVal = parseInt($("#vibrance").val()) || 0;
-        let saturationVal = parseInt($("#saturation").val()) || 0;
-        let cyanVal = parseInt($("#cyan").val()) || 0;
-        let magentaVal = parseInt($("#magenta").val()) || 0;
-        let yellowVal = parseInt($("#yellow").val()) || 0;
+    // ===========================================
+    // Canvas Display
+    // ===========================================
+    function adjustCanvasDisplay(w, h) {
+      const container = document.getElementById('canvasContainer');
+      const maxWidth = container.clientWidth - 20;
+      const maxHeight = container.clientHeight - 20;
+      const scale = Math.min(maxWidth / w, maxHeight / h, 1);
+      canvas.style.width = (w * scale) + 'px';
+      canvas.style.height = (h * scale) + 'px';
+    }
 
-        let tempFactor = temp / 100;
-        let tintFactor = tint / 100;
-        let satFactor = 1 + saturationVal / 100;
-        let vibFactor = vibranceVal / 100;
+    function displayNegative(imageData) {
+      canvas.width = imageData.width;
+      canvas.height = imageData.height;
+      ctx.putImageData(imageData, 0, 0);
+      adjustCanvasDisplay(imageData.width, imageData.height);
 
-        function rgbToHsl(r, g, b) {
-          r /= 255;
-          g /= 255;
-          b /= 255;
-          let max = Math.max(r, g, b);
-          let min = Math.min(r, g, b);
-          let h,
-            s,
-            l = (max + min) / 2;
+      transformCanvas.width = imageData.width;
+      transformCanvas.height = imageData.height;
+      transformCtx.putImageData(imageData, 0, 0);
+    }
 
-          if (max === min) {
-            h = s = 0;
-          } else {
-            let d = max - min;
-            s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-            switch (max) {
-              case r:
-                h = (g - b) / d + (g < b ? 6 : 0);
-                break;
-              case g:
-                h = (b - r) / d + 2;
-                break;
-              case b:
-                h = (r - g) / d + 4;
-                break;
+    // ===========================================
+    // File Loading
+    // ===========================================
+    async function loadFile(file) {
+      const placeholder = document.getElementById('uploadPlaceholder');
+      placeholder.innerHTML = `<p>${i18n[currentLang].processing}</p>`;
+
+      try {
+        const arrayBuffer = await file.arrayBuffer();
+        const fileName = file.name.toLowerCase();
+
+        let imageData;
+
+        if (['.cr2', '.nef', '.arw', '.dng', '.raw', '.rw2'].some(ext => fileName.endsWith(ext))) {
+          imageData = await loadRawFile(arrayBuffer, fileName);
+        } else if (file.type === 'image/png') {
+          imageData = loadPngFile(arrayBuffer);
+        } else {
+          imageData = await loadStandardImage(file);
+        }
+
+        if (imageData) {
+          state.originalImageData = imageData;
+          state.croppedImageData = null;
+          state.processedImageData = null;
+          state.filmBaseSet = false;
+
+          displayNegative(imageData);
+          showImageUI();
+          goToStep(1);
+        }
+      } catch (err) {
+        console.error('Error loading file:', err);
+        placeholder.innerHTML = `<p style="color: var(--danger);">Error loading file</p>`;
+      }
+    }
+
+    async function loadRawFile(buffer, fileName) {
+      if (fileName.endsWith('.dng')) {
+        const textSnippet = new TextDecoder().decode(buffer.slice(0, 1000));
+        if (textSnippet.includes('iPhone')) {
+          try {
+            const ifds = UTIF.decode(buffer);
+            UTIF.decodeImage(buffer, ifds[0]);
+            const rgba = UTIF.toRGBA8(ifds[0]);
+            return new ImageData(new Uint8ClampedArray(rgba), ifds[0].width, ifds[0].height);
+          } catch (err) {
+            console.error('UTIF.js failed:', err);
+          }
+        }
+      }
+
+      const raw = new LibRaw();
+      await raw.open(new Uint8Array(buffer), {
+        noInterpolation: false,
+        useAutoWb: true,
+        useCameraWb: true,
+        useCameraMatrix: 3,
+        outputColor: 1,
+        outputBps: 8
+      });
+
+      const result = await raw.imageData();
+      const { width, height, data: rgbData } = result;
+
+      const pixelCount = width * height;
+      const rgbaData = new Uint8ClampedArray(pixelCount * 4);
+      for (let i = 0; i < pixelCount; i++) {
+        rgbaData[i * 4] = rgbData[i * 3];
+        rgbaData[i * 4 + 1] = rgbData[i * 3 + 1];
+        rgbaData[i * 4 + 2] = rgbData[i * 3 + 2];
+        rgbaData[i * 4 + 3] = 255;
+      }
+
+      return new ImageData(rgbaData, width, height);
+    }
+
+    function loadPngFile(buffer) {
+      const decoded = UPNG.decode(buffer);
+      const { width, height, ctype, depth, data } = decoded;
+
+      const channelCount = (ctype & 2 ? 3 : 1) + (ctype & 4 ? 1 : 0);
+      const pixelCount = width * height;
+
+      let raw16 = new Uint16Array(pixelCount * channelCount);
+      if (depth <= 8) {
+        for (let i = 0; i < raw16.length; i++) raw16[i] = data[i] * 257;
+      } else {
+        for (let i = 0; i < raw16.length; i++) raw16[i] = (data[2 * i] << 8) | data[2 * i + 1];
+      }
+
+      const final8 = new Uint8ClampedArray(pixelCount * 4);
+      for (let i = 0; i < pixelCount; i++) {
+        const idx16 = i * channelCount;
+        const idx8 = i * 4;
+        final8[idx8] = raw16[idx16] >>> 8;
+        if (channelCount >= 3) {
+          final8[idx8 + 1] = raw16[idx16 + 1] >>> 8;
+          final8[idx8 + 2] = raw16[idx16 + 2] >>> 8;
+        } else {
+          final8[idx8 + 1] = final8[idx8];
+          final8[idx8 + 2] = final8[idx8];
+        }
+        final8[idx8 + 3] = channelCount === 4 ? (raw16[idx16 + 3] >>> 8) : 255;
+      }
+
+      return new ImageData(final8, width, height);
+    }
+
+    async function loadStandardImage(file) {
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => {
+          const tempCanvas = document.createElement('canvas');
+          tempCanvas.width = img.width;
+          tempCanvas.height = img.height;
+          const tempCtx = tempCanvas.getContext('2d');
+          tempCtx.drawImage(img, 0, 0);
+          resolve(tempCtx.getImageData(0, 0, img.width, img.height));
+        };
+        img.onerror = reject;
+        img.src = URL.createObjectURL(file);
+      });
+    }
+
+    function showImageUI() {
+      document.getElementById('uploadPlaceholder').style.display = 'none';
+      canvas.style.display = 'block';
+      document.getElementById('previewToolbar').style.display = 'flex';
+      document.getElementById('histogramContainer').style.display = 'block';
+      document.getElementById('controlsPanel').style.display = 'flex';
+      document.getElementById('appFooter').style.display = 'flex';
+
+      adjustCanvasDisplay(canvas.width, canvas.height);
+    }
+
+    // ===========================================
+    // Film Base Sampling
+    // ===========================================
+    function updateFilmBasePreview() {
+      const preview = document.getElementById('filmBasePreview');
+      const colorBox = document.getElementById('filmBaseColor');
+      const values = document.getElementById('filmBaseValues');
+
+      if (state.filmBaseSet) {
+        preview.style.display = 'flex';
+        colorBox.style.backgroundColor = `rgb(${state.filmBase.r}, ${state.filmBase.g}, ${state.filmBase.b})`;
+        values.textContent = `R: ${state.filmBase.r} G: ${state.filmBase.g} B: ${state.filmBase.b}`;
+      } else {
+        preview.style.display = 'none';
+      }
+    }
+
+    document.getElementById('sampleBaseBtn').addEventListener('click', () => {
+      state.samplingMode = 'filmBase';
+      document.getElementById('sampleBaseBtn').classList.add('active');
+      canvas.style.cursor = 'crosshair';
+    });
+
+    document.getElementById('autoDetectBtn').addEventListener('click', () => {
+      const sourceData = state.croppedImageData || state.originalImageData;
+      if (!sourceData) return;
+      state.filmBase = autoDetectFilmBase(sourceData);
+      state.filmBaseSet = true;
+      updateFilmBasePreview();
+    });
+
+    document.getElementById('applyConvertBtn').addEventListener('click', () => {
+      if (!state.filmBaseSet) {
+        // Auto detect if not set
+        const sourceData = state.croppedImageData || state.originalImageData;
+        state.filmBase = autoDetectFilmBase(sourceData);
+        state.filmBaseSet = true;
+        updateFilmBasePreview();
+      }
+      processNegative();
+    });
+
+    // ===========================================
+    // White Balance Sampling
+    // ===========================================
+    document.getElementById('sampleWBBtn').addEventListener('click', () => {
+      state.samplingMode = 'whiteBalance';
+      document.getElementById('sampleWBBtn').classList.add('active');
+      canvas.style.cursor = 'crosshair';
+    });
+
+    function updateWBSliders() {
+      document.getElementById('wbR').value = state.wbR;
+      document.getElementById('wbG').value = state.wbG;
+      document.getElementById('wbB').value = state.wbB;
+      document.getElementById('wbRValue').textContent = state.wbR.toFixed(2);
+      document.getElementById('wbGValue').textContent = state.wbG.toFixed(2);
+      document.getElementById('wbBValue').textContent = state.wbB.toFixed(2);
+    }
+
+    ['wbR', 'wbG', 'wbB'].forEach(id => {
+      const slider = document.getElementById(id);
+      slider.addEventListener('input', () => {
+        state[id] = parseFloat(slider.value);
+        document.getElementById(id + 'Value').textContent = state[id].toFixed(2);
+        schedulePreviewUpdate();
+      });
+      slider.addEventListener('change', () => scheduleFullUpdate());
+    });
+
+    // ===========================================
+    // Canvas Click Handler (Sampling)
+    // ===========================================
+    canvas.addEventListener('click', (e) => {
+      if (state.cropping) return;
+
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      const x = Math.floor((e.clientX - rect.left) * scaleX);
+      const y = Math.floor((e.clientY - rect.top) * scaleY);
+
+      if (state.samplingMode === 'filmBase') {
+        const sourceData = state.croppedImageData || state.originalImageData;
+        state.filmBase = sampleFilmBase(sourceData, x, y, 10);
+        state.filmBaseSet = true;
+        state.samplingMode = null;
+        document.getElementById('sampleBaseBtn').classList.remove('active');
+        canvas.style.cursor = 'default';
+        updateFilmBasePreview();
+      } else if (state.samplingMode === 'whiteBalance') {
+        // Sample from processed image
+        if (!state.processedImageData) return;
+        const sample = sampleFilmBase(state.processedImageData, x, y, 5);
+        const gray = (sample.r + sample.g + sample.b) / 3;
+
+        // Calculate multipliers to make sampled point neutral
+        state.wbR = sample.r > 0 ? gray / sample.r : 1;
+        state.wbG = sample.g > 0 ? gray / sample.g : 1;
+        state.wbB = sample.b > 0 ? gray / sample.b : 1;
+
+        // Normalize so G=1
+        const norm = state.wbG;
+        state.wbR /= norm;
+        state.wbG = 1;
+        state.wbB /= norm;
+
+        state.samplingMode = null;
+        document.getElementById('sampleWBBtn').classList.remove('active');
+        canvas.style.cursor = 'default';
+        updateWBSliders();
+        updateFull();
+      }
+    });
+
+    // ===========================================
+    // Film Type & Preset Selection
+    // ===========================================
+    document.querySelectorAll('.film-type-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.film-type-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        state.filmType = btn.dataset.type;
+
+        const presetSelect = document.getElementById('filmPreset');
+        if (state.filmType === 'bw') {
+          presetSelect.value = 'generic_bw';
+          state.filmPreset = 'generic_bw';
+        } else {
+          presetSelect.value = 'generic_color';
+          state.filmPreset = 'generic_color';
+        }
+      });
+    });
+
+    document.getElementById('filmPreset').addEventListener('change', (e) => {
+      state.filmPreset = e.target.value;
+      const preset = FILM_PRESETS[state.filmPreset];
+
+      document.querySelectorAll('.film-type-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.type === preset.type);
+      });
+      state.filmType = preset.type;
+    });
+
+    // ===========================================
+    // Slider Controls
+    // ===========================================
+    function setupSlider(id, stateKey, displayFormat = (v) => v) {
+      const slider = document.getElementById(id);
+      const valueDisplay = document.getElementById(id + 'Value');
+
+      slider.addEventListener('input', () => {
+        const value = parseFloat(slider.value);
+        state[stateKey] = value;
+        valueDisplay.textContent = displayFormat(value);
+        schedulePreviewUpdate();
+      });
+
+      slider.addEventListener('change', () => scheduleFullUpdate());
+    }
+
+    setupSlider('exposure', 'exposure', v => v.toFixed(1) + ' EV');
+    setupSlider('contrast', 'contrast');
+    setupSlider('highlights', 'highlights');
+    setupSlider('shadows', 'shadows');
+    setupSlider('temperature', 'temperature');
+    setupSlider('tint', 'tint');
+    setupSlider('vibrance', 'vibrance');
+    setupSlider('saturation', 'saturation');
+    setupSlider('cyan', 'cyan');
+    setupSlider('magenta', 'magenta');
+    setupSlider('yellow', 'yellow');
+
+    // ===========================================
+    // Section Toggle
+    // ===========================================
+    document.querySelectorAll('.section-header').forEach(header => {
+      header.addEventListener('click', () => {
+        const toggle = header.querySelector('.section-toggle');
+        const section = header.dataset.section;
+        if (!section) return;
+
+        const content = document.getElementById(section + 'SectionContent') ||
+                       document.getElementById(section + 'Section');
+        if (content && toggle) {
+          toggle.classList.toggle('collapsed');
+          content.classList.toggle('collapsed');
+        }
+      });
+    });
+
+    // ===========================================
+    // Rotation
+    // ===========================================
+    function applyRotation(angle) {
+      const sourceData = state.croppedImageData || state.originalImageData;
+      if (!sourceData) return;
+
+      const rad = angle * Math.PI / 180;
+      const w = canvas.width;
+      const h = canvas.height;
+      const cos = Math.abs(Math.cos(rad));
+      const sin = Math.abs(Math.sin(rad));
+      const newW = Math.ceil(w * cos + h * sin);
+      const newH = Math.ceil(w * sin + h * cos);
+
+      const offCanvas = document.createElement('canvas');
+      offCanvas.width = newW;
+      offCanvas.height = newH;
+      const offCtx = offCanvas.getContext('2d');
+
+      offCtx.translate(newW / 2, newH / 2);
+      offCtx.rotate(rad);
+      offCtx.drawImage(canvas, -w / 2, -h / 2);
+
+      canvas.width = newW;
+      canvas.height = newH;
+      ctx.drawImage(offCanvas, 0, 0);
+
+      const newImageData = ctx.getImageData(0, 0, newW, newH);
+
+      if (state.croppedImageData) {
+        state.croppedImageData = newImageData;
+      } else {
+        state.originalImageData = newImageData;
+      }
+
+      transformCanvas.width = newW;
+      transformCanvas.height = newH;
+      transformCtx.drawImage(offCanvas, 0, 0);
+
+      adjustCanvasDisplay(newW, newH);
+    }
+
+    document.getElementById('rotateLeftBtn').addEventListener('click', () => applyRotation(-90));
+    document.getElementById('rotateRightBtn').addEventListener('click', () => applyRotation(90));
+
+    document.getElementById('applyRotateBtn').addEventListener('click', () => {
+      const angle = parseFloat(document.getElementById('rotateAngle').value) || 0;
+      if (angle !== 0) {
+        applyRotation(angle);
+        document.getElementById('rotateAngle').value = 0;
+      }
+    });
+
+    // ===========================================
+    // Cropping
+    // ===========================================
+    const canvasContainer = document.getElementById('canvasContainer');
+    const cropOverlay = document.getElementById('cropOverlay');
+
+    document.getElementById('cropBtn').addEventListener('click', () => {
+      state.cropping = true;
+      cropOverlay.style.display = 'block';
+      cropOverlay.style.left = '0';
+      cropOverlay.style.top = '0';
+      cropOverlay.style.width = '0';
+      cropOverlay.style.height = '0';
+
+      document.getElementById('cropBtn').style.display = 'none';
+      document.getElementById('applyCropBtn').style.display = 'inline-flex';
+      document.getElementById('cancelCropBtn').style.display = 'inline-flex';
+    });
+
+    canvasContainer.addEventListener('mousedown', (e) => {
+      if (!state.cropping) return;
+      state.croppingActive = true;
+
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+
+      state.cropStart = {
+        x: (e.clientX - rect.left) * scaleX,
+        y: (e.clientY - rect.top) * scaleY
+      };
+    });
+
+    canvasContainer.addEventListener('mousemove', (e) => {
+      if (!state.cropping || !state.croppingActive) return;
+
+      const canvasRect = canvas.getBoundingClientRect();
+      const containerRect = canvasContainer.getBoundingClientRect();
+
+      // Calculate canvas offset within container (due to flexbox centering)
+      const offsetX = canvasRect.left - containerRect.left;
+      const offsetY = canvasRect.top - containerRect.top;
+
+      const scaleX = canvas.width / canvasRect.width;
+      const scaleY = canvas.height / canvasRect.height;
+
+      const current = {
+        x: (e.clientX - canvasRect.left) * scaleX,
+        y: (e.clientY - canvasRect.top) * scaleY
+      };
+
+      const left = Math.min(state.cropStart.x, current.x);
+      const top = Math.min(state.cropStart.y, current.y);
+      const width = Math.abs(current.x - state.cropStart.x);
+      const height = Math.abs(current.y - state.cropStart.y);
+
+      // Convert canvas coords to display coords and add container offset
+      const leftDisp = left / scaleX + offsetX;
+      const topDisp = top / scaleY + offsetY;
+      const widthDisp = width / scaleX;
+      const heightDisp = height / scaleY;
+
+      cropOverlay.style.left = leftDisp + 'px';
+      cropOverlay.style.top = topDisp + 'px';
+      cropOverlay.style.width = widthDisp + 'px';
+      cropOverlay.style.height = heightDisp + 'px';
+    });
+
+    canvasContainer.addEventListener('mouseup', () => {
+      if (state.cropping) state.croppingActive = false;
+    });
+
+    document.getElementById('cancelCropBtn').addEventListener('click', () => {
+      state.cropping = false;
+      cropOverlay.style.display = 'none';
+      document.getElementById('cropBtn').style.display = 'inline-flex';
+      document.getElementById('applyCropBtn').style.display = 'none';
+      document.getElementById('cancelCropBtn').style.display = 'none';
+    });
+
+    document.getElementById('applyCropBtn').addEventListener('click', () => {
+      const canvasRect = canvas.getBoundingClientRect();
+      const containerRect = canvasContainer.getBoundingClientRect();
+
+      // Calculate canvas offset within container (due to flexbox centering)
+      const offsetX = canvasRect.left - containerRect.left;
+      const offsetY = canvasRect.top - containerRect.top;
+
+      const scaleX = canvas.width / canvasRect.width;
+      const scaleY = canvas.height / canvasRect.height;
+
+      // Subtract offset before converting to canvas coordinates
+      const left = Math.floor((parseFloat(cropOverlay.style.left) - offsetX) * scaleX);
+      const top = Math.floor((parseFloat(cropOverlay.style.top) - offsetY) * scaleY);
+      const width = Math.floor(parseFloat(cropOverlay.style.width) * scaleX);
+      const height = Math.floor(parseFloat(cropOverlay.style.height) * scaleY);
+
+      if (width <= 0 || height <= 0) return;
+
+      // Save crop region for batch processing
+      state.cropRegion = { left, top, width, height };
+
+      const sourceData = state.croppedImageData || state.originalImageData;
+      const croppedData = new ImageData(
+        new Uint8ClampedArray(width * height * 4),
+        width,
+        height
+      );
+
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const srcIdx = ((top + y) * sourceData.width + left + x) * 4;
+          const dstIdx = (y * width + x) * 4;
+          croppedData.data[dstIdx] = sourceData.data[srcIdx];
+          croppedData.data[dstIdx + 1] = sourceData.data[srcIdx + 1];
+          croppedData.data[dstIdx + 2] = sourceData.data[srcIdx + 2];
+          croppedData.data[dstIdx + 3] = 255;
+        }
+      }
+
+      state.croppedImageData = croppedData;
+      displayNegative(croppedData);
+
+      state.cropping = false;
+      cropOverlay.style.display = 'none';
+      document.getElementById('cropBtn').style.display = 'inline-flex';
+      document.getElementById('applyCropBtn').style.display = 'none';
+      document.getElementById('cancelCropBtn').style.display = 'none';
+    });
+
+    // Convert button (skip to step 2)
+    document.getElementById('convertBtn').addEventListener('click', () => {
+      goToStep(2);
+    });
+
+    // ===========================================
+    // Reset & Start Over
+    // ===========================================
+    document.getElementById('resetBtn').addEventListener('click', () => {
+      // Reset adjustments only
+      state.exposure = 0;
+      state.contrast = 0;
+      state.highlights = 0;
+      state.shadows = 0;
+      state.temperature = 0;
+      state.tint = 0;
+      state.vibrance = 0;
+      state.saturation = 0;
+      state.cyan = 0;
+      state.magenta = 0;
+      state.yellow = 0;
+      state.wbR = 1;
+      state.wbG = 1;
+      state.wbB = 1;
+
+      document.getElementById('exposure').value = 0;
+      document.getElementById('contrast').value = 0;
+      document.getElementById('highlights').value = 0;
+      document.getElementById('shadows').value = 0;
+      document.getElementById('temperature').value = 0;
+      document.getElementById('tint').value = 0;
+      document.getElementById('vibrance').value = 0;
+      document.getElementById('saturation').value = 0;
+      document.getElementById('cyan').value = 0;
+      document.getElementById('magenta').value = 0;
+      document.getElementById('yellow').value = 0;
+
+      document.getElementById('exposureValue').textContent = '0 EV';
+      document.getElementById('contrastValue').textContent = '0';
+      document.getElementById('highlightsValue').textContent = '0';
+      document.getElementById('shadowsValue').textContent = '0';
+      document.getElementById('temperatureValue').textContent = '0';
+      document.getElementById('tintValue').textContent = '0';
+      document.getElementById('vibranceValue').textContent = '0';
+      document.getElementById('saturationValue').textContent = '0';
+      document.getElementById('cyanValue').textContent = '0';
+      document.getElementById('magentaValue').textContent = '0';
+      document.getElementById('yellowValue').textContent = '0';
+
+      updateWBSliders();
+      initCurves();
+      renderCurve();
+      updateFull();
+    });
+
+    document.getElementById('startOverBtn').addEventListener('click', () => {
+      if (state.originalImageData) {
+        state.croppedImageData = null;
+        state.processedImageData = null;
+        state.filmBaseSet = false;
+        displayNegative(state.originalImageData);
+        goToStep(1);
+        document.getElementById('resetBtn').click();
+      }
+    });
+
+    document.getElementById('newImageBtn').addEventListener('click', () => {
+      // Reset all state
+      state.originalImageData = null;
+      state.croppedImageData = null;
+      state.processedImageData = null;
+      state.displayImageData = null;
+      state.filmBaseSet = false;
+      state.currentStep = 1;
+
+      // Reset UI
+      canvas.style.display = 'none';
+      document.getElementById('uploadPlaceholder').style.display = 'flex';
+      document.getElementById('previewToolbar').style.display = 'none';
+      document.getElementById('histogramContainer').style.display = 'none';
+      document.getElementById('controlsPanel').style.display = 'none';
+      document.getElementById('appFooter').style.display = 'none';
+
+      // Reset adjustments
+      document.getElementById('resetBtn').click();
+
+      // Trigger file selection
+      fileInput.value = '';
+      fileInput.click();
+    });
+
+    // ===========================================
+    // Export
+    // ===========================================
+    const exportBtn = document.getElementById('exportBtn');
+    const exportDropdownMenu = document.getElementById('exportDropdownMenu');
+
+    // Toggle dropdown on main export button click
+    exportBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      exportDropdownMenu.classList.toggle('show');
+    });
+
+    // Prevent dropdown from closing when clicking inside it (for format settings)
+    exportDropdownMenu.addEventListener('click', (e) => {
+      // Only stop propagation if clicking on format settings, not export buttons
+      if (e.target.closest('.export-format-section') || e.target.closest('.export-quality-section')) {
+        e.stopPropagation();
+      }
+    });
+
+    // Close dropdown when clicking elsewhere
+    document.addEventListener('click', () => {
+      exportDropdownMenu.classList.remove('show');
+    });
+
+    function exportSingle() {
+      const format = state.exportFormat;
+      const ext = format === 'jpeg' ? '.jpg' : '.png';
+      const mimeType = format === 'jpeg' ? 'image/jpeg' : 'image/png';
+      const quality = format === 'jpeg' ? state.jpegQuality / 100 : undefined;
+
+      const dataURL = canvas.toDataURL(mimeType, quality);
+      const link = document.createElement('a');
+      const fileName = state.fileQueue.length > 0 && state.fileQueue[state.currentFileIndex]
+        ? state.fileQueue[state.currentFileIndex].file.name.replace(/\.[^.]+$/, '_converted' + ext)
+        : 'converted_negative' + ext;
+      link.download = fileName;
+      link.href = dataURL;
+      link.click();
+    }
+
+    document.getElementById('exportSingleBtn').addEventListener('click', exportSingle);
+
+    document.getElementById('exportZipBtn').addEventListener('click', async () => {
+      await exportBatchAsZip();
+    });
+
+    document.getElementById('exportAllBtn').addEventListener('click', async () => {
+      await exportBatchIndividually();
+    });
+
+    // Format toggle buttons
+    document.querySelectorAll('.format-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.format-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        state.exportFormat = btn.dataset.format;
+        updateExportUI();
+      });
+    });
+
+    // Quality slider
+    document.getElementById('exportQualitySlider').addEventListener('input', (e) => {
+      state.jpegQuality = parseInt(e.target.value);
+      document.getElementById('exportQualityValue').textContent = state.jpegQuality + '%';
+    });
+
+    function updateExportUI() {
+      const isJpeg = state.exportFormat === 'jpeg';
+      const qualitySection = document.getElementById('exportQualitySection');
+      qualitySection.classList.toggle('show', isJpeg);
+
+      // Update export button text
+      const exportBtn = document.getElementById('exportBtn');
+      exportBtn.textContent = i18n[currentLang][isJpeg ? 'exportJpeg' : 'exportPng'];
+      exportBtn.setAttribute('data-i18n', isJpeg ? 'exportJpeg' : 'exportPng');
+
+      // Update export current button text
+      const exportSingleBtn = document.getElementById('exportSingleBtn');
+      exportSingleBtn.textContent = i18n[currentLang][isJpeg ? 'exportCurrentJpeg' : 'exportCurrent'];
+      exportSingleBtn.setAttribute('data-i18n', isJpeg ? 'exportCurrentJpeg' : 'exportCurrent');
+    }
+
+    // ===========================================
+    // Batch Processing
+    // ===========================================
+    function extractCurrentSettings() {
+      return {
+        cropRegion: state.cropRegion,
+        filmType: state.filmType,
+        filmPreset: state.filmPreset,
+        filmBase: { ...state.filmBase },
+        exposure: state.exposure,
+        contrast: state.contrast,
+        highlights: state.highlights,
+        shadows: state.shadows,
+        temperature: state.temperature,
+        tint: state.tint,
+        vibrance: state.vibrance,
+        saturation: state.saturation,
+        cyan: state.cyan,
+        magenta: state.magenta,
+        yellow: state.yellow,
+        wbR: state.wbR,
+        wbG: state.wbG,
+        wbB: state.wbB,
+        curvePoints: {
+          r: state.curvePoints.r.map(p => ({ ...p })),
+          g: state.curvePoints.g.map(p => ({ ...p })),
+          b: state.curvePoints.b.map(p => ({ ...p }))
+        },
+        curves: {
+          r: new Uint8Array(state.curves.r),
+          g: new Uint8Array(state.curves.g),
+          b: new Uint8Array(state.curves.b)
+        }
+      };
+    }
+
+    function applyAdjustmentsWithSettings(imageData, settings) {
+      const { width, height, data } = imageData;
+      const output = new ImageData(new Uint8ClampedArray(data.length), width, height);
+      const outData = output.data;
+
+      const preset = FILM_PRESETS[settings.filmPreset];
+      const presetChars = preset.characteristics || {};
+
+      const exposureMult = Math.pow(2, settings.exposure);
+      const contrastFactor = 1 + (settings.contrast / 100);
+      const tempFactor = (settings.temperature + (presetChars.warmth || 0) * 100) / 100;
+      const tintFactor = settings.tint / 100;
+      const satFactor = 1 + ((settings.saturation + (presetChars.saturation || 0) * 100) / 100);
+      const vibFactor = settings.vibrance / 100;
+      const highlightsFactor = settings.highlights / 100;
+      const shadowsFactor = settings.shadows / 100;
+
+      for (let i = 0; i < data.length; i += 4) {
+        let r = data[i];
+        let g = data[i + 1];
+        let b = data[i + 2];
+
+        // Apply white balance
+        r *= settings.wbR;
+        g *= settings.wbG;
+        b *= settings.wbB;
+
+        // Apply exposure
+        r *= exposureMult;
+        g *= exposureMult;
+        b *= exposureMult;
+
+        // Apply contrast
+        r = ((r / 255 - 0.5) * contrastFactor + 0.5) * 255;
+        g = ((g / 255 - 0.5) * contrastFactor + 0.5) * 255;
+        b = ((b / 255 - 0.5) * contrastFactor + 0.5) * 255;
+
+        // Apply highlights/shadows
+        const luma = (r * 0.299 + g * 0.587 + b * 0.114) / 255;
+        if (luma > 0.5 && highlightsFactor !== 0) {
+          const mult = 1 + highlightsFactor * (luma - 0.5) * 2;
+          r *= mult; g *= mult; b *= mult;
+        }
+        if (luma < 0.5 && shadowsFactor !== 0) {
+          const mult = 1 + shadowsFactor * (0.5 - luma) * 2;
+          r *= mult; g *= mult; b *= mult;
+        }
+
+        // Apply temperature/tint
+        r = r * (1 + tempFactor * 0.3);
+        b = b * (1 - tempFactor * 0.3);
+        g = g * (1 + tintFactor * 0.3);
+
+        r = Math.max(0, Math.min(255, r));
+        g = Math.max(0, Math.min(255, g));
+        b = Math.max(0, Math.min(255, b));
+
+        // HSL for saturation/vibrance
+        let hsl = rgbToHsl(r, g, b);
+        hsl[1] *= satFactor;
+        if (vibFactor >= 0) {
+          hsl[1] += (1 - hsl[1]) * vibFactor;
+        } else {
+          hsl[1] *= (1 + vibFactor);
+        }
+        hsl[1] = Math.max(0, Math.min(1, hsl[1]));
+        [r, g, b] = hslToRgb(hsl[0], hsl[1], hsl[2]);
+
+        // CMY
+        let c = 1 - (r / 255);
+        let m = 1 - (g / 255);
+        let y = 1 - (b / 255);
+        c = Math.max(0, Math.min(1, c + settings.cyan / 100));
+        m = Math.max(0, Math.min(1, m + settings.magenta / 100));
+        y = Math.max(0, Math.min(1, y + settings.yellow / 100));
+        r = (1 - c) * 255;
+        g = (1 - m) * 255;
+        b = (1 - y) * 255;
+
+        // Curves
+        r = settings.curves.r[Math.round(Math.max(0, Math.min(255, r)))];
+        g = settings.curves.g[Math.round(Math.max(0, Math.min(255, g)))];
+        b = settings.curves.b[Math.round(Math.max(0, Math.min(255, b)))];
+
+        outData[i] = r;
+        outData[i + 1] = g;
+        outData[i + 2] = b;
+        outData[i + 3] = 255;
+      }
+
+      return output;
+    }
+
+    function cropImageData(imageData, cropRegion) {
+      const { left, top, width, height } = cropRegion;
+      const croppedData = new ImageData(
+        new Uint8ClampedArray(width * height * 4),
+        width,
+        height
+      );
+
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const srcIdx = ((top + y) * imageData.width + left + x) * 4;
+          const dstIdx = (y * width + x) * 4;
+          croppedData.data[dstIdx] = imageData.data[srcIdx];
+          croppedData.data[dstIdx + 1] = imageData.data[srcIdx + 1];
+          croppedData.data[dstIdx + 2] = imageData.data[srcIdx + 2];
+          croppedData.data[dstIdx + 3] = 255;
+        }
+      }
+
+      return croppedData;
+    }
+
+    async function loadFileToImageData(file) {
+      const arrayBuffer = await file.arrayBuffer();
+      const fileName = file.name.toLowerCase();
+
+      if (['.cr2', '.nef', '.arw', '.dng', '.raw', '.rw2'].some(ext => fileName.endsWith(ext))) {
+        return await loadRawFile(arrayBuffer, fileName);
+      } else if (file.type === 'image/png') {
+        return loadPngFile(arrayBuffer);
+      } else {
+        return await loadStandardImage(file);
+      }
+    }
+
+    async function imageDataToBlob(imageData, format = null, quality = null) {
+      format = format || state.exportFormat;
+      quality = quality !== null ? quality : state.jpegQuality;
+
+      const tempCanvas = document.createElement('canvas');
+      tempCanvas.width = imageData.width;
+      tempCanvas.height = imageData.height;
+      const tempCtx = tempCanvas.getContext('2d');
+      tempCtx.putImageData(imageData, 0, 0);
+
+      return new Promise(resolve => {
+        if (format === 'jpeg') {
+          tempCanvas.toBlob(resolve, 'image/jpeg', quality / 100);
+        } else {
+          tempCanvas.toBlob(resolve, 'image/png');
+        }
+      });
+    }
+
+    function updateBatchProgress(current, total, fileName) {
+      const percent = Math.round((current / total) * 100);
+      document.getElementById('batchProgressFill').style.width = percent + '%';
+      document.getElementById('batchProgressText').textContent = `${current} / ${total}`;
+      document.getElementById('batchProgressCurrent').textContent = fileName || '';
+    }
+
+    function showBatchProgress(show) {
+      document.getElementById('batchProgressOverlay').style.display = show ? 'flex' : 'none';
+    }
+
+    // Process a single file with given settings (streaming - no memory accumulation)
+    async function processOneFile(file, settings) {
+      const imageData = await loadFileToImageData(file);
+
+      let workingData = imageData;
+      if (settings.cropRegion) {
+        workingData = cropImageData(imageData, settings.cropRegion);
+      }
+
+      let processed;
+      const preset = FILM_PRESETS[settings.filmPreset];
+      if (settings.filmType === 'bw' || preset.type === 'bw') {
+        processed = convertBWNegative(workingData, {
+          contrast: preset.contrast || 1.0,
+          gamma: preset.gamma || 1.0
+        });
+      } else {
+        processed = convertColorNegative(workingData, settings.filmBase);
+      }
+
+      return applyAdjustmentsWithSettings(processed, settings);
+    }
+
+    // Get selected files for batch processing
+    function getSelectedFiles() {
+      return state.fileQueue
+        .map((item, index) => ({ item, index }))
+        .filter(({ item }) => item.selected);
+    }
+
+    // Create default settings with auto-detected film base
+    function createDefaultSettings(imageData) {
+      const filmBase = autoDetectFilmBase(imageData);
+      return {
+        cropRegion: null,
+        filmType: 'color',
+        filmPreset: 'generic_color',
+        filmBase: filmBase,
+        exposure: 0,
+        contrast: 0,
+        highlights: 0,
+        shadows: 0,
+        temperature: 0,
+        tint: 0,
+        vibrance: 0,
+        saturation: 0,
+        cyan: 0,
+        magenta: 0,
+        yellow: 0,
+        wbR: 1,
+        wbG: 1,
+        wbB: 1,
+        curvePoints: {
+          r: [{ x: 0, y: 0 }, { x: 255, y: 255 }],
+          g: [{ x: 0, y: 0 }, { x: 255, y: 255 }],
+          b: [{ x: 0, y: 0 }, { x: 255, y: 255 }]
+        },
+        curves: {
+          r: new Uint8Array(256).map((_, i) => i),
+          g: new Uint8Array(256).map((_, i) => i),
+          b: new Uint8Array(256).map((_, i) => i)
+        }
+      };
+    }
+
+    // Process a file with its own settings or auto-detect
+    async function processFileWithSettings(file, savedSettings) {
+      // Load the image
+      const imageData = await loadFileToImageData(file);
+
+      // Use saved settings or create default with auto-detect
+      const settings = savedSettings || createDefaultSettings(imageData);
+
+      // Apply crop if set
+      let workingData = imageData;
+      if (settings.cropRegion) {
+        workingData = cropImageData(imageData, settings.cropRegion);
+      }
+
+      // Convert negative
+      let processed;
+      const preset = FILM_PRESETS[settings.filmPreset];
+      if (settings.filmType === 'bw' || preset.type === 'bw') {
+        processed = convertBWNegative(workingData, {
+          contrast: preset.contrast || 1.0,
+          gamma: preset.gamma || 1.0
+        });
+      } else {
+        processed = convertColorNegative(workingData, settings.filmBase);
+      }
+
+      // Apply adjustments
+      return applyAdjustmentsWithSettings(processed, settings);
+    }
+
+    // Streaming ZIP export: process → add to zip → free memory → next
+    async function exportBatchAsZip() {
+      const selectedFiles = getSelectedFiles();
+      if (selectedFiles.length < 1) return;
+
+      const zip = new JSZip();
+      let processedCount = 0;
+
+      showBatchProgress(true);
+
+      try {
+        for (const { item, index } of selectedFiles) {
+          item.status = 'processing';
+          updateFileListUI();
+          processedCount++;
+          updateBatchProgress(processedCount, selectedFiles.length, item.file.name);
+
+          try {
+            let blob;
+            // If this is the current file and it's displayed, use displayed data
+            if (index === state.currentFileIndex && state.displayImageData && state.currentStep >= 3) {
+              blob = await imageDataToBlob(state.displayImageData);
+            } else {
+              // Process with saved settings or auto-detect
+              const adjusted = await processFileWithSettings(item.file, item.settings);
+              blob = await imageDataToBlob(adjusted);
             }
-            h /= 6;
+
+            const ext = state.exportFormat === 'jpeg' ? '.jpg' : '.png';
+            const name = item.file.name.replace(/\.[^.]+$/, '_converted' + ext);
+            zip.file(name, blob);
+            item.status = 'done';
+          } catch (err) {
+            console.error(`Error processing ${item.file.name}:`, err);
+            item.status = 'error';
+            item.error = err.message;
           }
-          return [h, s, l];
+
+          updateFileListUI();
+          await new Promise(r => setTimeout(r, 10));
         }
 
-        function hslToRgb(h, s, l) {
-          let r, g, b;
-          if (s === 0) {
-            r = g = b = l;
-          } else {
-            const hue2rgb = (p, q, t) => {
-              if (t < 0) t += 1;
-              if (t > 1) t -= 1;
-              if (t < 1 / 6) return p + (q - p) * 6 * t;
-              if (t < 1 / 2) return q;
-              if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
-              return p;
-            };
-            let q = l < 0.5 ? l * (1 + s) : l + s - l * s;
-            let p = 2 * l - q;
-            r = hue2rgb(p, q, h + 1 / 3);
-            g = hue2rgb(p, q, h);
-            b = hue2rgb(p, q, h - 1 / 3);
+        updateBatchProgress(selectedFiles.length, selectedFiles.length, 'Creating ZIP...');
+        const zipBlob = await zip.generateAsync({
+          type: 'blob',
+          compression: 'DEFLATE',
+          compressionOptions: { level: 6 }
+        });
+
+        const link = document.createElement('a');
+        link.download = 'converted_negatives.zip';
+        link.href = URL.createObjectURL(zipBlob);
+        link.click();
+        URL.revokeObjectURL(link.href);
+      } finally {
+        showBatchProgress(false);
+      }
+    }
+
+    // Streaming individual download: process → download → free → next
+    async function exportBatchIndividually() {
+      const selectedFiles = getSelectedFiles();
+      if (selectedFiles.length < 1) return;
+
+      let processedCount = 0;
+
+      showBatchProgress(true);
+
+      try {
+        for (const { item, index } of selectedFiles) {
+          item.status = 'processing';
+          updateFileListUI();
+          processedCount++;
+          updateBatchProgress(processedCount, selectedFiles.length, item.file.name);
+
+          try {
+            let blob;
+            if (index === state.currentFileIndex && state.displayImageData && state.currentStep >= 3) {
+              blob = await imageDataToBlob(state.displayImageData);
+            } else {
+              const adjusted = await processFileWithSettings(item.file, item.settings);
+              blob = await imageDataToBlob(adjusted);
+            }
+
+            const ext = state.exportFormat === 'jpeg' ? '.jpg' : '.png';
+            const name = item.file.name.replace(/\.[^.]+$/, '_converted' + ext);
+            const link = document.createElement('a');
+            link.download = name;
+            link.href = URL.createObjectURL(blob);
+            link.click();
+            URL.revokeObjectURL(link.href);
+
+            item.status = 'done';
+          } catch (err) {
+            console.error(`Error processing ${item.file.name}:`, err);
+            item.status = 'error';
           }
-          return [
-            Math.round(r * 255),
-            Math.round(g * 255),
-            Math.round(b * 255)
-          ];
+
+          updateFileListUI();
+          await new Promise(r => setTimeout(r, 200));
         }
+      } finally {
+        showBatchProgress(false);
+      }
+    }
 
-        let d = basePixels;
+    // ===========================================
+    // File List UI
+    // ===========================================
+    function updateFileListUI() {
+      const container = document.getElementById('fileListItems');
+      const countEl = document.getElementById('fileListCount');
+      const selectedCount = state.fileQueue.filter(f => f.selected).length;
+      const settingsCount = state.fileQueue.filter(f => f.settings).length;
 
-        for (let i = 0; i < total; i++) {
-          let idx = i * 4;
-          let r = d[idx];
-          let g = d[idx + 1];
-          let b = d[idx + 2];
+      // Show: selected/total (settings saved count)
+      countEl.textContent = `${selectedCount}/${state.fileQueue.length} (${settingsCount} ${i18n[currentLang].configured || 'configured'})`;
+      container.innerHTML = '';
 
-          let newR = r * (1 + tempFactor);
-          let newG = g * (1 + tintFactor);
-          let newB = b * (1 - tempFactor);
+      state.fileQueue.forEach((item, index) => {
+        const el = document.createElement('div');
+        el.className = 'file-list-item';
+        if (index === state.currentFileIndex) el.classList.add('active');
+        if (item.settings) el.classList.add('has-settings');
 
-          newR = Math.min(255, Math.max(0, newR));
-          newG = Math.min(255, Math.max(0, newG));
-          newB = Math.min(255, Math.max(0, newB));
+        const statusClass = item.status;
+        const statusText = i18n[currentLang][item.status === 'processing' ? 'processingStatus' : item.status] || item.status;
+        const settingsBadge = item.settings ? `<span class="file-list-settings-badge">${i18n[currentLang].customSettings || 'Custom'}</span>` : '';
 
-          let hsl = rgbToHsl(newR, newG, newB);
-          hsl[1] *= satFactor;
+        el.innerHTML = `
+          <input type="checkbox" class="file-list-checkbox" ${item.selected ? 'checked' : ''} data-index="${index}">
+          <span class="file-list-name">${item.file.name}${settingsBadge}</span>
+          <span class="file-list-status ${statusClass}">${statusText}</span>
+        `;
 
-          if (vibFactor >= 0) {
-            hsl[1] += (1 - hsl[1]) * vibFactor;
-          } else {
-            hsl[1] *= 1 + vibFactor;
-          }
-          hsl[1] = Math.max(0, Math.min(1, hsl[1]));
+        // Checkbox toggle
+        el.querySelector('.file-list-checkbox').addEventListener('click', (e) => {
+          e.stopPropagation();
+          state.fileQueue[index].selected = e.target.checked;
+          updateFileListUI();
+          updateExportButtons();
+        });
 
-          let [R2, G2, B2] = hslToRgb(hsl[0], hsl[1], hsl[2]);
+        // Click on item to view/edit
+        el.addEventListener('click', (e) => {
+          if (e.target.classList.contains('file-list-checkbox')) return;
+          switchToFile(index);
+        });
 
-          let C = 1 - R2 / 255;
-          let M = 1 - G2 / 255;
-          let Y = 1 - B2 / 255;
+        container.appendChild(el);
+      });
 
-          let newC = Math.max(0, Math.min(1, C + cyanVal / 100));
-          let newM = Math.max(0, Math.min(1, M + magentaVal / 100));
-          let newY = Math.max(0, Math.min(1, Y + yellowVal / 100));
+      // Show/hide save settings button based on batch mode
+      document.getElementById('saveSettingsBtn').style.display = state.batchMode ? 'inline-flex' : 'none';
+    }
 
-          let finalR = 255 * (1 - newC);
-          let finalG = 255 * (1 - newM);
-          let finalB = 255 * (1 - newY);
+    async function switchToFile(index) {
+      if (index < 0 || index >= state.fileQueue.length) return;
+      if (index === state.currentFileIndex) return;
 
-          adjusted.data[idx] = finalR;
-          adjusted.data[idx + 1] = finalG;
-          adjusted.data[idx + 2] = finalB;
-          adjusted.data[idx + 3] = 255;
+      state.currentFileIndex = index;
+      const fileItem = state.fileQueue[index];
+
+      // Load the file
+      await loadFile(fileItem.file);
+
+      // If this file has saved settings, restore them
+      if (fileItem.settings) {
+        restoreSettings(fileItem.settings);
+      }
+
+      updateFileListUI();
+    }
+
+    // Save current settings to the current file's queue entry
+    function saveCurrentFileSettings() {
+      if (state.currentFileIndex < 0 || state.currentFileIndex >= state.fileQueue.length) return;
+
+      const settings = extractCurrentSettings();
+      state.fileQueue[state.currentFileIndex].settings = settings;
+
+      updateFileListUI();
+      alert(i18n[currentLang].settingsSaved || 'Settings saved for current image');
+    }
+
+    // Restore settings from a saved settings object
+    function restoreSettings(settings) {
+      if (!settings) return;
+
+      // Restore crop region
+      state.cropRegion = settings.cropRegion;
+
+      // Restore film settings
+      state.filmType = settings.filmType;
+      state.filmPreset = settings.filmPreset;
+      state.filmBase = { ...settings.filmBase };
+      state.filmBaseSet = true;
+
+      // Restore adjustments
+      state.exposure = settings.exposure;
+      state.contrast = settings.contrast;
+      state.highlights = settings.highlights;
+      state.shadows = settings.shadows;
+      state.temperature = settings.temperature;
+      state.tint = settings.tint;
+      state.vibrance = settings.vibrance;
+      state.saturation = settings.saturation;
+      state.cyan = settings.cyan;
+      state.magenta = settings.magenta;
+      state.yellow = settings.yellow;
+      state.wbR = settings.wbR;
+      state.wbG = settings.wbG;
+      state.wbB = settings.wbB;
+
+      // Restore curves
+      state.curvePoints = {
+        r: settings.curvePoints.r.map(p => ({ ...p })),
+        g: settings.curvePoints.g.map(p => ({ ...p })),
+        b: settings.curvePoints.b.map(p => ({ ...p }))
+      };
+      ['r', 'g', 'b'].forEach(ch => updateCurveFromPoints(ch));
+
+      // Update UI to reflect restored settings
+      updateSlidersFromState();
+      updateWBSliders();
+      updateFilmBasePreview();
+      renderCurve();
+    }
+
+    // Update all slider UI elements from state
+    function updateSlidersFromState() {
+      document.getElementById('exposure').value = state.exposure;
+      document.getElementById('exposureValue').textContent = state.exposure.toFixed(1) + ' EV';
+      document.getElementById('contrast').value = state.contrast;
+      document.getElementById('contrastValue').textContent = state.contrast;
+      document.getElementById('highlights').value = state.highlights;
+      document.getElementById('highlightsValue').textContent = state.highlights;
+      document.getElementById('shadows').value = state.shadows;
+      document.getElementById('shadowsValue').textContent = state.shadows;
+      document.getElementById('temperature').value = state.temperature;
+      document.getElementById('temperatureValue').textContent = state.temperature;
+      document.getElementById('tint').value = state.tint;
+      document.getElementById('tintValue').textContent = state.tint;
+      document.getElementById('vibrance').value = state.vibrance;
+      document.getElementById('vibranceValue').textContent = state.vibrance;
+      document.getElementById('saturation').value = state.saturation;
+      document.getElementById('saturationValue').textContent = state.saturation;
+      document.getElementById('cyan').value = state.cyan;
+      document.getElementById('cyanValue').textContent = state.cyan;
+      document.getElementById('magenta').value = state.magenta;
+      document.getElementById('magentaValue').textContent = state.magenta;
+      document.getElementById('yellow').value = state.yellow;
+      document.getElementById('yellowValue').textContent = state.yellow;
+
+      // Update film type buttons
+      document.querySelectorAll('.film-type-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.type === state.filmType);
+      });
+      document.getElementById('filmPreset').value = state.filmPreset;
+    }
+
+    function updateExportButtons() {
+      // Enable batch export when there are selected files
+      const selectedCount = state.fileQueue.filter(f => f.selected).length;
+      document.getElementById('exportZipBtn').disabled = selectedCount < 1;
+      document.getElementById('exportAllBtn').disabled = selectedCount < 1;
+    }
+
+    function showBatchUI(show) {
+      document.getElementById('fileListSection').style.display = show ? 'block' : 'none';
+    }
+
+    // Select all button
+    document.getElementById('selectAllBtn').addEventListener('click', () => {
+      state.fileQueue.forEach(item => item.selected = true);
+      updateFileListUI();
+      updateExportButtons();
+    });
+
+    // Select none button
+    document.getElementById('selectNoneBtn').addEventListener('click', () => {
+      state.fileQueue.forEach(item => item.selected = false);
+      updateFileListUI();
+      updateExportButtons();
+    });
+
+    // Save settings button
+    document.getElementById('saveSettingsBtn').addEventListener('click', () => {
+      if (state.currentStep < 3) {
+        alert(i18n[currentLang].finishProcessing || 'Please complete the workflow (step 3) before saving settings.');
+        return;
+      }
+      saveCurrentFileSettings();
+    });
+
+    // Add more files button
+    document.getElementById('addMoreFilesBtn').addEventListener('click', () => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.multiple = true;
+      input.accept = '.cr2,.nef,.arw,.dng,.raw,.rw2,image/*';
+      input.onchange = (e) => {
+        if (e.target.files.length > 0) {
+          addFilesToQueue(Array.from(e.target.files));
         }
+      };
+      input.click();
+    });
 
-        ctx.putImageData(adjusted, 0, 0);
-      }, 300);
+    // Clear file list button
+    document.getElementById('clearFileListBtn').addEventListener('click', () => {
+      state.fileQueue = [];
+      state.currentFileIndex = 0;
+      state.batchMode = false;
+      showBatchUI(false);
+      updateExportButtons();
+    });
 
-      // Schedule real-time scaled preview + deferred full-res update
-      function scheduleUpdateAdjust() {
-        if (!updatePending) {
-          updatePending = true;
-          requestAnimationFrame(() => {
-            updateAdjustPreview();
-            updatePending = false;
+    function addFilesToQueue(files) {
+      // Filter for supported image files
+      const supportedExtensions = ['.cr2', '.nef', '.arw', '.dng', '.raw', '.rw2', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'];
+      const validFiles = files.filter(file => {
+        const ext = '.' + file.name.split('.').pop().toLowerCase();
+        return supportedExtensions.includes(ext) || file.type.startsWith('image/');
+      });
+
+      if (validFiles.length === 0) return;
+
+      // Add files to queue
+      for (const file of validFiles) {
+        // Avoid duplicates
+        if (!state.fileQueue.some(f => f.file.name === file.name && f.file.size === file.size)) {
+          state.fileQueue.push({
+            file: file,
+            selected: true,  // Selected by default
+            status: 'pending',
+            error: null,
+            settings: null  // null = use auto-detect, otherwise saved settings
           });
         }
-        doFullResolutionUpdate();
       }
 
-      // Bind events on both range and number inputs
-      $("[data-role='rangeInput'], [data-role='numberInput']").on("input", function () {
-        let $this = $(this);
-        let type = $this.data("type");
-        let role = $this.data("role");
-        let val = $this.val();
+      // Enable batch mode if more than one file
+      if (state.fileQueue.length > 1) {
+        state.batchMode = true;
+        showBatchUI(true);
+      }
 
-        if (role === "rangeInput") {
-          // Sync numberInput
-          $("[data-role='numberInput'][data-type='" + type + "']").val(val);
-        } else {
-          // Sync rangeInput
-          $("[data-role='rangeInput'][data-type='" + type + "']").val(val);
-        }
+      updateFileListUI();
+      updateExportButtons();
+    }
 
-        scheduleUpdateAdjust();
-      });
+    // ===========================================
+    // File Input Handling
+    // ===========================================
+    const fileInput = document.getElementById('fileInput');
+    const folderInput = document.getElementById('folderInput');
+    const uploadBtn = document.getElementById('uploadBtn');
+    const uploadFolderBtn = document.getElementById('uploadFolderBtn');
 
-      // Download handler
-      $downloadBtn.on("click", function () {
-        let dataURL = canvas.toDataURL("image/png");
-        let arr = dataURL.split(",");
-        let mime = arr[0].match(/:(.*?);/)[1];
-        let bstr = atob(arr[1]);
-        let n = bstr.length;
-        let u8arr = new Uint8Array(n);
+    uploadBtn.addEventListener('click', () => fileInput.click());
+    uploadFolderBtn.addEventListener('click', () => folderInput.click());
 
-        while (n--) {
-          u8arr[n] = bstr.charCodeAt(n);
-        }
-        let blob = new Blob([u8arr], { type: mime });
-        let link = document.createElement("a");
-        link.download = "corrected_film.png";
-        link.href = window.URL.createObjectURL(blob);
-        link.click();
-      });
+    fileInput.addEventListener('change', (e) => {
+      const files = Array.from(e.target.files);
+      if (files.length === 0) return;
 
-      // Adjust canvas display size to fit in the window
-      function adjustCanvasDisplay(w, h) {
-        const maxWidth = window.innerWidth - 40;
-        const maxHeight = window.innerHeight - 200;
-        let scale = Math.min(maxWidth / w, maxHeight / h);
+      // Reset state for new batch
+      state.fileQueue = [];
+      state.currentFileIndex = 0;
+      state.batchMode = false;
+      state.cropRegion = null;
 
-        $canvas.css({ width: w * scale, height: h * scale });
-        $canvasContainer.css({ width: w * scale, height: h * scale });
+      addFilesToQueue(files);
+
+      // Load the first file
+      if (state.fileQueue.length > 0) {
+        loadFile(state.fileQueue[0].file);
+      }
+    });
+
+    folderInput.addEventListener('change', (e) => {
+      const files = Array.from(e.target.files);
+      if (files.length === 0) return;
+
+      // Reset state for new batch
+      state.fileQueue = [];
+      state.currentFileIndex = 0;
+      state.batchMode = false;
+      state.cropRegion = null;
+
+      addFilesToQueue(files);
+
+      // Load the first file
+      if (state.fileQueue.length > 0) {
+        loadFile(state.fileQueue[0].file);
+      }
+    });
+
+    canvasContainer.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      canvasContainer.style.borderColor = 'var(--accent)';
+    });
+
+    canvasContainer.addEventListener('dragleave', () => {
+      canvasContainer.style.borderColor = '';
+    });
+
+    canvasContainer.addEventListener('drop', (e) => {
+      e.preventDefault();
+      canvasContainer.style.borderColor = '';
+
+      const files = Array.from(e.dataTransfer.files);
+      if (files.length === 0) return;
+
+      // Reset state for new batch
+      state.fileQueue = [];
+      state.currentFileIndex = 0;
+      state.batchMode = false;
+      state.cropRegion = null;
+
+      addFilesToQueue(files);
+
+      // Load the first file
+      if (state.fileQueue.length > 0) {
+        loadFile(state.fileQueue[0].file);
+      }
+    });
+
+    // ===========================================
+    // Window Resize
+    // ===========================================
+    window.addEventListener('resize', () => {
+      if (canvas.width > 0 && canvas.height > 0) {
+        adjustCanvasDisplay(canvas.width, canvas.height);
       }
     });
   </script>
