@@ -1060,15 +1060,22 @@
     /* Copyright Footer */
     .copyright {
       text-align: center;
-      padding: 8px;
-      font-size: 11px;
-      color: var(--text-muted);
-      background: var(--bg-primary);
+      padding: 12px 16px;
+      font-size: 13px;
+      color: var(--text-secondary);
+      background: var(--bg-secondary);
+      border-top: 1px solid var(--border-color);
+    }
+    .copyright a {
+      color: var(--accent-color);
+      text-decoration: none;
+    }
+    .copyright a:hover {
+      text-decoration: underline;
     }
   </style>
 
   <!-- External Libraries -->
-  <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
   <script type="module">
     import LibRaw from './index.js';
     window.LibRaw = LibRaw;
@@ -1433,7 +1440,7 @@
   </div>
 
   <div class="copyright">
-    © 2025 Negative Converter. tokugai.com All rights reserved.
+    © 2025 Negative Converter. <a href="https://neoanaloglab.com" target="_blank">neoanaloglab.com</a> All rights reserved.
   </div>
 
   <script>
