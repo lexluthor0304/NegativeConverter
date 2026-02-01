@@ -1109,8 +1109,8 @@
           <p data-i18n="dropHint">Drop image here or click to open</p>
           <button class="upload-btn" id="uploadBtn" data-i18n="selectFile">Select File</button>
           <button class="upload-btn" id="uploadFolderBtn" style="margin-left: 8px; background: var(--bg-tertiary); border: 1px solid var(--border);" data-i18n="selectFolder">Select Folder</button>
-          <input type="file" id="fileInput" accept=".cr2,.nef,.arw,.dng,.raw,.rw2,image/*" multiple>
-          <input type="file" id="folderInput" accept=".cr2,.nef,.arw,.dng,.raw,.rw2,image/*" webkitdirectory style="display: none;">
+          <input type="file" id="fileInput" accept=".cr2,.nef,.arw,.dng,.raw,.rw2,.tif,.tiff,image/*" multiple>
+          <input type="file" id="folderInput" accept=".cr2,.nef,.arw,.dng,.raw,.rw2,.tif,.tiff,image/*" webkitdirectory style="display: none;">
         </div>
         <canvas id="canvas" style="display: none;"></canvas>
         <div class="crop-overlay" id="cropOverlay"></div>
@@ -2691,7 +2691,7 @@
 
         let imageData;
 
-        if (['.cr2', '.nef', '.arw', '.dng', '.raw', '.rw2'].some(ext => fileName.endsWith(ext))) {
+        if (['.cr2', '.nef', '.arw', '.dng', '.raw', '.rw2', '.tif', '.tiff'].some(ext => fileName.endsWith(ext))) {
           imageData = await loadRawFile(arrayBuffer, fileName);
         } else if (file.type === 'image/png') {
           imageData = loadPngFile(arrayBuffer);
@@ -2716,6 +2716,20 @@
     }
 
     async function loadRawFile(buffer, fileName) {
+      // Handle TIF/TIFF files directly with UTIF.js
+      if (fileName.endsWith('.tif') || fileName.endsWith('.tiff')) {
+        try {
+          const ifds = UTIF.decode(buffer);
+          UTIF.decodeImage(buffer, ifds[0]);
+          const rgba = UTIF.toRGBA8(ifds[0]);
+          return new ImageData(new Uint8ClampedArray(rgba), ifds[0].width, ifds[0].height);
+        } catch (err) {
+          console.error('UTIF.js failed for TIFF:', err);
+          throw err;
+        }
+      }
+
+      // Handle iPhone DNG (ProRaw) with UTIF.js
       if (fileName.endsWith('.dng')) {
         const textSnippet = new TextDecoder().decode(buffer.slice(0, 1000));
         if (textSnippet.includes('iPhone')) {
@@ -3519,7 +3533,7 @@
       const arrayBuffer = await file.arrayBuffer();
       const fileName = file.name.toLowerCase();
 
-      if (['.cr2', '.nef', '.arw', '.dng', '.raw', '.rw2'].some(ext => fileName.endsWith(ext))) {
+      if (['.cr2', '.nef', '.arw', '.dng', '.raw', '.rw2', '.tif', '.tiff'].some(ext => fileName.endsWith(ext))) {
         return await loadRawFile(arrayBuffer, fileName);
       } else if (file.type === 'image/png') {
         return loadPngFile(arrayBuffer);
@@ -3953,7 +3967,7 @@
       const input = document.createElement('input');
       input.type = 'file';
       input.multiple = true;
-      input.accept = '.cr2,.nef,.arw,.dng,.raw,.rw2,image/*';
+      input.accept = '.cr2,.nef,.arw,.dng,.raw,.rw2,.tif,.tiff,image/*';
       input.onchange = (e) => {
         if (e.target.files.length > 0) {
           addFilesToQueue(Array.from(e.target.files));
@@ -3973,7 +3987,7 @@
 
     function addFilesToQueue(files) {
       // Filter for supported image files
-      const supportedExtensions = ['.cr2', '.nef', '.arw', '.dng', '.raw', '.rw2', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'];
+      const supportedExtensions = ['.cr2', '.nef', '.arw', '.dng', '.raw', '.rw2', '.tif', '.tiff', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'];
       const validFiles = files.filter(file => {
         const ext = '.' + file.name.split('.').pop().toLowerCase();
         return supportedExtensions.includes(ext) || file.type.startsWith('image/');
