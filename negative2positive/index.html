@@ -129,6 +129,12 @@
       object-fit: contain;
     }
 
+    #glCanvas {
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
+    }
+
     .crop-overlay {
       border: 2px dashed var(--accent);
       position: absolute;
@@ -1120,6 +1126,7 @@
           <input type="file" id="folderInput" accept=".cr2,.nef,.arw,.dng,.raw,.rw2,.tif,.tiff,image/*" webkitdirectory style="display: none;">
         </div>
         <canvas id="canvas" style="display: none;"></canvas>
+        <canvas id="glCanvas" style="display: none;"></canvas>
         <div class="crop-overlay" id="cropOverlay"></div>
       </div>
 
@@ -1789,6 +1796,8 @@
       croppedImageData: null,       // After cropping (still negative)
       processedImageData: null,     // After negative conversion
       displayImageData: null,       // After all adjustments
+      previewSourceImageData: null, // Downscaled source for preview renders
+      webglSourceImageData: null,   // Downscaled source for WebGL preview renders
 
       // Film settings
       filmType: 'color',
@@ -1845,11 +1854,14 @@
 
       // Export settings
       exportFormat: 'png',  // 'png' or 'jpeg'
-      jpegQuality: 92       // 1-100
+      jpegQuality: 92,      // 1-100
+
+      // Render state
+      lastRenderQuality: 'full' // 'full' | 'preview' | 'gl'
     };
 
     // Initialize curves
-    function initCurves() {
+    function initCurves(markDirty = false) {
       state.curves.r = new Uint8Array(256);
       state.curves.g = new Uint8Array(256);
       state.curves.b = new Uint8Array(256);
@@ -1863,14 +1875,17 @@
         state.curves.g[i] = i;
         state.curves.b[i] = i;
       }
+
+      if (markDirty && webglState.gl) webglState.curveDirty = true;
     }
-    initCurves();
+    initCurves(false);
 
     // ===========================================
     // Canvas & Context
     // ===========================================
     const canvas = document.getElementById('canvas');
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const glCanvas = document.getElementById('glCanvas');
     const histogramCanvas = document.getElementById('histogramCanvas');
     const histogramCtx = histogramCanvas.getContext('2d');
     const curveCanvas = document.getElementById('curveCanvas');
@@ -1920,6 +1935,7 @@
     function goToStep(step) {
       state.currentStep = step;
       updateWorkflowUI();
+      updateCanvasVisibility();
     }
 
     // ===========================================
@@ -2111,142 +2127,346 @@
       return output;
     }
 
-    function applyAdjustments(imageData) {
-      const { width, height, data } = imageData;
-      const output = new ImageData(new Uint8ClampedArray(data.length), width, height);
+    // ===========================================
+    // Pixel Adjustments (Optimized)
+    // ===========================================
+    function ensureImageDataBuffer(buffer, width, height) {
+      if (buffer && buffer.width === width && buffer.height === height) return buffer;
+      return new ImageData(new Uint8ClampedArray(width * height * 4), width, height);
+    }
+
+    function hue2rgb(p, q, t) {
+      if (t < 0) t += 1;
+      if (t > 1) t -= 1;
+      if (t < 1 / 6) return p + (q - p) * 6 * t;
+      if (t < 1 / 2) return q;
+      if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+      return p;
+    }
+
+    const channelLutR = new Uint8Array(256);
+    const channelLutG = new Uint8Array(256);
+    const channelLutB = new Uint8Array(256);
+
+    function buildChannelLuts({
+      lutR,
+      lutG,
+      lutB,
+      curveR,
+      curveG,
+      curveB,
+      rMult,
+      gMult,
+      bMult,
+      contrastFactor,
+      doContrast,
+      doTempTint,
+      tempRMult,
+      tintGMult,
+      tempBMult,
+      doCMY,
+      cmyRShift,
+      cmyGShift,
+      cmyBShift
+    }) {
+      for (let v = 0; v < 256; v++) {
+        let r = v * rMult;
+        let g = v * gMult;
+        let b = v * bMult;
+
+        if (doContrast) {
+          r = (r - 127.5) * contrastFactor + 127.5;
+          g = (g - 127.5) * contrastFactor + 127.5;
+          b = (b - 127.5) * contrastFactor + 127.5;
+        }
+
+        if (doTempTint) {
+          r *= tempRMult;
+          g *= tintGMult;
+          b *= tempBMult;
+        }
+
+        if (r < 0) r = 0; else if (r > 255) r = 255;
+        if (g < 0) g = 0; else if (g > 255) g = 255;
+        if (b < 0) b = 0; else if (b > 255) b = 255;
+
+        if (doCMY) {
+          r -= cmyRShift;
+          g -= cmyGShift;
+          b -= cmyBShift;
+
+          if (r < 0) r = 0; else if (r > 255) r = 255;
+          if (g < 0) g = 0; else if (g > 255) g = 255;
+          if (b < 0) b = 0; else if (b > 255) b = 255;
+        }
+
+        lutR[v] = curveR[(r + 0.5) | 0];
+        lutG[v] = curveG[(g + 0.5) | 0];
+        lutB[v] = curveB[(b + 0.5) | 0];
+      }
+    }
+
+    function applyAdjustmentsToBuffer(imageData, settings, output, quality = 'full') {
+      const { data } = imageData;
       const outData = output.data;
 
-      const preset = FILM_PRESETS[state.filmPreset];
+      const preset = FILM_PRESETS[settings.filmPreset];
       const presetChars = preset.characteristics || {};
 
-      const exposureMult = Math.pow(2, state.exposure);
-      const contrastFactor = 1 + (state.contrast / 100);
-      const tempFactor = (state.temperature + (presetChars.warmth || 0) * 100) / 100;
-      const tintFactor = state.tint / 100;
-      const satFactor = 1 + ((state.saturation + (presetChars.saturation || 0) * 100) / 100);
-      const vibFactor = state.vibrance / 100;
-      const highlightsFactor = state.highlights / 100;
-      const shadowsFactor = state.shadows / 100;
+      const exposureMult = Math.pow(2, settings.exposure);
+      const contrastFactor = 1 + (settings.contrast / 100);
+      const tempFactor = (settings.temperature + (presetChars.warmth || 0) * 100) / 100;
+      const tintFactor = settings.tint / 100;
+      const satFactor = 1 + ((settings.saturation + (presetChars.saturation || 0) * 100) / 100);
+      const vibFactor = settings.vibrance / 100;
+      const highlightsFactor = settings.highlights / 100;
+      const shadowsFactor = settings.shadows / 100;
+
+      const rMult = settings.wbR * exposureMult;
+      const gMult = settings.wbG * exposureMult;
+      const bMult = settings.wbB * exposureMult;
+
+      const tempRMult = 1 + tempFactor * 0.3;
+      const tempBMult = 1 - tempFactor * 0.3;
+      const tintGMult = 1 + tintFactor * 0.3;
+
+      const cmyRShift = settings.cyan * 2.55;
+      const cmyGShift = settings.magenta * 2.55;
+      const cmyBShift = settings.yellow * 2.55;
+
+      const curveR = settings.curves.r;
+      const curveG = settings.curves.g;
+      const curveB = settings.curves.b;
+
+      const doContrast = contrastFactor !== 1;
+      const doHighlights = highlightsFactor !== 0;
+      const doShadows = shadowsFactor !== 0;
+      const doTempTint = tempFactor !== 0 || tintFactor !== 0;
+      const doHsl = satFactor !== 1 || vibFactor !== 0;
+      const doCMY = cmyRShift !== 0 || cmyGShift !== 0 || cmyBShift !== 0;
+
+      const lumaScale = 2 / 255;
+
+      // Fast path: when adjustments are per-channel only, precompute LUTs once and do 3 lookups per pixel.
+      if (!doHighlights && !doShadows && !doHsl) {
+        buildChannelLuts({
+          lutR: channelLutR,
+          lutG: channelLutG,
+          lutB: channelLutB,
+          curveR,
+          curveG,
+          curveB,
+          rMult,
+          gMult,
+          bMult,
+          contrastFactor,
+          doContrast,
+          doTempTint,
+          tempRMult,
+          tintGMult,
+          tempBMult,
+          doCMY,
+          cmyRShift,
+          cmyGShift,
+          cmyBShift
+        });
+
+        for (let i = 0; i < data.length; i += 4) {
+          outData[i] = channelLutR[data[i]];
+          outData[i + 1] = channelLutG[data[i + 1]];
+          outData[i + 2] = channelLutB[data[i + 2]];
+          outData[i + 3] = 255;
+        }
+        return;
+      }
 
       for (let i = 0; i < data.length; i += 4) {
-        let r = data[i];
-        let g = data[i + 1];
-        let b = data[i + 2];
+        let r = data[i] * rMult;
+        let g = data[i + 1] * gMult;
+        let b = data[i + 2] * bMult;
 
-        // Apply white balance
-        r *= state.wbR;
-        g *= state.wbG;
-        b *= state.wbB;
-
-        // Apply exposure
-        r *= exposureMult;
-        g *= exposureMult;
-        b *= exposureMult;
-
-        // Apply contrast
-        r = ((r / 255 - 0.5) * contrastFactor + 0.5) * 255;
-        g = ((g / 255 - 0.5) * contrastFactor + 0.5) * 255;
-        b = ((b / 255 - 0.5) * contrastFactor + 0.5) * 255;
-
-        // Apply highlights/shadows
-        const luma = (r * 0.299 + g * 0.587 + b * 0.114) / 255;
-        if (luma > 0.5 && highlightsFactor !== 0) {
-          const mult = 1 + highlightsFactor * (luma - 0.5) * 2;
-          r *= mult; g *= mult; b *= mult;
-        }
-        if (luma < 0.5 && shadowsFactor !== 0) {
-          const mult = 1 + shadowsFactor * (0.5 - luma) * 2;
-          r *= mult; g *= mult; b *= mult;
+        if (doContrast) {
+          r = (r - 127.5) * contrastFactor + 127.5;
+          g = (g - 127.5) * contrastFactor + 127.5;
+          b = (b - 127.5) * contrastFactor + 127.5;
         }
 
-        // Apply temperature/tint
-        r = r * (1 + tempFactor * 0.3);
-        b = b * (1 - tempFactor * 0.3);
-        g = g * (1 + tintFactor * 0.3);
-
-        r = Math.max(0, Math.min(255, r));
-        g = Math.max(0, Math.min(255, g));
-        b = Math.max(0, Math.min(255, b));
-
-        // HSL for saturation/vibrance
-        let hsl = rgbToHsl(r, g, b);
-        hsl[1] *= satFactor;
-        if (vibFactor >= 0) {
-          hsl[1] += (1 - hsl[1]) * vibFactor;
-        } else {
-          hsl[1] *= (1 + vibFactor);
+        if (doHighlights || doShadows) {
+          const luma = (r * 0.299 + g * 0.587 + b * 0.114);
+          if (doHighlights && luma > 127.5) {
+            const mult = 1 + highlightsFactor * (luma - 127.5) * lumaScale;
+            r *= mult; g *= mult; b *= mult;
+          }
+          if (doShadows && luma < 127.5) {
+            const mult = 1 + shadowsFactor * (127.5 - luma) * lumaScale;
+            r *= mult; g *= mult; b *= mult;
+          }
         }
-        hsl[1] = Math.max(0, Math.min(1, hsl[1]));
-        [r, g, b] = hslToRgb(hsl[0], hsl[1], hsl[2]);
 
-        // CMY
-        let c = 1 - (r / 255);
-        let m = 1 - (g / 255);
-        let y = 1 - (b / 255);
-        c = Math.max(0, Math.min(1, c + state.cyan / 100));
-        m = Math.max(0, Math.min(1, m + state.magenta / 100));
-        y = Math.max(0, Math.min(1, y + state.yellow / 100));
-        r = (1 - c) * 255;
-        g = (1 - m) * 255;
-        b = (1 - y) * 255;
+        if (doTempTint) {
+          r *= tempRMult;
+          b *= tempBMult;
+          g *= tintGMult;
+        }
 
-        // Curves
-        r = state.curves.r[Math.round(Math.max(0, Math.min(255, r)))];
-        g = state.curves.g[Math.round(Math.max(0, Math.min(255, g)))];
-        b = state.curves.b[Math.round(Math.max(0, Math.min(255, b)))];
+        if (r < 0) r = 0; else if (r > 255) r = 255;
+        if (g < 0) g = 0; else if (g > 255) g = 255;
+        if (b < 0) b = 0; else if (b > 255) b = 255;
+
+        // The old pipeline always rounded here (via an HSL round-trip),
+        // so keep rounding even when saturation/vibrance is neutral.
+        if (!doHsl) {
+          r = (r + 0.5) | 0;
+          g = (g + 0.5) | 0;
+          b = (b + 0.5) | 0;
+        }
+
+        if (doHsl) {
+          if (quality === 'preview') {
+            // Fast approximation in RGB space (much cheaper than HSL), used only for interactive previews.
+            const max = r > g ? (r > b ? r : b) : (g > b ? g : b);
+            const min = r < g ? (r < b ? r : b) : (g < b ? g : b);
+
+            // Per-pixel saturation measure (HSV saturation) to modulate vibrance.
+            const hsvSat = max <= 0 ? 0 : (max - min) / max;
+            let vibScale = 1;
+            if (vibFactor >= 0) vibScale = 1 + vibFactor * (1 - hsvSat);
+            else vibScale = 1 + vibFactor;
+
+            const scale = satFactor * vibScale;
+            const gray = (r * 0.299 + g * 0.587 + b * 0.114);
+
+            r = gray + (r - gray) * scale;
+            g = gray + (g - gray) * scale;
+            b = gray + (b - gray) * scale;
+
+            if (r < 0) r = 0; else if (r > 255) r = 255;
+            if (g < 0) g = 0; else if (g > 255) g = 255;
+            if (b < 0) b = 0; else if (b > 255) b = 255;
+
+            r = (r + 0.5) | 0;
+            g = (g + 0.5) | 0;
+            b = (b + 0.5) | 0;
+          } else {
+          let rn = r / 255;
+          let gn = g / 255;
+          let bn = b / 255;
+
+          const max = rn > gn ? (rn > bn ? rn : bn) : (gn > bn ? gn : bn);
+          const min = rn < gn ? (rn < bn ? rn : bn) : (gn < bn ? gn : bn);
+          let h = 0;
+          let s = 0;
+          const l = (max + min) / 2;
+
+          if (max !== min) {
+            const d = max - min;
+            s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+            if (max === rn) h = (gn - bn) / d + (gn < bn ? 6 : 0);
+            else if (max === gn) h = (bn - rn) / d + 2;
+            else h = (rn - gn) / d + 4;
+            h /= 6;
+          }
+
+          // Saturation + vibrance adjustments (same semantics as the original HSL approach)
+          s *= satFactor;
+          if (vibFactor >= 0) s += (1 - s) * vibFactor;
+          else s *= (1 + vibFactor);
+          if (s < 0) s = 0; else if (s > 1) s = 1;
+
+          if (s === 0) {
+            const v = Math.round(l * 255);
+            r = v; g = v; b = v;
+          } else {
+            const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+            const p = 2 * l - q;
+            rn = hue2rgb(p, q, h + 1 / 3);
+            gn = hue2rgb(p, q, h);
+            bn = hue2rgb(p, q, h - 1 / 3);
+            r = Math.round(rn * 255);
+            g = Math.round(gn * 255);
+            b = Math.round(bn * 255);
+          }
+          }
+        }
+
+        if (doCMY) {
+          r -= cmyRShift;
+          g -= cmyGShift;
+          b -= cmyBShift;
+
+          if (r < 0) r = 0; else if (r > 255) r = 255;
+          if (g < 0) g = 0; else if (g > 255) g = 255;
+          if (b < 0) b = 0; else if (b > 255) b = 255;
+        }
+
+        r = curveR[(r + 0.5) | 0];
+        g = curveG[(g + 0.5) | 0];
+        b = curveB[(b + 0.5) | 0];
 
         outData[i] = r;
         outData[i + 1] = g;
         outData[i + 2] = b;
         outData[i + 3] = 255;
       }
-
-      return output;
     }
 
-    // ===========================================
-    // Color Space Conversions
-    // ===========================================
-    function rgbToHsl(r, g, b) {
-      r /= 255; g /= 255; b /= 255;
-      const max = Math.max(r, g, b), min = Math.min(r, g, b);
-      let h, s, l = (max + min) / 2;
+    function buildPreviewSourceImageData(imageData) {
+      const { width, height, data } = imageData;
+      const totalPixels = width * height;
+      // Keep interactive preview responsive on slower machines.
+      const maxPixels = 250_000;
 
-      if (max === min) {
-        h = s = 0;
-      } else {
-        const d = max - min;
-        s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-        switch (max) {
-          case r: h = (g - b) / d + (g < b ? 6 : 0); break;
-          case g: h = (b - r) / d + 2; break;
-          case b: h = (r - g) / d + 4; break;
+      if (totalPixels <= maxPixels) return imageData;
+
+      const step = Math.ceil(Math.sqrt(totalPixels / maxPixels));
+      const outW = Math.max(1, Math.floor(width / step));
+      const outH = Math.max(1, Math.floor(height / step));
+
+      const out = new ImageData(new Uint8ClampedArray(outW * outH * 4), outW, outH);
+      const outData = out.data;
+
+      for (let y = 0; y < outH; y++) {
+        const sy = Math.min(height - 1, y * step);
+        for (let x = 0; x < outW; x++) {
+          const sx = Math.min(width - 1, x * step);
+          const srcIdx = (sy * width + sx) * 4;
+          const dstIdx = (y * outW + x) * 4;
+          outData[dstIdx] = data[srcIdx];
+          outData[dstIdx + 1] = data[srcIdx + 1];
+          outData[dstIdx + 2] = data[srcIdx + 2];
+          outData[dstIdx + 3] = 255;
         }
-        h /= 6;
       }
-      return [h, s, l];
+
+      return out;
     }
 
-    function hslToRgb(h, s, l) {
-      let r, g, b;
-      if (s === 0) {
-        r = g = b = l;
-      } else {
-        function hue2rgb(p, q, t) {
-          if (t < 0) t += 1;
-          if (t > 1) t -= 1;
-          if (t < 1/6) return p + (q - p) * 6 * t;
-          if (t < 1/2) return q;
-          if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
-          return p;
+    function buildWebglSourceImageData(imageData, maxDim = 2048) {
+      if (!imageData) return null;
+      const { width, height, data } = imageData;
+      const scale = Math.max(width / maxDim, height / maxDim, 1);
+      const step = Math.ceil(scale);
+      if (step <= 1) return imageData;
+
+      const outW = Math.max(1, Math.floor(width / step));
+      const outH = Math.max(1, Math.floor(height / step));
+      const out = new ImageData(new Uint8ClampedArray(outW * outH * 4), outW, outH);
+      const outData = out.data;
+
+      for (let y = 0; y < outH; y++) {
+        const sy = Math.min(height - 1, y * step);
+        for (let x = 0; x < outW; x++) {
+          const sx = Math.min(width - 1, x * step);
+          const srcIdx = (sy * width + sx) * 4;
+          const dstIdx = (y * outW + x) * 4;
+          outData[dstIdx] = data[srcIdx];
+          outData[dstIdx + 1] = data[srcIdx + 1];
+          outData[dstIdx + 2] = data[srcIdx + 2];
+          outData[dstIdx + 3] = 255;
         }
-        const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
-        const p = 2 * l - q;
-        r = hue2rgb(p, q, h + 1/3);
-        g = hue2rgb(p, q, h);
-        b = hue2rgb(p, q, h - 1/3);
       }
-      return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
+
+      return out;
     }
 
     // ===========================================
@@ -2368,6 +2588,8 @@
       for (let i = 0; i < 256; i++) {
         curve[i] = Math.max(0, Math.min(255, Math.round(spline(i))));
       }
+
+      if (webglState.gl) webglState.curveDirty = true;
     }
 
     function renderCurve() {
@@ -2599,8 +2821,500 @@
     // ===========================================
     // Image Processing Pipeline
     // ===========================================
+    // WebGL is used to keep Step 3 adjustments responsive (WB/Tone/CMY/Curves) on large scans.
+    // CPU rendering is still used for fallback + batch export.
+
+    const webglState = {
+      gl: null,
+      program: null,
+      quadBuffer: null,
+      sourceTex: null,
+      curveTex: null,
+      curveDirty: true,
+      sourceDirty: true,
+      sourceSize: { w: 0, h: 0 },
+      maxTextureSize: 0,
+      handlersAttached: false,
+      locations: {
+        aPos: null,
+        uImage: null,
+        uCurve: null,
+        uWb: null,
+        uExposure: null,
+        uContrast: null,
+        uHighlights: null,
+        uShadows: null,
+        uTemp: null,
+        uTint: null,
+        uSat: null,
+        uVib: null,
+        uCmy: null
+      }
+    };
+
+    const webglCurveRgba = new Uint8Array(256 * 4);
+
+    function compileShader(gl, type, source) {
+      const shader = gl.createShader(type);
+      gl.shaderSource(shader, source);
+      gl.compileShader(shader);
+      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        const info = gl.getShaderInfoLog(shader) || 'Unknown shader compile error';
+        gl.deleteShader(shader);
+        throw new Error(info);
+      }
+      return shader;
+    }
+
+    function createProgram(gl, vsSource, fsSource) {
+      const vs = compileShader(gl, gl.VERTEX_SHADER, vsSource);
+      const fs = compileShader(gl, gl.FRAGMENT_SHADER, fsSource);
+      const program = gl.createProgram();
+      gl.attachShader(program, vs);
+      gl.attachShader(program, fs);
+      gl.linkProgram(program);
+      gl.deleteShader(vs);
+      gl.deleteShader(fs);
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        const info = gl.getProgramInfoLog(program) || 'Unknown program link error';
+        gl.deleteProgram(program);
+        throw new Error(info);
+      }
+      return program;
+    }
+
+    function initWebGLRenderer() {
+      if (webglState.gl) return true;
+
+      let gl = null;
+      try {
+        gl = glCanvas.getContext('webgl', {
+          alpha: false,
+          depth: false,
+          stencil: false,
+          antialias: false,
+          preserveDrawingBuffer: false,
+          premultipliedAlpha: false
+        });
+      } catch {
+        gl = null;
+      }
+
+      if (!gl) return false;
+
+      const vsSource = `
+        attribute vec2 a_pos;
+        varying vec2 v_uv;
+        void main() {
+          v_uv = (a_pos + 1.0) * 0.5;
+          gl_Position = vec4(a_pos, 0.0, 1.0);
+        }
+      `;
+
+      const fsSource = `
+        #ifdef GL_FRAGMENT_PRECISION_HIGH
+        precision highp float;
+        #else
+        precision mediump float;
+        #endif
+        varying vec2 v_uv;
+        uniform sampler2D u_image;
+        uniform sampler2D u_curve;
+
+        uniform vec3 u_wb;
+        uniform float u_exposure;
+        uniform float u_contrast;
+        uniform float u_highlights;
+        uniform float u_shadows;
+        uniform float u_temp;
+        uniform float u_tint;
+        uniform float u_sat;
+        uniform float u_vib;
+        uniform vec3 u_cmy;
+
+        float hue2rgb(float p, float q, float t) {
+          if (t < 0.0) t += 1.0;
+          if (t > 1.0) t -= 1.0;
+          if (t < 1.0 / 6.0) return p + (q - p) * 6.0 * t;
+          if (t < 1.0 / 2.0) return q;
+          if (t < 2.0 / 3.0) return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+          return p;
+        }
+
+        vec3 rgbToHsl(vec3 c) {
+          float r = c.r, g = c.g, b = c.b;
+          float maxc = max(r, max(g, b));
+          float minc = min(r, min(g, b));
+          float h = 0.0;
+          float s = 0.0;
+          float l = (maxc + minc) * 0.5;
+
+          if (maxc != minc) {
+            float d = maxc - minc;
+            s = l > 0.5 ? d / (2.0 - maxc - minc) : d / (maxc + minc);
+
+            if (maxc == r) {
+              h = (g - b) / d + (g < b ? 6.0 : 0.0);
+            } else if (maxc == g) {
+              h = (b - r) / d + 2.0;
+            } else {
+              h = (r - g) / d + 4.0;
+            }
+            h /= 6.0;
+          }
+
+          return vec3(h, s, l);
+        }
+
+        vec3 hslToRgb(float h, float s, float l) {
+          float r, g, b;
+          if (s == 0.0) {
+            r = g = b = l;
+          } else {
+            float q = l < 0.5 ? l * (1.0 + s) : l + s - l * s;
+            float p = 2.0 * l - q;
+            r = hue2rgb(p, q, h + 1.0 / 3.0);
+            g = hue2rgb(p, q, h);
+            b = hue2rgb(p, q, h - 1.0 / 3.0);
+          }
+          return vec3(r, g, b);
+        }
+
+        vec3 applyCurves(vec3 c) {
+          float rIdx = floor(c.r * 255.0 + 0.5);
+          float gIdx = floor(c.g * 255.0 + 0.5);
+          float bIdx = floor(c.b * 255.0 + 0.5);
+          vec4 cr = texture2D(u_curve, vec2((rIdx + 0.5) / 256.0, 0.5));
+          vec4 cg = texture2D(u_curve, vec2((gIdx + 0.5) / 256.0, 0.5));
+          vec4 cb = texture2D(u_curve, vec2((bIdx + 0.5) / 256.0, 0.5));
+          return vec3(cr.r, cg.g, cb.b);
+        }
+
+        void main() {
+          vec3 c = texture2D(u_image, v_uv).rgb;
+
+          float exposureMult = pow(2.0, u_exposure);
+          c *= u_wb * exposureMult;
+
+          c = (c - 0.5) * u_contrast + 0.5;
+
+          float luma = dot(c, vec3(0.299, 0.587, 0.114));
+          if (u_highlights != 0.0 && luma > 0.5) {
+            float mult = 1.0 + u_highlights * (luma - 0.5) * 2.0;
+            c *= mult;
+          }
+          if (u_shadows != 0.0 && luma < 0.5) {
+            float mult = 1.0 + u_shadows * (0.5 - luma) * 2.0;
+            c *= mult;
+          }
+
+          c.r *= (1.0 + u_temp * 0.3);
+          c.b *= (1.0 - u_temp * 0.3);
+          c.g *= (1.0 + u_tint * 0.3);
+          c = clamp(c, 0.0, 1.0);
+
+          if (u_sat != 1.0 || u_vib != 0.0) {
+            vec3 hsl = rgbToHsl(c);
+            float s = hsl.y * u_sat;
+            if (u_vib >= 0.0) {
+              s += (1.0 - s) * u_vib;
+            } else {
+              s *= (1.0 + u_vib);
+            }
+            hsl.y = clamp(s, 0.0, 1.0);
+            c = hslToRgb(hsl.x, hsl.y, hsl.z);
+          }
+
+          vec3 cmy = vec3(1.0) - c;
+          cmy = clamp(cmy + u_cmy, 0.0, 1.0);
+          c = vec3(1.0) - cmy;
+
+          c = applyCurves(c);
+
+          gl_FragColor = vec4(c, 1.0);
+        }
+      `;
+
+      try {
+        webglState.program = createProgram(gl, vsSource, fsSource);
+      } catch (err) {
+        console.warn('WebGL shader init failed:', err);
+        return false;
+      }
+
+      webglState.gl = gl;
+      webglState.maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE) || 0;
+
+      if (!webglState.handlersAttached) {
+        glCanvas.addEventListener('webglcontextlost', (e) => {
+          e.preventDefault();
+          // Mark renderer as unavailable; fall back to CPU.
+          webglState.gl = null;
+          webglState.program = null;
+          webglState.quadBuffer = null;
+          webglState.sourceTex = null;
+          webglState.curveTex = null;
+          webglState.sourceSize = { w: 0, h: 0 };
+          webglState.maxTextureSize = 0;
+          webglState.curveDirty = true;
+          webglState.sourceDirty = true;
+          updateCanvasVisibility();
+          schedulePreviewUpdate();
+        }, false);
+
+        glCanvas.addEventListener('webglcontextrestored', () => {
+          // Resources are lost; re-init lazily on next render.
+          webglState.gl = null;
+          webglState.program = null;
+          webglState.quadBuffer = null;
+          webglState.sourceTex = null;
+          webglState.curveTex = null;
+          webglState.sourceSize = { w: 0, h: 0 };
+          webglState.maxTextureSize = 0;
+          webglState.curveDirty = true;
+          webglState.sourceDirty = true;
+          schedulePreviewUpdate();
+        }, false);
+
+        webglState.handlersAttached = true;
+      }
+
+      // Full-screen quad
+      webglState.quadBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, webglState.quadBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+        -1, -1,
+         1, -1,
+        -1,  1,
+         1,  1
+      ]), gl.STATIC_DRAW);
+
+      gl.useProgram(webglState.program);
+
+      webglState.locations.aPos = gl.getAttribLocation(webglState.program, 'a_pos');
+      webglState.locations.uImage = gl.getUniformLocation(webglState.program, 'u_image');
+      webglState.locations.uCurve = gl.getUniformLocation(webglState.program, 'u_curve');
+      webglState.locations.uWb = gl.getUniformLocation(webglState.program, 'u_wb');
+      webglState.locations.uExposure = gl.getUniformLocation(webglState.program, 'u_exposure');
+      webglState.locations.uContrast = gl.getUniformLocation(webglState.program, 'u_contrast');
+      webglState.locations.uHighlights = gl.getUniformLocation(webglState.program, 'u_highlights');
+      webglState.locations.uShadows = gl.getUniformLocation(webglState.program, 'u_shadows');
+      webglState.locations.uTemp = gl.getUniformLocation(webglState.program, 'u_temp');
+      webglState.locations.uTint = gl.getUniformLocation(webglState.program, 'u_tint');
+      webglState.locations.uSat = gl.getUniformLocation(webglState.program, 'u_sat');
+      webglState.locations.uVib = gl.getUniformLocation(webglState.program, 'u_vib');
+      webglState.locations.uCmy = gl.getUniformLocation(webglState.program, 'u_cmy');
+
+      // Textures
+      webglState.sourceTex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, webglState.sourceTex);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+      webglState.curveTex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, webglState.curveTex);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+
+      // Bind samplers
+      gl.uniform1i(webglState.locations.uImage, 0);
+      gl.uniform1i(webglState.locations.uCurve, 1);
+
+      gl.disable(gl.DEPTH_TEST);
+      gl.disable(gl.BLEND);
+
+      webglState.curveDirty = true;
+      webglState.sourceDirty = true;
+
+      return true;
+    }
+
+    function isWebGLActive() {
+      return !!webglState.gl && state.currentStep >= 3 && !!state.processedImageData;
+    }
+
+    function resizeWebGLCanvas() {
+      if (!webglState.gl) return;
+      const rect = glCanvas.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+
+      const dpr = window.devicePixelRatio || 1;
+      let targetW = Math.max(1, Math.round(rect.width * dpr));
+      let targetH = Math.max(1, Math.round(rect.height * dpr));
+
+      // Limit interactive draw resolution to keep things smooth on very large displays.
+      const maxDim = 2048;
+      const maxCurrent = Math.max(targetW, targetH);
+      if (maxCurrent > maxDim) {
+        const scale = maxDim / maxCurrent;
+        targetW = Math.max(1, Math.floor(targetW * scale));
+        targetH = Math.max(1, Math.floor(targetH * scale));
+      }
+
+      if (glCanvas.width !== targetW) glCanvas.width = targetW;
+      if (glCanvas.height !== targetH) glCanvas.height = targetH;
+    }
+
+    function getWebglSourceImageData() {
+      const full = state.processedImageData;
+      if (!full) return null;
+
+      const maxTex = webglState.maxTextureSize || 0;
+      const targetMaxDim = Math.min(2048, maxTex || 2048);
+
+      let src = state.webglSourceImageData;
+      if (!src || src.width !== Math.min(src.width, targetMaxDim) || src.height !== Math.min(src.height, targetMaxDim)) {
+        // If cached source is missing or too large for the current device, rebuild from full-res.
+        src = buildWebglSourceImageData(full, targetMaxDim);
+        state.webglSourceImageData = src;
+      }
+
+      // Safety: if the result still doesn't fit (very old GPUs), force it down.
+      if (maxTex && (src.width > maxTex || src.height > maxTex)) {
+        src = buildWebglSourceImageData(full, maxTex);
+        state.webglSourceImageData = src;
+      }
+
+      return src;
+    }
+
+    function webglUploadSource(imageData) {
+      if (!webglState.gl) return;
+      if (!imageData) return;
+
+      const gl = webglState.gl;
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, webglState.sourceTex);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+      gl.texImage2D(
+        gl.TEXTURE_2D,
+        0,
+        gl.RGBA,
+        imageData.width,
+        imageData.height,
+        0,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        imageData.data
+      );
+      webglState.sourceSize.w = imageData.width;
+      webglState.sourceSize.h = imageData.height;
+      webglState.sourceDirty = false;
+    }
+
+    function webglUploadCurves() {
+      if (!webglState.gl) return;
+      const gl = webglState.gl;
+
+      for (let i = 0; i < 256; i++) {
+        const idx = i * 4;
+        webglCurveRgba[idx] = state.curves.r[i];
+        webglCurveRgba[idx + 1] = state.curves.g[i];
+        webglCurveRgba[idx + 2] = state.curves.b[i];
+        webglCurveRgba[idx + 3] = 255;
+      }
+
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, webglState.curveTex);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.texImage2D(
+        gl.TEXTURE_2D,
+        0,
+        gl.RGBA,
+        256,
+        1,
+        0,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        webglCurveRgba
+      );
+
+      webglState.curveDirty = false;
+    }
+
+    function webglSetUniforms() {
+      const gl = webglState.gl;
+      if (!gl) return;
+
+      const preset = FILM_PRESETS[state.filmPreset] || {};
+      const presetChars = preset.characteristics || {};
+
+      const exposure = state.exposure;
+      const contrast = 1 + (state.contrast / 100);
+      const highlights = state.highlights / 100;
+      const shadows = state.shadows / 100;
+      const tempFactor = (state.temperature + (presetChars.warmth || 0) * 100) / 100;
+      const tintFactor = state.tint / 100;
+      const satFactor = 1 + ((state.saturation + (presetChars.saturation || 0) * 100) / 100);
+      const vibFactor = state.vibrance / 100;
+
+      gl.uniform3f(webglState.locations.uWb, state.wbR, state.wbG, state.wbB);
+      gl.uniform1f(webglState.locations.uExposure, exposure);
+      gl.uniform1f(webglState.locations.uContrast, contrast);
+      gl.uniform1f(webglState.locations.uHighlights, highlights);
+      gl.uniform1f(webglState.locations.uShadows, shadows);
+      gl.uniform1f(webglState.locations.uTemp, tempFactor);
+      gl.uniform1f(webglState.locations.uTint, tintFactor);
+      gl.uniform1f(webglState.locations.uSat, satFactor);
+      gl.uniform1f(webglState.locations.uVib, vibFactor);
+      gl.uniform3f(webglState.locations.uCmy, state.cyan / 100, state.magenta / 100, state.yellow / 100);
+    }
+
+    function renderWebGL() {
+      if (!webglState.gl || !state.processedImageData) return;
+
+      resizeWebGLCanvas();
+
+      const gl = webglState.gl;
+      gl.viewport(0, 0, glCanvas.width, glCanvas.height);
+      gl.useProgram(webglState.program);
+
+      // Uploads if needed
+      const source = getWebglSourceImageData();
+      if (!source) return;
+      if (webglState.sourceDirty || webglState.sourceSize.w !== source.width || webglState.sourceSize.h !== source.height) {
+        webglUploadSource(source);
+      }
+      if (webglState.curveDirty) {
+        webglUploadCurves();
+      }
+
+      // Bind geometry
+      gl.bindBuffer(gl.ARRAY_BUFFER, webglState.quadBuffer);
+      gl.enableVertexAttribArray(webglState.locations.aPos);
+      gl.vertexAttribPointer(webglState.locations.aPos, 2, gl.FLOAT, false, 0, 0);
+
+      // Bind textures
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, webglState.sourceTex);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, webglState.curveTex);
+
+      webglSetUniforms();
+
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    }
+
+    function updateCanvasVisibility() {
+      const showGL = isWebGLActive();
+      glCanvas.style.display = showGL ? 'block' : 'none';
+      canvas.style.display = showGL ? 'none' : 'block';
+      if (showGL) renderWebGL();
+    }
+
     let updateScheduled = false;
-    let fullUpdateScheduled = false;
+    let fullUpdateTimer = null;
+
+    const previewCanvas = document.createElement('canvas');
+    const previewCtx = previewCanvas.getContext('2d', { willReadFrequently: true });
+    let fullAdjustedBuffer = null;
+    let previewAdjustedBuffer = null;
 
     function schedulePreviewUpdate() {
       if (!updateScheduled) {
@@ -2613,33 +3327,85 @@
     }
 
     function scheduleFullUpdate() {
-      if (!fullUpdateScheduled) {
-        fullUpdateScheduled = true;
-        setTimeout(() => {
-          updateFull();
-          fullUpdateScheduled = false;
-        }, 300);
-      }
+      if (fullUpdateTimer) clearTimeout(fullUpdateTimer);
+      // Full-res CPU rendering can be expensive on large scans; debounce aggressively.
+      fullUpdateTimer = setTimeout(() => {
+        updateFull();
+        fullUpdateTimer = null;
+      }, 1200);
     }
 
     function updatePreview() {
       if (!state.processedImageData) return;
-      const adjusted = applyAdjustments(state.processedImageData);
-      state.displayImageData = adjusted;
-      ctx.putImageData(adjusted, 0, 0);
-      renderHistogram(adjusted);
+
+      // Prefer GPU rendering in Step 3 when available.
+      if (state.currentStep >= 3 && initWebGLRenderer()) {
+        updateCanvasVisibility();
+        renderWebGL();
+        state.lastRenderQuality = 'gl';
+        return;
+      }
+
+      updatePreviewCpu();
+    }
+
+    function updatePreviewCpu() {
+      if (!state.processedImageData) return;
+
+      const source = state.previewSourceImageData || state.processedImageData;
+      previewAdjustedBuffer = ensureImageDataBuffer(previewAdjustedBuffer, source.width, source.height);
+      applyAdjustmentsToBuffer(source, state, previewAdjustedBuffer, 'preview');
+
+      if (source !== state.processedImageData) {
+        if (previewCanvas.width !== source.width) previewCanvas.width = source.width;
+        if (previewCanvas.height !== source.height) previewCanvas.height = source.height;
+        previewCtx.putImageData(previewAdjustedBuffer, 0, 0);
+
+        ctx.imageSmoothingEnabled = true;
+        ctx.drawImage(previewCanvas, 0, 0, canvas.width, canvas.height);
+        state.lastRenderQuality = 'preview';
+      } else {
+        ctx.putImageData(previewAdjustedBuffer, 0, 0);
+        state.displayImageData = previewAdjustedBuffer;
+        state.lastRenderQuality = 'full';
+      }
+      // Histogram updates are deferred to full renders for responsiveness.
     }
 
     function updateFull() {
       if (!state.processedImageData) return;
-      const adjusted = applyAdjustments(state.processedImageData);
-      state.displayImageData = adjusted;
-      ctx.putImageData(adjusted, 0, 0);
-      renderHistogram(adjusted);
+
+      // Prefer GPU rendering in Step 3 when available.
+      if (state.currentStep >= 3 && initWebGLRenderer()) {
+        updateCanvasVisibility();
+        renderWebGL();
+        state.lastRenderQuality = 'gl';
+        return;
+      }
+
+      updateFullCpu();
+    }
+
+    function updateFullCpu() {
+      if (!state.processedImageData) return;
+
+      const source = state.processedImageData;
+      fullAdjustedBuffer = ensureImageDataBuffer(fullAdjustedBuffer, source.width, source.height);
+      applyAdjustmentsToBuffer(source, state, fullAdjustedBuffer, 'full');
+      state.displayImageData = fullAdjustedBuffer;
+      ctx.putImageData(fullAdjustedBuffer, 0, 0);
+      renderHistogram(fullAdjustedBuffer);
 
       transformCanvas.width = canvas.width;
       transformCanvas.height = canvas.height;
-      transformCtx.putImageData(adjusted, 0, 0);
+      transformCtx.putImageData(fullAdjustedBuffer, 0, 0);
+      state.lastRenderQuality = 'full';
+    }
+
+    function ensureFullRender() {
+      if (!state.processedImageData) return;
+      // Always compute full-res on CPU for export/batch correctness.
+      updateFullCpu();
     }
 
     function processNegative() {
@@ -2659,11 +3425,16 @@
       }
 
       state.processedImageData = processed;
+      state.previewSourceImageData = buildPreviewSourceImageData(processed);
+      state.webglSourceImageData = buildWebglSourceImageData(processed);
+      if (initWebGLRenderer()) {
+        webglState.sourceDirty = true;
+        webglState.curveDirty = true;
+      }
       canvas.width = processed.width;
       canvas.height = processed.height;
-      updateFull();
-
       goToStep(3);
+      updateFull();
     }
 
     // ===========================================
@@ -2674,8 +3445,13 @@
       const maxWidth = container.clientWidth - 20;
       const maxHeight = container.clientHeight - 20;
       const scale = Math.min(maxWidth / w, maxHeight / h, 1);
-      canvas.style.width = (w * scale) + 'px';
-      canvas.style.height = (h * scale) + 'px';
+      const cssW = (w * scale) + 'px';
+      const cssH = (h * scale) + 'px';
+      canvas.style.width = cssW;
+      canvas.style.height = cssH;
+      glCanvas.style.width = cssW;
+      glCanvas.style.height = cssH;
+      if (isWebGLActive()) resizeWebGLCanvas();
     }
 
     function displayNegative(imageData) {
@@ -2714,7 +3490,15 @@
           state.originalImageData = imageData;
           state.croppedImageData = null;
           state.processedImageData = null;
+          state.displayImageData = null;
+          state.previewSourceImageData = null;
+          state.webglSourceImageData = null;
+          state.lastRenderQuality = 'full';
           state.filmBaseSet = false;
+          if (webglState.gl) {
+            webglState.sourceDirty = true;
+            webglState.sourceSize = { w: 0, h: 0 };
+          }
 
           displayNegative(imageData);
           showImageUI();
@@ -2830,12 +3614,12 @@
 
     function showImageUI() {
       document.getElementById('uploadPlaceholder').style.display = 'none';
-      canvas.style.display = 'block';
       document.getElementById('previewToolbar').style.display = 'flex';
       document.getElementById('histogramContainer').style.display = 'block';
       document.getElementById('controlsPanel').style.display = 'flex';
       document.getElementById('appFooter').style.display = 'flex';
 
+      updateCanvasVisibility();
       adjustCanvasDisplay(canvas.width, canvas.height);
     }
 
@@ -2860,6 +3644,7 @@
       state.samplingMode = 'filmBase';
       document.getElementById('sampleBaseBtn').classList.add('active');
       canvas.style.cursor = 'crosshair';
+      glCanvas.style.cursor = 'crosshair';
     });
 
     document.getElementById('autoDetectBtn').addEventListener('click', () => {
@@ -2888,6 +3673,7 @@
       state.samplingMode = 'whiteBalance';
       document.getElementById('sampleWBBtn').classList.add('active');
       canvas.style.cursor = 'crosshair';
+      glCanvas.style.cursor = 'crosshair';
     });
 
     function updateWBSliders() {
@@ -2912,26 +3698,39 @@
     // ===========================================
     // Canvas Click Handler (Sampling)
     // ===========================================
-    canvas.addEventListener('click', (e) => {
+    function handleSamplingClick(e) {
       if (state.cropping) return;
+      if (!state.samplingMode) return;
 
-      const rect = canvas.getBoundingClientRect();
-      const scaleX = canvas.width / rect.width;
-      const scaleY = canvas.height / rect.height;
-      const x = Math.floor((e.clientX - rect.left) * scaleX);
-      const y = Math.floor((e.clientY - rect.top) * scaleY);
+      const target = e.currentTarget;
+      const rect = target.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+
+      const relX = (e.clientX - rect.left) / rect.width;
+      const relY = (e.clientY - rect.top) / rect.height;
+      if (relX < 0 || relX > 1 || relY < 0 || relY > 1) return;
 
       if (state.samplingMode === 'filmBase') {
         const sourceData = state.croppedImageData || state.originalImageData;
+        if (!sourceData) return;
+
+        const x = Math.floor(relX * sourceData.width);
+        const y = Math.floor(relY * sourceData.height);
+
         state.filmBase = sampleFilmBase(sourceData, x, y, 10);
         state.filmBaseSet = true;
         state.samplingMode = null;
         document.getElementById('sampleBaseBtn').classList.remove('active');
         canvas.style.cursor = 'default';
+        glCanvas.style.cursor = 'default';
         updateFilmBasePreview();
       } else if (state.samplingMode === 'whiteBalance') {
-        // Sample from processed image
+        // Sample from processed image (post-inversion)
         if (!state.processedImageData) return;
+
+        const x = Math.floor(relX * state.processedImageData.width);
+        const y = Math.floor(relY * state.processedImageData.height);
+
         const sample = sampleFilmBase(state.processedImageData, x, y, 5);
         const gray = (sample.r + sample.g + sample.b) / 3;
 
@@ -2949,10 +3748,14 @@
         state.samplingMode = null;
         document.getElementById('sampleWBBtn').classList.remove('active');
         canvas.style.cursor = 'default';
+        glCanvas.style.cursor = 'default';
         updateWBSliders();
         updateFull();
       }
-    });
+    }
+
+    canvas.addEventListener('click', handleSamplingClick);
+    glCanvas.addEventListener('click', handleSamplingClick);
 
     // ===========================================
     // Film Type & Preset Selection
@@ -2971,6 +3774,8 @@
           presetSelect.value = 'generic_color';
           state.filmPreset = 'generic_color';
         }
+
+        schedulePreviewUpdate();
       });
     });
 
@@ -2982,6 +3787,8 @@
         btn.classList.toggle('active', btn.dataset.type === preset.type);
       });
       state.filmType = preset.type;
+
+      schedulePreviewUpdate();
     });
 
     // ===========================================
@@ -3265,7 +4072,7 @@
       document.getElementById('yellowValue').textContent = '0';
 
       updateWBSliders();
-      initCurves();
+      initCurves(true);
       renderCurve();
       updateFull();
     });
@@ -3274,7 +4081,19 @@
       if (state.originalImageData) {
         state.croppedImageData = null;
         state.processedImageData = null;
+        state.displayImageData = null;
+        state.previewSourceImageData = null;
+        state.webglSourceImageData = null;
         state.filmBaseSet = false;
+        state.lastRenderQuality = 'full';
+        if (webglState.gl) {
+          webglState.sourceDirty = true;
+          webglState.sourceSize = { w: 0, h: 0 };
+        }
+        if (fullUpdateTimer) {
+          clearTimeout(fullUpdateTimer);
+          fullUpdateTimer = null;
+        }
         displayNegative(state.originalImageData);
         goToStep(1);
         document.getElementById('resetBtn').click();
@@ -3287,11 +4106,25 @@
       state.croppedImageData = null;
       state.processedImageData = null;
       state.displayImageData = null;
+      state.previewSourceImageData = null;
+      state.webglSourceImageData = null;
       state.filmBaseSet = false;
       state.currentStep = 1;
+      state.lastRenderQuality = 'full';
+      fullAdjustedBuffer = null;
+      previewAdjustedBuffer = null;
+      if (webglState.gl) {
+        webglState.sourceDirty = true;
+        webglState.sourceSize = { w: 0, h: 0 };
+      }
+      if (fullUpdateTimer) {
+        clearTimeout(fullUpdateTimer);
+        fullUpdateTimer = null;
+      }
 
       // Reset UI
       canvas.style.display = 'none';
+      glCanvas.style.display = 'none';
       document.getElementById('uploadPlaceholder').style.display = 'flex';
       document.getElementById('previewToolbar').style.display = 'none';
       document.getElementById('histogramContainer').style.display = 'none';
@@ -3332,6 +4165,8 @@
     });
 
     function exportSingle() {
+      ensureFullRender();
+
       const format = state.exportFormat;
       const ext = format === 'jpeg' ? '.jpg' : '.png';
       const mimeType = format === 'jpeg' ? 'image/jpeg' : 'image/png';
@@ -3426,95 +4261,8 @@
     }
 
     function applyAdjustmentsWithSettings(imageData, settings) {
-      const { width, height, data } = imageData;
-      const output = new ImageData(new Uint8ClampedArray(data.length), width, height);
-      const outData = output.data;
-
-      const preset = FILM_PRESETS[settings.filmPreset];
-      const presetChars = preset.characteristics || {};
-
-      const exposureMult = Math.pow(2, settings.exposure);
-      const contrastFactor = 1 + (settings.contrast / 100);
-      const tempFactor = (settings.temperature + (presetChars.warmth || 0) * 100) / 100;
-      const tintFactor = settings.tint / 100;
-      const satFactor = 1 + ((settings.saturation + (presetChars.saturation || 0) * 100) / 100);
-      const vibFactor = settings.vibrance / 100;
-      const highlightsFactor = settings.highlights / 100;
-      const shadowsFactor = settings.shadows / 100;
-
-      for (let i = 0; i < data.length; i += 4) {
-        let r = data[i];
-        let g = data[i + 1];
-        let b = data[i + 2];
-
-        // Apply white balance
-        r *= settings.wbR;
-        g *= settings.wbG;
-        b *= settings.wbB;
-
-        // Apply exposure
-        r *= exposureMult;
-        g *= exposureMult;
-        b *= exposureMult;
-
-        // Apply contrast
-        r = ((r / 255 - 0.5) * contrastFactor + 0.5) * 255;
-        g = ((g / 255 - 0.5) * contrastFactor + 0.5) * 255;
-        b = ((b / 255 - 0.5) * contrastFactor + 0.5) * 255;
-
-        // Apply highlights/shadows
-        const luma = (r * 0.299 + g * 0.587 + b * 0.114) / 255;
-        if (luma > 0.5 && highlightsFactor !== 0) {
-          const mult = 1 + highlightsFactor * (luma - 0.5) * 2;
-          r *= mult; g *= mult; b *= mult;
-        }
-        if (luma < 0.5 && shadowsFactor !== 0) {
-          const mult = 1 + shadowsFactor * (0.5 - luma) * 2;
-          r *= mult; g *= mult; b *= mult;
-        }
-
-        // Apply temperature/tint
-        r = r * (1 + tempFactor * 0.3);
-        b = b * (1 - tempFactor * 0.3);
-        g = g * (1 + tintFactor * 0.3);
-
-        r = Math.max(0, Math.min(255, r));
-        g = Math.max(0, Math.min(255, g));
-        b = Math.max(0, Math.min(255, b));
-
-        // HSL for saturation/vibrance
-        let hsl = rgbToHsl(r, g, b);
-        hsl[1] *= satFactor;
-        if (vibFactor >= 0) {
-          hsl[1] += (1 - hsl[1]) * vibFactor;
-        } else {
-          hsl[1] *= (1 + vibFactor);
-        }
-        hsl[1] = Math.max(0, Math.min(1, hsl[1]));
-        [r, g, b] = hslToRgb(hsl[0], hsl[1], hsl[2]);
-
-        // CMY
-        let c = 1 - (r / 255);
-        let m = 1 - (g / 255);
-        let y = 1 - (b / 255);
-        c = Math.max(0, Math.min(1, c + settings.cyan / 100));
-        m = Math.max(0, Math.min(1, m + settings.magenta / 100));
-        y = Math.max(0, Math.min(1, y + settings.yellow / 100));
-        r = (1 - c) * 255;
-        g = (1 - m) * 255;
-        b = (1 - y) * 255;
-
-        // Curves
-        r = settings.curves.r[Math.round(Math.max(0, Math.min(255, r)))];
-        g = settings.curves.g[Math.round(Math.max(0, Math.min(255, g)))];
-        b = settings.curves.b[Math.round(Math.max(0, Math.min(255, b)))];
-
-        outData[i] = r;
-        outData[i + 1] = g;
-        outData[i + 2] = b;
-        outData[i + 3] = 255;
-      }
-
+      const output = new ImageData(new Uint8ClampedArray(imageData.data.length), imageData.width, imageData.height);
+      applyAdjustmentsToBuffer(imageData, settings, output, 'full');
       return output;
     }
 
@@ -3698,7 +4446,8 @@
           try {
             let blob;
             // If this is the current file and it's displayed, use displayed data
-            if (index === state.currentFileIndex && state.displayImageData && state.currentStep >= 3) {
+            if (index === state.currentFileIndex && state.currentStep >= 3) {
+              ensureFullRender();
               blob = await imageDataToBlob(state.displayImageData);
             } else {
               // Process with saved settings or auto-detect
@@ -3755,7 +4504,8 @@
 
           try {
             let blob;
-            if (index === state.currentFileIndex && state.displayImageData && state.currentStep >= 3) {
+            if (index === state.currentFileIndex && state.currentStep >= 3) {
+              ensureFullRender();
               blob = await imageDataToBlob(state.displayImageData);
             } else {
               const adjusted = await processFileWithSettings(item.file, item.settings);
