@@ -17,7 +17,7 @@ npx serve negative2positive
 python -m http.server -d negative2positive
 ```
 
-Live demo: https://neoanaloglab.com
+Live demo: https://negative-converter.tokugai.com
 
 ## Architecture
 
