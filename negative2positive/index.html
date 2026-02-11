@@ -1386,7 +1386,6 @@
   <script src="https://cdn.jsdelivr.net/npm/upng-js@2.1.0/UPNG.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/utif@3.1.0/UTIF.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jszip@3/dist/jszip.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 </head>
 
 <body>
@@ -2248,12 +2247,8 @@
     const canvasContainer = document.getElementById('canvasContainer');
     const histogramCanvas = document.getElementById('histogramCanvas');
     const histogramCtx = histogramCanvas.getContext('2d');
-    const HISTOGRAM_MAX_SAMPLES = 65_536;
-    const HISTOGRAM_UPDATE_INTERVAL_MS = 180;
-    let histogramChart = null;
-    const histogramSeriesR = new Array(256).fill(0);
-    const histogramSeriesG = new Array(256).fill(0);
-    const histogramSeriesB = new Array(256).fill(0);
+    const HISTOGRAM_MAX_SAMPLES = 24_576;
+    const HISTOGRAM_UPDATE_INTERVAL_MS = 260;
     const curveCanvas = document.getElementById('curveCanvas');
     const curveCtx = curveCanvas.getContext('2d');
     const loupe = document.getElementById('loupe');
@@ -2935,98 +2930,35 @@
     }
 
     // ===========================================
-    // Histogram
+    // Histogram (Lightroom-style)
     // ===========================================
-    function ensureHistogramChart() {
-      if (histogramChart) return histogramChart;
-      if (typeof window.Chart !== 'function') return null;
+    const HISTOGRAM_BINS = 256;
+    const histogramR = new Uint32Array(HISTOGRAM_BINS);
+    const histogramG = new Uint32Array(HISTOGRAM_BINS);
+    const histogramB = new Uint32Array(HISTOGRAM_BINS);
+    const histogramL = new Uint32Array(HISTOGRAM_BINS);
+    const histogramSmoothR = new Float32Array(HISTOGRAM_BINS);
+    const histogramSmoothG = new Float32Array(HISTOGRAM_BINS);
+    const histogramSmoothB = new Float32Array(HISTOGRAM_BINS);
+    const histogramSmoothL = new Float32Array(HISTOGRAM_BINS);
+    const histogramX = new Float32Array(HISTOGRAM_BINS);
+    let histogramXWidth = 0;
 
-      const baseW = histogramCanvas.offsetWidth || histogramCanvas.clientWidth;
-      const baseH = histogramCanvas.offsetHeight || histogramCanvas.clientHeight;
-      if (baseW <= 0 || baseH <= 0) return null;
-
-      histogramChart = new window.Chart(histogramCtx, {
-        type: 'bar',
-        data: {
-          labels: Array.from({ length: 256 }, (_, i) => i),
-          datasets: [
-            {
-              data: histogramSeriesR,
-              backgroundColor: 'rgba(255, 107, 107, 0.55)',
-              borderColor: 'rgba(255, 107, 107, 0.95)',
-              borderWidth: 0,
-              grouped: false
-            },
-            {
-              data: histogramSeriesG,
-              backgroundColor: 'rgba(105, 219, 124, 0.55)',
-              borderColor: 'rgba(105, 219, 124, 0.95)',
-              borderWidth: 0,
-              grouped: false
-            },
-            {
-              data: histogramSeriesB,
-              backgroundColor: 'rgba(116, 192, 252, 0.55)',
-              borderColor: 'rgba(116, 192, 252, 0.95)',
-              borderWidth: 0,
-              grouped: false
-            }
-          ]
-        },
-        options: {
-          responsive: true,
-          maintainAspectRatio: false,
-          animation: false,
-          normalized: true,
-          resizeDelay: 0,
-          plugins: {
-            legend: { display: false },
-            tooltip: { enabled: false }
-          },
-          datasets: {
-            bar: {
-              categoryPercentage: 1.0,
-              barPercentage: 1.0,
-              borderSkipped: false,
-              borderWidth: 0
-            }
-          },
-          scales: {
-            x: {
-              display: false,
-              grid: { display: false }
-            },
-            y: {
-              display: false,
-              beginAtZero: true,
-              suggestedMax: 1,
-              grid: { display: false }
-            }
-          }
-        }
-      });
-      return histogramChart;
+    function smoothHistogram(src, dst) {
+      dst[0] = (src[0] * 4 + src[1] * 2 + src[2]) / 7;
+      for (let i = 1; i < 255; i++) {
+        dst[i] = (src[i - 1] + src[i] * 2 + src[i + 1]) * 0.25;
+      }
+      dst[255] = (src[253] + src[254] * 2 + src[255] * 4) / 7;
     }
 
-    function renderHistogramWithChart(histR, histG, histB, maxVal) {
-      const chart = ensureHistogramChart();
-      if (!chart) return false;
-
-      try {
-        for (let i = 0; i < 256; i++) {
-          histogramSeriesR[i] = histR[i];
-          histogramSeriesG[i] = histG[i];
-          histogramSeriesB[i] = histB[i];
-        }
-        chart.options.scales.y.max = Math.max(1, maxVal);
-        chart.update('none');
-        return true;
-      } catch (err) {
-        console.warn('Histogram chart unavailable, fallback to canvas rendering.', err);
-        chart.destroy();
-        histogramChart = null;
-        return false;
+    function ensureHistogramX(width) {
+      if (histogramXWidth === width) return;
+      const scale = (width - 1) / 255;
+      for (let i = 0; i < HISTOGRAM_BINS; i++) {
+        histogramX[i] = i * scale;
       }
+      histogramXWidth = width;
     }
 
     function renderHistogram(imageData) {
@@ -3036,50 +2968,119 @@
       const baseH = histogramCanvas.offsetHeight || histogramCanvas.clientHeight;
       if (baseW <= 0 || baseH <= 0) return;
 
-      const { data } = imageData;
-      const histR = new Uint32Array(256);
-      const histG = new Uint32Array(256);
-      const histB = new Uint32Array(256);
-      const totalPixels = data.length >> 2;
-      const sampleStep = Math.max(1, Math.ceil(totalPixels / HISTOGRAM_MAX_SAMPLES));
-      const sampleStride = sampleStep << 2;
-
-      for (let i = 0; i < data.length; i += sampleStride) {
-        histR[data[i]]++;
-        histG[data[i + 1]]++;
-        histB[data[i + 2]]++;
-      }
-
-      let maxVal = 0;
-      for (let i = 0; i < 256; i++) {
-        maxVal = Math.max(maxVal, histR[i], histG[i], histB[i]);
-      }
-
-      if (renderHistogramWithChart(histR, histG, histB, maxVal)) return;
-
       const dpr = window.devicePixelRatio || 1;
       const cw = histogramCanvas.width = Math.max(1, Math.round(baseW * dpr));
       const ch = histogramCanvas.height = Math.max(1, Math.round(baseH * dpr));
-      histogramCtx.fillStyle = '#111';
-      histogramCtx.fillRect(0, 0, cw, ch);
+      ensureHistogramX(cw);
+
+      histogramR.fill(0);
+      histogramG.fill(0);
+      histogramB.fill(0);
+      histogramL.fill(0);
+
+      const { data } = imageData;
+      const totalPixels = data.length >> 2;
+      const sampleStep = Math.max(1, Math.ceil(totalPixels / HISTOGRAM_MAX_SAMPLES));
+      const sampleStride = sampleStep << 2;
+      let sampleCount = 0;
+
+      for (let i = 0; i < data.length; i += sampleStride) {
+        const r = data[i];
+        const g = data[i + 1];
+        const b = data[i + 2];
+        histogramR[r]++;
+        histogramG[g]++;
+        histogramB[b]++;
+        histogramL[(r * 77 + g * 150 + b * 29) >> 8]++;
+        sampleCount++;
+      }
+      if (sampleCount === 0) return;
+
+      smoothHistogram(histogramR, histogramSmoothR);
+      smoothHistogram(histogramG, histogramSmoothG);
+      smoothHistogram(histogramB, histogramSmoothB);
+      smoothHistogram(histogramL, histogramSmoothL);
+
+      let maxVal = 0;
+      for (let i = 0; i < HISTOGRAM_BINS; i++) {
+        if (histogramSmoothR[i] > maxVal) maxVal = histogramSmoothR[i];
+        if (histogramSmoothG[i] > maxVal) maxVal = histogramSmoothG[i];
+        if (histogramSmoothB[i] > maxVal) maxVal = histogramSmoothB[i];
+        if (histogramSmoothL[i] > maxVal) maxVal = histogramSmoothL[i];
+      }
       if (maxVal <= 0) return;
 
-      const barWidth = cw / 256;
-      const scale = ch / maxVal;
+      const logScale = (ch - dpr * 3) / Math.log1p(maxVal);
+      const toY = (value) => ch - Math.log1p(value) * logScale - dpr;
 
-      function drawChannel(hist, color) {
-        histogramCtx.fillStyle = color;
-        for (let i = 0; i < 256; i++) {
-          const h = hist[i] * scale;
-          histogramCtx.fillRect(i * barWidth, ch - h, barWidth, h);
-        }
+      const bg = histogramCtx.createLinearGradient(0, 0, 0, ch);
+      bg.addColorStop(0, '#1b1b1b');
+      bg.addColorStop(1, '#0f0f0f');
+      histogramCtx.fillStyle = bg;
+      histogramCtx.fillRect(0, 0, cw, ch);
+
+      histogramCtx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
+      histogramCtx.lineWidth = Math.max(1, dpr * 0.8);
+      for (let i = 1; i < 5; i++) {
+        const x = (cw * i) / 5;
+        histogramCtx.beginPath();
+        histogramCtx.moveTo(x, dpr * 2);
+        histogramCtx.lineTo(x, ch - dpr * 2);
+        histogramCtx.stroke();
       }
 
-      histogramCtx.globalAlpha = 0.5;
-      drawChannel(histR, '#ff6b6b');
-      drawChannel(histG, '#69db7c');
-      drawChannel(histB, '#74c0fc');
-      histogramCtx.globalAlpha = 1;
+      function drawHistogramCurve(values, fillColor, strokeColor, composite) {
+        histogramCtx.globalCompositeOperation = composite;
+        histogramCtx.beginPath();
+        histogramCtx.moveTo(0, ch - dpr);
+        for (let i = 0; i < HISTOGRAM_BINS; i++) {
+          histogramCtx.lineTo(histogramX[i], toY(values[i]));
+        }
+        histogramCtx.lineTo(cw - 1, ch - dpr);
+        histogramCtx.closePath();
+        histogramCtx.fillStyle = fillColor;
+        histogramCtx.fill();
+
+        histogramCtx.beginPath();
+        histogramCtx.moveTo(0, toY(values[0]));
+        for (let i = 1; i < HISTOGRAM_BINS; i++) {
+          histogramCtx.lineTo(histogramX[i], toY(values[i]));
+        }
+        histogramCtx.strokeStyle = strokeColor;
+        histogramCtx.lineWidth = Math.max(1, dpr * 0.9);
+        histogramCtx.stroke();
+      }
+
+      drawHistogramCurve(histogramSmoothL, 'rgba(228, 228, 228, 0.22)', 'rgba(245, 245, 245, 0.42)', 'source-over');
+      drawHistogramCurve(histogramSmoothR, 'rgba(255, 90, 90, 0.20)', 'rgba(255, 110, 110, 0.70)', 'lighter');
+      drawHistogramCurve(histogramSmoothG, 'rgba(90, 230, 120, 0.20)', 'rgba(120, 245, 145, 0.70)', 'lighter');
+      drawHistogramCurve(histogramSmoothB, 'rgba(110, 180, 255, 0.20)', 'rgba(135, 200, 255, 0.72)', 'lighter');
+      histogramCtx.globalCompositeOperation = 'source-over';
+
+      const shadowClipRatio = (histogramL[0] + histogramL[1] + histogramL[2]) / sampleCount;
+      const highlightClipRatio = (histogramL[253] + histogramL[254] + histogramL[255]) / sampleCount;
+      const indicatorSize = Math.max(6, Math.round(7 * dpr));
+      const indicatorMargin = Math.max(3, Math.round(4 * dpr));
+
+      if (shadowClipRatio > 0.008) {
+        histogramCtx.fillStyle = '#5da9ff';
+        histogramCtx.beginPath();
+        histogramCtx.moveTo(indicatorMargin, indicatorMargin);
+        histogramCtx.lineTo(indicatorMargin + indicatorSize, indicatorMargin);
+        histogramCtx.lineTo(indicatorMargin, indicatorMargin + indicatorSize);
+        histogramCtx.closePath();
+        histogramCtx.fill();
+      }
+
+      if (highlightClipRatio > 0.008) {
+        histogramCtx.fillStyle = '#ff6f6f';
+        histogramCtx.beginPath();
+        histogramCtx.moveTo(cw - indicatorMargin, indicatorMargin);
+        histogramCtx.lineTo(cw - indicatorMargin - indicatorSize, indicatorMargin);
+        histogramCtx.lineTo(cw - indicatorMargin, indicatorMargin + indicatorSize);
+        histogramCtx.closePath();
+        histogramCtx.fill();
+      }
     }
 
     // ===========================================
