@@ -2248,10 +2248,6 @@
     const histogramCanvas = document.getElementById('histogramCanvas');
     const histogramCtx = histogramCanvas.getContext('2d');
     let histogramChart = null;
-    let histogramLabels = null;
-    const histogramSeriesR = new Array(256).fill(0);
-    const histogramSeriesG = new Array(256).fill(0);
-    const histogramSeriesB = new Array(256).fill(0);
     const curveCanvas = document.getElementById('curveCanvas');
     const curveCtx = curveCanvas.getContext('2d');
     const loupe = document.getElementById('loupe');
@@ -2911,30 +2907,29 @@
       const baseH = histogramCanvas.offsetHeight || histogramCanvas.clientHeight;
       if (baseW <= 0 || baseH <= 0) return null;
 
-      histogramLabels = histogramLabels || Array.from({ length: 256 }, (_, i) => i);
       histogramChart = new window.Chart(histogramCtx, {
         type: 'bar',
         data: {
-          labels: histogramLabels,
+          labels: Array.from({ length: 256 }, (_, i) => i),
           datasets: [
             {
-              data: histogramSeriesR,
-              backgroundColor: 'rgba(255, 107, 107, 0.38)',
-              borderColor: 'rgba(255, 107, 107, 0.85)',
+              data: new Array(256).fill(0),
+              backgroundColor: 'rgba(255, 107, 107, 0.55)',
+              borderColor: 'rgba(255, 107, 107, 0.95)',
               borderWidth: 0,
               grouped: false
             },
             {
-              data: histogramSeriesG,
-              backgroundColor: 'rgba(105, 219, 124, 0.38)',
-              borderColor: 'rgba(105, 219, 124, 0.85)',
+              data: new Array(256).fill(0),
+              backgroundColor: 'rgba(105, 219, 124, 0.55)',
+              borderColor: 'rgba(105, 219, 124, 0.95)',
               borderWidth: 0,
               grouped: false
             },
             {
-              data: histogramSeriesB,
-              backgroundColor: 'rgba(116, 192, 252, 0.38)',
-              borderColor: 'rgba(116, 192, 252, 0.85)',
+              data: new Array(256).fill(0),
+              backgroundColor: 'rgba(116, 192, 252, 0.55)',
+              borderColor: 'rgba(116, 192, 252, 0.95)',
               borderWidth: 0,
               grouped: false
             }
@@ -2944,12 +2939,19 @@
           responsive: true,
           maintainAspectRatio: false,
           animation: false,
-          parsing: false,
           normalized: true,
           resizeDelay: 0,
           plugins: {
             legend: { display: false },
             tooltip: { enabled: false }
+          },
+          datasets: {
+            bar: {
+              categoryPercentage: 1.0,
+              barPercentage: 1.0,
+              borderSkipped: false,
+              borderWidth: 0
+            }
           },
           scales: {
             x: {
@@ -2973,13 +2975,10 @@
       if (!chart) return false;
 
       try {
-        for (let i = 0; i < 256; i++) {
-          histogramSeriesR[i] = histR[i];
-          histogramSeriesG[i] = histG[i];
-          histogramSeriesB[i] = histB[i];
-        }
-        chart.options.scales.y.suggestedMax = Math.max(1, maxVal);
-        chart.resize();
+        chart.data.datasets[0].data = Array.from(histR);
+        chart.data.datasets[1].data = Array.from(histG);
+        chart.data.datasets[2].data = Array.from(histB);
+        chart.options.scales.y.max = Math.max(1, maxVal);
         chart.update('none');
         return true;
       } catch (err) {
