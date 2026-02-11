@@ -1187,6 +1187,7 @@
         <button class="toolbar-btn" id="cancelCropBtn" style="display: none;" data-i18n="cancelCrop">Cancel</button>
         <div class="toolbar-separator" id="convertSeparator" style="display: none;"></div>
         <button class="toolbar-btn primary" id="convertBtn" style="display: none;" data-i18n="convert">Convert Negative</button>
+        <button class="toolbar-btn primary" id="convertPositiveBtn" style="display: none;" data-i18n="convertPositive">Convert Positive</button>
       </div>
 
       <!-- Histogram -->
@@ -1520,6 +1521,7 @@
         applyCrop: "应用裁剪",
         cancelCrop: "取消",
         convert: "转换负片",
+        convertPositive: "转换正片",
         histogram: "直方图",
         workflow: "工作流程",
         stepCrop: "裁剪图像（移除胶片外区域）",
@@ -1603,6 +1605,7 @@
         applyCrop: "Apply Crop",
         cancelCrop: "Cancel",
         convert: "Convert Negative",
+        convertPositive: "Convert Positive",
         histogram: "Histogram",
         workflow: "Workflow",
         stepCrop: "Crop image (remove non-film areas)",
@@ -1686,6 +1689,7 @@
         applyCrop: "適用",
         cancelCrop: "キャンセル",
         convert: "ネガ変換",
+        convertPositive: "ポジ変換",
         histogram: "ヒストグラム",
         workflow: "ワークフロー",
         stepCrop: "画像をトリミング（フィルム外を除去）",
@@ -2025,6 +2029,8 @@
       document.getElementById('convertSeparator').style.display =
         state.currentStep === 1 ? 'inline-block' : 'none';
       document.getElementById('convertBtn').style.display =
+        state.currentStep === 1 ? 'inline-flex' : 'none';
+      document.getElementById('convertPositiveBtn').style.display =
         state.currentStep === 1 ? 'inline-flex' : 'none';
     }
 
@@ -4421,6 +4427,18 @@
 
     // Convert button (skip to step 2)
     document.getElementById('convertBtn').addEventListener('click', () => {
+      goToStep(2);
+    });
+
+    // Convert positive button (skip to step 2 with positive mode selected)
+    document.getElementById('convertPositiveBtn').addEventListener('click', () => {
+      state.filmType = 'positive';
+      state.filmPreset = 'generic_positive';
+      document.getElementById('filmPreset').value = state.filmPreset;
+      document.querySelectorAll('.film-type-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.type === state.filmType);
+      });
+      updateFilmModeUI();
       goToStep(2);
     });
 
