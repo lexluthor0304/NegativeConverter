@@ -2155,6 +2155,7 @@
       processedImageData: null,     // After negative conversion
       displayImageData: null,       // After all adjustments
       previewSourceImageData: null, // Downscaled source for preview renders
+      histogramSourceImageData: null, // Further downscaled source for histogram updates
       webglSourceImageData: null,   // Downscaled source for WebGL preview renders
 
       // Film settings
@@ -2247,7 +2248,12 @@
     const canvasContainer = document.getElementById('canvasContainer');
     const histogramCanvas = document.getElementById('histogramCanvas');
     const histogramCtx = histogramCanvas.getContext('2d');
+    const HISTOGRAM_MAX_SAMPLES = 65_536;
+    const HISTOGRAM_UPDATE_INTERVAL_MS = 180;
     let histogramChart = null;
+    const histogramSeriesR = new Array(256).fill(0);
+    const histogramSeriesG = new Array(256).fill(0);
+    const histogramSeriesB = new Array(256).fill(0);
     const curveCanvas = document.getElementById('curveCanvas');
     const curveCtx = curveCanvas.getContext('2d');
     const loupe = document.getElementById('loupe');
@@ -2868,6 +2874,38 @@
       return out;
     }
 
+    function buildHistogramSourceImageData(imageData) {
+      if (!imageData) return null;
+
+      const { width, height, data } = imageData;
+      const totalPixels = width * height;
+      const maxPixels = HISTOGRAM_MAX_SAMPLES;
+
+      if (totalPixels <= maxPixels) return imageData;
+
+      const step = Math.ceil(Math.sqrt(totalPixels / maxPixels));
+      const outW = Math.max(1, Math.floor(width / step));
+      const outH = Math.max(1, Math.floor(height / step));
+
+      const out = new ImageData(new Uint8ClampedArray(outW * outH * 4), outW, outH);
+      const outData = out.data;
+
+      for (let y = 0; y < outH; y++) {
+        const sy = Math.min(height - 1, y * step);
+        for (let x = 0; x < outW; x++) {
+          const sx = Math.min(width - 1, x * step);
+          const srcIdx = (sy * width + sx) * 4;
+          const dstIdx = (y * outW + x) * 4;
+          outData[dstIdx] = data[srcIdx];
+          outData[dstIdx + 1] = data[srcIdx + 1];
+          outData[dstIdx + 2] = data[srcIdx + 2];
+          outData[dstIdx + 3] = 255;
+        }
+      }
+
+      return out;
+    }
+
     function buildWebglSourceImageData(imageData, maxDim = 2048) {
       if (!imageData) return null;
       const { width, height, data } = imageData;
@@ -2913,21 +2951,21 @@
           labels: Array.from({ length: 256 }, (_, i) => i),
           datasets: [
             {
-              data: new Array(256).fill(0),
+              data: histogramSeriesR,
               backgroundColor: 'rgba(255, 107, 107, 0.55)',
               borderColor: 'rgba(255, 107, 107, 0.95)',
               borderWidth: 0,
               grouped: false
             },
             {
-              data: new Array(256).fill(0),
+              data: histogramSeriesG,
               backgroundColor: 'rgba(105, 219, 124, 0.55)',
               borderColor: 'rgba(105, 219, 124, 0.95)',
               borderWidth: 0,
               grouped: false
             },
             {
-              data: new Array(256).fill(0),
+              data: histogramSeriesB,
               backgroundColor: 'rgba(116, 192, 252, 0.55)',
               borderColor: 'rgba(116, 192, 252, 0.95)',
               borderWidth: 0,
@@ -2975,9 +3013,11 @@
       if (!chart) return false;
 
       try {
-        chart.data.datasets[0].data = Array.from(histR);
-        chart.data.datasets[1].data = Array.from(histG);
-        chart.data.datasets[2].data = Array.from(histB);
+        for (let i = 0; i < 256; i++) {
+          histogramSeriesR[i] = histR[i];
+          histogramSeriesG[i] = histG[i];
+          histogramSeriesB[i] = histB[i];
+        }
         chart.options.scales.y.max = Math.max(1, maxVal);
         chart.update('none');
         return true;
@@ -2990,12 +3030,21 @@
     }
 
     function renderHistogram(imageData) {
+      if (!imageData) return;
+
+      const baseW = histogramCanvas.offsetWidth || histogramCanvas.clientWidth;
+      const baseH = histogramCanvas.offsetHeight || histogramCanvas.clientHeight;
+      if (baseW <= 0 || baseH <= 0) return;
+
       const { data } = imageData;
       const histR = new Uint32Array(256);
       const histG = new Uint32Array(256);
       const histB = new Uint32Array(256);
+      const totalPixels = data.length >> 2;
+      const sampleStep = Math.max(1, Math.ceil(totalPixels / HISTOGRAM_MAX_SAMPLES));
+      const sampleStride = sampleStep << 2;
 
-      for (let i = 0; i < data.length; i += 4) {
+      for (let i = 0; i < data.length; i += sampleStride) {
         histR[data[i]]++;
         histG[data[i + 1]]++;
         histB[data[i + 2]]++;
@@ -3007,10 +3056,6 @@
       }
 
       if (renderHistogramWithChart(histR, histG, histB, maxVal)) return;
-
-      const baseW = histogramCanvas.offsetWidth || histogramCanvas.clientWidth;
-      const baseH = histogramCanvas.offsetHeight || histogramCanvas.clientHeight;
-      if (baseW <= 0 || baseH <= 0) return;
 
       const dpr = window.devicePixelRatio || 1;
       const cw = histogramCanvas.width = Math.max(1, Math.round(baseW * dpr));
@@ -3918,9 +3963,9 @@
     function renderHistogramForWebGL(force = false) {
       if (!state.processedImageData) return;
       const now = performance.now();
-      if (!force && (now - lastHistogramUpdateTime) < 120) return;
+      if (!force && (now - lastHistogramUpdateTime) < HISTOGRAM_UPDATE_INTERVAL_MS) return;
 
-      const source = state.previewSourceImageData || state.processedImageData;
+      const source = state.histogramSourceImageData || state.previewSourceImageData || state.processedImageData;
       histogramAdjustedBuffer = ensureImageDataBuffer(histogramAdjustedBuffer, source.width, source.height);
       applyAdjustmentsToBuffer(source, state, histogramAdjustedBuffer, 'preview');
       renderHistogram(histogramAdjustedBuffer);
@@ -4041,6 +4086,7 @@
 
       state.processedImageData = processed;
       state.previewSourceImageData = buildPreviewSourceImageData(processed);
+      state.histogramSourceImageData = buildHistogramSourceImageData(state.previewSourceImageData || processed);
       state.webglSourceImageData = buildWebglSourceImageData(processed);
       if (initWebGLRenderer()) {
         webglState.sourceDirty = true;
@@ -4108,6 +4154,7 @@
           state.processedImageData = null;
           state.displayImageData = null;
           state.previewSourceImageData = null;
+          state.histogramSourceImageData = null;
           state.webglSourceImageData = null;
           state.lastRenderQuality = 'full';
           state.filmBaseSet = false;
@@ -5014,6 +5061,7 @@
         state.processedImageData = null;
         state.displayImageData = null;
         state.previewSourceImageData = null;
+        state.histogramSourceImageData = null;
         state.webglSourceImageData = null;
         state.filmBaseSet = false;
         state.lastRenderQuality = 'full';
@@ -5038,6 +5086,7 @@
       state.processedImageData = null;
       state.displayImageData = null;
       state.previewSourceImageData = null;
+      state.histogramSourceImageData = null;
       state.webglSourceImageData = null;
       state.filmBaseSet = false;
       state.currentStep = 1;
