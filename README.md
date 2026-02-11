@@ -12,6 +12,7 @@ This is a browser-based tool built with HTML and JavaScript that converts scanne
   - Temperature & Tint
   - Vibrance & Saturation
   - Cyan / Magenta / Yellow (CMY) channels
+- 🎞️ **Film presets** for color negative, B&W negative, and positive slide stocks (Kodak Ektachrome E100, Fujifilm Provia/Velvia)
 - 🛡️ **Privacy-friendly**: all image processing happens locally in your browser
 - 💾 **One-click download** of the final corrected image
 
