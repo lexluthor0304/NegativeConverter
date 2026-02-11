@@ -12,7 +12,8 @@ This is a browser-based tool built with HTML and JavaScript that converts scanne
   - Temperature & Tint
   - Vibrance & Saturation
   - Cyan / Magenta / Yellow (CMY) channels
-- 🎞️ **Film presets** for color negative, B&W negative, and positive slide stocks (Kodak Ektachrome E100, Fujifilm Provia/Velvia)
+- 🎞️ **Film presets** for color negative, B&W negative, and positive slide stocks across Kodak / Fujifilm / Ilford
+- 🗂️ **Data-driven preset system** loaded from `negative2positive/presets/film_presets.json` (supports alias fallback for older preset IDs)
 - 🛡️ **Privacy-friendly**: all image processing happens locally in your browser
 - 💾 **One-click download** of the final corrected image
 
@@ -35,6 +36,7 @@ This is a browser-based tool built with HTML and JavaScript that converts scanne
 - Uses a custom WebAssembly module based on [`LibRaw-Wasm`](https://github.com/ybouane/LibRaw-Wasm) to support `.cr2`, `.nef`, `.arw`, `.dng`, `.raw`, `.rw2` formats  
 - Includes a simplified AHD demosaicing algorithm for Bayer-pattern raw data  
 - Color adjustment logic is based on RGB ↔ HSL and RGB ↔ CMY conversions  
+- Film preset metadata is loaded from JSON and grouped dynamically by film type in the UI  
 - Performance optimizations include:
   - Cached DOM access
   - Offscreen canvas reuse

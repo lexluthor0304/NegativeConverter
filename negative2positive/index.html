@@ -1508,25 +1508,7 @@
             <button class="film-type-btn" data-type="positive" data-i18n="positiveFilm">Positive</button>
           </div>
           <select class="preset-select" id="filmPreset">
-            <optgroup label="Color" data-i18n-label="colorFilms">
-              <option value="generic_color" data-i18n="genericColor">Generic Color</option>
-              <option value="kodak_portra_400">Kodak Portra 400</option>
-              <option value="kodak_ektar_100">Kodak Ektar 100</option>
-              <option value="fuji_400h">Fuji Pro 400H</option>
-              <option value="fuji_superia">Fuji Superia</option>
-            </optgroup>
-            <optgroup label="B&W" data-i18n-label="bwFilms">
-              <option value="generic_bw" data-i18n="genericBW">Generic B&W</option>
-              <option value="kodak_trix_400">Kodak Tri-X 400</option>
-              <option value="ilford_hp5">Ilford HP5+</option>
-            </optgroup>
-            <optgroup label="Positive" data-i18n-label="positiveFilms">
-              <option value="generic_positive" data-i18n="genericPositive">Generic Positive</option>
-              <option value="kodak_ektachrome_e100">Kodak Ektachrome E100</option>
-              <option value="fujifilm_provia_100f">Fujifilm Provia 100F</option>
-              <option value="fujifilm_velvia_50">Fujifilm Velvia 50</option>
-              <option value="fujifilm_velvia_100">Fujifilm Velvia 100</option>
-            </optgroup>
+            <option value="generic_color" data-i18n="genericColor">Generic Color</option>
           </select>
           <div id="filmBaseControls">
             <div class="info-box" data-i18n="filmBaseInfo">Click on the orange film base area (unexposed edge) to sample the mask color</div>
@@ -2065,81 +2047,241 @@
     // ===========================================
     // Film Presets
     // ===========================================
-    const FILM_PRESETS = {
-      'kodak_portra_400': {
-        name: 'Kodak Portra 400',
-        type: 'color',
-        baseColor: { r: 0.85, g: 0.55, b: 0.35 },
-        characteristics: { warmth: 0.1, saturation: -0.05, contrast: 0 }
-      },
-      'kodak_ektar_100': {
-        name: 'Kodak Ektar 100',
-        type: 'color',
-        baseColor: { r: 0.82, g: 0.52, b: 0.32 },
-        characteristics: { warmth: 0, saturation: 0.15, contrast: 0.1 }
-      },
-      'fuji_400h': {
-        name: 'Fuji Pro 400H',
-        type: 'color',
-        baseColor: { r: 0.80, g: 0.58, b: 0.40 },
-        characteristics: { warmth: -0.05, saturation: 0, contrast: 0 }
-      },
-      'fuji_superia': {
-        name: 'Fuji Superia',
-        type: 'color',
-        baseColor: { r: 0.78, g: 0.55, b: 0.38 },
-        characteristics: { warmth: 0.05, saturation: 0.1, contrast: 0.05 }
-      },
-      'kodak_trix_400': {
-        name: 'Kodak Tri-X 400',
-        type: 'bw',
-        contrast: 1.1,
-        gamma: 0.9
-      },
-      'ilford_hp5': {
-        name: 'Ilford HP5+',
-        type: 'bw',
-        contrast: 1.0,
-        gamma: 1.0
-      },
-      'kodak_ektachrome_e100': {
-        name: 'Kodak Ektachrome E100',
-        type: 'positive',
-        characteristics: { warmth: 0.02, saturation: 0.08, contrast: 0.12 }
-      },
-      'fujifilm_provia_100f': {
-        name: 'Fujifilm Provia 100F',
-        type: 'positive',
-        characteristics: { warmth: -0.02, saturation: 0.08, contrast: 0.1 }
-      },
-      'fujifilm_velvia_50': {
-        name: 'Fujifilm Velvia 50',
-        type: 'positive',
-        characteristics: { warmth: -0.06, saturation: 0.28, contrast: 0.22 }
-      },
-      'fujifilm_velvia_100': {
-        name: 'Fujifilm Velvia 100',
-        type: 'positive',
-        characteristics: { warmth: -0.04, saturation: 0.22, contrast: 0.18 }
-      },
-      'generic_color': {
+    const PRESET_DATA_URL = './presets/film_presets.json';
+    const PRESET_TYPES = ['color', 'bw', 'positive'];
+    const PRESET_GROUPS = [
+      { type: 'color', labelKey: 'colorFilms', fallbackLabel: 'Color' },
+      { type: 'bw', labelKey: 'bwFilms', fallbackLabel: 'B&W' },
+      { type: 'positive', labelKey: 'positiveFilms', fallbackLabel: 'Positive' }
+    ];
+    const GENERIC_PRESET_I18N_KEYS = {
+      generic_color: 'genericColor',
+      generic_bw: 'genericBW',
+      generic_positive: 'genericPositive'
+    };
+    const DEFAULT_PRESET_BY_TYPE = {
+      color: 'generic_color',
+      bw: 'generic_bw',
+      positive: 'generic_positive'
+    };
+    const DEFAULT_FILM_PRESET_LIST = [
+      {
+        id: 'generic_color',
         name: 'Generic Color',
+        brand: 'generic',
         type: 'color',
+        status: 'active',
         baseColor: { r: 0.82, g: 0.55, b: 0.36 },
         characteristics: { warmth: 0, saturation: 0, contrast: 0 }
       },
-      'generic_bw': {
+      {
+        id: 'generic_bw',
         name: 'Generic B&W',
+        brand: 'generic',
         type: 'bw',
+        status: 'active',
         contrast: 1.0,
-        gamma: 1.0
+        gamma: 1.0,
+        bw: { gamma: 1.0 },
+        characteristics: { warmth: 0, saturation: 0, contrast: 0 }
       },
-      'generic_positive': {
+      {
+        id: 'generic_positive',
         name: 'Generic Positive',
+        brand: 'generic',
         type: 'positive',
+        status: 'active',
         characteristics: { warmth: 0, saturation: 0.1, contrast: 0.1 }
       }
-    };
+    ];
+
+    let FILM_PRESETS = {};
+    let FILM_PRESET_LIST = [];
+    let FILM_PRESET_ALIASES = {};
+
+    function sanitizePresetType(type) {
+      return PRESET_TYPES.includes(type) ? type : 'color';
+    }
+
+    function clampUnit(value, fallback) {
+      const n = Number(value);
+      if (Number.isFinite(n)) return Math.max(0, Math.min(1, n));
+      return fallback;
+    }
+
+    function normalizePreset(rawPreset) {
+      if (!rawPreset || typeof rawPreset !== 'object') return null;
+      if (typeof rawPreset.id !== 'string' || !rawPreset.id) return null;
+
+      const type = sanitizePresetType(rawPreset.type);
+      const status = rawPreset.status === 'deprecated' ? 'deprecated' : 'active';
+      const characteristics = rawPreset.characteristics || {};
+      const preset = {
+        id: rawPreset.id,
+        name: rawPreset.name || rawPreset.id,
+        brand: rawPreset.brand || 'generic',
+        type,
+        status,
+        characteristics: {
+          warmth: Number.isFinite(characteristics.warmth) ? characteristics.warmth : 0,
+          saturation: Number.isFinite(characteristics.saturation) ? characteristics.saturation : 0,
+          contrast: Number.isFinite(characteristics.contrast) ? characteristics.contrast : 0
+        }
+      };
+
+      if (type === 'color') {
+        const baseColor = rawPreset.baseColor || {};
+        preset.baseColor = {
+          r: clampUnit(baseColor.r, 0.82),
+          g: clampUnit(baseColor.g, 0.55),
+          b: clampUnit(baseColor.b, 0.36)
+        };
+      }
+
+      if (type === 'bw') {
+        const gammaFromNested = rawPreset.bw && Number.isFinite(rawPreset.bw.gamma)
+          ? rawPreset.bw.gamma
+          : undefined;
+        const gamma = Number.isFinite(rawPreset.gamma) ? rawPreset.gamma
+          : (gammaFromNested !== undefined ? gammaFromNested : 1.0);
+        const contrast = Number.isFinite(rawPreset.contrast) ? rawPreset.contrast : 1.0;
+        preset.gamma = gamma;
+        preset.contrast = contrast;
+        preset.bw = { gamma };
+      }
+
+      if (rawPreset.sourceMeta && typeof rawPreset.sourceMeta === 'object') {
+        preset.sourceMeta = rawPreset.sourceMeta;
+      }
+
+      return preset;
+    }
+
+    function buildPresetMap(presetList) {
+      const map = {};
+      for (const preset of presetList) {
+        map[preset.id] = preset;
+      }
+      return map;
+    }
+
+    function applyPresetDataset(dataset) {
+      if (!dataset || !Array.isArray(dataset.presets)) return false;
+      const list = dataset.presets
+        .map(normalizePreset)
+        .filter(Boolean);
+      if (!list.length) return false;
+
+      FILM_PRESET_LIST = list;
+      FILM_PRESETS = buildPresetMap(list);
+      FILM_PRESET_ALIASES = (dataset.aliases && typeof dataset.aliases === 'object')
+        ? { ...dataset.aliases }
+        : {};
+      return true;
+    }
+
+    function initPresetFallbacks() {
+      FILM_PRESET_LIST = DEFAULT_FILM_PRESET_LIST
+        .map(normalizePreset)
+        .filter(Boolean);
+      FILM_PRESETS = buildPresetMap(FILM_PRESET_LIST);
+      FILM_PRESET_ALIASES = {};
+    }
+
+    function resolvePresetId(presetId) {
+      if (typeof presetId !== 'string' || !presetId) return null;
+      if (FILM_PRESETS[presetId]) return presetId;
+      const aliasTarget = FILM_PRESET_ALIASES[presetId];
+      if (aliasTarget && FILM_PRESETS[aliasTarget]) return aliasTarget;
+      return null;
+    }
+
+    function getDefaultPresetForType(type) {
+      const safeType = sanitizePresetType(type);
+      const preferredId = DEFAULT_PRESET_BY_TYPE[safeType];
+      if (preferredId && FILM_PRESETS[preferredId]) return preferredId;
+
+      const firstActive = FILM_PRESET_LIST.find((preset) => (
+        preset.type === safeType && preset.status !== 'deprecated'
+      ));
+      return firstActive ? firstActive.id : (DEFAULT_PRESET_BY_TYPE.color || 'generic_color');
+    }
+
+    function getPresetOrFallback(presetId, fallbackType = 'color') {
+      const resolved = resolvePresetId(presetId);
+      if (resolved) return FILM_PRESETS[resolved];
+      const fallbackId = getDefaultPresetForType(fallbackType);
+      return FILM_PRESETS[fallbackId] || FILM_PRESETS.generic_color || null;
+    }
+
+    function getBwPresetParams(preset) {
+      const safePreset = preset || {};
+      const contrast = Number.isFinite(safePreset.contrast) ? safePreset.contrast : 1.0;
+      const gamma = Number.isFinite(safePreset.gamma)
+        ? safePreset.gamma
+        : (safePreset.bw && Number.isFinite(safePreset.bw.gamma) ? safePreset.bw.gamma : 1.0);
+      return { contrast, gamma };
+    }
+
+    function renderPresetOptions(selectedPresetId = state ? state.filmPreset : null) {
+      const presetSelect = document.getElementById('filmPreset');
+      if (!presetSelect) return;
+
+      presetSelect.innerHTML = '';
+      for (const group of PRESET_GROUPS) {
+        const presets = FILM_PRESET_LIST.filter((preset) => (
+          preset.type === group.type && preset.status !== 'deprecated'
+        ));
+        if (!presets.length) continue;
+
+        const optgroup = document.createElement('optgroup');
+        optgroup.setAttribute('data-i18n-label', group.labelKey);
+        optgroup.label = (i18n[currentLang] && i18n[currentLang][group.labelKey]) || group.fallbackLabel;
+
+        for (const preset of presets) {
+          const option = document.createElement('option');
+          option.value = preset.id;
+          option.textContent = preset.name;
+          const i18nKey = GENERIC_PRESET_I18N_KEYS[preset.id];
+          if (i18nKey) option.setAttribute('data-i18n', i18nKey);
+          optgroup.appendChild(option);
+        }
+        presetSelect.appendChild(optgroup);
+      }
+
+      const resolvedSelection = resolvePresetId(selectedPresetId);
+      const fallbackSelection = getDefaultPresetForType(state ? state.filmType : 'color');
+      const nextSelection = resolvedSelection || fallbackSelection;
+      if (nextSelection && presetSelect.querySelector(`option[value="${nextSelection}"]`)) {
+        presetSelect.value = nextSelection;
+      } else if (presetSelect.options.length) {
+        presetSelect.value = presetSelect.options[0].value;
+      }
+
+      if (state && presetSelect.value) {
+        state.filmPreset = presetSelect.value;
+      }
+    }
+
+    async function loadPresetDataset() {
+      initPresetFallbacks();
+      try {
+        const response = await fetch(PRESET_DATA_URL, { cache: 'no-store' });
+        if (!response.ok) {
+          throw new Error(`Preset dataset request failed: ${response.status}`);
+        }
+        const payload = await response.json();
+        if (!applyPresetDataset(payload)) {
+          throw new Error('Preset dataset is invalid.');
+        }
+      } catch (err) {
+        console.warn('Using fallback preset dataset.', err);
+      }
+      renderPresetOptions(state ? state.filmPreset : null);
+      if (typeof setLanguage === 'function') setLanguage(currentLang);
+    }
+
+    initPresetFallbacks();
 
     // ===========================================
     // Application State
@@ -2638,8 +2780,8 @@
       const { data } = imageData;
       const outData = output.data;
 
-      const preset = FILM_PRESETS[settings.filmPreset];
-      const presetChars = preset.characteristics || {};
+      const preset = getPresetOrFallback(settings.filmPreset, settings.filmType || 'color');
+      const presetChars = (preset && preset.characteristics) ? preset.characteristics : {};
 
       const exposureMult = Math.pow(2, settings.exposure);
       const contrastFactor = 1 + ((settings.contrast + (presetChars.contrast || 0) * 100) / 100);
@@ -3885,8 +4027,8 @@
       const gl = webglState.gl;
       if (!gl) return;
 
-      const preset = FILM_PRESETS[state.filmPreset] || {};
-      const presetChars = preset.characteristics || {};
+      const preset = getPresetOrFallback(state.filmPreset, state.filmType);
+      const presetChars = (preset && preset.characteristics) ? preset.characteristics : {};
 
       const exposure = state.exposure;
       const contrast = 1 + ((state.contrast + (presetChars.contrast || 0) * 100) / 100);
@@ -4072,14 +4214,16 @@
       if (!sourceData) return;
 
       let processed;
-      const preset = FILM_PRESETS[state.filmPreset];
+      const preset = getPresetOrFallback(state.filmPreset, state.filmType);
+      const presetType = (preset && preset.type) ? preset.type : state.filmType;
 
-      if (state.filmType === 'positive' || preset.type === 'positive') {
+      if (state.filmType === 'positive' || presetType === 'positive') {
         processed = convertPositiveFilm(sourceData);
-      } else if (state.filmType === 'bw' || preset.type === 'bw') {
+      } else if (state.filmType === 'bw' || presetType === 'bw') {
+        const bwParams = getBwPresetParams(preset);
         processed = convertBWNegative(sourceData, {
-          contrast: preset.contrast || 1.0,
-          gamma: preset.gamma || 1.0
+          contrast: bwParams.contrast,
+          gamma: bwParams.gamma
         });
       } else {
         processed = convertColorNegative(sourceData, state.filmBase);
@@ -4300,13 +4444,7 @@
     // ===========================================
     // Film Base Sampling
     // ===========================================
-    function getDefaultPresetForType(type) {
-      if (type === 'bw') return 'generic_bw';
-      if (type === 'positive') return 'generic_positive';
-      return 'generic_color';
-    }
-
-    function requiresFilmBase(preset = FILM_PRESETS[state.filmPreset]) {
+    function requiresFilmBase(preset = getPresetOrFallback(state.filmPreset, state.filmType)) {
       return (preset?.type || state.filmType) === 'color';
     }
 
@@ -4676,16 +4814,20 @@
     // ===========================================
     // Film Type & Preset Selection
     // ===========================================
+    function setFilmTypeButtons(type) {
+      document.querySelectorAll('.film-type-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.type === type);
+      });
+    }
+
     document.querySelectorAll('.film-type-btn').forEach(btn => {
       btn.addEventListener('click', () => {
-        document.querySelectorAll('.film-type-btn').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
         state.filmType = btn.dataset.type;
 
-        const presetSelect = document.getElementById('filmPreset');
         const defaultPreset = getDefaultPresetForType(state.filmType);
-        presetSelect.value = defaultPreset;
         state.filmPreset = defaultPreset;
+        renderPresetOptions(state.filmPreset);
+        setFilmTypeButtons(state.filmType);
         updateFilmModeUI();
 
         schedulePreviewUpdate();
@@ -4693,19 +4835,38 @@
     });
 
     document.getElementById('filmPreset').addEventListener('change', (e) => {
-      state.filmPreset = e.target.value;
-      const preset = FILM_PRESETS[state.filmPreset] || FILM_PRESETS.generic_color;
-
-      document.querySelectorAll('.film-type-btn').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.type === preset.type);
-      });
+      const preset = getPresetOrFallback(e.target.value, state.filmType);
+      if (!preset) return;
+      state.filmPreset = preset.id;
       state.filmType = preset.type;
+      if (e.target.value !== state.filmPreset) {
+        e.target.value = state.filmPreset;
+      }
+      setFilmTypeButtons(state.filmType);
       updateFilmModeUI();
 
       schedulePreviewUpdate();
     });
 
+    setFilmTypeButtons(state.filmType);
     updateFilmModeUI();
+
+    loadPresetDataset()
+      .then(() => {
+        const preset = getPresetOrFallback(state.filmPreset, state.filmType);
+        if (!preset) return;
+        state.filmPreset = preset.id;
+        state.filmType = preset.type;
+        setFilmTypeButtons(state.filmType);
+        const presetSelect = document.getElementById('filmPreset');
+        if (presetSelect && presetSelect.value !== state.filmPreset) {
+          presetSelect.value = state.filmPreset;
+        }
+        updateFilmModeUI();
+      })
+      .catch((err) => {
+        console.warn('Preset initialization failed.', err);
+      });
 
     // ===========================================
     // Slider Controls
@@ -4997,11 +5158,9 @@
     // Convert positive button (skip to step 2 with positive mode selected)
     document.getElementById('convertPositiveBtn').addEventListener('click', () => {
       state.filmType = 'positive';
-      state.filmPreset = 'generic_positive';
-      document.getElementById('filmPreset').value = state.filmPreset;
-      document.querySelectorAll('.film-type-btn').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.type === state.filmType);
-      });
+      state.filmPreset = getDefaultPresetForType('positive');
+      renderPresetOptions(state.filmPreset);
+      setFilmTypeButtons(state.filmType);
       updateFilmModeUI();
       goToStep(2);
     });
@@ -5322,13 +5481,15 @@
       }
 
       let processed;
-      const preset = FILM_PRESETS[settings.filmPreset];
-      if (settings.filmType === 'positive' || preset.type === 'positive') {
+      const preset = getPresetOrFallback(settings.filmPreset, settings.filmType);
+      const presetType = (preset && preset.type) ? preset.type : settings.filmType;
+      if (settings.filmType === 'positive' || presetType === 'positive') {
         processed = convertPositiveFilm(workingData);
-      } else if (settings.filmType === 'bw' || preset.type === 'bw') {
+      } else if (settings.filmType === 'bw' || presetType === 'bw') {
+        const bwParams = getBwPresetParams(preset);
         processed = convertBWNegative(workingData, {
-          contrast: preset.contrast || 1.0,
-          gamma: preset.gamma || 1.0
+          contrast: bwParams.contrast,
+          gamma: bwParams.gamma
         });
       } else {
         processed = convertColorNegative(workingData, settings.filmBase);
@@ -5395,13 +5556,15 @@
 
       // Convert negative
       let processed;
-      const preset = FILM_PRESETS[settings.filmPreset];
-      if (settings.filmType === 'positive' || preset.type === 'positive') {
+      const preset = getPresetOrFallback(settings.filmPreset, settings.filmType);
+      const presetType = (preset && preset.type) ? preset.type : settings.filmType;
+      if (settings.filmType === 'positive' || presetType === 'positive') {
         processed = convertPositiveFilm(workingData);
-      } else if (settings.filmType === 'bw' || preset.type === 'bw') {
+      } else if (settings.filmType === 'bw' || presetType === 'bw') {
+        const bwParams = getBwPresetParams(preset);
         processed = convertBWNegative(workingData, {
-          contrast: preset.contrast || 1.0,
-          gamma: preset.gamma || 1.0
+          contrast: bwParams.contrast,
+          gamma: bwParams.gamma
         });
       } else {
         processed = convertColorNegative(workingData, settings.filmBase);
@@ -5606,8 +5769,8 @@
       state.cropRegion = settings.cropRegion;
 
       // Restore film settings
-      state.filmType = settings.filmType;
-      state.filmPreset = settings.filmPreset;
+      state.filmType = sanitizePresetType(settings.filmType || 'color');
+      state.filmPreset = resolvePresetId(settings.filmPreset) || getDefaultPresetForType(state.filmType);
       state.filmBase = { ...settings.filmBase };
       state.filmBaseSet = true;
 
@@ -5667,10 +5830,13 @@
       document.getElementById('yellowValue').textContent = state.yellow;
 
       // Update film type buttons
-      document.querySelectorAll('.film-type-btn').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.type === state.filmType);
-      });
-      document.getElementById('filmPreset').value = state.filmPreset;
+      const preset = getPresetOrFallback(state.filmPreset, state.filmType);
+      state.filmPreset = preset ? preset.id : getDefaultPresetForType(state.filmType);
+      if (preset && state.filmType !== preset.type) {
+        state.filmType = preset.type;
+      }
+      renderPresetOptions(state.filmPreset);
+      setFilmTypeButtons(state.filmType);
       updateFilmModeUI();
     }
 
