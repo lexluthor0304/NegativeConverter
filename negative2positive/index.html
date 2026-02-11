@@ -656,6 +656,7 @@
       border-radius: 4px;
       border: 1px solid var(--border);
       cursor: crosshair;
+      touch-action: none;
       transition: border-color 0.2s;
     }
 
@@ -696,6 +697,11 @@
     }
 
     .footer-left {
+      display: flex;
+      gap: 8px;
+    }
+
+    .footer-right {
       display: flex;
       gap: 8px;
     }
@@ -1151,7 +1157,7 @@
 
       .app-main {
         grid-template-columns: 1fr;
-        grid-template-rows: minmax(0, 56%) minmax(0, 44%);
+        grid-template-rows: minmax(220px, 1.08fr) minmax(0, 1fr);
         gap: 10px;
         padding: 10px calc(10px + var(--safe-right)) 10px calc(10px + var(--safe-left));
       }
@@ -1287,6 +1293,9 @@
         position: sticky;
         bottom: 0;
         z-index: 60;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 8px;
         padding: 10px calc(10px + var(--safe-right)) calc(10px + var(--safe-bottom)) calc(10px + var(--safe-left));
         background: rgba(37, 37, 37, 0.9);
         backdrop-filter: blur(20px) saturate(160%);
@@ -1294,6 +1303,12 @@
       }
 
       .footer-left {
+        width: 100%;
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .footer-right {
         width: 100%;
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1304,6 +1319,14 @@
         min-height: 44px;
         border-radius: 12px;
         font-size: 14px;
+      }
+
+      .footer-right .export-dropdown {
+        width: 100%;
+      }
+
+      .footer-right .export-dropdown > .footer-btn {
+        width: 100%;
       }
 
       .copyright {
@@ -1695,7 +1718,7 @@
       <button class="footer-btn" id="resetBtn" data-i18n="reset">Reset</button>
       <button class="footer-btn" id="startOverBtn" data-i18n="startOver">Start Over</button>
     </div>
-    <div style="display: flex; gap: 8px;">
+    <div class="footer-right">
       <button class="footer-btn" id="saveSettingsBtn" style="display: none;" data-i18n="saveSettings">Save Settings</button>
       <div class="export-dropdown">
         <button class="footer-btn primary" id="exportBtn" data-i18n="exportPng">Export PNG</button>
@@ -1759,6 +1782,8 @@
         convert: "转换负片",
         convertPositive: "转换正片",
         histogram: "直方图",
+        loadError: "加载文件失败",
+        rawUnsupported: "当前 Safari 版本不支持 RAW 解码，请升级 Safari（建议 iOS 16.4+）或先转为 TIFF/JPEG。",
         workflow: "工作流程",
         stepCrop: "裁剪图像（移除胶片外区域）",
         stepBase: "采样胶片基底（橙色色罩）",
@@ -1843,6 +1868,8 @@
         convert: "Convert Negative",
         convertPositive: "Convert Positive",
         histogram: "Histogram",
+        loadError: "Error loading file",
+        rawUnsupported: "RAW decode is not supported in this Safari version. Update Safari (iOS 16.4+) or convert to TIFF/JPEG first.",
         workflow: "Workflow",
         stepCrop: "Crop image (remove non-film areas)",
         stepBase: "Sample film base (orange mask)",
@@ -1927,6 +1954,8 @@
         convert: "ネガ変換",
         convertPositive: "ポジ変換",
         histogram: "ヒストグラム",
+        loadError: "ファイルの読み込みに失敗しました",
+        rawUnsupported: "この Safari バージョンでは RAW デコードに対応していません。Safari（iOS 16.4+ 推奨）へ更新するか、先に TIFF/JPEG に変換してください。",
         workflow: "ワークフロー",
         stepCrop: "画像をトリミング（フィルム外を除去）",
         stepBase: "フィルムベースを取得（オレンジマスク）",
@@ -3214,6 +3243,78 @@
       }
     });
 
+    // Touch-friendly pointer support for iOS Safari. Keep mouse path above unchanged for PC.
+    let activeCurvePointerId = null;
+
+    curveCanvas.addEventListener('pointerdown', (e) => {
+      if (e.pointerType === 'mouse') return;
+      e.preventDefault();
+
+      const pos = getCurvePosition(e);
+      const nearPoint = findNearPoint(pos.canvasX, pos.canvasY);
+
+      if (nearPoint >= 0) {
+        draggingPoint = nearPoint;
+      } else {
+        const points = state.curvePoints[currentCurveChannel];
+        const newPoint = { x: pos.x, y: pos.y };
+        let insertIndex = points.findIndex(p => p.x > pos.x);
+        if (insertIndex === -1) insertIndex = points.length;
+        points.splice(insertIndex, 0, newPoint);
+        draggingPoint = insertIndex;
+        updateCurveFromPoints(currentCurveChannel);
+      }
+
+      activeCurvePointerId = e.pointerId;
+      curveCanvas.setPointerCapture(e.pointerId);
+      renderCurve();
+    }, { passive: false });
+
+    curveCanvas.addEventListener('pointermove', (e) => {
+      if (e.pointerType === 'mouse') return;
+      if (activeCurvePointerId !== e.pointerId || draggingPoint === null) return;
+      e.preventDefault();
+
+      const pos = getCurvePosition(e);
+      const points = state.curvePoints[currentCurveChannel];
+      const point = points[draggingPoint];
+
+      if (draggingPoint === 0 || draggingPoint === points.length - 1) {
+        point.y = pos.y;
+      } else {
+        const prevX = points[draggingPoint - 1].x + 1;
+        const nextX = points[draggingPoint + 1].x - 1;
+        point.x = Math.max(prevX, Math.min(nextX, pos.x));
+        point.y = pos.y;
+      }
+
+      updateCurveFromPoints(currentCurveChannel);
+      renderCurve();
+      schedulePreviewUpdate();
+    }, { passive: false });
+
+    function finishCurvePointerDrag(pointerId) {
+      if (activeCurvePointerId !== pointerId) return;
+      if (draggingPoint !== null) {
+        draggingPoint = null;
+        scheduleFullUpdate();
+      }
+      if (curveCanvas.hasPointerCapture(pointerId)) {
+        curveCanvas.releasePointerCapture(pointerId);
+      }
+      activeCurvePointerId = null;
+    }
+
+    curveCanvas.addEventListener('pointerup', (e) => {
+      if (e.pointerType === 'mouse') return;
+      finishCurvePointerDrag(e.pointerId);
+    });
+
+    curveCanvas.addEventListener('pointercancel', (e) => {
+      if (e.pointerType === 'mouse') return;
+      finishCurvePointerDrag(e.pointerId);
+    });
+
     // ===========================================
     // Image Processing Pipeline
     // ===========================================
@@ -3869,14 +3970,15 @@
     async function loadFile(file) {
       const placeholder = document.getElementById('uploadPlaceholder');
       placeholder.innerHTML = `<p>${i18n[currentLang].processing}</p>`;
+      const fileName = file.name.toLowerCase();
+      const isRawLikeFile = ['.cr2', '.nef', '.arw', '.dng', '.raw', '.rw2', '.tif', '.tiff'].some(ext => fileName.endsWith(ext));
 
       try {
         const arrayBuffer = await file.arrayBuffer();
-        const fileName = file.name.toLowerCase();
 
         let imageData;
 
-        if (['.cr2', '.nef', '.arw', '.dng', '.raw', '.rw2', '.tif', '.tiff'].some(ext => fileName.endsWith(ext))) {
+        if (isRawLikeFile) {
           imageData = await loadRawFile(arrayBuffer, fileName);
         } else if (file.type === 'image/png') {
           imageData = loadPngFile(arrayBuffer);
@@ -3904,7 +4006,12 @@
         }
       } catch (err) {
         console.error('Error loading file:', err);
-        placeholder.innerHTML = `<p style="color: var(--danger);">Error loading file</p>`;
+        const text = String(err?.message || err || '');
+        const isRawSupportIssue = isRawLikeFile && /module worker|worker|webassembly|wasm/i.test(text);
+        const message = isRawSupportIssue
+          ? (i18n[currentLang].rawUnsupported || 'RAW decode is not supported in this Safari version. Update Safari or convert to TIFF/JPEG first.')
+          : (i18n[currentLang].loadError || 'Error loading file');
+        placeholder.innerHTML = `<p style="color: var(--danger);">${message}</p>`;
       }
     }
 
@@ -3937,7 +4044,12 @@
         }
       }
 
-      const raw = new LibRaw();
+      let raw;
+      try {
+        raw = new LibRaw();
+      } catch (err) {
+        throw new Error(`module worker not supported: ${err?.message || err}`);
+      }
       await raw.open(new Uint8Array(buffer), {
         noInterpolation: false,
         useAutoWb: true,
@@ -4539,38 +4651,43 @@
 
     document.getElementById('cropBtn').addEventListener('click', () => {
       state.cropping = true;
+      state.croppingActive = false;
+      state.cropStart = null;
+      activeCropPointerId = null;
       cropOverlay.style.display = 'block';
       cropOverlay.style.left = '0';
       cropOverlay.style.top = '0';
       cropOverlay.style.width = '0';
       cropOverlay.style.height = '0';
+      canvasContainer.style.touchAction = 'none';
 
       document.getElementById('cropBtn').style.display = 'none';
       document.getElementById('applyCropBtn').style.display = 'inline-flex';
       document.getElementById('cancelCropBtn').style.display = 'inline-flex';
     });
 
-    canvasContainer.addEventListener('mousedown', (e) => {
+    let activeCropPointerId = null;
+
+    function startCropDrag(clientX, clientY) {
       if (!state.cropping) return;
-      state.croppingActive = true;
 
       const rect = canvas.getBoundingClientRect();
       const scaleX = canvas.width / rect.width;
       const scaleY = canvas.height / rect.height;
 
       state.cropStart = {
-        x: (e.clientX - rect.left) * scaleX,
-        y: (e.clientY - rect.top) * scaleY
+        x: (clientX - rect.left) * scaleX,
+        y: (clientY - rect.top) * scaleY
       };
-    });
+      state.croppingActive = true;
+    }
 
-    canvasContainer.addEventListener('mousemove', (e) => {
-      if (!state.cropping || !state.croppingActive) return;
+    function updateCropDrag(clientX, clientY) {
+      if (!state.cropping || !state.croppingActive || !state.cropStart) return;
 
       const canvasRect = canvas.getBoundingClientRect();
       const containerRect = canvasContainer.getBoundingClientRect();
 
-      // Calculate canvas offset within container (due to flexbox centering)
       const offsetX = canvasRect.left - containerRect.left;
       const offsetY = canvasRect.top - containerRect.top;
 
@@ -4578,8 +4695,8 @@
       const scaleY = canvas.height / canvasRect.height;
 
       const current = {
-        x: (e.clientX - canvasRect.left) * scaleX,
-        y: (e.clientY - canvasRect.top) * scaleY
+        x: (clientX - canvasRect.left) * scaleX,
+        y: (clientY - canvasRect.top) * scaleY
       };
 
       const left = Math.min(state.cropStart.x, current.x);
@@ -4587,7 +4704,6 @@
       const width = Math.abs(current.x - state.cropStart.x);
       const height = Math.abs(current.y - state.cropStart.y);
 
-      // Convert canvas coords to display coords and add container offset
       const leftDisp = left / scaleX + offsetX;
       const topDisp = top / scaleY + offsetY;
       const widthDisp = width / scaleX;
@@ -4597,15 +4713,59 @@
       cropOverlay.style.top = topDisp + 'px';
       cropOverlay.style.width = widthDisp + 'px';
       cropOverlay.style.height = heightDisp + 'px';
+    }
+
+    function finishCropDrag() {
+      if (!state.cropping) return;
+      state.croppingActive = false;
+    }
+
+    canvasContainer.addEventListener('mousedown', (e) => {
+      startCropDrag(e.clientX, e.clientY);
     });
 
-    canvasContainer.addEventListener('mouseup', () => {
-      if (state.cropping) state.croppingActive = false;
+    canvasContainer.addEventListener('mousemove', (e) => {
+      updateCropDrag(e.clientX, e.clientY);
     });
+
+    canvasContainer.addEventListener('mouseup', finishCropDrag);
+    canvasContainer.addEventListener('mouseleave', finishCropDrag);
+
+    canvasContainer.addEventListener('pointerdown', (e) => {
+      if (e.pointerType === 'mouse' || !state.cropping) return;
+      e.preventDefault();
+      activeCropPointerId = e.pointerId;
+      canvasContainer.setPointerCapture(e.pointerId);
+      startCropDrag(e.clientX, e.clientY);
+    }, { passive: false });
+
+    canvasContainer.addEventListener('pointermove', (e) => {
+      if (e.pointerType === 'mouse') return;
+      if (!state.cropping || activeCropPointerId !== e.pointerId) return;
+      e.preventDefault();
+      updateCropDrag(e.clientX, e.clientY);
+    }, { passive: false });
+
+    function finishCropPointer(e) {
+      if (e.pointerType === 'mouse') return;
+      if (activeCropPointerId !== e.pointerId) return;
+      finishCropDrag();
+      if (canvasContainer.hasPointerCapture(e.pointerId)) {
+        canvasContainer.releasePointerCapture(e.pointerId);
+      }
+      activeCropPointerId = null;
+    }
+
+    canvasContainer.addEventListener('pointerup', finishCropPointer);
+    canvasContainer.addEventListener('pointercancel', finishCropPointer);
 
     document.getElementById('cancelCropBtn').addEventListener('click', () => {
       state.cropping = false;
+      state.croppingActive = false;
+      state.cropStart = null;
+      activeCropPointerId = null;
       cropOverlay.style.display = 'none';
+      canvasContainer.style.touchAction = '';
       document.getElementById('cropBtn').style.display = 'inline-flex';
       document.getElementById('applyCropBtn').style.display = 'none';
       document.getElementById('cancelCropBtn').style.display = 'none';
@@ -4655,7 +4815,11 @@
       displayNegative(croppedData);
 
       state.cropping = false;
+      state.croppingActive = false;
+      state.cropStart = null;
+      activeCropPointerId = null;
       cropOverlay.style.display = 'none';
+      canvasContainer.style.touchAction = '';
       document.getElementById('cropBtn').style.display = 'inline-flex';
       document.getElementById('applyCropBtn').style.display = 'none';
       document.getElementById('cancelCropBtn').style.display = 'none';
