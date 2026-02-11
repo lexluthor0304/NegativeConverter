@@ -144,6 +144,36 @@
       z-index: 100;
     }
 
+    /* Sampling Loupe (Magnifier) */
+    .loupe {
+      position: absolute;
+      pointer-events: none;
+      display: none;
+      z-index: 250;
+      padding: 8px;
+      border-radius: 10px;
+      background: rgba(17, 17, 17, 0.95);
+      border: 1px solid var(--border-light);
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
+      backdrop-filter: blur(6px);
+    }
+
+    #loupeCanvas {
+      display: block;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      image-rendering: pixelated;
+    }
+
+    .loupe-info {
+      margin-top: 6px;
+      font-size: 11px;
+      color: var(--text-secondary);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      white-space: nowrap;
+      opacity: 0.95;
+    }
+
     /* Upload Placeholder */
     .upload-placeholder {
       display: flex;
@@ -1128,6 +1158,10 @@
         <canvas id="canvas" style="display: none;"></canvas>
         <canvas id="glCanvas" style="display: none;"></canvas>
         <div class="crop-overlay" id="cropOverlay"></div>
+        <div class="loupe" id="loupe">
+          <canvas id="loupeCanvas" width="155" height="155"></canvas>
+          <div class="loupe-info" id="loupeInfo"></div>
+        </div>
       </div>
 
       <!-- Toolbar -->
@@ -1886,10 +1920,18 @@
     const canvas = document.getElementById('canvas');
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     const glCanvas = document.getElementById('glCanvas');
+    const canvasContainer = document.getElementById('canvasContainer');
     const histogramCanvas = document.getElementById('histogramCanvas');
     const histogramCtx = histogramCanvas.getContext('2d');
     const curveCanvas = document.getElementById('curveCanvas');
     const curveCtx = curveCanvas.getContext('2d');
+    const loupe = document.getElementById('loupe');
+    const loupeCanvas = document.getElementById('loupeCanvas');
+    const loupeCtx = loupeCanvas.getContext('2d');
+    const loupeInfo = document.getElementById('loupeInfo');
+
+    const loupeSrcCanvas = document.createElement('canvas');
+    const loupeSrcCtx = loupeSrcCanvas.getContext('2d', { willReadFrequently: true });
 
     let transformCanvas = document.createElement('canvas');
     let transformCtx = transformCanvas.getContext('2d');
@@ -3696,6 +3738,206 @@
     });
 
     // ===========================================
+    // Sampling Loupe (Magnifier)
+    // ===========================================
+    const LOUPE_PATCH_SIZE = 31;
+    const LOUPE_HALF = (LOUPE_PATCH_SIZE - 1) / 2;
+    const loupePatchData = new Uint8ClampedArray(LOUPE_PATCH_SIZE * LOUPE_PATCH_SIZE * 4);
+    const loupePatch = new ImageData(loupePatchData, LOUPE_PATCH_SIZE, LOUPE_PATCH_SIZE);
+    const loupePatchAdjustedData = new Uint8ClampedArray(LOUPE_PATCH_SIZE * LOUPE_PATCH_SIZE * 4);
+    const loupePatchAdjusted = new ImageData(loupePatchAdjustedData, LOUPE_PATCH_SIZE, LOUPE_PATCH_SIZE);
+
+    loupeSrcCanvas.width = LOUPE_PATCH_SIZE;
+    loupeSrcCanvas.height = LOUPE_PATCH_SIZE;
+
+    let loupeRaf = 0;
+    let loupePending = null;
+
+    function clampBetween(v, min, max) {
+      if (v < min) return min;
+      if (v > max) return max;
+      return v;
+    }
+
+    function showLoupe() {
+      loupe.style.display = 'block';
+    }
+
+    function hideLoupe() {
+      if (loupeRaf) cancelAnimationFrame(loupeRaf);
+      loupeRaf = 0;
+      loupePending = null;
+      loupe.style.display = 'none';
+      loupeInfo.textContent = '';
+    }
+
+    function positionLoupe(clientX, clientY) {
+      const containerRect = canvasContainer.getBoundingClientRect();
+      const loupeRect = loupe.getBoundingClientRect();
+
+      const offset = 18;
+      const margin = 6;
+      let left = clientX - containerRect.left + offset;
+      let top = clientY - containerRect.top + offset;
+
+      if (left + loupeRect.width + margin > containerRect.width) {
+        left = clientX - containerRect.left - loupeRect.width - offset;
+      }
+      if (top + loupeRect.height + margin > containerRect.height) {
+        top = clientY - containerRect.top - loupeRect.height - offset;
+      }
+
+      const maxLeft = Math.max(margin, containerRect.width - loupeRect.width - margin);
+      const maxTop = Math.max(margin, containerRect.height - loupeRect.height - margin);
+      loupe.style.left = clampBetween(left, margin, maxLeft) + 'px';
+      loupe.style.top = clampBetween(top, margin, maxTop) + 'px';
+    }
+
+    function fillLoupePatchFromSource(sourceData, cx, cy) {
+      const { width, height, data } = sourceData;
+      let dstIdx = 0;
+      for (let py = 0; py < LOUPE_PATCH_SIZE; py++) {
+        const sy = clampBetween(cy + py - LOUPE_HALF, 0, height - 1);
+        const row = sy * width * 4;
+        for (let px = 0; px < LOUPE_PATCH_SIZE; px++) {
+          const sx = clampBetween(cx + px - LOUPE_HALF, 0, width - 1);
+          const srcIdx = row + sx * 4;
+          loupePatchData[dstIdx] = data[srcIdx];
+          loupePatchData[dstIdx + 1] = data[srcIdx + 1];
+          loupePatchData[dstIdx + 2] = data[srcIdx + 2];
+          loupePatchData[dstIdx + 3] = 255;
+          dstIdx += 4;
+        }
+      }
+    }
+
+    function drawLoupeOverlay() {
+      const pixelSize = loupeCanvas.width / LOUPE_PATCH_SIZE;
+      const center = LOUPE_HALF * pixelSize + pixelSize / 2;
+      const centerPixel = LOUPE_HALF * pixelSize;
+
+	      // Center pixel outline
+	      loupeCtx.lineWidth = 2;
+	      loupeCtx.strokeStyle = 'rgba(0, 0, 0, 0.9)';
+	      loupeCtx.strokeRect(centerPixel, centerPixel, pixelSize, pixelSize);
+	      loupeCtx.lineWidth = 1;
+	      loupeCtx.strokeStyle = 'rgba(255, 255, 255, 0.95)';
+	      loupeCtx.strokeRect(centerPixel + 0.5, centerPixel + 0.5, pixelSize - 1, pixelSize - 1);
+
+      // Crosshair (with outline for contrast)
+      loupeCtx.lineCap = 'butt';
+      loupeCtx.beginPath();
+      loupeCtx.lineWidth = 3;
+      loupeCtx.strokeStyle = 'rgba(0, 0, 0, 0.85)';
+      loupeCtx.moveTo(center, 0);
+      loupeCtx.lineTo(center, loupeCanvas.height);
+      loupeCtx.moveTo(0, center);
+      loupeCtx.lineTo(loupeCanvas.width, center);
+      loupeCtx.stroke();
+
+      loupeCtx.beginPath();
+      loupeCtx.lineWidth = 1;
+      loupeCtx.strokeStyle = 'rgba(255, 255, 255, 0.95)';
+      loupeCtx.moveTo(center, 0);
+      loupeCtx.lineTo(center, loupeCanvas.height);
+      loupeCtx.moveTo(0, center);
+      loupeCtx.lineTo(loupeCanvas.width, center);
+      loupeCtx.stroke();
+    }
+
+    function updateLoupe() {
+      loupeRaf = 0;
+      const pending = loupePending;
+      loupePending = null;
+
+      if (!pending || !state.samplingMode || state.cropping) {
+        hideLoupe();
+        return;
+      }
+
+      const target = pending.target;
+      const rect = target.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) {
+        hideLoupe();
+        return;
+      }
+
+      const relX = (pending.clientX - rect.left) / rect.width;
+      const relY = (pending.clientY - rect.top) / rect.height;
+      if (relX < 0 || relX > 1 || relY < 0 || relY > 1) {
+        hideLoupe();
+        return;
+      }
+
+      let sourceData = null;
+      const showAdjusted = state.samplingMode === 'whiteBalance';
+      if (state.samplingMode === 'filmBase') {
+        sourceData = state.croppedImageData || state.originalImageData;
+      } else if (state.samplingMode === 'whiteBalance') {
+        sourceData = state.processedImageData;
+      }
+      if (!sourceData) {
+        hideLoupe();
+        return;
+      }
+
+      const cx = clampBetween(Math.floor(relX * sourceData.width), 0, sourceData.width - 1);
+      const cy = clampBetween(Math.floor(relY * sourceData.height), 0, sourceData.height - 1);
+
+      fillLoupePatchFromSource(sourceData, cx, cy);
+
+      let centerR = 0, centerG = 0, centerB = 0;
+      const centerIdx = (LOUPE_HALF * LOUPE_PATCH_SIZE + LOUPE_HALF) * 4;
+
+      if (showAdjusted) {
+        applyAdjustmentsToBuffer(loupePatch, state, loupePatchAdjusted, 'full');
+        loupeSrcCtx.putImageData(loupePatchAdjusted, 0, 0);
+        centerR = loupePatchAdjustedData[centerIdx];
+        centerG = loupePatchAdjustedData[centerIdx + 1];
+        centerB = loupePatchAdjustedData[centerIdx + 2];
+      } else {
+        loupeSrcCtx.putImageData(loupePatch, 0, 0);
+        centerR = loupePatchData[centerIdx];
+        centerG = loupePatchData[centerIdx + 1];
+        centerB = loupePatchData[centerIdx + 2];
+      }
+
+      loupeCtx.imageSmoothingEnabled = false;
+      loupeCtx.clearRect(0, 0, loupeCanvas.width, loupeCanvas.height);
+      loupeCtx.drawImage(loupeSrcCanvas, 0, 0, loupeCanvas.width, loupeCanvas.height);
+      drawLoupeOverlay();
+
+      loupeInfo.textContent = `x ${cx}  y ${cy}   RGB ${centerR} ${centerG} ${centerB}`;
+
+      showLoupe();
+      positionLoupe(pending.clientX, pending.clientY);
+    }
+
+    function handleLoupePointer(e) {
+      if (!state.samplingMode || state.cropping) {
+        hideLoupe();
+        return;
+      }
+
+      loupePending = {
+        clientX: e.clientX,
+        clientY: e.clientY,
+        target: e.currentTarget
+      };
+
+      if (!loupeRaf) {
+        loupeRaf = requestAnimationFrame(updateLoupe);
+      }
+    }
+
+    [canvas, glCanvas].forEach(el => {
+      el.addEventListener('pointermove', handleLoupePointer);
+      el.addEventListener('pointerdown', handleLoupePointer);
+      el.addEventListener('pointerleave', hideLoupe);
+      el.addEventListener('pointercancel', hideLoupe);
+    });
+
+    // ===========================================
     // Canvas Click Handler (Sampling)
     // ===========================================
     function handleSamplingClick(e) {
@@ -3723,6 +3965,7 @@
         document.getElementById('sampleBaseBtn').classList.remove('active');
         canvas.style.cursor = 'default';
         glCanvas.style.cursor = 'default';
+        hideLoupe();
         updateFilmBasePreview();
       } else if (state.samplingMode === 'whiteBalance') {
         // Sample from processed image (post-inversion)
@@ -3749,6 +3992,7 @@
         document.getElementById('sampleWBBtn').classList.remove('active');
         canvas.style.cursor = 'default';
         glCanvas.style.cursor = 'default';
+        hideLoupe();
         updateWBSliders();
         updateFull();
       }
@@ -3895,7 +4139,6 @@
     // ===========================================
     // Cropping
     // ===========================================
-    const canvasContainer = document.getElementById('canvasContainer');
     const cropOverlay = document.getElementById('cropOverlay');
 
     document.getElementById('cropBtn').addEventListener('click', () => {
