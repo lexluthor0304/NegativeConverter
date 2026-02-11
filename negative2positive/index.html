@@ -1245,6 +1245,7 @@
           <div class="film-type-toggle">
             <button class="film-type-btn active" data-type="color" data-i18n="colorFilm">Color</button>
             <button class="film-type-btn" data-type="bw" data-i18n="bwFilm">B&W</button>
+            <button class="film-type-btn" data-type="positive" data-i18n="positiveFilm">Positive</button>
           </div>
           <select class="preset-select" id="filmPreset">
             <optgroup label="Color" data-i18n-label="colorFilms">
@@ -1259,16 +1260,26 @@
               <option value="kodak_trix_400">Kodak Tri-X 400</option>
               <option value="ilford_hp5">Ilford HP5+</option>
             </optgroup>
+            <optgroup label="Positive" data-i18n-label="positiveFilms">
+              <option value="generic_positive" data-i18n="genericPositive">Generic Positive</option>
+              <option value="kodak_ektachrome_e100">Kodak Ektachrome E100</option>
+              <option value="fujifilm_provia_100f">Fujifilm Provia 100F</option>
+              <option value="fujifilm_velvia_50">Fujifilm Velvia 50</option>
+              <option value="fujifilm_velvia_100">Fujifilm Velvia 100</option>
+            </optgroup>
           </select>
-          <div class="info-box" data-i18n="filmBaseInfo">Click on the orange film base area (unexposed edge) to sample the mask color</div>
-          <div class="film-base-buttons">
-            <button class="film-base-btn" id="sampleBaseBtn" data-i18n="sampleBase">Sample Film Base</button>
-            <button class="film-base-btn" id="autoDetectBtn" data-i18n="autoDetect">Auto Detect</button>
+          <div id="filmBaseControls">
+            <div class="info-box" data-i18n="filmBaseInfo">Click on the orange film base area (unexposed edge) to sample the mask color</div>
+            <div class="film-base-buttons">
+              <button class="film-base-btn" id="sampleBaseBtn" data-i18n="sampleBase">Sample Film Base</button>
+              <button class="film-base-btn" id="autoDetectBtn" data-i18n="autoDetect">Auto Detect</button>
+            </div>
+            <div class="film-base-preview" id="filmBasePreview" style="display: none;">
+              <div class="film-base-color" id="filmBaseColor"></div>
+              <div class="film-base-values" id="filmBaseValues">R: 0 G: 0 B: 0</div>
+            </div>
           </div>
-          <div class="film-base-preview" id="filmBasePreview" style="display: none;">
-            <div class="film-base-color" id="filmBaseColor"></div>
-            <div class="film-base-values" id="filmBaseValues">R: 0 G: 0 B: 0</div>
-          </div>
+          <div class="info-box" id="positiveFilmInfo" data-i18n="positiveModeInfo" style="display: none;">Positive slide film mode does not require film base sampling.</div>
           <button class="toolbar-btn primary" id="applyConvertBtn" style="margin-top: 8px; width: 100%; justify-content: center;" data-i18n="applyConvert">Apply & Convert</button>
         </div>
       </div>
@@ -1520,9 +1531,12 @@
         filmSettings: "胶片设置",
         colorFilm: "彩色",
         bwFilm: "黑白",
+        positiveFilm: "正片",
         genericColor: "通用彩色",
         genericBW: "通用黑白",
+        genericPositive: "通用正片",
         filmBaseInfo: "点击图像边缘的橙色胶片基底区域来采样色罩颜色",
+        positiveModeInfo: "正片模式无需采样胶片基底。",
         sampleBase: "采样胶片基底",
         autoDetect: "自动检测",
         applyConvert: "应用并转换",
@@ -1551,6 +1565,7 @@
         exportPng: "导出 PNG",
         colorFilms: "彩色负片",
         bwFilms: "黑白负片",
+        positiveFilms: "正片",
         processing: "处理中...",
         selectFolder: "选择文件夹",
         fileList: "文件列表",
@@ -1599,9 +1614,12 @@
         filmSettings: "Film Settings",
         colorFilm: "Color",
         bwFilm: "B&W",
+        positiveFilm: "Positive",
         genericColor: "Generic Color",
         genericBW: "Generic B&W",
+        genericPositive: "Generic Positive",
         filmBaseInfo: "Click on the orange film base area (unexposed edge) to sample the mask color",
+        positiveModeInfo: "Positive slide film mode does not require film base sampling.",
         sampleBase: "Sample Film Base",
         autoDetect: "Auto Detect",
         applyConvert: "Apply & Convert",
@@ -1630,6 +1648,7 @@
         exportPng: "Export PNG",
         colorFilms: "Color Films",
         bwFilms: "B&W Films",
+        positiveFilms: "Positive Slides",
         processing: "Processing...",
         selectFolder: "Select Folder",
         fileList: "File List",
@@ -1678,9 +1697,12 @@
         filmSettings: "フィルム設定",
         colorFilm: "カラー",
         bwFilm: "白黒",
+        positiveFilm: "ポジ",
         genericColor: "汎用カラー",
         genericBW: "汎用白黒",
+        genericPositive: "汎用ポジ",
         filmBaseInfo: "オレンジ色のフィルムベース部分をクリックしてマスク色を取得",
+        positiveModeInfo: "ポジフィルムモードではフィルムベースのサンプリングは不要です。",
         sampleBase: "フィルムベースを取得",
         autoDetect: "自動検出",
         applyConvert: "適用して変換",
@@ -1709,6 +1731,7 @@
         exportPng: "PNG出力",
         colorFilms: "カラーフィルム",
         bwFilms: "白黒フィルム",
+        positiveFilms: "ポジフィルム",
         processing: "処理中...",
         selectFolder: "フォルダ選択",
         fileList: "ファイル一覧",
@@ -1750,6 +1773,12 @@
         const key = el.dataset.i18n;
         if (i18n[lang][key]) {
           el.textContent = i18n[lang][key];
+        }
+      });
+      document.querySelectorAll('[data-i18n-label]').forEach(el => {
+        const key = el.dataset.i18nLabel;
+        if (i18n[lang][key]) {
+          el.label = i18n[lang][key];
         }
       });
     }
@@ -1804,6 +1833,26 @@
         contrast: 1.0,
         gamma: 1.0
       },
+      'kodak_ektachrome_e100': {
+        name: 'Kodak Ektachrome E100',
+        type: 'positive',
+        characteristics: { warmth: 0.02, saturation: 0.08, contrast: 0.12 }
+      },
+      'fujifilm_provia_100f': {
+        name: 'Fujifilm Provia 100F',
+        type: 'positive',
+        characteristics: { warmth: -0.02, saturation: 0.08, contrast: 0.1 }
+      },
+      'fujifilm_velvia_50': {
+        name: 'Fujifilm Velvia 50',
+        type: 'positive',
+        characteristics: { warmth: -0.06, saturation: 0.28, contrast: 0.22 }
+      },
+      'fujifilm_velvia_100': {
+        name: 'Fujifilm Velvia 100',
+        type: 'positive',
+        characteristics: { warmth: -0.04, saturation: 0.22, contrast: 0.18 }
+      },
       'generic_color': {
         name: 'Generic Color',
         type: 'color',
@@ -1815,6 +1864,11 @@
         type: 'bw',
         contrast: 1.0,
         gamma: 1.0
+      },
+      'generic_positive': {
+        name: 'Generic Positive',
+        type: 'positive',
+        characteristics: { warmth: 0, saturation: 0.1, contrast: 0.1 }
       }
     };
 
@@ -2169,6 +2223,64 @@
       return output;
     }
 
+    function convertPositiveFilm(imageData, options = {}) {
+      const { width, height, data } = imageData;
+      const output = new ImageData(new Uint8ClampedArray(data.length), width, height);
+      const outData = output.data;
+      const pixelCount = width * height;
+
+      const clipPercent = Math.max(0, Math.min(0.1, options.clipPercent ?? 0.01));
+      const lowTarget = pixelCount * clipPercent;
+      const highTarget = pixelCount * (1 - clipPercent);
+
+      const rHist = new Uint32Array(256);
+      const gHist = new Uint32Array(256);
+      const bHist = new Uint32Array(256);
+
+      for (let i = 0; i < data.length; i += 4) {
+        rHist[data[i]]++;
+        gHist[data[i + 1]]++;
+        bHist[data[i + 2]]++;
+      }
+
+      function histogramPercentile(hist, target) {
+        let sum = 0;
+        for (let i = 0; i < hist.length; i++) {
+          sum += hist[i];
+          if (sum >= target) return i;
+        }
+        return hist.length - 1;
+      }
+
+      const rLow = histogramPercentile(rHist, lowTarget);
+      const gLow = histogramPercentile(gHist, lowTarget);
+      const bLow = histogramPercentile(bHist, lowTarget);
+      const rHigh = histogramPercentile(rHist, highTarget);
+      const gHigh = histogramPercentile(gHist, highTarget);
+      const bHigh = histogramPercentile(bHist, highTarget);
+
+      const rScale = 255 / Math.max(1, rHigh - rLow);
+      const gScale = 255 / Math.max(1, gHigh - gLow);
+      const bScale = 255 / Math.max(1, bHigh - bLow);
+
+      for (let i = 0; i < data.length; i += 4) {
+        let r = (data[i] - rLow) * rScale;
+        let g = (data[i + 1] - gLow) * gScale;
+        let b = (data[i + 2] - bLow) * bScale;
+
+        if (r < 0) r = 0; else if (r > 255) r = 255;
+        if (g < 0) g = 0; else if (g > 255) g = 255;
+        if (b < 0) b = 0; else if (b > 255) b = 255;
+
+        outData[i] = (r + 0.5) | 0;
+        outData[i + 1] = (g + 0.5) | 0;
+        outData[i + 2] = (b + 0.5) | 0;
+        outData[i + 3] = 255;
+      }
+
+      return output;
+    }
+
     // ===========================================
     // Pixel Adjustments (Optimized)
     // ===========================================
@@ -2256,7 +2368,7 @@
       const presetChars = preset.characteristics || {};
 
       const exposureMult = Math.pow(2, settings.exposure);
-      const contrastFactor = 1 + (settings.contrast / 100);
+      const contrastFactor = 1 + ((settings.contrast + (presetChars.contrast || 0) * 100) / 100);
       const tempFactor = (settings.temperature + (presetChars.warmth || 0) * 100) / 100;
       const tintFactor = settings.tint / 100;
       const satFactor = 1 + ((settings.saturation + (presetChars.saturation || 0) * 100) / 100);
@@ -3288,7 +3400,7 @@
       const presetChars = preset.characteristics || {};
 
       const exposure = state.exposure;
-      const contrast = 1 + (state.contrast / 100);
+      const contrast = 1 + ((state.contrast + (presetChars.contrast || 0) * 100) / 100);
       const highlights = state.highlights / 100;
       const shadows = state.shadows / 100;
       const tempFactor = (state.temperature + (presetChars.warmth || 0) * 100) / 100;
@@ -3457,7 +3569,9 @@
       let processed;
       const preset = FILM_PRESETS[state.filmPreset];
 
-      if (state.filmType === 'bw' || preset.type === 'bw') {
+      if (state.filmType === 'positive' || preset.type === 'positive') {
+        processed = convertPositiveFilm(sourceData);
+      } else if (state.filmType === 'bw' || preset.type === 'bw') {
         processed = convertBWNegative(sourceData, {
           contrast: preset.contrast || 1.0,
           gamma: preset.gamma || 1.0
@@ -3668,10 +3782,48 @@
     // ===========================================
     // Film Base Sampling
     // ===========================================
+    function getDefaultPresetForType(type) {
+      if (type === 'bw') return 'generic_bw';
+      if (type === 'positive') return 'generic_positive';
+      return 'generic_color';
+    }
+
+    function requiresFilmBase(preset = FILM_PRESETS[state.filmPreset]) {
+      return (preset?.type || state.filmType) === 'color';
+    }
+
+    function updateFilmModeUI() {
+      const filmBaseControls = document.getElementById('filmBaseControls');
+      const positiveFilmInfo = document.getElementById('positiveFilmInfo');
+      const showFilmBase = requiresFilmBase();
+
+      filmBaseControls.style.display = showFilmBase ? 'block' : 'none';
+      positiveFilmInfo.style.display = showFilmBase ? 'none' : 'block';
+
+      if (!showFilmBase) {
+        if (state.samplingMode === 'filmBase') {
+          state.samplingMode = null;
+          document.getElementById('sampleBaseBtn').classList.remove('active');
+          canvas.style.cursor = 'default';
+          glCanvas.style.cursor = 'default';
+          hideLoupe();
+        }
+        document.getElementById('filmBasePreview').style.display = 'none';
+        return;
+      }
+
+      updateFilmBasePreview();
+    }
+
     function updateFilmBasePreview() {
       const preview = document.getElementById('filmBasePreview');
       const colorBox = document.getElementById('filmBaseColor');
       const values = document.getElementById('filmBaseValues');
+
+      if (!requiresFilmBase()) {
+        preview.style.display = 'none';
+        return;
+      }
 
       if (state.filmBaseSet) {
         preview.style.display = 'flex';
@@ -3683,6 +3835,7 @@
     }
 
     document.getElementById('sampleBaseBtn').addEventListener('click', () => {
+      if (!requiresFilmBase()) return;
       state.samplingMode = 'filmBase';
       document.getElementById('sampleBaseBtn').classList.add('active');
       canvas.style.cursor = 'crosshair';
@@ -3690,6 +3843,7 @@
     });
 
     document.getElementById('autoDetectBtn').addEventListener('click', () => {
+      if (!requiresFilmBase()) return;
       const sourceData = state.croppedImageData || state.originalImageData;
       if (!sourceData) return;
       state.filmBase = autoDetectFilmBase(sourceData);
@@ -3698,7 +3852,7 @@
     });
 
     document.getElementById('applyConvertBtn').addEventListener('click', () => {
-      if (!state.filmBaseSet) {
+      if (requiresFilmBase() && !state.filmBaseSet) {
         // Auto detect if not set
         const sourceData = state.croppedImageData || state.originalImageData;
         state.filmBase = autoDetectFilmBase(sourceData);
@@ -4011,13 +4165,10 @@
         state.filmType = btn.dataset.type;
 
         const presetSelect = document.getElementById('filmPreset');
-        if (state.filmType === 'bw') {
-          presetSelect.value = 'generic_bw';
-          state.filmPreset = 'generic_bw';
-        } else {
-          presetSelect.value = 'generic_color';
-          state.filmPreset = 'generic_color';
-        }
+        const defaultPreset = getDefaultPresetForType(state.filmType);
+        presetSelect.value = defaultPreset;
+        state.filmPreset = defaultPreset;
+        updateFilmModeUI();
 
         schedulePreviewUpdate();
       });
@@ -4025,15 +4176,18 @@
 
     document.getElementById('filmPreset').addEventListener('change', (e) => {
       state.filmPreset = e.target.value;
-      const preset = FILM_PRESETS[state.filmPreset];
+      const preset = FILM_PRESETS[state.filmPreset] || FILM_PRESETS.generic_color;
 
       document.querySelectorAll('.film-type-btn').forEach(btn => {
         btn.classList.toggle('active', btn.dataset.type === preset.type);
       });
       state.filmType = preset.type;
+      updateFilmModeUI();
 
       schedulePreviewUpdate();
     });
+
+    updateFilmModeUI();
 
     // ===========================================
     // Slider Controls
@@ -4585,7 +4739,9 @@
 
       let processed;
       const preset = FILM_PRESETS[settings.filmPreset];
-      if (settings.filmType === 'bw' || preset.type === 'bw') {
+      if (settings.filmType === 'positive' || preset.type === 'positive') {
+        processed = convertPositiveFilm(workingData);
+      } else if (settings.filmType === 'bw' || preset.type === 'bw') {
         processed = convertBWNegative(workingData, {
           contrast: preset.contrast || 1.0,
           gamma: preset.gamma || 1.0
@@ -4656,7 +4812,9 @@
       // Convert negative
       let processed;
       const preset = FILM_PRESETS[settings.filmPreset];
-      if (settings.filmType === 'bw' || preset.type === 'bw') {
+      if (settings.filmType === 'positive' || preset.type === 'positive') {
+        processed = convertPositiveFilm(workingData);
+      } else if (settings.filmType === 'bw' || preset.type === 'bw') {
         processed = convertBWNegative(workingData, {
           contrast: preset.contrast || 1.0,
           gamma: preset.gamma || 1.0
@@ -4896,7 +5054,6 @@
       // Update UI to reflect restored settings
       updateSlidersFromState();
       updateWBSliders();
-      updateFilmBasePreview();
       renderCurve();
     }
 
@@ -4930,6 +5087,7 @@
         btn.classList.toggle('active', btn.dataset.type === state.filmType);
       });
       document.getElementById('filmPreset').value = state.filmPreset;
+      updateFilmModeUI();
     }
 
     function updateExportButtons() {
