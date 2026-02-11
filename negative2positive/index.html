@@ -1435,6 +1435,12 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 12a10 10 0 11-.8 4" transform="scale(-1,1) translate(-24,0)"/></svg>
           <span>+90°</span>
         </button>
+        <button class="toolbar-btn" id="mirrorBtn" data-i18n="mirror" title="Mirror">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 4v16M4 8l4 4-4 4M20 8l-4 4 4 4"/>
+          </svg>
+          <span data-i18n="mirror">Mirror</span>
+        </button>
         <div class="rotate-controls">
           <input type="number" class="rotate-input" id="rotateAngle" value="0" min="-180" max="180" step="0.1">
           <span>°</span>
@@ -1758,6 +1764,7 @@
         dropHint: "拖放图片到此处或点击读取",
         selectFile: "选择文件",
         applyRotate: "应用",
+        mirror: "镜像",
         crop: "裁剪",
         applyCrop: "应用裁剪",
         cancelCrop: "取消",
@@ -1844,6 +1851,7 @@
         dropHint: "Drop image here or click to open",
         selectFile: "Select File",
         applyRotate: "Apply",
+        mirror: "Mirror",
         crop: "Crop",
         applyCrop: "Apply Crop",
         cancelCrop: "Cancel",
@@ -1930,6 +1938,7 @@
         dropHint: "画像をドロップまたはクリックして読み込み",
         selectFile: "ファイル選択",
         applyRotate: "適用",
+        mirror: "ミラー",
         crop: "トリミング",
         applyCrop: "適用",
         cancelCrop: "キャンセル",
@@ -4958,8 +4967,40 @@
       adjustCanvasDisplay(newW, newH);
     }
 
+    function applyMirror() {
+      const sourceData = state.croppedImageData || state.originalImageData;
+      if (!sourceData) return;
+
+      const w = canvas.width;
+      const h = canvas.height;
+      const offCanvas = document.createElement('canvas');
+      offCanvas.width = w;
+      offCanvas.height = h;
+      const offCtx = offCanvas.getContext('2d');
+
+      offCtx.translate(w, 0);
+      offCtx.scale(-1, 1);
+      offCtx.drawImage(canvas, 0, 0);
+
+      ctx.clearRect(0, 0, w, h);
+      ctx.drawImage(offCanvas, 0, 0);
+
+      const newImageData = ctx.getImageData(0, 0, w, h);
+      if (state.croppedImageData) {
+        state.croppedImageData = newImageData;
+      } else {
+        state.originalImageData = newImageData;
+      }
+
+      transformCanvas.width = w;
+      transformCanvas.height = h;
+      transformCtx.drawImage(offCanvas, 0, 0);
+      adjustCanvasDisplay(w, h);
+    }
+
     document.getElementById('rotateLeftBtn').addEventListener('click', () => applyRotation(-90));
     document.getElementById('rotateRightBtn').addEventListener('click', () => applyRotation(90));
+    document.getElementById('mirrorBtn').addEventListener('click', () => applyMirror());
 
     document.getElementById('applyRotateBtn').addEventListener('click', () => {
       const angle = parseFloat(document.getElementById('rotateAngle').value) || 0;
