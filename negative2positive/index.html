@@ -3,7 +3,7 @@
 
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>Negative Converter</title>
 
   <!-- Google Fonts -->
@@ -29,6 +29,17 @@
       --border: #3a3a3a;
       --border-light: #444;
       --shadow: rgba(0, 0, 0, 0.3);
+      --viewport-h: 100vh;
+      --safe-top: env(safe-area-inset-top, 0px);
+      --safe-right: env(safe-area-inset-right, 0px);
+      --safe-bottom: env(safe-area-inset-bottom, 0px);
+      --safe-left: env(safe-area-inset-left, 0px);
+    }
+
+    @supports (height: 100dvh) {
+      :root {
+        --viewport-h: 100dvh;
+      }
     }
 
     * {
@@ -48,6 +59,18 @@
       color: var(--text-primary);
       display: flex;
       flex-direction: column;
+      min-height: var(--viewport-h);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    @supports (-webkit-touch-callout: none) {
+      html {
+        height: -webkit-fill-available;
+      }
+
+      body {
+        min-height: -webkit-fill-available;
+      }
     }
 
     /* Header */
@@ -98,6 +121,7 @@
       grid-template-columns: 1fr 320px;
       flex: 1;
       overflow: hidden;
+      min-height: 0;
     }
 
     /* Preview Section */
@@ -108,7 +132,8 @@
       padding: 16px;
       overflow: hidden;
       height: 100%;
-      max-height: calc(100vh - 120px); /* Account for header and footer */
+      max-height: calc(var(--viewport-h) - 120px); /* Account for header and footer */
+      min-height: 0;
     }
 
     .canvas-container {
@@ -326,7 +351,8 @@
       display: flex;
       flex-direction: column;
       height: 100%;
-      max-height: calc(100vh - 120px); /* Account for header and footer */
+      max-height: calc(var(--viewport-h) - 120px); /* Account for header and footer */
+      min-height: 0;
     }
 
     .control-section {
@@ -1081,15 +1107,225 @@
 
     /* Responsive */
     @media (max-width: 900px) {
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Inter", "Segoe UI", Roboto, sans-serif;
+        background: linear-gradient(180deg, #1d1d1f 0%, #141416 100%);
+      }
+
+      button,
+      input,
+      select {
+        -webkit-tap-highlight-color: transparent;
+        touch-action: manipulation;
+      }
+
+      .app-header {
+        position: sticky;
+        top: 0;
+        z-index: 60;
+        padding: calc(10px + var(--safe-top)) calc(12px + var(--safe-right)) 10px calc(12px + var(--safe-left));
+        background: rgba(37, 37, 37, 0.86);
+        backdrop-filter: blur(18px) saturate(150%);
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      }
+
+      .app-title {
+        font-size: 17px;
+        letter-spacing: -0.02em;
+      }
+
+      .lang-selector {
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 12px;
+        padding: 2px;
+      }
+
+      .lang-btn {
+        min-height: 32px;
+        min-width: 48px;
+        padding: 6px 10px;
+        border: none;
+        border-radius: 9px;
+      }
+
       .app-main {
         grid-template-columns: 1fr;
-        grid-template-rows: 1fr auto;
+        grid-template-rows: minmax(0, 56%) minmax(0, 44%);
+        gap: 10px;
+        padding: 10px calc(10px + var(--safe-right)) 10px calc(10px + var(--safe-left));
+      }
+
+      .preview-section {
+        padding: 0;
+        max-height: none;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 16px;
+        background: rgba(29, 29, 31, 0.76);
+      }
+
+      .canvas-container {
+        margin: 10px;
+        border-radius: 14px;
+        min-height: 220px;
+      }
+
+      .preview-toolbar {
+        padding: 8px 10px 10px;
+        gap: 8px;
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        overflow-y: hidden;
+        overscroll-behavior-x: contain;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+      }
+
+      .preview-toolbar::-webkit-scrollbar {
+        display: none;
+      }
+
+      .status-badge,
+      .toolbar-btn,
+      .rotate-controls {
+        flex-shrink: 0;
+      }
+
+      .status-badge {
+        white-space: nowrap;
+      }
+
+      .toolbar-separator {
+        display: none;
+      }
+
+      .toolbar-btn {
+        min-height: 44px;
+        padding: 10px 14px;
+        border-radius: 12px;
+        font-size: 14px;
+        white-space: nowrap;
+      }
+
+      .rotate-controls {
+        gap: 6px;
+        padding: 4px 8px;
+        border-radius: 12px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        background: rgba(255, 255, 255, 0.03);
+      }
+
+      .rotate-input {
+        width: 70px;
+        height: 34px;
+        font-size: 16px;
+      }
+
+      .histogram-container {
+        margin: 0 10px 10px;
+        border-radius: 12px;
       }
 
       .controls-panel {
-        border-left: none;
-        border-top: 1px solid var(--border);
-        max-height: 50vh;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 16px;
+        max-height: none;
+        background: rgba(29, 29, 31, 0.72);
+        backdrop-filter: blur(14px) saturate(140%);
+        overscroll-behavior: contain;
+        -webkit-overflow-scrolling: touch;
+      }
+
+      .control-section {
+        padding: 14px;
+      }
+
+      .section-title {
+        font-size: 12px;
+      }
+
+      .film-type-btn,
+      .film-base-btn,
+      .file-list-btn,
+      .curve-tab,
+      .curve-preset-btn,
+      .footer-btn {
+        min-height: 40px;
+      }
+
+      .preset-select,
+      .rotate-input,
+      .file-list-btn,
+      .footer-btn {
+        font-size: 16px;
+      }
+
+      .preset-select {
+        min-height: 44px;
+      }
+
+      .slider-input {
+        height: 6px;
+      }
+
+      .slider-input::-webkit-slider-thumb {
+        width: 18px;
+        height: 18px;
+      }
+
+      .slider-input::-moz-range-thumb {
+        width: 18px;
+        height: 18px;
+      }
+
+      .file-list-section {
+        max-height: 34vh;
+        -webkit-overflow-scrolling: touch;
+      }
+
+      .app-footer {
+        position: sticky;
+        bottom: 0;
+        z-index: 60;
+        padding: 10px calc(10px + var(--safe-right)) calc(10px + var(--safe-bottom)) calc(10px + var(--safe-left));
+        background: rgba(37, 37, 37, 0.9);
+        backdrop-filter: blur(20px) saturate(160%);
+        border-top: 1px solid rgba(255, 255, 255, 0.08);
+      }
+
+      .footer-left {
+        width: 100%;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .footer-btn {
+        width: 100%;
+        min-height: 44px;
+        border-radius: 12px;
+        font-size: 14px;
+      }
+
+      .copyright {
+        padding: 10px calc(10px + var(--safe-right)) calc(10px + var(--safe-bottom)) calc(10px + var(--safe-left));
+        font-size: 12px;
+      }
+    }
+
+    @media (max-width: 600px) {
+      .app-header {
+        padding-right: calc(10px + var(--safe-right));
+        padding-left: calc(10px + var(--safe-left));
+      }
+
+      .app-title {
+        font-size: 16px;
+      }
+
+      .lang-btn {
+        min-width: 42px;
+        padding: 5px 8px;
+        font-size: 12px;
       }
     }
 
