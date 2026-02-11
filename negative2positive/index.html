@@ -1386,6 +1386,7 @@
   <script src="https://cdn.jsdelivr.net/npm/upng-js@2.1.0/UPNG.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/utif@3.1.0/UTIF.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jszip@3/dist/jszip.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 </head>
 
 <body>
@@ -2246,6 +2247,11 @@
     const canvasContainer = document.getElementById('canvasContainer');
     const histogramCanvas = document.getElementById('histogramCanvas');
     const histogramCtx = histogramCanvas.getContext('2d');
+    let histogramChart = null;
+    let histogramLabels = null;
+    const histogramSeriesR = new Array(256).fill(0);
+    const histogramSeriesG = new Array(256).fill(0);
+    const histogramSeriesB = new Array(256).fill(0);
     const curveCanvas = document.getElementById('curveCanvas');
     const curveCtx = curveCanvas.getContext('2d');
     const loupe = document.getElementById('loupe');
@@ -2897,6 +2903,93 @@
     // ===========================================
     // Histogram
     // ===========================================
+    function ensureHistogramChart() {
+      if (histogramChart) return histogramChart;
+      if (typeof window.Chart !== 'function') return null;
+
+      const baseW = histogramCanvas.offsetWidth || histogramCanvas.clientWidth;
+      const baseH = histogramCanvas.offsetHeight || histogramCanvas.clientHeight;
+      if (baseW <= 0 || baseH <= 0) return null;
+
+      histogramLabels = histogramLabels || Array.from({ length: 256 }, (_, i) => i);
+      histogramChart = new window.Chart(histogramCtx, {
+        type: 'bar',
+        data: {
+          labels: histogramLabels,
+          datasets: [
+            {
+              data: histogramSeriesR,
+              backgroundColor: 'rgba(255, 107, 107, 0.38)',
+              borderColor: 'rgba(255, 107, 107, 0.85)',
+              borderWidth: 0,
+              grouped: false
+            },
+            {
+              data: histogramSeriesG,
+              backgroundColor: 'rgba(105, 219, 124, 0.38)',
+              borderColor: 'rgba(105, 219, 124, 0.85)',
+              borderWidth: 0,
+              grouped: false
+            },
+            {
+              data: histogramSeriesB,
+              backgroundColor: 'rgba(116, 192, 252, 0.38)',
+              borderColor: 'rgba(116, 192, 252, 0.85)',
+              borderWidth: 0,
+              grouped: false
+            }
+          ]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: false,
+          parsing: false,
+          normalized: true,
+          resizeDelay: 0,
+          plugins: {
+            legend: { display: false },
+            tooltip: { enabled: false }
+          },
+          scales: {
+            x: {
+              display: false,
+              grid: { display: false }
+            },
+            y: {
+              display: false,
+              beginAtZero: true,
+              suggestedMax: 1,
+              grid: { display: false }
+            }
+          }
+        }
+      });
+      return histogramChart;
+    }
+
+    function renderHistogramWithChart(histR, histG, histB, maxVal) {
+      const chart = ensureHistogramChart();
+      if (!chart) return false;
+
+      try {
+        for (let i = 0; i < 256; i++) {
+          histogramSeriesR[i] = histR[i];
+          histogramSeriesG[i] = histG[i];
+          histogramSeriesB[i] = histB[i];
+        }
+        chart.options.scales.y.suggestedMax = Math.max(1, maxVal);
+        chart.resize();
+        chart.update('none');
+        return true;
+      } catch (err) {
+        console.warn('Histogram chart unavailable, fallback to canvas rendering.', err);
+        chart.destroy();
+        histogramChart = null;
+        return false;
+      }
+    }
+
     function renderHistogram(imageData) {
       const { data } = imageData;
       const histR = new Uint32Array(256);
@@ -2914,10 +3007,18 @@
         maxVal = Math.max(maxVal, histR[i], histG[i], histB[i]);
       }
 
-      const cw = histogramCanvas.width = histogramCanvas.offsetWidth * 2;
-      const ch = histogramCanvas.height = histogramCanvas.offsetHeight * 2;
+      if (renderHistogramWithChart(histR, histG, histB, maxVal)) return;
+
+      const baseW = histogramCanvas.offsetWidth || histogramCanvas.clientWidth;
+      const baseH = histogramCanvas.offsetHeight || histogramCanvas.clientHeight;
+      if (baseW <= 0 || baseH <= 0) return;
+
+      const dpr = window.devicePixelRatio || 1;
+      const cw = histogramCanvas.width = Math.max(1, Math.round(baseW * dpr));
+      const ch = histogramCanvas.height = Math.max(1, Math.round(baseH * dpr));
       histogramCtx.fillStyle = '#111';
       histogramCtx.fillRect(0, 0, cw, ch);
+      if (maxVal <= 0) return;
 
       const barWidth = cw / 256;
       const scale = ch / maxVal;
@@ -3812,6 +3913,20 @@
     const previewCtx = previewCanvas.getContext('2d', { willReadFrequently: true });
     let fullAdjustedBuffer = null;
     let previewAdjustedBuffer = null;
+    let histogramAdjustedBuffer = null;
+    let lastHistogramUpdateTime = 0;
+
+    function renderHistogramForWebGL(force = false) {
+      if (!state.processedImageData) return;
+      const now = performance.now();
+      if (!force && (now - lastHistogramUpdateTime) < 120) return;
+
+      const source = state.previewSourceImageData || state.processedImageData;
+      histogramAdjustedBuffer = ensureImageDataBuffer(histogramAdjustedBuffer, source.width, source.height);
+      applyAdjustmentsToBuffer(source, state, histogramAdjustedBuffer, 'preview');
+      renderHistogram(histogramAdjustedBuffer);
+      lastHistogramUpdateTime = now;
+    }
 
     function schedulePreviewUpdate() {
       if (!updateScheduled) {
@@ -3839,6 +3954,7 @@
       if (state.currentStep >= 3 && initWebGLRenderer()) {
         updateCanvasVisibility();
         renderWebGL();
+        renderHistogramForWebGL(false);
         state.lastRenderQuality = 'gl';
         return;
       }
@@ -3876,6 +3992,7 @@
       if (state.currentStep >= 3 && initWebGLRenderer()) {
         updateCanvasVisibility();
         renderWebGL();
+        renderHistogramForWebGL(true);
         state.lastRenderQuality = 'gl';
         return;
       }
