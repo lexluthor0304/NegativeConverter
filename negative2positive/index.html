@@ -168,7 +168,8 @@
       pointer-events: none;
       display: none;
       touch-action: none;
-      opacity: 0.45;
+      opacity: 0.72;
+      cursor: none;
     }
 
     #retouchCoverageCanvas {
@@ -178,7 +179,7 @@
       z-index: 210;
       pointer-events: none;
       display: none;
-      opacity: 0.52;
+      opacity: 0.42;
     }
 
     #retouchCursorCanvas {
@@ -2679,13 +2680,18 @@
       const radius = Math.max(1, Number(state.retouchBrushSize) || 1);
       const strokeWidth = Math.max(1, Math.min(3, radius * 0.12));
       retouchCursorCtx.save();
-      retouchCursorCtx.setLineDash(radius >= 10 ? [6, 4] : []);
-      retouchCursorCtx.strokeStyle = 'rgba(255, 255, 255, 0.95)';
+      retouchCursorCtx.setLineDash([]);
+      retouchCursorCtx.strokeStyle = 'rgba(255, 72, 72, 0.98)';
       retouchCursorCtx.lineWidth = strokeWidth;
       retouchCursorCtx.shadowColor = 'rgba(0, 0, 0, 0.55)';
       retouchCursorCtx.shadowBlur = 2;
       retouchCursorCtx.beginPath();
       retouchCursorCtx.arc(point.x, point.y, radius, 0, Math.PI * 2);
+      retouchCursorCtx.stroke();
+      retouchCursorCtx.lineWidth = 1;
+      retouchCursorCtx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
+      retouchCursorCtx.beginPath();
+      retouchCursorCtx.arc(point.x, point.y, Math.max(0.5, radius - strokeWidth * 1.2), 0, Math.PI * 2);
       retouchCursorCtx.stroke();
       retouchCursorCtx.restore();
     }
@@ -2700,10 +2706,10 @@
       for (let i = 0, p = 0; p < maskArray.length; p++, i += 4) {
         const v = maskArray[p];
         if (!v) continue;
-        rgba[i] = 30;
-        rgba[i + 1] = 220;
-        rgba[i + 2] = 255;
-        rgba[i + 3] = 180;
+        rgba[i] = 255;
+        rgba[i + 1] = 56;
+        rgba[i + 2] = 56;
+        rgba[i + 3] = 132;
       }
 
       retouchMaskSourceCanvas.width = width;
@@ -2751,6 +2757,7 @@
       retouchCursorCanvas.style.display = shouldShow ? 'block' : 'none';
       retouchMaskCanvas.style.display = shouldShow ? 'block' : 'none';
       retouchMaskCanvas.style.pointerEvents = shouldShow ? 'auto' : 'none';
+      retouchMaskCanvas.style.cursor = shouldShow ? 'none' : 'default';
       if (!shouldShow) {
         retouchPointerDown = false;
         retouchLastPoint = null;
@@ -2770,11 +2777,13 @@
         hideLoupe();
       }
       if (state.retouchManualMode) {
-        canvas.style.cursor = 'crosshair';
-        glCanvas.style.cursor = 'crosshair';
+        canvas.style.cursor = 'default';
+        glCanvas.style.cursor = 'default';
+        retouchMaskCanvas.style.cursor = 'none';
       } else if (!state.samplingMode) {
         canvas.style.cursor = 'default';
         glCanvas.style.cursor = 'default';
+        retouchMaskCanvas.style.cursor = 'default';
         retouchCursorPoint = null;
         clearRetouchCursorOverlay();
       }
@@ -3571,8 +3580,8 @@
       const radius = Math.max(1, Number(state.retouchBrushSize) || 1);
       retouchMaskCtx.lineCap = 'round';
       retouchMaskCtx.lineJoin = 'round';
-      retouchMaskCtx.strokeStyle = 'rgba(255, 255, 255, 1)';
-      retouchMaskCtx.fillStyle = 'rgba(255, 255, 255, 1)';
+      retouchMaskCtx.strokeStyle = 'rgba(255, 36, 36, 1)';
+      retouchMaskCtx.fillStyle = 'rgba(255, 36, 36, 1)';
       retouchMaskCtx.lineWidth = radius * 2;
       retouchMaskCtx.beginPath();
       retouchMaskCtx.moveTo(from.x, from.y);
@@ -3611,6 +3620,13 @@
       drawRetouchStroke(retouchLastPoint || point, point);
       retouchLastPoint = point;
       event.preventDefault();
+    });
+
+    retouchMaskCanvas.addEventListener('pointerenter', (event) => {
+      if (!state.retouchManualMode || !state.retouchEnabled) return;
+      const point = getRetouchImagePointFromClient(event.clientX, event.clientY);
+      retouchCursorPoint = point;
+      drawRetouchCursor(point);
     });
 
     function finishRetouchStroke(event) {
