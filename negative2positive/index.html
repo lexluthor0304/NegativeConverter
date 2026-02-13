@@ -1705,11 +1705,12 @@
           <span class="section-toggle">▼</span>
         </div>
         <div class="section-content" id="retouchSectionContent">
-          <div class="info-box" data-i18n="retouchInfo">Use OpenCV inpaint to fix dust and scratches. Manual mode paints a repair mask.</div>
+          <div class="info-box" data-i18n="retouchInfo">Use OpenCV inpaint to fix dust and scratches. Spot Heal mode paints and applies a repair brush automatically.</div>
           <div class="retouch-actions">
             <button class="film-base-btn" id="retouchToggleBtn" data-i18n="retouchEnable">Enable Retouch</button>
             <button class="film-base-btn" id="autoRepairBtn" data-i18n="autoRepair">Auto Detect</button>
             <button class="film-base-btn" id="manualMaskBtn" data-i18n="manualMask">Manual Mask</button>
+            <button class="film-base-btn" id="retouchSpotHealBtn" data-i18n="spotHealMode">Spot Heal Mode</button>
             <button class="film-base-btn" id="applyRepairBtn" data-i18n="applyRepair">Apply Repair</button>
           </div>
           <button class="film-base-btn" id="clearMaskBtn" data-i18n="clearMask" style="width: 100%;">Clear Mask</button>
@@ -1872,10 +1873,11 @@
         vibrance: "活力",
         saturation: "饱和度",
         retouch: "修复",
-        retouchInfo: "使用 OpenCV 修复灰尘与刮痕。手动模式可涂抹修复蒙版。",
+        retouchInfo: "使用 OpenCV 修复灰尘与刮痕。点修复模式下可直接用修复画笔涂抹并自动应用。",
         retouchEnable: "启用修复",
         autoRepair: "自动修复",
-        manualMask: "手动蒙版",
+        manualMask: "修复画笔",
+        spotHealMode: "点修复模式",
         applyRepair: "应用修复",
         clearMask: "清空蒙版",
         autoStrength: "自动强度",
@@ -1973,10 +1975,11 @@
         vibrance: "Vibrance",
         saturation: "Saturation",
         retouch: "Retouch",
-        retouchInfo: "Use OpenCV inpaint to fix dust and scratches. Manual mode paints a repair mask.",
+        retouchInfo: "Use OpenCV inpaint to fix dust and scratches. Spot Heal mode gives a live repair brush workflow.",
         retouchEnable: "Enable Retouch",
         autoRepair: "Auto Repair",
-        manualMask: "Manual Mask",
+        manualMask: "Repair Brush",
+        spotHealMode: "Spot Heal Mode",
         applyRepair: "Apply Repair",
         clearMask: "Clear Mask",
         autoStrength: "Auto Strength",
@@ -2074,10 +2077,11 @@
         vibrance: "バイブランス",
         saturation: "彩度",
         retouch: "補修",
-        retouchInfo: "OpenCV の inpaint でホコリやキズを補修します。手動モードでは補修マスクを描画できます。",
+        retouchInfo: "OpenCV の inpaint でホコリやキズを補修します。スポット修復モードでは修復ブラシを塗ると自動で反映されます。",
         retouchEnable: "補修を有効化",
         autoRepair: "自動補修",
-        manualMask: "手動マスク",
+        manualMask: "修復ブラシ",
+        spotHealMode: "スポット修復モード",
         applyRepair: "補修を適用",
         clearMask: "マスクをクリア",
         autoStrength: "自動強度",
@@ -2475,12 +2479,14 @@
 
       // Retouch settings
       retouchEnabled: false,
-      retouchAutoEnabled: true,
+      retouchAutoEnabled: false,
       retouchManualMode: false,
       retouchAutoStrength: 50,
       retouchInpaintRadius: 3,
       retouchBrushSize: 24,
+      retouchSpotHealMode: true,
       retouchSupported: null,
+      retouchBackend: null, // 'worker' | 'main'
       retouchSourceVersion: 0,
       retouchMaskVersion: 0,
       retouchMaskHasContent: false,
@@ -2596,6 +2602,8 @@
     const retouchScaleCtx = retouchScaleCanvas.getContext('2d', { willReadFrequently: true });
     let retouchWorker = null;
     let retouchWorkerReadyPromise = null;
+    let retouchMainCv = null;
+    let retouchMainCvPromise = null;
     let retouchRequestSeq = 0;
     let retouchStatusKey = 'retouchStatusIdle';
     const retouchRequestMap = new Map();
@@ -2617,9 +2625,11 @@
       const toggleBtn = document.getElementById('retouchToggleBtn');
       const autoBtn = document.getElementById('autoRepairBtn');
       const manualBtn = document.getElementById('manualMaskBtn');
+      const spotHealBtn = document.getElementById('retouchSpotHealBtn');
       if (toggleBtn) toggleBtn.classList.toggle('active', state.retouchEnabled);
       if (autoBtn) autoBtn.classList.toggle('active', state.retouchAutoEnabled);
       if (manualBtn) manualBtn.classList.toggle('active', state.retouchManualMode);
+      if (spotHealBtn) spotHealBtn.classList.toggle('active', state.retouchSpotHealMode);
     }
 
     function clearRetouchCaches() {
@@ -2656,6 +2666,13 @@
         canvas.style.cursor = 'default';
         glCanvas.style.cursor = 'default';
         hideLoupe();
+      }
+      if (state.retouchManualMode) {
+        canvas.style.cursor = 'crosshair';
+        glCanvas.style.cursor = 'crosshair';
+      } else if (!state.samplingMode) {
+        canvas.style.cursor = 'default';
+        glCanvas.style.cursor = 'default';
       }
       updateRetouchButtons();
       updateRetouchMaskVisibility();
@@ -2759,6 +2776,140 @@
       clearRetouchCaches();
     }
 
+    async function ensureRetouchMainReady() {
+      if (retouchMainCv) return retouchMainCv;
+      if (retouchMainCvPromise) return retouchMainCvPromise;
+
+      retouchMainCvPromise = (async () => {
+        try {
+          const bridge = await import('./opencvBridge.js');
+          const cv = await bridge.ensureCvReady();
+          retouchMainCv = cv;
+          state.retouchSupported = true;
+          state.retouchBackend = 'main';
+          return cv;
+        } catch (err) {
+          retouchMainCvPromise = null;
+          throw err;
+        }
+      })();
+
+      return retouchMainCvPromise;
+    }
+
+    function buildAutoMaskMat(cv, rgba, width, height, autoStrength) {
+      const src = cv.matFromArray(height, width, cv.CV_8UC4, rgba);
+      const gray = new cv.Mat();
+      const topHat = new cv.Mat();
+      const blackHat = new cv.Mat();
+      const combined = new cv.Mat();
+      const binary = new cv.Mat();
+      const refined = new cv.Mat();
+      const kernelSmall = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(3, 3));
+      const kernelLarge = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(5, 5));
+
+      try {
+        cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+        cv.morphologyEx(gray, topHat, cv.MORPH_TOPHAT, kernelLarge);
+        cv.morphologyEx(gray, blackHat, cv.MORPH_BLACKHAT, kernelLarge);
+        cv.addWeighted(topHat, 1, blackHat, 1, 0, combined);
+
+        const clampedStrength = Math.max(0, Math.min(100, autoStrength || 0));
+        const threshold = Math.max(8, Math.min(60, Math.round(48 - clampedStrength * 0.35)));
+        cv.threshold(combined, binary, threshold, 255, cv.THRESH_BINARY);
+        cv.morphologyEx(binary, refined, cv.MORPH_OPEN, kernelSmall);
+        cv.morphologyEx(refined, refined, cv.MORPH_CLOSE, kernelSmall);
+
+        return refined.clone();
+      } finally {
+        src.delete();
+        gray.delete();
+        topHat.delete();
+        blackHat.delete();
+        combined.delete();
+        binary.delete();
+        refined.delete();
+        kernelSmall.delete();
+        kernelLarge.delete();
+      }
+    }
+
+    function buildManualMaskMat(cv, rgbaMask, width, height) {
+      const out = new cv.Mat(height, width, cv.CV_8UC1, new cv.Scalar(0));
+      if (!rgbaMask) return out;
+
+      const mask = new Uint8Array(width * height);
+      for (let i = 0, p = 0; i < rgbaMask.length; i += 4, p++) {
+        const alpha = rgbaMask[i + 3];
+        const lum = (rgbaMask[i] + rgbaMask[i + 1] + rgbaMask[i + 2]) / 3;
+        mask[p] = (alpha > 0 || lum > 10) ? 255 : 0;
+      }
+      out.data.set(mask);
+      return out;
+    }
+
+    async function requestRetouchMain(sourceImageData, options = null) {
+      const cv = await ensureRetouchMainReady();
+      const width = sourceImageData.width;
+      const height = sourceImageData.height;
+      const rgba = sourceImageData.data;
+
+      const manualMaskData = options && options.manualMaskData
+        ? options.manualMaskData
+        : getManualMaskForSize(width, height);
+      const autoEnabled = options && typeof options.autoEnabled === 'boolean'
+        ? options.autoEnabled
+        : state.retouchAutoEnabled;
+      const autoStrength = options && Number.isFinite(options.autoStrength)
+        ? options.autoStrength
+        : state.retouchAutoStrength;
+      const inpaintRadius = options && Number.isFinite(options.inpaintRadius)
+        ? options.inpaintRadius
+        : state.retouchInpaintRadius;
+
+      const src = cv.matFromArray(height, width, cv.CV_8UC4, rgba);
+      const srcRgb = new cv.Mat();
+      const inpainted = new cv.Mat();
+      const outRgba = new cv.Mat();
+      let autoMask = null;
+      let manualMask = null;
+      let mergedMask = null;
+
+      try {
+        if (autoEnabled) {
+          autoMask = buildAutoMaskMat(cv, rgba, width, height, autoStrength);
+        }
+        manualMask = buildManualMaskMat(cv, manualMaskData ? manualMaskData.data : null, width, height);
+
+        if (autoMask && manualMask) {
+          mergedMask = new cv.Mat();
+          cv.bitwise_or(autoMask, manualMask, mergedMask);
+        } else if (autoMask) {
+          mergedMask = autoMask.clone();
+        } else if (manualMask) {
+          mergedMask = manualMask.clone();
+        }
+
+        const hasMask = mergedMask ? cv.countNonZero(mergedMask) > 0 : false;
+        if (!hasMask) {
+          return { imageData: cloneImageData(sourceImageData), applied: false };
+        }
+
+        cv.cvtColor(src, srcRgb, cv.COLOR_RGBA2RGB);
+        cv.inpaint(srcRgb, mergedMask, inpainted, Math.max(1, Math.min(20, inpaintRadius || 3)), cv.INPAINT_TELEA);
+        cv.cvtColor(inpainted, outRgba, cv.COLOR_RGB2RGBA);
+        return { imageData: new ImageData(new Uint8ClampedArray(outRgba.data), width, height), applied: true };
+      } finally {
+        src.delete();
+        srcRgb.delete();
+        inpainted.delete();
+        outRgba.delete();
+        if (autoMask) autoMask.delete();
+        if (manualMask) manualMask.delete();
+        if (mergedMask) mergedMask.delete();
+      }
+    }
+
     async function ensureRetouchWorkerReady() {
       if (state.retouchSupported === false) {
         throw new Error('Retouch is unavailable.');
@@ -2786,6 +2937,7 @@
               resolved = true;
               clearTimeout(timer);
               state.retouchSupported = true;
+              state.retouchBackend = 'worker';
               setRetouchStatus(retouchStatusKey || 'retouchStatusIdle');
               resolve(retouchWorker);
             }
@@ -2817,12 +2969,21 @@
             reject(new Error(event.message || 'Retouch worker error.'));
             return;
           }
-          state.retouchSupported = false;
-          setRetouchStatus('retouchStatusUnavailable');
+          state.retouchBackend = null;
+          retouchWorkerReadyPromise = null;
+          if (retouchWorker) {
+            try {
+              retouchWorker.terminate();
+            } catch (workerErr) {
+              // Ignore termination failures.
+            }
+            retouchWorker = null;
+          }
+          setRetouchStatus('retouchStatusProcessing');
         };
 
         retouchWorker.postMessage({ type: 'init' });
-      }).catch((err) => {
+      }).catch(async (err) => {
         if (retouchWorker) {
           try {
             retouchWorker.terminate();
@@ -2831,21 +2992,33 @@
           }
           retouchWorker = null;
         }
-        retouchWorkerReadyPromise = null;
-        state.retouchSupported = false;
-        state.retouchEnabled = false;
-        setRetouchManualMode(false);
-        updateRetouchButtons();
-        setRetouchStatus('retouchStatusUnavailable');
-        updateCanvasVisibility();
-        throw err;
+        try {
+          await ensureRetouchMainReady();
+          setRetouchStatus('retouchStatusReady');
+          return retouchMainCv;
+        } catch (fallbackErr) {
+          retouchWorkerReadyPromise = null;
+          state.retouchSupported = false;
+          state.retouchEnabled = false;
+          state.retouchBackend = null;
+          setRetouchManualMode(false);
+          updateRetouchButtons();
+          setRetouchStatus('retouchStatusUnavailable');
+          updateCanvasVisibility();
+          throw fallbackErr || err;
+        }
       });
 
       return retouchWorkerReadyPromise;
     }
 
     async function requestRetouch(sourceImageData, options = null) {
-      const worker = await ensureRetouchWorkerReady();
+      const backend = await ensureRetouchWorkerReady();
+      if (state.retouchBackend === 'main') {
+        return await requestRetouchMain(sourceImageData, options);
+      }
+
+      const worker = backend;
       const id = ++retouchRequestSeq;
 
       const sourceCopy = new Uint8ClampedArray(sourceImageData.data);
@@ -3043,7 +3216,15 @@
       clearRetouchCaches();
       if (state.retouchEnabled) {
         schedulePreviewUpdate();
-        scheduleFullUpdate();
+        if (state.retouchSpotHealMode) {
+          if (fullUpdateTimer) {
+            clearTimeout(fullUpdateTimer);
+            fullUpdateTimer = null;
+          }
+          updateFull();
+        } else {
+          scheduleFullUpdate();
+        }
       }
       if (event && retouchMaskCanvas.hasPointerCapture && retouchMaskCanvas.hasPointerCapture(event.pointerId)) {
         try {
@@ -3680,7 +3861,7 @@
     }
 
     // ===========================================
-    // Histogram (Lightroom-style)
+    // Histogram (photo-editor-style)
     // ===========================================
     const HISTOGRAM_BINS = 256;
     const histogramR = new Uint32Array(HISTOGRAM_BINS);
@@ -3834,7 +4015,7 @@
     }
 
     // ===========================================
-    // Curve Editor (Lightroom-style with control points)
+    // Curve Editor (photo-editor-style with control points)
     // ===========================================
     let currentCurveChannel = 'r';
     let draggingPoint = null;
@@ -5602,6 +5783,10 @@
       if (!state.retouchEnabled) {
         const ready = await enableRetouchIfNeeded();
         if (!ready) return;
+        if (state.retouchSpotHealMode) {
+          state.retouchAutoEnabled = false;
+          setRetouchManualMode(true);
+        }
         setRetouchStatus('retouchStatusProcessing');
         schedulePreviewUpdate();
         scheduleFullUpdate();
@@ -5617,10 +5802,27 @@
       updateRetouchButtons();
     });
 
+    document.getElementById('retouchSpotHealBtn').addEventListener('click', async () => {
+      const ready = await enableRetouchIfNeeded();
+      if (!ready) return;
+      state.retouchSpotHealMode = !state.retouchSpotHealMode;
+      if (state.retouchSpotHealMode) {
+        state.retouchAutoEnabled = false;
+        setRetouchManualMode(true);
+      }
+      updateRetouchButtons();
+      markRetouchDirty();
+      schedulePreviewUpdate();
+      scheduleFullUpdate();
+    });
+
     document.getElementById('autoRepairBtn').addEventListener('click', async () => {
       const ready = await enableRetouchIfNeeded();
       if (!ready) return;
       state.retouchAutoEnabled = !state.retouchAutoEnabled;
+      if (state.retouchAutoEnabled && state.retouchSpotHealMode) {
+        state.retouchSpotHealMode = false;
+      }
       markRetouchDirty();
       updateRetouchButtons();
       schedulePreviewUpdate();
@@ -6185,6 +6387,7 @@
         wbB: state.wbB,
         retouchEnabled: state.retouchEnabled,
         retouchAutoEnabled: state.retouchAutoEnabled,
+        retouchSpotHealMode: state.retouchSpotHealMode,
         retouchAutoStrength: state.retouchAutoStrength,
         retouchInpaintRadius: state.retouchInpaintRadius,
         retouchBrushSize: state.retouchBrushSize,
@@ -6346,7 +6549,8 @@
         wbG: 1,
         wbB: 1,
         retouchEnabled: false,
-        retouchAutoEnabled: true,
+        retouchAutoEnabled: false,
+        retouchSpotHealMode: true,
         retouchAutoStrength: 50,
         retouchInpaintRadius: 3,
         retouchBrushSize: 24,
@@ -6614,7 +6818,13 @@
       state.wbG = settings.wbG;
       state.wbB = settings.wbB;
       state.retouchEnabled = !!settings.retouchEnabled;
-      state.retouchAutoEnabled = settings.retouchAutoEnabled !== false;
+      const savedSpotHealMode = (typeof settings.retouchSpotHealMode === 'boolean')
+        ? settings.retouchSpotHealMode
+        : true;
+      state.retouchSpotHealMode = savedSpotHealMode;
+      state.retouchAutoEnabled = typeof settings.retouchAutoEnabled === 'boolean'
+        ? settings.retouchAutoEnabled
+        : !state.retouchSpotHealMode;
       state.retouchAutoStrength = Number.isFinite(settings.retouchAutoStrength) ? settings.retouchAutoStrength : 50;
       state.retouchInpaintRadius = Number.isFinite(settings.retouchInpaintRadius) ? settings.retouchInpaintRadius : 3;
       state.retouchBrushSize = Number.isFinite(settings.retouchBrushSize) ? settings.retouchBrushSize : 24;
