@@ -12,6 +12,7 @@ This is a browser-based tool built with HTML and JavaScript that converts scanne
   - Temperature & Tint
   - Vibrance & Saturation
   - Cyan / Magenta / Yellow (CMY) channels
+- 🩹 **Dust/Scratch Retouch** powered by `@techstark/opencv-js` (auto detect + manual mask)
 - 🎞️ **Film presets** for color negative, B&W negative, and positive slide stocks across Kodak / Fujifilm / Ilford
 - 🗂️ **Data-driven preset system** loaded from `negative2positive/presets/film_presets.json` (supports alias fallback for older preset IDs)
 - 🛡️ **Privacy-friendly**: all image processing happens locally in your browser
@@ -28,7 +29,8 @@ This is a browser-based tool built with HTML and JavaScript that converts scanne
    - **Temperature**, **Tint**
    - **Vibrance**, **Saturation**
    - **Cyan**, **Magenta**, **Yellow**
-7. Click **Download Corrected Image** to save your final result
+7. In the **Retouch** panel, run **Auto Repair** and/or paint **Manual Mask**, then click **Apply Repair**
+8. Click **Download Corrected Image** to save your final result
 
 ## ⚙️ Technical Highlights
 

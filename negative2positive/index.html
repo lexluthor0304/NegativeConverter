@@ -160,6 +160,17 @@
       object-fit: contain;
     }
 
+    #retouchMaskCanvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      z-index: 220;
+      pointer-events: none;
+      display: none;
+      touch-action: none;
+      opacity: 0.45;
+    }
+
     .crop-overlay {
       border: 2px dashed var(--accent);
       position: absolute;
@@ -598,6 +609,20 @@
       border: none;
       border-radius: 50%;
       cursor: pointer;
+    }
+
+    .retouch-actions {
+      display: grid;
+      gap: 8px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      margin-bottom: 8px;
+    }
+
+    .retouch-status {
+      margin-top: 6px;
+      font-size: 11px;
+      color: var(--text-secondary);
+      min-height: 16px;
     }
 
     /* Curve Editor */
@@ -1416,6 +1441,7 @@
         </div>
         <canvas id="canvas" style="display: none;"></canvas>
         <canvas id="glCanvas" style="display: none;"></canvas>
+        <canvas id="retouchMaskCanvas" style="display: none;"></canvas>
         <div class="crop-overlay" id="cropOverlay"></div>
         <div class="loupe" id="loupe">
           <canvas id="loupeCanvas" width="155" height="155"></canvas>
@@ -1672,6 +1698,46 @@
         </div>
       </div>
 
+      <!-- Retouch (Step 3) -->
+      <div class="control-section" id="retouchSection" style="display: none;">
+        <div class="section-header" data-section="retouch">
+          <span class="section-title" data-i18n="retouch">Retouch</span>
+          <span class="section-toggle">▼</span>
+        </div>
+        <div class="section-content" id="retouchSectionContent">
+          <div class="info-box" data-i18n="retouchInfo">Use OpenCV inpaint to fix dust and scratches. Manual mode paints a repair mask.</div>
+          <div class="retouch-actions">
+            <button class="film-base-btn" id="retouchToggleBtn" data-i18n="retouchEnable">Enable Retouch</button>
+            <button class="film-base-btn" id="autoRepairBtn" data-i18n="autoRepair">Auto Detect</button>
+            <button class="film-base-btn" id="manualMaskBtn" data-i18n="manualMask">Manual Mask</button>
+            <button class="film-base-btn" id="applyRepairBtn" data-i18n="applyRepair">Apply Repair</button>
+          </div>
+          <button class="film-base-btn" id="clearMaskBtn" data-i18n="clearMask" style="width: 100%;">Clear Mask</button>
+          <div class="slider-control" style="margin-top: 8px;">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="autoStrength">Auto Strength</span>
+              <span class="slider-value" id="retouchAutoStrengthValue">50</span>
+            </div>
+            <input type="range" class="slider-input" id="retouchAutoStrength" min="0" max="100" step="1" value="50">
+          </div>
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="inpaintRadius">Inpaint Radius</span>
+              <span class="slider-value" id="retouchInpaintRadiusValue">3.0</span>
+            </div>
+            <input type="range" class="slider-input" id="retouchInpaintRadius" min="1" max="15" step="0.5" value="3">
+          </div>
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="brushSize">Brush Size</span>
+              <span class="slider-value" id="retouchBrushSizeValue">24</span>
+            </div>
+            <input type="range" class="slider-input" id="retouchBrushSize" min="6" max="120" step="1" value="24">
+          </div>
+          <div class="retouch-status" id="retouchStatus" data-i18n="retouchStatusIdle">Retouch ready</div>
+        </div>
+      </div>
+
       <!-- Advanced (Curves) (Step 3) -->
       <div class="control-section" id="advancedSection" style="display: none;">
         <div class="section-header" data-section="advanced">
@@ -1805,6 +1871,20 @@
         tint: "色调",
         vibrance: "活力",
         saturation: "饱和度",
+        retouch: "修复",
+        retouchInfo: "使用 OpenCV 修复灰尘与刮痕。手动模式可涂抹修复蒙版。",
+        retouchEnable: "启用修复",
+        autoRepair: "自动修复",
+        manualMask: "手动蒙版",
+        applyRepair: "应用修复",
+        clearMask: "清空蒙版",
+        autoStrength: "自动强度",
+        inpaintRadius: "修复半径",
+        brushSize: "画笔大小",
+        retouchStatusIdle: "修复待命",
+        retouchStatusProcessing: "修复处理中...",
+        retouchStatusReady: "修复已更新",
+        retouchStatusUnavailable: "OpenCV 初始化失败，修复功能不可用",
         advanced: "高级",
         linear: "线性",
         sCurve: "S曲线",
@@ -1892,6 +1972,20 @@
         tint: "Tint",
         vibrance: "Vibrance",
         saturation: "Saturation",
+        retouch: "Retouch",
+        retouchInfo: "Use OpenCV inpaint to fix dust and scratches. Manual mode paints a repair mask.",
+        retouchEnable: "Enable Retouch",
+        autoRepair: "Auto Repair",
+        manualMask: "Manual Mask",
+        applyRepair: "Apply Repair",
+        clearMask: "Clear Mask",
+        autoStrength: "Auto Strength",
+        inpaintRadius: "Inpaint Radius",
+        brushSize: "Brush Size",
+        retouchStatusIdle: "Retouch ready",
+        retouchStatusProcessing: "Retouch processing...",
+        retouchStatusReady: "Retouch updated",
+        retouchStatusUnavailable: "OpenCV init failed. Retouch is unavailable.",
         advanced: "Advanced",
         linear: "Linear",
         sCurve: "S-Curve",
@@ -1979,6 +2073,20 @@
         tint: "色合い",
         vibrance: "バイブランス",
         saturation: "彩度",
+        retouch: "補修",
+        retouchInfo: "OpenCV の inpaint でホコリやキズを補修します。手動モードでは補修マスクを描画できます。",
+        retouchEnable: "補修を有効化",
+        autoRepair: "自動補修",
+        manualMask: "手動マスク",
+        applyRepair: "補修を適用",
+        clearMask: "マスクをクリア",
+        autoStrength: "自動強度",
+        inpaintRadius: "補修半径",
+        brushSize: "ブラシサイズ",
+        retouchStatusIdle: "補修待機中",
+        retouchStatusProcessing: "補修処理中...",
+        retouchStatusReady: "補修を更新しました",
+        retouchStatusUnavailable: "OpenCV 初期化に失敗したため補修機能は利用できません",
         advanced: "詳細",
         linear: "リニア",
         sCurve: "Sカーブ",
@@ -2365,6 +2473,26 @@
       exportFormat: 'png',  // 'png' or 'jpeg'
       jpegQuality: 92,      // 1-100
 
+      // Retouch settings
+      retouchEnabled: false,
+      retouchAutoEnabled: true,
+      retouchManualMode: false,
+      retouchAutoStrength: 50,
+      retouchInpaintRadius: 3,
+      retouchBrushSize: 24,
+      retouchSupported: null,
+      retouchSourceVersion: 0,
+      retouchMaskVersion: 0,
+      retouchMaskHasContent: false,
+      retouchCachePreview: null,
+      retouchCachePreviewKey: '',
+      retouchCacheFull: null,
+      retouchCacheFullKey: '',
+      retouchInFlightPreview: false,
+      retouchInFlightFull: false,
+      retouchPendingPreview: null,
+      retouchPendingFull: null,
+
       // Render state
       lastRenderQuality: 'full' // 'full' | 'preview' | 'gl'
     };
@@ -2395,6 +2523,8 @@
     const canvas = document.getElementById('canvas');
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     const glCanvas = document.getElementById('glCanvas');
+    const retouchMaskCanvas = document.getElementById('retouchMaskCanvas');
+    const retouchMaskCtx = retouchMaskCanvas.getContext('2d', { willReadFrequently: true });
     const canvasContainer = document.getElementById('canvasContainer');
     const histogramCanvas = document.getElementById('histogramCanvas');
     const histogramCtx = histogramCanvas.getContext('2d');
@@ -2439,7 +2569,7 @@
       document.getElementById('filmSettingsSection').style.display =
         state.currentStep >= 2 ? 'block' : 'none';
 
-      const step3Sections = ['whiteBalanceSection', 'toneSection', 'colorSection', 'cmySection', 'advancedSection'];
+      const step3Sections = ['whiteBalanceSection', 'toneSection', 'colorSection', 'cmySection', 'retouchSection', 'advancedSection'];
       step3Sections.forEach(id => {
         document.getElementById(id).style.display = state.currentStep >= 3 ? 'block' : 'none';
       });
@@ -2458,6 +2588,475 @@
       updateWorkflowUI();
       updateCanvasVisibility();
     }
+
+    // ===========================================
+    // Retouch (OpenCV Inpaint)
+    // ===========================================
+    const retouchScaleCanvas = document.createElement('canvas');
+    const retouchScaleCtx = retouchScaleCanvas.getContext('2d', { willReadFrequently: true });
+    let retouchWorker = null;
+    let retouchWorkerReadyPromise = null;
+    let retouchRequestSeq = 0;
+    let retouchStatusKey = 'retouchStatusIdle';
+    const retouchRequestMap = new Map();
+    let retouchRequestedPreviewKey = '';
+    let retouchRequestedFullKey = '';
+    let retouchPointerDown = false;
+    let retouchLastPoint = null;
+
+    function setRetouchStatus(key, fallback = '') {
+      retouchStatusKey = key;
+      const statusEl = document.getElementById('retouchStatus');
+      if (!statusEl) return;
+      if (key) statusEl.setAttribute('data-i18n', key);
+      const localized = key && i18n[currentLang] ? i18n[currentLang][key] : '';
+      statusEl.textContent = localized || fallback || '';
+    }
+
+    function updateRetouchButtons() {
+      const toggleBtn = document.getElementById('retouchToggleBtn');
+      const autoBtn = document.getElementById('autoRepairBtn');
+      const manualBtn = document.getElementById('manualMaskBtn');
+      if (toggleBtn) toggleBtn.classList.toggle('active', state.retouchEnabled);
+      if (autoBtn) autoBtn.classList.toggle('active', state.retouchAutoEnabled);
+      if (manualBtn) manualBtn.classList.toggle('active', state.retouchManualMode);
+    }
+
+    function clearRetouchCaches() {
+      state.retouchCachePreview = null;
+      state.retouchCachePreviewKey = '';
+      state.retouchCacheFull = null;
+      state.retouchCacheFullKey = '';
+    }
+
+    function syncRetouchMaskCanvasSize(width, height) {
+      const w = Math.max(1, width || 1);
+      const h = Math.max(1, height || 1);
+      if (retouchMaskCanvas.width !== w) retouchMaskCanvas.width = w;
+      if (retouchMaskCanvas.height !== h) retouchMaskCanvas.height = h;
+      retouchMaskCtx.clearRect(0, 0, retouchMaskCanvas.width, retouchMaskCanvas.height);
+    }
+
+    function updateRetouchMaskVisibility() {
+      const shouldShow = !!state.processedImageData && state.currentStep >= 3 && state.retouchEnabled && state.retouchManualMode;
+      retouchMaskCanvas.style.display = shouldShow ? 'block' : 'none';
+      retouchMaskCanvas.style.pointerEvents = shouldShow ? 'auto' : 'none';
+      if (!shouldShow) {
+        retouchPointerDown = false;
+        retouchLastPoint = null;
+      }
+    }
+
+    function setRetouchManualMode(enabled) {
+      state.retouchManualMode = !!enabled;
+      if (state.retouchManualMode && state.samplingMode) {
+        state.samplingMode = null;
+        document.getElementById('sampleBaseBtn').classList.remove('active');
+        document.getElementById('sampleWBBtn').classList.remove('active');
+        canvas.style.cursor = 'default';
+        glCanvas.style.cursor = 'default';
+        hideLoupe();
+      }
+      updateRetouchButtons();
+      updateRetouchMaskVisibility();
+    }
+
+    function resetRetouchRuntime(width = 0, height = 0) {
+      state.retouchSourceVersion += 1;
+      state.retouchMaskVersion = 0;
+      state.retouchMaskHasContent = false;
+      state.retouchInFlightPreview = false;
+      state.retouchInFlightFull = false;
+      state.retouchPendingPreview = null;
+      state.retouchPendingFull = null;
+      retouchRequestedPreviewKey = '';
+      retouchRequestedFullKey = '';
+      clearRetouchCaches();
+      if (width > 0 && height > 0) {
+        syncRetouchMaskCanvasSize(width, height);
+      } else {
+        retouchMaskCtx.clearRect(0, 0, retouchMaskCanvas.width, retouchMaskCanvas.height);
+      }
+      setRetouchManualMode(false);
+      setRetouchStatus(state.retouchSupported === false ? 'retouchStatusUnavailable' : 'retouchStatusIdle');
+    }
+
+    function cloneImageData(imageData) {
+      return new ImageData(new Uint8ClampedArray(imageData.data), imageData.width, imageData.height);
+    }
+
+    function computeRetouchSignature(imageData) {
+      const data = imageData.data;
+      if (!data || data.length === 0) return '0';
+
+      const stride = Math.max(4, Math.floor(data.length / 4096));
+      let hash = 2166136261;
+      for (let i = 0; i < data.length; i += stride) {
+        hash ^= data[i];
+        hash = Math.imul(hash, 16777619);
+      }
+      return (hash >>> 0).toString(16);
+    }
+
+    function buildRetouchCacheKey(imageData, quality) {
+      return [
+        state.retouchSourceVersion,
+        quality,
+        imageData.width + 'x' + imageData.height,
+        computeRetouchSignature(imageData),
+        state.retouchAutoEnabled ? 1 : 0,
+        state.retouchAutoStrength,
+        state.retouchInpaintRadius,
+        state.retouchMaskVersion
+      ].join('|');
+    }
+
+    function getManualMaskForSize(width, height) {
+      if (!state.retouchMaskHasContent) return null;
+      if (!state.processedImageData) return null;
+
+      if (retouchMaskCanvas.width === width && retouchMaskCanvas.height === height) {
+        return retouchMaskCtx.getImageData(0, 0, width, height);
+      }
+
+      retouchScaleCanvas.width = width;
+      retouchScaleCanvas.height = height;
+      retouchScaleCtx.clearRect(0, 0, width, height);
+      retouchScaleCtx.drawImage(retouchMaskCanvas, 0, 0, width, height);
+      return retouchScaleCtx.getImageData(0, 0, width, height);
+    }
+
+    function drawRetouchBuffer(imageData, quality) {
+      if (!imageData) return;
+
+      if (quality === 'preview' && state.previewSourceImageData && state.previewSourceImageData !== state.processedImageData) {
+        previewCanvas.width = imageData.width;
+        previewCanvas.height = imageData.height;
+        previewCtx.putImageData(imageData, 0, 0);
+        ctx.imageSmoothingEnabled = true;
+        ctx.drawImage(previewCanvas, 0, 0, canvas.width, canvas.height);
+      } else {
+        ctx.putImageData(imageData, 0, 0);
+      }
+
+      if (quality === 'full') {
+        state.displayImageData = imageData;
+        renderHistogram(imageData);
+        transformCanvas.width = canvas.width;
+        transformCanvas.height = canvas.height;
+        transformCtx.putImageData(imageData, 0, 0);
+      } else if (!state.previewSourceImageData || state.previewSourceImageData === state.processedImageData) {
+        state.displayImageData = imageData;
+      }
+    }
+
+    function markRetouchDirty({ clearMask = false } = {}) {
+      if (clearMask) {
+        state.retouchMaskVersion += 1;
+        state.retouchMaskHasContent = false;
+        retouchMaskCtx.clearRect(0, 0, retouchMaskCanvas.width, retouchMaskCanvas.height);
+      }
+      clearRetouchCaches();
+    }
+
+    async function ensureRetouchWorkerReady() {
+      if (state.retouchSupported === false) {
+        throw new Error('Retouch is unavailable.');
+      }
+      if (retouchWorkerReadyPromise) return retouchWorkerReadyPromise;
+
+      retouchWorkerReadyPromise = new Promise((resolve, reject) => {
+        try {
+          retouchWorker = new Worker('./opencv-worker.js', { type: 'module' });
+        } catch (err) {
+          reject(err);
+          return;
+        }
+
+        let resolved = false;
+        const timer = setTimeout(() => {
+          if (resolved) return;
+          reject(new Error('Retouch worker initialization timed out.'));
+        }, 20000);
+
+        retouchWorker.onmessage = (event) => {
+          const message = event.data || {};
+          if (message.type === 'ready') {
+            if (!resolved) {
+              resolved = true;
+              clearTimeout(timer);
+              state.retouchSupported = true;
+              setRetouchStatus(retouchStatusKey || 'retouchStatusIdle');
+              resolve(retouchWorker);
+            }
+            return;
+          }
+
+          if (message.type === 'error' && !resolved && (message.id === null || typeof message.id === 'undefined')) {
+            clearTimeout(timer);
+            reject(new Error(message.error || 'Retouch worker initialization failed.'));
+            return;
+          }
+
+          if (message.type === 'retouchResult' || message.type === 'error') {
+            const pending = retouchRequestMap.get(message.id);
+            if (!pending) return;
+            retouchRequestMap.delete(message.id);
+            if (message.type === 'error') {
+              pending.reject(new Error(message.error || 'Retouch failed.'));
+              return;
+            }
+            const out = new ImageData(new Uint8ClampedArray(message.outBuffer), message.width, message.height);
+            pending.resolve({ imageData: out, applied: !!message.applied });
+          }
+        };
+
+        retouchWorker.onerror = (event) => {
+          clearTimeout(timer);
+          if (!resolved) {
+            reject(new Error(event.message || 'Retouch worker error.'));
+            return;
+          }
+          state.retouchSupported = false;
+          setRetouchStatus('retouchStatusUnavailable');
+        };
+
+        retouchWorker.postMessage({ type: 'init' });
+      }).catch((err) => {
+        if (retouchWorker) {
+          try {
+            retouchWorker.terminate();
+          } catch (workerErr) {
+            // Ignore termination failures.
+          }
+          retouchWorker = null;
+        }
+        retouchWorkerReadyPromise = null;
+        state.retouchSupported = false;
+        state.retouchEnabled = false;
+        setRetouchManualMode(false);
+        updateRetouchButtons();
+        setRetouchStatus('retouchStatusUnavailable');
+        updateCanvasVisibility();
+        throw err;
+      });
+
+      return retouchWorkerReadyPromise;
+    }
+
+    async function requestRetouch(sourceImageData, options = null) {
+      const worker = await ensureRetouchWorkerReady();
+      const id = ++retouchRequestSeq;
+
+      const sourceCopy = new Uint8ClampedArray(sourceImageData.data);
+      const manualMaskData = options && options.manualMaskData
+        ? options.manualMaskData
+        : getManualMaskForSize(sourceImageData.width, sourceImageData.height);
+      const manualMaskCopy = manualMaskData ? new Uint8ClampedArray(manualMaskData.data) : null;
+      const transfer = [sourceCopy.buffer];
+      if (manualMaskCopy) transfer.push(manualMaskCopy.buffer);
+
+      const autoEnabled = options && typeof options.autoEnabled === 'boolean'
+        ? options.autoEnabled
+        : state.retouchAutoEnabled;
+      const autoStrength = options && Number.isFinite(options.autoStrength)
+        ? options.autoStrength
+        : state.retouchAutoStrength;
+      const inpaintRadius = options && Number.isFinite(options.inpaintRadius)
+        ? options.inpaintRadius
+        : state.retouchInpaintRadius;
+
+      return await new Promise((resolve, reject) => {
+        retouchRequestMap.set(id, { resolve, reject });
+        worker.postMessage({
+          type: 'retouch',
+          id,
+          width: sourceImageData.width,
+          height: sourceImageData.height,
+          rgbaBuffer: sourceCopy.buffer,
+          manualMaskBuffer: manualMaskCopy ? manualMaskCopy.buffer : null,
+          autoEnabled,
+          autoStrength,
+          inpaintRadius
+        }, transfer);
+      });
+    }
+
+    function getRetouchCache(quality) {
+      if (quality === 'preview') {
+        return { key: state.retouchCachePreviewKey, imageData: state.retouchCachePreview };
+      }
+      return { key: state.retouchCacheFullKey, imageData: state.retouchCacheFull };
+    }
+
+    function setRetouchCache(quality, key, imageData) {
+      if (quality === 'preview') {
+        state.retouchCachePreviewKey = key;
+        state.retouchCachePreview = imageData;
+      } else {
+        state.retouchCacheFullKey = key;
+        state.retouchCacheFull = imageData;
+      }
+    }
+
+    function queueRetouchRender(sourceImageData, quality) {
+      if (!state.retouchEnabled || !sourceImageData) return;
+      const snapshot = cloneImageData(sourceImageData);
+      const key = buildRetouchCacheKey(snapshot, quality);
+
+      const cache = getRetouchCache(quality);
+      if (cache.imageData && cache.key === key) {
+        drawRetouchBuffer(cache.imageData, quality);
+        return;
+      }
+
+      const sourcePrefix = state.retouchSourceVersion + '|' + quality + '|';
+      if (cache.imageData && cache.key.startsWith(sourcePrefix)) {
+        drawRetouchBuffer(cache.imageData, quality);
+      }
+
+      if (quality === 'preview') {
+        state.retouchPendingPreview = { key, imageData: snapshot };
+        retouchRequestedPreviewKey = key;
+        if (!state.retouchInFlightPreview) {
+          state.retouchInFlightPreview = true;
+          runQueuedRetouch('preview');
+        }
+      } else {
+        state.retouchPendingFull = { key, imageData: snapshot };
+        retouchRequestedFullKey = key;
+        if (!state.retouchInFlightFull) {
+          state.retouchInFlightFull = true;
+          runQueuedRetouch('full');
+        }
+      }
+    }
+
+    async function runQueuedRetouch(quality) {
+      const pendingField = quality === 'preview' ? 'retouchPendingPreview' : 'retouchPendingFull';
+      const inFlightField = quality === 'preview' ? 'retouchInFlightPreview' : 'retouchInFlightFull';
+
+      while (state[pendingField]) {
+        const task = state[pendingField];
+        state[pendingField] = null;
+        setRetouchStatus('retouchStatusProcessing');
+
+        try {
+          const result = await requestRetouch(task.imageData);
+          const currentPrefix = state.retouchSourceVersion + '|' + quality + '|';
+          if (!task.key.startsWith(currentPrefix)) {
+            continue;
+          }
+          setRetouchCache(quality, task.key, result.imageData);
+          const latestKey = quality === 'preview' ? retouchRequestedPreviewKey : retouchRequestedFullKey;
+          if (task.key === latestKey) {
+            drawRetouchBuffer(result.imageData, quality);
+          }
+          setRetouchStatus('retouchStatusReady');
+        } catch (err) {
+          console.warn('Retouch processing failed:', err);
+          setRetouchStatus('retouchStatusUnavailable');
+          state.retouchEnabled = false;
+          setRetouchManualMode(false);
+          updateRetouchButtons();
+          updateCanvasVisibility();
+          break;
+        }
+      }
+
+      state[inFlightField] = false;
+    }
+
+    async function forceRetouchFullRender() {
+      if (!state.retouchEnabled || !state.processedImageData) return;
+      const source = fullAdjustedBuffer || state.processedImageData;
+      const key = buildRetouchCacheKey(source, 'full');
+      if (state.retouchCacheFull && state.retouchCacheFullKey === key) {
+        drawRetouchBuffer(state.retouchCacheFull, 'full');
+        return;
+      }
+      setRetouchStatus('retouchStatusProcessing');
+      const result = await requestRetouch(source);
+      setRetouchCache('full', key, result.imageData);
+      drawRetouchBuffer(result.imageData, 'full');
+      setRetouchStatus('retouchStatusReady');
+    }
+
+    function getRetouchImagePointFromClient(clientX, clientY) {
+      const rect = retouchMaskCanvas.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return null;
+      const relX = (clientX - rect.left) / rect.width;
+      const relY = (clientY - rect.top) / rect.height;
+      if (relX < 0 || relX > 1 || relY < 0 || relY > 1) return null;
+      return {
+        x: Math.max(0, Math.min(retouchMaskCanvas.width - 1, Math.round(relX * (retouchMaskCanvas.width - 1)))),
+        y: Math.max(0, Math.min(retouchMaskCanvas.height - 1, Math.round(relY * (retouchMaskCanvas.height - 1))))
+      };
+    }
+
+    function drawRetouchStroke(from, to) {
+      if (!from || !to) return;
+      retouchMaskCtx.lineCap = 'round';
+      retouchMaskCtx.lineJoin = 'round';
+      retouchMaskCtx.strokeStyle = 'rgba(255, 255, 255, 1)';
+      retouchMaskCtx.fillStyle = 'rgba(255, 255, 255, 1)';
+      retouchMaskCtx.lineWidth = state.retouchBrushSize;
+      retouchMaskCtx.beginPath();
+      retouchMaskCtx.moveTo(from.x, from.y);
+      retouchMaskCtx.lineTo(to.x, to.y);
+      retouchMaskCtx.stroke();
+      retouchMaskCtx.beginPath();
+      retouchMaskCtx.arc(to.x, to.y, Math.max(1, state.retouchBrushSize * 0.5), 0, Math.PI * 2);
+      retouchMaskCtx.fill();
+    }
+
+    retouchMaskCanvas.addEventListener('pointerdown', (event) => {
+      if (!state.retouchManualMode || !state.retouchEnabled || state.currentStep < 3) return;
+      const point = getRetouchImagePointFromClient(event.clientX, event.clientY);
+      if (!point) return;
+      retouchPointerDown = true;
+      retouchLastPoint = point;
+      drawRetouchStroke(point, point);
+      state.retouchMaskHasContent = true;
+      try {
+        retouchMaskCanvas.setPointerCapture(event.pointerId);
+      } catch (err) {
+        // Ignore capture errors on unsupported environments.
+      }
+      event.preventDefault();
+    });
+
+    retouchMaskCanvas.addEventListener('pointermove', (event) => {
+      if (!retouchPointerDown || !state.retouchManualMode || !state.retouchEnabled) return;
+      const point = getRetouchImagePointFromClient(event.clientX, event.clientY);
+      if (!point) return;
+      drawRetouchStroke(retouchLastPoint || point, point);
+      retouchLastPoint = point;
+      event.preventDefault();
+    });
+
+    function finishRetouchStroke(event) {
+      if (!retouchPointerDown) return;
+      retouchPointerDown = false;
+      retouchLastPoint = null;
+      state.retouchMaskVersion += 1;
+      clearRetouchCaches();
+      if (state.retouchEnabled) {
+        schedulePreviewUpdate();
+        scheduleFullUpdate();
+      }
+      if (event && retouchMaskCanvas.hasPointerCapture && retouchMaskCanvas.hasPointerCapture(event.pointerId)) {
+        try {
+          retouchMaskCanvas.releasePointerCapture(event.pointerId);
+        } catch (err) {
+          // Ignore capture errors on unsupported environments.
+        }
+      }
+    }
+
+    retouchMaskCanvas.addEventListener('pointerup', finishRetouchStroke);
+    retouchMaskCanvas.addEventListener('pointercancel', finishRetouchStroke);
+    retouchMaskCanvas.addEventListener('pointerleave', finishRetouchStroke);
 
     // ===========================================
     // Core Negative Processing Algorithm
@@ -3396,6 +3995,7 @@
       state.curvePoints[currentCurveChannel] = points;
       updateCurveFromPoints(currentCurveChannel);
       renderCurve();
+      markRetouchDirty();
       scheduleFullUpdate();
     }
 
@@ -3421,6 +4021,7 @@
         updateCurveFromPoints(channel);
       });
       renderCurve();
+      markRetouchDirty();
       scheduleFullUpdate();
     });
 
@@ -3499,6 +4100,7 @@
 
         updateCurveFromPoints(currentCurveChannel);
         renderCurve();
+        markRetouchDirty();
         schedulePreviewUpdate();
       } else {
         // Update hover state
@@ -3514,6 +4116,7 @@
     curveCanvas.addEventListener('mouseup', () => {
       if (draggingPoint !== null) {
         draggingPoint = null;
+        markRetouchDirty();
         scheduleFullUpdate();
       }
     });
@@ -3521,6 +4124,7 @@
     curveCanvas.addEventListener('mouseleave', () => {
       if (draggingPoint !== null) {
         draggingPoint = null;
+        markRetouchDirty();
         scheduleFullUpdate();
       }
       hoveredPoint = null;
@@ -3536,6 +4140,7 @@
         state.curvePoints[currentCurveChannel].splice(nearPoint, 1);
         updateCurveFromPoints(currentCurveChannel);
         renderCurve();
+        markRetouchDirty();
         scheduleFullUpdate();
       }
     });
@@ -3587,6 +4192,7 @@
 
       updateCurveFromPoints(currentCurveChannel);
       renderCurve();
+      markRetouchDirty();
       schedulePreviewUpdate();
     }, { passive: false });
 
@@ -3594,6 +4200,7 @@
       if (activeCurvePointerId !== pointerId) return;
       if (draggingPoint !== null) {
         draggingPoint = null;
+        markRetouchDirty();
         scheduleFullUpdate();
       }
       if (curveCanvas.hasPointerCapture(pointerId)) {
@@ -3928,7 +4535,7 @@
     }
 
     function isWebGLActive() {
-      return !!webglState.gl && state.currentStep >= 3 && !!state.processedImageData;
+      return !!webglState.gl && state.currentStep >= 3 && !!state.processedImageData && !state.retouchEnabled;
     }
 
     function resizeWebGLCanvas() {
@@ -4099,6 +4706,7 @@
       const showGL = isWebGLActive();
       glCanvas.style.display = showGL ? 'block' : 'none';
       canvas.style.display = showGL ? 'none' : 'block';
+      updateRetouchMaskVisibility();
       if (showGL) renderWebGL();
     }
 
@@ -4147,7 +4755,7 @@
       if (!state.processedImageData) return;
 
       // Prefer GPU rendering in Step 3 when available.
-      if (state.currentStep >= 3 && initWebGLRenderer()) {
+      if (!state.retouchEnabled && state.currentStep >= 3 && initWebGLRenderer()) {
         updateCanvasVisibility();
         renderWebGL();
         renderHistogramForWebGL(false);
@@ -4178,6 +4786,10 @@
         state.displayImageData = previewAdjustedBuffer;
         state.lastRenderQuality = 'full';
       }
+
+      if (state.currentStep >= 3 && state.retouchEnabled) {
+        queueRetouchRender(previewAdjustedBuffer, 'preview');
+      }
       // Histogram updates are deferred to full renders for responsiveness.
     }
 
@@ -4185,7 +4797,7 @@
       if (!state.processedImageData) return;
 
       // Prefer GPU rendering in Step 3 when available.
-      if (state.currentStep >= 3 && initWebGLRenderer()) {
+      if (!state.retouchEnabled && state.currentStep >= 3 && initWebGLRenderer()) {
         updateCanvasVisibility();
         renderWebGL();
         renderHistogramForWebGL(true);
@@ -4210,12 +4822,28 @@
       transformCanvas.height = canvas.height;
       transformCtx.putImageData(fullAdjustedBuffer, 0, 0);
       state.lastRenderQuality = 'full';
+
+      if (state.currentStep >= 3 && state.retouchEnabled) {
+        queueRetouchRender(fullAdjustedBuffer, 'full');
+      }
     }
 
-    function ensureFullRender() {
+    async function ensureFullRender() {
       if (!state.processedImageData) return;
       // Always compute full-res on CPU for export/batch correctness.
       updateFullCpu();
+      if (state.retouchEnabled) {
+        try {
+          await forceRetouchFullRender();
+        } catch (err) {
+          console.warn('Retouch full render failed, exporting adjusted image only:', err);
+          state.retouchEnabled = false;
+          setRetouchManualMode(false);
+          updateRetouchButtons();
+          setRetouchStatus('retouchStatusUnavailable');
+          updateCanvasVisibility();
+        }
+      }
     }
 
     function processNegative() {
@@ -4239,6 +4867,7 @@
       }
 
       state.processedImageData = processed;
+      resetRetouchRuntime(processed.width, processed.height);
       state.previewSourceImageData = buildPreviewSourceImageData(processed);
       state.histogramSourceImageData = buildHistogramSourceImageData(state.previewSourceImageData || processed);
       state.webglSourceImageData = buildWebglSourceImageData(processed);
@@ -4266,6 +4895,8 @@
       canvas.style.height = cssH;
       glCanvas.style.width = cssW;
       glCanvas.style.height = cssH;
+      retouchMaskCanvas.style.width = cssW;
+      retouchMaskCanvas.style.height = cssH;
       if (isWebGLActive()) resizeWebGLCanvas();
     }
 
@@ -4312,6 +4943,7 @@
           state.webglSourceImageData = null;
           state.lastRenderQuality = 'full';
           state.filmBaseSet = false;
+          resetRetouchRuntime(imageData.width, imageData.height);
           if (webglState.gl) {
             webglState.sourceDirty = true;
             webglState.sourceSize = { w: 0, h: 0 };
@@ -4551,9 +5183,13 @@
       slider.addEventListener('input', () => {
         state[id] = parseFloat(slider.value);
         document.getElementById(id + 'Value').textContent = state[id].toFixed(2);
+        markRetouchDirty();
         schedulePreviewUpdate();
       });
-      slider.addEventListener('change', () => scheduleFullUpdate());
+      slider.addEventListener('change', () => {
+        markRetouchDirty();
+        scheduleFullUpdate();
+      });
     });
 
     // ===========================================
@@ -4813,6 +5449,7 @@
         glCanvas.style.cursor = 'default';
         hideLoupe();
         updateWBSliders();
+        markRetouchDirty();
         updateFull();
       }
     }
@@ -4839,6 +5476,7 @@
         setFilmTypeButtons(state.filmType);
         updateFilmModeUI();
 
+        markRetouchDirty();
         schedulePreviewUpdate();
       });
     });
@@ -4854,6 +5492,7 @@
       setFilmTypeButtons(state.filmType);
       updateFilmModeUI();
 
+      markRetouchDirty();
       schedulePreviewUpdate();
     });
 
@@ -4888,10 +5527,14 @@
         const value = parseFloat(slider.value);
         state[stateKey] = value;
         valueDisplay.textContent = displayFormat(value);
+        markRetouchDirty();
         schedulePreviewUpdate();
       });
 
-      slider.addEventListener('change', () => scheduleFullUpdate());
+      slider.addEventListener('change', () => {
+        markRetouchDirty();
+        scheduleFullUpdate();
+      });
     }
 
     setupSlider('exposure', 'exposure', v => v.toFixed(1) + ' EV');
@@ -4905,6 +5548,113 @@
     setupSlider('cyan', 'cyan');
     setupSlider('magenta', 'magenta');
     setupSlider('yellow', 'yellow');
+
+    // ===========================================
+    // Retouch Controls
+    // ===========================================
+    function updateRetouchSliderUI() {
+      const autoStrength = document.getElementById('retouchAutoStrength');
+      const radius = document.getElementById('retouchInpaintRadius');
+      const brush = document.getElementById('retouchBrushSize');
+      autoStrength.value = state.retouchAutoStrength;
+      radius.value = state.retouchInpaintRadius;
+      brush.value = state.retouchBrushSize;
+      document.getElementById('retouchAutoStrengthValue').textContent = String(state.retouchAutoStrength);
+      document.getElementById('retouchInpaintRadiusValue').textContent = Number(state.retouchInpaintRadius).toFixed(1);
+      document.getElementById('retouchBrushSizeValue').textContent = String(state.retouchBrushSize);
+    }
+
+    async function enableRetouchIfNeeded() {
+      if (state.retouchEnabled) return true;
+      try {
+        await ensureRetouchWorkerReady();
+      } catch (err) {
+        alert(i18n[currentLang].retouchStatusUnavailable || 'OpenCV init failed. Retouch is unavailable.');
+        return false;
+      }
+      state.retouchEnabled = true;
+      updateRetouchButtons();
+      updateCanvasVisibility();
+      return true;
+    }
+
+    function setupRetouchSlider(id, valueId, stateKey, format = (v) => String(v)) {
+      const slider = document.getElementById(id);
+      const valueEl = document.getElementById(valueId);
+      slider.addEventListener('input', () => {
+        const value = parseFloat(slider.value);
+        state[stateKey] = value;
+        valueEl.textContent = format(value);
+        markRetouchDirty();
+        if (state.retouchEnabled) schedulePreviewUpdate();
+      });
+      slider.addEventListener('change', () => {
+        markRetouchDirty();
+        if (state.retouchEnabled) scheduleFullUpdate();
+      });
+    }
+
+    setupRetouchSlider('retouchAutoStrength', 'retouchAutoStrengthValue', 'retouchAutoStrength', v => String(Math.round(v)));
+    setupRetouchSlider('retouchInpaintRadius', 'retouchInpaintRadiusValue', 'retouchInpaintRadius', v => Number(v).toFixed(1));
+    setupRetouchSlider('retouchBrushSize', 'retouchBrushSizeValue', 'retouchBrushSize', v => String(Math.round(v)));
+
+    document.getElementById('retouchToggleBtn').addEventListener('click', async () => {
+      if (!state.retouchEnabled) {
+        const ready = await enableRetouchIfNeeded();
+        if (!ready) return;
+        setRetouchStatus('retouchStatusProcessing');
+        schedulePreviewUpdate();
+        scheduleFullUpdate();
+      } else {
+        state.retouchEnabled = false;
+        setRetouchManualMode(false);
+        clearRetouchCaches();
+        setRetouchStatus('retouchStatusIdle');
+        updateCanvasVisibility();
+        schedulePreviewUpdate();
+        scheduleFullUpdate();
+      }
+      updateRetouchButtons();
+    });
+
+    document.getElementById('autoRepairBtn').addEventListener('click', async () => {
+      const ready = await enableRetouchIfNeeded();
+      if (!ready) return;
+      state.retouchAutoEnabled = !state.retouchAutoEnabled;
+      markRetouchDirty();
+      updateRetouchButtons();
+      schedulePreviewUpdate();
+      scheduleFullUpdate();
+    });
+
+    document.getElementById('manualMaskBtn').addEventListener('click', async () => {
+      const ready = await enableRetouchIfNeeded();
+      if (!ready) return;
+      setRetouchManualMode(!state.retouchManualMode);
+    });
+
+    document.getElementById('applyRepairBtn').addEventListener('click', async () => {
+      const ready = await enableRetouchIfNeeded();
+      if (!ready || !state.processedImageData) return;
+      try {
+        await ensureFullRender();
+      } catch (err) {
+        console.warn('Apply retouch failed:', err);
+      }
+    });
+
+    document.getElementById('clearMaskBtn').addEventListener('click', () => {
+      if (!state.retouchMaskHasContent) return;
+      markRetouchDirty({ clearMask: true });
+      if (state.retouchEnabled) {
+        schedulePreviewUpdate();
+        scheduleFullUpdate();
+      }
+    });
+
+    updateRetouchButtons();
+    updateRetouchSliderUI();
+    setRetouchStatus('retouchStatusIdle');
 
     // ===========================================
     // Section Toggle
@@ -5253,6 +6003,7 @@
       updateWBSliders();
       initCurves(true);
       renderCurve();
+      markRetouchDirty();
       updateFull();
     });
 
@@ -5266,6 +6017,7 @@
         state.webglSourceImageData = null;
         state.filmBaseSet = false;
         state.lastRenderQuality = 'full';
+        resetRetouchRuntime(state.originalImageData.width, state.originalImageData.height);
         if (webglState.gl) {
           webglState.sourceDirty = true;
           webglState.sourceSize = { w: 0, h: 0 };
@@ -5294,6 +6046,7 @@
       state.lastRenderQuality = 'full';
       fullAdjustedBuffer = null;
       previewAdjustedBuffer = null;
+      resetRetouchRuntime();
       if (webglState.gl) {
         webglState.sourceDirty = true;
         webglState.sourceSize = { w: 0, h: 0 };
@@ -5345,8 +6098,8 @@
       exportDropdownMenu.classList.remove('show');
     });
 
-    function exportSingle() {
-      ensureFullRender();
+    async function exportSingle() {
+      await ensureFullRender();
 
       const format = state.exportFormat;
       const ext = format === 'jpeg' ? '.jpg' : '.png';
@@ -5363,7 +6116,9 @@
       link.click();
     }
 
-    document.getElementById('exportSingleBtn').addEventListener('click', exportSingle);
+    document.getElementById('exportSingleBtn').addEventListener('click', () => {
+      void exportSingle();
+    });
 
     document.getElementById('exportZipBtn').addEventListener('click', async () => {
       await exportBatchAsZip();
@@ -5428,6 +6183,11 @@
         wbR: state.wbR,
         wbG: state.wbG,
         wbB: state.wbB,
+        retouchEnabled: state.retouchEnabled,
+        retouchAutoEnabled: state.retouchAutoEnabled,
+        retouchAutoStrength: state.retouchAutoStrength,
+        retouchInpaintRadius: state.retouchInpaintRadius,
+        retouchBrushSize: state.retouchBrushSize,
         curvePoints: {
           r: state.curvePoints.r.map(p => ({ ...p })),
           g: state.curvePoints.g.map(p => ({ ...p })),
@@ -5445,6 +6205,22 @@
       const output = new ImageData(new Uint8ClampedArray(imageData.data.length), imageData.width, imageData.height);
       applyAdjustmentsToBuffer(imageData, settings, output, 'full');
       return output;
+    }
+
+    async function applyRetouchWithSettings(imageData, settings) {
+      if (!settings || !settings.retouchEnabled) return imageData;
+      try {
+        const result = await requestRetouch(imageData, {
+          autoEnabled: settings.retouchAutoEnabled !== false,
+          autoStrength: Number.isFinite(settings.retouchAutoStrength) ? settings.retouchAutoStrength : 50,
+          inpaintRadius: Number.isFinite(settings.retouchInpaintRadius) ? settings.retouchInpaintRadius : 3,
+          manualMaskData: null
+        });
+        return result.imageData;
+      } catch (err) {
+        console.warn('Batch retouch skipped due to error:', err);
+        return imageData;
+      }
     }
 
     function cropImageData(imageData, cropRegion) {
@@ -5536,7 +6312,8 @@
         processed = convertColorNegative(workingData, settings.filmBase);
       }
 
-      return applyAdjustmentsWithSettings(processed, settings);
+      const adjusted = applyAdjustmentsWithSettings(processed, settings);
+      return await applyRetouchWithSettings(adjusted, settings);
     }
 
     // Get selected files for batch processing
@@ -5568,6 +6345,11 @@
         wbR: 1,
         wbG: 1,
         wbB: 1,
+        retouchEnabled: false,
+        retouchAutoEnabled: true,
+        retouchAutoStrength: 50,
+        retouchInpaintRadius: 3,
+        retouchBrushSize: 24,
         curvePoints: {
           r: [{ x: 0, y: 0 }, { x: 255, y: 255 }],
           g: [{ x: 0, y: 0 }, { x: 255, y: 255 }],
@@ -5611,8 +6393,9 @@
         processed = convertColorNegative(workingData, settings.filmBase);
       }
 
-      // Apply adjustments
-      return applyAdjustmentsWithSettings(processed, settings);
+      // Apply adjustments + optional retouch
+      const adjusted = applyAdjustmentsWithSettings(processed, settings);
+      return await applyRetouchWithSettings(adjusted, settings);
     }
 
     // Streaming ZIP export: process → add to zip → free memory → next
@@ -5636,7 +6419,7 @@
             let blob;
             // If this is the current file and it's displayed, use displayed data
             if (index === state.currentFileIndex && state.currentStep >= 3) {
-              ensureFullRender();
+              await ensureFullRender();
               blob = await imageDataToBlob(state.displayImageData);
             } else {
               // Process with saved settings or auto-detect
@@ -5694,7 +6477,7 @@
           try {
             let blob;
             if (index === state.currentFileIndex && state.currentStep >= 3) {
-              ensureFullRender();
+              await ensureFullRender();
               blob = await imageDataToBlob(state.displayImageData);
             } else {
               const adjusted = await processFileWithSettings(item.file, item.settings);
@@ -5830,6 +6613,15 @@
       state.wbR = settings.wbR;
       state.wbG = settings.wbG;
       state.wbB = settings.wbB;
+      state.retouchEnabled = !!settings.retouchEnabled;
+      state.retouchAutoEnabled = settings.retouchAutoEnabled !== false;
+      state.retouchAutoStrength = Number.isFinite(settings.retouchAutoStrength) ? settings.retouchAutoStrength : 50;
+      state.retouchInpaintRadius = Number.isFinite(settings.retouchInpaintRadius) ? settings.retouchInpaintRadius : 3;
+      state.retouchBrushSize = Number.isFinite(settings.retouchBrushSize) ? settings.retouchBrushSize : 24;
+      resetRetouchRuntime(
+        state.processedImageData ? state.processedImageData.width : canvas.width,
+        state.processedImageData ? state.processedImageData.height : canvas.height
+      );
 
       // Restore curves
       state.curvePoints = {
@@ -5842,6 +6634,8 @@
       // Update UI to reflect restored settings
       updateSlidersFromState();
       updateWBSliders();
+      updateRetouchSliderUI();
+      updateRetouchButtons();
       renderCurve();
     }
 
@@ -5879,6 +6673,9 @@
       renderPresetOptions(state.filmPreset);
       setFilmTypeButtons(state.filmType);
       updateFilmModeUI();
+      updateRetouchSliderUI();
+      updateRetouchButtons();
+      updateRetouchMaskVisibility();
     }
 
     function updateExportButtons() {
