@@ -1727,7 +1727,7 @@
           <span class="section-toggle">▼</span>
         </div>
         <div class="section-content" id="retouchSectionContent">
-          <div class="info-box" data-i18n="retouchInfo">使用 OpenCV 修复灰尘与刮痕。使用修复圈点击或拖动即可修复，半径可调。</div>
+          <div class="info-box" data-i18n="retouchInfo">取样修复画笔：Alt/Option + 点击设置取样点，再涂抹去灰尘和划痕。</div>
           <div class="retouch-actions">
             <button class="film-base-btn" id="retouchToggleBtn" data-i18n="retouchEnable">Enable Retouch</button>
             <button class="film-base-btn" id="autoRepairBtn" data-i18n="autoRepair">Auto Detect</button>
@@ -1893,7 +1893,7 @@
         vibrance: "活力",
         saturation: "饱和度",
         retouch: "修复",
-        retouchInfo: "使用 OpenCV 修复灰尘与刮痕。启用后直接使用可调半径的修复圈点击或拖动即可。",
+        retouchInfo: "取样修复画笔：Alt/Option + 点击设置取样点，再涂抹去灰尘和划痕。",
         retouchEnable: "启用修复",
         autoRepair: "自动修复",
         manualMask: "修复圈",
@@ -1905,6 +1905,7 @@
         retouchStatusIdle: "修复待命",
         retouchStatusProcessing: "修复处理中...",
         retouchStatusReady: "修复已更新",
+        retouchStatusSampleSet: "取样点已设置，开始涂抹修复",
         retouchStatusUnavailable: "OpenCV 初始化失败，修复功能不可用",
         retouchStatusFallback: "OpenCV 不可用，已切换到内置修复引擎",
         advanced: "高级",
@@ -1995,7 +1996,7 @@
         vibrance: "Vibrance",
         saturation: "Saturation",
         retouch: "Retouch",
-        retouchInfo: "Use OpenCV inpaint to fix dust and scratches. After enabling, paint directly with an adjustable repair circle.",
+        retouchInfo: "Sample heal brush: Alt/Option-click to set sample source, then paint to fix dust and scratches.",
         retouchEnable: "Enable Retouch",
         autoRepair: "Auto Repair",
         manualMask: "Repair Circle",
@@ -2007,6 +2008,7 @@
         retouchStatusIdle: "Retouch ready",
         retouchStatusProcessing: "Retouch processing...",
         retouchStatusReady: "Retouch updated",
+        retouchStatusSampleSet: "Sample source set. Paint to heal.",
         retouchStatusUnavailable: "OpenCV init failed. Retouch is unavailable.",
         retouchStatusFallback: "OpenCV unavailable. Using built-in repair engine.",
         advanced: "Advanced",
@@ -2097,7 +2099,7 @@
         vibrance: "バイブランス",
         saturation: "彩度",
         retouch: "補修",
-        retouchInfo: "OpenCV の inpaint でホコリやキズを補修します。有効化すると、半径を調整できる修復円でそのまま補修できます。",
+        retouchInfo: "サンプル修復ブラシ：Alt/Option + クリックでサンプル点を設定し、塗ってホコリやキズを補修します。",
         retouchEnable: "補修を有効化",
         autoRepair: "自動補修",
         manualMask: "修復円",
@@ -2109,6 +2111,7 @@
         retouchStatusIdle: "補修待機中",
         retouchStatusProcessing: "補修処理中...",
         retouchStatusReady: "補修を更新しました",
+        retouchStatusSampleSet: "サンプル点を設定しました。塗って補修します。",
         retouchStatusUnavailable: "OpenCV 初期化に失敗したため補修機能は利用できません",
         retouchStatusFallback: "OpenCV が利用できないため内蔵補修エンジンを使用します",
         advanced: "詳細",
@@ -2507,9 +2510,12 @@
       retouchSupported: null,
       retouchBackend: null, // 'worker' | 'main' | 'fallback'
       retouchWorkerEngine: null, // 'opencv' | 'fallback'
+      retouchUseMaskInpaint: false,
       retouchSourceVersion: 0,
       retouchMaskVersion: 0,
       retouchMaskHasContent: false,
+      retouchManualBaseImageData: null,
+      retouchSamplePoint: null,
       retouchCoverageKey: '',
       retouchCachePreview: null,
       retouchCachePreviewKey: '',
@@ -2641,6 +2647,8 @@
     let retouchPointerDown = false;
     let retouchLastPoint = null;
     let retouchCursorPoint = null;
+    let retouchStrokeSampleOffset = null;
+    let retouchStrokeToneDelta = { r: 0, g: 0, b: 0 };
 
     function setRetouchStatus(key, fallback = '') {
       retouchStatusKey = key;
@@ -2674,6 +2682,172 @@
       retouchCursorCtx.clearRect(0, 0, retouchCursorCanvas.width, retouchCursorCanvas.height);
     }
 
+    function shouldRunRetouchPipeline() {
+      return !!(state.retouchAutoEnabled || state.retouchUseMaskInpaint);
+    }
+
+    function clampByte(v) {
+      if (v < 0) return 0;
+      if (v > 255) return 255;
+      return v;
+    }
+
+    function refreshRetouchDerivedSources() {
+      if (!state.processedImageData) return;
+      state.previewSourceImageData = buildPreviewSourceImageData(state.processedImageData);
+      state.histogramSourceImageData = buildHistogramSourceImageData(state.previewSourceImageData || state.processedImageData);
+      state.webglSourceImageData = buildWebglSourceImageData(state.processedImageData);
+      if (webglState.gl) {
+        webglState.sourceDirty = true;
+      }
+    }
+
+    function ensureRetouchManualBase() {
+      if (!state.processedImageData) return false;
+      const base = state.retouchManualBaseImageData;
+      if (!base || base.width !== state.processedImageData.width || base.height !== state.processedImageData.height) {
+        state.retouchManualBaseImageData = cloneImageData(state.processedImageData);
+      }
+      return true;
+    }
+
+    function clearRetouchSamplePoint() {
+      state.retouchSamplePoint = null;
+      retouchStrokeSampleOffset = null;
+      retouchStrokeToneDelta = { r: 0, g: 0, b: 0 };
+    }
+
+    function restoreRetouchManualBase() {
+      if (!state.retouchManualBaseImageData) return false;
+      state.processedImageData = cloneImageData(state.retouchManualBaseImageData);
+      refreshRetouchDerivedSources();
+      clearRetouchSamplePoint();
+      return true;
+    }
+
+    function sampleCircleMean(data, width, height, cx, cy, radius) {
+      const r = Math.max(1, Math.round(radius || 1));
+      const r2 = r * r;
+      let sumR = 0;
+      let sumG = 0;
+      let sumB = 0;
+      let count = 0;
+      for (let dy = -r; dy <= r; dy++) {
+        const y = cy + dy;
+        if (y < 0 || y >= height) continue;
+        for (let dx = -r; dx <= r; dx++) {
+          if ((dx * dx + dy * dy) > r2) continue;
+          const x = cx + dx;
+          if (x < 0 || x >= width) continue;
+          const idx = (y * width + x) * 4;
+          sumR += data[idx];
+          sumG += data[idx + 1];
+          sumB += data[idx + 2];
+          count++;
+        }
+      }
+      if (count <= 0) return { r: 0, g: 0, b: 0 };
+      return {
+        r: sumR / count,
+        g: sumG / count,
+        b: sumB / count
+      };
+    }
+
+    function findAutoHealSampleOffset(point, radius) {
+      if (!state.processedImageData) return { dx: 0, dy: 0 };
+      const { width, height, data } = state.processedImageData;
+      const dstMean = sampleCircleMean(data, width, height, point.x, point.y, radius);
+      const baseR = Math.max(4, Math.round(radius * 2));
+      const candidateRings = [baseR, Math.round(baseR * 1.4), Math.round(baseR * 1.9)];
+      let best = null;
+      let bestScore = Infinity;
+      for (const ring of candidateRings) {
+        for (let deg = 0; deg < 360; deg += 24) {
+          const rad = deg * Math.PI / 180;
+          const sx = Math.round(point.x + Math.cos(rad) * ring);
+          const sy = Math.round(point.y + Math.sin(rad) * ring);
+          if (sx < 1 || sy < 1 || sx >= width - 1 || sy >= height - 1) continue;
+          const srcMean = sampleCircleMean(data, width, height, sx, sy, radius);
+          const dr = dstMean.r - srcMean.r;
+          const dg = dstMean.g - srcMean.g;
+          const db = dstMean.b - srcMean.b;
+          const score = Math.abs(dr) + Math.abs(dg) + Math.abs(db) + ring * 0.06;
+          if (score < bestScore) {
+            bestScore = score;
+            best = { dx: sx - point.x, dy: sy - point.y };
+          }
+        }
+      }
+      if (best) return best;
+      const fallbackDx = (point.x + baseR < width) ? baseR : -baseR;
+      return { dx: fallbackDx, dy: 0 };
+    }
+
+    function computeRetouchToneDelta(point, offset, radius) {
+      if (!state.processedImageData) return { r: 0, g: 0, b: 0 };
+      const { width, height, data } = state.processedImageData;
+      const srcX = Math.max(0, Math.min(width - 1, point.x + offset.dx));
+      const srcY = Math.max(0, Math.min(height - 1, point.y + offset.dy));
+      const dstMean = sampleCircleMean(data, width, height, point.x, point.y, radius);
+      const srcMean = sampleCircleMean(data, width, height, srcX, srcY, radius);
+      return {
+        r: dstMean.r - srcMean.r,
+        g: dstMean.g - srcMean.g,
+        b: dstMean.b - srcMean.b
+      };
+    }
+
+    function applyRetouchHealDab(point, offset, toneDelta, radius) {
+      if (!state.processedImageData || !offset) return;
+      const { width, height, data } = state.processedImageData;
+      const r = Math.max(1, Math.min(64, Math.round(radius || 1)));
+      const r2 = r * r;
+      for (let dy = -r; dy <= r; dy++) {
+        const dstY = point.y + dy;
+        if (dstY < 0 || dstY >= height) continue;
+        for (let dx = -r; dx <= r; dx++) {
+          const d2 = dx * dx + dy * dy;
+          if (d2 > r2) continue;
+          const dstX = point.x + dx;
+          if (dstX < 0 || dstX >= width) continue;
+
+          const srcX = dstX + offset.dx;
+          const srcY = dstY + offset.dy;
+          if (srcX < 0 || srcX >= width || srcY < 0 || srcY >= height) continue;
+
+          const t = 1 - (Math.sqrt(d2) / r);
+          const alpha = Math.max(0, Math.min(1, t * t * (3 - 2 * t)));
+          const dstIdx = (dstY * width + dstX) * 4;
+          const srcIdx = (srcY * width + srcX) * 4;
+
+          const healR = clampByte(data[srcIdx] + toneDelta.r);
+          const healG = clampByte(data[srcIdx + 1] + toneDelta.g);
+          const healB = clampByte(data[srcIdx + 2] + toneDelta.b);
+
+          data[dstIdx] = Math.round(data[dstIdx] * (1 - alpha) + healR * alpha);
+          data[dstIdx + 1] = Math.round(data[dstIdx + 1] * (1 - alpha) + healG * alpha);
+          data[dstIdx + 2] = Math.round(data[dstIdx + 2] * (1 - alpha) + healB * alpha);
+          data[dstIdx + 3] = 255;
+        }
+      }
+    }
+
+    function applyRetouchHealSegment(from, to) {
+      if (!from || !to || !retouchStrokeSampleOffset) return;
+      const dist = Math.hypot(to.x - from.x, to.y - from.y);
+      const spacing = Math.max(1, Math.round(Math.max(2, state.retouchBrushSize * 0.35)));
+      const steps = Math.max(1, Math.ceil(dist / spacing));
+      for (let i = 0; i <= steps; i++) {
+        const t = i / steps;
+        const p = {
+          x: Math.round(from.x + (to.x - from.x) * t),
+          y: Math.round(from.y + (to.y - from.y) * t)
+        };
+        applyRetouchHealDab(p, retouchStrokeSampleOffset, retouchStrokeToneDelta, state.retouchBrushSize);
+      }
+    }
+
     function drawRetouchCursor(point) {
       clearRetouchCursorOverlay();
       if (!point || !state.retouchEnabled || !state.retouchManualMode) return;
@@ -2693,6 +2867,19 @@
       retouchCursorCtx.beginPath();
       retouchCursorCtx.arc(point.x, point.y, Math.max(0.5, radius - strokeWidth * 1.2), 0, Math.PI * 2);
       retouchCursorCtx.stroke();
+
+      if (state.retouchSamplePoint) {
+        const sx = state.retouchSamplePoint.x;
+        const sy = state.retouchSamplePoint.y;
+        retouchCursorCtx.strokeStyle = 'rgba(80, 255, 120, 0.95)';
+        retouchCursorCtx.lineWidth = 1.5;
+        retouchCursorCtx.beginPath();
+        retouchCursorCtx.moveTo(sx - 6, sy);
+        retouchCursorCtx.lineTo(sx + 6, sy);
+        retouchCursorCtx.moveTo(sx, sy - 6);
+        retouchCursorCtx.lineTo(sx, sy + 6);
+        retouchCursorCtx.stroke();
+      }
       retouchCursorCtx.restore();
     }
 
@@ -2795,6 +2982,8 @@
       state.retouchSourceVersion += 1;
       state.retouchMaskVersion = 0;
       state.retouchMaskHasContent = false;
+      state.retouchManualBaseImageData = null;
+      clearRetouchSamplePoint();
       state.retouchCoverageKey = '';
       state.retouchInFlightPreview = false;
       state.retouchInFlightFull = false;
@@ -2845,6 +3034,7 @@
     }
 
     function getManualMaskForSize(width, height) {
+      if (!state.retouchUseMaskInpaint) return null;
       if (!state.retouchMaskHasContent) return null;
       if (!state.processedImageData) return null;
 
@@ -3551,6 +3741,11 @@
     async function forceRetouchFullRender() {
       if (!state.retouchEnabled || !state.processedImageData) return;
       const source = fullAdjustedBuffer || state.processedImageData;
+      if (!shouldRunRetouchPipeline()) {
+        drawRetouchBuffer(source, 'full');
+        setRetouchStatus('retouchStatusReady');
+        return;
+      }
       const key = buildRetouchCacheKey(source, 'full');
       if (state.retouchCacheFull && state.retouchCacheFullKey === key) {
         drawRetouchBuffer(state.retouchCacheFull, 'full');
@@ -3596,17 +3791,43 @@
       if (!state.retouchManualMode || !state.retouchEnabled || state.currentStep < 3) return;
       const point = getRetouchImagePointFromClient(event.clientX, event.clientY);
       if (!point) return;
+
+      if (event.altKey) {
+        state.retouchSamplePoint = { x: point.x, y: point.y };
+        retouchCursorPoint = point;
+        drawRetouchCursor(point);
+        setRetouchStatus('retouchStatusSampleSet');
+        event.preventDefault();
+        return;
+      }
+
+      if (!ensureRetouchManualBase()) return;
+      if (!state.retouchSamplePoint) {
+        const autoOffset = findAutoHealSampleOffset(point, state.retouchBrushSize);
+        state.retouchSamplePoint = {
+          x: point.x + autoOffset.dx,
+          y: point.y + autoOffset.dy
+        };
+      }
+      retouchStrokeSampleOffset = {
+        dx: state.retouchSamplePoint.x - point.x,
+        dy: state.retouchSamplePoint.y - point.y
+      };
+      retouchStrokeToneDelta = computeRetouchToneDelta(point, retouchStrokeSampleOffset, state.retouchBrushSize);
+
       retouchCursorPoint = point;
       drawRetouchCursor(point);
       retouchPointerDown = true;
       retouchLastPoint = point;
       drawRetouchStroke(point, point);
+      applyRetouchHealDab(point, retouchStrokeSampleOffset, retouchStrokeToneDelta, state.retouchBrushSize);
       state.retouchMaskHasContent = true;
       try {
         retouchMaskCanvas.setPointerCapture(event.pointerId);
       } catch (err) {
         // Ignore capture errors on unsupported environments.
       }
+      schedulePreviewUpdate();
       event.preventDefault();
     });
 
@@ -3618,7 +3839,9 @@
       }
       if (!retouchPointerDown || !state.retouchManualMode || !state.retouchEnabled || !point) return;
       drawRetouchStroke(retouchLastPoint || point, point);
+      applyRetouchHealSegment(retouchLastPoint || point, point);
       retouchLastPoint = point;
+      schedulePreviewUpdate();
       event.preventDefault();
     });
 
@@ -3634,8 +3857,15 @@
       retouchPointerDown = false;
       retouchLastPoint = null;
       state.retouchMaskVersion += 1;
+      state.retouchSourceVersion += 1;
+      refreshRetouchDerivedSources();
       clearRetouchCaches();
       if (state.retouchEnabled) {
+        if (!shouldRunRetouchPipeline()) {
+          clearRetouchCoverageOverlay();
+          state.retouchCoverageKey = '';
+          setRetouchStatus('retouchStatusReady');
+        }
         schedulePreviewUpdate();
         scheduleFullUpdate();
       }
@@ -5396,7 +5626,7 @@
         state.lastRenderQuality = 'full';
       }
 
-      if (state.currentStep >= 3 && state.retouchEnabled) {
+      if (state.currentStep >= 3 && state.retouchEnabled && shouldRunRetouchPipeline()) {
         queueRetouchRender(previewAdjustedBuffer, 'preview');
       }
       // Histogram updates are deferred to full renders for responsiveness.
@@ -5432,7 +5662,7 @@
       transformCtx.putImageData(fullAdjustedBuffer, 0, 0);
       state.lastRenderQuality = 'full';
 
-      if (state.currentStep >= 3 && state.retouchEnabled) {
+      if (state.currentStep >= 3 && state.retouchEnabled && shouldRunRetouchPipeline()) {
         queueRetouchRender(fullAdjustedBuffer, 'full');
       }
     }
@@ -6223,12 +6453,17 @@
       if (!state.retouchEnabled) {
         const ready = await enableRetouchIfNeeded();
         if (!ready) return;
-        setRetouchStatus('retouchStatusProcessing');
+        if (shouldRunRetouchPipeline()) {
+          setRetouchStatus('retouchStatusProcessing');
+        } else {
+          setRetouchStatus('retouchStatusIdle');
+        }
         schedulePreviewUpdate();
         scheduleFullUpdate();
       } else {
         state.retouchEnabled = false;
         setRetouchManualMode(false);
+        clearRetouchSamplePoint();
         clearRetouchCaches();
         clearRetouchCoverageOverlay();
         setRetouchStatus('retouchStatusIdle');
@@ -6243,6 +6478,10 @@
       const ready = await enableRetouchIfNeeded();
       if (!ready) return;
       state.retouchAutoEnabled = !state.retouchAutoEnabled;
+      if (!state.retouchAutoEnabled && !state.retouchUseMaskInpaint) {
+        clearRetouchCoverageOverlay();
+        state.retouchCoverageKey = '';
+      }
       markRetouchDirty();
       updateRetouchButtons();
       schedulePreviewUpdate();
@@ -6260,8 +6499,15 @@
     });
 
     document.getElementById('clearMaskBtn').addEventListener('click', () => {
-      if (!state.retouchMaskHasContent) return;
+      const hasManualEdits = !!state.retouchManualBaseImageData;
+      if (!state.retouchMaskHasContent && !hasManualEdits) return;
+      if (hasManualEdits) {
+        restoreRetouchManualBase();
+        state.retouchSourceVersion += 1;
+      }
+      clearRetouchSamplePoint();
       markRetouchDirty({ clearMask: true });
+      state.retouchManualBaseImageData = null;
       if (state.retouchEnabled) {
         schedulePreviewUpdate();
         scheduleFullUpdate();
