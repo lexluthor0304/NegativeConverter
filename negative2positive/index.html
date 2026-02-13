@@ -1705,12 +1705,12 @@
           <span class="section-toggle">▼</span>
         </div>
         <div class="section-content" id="retouchSectionContent">
-          <div class="info-box" data-i18n="retouchInfo">Use OpenCV inpaint to fix dust and scratches. Spot Heal mode paints and applies a repair brush automatically.</div>
+          <div class="info-box" data-i18n="retouchInfo">使用 OpenCV 修复灰尘与刮痕。点修复模式下可直接用修复画笔涂抹并自动应用。</div>
           <div class="retouch-actions">
             <button class="film-base-btn" id="retouchToggleBtn" data-i18n="retouchEnable">Enable Retouch</button>
             <button class="film-base-btn" id="autoRepairBtn" data-i18n="autoRepair">Auto Detect</button>
             <button class="film-base-btn" id="manualMaskBtn" data-i18n="manualMask">Manual Mask</button>
-            <button class="film-base-btn" id="retouchSpotHealBtn" data-i18n="spotHealMode">Spot Heal Mode</button>
+            <button class="film-base-btn" id="retouchSpotHealBtn" data-i18n="spotHealMode">点修复模式</button>
             <button class="film-base-btn" id="applyRepairBtn" data-i18n="applyRepair">Apply Repair</button>
           </div>
           <button class="film-base-btn" id="clearMaskBtn" data-i18n="clearMask" style="width: 100%;">Clear Mask</button>
@@ -1887,6 +1887,7 @@
         retouchStatusProcessing: "修复处理中...",
         retouchStatusReady: "修复已更新",
         retouchStatusUnavailable: "OpenCV 初始化失败，修复功能不可用",
+        retouchStatusFallback: "OpenCV 不可用，已切换到内置修复引擎",
         advanced: "高级",
         linear: "线性",
         sCurve: "S曲线",
@@ -1975,11 +1976,11 @@
         vibrance: "Vibrance",
         saturation: "Saturation",
         retouch: "Retouch",
-        retouchInfo: "Use OpenCV inpaint to fix dust and scratches. Spot Heal mode gives a live repair brush workflow.",
+        retouchInfo: "Use OpenCV inpaint to fix dust and scratches. 点修复模式 gives a live repair brush workflow.",
         retouchEnable: "Enable Retouch",
         autoRepair: "Auto Repair",
         manualMask: "Repair Brush",
-        spotHealMode: "Spot Heal Mode",
+        spotHealMode: "点修复模式",
         applyRepair: "Apply Repair",
         clearMask: "Clear Mask",
         autoStrength: "Auto Strength",
@@ -1989,6 +1990,7 @@
         retouchStatusProcessing: "Retouch processing...",
         retouchStatusReady: "Retouch updated",
         retouchStatusUnavailable: "OpenCV init failed. Retouch is unavailable.",
+        retouchStatusFallback: "OpenCV unavailable. Using built-in repair engine.",
         advanced: "Advanced",
         linear: "Linear",
         sCurve: "S-Curve",
@@ -2077,11 +2079,11 @@
         vibrance: "バイブランス",
         saturation: "彩度",
         retouch: "補修",
-        retouchInfo: "OpenCV の inpaint でホコリやキズを補修します。スポット修復モードでは修復ブラシを塗ると自動で反映されます。",
+        retouchInfo: "OpenCV の inpaint でホコリやキズを補修します。点修复模式では修復ブラシを塗ると自動で反映されます。",
         retouchEnable: "補修を有効化",
         autoRepair: "自動補修",
         manualMask: "修復ブラシ",
-        spotHealMode: "スポット修復モード",
+        spotHealMode: "点修复模式",
         applyRepair: "補修を適用",
         clearMask: "マスクをクリア",
         autoStrength: "自動強度",
@@ -2091,6 +2093,7 @@
         retouchStatusProcessing: "補修処理中...",
         retouchStatusReady: "補修を更新しました",
         retouchStatusUnavailable: "OpenCV 初期化に失敗したため補修機能は利用できません",
+        retouchStatusFallback: "OpenCV が利用できないため内蔵補修エンジンを使用します",
         advanced: "詳細",
         linear: "リニア",
         sCurve: "Sカーブ",
@@ -2486,7 +2489,7 @@
       retouchBrushSize: 24,
       retouchSpotHealMode: true,
       retouchSupported: null,
-      retouchBackend: null, // 'worker' | 'main'
+      retouchBackend: null, // 'worker' | 'main' | 'fallback'
       retouchSourceVersion: 0,
       retouchMaskVersion: 0,
       retouchMaskHasContent: false,
@@ -2910,6 +2913,236 @@
       }
     }
 
+    function buildManualMaskArray(manualMaskData, width, height) {
+      const mask = new Uint8Array(width * height);
+      if (!manualMaskData) return mask;
+      const data = manualMaskData.data || manualMaskData;
+      for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+        const alpha = data[i + 3];
+        const lum = (data[i] + data[i + 1] + data[i + 2]) / 3;
+        if (alpha > 0 || lum > 10) mask[p] = 255;
+      }
+      return mask;
+    }
+
+    function buildAutoMaskArray(sourceImageData, autoStrength) {
+      const { width, height, data } = sourceImageData;
+      const mask = new Uint8Array(width * height);
+      const threshold = Math.max(8, Math.min(60, 46 - (Math.max(0, Math.min(100, autoStrength || 0)) * 0.32)));
+
+      for (let y = 1; y < height - 1; y++) {
+        const row = y * width;
+        for (let x = 1; x < width - 1; x++) {
+          const p = row + x;
+          const centerIdx = p * 4;
+          const g = data[centerIdx] * 0.299 + data[centerIdx + 1] * 0.587 + data[centerIdx + 2] * 0.114;
+
+          let sum = 0;
+          let count = 0;
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+              if (dx === 0 && dy === 0) continue;
+              const q = ((y + dy) * width + (x + dx)) * 4;
+              sum += data[q] * 0.299 + data[q + 1] * 0.587 + data[q + 2] * 0.114;
+              count++;
+            }
+          }
+
+          const mean = count > 0 ? (sum / count) : g;
+          const diff = Math.abs(g - mean);
+          if (diff > threshold && (g < 38 || g > 220 || diff > threshold * 1.55)) {
+            mask[p] = 255;
+          }
+        }
+      }
+
+      if (autoStrength >= 55) {
+        const expanded = new Uint8Array(mask);
+        for (let y = 1; y < height - 1; y++) {
+          const row = y * width;
+          for (let x = 1; x < width - 1; x++) {
+            const p = row + x;
+            if (mask[p]) continue;
+            let hit = false;
+            for (let dy = -1; dy <= 1 && !hit; dy++) {
+              for (let dx = -1; dx <= 1; dx++) {
+                if (mask[(y + dy) * width + (x + dx)]) {
+                  hit = true;
+                  break;
+                }
+              }
+            }
+            if (hit) expanded[p] = 255;
+          }
+        }
+        return expanded;
+      }
+
+      return mask;
+    }
+
+    function mergeMaskArrays(maskA, maskB) {
+      if (!maskA && !maskB) return null;
+      if (!maskA) return new Uint8Array(maskB);
+      if (!maskB) return new Uint8Array(maskA);
+      const out = new Uint8Array(maskA.length);
+      for (let i = 0; i < out.length; i++) out[i] = (maskA[i] || maskB[i]) ? 255 : 0;
+      return out;
+    }
+
+    function countMaskPixels(mask) {
+      if (!mask) return 0;
+      let count = 0;
+      for (let i = 0; i < mask.length; i++) {
+        if (mask[i]) count++;
+      }
+      return count;
+    }
+
+    function inpaintFallback(sourceImageData, mergedMask, radius = 3) {
+      const { width, height, data } = sourceImageData;
+      const out = new Uint8ClampedArray(data);
+      let pending = new Uint8Array(mergedMask);
+      let remaining = countMaskPixels(pending);
+      if (remaining === 0) return cloneImageData(sourceImageData);
+
+      const baseRadius = Math.max(1, Math.min(20, Math.round(radius || 3)));
+      const maxPasses = Math.max(4, Math.min(24, baseRadius * 5));
+
+      for (let pass = 0; pass < maxPasses && remaining > 0; pass++) {
+        const next = new Uint8Array(pending);
+        let changed = 0;
+
+        for (let y = 0; y < height; y++) {
+          const row = y * width;
+          for (let x = 0; x < width; x++) {
+            const p = row + x;
+            if (!pending[p]) continue;
+
+            let sumR = 0;
+            let sumG = 0;
+            let sumB = 0;
+            let wSum = 0;
+
+            for (let dy = -baseRadius; dy <= baseRadius; dy++) {
+              const ny = y + dy;
+              if (ny < 0 || ny >= height) continue;
+              for (let dx = -baseRadius; dx <= baseRadius; dx++) {
+                const nx = x + dx;
+                if (nx < 0 || nx >= width) continue;
+                const d2 = dx * dx + dy * dy;
+                if (d2 === 0 || d2 > baseRadius * baseRadius) continue;
+                const q = ny * width + nx;
+                if (pending[q]) continue;
+                const w = 1 / (1 + d2);
+                const idx = q * 4;
+                sumR += out[idx] * w;
+                sumG += out[idx + 1] * w;
+                sumB += out[idx + 2] * w;
+                wSum += w;
+              }
+            }
+
+            if (wSum > 0) {
+              const outIdx = p * 4;
+              out[outIdx] = Math.round(sumR / wSum);
+              out[outIdx + 1] = Math.round(sumG / wSum);
+              out[outIdx + 2] = Math.round(sumB / wSum);
+              out[outIdx + 3] = 255;
+              next[p] = 0;
+              changed++;
+              remaining--;
+            }
+          }
+        }
+
+        pending = next;
+        if (changed > 0) continue;
+
+        // No progress: grow search ring for stubborn pixels.
+        const nextWide = new Uint8Array(pending);
+        let changedWide = 0;
+        const maxWideRadius = baseRadius + 6;
+
+        for (let y = 0; y < height; y++) {
+          const row = y * width;
+          for (let x = 0; x < width; x++) {
+            const p = row + x;
+            if (!pending[p]) continue;
+
+            let found = false;
+            let bestIdx = -1;
+            let bestDist = Infinity;
+
+            for (let r = baseRadius + 1; r <= maxWideRadius && !found; r++) {
+              for (let dy = -r; dy <= r; dy++) {
+                const ny = y + dy;
+                if (ny < 0 || ny >= height) continue;
+                for (let dx = -r; dx <= r; dx++) {
+                  if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+                  const nx = x + dx;
+                  if (nx < 0 || nx >= width) continue;
+                  const q = ny * width + nx;
+                  if (pending[q]) continue;
+                  const d2 = dx * dx + dy * dy;
+                  if (d2 < bestDist) {
+                    bestDist = d2;
+                    bestIdx = q;
+                    found = true;
+                  }
+                }
+              }
+            }
+
+            if (bestIdx >= 0) {
+              const srcIdx = bestIdx * 4;
+              const outIdx = p * 4;
+              out[outIdx] = out[srcIdx];
+              out[outIdx + 1] = out[srcIdx + 1];
+              out[outIdx + 2] = out[srcIdx + 2];
+              out[outIdx + 3] = 255;
+              nextWide[p] = 0;
+              changedWide++;
+              remaining--;
+            }
+          }
+        }
+
+        pending = nextWide;
+        if (changedWide === 0) break;
+      }
+
+      return new ImageData(out, width, height);
+    }
+
+    async function requestRetouchFallback(sourceImageData, options = null) {
+      const width = sourceImageData.width;
+      const height = sourceImageData.height;
+      const manualMaskData = options && options.manualMaskData
+        ? options.manualMaskData
+        : getManualMaskForSize(width, height);
+      const autoEnabled = options && typeof options.autoEnabled === 'boolean'
+        ? options.autoEnabled
+        : state.retouchAutoEnabled;
+      const autoStrength = options && Number.isFinite(options.autoStrength)
+        ? options.autoStrength
+        : state.retouchAutoStrength;
+      const inpaintRadius = options && Number.isFinite(options.inpaintRadius)
+        ? options.inpaintRadius
+        : state.retouchInpaintRadius;
+
+      const manualMask = buildManualMaskArray(manualMaskData, width, height);
+      const autoMask = autoEnabled ? buildAutoMaskArray(sourceImageData, autoStrength) : null;
+      const mergedMask = mergeMaskArrays(manualMask, autoMask);
+      const hasMask = countMaskPixels(mergedMask) > 0;
+      if (!hasMask) {
+        return { imageData: cloneImageData(sourceImageData), applied: false };
+      }
+
+      const output = inpaintFallback(sourceImageData, mergedMask, inpaintRadius);
+      return { imageData: output, applied: true };
+    }
+
     async function ensureRetouchWorkerReady() {
       if (state.retouchSupported === false) {
         throw new Error('Retouch is unavailable.');
@@ -2998,14 +3231,10 @@
           return retouchMainCv;
         } catch (fallbackErr) {
           retouchWorkerReadyPromise = null;
-          state.retouchSupported = false;
-          state.retouchEnabled = false;
-          state.retouchBackend = null;
-          setRetouchManualMode(false);
-          updateRetouchButtons();
-          setRetouchStatus('retouchStatusUnavailable');
-          updateCanvasVisibility();
-          throw fallbackErr || err;
+          state.retouchSupported = true;
+          state.retouchBackend = 'fallback';
+          setRetouchStatus('retouchStatusFallback');
+          return 'fallback';
         }
       });
 
@@ -3013,9 +3242,24 @@
     }
 
     async function requestRetouch(sourceImageData, options = null) {
-      const backend = await ensureRetouchWorkerReady();
+      let backend;
+      try {
+        backend = await ensureRetouchWorkerReady();
+      } catch (err) {
+        state.retouchBackend = 'fallback';
+        state.retouchSupported = true;
+        setRetouchStatus('retouchStatusFallback');
+        return await requestRetouchFallback(sourceImageData, options);
+      }
+
       if (state.retouchBackend === 'main') {
         return await requestRetouchMain(sourceImageData, options);
+      }
+      if (state.retouchBackend === 'fallback' || backend === 'fallback' || !backend || typeof backend.postMessage !== 'function') {
+        state.retouchBackend = 'fallback';
+        state.retouchSupported = true;
+        setRetouchStatus('retouchStatusFallback');
+        return await requestRetouchFallback(sourceImageData, options);
       }
 
       const worker = backend;
@@ -3039,20 +3283,28 @@
         ? options.inpaintRadius
         : state.retouchInpaintRadius;
 
-      return await new Promise((resolve, reject) => {
-        retouchRequestMap.set(id, { resolve, reject });
-        worker.postMessage({
-          type: 'retouch',
-          id,
-          width: sourceImageData.width,
-          height: sourceImageData.height,
-          rgbaBuffer: sourceCopy.buffer,
-          manualMaskBuffer: manualMaskCopy ? manualMaskCopy.buffer : null,
-          autoEnabled,
-          autoStrength,
-          inpaintRadius
-        }, transfer);
-      });
+      try {
+        return await new Promise((resolve, reject) => {
+          retouchRequestMap.set(id, { resolve, reject });
+          worker.postMessage({
+            type: 'retouch',
+            id,
+            width: sourceImageData.width,
+            height: sourceImageData.height,
+            rgbaBuffer: sourceCopy.buffer,
+            manualMaskBuffer: manualMaskCopy ? manualMaskCopy.buffer : null,
+            autoEnabled,
+            autoStrength,
+            inpaintRadius
+          }, transfer);
+        });
+      } catch (err) {
+        state.retouchBackend = 'fallback';
+        state.retouchSupported = true;
+        retouchWorkerReadyPromise = Promise.resolve('fallback');
+        setRetouchStatus('retouchStatusFallback');
+        return await requestRetouchFallback(sourceImageData, options);
+      }
     }
 
     function getRetouchCache(quality) {
@@ -5750,8 +6002,9 @@
       try {
         await ensureRetouchWorkerReady();
       } catch (err) {
-        alert(i18n[currentLang].retouchStatusUnavailable || 'OpenCV init failed. Retouch is unavailable.');
-        return false;
+        state.retouchBackend = 'fallback';
+        state.retouchSupported = true;
+        setRetouchStatus('retouchStatusFallback');
       }
       state.retouchEnabled = true;
       updateRetouchButtons();
