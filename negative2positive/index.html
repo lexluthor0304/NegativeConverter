@@ -162,30 +162,33 @@
 
     #retouchMaskCanvas {
       position: absolute;
-      top: 0;
-      left: 0;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
       z-index: 220;
       pointer-events: none;
       display: none;
       touch-action: none;
-      opacity: 0.72;
+      opacity: 0.92;
       cursor: none;
     }
 
     #retouchCoverageCanvas {
       position: absolute;
-      top: 0;
-      left: 0;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
       z-index: 210;
       pointer-events: none;
       display: none;
-      opacity: 0.42;
+      opacity: 0.3;
     }
 
     #retouchCursorCanvas {
       position: absolute;
-      top: 0;
-      left: 0;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
       z-index: 230;
       pointer-events: none;
       display: none;
@@ -1751,9 +1754,9 @@
           <div class="slider-control">
             <div class="slider-header">
               <span class="slider-label" data-i18n="brushSize">Brush Size</span>
-              <span class="slider-value" id="retouchBrushSizeValue">12</span>
+              <span class="slider-value" id="retouchBrushSizeValue">18</span>
             </div>
-            <input type="range" class="slider-input" id="retouchBrushSize" min="2" max="80" step="1" value="12">
+            <input type="range" class="slider-input" id="retouchBrushSize" min="2" max="80" step="1" value="18">
           </div>
           <div class="retouch-status" id="retouchStatus" data-i18n="retouchStatusIdle">Retouch ready</div>
         </div>
@@ -2506,7 +2509,7 @@
       retouchManualMode: false,
       retouchAutoStrength: 50,
       retouchInpaintRadius: 3,
-      retouchBrushSize: 12,
+      retouchBrushSize: 18,
       retouchSupported: null,
       retouchBackend: null, // 'worker' | 'main' | 'fallback'
       retouchWorkerEngine: null, // 'opencv' | 'fallback'
@@ -2649,6 +2652,10 @@
     let retouchCursorPoint = null;
     let retouchStrokeSampleOffset = null;
     let retouchStrokeToneDelta = { r: 0, g: 0, b: 0 };
+    const RETOUCH_STROKE_PREVIEW_INTERVAL_MS = 90;
+    let retouchLivePreviewTimer = null;
+    let retouchLastLivePreviewTs = 0;
+    const retouchBrushKernelCache = new Map();
 
     function setRetouchStatus(key, fallback = '') {
       retouchStatusKey = key;
@@ -2682,6 +2689,39 @@
       retouchCursorCtx.clearRect(0, 0, retouchCursorCanvas.width, retouchCursorCanvas.height);
     }
 
+    function clearRetouchLivePreviewTimer() {
+      if (retouchLivePreviewTimer) {
+        clearTimeout(retouchLivePreviewTimer);
+        retouchLivePreviewTimer = null;
+      }
+    }
+
+    function scheduleRetouchLivePreview(force = false) {
+      if (!state.retouchEnabled) return;
+      if (force) {
+        clearRetouchLivePreviewTimer();
+        retouchLastLivePreviewTs = performance.now();
+        schedulePreviewUpdate();
+        return;
+      }
+
+      const now = performance.now();
+      const elapsed = now - retouchLastLivePreviewTs;
+      if (elapsed >= RETOUCH_STROKE_PREVIEW_INTERVAL_MS) {
+        retouchLastLivePreviewTs = now;
+        schedulePreviewUpdate();
+        return;
+      }
+
+      if (retouchLivePreviewTimer) return;
+      const waitMs = Math.max(8, Math.round(RETOUCH_STROKE_PREVIEW_INTERVAL_MS - elapsed));
+      retouchLivePreviewTimer = setTimeout(() => {
+        retouchLivePreviewTimer = null;
+        retouchLastLivePreviewTs = performance.now();
+        schedulePreviewUpdate();
+      }, waitMs);
+    }
+
     function shouldRunRetouchPipeline() {
       return !!(state.retouchAutoEnabled || state.retouchUseMaskInpaint);
     }
@@ -2690,6 +2730,39 @@
       if (v < 0) return 0;
       if (v > 255) return 255;
       return v;
+    }
+
+    function getRetouchBrushKernel(radius) {
+      const r = Math.max(1, Math.min(120, Math.round(radius || 1)));
+      if (retouchBrushKernelCache.has(r)) {
+        return retouchBrushKernelCache.get(r);
+      }
+
+      const points = [];
+      const r2 = r * r;
+      for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          const d2 = dx * dx + dy * dy;
+          if (d2 > r2) continue;
+          const t = 1 - (Math.sqrt(d2) / r);
+          const alpha = Math.max(0, Math.min(1, t * t * (3 - 2 * t)));
+          if (alpha <= 0) continue;
+          points.push({ dx, dy, alpha });
+        }
+      }
+      const kernel = { radius: r, points };
+      retouchBrushKernelCache.set(r, kernel);
+      return kernel;
+    }
+
+    function getRetouchImageRadius() {
+      const displayRadius = Math.max(1, Number(state.retouchBrushSize) || 1);
+      const cssWidth = retouchMaskCanvas.clientWidth || canvas.clientWidth || 0;
+      const imageWidth = retouchMaskCanvas.width || canvas.width || 0;
+      if (!cssWidth || !imageWidth) return Math.max(1, Math.round(displayRadius));
+      const scale = cssWidth / imageWidth;
+      if (!Number.isFinite(scale) || scale <= 0) return Math.max(1, Math.round(displayRadius));
+      return Math.max(1, Math.min(120, Math.round(displayRadius / scale)));
     }
 
     function refreshRetouchDerivedSources() {
@@ -2801,42 +2874,42 @@
     function applyRetouchHealDab(point, offset, toneDelta, radius) {
       if (!state.processedImageData || !offset) return;
       const { width, height, data } = state.processedImageData;
-      const r = Math.max(1, Math.min(64, Math.round(radius || 1)));
-      const r2 = r * r;
-      for (let dy = -r; dy <= r; dy++) {
-        const dstY = point.y + dy;
-        if (dstY < 0 || dstY >= height) continue;
-        for (let dx = -r; dx <= r; dx++) {
-          const d2 = dx * dx + dy * dy;
-          if (d2 > r2) continue;
-          const dstX = point.x + dx;
-          if (dstX < 0 || dstX >= width) continue;
+      const kernel = getRetouchBrushKernel(radius);
+      const points = kernel.points;
+      const dr = toneDelta.r || 0;
+      const dg = toneDelta.g || 0;
+      const db = toneDelta.b || 0;
 
-          const srcX = dstX + offset.dx;
-          const srcY = dstY + offset.dy;
-          if (srcX < 0 || srcX >= width || srcY < 0 || srcY >= height) continue;
+      for (let i = 0; i < points.length; i++) {
+        const k = points[i];
+        const dstX = point.x + k.dx;
+        const dstY = point.y + k.dy;
+        if (dstX < 0 || dstX >= width || dstY < 0 || dstY >= height) continue;
 
-          const t = 1 - (Math.sqrt(d2) / r);
-          const alpha = Math.max(0, Math.min(1, t * t * (3 - 2 * t)));
-          const dstIdx = (dstY * width + dstX) * 4;
-          const srcIdx = (srcY * width + srcX) * 4;
+        const srcX = dstX + offset.dx;
+        const srcY = dstY + offset.dy;
+        if (srcX < 0 || srcX >= width || srcY < 0 || srcY >= height) continue;
 
-          const healR = clampByte(data[srcIdx] + toneDelta.r);
-          const healG = clampByte(data[srcIdx + 1] + toneDelta.g);
-          const healB = clampByte(data[srcIdx + 2] + toneDelta.b);
+        const alpha = k.alpha;
+        const dstIdx = (dstY * width + dstX) * 4;
+        const srcIdx = (srcY * width + srcX) * 4;
 
-          data[dstIdx] = Math.round(data[dstIdx] * (1 - alpha) + healR * alpha);
-          data[dstIdx + 1] = Math.round(data[dstIdx + 1] * (1 - alpha) + healG * alpha);
-          data[dstIdx + 2] = Math.round(data[dstIdx + 2] * (1 - alpha) + healB * alpha);
-          data[dstIdx + 3] = 255;
-        }
+        const healR = clampByte(data[srcIdx] + dr);
+        const healG = clampByte(data[srcIdx + 1] + dg);
+        const healB = clampByte(data[srcIdx + 2] + db);
+
+        data[dstIdx] = Math.round(data[dstIdx] * (1 - alpha) + healR * alpha);
+        data[dstIdx + 1] = Math.round(data[dstIdx + 1] * (1 - alpha) + healG * alpha);
+        data[dstIdx + 2] = Math.round(data[dstIdx + 2] * (1 - alpha) + healB * alpha);
+        data[dstIdx + 3] = 255;
       }
     }
 
     function applyRetouchHealSegment(from, to) {
       if (!from || !to || !retouchStrokeSampleOffset) return;
+      const radius = getRetouchImageRadius();
       const dist = Math.hypot(to.x - from.x, to.y - from.y);
-      const spacing = Math.max(1, Math.round(Math.max(2, state.retouchBrushSize * 0.35)));
+      const spacing = Math.max(1, Math.round(Math.max(2, radius * 0.45)));
       const steps = Math.max(1, Math.ceil(dist / spacing));
       for (let i = 0; i <= steps; i++) {
         const t = i / steps;
@@ -2844,14 +2917,14 @@
           x: Math.round(from.x + (to.x - from.x) * t),
           y: Math.round(from.y + (to.y - from.y) * t)
         };
-        applyRetouchHealDab(p, retouchStrokeSampleOffset, retouchStrokeToneDelta, state.retouchBrushSize);
+        applyRetouchHealDab(p, retouchStrokeSampleOffset, retouchStrokeToneDelta, radius);
       }
     }
 
     function drawRetouchCursor(point) {
       clearRetouchCursorOverlay();
       if (!point || !state.retouchEnabled || !state.retouchManualMode) return;
-      const radius = Math.max(1, Number(state.retouchBrushSize) || 1);
+      const radius = getRetouchImageRadius();
       const strokeWidth = Math.max(1, Math.min(3, radius * 0.12));
       retouchCursorCtx.save();
       retouchCursorCtx.setLineDash([]);
@@ -2938,14 +3011,14 @@
     }
 
     function updateRetouchMaskVisibility() {
-      const showCoverage = !!state.processedImageData && state.currentStep >= 3 && state.retouchEnabled;
-      retouchCoverageCanvas.style.display = showCoverage ? 'block' : 'none';
-      const shouldShow = !!state.processedImageData && state.currentStep >= 3 && state.retouchEnabled && state.retouchManualMode;
-      retouchCursorCanvas.style.display = shouldShow ? 'block' : 'none';
-      retouchMaskCanvas.style.display = shouldShow ? 'block' : 'none';
-      retouchMaskCanvas.style.pointerEvents = shouldShow ? 'auto' : 'none';
-      retouchMaskCanvas.style.cursor = shouldShow ? 'none' : 'default';
-      if (!shouldShow) {
+      const showOverlay = !!state.processedImageData && state.currentStep >= 3 && state.retouchEnabled;
+      const canPaint = showOverlay && state.retouchManualMode;
+      retouchCoverageCanvas.style.display = showOverlay ? 'block' : 'none';
+      retouchMaskCanvas.style.display = showOverlay ? 'block' : 'none';
+      retouchCursorCanvas.style.display = canPaint ? 'block' : 'none';
+      retouchMaskCanvas.style.pointerEvents = canPaint ? 'auto' : 'none';
+      retouchMaskCanvas.style.cursor = canPaint ? 'none' : 'default';
+      if (!canPaint) {
         retouchPointerDown = false;
         retouchLastPoint = null;
         retouchCursorPoint = null;
@@ -2979,6 +3052,8 @@
     }
 
     function resetRetouchRuntime(width = 0, height = 0) {
+      clearRetouchLivePreviewTimer();
+      retouchLastLivePreviewTs = 0;
       state.retouchSourceVersion += 1;
       state.retouchMaskVersion = 0;
       state.retouchMaskHasContent = false;
@@ -3772,11 +3847,12 @@
 
     function drawRetouchStroke(from, to) {
       if (!from || !to) return;
-      const radius = Math.max(1, Number(state.retouchBrushSize) || 1);
+      const radius = getRetouchImageRadius();
       retouchMaskCtx.lineCap = 'round';
       retouchMaskCtx.lineJoin = 'round';
-      retouchMaskCtx.strokeStyle = 'rgba(255, 36, 36, 1)';
-      retouchMaskCtx.fillStyle = 'rgba(255, 36, 36, 1)';
+      retouchMaskCtx.globalCompositeOperation = 'source-over';
+      retouchMaskCtx.strokeStyle = 'rgba(255, 24, 24, 0.98)';
+      retouchMaskCtx.fillStyle = 'rgba(255, 24, 24, 0.94)';
       retouchMaskCtx.lineWidth = radius * 2;
       retouchMaskCtx.beginPath();
       retouchMaskCtx.moveTo(from.x, from.y);
@@ -3785,6 +3861,11 @@
       retouchMaskCtx.beginPath();
       retouchMaskCtx.arc(to.x, to.y, radius, 0, Math.PI * 2);
       retouchMaskCtx.fill();
+      retouchMaskCtx.strokeStyle = 'rgba(255, 255, 255, 0.55)';
+      retouchMaskCtx.lineWidth = Math.max(1, Math.min(2.2, radius * 0.18));
+      retouchMaskCtx.beginPath();
+      retouchMaskCtx.arc(to.x, to.y, Math.max(0.5, radius - retouchMaskCtx.lineWidth * 0.5), 0, Math.PI * 2);
+      retouchMaskCtx.stroke();
     }
 
     retouchMaskCanvas.addEventListener('pointerdown', (event) => {
@@ -3802,8 +3883,9 @@
       }
 
       if (!ensureRetouchManualBase()) return;
+      const radius = getRetouchImageRadius();
       if (!state.retouchSamplePoint) {
-        const autoOffset = findAutoHealSampleOffset(point, state.retouchBrushSize);
+        const autoOffset = findAutoHealSampleOffset(point, radius);
         state.retouchSamplePoint = {
           x: point.x + autoOffset.dx,
           y: point.y + autoOffset.dy
@@ -3813,21 +3895,21 @@
         dx: state.retouchSamplePoint.x - point.x,
         dy: state.retouchSamplePoint.y - point.y
       };
-      retouchStrokeToneDelta = computeRetouchToneDelta(point, retouchStrokeSampleOffset, state.retouchBrushSize);
+      retouchStrokeToneDelta = computeRetouchToneDelta(point, retouchStrokeSampleOffset, radius);
 
       retouchCursorPoint = point;
       drawRetouchCursor(point);
       retouchPointerDown = true;
       retouchLastPoint = point;
       drawRetouchStroke(point, point);
-      applyRetouchHealDab(point, retouchStrokeSampleOffset, retouchStrokeToneDelta, state.retouchBrushSize);
+      applyRetouchHealDab(point, retouchStrokeSampleOffset, retouchStrokeToneDelta, radius);
       state.retouchMaskHasContent = true;
       try {
         retouchMaskCanvas.setPointerCapture(event.pointerId);
       } catch (err) {
         // Ignore capture errors on unsupported environments.
       }
-      schedulePreviewUpdate();
+      scheduleRetouchLivePreview(true);
       event.preventDefault();
     });
 
@@ -3841,7 +3923,7 @@
       drawRetouchStroke(retouchLastPoint || point, point);
       applyRetouchHealSegment(retouchLastPoint || point, point);
       retouchLastPoint = point;
-      schedulePreviewUpdate();
+      scheduleRetouchLivePreview();
       event.preventDefault();
     });
 
@@ -3853,13 +3935,17 @@
     });
 
     function finishRetouchStroke(event) {
-      if (!retouchPointerDown) return;
+      if (!retouchPointerDown) {
+        clearRetouchLivePreviewTimer();
+        return;
+      }
       retouchPointerDown = false;
       retouchLastPoint = null;
       state.retouchMaskVersion += 1;
       state.retouchSourceVersion += 1;
       refreshRetouchDerivedSources();
       clearRetouchCaches();
+      clearRetouchLivePreviewTimer();
       if (state.retouchEnabled) {
         if (!shouldRunRetouchPipeline()) {
           clearRetouchCoverageOverlay();
@@ -6462,6 +6548,8 @@
         scheduleFullUpdate();
       } else {
         state.retouchEnabled = false;
+        clearRetouchLivePreviewTimer();
+        retouchLastLivePreviewTs = 0;
         setRetouchManualMode(false);
         clearRetouchSamplePoint();
         clearRetouchCaches();
@@ -7211,7 +7299,7 @@
         retouchAutoEnabled: false,
         retouchAutoStrength: 50,
         retouchInpaintRadius: 3,
-        retouchBrushSize: 12,
+        retouchBrushSize: 18,
         curvePoints: {
           r: [{ x: 0, y: 0 }, { x: 255, y: 255 }],
           g: [{ x: 0, y: 0 }, { x: 255, y: 255 }],
@@ -7481,7 +7569,7 @@
         : false;
       state.retouchAutoStrength = Number.isFinite(settings.retouchAutoStrength) ? settings.retouchAutoStrength : 50;
       state.retouchInpaintRadius = Number.isFinite(settings.retouchInpaintRadius) ? settings.retouchInpaintRadius : 3;
-      state.retouchBrushSize = Number.isFinite(settings.retouchBrushSize) ? settings.retouchBrushSize : 12;
+      state.retouchBrushSize = Number.isFinite(settings.retouchBrushSize) ? settings.retouchBrushSize : 18;
       resetRetouchRuntime(
         state.processedImageData ? state.processedImageData.width : canvas.width,
         state.processedImageData ? state.processedImageData.height : canvas.height
