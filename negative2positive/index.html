@@ -518,6 +518,11 @@
       color: white;
     }
 
+    .film-base-btn:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+    }
+
     /* Film Base Preview */
     .film-base-preview {
       display: flex;
@@ -1380,7 +1385,11 @@
   <!-- External Libraries -->
   <script type="module">
     import LibRaw from './index.js';
+    import HealingEngine from './healing/healing.js';
+    import { DEFAULT_HEALING_PARAMS } from './healing/healing_types.js';
     window.LibRaw = LibRaw;
+    window.HealingEngine = HealingEngine;
+    window.DEFAULT_HEALING_PARAMS = DEFAULT_HEALING_PARAMS;
   </script>
   <script src="https://cdn.jsdelivr.net/npm/pako/dist/pako.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/upng-js@2.1.0/UPNG.min.js"></script>
@@ -1562,6 +1571,49 @@
             </div>
             <input type="range" class="slider-input" id="wbB" min="0.5" max="2" step="0.01" value="1">
           </div>
+        </div>
+      </div>
+
+      <!-- Retouch (Healing Brush) (Step 3) -->
+      <div class="control-section" id="retouchSection" style="display: none;">
+        <div class="section-header" data-section="retouch">
+          <span class="section-title" data-i18n="retouch">Retouch</span>
+          <span class="section-toggle">▼</span>
+        </div>
+        <div class="section-content" id="retouchSectionContent">
+          <div class="info-box" data-i18n="retouchInfo">Paint to heal dust and blemishes using nearby texture.</div>
+          <button class="film-base-btn" id="retouchToggleBtn" data-i18n="healingBrush">Healing Brush</button>
+
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="brushSize">Brush Size</span>
+              <span class="slider-value" id="retouchBrushSizeValue">18px</span>
+            </div>
+            <input type="range" class="slider-input" id="retouchBrushSize" min="3" max="200" step="1" value="18">
+          </div>
+
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="brushFeather">Feather</span>
+              <span class="slider-value" id="retouchFeatherValue">0.60</span>
+            </div>
+            <input type="range" class="slider-input" id="retouchFeather" min="0" max="1" step="0.01" value="0.6">
+          </div>
+
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="brushSampleRadius">Sample Radius</span>
+              <span class="slider-value" id="retouchSampleRadiusValue">64px</span>
+            </div>
+            <input type="range" class="slider-input" id="retouchSampleRadius" min="16" max="256" step="4" value="64">
+          </div>
+
+          <div style="display:flex; gap:8px; margin-top: 8px;">
+            <button class="film-base-btn" id="retouchUndoBtn" data-i18n="retouchUndo" disabled>Undo</button>
+            <button class="film-base-btn" id="retouchRedoBtn" data-i18n="retouchRedo" disabled>Redo</button>
+          </div>
+          <button class="film-base-btn" id="retouchClearBtn" data-i18n="clearRetouch" style="margin-top: 8px;">Clear Retouch</button>
+          <div class="info-box" id="retouchStatus" style="display:none; margin-top: 8px;"></div>
         </div>
       </div>
 
@@ -1805,6 +1857,16 @@
         tint: "色调",
         vibrance: "活力",
         saturation: "饱和度",
+        retouch: "修复",
+        retouchInfo: "在画布上涂抹瑕疵区域，系统会从邻域采样纹理并进行无缝融合。",
+        healingBrush: "修复画笔",
+        brushSize: "画笔大小",
+        brushFeather: "羽化",
+        brushSampleRadius: "采样半径",
+        retouchUndo: "撤销",
+        retouchRedo: "重做",
+        clearRetouch: "清除修复",
+        retouchWorking: "修复处理中...",
         advanced: "高级",
         linear: "线性",
         sCurve: "S曲线",
@@ -1892,6 +1954,16 @@
         tint: "Tint",
         vibrance: "Vibrance",
         saturation: "Saturation",
+        retouch: "Retouch",
+        retouchInfo: "Paint to heal dust and blemishes using nearby texture.",
+        healingBrush: "Healing Brush",
+        brushSize: "Brush Size",
+        brushFeather: "Feather",
+        brushSampleRadius: "Sample Radius",
+        retouchUndo: "Undo",
+        retouchRedo: "Redo",
+        clearRetouch: "Clear Retouch",
+        retouchWorking: "Healing in progress...",
         advanced: "Advanced",
         linear: "Linear",
         sCurve: "S-Curve",
@@ -1979,6 +2051,16 @@
         tint: "色合い",
         vibrance: "バイブランス",
         saturation: "彩度",
+        retouch: "修復",
+        retouchInfo: "ブラシで塗って近傍テクスチャから修復します。",
+        healingBrush: "修復ブラシ",
+        brushSize: "ブラシサイズ",
+        brushFeather: "フェザー",
+        brushSampleRadius: "サンプル半径",
+        retouchUndo: "元に戻す",
+        retouchRedo: "やり直し",
+        clearRetouch: "修復をクリア",
+        retouchWorking: "修復中...",
         advanced: "詳細",
         linear: "リニア",
         sCurve: "Sカーブ",
@@ -2366,8 +2448,131 @@
       jpegQuality: 92,      // 1-100
 
       // Render state
-      lastRenderQuality: 'full' // 'full' | 'preview' | 'gl'
+      lastRenderQuality: 'full', // 'full' | 'preview' | 'gl'
+
+      // Retouch (Healing Brush)
+      retouchActive: false,
+      retouchFullImageData: null, // ImageData (full-res) after retouch strokes
+      retouchUndoStack: [],
+      retouchRedoStack: [],
+      retouchStroke: null, // { pointerId, lastRelX, lastRelY, dabsFull: [{cx,cy}] }
+      retouchCommitInProgress: false,
+      retouchInFlight: false,
+      retouchPendingDab: null,
+      retouchParams: (window.DEFAULT_HEALING_PARAMS
+        ? (typeof structuredClone === 'function'
+          ? structuredClone(window.DEFAULT_HEALING_PARAMS)
+          : JSON.parse(JSON.stringify(window.DEFAULT_HEALING_PARAMS)))
+        : {
+        brushRadius: 18,
+        feather: 0.6,
+        flow: 1.0,
+        gap: 8,
+        sampleRadiusPreview: 64,
+        sampleRadiusFull: 128,
+        patchSize: 7,
+        patchmatchItersPreview: 3,
+        patchmatchItersFull: 6,
+        poissonItersPreview: 60,
+        poissonItersFull: 180,
+        spacingFactor: 0.35
+      })
     };
+
+    // ===========================================
+    // Retouch (Healing Brush) - Shared Helpers
+    // ===========================================
+    let healingEngine = null;
+    let healingPreviewSyncedFor = null; // ImageData reference last sent to worker
+
+    function getBaseFullImageData() {
+      return state.retouchFullImageData || state.processedImageData;
+    }
+
+    function getPreviewBaseImageData() {
+      return state.previewSourceImageData || getBaseFullImageData();
+    }
+
+    function ensureDetachedRetouchPreview() {
+      if (!state.retouchActive) return;
+      const base = getBaseFullImageData();
+      if (!base) return;
+      if (state.previewSourceImageData === base) {
+        state.previewSourceImageData = new ImageData(new Uint8ClampedArray(base.data), base.width, base.height);
+        healingPreviewSyncedFor = null;
+      }
+    }
+
+    function rebuildDerivedSourcesFromBaseFull(baseFull = null) {
+      const base = baseFull || getBaseFullImageData();
+      if (!base) return;
+      state.previewSourceImageData = buildPreviewSourceImageData(base);
+      state.histogramSourceImageData = buildHistogramSourceImageData(state.previewSourceImageData || base);
+      state.webglSourceImageData = buildWebglSourceImageData(base);
+      if (webglState.gl) {
+        webglState.sourceDirty = true;
+        webglState.sourceSize = { w: 0, h: 0 };
+      }
+      ensureDetachedRetouchPreview();
+      healingPreviewSyncedFor = null;
+    }
+
+    async function ensureHealingEngine() {
+      if (!healingEngine) {
+        if (!window.HealingEngine) throw new Error('HealingEngine not available');
+        healingEngine = new window.HealingEngine();
+        await healingEngine.init();
+      }
+      return healingEngine;
+    }
+
+    async function syncHealingPreviewImage() {
+      ensureDetachedRetouchPreview();
+      const preview = getPreviewBaseImageData();
+      if (!preview) return;
+      if (healingPreviewSyncedFor === preview) return;
+      const engine = await ensureHealingEngine();
+      await engine.setPreviewImage(preview);
+      healingPreviewSyncedFor = preview;
+    }
+
+    function updateRetouchButtons() {
+      const undoBtn = document.getElementById('retouchUndoBtn');
+      const redoBtn = document.getElementById('retouchRedoBtn');
+      if (undoBtn) undoBtn.disabled = !(state.retouchUndoStack && state.retouchUndoStack.length);
+      if (redoBtn) redoBtn.disabled = !(state.retouchRedoStack && state.retouchRedoStack.length);
+    }
+
+    function setRetouchStatus(text) {
+      const box = document.getElementById('retouchStatus');
+      if (!box) return;
+      const msg = (typeof text === 'string') ? text : '';
+      box.textContent = msg;
+      box.style.display = msg ? 'block' : 'none';
+    }
+
+    function resetRetouchState({ terminateWorker = false } = {}) {
+      state.retouchActive = false;
+      state.retouchStroke = null;
+      state.retouchCommitInProgress = false;
+      state.retouchInFlight = false;
+      state.retouchPendingDab = null;
+      state.retouchUndoStack = [];
+      state.retouchRedoStack = [];
+      state.retouchFullImageData = null;
+      healingPreviewSyncedFor = null;
+      setRetouchStatus('');
+      updateRetouchButtons();
+      const toggle = document.getElementById('retouchToggleBtn');
+      if (toggle) toggle.classList.remove('active');
+      canvasContainer.style.touchAction = '';
+      canvas.style.cursor = 'default';
+      glCanvas.style.cursor = 'default';
+      if (terminateWorker && healingEngine) {
+        healingEngine.terminate();
+        healingEngine = null;
+      }
+    }
 
     // Initialize curves
     function initCurves(markDirty = false) {
@@ -2439,7 +2644,7 @@
       document.getElementById('filmSettingsSection').style.display =
         state.currentStep >= 2 ? 'block' : 'none';
 
-      const step3Sections = ['whiteBalanceSection', 'toneSection', 'colorSection', 'cmySection', 'advancedSection'];
+      const step3Sections = ['whiteBalanceSection', 'retouchSection', 'toneSection', 'colorSection', 'cmySection', 'advancedSection'];
       step3Sections.forEach(id => {
         document.getElementById(id).style.display = state.currentStep >= 3 ? 'block' : 'none';
       });
@@ -2455,6 +2660,16 @@
 
     function goToStep(step) {
       state.currentStep = step;
+      if (state.currentStep < 3 && state.retouchActive) {
+        state.retouchActive = false;
+        state.retouchStroke = null;
+        state.retouchPendingDab = null;
+        const toggle = document.getElementById('retouchToggleBtn');
+        if (toggle) toggle.classList.remove('active');
+        canvasContainer.style.touchAction = '';
+        canvas.style.cursor = 'default';
+        glCanvas.style.cursor = 'default';
+      }
       updateWorkflowUI();
       updateCanvasVisibility();
     }
@@ -3928,7 +4143,7 @@
     }
 
     function isWebGLActive() {
-      return !!webglState.gl && state.currentStep >= 3 && !!state.processedImageData;
+      return !!webglState.gl && state.currentStep >= 3 && !!getBaseFullImageData() && !state.retouchActive;
     }
 
     function resizeWebGLCanvas() {
@@ -3954,7 +4169,7 @@
     }
 
     function getWebglSourceImageData() {
-      const full = state.processedImageData;
+      const full = getBaseFullImageData();
       if (!full) return null;
 
       const maxTex = webglState.maxTextureSize || 0;
@@ -4061,7 +4276,7 @@
     }
 
     function renderWebGL() {
-      if (!webglState.gl || !state.processedImageData) return;
+      if (!webglState.gl || !getBaseFullImageData()) return;
 
       resizeWebGLCanvas();
 
@@ -4113,11 +4328,12 @@
     let lastHistogramUpdateTime = 0;
 
     function renderHistogramForWebGL(force = false) {
-      if (!state.processedImageData) return;
+      const fullBase = getBaseFullImageData();
+      if (!fullBase) return;
       const now = performance.now();
       if (!force && (now - lastHistogramUpdateTime) < HISTOGRAM_UPDATE_INTERVAL_MS) return;
 
-      const source = state.histogramSourceImageData || state.previewSourceImageData || state.processedImageData;
+      const source = state.histogramSourceImageData || state.previewSourceImageData || fullBase;
       histogramAdjustedBuffer = ensureImageDataBuffer(histogramAdjustedBuffer, source.width, source.height);
       applyAdjustmentsToBuffer(source, state, histogramAdjustedBuffer, 'preview');
       renderHistogram(histogramAdjustedBuffer);
@@ -4144,10 +4360,10 @@
     }
 
     function updatePreview() {
-      if (!state.processedImageData) return;
+      if (!getBaseFullImageData()) return;
 
       // Prefer GPU rendering in Step 3 when available.
-      if (state.currentStep >= 3 && initWebGLRenderer()) {
+      if (!state.retouchActive && state.currentStep >= 3 && initWebGLRenderer()) {
         updateCanvasVisibility();
         renderWebGL();
         renderHistogramForWebGL(false);
@@ -4159,13 +4375,14 @@
     }
 
     function updatePreviewCpu() {
-      if (!state.processedImageData) return;
+      const fullBase = getBaseFullImageData();
+      if (!fullBase) return;
 
-      const source = state.previewSourceImageData || state.processedImageData;
+      const source = state.previewSourceImageData || fullBase;
       previewAdjustedBuffer = ensureImageDataBuffer(previewAdjustedBuffer, source.width, source.height);
       applyAdjustmentsToBuffer(source, state, previewAdjustedBuffer, 'preview');
 
-      if (source !== state.processedImageData) {
+      if (source !== fullBase) {
         if (previewCanvas.width !== source.width) previewCanvas.width = source.width;
         if (previewCanvas.height !== source.height) previewCanvas.height = source.height;
         previewCtx.putImageData(previewAdjustedBuffer, 0, 0);
@@ -4182,10 +4399,10 @@
     }
 
     function updateFull() {
-      if (!state.processedImageData) return;
+      if (!getBaseFullImageData()) return;
 
       // Prefer GPU rendering in Step 3 when available.
-      if (state.currentStep >= 3 && initWebGLRenderer()) {
+      if (!state.retouchActive && state.currentStep >= 3 && initWebGLRenderer()) {
         updateCanvasVisibility();
         renderWebGL();
         renderHistogramForWebGL(true);
@@ -4197,9 +4414,8 @@
     }
 
     function updateFullCpu() {
-      if (!state.processedImageData) return;
-
-      const source = state.processedImageData;
+      const source = getBaseFullImageData();
+      if (!source) return;
       fullAdjustedBuffer = ensureImageDataBuffer(fullAdjustedBuffer, source.width, source.height);
       applyAdjustmentsToBuffer(source, state, fullAdjustedBuffer, 'full');
       state.displayImageData = fullAdjustedBuffer;
@@ -4213,7 +4429,7 @@
     }
 
     function ensureFullRender() {
-      if (!state.processedImageData) return;
+      if (!getBaseFullImageData()) return;
       // Always compute full-res on CPU for export/batch correctness.
       updateFullCpu();
     }
@@ -4239,9 +4455,9 @@
       }
 
       state.processedImageData = processed;
-      state.previewSourceImageData = buildPreviewSourceImageData(processed);
-      state.histogramSourceImageData = buildHistogramSourceImageData(state.previewSourceImageData || processed);
-      state.webglSourceImageData = buildWebglSourceImageData(processed);
+      // Any retouch operations are tied to the processed base, so reset them on re-convert.
+      resetRetouchState({ terminateWorker: false });
+      rebuildDerivedSourcesFromBaseFull(processed);
       if (initWebGLRenderer()) {
         webglState.sourceDirty = true;
         webglState.curveDirty = true;
@@ -4693,7 +4909,7 @@
       if (state.samplingMode === 'filmBase') {
         sourceData = state.croppedImageData || state.originalImageData;
       } else if (state.samplingMode === 'whiteBalance') {
-        sourceData = state.processedImageData;
+        sourceData = getBaseFullImageData();
       }
       if (!sourceData) {
         hideLoupe();
@@ -4733,6 +4949,10 @@
     }
 
     function handleLoupePointer(e) {
+      if (state.retouchActive) {
+        hideLoupe();
+        return;
+      }
       if (!state.samplingMode || state.cropping) {
         hideLoupe();
         return;
@@ -4761,6 +4981,7 @@
     // ===========================================
     function handleSamplingClick(e) {
       if (state.cropping) return;
+      if (state.retouchActive) return;
       if (!state.samplingMode) return;
 
       const target = e.currentTarget;
@@ -4787,13 +5008,14 @@
         hideLoupe();
         updateFilmBasePreview();
       } else if (state.samplingMode === 'whiteBalance') {
-        // Sample from processed image (post-inversion)
-        if (!state.processedImageData) return;
+        // Sample from the current base (post-inversion), including any retouch edits.
+        const base = getBaseFullImageData();
+        if (!base) return;
 
-        const x = Math.floor(relX * state.processedImageData.width);
-        const y = Math.floor(relY * state.processedImageData.height);
+        const x = Math.floor(relX * base.width);
+        const y = Math.floor(relY * base.height);
 
-        const sample = sampleFilmBase(state.processedImageData, x, y, 5);
+        const sample = sampleFilmBase(base, x, y, 5);
         const gray = (sample.r + sample.g + sample.b) / 3;
 
         // Calculate multipliers to make sampled point neutral
@@ -4905,6 +5127,404 @@
     setupSlider('cyan', 'cyan');
     setupSlider('magenta', 'magenta');
     setupSlider('yellow', 'yellow');
+
+    // ===========================================
+    // Retouch (Healing Brush)
+    // ===========================================
+    function blitRoiIntoImageData(imageData, bbox, roiRgba) {
+      if (!imageData || !bbox || !roiRgba) return;
+      const { x, y, w, h } = bbox;
+      const dst = imageData.data;
+      const dstW = imageData.width;
+      const rowBytes = w * 4;
+      for (let row = 0; row < h; row++) {
+        const srcStart = row * rowBytes;
+        const dstStart = ((y + row) * dstW + x) * 4;
+        dst.set(roiRgba.subarray(srcStart, srcStart + rowBytes), dstStart);
+      }
+    }
+
+    function extractRoiRgba(imageData, bbox) {
+      const { x, y, w, h } = bbox;
+      const src = imageData.data;
+      const srcW = imageData.width;
+      const out = new Uint8Array(w * h * 4);
+      const rowBytes = w * 4;
+      for (let row = 0; row < h; row++) {
+        const srcStart = ((y + row) * srcW + x) * 4;
+        const dstStart = row * rowBytes;
+        out.set(src.subarray(srcStart, srcStart + rowBytes), dstStart);
+      }
+      return out;
+    }
+
+    function writeRoiRgba(imageData, bbox, roiRgba) {
+      blitRoiIntoImageData(imageData, bbox, roiRgba);
+    }
+
+    function updateRetouchUiFromState() {
+      const p = state.retouchParams;
+      const brush = document.getElementById('retouchBrushSize');
+      const brushVal = document.getElementById('retouchBrushSizeValue');
+      const feather = document.getElementById('retouchFeather');
+      const featherVal = document.getElementById('retouchFeatherValue');
+      const sample = document.getElementById('retouchSampleRadius');
+      const sampleVal = document.getElementById('retouchSampleRadiusValue');
+      if (brush) brush.value = String(p.brushRadius | 0);
+      if (brushVal) brushVal.textContent = `${p.brushRadius | 0}px`;
+      if (feather) feather.value = String(p.feather);
+      if (featherVal) featherVal.textContent = (+p.feather).toFixed(2);
+      if (sample) sample.value = String(p.sampleRadiusPreview | 0);
+      if (sampleVal) sampleVal.textContent = `${p.sampleRadiusPreview | 0}px`;
+
+      const toggle = document.getElementById('retouchToggleBtn');
+      if (toggle) toggle.classList.toggle('active', !!state.retouchActive);
+      updateRetouchButtons();
+    }
+
+    function getRetouchPreviewScale() {
+      const full = getBaseFullImageData();
+      const preview = getPreviewBaseImageData();
+      if (!full || !preview) return 1;
+      if (!full.width || !preview.width) return 1;
+      return preview.width / full.width;
+    }
+
+    function makeRetouchPreviewParams() {
+      const p = state.retouchParams;
+      const scale = getRetouchPreviewScale();
+      return {
+        brushRadius: Math.max(1, Math.round((p.brushRadius | 0) * scale)),
+        feather: +p.feather || 0,
+        flow: +p.flow || 1,
+        gap: p.gap | 0,
+        sampleRadius: Math.max(8, Math.round((p.sampleRadiusPreview | 0) * scale)),
+        patchSize: p.patchSize | 0,
+        patchmatchIters: p.patchmatchItersPreview | 0,
+        poissonIters: p.poissonItersPreview | 0
+      };
+    }
+
+    function makeRetouchFullParams() {
+      const p = state.retouchParams;
+      const sampleFull = p.sampleRadiusFull | 0;
+      return {
+        brushRadius: p.brushRadius | 0,
+        feather: +p.feather || 0,
+        flow: +p.flow || 1,
+        gap: p.gap | 0,
+        sampleRadius: sampleFull > 0 ? sampleFull : Math.min(256, (p.sampleRadiusPreview | 0) * 2),
+        patchSize: p.patchSize | 0,
+        patchmatchIters: p.patchmatchItersFull | 0,
+        poissonIters: p.poissonItersFull | 0
+      };
+    }
+
+    async function runRetouchPreviewDab(dabPreview) {
+      if (!state.retouchActive) return;
+      if (!getBaseFullImageData()) return;
+      if (state.retouchCommitInProgress) return;
+
+      state.retouchInFlight = true;
+      try {
+        await syncHealingPreviewImage();
+        const engine = await ensureHealingEngine();
+        const params = makeRetouchPreviewParams();
+        const res = await engine.applyPreviewDab(dabPreview, params);
+        if (res && res.bbox && res.rgba) {
+          const previewBase = getPreviewBaseImageData();
+          blitRoiIntoImageData(previewBase, res.bbox, res.rgba);
+          schedulePreviewUpdate();
+        }
+      } catch (err) {
+        console.warn('Retouch preview dab failed', err);
+      } finally {
+        state.retouchInFlight = false;
+        const next = state.retouchPendingDab;
+        state.retouchPendingDab = null;
+        if (next) runRetouchPreviewDab(next);
+      }
+    }
+
+    function queueRetouchPreviewDab(dabPreview) {
+      if (state.retouchInFlight) {
+        state.retouchPendingDab = dabPreview;
+        return;
+      }
+      runRetouchPreviewDab(dabPreview);
+    }
+
+    async function commitRetouchStroke(dabsFull) {
+      if (!dabsFull || !dabsFull.length) return;
+      if (!state.processedImageData) return;
+      if (state.retouchCommitInProgress) return;
+
+      const fullParams = makeRetouchFullParams();
+      const patchR = (fullParams.patchSize | 0) >> 1;
+      const roiHalf = (fullParams.brushRadius | 0) + (fullParams.sampleRadius | 0) + patchR + 8;
+      const base = state.retouchFullImageData || state.processedImageData;
+      const imgW = base.width | 0;
+      const imgH = base.height | 0;
+
+      let minX = imgW - 1;
+      let minY = imgH - 1;
+      let maxX = 0;
+      let maxY = 0;
+      for (let i = 0; i < dabsFull.length; i++) {
+        const d = dabsFull[i];
+        const x0 = (d.cx | 0) - roiHalf;
+        const y0 = (d.cy | 0) - roiHalf;
+        const x1 = (d.cx | 0) + roiHalf;
+        const y1 = (d.cy | 0) + roiHalf;
+        if (x0 < minX) minX = x0;
+        if (y0 < minY) minY = y0;
+        if (x1 > maxX) maxX = x1;
+        if (y1 > maxY) maxY = y1;
+      }
+
+      const bbox = {
+        x: Math.max(0, minX | 0),
+        y: Math.max(0, minY | 0),
+        w: Math.min(imgW - 1, maxX | 0) - Math.max(0, minX | 0) + 1,
+        h: Math.min(imgH - 1, maxY | 0) - Math.max(0, minY | 0) + 1
+      };
+      if (bbox.w <= 1 || bbox.h <= 1) return;
+
+      if (!state.retouchFullImageData) {
+        const src = state.processedImageData;
+        state.retouchFullImageData = new ImageData(new Uint8ClampedArray(src.data), src.width, src.height);
+      }
+
+      const fullImg = state.retouchFullImageData;
+      const before = extractRoiRgba(fullImg, bbox);
+      const roi = before.slice();
+
+      const dabsLocal = dabsFull.map(d => ({
+        cx: (d.cx | 0) - bbox.x,
+        cy: (d.cy | 0) - bbox.y
+      }));
+
+      state.retouchCommitInProgress = true;
+      setRetouchStatus((i18n[currentLang] && i18n[currentLang].retouchWorking) ? i18n[currentLang].retouchWorking : 'Healing...');
+      try {
+        const engine = await ensureHealingEngine();
+        const result = await engine.applyStrokeOnRoi(roi, bbox.w, bbox.h, bbox.x, bbox.y, dabsLocal, fullParams);
+        if (result && result.rgba) {
+          const after = result.rgba;
+          writeRoiRgba(fullImg, bbox, after);
+          state.retouchUndoStack.push({ bbox, before, after });
+          state.retouchRedoStack = [];
+          updateRetouchButtons();
+
+          rebuildDerivedSourcesFromBaseFull(fullImg);
+          await syncHealingPreviewImage();
+          schedulePreviewUpdate();
+          scheduleFullUpdate();
+        }
+      } catch (err) {
+        console.warn('Retouch full commit failed', err);
+      } finally {
+        state.retouchCommitInProgress = false;
+        setRetouchStatus('');
+      }
+    }
+
+    function retouchUndo() {
+      if (!state.retouchUndoStack.length) return;
+      if (!state.retouchFullImageData) return;
+      const action = state.retouchUndoStack.pop();
+      state.retouchRedoStack.push(action);
+      writeRoiRgba(state.retouchFullImageData, action.bbox, action.before);
+      updateRetouchButtons();
+      rebuildDerivedSourcesFromBaseFull(state.retouchFullImageData);
+      syncHealingPreviewImage();
+      schedulePreviewUpdate();
+      scheduleFullUpdate();
+    }
+
+    function retouchRedo() {
+      if (!state.retouchRedoStack.length) return;
+      if (!state.retouchFullImageData) return;
+      const action = state.retouchRedoStack.pop();
+      state.retouchUndoStack.push(action);
+      writeRoiRgba(state.retouchFullImageData, action.bbox, action.after);
+      updateRetouchButtons();
+      rebuildDerivedSourcesFromBaseFull(state.retouchFullImageData);
+      syncHealingPreviewImage();
+      schedulePreviewUpdate();
+      scheduleFullUpdate();
+    }
+
+    function clearRetouch() {
+      state.retouchFullImageData = null;
+      state.retouchUndoStack = [];
+      state.retouchRedoStack = [];
+      updateRetouchButtons();
+      rebuildDerivedSourcesFromBaseFull(state.processedImageData);
+      syncHealingPreviewImage();
+      schedulePreviewUpdate();
+      scheduleFullUpdate();
+    }
+
+    document.getElementById('retouchBrushSize').addEventListener('input', (e) => {
+      const v = Math.max(3, Math.min(200, parseInt(e.target.value, 10) || 18));
+      state.retouchParams.brushRadius = v;
+      document.getElementById('retouchBrushSizeValue').textContent = `${v}px`;
+    });
+
+    document.getElementById('retouchFeather').addEventListener('input', (e) => {
+      const v = Math.max(0, Math.min(1, parseFloat(e.target.value) || 0));
+      state.retouchParams.feather = v;
+      document.getElementById('retouchFeatherValue').textContent = v.toFixed(2);
+    });
+
+    document.getElementById('retouchSampleRadius').addEventListener('input', (e) => {
+      const v = Math.max(16, Math.min(256, parseInt(e.target.value, 10) || 64));
+      state.retouchParams.sampleRadiusPreview = v;
+      state.retouchParams.sampleRadiusFull = Math.min(256, Math.max(v, v * 2));
+      document.getElementById('retouchSampleRadiusValue').textContent = `${v}px`;
+    });
+
+    document.getElementById('retouchToggleBtn').addEventListener('click', async () => {
+      if (!state.processedImageData) return;
+      state.retouchActive = !state.retouchActive;
+      updateRetouchUiFromState();
+
+      if (state.retouchActive) {
+        // Disable sampling/crop interactions while painting.
+        state.samplingMode = null;
+        document.getElementById('sampleBaseBtn')?.classList.remove('active');
+        document.getElementById('sampleWBBtn')?.classList.remove('active');
+        hideLoupe();
+
+        canvasContainer.style.touchAction = 'none';
+        canvas.style.cursor = 'crosshair';
+        glCanvas.style.cursor = 'crosshair';
+
+        updateCanvasVisibility(); // forces CPU canvas while retouch is active
+        rebuildDerivedSourcesFromBaseFull(getBaseFullImageData());
+        await syncHealingPreviewImage();
+        schedulePreviewUpdate();
+      } else {
+        canvasContainer.style.touchAction = '';
+        canvas.style.cursor = 'default';
+        glCanvas.style.cursor = 'default';
+        updateCanvasVisibility();
+        schedulePreviewUpdate();
+      }
+    });
+
+    document.getElementById('retouchUndoBtn').addEventListener('click', retouchUndo);
+    document.getElementById('retouchRedoBtn').addEventListener('click', retouchRedo);
+    document.getElementById('retouchClearBtn').addEventListener('click', clearRetouch);
+
+    updateRetouchUiFromState();
+
+    function getRetouchRelPos(clientX, clientY) {
+      const target = (glCanvas.style.display !== 'none') ? glCanvas : canvas;
+      const rect = target.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return null;
+      const relX = (clientX - rect.left) / rect.width;
+      const relY = (clientY - rect.top) / rect.height;
+      if (relX < 0 || relX > 1 || relY < 0 || relY > 1) return null;
+      return { relX, relY };
+    }
+
+    function enqueueRetouchDabAtRel(relX, relY) {
+      const full = getBaseFullImageData();
+      const preview = getPreviewBaseImageData();
+      if (!full || !preview) return;
+      const dabFull = {
+        cx: Math.max(0, Math.min(full.width - 1, Math.floor(relX * full.width))),
+        cy: Math.max(0, Math.min(full.height - 1, Math.floor(relY * full.height)))
+      };
+      const dabPreview = {
+        cx: Math.max(0, Math.min(preview.width - 1, Math.floor(relX * preview.width))),
+        cy: Math.max(0, Math.min(preview.height - 1, Math.floor(relY * preview.height)))
+      };
+
+      if (state.retouchStroke) state.retouchStroke.dabsFull.push(dabFull);
+      queueRetouchPreviewDab(dabPreview);
+    }
+
+    function finishRetouchPointer(pointerId) {
+      const stroke = state.retouchStroke;
+      if (!stroke || stroke.pointerId !== pointerId) return;
+      if (canvasContainer.hasPointerCapture(pointerId)) {
+        try { canvasContainer.releasePointerCapture(pointerId); } catch {}
+      }
+
+      state.retouchStroke = null;
+      state.retouchPendingDab = null;
+
+      const dabsFull = stroke.dabsFull || [];
+      if (dabsFull.length) {
+        commitRetouchStroke(dabsFull);
+      }
+    }
+
+    canvasContainer.addEventListener('pointerdown', (e) => {
+      if (!state.retouchActive) return;
+      if (!getBaseFullImageData()) return;
+      if (state.cropping || state.croppingActive) return;
+      if (state.samplingMode) return;
+      if (state.retouchCommitInProgress) return;
+      if (e.button !== undefined && e.button !== 0) return;
+      e.preventDefault();
+
+      const pos = getRetouchRelPos(e.clientX, e.clientY);
+      if (!pos) return;
+
+      state.retouchStroke = {
+        pointerId: e.pointerId,
+        lastRelX: pos.relX,
+        lastRelY: pos.relY,
+        dabsFull: []
+      };
+
+      try { canvasContainer.setPointerCapture(e.pointerId); } catch {}
+      enqueueRetouchDabAtRel(pos.relX, pos.relY);
+    }, { passive: false });
+
+    canvasContainer.addEventListener('pointermove', (e) => {
+      const stroke = state.retouchStroke;
+      if (!state.retouchActive || !stroke) return;
+      if (stroke.pointerId !== e.pointerId) return;
+      if (state.retouchCommitInProgress) return;
+      if (!getBaseFullImageData()) return;
+      e.preventDefault();
+
+      const pos = getRetouchRelPos(e.clientX, e.clientY);
+      if (!pos) return;
+
+      const full = getBaseFullImageData();
+      const spacing = Math.max(1, (state.retouchParams.brushRadius | 0) * (+state.retouchParams.spacingFactor || 0.35));
+
+      let lx = stroke.lastRelX;
+      let ly = stroke.lastRelY;
+      let dx = pos.relX - lx;
+      let dy = pos.relY - ly;
+      let dist = Math.hypot(dx * full.width, dy * full.height);
+      while (dist >= spacing && dist > 0) {
+        const t = spacing / dist;
+        lx += dx * t;
+        ly += dy * t;
+        enqueueRetouchDabAtRel(lx, ly);
+        dx = pos.relX - lx;
+        dy = pos.relY - ly;
+        dist = Math.hypot(dx * full.width, dy * full.height);
+      }
+      stroke.lastRelX = lx;
+      stroke.lastRelY = ly;
+    }, { passive: false });
+
+    canvasContainer.addEventListener('pointerup', (e) => {
+      finishRetouchPointer(e.pointerId);
+    });
+
+    canvasContainer.addEventListener('pointercancel', (e) => {
+      finishRetouchPointer(e.pointerId);
+    });
 
     // ===========================================
     // Section Toggle
@@ -5258,6 +5878,7 @@
 
     document.getElementById('startOverBtn').addEventListener('click', () => {
       if (state.originalImageData) {
+        resetRetouchState({ terminateWorker: false });
         state.croppedImageData = null;
         state.processedImageData = null;
         state.displayImageData = null;
@@ -5281,6 +5902,7 @@
     });
 
     document.getElementById('newImageBtn').addEventListener('click', () => {
+      resetRetouchState({ terminateWorker: true });
       // Reset all state
       state.originalImageData = null;
       state.croppedImageData = null;
