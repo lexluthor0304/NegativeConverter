@@ -160,6 +160,13 @@
       object-fit: contain;
     }
 
+    #retouchOverlayCanvas {
+      position: absolute;
+      pointer-events: none;
+      display: none;
+      z-index: 120;
+    }
+
     .crop-overlay {
       border: 2px dashed var(--accent);
       position: absolute;
@@ -1425,6 +1432,7 @@
         </div>
         <canvas id="canvas" style="display: none;"></canvas>
         <canvas id="glCanvas" style="display: none;"></canvas>
+        <canvas id="retouchOverlayCanvas" style="display: none;"></canvas>
         <div class="crop-overlay" id="cropOverlay"></div>
         <div class="loupe" id="loupe">
           <canvas id="loupeCanvas" width="155" height="155"></canvas>
@@ -2456,6 +2464,8 @@
       retouchUndoStack: [],
       retouchRedoStack: [],
       retouchStroke: null, // { pointerId, lastRelX, lastRelY, dabsFull: [{cx,cy}] }
+      retouchCursorRel: null, // {relX, relY}
+      retouchLastStrokeRel: null, // { dabs: [{relX,relY}], until }
       retouchCommitInProgress: false,
       retouchInFlight: false,
       retouchPendingDab: null,
@@ -2554,6 +2564,8 @@
     function resetRetouchState({ terminateWorker = false } = {}) {
       state.retouchActive = false;
       state.retouchStroke = null;
+      state.retouchCursorRel = null;
+      state.retouchLastStrokeRel = null;
       state.retouchCommitInProgress = false;
       state.retouchInFlight = false;
       state.retouchPendingDab = null;
@@ -2611,6 +2623,8 @@
     const loupeCanvas = document.getElementById('loupeCanvas');
     const loupeCtx = loupeCanvas.getContext('2d');
     const loupeInfo = document.getElementById('loupeInfo');
+    const retouchOverlayCanvas = document.getElementById('retouchOverlayCanvas');
+    const retouchOverlayCtx = retouchOverlayCanvas.getContext('2d');
 
     const loupeSrcCanvas = document.createElement('canvas');
     const loupeSrcCtx = loupeSrcCanvas.getContext('2d', { willReadFrequently: true });
@@ -2663,6 +2677,8 @@
       if (state.currentStep < 3 && state.retouchActive) {
         state.retouchActive = false;
         state.retouchStroke = null;
+        state.retouchCursorRel = null;
+        state.retouchLastStrokeRel = null;
         state.retouchPendingDab = null;
         const toggle = document.getElementById('retouchToggleBtn');
         if (toggle) toggle.classList.remove('active');
@@ -4315,6 +4331,7 @@
       glCanvas.style.display = showGL ? 'block' : 'none';
       canvas.style.display = showGL ? 'none' : 'block';
       if (showGL) renderWebGL();
+      scheduleRetouchOverlayRender();
     }
 
     let updateScheduled = false;
@@ -5131,6 +5148,126 @@
     // ===========================================
     // Retouch (Healing Brush)
     // ===========================================
+    var RETOUCH_OVERLAY_FADE_MS = 900;
+    var retouchOverlayRaf = 0;
+    var retouchOverlayReady = false;
+
+    function scheduleRetouchOverlayRender() {
+      if (!retouchOverlayReady) return;
+      if (retouchOverlayRaf) return;
+      retouchOverlayRaf = requestAnimationFrame(renderRetouchOverlay);
+    }
+
+    function syncRetouchOverlayCanvasToTarget() {
+      const target = (glCanvas.style.display !== 'none') ? glCanvas : canvas;
+      const rect = target.getBoundingClientRect();
+      const containerRect = canvasContainer.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return null;
+
+      const left = rect.left - containerRect.left;
+      const top = rect.top - containerRect.top;
+      retouchOverlayCanvas.style.left = left + 'px';
+      retouchOverlayCanvas.style.top = top + 'px';
+      retouchOverlayCanvas.style.width = rect.width + 'px';
+      retouchOverlayCanvas.style.height = rect.height + 'px';
+
+      const dpr = window.devicePixelRatio || 1;
+      const pxW = Math.max(1, Math.round(rect.width * dpr));
+      const pxH = Math.max(1, Math.round(rect.height * dpr));
+      if (retouchOverlayCanvas.width !== pxW) retouchOverlayCanvas.width = pxW;
+      if (retouchOverlayCanvas.height !== pxH) retouchOverlayCanvas.height = pxH;
+
+      retouchOverlayCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      retouchOverlayCtx.clearRect(0, 0, rect.width, rect.height);
+
+      return { rect };
+    }
+
+    function drawRetouchDabs(dabsRel, rect, radiusPx, fillStyle, strokeStyle) {
+      if (!dabsRel || !dabsRel.length) return;
+      const ctx2 = retouchOverlayCtx;
+      const prevAlpha = ctx2.globalAlpha;
+      ctx2.fillStyle = fillStyle;
+      ctx2.strokeStyle = strokeStyle;
+      ctx2.lineWidth = 1;
+      for (let i = 0; i < dabsRel.length; i++) {
+        const d = dabsRel[i];
+        const x = d.relX * rect.width;
+        const y = d.relY * rect.height;
+        ctx2.beginPath();
+        ctx2.arc(x, y, radiusPx, 0, Math.PI * 2);
+        ctx2.fill();
+      }
+      // Outline once to avoid overly thick overlaps.
+      ctx2.globalAlpha = prevAlpha * 0.9;
+      for (let i = 0; i < dabsRel.length; i++) {
+        const d = dabsRel[i];
+        const x = d.relX * rect.width;
+        const y = d.relY * rect.height;
+        ctx2.beginPath();
+        ctx2.arc(x, y, radiusPx, 0, Math.PI * 2);
+        ctx2.stroke();
+      }
+      ctx2.globalAlpha = prevAlpha;
+    }
+
+    function renderRetouchOverlay() {
+      retouchOverlayRaf = 0;
+      const now = performance.now();
+      const last = state.retouchLastStrokeRel;
+      const lastActive = !!last && now < last.until;
+      if (!state.retouchActive && !lastActive) {
+        retouchOverlayCanvas.style.display = 'none';
+        return;
+      }
+
+      const info = syncRetouchOverlayCanvasToTarget();
+      if (!info) {
+        retouchOverlayCanvas.style.display = 'none';
+        return;
+      }
+
+      retouchOverlayCanvas.style.display = 'block';
+      const { rect } = info;
+
+      const full = getBaseFullImageData();
+      const scale = full ? (rect.width / full.width) : 1;
+      const radiusPx = Math.max(2, (state.retouchParams.brushRadius | 0) * scale);
+      const innerPx = Math.max(0, radiusPx * (1 - Math.max(0, Math.min(1, +state.retouchParams.feather || 0))));
+
+      // Draw last stroke as a brief fade-out so users can see where it applied.
+      if (lastActive) {
+        const t = Math.max(0, Math.min(1, (last.until - now) / RETOUCH_OVERLAY_FADE_MS));
+        retouchOverlayCtx.globalAlpha = 0.22 * t;
+        drawRetouchDabs(last.dabs, rect, radiusPx, 'rgba(74, 158, 255, 1)', 'rgba(74, 158, 255, 1)');
+        retouchOverlayCtx.globalAlpha = 1;
+      }
+
+      // Draw current stroke mask while painting.
+      if (state.retouchActive && state.retouchStroke && state.retouchStroke.dabsRel && state.retouchStroke.dabsRel.length) {
+        retouchOverlayCtx.globalAlpha = 0.18;
+        drawRetouchDabs(state.retouchStroke.dabsRel, rect, radiusPx, 'rgba(74, 158, 255, 1)', 'rgba(74, 158, 255, 1)');
+        retouchOverlayCtx.globalAlpha = 1;
+      }
+
+      // Cursor rings.
+      if (state.retouchActive && state.retouchCursorRel) {
+        const x = state.retouchCursorRel.relX * rect.width;
+        const y = state.retouchCursorRel.relY * rect.height;
+        retouchOverlayCtx.lineWidth = 1;
+        retouchOverlayCtx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
+        retouchOverlayCtx.beginPath();
+        retouchOverlayCtx.arc(x, y, radiusPx, 0, Math.PI * 2);
+        retouchOverlayCtx.stroke();
+        if (innerPx > 0.5 && innerPx < radiusPx - 0.5) {
+          retouchOverlayCtx.strokeStyle = 'rgba(255, 255, 255, 0.35)';
+          retouchOverlayCtx.beginPath();
+          retouchOverlayCtx.arc(x, y, innerPx, 0, Math.PI * 2);
+          retouchOverlayCtx.stroke();
+        }
+      }
+    }
+
     function blitRoiIntoImageData(imageData, bbox, roiRgba) {
       if (!imageData || !bbox || !roiRgba) return;
       const { x, y, w, h } = bbox;
@@ -5370,12 +5507,14 @@
       const v = Math.max(3, Math.min(200, parseInt(e.target.value, 10) || 18));
       state.retouchParams.brushRadius = v;
       document.getElementById('retouchBrushSizeValue').textContent = `${v}px`;
+      scheduleRetouchOverlayRender();
     });
 
     document.getElementById('retouchFeather').addEventListener('input', (e) => {
       const v = Math.max(0, Math.min(1, parseFloat(e.target.value) || 0));
       state.retouchParams.feather = v;
       document.getElementById('retouchFeatherValue').textContent = v.toFixed(2);
+      scheduleRetouchOverlayRender();
     });
 
     document.getElementById('retouchSampleRadius').addEventListener('input', (e) => {
@@ -5405,12 +5544,15 @@
         rebuildDerivedSourcesFromBaseFull(getBaseFullImageData());
         await syncHealingPreviewImage();
         schedulePreviewUpdate();
+        scheduleRetouchOverlayRender();
       } else {
         canvasContainer.style.touchAction = '';
         canvas.style.cursor = 'default';
         glCanvas.style.cursor = 'default';
+        state.retouchCursorRel = null;
         updateCanvasVisibility();
         schedulePreviewUpdate();
+        scheduleRetouchOverlayRender();
       }
     });
 
@@ -5443,8 +5585,12 @@
         cy: Math.max(0, Math.min(preview.height - 1, Math.floor(relY * preview.height)))
       };
 
-      if (state.retouchStroke) state.retouchStroke.dabsFull.push(dabFull);
+      if (state.retouchStroke) {
+        state.retouchStroke.dabsFull.push(dabFull);
+        state.retouchStroke.dabsRel.push({ relX, relY });
+      }
       queueRetouchPreviewDab(dabPreview);
+      scheduleRetouchOverlayRender();
     }
 
     function finishRetouchPointer(pointerId) {
@@ -5457,10 +5603,18 @@
       state.retouchStroke = null;
       state.retouchPendingDab = null;
 
+      if (stroke.dabsRel && stroke.dabsRel.length) {
+        state.retouchLastStrokeRel = {
+          dabs: stroke.dabsRel.slice(),
+          until: performance.now() + RETOUCH_OVERLAY_FADE_MS
+        };
+      }
+
       const dabsFull = stroke.dabsFull || [];
       if (dabsFull.length) {
         commitRetouchStroke(dabsFull);
       }
+      scheduleRetouchOverlayRender();
     }
 
     canvasContainer.addEventListener('pointerdown', (e) => {
@@ -5475,11 +5629,13 @@
       const pos = getRetouchRelPos(e.clientX, e.clientY);
       if (!pos) return;
 
+      state.retouchCursorRel = pos;
       state.retouchStroke = {
         pointerId: e.pointerId,
         lastRelX: pos.relX,
         lastRelY: pos.relY,
-        dabsFull: []
+        dabsFull: [],
+        dabsRel: []
       };
 
       try { canvasContainer.setPointerCapture(e.pointerId); } catch {}
@@ -5487,15 +5643,20 @@
     }, { passive: false });
 
     canvasContainer.addEventListener('pointermove', (e) => {
-      const stroke = state.retouchStroke;
-      if (!state.retouchActive || !stroke) return;
-      if (stroke.pointerId !== e.pointerId) return;
+      if (!state.retouchActive) return;
       if (state.retouchCommitInProgress) return;
       if (!getBaseFullImageData()) return;
       e.preventDefault();
 
       const pos = getRetouchRelPos(e.clientX, e.clientY);
       if (!pos) return;
+
+      state.retouchCursorRel = pos;
+      scheduleRetouchOverlayRender();
+
+      const stroke = state.retouchStroke;
+      if (!stroke) return;
+      if (stroke.pointerId !== e.pointerId) return;
 
       const full = getBaseFullImageData();
       const spacing = Math.max(1, (state.retouchParams.brushRadius | 0) * (+state.retouchParams.spacingFactor || 0.35));
@@ -5525,6 +5686,9 @@
     canvasContainer.addEventListener('pointercancel', (e) => {
       finishRetouchPointer(e.pointerId);
     });
+
+    retouchOverlayReady = true;
+    scheduleRetouchOverlayRender();
 
     // ===========================================
     // Section Toggle
