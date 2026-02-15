@@ -559,12 +559,33 @@
       color: var(--text-secondary);
     }
 
-    .slider-value {
-      font-size: 12px;
+    .slider-value-group {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .slider-number-input {
+      width: 72px;
+      padding: 4px 6px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 4px;
       color: var(--text-primary);
+      font-size: 12px;
       font-family: monospace;
-      min-width: 50px;
       text-align: right;
+    }
+
+    .slider-number-input:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    .slider-unit {
+      font-size: 11px;
+      color: var(--text-secondary);
+      min-width: 16px;
     }
 
     .slider-input {
@@ -1261,6 +1282,7 @@
 
       .preset-select,
       .rotate-input,
+      .slider-number-input,
       .file-list-btn,
       .footer-btn {
         font-size: 16px;
@@ -1282,6 +1304,11 @@
       .slider-input::-moz-range-thumb {
         width: 18px;
         height: 18px;
+      }
+
+      .slider-number-input {
+        width: 84px;
+        min-height: 36px;
       }
 
       .file-list-section {
@@ -1544,21 +1571,21 @@
           <div class="slider-control">
             <div class="slider-header">
               <span class="slider-label">R</span>
-              <span class="slider-value" id="wbRValue">1.00</span>
+              <input type="number" class="slider-number-input" id="wbRValue" min="0.5" max="2" step="0.01" value="1.00">
             </div>
             <input type="range" class="slider-input" id="wbR" min="0.5" max="2" step="0.01" value="1">
           </div>
           <div class="slider-control">
             <div class="slider-header">
               <span class="slider-label">G</span>
-              <span class="slider-value" id="wbGValue">1.00</span>
+              <input type="number" class="slider-number-input" id="wbGValue" min="0.5" max="2" step="0.01" value="1.00">
             </div>
             <input type="range" class="slider-input" id="wbG" min="0.5" max="2" step="0.01" value="1">
           </div>
           <div class="slider-control">
             <div class="slider-header">
               <span class="slider-label">B</span>
-              <span class="slider-value" id="wbBValue">1.00</span>
+              <input type="number" class="slider-number-input" id="wbBValue" min="0.5" max="2" step="0.01" value="1.00">
             </div>
             <input type="range" class="slider-input" id="wbB" min="0.5" max="2" step="0.01" value="1">
           </div>
@@ -1575,28 +1602,31 @@
           <div class="slider-control">
             <div class="slider-header">
               <span class="slider-label" data-i18n="exposure">Exposure</span>
-              <span class="slider-value" id="exposureValue">0 EV</span>
+              <div class="slider-value-group">
+                <input type="number" class="slider-number-input" id="exposureValue" min="-3" max="3" step="0.1" value="0.0">
+                <span class="slider-unit">EV</span>
+              </div>
             </div>
             <input type="range" class="slider-input" id="exposure" min="-3" max="3" step="0.1" value="0">
           </div>
           <div class="slider-control">
             <div class="slider-header">
               <span class="slider-label" data-i18n="contrast">Contrast</span>
-              <span class="slider-value" id="contrastValue">0</span>
+              <input type="number" class="slider-number-input" id="contrastValue" min="-100" max="100" step="1" value="0">
             </div>
             <input type="range" class="slider-input" id="contrast" min="-100" max="100" step="1" value="0">
           </div>
           <div class="slider-control">
             <div class="slider-header">
               <span class="slider-label" data-i18n="highlights">Highlights</span>
-              <span class="slider-value" id="highlightsValue">0</span>
+              <input type="number" class="slider-number-input" id="highlightsValue" min="-100" max="100" step="1" value="0">
             </div>
             <input type="range" class="slider-input" id="highlights" min="-100" max="100" step="1" value="0">
           </div>
           <div class="slider-control">
             <div class="slider-header">
               <span class="slider-label" data-i18n="shadows">Shadows</span>
-              <span class="slider-value" id="shadowsValue">0</span>
+              <input type="number" class="slider-number-input" id="shadowsValue" min="-100" max="100" step="1" value="0">
             </div>
             <input type="range" class="slider-input" id="shadows" min="-100" max="100" step="1" value="0">
           </div>
@@ -1613,28 +1643,28 @@
           <div class="slider-control">
             <div class="slider-header">
               <span class="slider-label" data-i18n="temperature">Temperature</span>
-              <span class="slider-value" id="temperatureValue">0</span>
+              <input type="number" class="slider-number-input" id="temperatureValue" min="-100" max="100" step="1" value="0">
             </div>
             <input type="range" class="slider-input" id="temperature" min="-100" max="100" step="1" value="0">
           </div>
           <div class="slider-control">
             <div class="slider-header">
               <span class="slider-label" data-i18n="tint">Tint</span>
-              <span class="slider-value" id="tintValue">0</span>
+              <input type="number" class="slider-number-input" id="tintValue" min="-100" max="100" step="1" value="0">
             </div>
             <input type="range" class="slider-input" id="tint" min="-100" max="100" step="1" value="0">
           </div>
           <div class="slider-control">
             <div class="slider-header">
               <span class="slider-label" data-i18n="vibrance">Vibrance</span>
-              <span class="slider-value" id="vibranceValue">0</span>
+              <input type="number" class="slider-number-input" id="vibranceValue" min="-100" max="100" step="1" value="0">
             </div>
             <input type="range" class="slider-input" id="vibrance" min="-100" max="100" step="1" value="0">
           </div>
           <div class="slider-control">
             <div class="slider-header">
               <span class="slider-label" data-i18n="saturation">Saturation</span>
-              <span class="slider-value" id="saturationValue">0</span>
+              <input type="number" class="slider-number-input" id="saturationValue" min="-100" max="100" step="1" value="0">
             </div>
             <input type="range" class="slider-input" id="saturation" min="-100" max="100" step="1" value="0">
           </div>
@@ -1651,21 +1681,21 @@
           <div class="slider-control">
             <div class="slider-header">
               <span class="slider-label">Cyan</span>
-              <span class="slider-value" id="cyanValue">0</span>
+              <input type="number" class="slider-number-input" id="cyanValue" min="-100" max="100" step="1" value="0">
             </div>
             <input type="range" class="slider-input" id="cyan" min="-100" max="100" step="1" value="0">
           </div>
           <div class="slider-control">
             <div class="slider-header">
               <span class="slider-label">Magenta</span>
-              <span class="slider-value" id="magentaValue">0</span>
+              <input type="number" class="slider-number-input" id="magentaValue" min="-100" max="100" step="1" value="0">
             </div>
             <input type="range" class="slider-input" id="magenta" min="-100" max="100" step="1" value="0">
           </div>
           <div class="slider-control">
             <div class="slider-header">
               <span class="slider-label">Yellow</span>
-              <span class="slider-value" id="yellowValue">0</span>
+              <input type="number" class="slider-number-input" id="yellowValue" min="-100" max="100" step="1" value="0">
             </div>
             <input type="range" class="slider-input" id="yellow" min="-100" max="100" step="1" value="0">
           </div>
@@ -4537,25 +4567,6 @@
       glCanvas.style.cursor = 'crosshair';
     });
 
-    function updateWBSliders() {
-      document.getElementById('wbR').value = state.wbR;
-      document.getElementById('wbG').value = state.wbG;
-      document.getElementById('wbB').value = state.wbB;
-      document.getElementById('wbRValue').textContent = state.wbR.toFixed(2);
-      document.getElementById('wbGValue').textContent = state.wbG.toFixed(2);
-      document.getElementById('wbBValue').textContent = state.wbB.toFixed(2);
-    }
-
-    ['wbR', 'wbG', 'wbB'].forEach(id => {
-      const slider = document.getElementById(id);
-      slider.addEventListener('input', () => {
-        state[id] = parseFloat(slider.value);
-        document.getElementById(id + 'Value').textContent = state[id].toFixed(2);
-        schedulePreviewUpdate();
-      });
-      slider.addEventListener('change', () => scheduleFullUpdate());
-    });
-
     // ===========================================
     // Sampling Loupe (Magnifier)
     // ===========================================
@@ -4880,21 +4891,116 @@
     // ===========================================
     // Slider Controls
     // ===========================================
-    function setupSlider(id, stateKey, displayFormat = (v) => v) {
+    const sliderBindings = [];
+    const sliderBindingMap = new Map();
+
+    function getStepDecimals(step) {
+      const text = String(step);
+      if (text.includes('e-')) {
+        const exp = Number.parseInt(text.split('e-')[1], 10);
+        return Number.isFinite(exp) ? exp : 0;
+      }
+      const dotIndex = text.indexOf('.');
+      return dotIndex >= 0 ? (text.length - dotIndex - 1) : 0;
+    }
+
+    function normalizeSliderValue(value, min, max, step, decimals) {
+      if (!Number.isFinite(value)) return min;
+
+      let nextValue = Math.min(max, Math.max(min, value));
+      if (Number.isFinite(step) && step > 0) {
+        nextValue = min + (Math.round((nextValue - min) / step) * step);
+      }
+      return Number(nextValue.toFixed(decimals));
+    }
+
+    function formatSliderValue(value, decimals) {
+      return decimals > 0 ? value.toFixed(decimals) : String(Math.round(value));
+    }
+
+    function setupSlider(id, stateKey, options = {}) {
       const slider = document.getElementById(id);
-      const valueDisplay = document.getElementById(id + 'Value');
+      const valueInput = document.getElementById(id + 'Value');
+      if (!slider || !valueInput) return;
+
+      const min = Number.parseFloat(slider.min);
+      const max = Number.parseFloat(slider.max);
+      const step = Number.parseFloat(slider.step || '1');
+      const decimals = Number.isInteger(options.decimals) ? options.decimals : getStepDecimals(step);
+      const format = options.format || ((value) => formatSliderValue(value, decimals));
+      const normalize = (rawValue) => normalizeSliderValue(rawValue, min, max, step, decimals);
+
+      const syncUI = (value) => {
+        slider.value = String(value);
+        valueInput.value = format(value);
+      };
+
+      const applyValue = (rawValue, commitFull = false) => {
+        const value = normalize(rawValue);
+        state[stateKey] = value;
+        syncUI(value);
+        schedulePreviewUpdate();
+        if (commitFull) scheduleFullUpdate();
+      };
 
       slider.addEventListener('input', () => {
-        const value = parseFloat(slider.value);
+        applyValue(Number.parseFloat(slider.value), false);
+      });
+
+      slider.addEventListener('change', () => {
+        applyValue(Number.parseFloat(slider.value), true);
+      });
+
+      valueInput.addEventListener('input', () => {
+        const parsed = Number.parseFloat(valueInput.value);
+        if (!Number.isFinite(parsed)) return;
+        const value = normalize(parsed);
         state[stateKey] = value;
-        valueDisplay.textContent = displayFormat(value);
+        slider.value = String(value);
         schedulePreviewUpdate();
       });
 
-      slider.addEventListener('change', () => scheduleFullUpdate());
+      const commitFromInput = () => {
+        const parsed = Number.parseFloat(valueInput.value);
+        const sourceValue = Number.isFinite(parsed) ? parsed : state[stateKey];
+        applyValue(sourceValue, true);
+      };
+
+      valueInput.addEventListener('blur', commitFromInput);
+      valueInput.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          commitFromInput();
+        }
+      });
+
+      const binding = { id, stateKey, slider, valueInput, normalize, format };
+      sliderBindings.push(binding);
+      sliderBindingMap.set(id, binding);
+      syncUI(normalize(state[stateKey]));
     }
 
-    setupSlider('exposure', 'exposure', v => v.toFixed(1) + ' EV');
+    function syncSliderFromState(id) {
+      const binding = sliderBindingMap.get(id);
+      if (!binding) return;
+      const value = binding.normalize(Number.parseFloat(state[binding.stateKey]));
+      state[binding.stateKey] = value;
+      binding.slider.value = String(value);
+      binding.valueInput.value = binding.format(value);
+    }
+
+    function syncAllSlidersFromState() {
+      sliderBindings.forEach(binding => syncSliderFromState(binding.id));
+    }
+
+    function updateWBSliders() {
+      ['wbR', 'wbG', 'wbB'].forEach(syncSliderFromState);
+    }
+
+    setupSlider('wbR', 'wbR', { decimals: 2 });
+    setupSlider('wbG', 'wbG', { decimals: 2 });
+    setupSlider('wbB', 'wbB', { decimals: 2 });
+    setupSlider('exposure', 'exposure', { decimals: 1 });
     setupSlider('contrast', 'contrast');
     setupSlider('highlights', 'highlights');
     setupSlider('shadows', 'shadows');
@@ -5226,31 +5332,7 @@
       state.wbG = 1;
       state.wbB = 1;
 
-      document.getElementById('exposure').value = 0;
-      document.getElementById('contrast').value = 0;
-      document.getElementById('highlights').value = 0;
-      document.getElementById('shadows').value = 0;
-      document.getElementById('temperature').value = 0;
-      document.getElementById('tint').value = 0;
-      document.getElementById('vibrance').value = 0;
-      document.getElementById('saturation').value = 0;
-      document.getElementById('cyan').value = 0;
-      document.getElementById('magenta').value = 0;
-      document.getElementById('yellow').value = 0;
-
-      document.getElementById('exposureValue').textContent = '0 EV';
-      document.getElementById('contrastValue').textContent = '0';
-      document.getElementById('highlightsValue').textContent = '0';
-      document.getElementById('shadowsValue').textContent = '0';
-      document.getElementById('temperatureValue').textContent = '0';
-      document.getElementById('tintValue').textContent = '0';
-      document.getElementById('vibranceValue').textContent = '0';
-      document.getElementById('saturationValue').textContent = '0';
-      document.getElementById('cyanValue').textContent = '0';
-      document.getElementById('magentaValue').textContent = '0';
-      document.getElementById('yellowValue').textContent = '0';
-
-      updateWBSliders();
+      updateSlidersFromState();
       initCurves(true);
       renderCurve();
       updateFull();
@@ -5841,34 +5923,12 @@
 
       // Update UI to reflect restored settings
       updateSlidersFromState();
-      updateWBSliders();
       renderCurve();
     }
 
     // Update all slider UI elements from state
     function updateSlidersFromState() {
-      document.getElementById('exposure').value = state.exposure;
-      document.getElementById('exposureValue').textContent = state.exposure.toFixed(1) + ' EV';
-      document.getElementById('contrast').value = state.contrast;
-      document.getElementById('contrastValue').textContent = state.contrast;
-      document.getElementById('highlights').value = state.highlights;
-      document.getElementById('highlightsValue').textContent = state.highlights;
-      document.getElementById('shadows').value = state.shadows;
-      document.getElementById('shadowsValue').textContent = state.shadows;
-      document.getElementById('temperature').value = state.temperature;
-      document.getElementById('temperatureValue').textContent = state.temperature;
-      document.getElementById('tint').value = state.tint;
-      document.getElementById('tintValue').textContent = state.tint;
-      document.getElementById('vibrance').value = state.vibrance;
-      document.getElementById('vibranceValue').textContent = state.vibrance;
-      document.getElementById('saturation').value = state.saturation;
-      document.getElementById('saturationValue').textContent = state.saturation;
-      document.getElementById('cyan').value = state.cyan;
-      document.getElementById('cyanValue').textContent = state.cyan;
-      document.getElementById('magenta').value = state.magenta;
-      document.getElementById('magentaValue').textContent = state.magenta;
-      document.getElementById('yellow').value = state.yellow;
-      document.getElementById('yellowValue').textContent = state.yellow;
+      syncAllSlidersFromState();
 
       // Update film type buttons
       const preset = getPresetOrFallback(state.filmPreset, state.filmType);
