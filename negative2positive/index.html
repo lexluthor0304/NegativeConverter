@@ -803,6 +803,10 @@
       max-height: 200px;
       overflow-y: auto;
       border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      background: var(--bg-secondary);
     }
 
     .file-list-header {
@@ -2478,6 +2482,17 @@
       if (saveSettingsBtn) {
         saveSettingsBtn.style.display = isBatchQueue ? 'inline-flex' : 'none';
       }
+    }
+
+    function revealBatchFileList() {
+      if (!state.batchMode) return;
+
+      const controlsPanel = document.getElementById('controlsPanel');
+      const fileListSection = document.getElementById('fileListSection');
+      if (!controlsPanel || !fileListSection) return;
+
+      fileListSection.style.display = 'block';
+      controlsPanel.scrollTop = 0;
     }
 
     function updateWorkflowUI() {
@@ -4316,6 +4331,7 @@
       canvas.height = processed.height;
       goToStep(3);
       syncBatchUIState();
+      revealBatchFileList();
       updateFull();
     }
 
