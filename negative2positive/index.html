@@ -2469,6 +2469,17 @@
       guide.style.display = (state.batchMode && state.currentStep >= 3) ? 'block' : 'none';
     }
 
+    function syncBatchUIState() {
+      const isBatchQueue = state.fileQueue.length > 1;
+      state.batchMode = isBatchQueue;
+      showBatchUI(isBatchQueue);
+
+      const saveSettingsBtn = document.getElementById('saveSettingsBtn');
+      if (saveSettingsBtn) {
+        saveSettingsBtn.style.display = isBatchQueue ? 'inline-flex' : 'none';
+      }
+    }
+
     function updateWorkflowUI() {
       const steps = ['step1', 'step2', 'step3'];
       const badge = document.getElementById('statusBadge');
@@ -2505,7 +2516,7 @@
       document.getElementById('convertPositiveBtn').style.display =
         state.currentStep === 1 ? 'inline-flex' : 'none';
 
-      updateBatchStep3GuideVisibility();
+      syncBatchUIState();
     }
 
     function goToStep(step) {
@@ -4304,6 +4315,7 @@
       canvas.width = processed.width;
       canvas.height = processed.height;
       goToStep(3);
+      syncBatchUIState();
       updateFull();
     }
 
@@ -4375,6 +4387,7 @@
           displayNegative(imageData);
           showImageUI();
           goToStep(1);
+          syncBatchUIState();
         }
       } catch (err) {
         console.error('Error loading file:', err);
@@ -5876,9 +5889,7 @@
         container.appendChild(el);
       });
 
-      // Show/hide save settings button based on batch mode
-      document.getElementById('saveSettingsBtn').style.display = state.batchMode ? 'inline-flex' : 'none';
-      updateBatchStep3GuideVisibility();
+      syncBatchUIState();
     }
 
     async function switchToFile(index) {
@@ -6020,8 +6031,8 @@
     document.getElementById('clearFileListBtn').addEventListener('click', () => {
       state.fileQueue = [];
       state.currentFileIndex = 0;
-      state.batchMode = false;
-      showBatchUI(false);
+      updateFileListUI();
+      syncBatchUIState();
       updateExportButtons();
     });
 
@@ -6049,11 +6060,7 @@
         }
       }
 
-      // Enable batch mode if more than one file
-      if (state.fileQueue.length > 1) {
-        state.batchMode = true;
-        showBatchUI(true);
-      }
+      syncBatchUIState();
 
       updateFileListUI();
       updateExportButtons();
@@ -6077,8 +6084,8 @@
       // Reset state for new batch
       state.fileQueue = [];
       state.currentFileIndex = 0;
-      state.batchMode = false;
       state.cropRegion = null;
+      syncBatchUIState();
 
       addFilesToQueue(files);
 
@@ -6095,8 +6102,8 @@
       // Reset state for new batch
       state.fileQueue = [];
       state.currentFileIndex = 0;
-      state.batchMode = false;
       state.cropRegion = null;
+      syncBatchUIState();
 
       addFilesToQueue(files);
 
@@ -6125,8 +6132,8 @@
       // Reset state for new batch
       state.fileQueue = [];
       state.currentFileIndex = 0;
-      state.batchMode = false;
       state.cropRegion = null;
+      syncBatchUIState();
 
       addFilesToQueue(files);
 
