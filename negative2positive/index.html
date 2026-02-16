@@ -791,6 +791,13 @@
       margin-bottom: 12px;
     }
 
+    .workflow-guide-note {
+      margin-top: 8px;
+      margin-bottom: 0;
+      line-height: 1.5;
+      white-space: pre-line;
+    }
+
     /* File List Panel (Batch Mode) */
     .file-list-section {
       max-height: 200px;
@@ -1527,6 +1534,13 @@
             <span data-i18n="stepAdjust">Adjust colors and export</span>
           </div>
         </div>
+        <div class="info-box workflow-guide-note" id="batchStep3GuideBox" data-i18n="batchStep3Guide" style="display: none;">
+          Batch Step 3 Guide:
+          1) Adjust current image.
+          2) Click "Save Settings".
+          3) Click the next file in File List.
+          4) Repeat, then export all.
+        </div>
       </div>
 
       <!-- Film Settings (Step 2) -->
@@ -1858,7 +1872,8 @@
         batchProcess: "批量处理",
         batchProcessing: "批量处理中...",
         saveSettings: "保存设置",
-        settingsSaved: "当前图片设置已保存",
+        settingsSaved: "当前图片设置已保存。请在文件列表中点击下一张继续。",
+        batchStep3Guide: "批处理第3步指南：\n1) 调整当前图片。\n2) 点击“保存设置”。\n3) 在文件列表中点击下一张。\n4) 对需要的图片重复以上步骤。\n5) 最后点击“批量导出 (ZIP)”或“逐个下载全部”。",
         exportCurrent: "导出当前图片 (PNG)",
         exportZip: "批量导出 (ZIP)",
         exportIndividual: "逐个下载全部",
@@ -1945,7 +1960,8 @@
         batchProcess: "Batch Process",
         batchProcessing: "Batch Processing...",
         saveSettings: "Save Settings",
-        settingsSaved: "Settings saved for current image",
+        settingsSaved: "Settings saved for current image. Click the next file in File List to continue.",
+        batchStep3Guide: "Batch Step 3 Guide:\n1) Adjust the current image.\n2) Click \"Save Settings\".\n3) Click the next file in File List.\n4) Repeat for each image you want.\n5) When finished, use \"Export All (ZIP)\" or \"Download All Individually\".",
         exportCurrent: "Export Current (PNG)",
         exportZip: "Export All (ZIP)",
         exportIndividual: "Download All Individually",
@@ -2032,7 +2048,8 @@
         batchProcess: "一括処理",
         batchProcessing: "一括処理中...",
         saveSettings: "設定を保存",
-        settingsSaved: "現在の画像の設定を保存しました",
+        settingsSaved: "現在の画像の設定を保存しました。次はファイル一覧で次の画像をクリックしてください。",
+        batchStep3Guide: "一括処理ステップ3ガイド：\n1) 現在の画像を調整します。\n2) 「設定を保存」をクリックします。\n3) ファイル一覧で次の画像をクリックします。\n4) 必要な画像ぶん繰り返します。\n5) 最後に「一括出力 (ZIP)」または「すべて個別にダウンロード」を実行します。",
         exportCurrent: "現在の画像を出力 (PNG)",
         exportZip: "一括出力 (ZIP)",
         exportIndividual: "すべて個別にダウンロード",
@@ -2446,6 +2463,12 @@
     // ===========================================
     // Workflow Management
     // ===========================================
+    function updateBatchStep3GuideVisibility() {
+      const guide = document.getElementById('batchStep3GuideBox');
+      if (!guide) return;
+      guide.style.display = (state.batchMode && state.currentStep >= 3) ? 'block' : 'none';
+    }
+
     function updateWorkflowUI() {
       const steps = ['step1', 'step2', 'step3'];
       const badge = document.getElementById('statusBadge');
@@ -2481,6 +2504,8 @@
         state.currentStep === 1 ? 'inline-flex' : 'none';
       document.getElementById('convertPositiveBtn').style.display =
         state.currentStep === 1 ? 'inline-flex' : 'none';
+
+      updateBatchStep3GuideVisibility();
     }
 
     function goToStep(step) {
@@ -5853,6 +5878,7 @@
 
       // Show/hide save settings button based on batch mode
       document.getElementById('saveSettingsBtn').style.display = state.batchMode ? 'inline-flex' : 'none';
+      updateBatchStep3GuideVisibility();
     }
 
     async function switchToFile(index) {
@@ -5950,6 +5976,7 @@
 
     function showBatchUI(show) {
       document.getElementById('fileListSection').style.display = show ? 'block' : 'none';
+      updateBatchStep3GuideVisibility();
     }
 
     // Select all button
