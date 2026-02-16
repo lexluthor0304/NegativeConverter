@@ -2405,6 +2405,7 @@
 
       // Batch mode state
       batchMode: false,
+      batchSessionActive: false,
       // fileQueue item: {file, selected, status, error, settings: null | {...}}
       // settings = null means use auto-detect for film base
       fileQueue: [],
@@ -2470,22 +2471,26 @@
     function updateBatchStep3GuideVisibility() {
       const guide = document.getElementById('batchStep3GuideBox');
       if (!guide) return;
-      guide.style.display = (state.batchMode && state.currentStep >= 3) ? 'block' : 'none';
+      guide.style.display = (state.batchSessionActive && state.currentStep >= 3) ? 'block' : 'none';
     }
 
-    function syncBatchUIState() {
-      const isBatchQueue = state.fileQueue.length > 1;
-      state.batchMode = isBatchQueue;
-      showBatchUI(isBatchQueue);
+    function syncBatchUIState(options = {}) {
+      const preserveSession = options.preserveSession === true;
+      if (!preserveSession && !state.batchSessionActive && state.fileQueue.length > 1) {
+        state.batchSessionActive = true;
+      }
+
+      state.batchMode = state.batchSessionActive;
+      showBatchUI(state.batchSessionActive);
 
       const saveSettingsBtn = document.getElementById('saveSettingsBtn');
       if (saveSettingsBtn) {
-        saveSettingsBtn.style.display = isBatchQueue ? 'inline-flex' : 'none';
+        saveSettingsBtn.style.display = state.batchSessionActive ? 'inline-flex' : 'none';
       }
     }
 
     function revealBatchFileList() {
-      if (!state.batchMode) return;
+      if (!state.batchSessionActive) return;
 
       const controlsPanel = document.getElementById('controlsPanel');
       const fileListSection = document.getElementById('fileListSection');
@@ -4330,7 +4335,7 @@
       canvas.width = processed.width;
       canvas.height = processed.height;
       goToStep(3);
-      syncBatchUIState();
+      syncBatchUIState({ preserveSession: true });
       revealBatchFileList();
       updateFull();
     }
@@ -5428,6 +5433,10 @@
       state.filmBaseSet = false;
       state.currentStep = 1;
       state.lastRenderQuality = 'full';
+      state.fileQueue = [];
+      state.currentFileIndex = 0;
+      state.batchSessionActive = false;
+      state.batchMode = false;
       fullAdjustedBuffer = null;
       previewAdjustedBuffer = null;
       if (webglState.gl) {
@@ -5450,6 +5459,7 @@
 
       // Reset adjustments
       document.getElementById('resetBtn').click();
+      syncBatchUIState();
 
       // Trigger file selection
       fileInput.value = '';
@@ -6047,6 +6057,7 @@
     document.getElementById('clearFileListBtn').addEventListener('click', () => {
       state.fileQueue = [];
       state.currentFileIndex = 0;
+      state.batchSessionActive = false;
       updateFileListUI();
       syncBatchUIState();
       updateExportButtons();
@@ -6076,6 +6087,9 @@
         }
       }
 
+      if (state.fileQueue.length > 1) {
+        state.batchSessionActive = true;
+      }
       syncBatchUIState();
 
       updateFileListUI();
@@ -6101,6 +6115,7 @@
       state.fileQueue = [];
       state.currentFileIndex = 0;
       state.cropRegion = null;
+      state.batchSessionActive = false;
       syncBatchUIState();
 
       addFilesToQueue(files);
@@ -6119,6 +6134,7 @@
       state.fileQueue = [];
       state.currentFileIndex = 0;
       state.cropRegion = null;
+      state.batchSessionActive = false;
       syncBatchUIState();
 
       addFilesToQueue(files);
@@ -6149,6 +6165,7 @@
       state.fileQueue = [];
       state.currentFileIndex = 0;
       state.cropRegion = null;
+      state.batchSessionActive = false;
       syncBatchUIState();
 
       addFilesToQueue(files);
