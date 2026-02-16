@@ -83,10 +83,31 @@
       border-bottom: 1px solid var(--border);
     }
 
+    .header-left {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      min-width: 0;
+    }
+
     .app-title {
       font-size: 18px;
       font-weight: 600;
       color: var(--text-primary);
+    }
+
+    .build-badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 2px 8px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--bg-tertiary);
+      color: var(--text-secondary);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      white-space: nowrap;
     }
 
     .lang-selector {
@@ -353,6 +374,13 @@
       height: 100%;
       max-height: calc(var(--viewport-h) - 120px); /* Account for header and footer */
       min-height: 0;
+    }
+
+    /* Prevent flexbox from collapsing earlier sections (e.g. File List) when Step 3 reveals more UI. */
+    .controls-panel > .file-list-section,
+    .controls-panel > .control-section {
+      flex: 0 0 auto;
+      flex-shrink: 0;
     }
 
     .control-section {
@@ -932,6 +960,23 @@
       margin-left: 4px;
     }
 
+    /* Debug Widget (enable with ?debug=1) */
+    .debug-widget {
+      position: fixed;
+      right: 12px;
+      bottom: 12px;
+      z-index: 9999;
+      max-width: min(420px, calc(100vw - 24px));
+      background: rgba(0, 0, 0, 0.72);
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      border-radius: 10px;
+      padding: 10px 12px;
+      color: rgba(255, 255, 255, 0.92);
+      font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      white-space: pre;
+      pointer-events: none;
+    }
+
     /* Batch Progress Modal */
     .batch-progress-overlay {
       position: fixed;
@@ -1429,7 +1474,10 @@
 <body>
   <!-- Header -->
   <header class="app-header">
-    <h1 class="app-title" data-i18n="title">Negative Converter</h1>
+    <div class="header-left">
+      <h1 class="app-title" data-i18n="title">Negative Converter</h1>
+      <span class="build-badge" id="buildBadge" style="display: none;"></span>
+    </div>
     <div class="lang-selector">
       <button class="lang-btn" data-lang="zh">中文</button>
       <button class="lang-btn" data-lang="en">EN</button>
@@ -2073,6 +2121,9 @@
       }
     };
 
+    const DEBUG_UI = new URLSearchParams(window.location.search).get('debug') === '1';
+    const BUILD_ID = '2026-02-16-filelist-lock-1';
+
     let currentLang = 'en';
 
     function setLanguage(lang) {
@@ -2098,6 +2149,14 @@
     const browserLang = navigator.language.startsWith('ja') ? 'ja'
       : navigator.language.startsWith('zh') ? 'zh' : 'en';
     setLanguage(browserLang);
+
+    if (DEBUG_UI) {
+      const badge = document.getElementById('buildBadge');
+      if (badge) {
+        badge.style.display = 'inline-flex';
+        badge.textContent = `build ${BUILD_ID}`;
+      }
+    }
 
     // Language selector
     document.querySelectorAll('.lang-btn').forEach(btn => {
@@ -2468,6 +2527,67 @@
     // ===========================================
     // Workflow Management
     // ===========================================
+    const debugUI = {
+      fileListSetCalls: 0,
+      lastFileListVisible: null,
+      lastFileListReason: ''
+    };
+
+    function ensureDebugWidget() {
+      if (!DEBUG_UI) return null;
+      let el = document.getElementById('debugWidget');
+      if (el) return el;
+      el = document.createElement('div');
+      el.id = 'debugWidget';
+      el.className = 'debug-widget';
+      document.body.appendChild(el);
+      return el;
+    }
+
+    function updateDebugWidget() {
+      if (!DEBUG_UI) return;
+      const el = ensureDebugWidget();
+      if (!el) return;
+
+      const fileListEl = document.getElementById('fileListSection');
+      const fileListDisplay = fileListEl
+        ? (fileListEl.style.display || getComputedStyle(fileListEl).display)
+        : 'n/a';
+      const fileListRect = fileListEl ? fileListEl.getBoundingClientRect() : null;
+      const fileListH = fileListRect ? Math.round(fileListRect.height) : 0;
+
+      el.textContent =
+        `BUILD ${BUILD_ID}\n` +
+        `step=${state.currentStep} queue=${state.fileQueue.length} idx=${state.currentFileIndex}\n` +
+        `batchSessionActive=${state.batchSessionActive} batchMode=${state.batchMode}\n` +
+        `fileList display=${fileListDisplay} h=${fileListH}\n` +
+        `fileList last=${debugUI.lastFileListVisible} reason=${debugUI.lastFileListReason}\n` +
+        `fileList setCalls=${debugUI.fileListSetCalls}`;
+    }
+
+    function setFileListVisible(visible, reason) {
+      const fileListEl = document.getElementById('fileListSection');
+      if (!fileListEl) return;
+
+      // Once a batch session is active, keep the list visible unless the session is explicitly cleared.
+      if (!visible && state.batchSessionActive) {
+        visible = true;
+        reason = `${reason || 'unknown'} (blocked)`;
+      }
+
+      const nextDisplay = visible ? 'block' : 'none';
+      if (fileListEl.style.display !== nextDisplay) {
+        fileListEl.style.display = nextDisplay;
+      }
+
+      if (DEBUG_UI) {
+        debugUI.fileListSetCalls++;
+        debugUI.lastFileListVisible = visible;
+        debugUI.lastFileListReason = reason || '';
+        updateDebugWidget();
+      }
+    }
+
     function updateBatchStep3GuideVisibility() {
       const guide = document.getElementById('batchStep3GuideBox');
       if (!guide) return;
@@ -2475,28 +2595,26 @@
     }
 
     function syncBatchUIState(options = {}) {
-      const preserveSession = options.preserveSession === true;
-      if (!preserveSession && !state.batchSessionActive && state.fileQueue.length > 1) {
-        state.batchSessionActive = true;
-      }
+      if (state.fileQueue.length > 1) state.batchSessionActive = true;
 
       state.batchMode = state.batchSessionActive;
-      showBatchUI(state.batchSessionActive);
+      showBatchUI(state.batchSessionActive, options.reason || 'syncBatchUIState');
 
       const saveSettingsBtn = document.getElementById('saveSettingsBtn');
       if (saveSettingsBtn) {
         saveSettingsBtn.style.display = state.batchSessionActive ? 'inline-flex' : 'none';
       }
+
+      updateDebugWidget();
     }
 
-    function revealBatchFileList() {
+    function revealBatchFileList(reason = 'revealBatchFileList') {
       if (!state.batchSessionActive) return;
 
       const controlsPanel = document.getElementById('controlsPanel');
-      const fileListSection = document.getElementById('fileListSection');
-      if (!controlsPanel || !fileListSection) return;
+      if (!controlsPanel) return;
 
-      fileListSection.style.display = 'block';
+      setFileListVisible(true, reason);
       controlsPanel.scrollTop = 0;
     }
 
@@ -2536,7 +2654,7 @@
       document.getElementById('convertPositiveBtn').style.display =
         state.currentStep === 1 ? 'inline-flex' : 'none';
 
-      syncBatchUIState();
+      syncBatchUIState({ reason: 'updateWorkflowUI' });
     }
 
     function goToStep(step) {
@@ -4335,8 +4453,8 @@
       canvas.width = processed.width;
       canvas.height = processed.height;
       goToStep(3);
-      syncBatchUIState({ preserveSession: true });
-      revealBatchFileList();
+      syncBatchUIState({ reason: 'processNegative' });
+      revealBatchFileList('processNegative');
       updateFull();
     }
 
@@ -4408,7 +4526,7 @@
           displayNegative(imageData);
           showImageUI();
           goToStep(1);
-          syncBatchUIState();
+          syncBatchUIState({ reason: 'loadFile' });
         }
       } catch (err) {
         console.error('Error loading file:', err);
@@ -5459,7 +5577,7 @@
 
       // Reset adjustments
       document.getElementById('resetBtn').click();
-      syncBatchUIState();
+      syncBatchUIState({ reason: 'newImageBtn' });
 
       // Trigger file selection
       fileInput.value = '';
@@ -5915,7 +6033,7 @@
         container.appendChild(el);
       });
 
-      syncBatchUIState();
+      syncBatchUIState({ reason: 'updateFileListUI' });
     }
 
     async function switchToFile(index) {
@@ -6011,8 +6129,8 @@
       document.getElementById('exportAllBtn').disabled = selectedCount < 1;
     }
 
-    function showBatchUI(show) {
-      document.getElementById('fileListSection').style.display = show ? 'block' : 'none';
+    function showBatchUI(show, reason) {
+      setFileListVisible(show, reason || 'showBatchUI');
       updateBatchStep3GuideVisibility();
     }
 
@@ -6059,7 +6177,7 @@
       state.currentFileIndex = 0;
       state.batchSessionActive = false;
       updateFileListUI();
-      syncBatchUIState();
+      syncBatchUIState({ reason: 'clearFileListBtn' });
       updateExportButtons();
     });
 
@@ -6090,7 +6208,7 @@
       if (state.fileQueue.length > 1) {
         state.batchSessionActive = true;
       }
-      syncBatchUIState();
+      syncBatchUIState({ reason: 'addFilesToQueue' });
 
       updateFileListUI();
       updateExportButtons();
@@ -6116,7 +6234,7 @@
       state.currentFileIndex = 0;
       state.cropRegion = null;
       state.batchSessionActive = false;
-      syncBatchUIState();
+      syncBatchUIState({ reason: 'fileInput_change_reset' });
 
       addFilesToQueue(files);
 
@@ -6135,7 +6253,7 @@
       state.currentFileIndex = 0;
       state.cropRegion = null;
       state.batchSessionActive = false;
-      syncBatchUIState();
+      syncBatchUIState({ reason: 'folderInput_change_reset' });
 
       addFilesToQueue(files);
 
@@ -6166,7 +6284,7 @@
       state.currentFileIndex = 0;
       state.cropRegion = null;
       state.batchSessionActive = false;
-      syncBatchUIState();
+      syncBatchUIState({ reason: 'drop_reset' });
 
       addFilesToQueue(files);
 
