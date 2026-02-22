@@ -37,6 +37,7 @@ This is a browser-based tool built with HTML and JavaScript that converts scanne
 - Includes a simplified AHD demosaicing algorithm for Bayer-pattern raw data  
 - Color adjustment logic is based on RGB ↔ HSL and RGB ↔ CMY conversions  
 - Film preset metadata is loaded from JSON and grouped dynamically by film type in the UI  
+- Auto frame detection uses OpenCV.js from `negative2positive/vendor/opencv/opencv-4.12.0.js` with jsDelivr fallback  
 - Performance optimizations include:
   - Cached DOM access
   - Offscreen canvas reuse

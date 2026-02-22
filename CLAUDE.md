@@ -28,7 +28,8 @@ negative2positive/
 ├── index.js      # LibRaw ES module wrapper
 ├── worker.js     # Web Worker for async WASM processing
 ├── libraw.js     # WASM module binding
-└── libraw.wasm   # Compiled LibRaw library for RAW format support
+├── libraw.wasm   # Compiled LibRaw library for RAW format support
+└── vendor/opencv/opencv-4.12.0.js  # Local OpenCV.js fallback for auto frame detection
 ```
 
 ### Key Technologies
@@ -38,6 +39,7 @@ negative2positive/
 - **jQuery 3.6.0** for DOM manipulation
 - **UPNG.js** for 16-bit PNG support
 - **UTIF.js** for TIFF/DNG parsing (iPhone ProRaw)
+- **OpenCV.js** for automatic border detection / auto crop / auto rotation
 
 ### Dual-Canvas Rendering Strategy
 The app uses two canvases for performance:
