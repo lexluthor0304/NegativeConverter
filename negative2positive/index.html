@@ -342,6 +342,19 @@
       color: var(--success);
     }
 
+    .current-file-label {
+      max-width: min(40vw, 460px);
+      padding: 4px 8px;
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.05);
+      color: var(--text-secondary);
+      font-size: 11px;
+      line-height: 1.3;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
     /* Histogram */
     .histogram-container {
       background: var(--bg-secondary);
@@ -951,6 +964,10 @@
       border-left: 3px solid var(--success);
     }
 
+    .file-list-item.is-dirty {
+      border-left: 3px solid var(--warning);
+    }
+
     .file-list-settings-badge {
       font-size: 9px;
       padding: 1px 4px;
@@ -958,6 +975,16 @@
       color: white;
       border-radius: 3px;
       margin-left: 4px;
+    }
+
+    .file-list-unsaved-badge {
+      font-size: 9px;
+      padding: 1px 4px;
+      background: var(--warning);
+      color: #111;
+      border-radius: 3px;
+      margin-left: 4px;
+      font-weight: 600;
     }
 
     /* Debug Widget (enable with ?debug=1) */
@@ -1269,12 +1296,14 @@
       }
 
       .status-badge,
+      .current-file-label,
       .toolbar-btn,
       .rotate-controls {
         flex-shrink: 0;
       }
 
-      .status-badge {
+      .status-badge,
+      .current-file-label {
         white-space: nowrap;
       }
 
@@ -1394,7 +1423,7 @@
       .footer-right {
         width: 100%;
         display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
+        grid-template-columns: repeat(3, minmax(0, 1fr));
       }
 
       .footer-btn {
@@ -1512,6 +1541,7 @@
       <!-- Toolbar -->
       <div class="preview-toolbar" id="previewToolbar" style="display: none;">
         <span class="status-badge step1" id="statusBadge" data-i18n="step1">Step 1: Crop</span>
+        <span class="current-file-label" id="currentFileLabel" style="display: none;"></span>
         <div class="toolbar-separator"></div>
         <button class="toolbar-btn" id="rotateLeftBtn" title="Rotate Left">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2.5 2v6h6M2.66 12a10 10 0 11.8 4"/></svg>
@@ -1536,6 +1566,7 @@
         <button class="toolbar-btn" id="cropBtn" data-i18n="crop">Crop</button>
         <button class="toolbar-btn" id="applyCropBtn" style="display: none;" data-i18n="applyCrop">Apply Crop</button>
         <button class="toolbar-btn" id="cancelCropBtn" style="display: none;" data-i18n="cancelCrop">Cancel</button>
+        <button class="toolbar-btn" id="addFilesToolbarBtn" data-i18n="addFiles">Add</button>
         <div class="toolbar-separator" id="convertSeparator" style="display: none;"></div>
         <button class="toolbar-btn primary" id="convertBtn" style="display: none;" data-i18n="convert">Convert Negative</button>
         <button class="toolbar-btn primary" id="convertPositiveBtn" style="display: none;" data-i18n="convertPositive">Convert Positive</button>
@@ -1610,7 +1641,7 @@
             <option value="generic_color" data-i18n="genericColor">Generic Color</option>
           </select>
           <div id="filmBaseControls">
-            <div class="info-box" data-i18n="filmBaseInfo">Click on the orange film base area (unexposed edge) to sample the mask color</div>
+            <div class="info-box" data-i18n="filmBaseInfo">Sample the unexposed film edge if available. If the border is already cropped out, use Auto Detect or reuse a reference frame.</div>
             <div class="film-base-buttons">
               <button class="film-base-btn" id="sampleBaseBtn" data-i18n="sampleBase">Sample Film Base</button>
               <button class="film-base-btn" id="autoDetectBtn" data-i18n="autoDetect">Auto Detect</button>
@@ -1804,6 +1835,7 @@
     </div>
     <div class="footer-right">
       <button class="footer-btn" id="saveSettingsBtn" style="display: none;" data-i18n="saveSettings">Save Settings</button>
+      <button class="footer-btn" id="applyToSelectedBtn" style="display: none;" data-i18n="applyToSelected">Apply to Selected</button>
       <div class="export-dropdown">
         <button class="footer-btn primary" id="exportBtn" data-i18n="exportPng">Export PNG</button>
         <div class="export-dropdown-menu" id="exportDropdownMenu">
@@ -1883,7 +1915,7 @@
         genericColor: "通用彩色",
         genericBW: "通用黑白",
         genericPositive: "通用正片",
-        filmBaseInfo: "点击图像边缘的橙色胶片基底区域来采样色罩颜色",
+        filmBaseInfo: "若保留了未曝光边缘，可点击橙色胶片基底取样；若边缘已裁掉，请使用“自动检测”或复用参考底片参数。",
         positiveModeInfo: "正片模式无需采样胶片基底。",
         sampleBase: "采样胶片基底",
         autoDetect: "自动检测",
@@ -1915,6 +1947,7 @@
         bwFilms: "黑白负片",
         positiveFilms: "正片",
         processing: "处理中...",
+        currentFile: "当前文件",
         selectFolder: "选择文件夹",
         fileList: "文件列表",
         selectAll: "全选",
@@ -1924,8 +1957,11 @@
         batchProcess: "批量处理",
         batchProcessing: "批量处理中...",
         saveSettings: "保存设置",
-        settingsSaved: "当前图片设置已保存。请在文件列表中点击下一张继续。",
-        batchStep3Guide: "批处理第3步指南：\n1) 调整当前图片。\n2) 点击“保存设置”。\n3) 在文件列表中点击下一张。\n4) 对需要的图片重复以上步骤。\n5) 最后点击“批量导出 (ZIP)”或“逐个下载全部”。",
+        settingsSaved: "当前图片设置已保存。",
+        applyToSelected: "应用到已选中",
+        appliedToSelected: "已将当前设置应用到 {count} 张图片。",
+        noSelectedFiles: "没有选中的图片可应用设置。",
+        batchStep3Guide: "批处理第3步指南：\n1) 调整当前图片。\n2) 切换图片或导出时会自动保存。\n3) 也可手动点击“保存设置”。\n4) 如需整卷统一参数，可点“应用到已选中”。\n5) 最后点击“批量导出 (ZIP)”或“逐个下载全部”。",
         exportCurrent: "导出当前图片 (PNG)",
         exportZip: "批量导出 (ZIP)",
         exportIndividual: "逐个下载全部",
@@ -1933,6 +1969,7 @@
         processingStatus: "处理中",
         done: "已完成",
         error: "错误",
+        unsaved: "未保存",
         configured: "已配置",
         customSettings: "已设置",
         autoDetect: "自动",
@@ -1971,7 +2008,7 @@
         genericColor: "Generic Color",
         genericBW: "Generic B&W",
         genericPositive: "Generic Positive",
-        filmBaseInfo: "Click on the orange film base area (unexposed edge) to sample the mask color",
+        filmBaseInfo: "Sample the unexposed film edge if available. If the border is already cropped out, use Auto Detect or reuse a reference frame.",
         positiveModeInfo: "Positive slide film mode does not require film base sampling.",
         sampleBase: "Sample Film Base",
         autoDetect: "Auto Detect",
@@ -2003,6 +2040,7 @@
         bwFilms: "B&W Films",
         positiveFilms: "Positive Slides",
         processing: "Processing...",
+        currentFile: "Current File",
         selectFolder: "Select Folder",
         fileList: "File List",
         selectAll: "All",
@@ -2012,8 +2050,11 @@
         batchProcess: "Batch Process",
         batchProcessing: "Batch Processing...",
         saveSettings: "Save Settings",
-        settingsSaved: "Settings saved for current image. Click the next file in File List to continue.",
-        batchStep3Guide: "Batch Step 3 Guide:\n1) Adjust the current image.\n2) Click \"Save Settings\".\n3) Click the next file in File List.\n4) Repeat for each image you want.\n5) When finished, use \"Export All (ZIP)\" or \"Download All Individually\".",
+        settingsSaved: "Settings saved for current image.",
+        applyToSelected: "Apply to Selected",
+        appliedToSelected: "Applied current settings to {count} image(s).",
+        noSelectedFiles: "No selected images to apply settings.",
+        batchStep3Guide: "Batch Step 3 Guide:\n1) Adjust the current image.\n2) Settings auto-save when switching files or exporting.\n3) You can still click \"Save Settings\" manually.\n4) Use \"Apply to Selected\" for roll-wide baseline settings.\n5) When finished, use \"Export All (ZIP)\" or \"Download All Individually\".",
         exportCurrent: "Export Current (PNG)",
         exportZip: "Export All (ZIP)",
         exportIndividual: "Download All Individually",
@@ -2021,6 +2062,7 @@
         processingStatus: "Processing",
         done: "Done",
         error: "Error",
+        unsaved: "Unsaved",
         configured: "configured",
         customSettings: "Custom",
         autoDetect: "Auto",
@@ -2059,7 +2101,7 @@
         genericColor: "汎用カラー",
         genericBW: "汎用白黒",
         genericPositive: "汎用ポジ",
-        filmBaseInfo: "オレンジ色のフィルムベース部分をクリックしてマスク色を取得",
+        filmBaseInfo: "未露光のフィルム端が残っていればそこをサンプリングしてください。端をトリミング済みなら「自動検出」または参照コマの値を使用してください。",
         positiveModeInfo: "ポジフィルムモードではフィルムベースのサンプリングは不要です。",
         sampleBase: "フィルムベースを取得",
         autoDetect: "自動検出",
@@ -2091,6 +2133,7 @@
         bwFilms: "白黒フィルム",
         positiveFilms: "ポジフィルム",
         processing: "処理中...",
+        currentFile: "現在のファイル",
         selectFolder: "フォルダ選択",
         fileList: "ファイル一覧",
         selectAll: "全選択",
@@ -2100,8 +2143,11 @@
         batchProcess: "一括処理",
         batchProcessing: "一括処理中...",
         saveSettings: "設定を保存",
-        settingsSaved: "現在の画像の設定を保存しました。次はファイル一覧で次の画像をクリックしてください。",
-        batchStep3Guide: "一括処理ステップ3ガイド：\n1) 現在の画像を調整します。\n2) 「設定を保存」をクリックします。\n3) ファイル一覧で次の画像をクリックします。\n4) 必要な画像ぶん繰り返します。\n5) 最後に「一括出力 (ZIP)」または「すべて個別にダウンロード」を実行します。",
+        settingsSaved: "現在の画像の設定を保存しました。",
+        applyToSelected: "選択中に適用",
+        appliedToSelected: "現在の設定を {count} 枚に適用しました。",
+        noSelectedFiles: "設定を適用できる選択画像がありません。",
+        batchStep3Guide: "一括処理ステップ3ガイド：\n1) 現在の画像を調整します。\n2) 画像切替または書き出し時に自動保存されます。\n3) 必要なら「設定を保存」も使えます。\n4) ロール全体に適用する場合は「選択中に適用」を使います。\n5) 最後に「一括出力 (ZIP)」または「すべて個別にダウンロード」を実行します。",
         exportCurrent: "現在の画像を出力 (PNG)",
         exportZip: "一括出力 (ZIP)",
         exportIndividual: "すべて個別にダウンロード",
@@ -2109,6 +2155,7 @@
         processingStatus: "処理中",
         done: "完了",
         error: "エラー",
+        unsaved: "未保存",
         configured: "設定済",
         customSettings: "設定済",
         autoDetect: "自動",
@@ -2122,7 +2169,7 @@
     };
 
     const DEBUG_UI = new URLSearchParams(window.location.search).get('debug') === '1';
-    const BUILD_ID = '2026-02-16-filelist-lock-1';
+    const BUILD_ID = '2026-02-22-batch-export-consistency-1';
 
     let currentLang = 'en';
 
@@ -2143,6 +2190,7 @@
           el.label = i18n[lang][key];
         }
       });
+      updateCurrentFileLabel();
     }
 
     // Detect language
@@ -2465,7 +2513,7 @@
       // Batch mode state
       batchMode: false,
       batchSessionActive: false,
-      // fileQueue item: {file, selected, status, error, settings: null | {...}}
+      // fileQueue item: {file, selected, status, error, settings: null | {...}, isDirty: boolean}
       // settings = null means use auto-detect for film base
       fileQueue: [],
       currentFileIndex: 0,
@@ -2601,10 +2649,16 @@
       showBatchUI(state.batchSessionActive, options.reason || 'syncBatchUIState');
 
       const saveSettingsBtn = document.getElementById('saveSettingsBtn');
+      const applyToSelectedBtn = document.getElementById('applyToSelectedBtn');
+      const showBatchStep3Actions = state.batchSessionActive && state.currentStep >= 3;
       if (saveSettingsBtn) {
-        saveSettingsBtn.style.display = state.batchSessionActive ? 'inline-flex' : 'none';
+        saveSettingsBtn.style.display = showBatchStep3Actions ? 'inline-flex' : 'none';
+      }
+      if (applyToSelectedBtn) {
+        applyToSelectedBtn.style.display = showBatchStep3Actions ? 'inline-flex' : 'none';
       }
 
+      updateCurrentFileLabel();
       updateDebugWidget();
     }
 
@@ -2616,6 +2670,28 @@
 
       setFileListVisible(true, reason);
       controlsPanel.scrollTop = 0;
+    }
+
+    function getCurrentQueueItem() {
+      if (state.currentFileIndex < 0 || state.currentFileIndex >= state.fileQueue.length) return null;
+      return state.fileQueue[state.currentFileIndex];
+    }
+
+    function updateCurrentFileLabel() {
+      const label = document.getElementById('currentFileLabel');
+      if (!label) return;
+
+      const item = getCurrentQueueItem();
+      if (!item || !item.file) {
+        label.style.display = 'none';
+        label.textContent = '';
+        return;
+      }
+
+      const prefix = i18n[currentLang].currentFile || 'Current File';
+      const unsavedText = item.isDirty ? ` • ${i18n[currentLang].unsaved || 'Unsaved'}` : '';
+      label.textContent = `${prefix}: ${item.file.name}${unsavedText}`;
+      label.style.display = 'inline-flex';
     }
 
     function updateWorkflowUI() {
@@ -3600,6 +3676,7 @@
       state.curvePoints[currentCurveChannel] = points;
       updateCurveFromPoints(currentCurveChannel);
       renderCurve();
+      markCurrentFileDirty();
       scheduleFullUpdate();
     }
 
@@ -3625,6 +3702,7 @@
         updateCurveFromPoints(channel);
       });
       renderCurve();
+      markCurrentFileDirty();
       scheduleFullUpdate();
     });
 
@@ -3677,6 +3755,7 @@
 
         draggingPoint = insertIndex;
         updateCurveFromPoints(currentCurveChannel);
+        markCurrentFileDirty();
       }
       renderCurve();
     });
@@ -3703,6 +3782,7 @@
 
         updateCurveFromPoints(currentCurveChannel);
         renderCurve();
+        markCurrentFileDirty();
         schedulePreviewUpdate();
       } else {
         // Update hover state
@@ -3740,6 +3820,7 @@
         state.curvePoints[currentCurveChannel].splice(nearPoint, 1);
         updateCurveFromPoints(currentCurveChannel);
         renderCurve();
+        markCurrentFileDirty();
         scheduleFullUpdate();
       }
     });
@@ -3764,6 +3845,7 @@
         points.splice(insertIndex, 0, newPoint);
         draggingPoint = insertIndex;
         updateCurveFromPoints(currentCurveChannel);
+        markCurrentFileDirty();
       }
 
       activeCurvePointerId = e.pointerId;
@@ -3791,6 +3873,7 @@
 
       updateCurveFromPoints(currentCurveChannel);
       renderCurve();
+      markCurrentFileDirty();
       schedulePreviewUpdate();
     }, { passive: false });
 
@@ -4721,6 +4804,7 @@
       state.filmBase = autoDetectFilmBase(sourceData);
       state.filmBaseSet = true;
       updateFilmBasePreview();
+      markCurrentFileDirty();
     });
 
     document.getElementById('applyConvertBtn').addEventListener('click', () => {
@@ -4730,6 +4814,7 @@
         state.filmBase = autoDetectFilmBase(sourceData);
         state.filmBaseSet = true;
         updateFilmBasePreview();
+        markCurrentFileDirty();
       }
       processNegative();
     });
@@ -4974,6 +5059,7 @@
         glCanvas.style.cursor = 'default';
         hideLoupe();
         updateFilmBasePreview();
+        markCurrentFileDirty();
       } else if (state.samplingMode === 'whiteBalance') {
         // Sample from processed image (post-inversion)
         if (!state.processedImageData) return;
@@ -5001,6 +5087,7 @@
         glCanvas.style.cursor = 'default';
         hideLoupe();
         updateWBSliders();
+        markCurrentFileDirty();
         updateFull();
       }
     }
@@ -5027,6 +5114,7 @@
         setFilmTypeButtons(state.filmType);
         updateFilmModeUI();
 
+        markCurrentFileDirty();
         schedulePreviewUpdate();
       });
     });
@@ -5042,6 +5130,7 @@
       setFilmTypeButtons(state.filmType);
       updateFilmModeUI();
 
+      markCurrentFileDirty();
       schedulePreviewUpdate();
     });
 
@@ -5116,6 +5205,7 @@
         const value = normalize(rawValue);
         state[stateKey] = value;
         syncUI(value);
+        markCurrentFileDirty();
         schedulePreviewUpdate();
         if (commitFull) scheduleFullUpdate();
       };
@@ -5134,6 +5224,7 @@
         const value = normalize(parsed);
         state[stateKey] = value;
         slider.value = String(value);
+        markCurrentFileDirty();
         schedulePreviewUpdate();
       });
 
@@ -5248,6 +5339,7 @@
       transformCtx.drawImage(offCanvas, 0, 0);
 
       adjustCanvasDisplay(newW, newH);
+      markCurrentFileDirty();
     }
 
     function applyMirror() {
@@ -5279,6 +5371,7 @@
       transformCanvas.height = h;
       transformCtx.drawImage(offCanvas, 0, 0);
       adjustCanvasDisplay(w, h);
+      markCurrentFileDirty();
     }
 
     document.getElementById('rotateLeftBtn').addEventListener('click', () => applyRotation(-90));
@@ -5462,6 +5555,7 @@
 
       state.croppedImageData = croppedData;
       displayNegative(croppedData);
+      markCurrentFileDirty();
 
       state.cropping = false;
       state.croppingActive = false;
@@ -5486,6 +5580,7 @@
       renderPresetOptions(state.filmPreset);
       setFilmTypeButtons(state.filmType);
       updateFilmModeUI();
+      markCurrentFileDirty();
       goToStep(2);
     });
 
@@ -5512,6 +5607,7 @@
       updateSlidersFromState();
       initCurves(true);
       renderCurve();
+      markCurrentFileDirty();
       updateFull();
     });
 
@@ -5536,6 +5632,7 @@
         displayNegative(state.originalImageData);
         goToStep(1);
         document.getElementById('resetBtn').click();
+        markCurrentFileDirty();
       }
     });
 
@@ -5609,25 +5706,36 @@
       exportDropdownMenu.classList.remove('show');
     });
 
-    function exportSingle() {
-      ensureFullRender();
-
+    async function exportSingle() {
       const format = state.exportFormat;
       const ext = format === 'jpeg' ? '.jpg' : '.png';
       const mimeType = format === 'jpeg' ? 'image/jpeg' : 'image/png';
       const quality = format === 'jpeg' ? state.jpegQuality / 100 : undefined;
 
+      const currentItem = getCurrentQueueItem();
+      if (currentItem && state.currentStep >= 3 && state.processedImageData) {
+        persistCurrentFileSettings({ silent: true });
+        const adjusted = await processFileWithSettings(currentItem.file, currentItem.settings);
+        const blob = await imageDataToBlob(adjusted, format, state.jpegQuality);
+        const link = document.createElement('a');
+        link.download = currentItem.file.name.replace(/\.[^.]+$/, '_converted' + ext);
+        link.href = URL.createObjectURL(blob);
+        link.click();
+        URL.revokeObjectURL(link.href);
+        return;
+      }
+
+      ensureFullRender();
       const dataURL = canvas.toDataURL(mimeType, quality);
       const link = document.createElement('a');
-      const fileName = state.fileQueue.length > 0 && state.fileQueue[state.currentFileIndex]
-        ? state.fileQueue[state.currentFileIndex].file.name.replace(/\.[^.]+$/, '_converted' + ext)
-        : 'converted_negative' + ext;
-      link.download = fileName;
+      link.download = 'converted_negative' + ext;
       link.href = dataURL;
       link.click();
     }
 
-    document.getElementById('exportSingleBtn').addEventListener('click', exportSingle);
+    document.getElementById('exportSingleBtn').addEventListener('click', async () => {
+      await exportSingle();
+    });
 
     document.getElementById('exportZipBtn').addEventListener('click', async () => {
       await exportBatchAsZip();
@@ -5703,6 +5811,100 @@
           b: new Uint8Array(state.curves.b)
         }
       };
+    }
+
+    function cloneSettings(settings) {
+      if (!settings) return null;
+      return {
+        cropRegion: settings.cropRegion ? { ...settings.cropRegion } : null,
+        filmType: settings.filmType,
+        filmPreset: settings.filmPreset,
+        filmBase: { ...settings.filmBase },
+        exposure: settings.exposure,
+        contrast: settings.contrast,
+        highlights: settings.highlights,
+        shadows: settings.shadows,
+        temperature: settings.temperature,
+        tint: settings.tint,
+        vibrance: settings.vibrance,
+        saturation: settings.saturation,
+        cyan: settings.cyan,
+        magenta: settings.magenta,
+        yellow: settings.yellow,
+        wbR: settings.wbR,
+        wbG: settings.wbG,
+        wbB: settings.wbB,
+        curvePoints: {
+          r: settings.curvePoints.r.map(p => ({ ...p })),
+          g: settings.curvePoints.g.map(p => ({ ...p })),
+          b: settings.curvePoints.b.map(p => ({ ...p }))
+        },
+        curves: {
+          r: new Uint8Array(settings.curves.r),
+          g: new Uint8Array(settings.curves.g),
+          b: new Uint8Array(settings.curves.b)
+        }
+      };
+    }
+
+    function markCurrentFileDirty() {
+      const item = getCurrentQueueItem();
+      if (!item) return;
+      if (item.isDirty) return;
+      item.isDirty = true;
+      if (state.batchSessionActive) {
+        updateFileListUI();
+      } else {
+        updateCurrentFileLabel();
+      }
+    }
+
+    function persistCurrentFileSettings(options = {}) {
+      const { silent = false, force = false } = options;
+      const item = getCurrentQueueItem();
+      if (!item) return false;
+      if (!state.originalImageData) return false;
+      if (!force && !item.isDirty && item.settings) return false;
+
+      item.settings = extractCurrentSettings();
+      item.isDirty = false;
+      updateFileListUI();
+
+      if (!silent) {
+        alert(i18n[currentLang].settingsSaved || 'Settings saved for current image');
+      }
+      return true;
+    }
+
+    function applyCurrentSettingsToSelected() {
+      if (state.currentStep < 3 || !state.processedImageData) {
+        alert(i18n[currentLang].finishProcessing || 'Please complete the workflow (step 3) before saving settings.');
+        return;
+      }
+
+      const selectedItems = state.fileQueue.filter(item => item.selected);
+      if (selectedItems.length < 1) {
+        alert(i18n[currentLang].noSelectedFiles || 'No selected images to apply settings.');
+        return;
+      }
+
+      const baseSettings = extractCurrentSettings();
+      selectedItems.forEach(item => {
+        item.settings = cloneSettings(baseSettings);
+        item.isDirty = false;
+      });
+
+      updateFileListUI();
+      const template = i18n[currentLang].appliedToSelected || 'Applied current settings to {count} image(s).';
+      alert(template.replace('{count}', String(selectedItems.length)));
+    }
+
+    function getSettingsForExport(index, item) {
+      if (!item) return null;
+      if (index === state.currentFileIndex && (item.isDirty || !item.settings)) {
+        persistCurrentFileSettings({ silent: true, force: true });
+      }
+      return item.settings || null;
     }
 
     function applyAdjustmentsWithSettings(imageData, settings) {
@@ -5897,16 +6099,9 @@
           updateBatchProgress(processedCount, selectedFiles.length, item.file.name);
 
           try {
-            let blob;
-            // If this is the current file and it's displayed, use displayed data
-            if (index === state.currentFileIndex && state.currentStep >= 3) {
-              ensureFullRender();
-              blob = await imageDataToBlob(state.displayImageData);
-            } else {
-              // Process with saved settings or auto-detect
-              const adjusted = await processFileWithSettings(item.file, item.settings);
-              blob = await imageDataToBlob(adjusted);
-            }
+            const settingsForFile = getSettingsForExport(index, item);
+            const adjusted = await processFileWithSettings(item.file, settingsForFile);
+            const blob = await imageDataToBlob(adjusted);
 
             const ext = state.exportFormat === 'jpeg' ? '.jpg' : '.png';
             const name = item.file.name.replace(/\.[^.]+$/, '_converted' + ext);
@@ -5956,14 +6151,9 @@
           updateBatchProgress(processedCount, selectedFiles.length, item.file.name);
 
           try {
-            let blob;
-            if (index === state.currentFileIndex && state.currentStep >= 3) {
-              ensureFullRender();
-              blob = await imageDataToBlob(state.displayImageData);
-            } else {
-              const adjusted = await processFileWithSettings(item.file, item.settings);
-              blob = await imageDataToBlob(adjusted);
-            }
+            const settingsForFile = getSettingsForExport(index, item);
+            const adjusted = await processFileWithSettings(item.file, settingsForFile);
+            const blob = await imageDataToBlob(adjusted);
 
             const ext = state.exportFormat === 'jpeg' ? '.jpg' : '.png';
             const name = item.file.name.replace(/\.[^.]+$/, '_converted' + ext);
@@ -6005,14 +6195,16 @@
         el.className = 'file-list-item';
         if (index === state.currentFileIndex) el.classList.add('active');
         if (item.settings) el.classList.add('has-settings');
+        if (item.isDirty) el.classList.add('is-dirty');
 
         const statusClass = item.status;
         const statusText = i18n[currentLang][item.status === 'processing' ? 'processingStatus' : item.status] || item.status;
         const settingsBadge = item.settings ? `<span class="file-list-settings-badge">${i18n[currentLang].customSettings || 'Custom'}</span>` : '';
+        const unsavedBadge = item.isDirty ? `<span class="file-list-unsaved-badge">${i18n[currentLang].unsaved || 'Unsaved'}</span>` : '';
 
         el.innerHTML = `
           <input type="checkbox" class="file-list-checkbox" ${item.selected ? 'checked' : ''} data-index="${index}">
-          <span class="file-list-name">${item.file.name}${settingsBadge}</span>
+          <span class="file-list-name">${item.file.name}${settingsBadge}${unsavedBadge}</span>
           <span class="file-list-status ${statusClass}">${statusText}</span>
         `;
 
@@ -6040,6 +6232,7 @@
       if (index < 0 || index >= state.fileQueue.length) return;
       if (index === state.currentFileIndex) return;
 
+      persistCurrentFileSettings({ silent: true });
       state.currentFileIndex = index;
       const fileItem = state.fileQueue[index];
 
@@ -6049,6 +6242,7 @@
       // If this file has saved settings, restore them
       if (fileItem.settings) {
         restoreSettings(fileItem.settings);
+        fileItem.isDirty = false;
       }
 
       updateFileListUI();
@@ -6056,13 +6250,7 @@
 
     // Save current settings to the current file's queue entry
     function saveCurrentFileSettings() {
-      if (state.currentFileIndex < 0 || state.currentFileIndex >= state.fileQueue.length) return;
-
-      const settings = extractCurrentSettings();
-      state.fileQueue[state.currentFileIndex].settings = settings;
-
-      updateFileListUI();
-      alert(i18n[currentLang].settingsSaved || 'Settings saved for current image');
+      persistCurrentFileSettings({ silent: false, force: true });
     }
 
     // Restore settings from a saved settings object
@@ -6157,8 +6345,11 @@
       saveCurrentFileSettings();
     });
 
-    // Add more files button
-    document.getElementById('addMoreFilesBtn').addEventListener('click', () => {
+    document.getElementById('applyToSelectedBtn').addEventListener('click', () => {
+      applyCurrentSettingsToSelected();
+    });
+
+    function openAddFilesPicker() {
       const input = document.createElement('input');
       input.type = 'file';
       input.multiple = true;
@@ -6166,9 +6357,22 @@
       input.onchange = (e) => {
         if (e.target.files.length > 0) {
           addFilesToQueue(Array.from(e.target.files));
+          if (!state.originalImageData && state.fileQueue.length > 0) {
+            loadFile(state.fileQueue[state.currentFileIndex].file);
+          }
         }
       };
       input.click();
+    }
+
+    // Add more files button
+    document.getElementById('addMoreFilesBtn').addEventListener('click', () => {
+      openAddFilesPicker();
+    });
+
+    // Add files button in toolbar (single image + batch)
+    document.getElementById('addFilesToolbarBtn').addEventListener('click', () => {
+      openAddFilesPicker();
     });
 
     // Clear file list button
@@ -6200,7 +6404,8 @@
             selected: true,  // Selected by default
             status: 'pending',
             error: null,
-            settings: null  // null = use auto-detect, otherwise saved settings
+            settings: null,  // null = use auto-detect, otherwise saved settings
+            isDirty: false
           });
         }
       }
