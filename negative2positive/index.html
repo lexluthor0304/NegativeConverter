@@ -7265,16 +7265,45 @@
       return true;
     }
 
-    function applyRotation(angle) {
-      if (!state.originalImageData || !Number.isFinite(angle) || angle === 0) return;
+    function mapCropRegionAfterRotation(cropRegion, sourceWidth, sourceHeight, rotatedWidth, rotatedHeight, angleDegrees) {
+      if (!cropRegion) return null;
+      const rad = (Number(angleDegrees) || 0) * Math.PI / 180;
+      const cos = Math.cos(rad);
+      const sin = Math.sin(rad);
+      const srcCx = sourceWidth / 2;
+      const srcCy = sourceHeight / 2;
+      const dstCx = rotatedWidth / 2;
+      const dstCy = rotatedHeight / 2;
 
-      const rotatedData = applyRotationToImageData(state.originalImageData, angle);
-      if (!rotatedData) return;
+      const corners = [
+        { x: cropRegion.left, y: cropRegion.top },
+        { x: cropRegion.left + cropRegion.width, y: cropRegion.top },
+        { x: cropRegion.left + cropRegion.width, y: cropRegion.top + cropRegion.height },
+        { x: cropRegion.left, y: cropRegion.top + cropRegion.height }
+      ];
 
-      state.originalImageData = rotatedData;
-      state.croppedImageData = null;
-      state.cropRegion = null;
-      state.rotationAngle = normalizeAngleDegrees((state.rotationAngle || 0) + angle);
+      const rotated = corners.map((point) => {
+        const relX = point.x - srcCx;
+        const relY = point.y - srcCy;
+        const x = relX * cos - relY * sin + dstCx;
+        const y = relX * sin + relY * cos + dstCy;
+        return { x, y };
+      });
+
+      const minX = Math.min(...rotated.map(point => point.x));
+      const maxX = Math.max(...rotated.map(point => point.x));
+      const minY = Math.min(...rotated.map(point => point.y));
+      const maxY = Math.max(...rotated.map(point => point.y));
+
+      return sanitizeCropRegionForImage({
+        left: Math.floor(minX),
+        top: Math.floor(minY),
+        width: Math.ceil(maxX - minX),
+        height: Math.ceil(maxY - minY)
+      }, { width: rotatedWidth, height: rotatedHeight });
+    }
+
+    function invalidateProcessedPipelineState() {
       state.processedImageData = null;
       state.displayImageData = null;
       state.previewSourceImageData = null;
@@ -7285,11 +7314,46 @@
         webglState.sourceDirty = true;
         webglState.sourceSize = { w: 0, h: 0 };
       }
+    }
+
+    function applyRotation(angle) {
+      if (!state.originalImageData || !Number.isFinite(angle) || angle === 0) return;
+
+      const normalizedAngle = normalizeAngleDegrees(Number(angle) || 0);
+      if (Math.abs(normalizedAngle) < 0.001) return;
+
+      const sourceOriginal = state.originalImageData;
+      const sourceCrop = state.cropRegion ? { ...state.cropRegion } : null;
+      const shouldPreserveCrop = state.currentStep >= 3 && Boolean(sourceCrop);
+
+      const rotatedData = applyRotationToImageData(sourceOriginal, normalizedAngle);
+      if (!rotatedData) return;
+
+      state.originalImageData = rotatedData;
+
+      if (shouldPreserveCrop) {
+        const mappedCrop = mapCropRegionAfterRotation(
+          sourceCrop,
+          sourceOriginal.width,
+          sourceOriginal.height,
+          rotatedData.width,
+          rotatedData.height,
+          normalizedAngle
+        );
+        state.cropRegion = mappedCrop;
+        state.croppedImageData = mappedCrop ? cropImageData(state.originalImageData, mappedCrop) : null;
+      } else {
+        state.croppedImageData = null;
+        state.cropRegion = null;
+      }
+
+      state.rotationAngle = normalizeAngleDegrees((state.rotationAngle || 0) + normalizedAngle);
+      invalidateProcessedPipelineState();
 
       if (state.currentStep >= 3) {
         processNegative();
       } else {
-        displayNegative(rotatedData);
+        displayNegative(state.croppedImageData || rotatedData);
         updateCanvasVisibility();
       }
       setStep2Mode(suggestStep2Mode());
