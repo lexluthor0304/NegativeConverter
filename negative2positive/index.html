@@ -5840,29 +5840,15 @@
 
       if (width <= 0 || height <= 0) return;
 
-      // Save crop region for batch processing
-      state.cropRegion = { left, top, width, height };
-
-      const sourceData = state.croppedImageData || state.originalImageData;
-      const croppedData = new ImageData(
-        new Uint8ClampedArray(width * height * 4),
+      const baseCrop = state.cropRegion;
+      const hasNestedCropBase = Boolean(state.croppedImageData && baseCrop);
+      const absoluteCrop = {
+        left: hasNestedCropBase ? baseCrop.left + left : left,
+        top: hasNestedCropBase ? baseCrop.top + top : top,
         width,
         height
-      );
-
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          const srcIdx = ((top + y) * sourceData.width + left + x) * 4;
-          const dstIdx = (y * width + x) * 4;
-          croppedData.data[dstIdx] = sourceData.data[srcIdx];
-          croppedData.data[dstIdx + 1] = sourceData.data[srcIdx + 1];
-          croppedData.data[dstIdx + 2] = sourceData.data[srcIdx + 2];
-          croppedData.data[dstIdx + 3] = 255;
-        }
-      }
-
-      state.croppedImageData = croppedData;
-      displayNegative(croppedData);
+      };
+      applyCropRegionToLoadedImage(absoluteCrop, { refreshDisplay: true });
       setStep2Mode(suggestStep2Mode());
       markCurrentFileDirty();
 
@@ -5922,6 +5908,7 @@
 
     document.getElementById('startOverBtn').addEventListener('click', () => {
       if (state.originalImageData) {
+        state.cropRegion = null;
         state.croppedImageData = null;
         state.processedImageData = null;
         state.displayImageData = null;
@@ -6288,8 +6275,55 @@
       return output;
     }
 
+    function sanitizeCropRegionForImage(cropRegion, imageData) {
+      if (!cropRegion || !imageData) return null;
+      const imageWidth = imageData.width | 0;
+      const imageHeight = imageData.height | 0;
+      if (imageWidth < 1 || imageHeight < 1) return null;
+
+      const leftRaw = Number(cropRegion.left);
+      const topRaw = Number(cropRegion.top);
+      const widthRaw = Number(cropRegion.width);
+      const heightRaw = Number(cropRegion.height);
+      if (!Number.isFinite(leftRaw) || !Number.isFinite(topRaw) || !Number.isFinite(widthRaw) || !Number.isFinite(heightRaw)) {
+        return null;
+      }
+
+      const left = clampBetween(Math.floor(leftRaw), 0, imageWidth - 1);
+      const top = clampBetween(Math.floor(topRaw), 0, imageHeight - 1);
+      const maxWidth = imageWidth - left;
+      const maxHeight = imageHeight - top;
+      if (maxWidth < 1 || maxHeight < 1) return null;
+
+      const width = clampBetween(Math.floor(widthRaw), 1, maxWidth);
+      const height = clampBetween(Math.floor(heightRaw), 1, maxHeight);
+      if (width < 1 || height < 1) return null;
+
+      return { left, top, width, height };
+    }
+
+    function applyCropRegionToLoadedImage(cropRegion, options = {}) {
+      const { refreshDisplay = false } = options;
+      if (!state.originalImageData) {
+        state.cropRegion = null;
+        state.croppedImageData = null;
+        return false;
+      }
+
+      const sanitized = sanitizeCropRegionForImage(cropRegion, state.originalImageData);
+      state.cropRegion = sanitized;
+      state.croppedImageData = sanitized ? cropImageData(state.originalImageData, sanitized) : null;
+
+      if (refreshDisplay) {
+        displayNegative(state.croppedImageData || state.originalImageData);
+      }
+      return Boolean(sanitized);
+    }
+
     function cropImageData(imageData, cropRegion) {
-      const { left, top, width, height } = cropRegion;
+      const sanitized = sanitizeCropRegionForImage(cropRegion, imageData);
+      if (!sanitized) return imageData;
+      const { left, top, width, height } = sanitized;
       const croppedData = new ImageData(
         new Uint8ClampedArray(width * height * 4),
         width,
@@ -6359,7 +6393,10 @@
 
       let workingData = imageData;
       if (settings.cropRegion) {
-        workingData = cropImageData(imageData, settings.cropRegion);
+        const cropRegion = sanitizeCropRegionForImage(settings.cropRegion, imageData);
+        if (cropRegion) {
+          workingData = cropImageData(imageData, cropRegion);
+        }
       }
 
       let processed;
@@ -6433,7 +6470,10 @@
       // Apply crop if set
       let workingData = imageData;
       if (settings.cropRegion) {
-        workingData = cropImageData(imageData, settings.cropRegion);
+        const cropRegion = sanitizeCropRegionForImage(settings.cropRegion, imageData);
+        if (cropRegion) {
+          workingData = cropImageData(imageData, cropRegion);
+        }
       }
 
       // Convert negative
@@ -6633,7 +6673,10 @@
       if (!settings) return;
 
       // Restore crop region
-      state.cropRegion = settings.cropRegion;
+      applyCropRegionToLoadedImage(settings.cropRegion, { refreshDisplay: true });
+      if (state.originalImageData) {
+        settings.cropRegion = state.cropRegion ? { ...state.cropRegion } : null;
+      }
 
       // Restore film settings
       state.filmType = sanitizePresetType(settings.filmType || 'color');
