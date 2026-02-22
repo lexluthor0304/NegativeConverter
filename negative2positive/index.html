@@ -534,6 +534,7 @@
     .film-base-buttons {
       display: flex;
       gap: 8px;
+      flex-wrap: wrap;
     }
 
     .film-base-btn {
@@ -557,6 +558,82 @@
       background: var(--accent);
       border-color: var(--accent);
       color: white;
+    }
+
+    .step2-mode-toggle {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+
+    .step2-mode-btn {
+      flex: 1;
+      padding: 7px 9px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text-secondary);
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .step2-mode-btn:hover {
+      background: var(--bg-hover);
+      border-color: var(--border-light);
+      color: var(--text-primary);
+    }
+
+    .step2-mode-btn.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: white;
+    }
+
+    .roll-reference-controls {
+      margin-top: 10px;
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.02);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .roll-reference-title {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      color: var(--text-secondary);
+      font-weight: 600;
+    }
+
+    .roll-reference-status {
+      font-size: 11px;
+      color: var(--text-secondary);
+      line-height: 1.3;
+    }
+
+    .roll-reference-options {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .roll-reference-option {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--text-secondary);
+      user-select: none;
+    }
+
+    .roll-reference-option input[type="checkbox"] {
+      accent-color: var(--accent);
+      width: 14px;
+      height: 14px;
     }
 
     /* Film Base Preview */
@@ -1357,6 +1434,7 @@
       }
 
       .film-type-btn,
+      .step2-mode-btn,
       .film-base-btn,
       .file-list-btn,
       .curve-tab,
@@ -1632,6 +1710,10 @@
           <span class="section-title" data-i18n="filmSettings">Film Settings</span>
         </div>
         <div class="section-content">
+          <div class="step2-mode-toggle" id="step2ModeToggle">
+            <button class="step2-mode-btn active" id="step2ModeBorderBtn" data-mode="border" data-i18n="step2ModeBorder">Border Available</button>
+            <button class="step2-mode-btn" id="step2ModeNoBorderBtn" data-mode="noBorder" data-i18n="step2ModeNoBorder">No Border / ES-2</button>
+          </div>
           <div class="film-type-toggle">
             <button class="film-type-btn active" data-type="color" data-i18n="colorFilm">Color</button>
             <button class="film-type-btn" data-type="bw" data-i18n="bwFilm">B&W</button>
@@ -1645,10 +1727,30 @@
             <div class="film-base-buttons">
               <button class="film-base-btn" id="sampleBaseBtn" data-i18n="sampleBase">Sample Film Base</button>
               <button class="film-base-btn" id="autoDetectBtn" data-i18n="autoDetect">Auto Detect</button>
+              <button class="film-base-btn" id="useReferenceBtn" data-i18n="useRollReference">Use Roll Reference</button>
             </div>
             <div class="film-base-preview" id="filmBasePreview" style="display: none;">
               <div class="film-base-color" id="filmBaseColor"></div>
               <div class="film-base-values" id="filmBaseValues">R: 0 G: 0 B: 0</div>
+            </div>
+            <div class="roll-reference-controls" id="rollReferenceControls">
+              <div class="roll-reference-title" data-i18n="rollReferenceTitle">Roll Reference</div>
+              <div class="roll-reference-status" id="rollReferenceStatus" data-i18n="rollReferenceNone">No roll reference set.</div>
+              <div class="film-base-buttons">
+                <button class="film-base-btn" id="setRollReferenceBtn" data-i18n="setRollReference">Set Current as Reference</button>
+                <button class="film-base-btn" id="applyRollReferenceBtn" data-i18n="applyRollReference">Apply Reference to Selected</button>
+                <button class="film-base-btn" id="clearRollReferenceBtn" data-i18n="clearRollReference">Clear Reference</button>
+              </div>
+              <div class="roll-reference-options">
+                <label class="roll-reference-option">
+                  <input type="checkbox" id="lockRollReference">
+                  <span data-i18n="lockRollReference">Lock reference for newly added files</span>
+                </label>
+                <label class="roll-reference-option">
+                  <input type="checkbox" id="applyCropWithReference">
+                  <span data-i18n="applyCropWithReference">Also apply crop from reference</span>
+                </label>
+              </div>
             </div>
           </div>
           <div class="info-box" id="positiveFilmInfo" data-i18n="positiveModeInfo" style="display: none;">Positive slide film mode does not require film base sampling.</div>
@@ -1908,6 +2010,8 @@
         step1: "第1步：裁剪",
         step2: "第2步：色罩",
         step3: "第3步：调整",
+        step2ModeBorder: "有边框",
+        step2ModeNoBorder: "无边框 / ES-2",
         filmSettings: "胶片设置",
         colorFilm: "彩色",
         bwFilm: "黑白",
@@ -1919,6 +2023,20 @@
         positiveModeInfo: "正片模式无需采样胶片基底。",
         sampleBase: "采样胶片基底",
         autoDetect: "自动检测",
+        useRollReference: "使用整卷参考",
+        rollReferenceTitle: "整卷参考",
+        rollReferenceNone: "尚未设置整卷参考。",
+        rollReferenceActive: "参考来源：{file}",
+        setRollReference: "将当前图设为参考",
+        applyRollReference: "应用参考到已选中",
+        clearRollReference: "清除参考",
+        lockRollReference: "新增文件自动套用参考",
+        applyCropWithReference: "同时套用参考裁剪",
+        rollReferenceSet: "已将当前图片设为整卷参考。",
+        rollReferenceCleared: "已清除整卷参考。",
+        rollReferenceApplied: "已将整卷参考应用到 {count} 张图片。",
+        rollReferenceMissing: "尚未设置整卷参考。",
+        rollReferenceAppliedCurrent: "已将整卷参考应用到当前图片。",
         applyConvert: "应用并转换",
         whiteBalance: "白平衡",
         wbInfo: "点击图像中应为中性灰的区域，或手动调整",
@@ -2001,6 +2119,8 @@
         step1: "Step 1: Crop",
         step2: "Step 2: Mask",
         step3: "Step 3: Adjust",
+        step2ModeBorder: "Border Available",
+        step2ModeNoBorder: "No Border / ES-2",
         filmSettings: "Film Settings",
         colorFilm: "Color",
         bwFilm: "B&W",
@@ -2012,6 +2132,20 @@
         positiveModeInfo: "Positive slide film mode does not require film base sampling.",
         sampleBase: "Sample Film Base",
         autoDetect: "Auto Detect",
+        useRollReference: "Use Roll Reference",
+        rollReferenceTitle: "Roll Reference",
+        rollReferenceNone: "No roll reference set.",
+        rollReferenceActive: "Reference source: {file}",
+        setRollReference: "Set Current as Reference",
+        applyRollReference: "Apply Reference to Selected",
+        clearRollReference: "Clear Reference",
+        lockRollReference: "Lock reference for newly added files",
+        applyCropWithReference: "Also apply crop from reference",
+        rollReferenceSet: "Current image has been set as the roll reference.",
+        rollReferenceCleared: "Roll reference cleared.",
+        rollReferenceApplied: "Applied roll reference to {count} image(s).",
+        rollReferenceMissing: "No roll reference is set.",
+        rollReferenceAppliedCurrent: "Roll reference applied to current image.",
         applyConvert: "Apply & Convert",
         whiteBalance: "White Balance",
         wbInfo: "Click on a neutral gray area in the image, or adjust manually",
@@ -2094,6 +2228,8 @@
         step1: "ステップ1：トリミング",
         step2: "ステップ2：マスク",
         step3: "ステップ3：調整",
+        step2ModeBorder: "端あり",
+        step2ModeNoBorder: "端なし / ES-2",
         filmSettings: "フィルム設定",
         colorFilm: "カラー",
         bwFilm: "白黒",
@@ -2105,6 +2241,20 @@
         positiveModeInfo: "ポジフィルムモードではフィルムベースのサンプリングは不要です。",
         sampleBase: "フィルムベースを取得",
         autoDetect: "自動検出",
+        useRollReference: "ロール参照を使用",
+        rollReferenceTitle: "ロール参照",
+        rollReferenceNone: "ロール参照は未設定です。",
+        rollReferenceActive: "参照元: {file}",
+        setRollReference: "現在画像を参照に設定",
+        applyRollReference: "参照を選択画像へ適用",
+        clearRollReference: "参照をクリア",
+        lockRollReference: "追加ファイルへ参照を自動適用",
+        applyCropWithReference: "参照のトリミングも適用",
+        rollReferenceSet: "現在の画像をロール参照に設定しました。",
+        rollReferenceCleared: "ロール参照をクリアしました。",
+        rollReferenceApplied: "ロール参照を {count} 枚に適用しました。",
+        rollReferenceMissing: "ロール参照が設定されていません。",
+        rollReferenceAppliedCurrent: "ロール参照を現在の画像に適用しました。",
         applyConvert: "適用して変換",
         whiteBalance: "ホワイトバランス",
         wbInfo: "画像内のニュートラルグレー部分をクリック、または手動調整",
@@ -2172,6 +2322,7 @@
     const BUILD_ID = '2026-02-22-batch-export-consistency-1';
 
     let currentLang = 'en';
+    let stateReady = false;
 
     function setLanguage(lang) {
       currentLang = lang;
@@ -2190,7 +2341,10 @@
           el.label = i18n[lang][key];
         }
       });
-      updateCurrentFileLabel();
+      if (stateReady) {
+        updateCurrentFileLabel();
+        updateRollReferenceUI();
+      }
     }
 
     // Detect language
@@ -2471,6 +2625,7 @@
       filmPreset: 'generic_color',
       filmBase: { r: 210, g: 140, b: 90 },
       filmBaseSet: false,
+      step2Mode: 'border', // 'border' | 'noBorder'
 
       // White balance multipliers
       wbR: 1.0,
@@ -2513,12 +2668,21 @@
       // Batch mode state
       batchMode: false,
       batchSessionActive: false,
-      // fileQueue item: {file, selected, status, error, settings: null | {...}, isDirty: boolean}
+      // fileQueue item: {id, file, selected, status, error, settings: null | {...}, isDirty: boolean}
       // settings = null means use auto-detect for film base
       fileQueue: [],
       currentFileIndex: 0,
       // Saved crop region for current image (used when saving settings)
       cropRegion: null,
+
+      // Roll-level reference profile (session scoped)
+      rollReference: {
+        enabled: false,
+        sourceFileId: null,
+        settingsSnapshot: null,
+        applyLock: false,
+        applyCrop: false
+      },
 
       // Export settings
       exportFormat: 'png',  // 'png' or 'jpeg'
@@ -2527,6 +2691,7 @@
       // Render state
       lastRenderQuality: 'full' // 'full' | 'preview' | 'gl'
     };
+    stateReady = true;
 
     // Initialize curves
     function initCurves(markDirty = false) {
@@ -2659,6 +2824,7 @@
       }
 
       updateCurrentFileLabel();
+      updateRollReferenceUI();
       updateDebugWidget();
     }
 
@@ -2677,6 +2843,23 @@
       return state.fileQueue[state.currentFileIndex];
     }
 
+    function getQueueItemById(id) {
+      if (!id) return null;
+      return state.fileQueue.find(item => item.id === id) || null;
+    }
+
+    function hasRollReference() {
+      return Boolean(state.rollReference.enabled && state.rollReference.settingsSnapshot);
+    }
+
+    function resetRollReferenceState() {
+      state.rollReference.enabled = false;
+      state.rollReference.sourceFileId = null;
+      state.rollReference.settingsSnapshot = null;
+      state.rollReference.applyLock = false;
+      state.rollReference.applyCrop = false;
+    }
+
     function updateCurrentFileLabel() {
       const label = document.getElementById('currentFileLabel');
       if (!label) return;
@@ -2692,6 +2875,39 @@
       const unsavedText = item.isDirty ? ` • ${i18n[currentLang].unsaved || 'Unsaved'}` : '';
       label.textContent = `${prefix}: ${item.file.name}${unsavedText}`;
       label.style.display = 'inline-flex';
+    }
+
+    function updateRollReferenceUI() {
+      const statusEl = document.getElementById('rollReferenceStatus');
+      const setBtn = document.getElementById('setRollReferenceBtn');
+      const applyBtn = document.getElementById('applyRollReferenceBtn');
+      const clearBtn = document.getElementById('clearRollReferenceBtn');
+      const useBtn = document.getElementById('useReferenceBtn');
+      const lockInput = document.getElementById('lockRollReference');
+      const cropInput = document.getElementById('applyCropWithReference');
+      const controlsEl = document.getElementById('rollReferenceControls');
+      if (!statusEl || !setBtn || !applyBtn || !clearBtn || !lockInput || !cropInput || !controlsEl) return;
+
+      const showControls = requiresFilmBase();
+      controlsEl.style.display = showControls ? 'flex' : 'none';
+      if (!showControls) return;
+
+      const hasReference = hasRollReference();
+      const sourceItem = getQueueItemById(state.rollReference.sourceFileId);
+      const sourceName = sourceItem ? sourceItem.file.name : 'n/a';
+
+      statusEl.textContent = hasReference
+        ? (i18n[currentLang].rollReferenceActive || 'Reference source: {file}').replace('{file}', sourceName)
+        : (i18n[currentLang].rollReferenceNone || 'No roll reference set.');
+
+      setBtn.disabled = !(state.currentStep >= 3 && state.processedImageData);
+      applyBtn.disabled = !hasReference;
+      clearBtn.disabled = !hasReference;
+      if (useBtn) useBtn.disabled = !hasReference;
+      lockInput.checked = Boolean(state.rollReference.applyLock);
+      cropInput.checked = Boolean(state.rollReference.applyCrop);
+      lockInput.disabled = !hasReference;
+      cropInput.disabled = !hasReference;
     }
 
     function updateWorkflowUI() {
@@ -2735,6 +2951,9 @@
 
     function goToStep(step) {
       state.currentStep = step;
+      if (step === 2 && requiresFilmBase()) {
+        setStep2Mode(suggestStep2Mode());
+      }
       updateWorkflowUI();
       updateCanvasVisibility();
     }
@@ -4747,27 +4966,82 @@
       return (preset?.type || state.filmType) === 'color';
     }
 
+    function suggestStep2Mode() {
+      if (!requiresFilmBase()) return 'border';
+      if (state.cropRegion) return 'noBorder';
+
+      const sourceData = state.croppedImageData || state.originalImageData;
+      if (!sourceData) return 'border';
+      const sample = autoDetectFilmBase(sourceData);
+      const orangeBias = (sample.r - sample.b) + ((sample.r - sample.g) * 0.5);
+      return orangeBias > 10 ? 'border' : 'noBorder';
+    }
+
+    function setStep2Mode(mode) {
+      state.step2Mode = mode === 'noBorder' ? 'noBorder' : 'border';
+      const borderBtn = document.getElementById('step2ModeBorderBtn');
+      const noBorderBtn = document.getElementById('step2ModeNoBorderBtn');
+      if (borderBtn) borderBtn.classList.toggle('active', state.step2Mode === 'border');
+      if (noBorderBtn) noBorderBtn.classList.toggle('active', state.step2Mode === 'noBorder');
+      updateFilmModeUI();
+    }
+
+    function applyRollReferenceToCurrentForStep2() {
+      if (!hasRollReference()) return false;
+      const ref = state.rollReference.settingsSnapshot;
+      if (!ref) return false;
+
+      state.filmType = sanitizePresetType(ref.filmType || 'color');
+      state.filmPreset = resolvePresetId(ref.filmPreset) || getDefaultPresetForType(state.filmType);
+      state.filmBase = { ...ref.filmBase };
+      state.filmBaseSet = true;
+
+      updateSlidersFromState();
+      updateFilmBasePreview();
+      markCurrentFileDirty();
+      return true;
+    }
+
     function updateFilmModeUI() {
       const filmBaseControls = document.getElementById('filmBaseControls');
       const positiveFilmInfo = document.getElementById('positiveFilmInfo');
+      const modeToggle = document.getElementById('step2ModeToggle');
+      const sampleBaseBtn = document.getElementById('sampleBaseBtn');
+      const autoDetectBtn = document.getElementById('autoDetectBtn');
+      const useReferenceBtn = document.getElementById('useReferenceBtn');
       const showFilmBase = requiresFilmBase();
 
+      modeToggle.style.display = showFilmBase ? 'flex' : 'none';
       filmBaseControls.style.display = showFilmBase ? 'block' : 'none';
       positiveFilmInfo.style.display = showFilmBase ? 'none' : 'block';
 
       if (!showFilmBase) {
         if (state.samplingMode === 'filmBase') {
           state.samplingMode = null;
-          document.getElementById('sampleBaseBtn').classList.remove('active');
+          sampleBaseBtn.classList.remove('active');
           canvas.style.cursor = 'default';
           glCanvas.style.cursor = 'default';
           hideLoupe();
         }
         document.getElementById('filmBasePreview').style.display = 'none';
+        updateRollReferenceUI();
         return;
       }
 
+      if (state.samplingMode === 'filmBase' && state.step2Mode === 'noBorder') {
+        state.samplingMode = null;
+        sampleBaseBtn.classList.remove('active');
+        canvas.style.cursor = 'default';
+        glCanvas.style.cursor = 'default';
+        hideLoupe();
+      }
+
+      sampleBaseBtn.style.display = state.step2Mode === 'border' ? 'inline-flex' : 'none';
+      autoDetectBtn.style.display = 'inline-flex';
+      useReferenceBtn.style.display = state.step2Mode === 'noBorder' ? 'inline-flex' : 'none';
+
       updateFilmBasePreview();
+      updateRollReferenceUI();
     }
 
     function updateFilmBasePreview() {
@@ -4791,6 +5065,7 @@
 
     document.getElementById('sampleBaseBtn').addEventListener('click', () => {
       if (!requiresFilmBase()) return;
+      if (state.step2Mode !== 'border') return;
       state.samplingMode = 'filmBase';
       document.getElementById('sampleBaseBtn').classList.add('active');
       canvas.style.cursor = 'crosshair';
@@ -4807,14 +5082,27 @@
       markCurrentFileDirty();
     });
 
+    document.getElementById('useReferenceBtn').addEventListener('click', () => {
+      if (!hasRollReference()) {
+        alert(i18n[currentLang].rollReferenceMissing || 'No roll reference is set.');
+        return;
+      }
+      if (applyRollReferenceToCurrentForStep2()) {
+        alert(i18n[currentLang].rollReferenceAppliedCurrent || 'Roll reference applied to current image.');
+      }
+    });
+
     document.getElementById('applyConvertBtn').addEventListener('click', () => {
       if (requiresFilmBase() && !state.filmBaseSet) {
-        // Auto detect if not set
-        const sourceData = state.croppedImageData || state.originalImageData;
-        state.filmBase = autoDetectFilmBase(sourceData);
-        state.filmBaseSet = true;
-        updateFilmBasePreview();
-        markCurrentFileDirty();
+        const usedReference = state.step2Mode === 'noBorder' ? applyRollReferenceToCurrentForStep2() : false;
+        if (!usedReference) {
+          // Auto detect if not set
+          const sourceData = state.croppedImageData || state.originalImageData;
+          state.filmBase = autoDetectFilmBase(sourceData);
+          state.filmBaseSet = true;
+          updateFilmBasePreview();
+          markCurrentFileDirty();
+        }
       }
       processNegative();
     });
@@ -5104,6 +5392,12 @@
       });
     }
 
+    document.querySelectorAll('.step2-mode-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        setStep2Mode(btn.dataset.mode);
+      });
+    });
+
     document.querySelectorAll('.film-type-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         state.filmType = btn.dataset.type;
@@ -5112,7 +5406,14 @@
         state.filmPreset = defaultPreset;
         renderPresetOptions(state.filmPreset);
         setFilmTypeButtons(state.filmType);
-        updateFilmModeUI();
+        let modeUpdated = false;
+        if (requiresFilmBase()) {
+          setStep2Mode(suggestStep2Mode());
+          modeUpdated = true;
+        }
+        if (!modeUpdated) {
+          updateFilmModeUI();
+        }
 
         markCurrentFileDirty();
         schedulePreviewUpdate();
@@ -5128,14 +5429,21 @@
         e.target.value = state.filmPreset;
       }
       setFilmTypeButtons(state.filmType);
-      updateFilmModeUI();
+      let modeUpdated = false;
+      if (requiresFilmBase()) {
+        setStep2Mode(suggestStep2Mode());
+        modeUpdated = true;
+      }
+      if (!modeUpdated) {
+        updateFilmModeUI();
+      }
 
       markCurrentFileDirty();
       schedulePreviewUpdate();
     });
 
     setFilmTypeButtons(state.filmType);
-    updateFilmModeUI();
+    setStep2Mode(suggestStep2Mode());
 
     loadPresetDataset()
       .then(() => {
@@ -5148,7 +5456,7 @@
         if (presetSelect && presetSelect.value !== state.filmPreset) {
           presetSelect.value = state.filmPreset;
         }
-        updateFilmModeUI();
+        setStep2Mode(suggestStep2Mode());
       })
       .catch((err) => {
         console.warn('Preset initialization failed.', err);
@@ -5555,6 +5863,7 @@
 
       state.croppedImageData = croppedData;
       displayNegative(croppedData);
+      setStep2Mode(suggestStep2Mode());
       markCurrentFileDirty();
 
       state.cropping = false;
@@ -5652,6 +5961,7 @@
       state.currentFileIndex = 0;
       state.batchSessionActive = false;
       state.batchMode = false;
+      resetRollReferenceState();
       fullAdjustedBuffer = null;
       previewAdjustedBuffer = null;
       if (webglState.gl) {
@@ -5876,6 +6186,25 @@
       return true;
     }
 
+    function applySettingsToItems(baseSettings, items, options = {}) {
+      const includeCrop = Boolean(options.includeCrop);
+      const copied = cloneSettings(baseSettings);
+      if (!copied) return 0;
+
+      let count = 0;
+      items.forEach(item => {
+        const next = cloneSettings(copied);
+        if (!includeCrop) {
+          const existingCrop = item.settings && item.settings.cropRegion ? { ...item.settings.cropRegion } : null;
+          next.cropRegion = existingCrop;
+        }
+        item.settings = next;
+        item.isDirty = false;
+        count++;
+      });
+      return count;
+    }
+
     function applyCurrentSettingsToSelected() {
       if (state.currentStep < 3 || !state.processedImageData) {
         alert(i18n[currentLang].finishProcessing || 'Please complete the workflow (step 3) before saving settings.');
@@ -5889,14 +6218,60 @@
       }
 
       const baseSettings = extractCurrentSettings();
-      selectedItems.forEach(item => {
-        item.settings = cloneSettings(baseSettings);
-        item.isDirty = false;
-      });
+      applySettingsToItems(baseSettings, selectedItems, { includeCrop: false });
 
       updateFileListUI();
       const template = i18n[currentLang].appliedToSelected || 'Applied current settings to {count} image(s).';
       alert(template.replace('{count}', String(selectedItems.length)));
+    }
+
+    function setRollReferenceFromCurrent() {
+      if (state.currentStep < 3 || !state.processedImageData) {
+        alert(i18n[currentLang].finishProcessing || 'Please complete the workflow (step 3) before saving settings.');
+        return;
+      }
+      const currentItem = getCurrentQueueItem();
+      state.rollReference.enabled = true;
+      state.rollReference.sourceFileId = currentItem ? currentItem.id : null;
+      state.rollReference.settingsSnapshot = extractCurrentSettings();
+      persistCurrentFileSettings({ silent: true, force: true });
+      updateRollReferenceUI();
+      alert(i18n[currentLang].rollReferenceSet || 'Current image has been set as the roll reference.');
+    }
+
+    function applyRollReferenceToSelected() {
+      if (!hasRollReference()) {
+        alert(i18n[currentLang].rollReferenceMissing || 'No roll reference is set.');
+        return;
+      }
+      const selectedItems = state.fileQueue.filter(item => item.selected);
+      if (selectedItems.length < 1) {
+        alert(i18n[currentLang].noSelectedFiles || 'No selected images to apply settings.');
+        return;
+      }
+      const applied = applySettingsToItems(
+        state.rollReference.settingsSnapshot,
+        selectedItems,
+        { includeCrop: state.rollReference.applyCrop }
+      );
+
+      const currentItem = getCurrentQueueItem();
+      if (currentItem && currentItem.selected && currentItem.settings) {
+        restoreSettings(currentItem.settings);
+        if (state.currentStep >= 3 && state.originalImageData) {
+          processNegative();
+        }
+      }
+
+      updateFileListUI();
+      const template = i18n[currentLang].rollReferenceApplied || 'Applied roll reference to {count} image(s).';
+      alert(template.replace('{count}', String(applied)));
+    }
+
+    function clearRollReference() {
+      resetRollReferenceState();
+      updateRollReferenceUI();
+      alert(i18n[currentLang].rollReferenceCleared || 'Roll reference cleared.');
     }
 
     function getSettingsForExport(index, item) {
@@ -6349,6 +6724,28 @@
       applyCurrentSettingsToSelected();
     });
 
+    document.getElementById('setRollReferenceBtn').addEventListener('click', () => {
+      setRollReferenceFromCurrent();
+    });
+
+    document.getElementById('applyRollReferenceBtn').addEventListener('click', () => {
+      applyRollReferenceToSelected();
+    });
+
+    document.getElementById('clearRollReferenceBtn').addEventListener('click', () => {
+      clearRollReference();
+    });
+
+    document.getElementById('lockRollReference').addEventListener('change', (e) => {
+      state.rollReference.applyLock = Boolean(e.target.checked);
+      updateRollReferenceUI();
+    });
+
+    document.getElementById('applyCropWithReference').addEventListener('change', (e) => {
+      state.rollReference.applyCrop = Boolean(e.target.checked);
+      updateRollReferenceUI();
+    });
+
     function openAddFilesPicker() {
       const input = document.createElement('input');
       input.type = 'file';
@@ -6380,10 +6777,15 @@
       state.fileQueue = [];
       state.currentFileIndex = 0;
       state.batchSessionActive = false;
+      resetRollReferenceState();
       updateFileListUI();
       syncBatchUIState({ reason: 'clearFileListBtn' });
       updateExportButtons();
     });
+
+    function createQueueItemId(file) {
+      return `${file.name}::${file.size}::${file.lastModified || 0}`;
+    }
 
     function addFilesToQueue(files) {
       // Filter for supported image files
@@ -6398,15 +6800,28 @@
       // Add files to queue
       for (const file of validFiles) {
         // Avoid duplicates
-        if (!state.fileQueue.some(f => f.file.name === file.name && f.file.size === file.size)) {
-          state.fileQueue.push({
+        const id = createQueueItemId(file);
+        if (!state.fileQueue.some(f => f.id === id)) {
+          const newItem = {
+            id,
             file: file,
             selected: true,  // Selected by default
             status: 'pending',
             error: null,
             settings: null,  // null = use auto-detect, otherwise saved settings
             isDirty: false
-          });
+          };
+          if (hasRollReference() && state.rollReference.applyLock) {
+            const applied = applySettingsToItems(
+              state.rollReference.settingsSnapshot,
+              [newItem],
+              { includeCrop: state.rollReference.applyCrop }
+            );
+            if (applied > 0) {
+              newItem.status = 'pending';
+            }
+          }
+          state.fileQueue.push(newItem);
         }
       }
 
@@ -6439,6 +6854,7 @@
       state.currentFileIndex = 0;
       state.cropRegion = null;
       state.batchSessionActive = false;
+      resetRollReferenceState();
       syncBatchUIState({ reason: 'fileInput_change_reset' });
 
       addFilesToQueue(files);
@@ -6458,6 +6874,7 @@
       state.currentFileIndex = 0;
       state.cropRegion = null;
       state.batchSessionActive = false;
+      resetRollReferenceState();
       syncBatchUIState({ reason: 'folderInput_change_reset' });
 
       addFilesToQueue(files);
@@ -6489,6 +6906,7 @@
       state.currentFileIndex = 0;
       state.cropRegion = null;
       state.batchSessionActive = false;
+      resetRollReferenceState();
       syncBatchUIState({ reason: 'drop_reset' });
 
       addFilesToQueue(files);
