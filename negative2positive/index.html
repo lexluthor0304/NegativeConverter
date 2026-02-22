@@ -1872,7 +1872,7 @@
             <div class="autoframe-row">
               <span data-i18n="autoFrameLowConfidenceBehavior">Low confidence</span>
               <select id="autoFrameLowConfidenceSelect">
-                <option value="suggest" data-i18n="autoFrameSuggestOnly">Suggest only</option>
+                <option value="suggest" data-i18n="autoFrameSuggestOnly">Try crop anyway</option>
                 <option value="rotateOnly" data-i18n="autoFrameRotateOnly">Rotate only</option>
                 <option value="ignore" data-i18n="autoFrameNoAction">Do nothing</option>
               </select>
@@ -2295,8 +2295,9 @@
         autoFrameNoReliableBorder: "未检测到可靠边框，请手动裁剪。",
         autoFrameCvLoadError: "OpenCV 加载失败，无法使用自动识别。",
         autoFrameBatchDone: "自动识别完成：成功 {success} 张，失败 {failed} 张。",
-        autoFrameBatchDoneExtended: "自动识别完成：成功裁剪 {success} 张，仅旋转 {rotated} 张，失败 {failed} 张。",
+        autoFrameBatchDoneExtended: "自动识别完成：成功裁剪 {success} 张（其中低置信度 {lowApplied} 张），仅旋转 {rotated} 张，失败 {failed} 张。",
         autoFrameRotateOnlyApplied: "低置信度：已仅应用旋转 {angle}°。",
+        autoFrameLowConfidenceApplied: "低置信度：已应用自动裁剪，请检查结果（置信度 {confidence}）。",
         autoFrameSettings: "自动边框设置",
         autoFrameEnabled: "启用自动边框识别",
         autoFrameAutoApplyHigh: "高置信度时自动应用",
@@ -2306,10 +2307,13 @@
         autoFrameFormat120: "优先 120",
         autoFrame120Formats: "120 子格式",
         autoFrameLowConfidenceBehavior: "低置信度处理",
-        autoFrameSuggestOnly: "仅建议，不自动应用",
+        autoFrameSuggestOnly: "低置信度也尝试裁剪",
         autoFrameRotateOnly: "只应用旋转",
         autoFrameNoAction: "不执行操作",
-        autoFrameDiagnostics: "检测详情：方法 {method} | 格式 {format} | 置信度 {confidence}",
+        autoFrameDiagnostics: "检测详情：方法 {method} | 格式 {format} | 置信度 {confidence} | 应用 {mode}",
+        autoFrameModeCrop: "裁剪",
+        autoFrameModeRotateOnly: "仅旋转",
+        autoFrameModeNone: "未应用",
         exportCurrent: "导出当前图片 (PNG)",
         exportZip: "批量导出 (ZIP)",
         exportIndividual: "逐个下载全部",
@@ -2444,8 +2448,9 @@
         autoFrameNoReliableBorder: "No reliable frame border detected. Please crop manually.",
         autoFrameCvLoadError: "OpenCV failed to load. Auto frame is unavailable.",
         autoFrameBatchDone: "Auto frame finished: {success} succeeded, {failed} failed.",
-        autoFrameBatchDoneExtended: "Auto frame finished: {success} crop success, {rotated} rotation-only, {failed} failed.",
+        autoFrameBatchDoneExtended: "Auto frame finished: {success} crop success ({lowApplied} low-confidence), {rotated} rotation-only, {failed} failed.",
         autoFrameRotateOnlyApplied: "Low confidence: applied rotation only ({angle}°).",
+        autoFrameLowConfidenceApplied: "Low confidence: crop applied. Please verify the result (confidence {confidence}).",
         autoFrameSettings: "Auto Frame Settings",
         autoFrameEnabled: "Enable Auto Frame",
         autoFrameAutoApplyHigh: "Auto-apply high confidence",
@@ -2455,10 +2460,13 @@
         autoFrameFormat120: "Prefer 120",
         autoFrame120Formats: "120 sub-formats",
         autoFrameLowConfidenceBehavior: "Low confidence",
-        autoFrameSuggestOnly: "Suggest only",
+        autoFrameSuggestOnly: "Try crop on low confidence",
         autoFrameRotateOnly: "Rotate only",
         autoFrameNoAction: "Do nothing",
-        autoFrameDiagnostics: "Detection: method {method} | format {format} | confidence {confidence}",
+        autoFrameDiagnostics: "Detection: method {method} | format {format} | confidence {confidence} | applied {mode}",
+        autoFrameModeCrop: "Crop",
+        autoFrameModeRotateOnly: "Rotate only",
+        autoFrameModeNone: "None",
         exportCurrent: "Export Current (PNG)",
         exportZip: "Export All (ZIP)",
         exportIndividual: "Download All Individually",
@@ -2593,8 +2601,9 @@
         autoFrameNoReliableBorder: "信頼できるフレーム境界を検出できませんでした。手動でトリミングしてください。",
         autoFrameCvLoadError: "OpenCV の読み込みに失敗したため、自動検出は利用できません。",
         autoFrameBatchDone: "自動検出が完了しました: 成功 {success} 枚、失敗 {failed} 枚。",
-        autoFrameBatchDoneExtended: "自動検出が完了しました: トリミング成功 {success} 枚、回転のみ {rotated} 枚、失敗 {failed} 枚。",
+        autoFrameBatchDoneExtended: "自動検出が完了しました: トリミング成功 {success} 枚（低信頼度 {lowApplied} 枚を含む）、回転のみ {rotated} 枚、失敗 {failed} 枚。",
         autoFrameRotateOnlyApplied: "低信頼度のため回転のみを適用しました（{angle}°）。",
+        autoFrameLowConfidenceApplied: "低信頼度でしたがトリミングを適用しました（信頼度 {confidence}）。結果を確認してください。",
         autoFrameSettings: "自動フレーム設定",
         autoFrameEnabled: "自動フレーム検出を有効化",
         autoFrameAutoApplyHigh: "高信頼度は自動適用",
@@ -2604,10 +2613,13 @@
         autoFrameFormat120: "120 を優先",
         autoFrame120Formats: "120 サブ形式",
         autoFrameLowConfidenceBehavior: "低信頼度時の動作",
-        autoFrameSuggestOnly: "提案のみ",
+        autoFrameSuggestOnly: "低信頼度でもトリミングを試す",
         autoFrameRotateOnly: "回転のみ適用",
         autoFrameNoAction: "何もしない",
-        autoFrameDiagnostics: "検出情報: 手法 {method} | 形式 {format} | 信頼度 {confidence}",
+        autoFrameDiagnostics: "検出情報: 手法 {method} | 形式 {format} | 信頼度 {confidence} | 適用 {mode}",
+        autoFrameModeCrop: "トリミング",
+        autoFrameModeRotateOnly: "回転のみ",
+        autoFrameModeNone: "未適用",
         exportCurrent: "現在の画像を出力 (PNG)",
         exportZip: "一括出力 (ZIP)",
         exportIndividual: "すべて個別にダウンロード",
@@ -2629,7 +2641,7 @@
     };
 
     const DEBUG_UI = new URLSearchParams(window.location.search).get('debug') === '1';
-    const BUILD_ID = '2026-02-22-auto-frame-detect-3';
+    const BUILD_ID = '2026-02-22-auto-frame-detect-4';
     const OPENCV_SCRIPT_CANDIDATES = [
       './vendor/opencv/opencv-4.12.0.js',
       'https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.12.0-release.1/dist/opencv.js'
@@ -7001,6 +7013,77 @@
       return Array.from(angleSet);
     }
 
+    function getAutoFrameTargetRatiosForFormat(formatKey = 'unknown') {
+      const direct = AUTO_FRAME_FORMAT_RATIOS[formatKey];
+      if (Number.isFinite(direct)) return [direct];
+      const fallback = getAutoFrameAspectTargets()
+        .map(target => target.ratio)
+        .filter(ratio => Number.isFinite(ratio) && ratio > 0.01);
+      return fallback.length ? fallback : [AUTO_FRAME_FORMAT_RATIOS['135'] || 1.5];
+    }
+
+    function evaluateAutoFrameCropRegion(cropRegion, imageData, detectedFormat = 'unknown', candidate = null) {
+      if (!cropRegion || !imageData) {
+        return {
+          isValid: false,
+          areaRatio: 0,
+          aspectDelta: 1,
+          aspectScore: 0,
+          areaScore: 0,
+          edgeSupport: 0,
+          shortEdgeCoverage: 0
+        };
+      }
+
+      const totalArea = Math.max(1, imageData.width * imageData.height);
+      const cropArea = Math.max(1, cropRegion.width * cropRegion.height);
+      const areaRatio = cropArea / totalArea;
+      const ratio = Math.max(cropRegion.width, cropRegion.height) / Math.max(1, Math.min(cropRegion.width, cropRegion.height));
+      const targetRatios = getAutoFrameTargetRatiosForFormat(detectedFormat);
+      let bestAspectDelta = Infinity;
+      targetRatios.forEach((targetRatio) => {
+        const delta = Math.abs(ratio - targetRatio) / targetRatio;
+        if (delta < bestAspectDelta) bestAspectDelta = delta;
+      });
+      if (!Number.isFinite(bestAspectDelta)) bestAspectDelta = 1;
+
+      const hasKnownFormat = Number.isFinite(AUTO_FRAME_FORMAT_RATIOS[detectedFormat]);
+      const aspectTolerance = hasKnownFormat ? 0.34 : 0.42;
+      const areaScore = clampBetween((areaRatio - 0.08) / 0.86, 0, 1);
+      const aspectScore = 1 - clampBetween(bestAspectDelta / aspectTolerance, 0, 1);
+      const shortEdgeCoverage = Math.min(cropRegion.width / imageData.width, cropRegion.height / imageData.height);
+      const edgeSupport = candidate && candidate.scoreBreakdown
+        ? clampBetween(Number(candidate.scoreBreakdown.edgeSupport) || 0, 0, 1)
+        : 0.5;
+
+      const isValid = areaRatio >= 0.10
+        && areaRatio <= 0.975
+        && bestAspectDelta <= aspectTolerance
+        && shortEdgeCoverage >= 0.22
+        && edgeSupport >= 0.12;
+
+      return {
+        isValid,
+        areaRatio: Number(areaRatio.toFixed(4)),
+        aspectDelta: Number(bestAspectDelta.toFixed(4)),
+        aspectScore: Number(aspectScore.toFixed(3)),
+        areaScore: Number(areaScore.toFixed(3)),
+        edgeSupport: Number(edgeSupport.toFixed(3)),
+        shortEdgeCoverage: Number(shortEdgeCoverage.toFixed(3)),
+        aspectTolerance: Number(aspectTolerance.toFixed(3))
+      };
+    }
+
+    function computeAutoFrameAnglePenalty(angle) {
+      const absAngle = Math.abs(normalizeAngleDegrees(Number(angle) || 0));
+      if (absAngle <= 0.12) return 0;
+      const remainder = absAngle % 90;
+      const distanceToRightAngle = Math.min(remainder, 90 - remainder);
+      const offAxisPenalty = clampBetween(distanceToRightAngle / 22, 0, 1) * 0.16;
+      const magnitudePenalty = clampBetween(absAngle / 120, 0, 1) * 0.07;
+      return clampBetween(offAxisPenalty + magnitudePenalty, 0, 0.25);
+    }
+
     function buildCropRegionFromBound(bound, imageData, marginRatio = 0.02) {
       if (!bound || !imageData) return null;
       const margin = Math.round(Math.min(imageData.width, imageData.height) * Math.max(0, marginRatio));
@@ -7020,16 +7103,27 @@
       });
       if (!candidates.length) return null;
 
-      const best = candidates[0];
-      const cropRegion = buildCropRegionFromBound(best.bound, imageData, marginRatio);
-      if (!cropRegion) return null;
-      const cropAreaRatio = (cropRegion.width * cropRegion.height) / (imageData.width * imageData.height);
-      const confidence = clampBetween((best.score * 0.78) + (Math.min(cropAreaRatio / 0.92, 1) * 0.22), 0, 1);
-      return {
-        cropRegion,
-        confidence,
-        candidate: best
-      };
+      for (const candidate of candidates) {
+        const cropRegion = buildCropRegionFromBound(candidate.bound, imageData, marginRatio);
+        if (!cropRegion) continue;
+        const validation = evaluateAutoFrameCropRegion(cropRegion, imageData, candidate.detectedFormat, candidate);
+        if (!validation.isValid) continue;
+        const confidence = clampBetween(
+          (candidate.score * 0.62) +
+          (Math.min(validation.areaRatio / 0.92, 1) * 0.16) +
+          (validation.aspectScore * 0.16) +
+          (validation.edgeSupport * 0.06),
+          0,
+          1
+        );
+        return {
+          cropRegion,
+          confidence,
+          candidate,
+          validation
+        };
+      }
+      return null;
     }
 
     function inferConfidenceLevel(confidence) {
@@ -7056,9 +7150,21 @@
         const cropPreview = detectAxisAlignedCropRegion(rotatedPreview, state.autoFrame.marginRatio);
         if (!cropPreview) continue;
         const baseScore = previewCandidates[0] ? previewCandidates[0].score : 0.5;
-        const score = (baseScore * 0.28) + (cropPreview.confidence * 0.72);
-        if (!bestPreview || score > bestPreview.score) {
-          bestPreview = { angle, score, cropPreview };
+        const anglePenalty = computeAutoFrameAnglePenalty(angle);
+        const validationAspect = cropPreview.validation ? cropPreview.validation.aspectScore : 0.6;
+        const score = clampBetween(
+          (baseScore * 0.24) +
+          (cropPreview.confidence * 0.66) +
+          (validationAspect * 0.10) -
+          anglePenalty,
+          0,
+          1
+        );
+        const isBetter = !bestPreview
+          || score > (bestPreview.score + 0.001)
+          || (Math.abs(score - bestPreview.score) <= 0.001 && Math.abs(angle) < Math.abs(bestPreview.angle));
+        if (isBetter) {
+          bestPreview = { angle, score, cropPreview, anglePenalty };
         }
       }
 
@@ -7066,9 +7172,17 @@
       const normalizedAngle = Math.abs(bestPreview.angle) < 0.15 ? 0 : Number(bestPreview.angle.toFixed(2));
       const rotatedFull = Math.abs(normalizedAngle) < 0.001 ? imageData : applyRotationToImageData(imageData, normalizedAngle);
       const cropFull = detectAxisAlignedCropRegion(rotatedFull, state.autoFrame.marginRatio);
-      if (!cropFull) return null;
+      if (!cropFull || !cropFull.validation || !cropFull.validation.isValid) return null;
 
-      const confidence = Number(clampBetween((bestPreview.score * 0.35) + (cropFull.confidence * 0.65), 0, 1).toFixed(2));
+      const fullAnglePenalty = computeAutoFrameAnglePenalty(normalizedAngle);
+      const confidence = Number(clampBetween(
+        (bestPreview.score * 0.34) +
+        (cropFull.confidence * 0.56) +
+        (cropFull.validation.aspectScore * 0.10) -
+        (fullAnglePenalty * 0.4),
+        0,
+        1
+      ).toFixed(2));
       const confidenceLevel = inferConfidenceLevel(confidence);
       const detectedFormat = cropFull.candidate && cropFull.candidate.detectedFormat
         ? cropFull.candidate.detectedFormat
@@ -7083,7 +7197,9 @@
         rotatedImageData: rotatedFull,
         diagnostics: {
           method: cropFull.candidate ? cropFull.candidate.method : 'unknown',
-          scoreBreakdown: cropFull.candidate ? cropFull.candidate.scoreBreakdown : null
+          scoreBreakdown: cropFull.candidate ? cropFull.candidate.scoreBreakdown : null,
+          anglePenalty: Number(fullAnglePenalty.toFixed(3)),
+          cropValidation: cropFull.validation || null
         }
       };
     }
@@ -7115,7 +7231,10 @@
         confidence: result.confidence,
         detectedFormat: result.detectedFormat || 'unknown',
         method: result.diagnostics && result.diagnostics.method ? result.diagnostics.method : 'unknown',
-        confidenceLevel: result.confidenceLevel || inferConfidenceLevel(result.confidence || 0)
+        confidenceLevel: result.confidenceLevel || inferConfidenceLevel(result.confidence || 0),
+        rotateOnly: false,
+        appliedMode: 'crop',
+        lowConfidenceApplied: (result.confidenceLevel || inferConfidenceLevel(result.confidence || 0)) === 'low'
       };
       updateAutoFrameDiagnosticsUI();
       setStep2Mode(suggestStep2Mode());
@@ -7137,7 +7256,9 @@
         detectedFormat: result.detectedFormat || 'unknown',
         method: result.diagnostics && result.diagnostics.method ? result.diagnostics.method : 'unknown',
         confidenceLevel: result.confidenceLevel || inferConfidenceLevel(result.confidence || 0),
-        rotateOnly: true
+        rotateOnly: true,
+        appliedMode: 'rotateOnly',
+        lowConfidenceApplied: false
       };
       updateAutoFrameDiagnosticsUI();
       setStep2Mode(suggestStep2Mode());
@@ -7264,10 +7385,12 @@
           } else if (lowBehavior === 'ignore') {
             alert(i18n[currentLang].autoFrameNoReliableBorder || 'No reliable frame border detected. Please crop manually.');
           } else {
-            const title = i18n[currentLang].autoFrameLowConfidenceTitle
-              || 'Low-confidence frame detected. Apply suggested crop anyway?';
-            if (window.confirm(`${title}\n${detail}`)) {
-              applied = applyAutoFrameResult(result);
+            applied = applyAutoFrameResult(result);
+            if (applied) {
+              const template = i18n[currentLang].autoFrameLowConfidenceApplied
+                || 'Low confidence: crop applied. Please verify the result (confidence {confidence}).';
+              const confidenceText = Number.isFinite(result.confidence) ? result.confidence.toFixed(2) : '0.00';
+              alert(template.replace('{confidence}', confidenceText));
             }
           }
         } else if (result.confidenceLevel === 'high' && state.autoFrame.autoApplyHighConfidence) {
@@ -7286,7 +7409,10 @@
             confidence: result.confidence,
             detectedFormat: result.detectedFormat || 'unknown',
             method: result.diagnostics && result.diagnostics.method ? result.diagnostics.method : 'unknown',
-            confidenceLevel: result.confidenceLevel || inferConfidenceLevel(result.confidence || 0)
+            confidenceLevel: result.confidenceLevel || inferConfidenceLevel(result.confidence || 0),
+            rotateOnly: false,
+            appliedMode: 'none',
+            lowConfidenceApplied: false
           };
           updateAutoFrameDiagnosticsUI();
         }
@@ -7317,6 +7443,7 @@
       }
 
       let successCount = 0;
+      let lowAppliedCount = 0;
       let rotateOnlyCount = 0;
       let failCount = 0;
       showBatchProgress(true);
@@ -7336,11 +7463,19 @@
 
             const existing = item.settings ? cloneSettings(item.settings) : createDefaultSettings(imageData);
             const lowBehavior = state.autoFrame.lowConfidenceBehavior || 'suggest';
+            let appliedMode = 'none';
             if (result.confidenceLevel === 'low') {
               if (lowBehavior === 'rotateOnly' && Math.abs(result.angle) > 0.05) {
                 existing.rotationAngle = result.angle;
                 existing.cropRegion = null;
                 rotateOnlyCount++;
+                appliedMode = 'rotateOnly';
+              } else if (lowBehavior === 'suggest') {
+                existing.rotationAngle = result.angle;
+                existing.cropRegion = result.cropRegion ? { ...result.cropRegion } : null;
+                successCount++;
+                lowAppliedCount++;
+                appliedMode = 'crop';
               } else {
                 failCount++;
                 continue;
@@ -7349,6 +7484,7 @@
               existing.rotationAngle = result.angle;
               existing.cropRegion = result.cropRegion ? { ...result.cropRegion } : null;
               successCount++;
+              appliedMode = 'crop';
             }
 
             existing.autoFrameMeta = {
@@ -7356,7 +7492,9 @@
               confidenceLevel: result.confidenceLevel || inferConfidenceLevel(result.confidence || 0),
               detectedFormat: result.detectedFormat || 'unknown',
               method: result.diagnostics && result.diagnostics.method ? result.diagnostics.method : 'unknown',
-              rotateOnly: result.confidenceLevel === 'low' && (state.autoFrame.lowConfidenceBehavior || 'suggest') === 'rotateOnly',
+              rotateOnly: appliedMode === 'rotateOnly',
+              appliedMode,
+              lowConfidenceApplied: result.confidenceLevel === 'low' && appliedMode === 'crop',
               detectedAt: Date.now()
             };
             item.settings = existing;
@@ -7385,6 +7523,7 @@
         || 'Auto frame finished: {success} succeeded, {failed} failed.';
       alert(template
         .replace('{success}', String(successCount))
+        .replace('{lowApplied}', String(lowAppliedCount))
         .replace('{rotated}', String(rotateOnlyCount))
         .replace('{failed}', String(failCount)));
     }
@@ -8427,12 +8566,16 @@
       }
 
       if (safe.autoFrameMeta) {
+        const restoredMode = safe.autoFrameMeta.appliedMode
+          || (Boolean(safe.autoFrameMeta.rotateOnly) ? 'rotateOnly' : 'none');
         state.autoFrame.lastDiagnostics = {
           confidence: safe.autoFrameMeta.confidence,
           detectedFormat: safe.autoFrameMeta.detectedFormat || 'unknown',
           method: safe.autoFrameMeta.method || 'unknown',
           confidenceLevel: safe.autoFrameMeta.confidenceLevel || inferConfidenceLevel(safe.autoFrameMeta.confidence || 0),
-          rotateOnly: Boolean(safe.autoFrameMeta.rotateOnly)
+          rotateOnly: restoredMode === 'rotateOnly',
+          appliedMode: restoredMode,
+          lowConfidenceApplied: Boolean(safe.autoFrameMeta.lowConfidenceApplied)
         };
       } else {
         state.autoFrame.lastDiagnostics = null;
@@ -8544,6 +8687,17 @@
       return String(formatKey);
     }
 
+    function formatAppliedModeLabel(mode) {
+      const normalized = mode === 'crop' || mode === 'rotateOnly' ? mode : 'none';
+      if (normalized === 'crop') {
+        return getLocalizedText('autoFrameModeCrop', 'Crop');
+      }
+      if (normalized === 'rotateOnly') {
+        return getLocalizedText('autoFrameModeRotateOnly', 'Rotate only');
+      }
+      return getLocalizedText('autoFrameModeNone', 'None');
+    }
+
     function updateAutoFrameDiagnosticsUI() {
       const box = document.getElementById('autoFrameDiagnosticsBox');
       if (!box) return;
@@ -8555,10 +8709,12 @@
       }
       const template = i18n[currentLang].autoFrameDiagnostics
         || 'Detection: method {method} | format {format} | confidence {confidence}';
+      const appliedMode = diag.appliedMode || (diag.rotateOnly ? 'rotateOnly' : 'none');
       box.textContent = template
         .replace('{method}', String(diag.method || 'unknown'))
         .replace('{format}', formatDetectedFormatLabel(diag.detectedFormat))
-        .replace('{confidence}', Number.isFinite(diag.confidence) ? diag.confidence.toFixed(2) : '0.00');
+        .replace('{confidence}', Number.isFinite(diag.confidence) ? diag.confidence.toFixed(2) : '0.00')
+        .replace('{mode}', formatAppliedModeLabel(appliedMode));
       box.style.display = 'block';
     }
 
