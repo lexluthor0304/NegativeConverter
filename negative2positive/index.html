@@ -3596,6 +3596,191 @@
     const channelLutG = new Uint8Array(256);
     const channelLutB = new Uint8Array(256);
 
+    function makeLinearCurveLut() {
+      const curve = new Uint8Array(256);
+      for (let i = 0; i < 256; i++) curve[i] = i;
+      return curve;
+    }
+
+    function makeLinearCurvePoints() {
+      return [{ x: 0, y: 0 }, { x: 255, y: 255 }];
+    }
+
+    function sanitizeNumeric(value, fallback, min = -Infinity, max = Infinity) {
+      const n = Number(value);
+      const base = Number.isFinite(n) ? n : fallback;
+      if (!Number.isFinite(base)) return Number.isFinite(fallback) ? fallback : 0;
+      return clampBetween(base, min, max);
+    }
+
+    function sanitizeFilmBase(input, fallback = null) {
+      const source = (input && typeof input === 'object')
+        ? input
+        : (fallback && typeof fallback === 'object' ? fallback : { r: 210, g: 140, b: 90 });
+      return {
+        r: Math.round(sanitizeNumeric(source.r, 210, 1, 255)),
+        g: Math.round(sanitizeNumeric(source.g, 140, 1, 255)),
+        b: Math.round(sanitizeNumeric(source.b, 90, 1, 255))
+      };
+    }
+
+    function sanitizeCurvePointChannel(points, fallbackPoints = null) {
+      const source = Array.isArray(points) ? points : (Array.isArray(fallbackPoints) ? fallbackPoints : null);
+      if (!source || source.length < 2) return makeLinearCurvePoints();
+
+      const normalized = [];
+      source.forEach((point) => {
+        if (!point || typeof point !== 'object') return;
+        const x = sanitizeNumeric(point.x, NaN, 0, 255);
+        const y = sanitizeNumeric(point.y, NaN, 0, 255);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+        normalized.push({ x: Math.round(x), y: Math.round(y) });
+      });
+      if (normalized.length < 2) return makeLinearCurvePoints();
+
+      normalized.sort((a, b) => a.x - b.x);
+      const deduped = [];
+      normalized.forEach((point) => {
+        if (!deduped.length) {
+          deduped.push(point);
+          return;
+        }
+        const last = deduped[deduped.length - 1];
+        if (point.x === last.x) {
+          last.y = point.y;
+        } else {
+          deduped.push(point);
+        }
+      });
+      if (deduped.length < 2) return makeLinearCurvePoints();
+
+      if (deduped[0].x !== 0) {
+        deduped.unshift({ x: 0, y: deduped[0].y });
+      } else {
+        deduped[0].y = Math.round(sanitizeNumeric(deduped[0].y, 0, 0, 255));
+      }
+
+      const tail = deduped[deduped.length - 1];
+      if (tail.x !== 255) {
+        deduped.push({ x: 255, y: tail.y });
+      } else {
+        tail.y = Math.round(sanitizeNumeric(tail.y, 255, 0, 255));
+      }
+
+      if (deduped.length < 2 || deduped[0].x !== 0 || deduped[deduped.length - 1].x !== 255) {
+        return makeLinearCurvePoints();
+      }
+      return deduped;
+    }
+
+    function buildCurveLutFromPoints(points) {
+      const safePoints = sanitizeCurvePointChannel(points, null);
+      const curve = new Uint8Array(256);
+      let spline = null;
+      try {
+        spline = computeSpline(safePoints);
+      } catch (err) {
+        spline = null;
+      }
+      if (!spline) return makeLinearCurveLut();
+
+      for (let i = 0; i < 256; i++) {
+        const value = Math.round(spline(i));
+        curve[i] = clampBetween(value, 0, 255);
+      }
+      return curve;
+    }
+
+    function sanitizeCurveLut(channelCurve, fallbackCurve = null) {
+      if (channelCurve instanceof Uint8Array && channelCurve.length >= 256) {
+        return channelCurve;
+      }
+      const source = (channelCurve && typeof channelCurve.length === 'number' && channelCurve.length >= 256)
+        ? channelCurve
+        : ((fallbackCurve && typeof fallbackCurve.length === 'number' && fallbackCurve.length >= 256)
+          ? fallbackCurve
+          : null);
+      if (!source) return null;
+
+      const next = new Uint8Array(256);
+      for (let i = 0; i < 256; i++) {
+        const value = Number(source[i]);
+        if (!Number.isFinite(value)) return null;
+        next[i] = clampBetween(Math.round(value), 0, 255);
+      }
+      return next;
+    }
+
+    function sanitizeSettings(rawSettings, options = {}) {
+      const fallbackSettings = (options.fallbackSettings && typeof options.fallbackSettings === 'object')
+        ? options.fallbackSettings
+        : state;
+      const source = (rawSettings && typeof rawSettings === 'object') ? rawSettings : {};
+      const includeCurvePoints = options.includeCurvePoints !== false;
+      const includeCurves = options.includeCurves !== false;
+
+      const fallbackType = sanitizePresetType(fallbackSettings.filmType || 'color');
+      const filmType = sanitizePresetType(source.filmType || fallbackType);
+      const fallbackPreset = resolvePresetId(fallbackSettings.filmPreset) || getDefaultPresetForType(fallbackType);
+      const filmPreset = resolvePresetId(source.filmPreset) || fallbackPreset || getDefaultPresetForType(filmType);
+
+      const safe = {
+        cropRegion: source.cropRegion ? { ...source.cropRegion } : (fallbackSettings.cropRegion ? { ...fallbackSettings.cropRegion } : null),
+        rotationAngle: normalizeAngleDegrees(sanitizeNumeric(source.rotationAngle, fallbackSettings.rotationAngle || 0, -3600, 3600)),
+        autoFrameMeta: source.autoFrameMeta ? { ...source.autoFrameMeta } : (fallbackSettings.autoFrameMeta ? { ...fallbackSettings.autoFrameMeta } : null),
+        filmType,
+        filmPreset,
+        filmBase: sanitizeFilmBase(source.filmBase, fallbackSettings.filmBase),
+        exposure: sanitizeNumeric(source.exposure, fallbackSettings.exposure ?? 0, -3, 3),
+        contrast: sanitizeNumeric(source.contrast, fallbackSettings.contrast ?? 0, -100, 100),
+        highlights: sanitizeNumeric(source.highlights, fallbackSettings.highlights ?? 0, -100, 100),
+        shadows: sanitizeNumeric(source.shadows, fallbackSettings.shadows ?? 0, -100, 100),
+        temperature: sanitizeNumeric(source.temperature, fallbackSettings.temperature ?? 0, -100, 100),
+        tint: sanitizeNumeric(source.tint, fallbackSettings.tint ?? 0, -100, 100),
+        vibrance: sanitizeNumeric(source.vibrance, fallbackSettings.vibrance ?? 0, -100, 100),
+        saturation: sanitizeNumeric(source.saturation, fallbackSettings.saturation ?? 0, -100, 100),
+        cyan: sanitizeNumeric(source.cyan, fallbackSettings.cyan ?? 0, -100, 100),
+        magenta: sanitizeNumeric(source.magenta, fallbackSettings.magenta ?? 0, -100, 100),
+        yellow: sanitizeNumeric(source.yellow, fallbackSettings.yellow ?? 0, -100, 100),
+        wbR: sanitizeNumeric(source.wbR, fallbackSettings.wbR ?? 1, 0.5, 2),
+        wbG: sanitizeNumeric(source.wbG, fallbackSettings.wbG ?? 1, 0.5, 2),
+        wbB: sanitizeNumeric(source.wbB, fallbackSettings.wbB ?? 1, 0.5, 2)
+      };
+
+      if (includeCurvePoints) {
+        const fallbackPoints = fallbackSettings.curvePoints || {};
+        const sourcePoints = source.curvePoints || {};
+        safe.curvePoints = {
+          r: sanitizeCurvePointChannel(sourcePoints.r, fallbackPoints.r),
+          g: sanitizeCurvePointChannel(sourcePoints.g, fallbackPoints.g),
+          b: sanitizeCurvePointChannel(sourcePoints.b, fallbackPoints.b)
+        };
+      }
+
+      if (includeCurves) {
+        const sourceCurves = source.curves || {};
+        const fallbackCurves = fallbackSettings.curves || {};
+        let rCurve = sanitizeCurveLut(sourceCurves.r, fallbackCurves.r);
+        let gCurve = sanitizeCurveLut(sourceCurves.g, fallbackCurves.g);
+        let bCurve = sanitizeCurveLut(sourceCurves.b, fallbackCurves.b);
+
+        if (!rCurve || !gCurve || !bCurve) {
+          const curvePoints = safe.curvePoints || {
+            r: sanitizeCurvePointChannel((source.curvePoints || {}).r, (fallbackSettings.curvePoints || {}).r),
+            g: sanitizeCurvePointChannel((source.curvePoints || {}).g, (fallbackSettings.curvePoints || {}).g),
+            b: sanitizeCurvePointChannel((source.curvePoints || {}).b, (fallbackSettings.curvePoints || {}).b)
+          };
+          if (!rCurve) rCurve = buildCurveLutFromPoints(curvePoints.r);
+          if (!gCurve) gCurve = buildCurveLutFromPoints(curvePoints.g);
+          if (!bCurve) bCurve = buildCurveLutFromPoints(curvePoints.b);
+        }
+
+        safe.curves = { r: rCurve, g: gCurve, b: bCurve };
+      }
+
+      return safe;
+    }
+
     function buildChannelLuts({
       lutR,
       lutG,
@@ -3657,34 +3842,39 @@
     function applyAdjustmentsToBuffer(imageData, settings, output, quality = 'full') {
       const { data } = imageData;
       const outData = output.data;
+      const safeSettings = sanitizeSettings(settings, {
+        fallbackSettings: state,
+        includeCurvePoints: false,
+        includeCurves: true
+      });
 
-      const preset = getPresetOrFallback(settings.filmPreset, settings.filmType || 'color');
+      const preset = getPresetOrFallback(safeSettings.filmPreset, safeSettings.filmType || 'color');
       const presetChars = (preset && preset.characteristics) ? preset.characteristics : {};
 
-      const exposureMult = Math.pow(2, settings.exposure);
-      const contrastFactor = 1 + ((settings.contrast + (presetChars.contrast || 0) * 100) / 100);
-      const tempFactor = (settings.temperature + (presetChars.warmth || 0) * 100) / 100;
-      const tintFactor = settings.tint / 100;
-      const satFactor = 1 + ((settings.saturation + (presetChars.saturation || 0) * 100) / 100);
-      const vibFactor = settings.vibrance / 100;
-      const highlightsFactor = settings.highlights / 100;
-      const shadowsFactor = settings.shadows / 100;
+      const exposureMult = Math.pow(2, safeSettings.exposure);
+      const contrastFactor = 1 + ((safeSettings.contrast + (presetChars.contrast || 0) * 100) / 100);
+      const tempFactor = (safeSettings.temperature + (presetChars.warmth || 0) * 100) / 100;
+      const tintFactor = safeSettings.tint / 100;
+      const satFactor = 1 + ((safeSettings.saturation + (presetChars.saturation || 0) * 100) / 100);
+      const vibFactor = safeSettings.vibrance / 100;
+      const highlightsFactor = safeSettings.highlights / 100;
+      const shadowsFactor = safeSettings.shadows / 100;
 
-      const rMult = settings.wbR * exposureMult;
-      const gMult = settings.wbG * exposureMult;
-      const bMult = settings.wbB * exposureMult;
+      const rMult = safeSettings.wbR * exposureMult;
+      const gMult = safeSettings.wbG * exposureMult;
+      const bMult = safeSettings.wbB * exposureMult;
 
       const tempRMult = 1 + tempFactor * 0.3;
       const tempBMult = 1 - tempFactor * 0.3;
       const tintGMult = 1 + tintFactor * 0.3;
 
-      const cmyRShift = settings.cyan * 2.55;
-      const cmyGShift = settings.magenta * 2.55;
-      const cmyBShift = settings.yellow * 2.55;
+      const cmyRShift = safeSettings.cyan * 2.55;
+      const cmyGShift = safeSettings.magenta * 2.55;
+      const cmyBShift = safeSettings.yellow * 2.55;
 
-      const curveR = settings.curves.r;
-      const curveG = settings.curves.g;
-      const curveB = settings.curves.b;
+      const curveR = safeSettings.curves.r;
+      const curveG = safeSettings.curves.g;
+      const curveB = safeSettings.curves.b;
 
       const doContrast = contrastFactor !== 1;
       const doHighlights = highlightsFactor !== 0;
@@ -4500,6 +4690,8 @@
       quadBuffer: null,
       sourceTex: null,
       curveTex: null,
+      disabledByError: false,
+      lastError: null,
       curveDirty: true,
       sourceDirty: true,
       sourceSize: { w: 0, h: 0 },
@@ -4523,6 +4715,16 @@
     };
 
     const webglCurveRgba = new Uint8Array(256 * 4);
+
+    function disableWebGLByError(err) {
+      const message = err && err.message ? err.message : String(err);
+      if (!webglState.disabledByError) {
+        console.error('WebGL render failed. Falling back to CPU preview:', message, err);
+      }
+      webglState.disabledByError = true;
+      webglState.lastError = message;
+      updateCanvasVisibility();
+    }
 
     function compileShader(gl, type, source) {
       const shader = gl.createShader(type);
@@ -4554,6 +4756,7 @@
     }
 
     function initWebGLRenderer() {
+      if (webglState.disabledByError) return false;
       if (webglState.gl) return true;
 
       let gl = null;
@@ -4728,6 +4931,7 @@
           webglState.maxTextureSize = 0;
           webglState.curveDirty = true;
           webglState.sourceDirty = true;
+          webglState.lastError = null;
           updateCanvasVisibility();
           schedulePreviewUpdate();
         }, false);
@@ -4743,6 +4947,7 @@
           webglState.maxTextureSize = 0;
           webglState.curveDirty = true;
           webglState.sourceDirty = true;
+          webglState.lastError = null;
           schedulePreviewUpdate();
         }, false);
 
@@ -4799,12 +5004,13 @@
 
       webglState.curveDirty = true;
       webglState.sourceDirty = true;
+      webglState.lastError = null;
 
       return true;
     }
 
     function isWebGLActive() {
-      return !!webglState.gl && state.currentStep >= 3 && !!state.processedImageData;
+      return !!webglState.gl && !webglState.disabledByError && state.currentStep >= 3 && !!state.processedImageData;
     }
 
     function resizeWebGLCanvas() {
@@ -4911,20 +5117,25 @@
     function webglSetUniforms() {
       const gl = webglState.gl;
       if (!gl) return;
+      const safe = sanitizeSettings(state, {
+        fallbackSettings: state,
+        includeCurvePoints: false,
+        includeCurves: false
+      });
 
-      const preset = getPresetOrFallback(state.filmPreset, state.filmType);
+      const preset = getPresetOrFallback(safe.filmPreset, safe.filmType);
       const presetChars = (preset && preset.characteristics) ? preset.characteristics : {};
 
-      const exposure = state.exposure;
-      const contrast = 1 + ((state.contrast + (presetChars.contrast || 0) * 100) / 100);
-      const highlights = state.highlights / 100;
-      const shadows = state.shadows / 100;
-      const tempFactor = (state.temperature + (presetChars.warmth || 0) * 100) / 100;
-      const tintFactor = state.tint / 100;
-      const satFactor = 1 + ((state.saturation + (presetChars.saturation || 0) * 100) / 100);
-      const vibFactor = state.vibrance / 100;
+      const exposure = safe.exposure;
+      const contrast = 1 + ((safe.contrast + (presetChars.contrast || 0) * 100) / 100);
+      const highlights = safe.highlights / 100;
+      const shadows = safe.shadows / 100;
+      const tempFactor = (safe.temperature + (presetChars.warmth || 0) * 100) / 100;
+      const tintFactor = safe.tint / 100;
+      const satFactor = 1 + ((safe.saturation + (presetChars.saturation || 0) * 100) / 100);
+      const vibFactor = safe.vibrance / 100;
 
-      gl.uniform3f(webglState.locations.uWb, state.wbR, state.wbG, state.wbB);
+      gl.uniform3f(webglState.locations.uWb, safe.wbR, safe.wbG, safe.wbB);
       gl.uniform1f(webglState.locations.uExposure, exposure);
       gl.uniform1f(webglState.locations.uContrast, contrast);
       gl.uniform1f(webglState.locations.uHighlights, highlights);
@@ -4933,49 +5144,58 @@
       gl.uniform1f(webglState.locations.uTint, tintFactor);
       gl.uniform1f(webglState.locations.uSat, satFactor);
       gl.uniform1f(webglState.locations.uVib, vibFactor);
-      gl.uniform3f(webglState.locations.uCmy, state.cyan / 100, state.magenta / 100, state.yellow / 100);
+      gl.uniform3f(webglState.locations.uCmy, safe.cyan / 100, safe.magenta / 100, safe.yellow / 100);
     }
 
     function renderWebGL() {
-      if (!webglState.gl || !state.processedImageData) return;
+      if (!webglState.gl || webglState.disabledByError || !state.processedImageData) return false;
 
-      resizeWebGLCanvas();
+      try {
+        resizeWebGLCanvas();
 
-      const gl = webglState.gl;
-      gl.viewport(0, 0, glCanvas.width, glCanvas.height);
-      gl.useProgram(webglState.program);
+        const gl = webglState.gl;
+        gl.viewport(0, 0, glCanvas.width, glCanvas.height);
+        gl.useProgram(webglState.program);
 
-      // Uploads if needed
-      const source = getWebglSourceImageData();
-      if (!source) return;
-      if (webglState.sourceDirty || webglState.sourceSize.w !== source.width || webglState.sourceSize.h !== source.height) {
-        webglUploadSource(source);
+        // Uploads if needed
+        const source = getWebglSourceImageData();
+        if (!source) return false;
+        if (webglState.sourceDirty || webglState.sourceSize.w !== source.width || webglState.sourceSize.h !== source.height) {
+          webglUploadSource(source);
+        }
+        if (webglState.curveDirty) {
+          webglUploadCurves();
+        }
+
+        // Bind geometry
+        gl.bindBuffer(gl.ARRAY_BUFFER, webglState.quadBuffer);
+        gl.enableVertexAttribArray(webglState.locations.aPos);
+        gl.vertexAttribPointer(webglState.locations.aPos, 2, gl.FLOAT, false, 0, 0);
+
+        // Bind textures
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, webglState.sourceTex);
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_2D, webglState.curveTex);
+
+        webglSetUniforms();
+
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        const errCode = gl.getError();
+        if (errCode !== gl.NO_ERROR) {
+          throw new Error(`WebGL draw error code: ${errCode}`);
+        }
+        return true;
+      } catch (err) {
+        disableWebGLByError(err);
+        return false;
       }
-      if (webglState.curveDirty) {
-        webglUploadCurves();
-      }
-
-      // Bind geometry
-      gl.bindBuffer(gl.ARRAY_BUFFER, webglState.quadBuffer);
-      gl.enableVertexAttribArray(webglState.locations.aPos);
-      gl.vertexAttribPointer(webglState.locations.aPos, 2, gl.FLOAT, false, 0, 0);
-
-      // Bind textures
-      gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, webglState.sourceTex);
-      gl.activeTexture(gl.TEXTURE1);
-      gl.bindTexture(gl.TEXTURE_2D, webglState.curveTex);
-
-      webglSetUniforms();
-
-      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
 
     function updateCanvasVisibility() {
       const showGL = isWebGLActive();
       glCanvas.style.display = showGL ? 'block' : 'none';
       canvas.style.display = showGL ? 'none' : 'block';
-      if (showGL) renderWebGL();
     }
 
     let updateScheduled = false;
@@ -5025,12 +5245,14 @@
       // Prefer GPU rendering in Step 3 when available.
       if (state.currentStep >= 3 && initWebGLRenderer()) {
         updateCanvasVisibility();
-        renderWebGL();
-        renderHistogramForWebGL(false);
-        state.lastRenderQuality = 'gl';
-        return;
+        if (isWebGLActive() && renderWebGL()) {
+          renderHistogramForWebGL(false);
+          state.lastRenderQuality = 'gl';
+          return;
+        }
       }
 
+      updateCanvasVisibility();
       updatePreviewCpu();
     }
 
@@ -5063,12 +5285,14 @@
       // Prefer GPU rendering in Step 3 when available.
       if (state.currentStep >= 3 && initWebGLRenderer()) {
         updateCanvasVisibility();
-        renderWebGL();
-        renderHistogramForWebGL(true);
-        state.lastRenderQuality = 'gl';
-        return;
+        if (isWebGLActive() && renderWebGL()) {
+          renderHistogramForWebGL(true);
+          state.lastRenderQuality = 'gl';
+          return;
+        }
       }
 
+      updateCanvasVisibility();
       updateFullCpu();
     }
 
@@ -6930,8 +7154,23 @@
       state.croppedImageData = null;
       state.cropRegion = null;
       state.rotationAngle = normalizeAngleDegrees((state.rotationAngle || 0) + angle);
+      state.processedImageData = null;
+      state.displayImageData = null;
+      state.previewSourceImageData = null;
+      state.histogramSourceImageData = null;
+      state.webglSourceImageData = null;
+      state.lastRenderQuality = 'full';
+      if (webglState.gl) {
+        webglState.sourceDirty = true;
+        webglState.sourceSize = { w: 0, h: 0 };
+      }
 
-      displayNegative(rotatedData);
+      if (state.currentStep >= 3) {
+        processNegative();
+      } else {
+        displayNegative(rotatedData);
+        updateCanvasVisibility();
+      }
       setStep2Mode(suggestStep2Mode());
       markCurrentFileDirty();
     }
@@ -7548,72 +7787,74 @@
     // Batch Processing
     // ===========================================
     function extractCurrentSettings() {
+      const safe = sanitizeSettings(state, { fallbackSettings: state });
       return {
-        cropRegion: state.cropRegion,
-        rotationAngle: state.rotationAngle || 0,
+        cropRegion: safe.cropRegion ? { ...safe.cropRegion } : null,
+        rotationAngle: safe.rotationAngle || 0,
         autoFrameMeta: state.autoFrame.lastDiagnostics ? { ...state.autoFrame.lastDiagnostics } : null,
-        filmType: state.filmType,
-        filmPreset: state.filmPreset,
-        filmBase: { ...state.filmBase },
-        exposure: state.exposure,
-        contrast: state.contrast,
-        highlights: state.highlights,
-        shadows: state.shadows,
-        temperature: state.temperature,
-        tint: state.tint,
-        vibrance: state.vibrance,
-        saturation: state.saturation,
-        cyan: state.cyan,
-        magenta: state.magenta,
-        yellow: state.yellow,
-        wbR: state.wbR,
-        wbG: state.wbG,
-        wbB: state.wbB,
+        filmType: safe.filmType,
+        filmPreset: safe.filmPreset,
+        filmBase: { ...safe.filmBase },
+        exposure: safe.exposure,
+        contrast: safe.contrast,
+        highlights: safe.highlights,
+        shadows: safe.shadows,
+        temperature: safe.temperature,
+        tint: safe.tint,
+        vibrance: safe.vibrance,
+        saturation: safe.saturation,
+        cyan: safe.cyan,
+        magenta: safe.magenta,
+        yellow: safe.yellow,
+        wbR: safe.wbR,
+        wbG: safe.wbG,
+        wbB: safe.wbB,
         curvePoints: {
-          r: state.curvePoints.r.map(p => ({ ...p })),
-          g: state.curvePoints.g.map(p => ({ ...p })),
-          b: state.curvePoints.b.map(p => ({ ...p }))
+          r: safe.curvePoints.r.map(p => ({ ...p })),
+          g: safe.curvePoints.g.map(p => ({ ...p })),
+          b: safe.curvePoints.b.map(p => ({ ...p }))
         },
         curves: {
-          r: new Uint8Array(state.curves.r),
-          g: new Uint8Array(state.curves.g),
-          b: new Uint8Array(state.curves.b)
+          r: new Uint8Array(safe.curves.r),
+          g: new Uint8Array(safe.curves.g),
+          b: new Uint8Array(safe.curves.b)
         }
       };
     }
 
     function cloneSettings(settings) {
       if (!settings) return null;
+      const safe = sanitizeSettings(settings, { fallbackSettings: state });
       return {
-        cropRegion: settings.cropRegion ? { ...settings.cropRegion } : null,
-        rotationAngle: Number.isFinite(settings.rotationAngle) ? settings.rotationAngle : 0,
-        autoFrameMeta: settings.autoFrameMeta ? { ...settings.autoFrameMeta } : null,
-        filmType: settings.filmType,
-        filmPreset: settings.filmPreset,
-        filmBase: { ...settings.filmBase },
-        exposure: settings.exposure,
-        contrast: settings.contrast,
-        highlights: settings.highlights,
-        shadows: settings.shadows,
-        temperature: settings.temperature,
-        tint: settings.tint,
-        vibrance: settings.vibrance,
-        saturation: settings.saturation,
-        cyan: settings.cyan,
-        magenta: settings.magenta,
-        yellow: settings.yellow,
-        wbR: settings.wbR,
-        wbG: settings.wbG,
-        wbB: settings.wbB,
+        cropRegion: safe.cropRegion ? { ...safe.cropRegion } : null,
+        rotationAngle: safe.rotationAngle,
+        autoFrameMeta: safe.autoFrameMeta ? { ...safe.autoFrameMeta } : null,
+        filmType: safe.filmType,
+        filmPreset: safe.filmPreset,
+        filmBase: { ...safe.filmBase },
+        exposure: safe.exposure,
+        contrast: safe.contrast,
+        highlights: safe.highlights,
+        shadows: safe.shadows,
+        temperature: safe.temperature,
+        tint: safe.tint,
+        vibrance: safe.vibrance,
+        saturation: safe.saturation,
+        cyan: safe.cyan,
+        magenta: safe.magenta,
+        yellow: safe.yellow,
+        wbR: safe.wbR,
+        wbG: safe.wbG,
+        wbB: safe.wbB,
         curvePoints: {
-          r: settings.curvePoints.r.map(p => ({ ...p })),
-          g: settings.curvePoints.g.map(p => ({ ...p })),
-          b: settings.curvePoints.b.map(p => ({ ...p }))
+          r: safe.curvePoints.r.map(p => ({ ...p })),
+          g: safe.curvePoints.g.map(p => ({ ...p })),
+          b: safe.curvePoints.b.map(p => ({ ...p }))
         },
         curves: {
-          r: new Uint8Array(settings.curves.r),
-          g: new Uint8Array(settings.curves.g),
-          b: new Uint8Array(settings.curves.b)
+          r: new Uint8Array(safe.curves.r),
+          g: new Uint8Array(safe.curves.g),
+          b: new Uint8Array(safe.curves.b)
         }
       };
     }
@@ -7750,8 +7991,9 @@
     }
 
     function applyAdjustmentsWithSettings(imageData, settings) {
+      const safeSettings = sanitizeSettings(settings, { fallbackSettings: state });
       const output = new ImageData(new Uint8ClampedArray(imageData.data.length), imageData.width, imageData.height);
-      applyAdjustmentsToBuffer(imageData, settings, output, 'full');
+      applyAdjustmentsToBuffer(imageData, safeSettings, output, 'full');
       return output;
     }
 
@@ -7869,36 +8111,37 @@
 
     // Process a single file with given settings (streaming - no memory accumulation)
     async function processOneFile(file, settings) {
+      const safeSettings = sanitizeSettings(settings, { fallbackSettings: state });
       const imageData = await loadFileToImageData(file);
 
       let workingData = imageData;
-      const rotationAngle = Number.isFinite(settings.rotationAngle) ? settings.rotationAngle : 0;
+      const rotationAngle = Number.isFinite(safeSettings.rotationAngle) ? safeSettings.rotationAngle : 0;
       if (Math.abs(rotationAngle) > 0.001) {
         workingData = applyRotationToImageData(workingData, rotationAngle);
       }
-      if (settings.cropRegion) {
-        const cropRegion = sanitizeCropRegionForImage(settings.cropRegion, workingData);
+      if (safeSettings.cropRegion) {
+        const cropRegion = sanitizeCropRegionForImage(safeSettings.cropRegion, workingData);
         if (cropRegion) {
           workingData = cropImageData(workingData, cropRegion);
         }
       }
 
       let processed;
-      const preset = getPresetOrFallback(settings.filmPreset, settings.filmType);
-      const presetType = (preset && preset.type) ? preset.type : settings.filmType;
-      if (settings.filmType === 'positive' || presetType === 'positive') {
+      const preset = getPresetOrFallback(safeSettings.filmPreset, safeSettings.filmType);
+      const presetType = (preset && preset.type) ? preset.type : safeSettings.filmType;
+      if (safeSettings.filmType === 'positive' || presetType === 'positive') {
         processed = convertPositiveFilm(workingData);
-      } else if (settings.filmType === 'bw' || presetType === 'bw') {
+      } else if (safeSettings.filmType === 'bw' || presetType === 'bw') {
         const bwParams = getBwPresetParams(preset);
         processed = convertBWNegative(workingData, {
           contrast: bwParams.contrast,
           gamma: bwParams.gamma
         });
       } else {
-        processed = convertColorNegative(workingData, settings.filmBase);
+        processed = convertColorNegative(workingData, safeSettings.filmBase);
       }
 
-      return applyAdjustmentsWithSettings(processed, settings);
+      return applyAdjustmentsWithSettings(processed, safeSettings);
     }
 
     // Get selected files for batch processing
@@ -7938,9 +8181,9 @@
           b: [{ x: 0, y: 0 }, { x: 255, y: 255 }]
         },
         curves: {
-          r: new Uint8Array(256).map((_, i) => i),
-          g: new Uint8Array(256).map((_, i) => i),
-          b: new Uint8Array(256).map((_, i) => i)
+          r: makeLinearCurveLut(),
+          g: makeLinearCurveLut(),
+          b: makeLinearCurveLut()
         }
       };
     }
@@ -7951,7 +8194,9 @@
       const imageData = await loadFileToImageData(file);
 
       // Use saved settings or create default with auto-detect
-      const settings = savedSettings || createDefaultSettings(imageData);
+      const settings = sanitizeSettings(savedSettings || createDefaultSettings(imageData), {
+        fallbackSettings: state
+      });
 
       // Apply crop if set
       let workingData = imageData;
@@ -8162,8 +8407,9 @@
     // Restore settings from a saved settings object
     function restoreSettings(settings) {
       if (!settings) return;
+      const safe = sanitizeSettings(settings, { fallbackSettings: state });
 
-      state.rotationAngle = Number.isFinite(settings.rotationAngle) ? normalizeAngleDegrees(settings.rotationAngle) : 0;
+      state.rotationAngle = Number.isFinite(safe.rotationAngle) ? normalizeAngleDegrees(safe.rotationAngle) : 0;
 
       if (state.loadedBaseImageData) {
         state.originalImageData = state.loadedBaseImageData;
@@ -8174,19 +8420,19 @@
       }
 
       // Restore crop region after rotation
-      applyCropRegionToLoadedImage(settings.cropRegion, { refreshDisplay: true });
+      applyCropRegionToLoadedImage(safe.cropRegion, { refreshDisplay: true });
       if (state.originalImageData) {
-        settings.rotationAngle = state.rotationAngle;
-        settings.cropRegion = state.cropRegion ? { ...state.cropRegion } : null;
+        safe.rotationAngle = state.rotationAngle;
+        safe.cropRegion = state.cropRegion ? { ...state.cropRegion } : null;
       }
 
-      if (settings.autoFrameMeta) {
+      if (safe.autoFrameMeta) {
         state.autoFrame.lastDiagnostics = {
-          confidence: settings.autoFrameMeta.confidence,
-          detectedFormat: settings.autoFrameMeta.detectedFormat || 'unknown',
-          method: settings.autoFrameMeta.method || 'unknown',
-          confidenceLevel: settings.autoFrameMeta.confidenceLevel || inferConfidenceLevel(settings.autoFrameMeta.confidence || 0),
-          rotateOnly: Boolean(settings.autoFrameMeta.rotateOnly)
+          confidence: safe.autoFrameMeta.confidence,
+          detectedFormat: safe.autoFrameMeta.detectedFormat || 'unknown',
+          method: safe.autoFrameMeta.method || 'unknown',
+          confidenceLevel: safe.autoFrameMeta.confidenceLevel || inferConfidenceLevel(safe.autoFrameMeta.confidence || 0),
+          rotateOnly: Boolean(safe.autoFrameMeta.rotateOnly)
         };
       } else {
         state.autoFrame.lastDiagnostics = null;
@@ -8194,32 +8440,32 @@
       updateAutoFrameDiagnosticsUI();
 
       // Restore film settings
-      state.filmType = sanitizePresetType(settings.filmType || 'color');
-      state.filmPreset = resolvePresetId(settings.filmPreset) || getDefaultPresetForType(state.filmType);
-      state.filmBase = { ...settings.filmBase };
+      state.filmType = sanitizePresetType(safe.filmType || 'color');
+      state.filmPreset = resolvePresetId(safe.filmPreset) || getDefaultPresetForType(state.filmType);
+      state.filmBase = { ...safe.filmBase };
       state.filmBaseSet = true;
 
       // Restore adjustments
-      state.exposure = settings.exposure;
-      state.contrast = settings.contrast;
-      state.highlights = settings.highlights;
-      state.shadows = settings.shadows;
-      state.temperature = settings.temperature;
-      state.tint = settings.tint;
-      state.vibrance = settings.vibrance;
-      state.saturation = settings.saturation;
-      state.cyan = settings.cyan;
-      state.magenta = settings.magenta;
-      state.yellow = settings.yellow;
-      state.wbR = settings.wbR;
-      state.wbG = settings.wbG;
-      state.wbB = settings.wbB;
+      state.exposure = safe.exposure;
+      state.contrast = safe.contrast;
+      state.highlights = safe.highlights;
+      state.shadows = safe.shadows;
+      state.temperature = safe.temperature;
+      state.tint = safe.tint;
+      state.vibrance = safe.vibrance;
+      state.saturation = safe.saturation;
+      state.cyan = safe.cyan;
+      state.magenta = safe.magenta;
+      state.yellow = safe.yellow;
+      state.wbR = safe.wbR;
+      state.wbG = safe.wbG;
+      state.wbB = safe.wbB;
 
       // Restore curves
       state.curvePoints = {
-        r: settings.curvePoints.r.map(p => ({ ...p })),
-        g: settings.curvePoints.g.map(p => ({ ...p })),
-        b: settings.curvePoints.b.map(p => ({ ...p }))
+        r: safe.curvePoints.r.map(p => ({ ...p })),
+        g: safe.curvePoints.g.map(p => ({ ...p })),
+        b: safe.curvePoints.b.map(p => ({ ...p }))
       };
       ['r', 'g', 'b'].forEach(ch => updateCurveFromPoints(ch));
 
