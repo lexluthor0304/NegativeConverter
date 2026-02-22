@@ -1644,6 +1644,8 @@
         <button class="toolbar-btn" id="cropBtn" data-i18n="crop">Crop</button>
         <button class="toolbar-btn" id="applyCropBtn" style="display: none;" data-i18n="applyCrop">Apply Crop</button>
         <button class="toolbar-btn" id="cancelCropBtn" style="display: none;" data-i18n="cancelCrop">Cancel</button>
+        <button class="toolbar-btn" id="autoFrameBtn" data-i18n="autoFrame">Auto Frame</button>
+        <button class="toolbar-btn" id="autoFrameSelectedBtn" data-i18n="autoFrameSelected">Auto Frame Selected</button>
         <button class="toolbar-btn" id="addFilesToolbarBtn" data-i18n="addFiles">Add</button>
         <div class="toolbar-separator" id="convertSeparator" style="display: none;"></div>
         <button class="toolbar-btn primary" id="convertBtn" style="display: none;" data-i18n="convert">Convert Negative</button>
@@ -1998,6 +2000,8 @@
         crop: "裁剪",
         applyCrop: "应用裁剪",
         cancelCrop: "取消",
+        autoFrame: "自动识别边框",
+        autoFrameSelected: "批量自动识别",
         convert: "转换负片",
         convertPositive: "转换正片",
         histogram: "直方图",
@@ -2080,6 +2084,12 @@
         appliedToSelected: "已将当前设置应用到 {count} 张图片。",
         noSelectedFiles: "没有选中的图片可应用设置。",
         batchStep3Guide: "批处理第3步指南：\n1) 调整当前图片。\n2) 切换图片或导出时会自动保存。\n3) 也可手动点击“保存设置”。\n4) 如需整卷统一参数，可点“应用到已选中”。\n5) 最后点击“批量导出 (ZIP)”或“逐个下载全部”。",
+        autoFrameAnalyzing: "正在自动识别边框...",
+        autoFramePreviewTitle: "检测到可用边框，是否应用？",
+        autoFramePreviewDetail: "将旋转 {angle}°，裁剪到 {width}×{height}，置信度 {confidence}",
+        autoFrameNoReliableBorder: "未检测到可靠边框，请手动裁剪。",
+        autoFrameCvLoadError: "OpenCV 加载失败，无法使用自动识别。",
+        autoFrameBatchDone: "自动识别完成：成功 {success} 张，失败 {failed} 张。",
         exportCurrent: "导出当前图片 (PNG)",
         exportZip: "批量导出 (ZIP)",
         exportIndividual: "逐个下载全部",
@@ -2107,6 +2117,8 @@
         crop: "Crop",
         applyCrop: "Apply Crop",
         cancelCrop: "Cancel",
+        autoFrame: "Auto Frame",
+        autoFrameSelected: "Auto Frame Selected",
         convert: "Convert Negative",
         convertPositive: "Convert Positive",
         histogram: "Histogram",
@@ -2189,6 +2201,12 @@
         appliedToSelected: "Applied current settings to {count} image(s).",
         noSelectedFiles: "No selected images to apply settings.",
         batchStep3Guide: "Batch Step 3 Guide:\n1) Adjust the current image.\n2) Settings auto-save when switching files or exporting.\n3) You can still click \"Save Settings\" manually.\n4) Use \"Apply to Selected\" for roll-wide baseline settings.\n5) When finished, use \"Export All (ZIP)\" or \"Download All Individually\".",
+        autoFrameAnalyzing: "Analyzing frame borders...",
+        autoFramePreviewTitle: "Reliable frame detected. Apply auto rotation and crop?",
+        autoFramePreviewDetail: "Rotate {angle}°, crop to {width}×{height}, confidence {confidence}",
+        autoFrameNoReliableBorder: "No reliable frame border detected. Please crop manually.",
+        autoFrameCvLoadError: "OpenCV failed to load. Auto frame is unavailable.",
+        autoFrameBatchDone: "Auto frame finished: {success} succeeded, {failed} failed.",
         exportCurrent: "Export Current (PNG)",
         exportZip: "Export All (ZIP)",
         exportIndividual: "Download All Individually",
@@ -2216,6 +2234,8 @@
         crop: "トリミング",
         applyCrop: "適用",
         cancelCrop: "キャンセル",
+        autoFrame: "自動フレーム検出",
+        autoFrameSelected: "選択画像を自動検出",
         convert: "ネガ変換",
         convertPositive: "ポジ変換",
         histogram: "ヒストグラム",
@@ -2298,6 +2318,12 @@
         appliedToSelected: "現在の設定を {count} 枚に適用しました。",
         noSelectedFiles: "設定を適用できる選択画像がありません。",
         batchStep3Guide: "一括処理ステップ3ガイド：\n1) 現在の画像を調整します。\n2) 画像切替または書き出し時に自動保存されます。\n3) 必要なら「設定を保存」も使えます。\n4) ロール全体に適用する場合は「選択中に適用」を使います。\n5) 最後に「一括出力 (ZIP)」または「すべて個別にダウンロード」を実行します。",
+        autoFrameAnalyzing: "フレーム境界を解析中...",
+        autoFramePreviewTitle: "信頼できるフレームを検出しました。自動回転とトリミングを適用しますか？",
+        autoFramePreviewDetail: "{angle}°回転、{width}×{height} にトリミング、信頼度 {confidence}",
+        autoFrameNoReliableBorder: "信頼できるフレーム境界を検出できませんでした。手動でトリミングしてください。",
+        autoFrameCvLoadError: "OpenCV の読み込みに失敗したため、自動検出は利用できません。",
+        autoFrameBatchDone: "自動検出が完了しました: 成功 {success} 枚、失敗 {failed} 枚。",
         exportCurrent: "現在の画像を出力 (PNG)",
         exportZip: "一括出力 (ZIP)",
         exportIndividual: "すべて個別にダウンロード",
@@ -2319,7 +2345,10 @@
     };
 
     const DEBUG_UI = new URLSearchParams(window.location.search).get('debug') === '1';
-    const BUILD_ID = '2026-02-22-batch-export-consistency-1';
+    const BUILD_ID = '2026-02-22-auto-frame-detect-1';
+    const OPENCV_SCRIPT_PATH = './node_modules/@techstark/opencv-js/dist/opencv.js';
+    const AUTO_FRAME_MAX_SIDE = 1600;
+    let opencvReadyPromise = null;
 
     let currentLang = 'en';
     let stateReady = false;
@@ -2344,6 +2373,7 @@
       if (stateReady) {
         updateCurrentFileLabel();
         updateRollReferenceUI();
+        updateAutoFrameButtons();
       }
     }
 
@@ -2612,7 +2642,8 @@
       currentStep: 1,  // 1=crop, 2=film base, 3=adjust
 
       // Image data
-      originalImageData: null,      // Raw loaded image (negative, untouched)
+      loadedBaseImageData: null,    // File-loaded baseline (never transformed)
+      originalImageData: null,      // Current working base image (may include rotation)
       croppedImageData: null,       // After cropping (still negative)
       processedImageData: null,     // After negative conversion
       displayImageData: null,       // After all adjustments
@@ -2663,7 +2694,13 @@
       cropStart: null,
       croppingActive: false,
       samplingMode: null,  // null, 'filmBase', 'whiteBalance'
-      rotation: 0,
+      rotationAngle: 0,
+
+      autoFrame: {
+        enabled: true,
+        marginRatio: 0.02,
+        minConfidence: 0.55
+      },
 
       // Batch mode state
       batchMode: false,
@@ -2825,6 +2862,7 @@
 
       updateCurrentFileLabel();
       updateRollReferenceUI();
+      updateAutoFrameButtons();
       updateDebugWidget();
     }
 
@@ -4811,8 +4849,11 @@
         }
 
         if (imageData) {
+          state.loadedBaseImageData = imageData;
           state.originalImageData = imageData;
           state.croppedImageData = null;
+          state.cropRegion = null;
+          state.rotationAngle = 0;
           state.processedImageData = null;
           state.displayImageData = null;
           state.previewSourceImageData = null;
@@ -4829,6 +4870,7 @@
           showImageUI();
           goToStep(1);
           syncBatchUIState({ reason: 'loadFile' });
+          updateAutoFrameButtons();
         }
       } catch (err) {
         console.error('Error loading file:', err);
@@ -5609,44 +5651,361 @@
     // ===========================================
     // Rotation
     // ===========================================
-    function applyRotation(angle) {
-      const sourceData = state.croppedImageData || state.originalImageData;
-      if (!sourceData) return;
+    function normalizeAngleDegrees(angle) {
+      let normalized = Number.isFinite(angle) ? angle : 0;
+      while (normalized > 180) normalized -= 360;
+      while (normalized <= -180) normalized += 360;
+      return normalized;
+    }
 
-      const rad = angle * Math.PI / 180;
-      const w = canvas.width;
-      const h = canvas.height;
+    function applyRotationToImageData(imageData, angle) {
+      if (!imageData) return null;
+      const normalized = normalizeAngleDegrees(Number(angle) || 0);
+      if (Math.abs(normalized) < 0.001) return imageData;
+
+      const rad = normalized * Math.PI / 180;
+      const w = imageData.width;
+      const h = imageData.height;
       const cos = Math.abs(Math.cos(rad));
       const sin = Math.abs(Math.sin(rad));
-      const newW = Math.ceil(w * cos + h * sin);
-      const newH = Math.ceil(w * sin + h * cos);
+      const newW = Math.max(1, Math.ceil(w * cos + h * sin));
+      const newH = Math.max(1, Math.ceil(w * sin + h * cos));
 
-      const offCanvas = document.createElement('canvas');
-      offCanvas.width = newW;
-      offCanvas.height = newH;
-      const offCtx = offCanvas.getContext('2d');
+      const srcCanvas = document.createElement('canvas');
+      srcCanvas.width = w;
+      srcCanvas.height = h;
+      const srcCtx = srcCanvas.getContext('2d', { willReadFrequently: true });
+      srcCtx.putImageData(imageData, 0, 0);
 
-      offCtx.translate(newW / 2, newH / 2);
-      offCtx.rotate(rad);
-      offCtx.drawImage(canvas, -w / 2, -h / 2);
+      const dstCanvas = document.createElement('canvas');
+      dstCanvas.width = newW;
+      dstCanvas.height = newH;
+      const dstCtx = dstCanvas.getContext('2d', { willReadFrequently: true });
+      dstCtx.translate(newW / 2, newH / 2);
+      dstCtx.rotate(rad);
+      dstCtx.drawImage(srcCanvas, -w / 2, -h / 2);
 
-      canvas.width = newW;
-      canvas.height = newH;
-      ctx.drawImage(offCanvas, 0, 0);
+      return dstCtx.getImageData(0, 0, newW, newH);
+    }
 
-      const newImageData = ctx.getImageData(0, 0, newW, newH);
+    function resizeImageDataForDetection(imageData, maxSide = AUTO_FRAME_MAX_SIDE) {
+      if (!imageData) return null;
+      const longest = Math.max(imageData.width, imageData.height);
+      if (longest <= maxSide) return imageData;
 
-      if (state.croppedImageData) {
-        state.croppedImageData = newImageData;
-      } else {
-        state.originalImageData = newImageData;
+      const scale = maxSide / longest;
+      const targetW = Math.max(1, Math.round(imageData.width * scale));
+      const targetH = Math.max(1, Math.round(imageData.height * scale));
+
+      const srcCanvas = document.createElement('canvas');
+      srcCanvas.width = imageData.width;
+      srcCanvas.height = imageData.height;
+      const srcCtx = srcCanvas.getContext('2d', { willReadFrequently: true });
+      srcCtx.putImageData(imageData, 0, 0);
+
+      const dstCanvas = document.createElement('canvas');
+      dstCanvas.width = targetW;
+      dstCanvas.height = targetH;
+      const dstCtx = dstCanvas.getContext('2d', { willReadFrequently: true });
+      dstCtx.drawImage(srcCanvas, 0, 0, targetW, targetH);
+      return dstCtx.getImageData(0, 0, targetW, targetH);
+    }
+
+    async function ensureOpenCvReady() {
+      if (window.cv && window.cv.Mat) return true;
+      if (opencvReadyPromise) return opencvReadyPromise;
+
+      opencvReadyPromise = new Promise((resolve, reject) => {
+        let resolved = false;
+        const settle = (ok, err) => {
+          if (resolved) return;
+          resolved = true;
+          if (ok) resolve(true);
+          else reject(err || new Error('OpenCV initialization failed'));
+        };
+
+        const existingScript = document.querySelector('script[data-opencv-loader="1"]');
+        const onScriptLoaded = () => {
+          if (!window.cv) {
+            settle(false, new Error('OpenCV global is unavailable'));
+            return;
+          }
+          if (window.cv.Mat) {
+            settle(true);
+            return;
+          }
+
+          const runtimeTimeout = window.setTimeout(() => {
+            if (window.cv && window.cv.Mat) {
+              settle(true);
+            } else {
+              settle(false, new Error('OpenCV runtime init timeout'));
+            }
+          }, 15000);
+
+          const prev = window.cv.onRuntimeInitialized;
+          window.cv.onRuntimeInitialized = () => {
+            if (typeof prev === 'function') prev();
+            window.clearTimeout(runtimeTimeout);
+            settle(true);
+          };
+        };
+
+        if (existingScript) {
+          if (window.cv && window.cv.Mat) {
+            settle(true);
+          } else if (window.cv) {
+            onScriptLoaded();
+          } else {
+            existingScript.addEventListener('load', onScriptLoaded, { once: true });
+            existingScript.addEventListener('error', () => settle(false, new Error('OpenCV script load failed')), { once: true });
+          }
+          return;
+        }
+
+        const script = document.createElement('script');
+        script.src = OPENCV_SCRIPT_PATH;
+        script.async = true;
+        script.defer = true;
+        script.dataset.opencvLoader = '1';
+        script.onload = onScriptLoaded;
+        script.onerror = () => settle(false, new Error('OpenCV script load failed'));
+        document.head.appendChild(script);
+      }).catch((err) => {
+        console.error('OpenCV unavailable:', err);
+        return false;
+      });
+
+      return opencvReadyPromise;
+    }
+
+    function scoreCandidateAspect(ratio) {
+      const refs = [1.5, 1.33, 1.66];
+      let best = 0;
+      refs.forEach(ref => {
+        const delta = Math.abs(ratio - ref) / ref;
+        best = Math.max(best, 1 - clampBetween(delta / 0.6, 0, 1));
+      });
+      return best;
+    }
+
+    function analyzeBorderWithCv(imageData, options = {}) {
+      if (!(window.cv && window.cv.Mat) || !imageData) return null;
+
+      const minAreaRatio = Number.isFinite(options.minAreaRatio) ? options.minAreaRatio : 0.08;
+      const retrievalMode = options.retrievalMode === 'external' ? window.cv.RETR_EXTERNAL : window.cv.RETR_LIST;
+
+      const src = window.cv.matFromImageData(imageData);
+      let gray = null;
+      let blurred = null;
+      let edges = null;
+      let kernel = null;
+      let contours = null;
+      let hierarchy = null;
+
+      try {
+        gray = new window.cv.Mat();
+        blurred = new window.cv.Mat();
+        edges = new window.cv.Mat();
+        kernel = window.cv.getStructuringElement(window.cv.MORPH_RECT, new window.cv.Size(3, 3));
+        contours = new window.cv.MatVector();
+        hierarchy = new window.cv.Mat();
+
+        window.cv.cvtColor(src, gray, window.cv.COLOR_RGBA2GRAY);
+        window.cv.GaussianBlur(gray, blurred, new window.cv.Size(5, 5), 0, 0, window.cv.BORDER_DEFAULT);
+        window.cv.Canny(blurred, edges, 50, 150, 3, false);
+        window.cv.dilate(edges, edges, kernel, new window.cv.Point(-1, -1), 1);
+        window.cv.findContours(edges, contours, hierarchy, retrievalMode, window.cv.CHAIN_APPROX_SIMPLE);
+
+        const imageArea = src.cols * src.rows;
+        let best = null;
+
+        for (let i = 0; i < contours.size(); i++) {
+          const contour = contours.get(i);
+          const area = window.cv.contourArea(contour);
+          if (area < imageArea * minAreaRatio) {
+            contour.delete();
+            continue;
+          }
+
+          const bound = window.cv.boundingRect(contour);
+          const minRect = window.cv.minAreaRect(contour);
+          const rectArea = Math.max(1, minRect.size.width * minRect.size.height);
+          const areaRatio = area / imageArea;
+          const areaScore = clampBetween(areaRatio / 0.7, 0, 1);
+          const rectangularity = clampBetween(area / rectArea, 0, 1);
+          const edgeDistance = Math.min(
+            bound.x,
+            bound.y,
+            src.cols - (bound.x + bound.width),
+            src.rows - (bound.y + bound.height)
+          );
+          const proximity = 1 - clampBetween(edgeDistance / (Math.min(src.cols, src.rows) * 0.12), 0, 1);
+          const ratio = Math.max(minRect.size.width, minRect.size.height) / Math.max(1, Math.min(minRect.size.width, minRect.size.height));
+          const aspectScore = scoreCandidateAspect(ratio);
+          const score = areaScore * 0.45 + rectangularity * 0.25 + proximity * 0.20 + aspectScore * 0.10;
+
+          if (!best || score > best.score) {
+            best = {
+              score,
+              areaRatio,
+              bound: {
+                x: bound.x,
+                y: bound.y,
+                width: bound.width,
+                height: bound.height
+              },
+              minRect: {
+                angle: minRect.angle,
+                width: minRect.size.width,
+                height: minRect.size.height
+              }
+            };
+          }
+
+          contour.delete();
+        }
+
+        return best;
+      } catch (err) {
+        console.error('OpenCV border analysis failed:', err);
+        return null;
+      } finally {
+        src.delete();
+        if (gray) gray.delete();
+        if (blurred) blurred.delete();
+        if (edges) edges.delete();
+        if (kernel) kernel.delete();
+        if (contours) contours.delete();
+        if (hierarchy) hierarchy.delete();
+      }
+    }
+
+    function buildRotationCandidates(minRect) {
+      if (!minRect) return [0];
+
+      let angle = Number(minRect.angle) || 0;
+      let width = Number(minRect.width) || 0;
+      let height = Number(minRect.height) || 0;
+      if (width < height) angle += 90;
+
+      angle = normalizeAngleDegrees(angle);
+      const candidates = [angle, -angle, 0];
+      const deduped = [];
+      candidates.forEach(value => {
+        const normalized = normalizeAngleDegrees(value);
+        if (!deduped.some(existing => Math.abs(existing - normalized) < 0.3)) {
+          deduped.push(normalized);
+        }
+      });
+      return deduped;
+    }
+
+    function detectAxisAlignedCropRegion(imageData, marginRatio = 0.02) {
+      const analysis = analyzeBorderWithCv(imageData, {
+        minAreaRatio: 0.05,
+        retrievalMode: 'external'
+      });
+      if (!analysis || !analysis.bound) return null;
+
+      const margin = Math.round(Math.min(imageData.width, imageData.height) * Math.max(0, marginRatio));
+      const left = clampBetween(analysis.bound.x - margin, 0, imageData.width - 1);
+      const top = clampBetween(analysis.bound.y - margin, 0, imageData.height - 1);
+      const maxWidth = imageData.width - left;
+      const maxHeight = imageData.height - top;
+      const width = clampBetween(analysis.bound.width + margin * 2, 1, maxWidth);
+      const height = clampBetween(analysis.bound.height + margin * 2, 1, maxHeight);
+
+      const cropRegion = sanitizeCropRegionForImage({ left, top, width, height }, imageData);
+      if (!cropRegion) return null;
+
+      const cropAreaRatio = (cropRegion.width * cropRegion.height) / (imageData.width * imageData.height);
+      const confidence = clampBetween((analysis.score * 0.7) + (Math.min(cropAreaRatio / 0.9, 1) * 0.3), 0, 1);
+
+      return {
+        cropRegion,
+        confidence
+      };
+    }
+
+    async function detectFrameAndRotation(imageData) {
+      if (!imageData) return null;
+      const ready = await ensureOpenCvReady();
+      if (!ready) return null;
+
+      const previewData = resizeImageDataForDetection(imageData, AUTO_FRAME_MAX_SIDE);
+      const baseAnalysis = analyzeBorderWithCv(previewData, { minAreaRatio: 0.05 });
+      if (!baseAnalysis || !baseAnalysis.minRect) return null;
+
+      const candidates = buildRotationCandidates(baseAnalysis.minRect);
+      let bestPreview = null;
+
+      for (const angle of candidates) {
+        const rotatedPreview = Math.abs(angle) < 0.001 ? previewData : applyRotationToImageData(previewData, angle);
+        const cropPreview = detectAxisAlignedCropRegion(rotatedPreview, state.autoFrame.marginRatio);
+        if (!cropPreview) continue;
+
+        const score = (baseAnalysis.score * 0.35) + (cropPreview.confidence * 0.65);
+        if (!bestPreview || score > bestPreview.score) {
+          bestPreview = { angle, score };
+        }
       }
 
-      transformCanvas.width = newW;
-      transformCanvas.height = newH;
-      transformCtx.drawImage(offCanvas, 0, 0);
+      if (!bestPreview) return null;
+      const normalizedAngle = Math.abs(bestPreview.angle) < 0.15 ? 0 : Number(bestPreview.angle.toFixed(2));
+      const rotatedFull = Math.abs(normalizedAngle) < 0.001 ? imageData : applyRotationToImageData(imageData, normalizedAngle);
+      const cropFull = detectAxisAlignedCropRegion(rotatedFull, state.autoFrame.marginRatio);
+      if (!cropFull) return null;
 
-      adjustCanvasDisplay(newW, newH);
+      const confidence = Number(clampBetween((bestPreview.score * 0.4) + (cropFull.confidence * 0.6), 0, 1).toFixed(2));
+      if (confidence < state.autoFrame.minConfidence) return null;
+
+      return {
+        angle: normalizedAngle,
+        cropRegion: cropFull.cropRegion,
+        confidence,
+        rotatedImageData: rotatedFull
+      };
+    }
+
+    function formatAutoFrameDetail(result) {
+      const detailTemplate = i18n[currentLang].autoFramePreviewDetail
+        || 'Rotate {angle}°, crop to {width}x{height}, confidence {confidence}';
+      return detailTemplate
+        .replace('{angle}', String(result.angle))
+        .replace('{width}', String(result.cropRegion.width))
+        .replace('{height}', String(result.cropRegion.height))
+        .replace('{confidence}', String(result.confidence.toFixed(2)));
+    }
+
+    function applyAutoFrameResult(result) {
+      if (!result || !state.originalImageData) return false;
+
+      state.rotationAngle = normalizeAngleDegrees(result.angle || 0);
+      state.croppedImageData = null;
+      state.cropRegion = null;
+      state.originalImageData = result.rotatedImageData
+        || (Math.abs(state.rotationAngle) < 0.001
+          ? state.originalImageData
+          : applyRotationToImageData(state.originalImageData, state.rotationAngle));
+      applyCropRegionToLoadedImage(result.cropRegion, { refreshDisplay: true });
+      setStep2Mode(suggestStep2Mode());
+      return true;
+    }
+
+    function applyRotation(angle) {
+      if (!state.originalImageData || !Number.isFinite(angle) || angle === 0) return;
+
+      const rotatedData = applyRotationToImageData(state.originalImageData, angle);
+      if (!rotatedData) return;
+
+      state.originalImageData = rotatedData;
+      state.croppedImageData = null;
+      state.cropRegion = null;
+      state.rotationAngle = normalizeAngleDegrees((state.rotationAngle || 0) + angle);
+
+      displayNegative(rotatedData);
+      setStep2Mode(suggestStep2Mode());
       markCurrentFileDirty();
     }
 
@@ -5692,6 +6051,124 @@
         applyRotation(angle);
         document.getElementById('rotateAngle').value = 0;
       }
+    });
+
+    async function applyAutoFrameToCurrent() {
+      if (state.currentStep !== 1) return;
+      const source = state.loadedBaseImageData || state.originalImageData;
+      if (!source) return;
+
+      const button = document.getElementById('autoFrameBtn');
+      const previousText = button ? button.textContent : '';
+      if (button) {
+        button.disabled = true;
+        button.textContent = i18n[currentLang].autoFrameAnalyzing || 'Analyzing frame borders...';
+      }
+
+      try {
+        const ready = await ensureOpenCvReady();
+        if (!ready) {
+          alert(i18n[currentLang].autoFrameCvLoadError || 'OpenCV failed to load. Auto frame is unavailable.');
+          return;
+        }
+
+        const result = await detectFrameAndRotation(source);
+        if (!result) {
+          alert(i18n[currentLang].autoFrameNoReliableBorder || 'No reliable frame border detected. Please crop manually.');
+          return;
+        }
+
+        const title = i18n[currentLang].autoFramePreviewTitle || 'Reliable frame detected. Apply auto rotation and crop?';
+        const detail = formatAutoFrameDetail(result);
+        if (!window.confirm(`${title}\n${detail}`)) return;
+
+        state.originalImageData = source;
+        if (!applyAutoFrameResult(result)) return;
+        markCurrentFileDirty();
+      } finally {
+        if (button) {
+          button.textContent = previousText || (i18n[currentLang].autoFrame || 'Auto Frame');
+          updateAutoFrameButtons();
+        }
+      }
+    }
+
+    async function applyAutoFrameToSelected() {
+      if (state.currentStep !== 1) return;
+      const selectedItems = state.fileQueue.filter(item => item.selected);
+      if (selectedItems.length < 1) return;
+
+      const ready = await ensureOpenCvReady();
+      if (!ready) {
+        alert(i18n[currentLang].autoFrameCvLoadError || 'OpenCV failed to load. Auto frame is unavailable.');
+        return;
+      }
+
+      const button = document.getElementById('autoFrameSelectedBtn');
+      const previousText = button ? button.textContent : '';
+      if (button) {
+        button.disabled = true;
+        button.textContent = i18n[currentLang].autoFrameAnalyzing || 'Analyzing frame borders...';
+      }
+
+      let successCount = 0;
+      let failCount = 0;
+      showBatchProgress(true);
+
+      try {
+        for (let i = 0; i < selectedItems.length; i++) {
+          const item = selectedItems[i];
+          updateBatchProgress(i + 1, selectedItems.length, item.file.name);
+
+          try {
+            const imageData = await loadFileToImageData(item.file);
+            const result = await detectFrameAndRotation(imageData);
+            if (!result) {
+              failCount++;
+              continue;
+            }
+
+            const existing = item.settings ? cloneSettings(item.settings) : createDefaultSettings(imageData);
+            existing.rotationAngle = result.angle;
+            existing.cropRegion = result.cropRegion ? { ...result.cropRegion } : null;
+            existing.autoFrameMeta = {
+              confidence: result.confidence,
+              detectedAt: Date.now()
+            };
+            item.settings = existing;
+            item.isDirty = false;
+            successCount++;
+          } catch (err) {
+            console.error('Auto frame batch item failed:', item.file.name, err);
+            failCount++;
+          }
+        }
+      } finally {
+        showBatchProgress(false);
+        if (button) {
+          button.textContent = previousText || (i18n[currentLang].autoFrameSelected || 'Auto Frame Selected');
+          updateAutoFrameButtons();
+        }
+      }
+
+      const currentItem = getCurrentQueueItem();
+      if (currentItem && currentItem.settings && currentItem.selected) {
+        restoreSettings(currentItem.settings);
+      }
+
+      updateFileListUI();
+      const template = i18n[currentLang].autoFrameBatchDone || 'Auto frame finished: {success} succeeded, {failed} failed.';
+      alert(template
+        .replace('{success}', String(successCount))
+        .replace('{failed}', String(failCount)));
+    }
+
+    document.getElementById('autoFrameBtn').addEventListener('click', () => {
+      applyAutoFrameToCurrent();
+    });
+
+    document.getElementById('autoFrameSelectedBtn').addEventListener('click', () => {
+      applyAutoFrameToSelected();
     });
 
     // ===========================================
@@ -5907,7 +6384,9 @@
     });
 
     document.getElementById('startOverBtn').addEventListener('click', () => {
-      if (state.originalImageData) {
+      if (state.loadedBaseImageData || state.originalImageData) {
+        state.originalImageData = state.loadedBaseImageData || state.originalImageData;
+        state.rotationAngle = 0;
         state.cropRegion = null;
         state.croppedImageData = null;
         state.processedImageData = null;
@@ -5926,6 +6405,7 @@
           fullUpdateTimer = null;
         }
         displayNegative(state.originalImageData);
+        updateAutoFrameButtons();
         goToStep(1);
         document.getElementById('resetBtn').click();
         markCurrentFileDirty();
@@ -5934,8 +6414,11 @@
 
     document.getElementById('newImageBtn').addEventListener('click', () => {
       // Reset all state
+      state.loadedBaseImageData = null;
       state.originalImageData = null;
       state.croppedImageData = null;
+      state.cropRegion = null;
+      state.rotationAngle = 0;
       state.processedImageData = null;
       state.displayImageData = null;
       state.previewSourceImageData = null;
@@ -6080,6 +6563,7 @@
     function extractCurrentSettings() {
       return {
         cropRegion: state.cropRegion,
+        rotationAngle: state.rotationAngle || 0,
         filmType: state.filmType,
         filmPreset: state.filmPreset,
         filmBase: { ...state.filmBase },
@@ -6114,6 +6598,8 @@
       if (!settings) return null;
       return {
         cropRegion: settings.cropRegion ? { ...settings.cropRegion } : null,
+        rotationAngle: Number.isFinite(settings.rotationAngle) ? settings.rotationAngle : 0,
+        autoFrameMeta: settings.autoFrameMeta ? { ...settings.autoFrameMeta } : null,
         filmType: settings.filmType,
         filmPreset: settings.filmPreset,
         filmBase: { ...settings.filmBase },
@@ -6183,7 +6669,11 @@
         const next = cloneSettings(copied);
         if (!includeCrop) {
           const existingCrop = item.settings && item.settings.cropRegion ? { ...item.settings.cropRegion } : null;
+          const existingRotation = item.settings && Number.isFinite(item.settings.rotationAngle)
+            ? item.settings.rotationAngle
+            : 0;
           next.cropRegion = existingCrop;
+          next.rotationAngle = existingRotation;
         }
         item.settings = next;
         item.isDirty = false;
@@ -6392,10 +6882,14 @@
       const imageData = await loadFileToImageData(file);
 
       let workingData = imageData;
+      const rotationAngle = Number.isFinite(settings.rotationAngle) ? settings.rotationAngle : 0;
+      if (Math.abs(rotationAngle) > 0.001) {
+        workingData = applyRotationToImageData(workingData, rotationAngle);
+      }
       if (settings.cropRegion) {
-        const cropRegion = sanitizeCropRegionForImage(settings.cropRegion, imageData);
+        const cropRegion = sanitizeCropRegionForImage(settings.cropRegion, workingData);
         if (cropRegion) {
-          workingData = cropImageData(imageData, cropRegion);
+          workingData = cropImageData(workingData, cropRegion);
         }
       }
 
@@ -6429,6 +6923,7 @@
       const filmBase = autoDetectFilmBase(imageData);
       return {
         cropRegion: null,
+        rotationAngle: 0,
         filmType: 'color',
         filmPreset: 'generic_color',
         filmBase: filmBase,
@@ -6469,10 +6964,14 @@
 
       // Apply crop if set
       let workingData = imageData;
+      const rotationAngle = Number.isFinite(settings.rotationAngle) ? settings.rotationAngle : 0;
+      if (Math.abs(rotationAngle) > 0.001) {
+        workingData = applyRotationToImageData(workingData, rotationAngle);
+      }
       if (settings.cropRegion) {
-        const cropRegion = sanitizeCropRegionForImage(settings.cropRegion, imageData);
+        const cropRegion = sanitizeCropRegionForImage(settings.cropRegion, workingData);
         if (cropRegion) {
-          workingData = cropImageData(imageData, cropRegion);
+          workingData = cropImageData(workingData, cropRegion);
         }
       }
 
@@ -6640,6 +7139,7 @@
         container.appendChild(el);
       });
 
+      updateAutoFrameButtons();
       syncBatchUIState({ reason: 'updateFileListUI' });
     }
 
@@ -6672,9 +7172,20 @@
     function restoreSettings(settings) {
       if (!settings) return;
 
-      // Restore crop region
+      state.rotationAngle = Number.isFinite(settings.rotationAngle) ? normalizeAngleDegrees(settings.rotationAngle) : 0;
+
+      if (state.loadedBaseImageData) {
+        state.originalImageData = state.loadedBaseImageData;
+      }
+
+      if (state.originalImageData && Math.abs(state.rotationAngle) > 0.001) {
+        state.originalImageData = applyRotationToImageData(state.originalImageData, state.rotationAngle);
+      }
+
+      // Restore crop region after rotation
       applyCropRegionToLoadedImage(settings.cropRegion, { refreshDisplay: true });
       if (state.originalImageData) {
+        settings.rotationAngle = state.rotationAngle;
         settings.cropRegion = state.cropRegion ? { ...state.cropRegion } : null;
       }
 
@@ -6733,6 +7244,18 @@
       const selectedCount = state.fileQueue.filter(f => f.selected).length;
       document.getElementById('exportZipBtn').disabled = selectedCount < 1;
       document.getElementById('exportAllBtn').disabled = selectedCount < 1;
+      updateAutoFrameButtons();
+    }
+
+    function updateAutoFrameButtons() {
+      const currentBtn = document.getElementById('autoFrameBtn');
+      const selectedBtn = document.getElementById('autoFrameSelectedBtn');
+      if (!currentBtn || !selectedBtn) return;
+
+      const stepReady = state.currentStep === 1;
+      currentBtn.disabled = !state.originalImageData || !state.autoFrame.enabled || !stepReady;
+      const selectedCount = state.fileQueue.filter(f => f.selected).length;
+      selectedBtn.disabled = !state.autoFrame.enabled || selectedCount < 1 || !stepReady;
     }
 
     function showBatchUI(show, reason) {
@@ -6896,6 +7419,8 @@
       state.fileQueue = [];
       state.currentFileIndex = 0;
       state.cropRegion = null;
+      state.rotationAngle = 0;
+      state.loadedBaseImageData = null;
       state.batchSessionActive = false;
       resetRollReferenceState();
       syncBatchUIState({ reason: 'fileInput_change_reset' });
@@ -6916,6 +7441,8 @@
       state.fileQueue = [];
       state.currentFileIndex = 0;
       state.cropRegion = null;
+      state.rotationAngle = 0;
+      state.loadedBaseImageData = null;
       state.batchSessionActive = false;
       resetRollReferenceState();
       syncBatchUIState({ reason: 'folderInput_change_reset' });
@@ -6948,6 +7475,8 @@
       state.fileQueue = [];
       state.currentFileIndex = 0;
       state.cropRegion = null;
+      state.rotationAngle = 0;
+      state.loadedBaseImageData = null;
       state.batchSessionActive = false;
       resetRollReferenceState();
       syncBatchUIState({ reason: 'drop_reset' });
