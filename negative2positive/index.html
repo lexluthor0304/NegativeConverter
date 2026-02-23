@@ -688,6 +688,73 @@
       height: 14px;
     }
 
+    .autoframe-settings {
+      margin-top: 8px;
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.02);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .autoframe-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .autoframe-row select {
+      flex: 1;
+      min-width: 0;
+      padding: 6px 8px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text-primary);
+      font-size: 12px;
+    }
+
+    .autoframe-row select:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    .autoframe-options {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px 8px;
+      padding-top: 2px;
+    }
+
+    .autoframe-option {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--text-secondary);
+      user-select: none;
+    }
+
+    .autoframe-option input[type="checkbox"] {
+      accent-color: var(--accent);
+      width: 14px;
+      height: 14px;
+    }
+
+    .autoframe-diagnostics {
+      font-family: monospace;
+      font-size: 11px;
+      color: var(--text-secondary);
+      white-space: pre-line;
+      line-height: 1.4;
+      margin-bottom: 0;
+    }
+
     /* Film Base Preview */
     .film-base-preview {
       display: flex;
@@ -1758,6 +1825,63 @@
         </div>
       </div>
 
+      <!-- Auto Frame Settings (Step 1) -->
+      <div class="control-section" id="autoFrameSettingsSection" style="display: none;">
+        <div class="section-header">
+          <span class="section-title" data-i18n="autoFrameSettings">Auto Frame Settings</span>
+        </div>
+        <div class="section-content">
+          <div class="autoframe-settings">
+            <label class="autoframe-option">
+              <input type="checkbox" id="autoFrameEnabledInput" checked>
+              <span data-i18n="autoFrameEnabled">Enable Auto Frame</span>
+            </label>
+            <label class="autoframe-option">
+              <input type="checkbox" id="autoFrameAutoApplyInput" checked>
+              <span data-i18n="autoFrameAutoApplyHigh">Auto-apply high confidence</span>
+            </label>
+            <div class="autoframe-row">
+              <span data-i18n="autoFrameFormatLabel">Film Format</span>
+              <select id="autoFrameFormatSelect">
+                <option value="auto" data-i18n="autoFrameFormatAuto">Auto (135/120)</option>
+                <option value="135" data-i18n="autoFrameFormat135">Prefer 135</option>
+                <option value="120" data-i18n="autoFrameFormat120">Prefer 120</option>
+              </select>
+            </div>
+            <div class="autoframe-row" id="autoFrame120LabelRow">
+              <span data-i18n="autoFrame120Formats">120 sub-formats</span>
+            </div>
+            <div class="autoframe-options" id="autoFrame120Options">
+              <label class="autoframe-option">
+                <input type="checkbox" id="autoFrame120_645" checked>
+                <span>6x4.5</span>
+              </label>
+              <label class="autoframe-option">
+                <input type="checkbox" id="autoFrame120_66" checked>
+                <span>6x6</span>
+              </label>
+              <label class="autoframe-option">
+                <input type="checkbox" id="autoFrame120_67" checked>
+                <span>6x7</span>
+              </label>
+              <label class="autoframe-option">
+                <input type="checkbox" id="autoFrame120_69" checked>
+                <span>6x9</span>
+              </label>
+            </div>
+            <div class="autoframe-row">
+              <span data-i18n="autoFrameLowConfidenceBehavior">Low confidence</span>
+              <select id="autoFrameLowConfidenceSelect">
+                <option value="suggest" data-i18n="autoFrameSuggestOnly">Try crop anyway</option>
+                <option value="rotateOnly" data-i18n="autoFrameRotateOnly">Rotate only</option>
+                <option value="ignore" data-i18n="autoFrameNoAction">Do nothing</option>
+              </select>
+            </div>
+          </div>
+          <div class="info-box autoframe-diagnostics" id="autoFrameDiagnosticsBox" style="display: none;"></div>
+        </div>
+      </div>
+
       <!-- Film Settings (Step 2) -->
       <div class="control-section" id="filmSettingsSection" style="display: none;">
         <div class="section-header">
@@ -2167,9 +2291,29 @@
         autoFrameAnalyzing: "正在自动识别边框...",
         autoFramePreviewTitle: "检测到可用边框，是否应用？",
         autoFramePreviewDetail: "将旋转 {angle}°，裁剪到 {width}×{height}，置信度 {confidence}",
+        autoFrameLowConfidenceTitle: "检测到低置信度边框，是否仍按建议应用裁剪？",
         autoFrameNoReliableBorder: "未检测到可靠边框，请手动裁剪。",
         autoFrameCvLoadError: "OpenCV 加载失败，无法使用自动识别。",
         autoFrameBatchDone: "自动识别完成：成功 {success} 张，失败 {failed} 张。",
+        autoFrameBatchDoneExtended: "自动识别完成：成功裁剪 {success} 张（其中低置信度 {lowApplied} 张），仅旋转 {rotated} 张，失败 {failed} 张。",
+        autoFrameRotateOnlyApplied: "低置信度：已仅应用旋转 {angle}°。",
+        autoFrameLowConfidenceApplied: "低置信度：已应用自动裁剪，请检查结果（置信度 {confidence}）。",
+        autoFrameSettings: "自动边框设置",
+        autoFrameEnabled: "启用自动边框识别",
+        autoFrameAutoApplyHigh: "高置信度时自动应用",
+        autoFrameFormatLabel: "胶片格式",
+        autoFrameFormatAuto: "自动（135/120）",
+        autoFrameFormat135: "优先 135",
+        autoFrameFormat120: "优先 120",
+        autoFrame120Formats: "120 子格式",
+        autoFrameLowConfidenceBehavior: "低置信度处理",
+        autoFrameSuggestOnly: "低置信度也尝试裁剪",
+        autoFrameRotateOnly: "只应用旋转",
+        autoFrameNoAction: "不执行操作",
+        autoFrameDiagnostics: "检测详情：方法 {method} | 格式 {format} | 置信度 {confidence} | 应用 {mode}",
+        autoFrameModeCrop: "裁剪",
+        autoFrameModeRotateOnly: "仅旋转",
+        autoFrameModeNone: "未应用",
         exportCurrent: "导出当前图片 (PNG)",
         exportZip: "批量导出 (ZIP)",
         exportIndividual: "逐个下载全部",
@@ -2300,9 +2444,29 @@
         autoFrameAnalyzing: "Analyzing frame borders...",
         autoFramePreviewTitle: "Reliable frame detected. Apply auto rotation and crop?",
         autoFramePreviewDetail: "Rotate {angle}°, crop to {width}×{height}, confidence {confidence}",
+        autoFrameLowConfidenceTitle: "Low-confidence frame detected. Apply suggested crop anyway?",
         autoFrameNoReliableBorder: "No reliable frame border detected. Please crop manually.",
         autoFrameCvLoadError: "OpenCV failed to load. Auto frame is unavailable.",
         autoFrameBatchDone: "Auto frame finished: {success} succeeded, {failed} failed.",
+        autoFrameBatchDoneExtended: "Auto frame finished: {success} crop success ({lowApplied} low-confidence), {rotated} rotation-only, {failed} failed.",
+        autoFrameRotateOnlyApplied: "Low confidence: applied rotation only ({angle}°).",
+        autoFrameLowConfidenceApplied: "Low confidence: crop applied. Please verify the result (confidence {confidence}).",
+        autoFrameSettings: "Auto Frame Settings",
+        autoFrameEnabled: "Enable Auto Frame",
+        autoFrameAutoApplyHigh: "Auto-apply high confidence",
+        autoFrameFormatLabel: "Film Format",
+        autoFrameFormatAuto: "Auto (135/120)",
+        autoFrameFormat135: "Prefer 135",
+        autoFrameFormat120: "Prefer 120",
+        autoFrame120Formats: "120 sub-formats",
+        autoFrameLowConfidenceBehavior: "Low confidence",
+        autoFrameSuggestOnly: "Try crop on low confidence",
+        autoFrameRotateOnly: "Rotate only",
+        autoFrameNoAction: "Do nothing",
+        autoFrameDiagnostics: "Detection: method {method} | format {format} | confidence {confidence} | applied {mode}",
+        autoFrameModeCrop: "Crop",
+        autoFrameModeRotateOnly: "Rotate only",
+        autoFrameModeNone: "None",
         exportCurrent: "Export Current (PNG)",
         exportZip: "Export All (ZIP)",
         exportIndividual: "Download All Individually",
@@ -2433,9 +2597,29 @@
         autoFrameAnalyzing: "フレーム境界を解析中...",
         autoFramePreviewTitle: "信頼できるフレームを検出しました。自動回転とトリミングを適用しますか？",
         autoFramePreviewDetail: "{angle}°回転、{width}×{height} にトリミング、信頼度 {confidence}",
+        autoFrameLowConfidenceTitle: "低信頼度のフレーム候補です。提案どおり適用しますか？",
         autoFrameNoReliableBorder: "信頼できるフレーム境界を検出できませんでした。手動でトリミングしてください。",
         autoFrameCvLoadError: "OpenCV の読み込みに失敗したため、自動検出は利用できません。",
         autoFrameBatchDone: "自動検出が完了しました: 成功 {success} 枚、失敗 {failed} 枚。",
+        autoFrameBatchDoneExtended: "自動検出が完了しました: トリミング成功 {success} 枚（低信頼度 {lowApplied} 枚を含む）、回転のみ {rotated} 枚、失敗 {failed} 枚。",
+        autoFrameRotateOnlyApplied: "低信頼度のため回転のみを適用しました（{angle}°）。",
+        autoFrameLowConfidenceApplied: "低信頼度でしたがトリミングを適用しました（信頼度 {confidence}）。結果を確認してください。",
+        autoFrameSettings: "自動フレーム設定",
+        autoFrameEnabled: "自動フレーム検出を有効化",
+        autoFrameAutoApplyHigh: "高信頼度は自動適用",
+        autoFrameFormatLabel: "フィルム形式",
+        autoFrameFormatAuto: "自動（135/120）",
+        autoFrameFormat135: "135 を優先",
+        autoFrameFormat120: "120 を優先",
+        autoFrame120Formats: "120 サブ形式",
+        autoFrameLowConfidenceBehavior: "低信頼度時の動作",
+        autoFrameSuggestOnly: "低信頼度でもトリミングを試す",
+        autoFrameRotateOnly: "回転のみ適用",
+        autoFrameNoAction: "何もしない",
+        autoFrameDiagnostics: "検出情報: 手法 {method} | 形式 {format} | 信頼度 {confidence} | 適用 {mode}",
+        autoFrameModeCrop: "トリミング",
+        autoFrameModeRotateOnly: "回転のみ",
+        autoFrameModeNone: "未適用",
         exportCurrent: "現在の画像を出力 (PNG)",
         exportZip: "一括出力 (ZIP)",
         exportIndividual: "すべて個別にダウンロード",
@@ -2457,12 +2641,29 @@
     };
 
     const DEBUG_UI = new URLSearchParams(window.location.search).get('debug') === '1';
-    const BUILD_ID = '2026-02-22-auto-frame-detect-2';
+    const BUILD_ID = '2026-02-22-auto-frame-detect-4';
     const OPENCV_SCRIPT_CANDIDATES = [
       './vendor/opencv/opencv-4.12.0.js',
       'https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.12.0-release.1/dist/opencv.js'
     ];
     const AUTO_FRAME_MAX_SIDE = 1600;
+    const AUTO_FRAME_FORMAT_RATIOS = {
+      '135': 1.5,
+      '120-6x4.5': 1.33,
+      '120-6x6': 1.0,
+      '120-6x7': 1.17,
+      '120-6x9': 1.5
+    };
+    const AUTO_FRAME_DEFAULT_120_FORMATS = ['6x4.5', '6x6', '6x7', '6x9'];
+    const AUTO_FRAME_SCORE_WEIGHTS = {
+      area: 0.18,
+      rectangularity: 0.20,
+      orthogonality: 0.14,
+      parallelism: 0.10,
+      edgeSupport: 0.18,
+      centerPrior: 0.08,
+      aspect: 0.12
+    };
     let opencvReadyPromise = null;
     let opencvActiveSource = null;
     const STEP2_FIRST_HINT_SESSION_KEY = 'nc_step2_first_hint_seen_v1';
@@ -2499,6 +2700,8 @@
       if (stateReady) {
         updateCurrentFileLabel();
         updateRollReferenceUI();
+        updateAutoFrameConfigUI();
+        updateAutoFrameDiagnosticsUI();
         updateAutoFrameButtons();
         updateStep2GuideCard({ skipFirstHint: true });
       }
@@ -2826,7 +3029,18 @@
       autoFrame: {
         enabled: true,
         marginRatio: 0.02,
-        minConfidence: 0.55
+        minConfidence: 0.55,
+        highConfidence: 0.72,
+        autoApplyHighConfidence: true,
+        formatPreference: 'auto', // 'auto' | '135' | '120'
+        allowed120Formats: {
+          '6x4.5': true,
+          '6x6': true,
+          '6x7': true,
+          '6x9': true
+        },
+        lowConfidenceBehavior: 'suggest', // 'suggest' | 'rotateOnly' | 'ignore'
+        lastDiagnostics: null
       },
 
       // Batch mode state
@@ -3095,6 +3309,8 @@
       badge.textContent = i18n[currentLang]['step' + state.currentStep];
 
       // Show/hide sections based on step
+      document.getElementById('autoFrameSettingsSection').style.display =
+        state.currentStep === 1 ? 'block' : 'none';
       document.getElementById('filmSettingsSection').style.display =
         state.currentStep >= 2 ? 'block' : 'none';
 
@@ -3112,6 +3328,7 @@
         state.currentStep === 1 ? 'inline-flex' : 'none';
 
       syncBatchUIState({ reason: 'updateWorkflowUI' });
+      updateAutoFrameButtons();
     }
 
     function goToStep(step) {
@@ -3391,6 +3608,191 @@
     const channelLutG = new Uint8Array(256);
     const channelLutB = new Uint8Array(256);
 
+    function makeLinearCurveLut() {
+      const curve = new Uint8Array(256);
+      for (let i = 0; i < 256; i++) curve[i] = i;
+      return curve;
+    }
+
+    function makeLinearCurvePoints() {
+      return [{ x: 0, y: 0 }, { x: 255, y: 255 }];
+    }
+
+    function sanitizeNumeric(value, fallback, min = -Infinity, max = Infinity) {
+      const n = Number(value);
+      const base = Number.isFinite(n) ? n : fallback;
+      if (!Number.isFinite(base)) return Number.isFinite(fallback) ? fallback : 0;
+      return clampBetween(base, min, max);
+    }
+
+    function sanitizeFilmBase(input, fallback = null) {
+      const source = (input && typeof input === 'object')
+        ? input
+        : (fallback && typeof fallback === 'object' ? fallback : { r: 210, g: 140, b: 90 });
+      return {
+        r: Math.round(sanitizeNumeric(source.r, 210, 1, 255)),
+        g: Math.round(sanitizeNumeric(source.g, 140, 1, 255)),
+        b: Math.round(sanitizeNumeric(source.b, 90, 1, 255))
+      };
+    }
+
+    function sanitizeCurvePointChannel(points, fallbackPoints = null) {
+      const source = Array.isArray(points) ? points : (Array.isArray(fallbackPoints) ? fallbackPoints : null);
+      if (!source || source.length < 2) return makeLinearCurvePoints();
+
+      const normalized = [];
+      source.forEach((point) => {
+        if (!point || typeof point !== 'object') return;
+        const x = sanitizeNumeric(point.x, NaN, 0, 255);
+        const y = sanitizeNumeric(point.y, NaN, 0, 255);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+        normalized.push({ x: Math.round(x), y: Math.round(y) });
+      });
+      if (normalized.length < 2) return makeLinearCurvePoints();
+
+      normalized.sort((a, b) => a.x - b.x);
+      const deduped = [];
+      normalized.forEach((point) => {
+        if (!deduped.length) {
+          deduped.push(point);
+          return;
+        }
+        const last = deduped[deduped.length - 1];
+        if (point.x === last.x) {
+          last.y = point.y;
+        } else {
+          deduped.push(point);
+        }
+      });
+      if (deduped.length < 2) return makeLinearCurvePoints();
+
+      if (deduped[0].x !== 0) {
+        deduped.unshift({ x: 0, y: deduped[0].y });
+      } else {
+        deduped[0].y = Math.round(sanitizeNumeric(deduped[0].y, 0, 0, 255));
+      }
+
+      const tail = deduped[deduped.length - 1];
+      if (tail.x !== 255) {
+        deduped.push({ x: 255, y: tail.y });
+      } else {
+        tail.y = Math.round(sanitizeNumeric(tail.y, 255, 0, 255));
+      }
+
+      if (deduped.length < 2 || deduped[0].x !== 0 || deduped[deduped.length - 1].x !== 255) {
+        return makeLinearCurvePoints();
+      }
+      return deduped;
+    }
+
+    function buildCurveLutFromPoints(points) {
+      const safePoints = sanitizeCurvePointChannel(points, null);
+      const curve = new Uint8Array(256);
+      let spline = null;
+      try {
+        spline = computeSpline(safePoints);
+      } catch (err) {
+        spline = null;
+      }
+      if (!spline) return makeLinearCurveLut();
+
+      for (let i = 0; i < 256; i++) {
+        const value = Math.round(spline(i));
+        curve[i] = clampBetween(value, 0, 255);
+      }
+      return curve;
+    }
+
+    function sanitizeCurveLut(channelCurve, fallbackCurve = null) {
+      if (channelCurve instanceof Uint8Array && channelCurve.length >= 256) {
+        return channelCurve;
+      }
+      const source = (channelCurve && typeof channelCurve.length === 'number' && channelCurve.length >= 256)
+        ? channelCurve
+        : ((fallbackCurve && typeof fallbackCurve.length === 'number' && fallbackCurve.length >= 256)
+          ? fallbackCurve
+          : null);
+      if (!source) return null;
+
+      const next = new Uint8Array(256);
+      for (let i = 0; i < 256; i++) {
+        const value = Number(source[i]);
+        if (!Number.isFinite(value)) return null;
+        next[i] = clampBetween(Math.round(value), 0, 255);
+      }
+      return next;
+    }
+
+    function sanitizeSettings(rawSettings, options = {}) {
+      const fallbackSettings = (options.fallbackSettings && typeof options.fallbackSettings === 'object')
+        ? options.fallbackSettings
+        : state;
+      const source = (rawSettings && typeof rawSettings === 'object') ? rawSettings : {};
+      const includeCurvePoints = options.includeCurvePoints !== false;
+      const includeCurves = options.includeCurves !== false;
+
+      const fallbackType = sanitizePresetType(fallbackSettings.filmType || 'color');
+      const filmType = sanitizePresetType(source.filmType || fallbackType);
+      const fallbackPreset = resolvePresetId(fallbackSettings.filmPreset) || getDefaultPresetForType(fallbackType);
+      const filmPreset = resolvePresetId(source.filmPreset) || fallbackPreset || getDefaultPresetForType(filmType);
+
+      const safe = {
+        cropRegion: source.cropRegion ? { ...source.cropRegion } : (fallbackSettings.cropRegion ? { ...fallbackSettings.cropRegion } : null),
+        rotationAngle: normalizeAngleDegrees(sanitizeNumeric(source.rotationAngle, fallbackSettings.rotationAngle || 0, -3600, 3600)),
+        autoFrameMeta: source.autoFrameMeta ? { ...source.autoFrameMeta } : (fallbackSettings.autoFrameMeta ? { ...fallbackSettings.autoFrameMeta } : null),
+        filmType,
+        filmPreset,
+        filmBase: sanitizeFilmBase(source.filmBase, fallbackSettings.filmBase),
+        exposure: sanitizeNumeric(source.exposure, fallbackSettings.exposure ?? 0, -3, 3),
+        contrast: sanitizeNumeric(source.contrast, fallbackSettings.contrast ?? 0, -100, 100),
+        highlights: sanitizeNumeric(source.highlights, fallbackSettings.highlights ?? 0, -100, 100),
+        shadows: sanitizeNumeric(source.shadows, fallbackSettings.shadows ?? 0, -100, 100),
+        temperature: sanitizeNumeric(source.temperature, fallbackSettings.temperature ?? 0, -100, 100),
+        tint: sanitizeNumeric(source.tint, fallbackSettings.tint ?? 0, -100, 100),
+        vibrance: sanitizeNumeric(source.vibrance, fallbackSettings.vibrance ?? 0, -100, 100),
+        saturation: sanitizeNumeric(source.saturation, fallbackSettings.saturation ?? 0, -100, 100),
+        cyan: sanitizeNumeric(source.cyan, fallbackSettings.cyan ?? 0, -100, 100),
+        magenta: sanitizeNumeric(source.magenta, fallbackSettings.magenta ?? 0, -100, 100),
+        yellow: sanitizeNumeric(source.yellow, fallbackSettings.yellow ?? 0, -100, 100),
+        wbR: sanitizeNumeric(source.wbR, fallbackSettings.wbR ?? 1, 0.5, 2),
+        wbG: sanitizeNumeric(source.wbG, fallbackSettings.wbG ?? 1, 0.5, 2),
+        wbB: sanitizeNumeric(source.wbB, fallbackSettings.wbB ?? 1, 0.5, 2)
+      };
+
+      if (includeCurvePoints) {
+        const fallbackPoints = fallbackSettings.curvePoints || {};
+        const sourcePoints = source.curvePoints || {};
+        safe.curvePoints = {
+          r: sanitizeCurvePointChannel(sourcePoints.r, fallbackPoints.r),
+          g: sanitizeCurvePointChannel(sourcePoints.g, fallbackPoints.g),
+          b: sanitizeCurvePointChannel(sourcePoints.b, fallbackPoints.b)
+        };
+      }
+
+      if (includeCurves) {
+        const sourceCurves = source.curves || {};
+        const fallbackCurves = fallbackSettings.curves || {};
+        let rCurve = sanitizeCurveLut(sourceCurves.r, fallbackCurves.r);
+        let gCurve = sanitizeCurveLut(sourceCurves.g, fallbackCurves.g);
+        let bCurve = sanitizeCurveLut(sourceCurves.b, fallbackCurves.b);
+
+        if (!rCurve || !gCurve || !bCurve) {
+          const curvePoints = safe.curvePoints || {
+            r: sanitizeCurvePointChannel((source.curvePoints || {}).r, (fallbackSettings.curvePoints || {}).r),
+            g: sanitizeCurvePointChannel((source.curvePoints || {}).g, (fallbackSettings.curvePoints || {}).g),
+            b: sanitizeCurvePointChannel((source.curvePoints || {}).b, (fallbackSettings.curvePoints || {}).b)
+          };
+          if (!rCurve) rCurve = buildCurveLutFromPoints(curvePoints.r);
+          if (!gCurve) gCurve = buildCurveLutFromPoints(curvePoints.g);
+          if (!bCurve) bCurve = buildCurveLutFromPoints(curvePoints.b);
+        }
+
+        safe.curves = { r: rCurve, g: gCurve, b: bCurve };
+      }
+
+      return safe;
+    }
+
     function buildChannelLuts({
       lutR,
       lutG,
@@ -3452,34 +3854,39 @@
     function applyAdjustmentsToBuffer(imageData, settings, output, quality = 'full') {
       const { data } = imageData;
       const outData = output.data;
+      const safeSettings = sanitizeSettings(settings, {
+        fallbackSettings: state,
+        includeCurvePoints: false,
+        includeCurves: true
+      });
 
-      const preset = getPresetOrFallback(settings.filmPreset, settings.filmType || 'color');
+      const preset = getPresetOrFallback(safeSettings.filmPreset, safeSettings.filmType || 'color');
       const presetChars = (preset && preset.characteristics) ? preset.characteristics : {};
 
-      const exposureMult = Math.pow(2, settings.exposure);
-      const contrastFactor = 1 + ((settings.contrast + (presetChars.contrast || 0) * 100) / 100);
-      const tempFactor = (settings.temperature + (presetChars.warmth || 0) * 100) / 100;
-      const tintFactor = settings.tint / 100;
-      const satFactor = 1 + ((settings.saturation + (presetChars.saturation || 0) * 100) / 100);
-      const vibFactor = settings.vibrance / 100;
-      const highlightsFactor = settings.highlights / 100;
-      const shadowsFactor = settings.shadows / 100;
+      const exposureMult = Math.pow(2, safeSettings.exposure);
+      const contrastFactor = 1 + ((safeSettings.contrast + (presetChars.contrast || 0) * 100) / 100);
+      const tempFactor = (safeSettings.temperature + (presetChars.warmth || 0) * 100) / 100;
+      const tintFactor = safeSettings.tint / 100;
+      const satFactor = 1 + ((safeSettings.saturation + (presetChars.saturation || 0) * 100) / 100);
+      const vibFactor = safeSettings.vibrance / 100;
+      const highlightsFactor = safeSettings.highlights / 100;
+      const shadowsFactor = safeSettings.shadows / 100;
 
-      const rMult = settings.wbR * exposureMult;
-      const gMult = settings.wbG * exposureMult;
-      const bMult = settings.wbB * exposureMult;
+      const rMult = safeSettings.wbR * exposureMult;
+      const gMult = safeSettings.wbG * exposureMult;
+      const bMult = safeSettings.wbB * exposureMult;
 
       const tempRMult = 1 + tempFactor * 0.3;
       const tempBMult = 1 - tempFactor * 0.3;
       const tintGMult = 1 + tintFactor * 0.3;
 
-      const cmyRShift = settings.cyan * 2.55;
-      const cmyGShift = settings.magenta * 2.55;
-      const cmyBShift = settings.yellow * 2.55;
+      const cmyRShift = safeSettings.cyan * 2.55;
+      const cmyGShift = safeSettings.magenta * 2.55;
+      const cmyBShift = safeSettings.yellow * 2.55;
 
-      const curveR = settings.curves.r;
-      const curveG = settings.curves.g;
-      const curveB = settings.curves.b;
+      const curveR = safeSettings.curves.r;
+      const curveG = safeSettings.curves.g;
+      const curveB = safeSettings.curves.b;
 
       const doContrast = contrastFactor !== 1;
       const doHighlights = highlightsFactor !== 0;
@@ -4295,6 +4702,8 @@
       quadBuffer: null,
       sourceTex: null,
       curveTex: null,
+      disabledByError: false,
+      lastError: null,
       curveDirty: true,
       sourceDirty: true,
       sourceSize: { w: 0, h: 0 },
@@ -4318,6 +4727,16 @@
     };
 
     const webglCurveRgba = new Uint8Array(256 * 4);
+
+    function disableWebGLByError(err) {
+      const message = err && err.message ? err.message : String(err);
+      if (!webglState.disabledByError) {
+        console.error('WebGL render failed. Falling back to CPU preview:', message, err);
+      }
+      webglState.disabledByError = true;
+      webglState.lastError = message;
+      updateCanvasVisibility();
+    }
 
     function compileShader(gl, type, source) {
       const shader = gl.createShader(type);
@@ -4349,6 +4768,7 @@
     }
 
     function initWebGLRenderer() {
+      if (webglState.disabledByError) return false;
       if (webglState.gl) return true;
 
       let gl = null;
@@ -4523,6 +4943,7 @@
           webglState.maxTextureSize = 0;
           webglState.curveDirty = true;
           webglState.sourceDirty = true;
+          webglState.lastError = null;
           updateCanvasVisibility();
           schedulePreviewUpdate();
         }, false);
@@ -4538,6 +4959,7 @@
           webglState.maxTextureSize = 0;
           webglState.curveDirty = true;
           webglState.sourceDirty = true;
+          webglState.lastError = null;
           schedulePreviewUpdate();
         }, false);
 
@@ -4594,12 +5016,13 @@
 
       webglState.curveDirty = true;
       webglState.sourceDirty = true;
+      webglState.lastError = null;
 
       return true;
     }
 
     function isWebGLActive() {
-      return !!webglState.gl && state.currentStep >= 3 && !!state.processedImageData;
+      return !!webglState.gl && !webglState.disabledByError && state.currentStep >= 3 && !!state.processedImageData;
     }
 
     function resizeWebGLCanvas() {
@@ -4706,20 +5129,25 @@
     function webglSetUniforms() {
       const gl = webglState.gl;
       if (!gl) return;
+      const safe = sanitizeSettings(state, {
+        fallbackSettings: state,
+        includeCurvePoints: false,
+        includeCurves: false
+      });
 
-      const preset = getPresetOrFallback(state.filmPreset, state.filmType);
+      const preset = getPresetOrFallback(safe.filmPreset, safe.filmType);
       const presetChars = (preset && preset.characteristics) ? preset.characteristics : {};
 
-      const exposure = state.exposure;
-      const contrast = 1 + ((state.contrast + (presetChars.contrast || 0) * 100) / 100);
-      const highlights = state.highlights / 100;
-      const shadows = state.shadows / 100;
-      const tempFactor = (state.temperature + (presetChars.warmth || 0) * 100) / 100;
-      const tintFactor = state.tint / 100;
-      const satFactor = 1 + ((state.saturation + (presetChars.saturation || 0) * 100) / 100);
-      const vibFactor = state.vibrance / 100;
+      const exposure = safe.exposure;
+      const contrast = 1 + ((safe.contrast + (presetChars.contrast || 0) * 100) / 100);
+      const highlights = safe.highlights / 100;
+      const shadows = safe.shadows / 100;
+      const tempFactor = (safe.temperature + (presetChars.warmth || 0) * 100) / 100;
+      const tintFactor = safe.tint / 100;
+      const satFactor = 1 + ((safe.saturation + (presetChars.saturation || 0) * 100) / 100);
+      const vibFactor = safe.vibrance / 100;
 
-      gl.uniform3f(webglState.locations.uWb, state.wbR, state.wbG, state.wbB);
+      gl.uniform3f(webglState.locations.uWb, safe.wbR, safe.wbG, safe.wbB);
       gl.uniform1f(webglState.locations.uExposure, exposure);
       gl.uniform1f(webglState.locations.uContrast, contrast);
       gl.uniform1f(webglState.locations.uHighlights, highlights);
@@ -4728,49 +5156,58 @@
       gl.uniform1f(webglState.locations.uTint, tintFactor);
       gl.uniform1f(webglState.locations.uSat, satFactor);
       gl.uniform1f(webglState.locations.uVib, vibFactor);
-      gl.uniform3f(webglState.locations.uCmy, state.cyan / 100, state.magenta / 100, state.yellow / 100);
+      gl.uniform3f(webglState.locations.uCmy, safe.cyan / 100, safe.magenta / 100, safe.yellow / 100);
     }
 
     function renderWebGL() {
-      if (!webglState.gl || !state.processedImageData) return;
+      if (!webglState.gl || webglState.disabledByError || !state.processedImageData) return false;
 
-      resizeWebGLCanvas();
+      try {
+        resizeWebGLCanvas();
 
-      const gl = webglState.gl;
-      gl.viewport(0, 0, glCanvas.width, glCanvas.height);
-      gl.useProgram(webglState.program);
+        const gl = webglState.gl;
+        gl.viewport(0, 0, glCanvas.width, glCanvas.height);
+        gl.useProgram(webglState.program);
 
-      // Uploads if needed
-      const source = getWebglSourceImageData();
-      if (!source) return;
-      if (webglState.sourceDirty || webglState.sourceSize.w !== source.width || webglState.sourceSize.h !== source.height) {
-        webglUploadSource(source);
+        // Uploads if needed
+        const source = getWebglSourceImageData();
+        if (!source) return false;
+        if (webglState.sourceDirty || webglState.sourceSize.w !== source.width || webglState.sourceSize.h !== source.height) {
+          webglUploadSource(source);
+        }
+        if (webglState.curveDirty) {
+          webglUploadCurves();
+        }
+
+        // Bind geometry
+        gl.bindBuffer(gl.ARRAY_BUFFER, webglState.quadBuffer);
+        gl.enableVertexAttribArray(webglState.locations.aPos);
+        gl.vertexAttribPointer(webglState.locations.aPos, 2, gl.FLOAT, false, 0, 0);
+
+        // Bind textures
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, webglState.sourceTex);
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_2D, webglState.curveTex);
+
+        webglSetUniforms();
+
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        const errCode = gl.getError();
+        if (errCode !== gl.NO_ERROR) {
+          throw new Error(`WebGL draw error code: ${errCode}`);
+        }
+        return true;
+      } catch (err) {
+        disableWebGLByError(err);
+        return false;
       }
-      if (webglState.curveDirty) {
-        webglUploadCurves();
-      }
-
-      // Bind geometry
-      gl.bindBuffer(gl.ARRAY_BUFFER, webglState.quadBuffer);
-      gl.enableVertexAttribArray(webglState.locations.aPos);
-      gl.vertexAttribPointer(webglState.locations.aPos, 2, gl.FLOAT, false, 0, 0);
-
-      // Bind textures
-      gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, webglState.sourceTex);
-      gl.activeTexture(gl.TEXTURE1);
-      gl.bindTexture(gl.TEXTURE_2D, webglState.curveTex);
-
-      webglSetUniforms();
-
-      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
 
     function updateCanvasVisibility() {
       const showGL = isWebGLActive();
       glCanvas.style.display = showGL ? 'block' : 'none';
       canvas.style.display = showGL ? 'none' : 'block';
-      if (showGL) renderWebGL();
     }
 
     let updateScheduled = false;
@@ -4820,12 +5257,14 @@
       // Prefer GPU rendering in Step 3 when available.
       if (state.currentStep >= 3 && initWebGLRenderer()) {
         updateCanvasVisibility();
-        renderWebGL();
-        renderHistogramForWebGL(false);
-        state.lastRenderQuality = 'gl';
-        return;
+        if (isWebGLActive() && renderWebGL()) {
+          renderHistogramForWebGL(false);
+          state.lastRenderQuality = 'gl';
+          return;
+        }
       }
 
+      updateCanvasVisibility();
       updatePreviewCpu();
     }
 
@@ -4858,12 +5297,14 @@
       // Prefer GPU rendering in Step 3 when available.
       if (state.currentStep >= 3 && initWebGLRenderer()) {
         updateCanvasVisibility();
-        renderWebGL();
-        renderHistogramForWebGL(true);
-        state.lastRenderQuality = 'gl';
-        return;
+        if (isWebGLActive() && renderWebGL()) {
+          renderHistogramForWebGL(true);
+          state.lastRenderQuality = 'gl';
+          return;
+        }
       }
 
+      updateCanvasVisibility();
       updateFullCpu();
     }
 
@@ -4988,6 +5429,7 @@
           state.webglSourceImageData = null;
           state.lastRenderQuality = 'full';
           state.filmBaseSet = false;
+          state.autoFrame.lastDiagnostics = null;
           if (webglState.gl) {
             webglState.sourceDirty = true;
             webglState.sourceSize = { w: 0, h: 0 };
@@ -4996,6 +5438,7 @@
           displayNegative(imageData);
           showImageUI();
           goToStep(1);
+          updateAutoFrameDiagnosticsUI();
           syncBatchUIState({ reason: 'loadFile' });
           updateAutoFrameButtons();
         }
@@ -5126,6 +5569,8 @@
 
       updateCanvasVisibility();
       adjustCanvasDisplay(canvas.width, canvas.height);
+      updateAutoFrameConfigUI();
+      updateAutoFrameDiagnosticsUI();
     }
 
     // ===========================================
@@ -6087,153 +6532,606 @@
       return ready;
     }
 
-    function scoreCandidateAspect(ratio) {
-      const refs = [1.5, 1.33, 1.66];
-      let best = 0;
-      refs.forEach(ref => {
-        const delta = Math.abs(ratio - ref) / ref;
-        best = Math.max(best, 1 - clampBetween(delta / 0.6, 0, 1));
+    function getAutoFrameAspectTargets() {
+      const pref = state.autoFrame && state.autoFrame.formatPreference ? state.autoFrame.formatPreference : 'auto';
+      const allowed120Map = (state.autoFrame && state.autoFrame.allowed120Formats) || {};
+      const enabled120 = AUTO_FRAME_DEFAULT_120_FORMATS.filter(fmt => allowed120Map[fmt] !== false);
+      const safe120 = enabled120.length ? enabled120 : ['6x6'];
+
+      const targets = [];
+      const addTarget = (key, weight = 1) => {
+        const ratio = AUTO_FRAME_FORMAT_RATIOS[key];
+        if (!Number.isFinite(ratio)) return;
+        targets.push({ key, ratio, weight: clampBetween(weight, 0.4, 1.2) });
+      };
+
+      if (pref === '135') {
+        addTarget('135', 1.05);
+        safe120.forEach(fmt => addTarget(`120-${fmt}`, 0.78));
+      } else if (pref === '120') {
+        safe120.forEach(fmt => addTarget(`120-${fmt}`, 1.05));
+        addTarget('135', 0.78);
+      } else {
+        addTarget('135', 1);
+        safe120.forEach(fmt => addTarget(`120-${fmt}`, 1));
+      }
+      return targets.length ? targets : [{ key: '135', ratio: 1.5, weight: 1 }];
+    }
+
+    function scoreAspectAgainstTargets(ratio, targets) {
+      const safeRatio = Math.max(0.01, Number(ratio) || 1);
+      let best = { score: 0, format: 'unknown' };
+      targets.forEach(target => {
+        const delta = Math.abs(safeRatio - target.ratio) / target.ratio;
+        const normalized = 1 - clampBetween(delta / 0.45, 0, 1);
+        const weighted = clampBetween(normalized * target.weight, 0, 1);
+        if (weighted > best.score) {
+          best = { score: weighted, format: target.key };
+        }
       });
       return best;
     }
 
-    function analyzeBorderWithCv(imageData, options = {}) {
-      if (!(window.cv && window.cv.Mat) || !imageData) return null;
+    function sanitizeBound(bound, imageWidth, imageHeight) {
+      if (!bound) return null;
+      const left = clampBetween(Math.floor(Number(bound.x) || 0), 0, imageWidth - 1);
+      const top = clampBetween(Math.floor(Number(bound.y) || 0), 0, imageHeight - 1);
+      const maxWidth = imageWidth - left;
+      const maxHeight = imageHeight - top;
+      if (maxWidth < 1 || maxHeight < 1) return null;
+      const width = clampBetween(Math.floor(Number(bound.width) || 0), 1, maxWidth);
+      const height = clampBetween(Math.floor(Number(bound.height) || 0), 1, maxHeight);
+      if (width < 1 || height < 1) return null;
+      return { x: left, y: top, width, height };
+    }
 
-      const minAreaRatio = Number.isFinite(options.minAreaRatio) ? options.minAreaRatio : 0.08;
+    function orderPointsClockwise(points) {
+      if (!Array.isArray(points) || points.length !== 4) return [];
+      const center = points.reduce((acc, p) => {
+        acc.x += p.x;
+        acc.y += p.y;
+        return acc;
+      }, { x: 0, y: 0 });
+      center.x /= points.length;
+      center.y /= points.length;
+      return [...points].sort((a, b) => {
+        const angleA = Math.atan2(a.y - center.y, a.x - center.x);
+        const angleB = Math.atan2(b.y - center.y, b.x - center.x);
+        return angleA - angleB;
+      });
+    }
+
+    function computeOrthogonality(points) {
+      if (!Array.isArray(points) || points.length !== 4) return 0.65;
+      const ordered = orderPointsClockwise(points);
+      if (ordered.length !== 4) return 0.65;
+
+      let deviationSum = 0;
+      for (let i = 0; i < 4; i++) {
+        const prev = ordered[(i + 3) % 4];
+        const curr = ordered[i];
+        const next = ordered[(i + 1) % 4];
+        const v1x = prev.x - curr.x;
+        const v1y = prev.y - curr.y;
+        const v2x = next.x - curr.x;
+        const v2y = next.y - curr.y;
+        const len1 = Math.hypot(v1x, v1y);
+        const len2 = Math.hypot(v2x, v2y);
+        if (len1 < 0.001 || len2 < 0.001) {
+          deviationSum += 45;
+          continue;
+        }
+        const cosTheta = clampBetween((v1x * v2x + v1y * v2y) / (len1 * len2), -1, 1);
+        const angle = Math.acos(cosTheta) * 180 / Math.PI;
+        deviationSum += Math.abs(90 - angle);
+      }
+      const avgDeviation = deviationSum / 4;
+      return 1 - clampBetween(avgDeviation / 30, 0, 1);
+    }
+
+    function computeParallelism(points) {
+      if (!Array.isArray(points) || points.length !== 4) return 0.65;
+      const ordered = orderPointsClockwise(points);
+      if (ordered.length !== 4) return 0.65;
+
+      const edges = [];
+      for (let i = 0; i < 4; i++) {
+        const p1 = ordered[i];
+        const p2 = ordered[(i + 1) % 4];
+        let orientation = Math.atan2(p2.y - p1.y, p2.x - p1.x) * 180 / Math.PI;
+        if (orientation < 0) orientation += 180;
+        edges.push(orientation);
+      }
+
+      const pairDelta = (a, b) => {
+        let delta = Math.abs(a - b);
+        if (delta > 90) delta = 180 - delta;
+        return delta;
+      };
+
+      const dev1 = pairDelta(edges[0], edges[2]);
+      const dev2 = pairDelta(edges[1], edges[3]);
+      const avgDeviation = (dev1 + dev2) / 2;
+      return 1 - clampBetween(avgDeviation / 20, 0, 1);
+    }
+
+    function extractApproxPoints(approxMat) {
+      if (!approxMat || !approxMat.data32S) return [];
+      const data = approxMat.data32S;
+      const points = [];
+      for (let i = 0; i + 1 < data.length; i += 2) {
+        points.push({ x: data[i], y: data[i + 1] });
+      }
+      return points;
+    }
+
+    function edgePixelAt(mat, x, y) {
+      if (!mat || !Number.isFinite(x) || !Number.isFinite(y)) return 0;
+      const safeX = clampBetween(Math.round(x), 0, mat.cols - 1);
+      const safeY = clampBetween(Math.round(y), 0, mat.rows - 1);
+      return mat.ucharPtr(safeY, safeX)[0] > 0 ? 1 : 0;
+    }
+
+    function computeEdgeSupport(edges, bound) {
+      if (!edges || !bound) return 0;
+      const left = bound.x;
+      const right = bound.x + bound.width - 1;
+      const top = bound.y;
+      const bottom = bound.y + bound.height - 1;
+      if (right <= left || bottom <= top) return 0;
+
+      const step = Math.max(1, Math.round(Math.min(bound.width, bound.height) / 120));
+      let hits = 0;
+      let total = 0;
+
+      for (let x = left; x <= right; x += step) {
+        hits += edgePixelAt(edges, x, top);
+        hits += edgePixelAt(edges, x, bottom);
+        total += 2;
+      }
+      for (let y = top; y <= bottom; y += step) {
+        hits += edgePixelAt(edges, left, y);
+        hits += edgePixelAt(edges, right, y);
+        total += 2;
+      }
+
+      return total > 0 ? clampBetween(hits / total, 0, 1) : 0;
+    }
+
+    function scoreFrameCandidate(candidate, context) {
+      if (!candidate || !context) return null;
+      const { imageWidth, imageHeight, imageArea, edges, aspectTargets } = context;
+      const bound = sanitizeBound(candidate.bound, imageWidth, imageHeight);
+      if (!bound) return null;
+
+      const area = Math.max(1, Number(candidate.area) || (bound.width * bound.height));
+      const areaRatio = area / imageArea;
+      const rectWidth = Math.max(1, Number(candidate.minRectWidth) || bound.width);
+      const rectHeight = Math.max(1, Number(candidate.minRectHeight) || bound.height);
+      const rectArea = Math.max(1, rectWidth * rectHeight);
+      const rectangularity = clampBetween(area / rectArea, 0, 1);
+
+      const areaCoverage = clampBetween(areaRatio / 0.88, 0, 1);
+      const overshootPenalty = areaRatio > 0.97 ? clampBetween((areaRatio - 0.97) / 0.03, 0, 1) * 0.35 : 0;
+      const areaScore = clampBetween(areaCoverage - overshootPenalty, 0, 1);
+
+      const points = Array.isArray(candidate.points) ? candidate.points : [];
+      const orthogonality = clampBetween(Number(candidate.orthogonalityHint), 0, 1) || computeOrthogonality(points);
+      const parallelism = clampBetween(Number(candidate.parallelismHint), 0, 1) || computeParallelism(points);
+      const edgeSupport = computeEdgeSupport(edges, bound);
+
+      const centerX = bound.x + (bound.width / 2);
+      const centerY = bound.y + (bound.height / 2);
+      const centerDist = Math.hypot(centerX - (imageWidth / 2), centerY - (imageHeight / 2));
+      const centerPrior = 1 - clampBetween(centerDist / (Math.hypot(imageWidth, imageHeight) * 0.45), 0, 1);
+
+      const ratio = Math.max(rectWidth, rectHeight) / Math.max(1, Math.min(rectWidth, rectHeight));
+      const aspect = scoreAspectAgainstTargets(ratio, aspectTargets);
+
+      const score = (
+        areaScore * AUTO_FRAME_SCORE_WEIGHTS.area +
+        rectangularity * AUTO_FRAME_SCORE_WEIGHTS.rectangularity +
+        orthogonality * AUTO_FRAME_SCORE_WEIGHTS.orthogonality +
+        parallelism * AUTO_FRAME_SCORE_WEIGHTS.parallelism +
+        edgeSupport * AUTO_FRAME_SCORE_WEIGHTS.edgeSupport +
+        centerPrior * AUTO_FRAME_SCORE_WEIGHTS.centerPrior +
+        aspect.score * AUTO_FRAME_SCORE_WEIGHTS.aspect
+      );
+
+      return {
+        ...candidate,
+        bound,
+        score: clampBetween(score, 0, 1),
+        areaRatio,
+        detectedFormat: aspect.format,
+        scoreBreakdown: {
+          area: Number(areaScore.toFixed(3)),
+          rectangularity: Number(rectangularity.toFixed(3)),
+          orthogonality: Number(orthogonality.toFixed(3)),
+          parallelism: Number(parallelism.toFixed(3)),
+          edgeSupport: Number(edgeSupport.toFixed(3)),
+          centerPrior: Number(centerPrior.toFixed(3)),
+          aspect: Number(aspect.score.toFixed(3))
+        },
+        minRect: {
+          angle: Number(candidate.minRectAngle) || 0,
+          width: rectWidth,
+          height: rectHeight
+        }
+      };
+    }
+
+    function buildHoughCandidate(edges, imageWidth, imageHeight) {
+      if (!window.cv.HoughLinesP) return null;
+      const lines = new window.cv.Mat();
+      try {
+        const minDim = Math.min(imageWidth, imageHeight);
+        window.cv.HoughLinesP(
+          edges,
+          lines,
+          1,
+          Math.PI / 180,
+          70,
+          Math.max(40, Math.round(minDim * 0.25)),
+          Math.max(8, Math.round(minDim * 0.02))
+        );
+
+        if (!lines.rows || !lines.data32S) return null;
+        const data = lines.data32S;
+        let left = Infinity;
+        let top = Infinity;
+        let right = -Infinity;
+        let bottom = -Infinity;
+        let hCount = 0;
+        let vCount = 0;
+
+        for (let i = 0; i < lines.rows; i++) {
+          const idx = i * 4;
+          const x1 = data[idx];
+          const y1 = data[idx + 1];
+          const x2 = data[idx + 2];
+          const y2 = data[idx + 3];
+          const dx = x2 - x1;
+          const dy = y2 - y1;
+          const length = Math.hypot(dx, dy);
+          if (length < minDim * 0.18) continue;
+
+          let angle = Math.abs(Math.atan2(dy, dx) * 180 / Math.PI);
+          if (angle > 90) angle = 180 - angle;
+
+          if (angle <= 16) {
+            hCount++;
+          } else if (angle >= 74) {
+            vCount++;
+          } else {
+            continue;
+          }
+
+          left = Math.min(left, x1, x2);
+          right = Math.max(right, x1, x2);
+          top = Math.min(top, y1, y2);
+          bottom = Math.max(bottom, y1, y2);
+        }
+
+        if (hCount < 2 || vCount < 2) return null;
+        if (!Number.isFinite(left) || !Number.isFinite(top) || !Number.isFinite(right) || !Number.isFinite(bottom)) {
+          return null;
+        }
+
+        const margin = Math.round(minDim * 0.006);
+        const bound = sanitizeBound({
+          x: left - margin,
+          y: top - margin,
+          width: (right - left) + margin * 2,
+          height: (bottom - top) + margin * 2
+        }, imageWidth, imageHeight);
+        if (!bound) return null;
+
+        return {
+          method: 'hough',
+          area: bound.width * bound.height,
+          bound,
+          minRectWidth: bound.width,
+          minRectHeight: bound.height,
+          minRectAngle: 0,
+          points: [
+            { x: bound.x, y: bound.y },
+            { x: bound.x + bound.width, y: bound.y },
+            { x: bound.x + bound.width, y: bound.y + bound.height },
+            { x: bound.x, y: bound.y + bound.height }
+          ],
+          orthogonalityHint: 1,
+          parallelismHint: 1
+        };
+      } catch (err) {
+        console.warn('Hough candidate failed:', err);
+        return null;
+      } finally {
+        lines.delete();
+      }
+    }
+
+    function detectFrameCandidatesWithCv(imageData, options = {}) {
+      if (!(window.cv && window.cv.Mat) || !imageData) return [];
+
+      const minAreaRatio = Number.isFinite(options.minAreaRatio) ? options.minAreaRatio : 0.05;
       const retrievalMode = options.retrievalMode === 'external' ? window.cv.RETR_EXTERNAL : window.cv.RETR_LIST;
-
+      const aspectTargets = getAutoFrameAspectTargets();
       const src = window.cv.matFromImageData(imageData);
+      const imageWidth = src.cols;
+      const imageHeight = src.rows;
+      const imageArea = Math.max(1, imageWidth * imageHeight);
+
       let gray = null;
+      let claheEnhanced = null;
+      let topHat = null;
+      let blackHat = null;
+      let merged = null;
       let blurred = null;
       let edges = null;
-      let kernel = null;
+      let kernel3 = null;
+      let kernel7 = null;
       let contours = null;
       let hierarchy = null;
 
       try {
         gray = new window.cv.Mat();
+        claheEnhanced = new window.cv.Mat();
+        topHat = new window.cv.Mat();
+        blackHat = new window.cv.Mat();
+        merged = new window.cv.Mat();
         blurred = new window.cv.Mat();
         edges = new window.cv.Mat();
-        kernel = window.cv.getStructuringElement(window.cv.MORPH_RECT, new window.cv.Size(3, 3));
+        kernel3 = window.cv.getStructuringElement(window.cv.MORPH_RECT, new window.cv.Size(3, 3));
+        kernel7 = window.cv.getStructuringElement(window.cv.MORPH_RECT, new window.cv.Size(7, 7));
         contours = new window.cv.MatVector();
         hierarchy = new window.cv.Mat();
 
         window.cv.cvtColor(src, gray, window.cv.COLOR_RGBA2GRAY);
-        window.cv.GaussianBlur(gray, blurred, new window.cv.Size(5, 5), 0, 0, window.cv.BORDER_DEFAULT);
-        window.cv.Canny(blurred, edges, 50, 150, 3, false);
-        window.cv.dilate(edges, edges, kernel, new window.cv.Point(-1, -1), 1);
+        let claheApplied = false;
+        let clahe = null;
+        try {
+          if (window.cv.createCLAHE && typeof window.cv.createCLAHE === 'function') {
+            clahe = window.cv.createCLAHE(2.0, new window.cv.Size(8, 8));
+          } else if (window.cv.CLAHE && typeof window.cv.CLAHE === 'function') {
+            clahe = new window.cv.CLAHE(2.0, new window.cv.Size(8, 8));
+          }
+          if (clahe && typeof clahe.apply === 'function') {
+            clahe.apply(gray, claheEnhanced);
+            claheApplied = true;
+          }
+        } catch (err) {
+          claheApplied = false;
+        } finally {
+          if (clahe && typeof clahe.delete === 'function') {
+            clahe.delete();
+          }
+        }
+        if (!claheApplied) {
+          window.cv.equalizeHist(gray, claheEnhanced);
+        }
+        window.cv.morphologyEx(claheEnhanced, topHat, window.cv.MORPH_TOPHAT, kernel7);
+        window.cv.morphologyEx(claheEnhanced, blackHat, window.cv.MORPH_BLACKHAT, kernel7);
+        window.cv.addWeighted(claheEnhanced, 1.0, topHat, 0.7, 0, merged);
+        window.cv.addWeighted(merged, 1.0, blackHat, -0.45, 0, merged);
+        window.cv.GaussianBlur(merged, blurred, new window.cv.Size(5, 5), 0, 0, window.cv.BORDER_DEFAULT);
+        window.cv.Canny(blurred, edges, 40, 140, 3, false);
+        window.cv.dilate(edges, edges, kernel3, new window.cv.Point(-1, -1), 1);
+
+        const candidates = [];
         window.cv.findContours(edges, contours, hierarchy, retrievalMode, window.cv.CHAIN_APPROX_SIMPLE);
-
-        const imageArea = src.cols * src.rows;
-        let best = null;
-
         for (let i = 0; i < contours.size(); i++) {
           const contour = contours.get(i);
-          const area = window.cv.contourArea(contour);
-          if (area < imageArea * minAreaRatio) {
+          let approx = null;
+          try {
+            const area = Math.abs(window.cv.contourArea(contour));
+            if (area < imageArea * minAreaRatio) continue;
+
+            const bound = window.cv.boundingRect(contour);
+            const minRect = window.cv.minAreaRect(contour);
+            const perimeter = window.cv.arcLength(contour, true);
+            approx = new window.cv.Mat();
+            window.cv.approxPolyDP(contour, approx, Math.max(2, perimeter * 0.02), true);
+            const approxPoints = extractApproxPoints(approx);
+
+            const scored = scoreFrameCandidate({
+              method: 'contour',
+              area,
+              bound,
+              minRectWidth: minRect.size.width,
+              minRectHeight: minRect.size.height,
+              minRectAngle: minRect.angle,
+              points: approxPoints.length === 4 ? approxPoints : []
+            }, {
+              imageWidth,
+              imageHeight,
+              imageArea,
+              edges,
+              aspectTargets
+            });
+            if (scored) candidates.push(scored);
+          } finally {
             contour.delete();
-            continue;
+            if (approx) approx.delete();
           }
-
-          const bound = window.cv.boundingRect(contour);
-          const minRect = window.cv.minAreaRect(contour);
-          const rectArea = Math.max(1, minRect.size.width * minRect.size.height);
-          const areaRatio = area / imageArea;
-          const areaScore = clampBetween(areaRatio / 0.7, 0, 1);
-          const rectangularity = clampBetween(area / rectArea, 0, 1);
-          const edgeDistance = Math.min(
-            bound.x,
-            bound.y,
-            src.cols - (bound.x + bound.width),
-            src.rows - (bound.y + bound.height)
-          );
-          const proximity = 1 - clampBetween(edgeDistance / (Math.min(src.cols, src.rows) * 0.12), 0, 1);
-          const ratio = Math.max(minRect.size.width, minRect.size.height) / Math.max(1, Math.min(minRect.size.width, minRect.size.height));
-          const aspectScore = scoreCandidateAspect(ratio);
-          const score = areaScore * 0.45 + rectangularity * 0.25 + proximity * 0.20 + aspectScore * 0.10;
-
-          if (!best || score > best.score) {
-            best = {
-              score,
-              areaRatio,
-              bound: {
-                x: bound.x,
-                y: bound.y,
-                width: bound.width,
-                height: bound.height
-              },
-              minRect: {
-                angle: minRect.angle,
-                width: minRect.size.width,
-                height: minRect.size.height
-              }
-            };
-          }
-
-          contour.delete();
         }
 
-        return best;
+        const houghCandidate = buildHoughCandidate(edges, imageWidth, imageHeight);
+        if (houghCandidate) {
+          const scoredHough = scoreFrameCandidate(houghCandidate, {
+            imageWidth,
+            imageHeight,
+            imageArea,
+            edges,
+            aspectTargets
+          });
+          if (scoredHough) candidates.push(scoredHough);
+        }
+
+        return candidates
+          .filter(candidate => candidate.areaRatio >= minAreaRatio)
+          .sort((a, b) => b.score - a.score)
+          .slice(0, 10);
       } catch (err) {
         console.error('OpenCV border analysis failed:', err);
-        return null;
+        return [];
       } finally {
         src.delete();
         if (gray) gray.delete();
+        if (claheEnhanced) claheEnhanced.delete();
+        if (topHat) topHat.delete();
+        if (blackHat) blackHat.delete();
+        if (merged) merged.delete();
         if (blurred) blurred.delete();
         if (edges) edges.delete();
-        if (kernel) kernel.delete();
+        if (kernel3) kernel3.delete();
+        if (kernel7) kernel7.delete();
         if (contours) contours.delete();
         if (hierarchy) hierarchy.delete();
       }
     }
 
-    function buildRotationCandidates(minRect) {
-      if (!minRect) return [0];
-
-      let angle = Number(minRect.angle) || 0;
-      let width = Number(minRect.width) || 0;
-      let height = Number(minRect.height) || 0;
-      if (width < height) angle += 90;
-
-      angle = normalizeAngleDegrees(angle);
-      const candidates = [angle, -angle, 0];
-      const deduped = [];
-      candidates.forEach(value => {
-        const normalized = normalizeAngleDegrees(value);
-        if (!deduped.some(existing => Math.abs(existing - normalized) < 0.3)) {
-          deduped.push(normalized);
-        }
+    function buildRotationCandidates(baseCandidates = []) {
+      const angleSet = new Set([0]);
+      baseCandidates.slice(0, 4).forEach(candidate => {
+        const minRect = candidate && candidate.minRect ? candidate.minRect : null;
+        if (!minRect) return;
+        let angle = Number(minRect.angle) || 0;
+        const width = Number(minRect.width) || 0;
+        const height = Number(minRect.height) || 0;
+        if (width < height) angle += 90;
+        [angle, -angle, angle + 90, angle - 90, angle + 180].forEach(raw => {
+          const normalized = normalizeAngleDegrees(raw);
+          const quantized = Math.round(normalized * 10) / 10;
+          if (Math.abs(quantized) <= 0.1) {
+            angleSet.add(0);
+          } else {
+            angleSet.add(quantized);
+          }
+        });
       });
-      return deduped;
+      return Array.from(angleSet);
+    }
+
+    function getAutoFrameTargetRatiosForFormat(formatKey = 'unknown') {
+      const direct = AUTO_FRAME_FORMAT_RATIOS[formatKey];
+      if (Number.isFinite(direct)) return [direct];
+      const fallback = getAutoFrameAspectTargets()
+        .map(target => target.ratio)
+        .filter(ratio => Number.isFinite(ratio) && ratio > 0.01);
+      return fallback.length ? fallback : [AUTO_FRAME_FORMAT_RATIOS['135'] || 1.5];
+    }
+
+    function evaluateAutoFrameCropRegion(cropRegion, imageData, detectedFormat = 'unknown', candidate = null) {
+      if (!cropRegion || !imageData) {
+        return {
+          isValid: false,
+          areaRatio: 0,
+          aspectDelta: 1,
+          aspectScore: 0,
+          areaScore: 0,
+          edgeSupport: 0,
+          shortEdgeCoverage: 0
+        };
+      }
+
+      const totalArea = Math.max(1, imageData.width * imageData.height);
+      const cropArea = Math.max(1, cropRegion.width * cropRegion.height);
+      const areaRatio = cropArea / totalArea;
+      const ratio = Math.max(cropRegion.width, cropRegion.height) / Math.max(1, Math.min(cropRegion.width, cropRegion.height));
+      const targetRatios = getAutoFrameTargetRatiosForFormat(detectedFormat);
+      let bestAspectDelta = Infinity;
+      targetRatios.forEach((targetRatio) => {
+        const delta = Math.abs(ratio - targetRatio) / targetRatio;
+        if (delta < bestAspectDelta) bestAspectDelta = delta;
+      });
+      if (!Number.isFinite(bestAspectDelta)) bestAspectDelta = 1;
+
+      const hasKnownFormat = Number.isFinite(AUTO_FRAME_FORMAT_RATIOS[detectedFormat]);
+      const aspectTolerance = hasKnownFormat ? 0.34 : 0.42;
+      const areaScore = clampBetween((areaRatio - 0.08) / 0.86, 0, 1);
+      const aspectScore = 1 - clampBetween(bestAspectDelta / aspectTolerance, 0, 1);
+      const shortEdgeCoverage = Math.min(cropRegion.width / imageData.width, cropRegion.height / imageData.height);
+      const edgeSupport = candidate && candidate.scoreBreakdown
+        ? clampBetween(Number(candidate.scoreBreakdown.edgeSupport) || 0, 0, 1)
+        : 0.5;
+
+      const isValid = areaRatio >= 0.10
+        && areaRatio <= 0.975
+        && bestAspectDelta <= aspectTolerance
+        && shortEdgeCoverage >= 0.22
+        && edgeSupport >= 0.12;
+
+      return {
+        isValid,
+        areaRatio: Number(areaRatio.toFixed(4)),
+        aspectDelta: Number(bestAspectDelta.toFixed(4)),
+        aspectScore: Number(aspectScore.toFixed(3)),
+        areaScore: Number(areaScore.toFixed(3)),
+        edgeSupport: Number(edgeSupport.toFixed(3)),
+        shortEdgeCoverage: Number(shortEdgeCoverage.toFixed(3)),
+        aspectTolerance: Number(aspectTolerance.toFixed(3))
+      };
+    }
+
+    function computeAutoFrameAnglePenalty(angle) {
+      const absAngle = Math.abs(normalizeAngleDegrees(Number(angle) || 0));
+      if (absAngle <= 0.12) return 0;
+      const remainder = absAngle % 90;
+      const distanceToRightAngle = Math.min(remainder, 90 - remainder);
+      const offAxisPenalty = clampBetween(distanceToRightAngle / 22, 0, 1) * 0.16;
+      const magnitudePenalty = clampBetween(absAngle / 120, 0, 1) * 0.07;
+      return clampBetween(offAxisPenalty + magnitudePenalty, 0, 0.25);
+    }
+
+    function buildCropRegionFromBound(bound, imageData, marginRatio = 0.02) {
+      if (!bound || !imageData) return null;
+      const margin = Math.round(Math.min(imageData.width, imageData.height) * Math.max(0, marginRatio));
+      const left = clampBetween(bound.x - margin, 0, imageData.width - 1);
+      const top = clampBetween(bound.y - margin, 0, imageData.height - 1);
+      const maxWidth = imageData.width - left;
+      const maxHeight = imageData.height - top;
+      const width = clampBetween(bound.width + margin * 2, 1, maxWidth);
+      const height = clampBetween(bound.height + margin * 2, 1, maxHeight);
+      return sanitizeCropRegionForImage({ left, top, width, height }, imageData);
     }
 
     function detectAxisAlignedCropRegion(imageData, marginRatio = 0.02) {
-      const analysis = analyzeBorderWithCv(imageData, {
-        minAreaRatio: 0.05,
+      const candidates = detectFrameCandidatesWithCv(imageData, {
+        minAreaRatio: 0.04,
         retrievalMode: 'external'
       });
-      if (!analysis || !analysis.bound) return null;
+      if (!candidates.length) return null;
 
-      const margin = Math.round(Math.min(imageData.width, imageData.height) * Math.max(0, marginRatio));
-      const left = clampBetween(analysis.bound.x - margin, 0, imageData.width - 1);
-      const top = clampBetween(analysis.bound.y - margin, 0, imageData.height - 1);
-      const maxWidth = imageData.width - left;
-      const maxHeight = imageData.height - top;
-      const width = clampBetween(analysis.bound.width + margin * 2, 1, maxWidth);
-      const height = clampBetween(analysis.bound.height + margin * 2, 1, maxHeight);
+      for (const candidate of candidates) {
+        const cropRegion = buildCropRegionFromBound(candidate.bound, imageData, marginRatio);
+        if (!cropRegion) continue;
+        const validation = evaluateAutoFrameCropRegion(cropRegion, imageData, candidate.detectedFormat, candidate);
+        if (!validation.isValid) continue;
+        const confidence = clampBetween(
+          (candidate.score * 0.62) +
+          (Math.min(validation.areaRatio / 0.92, 1) * 0.16) +
+          (validation.aspectScore * 0.16) +
+          (validation.edgeSupport * 0.06),
+          0,
+          1
+        );
+        return {
+          cropRegion,
+          confidence,
+          candidate,
+          validation
+        };
+      }
+      return null;
+    }
 
-      const cropRegion = sanitizeCropRegionForImage({ left, top, width, height }, imageData);
-      if (!cropRegion) return null;
-
-      const cropAreaRatio = (cropRegion.width * cropRegion.height) / (imageData.width * imageData.height);
-      const confidence = clampBetween((analysis.score * 0.7) + (Math.min(cropAreaRatio / 0.9, 1) * 0.3), 0, 1);
-
-      return {
-        cropRegion,
-        confidence
-      };
+    function inferConfidenceLevel(confidence) {
+      const high = Number.isFinite(state.autoFrame.highConfidence) ? state.autoFrame.highConfidence : 0.72;
+      const min = Number.isFinite(state.autoFrame.minConfidence) ? state.autoFrame.minConfidence : 0.55;
+      if (confidence >= high) return 'high';
+      if (confidence >= min) return 'medium';
+      return 'low';
     }
 
     async function detectFrameAndRotation(imageData) {
@@ -6242,20 +7140,31 @@
       if (!ready) return null;
 
       const previewData = resizeImageDataForDetection(imageData, AUTO_FRAME_MAX_SIDE);
-      const baseAnalysis = analyzeBorderWithCv(previewData, { minAreaRatio: 0.05 });
-      if (!baseAnalysis || !baseAnalysis.minRect) return null;
+      const previewCandidates = detectFrameCandidatesWithCv(previewData, { minAreaRatio: 0.04 });
+      if (!previewCandidates.length) return null;
 
-      const candidates = buildRotationCandidates(baseAnalysis.minRect);
+      const angleCandidates = buildRotationCandidates(previewCandidates);
       let bestPreview = null;
-
-      for (const angle of candidates) {
+      for (const angle of angleCandidates) {
         const rotatedPreview = Math.abs(angle) < 0.001 ? previewData : applyRotationToImageData(previewData, angle);
         const cropPreview = detectAxisAlignedCropRegion(rotatedPreview, state.autoFrame.marginRatio);
         if (!cropPreview) continue;
-
-        const score = (baseAnalysis.score * 0.35) + (cropPreview.confidence * 0.65);
-        if (!bestPreview || score > bestPreview.score) {
-          bestPreview = { angle, score };
+        const baseScore = previewCandidates[0] ? previewCandidates[0].score : 0.5;
+        const anglePenalty = computeAutoFrameAnglePenalty(angle);
+        const validationAspect = cropPreview.validation ? cropPreview.validation.aspectScore : 0.6;
+        const score = clampBetween(
+          (baseScore * 0.24) +
+          (cropPreview.confidence * 0.66) +
+          (validationAspect * 0.10) -
+          anglePenalty,
+          0,
+          1
+        );
+        const isBetter = !bestPreview
+          || score > (bestPreview.score + 0.001)
+          || (Math.abs(score - bestPreview.score) <= 0.001 && Math.abs(angle) < Math.abs(bestPreview.angle));
+        if (isBetter) {
+          bestPreview = { angle, score, cropPreview, anglePenalty };
         }
       }
 
@@ -6263,27 +7172,48 @@
       const normalizedAngle = Math.abs(bestPreview.angle) < 0.15 ? 0 : Number(bestPreview.angle.toFixed(2));
       const rotatedFull = Math.abs(normalizedAngle) < 0.001 ? imageData : applyRotationToImageData(imageData, normalizedAngle);
       const cropFull = detectAxisAlignedCropRegion(rotatedFull, state.autoFrame.marginRatio);
-      if (!cropFull) return null;
+      if (!cropFull || !cropFull.validation || !cropFull.validation.isValid) return null;
 
-      const confidence = Number(clampBetween((bestPreview.score * 0.4) + (cropFull.confidence * 0.6), 0, 1).toFixed(2));
-      if (confidence < state.autoFrame.minConfidence) return null;
+      const fullAnglePenalty = computeAutoFrameAnglePenalty(normalizedAngle);
+      const confidence = Number(clampBetween(
+        (bestPreview.score * 0.34) +
+        (cropFull.confidence * 0.56) +
+        (cropFull.validation.aspectScore * 0.10) -
+        (fullAnglePenalty * 0.4),
+        0,
+        1
+      ).toFixed(2));
+      const confidenceLevel = inferConfidenceLevel(confidence);
+      const detectedFormat = cropFull.candidate && cropFull.candidate.detectedFormat
+        ? cropFull.candidate.detectedFormat
+        : 'unknown';
 
       return {
         angle: normalizedAngle,
         cropRegion: cropFull.cropRegion,
         confidence,
-        rotatedImageData: rotatedFull
+        confidenceLevel,
+        detectedFormat,
+        rotatedImageData: rotatedFull,
+        diagnostics: {
+          method: cropFull.candidate ? cropFull.candidate.method : 'unknown',
+          scoreBreakdown: cropFull.candidate ? cropFull.candidate.scoreBreakdown : null,
+          anglePenalty: Number(fullAnglePenalty.toFixed(3)),
+          cropValidation: cropFull.validation || null
+        }
       };
     }
 
     function formatAutoFrameDetail(result) {
       const detailTemplate = i18n[currentLang].autoFramePreviewDetail
         || 'Rotate {angle}°, crop to {width}x{height}, confidence {confidence}';
-      return detailTemplate
+      const base = detailTemplate
         .replace('{angle}', String(result.angle))
         .replace('{width}', String(result.cropRegion.width))
         .replace('{height}', String(result.cropRegion.height))
         .replace('{confidence}', String(result.confidence.toFixed(2)));
+      const formatPart = result.detectedFormat ? `\nformat: ${result.detectedFormat}` : '';
+      return `${base}${formatPart}`;
     }
 
     function applyAutoFrameResult(result) {
@@ -6297,22 +7227,135 @@
           ? state.originalImageData
           : applyRotationToImageData(state.originalImageData, state.rotationAngle));
       applyCropRegionToLoadedImage(result.cropRegion, { refreshDisplay: true });
+      state.autoFrame.lastDiagnostics = {
+        confidence: result.confidence,
+        detectedFormat: result.detectedFormat || 'unknown',
+        method: result.diagnostics && result.diagnostics.method ? result.diagnostics.method : 'unknown',
+        confidenceLevel: result.confidenceLevel || inferConfidenceLevel(result.confidence || 0),
+        rotateOnly: false,
+        appliedMode: 'crop',
+        lowConfidenceApplied: (result.confidenceLevel || inferConfidenceLevel(result.confidence || 0)) === 'low'
+      };
+      updateAutoFrameDiagnosticsUI();
       setStep2Mode(suggestStep2Mode());
       return true;
+    }
+
+    function applyAutoFrameRotationOnly(result) {
+      if (!result || !state.originalImageData) return false;
+      state.rotationAngle = normalizeAngleDegrees(result.angle || 0);
+      state.cropRegion = null;
+      state.croppedImageData = null;
+      state.originalImageData = result.rotatedImageData
+        || (Math.abs(state.rotationAngle) < 0.001
+          ? state.originalImageData
+          : applyRotationToImageData(state.originalImageData, state.rotationAngle));
+      displayNegative(state.originalImageData);
+      state.autoFrame.lastDiagnostics = {
+        confidence: result.confidence,
+        detectedFormat: result.detectedFormat || 'unknown',
+        method: result.diagnostics && result.diagnostics.method ? result.diagnostics.method : 'unknown',
+        confidenceLevel: result.confidenceLevel || inferConfidenceLevel(result.confidence || 0),
+        rotateOnly: true,
+        appliedMode: 'rotateOnly',
+        lowConfidenceApplied: false
+      };
+      updateAutoFrameDiagnosticsUI();
+      setStep2Mode(suggestStep2Mode());
+      return true;
+    }
+
+    function mapCropRegionAfterRotation(cropRegion, sourceWidth, sourceHeight, rotatedWidth, rotatedHeight, angleDegrees) {
+      if (!cropRegion) return null;
+      const rad = (Number(angleDegrees) || 0) * Math.PI / 180;
+      const cos = Math.cos(rad);
+      const sin = Math.sin(rad);
+      const srcCx = sourceWidth / 2;
+      const srcCy = sourceHeight / 2;
+      const dstCx = rotatedWidth / 2;
+      const dstCy = rotatedHeight / 2;
+
+      const corners = [
+        { x: cropRegion.left, y: cropRegion.top },
+        { x: cropRegion.left + cropRegion.width, y: cropRegion.top },
+        { x: cropRegion.left + cropRegion.width, y: cropRegion.top + cropRegion.height },
+        { x: cropRegion.left, y: cropRegion.top + cropRegion.height }
+      ];
+
+      const rotated = corners.map((point) => {
+        const relX = point.x - srcCx;
+        const relY = point.y - srcCy;
+        const x = relX * cos - relY * sin + dstCx;
+        const y = relX * sin + relY * cos + dstCy;
+        return { x, y };
+      });
+
+      const minX = Math.min(...rotated.map(point => point.x));
+      const maxX = Math.max(...rotated.map(point => point.x));
+      const minY = Math.min(...rotated.map(point => point.y));
+      const maxY = Math.max(...rotated.map(point => point.y));
+
+      return sanitizeCropRegionForImage({
+        left: Math.floor(minX),
+        top: Math.floor(minY),
+        width: Math.ceil(maxX - minX),
+        height: Math.ceil(maxY - minY)
+      }, { width: rotatedWidth, height: rotatedHeight });
+    }
+
+    function invalidateProcessedPipelineState() {
+      state.processedImageData = null;
+      state.displayImageData = null;
+      state.previewSourceImageData = null;
+      state.histogramSourceImageData = null;
+      state.webglSourceImageData = null;
+      state.lastRenderQuality = 'full';
+      if (webglState.gl) {
+        webglState.sourceDirty = true;
+        webglState.sourceSize = { w: 0, h: 0 };
+      }
     }
 
     function applyRotation(angle) {
       if (!state.originalImageData || !Number.isFinite(angle) || angle === 0) return;
 
-      const rotatedData = applyRotationToImageData(state.originalImageData, angle);
+      const normalizedAngle = normalizeAngleDegrees(Number(angle) || 0);
+      if (Math.abs(normalizedAngle) < 0.001) return;
+
+      const sourceOriginal = state.originalImageData;
+      const sourceCrop = state.cropRegion ? { ...state.cropRegion } : null;
+      const shouldPreserveCrop = state.currentStep >= 3 && Boolean(sourceCrop);
+
+      const rotatedData = applyRotationToImageData(sourceOriginal, normalizedAngle);
       if (!rotatedData) return;
 
       state.originalImageData = rotatedData;
-      state.croppedImageData = null;
-      state.cropRegion = null;
-      state.rotationAngle = normalizeAngleDegrees((state.rotationAngle || 0) + angle);
 
-      displayNegative(rotatedData);
+      if (shouldPreserveCrop) {
+        const mappedCrop = mapCropRegionAfterRotation(
+          sourceCrop,
+          sourceOriginal.width,
+          sourceOriginal.height,
+          rotatedData.width,
+          rotatedData.height,
+          normalizedAngle
+        );
+        state.cropRegion = mappedCrop;
+        state.croppedImageData = mappedCrop ? cropImageData(state.originalImageData, mappedCrop) : null;
+      } else {
+        state.croppedImageData = null;
+        state.cropRegion = null;
+      }
+
+      state.rotationAngle = normalizeAngleDegrees((state.rotationAngle || 0) + normalizedAngle);
+      invalidateProcessedPipelineState();
+
+      if (state.currentStep >= 3) {
+        processNegative();
+      } else {
+        displayNegative(state.croppedImageData || rotatedData);
+        updateCanvasVisibility();
+      }
       setStep2Mode(suggestStep2Mode());
       markCurrentFileDirty();
     }
@@ -6386,13 +7429,57 @@
           return;
         }
 
-        const title = i18n[currentLang].autoFramePreviewTitle || 'Reliable frame detected. Apply auto rotation and crop?';
         const detail = formatAutoFrameDetail(result);
-        if (!window.confirm(`${title}\n${detail}`)) return;
-
         state.originalImageData = source;
-        if (!applyAutoFrameResult(result)) return;
-        markCurrentFileDirty();
+        const lowBehavior = state.autoFrame.lowConfidenceBehavior || 'suggest';
+        let applied = false;
+
+        if (result.confidenceLevel === 'low') {
+          if (lowBehavior === 'rotateOnly') {
+            if (Math.abs(result.angle) > 0.05) {
+              applied = applyAutoFrameRotationOnly(result);
+              if (applied) {
+                const template = i18n[currentLang].autoFrameRotateOnlyApplied
+                  || 'Low confidence: applied rotation only ({angle}°).';
+                alert(template.replace('{angle}', String(result.angle)));
+              }
+            } else {
+              alert(i18n[currentLang].autoFrameNoReliableBorder || 'No reliable frame border detected. Please crop manually.');
+            }
+          } else if (lowBehavior === 'ignore') {
+            alert(i18n[currentLang].autoFrameNoReliableBorder || 'No reliable frame border detected. Please crop manually.');
+          } else {
+            applied = applyAutoFrameResult(result);
+            if (applied) {
+              const template = i18n[currentLang].autoFrameLowConfidenceApplied
+                || 'Low confidence: crop applied. Please verify the result (confidence {confidence}).';
+              const confidenceText = Number.isFinite(result.confidence) ? result.confidence.toFixed(2) : '0.00';
+              alert(template.replace('{confidence}', confidenceText));
+            }
+          }
+        } else if (result.confidenceLevel === 'high' && state.autoFrame.autoApplyHighConfidence) {
+          applied = applyAutoFrameResult(result);
+        } else {
+          const title = i18n[currentLang].autoFramePreviewTitle || 'Reliable frame detected. Apply auto rotation and crop?';
+          if (window.confirm(`${title}\n${detail}`)) {
+            applied = applyAutoFrameResult(result);
+          }
+        }
+
+        if (applied) {
+          markCurrentFileDirty();
+        } else {
+          state.autoFrame.lastDiagnostics = {
+            confidence: result.confidence,
+            detectedFormat: result.detectedFormat || 'unknown',
+            method: result.diagnostics && result.diagnostics.method ? result.diagnostics.method : 'unknown',
+            confidenceLevel: result.confidenceLevel || inferConfidenceLevel(result.confidence || 0),
+            rotateOnly: false,
+            appliedMode: 'none',
+            lowConfidenceApplied: false
+          };
+          updateAutoFrameDiagnosticsUI();
+        }
       } finally {
         if (button) {
           button.textContent = previousText || (i18n[currentLang].autoFrame || 'Auto Frame');
@@ -6420,6 +7507,8 @@
       }
 
       let successCount = 0;
+      let lowAppliedCount = 0;
+      let rotateOnlyCount = 0;
       let failCount = 0;
       showBatchProgress(true);
 
@@ -6437,15 +7526,43 @@
             }
 
             const existing = item.settings ? cloneSettings(item.settings) : createDefaultSettings(imageData);
-            existing.rotationAngle = result.angle;
-            existing.cropRegion = result.cropRegion ? { ...result.cropRegion } : null;
+            const lowBehavior = state.autoFrame.lowConfidenceBehavior || 'suggest';
+            let appliedMode = 'none';
+            if (result.confidenceLevel === 'low') {
+              if (lowBehavior === 'rotateOnly' && Math.abs(result.angle) > 0.05) {
+                existing.rotationAngle = result.angle;
+                existing.cropRegion = null;
+                rotateOnlyCount++;
+                appliedMode = 'rotateOnly';
+              } else if (lowBehavior === 'suggest') {
+                existing.rotationAngle = result.angle;
+                existing.cropRegion = result.cropRegion ? { ...result.cropRegion } : null;
+                successCount++;
+                lowAppliedCount++;
+                appliedMode = 'crop';
+              } else {
+                failCount++;
+                continue;
+              }
+            } else {
+              existing.rotationAngle = result.angle;
+              existing.cropRegion = result.cropRegion ? { ...result.cropRegion } : null;
+              successCount++;
+              appliedMode = 'crop';
+            }
+
             existing.autoFrameMeta = {
               confidence: result.confidence,
+              confidenceLevel: result.confidenceLevel || inferConfidenceLevel(result.confidence || 0),
+              detectedFormat: result.detectedFormat || 'unknown',
+              method: result.diagnostics && result.diagnostics.method ? result.diagnostics.method : 'unknown',
+              rotateOnly: appliedMode === 'rotateOnly',
+              appliedMode,
+              lowConfidenceApplied: result.confidenceLevel === 'low' && appliedMode === 'crop',
               detectedAt: Date.now()
             };
             item.settings = existing;
             item.isDirty = false;
-            successCount++;
           } catch (err) {
             console.error('Auto frame batch item failed:', item.file.name, err);
             failCount++;
@@ -6465,9 +7582,13 @@
       }
 
       updateFileListUI();
-      const template = i18n[currentLang].autoFrameBatchDone || 'Auto frame finished: {success} succeeded, {failed} failed.';
+      const template = i18n[currentLang].autoFrameBatchDoneExtended
+        || i18n[currentLang].autoFrameBatchDone
+        || 'Auto frame finished: {success} succeeded, {failed} failed.';
       alert(template
         .replace('{success}', String(successCount))
+        .replace('{lowApplied}', String(lowAppliedCount))
+        .replace('{rotated}', String(rotateOnlyCount))
         .replace('{failed}', String(failCount)));
     }
 
@@ -6869,71 +7990,74 @@
     // Batch Processing
     // ===========================================
     function extractCurrentSettings() {
+      const safe = sanitizeSettings(state, { fallbackSettings: state });
       return {
-        cropRegion: state.cropRegion,
-        rotationAngle: state.rotationAngle || 0,
-        filmType: state.filmType,
-        filmPreset: state.filmPreset,
-        filmBase: { ...state.filmBase },
-        exposure: state.exposure,
-        contrast: state.contrast,
-        highlights: state.highlights,
-        shadows: state.shadows,
-        temperature: state.temperature,
-        tint: state.tint,
-        vibrance: state.vibrance,
-        saturation: state.saturation,
-        cyan: state.cyan,
-        magenta: state.magenta,
-        yellow: state.yellow,
-        wbR: state.wbR,
-        wbG: state.wbG,
-        wbB: state.wbB,
+        cropRegion: safe.cropRegion ? { ...safe.cropRegion } : null,
+        rotationAngle: safe.rotationAngle || 0,
+        autoFrameMeta: state.autoFrame.lastDiagnostics ? { ...state.autoFrame.lastDiagnostics } : null,
+        filmType: safe.filmType,
+        filmPreset: safe.filmPreset,
+        filmBase: { ...safe.filmBase },
+        exposure: safe.exposure,
+        contrast: safe.contrast,
+        highlights: safe.highlights,
+        shadows: safe.shadows,
+        temperature: safe.temperature,
+        tint: safe.tint,
+        vibrance: safe.vibrance,
+        saturation: safe.saturation,
+        cyan: safe.cyan,
+        magenta: safe.magenta,
+        yellow: safe.yellow,
+        wbR: safe.wbR,
+        wbG: safe.wbG,
+        wbB: safe.wbB,
         curvePoints: {
-          r: state.curvePoints.r.map(p => ({ ...p })),
-          g: state.curvePoints.g.map(p => ({ ...p })),
-          b: state.curvePoints.b.map(p => ({ ...p }))
+          r: safe.curvePoints.r.map(p => ({ ...p })),
+          g: safe.curvePoints.g.map(p => ({ ...p })),
+          b: safe.curvePoints.b.map(p => ({ ...p }))
         },
         curves: {
-          r: new Uint8Array(state.curves.r),
-          g: new Uint8Array(state.curves.g),
-          b: new Uint8Array(state.curves.b)
+          r: new Uint8Array(safe.curves.r),
+          g: new Uint8Array(safe.curves.g),
+          b: new Uint8Array(safe.curves.b)
         }
       };
     }
 
     function cloneSettings(settings) {
       if (!settings) return null;
+      const safe = sanitizeSettings(settings, { fallbackSettings: state });
       return {
-        cropRegion: settings.cropRegion ? { ...settings.cropRegion } : null,
-        rotationAngle: Number.isFinite(settings.rotationAngle) ? settings.rotationAngle : 0,
-        autoFrameMeta: settings.autoFrameMeta ? { ...settings.autoFrameMeta } : null,
-        filmType: settings.filmType,
-        filmPreset: settings.filmPreset,
-        filmBase: { ...settings.filmBase },
-        exposure: settings.exposure,
-        contrast: settings.contrast,
-        highlights: settings.highlights,
-        shadows: settings.shadows,
-        temperature: settings.temperature,
-        tint: settings.tint,
-        vibrance: settings.vibrance,
-        saturation: settings.saturation,
-        cyan: settings.cyan,
-        magenta: settings.magenta,
-        yellow: settings.yellow,
-        wbR: settings.wbR,
-        wbG: settings.wbG,
-        wbB: settings.wbB,
+        cropRegion: safe.cropRegion ? { ...safe.cropRegion } : null,
+        rotationAngle: safe.rotationAngle,
+        autoFrameMeta: safe.autoFrameMeta ? { ...safe.autoFrameMeta } : null,
+        filmType: safe.filmType,
+        filmPreset: safe.filmPreset,
+        filmBase: { ...safe.filmBase },
+        exposure: safe.exposure,
+        contrast: safe.contrast,
+        highlights: safe.highlights,
+        shadows: safe.shadows,
+        temperature: safe.temperature,
+        tint: safe.tint,
+        vibrance: safe.vibrance,
+        saturation: safe.saturation,
+        cyan: safe.cyan,
+        magenta: safe.magenta,
+        yellow: safe.yellow,
+        wbR: safe.wbR,
+        wbG: safe.wbG,
+        wbB: safe.wbB,
         curvePoints: {
-          r: settings.curvePoints.r.map(p => ({ ...p })),
-          g: settings.curvePoints.g.map(p => ({ ...p })),
-          b: settings.curvePoints.b.map(p => ({ ...p }))
+          r: safe.curvePoints.r.map(p => ({ ...p })),
+          g: safe.curvePoints.g.map(p => ({ ...p })),
+          b: safe.curvePoints.b.map(p => ({ ...p }))
         },
         curves: {
-          r: new Uint8Array(settings.curves.r),
-          g: new Uint8Array(settings.curves.g),
-          b: new Uint8Array(settings.curves.b)
+          r: new Uint8Array(safe.curves.r),
+          g: new Uint8Array(safe.curves.g),
+          b: new Uint8Array(safe.curves.b)
         }
       };
     }
@@ -7070,8 +8194,9 @@
     }
 
     function applyAdjustmentsWithSettings(imageData, settings) {
+      const safeSettings = sanitizeSettings(settings, { fallbackSettings: state });
       const output = new ImageData(new Uint8ClampedArray(imageData.data.length), imageData.width, imageData.height);
-      applyAdjustmentsToBuffer(imageData, settings, output, 'full');
+      applyAdjustmentsToBuffer(imageData, safeSettings, output, 'full');
       return output;
     }
 
@@ -7189,36 +8314,37 @@
 
     // Process a single file with given settings (streaming - no memory accumulation)
     async function processOneFile(file, settings) {
+      const safeSettings = sanitizeSettings(settings, { fallbackSettings: state });
       const imageData = await loadFileToImageData(file);
 
       let workingData = imageData;
-      const rotationAngle = Number.isFinite(settings.rotationAngle) ? settings.rotationAngle : 0;
+      const rotationAngle = Number.isFinite(safeSettings.rotationAngle) ? safeSettings.rotationAngle : 0;
       if (Math.abs(rotationAngle) > 0.001) {
         workingData = applyRotationToImageData(workingData, rotationAngle);
       }
-      if (settings.cropRegion) {
-        const cropRegion = sanitizeCropRegionForImage(settings.cropRegion, workingData);
+      if (safeSettings.cropRegion) {
+        const cropRegion = sanitizeCropRegionForImage(safeSettings.cropRegion, workingData);
         if (cropRegion) {
           workingData = cropImageData(workingData, cropRegion);
         }
       }
 
       let processed;
-      const preset = getPresetOrFallback(settings.filmPreset, settings.filmType);
-      const presetType = (preset && preset.type) ? preset.type : settings.filmType;
-      if (settings.filmType === 'positive' || presetType === 'positive') {
+      const preset = getPresetOrFallback(safeSettings.filmPreset, safeSettings.filmType);
+      const presetType = (preset && preset.type) ? preset.type : safeSettings.filmType;
+      if (safeSettings.filmType === 'positive' || presetType === 'positive') {
         processed = convertPositiveFilm(workingData);
-      } else if (settings.filmType === 'bw' || presetType === 'bw') {
+      } else if (safeSettings.filmType === 'bw' || presetType === 'bw') {
         const bwParams = getBwPresetParams(preset);
         processed = convertBWNegative(workingData, {
           contrast: bwParams.contrast,
           gamma: bwParams.gamma
         });
       } else {
-        processed = convertColorNegative(workingData, settings.filmBase);
+        processed = convertColorNegative(workingData, safeSettings.filmBase);
       }
 
-      return applyAdjustmentsWithSettings(processed, settings);
+      return applyAdjustmentsWithSettings(processed, safeSettings);
     }
 
     // Get selected files for batch processing
@@ -7234,6 +8360,7 @@
       return {
         cropRegion: null,
         rotationAngle: 0,
+        autoFrameMeta: null,
         filmType: 'color',
         filmPreset: 'generic_color',
         filmBase: filmBase,
@@ -7257,9 +8384,9 @@
           b: [{ x: 0, y: 0 }, { x: 255, y: 255 }]
         },
         curves: {
-          r: new Uint8Array(256).map((_, i) => i),
-          g: new Uint8Array(256).map((_, i) => i),
-          b: new Uint8Array(256).map((_, i) => i)
+          r: makeLinearCurveLut(),
+          g: makeLinearCurveLut(),
+          b: makeLinearCurveLut()
         }
       };
     }
@@ -7270,7 +8397,9 @@
       const imageData = await loadFileToImageData(file);
 
       // Use saved settings or create default with auto-detect
-      const settings = savedSettings || createDefaultSettings(imageData);
+      const settings = sanitizeSettings(savedSettings || createDefaultSettings(imageData), {
+        fallbackSettings: state
+      });
 
       // Apply crop if set
       let workingData = imageData;
@@ -7481,8 +8610,9 @@
     // Restore settings from a saved settings object
     function restoreSettings(settings) {
       if (!settings) return;
+      const safe = sanitizeSettings(settings, { fallbackSettings: state });
 
-      state.rotationAngle = Number.isFinite(settings.rotationAngle) ? normalizeAngleDegrees(settings.rotationAngle) : 0;
+      state.rotationAngle = Number.isFinite(safe.rotationAngle) ? normalizeAngleDegrees(safe.rotationAngle) : 0;
 
       if (state.loadedBaseImageData) {
         state.originalImageData = state.loadedBaseImageData;
@@ -7493,39 +8623,56 @@
       }
 
       // Restore crop region after rotation
-      applyCropRegionToLoadedImage(settings.cropRegion, { refreshDisplay: true });
+      applyCropRegionToLoadedImage(safe.cropRegion, { refreshDisplay: true });
       if (state.originalImageData) {
-        settings.rotationAngle = state.rotationAngle;
-        settings.cropRegion = state.cropRegion ? { ...state.cropRegion } : null;
+        safe.rotationAngle = state.rotationAngle;
+        safe.cropRegion = state.cropRegion ? { ...state.cropRegion } : null;
       }
 
+      if (safe.autoFrameMeta) {
+        const restoredMode = safe.autoFrameMeta.appliedMode
+          || (Boolean(safe.autoFrameMeta.rotateOnly) ? 'rotateOnly' : 'none');
+        state.autoFrame.lastDiagnostics = {
+          confidence: safe.autoFrameMeta.confidence,
+          detectedFormat: safe.autoFrameMeta.detectedFormat || 'unknown',
+          method: safe.autoFrameMeta.method || 'unknown',
+          confidenceLevel: safe.autoFrameMeta.confidenceLevel || inferConfidenceLevel(safe.autoFrameMeta.confidence || 0),
+          rotateOnly: restoredMode === 'rotateOnly',
+          appliedMode: restoredMode,
+          lowConfidenceApplied: Boolean(safe.autoFrameMeta.lowConfidenceApplied)
+        };
+      } else {
+        state.autoFrame.lastDiagnostics = null;
+      }
+      updateAutoFrameDiagnosticsUI();
+
       // Restore film settings
-      state.filmType = sanitizePresetType(settings.filmType || 'color');
-      state.filmPreset = resolvePresetId(settings.filmPreset) || getDefaultPresetForType(state.filmType);
-      state.filmBase = { ...settings.filmBase };
+      state.filmType = sanitizePresetType(safe.filmType || 'color');
+      state.filmPreset = resolvePresetId(safe.filmPreset) || getDefaultPresetForType(state.filmType);
+      state.filmBase = { ...safe.filmBase };
       state.filmBaseSet = true;
 
       // Restore adjustments
-      state.exposure = settings.exposure;
-      state.contrast = settings.contrast;
-      state.highlights = settings.highlights;
-      state.shadows = settings.shadows;
-      state.temperature = settings.temperature;
-      state.tint = settings.tint;
-      state.vibrance = settings.vibrance;
-      state.saturation = settings.saturation;
-      state.cyan = settings.cyan;
-      state.magenta = settings.magenta;
-      state.yellow = settings.yellow;
-      state.wbR = settings.wbR;
-      state.wbG = settings.wbG;
-      state.wbB = settings.wbB;
+      state.exposure = safe.exposure;
+      state.contrast = safe.contrast;
+      state.highlights = safe.highlights;
+      state.shadows = safe.shadows;
+      state.temperature = safe.temperature;
+      state.tint = safe.tint;
+      state.vibrance = safe.vibrance;
+      state.saturation = safe.saturation;
+      state.cyan = safe.cyan;
+      state.magenta = safe.magenta;
+      state.yellow = safe.yellow;
+      state.wbR = safe.wbR;
+      state.wbG = safe.wbG;
+      state.wbB = safe.wbB;
 
       // Restore curves
       state.curvePoints = {
-        r: settings.curvePoints.r.map(p => ({ ...p })),
-        g: settings.curvePoints.g.map(p => ({ ...p })),
-        b: settings.curvePoints.b.map(p => ({ ...p }))
+        r: safe.curvePoints.r.map(p => ({ ...p })),
+        g: safe.curvePoints.g.map(p => ({ ...p })),
+        b: safe.curvePoints.b.map(p => ({ ...p }))
       };
       ['r', 'g', 'b'].forEach(ch => updateCurveFromPoints(ch));
 
@@ -7557,6 +8704,113 @@
       updateAutoFrameButtons();
     }
 
+    function normalizeAutoFrame120Options() {
+      const map = state.autoFrame.allowed120Formats || {};
+      const anyEnabled = AUTO_FRAME_DEFAULT_120_FORMATS.some(fmt => map[fmt] !== false);
+      if (!anyEnabled) {
+        map['6x6'] = true;
+      }
+      AUTO_FRAME_DEFAULT_120_FORMATS.forEach(fmt => {
+        if (typeof map[fmt] !== 'boolean') {
+          map[fmt] = true;
+        }
+      });
+      state.autoFrame.allowed120Formats = map;
+    }
+
+    function updateAutoFrameConfigUI() {
+      const enabledInput = document.getElementById('autoFrameEnabledInput');
+      const autoApplyInput = document.getElementById('autoFrameAutoApplyInput');
+      const formatSelect = document.getElementById('autoFrameFormatSelect');
+      const lowSelect = document.getElementById('autoFrameLowConfidenceSelect');
+      const option645 = document.getElementById('autoFrame120_645');
+      const option66 = document.getElementById('autoFrame120_66');
+      const option67 = document.getElementById('autoFrame120_67');
+      const option69 = document.getElementById('autoFrame120_69');
+      const optionsContainer = document.getElementById('autoFrame120Options');
+      if (!enabledInput || !autoApplyInput || !formatSelect || !lowSelect) return;
+
+      normalizeAutoFrame120Options();
+      enabledInput.checked = Boolean(state.autoFrame.enabled);
+      autoApplyInput.checked = Boolean(state.autoFrame.autoApplyHighConfidence);
+      formatSelect.value = state.autoFrame.formatPreference || 'auto';
+      lowSelect.value = state.autoFrame.lowConfidenceBehavior || 'suggest';
+      if (option645) option645.checked = state.autoFrame.allowed120Formats['6x4.5'] !== false;
+      if (option66) option66.checked = state.autoFrame.allowed120Formats['6x6'] !== false;
+      if (option67) option67.checked = state.autoFrame.allowed120Formats['6x7'] !== false;
+      if (option69) option69.checked = state.autoFrame.allowed120Formats['6x9'] !== false;
+      if (optionsContainer) {
+        optionsContainer.style.opacity = formatSelect.value === '135' ? '0.55' : '1';
+      }
+    }
+
+    function formatDetectedFormatLabel(formatKey) {
+      if (!formatKey || formatKey === 'unknown') return 'unknown';
+      if (formatKey === '135') return '135';
+      if (String(formatKey).startsWith('120-')) return formatKey.replace('120-', '120 ');
+      return String(formatKey);
+    }
+
+    function formatAppliedModeLabel(mode) {
+      const normalized = mode === 'crop' || mode === 'rotateOnly' ? mode : 'none';
+      if (normalized === 'crop') {
+        return getLocalizedText('autoFrameModeCrop', 'Crop');
+      }
+      if (normalized === 'rotateOnly') {
+        return getLocalizedText('autoFrameModeRotateOnly', 'Rotate only');
+      }
+      return getLocalizedText('autoFrameModeNone', 'None');
+    }
+
+    function updateAutoFrameDiagnosticsUI() {
+      const box = document.getElementById('autoFrameDiagnosticsBox');
+      if (!box) return;
+      const diag = state.autoFrame.lastDiagnostics;
+      if (!diag) {
+        box.style.display = 'none';
+        box.textContent = '';
+        return;
+      }
+      const template = i18n[currentLang].autoFrameDiagnostics
+        || 'Detection: method {method} | format {format} | confidence {confidence}';
+      const appliedMode = diag.appliedMode || (diag.rotateOnly ? 'rotateOnly' : 'none');
+      box.textContent = template
+        .replace('{method}', String(diag.method || 'unknown'))
+        .replace('{format}', formatDetectedFormatLabel(diag.detectedFormat))
+        .replace('{confidence}', Number.isFinite(diag.confidence) ? diag.confidence.toFixed(2) : '0.00')
+        .replace('{mode}', formatAppliedModeLabel(appliedMode));
+      box.style.display = 'block';
+    }
+
+    function applyAutoFrameConfigFromUI() {
+      const enabledInput = document.getElementById('autoFrameEnabledInput');
+      const autoApplyInput = document.getElementById('autoFrameAutoApplyInput');
+      const formatSelect = document.getElementById('autoFrameFormatSelect');
+      const lowSelect = document.getElementById('autoFrameLowConfidenceSelect');
+      const option645 = document.getElementById('autoFrame120_645');
+      const option66 = document.getElementById('autoFrame120_66');
+      const option67 = document.getElementById('autoFrame120_67');
+      const option69 = document.getElementById('autoFrame120_69');
+
+      if (enabledInput) state.autoFrame.enabled = Boolean(enabledInput.checked);
+      if (autoApplyInput) state.autoFrame.autoApplyHighConfidence = Boolean(autoApplyInput.checked);
+      if (formatSelect) state.autoFrame.formatPreference = formatSelect.value === '135' || formatSelect.value === '120' ? formatSelect.value : 'auto';
+      if (lowSelect) {
+        const value = lowSelect.value;
+        state.autoFrame.lowConfidenceBehavior = (value === 'rotateOnly' || value === 'ignore') ? value : 'suggest';
+      }
+
+      state.autoFrame.allowed120Formats = {
+        '6x4.5': option645 ? Boolean(option645.checked) : true,
+        '6x6': option66 ? Boolean(option66.checked) : true,
+        '6x7': option67 ? Boolean(option67.checked) : true,
+        '6x9': option69 ? Boolean(option69.checked) : true
+      };
+      normalizeAutoFrame120Options();
+      updateAutoFrameConfigUI();
+      updateAutoFrameButtons();
+    }
+
     function updateAutoFrameButtons() {
       const currentBtn = document.getElementById('autoFrameBtn');
       const selectedBtn = document.getElementById('autoFrameSelectedBtn');
@@ -7566,6 +8820,7 @@
       currentBtn.disabled = !state.originalImageData || !state.autoFrame.enabled || !stepReady;
       const selectedCount = state.fileQueue.filter(f => f.selected).length;
       selectedBtn.disabled = !state.autoFrame.enabled || selectedCount < 1 || !stepReady;
+      updateAutoFrameConfigUI();
     }
 
     function showBatchUI(show, reason) {
@@ -7621,6 +8876,15 @@
       state.rollReference.applyCrop = Boolean(e.target.checked);
       updateRollReferenceUI();
     });
+
+    ['autoFrameEnabledInput', 'autoFrameAutoApplyInput', 'autoFrameFormatSelect', 'autoFrameLowConfidenceSelect',
+      'autoFrame120_645', 'autoFrame120_66', 'autoFrame120_67', 'autoFrame120_69']
+      .forEach(id => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.addEventListener('change', applyAutoFrameConfigFromUI);
+      });
+    updateAutoFrameConfigUI();
 
     function openAddFilesPicker() {
       const input = document.createElement('input');
