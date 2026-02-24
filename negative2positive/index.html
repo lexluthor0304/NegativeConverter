@@ -3448,104 +3448,149 @@
       const baseR = filmBase.r / 255;
       const baseG = filmBase.g / 255;
       const baseB = filmBase.b / 255;
-      const eps = 0.001;
+      const eps = 1e-6;
+      const BINS = 1024;
+      const paperGamma = 3.5;
+      const softClipThreshold = 0.85;
+      const softClipRange = 1 - softClipThreshold; // 0.15
+      const shadowThreshold = 0.15;
+      const wbLowClamp = 0.05;
 
-      const normalized = new Float32Array(data.length);
+      const pixelCount = width * height;
+      const logDensity = new Float32Array(pixelCount * 3);
 
-      for (let i = 0; i < data.length; i += 4) {
-        let r = data[i] / 255;
-        let g = data[i + 1] / 255;
-        let b = data[i + 2] / 255;
+      // Per-channel min/max for histogram binning
+      let minR = Infinity, maxR = -Infinity;
+      let minG = Infinity, maxG = -Infinity;
+      let minB = Infinity, maxB = -Infinity;
 
-        r = r / Math.max(baseR, eps);
-        g = g / Math.max(baseG, eps);
-        b = b / Math.max(baseB, eps);
+      // Pass 1: Dmin division + log₁₀ density transform + track min/max
+      for (let i = 0, j = 0; i < data.length; i += 4, j += 3) {
+        let r = (data[i] / 255) / Math.max(baseR, eps);
+        let g = (data[i + 1] / 255) / Math.max(baseG, eps);
+        let b = (data[i + 2] / 255) / Math.max(baseB, eps);
 
         r = Math.min(r, 2);
         g = Math.min(g, 2);
         b = Math.min(b, 2);
 
-        r = 1 / Math.max(r, eps);
-        g = 1 / Math.max(g, eps);
-        b = 1 / Math.max(b, eps);
+        r = -Math.log10(Math.max(r, eps));
+        g = -Math.log10(Math.max(g, eps));
+        b = -Math.log10(Math.max(b, eps));
 
-        normalized[i] = r;
-        normalized[i + 1] = g;
-        normalized[i + 2] = b;
-        normalized[i + 3] = 1;
+        logDensity[j] = r;
+        logDensity[j + 1] = g;
+        logDensity[j + 2] = b;
+
+        if (r < minR) minR = r; if (r > maxR) maxR = r;
+        if (g < minG) minG = g; if (g > maxG) maxG = g;
+        if (b < minB) minB = b; if (b > maxB) maxB = b;
       }
 
-      // Pass 1: Compute per-pixel luminance stats and build luminance histogram
-      const pixelCount = width * height;
-      let lumMin = Infinity, lumMax = -Infinity;
-      const lumHist = new Float32Array(1000);
+      // Build per-channel histograms from logDensity
+      const histR = new Uint32Array(BINS);
+      const histG = new Uint32Array(BINS);
+      const histB = new Uint32Array(BINS);
+      const rangeR = maxR - minR + eps;
+      const rangeG = maxG - minG + eps;
+      const rangeB = maxB - minB + eps;
+      const binScaleR = (BINS - 1) / rangeR;
+      const binScaleG = (BINS - 1) / rangeG;
+      const binScaleB = (BINS - 1) / rangeB;
 
-      for (let i = 0; i < normalized.length; i += 4) {
-        const lum = 0.2126 * normalized[i] + 0.7152 * normalized[i + 1] + 0.0722 * normalized[i + 2];
-        if (lum < lumMin) lumMin = lum;
-        if (lum > lumMax) lumMax = lum;
+      for (let j = 0; j < logDensity.length; j += 3) {
+        histR[Math.min(BINS - 1, (logDensity[j] - minR) * binScaleR | 0)]++;
+        histG[Math.min(BINS - 1, (logDensity[j + 1] - minG) * binScaleG | 0)]++;
+        histB[Math.min(BINS - 1, (logDensity[j + 2] - minB) * binScaleB | 0)]++;
       }
 
-      const lumRange0 = lumMax - lumMin + 0.001;
-      for (let i = 0; i < normalized.length; i += 4) {
-        const lum = 0.2126 * normalized[i] + 0.7152 * normalized[i + 1] + 0.0722 * normalized[i + 2];
-        const idx = Math.min(999, Math.floor((lum - lumMin) / lumRange0 * 999));
-        lumHist[idx]++;
-      }
-
-      // Find unified 2%/98% luminance percentiles
-      let lumLow, lumHigh;
-      {
+      // Auto calibration: extract percentiles from histograms
+      function percentile(hist, min, range, target) {
         let sum = 0;
-        const lowTarget = pixelCount * 0.02;
-        const highTarget = pixelCount * 0.98;
-        lumLow = lumMin;
-        lumHigh = lumMax;
-        for (let i = 0; i < 1000; i++) {
-          sum += lumHist[i];
-          if (lumLow === lumMin && sum >= lowTarget) lumLow = lumMin + lumRange0 * (i / 999);
-          if (sum >= highTarget) { lumHigh = lumMin + lumRange0 * (i / 999); break; }
+        for (let i = 0; i < BINS; i++) {
+          sum += hist[i];
+          if (sum >= target) return min + range * (i / (BINS - 1));
+        }
+        return min + range;
+      }
+
+      const lowTarget = pixelCount * 0.005;
+      const highTarget = pixelCount * 0.995;
+
+      const offsetR = percentile(histR, minR, rangeR, lowTarget);
+      const offsetG = percentile(histG, minG, rangeG, lowTarget);
+      const offsetB = percentile(histB, minB, rangeB, lowTarget);
+
+      const DmaxR = percentile(histR, minR, rangeR, highTarget);
+      const DmaxG = percentile(histG, minG, rangeG, highTarget);
+      const DmaxB = percentile(histB, minB, rangeB, highTarget);
+
+      // Useful density range per channel → highlight WB + exposure normalization
+      const usefulR = Math.max(DmaxR - offsetR, eps);
+      const usefulG = Math.max(DmaxG - offsetG, eps);
+      const usefulB = Math.max(DmaxB - offsetB, eps);
+      const maxUseful = Math.max(usefulR, usefulG, usefulB);
+
+      const wbHighR = maxUseful / usefulR;
+      const wbHighG = maxUseful / usefulG;
+      const wbHighB = maxUseful / usefulB;
+      const exposureScale = 1 / maxUseful;
+
+      // Pass 2: Shadow white balance scan
+      let shadowSumR = 0, shadowSumG = 0, shadowSumB = 0, shadowCount = 0;
+      for (let j = 0; j < logDensity.length; j += 3) {
+        const cR = (logDensity[j] - offsetR) * wbHighR * exposureScale;
+        const cG = (logDensity[j + 1] - offsetG) * wbHighG * exposureScale;
+        const cB = (logDensity[j + 2] - offsetB) * wbHighB * exposureScale;
+        const avg = (cR + cG + cB) / 3;
+        if (avg >= 0 && avg <= shadowThreshold) {
+          shadowSumR += cR;
+          shadowSumG += cG;
+          shadowSumB += cB;
+          shadowCount++;
         }
       }
 
-      // Pass 2: Compute R/G/B means within the [lumLow, lumHigh] range for Gray World correction
-      let rSum = 0, gSum = 0, bSum = 0, validCount = 0;
-      for (let i = 0; i < normalized.length; i += 4) {
-        const lum = 0.2126 * normalized[i] + 0.7152 * normalized[i + 1] + 0.0722 * normalized[i + 2];
-        if (lum >= lumLow && lum <= lumHigh) {
-          rSum += normalized[i];
-          gSum += normalized[i + 1];
-          bSum += normalized[i + 2];
-          validCount++;
+      let wbLowR = 0, wbLowG = 0, wbLowB = 0;
+      if (shadowCount > 100) {
+        const sAvgR = shadowSumR / shadowCount;
+        const sAvgG = shadowSumG / shadowCount;
+        const sAvgB = shadowSumB / shadowCount;
+        const sMean = (sAvgR + sAvgG + sAvgB) / 3;
+        wbLowR = Math.max(-wbLowClamp, Math.min(wbLowClamp, sMean - sAvgR));
+        wbLowG = Math.max(-wbLowClamp, Math.min(wbLowClamp, sMean - sAvgG));
+        wbLowB = Math.max(-wbLowClamp, Math.min(wbLowClamp, sMean - sAvgB));
+      }
+
+      // Pass 3: Apply full correction + paper gamma + soft clip → Uint8
+      for (let i = 0, j = 0; i < data.length; i += 4, j += 3) {
+        let r = (logDensity[j] - offsetR) * wbHighR * exposureScale + wbLowR;
+        let g = (logDensity[j + 1] - offsetG) * wbHighG * exposureScale + wbLowG;
+        let b = (logDensity[j + 2] - offsetB) * wbHighB * exposureScale + wbLowB;
+
+        r = Math.max(0, Math.min(1, r));
+        g = Math.max(0, Math.min(1, g));
+        b = Math.max(0, Math.min(1, b));
+
+        // Paper simulation: density → transmission → paper gamma
+        r = Math.pow(1 - r, paperGamma);
+        g = Math.pow(1 - g, paperGamma);
+        b = Math.pow(1 - b, paperGamma);
+
+        // Soft clip highlights
+        if (r > softClipThreshold) {
+          r = softClipThreshold + softClipRange * (1 - Math.exp(-(r - softClipThreshold) / softClipRange));
         }
-      }
+        if (g > softClipThreshold) {
+          g = softClipThreshold + softClipRange * (1 - Math.exp(-(g - softClipThreshold) / softClipRange));
+        }
+        if (b > softClipThreshold) {
+          b = softClipThreshold + softClipRange * (1 - Math.exp(-(b - softClipThreshold) / softClipRange));
+        }
 
-      let corrR = 1, corrG = 1, corrB = 1;
-      if (validCount > 0) {
-        const rMean = rSum / validCount;
-        const gMean = gSum / validCount;
-        const bMean = bSum / validCount;
-        const globalMean = (rMean + gMean + bMean) / 3;
-        corrR = Math.max(0.85, Math.min(1.15, globalMean / Math.max(rMean, 0.001)));
-        corrG = Math.max(0.85, Math.min(1.15, globalMean / Math.max(gMean, 0.001)));
-        corrB = Math.max(0.85, Math.min(1.15, globalMean / Math.max(bMean, 0.001)));
-      }
-
-      // Pass 3: Unified luminance stretch + bounded Gray World correction + gamma
-      const lumRange = lumHigh - lumLow + 0.001;
-      const gamma = 1.1;
-      for (let i = 0; i < normalized.length; i += 4) {
-        let r = (normalized[i] - lumLow) / lumRange * corrR;
-        let g = (normalized[i + 1] - lumLow) / lumRange * corrG;
-        let b = (normalized[i + 2] - lumLow) / lumRange * corrB;
-
-        r = Math.pow(Math.max(0, Math.min(1, r)), gamma);
-        g = Math.pow(Math.max(0, Math.min(1, g)), gamma);
-        b = Math.pow(Math.max(0, Math.min(1, b)), gamma);
-
-        outData[i] = Math.round(r * 255);
-        outData[i + 1] = Math.round(g * 255);
-        outData[i + 2] = Math.round(b * 255);
+        outData[i] = r * 255 + 0.5 | 0;
+        outData[i + 1] = g * 255 + 0.5 | 0;
+        outData[i + 2] = b * 255 + 0.5 | 0;
         outData[i + 3] = 255;
       }
 
@@ -3569,7 +3614,7 @@
         // Skip highly saturated pixels
         const maxC = Math.max(r, g, b);
         const minC = Math.min(r, g, b);
-        if (maxC > 0 && (maxC - minC) / maxC > 0.65) continue;
+        if (maxC > 0 && (maxC - minC) / maxC > 0.50) continue;
 
         rSum += r;
         gSum += g;
@@ -3594,9 +3639,9 @@
       wbG = 1;
       wbB /= norm;
 
-      // Clamp to reasonable range
-      wbR = Math.max(0.5, Math.min(2.0, wbR));
-      wbB = Math.max(0.5, Math.min(2.0, wbB));
+      // Clamp to reasonable range (tighter: Cineon pipeline handles most WB internally)
+      wbR = Math.max(0.7, Math.min(1.4, wbR));
+      wbB = Math.max(0.7, Math.min(1.4, wbB));
 
       return { wbR, wbG, wbB };
     }
