@@ -3369,6 +3369,35 @@
       };
     }
 
+    function sampleGrayPoint(imageData, x, y) {
+      const { width, height, data } = imageData;
+      const radius = Math.max(8, Math.min(25, Math.round(Math.min(width, height) * 0.005)));
+      const startX = Math.max(0, x - radius);
+      const endX = Math.min(width - 1, x + radius);
+      const startY = Math.max(0, y - radius);
+      const endY = Math.min(height - 1, y + radius);
+
+      const samples = [];
+      for (let py = startY; py <= endY; py++) {
+        for (let px = startX; px <= endX; px++) {
+          const idx = (py * width + px) * 4;
+          const r = data[idx], g = data[idx + 1], b = data[idx + 2];
+          const lum = r * 0.299 + g * 0.587 + b * 0.114;
+          samples.push({ r, g, b, lum });
+        }
+      }
+
+      // 10% trimmed mean: sort by luminance, discard top/bottom 10%
+      samples.sort((a, b) => a.lum - b.lum);
+      const trimCount = Math.max(1, Math.floor(samples.length * 0.1));
+      const trimmed = samples.slice(trimCount, samples.length - trimCount);
+
+      let rSum = 0, gSum = 0, bSum = 0;
+      for (const s of trimmed) { rSum += s.r; gSum += s.g; bSum += s.b; }
+      const n = trimmed.length || 1;
+      return { r: rSum / n, g: gSum / n, b: bSum / n };
+    }
+
     function autoDetectFilmBase(imageData) {
       const { width, height, data } = imageData;
       const edgeSize = Math.min(50, Math.floor(Math.min(width, height) * 0.05));
@@ -3391,6 +3420,22 @@
         candidates.push({ ...sample, brightness });
       }
 
+      // C-41 orange mask validation: R > G > B with characteristic ratios
+      const c41Candidates = candidates.filter(s => {
+        if (s.r <= s.g || s.g <= s.b) return false;
+        const rg = s.r / Math.max(s.g, 1);
+        const gb = s.g / Math.max(s.b, 1);
+        return rg >= 1.15 && rg <= 2.5 && gb >= 1.1 && gb <= 2.5;
+      });
+
+      if (c41Candidates.length > 0) {
+        // Use median by brightness for robustness
+        c41Candidates.sort((a, b) => a.brightness - b.brightness);
+        const mid = c41Candidates[Math.floor(c41Candidates.length / 2)];
+        return { r: mid.r, g: mid.g, b: mid.b };
+      }
+
+      // Fallback for B&W / positive / tightly cropped: take brightest
       candidates.sort((a, b) => b.brightness - a.brightness);
       return { r: candidates[0].r, g: candidates[0].g, b: candidates[0].b };
     }
@@ -3430,55 +3475,70 @@
         normalized[i + 3] = 1;
       }
 
-      let rMin = Infinity, rMax = -Infinity;
-      let gMin = Infinity, gMax = -Infinity;
-      let bMin = Infinity, bMax = -Infinity;
-
-      for (let i = 0; i < normalized.length; i += 4) {
-        rMin = Math.min(rMin, normalized[i]);
-        rMax = Math.max(rMax, normalized[i]);
-        gMin = Math.min(gMin, normalized[i + 1]);
-        gMax = Math.max(gMax, normalized[i + 1]);
-        bMin = Math.min(bMin, normalized[i + 2]);
-        bMax = Math.max(bMax, normalized[i + 2]);
-      }
-
-      const rHist = new Float32Array(1000);
-      const gHist = new Float32Array(1000);
-      const bHist = new Float32Array(1000);
-
-      for (let i = 0; i < normalized.length; i += 4) {
-        const rIdx = Math.min(999, Math.floor((normalized[i] - rMin) / (rMax - rMin + 0.001) * 999));
-        const gIdx = Math.min(999, Math.floor((normalized[i + 1] - gMin) / (gMax - gMin + 0.001) * 999));
-        const bIdx = Math.min(999, Math.floor((normalized[i + 2] - bMin) / (bMax - bMin + 0.001) * 999));
-        rHist[rIdx]++;
-        gHist[gIdx]++;
-        bHist[bIdx]++;
-      }
-
+      // Pass 1: Compute per-pixel luminance stats and build luminance histogram
       const pixelCount = width * height;
-      function findPercentile(hist, target) {
-        let sum = 0;
-        for (let i = 0; i < hist.length; i++) {
-          sum += hist[i];
-          if (sum >= target) return i / 999;
-        }
-        return 1;
-      }
-
-      const rLow = rMin + (rMax - rMin) * findPercentile(rHist, pixelCount * 0.02);
-      const rHigh = rMin + (rMax - rMin) * findPercentile(rHist, pixelCount * 0.98);
-      const gLow = gMin + (gMax - gMin) * findPercentile(gHist, pixelCount * 0.02);
-      const gHigh = gMin + (gMax - gMin) * findPercentile(gHist, pixelCount * 0.98);
-      const bLow = bMin + (bMax - bMin) * findPercentile(bHist, pixelCount * 0.02);
-      const bHigh = bMin + (bMax - bMin) * findPercentile(bHist, pixelCount * 0.98);
+      let lumMin = Infinity, lumMax = -Infinity;
+      const lumHist = new Float32Array(1000);
 
       for (let i = 0; i < normalized.length; i += 4) {
-        let r = (normalized[i] - rLow) / (rHigh - rLow + 0.001);
-        let g = (normalized[i + 1] - gLow) / (gHigh - gLow + 0.001);
-        let b = (normalized[i + 2] - bLow) / (bHigh - bLow + 0.001);
+        const lum = 0.2126 * normalized[i] + 0.7152 * normalized[i + 1] + 0.0722 * normalized[i + 2];
+        if (lum < lumMin) lumMin = lum;
+        if (lum > lumMax) lumMax = lum;
+      }
 
-        const gamma = 1.1;
+      const lumRange0 = lumMax - lumMin + 0.001;
+      for (let i = 0; i < normalized.length; i += 4) {
+        const lum = 0.2126 * normalized[i] + 0.7152 * normalized[i + 1] + 0.0722 * normalized[i + 2];
+        const idx = Math.min(999, Math.floor((lum - lumMin) / lumRange0 * 999));
+        lumHist[idx]++;
+      }
+
+      // Find unified 2%/98% luminance percentiles
+      let lumLow, lumHigh;
+      {
+        let sum = 0;
+        const lowTarget = pixelCount * 0.02;
+        const highTarget = pixelCount * 0.98;
+        lumLow = lumMin;
+        lumHigh = lumMax;
+        for (let i = 0; i < 1000; i++) {
+          sum += lumHist[i];
+          if (lumLow === lumMin && sum >= lowTarget) lumLow = lumMin + lumRange0 * (i / 999);
+          if (sum >= highTarget) { lumHigh = lumMin + lumRange0 * (i / 999); break; }
+        }
+      }
+
+      // Pass 2: Compute R/G/B means within the [lumLow, lumHigh] range for Gray World correction
+      let rSum = 0, gSum = 0, bSum = 0, validCount = 0;
+      for (let i = 0; i < normalized.length; i += 4) {
+        const lum = 0.2126 * normalized[i] + 0.7152 * normalized[i + 1] + 0.0722 * normalized[i + 2];
+        if (lum >= lumLow && lum <= lumHigh) {
+          rSum += normalized[i];
+          gSum += normalized[i + 1];
+          bSum += normalized[i + 2];
+          validCount++;
+        }
+      }
+
+      let corrR = 1, corrG = 1, corrB = 1;
+      if (validCount > 0) {
+        const rMean = rSum / validCount;
+        const gMean = gSum / validCount;
+        const bMean = bSum / validCount;
+        const globalMean = (rMean + gMean + bMean) / 3;
+        corrR = Math.max(0.85, Math.min(1.15, globalMean / Math.max(rMean, 0.001)));
+        corrG = Math.max(0.85, Math.min(1.15, globalMean / Math.max(gMean, 0.001)));
+        corrB = Math.max(0.85, Math.min(1.15, globalMean / Math.max(bMean, 0.001)));
+      }
+
+      // Pass 3: Unified luminance stretch + bounded Gray World correction + gamma
+      const lumRange = lumHigh - lumLow + 0.001;
+      const gamma = 1.1;
+      for (let i = 0; i < normalized.length; i += 4) {
+        let r = (normalized[i] - lumLow) / lumRange * corrR;
+        let g = (normalized[i + 1] - lumLow) / lumRange * corrG;
+        let b = (normalized[i + 2] - lumLow) / lumRange * corrB;
+
         r = Math.pow(Math.max(0, Math.min(1, r)), gamma);
         g = Math.pow(Math.max(0, Math.min(1, g)), gamma);
         b = Math.pow(Math.max(0, Math.min(1, b)), gamma);
@@ -3490,6 +3550,55 @@
       }
 
       return output;
+    }
+
+    function computeAutoWhiteBalance(imageData) {
+      const { width, height, data } = imageData;
+      const pixelCount = width * height;
+      const stride = Math.max(1, Math.floor(pixelCount / 100000));
+
+      let rSum = 0, gSum = 0, bSum = 0, count = 0;
+
+      for (let i = 0; i < data.length; i += 4 * stride) {
+        const r = data[i], g = data[i + 1], b = data[i + 2];
+
+        // Skip very dark and very bright pixels
+        if (r < 15 && g < 15 && b < 15) continue;
+        if (r > 240 && g > 240 && b > 240) continue;
+
+        // Skip highly saturated pixels
+        const maxC = Math.max(r, g, b);
+        const minC = Math.min(r, g, b);
+        if (maxC > 0 && (maxC - minC) / maxC > 0.65) continue;
+
+        rSum += r;
+        gSum += g;
+        bSum += b;
+        count++;
+      }
+
+      if (count < 100) return { wbR: 1, wbG: 1, wbB: 1 };
+
+      const rMean = rSum / count;
+      const gMean = gSum / count;
+      const bMean = bSum / count;
+      const globalMean = (rMean + gMean + bMean) / 3;
+
+      let wbR = globalMean / Math.max(rMean, 0.001);
+      let wbG = globalMean / Math.max(gMean, 0.001);
+      let wbB = globalMean / Math.max(bMean, 0.001);
+
+      // Normalize G=1
+      const norm = wbG;
+      wbR /= norm;
+      wbG = 1;
+      wbB /= norm;
+
+      // Clamp to reasonable range
+      wbR = Math.max(0.5, Math.min(2.0, wbR));
+      wbB = Math.max(0.5, Math.min(2.0, wbB));
+
+      return { wbR, wbG, wbB };
     }
 
     function convertBWNegative(imageData, options = {}) {
@@ -3851,6 +3960,33 @@
       }
     }
 
+    // Non-linear temperature curve: [sliderValue(-100..100), rMult, bMult]
+    const TEMP_CURVE = [
+      [-100, 0.70, 1.40],
+      [ -50, 0.82, 1.22],
+      [   0, 1.00, 1.00],
+      [  50, 1.20, 0.80],
+      [ 100, 1.35, 0.65]
+    ];
+
+    function interpTempCurve(sliderValue) {
+      const v = Math.max(-100, Math.min(100, sliderValue));
+      for (let i = 0; i < TEMP_CURVE.length - 1; i++) {
+        const [x0, r0, b0] = TEMP_CURVE[i];
+        const [x1, r1, b1] = TEMP_CURVE[i + 1];
+        if (v >= x0 && v <= x1) {
+          const t = (v - x0) / (x1 - x0);
+          return {
+            tempRMult: r0 + (r1 - r0) * t,
+            tempBMult: b0 + (b1 - b0) * t
+          };
+        }
+      }
+      // Edge case: return last point
+      const last = TEMP_CURVE[TEMP_CURVE.length - 1];
+      return { tempRMult: last[1], tempBMult: last[2] };
+    }
+
     function applyAdjustmentsToBuffer(imageData, settings, output, quality = 'full') {
       const { data } = imageData;
       const outData = output.data;
@@ -3865,7 +4001,6 @@
 
       const exposureMult = Math.pow(2, safeSettings.exposure);
       const contrastFactor = 1 + ((safeSettings.contrast + (presetChars.contrast || 0) * 100) / 100);
-      const tempFactor = (safeSettings.temperature + (presetChars.warmth || 0) * 100) / 100;
       const tintFactor = safeSettings.tint / 100;
       const satFactor = 1 + ((safeSettings.saturation + (presetChars.saturation || 0) * 100) / 100);
       const vibFactor = safeSettings.vibrance / 100;
@@ -3876,8 +4011,8 @@
       const gMult = safeSettings.wbG * exposureMult;
       const bMult = safeSettings.wbB * exposureMult;
 
-      const tempRMult = 1 + tempFactor * 0.3;
-      const tempBMult = 1 - tempFactor * 0.3;
+      const tempSlider = safeSettings.temperature + (presetChars.warmth || 0) * 100;
+      const { tempRMult, tempBMult } = interpTempCurve(tempSlider);
       const tintGMult = 1 + tintFactor * 0.3;
 
       const cmyRShift = safeSettings.cyan * 2.55;
@@ -3891,7 +4026,7 @@
       const doContrast = contrastFactor !== 1;
       const doHighlights = highlightsFactor !== 0;
       const doShadows = shadowsFactor !== 0;
-      const doTempTint = tempFactor !== 0 || tintFactor !== 0;
+      const doTempTint = tempRMult !== 1 || tempBMult !== 1 || tintGMult !== 1;
       const doHsl = satFactor !== 1 || vibFactor !== 0;
       const doCMY = cmyRShift !== 0 || cmyGShift !== 0 || cmyBShift !== 0;
 
@@ -4718,8 +4853,9 @@
         uContrast: null,
         uHighlights: null,
         uShadows: null,
-        uTemp: null,
-        uTint: null,
+        uTempRMult: null,
+        uTempBMult: null,
+        uTintGMult: null,
         uSat: null,
         uVib: null,
         uCmy: null
@@ -4811,8 +4947,9 @@
         uniform float u_contrast;
         uniform float u_highlights;
         uniform float u_shadows;
-        uniform float u_temp;
-        uniform float u_tint;
+        uniform float u_tempRMult;
+        uniform float u_tempBMult;
+        uniform float u_tintGMult;
         uniform float u_sat;
         uniform float u_vib;
         uniform vec3 u_cmy;
@@ -4893,9 +5030,9 @@
             c *= mult;
           }
 
-          c.r *= (1.0 + u_temp * 0.3);
-          c.b *= (1.0 - u_temp * 0.3);
-          c.g *= (1.0 + u_tint * 0.3);
+          c.r *= u_tempRMult;
+          c.b *= u_tempBMult;
+          c.g *= u_tintGMult;
           c = clamp(c, 0.0, 1.0);
 
           if (u_sat != 1.0 || u_vib != 0.0) {
@@ -4986,8 +5123,9 @@
       webglState.locations.uContrast = gl.getUniformLocation(webglState.program, 'u_contrast');
       webglState.locations.uHighlights = gl.getUniformLocation(webglState.program, 'u_highlights');
       webglState.locations.uShadows = gl.getUniformLocation(webglState.program, 'u_shadows');
-      webglState.locations.uTemp = gl.getUniformLocation(webglState.program, 'u_temp');
-      webglState.locations.uTint = gl.getUniformLocation(webglState.program, 'u_tint');
+      webglState.locations.uTempRMult = gl.getUniformLocation(webglState.program, 'u_tempRMult');
+      webglState.locations.uTempBMult = gl.getUniformLocation(webglState.program, 'u_tempBMult');
+      webglState.locations.uTintGMult = gl.getUniformLocation(webglState.program, 'u_tintGMult');
       webglState.locations.uSat = gl.getUniformLocation(webglState.program, 'u_sat');
       webglState.locations.uVib = gl.getUniformLocation(webglState.program, 'u_vib');
       webglState.locations.uCmy = gl.getUniformLocation(webglState.program, 'u_cmy');
@@ -5142,8 +5280,10 @@
       const contrast = 1 + ((safe.contrast + (presetChars.contrast || 0) * 100) / 100);
       const highlights = safe.highlights / 100;
       const shadows = safe.shadows / 100;
-      const tempFactor = (safe.temperature + (presetChars.warmth || 0) * 100) / 100;
+      const tempSlider = safe.temperature + (presetChars.warmth || 0) * 100;
+      const { tempRMult, tempBMult } = interpTempCurve(tempSlider);
       const tintFactor = safe.tint / 100;
+      const tintGMult = 1 + tintFactor * 0.3;
       const satFactor = 1 + ((safe.saturation + (presetChars.saturation || 0) * 100) / 100);
       const vibFactor = safe.vibrance / 100;
 
@@ -5152,8 +5292,9 @@
       gl.uniform1f(webglState.locations.uContrast, contrast);
       gl.uniform1f(webglState.locations.uHighlights, highlights);
       gl.uniform1f(webglState.locations.uShadows, shadows);
-      gl.uniform1f(webglState.locations.uTemp, tempFactor);
-      gl.uniform1f(webglState.locations.uTint, tintFactor);
+      gl.uniform1f(webglState.locations.uTempRMult, tempRMult);
+      gl.uniform1f(webglState.locations.uTempBMult, tempBMult);
+      gl.uniform1f(webglState.locations.uTintGMult, tintGMult);
       gl.uniform1f(webglState.locations.uSat, satFactor);
       gl.uniform1f(webglState.locations.uVib, vibFactor);
       gl.uniform3f(webglState.locations.uCmy, safe.cyan / 100, safe.magenta / 100, safe.yellow / 100);
@@ -5351,6 +5492,18 @@
       }
 
       state.processedImageData = processed;
+
+      // Auto white balance for color negatives
+      const isColor = state.filmType !== 'positive' && presetType !== 'positive' &&
+                      state.filmType !== 'bw' && presetType !== 'bw';
+      if (isColor) {
+        const wb = computeAutoWhiteBalance(processed);
+        state.wbR = wb.wbR;
+        state.wbG = wb.wbG;
+        state.wbB = wb.wbB;
+        updateWBSliders();
+      }
+
       state.previewSourceImageData = buildPreviewSourceImageData(processed);
       state.histogramSourceImageData = buildHistogramSourceImageData(state.previewSourceImageData || processed);
       state.webglSourceImageData = buildWebglSourceImageData(processed);
@@ -6068,8 +6221,8 @@
         const x = Math.floor(relX * state.processedImageData.width);
         const y = Math.floor(relY * state.processedImageData.height);
 
-        const sample = sampleFilmBase(state.processedImageData, x, y, 5);
-        const gray = (sample.r + sample.g + sample.b) / 3;
+        const sample = sampleGrayPoint(state.processedImageData, x, y);
+        const gray = sample.r * 0.299 + sample.g * 0.587 + sample.b * 0.114;
 
         // Calculate multipliers to make sampled point neutral
         state.wbR = sample.r > 0 ? gray / sample.r : 1;
@@ -7801,9 +7954,17 @@
       state.cyan = 0;
       state.magenta = 0;
       state.yellow = 0;
-      state.wbR = 1;
-      state.wbG = 1;
-      state.wbB = 1;
+      // Re-run auto WB for color negatives; fallback to neutral for others
+      if (state.processedImageData && state.filmType !== 'bw' && state.filmType !== 'positive') {
+        const wb = computeAutoWhiteBalance(state.processedImageData);
+        state.wbR = wb.wbR;
+        state.wbG = wb.wbG;
+        state.wbB = wb.wbB;
+      } else {
+        state.wbR = 1;
+        state.wbG = 1;
+        state.wbB = 1;
+      }
 
       updateSlidersFromState();
       initCurves(true);
@@ -8428,6 +8589,14 @@
         });
       } else {
         processed = convertColorNegative(workingData, settings.filmBase);
+
+        // Auto WB for batch: if WB was not manually set (all defaults), compute it
+        if (settings.wbR === 1 && settings.wbG === 1 && settings.wbB === 1) {
+          const wb = computeAutoWhiteBalance(processed);
+          settings.wbR = wb.wbR;
+          settings.wbG = wb.wbG;
+          settings.wbB = wb.wbB;
+        }
       }
 
       // Apply adjustments
