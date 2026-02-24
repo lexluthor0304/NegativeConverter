@@ -3396,96 +3396,199 @@
     }
 
     function convertColorNegative(imageData, filmBase) {
+      // negadoctor (Kodak Cineon density) pipeline
+      // Ported from darktable src/iop/negadoctor.c
       const { width, height, data } = imageData;
       const output = new ImageData(new Uint8ClampedArray(data.length), width, height);
       const outData = output.data;
+      const pixelCount = width * height;
+      const eps = 1e-6;
+      const BINS = 4096;
 
-      const baseR = filmBase.r / 255;
-      const baseG = filmBase.g / 255;
-      const baseB = filmBase.b / 255;
-      const eps = 0.001;
+      // --- Dmin from film base ---
+      const Dmin = [filmBase.r / 255, filmBase.g / 255, filmBase.b / 255];
+      for (let c = 0; c < 3; c++) Dmin[c] = Math.max(Dmin[c], eps);
 
-      const normalized = new Float32Array(data.length);
+      // --- Pass 1: Build RGB + luminance histograms from raw pixels ---
+      const histR = new Uint32Array(BINS);
+      const histG = new Uint32Array(BINS);
+      const histB = new Uint32Array(BINS);
+      const histLum = new Uint32Array(BINS);
 
       for (let i = 0; i < data.length; i += 4) {
-        let r = data[i] / 255;
-        let g = data[i + 1] / 255;
-        let b = data[i + 2] / 255;
-
-        r = r / Math.max(baseR, eps);
-        g = g / Math.max(baseG, eps);
-        b = b / Math.max(baseB, eps);
-
-        r = Math.min(r, 2);
-        g = Math.min(g, 2);
-        b = Math.min(b, 2);
-
-        r = 1 / Math.max(r, eps);
-        g = 1 / Math.max(g, eps);
-        b = 1 / Math.max(b, eps);
-
-        normalized[i] = r;
-        normalized[i + 1] = g;
-        normalized[i + 2] = b;
-        normalized[i + 3] = 1;
+        const r = data[i], g = data[i + 1], b = data[i + 2];
+        histR[Math.min(BINS - 1, r * (BINS - 1) / 255 | 0)]++;
+        histG[Math.min(BINS - 1, g * (BINS - 1) / 255 | 0)]++;
+        histB[Math.min(BINS - 1, b * (BINS - 1) / 255 | 0)]++;
+        const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+        histLum[Math.min(BINS - 1, lum * (BINS - 1) / 255 | 0)]++;
       }
 
-      let rMin = Infinity, rMax = -Infinity;
-      let gMin = Infinity, gMax = -Infinity;
-      let bMin = Infinity, bMax = -Infinity;
-
-      for (let i = 0; i < normalized.length; i += 4) {
-        rMin = Math.min(rMin, normalized[i]);
-        rMax = Math.max(rMax, normalized[i]);
-        gMin = Math.min(gMin, normalized[i + 1]);
-        gMax = Math.max(gMax, normalized[i + 1]);
-        bMin = Math.min(bMin, normalized[i + 2]);
-        bMax = Math.max(bMax, normalized[i + 2]);
-      }
-
-      const rHist = new Float32Array(1000);
-      const gHist = new Float32Array(1000);
-      const bHist = new Float32Array(1000);
-
-      for (let i = 0; i < normalized.length; i += 4) {
-        const rIdx = Math.min(999, Math.floor((normalized[i] - rMin) / (rMax - rMin + 0.001) * 999));
-        const gIdx = Math.min(999, Math.floor((normalized[i + 1] - gMin) / (gMax - gMin + 0.001) * 999));
-        const bIdx = Math.min(999, Math.floor((normalized[i + 2] - bMin) / (bMax - bMin + 0.001) * 999));
-        rHist[rIdx]++;
-        gHist[gIdx]++;
-        bHist[bIdx]++;
-      }
-
-      const pixelCount = width * height;
-      function findPercentile(hist, target) {
+      function percentileFromHist(hist, fraction) {
+        const target = pixelCount * fraction;
         let sum = 0;
-        for (let i = 0; i < hist.length; i++) {
+        for (let i = 0; i < BINS; i++) {
           sum += hist[i];
-          if (sum >= target) return i / 999;
+          if (sum >= target) return (i / (BINS - 1)) * 255;
         }
-        return 1;
+        return 255;
       }
 
-      const rLow = rMin + (rMax - rMin) * findPercentile(rHist, pixelCount * 0.02);
-      const rHigh = rMin + (rMax - rMin) * findPercentile(rHist, pixelCount * 0.98);
-      const gLow = gMin + (gMax - gMin) * findPercentile(gHist, pixelCount * 0.02);
-      const gHigh = gMin + (gMax - gMin) * findPercentile(gHist, pixelCount * 0.98);
-      const bLow = bMin + (bMax - bMin) * findPercentile(bHist, pixelCount * 0.02);
-      const bHigh = bMin + (bMax - bMin) * findPercentile(bHist, pixelCount * 0.98);
+      // dark[c]: 0.5th percentile (dense film = print highlights)
+      // bright[c]: 99.5th percentile (thin film = print shadows)
+      const dark = [
+        percentileFromHist(histR, 0.005) / 255,
+        percentileFromHist(histG, 0.005) / 255,
+        percentileFromHist(histB, 0.005) / 255
+      ];
+      const bright = [
+        percentileFromHist(histR, 0.995) / 255,
+        percentileFromHist(histG, 0.995) / 255,
+        percentileFromHist(histB, 0.995) / 255
+      ];
+      const lumLow = percentileFromHist(histLum, 0.20);
+      const lumHigh = percentileFromHist(histLum, 0.80);
 
-      for (let i = 0; i < normalized.length; i += 4) {
-        let r = (normalized[i] - rLow) / (rHigh - rLow + 0.001);
-        let g = (normalized[i + 1] - gLow) / (gHigh - gLow + 0.001);
-        let b = (normalized[i + 2] - bLow) / (bHigh - bLow + 0.001);
+      // --- Pass 2: Shadow / highlight region means ---
+      let shadowSum = [0, 0, 0], shadowCount = 0;
+      let highlightSum = [0, 0, 0], highlightCount = 0;
 
-        const gamma = 1.1;
-        r = Math.pow(Math.max(0, Math.min(1, r)), gamma);
-        g = Math.pow(Math.max(0, Math.min(1, g)), gamma);
-        b = Math.pow(Math.max(0, Math.min(1, b)), gamma);
+      for (let i = 0; i < data.length; i += 4) {
+        const r = data[i], g = data[i + 1], b = data[i + 2];
+        const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+        if (lum <= lumLow) {
+          shadowSum[0] += r; shadowSum[1] += g; shadowSum[2] += b;
+          shadowCount++;
+        }
+        if (lum >= lumHigh) {
+          highlightSum[0] += r; highlightSum[1] += g; highlightSum[2] += b;
+          highlightCount++;
+        }
+      }
 
-        outData[i] = Math.round(r * 255);
-        outData[i + 1] = Math.round(g * 255);
-        outData[i + 2] = Math.round(b * 255);
+      const shadowMean = [0, 0, 0];
+      const highlightMean = [0, 0, 0];
+      for (let c = 0; c < 3; c++) {
+        shadowMean[c] = shadowCount > 0 ? (shadowSum[c] / shadowCount) / 255 : dark[c];
+        highlightMean[c] = highlightCount > 0 ? (highlightSum[c] / highlightCount) / 255 : bright[c];
+      }
+
+      // --- Auto-calibrate negadoctor parameters ---
+
+      // 2. D_max (apply_auto_Dmax)
+      let D_max = -Infinity;
+      for (let c = 0; c < 3; c++) {
+        D_max = Math.max(D_max, Math.log10(Dmin[c] / Math.max(dark[c], eps)));
+      }
+      D_max = Math.max(D_max, 0.01);
+
+      // 3. offset (apply_auto_offset)
+      let offset = Infinity;
+      for (let c = 0; c < 3; c++) {
+        offset = Math.min(offset, Math.log10(Dmin[c] / Math.max(bright[c], eps)) / D_max);
+      }
+
+      // 4. wb_low (apply_auto_WB_low) — shadow white balance
+      const wbLowVal = [0, 0, 0];
+      for (let c = 0; c < 3; c++) {
+        wbLowVal[c] = Math.log10(Dmin[c] / Math.max(shadowMean[c], eps)) / D_max;
+      }
+      const wbLowMin = Math.min(wbLowVal[0], wbLowVal[1], wbLowVal[2]);
+      const wb_low = [0, 0, 0];
+      for (let c = 0; c < 3; c++) {
+        wb_low[c] = wbLowMin / Math.max(wbLowVal[c], eps);
+      }
+
+      // 5. wb_high (apply_auto_WB_high) — highlight white balance
+      const wbHighVal = [0, 0, 0];
+      for (let c = 0; c < 3; c++) {
+        const denom = offset * wb_low[c] - Math.log10(Dmin[c] / Math.max(highlightMean[c], eps)) / D_max;
+        wbHighVal[c] = Math.abs(-1 / Math.max(Math.abs(denom), eps));
+      }
+      const wbHighMin = Math.min(wbHighVal[0], wbHighVal[1], wbHighVal[2]);
+      const wb_high = [0, 0, 0];
+      for (let c = 0; c < 3; c++) {
+        wb_high[c] = wbHighVal[c] / Math.max(wbHighMin, eps);
+      }
+
+      // Sanity check: fallback wb to [1,1,1] if NaN/Inf
+      for (let c = 0; c < 3; c++) {
+        if (!isFinite(wb_low[c]) || isNaN(wb_low[c])) wb_low[c] = 1;
+        if (!isFinite(wb_high[c]) || isNaN(wb_high[c])) wb_high[c] = 1;
+      }
+
+      // 6. black (apply_auto_black)
+      let black = -Infinity;
+      for (let c = 0; c < 3; c++) {
+        let v = -Math.log10(Dmin[c] / Math.max(bright[c], eps));
+        v *= wb_high[c] / D_max;
+        v += wb_low[c] * offset * wb_high[c];
+        v = 0.1 - (1 - Math.pow(10, v));
+        black = Math.max(black, v);
+      }
+
+      // 7. exposure (apply_auto_exposure)
+      let exposure = Infinity;
+      for (let c = 0; c < 3; c++) {
+        let v = -Math.log10(Dmin[c] / Math.max(dark[c], eps));
+        v *= wb_high[c] / D_max;
+        v += wb_low[c] * offset;
+        const denom = 1 - Math.pow(10, v) + black;
+        v = 0.96 / Math.max(denom, eps);
+        exposure = Math.min(exposure, v);
+      }
+
+      // Paper parameters (negadoctor defaults)
+      const gamma = 4.0;
+      const soft_clip = 0.75;
+      const soft_clip_comp = 1 - soft_clip;
+
+      // commit_params precomputation
+      const d_wb_high = [0, 0, 0];
+      const d_offset = [0, 0, 0];
+      for (let c = 0; c < 3; c++) {
+        d_wb_high[c] = wb_high[c] / D_max;
+        d_offset[c] = wb_high[c] * offset * wb_low[c];
+      }
+      const d_black = -exposure * (1 + black);
+
+      // --- Pass 3: Apply negadoctor pixel pipeline → Uint8 output ---
+      const log10 = Math.log10;
+      const pow = Math.pow;
+      const exp = Math.exp;
+      const max = Math.max;
+
+      for (let i = 0; i < data.length; i += 4) {
+        for (let c = 0; c < 3; c++) {
+          // Step 1: Clamp
+          const clamped = max(data[i + c] / 255, eps);
+
+          // Step 2: Density ratio (Dmin as reference)
+          const density = Dmin[c] / clamped;
+
+          // Step 3: Log density
+          const log_density = -log10(density);
+
+          // Step 4: White balance + offset correction (log space)
+          const corrected = d_wb_high[c] * log_density + d_offset[c];
+
+          // Step 5: Back to linear
+          const linear = pow(10, corrected);
+
+          // Step 6: Paper simulation: exposure + black point
+          let print = -(exposure * linear + d_black);
+          print = max(print, 0);
+
+          // Step 7a: Paper gamma
+          print = pow(print, gamma);
+
+          // Step 7b: Soft clip
+          if (print > soft_clip) {
+            print = soft_clip + soft_clip_comp * (1 - exp(-(print - soft_clip) / soft_clip_comp));
+          }
+
+          outData[i + c] = print * 255 + 0.5 | 0;
+        }
         outData[i + 3] = 255;
       }
 
