@@ -3864,7 +3864,7 @@
       const presetChars = (preset && preset.characteristics) ? preset.characteristics : {};
 
       const exposureMult = Math.pow(2, safeSettings.exposure);
-      const contrastFactor = 1 + ((safeSettings.contrast + (presetChars.contrast || 0) * 100) / 100);
+      const contrastFactor = 1 + (safeSettings.contrast / 100);
       const tempFactor = (safeSettings.temperature + (presetChars.warmth || 0) * 100) / 100;
       const tintFactor = safeSettings.tint / 100;
       const satFactor = 1 + ((safeSettings.saturation + (presetChars.saturation || 0) * 100) / 100);
@@ -5139,7 +5139,7 @@
       const presetChars = (preset && preset.characteristics) ? preset.characteristics : {};
 
       const exposure = safe.exposure;
-      const contrast = 1 + ((safe.contrast + (presetChars.contrast || 0) * 100) / 100);
+      const contrast = 1 + (safe.contrast / 100);
       const highlights = safe.highlights / 100;
       const shadows = safe.shadows / 100;
       const tempFactor = (safe.temperature + (presetChars.warmth || 0) * 100) / 100;
