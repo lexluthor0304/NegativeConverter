@@ -235,20 +235,7 @@
     }
 
     .privacy-banner.collapsed {
-      padding-top: 8px;
-      padding-bottom: 8px;
-    }
-
-    .privacy-banner.collapsed .privacy-banner-body {
       display: none;
-    }
-
-    .privacy-banner.collapsed .privacy-banner-text {
-      gap: 0;
-    }
-
-    .privacy-banner.collapsed .privacy-banner-toggle svg {
-      transform: rotate(180deg);
     }
 
     .sr-only {
@@ -1869,10 +1856,11 @@
     </div>
     <div class="privacy-banner-actions">
       <a class="privacy-banner-btn" href="./privacy.html" target="_blank" rel="noopener" data-i18n="privacyBannerLink">Privacy details</a>
-      <button class="privacy-banner-toggle" id="privacyBannerToggle" type="button" aria-expanded="true">
-        <span class="sr-only" data-i18n="privacyBannerToggleLabel">Collapse/expand privacy notice</span>
+      <button class="privacy-banner-toggle" id="privacyBannerToggle" type="button">
+        <span class="sr-only" data-i18n="privacyBannerToggleLabel">Hide privacy notice</span>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-          <path d="M6 15l6-6 6 6"></path>
+          <path d="M18 6L6 18"></path>
+          <path d="M6 6l12 12"></path>
         </svg>
       </button>
     </div>
@@ -2351,7 +2339,7 @@
         privacyBannerTitle: "纯前端运行 · 不上传照片",
         privacyBannerBody: "你选择的照片只在你的浏览器里处理，我们的服务器收不到。",
         privacyBannerLink: "查看隐私说明",
-        privacyBannerToggleLabel: "收起或展开隐私说明横幅",
+        privacyBannerToggleLabel: "隐藏隐私说明横幅",
         dropHint: "拖放图片到此处或点击读取",
         selectFile: "选择文件",
         applyRotate: "应用",
@@ -2508,7 +2496,7 @@
         privacyBannerTitle: "Runs locally · No photo uploads",
         privacyBannerBody: "Your photos are processed in your browser. Our server never receives your images.",
         privacyBannerLink: "Privacy details",
-        privacyBannerToggleLabel: "Collapse/expand privacy notice",
+        privacyBannerToggleLabel: "Hide privacy notice",
         dropHint: "Drop image here or click to open",
         selectFile: "Select File",
         applyRotate: "Apply",
@@ -2665,7 +2653,7 @@
         privacyBannerTitle: "ローカル処理 · 写真はアップロードしません",
         privacyBannerBody: "写真はブラウザ内で処理され、サーバーに送信されません。",
         privacyBannerLink: "プライバシー詳細",
-        privacyBannerToggleLabel: "プライバシー通知を折りたたむ／展開",
+        privacyBannerToggleLabel: "プライバシー通知を非表示",
         dropHint: "画像をドロップまたはクリックして読み込み",
         selectFile: "ファイル選択",
         applyRotate: "適用",
@@ -2932,12 +2920,10 @@
 
       const collapsed = safeStorageGet(PRIVACY_BANNER_COLLAPSED_STORAGE_KEY) === '1';
       banner.classList.toggle('collapsed', collapsed);
-      toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
 
       toggle.addEventListener('click', () => {
-        const nowCollapsed = banner.classList.toggle('collapsed');
-        toggle.setAttribute('aria-expanded', nowCollapsed ? 'false' : 'true');
-        safeStorageSet(PRIVACY_BANNER_COLLAPSED_STORAGE_KEY, nowCollapsed ? '1' : '0');
+        banner.classList.add('collapsed');
+        safeStorageSet(PRIVACY_BANNER_COLLAPSED_STORAGE_KEY, '1');
       });
     }
 
