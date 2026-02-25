@@ -136,6 +136,137 @@
       color: white;
     }
 
+    /* Privacy Banner */
+    .privacy-banner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 20px;
+      background: rgba(76, 175, 80, 0.08);
+      border-bottom: 1px solid rgba(76, 175, 80, 0.25);
+    }
+
+    .privacy-banner-left {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .privacy-banner-icon {
+      width: 20px;
+      height: 20px;
+      flex: 0 0 auto;
+      margin-top: 1px;
+      color: var(--success);
+      opacity: 0.95;
+    }
+
+    .privacy-banner-text {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .privacy-banner-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--success);
+      line-height: 1.2;
+    }
+
+    .privacy-banner-body {
+      font-size: 12px;
+      color: var(--text-secondary);
+      line-height: 1.35;
+    }
+
+    .privacy-banner-actions {
+      flex: 0 0 auto;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .privacy-banner-btn {
+      padding: 7px 12px;
+      background: rgba(76, 175, 80, 0.14);
+      border: 1px solid rgba(76, 175, 80, 0.35);
+      border-radius: 999px;
+      color: var(--text-primary);
+      font-size: 12px;
+      font-weight: 600;
+      text-decoration: none;
+      white-space: nowrap;
+      transition: all 0.2s;
+    }
+
+    .privacy-banner-btn:hover {
+      background: rgba(76, 175, 80, 0.22);
+      border-color: rgba(76, 175, 80, 0.55);
+    }
+
+    .privacy-banner-toggle {
+      width: 34px;
+      height: 34px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--text-secondary);
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .privacy-banner-toggle:hover {
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--text-primary);
+      border-color: var(--border-light);
+    }
+
+    .privacy-banner-toggle svg {
+      width: 16px;
+      height: 16px;
+      transition: transform 0.2s;
+    }
+
+    .privacy-banner.collapsed {
+      display: none;
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    @media (max-width: 720px) {
+      .privacy-banner {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .privacy-banner-actions {
+        width: 100%;
+        justify-content: space-between;
+      }
+
+      .privacy-banner-btn {
+        flex: 1;
+        text-align: center;
+      }
+    }
+
     /* Main Layout */
     .app-main {
       display: grid;
@@ -1711,6 +1842,30 @@
     </div>
   </header>
 
+  <!-- Privacy Notice -->
+  <div class="privacy-banner" role="note" aria-label="Privacy notice">
+    <div class="privacy-banner-left">
+      <svg class="privacy-banner-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+        <path d="M12 2l8 4v6c0 5-3.5 9.4-8 10-4.5-.6-8-5-8-10V6l8-4z"/>
+        <path d="M9 12l2 2 4-4"/>
+      </svg>
+      <div class="privacy-banner-text">
+        <div class="privacy-banner-title" data-i18n="privacyBannerTitle">Runs locally · No photo uploads</div>
+        <div class="privacy-banner-body" data-i18n="privacyBannerBody">Your photos are processed in your browser. Our server never receives your images.</div>
+      </div>
+    </div>
+    <div class="privacy-banner-actions">
+      <a class="privacy-banner-btn" href="./privacy.html" target="_blank" rel="noopener" data-i18n="privacyBannerLink">Privacy details</a>
+      <button class="privacy-banner-toggle" id="privacyBannerToggle" type="button">
+        <span class="sr-only" data-i18n="privacyBannerToggleLabel">Hide privacy notice</span>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <path d="M18 6L6 18"></path>
+          <path d="M6 6l12 12"></path>
+        </svg>
+      </button>
+    </div>
+  </div>
+
   <!-- Main Content -->
   <main class="app-main">
     <!-- Preview Section -->
@@ -2181,6 +2336,10 @@
     const i18n = {
       zh: {
         title: "负片转正片",
+        privacyBannerTitle: "纯前端运行 · 不上传照片",
+        privacyBannerBody: "你选择的照片只在你的浏览器里处理，我们的服务器收不到。",
+        privacyBannerLink: "查看隐私说明",
+        privacyBannerToggleLabel: "隐藏隐私说明横幅",
         dropHint: "拖放图片到此处或点击读取",
         selectFile: "选择文件",
         applyRotate: "应用",
@@ -2334,6 +2493,10 @@
       },
       en: {
         title: "Negative Converter",
+        privacyBannerTitle: "Runs locally · No photo uploads",
+        privacyBannerBody: "Your photos are processed in your browser. Our server never receives your images.",
+        privacyBannerLink: "Privacy details",
+        privacyBannerToggleLabel: "Hide privacy notice",
         dropHint: "Drop image here or click to open",
         selectFile: "Select File",
         applyRotate: "Apply",
@@ -2487,6 +2650,10 @@
       },
       ja: {
         title: "ネガポジ変換",
+        privacyBannerTitle: "ローカル処理 · 写真はアップロードしません",
+        privacyBannerBody: "写真はブラウザ内で処理され、サーバーに送信されません。",
+        privacyBannerLink: "プライバシー詳細",
+        privacyBannerToggleLabel: "プライバシー通知を非表示",
         dropHint: "画像をドロップまたはクリックして読み込み",
         selectFile: "ファイル選択",
         applyRotate: "適用",
@@ -2667,6 +2834,7 @@
     let opencvReadyPromise = null;
     let opencvActiveSource = null;
     const STEP2_FIRST_HINT_SESSION_KEY = 'nc_step2_first_hint_seen_v1';
+    const PRIVACY_BANNER_COLLAPSED_STORAGE_KEY = 'nc_privacy_banner_collapsed_v1';
 
     let currentLang = 'en';
     let stateReady = false;
@@ -2697,6 +2865,10 @@
           el.label = i18n[lang][key];
         }
       });
+      const privacyLink = document.querySelector('.privacy-banner-btn');
+      if (privacyLink) {
+        privacyLink.href = `./privacy.html?lang=${encodeURIComponent(lang)}`;
+      }
       if (stateReady) {
         updateCurrentFileLabel();
         updateRollReferenceUI();
@@ -2724,6 +2896,38 @@
     document.querySelectorAll('.lang-btn').forEach(btn => {
       btn.addEventListener('click', () => setLanguage(btn.dataset.lang));
     });
+
+    function safeStorageGet(key) {
+      try {
+        return localStorage.getItem(key);
+      } catch (err) {
+        return null;
+      }
+    }
+
+    function safeStorageSet(key, value) {
+      try {
+        localStorage.setItem(key, value);
+      } catch (err) {
+        // ignore
+      }
+    }
+
+    function initPrivacyBannerToggle() {
+      const banner = document.querySelector('.privacy-banner');
+      const toggle = document.getElementById('privacyBannerToggle');
+      if (!banner || !toggle) return;
+
+      const collapsed = safeStorageGet(PRIVACY_BANNER_COLLAPSED_STORAGE_KEY) === '1';
+      banner.classList.toggle('collapsed', collapsed);
+
+      toggle.addEventListener('click', () => {
+        banner.classList.add('collapsed');
+        safeStorageSet(PRIVACY_BANNER_COLLAPSED_STORAGE_KEY, '1');
+      });
+    }
+
+    initPrivacyBannerToggle();
 
     // ===========================================
     // Film Presets

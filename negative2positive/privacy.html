@@ -1,0 +1,601 @@
+<!DOCTYPE html>
+<html lang="zh">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>隐私政策</title>
+  <style>
+    :root {
+      --bg-primary: #1a1a1a;
+      --bg-secondary: #252525;
+      --bg-tertiary: #2d2d2d;
+      --bg-hover: #363636;
+      --text-primary: #e0e0e0;
+      --text-secondary: #a0a0a0;
+      --text-muted: #777;
+      --accent: #4a9eff;
+      --success: #4caf50;
+      --border: #3a3a3a;
+      --border-light: #444;
+      --shadow: rgba(0, 0, 0, 0.3);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", "PingFang SC",
+        "Hiragino Sans", "Microsoft YaHei", sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      min-height: 100vh;
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    a:hover {
+      text-decoration: underline;
+    }
+
+    /* Top Bar */
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 18px;
+      background: var(--bg-secondary);
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+
+    .topbar-left {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .page-title {
+      font-size: 16px;
+      font-weight: 700;
+      line-height: 1.2;
+    }
+
+    .page-subtitle {
+      font-size: 12px;
+      color: var(--text-secondary);
+      line-height: 1.35;
+    }
+
+    .topbar-right {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex: 0 0 auto;
+    }
+
+    .lang-selector {
+      display: flex;
+      gap: 6px;
+    }
+
+    .lang-btn {
+      padding: 7px 10px;
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      cursor: pointer;
+      font-size: 12px;
+      border-radius: 6px;
+      transition: all 0.2s;
+    }
+
+    .lang-btn:hover {
+      background: var(--bg-tertiary);
+      color: var(--text-primary);
+    }
+
+    .lang-btn.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: white;
+    }
+
+    .topbar-btn {
+      padding: 7px 12px;
+      background: rgba(74, 158, 255, 0.12);
+      border: 1px solid rgba(74, 158, 255, 0.35);
+      color: var(--text-primary);
+      cursor: pointer;
+      font-size: 12px;
+      border-radius: 999px;
+      transition: all 0.2s;
+      white-space: nowrap;
+    }
+
+    .topbar-btn:hover {
+      background: rgba(74, 158, 255, 0.18);
+      border-color: rgba(74, 158, 255, 0.55);
+    }
+
+    /* Layout */
+    .container {
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .hero {
+      border: 1px solid rgba(76, 175, 80, 0.35);
+      background: rgba(76, 175, 80, 0.08);
+      border-radius: 12px;
+      padding: 14px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .hero-title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 800;
+      color: var(--success);
+      font-size: 14px;
+    }
+
+    .hero-title svg {
+      width: 20px;
+      height: 20px;
+      flex: 0 0 auto;
+    }
+
+    .hero-body {
+      color: var(--text-primary);
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .quick-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 10px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      font-size: 12px;
+      color: var(--text-primary);
+      text-decoration: none;
+    }
+
+    .chip:hover {
+      background: rgba(255, 255, 255, 0.07);
+      text-decoration: none;
+    }
+
+    .card {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: 0 10px 30px var(--shadow);
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .card h2 {
+      font-size: 13px;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+      color: var(--text-secondary);
+      font-weight: 700;
+    }
+
+    .card p {
+      font-size: 13px;
+      line-height: 1.6;
+      color: var(--text-primary);
+    }
+
+    .card ul,
+    .card ol {
+      padding-left: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      font-size: 13px;
+      line-height: 1.6;
+      color: var(--text-primary);
+    }
+
+    .note {
+      font-size: 12px;
+      line-height: 1.55;
+      color: var(--text-secondary);
+      border-left: 3px solid rgba(74, 158, 255, 0.6);
+      padding-left: 10px;
+    }
+
+    .muted {
+      color: var(--text-muted);
+    }
+
+    .content {
+      display: none;
+    }
+
+    @media (max-width: 760px) {
+      .topbar {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+
+      .topbar-right {
+        width: 100%;
+        justify-content: space-between;
+      }
+
+      .container {
+        padding: 14px;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <header class="topbar">
+    <div class="topbar-left">
+      <div class="page-title" data-i18n="pageTitle">隐私政策</div>
+      <div class="page-subtitle" data-i18n="pageSubtitle">用通俗的话说明：照片不会上传，你可以放心使用。</div>
+    </div>
+    <div class="topbar-right">
+      <div class="lang-selector" aria-label="Language selector">
+        <button class="lang-btn" data-lang="zh">中文</button>
+        <button class="lang-btn" data-lang="en">EN</button>
+        <button class="lang-btn" data-lang="ja">日本語</button>
+      </div>
+      <button class="topbar-btn" id="backBtn" type="button" data-i18n="backToApp">返回应用</button>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- Chinese -->
+    <div class="content" data-lang="zh">
+      <section class="hero">
+        <div class="hero-title">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path d="M12 2l8 4v6c0 5-3.5 9.4-8 10-4.5-.6-8-5-8-10V6l8-4z"></path>
+            <path d="M9 12l2 2 4-4"></path>
+          </svg>
+          <span>照片不会上传</span>
+        </div>
+        <div class="hero-body">
+          你选择的照片只在你的浏览器里处理，我们的服务器收不到照片内容。
+        </div>
+        <div class="quick-links">
+          <a class="chip" href="#verify-zh">我怎么验证？</a>
+          <a class="chip" href="#offline-zh">离线使用（更安心）</a>
+          <a class="chip" href="https://github.com/lexluthor0304/NegativeConverter" target="_blank" rel="noopener">开源仓库</a>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>我们的承诺</h2>
+        <ul>
+          <li>不会把你选择的照片文件上传到服务器。</li>
+          <li>不需要登录，不会建立用户画像，不做广告追踪。</li>
+          <li>不会把你的照片用于训练、营销或任何其他用途。</li>
+        </ul>
+      </section>
+
+      <section class="card">
+        <h2>照片在哪里处理？</h2>
+        <ul>
+          <li>转换、裁剪、调色、导出都在你的设备和浏览器里完成。</li>
+          <li>导出的结果文件只会保存到你的设备上。</li>
+        </ul>
+      </section>
+
+      <section class="card">
+        <h2>我们会收集什么？</h2>
+        <ul>
+          <li>本工具本身不收集你的个人信息，也不上传照片内容。</li>
+          <li>如果你使用在线演示站点：网站通常会记录基础访问日志（例如访问时间、访问页面、浏览器/设备信息、IP 地址），用于保障稳定运行与排查问题。</li>
+          <li>这些日志不包含你的照片内容。</li>
+        </ul>
+      </section>
+
+      <section class="card" id="verify-zh">
+        <h2>我怎么验证？</h2>
+        <ol>
+          <li>打开浏览器“开发者工具”。</li>
+          <li>进入 Network（网络）面板。</li>
+          <li>正常使用本工具时，不应出现把照片文件“上传”的请求。</li>
+        </ol>
+        <p class="note">
+          说明：在线版页面可能会加载字体/脚本等公开资源，会产生正常的网络访问，但这些请求不包含你的照片文件。
+        </p>
+      </section>
+
+      <section class="card" id="offline-zh">
+        <h2>离线使用（更安心）</h2>
+        <p>
+          你可以下载本项目源码，在本地运行后再使用。这样使用过程中不会连接到我们的在线站点。
+        </p>
+        <p class="muted">
+          小提示：如果直接双击打开文件，部分浏览器可能限制模块加载；更稳妥的方法是用“本地静态服务器”打开（例如使用 Python 或任意本地预览工具）。
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>开源透明与反馈</h2>
+        <p>
+          源码仓库：
+          <a href="https://github.com/lexluthor0304/NegativeConverter" target="_blank" rel="noopener">github.com/lexluthor0304/NegativeConverter</a>
+        </p>
+        <p>
+          如果你发现问题或有建议，欢迎在 GitHub Issues 里反馈。
+        </p>
+      </section>
+    </div>
+
+    <!-- English -->
+    <div class="content" data-lang="en">
+      <section class="hero">
+        <div class="hero-title">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path d="M12 2l8 4v6c0 5-3.5 9.4-8 10-4.5-.6-8-5-8-10V6l8-4z"></path>
+            <path d="M9 12l2 2 4-4"></path>
+          </svg>
+          <span>No photo uploads</span>
+        </div>
+        <div class="hero-body">
+          Your photos are processed in your browser. Our server never receives your image content.
+        </div>
+        <div class="quick-links">
+          <a class="chip" href="#verify-en">How can I verify?</a>
+          <a class="chip" href="#offline-en">Use offline</a>
+          <a class="chip" href="https://github.com/lexluthor0304/NegativeConverter" target="_blank" rel="noopener">Open source</a>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Our promise</h2>
+        <ul>
+          <li>We do not upload the photos you choose to any server.</li>
+          <li>No login required. No profiling. No ad tracking.</li>
+          <li>We do not use your photos for training, marketing, or any other purpose.</li>
+        </ul>
+      </section>
+
+      <section class="card">
+        <h2>Where processing happens</h2>
+        <ul>
+          <li>Conversion, cropping, color adjustments, and export all happen on your device, inside the browser.</li>
+          <li>Exported files are saved only to your device.</li>
+        </ul>
+      </section>
+
+      <section class="card">
+        <h2>What we collect</h2>
+        <ul>
+          <li>This tool itself does not collect your personal information and does not upload your photo content.</li>
+          <li>If you use an online demo site: websites typically keep basic access logs (for example time, page path, browser/device info, IP address) for reliability and debugging.</li>
+          <li>These logs do not include your photo content.</li>
+        </ul>
+      </section>
+
+      <section class="card" id="verify-en">
+        <h2>How can I verify?</h2>
+        <ol>
+          <li>Open your browser’s Developer Tools.</li>
+          <li>Go to the Network panel.</li>
+          <li>When using this tool, you should not see any request that uploads your photo file.</li>
+        </ol>
+        <p class="note">
+          Note: the online page may load public fonts/scripts and other resources, which is normal network activity, but those requests do not include your photo file.
+        </p>
+      </section>
+
+      <section class="card" id="offline-en">
+        <h2>Use offline (extra peace of mind)</h2>
+        <p>
+          You can download the source code and run it locally. This avoids connecting to an online demo site during use.
+        </p>
+        <p class="muted">
+          Tip: some browsers restrict local module loading when opening files directly. A small local static server is the most reliable way to run it.
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>Open source & feedback</h2>
+        <p>
+          Source repository:
+          <a href="https://github.com/lexluthor0304/NegativeConverter" target="_blank" rel="noopener">github.com/lexluthor0304/NegativeConverter</a>
+        </p>
+        <p>
+          For bugs or suggestions, please use GitHub Issues.
+        </p>
+      </section>
+    </div>
+
+    <!-- Japanese -->
+    <div class="content" data-lang="ja">
+      <section class="hero">
+        <div class="hero-title">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path d="M12 2l8 4v6c0 5-3.5 9.4-8 10-4.5-.6-8-5-8-10V6l8-4z"></path>
+            <path d="M9 12l2 2 4-4"></path>
+          </svg>
+          <span>写真はアップロードしません</span>
+        </div>
+        <div class="hero-body">
+          写真はブラウザ内で処理され、サーバーに写真内容は送信されません。
+        </div>
+        <div class="quick-links">
+          <a class="chip" href="#verify-ja">どうやって確認する？</a>
+          <a class="chip" href="#offline-ja">オフライン利用</a>
+          <a class="chip" href="https://github.com/lexluthor0304/NegativeConverter" target="_blank" rel="noopener">オープンソース</a>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>お約束</h2>
+        <ul>
+          <li>選択した写真ファイルをサーバーへアップロードしません。</li>
+          <li>ログイン不要。ユーザー追跡や広告トラッキングは行いません。</li>
+          <li>写真を学習・マーケティングなど他の目的に利用しません。</li>
+        </ul>
+      </section>
+
+      <section class="card">
+        <h2>どこで処理されますか？</h2>
+        <ul>
+          <li>変換、トリミング、色調整、書き出しはすべてあなたの端末のブラウザ内で行われます。</li>
+          <li>書き出したファイルはあなたの端末にのみ保存されます。</li>
+        </ul>
+      </section>
+
+      <section class="card">
+        <h2>収集する情報</h2>
+        <ul>
+          <li>本ツール自体は個人情報を収集せず、写真内容もアップロードしません。</li>
+          <li>オンラインデモサイトを利用する場合：通常、安定運用や不具合調査のために基本的なアクセスログ（日時、ページ、ブラウザ/端末情報、IP アドレスなど）を記録することがあります。</li>
+          <li>これらのログに写真内容は含まれません。</li>
+        </ul>
+      </section>
+
+      <section class="card" id="verify-ja">
+        <h2>どうやって確認する？</h2>
+        <ol>
+          <li>ブラウザの開発者ツールを開きます。</li>
+          <li>Network（ネットワーク）を確認します。</li>
+          <li>通常の利用中に、写真ファイルを「アップロード」する通信は発生しないはずです。</li>
+        </ol>
+        <p class="note">
+          補足：オンライン版ではフォント/スクリプトなど公開リソースの読み込みが発生する場合がありますが、写真ファイルは含まれません。
+        </p>
+      </section>
+
+      <section class="card" id="offline-ja">
+        <h2>オフライン利用（さらに安心）</h2>
+        <p>
+          ソースコードをダウンロードしてローカルで実行できます。これにより、利用中にオンラインデモサイトへ接続しません。
+        </p>
+        <p class="muted">
+          ヒント：ファイルを直接開くと、ブラウザによってはモジュール読み込みが制限されます。簡単なローカル静的サーバーでの起動が確実です。
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>オープンソースとフィードバック</h2>
+        <p>
+          リポジトリ：
+          <a href="https://github.com/lexluthor0304/NegativeConverter" target="_blank" rel="noopener">github.com/lexluthor0304/NegativeConverter</a>
+        </p>
+        <p>
+          不具合や提案は GitHub Issues へお願いします。
+        </p>
+      </section>
+    </div>
+  </main>
+
+  <script>
+    const SUPPORTED_LANGS = ['zh', 'en', 'ja'];
+    const uiText = {
+      zh: {
+        docTitle: '隐私政策',
+        pageTitle: '隐私政策',
+        pageSubtitle: '用通俗的话说明：照片不会上传，你可以放心使用。',
+        backToApp: '返回应用'
+      },
+      en: {
+        docTitle: 'Privacy Policy',
+        pageTitle: 'Privacy Policy',
+        pageSubtitle: 'Plain-language privacy details so you can use it with confidence.',
+        backToApp: 'Back to App'
+      },
+      ja: {
+        docTitle: 'プライバシーポリシー',
+        pageTitle: 'プライバシーポリシー',
+        pageSubtitle: 'わかりやすく説明します：写真はアップロードされません。',
+        backToApp: 'アプリに戻る'
+      }
+    };
+
+    function detectLang() {
+      const params = new URLSearchParams(window.location.search);
+      const paramLang = params.get('lang');
+      if (SUPPORTED_LANGS.includes(paramLang)) return paramLang;
+      const nav = navigator.language || '';
+      if (nav.startsWith('ja')) return 'ja';
+      if (nav.startsWith('zh')) return 'zh';
+      return 'en';
+    }
+
+    function setLanguage(lang) {
+      const nextLang = SUPPORTED_LANGS.includes(lang) ? lang : 'en';
+      const dict = uiText[nextLang] || uiText.en;
+
+      document.documentElement.lang = nextLang;
+      document.title = dict.docTitle;
+      document.querySelectorAll('[data-i18n]').forEach(el => {
+        const key = el.dataset.i18n;
+        if (dict[key]) el.textContent = dict[key];
+      });
+
+      document.querySelectorAll('.lang-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.lang === nextLang);
+      });
+      document.querySelectorAll('.content').forEach(section => {
+        section.style.display = section.dataset.lang === nextLang ? 'block' : 'none';
+      });
+
+      const params = new URLSearchParams(window.location.search);
+      params.set('lang', nextLang);
+      const url = `${window.location.pathname}?${params.toString()}`;
+      history.replaceState({}, '', url);
+    }
+
+    document.querySelectorAll('.lang-btn').forEach(btn => {
+      btn.addEventListener('click', () => setLanguage(btn.dataset.lang));
+    });
+
+    const backBtn = document.getElementById('backBtn');
+    if (backBtn) {
+      backBtn.addEventListener('click', () => {
+        if (window.history.length > 1) {
+          window.history.back();
+          return;
+        }
+        window.location.href = './index.html';
+      });
+    }
+
+    setLanguage(detectLang());
+  </script>
+</body>
+
+</html>
+
