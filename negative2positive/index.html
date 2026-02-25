@@ -208,6 +208,61 @@
       border-color: rgba(76, 175, 80, 0.55);
     }
 
+    .privacy-banner-toggle {
+      width: 34px;
+      height: 34px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--text-secondary);
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .privacy-banner-toggle:hover {
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--text-primary);
+      border-color: var(--border-light);
+    }
+
+    .privacy-banner-toggle svg {
+      width: 16px;
+      height: 16px;
+      transition: transform 0.2s;
+    }
+
+    .privacy-banner.collapsed {
+      padding-top: 8px;
+      padding-bottom: 8px;
+    }
+
+    .privacy-banner.collapsed .privacy-banner-body {
+      display: none;
+    }
+
+    .privacy-banner.collapsed .privacy-banner-text {
+      gap: 0;
+    }
+
+    .privacy-banner.collapsed .privacy-banner-toggle svg {
+      transform: rotate(180deg);
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
     @media (max-width: 720px) {
       .privacy-banner {
         align-items: flex-start;
@@ -216,10 +271,11 @@
 
       .privacy-banner-actions {
         width: 100%;
+        justify-content: space-between;
       }
 
       .privacy-banner-btn {
-        width: 100%;
+        flex: 1;
         text-align: center;
       }
     }
@@ -1813,6 +1869,12 @@
     </div>
     <div class="privacy-banner-actions">
       <a class="privacy-banner-btn" href="./privacy.html" target="_blank" rel="noopener" data-i18n="privacyBannerLink">Privacy details</a>
+      <button class="privacy-banner-toggle" id="privacyBannerToggle" type="button" aria-expanded="true">
+        <span class="sr-only" data-i18n="privacyBannerToggleLabel">Collapse/expand privacy notice</span>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <path d="M6 15l6-6 6 6"></path>
+        </svg>
+      </button>
     </div>
   </div>
 
@@ -2289,6 +2351,7 @@
         privacyBannerTitle: "纯前端运行 · 不上传照片",
         privacyBannerBody: "你选择的照片只在你的浏览器里处理，我们的服务器收不到。",
         privacyBannerLink: "查看隐私说明",
+        privacyBannerToggleLabel: "收起或展开隐私说明横幅",
         dropHint: "拖放图片到此处或点击读取",
         selectFile: "选择文件",
         applyRotate: "应用",
@@ -2445,6 +2508,7 @@
         privacyBannerTitle: "Runs locally · No photo uploads",
         privacyBannerBody: "Your photos are processed in your browser. Our server never receives your images.",
         privacyBannerLink: "Privacy details",
+        privacyBannerToggleLabel: "Collapse/expand privacy notice",
         dropHint: "Drop image here or click to open",
         selectFile: "Select File",
         applyRotate: "Apply",
@@ -2601,6 +2665,7 @@
         privacyBannerTitle: "ローカル処理 · 写真はアップロードしません",
         privacyBannerBody: "写真はブラウザ内で処理され、サーバーに送信されません。",
         privacyBannerLink: "プライバシー詳細",
+        privacyBannerToggleLabel: "プライバシー通知を折りたたむ／展開",
         dropHint: "画像をドロップまたはクリックして読み込み",
         selectFile: "ファイル選択",
         applyRotate: "適用",
@@ -2781,6 +2846,7 @@
     let opencvReadyPromise = null;
     let opencvActiveSource = null;
     const STEP2_FIRST_HINT_SESSION_KEY = 'nc_step2_first_hint_seen_v1';
+    const PRIVACY_BANNER_COLLAPSED_STORAGE_KEY = 'nc_privacy_banner_collapsed_v1';
 
     let currentLang = 'en';
     let stateReady = false;
@@ -2811,6 +2877,10 @@
           el.label = i18n[lang][key];
         }
       });
+      const privacyLink = document.querySelector('.privacy-banner-btn');
+      if (privacyLink) {
+        privacyLink.href = `./privacy.html?lang=${encodeURIComponent(lang)}`;
+      }
       if (stateReady) {
         updateCurrentFileLabel();
         updateRollReferenceUI();
@@ -2838,6 +2908,40 @@
     document.querySelectorAll('.lang-btn').forEach(btn => {
       btn.addEventListener('click', () => setLanguage(btn.dataset.lang));
     });
+
+    function safeStorageGet(key) {
+      try {
+        return localStorage.getItem(key);
+      } catch (err) {
+        return null;
+      }
+    }
+
+    function safeStorageSet(key, value) {
+      try {
+        localStorage.setItem(key, value);
+      } catch (err) {
+        // ignore
+      }
+    }
+
+    function initPrivacyBannerToggle() {
+      const banner = document.querySelector('.privacy-banner');
+      const toggle = document.getElementById('privacyBannerToggle');
+      if (!banner || !toggle) return;
+
+      const collapsed = safeStorageGet(PRIVACY_BANNER_COLLAPSED_STORAGE_KEY) === '1';
+      banner.classList.toggle('collapsed', collapsed);
+      toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+
+      toggle.addEventListener('click', () => {
+        const nowCollapsed = banner.classList.toggle('collapsed');
+        toggle.setAttribute('aria-expanded', nowCollapsed ? 'false' : 'true');
+        safeStorageSet(PRIVACY_BANNER_COLLAPSED_STORAGE_KEY, nowCollapsed ? '1' : '0');
+      });
+    }
+
+    initPrivacyBannerToggle();
 
     // ===========================================
     // Film Presets
