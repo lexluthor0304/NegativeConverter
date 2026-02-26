@@ -30,8 +30,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          version_conf="$(python3 -c 'import json; print(str(json.load(open(\"src-tauri/tauri.conf.json\", \"r\", encoding=\"utf-8\"))[\"version\"]).strip())')"
-          version_cargo="$(python3 -c 'import tomllib; print(str(tomllib.load(open(\"src-tauri/Cargo.toml\", \"rb\"))[\"package\"][\"version\"]).strip())')"
+          version_conf="$(python3 -c 'import json; print(str(json.load(open("src-tauri/tauri.conf.json", "r", encoding="utf-8"))["version"]).strip())')"
+          version_cargo="$(python3 -c 'import tomllib; print(str(tomllib.load(open("src-tauri/Cargo.toml", "rb"))["package"]["version"]).strip())')"
 
           if [ -z "${version_conf}" ] || [ -z "${version_cargo}" ]; then
             echo "Missing version (tauri.conf.json='${version_conf}', Cargo.toml='${version_cargo}')" >&2
