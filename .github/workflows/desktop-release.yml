@@ -49,7 +49,7 @@ jobs:
           tag="v${version_conf}"
 
           api="https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${tag}"
-          status="$(curl -sS -o /dev/null -w \"%{http_code}\" -H \"Authorization: Bearer ${GITHUB_TOKEN}\" -H \"X-GitHub-Api-Version: 2022-11-28\" \"${api}\")"
+          status="$(curl -sS -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GITHUB_TOKEN}" -H "X-GitHub-Api-Version: 2022-11-28" "${api}")"
 
           should_release="false"
           if [ "${status}" = "404" ]; then
@@ -132,7 +132,7 @@ jobs:
         run: |
           set -euo pipefail
           api="https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}"
-          status="$(curl -sS -o /dev/null -w \"%{http_code}\" -H \"Authorization: Bearer ${GITHUB_TOKEN}\" -H \"X-GitHub-Api-Version: 2022-11-28\" \"${api}\")"
+          status="$(curl -sS -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GITHUB_TOKEN}" -H "X-GitHub-Api-Version: 2022-11-28" "${api}")"
           if [ "${status}" = "200" ]; then
             echo "release_exists=true" >> "${GITHUB_OUTPUT}"
             exit 0
