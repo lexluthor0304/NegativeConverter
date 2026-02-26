@@ -37,7 +37,7 @@ This is a browser-based tool built with HTML and JavaScript that converts scanne
 - Includes a simplified AHD demosaicing algorithm for Bayer-pattern raw data  
 - Color adjustment logic is based on RGB ↔ HSL and RGB ↔ CMY conversions  
 - Film preset metadata is loaded from JSON and grouped dynamically by film type in the UI  
-- Auto frame detection uses OpenCV.js from `negative2positive/vendor/opencv/opencv-4.12.0.js` with jsDelivr fallback  
+- Auto frame detection uses OpenCV.js from `negative2positive/vendor/opencv/opencv-4.12.0.js`  
 - Performance optimizations include:
   - Cached DOM access
   - Offscreen canvas reuse
@@ -46,6 +46,39 @@ This is a browser-based tool built with HTML and JavaScript that converts scanne
 ## Live Demo
 
 [Film Negative → Positive Converter](https://negative-converter.tokugai.com)
+
+## 🖥️ Desktop App (Tauri)
+
+This repo includes a Tauri wrapper to package the web app as an offline desktop application for Windows / macOS / Linux.
+
+### Development
+
+```bash
+npm ci
+npm run tauri:dev
+```
+
+### Build installers
+
+```bash
+npm run tauri:build
+```
+
+Build outputs are placed under:
+- `src-tauri/target/release/bundle/`
+
+### Release (GitHub Actions)
+
+1. Update versions:
+   - `src-tauri/tauri.conf.json`
+   - `src-tauri/Cargo.toml`
+2. Merge to `main`
+3. Tag and push:
+
+```bash
+git tag vX.Y.Z
+git push origin vX.Y.Z
+```
 
 ## 💡 Development & Contributions
 

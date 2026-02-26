@@ -1,0 +1,13 @@
+{
+  "name": "negativeconverter",
+  "private": true,
+  "devDependencies": {
+    "@tauri-apps/cli": "2.10.0",
+    "http-server": "14.1.1"
+  },
+  "scripts": {
+    "dev:web": "http-server negative2positive -p 4173 -c-1",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
+  }
+}

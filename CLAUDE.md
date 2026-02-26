@@ -29,7 +29,7 @@ negative2positive/
 ├── worker.js     # Web Worker for async WASM processing
 ├── libraw.js     # WASM module binding
 ├── libraw.wasm   # Compiled LibRaw library for RAW format support
-└── vendor/opencv/opencv-4.12.0.js  # Local OpenCV.js fallback for auto frame detection
+└── vendor/opencv/opencv-4.12.0.js  # OpenCV.js for auto frame detection
 ```
 
 ### Key Technologies

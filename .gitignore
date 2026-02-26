@@ -30,6 +30,7 @@ Thumbs.db
 
 # 包管理器锁文件（如果你只使用 npm 或 yarn 的其中一个，可以删除另一个）
 package-lock.json
+!/package-lock.json
 yarn.lock
 pnpm-lock.yaml
 

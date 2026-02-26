@@ -6,12 +6,32 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>Negative Converter</title>
 
-  <!-- Google Fonts -->
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
-
   <style>
+    /* Local Inter font (offline-friendly) */
+    @font-face {
+      font-family: 'Inter';
+      src: url('./vendor/fonts/inter/Inter-400.woff2') format('woff2');
+      font-weight: 400;
+      font-style: normal;
+      font-display: swap;
+    }
+
+    @font-face {
+      font-family: 'Inter';
+      src: url('./vendor/fonts/inter/Inter-500.woff2') format('woff2');
+      font-weight: 500;
+      font-style: normal;
+      font-display: swap;
+    }
+
+    @font-face {
+      font-family: 'Inter';
+      src: url('./vendor/fonts/inter/Inter-600.woff2') format('woff2');
+      font-weight: 600;
+      font-style: normal;
+      font-display: swap;
+    }
+
     :root {
       --bg-primary: #1a1a1a;
       --bg-secondary: #252525;
@@ -1822,10 +1842,10 @@
     import LibRaw from './index.js';
     window.LibRaw = LibRaw;
   </script>
-  <script src="https://cdn.jsdelivr.net/npm/pako/dist/pako.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/upng-js@2.1.0/UPNG.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/utif@3.1.0/UTIF.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/jszip@3/dist/jszip.min.js"></script>
+  <script src="./vendor/pako/pako.min.js"></script>
+  <script src="./vendor/upng/UPNG.min.js"></script>
+  <script src="./vendor/utif/UTIF.min.js"></script>
+  <script src="./vendor/jszip/jszip.min.js"></script>
 </head>
 
 <body>
@@ -2323,11 +2343,8 @@
 
   <div class="copyright">
     © 2025 Negative Converter. <a href="https://neoanaloglab.com" target="_blank">neoanaloglab.com</a> All rights reserved.
-    <span class="github-link">
-      <a class="github-button" href="https://github.com/lexluthor0304/NegativeConverter" data-icon="octicon-star" data-size="large" data-show-count="true" aria-label="Star lexluthor0304/NegativeConverter on GitHub">Star</a>
-    </span>
+    <a class="github-link" href="https://github.com/lexluthor0304/NegativeConverter" target="_blank" rel="noopener">GitHub</a>
   </div>
-  <script async defer src="https://buttons.github.io/buttons.js"></script>
 
   <script>
     // ===========================================
@@ -2809,10 +2826,7 @@
 
     const DEBUG_UI = new URLSearchParams(window.location.search).get('debug') === '1';
     const BUILD_ID = '2026-02-22-auto-frame-detect-4';
-    const OPENCV_SCRIPT_CANDIDATES = [
-      './vendor/opencv/opencv-4.12.0.js',
-      'https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.12.0-release.1/dist/opencv.js'
-    ];
+    const OPENCV_SCRIPT_CANDIDATES = ['./vendor/opencv/opencv-4.12.0.js'];
     const AUTO_FRAME_MAX_SIDE = 1600;
     const AUTO_FRAME_FORMAT_RATIOS = {
       '135': 1.5,
