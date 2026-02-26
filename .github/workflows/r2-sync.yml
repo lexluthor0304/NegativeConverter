@@ -1,0 +1,78 @@
+name: R2 Sync
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "GitHub release tag to sync (e.g. v0.1.0)"
+        required: true
+        type: string
+      update_latest:
+        description: "Update negative-converter/release/latest.json"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: Sync release assets to R2
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          gh release download "${TAG}" \
+            -p '*.dmg' \
+            -p '*.msi' \
+            -p '*.exe' \
+            -p '*.AppImage' \
+            -p '*.deb' \
+            -p '*.rpm' \
+            -D artifacts
+
+      - name: Ensure AWS CLI
+        run: |
+          set -euo pipefail
+          if command -v aws >/dev/null 2>&1; then
+            aws --version
+            exit 0
+          fi
+          sudo apt-get update
+          sudo apt-get install -y awscli
+          aws --version
+
+      - name: Upload installers to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_REGION: auto
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          TAG: ${{ inputs.tag }}
+          UPDATE_LATEST: ${{ inputs.update_latest }}
+        run: |
+          set -euo pipefail
+          extra=()
+          if [ "${UPDATE_LATEST}" = "true" ]; then
+            extra+=(--update-latest)
+          fi
+
+          python3 .github/scripts/r2_sync_release.py \
+            --source-dir artifacts \
+            --bucket "${R2_BUCKET}" \
+            --endpoint "${R2_ENDPOINT}" \
+            --prefix "negative-converter/release" \
+            --tag "${TAG}" \
+            "${extra[@]}"
