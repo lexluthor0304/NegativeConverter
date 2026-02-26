@@ -73,12 +73,9 @@ Build outputs are placed under:
    - `src-tauri/tauri.conf.json`
    - `src-tauri/Cargo.toml`
 2. Merge to `main`
-3. Tag and push:
-
-```bash
-git tag vX.Y.Z
-git push origin vX.Y.Z
-```
+3. GitHub Actions automatically:
+   - creates a `vX.Y.Z` tag
+   - publishes a GitHub Release with the installers
 
 ## 💡 Development & Contributions
 
