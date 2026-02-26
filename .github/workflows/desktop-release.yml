@@ -23,11 +23,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
       - name: Read and validate version
         id: versions
         env:
@@ -35,41 +30,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          version_conf="$(node - <<'NODE'
-          const cfg = require('./src-tauri/tauri.conf.json');
-          if (!cfg || typeof cfg.version !== 'string' || !cfg.version.trim()) {
-            console.error('Missing version in src-tauri/tauri.conf.json');
-            process.exit(1);
-          }
-          process.stdout.write(cfg.version.trim());
-NODE
-          )"
-          version_cargo="$(node - <<'NODE'
-          const fs = require('fs');
-          const text = fs.readFileSync('src-tauri/Cargo.toml', 'utf8');
-          const lines = text.split(/\r?\n/);
-          let inPackage = false;
-          let version = null;
-          for (const rawLine of lines) {
-            const line = rawLine.trim();
-            if (line.startsWith('[') && line.endsWith(']')) {
-              inPackage = line === '[package]';
-              continue;
-            }
-            if (!inPackage) continue;
-            const match = line.match(/^version\\s*=\\s*\"([^\"]+)\"\\s*$/);
-            if (match) {
-              version = match[1];
-              break;
-            }
-          }
-          if (!version) {
-            console.error('Failed to read [package].version from src-tauri/Cargo.toml');
-            process.exit(1);
-          }
-          process.stdout.write(version);
-NODE
-          )"
+          version_conf="$(python3 -c \"import json; print(json.load(open('src-tauri/tauri.conf.json', 'r', encoding='utf-8'))['version'])\")"
+          version_cargo="$(python3 -c \"import tomllib; print(tomllib.load(open('src-tauri/Cargo.toml', 'rb'))['package']['version'])\")"
 
           if [ -z "${version_conf}" ] || [ -z "${version_cargo}" ]; then
             echo "Missing version (tauri.conf.json='${version_conf}', Cargo.toml='${version_cargo}')" >&2
