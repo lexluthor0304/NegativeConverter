@@ -531,6 +531,7 @@
       const candidates = [];
       const explicit = getParam('r2_base') || getParam('r2Base');
       if (explicit) candidates.push(explicit);
+      candidates.push('https://download.neoanaloglab.com');
       candidates.push(window.location.origin);
       candidates.push('https://negative-converter.tokugai.com');
       return Array.from(new Set(candidates.map(normalizeBaseUrl).filter(Boolean)));
