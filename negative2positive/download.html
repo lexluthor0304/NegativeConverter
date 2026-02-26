@@ -196,6 +196,17 @@
       line-height: 1.45;
     }
 
+    .download-hash {
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+
+    .download-hash code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 11px;
+      word-break: break-all;
+    }
+
     .download-grid {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -676,8 +687,16 @@
 
             actions.appendChild(a);
             const hash = document.createElement('div');
-            hash.className = 'muted';
-            hash.textContent = `${t('sha256')}: ${preferred.sha256 || '—'}`;
+            hash.className = 'muted download-hash';
+
+            const hashLabel = document.createElement('span');
+            hashLabel.textContent = `${t('sha256')}: `;
+
+            const hashValue = document.createElement('code');
+            hashValue.textContent = preferred.sha256 || '—';
+
+            hash.appendChild(hashLabel);
+            hash.appendChild(hashValue);
             actions.appendChild(hash);
           }
 
