@@ -76,6 +76,16 @@ Build outputs are placed under:
 3. GitHub Actions automatically:
    - creates a `vX.Y.Z` tag
    - publishes a GitHub Release with the installers
+   - (optional) syncs installers to Cloudflare R2 under `negative-converter/release/vX.Y.Z/`
+
+#### Cloudflare R2 sync (optional)
+
+If you want the release workflow to upload installers to R2, add these GitHub Actions secrets:
+
+- `R2_ACCESS_KEY_ID`
+- `R2_SECRET_ACCESS_KEY`
+- `R2_BUCKET`
+- `R2_ENDPOINT` (e.g. `https://<accountid>.r2.cloudflarestorage.com/`)
 
 ## 💡 Development & Contributions
 

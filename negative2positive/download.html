@@ -1,0 +1,745 @@
+<!DOCTYPE html>
+<html lang="zh">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>离线版下载</title>
+  <style>
+    :root {
+      --bg-primary: #1a1a1a;
+      --bg-secondary: #252525;
+      --bg-tertiary: #2d2d2d;
+      --bg-hover: #363636;
+      --text-primary: #e0e0e0;
+      --text-secondary: #a0a0a0;
+      --text-muted: #777;
+      --accent: #4a9eff;
+      --accent-weak: rgba(74, 158, 255, 0.12);
+      --success: #4caf50;
+      --warning: #ffb74d;
+      --border: #3a3a3a;
+      --border-light: #444;
+      --shadow: rgba(0, 0, 0, 0.3);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", "PingFang SC",
+        "Hiragino Sans", "Microsoft YaHei", sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      min-height: 100vh;
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    a:hover {
+      text-decoration: underline;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 18px;
+      background: var(--bg-secondary);
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+
+    .topbar-left {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .page-title {
+      font-size: 16px;
+      font-weight: 800;
+      line-height: 1.2;
+    }
+
+    .page-subtitle {
+      font-size: 12px;
+      color: var(--text-secondary);
+      line-height: 1.35;
+    }
+
+    .topbar-right {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex: 0 0 auto;
+    }
+
+    .lang-selector {
+      display: flex;
+      gap: 6px;
+    }
+
+    .lang-btn {
+      padding: 7px 10px;
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      cursor: pointer;
+      font-size: 12px;
+      border-radius: 6px;
+      transition: all 0.2s;
+    }
+
+    .lang-btn:hover {
+      background: var(--bg-tertiary);
+      color: var(--text-primary);
+    }
+
+    .lang-btn.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: white;
+    }
+
+    .topbar-btn {
+      padding: 7px 12px;
+      background: var(--accent-weak);
+      border: 1px solid rgba(74, 158, 255, 0.35);
+      color: var(--text-primary);
+      cursor: pointer;
+      font-size: 12px;
+      border-radius: 999px;
+      transition: all 0.2s;
+      white-space: nowrap;
+      text-decoration: none;
+    }
+
+    .topbar-btn:hover {
+      background: rgba(74, 158, 255, 0.18);
+      border-color: rgba(74, 158, 255, 0.55);
+      text-decoration: none;
+    }
+
+    .container {
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .hero {
+      border: 1px solid rgba(76, 175, 80, 0.35);
+      background: rgba(76, 175, 80, 0.08);
+      border-radius: 12px;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .hero-title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 900;
+      color: var(--success);
+      font-size: 14px;
+    }
+
+    .hero-title svg {
+      width: 20px;
+      height: 20px;
+      flex: 0 0 auto;
+    }
+
+    .hero-body {
+      color: var(--text-primary);
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .card {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: 0 10px 30px var(--shadow);
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .card h2 {
+      font-size: 13px;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+      color: var(--text-secondary);
+      font-weight: 800;
+    }
+
+    .muted {
+      color: var(--text-muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .download-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .os-card {
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.03);
+      border-radius: 12px;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      min-height: 160px;
+    }
+
+    .os-title {
+      font-weight: 900;
+      font-size: 13px;
+    }
+
+    .os-subtitle {
+      font-size: 12px;
+      color: var(--text-secondary);
+      line-height: 1.35;
+    }
+
+    .download-actions {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-top: 2px;
+    }
+
+    .download-btn {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--bg-tertiary);
+      color: var(--text-primary);
+      text-decoration: none;
+      transition: all 0.2s;
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .download-btn:hover {
+      background: var(--bg-hover);
+      text-decoration: none;
+      border-color: var(--border-light);
+    }
+
+    .download-btn.primary {
+      border-color: rgba(74, 158, 255, 0.55);
+      background: rgba(74, 158, 255, 0.12);
+    }
+
+    .download-btn.primary:hover {
+      background: rgba(74, 158, 255, 0.18);
+      border-color: rgba(74, 158, 255, 0.75);
+    }
+
+    .download-meta {
+      font-size: 11px;
+      color: var(--text-secondary);
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .status-line {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 10px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 800;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--text-secondary);
+      white-space: nowrap;
+    }
+
+    .badge.ok {
+      border-color: rgba(76, 175, 80, 0.35);
+      background: rgba(76, 175, 80, 0.08);
+      color: var(--success);
+    }
+
+    .badge.warn {
+      border-color: rgba(255, 183, 77, 0.35);
+      background: rgba(255, 183, 77, 0.08);
+      color: var(--warning);
+    }
+
+    @media (max-width: 900px) {
+      .download-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 760px) {
+      .topbar {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+
+      .topbar-right {
+        width: 100%;
+        justify-content: space-between;
+      }
+
+      .container {
+        padding: 14px;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <header class="topbar">
+    <div class="topbar-left">
+      <div class="page-title" data-i18n="pageTitle">离线版下载</div>
+      <div class="page-subtitle" data-i18n="pageSubtitle">下载 Windows / macOS / Linux 离线桌面版（本地运行，不需要联网）。</div>
+    </div>
+    <div class="topbar-right">
+      <div class="lang-selector" aria-label="Language selector">
+        <button class="lang-btn" data-lang="zh">中文</button>
+        <button class="lang-btn" data-lang="en">EN</button>
+        <button class="lang-btn" data-lang="ja">日本語</button>
+      </div>
+      <button class="topbar-btn" id="backBtn" type="button" data-i18n="backToApp">返回应用</button>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="hero">
+      <div class="hero-title">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <path d="M12 2l8 4v6c0 5-3.5 9.4-8 10-4.5-.6-8-5-8-10V6l8-4z"></path>
+          <path d="M9 12l2 2 4-4"></path>
+        </svg>
+        <span data-i18n="heroTitle">离线桌面版（更安心）</span>
+      </div>
+      <div class="hero-body" data-i18n="heroBody">
+        离线版安装后可直接在本地运行：不需要联网、照片也不会上传。适合对隐私和稳定性要求更高的使用场景。
+      </div>
+    </section>
+
+    <section class="card" aria-label="Downloads">
+      <h2 data-i18n="downloadsTitle">下载</h2>
+      <div class="status-line">
+        <span class="badge ok" id="latestTagBadge" style="display:none;"></span>
+        <span class="badge" id="sourceBadge" style="display:none;"></span>
+        <span class="badge warn" id="statusBadge" style="display:none;"></span>
+      </div>
+      <div class="muted" id="latestInfo" data-i18n="loading">正在获取最新版本…</div>
+      <div class="download-grid" id="downloadGrid" style="display:none;"></div>
+      <div class="muted" id="fallbackLinks" style="display:none;">
+        <span data-i18n="fallbackLabel">备用：</span>
+        <a href="https://github.com/lexluthor0304/NegativeConverter/releases/latest" target="_blank" rel="noopener" data-i18n="githubReleases">GitHub Releases</a>
+      </div>
+    </section>
+
+    <section class="card" aria-label="Notes">
+      <h2 data-i18n="notesTitle">提示</h2>
+      <ul class="muted" style="padding-left: 18px;">
+        <li data-i18n="noteWindows">Windows：优先下载 EXE（安装器）。</li>
+        <li data-i18n="noteMac">macOS：DMG 安装包。若提示“无法打开”，请在系统设置里允许打开。</li>
+        <li data-i18n="noteLinux">Linux：优先 AppImage；也提供 deb/rpm。</li>
+        <li data-i18n="noteVerify">下载后可校验 SHA-256（页面会显示）。</li>
+      </ul>
+    </section>
+  </main>
+
+  <script>
+    const SUPPORTED_LANGS = ['zh', 'en', 'ja'];
+    const uiText = {
+      zh: {
+        docTitle: '离线版下载',
+        pageTitle: '离线版下载',
+        pageSubtitle: '下载 Windows / macOS / Linux 离线桌面版（本地运行，不需要联网）。',
+        backToApp: '返回应用',
+        heroTitle: '离线桌面版（更安心）',
+        heroBody: '离线版安装后可直接在本地运行：不需要联网、照片也不会上传。适合对隐私和稳定性要求更高的使用场景。',
+        downloadsTitle: '下载',
+        loading: '正在获取最新版本…',
+        loadFailed: '获取失败：{error}',
+        fallbackLabel: '备用：',
+        githubReleases: 'GitHub Releases',
+        notesTitle: '提示',
+        noteWindows: 'Windows：优先下载 EXE（安装器）。',
+        noteMac: 'macOS：DMG 安装包。若提示“无法打开”，请在系统设置里允许打开。',
+        noteLinux: 'Linux：优先 AppImage；也提供 deb/rpm。',
+        noteVerify: '下载后可校验 SHA-256（页面会显示）。',
+        latestVersion: '最新版本：{tag}',
+        sourceFrom: '来源：{base}',
+        statusWarning: '未能从 R2 获取 latest.json，已切换到备用链接。',
+        windows: 'Windows',
+        macos: 'macOS',
+        linux: 'Linux',
+        recommended: '推荐',
+        alt: '其他',
+        download: '下载',
+        sha256: 'SHA-256',
+        bytes: '大小'
+      },
+      en: {
+        docTitle: 'Offline Download',
+        pageTitle: 'Offline Download',
+        pageSubtitle: 'Download the offline desktop app for Windows / macOS / Linux.',
+        backToApp: 'Back to App',
+        heroTitle: 'Offline desktop app',
+        heroBody: 'Runs locally after installation: no internet required, and your photos are never uploaded. Great for privacy and reliability.',
+        downloadsTitle: 'Downloads',
+        loading: 'Fetching the latest version…',
+        loadFailed: 'Failed to fetch: {error}',
+        fallbackLabel: 'Fallback:',
+        githubReleases: 'GitHub Releases',
+        notesTitle: 'Notes',
+        noteWindows: 'Windows: EXE installer is recommended.',
+        noteMac: 'macOS: DMG package. If blocked, allow it in System Settings.',
+        noteLinux: 'Linux: AppImage is recommended; deb/rpm are also available.',
+        noteVerify: 'You can verify the SHA-256 shown on this page.',
+        latestVersion: 'Latest: {tag}',
+        sourceFrom: 'Source: {base}',
+        statusWarning: "Couldn't fetch latest.json from R2. Showing fallback link instead.",
+        windows: 'Windows',
+        macos: 'macOS',
+        linux: 'Linux',
+        recommended: 'Recommended',
+        alt: 'Alternatives',
+        download: 'Download',
+        sha256: 'SHA-256',
+        bytes: 'Size'
+      },
+      ja: {
+        docTitle: 'オフライン版ダウンロード',
+        pageTitle: 'オフライン版ダウンロード',
+        pageSubtitle: 'Windows / macOS / Linux 向けのオフライン版をダウンロードできます。',
+        backToApp: 'アプリに戻る',
+        heroTitle: 'オフライン版（安心）',
+        heroBody: 'インストール後はローカルで動作します。ネット接続不要で、写真もアップロードされません。プライバシー重視の方におすすめです。',
+        downloadsTitle: 'ダウンロード',
+        loading: '最新バージョンを取得中…',
+        loadFailed: '取得に失敗しました: {error}',
+        fallbackLabel: '代替:',
+        githubReleases: 'GitHub Releases',
+        notesTitle: 'ヒント',
+        noteWindows: 'Windows：EXE（インストーラ）推奨。',
+        noteMac: 'macOS：DMG パッケージ。ブロックされた場合は設定から許可してください。',
+        noteLinux: 'Linux：AppImage 推奨。deb/rpm もあります。',
+        noteVerify: '表示される SHA-256 で検証できます。',
+        latestVersion: '最新：{tag}',
+        sourceFrom: '取得元：{base}',
+        statusWarning: 'R2 の latest.json を取得できませんでした。代替リンクを表示します。',
+        windows: 'Windows',
+        macos: 'macOS',
+        linux: 'Linux',
+        recommended: 'おすすめ',
+        alt: 'その他',
+        download: 'ダウンロード',
+        sha256: 'SHA-256',
+        bytes: 'サイズ'
+      }
+    };
+
+    function getParam(name) {
+      try {
+        return new URLSearchParams(window.location.search).get(name);
+      } catch (err) {
+        return null;
+      }
+    }
+
+    function detectLang() {
+      const paramLang = getParam('lang');
+      if (SUPPORTED_LANGS.includes(paramLang)) return paramLang;
+      const nav = navigator.language || '';
+      if (nav.startsWith('ja')) return 'ja';
+      if (nav.startsWith('zh')) return 'zh';
+      return 'en';
+    }
+
+    function applyI18n(lang) {
+      const dict = uiText[lang] || uiText.en;
+      document.documentElement.lang = lang;
+      document.title = dict.docTitle;
+
+      document.querySelectorAll('[data-i18n]').forEach(el => {
+        const key = el.dataset.i18n;
+        if (dict[key]) el.textContent = dict[key];
+      });
+
+      document.querySelectorAll('.lang-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.lang === lang);
+      });
+
+      const params = new URLSearchParams(window.location.search);
+      params.set('lang', lang);
+      const url = `${window.location.pathname}?${params.toString()}`;
+      history.replaceState({}, '', url);
+    }
+
+    function t(key, vars = {}) {
+      const lang = document.documentElement.lang || 'en';
+      const dict = uiText[lang] || uiText.en;
+      let text = dict[key] || '';
+      Object.entries(vars).forEach(([k, v]) => {
+        text = text.replaceAll(`{${k}}`, String(v));
+      });
+      return text;
+    }
+
+    function normalizeBaseUrl(base) {
+      if (!base) return '';
+      return String(base).trim().replace(/\/+$/, '');
+    }
+
+    function buildCandidateBases() {
+      const candidates = [];
+      const explicit = getParam('r2_base') || getParam('r2Base');
+      if (explicit) candidates.push(explicit);
+      candidates.push(window.location.origin);
+      candidates.push('https://negative-converter.tokugai.com');
+      return Array.from(new Set(candidates.map(normalizeBaseUrl).filter(Boolean)));
+    }
+
+    async function fetchLatestJson() {
+      const bases = buildCandidateBases();
+      let lastErr = null;
+      for (const base of bases) {
+        const url = `${base}/negative-converter/release/latest.json`;
+        try {
+          const resp = await fetch(url, { cache: 'no-store' });
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          const json = await resp.json();
+          return { base, url, json };
+        } catch (err) {
+          lastErr = err;
+        }
+      }
+      throw lastErr || new Error('Unknown error');
+    }
+
+    function formatBytes(bytes) {
+      const n = Number(bytes);
+      if (!Number.isFinite(n) || n <= 0) return '—';
+      const units = ['B', 'KB', 'MB', 'GB'];
+      let value = n;
+      let unitIndex = 0;
+      while (value >= 1024 && unitIndex < units.length - 1) {
+        value /= 1024;
+        unitIndex += 1;
+      }
+      const precision = unitIndex === 0 ? 0 : unitIndex === 1 ? 0 : 1;
+      return `${value.toFixed(precision)} ${units[unitIndex]}`;
+    }
+
+    function buildUrl(base, key) {
+      const b = normalizeBaseUrl(base);
+      const k = String(key || '').replace(/^\/+/, '');
+      return encodeURI(`${b}/${k}`);
+    }
+
+    function pickPreferred(files, types) {
+      for (const type of types) {
+        const item = files.find(f => (f.type || '').toLowerCase() === type);
+        if (item) return item;
+      }
+      return files[0] || null;
+    }
+
+    function renderDownloads({ base, json }) {
+      const latestInfo = document.getElementById('latestInfo');
+      const grid = document.getElementById('downloadGrid');
+      const tagBadge = document.getElementById('latestTagBadge');
+      const sourceBadge = document.getElementById('sourceBadge');
+      const fallbackLinks = document.getElementById('fallbackLinks');
+      const statusBadge = document.getElementById('statusBadge');
+
+      const files = Array.isArray(json && json.files) ? json.files : [];
+      const tag = typeof json.tag === 'string' ? json.tag : '';
+      if (!tag || files.length === 0) {
+        throw new Error('Invalid latest.json');
+      }
+
+      tagBadge.style.display = 'inline-flex';
+      tagBadge.textContent = t('latestVersion', { tag });
+
+      sourceBadge.style.display = 'inline-flex';
+      sourceBadge.textContent = t('sourceFrom', { base });
+
+      statusBadge.style.display = 'none';
+      latestInfo.textContent = '';
+
+      grid.style.display = 'grid';
+      fallbackLinks.style.display = 'block';
+
+      const byOs = {
+        windows: files.filter(f => f.os === 'windows'),
+        macos: files.filter(f => f.os === 'macos'),
+        linux: files.filter(f => f.os === 'linux')
+      };
+
+      const specs = [
+        {
+          os: 'windows',
+          titleKey: 'windows',
+          subtitle: 'EXE / MSI',
+          preferredTypes: ['exe', 'msi']
+        },
+        {
+          os: 'macos',
+          titleKey: 'macos',
+          subtitle: 'DMG',
+          preferredTypes: ['dmg']
+        },
+        {
+          os: 'linux',
+          titleKey: 'linux',
+          subtitle: 'AppImage / deb / rpm',
+          preferredTypes: ['appimage', 'deb', 'rpm']
+        }
+      ];
+
+      grid.innerHTML = '';
+      for (const spec of specs) {
+        const osFiles = byOs[spec.os] || [];
+        const card = document.createElement('div');
+        card.className = 'os-card';
+
+        const title = document.createElement('div');
+        title.className = 'os-title';
+        title.textContent = t(spec.titleKey);
+
+        const subtitle = document.createElement('div');
+        subtitle.className = 'os-subtitle';
+        subtitle.textContent = spec.subtitle;
+
+        const actions = document.createElement('div');
+        actions.className = 'download-actions';
+
+        if (osFiles.length === 0) {
+          const empty = document.createElement('div');
+          empty.className = 'muted';
+          empty.textContent = '—';
+          actions.appendChild(empty);
+        } else {
+          const preferred = pickPreferred(osFiles, spec.preferredTypes);
+          const others = osFiles.filter(f => f !== preferred);
+
+          if (preferred) {
+            const a = document.createElement('a');
+            a.className = 'download-btn primary';
+            a.href = buildUrl(base, preferred.key);
+            a.target = '_blank';
+            a.rel = 'noopener';
+            a.textContent = `${t('recommended')} · ${t('download')}`;
+
+            const meta = document.createElement('span');
+            meta.className = 'download-meta';
+            meta.textContent = `${preferred.arch || '—'} · ${formatBytes(preferred.bytes)}`;
+            a.appendChild(meta);
+
+            actions.appendChild(a);
+            const hash = document.createElement('div');
+            hash.className = 'muted';
+            hash.textContent = `${t('sha256')}: ${preferred.sha256 || '—'}`;
+            actions.appendChild(hash);
+          }
+
+          for (const other of others) {
+            const a = document.createElement('a');
+            a.className = 'download-btn';
+            a.href = buildUrl(base, other.key);
+            a.target = '_blank';
+            a.rel = 'noopener';
+            a.textContent = `${t('alt')} · ${t('download')} (${(other.type || '').toUpperCase() || 'FILE'})`;
+
+            const meta = document.createElement('span');
+            meta.className = 'download-meta';
+            meta.textContent = `${other.arch || '—'} · ${formatBytes(other.bytes)}`;
+            a.appendChild(meta);
+
+            actions.appendChild(a);
+          }
+        }
+
+        card.appendChild(title);
+        card.appendChild(subtitle);
+        card.appendChild(actions);
+        grid.appendChild(card);
+      }
+    }
+
+    async function init() {
+      const lang = detectLang();
+      applyI18n(lang);
+
+      document.querySelectorAll('.lang-btn').forEach(btn => {
+        btn.addEventListener('click', () => applyI18n(btn.dataset.lang));
+      });
+
+      const backBtn = document.getElementById('backBtn');
+      if (backBtn) {
+        backBtn.addEventListener('click', () => {
+          if (window.history.length > 1) {
+            window.history.back();
+            return;
+          }
+          window.location.href = './index.html';
+        });
+      }
+
+      const latestInfo = document.getElementById('latestInfo');
+      const statusBadge = document.getElementById('statusBadge');
+      const fallbackLinks = document.getElementById('fallbackLinks');
+
+      try {
+        const result = await fetchLatestJson();
+        renderDownloads(result);
+      } catch (err) {
+        statusBadge.style.display = 'inline-flex';
+        statusBadge.textContent = t('statusWarning');
+        fallbackLinks.style.display = 'block';
+        latestInfo.textContent = t('loadFailed', { error: err && err.message ? err.message : String(err) });
+      }
+    }
+
+    init();
+  </script>
+</body>
+
+</html>

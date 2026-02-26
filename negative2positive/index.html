@@ -208,6 +208,7 @@
       display: flex;
       align-items: center;
       gap: 8px;
+      flex-wrap: wrap;
     }
 
     .privacy-banner-btn {
@@ -278,12 +279,16 @@
 
       .privacy-banner-actions {
         width: 100%;
-        justify-content: space-between;
+        justify-content: flex-start;
       }
 
       .privacy-banner-btn {
-        flex: 1;
+        flex: 1 1 160px;
         text-align: center;
+      }
+
+      .privacy-banner-toggle {
+        margin-left: auto;
       }
     }
 
@@ -1875,7 +1880,8 @@
       </div>
     </div>
     <div class="privacy-banner-actions">
-      <a class="privacy-banner-btn" href="./privacy.html" target="_blank" rel="noopener" data-i18n="privacyBannerLink">Privacy details</a>
+      <a class="privacy-banner-btn" id="privacyDetailsLink" href="./privacy.html" target="_blank" rel="noopener" data-i18n="privacyBannerLink">Privacy details</a>
+      <a class="privacy-banner-btn" id="offlineDownloadLink" href="./download.html" target="_blank" rel="noopener" data-i18n="offlineDownloadLink">Download offline app</a>
       <button class="privacy-banner-toggle" id="privacyBannerToggle" type="button">
         <span class="sr-only" data-i18n="privacyBannerToggleLabel">Hide privacy notice</span>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
@@ -2356,6 +2362,7 @@
         privacyBannerTitle: "纯前端运行 · 不上传照片",
         privacyBannerBody: "你选择的照片只在你的浏览器里处理，我们的服务器收不到。",
         privacyBannerLink: "查看隐私说明",
+        offlineDownloadLink: "下载离线版",
         privacyBannerToggleLabel: "隐藏隐私说明横幅",
         dropHint: "拖放图片到此处或点击读取",
         selectFile: "选择文件",
@@ -2513,6 +2520,7 @@
         privacyBannerTitle: "Runs locally · No photo uploads",
         privacyBannerBody: "Your photos are processed in your browser. Our server never receives your images.",
         privacyBannerLink: "Privacy details",
+        offlineDownloadLink: "Download offline app",
         privacyBannerToggleLabel: "Hide privacy notice",
         dropHint: "Drop image here or click to open",
         selectFile: "Select File",
@@ -2670,6 +2678,7 @@
         privacyBannerTitle: "ローカル処理 · 写真はアップロードしません",
         privacyBannerBody: "写真はブラウザ内で処理され、サーバーに送信されません。",
         privacyBannerLink: "プライバシー詳細",
+        offlineDownloadLink: "オフライン版をダウンロード",
         privacyBannerToggleLabel: "プライバシー通知を非表示",
         dropHint: "画像をドロップまたはクリックして読み込み",
         selectFile: "ファイル選択",
@@ -2879,9 +2888,13 @@
           el.label = i18n[lang][key];
         }
       });
-      const privacyLink = document.querySelector('.privacy-banner-btn');
+      const privacyLink = document.getElementById('privacyDetailsLink');
       if (privacyLink) {
         privacyLink.href = `./privacy.html?lang=${encodeURIComponent(lang)}`;
+      }
+      const offlineLink = document.getElementById('offlineDownloadLink');
+      if (offlineLink) {
+        offlineLink.href = `./download.html?lang=${encodeURIComponent(lang)}`;
       }
       if (stateReady) {
         updateCurrentFileLabel();
