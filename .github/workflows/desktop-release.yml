@@ -196,9 +196,15 @@ jobs:
           fail_on_unmatched_files: true
 
       - name: Ensure AWS CLI
-        if: ${{ secrets.R2_ACCESS_KEY_ID != '' && secrets.R2_SECRET_ACCESS_KEY != '' }}
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: |
           set -euo pipefail
+          if [ -z "${AWS_ACCESS_KEY_ID}" ] || [ -z "${AWS_SECRET_ACCESS_KEY}" ]; then
+            echo "No R2 S3 credentials configured; skipping AWS CLI install."
+            exit 0
+          fi
           if command -v aws >/dev/null 2>&1; then
             aws --version
             exit 0
@@ -208,7 +214,6 @@ jobs:
           aws --version
 
       - name: Upload installers to R2
-        if: ${{ (secrets.R2_ACCESS_KEY_ID != '' && secrets.R2_SECRET_ACCESS_KEY != '' && secrets.R2_BUCKET != '' && secrets.R2_ENDPOINT != '') || (secrets.CLOUDFLARE_API_TOKEN != '' && secrets.CLOUDFLARE_ACCOUNT_ID != '' && secrets.R2_BUCKET != '') }}
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -221,6 +226,10 @@ jobs:
           TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           set -euo pipefail
+          if [ -z "${AWS_ACCESS_KEY_ID}" ] && [ -z "${AWS_SECRET_ACCESS_KEY}" ] && [ -z "${CLOUDFLARE_API_TOKEN}" ] && [ -z "${CLOUDFLARE_ACCOUNT_ID}" ]; then
+            echo "R2 credentials not configured; skipping upload."
+            exit 0
+          fi
           python3 .github/scripts/r2_sync_release.py \
             --source-dir artifacts \
             --bucket "${R2_BUCKET}" \
