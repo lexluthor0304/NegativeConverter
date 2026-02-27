@@ -8146,43 +8146,124 @@
       exportDropdownMenu.classList.remove('show');
     });
 
+    function isTauriDesktop() {
+      return typeof window !== 'undefined'
+        && !!window.__TAURI__
+        && !!window.__TAURI__.core
+        && typeof window.__TAURI__.core.invoke === 'function';
+    }
+
+    function downloadBlobInBrowser(blob, fileName) {
+      const link = document.createElement('a');
+      link.download = fileName;
+      link.href = URL.createObjectURL(blob);
+      link.click();
+      URL.revokeObjectURL(link.href);
+    }
+
+    function blobToBase64(blob) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const result = typeof reader.result === 'string' ? reader.result : '';
+          const commaIndex = result.indexOf(',');
+          if (commaIndex < 0) {
+            reject(new Error('Invalid export payload encoding.'));
+            return;
+          }
+          resolve(result.slice(commaIndex + 1));
+        };
+        reader.onerror = () => {
+          reject(reader.error || new Error('Failed to encode export payload.'));
+        };
+        reader.readAsDataURL(blob);
+      });
+    }
+
+    async function saveBlob(blob, fileName, mimeType = 'application/octet-stream') {
+      if (!(blob instanceof Blob)) {
+        throw new Error('Export payload is not a Blob.');
+      }
+
+      const normalizedBlob = blob.type ? blob : new Blob([blob], { type: mimeType });
+      if (isTauriDesktop()) {
+        const bytesBase64 = await blobToBase64(normalizedBlob);
+        const result = await window.__TAURI__.core.invoke('save_export_file', {
+          suggestedName: fileName,
+          bytesBase64
+        });
+        return {
+          saved: Boolean(result && result.saved),
+          path: result && result.path ? result.path : null
+        };
+      }
+
+      downloadBlobInBrowser(normalizedBlob, fileName);
+      return { saved: true, path: null };
+    }
+
+    function canvasToBlobWithType(targetCanvas, mimeType, quality) {
+      return new Promise((resolve, reject) => {
+        targetCanvas.toBlob((blob) => {
+          if (!blob) {
+            reject(new Error('Failed to render export image.'));
+            return;
+          }
+          resolve(blob);
+        }, mimeType, quality);
+      });
+    }
+
+    function notifyExportError(err) {
+      console.error('Export failed:', err);
+      const message = err && err.message ? err.message : String(err || 'Unknown error');
+      alert(`Export failed: ${message}`);
+    }
+
     async function exportSingle() {
       const format = state.exportFormat;
       const ext = format === 'jpeg' ? '.jpg' : '.png';
       const mimeType = format === 'jpeg' ? 'image/jpeg' : 'image/png';
       const quality = format === 'jpeg' ? state.jpegQuality / 100 : undefined;
+      let fileName = 'converted_negative' + ext;
+      let blob;
 
       const currentItem = getCurrentQueueItem();
       if (currentItem && state.currentStep >= 3 && state.processedImageData) {
         persistCurrentFileSettings({ silent: true });
         const adjusted = await processFileWithSettings(currentItem.file, currentItem.settings);
-        const blob = await imageDataToBlob(adjusted, format, state.jpegQuality);
-        const link = document.createElement('a');
-        link.download = currentItem.file.name.replace(/\.[^.]+$/, '_converted' + ext);
-        link.href = URL.createObjectURL(blob);
-        link.click();
-        URL.revokeObjectURL(link.href);
-        return;
+        blob = await imageDataToBlob(adjusted, format, state.jpegQuality);
+        fileName = currentItem.file.name.replace(/\.[^.]+$/, '_converted' + ext);
+      } else {
+        ensureFullRender();
+        blob = await canvasToBlobWithType(canvas, mimeType, quality);
       }
 
-      ensureFullRender();
-      const dataURL = canvas.toDataURL(mimeType, quality);
-      const link = document.createElement('a');
-      link.download = 'converted_negative' + ext;
-      link.href = dataURL;
-      link.click();
+      return await saveBlob(blob, fileName, mimeType);
     }
 
     document.getElementById('exportSingleBtn').addEventListener('click', async () => {
-      await exportSingle();
+      try {
+        await exportSingle();
+      } catch (err) {
+        notifyExportError(err);
+      }
     });
 
     document.getElementById('exportZipBtn').addEventListener('click', async () => {
-      await exportBatchAsZip();
+      try {
+        await exportBatchAsZip();
+      } catch (err) {
+        notifyExportError(err);
+      }
     });
 
     document.getElementById('exportAllBtn').addEventListener('click', async () => {
-      await exportBatchIndividually();
+      try {
+        await exportBatchIndividually();
+      } catch (err) {
+        notifyExportError(err);
+      }
     });
 
     // Format toggle buttons
@@ -8523,11 +8604,18 @@
       const tempCtx = tempCanvas.getContext('2d');
       tempCtx.putImageData(imageData, 0, 0);
 
-      return new Promise(resolve => {
+      return new Promise((resolve, reject) => {
+        const handleBlob = (blob) => {
+          if (!blob) {
+            reject(new Error('Failed to generate export blob.'));
+            return;
+          }
+          resolve(blob);
+        };
         if (format === 'jpeg') {
-          tempCanvas.toBlob(resolve, 'image/jpeg', quality / 100);
+          tempCanvas.toBlob(handleBlob, 'image/jpeg', quality / 100);
         } else {
-          tempCanvas.toBlob(resolve, 'image/png');
+          tempCanvas.toBlob(handleBlob, 'image/png');
         }
       });
     }
@@ -8708,11 +8796,7 @@
           compressionOptions: { level: 6 }
         });
 
-        const link = document.createElement('a');
-        link.download = 'converted_negatives.zip';
-        link.href = URL.createObjectURL(zipBlob);
-        link.click();
-        URL.revokeObjectURL(link.href);
+        await saveBlob(zipBlob, 'converted_negatives.zip', 'application/zip');
       } finally {
         showBatchProgress(false);
       }
@@ -8724,6 +8808,7 @@
       if (selectedFiles.length < 1) return;
 
       let processedCount = 0;
+      let cancelledByUser = false;
 
       showBatchProgress(true);
 
@@ -8741,11 +8826,14 @@
 
             const ext = state.exportFormat === 'jpeg' ? '.jpg' : '.png';
             const name = item.file.name.replace(/\.[^.]+$/, '_converted' + ext);
-            const link = document.createElement('a');
-            link.download = name;
-            link.href = URL.createObjectURL(blob);
-            link.click();
-            URL.revokeObjectURL(link.href);
+            const result = await saveBlob(blob, name, state.exportFormat === 'jpeg' ? 'image/jpeg' : 'image/png');
+            if (!result.saved) {
+              cancelledByUser = true;
+              item.status = 'pending';
+              item.error = null;
+              updateFileListUI();
+              break;
+            }
 
             item.status = 'done';
           } catch (err) {
@@ -8755,6 +8843,9 @@
 
           updateFileListUI();
           await new Promise(r => setTimeout(r, 200));
+        }
+        if (cancelledByUser) {
+          console.info('Batch individual export cancelled by user.');
         }
       } finally {
         showBatchProgress(false);

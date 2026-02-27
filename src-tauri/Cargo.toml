@@ -19,3 +19,6 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+base64 = "0.22"
+rfd = "0.15"
+serde = { version = "1", features = ["derive"] }
