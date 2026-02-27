@@ -226,8 +226,24 @@ jobs:
           TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           set -euo pipefail
-          if [ -z "${AWS_ACCESS_KEY_ID}" ] && [ -z "${AWS_SECRET_ACCESS_KEY}" ] && [ -z "${CLOUDFLARE_API_TOKEN}" ] && [ -z "${CLOUDFLARE_ACCOUNT_ID}" ]; then
+          if [ -z "${R2_BUCKET}" ]; then
+            echo "R2_BUCKET not configured; skipping upload."
+            exit 0
+          fi
+
+          has_s3="false"
+          if [ -n "${AWS_ACCESS_KEY_ID}" ] && [ -n "${AWS_SECRET_ACCESS_KEY}" ] && [ -n "${R2_ENDPOINT}" ]; then
+            has_s3="true"
+          fi
+
+          has_cf="false"
+          if [ -n "${CLOUDFLARE_API_TOKEN}" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID}" ]; then
+            has_cf="true"
+          fi
+
+          if [ "${has_s3}" != "true" ] && [ "${has_cf}" != "true" ]; then
             echo "R2 credentials not configured; skipping upload."
+            echo "Set either (R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY/R2_ENDPOINT) or (CLOUDFLARE_API_TOKEN/CLOUDFLARE_ACCOUNT_ID)."
             exit 0
           fi
           python3 .github/scripts/r2_sync_release.py \
