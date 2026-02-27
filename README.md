@@ -80,12 +80,20 @@ Build outputs are placed under:
 
 #### Cloudflare R2 sync (optional)
 
-If you want the release workflow to upload installers to R2, add these GitHub Actions secrets:
+If you want the release workflow to upload installers to R2, add **one** of these GitHub Actions secret sets:
+
+**Option A: R2 S3 API token**
 
 - `R2_ACCESS_KEY_ID`
 - `R2_SECRET_ACCESS_KEY`
 - `R2_BUCKET`
 - `R2_ENDPOINT` (e.g. `https://<accountid>.r2.cloudflarestorage.com/`)
+
+**Option B: Cloudflare API token (no S3 keys)**
+
+- `CLOUDFLARE_API_TOKEN`
+- `CLOUDFLARE_ACCOUNT_ID`
+- `R2_BUCKET`
 
 ## 💡 Development & Contributions
 
