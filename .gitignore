@@ -37,6 +37,12 @@ pnpm-lock.yaml
 # 缓存
 .cache/
 *.log
+__pycache__/
+*.pyc
+
+# 本地工具
+.claude/
+.vercel_home/
 
 # 本地测试服务器生成的文件
 *.local
