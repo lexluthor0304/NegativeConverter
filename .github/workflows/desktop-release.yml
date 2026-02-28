@@ -56,36 +56,16 @@ jobs:
           tag_glob="v${major}.${minor}.*"
           existing_tags="$(git ls-remote --tags --refs origin "${tag_glob}" | awk -F'/' '{ print $3 }' || true)"
 
-          next_patch="$(printf "%s\n" "${existing_tags}" | python3 - "${major}" "${minor}" "${base_patch}" <<'PY'
-          import re
-          import sys
-
-          major = int(sys.argv[1])
-          minor = int(sys.argv[2])
-          base_patch = int(sys.argv[3])
-          pattern = re.compile(rf"^v{major}\.{minor}\.(\d+)$")
-
-          max_patch = None
-          for raw in sys.stdin:
-              tag = raw.strip()
-              if not tag:
-                  continue
-              match = pattern.fullmatch(tag)
-              if not match:
-                  continue
-              patch = int(match.group(1))
-              if max_patch is None or patch > max_patch:
-                  max_patch = patch
-
-          if max_patch is None:
-              print(base_patch)
-          else:
-              print(max_patch + 1)
-          PY
+          next_patch="$(
+            EXISTING_TAGS="${existing_tags}" python3 -c 'import os,re,sys; major=int(sys.argv[1]); minor=int(sys.argv[2]); base_patch=int(sys.argv[3]); patches=[int(m.group(1)) for t in os.environ.get("EXISTING_TAGS", "").splitlines() if (m:=re.fullmatch(rf"v{major}\.{minor}\.(\d+)", t.strip()))]; print(base_patch if not patches else max(patches)+1)' "${major}" "${minor}" "${base_patch}"
           )"
 
           version="${major}.${minor}.${next_patch}"
           tag="v${version}"
+          if git ls-remote --tags --refs origin "${tag}" | grep -q .; then
+            echo "Computed tag already exists on origin: ${tag}" >&2
+            exit 1
+          fi
           echo "Computed release version: ${version} (${tag})"
 
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
