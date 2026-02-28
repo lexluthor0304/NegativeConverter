@@ -725,7 +725,7 @@
             }
 
             if (preferredLegacy) {
-              const glibcVersion = preferredLegacy.glibcMin || '2.31';
+              const glibcVersion = preferredLegacy.glibcMin || '2.35';
               const glibcLabel = t('glibcMin', { version: glibcVersion });
               appendDownloadAction(preferredLegacy, {
                 text: `${t('compatibility')} · ${t('download')}`,
@@ -746,7 +746,7 @@
               const variantSuffix = isLegacy ? ` / ${t('compatibility')}` : '';
               appendDownloadAction(other, {
                 text: `${t('alt')} · ${t('download')} (${typeLabel}${variantSuffix})`,
-                extraMeta: isLegacy ? t('glibcMin', { version: other.glibcMin || '2.31' }) : ''
+                extraMeta: isLegacy ? t('glibcMin', { version: other.glibcMin || '2.35' }) : ''
               });
             }
           } else {
