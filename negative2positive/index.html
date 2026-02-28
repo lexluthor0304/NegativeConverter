@@ -259,6 +259,88 @@
       display: none;
     }
 
+    .desktop-update-banner {
+      display: none;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 20px;
+      background: rgba(255, 193, 7, 0.1);
+      border-bottom: 1px solid rgba(255, 193, 7, 0.28);
+    }
+
+    .desktop-update-left {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .desktop-update-icon {
+      width: 20px;
+      height: 20px;
+      flex: 0 0 auto;
+      margin-top: 1px;
+      color: #f4b400;
+      opacity: 0.95;
+    }
+
+    .desktop-update-text {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .desktop-update-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: #f4b400;
+      line-height: 1.2;
+    }
+
+    .desktop-update-body {
+      font-size: 12px;
+      color: var(--text-secondary);
+      line-height: 1.35;
+    }
+
+    .desktop-update-actions {
+      flex: 0 0 auto;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .desktop-update-btn {
+      padding: 7px 12px;
+      background: rgba(255, 193, 7, 0.16);
+      border: 1px solid rgba(255, 193, 7, 0.35);
+      border-radius: 999px;
+      color: var(--text-primary);
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: all 0.2s;
+    }
+
+    .desktop-update-btn:hover {
+      background: rgba(255, 193, 7, 0.24);
+      border-color: rgba(255, 193, 7, 0.55);
+    }
+
+    .desktop-update-btn.primary {
+      background: rgba(255, 193, 7, 0.28);
+      border-color: rgba(255, 193, 7, 0.55);
+    }
+
+    .desktop-update-btn.primary:hover {
+      background: rgba(255, 193, 7, 0.38);
+      border-color: rgba(255, 193, 7, 0.72);
+    }
+
     .sr-only {
       position: absolute;
       width: 1px;
@@ -277,12 +359,27 @@
         flex-direction: column;
       }
 
+      .desktop-update-banner {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
       .privacy-banner-actions {
         width: 100%;
         justify-content: flex-start;
       }
 
+      .desktop-update-actions {
+        width: 100%;
+        justify-content: flex-start;
+      }
+
       .privacy-banner-btn {
+        flex: 1 1 160px;
+        text-align: center;
+      }
+
+      .desktop-update-btn {
         flex: 1 1 160px;
         text-align: center;
       }
@@ -1892,6 +1989,24 @@
     </div>
   </div>
 
+  <div class="desktop-update-banner" id="desktopUpdateBanner" role="status" aria-live="polite">
+    <div class="desktop-update-left">
+      <svg class="desktop-update-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+        <path d="M12 3v10"></path>
+        <path d="M7.5 9.5L12 14l4.5-4.5"></path>
+        <path d="M4 17h16"></path>
+      </svg>
+      <div class="desktop-update-text">
+        <div class="desktop-update-title" data-i18n="desktopUpdateTitle">New version available</div>
+        <div class="desktop-update-body" id="desktopUpdateBody">Current version 0.0.0, latest version 0.0.0.</div>
+      </div>
+    </div>
+    <div class="desktop-update-actions">
+      <button class="desktop-update-btn primary" id="desktopUpdateActionBtn" type="button" data-i18n="desktopUpdateAction">Download update</button>
+      <button class="desktop-update-btn" id="desktopUpdateLaterBtn" type="button" data-i18n="desktopUpdateLater">Later</button>
+    </div>
+  </div>
+
   <!-- Main Content -->
   <main class="app-main">
     <!-- Preview Section -->
@@ -2364,6 +2479,10 @@
         privacyBannerLink: "查看隐私说明",
         offlineDownloadLink: "下载离线版",
         privacyBannerToggleLabel: "隐藏隐私说明横幅",
+        desktopUpdateTitle: "发现新版本",
+        desktopUpdateBody: "当前版本 {current}，最新版本 {latest}。",
+        desktopUpdateAction: "前往下载更新",
+        desktopUpdateLater: "稍后提醒",
         dropHint: "拖放图片到此处或点击读取",
         selectFile: "选择文件",
         applyRotate: "应用",
@@ -2522,6 +2641,10 @@
         privacyBannerLink: "Privacy details",
         offlineDownloadLink: "Download offline app",
         privacyBannerToggleLabel: "Hide privacy notice",
+        desktopUpdateTitle: "New version available",
+        desktopUpdateBody: "Current version {current}, latest version {latest}.",
+        desktopUpdateAction: "Download update",
+        desktopUpdateLater: "Later",
         dropHint: "Drop image here or click to open",
         selectFile: "Select File",
         applyRotate: "Apply",
@@ -2680,6 +2803,10 @@
         privacyBannerLink: "プライバシー詳細",
         offlineDownloadLink: "オフライン版をダウンロード",
         privacyBannerToggleLabel: "プライバシー通知を非表示",
+        desktopUpdateTitle: "新しいバージョンがあります",
+        desktopUpdateBody: "現在のバージョン {current}、最新バージョン {latest}。",
+        desktopUpdateAction: "ダウンロードページへ",
+        desktopUpdateLater: "後で",
         dropHint: "画像をドロップまたはクリックして読み込み",
         selectFile: "ファイル選択",
         applyRotate: "適用",
@@ -2858,10 +2985,24 @@
     let opencvActiveSource = null;
     const STEP2_FIRST_HINT_SESSION_KEY = 'nc_step2_first_hint_seen_v1';
     const PRIVACY_BANNER_COLLAPSED_STORAGE_KEY = 'nc_privacy_banner_collapsed_v1';
+    const DESKTOP_UPDATE_LAST_CHECK_TS_KEY = 'nc_desktop_update_last_check_ts';
+    const DESKTOP_UPDATE_LAST_SEEN_LATEST_KEY = 'nc_desktop_update_last_seen_latest';
+    const DESKTOP_UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+    const DESKTOP_UPDATE_FETCH_TIMEOUT_MS = 5000;
+    const DESKTOP_UPDATE_MANIFEST_URLS = [
+      'https://download.neoanaloglab.com/negative-converter/release/latest.json',
+      'https://negative-converter.tokugai.com/negative-converter/release/latest.json'
+    ];
+    const DESKTOP_UPDATE_PAGE_URL = 'https://negative-converter.tokugai.com/download.html';
 
     let currentLang = 'en';
     let stateReady = false;
     let step2FirstHintHandled = false;
+    const desktopUpdateState = {
+      visible: false,
+      currentVersion: '',
+      latestVersion: ''
+    };
 
     function getLocalizedText(key, fallback = '') {
       const dict = i18n[currentLang] || i18n.en || {};
@@ -2896,6 +3037,7 @@
       if (offlineLink) {
         offlineLink.href = `./download.html?lang=${encodeURIComponent(lang)}`;
       }
+      updateDesktopUpdateBannerText();
       if (stateReady) {
         updateCurrentFileLabel();
         updateRollReferenceUI();
@@ -2940,6 +3082,163 @@
       }
     }
 
+    function applyTemplate(template, vars = {}) {
+      let output = String(template || '');
+      Object.entries(vars).forEach(([key, value]) => {
+        output = output.replaceAll(`{${key}}`, String(value));
+      });
+      return output;
+    }
+
+    function parseSemver(value) {
+      if (typeof value !== 'string') return null;
+      const normalized = value.trim().replace(/^v/i, '');
+      const match = normalized.match(/^(\d+)\.(\d+)\.(\d+)$/);
+      if (!match) return null;
+      return {
+        normalized,
+        major: Number(match[1]),
+        minor: Number(match[2]),
+        patch: Number(match[3])
+      };
+    }
+
+    function compareSemver(a, b) {
+      if (a.major !== b.major) return a.major - b.major;
+      if (a.minor !== b.minor) return a.minor - b.minor;
+      return a.patch - b.patch;
+    }
+
+    function updateDesktopUpdateBannerText() {
+      const body = document.getElementById('desktopUpdateBody');
+      if (!body) return;
+      const template = getLocalizedText(
+        'desktopUpdateBody',
+        'Current version {current}, latest version {latest}.'
+      );
+      const current = desktopUpdateState.currentVersion || '0.0.0';
+      const latest = desktopUpdateState.latestVersion || '0.0.0';
+      body.textContent = applyTemplate(template, { current, latest });
+    }
+
+    function showDesktopUpdateBanner(currentVersion, latestVersion) {
+      const banner = document.getElementById('desktopUpdateBanner');
+      if (!banner) return;
+      desktopUpdateState.visible = true;
+      desktopUpdateState.currentVersion = currentVersion;
+      desktopUpdateState.latestVersion = latestVersion;
+      updateDesktopUpdateBannerText();
+      banner.style.display = 'flex';
+    }
+
+    function hideDesktopUpdateBanner() {
+      const banner = document.getElementById('desktopUpdateBanner');
+      if (!banner) return;
+      desktopUpdateState.visible = false;
+      banner.style.display = 'none';
+    }
+
+    function shouldSkipDesktopUpdateCheck() {
+      const raw = safeStorageGet(DESKTOP_UPDATE_LAST_CHECK_TS_KEY);
+      const lastCheck = Number(raw);
+      if (!Number.isFinite(lastCheck) || lastCheck <= 0) return false;
+      return (Date.now() - lastCheck) < DESKTOP_UPDATE_CHECK_INTERVAL_MS;
+    }
+
+    function markDesktopUpdateChecked() {
+      safeStorageSet(DESKTOP_UPDATE_LAST_CHECK_TS_KEY, String(Date.now()));
+    }
+
+    async function fetchLatestDesktopVersion() {
+      let lastError = null;
+      for (const url of DESKTOP_UPDATE_MANIFEST_URLS) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), DESKTOP_UPDATE_FETCH_TIMEOUT_MS);
+        try {
+          const response = await fetch(url, { cache: 'no-store', signal: controller.signal });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const payload = await response.json();
+          const fromVersion = typeof payload.version === 'string' ? payload.version : '';
+          const fromTag = typeof payload.tag === 'string' ? payload.tag : '';
+          const parsed = parseSemver(fromVersion) || parseSemver(fromTag);
+          if (!parsed) throw new Error('invalid version in latest.json');
+          return parsed.normalized;
+        } catch (err) {
+          lastError = err;
+        } finally {
+          clearTimeout(timeout);
+        }
+      }
+      throw lastError || new Error('failed to load release manifest');
+    }
+
+    function buildDesktopUpdateDownloadUrl() {
+      const url = new URL(DESKTOP_UPDATE_PAGE_URL);
+      url.searchParams.set('lang', currentLang || 'en');
+      url.searchParams.set('from', 'desktop-update');
+      if (desktopUpdateState.currentVersion) url.searchParams.set('current', desktopUpdateState.currentVersion);
+      if (desktopUpdateState.latestVersion) url.searchParams.set('latest', desktopUpdateState.latestVersion);
+      return url.toString();
+    }
+
+    async function openDownloadPageForUpdate() {
+      const url = buildDesktopUpdateDownloadUrl();
+      if (isTauriDesktop()) {
+        try {
+          await window.__TAURI__.core.invoke('open_external_url', { url });
+          return;
+        } catch (err) {
+          console.warn('Desktop open_external_url failed, falling back to window.open:', err);
+        }
+      }
+      window.open(url, '_blank', 'noopener');
+    }
+
+    async function checkDesktopUpdate(options = {}) {
+      if (!isTauriDesktop()) return;
+      const force = Boolean(options.force);
+      if (!force && shouldSkipDesktopUpdateCheck()) return;
+
+      try {
+        const currentRaw = await window.__TAURI__.core.invoke('get_app_version');
+        const currentParsed = parseSemver(String(currentRaw || ''));
+        if (!currentParsed) return;
+
+        const latest = await fetchLatestDesktopVersion();
+        const latestParsed = parseSemver(latest);
+        if (!latestParsed) return;
+
+        if (compareSemver(latestParsed, currentParsed) > 0) {
+          safeStorageSet(DESKTOP_UPDATE_LAST_SEEN_LATEST_KEY, latestParsed.normalized);
+          showDesktopUpdateBanner(currentParsed.normalized, latestParsed.normalized);
+        }
+      } catch (err) {
+        console.info('Desktop update check skipped:', err);
+      } finally {
+        markDesktopUpdateChecked();
+      }
+    }
+
+    function initDesktopUpdateCheck() {
+      const actionBtn = document.getElementById('desktopUpdateActionBtn');
+      const laterBtn = document.getElementById('desktopUpdateLaterBtn');
+      if (actionBtn) {
+        actionBtn.addEventListener('click', () => {
+          openDownloadPageForUpdate().catch((err) => {
+            console.warn('Failed to open download page:', err);
+          });
+        });
+      }
+      if (laterBtn) {
+        laterBtn.addEventListener('click', () => {
+          hideDesktopUpdateBanner();
+        });
+      }
+      checkDesktopUpdate().catch((err) => {
+        console.info('Desktop update check failed:', err);
+      });
+    }
+
     function initPrivacyBannerToggle() {
       const banner = document.querySelector('.privacy-banner');
       const toggle = document.getElementById('privacyBannerToggle');
@@ -2955,6 +3254,7 @@
     }
 
     initPrivacyBannerToggle();
+    initDesktopUpdateCheck();
 
     // ===========================================
     // Film Presets
