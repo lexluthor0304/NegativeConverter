@@ -412,7 +412,7 @@
         notesTitle: '提示',
         noteWindows: 'Windows：优先下载 EXE（安装器）。',
         noteMac: 'macOS：DMG 安装包。若提示“无法打开”，请在系统设置里允许打开。',
-        noteLinux: 'Linux：优先 AppImage；也提供 deb/rpm。',
+        noteLinux: 'Linux：优先标准版 AppImage；旧系统若出现 GLIBC 报错，请使用兼容版 AppImage。',
         noteVerify: '下载后可校验 SHA-256（页面会显示）。',
         latestVersion: '最新版本：{tag}',
         sourceFrom: '来源：{base}',
@@ -421,8 +421,11 @@
         macos: 'macOS',
         linux: 'Linux',
         recommended: '推荐',
+        compatibility: '兼容版',
         alt: '其他',
         download: '下载',
+        glibcMin: 'glibc >= {version}',
+        linuxLegacyHint: '若出现 GLIBC 报错，请下载兼容版 AppImage（{glibc}）。',
         sha256: 'SHA-256',
         bytes: '大小'
       },
@@ -441,7 +444,7 @@
         notesTitle: 'Notes',
         noteWindows: 'Windows: EXE installer is recommended.',
         noteMac: 'macOS: DMG package. If blocked, allow it in System Settings.',
-        noteLinux: 'Linux: AppImage is recommended; deb/rpm are also available.',
+        noteLinux: 'Linux: standard AppImage is recommended; if you see GLIBC errors on older systems, use the compatibility AppImage.',
         noteVerify: 'You can verify the SHA-256 shown on this page.',
         latestVersion: 'Latest: {tag}',
         sourceFrom: 'Source: {base}',
@@ -450,8 +453,11 @@
         macos: 'macOS',
         linux: 'Linux',
         recommended: 'Recommended',
+        compatibility: 'Compatibility',
         alt: 'Alternatives',
         download: 'Download',
+        glibcMin: 'glibc >= {version}',
+        linuxLegacyHint: 'If GLIBC errors appear, use the compatibility AppImage ({glibc}).',
         sha256: 'SHA-256',
         bytes: 'Size'
       },
@@ -470,7 +476,7 @@
         notesTitle: 'ヒント',
         noteWindows: 'Windows：EXE（インストーラ）推奨。',
         noteMac: 'macOS：DMG パッケージ。ブロックされた場合は設定から許可してください。',
-        noteLinux: 'Linux：AppImage 推奨。deb/rpm もあります。',
+        noteLinux: 'Linux：標準版 AppImage 推奨。古い環境で GLIBC エラーが出る場合は互換版 AppImage を使用してください。',
         noteVerify: '表示される SHA-256 で検証できます。',
         latestVersion: '最新：{tag}',
         sourceFrom: '取得元：{base}',
@@ -479,8 +485,11 @@
         macos: 'macOS',
         linux: 'Linux',
         recommended: 'おすすめ',
+        compatibility: '互換版',
         alt: 'その他',
         download: 'ダウンロード',
+        glibcMin: 'glibc >= {version}',
+        linuxLegacyHint: 'GLIBC エラーが出る場合は互換版 AppImage（{glibc}）を利用してください。',
         sha256: 'SHA-256',
         bytes: 'サイズ'
       }
@@ -669,23 +678,24 @@
           empty.textContent = '—';
           actions.appendChild(empty);
         } else {
-          const preferred = pickPreferred(osFiles, spec.preferredTypes);
-          const others = osFiles.filter(f => f !== preferred);
-
-          if (preferred) {
+          const appendDownloadAction = (file, options = {}) => {
+            const { primary = false, text = '', showHash = false, extraMeta = '' } = options;
             const a = document.createElement('a');
-            a.className = 'download-btn primary';
-            a.href = buildUrl(base, preferred.key);
+            a.className = primary ? 'download-btn primary' : 'download-btn';
+            a.href = buildUrl(base, file.key);
             a.target = '_blank';
             a.rel = 'noopener';
-            a.textContent = `${t('recommended')} · ${t('download')}`;
+            a.textContent = text;
 
             const meta = document.createElement('span');
             meta.className = 'download-meta';
-            meta.textContent = `${preferred.arch || '—'} · ${formatBytes(preferred.bytes)}`;
+            const metaParts = [`${file.arch || '—'}`, `${formatBytes(file.bytes)}`];
+            if (extraMeta) metaParts.push(extraMeta);
+            meta.textContent = metaParts.join(' · ');
             a.appendChild(meta);
-
             actions.appendChild(a);
+
+            if (!showHash) return;
             const hash = document.createElement('div');
             hash.className = 'muted download-hash';
 
@@ -693,27 +703,69 @@
             hashLabel.textContent = `${t('sha256')}: `;
 
             const hashValue = document.createElement('code');
-            hashValue.textContent = preferred.sha256 || '—';
+            hashValue.textContent = file.sha256 || '—';
 
             hash.appendChild(hashLabel);
             hash.appendChild(hashValue);
             actions.appendChild(hash);
-          }
+          };
 
-          for (const other of others) {
-            const a = document.createElement('a');
-            a.className = 'download-btn';
-            a.href = buildUrl(base, other.key);
-            a.target = '_blank';
-            a.rel = 'noopener';
-            a.textContent = `${t('alt')} · ${t('download')} (${(other.type || '').toUpperCase() || 'FILE'})`;
+          if (spec.os === 'linux') {
+            const legacyFiles = osFiles.filter(f => String(f.variant || '').toLowerCase() === 'legacy');
+            const standardFiles = osFiles.filter(f => String(f.variant || '').toLowerCase() !== 'legacy');
+            const preferred = pickPreferred(standardFiles.length > 0 ? standardFiles : osFiles, spec.preferredTypes);
+            const preferredLegacy = pickPreferred(legacyFiles, ['appimage', 'deb', 'rpm']);
 
-            const meta = document.createElement('span');
-            meta.className = 'download-meta';
-            meta.textContent = `${other.arch || '—'} · ${formatBytes(other.bytes)}`;
-            a.appendChild(meta);
+            if (preferred) {
+              appendDownloadAction(preferred, {
+                primary: true,
+                text: `${t('recommended')} · ${t('download')}`,
+                showHash: true
+              });
+            }
 
-            actions.appendChild(a);
+            if (preferredLegacy) {
+              const glibcVersion = preferredLegacy.glibcMin || '2.31';
+              const glibcLabel = t('glibcMin', { version: glibcVersion });
+              appendDownloadAction(preferredLegacy, {
+                text: `${t('compatibility')} · ${t('download')}`,
+                showHash: true,
+                extraMeta: glibcLabel
+              });
+
+              const hint = document.createElement('div');
+              hint.className = 'muted';
+              hint.textContent = t('linuxLegacyHint', { glibc: glibcLabel });
+              actions.appendChild(hint);
+            }
+
+            const others = osFiles.filter(f => f !== preferred && f !== preferredLegacy);
+            for (const other of others) {
+              const typeLabel = (other.type || '').toUpperCase() || 'FILE';
+              const isLegacy = String(other.variant || '').toLowerCase() === 'legacy';
+              const variantSuffix = isLegacy ? ` / ${t('compatibility')}` : '';
+              appendDownloadAction(other, {
+                text: `${t('alt')} · ${t('download')} (${typeLabel}${variantSuffix})`,
+                extraMeta: isLegacy ? t('glibcMin', { version: other.glibcMin || '2.31' }) : ''
+              });
+            }
+          } else {
+            const preferred = pickPreferred(osFiles, spec.preferredTypes);
+            const others = osFiles.filter(f => f !== preferred);
+
+            if (preferred) {
+              appendDownloadAction(preferred, {
+                primary: true,
+                text: `${t('recommended')} · ${t('download')}`,
+                showHash: true
+              });
+            }
+
+            for (const other of others) {
+              appendDownloadAction(other, {
+                text: `${t('alt')} · ${t('download')} (${(other.type || '').toUpperCase() || 'FILE'})`
+              });
+            }
           }
         }
 
