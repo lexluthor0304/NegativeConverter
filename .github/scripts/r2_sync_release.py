@@ -62,7 +62,22 @@ def _classify_asset(name: str) -> dict:
     elif re.search(r"(x86_64|amd64|x64)", lower):
         arch = "x64"
 
-    return {"os": os_name, "type": kind, "arch": arch}
+    result = {"os": os_name, "type": kind, "arch": arch, "variant": "standard"}
+    if os_name == "linux":
+        legacy_match = re.search(r"legacy[-_]?glibc[-_]?([0-9]+)(?:[._-]([0-9]+))?", lower)
+        if legacy_match:
+            major_raw = legacy_match.group(1)
+            minor_raw = legacy_match.group(2)
+            if minor_raw:
+                glibc_min = f"{int(major_raw)}.{int(minor_raw)}"
+            elif len(major_raw) >= 2:
+                glibc_min = f"{int(major_raw[0])}.{int(major_raw[1:])}"
+            else:
+                glibc_min = f"{int(major_raw)}.0"
+            result["variant"] = "legacy"
+            result["glibcMin"] = glibc_min
+
+    return result
 
 
 def _aws_s3_cp(*, src: Path, dest: str, endpoint: str, cache_control: str, content_type: str | None) -> None:
