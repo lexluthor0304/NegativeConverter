@@ -72,7 +72,8 @@ Build outputs are placed under:
 - Run AppImage directly, not with `sudo`.
 - The desktop app now applies AppImage-only runtime guards:
   - isolates GIO module loading to avoid host `gvfs`/GLib ABI mismatches
-  - keeps DMABUF enabled when render nodes are usable, and auto-falls back when not
+  - standard AppImage keeps DMABUF when render nodes are usable, and auto-falls back when not
+  - compatibility AppImage (`*_legacy-glibc235.AppImage`) defaults DMABUF off for startup stability
 - Optional override for DMABUF behavior:
   - force enable: `NEGATIVE_CONVERTER_DMABUF=on ./Negative\ Converter*.AppImage`
   - force disable: `NEGATIVE_CONVERTER_DMABUF=off ./Negative\ Converter*.AppImage`

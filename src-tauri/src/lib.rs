@@ -44,6 +44,44 @@ fn parse_bool_flag(value: &str) -> Option<bool> {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppImageVariant {
+    Standard,
+    LegacyCompat,
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn looks_like_legacy_appimage_name(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.contains("legacy") && lower.contains("glibc")
+}
+
+#[cfg(target_os = "linux")]
+fn detect_appimage_variant() -> AppImageVariant {
+    if let Some(appimage) = std::env::var("APPIMAGE").ok() {
+        if looks_like_legacy_appimage_name(&appimage) {
+            return AppImageVariant::LegacyCompat;
+        }
+    }
+
+    if let Some(argv0) = std::env::args_os().next() {
+        if looks_like_legacy_appimage_name(&argv0.to_string_lossy()) {
+            return AppImageVariant::LegacyCompat;
+        }
+    }
+
+    AppImageVariant::Standard
+}
+
+#[cfg(target_os = "linux")]
+fn appimage_variant_label(variant: AppImageVariant) -> &'static str {
+    match variant {
+        AppImageVariant::Standard => "standard",
+        AppImageVariant::LegacyCompat => "legacy",
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn set_env_if_absent(key: &str, value: &str) -> bool {
     if std::env::var_os(key).is_some() {
@@ -100,6 +138,83 @@ enum DmabufProbeResult {
     NoRenderNode,
     PermissionDenied(Vec<String>),
     Unavailable(String),
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DmabufProbeKind {
+    Supported,
+    NoRenderNode,
+    PermissionDenied,
+    Unavailable,
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DmabufKeepReason {
+    UserPreset,
+    OverrideEnabled,
+    ProbeSupported,
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DmabufDisableReason {
+    OverrideDisabled,
+    LegacyDefault,
+    NoRenderNode,
+    PermissionDenied,
+    ProbeUnavailable,
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DmabufDecision {
+    Keep(DmabufKeepReason),
+    Disable(DmabufDisableReason),
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn decide_dmabuf_policy(
+    variant: AppImageVariant,
+    user_set_webkit_disable: bool,
+    override_value: Option<bool>,
+    probe_kind: Option<DmabufProbeKind>,
+) -> DmabufDecision {
+    if user_set_webkit_disable {
+        return DmabufDecision::Keep(DmabufKeepReason::UserPreset);
+    }
+
+    if let Some(override_value) = override_value {
+        return if override_value {
+            DmabufDecision::Keep(DmabufKeepReason::OverrideEnabled)
+        } else {
+            DmabufDecision::Disable(DmabufDisableReason::OverrideDisabled)
+        };
+    }
+
+    if variant == AppImageVariant::LegacyCompat {
+        return DmabufDecision::Disable(DmabufDisableReason::LegacyDefault);
+    }
+
+    match probe_kind.unwrap_or(DmabufProbeKind::Unavailable) {
+        DmabufProbeKind::Supported => DmabufDecision::Keep(DmabufKeepReason::ProbeSupported),
+        DmabufProbeKind::NoRenderNode => DmabufDecision::Disable(DmabufDisableReason::NoRenderNode),
+        DmabufProbeKind::PermissionDenied => {
+            DmabufDecision::Disable(DmabufDisableReason::PermissionDenied)
+        }
+        DmabufProbeKind::Unavailable => DmabufDecision::Disable(DmabufDisableReason::ProbeUnavailable),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn dmabuf_probe_kind(result: &DmabufProbeResult) -> DmabufProbeKind {
+    match result {
+        DmabufProbeResult::Supported(_) => DmabufProbeKind::Supported,
+        DmabufProbeResult::NoRenderNode => DmabufProbeKind::NoRenderNode,
+        DmabufProbeResult::PermissionDenied(_) => DmabufProbeKind::PermissionDenied,
+        DmabufProbeResult::Unavailable(_) => DmabufProbeKind::Unavailable,
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -178,48 +293,79 @@ fn disable_dmabuf_renderer(reason: &str) {
 }
 
 #[cfg(target_os = "linux")]
-fn apply_appimage_dmabuf_policy() {
-    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_some() {
+fn apply_appimage_dmabuf_policy(variant: AppImageVariant) {
+    let user_set_webkit_disable = std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_some();
+    let dmabuf_override_raw = std::env::var("NEGATIVE_CONVERTER_DMABUF").ok();
+    let dmabuf_override = dmabuf_override_raw.as_deref().and_then(parse_bool_flag);
+
+    if dmabuf_override_raw.is_some() && dmabuf_override.is_none() {
         eprintln!(
-            "[linux-compat] WEBKIT_DISABLE_DMABUF_RENDERER already set by user; keeping existing value."
+            "[linux-compat] Ignoring NEGATIVE_CONVERTER_DMABUF={}; expected on/off/true/false/1/0.",
+            dmabuf_override_raw.as_deref().unwrap_or_default()
         );
-        return;
     }
 
-    let dmabuf_override = std::env::var("NEGATIVE_CONVERTER_DMABUF").ok();
-    if let Some(raw) = dmabuf_override.as_deref() {
-        match parse_bool_flag(raw) {
-            Some(true) => {
-                eprintln!("[linux-compat] Keeping DMABUF enabled (NEGATIVE_CONVERTER_DMABUF={raw}).");
-                return;
-            }
-            Some(false) => {
-                disable_dmabuf_renderer("forced by NEGATIVE_CONVERTER_DMABUF.");
-                return;
-            }
-            None => {
+    let probe_result = if !user_set_webkit_disable
+        && dmabuf_override.is_none()
+        && variant == AppImageVariant::Standard
+    {
+        Some(probe_dmabuf_support())
+    } else {
+        None
+    };
+
+    let decision = decide_dmabuf_policy(
+        variant,
+        user_set_webkit_disable,
+        dmabuf_override,
+        probe_result.as_ref().map(dmabuf_probe_kind),
+    );
+
+    match decision {
+        DmabufDecision::Keep(DmabufKeepReason::UserPreset) => {
+            eprintln!(
+                "[linux-compat] WEBKIT_DISABLE_DMABUF_RENDERER already set by user; keeping existing value."
+            );
+        }
+        DmabufDecision::Keep(DmabufKeepReason::OverrideEnabled) => {
+            eprintln!("[linux-compat] Keeping DMABUF enabled by NEGATIVE_CONVERTER_DMABUF override.");
+        }
+        DmabufDecision::Keep(DmabufKeepReason::ProbeSupported) => {
+            if let Some(DmabufProbeResult::Supported(path)) = probe_result {
                 eprintln!(
-                    "[linux-compat] Ignoring NEGATIVE_CONVERTER_DMABUF={raw}; expected on/off/true/false/1/0."
+                    "[linux-compat] DMABUF render node is accessible ({path}); keeping DMABUF enabled."
                 );
+            } else {
+                eprintln!("[linux-compat] Keeping DMABUF enabled.");
             }
         }
-    }
-
-    match probe_dmabuf_support() {
-        DmabufProbeResult::Supported(path) => {
-            eprintln!("[linux-compat] DMABUF render node is accessible ({path}); keeping DMABUF enabled.");
+        DmabufDecision::Disable(DmabufDisableReason::OverrideDisabled) => {
+            disable_dmabuf_renderer("forced by NEGATIVE_CONVERTER_DMABUF.");
         }
-        DmabufProbeResult::NoRenderNode => {
+        DmabufDecision::Disable(DmabufDisableReason::LegacyDefault) => {
+            disable_dmabuf_renderer(
+                "legacy compatibility AppImage defaults DMABUF off for startup stability.",
+            );
+        }
+        DmabufDecision::Disable(DmabufDisableReason::NoRenderNode) => {
             disable_dmabuf_renderer("no /dev/dri/renderD* node found.");
         }
-        DmabufProbeResult::PermissionDenied(paths) => {
-            disable_dmabuf_renderer(&format!(
-                "permission denied opening render node(s): {}",
-                paths.join(", ")
-            ));
+        DmabufDecision::Disable(DmabufDisableReason::PermissionDenied) => {
+            if let Some(DmabufProbeResult::PermissionDenied(paths)) = probe_result {
+                disable_dmabuf_renderer(&format!(
+                    "permission denied opening render node(s): {}",
+                    paths.join(", ")
+                ));
+            } else {
+                disable_dmabuf_renderer("permission denied opening /dev/dri/render node.");
+            }
         }
-        DmabufProbeResult::Unavailable(reason) => {
-            disable_dmabuf_renderer(&format!("render node probe failed: {reason}"));
+        DmabufDecision::Disable(DmabufDisableReason::ProbeUnavailable) => {
+            if let Some(DmabufProbeResult::Unavailable(reason)) = probe_result {
+                disable_dmabuf_renderer(&format!("render node probe failed: {reason}"));
+            } else {
+                disable_dmabuf_renderer("render node probe failed.");
+            }
         }
     }
 }
@@ -230,9 +376,13 @@ fn apply_linux_appimage_compat_env() {
         return;
     }
 
-    eprintln!("[linux-compat] AppImage runtime detected. Applying Linux compatibility guards.");
+    let variant = detect_appimage_variant();
+    eprintln!(
+        "[linux-compat] AppImage runtime detected ({}). Applying Linux compatibility guards.",
+        appimage_variant_label(variant)
+    );
     apply_appimage_gio_guards();
-    apply_appimage_dmabuf_policy();
+    apply_appimage_dmabuf_policy(variant);
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -249,7 +399,10 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_bool_flag;
+    use super::{
+        decide_dmabuf_policy, looks_like_legacy_appimage_name, parse_bool_flag, AppImageVariant,
+        DmabufDecision, DmabufDisableReason, DmabufKeepReason, DmabufProbeKind,
+    };
 
     #[test]
     fn parse_bool_flag_accepts_truthy_values() {
@@ -269,5 +422,86 @@ mod tests {
     fn parse_bool_flag_rejects_unknown_values() {
         assert_eq!(parse_bool_flag("maybe"), None);
         assert_eq!(parse_bool_flag(""), None);
+    }
+
+    #[test]
+    fn legacy_appimage_name_detection_requires_legacy_and_glibc() {
+        assert!(looks_like_legacy_appimage_name(
+            "Negative Converter_0.1.4_amd64_legacy-glibc235.AppImage"
+        ));
+        assert!(looks_like_legacy_appimage_name(
+            "/tmp/negative_converter_legacy_glibc_231.appimage"
+        ));
+        assert!(!looks_like_legacy_appimage_name(
+            "Negative Converter_0.1.4_amd64.AppImage"
+        ));
+        assert!(!looks_like_legacy_appimage_name("legacy-build.AppImage"));
+    }
+
+    #[test]
+    fn dmabuf_policy_respects_user_preset_first() {
+        let decision = decide_dmabuf_policy(
+            AppImageVariant::LegacyCompat,
+            true,
+            Some(false),
+            Some(DmabufProbeKind::PermissionDenied),
+        );
+        assert_eq!(decision, DmabufDecision::Keep(DmabufKeepReason::UserPreset));
+    }
+
+    #[test]
+    fn dmabuf_policy_allows_override_on_for_legacy_variant() {
+        let decision = decide_dmabuf_policy(
+            AppImageVariant::LegacyCompat,
+            false,
+            Some(true),
+            Some(DmabufProbeKind::PermissionDenied),
+        );
+        assert_eq!(
+            decision,
+            DmabufDecision::Keep(DmabufKeepReason::OverrideEnabled)
+        );
+    }
+
+    #[test]
+    fn dmabuf_policy_disables_legacy_by_default() {
+        let decision = decide_dmabuf_policy(AppImageVariant::LegacyCompat, false, None, None);
+        assert_eq!(
+            decision,
+            DmabufDecision::Disable(DmabufDisableReason::LegacyDefault)
+        );
+    }
+
+    #[test]
+    fn dmabuf_policy_uses_probe_for_standard_appimage() {
+        let supported = decide_dmabuf_policy(
+            AppImageVariant::Standard,
+            false,
+            None,
+            Some(DmabufProbeKind::Supported),
+        );
+        assert_eq!(supported, DmabufDecision::Keep(DmabufKeepReason::ProbeSupported));
+
+        let no_render = decide_dmabuf_policy(
+            AppImageVariant::Standard,
+            false,
+            None,
+            Some(DmabufProbeKind::NoRenderNode),
+        );
+        assert_eq!(
+            no_render,
+            DmabufDecision::Disable(DmabufDisableReason::NoRenderNode)
+        );
+
+        let denied = decide_dmabuf_policy(
+            AppImageVariant::Standard,
+            false,
+            None,
+            Some(DmabufProbeKind::PermissionDenied),
+        );
+        assert_eq!(
+            denied,
+            DmabufDecision::Disable(DmabufDisableReason::PermissionDenied)
+        );
     }
 }
