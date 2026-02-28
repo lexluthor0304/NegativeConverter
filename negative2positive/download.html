@@ -412,7 +412,7 @@
         notesTitle: '提示',
         noteWindows: 'Windows：优先下载 EXE（安装器）。',
         noteMac: 'macOS：DMG 安装包。若提示“无法打开”，请在系统设置里允许打开。',
-        noteLinux: 'Linux：优先标准版 AppImage；旧系统若出现 GLIBC 报错，请使用兼容版 AppImage。',
+        noteLinux: 'Linux：优先标准版 AppImage；请勿使用 sudo 运行。AppImage 已内置启动兼容保护，旧系统若出现 GLIBC 报错请使用兼容版。',
         noteVerify: '下载后可校验 SHA-256（页面会显示）。',
         latestVersion: '最新版本：{tag}',
         sourceFrom: '来源：{base}',
@@ -425,7 +425,7 @@
         alt: '其他',
         download: '下载',
         glibcMin: 'glibc >= {version}',
-        linuxLegacyHint: '若出现 GLIBC 报错，请下载兼容版 AppImage（{glibc}）。',
+        linuxLegacyHint: '若出现 GLIBC 报错，请下载兼容版 AppImage（{glibc}）；若图形驱动报错，请勿使用 sudo 并参考 README 的 Linux 排障说明。',
         sha256: 'SHA-256',
         bytes: '大小'
       },
@@ -444,7 +444,7 @@
         notesTitle: 'Notes',
         noteWindows: 'Windows: EXE installer is recommended.',
         noteMac: 'macOS: DMG package. If blocked, allow it in System Settings.',
-        noteLinux: 'Linux: standard AppImage is recommended; if you see GLIBC errors on older systems, use the compatibility AppImage.',
+        noteLinux: 'Linux: standard AppImage is recommended. Do not run with sudo. AppImage startup guards are built in; if you still see GLIBC errors on older systems, use the compatibility AppImage.',
         noteVerify: 'You can verify the SHA-256 shown on this page.',
         latestVersion: 'Latest: {tag}',
         sourceFrom: 'Source: {base}',
@@ -457,7 +457,7 @@
         alt: 'Alternatives',
         download: 'Download',
         glibcMin: 'glibc >= {version}',
-        linuxLegacyHint: 'If GLIBC errors appear, use the compatibility AppImage ({glibc}).',
+        linuxLegacyHint: 'If GLIBC errors appear, use the compatibility AppImage ({glibc}); for graphics-driver startup issues, run without sudo and follow the Linux troubleshooting in README.',
         sha256: 'SHA-256',
         bytes: 'Size'
       },
@@ -476,7 +476,7 @@
         notesTitle: 'ヒント',
         noteWindows: 'Windows：EXE（インストーラ）推奨。',
         noteMac: 'macOS：DMG パッケージ。ブロックされた場合は設定から許可してください。',
-        noteLinux: 'Linux：標準版 AppImage 推奨。古い環境で GLIBC エラーが出る場合は互換版 AppImage を使用してください。',
+        noteLinux: 'Linux：標準版 AppImage 推奨。sudo では実行しないでください。AppImage には起動時互換ガードを組み込んでおり、古い環境で GLIBC エラーが出る場合は互換版を使用してください。',
         noteVerify: '表示される SHA-256 で検証できます。',
         latestVersion: '最新：{tag}',
         sourceFrom: '取得元：{base}',
@@ -489,7 +489,7 @@
         alt: 'その他',
         download: 'ダウンロード',
         glibcMin: 'glibc >= {version}',
-        linuxLegacyHint: 'GLIBC エラーが出る場合は互換版 AppImage（{glibc}）を利用してください。',
+        linuxLegacyHint: 'GLIBC エラーが出る場合は互換版 AppImage（{glibc}）を利用してください。描画系の起動エラーが出る場合は sudo を使わず、README の Linux トラブルシュートを参照してください。',
         sha256: 'SHA-256',
         bytes: 'サイズ'
       }
