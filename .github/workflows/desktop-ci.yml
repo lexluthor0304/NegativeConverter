@@ -58,8 +58,8 @@ jobs:
           if-no-files-found: error
 
   build-linux-legacy:
-    name: Build Linux Legacy AppImage (glibc 2.31)
-    runs-on: ubuntu-20.04
+    name: Build Linux Legacy AppImage (glibc 2.35)
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout
@@ -82,8 +82,8 @@ jobs:
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev librsvg2-dev patchelf
-          sudo apt-get install -y libwebkit2gtk-4.0-dev
+          sudo apt-get install -y libgtk-3-dev libglib2.0-dev librsvg2-dev patchelf pkg-config libssl-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev || sudo apt-get install -y libwebkit2gtk-4.0-dev
           sudo apt-get install -y libayatana-appindicator3-dev || sudo apt-get install -y libappindicator3-dev
 
       - name: Install dependencies
@@ -98,7 +98,7 @@ jobs:
           count=0
           for file in src-tauri/target/release/bundle/appimage/*.AppImage; do
             [ -e "${file}" ] || continue
-            legacy="${file%.AppImage}_legacy-glibc231.AppImage"
+            legacy="${file%.AppImage}_legacy-glibc235.AppImage"
             mv "${file}" "${legacy}"
             echo "Marked legacy AppImage: $(basename "${legacy}")"
             count=$((count + 1))
@@ -112,5 +112,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: bundle-linux-legacy
-          path: src-tauri/target/release/bundle/appimage/*_legacy-glibc231.AppImage
+          path: src-tauri/target/release/bundle/appimage/*_legacy-glibc235.AppImage
           if-no-files-found: error
