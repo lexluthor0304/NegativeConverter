@@ -67,6 +67,18 @@ npm run tauri:build
 Build outputs are placed under:
 - `src-tauri/target/release/bundle/`
 
+### Linux AppImage troubleshooting
+
+- Run AppImage directly, not with `sudo`.
+- The desktop app now applies AppImage-only runtime guards:
+  - isolates GIO module loading to avoid host `gvfs`/GLib ABI mismatches
+  - standard AppImage keeps DMABUF when render nodes are usable, and auto-falls back when not
+  - compatibility AppImage (`*_legacy-glibc235.AppImage`) defaults DMABUF off for startup stability
+- Optional override for DMABUF behavior:
+  - force enable: `NEGATIVE_CONVERTER_DMABUF=on ./Negative\ Converter*.AppImage`
+  - force disable: `NEGATIVE_CONVERTER_DMABUF=off ./Negative\ Converter*.AppImage`
+- If startup still fails on older distros, use the compatibility AppImage (`*_legacy-glibc235.AppImage`).
+
 ### Release (GitHub Actions)
 
 1. Update versions:
