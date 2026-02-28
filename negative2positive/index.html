@@ -1485,7 +1485,8 @@
       gap: 4px;
     }
 
-    .export-format-toggle .format-btn {
+    .export-format-toggle .format-btn,
+    .export-bitdepth-toggle .bitdepth-btn {
       flex: 1;
       padding: 6px 12px;
       background: var(--bg-tertiary);
@@ -1496,18 +1497,47 @@
       transition: all 0.15s;
     }
 
-    .export-format-toggle .format-btn:first-child {
+    .export-format-toggle .format-btn:first-child,
+    .export-bitdepth-toggle .bitdepth-btn:first-child {
       border-radius: 4px 0 0 4px;
     }
 
-    .export-format-toggle .format-btn:last-child {
+    .export-format-toggle .format-btn:last-child,
+    .export-bitdepth-toggle .bitdepth-btn:last-child {
       border-radius: 0 4px 4px 0;
     }
 
-    .export-format-toggle .format-btn.active {
+    .export-format-toggle .format-btn.active,
+    .export-bitdepth-toggle .bitdepth-btn.active {
       background: var(--accent);
       border-color: var(--accent);
       color: white;
+    }
+
+    .export-bitdepth-section {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .export-bitdepth-toggle {
+      display: flex;
+      gap: 4px;
+    }
+
+    .export-bitdepth-toggle .bitdepth-btn.disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .export-bitdepth-note {
+      margin-top: 6px;
+      font-size: 11px;
+      color: var(--text-secondary);
+      display: none;
+    }
+
+    .export-bitdepth-note.show {
+      display: block;
     }
 
     .export-quality-section {
@@ -2317,7 +2347,16 @@
             <div class="export-format-toggle">
               <button class="format-btn active" data-format="png">PNG</button>
               <button class="format-btn" data-format="jpeg">JPEG</button>
+              <button class="format-btn" data-format="tiff">TIFF</button>
             </div>
+          </div>
+          <div class="export-bitdepth-section" id="exportBitDepthSection">
+            <div class="export-format-label" data-i18n="exportBitDepth">Bit Depth</div>
+            <div class="export-bitdepth-toggle">
+              <button class="bitdepth-btn active" data-bitdepth="8">8-bit</button>
+              <button class="bitdepth-btn" data-bitdepth="16">16-bit</button>
+            </div>
+            <div class="export-bitdepth-note" id="exportBitDepthNote" data-i18n="bitDepthJpegLocked"></div>
           </div>
           <div class="export-quality-section" id="exportQualitySection">
             <div class="export-quality-header">
@@ -2510,10 +2549,14 @@
         autoDetect: "自动检测色罩",
         finishProcessing: "请先完成当前图片的处理流程（到第3步）",
         exportFormat: "导出格式",
+        exportBitDepth: "导出位深",
         jpegQuality: "JPEG 质量",
         exportJpeg: "导出 JPEG",
+        exportTiff: "导出 TIFF",
         exportCurrentJpeg: "导出当前图片 (JPEG)",
-        exportZipJpeg: "批量导出 (ZIP/JPEG)"
+        exportCurrentTiff: "导出当前图片 (TIFF)",
+        exportZipJpeg: "批量导出 (ZIP/JPEG)",
+        bitDepthJpegLocked: "JPEG 仅支持 8-bit 导出。"
       },
       en: {
         title: "Negative Converter",
@@ -2668,10 +2711,14 @@
         autoDetect: "Auto Detect Mask",
         finishProcessing: "Please complete the workflow (step 3) before saving settings",
         exportFormat: "Export Format",
+        exportBitDepth: "Bit Depth",
         jpegQuality: "JPEG Quality",
         exportJpeg: "Export JPEG",
+        exportTiff: "Export TIFF",
         exportCurrentJpeg: "Export Current (JPEG)",
-        exportZipJpeg: "Export All (ZIP/JPEG)"
+        exportCurrentTiff: "Export Current (TIFF)",
+        exportZipJpeg: "Export All (ZIP/JPEG)",
+        bitDepthJpegLocked: "JPEG export is limited to 8-bit."
       },
       ja: {
         title: "ネガポジ変換",
@@ -2826,10 +2873,14 @@
         autoDetect: "マスク自動検出",
         finishProcessing: "設定を保存する前にワークフロー（ステップ3）を完了してください",
         exportFormat: "出力形式",
+        exportBitDepth: "出力ビット深度",
         jpegQuality: "JPEG品質",
         exportJpeg: "JPEG出力",
+        exportTiff: "TIFF出力",
         exportCurrentJpeg: "現在の画像を出力 (JPEG)",
-        exportZipJpeg: "一括出力 (ZIP/JPEG)"
+        exportCurrentTiff: "現在の画像を出力 (TIFF)",
+        exportZipJpeg: "一括出力 (ZIP/JPEG)",
+        bitDepthJpegLocked: "JPEG は 8-bit 出力のみ対応です。"
       }
     };
 
@@ -2903,6 +2954,7 @@
         updateAutoFrameDiagnosticsUI();
         updateAutoFrameButtons();
         updateStep2GuideCard({ skipFirstHint: true });
+        if (typeof updateExportUI === 'function') updateExportUI();
       }
     }
 
@@ -3294,7 +3346,8 @@
       },
 
       // Export settings
-      exportFormat: 'png',  // 'png' or 'jpeg'
+      exportFormat: 'png',  // 'png' | 'jpeg' | 'tiff'
+      exportBitDepth: 8,    // 8 | 16
       jpegQuality: 92,      // 1-100
 
       // Render state
@@ -8133,10 +8186,13 @@
       exportDropdownMenu.classList.toggle('show');
     });
 
-    // Prevent dropdown from closing when clicking inside it (for format settings)
+    // Prevent dropdown from closing when clicking inside it (for export settings)
     exportDropdownMenu.addEventListener('click', (e) => {
-      // Only stop propagation if clicking on format settings, not export buttons
-      if (e.target.closest('.export-format-section') || e.target.closest('.export-quality-section')) {
+      if (
+        e.target.closest('.export-format-section')
+        || e.target.closest('.export-bitdepth-section')
+        || e.target.closest('.export-quality-section')
+      ) {
         e.stopPropagation();
       }
     });
@@ -8214,6 +8270,197 @@
       });
     }
 
+    const pngCrcTable = (() => {
+      const table = new Uint32Array(256);
+      for (let n = 0; n < 256; n++) {
+        let c = n;
+        for (let k = 0; k < 8; k++) {
+          c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+        }
+        table[n] = c >>> 0;
+      }
+      return table;
+    })();
+
+    function crc32OfBytes(bytes) {
+      let crc = 0xFFFFFFFF;
+      for (let i = 0; i < bytes.length; i++) {
+        crc = pngCrcTable[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8);
+      }
+      return (crc ^ 0xFFFFFFFF) >>> 0;
+    }
+
+    function createPngChunk(type, data) {
+      const dataBytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+      const chunk = new Uint8Array(12 + dataBytes.length);
+      const view = new DataView(chunk.buffer);
+      view.setUint32(0, dataBytes.length, false);
+      for (let i = 0; i < 4; i++) chunk[4 + i] = type.charCodeAt(i);
+      chunk.set(dataBytes, 8);
+      const crc = crc32OfBytes(chunk.subarray(4, 8 + dataBytes.length));
+      view.setUint32(8 + dataBytes.length, crc, false);
+      return chunk;
+    }
+
+    function encodePng16Blob(imageData) {
+      const width = imageData.width;
+      const height = imageData.height;
+      const src = imageData.data;
+      const rowBytes = width * 4 * 2;
+      const raw = new Uint8Array((rowBytes + 1) * height);
+      let srcIndex = 0;
+      let rawIndex = 0;
+      for (let y = 0; y < height; y++) {
+        raw[rawIndex++] = 0; // filter type: None
+        for (let x = 0; x < width * 4; x++) {
+          const u16 = src[srcIndex++] * 257;
+          raw[rawIndex++] = (u16 >>> 8) & 0xFF;
+          raw[rawIndex++] = u16 & 0xFF;
+        }
+      }
+
+      const compressed = pako.deflate(raw, { level: 6 });
+      const signature = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+      const ihdr = new Uint8Array(13);
+      const ihdrView = new DataView(ihdr.buffer);
+      ihdrView.setUint32(0, width, false);
+      ihdrView.setUint32(4, height, false);
+      ihdr[8] = 16; // bit depth
+      ihdr[9] = 6;  // RGBA
+      ihdr[10] = 0; // compression
+      ihdr[11] = 0; // filter
+      ihdr[12] = 0; // interlace
+
+      const ihdrChunk = createPngChunk('IHDR', ihdr);
+      const idatChunk = createPngChunk('IDAT', compressed);
+      const iendChunk = createPngChunk('IEND', new Uint8Array(0));
+
+      const totalLength = signature.length + ihdrChunk.length + idatChunk.length + iendChunk.length;
+      const png = new Uint8Array(totalLength);
+      let offset = 0;
+      png.set(signature, offset); offset += signature.length;
+      png.set(ihdrChunk, offset); offset += ihdrChunk.length;
+      png.set(idatChunk, offset); offset += idatChunk.length;
+      png.set(iendChunk, offset);
+
+      return new Blob([png], { type: 'image/png' });
+    }
+
+    function encodeTiffBlob(imageData, bitDepth = 8) {
+      const width = imageData.width;
+      const height = imageData.height;
+      const pixels = imageData.data;
+      const channels = 4;
+      const bytesPerSample = bitDepth === 16 ? 2 : 1;
+      const stripByteCount = width * height * channels * bytesPerSample;
+      const pixelData = new Uint8Array(stripByteCount);
+
+      if (bitDepth === 16) {
+        let p = 0;
+        for (let i = 0; i < pixels.length; i++) {
+          const value = pixels[i] * 257;
+          pixelData[p++] = value & 0xFF;
+          pixelData[p++] = (value >>> 8) & 0xFF;
+        }
+      } else {
+        pixelData.set(pixels);
+      }
+
+      const headerSize = 8;
+      const pixelOffset = headerSize;
+      const ifdOffset = pixelOffset + pixelData.length;
+      const entryCount = 12;
+      const ifdSize = 2 + (entryCount * 12) + 4;
+      const bitsArrayOffset = ifdOffset + ifdSize;
+      const sampleFormatOffset = bitsArrayOffset + 8;
+      const totalSize = sampleFormatOffset + 8;
+      const out = new Uint8Array(totalSize);
+      const view = new DataView(out.buffer);
+
+      const writeU16 = (off, val) => view.setUint16(off, val, true);
+      const writeU32 = (off, val) => view.setUint32(off, val, true);
+
+      // Header
+      out[0] = 0x49; out[1] = 0x49; // little-endian
+      writeU16(2, 42);
+      writeU32(4, ifdOffset);
+      out.set(pixelData, pixelOffset);
+
+      // IFD
+      writeU16(ifdOffset, entryCount);
+      let entryOffset = ifdOffset + 2;
+      const writeEntry = (tag, type, count, valueOrOffset) => {
+        writeU16(entryOffset, tag);
+        writeU16(entryOffset + 2, type);
+        writeU32(entryOffset + 4, count);
+        writeU32(entryOffset + 8, valueOrOffset);
+        entryOffset += 12;
+      };
+      const shortInline = (value) => value & 0xFFFF;
+
+      writeEntry(256, 4, 1, width);                 // ImageWidth
+      writeEntry(257, 4, 1, height);                // ImageLength
+      writeEntry(258, 3, 4, bitsArrayOffset);       // BitsPerSample
+      writeEntry(259, 3, 1, shortInline(1));        // Compression = none
+      writeEntry(262, 3, 1, shortInline(2));        // Photometric = RGB
+      writeEntry(273, 4, 1, pixelOffset);           // StripOffsets
+      writeEntry(277, 3, 1, shortInline(channels)); // SamplesPerPixel
+      writeEntry(278, 4, 1, height);                // RowsPerStrip
+      writeEntry(279, 4, 1, stripByteCount);        // StripByteCounts
+      writeEntry(284, 3, 1, shortInline(1));        // PlanarConfiguration
+      writeEntry(338, 3, 1, shortInline(1));        // ExtraSamples (associated alpha)
+      writeEntry(339, 3, 4, sampleFormatOffset);    // SampleFormat
+
+      writeU32(entryOffset, 0); // next IFD offset
+
+      // Extra value arrays
+      const sampleBit = bitDepth === 16 ? 16 : 8;
+      for (let i = 0; i < 4; i++) {
+        writeU16(bitsArrayOffset + (i * 2), sampleBit);
+        writeU16(sampleFormatOffset + (i * 2), 1); // unsigned integer
+      }
+
+      return new Blob([out], { type: 'image/tiff' });
+    }
+
+    function getEffectiveExportBitDepth(format = state.exportFormat, requestedBitDepth = state.exportBitDepth) {
+      if (format === 'jpeg') return 8;
+      return Number(requestedBitDepth) === 16 ? 16 : 8;
+    }
+
+    function getExportInfo(format = state.exportFormat, requestedBitDepth = state.exportBitDepth) {
+      const normalizedFormat = format === 'jpeg' || format === 'tiff' ? format : 'png';
+      const bitDepth = getEffectiveExportBitDepth(normalizedFormat, requestedBitDepth);
+      if (normalizedFormat === 'jpeg') {
+        return { format: normalizedFormat, bitDepth, extension: '.jpg', mimeType: 'image/jpeg' };
+      }
+      if (normalizedFormat === 'tiff') {
+        return { format: normalizedFormat, bitDepth, extension: '.tiff', mimeType: 'image/tiff' };
+      }
+      return { format: 'png', bitDepth, extension: '.png', mimeType: 'image/png' };
+    }
+
+    function buildExportFileName(sourceName, exportInfo) {
+      const withConverted = sourceName
+        ? sourceName.replace(/\.[^.]+$/, '_converted')
+        : 'converted_negative';
+      const depthSuffix = exportInfo.bitDepth === 16 && exportInfo.format !== 'jpeg' ? '_16bit' : '';
+      return `${withConverted}${depthSuffix}${exportInfo.extension}`;
+    }
+
+    function getCurrentExportImageData() {
+      if (state.displayImageData && state.currentStep >= 3) {
+        return state.displayImageData;
+      }
+      if (state.processedImageData && state.currentStep >= 3) {
+        return applyAdjustmentsWithSettings(state.processedImageData, state);
+      }
+      if (canvas.width > 0 && canvas.height > 0) {
+        return ctx.getImageData(0, 0, canvas.width, canvas.height);
+      }
+      return null;
+    }
+
     function notifyExportError(err) {
       console.error('Export failed:', err);
       const message = err && err.message ? err.message : String(err || 'Unknown error');
@@ -8221,25 +8468,24 @@
     }
 
     async function exportSingle() {
-      const format = state.exportFormat;
-      const ext = format === 'jpeg' ? '.jpg' : '.png';
-      const mimeType = format === 'jpeg' ? 'image/jpeg' : 'image/png';
-      const quality = format === 'jpeg' ? state.jpegQuality / 100 : undefined;
-      let fileName = 'converted_negative' + ext;
+      const exportInfo = getExportInfo();
+      let fileName = buildExportFileName(null, exportInfo);
       let blob;
 
       const currentItem = getCurrentQueueItem();
       if (currentItem && state.currentStep >= 3 && state.processedImageData) {
         persistCurrentFileSettings({ silent: true });
         const adjusted = await processFileWithSettings(currentItem.file, currentItem.settings);
-        blob = await imageDataToBlob(adjusted, format, state.jpegQuality);
-        fileName = currentItem.file.name.replace(/\.[^.]+$/, '_converted' + ext);
+        blob = await imageDataToBlob(adjusted, exportInfo.format, state.jpegQuality, exportInfo.bitDepth);
+        fileName = buildExportFileName(currentItem.file.name, exportInfo);
       } else {
         ensureFullRender();
-        blob = await canvasToBlobWithType(canvas, mimeType, quality);
+        const imageData = getCurrentExportImageData();
+        if (!imageData) throw new Error('No image available for export.');
+        blob = await imageDataToBlob(imageData, exportInfo.format, state.jpegQuality, exportInfo.bitDepth);
       }
 
-      return await saveBlob(blob, fileName, mimeType);
+      return await saveBlob(blob, fileName, exportInfo.mimeType);
     }
 
     document.getElementById('exportSingleBtn').addEventListener('click', async () => {
@@ -8276,6 +8522,17 @@
       });
     });
 
+    // Bit depth toggle buttons
+    document.querySelectorAll('.bitdepth-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (btn.classList.contains('disabled')) return;
+        document.querySelectorAll('.bitdepth-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        state.exportBitDepth = parseInt(btn.dataset.bitdepth, 10) === 16 ? 16 : 8;
+        updateExportUI();
+      });
+    });
+
     // Quality slider
     document.getElementById('exportQualitySlider').addEventListener('input', (e) => {
       state.jpegQuality = parseInt(e.target.value);
@@ -8283,20 +8540,41 @@
     });
 
     function updateExportUI() {
-      const isJpeg = state.exportFormat === 'jpeg';
+      const format = state.exportFormat;
+      const isJpeg = format === 'jpeg';
+      if (isJpeg) state.exportBitDepth = 8;
       const qualitySection = document.getElementById('exportQualitySection');
       qualitySection.classList.toggle('show', isJpeg);
 
+      const bitDepthNote = document.getElementById('exportBitDepthNote');
+      bitDepthNote.classList.toggle('show', isJpeg);
+      document.querySelectorAll('.bitdepth-btn').forEach(btn => {
+        const depth = parseInt(btn.dataset.bitdepth, 10) === 16 ? 16 : 8;
+        const disabled = isJpeg && depth === 16;
+        btn.classList.toggle('disabled', disabled);
+        btn.classList.toggle('active', depth === state.exportBitDepth);
+      });
+
       // Update export button text
       const exportBtn = document.getElementById('exportBtn');
-      exportBtn.textContent = i18n[currentLang][isJpeg ? 'exportJpeg' : 'exportPng'];
-      exportBtn.setAttribute('data-i18n', isJpeg ? 'exportJpeg' : 'exportPng');
+      const exportKey = isJpeg ? 'exportJpeg' : (format === 'tiff' ? 'exportTiff' : 'exportPng');
+      exportBtn.textContent = i18n[currentLang][exportKey];
+      exportBtn.setAttribute('data-i18n', exportKey);
 
       // Update export current button text
       const exportSingleBtn = document.getElementById('exportSingleBtn');
-      exportSingleBtn.textContent = i18n[currentLang][isJpeg ? 'exportCurrentJpeg' : 'exportCurrent'];
-      exportSingleBtn.setAttribute('data-i18n', isJpeg ? 'exportCurrentJpeg' : 'exportCurrent');
+      const exportSingleKey = isJpeg ? 'exportCurrentJpeg' : (format === 'tiff' ? 'exportCurrentTiff' : 'exportCurrent');
+      exportSingleBtn.textContent = i18n[currentLang][exportSingleKey];
+      exportSingleBtn.setAttribute('data-i18n', exportSingleKey);
+
+      const bitDepthButtons = document.querySelectorAll('.bitdepth-btn');
+      bitDepthButtons.forEach((btn) => {
+        const depth = parseInt(btn.dataset.bitdepth, 10) === 16 ? 16 : 8;
+        btn.textContent = depth === 16 ? '16-bit' : '8-bit';
+      });
     }
+
+    updateExportUI();
 
     // ===========================================
     // Batch Processing
@@ -8594,9 +8872,16 @@
       }
     }
 
-    async function imageDataToBlob(imageData, format = null, quality = null) {
-      format = format || state.exportFormat;
-      quality = quality !== null ? quality : state.jpegQuality;
+    async function imageDataToBlob(imageData, format = null, quality = null, bitDepth = null) {
+      const exportInfo = getExportInfo(format || state.exportFormat, bitDepth ?? state.exportBitDepth);
+      const jpegQuality = quality !== null ? quality : state.jpegQuality;
+
+      if (exportInfo.format === 'tiff') {
+        return encodeTiffBlob(imageData, exportInfo.bitDepth);
+      }
+      if (exportInfo.format === 'png' && exportInfo.bitDepth === 16) {
+        return encodePng16Blob(imageData);
+      }
 
       const tempCanvas = document.createElement('canvas');
       tempCanvas.width = imageData.width;
@@ -8604,20 +8889,10 @@
       const tempCtx = tempCanvas.getContext('2d');
       tempCtx.putImageData(imageData, 0, 0);
 
-      return new Promise((resolve, reject) => {
-        const handleBlob = (blob) => {
-          if (!blob) {
-            reject(new Error('Failed to generate export blob.'));
-            return;
-          }
-          resolve(blob);
-        };
-        if (format === 'jpeg') {
-          tempCanvas.toBlob(handleBlob, 'image/jpeg', quality / 100);
-        } else {
-          tempCanvas.toBlob(handleBlob, 'image/png');
-        }
-      });
+      if (exportInfo.format === 'jpeg') {
+        return canvasToBlobWithType(tempCanvas, 'image/jpeg', jpegQuality / 100);
+      }
+      return canvasToBlobWithType(tempCanvas, 'image/png');
     }
 
     function updateBatchProgress(current, total, fileName) {
@@ -8759,6 +9034,7 @@
       if (selectedFiles.length < 1) return;
 
       const zip = new JSZip();
+      const exportInfo = getExportInfo();
       let processedCount = 0;
 
       showBatchProgress(true);
@@ -8773,10 +9049,14 @@
           try {
             const settingsForFile = getSettingsForExport(index, item);
             const adjusted = await processFileWithSettings(item.file, settingsForFile);
-            const blob = await imageDataToBlob(adjusted);
+            const blob = await imageDataToBlob(
+              adjusted,
+              exportInfo.format,
+              state.jpegQuality,
+              exportInfo.bitDepth
+            );
 
-            const ext = state.exportFormat === 'jpeg' ? '.jpg' : '.png';
-            const name = item.file.name.replace(/\.[^.]+$/, '_converted' + ext);
+            const name = buildExportFileName(item.file.name, exportInfo);
             zip.file(name, blob);
             item.status = 'done';
           } catch (err) {
@@ -8807,6 +9087,7 @@
       const selectedFiles = getSelectedFiles();
       if (selectedFiles.length < 1) return;
 
+      const exportInfo = getExportInfo();
       let processedCount = 0;
       let cancelledByUser = false;
 
@@ -8822,11 +9103,15 @@
           try {
             const settingsForFile = getSettingsForExport(index, item);
             const adjusted = await processFileWithSettings(item.file, settingsForFile);
-            const blob = await imageDataToBlob(adjusted);
+            const blob = await imageDataToBlob(
+              adjusted,
+              exportInfo.format,
+              state.jpegQuality,
+              exportInfo.bitDepth
+            );
 
-            const ext = state.exportFormat === 'jpeg' ? '.jpg' : '.png';
-            const name = item.file.name.replace(/\.[^.]+$/, '_converted' + ext);
-            const result = await saveBlob(blob, name, state.exportFormat === 'jpeg' ? 'image/jpeg' : 'image/png');
+            const name = buildExportFileName(item.file.name, exportInfo);
+            const result = await saveBlob(blob, name, exportInfo.mimeType);
             if (!result.saved) {
               cancelledByUser = true;
               item.status = 'pending';
