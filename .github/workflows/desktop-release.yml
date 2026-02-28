@@ -134,6 +134,9 @@ jobs:
     needs: [prepare, build]
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
