@@ -4252,7 +4252,7 @@
     let FILM_PRESETS = {};
     let FILM_PRESET_LIST = [];
     let FILM_PRESET_ALIASES = {};
-    const COLOR_PRESET_CONVERSION_MODELS = ['legacy', 'datasheet_v1'];
+    const COLOR_PRESET_CONVERSION_MODELS = ['legacy', 'datasheet_v1', 'datasheet_curve_v1'];
     const COLOR_MODEL_MASK_MODES = ['orange', 'none', 'redscale'];
     const DEFAULT_COLOR_MODEL = {
       maskMode: 'orange',
@@ -4362,6 +4362,95 @@
       };
     }
 
+    function sanitizeDatasheetCurveRange(input, defaults, minAllowed, maxAllowed) {
+      const source = (input && typeof input === 'object') ? input : {};
+      const fallback = (defaults && typeof defaults === 'object') ? defaults : { min: minAllowed, max: maxAllowed };
+      const minRaw = Number(source.min);
+      const maxRaw = Number(source.max);
+      let min = Number.isFinite(minRaw) ? minRaw : Number(fallback.min);
+      let max = Number.isFinite(maxRaw) ? maxRaw : Number(fallback.max);
+      if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) {
+        min = Number(fallback.min);
+        max = Number(fallback.max);
+      }
+      min = Math.max(minAllowed, Math.min(maxAllowed, min));
+      max = Math.max(minAllowed, Math.min(maxAllowed, max));
+      if (max <= min) max = Math.min(maxAllowed, min + 1);
+      return { min, max };
+    }
+
+    function sanitizeDatasheetCurveChannel(points, logERange, densityRange) {
+      const list = Array.isArray(points) ? points : [];
+      const out = [];
+      for (const raw of list) {
+        const src = (raw && typeof raw === 'object') ? raw : {};
+        const logE = Number(src.logE);
+        const density = Number(src.density);
+        if (!Number.isFinite(logE) || !Number.isFinite(density)) continue;
+        out.push({
+          logE: Math.max(logERange.min, Math.min(logERange.max, logE)),
+          density: Math.max(densityRange.min, Math.min(densityRange.max, density))
+        });
+      }
+      if (out.length < 2) return null;
+
+      out.sort((a, b) => a.logE - b.logE);
+      const deduped = [];
+      for (const point of out) {
+        if (!deduped.length) {
+          deduped.push(point);
+          continue;
+        }
+        const tail = deduped[deduped.length - 1];
+        if (Math.abs(point.logE - tail.logE) <= 1e-6) {
+          tail.density = Math.max(tail.density, point.density);
+          continue;
+        }
+        deduped.push(point);
+      }
+
+      const eps = 1e-3;
+      if (Math.abs(deduped[0].logE - logERange.min) > eps) return null;
+      if (Math.abs(deduped[deduped.length - 1].logE - logERange.max) > eps) return null;
+
+      // Enforce monotonic density so inversion is well-defined.
+      let prev = deduped[0].density;
+      for (let i = 1; i < deduped.length; i++) {
+        if (deduped[i].density < prev) deduped[i].density = prev;
+        prev = deduped[i].density;
+      }
+
+      return deduped.slice(0, 2048);
+    }
+
+    function sanitizeDatasheetCurveSource(source) {
+      const src = (source && typeof source === 'object') ? source : {};
+      const page = Math.round(sanitizeNumeric(src.page, 0, 0, 200));
+      return {
+        pdfUrl: typeof src.pdfUrl === 'string' ? src.pdfUrl.slice(0, 600) : '',
+        page,
+        label: typeof src.label === 'string' ? src.label.slice(0, 120) : ''
+      };
+    }
+
+    function sanitizeDatasheetCurve(input) {
+      if (!input || typeof input !== 'object') return null;
+      const source = input;
+      const logERange = sanitizeDatasheetCurveRange(source.logERange, null, -10, 10);
+      const densityRange = sanitizeDatasheetCurveRange(source.densityRange, null, 0, 6);
+      const channels = (source.channels && typeof source.channels === 'object') ? source.channels : {};
+      const r = sanitizeDatasheetCurveChannel(channels.r, logERange, densityRange);
+      const g = sanitizeDatasheetCurveChannel(channels.g, logERange, densityRange);
+      const b = sanitizeDatasheetCurveChannel(channels.b, logERange, densityRange);
+      if (!r || !g || !b) return null;
+      return {
+        logERange,
+        densityRange,
+        channels: { r, g, b },
+        source: sanitizeDatasheetCurveSource(source.source)
+      };
+    }
+
     function normalizePreset(rawPreset) {
       if (!rawPreset || typeof rawPreset !== 'object') return null;
       if (typeof rawPreset.id !== 'string' || !rawPreset.id) return null;
@@ -4391,6 +4480,8 @@
         };
         preset.conversionModel = sanitizeColorConversionModel(rawPreset.conversionModel);
         preset.colorModel = sanitizeColorModel(rawPreset.colorModel, DEFAULT_COLOR_MODEL);
+        const curve = sanitizeDatasheetCurve(rawPreset.datasheetCurve);
+        if (curve) preset.datasheetCurve = curve;
       }
 
       if (type === 'bw') {
@@ -5083,14 +5174,44 @@
       return { r: candidates[0].r, g: candidates[0].g, b: candidates[0].b };
     }
 
-    function findHistogramPercentile(hist, target) {
-      let sum = 0;
-      for (let i = 0; i < hist.length; i++) {
-        sum += hist[i];
-        if (sum >= target) return i / 999;
-      }
-      return 1;
-    }
+	    function findHistogramPercentile(hist, target) {
+	      let sum = 0;
+	      for (let i = 0; i < hist.length; i++) {
+	        sum += hist[i];
+	        if (sum >= target) return i / 999;
+	      }
+	      return 1;
+	    }
+
+	    function findHistogramPercentileIndex256(hist, target) {
+	      let sum = 0;
+	      for (let i = 0; i < hist.length; i++) {
+	        sum += hist[i];
+	        if (sum >= target) return i;
+	      }
+	      return hist.length - 1;
+	    }
+
+	    function estimateFilmBaseFromPercentile(imageData, percentile = 0.999) {
+	      const safePercentile = Number.isFinite(percentile) ? Math.max(0.9, Math.min(0.99995, percentile)) : 0.999;
+	      const { width, height, data } = imageData;
+	      const pixelCount = width * height;
+	      const target = pixelCount * safePercentile;
+
+	      const rHist = new Uint32Array(256);
+	      const gHist = new Uint32Array(256);
+	      const bHist = new Uint32Array(256);
+	      for (let i = 0; i < data.length; i += 4) {
+	        rHist[data[i]]++;
+	        gHist[data[i + 1]]++;
+	        bHist[data[i + 2]]++;
+	      }
+
+	      const r = findHistogramPercentileIndex256(rHist, target);
+	      const g = findHistogramPercentileIndex256(gHist, target);
+	      const b = findHistogramPercentileIndex256(bHist, target);
+	      return { r, g, b };
+	    }
 
     function applyToneShaping(value, shadowLift, highlightRollOff) {
       let v = Math.max(0, Math.min(1, value));
@@ -5199,19 +5320,21 @@
       return output;
     }
 
-    function convertColorNegativeDatasheet(imageData, filmBase, colorModel = DEFAULT_COLOR_MODEL) {
-      const { width, height, data } = imageData;
-      const output = new ImageData(new Uint8ClampedArray(data.length), width, height);
-      const outData = output.data;
-      const safeModel = sanitizeColorModel(colorModel, DEFAULT_COLOR_MODEL);
+	    function convertColorNegativeDatasheet(imageData, filmBase, colorModel = DEFAULT_COLOR_MODEL) {
+	      const { width, height, data } = imageData;
+	      const output = new ImageData(new Uint8ClampedArray(data.length), width, height);
+	      const outData = output.data;
+	      const safeModel = sanitizeColorModel(colorModel, DEFAULT_COLOR_MODEL);
 
-      const usesMaskSampling = safeModel.maskMode === 'orange';
-      const baseSample = (filmBase && typeof filmBase === 'object') ? filmBase : { r: 255, g: 255, b: 255 };
-      const baseR = (usesMaskSampling ? (baseSample.r / 255) : 1) * safeModel.baseScale.r;
-      const baseG = (usesMaskSampling ? (baseSample.g / 255) : 1) * safeModel.baseScale.g;
-      const baseB = (usesMaskSampling ? (baseSample.b / 255) : 1) * safeModel.baseScale.b;
-      const eps = 0.001;
-      const preMix = safeModel.preMix;
+	      const usesMaskSampling = safeModel.maskMode === 'orange';
+	      const baseSample = usesMaskSampling
+	        ? ((filmBase && typeof filmBase === 'object') ? filmBase : { r: 255, g: 255, b: 255 })
+	        : estimateFilmBaseFromPercentile(imageData, 0.999);
+	      const baseR = (baseSample.r / 255) * safeModel.baseScale.r;
+	      const baseG = (baseSample.g / 255) * safeModel.baseScale.g;
+	      const baseB = (baseSample.b / 255) * safeModel.baseScale.b;
+	      const eps = 0.001;
+	      const preMix = safeModel.preMix;
 
       const normalized = new Float32Array(data.length);
 
@@ -5291,17 +5414,103 @@
         outData[i + 3] = 255;
       }
 
-      return output;
-    }
+	      return output;
+	    }
 
-    function convertColorNegativeByPreset(imageData, filmBase, preset) {
-      const safePreset = preset || {};
-      const conversionModel = sanitizeColorConversionModel(safePreset.conversionModel);
-      if (conversionModel === 'datasheet_v1') {
-        return convertColorNegativeDatasheet(imageData, filmBase, safePreset.colorModel);
-      }
-      return convertColorNegativeLegacy(imageData, filmBase);
-    }
+	    function invertLogEFromDensity(points, density) {
+	      const list = Array.isArray(points) ? points : [];
+	      if (list.length < 2) return 0;
+	      const first = list[0];
+	      const last = list[list.length - 1];
+	      if (density <= first.density) return first.logE;
+	      if (density >= last.density) return last.logE;
+
+	      let lo = 0;
+	      let hi = list.length - 1;
+	      while (hi - lo > 1) {
+	        const mid = (lo + hi) >> 1;
+	        if (list[mid].density < density) lo = mid;
+	        else hi = mid;
+	      }
+
+	      const a = list[lo];
+	      const b = list[hi];
+	      const span = (b.density - a.density);
+	      if (span <= 1e-6) return a.logE;
+	      const t = (density - a.density) / span;
+	      return a.logE + (b.logE - a.logE) * t;
+	    }
+
+	    function convertColorNegativeDatasheetCurve(imageData, filmBase, preset) {
+	      const { width, height, data } = imageData;
+	      const output = new ImageData(new Uint8ClampedArray(data.length), width, height);
+	      const outData = output.data;
+
+	      const safePreset = preset || {};
+	      const curve = sanitizeDatasheetCurve(safePreset.datasheetCurve);
+	      if (!curve) {
+	        console.warn('[datasheet_curve_v1] Missing/invalid datasheetCurve; falling back to datasheet_v1.');
+	        return convertColorNegativeDatasheet(imageData, filmBase, safePreset.colorModel);
+	      }
+
+	      const maskMode = sanitizeColorModel(safePreset.colorModel, DEFAULT_COLOR_MODEL).maskMode;
+	      const baseSample = (maskMode === 'orange' && filmBase && typeof filmBase === 'object')
+	        ? filmBase
+	        : estimateFilmBaseFromPercentile(imageData, 0.999);
+	      const baseR = Math.max(1, Math.min(255, Math.round(Number(baseSample.r) || 0))) / 255;
+	      const baseG = Math.max(1, Math.min(255, Math.round(Number(baseSample.g) || 0))) / 255;
+	      const baseB = Math.max(1, Math.min(255, Math.round(Number(baseSample.b) || 0))) / 255;
+
+	      const logEMin = curve.logERange.min;
+	      const logEMax = curve.logERange.max;
+	      const logESpan = Math.max(1e-6, logEMax - logEMin);
+	      const invLogESpan = 1 / logESpan;
+
+	      function buildChannelLut(channel, baseValue) {
+	        const points = curve.channels[channel];
+	        const dMin = points[0].density;
+	        const densityMin = curve.densityRange.min;
+	        const densityMax = curve.densityRange.max;
+	        const lut = new Uint8Array(256);
+	        const eps = 1 / 255;
+
+	        for (let v = 0; v < 256; v++) {
+	          const i = Math.max(eps, v / 255);
+	          let d = dMin + Math.log10(baseValue / i);
+	          if (!Number.isFinite(d)) d = densityMax;
+	          d = Math.max(densityMin, Math.min(densityMax, d));
+	          const logE = invertLogEFromDensity(points, d);
+	          const out = Math.max(0, Math.min(1, (logE - logEMin) * invLogESpan));
+	          lut[v] = Math.round(out * 255);
+	        }
+	        return lut;
+	      }
+
+	      const lutR = buildChannelLut('r', baseR);
+	      const lutG = buildChannelLut('g', baseG);
+	      const lutB = buildChannelLut('b', baseB);
+
+	      for (let i = 0; i < data.length; i += 4) {
+	        outData[i] = lutR[data[i]];
+	        outData[i + 1] = lutG[data[i + 1]];
+	        outData[i + 2] = lutB[data[i + 2]];
+	        outData[i + 3] = data[i + 3];
+	      }
+
+	      return output;
+	    }
+
+	    function convertColorNegativeByPreset(imageData, filmBase, preset) {
+	      const safePreset = preset || {};
+	      const conversionModel = sanitizeColorConversionModel(safePreset.conversionModel);
+	      if (conversionModel === 'datasheet_curve_v1') {
+	        return convertColorNegativeDatasheetCurve(imageData, filmBase, safePreset);
+	      }
+	      if (conversionModel === 'datasheet_v1') {
+	        return convertColorNegativeDatasheet(imageData, filmBase, safePreset.colorModel);
+	      }
+	      return convertColorNegativeLegacy(imageData, filmBase);
+	    }
 
     function convertBWNegative(imageData, options = {}) {
       const { width, height, data } = imageData;
@@ -7416,18 +7625,18 @@
     // ===========================================
     // Film Base Sampling
     // ===========================================
-    function needsMaskSampling(preset = getPresetOrFallback(state.filmPreset, state.filmType)) {
-      const safePreset = preset || {};
-      const presetType = (safePreset.type || state.filmType);
-      if (presetType !== 'color') return false;
+	    function needsMaskSampling(preset = getPresetOrFallback(state.filmPreset, state.filmType)) {
+	      const safePreset = preset || {};
+	      const presetType = (safePreset.type || state.filmType);
+	      if (presetType !== 'color') return false;
 
-      const conversionModel = sanitizeColorConversionModel(safePreset.conversionModel);
-      if (conversionModel === 'datasheet_v1') {
-        const maskMode = sanitizeColorModel(safePreset.colorModel, DEFAULT_COLOR_MODEL).maskMode;
-        return maskMode === 'orange';
-      }
-      return true;
-    }
+	      const conversionModel = sanitizeColorConversionModel(safePreset.conversionModel);
+	      if (conversionModel === 'datasheet_v1' || conversionModel === 'datasheet_curve_v1') {
+	        const maskMode = sanitizeColorModel(safePreset.colorModel, DEFAULT_COLOR_MODEL).maskMode;
+	        return maskMode === 'orange';
+	      }
+	      return true;
+	    }
 
     function requiresFilmBase(preset = getPresetOrFallback(state.filmPreset, state.filmType)) {
       return needsMaskSampling(preset);
