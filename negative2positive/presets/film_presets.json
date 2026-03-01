@@ -115,7 +115,7 @@
       "baseColor": { "r": 0.87, "g": 0.59, "b": 0.42 },
       "conversionModel": "datasheet_v1",
       "colorModel": {
-        "maskMode": "orange",
+        "maskMode": "none",
         "baseScale": { "r": 1.12, "g": 1.0, "b": 0.9 },
         "preMix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
         "percentileLow": { "r": 0.02, "g": 0.02, "b": 0.02 },

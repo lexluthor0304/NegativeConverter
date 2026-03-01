@@ -2466,6 +2466,7 @@
             </div>
           </div>
           <div class="info-box" id="positiveFilmInfo" data-i18n="positiveModeInfo" style="display: none;">Positive slide film mode does not require film base sampling.</div>
+          <div class="info-box" id="noMaskFilmInfo" data-i18n="noMaskModeInfo" style="display: none;">This film profile does not use an orange mask baseline. Skip mask sampling and continue.</div>
           <button class="toolbar-btn primary" id="applyConvertBtn" style="margin-top: 8px; width: 100%; justify-content: center;" data-i18n="applyConvert">Apply & Convert</button>
         </div>
       </div>
@@ -2750,6 +2751,7 @@
         genericPositive: "通用正片",
         filmBaseInfo: "看得到橙色未曝光边缘：请手动采样。看不到边缘（如 ES-2）：请点“自动检测色罩”或“使用整卷参考值”。",
         positiveModeInfo: "正片模式不需要色罩采样，可直接点击“下一步：转换并进入调整”。",
+        noMaskModeInfo: "当前胶片预设为“无色罩”流程，不需要采样色罩，直接点击“下一步：转换并进入调整”。",
         sampleBase: "手动采样色罩",
         autoDetect: "自动检测色罩",
         useRollReference: "使用整卷参考值",
@@ -2949,6 +2951,7 @@
         genericPositive: "Generic Positive",
         filmBaseInfo: "If you can see unexposed orange border, sample it manually. If border is cropped out (for example ES-2), use Auto Detect Mask or Roll Reference.",
         positiveModeInfo: "Positive mode does not need film-mask sampling. You can go straight to “Next: Convert and Continue”.",
+        noMaskModeInfo: "This film profile uses a no-mask workflow. Skip mask sampling and go straight to “Next: Convert and Continue”.",
         sampleBase: "Sample Mask Manually",
         autoDetect: "Auto Detect Mask",
         useRollReference: "Use Roll Reference Value",
@@ -3148,6 +3151,7 @@
         genericPositive: "汎用ポジ",
         filmBaseInfo: "未露光のオレンジ端が見える場合は手動サンプリング。端がない（ES-2 など）場合は「マスク自動検出」または「ロール参照値」を使ってください。",
         positiveModeInfo: "ポジモードではマスクサンプリングは不要です。「次へ：変換して調整へ」を押してください。",
+        noMaskModeInfo: "このフィルムプリセットはマスク無しワークフローです。マスクサンプリングは不要なので「次へ：変換して調整へ」を押してください。",
         sampleBase: "マスクを手動サンプリング",
         autoDetect: "マスク自動検出",
         useRollReference: "ロール参照値を使用",
@@ -5013,8 +5017,12 @@
 
     function goToStep(step) {
       state.currentStep = step;
-      if (step === 2 && requiresFilmBase()) {
-        setStep2Mode(suggestStep2Mode());
+      if (step === 2) {
+        if (requiresFilmBase()) {
+          setStep2Mode(suggestStep2Mode());
+        } else {
+          updateFilmModeUI();
+        }
       }
       updateWorkflowUI();
       updateCanvasVisibility();
@@ -5197,9 +5205,11 @@
       const outData = output.data;
       const safeModel = sanitizeColorModel(colorModel, DEFAULT_COLOR_MODEL);
 
-      const baseR = (filmBase.r / 255) * safeModel.baseScale.r;
-      const baseG = (filmBase.g / 255) * safeModel.baseScale.g;
-      const baseB = (filmBase.b / 255) * safeModel.baseScale.b;
+      const usesMaskSampling = safeModel.maskMode === 'orange';
+      const baseSample = (filmBase && typeof filmBase === 'object') ? filmBase : { r: 255, g: 255, b: 255 };
+      const baseR = (usesMaskSampling ? (baseSample.r / 255) : 1) * safeModel.baseScale.r;
+      const baseG = (usesMaskSampling ? (baseSample.g / 255) : 1) * safeModel.baseScale.g;
+      const baseB = (usesMaskSampling ? (baseSample.b / 255) : 1) * safeModel.baseScale.b;
       const eps = 0.001;
       const preMix = safeModel.preMix;
 
@@ -7406,8 +7416,21 @@
     // ===========================================
     // Film Base Sampling
     // ===========================================
+    function needsMaskSampling(preset = getPresetOrFallback(state.filmPreset, state.filmType)) {
+      const safePreset = preset || {};
+      const presetType = (safePreset.type || state.filmType);
+      if (presetType !== 'color') return false;
+
+      const conversionModel = sanitizeColorConversionModel(safePreset.conversionModel);
+      if (conversionModel === 'datasheet_v1') {
+        const maskMode = sanitizeColorModel(safePreset.colorModel, DEFAULT_COLOR_MODEL).maskMode;
+        return maskMode === 'orange';
+      }
+      return true;
+    }
+
     function requiresFilmBase(preset = getPresetOrFallback(state.filmPreset, state.filmType)) {
-      return (preset?.type || state.filmType) === 'color';
+      return needsMaskSampling(preset);
     }
 
     function suggestStep2Mode() {
@@ -7555,15 +7578,23 @@
     function updateFilmModeUI() {
       const filmBaseControls = document.getElementById('filmBaseControls');
       const positiveFilmInfo = document.getElementById('positiveFilmInfo');
+      const noMaskFilmInfo = document.getElementById('noMaskFilmInfo');
       const modeToggle = document.getElementById('step2ModeToggle');
       const sampleBaseBtn = document.getElementById('sampleBaseBtn');
       const autoDetectBtn = document.getElementById('autoDetectBtn');
       const useReferenceBtn = document.getElementById('useReferenceBtn');
-      const showFilmBase = requiresFilmBase();
+      const activePreset = getPresetOrFallback(state.filmPreset, state.filmType);
+      const activeType = (activePreset && activePreset.type) ? activePreset.type : state.filmType;
+      const showFilmBase = requiresFilmBase(activePreset);
+      const showPositiveInfo = activeType === 'positive';
+      const showNoMaskInfo = activeType === 'color' && !showFilmBase;
 
       modeToggle.style.display = showFilmBase ? 'flex' : 'none';
       filmBaseControls.style.display = showFilmBase ? 'block' : 'none';
-      positiveFilmInfo.style.display = showFilmBase ? 'none' : 'block';
+      positiveFilmInfo.style.display = showPositiveInfo ? 'block' : 'none';
+      if (noMaskFilmInfo) {
+        noMaskFilmInfo.style.display = showNoMaskInfo ? 'block' : 'none';
+      }
 
       if (!showFilmBase) {
         if (state.samplingMode === 'filmBase') {
