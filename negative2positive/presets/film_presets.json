@@ -4,7 +4,11 @@
   "aliases": {
     "fujifilm_pro_400h": "fuji_400h",
     "fujifilm_superia_400": "fuji_superia",
-    "ilford_hp5_plus": "ilford_hp5"
+    "ilford_hp5_plus": "ilford_hp5",
+    "harman_phoenix_ii": "harman_phoenix_ii_200",
+    "harman_phoenix_2": "harman_phoenix_ii_200",
+    "harman_redscale": "harman_red",
+    "kodak_aerocolor_iv": "kodak_aerocolor_iv_2460"
   },
   "presets": [
     {
@@ -37,6 +41,91 @@
       "status": "active",
       "characteristics": { "warmth": 0.0, "saturation": 0.1, "contrast": 0.1 },
       "sourceMeta": { "sourceTier": "internal", "confidence": 1.0, "notes": "Fallback positive preset." }
+    },
+
+    {
+      "id": "harman_phoenix_200",
+      "name": "HARMAN Phoenix 200",
+      "brand": "harman",
+      "type": "color",
+      "status": "active",
+      "baseColor": { "r": 0.72, "g": 0.57, "b": 0.68 },
+      "conversionModel": "datasheet_v1",
+      "colorModel": {
+        "maskMode": "none",
+        "baseScale": { "r": 1.0, "g": 0.97, "b": 0.94 },
+        "preMix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+        "percentileLow": { "r": 0.01, "g": 0.01, "b": 0.01 },
+        "percentileHigh": { "r": 0.99, "g": 0.99, "b": 0.99 },
+        "gamma": { "r": 0.98, "g": 0.98, "b": 0.95 },
+        "shadowLift": 0.06,
+        "highlightRollOff": 0.1
+      },
+      "characteristics": { "warmth": -0.01, "saturation": -0.18, "contrast": -0.08 },
+      "sourceMeta": { "sourceTier": "datasheet", "confidence": 0.9, "notes": "HARMAN Phoenix 200 technical information (Sep 2024): no orange mask, high contrast/high saturation scan tendency." }
+    },
+    {
+      "id": "harman_phoenix_ii_200",
+      "name": "HARMAN Phoenix II 200",
+      "brand": "harman",
+      "type": "color",
+      "status": "active",
+      "baseColor": { "r": 0.73, "g": 0.58, "b": 0.68 },
+      "conversionModel": "datasheet_v1",
+      "colorModel": {
+        "maskMode": "none",
+        "baseScale": { "r": 1.0, "g": 0.98, "b": 0.96 },
+        "preMix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+        "percentileLow": { "r": 0.015, "g": 0.015, "b": 0.015 },
+        "percentileHigh": { "r": 0.985, "g": 0.985, "b": 0.985 },
+        "gamma": { "r": 1.0, "g": 1.0, "b": 0.98 },
+        "shadowLift": 0.03,
+        "highlightRollOff": 0.06
+      },
+      "characteristics": { "warmth": -0.01, "saturation": -0.08, "contrast": -0.03 },
+      "sourceMeta": { "sourceTier": "datasheet", "confidence": 0.92, "notes": "HARMAN Phoenix II technical information (Jul 2025): wider latitude and more normal contrast than Phoenix I, still no orange mask." }
+    },
+    {
+      "id": "harman_red",
+      "name": "HARMAN RED",
+      "brand": "harman",
+      "type": "color",
+      "status": "active",
+      "baseColor": { "r": 0.8, "g": 0.6, "b": 0.42 },
+      "conversionModel": "datasheet_v1",
+      "colorModel": {
+        "maskMode": "redscale",
+        "baseScale": { "r": 1.05, "g": 1.0, "b": 0.9 },
+        "preMix": [[0.92, 0.08, 0], [0.25, 0.75, 0], [0.58, 0.42, 0]],
+        "percentileLow": { "r": 0.01, "g": 0.01, "b": 0.01 },
+        "percentileHigh": { "r": 0.99, "g": 0.99, "b": 0.99 },
+        "gamma": { "r": 1.05, "g": 1.0, "b": 0.92 },
+        "shadowLift": 0.04,
+        "highlightRollOff": 0.08
+      },
+      "characteristics": { "warmth": 0.12, "saturation": -0.1, "contrast": -0.05 },
+      "sourceMeta": { "sourceTier": "datasheet", "confidence": 0.91, "notes": "HARMAN RED technical information (Jun 2025): high contrast redscale film, very low blue-channel information." }
+    },
+    {
+      "id": "kodak_aerocolor_iv_2460",
+      "name": "Kodak AeroColor IV 2460",
+      "brand": "kodak",
+      "type": "color",
+      "status": "active",
+      "baseColor": { "r": 0.87, "g": 0.59, "b": 0.42 },
+      "conversionModel": "datasheet_v1",
+      "colorModel": {
+        "maskMode": "orange",
+        "baseScale": { "r": 1.12, "g": 1.0, "b": 0.9 },
+        "preMix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+        "percentileLow": { "r": 0.02, "g": 0.02, "b": 0.02 },
+        "percentileHigh": { "r": 0.985, "g": 0.98, "b": 0.975 },
+        "gamma": { "r": 1.08, "g": 1.08, "b": 1.06 },
+        "shadowLift": 0.02,
+        "highlightRollOff": 0.05
+      },
+      "characteristics": { "warmth": -0.04, "saturation": 0.05, "contrast": 0.03 },
+      "sourceMeta": { "sourceTier": "datasheet", "confidence": 0.84, "notes": "Kodak AeroColor IV 2460 technical data (Z-33): color aerial negative tuning baseline." }
     },
 
     {

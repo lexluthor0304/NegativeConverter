@@ -4248,6 +4248,22 @@
     let FILM_PRESETS = {};
     let FILM_PRESET_LIST = [];
     let FILM_PRESET_ALIASES = {};
+    const COLOR_PRESET_CONVERSION_MODELS = ['legacy', 'datasheet_v1'];
+    const COLOR_MODEL_MASK_MODES = ['orange', 'none', 'redscale'];
+    const DEFAULT_COLOR_MODEL = {
+      maskMode: 'orange',
+      baseScale: { r: 1.0, g: 1.0, b: 1.0 },
+      preMix: [
+        [1, 0, 0],
+        [0, 1, 0],
+        [0, 0, 1]
+      ],
+      percentileLow: { r: 0.02, g: 0.02, b: 0.02 },
+      percentileHigh: { r: 0.98, g: 0.98, b: 0.98 },
+      gamma: { r: 1.1, g: 1.1, b: 1.1 },
+      shadowLift: 0,
+      highlightRollOff: 0
+    };
 
     function sanitizePresetType(type) {
       return PRESET_TYPES.includes(type) ? type : 'color';
@@ -4257,6 +4273,89 @@
       const n = Number(value);
       if (Number.isFinite(n)) return Math.max(0, Math.min(1, n));
       return fallback;
+    }
+
+    function sanitizeColorConversionModel(mode) {
+      return COLOR_PRESET_CONVERSION_MODELS.includes(mode) ? mode : 'legacy';
+    }
+
+    function sanitizeTripletObject(source, fallback, defaults, min, max) {
+      const src = (source && typeof source === 'object') ? source : {};
+      const fb = (fallback && typeof fallback === 'object') ? fallback : defaults;
+      function pick(channel) {
+        const fallbackValue = Number.isFinite(fb[channel]) ? fb[channel] : defaults[channel];
+        const value = Number(src[channel]);
+        if (Number.isFinite(value)) return Math.max(min, Math.min(max, value));
+        return Math.max(min, Math.min(max, fallbackValue));
+      }
+      return {
+        r: pick('r'),
+        g: pick('g'),
+        b: pick('b')
+      };
+    }
+
+    function sanitizePreMixMatrix(input, fallback = null) {
+      const fallbackMatrix = Array.isArray(fallback) ? fallback : DEFAULT_COLOR_MODEL.preMix;
+      const source = Array.isArray(input) ? input : [];
+      const matrix = [];
+
+      for (let row = 0; row < 3; row++) {
+        const srcRow = Array.isArray(source[row]) ? source[row] : [];
+        const fallbackRow = Array.isArray(fallbackMatrix[row]) ? fallbackMatrix[row] : DEFAULT_COLOR_MODEL.preMix[row];
+        matrix[row] = [];
+        for (let col = 0; col < 3; col++) {
+          const fallbackValue = Number.isFinite(fallbackRow[col]) ? fallbackRow[col] : DEFAULT_COLOR_MODEL.preMix[row][col];
+          const value = Number(srcRow[col]);
+          matrix[row][col] = Number.isFinite(value)
+            ? Math.max(-2, Math.min(2, value))
+            : fallbackValue;
+        }
+      }
+
+      return matrix;
+    }
+
+    function sanitizeColorModel(input, fallback = null) {
+      const source = (input && typeof input === 'object') ? input : {};
+      const fallbackValue = (fallback && typeof fallback === 'object') ? fallback : DEFAULT_COLOR_MODEL;
+      const maskModeCandidate = typeof source.maskMode === 'string' ? source.maskMode : fallbackValue.maskMode;
+      const maskMode = COLOR_MODEL_MASK_MODES.includes(maskModeCandidate) ? maskModeCandidate : DEFAULT_COLOR_MODEL.maskMode;
+      const baseScale = sanitizeTripletObject(source.baseScale, fallbackValue.baseScale, DEFAULT_COLOR_MODEL.baseScale, 0.2, 3.0);
+      const percentileLow = sanitizeTripletObject(source.percentileLow, fallbackValue.percentileLow, DEFAULT_COLOR_MODEL.percentileLow, 0, 0.2);
+      const percentileHigh = sanitizeTripletObject(source.percentileHigh, fallbackValue.percentileHigh, DEFAULT_COLOR_MODEL.percentileHigh, 0.8, 1);
+      const gamma = sanitizeTripletObject(source.gamma, fallbackValue.gamma, DEFAULT_COLOR_MODEL.gamma, 0.2, 3.0);
+      const preMix = sanitizePreMixMatrix(source.preMix, fallbackValue.preMix);
+
+      ['r', 'g', 'b'].forEach((channel) => {
+        if (percentileHigh[channel] <= percentileLow[channel] + 0.001) {
+          percentileHigh[channel] = Math.min(0.999, percentileLow[channel] + 0.02);
+        }
+      });
+
+      const shadowLiftRaw = Number(source.shadowLift);
+      const highlightRollOffRaw = Number(source.highlightRollOff);
+      const shadowLiftFallback = Number.isFinite(fallbackValue.shadowLift) ? fallbackValue.shadowLift : DEFAULT_COLOR_MODEL.shadowLift;
+      const highlightFallback = Number.isFinite(fallbackValue.highlightRollOff)
+        ? fallbackValue.highlightRollOff
+        : DEFAULT_COLOR_MODEL.highlightRollOff;
+      const shadowLift = Number.isFinite(shadowLiftRaw)
+        ? Math.max(0, Math.min(0.3, shadowLiftRaw))
+        : Math.max(0, Math.min(0.3, shadowLiftFallback));
+      const highlightRollOff = Number.isFinite(highlightRollOffRaw)
+        ? Math.max(0, Math.min(0.3, highlightRollOffRaw))
+        : Math.max(0, Math.min(0.3, highlightFallback));
+
+      return {
+        maskMode,
+        baseScale,
+        preMix,
+        percentileLow,
+        percentileHigh,
+        gamma,
+        shadowLift,
+        highlightRollOff
+      };
     }
 
     function normalizePreset(rawPreset) {
@@ -4286,6 +4385,8 @@
           g: clampUnit(baseColor.g, 0.55),
           b: clampUnit(baseColor.b, 0.36)
         };
+        preset.conversionModel = sanitizeColorConversionModel(rawPreset.conversionModel);
+        preset.colorModel = sanitizeColorModel(rawPreset.colorModel, DEFAULT_COLOR_MODEL);
       }
 
       if (type === 'bw') {
@@ -4974,7 +5075,35 @@
       return { r: candidates[0].r, g: candidates[0].g, b: candidates[0].b };
     }
 
-    function convertColorNegative(imageData, filmBase) {
+    function findHistogramPercentile(hist, target) {
+      let sum = 0;
+      for (let i = 0; i < hist.length; i++) {
+        sum += hist[i];
+        if (sum >= target) return i / 999;
+      }
+      return 1;
+    }
+
+    function applyToneShaping(value, shadowLift, highlightRollOff) {
+      let v = Math.max(0, Math.min(1, value));
+
+      if (shadowLift > 0 && v < 0.5) {
+        const t = v / 0.5;
+        const exponent = 1 / (1 + shadowLift * 4);
+        v = 0.5 * Math.pow(t, exponent);
+      }
+
+      if (highlightRollOff > 0 && v > 0.5) {
+        const t = (v - 0.5) / 0.5;
+        const exponent = 1 / (1 + highlightRollOff * 4);
+        const compressed = 1 - Math.pow(1 - t, exponent);
+        v = 0.5 + compressed * 0.5;
+      }
+
+      return Math.max(0, Math.min(1, v));
+    }
+
+    function convertColorNegativeLegacy(imageData, filmBase) {
       const { width, height, data } = imageData;
       const output = new ImageData(new Uint8ClampedArray(data.length), width, height);
       const outData = output.data;
@@ -5036,21 +5165,12 @@
       }
 
       const pixelCount = width * height;
-      function findPercentile(hist, target) {
-        let sum = 0;
-        for (let i = 0; i < hist.length; i++) {
-          sum += hist[i];
-          if (sum >= target) return i / 999;
-        }
-        return 1;
-      }
-
-      const rLow = rMin + (rMax - rMin) * findPercentile(rHist, pixelCount * 0.02);
-      const rHigh = rMin + (rMax - rMin) * findPercentile(rHist, pixelCount * 0.98);
-      const gLow = gMin + (gMax - gMin) * findPercentile(gHist, pixelCount * 0.02);
-      const gHigh = gMin + (gMax - gMin) * findPercentile(gHist, pixelCount * 0.98);
-      const bLow = bMin + (bMax - bMin) * findPercentile(bHist, pixelCount * 0.02);
-      const bHigh = bMin + (bMax - bMin) * findPercentile(bHist, pixelCount * 0.98);
+      const rLow = rMin + (rMax - rMin) * findHistogramPercentile(rHist, pixelCount * 0.02);
+      const rHigh = rMin + (rMax - rMin) * findHistogramPercentile(rHist, pixelCount * 0.98);
+      const gLow = gMin + (gMax - gMin) * findHistogramPercentile(gHist, pixelCount * 0.02);
+      const gHigh = gMin + (gMax - gMin) * findHistogramPercentile(gHist, pixelCount * 0.98);
+      const bLow = bMin + (bMax - bMin) * findHistogramPercentile(bHist, pixelCount * 0.02);
+      const bHigh = bMin + (bMax - bMin) * findHistogramPercentile(bHist, pixelCount * 0.98);
 
       for (let i = 0; i < normalized.length; i += 4) {
         let r = (normalized[i] - rLow) / (rHigh - rLow + 0.001);
@@ -5069,6 +5189,108 @@
       }
 
       return output;
+    }
+
+    function convertColorNegativeDatasheet(imageData, filmBase, colorModel = DEFAULT_COLOR_MODEL) {
+      const { width, height, data } = imageData;
+      const output = new ImageData(new Uint8ClampedArray(data.length), width, height);
+      const outData = output.data;
+      const safeModel = sanitizeColorModel(colorModel, DEFAULT_COLOR_MODEL);
+
+      const baseR = (filmBase.r / 255) * safeModel.baseScale.r;
+      const baseG = (filmBase.g / 255) * safeModel.baseScale.g;
+      const baseB = (filmBase.b / 255) * safeModel.baseScale.b;
+      const eps = 0.001;
+      const preMix = safeModel.preMix;
+
+      const normalized = new Float32Array(data.length);
+
+      for (let i = 0; i < data.length; i += 4) {
+        let r = data[i] / 255;
+        let g = data[i + 1] / 255;
+        let b = data[i + 2] / 255;
+
+        r = r / Math.max(baseR, eps);
+        g = g / Math.max(baseG, eps);
+        b = b / Math.max(baseB, eps);
+
+        r = Math.min(r, 2);
+        g = Math.min(g, 2);
+        b = Math.min(b, 2);
+
+        const mixedR = Math.max(0, (preMix[0][0] * r) + (preMix[0][1] * g) + (preMix[0][2] * b));
+        const mixedG = Math.max(0, (preMix[1][0] * r) + (preMix[1][1] * g) + (preMix[1][2] * b));
+        const mixedB = Math.max(0, (preMix[2][0] * r) + (preMix[2][1] * g) + (preMix[2][2] * b));
+
+        normalized[i] = 1 / Math.max(mixedR, eps);
+        normalized[i + 1] = 1 / Math.max(mixedG, eps);
+        normalized[i + 2] = 1 / Math.max(mixedB, eps);
+        normalized[i + 3] = 1;
+      }
+
+      let rMin = Infinity, rMax = -Infinity;
+      let gMin = Infinity, gMax = -Infinity;
+      let bMin = Infinity, bMax = -Infinity;
+
+      for (let i = 0; i < normalized.length; i += 4) {
+        rMin = Math.min(rMin, normalized[i]);
+        rMax = Math.max(rMax, normalized[i]);
+        gMin = Math.min(gMin, normalized[i + 1]);
+        gMax = Math.max(gMax, normalized[i + 1]);
+        bMin = Math.min(bMin, normalized[i + 2]);
+        bMax = Math.max(bMax, normalized[i + 2]);
+      }
+
+      const rHist = new Float32Array(1000);
+      const gHist = new Float32Array(1000);
+      const bHist = new Float32Array(1000);
+
+      for (let i = 0; i < normalized.length; i += 4) {
+        const rIdx = Math.min(999, Math.floor((normalized[i] - rMin) / (rMax - rMin + 0.001) * 999));
+        const gIdx = Math.min(999, Math.floor((normalized[i + 1] - gMin) / (gMax - gMin + 0.001) * 999));
+        const bIdx = Math.min(999, Math.floor((normalized[i + 2] - bMin) / (bMax - bMin + 0.001) * 999));
+        rHist[rIdx]++;
+        gHist[gIdx]++;
+        bHist[bIdx]++;
+      }
+
+      const pixelCount = width * height;
+      const rLow = rMin + (rMax - rMin) * findHistogramPercentile(rHist, pixelCount * safeModel.percentileLow.r);
+      const rHigh = rMin + (rMax - rMin) * findHistogramPercentile(rHist, pixelCount * safeModel.percentileHigh.r);
+      const gLow = gMin + (gMax - gMin) * findHistogramPercentile(gHist, pixelCount * safeModel.percentileLow.g);
+      const gHigh = gMin + (gMax - gMin) * findHistogramPercentile(gHist, pixelCount * safeModel.percentileHigh.g);
+      const bLow = bMin + (bMax - bMin) * findHistogramPercentile(bHist, pixelCount * safeModel.percentileLow.b);
+      const bHigh = bMin + (bMax - bMin) * findHistogramPercentile(bHist, pixelCount * safeModel.percentileHigh.b);
+
+      for (let i = 0; i < normalized.length; i += 4) {
+        let r = (normalized[i] - rLow) / (rHigh - rLow + 0.001);
+        let g = (normalized[i + 1] - gLow) / (gHigh - gLow + 0.001);
+        let b = (normalized[i + 2] - bLow) / (bHigh - bLow + 0.001);
+
+        r = applyToneShaping(r, safeModel.shadowLift, safeModel.highlightRollOff);
+        g = applyToneShaping(g, safeModel.shadowLift, safeModel.highlightRollOff);
+        b = applyToneShaping(b, safeModel.shadowLift, safeModel.highlightRollOff);
+
+        r = Math.pow(Math.max(0, Math.min(1, r)), safeModel.gamma.r);
+        g = Math.pow(Math.max(0, Math.min(1, g)), safeModel.gamma.g);
+        b = Math.pow(Math.max(0, Math.min(1, b)), safeModel.gamma.b);
+
+        outData[i] = Math.round(r * 255);
+        outData[i + 1] = Math.round(g * 255);
+        outData[i + 2] = Math.round(b * 255);
+        outData[i + 3] = 255;
+      }
+
+      return output;
+    }
+
+    function convertColorNegativeByPreset(imageData, filmBase, preset) {
+      const safePreset = preset || {};
+      const conversionModel = sanitizeColorConversionModel(safePreset.conversionModel);
+      if (conversionModel === 'datasheet_v1') {
+        return convertColorNegativeDatasheet(imageData, filmBase, safePreset.colorModel);
+      }
+      return convertColorNegativeLegacy(imageData, filmBase);
     }
 
     function convertBWNegative(imageData, options = {}) {
@@ -6929,7 +7151,7 @@
           gamma: bwParams.gamma
         });
       } else {
-        processed = convertColorNegative(correctedSourceData, state.filmBase);
+        processed = convertColorNegativeByPreset(correctedSourceData, state.filmBase, preset);
       }
 
       state.processedImageData = processed;
@@ -7190,6 +7412,11 @@
 
     function suggestStep2Mode() {
       if (!requiresFilmBase()) return 'border';
+      const preset = getPresetOrFallback(state.filmPreset, state.filmType);
+      if (preset && preset.type === 'color' && sanitizeColorConversionModel(preset.conversionModel) === 'datasheet_v1') {
+        const maskMode = sanitizeColorModel(preset.colorModel, DEFAULT_COLOR_MODEL).maskMode;
+        if (maskMode !== 'orange') return 'noBorder';
+      }
       if (state.cropRegion) return 'noBorder';
 
       const sourceData = state.croppedImageData || state.originalImageData;
@@ -10465,7 +10692,7 @@
           gamma: bwParams.gamma
         });
       } else {
-        processed = convertColorNegative(workingData, safeSettings.filmBase);
+        processed = convertColorNegativeByPreset(workingData, safeSettings.filmBase, preset);
       }
 
       return applyAdjustmentsWithSettings(processed, safeSettings);
@@ -10553,7 +10780,7 @@
           gamma: bwParams.gamma
         });
       } else {
-        processed = convertColorNegative(workingData, settings.filmBase);
+        processed = convertColorNegativeByPreset(workingData, settings.filmBase, preset);
       }
 
       // Apply adjustments
