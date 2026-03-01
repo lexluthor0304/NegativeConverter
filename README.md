@@ -14,6 +14,8 @@ This is a browser-based tool built with HTML and JavaScript that converts scanne
   - Cyan / Magenta / Yellow (CMY) channels
 - 🎞️ **Film presets** for color negative, B&W negative, and positive slide stocks across Kodak / Fujifilm / Ilford
 - 🗂️ **Data-driven preset system** loaded from `negative2positive/presets/film_presets.json` (supports alias fallback for older preset IDs)
+- 🔍 **Optional lens profile workflow**: search/select Lensfun profiles manually, or skip lens correction and continue
+- 🧷 **Roll-level lens settings**: lens correction on/off and parameters can be applied to selected files or reused via roll reference
 - 🛡️ **Privacy-friendly**: all image processing happens locally in your browser
 - 💾 **Flexible export**: PNG / JPEG / TIFF with selectable bit depth (8-bit, plus 16-bit for PNG/TIFF)
 
@@ -38,6 +40,7 @@ This is a browser-based tool built with HTML and JavaScript that converts scanne
 - Includes a simplified AHD demosaicing algorithm for Bayer-pattern raw data  
 - Color adjustment logic is based on RGB ↔ HSL and RGB ↔ CMY conversions  
 - Film preset metadata is loaded from JSON and grouped dynamically by film type in the UI  
+- Optional lens correction uses [`@neoanaloglabkk/lensfun-wasm`](https://www.jsdelivr.com/package/npm/@neoanaloglabkk/lensfun-wasm) with **CDN-first + local fallback** assets in `negative2positive/vendor/lensfun-wasm/`  
 - Auto frame detection uses OpenCV.js from `negative2positive/vendor/opencv/opencv-4.12.0.js`  
 - Performance optimizations include:
   - Cached DOM access

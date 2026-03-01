@@ -941,6 +941,123 @@
       height: 14px;
     }
 
+    .lens-correction-panel {
+      margin-top: 10px;
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.02);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .lens-section-title {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      color: var(--text-secondary);
+      font-weight: 600;
+    }
+
+    .lens-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .lens-toggle-label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      user-select: none;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .lens-toggle-label input[type="checkbox"] {
+      accent-color: var(--accent);
+      width: 14px;
+      height: 14px;
+    }
+
+    .lens-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .lens-field {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .lens-field.wide {
+      grid-column: 1 / -1;
+    }
+
+    .lens-field label {
+      font-size: 11px;
+      color: var(--text-secondary);
+    }
+
+    .lens-field input,
+    .lens-field select {
+      width: 100%;
+      min-width: 0;
+      padding: 6px 8px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text-primary);
+      font-size: 12px;
+    }
+
+    .lens-field input:focus,
+    .lens-field select:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    .lens-field input:disabled,
+    .lens-field select:disabled {
+      opacity: 0.68;
+      cursor: not-allowed;
+    }
+
+    .lens-status {
+      margin: 0;
+      font-size: 11px;
+      line-height: 1.35;
+      color: var(--text-secondary);
+      white-space: pre-line;
+    }
+
+    .lens-status.error {
+      color: var(--danger);
+    }
+
+    .lens-status.ready {
+      color: var(--success);
+    }
+
+    .lens-selected {
+      margin: 0;
+      font-size: 11px;
+      line-height: 1.35;
+      color: var(--text-secondary);
+    }
+
+    .lens-step-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
     .autoframe-settings {
       margin-top: 8px;
       padding: 10px;
@@ -1857,6 +1974,15 @@
         min-height: 44px;
       }
 
+      .lens-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .lens-step-row {
+        flex-direction: column;
+        align-items: stretch;
+      }
+
       .slider-input {
         height: 6px;
       }
@@ -2238,6 +2364,76 @@
           <select class="preset-select" id="filmPreset">
             <option value="generic_color" data-i18n="genericColor">Generic Color</option>
           </select>
+          <div class="lens-correction-panel" id="lensCorrectionPanel">
+            <div class="lens-section-title" data-i18n="lensSectionTitle">Lens Correction (Optional)</div>
+            <div class="lens-row">
+              <label class="lens-toggle-label">
+                <input type="checkbox" id="lensEnableInput">
+                <span data-i18n="lensEnable">Enable Lens Correction</span>
+              </label>
+              <button class="film-base-btn" id="lensSkipBtn" type="button" data-i18n="lensSkipBtn">Skip</button>
+            </div>
+            <div class="info-box lens-status" id="lensStatusBox" data-i18n="lensStatusIdle">Lens correction is optional. You can continue without selecting a profile.</div>
+            <div class="lens-grid">
+              <div class="lens-field wide">
+                <label for="lensLensModelInput" data-i18n="lensLensModel">Lens Model</label>
+                <input id="lensLensModelInput" type="text" placeholder="e.g. 50mm f/1.8">
+              </div>
+              <div class="lens-field">
+                <label for="lensLensMakerInput" data-i18n="lensLensMaker">Lens Maker</label>
+                <input id="lensLensMakerInput" type="text" placeholder="optional">
+              </div>
+              <div class="lens-field">
+                <label for="lensCameraModelInput" data-i18n="lensCameraModel">Camera Model</label>
+                <input id="lensCameraModelInput" type="text" placeholder="optional">
+              </div>
+              <div class="lens-field">
+                <label for="lensCameraMakerInput" data-i18n="lensCameraMaker">Camera Maker</label>
+                <input id="lensCameraMakerInput" type="text" placeholder="optional">
+              </div>
+              <div class="lens-field">
+                <button class="film-base-btn" id="lensSearchBtn" type="button" data-i18n="lensSearchBtn">Search Profiles</button>
+              </div>
+              <div class="lens-field">
+                <button class="film-base-btn" id="lensUseSelectedBtn" type="button" data-i18n="lensUseSelectedBtn">Use Selected Profile</button>
+              </div>
+              <div class="lens-field wide">
+                <label for="lensResultSelect" data-i18n="lensResults">Search Results</label>
+                <select id="lensResultSelect" disabled>
+                  <option value="" data-i18n="lensNoResult">No profiles loaded yet</option>
+                </select>
+              </div>
+              <div class="lens-field wide">
+                <p class="lens-selected" id="lensSelectedText" data-i18n="lensSelectedNone">Selected profile: none</p>
+              </div>
+              <div class="lens-field">
+                <label for="lensFocalInput" data-i18n="lensFocal">Focal (mm)</label>
+                <input id="lensFocalInput" type="number" min="1" max="2000" step="0.1" value="50">
+              </div>
+              <div class="lens-field">
+                <label for="lensCropInput" data-i18n="lensCrop">Crop Factor</label>
+                <input id="lensCropInput" type="number" min="0.1" max="10" step="0.01" value="1">
+              </div>
+              <div class="lens-field">
+                <label for="lensApertureInput" data-i18n="lensAperture">Aperture (f)</label>
+                <input id="lensApertureInput" type="number" min="0.5" max="64" step="0.1" value="8">
+              </div>
+              <div class="lens-field">
+                <label for="lensDistanceInput" data-i18n="lensDistance">Distance (m)</label>
+                <input id="lensDistanceInput" type="number" min="0.1" max="10000" step="0.1" value="1000">
+              </div>
+              <div class="lens-field wide">
+                <label for="lensStepModeSelect" data-i18n="lensStepMode">Map Detail</label>
+                <div class="lens-step-row">
+                  <select id="lensStepModeSelect">
+                    <option value="auto" data-i18n="lensStepAuto">Auto</option>
+                    <option value="manual" data-i18n="lensStepManual">Manual</option>
+                  </select>
+                  <input id="lensStepInput" type="number" min="1" max="16" step="1" value="2" title="step">
+                </div>
+              </div>
+            </div>
+          </div>
           <div id="filmBaseControls">
             <div class="info-box" data-i18n="filmBaseInfo">Sample the unexposed film edge if available. If the border is already cropped out, use Auto Detect or reuse a reference frame.</div>
             <div class="film-base-buttons">
@@ -2675,6 +2871,39 @@
         exportCurrentJpeg: "导出当前图片 (JPEG)",
         exportCurrentTiff: "导出当前图片 (TIFF)",
         exportZipJpeg: "批量导出 (ZIP/JPEG)",
+        lensSectionTitle: "镜头矫正（可选）",
+        lensEnable: "启用镜头矫正",
+        lensSkipBtn: "跳过镜头矫正",
+        lensStatusIdle: "镜头矫正是可选步骤，不选择也可继续。",
+        lensStatusLoading: "正在初始化 Lensfun...",
+        lensStatusReadyCdn: "Lensfun 已就绪（CDN 资源）。",
+        lensStatusReadyLocal: "Lensfun 已就绪（本地回退资源）。",
+        lensStatusSearchCount: "已找到 {count} 个候选镜头。",
+        lensStatusNoResult: "未找到匹配镜头，你可以继续并跳过镜头矫正。",
+        lensStatusNeedModel: "请先输入镜头型号再搜索。",
+        lensStatusNeedProfile: "已启用镜头矫正，请先选择镜头 profile，或点击“跳过镜头矫正”。",
+        lensStatusSelected: "已选择镜头：{lens}",
+        lensStatusSkipped: "已跳过镜头矫正。",
+        lensStatusApplied: "镜头矫正已应用。",
+        lensStatusApplyFailed: "镜头矫正失败：{reason}。已自动跳过并继续转换。",
+        lensStatusInitFailed: "Lensfun 初始化失败：{reason}。可继续转换但不做镜头矫正。",
+        lensLensModel: "镜头型号",
+        lensLensMaker: "镜头厂商",
+        lensCameraModel: "机身型号",
+        lensCameraMaker: "机身厂商",
+        lensSearchBtn: "搜索镜头 Profile",
+        lensUseSelectedBtn: "使用选中 Profile",
+        lensResults: "搜索结果",
+        lensNoResult: "尚未加载候选镜头",
+        lensSelectedNone: "已选镜头：无",
+        lensSelectedPrefix: "已选镜头：{lens}",
+        lensFocal: "焦距 (mm)",
+        lensCrop: "裁切系数",
+        lensAperture: "光圈 (f)",
+        lensDistance: "对焦距离 (m)",
+        lensStepMode: "映射精度",
+        lensStepAuto: "自动",
+        lensStepManual: "手动",
         bitDepthJpegLocked: "JPEG 仅支持 8-bit 导出。"
       },
       en: {
@@ -2841,6 +3070,39 @@
         exportCurrentJpeg: "Export Current (JPEG)",
         exportCurrentTiff: "Export Current (TIFF)",
         exportZipJpeg: "Export All (ZIP/JPEG)",
+        lensSectionTitle: "Lens Correction (Optional)",
+        lensEnable: "Enable Lens Correction",
+        lensSkipBtn: "Skip Lens Correction",
+        lensStatusIdle: "Lens correction is optional. You can continue without selecting a profile.",
+        lensStatusLoading: "Initializing Lensfun...",
+        lensStatusReadyCdn: "Lensfun ready (CDN assets).",
+        lensStatusReadyLocal: "Lensfun ready (local fallback assets).",
+        lensStatusSearchCount: "Found {count} lens profile candidates.",
+        lensStatusNoResult: "No matching lens profile found. You can continue and skip lens correction.",
+        lensStatusNeedModel: "Enter a lens model before searching.",
+        lensStatusNeedProfile: "Lens correction is enabled. Select a lens profile or click skip.",
+        lensStatusSelected: "Selected lens: {lens}",
+        lensStatusSkipped: "Lens correction skipped.",
+        lensStatusApplied: "Lens correction applied.",
+        lensStatusApplyFailed: "Lens correction failed: {reason}. Continuing without lens correction.",
+        lensStatusInitFailed: "Lensfun initialization failed: {reason}. Continuing without lens correction.",
+        lensLensModel: "Lens Model",
+        lensLensMaker: "Lens Maker",
+        lensCameraModel: "Camera Model",
+        lensCameraMaker: "Camera Maker",
+        lensSearchBtn: "Search Profiles",
+        lensUseSelectedBtn: "Use Selected Profile",
+        lensResults: "Search Results",
+        lensNoResult: "No profiles loaded yet",
+        lensSelectedNone: "Selected profile: none",
+        lensSelectedPrefix: "Selected profile: {lens}",
+        lensFocal: "Focal (mm)",
+        lensCrop: "Crop Factor",
+        lensAperture: "Aperture (f)",
+        lensDistance: "Distance (m)",
+        lensStepMode: "Map Detail",
+        lensStepAuto: "Auto",
+        lensStepManual: "Manual",
         bitDepthJpegLocked: "JPEG export is limited to 8-bit."
       },
       ja: {
@@ -3007,6 +3269,39 @@
         exportCurrentJpeg: "現在の画像を出力 (JPEG)",
         exportCurrentTiff: "現在の画像を出力 (TIFF)",
         exportZipJpeg: "一括出力 (ZIP/JPEG)",
+        lensSectionTitle: "レンズ補正（任意）",
+        lensEnable: "レンズ補正を有効化",
+        lensSkipBtn: "レンズ補正をスキップ",
+        lensStatusIdle: "レンズ補正は任意です。選択しなくても続行できます。",
+        lensStatusLoading: "Lensfun を初期化中...",
+        lensStatusReadyCdn: "Lensfun 準備完了（CDN）。",
+        lensStatusReadyLocal: "Lensfun 準備完了（ローカルフォールバック）。",
+        lensStatusSearchCount: "{count} 件の候補レンズが見つかりました。",
+        lensStatusNoResult: "一致するレンズが見つかりません。スキップして続行できます。",
+        lensStatusNeedModel: "検索前にレンズ名を入力してください。",
+        lensStatusNeedProfile: "レンズ補正が有効です。プロファイルを選択するかスキップしてください。",
+        lensStatusSelected: "選択中レンズ: {lens}",
+        lensStatusSkipped: "レンズ補正をスキップしました。",
+        lensStatusApplied: "レンズ補正を適用しました。",
+        lensStatusApplyFailed: "レンズ補正に失敗: {reason}。補正なしで続行します。",
+        lensStatusInitFailed: "Lensfun 初期化失敗: {reason}。補正なしで続行します。",
+        lensLensModel: "レンズ名",
+        lensLensMaker: "レンズメーカー",
+        lensCameraModel: "カメラ機種",
+        lensCameraMaker: "カメラメーカー",
+        lensSearchBtn: "プロファイル検索",
+        lensUseSelectedBtn: "選択したプロファイルを使用",
+        lensResults: "検索結果",
+        lensNoResult: "候補レンズはまだありません",
+        lensSelectedNone: "選択中プロファイル: なし",
+        lensSelectedPrefix: "選択中プロファイル: {lens}",
+        lensFocal: "焦点距離 (mm)",
+        lensCrop: "クロップ係数",
+        lensAperture: "絞り (f)",
+        lensDistance: "撮影距離 (m)",
+        lensStepMode: "マップ精度",
+        lensStepAuto: "自動",
+        lensStepManual: "手動",
         bitDepthJpegLocked: "JPEG は 8-bit 出力のみ対応です。"
       }
     };
@@ -3045,6 +3340,17 @@
       'https://negative-converter.tokugai.com/negative-converter/release/latest.json'
     ];
     const DESKTOP_UPDATE_PAGE_URL = 'https://negative-converter.tokugai.com/download.html';
+    const LENSFUN_PACKAGE_VERSION = '0.1.1';
+    const LENSFUN_CDN_BASE = `https://cdn.jsdelivr.net/npm/@neoanaloglabkk/lensfun-wasm@${LENSFUN_PACKAGE_VERSION}/dist`;
+    const LENSFUN_LOCAL_BASE = './vendor/lensfun-wasm';
+    const lensScriptLoadPromises = new Map();
+    const lensMapCache = new Map();
+    const lensfunRuntime = {
+      initPromise: null,
+      client: null,
+      source: null,
+      lastError: ''
+    };
 
     let currentLang = 'en';
     let stateReady = false;
@@ -3096,6 +3402,7 @@
         updateAutoFrameDiagnosticsUI();
         updateAutoFrameButtons();
         updateStep2GuideCard({ skipFirstHint: true });
+        if (typeof updateLensCorrectionUI === 'function') updateLensCorrectionUI();
         if (typeof updateExportUI === 'function') updateExportUI();
       }
     }
@@ -3140,6 +3447,576 @@
         output = output.replaceAll(`{${key}}`, String(value));
       });
       return output;
+    }
+
+    function formatLensLabel(lens) {
+      if (!lens || typeof lens !== 'object') return '';
+      const maker = String(lens.maker || '').trim();
+      const model = String(lens.model || '').trim();
+      return `${maker} ${model}`.trim() || model || maker || '';
+    }
+
+    function sanitizeLensRuntimeError(err) {
+      const raw = String(err?.message || err || '').replace(/\s+/g, ' ').trim();
+      if (!raw) return 'unknown';
+      return raw.slice(0, 180);
+    }
+
+    function getLensSourceAssets(source) {
+      if (source === 'cdn') {
+        return {
+          source,
+          iifeUrl: `${LENSFUN_CDN_BASE}/umd/index.iife.js`,
+          moduleJsUrl: `${LENSFUN_CDN_BASE}/assets/lensfun-core.js`,
+          wasmUrl: `${LENSFUN_CDN_BASE}/assets/lensfun-core.wasm`,
+          dataUrl: `${LENSFUN_CDN_BASE}/assets/lensfun-core.data`
+        };
+      }
+      return {
+        source: 'local',
+        iifeUrl: `${LENSFUN_LOCAL_BASE}/index.iife.js`,
+        moduleJsUrl: `${LENSFUN_LOCAL_BASE}/lensfun-core.js`,
+        wasmUrl: `${LENSFUN_LOCAL_BASE}/lensfun-core.wasm`,
+        dataUrl: `${LENSFUN_LOCAL_BASE}/lensfun-core.data`
+      };
+    }
+
+    function loadLensScript(url) {
+      if (lensScriptLoadPromises.has(url)) return lensScriptLoadPromises.get(url);
+
+      const promise = new Promise((resolve, reject) => {
+        const existing = document.querySelector(`script[data-lensfun-src="${url}"]`);
+        if (existing) {
+          existing.addEventListener('load', () => resolve(url), { once: true });
+          existing.addEventListener('error', () => reject(new Error(`failed to load ${url}`)), { once: true });
+          return;
+        }
+
+        const script = document.createElement('script');
+        script.src = url;
+        script.async = true;
+        script.dataset.lensfunSrc = url;
+        script.onload = () => resolve(url);
+        script.onerror = () => reject(new Error(`failed to load ${url}`));
+        document.head.appendChild(script);
+      }).catch((err) => {
+        lensScriptLoadPromises.delete(url);
+        throw err;
+      });
+
+      lensScriptLoadPromises.set(url, promise);
+      return promise;
+    }
+
+    async function initLensfunClientFromSource(source) {
+      const assets = getLensSourceAssets(source);
+      await loadLensScript(assets.iifeUrl);
+      if (!window.LensfunWasm || typeof window.LensfunWasm.createLensfun !== 'function') {
+        throw new Error('LensfunWasm global is unavailable');
+      }
+
+      const client = await window.LensfunWasm.createLensfun({
+        moduleJsUrl: assets.moduleJsUrl,
+        wasmUrl: assets.wasmUrl,
+        dataUrl: assets.dataUrl
+      });
+      return { client, source: assets.source };
+    }
+
+    async function ensureLensfunClient() {
+      if (lensfunRuntime.client) {
+        return { client: lensfunRuntime.client, source: lensfunRuntime.source };
+      }
+      if (lensfunRuntime.initPromise) {
+        return lensfunRuntime.initPromise;
+      }
+
+      lensfunRuntime.initPromise = (async () => {
+        try {
+          const runtime = await initLensfunClientFromSource('cdn');
+          lensfunRuntime.client = runtime.client;
+          lensfunRuntime.source = runtime.source;
+          lensfunRuntime.lastError = '';
+          return runtime;
+        } catch (cdnErr) {
+          try {
+            const runtime = await initLensfunClientFromSource('local');
+            lensfunRuntime.client = runtime.client;
+            lensfunRuntime.source = runtime.source;
+            lensfunRuntime.lastError = '';
+            return runtime;
+          } catch (localErr) {
+            const cdnReason = sanitizeLensRuntimeError(cdnErr);
+            const localReason = sanitizeLensRuntimeError(localErr);
+            lensfunRuntime.lastError = `CDN: ${cdnReason}; local: ${localReason}`;
+            throw new Error(lensfunRuntime.lastError);
+          }
+        }
+      })();
+
+      try {
+        return await lensfunRuntime.initPromise;
+      } finally {
+        if (!lensfunRuntime.client) lensfunRuntime.initPromise = null;
+      }
+    }
+
+    function resolveLensStatusKeyForSource(source) {
+      return source === 'cdn' ? 'lensStatusReadyCdn' : 'lensStatusReadyLocal';
+    }
+
+    function setLensStatus(statusKey, statusVars = {}) {
+      if (!state || !state.lensCorrection) return;
+      state.lensCorrection.statusKey = statusKey || 'lensStatusIdle';
+      state.lensCorrection.statusVars = statusVars && typeof statusVars === 'object'
+        ? { ...statusVars }
+        : {};
+      if (stateReady) updateLensCorrectionUI();
+    }
+
+    function getAutoLensMapStep(width, height) {
+      const maxSide = Math.max(width, height);
+      if (maxSide >= 5200) return 8;
+      if (maxSide >= 3600) return 6;
+      if (maxSide >= 2400) return 4;
+      if (maxSide >= 1500) return 3;
+      return 2;
+    }
+
+    function resolveLensMapStep(params, width, height) {
+      if (params.stepMode === 'manual') {
+        return Math.round(clampBetween(params.step || 2, 1, 16));
+      }
+      return getAutoLensMapStep(width, height);
+    }
+
+    function buildLensMapCacheKey(lensHandle, width, height, params, modes) {
+      return [
+        lensHandle,
+        width,
+        height,
+        params.focal.toFixed(4),
+        params.crop.toFixed(4),
+        params.aperture.toFixed(4),
+        params.distance.toFixed(4),
+        params.step,
+        params.stepMode,
+        modes.includeTca ? 1 : 0,
+        modes.includeVignetting ? 1 : 0
+      ].join('|');
+    }
+
+    function bilerp(a00, a10, a01, a11, fx, fy) {
+      const x0 = a00 + (a10 - a00) * fx;
+      const x1 = a01 + (a11 - a01) * fx;
+      return x0 + (x1 - x0) * fy;
+    }
+
+    function sampleImageChannelBilinear(data, width, height, x, y, channel) {
+      if (x < 0 || y < 0 || x > width - 1 || y > height - 1) return 0;
+      const x0 = Math.floor(x);
+      const y0 = Math.floor(y);
+      const x1 = Math.min(x0 + 1, width - 1);
+      const y1 = Math.min(y0 + 1, height - 1);
+      const fx = x - x0;
+      const fy = y - y0;
+
+      const i00 = (y0 * width + x0) * 4 + channel;
+      const i10 = (y0 * width + x1) * 4 + channel;
+      const i01 = (y1 * width + x0) * 4 + channel;
+      const i11 = (y1 * width + x1) * 4 + channel;
+
+      return bilerp(data[i00], data[i10], data[i01], data[i11], fx, fy);
+    }
+
+    function sampleGridPair(grid, gridWidth, x0, x1, y0, y1, fx, fy) {
+      const p00 = (y0 * gridWidth + x0) * 2;
+      const p10 = (y0 * gridWidth + x1) * 2;
+      const p01 = (y1 * gridWidth + x0) * 2;
+      const p11 = (y1 * gridWidth + x1) * 2;
+      return {
+        x: bilerp(grid[p00], grid[p10], grid[p01], grid[p11], fx, fy),
+        y: bilerp(grid[p00 + 1], grid[p10 + 1], grid[p01 + 1], grid[p11 + 1], fx, fy)
+      };
+    }
+
+    function sampleGridTriple(grid, gridWidth, x0, x1, y0, y1, fx, fy) {
+      const p00 = (y0 * gridWidth + x0) * 3;
+      const p10 = (y0 * gridWidth + x1) * 3;
+      const p01 = (y1 * gridWidth + x0) * 3;
+      const p11 = (y1 * gridWidth + x1) * 3;
+      return {
+        r: bilerp(grid[p00], grid[p10], grid[p01], grid[p11], fx, fy),
+        g: bilerp(grid[p00 + 1], grid[p10 + 1], grid[p01 + 1], grid[p11 + 1], fx, fy),
+        b: bilerp(grid[p00 + 2], grid[p10 + 2], grid[p01 + 2], grid[p11 + 2], fx, fy)
+      };
+    }
+
+    function sampleGridTca(grid, gridWidth, x0, x1, y0, y1, fx, fy) {
+      const p00 = (y0 * gridWidth + x0) * 6;
+      const p10 = (y0 * gridWidth + x1) * 6;
+      const p01 = (y1 * gridWidth + x0) * 6;
+      const p11 = (y1 * gridWidth + x1) * 6;
+      return {
+        rx: bilerp(grid[p00], grid[p10], grid[p01], grid[p11], fx, fy),
+        ry: bilerp(grid[p00 + 1], grid[p10 + 1], grid[p01 + 1], grid[p11 + 1], fx, fy),
+        gx: bilerp(grid[p00 + 2], grid[p10 + 2], grid[p01 + 2], grid[p11 + 2], fx, fy),
+        gy: bilerp(grid[p00 + 3], grid[p10 + 3], grid[p01 + 3], grid[p11 + 3], fx, fy),
+        bx: bilerp(grid[p00 + 4], grid[p10 + 4], grid[p01 + 4], grid[p11 + 4], fx, fy),
+        by: bilerp(grid[p00 + 5], grid[p10 + 5], grid[p01 + 5], grid[p11 + 5], fx, fy)
+      };
+    }
+
+    function applyLensMapsToImage(imageData, maps, modes) {
+      const { width, height, data } = imageData;
+      const output = new ImageData(new Uint8ClampedArray(data.length), width, height);
+      const outData = output.data;
+      const gridWidth = maps.gridWidth;
+      const gridHeight = maps.gridHeight;
+      const step = Math.max(1, maps.step || 1);
+      const geometry = maps.geometry;
+      const tca = (modes.includeTca && maps.tca) ? maps.tca : null;
+      const vignetting = (modes.includeVignetting && maps.vignetting) ? maps.vignetting : null;
+
+      for (let y = 0; y < height; y++) {
+        const gyRaw = y / step;
+        const y0 = clampBetween(Math.floor(gyRaw), 0, gridHeight - 1);
+        const y1 = clampBetween(y0 + 1, 0, gridHeight - 1);
+        const fy = clampBetween(gyRaw - y0, 0, 1);
+
+        for (let x = 0; x < width; x++) {
+          const gxRaw = x / step;
+          const x0 = clampBetween(Math.floor(gxRaw), 0, gridWidth - 1);
+          const x1 = clampBetween(x0 + 1, 0, gridWidth - 1);
+          const fx = clampBetween(gxRaw - x0, 0, 1);
+
+          let rX, rY, gX, gY, bX, bY;
+          if (tca) {
+            const tcaCoords = sampleGridTca(tca, gridWidth, x0, x1, y0, y1, fx, fy);
+            rX = tcaCoords.rx; rY = tcaCoords.ry;
+            gX = tcaCoords.gx; gY = tcaCoords.gy;
+            bX = tcaCoords.bx; bY = tcaCoords.by;
+          } else {
+            const geometryCoords = sampleGridPair(geometry, gridWidth, x0, x1, y0, y1, fx, fy);
+            rX = geometryCoords.x; rY = geometryCoords.y;
+            gX = geometryCoords.x; gY = geometryCoords.y;
+            bX = geometryCoords.x; bY = geometryCoords.y;
+          }
+
+          let r = sampleImageChannelBilinear(data, width, height, rX, rY, 0);
+          let g = sampleImageChannelBilinear(data, width, height, gX, gY, 1);
+          let b = sampleImageChannelBilinear(data, width, height, bX, bY, 2);
+
+          if (vignetting) {
+            const gains = sampleGridTriple(vignetting, gridWidth, x0, x1, y0, y1, fx, fy);
+            r *= gains.r;
+            g *= gains.g;
+            b *= gains.b;
+          }
+
+          const outIdx = (y * width + x) * 4;
+          outData[outIdx] = clampBetween(Math.round(r), 0, 255);
+          outData[outIdx + 1] = clampBetween(Math.round(g), 0, 255);
+          outData[outIdx + 2] = clampBetween(Math.round(b), 0, 255);
+          outData[outIdx + 3] = 255;
+        }
+      }
+      return output;
+    }
+
+    async function applyLensCorrectionWithSettings(imageData, settings, options = {}) {
+      const { updateUi = false } = options;
+      const safeSettings = sanitizeSettings(settings, {
+        fallbackSettings: state,
+        includeCurvePoints: false,
+        includeCurves: false
+      });
+      const lensCorrection = safeSettings.lensCorrection;
+      const selectedLens = lensCorrection.selectedLens;
+
+      if (!lensCorrection.enabled) {
+        if (updateUi) setLensStatus('lensStatusSkipped');
+        return imageData;
+      }
+
+      if (!selectedLens || !selectedLens.handle) {
+        if (updateUi) setLensStatus('lensStatusNeedProfile');
+        return imageData;
+      }
+
+      if (updateUi) setLensStatus('lensStatusLoading');
+
+      let runtime;
+      try {
+        runtime = await ensureLensfunClient();
+      } catch (err) {
+        const reason = sanitizeLensRuntimeError(err);
+        if (updateUi) {
+          state.lensCorrection.lastError = reason;
+          setLensStatus('lensStatusInitFailed', { reason });
+        }
+        return imageData;
+      }
+
+      if (updateUi) {
+        state.lensCorrection.source = runtime.source;
+        setLensStatus(resolveLensStatusKeyForSource(runtime.source));
+      }
+
+      try {
+        const params = {
+          focal: lensCorrection.params.focal,
+          crop: lensCorrection.params.crop,
+          aperture: lensCorrection.params.aperture,
+          distance: lensCorrection.params.distance,
+          stepMode: lensCorrection.params.stepMode,
+          step: resolveLensMapStep(lensCorrection.params, imageData.width, imageData.height)
+        };
+        const cacheKey = buildLensMapCacheKey(
+          selectedLens.handle,
+          imageData.width,
+          imageData.height,
+          params,
+          lensCorrection.modes
+        );
+        let maps = lensMapCache.get(cacheKey);
+        if (!maps) {
+          maps = runtime.client.buildCorrectionMaps({
+            lensHandle: selectedLens.handle,
+            width: imageData.width,
+            height: imageData.height,
+            focal: params.focal,
+            crop: params.crop,
+            step: params.step,
+            reverse: false,
+            includeTca: lensCorrection.modes.includeTca,
+            includeVignetting: lensCorrection.modes.includeVignetting,
+            aperture: params.aperture,
+            distance: params.distance
+          });
+          lensMapCache.set(cacheKey, maps);
+          if (lensMapCache.size > 12) {
+            const oldestKey = lensMapCache.keys().next().value;
+            if (oldestKey) lensMapCache.delete(oldestKey);
+          }
+        }
+
+        const corrected = applyLensMapsToImage(imageData, maps, lensCorrection.modes);
+        if (updateUi) {
+          state.lensCorrection.lastError = '';
+          setLensStatus('lensStatusApplied');
+        }
+        return corrected;
+      } catch (err) {
+        const reason = sanitizeLensRuntimeError(err);
+        if (updateUi) {
+          state.lensCorrection.lastError = reason;
+          setLensStatus('lensStatusApplyFailed', { reason });
+        }
+        return imageData;
+      }
+    }
+
+    function parseMetadataNumber(value) {
+      if (typeof value === 'number' && Number.isFinite(value)) return value;
+      if (typeof value !== 'string') return NaN;
+      const text = value.trim();
+      if (!text) return NaN;
+
+      const ratio = text.match(/(-?\d+(?:\.\d+)?)\s*\/\s*(-?\d+(?:\.\d+)?)/);
+      if (ratio) {
+        const num = Number(ratio[1]);
+        const den = Number(ratio[2]);
+        if (Number.isFinite(num) && Number.isFinite(den) && den !== 0) return num / den;
+      }
+
+      const direct = text.match(/-?\d+(?:\.\d+)?/);
+      if (!direct) return NaN;
+      const parsed = Number(direct[0]);
+      return Number.isFinite(parsed) ? parsed : NaN;
+    }
+
+    function normalizeMetadataKey(key) {
+      return String(key || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    }
+
+    function findMetadataValue(metadata, candidateKeys) {
+      if (!metadata || typeof metadata !== 'object') return null;
+      const target = new Set(candidateKeys.map(normalizeMetadataKey));
+      const queue = [metadata];
+      const visited = new Set();
+      let depth = 0;
+
+      while (queue.length && depth < 3000) {
+        const node = queue.shift();
+        depth++;
+        if (!node || typeof node !== 'object' || visited.has(node)) continue;
+        visited.add(node);
+
+        for (const [rawKey, rawValue] of Object.entries(node)) {
+          const normalizedKey = normalizeMetadataKey(rawKey);
+          if (target.has(normalizedKey) && rawValue !== null && rawValue !== undefined && rawValue !== '') {
+            return rawValue;
+          }
+          if (rawValue && typeof rawValue === 'object') queue.push(rawValue);
+        }
+      }
+      return null;
+    }
+
+    function extractRawLensMetadata(metadata) {
+      if (!metadata || typeof metadata !== 'object') return null;
+      const lensModelRaw = findMetadataValue(metadata, ['lensModel', 'lens', 'lensName', 'lensDescription', 'lensInfo']);
+      const lensMakerRaw = findMetadataValue(metadata, ['lensMaker', 'lensMake']);
+      const cameraModelRaw = findMetadataValue(metadata, ['cameraModel', 'model', 'camera']);
+      const cameraMakerRaw = findMetadataValue(metadata, ['cameraMaker', 'make', 'cameraMake']);
+      const focalRaw = findMetadataValue(metadata, ['focalLength', 'focalLen', 'focal', 'focalMm']);
+      const apertureRaw = findMetadataValue(metadata, ['aperture', 'fNumber', 'fstop', 'fStop']);
+
+      const focal = parseMetadataNumber(focalRaw);
+      const aperture = parseMetadataNumber(apertureRaw);
+
+      const output = {
+        lensModel: lensModelRaw ? String(lensModelRaw).trim() : '',
+        lensMaker: lensMakerRaw ? String(lensMakerRaw).trim() : '',
+        cameraModel: cameraModelRaw ? String(cameraModelRaw).trim() : '',
+        cameraMaker: cameraMakerRaw ? String(cameraMakerRaw).trim() : '',
+        focal: Number.isFinite(focal) ? focal : NaN,
+        aperture: Number.isFinite(aperture) ? aperture : NaN
+      };
+      return output;
+    }
+
+    function applyLensMetadataPrefill(metadata) {
+      if (!metadata || typeof metadata !== 'object') return;
+      const search = state.lensCorrection.search;
+      if (!search.lensModel && metadata.lensModel) search.lensModel = metadata.lensModel;
+      if (!search.lensMaker && metadata.lensMaker) search.lensMaker = metadata.lensMaker;
+      if (!search.cameraModel && metadata.cameraModel) search.cameraModel = metadata.cameraModel;
+      if (!search.cameraMaker && metadata.cameraMaker) search.cameraMaker = metadata.cameraMaker;
+
+      if (!state.lensCorrection.paramTouched.focal && Number.isFinite(metadata.focal)) {
+        state.lensCorrection.params.focal = clampBetween(metadata.focal, 1, 10_000);
+      }
+      if (!state.lensCorrection.paramTouched.aperture && Number.isFinite(metadata.aperture)) {
+        state.lensCorrection.params.aperture = clampBetween(metadata.aperture, 0.5, 512);
+      }
+
+      updateLensCorrectionUI();
+    }
+
+    function guessFocalFromLensProfile(lens) {
+      if (!lens || typeof lens !== 'object') return 50;
+      const minFocal = sanitizeNumeric(lens.minFocal, NaN, 0, 10_000);
+      const maxFocal = sanitizeNumeric(lens.maxFocal, NaN, 0, 10_000);
+      if (Number.isFinite(minFocal) && Number.isFinite(maxFocal) && maxFocal >= minFocal && maxFocal > 0) {
+        if (minFocal > 0 && maxFocal > 0) return (minFocal + maxFocal) / 2;
+      }
+      if (Number.isFinite(minFocal) && minFocal > 0) return minFocal;
+      if (Number.isFinite(maxFocal) && maxFocal > 0) return maxFocal;
+      return 50;
+    }
+
+    function syncLensStepInputState() {
+      const stepModeSelect = document.getElementById('lensStepModeSelect');
+      const stepInput = document.getElementById('lensStepInput');
+      if (!stepModeSelect || !stepInput) return;
+      const manual = stepModeSelect.value === 'manual';
+      stepInput.disabled = !manual;
+    }
+
+    function renderLensSearchResults() {
+      const select = document.getElementById('lensResultSelect');
+      if (!select) return;
+      const results = Array.isArray(state.lensCorrection.searchResults)
+        ? state.lensCorrection.searchResults
+        : [];
+      const selectedHandle = state.lensCorrection.selectedLens?.handle || null;
+
+      select.innerHTML = '';
+      if (!results.length) {
+        const opt = document.createElement('option');
+        opt.value = '';
+        opt.textContent = getLocalizedText('lensNoResult', 'No profiles loaded yet');
+        select.appendChild(opt);
+        select.disabled = true;
+        return;
+      }
+
+      results.forEach((lens, idx) => {
+        const option = document.createElement('option');
+        option.value = String(idx);
+        const maker = String(lens.maker || '').trim();
+        const model = String(lens.model || '').trim();
+        const score = Number.isFinite(lens.score) ? Number(lens.score).toFixed(3) : '0.000';
+        const minFocal = Number.isFinite(lens.minFocal) ? Number(lens.minFocal).toFixed(1) : '-';
+        const maxFocal = Number.isFinite(lens.maxFocal) ? Number(lens.maxFocal).toFixed(1) : '-';
+        option.textContent = `${maker} ${model} | score ${score} | ${minFocal}-${maxFocal}mm`.trim();
+        if (selectedHandle && lens.handle === selectedHandle) {
+          option.selected = true;
+        }
+        select.appendChild(option);
+      });
+      select.disabled = false;
+      if (select.selectedIndex < 0) select.selectedIndex = 0;
+    }
+
+    function updateLensCorrectionUI() {
+      const panel = document.getElementById('lensCorrectionPanel');
+      if (!panel) return;
+
+      const enableInput = document.getElementById('lensEnableInput');
+      const lensModelInput = document.getElementById('lensLensModelInput');
+      const lensMakerInput = document.getElementById('lensLensMakerInput');
+      const cameraModelInput = document.getElementById('lensCameraModelInput');
+      const cameraMakerInput = document.getElementById('lensCameraMakerInput');
+      const focalInput = document.getElementById('lensFocalInput');
+      const cropInput = document.getElementById('lensCropInput');
+      const apertureInput = document.getElementById('lensApertureInput');
+      const distanceInput = document.getElementById('lensDistanceInput');
+      const stepModeSelect = document.getElementById('lensStepModeSelect');
+      const stepInput = document.getElementById('lensStepInput');
+      const useSelectedBtn = document.getElementById('lensUseSelectedBtn');
+      const statusBox = document.getElementById('lensStatusBox');
+      const selectedText = document.getElementById('lensSelectedText');
+
+      enableInput.checked = Boolean(state.lensCorrection.enabled);
+      lensModelInput.value = state.lensCorrection.search.lensModel || '';
+      lensMakerInput.value = state.lensCorrection.search.lensMaker || '';
+      cameraModelInput.value = state.lensCorrection.search.cameraModel || '';
+      cameraMakerInput.value = state.lensCorrection.search.cameraMaker || '';
+
+      focalInput.value = String(Number(state.lensCorrection.params.focal).toFixed(2)).replace(/\.00$/, '');
+      cropInput.value = String(Number(state.lensCorrection.params.crop).toFixed(3)).replace(/\.?0+$/, '');
+      apertureInput.value = String(Number(state.lensCorrection.params.aperture).toFixed(2)).replace(/\.00$/, '');
+      distanceInput.value = String(Number(state.lensCorrection.params.distance).toFixed(2)).replace(/\.00$/, '');
+      stepModeSelect.value = state.lensCorrection.params.stepMode === 'manual' ? 'manual' : 'auto';
+      stepInput.value = String(Math.round(state.lensCorrection.params.step || 2));
+      syncLensStepInputState();
+
+      renderLensSearchResults();
+      const hasResults = Array.isArray(state.lensCorrection.searchResults) && state.lensCorrection.searchResults.length > 0;
+      useSelectedBtn.disabled = !hasResults;
+
+      const selectedLens = state.lensCorrection.selectedLens;
+      if (selectedLens) {
+        selectedText.textContent = applyTemplate(
+          getLocalizedText('lensSelectedPrefix', 'Selected profile: {lens}'),
+          { lens: formatLensLabel(selectedLens) || `#${selectedLens.handle}` }
+        );
+      } else {
+        selectedText.textContent = getLocalizedText('lensSelectedNone', 'Selected profile: none');
+      }
+
+      const statusKey = state.lensCorrection.statusKey || 'lensStatusIdle';
+      const template = getLocalizedText(statusKey, getLocalizedText('lensStatusIdle', 'Lens correction is optional.'));
+      statusBox.textContent = applyTemplate(template, state.lensCorrection.statusVars || {});
+      statusBox.classList.remove('error', 'ready');
+      if (statusKey === 'lensStatusInitFailed' || statusKey === 'lensStatusApplyFailed') {
+        statusBox.classList.add('error');
+      } else if (statusKey === 'lensStatusReadyCdn' || statusKey === 'lensStatusReadyLocal' || statusKey === 'lensStatusApplied') {
+        statusBox.classList.add('ready');
+      }
     }
 
     function parseSemver(value) {
@@ -3307,6 +4184,15 @@
 
     initPrivacyBannerToggle();
     initDesktopUpdateCheck();
+    window.addEventListener('beforeunload', () => {
+      if (lensfunRuntime.client && typeof lensfunRuntime.client.dispose === 'function') {
+        try {
+          lensfunRuntime.client.dispose();
+        } catch (err) {
+          // ignore
+        }
+      }
+    });
 
     // ===========================================
     // Film Presets
@@ -3547,6 +4433,113 @@
 
     initPresetFallbacks();
 
+    function createDefaultLensCorrectionSettings() {
+      return {
+        enabled: false,
+        selectedLens: null,
+        params: {
+          focal: 50,
+          crop: 1,
+          aperture: 8,
+          distance: 1000,
+          stepMode: 'auto',
+          step: 2
+        },
+        modes: {
+          includeTca: true,
+          includeVignetting: true
+        },
+        lastError: ''
+      };
+    }
+
+    function createInitialLensCorrectionState() {
+      const base = createDefaultLensCorrectionSettings();
+      return {
+        enabled: base.enabled,
+        selectedLens: base.selectedLens,
+        params: { ...base.params },
+        modes: { ...base.modes },
+        lastError: base.lastError,
+        search: {
+          lensModel: '',
+          lensMaker: '',
+          cameraModel: '',
+          cameraMaker: ''
+        },
+        searchResults: [],
+        statusKey: 'lensStatusIdle',
+        statusVars: {},
+        source: null,
+        paramTouched: {
+          focal: false,
+          crop: false,
+          aperture: false,
+          distance: false,
+          stepMode: false,
+          step: false
+        }
+      };
+    }
+
+    function sanitizeLensSelection(input, fallback = null) {
+      const source = (input && typeof input === 'object') ? input : fallback;
+      if (!source || typeof source !== 'object') return null;
+      const handleRaw = Number(source.handle);
+      const handle = Number.isFinite(handleRaw) ? Math.trunc(handleRaw) : NaN;
+      if (!Number.isFinite(handle) || handle < 1) return null;
+      return {
+        handle,
+        maker: String(source.maker || '').trim(),
+        model: String(source.model || '').trim(),
+        score: sanitizeNumeric(source.score, 0, 0, 1_000_000),
+        minFocal: sanitizeNumeric(source.minFocal, 0, 0, 10_000),
+        maxFocal: sanitizeNumeric(source.maxFocal, 0, 0, 10_000),
+        minAperture: sanitizeNumeric(source.minAperture, 0, 0, 512),
+        maxAperture: sanitizeNumeric(source.maxAperture, 0, 0, 512),
+        cropFactor: sanitizeNumeric(source.cropFactor, 1, 0.1, 10)
+      };
+    }
+
+    function sanitizeLensCorrection(input, fallback = null) {
+      const fallbackValue = (fallback && typeof fallback === 'object')
+        ? fallback
+        : createDefaultLensCorrectionSettings();
+      const source = (input && typeof input === 'object') ? input : {};
+      const selectedLens = sanitizeLensSelection(source.selectedLens, fallbackValue.selectedLens);
+
+      const fallbackParams = (fallbackValue.params && typeof fallbackValue.params === 'object')
+        ? fallbackValue.params
+        : createDefaultLensCorrectionSettings().params;
+      const sourceParams = (source.params && typeof source.params === 'object') ? source.params : {};
+      const stepMode = sourceParams.stepMode === 'manual'
+        ? 'manual'
+        : (fallbackParams.stepMode === 'manual' ? 'manual' : 'auto');
+
+      const fallbackModes = (fallbackValue.modes && typeof fallbackValue.modes === 'object')
+        ? fallbackValue.modes
+        : createDefaultLensCorrectionSettings().modes;
+      const sourceModes = (source.modes && typeof source.modes === 'object') ? source.modes : {};
+
+      return {
+        enabled: Boolean(source.enabled ?? fallbackValue.enabled),
+        selectedLens,
+        params: {
+          focal: sanitizeNumeric(sourceParams.focal, fallbackParams.focal ?? 50, 1, 10_000),
+          crop: sanitizeNumeric(sourceParams.crop, fallbackParams.crop ?? 1, 0.1, 10),
+          aperture: sanitizeNumeric(sourceParams.aperture, fallbackParams.aperture ?? 8, 0.5, 512),
+          distance: sanitizeNumeric(sourceParams.distance, fallbackParams.distance ?? 1000, 0.1, 100_000),
+          stepMode,
+          step: Math.round(sanitizeNumeric(sourceParams.step, fallbackParams.step ?? 2, 1, 16))
+        },
+        modes: {
+          includeTca: sourceModes.includeTca !== false,
+          includeVignetting: sourceModes.includeVignetting !== false
+        },
+        lastError: String(source.lastError || fallbackValue.lastError || '').slice(0, 300)
+      };
+    }
+
     // ===========================================
     // Application State
     // ===========================================
@@ -3570,6 +4563,8 @@
       filmBase: { r: 210, g: 140, b: 90 },
       filmBaseSet: false,
       step2Mode: 'border', // 'border' | 'noBorder'
+      lensCorrection: createInitialLensCorrectionState(),
+      rawMetadata: null,
 
       // White balance multipliers
       wbR: 1.0,
@@ -4327,6 +5322,7 @@
         filmType,
         filmPreset,
         filmBase: sanitizeFilmBase(source.filmBase, fallbackSettings.filmBase),
+        lensCorrection: sanitizeLensCorrection(source.lensCorrection, fallbackSettings.lensCorrection),
         exposure: sanitizeNumeric(source.exposure, fallbackSettings.exposure ?? 0, -3, 3),
         contrast: sanitizeNumeric(source.contrast, fallbackSettings.contrast ?? 0, -100, 100),
         highlights: sanitizeNumeric(source.highlights, fallbackSettings.highlights ?? 0, -100, 100),
@@ -5914,24 +6910,26 @@
       updateFullCpu();
     }
 
-    function processNegative() {
+    async function processNegative() {
       const sourceData = state.croppedImageData || state.originalImageData;
       if (!sourceData) return;
+
+      const correctedSourceData = await applyLensCorrectionWithSettings(sourceData, state, { updateUi: true });
 
       let processed;
       const preset = getPresetOrFallback(state.filmPreset, state.filmType);
       const presetType = (preset && preset.type) ? preset.type : state.filmType;
 
       if (state.filmType === 'positive' || presetType === 'positive') {
-        processed = convertPositiveFilm(sourceData);
+        processed = convertPositiveFilm(correctedSourceData);
       } else if (state.filmType === 'bw' || presetType === 'bw') {
         const bwParams = getBwPresetParams(preset);
-        processed = convertBWNegative(sourceData, {
+        processed = convertBWNegative(correctedSourceData, {
           contrast: bwParams.contrast,
           gamma: bwParams.gamma
         });
       } else {
-        processed = convertColorNegative(sourceData, state.filmBase);
+        processed = convertColorNegative(correctedSourceData, state.filmBase);
       }
 
       state.processedImageData = processed;
@@ -5991,9 +6989,14 @@
         const arrayBuffer = await file.arrayBuffer();
 
         let imageData;
+        let extractedRawMeta = null;
 
         if (isRawLikeFile) {
-          imageData = await loadRawFile(arrayBuffer, fileName);
+          imageData = await loadRawFile(arrayBuffer, fileName, {
+            onMetadata(meta) {
+              extractedRawMeta = meta;
+            }
+          });
         } else if (file.type === 'image/png') {
           imageData = loadPngFile(arrayBuffer);
         } else {
@@ -6014,11 +7017,17 @@
           state.lastRenderQuality = 'full';
           state.filmBaseSet = false;
           state.autoFrame.lastDiagnostics = null;
+          state.rawMetadata = extractedRawMeta;
           if (webglState.gl) {
             webglState.sourceDirty = true;
             webglState.sourceSize = { w: 0, h: 0 };
           }
 
+          if (extractedRawMeta) {
+            applyLensMetadataPrefill(extractedRawMeta);
+          } else {
+            updateLensCorrectionUI();
+          }
           displayNegative(imageData);
           showImageUI();
           goToStep(1);
@@ -6037,13 +7046,16 @@
       }
     }
 
-    async function loadRawFile(buffer, fileName) {
+    async function loadRawFile(buffer, fileName, options = {}) {
+      const onMetadata = typeof options.onMetadata === 'function' ? options.onMetadata : null;
+
       // Handle TIF/TIFF files directly with UTIF.js
       if (fileName.endsWith('.tif') || fileName.endsWith('.tiff')) {
         try {
           const ifds = UTIF.decode(buffer);
           UTIF.decodeImage(buffer, ifds[0]);
           const rgba = UTIF.toRGBA8(ifds[0]);
+          if (onMetadata) onMetadata(null);
           return new ImageData(new Uint8ClampedArray(rgba), ifds[0].width, ifds[0].height);
         } catch (err) {
           console.error('UTIF.js failed for TIFF:', err);
@@ -6059,6 +7071,7 @@
             const ifds = UTIF.decode(buffer);
             UTIF.decodeImage(buffer, ifds[0]);
             const rgba = UTIF.toRGBA8(ifds[0]);
+            if (onMetadata) onMetadata(null);
             return new ImageData(new Uint8ClampedArray(rgba), ifds[0].width, ifds[0].height);
           } catch (err) {
             console.error('UTIF.js failed:', err);
@@ -6080,6 +7093,16 @@
         outputColor: 1,
         outputBps: 8
       });
+
+      if (onMetadata) {
+        let rawMetadata = null;
+        try {
+          rawMetadata = await raw.metadata(true);
+        } catch (err) {
+          rawMetadata = null;
+        }
+        onMetadata(extractRawLensMetadata(rawMetadata));
+      }
 
       const result = await raw.imageData();
       const { width, height, data: rgbData } = result;
@@ -6155,6 +7178,7 @@
       adjustCanvasDisplay(canvas.width, canvas.height);
       updateAutoFrameConfigUI();
       updateAutoFrameDiagnosticsUI();
+      updateLensCorrectionUI();
     }
 
     // ===========================================
@@ -6193,8 +7217,21 @@
       state.filmPreset = resolvePresetId(ref.filmPreset) || getDefaultPresetForType(state.filmType);
       state.filmBase = { ...ref.filmBase };
       state.filmBaseSet = true;
+      if (ref.lensCorrection) {
+        const safeLens = sanitizeLensCorrection(ref.lensCorrection, state.lensCorrection);
+        state.lensCorrection.enabled = Boolean(safeLens.enabled);
+        state.lensCorrection.selectedLens = safeLens.selectedLens ? { ...safeLens.selectedLens } : null;
+        state.lensCorrection.params = { ...safeLens.params };
+        state.lensCorrection.modes = { ...safeLens.modes };
+        state.lensCorrection.lastError = safeLens.lastError || '';
+        if (state.lensCorrection.selectedLens) {
+          state.lensCorrection.search.lensModel = state.lensCorrection.selectedLens.model || state.lensCorrection.search.lensModel;
+          state.lensCorrection.search.lensMaker = state.lensCorrection.selectedLens.maker || state.lensCorrection.search.lensMaker;
+        }
+      }
 
       updateSlidersFromState();
+      updateLensCorrectionUI();
       updateFilmBasePreview();
       updateStep2GuideCard();
       markCurrentFileDirty();
@@ -6312,6 +7349,7 @@
         document.getElementById('filmBasePreview').style.display = 'none';
         updateRollReferenceUI();
         updateStep2GuideCard();
+        updateLensCorrectionUI();
         return;
       }
 
@@ -6330,6 +7368,7 @@
       updateFilmBasePreview();
       updateRollReferenceUI();
       updateStep2GuideCard();
+      updateLensCorrectionUI();
     }
 
     function updateFilmBasePreview() {
@@ -6400,8 +7439,182 @@
           }
         }
       }
-      processNegative();
+      void processNegative();
     });
+
+    function readLensSearchInputsFromUI() {
+      const lensModelInput = document.getElementById('lensLensModelInput');
+      const lensMakerInput = document.getElementById('lensLensMakerInput');
+      const cameraModelInput = document.getElementById('lensCameraModelInput');
+      const cameraMakerInput = document.getElementById('lensCameraMakerInput');
+      state.lensCorrection.search = {
+        lensModel: String(lensModelInput?.value || '').trim(),
+        lensMaker: String(lensMakerInput?.value || '').trim(),
+        cameraModel: String(cameraModelInput?.value || '').trim(),
+        cameraMaker: String(cameraMakerInput?.value || '').trim()
+      };
+      return state.lensCorrection.search;
+    }
+
+    function applyLensProfileSelection(lens) {
+      const selected = sanitizeLensSelection(lens, null);
+      if (!selected) return false;
+      state.lensCorrection.selectedLens = selected;
+      state.lensCorrection.enabled = true;
+      state.lensCorrection.search.lensModel = selected.model || state.lensCorrection.search.lensModel;
+      state.lensCorrection.search.lensMaker = selected.maker || state.lensCorrection.search.lensMaker;
+      if (!state.lensCorrection.paramTouched.crop && Number.isFinite(selected.cropFactor) && selected.cropFactor > 0) {
+        state.lensCorrection.params.crop = clampBetween(selected.cropFactor, 0.1, 10);
+      }
+      if (!state.lensCorrection.paramTouched.focal) {
+        state.lensCorrection.params.focal = clampBetween(guessFocalFromLensProfile(selected), 1, 10_000);
+      }
+      if (!state.lensCorrection.paramTouched.aperture && Number.isFinite(selected.maxAperture) && selected.maxAperture > 0) {
+        state.lensCorrection.params.aperture = clampBetween(selected.maxAperture, 0.5, 512);
+      }
+      state.lensCorrection.lastError = '';
+      setLensStatus('lensStatusSelected', { lens: formatLensLabel(selected) || `#${selected.handle}` });
+      updateLensCorrectionUI();
+      markCurrentFileDirty();
+      return true;
+    }
+
+    async function runLensProfileSearch() {
+      const searchBtn = document.getElementById('lensSearchBtn');
+      const query = readLensSearchInputsFromUI();
+      if (!query.lensModel) {
+        setLensStatus('lensStatusNeedModel');
+        updateLensCorrectionUI();
+        return;
+      }
+
+      const previousText = searchBtn.textContent;
+      searchBtn.disabled = true;
+      setLensStatus('lensStatusLoading');
+      updateLensCorrectionUI();
+
+      try {
+        const runtime = await ensureLensfunClient();
+        state.lensCorrection.source = runtime.source;
+        setLensStatus(resolveLensStatusKeyForSource(runtime.source));
+
+        const searchFlags = (window.LensfunWasm && Number.isFinite(window.LensfunWasm.LF_SEARCH_SORT_AND_UNIQUIFY))
+          ? window.LensfunWasm.LF_SEARCH_SORT_AND_UNIQUIFY
+          : 2;
+        const results = runtime.client.searchLenses({
+          lensModel: query.lensModel,
+          lensMaker: query.lensMaker || undefined,
+          cameraMaker: query.cameraMaker || undefined,
+          cameraModel: query.cameraModel || undefined,
+          searchFlags
+        });
+
+        state.lensCorrection.searchResults = Array.isArray(results) ? results.slice(0, 200) : [];
+        renderLensSearchResults();
+
+        if (!state.lensCorrection.searchResults.length) {
+          setLensStatus('lensStatusNoResult');
+          updateLensCorrectionUI();
+          return;
+        }
+
+        setLensStatus('lensStatusSearchCount', {
+          count: state.lensCorrection.searchResults.length
+        });
+        updateLensCorrectionUI();
+      } catch (err) {
+        const reason = sanitizeLensRuntimeError(err);
+        state.lensCorrection.lastError = reason;
+        setLensStatus('lensStatusInitFailed', { reason });
+        updateLensCorrectionUI();
+      } finally {
+        searchBtn.disabled = false;
+        if (previousText) searchBtn.textContent = previousText;
+      }
+    }
+
+    document.getElementById('lensEnableInput').addEventListener('change', (e) => {
+      state.lensCorrection.enabled = Boolean(e.target.checked);
+      if (state.lensCorrection.enabled && !state.lensCorrection.selectedLens) {
+        setLensStatus('lensStatusNeedProfile');
+      } else if (!state.lensCorrection.enabled) {
+        setLensStatus('lensStatusSkipped');
+      } else if (state.lensCorrection.selectedLens) {
+        setLensStatus('lensStatusSelected', {
+          lens: formatLensLabel(state.lensCorrection.selectedLens) || `#${state.lensCorrection.selectedLens.handle}`
+        });
+      }
+      updateLensCorrectionUI();
+      markCurrentFileDirty();
+    });
+
+    document.getElementById('lensSkipBtn').addEventListener('click', () => {
+      state.lensCorrection.enabled = false;
+      setLensStatus('lensStatusSkipped');
+      updateLensCorrectionUI();
+      markCurrentFileDirty();
+    });
+
+    document.getElementById('lensSearchBtn').addEventListener('click', () => {
+      void runLensProfileSearch();
+    });
+
+    document.getElementById('lensUseSelectedBtn').addEventListener('click', () => {
+      const select = document.getElementById('lensResultSelect');
+      const idx = Number(select.value);
+      if (!Number.isFinite(idx) || idx < 0 || idx >= state.lensCorrection.searchResults.length) {
+        setLensStatus('lensStatusNeedProfile');
+        updateLensCorrectionUI();
+        return;
+      }
+      applyLensProfileSelection(state.lensCorrection.searchResults[idx]);
+    });
+
+    document.getElementById('lensResultSelect').addEventListener('change', (e) => {
+      const idx = Number(e.target.value);
+      if (!Number.isFinite(idx) || idx < 0 || idx >= state.lensCorrection.searchResults.length) return;
+      const candidate = state.lensCorrection.searchResults[idx];
+      setLensStatus('lensStatusSelected', { lens: formatLensLabel(candidate) || `#${candidate.handle}` });
+      updateLensCorrectionUI();
+    });
+
+    const lensTextInputs = ['lensLensModelInput', 'lensLensMakerInput', 'lensCameraModelInput', 'lensCameraMakerInput'];
+    lensTextInputs.forEach((id) => {
+      const input = document.getElementById(id);
+      if (!input) return;
+      input.addEventListener('input', () => {
+        readLensSearchInputsFromUI();
+      });
+    });
+
+    function bindLensNumericParamInput(id, key, min, max, decimals = 3) {
+      const input = document.getElementById(id);
+      if (!input) return;
+      const handler = () => {
+        const value = sanitizeNumeric(input.value, state.lensCorrection.params[key], min, max);
+        state.lensCorrection.params[key] = value;
+        input.value = String(Number(value).toFixed(decimals)).replace(/\.?0+$/, '');
+        state.lensCorrection.paramTouched[key] = true;
+        markCurrentFileDirty();
+      };
+      input.addEventListener('change', handler);
+      input.addEventListener('blur', handler);
+    }
+
+    bindLensNumericParamInput('lensFocalInput', 'focal', 1, 10_000, 2);
+    bindLensNumericParamInput('lensCropInput', 'crop', 0.1, 10, 3);
+    bindLensNumericParamInput('lensApertureInput', 'aperture', 0.5, 512, 2);
+    bindLensNumericParamInput('lensDistanceInput', 'distance', 0.1, 100_000, 2);
+    bindLensNumericParamInput('lensStepInput', 'step', 1, 16, 0);
+
+    document.getElementById('lensStepModeSelect').addEventListener('change', (e) => {
+      state.lensCorrection.params.stepMode = e.target.value === 'manual' ? 'manual' : 'auto';
+      state.lensCorrection.paramTouched.stepMode = true;
+      syncLensStepInputState();
+      markCurrentFileDirty();
+    });
+
+    updateLensCorrectionUI();
 
     // ===========================================
     // White Balance Sampling
@@ -7935,7 +9148,7 @@
       invalidateProcessedPipelineState();
 
       if (state.currentStep >= 3) {
-        processNegative();
+        void processNegative();
       } else {
         displayNegative(state.croppedImageData || rotatedData);
         updateCanvasVisibility();
@@ -8438,12 +9651,14 @@
       state.histogramSourceImageData = null;
       state.webglSourceImageData = null;
       state.filmBaseSet = false;
+      state.rawMetadata = null;
       state.currentStep = 1;
       state.lastRenderQuality = 'full';
       state.fileQueue = [];
       state.currentFileIndex = 0;
       state.batchSessionActive = false;
       state.batchMode = false;
+      state.lensCorrection = createInitialLensCorrectionState();
       resetRollReferenceState();
       fullAdjustedBuffer = null;
       previewAdjustedBuffer = null;
@@ -8888,6 +10103,13 @@
         filmType: safe.filmType,
         filmPreset: safe.filmPreset,
         filmBase: { ...safe.filmBase },
+        lensCorrection: {
+          enabled: Boolean(safe.lensCorrection.enabled),
+          selectedLens: safe.lensCorrection.selectedLens ? { ...safe.lensCorrection.selectedLens } : null,
+          params: { ...safe.lensCorrection.params },
+          modes: { ...safe.lensCorrection.modes },
+          lastError: safe.lensCorrection.lastError || ''
+        },
         exposure: safe.exposure,
         contrast: safe.contrast,
         highlights: safe.highlights,
@@ -8925,6 +10147,13 @@
         filmType: safe.filmType,
         filmPreset: safe.filmPreset,
         filmBase: { ...safe.filmBase },
+        lensCorrection: {
+          enabled: Boolean(safe.lensCorrection.enabled),
+          selectedLens: safe.lensCorrection.selectedLens ? { ...safe.lensCorrection.selectedLens } : null,
+          params: { ...safe.lensCorrection.params },
+          modes: { ...safe.lensCorrection.modes },
+          lastError: safe.lensCorrection.lastError || ''
+        },
         exposure: safe.exposure,
         contrast: safe.contrast,
         highlights: safe.highlights,
@@ -9059,7 +10288,7 @@
       if (currentItem && currentItem.selected && currentItem.settings) {
         restoreSettings(currentItem.settings);
         if (state.currentStep >= 3 && state.originalImageData) {
-          processNegative();
+          void processNegative();
         }
       }
 
@@ -9222,6 +10451,7 @@
           workingData = cropImageData(workingData, cropRegion);
         }
       }
+      workingData = await applyLensCorrectionWithSettings(workingData, safeSettings, { updateUi: false });
 
       let processed;
       const preset = getPresetOrFallback(safeSettings.filmPreset, safeSettings.filmType);
@@ -9258,6 +10488,7 @@
         filmType: 'color',
         filmPreset: 'generic_color',
         filmBase: filmBase,
+        lensCorrection: createDefaultLensCorrectionSettings(),
         exposure: 0,
         contrast: 0,
         highlights: 0,
@@ -9307,6 +10538,7 @@
           workingData = cropImageData(workingData, cropRegion);
         }
       }
+      workingData = await applyLensCorrectionWithSettings(workingData, settings, { updateUi: false });
 
       // Convert negative
       let processed;
@@ -9558,6 +10790,21 @@
       state.filmPreset = resolvePresetId(safe.filmPreset) || getDefaultPresetForType(state.filmType);
       state.filmBase = { ...safe.filmBase };
       state.filmBaseSet = true;
+      state.lensCorrection.enabled = Boolean(safe.lensCorrection.enabled);
+      state.lensCorrection.selectedLens = safe.lensCorrection.selectedLens ? { ...safe.lensCorrection.selectedLens } : null;
+      state.lensCorrection.params = { ...safe.lensCorrection.params };
+      state.lensCorrection.modes = { ...safe.lensCorrection.modes };
+      state.lensCorrection.lastError = safe.lensCorrection.lastError || '';
+      if (state.lensCorrection.selectedLens) {
+        state.lensCorrection.search.lensModel = state.lensCorrection.selectedLens.model || state.lensCorrection.search.lensModel;
+        state.lensCorrection.search.lensMaker = state.lensCorrection.selectedLens.maker || state.lensCorrection.search.lensMaker;
+      }
+      state.lensCorrection.statusKey = state.lensCorrection.enabled
+        ? (state.lensCorrection.selectedLens ? 'lensStatusSelected' : 'lensStatusNeedProfile')
+        : 'lensStatusSkipped';
+      state.lensCorrection.statusVars = state.lensCorrection.selectedLens
+        ? { lens: formatLensLabel(state.lensCorrection.selectedLens) }
+        : {};
 
       // Restore adjustments
       state.exposure = safe.exposure;
@@ -9586,6 +10833,7 @@
       // Update UI to reflect restored settings
       updateSlidersFromState();
       renderCurve();
+      updateLensCorrectionUI();
     }
 
     // Update all slider UI elements from state
@@ -9601,6 +10849,7 @@
       renderPresetOptions(state.filmPreset);
       setFilmTypeButtons(state.filmType);
       updateFilmModeUI();
+      updateLensCorrectionUI();
     }
 
     function updateExportButtons() {
