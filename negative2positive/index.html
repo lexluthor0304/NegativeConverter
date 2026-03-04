@@ -662,6 +662,30 @@
       cursor: pointer;
     }
 
+    .guide-toggle-btn {
+      padding: 6px 10px;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--text-secondary);
+      font-size: 11px;
+      cursor: pointer;
+      transition: all 0.2s;
+      line-height: 1;
+      white-space: nowrap;
+    }
+
+    .guide-toggle-btn:hover {
+      background: var(--bg-tertiary);
+      border-color: var(--border-light);
+    }
+
+    .guide-toggle-btn[aria-pressed="true"] {
+      background: rgba(74, 158, 255, 0.12);
+      border-color: rgba(74, 158, 255, 0.35);
+      color: var(--accent);
+    }
+
     .section-title {
       font-size: 13px;
       font-weight: 600;
@@ -2249,29 +2273,31 @@
         </div>
       </div>
 
-      <!-- Workflow Guide -->
-      <div class="control-section">
-        <div class="section-header">
-          <span class="section-title" data-i18n="workflow">Workflow</span>
-        </div>
-        <div class="workflow-steps" id="workflowSteps">
-          <div class="workflow-step active" id="step1">
-            <span class="step-number">1</span>
-            <span data-i18n="stepCrop">Crop image (remove non-film areas)</span>
+	      <!-- Workflow Guide -->
+	      <div class="control-section">
+	        <div class="section-header">
+	          <span class="section-title" data-i18n="workflow">Workflow</span>
+	          <button class="guide-toggle-btn" id="guideToggleBtn" type="button" aria-pressed="true">Guide: On</button>
+	        </div>
+	        <div class="workflow-steps" id="workflowSteps">
+	          <div class="workflow-step active" id="step1">
+	            <span class="step-number">1</span>
+	            <span data-i18n="stepCrop">Crop image (remove non-film areas)</span>
           </div>
           <div class="workflow-step" id="step2">
             <span class="step-number">2</span>
             <span data-i18n="stepBase">Sample film base (orange mask)</span>
           </div>
           <div class="workflow-step" id="step3">
-            <span class="step-number">3</span>
-            <span data-i18n="stepAdjust">Adjust colors and export</span>
-          </div>
-        </div>
-        <div class="info-box workflow-guide-note" id="batchStep3GuideBox" data-i18n="batchStep3Guide" style="display: none;">
-          Batch Step 3 Guide:
-          1) Adjust current image.
-          2) Click "Save Settings".
+	            <span class="step-number">3</span>
+	            <span data-i18n="stepAdjust">Adjust colors and export</span>
+	          </div>
+	        </div>
+	        <div class="info-box workflow-guide-note" id="quickGuideBox" data-i18n="quickGuide" style="display: none;"></div>
+	        <div class="info-box workflow-guide-note" id="batchStep3GuideBox" data-i18n="batchStep3Guide" style="display: none;">
+	          Batch Step 3 Guide:
+	          1) Adjust current image.
+	          2) Click "Save Settings".
           3) Click the next file in File List.
           4) Repeat, then export all.
         </div>
@@ -2724,14 +2750,14 @@
         mirror: "镜像",
         crop: "裁剪",
         applyCrop: "应用裁剪",
-        cancelCrop: "取消",
-        autoFrame: "自动识别边框",
-        autoFrameSelected: "批量自动识别",
-        convert: "转换负片",
-        convertPositive: "转换正片",
-        histogram: "直方图",
-        loadError: "加载文件失败",
-        rawUnsupported: "当前 Safari 版本不支持 RAW 解码，请升级 Safari（建议 iOS 16.4+）或先转为 TIFF/JPEG。",
+	        cancelCrop: "取消",
+	        autoFrame: "自动识别边框",
+	        autoFrameSelected: "批量自动识别",
+	        convert: "下一步：胶片设置",
+	        convertPositive: "下一步：正片模式",
+	        histogram: "直方图",
+	        loadError: "加载文件失败",
+	        rawUnsupported: "当前 Safari 版本不支持 RAW 解码，请升级 Safari（建议 iOS 16.4+）或先转为 TIFF/JPEG。",
         workflow: "工作流程",
         stepCrop: "裁剪图像（移除胶片外区域）",
         stepBase: "设置色罩基准（新手按步骤即可）",
@@ -2745,14 +2771,17 @@
         colorFilm: "彩色",
         bwFilm: "黑白",
         positiveFilm: "正片",
-        genericColor: "通用彩色",
-        genericBW: "通用黑白",
-        genericPositive: "通用正片",
-        filmBaseInfo: "看得到橙色未曝光边缘：请手动采样。看不到边缘（如 ES-2）：请点“自动检测色罩”或“使用整卷参考值”。",
-        positiveModeInfo: "正片模式不需要色罩采样，可直接点击“下一步：转换并进入调整”。",
-        sampleBase: "手动采样色罩",
-        autoDetect: "自动检测色罩",
-        useRollReference: "使用整卷参考值",
+	        genericColor: "通用彩色",
+	        genericBW: "通用黑白",
+	        genericPositive: "通用正片",
+	        filmBaseInfo: "看得到橙色未曝光边缘：请手动采样。看不到边缘（如 ES-2）：请点“自动检测色罩”或“使用整卷参考值”。",
+	        positiveModeInfo: "色罩采样只用于彩色负片。黑白负片或正片不需要色罩采样：选择片种后，直接点击“下一步：转换并进入调整”。",
+	        guideToggleOn: "引导：开",
+	        guideToggleOff: "引导：关",
+	        quickGuide: "快速引导：\n• 彩色负片：第1步裁剪 → 下一步：胶片设置 →（第2步）设置色罩（手动/自动/整卷参考）→ 下一步：转换并进入调整 → 第3步调色导出\n• 黑白负片：第1步裁剪 → 下一步：胶片设置 → 片种选“黑白”→ 下一步：转换并进入调整（无需色罩）\n• 正片：第1步裁剪 → 下一步：正片模式 → 下一步：转换并进入调整（无需色罩）\n批处理：添加多张 → 处理一张作为参考 →「保存设置/应用到已选中」→ 最后「批量导出 (ZIP)」。\n提示：两个“下一步”按钮只在第1步显示；看左上角步骤徽标确认当前在哪一步。",
+	        sampleBase: "手动采样色罩",
+	        autoDetect: "自动检测色罩",
+	        useRollReference: "使用整卷参考值",
         step2FirstHint: "提示：如果你找不到橙色边缘，请切换到“无边框 / ES-2”再继续。",
         guideStep2Title: "第一次用？按下面 3 步做",
         guideStep2Intro: "先选择“有边框”或“无边框 / ES-2”，再按步骤执行。",
@@ -2923,14 +2952,14 @@
         mirror: "Mirror",
         crop: "Crop",
         applyCrop: "Apply Crop",
-        cancelCrop: "Cancel",
-        autoFrame: "Auto Frame",
-        autoFrameSelected: "Auto Frame Selected",
-        convert: "Convert Negative",
-        convertPositive: "Convert Positive",
-        histogram: "Histogram",
-        loadError: "Error loading file",
-        rawUnsupported: "RAW decode is not supported in this Safari version. Update Safari (iOS 16.4+) or convert to TIFF/JPEG first.",
+	        cancelCrop: "Cancel",
+	        autoFrame: "Auto Frame",
+	        autoFrameSelected: "Auto Frame Selected",
+	        convert: "Next: Film Settings",
+	        convertPositive: "Next: Positive Mode",
+	        histogram: "Histogram",
+	        loadError: "Error loading file",
+	        rawUnsupported: "RAW decode is not supported in this Safari version. Update Safari (iOS 16.4+) or convert to TIFF/JPEG first.",
         workflow: "Workflow",
         stepCrop: "Crop image (remove non-film areas)",
         stepBase: "Set Film Mask Baseline (Beginner Friendly)",
@@ -2944,14 +2973,17 @@
         colorFilm: "Color",
         bwFilm: "B&W",
         positiveFilm: "Positive",
-        genericColor: "Generic Color",
-        genericBW: "Generic B&W",
-        genericPositive: "Generic Positive",
-        filmBaseInfo: "If you can see unexposed orange border, sample it manually. If border is cropped out (for example ES-2), use Auto Detect Mask or Roll Reference.",
-        positiveModeInfo: "Positive mode does not need film-mask sampling. You can go straight to “Next: Convert and Continue”.",
-        sampleBase: "Sample Mask Manually",
-        autoDetect: "Auto Detect Mask",
-        useRollReference: "Use Roll Reference Value",
+	        genericColor: "Generic Color",
+	        genericBW: "Generic B&W",
+	        genericPositive: "Generic Positive",
+	        filmBaseInfo: "If you can see unexposed orange border, sample it manually. If border is cropped out (for example ES-2), use Auto Detect Mask or Roll Reference.",
+	        positiveModeInfo: "Mask sampling is only for color negatives. For B&W negatives or positive slides, select the film type and go straight to “Next: Convert and Continue”.",
+	        guideToggleOn: "Guide: On",
+	        guideToggleOff: "Guide: Off",
+	        quickGuide: "Quick Guide:\n• Color negative: Step 1 Crop → Next: Film Settings → (Step 2) set Mask (sample / auto-detect / roll reference) → Next: Convert and Continue → Step 3 Adjust & Export\n• B&W negative: Step 1 Crop → Next: Film Settings → set Film Type = B&W → Next: Convert and Continue (no mask)\n• Positive slide: Step 1 Crop → Next: Positive Mode → Next: Convert and Continue (no mask)\nBatch: Add multiple files → process one frame → Save Settings / Apply to Selected → Export All (ZIP) when ready.\nTip: The “Next” buttons only appear in Step 1. Check the badge to see your current step.",
+	        sampleBase: "Sample Mask Manually",
+	        autoDetect: "Auto Detect Mask",
+	        useRollReference: "Use Roll Reference Value",
         step2FirstHint: "Tip: If you cannot find orange border area, switch to “No Border / ES-2”.",
         guideStep2Title: "First time here? Follow these 3 steps",
         guideStep2Intro: "Pick the mode that matches your scan setup, then do the steps below.",
@@ -3122,14 +3154,14 @@
         mirror: "ミラー",
         crop: "トリミング",
         applyCrop: "適用",
-        cancelCrop: "キャンセル",
-        autoFrame: "自動フレーム検出",
-        autoFrameSelected: "選択画像を自動検出",
-        convert: "ネガ変換",
-        convertPositive: "ポジ変換",
-        histogram: "ヒストグラム",
-        loadError: "ファイルの読み込みに失敗しました",
-        rawUnsupported: "この Safari バージョンでは RAW デコードに対応していません。Safari（iOS 16.4+ 推奨）へ更新するか、先に TIFF/JPEG に変換してください。",
+	        cancelCrop: "キャンセル",
+	        autoFrame: "自動フレーム検出",
+	        autoFrameSelected: "選択画像を自動検出",
+	        convert: "次へ：フィルム設定",
+	        convertPositive: "次へ：ポジモード",
+	        histogram: "ヒストグラム",
+	        loadError: "ファイルの読み込みに失敗しました",
+	        rawUnsupported: "この Safari バージョンでは RAW デコードに対応していません。Safari（iOS 16.4+ 推奨）へ更新するか、先に TIFF/JPEG に変換してください。",
         workflow: "ワークフロー",
         stepCrop: "画像をトリミング（フィルム外を除去）",
         stepBase: "マスク基準を設定（初回でも簡単）",
@@ -3143,14 +3175,17 @@
         colorFilm: "カラー",
         bwFilm: "白黒",
         positiveFilm: "ポジ",
-        genericColor: "汎用カラー",
-        genericBW: "汎用白黒",
-        genericPositive: "汎用ポジ",
-        filmBaseInfo: "未露光のオレンジ端が見える場合は手動サンプリング。端がない（ES-2 など）場合は「マスク自動検出」または「ロール参照値」を使ってください。",
-        positiveModeInfo: "ポジモードではマスクサンプリングは不要です。「次へ：変換して調整へ」を押してください。",
-        sampleBase: "マスクを手動サンプリング",
-        autoDetect: "マスク自動検出",
-        useRollReference: "ロール参照値を使用",
+	        genericColor: "汎用カラー",
+	        genericBW: "汎用白黒",
+	        genericPositive: "汎用ポジ",
+	        filmBaseInfo: "未露光のオレンジ端が見える場合は手動サンプリング。端がない（ES-2 など）場合は「マスク自動検出」または「ロール参照値」を使ってください。",
+	        positiveModeInfo: "マスクサンプリングが必要なのはカラー・ネガのみです。白黒ネガ／ポジはマスク不要：種類を選んで「次へ：変換して調整へ」を押してください。",
+	        guideToggleOn: "ガイド：ON",
+	        guideToggleOff: "ガイド：OFF",
+	        quickGuide: "クイックガイド：\n• カラーネガ：ステップ1 トリミング → 次へ：フィルム設定 →（ステップ2）マスク設定（手動/自動/ロール参照）→ 次へ：変換して調整へ → ステップ3 調整・書き出し\n• 白黒ネガ：ステップ1 → 次へ：フィルム設定 → 種類を「白黒」に → 次へ：変換して調整へ（マスク不要）\n• ポジ：ステップ1 → 次へ：ポジモード → 次へ：変換して調整へ（マスク不要）\n一括：複数追加 → 1枚を基準に調整 →「設定を保存/選択中に適用」→ 最後に ZIP 書き出し。\nヒント：「次へ」ボタンはステップ1でのみ表示。左上のバッジで現在のステップを確認。",
+	        sampleBase: "マスクを手動サンプリング",
+	        autoDetect: "マスク自動検出",
+	        useRollReference: "ロール参照値を使用",
         step2FirstHint: "ヒント：オレンジ端が見つからない場合は「端なし / ES-2」に切り替えてください。",
         guideStep2Title: "初めての方へ：この 3 ステップでOK",
         guideStep2Intro: "まずスキャン方法に合うモードを選び、次の手順を実行してください。",
@@ -3327,13 +3362,14 @@
       centerPrior: 0.08,
       aspect: 0.12
     };
-    let opencvReadyPromise = null;
-    let opencvActiveSource = null;
-    const STEP2_FIRST_HINT_SESSION_KEY = 'nc_step2_first_hint_seen_v1';
-    const PRIVACY_BANNER_COLLAPSED_STORAGE_KEY = 'nc_privacy_banner_collapsed_v1';
-    const DESKTOP_UPDATE_LAST_CHECK_TS_KEY = 'nc_desktop_update_last_check_ts';
-    const DESKTOP_UPDATE_LAST_SEEN_LATEST_KEY = 'nc_desktop_update_last_seen_latest';
-    const DESKTOP_UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+	    let opencvReadyPromise = null;
+	    let opencvActiveSource = null;
+	    const STEP2_FIRST_HINT_SESSION_KEY = 'nc_step2_first_hint_seen_v1';
+	    const PRIVACY_BANNER_COLLAPSED_STORAGE_KEY = 'nc_privacy_banner_collapsed_v1';
+	    const GUIDE_MODE_STORAGE_KEY = 'nc_guide_mode_enabled_v1';
+	    const DESKTOP_UPDATE_LAST_CHECK_TS_KEY = 'nc_desktop_update_last_check_ts';
+	    const DESKTOP_UPDATE_LAST_SEEN_LATEST_KEY = 'nc_desktop_update_last_seen_latest';
+	    const DESKTOP_UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
     const DESKTOP_UPDATE_FETCH_TIMEOUT_MS = 5000;
     const DESKTOP_UPDATE_MANIFEST_URLS = [
       'https://download.neoanaloglab.com/negative-converter/release/latest.json',
@@ -3352,12 +3388,13 @@
       lastError: ''
     };
 
-    let currentLang = 'en';
-    let stateReady = false;
-    let step2FirstHintHandled = false;
-    const desktopUpdateState = {
-      visible: false,
-      currentVersion: '',
+	    let currentLang = 'en';
+	    let guideModeEnabled = true;
+	    let stateReady = false;
+	    let step2FirstHintHandled = false;
+	    const desktopUpdateState = {
+	      visible: false,
+	      currentVersion: '',
       latestVersion: ''
     };
 
@@ -3391,14 +3428,15 @@
         privacyLink.href = `./privacy.html?lang=${encodeURIComponent(lang)}`;
       }
       const offlineLink = document.getElementById('offlineDownloadLink');
-      if (offlineLink) {
-        offlineLink.href = `./download.html?lang=${encodeURIComponent(lang)}`;
-      }
-      updateDesktopUpdateBannerText();
-      if (stateReady) {
-        updateCurrentFileLabel();
-        updateRollReferenceUI();
-        updateAutoFrameConfigUI();
+	      if (offlineLink) {
+	        offlineLink.href = `./download.html?lang=${encodeURIComponent(lang)}`;
+	      }
+	      updateDesktopUpdateBannerText();
+	      updateGuideModeUI();
+	      if (stateReady) {
+	        updateCurrentFileLabel();
+	        updateRollReferenceUI();
+	        updateAutoFrameConfigUI();
         updateAutoFrameDiagnosticsUI();
         updateAutoFrameButtons();
         updateStep2GuideCard({ skipFirstHint: true });
@@ -3433,18 +3471,68 @@
       }
     }
 
-    function safeStorageSet(key, value) {
-      try {
-        localStorage.setItem(key, value);
-      } catch (err) {
-        // ignore
-      }
-    }
+	    function safeStorageSet(key, value) {
+	      try {
+	        localStorage.setItem(key, value);
+	      } catch (err) {
+	        // ignore
+	      }
+	    }
 
-    function applyTemplate(template, vars = {}) {
-      let output = String(template || '');
-      Object.entries(vars).forEach(([key, value]) => {
-        output = output.replaceAll(`{${key}}`, String(value));
+	    function clearRecommendedActions() {
+	      ['sampleBaseBtn', 'autoDetectBtn', 'useReferenceBtn', 'applyConvertBtn'].forEach(id => {
+	        const btn = document.getElementById(id);
+	        if (btn) btn.classList.remove('recommended-action');
+	      });
+	    }
+
+	    function updateGuideModeUI() {
+	      const toggleBtn = document.getElementById('guideToggleBtn');
+	      if (toggleBtn) {
+	        toggleBtn.setAttribute('aria-pressed', guideModeEnabled ? 'true' : 'false');
+	        toggleBtn.textContent = guideModeEnabled
+	          ? getLocalizedText('guideToggleOn', 'Guide: On')
+	          : getLocalizedText('guideToggleOff', 'Guide: Off');
+	      }
+
+	      const quickGuideBox = document.getElementById('quickGuideBox');
+	      if (quickGuideBox) {
+	        quickGuideBox.style.display = guideModeEnabled ? 'block' : 'none';
+	      }
+
+	      if (!guideModeEnabled) {
+	        clearRecommendedActions();
+	        const step2Hint = document.getElementById('step2FirstHint');
+	        if (step2Hint) step2Hint.style.display = 'none';
+	      }
+
+	      if (stateReady) {
+	        updateBatchStep3GuideVisibility();
+	        updateStep2GuideCard({ skipFirstHint: true });
+	      }
+	    }
+
+	    function setGuideModeEnabled(enabled, options = {}) {
+	      const { persist = true } = options;
+	      guideModeEnabled = Boolean(enabled);
+	      if (persist) safeStorageSet(GUIDE_MODE_STORAGE_KEY, guideModeEnabled ? '1' : '0');
+	      updateGuideModeUI();
+	    }
+
+	    guideModeEnabled = safeStorageGet(GUIDE_MODE_STORAGE_KEY) !== '0';
+	    const guideToggleBtn = document.getElementById('guideToggleBtn');
+	    if (guideToggleBtn) {
+	      guideToggleBtn.addEventListener('click', (e) => {
+	        e.stopPropagation();
+	        setGuideModeEnabled(!guideModeEnabled);
+	      });
+	    }
+	    updateGuideModeUI();
+
+	    function applyTemplate(template, vars = {}) {
+	      let output = String(template || '');
+	      Object.entries(vars).forEach(([key, value]) => {
+	        output = output.replaceAll(`{${key}}`, String(value));
       });
       return output;
     }
@@ -4758,11 +4846,11 @@
       }
     }
 
-    function updateBatchStep3GuideVisibility() {
-      const guide = document.getElementById('batchStep3GuideBox');
-      if (!guide) return;
-      guide.style.display = (state.batchSessionActive && state.currentStep >= 3) ? 'block' : 'none';
-    }
+	    function updateBatchStep3GuideVisibility() {
+	      const guide = document.getElementById('batchStep3GuideBox');
+	      if (!guide) return;
+	      guide.style.display = (guideModeEnabled && state.batchSessionActive && state.currentStep >= 3) ? 'block' : 'none';
+	    }
 
     function syncBatchUIState(options = {}) {
       if (state.fileQueue.length > 1) state.batchSessionActive = true;
@@ -7238,31 +7326,36 @@
       return true;
     }
 
-    function setRecommendedAction(actionId) {
-      ['sampleBaseBtn', 'autoDetectBtn', 'useReferenceBtn', 'applyConvertBtn'].forEach(id => {
-        const btn = document.getElementById(id);
-        if (btn) btn.classList.remove('recommended-action');
-      });
-      if (!actionId) return;
+	    function setRecommendedAction(actionId) {
+	      clearRecommendedActions();
+	      if (!guideModeEnabled) return;
+	      if (!actionId) return;
 
-      const target = document.getElementById(actionId);
-      if (!target || target.disabled) return;
-      if (target.style.display === 'none') return;
-      target.classList.add('recommended-action');
-    }
+	      const target = document.getElementById(actionId);
+	      if (!target || target.disabled) return;
+	      if (target.style.display === 'none') return;
+	      target.classList.add('recommended-action');
+	    }
 
-    function updateStep2GuideCard(options = {}) {
-      const { skipFirstHint = false } = options;
-      const card = document.getElementById('step2GuideCard');
-      const step1El = document.getElementById('step2GuideStep1');
-      const step2El = document.getElementById('step2GuideStep2');
-      const step3El = document.getElementById('step2GuideStep3');
-      const tipEl = document.getElementById('step2GuideTip');
-      const firstHintEl = document.getElementById('step2FirstHint');
-      if (!card || !step1El || !step2El || !step3El || !tipEl) return;
+	    function updateStep2GuideCard(options = {}) {
+	      const { skipFirstHint = false } = options;
+	      const card = document.getElementById('step2GuideCard');
+	      const step1El = document.getElementById('step2GuideStep1');
+	      const step2El = document.getElementById('step2GuideStep2');
+	      const step3El = document.getElementById('step2GuideStep3');
+	      const tipEl = document.getElementById('step2GuideTip');
+	      const firstHintEl = document.getElementById('step2FirstHint');
+	      if (!card || !step1El || !step2El || !step3El || !tipEl) return;
 
-      const showFilmBase = requiresFilmBase();
-      card.style.display = showFilmBase ? 'flex' : 'none';
+	      if (!guideModeEnabled) {
+	        card.style.display = 'none';
+	        setRecommendedAction(null);
+	        if (firstHintEl) firstHintEl.style.display = 'none';
+	        return;
+	      }
+
+	      const showFilmBase = requiresFilmBase();
+	      card.style.display = showFilmBase ? 'flex' : 'none';
 
       if (firstHintEl) {
         firstHintEl.textContent = getLocalizedText(
