@@ -597,15 +597,44 @@
       backdrop-filter: blur(3px);
     }
 
+    .histogram-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 3px;
+    }
+
     .histogram-label {
       font-size: 11px;
       color: rgba(235, 235, 235, 0.85);
-      margin-bottom: 3px;
+      margin-bottom: 0;
       text-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
       cursor: grab;
       user-select: none;
       -webkit-user-select: none;
       touch-action: none;
+    }
+
+    .histogram-drag-hint {
+      font-size: 10px;
+      line-height: 1;
+      color: rgba(235, 235, 235, 0.72);
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 999px;
+      padding: 3px 7px;
+      white-space: nowrap;
+      user-select: none;
+      -webkit-user-select: none;
+      pointer-events: none;
+      transition: opacity 0.15s ease;
+      opacity: 1;
+    }
+
+    .histogram-drag-hint.is-hidden {
+      opacity: 0;
+      display: none;
     }
 
     .histogram-container.dragging .histogram-label {
@@ -1957,6 +1986,11 @@
         height: 72px;
       }
 
+      .histogram-drag-hint {
+        font-size: 9px;
+        padding: 2px 6px;
+      }
+
       .controls-panel {
         border: 1px solid rgba(255, 255, 255, 0.08);
         border-radius: 16px;
@@ -2245,7 +2279,10 @@
 
       <!-- Histogram -->
       <div class="histogram-container" id="histogramContainer" style="display: none;">
-        <div class="histogram-label" data-i18n="histogram">Histogram</div>
+        <div class="histogram-header">
+          <div class="histogram-label" data-i18n="histogram">Histogram</div>
+          <div class="histogram-drag-hint is-hidden" id="histogramDragHint" data-i18n="histogramDragHint">Drag to move</div>
+        </div>
         <canvas id="histogramCanvas" width="256" height="100"></canvas>
       </div>
     </section>

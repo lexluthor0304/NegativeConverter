@@ -59,6 +59,7 @@
 	        convert: "下一步：胶片设置",
 	        convertPositive: "下一步：正片模式",
 	        histogram: "直方图",
+	        histogramDragHint: "可拖动",
 	        loadError: "加载文件失败",
 	        rawUnsupported: "当前 Safari 版本不支持 RAW 解码，请升级 Safari（建议 iOS 16.4+）或先转为 TIFF/JPEG。",
         workflow: "工作流程",
@@ -297,6 +298,7 @@
 	        convert: "Next: Film Settings",
 	        convertPositive: "Next: Positive Mode",
 	        histogram: "Histogram",
+	        histogramDragHint: "Drag to move",
 	        loadError: "Error loading file",
 	        rawUnsupported: "RAW decode is not supported in this Safari version. Update Safari (iOS 16.4+) or convert to TIFF/JPEG first.",
         workflow: "Workflow",
@@ -535,6 +537,7 @@
 	        convert: "次へ：フィルム設定",
 	        convertPositive: "次へ：ポジモード",
 	        histogram: "ヒストグラム",
+	        histogramDragHint: "ドラッグで移動",
 	        loadError: "ファイルの読み込みに失敗しました",
 	        rawUnsupported: "この Safari バージョンでは RAW デコードに対応していません。Safari（iOS 16.4+ 推奨）へ更新するか、先に TIFF/JPEG に変換してください。",
         workflow: "ワークフロー",
@@ -778,6 +781,7 @@
 	    const PRIVACY_BANNER_COLLAPSED_STORAGE_KEY = 'nc_privacy_banner_collapsed_v1';
 	    const GUIDE_MODE_STORAGE_KEY = 'nc_guide_mode_enabled_v1';
 	    const HISTOGRAM_POSITION_STORAGE_KEY = 'nc_histogram_position_v1';
+	    const HISTOGRAM_DRAG_HINT_DISMISSED_STORAGE_KEY = 'nc_histogram_drag_hint_dismissed_v1';
 	    const DESKTOP_UPDATE_LAST_CHECK_TS_KEY = 'nc_desktop_update_last_check_ts';
 	    const DESKTOP_UPDATE_LAST_SEEN_LATEST_KEY = 'nc_desktop_update_last_seen_latest';
 	    const DESKTOP_UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -2214,6 +2218,7 @@
     const beforeAfterBtn = document.getElementById('beforeAfterBtn');
     const histogramContainer = document.getElementById('histogramContainer');
     const histogramHandle = histogramContainer?.querySelector('.histogram-label') || null;
+    const histogramDragHint = document.getElementById('histogramDragHint');
     const histogramCanvas = document.getElementById('histogramCanvas');
     const histogram = new Histogram(histogramCanvas);
     const HISTOGRAM_MAX_SAMPLES = 24_576;
@@ -3293,6 +3298,23 @@
       startTop: 0
     };
 
+    function isHistogramDragHintDismissed() {
+      return safeStorageGet(HISTOGRAM_DRAG_HINT_DISMISSED_STORAGE_KEY) === '1';
+    }
+
+    function updateHistogramDragHintVisibility() {
+      if (!histogramDragHint || !histogramContainer) return;
+      const shouldShow = histogramContainer.style.display !== 'none' && !isHistogramDragHintDismissed();
+      histogramDragHint.classList.toggle('is-hidden', !shouldShow);
+      histogramDragHint.setAttribute('aria-hidden', shouldShow ? 'false' : 'true');
+    }
+
+    function dismissHistogramDragHint() {
+      if (!histogramDragHint || isHistogramDragHintDismissed()) return;
+      safeStorageSet(HISTOGRAM_DRAG_HINT_DISMISSED_STORAGE_KEY, '1');
+      updateHistogramDragHintVisibility();
+    }
+
     function parseHistogramStoredPosition() {
       const raw = safeStorageGet(HISTOGRAM_POSITION_STORAGE_KEY);
       if (!raw) return null;
@@ -3396,6 +3418,7 @@
       if (!bounds) return;
       event.preventDefault();
       event.stopPropagation();
+      dismissHistogramDragHint();
 
       const currentLeft = Number.parseFloat(histogramContainer.style.left);
       const currentTop = Number.parseFloat(histogramContainer.style.top);
@@ -4785,6 +4808,7 @@
       document.getElementById('uploadPlaceholder').style.display = 'none';
       document.getElementById('previewToolbar').style.display = 'flex';
       document.getElementById('histogramContainer').style.display = 'block';
+      updateHistogramDragHintVisibility();
       document.getElementById('controlsPanel').style.display = 'flex';
       document.getElementById('appFooter').style.display = 'flex';
 
