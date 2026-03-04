@@ -1,0 +1,2857 @@
+<!DOCTYPE html>
+<html lang="zh">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Negative Converter</title>
+
+  <style>
+    :root {
+      --bg-primary: #1a1a1a;
+      --bg-secondary: #252525;
+      --bg-tertiary: #2d2d2d;
+      --bg-hover: #363636;
+      --text-primary: #e0e0e0;
+      --text-secondary: #888;
+      --text-muted: #666;
+      --accent: #4a9eff;
+      --accent-hover: #6db3ff;
+      --accent-dim: #3a7ecc;
+      --danger: #ff6b6b;
+      --success: #4caf50;
+      --warning: #ffb74d;
+      --border: #3a3a3a;
+      --border-light: #444;
+      --shadow: rgba(0, 0, 0, 0.3);
+      --viewport-h: 100vh;
+      --safe-top: env(safe-area-inset-top, 0px);
+      --safe-right: env(safe-area-inset-right, 0px);
+      --safe-bottom: env(safe-area-inset-bottom, 0px);
+      --safe-left: env(safe-area-inset-left, 0px);
+    }
+
+    @supports (height: 100dvh) {
+      :root {
+        --viewport-h: 100dvh;
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html, body {
+      height: 100%;
+      overflow: hidden;
+    }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      display: flex;
+      flex-direction: column;
+      min-height: var(--viewport-h);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    @supports (-webkit-touch-callout: none) {
+      html {
+        height: -webkit-fill-available;
+      }
+
+      body {
+        min-height: -webkit-fill-available;
+      }
+    }
+
+    /* Header */
+    .app-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px 20px;
+      background: var(--bg-secondary);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .header-left {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .app-title {
+      font-size: 18px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .build-badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 2px 8px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--bg-tertiary);
+      color: var(--text-secondary);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      white-space: nowrap;
+    }
+
+    .lang-selector {
+      display: flex;
+      gap: 4px;
+    }
+
+    .lang-btn {
+      padding: 6px 12px;
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      cursor: pointer;
+      font-size: 13px;
+      transition: all 0.2s;
+    }
+
+    .lang-btn:hover {
+      background: var(--bg-tertiary);
+      color: var(--text-primary);
+    }
+
+    .lang-btn.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: white;
+    }
+
+    /* Privacy Banner */
+    .privacy-banner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 20px;
+      background: rgba(76, 175, 80, 0.08);
+      border-bottom: 1px solid rgba(76, 175, 80, 0.25);
+    }
+
+    .privacy-banner-left {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .privacy-banner-icon {
+      width: 20px;
+      height: 20px;
+      flex: 0 0 auto;
+      margin-top: 1px;
+      color: var(--success);
+      opacity: 0.95;
+    }
+
+    .privacy-banner-text {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .privacy-banner-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--success);
+      line-height: 1.2;
+    }
+
+    .privacy-banner-body {
+      font-size: 12px;
+      color: var(--text-secondary);
+      line-height: 1.35;
+    }
+
+    .privacy-banner-actions {
+      flex: 0 0 auto;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .privacy-banner-btn {
+      padding: 7px 12px;
+      background: rgba(76, 175, 80, 0.14);
+      border: 1px solid rgba(76, 175, 80, 0.35);
+      border-radius: 999px;
+      color: var(--text-primary);
+      font-size: 12px;
+      font-weight: 600;
+      text-decoration: none;
+      white-space: nowrap;
+      transition: all 0.2s;
+    }
+
+    .privacy-banner-btn:hover {
+      background: rgba(76, 175, 80, 0.22);
+      border-color: rgba(76, 175, 80, 0.55);
+    }
+
+    .privacy-banner-toggle {
+      width: 34px;
+      height: 34px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--text-secondary);
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .privacy-banner-toggle:hover {
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--text-primary);
+      border-color: var(--border-light);
+    }
+
+    .privacy-banner-toggle svg {
+      width: 16px;
+      height: 16px;
+      transition: transform 0.2s;
+    }
+
+    .privacy-banner.collapsed {
+      display: none;
+    }
+
+    .desktop-update-banner {
+      display: none;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 20px;
+      background: rgba(255, 193, 7, 0.1);
+      border-bottom: 1px solid rgba(255, 193, 7, 0.28);
+    }
+
+    .desktop-update-left {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .desktop-update-icon {
+      width: 20px;
+      height: 20px;
+      flex: 0 0 auto;
+      margin-top: 1px;
+      color: #f4b400;
+      opacity: 0.95;
+    }
+
+    .desktop-update-text {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .desktop-update-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: #f4b400;
+      line-height: 1.2;
+    }
+
+    .desktop-update-body {
+      font-size: 12px;
+      color: var(--text-secondary);
+      line-height: 1.35;
+    }
+
+    .desktop-update-actions {
+      flex: 0 0 auto;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .desktop-update-btn {
+      padding: 7px 12px;
+      background: rgba(255, 193, 7, 0.16);
+      border: 1px solid rgba(255, 193, 7, 0.35);
+      border-radius: 999px;
+      color: var(--text-primary);
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: all 0.2s;
+    }
+
+    .desktop-update-btn:hover {
+      background: rgba(255, 193, 7, 0.24);
+      border-color: rgba(255, 193, 7, 0.55);
+    }
+
+    .desktop-update-btn.primary {
+      background: rgba(255, 193, 7, 0.28);
+      border-color: rgba(255, 193, 7, 0.55);
+    }
+
+    .desktop-update-btn.primary:hover {
+      background: rgba(255, 193, 7, 0.38);
+      border-color: rgba(255, 193, 7, 0.72);
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    @media (max-width: 720px) {
+      .privacy-banner {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .desktop-update-banner {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .privacy-banner-actions {
+        width: 100%;
+        justify-content: flex-start;
+      }
+
+      .desktop-update-actions {
+        width: 100%;
+        justify-content: flex-start;
+      }
+
+      .privacy-banner-btn {
+        flex: 1 1 160px;
+        text-align: center;
+      }
+
+      .desktop-update-btn {
+        flex: 1 1 160px;
+        text-align: center;
+      }
+
+      .privacy-banner-toggle {
+        margin-left: auto;
+      }
+    }
+
+    /* Main Layout */
+    .app-main {
+      display: grid;
+      grid-template-columns: 1fr 296px;
+      flex: 1;
+      overflow: hidden;
+      min-height: 0;
+    }
+
+    /* Preview Section */
+    .preview-section {
+      display: flex;
+      flex-direction: column;
+      background: var(--bg-primary);
+      padding: 12px;
+      position: relative;
+      overflow: hidden;
+      height: 100%;
+      max-height: calc(var(--viewport-h) - 120px); /* Account for header and footer */
+      min-height: 0;
+    }
+
+    .canvas-container {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #111;
+      border-radius: 8px;
+      position: relative;
+      overflow: hidden;
+      min-height: 400px;
+    }
+
+    #canvas {
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
+    }
+
+    #glCanvas {
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
+    }
+
+    .crop-overlay {
+      border: 2px dashed var(--accent);
+      position: absolute;
+      pointer-events: none;
+      display: none;
+      background: rgba(74, 158, 255, 0.1);
+      z-index: 100;
+    }
+
+    /* Sampling Loupe (Magnifier) */
+    .loupe {
+      position: absolute;
+      pointer-events: none;
+      display: none;
+      z-index: 250;
+      padding: 8px;
+      border-radius: 10px;
+      background: rgba(17, 17, 17, 0.95);
+      border: 1px solid var(--border-light);
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
+      backdrop-filter: blur(6px);
+    }
+
+    #loupeCanvas {
+      display: block;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      image-rendering: pixelated;
+    }
+
+    .loupe-info {
+      margin-top: 6px;
+      font-size: 11px;
+      color: var(--text-secondary);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      white-space: nowrap;
+      opacity: 0.95;
+    }
+
+    /* Upload Placeholder */
+    .upload-placeholder {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-secondary);
+      gap: 16px;
+    }
+
+    .upload-placeholder svg {
+      width: 64px;
+      height: 64px;
+      opacity: 0.5;
+    }
+
+    .upload-btn {
+      padding: 12px 24px;
+      background: var(--accent);
+      border: none;
+      border-radius: 6px;
+      color: white;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .upload-btn:hover {
+      background: var(--accent-hover);
+    }
+
+    #fileInput {
+      display: none;
+    }
+
+    /* Preview Toolbar */
+    .preview-toolbar {
+      display: flex;
+      gap: 8px;
+      padding: 12px 0;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .toolbar-btn {
+      padding: 8px 16px;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text-primary);
+      font-size: 13px;
+      cursor: pointer;
+      transition: all 0.2s;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .toolbar-btn:hover {
+      background: var(--bg-tertiary);
+      border-color: var(--border-light);
+    }
+
+    .toolbar-btn.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: white;
+    }
+
+    .toolbar-btn.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: white;
+    }
+
+    .toolbar-btn.primary:hover {
+      background: var(--accent-hover);
+    }
+
+    .toolbar-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .toolbar-btn svg {
+      width: 16px;
+      height: 16px;
+    }
+
+    .toolbar-separator {
+      width: 1px;
+      height: 24px;
+      background: var(--border);
+      margin: 0 4px;
+    }
+
+    /* Status Badge */
+    .status-badge {
+      padding: 4px 10px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .status-badge.step1 {
+      background: rgba(255, 183, 77, 0.2);
+      color: var(--warning);
+    }
+
+    .status-badge.step2 {
+      background: rgba(74, 158, 255, 0.2);
+      color: var(--accent);
+    }
+
+    .status-badge.step3 {
+      background: rgba(76, 175, 80, 0.2);
+      color: var(--success);
+    }
+
+    .current-file-label {
+      max-width: min(40vw, 460px);
+      padding: 4px 8px;
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.05);
+      color: var(--text-secondary);
+      font-size: 11px;
+      line-height: 1.3;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    /* Histogram */
+    .histogram-container {
+      position: absolute;
+      left: 14px;
+      bottom: 14px;
+      z-index: 24;
+      background: rgba(0, 0, 0, 0.68);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 8px;
+      padding: 6px;
+      backdrop-filter: blur(3px);
+    }
+
+    .histogram-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 3px;
+    }
+
+    .histogram-label {
+      font-size: 11px;
+      color: rgba(235, 235, 235, 0.85);
+      margin-bottom: 0;
+      text-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+      cursor: grab;
+      user-select: none;
+      -webkit-user-select: none;
+      touch-action: none;
+    }
+
+    .histogram-drag-hint {
+      font-size: 10px;
+      line-height: 1;
+      color: rgba(235, 235, 235, 0.72);
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 999px;
+      padding: 3px 7px;
+      white-space: nowrap;
+      user-select: none;
+      -webkit-user-select: none;
+      pointer-events: none;
+      transition: opacity 0.15s ease;
+      opacity: 1;
+    }
+
+    .histogram-drag-hint.is-hidden {
+      opacity: 0;
+      display: none;
+    }
+
+    .histogram-container.dragging .histogram-label {
+      cursor: grabbing;
+    }
+
+    #histogramCanvas {
+      width: 256px;
+      height: 100px;
+      background: transparent;
+      border-radius: 4px;
+      display: block;
+    }
+
+    /* Controls Panel */
+    .controls-panel {
+      background: var(--bg-secondary);
+      border-left: 1px solid var(--border);
+      overflow-y: auto;
+      overflow-x: hidden;
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      max-height: calc(var(--viewport-h) - 120px); /* Account for header and footer */
+      min-height: 0;
+    }
+
+    /* Prevent flexbox from collapsing earlier sections (e.g. File List) when Step 3 reveals more UI. */
+    .controls-panel > .file-list-section,
+    .controls-panel > .control-section {
+      flex: 0 0 auto;
+      flex-shrink: 0;
+    }
+
+    .control-section {
+      border-bottom: 1px solid var(--border);
+      padding: 16px;
+    }
+
+    .section-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+      cursor: pointer;
+    }
+
+    .guide-toggle-btn {
+      padding: 6px 10px;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--text-secondary);
+      font-size: 11px;
+      cursor: pointer;
+      transition: all 0.2s;
+      line-height: 1;
+      white-space: nowrap;
+    }
+
+    .guide-toggle-btn:hover {
+      background: var(--bg-tertiary);
+      border-color: var(--border-light);
+    }
+
+    .guide-toggle-btn[aria-pressed="true"] {
+      background: rgba(74, 158, 255, 0.12);
+      border-color: rgba(74, 158, 255, 0.35);
+      color: var(--accent);
+    }
+
+    .section-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-primary);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .section-toggle {
+      color: var(--text-secondary);
+      transition: transform 0.2s;
+    }
+
+    .section-toggle.collapsed {
+      transform: rotate(-90deg);
+    }
+
+    .section-content {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .section-content.collapsed {
+      display: none;
+    }
+
+    /* Workflow Steps */
+    .workflow-steps {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 12px;
+      background: var(--bg-tertiary);
+      border-radius: 6px;
+      margin-bottom: 12px;
+    }
+
+    .workflow-step {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px;
+      border-radius: 4px;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .workflow-step.active {
+      background: rgba(74, 158, 255, 0.1);
+      color: var(--accent);
+    }
+
+    .workflow-step.completed {
+      color: var(--success);
+    }
+
+    .step-number {
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      background: var(--bg-secondary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    .workflow-step.active .step-number {
+      background: var(--accent);
+      color: white;
+    }
+
+    .workflow-step.completed .step-number {
+      background: var(--success);
+      color: white;
+    }
+
+    /* Film Type Toggle */
+    .film-type-toggle {
+      display: flex;
+      background: var(--bg-tertiary);
+      border-radius: 6px;
+      padding: 3px;
+    }
+
+    .film-type-btn {
+      flex: 1;
+      padding: 8px;
+      background: transparent;
+      border: none;
+      color: var(--text-secondary);
+      font-size: 13px;
+      cursor: pointer;
+      border-radius: 4px;
+      transition: all 0.2s;
+    }
+
+    .film-type-btn.active {
+      background: var(--accent);
+      color: white;
+    }
+
+    /* Preset Selector */
+    .preset-select {
+      width: 100%;
+      padding: 8px 12px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text-primary);
+      font-size: 13px;
+      cursor: pointer;
+    }
+
+    .preset-select:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    /* Film Base Buttons */
+    .film-base-buttons {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .film-base-btn {
+      flex: 1;
+      padding: 8px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text-primary);
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .film-base-btn:hover {
+      background: var(--bg-hover);
+      border-color: var(--border-light);
+    }
+
+    .film-base-btn.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: white;
+    }
+
+    .step2-mode-toggle {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+
+    .step2-mode-btn {
+      flex: 1;
+      padding: 7px 9px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text-secondary);
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .step2-mode-btn:hover {
+      background: var(--bg-hover);
+      border-color: var(--border-light);
+      color: var(--text-primary);
+    }
+
+    .step2-mode-btn.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: white;
+    }
+
+    .step2-guide-card {
+      margin-bottom: 10px;
+      padding: 10px;
+      border: 1px solid rgba(74, 158, 255, 0.35);
+      border-radius: 6px;
+      background: rgba(74, 158, 255, 0.08);
+      color: var(--text-primary);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .step2-guide-title {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--accent);
+    }
+
+    .step2-guide-intro,
+    .step2-guide-term {
+      font-size: 11px;
+      line-height: 1.45;
+      color: var(--text-secondary);
+    }
+
+    .step2-guide-list {
+      margin: 0;
+      padding-left: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      color: var(--text-primary);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
+    .step2-guide-tip {
+      font-size: 11px;
+      line-height: 1.45;
+      color: var(--accent);
+      border-top: 1px dashed rgba(74, 158, 255, 0.35);
+      padding-top: 8px;
+    }
+
+    .recommended-action {
+      outline: 2px solid rgba(74, 158, 255, 0.55);
+      box-shadow: 0 0 0 1px rgba(74, 158, 255, 0.25) inset;
+      border-color: var(--accent) !important;
+      background: rgba(74, 158, 255, 0.12);
+      color: var(--text-primary);
+    }
+
+    .roll-reference-controls {
+      margin-top: 10px;
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.02);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .roll-reference-title {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      color: var(--text-secondary);
+      font-weight: 600;
+    }
+
+    .roll-reference-status {
+      font-size: 11px;
+      color: var(--text-secondary);
+      line-height: 1.3;
+    }
+
+    .roll-reference-options {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .roll-reference-option {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--text-secondary);
+      user-select: none;
+    }
+
+    .roll-reference-option input[type="checkbox"] {
+      accent-color: var(--accent);
+      width: 14px;
+      height: 14px;
+    }
+
+    .lens-correction-panel {
+      margin-top: 10px;
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.02);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .lens-section-title {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      color: var(--text-secondary);
+      font-weight: 600;
+    }
+
+    .lens-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .lens-toggle-label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      user-select: none;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .lens-toggle-label input[type="checkbox"] {
+      accent-color: var(--accent);
+      width: 14px;
+      height: 14px;
+    }
+
+    .lens-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .lens-field {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .lens-field.wide {
+      grid-column: 1 / -1;
+    }
+
+    .lens-field label {
+      font-size: 11px;
+      color: var(--text-secondary);
+    }
+
+    .lens-field input,
+    .lens-field select {
+      width: 100%;
+      min-width: 0;
+      padding: 6px 8px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text-primary);
+      font-size: 12px;
+    }
+
+    .lens-field input:focus,
+    .lens-field select:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    .lens-field input:disabled,
+    .lens-field select:disabled {
+      opacity: 0.68;
+      cursor: not-allowed;
+    }
+
+    .lens-status {
+      margin: 0;
+      font-size: 11px;
+      line-height: 1.35;
+      color: var(--text-secondary);
+      white-space: pre-line;
+    }
+
+    .lens-status.error {
+      color: var(--danger);
+    }
+
+    .lens-status.ready {
+      color: var(--success);
+    }
+
+    .lens-selected {
+      margin: 0;
+      font-size: 11px;
+      line-height: 1.35;
+      color: var(--text-secondary);
+    }
+
+    .lens-step-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .autoframe-settings {
+      margin-top: 8px;
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.02);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .autoframe-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .autoframe-row select {
+      flex: 1;
+      min-width: 0;
+      padding: 6px 8px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text-primary);
+      font-size: 12px;
+    }
+
+    .autoframe-row select:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    .autoframe-options {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px 8px;
+      padding-top: 2px;
+    }
+
+    .autoframe-option {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--text-secondary);
+      user-select: none;
+    }
+
+    .autoframe-option input[type="checkbox"] {
+      accent-color: var(--accent);
+      width: 14px;
+      height: 14px;
+    }
+
+    .autoframe-diagnostics {
+      font-family: monospace;
+      font-size: 11px;
+      color: var(--text-secondary);
+      white-space: pre-line;
+      line-height: 1.4;
+      margin-bottom: 0;
+    }
+
+    /* Film Base Preview */
+    .film-base-preview {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px;
+      background: var(--bg-tertiary);
+      border-radius: 4px;
+    }
+
+    .film-base-color {
+      width: 32px;
+      height: 32px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+    }
+
+    .film-base-values {
+      font-size: 11px;
+      color: var(--text-secondary);
+      font-family: monospace;
+    }
+
+    /* Slider Control */
+    .slider-control {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .slider-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .slider-label {
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .slider-value-group {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .slider-number-input {
+      width: 72px;
+      padding: 4px 6px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text-primary);
+      font-size: 12px;
+      font-family: monospace;
+      text-align: right;
+    }
+
+    .slider-number-input:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    .slider-unit {
+      font-size: 11px;
+      color: var(--text-secondary);
+      min-width: 16px;
+    }
+
+    .slider-input {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 100%;
+      height: 4px;
+      background: var(--bg-tertiary);
+      border-radius: 2px;
+      cursor: pointer;
+    }
+
+    .slider-input::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px;
+      height: 14px;
+      background: var(--accent);
+      border-radius: 50%;
+      cursor: pointer;
+      transition: transform 0.1s;
+    }
+
+    .slider-input::-webkit-slider-thumb:hover {
+      transform: scale(1.2);
+    }
+
+    .slider-input::-moz-range-thumb {
+      width: 14px;
+      height: 14px;
+      background: var(--accent);
+      border: none;
+      border-radius: 50%;
+      cursor: pointer;
+    }
+
+    /* Curve Editor */
+    .curve-editor {
+      background: var(--bg-tertiary);
+      border-radius: 4px;
+      padding: 8px;
+    }
+
+    .curve-hint {
+      font-size: 11px;
+      color: var(--text-secondary);
+      margin: 0 0 8px 0;
+    }
+
+    .curve-tabs {
+      display: flex;
+      gap: 4px;
+      margin-bottom: 8px;
+    }
+
+    .curve-tab.reset {
+      color: var(--text-secondary);
+      margin-left: auto;
+    }
+
+    .curve-tab.reset:hover {
+      color: var(--accent);
+      border-color: var(--accent);
+    }
+
+    .curve-tab {
+      flex: 1;
+      padding: 4px 8px;
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      font-size: 11px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .curve-tab.r { color: #ff6b6b; }
+    .curve-tab.g { color: #69db7c; }
+    .curve-tab.b { color: #74c0fc; }
+
+    .curve-tab.active {
+      background: var(--bg-hover);
+      border-color: var(--border-light);
+    }
+
+    .curve-canvas {
+      width: 100%;
+      height: 120px;
+      background: #111;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      cursor: crosshair;
+      touch-action: none;
+      transition: border-color 0.2s;
+    }
+
+    .curve-canvas:hover {
+      border-color: var(--accent);
+    }
+
+    .curve-presets {
+      display: flex;
+      gap: 4px;
+      margin-top: 8px;
+    }
+
+    .curve-preset-btn {
+      flex: 1;
+      padding: 4px;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      color: var(--text-secondary);
+      font-size: 10px;
+      cursor: pointer;
+    }
+
+    .curve-preset-btn:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+
+    /* Footer */
+    .app-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px 20px;
+      background: var(--bg-secondary);
+      border-top: 1px solid var(--border);
+    }
+
+    .footer-left {
+      display: flex;
+      gap: 8px;
+    }
+
+    .footer-right {
+      display: flex;
+      gap: 8px;
+    }
+
+    .footer-btn {
+      padding: 8px 16px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text-primary);
+      font-size: 13px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .footer-btn:hover {
+      background: var(--bg-hover);
+    }
+
+    .footer-btn.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: white;
+    }
+
+    .footer-btn.primary:hover {
+      background: var(--accent-hover);
+    }
+
+    .footer-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    /* Rotate Controls */
+    .rotate-controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .rotate-input {
+      width: 60px;
+      padding: 6px 8px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text-primary);
+      font-size: 13px;
+      text-align: center;
+    }
+
+    .rotate-input:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    /* Info Box */
+    .info-box {
+      padding: 10px 12px;
+      background: rgba(74, 158, 255, 0.1);
+      border: 1px solid rgba(74, 158, 255, 0.3);
+      border-radius: 4px;
+      font-size: 12px;
+      color: var(--accent);
+      margin-bottom: 12px;
+    }
+
+    .workflow-guide-note {
+      margin-top: 8px;
+      margin-bottom: 0;
+      line-height: 1.5;
+      white-space: pre-line;
+    }
+
+    /* File List Panel (Batch Mode) */
+    .file-list-section {
+      max-height: 200px;
+      overflow-y: auto;
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      background: var(--bg-secondary);
+    }
+
+    .file-list-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 16px;
+      background: var(--bg-tertiary);
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+
+    .file-list-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .file-list-count {
+      font-size: 11px;
+      color: var(--text-secondary);
+    }
+
+    .file-list-items {
+      padding: 4px 0;
+    }
+
+    .file-list-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 12px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .file-list-item:hover {
+      background: var(--bg-tertiary);
+    }
+
+    .file-list-item.active {
+      background: rgba(74, 158, 255, 0.15);
+    }
+
+    .file-list-checkbox {
+      width: 14px;
+      height: 14px;
+      cursor: pointer;
+      accent-color: var(--accent);
+    }
+
+    .file-list-name {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--text-primary);
+    }
+
+    .file-list-status {
+      font-size: 10px;
+      padding: 2px 6px;
+      border-radius: 8px;
+      white-space: nowrap;
+    }
+
+    .file-list-status.pending {
+      background: rgba(136, 136, 136, 0.2);
+      color: var(--text-secondary);
+    }
+
+    .file-list-status.processing {
+      background: rgba(74, 158, 255, 0.2);
+      color: var(--accent);
+    }
+
+    .file-list-status.done {
+      background: rgba(76, 175, 80, 0.2);
+      color: var(--success);
+    }
+
+    .file-list-status.error {
+      background: rgba(255, 107, 107, 0.2);
+      color: var(--danger);
+    }
+
+    .file-list-actions {
+      display: flex;
+      gap: 4px;
+      padding: 8px 16px;
+      border-top: 1px solid var(--border);
+    }
+
+    .file-list-btn {
+      flex: 1;
+      padding: 6px 8px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text-primary);
+      font-size: 11px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .file-list-btn:hover {
+      background: var(--bg-hover);
+    }
+
+    .file-list-item.has-settings {
+      border-left: 3px solid var(--success);
+    }
+
+    .file-list-item.is-dirty {
+      border-left: 3px solid var(--warning);
+    }
+
+    .file-list-settings-badge {
+      font-size: 9px;
+      padding: 1px 4px;
+      background: var(--success);
+      color: white;
+      border-radius: 3px;
+      margin-left: 4px;
+    }
+
+    .file-list-unsaved-badge {
+      font-size: 9px;
+      padding: 1px 4px;
+      background: var(--warning);
+      color: #111;
+      border-radius: 3px;
+      margin-left: 4px;
+      font-weight: 600;
+    }
+
+    /* Debug Widget (enable with ?debug=1) */
+    .debug-widget {
+      position: fixed;
+      right: 12px;
+      bottom: 12px;
+      z-index: 9999;
+      max-width: min(420px, calc(100vw - 24px));
+      background: rgba(0, 0, 0, 0.72);
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      border-radius: 10px;
+      padding: 10px 12px;
+      color: rgba(255, 255, 255, 0.92);
+      font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      white-space: pre;
+      pointer-events: none;
+    }
+
+    /* Batch Progress Modal */
+    .batch-progress-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.7);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+    }
+
+    .batch-progress-modal {
+      background: var(--bg-secondary);
+      border-radius: 8px;
+      padding: 24px;
+      min-width: 320px;
+      max-width: 400px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    }
+
+    .batch-progress-title {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 16px;
+      color: var(--text-primary);
+    }
+
+    .batch-progress-bar {
+      height: 8px;
+      background: var(--bg-tertiary);
+      border-radius: 4px;
+      overflow: hidden;
+      margin-bottom: 12px;
+    }
+
+    .batch-progress-fill {
+      height: 100%;
+      background: var(--accent);
+      transition: width 0.3s ease;
+    }
+
+    .batch-progress-text {
+      font-size: 13px;
+      color: var(--text-secondary);
+      text-align: center;
+    }
+
+    .batch-progress-current {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-top: 8px;
+      text-align: center;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    /* Export Dropdown */
+    .export-dropdown {
+      position: relative;
+      display: inline-block;
+    }
+
+    .export-dropdown-menu {
+      position: absolute;
+      bottom: 100%;
+      right: 0;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      min-width: 180px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+      display: none;
+      margin-bottom: 4px;
+      z-index: 100;
+    }
+
+    .export-dropdown-menu.show {
+      display: block;
+    }
+
+    .export-dropdown-item {
+      display: block;
+      width: 100%;
+      padding: 10px 12px;
+      background: none;
+      border: none;
+      color: var(--text-primary);
+      font-size: 13px;
+      text-align: left;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .export-dropdown-item:hover {
+      background: var(--bg-tertiary);
+    }
+
+    .export-dropdown-item:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .export-dropdown-divider {
+      height: 1px;
+      background: var(--border);
+      margin: 4px 0;
+    }
+
+    .export-format-section {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .export-format-label {
+      font-size: 11px;
+      color: var(--text-secondary);
+      margin-bottom: 6px;
+      text-transform: uppercase;
+    }
+
+    .export-format-toggle {
+      display: flex;
+      gap: 4px;
+    }
+
+    .export-format-toggle .format-btn,
+    .export-bitdepth-toggle .bitdepth-btn {
+      flex: 1;
+      padding: 6px 12px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .export-format-toggle .format-btn:first-child,
+    .export-bitdepth-toggle .bitdepth-btn:first-child {
+      border-radius: 4px 0 0 4px;
+    }
+
+    .export-format-toggle .format-btn:last-child,
+    .export-bitdepth-toggle .bitdepth-btn:last-child {
+      border-radius: 0 4px 4px 0;
+    }
+
+    .export-format-toggle .format-btn.active,
+    .export-bitdepth-toggle .bitdepth-btn.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: white;
+    }
+
+    .export-bitdepth-section {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .export-bitdepth-toggle {
+      display: flex;
+      gap: 4px;
+    }
+
+    .export-bitdepth-toggle .bitdepth-btn.disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .export-bitdepth-note {
+      margin-top: 6px;
+      font-size: 11px;
+      color: var(--text-secondary);
+      display: none;
+    }
+
+    .export-bitdepth-note.show {
+      display: block;
+    }
+
+    .export-quality-section {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+      display: none;
+    }
+
+    .export-quality-section.show {
+      display: block;
+    }
+
+    .export-quality-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+
+    .export-quality-label {
+      font-size: 11px;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+    }
+
+    .export-quality-value {
+      font-size: 12px;
+      color: var(--text-primary);
+    }
+
+    .export-quality-slider {
+      width: 100%;
+      height: 4px;
+      -webkit-appearance: none;
+      appearance: none;
+      background: var(--bg-tertiary);
+      border-radius: 2px;
+      outline: none;
+    }
+
+    .export-quality-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 14px;
+      height: 14px;
+      background: var(--accent);
+      border-radius: 50%;
+      cursor: pointer;
+    }
+
+    .export-quality-slider::-moz-range-thumb {
+      width: 14px;
+      height: 14px;
+      background: var(--accent);
+      border-radius: 50%;
+      cursor: pointer;
+      border: none;
+    }
+
+    /* Responsive */
+    @media (max-width: 900px) {
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Inter", "Segoe UI", Roboto, sans-serif;
+        background: linear-gradient(180deg, #1d1d1f 0%, #141416 100%);
+      }
+
+      button,
+      input,
+      select {
+        -webkit-tap-highlight-color: transparent;
+        touch-action: manipulation;
+      }
+
+      .app-header {
+        position: sticky;
+        top: 0;
+        z-index: 60;
+        padding: calc(10px + var(--safe-top)) calc(12px + var(--safe-right)) 10px calc(12px + var(--safe-left));
+        background: rgba(37, 37, 37, 0.86);
+        backdrop-filter: blur(18px) saturate(150%);
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      }
+
+      .app-title {
+        font-size: 17px;
+        letter-spacing: -0.02em;
+      }
+
+      .lang-selector {
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 12px;
+        padding: 2px;
+      }
+
+      .lang-btn {
+        min-height: 32px;
+        min-width: 48px;
+        padding: 6px 10px;
+        border: none;
+        border-radius: 9px;
+      }
+
+      .app-main {
+        grid-template-columns: 1fr;
+        grid-template-rows: minmax(220px, 1.08fr) minmax(0, 1fr);
+        gap: 10px;
+        padding: 10px calc(10px + var(--safe-right)) 10px calc(10px + var(--safe-left));
+      }
+
+      .preview-section {
+        padding: 0;
+        max-height: none;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 16px;
+        background: rgba(29, 29, 31, 0.76);
+      }
+
+      .canvas-container {
+        margin: 10px;
+        border-radius: 14px;
+        min-height: 220px;
+      }
+
+      .preview-toolbar {
+        padding: 8px 10px 10px;
+        gap: 8px;
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        overflow-y: hidden;
+        overscroll-behavior-x: contain;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+      }
+
+      .preview-toolbar::-webkit-scrollbar {
+        display: none;
+      }
+
+      .status-badge,
+      .current-file-label,
+      .toolbar-btn,
+      .rotate-controls {
+        flex-shrink: 0;
+      }
+
+      .status-badge,
+      .current-file-label {
+        white-space: nowrap;
+      }
+
+      .toolbar-separator {
+        display: none;
+      }
+
+      .toolbar-btn {
+        min-height: 44px;
+        padding: 10px 14px;
+        border-radius: 12px;
+        font-size: 14px;
+        white-space: nowrap;
+      }
+
+      .rotate-controls {
+        gap: 6px;
+        padding: 4px 8px;
+        border-radius: 12px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        background: rgba(255, 255, 255, 0.03);
+      }
+
+      .rotate-input {
+        width: 70px;
+        height: 34px;
+        font-size: 16px;
+      }
+
+      .histogram-container {
+        left: 14px;
+        bottom: 14px;
+        margin: 0;
+        border-radius: 10px;
+        padding: 6px;
+      }
+
+      #histogramCanvas {
+        width: 180px;
+        height: 72px;
+      }
+
+      .histogram-drag-hint {
+        font-size: 9px;
+        padding: 2px 6px;
+      }
+
+      .controls-panel {
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 16px;
+        max-height: none;
+        background: rgba(29, 29, 31, 0.72);
+        backdrop-filter: blur(14px) saturate(140%);
+        overscroll-behavior: contain;
+        -webkit-overflow-scrolling: touch;
+      }
+
+      .control-section {
+        padding: 14px;
+      }
+
+      .section-title {
+        font-size: 12px;
+      }
+
+      .film-type-btn,
+      .step2-mode-btn,
+      .film-base-btn,
+      .file-list-btn,
+      .curve-tab,
+      .curve-preset-btn,
+      .footer-btn {
+        min-height: 40px;
+      }
+
+      .preset-select,
+      .rotate-input,
+      .slider-number-input,
+      .file-list-btn,
+      .footer-btn {
+        font-size: 16px;
+      }
+
+      .preset-select {
+        min-height: 44px;
+      }
+
+      .lens-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .lens-step-row {
+        flex-direction: column;
+        align-items: stretch;
+      }
+
+      .slider-input {
+        height: 6px;
+      }
+
+      .slider-input::-webkit-slider-thumb {
+        width: 18px;
+        height: 18px;
+      }
+
+      .slider-input::-moz-range-thumb {
+        width: 18px;
+        height: 18px;
+      }
+
+      .slider-number-input {
+        width: 84px;
+        min-height: 36px;
+      }
+
+      .file-list-section {
+        max-height: 34vh;
+        -webkit-overflow-scrolling: touch;
+      }
+
+      .app-footer {
+        position: sticky;
+        bottom: 0;
+        z-index: 60;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 8px;
+        padding: 10px calc(10px + var(--safe-right)) calc(10px + var(--safe-bottom)) calc(10px + var(--safe-left));
+        background: rgba(37, 37, 37, 0.9);
+        backdrop-filter: blur(20px) saturate(160%);
+        border-top: 1px solid rgba(255, 255, 255, 0.08);
+      }
+
+      .footer-left {
+        width: 100%;
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .footer-right {
+        width: 100%;
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .footer-btn {
+        width: 100%;
+        min-height: 44px;
+        border-radius: 12px;
+        font-size: 14px;
+      }
+
+      .footer-right .export-dropdown {
+        width: 100%;
+      }
+
+      .footer-right .export-dropdown > .footer-btn {
+        width: 100%;
+      }
+
+      .copyright {
+        padding: 10px calc(10px + var(--safe-right)) calc(10px + var(--safe-bottom)) calc(10px + var(--safe-left));
+        font-size: 12px;
+      }
+    }
+
+    @media (max-width: 600px) {
+      .app-header {
+        padding-right: calc(10px + var(--safe-right));
+        padding-left: calc(10px + var(--safe-left));
+      }
+
+      .app-title {
+        font-size: 16px;
+      }
+
+      .lang-btn {
+        min-width: 42px;
+        padding: 5px 8px;
+        font-size: 12px;
+      }
+    }
+
+    /* Copyright Footer */
+    .copyright {
+      flex-shrink: 0;
+      text-align: center;
+      padding: 12px 16px;
+      font-size: 13px;
+      color: var(--text-secondary);
+      background: var(--bg-secondary);
+      border-top: 1px solid var(--border);
+    }
+    .copyright a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+    .copyright a:hover {
+      text-decoration: underline;
+    }
+    .copyright .github-link {
+      display: inline-block;
+      margin-left: 12px;
+      vertical-align: middle;
+      height: 28px;
+    }
+  </style>
+
+  <!-- External Libraries -->
+  <script type="module">
+    import LibRaw from './index.js';
+    window.LibRaw = LibRaw;
+  </script>
+</head>
+
+<body>
+  <!-- Header -->
+  <header class="app-header">
+    <div class="header-left">
+      <h1 class="app-title" data-i18n="title">Negative Converter</h1>
+      <span class="build-badge" id="buildBadge" style="display: none;"></span>
+    </div>
+    <div class="lang-selector">
+      <button class="lang-btn" data-lang="zh">中文</button>
+      <button class="lang-btn" data-lang="en">EN</button>
+      <button class="lang-btn" data-lang="ja">日本語</button>
+    </div>
+  </header>
+
+  <!-- Privacy Notice -->
+  <div class="privacy-banner" role="note" aria-label="Privacy notice">
+    <div class="privacy-banner-left">
+      <svg class="privacy-banner-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+        <path d="M12 2l8 4v6c0 5-3.5 9.4-8 10-4.5-.6-8-5-8-10V6l8-4z"/>
+        <path d="M9 12l2 2 4-4"/>
+      </svg>
+      <div class="privacy-banner-text">
+        <div class="privacy-banner-title" data-i18n="privacyBannerTitle">Runs locally · No photo uploads</div>
+        <div class="privacy-banner-body" data-i18n="privacyBannerBody">Your photos are processed in your browser. Our server never receives your images.</div>
+      </div>
+    </div>
+    <div class="privacy-banner-actions">
+      <a class="privacy-banner-btn" id="privacyDetailsLink" href="./privacy.html" target="_blank" rel="noopener" data-i18n="privacyBannerLink">Privacy details</a>
+      <a class="privacy-banner-btn" id="offlineDownloadLink" href="./download.html" target="_blank" rel="noopener" data-i18n="offlineDownloadLink">Download offline app</a>
+      <button class="privacy-banner-toggle" id="privacyBannerToggle" type="button">
+        <span class="sr-only" data-i18n="privacyBannerToggleLabel">Hide privacy notice</span>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <path d="M18 6L6 18"></path>
+          <path d="M6 6l12 12"></path>
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <div class="desktop-update-banner" id="desktopUpdateBanner" role="status" aria-live="polite">
+    <div class="desktop-update-left">
+      <svg class="desktop-update-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+        <path d="M12 3v10"></path>
+        <path d="M7.5 9.5L12 14l4.5-4.5"></path>
+        <path d="M4 17h16"></path>
+      </svg>
+      <div class="desktop-update-text">
+        <div class="desktop-update-title" data-i18n="desktopUpdateTitle">New version available</div>
+        <div class="desktop-update-body" id="desktopUpdateBody">Current version 0.0.0, latest version 0.0.0.</div>
+      </div>
+    </div>
+    <div class="desktop-update-actions">
+      <button class="desktop-update-btn primary" id="desktopUpdateActionBtn" type="button" data-i18n="desktopUpdateAction">Download update</button>
+      <button class="desktop-update-btn" id="desktopUpdateLaterBtn" type="button" data-i18n="desktopUpdateLater">Later</button>
+    </div>
+  </div>
+
+  <!-- Main Content -->
+  <main class="app-main">
+    <!-- Preview Section -->
+    <section class="preview-section">
+      <div class="canvas-container" id="canvasContainer">
+        <div class="upload-placeholder" id="uploadPlaceholder">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+          </svg>
+          <p data-i18n="dropHint">Drop image here or click to open</p>
+          <button class="upload-btn" id="uploadBtn" data-i18n="selectFile">Select File</button>
+          <button class="upload-btn" id="uploadFolderBtn" style="margin-left: 8px; background: var(--bg-tertiary); border: 1px solid var(--border);" data-i18n="selectFolder">Select Folder</button>
+          <input type="file" id="fileInput" accept=".cr2,.nef,.arw,.dng,.raw,.rw2,.tif,.tiff,image/*" multiple>
+          <input type="file" id="folderInput" accept=".cr2,.nef,.arw,.dng,.raw,.rw2,.tif,.tiff,image/*" webkitdirectory style="display: none;">
+        </div>
+        <canvas id="canvas" style="display: none;"></canvas>
+        <canvas id="glCanvas" style="display: none;"></canvas>
+        <div class="crop-overlay" id="cropOverlay"></div>
+        <div class="loupe" id="loupe">
+          <canvas id="loupeCanvas" width="155" height="155"></canvas>
+          <div class="loupe-info" id="loupeInfo"></div>
+        </div>
+      </div>
+
+      <!-- Toolbar -->
+      <div class="preview-toolbar" id="previewToolbar" style="display: none;">
+        <span class="status-badge step1" id="statusBadge" data-i18n="step1">Step 1: Crop</span>
+        <span class="current-file-label" id="currentFileLabel" style="display: none;"></span>
+        <div class="toolbar-separator"></div>
+        <button class="toolbar-btn" id="rotateLeftBtn" title="Rotate Left">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2.5 2v6h6M2.66 12a10 10 0 11.8 4"/></svg>
+          <span>-90°</span>
+        </button>
+        <button class="toolbar-btn" id="rotateRightBtn" title="Rotate Right">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 12a10 10 0 11-.8 4" transform="scale(-1,1) translate(-24,0)"/></svg>
+          <span>+90°</span>
+        </button>
+        <button class="toolbar-btn" id="mirrorBtn" data-i18n="mirror" title="Mirror">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 4v16M4 8l4 4-4 4M20 8l-4 4 4 4"/>
+          </svg>
+          <span data-i18n="mirror">Mirror</span>
+        </button>
+        <div class="rotate-controls">
+          <input type="number" class="rotate-input" id="rotateAngle" value="0" min="-180" max="180" step="0.1">
+          <span>°</span>
+          <button class="toolbar-btn" id="applyRotateBtn" data-i18n="applyRotate">Apply</button>
+        </div>
+        <div class="toolbar-separator"></div>
+        <button class="toolbar-btn" id="cropBtn" data-i18n="crop">Crop</button>
+        <button class="toolbar-btn" id="applyCropBtn" style="display: none;" data-i18n="applyCrop">Apply Crop</button>
+        <button class="toolbar-btn" id="cancelCropBtn" style="display: none;" data-i18n="cancelCrop">Cancel</button>
+        <button class="toolbar-btn" id="autoFrameBtn" data-i18n="autoFrame">Auto Frame</button>
+        <button class="toolbar-btn" id="autoFrameSelectedBtn" data-i18n="autoFrameSelected">Auto Frame Selected</button>
+        <button class="toolbar-btn" id="beforeAfterBtn" data-i18n="beforeAfter" disabled>Before/After</button>
+        <button class="toolbar-btn" id="addFilesToolbarBtn" data-i18n="addFiles">Add</button>
+        <div class="toolbar-separator" id="convertSeparator" style="display: none;"></div>
+        <button class="toolbar-btn primary" id="convertBtn" style="display: none;" data-i18n="convert">Convert Negative</button>
+        <button class="toolbar-btn primary" id="convertPositiveBtn" style="display: none;" data-i18n="convertPositive">Convert Positive</button>
+      </div>
+
+      <!-- Histogram -->
+      <div class="histogram-container" id="histogramContainer" style="display: none;">
+        <div class="histogram-header">
+          <div class="histogram-label" data-i18n="histogram">Histogram</div>
+          <div class="histogram-drag-hint is-hidden" id="histogramDragHint" data-i18n="histogramDragHint">Drag to move</div>
+        </div>
+        <canvas id="histogramCanvas" width="256" height="100"></canvas>
+      </div>
+    </section>
+
+    <!-- Controls Panel -->
+    <aside class="controls-panel" id="controlsPanel" style="display: none;">
+      <!-- File List (Batch Mode) -->
+      <div class="file-list-section" id="fileListSection" style="display: none;">
+        <div class="file-list-header">
+          <span class="file-list-title" data-i18n="fileList">File List</span>
+          <span class="file-list-count" id="fileListCount">0 / 0</span>
+        </div>
+        <div class="file-list-items" id="fileListItems">
+          <!-- File items dynamically added here -->
+        </div>
+        <div class="file-list-actions">
+          <button class="file-list-btn" id="selectAllBtn" data-i18n="selectAll">All</button>
+          <button class="file-list-btn" id="selectNoneBtn" data-i18n="selectNone">None</button>
+          <button class="file-list-btn" id="addMoreFilesBtn" data-i18n="addFiles">Add</button>
+          <button class="file-list-btn" id="clearFileListBtn" data-i18n="clearList">Clear</button>
+        </div>
+      </div>
+
+	      <!-- Workflow Guide -->
+	      <div class="control-section">
+	        <div class="section-header">
+	          <span class="section-title" data-i18n="workflow">Workflow</span>
+	          <button class="guide-toggle-btn" id="guideToggleBtn" type="button" aria-pressed="true" data-i18n="guideToggleOn">Guide: On</button>
+	        </div>
+	        <div class="workflow-steps" id="workflowSteps">
+	          <div class="workflow-step active" id="step1">
+	            <span class="step-number">1</span>
+	            <span data-i18n="stepCrop">Crop image (remove non-film areas)</span>
+          </div>
+          <div class="workflow-step" id="step2">
+            <span class="step-number">2</span>
+            <span data-i18n="stepBase">Sample film base (orange mask)</span>
+          </div>
+          <div class="workflow-step" id="step3">
+	            <span class="step-number">3</span>
+	            <span data-i18n="stepAdjust">Adjust colors and export</span>
+	          </div>
+	        </div>
+	        <div class="info-box workflow-guide-note" id="quickGuideBox" data-i18n="quickGuide" style="display: none;"></div>
+	        <div class="info-box workflow-guide-note" id="batchStep3GuideBox" data-i18n="batchStep3Guide" style="display: none;">
+	          Batch Step 3 Guide:
+	          1) Adjust current image.
+	          2) Click "Save Settings".
+          3) Click the next file in File List.
+          4) Repeat, then export all.
+        </div>
+      </div>
+
+      <!-- Auto Frame Settings (Step 1) -->
+      <div class="control-section" id="autoFrameSettingsSection" style="display: none;">
+        <div class="section-header">
+          <span class="section-title" data-i18n="autoFrameSettings">Auto Frame Settings</span>
+        </div>
+        <div class="section-content">
+          <div class="autoframe-settings">
+            <label class="autoframe-option">
+              <input type="checkbox" id="autoFrameEnabledInput" checked>
+              <span data-i18n="autoFrameEnabled">Enable Auto Frame</span>
+            </label>
+            <label class="autoframe-option">
+              <input type="checkbox" id="autoFrameAutoApplyInput" checked>
+              <span data-i18n="autoFrameAutoApplyHigh">Auto-apply high confidence</span>
+            </label>
+            <div class="autoframe-row">
+              <span data-i18n="autoFrameFormatLabel">Film Format</span>
+              <select id="autoFrameFormatSelect">
+                <option value="auto" data-i18n="autoFrameFormatAuto">Auto (135/120)</option>
+                <option value="135" data-i18n="autoFrameFormat135">Prefer 135</option>
+                <option value="120" data-i18n="autoFrameFormat120">Prefer 120</option>
+              </select>
+            </div>
+            <div class="autoframe-row" id="autoFrame120LabelRow">
+              <span data-i18n="autoFrame120Formats">120 sub-formats</span>
+            </div>
+            <div class="autoframe-options" id="autoFrame120Options">
+              <label class="autoframe-option">
+                <input type="checkbox" id="autoFrame120_645" checked>
+                <span>6x4.5</span>
+              </label>
+              <label class="autoframe-option">
+                <input type="checkbox" id="autoFrame120_66" checked>
+                <span>6x6</span>
+              </label>
+              <label class="autoframe-option">
+                <input type="checkbox" id="autoFrame120_67" checked>
+                <span>6x7</span>
+              </label>
+              <label class="autoframe-option">
+                <input type="checkbox" id="autoFrame120_69" checked>
+                <span>6x9</span>
+              </label>
+            </div>
+            <div class="autoframe-row">
+              <span data-i18n="autoFrameLowConfidenceBehavior">Low confidence</span>
+              <select id="autoFrameLowConfidenceSelect">
+                <option value="suggest" data-i18n="autoFrameSuggestOnly">Try crop anyway</option>
+                <option value="rotateOnly" data-i18n="autoFrameRotateOnly">Rotate only</option>
+                <option value="ignore" data-i18n="autoFrameNoAction">Do nothing</option>
+              </select>
+            </div>
+          </div>
+          <div class="info-box autoframe-diagnostics" id="autoFrameDiagnosticsBox" style="display: none;"></div>
+        </div>
+      </div>
+
+      <!-- Film Settings (Step 2) -->
+      <div class="control-section" id="filmSettingsSection" style="display: none;">
+        <div class="section-header">
+          <span class="section-title" data-i18n="filmSettings">Film Settings</span>
+        </div>
+        <div class="section-content">
+          <div class="step2-mode-toggle" id="step2ModeToggle">
+            <button class="step2-mode-btn active" id="step2ModeBorderBtn" data-mode="border" data-i18n="step2ModeBorder">Border Available</button>
+            <button class="step2-mode-btn" id="step2ModeNoBorderBtn" data-mode="noBorder" data-i18n="step2ModeNoBorder">No Border / ES-2</button>
+          </div>
+          <div class="info-box workflow-guide-note" id="step2FirstHint" data-i18n="step2FirstHint" style="display: none;"></div>
+          <div class="step2-guide-card" id="step2GuideCard">
+            <div class="step2-guide-title" data-i18n="guideStep2Title">First time here? Follow these 3 steps.</div>
+            <div class="step2-guide-intro" data-i18n="guideStep2Intro">Pick the mode that matches your scan setup, then follow the guided steps below.</div>
+            <div class="step2-guide-term" data-i18n="guideTermMaskHelp">Film mask means the unexposed orange edge area near sprocket holes or frame edge.</div>
+            <ol class="step2-guide-list">
+              <li id="step2GuideStep1"></li>
+              <li id="step2GuideStep2"></li>
+              <li id="step2GuideStep3"></li>
+            </ol>
+            <div class="step2-guide-tip" id="step2GuideTip"></div>
+          </div>
+          <div class="film-type-toggle">
+            <button class="film-type-btn active" data-type="color" data-i18n="colorFilm">Color</button>
+            <button class="film-type-btn" data-type="bw" data-i18n="bwFilm">B&W</button>
+            <button class="film-type-btn" data-type="positive" data-i18n="positiveFilm">Positive</button>
+          </div>
+          <select class="preset-select" id="filmPreset">
+            <option value="generic_color" data-i18n="genericColor">Generic Color</option>
+          </select>
+          <div class="lens-correction-panel" id="lensCorrectionPanel">
+            <div class="lens-section-title" data-i18n="lensSectionTitle">Lens Correction (Optional)</div>
+            <div class="lens-row">
+              <label class="lens-toggle-label">
+                <input type="checkbox" id="lensEnableInput">
+                <span data-i18n="lensEnable">Enable Lens Correction</span>
+              </label>
+              <button class="film-base-btn" id="lensSkipBtn" type="button" data-i18n="lensSkipBtn">Skip</button>
+            </div>
+            <div class="info-box lens-status" id="lensStatusBox" data-i18n="lensStatusIdle">Lens correction is optional. You can continue without selecting a profile.</div>
+            <div class="lens-grid">
+              <div class="lens-field wide">
+                <label for="lensLensModelInput" data-i18n="lensLensModel">Lens Model</label>
+                <input id="lensLensModelInput" type="text" placeholder="e.g. 50mm f/1.8">
+              </div>
+              <div class="lens-field">
+                <label for="lensLensMakerInput" data-i18n="lensLensMaker">Lens Maker</label>
+                <input id="lensLensMakerInput" type="text" placeholder="optional">
+              </div>
+              <div class="lens-field">
+                <label for="lensCameraModelInput" data-i18n="lensCameraModel">Camera Model</label>
+                <input id="lensCameraModelInput" type="text" placeholder="optional">
+              </div>
+              <div class="lens-field">
+                <label for="lensCameraMakerInput" data-i18n="lensCameraMaker">Camera Maker</label>
+                <input id="lensCameraMakerInput" type="text" placeholder="optional">
+              </div>
+              <div class="lens-field">
+                <button class="film-base-btn" id="lensSearchBtn" type="button" data-i18n="lensSearchBtn">Search Profiles</button>
+              </div>
+              <div class="lens-field">
+                <button class="film-base-btn" id="lensUseSelectedBtn" type="button" data-i18n="lensUseSelectedBtn">Use Selected Profile</button>
+              </div>
+              <div class="lens-field wide">
+                <label for="lensResultSelect" data-i18n="lensResults">Search Results</label>
+                <select id="lensResultSelect" disabled>
+                  <option value="" data-i18n="lensNoResult">No profiles loaded yet</option>
+                </select>
+              </div>
+              <div class="lens-field wide">
+                <p class="lens-selected" id="lensSelectedText" data-i18n="lensSelectedNone">Selected profile: none</p>
+              </div>
+              <div class="lens-field">
+                <label for="lensFocalInput" data-i18n="lensFocal">Focal (mm)</label>
+                <input id="lensFocalInput" type="number" min="1" max="2000" step="0.1" value="50">
+              </div>
+              <div class="lens-field">
+                <label for="lensCropInput" data-i18n="lensCrop">Crop Factor</label>
+                <input id="lensCropInput" type="number" min="0.1" max="10" step="0.01" value="1">
+              </div>
+              <div class="lens-field">
+                <label for="lensApertureInput" data-i18n="lensAperture">Aperture (f)</label>
+                <input id="lensApertureInput" type="number" min="0.5" max="64" step="0.1" value="8">
+              </div>
+              <div class="lens-field">
+                <label for="lensDistanceInput" data-i18n="lensDistance">Distance (m)</label>
+                <input id="lensDistanceInput" type="number" min="0.1" max="10000" step="0.1" value="1000">
+              </div>
+              <div class="lens-field wide">
+                <label for="lensStepModeSelect" data-i18n="lensStepMode">Map Detail</label>
+                <div class="lens-step-row">
+                  <select id="lensStepModeSelect">
+                    <option value="auto" data-i18n="lensStepAuto">Auto</option>
+                    <option value="manual" data-i18n="lensStepManual">Manual</option>
+                  </select>
+                  <input id="lensStepInput" type="number" min="1" max="16" step="1" value="2" title="step">
+                </div>
+              </div>
+            </div>
+          </div>
+          <div id="filmBaseControls">
+            <div class="info-box" data-i18n="filmBaseInfo">Sample the unexposed film edge if available. If the border is already cropped out, use Auto Detect or reuse a reference frame.</div>
+            <div class="film-base-buttons">
+              <button class="film-base-btn" id="sampleBaseBtn" data-i18n="sampleBase">Sample Film Base</button>
+              <button class="film-base-btn" id="autoDetectBtn" data-i18n="autoDetect">Auto Detect</button>
+              <button class="film-base-btn" id="useReferenceBtn" data-i18n="useRollReference">Use Roll Reference</button>
+            </div>
+            <div class="film-base-preview" id="filmBasePreview" style="display: none;">
+              <div class="film-base-color" id="filmBaseColor"></div>
+              <div class="film-base-values" id="filmBaseValues">R: 0 G: 0 B: 0</div>
+            </div>
+            <div class="roll-reference-controls" id="rollReferenceControls">
+              <div class="roll-reference-title" data-i18n="rollReferenceTitle">Roll Reference</div>
+              <div class="roll-reference-status" id="rollReferenceStatus" data-i18n="rollReferenceNone">No roll reference set.</div>
+              <div class="film-base-buttons">
+                <button class="film-base-btn" id="setRollReferenceBtn" data-i18n="setRollReference">Set Current as Reference</button>
+                <button class="film-base-btn" id="applyRollReferenceBtn" data-i18n="applyRollReference">Apply Reference to Selected</button>
+                <button class="film-base-btn" id="clearRollReferenceBtn" data-i18n="clearRollReference">Clear Reference</button>
+              </div>
+              <div class="roll-reference-options">
+                <label class="roll-reference-option">
+                  <input type="checkbox" id="lockRollReference">
+                  <span data-i18n="lockRollReference">Lock reference for newly added files</span>
+                </label>
+                <label class="roll-reference-option">
+                  <input type="checkbox" id="applyCropWithReference">
+                  <span data-i18n="applyCropWithReference">Also apply crop from reference</span>
+                </label>
+              </div>
+            </div>
+          </div>
+          <div class="info-box" id="positiveFilmInfo" data-i18n="positiveModeInfo" style="display: none;">Positive slide film mode does not require film base sampling.</div>
+          <button class="toolbar-btn primary" id="applyConvertBtn" style="margin-top: 8px; width: 100%; justify-content: center;" data-i18n="applyConvert">Apply & Convert</button>
+        </div>
+      </div>
+
+      <!-- Color Model (Step 3, SilverCore) -->
+      <div class="control-section" id="whiteBalanceSection" style="display: none;">
+        <div class="section-header" data-section="conversion">
+          <span class="section-title" data-i18n="sectionColorModel">Color Model</span>
+          <span class="section-toggle">▼</span>
+        </div>
+        <div class="section-content" id="conversionSectionContent">
+          <div class="info-box" data-i18n="wbInfo">Click on a neutral gray area in the image, or adjust manually</div>
+          <button class="film-base-btn" id="sampleWBBtn" data-i18n="sampleWB">Sample Gray Point</button>
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="coreColorModelLabel">Color Model</span>
+            </div>
+            <select class="preset-select" id="coreColorModel">
+              <option value="noritsu">Noritsu</option>
+              <option value="frontier">Frontier</option>
+              <option value="standard" selected data-i18n="coreModelStandard">Standard</option>
+              <option value="warm" data-i18n="coreModelWarm">Warm</option>
+              <option value="mono" data-i18n="coreModelMono">Mono</option>
+              <option value="cine-log" data-i18n="coreModelCineLog">Cine Log</option>
+              <option value="cine-rich" data-i18n="coreModelCineRich">Cine Rich</option>
+              <option value="cine-flat" data-i18n="coreModelCineFlat">Cine Flat</option>
+              <option value="neutral" data-i18n="coreModelNeutral">Neutral</option>
+            </select>
+          </div>
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="corePreSaturation">Pre-Saturation</span>
+              <input type="number" class="slider-number-input" id="corePreSaturationValue" min="0" max="200" step="1" value="100">
+            </div>
+            <input type="range" class="slider-input" id="corePreSaturation" min="0" max="200" step="1" value="100">
+          </div>
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="coreBorderBuffer">Border Buffer %</span>
+              <input type="number" class="slider-number-input" id="coreBorderBufferValue" min="0" max="30" step="1" value="10">
+            </div>
+            <input type="range" class="slider-input" id="coreBorderBuffer" min="0" max="30" step="1" value="10">
+          </div>
+        </div>
+      </div>
+
+      <!-- Tone (Step 3, SilverCore) -->
+      <div class="control-section" id="toneSection" style="display: none;">
+        <div class="section-header" data-section="tone">
+          <span class="section-title" data-i18n="toneAdjustments">Tone</span>
+          <span class="section-toggle">▼</span>
+        </div>
+        <div class="section-content" id="toneSectionContent">
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="coreBrightness">Brightness</span>
+              <input type="number" class="slider-number-input" id="coreBrightnessValue" min="-100" max="100" step="1" value="0">
+            </div>
+            <input type="range" class="slider-input" id="coreBrightness" min="-100" max="100" step="1" value="0">
+          </div>
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="exposure">Exposure</span>
+              <input type="number" class="slider-number-input" id="coreExposureValue" min="-300" max="300" step="1" value="0">
+            </div>
+            <input type="range" class="slider-input" id="coreExposure" min="-300" max="300" step="1" value="0">
+          </div>
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="contrast">Contrast</span>
+              <input type="number" class="slider-number-input" id="coreContrastValue" min="-100" max="100" step="1" value="0">
+            </div>
+            <input type="range" class="slider-input" id="coreContrast" min="-100" max="100" step="1" value="0">
+          </div>
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="highlights">Highlights</span>
+              <input type="number" class="slider-number-input" id="coreHighlightsValue" min="-100" max="100" step="1" value="0">
+            </div>
+            <input type="range" class="slider-input" id="coreHighlights" min="-100" max="100" step="1" value="0">
+          </div>
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="shadows">Shadows</span>
+              <input type="number" class="slider-number-input" id="coreShadowsValue" min="-100" max="100" step="1" value="0">
+            </div>
+            <input type="range" class="slider-input" id="coreShadows" min="-100" max="100" step="1" value="0">
+          </div>
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="coreWhites">Whites</span>
+              <input type="number" class="slider-number-input" id="coreWhitesValue" min="-100" max="100" step="1" value="0">
+            </div>
+            <input type="range" class="slider-input" id="coreWhites" min="-100" max="100" step="1" value="0">
+          </div>
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="coreBlacks">Blacks</span>
+              <input type="number" class="slider-number-input" id="coreBlacksValue" min="-100" max="100" step="1" value="0">
+            </div>
+            <input type="range" class="slider-input" id="coreBlacks" min="-100" max="100" step="1" value="0">
+          </div>
+        </div>
+      </div>
+
+      <!-- Color (Step 3, SilverCore) -->
+      <div class="control-section" id="colorSection" style="display: none;">
+        <div class="section-header" data-section="color">
+          <span class="section-title" data-i18n="sectionColor">Color</span>
+          <span class="section-toggle">▼</span>
+        </div>
+        <div class="section-content" id="colorSectionContent">
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="coreWbModeLabel">White Balance</span>
+            </div>
+            <select class="preset-select" id="coreWbMode">
+              <option value="auto" selected data-i18n="wbAutoLinearFixed">Auto (Linear Fixed)</option>
+              <option value="linearDynamic" data-i18n="wbLinearDynamic">Linear Dynamic</option>
+              <option value="shadowWeighted" data-i18n="wbShadowWeighted">Shadow Weighted</option>
+              <option value="highlightWeighted" data-i18n="wbHighlightWeighted">Highlight Weighted</option>
+              <option value="midtoneWeighted" data-i18n="wbMidtoneWeighted">Midtone Weighted</option>
+            </select>
+          </div>
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="temperature">Temperature</span>
+              <input type="number" class="slider-number-input" id="coreTemperatureValue" min="-100" max="100" step="1" value="0">
+            </div>
+            <input type="range" class="slider-input" id="coreTemperature" min="-100" max="100" step="1" value="0">
+          </div>
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="tint">Tint</span>
+              <input type="number" class="slider-number-input" id="coreTintValue" min="-100" max="100" step="1" value="0">
+            </div>
+            <input type="range" class="slider-input" id="coreTint" min="-100" max="100" step="1" value="0">
+          </div>
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="saturation">Saturation</span>
+              <input type="number" class="slider-number-input" id="coreSaturationValue" min="0" max="200" step="1" value="100">
+            </div>
+            <input type="range" class="slider-input" id="coreSaturation" min="0" max="200" step="1" value="100">
+          </div>
+        </div>
+      </div>
+
+      <!-- Effects (Step 3, SilverCore) -->
+      <div class="control-section" id="cmySection" style="display: none;">
+        <div class="section-header" data-section="effects">
+          <span class="section-title" data-i18n="sectionEffects">Effects</span>
+          <span class="section-toggle">▼</span>
+        </div>
+        <div class="section-content" id="effectsSectionContent">
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="coreGlow">Glow</span>
+              <input type="number" class="slider-number-input" id="coreGlowValue" min="0" max="100" step="1" value="0">
+            </div>
+            <input type="range" class="slider-input" id="coreGlow" min="0" max="100" step="1" value="0">
+          </div>
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="coreFade">Fade</span>
+              <input type="number" class="slider-number-input" id="coreFadeValue" min="0" max="100" step="1" value="0">
+            </div>
+            <input type="range" class="slider-input" id="coreFade" min="0" max="100" step="1" value="0">
+          </div>
+        </div>
+      </div>
+
+      <!-- Engine (Step 3, SilverCore) -->
+      <div class="control-section" id="advancedSection" style="display: none;">
+        <div class="section-header" data-section="engine">
+          <span class="section-title" data-i18n="sectionEngine">Engine</span>
+          <span class="section-toggle">▼</span>
+        </div>
+        <div class="section-content" id="engineSectionContent">
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="coreCurvePrecision">Curve Precision</span>
+            </div>
+            <select class="preset-select" id="coreCurvePrecision">
+              <option value="auto" selected data-i18n="curvePrecisionAuto30">Auto (30 points)</option>
+              <option value="smooth" data-i18n="curvePrecisionSmooth70">Smooth (70 points)</option>
+              <option value="precise" data-i18n="curvePrecisionPrecise128">Precise (128 points)</option>
+            </select>
+          </div>
+          <label class="roll-reference-option">
+            <input type="checkbox" id="coreUseWebGL" checked>
+            <span data-i18n="coreUseWebGL">WebGL Acceleration</span>
+          </label>
+        </div>
+      </div>
+
+      <!-- Additional (Legacy Fine Tune) -->
+      <div class="control-section" id="additionalSection" style="display: none;">
+        <div class="section-header" data-section="additional">
+          <span class="section-title" data-i18n="advanced">Advanced</span>
+          <span class="section-toggle collapsed">▼</span>
+        </div>
+        <div class="section-content collapsed" id="additionalSectionContent">
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label">R</span>
+              <input type="number" class="slider-number-input" id="wbRValue" min="0.5" max="2" step="0.01" value="1.00">
+            </div>
+            <input type="range" class="slider-input" id="wbR" min="0.5" max="2" step="0.01" value="1">
+          </div>
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label">G</span>
+              <input type="number" class="slider-number-input" id="wbGValue" min="0.5" max="2" step="0.01" value="1.00">
+            </div>
+            <input type="range" class="slider-input" id="wbG" min="0.5" max="2" step="0.01" value="1">
+          </div>
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label">B</span>
+              <input type="number" class="slider-number-input" id="wbBValue" min="0.5" max="2" step="0.01" value="1.00">
+            </div>
+            <input type="range" class="slider-input" id="wbB" min="0.5" max="2" step="0.01" value="1">
+          </div>
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="cyan">Cyan</span>
+              <input type="number" class="slider-number-input" id="cyanValue" min="-100" max="100" step="1" value="0">
+            </div>
+            <input type="range" class="slider-input" id="cyan" min="-100" max="100" step="1" value="0">
+          </div>
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="magenta">Magenta</span>
+              <input type="number" class="slider-number-input" id="magentaValue" min="-100" max="100" step="1" value="0">
+            </div>
+            <input type="range" class="slider-input" id="magenta" min="-100" max="100" step="1" value="0">
+          </div>
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="yellow">Yellow</span>
+              <input type="number" class="slider-number-input" id="yellowValue" min="-100" max="100" step="1" value="0">
+            </div>
+            <input type="range" class="slider-input" id="yellow" min="-100" max="100" step="1" value="0">
+          </div>
+          <div class="curve-editor">
+            <p class="curve-hint" data-i18n="curveHint">Click and drag to adjust the curve</p>
+            <div class="curve-tabs">
+              <button class="curve-tab r active" data-channel="r">R</button>
+              <button class="curve-tab g" data-channel="g">G</button>
+              <button class="curve-tab b" data-channel="b">B</button>
+              <button class="curve-tab reset" id="resetCurveBtn" data-i18n="resetCurve">Reset</button>
+            </div>
+            <canvas class="curve-canvas" id="curveCanvas"></canvas>
+            <div class="curve-presets">
+              <button class="curve-preset-btn" data-preset="linear" data-i18n="linear">Linear</button>
+              <button class="curve-preset-btn" data-preset="scurve" data-i18n="sCurve">S-Curve</button>
+              <button class="curve-preset-btn" data-preset="log" data-i18n="log">Log</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <!-- Footer -->
+  <footer class="app-footer" id="appFooter" style="display: none;">
+    <div class="footer-left">
+      <button class="footer-btn" id="newImageBtn" data-i18n="newImage">New Image</button>
+      <button class="footer-btn" id="resetBtn" data-i18n="reset">Reset</button>
+      <button class="footer-btn" id="startOverBtn" data-i18n="startOver">Start Over</button>
+    </div>
+    <div class="footer-right">
+      <button class="footer-btn" id="saveSettingsBtn" style="display: none;" data-i18n="saveSettings">Save Settings</button>
+      <button class="footer-btn" id="applyToSelectedBtn" style="display: none;" data-i18n="applyToSelected">Apply to Selected</button>
+      <div class="export-dropdown">
+        <button class="footer-btn primary" id="exportBtn" data-i18n="exportPng">Export PNG</button>
+        <div class="export-dropdown-menu" id="exportDropdownMenu">
+          <div class="export-format-section">
+            <div class="export-format-label" data-i18n="exportFormat">Export Format</div>
+            <div class="export-format-toggle">
+              <button class="format-btn active" data-format="png">PNG</button>
+              <button class="format-btn" data-format="jpeg">JPEG</button>
+              <button class="format-btn" data-format="tiff">TIFF</button>
+            </div>
+          </div>
+          <div class="export-bitdepth-section" id="exportBitDepthSection">
+            <div class="export-format-label" data-i18n="exportBitDepth">Bit Depth</div>
+            <div class="export-bitdepth-toggle">
+              <button class="bitdepth-btn active" data-bitdepth="8">8-bit</button>
+              <button class="bitdepth-btn" data-bitdepth="16">16-bit</button>
+            </div>
+            <div class="export-bitdepth-note" id="exportBitDepthNote" data-i18n="bitDepthJpegLocked"></div>
+          </div>
+          <div class="export-quality-section" id="exportQualitySection">
+            <div class="export-quality-header">
+              <span class="export-quality-label" data-i18n="jpegQuality">JPEG Quality</span>
+              <span class="export-quality-value" id="exportQualityValue">92%</span>
+            </div>
+            <input type="range" class="export-quality-slider" id="exportQualitySlider" min="1" max="100" value="92">
+          </div>
+          <button class="export-dropdown-item" id="exportSingleBtn" data-i18n="exportCurrent">Export Current (PNG)</button>
+          <div class="export-dropdown-divider"></div>
+          <button class="export-dropdown-item" id="exportZipBtn" data-i18n="exportZip" disabled>Export All (ZIP)</button>
+          <button class="export-dropdown-item" id="exportAllBtn" data-i18n="exportIndividual" disabled>Download All Individually</button>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <!-- Batch Progress Modal -->
+  <div class="batch-progress-overlay" id="batchProgressOverlay" style="display: none;">
+    <div class="batch-progress-modal">
+      <div class="batch-progress-title" data-i18n="batchProcessing">Batch Processing...</div>
+      <div class="batch-progress-bar">
+        <div class="batch-progress-fill" id="batchProgressFill" style="width: 0%;"></div>
+      </div>
+      <div class="batch-progress-text" id="batchProgressText">0 / 0</div>
+      <div class="batch-progress-current" id="batchProgressCurrent"></div>
+    </div>
+  </div>
+
+  <div class="copyright">
+    © 2025 Negative Converter. <a href="https://neoanaloglab.com" target="_blank">neoanaloglab.com</a> All rights reserved.
+    <a class="github-link" href="https://github.com/lexluthor0304/NegativeConverter" target="_blank" rel="noopener">GitHub</a>
+  </div>
+
+  <script type="module" src="./src/app/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,376 @@
+{
+  "version": 1,
+  "generatedAt": "2026-02-11T00:00:00Z",
+  "aliases": {
+    "fujifilm_pro_400h": "fuji_400h",
+    "fujifilm_superia_400": "fuji_superia",
+    "ilford_hp5_plus": "ilford_hp5"
+  },
+  "presets": [
+    {
+      "id": "generic_color",
+      "name": "Generic Color",
+      "brand": "generic",
+      "type": "color",
+      "status": "active",
+      "baseColor": { "r": 0.82, "g": 0.55, "b": 0.36 },
+      "characteristics": { "warmth": 0.0, "saturation": 0.0, "contrast": 0.0 },
+      "sourceMeta": { "sourceTier": "internal", "confidence": 1.0, "notes": "Fallback color preset." }
+    },
+    {
+      "id": "generic_bw",
+      "name": "Generic B&W",
+      "brand": "generic",
+      "type": "bw",
+      "status": "active",
+      "contrast": 1.0,
+      "gamma": 1.0,
+      "bw": { "gamma": 1.0 },
+      "characteristics": { "warmth": 0.0, "saturation": 0.0, "contrast": 0.0 },
+      "sourceMeta": { "sourceTier": "internal", "confidence": 1.0, "notes": "Fallback B&W preset." }
+    },
+    {
+      "id": "generic_positive",
+      "name": "Generic Positive",
+      "brand": "generic",
+      "type": "positive",
+      "status": "active",
+      "characteristics": { "warmth": 0.0, "saturation": 0.1, "contrast": 0.1 },
+      "sourceMeta": { "sourceTier": "internal", "confidence": 1.0, "notes": "Fallback positive preset." }
+    },
+
+    {
+      "id": "kodak_portra_160",
+      "name": "Kodak Portra 160",
+      "brand": "kodak",
+      "type": "color",
+      "status": "active",
+      "baseColor": { "r": 0.84, "g": 0.55, "b": 0.36 },
+      "characteristics": { "warmth": 0.06, "saturation": -0.03, "contrast": -0.02 },
+      "sourceMeta": { "sourceTier": "hybrid", "confidence": 0.78, "notes": "Portra family baseline, lower speed look." }
+    },
+    {
+      "id": "kodak_portra_400",
+      "name": "Kodak Portra 400",
+      "brand": "kodak",
+      "type": "color",
+      "status": "active",
+      "baseColor": { "r": 0.85, "g": 0.55, "b": 0.35 },
+      "characteristics": { "warmth": 0.1, "saturation": -0.05, "contrast": 0.0 },
+      "sourceMeta": { "sourceTier": "hybrid", "confidence": 0.85, "notes": "Existing tuned baseline." }
+    },
+    {
+      "id": "kodak_portra_800",
+      "name": "Kodak Portra 800",
+      "brand": "kodak",
+      "type": "color",
+      "status": "active",
+      "baseColor": { "r": 0.86, "g": 0.56, "b": 0.36 },
+      "characteristics": { "warmth": 0.12, "saturation": -0.06, "contrast": 0.02 },
+      "sourceMeta": { "sourceTier": "hybrid", "confidence": 0.73, "notes": "Portra family baseline, higher speed look." }
+    },
+    {
+      "id": "kodak_ektar_100",
+      "name": "Kodak Ektar 100",
+      "brand": "kodak",
+      "type": "color",
+      "status": "active",
+      "baseColor": { "r": 0.82, "g": 0.52, "b": 0.32 },
+      "characteristics": { "warmth": 0.0, "saturation": 0.15, "contrast": 0.1 },
+      "sourceMeta": { "sourceTier": "hybrid", "confidence": 0.86, "notes": "Existing tuned baseline." }
+    },
+    {
+      "id": "kodak_gold_200",
+      "name": "Kodak Gold 200",
+      "brand": "kodak",
+      "type": "color",
+      "status": "active",
+      "baseColor": { "r": 0.83, "g": 0.53, "b": 0.34 },
+      "characteristics": { "warmth": 0.1, "saturation": 0.08, "contrast": 0.04 },
+      "sourceMeta": { "sourceTier": "hybrid", "confidence": 0.81, "notes": "Consumer Kodak warm palette." }
+    },
+    {
+      "id": "kodak_ultramax_400",
+      "name": "Kodak UltraMax 400",
+      "brand": "kodak",
+      "type": "color",
+      "status": "active",
+      "baseColor": { "r": 0.82, "g": 0.53, "b": 0.35 },
+      "characteristics": { "warmth": 0.08, "saturation": 0.09, "contrast": 0.06 },
+      "sourceMeta": { "sourceTier": "hybrid", "confidence": 0.78, "notes": "Consumer high-speed Kodak baseline." }
+    },
+    {
+      "id": "kodak_colorplus_200",
+      "name": "Kodak ColorPlus 200",
+      "brand": "kodak",
+      "type": "color",
+      "status": "active",
+      "baseColor": { "r": 0.83, "g": 0.54, "b": 0.35 },
+      "characteristics": { "warmth": 0.08, "saturation": 0.05, "contrast": 0.02 },
+      "sourceMeta": { "sourceTier": "hybrid", "confidence": 0.74, "notes": "Entry Kodak consumer negative profile." }
+    },
+    {
+      "id": "kodak_pro_image_100",
+      "name": "Kodak Pro Image 100",
+      "brand": "kodak",
+      "type": "color",
+      "status": "active",
+      "baseColor": { "r": 0.84, "g": 0.54, "b": 0.35 },
+      "characteristics": { "warmth": 0.06, "saturation": 0.03, "contrast": 0.01 },
+      "sourceMeta": { "sourceTier": "hybrid", "confidence": 0.72, "notes": "Pro-level neutral Kodak color negative." }
+    },
+    {
+      "id": "kodak_trix_400",
+      "name": "Kodak Tri-X 400",
+      "brand": "kodak",
+      "type": "bw",
+      "status": "active",
+      "contrast": 1.1,
+      "gamma": 0.9,
+      "bw": { "gamma": 0.9 },
+      "characteristics": { "warmth": 0.0, "saturation": 0.0, "contrast": 0.1 },
+      "sourceMeta": { "sourceTier": "hybrid", "confidence": 0.88, "notes": "Classic punchy grain-heavy Kodak B&W." }
+    },
+    {
+      "id": "kodak_tmax_100",
+      "name": "Kodak T-MAX 100",
+      "brand": "kodak",
+      "type": "bw",
+      "status": "active",
+      "contrast": 0.95,
+      "gamma": 1.0,
+      "bw": { "gamma": 1.0 },
+      "characteristics": { "warmth": 0.0, "saturation": 0.0, "contrast": -0.02 },
+      "sourceMeta": { "sourceTier": "hybrid", "confidence": 0.83, "notes": "Finer grain, cleaner tonal response." }
+    },
+    {
+      "id": "kodak_tmax_400",
+      "name": "Kodak T-MAX 400",
+      "brand": "kodak",
+      "type": "bw",
+      "status": "active",
+      "contrast": 1.0,
+      "gamma": 0.96,
+      "bw": { "gamma": 0.96 },
+      "characteristics": { "warmth": 0.0, "saturation": 0.0, "contrast": 0.02 },
+      "sourceMeta": { "sourceTier": "hybrid", "confidence": 0.8, "notes": "Modern medium-speed Kodak B&W tonal curve." }
+    },
+
+    {
+      "id": "fuji_400h",
+      "name": "Fuji Pro 400H",
+      "brand": "fujifilm",
+      "type": "color",
+      "status": "active",
+      "baseColor": { "r": 0.8, "g": 0.58, "b": 0.4 },
+      "characteristics": { "warmth": -0.05, "saturation": 0.0, "contrast": 0.0 },
+      "sourceMeta": { "sourceTier": "hybrid", "confidence": 0.84, "notes": "Existing tuned baseline." }
+    },
+    {
+      "id": "fuji_superia",
+      "name": "Fuji Superia",
+      "brand": "fujifilm",
+      "type": "color",
+      "status": "active",
+      "baseColor": { "r": 0.78, "g": 0.55, "b": 0.38 },
+      "characteristics": { "warmth": 0.05, "saturation": 0.1, "contrast": 0.05 },
+      "sourceMeta": { "sourceTier": "hybrid", "confidence": 0.82, "notes": "Existing tuned baseline." }
+    },
+    {
+      "id": "fujifilm_superia_xtra_400",
+      "name": "Fujifilm Superia X-TRA 400",
+      "brand": "fujifilm",
+      "type": "color",
+      "status": "active",
+      "baseColor": { "r": 0.79, "g": 0.56, "b": 0.39 },
+      "characteristics": { "warmth": 0.0, "saturation": 0.1, "contrast": 0.06 },
+      "sourceMeta": { "sourceTier": "hybrid", "confidence": 0.79, "notes": "Consumer Fuji high-speed profile." }
+    },
+    {
+      "id": "fujifilm_superia_premium_400",
+      "name": "Fujifilm Superia Premium 400",
+      "brand": "fujifilm",
+      "type": "color",
+      "status": "active",
+      "baseColor": { "r": 0.79, "g": 0.57, "b": 0.39 },
+      "characteristics": { "warmth": -0.01, "saturation": 0.11, "contrast": 0.05 },
+      "sourceMeta": { "sourceTier": "hybrid", "confidence": 0.75, "notes": "Regional premium Fuji consumer profile." }
+    },
+    {
+      "id": "fujifilm_fujicolor_100",
+      "name": "Fujifilm Fujicolor 100",
+      "brand": "fujifilm",
+      "type": "color",
+      "status": "active",
+      "baseColor": { "r": 0.8, "g": 0.57, "b": 0.4 },
+      "characteristics": { "warmth": -0.02, "saturation": 0.05, "contrast": 0.02 },
+      "sourceMeta": { "sourceTier": "hybrid", "confidence": 0.71, "notes": "Low-speed Fuji consumer profile." }
+    },
+    {
+      "id": "fujifilm_fujicolor_200",
+      "name": "Fujifilm Fujicolor 200",
+      "brand": "fujifilm",
+      "type": "color",
+      "status": "active",
+      "baseColor": { "r": 0.8, "g": 0.56, "b": 0.39 },
+      "characteristics": { "warmth": -0.01, "saturation": 0.06, "contrast": 0.03 },
+      "sourceMeta": { "sourceTier": "hybrid", "confidence": 0.73, "notes": "Current Fujicolor consumer baseline." }
+    },
+    {
+      "id": "fujifilm_c200",
+      "name": "Fujifilm C200",
+      "brand": "fujifilm",
+      "type": "color",
+      "status": "active",
+      "baseColor": { "r": 0.8, "g": 0.56, "b": 0.4 },
+      "characteristics": { "warmth": -0.02, "saturation": 0.04, "contrast": 0.02 },
+      "sourceMeta": { "sourceTier": "hybrid", "confidence": 0.76, "notes": "Classic Fuji C-series profile." }
+    },
+    {
+      "id": "fujifilm_acros_ii",
+      "name": "Fujifilm Neopan Acros II",
+      "brand": "fujifilm",
+      "type": "bw",
+      "status": "active",
+      "contrast": 0.97,
+      "gamma": 1.0,
+      "bw": { "gamma": 1.0 },
+      "characteristics": { "warmth": 0.0, "saturation": 0.0, "contrast": -0.01 },
+      "sourceMeta": { "sourceTier": "hybrid", "confidence": 0.82, "notes": "Fine-grain modern Fuji B&W profile." }
+    },
+
+    {
+      "id": "ilford_hp5",
+      "name": "Ilford HP5+",
+      "brand": "ilford",
+      "type": "bw",
+      "status": "active",
+      "contrast": 1.0,
+      "gamma": 1.0,
+      "bw": { "gamma": 1.0 },
+      "characteristics": { "warmth": 0.0, "saturation": 0.0, "contrast": 0.0 },
+      "sourceMeta": { "sourceTier": "hybrid", "confidence": 0.84, "notes": "Existing tuned baseline." }
+    },
+    {
+      "id": "ilford_fp4_plus",
+      "name": "Ilford FP4 Plus",
+      "brand": "ilford",
+      "type": "bw",
+      "status": "active",
+      "contrast": 0.95,
+      "gamma": 1.02,
+      "bw": { "gamma": 1.02 },
+      "characteristics": { "warmth": 0.0, "saturation": 0.0, "contrast": -0.03 },
+      "sourceMeta": { "sourceTier": "hybrid", "confidence": 0.84, "notes": "Fine grain, smoother mid-tones." }
+    },
+    {
+      "id": "ilford_delta_100",
+      "name": "Ilford Delta 100",
+      "brand": "ilford",
+      "type": "bw",
+      "status": "active",
+      "contrast": 0.94,
+      "gamma": 1.02,
+      "bw": { "gamma": 1.02 },
+      "characteristics": { "warmth": 0.0, "saturation": 0.0, "contrast": -0.04 },
+      "sourceMeta": { "sourceTier": "hybrid", "confidence": 0.8, "notes": "Modern low-speed Ilford profile." }
+    },
+    {
+      "id": "ilford_delta_400",
+      "name": "Ilford Delta 400",
+      "brand": "ilford",
+      "type": "bw",
+      "status": "active",
+      "contrast": 0.99,
+      "gamma": 0.98,
+      "bw": { "gamma": 0.98 },
+      "characteristics": { "warmth": 0.0, "saturation": 0.0, "contrast": 0.0 },
+      "sourceMeta": { "sourceTier": "hybrid", "confidence": 0.79, "notes": "Balanced speed/contrast modern Ilford profile." }
+    },
+    {
+      "id": "ilford_delta_3200",
+      "name": "Ilford Delta 3200",
+      "brand": "ilford",
+      "type": "bw",
+      "status": "active",
+      "contrast": 1.08,
+      "gamma": 0.9,
+      "bw": { "gamma": 0.9 },
+      "characteristics": { "warmth": 0.0, "saturation": 0.0, "contrast": 0.08 },
+      "sourceMeta": { "sourceTier": "hybrid", "confidence": 0.75, "notes": "High-speed pushed-look Ilford profile." }
+    },
+    {
+      "id": "ilford_pan_f_plus",
+      "name": "Ilford Pan F Plus",
+      "brand": "ilford",
+      "type": "bw",
+      "status": "active",
+      "contrast": 0.92,
+      "gamma": 1.05,
+      "bw": { "gamma": 1.05 },
+      "characteristics": { "warmth": 0.0, "saturation": 0.0, "contrast": -0.05 },
+      "sourceMeta": { "sourceTier": "hybrid", "confidence": 0.81, "notes": "Very fine grain low-speed Ilford profile." }
+    },
+    {
+      "id": "ilford_xp2_super",
+      "name": "Ilford XP2 Super",
+      "brand": "ilford",
+      "type": "bw",
+      "status": "active",
+      "contrast": 0.97,
+      "gamma": 1.0,
+      "bw": { "gamma": 1.0 },
+      "characteristics": { "warmth": 0.0, "saturation": 0.0, "contrast": -0.01 },
+      "sourceMeta": { "sourceTier": "hybrid", "confidence": 0.78, "notes": "C-41 B&W profile with gentler contrast." }
+    },
+    {
+      "id": "ilford_sfx_200",
+      "name": "Ilford SFX 200",
+      "brand": "ilford",
+      "type": "bw",
+      "status": "active",
+      "contrast": 1.0,
+      "gamma": 0.98,
+      "bw": { "gamma": 0.98 },
+      "characteristics": { "warmth": 0.0, "saturation": 0.0, "contrast": 0.02 },
+      "sourceMeta": { "sourceTier": "hybrid", "confidence": 0.7, "notes": "Extended red sensitivity style baseline." }
+    },
+
+    {
+      "id": "kodak_ektachrome_e100",
+      "name": "Kodak Ektachrome E100",
+      "brand": "kodak",
+      "type": "positive",
+      "status": "active",
+      "characteristics": { "warmth": 0.02, "saturation": 0.08, "contrast": 0.12 },
+      "sourceMeta": { "sourceTier": "internal", "confidence": 0.86, "notes": "Existing positive preset." }
+    },
+    {
+      "id": "fujifilm_provia_100f",
+      "name": "Fujifilm Provia 100F",
+      "brand": "fujifilm",
+      "type": "positive",
+      "status": "active",
+      "characteristics": { "warmth": -0.02, "saturation": 0.08, "contrast": 0.1 },
+      "sourceMeta": { "sourceTier": "internal", "confidence": 0.86, "notes": "Existing positive preset." }
+    },
+    {
+      "id": "fujifilm_velvia_50",
+      "name": "Fujifilm Velvia 50",
+      "brand": "fujifilm",
+      "type": "positive",
+      "status": "active",
+      "characteristics": { "warmth": -0.06, "saturation": 0.28, "contrast": 0.22 },
+      "sourceMeta": { "sourceTier": "internal", "confidence": 0.9, "notes": "Existing positive preset." }
+    },
+    {
+      "id": "fujifilm_velvia_100",
+      "name": "Fujifilm Velvia 100",
+      "brand": "fujifilm",
+      "type": "positive",
+      "status": "active",
+      "characteristics": { "warmth": -0.04, "saturation": 0.22, "contrast": 0.18 },
+      "sourceMeta": { "sourceTier": "internal", "confidence": 0.88, "notes": "Existing positive preset." }
+    }
+  ]
+}

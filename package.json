@@ -1,0 +1,25 @@
+{
+  "name": "negativeconverter",
+  "private": true,
+  "devDependencies": {
+    "@tauri-apps/cli": "2.10.0",
+    "http-server": "14.1.1",
+    "vite": "^5.4.19"
+  },
+  "scripts": {
+    "dev:web": "vite --config negative2positive/vite.config.js",
+    "build:web": "vite build --config negative2positive/vite.config.js && node scripts/sync-web-dist.mjs",
+    "preview:web": "vite preview --config negative2positive/vite.config.js",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "npm run build:web && tauri build"
+  },
+  "dependencies": {
+    "@fontsource/inter": "5.2.8",
+    "@neoanaloglabkk/lensfun-wasm": "0.1.3",
+    "@techstark/opencv-js": "4.12.0-release.1",
+    "jszip": "3.10.1",
+    "pako": "2.1.0",
+    "upng-js": "2.1.0",
+    "utif": "3.1.0"
+  }
+}
