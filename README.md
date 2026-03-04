@@ -82,6 +82,19 @@ npm ci
 npm run dev:web
 ```
 
+### Vercel deployment (important)
+
+This app must be deployed from the **Vite build output**, not by serving source files directly.
+
+Required settings:
+
+- Root Directory: repository root
+- Install Command: `npm ci`
+- Build Command: `npm run build:web`
+- Output Directory: `negative2positive/dist`
+
+If Vercel serves `negative2positive/index.html` directly, module imports like `pako` / `utif` / `jszip` will not resolve in browser and upload buttons can stop working.
+
 ### Desktop dev (Tauri)
 
 ```bash
