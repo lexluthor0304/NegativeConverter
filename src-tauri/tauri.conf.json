@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run dev:web",
     "devUrl": "http://127.0.0.1:4173",
-    "frontendDist": "../negative2positive"
+    "frontendDist": "../negative2positive/dist"
   },
   "app": {
     "withGlobalTauri": true,

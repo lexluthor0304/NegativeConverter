@@ -60,8 +60,8 @@ This is a browser-based tool built with HTML and JavaScript that converts scanne
 - Includes a simplified AHD demosaicing algorithm for Bayer-pattern raw data  
 - Color adjustment logic is based on RGB ↔ HSL and RGB ↔ CMY conversions  
 - Film preset metadata is loaded from JSON and grouped dynamically by film type in the UI  
-- Optional lens correction uses [`@neoanaloglabkk/lensfun-wasm`](https://www.jsdelivr.com/package/npm/@neoanaloglabkk/lensfun-wasm) with **CDN-first + local fallback** assets in `negative2positive/vendor/lensfun-wasm/`  
-- Auto frame detection uses OpenCV.js from `negative2positive/vendor/opencv/opencv-4.12.0.js`  
+- Optional lens correction uses [`@neoanaloglabkk/lensfun-wasm`](https://www.jsdelivr.com/package/npm/@neoanaloglabkk/lensfun-wasm) with **npm local assets first + CDN fallback**  
+- Auto frame detection uses [`@techstark/opencv-js`](https://www.npmjs.com/package/@techstark/opencv-js) loaded dynamically from the npm package asset URL  
 - Performance optimizations include:
   - Cached DOM access
   - Offscreen canvas reuse
@@ -79,6 +79,12 @@ This repo includes a Tauri wrapper to package the web app as an offline desktop 
 
 ```bash
 npm ci
+npm run dev:web
+```
+
+### Desktop dev (Tauri)
+
+```bash
 npm run tauri:dev
 ```
 

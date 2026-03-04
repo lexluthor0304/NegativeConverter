@@ -8,13 +8,17 @@ NegativeConverter is a browser-based film negative to positive converter. It pro
 
 ## Development
 
-**No build system required.** This is a zero-build static web application.
+This project now uses **Vite** for web dev/build and Tauri for desktop packaging.
 
-To run locally, serve the `negative2positive/` directory with any static web server:
+Run locally:
 ```bash
-npx serve negative2positive
-# or
-python -m http.server -d negative2positive
+npm ci
+npm run dev:web
+```
+
+Build web assets:
+```bash
+npm run build:web
 ```
 
 Live demo: https://negative-converter.tokugai.com
@@ -24,12 +28,16 @@ Live demo: https://negative-converter.tokugai.com
 ### File Structure
 ```
 negative2positive/
-├── index.html    # Complete UI + application logic (~1,265 lines)
-├── index.js      # LibRaw ES module wrapper
-├── worker.js     # Web Worker for async WASM processing
-├── libraw.js     # WASM module binding
-├── libraw.wasm   # Compiled LibRaw library for RAW format support
-└── vendor/opencv/opencv-4.12.0.js  # OpenCV.js for auto frame detection
+├── index.html                  # App shell + DOM markup
+├── src/
+│   ├── app/main.js             # Main app runtime (module entry)
+│   ├── pipeline/               # Conversion routing + adapters
+│   ├── render/                 # Histogram/render services
+│   └── silvercore/             # Core conversion engine modules
+├── index.js                    # LibRaw ES module wrapper
+├── worker.js                   # Web Worker for async WASM processing
+├── libraw.js                   # WASM module binding
+└── libraw.wasm                 # Compiled LibRaw library for RAW format support
 ```
 
 ### Key Technologies
@@ -37,16 +45,14 @@ negative2positive/
 - **WebAssembly (LibRaw)** for RAW file decoding (CR2, NEF, ARW, DNG, RW2)
 - **Web Workers** for non-blocking RAW processing
 - **jQuery 3.6.0** for DOM manipulation
-- **UPNG.js** for 16-bit PNG support
-- **UTIF.js** for TIFF/DNG parsing (iPhone ProRaw)
-- **OpenCV.js** for automatic border detection / auto crop / auto rotation
+- **UPNG.js** (npm: `upng-js`) for 16-bit PNG support
+- **UTIF.js** (npm: `utif`) for TIFF/DNG parsing (iPhone ProRaw)
+- **OpenCV.js** (npm: `@techstark/opencv-js`) for automatic border detection / auto crop / auto rotation
 
-### Dual-Canvas Rendering Strategy
-The app uses two canvases for performance:
-1. **Preview canvas** (1/4 scale) - Real-time slider feedback
-2. **Base pixels** (full resolution) - Final output quality
-
-Slider adjustments update the preview immediately, with debounced (300ms) full-resolution updates after the user stops adjusting.
+### Rendering Strategy
+The app keeps dual-path rendering behavior:
+1. **Preview path** for responsive slider feedback.
+2. **Full-resolution path** for export correctness.
 
 ### Image Processing Pipeline
 1. File upload → Format detection → Decoder dispatch (LibRaw/UTIF/Canvas API)
