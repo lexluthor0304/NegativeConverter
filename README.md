@@ -21,16 +21,36 @@ This is a browser-based tool built with HTML and JavaScript that converts scanne
 
 ## 🚀 How to Use
 
-1. Open `index.html` in any modern browser (Chrome/Edge/Firefox recommended)
-2. Click **Choose File** to upload your scanned film negative (PNG, JPG, or DNG)
-3. Use the **Rotation** slider or number box to align your image, then click **Apply Rotation**
-4. Click **Start Crop**, draw a box with your mouse, and click **Apply** to crop
-5. Click on a neutral gray area in the image to perform **White Balance**
-6. Use sliders or number inputs to fine-tune:
-   - **Temperature**, **Tint**
-   - **Vibrance**, **Saturation**
-   - **Cyan**, **Magenta**, **Yellow**
-7. Click **Download Corrected Image** to save your final result
+### Workflow (Step 1 → 3)
+
+1. **Step 1: Crop**
+   - Rotate / Auto Frame / Crop until only the film area remains
+   - Click **Next: Film Settings** (negatives) or **Next: Positive Mode** (slides)
+2. **Step 2: Film Settings**
+   - Pick film type: **Color**, **B&W**, or **Positive**
+   - **Color negatives**: set the mask baseline (sample manually / auto-detect / roll reference)
+   - Click **Next: Convert and Continue**
+3. **Step 3: Adjust & Export**
+   - White balance + sliders + curves to taste
+   - Export PNG / JPEG / TIFF
+
+### Film type quickstart
+
+- **Color negative**: Step 1 → **Next: Film Settings** → keep **Color** → set mask → **Next: Convert and Continue** → Step 3
+- **B&W negative**: Step 1 → **Next: Film Settings** → select **B&W** → **Next: Convert and Continue** (no mask) → Step 3
+- **Positive slide**: Step 1 → **Next: Positive Mode** (or select **Positive** in Step 2) → **Next: Convert and Continue** → Step 3
+
+### Batch workflow (multiple files)
+
+1. Click **Add** and choose multiple images (File List appears)
+2. Process one frame fully to Step 3
+3. Use **Save Settings** for the current frame, or **Apply to Selected** for roll-wide settings
+4. (Optional) Use **Set Current as Reference** + **Apply Reference to Selected** for roll reference
+5. Export via **Export All (ZIP)** or **Download All Individually**
+
+### Guided Mode
+
+- The Workflow panel includes a **Guide** toggle to show/hide in-app instructions (stored in localStorage)
 
 ## ⚙️ Technical Highlights
 
