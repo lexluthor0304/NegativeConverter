@@ -91,7 +91,9 @@ Required settings:
 - Root Directory: repository root
 - Install Command: `npm ci`
 - Build Command: `npm run build:web`
-- Output Directory: `negative2positive/dist`
+- Output Directory: `dist`
+
+`npm run build:web` generates `negative2positive/dist` (for local/Tauri) and also syncs it to root `dist` (for Vercel output pickup).
 
 If Vercel serves `negative2positive/index.html` directly, module imports like `pako` / `utif` / `jszip` will not resolve in browser and upload buttons can stop working.
 

@@ -8,7 +8,7 @@
   },
   "scripts": {
     "dev:web": "vite --config negative2positive/vite.config.js",
-    "build:web": "vite build --config negative2positive/vite.config.js",
+    "build:web": "vite build --config negative2positive/vite.config.js && node scripts/sync-web-dist.mjs",
     "preview:web": "vite preview --config negative2positive/vite.config.js",
     "tauri:dev": "tauri dev",
     "tauri:build": "npm run build:web && tauri build"

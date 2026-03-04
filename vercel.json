@@ -1,5 +1,5 @@
 {
   "installCommand": "npm ci",
   "buildCommand": "npm run build:web",
-  "outputDirectory": "negative2positive/dist"
+  "outputDirectory": "dist"
 }
