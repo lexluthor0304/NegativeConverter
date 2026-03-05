@@ -1,17 +1,15 @@
 import { convertColorWithSilverCore, convertBwWithSilverCore } from './silverAdapter.js';
 import { convertPositiveLegacy } from './legacyPositive.js';
 
-export function resolveConversionMode(settings = {}, preset = null) {
-  const settingType = settings.filmType;
-  const presetType = preset && typeof preset === 'object' ? preset.type : null;
-  const type = presetType || settingType || 'color';
+export function resolveConversionMode(settings = {}) {
+  const type = settings.filmType || 'color';
   if (type === 'positive') return 'positive';
   if (type === 'bw') return 'bw';
   return 'color';
 }
 
-export function convertFrameWithRouter({ imageData, settings = {}, preset = null }) {
-  const mode = resolveConversionMode(settings, preset);
+export async function convertFrameWithRouter({ imageData, settings = {} }) {
+  const mode = resolveConversionMode(settings);
   if (mode === 'positive') {
     return convertPositiveLegacy(imageData);
   }

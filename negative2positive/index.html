@@ -466,6 +466,9 @@
     }
 
     .upload-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
       padding: 12px 24px;
       background: var(--accent);
       border: none;
@@ -481,8 +484,46 @@
       background: var(--accent-hover);
     }
 
-    #fileInput {
+    .upload-btn.secondary {
+      margin-left: 8px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+    }
+
+    .upload-btn.secondary:hover {
+      background: var(--bg-secondary);
+      border-color: var(--border-light);
+    }
+
+    .upload-btn.is-disabled {
+      cursor: not-allowed;
+      opacity: 0.45;
+      pointer-events: none;
+    }
+
+    .hidden-file-input {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    .upload-support-hint {
       display: none;
+      max-width: 320px;
+      font-size: 12px;
+      color: var(--text-muted);
+      text-align: center;
+      line-height: 1.4;
+    }
+
+    .upload-support-hint.visible {
+      display: block;
     }
 
     /* Preview Toolbar */
@@ -2226,10 +2267,11 @@
             <path d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
           </svg>
           <p data-i18n="dropHint">Drop image here or click to open</p>
-          <button class="upload-btn" id="uploadBtn" data-i18n="selectFile">Select File</button>
-          <button class="upload-btn" id="uploadFolderBtn" style="margin-left: 8px; background: var(--bg-tertiary); border: 1px solid var(--border);" data-i18n="selectFolder">Select Folder</button>
-          <input type="file" id="fileInput" accept=".cr2,.nef,.arw,.dng,.raw,.rw2,.tif,.tiff,image/*" multiple>
-          <input type="file" id="folderInput" accept=".cr2,.nef,.arw,.dng,.raw,.rw2,.tif,.tiff,image/*" webkitdirectory style="display: none;">
+          <label class="upload-btn" id="uploadBtn" for="fileInput" role="button" tabindex="0" data-i18n="selectFile">Select File</label>
+          <label class="upload-btn secondary" id="uploadFolderBtn" for="folderInput" role="button" tabindex="0" data-i18n="selectFolder">Select Folder</label>
+          <input type="file" id="fileInput" class="hidden-file-input" accept=".cr2,.nef,.arw,.dng,.raw,.rw2,.tif,.tiff,image/*" multiple>
+          <input type="file" id="folderInput" class="hidden-file-input" accept=".cr2,.nef,.arw,.dng,.raw,.rw2,.tif,.tiff,image/*" webkitdirectory directory multiple>
+          <div class="upload-support-hint" id="folderPickerHint" data-i18n="folderPickerUnsupported">Folder selection is not supported in this browser. Please use Select File.</div>
         </div>
         <canvas id="canvas" style="display: none;"></canvas>
         <canvas id="glCanvas" style="display: none;"></canvas>
@@ -2389,6 +2431,13 @@
               </select>
             </div>
           </div>
+          <div class="slider-control">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="coreBorderBuffer">Border Buffer %</span>
+              <input type="number" class="slider-number-input" id="coreBorderBufferValue" min="0" max="30" step="1" value="10">
+            </div>
+            <input type="range" class="slider-input" id="coreBorderBuffer" min="0" max="30" step="1" value="10">
+          </div>
           <div class="info-box autoframe-diagnostics" id="autoFrameDiagnosticsBox" style="display: none;"></div>
         </div>
       </div>
@@ -2420,9 +2469,22 @@
             <button class="film-type-btn" data-type="bw" data-i18n="bwFilm">B&W</button>
             <button class="film-type-btn" data-type="positive" data-i18n="positiveFilm">Positive</button>
           </div>
-          <select class="preset-select" id="filmPreset">
-            <option value="generic_color" data-i18n="genericColor">Generic Color</option>
-          </select>
+          <div class="slider-control" id="coreColorModelStep2Control">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="coreColorModelLabel">Color Model</span>
+            </div>
+            <select class="preset-select" id="coreColorModelStep2">
+              <option value="noritsu">Noritsu</option>
+              <option value="frontier">Frontier</option>
+              <option value="standard" selected data-i18n="coreModelStandard">Standard</option>
+              <option value="warm" data-i18n="coreModelWarm">Warm</option>
+              <option value="mono" data-i18n="coreModelMono">Mono</option>
+              <option value="cine-log" data-i18n="coreModelCineLog">Cine Log</option>
+              <option value="cine-rich" data-i18n="coreModelCineRich">Cine Rich</option>
+              <option value="cine-flat" data-i18n="coreModelCineFlat">Cine Flat</option>
+              <option value="neutral" data-i18n="coreModelNeutral">Neutral</option>
+            </select>
+          </div>
           <div class="lens-correction-panel" id="lensCorrectionPanel">
             <div class="lens-section-title" data-i18n="lensSectionTitle">Lens Correction (Optional)</div>
             <div class="lens-row">
@@ -2535,24 +2597,27 @@
           <span class="section-title" data-i18n="sectionColorModel">Color Model</span>
           <span class="section-toggle">▼</span>
         </div>
-        <div class="section-content" id="conversionSectionContent">
-          <div class="info-box" data-i18n="wbInfo">Click on a neutral gray area in the image, or adjust manually</div>
-          <button class="film-base-btn" id="sampleWBBtn" data-i18n="sampleWB">Sample Gray Point</button>
+          <div class="section-content" id="conversionSectionContent">
+            <div class="info-box" data-i18n="wbInfo">Click on a neutral gray area in the image, or adjust manually</div>
+            <button class="film-base-btn" id="sampleWBBtn" data-i18n="sampleWB">Sample Gray Point</button>
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label" data-i18n="coreEnhancedProfile">Enhanced Profile</span>
+              </div>
+            <select class="preset-select" id="coreEnhancedProfile">
+              <option value="none" selected data-i18n="coreProfileNone">None</option>
+              <option value="frontier" data-i18n="coreProfileFrontier">Frontier</option>
+              <option value="crystal" data-i18n="coreProfileCrystal">Crystal</option>
+              <option value="natural" data-i18n="coreProfileNatural">Natural</option>
+              <option value="pakon" data-i18n="coreProfilePakon">Pakon</option>
+            </select>
+          </div>
           <div class="slider-control">
             <div class="slider-header">
-              <span class="slider-label" data-i18n="coreColorModelLabel">Color Model</span>
+              <span class="slider-label" data-i18n="coreProfileStrength">Profile Strength</span>
+              <input type="number" class="slider-number-input" id="coreProfileStrengthValue" min="0" max="200" step="25" value="100">
             </div>
-            <select class="preset-select" id="coreColorModel">
-              <option value="noritsu">Noritsu</option>
-              <option value="frontier">Frontier</option>
-              <option value="standard" selected data-i18n="coreModelStandard">Standard</option>
-              <option value="warm" data-i18n="coreModelWarm">Warm</option>
-              <option value="mono" data-i18n="coreModelMono">Mono</option>
-              <option value="cine-log" data-i18n="coreModelCineLog">Cine Log</option>
-              <option value="cine-rich" data-i18n="coreModelCineRich">Cine Rich</option>
-              <option value="cine-flat" data-i18n="coreModelCineFlat">Cine Flat</option>
-              <option value="neutral" data-i18n="coreModelNeutral">Neutral</option>
-            </select>
+            <input type="range" class="slider-input" id="coreProfileStrength" min="0" max="200" step="25" value="100">
           </div>
           <div class="slider-control">
             <div class="slider-header">
@@ -2560,13 +2625,6 @@
               <input type="number" class="slider-number-input" id="corePreSaturationValue" min="0" max="200" step="1" value="100">
             </div>
             <input type="range" class="slider-input" id="corePreSaturation" min="0" max="200" step="1" value="100">
-          </div>
-          <div class="slider-control">
-            <div class="slider-header">
-              <span class="slider-label" data-i18n="coreBorderBuffer">Border Buffer %</span>
-              <input type="number" class="slider-number-input" id="coreBorderBufferValue" min="0" max="30" step="1" value="10">
-            </div>
-            <input type="range" class="slider-input" id="coreBorderBuffer" min="0" max="30" step="1" value="10">
           </div>
         </div>
       </div>
