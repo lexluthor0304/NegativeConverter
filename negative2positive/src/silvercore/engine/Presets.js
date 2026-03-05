@@ -128,7 +128,6 @@ export const toneProfiles = {
 
 // Map UI color model names to tone profile keys
 export const colorModelToToneProfile = {
-  noritsu: 'standard',
   frontier: 'standard',
   standard: 'standard',
   warm: 'standard',
@@ -146,30 +145,36 @@ export const colorModels = {
     defaultShadowsTemp: 0, defaultShadowsTint: 0, defaultShadowsCyan: 0,
     defaultHighlightsTemp: 0, defaultHighlightsTint: 0, defaultHighlightsCyan: 0,
     blackThreshold: 0.001, whiteThreshold: 0.001,
+    hslAdjustments: null,
   },
   basic: {
     defaultTemp: 0, defaultTint: 0, defaultCyan: 0,
     defaultShadowsTemp: 0, defaultShadowsTint: 0, defaultShadowsCyan: 0,
     defaultHighlightsTemp: 0, defaultHighlightsTint: 0, defaultHighlightsCyan: 0,
     blackThreshold: 0.002, whiteThreshold: 0.001,
+    hslAdjustments: {
+      redHue: 0, redSaturation: 0,
+      greenHue: 0, greenSaturation: 0,
+      blueHue: -10, blueSaturation: 0,
+    },
   },
   frontier: {
     defaultTemp: 1, defaultTint: 0, defaultCyan: -1,
     defaultShadowsTemp: 3, defaultShadowsTint: 0, defaultShadowsCyan: 0,
     defaultHighlightsTemp: 0, defaultHighlightsTint: 0, defaultHighlightsCyan: 0,
     blackThreshold: 0.002, whiteThreshold: 0.002,
-  },
-  noritsu: {
-    defaultTemp: 0, defaultTint: 0, defaultCyan: 0,
-    defaultShadowsTemp: 0, defaultShadowsTint: 0, defaultShadowsCyan: 0,
-    defaultHighlightsTemp: 0, defaultHighlightsTint: 0, defaultHighlightsCyan: 0,
-    blackThreshold: 0.002, whiteThreshold: 0.002,
+    hslAdjustments: {
+      redHue: 15, redSaturation: -10,
+      greenHue: 0, greenSaturation: 0,
+      blueHue: -15, blueSaturation: 0,
+    },
   },
   mono: {
     defaultTemp: 0, defaultTint: 0, defaultCyan: 0,
     defaultShadowsTemp: 0, defaultShadowsTint: 0, defaultShadowsCyan: 0,
     defaultHighlightsTemp: 0, defaultHighlightsTint: 0, defaultHighlightsCyan: 0,
     blackThreshold: 0.002, whiteThreshold: 0.002,
+    hslAdjustments: null,
   },
 };
 

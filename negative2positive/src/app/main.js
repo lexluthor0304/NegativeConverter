@@ -75,13 +75,41 @@
         colorFilm: "彩色",
         bwFilm: "黑白",
         positiveFilm: "正片",
-	        genericColor: "通用彩色",
-	        genericBW: "通用黑白",
-	        genericPositive: "通用正片",
 	        filmBaseInfo: "看得到橙色未曝光边缘：请手动采样。看不到边缘（如 ES-2）：请点“自动检测色罩”或“使用整卷参考值”。",
 	        positiveModeInfo: "色罩采样只用于彩色负片。黑白负片或正片不需要色罩采样：选择片种后，直接点击“下一步：转换并进入调整”。",
 	        guideToggleOn: "引导：开",
 	        guideToggleOff: "引导：关",
+        noviceGuideTitle: "新手引导",
+        noviceGuidePhaseStep1: "第1步：裁剪",
+        noviceGuidePhaseStep2: "第2步：胶片设置",
+        noviceGuidePhaseStep3: "第3步：调整与导出",
+        noviceGuidePrimaryStep1: "先把画面裁到只剩胶片有效区域，再进入下一步。",
+        noviceGuidePrimaryStep2ColorBorder: "当前是彩色负片（有边框）：优先手动采样色罩，结果会更稳定。",
+        noviceGuidePrimaryStep2ColorNoBorder: "当前是彩色负片（无边框 / ES-2）：优先自动检测或套用整卷参考。",
+        noviceGuidePrimaryStep2Bw: "当前是黑白负片：无需色罩采样，确认片种后会自动进入调整。",
+        noviceGuidePrimaryStep2Positive: "当前是正片：无需色罩采样，点击“下一步：转换并进入调整”。",
+        noviceGuidePrimaryStep3Single: "现在做细调并导出当前图片。",
+        noviceGuidePrimaryStep3Batch: "现在进入批处理收尾：统一设置并批量导出。",
+        noviceGuideChecklistStep1Crop: "需要时先用自动识别边框，再手动微调裁剪。",
+        noviceGuideChecklistStep1Next: "裁剪完成后点击“下一步：胶片设置”或“下一步：正片模式”。",
+        noviceGuideChecklistStep2ColorBorderSample: "点击“手动采样色罩”，在未曝光橙色边缘取样。",
+        noviceGuideChecklistStep2ColorBorderFallback: "找不到可靠边缘时，改用“自动检测色罩”。",
+        noviceGuideChecklistStep2ColorNoBorderAuto: "先点“自动检测色罩”。",
+        noviceGuideChecklistStep2ColorNoBorderReference: "有参考帧时，点“使用整卷参考值”会更稳定。",
+        noviceGuideChecklistStep2BwSelect: "确认片种为“黑白”。",
+        noviceGuideChecklistStep2BwAuto: "系统会自动转换并进入第3步。",
+        noviceGuideChecklistStep2PositiveConvert: "点击“下一步：转换并进入调整”进入第3步。",
+        noviceGuideChecklistStep3SampleGray: "颜色偏差时先“采样灰点”，再微调参数。",
+        noviceGuideChecklistStep3Export: "完成后从底部导出（单张或 ZIP）。",
+        noviceGuideChecklistStep3BatchSave: "调好当前图后点“保存设置”。",
+        noviceGuideChecklistStep3BatchApply: "需要整卷统一参数时点“应用到已选中”。",
+        noviceGuideChecklistStep3BatchExport: "最后执行“批量导出 (ZIP)”或“逐个下载全部”。",
+        noviceGuideStatusAutoToStep3: "完成采样/自动检测后会自动进入第3步（无需再点下一步）。",
+        noviceGuideStatusAutoToStep3Ready: "色罩已就绪，系统将自动进入第3步；你也可手动点“下一步：转换并进入调整”。",
+        noviceGuideStatusManualConvert: "此模式不会自动跳转，请手动点击转换按钮进入第3步。",
+        noviceGuideStatusStep3Collapsed: "为降低新手复杂度，第3步面板已默认折叠；按需展开即可。",
+        noviceGuideWarningMaskUnset: "还未设置色罩，直接转换可能偏色。",
+        noviceGuideWarningReferenceMissing: "尚未设置整卷参考值；自动检测结果不稳定时建议先设参考。",
 	        quickGuide: "快速引导：\n• 彩色负片：第1步裁剪 → 下一步：胶片设置 →（第2步）设置色罩（手动/自动/整卷参考）→ 下一步：转换并进入调整 → 第3步调色导出\n• 黑白负片：第1步裁剪 → 下一步：胶片设置 → 片种选“黑白”→ 下一步：转换并进入调整（无需色罩）\n• 正片：第1步裁剪 → 下一步：正片模式 → 下一步：转换并进入调整（无需色罩）\n批处理：添加多张 → 处理一张作为参考 →「保存设置/应用到已选中」→ 最后「批量导出 (ZIP)」。\n提示：两个“下一步”按钮只在第1步显示；看左上角步骤徽标确认当前在哪一步。",
 	        sampleBase: "手动采样色罩",
 	        autoDetect: "自动检测色罩",
@@ -121,6 +149,13 @@
         sampleWB: "采样灰点",
         sectionColorModel: "色彩模型",
         coreColorModelLabel: "色彩模型",
+        coreEnhancedProfile: "增强配置",
+        coreProfileStrength: "配置强度",
+        coreProfileNone: "无",
+        coreProfileFrontier: "Frontier",
+        coreProfileCrystal: "Crystal",
+        coreProfileNatural: "Natural",
+        coreProfilePakon: "Pakon",
         coreModelStandard: "标准",
         coreModelWarm: "暖调",
         coreModelMono: "单色",
@@ -178,6 +213,7 @@
         processing: "处理中...",
         currentFile: "当前文件",
         selectFolder: "选择文件夹",
+        folderPickerUnsupported: "当前浏览器不支持文件夹选择，请改用“选择文件”。",
         fileList: "文件列表",
         selectAll: "全选",
         selectNone: "全不选",
@@ -314,13 +350,41 @@
         colorFilm: "Color",
         bwFilm: "B&W",
         positiveFilm: "Positive",
-	        genericColor: "Generic Color",
-	        genericBW: "Generic B&W",
-	        genericPositive: "Generic Positive",
 	        filmBaseInfo: "If you can see unexposed orange border, sample it manually. If border is cropped out (for example ES-2), use Auto Detect Mask or Roll Reference.",
 	        positiveModeInfo: "Mask sampling is only for color negatives. For B&W negatives or positive slides, select the film type and go straight to “Next: Convert and Continue”.",
 	        guideToggleOn: "Guide: On",
 	        guideToggleOff: "Guide: Off",
+        noviceGuideTitle: "Beginner Guide",
+        noviceGuidePhaseStep1: "Step 1: Crop",
+        noviceGuidePhaseStep2: "Step 2: Film Settings",
+        noviceGuidePhaseStep3: "Step 3: Adjust & Export",
+        noviceGuidePrimaryStep1: "Crop the frame to the effective film area first, then move on.",
+        noviceGuidePrimaryStep2ColorBorder: "Color negative with border: manual mask sampling is the most stable start.",
+        noviceGuidePrimaryStep2ColorNoBorder: "Color negative without border (ES-2): start with auto mask detection or roll reference.",
+        noviceGuidePrimaryStep2Bw: "B&W negative: no mask sampling needed. Confirm film type and it will proceed to adjustment.",
+        noviceGuidePrimaryStep2Positive: "Positive mode: no mask sampling needed. Click “Next: Convert and Continue”.",
+        noviceGuidePrimaryStep3Single: "Fine-tune and export the current image.",
+        noviceGuidePrimaryStep3Batch: "Finish batch workflow: unify settings and export in bulk.",
+        noviceGuideChecklistStep1Crop: "Use Auto Frame first if available, then fine-tune crop manually.",
+        noviceGuideChecklistStep1Next: "After crop, click “Next: Film Settings” or “Next: Positive Mode”.",
+        noviceGuideChecklistStep2ColorBorderSample: "Click “Sample Mask Manually” and pick an unexposed orange edge.",
+        noviceGuideChecklistStep2ColorBorderFallback: "If edge sampling is unreliable, use “Auto Detect Mask”.",
+        noviceGuideChecklistStep2ColorNoBorderAuto: "Start with “Auto Detect Mask”.",
+        noviceGuideChecklistStep2ColorNoBorderReference: "If you have a reference frame, “Use Roll Reference Value” is more stable.",
+        noviceGuideChecklistStep2BwSelect: "Confirm Film Type is set to B&W.",
+        noviceGuideChecklistStep2BwAuto: "The app will auto-convert and enter Step 3.",
+        noviceGuideChecklistStep2PositiveConvert: "Click “Next: Convert and Continue” to enter Step 3.",
+        noviceGuideChecklistStep3SampleGray: "If color is off, sample a gray point first, then fine-tune.",
+        noviceGuideChecklistStep3Export: "Export from the footer when ready (single image or ZIP).",
+        noviceGuideChecklistStep3BatchSave: "After tuning current image, click “Save Settings”.",
+        noviceGuideChecklistStep3BatchApply: "Use “Apply to Selected” for roll-wide consistency.",
+        noviceGuideChecklistStep3BatchExport: "Finish with “Export All (ZIP)” or “Download All Individually”.",
+        noviceGuideStatusAutoToStep3: "After sampling or auto-detect, conversion proceeds to Step 3 automatically.",
+        noviceGuideStatusAutoToStep3Ready: "Mask baseline is ready. The app will enter Step 3 automatically; manual convert is still available.",
+        noviceGuideStatusManualConvert: "This mode does not auto-jump. Click the convert button to enter Step 3.",
+        noviceGuideStatusStep3Collapsed: "Step 3 panels are collapsed by default for beginners. Expand only what you need.",
+        noviceGuideWarningMaskUnset: "Mask baseline is not set yet. Converting now may cause color cast.",
+        noviceGuideWarningReferenceMissing: "No roll reference is set. If auto-detect is unstable, set one reference frame first.",
 	        quickGuide: "Quick Guide:\n• Color negative: Step 1 Crop → Next: Film Settings → (Step 2) set Mask (sample / auto-detect / roll reference) → Next: Convert and Continue → Step 3 Adjust & Export\n• B&W negative: Step 1 Crop → Next: Film Settings → set Film Type = B&W → Next: Convert and Continue (no mask)\n• Positive slide: Step 1 Crop → Next: Positive Mode → Next: Convert and Continue (no mask)\nBatch: Add multiple files → process one frame → Save Settings / Apply to Selected → Export All (ZIP) when ready.\nTip: The “Next” buttons only appear in Step 1. Check the badge to see your current step.",
 	        sampleBase: "Sample Mask Manually",
 	        autoDetect: "Auto Detect Mask",
@@ -360,6 +424,13 @@
         sampleWB: "Sample Gray Point",
         sectionColorModel: "Color Model",
         coreColorModelLabel: "Color Model",
+        coreEnhancedProfile: "Enhanced Profile",
+        coreProfileStrength: "Profile Strength",
+        coreProfileNone: "None",
+        coreProfileFrontier: "Frontier",
+        coreProfileCrystal: "Crystal",
+        coreProfileNatural: "Natural",
+        coreProfilePakon: "Pakon",
         coreModelStandard: "Standard",
         coreModelWarm: "Warm",
         coreModelMono: "Mono",
@@ -417,6 +488,7 @@
         processing: "Processing...",
         currentFile: "Current File",
         selectFolder: "Select Folder",
+        folderPickerUnsupported: "Folder selection is not supported in this browser. Please use Select File.",
         fileList: "File List",
         selectAll: "All",
         selectNone: "None",
@@ -553,13 +625,41 @@
         colorFilm: "カラー",
         bwFilm: "白黒",
         positiveFilm: "ポジ",
-	        genericColor: "汎用カラー",
-	        genericBW: "汎用白黒",
-	        genericPositive: "汎用ポジ",
 	        filmBaseInfo: "未露光のオレンジ端が見える場合は手動サンプリング。端がない（ES-2 など）場合は「マスク自動検出」または「ロール参照値」を使ってください。",
 	        positiveModeInfo: "マスクサンプリングが必要なのはカラー・ネガのみです。白黒ネガ／ポジはマスク不要：種類を選んで「次へ：変換して調整へ」を押してください。",
 	        guideToggleOn: "ガイド：ON",
 	        guideToggleOff: "ガイド：OFF",
+        noviceGuideTitle: "初心者ガイド",
+        noviceGuidePhaseStep1: "ステップ1：トリミング",
+        noviceGuidePhaseStep2: "ステップ2：フィルム設定",
+        noviceGuidePhaseStep3: "ステップ3：調整と書き出し",
+        noviceGuidePrimaryStep1: "まず有効なフィルム領域までトリミングしてから次へ進みます。",
+        noviceGuidePrimaryStep2ColorBorder: "カラーネガ（端あり）：まず手動でマスクをサンプリングすると安定します。",
+        noviceGuidePrimaryStep2ColorNoBorder: "カラーネガ（端なし / ES-2）：自動検出またはロール参照値から開始します。",
+        noviceGuidePrimaryStep2Bw: "白黒ネガ：マスクサンプリングは不要です。種類を確認すると自動で調整へ進みます。",
+        noviceGuidePrimaryStep2Positive: "ポジ：マスクサンプリングは不要です。「次へ：変換して調整へ」を押してください。",
+        noviceGuidePrimaryStep3Single: "現在の画像を微調整して書き出します。",
+        noviceGuidePrimaryStep3Batch: "一括処理の仕上げです。設定を揃えてまとめて書き出します。",
+        noviceGuideChecklistStep1Crop: "必要なら先に自動フレーム検出を使い、最後に手動で微調整します。",
+        noviceGuideChecklistStep1Next: "トリミング後に「次へ：フィルム設定」または「次へ：ポジモード」を押します。",
+        noviceGuideChecklistStep2ColorBorderSample: "「マスクを手動サンプリング」で未露光のオレンジ端をクリックします。",
+        noviceGuideChecklistStep2ColorBorderFallback: "端の取得が難しい場合は「マスク自動検出」を使います。",
+        noviceGuideChecklistStep2ColorNoBorderAuto: "まず「マスク自動検出」を実行します。",
+        noviceGuideChecklistStep2ColorNoBorderReference: "参照コマがある場合は「ロール参照値を使用」の方が安定します。",
+        noviceGuideChecklistStep2BwSelect: "フィルム種類が「白黒」になっているか確認します。",
+        noviceGuideChecklistStep2BwAuto: "そのまま自動でステップ3に進みます。",
+        noviceGuideChecklistStep2PositiveConvert: "「次へ：変換して調整へ」を押してステップ3へ進みます。",
+        noviceGuideChecklistStep3SampleGray: "色がずれる場合は先にグレーポイントをサンプリングします。",
+        noviceGuideChecklistStep3Export: "調整後、フッターから書き出します（単体または ZIP）。",
+        noviceGuideChecklistStep3BatchSave: "現在画像の調整後に「設定を保存」を押します。",
+        noviceGuideChecklistStep3BatchApply: "ロール全体に揃える場合は「選択中に適用」を使います。",
+        noviceGuideChecklistStep3BatchExport: "最後に「一括出力 (ZIP)」または個別ダウンロードを実行します。",
+        noviceGuideStatusAutoToStep3: "サンプリングまたは自動検出が完了すると、自動でステップ3へ進みます。",
+        noviceGuideStatusAutoToStep3Ready: "マスク基準が準備できました。自動でステップ3へ進みます（手動変換も可能です）。",
+        noviceGuideStatusManualConvert: "このモードは自動遷移しません。変換ボタンを押してステップ3へ進んでください。",
+        noviceGuideStatusStep3Collapsed: "初心者向けにステップ3の各パネルは初回のみ折りたたまれます。必要な項目だけ展開してください。",
+        noviceGuideWarningMaskUnset: "マスク基準が未設定です。このまま変換すると色かぶりの可能性があります。",
+        noviceGuideWarningReferenceMissing: "ロール参照値が未設定です。自動検出が不安定な場合は先に参照コマを設定してください。",
 	        quickGuide: "クイックガイド：\n• カラーネガ：ステップ1 トリミング → 次へ：フィルム設定 →（ステップ2）マスク設定（手動/自動/ロール参照）→ 次へ：変換して調整へ → ステップ3 調整・書き出し\n• 白黒ネガ：ステップ1 → 次へ：フィルム設定 → 種類を「白黒」に → 次へ：変換して調整へ（マスク不要）\n• ポジ：ステップ1 → 次へ：ポジモード → 次へ：変換して調整へ（マスク不要）\n一括：複数追加 → 1枚を基準に調整 →「設定を保存/選択中に適用」→ 最後に ZIP 書き出し。\nヒント：「次へ」ボタンはステップ1でのみ表示。左上のバッジで現在のステップを確認。",
 	        sampleBase: "マスクを手動サンプリング",
 	        autoDetect: "マスク自動検出",
@@ -599,6 +699,13 @@
         sampleWB: "グレーポイントを取得",
         sectionColorModel: "カラーモデル",
         coreColorModelLabel: "カラーモデル",
+        coreEnhancedProfile: "拡張プロファイル",
+        coreProfileStrength: "プロファイル強度",
+        coreProfileNone: "なし",
+        coreProfileFrontier: "Frontier",
+        coreProfileCrystal: "Crystal",
+        coreProfileNatural: "Natural",
+        coreProfilePakon: "Pakon",
         coreModelStandard: "標準",
         coreModelWarm: "ウォーム",
         coreModelMono: "モノクロ",
@@ -656,6 +763,7 @@
         processing: "処理中...",
         currentFile: "現在のファイル",
         selectFolder: "フォルダ選択",
+        folderPickerUnsupported: "このブラウザはフォルダ選択に対応していません。ファイル選択を使用してください。",
         fileList: "ファイル一覧",
         selectAll: "全選択",
         selectNone: "全解除",
@@ -775,16 +883,21 @@
       centerPrior: 0.08,
       aspect: 0.12
     };
-	    let opencvReadyPromise = null;
-	    let opencvActiveSource = null;
-	    const STEP2_FIRST_HINT_SESSION_KEY = 'nc_step2_first_hint_seen_v1';
-	    const PRIVACY_BANNER_COLLAPSED_STORAGE_KEY = 'nc_privacy_banner_collapsed_v1';
-	    const GUIDE_MODE_STORAGE_KEY = 'nc_guide_mode_enabled_v1';
-	    const HISTOGRAM_POSITION_STORAGE_KEY = 'nc_histogram_position_v1';
-	    const HISTOGRAM_DRAG_HINT_DISMISSED_STORAGE_KEY = 'nc_histogram_drag_hint_dismissed_v1';
-	    const DESKTOP_UPDATE_LAST_CHECK_TS_KEY = 'nc_desktop_update_last_check_ts';
-	    const DESKTOP_UPDATE_LAST_SEEN_LATEST_KEY = 'nc_desktop_update_last_seen_latest';
-	    const DESKTOP_UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+    const CORE_ENHANCED_PROFILE_OPTIONS = new Set(['none', 'frontier', 'crystal', 'natural', 'pakon']);
+    const CORE_COLOR_MODEL_OPTIONS = new Set(['frontier', 'standard', 'warm', 'mono', 'cine-log', 'cine-rich', 'cine-flat', 'neutral']);
+    const CORE_COLOR_MODEL_MIGRATION_MAP = Object.freeze({
+      noritsu: 'standard'
+    });
+    let opencvReadyPromise = null;
+    let opencvActiveSource = null;
+    const STEP3_GUIDE_COLLAPSED_SESSION_KEY = 'nc_step3_guide_collapsed_v1';
+    const PRIVACY_BANNER_COLLAPSED_STORAGE_KEY = 'nc_privacy_banner_collapsed_v1';
+    const GUIDE_MODE_STORAGE_KEY = 'nc_guide_mode_enabled_v1';
+    const HISTOGRAM_POSITION_STORAGE_KEY = 'nc_histogram_position_v1';
+    const HISTOGRAM_DRAG_HINT_DISMISSED_STORAGE_KEY = 'nc_histogram_drag_hint_dismissed_v1';
+    const DESKTOP_UPDATE_LAST_CHECK_TS_KEY = 'nc_desktop_update_last_check_ts';
+    const DESKTOP_UPDATE_LAST_SEEN_LATEST_KEY = 'nc_desktop_update_last_seen_latest';
+    const DESKTOP_UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
     const DESKTOP_UPDATE_FETCH_TIMEOUT_MS = 5000;
     const DESKTOP_UPDATE_MANIFEST_URLS = [
       'https://download.neoanaloglab.com/negative-converter/release/latest.json',
@@ -802,13 +915,13 @@
       lastError: ''
     };
 
-	    let currentLang = 'en';
-	    let guideModeEnabled = true;
-	    let stateReady = false;
-	    let step2FirstHintHandled = false;
-	    const desktopUpdateState = {
-	      visible: false,
-	      currentVersion: '',
+    let currentLang = 'en';
+    let guideModeEnabled = true;
+    let stateReady = false;
+    let step3GuideCollapsedOnce = false;
+    const desktopUpdateState = {
+      visible: false,
+      currentVersion: '',
       latestVersion: ''
     };
 
@@ -843,18 +956,18 @@
         privacyLink.href = `./privacy.html?lang=${encodeURIComponent(lang)}`;
       }
       const offlineLink = document.getElementById('offlineDownloadLink');
-	      if (offlineLink) {
-	        offlineLink.href = `./download.html?lang=${encodeURIComponent(lang)}`;
-	      }
-	      updateDesktopUpdateBannerText();
-	      updateGuideModeUI();
-	      if (stateReady) {
-	        updateCurrentFileLabel();
-	        updateRollReferenceUI();
-	        updateAutoFrameConfigUI();
+      if (offlineLink) {
+        offlineLink.href = `./download.html?lang=${encodeURIComponent(lang)}`;
+      }
+      updateDesktopUpdateBannerText();
+      updateGuideModeUI();
+      if (stateReady) {
+        updateCurrentFileLabel();
+        updateRollReferenceUI();
+        updateAutoFrameConfigUI();
         updateAutoFrameDiagnosticsUI();
         updateAutoFrameButtons();
-        updateStep2GuideCard({ skipFirstHint: true });
+        renderNoviceGuide({ applyStep3Collapse: false });
         if (typeof updateLensCorrectionUI === 'function') updateLensCorrectionUI();
         if (typeof updateExportUI === 'function') updateExportUI();
       }
@@ -894,55 +1007,102 @@
 	      }
 	    }
 
-	    function clearRecommendedActions() {
-	      ['sampleBaseBtn', 'autoDetectBtn', 'useReferenceBtn', 'applyConvertBtn'].forEach(id => {
-	        const btn = document.getElementById(id);
-	        if (btn) btn.classList.remove('recommended-action');
-	      });
-	    }
+    function clearRecommendedActions() {
+      [
+        'autoFrameBtn',
+        'cropBtn',
+        'convertBtn',
+        'convertPositiveBtn',
+        'sampleBaseBtn',
+        'autoDetectBtn',
+        'useReferenceBtn',
+        'applyConvertBtn',
+        'sampleWBBtn',
+        'saveSettingsBtn',
+        'applyToSelectedBtn',
+        'exportBtn'
+      ].forEach(id => {
+        const btn = document.getElementById(id);
+        if (btn) btn.classList.remove('recommended-action');
+      });
+    }
 
-	    function updateGuideModeUI() {
-	      const toggleBtn = document.getElementById('guideToggleBtn');
-	      if (toggleBtn) {
-	        toggleBtn.setAttribute('aria-pressed', guideModeEnabled ? 'true' : 'false');
-	        toggleBtn.textContent = guideModeEnabled
-	          ? getLocalizedText('guideToggleOn', 'Guide: On')
-	          : getLocalizedText('guideToggleOff', 'Guide: Off');
-	      }
+    function setRecommendedActions(actionIds = []) {
+      clearRecommendedActions();
+      if (!guideModeEnabled || !Array.isArray(actionIds)) return;
+      actionIds.forEach(id => {
+        const btn = document.getElementById(id);
+        if (!btn || btn.disabled) return;
+        if (btn.style.display === 'none') return;
+        btn.classList.add('recommended-action');
+      });
+    }
 
-	      const quickGuideBox = document.getElementById('quickGuideBox');
-	      if (quickGuideBox) {
-	        quickGuideBox.style.display = guideModeEnabled ? 'block' : 'none';
-	      }
+    function setSectionCollapsed(section, collapsed) {
+      const header = document.querySelector(`.section-header[data-section="${section}"]`);
+      const toggle = header ? header.querySelector('.section-toggle') : null;
+      const content = document.getElementById(section + 'SectionContent')
+        || document.getElementById(section + 'Section');
+      if (toggle) toggle.classList.toggle('collapsed', Boolean(collapsed));
+      if (content) content.classList.toggle('collapsed', Boolean(collapsed));
+    }
 
-	      if (!guideModeEnabled) {
-	        clearRecommendedActions();
-	        const step2Hint = document.getElementById('step2FirstHint');
-	        if (step2Hint) step2Hint.style.display = 'none';
-	      }
+    function collapseStep3SectionsForGuideIfNeeded() {
+      if (!guideModeEnabled) return;
+      if (state.currentStep < 3) return;
+      if (step3GuideCollapsedOnce) return;
+      ['conversion', 'tone', 'color', 'effects', 'engine'].forEach(section => {
+        setSectionCollapsed(section, true);
+      });
+      step3GuideCollapsedOnce = true;
+      try {
+        sessionStorage.setItem(STEP3_GUIDE_COLLAPSED_SESSION_KEY, '1');
+      } catch (err) {
+        // ignore
+      }
+    }
 
-	      if (stateReady) {
-	        updateBatchStep3GuideVisibility();
-	        updateStep2GuideCard({ skipFirstHint: true });
-	      }
-	    }
+    function updateGuideModeUI() {
+      const toggleBtn = document.getElementById('guideToggleBtn');
+      if (toggleBtn) {
+        toggleBtn.setAttribute('aria-pressed', guideModeEnabled ? 'true' : 'false');
+        toggleBtn.textContent = guideModeEnabled
+          ? getLocalizedText('guideToggleOn', 'Guide: On')
+          : getLocalizedText('guideToggleOff', 'Guide: Off');
+      }
 
-	    function setGuideModeEnabled(enabled, options = {}) {
-	      const { persist = true } = options;
-	      guideModeEnabled = Boolean(enabled);
-	      if (persist) safeStorageSet(GUIDE_MODE_STORAGE_KEY, guideModeEnabled ? '1' : '0');
-	      updateGuideModeUI();
-	    }
+      const card = document.getElementById('noviceGuideCard');
+      if (card) card.style.display = guideModeEnabled ? 'flex' : 'none';
+      if (!guideModeEnabled) {
+        clearRecommendedActions();
+      }
 
-	    guideModeEnabled = safeStorageGet(GUIDE_MODE_STORAGE_KEY) !== '0';
-	    const guideToggleBtn = document.getElementById('guideToggleBtn');
-	    if (guideToggleBtn) {
-	      guideToggleBtn.addEventListener('click', (e) => {
-	        e.stopPropagation();
-	        setGuideModeEnabled(!guideModeEnabled);
-	      });
-	    }
-	    updateGuideModeUI();
+      if (stateReady) {
+        renderNoviceGuide({ applyStep3Collapse: true });
+      }
+    }
+
+    function setGuideModeEnabled(enabled, options = {}) {
+      const { persist = true } = options;
+      guideModeEnabled = Boolean(enabled);
+      if (persist) safeStorageSet(GUIDE_MODE_STORAGE_KEY, guideModeEnabled ? '1' : '0');
+      updateGuideModeUI();
+    }
+
+    guideModeEnabled = safeStorageGet(GUIDE_MODE_STORAGE_KEY) !== '0';
+    try {
+      step3GuideCollapsedOnce = sessionStorage.getItem(STEP3_GUIDE_COLLAPSED_SESSION_KEY) === '1';
+    } catch (err) {
+      step3GuideCollapsedOnce = false;
+    }
+    const guideToggleBtn = document.getElementById('guideToggleBtn');
+    if (guideToggleBtn) {
+      guideToggleBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        setGuideModeEnabled(!guideModeEnabled);
+      });
+    }
+    updateGuideModeUI();
 
 	    function applyTemplate(template, vars = {}) {
 	      let output = String(template || '');
@@ -1718,234 +1878,67 @@
     });
 
     // ===========================================
-    // Film Presets
+    // Film Type
     // ===========================================
-    const PRESET_DATA_URL = './presets/film_presets.json';
     const PRESET_TYPES = ['color', 'bw', 'positive'];
-    const PRESET_GROUPS = [
-      { type: 'color', labelKey: 'colorFilms', fallbackLabel: 'Color' },
-      { type: 'bw', labelKey: 'bwFilms', fallbackLabel: 'B&W' },
-      { type: 'positive', labelKey: 'positiveFilms', fallbackLabel: 'Positive' }
-    ];
-    const GENERIC_PRESET_I18N_KEYS = {
-      generic_color: 'genericColor',
-      generic_bw: 'genericBW',
-      generic_positive: 'genericPositive'
-    };
-    const DEFAULT_PRESET_BY_TYPE = {
-      color: 'generic_color',
-      bw: 'generic_bw',
-      positive: 'generic_positive'
-    };
-    const DEFAULT_FILM_PRESET_LIST = [
-      {
-        id: 'generic_color',
-        name: 'Generic Color',
-        brand: 'generic',
-        type: 'color',
-        status: 'active',
-        baseColor: { r: 0.82, g: 0.55, b: 0.36 },
-        characteristics: { warmth: 0, saturation: 0, contrast: 0 }
-      },
-      {
-        id: 'generic_bw',
-        name: 'Generic B&W',
-        brand: 'generic',
-        type: 'bw',
-        status: 'active',
-        contrast: 1.0,
-        gamma: 1.0,
-        bw: { gamma: 1.0 },
-        characteristics: { warmth: 0, saturation: 0, contrast: 0 }
-      },
-      {
-        id: 'generic_positive',
-        name: 'Generic Positive',
-        brand: 'generic',
-        type: 'positive',
-        status: 'active',
-        characteristics: { warmth: 0, saturation: 0.1, contrast: 0.1 }
-      }
-    ];
-
-    let FILM_PRESETS = {};
-    let FILM_PRESET_LIST = [];
-    let FILM_PRESET_ALIASES = {};
 
     function sanitizePresetType(type) {
       return PRESET_TYPES.includes(type) ? type : 'color';
     }
 
-    function clampUnit(value, fallback) {
-      const n = Number(value);
-      if (Number.isFinite(n)) return Math.max(0, Math.min(1, n));
-      return fallback;
-    }
+    function inferFilmTypeFromLegacyPreset(presetId, fallback = 'color') {
+      const fallbackType = sanitizePresetType(fallback);
+      const normalized = String(presetId || '').trim().toLowerCase();
+      if (!normalized) return fallbackType;
 
-    function normalizePreset(rawPreset) {
-      if (!rawPreset || typeof rawPreset !== 'object') return null;
-      if (typeof rawPreset.id !== 'string' || !rawPreset.id) return null;
-
-      const type = sanitizePresetType(rawPreset.type);
-      const status = rawPreset.status === 'deprecated' ? 'deprecated' : 'active';
-      const characteristics = rawPreset.characteristics || {};
-      const preset = {
-        id: rawPreset.id,
-        name: rawPreset.name || rawPreset.id,
-        brand: rawPreset.brand || 'generic',
-        type,
-        status,
-        characteristics: {
-          warmth: Number.isFinite(characteristics.warmth) ? characteristics.warmth : 0,
-          saturation: Number.isFinite(characteristics.saturation) ? characteristics.saturation : 0,
-          contrast: Number.isFinite(characteristics.contrast) ? characteristics.contrast : 0
-        }
-      };
-
-      if (type === 'color') {
-        const baseColor = rawPreset.baseColor || {};
-        preset.baseColor = {
-          r: clampUnit(baseColor.r, 0.82),
-          g: clampUnit(baseColor.g, 0.55),
-          b: clampUnit(baseColor.b, 0.36)
-        };
+      if (
+        normalized.endsWith('_positive')
+        || normalized.includes('positive')
+        || normalized.includes('provia')
+        || normalized.includes('velvia')
+        || normalized.includes('ektachrome')
+        || normalized.includes('slide')
+      ) {
+        return 'positive';
       }
 
-      if (type === 'bw') {
-        const gammaFromNested = rawPreset.bw && Number.isFinite(rawPreset.bw.gamma)
-          ? rawPreset.bw.gamma
-          : undefined;
-        const gamma = Number.isFinite(rawPreset.gamma) ? rawPreset.gamma
-          : (gammaFromNested !== undefined ? gammaFromNested : 1.0);
-        const contrast = Number.isFinite(rawPreset.contrast) ? rawPreset.contrast : 1.0;
-        preset.gamma = gamma;
-        preset.contrast = contrast;
-        preset.bw = { gamma };
+      if (
+        normalized.endsWith('_bw')
+        || normalized.includes('bw')
+        || normalized.includes('ilford')
+        || normalized.includes('trix')
+        || normalized.includes('tri-x')
+        || normalized.includes('tmax')
+        || normalized.includes('acros')
+        || normalized.includes('hp5')
+        || normalized.includes('fp4')
+        || normalized.includes('panf')
+        || normalized.includes('delta')
+        || normalized.includes('sfx')
+        || normalized.includes('xp2')
+        || normalized.includes('neopan')
+      ) {
+        return 'bw';
       }
 
-      if (rawPreset.sourceMeta && typeof rawPreset.sourceMeta === 'object') {
-        preset.sourceMeta = rawPreset.sourceMeta;
-      }
-
-      return preset;
+      return 'color';
     }
 
-    function buildPresetMap(presetList) {
-      const map = {};
-      for (const preset of presetList) {
-        map[preset.id] = preset;
-      }
-      return map;
+    function sanitizeCoreEnhancedProfile(value, fallback = 'none') {
+      const normalizedFallback = CORE_ENHANCED_PROFILE_OPTIONS.has(fallback) ? fallback : 'none';
+      const normalized = String(value || normalizedFallback);
+      return CORE_ENHANCED_PROFILE_OPTIONS.has(normalized) ? normalized : normalizedFallback;
     }
 
-    function applyPresetDataset(dataset) {
-      if (!dataset || !Array.isArray(dataset.presets)) return false;
-      const list = dataset.presets
-        .map(normalizePreset)
-        .filter(Boolean);
-      if (!list.length) return false;
+    function sanitizeCoreColorModel(value, fallback = 'standard') {
+      const fallbackRaw = String(fallback || 'standard').trim().toLowerCase();
+      const fallbackMigrated = CORE_COLOR_MODEL_MIGRATION_MAP[fallbackRaw] || fallbackRaw;
+      const normalizedFallback = CORE_COLOR_MODEL_OPTIONS.has(fallbackMigrated) ? fallbackMigrated : 'standard';
 
-      FILM_PRESET_LIST = list;
-      FILM_PRESETS = buildPresetMap(list);
-      FILM_PRESET_ALIASES = (dataset.aliases && typeof dataset.aliases === 'object')
-        ? { ...dataset.aliases }
-        : {};
-      return true;
+      const raw = String(value || normalizedFallback).trim().toLowerCase();
+      const migrated = CORE_COLOR_MODEL_MIGRATION_MAP[raw] || raw;
+      return CORE_COLOR_MODEL_OPTIONS.has(migrated) ? migrated : normalizedFallback;
     }
-
-    function initPresetFallbacks() {
-      FILM_PRESET_LIST = DEFAULT_FILM_PRESET_LIST
-        .map(normalizePreset)
-        .filter(Boolean);
-      FILM_PRESETS = buildPresetMap(FILM_PRESET_LIST);
-      FILM_PRESET_ALIASES = {};
-    }
-
-    function resolvePresetId(presetId) {
-      if (typeof presetId !== 'string' || !presetId) return null;
-      if (FILM_PRESETS[presetId]) return presetId;
-      const aliasTarget = FILM_PRESET_ALIASES[presetId];
-      if (aliasTarget && FILM_PRESETS[aliasTarget]) return aliasTarget;
-      return null;
-    }
-
-    function getDefaultPresetForType(type) {
-      const safeType = sanitizePresetType(type);
-      const preferredId = DEFAULT_PRESET_BY_TYPE[safeType];
-      if (preferredId && FILM_PRESETS[preferredId]) return preferredId;
-
-      const firstActive = FILM_PRESET_LIST.find((preset) => (
-        preset.type === safeType && preset.status !== 'deprecated'
-      ));
-      return firstActive ? firstActive.id : (DEFAULT_PRESET_BY_TYPE.color || 'generic_color');
-    }
-
-    function getPresetOrFallback(presetId, fallbackType = 'color') {
-      const resolved = resolvePresetId(presetId);
-      if (resolved) return FILM_PRESETS[resolved];
-      const fallbackId = getDefaultPresetForType(fallbackType);
-      return FILM_PRESETS[fallbackId] || FILM_PRESETS.generic_color || null;
-    }
-
-    function renderPresetOptions(selectedPresetId = state ? state.filmPreset : null) {
-      const presetSelect = document.getElementById('filmPreset');
-      if (!presetSelect) return;
-
-      presetSelect.innerHTML = '';
-      for (const group of PRESET_GROUPS) {
-        const presets = FILM_PRESET_LIST.filter((preset) => (
-          preset.type === group.type && preset.status !== 'deprecated'
-        ));
-        if (!presets.length) continue;
-
-        const optgroup = document.createElement('optgroup');
-        optgroup.setAttribute('data-i18n-label', group.labelKey);
-        optgroup.label = (i18n[currentLang] && i18n[currentLang][group.labelKey]) || group.fallbackLabel;
-
-        for (const preset of presets) {
-          const option = document.createElement('option');
-          option.value = preset.id;
-          option.textContent = preset.name;
-          const i18nKey = GENERIC_PRESET_I18N_KEYS[preset.id];
-          if (i18nKey) option.setAttribute('data-i18n', i18nKey);
-          optgroup.appendChild(option);
-        }
-        presetSelect.appendChild(optgroup);
-      }
-
-      const resolvedSelection = resolvePresetId(selectedPresetId);
-      const fallbackSelection = getDefaultPresetForType(state ? state.filmType : 'color');
-      const nextSelection = resolvedSelection || fallbackSelection;
-      if (nextSelection && presetSelect.querySelector(`option[value="${nextSelection}"]`)) {
-        presetSelect.value = nextSelection;
-      } else if (presetSelect.options.length) {
-        presetSelect.value = presetSelect.options[0].value;
-      }
-
-      if (state && presetSelect.value) {
-        state.filmPreset = presetSelect.value;
-      }
-    }
-
-    async function loadPresetDataset() {
-      initPresetFallbacks();
-      try {
-        const response = await fetch(PRESET_DATA_URL, { cache: 'no-store' });
-        if (!response.ok) {
-          throw new Error(`Preset dataset request failed: ${response.status}`);
-        }
-        const payload = await response.json();
-        if (!applyPresetDataset(payload)) {
-          throw new Error('Preset dataset is invalid.');
-        }
-      } catch (err) {
-        console.warn('Using fallback preset dataset.', err);
-      }
-      renderPresetOptions(state ? state.filmPreset : null);
-      if (typeof setLanguage === 'function') setLanguage(currentLang);
-    }
-
-    initPresetFallbacks();
 
     function createDefaultLensCorrectionSettings() {
       return {
@@ -2074,7 +2067,6 @@
 
       // Film settings
       filmType: 'color',
-      filmPreset: 'generic_color',
       filmBase: { r: 210, g: 140, b: 90 },
       filmBaseSet: false,
       step2Mode: 'border', // 'border' | 'noBorder'
@@ -2083,8 +2075,11 @@
 
       // SilverCore conversion controls (for color/bw negatives)
       coreColorModel: 'standard',
+      coreEnhancedProfile: 'none',
+      coreProfileStrength: 100,
       corePreSaturation: 100,
       coreBorderBuffer: 10,
+      coreBorderBufferBorderValue: 10,
       coreBrightness: 0,
       coreExposure: 0,
       coreContrast: 0,
@@ -2186,6 +2181,7 @@
       lastRenderQuality: 'full' // 'full' | 'preview' | 'gl'
     };
     stateReady = true;
+    updateGuideModeUI();
 
     // Initialize curves
     function initCurves(markDirty = false) {
@@ -2302,11 +2298,9 @@
       }
     }
 
-	    function updateBatchStep3GuideVisibility() {
-	      const guide = document.getElementById('batchStep3GuideBox');
-	      if (!guide) return;
-	      guide.style.display = (guideModeEnabled && state.batchSessionActive && state.currentStep >= 3) ? 'block' : 'none';
-	    }
+    function updateBatchStep3GuideVisibility() {
+      renderNoviceGuide({ applyStep3Collapse: false });
+    }
 
     function syncBatchUIState(options = {}) {
       if (state.fileQueue.length > 1) state.batchSessionActive = true;
@@ -2418,6 +2412,7 @@
 
       steps.forEach((stepId, idx) => {
         const stepEl = document.getElementById(stepId);
+        if (!stepEl) return;
         stepEl.classList.remove('active', 'completed');
         if (idx + 1 < state.currentStep) {
           stepEl.classList.add('completed');
@@ -2449,6 +2444,7 @@
       syncBatchUIState({ reason: 'updateWorkflowUI' });
       updateAutoFrameButtons();
       updateBeforeAfterButtonState();
+      renderNoviceGuide({ applyStep3Collapse: true });
     }
 
     function updateStep3SectionVisibility() {
@@ -2587,24 +2583,28 @@
       };
     }
 
-    function autoDetectFilmBase(imageData) {
-      const { width, height, data } = imageData;
-      const edgeSize = Math.min(50, Math.floor(Math.min(width, height) * 0.05));
+    function autoDetectFilmBase(imageData, borderBufferPct = 10) {
+      const { width, height } = imageData;
+      const minSide = Math.max(1, Math.min(width, height));
+      const bufferPct = sanitizeNumeric(borderBufferPct, 10, 0, 30);
+      const edgeBand = Math.max(1, Math.round(minSide * (bufferPct / 100)));
+      const edgeOffset = Math.max(1, Math.round(edgeBand * 0.5));
+      const sampleRadius = Math.max(1, Math.min(80, Math.round(edgeBand * 0.5)));
 
       let candidates = [];
       const regions = [
-        { x: width / 2, y: edgeSize / 2 },
-        { x: width / 2, y: height - edgeSize / 2 },
-        { x: edgeSize / 2, y: height / 2 },
-        { x: width - edgeSize / 2, y: height / 2 },
-        { x: edgeSize / 2, y: edgeSize / 2 },
-        { x: width - edgeSize / 2, y: edgeSize / 2 },
-        { x: edgeSize / 2, y: height - edgeSize / 2 },
-        { x: width - edgeSize / 2, y: height - edgeSize / 2 }
+        { x: width / 2, y: edgeOffset },
+        { x: width / 2, y: height - edgeOffset },
+        { x: edgeOffset, y: height / 2 },
+        { x: width - edgeOffset, y: height / 2 },
+        { x: edgeOffset, y: edgeOffset },
+        { x: width - edgeOffset, y: edgeOffset },
+        { x: edgeOffset, y: height - edgeOffset },
+        { x: width - edgeOffset, y: height - edgeOffset }
       ];
 
       for (const region of regions) {
-        const sample = sampleFilmBase(imageData, Math.floor(region.x), Math.floor(region.y), edgeSize);
+        const sample = sampleFilmBase(imageData, Math.floor(region.x), Math.floor(region.y), sampleRadius);
         const brightness = (sample.r + sample.g + sample.b) / 3;
         candidates.push({ ...sample, brightness });
       }
@@ -2758,21 +2758,30 @@
       const includeCurves = options.includeCurves !== false;
 
       const fallbackType = sanitizePresetType(fallbackSettings.filmType || 'color');
-      const filmType = sanitizePresetType(source.filmType || fallbackType);
-      const fallbackPreset = resolvePresetId(fallbackSettings.filmPreset) || getDefaultPresetForType(fallbackType);
-      const filmPreset = resolvePresetId(source.filmPreset) || fallbackPreset || getDefaultPresetForType(filmType);
+      const inferredType = inferFilmTypeFromLegacyPreset(source.filmPreset, fallbackType);
+      const filmType = sanitizePresetType(source.filmType || inferredType || fallbackType);
 
       const safe = {
         cropRegion: source.cropRegion ? { ...source.cropRegion } : (fallbackSettings.cropRegion ? { ...fallbackSettings.cropRegion } : null),
         rotationAngle: normalizeAngleDegrees(sanitizeNumeric(source.rotationAngle, fallbackSettings.rotationAngle || 0, -3600, 3600)),
         autoFrameMeta: source.autoFrameMeta ? { ...source.autoFrameMeta } : (fallbackSettings.autoFrameMeta ? { ...fallbackSettings.autoFrameMeta } : null),
         filmType,
-        filmPreset,
         filmBase: sanitizeFilmBase(source.filmBase, fallbackSettings.filmBase),
         lensCorrection: sanitizeLensCorrection(source.lensCorrection, fallbackSettings.lensCorrection),
-        coreColorModel: String(source.coreColorModel || fallbackSettings.coreColorModel || 'standard'),
+        coreColorModel: sanitizeCoreColorModel(
+          source.coreColorModel,
+          sanitizeCoreColorModel(fallbackSettings.coreColorModel, 'standard')
+        ),
+        coreEnhancedProfile: sanitizeCoreEnhancedProfile(source.coreEnhancedProfile, sanitizeCoreEnhancedProfile(fallbackSettings.coreEnhancedProfile, 'none')),
+        coreProfileStrength: sanitizeNumeric(source.coreProfileStrength, fallbackSettings.coreProfileStrength ?? 100, 0, 200),
         corePreSaturation: sanitizeNumeric(source.corePreSaturation, fallbackSettings.corePreSaturation ?? 100, 0, 200),
         coreBorderBuffer: sanitizeNumeric(source.coreBorderBuffer, fallbackSettings.coreBorderBuffer ?? 10, 0, 30),
+        coreBorderBufferBorderValue: sanitizeNumeric(
+          source.coreBorderBufferBorderValue,
+          source.coreBorderBuffer ?? fallbackSettings.coreBorderBufferBorderValue ?? fallbackSettings.coreBorderBuffer ?? 10,
+          0,
+          30
+        ),
         coreBrightness: sanitizeNumeric(source.coreBrightness, fallbackSettings.coreBrightness ?? 0, -100, 100),
         coreExposure: sanitizeNumeric(source.coreExposure, fallbackSettings.coreExposure ?? 0, -300, 300),
         coreContrast: sanitizeNumeric(source.coreContrast, fallbackSettings.coreContrast ?? 0, -100, 100),
@@ -2841,8 +2850,7 @@
     }
 
     function getEffectiveFilmType(settings = state) {
-      const preset = getPresetOrFallback(settings.filmPreset, settings.filmType);
-      return sanitizePresetType((preset && preset.type) || settings.filmType || 'color');
+      return sanitizePresetType(settings.filmType || 'color');
     }
 
     function usesSilverCoreConversion(settings = state) {
@@ -2860,6 +2868,8 @@
       return {
         ...safe,
         colorModel: safe.coreColorModel,
+        enhancedProfile: safe.coreEnhancedProfile,
+        profileStrength: safe.coreProfileStrength,
         preSaturation: safe.corePreSaturation,
         borderBuffer: safe.coreBorderBuffer,
         brightness: safe.coreBrightness,
@@ -2953,8 +2963,6 @@
         includeCurves: true
       });
 
-      const preset = getPresetOrFallback(safeSettings.filmPreset, safeSettings.filmType || 'color');
-      const presetChars = (preset && preset.characteristics) ? preset.characteristics : {};
       const useLegacyTone = !usesSilverCoreConversion(safeSettings);
 
       const legacyExposure = useLegacyTone ? safeSettings.exposure : 0;
@@ -2966,10 +2974,10 @@
       const legacySaturation = useLegacyTone ? safeSettings.saturation : 0;
 
       const exposureMult = Math.pow(2, legacyExposure);
-      const contrastFactor = 1 + ((legacyContrast + (presetChars.contrast || 0) * 100) / 100);
-      const tempFactor = (legacyTemperature + (presetChars.warmth || 0) * 100) / 100;
+      const contrastFactor = 1 + (legacyContrast / 100);
+      const tempFactor = legacyTemperature / 100;
       const tintFactor = legacyTint / 100;
-      const satFactor = 1 + ((legacySaturation + (presetChars.saturation || 0) * 100) / 100);
+      const satFactor = 1 + (legacySaturation / 100);
       const vibFactor = safeSettings.vibrance / 100;
       const highlightsFactor = legacyHighlights / 100;
       const shadowsFactor = legacyShadows / 100;
@@ -4307,8 +4315,6 @@
         includeCurves: false
       });
 
-      const preset = getPresetOrFallback(safe.filmPreset, safe.filmType);
-      const presetChars = (preset && preset.characteristics) ? preset.characteristics : {};
       const useLegacyTone = !usesSilverCoreConversion(safe);
 
       const legacyExposure = useLegacyTone ? safe.exposure : 0;
@@ -4320,12 +4326,12 @@
       const legacySaturation = useLegacyTone ? safe.saturation : 0;
 
       const exposure = legacyExposure;
-      const contrast = 1 + ((legacyContrast + (presetChars.contrast || 0) * 100) / 100);
+      const contrast = 1 + (legacyContrast / 100);
       const highlights = legacyHighlights / 100;
       const shadows = legacyShadows / 100;
-      const tempFactor = (legacyTemperature + (presetChars.warmth || 0) * 100) / 100;
+      const tempFactor = legacyTemperature / 100;
       const tintFactor = legacyTint / 100;
-      const satFactor = 1 + ((legacySaturation + (presetChars.saturation || 0) * 100) / 100);
+      const satFactor = 1 + (legacySaturation / 100);
       const vibFactor = safe.vibrance / 100;
 
       gl.uniform3f(webglState.locations.uWb, safe.wbR, safe.wbG, safe.wbB);
@@ -4527,26 +4533,71 @@
       canvas.height = processed.height;
     }
 
-    function convertFromCurrentSource(settings = state) {
+    async function convertFromCurrentSource(settings = state) {
       const source = state.conversionSourceImageData || state.croppedImageData || state.originalImageData;
       if (!source) return null;
-      const preset = getPresetOrFallback(settings.filmPreset, settings.filmType);
-      return convertFrameWithRouter({
+      return await convertFrameWithRouter({
         imageData: source,
-        settings: buildRouterSettings(settings),
-        preset
+        settings: buildRouterSettings(settings)
       });
     }
 
     let coreReprocessTimer = null;
+    let coreReprocessToken = 0;
+    let step2AutoConvertTimer = null;
+    let step2AutoConvertToken = 0;
+    let processNegativeInFlight = null;
 
-    function rerenderWithCoreControls(options = {}) {
+    function canAutoConvertFromStep2() {
+      if (state.currentStep < 2 || state.currentStep >= 3) return false;
+      if (!usesSilverCoreConversion(state)) return false;
+      const sourceData = state.croppedImageData || state.originalImageData;
+      if (!sourceData) return false;
+      if (requiresFilmBase(state) && !state.filmBaseSet) return false;
+      if (state.samplingMode === 'filmBase' || state.cropping) return false;
+      return true;
+    }
+
+    async function runAutoConvertFromStep2(options = {}) {
+      const token = Number.isInteger(options.token) ? options.token : null;
+      if (token !== null && token !== step2AutoConvertToken) return;
+      if (!canAutoConvertFromStep2()) return;
+
+      await processNegative();
+    }
+
+    function scheduleAutoConvertFromStep2(options = {}) {
+      if (!canAutoConvertFromStep2()) return;
+      const immediate = Boolean(options.immediate);
+      const token = ++step2AutoConvertToken;
+
+      if (step2AutoConvertTimer) clearTimeout(step2AutoConvertTimer);
+      step2AutoConvertTimer = setTimeout(() => {
+        step2AutoConvertTimer = null;
+        void runAutoConvertFromStep2({ token }).catch((err) => {
+          console.error('Step2 auto convert failed:', err);
+        });
+      }, immediate ? 0 : 70);
+    }
+
+    function scheduleSilverSourceRefresh(options = {}) {
+      if (!usesSilverCoreConversion(state)) return;
+      if (state.currentStep >= 3) {
+        scheduleCoreReprocess({ full: false });
+        return;
+      }
+      scheduleAutoConvertFromStep2(options);
+    }
+
+    async function rerenderWithCoreControls(options = {}) {
       const full = Boolean(options.full);
+      const token = Number.isInteger(options.token) ? options.token : null;
       if (!usesSilverCoreConversion(state)) return;
       if (!state.conversionSourceImageData) return;
 
-      const processed = convertFromCurrentSource(state);
+      const processed = await convertFromCurrentSource(state);
       if (!processed) return;
+      if (token !== null && token !== coreReprocessToken) return;
       applyProcessedImageToState(processed);
 
       if (full) {
@@ -4562,26 +4613,40 @@
       if (!usesSilverCoreConversion(state)) return;
       if (!state.conversionSourceImageData || state.currentStep < 3) return;
 
+      const token = ++coreReprocessToken;
       if (coreReprocessTimer) clearTimeout(coreReprocessTimer);
       coreReprocessTimer = setTimeout(() => {
         coreReprocessTimer = null;
-        rerenderWithCoreControls({ full });
+        void rerenderWithCoreControls({ full, token }).catch((err) => {
+          console.error('Core reprocess failed:', err);
+        });
       }, full ? 70 : 40);
     }
 
     async function processNegative() {
-      const sourceData = state.croppedImageData || state.originalImageData;
-      if (!sourceData) return;
+      if (processNegativeInFlight) return processNegativeInFlight;
 
-      const correctedSourceData = await applyLensCorrectionWithSettings(sourceData, state, { updateUi: true });
-      state.conversionSourceImageData = correctedSourceData;
-      const processed = convertFromCurrentSource(state);
-      if (!processed) return;
-      applyProcessedImageToState(processed);
-      goToStep(3);
-      syncBatchUIState({ reason: 'processNegative' });
-      revealBatchFileList('processNegative');
-      updateFull();
+      processNegativeInFlight = (async () => {
+        const sourceData = state.croppedImageData || state.originalImageData;
+        if (!sourceData) return;
+
+        const correctedSourceData = await applyLensCorrectionWithSettings(sourceData, state, { updateUi: true });
+        state.conversionSourceImageData = correctedSourceData;
+        const processed = await convertFromCurrentSource(state);
+        if (!processed) return;
+        applyProcessedImageToState(processed);
+        goToStep(3);
+        syncBatchUIState({ reason: 'processNegative' });
+        revealBatchFileList('processNegative');
+        updatePreview();
+        scheduleFullUpdate();
+      })();
+
+      try {
+        return await processNegativeInFlight;
+      } finally {
+        processNegativeInFlight = null;
+      }
     }
 
     // ===========================================
@@ -4825,8 +4890,8 @@
     // ===========================================
     // Film Base Sampling
     // ===========================================
-    function requiresFilmBase(preset = getPresetOrFallback(state.filmPreset, state.filmType)) {
-      return (preset?.type || state.filmType) === 'color';
+    function requiresFilmBase(settings = state) {
+      return sanitizePresetType(settings?.filmType || state.filmType || 'color') === 'color';
     }
 
     function suggestStep2Mode() {
@@ -4835,17 +4900,37 @@
 
       const sourceData = state.croppedImageData || state.originalImageData;
       if (!sourceData) return 'border';
-      const sample = autoDetectFilmBase(sourceData);
+      const suggestionBuffer = state.step2Mode === 'noBorder'
+        ? state.coreBorderBufferBorderValue
+        : state.coreBorderBuffer;
+      const sample = autoDetectFilmBase(sourceData, suggestionBuffer);
       const orangeBias = (sample.r - sample.b) + ((sample.r - sample.g) * 0.5);
       return orangeBias > 10 ? 'border' : 'noBorder';
     }
 
     function setStep2Mode(mode) {
-      state.step2Mode = mode === 'noBorder' ? 'noBorder' : 'border';
+      const nextMode = mode === 'noBorder' ? 'noBorder' : 'border';
+      if (requiresFilmBase()) {
+        if (nextMode === 'noBorder') {
+          if (state.step2Mode !== 'noBorder') {
+            state.coreBorderBufferBorderValue = sanitizeNumeric(state.coreBorderBuffer, 10, 0, 30);
+          } else {
+            state.coreBorderBufferBorderValue = sanitizeNumeric(state.coreBorderBufferBorderValue, 10, 0, 30);
+          }
+          state.coreBorderBuffer = 0;
+        } else {
+          const restoredBuffer = sanitizeNumeric(state.coreBorderBufferBorderValue, 10, 0, 30);
+          state.coreBorderBufferBorderValue = restoredBuffer;
+          state.coreBorderBuffer = restoredBuffer;
+        }
+      }
+
+      state.step2Mode = nextMode;
       const borderBtn = document.getElementById('step2ModeBorderBtn');
       const noBorderBtn = document.getElementById('step2ModeNoBorderBtn');
       if (borderBtn) borderBtn.classList.toggle('active', state.step2Mode === 'border');
       if (noBorderBtn) noBorderBtn.classList.toggle('active', state.step2Mode === 'noBorder');
+      syncSliderFromState('coreBorderBuffer');
       updateFilmModeUI();
     }
 
@@ -4854,8 +4939,7 @@
       const ref = state.rollReference.settingsSnapshot;
       if (!ref) return false;
 
-      state.filmType = sanitizePresetType(ref.filmType || 'color');
-      state.filmPreset = resolvePresetId(ref.filmPreset) || getDefaultPresetForType(state.filmType);
+      state.filmType = sanitizePresetType(ref.filmType || inferFilmTypeFromLegacyPreset(ref.filmPreset, 'color'));
       state.filmBase = { ...ref.filmBase };
       state.filmBaseSet = true;
       if (ref.lensCorrection) {
@@ -4879,111 +4963,169 @@
       return true;
     }
 
-	    function setRecommendedAction(actionId) {
-	      clearRecommendedActions();
-	      if (!guideModeEnabled) return;
-	      if (!actionId) return;
+    function buildNoviceGuideViewModel() {
+      const filmType = sanitizePresetType(state.filmType || 'color');
+      const inBatch = Boolean(state.batchSessionActive);
+      const model = {
+        phaseKey: 'noviceGuidePhaseStep1',
+        primaryKey: 'noviceGuidePrimaryStep1',
+        checklistKeys: ['noviceGuideChecklistStep1Crop', 'noviceGuideChecklistStep1Next'],
+        statusKey: '',
+        warningKey: '',
+        recommendedActionIds: []
+      };
 
-	      const target = document.getElementById(actionId);
-	      if (!target || target.disabled) return;
-	      if (target.style.display === 'none') return;
-	      target.classList.add('recommended-action');
-	    }
-
-	    function updateStep2GuideCard(options = {}) {
-	      const { skipFirstHint = false } = options;
-	      const card = document.getElementById('step2GuideCard');
-	      const step1El = document.getElementById('step2GuideStep1');
-	      const step2El = document.getElementById('step2GuideStep2');
-	      const step3El = document.getElementById('step2GuideStep3');
-	      const tipEl = document.getElementById('step2GuideTip');
-	      const firstHintEl = document.getElementById('step2FirstHint');
-	      if (!card || !step1El || !step2El || !step3El || !tipEl) return;
-
-	      if (!guideModeEnabled) {
-	        card.style.display = 'none';
-	        setRecommendedAction(null);
-	        if (firstHintEl) firstHintEl.style.display = 'none';
-	        return;
-	      }
-
-	      const showFilmBase = requiresFilmBase();
-	      card.style.display = showFilmBase ? 'flex' : 'none';
-
-      if (firstHintEl) {
-        firstHintEl.textContent = getLocalizedText(
-          'step2FirstHint',
-          'Tip: If you cannot find orange border area, switch to "No Border / ES-2".'
-        );
+      if (state.currentStep <= 1) {
+        model.recommendedActionIds = state.cropRegion
+          ? ['convertBtn']
+          : ['autoFrameBtn', 'cropBtn'];
+        return model;
       }
 
-      if (!showFilmBase) {
-        setRecommendedAction(null);
-        if (firstHintEl) firstHintEl.style.display = 'none';
+      if (state.currentStep === 2) {
+        model.phaseKey = 'noviceGuidePhaseStep2';
+        if (filmType === 'color') {
+          const isNoBorder = state.step2Mode === 'noBorder';
+          const hasReference = hasRollReference();
+          if (isNoBorder) {
+            model.primaryKey = 'noviceGuidePrimaryStep2ColorNoBorder';
+            model.checklistKeys = [
+              'noviceGuideChecklistStep2ColorNoBorderAuto',
+              'noviceGuideChecklistStep2ColorNoBorderReference'
+            ];
+            model.recommendedActionIds = hasReference
+              ? ['useReferenceBtn', 'autoDetectBtn']
+              : ['autoDetectBtn'];
+            if (!state.filmBaseSet && !hasReference) {
+              model.warningKey = 'noviceGuideWarningReferenceMissing';
+            }
+          } else {
+            model.primaryKey = 'noviceGuidePrimaryStep2ColorBorder';
+            model.checklistKeys = [
+              'noviceGuideChecklistStep2ColorBorderSample',
+              'noviceGuideChecklistStep2ColorBorderFallback'
+            ];
+            model.recommendedActionIds = ['sampleBaseBtn', 'autoDetectBtn'];
+            if (!state.filmBaseSet) {
+              model.warningKey = 'noviceGuideWarningMaskUnset';
+            }
+          }
+
+          if (state.filmBaseSet) {
+            model.statusKey = 'noviceGuideStatusAutoToStep3Ready';
+            model.recommendedActionIds = ['applyConvertBtn'];
+          } else {
+            model.statusKey = 'noviceGuideStatusAutoToStep3';
+          }
+          return model;
+        }
+
+        if (filmType === 'bw') {
+          model.primaryKey = 'noviceGuidePrimaryStep2Bw';
+          model.checklistKeys = [
+            'noviceGuideChecklistStep2BwSelect',
+            'noviceGuideChecklistStep2BwAuto'
+          ];
+          model.statusKey = 'noviceGuideStatusAutoToStep3';
+          model.recommendedActionIds = ['applyConvertBtn'];
+          return model;
+        }
+
+        model.primaryKey = 'noviceGuidePrimaryStep2Positive';
+        model.checklistKeys = ['noviceGuideChecklistStep2PositiveConvert'];
+        model.statusKey = 'noviceGuideStatusManualConvert';
+        model.recommendedActionIds = ['applyConvertBtn'];
+        return model;
+      }
+
+      model.phaseKey = 'noviceGuidePhaseStep3';
+      model.primaryKey = inBatch
+        ? 'noviceGuidePrimaryStep3Batch'
+        : 'noviceGuidePrimaryStep3Single';
+      model.checklistKeys = inBatch
+        ? [
+            'noviceGuideChecklistStep3BatchSave',
+            'noviceGuideChecklistStep3BatchApply',
+            'noviceGuideChecklistStep3BatchExport'
+          ]
+        : [
+            'noviceGuideChecklistStep3SampleGray',
+            'noviceGuideChecklistStep3Export'
+          ];
+      model.statusKey = step3GuideCollapsedOnce ? 'noviceGuideStatusStep3Collapsed' : '';
+      model.recommendedActionIds = inBatch
+        ? ['saveSettingsBtn', 'applyToSelectedBtn', 'exportBtn']
+        : ['sampleWBBtn', 'exportBtn'];
+      return model;
+    }
+
+    function renderNoviceGuide(options = {}) {
+      const { applyStep3Collapse = false } = options;
+      const card = document.getElementById('noviceGuideCard');
+      const phaseEl = document.getElementById('noviceGuidePhase');
+      const primaryEl = document.getElementById('noviceGuidePrimary');
+      const checklistEl = document.getElementById('noviceGuideChecklist');
+      const statusEl = document.getElementById('noviceGuideStatus');
+      const warningEl = document.getElementById('noviceGuideWarning');
+      if (!card || !phaseEl || !primaryEl || !checklistEl || !statusEl || !warningEl) return;
+
+      if (!guideModeEnabled) {
+        card.style.display = 'none';
+        clearRecommendedActions();
         return;
       }
+      card.style.display = 'flex';
 
-      const isNoBorder = state.step2Mode === 'noBorder';
-      const hasMask = Boolean(state.filmBaseSet);
-      const hasReference = hasRollReference();
-      const step2Active = state.currentStep >= 2;
-
-      const step1Key = isNoBorder ? 'guideNoBorderStep1' : 'guideBorderStep1';
-      const step2Key = isNoBorder ? 'guideNoBorderStep2' : 'guideBorderStep2';
-      const step3Key = isNoBorder ? 'guideNoBorderStep3' : 'guideBorderStep3';
-
-      step1El.textContent = getLocalizedText(step1Key, '');
-      step2El.textContent = getLocalizedText(step2Key, '');
-      step3El.textContent = getLocalizedText(step3Key, '');
-
-      let tipKey = 'guideTipFallback';
-      let recommendedId = isNoBorder ? 'autoDetectBtn' : 'sampleBaseBtn';
-
-      if (hasMask) {
-        tipKey = 'guideTipReady';
-        recommendedId = 'applyConvertBtn';
-      } else if (isNoBorder && hasReference) {
-        tipKey = 'guideTipReferenceReady';
-        recommendedId = 'useReferenceBtn';
-      } else if (!isNoBorder) {
-        tipKey = 'guideTipMismatch';
-        recommendedId = 'sampleBaseBtn';
+      if (applyStep3Collapse) {
+        collapseStep3SectionsForGuideIfNeeded();
       }
 
-      tipEl.textContent = getLocalizedText(tipKey, '');
-      setRecommendedAction(recommendedId);
+      const model = buildNoviceGuideViewModel();
+      phaseEl.textContent = getLocalizedText(model.phaseKey, '');
+      primaryEl.textContent = getLocalizedText(model.primaryKey, '');
 
-      if (firstHintEl) {
-        let showFirstHint = false;
-        if (!skipFirstHint && step2Active && !step2FirstHintHandled) {
-          try {
-            const seen = sessionStorage.getItem(STEP2_FIRST_HINT_SESSION_KEY) === '1';
-            if (!seen) {
-              showFirstHint = true;
-              sessionStorage.setItem(STEP2_FIRST_HINT_SESSION_KEY, '1');
-            }
-          } catch (err) {
-            showFirstHint = true;
-          }
-          step2FirstHintHandled = true;
-        }
-        firstHintEl.style.display = showFirstHint ? 'block' : 'none';
-      }
+      checklistEl.innerHTML = '';
+      model.checklistKeys.forEach(key => {
+        const text = getLocalizedText(key, '');
+        if (!text) return;
+        const item = document.createElement('li');
+        item.textContent = text;
+        checklistEl.appendChild(item);
+      });
+
+      const statusText = model.statusKey ? getLocalizedText(model.statusKey, '') : '';
+      statusEl.textContent = statusText;
+      statusEl.style.display = statusText ? 'block' : 'none';
+
+      const warningText = model.warningKey ? getLocalizedText(model.warningKey, '') : '';
+      warningEl.textContent = warningText;
+      warningEl.style.display = warningText ? 'block' : 'none';
+
+      setRecommendedActions(model.recommendedActionIds);
+    }
+
+    function updateStep2GuideCard() {
+      renderNoviceGuide({ applyStep3Collapse: false });
     }
 
     function updateFilmModeUI() {
       const filmBaseControls = document.getElementById('filmBaseControls');
       const positiveFilmInfo = document.getElementById('positiveFilmInfo');
       const modeToggle = document.getElementById('step2ModeToggle');
+      const step2CoreColorModelControl = document.getElementById('coreColorModelStep2Control');
       const sampleBaseBtn = document.getElementById('sampleBaseBtn');
       const autoDetectBtn = document.getElementById('autoDetectBtn');
       const useReferenceBtn = document.getElementById('useReferenceBtn');
       const showFilmBase = requiresFilmBase();
+      const showStep2CoreModel = usesSilverCoreConversion(state);
       updateStep3SectionVisibility();
 
       modeToggle.style.display = showFilmBase ? 'flex' : 'none';
       filmBaseControls.style.display = showFilmBase ? 'block' : 'none';
       positiveFilmInfo.style.display = showFilmBase ? 'none' : 'block';
+      if (step2CoreColorModelControl) {
+        step2CoreColorModelControl.style.display = showStep2CoreModel ? 'block' : 'none';
+      }
 
       if (!showFilmBase) {
         if (state.samplingMode === 'filmBase') {
@@ -5054,11 +5196,12 @@
       if (!requiresFilmBase()) return;
       const sourceData = state.croppedImageData || state.originalImageData;
       if (!sourceData) return;
-      state.filmBase = autoDetectFilmBase(sourceData);
+      state.filmBase = autoDetectFilmBase(sourceData, state.coreBorderBuffer);
       state.filmBaseSet = true;
       updateFilmBasePreview();
       updateStep2GuideCard();
       markCurrentFileDirty();
+      scheduleSilverSourceRefresh({ immediate: true });
     });
 
     document.getElementById('useReferenceBtn').addEventListener('click', () => {
@@ -5068,6 +5211,7 @@
       }
       if (applyRollReferenceToCurrentForStep2()) {
         updateStep2GuideCard();
+        scheduleSilverSourceRefresh({ immediate: true });
         alert(i18n[currentLang].rollReferenceAppliedCurrent || 'Roll reference applied to current image.');
       }
     });
@@ -5078,7 +5222,7 @@
         if (!usedReference) {
           // Auto detect if not set
           const sourceData = state.croppedImageData || state.originalImageData;
-          state.filmBase = autoDetectFilmBase(sourceData);
+          state.filmBase = autoDetectFilmBase(sourceData, state.coreBorderBuffer);
           state.filmBaseSet = true;
           updateFilmBasePreview();
           updateStep2GuideCard();
@@ -5514,6 +5658,7 @@
         updateStep2GuideCard();
         markCurrentFileDirty();
         updateBeforeAfterButtonState();
+        scheduleSilverSourceRefresh({ immediate: true });
       } else if (state.samplingMode === 'whiteBalance') {
         // Sample from processed image (post-inversion)
         if (!state.processedImageData) return;
@@ -5568,10 +5713,6 @@
     document.querySelectorAll('.film-type-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         state.filmType = btn.dataset.type;
-
-        const defaultPreset = getDefaultPresetForType(state.filmType);
-        state.filmPreset = defaultPreset;
-        renderPresetOptions(state.filmPreset);
         setFilmTypeButtons(state.filmType);
         let modeUpdated = false;
         if (requiresFilmBase()) {
@@ -5584,58 +5725,14 @@
 
         markCurrentFileDirty();
         if (usesSilverCoreConversion(state)) {
-          scheduleCoreReprocess({ full: true });
+          scheduleSilverSourceRefresh();
         } else {
           schedulePreviewUpdate();
         }
       });
     });
 
-    document.getElementById('filmPreset').addEventListener('change', (e) => {
-      const preset = getPresetOrFallback(e.target.value, state.filmType);
-      if (!preset) return;
-      state.filmPreset = preset.id;
-      state.filmType = preset.type;
-      if (e.target.value !== state.filmPreset) {
-        e.target.value = state.filmPreset;
-      }
-      setFilmTypeButtons(state.filmType);
-      let modeUpdated = false;
-      if (requiresFilmBase()) {
-        setStep2Mode(suggestStep2Mode());
-        modeUpdated = true;
-      }
-      if (!modeUpdated) {
-        updateFilmModeUI();
-      }
-
-      markCurrentFileDirty();
-      if (usesSilverCoreConversion(state)) {
-        scheduleCoreReprocess({ full: true });
-      } else {
-        schedulePreviewUpdate();
-      }
-    });
-
     setFilmTypeButtons(state.filmType);
-    setStep2Mode(suggestStep2Mode());
-
-    loadPresetDataset()
-      .then(() => {
-        const preset = getPresetOrFallback(state.filmPreset, state.filmType);
-        if (!preset) return;
-        state.filmPreset = preset.id;
-        state.filmType = preset.type;
-        setFilmTypeButtons(state.filmType);
-        const presetSelect = document.getElementById('filmPreset');
-        if (presetSelect && presetSelect.value !== state.filmPreset) {
-          presetSelect.value = state.filmPreset;
-        }
-        setStep2Mode(suggestStep2Mode());
-      })
-      .catch((err) => {
-        console.warn('Preset initialization failed.', err);
-      });
 
     // ===========================================
     // Slider Controls
@@ -5820,8 +5917,30 @@
       onCommit: () => scheduleCoreReprocess({ full: true })
     };
 
+    function cacheBorderBufferValueForBorderMode(value) {
+      if (!requiresFilmBase()) return;
+      if (state.step2Mode === 'noBorder') return;
+      state.coreBorderBufferBorderValue = sanitizeNumeric(value, state.coreBorderBufferBorderValue ?? 10, 0, 30);
+    }
+
+    const coreBorderBufferHandlers = {
+      onInput: (value) => {
+        cacheBorderBufferValueForBorderMode(value);
+        scheduleSilverSourceRefresh();
+      },
+      onCommit: (value) => {
+        cacheBorderBufferValueForBorderMode(value);
+        scheduleSilverSourceRefresh({ immediate: true });
+      }
+    };
+
+    function handleCoreColorModelChange() {
+      scheduleSilverSourceRefresh();
+    }
+
+    setupSlider('coreProfileStrength', 'coreProfileStrength', coreReprocessHandlers);
     setupSlider('corePreSaturation', 'corePreSaturation', coreReprocessHandlers);
-    setupSlider('coreBorderBuffer', 'coreBorderBuffer', coreReprocessHandlers);
+    setupSlider('coreBorderBuffer', 'coreBorderBuffer', coreBorderBufferHandlers);
     setupSlider('coreBrightness', 'coreBrightness', coreReprocessHandlers);
     setupSlider('coreExposure', 'coreExposure', coreReprocessHandlers);
     setupSlider('coreContrast', 'coreContrast', coreReprocessHandlers);
@@ -5834,7 +5953,10 @@
     setupSlider('coreSaturation', 'coreSaturation', coreReprocessHandlers);
     setupSlider('coreGlow', 'coreGlow', coreReprocessHandlers);
     setupSlider('coreFade', 'coreFade', coreReprocessHandlers);
-    setupSelect('coreColorModel', 'coreColorModel', {
+    setupSelect('coreColorModelStep2', 'coreColorModel', {
+      onChange: handleCoreColorModelChange
+    });
+    setupSelect('coreEnhancedProfile', 'coreEnhancedProfile', {
       onChange: () => scheduleCoreReprocess({ full: true })
     });
     setupSelect('coreWbMode', 'coreWbMode', {
@@ -5853,6 +5975,10 @@
     setupSlider('cyan', 'cyan');
     setupSlider('magenta', 'magenta');
     setupSlider('yellow', 'yellow');
+
+    // Initialize step2 mode only after slider bindings exist.
+    // setStep2Mode() syncs coreBorderBuffer via syncSliderFromState().
+    setStep2Mode(suggestStep2Mode());
 
     // ===========================================
     // Section Toggle
@@ -6872,6 +6998,10 @@
         clearTimeout(coreReprocessTimer);
         coreReprocessTimer = null;
       }
+      if (step2AutoConvertTimer) {
+        clearTimeout(step2AutoConvertTimer);
+        step2AutoConvertTimer = null;
+      }
     }
 
     function applyRotation(angle) {
@@ -7405,8 +7535,6 @@
     // Convert positive button (skip to step 2 with positive mode selected)
     document.getElementById('convertPositiveBtn').addEventListener('click', () => {
       state.filmType = 'positive';
-      state.filmPreset = getDefaultPresetForType('positive');
-      renderPresetOptions(state.filmPreset);
       setFilmTypeButtons(state.filmType);
       updateFilmModeUI();
       markCurrentFileDirty();
@@ -7419,8 +7547,11 @@
     document.getElementById('resetBtn').addEventListener('click', () => {
       // Reset adjustments only
       state.coreColorModel = 'standard';
+      state.coreEnhancedProfile = 'none';
+      state.coreProfileStrength = 100;
       state.corePreSaturation = 100;
       state.coreBorderBuffer = 10;
+      state.coreBorderBufferBorderValue = 10;
       state.coreBrightness = 0;
       state.coreExposure = 0;
       state.coreContrast = 0;
@@ -7457,7 +7588,9 @@
       renderCurve();
       markCurrentFileDirty();
       if (usesSilverCoreConversion(state) && state.conversionSourceImageData) {
-        rerenderWithCoreControls({ full: true });
+        void rerenderWithCoreControls({ full: true }).catch((err) => {
+          console.error('Core rerender failed:', err);
+        });
       } else {
         updateFull();
       }
@@ -7489,6 +7622,10 @@
         if (coreReprocessTimer) {
           clearTimeout(coreReprocessTimer);
           coreReprocessTimer = null;
+        }
+        if (step2AutoConvertTimer) {
+          clearTimeout(step2AutoConvertTimer);
+          step2AutoConvertTimer = null;
         }
         displayNegative(state.originalImageData);
         updateAutoFrameButtons();
@@ -7535,6 +7672,10 @@
       if (coreReprocessTimer) {
         clearTimeout(coreReprocessTimer);
         coreReprocessTimer = null;
+      }
+      if (step2AutoConvertTimer) {
+        clearTimeout(step2AutoConvertTimer);
+        step2AutoConvertTimer = null;
       }
 
       // Reset UI
@@ -7968,7 +8109,6 @@
         rotationAngle: safe.rotationAngle || 0,
         autoFrameMeta: state.autoFrame.lastDiagnostics ? { ...state.autoFrame.lastDiagnostics } : null,
         filmType: safe.filmType,
-        filmPreset: safe.filmPreset,
         filmBase: { ...safe.filmBase },
         lensCorrection: {
           enabled: Boolean(safe.lensCorrection.enabled),
@@ -7978,8 +8118,11 @@
           lastError: safe.lensCorrection.lastError || ''
         },
         coreColorModel: safe.coreColorModel,
+        coreEnhancedProfile: safe.coreEnhancedProfile,
+        coreProfileStrength: safe.coreProfileStrength,
         corePreSaturation: safe.corePreSaturation,
         coreBorderBuffer: safe.coreBorderBuffer,
+        coreBorderBufferBorderValue: safe.coreBorderBufferBorderValue,
         coreBrightness: safe.coreBrightness,
         coreExposure: safe.coreExposure,
         coreContrast: safe.coreContrast,
@@ -8030,7 +8173,6 @@
         rotationAngle: safe.rotationAngle,
         autoFrameMeta: safe.autoFrameMeta ? { ...safe.autoFrameMeta } : null,
         filmType: safe.filmType,
-        filmPreset: safe.filmPreset,
         filmBase: { ...safe.filmBase },
         lensCorrection: {
           enabled: Boolean(safe.lensCorrection.enabled),
@@ -8040,8 +8182,11 @@
           lastError: safe.lensCorrection.lastError || ''
         },
         coreColorModel: safe.coreColorModel,
+        coreEnhancedProfile: safe.coreEnhancedProfile,
+        coreProfileStrength: safe.coreProfileStrength,
         corePreSaturation: safe.corePreSaturation,
         coreBorderBuffer: safe.coreBorderBuffer,
+        coreBorderBufferBorderValue: safe.coreBorderBufferBorderValue,
         coreBrightness: safe.coreBrightness,
         coreExposure: safe.coreExposure,
         coreContrast: safe.coreContrast,
@@ -8356,11 +8501,9 @@
       }
       workingData = await applyLensCorrectionWithSettings(workingData, safeSettings, { updateUi: false });
 
-      const preset = getPresetOrFallback(safeSettings.filmPreset, safeSettings.filmType);
-      const processed = convertFrameWithRouter({
+      const processed = await convertFrameWithRouter({
         imageData: workingData,
-        settings: buildRouterSettings(safeSettings),
-        preset
+        settings: buildRouterSettings(safeSettings)
       });
 
       return applyAdjustmentsWithSettings(processed, safeSettings);
@@ -8375,18 +8518,20 @@
 
     // Create default settings with auto-detected film base
     function createDefaultSettings(imageData) {
-      const filmBase = autoDetectFilmBase(imageData);
+      const filmBase = autoDetectFilmBase(imageData, 10);
       return {
         cropRegion: null,
         rotationAngle: 0,
         autoFrameMeta: null,
         filmType: 'color',
-        filmPreset: 'generic_color',
         filmBase: filmBase,
         lensCorrection: createDefaultLensCorrectionSettings(),
         coreColorModel: 'standard',
+        coreEnhancedProfile: 'none',
+        coreProfileStrength: 100,
         corePreSaturation: 100,
         coreBorderBuffer: 10,
+        coreBorderBufferBorderValue: 10,
         coreBrightness: 0,
         coreExposure: 0,
         coreContrast: 0,
@@ -8453,12 +8598,10 @@
       }
       workingData = await applyLensCorrectionWithSettings(workingData, settings, { updateUi: false });
 
-      const preset = getPresetOrFallback(settings.filmPreset, settings.filmType);
       // Convert negative/positive via unified conversion router.
-      const processed = convertFrameWithRouter({
+      const processed = await convertFrameWithRouter({
         imageData: workingData,
-        settings: buildRouterSettings(settings),
-        preset
+        settings: buildRouterSettings(settings)
       });
 
       // Apply adjustments
@@ -8695,7 +8838,6 @@
 
       // Restore film settings
       state.filmType = sanitizePresetType(safe.filmType || 'color');
-      state.filmPreset = resolvePresetId(safe.filmPreset) || getDefaultPresetForType(state.filmType);
       state.filmBase = { ...safe.filmBase };
       state.filmBaseSet = true;
       state.lensCorrection.enabled = Boolean(safe.lensCorrection.enabled);
@@ -8716,8 +8858,11 @@
 
       // Restore adjustments
       state.coreColorModel = safe.coreColorModel;
+      state.coreEnhancedProfile = safe.coreEnhancedProfile;
+      state.coreProfileStrength = safe.coreProfileStrength;
       state.corePreSaturation = safe.corePreSaturation;
       state.coreBorderBuffer = safe.coreBorderBuffer;
+      state.coreBorderBufferBorderValue = safe.coreBorderBufferBorderValue;
       state.coreBrightness = safe.coreBrightness;
       state.coreExposure = safe.coreExposure;
       state.coreContrast = safe.coreContrast;
@@ -8770,12 +8915,6 @@
       syncAllCheckboxesFromState();
 
       // Update film type buttons
-      const preset = getPresetOrFallback(state.filmPreset, state.filmType);
-      state.filmPreset = preset ? preset.id : getDefaultPresetForType(state.filmType);
-      if (preset && state.filmType !== preset.type) {
-        state.filmType = preset.type;
-      }
-      renderPresetOptions(state.filmPreset);
       setFilmTypeButtons(state.filmType);
       updateFilmModeUI();
       updateLensCorrectionUI();
@@ -9066,9 +9205,55 @@
     const folderInput = document.getElementById('folderInput');
     const uploadBtn = document.getElementById('uploadBtn');
     const uploadFolderBtn = document.getElementById('uploadFolderBtn');
+    const folderPickerHint = document.getElementById('folderPickerHint');
 
-    uploadBtn.addEventListener('click', () => fileInput.click());
-    uploadFolderBtn.addEventListener('click', () => folderInput.click());
+    function supportsFolderPicker() {
+      return !!(folderInput && ('webkitdirectory' in folderInput));
+    }
+
+    function handleUploadLabelKeydown(e) {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      const label = e.currentTarget;
+      if (!label || label.getAttribute('aria-disabled') === 'true') return;
+      const inputId = label.getAttribute('for');
+      if (!inputId) return;
+      const input = document.getElementById(inputId);
+      if (!input) return;
+      e.preventDefault();
+      input.value = '';
+      input.click();
+    }
+
+    function applyFolderPickerAvailability() {
+      if (!uploadFolderBtn) return;
+      if (supportsFolderPicker()) {
+        uploadFolderBtn.classList.remove('is-disabled');
+        uploadFolderBtn.removeAttribute('aria-disabled');
+        uploadFolderBtn.setAttribute('for', 'folderInput');
+        uploadFolderBtn.tabIndex = 0;
+        if (folderPickerHint) folderPickerHint.classList.remove('visible');
+        return;
+      }
+      uploadFolderBtn.classList.add('is-disabled');
+      uploadFolderBtn.setAttribute('aria-disabled', 'true');
+      uploadFolderBtn.removeAttribute('for');
+      uploadFolderBtn.tabIndex = -1;
+      if (folderPickerHint) folderPickerHint.classList.add('visible');
+    }
+
+    [uploadBtn, uploadFolderBtn].forEach(label => {
+      if (!label) return;
+      label.addEventListener('keydown', handleUploadLabelKeydown);
+    });
+
+    applyFolderPickerAvailability();
+
+    fileInput.addEventListener('click', () => {
+      fileInput.value = '';
+    });
+    folderInput.addEventListener('click', () => {
+      folderInput.value = '';
+    });
 
     fileInput.addEventListener('change', (e) => {
       const files = Array.from(e.target.files);
