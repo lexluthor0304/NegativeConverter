@@ -1,5 +1,7 @@
 import { Engine } from '../silvercore/engine/Engine.js';
 
+const ENHANCED_PROFILE_SET = new Set(['none', 'frontier', 'crystal', 'natural', 'pakon']);
+
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
@@ -27,6 +29,47 @@ function normalizeCurvePrecision(value) {
   return 'auto';
 }
 
+function normalizeEnhancedProfile(value) {
+  const normalized = String(value || 'none');
+  return ENHANCED_PROFILE_SET.has(normalized) ? normalized : 'none';
+}
+
+function sanitizeFilmBase(base) {
+  if (!base || typeof base !== 'object') return null;
+  const r = Number(base.r);
+  const g = Number(base.g);
+  const b = Number(base.b);
+  if (!Number.isFinite(r) || !Number.isFinite(g) || !Number.isFinite(b)) return null;
+  return {
+    r: clamp(Math.round(r), 0, 255),
+    g: clamp(Math.round(g), 0, 255),
+    b: clamp(Math.round(b), 0, 255),
+  };
+}
+
+function computeFilmBaseGains(base) {
+  const safeBase = sanitizeFilmBase(base);
+  if (!safeBase) return null;
+  const gray = (safeBase.r + safeBase.g + safeBase.b) / 3;
+  if (!Number.isFinite(gray) || gray <= 0) return null;
+  return {
+    r: clamp(gray / Math.max(safeBase.r, 1), 0.25, 4),
+    g: clamp(gray / Math.max(safeBase.g, 1), 0.25, 4),
+    b: clamp(gray / Math.max(safeBase.b, 1), 0.25, 4),
+  };
+}
+
+function applyFilmBaseCompensationInPlace(imageData, gains) {
+  if (!imageData || !imageData.data || !gains) return imageData;
+  const { data } = imageData;
+  for (let i = 0; i < data.length; i += 4) {
+    data[i] = clamp(Math.round(data[i] * gains.r), 0, 255);
+    data[i + 1] = clamp(Math.round(data[i + 1] * gains.g), 0, 255);
+    data[i + 2] = clamp(Math.round(data[i + 2] * gains.b), 0, 255);
+  }
+  return imageData;
+}
+
 function buildSilverCoreParams(mode, settings = {}) {
   const colorModel = String(settings.colorModel || 'standard');
   const resolvedColorModel = mode === 'bw' ? 'mono' : colorModel;
@@ -51,6 +94,8 @@ function buildSilverCoreParams(mode, settings = {}) {
     curvePrecision: normalizeCurvePrecision(settings.curvePrecision),
     source: String(settings.source || 'cameraScan'),
     useWebGL: settings.useWebGL !== false,
+    enhancedProfile: normalizeEnhancedProfile(settings.enhancedProfile),
+    profileStrength: Math.round(sanitizeNumber(settings.profileStrength, 100, 0, 200)),
   };
 }
 
@@ -65,18 +110,32 @@ function toGrayscaleInPlace(imageData) {
   return imageData;
 }
 
-function runSilverCore(imageData, settings, mode) {
+async function runSilverCore(imageData, settings, mode) {
   const input = cloneImageData(imageData);
   const params = buildSilverCoreParams(mode, settings);
+  if (mode === 'color') {
+    const filmBaseGains = computeFilmBaseGains(settings && settings.filmBase);
+    if (filmBaseGains) {
+      applyFilmBaseCompensationInPlace(input, filmBaseGains);
+    }
+  }
   const engine = new Engine(input.width, input.height);
+  try {
+    await engine.setEnhancedProfile(params.enhancedProfile);
+  } catch (err) {
+    console.error('Failed to load enhanced profile, fallback to none:', err);
+    params.enhancedProfile = 'none';
+    params.profileStrength = 0;
+    await engine.setEnhancedProfile('none');
+  }
   const processed = engine.process(input, params);
   return mode === 'bw' ? toGrayscaleInPlace(processed) : processed;
 }
 
-export function convertColorWithSilverCore(imageData, settings = {}) {
+export async function convertColorWithSilverCore(imageData, settings = {}) {
   return runSilverCore(imageData, settings, 'color');
 }
 
-export function convertBwWithSilverCore(imageData, settings = {}) {
+export async function convertBwWithSilverCore(imageData, settings = {}) {
   return runSilverCore(imageData, settings, 'bw');
 }
