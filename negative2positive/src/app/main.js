@@ -162,7 +162,13 @@
         coreModelCineLog: "电影 Log",
         coreModelCineRich: "电影浓郁",
         coreModelCineFlat: "电影平坦",
+        coreModelNoritsu: "Noritsu",
         coreModelNeutral: "中性",
+        filmPresetLabel: "胶片预设",
+        presetNone: "无（手动）",
+        presetGroupColor: "彩色",
+        presetGroupBW: "黑白",
+        presetGroupPositive: "正片",
         corePreSaturation: "预饱和度",
         coreBorderBuffer: "边框缓冲 %",
         coreBrightness: "亮度",
@@ -437,7 +443,13 @@
         coreModelCineLog: "Cine Log",
         coreModelCineRich: "Cine Rich",
         coreModelCineFlat: "Cine Flat",
+        coreModelNoritsu: "Noritsu",
         coreModelNeutral: "Neutral",
+        filmPresetLabel: "Film Preset",
+        presetNone: "None (Manual)",
+        presetGroupColor: "Color",
+        presetGroupBW: "B&W",
+        presetGroupPositive: "Positive",
         corePreSaturation: "Pre-Saturation",
         coreBorderBuffer: "Border Buffer %",
         coreBrightness: "Brightness",
@@ -712,7 +724,13 @@
         coreModelCineLog: "シネログ",
         coreModelCineRich: "シネリッチ",
         coreModelCineFlat: "シネフラット",
+        coreModelNoritsu: "Noritsu",
         coreModelNeutral: "ニュートラル",
+        filmPresetLabel: "フィルムプリセット",
+        presetNone: "なし（手動）",
+        presetGroupColor: "カラー",
+        presetGroupBW: "白黒",
+        presetGroupPositive: "ポジ",
         corePreSaturation: "事前彩度",
         coreBorderBuffer: "境界バッファ %",
         coreBrightness: "明るさ",
@@ -884,10 +902,8 @@
       aspect: 0.12
     };
     const CORE_ENHANCED_PROFILE_OPTIONS = new Set(['none', 'frontier', 'crystal', 'natural', 'pakon']);
-    const CORE_COLOR_MODEL_OPTIONS = new Set(['frontier', 'standard', 'warm', 'mono', 'cine-log', 'cine-rich', 'cine-flat', 'neutral']);
-    const CORE_COLOR_MODEL_MIGRATION_MAP = Object.freeze({
-      noritsu: 'standard'
-    });
+    const CORE_COLOR_MODEL_OPTIONS = new Set(['frontier', 'standard', 'warm', 'mono', 'noritsu', 'cine-log', 'cine-rich', 'cine-flat', 'neutral']);
+    const CORE_COLOR_MODEL_MIGRATION_MAP = Object.freeze({});
     let opencvReadyPromise = null;
     let opencvActiveSource = null;
     const STEP3_GUIDE_COLLAPSED_SESSION_KEY = 'nc_step3_guide_collapsed_v1';
@@ -2074,6 +2090,7 @@
       rawMetadata: null,
 
       // SilverCore conversion controls (for color/bw negatives)
+      coreFilmPreset: 'none',
       coreColorModel: 'standard',
       coreEnhancedProfile: 'none',
       coreProfileStrength: 100,
@@ -2768,6 +2785,7 @@
         filmType,
         filmBase: sanitizeFilmBase(source.filmBase, fallbackSettings.filmBase),
         lensCorrection: sanitizeLensCorrection(source.lensCorrection, fallbackSettings.lensCorrection),
+        coreFilmPreset: String(source.coreFilmPreset || fallbackSettings.coreFilmPreset || 'none'),
         coreColorModel: sanitizeCoreColorModel(
           source.coreColorModel,
           sanitizeCoreColorModel(fallbackSettings.coreColorModel, 'standard')
@@ -2867,6 +2885,7 @@
 
       return {
         ...safe,
+        filmPreset: safe.coreFilmPreset || 'none',
         colorModel: safe.coreColorModel,
         enhancedProfile: safe.coreEnhancedProfile,
         profileStrength: safe.coreProfileStrength,
@@ -5938,6 +5957,44 @@
       scheduleSilverSourceRefresh();
     }
 
+    function handleFilmPresetChange(presetId) {
+      if (!presetId || presetId === 'none') {
+        // Switching back to manual - just reprocess
+        scheduleSilverSourceRefresh();
+        return;
+      }
+      // Import preset data dynamically (it's already bundled)
+      import('../silvercore/engine/FilmPresets.js').then(({ filmPresets }) => {
+        const preset = filmPresets[presetId];
+        if (!preset) {
+          scheduleSilverSourceRefresh();
+          return;
+        }
+        const s = preset.settings;
+        // Update enhanced profile
+        if (s.enhancedProfile) {
+          state.coreEnhancedProfile = s.enhancedProfile;
+          const epSelect = document.getElementById('coreEnhancedProfile');
+          if (epSelect) epSelect.value = s.enhancedProfile;
+        }
+        // Update saturation slider
+        if (s.saturation !== undefined) {
+          state.coreSaturation = s.saturation;
+          syncSliderFromState('coreSaturation');
+        }
+        // Update glow/fade sliders
+        if (s.glow !== undefined) { state.coreGlow = s.glow; syncSliderFromState('coreGlow'); }
+        if (s.fade !== undefined) { state.coreFade = s.fade; syncSliderFromState('coreFade'); }
+        // Update tone sliders
+        if (s.shadows !== undefined) { state.coreShadows = s.shadows; syncSliderFromState('coreShadows'); }
+        if (s.highlights !== undefined) { state.coreHighlights = s.highlights; syncSliderFromState('coreHighlights'); }
+        if (s.blacks !== undefined) { state.coreBlacks = s.blacks; syncSliderFromState('coreBlacks'); }
+        if (s.whites !== undefined) { state.coreWhites = s.whites; syncSliderFromState('coreWhites'); }
+
+        scheduleSilverSourceRefresh();
+      });
+    }
+
     setupSlider('coreProfileStrength', 'coreProfileStrength', coreReprocessHandlers);
     setupSlider('corePreSaturation', 'corePreSaturation', coreReprocessHandlers);
     setupSlider('coreBorderBuffer', 'coreBorderBuffer', coreBorderBufferHandlers);
@@ -5955,6 +6012,9 @@
     setupSlider('coreFade', 'coreFade', coreReprocessHandlers);
     setupSelect('coreColorModelStep2', 'coreColorModel', {
       onChange: handleCoreColorModelChange
+    });
+    setupSelect('filmPreset', 'coreFilmPreset', {
+      onChange: handleFilmPresetChange
     });
     setupSelect('coreEnhancedProfile', 'coreEnhancedProfile', {
       onChange: () => scheduleCoreReprocess({ full: true })
@@ -7546,6 +7606,7 @@
     // ===========================================
     document.getElementById('resetBtn').addEventListener('click', () => {
       // Reset adjustments only
+      state.coreFilmPreset = 'none';
       state.coreColorModel = 'standard';
       state.coreEnhancedProfile = 'none';
       state.coreProfileStrength = 100;
@@ -8117,6 +8178,7 @@
           modes: { ...safe.lensCorrection.modes },
           lastError: safe.lensCorrection.lastError || ''
         },
+        coreFilmPreset: safe.coreFilmPreset,
         coreColorModel: safe.coreColorModel,
         coreEnhancedProfile: safe.coreEnhancedProfile,
         coreProfileStrength: safe.coreProfileStrength,
@@ -8181,6 +8243,7 @@
           modes: { ...safe.lensCorrection.modes },
           lastError: safe.lensCorrection.lastError || ''
         },
+        coreFilmPreset: safe.coreFilmPreset,
         coreColorModel: safe.coreColorModel,
         coreEnhancedProfile: safe.coreEnhancedProfile,
         coreProfileStrength: safe.coreProfileStrength,
@@ -8526,6 +8589,7 @@
         filmType: 'color',
         filmBase: filmBase,
         lensCorrection: createDefaultLensCorrectionSettings(),
+        coreFilmPreset: 'none',
         coreColorModel: 'standard',
         coreEnhancedProfile: 'none',
         coreProfileStrength: 100,
@@ -8857,6 +8921,7 @@
         : {};
 
       // Restore adjustments
+      state.coreFilmPreset = safe.coreFilmPreset || 'none';
       state.coreColorModel = safe.coreColorModel;
       state.coreEnhancedProfile = safe.coreEnhancedProfile;
       state.coreProfileStrength = safe.coreProfileStrength;

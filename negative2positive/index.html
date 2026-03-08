@@ -382,7 +382,7 @@
       position: relative;
       overflow: hidden;
       height: 100%;
-      max-height: calc(var(--viewport-h) - 120px); /* Account for header and footer */
+      max-height: calc(var(--viewport-h) - 96px); /* Account for header and footer */
       min-height: 0;
     }
 
@@ -699,7 +699,7 @@
       display: flex;
       flex-direction: column;
       height: 100%;
-      max-height: calc(var(--viewport-h) - 120px); /* Account for header and footer */
+      max-height: calc(var(--viewport-h) - 96px); /* Account for header and footer */
       min-height: 0;
     }
 
@@ -2163,9 +2163,8 @@
         width: 100%;
       }
 
-      .copyright {
-        padding: 10px calc(10px + var(--safe-right)) calc(10px + var(--safe-bottom)) calc(10px + var(--safe-left));
-        font-size: 12px;
+      .header-copyright {
+        display: none;
       }
     }
 
@@ -2186,28 +2185,21 @@
       }
     }
 
-    /* Copyright Footer */
-    .copyright {
-      flex-shrink: 0;
-      text-align: center;
-      padding: 12px 16px;
-      font-size: 13px;
-      color: var(--text-secondary);
-      background: var(--bg-secondary);
-      border-top: 1px solid var(--border);
+    /* Header Copyright */
+    .header-copyright {
+      font-size: 11px;
+      color: var(--text-muted);
+      white-space: nowrap;
     }
-    .copyright a {
-      color: var(--accent);
+    .header-copyright a {
+      color: var(--text-secondary);
       text-decoration: none;
     }
-    .copyright a:hover {
+    .header-copyright a:hover {
       text-decoration: underline;
     }
-    .copyright .github-link {
-      display: inline-block;
-      margin-left: 12px;
-      vertical-align: middle;
-      height: 28px;
+    .header-copyright .github-link {
+      margin-left: 8px;
     }
   </style>
 
@@ -2224,6 +2216,10 @@
     <div class="header-left">
       <h1 class="app-title" data-i18n="title">Negative Converter</h1>
       <span class="build-badge" id="buildBadge" style="display: none;"></span>
+      <span class="header-copyright">
+        © 2025 <a href="https://neoanaloglab.com" target="_blank">neoanaloglab.com</a>
+        <a class="github-link" href="https://github.com/lexluthor0304/NegativeConverter" target="_blank" rel="noopener">GitHub</a>
+      </span>
     </div>
     <div class="lang-selector">
       <button class="lang-btn" data-lang="zh">中文</button>
@@ -2469,6 +2465,7 @@
             </div>
             <select class="preset-select" id="coreColorModelStep2">
               <option value="frontier">Frontier</option>
+              <option value="noritsu">Noritsu</option>
               <option value="standard" selected data-i18n="coreModelStandard">Standard</option>
               <option value="warm" data-i18n="coreModelWarm">Warm</option>
               <option value="mono" data-i18n="coreModelMono">Mono</option>
@@ -2476,6 +2473,57 @@
               <option value="cine-rich" data-i18n="coreModelCineRich">Cine Rich</option>
               <option value="cine-flat" data-i18n="coreModelCineFlat">Cine Flat</option>
               <option value="neutral" data-i18n="coreModelNeutral">Neutral</option>
+            </select>
+          </div>
+          <div class="slider-control" id="filmPresetControl">
+            <div class="slider-header">
+              <span class="slider-label" data-i18n="filmPresetLabel">Film Preset</span>
+            </div>
+            <select class="preset-select" id="filmPreset">
+              <option value="none" selected data-i18n="presetNone">None (Manual)</option>
+              <optgroup label="Color" data-i18n-label="presetGroupColor">
+                <option value="frontier-lab">Frontier Lab</option>
+                <option value="noritsu-lab">Noritsu Lab</option>
+                <option value="portra-classic">Portra Classic</option>
+                <option value="gold-warm">Gold Warm</option>
+                <option value="superia-vivid">Superia Vivid</option>
+                <option value="crystal-archive">Crystal Archive</option>
+                <option value="cinema-stock">Cinema Stock</option>
+                <option value="standard-auto">Standard Auto</option>
+                <option value="rich-depth">Rich Depth</option>
+                <option value="neutral-clean">Neutral Clean</option>
+                <option value="clean-contrast">Clean Contrast</option>
+                <option value="bold-contrast">Bold Contrast</option>
+                <option value="portrait-warm">Portrait Warm</option>
+                <option value="fashion-tone">Fashion Tone</option>
+                <option value="scanner-rich">Scanner Rich</option>
+                <option value="standard-flat">Standard Flat</option>
+              </optgroup>
+              <optgroup label="B&W" data-i18n-label="presetGroupBW">
+                <option value="selenium-cold">Selenium Cold</option>
+                <option value="selenium-warm">Selenium Warm</option>
+                <option value="warmtone">Warmtone</option>
+                <option value="cooltone">Cooltone</option>
+                <option value="palladium">Palladium</option>
+                <option value="fomatone">Fomatone</option>
+                <option value="kodak-brown">Kodak Brown</option>
+                <option value="sepia-classic">Sepia Classic</option>
+                <option value="sepia-deep">Sepia Deep</option>
+                <option value="cyanotype">Cyanotype</option>
+                <option value="platinum">Platinum</option>
+                <option value="cold-neutral">Cold Neutral</option>
+                <option value="warm-neutral">Warm Neutral</option>
+                <option value="high-contrast-bw">High Contrast</option>
+                <option value="soft-bw">Soft B&W</option>
+                <option value="filmic-bw">Filmic B&W</option>
+                <option value="rich-bw">Rich B&W</option>
+                <option value="flat-bw">Flat B&W</option>
+              </optgroup>
+              <optgroup label="Positive" data-i18n-label="presetGroupPositive">
+                <option value="slide-neutral">Slide Neutral</option>
+                <option value="slide-rich">Slide Rich</option>
+                <option value="slide-soft">Slide Soft</option>
+              </optgroup>
             </select>
           </div>
           <div class="lens-correction-panel" id="lensCorrectionPanel">
@@ -2898,10 +2946,6 @@
     </div>
   </div>
 
-  <div class="copyright">
-    © 2025 Negative Converter. <a href="https://neoanaloglab.com" target="_blank">neoanaloglab.com</a> All rights reserved.
-    <a class="github-link" href="https://github.com/lexluthor0304/NegativeConverter" target="_blank" rel="noopener">GitHub</a>
-  </div>
 
   <script type="module" src="./src/app/main.js"></script>
 </body>

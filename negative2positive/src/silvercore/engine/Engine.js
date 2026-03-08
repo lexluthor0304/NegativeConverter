@@ -144,8 +144,14 @@ export class Engine {
     const model = colorModels[params.colorModel] || colorModels.basic
     const pStr = (params.profileStrength ?? 100) / 100
 
-    const tempVal = (params.temperature || 0) + autoColor.tempCorrection + (model.defaultTemp || 0) * pStr
-    const tintVal = (params.tint || 0) + autoColor.tintCorrection + (model.defaultTint || 0) * pStr
+    // wbTonality scaling for autoColor correction
+    const wbTonality = params.wbTonality || 'addDensity'
+    const tonalityScale = wbTonality === 'addDensity' ? 1.2
+      : wbTonality === 'subtractDensity' ? 0.8
+      : 1.0
+
+    const tempVal = (params.temperature || 0) + autoColor.tempCorrection * tonalityScale + (model.defaultTemp || 0) * pStr
+    const tintVal = (params.tint || 0) + autoColor.tintCorrection * tonalityScale + (model.defaultTint || 0) * pStr
 
     return {
       toneProfile,
@@ -161,23 +167,26 @@ export class Engine {
       temp: tempVal,
       tint: tintVal,
       temperature: params.temperature || 0,
-      cyan: (autoColor.cyanCorrection || 0) + (model.defaultCyan || 0) * pStr,
+      cyan: (autoColor.cyanCorrection || 0) * tonalityScale + (model.defaultCyan || 0) * pStr,
       wbTemp: tempVal,
       wbTint: tintVal,
       wbMethod: params.wbMode || 'linearFixed',
-      layerOrder: 'colorFirst',
+      layerOrder: params.layerOrder || 'colorFirst',
       softHigh: 0,
       softLow: 0,
       softHighlights: false,
       softShadows: false,
-      shadowRange: 5,
-      highlightRange: 5,
-      shadowCyan: (model.defaultShadowsCyan || 0) * pStr,
-      shadowTint: (model.defaultShadowsTint || 0) * pStr,
-      shadowTemp: (model.defaultShadowsTemp || 0) * pStr,
-      highlightCyan: (model.defaultHighlightsCyan || 0) * pStr,
-      highlightTint: (model.defaultHighlightsTint || 0) * pStr,
-      highlightTemp: (model.defaultHighlightsTemp || 0) * pStr,
+      shadowRange: params.shadowRange ?? 5,
+      highlightRange: params.highlightRange ?? 5,
+      shadowCyan: (params.shadowCyan || 0) + (model.defaultShadowsCyan || 0) * pStr,
+      shadowTint: (params.shadowTint || 0) + (model.defaultShadowsTint || 0) * pStr,
+      shadowTemp: (params.shadowTemp || 0) + (model.defaultShadowsTemp || 0) * pStr,
+      highlightCyan: (params.highlightCyan || 0) + (model.defaultHighlightsCyan || 0) * pStr,
+      highlightTint: (params.highlightTint || 0) + (model.defaultHighlightsTint || 0) * pStr,
+      highlightTemp: (params.highlightTemp || 0) + (model.defaultHighlightsTemp || 0) * pStr,
+      midCyan: params.midCyan || 0,
+      midTint: params.midTint || 0,
+      midTemp: params.midTemp || 0,
       curvePrecision: params.curvePrecision || 'auto',
       borderBuffer: params.borderBuffer || 10,
       colorModel: params.colorModel || 'standard',

@@ -317,6 +317,26 @@ function shadowColorLayer(channels, settings) {
   });
 }
 
+function midtoneColorLayer(channels, settings) {
+  const colorScale = 0.1;
+  const midCenter = 0.5;
+  const midWidth = 0.35;
+  const colorSettings = [-(settings.midCyan ?? 0), -(settings.midTint ?? 0), -(settings.midTemp ?? 0)];
+
+  return mapChannels(channels, (x, ch) => {
+    const colorVal = colorSettings[ch - 1];
+    if (colorVal === 0) return x;
+
+    // Bell-curve weight centered at midCenter
+    const dist = (x - midCenter) / midWidth;
+    const weight = Math.exp(-0.5 * dist * dist);
+    if (weight < 0.01) return x;
+
+    const shift = colorVal * colorScale * weight / 255;
+    return clamp01(x + shift);
+  });
+}
+
 function highlightColorLayer(channels, settings) {
   const midpoint = 0.75;
   const colorScale = 0.125;
@@ -500,6 +520,9 @@ export function generateCurves(channelData, settings) {
   }
   if ((settings.shadowCyan ?? 0) !== 0 || (settings.shadowTint ?? 0) !== 0 || (settings.shadowTemp ?? 0) !== 0) {
     curve = shadowColorLayer(curve, settings);
+  }
+  if ((settings.midCyan ?? 0) !== 0 || (settings.midTint ?? 0) !== 0 || (settings.midTemp ?? 0) !== 0) {
+    curve = midtoneColorLayer(curve, settings);
   }
 
   // 8. Invert (negative -> positive)
