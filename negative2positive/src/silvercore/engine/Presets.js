@@ -132,6 +132,7 @@ export const colorModelToToneProfile = {
   standard: 'standard',
   warm: 'standard',
   mono: 'standard',
+  noritsu: 'standard',
   'cine-log': 'filmic',
   'cine-rich': 'filmic_rich',
   'cine-flat': 'filmic_flat',
@@ -175,6 +176,17 @@ export const colorModels = {
     defaultHighlightsTemp: 0, defaultHighlightsTint: 0, defaultHighlightsCyan: 0,
     blackThreshold: 0.002, whiteThreshold: 0.002,
     hslAdjustments: null,
+  },
+  noritsu: {
+    defaultTemp: 0, defaultTint: 0, defaultCyan: 0,
+    defaultShadowsTemp: 0, defaultShadowsTint: 0, defaultShadowsCyan: 0,
+    defaultHighlightsTemp: 0, defaultHighlightsTint: 0, defaultHighlightsCyan: 0,
+    blackThreshold: 0.002, whiteThreshold: 0.002,
+    hslAdjustments: {
+      redHue: 15, redSaturation: -4,
+      greenHue: 0, greenSaturation: 0,
+      blueHue: -10, blueSaturation: 0,
+    },
   },
 };
 
