@@ -1,4 +1,5 @@
 import { Engine } from '../silvercore/engine/Engine.js';
+import { filmPresets } from '../silvercore/engine/FilmPresets.js';
 
 const ENHANCED_PROFILE_SET = new Set(['none', 'frontier', 'crystal', 'natural', 'pakon']);
 
@@ -70,32 +71,53 @@ function applyFilmBaseCompensationInPlace(imageData, gains) {
   return imageData;
 }
 
+function applyFilmPreset(baseSettings, presetId) {
+  if (!presetId || presetId === 'none') return baseSettings;
+  const preset = filmPresets[presetId];
+  if (!preset) return baseSettings;
+  return { ...baseSettings, ...preset.settings };
+}
+
 function buildSilverCoreParams(mode, settings = {}) {
-  const colorModel = String(settings.colorModel || 'standard');
+  const merged = applyFilmPreset(settings, settings.filmPreset);
+  const colorModel = String(merged.colorModel || 'standard');
   const resolvedColorModel = mode === 'bw' ? 'mono' : colorModel;
 
   return {
     colorModel: resolvedColorModel,
-    preSaturation: Math.round(sanitizeNumber(settings.preSaturation, 100, 0, 200)),
-    borderBuffer: Math.round(sanitizeNumber(settings.borderBuffer, 10, 0, 30)),
-    brightness: sanitizeNumber(settings.brightness, 0, -100, 100),
-    exposure: sanitizeNumber(settings.exposure, 0, -300, 300),
-    contrast: sanitizeNumber(settings.contrast, 0, -100, 100),
-    highlights: sanitizeNumber(settings.highlights, 0, -100, 100),
-    shadows: sanitizeNumber(settings.shadows, 0, -100, 100),
-    whites: sanitizeNumber(settings.whites, 0, -100, 100),
-    blacks: sanitizeNumber(settings.blacks, 0, -100, 100),
-    wbMode: String(settings.wbMode || 'auto'),
-    temperature: sanitizeNumber(settings.temperature, 0, -100, 100),
-    tint: sanitizeNumber(settings.tint, 0, -100, 100),
-    saturation: normalizeSaturation(settings.saturation),
-    glow: sanitizeNumber(settings.glow, 0, 0, 100),
-    fade: sanitizeNumber(settings.fade, 0, 0, 100),
-    curvePrecision: normalizeCurvePrecision(settings.curvePrecision),
-    source: String(settings.source || 'cameraScan'),
-    useWebGL: settings.useWebGL !== false,
-    enhancedProfile: normalizeEnhancedProfile(settings.enhancedProfile),
-    profileStrength: Math.round(sanitizeNumber(settings.profileStrength, 100, 0, 200)),
+    preSaturation: Math.round(sanitizeNumber(merged.preSaturation, 100, 0, 200)),
+    borderBuffer: Math.round(sanitizeNumber(merged.borderBuffer, 10, 0, 30)),
+    brightness: sanitizeNumber(merged.brightness, 0, -100, 100),
+    exposure: sanitizeNumber(merged.exposure, 0, -300, 300),
+    contrast: sanitizeNumber(merged.contrast, 0, -100, 100),
+    highlights: sanitizeNumber(merged.highlights, 0, -100, 100),
+    shadows: sanitizeNumber(merged.shadows, 0, -100, 100),
+    whites: sanitizeNumber(merged.whites, 0, -100, 100),
+    blacks: sanitizeNumber(merged.blacks, 0, -100, 100),
+    wbMode: String(merged.wbMode || 'auto'),
+    temperature: sanitizeNumber(merged.temperature, 0, -100, 100),
+    tint: sanitizeNumber(merged.tint, 0, -100, 100),
+    saturation: normalizeSaturation(merged.saturation),
+    glow: sanitizeNumber(merged.glow, 0, 0, 100),
+    fade: sanitizeNumber(merged.fade, 0, 0, 100),
+    curvePrecision: normalizeCurvePrecision(merged.curvePrecision),
+    source: String(merged.source || 'cameraScan'),
+    useWebGL: merged.useWebGL !== false,
+    enhancedProfile: normalizeEnhancedProfile(merged.enhancedProfile),
+    profileStrength: Math.round(sanitizeNumber(merged.profileStrength, 100, 0, 200)),
+    midCyan: sanitizeNumber(merged.midCyan, 0, -100, 100),
+    midTint: sanitizeNumber(merged.midTint, 0, -100, 100),
+    midTemp: sanitizeNumber(merged.midTemp, 0, -100, 100),
+    shadowRange: sanitizeNumber(merged.shadowRange, 5, 0, 10),
+    highlightRange: sanitizeNumber(merged.highlightRange, 5, 0, 10),
+    wbTonality: String(merged.wbTonality || 'addDensity'),
+    shadowCyan: sanitizeNumber(merged.shadowCyan, 0, -100, 100),
+    shadowTint: sanitizeNumber(merged.shadowTint, 0, -100, 100),
+    shadowTemp: sanitizeNumber(merged.shadowTemp, 0, -100, 100),
+    highlightCyan: sanitizeNumber(merged.highlightCyan, 0, -100, 100),
+    highlightTint: sanitizeNumber(merged.highlightTint, 0, -100, 100),
+    highlightTemp: sanitizeNumber(merged.highlightTemp, 0, -100, 100),
+    layerOrder: String(merged.layerOrder || 'colorFirst'),
   };
 }
 
