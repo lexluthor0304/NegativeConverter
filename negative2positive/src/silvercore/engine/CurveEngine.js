@@ -79,13 +79,16 @@ function prepareSettings(channelData, settings) {
 
   let autoGamma = 1;
   if (profile.autoTone) {
-    autoGamma = autoToneGamma(channelData);
+    const rawGamma = autoToneGamma(channelData);
+    const autoToneLevel = settings.autoToneLevel ?? 1;
+    autoGamma = 1 + (rawGamma - 1) * autoToneLevel;
   }
 
   return {
     cyan: 1 - (settings.temp || 0) * 0.01,
     tint: 1 - (settings.tint || 0) * 0.01,
     temp: 1 - (settings.temperature || 0) * 0.01,
+    wbCyan: -(settings.wbCyan || 0) / 255,
     wbTint: -(settings.wbTint || 0) / 255,
     wbTemp: -(settings.wbTemp || 0) / 255,
     brightness: (1 / (1 + (settings.brightness || 0) * 0.02)) *
@@ -254,14 +257,8 @@ function whitesLayer(channels, settings, prepared) {
 const WB_LOW = 0.1;
 const WB_HIGH = 0.8;
 
-function colorLinearLayer(channels, settings) {
-  const wbTint = -(settings.wbTint || 0) / 255;
-  const wbTemp = -(settings.wbTemp || 0) / 255;
-  if (wbTint === 0 && wbTemp === 0) return channels;
-
-  const colorOffset = [0, wbTint, wbTemp];
+function applyLinearFixed(channels, colorOffset) {
   const highCompl = 1 - WB_HIGH;
-
   return mapChannels(channels, (x, ch) => {
     const offset = colorOffset[ch - 1];
     if (offset === 0) return x;
@@ -275,6 +272,120 @@ function colorLinearLayer(channels, settings) {
     }
     return clamp01(x + offset);
   });
+}
+
+function applyLinearDynamic(channels, colorOffset) {
+  const highCompl = 1 - WB_HIGH;
+  return mapChannels(channels, (x, ch) => {
+    const offset = colorOffset[ch - 1];
+    if (offset === 0) return x;
+    if (x <= 0 || x >= 1) return clamp01(x);
+    const scaled = offset * (0.2 + 0.8 * x);
+    if (x > WB_HIGH) {
+      const blend = (1 - x) / highCompl;
+      return clamp01(x + scaled * blend);
+    }
+    if (x < WB_LOW) {
+      return clamp01(x + scaled * (x / WB_LOW));
+    }
+    return clamp01(x + scaled);
+  });
+}
+
+function applyShadowWeighted(channels, colorOffset) {
+  return mapChannels(channels, (x, ch) => {
+    const offset = colorOffset[ch - 1];
+    if (offset === 0 || x <= 0 || x >= 1) return x;
+    const gamma = 1 + offset * 4;
+    if (gamma <= 0.01) return x;
+    return clamp01(Math.pow(x, 1 / gamma));
+  });
+}
+
+function applyHighlightWeighted(channels, colorOffset) {
+  return mapChannels(channels, (x, ch) => {
+    const offset = colorOffset[ch - 1];
+    if (offset === 0 || x <= 0 || x >= 1) return x;
+    const gamma = 1 + offset * 4;
+    if (gamma <= 0.01) return x;
+    return clamp01(1 - Math.pow(1 - x, gamma));
+  });
+}
+
+function applyMidtoneWeighted(channels, colorOffset) {
+  return mapChannels(channels, (x, ch) => {
+    const offset = colorOffset[ch - 1];
+    if (offset === 0 || x <= 0 || x >= 1) return x;
+    const gamma = 1 + offset * 4;
+    if (gamma <= 0.01) return x;
+    const shadow = clamp01(Math.pow(x, 1 / gamma));
+    const highlight = clamp01(1 - Math.pow(1 - x, gamma));
+    return (shadow + highlight) / 2;
+  });
+}
+
+function colorLinearLayer(channels, settings) {
+  const wbTint = -(settings.wbTint || 0) / 255;
+  const wbTemp = -(settings.wbTemp || 0) / 255;
+  const wbCyan = -(settings.wbCyan || 0) / 255;
+  const wbTonality = settings.wbTonality || 'addDensity';
+  const wbMethod = settings.wbMethod || 'linearFixed';
+
+  let colorOffset;
+  let brightnessMultiplier = 1;
+
+  switch (wbTonality) {
+    case 'neutralDensity':
+      colorOffset = [
+        -(wbTemp / 2 + wbTint / 2),
+        -(wbTemp / 2 - wbTint / 2),
+        wbTemp / 2 - wbTint / 2,
+      ];
+      break;
+    case 'subtractDensity': {
+      const denom = (1 - wbTemp * 0.5) * (1 - wbTint * 0.5);
+      brightnessMultiplier = Math.abs(denom) > 0.001 ? 1 / denom : 1;
+      colorOffset = [
+        -(wbTemp + wbTint),
+        0,
+        0,
+      ];
+      break;
+    }
+    case 'tempTintDensity':
+      colorOffset = [
+        -wbTint / 2,
+        0,
+        wbTemp - wbTint / 2,
+      ];
+      break;
+    case 'addDensity':
+    default:
+      colorOffset = [wbCyan, wbTint, wbTemp];
+      break;
+  }
+
+  if (colorOffset[0] === 0 && colorOffset[1] === 0 && colorOffset[2] === 0 && brightnessMultiplier === 1) {
+    return channels;
+  }
+
+  if (brightnessMultiplier !== 1) {
+    channels = mapChannels(channels, (x) => clamp01(x * brightnessMultiplier));
+  }
+
+  switch (wbMethod) {
+    case 'linearDynamic':
+      return applyLinearDynamic(channels, colorOffset);
+    case 'shadowWeighted':
+      return applyShadowWeighted(channels, colorOffset);
+    case 'highlightWeighted':
+      return applyHighlightWeighted(channels, colorOffset);
+    case 'midtoneWeighted':
+      return applyMidtoneWeighted(channels, colorOffset);
+    case 'linearFixed':
+    default:
+      return applyLinearFixed(channels, colorOffset);
+  }
 }
 
 function colorGammaLayer(channels, colorMultipliers) {
@@ -362,7 +473,7 @@ function highlightColorLayer(channels, settings) {
 
 function invertCurve(channels) {
   const len = channels[0].length;
-  return mapChannels(channels, (x, ch, pt) => channels[ch - 1][len - pt]);
+  return mapChannels(channels, (_x, ch, pt) => channels[ch - 1][len - pt]);
 }
 
 // --- Soft clip layer ---
@@ -376,6 +487,45 @@ function softClipLayer(channels, whiteClips, blackClips) {
     const blackScale = bc / 255;
     return x * (whiteScale - blackScale) + blackScale;
   });
+}
+
+// --- Color protected clamp ---
+
+function colorProtectedClamp(channels) {
+  const numPts = channels[0].length;
+  for (let pt = 0; pt < numPts; pt++) {
+    let r = channels[0][pt];
+    let g = channels[1][pt];
+    let b = channels[2][pt];
+
+    const maxVal = Math.max(r, g, b);
+    const minVal = Math.min(r, g, b);
+    if (maxVal <= 1 && minVal >= 0) continue;
+
+    const avg = (r + g + b) / 3;
+
+    if (maxVal > 1 && avg < maxVal) {
+      const ratio = (1 - avg) / (maxVal - avg);
+      r = avg + (r - avg) * ratio;
+      g = avg + (g - avg) * ratio;
+      b = avg + (b - avg) * ratio;
+    }
+
+    if (minVal < 0 && avg > minVal) {
+      const newMin = Math.min(r, g, b);
+      if (newMin < 0) {
+        const ratio = avg / (avg - newMin);
+        r = avg + (r - avg) * ratio;
+        g = avg + (g - avg) * ratio;
+        b = avg + (b - avg) * ratio;
+      }
+    }
+
+    channels[0][pt] = clamp01(r);
+    channels[1][pt] = clamp01(g);
+    channels[2][pt] = clamp01(b);
+  }
+  return channels;
 }
 
 // --- Clip point computation ---
@@ -424,13 +574,18 @@ function buildRawCurve(channelData, settings, normalizedGrid) {
   const numPoints = normalizedGrid[0].length;
   const raw = [[], [], []];
 
+  // For negative mode, swap softHighlights/softShadows semantics
+  const isNeg = (settings.imageType || 'negative') === 'negative';
+  const useSoftHigh = isNeg ? settings.softHighlights : settings.softShadows;
+  const useSoftLow = isNeg ? settings.softShadows : settings.softHighlights;
+
   for (let i = 0; i < numPoints; i++) {
     for (let ch = 0; ch < 3; ch++) {
       raw[ch][i] = clip.whites[ch] + normalizedGrid[ch][i] * clip.widths[ch];
     }
 
-    // Soft highlight clipping
-    if (i === 0 && settings.softHighlights) {
+    // Soft highlight clipping (first point)
+    if (i === 0 && useSoftHigh) {
       if (raw[0][0] > SOFT_CLIP && raw[1][0] > SOFT_CLIP && raw[2][0] > SOFT_CLIP) {
         raw[0][0] -= SOFT_CLIP;
         raw[1][0] -= SOFT_CLIP;
@@ -438,8 +593,8 @@ function buildRawCurve(channelData, settings, normalizedGrid) {
       }
     }
 
-    // Soft shadow clipping
-    if (i === numPoints - 1 && settings.softShadows) {
+    // Soft shadow clipping (last point)
+    if (i === numPoints - 1 && useSoftLow) {
       const threshold = 255 - SOFT_CLIP;
       if (raw[0][i] < threshold && raw[1][i] < threshold && raw[2][i] < threshold) {
         raw[0][i] += SOFT_CLIP;
@@ -461,6 +616,8 @@ function buildRawCurve(channelData, settings, normalizedGrid) {
  * @returns {Object} { r: Uint8Array(256), g: Uint8Array(256), b: Uint8Array(256) } - LUT per channel
  */
 export function generateCurves(channelData, settings) {
+  const imageType = settings.imageType || 'negative';
+
   // 1. Prepare settings
   const prepared = prepareSettings(channelData, settings);
 
@@ -481,11 +638,12 @@ export function generateCurves(channelData, settings) {
   const colorMults = [prepared.cyan, prepared.tint, prepared.temp];
 
   // 7. Apply layers in order
+  const hasWbColor = prepared.wbTint !== 0 || prepared.wbTemp !== 0 || prepared.wbCyan !== 0;
 
   // Color first (default)
   const layerOrder = settings.layerOrder || 'colorFirst';
   if (layerOrder === 'colorFirst') {
-    if (prepared.wbTint !== 0 || prepared.wbTemp !== 0) {
+    if (hasWbColor) {
       curve = colorLinearLayer(curve, settings);
     }
     curve = colorGammaLayer(curve, colorMults);
@@ -506,7 +664,7 @@ export function generateCurves(channelData, settings) {
   // Tones first alternative order
   if (layerOrder === 'tonesFirst') {
     const refGrid = createBaseGrid(resolution);
-    if (prepared.wbTint !== 0 || prepared.wbTemp !== 0) {
+    if (hasWbColor) {
       const colorCurve = colorLinearLayer(refGrid, settings);
       curve = applyDifferenceLayer(curve, colorCurve, refGrid);
     }
@@ -525,16 +683,19 @@ export function generateCurves(channelData, settings) {
     curve = midtoneColorLayer(curve, settings);
   }
 
-  // 8. Invert (negative -> positive)
-  const inverted = invertCurve(curve);
+  // Color protected clamp (preserves channel ratios on overflow)
+  curve = colorProtectedClamp(curve);
 
-  // 9. Build interleaved curve points (X=raw input, Y=inverted*255)
+  // 8. Invert for negative mode; skip for positive
+  const finalCurve = imageType === 'positive' ? curve : invertCurve(curve);
+
+  // 9. Build interleaved curve points (X=raw input, Y=output*255)
   const curvePoints = [[], [], []];
   for (let ch = 0; ch < 3; ch++) {
     for (let pt = 0; pt < curve[0].length; pt++) {
       curvePoints[ch].push({
         x: Math.round(raw[ch][pt]),
-        y: Math.round(inverted[ch][pt] * 255),
+        y: Math.round(finalCurve[ch][pt] * 255),
       });
     }
   }
