@@ -1,5 +1,6 @@
 import { Engine } from '../silvercore/engine/Engine.js';
 import { filmPresets } from '../silvercore/engine/FilmPresets.js';
+import { bwMixWeights } from '../silvercore/engine/Presets.js';
 
 const ENHANCED_PROFILE_SET = new Set(['none', 'frontier', 'crystal', 'natural', 'pakon']);
 
@@ -83,8 +84,12 @@ function buildSilverCoreParams(mode, settings = {}) {
   const colorModel = String(merged.colorModel || 'standard');
   const resolvedColorModel = mode === 'bw' ? 'mono' : colorModel;
 
+  // Determine imageType from mode
+  const imageType = mode === 'positive' ? 'positive' : 'negative';
+
   return {
     colorModel: resolvedColorModel,
+    imageType,
     preSaturation: Math.round(sanitizeNumber(merged.preSaturation, 100, 0, 200)),
     borderBuffer: Math.round(sanitizeNumber(merged.borderBuffer, 10, 0, 30)),
     brightness: sanitizeNumber(merged.brightness, 0, -100, 100),
@@ -118,13 +123,18 @@ function buildSilverCoreParams(mode, settings = {}) {
     highlightTint: sanitizeNumber(merged.highlightTint, 0, -100, 100),
     highlightTemp: sanitizeNumber(merged.highlightTemp, 0, -100, 100),
     layerOrder: String(merged.layerOrder || 'colorFirst'),
+    autoToneLevel: Math.round(sanitizeNumber(merged.autoToneLevel, 100, 0, 100)),
+    autoColorLevel: Math.round(sanitizeNumber(merged.autoColorLevel, 100, 0, 100)),
+    filmWB: String(merged.filmWB || 'none'),
+    bwMix: String(merged.bwMix || 'standard'),
   };
 }
 
-function toGrayscaleInPlace(imageData) {
+function toGrayscaleInPlace(imageData, mixPreset) {
+  const weights = bwMixWeights[mixPreset] || bwMixWeights.standard;
   const data = imageData.data;
   for (let i = 0; i < data.length; i += 4) {
-    const y = Math.round(data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114);
+    const y = Math.round(data[i] * weights.r + data[i + 1] * weights.g + data[i + 2] * weights.b);
     data[i] = y;
     data[i + 1] = y;
     data[i + 2] = y;
@@ -135,7 +145,8 @@ function toGrayscaleInPlace(imageData) {
 async function runSilverCore(imageData, settings, mode) {
   const input = cloneImageData(imageData);
   const params = buildSilverCoreParams(mode, settings);
-  if (mode === 'color') {
+  // Film base compensation: skip for positive mode (no orange mask)
+  if (mode !== 'positive') {
     const filmBaseGains = computeFilmBaseGains(settings && settings.filmBase);
     if (filmBaseGains) {
       applyFilmBaseCompensationInPlace(input, filmBaseGains);
@@ -151,7 +162,7 @@ async function runSilverCore(imageData, settings, mode) {
     await engine.setEnhancedProfile('none');
   }
   const processed = engine.process(input, params);
-  return mode === 'bw' ? toGrayscaleInPlace(processed) : processed;
+  return mode === 'bw' ? toGrayscaleInPlace(processed, params.bwMix) : processed;
 }
 
 export async function convertColorWithSilverCore(imageData, settings = {}) {
@@ -160,4 +171,8 @@ export async function convertColorWithSilverCore(imageData, settings = {}) {
 
 export async function convertBwWithSilverCore(imageData, settings = {}) {
   return runSilverCore(imageData, settings, 'bw');
+}
+
+export async function convertPositiveWithSilverCore(imageData, settings = {}) {
+  return runSilverCore(imageData, settings, 'positive');
 }
