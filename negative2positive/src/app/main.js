@@ -2873,7 +2873,7 @@
 
     function usesSilverCoreConversion(settings = state) {
       const type = getEffectiveFilmType(settings);
-      return type === 'color' || type === 'bw';
+      return type === 'color' || type === 'bw' || type === 'positive';
     }
 
     function buildCoreConversionSettings(settings = state) {
