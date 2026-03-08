@@ -6,9 +6,10 @@
 import { analyzeImage, applyLUT, adjustSaturation, applyHSLAdjustments } from './ImageProcessor.js'
 import { generateCurves } from './CurveEngine.js'
 import { computeAutoColor } from './WhiteBalance.js'
-import { colorModelToToneProfile, colorModels } from './Presets.js'
+import { colorModelToToneProfile, colorModels, toneProfiles, filmWBPresets } from './Presets.js'
 import { WebGLRenderer } from './WebGLRenderer.js'
 import { loadProfile, applyLut3D } from './EnhancedProfiles.js'
+import { applyUnsharpMask } from './Sharpening.js'
 
 export class Engine {
   constructor(width, height) {
@@ -117,6 +118,13 @@ export class Engine {
         if (needsPostProcess && saturation !== 100) {
           adjustSaturation(result, saturation)
         }
+        if (this.lastSettings && this.lastSettings.sharpenAmount > 0) {
+          applyUnsharpMask(result, {
+            amount: this.lastSettings.sharpenAmount,
+            radius: this.lastSettings.sharpenRadius,
+            threshold: this.lastSettings.sharpenThreshold,
+          })
+        }
         return result
       }
     }
@@ -130,6 +138,13 @@ export class Engine {
     if (saturation !== 100) {
       adjustSaturation(imageData, saturation)
     }
+    if (this.lastSettings && this.lastSettings.sharpenAmount > 0) {
+      applyUnsharpMask(imageData, {
+        amount: this.lastSettings.sharpenAmount,
+        radius: this.lastSettings.sharpenRadius,
+        threshold: this.lastSettings.sharpenThreshold,
+      })
+    }
     return imageData
   }
 
@@ -138,23 +153,29 @@ export class Engine {
    */
   buildSettings(params) {
     const toneProfile = colorModelToToneProfile[params.colorModel] || 'standard'
+    const profileData = toneProfiles[toneProfile] || toneProfiles.standard
     const autoColor = this.autoColor || { tempCorrection: 0, tintCorrection: 0, cyanCorrection: 0 }
 
     // Color model defaults, scaled by profile strength
     const model = colorModels[params.colorModel] || colorModels.basic
     const pStr = (params.profileStrength ?? 100) / 100
 
-    // wbTonality scaling for autoColor correction
-    const wbTonality = params.wbTonality || 'addDensity'
-    const tonalityScale = wbTonality === 'addDensity' ? 1.2
-      : wbTonality === 'subtractDensity' ? 0.8
-      : 1.0
+    // Auto level scaling (Phase 7)
+    const autoToneLevel = (params.autoToneLevel ?? 100) / 100
+    const autoColorLevel = (params.autoColorLevel ?? 100) / 100
 
-    const tempVal = (params.temperature || 0) + autoColor.tempCorrection * tonalityScale + (model.defaultTemp || 0) * pStr
-    const tintVal = (params.tint || 0) + autoColor.tintCorrection * tonalityScale + (model.defaultTint || 0) * pStr
+    // Film WB base offsets (Phase 6)
+    const filmWB = filmWBPresets[params.filmWB] || filmWBPresets.none || { temp: 0, tint: 0, cyan: 0 }
+
+    const tempVal = (params.temperature || 0) + autoColor.tempCorrection * autoColorLevel + (model.defaultTemp || 0) * pStr + filmWB.temp
+    const tintVal = (params.tint || 0) + autoColor.tintCorrection * autoColorLevel + (model.defaultTint || 0) * pStr + filmWB.tint
+    const cyanVal = autoColor.cyanCorrection * autoColorLevel + (model.defaultCyan || 0) * pStr + filmWB.cyan
+
+    const imageType = params.imageType || 'negative'
 
     return {
       toneProfile,
+      imageType,
       brightness: params.brightness || 0,
       exposure: params.exposure || 0,
       contrast: params.contrast || 0,
@@ -167,15 +188,17 @@ export class Engine {
       temp: tempVal,
       tint: tintVal,
       temperature: params.temperature || 0,
-      cyan: (autoColor.cyanCorrection || 0) * tonalityScale + (model.defaultCyan || 0) * pStr,
+      cyan: cyanVal,
+      wbCyan: cyanVal,
       wbTemp: tempVal,
       wbTint: tintVal,
+      wbTonality: params.wbTonality || 'addDensity',
       wbMethod: params.wbMode || 'linearFixed',
       layerOrder: params.layerOrder || 'colorFirst',
       softHigh: 0,
       softLow: 0,
-      softHighlights: false,
-      softShadows: false,
+      softHighlights: profileData.softHighlights ?? false,
+      softShadows: profileData.softShadows ?? false,
       shadowRange: params.shadowRange ?? 5,
       highlightRange: params.highlightRange ?? 5,
       shadowCyan: (params.shadowCyan || 0) + (model.defaultShadowsCyan || 0) * pStr,
@@ -192,6 +215,11 @@ export class Engine {
       colorModel: params.colorModel || 'standard',
       preSaturation: params.preSaturation || 100,
       saturation: params.saturation || 100,
+      autoToneLevel,
+      autoColorLevel,
+      sharpenAmount: params.sharpenAmount || 0,
+      sharpenRadius: params.sharpenRadius ?? 1.0,
+      sharpenThreshold: params.sharpenThreshold ?? 0,
       hslAdjustments: model.hslAdjustments ? {
         redHue: (model.hslAdjustments.redHue || 0) * pStr,
         redSaturation: (model.hslAdjustments.redSaturation || 0) * pStr,
