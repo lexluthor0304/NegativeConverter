@@ -44,10 +44,11 @@ export function analyzeImage(imageData, params) {
   const blackThreshold = model.blackThreshold ?? 0.002;
   const whiteThreshold = model.whiteThreshold ?? 0.002;
 
+  const imageType = params.imageType || 'negative';
   return [
-    computeChannelLevels(rHist, totalPixels, blackThreshold, whiteThreshold, 'ToneCurvePV2012Red'),
-    computeChannelLevels(gHist, totalPixels, blackThreshold, whiteThreshold, 'ToneCurvePV2012Green'),
-    computeChannelLevels(bHist, totalPixels, blackThreshold, whiteThreshold, 'ToneCurvePV2012Blue'),
+    computeChannelLevels(rHist, totalPixels, blackThreshold, whiteThreshold, 'ToneCurvePV2012Red', imageType),
+    computeChannelLevels(gHist, totalPixels, blackThreshold, whiteThreshold, 'ToneCurvePV2012Green', imageType),
+    computeChannelLevels(bHist, totalPixels, blackThreshold, whiteThreshold, 'ToneCurvePV2012Blue', imageType),
   ];
 }
 
@@ -57,7 +58,7 @@ export function analyzeImage(imageData, params) {
  * - whitePointOrigin = dark end of negative = white point of positive
  * - blackPointOrigin = bright end of negative = black point of positive
  */
-function computeChannelLevels(hist, totalPixels, blackThreshold, whiteThreshold, settingName) {
+function computeChannelLevels(hist, totalPixels, blackThreshold, whiteThreshold, settingName, imageType) {
   // Find white point origin (scan from dark end)
   let cumulative = 0;
   let whitePointOrigin = 0;
@@ -95,7 +96,9 @@ function computeChannelLevels(hist, totalPixels, blackThreshold, whiteThreshold,
   }
 
   let meanPoint = totalPixels > 0 ? weightedSum / totalPixels / 256 : 0.5;
-  meanPoint = 1 - meanPoint; // Invert because this is a negative
+  if (imageType !== 'positive') {
+    meanPoint = 1 - meanPoint; // Invert because this is a negative
+  }
 
   return { whitePointOrigin, blackPointOrigin, meanPoint, settingName };
 }

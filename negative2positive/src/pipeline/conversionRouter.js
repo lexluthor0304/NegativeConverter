@@ -1,4 +1,4 @@
-import { convertColorWithSilverCore, convertBwWithSilverCore } from './silverAdapter.js';
+import { convertColorWithSilverCore, convertBwWithSilverCore, convertPositiveWithSilverCore } from './silverAdapter.js';
 import { convertPositiveLegacy } from './legacyPositive.js';
 
 export function resolveConversionMode(settings = {}) {
@@ -11,7 +11,11 @@ export function resolveConversionMode(settings = {}) {
 export async function convertFrameWithRouter({ imageData, settings = {} }) {
   const mode = resolveConversionMode(settings);
   if (mode === 'positive') {
-    return convertPositiveLegacy(imageData);
+    const useLegacy = settings.positiveEngine === 'legacy';
+    if (useLegacy) {
+      return convertPositiveLegacy(imageData);
+    }
+    return convertPositiveWithSilverCore(imageData, settings);
   }
   if (mode === 'bw') {
     return convertBwWithSilverCore(imageData, settings);

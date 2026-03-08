@@ -124,6 +124,36 @@ export const toneProfiles = {
     defaultSoftHigh: 0, defaultSoftLow: 0,
     autoTone: true,
   },
+  highlight_hard: {
+    defaultBrightness: 0, defaultBlacks: 2, defaultWhites: -2,
+    defaultShadows: 0, defaultHighlights: 10,
+    defaultGamma: 1, defaultContrast: 10,
+    defaultSoftHigh: 0, defaultSoftLow: 0,
+    autoTone: true,
+  },
+  highlight_soft: {
+    defaultBrightness: 0, defaultBlacks: 2, defaultWhites: -10,
+    defaultShadows: -10, defaultHighlights: 0,
+    defaultGamma: 1, defaultContrast: 0,
+    defaultSoftHigh: 0, defaultSoftLow: 0,
+    autoTone: true,
+    softHighlights: true,
+  },
+  shadow_hard: {
+    defaultBrightness: 0, defaultBlacks: 2, defaultWhites: 0,
+    defaultShadows: -10, defaultHighlights: 0,
+    defaultGamma: 1, defaultContrast: 10,
+    defaultSoftHigh: 0, defaultSoftLow: 0,
+    autoTone: true,
+  },
+  shadow_soft: {
+    defaultBrightness: 0, defaultBlacks: 9, defaultWhites: -2,
+    defaultShadows: 0, defaultHighlights: 10,
+    defaultGamma: 1, defaultContrast: 0,
+    defaultSoftHigh: 0, defaultSoftLow: 0,
+    autoTone: true,
+    softShadows: true,
+  },
 };
 
 // Map UI color model names to tone profile keys
@@ -196,4 +226,27 @@ export const filmCharacter = {
   warm:     { filmHue: 35, hueStrength: 10 },
   cool:     { filmHue: 45, hueStrength: 10 },
   standard: { filmHue: 25, hueStrength: 10 },
+};
+
+// Film-specific white balance presets (temp/tint/cyan base offsets)
+export const filmWBPresets = {
+  none:              { temp: 0,  tint: 0,  cyan: 0 },
+  'kodak-gold':      { temp: -3, tint: 2,  cyan: -1 },
+  'kodak-portra':    { temp: -2, tint: 1,  cyan: 0 },
+  'kodak-ektar':     { temp: -1, tint: 0,  cyan: 1 },
+  'kodak-colorplus': { temp: -2, tint: 2,  cyan: -1 },
+  'fuji-c200':       { temp: 2,  tint: -1, cyan: 1 },
+  'fuji-pro400h':    { temp: 1,  tint: 0,  cyan: 1 },
+  'fuji-superia':    { temp: 1,  tint: -1, cyan: 0 },
+  'cinestill-50d':   { temp: -4, tint: 1,  cyan: -1 },
+  'cinestill-800t':  { temp: -8, tint: 3,  cyan: -2 },
+};
+
+// B&W channel mixing weights
+export const bwMixWeights = {
+  standard: { r: 0.299, g: 0.587, b: 0.114 },
+  red:      { r: 0.6,   g: 0.3,   b: 0.1 },
+  green:    { r: 0.2,   g: 0.7,   b: 0.1 },
+  blue:     { r: 0.1,   g: 0.3,   b: 0.6 },
+  orange:   { r: 0.5,   g: 0.4,   b: 0.1 },
 };
