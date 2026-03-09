@@ -112,6 +112,21 @@ npm run tauri:build
 Build outputs are placed under:
 - `src-tauri/target/release/bundle/`
 
+### macOS installation troubleshooting
+
+If macOS shows **"Negative Converter is damaged and can't be opened"**, this is because the app is not yet notarized by Apple. Use one of these methods:
+
+**Method 1 — Terminal command (recommended):**
+```bash
+xattr -cr /Applications/Negative\ Converter.app
+```
+
+**Method 2 — Right-click open:**
+Right-click (or Control-click) the app → select **Open** → click **Open** in the confirmation dialog.
+
+**Method 3 — System Settings:**
+Go to **System Settings → Privacy & Security**, scroll down and click **Open Anyway** next to the blocked app message.
+
 ### Linux AppImage troubleshooting
 
 - Run AppImage directly, not with `sudo`.
