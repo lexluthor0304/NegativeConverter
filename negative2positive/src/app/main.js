@@ -15,6 +15,7 @@
     import '@fontsource/inter/600.css';
 
     import { convertFrameWithRouter } from '../pipeline/conversionRouter.js';
+    import { invalidateSilverCoreCache } from '../pipeline/silverAdapter.js';
     import { Histogram } from '../silvercore/ui/Histogram.js';
 
     const UPNG = (UPNGImport && typeof UPNGImport.decode === 'function')
@@ -314,7 +315,10 @@
         lensStepMode: "映射精度",
         lensStepAuto: "自动",
         lensStepManual: "手动",
-        bitDepthJpegLocked: "JPEG 仅支持 8-bit 导出。"
+        bitDepthJpegLocked: "JPEG 仅支持 8-bit 导出。",
+        zoomIn: "放大",
+        zoomOut: "缩小",
+        zoomReset: "重置缩放"
       },
       en: {
         title: "Negative Converter",
@@ -595,7 +599,10 @@
         lensStepMode: "Map Detail",
         lensStepAuto: "Auto",
         lensStepManual: "Manual",
-        bitDepthJpegLocked: "JPEG export is limited to 8-bit."
+        bitDepthJpegLocked: "JPEG export is limited to 8-bit.",
+        zoomIn: "Zoom In",
+        zoomOut: "Zoom Out",
+        zoomReset: "Reset Zoom"
       },
       ja: {
         title: "ネガポジ変換",
@@ -876,7 +883,10 @@
         lensStepMode: "マップ精度",
         lensStepAuto: "自動",
         lensStepManual: "手動",
-        bitDepthJpegLocked: "JPEG は 8-bit 出力のみ対応です。"
+        bitDepthJpegLocked: "JPEG は 8-bit 出力のみ対応です。",
+        zoomIn: "拡大",
+        zoomOut: "縮小",
+        zoomReset: "ズームリセット"
       }
     };
 
@@ -2077,6 +2087,7 @@
       processedImageData: null,     // After negative conversion
       displayImageData: null,       // After all adjustments
       conversionSourceImageData: null, // Lens-corrected source used for core conversion rerender
+      conversionPreviewImageData: null, // Downscaled conversionSourceImageData for preview-resolution SilverCore
       previewSourceImageData: null, // Downscaled source for preview renders
       histogramSourceImageData: null, // Further downscaled source for histogram updates
       webglSourceImageData: null,   // Downscaled source for WebGL preview renders
@@ -2143,6 +2154,16 @@
         g: [{ x: 0, y: 0 }, { x: 255, y: 255 }],
         b: [{ x: 0, y: 0 }, { x: 255, y: 255 }]
       },
+
+      // Zoom/Pan state
+      zoomLevel: 1,
+      panX: 0,
+      panY: 0,
+      isPanning: false,
+      panStartX: 0,
+      panStartY: 0,
+      panStartPanX: 0,
+      panStartPanY: 0,
 
       // UI state
       cropping: false,
@@ -2227,6 +2248,11 @@
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     const glCanvas = document.getElementById('glCanvas');
     const canvasContainer = document.getElementById('canvasContainer');
+    const canvasTransformWrapper = document.getElementById('canvasTransformWrapper');
+    const zoomIndicator = document.getElementById('zoomIndicator');
+    const zoomControls = document.getElementById('zoomControls');
+    const ZOOM_MIN = 1;
+    const ZOOM_MAX = 8;
     const previewSection = canvasContainer.closest('.preview-section');
     const beforeAfterBtn = document.getElementById('beforeAfterBtn');
     const histogramContainer = document.getElementById('histogramContainer');
@@ -4226,12 +4252,14 @@
 
     function resizeWebGLCanvas() {
       if (!webglState.gl) return;
-      const rect = glCanvas.getBoundingClientRect();
-      if (rect.width <= 0 || rect.height <= 0) return;
+      // Use pre-transform CSS dimensions to avoid bloating the buffer when zoomed
+      const cssW = parseFloat(glCanvas.style.width) || 0;
+      const cssH = parseFloat(glCanvas.style.height) || 0;
+      if (cssW <= 0 || cssH <= 0) return;
 
       const dpr = window.devicePixelRatio || 1;
-      let targetW = Math.max(1, Math.round(rect.width * dpr));
-      let targetH = Math.max(1, Math.round(rect.height * dpr));
+      let targetW = Math.max(1, Math.round(cssW * dpr));
+      let targetH = Math.max(1, Math.round(cssH * dpr));
 
       // Limit interactive draw resolution to keep things smooth on very large displays.
       const maxDim = 2048;
@@ -4452,8 +4480,16 @@
       if (fullUpdateTimer) clearTimeout(fullUpdateTimer);
       // Full-res CPU rendering can be expensive on large scans; debounce aggressively.
       fullUpdateTimer = setTimeout(() => {
-        updateFull();
         fullUpdateTimer = null;
+        // If SilverCore mode and we were using preview-resolution, run full reprocess
+        if (usesSilverCoreConversion(state) && state.conversionSourceImageData
+          && state.conversionPreviewImageData && state.conversionPreviewImageData !== state.conversionSourceImageData) {
+          void rerenderWithCoreControls({ full: true }).catch((err) => {
+            console.error('Full reprocess from scheduleFullUpdate failed:', err);
+          });
+          return;
+        }
+        updateFull();
       }, 1200);
     }
 
@@ -4552,12 +4588,17 @@
       canvas.height = processed.height;
     }
 
-    async function convertFromCurrentSource(settings = state) {
-      const source = state.conversionSourceImageData || state.croppedImageData || state.originalImageData;
-      if (!source) return null;
+    async function convertFromCurrentSource(settings = state, { preview = false } = {}) {
+      const fullSource = state.conversionSourceImageData || state.croppedImageData || state.originalImageData;
+      if (!fullSource) return null;
+      const source = (preview && state.conversionPreviewImageData) ? state.conversionPreviewImageData : fullSource;
       return await convertFrameWithRouter({
         imageData: source,
-        settings: buildRouterSettings(settings)
+        settings: buildRouterSettings(settings),
+        options: {
+          preview,
+          forceFullProcess: !preview
+        }
       });
     }
 
@@ -4608,22 +4649,78 @@
       scheduleAutoConvertFromStep2(options);
     }
 
+    function applyPreviewProcessedImageToState(processed) {
+      if (!processed) return;
+      // Only update preview-related state; leave processedImageData untouched
+      // so that full-resolution export remains correct.
+      state.previewSourceImageData = buildPreviewSourceImageData(processed);
+      state.webglSourceImageData = buildWebglSourceImageData(processed);
+      if (initWebGLRenderer()) {
+        webglState.sourceDirty = true;
+        webglState.curveDirty = true;
+      }
+      const fullW = state.processedImageData ? state.processedImageData.width : processed.width;
+      const fullH = state.processedImageData ? state.processedImageData.height : processed.height;
+      canvas.width = fullW;
+      canvas.height = fullH;
+    }
+
+    let _coreReprocessInFlight = false;
+    let _coreReprocessPending = null;
+
     async function rerenderWithCoreControls(options = {}) {
       const full = Boolean(options.full);
       const token = Number.isInteger(options.token) ? options.token : null;
       if (!usesSilverCoreConversion(state)) return;
       if (!state.conversionSourceImageData) return;
 
-      const processed = await convertFromCurrentSource(state);
-      if (!processed) return;
-      if (token !== null && token !== coreReprocessToken) return;
-      applyProcessedImageToState(processed);
+      // In-flight guard: if a reprocess is already running, queue the latest request
+      if (_coreReprocessInFlight) {
+        _coreReprocessPending = options;
+        return;
+      }
+      _coreReprocessInFlight = true;
 
-      if (full) {
-        updateFull();
-      } else {
-        updatePreview();
-        scheduleFullUpdate();
+      try {
+        if (full) {
+          // Full-resolution path
+          const processed = await convertFromCurrentSource(state, { preview: false });
+          if (!processed) return;
+          if (token !== null && token !== coreReprocessToken) return;
+          applyProcessedImageToState(processed);
+          updateFull();
+        } else {
+          // Check if preview source is actually smaller than full source
+          const hasSmallPreview = state.conversionPreviewImageData
+            && state.conversionPreviewImageData !== state.conversionSourceImageData;
+
+          // Preview-resolution path: run SilverCore on small image
+          const previewProcessed = await convertFromCurrentSource(state, { preview: hasSmallPreview });
+          if (!previewProcessed) return;
+          if (token !== null && token !== coreReprocessToken) return;
+
+          if (hasSmallPreview) {
+            // Preview source is smaller — update preview display path only
+            applyPreviewProcessedImageToState(previewProcessed);
+            updatePreview();
+            scheduleFullUpdate();
+          } else {
+            // No downscaled preview (image already small) — treat as full
+            applyProcessedImageToState(previewProcessed);
+            updatePreview();
+            // No need to schedule full update; we already processed at full resolution
+          }
+        }
+      } finally {
+        _coreReprocessInFlight = false;
+        // If a new request came in while we were processing, run the latest one
+        if (_coreReprocessPending) {
+          const pending = _coreReprocessPending;
+          _coreReprocessPending = null;
+          void rerenderWithCoreControls(pending).catch((err) => {
+            console.error('Core reprocess (pending) failed:', err);
+          });
+        }
       }
     }
 
@@ -4639,7 +4736,7 @@
         void rerenderWithCoreControls({ full, token }).catch((err) => {
           console.error('Core reprocess failed:', err);
         });
-      }, full ? 70 : 40);
+      }, full ? 70 : 80);
     }
 
     async function processNegative() {
@@ -4650,8 +4747,10 @@
         if (!sourceData) return;
 
         const correctedSourceData = await applyLensCorrectionWithSettings(sourceData, state, { updateUi: true });
+        invalidateSilverCoreCache();
         state.conversionSourceImageData = correctedSourceData;
-        const processed = await convertFromCurrentSource(state);
+        state.conversionPreviewImageData = buildPreviewSourceImageData(correctedSourceData);
+        const processed = await convertFromCurrentSource(state, { preview: false });
         if (!processed) return;
         applyProcessedImageToState(processed);
         goToStep(3);
@@ -4682,10 +4781,94 @@
       canvas.style.height = cssH;
       glCanvas.style.width = cssW;
       glCanvas.style.height = cssH;
+      canvasTransformWrapper.style.width = cssW;
+      canvasTransformWrapper.style.height = cssH;
       if (isWebGLActive()) resizeWebGLCanvas();
+      if (state.zoomLevel > 1) {
+        clampPan();
+        applyZoomPanTransform();
+      }
+    }
+
+    // ===========================================
+    // Zoom / Pan
+    // ===========================================
+    function applyZoomPanTransform() {
+      const z = state.zoomLevel;
+      canvasTransformWrapper.style.transform = `translate(${state.panX}px, ${state.panY}px) scale(${z})`;
+      if (z > 1) {
+        zoomIndicator.textContent = Math.round(z * 100) + '%';
+        zoomIndicator.style.display = 'block';
+        canvasContainer.classList.add('zoom-pan-active');
+      } else {
+        zoomIndicator.style.display = 'none';
+        canvasContainer.classList.remove('zoom-pan-active');
+      }
+    }
+
+    function clampPan() {
+      const z = state.zoomLevel;
+      const wrapperW = parseFloat(canvasTransformWrapper.style.width) || 0;
+      const wrapperH = parseFloat(canvasTransformWrapper.style.height) || 0;
+      const containerW = canvasContainer.clientWidth;
+      const containerH = canvasContainer.clientHeight;
+      const scaledW = wrapperW * z;
+      const scaledH = wrapperH * z;
+
+      if (scaledW <= containerW) {
+        state.panX = (containerW - scaledW) / 2;
+      } else {
+        const minX = containerW - scaledW;
+        const maxX = 0;
+        state.panX = Math.max(minX, Math.min(maxX, state.panX));
+      }
+
+      if (scaledH <= containerH) {
+        state.panY = (containerH - scaledH) / 2;
+      } else {
+        const minY = containerH - scaledH;
+        const maxY = 0;
+        state.panY = Math.max(minY, Math.min(maxY, state.panY));
+      }
+    }
+
+    function resetZoomPan() {
+      state.zoomLevel = 1;
+      state.panX = 0;
+      state.panY = 0;
+      state.isPanning = false;
+      canvasTransformWrapper.style.transform = '';
+      zoomIndicator.style.display = 'none';
+      canvasContainer.classList.remove('zoom-pan-active', 'zoom-panning');
+    }
+
+    function zoomAtPoint(newZoom, clientX, clientY) {
+      const oldZoom = state.zoomLevel;
+      newZoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, newZoom));
+      if (newZoom === oldZoom) return;
+
+      const containerRect = canvasContainer.getBoundingClientRect();
+      const cursorX = clientX - containerRect.left;
+      const cursorY = clientY - containerRect.top;
+
+      // Content position under cursor in pre-transform space
+      const contentX = (cursorX - state.panX) / oldZoom;
+      const contentY = (cursorY - state.panY) / oldZoom;
+
+      state.zoomLevel = newZoom;
+      state.panX = cursorX - contentX * newZoom;
+      state.panY = cursorY - contentY * newZoom;
+
+      clampPan();
+      applyZoomPanTransform();
+    }
+
+    function canPan() {
+      return state.zoomLevel > 1 && !state.cropping && !state.samplingMode;
     }
 
     function displayNegative(imageData) {
+      resetZoomPan();
       canvas.width = imageData.width;
       canvas.height = imageData.height;
       ctx.putImageData(imageData, 0, 0);
@@ -4731,7 +4914,9 @@
           state.rotationAngle = 0;
           state.processedImageData = null;
           state.displayImageData = null;
+          invalidateSilverCoreCache();
           state.conversionSourceImageData = null;
+          state.conversionPreviewImageData = null;
           state.previewSourceImageData = null;
           state.histogramSourceImageData = null;
           state.webglSourceImageData = null;
@@ -4895,6 +5080,13 @@
       updateHistogramDragHintVisibility();
       document.getElementById('controlsPanel').style.display = 'flex';
       document.getElementById('appFooter').style.display = 'flex';
+
+      // Show zoom controls and update i18n titles
+      zoomControls.style.display = 'flex';
+      const lang = i18n[currentLang] || i18n.en;
+      document.getElementById('zoomInBtn').title = lang.zoomIn || 'Zoom In';
+      document.getElementById('zoomOutBtn').title = lang.zoomOut || 'Zoom Out';
+      document.getElementById('zoomResetBtn').title = lang.zoomReset || 'Reset Zoom';
 
       initHistogramDragging();
       restoreHistogramPositionOrDefault();
@@ -7045,7 +7237,9 @@
     function invalidateProcessedPipelineState() {
       state.processedImageData = null;
       state.displayImageData = null;
+      invalidateSilverCoreCache();
       state.conversionSourceImageData = null;
+      state.conversionPreviewImageData = null;
       state.previewSourceImageData = null;
       state.histogramSourceImageData = null;
       state.webglSourceImageData = null;
@@ -7097,6 +7291,7 @@
 
       state.rotationAngle = normalizeAngleDegrees((state.rotationAngle || 0) + normalizedAngle);
       invalidateProcessedPipelineState();
+      resetZoomPan();
 
       if (state.currentStep >= 3) {
         void processNegative();
@@ -7414,6 +7609,48 @@
       beforeAfterPointerId = null;
     });
 
+    // Keyboard zoom shortcuts
+    document.addEventListener('keydown', (event) => {
+      if (isEditableTarget(event.target)) return;
+      if (state.cropping || state.samplingMode) return;
+      const key = event.key;
+      if (key === '+' || key === '=') {
+        event.preventDefault();
+        const containerRect = canvasContainer.getBoundingClientRect();
+        const cx = containerRect.left + containerRect.width / 2;
+        const cy = containerRect.top + containerRect.height / 2;
+        zoomAtPoint(state.zoomLevel * 1.5, cx, cy);
+      } else if (key === '-') {
+        event.preventDefault();
+        const containerRect = canvasContainer.getBoundingClientRect();
+        const cx = containerRect.left + containerRect.width / 2;
+        const cy = containerRect.top + containerRect.height / 2;
+        zoomAtPoint(state.zoomLevel / 1.5, cx, cy);
+      } else if (key === '0') {
+        event.preventDefault();
+        resetZoomPan();
+      }
+    });
+
+    // Zoom control buttons
+    document.getElementById('zoomInBtn').addEventListener('click', () => {
+      const containerRect = canvasContainer.getBoundingClientRect();
+      const cx = containerRect.left + containerRect.width / 2;
+      const cy = containerRect.top + containerRect.height / 2;
+      zoomAtPoint(state.zoomLevel * 1.5, cx, cy);
+    });
+
+    document.getElementById('zoomOutBtn').addEventListener('click', () => {
+      const containerRect = canvasContainer.getBoundingClientRect();
+      const cx = containerRect.left + containerRect.width / 2;
+      const cy = containerRect.top + containerRect.height / 2;
+      zoomAtPoint(state.zoomLevel / 1.5, cx, cy);
+    });
+
+    document.getElementById('zoomResetBtn').addEventListener('click', () => {
+      resetZoomPan();
+    });
+
     // ===========================================
     // Cropping
     // ===========================================
@@ -7440,16 +7677,36 @@
 
     let activeCropPointerId = null;
 
+    function getCropDisplayScale() {
+      // Pre-transform CSS size of the canvas (unaffected by zoom)
+      const cssW = parseFloat(canvas.style.width) || canvas.width;
+      const cssH = parseFloat(canvas.style.height) || canvas.height;
+      return {
+        scaleX: canvas.width / cssW,
+        scaleY: canvas.height / cssH,
+        cssW,
+        cssH
+      };
+    }
+
+    function screenToWrapperLocal(clientX, clientY) {
+      const wrapperRect = canvasTransformWrapper.getBoundingClientRect();
+      const z = state.zoomLevel;
+      return {
+        x: (clientX - wrapperRect.left) / z,
+        y: (clientY - wrapperRect.top) / z
+      };
+    }
+
     function startCropDrag(clientX, clientY) {
       if (!state.cropping) return;
 
-      const rect = canvas.getBoundingClientRect();
-      const scaleX = canvas.width / rect.width;
-      const scaleY = canvas.height / rect.height;
+      const { scaleX, scaleY } = getCropDisplayScale();
+      const local = screenToWrapperLocal(clientX, clientY);
 
       state.cropStart = {
-        x: (clientX - rect.left) * scaleX,
-        y: (clientY - rect.top) * scaleY
+        x: local.x * scaleX,
+        y: local.y * scaleY
       };
       state.croppingActive = true;
     }
@@ -7457,18 +7714,12 @@
     function updateCropDrag(clientX, clientY) {
       if (!state.cropping || !state.croppingActive || !state.cropStart) return;
 
-      const canvasRect = canvas.getBoundingClientRect();
-      const containerRect = canvasContainer.getBoundingClientRect();
-
-      const offsetX = canvasRect.left - containerRect.left;
-      const offsetY = canvasRect.top - containerRect.top;
-
-      const scaleX = canvas.width / canvasRect.width;
-      const scaleY = canvas.height / canvasRect.height;
+      const { scaleX, scaleY } = getCropDisplayScale();
+      const local = screenToWrapperLocal(clientX, clientY);
 
       const current = {
-        x: (clientX - canvasRect.left) * scaleX,
-        y: (clientY - canvasRect.top) * scaleY
+        x: local.x * scaleX,
+        y: local.y * scaleY
       };
 
       const left = Math.min(state.cropStart.x, current.x);
@@ -7476,8 +7727,9 @@
       const width = Math.abs(current.x - state.cropStart.x);
       const height = Math.abs(current.y - state.cropStart.y);
 
-      const leftDisp = left / scaleX + offsetX;
-      const topDisp = top / scaleY + offsetY;
+      // Overlay is inside wrapper, so use pre-transform (wrapper-local) coords
+      const leftDisp = left / scaleX;
+      const topDisp = top / scaleY;
       const widthDisp = width / scaleX;
       const heightDisp = height / scaleY;
 
@@ -7493,43 +7745,142 @@
     }
 
     canvasContainer.addEventListener('mousedown', (e) => {
-      startCropDrag(e.clientX, e.clientY);
+      if (state.cropping) {
+        startCropDrag(e.clientX, e.clientY);
+      } else if (canPan()) {
+        state.isPanning = true;
+        state.panStartX = e.clientX;
+        state.panStartY = e.clientY;
+        state.panStartPanX = state.panX;
+        state.panStartPanY = state.panY;
+        canvasContainer.classList.add('zoom-panning');
+        e.preventDefault();
+      }
     });
 
     canvasContainer.addEventListener('mousemove', (e) => {
-      updateCropDrag(e.clientX, e.clientY);
+      if (state.cropping) {
+        updateCropDrag(e.clientX, e.clientY);
+      } else if (state.isPanning) {
+        state.panX = state.panStartPanX + (e.clientX - state.panStartX);
+        state.panY = state.panStartPanY + (e.clientY - state.panStartY);
+        clampPan();
+        applyZoomPanTransform();
+      }
     });
 
-    canvasContainer.addEventListener('mouseup', finishCropDrag);
-    canvasContainer.addEventListener('mouseleave', finishCropDrag);
+    function finishPan() {
+      if (state.isPanning) {
+        state.isPanning = false;
+        canvasContainer.classList.remove('zoom-panning');
+      }
+    }
+
+    canvasContainer.addEventListener('mouseup', () => { finishCropDrag(); finishPan(); });
+    canvasContainer.addEventListener('mouseleave', () => { finishCropDrag(); finishPan(); });
 
     canvasContainer.addEventListener('pointerdown', (e) => {
-      if (e.pointerType === 'mouse' || !state.cropping) return;
-      e.preventDefault();
-      activeCropPointerId = e.pointerId;
-      canvasContainer.setPointerCapture(e.pointerId);
-      startCropDrag(e.clientX, e.clientY);
+      if (e.pointerType === 'mouse') return;
+      if (state.cropping) {
+        e.preventDefault();
+        activeCropPointerId = e.pointerId;
+        canvasContainer.setPointerCapture(e.pointerId);
+        startCropDrag(e.clientX, e.clientY);
+      } else if (canPan()) {
+        e.preventDefault();
+        state.isPanning = true;
+        state.panStartX = e.clientX;
+        state.panStartY = e.clientY;
+        state.panStartPanX = state.panX;
+        state.panStartPanY = state.panY;
+        canvasContainer.setPointerCapture(e.pointerId);
+        canvasContainer.classList.add('zoom-panning');
+      }
     }, { passive: false });
 
     canvasContainer.addEventListener('pointermove', (e) => {
       if (e.pointerType === 'mouse') return;
-      if (!state.cropping || activeCropPointerId !== e.pointerId) return;
-      e.preventDefault();
-      updateCropDrag(e.clientX, e.clientY);
+      if (state.cropping && activeCropPointerId === e.pointerId) {
+        e.preventDefault();
+        updateCropDrag(e.clientX, e.clientY);
+      } else if (state.isPanning) {
+        e.preventDefault();
+        state.panX = state.panStartPanX + (e.clientX - state.panStartX);
+        state.panY = state.panStartPanY + (e.clientY - state.panStartY);
+        clampPan();
+        applyZoomPanTransform();
+      }
     }, { passive: false });
 
     function finishCropPointer(e) {
       if (e.pointerType === 'mouse') return;
-      if (activeCropPointerId !== e.pointerId) return;
-      finishCropDrag();
-      if (canvasContainer.hasPointerCapture(e.pointerId)) {
-        canvasContainer.releasePointerCapture(e.pointerId);
+      if (activeCropPointerId === e.pointerId) {
+        finishCropDrag();
+        if (canvasContainer.hasPointerCapture(e.pointerId)) {
+          canvasContainer.releasePointerCapture(e.pointerId);
+        }
+        activeCropPointerId = null;
       }
-      activeCropPointerId = null;
+      if (state.isPanning) {
+        finishPan();
+        if (canvasContainer.hasPointerCapture(e.pointerId)) {
+          canvasContainer.releasePointerCapture(e.pointerId);
+        }
+      }
     }
 
     canvasContainer.addEventListener('pointerup', finishCropPointer);
     canvasContainer.addEventListener('pointercancel', finishCropPointer);
+
+    // Wheel zoom
+    canvasContainer.addEventListener('wheel', (e) => {
+      if (state.cropping || state.samplingMode) return;
+      e.preventDefault();
+      const delta = e.ctrlKey ? -e.deltaY * 0.01 : -e.deltaY * 0.003;
+      const factor = Math.pow(2, delta);
+      zoomAtPoint(state.zoomLevel * factor, e.clientX, e.clientY);
+    }, { passive: false });
+
+    // Double-click: toggle zoom
+    canvasContainer.addEventListener('dblclick', (e) => {
+      if (state.cropping || state.samplingMode) return;
+      if (state.zoomLevel > 1) {
+        resetZoomPan();
+      } else {
+        zoomAtPoint(2, e.clientX, e.clientY);
+      }
+    });
+
+    // Touch pinch zoom
+    let pinchStartDist = 0;
+    let pinchStartZoom = 1;
+
+    canvasContainer.addEventListener('touchstart', (e) => {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        const dx = e.touches[0].clientX - e.touches[1].clientX;
+        const dy = e.touches[0].clientY - e.touches[1].clientY;
+        pinchStartDist = Math.hypot(dx, dy);
+        pinchStartZoom = state.zoomLevel;
+      }
+    }, { passive: false });
+
+    canvasContainer.addEventListener('touchmove', (e) => {
+      if (e.touches.length === 2 && pinchStartDist > 0) {
+        e.preventDefault();
+        const dx = e.touches[0].clientX - e.touches[1].clientX;
+        const dy = e.touches[0].clientY - e.touches[1].clientY;
+        const dist = Math.hypot(dx, dy);
+        const centerX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+        const centerY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+        const newZoom = pinchStartZoom * (dist / pinchStartDist);
+        zoomAtPoint(newZoom, centerX, centerY);
+      }
+    }, { passive: false });
+
+    canvasContainer.addEventListener('touchend', () => {
+      pinchStartDist = 0;
+    });
 
     document.getElementById('cancelCropBtn').addEventListener('click', () => {
       state.cropping = false;
@@ -7545,19 +7896,11 @@
     });
 
     document.getElementById('applyCropBtn').addEventListener('click', () => {
-      const canvasRect = canvas.getBoundingClientRect();
-      const containerRect = canvasContainer.getBoundingClientRect();
+      // Overlay coords are wrapper-local (pre-transform), convert to canvas pixels
+      const { scaleX, scaleY } = getCropDisplayScale();
 
-      // Calculate canvas offset within container (due to flexbox centering)
-      const offsetX = canvasRect.left - containerRect.left;
-      const offsetY = canvasRect.top - containerRect.top;
-
-      const scaleX = canvas.width / canvasRect.width;
-      const scaleY = canvas.height / canvasRect.height;
-
-      // Subtract offset before converting to canvas coordinates
-      const left = Math.floor((parseFloat(cropOverlay.style.left) - offsetX) * scaleX);
-      const top = Math.floor((parseFloat(cropOverlay.style.top) - offsetY) * scaleY);
+      const left = Math.floor(parseFloat(cropOverlay.style.left) * scaleX);
+      const top = Math.floor(parseFloat(cropOverlay.style.top) * scaleY);
       const width = Math.floor(parseFloat(cropOverlay.style.width) * scaleX);
       const height = Math.floor(parseFloat(cropOverlay.style.height) * scaleY);
 
@@ -7572,6 +7915,7 @@
         height
       };
       applyCropRegionToLoadedImage(absoluteCrop, { refreshDisplay: true });
+      resetZoomPan();
       setStep2Mode(suggestStep2Mode());
       markCurrentFileDirty();
 
@@ -7659,6 +8003,7 @@
 
     document.getElementById('startOverBtn').addEventListener('click', () => {
       exitBeforeAfter();
+      resetZoomPan();
       if (state.loadedBaseImageData || state.originalImageData) {
         state.originalImageData = state.loadedBaseImageData || state.originalImageData;
         state.rotationAngle = 0;
@@ -7666,7 +8011,9 @@
         state.croppedImageData = null;
         state.processedImageData = null;
         state.displayImageData = null;
+        invalidateSilverCoreCache();
         state.conversionSourceImageData = null;
+        state.conversionPreviewImageData = null;
         state.previewSourceImageData = null;
         state.histogramSourceImageData = null;
         state.webglSourceImageData = null;
@@ -7698,6 +8045,8 @@
 
     document.getElementById('newImageBtn').addEventListener('click', () => {
       exitBeforeAfter();
+      resetZoomPan();
+      zoomControls.style.display = 'none';
       // Reset all state
       state.loadedBaseImageData = null;
       state.originalImageData = null;
@@ -7706,7 +8055,9 @@
       state.rotationAngle = 0;
       state.processedImageData = null;
       state.displayImageData = null;
+      invalidateSilverCoreCache();
       state.conversionSourceImageData = null;
+      state.conversionPreviewImageData = null;
       state.previewSourceImageData = null;
       state.histogramSourceImageData = null;
       state.webglSourceImageData = null;
@@ -8840,6 +9191,7 @@
       if (index < 0 || index >= state.fileQueue.length) return;
       if (index === state.currentFileIndex) return;
 
+      resetZoomPan();
       persistCurrentFileSettings({ silent: true });
       state.currentFileIndex = index;
       const fileItem = state.fileQueue[index];

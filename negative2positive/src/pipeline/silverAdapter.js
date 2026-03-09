@@ -142,9 +142,76 @@ function toGrayscaleInPlace(imageData, mixPreset) {
   return imageData;
 }
 
-async function runSilverCore(imageData, settings, mode) {
-  const input = cloneImageData(imageData);
+// --- Layer 1: Engine cache ---
+// Dual cache for preview (small) and full (large) resolution engines
+const _cache = {
+  preview: { engine: null, width: 0, height: 0, profile: null, inputBuffer: null },
+  full:    { engine: null, width: 0, height: 0, profile: null, inputBuffer: null },
+};
+
+function _slotFor(options) {
+  return (options && options.preview) ? _cache.preview : _cache.full;
+}
+
+function _getOrCreateEngine(slot, w, h) {
+  if (slot.engine && slot.width === w && slot.height === h) {
+    return slot.engine;
+  }
+  slot.engine = new Engine(w, h);
+  slot.width = w;
+  slot.height = h;
+  slot.profile = null; // force profile reload on new engine
+  slot.inputBuffer = null;
+  return slot.engine;
+}
+
+async function _ensureProfile(slot, engine, profileName) {
+  if (slot.profile === profileName) return;
+  try {
+    await engine.setEnhancedProfile(profileName);
+    slot.profile = profileName;
+  } catch (err) {
+    console.error('Failed to load enhanced profile, fallback to none:', err);
+    await engine.setEnhancedProfile('none');
+    slot.profile = 'none';
+  }
+}
+
+function _reuseInputBuffer(slot, imageData) {
+  const len = imageData.data.length;
+  if (slot.inputBuffer && slot.inputBuffer.data.length === len) {
+    slot.inputBuffer.data.set(imageData.data);
+    return slot.inputBuffer;
+  }
+  const cloned = cloneImageData(imageData);
+  slot.inputBuffer = cloned;
+  return cloned;
+}
+
+// Determine whether we need full process() (histogram re-analysis) or can use reprocess()
+function _needsFullProcess(slot, options) {
+  if (!slot.engine || !slot.engine.channelData) return true;
+  if (options && options.forceFullProcess) return true;
+  return false;
+}
+
+async function runSilverCore(imageData, settings, mode, options) {
+  const slot = _slotFor(options);
   const params = buildSilverCoreParams(mode, settings);
+
+  const engine = _getOrCreateEngine(slot, imageData.width, imageData.height);
+
+  // Profile loading (skip if unchanged)
+  const profileName = params.enhancedProfile;
+  await _ensureProfile(slot, engine, profileName);
+  if (slot.profile === 'none' && profileName !== 'none') {
+    params.enhancedProfile = 'none';
+    params.profileStrength = 0;
+  }
+
+  // Reuse input buffer to avoid GC pressure
+  const input = _reuseInputBuffer(slot, imageData);
+
   // Film base compensation: skip for positive mode (no orange mask)
   if (mode !== 'positive') {
     const filmBaseGains = computeFilmBaseGains(settings && settings.filmBase);
@@ -152,27 +219,33 @@ async function runSilverCore(imageData, settings, mode) {
       applyFilmBaseCompensationInPlace(input, filmBaseGains);
     }
   }
-  const engine = new Engine(input.width, input.height);
-  try {
-    await engine.setEnhancedProfile(params.enhancedProfile);
-  } catch (err) {
-    console.error('Failed to load enhanced profile, fallback to none:', err);
-    params.enhancedProfile = 'none';
-    params.profileStrength = 0;
-    await engine.setEnhancedProfile('none');
-  }
-  const processed = engine.process(input, params);
+
+  // Choose process() vs reprocess() based on whether histogram analysis is needed
+  const processed = _needsFullProcess(slot, options)
+    ? engine.process(input, params)
+    : engine.reprocess(input, params);
+
   return mode === 'bw' ? toGrayscaleInPlace(processed, params.bwMix) : processed;
 }
 
-export async function convertColorWithSilverCore(imageData, settings = {}) {
-  return runSilverCore(imageData, settings, 'color');
+export function invalidateSilverCoreCache() {
+  for (const slot of [_cache.preview, _cache.full]) {
+    slot.engine = null;
+    slot.width = 0;
+    slot.height = 0;
+    slot.profile = null;
+    slot.inputBuffer = null;
+  }
 }
 
-export async function convertBwWithSilverCore(imageData, settings = {}) {
-  return runSilverCore(imageData, settings, 'bw');
+export async function convertColorWithSilverCore(imageData, settings = {}, options = {}) {
+  return runSilverCore(imageData, settings, 'color', options);
 }
 
-export async function convertPositiveWithSilverCore(imageData, settings = {}) {
-  return runSilverCore(imageData, settings, 'positive');
+export async function convertBwWithSilverCore(imageData, settings = {}, options = {}) {
+  return runSilverCore(imageData, settings, 'bw', options);
+}
+
+export async function convertPositiveWithSilverCore(imageData, settings = {}, options = {}) {
+  return runSilverCore(imageData, settings, 'positive', options);
 }
