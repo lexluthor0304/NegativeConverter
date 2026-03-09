@@ -29,7 +29,7 @@ const PROFILES_DIR = resolve(__dirname, '../negative2positive/src/silvercore/res
 
 /**
  * Compute identity value for a given grid index
- * Matches nopValue from decode-nlp-lut.mjs
+ * Identity value: i * 65535 / (N-1), rounded
  */
 function identityValue(i) {
   return Math.floor((i * 65535 + (LUT_SIZE >> 1)) / (LUT_SIZE - 1));
