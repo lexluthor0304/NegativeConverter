@@ -6,7 +6,7 @@
 
 import { convertSpace } from './ColorSpace.js'
 
-export const PROFILES = ['none', 'frontier', 'crystal', 'natural', 'pakon']
+export const PROFILES = ['none', 'frontier', 'crystal', 'natural', 'pakon', 'noritsu']
 export const LUT_SIZE = 32
 
 const profileCache = new Map()
@@ -15,6 +15,7 @@ const PROFILE_URLS = {
   crystal: new URL('../resources/profiles/crystal.bin', import.meta.url).href,
   natural: new URL('../resources/profiles/natural.bin', import.meta.url).href,
   pakon: new URL('../resources/profiles/pakon.bin', import.meta.url).href,
+  noritsu: new URL('../resources/profiles/noritsu.bin', import.meta.url).href,
 }
 
 /**
