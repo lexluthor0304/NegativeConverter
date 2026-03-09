@@ -41,7 +41,7 @@ export const filmPresets = {
     category: 'color',
     settings: {
       toneProfile: 'base_gamma',
-      enhancedProfile: 'frontier',
+      enhancedProfile: 'noritsu',
       shadows: -20,
       highlights: -8,
       blacks: 0,
