@@ -17,6 +17,10 @@
     import { convertFrameWithRouter } from '../pipeline/conversionRouter.js';
     import { invalidateSilverCoreCache } from '../pipeline/silverAdapter.js';
     import { Histogram } from '../silvercore/ui/Histogram.js';
+    import {
+      detectDust, updateDustStrength, inpaintMasked,
+      refineMaskIntelligent, refineMaskDirect, refineMaskRemove
+    } from '../silvercore/engine/DustRemoval.js';
 
     const UPNG = (UPNGImport && typeof UPNGImport.decode === 'function')
       ? UPNGImport
@@ -186,6 +190,17 @@
         coreGlow: "辉光",
         coreFade: "褪色",
         sectionEngine: "引擎",
+        sectionDustRemoval: "除尘",
+        dustRemovalEnable: "启用除尘",
+        dustStrength: "灵敏度",
+        dustShowMask: "显示蒙版",
+        dustBrushSize: "笔刷大小",
+        dustBrushHint: "点击=智能 | Alt+点击=直接 | Shift+点击=擦除",
+        dustClearMask: "清除蒙版",
+        dustStatusIdle: "就绪",
+        dustStatusProcessing: "处理中...",
+        dustStatusDone: "检测到 {count} 个灰尘颗粒",
+        dustStatusNone: "未检测到灰尘",
         coreCurvePrecision: "曲线精度",
         curvePrecisionAuto30: "自动（30 点）",
         curvePrecisionSmooth70: "平滑（70 点）",
@@ -470,6 +485,17 @@
         coreGlow: "Glow",
         coreFade: "Fade",
         sectionEngine: "Engine",
+        sectionDustRemoval: "Dust Removal",
+        dustRemovalEnable: "Enable Dust Removal",
+        dustStrength: "Sensitivity",
+        dustShowMask: "Show Mask",
+        dustBrushSize: "Brush Size",
+        dustBrushHint: "Click = Smart | Alt+Click = Direct | Shift+Click = Erase",
+        dustClearMask: "Clear Mask",
+        dustStatusIdle: "Ready",
+        dustStatusProcessing: "Processing...",
+        dustStatusDone: "Detected {count} dust particles",
+        dustStatusNone: "No dust detected",
         coreCurvePrecision: "Curve Precision",
         curvePrecisionAuto30: "Auto (30 points)",
         curvePrecisionSmooth70: "Smooth (70 points)",
@@ -754,6 +780,17 @@
         coreGlow: "グロー",
         coreFade: "フェード",
         sectionEngine: "エンジン",
+        sectionDustRemoval: "ダスト除去",
+        dustRemovalEnable: "ダスト除去を有効にする",
+        dustStrength: "感度",
+        dustShowMask: "マスク表示",
+        dustBrushSize: "ブラシサイズ",
+        dustBrushHint: "クリック=スマート | Alt+クリック=直接 | Shift+クリック=消去",
+        dustClearMask: "マスクをクリア",
+        dustStatusIdle: "準備完了",
+        dustStatusProcessing: "処理中...",
+        dustStatusDone: "{count} 個のダスト粒子を検出",
+        dustStatusNone: "ダストは検出されませんでした",
         coreCurvePrecision: "カーブ精度",
         curvePrecisionAuto30: "自動（30ポイント）",
         curvePrecisionSmooth70: "スムーズ（70ポイント）",
@@ -2210,6 +2247,19 @@
         applyCrop: false
       },
 
+      // Dust removal
+      dustRemoval: {
+        enabled: false,
+        strength: 3,
+        mask: null,          // Uint8Array (h*w)
+        showMask: false,
+        processing: false,
+        particleCount: 0,
+        _state: null,        // Internal state for updateDustStrength
+        inpaintedImageData: null, // ImageData after inpainting
+        brushSize: 5,
+      },
+
       // Export settings
       exportFormat: 'png',  // 'png' | 'jpeg' | 'tiff'
       exportBitDepth: 8,    // 8 | 16
@@ -2493,6 +2543,9 @@
     function updateStep3SectionVisibility() {
       const inStep3 = state.currentStep >= 3;
       const showCore = inStep3 && usesSilverCoreConversion(state);
+      const dustSection = document.getElementById('dustRemovalSection');
+      if (dustSection) dustSection.style.display = inStep3 ? 'block' : 'none';
+
       ['whiteBalanceSection', 'toneSection', 'colorSection', 'cmySection', 'advancedSection'].forEach((id) => {
         const el = document.getElementById(id);
         if (!el) return;
@@ -4532,6 +4585,7 @@
         state.lastRenderQuality = 'full';
       }
       // Histogram updates are deferred to full renders for responsiveness.
+      if (state.dustRemoval.showMask && state.dustRemoval.mask) renderDustMaskOverlay();
     }
 
     function updateFull() {
@@ -4566,6 +4620,7 @@
       transformCanvas.height = canvas.height;
       transformCtx.putImageData(fullAdjustedBuffer, 0, 0);
       state.lastRenderQuality = 'full';
+      if (state.dustRemoval.showMask && state.dustRemoval.mask) renderDustMaskOverlay();
     }
 
     function ensureFullRender() {
@@ -4753,11 +4808,20 @@
         const processed = await convertFromCurrentSource(state, { preview: false });
         if (!processed) return;
         applyProcessedImageToState(processed);
+        // Reset dust removal state for new conversion
+        state.dustRemoval._state = null;
+        state.dustRemoval.mask = null;
+        state.dustRemoval.inpaintedImageData = null;
+        state.dustRemoval.particleCount = 0;
         goToStep(3);
         syncBatchUIState({ reason: 'processNegative' });
         revealBatchFileList('processNegative');
         updatePreview();
         scheduleFullUpdate();
+        // Auto-run dust detection if enabled
+        if (state.dustRemoval.enabled) {
+          scheduleDustDetection();
+        }
       })();
 
       try {
@@ -4766,6 +4830,388 @@
         processNegativeInFlight = null;
       }
     }
+
+    // ===========================================
+    // Dust Removal Pipeline
+    // ===========================================
+    let dustDetectionTimer = null;
+    let dustDrawing = false;
+    let dustBrushMode = 'intelligent';
+
+    function getDustSource() {
+      return state.processedImageData;
+    }
+
+    function updateDustStatusUI(text) {
+      const el = document.getElementById('dustStatus');
+      if (el) el.textContent = text;
+    }
+
+    function updateDustControlsVisibility() {
+      const controls = document.getElementById('dustRemovalControls');
+      if (controls) controls.style.display = state.dustRemoval.enabled ? 'block' : 'none';
+      const brushControls = document.getElementById('dustBrushControls');
+      if (brushControls) brushControls.style.display = state.dustRemoval.showMask ? 'block' : 'none';
+    }
+
+    async function runDustDetection() {
+      const source = getDustSource();
+      if (!source) return;
+      if (state.dustRemoval.processing) return;
+
+      state.dustRemoval.processing = true;
+      updateDustStatusUI(getLocalizedText('dustStatusProcessing', 'Processing...'));
+
+      await ensureOpenCvReady();
+
+      // Use a short timeout to let the UI update
+      await new Promise(r => setTimeout(r, 10));
+
+      try {
+        const prevState = state.dustRemoval._state;
+        const { mask, particleCount, _state } = prevState
+          ? updateDustStrength(source, prevState, state.dustRemoval.strength)
+          : detectDust(source, { strength: state.dustRemoval.strength });
+        state.dustRemoval.mask = mask;
+        state.dustRemoval.particleCount = particleCount;
+        state.dustRemoval._state = _state;
+
+        if (particleCount > 0) {
+          const inpainted = inpaintMasked(source, mask, 3);
+          state.dustRemoval.inpaintedImageData = inpainted;
+          const tmpl = getLocalizedText('dustStatusDone', 'Detected {count} dust particles');
+          updateDustStatusUI(tmpl.replace('{count}', String(particleCount)));
+        } else {
+          state.dustRemoval.inpaintedImageData = null;
+          updateDustStatusUI(getLocalizedText('dustStatusNone', 'No dust detected'));
+        }
+      } catch (err) {
+        console.error('Dust detection failed:', err);
+        state.dustRemoval.mask = null;
+        state.dustRemoval.inpaintedImageData = null;
+        updateDustStatusUI('Error: ' + (err.message || err));
+      } finally {
+        state.dustRemoval.processing = false;
+      }
+
+      // Refresh display to show inpainted result
+      applyDustResultToState();
+      updatePreview();
+      scheduleFullUpdate();
+    }
+
+    function applyDustResultToState() {
+      if (!state.dustRemoval.enabled || !state.dustRemoval.inpaintedImageData) return;
+      // Replace processedImageData with inpainted version for downstream adjustments
+      const inpainted = state.dustRemoval.inpaintedImageData;
+      applyProcessedImageToState(inpainted);
+    }
+
+    function scheduleDustDetection() {
+      if (dustDetectionTimer) clearTimeout(dustDetectionTimer);
+      dustDetectionTimer = setTimeout(() => {
+        dustDetectionTimer = null;
+        void runDustDetection();
+      }, 300);
+    }
+
+    function clearDustState() {
+      state.dustRemoval.mask = null;
+      state.dustRemoval.inpaintedImageData = null;
+      state.dustRemoval.particleCount = 0;
+      state.dustRemoval._state = null;
+      updateDustStatusUI(getLocalizedText('dustStatusIdle', 'Ready'));
+    }
+
+    function renderDustMaskOverlay() {
+      if (!state.dustRemoval.showMask || !state.dustRemoval.mask || !state.processedImageData) return;
+
+      const { width, height } = state.processedImageData;
+      const mask = state.dustRemoval.mask;
+
+      // Draw red semi-transparent overlay on the canvas for masked areas
+      const overlayData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const scaleX = width / canvas.width;
+      const scaleY = height / canvas.height;
+
+      for (let cy = 0; cy < canvas.height; cy++) {
+        for (let cx = 0; cx < canvas.width; cx++) {
+          const mx = Math.min(width - 1, Math.round(cx * scaleX));
+          const my = Math.min(height - 1, Math.round(cy * scaleY));
+          if (mask[my * width + mx] > 0) {
+            const idx = (cy * canvas.width + cx) * 4;
+            // Red overlay at 50% opacity
+            overlayData.data[idx] = Math.min(255, overlayData.data[idx] * 0.5 + 255 * 0.5) | 0;
+            overlayData.data[idx + 1] = (overlayData.data[idx + 1] * 0.5) | 0;
+            overlayData.data[idx + 2] = (overlayData.data[idx + 2] * 0.5) | 0;
+          }
+        }
+      }
+      ctx.putImageData(overlayData, 0, 0);
+    }
+
+    // ── Dust Removal UI Event Handlers ───────────────────────────────────────
+
+    document.getElementById('dustRemovalEnabled')?.addEventListener('change', function () {
+      state.dustRemoval.enabled = this.checked;
+      updateDustControlsVisibility();
+
+      if (state.dustRemoval.enabled && state.processedImageData) {
+        // Re-run detection on the original converted image (before inpainting)
+        // Need to reconvert to get clean processedImageData
+        scheduleDustDetection();
+      } else if (!state.dustRemoval.enabled) {
+        // Disabled: restore original processedImageData by reconverting
+        clearDustState();
+        void rerenderWithCoreControls({ full: true });
+      }
+    });
+
+    document.getElementById('dustStrength')?.addEventListener('input', function () {
+      const val = parseInt(this.value, 10);
+      state.dustRemoval.strength = val;
+      const numInput = document.getElementById('dustStrengthValue');
+      if (numInput) numInput.value = String(val);
+
+      if (state.dustRemoval.enabled) {
+        scheduleDustDetection();
+      }
+    });
+
+    document.getElementById('dustStrengthValue')?.addEventListener('change', function () {
+      const val = Math.max(1, Math.min(10, parseInt(this.value, 10) || 3));
+      this.value = String(val);
+      state.dustRemoval.strength = val;
+      const slider = document.getElementById('dustStrength');
+      if (slider) slider.value = String(val);
+
+      if (state.dustRemoval.enabled) {
+        scheduleDustDetection();
+      }
+    });
+
+    document.getElementById('dustShowMask')?.addEventListener('change', function () {
+      state.dustRemoval.showMask = this.checked;
+      updateDustControlsVisibility();
+      if (state.dustRemoval.showMask) {
+        renderDustMaskOverlay();
+      } else {
+        updatePreview();
+      }
+    });
+
+    document.getElementById('dustBrushSize')?.addEventListener('input', function () {
+      const val = parseInt(this.value, 10);
+      state.dustRemoval.brushSize = val;
+      const numInput = document.getElementById('dustBrushSizeValue');
+      if (numInput) numInput.value = String(val);
+    });
+
+    document.getElementById('dustBrushSizeValue')?.addEventListener('change', function () {
+      const val = Math.max(1, Math.min(50, parseInt(this.value, 10) || 5));
+      this.value = String(val);
+      state.dustRemoval.brushSize = val;
+      const slider = document.getElementById('dustBrushSize');
+      if (slider) slider.value = String(val);
+    });
+
+    document.getElementById('dustClearMaskBtn')?.addEventListener('click', () => {
+      if (!state.dustRemoval.enabled) return;
+      clearDustState();
+      // Re-run fresh detection
+      scheduleDustDetection();
+    });
+
+    // ── Brush drawing on canvas ──────────────────────────────────────────────
+
+    function canvasToImageCoords(canvasX, canvasY) {
+      const source = state.processedImageData;
+      if (!source) return null;
+      const scaleX = source.width / canvas.width;
+      const scaleY = source.height / canvas.height;
+      return {
+        x: Math.round(canvasX * scaleX),
+        y: Math.round(canvasY * scaleY)
+      };
+    }
+
+    function createBrushMask(points, brushRadius, width, height) {
+      const mask = new Uint8Array(width * height);
+      const r = brushRadius;
+
+      for (const pt of points) {
+        const cx = pt.x, cy = pt.y;
+        for (let dy = -r; dy <= r; dy++) {
+          for (let dx = -r; dx <= r; dx++) {
+            if (dx * dx + dy * dy > r * r) continue;
+            const nx = cx + dx, ny = cy + dy;
+            if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+              mask[ny * width + nx] = 255;
+            }
+          }
+        }
+      }
+
+      // Also fill lines between consecutive points
+      for (let i = 1; i < points.length; i++) {
+        const p0 = points[i - 1], p1 = points[i];
+        const dist = Math.sqrt((p1.x - p0.x) ** 2 + (p1.y - p0.y) ** 2);
+        const steps = Math.max(1, Math.ceil(dist));
+        for (let s = 0; s <= steps; s++) {
+          const t = s / steps;
+          const ix = Math.round(p0.x + (p1.x - p0.x) * t);
+          const iy = Math.round(p0.y + (p1.y - p0.y) * t);
+          for (let dy = -r; dy <= r; dy++) {
+            for (let dx = -r; dx <= r; dx++) {
+              if (dx * dx + dy * dy > r * r) continue;
+              const nx = ix + dx, ny = iy + dy;
+              if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                mask[ny * width + nx] = 255;
+              }
+            }
+          }
+        }
+      }
+
+      return mask;
+    }
+
+    let dustBrushPoints = [];
+
+    function onDustBrushStart(e) {
+      if (!state.dustRemoval.enabled || !state.dustRemoval.showMask) return;
+      if (!state.dustRemoval.mask || !state.processedImageData) return;
+      if (state.samplingMode || state.cropping) return;
+
+      e.preventDefault();
+      dustDrawing = true;
+      dustBrushPoints = [];
+
+      // Determine mode
+      if (e.altKey) {
+        dustBrushMode = 'direct';
+      } else if (e.shiftKey) {
+        dustBrushMode = 'remove';
+      } else {
+        dustBrushMode = 'intelligent';
+      }
+
+      const rect = canvas.getBoundingClientRect();
+      const cx = (e.clientX - rect.left) * (canvas.width / rect.width);
+      const cy = (e.clientY - rect.top) * (canvas.height / rect.height);
+      const imgCoord = canvasToImageCoords(cx, cy);
+      if (imgCoord) dustBrushPoints.push(imgCoord);
+    }
+
+    function onDustBrushMove(e) {
+      if (!dustDrawing) return;
+      const rect = canvas.getBoundingClientRect();
+      const cx = (e.clientX - rect.left) * (canvas.width / rect.width);
+      const cy = (e.clientY - rect.top) * (canvas.height / rect.height);
+      const imgCoord = canvasToImageCoords(cx, cy);
+      if (imgCoord) dustBrushPoints.push(imgCoord);
+
+      // Visual feedback: draw brush stroke on canvas
+      if (state.dustRemoval.showMask) {
+        renderDustMaskOverlay();
+        // Draw brush points
+        const scaleX = canvas.width / (state.processedImageData?.width || 1);
+        const scaleY = canvas.height / (state.processedImageData?.height || 1);
+        const r = state.dustRemoval.brushSize * scaleX;
+        ctx.save();
+        ctx.globalAlpha = 0.4;
+        ctx.fillStyle = dustBrushMode === 'direct' ? '#ff0000'
+          : dustBrushMode === 'remove' ? '#0066ff' : '#ffff00';
+        for (const pt of dustBrushPoints) {
+          ctx.beginPath();
+          ctx.arc(pt.x * scaleX, pt.y * scaleY, r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.restore();
+      }
+    }
+
+    function onDustBrushEnd(e) {
+      if (!dustDrawing) return;
+      dustDrawing = false;
+
+      if (dustBrushPoints.length === 0 || !state.processedImageData || !state.dustRemoval.mask) return;
+
+      const source = getDustSource();
+      if (!source) return;
+
+      const { width, height } = source;
+      const brushMask = createBrushMask(dustBrushPoints, state.dustRemoval.brushSize, width, height);
+
+      let newMask;
+      if (dustBrushMode === 'intelligent') {
+        newMask = refineMaskIntelligent(source, state.dustRemoval.mask, brushMask);
+      } else if (dustBrushMode === 'direct') {
+        newMask = refineMaskDirect(state.dustRemoval.mask, brushMask);
+      } else {
+        newMask = refineMaskRemove(state.dustRemoval.mask, brushMask);
+      }
+
+      state.dustRemoval.mask = newMask;
+
+      // Re-inpaint with updated mask
+      // We need the original pre-inpaint source.
+      // Re-convert to get clean source, then re-inpaint
+      const cleanSource = state.conversionSourceImageData || state.croppedImageData || state.originalImageData;
+      if (cleanSource) {
+        convertFromCurrentSource(state, { preview: false }).then(processed => {
+          if (!processed) return;
+          const inpainted = inpaintMasked(processed, newMask, 3);
+          state.dustRemoval.inpaintedImageData = inpainted;
+
+          // Count particles
+          const c = window.cv;
+          if (c && c.Mat) {
+            try {
+              const maskMat = new c.Mat(height, width, c.CV_8UC1);
+              maskMat.data.set(newMask);
+              const contours = new c.MatVector();
+              const hierarchy = new c.Mat();
+              c.findContours(maskMat, contours, hierarchy, c.RETR_EXTERNAL, c.CHAIN_APPROX_SIMPLE);
+              state.dustRemoval.particleCount = contours.size();
+              maskMat.delete();
+              contours.delete();
+              hierarchy.delete();
+            } catch (_e) { /* ignore */ }
+          }
+
+          const tmpl = getLocalizedText('dustStatusDone', 'Detected {count} dust particles');
+          updateDustStatusUI(tmpl.replace('{count}', String(state.dustRemoval.particleCount)));
+
+          applyProcessedImageToState(inpainted);
+          updatePreview();
+          if (state.dustRemoval.showMask) {
+            // Need to re-render after updatePreview finishes
+            requestAnimationFrame(() => renderDustMaskOverlay());
+          }
+        });
+      }
+
+      dustBrushPoints = [];
+    }
+
+    // Attach brush handlers
+    canvas.addEventListener('mousedown', onDustBrushStart);
+    document.addEventListener('mousemove', onDustBrushMove);
+    document.addEventListener('mouseup', onDustBrushEnd);
+
+    // Ctrl+scroll to adjust brush size
+    canvas.addEventListener('wheel', (e) => {
+      if (!state.dustRemoval.enabled || !state.dustRemoval.showMask) return;
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+      const delta = e.deltaY > 0 ? -1 : 1;
+      state.dustRemoval.brushSize = Math.max(1, Math.min(50, state.dustRemoval.brushSize + delta));
+      const slider = document.getElementById('dustBrushSize');
+      const numInput = document.getElementById('dustBrushSizeValue');
+      if (slider) slider.value = String(state.dustRemoval.brushSize);
+      if (numInput) numInput.value = String(state.dustRemoval.brushSize);
+    }, { passive: false });
 
     // ===========================================
     // Canvas Display
@@ -9014,10 +9460,17 @@
       workingData = await applyLensCorrectionWithSettings(workingData, settings, { updateUi: false });
 
       // Convert negative/positive via unified conversion router.
-      const processed = await convertFrameWithRouter({
+      let processed = await convertFrameWithRouter({
         imageData: workingData,
         settings: buildRouterSettings(settings)
       });
+
+      // Apply dust removal if enabled (full resolution for export)
+      if (state.dustRemoval.enabled && processed) {
+        await ensureOpenCvReady();
+        const { mask } = detectDust(processed, { strength: state.dustRemoval.strength });
+        processed = inpaintMasked(processed, mask, 3);
+      }
 
       // Apply adjustments
       return applyAdjustmentsWithSettings(processed, settings);
