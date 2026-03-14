@@ -4,12 +4,19 @@
  * Performance target: 4000x6000 < 500ms via separable kernel.
  */
 
+// Gaussian kernel cache (Phase 7) - keyed by radius*10 (0.1 precision)
+const _kernelCache = new Map()
+
 /**
- * Build 1D Gaussian kernel for given radius.
+ * Build 1D Gaussian kernel for given radius (cached).
  * @param {number} radius - Blur radius (0.5-3.0)
  * @returns {Float32Array} Normalized kernel
  */
 function buildGaussianKernel(radius) {
+  const cacheKey = Math.round(radius * 10);
+  const cached = _kernelCache.get(cacheKey);
+  if (cached) return cached;
+
   const sigma = radius;
   const size = Math.ceil(sigma * 3) * 2 + 1;
   const kernel = new Float32Array(size);
@@ -26,12 +33,13 @@ function buildGaussianKernel(radius) {
     kernel[i] /= sum;
   }
 
+  _kernelCache.set(cacheKey, kernel);
   return kernel;
 }
 
 /**
  * Separable Gaussian blur (horizontal + vertical passes).
- * Operates on a single-channel Float32Array.
+ * Split into boundary/interior regions to eliminate clamp in inner loop (Phase 5).
  * @param {Float32Array} channel - Input channel data
  * @param {number} width
  * @param {number} height
@@ -39,32 +47,92 @@ function buildGaussianKernel(radius) {
  * @returns {Float32Array} Blurred channel
  */
 function separableBlur(channel, width, height, kernel) {
-  const halfK = (kernel.length - 1) / 2;
+  const kLen = kernel.length;
+  const halfK = (kLen - 1) / 2;
   const temp = new Float32Array(width * height);
   const output = new Float32Array(width * height);
 
-  // Horizontal pass
+  // Horizontal pass - split into left boundary / interior / right boundary
+  const hInnerStart = halfK;
+  const hInnerEnd = width - halfK;
+
   for (let y = 0; y < height; y++) {
     const rowOffset = y * width;
-    for (let x = 0; x < width; x++) {
+
+    // Left boundary [0, halfK) - needs clamping
+    for (let x = 0; x < hInnerStart && x < width; x++) {
       let sum = 0;
-      for (let k = 0; k < kernel.length; k++) {
-        const sx = Math.min(Math.max(x + k - halfK, 0), width - 1);
-        sum += channel[rowOffset + sx] * kernel[k];
+      for (let k = 0; k < kLen; k++) {
+        const sx = x + k - halfK;
+        sum += channel[rowOffset + (sx < 0 ? 0 : sx)] * kernel[k];
+      }
+      temp[rowOffset + x] = sum;
+    }
+
+    // Interior [halfK, width-halfK) - no clamping needed
+    for (let x = hInnerStart; x < hInnerEnd; x++) {
+      let sum = 0;
+      const baseIdx = rowOffset + x - halfK;
+      for (let k = 0; k < kLen; k++) {
+        sum += channel[baseIdx + k] * kernel[k];
+      }
+      temp[rowOffset + x] = sum;
+    }
+
+    // Right boundary [width-halfK, width) - needs clamping
+    for (let x = Math.max(hInnerEnd, hInnerStart); x < width; x++) {
+      let sum = 0;
+      for (let k = 0; k < kLen; k++) {
+        const sx = x + k - halfK;
+        sum += channel[rowOffset + (sx >= width ? width - 1 : sx)] * kernel[k];
       }
       temp[rowOffset + x] = sum;
     }
   }
 
-  // Vertical pass
-  for (let x = 0; x < width; x++) {
-    for (let y = 0; y < height; y++) {
-      let sum = 0;
-      for (let k = 0; k < kernel.length; k++) {
-        const sy = Math.min(Math.max(y + k - halfK, 0), height - 1);
-        sum += temp[sy * width + x] * kernel[k];
+  // Vertical pass - split into top boundary / interior / bottom boundary
+  // Process in blocks of 64 columns for better cache locality
+  const BLOCK = 64;
+  const vInnerStart = halfK;
+  const vInnerEnd = height - halfK;
+
+  for (let xBlock = 0; xBlock < width; xBlock += BLOCK) {
+    const xEnd = Math.min(xBlock + BLOCK, width);
+
+    // Top boundary [0, halfK) - needs clamping
+    for (let y = 0; y < vInnerStart && y < height; y++) {
+      for (let x = xBlock; x < xEnd; x++) {
+        let sum = 0;
+        for (let k = 0; k < kLen; k++) {
+          const sy = y + k - halfK;
+          sum += temp[(sy < 0 ? 0 : sy) * width + x] * kernel[k];
+        }
+        output[y * width + x] = sum;
       }
-      output[y * width + x] = sum;
+    }
+
+    // Interior [halfK, height-halfK) - no clamping needed
+    for (let y = vInnerStart; y < vInnerEnd; y++) {
+      const baseY = y - halfK;
+      for (let x = xBlock; x < xEnd; x++) {
+        let sum = 0;
+        for (let k = 0; k < kLen; k++) {
+          sum += temp[(baseY + k) * width + x] * kernel[k];
+        }
+        output[y * width + x] = sum;
+      }
+    }
+
+    // Bottom boundary [height-halfK, height) - needs clamping
+    for (let y = Math.max(vInnerEnd, vInnerStart); y < height; y++) {
+      for (let x = xBlock; x < xEnd; x++) {
+        let sum = 0;
+        for (let k = 0; k < kLen; k++) {
+          const sy = y + k - halfK;
+          sum += temp[(sy >= height ? height - 1 : sy) * width + x] * kernel[k];
+        }
+        output[y * width + x] = sum;
+      }
     }
   }
 

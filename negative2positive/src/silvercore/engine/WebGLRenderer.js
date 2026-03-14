@@ -137,6 +137,11 @@ export class WebGLRenderer {
     this.isWebGL2 = false
     this.lut3DEnabled = false
     this.lut3DTex = null
+    // Pre-allocated buffer for LUT upload (Phase 4)
+    this._lutUploadData = new Uint8Array(256 * 4)
+    this._lastLutR = null
+    this._lastLutG = null
+    this._lastLutB = null
 
     // Try WebGL2 first, fall back to WebGL1
     this.gl = canvas.getContext('webgl2', { preserveDrawingBuffer: true })
@@ -235,16 +240,21 @@ export class WebGLRenderer {
   }
 
   /**
-   * Upload LUT as 256x1 texture.
+   * Upload LUT as 256x1 texture. Skips upload if LUT reference unchanged.
    */
-  _uploadLUT(unit, tex, lut) {
+  _uploadLUT(unit, tex, lut, cacheKey) {
+    // Skip upload if LUT reference hasn't changed
+    if (this[cacheKey] === lut) return
+    this[cacheKey] = lut
+
     const gl = this.gl
-    const data = new Uint8Array(256 * 4)
+    const data = this._lutUploadData
     for (let i = 0; i < 256; i++) {
-      data[i * 4] = lut[i]
-      data[i * 4 + 1] = lut[i]
-      data[i * 4 + 2] = lut[i]
-      data[i * 4 + 3] = 255
+      const off = i * 4
+      data[off] = lut[i]
+      data[off + 1] = lut[i]
+      data[off + 2] = lut[i]
+      data[off + 3] = 255
     }
     gl.activeTexture(gl.TEXTURE0 + unit)
     gl.bindTexture(gl.TEXTURE_2D, tex)
@@ -320,10 +330,10 @@ export class WebGLRenderer {
     gl.bindTexture(gl.TEXTURE_2D, this.imageTex)
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, data)
 
-    // Upload 1D LUTs
-    this._uploadLUT(1, this.lutTexR, rLUT)
-    this._uploadLUT(2, this.lutTexG, gLUT)
-    this._uploadLUT(3, this.lutTexB, bLUT)
+    // Upload 1D LUTs (cached - skips if unchanged)
+    this._uploadLUT(1, this.lutTexR, rLUT, '_lastLutR')
+    this._uploadLUT(2, this.lutTexG, gLUT, '_lastLutG')
+    this._uploadLUT(3, this.lutTexB, bLUT, '_lastLutB')
 
     // Saturation
     gl.uniform1f(this.uSaturation, saturation / 100)
