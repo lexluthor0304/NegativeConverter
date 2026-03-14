@@ -4621,6 +4621,7 @@
 
     function isWebGLActive() {
       if (usesSilverCoreConversion(state)) return false;
+      if (state.dustRemoval.enabled && state.dustRemoval.showMask) return false;
       return !!webglState.gl && !webglState.disabledByError && state.currentStep >= 3 && !!state.processedImageData;
     }
 
@@ -5291,7 +5292,11 @@
         scheduleDustDetection();
       } else if (!state.dustRemoval.enabled) {
         // Disabled: restore original processedImageData by reconverting
+        state.dustRemoval.showMask = false;
+        const showMaskCheckbox = document.getElementById('dustShowMask');
+        if (showMaskCheckbox) showMaskCheckbox.checked = false;
         clearDustState();
+        updateCanvasVisibility();
         void rerenderWithCoreControls({ full: true });
       }
     });
@@ -5336,10 +5341,12 @@
     document.getElementById('dustShowMask')?.addEventListener('change', function () {
       state.dustRemoval.showMask = this.checked;
       updateDustControlsVisibility();
+      updateCanvasVisibility();
       if (state.dustRemoval.showMask) {
-        renderDustMaskOverlay();
+        updatePreview();           // render image on 2D canvas first
+        requestAnimationFrame(() => renderDustMaskOverlay());
       } else {
-        updatePreview();
+        updatePreview();           // restore normal render path (may switch back to WebGL)
       }
     });
 
@@ -5439,7 +5446,8 @@
         dustBrushMode = 'intelligent';
       }
 
-      const rect = canvas.getBoundingClientRect();
+      const target = e.currentTarget;
+      const rect = target.getBoundingClientRect();
       const cx = (e.clientX - rect.left) * (canvas.width / rect.width);
       const cy = (e.clientY - rect.top) * (canvas.height / rect.height);
       const imgCoord = canvasToImageCoords(cx, cy);
@@ -5448,7 +5456,8 @@
 
     function onDustBrushMove(e) {
       if (!dustDrawing) return;
-      const rect = canvas.getBoundingClientRect();
+      const activeCanvas = isWebGLActive() ? glCanvas : canvas;
+      const rect = activeCanvas.getBoundingClientRect();
       const cx = (e.clientX - rect.left) * (canvas.width / rect.width);
       const cy = (e.clientY - rect.top) * (canvas.height / rect.height);
       const imgCoord = canvasToImageCoords(cx, cy);
@@ -5541,11 +5550,12 @@
 
     // Attach brush handlers
     canvas.addEventListener('mousedown', onDustBrushStart);
+    glCanvas.addEventListener('mousedown', onDustBrushStart);
     document.addEventListener('mousemove', onDustBrushMove);
     document.addEventListener('mouseup', onDustBrushEnd);
 
     // Ctrl+scroll to adjust brush size
-    canvas.addEventListener('wheel', (e) => {
+    const dustWheelHandler = (e) => {
       if (!state.dustRemoval.enabled || !state.dustRemoval.showMask) return;
       if (!e.ctrlKey) return;
       e.preventDefault();
@@ -5555,7 +5565,9 @@
       const numInput = document.getElementById('dustBrushSizeValue');
       if (slider) slider.value = String(state.dustRemoval.brushSize);
       if (numInput) numInput.value = String(state.dustRemoval.brushSize);
-    }, { passive: false });
+    };
+    canvas.addEventListener('wheel', dustWheelHandler, { passive: false });
+    glCanvas.addEventListener('wheel', dustWheelHandler, { passive: false });
 
     // ===========================================
     // Canvas Display

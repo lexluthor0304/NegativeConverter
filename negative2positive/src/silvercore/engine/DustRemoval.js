@@ -443,9 +443,7 @@ export function detectDust(imageData, { strength = 3 } = {}) {
   const fullLinien = new Uint8Array(pixelCount);
   const fullGauss = new Uint8Array(pixelCount);
 
-  // Process in 2x2 tiles — always use strength=1 for initial cache building
-  // (Python: self.process_image(1) regardless of self.strength)
-  const initStrength = 1;
+  // Process in 2x2 tiles
   for (let row = 0; row < 2; row++) {
     for (let col = 0; col < 2; col++) {
       const y1 = row * hStep;
@@ -456,7 +454,7 @@ export function detectDust(imageData, { strength = 3 } = {}) {
       const th = y2 - y1;
 
       const tile = extractTile(imageData, x1, y1, x2, y2);
-      const { scharr, scharrAll, lineMask, gaussMask } = correctTile(tile, initStrength);
+      const { scharr, scharrAll, lineMask, gaussMask } = correctTile(tile, strength);
 
       placeTile(fullScharr, w, scharr, tw, th, x1, y1);
       placeTile(fullScharrAll, w, scharrAll, tw, th, x1, y1);
@@ -521,7 +519,7 @@ export function updateDustStrength(imageData, existingState, newStrength) {
   const pixelCount = w * h;
   const hStep = h >> 1;
   const wStep = w >> 1;
-  const factor = 10;
+  const TH_scharr = 0.7;
 
   // Convert to grayscale
   const src = imageDataToMat(imageData);
@@ -573,7 +571,7 @@ export function updateDustStrength(imageData, existingState, newStrength) {
       }
       const normalized = normalizeToUint8(mag, tilePixels);
 
-      const threshVal = (newStrength * factor) | 0;
+      const threshVal = (TH_scharr * newStrength * 5) | 0;
       const tileScharr = new Uint8Array(tilePixels);
       for (let i = 0; i < tilePixels; i++) {
         tileScharr[i] = (normalized[i] >= threshVal && normalized[i] <= 255) ? 255 : 0;
@@ -593,8 +591,8 @@ export function updateDustStrength(imageData, existingState, newStrength) {
     increase[i] = Math.min(255, val * gauss[i]);
   }
 
-  // Analyze contours — reuse cached allowedMask (BUG 3 fix)
-  const allowedMask = existingState.allowedMask;
+  // Analyze contours with new threshold
+  const { allowedMask } = analyzeContours(increase, scharrAll, w, h);
 
   // Dilate
   const kernelSize = Math.max(3, Math.round(h * 0.0015)) | 1;
