@@ -123,39 +123,100 @@ export function applyLUT(imageData, rLUT, gLUT, bLUT) {
 }
 
 /**
- * Simple box blur for pre-processing (replaces ImageMagick -blur 0x1).
+ * Separable box blur for pre-processing (replaces ImageMagick -blur 0x1).
+ * Uses sliding window: O(n²) independent of radius.
  * @param {ImageData} imageData
  * @param {number} radius
  * @returns {ImageData}
  */
 export function boxBlur(imageData, radius = 1) {
   const { data, width, height } = imageData;
-  const output = new Uint8ClampedArray(data.length);
   const size = radius * 2 + 1;
-  const area = size * size;
+  const invSize = 1 / size;
+  const temp = new Uint8ClampedArray(data.length);
 
+  // Horizontal pass: data → temp
   for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      let rSum = 0, gSum = 0, bSum = 0;
-      for (let dy = -radius; dy <= radius; dy++) {
-        for (let dx = -radius; dx <= radius; dx++) {
-          const sx = Math.min(Math.max(x + dx, 0), width - 1);
-          const sy = Math.min(Math.max(y + dy, 0), height - 1);
-          const si = (sy * width + sx) * 4;
-          rSum += data[si];
-          gSum += data[si + 1];
-          bSum += data[si + 2];
-        }
-      }
-      const di = (y * width + x) * 4;
-      output[di] = rSum / area;
-      output[di + 1] = gSum / area;
-      output[di + 2] = bSum / area;
-      output[di + 3] = data[di + 3];
+    const rowOff = y * width * 4;
+    // Initialize running sums for first pixel
+    let rSum = 0, gSum = 0, bSum = 0;
+    for (let dx = -radius; dx <= radius; dx++) {
+      const sx = dx < 0 ? 0 : dx >= width ? width - 1 : dx;
+      const si = rowOff + sx * 4;
+      rSum += data[si];
+      gSum += data[si + 1];
+      bSum += data[si + 2];
+    }
+    temp[rowOff] = rSum * invSize;
+    temp[rowOff + 1] = gSum * invSize;
+    temp[rowOff + 2] = bSum * invSize;
+    temp[rowOff + 3] = data[rowOff + 3];
+
+    // Slide window across the row
+    for (let x = 1; x < width; x++) {
+      // Add new right pixel
+      const addX = x + radius;
+      const addSx = addX >= width ? width - 1 : addX;
+      const addI = rowOff + addSx * 4;
+      rSum += data[addI];
+      gSum += data[addI + 1];
+      bSum += data[addI + 2];
+
+      // Remove old left pixel
+      const remX = x - radius - 1;
+      const remSx = remX < 0 ? 0 : remX;
+      const remI = rowOff + remSx * 4;
+      rSum -= data[remI];
+      gSum -= data[remI + 1];
+      bSum -= data[remI + 2];
+
+      const di = rowOff + x * 4;
+      temp[di] = rSum * invSize;
+      temp[di + 1] = gSum * invSize;
+      temp[di + 2] = bSum * invSize;
+      temp[di + 3] = data[di + 3];
     }
   }
 
-  imageData.data.set(output);
+  // Vertical pass: temp → data
+  for (let x = 0; x < width; x++) {
+    const colOff = x * 4;
+    // Initialize running sums for first pixel
+    let rSum = 0, gSum = 0, bSum = 0;
+    for (let dy = -radius; dy <= radius; dy++) {
+      const sy = dy < 0 ? 0 : dy >= height ? height - 1 : dy;
+      const si = sy * width * 4 + colOff;
+      rSum += temp[si];
+      gSum += temp[si + 1];
+      bSum += temp[si + 2];
+    }
+    data[colOff] = rSum * invSize;
+    data[colOff + 1] = gSum * invSize;
+    data[colOff + 2] = bSum * invSize;
+
+    // Slide window down the column
+    for (let y = 1; y < height; y++) {
+      const addY = y + radius;
+      const addSy = addY >= height ? height - 1 : addY;
+      const addI = addSy * width * 4 + colOff;
+      rSum += temp[addI];
+      gSum += temp[addI + 1];
+      bSum += temp[addI + 2];
+
+      const remY = y - radius - 1;
+      const remSy = remY < 0 ? 0 : remY;
+      const remI = remSy * width * 4 + colOff;
+      rSum -= temp[remI];
+      gSum -= temp[remI + 1];
+      bSum -= temp[remI + 2];
+
+      const di = y * width * 4 + colOff;
+      data[di] = rSum * invSize;
+      data[di + 1] = gSum * invSize;
+      data[di + 2] = bSum * invSize;
+    }
+  }
+
   return imageData;
 }
 
@@ -172,9 +233,35 @@ export function negateImage(imageData) {
   return imageData;
 }
 
+// Pre-computed hue weight lookup tables (Phase 3)
+// 3600 entries for 0.1° resolution in [0,1] hue space
+const HUE_TABLE_SIZE = 3600
+const hueWeightTableR = new Float32Array(HUE_TABLE_SIZE) // Red center at 0
+const hueWeightTableG = new Float32Array(HUE_TABLE_SIZE) // Green center at 1/3
+const hueWeightTableB = new Float32Array(HUE_TABLE_SIZE) // Blue center at 2/3
+
+;(function buildHueWeightTables() {
+  const inv = 1 / HUE_TABLE_SIZE
+  for (let i = 0; i < HUE_TABLE_SIZE; i++) {
+    const h = i * inv
+    // Red (center = 0)
+    let dist = h > 0.5 ? 1 - h : h
+    hueWeightTableR[i] = dist > 1/6 ? 0 : 0.5 + 0.5 * Math.cos(dist * 6 * Math.PI)
+    // Green (center = 1/3)
+    dist = Math.abs(h - 1/3)
+    if (dist > 0.5) dist = 1 - dist
+    hueWeightTableG[i] = dist > 1/6 ? 0 : 0.5 + 0.5 * Math.cos(dist * 6 * Math.PI)
+    // Blue (center = 2/3)
+    dist = Math.abs(h - 2/3)
+    if (dist > 0.5) dist = 1 - dist
+    hueWeightTableB[i] = dist > 1/6 ? 0 : 0.5 + 0.5 * Math.cos(dist * 6 * Math.PI)
+  }
+})()
+
 /**
  * Apply HSL (Hue/Saturation) adjustments per color region.
  * Mimics Lightroom's HSL panel with Red/Green/Blue channels.
+ * Uses pre-computed hue weight lookup tables (Phase 3).
  * @param {ImageData} imageData - Will be modified in place
  * @param {Object} hsl - { redHue, redSaturation, greenHue, greenSaturation, blueHue, blueSaturation }
  * @returns {ImageData}
@@ -187,23 +274,28 @@ export function applyHSLAdjustments(imageData, hsl) {
   }
 
   const { data } = imageData
-  // Precompute hue shifts in [0,1] range (Lightroom uses [-100,100] mapped to [-30°,+30°] approx)
   const rHueShift = redHue / 360
   const gHueShift = greenHue / 360
   const bHueShift = blueHue / 360
-  // Saturation adjustments as multiplier offsets (Lightroom [-100,100] → [-1,+1])
   const rSatFactor = redSaturation / 100
   const gSatFactor = greenSaturation / 100
   const bSatFactor = blueSaturation / 100
+  const inv255 = 1 / 255
 
   for (let i = 0; i < data.length; i += 4) {
-    const r = data[i] / 255
-    const g = data[i + 1] / 255
-    const b = data[i + 2] / 255
+    const r = data[i] * inv255
+    const g = data[i + 1] * inv255
+    const b = data[i + 2] * inv255
 
-    // RGB → HSL
-    const max = Math.max(r, g, b)
-    const min = Math.min(r, g, b)
+    // RGB → HSL (optimized: avoid Math.max/Math.min function calls)
+    let max, min
+    if (r > g) {
+      max = r > b ? r : b
+      min = g < b ? g : b
+    } else {
+      max = g > b ? g : b
+      min = r < b ? r : b
+    }
     const d = max - min
     const l = (max + min) * 0.5
 
@@ -214,21 +306,24 @@ export function applyHSLAdjustments(imageData, hsl) {
     else if (max === g) h = ((b - r) / d + 2) / 6
     else h = ((r - g) / d + 4) / 6
 
-    let s = l > 0.5 ? d / (2 - max - min) : d / (max + min)
+    const invD = 1 / (l > 0.5 ? 2 - max - min : max + min)
+    let s = d * invD
 
-    // Compute per-region weights using cosine falloff
-    // Each region has 120° width (60° half-width), centered at 0°, 120°, 240°
-    const rWeight = hueWeight(h, 0)     // Red center at 0°
-    const gWeight = hueWeight(h, 1/3)   // Green center at 120°
-    const bWeight = hueWeight(h, 2/3)   // Blue center at 240°
+    // Lookup hue weights from pre-computed tables
+    const hIdx = (h * HUE_TABLE_SIZE) | 0
+    const rWeight = hueWeightTableR[hIdx]
+    const gWeight = hueWeightTableG[hIdx]
+    const bWeight = hueWeightTableB[hIdx]
 
-    // Apply hue shift (weighted blend of all regions)
+    // Apply hue shift
     h += rWeight * rHueShift + gWeight * gHueShift + bWeight * bHueShift
-    h = h - Math.floor(h) // wrap to [0,1]
+    h = h - Math.floor(h)
 
     // Apply saturation adjustment
     const satAdj = rWeight * rSatFactor + gWeight * gSatFactor + bWeight * bSatFactor
-    s = Math.max(0, Math.min(1, s * (1 + satAdj)))
+    s = s * (1 + satAdj)
+    if (s < 0) s = 0
+    else if (s > 1) s = 1
 
     // HSL → RGB
     let r2, g2, b2
@@ -242,22 +337,13 @@ export function applyHSLAdjustments(imageData, hsl) {
       b2 = hue2rgb(p, q, h - 1/3)
     }
 
-    data[i] = Math.max(0, Math.min(255, r2 * 255 + 0.5)) | 0
-    data[i + 1] = Math.max(0, Math.min(255, g2 * 255 + 0.5)) | 0
-    data[i + 2] = Math.max(0, Math.min(255, b2 * 255 + 0.5)) | 0
+    let v
+    v = r2 * 255 + 0.5; data[i] = v < 0 ? 0 : v > 255 ? 255 : v | 0
+    v = g2 * 255 + 0.5; data[i + 1] = v < 0 ? 0 : v > 255 ? 255 : v | 0
+    v = b2 * 255 + 0.5; data[i + 2] = v < 0 ? 0 : v > 255 ? 255 : v | 0
   }
 
   return imageData
-}
-
-/** Cosine-based weight for a hue region. center in [0,1], 60° half-width. */
-function hueWeight(h, center) {
-  // Angular distance on hue circle
-  let dist = Math.abs(h - center)
-  if (dist > 0.5) dist = 1 - dist
-  // 60° half-width = 1/6 in [0,1] hue space
-  if (dist > 1/6) return 0
-  return 0.5 + 0.5 * Math.cos(dist * 6 * Math.PI)
 }
 
 /** HSL hue-to-RGB helper */

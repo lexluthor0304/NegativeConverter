@@ -61,17 +61,6 @@ function computeFilmBaseGains(base) {
   };
 }
 
-function applyFilmBaseCompensationInPlace(imageData, gains) {
-  if (!imageData || !imageData.data || !gains) return imageData;
-  const { data } = imageData;
-  for (let i = 0; i < data.length; i += 4) {
-    data[i] = clamp(Math.round(data[i] * gains.r), 0, 255);
-    data[i + 1] = clamp(Math.round(data[i + 1] * gains.g), 0, 255);
-    data[i + 2] = clamp(Math.round(data[i + 2] * gains.b), 0, 255);
-  }
-  return imageData;
-}
-
 function applyFilmPreset(baseSettings, presetId) {
   if (!presetId || presetId === 'none') return baseSettings;
   const preset = filmPresets[presetId];
@@ -145,9 +134,15 @@ function toGrayscaleInPlace(imageData, mixPreset) {
 // --- Layer 1: Engine cache ---
 // Dual cache for preview (small) and full (large) resolution engines
 const _cache = {
-  preview: { engine: null, width: 0, height: 0, profile: null, inputBuffer: null },
-  full:    { engine: null, width: 0, height: 0, profile: null, inputBuffer: null },
+  preview: { engine: null, width: 0, height: 0, profile: null, inputBuffer: null, pristineBuffer: null, lastSourceRef: null, lastFilmBaseGains: null },
+  full:    { engine: null, width: 0, height: 0, profile: null, inputBuffer: null, pristineBuffer: null, lastSourceRef: null, lastFilmBaseGains: null },
 };
+
+function gainsEqual(a, b) {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.r === b.r && a.g === b.g && a.b === b.b;
+}
 
 function _slotFor(options) {
   return (options && options.preview) ? _cache.preview : _cache.full;
@@ -162,6 +157,9 @@ function _getOrCreateEngine(slot, w, h) {
   slot.height = h;
   slot.profile = null; // force profile reload on new engine
   slot.inputBuffer = null;
+  slot.pristineBuffer = null;
+  slot.lastSourceRef = null;
+  slot.lastFilmBaseGains = null;
   return slot.engine;
 }
 
@@ -177,15 +175,48 @@ async function _ensureProfile(slot, engine, profileName) {
   }
 }
 
-function _reuseInputBuffer(slot, imageData) {
+function _reuseInputBuffer(slot, imageData, filmBaseGains) {
   const len = imageData.data.length;
-  if (slot.inputBuffer && slot.inputBuffer.data.length === len) {
-    slot.inputBuffer.data.set(imageData.data);
+  const sourceRef = imageData.data;
+  const sourceChanged = sourceRef !== slot.lastSourceRef;
+  const gainsChanged = !gainsEqual(slot.lastFilmBaseGains, filmBaseGains);
+
+  // Ensure buffers are allocated
+  if (!slot.inputBuffer || slot.inputBuffer.data.length !== len) {
+    slot.inputBuffer = cloneImageData(imageData);
+    slot.pristineBuffer = new Uint8ClampedArray(len);
+    // Build pristine: source + filmBase
+    slot.pristineBuffer.set(sourceRef);
+    if (filmBaseGains) {
+      _applyGainsToBuffer(slot.pristineBuffer, filmBaseGains);
+    }
+    slot.lastSourceRef = sourceRef;
+    slot.lastFilmBaseGains = filmBaseGains ? { ...filmBaseGains } : null;
+    slot.inputBuffer.data.set(slot.pristineBuffer);
     return slot.inputBuffer;
   }
-  const cloned = cloneImageData(imageData);
-  slot.inputBuffer = cloned;
-  return cloned;
+
+  if (sourceChanged || gainsChanged) {
+    // Rebuild pristine: copy source + apply filmBase
+    slot.pristineBuffer.set(sourceRef);
+    if (filmBaseGains) {
+      _applyGainsToBuffer(slot.pristineBuffer, filmBaseGains);
+    }
+    slot.lastSourceRef = sourceRef;
+    slot.lastFilmBaseGains = filmBaseGains ? { ...filmBaseGains } : null;
+  }
+
+  // Copy pristine → inputBuffer (engine modifies inputBuffer in-place)
+  slot.inputBuffer.data.set(slot.pristineBuffer);
+  return slot.inputBuffer;
+}
+
+function _applyGainsToBuffer(data, gains) {
+  for (let i = 0; i < data.length; i += 4) {
+    data[i] = clamp(Math.round(data[i] * gains.r), 0, 255);
+    data[i + 1] = clamp(Math.round(data[i + 1] * gains.g), 0, 255);
+    data[i + 2] = clamp(Math.round(data[i + 2] * gains.b), 0, 255);
+  }
 }
 
 // Determine whether we need full process() (histogram re-analysis) or can use reprocess()
@@ -209,16 +240,11 @@ async function runSilverCore(imageData, settings, mode, options) {
     params.profileStrength = 0;
   }
 
-  // Reuse input buffer to avoid GC pressure
-  const input = _reuseInputBuffer(slot, imageData);
+  // Compute filmBase gains (skip for positive mode - no orange mask)
+  const filmBaseGains = mode !== 'positive' ? computeFilmBaseGains(settings && settings.filmBase) : null;
 
-  // Film base compensation: skip for positive mode (no orange mask)
-  if (mode !== 'positive') {
-    const filmBaseGains = computeFilmBaseGains(settings && settings.filmBase);
-    if (filmBaseGains) {
-      applyFilmBaseCompensationInPlace(input, filmBaseGains);
-    }
-  }
+  // Reuse input buffer; skips filmBase per-pixel loop when source + gains unchanged
+  const input = _reuseInputBuffer(slot, imageData, filmBaseGains);
 
   // Choose process() vs reprocess() based on whether histogram analysis is needed
   const processed = _needsFullProcess(slot, options)
@@ -235,6 +261,9 @@ export function invalidateSilverCoreCache() {
     slot.height = 0;
     slot.profile = null;
     slot.inputBuffer = null;
+    slot.pristineBuffer = null;
+    slot.lastSourceRef = null;
+    slot.lastFilmBaseGains = null;
   }
 }
 
