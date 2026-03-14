@@ -1508,6 +1508,26 @@
       background: var(--bg-hover);
     }
 
+    .footer-btn:disabled {
+      opacity: 0.35;
+      cursor: default;
+      pointer-events: none;
+    }
+
+    .footer-btn svg { flex-shrink: 0; }
+
+    #toastContainer {
+      position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+      z-index: 2000; display: flex; flex-direction: column; align-items: center; gap: 6px;
+      pointer-events: none;
+    }
+    .toast-message {
+      background: rgba(30,30,30,0.92); color: #e0e0e0; padding: 8px 18px;
+      border-radius: 6px; font-size: 13px; opacity: 0; transition: opacity 0.25s;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3); white-space: nowrap;
+    }
+    .toast-message.toast-visible { opacity: 1; }
+
     .footer-btn.primary {
       background: var(--accent);
       border-color: var(--accent);
@@ -2195,7 +2215,7 @@
       .footer-left {
         width: 100%;
         display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
+        grid-template-columns: repeat(5, minmax(0, 1fr));
       }
 
       .footer-right {
@@ -2696,6 +2716,45 @@
         </div>
       </div>
 
+      <!-- Dust Removal (Step 3, before other adjustments) -->
+      <div class="control-section" id="dustRemovalSection" style="display: none;">
+        <div class="section-header" data-section="dustRemoval">
+          <span class="section-title" data-i18n="sectionDustRemoval">Dust Removal</span>
+          <span class="section-toggle">▼</span>
+        </div>
+        <div class="section-content" id="dustRemovalSectionContent">
+          <label class="roll-reference-option">
+            <input type="checkbox" id="dustRemovalEnabled">
+            <span data-i18n="dustRemovalEnable">Enable Dust Removal</span>
+          </label>
+          <div id="dustRemovalControls" style="display: none;">
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label" data-i18n="dustStrength">Sensitivity</span>
+                <input type="number" class="slider-number-input" id="dustStrengthValue" min="1" max="10" step="1" value="3">
+              </div>
+              <input type="range" class="slider-input" id="dustStrength" min="1" max="10" step="1" value="3">
+            </div>
+            <div class="info-box" id="dustStatus" data-i18n="dustStatusIdle">Ready</div>
+            <label class="roll-reference-option" style="margin-top: 6px;">
+              <input type="checkbox" id="dustShowMask">
+              <span data-i18n="dustShowMask">Show Mask</span>
+            </label>
+            <div id="dustBrushControls" style="display: none;">
+              <div class="slider-control">
+                <div class="slider-header">
+                  <span class="slider-label" data-i18n="dustBrushSize">Brush Size</span>
+                  <input type="number" class="slider-number-input" id="dustBrushSizeValue" min="1" max="50" step="1" value="5">
+                </div>
+                <input type="range" class="slider-input" id="dustBrushSize" min="1" max="50" step="1" value="5">
+              </div>
+              <div class="info-box" style="font-size: 11px; padding: 6px 8px;" data-i18n="dustBrushHint">Click = Smart | Alt+Click = Direct | Shift+Click = Erase</div>
+            </div>
+            <button class="toolbar-btn" id="dustClearMaskBtn" style="margin-top: 6px; width: 100%; justify-content: center;" data-i18n="dustClearMask">Clear Mask</button>
+          </div>
+        </div>
+      </div>
+
       <!-- Color Model (Step 3, SilverCore) -->
       <div class="control-section" id="whiteBalanceSection" style="display: none;">
         <div class="section-header" data-section="conversion">
@@ -2957,6 +3016,14 @@
   <footer class="app-footer" id="appFooter" style="display: none;">
     <div class="footer-left">
       <button class="footer-btn" id="newImageBtn" data-i18n="newImage">New Image</button>
+      <button class="footer-btn" id="undoBtn" title="Ctrl+Z / ⌘Z" disabled>
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: -2px; margin-right: 2px;"><path d="M3 10h10a5 5 0 0 1 0 10H9"/><polyline points="7 14 3 10 7 6"/></svg>
+        <span data-i18n="undo">Undo</span>
+      </button>
+      <button class="footer-btn" id="redoBtn" title="Ctrl+Shift+Z / ⌘⇧Z" disabled>
+        <span data-i18n="redo">Redo</span>
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: -2px; margin-left: 2px;"><path d="M21 10H11a5 5 0 0 0 0 10h4"/><polyline points="17 14 21 10 17 6"/></svg>
+      </button>
       <button class="footer-btn" id="resetBtn" data-i18n="reset">Reset</button>
       <button class="footer-btn" id="startOverBtn" data-i18n="startOver">Start Over</button>
     </div>
@@ -3011,6 +3078,7 @@
   </div>
 
 
+  <div id="toastContainer"></div>
   <script type="module" src="./src/app/main.js"></script>
 </body>
 </html>
