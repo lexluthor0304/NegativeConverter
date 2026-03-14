@@ -17,6 +17,10 @@
     import { convertFrameWithRouter } from '../pipeline/conversionRouter.js';
     import { invalidateSilverCoreCache } from '../pipeline/silverAdapter.js';
     import { Histogram } from '../silvercore/ui/Histogram.js';
+    import {
+      detectDust, updateDustStrength, inpaintMasked,
+      refineMaskIntelligent, refineMaskDirect, refineMaskRemove
+    } from '../silvercore/engine/DustRemoval.js';
 
     const UPNG = (UPNGImport && typeof UPNGImport.decode === 'function')
       ? UPNGImport
@@ -186,6 +190,17 @@
         coreGlow: "辉光",
         coreFade: "褪色",
         sectionEngine: "引擎",
+        sectionDustRemoval: "除尘",
+        dustRemovalEnable: "启用除尘",
+        dustStrength: "灵敏度",
+        dustShowMask: "显示蒙版",
+        dustBrushSize: "笔刷大小",
+        dustBrushHint: "点击=智能 | Alt+点击=直接 | Shift+点击=擦除",
+        dustClearMask: "清除蒙版",
+        dustStatusIdle: "就绪",
+        dustStatusProcessing: "处理中...",
+        dustStatusDone: "检测到 {count} 个灰尘颗粒",
+        dustStatusNone: "未检测到灰尘",
         coreCurvePrecision: "曲线精度",
         curvePrecisionAuto30: "自动（30 点）",
         curvePrecisionSmooth70: "平滑（70 点）",
@@ -213,6 +228,15 @@
         reset: "重置调整",
         startOver: "重新开始",
         newImage: "选择新图片",
+        undo: "撤销",
+        redo: "重做",
+        undone: "已撤销: {action}",
+        redone: "已重做: {action}",
+        nothingToUndo: "没有可撤销的操作",
+        nothingToRedo: "没有可重做的操作",
+        cancelledCrop: "已取消裁剪",
+        cancelledSampling: "已退出取样模式",
+        cancelledBrush: "已取消笔刷",
         exportPng: "导出 PNG",
         colorFilms: "彩色负片",
         bwFilms: "黑白负片",
@@ -470,6 +494,17 @@
         coreGlow: "Glow",
         coreFade: "Fade",
         sectionEngine: "Engine",
+        sectionDustRemoval: "Dust Removal",
+        dustRemovalEnable: "Enable Dust Removal",
+        dustStrength: "Sensitivity",
+        dustShowMask: "Show Mask",
+        dustBrushSize: "Brush Size",
+        dustBrushHint: "Click = Smart | Alt+Click = Direct | Shift+Click = Erase",
+        dustClearMask: "Clear Mask",
+        dustStatusIdle: "Ready",
+        dustStatusProcessing: "Processing...",
+        dustStatusDone: "Detected {count} dust particles",
+        dustStatusNone: "No dust detected",
         coreCurvePrecision: "Curve Precision",
         curvePrecisionAuto30: "Auto (30 points)",
         curvePrecisionSmooth70: "Smooth (70 points)",
@@ -497,6 +532,15 @@
         reset: "Reset Adjustments",
         startOver: "Start Over",
         newImage: "New Image",
+        undo: "Undo",
+        redo: "Redo",
+        undone: "Undone: {action}",
+        redone: "Redone: {action}",
+        nothingToUndo: "Nothing to undo",
+        nothingToRedo: "Nothing to redo",
+        cancelledCrop: "Crop cancelled",
+        cancelledSampling: "Exited sampling mode",
+        cancelledBrush: "Brush cancelled",
         exportPng: "Export PNG",
         colorFilms: "Color Films",
         bwFilms: "B&W Films",
@@ -754,6 +798,17 @@
         coreGlow: "グロー",
         coreFade: "フェード",
         sectionEngine: "エンジン",
+        sectionDustRemoval: "ダスト除去",
+        dustRemovalEnable: "ダスト除去を有効にする",
+        dustStrength: "感度",
+        dustShowMask: "マスク表示",
+        dustBrushSize: "ブラシサイズ",
+        dustBrushHint: "クリック=スマート | Alt+クリック=直接 | Shift+クリック=消去",
+        dustClearMask: "マスクをクリア",
+        dustStatusIdle: "準備完了",
+        dustStatusProcessing: "処理中...",
+        dustStatusDone: "{count} 個のダスト粒子を検出",
+        dustStatusNone: "ダストは検出されませんでした",
         coreCurvePrecision: "カーブ精度",
         curvePrecisionAuto30: "自動（30ポイント）",
         curvePrecisionSmooth70: "スムーズ（70ポイント）",
@@ -781,6 +836,15 @@
         reset: "調整をリセット",
         startOver: "最初から",
         newImage: "新しい画像",
+        undo: "元に戻す",
+        redo: "やり直し",
+        undone: "取り消し: {action}",
+        redone: "やり直し: {action}",
+        nothingToUndo: "元に戻す操作はありません",
+        nothingToRedo: "やり直す操作はありません",
+        cancelledCrop: "トリミングをキャンセル",
+        cancelledSampling: "サンプリングモードを終了",
+        cancelledBrush: "ブラシをキャンセル",
         exportPng: "PNG出力",
         colorFilms: "カラーフィルム",
         bwFilms: "白黒フィルム",
@@ -2210,6 +2274,19 @@
         applyCrop: false
       },
 
+      // Dust removal
+      dustRemoval: {
+        enabled: false,
+        strength: 3,
+        mask: null,          // Uint8Array (h*w)
+        showMask: false,
+        processing: false,
+        particleCount: 0,
+        _state: null,        // Internal state for updateDustStrength
+        inpaintedImageData: null, // ImageData after inpainting
+        brushSize: 5,
+      },
+
       // Export settings
       exportFormat: 'png',  // 'png' | 'jpeg' | 'tiff'
       exportBitDepth: 8,    // 8 | 16
@@ -2220,6 +2297,272 @@
     };
     stateReady = true;
     updateGuideModeUI();
+
+    // ===========================================
+    // Toast Notification System
+    // ===========================================
+    function showToast(message, durationMs = 2000) {
+      const container = document.getElementById('toastContainer');
+      if (!container) return;
+      const el = document.createElement('div');
+      el.className = 'toast-message';
+      el.textContent = message;
+      container.appendChild(el);
+      requestAnimationFrame(() => el.classList.add('toast-visible'));
+      setTimeout(() => {
+        el.classList.remove('toast-visible');
+        el.addEventListener('transitionend', () => el.remove(), { once: true });
+      }, durationMs);
+    }
+
+    // ===========================================
+    // Undo / Redo System
+    // ===========================================
+    const undoStack = [];
+    const redoStack = [];
+    const MAX_UNDO = 30;
+
+    const undoLabelMap = {
+      zh: {
+        rotation: '旋转', mirror: '镜像', crop: '裁剪', filmType: '胶片类型',
+        curveEdit: '曲线编辑', curvePointDelete: '删除曲线点', curvePreset: '曲线预设',
+        curveReset: '重置曲线', dustBrushStroke: '除尘笔刷', dustToggle: '除尘开关',
+        filmBase: '色罩基准', whiteBalance: '白平衡', autoDetectBase: '自动检测色罩',
+        coreExposure: '曝光', coreContrast: '对比度', coreHighlights: '高光',
+        coreShadows: '阴影', coreWhites: '白色', coreBlacks: '黑色',
+        coreBrightness: '亮度', coreTemperature: '色温', coreTint: '色调',
+        coreSaturation: '饱和度', coreGlow: '辉光', coreFade: '褪色',
+        coreWbMode: '白平衡模式', coreFilmPreset: '胶片预设',
+        coreColorModel: '色彩模型', coreEnhancedProfile: '增强曲线',
+        coreProfileStrength: '曲线强度', corePreSaturation: '预饱和度',
+        coreBorderBuffer: '边框缓冲', coreBorderBufferBorderValue: '边框阈值',
+        coreCurvePrecision: '曲线精度', coreUseWebGL: 'WebGL渲染',
+        exposure: '曝光微调', contrast: '对比度微调', highlights: '高光微调',
+        shadows: '阴影微调', temperature: '色温微调', tint: '色调微调',
+        vibrance: '自然饱和度', saturation: '饱和度微调',
+        cyan: '青色', magenta: '品红', yellow: '黄色',
+        dustStrength: '除尘灵敏度', dustBrushSize: '笔刷大小',
+      },
+      en: {
+        rotation: 'Rotation', mirror: 'Mirror', crop: 'Crop', filmType: 'Film Type',
+        curveEdit: 'Curve Edit', curvePointDelete: 'Delete Curve Point', curvePreset: 'Curve Preset',
+        curveReset: 'Reset Curves', dustBrushStroke: 'Dust Brush', dustToggle: 'Dust Toggle',
+        filmBase: 'Film Base', whiteBalance: 'White Balance', autoDetectBase: 'Auto Detect Base',
+        coreExposure: 'Exposure', coreContrast: 'Contrast', coreHighlights: 'Highlights',
+        coreShadows: 'Shadows', coreWhites: 'Whites', coreBlacks: 'Blacks',
+        coreBrightness: 'Brightness', coreTemperature: 'Temperature', coreTint: 'Tint',
+        coreSaturation: 'Saturation', coreGlow: 'Glow', coreFade: 'Fade',
+        coreWbMode: 'WB Mode', coreFilmPreset: 'Film Preset',
+        coreColorModel: 'Color Model', coreEnhancedProfile: 'Enhanced Profile',
+        coreProfileStrength: 'Profile Strength', corePreSaturation: 'Pre-Saturation',
+        coreBorderBuffer: 'Border Buffer', coreBorderBufferBorderValue: 'Border Threshold',
+        coreCurvePrecision: 'Curve Precision', coreUseWebGL: 'WebGL',
+        exposure: 'Exposure Fine', contrast: 'Contrast Fine', highlights: 'Highlights Fine',
+        shadows: 'Shadows Fine', temperature: 'Temperature Fine', tint: 'Tint Fine',
+        vibrance: 'Vibrance', saturation: 'Saturation Fine',
+        cyan: 'Cyan', magenta: 'Magenta', yellow: 'Yellow',
+        dustStrength: 'Dust Sensitivity', dustBrushSize: 'Brush Size',
+      },
+      ja: {
+        rotation: '回転', mirror: 'ミラー', crop: 'トリミング', filmType: 'フィルムタイプ',
+        curveEdit: 'カーブ編集', curvePointDelete: 'カーブポイント削除', curvePreset: 'カーブプリセット',
+        curveReset: 'カーブリセット', dustBrushStroke: '除塵ブラシ', dustToggle: '除塵切替',
+        filmBase: 'フィルムベース', whiteBalance: 'ホワイトバランス', autoDetectBase: '自動検出',
+        coreExposure: '露出', coreContrast: 'コントラスト', coreHighlights: 'ハイライト',
+        coreShadows: 'シャドウ', coreWhites: 'ホワイト', coreBlacks: 'ブラック',
+        coreBrightness: '明るさ', coreTemperature: '色温度', coreTint: '色合い',
+        coreSaturation: '彩度', coreGlow: 'グロー', coreFade: 'フェード',
+        coreWbMode: 'WBモード', coreFilmPreset: 'フィルムプリセット',
+        coreColorModel: 'カラーモデル', coreEnhancedProfile: '強化プロファイル',
+        coreProfileStrength: 'プロファイル強度', corePreSaturation: 'プリサチュレーション',
+        coreBorderBuffer: 'ボーダーバッファ', coreBorderBufferBorderValue: 'ボーダー閾値',
+        coreCurvePrecision: 'カーブ精度', coreUseWebGL: 'WebGL',
+        exposure: '露出微調整', contrast: 'コントラスト微調整', highlights: 'ハイライト微調整',
+        shadows: 'シャドウ微調整', temperature: '色温度微調整', tint: '色合い微調整',
+        vibrance: '自然な彩度', saturation: '彩度微調整',
+        cyan: 'シアン', magenta: 'マゼンタ', yellow: 'イエロー',
+        dustStrength: '除塵感度', dustBrushSize: 'ブラシサイズ',
+      }
+    };
+
+    function getUndoLabel(label) {
+      const map = undoLabelMap[currentLang] || undoLabelMap.en;
+      return map[label] || label;
+    }
+
+    // Snapshot keys for Category A (lightweight, deep-copied)
+    const SNAPSHOT_SCALAR_KEYS = [
+      'exposure', 'contrast', 'highlights', 'shadows', 'temperature', 'tint',
+      'vibrance', 'saturation', 'cyan', 'magenta', 'yellow',
+      'coreFilmPreset', 'coreColorModel', 'coreEnhancedProfile', 'coreProfileStrength',
+      'corePreSaturation', 'coreBorderBuffer', 'coreBorderBufferBorderValue',
+      'coreBrightness', 'coreExposure', 'coreContrast', 'coreHighlights', 'coreShadows',
+      'coreWhites', 'coreBlacks', 'coreWbMode', 'coreTemperature', 'coreTint',
+      'coreSaturation', 'coreGlow', 'coreFade', 'coreCurvePrecision', 'coreUseWebGL',
+      'wbR', 'wbG', 'wbB', 'filmType', 'filmBaseSet', 'step2Mode', 'rotationAngle',
+      'currentStep',
+    ];
+
+    // Category B: heavy image data (stored by reference)
+    const SNAPSHOT_REF_KEYS = [
+      'originalImageData', 'croppedImageData', 'processedImageData',
+      'conversionSourceImageData', 'conversionPreviewImageData', 'previewSourceImageData',
+      'histogramSourceImageData', 'webglSourceImageData',
+    ];
+
+    function captureSnapshot(label) {
+      const settings = {};
+      for (const key of SNAPSHOT_SCALAR_KEYS) {
+        settings[key] = state[key];
+      }
+      // Deep copy objects
+      settings.filmBase = state.filmBase ? { ...state.filmBase } : null;
+      settings.cropRegion = state.cropRegion ? { ...state.cropRegion } : null;
+      // Deep copy curves
+      settings.curves = {
+        r: state.curves.r ? new Uint8Array(state.curves.r) : null,
+        g: state.curves.g ? new Uint8Array(state.curves.g) : null,
+        b: state.curves.b ? new Uint8Array(state.curves.b) : null,
+      };
+      settings.curvePoints = {
+        r: state.curvePoints.r.map(p => ({ ...p })),
+        g: state.curvePoints.g.map(p => ({ ...p })),
+        b: state.curvePoints.b.map(p => ({ ...p })),
+      };
+      // Dust removal settings
+      settings.dustRemoval = {
+        enabled: state.dustRemoval.enabled,
+        strength: state.dustRemoval.strength,
+        brushSize: state.dustRemoval.brushSize,
+        showMask: state.dustRemoval.showMask,
+      };
+
+      // Category B: references
+      const refs = {};
+      for (const key of SNAPSHOT_REF_KEYS) {
+        refs[key] = state[key];
+      }
+      // Dust refs
+      refs.dustMask = state.dustRemoval.mask;
+      refs.dustInpaintedImageData = state.dustRemoval.inpaintedImageData;
+      refs.dustCleanSource = state.dustRemoval.cleanSource || null;
+      refs.dustState = state.dustRemoval._state;
+
+      return { label, settings, refs };
+    }
+
+    function cancelPendingTimers() {
+      if (fullUpdateTimer) { clearTimeout(fullUpdateTimer); fullUpdateTimer = null; }
+      if (coreReprocessTimer) { clearTimeout(coreReprocessTimer); coreReprocessTimer = null; }
+      if (step2AutoConvertTimer) { clearTimeout(step2AutoConvertTimer); step2AutoConvertTimer = null; }
+      if (dustDetectionTimer) { clearTimeout(dustDetectionTimer); dustDetectionTimer = null; }
+    }
+
+    function restoreSnapshot(snapshot) {
+      cancelPendingTimers();
+
+      // Restore Category A
+      const s = snapshot.settings;
+      for (const key of SNAPSHOT_SCALAR_KEYS) {
+        state[key] = s[key];
+      }
+      state.filmBase = s.filmBase ? { ...s.filmBase } : { r: 210, g: 140, b: 90 };
+      state.cropRegion = s.cropRegion ? { ...s.cropRegion } : null;
+      state.curves = {
+        r: s.curves.r ? new Uint8Array(s.curves.r) : null,
+        g: s.curves.g ? new Uint8Array(s.curves.g) : null,
+        b: s.curves.b ? new Uint8Array(s.curves.b) : null,
+      };
+      state.curvePoints = {
+        r: s.curvePoints.r.map(p => ({ ...p })),
+        g: s.curvePoints.g.map(p => ({ ...p })),
+        b: s.curvePoints.b.map(p => ({ ...p })),
+      };
+      state.dustRemoval.enabled = s.dustRemoval.enabled;
+      state.dustRemoval.strength = s.dustRemoval.strength;
+      state.dustRemoval.brushSize = s.dustRemoval.brushSize;
+      state.dustRemoval.showMask = s.dustRemoval.showMask;
+
+      // Restore Category B refs
+      const r = snapshot.refs;
+      for (const key of SNAPSHOT_REF_KEYS) {
+        state[key] = r[key];
+      }
+      state.dustRemoval.mask = r.dustMask;
+      state.dustRemoval.inpaintedImageData = r.dustInpaintedImageData;
+      state.dustRemoval.cleanSource = r.dustCleanSource;
+      state.dustRemoval._state = r.dustState;
+
+      // Sync UI
+      updateSlidersFromState();
+      renderCurve();
+      updateDustControlsVisibility();
+
+      // Re-render
+      if (state.processedImageData) {
+        applyProcessedImageToState(state.processedImageData);
+        if (usesSilverCoreConversion(state)) {
+          rerenderWithCoreControls({ full: true }).catch(() => {});
+        } else {
+          updateFull();
+        }
+      } else {
+        const sourceData = state.croppedImageData || state.originalImageData;
+        if (sourceData) {
+          displayNegative(sourceData);
+          updateCanvasVisibility();
+        }
+      }
+      goToStep(s.currentStep);
+    }
+
+    function pushUndo(label) {
+      undoStack.push(captureSnapshot(label));
+      if (undoStack.length > MAX_UNDO) undoStack.shift();
+      redoStack.length = 0;
+      updateUndoRedoButtons();
+    }
+
+    function performUndo() {
+      if (undoStack.length === 0) {
+        showToast(getLocalizedText('nothingToUndo', 'Nothing to undo'));
+        return;
+      }
+      redoStack.push(captureSnapshot('redo'));
+      const snapshot = undoStack.pop();
+      restoreSnapshot(snapshot);
+      const actionName = getUndoLabel(snapshot.label);
+      const tmpl = getLocalizedText('undone', 'Undone: {action}');
+      showToast(tmpl.replace('{action}', actionName));
+      updateUndoRedoButtons();
+    }
+
+    function performRedo() {
+      if (redoStack.length === 0) {
+        showToast(getLocalizedText('nothingToRedo', 'Nothing to redo'));
+        return;
+      }
+      undoStack.push(captureSnapshot('undo'));
+      const snapshot = redoStack.pop();
+      restoreSnapshot(snapshot);
+      const actionName = getUndoLabel(snapshot.label);
+      const tmpl = getLocalizedText('redone', 'Redone: {action}');
+      showToast(tmpl.replace('{action}', actionName));
+      updateUndoRedoButtons();
+    }
+
+    function clearUndoHistory() {
+      undoStack.length = 0;
+      redoStack.length = 0;
+      updateUndoRedoButtons();
+    }
+
+    function updateUndoRedoButtons() {
+      const undoBtn = document.getElementById('undoBtn');
+      const redoBtn = document.getElementById('redoBtn');
+      if (undoBtn) undoBtn.disabled = undoStack.length === 0;
+      if (redoBtn) redoBtn.disabled = redoStack.length === 0;
+    }
 
     // Initialize curves
     function initCurves(markDirty = false) {
@@ -2493,6 +2836,9 @@
     function updateStep3SectionVisibility() {
       const inStep3 = state.currentStep >= 3;
       const showCore = inStep3 && usesSilverCoreConversion(state);
+      const dustSection = document.getElementById('dustRemovalSection');
+      if (dustSection) dustSection.style.display = inStep3 ? 'block' : 'none';
+
       ['whiteBalanceSection', 'toneSection', 'colorSection', 'cmySection', 'advancedSection'].forEach((id) => {
         const el = document.getElementById(id);
         if (!el) return;
@@ -3674,6 +4020,7 @@
     }
 
     function setCurvePreset(preset) {
+      pushUndo('curvePreset');
       let points;
       switch (preset) {
         case 'linear':
@@ -3711,6 +4058,7 @@
     });
 
     document.getElementById('resetCurveBtn').addEventListener('click', () => {
+      pushUndo('curveReset');
       // Reset ALL channels, not just the current one
       ['r', 'g', 'b'].forEach(channel => {
         state.curvePoints[channel] = [{ x: 0, y: 0 }, { x: 255, y: 255 }];
@@ -3751,7 +4099,10 @@
       return -1;
     }
 
+    let curvePreUndoSnapshot = null;
+
     curveCanvas.addEventListener('mousedown', (e) => {
+      curvePreUndoSnapshot = captureSnapshot('curveEdit');
       const pos = getCurvePosition(e);
       const nearPoint = findNearPoint(pos.canvasX, pos.canvasY);
 
@@ -3812,6 +4163,13 @@
 
     curveCanvas.addEventListener('mouseup', () => {
       if (draggingPoint !== null) {
+        if (curvePreUndoSnapshot) {
+          undoStack.push(curvePreUndoSnapshot);
+          if (undoStack.length > MAX_UNDO) undoStack.shift();
+          redoStack.length = 0;
+          curvePreUndoSnapshot = null;
+          updateUndoRedoButtons();
+        }
         draggingPoint = null;
         scheduleFullUpdate();
       }
@@ -3819,6 +4177,13 @@
 
     curveCanvas.addEventListener('mouseleave', () => {
       if (draggingPoint !== null) {
+        if (curvePreUndoSnapshot) {
+          undoStack.push(curvePreUndoSnapshot);
+          if (undoStack.length > MAX_UNDO) undoStack.shift();
+          redoStack.length = 0;
+          curvePreUndoSnapshot = null;
+          updateUndoRedoButtons();
+        }
         draggingPoint = null;
         scheduleFullUpdate();
       }
@@ -3832,6 +4197,7 @@
       const nearPoint = findNearPoint(pos.canvasX, pos.canvasY);
 
       if (nearPoint > 0 && nearPoint < state.curvePoints[currentCurveChannel].length - 1) {
+        pushUndo('curvePointDelete');
         state.curvePoints[currentCurveChannel].splice(nearPoint, 1);
         updateCurveFromPoints(currentCurveChannel);
         renderCurve();
@@ -3846,6 +4212,7 @@
     curveCanvas.addEventListener('pointerdown', (e) => {
       if (e.pointerType === 'mouse') return;
       e.preventDefault();
+      curvePreUndoSnapshot = captureSnapshot('curveEdit');
 
       const pos = getCurvePosition(e);
       const nearPoint = findNearPoint(pos.canvasX, pos.canvasY);
@@ -3895,6 +4262,13 @@
     function finishCurvePointerDrag(pointerId) {
       if (activeCurvePointerId !== pointerId) return;
       if (draggingPoint !== null) {
+        if (curvePreUndoSnapshot) {
+          undoStack.push(curvePreUndoSnapshot);
+          if (undoStack.length > MAX_UNDO) undoStack.shift();
+          redoStack.length = 0;
+          curvePreUndoSnapshot = null;
+          updateUndoRedoButtons();
+        }
         draggingPoint = null;
         scheduleFullUpdate();
       }
@@ -4247,6 +4621,7 @@
 
     function isWebGLActive() {
       if (usesSilverCoreConversion(state)) return false;
+      if (state.dustRemoval.enabled && state.dustRemoval.showMask) return false;
       return !!webglState.gl && !webglState.disabledByError && state.currentStep >= 3 && !!state.processedImageData;
     }
 
@@ -4532,6 +4907,7 @@
         state.lastRenderQuality = 'full';
       }
       // Histogram updates are deferred to full renders for responsiveness.
+      if (state.dustRemoval.showMask && state.dustRemoval.mask) renderDustMaskOverlay();
     }
 
     function updateFull() {
@@ -4566,6 +4942,7 @@
       transformCanvas.height = canvas.height;
       transformCtx.putImageData(fullAdjustedBuffer, 0, 0);
       state.lastRenderQuality = 'full';
+      if (state.dustRemoval.showMask && state.dustRemoval.mask) renderDustMaskOverlay();
     }
 
     function ensureFullRender() {
@@ -4753,11 +5130,21 @@
         const processed = await convertFromCurrentSource(state, { preview: false });
         if (!processed) return;
         applyProcessedImageToState(processed);
+        // Reset dust removal state for new conversion
+        state.dustRemoval._state = null;
+        state.dustRemoval.mask = null;
+        state.dustRemoval.inpaintedImageData = null;
+        state.dustRemoval.particleCount = 0;
+        state.dustRemoval.cleanSource = null;
         goToStep(3);
         syncBatchUIState({ reason: 'processNegative' });
         revealBatchFileList('processNegative');
         updatePreview();
         scheduleFullUpdate();
+        // Auto-run dust detection if enabled
+        if (state.dustRemoval.enabled) {
+          scheduleDustDetection();
+        }
       })();
 
       try {
@@ -4766,6 +5153,421 @@
         processNegativeInFlight = null;
       }
     }
+
+    // ===========================================
+    // Dust Removal Pipeline
+    // ===========================================
+    let dustDetectionTimer = null;
+    let dustDrawing = false;
+    let dustBrushMode = 'intelligent';
+
+    function getDustSource() {
+      return state.dustRemoval.cleanSource || state.processedImageData;
+    }
+
+    function updateDustStatusUI(text) {
+      const el = document.getElementById('dustStatus');
+      if (el) el.textContent = text;
+    }
+
+    function updateDustControlsVisibility() {
+      const controls = document.getElementById('dustRemovalControls');
+      if (controls) controls.style.display = state.dustRemoval.enabled ? 'block' : 'none';
+      const brushControls = document.getElementById('dustBrushControls');
+      if (brushControls) brushControls.style.display = state.dustRemoval.showMask ? 'block' : 'none';
+    }
+
+    async function runDustDetection() {
+      const source = getDustSource();
+      if (!source) return;
+      if (state.dustRemoval.processing) return;
+
+      state.dustRemoval.processing = true;
+      updateDustStatusUI(getLocalizedText('dustStatusProcessing', 'Processing...'));
+
+      await ensureOpenCvReady();
+
+      // Use a short timeout to let the UI update
+      await new Promise(r => setTimeout(r, 10));
+
+      try {
+        // Save original source before inpainting overwrites processedImageData
+        if (!state.dustRemoval.cleanSource) {
+          state.dustRemoval.cleanSource = source;
+        }
+
+        const prevState = state.dustRemoval._state;
+        const { mask, particleCount, _state } = prevState
+          ? updateDustStrength(source, prevState, state.dustRemoval.strength)
+          : detectDust(source, { strength: state.dustRemoval.strength });
+        state.dustRemoval.mask = mask;
+        state.dustRemoval.particleCount = particleCount;
+        state.dustRemoval._state = _state;
+
+        if (particleCount > 0) {
+          const inpainted = inpaintMasked(source, mask, 3);
+          state.dustRemoval.inpaintedImageData = inpainted;
+          const tmpl = getLocalizedText('dustStatusDone', 'Detected {count} dust particles');
+          updateDustStatusUI(tmpl.replace('{count}', String(particleCount)));
+        } else {
+          state.dustRemoval.inpaintedImageData = null;
+          updateDustStatusUI(getLocalizedText('dustStatusNone', 'No dust detected'));
+        }
+      } catch (err) {
+        console.error('Dust detection failed:', err);
+        state.dustRemoval.mask = null;
+        state.dustRemoval.inpaintedImageData = null;
+        updateDustStatusUI('Error: ' + (err.message || err));
+      } finally {
+        state.dustRemoval.processing = false;
+      }
+
+      // Refresh display to show inpainted result
+      applyDustResultToState();
+      updatePreview();
+      scheduleFullUpdate();
+    }
+
+    function applyDustResultToState() {
+      if (!state.dustRemoval.enabled || !state.dustRemoval.inpaintedImageData) return;
+      // Replace processedImageData with inpainted version for downstream adjustments
+      const inpainted = state.dustRemoval.inpaintedImageData;
+      applyProcessedImageToState(inpainted);
+    }
+
+    function scheduleDustDetection() {
+      if (dustDetectionTimer) clearTimeout(dustDetectionTimer);
+      dustDetectionTimer = setTimeout(() => {
+        dustDetectionTimer = null;
+        void runDustDetection();
+      }, 300);
+    }
+
+    function clearDustState() {
+      state.dustRemoval.mask = null;
+      state.dustRemoval.inpaintedImageData = null;
+      state.dustRemoval.particleCount = 0;
+      state.dustRemoval._state = null;
+      state.dustRemoval.cleanSource = null;
+      updateDustStatusUI(getLocalizedText('dustStatusIdle', 'Ready'));
+    }
+
+    function renderDustMaskOverlay() {
+      if (!state.dustRemoval.showMask || !state.dustRemoval.mask || !state.processedImageData) return;
+
+      const { width, height } = state.processedImageData;
+      const mask = state.dustRemoval.mask;
+
+      // Draw red semi-transparent overlay on the canvas for masked areas
+      const overlayData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const scaleX = width / canvas.width;
+      const scaleY = height / canvas.height;
+
+      for (let cy = 0; cy < canvas.height; cy++) {
+        for (let cx = 0; cx < canvas.width; cx++) {
+          const mx = Math.min(width - 1, Math.round(cx * scaleX));
+          const my = Math.min(height - 1, Math.round(cy * scaleY));
+          if (mask[my * width + mx] > 0) {
+            const idx = (cy * canvas.width + cx) * 4;
+            // Red overlay at 50% opacity
+            overlayData.data[idx] = Math.min(255, overlayData.data[idx] * 0.5 + 255 * 0.5) | 0;
+            overlayData.data[idx + 1] = (overlayData.data[idx + 1] * 0.5) | 0;
+            overlayData.data[idx + 2] = (overlayData.data[idx + 2] * 0.5) | 0;
+          }
+        }
+      }
+      ctx.putImageData(overlayData, 0, 0);
+    }
+
+    // ── Dust Removal UI Event Handlers ───────────────────────────────────────
+
+    document.getElementById('dustRemovalEnabled')?.addEventListener('change', function () {
+      pushUndo('dustToggle');
+      state.dustRemoval.enabled = this.checked;
+      updateDustControlsVisibility();
+
+      if (state.dustRemoval.enabled && state.processedImageData) {
+        // Re-run detection on the original converted image (before inpainting)
+        // Need to reconvert to get clean processedImageData
+        scheduleDustDetection();
+      } else if (!state.dustRemoval.enabled) {
+        // Disabled: restore original processedImageData by reconverting
+        state.dustRemoval.showMask = false;
+        const showMaskCheckbox = document.getElementById('dustShowMask');
+        if (showMaskCheckbox) showMaskCheckbox.checked = false;
+        clearDustState();
+        updateCanvasVisibility();
+        void rerenderWithCoreControls({ full: true });
+      }
+    });
+
+    let dustStrengthPreSnapshot = null;
+    document.getElementById('dustStrength')?.addEventListener('pointerdown', function () {
+      dustStrengthPreSnapshot = captureSnapshot('dustStrength');
+    });
+    document.getElementById('dustStrength')?.addEventListener('input', function () {
+      const val = parseInt(this.value, 10);
+      state.dustRemoval.strength = val;
+      const numInput = document.getElementById('dustStrengthValue');
+      if (numInput) numInput.value = String(val);
+
+      if (state.dustRemoval.enabled) {
+        scheduleDustDetection();
+      }
+    });
+    document.getElementById('dustStrength')?.addEventListener('change', function () {
+      if (dustStrengthPreSnapshot) {
+        undoStack.push(dustStrengthPreSnapshot);
+        if (undoStack.length > MAX_UNDO) undoStack.shift();
+        redoStack.length = 0;
+        dustStrengthPreSnapshot = null;
+        updateUndoRedoButtons();
+      }
+    });
+
+    document.getElementById('dustStrengthValue')?.addEventListener('change', function () {
+      pushUndo('dustStrength');
+      const val = Math.max(1, Math.min(10, parseInt(this.value, 10) || 3));
+      this.value = String(val);
+      state.dustRemoval.strength = val;
+      const slider = document.getElementById('dustStrength');
+      if (slider) slider.value = String(val);
+
+      if (state.dustRemoval.enabled) {
+        scheduleDustDetection();
+      }
+    });
+
+    document.getElementById('dustShowMask')?.addEventListener('change', function () {
+      state.dustRemoval.showMask = this.checked;
+      updateDustControlsVisibility();
+      updateCanvasVisibility();
+      if (state.dustRemoval.showMask) {
+        updatePreview();           // render image on 2D canvas first
+        requestAnimationFrame(() => renderDustMaskOverlay());
+      } else {
+        updatePreview();           // restore normal render path (may switch back to WebGL)
+      }
+    });
+
+    document.getElementById('dustBrushSize')?.addEventListener('input', function () {
+      const val = parseInt(this.value, 10);
+      state.dustRemoval.brushSize = val;
+      const numInput = document.getElementById('dustBrushSizeValue');
+      if (numInput) numInput.value = String(val);
+    });
+
+    document.getElementById('dustBrushSizeValue')?.addEventListener('change', function () {
+      const val = Math.max(1, Math.min(50, parseInt(this.value, 10) || 5));
+      this.value = String(val);
+      state.dustRemoval.brushSize = val;
+      const slider = document.getElementById('dustBrushSize');
+      if (slider) slider.value = String(val);
+    });
+
+    document.getElementById('dustClearMaskBtn')?.addEventListener('click', () => {
+      if (!state.dustRemoval.enabled) return;
+      clearDustState();
+      // Re-run fresh detection
+      scheduleDustDetection();
+    });
+
+    // ── Brush drawing on canvas ──────────────────────────────────────────────
+
+    function canvasToImageCoords(canvasX, canvasY) {
+      const source = state.processedImageData;
+      if (!source) return null;
+      const scaleX = source.width / canvas.width;
+      const scaleY = source.height / canvas.height;
+      return {
+        x: Math.round(canvasX * scaleX),
+        y: Math.round(canvasY * scaleY)
+      };
+    }
+
+    function createBrushMask(points, brushRadius, width, height) {
+      const mask = new Uint8Array(width * height);
+      const r = brushRadius;
+
+      for (const pt of points) {
+        const cx = pt.x, cy = pt.y;
+        for (let dy = -r; dy <= r; dy++) {
+          for (let dx = -r; dx <= r; dx++) {
+            if (dx * dx + dy * dy > r * r) continue;
+            const nx = cx + dx, ny = cy + dy;
+            if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+              mask[ny * width + nx] = 255;
+            }
+          }
+        }
+      }
+
+      // Also fill lines between consecutive points
+      for (let i = 1; i < points.length; i++) {
+        const p0 = points[i - 1], p1 = points[i];
+        const dist = Math.sqrt((p1.x - p0.x) ** 2 + (p1.y - p0.y) ** 2);
+        const steps = Math.max(1, Math.ceil(dist));
+        for (let s = 0; s <= steps; s++) {
+          const t = s / steps;
+          const ix = Math.round(p0.x + (p1.x - p0.x) * t);
+          const iy = Math.round(p0.y + (p1.y - p0.y) * t);
+          for (let dy = -r; dy <= r; dy++) {
+            for (let dx = -r; dx <= r; dx++) {
+              if (dx * dx + dy * dy > r * r) continue;
+              const nx = ix + dx, ny = iy + dy;
+              if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                mask[ny * width + nx] = 255;
+              }
+            }
+          }
+        }
+      }
+
+      return mask;
+    }
+
+    let dustBrushPoints = [];
+
+    function onDustBrushStart(e) {
+      if (!state.dustRemoval.enabled || !state.dustRemoval.showMask) return;
+      if (!state.dustRemoval.mask || !state.processedImageData) return;
+      if (state.samplingMode || state.cropping) return;
+
+      e.preventDefault();
+      dustDrawing = true;
+      dustBrushPoints = [];
+
+      // Determine mode
+      if (e.altKey) {
+        dustBrushMode = 'direct';
+      } else if (e.shiftKey) {
+        dustBrushMode = 'remove';
+      } else {
+        dustBrushMode = 'intelligent';
+      }
+
+      const target = e.currentTarget;
+      const rect = target.getBoundingClientRect();
+      const cx = (e.clientX - rect.left) * (canvas.width / rect.width);
+      const cy = (e.clientY - rect.top) * (canvas.height / rect.height);
+      const imgCoord = canvasToImageCoords(cx, cy);
+      if (imgCoord) dustBrushPoints.push(imgCoord);
+    }
+
+    function onDustBrushMove(e) {
+      if (!dustDrawing) return;
+      const activeCanvas = isWebGLActive() ? glCanvas : canvas;
+      const rect = activeCanvas.getBoundingClientRect();
+      const cx = (e.clientX - rect.left) * (canvas.width / rect.width);
+      const cy = (e.clientY - rect.top) * (canvas.height / rect.height);
+      const imgCoord = canvasToImageCoords(cx, cy);
+      if (imgCoord) dustBrushPoints.push(imgCoord);
+
+      // Visual feedback: draw brush stroke on canvas
+      if (state.dustRemoval.showMask) {
+        renderDustMaskOverlay();
+        // Draw brush points
+        const scaleX = canvas.width / (state.processedImageData?.width || 1);
+        const scaleY = canvas.height / (state.processedImageData?.height || 1);
+        const r = state.dustRemoval.brushSize * scaleX;
+        ctx.save();
+        ctx.globalAlpha = 0.4;
+        ctx.fillStyle = dustBrushMode === 'direct' ? '#ff0000'
+          : dustBrushMode === 'remove' ? '#0066ff' : '#ffff00';
+        for (const pt of dustBrushPoints) {
+          ctx.beginPath();
+          ctx.arc(pt.x * scaleX, pt.y * scaleY, r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.restore();
+      }
+    }
+
+    function onDustBrushEnd(e) {
+      if (!dustDrawing) return;
+      dustDrawing = false;
+
+      if (dustBrushPoints.length === 0 || !state.processedImageData || !state.dustRemoval.mask) return;
+      pushUndo('dustBrushStroke');
+
+      const source = getDustSource();
+      if (!source) return;
+
+      const { width, height } = source;
+      const brushMask = createBrushMask(dustBrushPoints, state.dustRemoval.brushSize, width, height);
+
+      let newMask;
+      if (dustBrushMode === 'intelligent') {
+        newMask = refineMaskIntelligent(source, state.dustRemoval.mask, brushMask);
+      } else if (dustBrushMode === 'direct') {
+        newMask = refineMaskDirect(state.dustRemoval.mask, brushMask);
+      } else {
+        newMask = refineMaskRemove(state.dustRemoval.mask, brushMask);
+      }
+
+      state.dustRemoval.mask = newMask;
+
+      // Re-inpaint with updated mask
+      // We need the original pre-inpaint source.
+      // Re-convert to get clean source, then re-inpaint
+      const cleanSource = state.conversionSourceImageData || state.croppedImageData || state.originalImageData;
+      if (cleanSource) {
+        convertFromCurrentSource(state, { preview: false }).then(processed => {
+          if (!processed) return;
+          const inpainted = inpaintMasked(processed, newMask, 3);
+          state.dustRemoval.inpaintedImageData = inpainted;
+
+          // Count particles
+          const c = window.cv;
+          if (c && c.Mat) {
+            try {
+              const maskMat = new c.Mat(height, width, c.CV_8UC1);
+              maskMat.data.set(newMask);
+              const contours = new c.MatVector();
+              const hierarchy = new c.Mat();
+              c.findContours(maskMat, contours, hierarchy, c.RETR_EXTERNAL, c.CHAIN_APPROX_SIMPLE);
+              state.dustRemoval.particleCount = contours.size();
+              maskMat.delete();
+              contours.delete();
+              hierarchy.delete();
+            } catch (_e) { /* ignore */ }
+          }
+
+          const tmpl = getLocalizedText('dustStatusDone', 'Detected {count} dust particles');
+          updateDustStatusUI(tmpl.replace('{count}', String(state.dustRemoval.particleCount)));
+
+          applyProcessedImageToState(inpainted);
+          updatePreview();
+          if (state.dustRemoval.showMask) {
+            // Need to re-render after updatePreview finishes
+            requestAnimationFrame(() => renderDustMaskOverlay());
+          }
+        });
+      }
+
+      dustBrushPoints = [];
+    }
+
+    // Attach brush handlers
+    canvas.addEventListener('mousedown', onDustBrushStart);
+    glCanvas.addEventListener('mousedown', onDustBrushStart);
+    document.addEventListener('mousemove', onDustBrushMove);
+    document.addEventListener('mouseup', onDustBrushEnd);
+
+    // Ctrl+scroll to adjust brush size
+    const dustWheelHandler = (e) => {
+      if (!state.dustRemoval.enabled || !state.dustRemoval.showMask) return;
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+      const delta = e.deltaY > 0 ? -1 : 1;
+      state.dustRemoval.brushSize = Math.max(1, Math.min(50, state.dustRemoval.brushSize + delta));
+      const slider = document.getElementById('dustBrushSize');
+      const numInput = document.getElementById('dustBrushSizeValue');
+      if (slider) slider.value = String(state.dustRemoval.brushSize);
+      if (numInput) numInput.value = String(state.dustRemoval.brushSize);
+    };
+    canvas.addEventListener('wheel', dustWheelHandler, { passive: false });
+    glCanvas.addEventListener('wheel', dustWheelHandler, { passive: false });
 
     // ===========================================
     // Canvas Display
@@ -4937,6 +5739,7 @@
           displayNegative(imageData);
           showImageUI();
           goToStep(1);
+          clearUndoHistory();
           updateAutoFrameDiagnosticsUI();
           syncBatchUIState({ reason: 'loadFile' });
           updateAutoFrameButtons();
@@ -5407,6 +6210,7 @@
       if (!requiresFilmBase()) return;
       const sourceData = state.croppedImageData || state.originalImageData;
       if (!sourceData) return;
+      pushUndo('autoDetectBase');
       state.filmBase = autoDetectFilmBase(sourceData, state.coreBorderBuffer);
       state.filmBaseSet = true;
       updateFilmBasePreview();
@@ -5855,6 +6659,7 @@
         const sourceData = state.croppedImageData || state.originalImageData;
         if (!sourceData) return;
 
+        pushUndo('filmBase');
         const x = Math.floor(relX * sourceData.width);
         const y = Math.floor(relY * sourceData.height);
 
@@ -5874,6 +6679,7 @@
         // Sample from processed image (post-inversion)
         if (!state.processedImageData) return;
 
+        pushUndo('whiteBalance');
         const x = Math.floor(relX * state.processedImageData.width);
         const y = Math.floor(relY * state.processedImageData.height);
 
@@ -5923,6 +6729,7 @@
 
     document.querySelectorAll('.film-type-btn').forEach(btn => {
       btn.addEventListener('click', () => {
+        pushUndo('filmType');
         state.filmType = btn.dataset.type;
         setFilmTypeButtons(state.filmType);
         let modeUpdated = false;
@@ -6012,11 +6819,25 @@
         }
       };
 
+      // Undo: capture snapshot before drag starts
+      let preDragSnapshot = null;
+
+      slider.addEventListener('pointerdown', () => {
+        preDragSnapshot = captureSnapshot(stateKey);
+      });
+
       slider.addEventListener('input', () => {
         applyValue(Number.parseFloat(slider.value), false);
       });
 
       slider.addEventListener('change', () => {
+        if (preDragSnapshot) {
+          undoStack.push(preDragSnapshot);
+          if (undoStack.length > MAX_UNDO) undoStack.shift();
+          redoStack.length = 0;
+          preDragSnapshot = null;
+          updateUndoRedoButtons();
+        }
         applyValue(Number.parseFloat(slider.value), true);
       });
 
@@ -6032,6 +6853,7 @@
       });
 
       const commitFromInput = () => {
+        pushUndo(stateKey);
         const parsed = Number.parseFloat(valueInput.value);
         const sourceValue = Number.isFinite(parsed) ? parsed : state[stateKey];
         applyValue(sourceValue, true);
@@ -6081,6 +6903,7 @@
       });
 
       select.addEventListener('change', () => {
+        pushUndo(stateKey);
         state[stateKey] = select.value;
         markCurrentFileDirty();
         if (onChange) onChange(select.value);
@@ -6097,6 +6920,7 @@
 
       checkbox.checked = Boolean(state[stateKey]);
       checkbox.addEventListener('change', () => {
+        pushUndo(stateKey);
         state[stateKey] = Boolean(checkbox.checked);
         markCurrentFileDirty();
         if (onChange) onChange(state[stateKey]);
@@ -7264,6 +8088,7 @@
       const normalizedAngle = normalizeAngleDegrees(Number(angle) || 0);
       if (Math.abs(normalizedAngle) < 0.001) return;
 
+      pushUndo('rotation');
       const sourceOriginal = state.originalImageData;
       const sourceCrop = state.cropRegion ? { ...state.cropRegion } : null;
       const shouldPreserveCrop = state.currentStep >= 3 && Boolean(sourceCrop);
@@ -7307,6 +8132,7 @@
       const sourceData = state.croppedImageData || state.originalImageData;
       if (!sourceData) return;
 
+      pushUndo('mirror');
       const w = canvas.width;
       const h = canvas.height;
       const offCanvas = document.createElement('canvas');
@@ -7632,6 +8458,70 @@
       }
     });
 
+    // Undo/Redo keyboard shortcuts
+    document.addEventListener('keydown', (event) => {
+      if (isEditableTarget(event.target)) return;
+
+      if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key === 'z') {
+        event.preventDefault();
+        performUndo();
+        return;
+      }
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && (event.key === 'z' || event.key === 'Z')) {
+        event.preventDefault();
+        performRedo();
+        return;
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key === 'y') {
+        event.preventDefault();
+        performRedo();
+        return;
+      }
+    });
+
+    // Undo/Redo button click handlers
+    document.getElementById('undoBtn').addEventListener('click', () => performUndo());
+    document.getElementById('redoBtn').addEventListener('click', () => performRedo());
+
+    // Escape key handler
+    document.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') return;
+      if (isEditableTarget(event.target)) return;
+
+      if (state.beforeAfterActive) {
+        event.preventDefault();
+        exitBeforeAfter();
+        return;
+      }
+      if (state.cropping) {
+        event.preventDefault();
+        document.getElementById('cancelCropBtn').click();
+        showToast(getLocalizedText('cancelledCrop', 'Crop cancelled'));
+        return;
+      }
+      if (state.samplingMode) {
+        event.preventDefault();
+        state.samplingMode = null;
+        document.getElementById('sampleBaseBtn')?.classList.remove('active');
+        document.getElementById('sampleWBBtn')?.classList.remove('active');
+        canvas.style.cursor = '';
+        const glCanvas = document.getElementById('glCanvas');
+        if (glCanvas) glCanvas.style.cursor = '';
+        hideLoupe();
+        updateBeforeAfterButtonState();
+        showToast(getLocalizedText('cancelledSampling', 'Exited sampling mode'));
+        return;
+      }
+      if (dustDrawing) {
+        event.preventDefault();
+        dustDrawing = false;
+        dustBrushPoints = [];
+        if (state.dustRemoval.showMask) renderDustMaskOverlay();
+        showToast(getLocalizedText('cancelledBrush', 'Brush cancelled'));
+        return;
+      }
+    });
+
     // Zoom control buttons
     document.getElementById('zoomInBtn').addEventListener('click', () => {
       const containerRect = canvasContainer.getBoundingClientRect();
@@ -7896,6 +8786,7 @@
     });
 
     document.getElementById('applyCropBtn').addEventListener('click', () => {
+      pushUndo('crop');
       // Overlay coords are wrapper-local (pre-transform), convert to canvas pixels
       const { scaleX, scaleY } = getCropDisplayScale();
 
@@ -8002,6 +8893,7 @@
     });
 
     document.getElementById('startOverBtn').addEventListener('click', () => {
+      clearUndoHistory();
       exitBeforeAfter();
       resetZoomPan();
       if (state.loadedBaseImageData || state.originalImageData) {
@@ -8044,6 +8936,7 @@
     });
 
     document.getElementById('newImageBtn').addEventListener('click', () => {
+      clearUndoHistory();
       exitBeforeAfter();
       resetZoomPan();
       zoomControls.style.display = 'none';
@@ -9014,10 +9907,17 @@
       workingData = await applyLensCorrectionWithSettings(workingData, settings, { updateUi: false });
 
       // Convert negative/positive via unified conversion router.
-      const processed = await convertFrameWithRouter({
+      let processed = await convertFrameWithRouter({
         imageData: workingData,
         settings: buildRouterSettings(settings)
       });
+
+      // Apply dust removal if enabled (full resolution for export)
+      if (state.dustRemoval.enabled && processed) {
+        await ensureOpenCvReady();
+        const { mask } = detectDust(processed, { strength: state.dustRemoval.strength });
+        processed = inpaintMasked(processed, mask, 3);
+      }
 
       // Apply adjustments
       return applyAdjustmentsWithSettings(processed, settings);
@@ -9191,6 +10091,7 @@
       if (index < 0 || index >= state.fileQueue.length) return;
       if (index === state.currentFileIndex) return;
 
+      clearUndoHistory();
       resetZoomPan();
       persistCurrentFileSettings({ silent: true });
       state.currentFileIndex = index;
