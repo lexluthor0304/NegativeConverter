@@ -710,7 +710,7 @@ export function generateCurves(channelData, settings) {
 
 /**
  * Interpolate sparse curve points to a full 256-entry LUT.
- * Uses linear interpolation between control points.
+ * Uses linear interpolation with progressive index (O(n+m) instead of O(n*m)).
  */
 function interpolateToLUT(points) {
   const lut = new Uint8Array(256);
@@ -718,26 +718,28 @@ function interpolateToLUT(points) {
   // Sort by x
   points.sort((a, b) => a.x - b.x);
 
-  // Clamp and extend
+  const firstY = points[0].y < 0 ? 0 : points[0].y > 255 ? 255 : points[0].y;
+  const lastY = points[points.length - 1].y < 0 ? 0 : points[points.length - 1].y > 255 ? 255 : points[points.length - 1].y;
+  const lastX = points[points.length - 1].x;
+
+  // Progressive index - lo only moves forward
+  let lo = 0;
+
   for (let i = 0; i < 256; i++) {
     if (i <= points[0].x) {
-      lut[i] = Math.max(0, Math.min(255, points[0].y));
-    } else if (i >= points[points.length - 1].x) {
-      lut[i] = Math.max(0, Math.min(255, points[points.length - 1].y));
+      lut[i] = firstY;
+    } else if (i >= lastX) {
+      lut[i] = lastY;
     } else {
-      // Find surrounding points
-      let lo = 0;
-      for (let j = 0; j < points.length - 1; j++) {
-        if (points[j].x <= i && points[j + 1].x >= i) {
-          lo = j;
-          break;
-        }
+      // Advance lo pointer progressively (O(n+m) total)
+      while (lo < points.length - 2 && points[lo + 1].x < i) {
+        lo++;
       }
       const p0 = points[lo];
       const p1 = points[lo + 1];
       const t = (p1.x === p0.x) ? 0 : (i - p0.x) / (p1.x - p0.x);
       const v = p0.y + t * (p1.y - p0.y);
-      lut[i] = Math.max(0, Math.min(255, Math.round(v)));
+      lut[i] = v < 0 ? 0 : v > 255 ? 255 : (v + 0.5) | 0;
     }
   }
 
