@@ -71,7 +71,6 @@
 	        convert: "下一步：胶片设置",
 	        convertPositive: "下一步：正片模式",
 	        histogram: "直方图",
-	        histogramDragHint: "可拖动",
 	        loadError: "加载文件失败",
 	        rawUnsupported: "当前 Safari 版本不支持 RAW 解码，请升级 Safari（建议 iOS 16.4+）或先转为 TIFF/JPEG。",
         workflow: "工作流程",
@@ -386,7 +385,6 @@
 	        convert: "Next: Film Settings",
 	        convertPositive: "Next: Positive Mode",
 	        histogram: "Histogram",
-	        histogramDragHint: "Drag to move",
 	        loadError: "Error loading file",
 	        rawUnsupported: "RAW decode is not supported in this Safari version. Update Safari (iOS 16.4+) or convert to TIFF/JPEG first.",
         workflow: "Workflow",
@@ -701,7 +699,6 @@
 	        convert: "次へ：フィルム設定",
 	        convertPositive: "次へ：ポジモード",
 	        histogram: "ヒストグラム",
-	        histogramDragHint: "ドラッグで移動",
 	        loadError: "ファイルの読み込みに失敗しました",
 	        rawUnsupported: "この Safari バージョンでは RAW デコードに対応していません。Safari（iOS 16.4+ 推奨）へ更新するか、先に TIFF/JPEG に変換してください。",
         workflow: "ワークフロー",
@@ -1023,8 +1020,6 @@
     const STEP3_GUIDE_COLLAPSED_SESSION_KEY = 'nc_step3_guide_collapsed_v1';
     const PRIVACY_BANNER_COLLAPSED_STORAGE_KEY = 'nc_privacy_banner_collapsed_v1';
     const GUIDE_MODE_STORAGE_KEY = 'nc_guide_mode_enabled_v1';
-    const HISTOGRAM_POSITION_STORAGE_KEY = 'nc_histogram_position_v1';
-    const HISTOGRAM_DRAG_HINT_DISMISSED_STORAGE_KEY = 'nc_histogram_drag_hint_dismissed_v1';
     const DESKTOP_UPDATE_LAST_CHECK_TS_KEY = 'nc_desktop_update_last_check_ts';
     const DESKTOP_UPDATE_LAST_SEEN_LATEST_KEY = 'nc_desktop_update_last_seen_latest';
     const DESKTOP_UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -2636,11 +2631,8 @@
     const zoomControls = document.getElementById('zoomControls');
     const ZOOM_MIN = 1;
     const ZOOM_MAX = 8;
-    const previewSection = canvasContainer.closest('.preview-section');
     const beforeAfterBtn = document.getElementById('beforeAfterBtn');
     const histogramContainer = document.getElementById('histogramContainer');
-    const histogramHandle = histogramContainer?.querySelector('.histogram-label') || null;
-    const histogramDragHint = document.getElementById('histogramDragHint');
     const histogramCanvas = document.getElementById('histogramCanvas');
     const histogram = new Histogram(histogramCanvas);
     const HISTOGRAM_MAX_SAMPLES = 24_576;
@@ -3695,224 +3687,23 @@
     // ===========================================
     // Histogram (Lightroom-style)
     // ===========================================
-    const HISTOGRAM_BINS = 256;
-    const histogramR = new Uint32Array(HISTOGRAM_BINS);
-    const histogramG = new Uint32Array(HISTOGRAM_BINS);
-    const histogramB = new Uint32Array(HISTOGRAM_BINS);
-    const histogramL = new Uint32Array(HISTOGRAM_BINS);
-    const histogramSmoothR = new Float32Array(HISTOGRAM_BINS);
-    const histogramSmoothG = new Float32Array(HISTOGRAM_BINS);
-    const histogramSmoothB = new Float32Array(HISTOGRAM_BINS);
-    const histogramSmoothL = new Float32Array(HISTOGRAM_BINS);
-    const histogramX = new Float32Array(HISTOGRAM_BINS);
-    let histogramXWidth = 0;
 
-    function smoothHistogram(src, dst) {
-      dst[0] = (src[0] * 4 + src[1] * 2 + src[2]) / 7;
-      for (let i = 1; i < 255; i++) {
-        dst[i] = (src[i - 1] + src[i] * 2 + src[i + 1]) * 0.25;
+    function resizeHistogramCanvas() {
+      if (!histogramContainer || !histogramCanvas) return;
+      const displayWidth = histogramContainer.clientWidth - 32; // subtract padding
+      if (displayWidth > 0 && histogramCanvas.width !== displayWidth) {
+        histogramCanvas.width = displayWidth;
+        histogram.width = displayWidth;
       }
-      dst[255] = (src[253] + src[254] * 2 + src[255] * 4) / 7;
-    }
-
-    function ensureHistogramX(width) {
-      if (histogramXWidth === width) return;
-      const scale = (width - 1) / 255;
-      for (let i = 0; i < HISTOGRAM_BINS; i++) {
-        histogramX[i] = i * scale;
+      const h = histogramCanvas.height;
+      if (histogram.height !== h) {
+        histogram.height = h;
       }
-      histogramXWidth = width;
     }
 
     function renderHistogram(imageData) {
+      resizeHistogramCanvas();
       histogram.draw(imageData);
-    }
-
-    const histogramDragState = {
-      active: false,
-      pointerId: null,
-      startPointerX: 0,
-      startPointerY: 0,
-      startLeft: 0,
-      startTop: 0
-    };
-
-    function isHistogramDragHintDismissed() {
-      return safeStorageGet(HISTOGRAM_DRAG_HINT_DISMISSED_STORAGE_KEY) === '1';
-    }
-
-    function updateHistogramDragHintVisibility() {
-      if (!histogramDragHint || !histogramContainer) return;
-      const shouldShow = histogramContainer.style.display !== 'none' && !isHistogramDragHintDismissed();
-      histogramDragHint.classList.toggle('is-hidden', !shouldShow);
-      histogramDragHint.setAttribute('aria-hidden', shouldShow ? 'false' : 'true');
-    }
-
-    function dismissHistogramDragHint() {
-      if (!histogramDragHint || isHistogramDragHintDismissed()) return;
-      safeStorageSet(HISTOGRAM_DRAG_HINT_DISMISSED_STORAGE_KEY, '1');
-      updateHistogramDragHintVisibility();
-    }
-
-    function parseHistogramStoredPosition() {
-      const raw = safeStorageGet(HISTOGRAM_POSITION_STORAGE_KEY);
-      if (!raw) return null;
-      try {
-        const parsed = JSON.parse(raw);
-        const xRatio = Number(parsed?.xRatio);
-        const yRatio = Number(parsed?.yRatio);
-        if (!Number.isFinite(xRatio) || !Number.isFinite(yRatio)) return null;
-        return {
-          xRatio: Math.max(0, Math.min(1, xRatio)),
-          yRatio: Math.max(0, Math.min(1, yRatio))
-        };
-      } catch (err) {
-        return null;
-      }
-    }
-
-    function getHistogramDragBounds() {
-      if (!previewSection || !histogramContainer) return null;
-      const parentWidth = previewSection.clientWidth;
-      const parentHeight = previewSection.clientHeight;
-      const histWidth = histogramContainer.offsetWidth;
-      const histHeight = histogramContainer.offsetHeight;
-      if (parentWidth <= 0 || parentHeight <= 0 || histWidth <= 0 || histHeight <= 0) return null;
-      return {
-        maxLeft: Math.max(0, parentWidth - histWidth),
-        maxTop: Math.max(0, parentHeight - histHeight)
-      };
-    }
-
-    function getDefaultHistogramPosition(bounds) {
-      const left = Math.min(bounds.maxLeft, 14);
-      const top = Math.max(0, bounds.maxTop - 14);
-      return { left, top };
-    }
-
-    function saveHistogramPosition(left, top, bounds) {
-      if (!bounds) return;
-      const xRatio = bounds.maxLeft > 0 ? left / bounds.maxLeft : 0;
-      const yRatio = bounds.maxTop > 0 ? top / bounds.maxTop : 0;
-      safeStorageSet(HISTOGRAM_POSITION_STORAGE_KEY, JSON.stringify({
-        xRatio: Math.max(0, Math.min(1, xRatio)),
-        yRatio: Math.max(0, Math.min(1, yRatio))
-      }));
-    }
-
-    function applyHistogramPosition(left, top, options = {}) {
-      if (!histogramContainer) return;
-      const { persist = false } = options;
-      const bounds = getHistogramDragBounds();
-      if (!bounds) return;
-
-      const clampedLeft = Math.max(0, Math.min(bounds.maxLeft, Number.isFinite(left) ? left : 0));
-      const clampedTop = Math.max(0, Math.min(bounds.maxTop, Number.isFinite(top) ? top : 0));
-      histogramContainer.style.left = `${Math.round(clampedLeft)}px`;
-      histogramContainer.style.top = `${Math.round(clampedTop)}px`;
-      histogramContainer.style.bottom = 'auto';
-      histogramContainer.style.right = 'auto';
-
-      if (persist) {
-        saveHistogramPosition(clampedLeft, clampedTop, bounds);
-      }
-    }
-
-    function restoreHistogramPositionOrDefault(retry = 0) {
-      if (!histogramContainer) return;
-      const bounds = getHistogramDragBounds();
-      if (!bounds) {
-        if (retry < 2) {
-          requestAnimationFrame(() => restoreHistogramPositionOrDefault(retry + 1));
-        }
-        return;
-      }
-
-      const stored = parseHistogramStoredPosition();
-      if (stored) {
-        applyHistogramPosition(stored.xRatio * bounds.maxLeft, stored.yRatio * bounds.maxTop, { persist: false });
-        return;
-      }
-
-      const defaults = getDefaultHistogramPosition(bounds);
-      applyHistogramPosition(defaults.left, defaults.top, { persist: false });
-    }
-
-    function reclampHistogramPosition() {
-      if (!histogramContainer) return;
-      const currentLeft = Number.parseFloat(histogramContainer.style.left);
-      const currentTop = Number.parseFloat(histogramContainer.style.top);
-      if (Number.isFinite(currentLeft) && Number.isFinite(currentTop)) {
-        applyHistogramPosition(currentLeft, currentTop, { persist: false });
-      } else {
-        restoreHistogramPositionOrDefault();
-      }
-    }
-
-    function beginHistogramDrag(event) {
-      if (!histogramContainer || !histogramHandle) return;
-      if (event.pointerType === 'mouse' && event.button !== 0) return;
-
-      const bounds = getHistogramDragBounds();
-      if (!bounds) return;
-      event.preventDefault();
-      event.stopPropagation();
-      dismissHistogramDragHint();
-
-      const currentLeft = Number.parseFloat(histogramContainer.style.left);
-      const currentTop = Number.parseFloat(histogramContainer.style.top);
-      const defaults = getDefaultHistogramPosition(bounds);
-
-      histogramDragState.active = true;
-      histogramDragState.pointerId = event.pointerId;
-      histogramDragState.startPointerX = event.clientX;
-      histogramDragState.startPointerY = event.clientY;
-      histogramDragState.startLeft = Number.isFinite(currentLeft) ? currentLeft : defaults.left;
-      histogramDragState.startTop = Number.isFinite(currentTop) ? currentTop : defaults.top;
-      histogramContainer.classList.add('dragging');
-
-      if (typeof histogramHandle.setPointerCapture === 'function') {
-        histogramHandle.setPointerCapture(event.pointerId);
-      }
-    }
-
-    function moveHistogramDrag(event) {
-      if (!histogramDragState.active || histogramDragState.pointerId !== event.pointerId) return;
-      event.preventDefault();
-
-      const dx = event.clientX - histogramDragState.startPointerX;
-      const dy = event.clientY - histogramDragState.startPointerY;
-      applyHistogramPosition(histogramDragState.startLeft + dx, histogramDragState.startTop + dy, { persist: false });
-    }
-
-    function endHistogramDrag(event) {
-      if (!histogramDragState.active || histogramDragState.pointerId !== event.pointerId) return;
-
-      histogramDragState.active = false;
-      histogramDragState.pointerId = null;
-      histogramContainer?.classList.remove('dragging');
-
-      if (histogramHandle && typeof histogramHandle.hasPointerCapture === 'function' &&
-          histogramHandle.hasPointerCapture(event.pointerId)) {
-        histogramHandle.releasePointerCapture(event.pointerId);
-      }
-
-      const currentLeft = Number.parseFloat(histogramContainer?.style.left || '');
-      const currentTop = Number.parseFloat(histogramContainer?.style.top || '');
-      if (Number.isFinite(currentLeft) && Number.isFinite(currentTop)) {
-        applyHistogramPosition(currentLeft, currentTop, { persist: true });
-      }
-    }
-
-    function initHistogramDragging() {
-      if (!histogramHandle || !histogramContainer || !previewSection) return;
-      if (histogramHandle.dataset.histDragReady === '1') return;
-      histogramHandle.dataset.histDragReady = '1';
-
-      histogramHandle.addEventListener('pointerdown', beginHistogramDrag, { passive: false });
-      histogramHandle.addEventListener('pointermove', moveHistogramDrag, { passive: false });
-      histogramHandle.addEventListener('pointerup', endHistogramDrag);
-      histogramHandle.addEventListener('pointercancel', endHistogramDrag);
     }
 
     // ===========================================
@@ -6037,7 +5828,6 @@
       document.getElementById('uploadPlaceholder').style.display = 'none';
       document.getElementById('previewToolbar').style.display = 'flex';
       document.getElementById('histogramContainer').style.display = 'block';
-      updateHistogramDragHintVisibility();
       document.getElementById('controlsPanel').style.display = 'flex';
       document.getElementById('appFooter').style.display = 'flex';
 
@@ -6048,8 +5838,7 @@
       document.getElementById('zoomOutBtn').title = lang.zoomOut || 'Zoom Out';
       document.getElementById('zoomResetBtn').title = lang.zoomReset || 'Reset Zoom';
 
-      initHistogramDragging();
-      restoreHistogramPositionOrDefault();
+      resizeHistogramCanvas();
       updateCanvasVisibility();
       adjustCanvasDisplay(canvas.width, canvas.height);
       updateAutoFrameConfigUI();
@@ -10880,5 +10669,5 @@
       if (canvas.width > 0 && canvas.height > 0) {
         adjustCanvasDisplay(canvas.width, canvas.height);
       }
-      reclampHistogramPosition();
+      resizeHistogramCanvas();
     });

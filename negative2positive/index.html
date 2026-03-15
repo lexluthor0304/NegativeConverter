@@ -683,65 +683,30 @@
 
     /* Histogram */
     .histogram-container {
-      position: absolute;
-      left: 14px;
-      bottom: 14px;
-      z-index: 24;
-      background: rgba(0, 0, 0, 0.68);
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      border-radius: 8px;
-      padding: 6px;
-      backdrop-filter: blur(3px);
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-secondary);
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      flex: 0 0 auto;
     }
 
     .histogram-header {
       display: flex;
       align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      margin-bottom: 3px;
+      margin-bottom: 4px;
     }
 
     .histogram-label {
       font-size: 11px;
-      color: rgba(235, 235, 235, 0.85);
-      margin-bottom: 0;
-      text-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
-      cursor: grab;
-      user-select: none;
-      -webkit-user-select: none;
-      touch-action: none;
-    }
-
-    .histogram-drag-hint {
-      font-size: 10px;
-      line-height: 1;
-      color: rgba(235, 235, 235, 0.72);
-      background: rgba(255, 255, 255, 0.08);
-      border: 1px solid rgba(255, 255, 255, 0.12);
-      border-radius: 999px;
-      padding: 3px 7px;
-      white-space: nowrap;
-      user-select: none;
-      -webkit-user-select: none;
-      pointer-events: none;
-      transition: opacity 0.15s ease;
-      opacity: 1;
-    }
-
-    .histogram-drag-hint.is-hidden {
-      opacity: 0;
-      display: none;
-    }
-
-    .histogram-container.dragging .histogram-label {
-      cursor: grabbing;
+      color: var(--text-secondary);
     }
 
     #histogramCanvas {
-      width: 256px;
-      height: 100px;
-      background: transparent;
+      width: 100%;
+      height: 80px;
+      background: rgba(0, 0, 0, 0.25);
       border-radius: 4px;
       display: block;
     }
@@ -2156,24 +2121,6 @@
         font-size: 16px;
       }
 
-      .histogram-container {
-        left: 14px;
-        bottom: 14px;
-        margin: 0;
-        border-radius: 10px;
-        padding: 6px;
-      }
-
-      #histogramCanvas {
-        width: 180px;
-        height: 72px;
-      }
-
-      .histogram-drag-hint {
-        font-size: 9px;
-        padding: 2px 6px;
-      }
-
       .controls-panel {
         border: 1px solid rgba(255, 255, 255, 0.08);
         border-radius: 16px;
@@ -2465,18 +2412,17 @@
         <button class="toolbar-btn primary" id="convertPositiveBtn" style="display: none;" data-i18n="convertPositive">Convert Positive</button>
       </div>
 
-      <!-- Histogram -->
-      <div class="histogram-container" id="histogramContainer" style="display: none;">
-        <div class="histogram-header">
-          <div class="histogram-label" data-i18n="histogram">Histogram</div>
-          <div class="histogram-drag-hint is-hidden" id="histogramDragHint" data-i18n="histogramDragHint">Drag to move</div>
-        </div>
-        <canvas id="histogramCanvas" width="256" height="100"></canvas>
-      </div>
     </section>
 
     <!-- Controls Panel -->
     <aside class="controls-panel" id="controlsPanel" style="display: none;">
+      <!-- Histogram -->
+      <div class="histogram-container" id="histogramContainer" style="display: none;">
+        <div class="histogram-header">
+          <div class="histogram-label" data-i18n="histogram">Histogram</div>
+        </div>
+        <canvas id="histogramCanvas" width="256" height="100"></canvas>
+      </div>
       <!-- File List (Batch Mode) -->
       <div class="file-list-section" id="fileListSection" style="display: none;">
         <div class="file-list-header">
