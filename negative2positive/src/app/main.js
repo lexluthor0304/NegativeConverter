@@ -359,7 +359,8 @@
         loadingConverting: "正在转换底片...",
         loadingComplete: "完成！",
         loadingCancelled: "已取消",
-        loadingLoading: "加载中..."
+        loadingLoading: "加载中...",
+        loadingCancel: "取消"
       },
       en: {
         title: "Negative Converter",
@@ -673,7 +674,8 @@
         loadingConverting: "Converting negative...",
         loadingComplete: "Complete!",
         loadingCancelled: "Cancelled",
-        loadingLoading: "Loading..."
+        loadingLoading: "Loading...",
+        loadingCancel: "Cancel"
       },
       ja: {
         title: "ネガポジ変換",
@@ -986,8 +988,9 @@
         loadingAdjusting: "調整を適用中...",
         loadingConverting: "ネガ変換中...",
         loadingComplete: "完了！",
-        loadingCancelled: "キャンセル",
-        loadingLoading: "読み込み中..."
+        loadingCancelled: "キャンセル済み",
+        loadingLoading: "読み込み中...",
+        loadingCancel: "キャンセル"
       }
     };
 
@@ -9848,17 +9851,11 @@
 
       // Try Worker for large images (>1MP)
       if (isWorkerAvailable() && imageData.width * imageData.height > 1_000_000) {
-        // Mirror the useLegacyTone logic from applyAdjustmentsToBuffer
-        const workerSettings = { ...safeSettings };
-        if (usesSilverCoreConversion(safeSettings)) {
-          workerSettings.exposure = 0;
-          workerSettings.contrast = 0;
-          workerSettings.highlights = 0;
-          workerSettings.shadows = 0;
-          workerSettings.temperature = 0;
-          workerSettings.tint = 0;
-          workerSettings.saturation = 0;
-        }
+        // Mirror the useLegacyTone logic from applyAdjustmentsToBuffer:
+        // SilverCore handles tone internally, so zero out legacy tone params.
+        const workerSettings = usesSilverCoreConversion(safeSettings)
+          ? { ...safeSettings, exposure: 0, contrast: 0, highlights: 0, shadows: 0, temperature: 0, tint: 0, saturation: 0 }
+          : safeSettings;
         const result = await workerApplyAdjustments(imageData, workerSettings, 'full');
         if (result) return result;
       }

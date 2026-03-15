@@ -30,11 +30,12 @@ self.onmessage = function (e) {
 function handleApplyAdjustments(msg) {
   const { id, inputBuffer, width, height, settings, quality } = msg;
 
-  // Reconstruct curves as Uint8Array if transferred as plain arrays
+  // Ensure curves are Uint8Array (structured clone preserves type, but guard defensively)
   if (settings.curves) {
-    if (!(settings.curves.r instanceof Uint8Array)) settings.curves.r = new Uint8Array(settings.curves.r);
-    if (!(settings.curves.g instanceof Uint8Array)) settings.curves.g = new Uint8Array(settings.curves.g);
-    if (!(settings.curves.b instanceof Uint8Array)) settings.curves.b = new Uint8Array(settings.curves.b);
+    const c = settings.curves;
+    if (!(c.r instanceof Uint8Array)) c.r = new Uint8Array(c.r);
+    if (!(c.g instanceof Uint8Array)) c.g = new Uint8Array(c.g);
+    if (!(c.b instanceof Uint8Array)) c.b = new Uint8Array(c.b);
   }
 
   const params = computeAdjustmentParams(settings);

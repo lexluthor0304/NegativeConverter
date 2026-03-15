@@ -76,15 +76,16 @@ function sendToWorker(message, transfers, onProgress) {
 }
 
 /**
- * Serialize settings for worker transfer: convert Uint8Array curves to plain arrays.
+ * Serialize settings for worker transfer.
+ * Curves are copied as Uint8Array (structured clone handles them natively).
  */
 function serializeSettings(settings) {
   const copy = { ...settings };
   if (copy.curves) {
     copy.curves = {
-      r: Array.from(copy.curves.r),
-      g: Array.from(copy.curves.g),
-      b: Array.from(copy.curves.b)
+      r: new Uint8Array(copy.curves.r),
+      g: new Uint8Array(copy.curves.g),
+      b: new Uint8Array(copy.curves.b)
     };
   }
   return copy;
@@ -99,6 +100,7 @@ function serializeSettings(settings) {
  * @returns {Promise<ImageData>}
  */
 export async function workerApplyAdjustments(imageData, settings, quality = 'full', onProgress = null) {
+  // Must copy: if worker fails, caller's fallback still needs the original buffer.
   const inputBuffer = imageData.data.buffer.slice(0);
 
   try {
@@ -128,17 +130,15 @@ export async function workerApplyAdjustments(imageData, settings, quality = 'ful
  * @returns {Promise<Blob>}
  */
 export async function workerEncodePng16(imageData, onProgress = null) {
-  const pixelBuffer = imageData.data.buffer.slice(0);
-
   try {
     return await sendToWorker(
       {
         type: 'encodePng16',
-        pixelData: pixelBuffer,
+        pixelData: imageData.data.buffer,
         width: imageData.width,
         height: imageData.height
       },
-      [pixelBuffer],
+      [imageData.data.buffer],
       onProgress
     );
   } catch {
@@ -154,18 +154,16 @@ export async function workerEncodePng16(imageData, onProgress = null) {
  * @returns {Promise<Blob>}
  */
 export async function workerEncodeTiff(imageData, bitDepth = 8, onProgress = null) {
-  const pixelBuffer = imageData.data.buffer.slice(0);
-
   try {
     return await sendToWorker(
       {
         type: 'encodeTiff',
-        pixelData: pixelBuffer,
+        pixelData: imageData.data.buffer,
         width: imageData.width,
         height: imageData.height,
         bitDepth
       },
-      [pixelBuffer],
+      [imageData.data.buffer],
       onProgress
     );
   } catch {

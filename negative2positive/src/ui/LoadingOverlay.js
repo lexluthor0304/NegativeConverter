@@ -28,6 +28,7 @@ export class LoadingOverlay {
     this._percent = 0;
     this._targetPercent = 0;
     this._cancelCallback = null;
+    this._onCancelClick = null;
 
     // DOM elements
     this._overlay = null;
@@ -61,9 +62,10 @@ export class LoadingOverlay {
     this._cancelBtn.className = 'loading-cancel-btn';
     this._cancelBtn.style.display = 'none';
     this._cancelBtn.textContent = 'Cancel';
-    this._cancelBtn.addEventListener('click', () => {
+    this._onCancelClick = () => {
       if (this._cancelCallback) this._cancelCallback();
-    });
+    };
+    this._cancelBtn.addEventListener('click', this._onCancelClick);
     this._overlay.appendChild(this._cancelBtn);
 
     document.body.appendChild(this._overlay);
@@ -177,7 +179,7 @@ export class LoadingOverlay {
     this._createDOM();
     await this._initThree();
 
-    const { title = '', cancelable = false, onCancel = null } = options;
+    const { title = '', cancelable = false, onCancel = null, cancelText = 'Cancel' } = options;
 
     this._targetPercent = 0;
     this._percent = 0;
@@ -185,6 +187,7 @@ export class LoadingOverlay {
     this._phaseText.textContent = title;
 
     this._cancelCallback = onCancel;
+    this._cancelBtn.textContent = cancelText;
     this._cancelBtn.style.display = cancelable ? 'inline-block' : 'none';
 
     this._visible = true;
@@ -239,10 +242,15 @@ export class LoadingOverlay {
       });
       this._scene = null;
     }
+    if (this._cancelBtn && this._onCancelClick) {
+      this._cancelBtn.removeEventListener('click', this._onCancelClick);
+      this._onCancelClick = null;
+    }
     if (this._overlay && this._overlay.parentNode) {
       this._overlay.parentNode.removeChild(this._overlay);
     }
     this._overlay = null;
+    this._cancelBtn = null;
     this._initialized = false;
   }
 
