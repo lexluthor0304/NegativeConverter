@@ -21,6 +21,13 @@
       detectDust, updateDustStrength, inpaintMasked,
       refineMaskIntelligent, refineMaskDirect, refineMaskRemove
     } from '../silvercore/engine/DustRemoval.js';
+    import { getLoadingOverlay } from '../ui/LoadingOverlay.js';
+    import {
+      workerApplyAdjustments,
+      workerEncodePng16,
+      workerEncodeTiff,
+      isWorkerAvailable
+    } from '../workers/workerBridge.js';
 
     const UPNG = (UPNGImport && typeof UPNGImport.decode === 'function')
       ? UPNGImport
@@ -342,7 +349,17 @@
         bitDepthJpegLocked: "JPEG 仅支持 8-bit 导出。",
         zoomIn: "放大",
         zoomOut: "缩小",
-        zoomReset: "重置缩放"
+        zoomReset: "重置缩放",
+        loadingExporting: "导出中...",
+        loadingProcessing: "处理图片中...",
+        loadingEncoding: "编码中...",
+        loadingBatchFile: "正在处理第 {current} / {total} 张",
+        loadingBatchZip: "正在创建 ZIP 压缩包...",
+        loadingAdjusting: "正在应用调整...",
+        loadingConverting: "正在转换底片...",
+        loadingComplete: "完成！",
+        loadingCancelled: "已取消",
+        loadingLoading: "加载中..."
       },
       en: {
         title: "Negative Converter",
@@ -646,7 +663,17 @@
         bitDepthJpegLocked: "JPEG export is limited to 8-bit.",
         zoomIn: "Zoom In",
         zoomOut: "Zoom Out",
-        zoomReset: "Reset Zoom"
+        zoomReset: "Reset Zoom",
+        loadingExporting: "Exporting...",
+        loadingProcessing: "Processing image...",
+        loadingEncoding: "Encoding...",
+        loadingBatchFile: "Processing file {current} of {total}",
+        loadingBatchZip: "Creating ZIP archive...",
+        loadingAdjusting: "Applying adjustments...",
+        loadingConverting: "Converting negative...",
+        loadingComplete: "Complete!",
+        loadingCancelled: "Cancelled",
+        loadingLoading: "Loading..."
       },
       ja: {
         title: "ネガポジ変換",
@@ -950,7 +977,17 @@
         bitDepthJpegLocked: "JPEG は 8-bit 出力のみ対応です。",
         zoomIn: "拡大",
         zoomOut: "縮小",
-        zoomReset: "ズームリセット"
+        zoomReset: "ズームリセット",
+        loadingExporting: "書き出し中...",
+        loadingProcessing: "画像処理中...",
+        loadingEncoding: "エンコード中...",
+        loadingBatchFile: "{total}枚中{current}枚目を処理中",
+        loadingBatchZip: "ZIPアーカイブを作成中...",
+        loadingAdjusting: "調整を適用中...",
+        loadingConverting: "ネガ変換中...",
+        loadingComplete: "完了！",
+        loadingCancelled: "キャンセル",
+        loadingLoading: "読み込み中..."
       }
     };
 
@@ -4945,9 +4982,97 @@
       if (state.dustRemoval.showMask && state.dustRemoval.mask) renderDustMaskOverlay();
     }
 
+    function renderFullWebGL() {
+      if (!webglState.gl || !state.processedImageData) return false;
+      // WebGL only usable for legacy tone path (non-SilverCore)
+      if (usesSilverCoreConversion(state)) return false;
+      if (state.dustRemoval.enabled && state.dustRemoval.showMask) return false;
+
+      const source = state.processedImageData;
+      const gl = webglState.gl;
+      const maxTex = webglState.maxTextureSize || 0;
+      if (maxTex && (source.width > maxTex || source.height > maxTex)) return false;
+
+      try {
+        // Save original canvas size
+        const origW = glCanvas.width;
+        const origH = glCanvas.height;
+
+        // Resize to full resolution
+        glCanvas.width = source.width;
+        glCanvas.height = source.height;
+        gl.viewport(0, 0, source.width, source.height);
+        gl.useProgram(webglState.program);
+
+        // Upload full-res source
+        webglUploadSource(source);
+        webglUploadCurves();
+        webglSetUniforms();
+
+        // Bind geometry
+        gl.bindBuffer(gl.ARRAY_BUFFER, webglState.quadBuffer);
+        gl.enableVertexAttribArray(webglState.locations.aPos);
+        gl.vertexAttribPointer(webglState.locations.aPos, 2, gl.FLOAT, false, 0, 0);
+
+        // Bind textures
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, webglState.sourceTex);
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_2D, webglState.curveTex);
+
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        gl.finish();
+
+        // Read back pixels
+        const pixels = new Uint8Array(source.width * source.height * 4);
+        gl.readPixels(0, 0, source.width, source.height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+
+        // WebGL readPixels returns Y-flipped data — flip it
+        const rowSize = source.width * 4;
+        const tempRow = new Uint8Array(rowSize);
+        for (let y = 0; y < (source.height >> 1); y++) {
+          const topOffset = y * rowSize;
+          const bottomOffset = (source.height - 1 - y) * rowSize;
+          tempRow.set(pixels.subarray(topOffset, topOffset + rowSize));
+          pixels.set(pixels.subarray(bottomOffset, bottomOffset + rowSize), topOffset);
+          pixels.set(tempRow, bottomOffset);
+        }
+
+        const imageData = new ImageData(new Uint8ClampedArray(pixels.buffer), source.width, source.height);
+
+        // Restore canvas size
+        glCanvas.width = origW;
+        glCanvas.height = origH;
+
+        // Mark source as dirty so next preview re-uploads the preview-sized texture
+        webglState.sourceDirty = true;
+
+        return imageData;
+      } catch (err) {
+        console.warn('WebGL full-res render failed, falling back to CPU:', err);
+        return false;
+      }
+    }
+
     function ensureFullRender() {
       if (!state.processedImageData) return;
-      // Always compute full-res on CPU for export/batch correctness.
+
+      // Try WebGL for 8-bit export (legacy tone path only)
+      if (!usesSilverCoreConversion(state) && webglState.gl && !webglState.disabledByError) {
+        const result = renderFullWebGL();
+        if (result && result instanceof ImageData) {
+          state.displayImageData = result;
+          ctx.putImageData(result, 0, 0);
+          renderHistogram(result);
+          transformCanvas.width = canvas.width;
+          transformCanvas.height = canvas.height;
+          transformCtx.putImageData(result, 0, 0);
+          state.lastRenderQuality = 'full';
+          return;
+        }
+      }
+
+      // Fallback to CPU
       updateFullCpu();
     }
 
@@ -5123,27 +5248,40 @@
         const sourceData = state.croppedImageData || state.originalImageData;
         if (!sourceData) return;
 
-        const correctedSourceData = await applyLensCorrectionWithSettings(sourceData, state, { updateUi: true });
-        invalidateSilverCoreCache();
-        state.conversionSourceImageData = correctedSourceData;
-        state.conversionPreviewImageData = buildPreviewSourceImageData(correctedSourceData);
-        const processed = await convertFromCurrentSource(state, { preview: false });
-        if (!processed) return;
-        applyProcessedImageToState(processed);
-        // Reset dust removal state for new conversion
-        state.dustRemoval._state = null;
-        state.dustRemoval.mask = null;
-        state.dustRemoval.inpaintedImageData = null;
-        state.dustRemoval.particleCount = 0;
-        state.dustRemoval.cleanSource = null;
-        goToStep(3);
-        syncBatchUIState({ reason: 'processNegative' });
-        revealBatchFileList('processNegative');
-        updatePreview();
-        scheduleFullUpdate();
-        // Auto-run dust detection if enabled
-        if (state.dustRemoval.enabled) {
-          scheduleDustDetection();
+        const overlay = getLoadingOverlay();
+        const lang = i18n[currentLang];
+        await overlay.show({ title: lang.loadingConverting });
+
+        try {
+          overlay.updateProgress(10, lang.loadingConverting);
+          const correctedSourceData = await applyLensCorrectionWithSettings(sourceData, state, { updateUi: true });
+          invalidateSilverCoreCache();
+          state.conversionSourceImageData = correctedSourceData;
+          state.conversionPreviewImageData = buildPreviewSourceImageData(correctedSourceData);
+          overlay.updateProgress(40, lang.loadingConverting);
+          const processed = await convertFromCurrentSource(state, { preview: false });
+          if (!processed) return;
+          overlay.updateProgress(85, lang.loadingProcessing);
+          applyProcessedImageToState(processed);
+          // Reset dust removal state for new conversion
+          state.dustRemoval._state = null;
+          state.dustRemoval.mask = null;
+          state.dustRemoval.inpaintedImageData = null;
+          state.dustRemoval.particleCount = 0;
+          state.dustRemoval.cleanSource = null;
+          goToStep(3);
+          syncBatchUIState({ reason: 'processNegative' });
+          revealBatchFileList('processNegative');
+          updatePreview();
+          scheduleFullUpdate();
+          overlay.updateProgress(100, lang.loadingComplete);
+          await new Promise(r => setTimeout(r, 250));
+          // Auto-run dust detection if enabled
+          if (state.dustRemoval.enabled) {
+            scheduleDustDetection();
+          }
+        } finally {
+          overlay.hide();
         }
       })();
 
@@ -5690,18 +5828,28 @@
       const fileName = file.name.toLowerCase();
       const isRawLikeFile = ['.cr2', '.nef', '.arw', '.dng', '.raw', '.rw2', '.tif', '.tiff'].some(ext => fileName.endsWith(ext));
 
+      const overlay = getLoadingOverlay();
+      const lang = i18n[currentLang];
+
       try {
+        if (isRawLikeFile) {
+          await overlay.show({ title: lang.loadingLoading });
+          overlay.updateProgress(10, lang.loadingLoading);
+        }
+
         const arrayBuffer = await file.arrayBuffer();
 
         let imageData;
         let extractedRawMeta = null;
 
         if (isRawLikeFile) {
+          overlay.updateProgress(30, lang.loadingProcessing);
           imageData = await loadRawFile(arrayBuffer, fileName, {
             onMetadata(meta) {
               extractedRawMeta = meta;
             }
           });
+          overlay.updateProgress(90, lang.loadingProcessing);
         } else if (file.type === 'image/png') {
           imageData = loadPngFile(arrayBuffer);
         } else {
@@ -5744,7 +5892,13 @@
           syncBatchUIState({ reason: 'loadFile' });
           updateAutoFrameButtons();
         }
+        if (isRawLikeFile) {
+          overlay.updateProgress(100, lang.loadingComplete);
+          await new Promise(r => setTimeout(r, 200));
+          overlay.hide();
+        }
       } catch (err) {
+        overlay.hide();
         console.error('Error loading file:', err);
         const text = String(err?.message || err || '');
         const isRawSupportIssue = isRawLikeFile && /module worker|worker|webassembly|wasm/i.test(text);
@@ -9276,12 +9430,12 @@
       return `${withConverted}${depthSuffix}${exportInfo.extension}`;
     }
 
-    function getCurrentExportImageData() {
+    async function getCurrentExportImageData() {
       if (state.displayImageData && state.currentStep >= 3) {
         return state.displayImageData;
       }
       if (state.processedImageData && state.currentStep >= 3) {
-        return applyAdjustmentsWithSettings(state.processedImageData, state);
+        return await applyAdjustmentsWithSettings(state.processedImageData, state);
       }
       if (canvas.width > 0 && canvas.height > 0) {
         return ctx.getImageData(0, 0, canvas.width, canvas.height);
@@ -9296,21 +9450,39 @@
     }
 
     async function exportSingle() {
+      const lang = i18n[currentLang];
+      const overlay = getLoadingOverlay();
       const exportInfo = getExportInfo();
       let fileName = buildExportFileName(null, exportInfo);
       let blob;
 
-      const currentItem = getCurrentQueueItem();
-      if (currentItem && state.currentStep >= 3 && state.processedImageData) {
-        persistCurrentFileSettings({ silent: true });
-        const adjusted = await processFileWithSettings(currentItem.file, currentItem.settings);
-        blob = await imageDataToBlob(adjusted, exportInfo.format, state.jpegQuality, exportInfo.bitDepth);
-        fileName = buildExportFileName(currentItem.file.name, exportInfo);
-      } else {
-        ensureFullRender();
-        const imageData = getCurrentExportImageData();
-        if (!imageData) throw new Error('No image available for export.');
-        blob = await imageDataToBlob(imageData, exportInfo.format, state.jpegQuality, exportInfo.bitDepth);
+      await overlay.show({ title: lang.loadingExporting });
+      try {
+        overlay.updateProgress(5, lang.loadingAdjusting);
+
+        const currentItem = getCurrentQueueItem();
+        if (currentItem && state.currentStep >= 3 && state.processedImageData) {
+          persistCurrentFileSettings({ silent: true });
+          const adjusted = await processFileWithSettings(currentItem.file, currentItem.settings);
+          overlay.updateProgress(60, lang.loadingEncoding);
+          blob = await imageDataToBlob(adjusted, exportInfo.format, state.jpegQuality, exportInfo.bitDepth, (pct) => {
+            overlay.updateProgress(60 + pct * 0.35, lang.loadingEncoding);
+          });
+          fileName = buildExportFileName(currentItem.file.name, exportInfo);
+        } else {
+          ensureFullRender();
+          overlay.updateProgress(50, lang.loadingEncoding);
+          const imageData = await getCurrentExportImageData();
+          if (!imageData) throw new Error('No image available for export.');
+          blob = await imageDataToBlob(imageData, exportInfo.format, state.jpegQuality, exportInfo.bitDepth, (pct) => {
+            overlay.updateProgress(50 + pct * 0.45, lang.loadingEncoding);
+          });
+        }
+
+        overlay.updateProgress(100, lang.loadingComplete);
+        await new Promise(r => setTimeout(r, 300));
+      } finally {
+        overlay.hide();
       }
 
       return await saveBlob(blob, fileName, exportInfo.mimeType);
@@ -9667,8 +9839,31 @@
       return item.settings || null;
     }
 
-    function applyAdjustmentsWithSettings(imageData, settings) {
-      const safeSettings = sanitizeSettings(settings, { fallbackSettings: state });
+    async function applyAdjustmentsWithSettings(imageData, settings) {
+      const safeSettings = sanitizeSettings(settings, {
+        fallbackSettings: state,
+        includeCurvePoints: false,
+        includeCurves: true
+      });
+
+      // Try Worker for large images (>1MP)
+      if (isWorkerAvailable() && imageData.width * imageData.height > 1_000_000) {
+        // Mirror the useLegacyTone logic from applyAdjustmentsToBuffer
+        const workerSettings = { ...safeSettings };
+        if (usesSilverCoreConversion(safeSettings)) {
+          workerSettings.exposure = 0;
+          workerSettings.contrast = 0;
+          workerSettings.highlights = 0;
+          workerSettings.shadows = 0;
+          workerSettings.temperature = 0;
+          workerSettings.tint = 0;
+          workerSettings.saturation = 0;
+        }
+        const result = await workerApplyAdjustments(imageData, workerSettings, 'full');
+        if (result) return result;
+      }
+
+      // Fallback to main thread
       const output = new ImageData(new Uint8ClampedArray(imageData.data.length), imageData.width, imageData.height);
       applyAdjustmentsToBuffer(imageData, safeSettings, output, 'full');
       return output;
@@ -9756,14 +9951,24 @@
       }
     }
 
-    async function imageDataToBlob(imageData, format = null, quality = null, bitDepth = null) {
+    async function imageDataToBlob(imageData, format = null, quality = null, bitDepth = null, onProgress = null) {
       const exportInfo = getExportInfo(format || state.exportFormat, bitDepth ?? state.exportBitDepth);
       const jpegQuality = quality !== null ? quality : state.jpegQuality;
 
       if (exportInfo.format === 'tiff') {
+        // Try Worker first for TIFF encoding
+        if (isWorkerAvailable()) {
+          const workerBlob = await workerEncodeTiff(imageData, exportInfo.bitDepth, onProgress);
+          if (workerBlob) return workerBlob;
+        }
         return encodeTiffBlob(imageData, exportInfo.bitDepth);
       }
       if (exportInfo.format === 'png' && exportInfo.bitDepth === 16) {
+        // Try Worker first for 16-bit PNG encoding
+        if (isWorkerAvailable()) {
+          const workerBlob = await workerEncodePng16(imageData, onProgress);
+          if (workerBlob) return workerBlob;
+        }
         return encodePng16Blob(imageData);
       }
 
@@ -9934,19 +10139,25 @@
       const zip = new JSZipCtor();
       const exportInfo = getExportInfo();
       let processedCount = 0;
+      const lang = i18n[currentLang];
+      const overlay = getLoadingOverlay();
+      const total = selectedFiles.length;
 
-      showBatchProgress(true);
+      await overlay.show({ title: lang.loadingExporting });
 
       try {
         for (const { item, index } of selectedFiles) {
           item.status = 'processing';
           updateFileListUI();
           processedCount++;
-          updateBatchProgress(processedCount, selectedFiles.length, item.file.name);
+          const fileProgress = ((processedCount - 1) / total) * 90;
+          const fileSlice = 90 / total;
+          overlay.updateProgress(fileProgress, lang.loadingBatchFile.replace('{current}', processedCount).replace('{total}', total));
 
           try {
             const settingsForFile = getSettingsForExport(index, item);
             const adjusted = await processFileWithSettings(item.file, settingsForFile);
+            overlay.updateProgress(fileProgress + fileSlice * 0.6, lang.loadingEncoding);
             const blob = await imageDataToBlob(
               adjusted,
               exportInfo.format,
@@ -9963,20 +10174,23 @@
             item.error = err.message;
           }
 
+          overlay.updateProgress(fileProgress + fileSlice, lang.loadingBatchFile.replace('{current}', processedCount).replace('{total}', total));
           updateFileListUI();
           await new Promise(r => setTimeout(r, 10));
         }
 
-        updateBatchProgress(selectedFiles.length, selectedFiles.length, 'Creating ZIP...');
+        overlay.updateProgress(92, lang.loadingBatchZip);
         const zipBlob = await zip.generateAsync({
           type: 'blob',
           compression: 'DEFLATE',
           compressionOptions: { level: 6 }
         });
 
+        overlay.updateProgress(100, lang.loadingComplete);
+        await new Promise(r => setTimeout(r, 300));
         await saveBlob(zipBlob, 'converted_negatives.zip', 'application/zip');
       } finally {
-        showBatchProgress(false);
+        overlay.hide();
       }
     }
 
@@ -9988,19 +10202,25 @@
       const exportInfo = getExportInfo();
       let processedCount = 0;
       let cancelledByUser = false;
+      const lang = i18n[currentLang];
+      const overlay = getLoadingOverlay();
+      const total = selectedFiles.length;
 
-      showBatchProgress(true);
+      await overlay.show({ title: lang.loadingExporting });
 
       try {
         for (const { item, index } of selectedFiles) {
           item.status = 'processing';
           updateFileListUI();
           processedCount++;
-          updateBatchProgress(processedCount, selectedFiles.length, item.file.name);
+          const fileProgress = ((processedCount - 1) / total) * 100;
+          const fileSlice = 100 / total;
+          overlay.updateProgress(fileProgress, lang.loadingBatchFile.replace('{current}', processedCount).replace('{total}', total));
 
           try {
             const settingsForFile = getSettingsForExport(index, item);
             const adjusted = await processFileWithSettings(item.file, settingsForFile);
+            overlay.updateProgress(fileProgress + fileSlice * 0.6, lang.loadingEncoding);
             const blob = await imageDataToBlob(
               adjusted,
               exportInfo.format,
@@ -10009,6 +10229,7 @@
             );
 
             const name = buildExportFileName(item.file.name, exportInfo);
+            overlay.hide(); // Hide overlay before save dialog
             const result = await saveBlob(blob, name, exportInfo.mimeType);
             if (!result.saved) {
               cancelledByUser = true;
@@ -10016,6 +10237,10 @@
               item.error = null;
               updateFileListUI();
               break;
+            }
+            // Re-show overlay for next file
+            if (processedCount < total) {
+              await overlay.show({ title: lang.loadingExporting });
             }
 
             item.status = 'done';
@@ -10025,13 +10250,13 @@
           }
 
           updateFileListUI();
-          await new Promise(r => setTimeout(r, 200));
+          await new Promise(r => setTimeout(r, 100));
         }
         if (cancelledByUser) {
           console.info('Batch individual export cancelled by user.');
         }
       } finally {
-        showBatchProgress(false);
+        overlay.hide();
       }
     }
 

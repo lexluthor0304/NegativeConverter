@@ -1809,6 +1809,54 @@
       white-space: nowrap;
     }
 
+    /* Loading Overlay (Three.js) */
+    .loading-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.85);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 1001;
+      opacity: 0;
+      transition: opacity 0.3s ease;
+      pointer-events: none;
+    }
+    .loading-overlay.visible {
+      opacity: 1;
+      pointer-events: all;
+    }
+    .loading-progress-text {
+      font-family: 'Inter', monospace;
+      font-size: 28px;
+      font-weight: 700;
+      color: #4a9eff;
+      text-shadow: 0 0 10px rgba(74,158,255,0.6), 0 0 30px rgba(74,158,255,0.3);
+      margin-top: 24px;
+    }
+    .loading-phase-text {
+      font-family: 'Inter', sans-serif;
+      font-size: 14px;
+      color: var(--text-secondary, #999);
+      margin-top: 8px;
+    }
+    .loading-cancel-btn {
+      margin-top: 20px;
+      padding: 8px 20px;
+      background: transparent;
+      border: 1px solid var(--accent, #4a9eff);
+      color: var(--accent, #4a9eff);
+      border-radius: 6px;
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 0.2s, color 0.2s;
+    }
+    .loading-cancel-btn:hover {
+      background: var(--accent, #4a9eff);
+      color: #000;
+    }
+
     /* Export Dropdown */
     .export-dropdown {
       position: relative;
