@@ -2,8 +2,9 @@ use base64::Engine;
 use serde::Serialize;
 #[cfg(target_os = "linux")]
 use std::io::ErrorKind;
+use std::path::PathBuf;
 #[cfg(target_os = "linux")]
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 #[derive(Serialize)]
@@ -15,6 +16,46 @@ struct SaveResult {
 #[tauri::command]
 fn get_app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+fn normalize_export_path(mut path: PathBuf, suggested_name: &str) -> PathBuf {
+    let suggested_extension = std::path::Path::new(suggested_name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty());
+
+    if path.extension().is_none() {
+        if let Some(extension) = suggested_extension {
+            path.set_extension(extension);
+        }
+    }
+
+    path
+}
+
+fn decode_export_bytes(bytes_base64: &str) -> Result<Vec<u8>, String> {
+    base64::engine::general_purpose::STANDARD
+        .decode(bytes_base64)
+        .map_err(|err| format!("decode base64 failed: {err}"))
+}
+
+fn write_export_bytes(path: &PathBuf, bytes_base64: &str) -> Result<SaveResult, String> {
+    let bytes = decode_export_bytes(bytes_base64)?;
+    std::fs::write(path, bytes).map_err(|err| format!("write file failed: {err}"))?;
+
+    Ok(SaveResult {
+        saved: true,
+        path: Some(path.to_string_lossy().to_string()),
+    })
+}
+
+#[tauri::command]
+fn pick_export_file_path(suggested_name: String) -> Option<String> {
+    let path = rfd::FileDialog::new()
+        .set_file_name(&suggested_name)
+        .save_file()?;
+    let normalized = normalize_export_path(path, &suggested_name);
+    Some(normalized.to_string_lossy().to_string())
 }
 
 #[tauri::command]
@@ -29,16 +70,18 @@ fn save_export_file(suggested_name: String, bytes_base64: String) -> Result<Save
         });
     };
 
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(bytes_base64)
-        .map_err(|err| format!("decode base64 failed: {err}"))?;
+    let normalized = normalize_export_path(path, &suggested_name);
+    write_export_bytes(&normalized, &bytes_base64)
+}
 
-    std::fs::write(&path, bytes).map_err(|err| format!("write file failed: {err}"))?;
+#[tauri::command]
+fn write_export_file_to_path(path: String, bytes_base64: String) -> Result<SaveResult, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("export path is empty".to_string());
+    }
 
-    Ok(SaveResult {
-        saved: true,
-        path: Some(path.to_string_lossy().to_string()),
-    })
+    write_export_bytes(&PathBuf::from(trimmed), &bytes_base64)
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -441,6 +484,8 @@ pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             save_export_file,
+            pick_export_file_path,
+            write_export_file_to_path,
             get_app_version,
             open_external_url
         ])
@@ -451,9 +496,11 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        decide_dmabuf_policy, looks_like_legacy_appimage_name, parse_bool_flag, AppImageVariant,
-        DmabufDecision, DmabufDisableReason, DmabufKeepReason, DmabufProbeKind,
+        decide_dmabuf_policy, looks_like_legacy_appimage_name, normalize_export_path,
+        parse_bool_flag, AppImageVariant, DmabufDecision, DmabufDisableReason,
+        DmabufKeepReason, DmabufProbeKind,
     };
+    use std::path::PathBuf;
 
     #[test]
     fn parse_bool_flag_accepts_truthy_values() {
@@ -487,6 +534,19 @@ mod tests {
             "Negative Converter_0.1.4_amd64.AppImage"
         ));
         assert!(!looks_like_legacy_appimage_name("legacy-build.AppImage"));
+    }
+
+    #[test]
+    fn normalize_export_path_adds_missing_extension_from_suggested_name() {
+        let path = normalize_export_path(PathBuf::from("/tmp/converted_negatives"), "converted.zip");
+        assert_eq!(path, PathBuf::from("/tmp/converted_negatives.zip"));
+    }
+
+    #[test]
+    fn normalize_export_path_preserves_explicit_extension() {
+        let path =
+            normalize_export_path(PathBuf::from("/tmp/converted_negatives.custom"), "converted.zip");
+        assert_eq!(path, PathBuf::from("/tmp/converted_negatives.custom"));
     }
 
     #[test]
