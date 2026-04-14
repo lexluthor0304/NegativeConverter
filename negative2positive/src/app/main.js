@@ -304,6 +304,11 @@
         exportCurrentJpeg: "导出当前图片 (JPEG)",
         exportCurrentTiff: "导出当前图片 (TIFF)",
         exportZipJpeg: "批量导出 (ZIP/JPEG)",
+        exportSaveCancelled: "已取消保存，文件未写出。",
+        zipSavedTo: "ZIP 已保存到：\n{path}",
+        zipSaveCancelled: "已取消 ZIP 保存，未写出文件。",
+        zipDownloadStarted: "ZIP 下载已开始，请检查浏览器下载目录。",
+        batchDownloadCancelled: "已取消后续导出。已经保存的文件会保留。",
         lensSectionTitle: "镜头矫正（可选）",
         lensEnable: "启用镜头矫正",
         lensSkipBtn: "跳过镜头矫正",
@@ -608,6 +613,11 @@
         exportCurrentJpeg: "Export Current (JPEG)",
         exportCurrentTiff: "Export Current (TIFF)",
         exportZipJpeg: "Export All (ZIP/JPEG)",
+        exportSaveCancelled: "Save cancelled. No file was written.",
+        zipSavedTo: "ZIP saved to:\n{path}",
+        zipSaveCancelled: "ZIP save cancelled. No file was written.",
+        zipDownloadStarted: "ZIP download started. Check your Downloads folder.",
+        batchDownloadCancelled: "Batch export cancelled. Files already saved were kept.",
         lensSectionTitle: "Lens Correction (Optional)",
         lensEnable: "Enable Lens Correction",
         lensSkipBtn: "Skip Lens Correction",
@@ -912,6 +922,11 @@
         exportCurrentJpeg: "現在の画像を出力 (JPEG)",
         exportCurrentTiff: "現在の画像を出力 (TIFF)",
         exportZipJpeg: "一括出力 (ZIP/JPEG)",
+        exportSaveCancelled: "保存をキャンセルしました。ファイルは書き出されていません。",
+        zipSavedTo: "ZIP を保存しました:\n{path}",
+        zipSaveCancelled: "ZIP の保存をキャンセルしました。ファイルは書き出されていません。",
+        zipDownloadStarted: "ZIP のダウンロードを開始しました。ダウンロードフォルダを確認してください。",
+        batchDownloadCancelled: "以降の書き出しをキャンセルしました。保存済みのファイルは保持されます。",
         lensSectionTitle: "レンズ補正（任意）",
         lensEnable: "レンズ補正を有効化",
         lensSkipBtn: "レンズ補正をスキップ",
@@ -2313,6 +2328,41 @@
         el.classList.remove('toast-visible');
         el.addEventListener('transitionend', () => el.remove(), { once: true });
       }, durationMs);
+    }
+
+    function interpolateText(template, replacements = {}) {
+      let text = String(template || '');
+      for (const [key, value] of Object.entries(replacements)) {
+        text = text.replaceAll(`{${key}}`, String(value ?? ''));
+      }
+      return text;
+    }
+
+    function getInterpolatedText(key, replacements = {}, fallback = '') {
+      return interpolateText(getLocalizedText(key, fallback), replacements);
+    }
+
+    function handleSaveResult(result, {
+      cancelledKey,
+      cancelledFallback,
+      savedPathKey,
+      savedPathFallback,
+      browserSuccessKey,
+      browserSuccessFallback,
+      toastDurationMs = 3500
+    } = {}) {
+      if (!result || !result.saved) {
+        showToast(getLocalizedText(cancelledKey, cancelledFallback), toastDurationMs);
+        return false;
+      }
+
+      if (result.path && savedPathKey) {
+        alert(getInterpolatedText(savedPathKey, { path: result.path }, savedPathFallback));
+      } else if (browserSuccessKey) {
+        showToast(getLocalizedText(browserSuccessKey, browserSuccessFallback), toastDurationMs);
+      }
+
+      return true;
     }
 
     // ===========================================
@@ -9318,7 +9368,11 @@
 
     document.getElementById('exportSingleBtn').addEventListener('click', async () => {
       try {
-        await exportSingle();
+        const result = await exportSingle();
+        handleSaveResult(result, {
+          cancelledKey: 'exportSaveCancelled',
+          cancelledFallback: 'Save cancelled. No file was written.'
+        });
       } catch (err) {
         notifyExportError(err);
       }
@@ -9974,7 +10028,15 @@
           compressionOptions: { level: 6 }
         });
 
-        await saveBlob(zipBlob, 'converted_negatives.zip', 'application/zip');
+        const result = await saveBlob(zipBlob, 'converted_negatives.zip', 'application/zip');
+        handleSaveResult(result, {
+          cancelledKey: 'zipSaveCancelled',
+          cancelledFallback: 'ZIP save cancelled. No file was written.',
+          savedPathKey: 'zipSavedTo',
+          savedPathFallback: 'ZIP saved to:\n{path}',
+          browserSuccessKey: 'zipDownloadStarted',
+          browserSuccessFallback: 'ZIP download started. Check your Downloads folder.'
+        });
       } finally {
         showBatchProgress(false);
       }
@@ -10029,6 +10091,13 @@
         }
         if (cancelledByUser) {
           console.info('Batch individual export cancelled by user.');
+          showToast(
+            getLocalizedText(
+              'batchDownloadCancelled',
+              'Batch export cancelled. Files already saved were kept.'
+            ),
+            3500
+          );
         }
       } finally {
         showBatchProgress(false);
