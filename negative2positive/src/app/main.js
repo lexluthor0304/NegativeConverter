@@ -21,6 +21,13 @@
       detectDust, updateDustStrength, inpaintMasked,
       refineMaskIntelligent, refineMaskDirect, refineMaskRemove
     } from '../silvercore/engine/DustRemoval.js';
+    import { getLoadingOverlay } from '../ui/LoadingOverlay.js';
+    import {
+      workerApplyAdjustments,
+      workerEncodePng16,
+      workerEncodeTiff,
+      isWorkerAvailable
+    } from '../workers/workerBridge.js';
 
     const UPNG = (UPNGImport && typeof UPNGImport.decode === 'function')
       ? UPNGImport
@@ -64,7 +71,6 @@
 	        convert: "下一步：胶片设置",
 	        convertPositive: "下一步：正片模式",
 	        histogram: "直方图",
-	        histogramDragHint: "可拖动",
 	        loadError: "加载文件失败",
 	        rawUnsupported: "当前 Safari 版本不支持 RAW 解码，请升级 Safari（建议 iOS 16.4+）或先转为 TIFF/JPEG。",
         workflow: "工作流程",
@@ -347,7 +353,18 @@
         bitDepthJpegLocked: "JPEG 仅支持 8-bit 导出。",
         zoomIn: "放大",
         zoomOut: "缩小",
-        zoomReset: "重置缩放"
+        zoomReset: "重置缩放",
+        loadingExporting: "导出中...",
+        loadingProcessing: "处理图片中...",
+        loadingEncoding: "编码中...",
+        loadingBatchFile: "正在处理第 {current} / {total} 张",
+        loadingBatchZip: "正在创建 ZIP 压缩包...",
+        loadingAdjusting: "正在应用调整...",
+        loadingConverting: "正在转换底片...",
+        loadingComplete: "完成！",
+        loadingCancelled: "已取消",
+        loadingLoading: "加载中...",
+        loadingCancel: "取消"
       },
       en: {
         title: "Negative Converter",
@@ -373,7 +390,6 @@
 	        convert: "Next: Film Settings",
 	        convertPositive: "Next: Positive Mode",
 	        histogram: "Histogram",
-	        histogramDragHint: "Drag to move",
 	        loadError: "Error loading file",
 	        rawUnsupported: "RAW decode is not supported in this Safari version. Update Safari (iOS 16.4+) or convert to TIFF/JPEG first.",
         workflow: "Workflow",
@@ -656,7 +672,18 @@
         bitDepthJpegLocked: "JPEG export is limited to 8-bit.",
         zoomIn: "Zoom In",
         zoomOut: "Zoom Out",
-        zoomReset: "Reset Zoom"
+        zoomReset: "Reset Zoom",
+        loadingExporting: "Exporting...",
+        loadingProcessing: "Processing image...",
+        loadingEncoding: "Encoding...",
+        loadingBatchFile: "Processing file {current} of {total}",
+        loadingBatchZip: "Creating ZIP archive...",
+        loadingAdjusting: "Applying adjustments...",
+        loadingConverting: "Converting negative...",
+        loadingComplete: "Complete!",
+        loadingCancelled: "Cancelled",
+        loadingLoading: "Loading...",
+        loadingCancel: "Cancel"
       },
       ja: {
         title: "ネガポジ変換",
@@ -682,7 +709,6 @@
 	        convert: "次へ：フィルム設定",
 	        convertPositive: "次へ：ポジモード",
 	        histogram: "ヒストグラム",
-	        histogramDragHint: "ドラッグで移動",
 	        loadError: "ファイルの読み込みに失敗しました",
 	        rawUnsupported: "この Safari バージョンでは RAW デコードに対応していません。Safari（iOS 16.4+ 推奨）へ更新するか、先に TIFF/JPEG に変換してください。",
         workflow: "ワークフロー",
@@ -965,7 +991,18 @@
         bitDepthJpegLocked: "JPEG は 8-bit 出力のみ対応です。",
         zoomIn: "拡大",
         zoomOut: "縮小",
-        zoomReset: "ズームリセット"
+        zoomReset: "ズームリセット",
+        loadingExporting: "書き出し中...",
+        loadingProcessing: "画像処理中...",
+        loadingEncoding: "エンコード中...",
+        loadingBatchFile: "{total}枚中{current}枚目を処理中",
+        loadingBatchZip: "ZIPアーカイブを作成中...",
+        loadingAdjusting: "調整を適用中...",
+        loadingConverting: "ネガ変換中...",
+        loadingComplete: "完了！",
+        loadingCancelled: "キャンセル済み",
+        loadingLoading: "読み込み中...",
+        loadingCancel: "キャンセル"
       }
     };
 
@@ -998,8 +1035,6 @@
     const STEP3_GUIDE_COLLAPSED_SESSION_KEY = 'nc_step3_guide_collapsed_v1';
     const PRIVACY_BANNER_COLLAPSED_STORAGE_KEY = 'nc_privacy_banner_collapsed_v1';
     const GUIDE_MODE_STORAGE_KEY = 'nc_guide_mode_enabled_v1';
-    const HISTOGRAM_POSITION_STORAGE_KEY = 'nc_histogram_position_v1';
-    const HISTOGRAM_DRAG_HINT_DISMISSED_STORAGE_KEY = 'nc_histogram_drag_hint_dismissed_v1';
     const DESKTOP_UPDATE_LAST_CHECK_TS_KEY = 'nc_desktop_update_last_check_ts';
     const DESKTOP_UPDATE_LAST_SEEN_LATEST_KEY = 'nc_desktop_update_last_seen_latest';
     const DESKTOP_UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -2646,11 +2681,8 @@
     const zoomControls = document.getElementById('zoomControls');
     const ZOOM_MIN = 1;
     const ZOOM_MAX = 8;
-    const previewSection = canvasContainer.closest('.preview-section');
     const beforeAfterBtn = document.getElementById('beforeAfterBtn');
     const histogramContainer = document.getElementById('histogramContainer');
-    const histogramHandle = histogramContainer?.querySelector('.histogram-label') || null;
-    const histogramDragHint = document.getElementById('histogramDragHint');
     const histogramCanvas = document.getElementById('histogramCanvas');
     const histogram = new Histogram(histogramCanvas);
     const HISTOGRAM_MAX_SAMPLES = 24_576;
@@ -3705,224 +3737,23 @@
     // ===========================================
     // Histogram (Lightroom-style)
     // ===========================================
-    const HISTOGRAM_BINS = 256;
-    const histogramR = new Uint32Array(HISTOGRAM_BINS);
-    const histogramG = new Uint32Array(HISTOGRAM_BINS);
-    const histogramB = new Uint32Array(HISTOGRAM_BINS);
-    const histogramL = new Uint32Array(HISTOGRAM_BINS);
-    const histogramSmoothR = new Float32Array(HISTOGRAM_BINS);
-    const histogramSmoothG = new Float32Array(HISTOGRAM_BINS);
-    const histogramSmoothB = new Float32Array(HISTOGRAM_BINS);
-    const histogramSmoothL = new Float32Array(HISTOGRAM_BINS);
-    const histogramX = new Float32Array(HISTOGRAM_BINS);
-    let histogramXWidth = 0;
 
-    function smoothHistogram(src, dst) {
-      dst[0] = (src[0] * 4 + src[1] * 2 + src[2]) / 7;
-      for (let i = 1; i < 255; i++) {
-        dst[i] = (src[i - 1] + src[i] * 2 + src[i + 1]) * 0.25;
+    function resizeHistogramCanvas() {
+      if (!histogramContainer || !histogramCanvas) return;
+      const displayWidth = histogramContainer.clientWidth - 32; // subtract padding
+      if (displayWidth > 0 && histogramCanvas.width !== displayWidth) {
+        histogramCanvas.width = displayWidth;
+        histogram.width = displayWidth;
       }
-      dst[255] = (src[253] + src[254] * 2 + src[255] * 4) / 7;
-    }
-
-    function ensureHistogramX(width) {
-      if (histogramXWidth === width) return;
-      const scale = (width - 1) / 255;
-      for (let i = 0; i < HISTOGRAM_BINS; i++) {
-        histogramX[i] = i * scale;
+      const h = histogramCanvas.height;
+      if (histogram.height !== h) {
+        histogram.height = h;
       }
-      histogramXWidth = width;
     }
 
     function renderHistogram(imageData) {
+      resizeHistogramCanvas();
       histogram.draw(imageData);
-    }
-
-    const histogramDragState = {
-      active: false,
-      pointerId: null,
-      startPointerX: 0,
-      startPointerY: 0,
-      startLeft: 0,
-      startTop: 0
-    };
-
-    function isHistogramDragHintDismissed() {
-      return safeStorageGet(HISTOGRAM_DRAG_HINT_DISMISSED_STORAGE_KEY) === '1';
-    }
-
-    function updateHistogramDragHintVisibility() {
-      if (!histogramDragHint || !histogramContainer) return;
-      const shouldShow = histogramContainer.style.display !== 'none' && !isHistogramDragHintDismissed();
-      histogramDragHint.classList.toggle('is-hidden', !shouldShow);
-      histogramDragHint.setAttribute('aria-hidden', shouldShow ? 'false' : 'true');
-    }
-
-    function dismissHistogramDragHint() {
-      if (!histogramDragHint || isHistogramDragHintDismissed()) return;
-      safeStorageSet(HISTOGRAM_DRAG_HINT_DISMISSED_STORAGE_KEY, '1');
-      updateHistogramDragHintVisibility();
-    }
-
-    function parseHistogramStoredPosition() {
-      const raw = safeStorageGet(HISTOGRAM_POSITION_STORAGE_KEY);
-      if (!raw) return null;
-      try {
-        const parsed = JSON.parse(raw);
-        const xRatio = Number(parsed?.xRatio);
-        const yRatio = Number(parsed?.yRatio);
-        if (!Number.isFinite(xRatio) || !Number.isFinite(yRatio)) return null;
-        return {
-          xRatio: Math.max(0, Math.min(1, xRatio)),
-          yRatio: Math.max(0, Math.min(1, yRatio))
-        };
-      } catch (err) {
-        return null;
-      }
-    }
-
-    function getHistogramDragBounds() {
-      if (!previewSection || !histogramContainer) return null;
-      const parentWidth = previewSection.clientWidth;
-      const parentHeight = previewSection.clientHeight;
-      const histWidth = histogramContainer.offsetWidth;
-      const histHeight = histogramContainer.offsetHeight;
-      if (parentWidth <= 0 || parentHeight <= 0 || histWidth <= 0 || histHeight <= 0) return null;
-      return {
-        maxLeft: Math.max(0, parentWidth - histWidth),
-        maxTop: Math.max(0, parentHeight - histHeight)
-      };
-    }
-
-    function getDefaultHistogramPosition(bounds) {
-      const left = Math.min(bounds.maxLeft, 14);
-      const top = Math.max(0, bounds.maxTop - 14);
-      return { left, top };
-    }
-
-    function saveHistogramPosition(left, top, bounds) {
-      if (!bounds) return;
-      const xRatio = bounds.maxLeft > 0 ? left / bounds.maxLeft : 0;
-      const yRatio = bounds.maxTop > 0 ? top / bounds.maxTop : 0;
-      safeStorageSet(HISTOGRAM_POSITION_STORAGE_KEY, JSON.stringify({
-        xRatio: Math.max(0, Math.min(1, xRatio)),
-        yRatio: Math.max(0, Math.min(1, yRatio))
-      }));
-    }
-
-    function applyHistogramPosition(left, top, options = {}) {
-      if (!histogramContainer) return;
-      const { persist = false } = options;
-      const bounds = getHistogramDragBounds();
-      if (!bounds) return;
-
-      const clampedLeft = Math.max(0, Math.min(bounds.maxLeft, Number.isFinite(left) ? left : 0));
-      const clampedTop = Math.max(0, Math.min(bounds.maxTop, Number.isFinite(top) ? top : 0));
-      histogramContainer.style.left = `${Math.round(clampedLeft)}px`;
-      histogramContainer.style.top = `${Math.round(clampedTop)}px`;
-      histogramContainer.style.bottom = 'auto';
-      histogramContainer.style.right = 'auto';
-
-      if (persist) {
-        saveHistogramPosition(clampedLeft, clampedTop, bounds);
-      }
-    }
-
-    function restoreHistogramPositionOrDefault(retry = 0) {
-      if (!histogramContainer) return;
-      const bounds = getHistogramDragBounds();
-      if (!bounds) {
-        if (retry < 2) {
-          requestAnimationFrame(() => restoreHistogramPositionOrDefault(retry + 1));
-        }
-        return;
-      }
-
-      const stored = parseHistogramStoredPosition();
-      if (stored) {
-        applyHistogramPosition(stored.xRatio * bounds.maxLeft, stored.yRatio * bounds.maxTop, { persist: false });
-        return;
-      }
-
-      const defaults = getDefaultHistogramPosition(bounds);
-      applyHistogramPosition(defaults.left, defaults.top, { persist: false });
-    }
-
-    function reclampHistogramPosition() {
-      if (!histogramContainer) return;
-      const currentLeft = Number.parseFloat(histogramContainer.style.left);
-      const currentTop = Number.parseFloat(histogramContainer.style.top);
-      if (Number.isFinite(currentLeft) && Number.isFinite(currentTop)) {
-        applyHistogramPosition(currentLeft, currentTop, { persist: false });
-      } else {
-        restoreHistogramPositionOrDefault();
-      }
-    }
-
-    function beginHistogramDrag(event) {
-      if (!histogramContainer || !histogramHandle) return;
-      if (event.pointerType === 'mouse' && event.button !== 0) return;
-
-      const bounds = getHistogramDragBounds();
-      if (!bounds) return;
-      event.preventDefault();
-      event.stopPropagation();
-      dismissHistogramDragHint();
-
-      const currentLeft = Number.parseFloat(histogramContainer.style.left);
-      const currentTop = Number.parseFloat(histogramContainer.style.top);
-      const defaults = getDefaultHistogramPosition(bounds);
-
-      histogramDragState.active = true;
-      histogramDragState.pointerId = event.pointerId;
-      histogramDragState.startPointerX = event.clientX;
-      histogramDragState.startPointerY = event.clientY;
-      histogramDragState.startLeft = Number.isFinite(currentLeft) ? currentLeft : defaults.left;
-      histogramDragState.startTop = Number.isFinite(currentTop) ? currentTop : defaults.top;
-      histogramContainer.classList.add('dragging');
-
-      if (typeof histogramHandle.setPointerCapture === 'function') {
-        histogramHandle.setPointerCapture(event.pointerId);
-      }
-    }
-
-    function moveHistogramDrag(event) {
-      if (!histogramDragState.active || histogramDragState.pointerId !== event.pointerId) return;
-      event.preventDefault();
-
-      const dx = event.clientX - histogramDragState.startPointerX;
-      const dy = event.clientY - histogramDragState.startPointerY;
-      applyHistogramPosition(histogramDragState.startLeft + dx, histogramDragState.startTop + dy, { persist: false });
-    }
-
-    function endHistogramDrag(event) {
-      if (!histogramDragState.active || histogramDragState.pointerId !== event.pointerId) return;
-
-      histogramDragState.active = false;
-      histogramDragState.pointerId = null;
-      histogramContainer?.classList.remove('dragging');
-
-      if (histogramHandle && typeof histogramHandle.hasPointerCapture === 'function' &&
-          histogramHandle.hasPointerCapture(event.pointerId)) {
-        histogramHandle.releasePointerCapture(event.pointerId);
-      }
-
-      const currentLeft = Number.parseFloat(histogramContainer?.style.left || '');
-      const currentTop = Number.parseFloat(histogramContainer?.style.top || '');
-      if (Number.isFinite(currentLeft) && Number.isFinite(currentTop)) {
-        applyHistogramPosition(currentLeft, currentTop, { persist: true });
-      }
-    }
-
-    function initHistogramDragging() {
-      if (!histogramHandle || !histogramContainer || !previewSection) return;
-      if (histogramHandle.dataset.histDragReady === '1') return;
-      histogramHandle.dataset.histDragReady = '1';
-
-      histogramHandle.addEventListener('pointerdown', beginHistogramDrag, { passive: false });
-      histogramHandle.addEventListener('pointermove', moveHistogramDrag, { passive: false });
-      histogramHandle.addEventListener('pointerup', endHistogramDrag);
-      histogramHandle.addEventListener('pointercancel', endHistogramDrag);
     }
 
     // ===========================================
@@ -4995,9 +4826,97 @@
       if (state.dustRemoval.showMask && state.dustRemoval.mask) renderDustMaskOverlay();
     }
 
+    function renderFullWebGL() {
+      if (!webglState.gl || !state.processedImageData) return false;
+      // WebGL only usable for legacy tone path (non-SilverCore)
+      if (usesSilverCoreConversion(state)) return false;
+      if (state.dustRemoval.enabled && state.dustRemoval.showMask) return false;
+
+      const source = state.processedImageData;
+      const gl = webglState.gl;
+      const maxTex = webglState.maxTextureSize || 0;
+      if (maxTex && (source.width > maxTex || source.height > maxTex)) return false;
+
+      try {
+        // Save original canvas size
+        const origW = glCanvas.width;
+        const origH = glCanvas.height;
+
+        // Resize to full resolution
+        glCanvas.width = source.width;
+        glCanvas.height = source.height;
+        gl.viewport(0, 0, source.width, source.height);
+        gl.useProgram(webglState.program);
+
+        // Upload full-res source
+        webglUploadSource(source);
+        webglUploadCurves();
+        webglSetUniforms();
+
+        // Bind geometry
+        gl.bindBuffer(gl.ARRAY_BUFFER, webglState.quadBuffer);
+        gl.enableVertexAttribArray(webglState.locations.aPos);
+        gl.vertexAttribPointer(webglState.locations.aPos, 2, gl.FLOAT, false, 0, 0);
+
+        // Bind textures
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, webglState.sourceTex);
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_2D, webglState.curveTex);
+
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        gl.finish();
+
+        // Read back pixels
+        const pixels = new Uint8Array(source.width * source.height * 4);
+        gl.readPixels(0, 0, source.width, source.height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+
+        // WebGL readPixels returns Y-flipped data — flip it
+        const rowSize = source.width * 4;
+        const tempRow = new Uint8Array(rowSize);
+        for (let y = 0; y < (source.height >> 1); y++) {
+          const topOffset = y * rowSize;
+          const bottomOffset = (source.height - 1 - y) * rowSize;
+          tempRow.set(pixels.subarray(topOffset, topOffset + rowSize));
+          pixels.set(pixels.subarray(bottomOffset, bottomOffset + rowSize), topOffset);
+          pixels.set(tempRow, bottomOffset);
+        }
+
+        const imageData = new ImageData(new Uint8ClampedArray(pixels.buffer), source.width, source.height);
+
+        // Restore canvas size
+        glCanvas.width = origW;
+        glCanvas.height = origH;
+
+        // Mark source as dirty so next preview re-uploads the preview-sized texture
+        webglState.sourceDirty = true;
+
+        return imageData;
+      } catch (err) {
+        console.warn('WebGL full-res render failed, falling back to CPU:', err);
+        return false;
+      }
+    }
+
     function ensureFullRender() {
       if (!state.processedImageData) return;
-      // Always compute full-res on CPU for export/batch correctness.
+
+      // Try WebGL for 8-bit export (legacy tone path only)
+      if (!usesSilverCoreConversion(state) && webglState.gl && !webglState.disabledByError) {
+        const result = renderFullWebGL();
+        if (result && result instanceof ImageData) {
+          state.displayImageData = result;
+          ctx.putImageData(result, 0, 0);
+          renderHistogram(result);
+          transformCanvas.width = canvas.width;
+          transformCanvas.height = canvas.height;
+          transformCtx.putImageData(result, 0, 0);
+          state.lastRenderQuality = 'full';
+          return;
+        }
+      }
+
+      // Fallback to CPU
       updateFullCpu();
     }
 
@@ -5173,27 +5092,40 @@
         const sourceData = state.croppedImageData || state.originalImageData;
         if (!sourceData) return;
 
-        const correctedSourceData = await applyLensCorrectionWithSettings(sourceData, state, { updateUi: true });
-        invalidateSilverCoreCache();
-        state.conversionSourceImageData = correctedSourceData;
-        state.conversionPreviewImageData = buildPreviewSourceImageData(correctedSourceData);
-        const processed = await convertFromCurrentSource(state, { preview: false });
-        if (!processed) return;
-        applyProcessedImageToState(processed);
-        // Reset dust removal state for new conversion
-        state.dustRemoval._state = null;
-        state.dustRemoval.mask = null;
-        state.dustRemoval.inpaintedImageData = null;
-        state.dustRemoval.particleCount = 0;
-        state.dustRemoval.cleanSource = null;
-        goToStep(3);
-        syncBatchUIState({ reason: 'processNegative' });
-        revealBatchFileList('processNegative');
-        updatePreview();
-        scheduleFullUpdate();
-        // Auto-run dust detection if enabled
-        if (state.dustRemoval.enabled) {
-          scheduleDustDetection();
+        const overlay = getLoadingOverlay();
+        const lang = i18n[currentLang];
+        await overlay.show({ title: lang.loadingConverting });
+
+        try {
+          overlay.updateProgress(10, lang.loadingConverting);
+          const correctedSourceData = await applyLensCorrectionWithSettings(sourceData, state, { updateUi: true });
+          invalidateSilverCoreCache();
+          state.conversionSourceImageData = correctedSourceData;
+          state.conversionPreviewImageData = buildPreviewSourceImageData(correctedSourceData);
+          overlay.updateProgress(40, lang.loadingConverting);
+          const processed = await convertFromCurrentSource(state, { preview: false });
+          if (!processed) return;
+          overlay.updateProgress(85, lang.loadingProcessing);
+          applyProcessedImageToState(processed);
+          // Reset dust removal state for new conversion
+          state.dustRemoval._state = null;
+          state.dustRemoval.mask = null;
+          state.dustRemoval.inpaintedImageData = null;
+          state.dustRemoval.particleCount = 0;
+          state.dustRemoval.cleanSource = null;
+          goToStep(3);
+          syncBatchUIState({ reason: 'processNegative' });
+          revealBatchFileList('processNegative');
+          updatePreview();
+          scheduleFullUpdate();
+          overlay.updateProgress(100, lang.loadingComplete);
+          await new Promise(r => setTimeout(r, 250));
+          // Auto-run dust detection if enabled
+          if (state.dustRemoval.enabled) {
+            scheduleDustDetection();
+          }
+        } finally {
+          overlay.hide();
         }
       })();
 
@@ -5740,18 +5672,28 @@
       const fileName = file.name.toLowerCase();
       const isRawLikeFile = ['.cr2', '.nef', '.arw', '.dng', '.raw', '.rw2', '.tif', '.tiff'].some(ext => fileName.endsWith(ext));
 
+      const overlay = getLoadingOverlay();
+      const lang = i18n[currentLang];
+
       try {
+        if (isRawLikeFile) {
+          await overlay.show({ title: lang.loadingLoading });
+          overlay.updateProgress(10, lang.loadingLoading);
+        }
+
         const arrayBuffer = await file.arrayBuffer();
 
         let imageData;
         let extractedRawMeta = null;
 
         if (isRawLikeFile) {
+          overlay.updateProgress(30, lang.loadingProcessing);
           imageData = await loadRawFile(arrayBuffer, fileName, {
             onMetadata(meta) {
               extractedRawMeta = meta;
             }
           });
+          overlay.updateProgress(90, lang.loadingProcessing);
         } else if (file.type === 'image/png') {
           imageData = loadPngFile(arrayBuffer);
         } else {
@@ -5794,7 +5736,13 @@
           syncBatchUIState({ reason: 'loadFile' });
           updateAutoFrameButtons();
         }
+        if (isRawLikeFile) {
+          overlay.updateProgress(100, lang.loadingComplete);
+          await new Promise(r => setTimeout(r, 200));
+          overlay.hide();
+        }
       } catch (err) {
+        overlay.hide();
         console.error('Error loading file:', err);
         const text = String(err?.message || err || '');
         const isRawSupportIssue = isRawLikeFile && /module worker|worker|webassembly|wasm/i.test(text);
@@ -5930,7 +5878,6 @@
       document.getElementById('uploadPlaceholder').style.display = 'none';
       document.getElementById('previewToolbar').style.display = 'flex';
       document.getElementById('histogramContainer').style.display = 'block';
-      updateHistogramDragHintVisibility();
       document.getElementById('controlsPanel').style.display = 'flex';
       document.getElementById('appFooter').style.display = 'flex';
 
@@ -5941,8 +5888,7 @@
       document.getElementById('zoomOutBtn').title = lang.zoomOut || 'Zoom Out';
       document.getElementById('zoomResetBtn').title = lang.zoomReset || 'Reset Zoom';
 
-      initHistogramDragging();
-      restoreHistogramPositionOrDefault();
+      resizeHistogramCanvas();
       updateCanvasVisibility();
       adjustCanvasDisplay(canvas.width, canvas.height);
       updateAutoFrameConfigUI();
@@ -9326,12 +9272,12 @@
       return `${withConverted}${depthSuffix}${exportInfo.extension}`;
     }
 
-    function getCurrentExportImageData() {
+    async function getCurrentExportImageData() {
       if (state.displayImageData && state.currentStep >= 3) {
         return state.displayImageData;
       }
       if (state.processedImageData && state.currentStep >= 3) {
-        return applyAdjustmentsWithSettings(state.processedImageData, state);
+        return await applyAdjustmentsWithSettings(state.processedImageData, state);
       }
       if (canvas.width > 0 && canvas.height > 0) {
         return ctx.getImageData(0, 0, canvas.width, canvas.height);
@@ -9346,21 +9292,39 @@
     }
 
     async function exportSingle() {
+      const lang = i18n[currentLang];
+      const overlay = getLoadingOverlay();
       const exportInfo = getExportInfo();
       let fileName = buildExportFileName(null, exportInfo);
       let blob;
 
-      const currentItem = getCurrentQueueItem();
-      if (currentItem && state.currentStep >= 3 && state.processedImageData) {
-        persistCurrentFileSettings({ silent: true });
-        const adjusted = await processFileWithSettings(currentItem.file, currentItem.settings);
-        blob = await imageDataToBlob(adjusted, exportInfo.format, state.jpegQuality, exportInfo.bitDepth);
-        fileName = buildExportFileName(currentItem.file.name, exportInfo);
-      } else {
-        ensureFullRender();
-        const imageData = getCurrentExportImageData();
-        if (!imageData) throw new Error('No image available for export.');
-        blob = await imageDataToBlob(imageData, exportInfo.format, state.jpegQuality, exportInfo.bitDepth);
+      await overlay.show({ title: lang.loadingExporting });
+      try {
+        overlay.updateProgress(5, lang.loadingAdjusting);
+
+        const currentItem = getCurrentQueueItem();
+        if (currentItem && state.currentStep >= 3 && state.processedImageData) {
+          persistCurrentFileSettings({ silent: true });
+          const adjusted = await processFileWithSettings(currentItem.file, currentItem.settings);
+          overlay.updateProgress(60, lang.loadingEncoding);
+          blob = await imageDataToBlob(adjusted, exportInfo.format, state.jpegQuality, exportInfo.bitDepth, (pct) => {
+            overlay.updateProgress(60 + pct * 0.35, lang.loadingEncoding);
+          });
+          fileName = buildExportFileName(currentItem.file.name, exportInfo);
+        } else {
+          ensureFullRender();
+          overlay.updateProgress(50, lang.loadingEncoding);
+          const imageData = await getCurrentExportImageData();
+          if (!imageData) throw new Error('No image available for export.');
+          blob = await imageDataToBlob(imageData, exportInfo.format, state.jpegQuality, exportInfo.bitDepth, (pct) => {
+            overlay.updateProgress(50 + pct * 0.45, lang.loadingEncoding);
+          });
+        }
+
+        overlay.updateProgress(100, lang.loadingComplete);
+        await new Promise(r => setTimeout(r, 300));
+      } finally {
+        overlay.hide();
       }
 
       return await saveBlob(blob, fileName, exportInfo.mimeType);
@@ -9721,8 +9685,25 @@
       return item.settings || null;
     }
 
-    function applyAdjustmentsWithSettings(imageData, settings) {
-      const safeSettings = sanitizeSettings(settings, { fallbackSettings: state });
+    async function applyAdjustmentsWithSettings(imageData, settings) {
+      const safeSettings = sanitizeSettings(settings, {
+        fallbackSettings: state,
+        includeCurvePoints: false,
+        includeCurves: true
+      });
+
+      // Try Worker for large images (>1MP)
+      if (isWorkerAvailable() && imageData.width * imageData.height > 1_000_000) {
+        // Mirror the useLegacyTone logic from applyAdjustmentsToBuffer:
+        // SilverCore handles tone internally, so zero out legacy tone params.
+        const workerSettings = usesSilverCoreConversion(safeSettings)
+          ? { ...safeSettings, exposure: 0, contrast: 0, highlights: 0, shadows: 0, temperature: 0, tint: 0, saturation: 0 }
+          : safeSettings;
+        const result = await workerApplyAdjustments(imageData, workerSettings, 'full');
+        if (result) return result;
+      }
+
+      // Fallback to main thread
       const output = new ImageData(new Uint8ClampedArray(imageData.data.length), imageData.width, imageData.height);
       applyAdjustmentsToBuffer(imageData, safeSettings, output, 'full');
       return output;
@@ -9810,14 +9791,24 @@
       }
     }
 
-    async function imageDataToBlob(imageData, format = null, quality = null, bitDepth = null) {
+    async function imageDataToBlob(imageData, format = null, quality = null, bitDepth = null, onProgress = null) {
       const exportInfo = getExportInfo(format || state.exportFormat, bitDepth ?? state.exportBitDepth);
       const jpegQuality = quality !== null ? quality : state.jpegQuality;
 
       if (exportInfo.format === 'tiff') {
+        // Try Worker first for TIFF encoding
+        if (isWorkerAvailable()) {
+          const workerBlob = await workerEncodeTiff(imageData, exportInfo.bitDepth, onProgress);
+          if (workerBlob) return workerBlob;
+        }
         return encodeTiffBlob(imageData, exportInfo.bitDepth);
       }
       if (exportInfo.format === 'png' && exportInfo.bitDepth === 16) {
+        // Try Worker first for 16-bit PNG encoding
+        if (isWorkerAvailable()) {
+          const workerBlob = await workerEncodePng16(imageData, onProgress);
+          if (workerBlob) return workerBlob;
+        }
         return encodePng16Blob(imageData);
       }
 
@@ -9988,19 +9979,25 @@
       const zip = new JSZipCtor();
       const exportInfo = getExportInfo();
       let processedCount = 0;
+      const lang = i18n[currentLang];
+      const overlay = getLoadingOverlay();
+      const total = selectedFiles.length;
 
-      showBatchProgress(true);
+      await overlay.show({ title: lang.loadingExporting });
 
       try {
         for (const { item, index } of selectedFiles) {
           item.status = 'processing';
           updateFileListUI();
           processedCount++;
-          updateBatchProgress(processedCount, selectedFiles.length, item.file.name);
+          const fileProgress = ((processedCount - 1) / total) * 90;
+          const fileSlice = 90 / total;
+          overlay.updateProgress(fileProgress, lang.loadingBatchFile.replace('{current}', processedCount).replace('{total}', total));
 
           try {
             const settingsForFile = getSettingsForExport(index, item);
             const adjusted = await processFileWithSettings(item.file, settingsForFile);
+            overlay.updateProgress(fileProgress + fileSlice * 0.6, lang.loadingEncoding);
             const blob = await imageDataToBlob(
               adjusted,
               exportInfo.format,
@@ -10017,11 +10014,12 @@
             item.error = err.message;
           }
 
+          overlay.updateProgress(fileProgress + fileSlice, lang.loadingBatchFile.replace('{current}', processedCount).replace('{total}', total));
           updateFileListUI();
           await new Promise(r => setTimeout(r, 10));
         }
 
-        updateBatchProgress(selectedFiles.length, selectedFiles.length, 'Creating ZIP...');
+        overlay.updateProgress(92, lang.loadingBatchZip);
         const zipBlob = await zip.generateAsync({
           type: 'blob',
           compression: 'DEFLATE',
@@ -10038,7 +10036,7 @@
           browserSuccessFallback: 'ZIP download started. Check your Downloads folder.'
         });
       } finally {
-        showBatchProgress(false);
+        overlay.hide();
       }
     }
 
@@ -10050,19 +10048,25 @@
       const exportInfo = getExportInfo();
       let processedCount = 0;
       let cancelledByUser = false;
+      const lang = i18n[currentLang];
+      const overlay = getLoadingOverlay();
+      const total = selectedFiles.length;
 
-      showBatchProgress(true);
+      await overlay.show({ title: lang.loadingExporting });
 
       try {
         for (const { item, index } of selectedFiles) {
           item.status = 'processing';
           updateFileListUI();
           processedCount++;
-          updateBatchProgress(processedCount, selectedFiles.length, item.file.name);
+          const fileProgress = ((processedCount - 1) / total) * 100;
+          const fileSlice = 100 / total;
+          overlay.updateProgress(fileProgress, lang.loadingBatchFile.replace('{current}', processedCount).replace('{total}', total));
 
           try {
             const settingsForFile = getSettingsForExport(index, item);
             const adjusted = await processFileWithSettings(item.file, settingsForFile);
+            overlay.updateProgress(fileProgress + fileSlice * 0.6, lang.loadingEncoding);
             const blob = await imageDataToBlob(
               adjusted,
               exportInfo.format,
@@ -10071,6 +10075,7 @@
             );
 
             const name = buildExportFileName(item.file.name, exportInfo);
+            overlay.hide(); // Hide overlay before save dialog
             const result = await saveBlob(blob, name, exportInfo.mimeType);
             if (!result.saved) {
               cancelledByUser = true;
@@ -10078,6 +10083,10 @@
               item.error = null;
               updateFileListUI();
               break;
+            }
+            // Re-show overlay for next file
+            if (processedCount < total) {
+              await overlay.show({ title: lang.loadingExporting });
             }
 
             item.status = 'done';
@@ -10087,7 +10096,7 @@
           }
 
           updateFileListUI();
-          await new Promise(r => setTimeout(r, 200));
+          await new Promise(r => setTimeout(r, 100));
         }
         if (cancelledByUser) {
           console.info('Batch individual export cancelled by user.');
@@ -10100,7 +10109,7 @@
           );
         }
       } finally {
-        showBatchProgress(false);
+        overlay.hide();
       }
     }
 
@@ -10727,5 +10736,5 @@
       if (canvas.width > 0 && canvas.height > 0) {
         adjustCanvasDisplay(canvas.width, canvas.height);
       }
-      reclampHistogramPosition();
+      resizeHistogramCanvas();
     });
