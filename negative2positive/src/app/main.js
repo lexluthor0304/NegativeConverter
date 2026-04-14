@@ -9114,22 +9114,51 @@
       });
     }
 
-    async function saveBlob(blob, fileName, mimeType = 'application/octet-stream') {
+    function normalizeExportBlob(blob, mimeType = 'application/octet-stream') {
       if (!(blob instanceof Blob)) {
         throw new Error('Export payload is not a Blob.');
       }
+      return blob.type ? blob : new Blob([blob], { type: mimeType });
+    }
 
-      const normalizedBlob = blob.type ? blob : new Blob([blob], { type: mimeType });
+    function normalizeSaveResult(result) {
+      return {
+        saved: Boolean(result && result.saved),
+        path: result && result.path ? result.path : null
+      };
+    }
+
+    async function pickDesktopSavePath(fileName) {
+      if (!isTauriDesktop()) return null;
+      const path = await window.__TAURI__.core.invoke('pick_export_file_path', {
+        suggestedName: fileName
+      });
+      return typeof path === 'string' && path ? path : null;
+    }
+
+    async function writeBlobToDesktopPath(blob, targetPath, mimeType = 'application/octet-stream') {
+      if (!isTauriDesktop()) {
+        throw new Error('Desktop path writes require the Tauri runtime.');
+      }
+
+      const normalizedBlob = normalizeExportBlob(blob, mimeType);
+      const bytesBase64 = await blobToBase64(normalizedBlob);
+      const result = await window.__TAURI__.core.invoke('write_export_file_to_path', {
+        path: targetPath,
+        bytesBase64
+      });
+      return normalizeSaveResult(result);
+    }
+
+    async function saveBlob(blob, fileName, mimeType = 'application/octet-stream') {
+      const normalizedBlob = normalizeExportBlob(blob, mimeType);
       if (isTauriDesktop()) {
         const bytesBase64 = await blobToBase64(normalizedBlob);
         const result = await window.__TAURI__.core.invoke('save_export_file', {
           suggestedName: fileName,
           bytesBase64
         });
-        return {
-          saved: Boolean(result && result.saved),
-          path: result && result.path ? result.path : null
-        };
+        return normalizeSaveResult(result);
       }
 
       downloadBlobInBrowser(normalizedBlob, fileName);
@@ -9985,6 +10014,22 @@
       if (typeof JSZipCtor !== 'function') {
         throw new Error('JSZip module is unavailable');
       }
+
+      const zipFileName = 'converted_negatives.zip';
+      let desktopZipTargetPath = null;
+      if (isTauriDesktop()) {
+        // Pick the destination before the long-running batch starts so macOS can
+        // surface the save panel immediately instead of after processing finishes.
+        desktopZipTargetPath = await pickDesktopSavePath(zipFileName);
+        if (!desktopZipTargetPath) {
+          handleSaveResult({ saved: false, path: null }, {
+            cancelledKey: 'zipSaveCancelled',
+            cancelledFallback: 'ZIP save cancelled. No file was written.'
+          });
+          return;
+        }
+      }
+
       const zip = new JSZipCtor();
       const exportInfo = getExportInfo();
       let processedCount = 0;
@@ -10028,7 +10073,9 @@
           compressionOptions: { level: 6 }
         });
 
-        const result = await saveBlob(zipBlob, 'converted_negatives.zip', 'application/zip');
+        const result = desktopZipTargetPath
+          ? await writeBlobToDesktopPath(zipBlob, desktopZipTargetPath, 'application/zip')
+          : await saveBlob(zipBlob, zipFileName, 'application/zip');
         handleSaveResult(result, {
           cancelledKey: 'zipSaveCancelled',
           cancelledFallback: 'ZIP save cancelled. No file was written.',
