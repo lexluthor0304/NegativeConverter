@@ -49,6 +49,42 @@ fn write_export_bytes(path: &PathBuf, bytes_base64: &str) -> Result<SaveResult, 
     })
 }
 
+fn build_unique_export_path(directory: &PathBuf, suggested_name: &str) -> PathBuf {
+    let base_name = if suggested_name.trim().is_empty() {
+        "converted_negative"
+    } else {
+        suggested_name.trim()
+    };
+    let base_path = normalize_export_path(directory.join(base_name), base_name);
+    if !base_path.exists() {
+        return base_path;
+    }
+
+    let stem = base_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("converted_negative");
+    let extension = base_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.to_string());
+
+    for index in 1.. {
+        let candidate_name = match &extension {
+            Some(ext) => format!("{stem}_{index}.{ext}"),
+            None => format!("{stem}_{index}"),
+        };
+        let candidate = directory.join(candidate_name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    base_path
+}
+
 #[tauri::command]
 fn pick_export_file_path(suggested_name: String) -> Option<String> {
     let path = rfd::FileDialog::new()
@@ -56,6 +92,12 @@ fn pick_export_file_path(suggested_name: String) -> Option<String> {
         .save_file()?;
     let normalized = normalize_export_path(path, &suggested_name);
     Some(normalized.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn pick_export_directory() -> Option<String> {
+    let path = rfd::FileDialog::new().pick_folder()?;
+    Some(path.to_string_lossy().to_string())
 }
 
 #[tauri::command]
@@ -82,6 +124,26 @@ fn write_export_file_to_path(path: String, bytes_base64: String) -> Result<SaveR
     }
 
     write_export_bytes(&PathBuf::from(trimmed), &bytes_base64)
+}
+
+#[tauri::command]
+fn write_export_file_to_directory(
+    directory: String,
+    suggested_name: String,
+    bytes_base64: String,
+) -> Result<SaveResult, String> {
+    let trimmed = directory.trim();
+    if trimmed.is_empty() {
+        return Err("export directory is empty".to_string());
+    }
+
+    let directory_path = PathBuf::from(trimmed);
+    if !directory_path.is_dir() {
+        return Err(format!("export directory is invalid: {trimmed}"));
+    }
+
+    let target_path = build_unique_export_path(&directory_path, &suggested_name);
+    write_export_bytes(&target_path, &bytes_base64)
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -485,7 +547,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             save_export_file,
             pick_export_file_path,
+            pick_export_directory,
             write_export_file_to_path,
+            write_export_file_to_directory,
             get_app_version,
             open_external_url
         ])
