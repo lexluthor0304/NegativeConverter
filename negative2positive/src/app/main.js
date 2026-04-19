@@ -112,9 +112,11 @@
         noviceGuideChecklistStep2PositiveConvert: "点击“下一步：转换并进入调整”进入第3步。",
         noviceGuideChecklistStep3SampleGray: "颜色偏差时先“采样灰点”，再微调参数。",
         noviceGuideChecklistStep3Export: "完成后从底部导出（单张或 ZIP）。",
+        noviceGuideChecklistStep3ExportDesktop: "完成后从底部导出（单张或逐张批量导出）。",
         noviceGuideChecklistStep3BatchSave: "调好当前图后点“保存设置”。",
         noviceGuideChecklistStep3BatchApply: "需要整卷统一参数时点“应用到已选中”。",
         noviceGuideChecklistStep3BatchExport: "最后执行“批量导出 (ZIP)”或“逐个下载全部”。",
+        noviceGuideChecklistStep3BatchExportDesktop: "最后执行“逐张导出全部”。",
         noviceGuideStatusAutoToStep3: "完成采样/自动检测后会自动进入第3步（无需再点下一步）。",
         noviceGuideStatusAutoToStep3Ready: "色罩已就绪，系统将自动进入第3步；你也可手动点“下一步：转换并进入调整”。",
         noviceGuideStatusManualConvert: "此模式不会自动跳转，请手动点击转换按钮进入第3步。",
@@ -158,6 +160,18 @@
         whiteBalance: "白平衡",
         wbInfo: "点击图像中应为中性灰的区域，或手动调整",
         sampleWB: "采样灰点",
+        grayPointHeaderSampling: "点击画面灰点…",
+        grayPointHeaderResample: "重新采样灰点",
+        grayPointGuideTitle: "找到画面里的中性灰点",
+        grayPointGuideBody: "去完色罩后，先在画面里找一块本来应该是中性灰的区域取样，通常能更快得到准确白平衡。",
+        grayPointGuideHint: "主入口已经放到顶部。开始采样后，直接在图片上点击灰点即可。",
+        grayPointGuideActiveTitle: "正在等待灰点取样",
+        grayPointGuideActiveBody: "请直接点击画面里应为中性灰的位置。建议避开高光反射、彩色物体和明显偏色区域。",
+        grayPointGuideActiveHint: "如果点错了，按 Esc 退出后重新取样。",
+        frontierGuidePopupTitle: "已切到更艳丽的 Frontier 组合",
+        frontierGuidePopupBody: "为了让颜色更鲜艳，这张图在进入第 3 步前已自动套用 Color Model = Frontier 和 Film Preset = Frontier Lab。",
+        frontierGuidePopupNote: "如果你想换别的风格，仍可回到第 2 步手动修改。接下来建议在顶部使用“采样灰点”微调最佳白平衡。",
+        frontierGuidePopupClose: "继续调整",
         sectionColorModel: "色彩模型",
         coreColorModelLabel: "色彩模型",
         coreEnhancedProfile: "增强配置",
@@ -293,6 +307,7 @@
         exportCurrent: "导出当前图片 (PNG)",
         exportZip: "批量导出 (ZIP)",
         exportIndividual: "逐个下载全部",
+        exportIndividualDesktop: "逐张导出全部",
         pending: "等待处理",
         processingStatus: "处理中",
         done: "已完成",
@@ -315,6 +330,10 @@
         zipSaveCancelled: "已取消 ZIP 保存，未写出文件。",
         zipDownloadStarted: "ZIP 下载已开始，请检查浏览器下载目录。",
         batchDownloadCancelled: "已取消后续导出。已经保存的文件会保留。",
+        desktopBatchExportProgress: "导出中 {current} / {total}",
+        desktopBatchExportFolderCancelled: "已取消选择导出文件夹。",
+        desktopBatchExportSummary: "已导出 {success} / {total} 张到 {folder}。",
+        desktopBatchExportSummaryErrors: "已导出 {success} / {total} 张，失败 {failed} 张。目标：{folder}。",
         lensSectionTitle: "镜头矫正（可选）",
         lensEnable: "启用镜头矫正",
         lensSkipBtn: "跳过镜头矫正",
@@ -431,9 +450,11 @@
         noviceGuideChecklistStep2PositiveConvert: "Click “Next: Convert and Continue” to enter Step 3.",
         noviceGuideChecklistStep3SampleGray: "If color is off, sample a gray point first, then fine-tune.",
         noviceGuideChecklistStep3Export: "Export from the footer when ready (single image or ZIP).",
+        noviceGuideChecklistStep3ExportDesktop: "Export from the footer when ready (single image or individual batch export).",
         noviceGuideChecklistStep3BatchSave: "After tuning current image, click “Save Settings”.",
         noviceGuideChecklistStep3BatchApply: "Use “Apply to Selected” for roll-wide consistency.",
         noviceGuideChecklistStep3BatchExport: "Finish with “Export All (ZIP)” or “Download All Individually”.",
+        noviceGuideChecklistStep3BatchExportDesktop: "Finish with “Export All Individually”.",
         noviceGuideStatusAutoToStep3: "After sampling or auto-detect, conversion proceeds to Step 3 automatically.",
         noviceGuideStatusAutoToStep3Ready: "Mask baseline is ready. The app will enter Step 3 automatically; manual convert is still available.",
         noviceGuideStatusManualConvert: "This mode does not auto-jump. Click the convert button to enter Step 3.",
@@ -477,6 +498,18 @@
         whiteBalance: "White Balance",
         wbInfo: "Click on a neutral gray area in the image, or adjust manually",
         sampleWB: "Sample Gray Point",
+        grayPointHeaderSampling: "Click gray point…",
+        grayPointHeaderResample: "Resample Gray Point",
+        grayPointGuideTitle: "Find a neutral gray point in the frame",
+        grayPointGuideBody: "After the mask is removed, sample an area that should be neutral gray. This is usually the fastest way to dial in white balance.",
+        grayPointGuideHint: "The main control is now in the header. Once sampling starts, click the gray area directly on the image.",
+        grayPointGuideActiveTitle: "Waiting for a gray-point sample",
+        grayPointGuideActiveBody: "Click a part of the image that should be neutral gray. Avoid specular highlights, colored objects, and obviously tinted areas.",
+        grayPointGuideActiveHint: "If you miss, press Esc and sample again.",
+        frontierGuidePopupTitle: "Frontier look was enabled for stronger color",
+        frontierGuidePopupBody: "Before entering Step 3, this image was automatically switched to Color Model = Frontier and Film Preset = Frontier Lab for a more vivid result.",
+        frontierGuidePopupNote: "You can still go back to Step 2 and change both options manually. Next, use the header gray-point sampler to fine-tune white balance.",
+        frontierGuidePopupClose: "Continue",
         sectionColorModel: "Color Model",
         coreColorModelLabel: "Color Model",
         coreEnhancedProfile: "Enhanced Profile",
@@ -612,6 +645,7 @@
         exportCurrent: "Export Current (PNG)",
         exportZip: "Export All (ZIP)",
         exportIndividual: "Download All Individually",
+        exportIndividualDesktop: "Export All Individually",
         pending: "Pending",
         processingStatus: "Processing",
         done: "Done",
@@ -634,6 +668,10 @@
         zipSaveCancelled: "ZIP save cancelled. No file was written.",
         zipDownloadStarted: "ZIP download started. Check your Downloads folder.",
         batchDownloadCancelled: "Batch export cancelled. Files already saved were kept.",
+        desktopBatchExportProgress: "Exporting {current} / {total}",
+        desktopBatchExportFolderCancelled: "Folder selection cancelled. No files were exported.",
+        desktopBatchExportSummary: "Exported {success} / {total} files to {folder}.",
+        desktopBatchExportSummaryErrors: "Exported {success} / {total} files, {failed} failed. Target: {folder}.",
         lensSectionTitle: "Lens Correction (Optional)",
         lensEnable: "Enable Lens Correction",
         lensSkipBtn: "Skip Lens Correction",
@@ -750,9 +788,11 @@
         noviceGuideChecklistStep2PositiveConvert: "「次へ：変換して調整へ」を押してステップ3へ進みます。",
         noviceGuideChecklistStep3SampleGray: "色がずれる場合は先にグレーポイントをサンプリングします。",
         noviceGuideChecklistStep3Export: "調整後、フッターから書き出します（単体または ZIP）。",
+        noviceGuideChecklistStep3ExportDesktop: "調整後、フッターから書き出します（単体または個別一括書き出し）。",
         noviceGuideChecklistStep3BatchSave: "現在画像の調整後に「設定を保存」を押します。",
         noviceGuideChecklistStep3BatchApply: "ロール全体に揃える場合は「選択中に適用」を使います。",
         noviceGuideChecklistStep3BatchExport: "最後に「一括出力 (ZIP)」または個別ダウンロードを実行します。",
+        noviceGuideChecklistStep3BatchExportDesktop: "最後に「すべて個別に書き出し」を実行します。",
         noviceGuideStatusAutoToStep3: "サンプリングまたは自動検出が完了すると、自動でステップ3へ進みます。",
         noviceGuideStatusAutoToStep3Ready: "マスク基準が準備できました。自動でステップ3へ進みます（手動変換も可能です）。",
         noviceGuideStatusManualConvert: "このモードは自動遷移しません。変換ボタンを押してステップ3へ進んでください。",
@@ -796,6 +836,18 @@
         whiteBalance: "ホワイトバランス",
         wbInfo: "画像内のニュートラルグレー部分をクリック、または手動調整",
         sampleWB: "グレーポイントを取得",
+        grayPointHeaderSampling: "グレーポイントをクリック…",
+        grayPointHeaderResample: "グレーポイントを再取得",
+        grayPointGuideTitle: "画面内の中性グレーを見つける",
+        grayPointGuideBody: "マスク除去後は、本来ニュートラルグレーになる部分を先にサンプルすると、最適なホワイトバランスに合わせやすくなります。",
+        grayPointGuideHint: "メイン操作はヘッダーに移動しました。サンプリング開始後は画像上のグレーポイントを直接クリックしてください。",
+        grayPointGuideActiveTitle: "グレーポイントのサンプリング待機中",
+        grayPointGuideActiveBody: "本来ニュートラルグレーになる部分をクリックしてください。強い反射や色付きの被写体、明らかな色かぶりの場所は避けてください。",
+        grayPointGuideActiveHint: "外した場合は Esc で終了して再サンプルできます。",
+        frontierGuidePopupTitle: "より鮮やかな Frontier 設定を適用しました",
+        frontierGuidePopupBody: "より鮮やかな色にするため、この画像は Step 3 に入る前に Color Model = Frontier と Film Preset = Frontier Lab を自動適用しています。",
+        frontierGuidePopupNote: "別の雰囲気にしたい場合は Step 2 に戻って手動で変更できます。次はヘッダーのグレーポイントサンプラーでホワイトバランスを整えてください。",
+        frontierGuidePopupClose: "調整を続ける",
         sectionColorModel: "カラーモデル",
         coreColorModelLabel: "カラーモデル",
         coreEnhancedProfile: "拡張プロファイル",
@@ -931,6 +983,7 @@
         exportCurrent: "現在の画像を出力 (PNG)",
         exportZip: "一括出力 (ZIP)",
         exportIndividual: "すべて個別にダウンロード",
+        exportIndividualDesktop: "すべて個別に書き出し",
         pending: "待機中",
         processingStatus: "処理中",
         done: "完了",
@@ -953,6 +1006,10 @@
         zipSaveCancelled: "ZIP の保存をキャンセルしました。ファイルは書き出されていません。",
         zipDownloadStarted: "ZIP のダウンロードを開始しました。ダウンロードフォルダを確認してください。",
         batchDownloadCancelled: "以降の書き出しをキャンセルしました。保存済みのファイルは保持されます。",
+        desktopBatchExportProgress: "書き出し中 {current} / {total}",
+        desktopBatchExportFolderCancelled: "出力フォルダの選択をキャンセルしました。",
+        desktopBatchExportSummary: "{total}枚中{success}枚を書き出しました。保存先: {folder}",
+        desktopBatchExportSummaryErrors: "{total}枚中{success}枚を書き出し、{failed}枚は失敗しました。保存先: {folder}",
         lensSectionTitle: "レンズ補正（任意）",
         lensEnable: "レンズ補正を有効化",
         lensSkipBtn: "レンズ補正をスキップ",
@@ -1033,6 +1090,7 @@
     let opencvReadyPromise = null;
     let opencvActiveSource = null;
     const STEP3_GUIDE_COLLAPSED_SESSION_KEY = 'nc_step3_guide_collapsed_v1';
+    const FRONTIER_GUIDE_POPUP_SESSION_KEY = 'nc_frontier_guide_popup_shown_v1';
     const PRIVACY_BANNER_COLLAPSED_STORAGE_KEY = 'nc_privacy_banner_collapsed_v1';
     const GUIDE_MODE_STORAGE_KEY = 'nc_guide_mode_enabled_v1';
     const DESKTOP_UPDATE_LAST_CHECK_TS_KEY = 'nc_desktop_update_last_check_ts';
@@ -1059,6 +1117,17 @@
     let guideModeEnabled = true;
     let stateReady = false;
     let step3GuideCollapsedOnce = false;
+    let frontierGuidePopupShownThisSession = false;
+    let frontierGuidePopupPending = false;
+    let filmPresetsPromise = null;
+    const desktopBatchExportState = {
+      active: false,
+      current: 0,
+      total: 0,
+      percent: 0,
+      fileName: '',
+      targetDirectory: ''
+    };
     const desktopUpdateState = {
       visible: false,
       currentVersion: '',
@@ -1108,8 +1177,10 @@
         updateAutoFrameDiagnosticsUI();
         updateAutoFrameButtons();
         renderNoviceGuide({ applyStep3Collapse: false });
+        updateGrayPointGuideUI();
         if (typeof updateLensCorrectionUI === 'function') updateLensCorrectionUI();
         if (typeof updateExportUI === 'function') updateExportUI();
+        updateDesktopBatchExportUI();
       }
     }
 
@@ -1147,6 +1218,22 @@
 	      }
 	    }
 
+    function safeSessionStorageGet(key) {
+      try {
+        return sessionStorage.getItem(key);
+      } catch (err) {
+        return null;
+      }
+    }
+
+    function safeSessionStorageSet(key, value) {
+      try {
+        sessionStorage.setItem(key, value);
+      } catch (err) {
+        // ignore
+      }
+    }
+
     function clearRecommendedActions() {
       [
         'autoFrameBtn',
@@ -1158,6 +1245,7 @@
         'useReferenceBtn',
         'applyConvertBtn',
         'sampleWBBtn',
+        'headerGrayPointBtn',
         'saveSettingsBtn',
         'applyToSelectedBtn',
         'exportBtn'
@@ -1195,11 +1283,7 @@
         setSectionCollapsed(section, true);
       });
       step3GuideCollapsedOnce = true;
-      try {
-        sessionStorage.setItem(STEP3_GUIDE_COLLAPSED_SESSION_KEY, '1');
-      } catch (err) {
-        // ignore
-      }
+      safeSessionStorageSet(STEP3_GUIDE_COLLAPSED_SESSION_KEY, '1');
     }
 
     function updateGuideModeUI() {
@@ -1222,6 +1306,201 @@
       }
     }
 
+    function loadFilmPresets() {
+      if (!filmPresetsPromise) {
+        filmPresetsPromise = import('../silvercore/engine/FilmPresets.js')
+          .then(({ filmPresets }) => filmPresets || {});
+      }
+      return filmPresetsPromise;
+    }
+
+    function isGrayPointGuideAvailable() {
+      if (!stateReady) return false;
+      return state.currentStep >= 3
+        && usesSilverCoreConversion(state)
+        && sanitizePresetType(state.filmType || 'color') === 'color';
+    }
+
+    function setFrontierGuidePopupVisible(visible) {
+      const overlay = document.getElementById('frontierGuidePopupOverlay');
+      if (!overlay) return;
+      overlay.classList.toggle('visible', Boolean(visible));
+      overlay.setAttribute('aria-hidden', visible ? 'false' : 'true');
+    }
+
+    function closeFrontierGuidePopup() {
+      setFrontierGuidePopupVisible(false);
+    }
+
+    function maybeShowFrontierGuidePopup() {
+      if (!frontierGuidePopupPending) return;
+      frontierGuidePopupPending = false;
+      if (frontierGuidePopupShownThisSession) return;
+      frontierGuidePopupShownThisSession = true;
+      safeSessionStorageSet(FRONTIER_GUIDE_POPUP_SESSION_KEY, '1');
+      setFrontierGuidePopupVisible(true);
+    }
+
+    async function applyFilmPresetSettingsToState(presetId) {
+      const nextPresetId = String(presetId || 'none');
+      state.coreFilmPreset = nextPresetId;
+      if (nextPresetId === 'none') {
+        syncAllSelectsFromState();
+        return false;
+      }
+
+      const filmPresets = await loadFilmPresets();
+      const preset = filmPresets[nextPresetId];
+      if (!preset || !preset.settings) {
+        syncAllSelectsFromState();
+        return false;
+      }
+
+      const s = preset.settings;
+      if (s.enhancedProfile) {
+        state.coreEnhancedProfile = s.enhancedProfile;
+      }
+      if (s.saturation !== undefined) {
+        state.coreSaturation = s.saturation;
+      }
+      if (s.glow !== undefined) {
+        state.coreGlow = s.glow;
+      }
+      if (s.fade !== undefined) {
+        state.coreFade = s.fade;
+      }
+      if (s.shadows !== undefined) {
+        state.coreShadows = s.shadows;
+      }
+      if (s.highlights !== undefined) {
+        state.coreHighlights = s.highlights;
+      }
+      if (s.blacks !== undefined) {
+        state.coreBlacks = s.blacks;
+      }
+      if (s.whites !== undefined) {
+        state.coreWhites = s.whites;
+      }
+
+      syncAllSelectsFromState();
+      [
+        'coreSaturation',
+        'coreGlow',
+        'coreFade',
+        'coreShadows',
+        'coreHighlights',
+        'coreBlacks',
+        'coreWhites'
+      ].forEach(syncSliderFromState);
+      return true;
+    }
+
+    function updateGrayPointGuideUI() {
+      if (!stateReady) return;
+
+      const show = isGrayPointGuideAvailable();
+      const isActive = state.samplingMode === 'whiteBalance';
+      const headerBtn = document.getElementById('headerGrayPointBtn');
+      const sampleBtn = document.getElementById('sampleWBBtn');
+      const guideSection = document.getElementById('grayPointGuideSection');
+      const guideCard = document.getElementById('grayPointGuideCard');
+      const guideTitle = document.getElementById('grayPointGuideTitle');
+      const guideBody = document.getElementById('grayPointGuideBody');
+      const guideHint = document.getElementById('grayPointGuideHint');
+
+      if (headerBtn) {
+        headerBtn.style.display = show ? 'inline-flex' : 'none';
+        headerBtn.disabled = !state.processedImageData;
+        headerBtn.classList.toggle('active', isActive);
+        headerBtn.classList.toggle('done', !isActive && Boolean(state.grayPointSampled));
+        const labelKey = isActive
+          ? 'grayPointHeaderSampling'
+          : (state.grayPointSampled ? 'grayPointHeaderResample' : 'sampleWB');
+        headerBtn.textContent = getLocalizedText(labelKey, getLocalizedText('sampleWB', 'Sample Gray Point'));
+      }
+
+      if (sampleBtn) {
+        sampleBtn.style.display = show ? 'none' : 'inline-flex';
+        sampleBtn.classList.toggle('active', isActive);
+      }
+
+      if (guideSection) {
+        guideSection.style.display = show ? 'block' : 'none';
+      }
+      if (!show) return;
+
+      if (guideCard) {
+        guideCard.classList.toggle('is-active', isActive);
+      }
+      if (guideTitle) {
+        guideTitle.textContent = getLocalizedText(
+          isActive ? 'grayPointGuideActiveTitle' : 'grayPointGuideTitle',
+          'Find a neutral gray point'
+        );
+      }
+      if (guideBody) {
+        guideBody.textContent = getLocalizedText(
+          isActive ? 'grayPointGuideActiveBody' : 'grayPointGuideBody',
+          'Sample a neutral gray area to refine white balance.'
+        );
+      }
+      if (guideHint) {
+        guideHint.textContent = getLocalizedText(
+          isActive ? 'grayPointGuideActiveHint' : 'grayPointGuideHint',
+          'Click the image directly after starting gray-point sampling.'
+        );
+      }
+    }
+
+    function updateSamplingModeUI() {
+      if (!stateReady) return;
+      const sampleBaseBtn = document.getElementById('sampleBaseBtn');
+      if (sampleBaseBtn) {
+        sampleBaseBtn.classList.toggle('active', state.samplingMode === 'filmBase');
+      }
+
+      const cursor = state.samplingMode ? 'crosshair' : '';
+      const canvasEl = document.getElementById('canvas');
+      const glCanvasEl = document.getElementById('glCanvas');
+      if (canvasEl) canvasEl.style.cursor = cursor;
+      if (glCanvasEl) glCanvasEl.style.cursor = cursor;
+      if (!state.samplingMode) {
+        hideLoupe();
+      }
+      updateGrayPointGuideUI();
+    }
+
+    function resetFrontierGuideImageState() {
+      state.frontierGuideAutoAppliedForImage = false;
+      state.frontierGuideStep2ChoiceTouched = false;
+      frontierGuidePopupPending = false;
+    }
+
+    function startWhiteBalanceSampling() {
+      if (!state.processedImageData) return;
+      exitBeforeAfter();
+      state.samplingMode = 'whiteBalance';
+      updateSamplingModeUI();
+      updateBeforeAfterButtonState();
+    }
+
+    async function maybeApplyFrontierGuideDefaults() {
+      if (!stateReady) return false;
+      if (state.currentStep >= 3) return false;
+      if (!usesSilverCoreConversion(state)) return false;
+      if (sanitizePresetType(state.filmType || 'color') !== 'color') return false;
+      if (state.frontierGuideAutoAppliedForImage) return false;
+      if (state.frontierGuideStep2ChoiceTouched) return false;
+      if (state.coreColorModel !== 'standard' || state.coreFilmPreset !== 'none') return false;
+
+      state.coreColorModel = 'frontier';
+      await applyFilmPresetSettingsToState('frontier-lab');
+      state.frontierGuideAutoAppliedForImage = true;
+      markCurrentFileDirty();
+      frontierGuidePopupPending = !frontierGuidePopupShownThisSession;
+      return true;
+    }
+
     function setGuideModeEnabled(enabled, options = {}) {
       const { persist = true } = options;
       guideModeEnabled = Boolean(enabled);
@@ -1230,11 +1509,8 @@
     }
 
     guideModeEnabled = safeStorageGet(GUIDE_MODE_STORAGE_KEY) !== '0';
-    try {
-      step3GuideCollapsedOnce = sessionStorage.getItem(STEP3_GUIDE_COLLAPSED_SESSION_KEY) === '1';
-    } catch (err) {
-      step3GuideCollapsedOnce = false;
-    }
+    step3GuideCollapsedOnce = safeSessionStorageGet(STEP3_GUIDE_COLLAPSED_SESSION_KEY) === '1';
+    frontierGuidePopupShownThisSession = safeSessionStorageGet(FRONTIER_GUIDE_POPUP_SESSION_KEY) === '1';
     const guideToggleBtn = document.getElementById('guideToggleBtn');
     if (guideToggleBtn) {
       guideToggleBtn.addEventListener('click', (e) => {
@@ -1243,6 +1519,20 @@
       });
     }
     updateGuideModeUI();
+
+    document.getElementById('headerGrayPointBtn')?.addEventListener('click', () => {
+      startWhiteBalanceSampling();
+    });
+
+    document.getElementById('frontierGuidePopupCloseBtn')?.addEventListener('click', () => {
+      closeFrontierGuidePopup();
+    });
+
+    document.getElementById('frontierGuidePopupOverlay')?.addEventListener('click', (event) => {
+      if (event.target === event.currentTarget) {
+        closeFrontierGuidePopup();
+      }
+    });
 
 	    function applyTemplate(template, vars = {}) {
 	      let output = String(template || '');
@@ -2210,7 +2500,10 @@
       filmType: 'color',
       filmBase: { r: 210, g: 140, b: 90 },
       filmBaseSet: false,
+      grayPointSampled: false,
       step2Mode: 'border', // 'border' | 'noBorder'
+      frontierGuideAutoAppliedForImage: false,
+      frontierGuideStep2ChoiceTouched: false,
       lensCorrection: createInitialLensCorrectionState(),
       rawMetadata: null,
 
@@ -2347,6 +2640,7 @@
     };
     stateReady = true;
     updateGuideModeUI();
+    updateGrayPointGuideUI();
 
     // ===========================================
     // Toast Notification System
@@ -2375,6 +2669,112 @@
 
     function getInterpolatedText(key, replacements = {}, fallback = '') {
       return interpolateText(getLocalizedText(key, fallback), replacements);
+    }
+
+    function summarizePathForUi(path) {
+      const normalized = String(path || '').replace(/[\\/]+$/, '');
+      if (!normalized) return '';
+      const parts = normalized.split(/[\\/]/).filter(Boolean);
+      return parts.length ? parts[parts.length - 1] : normalized;
+    }
+
+    function updateDesktopBatchExportUI() {
+      const container = document.getElementById('headerExportProgress');
+      const label = document.getElementById('headerExportProgressLabel');
+      const file = document.getElementById('headerExportProgressFile');
+      const fill = document.getElementById('headerExportProgressFill');
+      if (!container || !label || !file || !fill) return;
+
+      const show = isTauriDesktop() && desktopBatchExportState.active;
+      container.classList.toggle('visible', show);
+      container.setAttribute('aria-hidden', show ? 'false' : 'true');
+
+      if (!show) {
+        fill.style.width = '0%';
+        file.textContent = '';
+        label.textContent = getInterpolatedText(
+          'desktopBatchExportProgress',
+          { current: 0, total: 0 },
+          'Exporting 0 / 0'
+        );
+        return;
+      }
+
+      label.textContent = getInterpolatedText(
+        'desktopBatchExportProgress',
+        {
+          current: desktopBatchExportState.current,
+          total: desktopBatchExportState.total
+        },
+        `Exporting ${desktopBatchExportState.current} / ${desktopBatchExportState.total}`
+      );
+      file.textContent = desktopBatchExportState.fileName || summarizePathForUi(desktopBatchExportState.targetDirectory);
+      fill.style.width = `${Math.max(0, Math.min(100, desktopBatchExportState.percent || 0))}%`;
+    }
+
+    function setDesktopBatchExportState(patch = {}) {
+      const wasActive = desktopBatchExportState.active;
+      Object.assign(desktopBatchExportState, patch);
+      updateDesktopBatchExportUI();
+      if (wasActive !== desktopBatchExportState.active) {
+        updateDesktopBatchExportControlLock();
+      }
+      if (stateReady && typeof updateExportButtons === 'function' && wasActive !== desktopBatchExportState.active) {
+        updateExportButtons();
+      }
+    }
+
+    function resetDesktopBatchExportState() {
+      setDesktopBatchExportState({
+        active: false,
+        current: 0,
+        total: 0,
+        percent: 0,
+        fileName: '',
+        targetDirectory: ''
+      });
+    }
+
+    function setUploadLabelDisabled(label, disabled, inputId) {
+      if (!label) return;
+      label.classList.toggle('is-disabled', Boolean(disabled));
+      label.setAttribute('aria-disabled', disabled ? 'true' : 'false');
+      if (disabled) {
+        label.removeAttribute('for');
+        label.tabIndex = -1;
+        return;
+      }
+      label.setAttribute('for', inputId);
+      label.tabIndex = 0;
+    }
+
+    function isDesktopBatchExportLocked() {
+      return isTauriDesktop() && desktopBatchExportState.active;
+    }
+
+    function updateDesktopBatchExportControlLock() {
+      const locked = isDesktopBatchExportLocked();
+      [
+        'newImageBtn',
+        'startOverBtn',
+        'selectAllBtn',
+        'selectNoneBtn',
+        'addMoreFilesBtn',
+        'addFilesToolbarBtn',
+        'clearFileListBtn',
+        'saveSettingsBtn',
+        'applyToSelectedBtn'
+      ].forEach((id) => {
+        const el = document.getElementById(id);
+        if (el) el.disabled = locked;
+      });
+
+      setUploadLabelDisabled(document.getElementById('uploadBtn'), locked, 'fileInput');
+      if (locked) {
+        setUploadLabelDisabled(document.getElementById('uploadFolderBtn'), true, 'folderInput');
+      } else if (typeof applyFolderPickerAvailability === 'function') {
+        applyFolderPickerAvailability();
+      }
     }
 
     function handleSaveResult(result, {
@@ -2484,7 +2884,7 @@
       'coreBrightness', 'coreExposure', 'coreContrast', 'coreHighlights', 'coreShadows',
       'coreWhites', 'coreBlacks', 'coreWbMode', 'coreTemperature', 'coreTint',
       'coreSaturation', 'coreGlow', 'coreFade', 'coreCurvePrecision', 'coreUseWebGL',
-      'wbR', 'wbG', 'wbB', 'filmType', 'filmBaseSet', 'step2Mode', 'rotationAngle',
+      'wbR', 'wbG', 'wbB', 'filmType', 'filmBaseSet', 'grayPointSampled', 'step2Mode', 'rotationAngle',
       'currentStep',
     ];
 
@@ -2931,6 +3331,8 @@
       if (additional) {
         additional.style.display = inStep3 ? 'block' : 'none';
       }
+
+      updateGrayPointGuideUI();
     }
 
     function goToStep(step) {
@@ -3284,7 +3686,10 @@
         yellow: sanitizeNumeric(source.yellow, fallbackSettings.yellow ?? 0, -100, 100),
         wbR: sanitizeNumeric(source.wbR, fallbackSettings.wbR ?? 1, 0.5, 2),
         wbG: sanitizeNumeric(source.wbG, fallbackSettings.wbG ?? 1, 0.5, 2),
-        wbB: sanitizeNumeric(source.wbB, fallbackSettings.wbB ?? 1, 0.5, 2)
+        wbB: sanitizeNumeric(source.wbB, fallbackSettings.wbB ?? 1, 0.5, 2),
+        grayPointSampled: typeof source.grayPointSampled === 'boolean'
+          ? source.grayPointSampled
+          : Boolean(fallbackSettings.grayPointSampled)
       };
 
       if (includeCurvePoints) {
@@ -5097,6 +5502,10 @@
         await overlay.show({ title: lang.loadingConverting });
 
         try {
+          const frontierAutoApplied = await maybeApplyFrontierGuideDefaults();
+          if (frontierAutoApplied) {
+            updateSlidersFromState();
+          }
           overlay.updateProgress(10, lang.loadingConverting);
           const correctedSourceData = await applyLensCorrectionWithSettings(sourceData, state, { updateUi: true });
           invalidateSilverCoreCache();
@@ -5118,6 +5527,7 @@
           revealBatchFileList('processNegative');
           updatePreview();
           scheduleFullUpdate();
+          maybeShowFrontierGuidePopup();
           overlay.updateProgress(100, lang.loadingComplete);
           await new Promise(r => setTimeout(r, 250));
           // Auto-run dust detection if enabled
@@ -5671,6 +6081,7 @@
       placeholder.innerHTML = `<p>${i18n[currentLang].processing}</p>`;
       const fileName = file.name.toLowerCase();
       const isRawLikeFile = ['.cr2', '.nef', '.arw', '.dng', '.raw', '.rw2', '.tif', '.tiff'].some(ext => fileName.endsWith(ext));
+      closeFrontierGuidePopup();
 
       const overlay = getLoadingOverlay();
       const lang = i18n[currentLang];
@@ -5716,6 +6127,8 @@
           state.webglSourceImageData = null;
           state.lastRenderQuality = 'full';
           state.filmBaseSet = false;
+          state.grayPointSampled = false;
+          resetFrontierGuideImageState();
           state.autoFrame.lastDiagnostics = null;
           state.rawMetadata = extractedRawMeta;
           if (webglState.gl) {
@@ -5735,6 +6148,7 @@
           updateAutoFrameDiagnosticsUI();
           syncBatchUIState({ reason: 'loadFile' });
           updateAutoFrameButtons();
+          updateSamplingModeUI();
         }
         if (isRawLikeFile) {
           overlay.updateProgress(100, lang.loadingComplete);
@@ -6052,20 +6466,25 @@
       model.primaryKey = inBatch
         ? 'noviceGuidePrimaryStep3Batch'
         : 'noviceGuidePrimaryStep3Single';
+      const desktopBatchExport = isTauriDesktop();
       model.checklistKeys = inBatch
         ? [
             'noviceGuideChecklistStep3BatchSave',
             'noviceGuideChecklistStep3BatchApply',
-            'noviceGuideChecklistStep3BatchExport'
+            desktopBatchExport
+              ? 'noviceGuideChecklistStep3BatchExportDesktop'
+              : 'noviceGuideChecklistStep3BatchExport'
           ]
         : [
             'noviceGuideChecklistStep3SampleGray',
-            'noviceGuideChecklistStep3Export'
+            desktopBatchExport
+              ? 'noviceGuideChecklistStep3ExportDesktop'
+              : 'noviceGuideChecklistStep3Export'
           ];
       model.statusKey = step3GuideCollapsedOnce ? 'noviceGuideStatusStep3Collapsed' : '';
       model.recommendedActionIds = inBatch
         ? ['saveSettingsBtn', 'applyToSelectedBtn', 'exportBtn']
-        : ['sampleWBBtn', 'exportBtn'];
+        : ['headerGrayPointBtn', 'exportBtn'];
       return model;
     }
 
@@ -6140,10 +6559,7 @@
       if (!showFilmBase) {
         if (state.samplingMode === 'filmBase') {
           state.samplingMode = null;
-          sampleBaseBtn.classList.remove('active');
-          canvas.style.cursor = 'default';
-          glCanvas.style.cursor = 'default';
-          hideLoupe();
+          updateSamplingModeUI();
         }
         document.getElementById('filmBasePreview').style.display = 'none';
         updateRollReferenceUI();
@@ -6155,10 +6571,7 @@
 
       if (state.samplingMode === 'filmBase' && state.step2Mode === 'noBorder') {
         state.samplingMode = null;
-        sampleBaseBtn.classList.remove('active');
-        canvas.style.cursor = 'default';
-        glCanvas.style.cursor = 'default';
-        hideLoupe();
+        updateSamplingModeUI();
       }
 
       sampleBaseBtn.style.display = state.step2Mode === 'border' ? 'inline-flex' : 'none';
@@ -6196,9 +6609,7 @@
       if (state.step2Mode !== 'border') return;
       exitBeforeAfter();
       state.samplingMode = 'filmBase';
-      document.getElementById('sampleBaseBtn').classList.add('active');
-      canvas.style.cursor = 'crosshair';
-      glCanvas.style.cursor = 'crosshair';
+      updateSamplingModeUI();
       updateBeforeAfterButtonState();
     });
 
@@ -6428,12 +6839,7 @@
     // White Balance Sampling
     // ===========================================
     document.getElementById('sampleWBBtn').addEventListener('click', () => {
-      exitBeforeAfter();
-      state.samplingMode = 'whiteBalance';
-      document.getElementById('sampleWBBtn').classList.add('active');
-      canvas.style.cursor = 'crosshair';
-      glCanvas.style.cursor = 'crosshair';
-      updateBeforeAfterButtonState();
+      startWhiteBalanceSampling();
     });
 
     // ===========================================
@@ -6662,10 +7068,7 @@
         state.filmBase = sampleFilmBase(sourceData, x, y, 10);
         state.filmBaseSet = true;
         state.samplingMode = null;
-        document.getElementById('sampleBaseBtn').classList.remove('active');
-        canvas.style.cursor = 'default';
-        glCanvas.style.cursor = 'default';
-        hideLoupe();
+        updateSamplingModeUI();
         updateFilmBasePreview();
         updateStep2GuideCard();
         markCurrentFileDirty();
@@ -6692,12 +7095,10 @@
         state.wbR /= norm;
         state.wbG = 1;
         state.wbB /= norm;
+        state.grayPointSampled = true;
 
         state.samplingMode = null;
-        document.getElementById('sampleWBBtn').classList.remove('active');
-        canvas.style.cursor = 'default';
-        glCanvas.style.cursor = 'default';
-        hideLoupe();
+        updateSamplingModeUI();
         updateWBSliders();
         markCurrentFileDirty();
         updateBeforeAfterButtonState();
@@ -6966,43 +7367,13 @@
     };
 
     function handleCoreColorModelChange() {
+      state.frontierGuideStep2ChoiceTouched = true;
       scheduleSilverSourceRefresh();
     }
 
     function handleFilmPresetChange(presetId) {
-      if (!presetId || presetId === 'none') {
-        // Switching back to manual - just reprocess
-        scheduleSilverSourceRefresh();
-        return;
-      }
-      // Import preset data dynamically (it's already bundled)
-      import('../silvercore/engine/FilmPresets.js').then(({ filmPresets }) => {
-        const preset = filmPresets[presetId];
-        if (!preset) {
-          scheduleSilverSourceRefresh();
-          return;
-        }
-        const s = preset.settings;
-        // Update enhanced profile
-        if (s.enhancedProfile) {
-          state.coreEnhancedProfile = s.enhancedProfile;
-          const epSelect = document.getElementById('coreEnhancedProfile');
-          if (epSelect) epSelect.value = s.enhancedProfile;
-        }
-        // Update saturation slider
-        if (s.saturation !== undefined) {
-          state.coreSaturation = s.saturation;
-          syncSliderFromState('coreSaturation');
-        }
-        // Update glow/fade sliders
-        if (s.glow !== undefined) { state.coreGlow = s.glow; syncSliderFromState('coreGlow'); }
-        if (s.fade !== undefined) { state.coreFade = s.fade; syncSliderFromState('coreFade'); }
-        // Update tone sliders
-        if (s.shadows !== undefined) { state.coreShadows = s.shadows; syncSliderFromState('coreShadows'); }
-        if (s.highlights !== undefined) { state.coreHighlights = s.highlights; syncSliderFromState('coreHighlights'); }
-        if (s.blacks !== undefined) { state.coreBlacks = s.blacks; syncSliderFromState('coreBlacks'); }
-        if (s.whites !== undefined) { state.coreWhites = s.whites; syncSliderFromState('coreWhites'); }
-
+      state.frontierGuideStep2ChoiceTouched = true;
+      void applyFilmPresetSettingsToState(presetId).then(() => {
         scheduleSilverSourceRefresh();
       });
     }
@@ -8484,6 +8855,12 @@
       if (event.key !== 'Escape') return;
       if (isEditableTarget(event.target)) return;
 
+      const frontierGuidePopupOverlay = document.getElementById('frontierGuidePopupOverlay');
+      if (frontierGuidePopupOverlay?.classList.contains('visible')) {
+        event.preventDefault();
+        closeFrontierGuidePopup();
+        return;
+      }
       if (state.beforeAfterActive) {
         event.preventDefault();
         exitBeforeAfter();
@@ -8498,12 +8875,7 @@
       if (state.samplingMode) {
         event.preventDefault();
         state.samplingMode = null;
-        document.getElementById('sampleBaseBtn')?.classList.remove('active');
-        document.getElementById('sampleWBBtn')?.classList.remove('active');
-        canvas.style.cursor = '';
-        const glCanvas = document.getElementById('glCanvas');
-        if (glCanvas) glCanvas.style.cursor = '';
-        hideLoupe();
+        updateSamplingModeUI();
         updateBeforeAfterButtonState();
         showToast(getLocalizedText('cancelledSampling', 'Exited sampling mode'));
         return;
@@ -8874,6 +9246,7 @@
       state.wbR = 1;
       state.wbG = 1;
       state.wbB = 1;
+      state.grayPointSampled = false;
 
       updateSlidersFromState();
       initCurves(true);
@@ -8889,7 +9262,9 @@
     });
 
     document.getElementById('startOverBtn').addEventListener('click', () => {
+      if (isDesktopBatchExportLocked()) return;
       clearUndoHistory();
+      closeFrontierGuidePopup();
       exitBeforeAfter();
       resetZoomPan();
       if (state.loadedBaseImageData || state.originalImageData) {
@@ -8906,6 +9281,8 @@
         state.histogramSourceImageData = null;
         state.webglSourceImageData = null;
         state.filmBaseSet = false;
+        state.grayPointSampled = false;
+        resetFrontierGuideImageState();
         state.lastRenderQuality = 'full';
         if (webglState.gl) {
           webglState.sourceDirty = true;
@@ -8932,7 +9309,9 @@
     });
 
     document.getElementById('newImageBtn').addEventListener('click', () => {
+      if (isDesktopBatchExportLocked()) return;
       clearUndoHistory();
+      closeFrontierGuidePopup();
       exitBeforeAfter();
       resetZoomPan();
       zoomControls.style.display = 'none';
@@ -8951,6 +9330,7 @@
       state.histogramSourceImageData = null;
       state.webglSourceImageData = null;
       state.filmBaseSet = false;
+      state.grayPointSampled = false;
       state.rawMetadata = null;
       state.currentStep = 1;
       state.lastRenderQuality = 'full';
@@ -8959,6 +9339,7 @@
       state.batchSessionActive = false;
       state.batchMode = false;
       state.lensCorrection = createInitialLensCorrectionState();
+      resetFrontierGuideImageState();
       resetRollReferenceState();
       fullAdjustedBuffer = null;
       previewAdjustedBuffer = null;
@@ -9082,6 +9463,12 @@
       return typeof path === 'string' && path ? path : null;
     }
 
+    async function pickDesktopExportDirectory() {
+      if (!isTauriDesktop()) return null;
+      const path = await window.__TAURI__.core.invoke('pick_export_directory');
+      return typeof path === 'string' && path ? path : null;
+    }
+
     async function writeBlobToDesktopPath(blob, targetPath, mimeType = 'application/octet-stream') {
       if (!isTauriDesktop()) {
         throw new Error('Desktop path writes require the Tauri runtime.');
@@ -9091,6 +9478,21 @@
       const bytesBase64 = await blobToBase64(normalizedBlob);
       const result = await window.__TAURI__.core.invoke('write_export_file_to_path', {
         path: targetPath,
+        bytesBase64
+      });
+      return normalizeSaveResult(result);
+    }
+
+    async function writeBlobToDesktopDirectory(blob, directory, fileName, mimeType = 'application/octet-stream') {
+      if (!isTauriDesktop()) {
+        throw new Error('Desktop directory writes require the Tauri runtime.');
+      }
+
+      const normalizedBlob = normalizeExportBlob(blob, mimeType);
+      const bytesBase64 = await blobToBase64(normalizedBlob);
+      const result = await window.__TAURI__.core.invoke('write_export_file_to_directory', {
+        directory,
+        suggestedName: fileName,
         bytesBase64
       });
       return normalizeSaveResult(result);
@@ -9414,7 +9816,20 @@
       document.getElementById('exportQualityValue').textContent = state.jpegQuality + '%';
     });
 
+    function updateDesktopExportMenuUI() {
+      const zipBtn = document.getElementById('exportZipBtn');
+      const exportAllBtn = document.getElementById('exportAllBtn');
+      if (!zipBtn || !exportAllBtn) return;
+
+      const desktop = isTauriDesktop();
+      zipBtn.style.display = desktop ? 'none' : '';
+      const exportAllKey = desktop ? 'exportIndividualDesktop' : 'exportIndividual';
+      exportAllBtn.textContent = getLocalizedText(exportAllKey, exportAllBtn.textContent || 'Export All Individually');
+      exportAllBtn.setAttribute('data-i18n', exportAllKey);
+    }
+
     function updateExportUI() {
+      updateDesktopExportMenuUI();
       const format = state.exportFormat;
       const isJpeg = format === 'jpeg';
       if (isJpeg) state.exportBitDepth = 8;
@@ -9505,6 +9920,7 @@
         wbR: safe.wbR,
         wbG: safe.wbG,
         wbB: safe.wbB,
+        grayPointSampled: Boolean(safe.grayPointSampled),
         curvePoints: {
           r: safe.curvePoints.r.map(p => ({ ...p })),
           g: safe.curvePoints.g.map(p => ({ ...p })),
@@ -9570,6 +9986,7 @@
         wbR: safe.wbR,
         wbG: safe.wbG,
         wbB: safe.wbB,
+        grayPointSampled: Boolean(safe.grayPointSampled),
         curvePoints: {
           r: safe.curvePoints.r.map(p => ({ ...p })),
           g: safe.curvePoints.g.map(p => ({ ...p })),
@@ -9943,6 +10360,7 @@
         wbR: 1,
         wbG: 1,
         wbB: 1,
+        grayPointSampled: false,
         curvePoints: {
           r: [{ x: 0, y: 0 }, { x: 255, y: 255 }],
           g: [{ x: 0, y: 0 }, { x: 255, y: 255 }],
@@ -9957,7 +10375,7 @@
     }
 
     // Process a file with its own settings or auto-detect
-    async function processFileWithSettings(file, savedSettings) {
+    async function processFileWithSettings(file, savedSettings, options = {}) {
       // Load the image
       const imageData = await loadFileToImageData(file);
 
@@ -9987,9 +10405,11 @@
       });
 
       // Apply dust removal if enabled (full resolution for export)
-      if (state.dustRemoval.enabled && processed) {
+      const dustRemoval = options.dustRemoval || state.dustRemoval;
+      if (dustRemoval && dustRemoval.enabled && processed) {
         await ensureOpenCvReady();
-        const { mask } = detectDust(processed, { strength: state.dustRemoval.strength });
+        const strength = Number.isFinite(dustRemoval.strength) ? dustRemoval.strength : state.dustRemoval.strength;
+        const { mask } = detectDust(processed, { strength });
         processed = inpaintMasked(processed, mask, 3);
       }
 
@@ -10087,8 +10507,161 @@
       }
     }
 
+    function createBatchExportJobs(selectedFiles, exportInfo) {
+      return selectedFiles.map(({ item, index }) => ({
+        item,
+        index,
+        file: item.file,
+        outputName: buildExportFileName(item.file.name, exportInfo),
+        settings: cloneSettings(getSettingsForExport(index, item))
+      }));
+    }
+
+    function resetBatchExportStatuses(jobs) {
+      jobs.forEach(({ item }) => {
+        item.status = 'pending';
+        item.error = null;
+      });
+      updateFileListUI();
+    }
+
+    function waitForNextFrame() {
+      return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+    }
+
+    function showDesktopBatchExportSummary({ successCount, failCount, total, targetDirectory }) {
+      const folder = summarizePathForUi(targetDirectory) || targetDirectory || 'selected folder';
+      const key = failCount > 0 ? 'desktopBatchExportSummaryErrors' : 'desktopBatchExportSummary';
+      const fallback = failCount > 0
+        ? `Exported ${successCount} / ${total} files, ${failCount} failed. Target: ${folder}.`
+        : `Exported ${successCount} / ${total} files to ${folder}.`;
+      showToast(
+        getInterpolatedText(key, {
+          success: successCount,
+          total,
+          failed: failCount,
+          folder
+        }, fallback),
+        4500
+      );
+    }
+
+    async function exportBatchIndividuallyDesktop() {
+      const selectedFiles = getSelectedFiles();
+      if (selectedFiles.length < 1) return;
+
+      const targetDirectory = await pickDesktopExportDirectory();
+      if (!targetDirectory) {
+        showToast(
+          getLocalizedText(
+            'desktopBatchExportFolderCancelled',
+            'Folder selection cancelled. No files were exported.'
+          ),
+          3500
+        );
+        return;
+      }
+
+      const exportInfo = getExportInfo();
+      const jobs = createBatchExportJobs(selectedFiles, exportInfo);
+      const total = jobs.length;
+      const jpegQuality = state.jpegQuality;
+      const dustRemoval = {
+        enabled: Boolean(state.dustRemoval.enabled),
+        strength: state.dustRemoval.strength
+      };
+      let successCount = 0;
+      let failCount = 0;
+
+      resetBatchExportStatuses(jobs);
+      setDesktopBatchExportState({
+        active: true,
+        current: 0,
+        total,
+        percent: 0,
+        fileName: '',
+        targetDirectory
+      });
+      await waitForNextFrame();
+
+      try {
+        for (let i = 0; i < jobs.length; i++) {
+          const { item, file, outputName, settings } = jobs[i];
+          const fileBaseProgress = (i / total) * 100;
+          const fileSlice = 100 / total;
+
+          item.status = 'processing';
+          item.error = null;
+          updateFileListUI();
+          setDesktopBatchExportState({
+            active: true,
+            current: i + 1,
+            total,
+            percent: fileBaseProgress + fileSlice * 0.05,
+            fileName: file.name,
+            targetDirectory
+          });
+          await waitForNextFrame();
+
+          try {
+            const adjusted = await processFileWithSettings(file, settings, { dustRemoval });
+            setDesktopBatchExportState({
+              active: true,
+              current: i + 1,
+              total,
+              percent: fileBaseProgress + fileSlice * 0.62,
+              fileName: file.name,
+              targetDirectory
+            });
+
+            const blob = await imageDataToBlob(
+              adjusted,
+              exportInfo.format,
+              jpegQuality,
+              exportInfo.bitDepth,
+              (pct) => {
+                setDesktopBatchExportState({
+                  active: true,
+                  current: i + 1,
+                  total,
+                  percent: fileBaseProgress + fileSlice * (0.62 + pct * 0.3),
+                  fileName: file.name,
+                  targetDirectory
+                });
+              }
+            );
+
+            await writeBlobToDesktopDirectory(blob, targetDirectory, outputName, exportInfo.mimeType);
+            item.status = 'done';
+            item.error = null;
+            successCount++;
+          } catch (err) {
+            console.error(`Error processing ${file.name}:`, err);
+            item.status = 'error';
+            item.error = err && err.message ? err.message : String(err || 'Unknown error');
+            failCount++;
+          }
+
+          updateFileListUI();
+          setDesktopBatchExportState({
+            active: true,
+            current: i + 1,
+            total,
+            percent: fileBaseProgress + fileSlice,
+            fileName: file.name,
+            targetDirectory
+          });
+          await waitForNextFrame();
+        }
+      } finally {
+        resetDesktopBatchExportState();
+      }
+
+      showDesktopBatchExportSummary({ successCount, failCount, total, targetDirectory });
+    }
+
     // Streaming individual download: process → download → free → next
-    async function exportBatchIndividually() {
+    async function exportBatchIndividuallyBrowser() {
       const selectedFiles = getSelectedFiles();
       if (selectedFiles.length < 1) return;
 
@@ -10158,6 +10731,14 @@
       } finally {
         overlay.hide();
       }
+    }
+
+    async function exportBatchIndividually() {
+      if (isTauriDesktop()) {
+        await exportBatchIndividuallyDesktop();
+        return;
+      }
+      await exportBatchIndividuallyBrowser();
     }
 
     // ===========================================
@@ -10336,6 +10917,13 @@
       state.wbR = safe.wbR;
       state.wbG = safe.wbG;
       state.wbB = safe.wbB;
+      state.grayPointSampled = Boolean(
+        safe.grayPointSampled
+        || Math.abs(safe.wbR - 1) > 0.01
+        || Math.abs(safe.wbB - 1) > 0.01
+      );
+      state.frontierGuideStep2ChoiceTouched = state.coreColorModel !== 'standard' || state.coreFilmPreset !== 'none';
+      state.frontierGuideAutoAppliedForImage = state.frontierGuideStep2ChoiceTouched;
 
       // Restore curves
       state.curvePoints = {
@@ -10364,10 +10952,16 @@
     }
 
     function updateExportButtons() {
-      // Enable batch export when there are selected files
       const selectedCount = state.fileQueue.filter(f => f.selected).length;
-      document.getElementById('exportZipBtn').disabled = selectedCount < 1;
-      document.getElementById('exportAllBtn').disabled = selectedCount < 1;
+      const exportLocked = isDesktopBatchExportLocked();
+      const exportBtn = document.getElementById('exportBtn');
+      const exportSingleBtn = document.getElementById('exportSingleBtn');
+      const exportZipBtn = document.getElementById('exportZipBtn');
+      const exportAllBtn = document.getElementById('exportAllBtn');
+      if (exportBtn) exportBtn.disabled = exportLocked;
+      if (exportSingleBtn) exportSingleBtn.disabled = exportLocked;
+      if (exportZipBtn) exportZipBtn.disabled = selectedCount < 1 || exportLocked;
+      if (exportAllBtn) exportAllBtn.disabled = selectedCount < 1 || exportLocked;
       updateAutoFrameButtons();
     }
 
@@ -10554,11 +11148,13 @@
     updateAutoFrameConfigUI();
 
     function openAddFilesPicker() {
+      if (isDesktopBatchExportLocked()) return;
       const input = document.createElement('input');
       input.type = 'file';
       input.multiple = true;
       input.accept = '.cr2,.nef,.arw,.dng,.raw,.rw2,.tif,.tiff,image/*';
       input.onchange = (e) => {
+        if (isDesktopBatchExportLocked()) return;
         if (e.target.files.length > 0) {
           addFilesToQueue(Array.from(e.target.files));
           if (!state.originalImageData && state.fileQueue.length > 0) {
@@ -10581,6 +11177,7 @@
 
     // Clear file list button
     document.getElementById('clearFileListBtn').addEventListener('click', () => {
+      if (isDesktopBatchExportLocked()) return;
       state.fileQueue = [];
       state.currentFileIndex = 0;
       state.batchSessionActive = false;
@@ -10699,6 +11296,7 @@
     });
 
     fileInput.addEventListener('change', (e) => {
+      if (isDesktopBatchExportLocked()) return;
       const files = Array.from(e.target.files);
       if (files.length === 0) return;
 
@@ -10721,6 +11319,7 @@
     });
 
     folderInput.addEventListener('change', (e) => {
+      if (isDesktopBatchExportLocked()) return;
       const files = Array.from(e.target.files);
       if (files.length === 0) return;
 
@@ -10754,6 +11353,7 @@
     canvasContainer.addEventListener('drop', (e) => {
       e.preventDefault();
       canvasContainer.style.borderColor = '';
+      if (isDesktopBatchExportLocked()) return;
 
       const files = Array.from(e.dataTransfer.files);
       if (files.length === 0) return;
