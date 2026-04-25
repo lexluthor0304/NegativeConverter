@@ -6092,7 +6092,7 @@
       const placeholder = document.getElementById('uploadPlaceholder');
       placeholder.innerHTML = `<p>${i18n[currentLang].processing}</p>`;
       const fileName = file.name.toLowerCase();
-      const isRawLikeFile = ['.cr2', '.nef', '.arw', '.dng', '.raw', '.rw2', '.tif', '.tiff'].some(ext => fileName.endsWith(ext));
+      const isRawLikeFile = ['.cr2', '.crw', '.nef', '.arw', '.dng', '.raf', '.raw', '.rw2', '.pef', '.srw', '.3fr', '.orf', '.tif', '.tiff'].some(ext => fileName.endsWith(ext));
       closeFrontierGuidePopup();
 
       const overlay = getLoadingOverlay();
@@ -10295,7 +10295,7 @@
       const arrayBuffer = await file.arrayBuffer();
       const fileName = file.name.toLowerCase();
 
-      if (['.cr2', '.nef', '.arw', '.dng', '.raw', '.rw2', '.tif', '.tiff'].some(ext => fileName.endsWith(ext))) {
+      if (['.cr2', '.crw', '.nef', '.arw', '.dng', '.raf', '.raw', '.rw2', '.pef', '.srw', '.3fr', '.orf', '.tif', '.tiff'].some(ext => fileName.endsWith(ext))) {
         return await loadRawFile(arrayBuffer, fileName);
       } else if (file.type === 'image/png') {
         return loadPngFile(arrayBuffer);
@@ -11219,7 +11219,7 @@
       const input = document.createElement('input');
       input.type = 'file';
       input.multiple = true;
-      input.accept = '.cr2,.nef,.arw,.dng,.raw,.rw2,.tif,.tiff,image/*';
+      input.accept = '.cr2,.crw,.nef,.arw,.dng,.raf,.raw,.rw2,.pef,.srw,.3fr,.orf,.tif,.tiff,image/*';
       input.onchange = (e) => {
         if (isDesktopBatchExportLocked()) return;
         if (e.target.files.length > 0) {
@@ -11260,7 +11260,7 @@
 
     function addFilesToQueue(files) {
       // Filter for supported image files
-      const supportedExtensions = ['.cr2', '.nef', '.arw', '.dng', '.raw', '.rw2', '.tif', '.tiff', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'];
+      const supportedExtensions = ['.cr2', '.crw', '.nef', '.arw', '.dng', '.raf', '.raw', '.rw2', '.pef', '.srw', '.3fr', '.orf', '.tif', '.tiff', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'];
       const validFiles = files.filter(file => {
         const ext = '.' + file.name.split('.').pop().toLowerCase();
         return supportedExtensions.includes(ext) || file.type.startsWith('image/');
