@@ -1,17 +1,28 @@
 /**
  * ImageProcessor.js - Canvas-based image processing pipeline
- * Canvas-based image processing pipeline
+ *
+ * 16-bit pipeline: All functions operate on Image16 ({ width, height, data: Uint16Array }
+ * RGBA, range [0, 65535]). Histograms remain 256-bin via `>> 8` indexing (cheap, accurate
+ * enough for auto black/white point detection). Channel point ranges are reported in
+ * the 16-bit domain so curve generators can index a 65536-entry LUT directly.
  */
 
 import { colorModels } from './Presets.js'
+
+const MAX_16 = 65535;
+const HIST_BINS = 256;
+const HIST_MAX = HIST_BINS - 1;
+// Multiplier converting 8-bit histogram bin index → 16-bit pixel value.
+// 65535 / 255 = 257, so bin k corresponds to pixel value k * 257.
+const BIN_TO_16 = 257;
 
 /**
  * Analyze image to extract per-channel histogram data.
  * Returns black/white/mean points per channel via histogram analysis.
  *
- * @param {ImageData} imageData - Source image (negative)
+ * @param {Image16} imageData - Source image, 16-bit RGBA
  * @param {Object} params - { borderBuffer, colorModel }
- * @returns {Object[]} [rChannel, gChannel, bChannel] each with whitePointOrigin, blackPointOrigin, meanPoint
+ * @returns {Object[]} per-channel { whitePointOrigin, blackPointOrigin, meanPoint } in [0, 65535]
  */
 export function analyzeImage(imageData, params) {
   const { data, width, height } = imageData;
@@ -23,18 +34,19 @@ export function analyzeImage(imageData, params) {
   const cropW = width - 2 * cropX;
   const cropH = height - 2 * cropY;
 
-  // Build per-channel histograms from cropped region
-  const rHist = new Uint32Array(256);
-  const gHist = new Uint32Array(256);
-  const bHist = new Uint32Array(256);
+  // Build per-channel 256-bin histograms from cropped region (>>8 indexing keeps cost
+  // identical to the 8-bit version while operating on 16-bit pixels).
+  const rHist = new Uint32Array(HIST_BINS);
+  const gHist = new Uint32Array(HIST_BINS);
+  const bHist = new Uint32Array(HIST_BINS);
   let totalPixels = 0;
 
   for (let y = cropY; y < cropY + cropH; y++) {
     for (let x = cropX; x < cropX + cropW; x++) {
       const i = (y * width + x) * 4;
-      rHist[data[i]]++;
-      gHist[data[i + 1]]++;
-      bHist[data[i + 2]]++;
+      rHist[data[i] >>> 8]++;
+      gHist[data[i + 1] >>> 8]++;
+      bHist[data[i + 2] >>> 8]++;
       totalPixels++;
     }
   }
@@ -59,35 +71,35 @@ export function analyzeImage(imageData, params) {
  * - blackPointOrigin = bright end of negative = black point of positive
  */
 function computeChannelLevels(hist, totalPixels, blackThreshold, whiteThreshold, settingName, imageType) {
-  // Find white point origin (scan from dark end)
+  // Find white point origin (scan from dark end) — bin index in [0, 255]
   let cumulative = 0;
-  let whitePointOrigin = 0;
-  for (let i = 0; i < 256; i++) {
+  let whiteBin = 0;
+  for (let i = 0; i < HIST_BINS; i++) {
     cumulative += hist[i] / totalPixels;
     if (cumulative > whiteThreshold) {
-      whitePointOrigin = Math.max(i - 1, 0);
+      whiteBin = Math.max(i - 1, 0);
       break;
     }
   }
 
   // Find black point origin (scan from bright end)
   cumulative = 0;
-  let blackPointOrigin = 255;
-  for (let i = 255; i >= 0; i--) {
+  let blackBin = HIST_MAX;
+  for (let i = HIST_MAX; i >= 0; i--) {
     cumulative += hist[i] / totalPixels;
     if (cumulative > blackThreshold) {
-      blackPointOrigin = Math.min(i + 1, 255);
+      blackBin = Math.min(i + 1, HIST_MAX);
       break;
     }
   }
 
-  // Compute mean point (weighted average within adjusted range)
+  // Compute mean point (weighted average within adjusted range) — still in bin space
   const expandFactor = 0.005;
   const contractFactor = 0.005;
-  const adjBlack = Math.round(whitePointOrigin * (1 + expandFactor));
-  const adjWhite = Math.round(blackPointOrigin * (1 - contractFactor));
+  const adjBlack = Math.round(whiteBin * (1 + expandFactor));
+  const adjWhite = Math.round(blackBin * (1 - contractFactor));
   const adjRange = adjWhite - adjBlack;
-  const adjScale = adjRange > 0 ? 256 / adjRange : 1;
+  const adjScale = adjRange > 0 ? HIST_BINS / adjRange : 1;
 
   let weightedSum = 0;
   for (let i = adjBlack; i <= adjWhite; i++) {
@@ -95,21 +107,28 @@ function computeChannelLevels(hist, totalPixels, blackThreshold, whiteThreshold,
     weightedSum += hist[i] * normalizedPosition;
   }
 
-  let meanPoint = totalPixels > 0 ? weightedSum / totalPixels / 256 : 0.5;
+  let meanPoint = totalPixels > 0 ? weightedSum / totalPixels / HIST_BINS : 0.5;
   if (imageType !== 'positive') {
     meanPoint = 1 - meanPoint; // Invert because this is a negative
   }
 
-  return { whitePointOrigin, blackPointOrigin, meanPoint, settingName };
+  // Promote bin indices to 16-bit pixel range so downstream curve generators can
+  // index Uint16Array(65536) LUTs directly.
+  return {
+    whitePointOrigin: whiteBin * BIN_TO_16,
+    blackPointOrigin: blackBin * BIN_TO_16,
+    meanPoint,
+    settingName,
+  };
 }
 
 /**
  * Apply tone curve LUTs to image data.
- * @param {ImageData} imageData - Source (will be modified in place)
- * @param {Uint8Array} rLUT - Red channel LUT (256 entries)
- * @param {Uint8Array} gLUT - Green channel LUT
- * @param {Uint8Array} bLUT - Blue channel LUT
- * @returns {ImageData} Modified imageData
+ * @param {Image16} imageData - 16-bit RGBA image (will be modified in place)
+ * @param {Uint16Array} rLUT - Red channel LUT (65536 entries → 0..65535)
+ * @param {Uint16Array} gLUT - Green channel LUT
+ * @param {Uint16Array} bLUT - Blue channel LUT
+ * @returns {Image16} Modified imageData
  */
 export function applyLUT(imageData, rLUT, gLUT, bLUT) {
   const { data } = imageData;
@@ -133,7 +152,10 @@ export function boxBlur(imageData, radius = 1) {
   const { data, width, height } = imageData;
   const size = radius * 2 + 1;
   const invSize = 1 / size;
-  const temp = new Uint8ClampedArray(data.length);
+  // Match data type — boxBlur preserves [0, MAX] since it's an average.
+  const temp = data instanceof Uint16Array
+    ? new Uint16Array(data.length)
+    : new Uint8ClampedArray(data.length);
 
   // Horizontal pass: data → temp
   for (let y = 0; y < height; y++) {
@@ -222,13 +244,14 @@ export function boxBlur(imageData, radius = 1) {
 
 /**
  * Negate image (invert pixel values). Simple negative-to-positive.
+ * @param {Image16} imageData - 16-bit RGBA, modified in place.
  */
 export function negateImage(imageData) {
   const { data } = imageData;
   for (let i = 0; i < data.length; i += 4) {
-    data[i] = 255 - data[i];
-    data[i + 1] = 255 - data[i + 1];
-    data[i + 2] = 255 - data[i + 2];
+    data[i] = MAX_16 - data[i];
+    data[i + 1] = MAX_16 - data[i + 1];
+    data[i + 2] = MAX_16 - data[i + 2];
   }
   return imageData;
 }
@@ -280,12 +303,12 @@ export function applyHSLAdjustments(imageData, hsl) {
   const rSatFactor = redSaturation / 100
   const gSatFactor = greenSaturation / 100
   const bSatFactor = blueSaturation / 100
-  const inv255 = 1 / 255
+  const invMax = 1 / MAX_16
 
   for (let i = 0; i < data.length; i += 4) {
-    const r = data[i] * inv255
-    const g = data[i + 1] * inv255
-    const b = data[i + 2] * inv255
+    const r = data[i] * invMax
+    const g = data[i + 1] * invMax
+    const b = data[i + 2] * invMax
 
     // RGB → HSL (optimized: avoid Math.max/Math.min function calls)
     let max, min
@@ -338,9 +361,9 @@ export function applyHSLAdjustments(imageData, hsl) {
     }
 
     let v
-    v = r2 * 255 + 0.5; data[i] = v < 0 ? 0 : v > 255 ? 255 : v | 0
-    v = g2 * 255 + 0.5; data[i + 1] = v < 0 ? 0 : v > 255 ? 255 : v | 0
-    v = b2 * 255 + 0.5; data[i + 2] = v < 0 ? 0 : v > 255 ? 255 : v | 0
+    v = r2 * MAX_16 + 0.5; data[i] = v < 0 ? 0 : v > MAX_16 ? MAX_16 : v | 0
+    v = g2 * MAX_16 + 0.5; data[i + 1] = v < 0 ? 0 : v > MAX_16 ? MAX_16 : v | 0
+    v = b2 * MAX_16 + 0.5; data[i + 2] = v < 0 ? 0 : v > MAX_16 ? MAX_16 : v | 0
   }
 
   return imageData
@@ -358,7 +381,7 @@ function hue2rgb(p, q, t) {
 
 /**
  * Adjust saturation of image.
- * @param {ImageData} imageData
+ * @param {Image16} imageData - 16-bit RGBA
  * @param {number} amount - 0=grayscale, 100=unchanged, 200=max saturation
  */
 export function adjustSaturation(imageData, amount) {
@@ -368,9 +391,9 @@ export function adjustSaturation(imageData, amount) {
   for (let i = 0; i < data.length; i += 4) {
     const r = data[i], g = data[i + 1], b = data[i + 2];
     const lum = 0.299 * r + 0.587 * g + 0.114 * b;
-    data[i] = Math.max(0, Math.min(255, lum + factor * (r - lum)));
-    data[i + 1] = Math.max(0, Math.min(255, lum + factor * (g - lum)));
-    data[i + 2] = Math.max(0, Math.min(255, lum + factor * (b - lum)));
+    data[i] = Math.max(0, Math.min(MAX_16, lum + factor * (r - lum)));
+    data[i + 1] = Math.max(0, Math.min(MAX_16, lum + factor * (g - lum)));
+    data[i + 2] = Math.max(0, Math.min(MAX_16, lum + factor * (b - lum)));
   }
   return imageData;
 }

@@ -50,9 +50,9 @@ export class Engine {
 
   /**
    * Full processing pipeline: negative -> positive
-   * @param {ImageData} imageData - Input negative image
+   * @param {Image16} imageData - Input negative image (16-bit RGBA)
    * @param {Object} params - All UI parameters
-   * @returns {ImageData} Processed positive image
+   * @returns {Image16} Processed positive image (16-bit RGBA)
    */
   process(imageData, params) {
     // 1. Analyze the negative (histogram-based black/white/mean points)
@@ -65,11 +65,11 @@ export class Engine {
     const settings = this.buildSettings(params)
     this.lastSettings = settings
 
-    // 4. Generate tone curve LUTs
+    // 4. Generate tone curve LUTs (Uint16Array 65536-entry per channel)
     const luts = generateCurves(this.channelData, settings)
     this.lastLuts = luts
 
-    // 5. Apply LUTs + 3D LUT + HSL + saturation
+    // 5. Apply LUTs + 3D LUT + HSL + saturation (all CPU 16-bit for precision).
     return this._applyLuts(imageData, luts, params)
   }
 
@@ -88,48 +88,17 @@ export class Engine {
   }
 
   /**
-   * Apply 1D LUTs, optional 3D LUT, and saturation.
+   * Apply 1D LUTs, optional 3D LUT, and saturation — full CPU 16-bit.
+   * WebGL path is currently disabled in the 16-bit pipeline (shaders + LUT textures
+   * are 8-bit; preserving full precision requires GPU upgrade work that is out of
+   * scope for this stage).
    */
   _applyLuts(imageData, luts, params) {
-    const useWebGL = params.useWebGL !== false && this.glRenderer
+    void params
     const lutStrength = this.enhancedLut ? (params.profileStrength ?? 100) : 0
     const saturation = params.saturation ?? 100
     const hslAdj = this.lastSettings ? this.lastSettings.hslAdjustments : null
 
-    if (useWebGL) {
-      const webgl2 = this.glRenderer.isWebGL2
-      // WebGL2: shader handles 1D LUT + 3D LUT + saturation
-      // WebGL1: shader handles 1D LUT only when 3D LUT is needed
-      const needs3DCPU = this.enhancedLut && lutStrength > 0 && !webgl2
-      // When HSL or 3D CPU is needed, disable shader saturation (apply after)
-      const needsPostProcess = needs3DCPU || hslAdj
-      const shaderSat = needsPostProcess ? 100 : saturation
-      const shaderLutStr = webgl2 ? lutStrength : 0
-
-      const result = this.glRenderer.render(
-        imageData, luts.r, luts.g, luts.b,
-        shaderSat, shaderLutStr
-      )
-      if (result) {
-        applyHSLAdjustments(result, hslAdj)
-        if (needs3DCPU) {
-          applyLut3D(result, this.enhancedLut, lutStrength)
-        }
-        if (needsPostProcess && saturation !== 100) {
-          adjustSaturation(result, saturation)
-        }
-        if (this.lastSettings && this.lastSettings.sharpenAmount > 0) {
-          applyUnsharpMask(result, {
-            amount: this.lastSettings.sharpenAmount,
-            radius: this.lastSettings.sharpenRadius,
-            threshold: this.lastSettings.sharpenThreshold,
-          })
-        }
-        return result
-      }
-    }
-
-    // Full CPU fallback
     applyLUT(imageData, luts.r, luts.g, luts.b)
     applyHSLAdjustments(imageData, hslAdj)
     if (this.enhancedLut && lutStrength > 0) {

@@ -16,6 +16,11 @@
 
     import { convertFrameWithRouter } from '../pipeline/conversionRouter.js';
     import { invalidateSilverCoreCache } from '../pipeline/silverAdapter.js';
+    import {
+      fromImageData8,
+      toImageData8,
+      packRGBToImage16,
+    } from '../silvercore/util/image16.js';
     import { Histogram } from '../silvercore/ui/Histogram.js';
     import {
       detectDust, updateDustStrength, inpaintMasked,
@@ -2495,6 +2500,13 @@
       previewSourceImageData: null, // Downscaled source for preview renders
       histogramSourceImageData: null, // Further downscaled source for histogram updates
       webglSourceImageData: null,   // Downscaled source for WebGL preview renders
+
+      // 16-bit pipeline (Stage 2+) — full-precision counterparts to the 8-bit fields above.
+      // Shape: { width, height, data: Uint16Array }, RGBA, range [0, 65535].
+      // SilverCore Engine consumes Image16 starting in Stage 3; until then these are dormant.
+      original16: null,
+      cropped16: null,
+      processed16: null,
 
       // Film settings
       filmType: 'color',
@@ -6125,6 +6137,12 @@
           state.previewSourceImageData = null;
           state.histogramSourceImageData = null;
           state.webglSourceImageData = null;
+          // Mirror 16-bit handle from loader. Falls back to upscaling the 8-bit copy
+          // when the loader did not attach __image16 (defensive — should not happen).
+          state.original16 = imageData.__image16
+            || (imageData instanceof ImageData ? fromImageData8(imageData) : null);
+          state.cropped16 = null;
+          state.processed16 = null;
           state.lastRenderQuality = 'full';
           state.filmBaseSet = false;
           state.grayPointSampled = false;
@@ -6177,7 +6195,9 @@
           UTIF.decodeImage(buffer, ifds[0]);
           const rgba = UTIF.toRGBA8(ifds[0]);
           if (onMetadata) onMetadata(null);
-          return new ImageData(new Uint8ClampedArray(rgba), ifds[0].width, ifds[0].height);
+          const imageData = new ImageData(new Uint8ClampedArray(rgba), ifds[0].width, ifds[0].height);
+          imageData.__image16 = fromImageData8(imageData);
+          return imageData;
         } catch (err) {
           console.error('UTIF.js failed for TIFF:', err);
           throw err;
@@ -6193,7 +6213,9 @@
             UTIF.decodeImage(buffer, ifds[0]);
             const rgba = UTIF.toRGBA8(ifds[0]);
             if (onMetadata) onMetadata(null);
-            return new ImageData(new Uint8ClampedArray(rgba), ifds[0].width, ifds[0].height);
+            const imageData = new ImageData(new Uint8ClampedArray(rgba), ifds[0].width, ifds[0].height);
+            imageData.__image16 = fromImageData8(imageData);
+            return imageData;
           } catch (err) {
             console.error('UTIF.js failed:', err);
           }
@@ -6212,7 +6234,7 @@
         useCameraWb: true,
         useCameraMatrix: 3,
         outputColor: 1,
-        outputBps: 8
+        outputBps: 16
       });
 
       if (onMetadata) {
@@ -6228,16 +6250,26 @@
       const result = await raw.imageData();
       const { width, height, data: rgbData } = result;
 
+      // LibRaw with outputBps:16 returns RGB packed little-endian. Prefer a
+      // zero-copy Uint16Array view; fall back to a manual repack only when the
+      // shape doesn't match expectations.
       const pixelCount = width * height;
-      const rgbaData = new Uint8ClampedArray(pixelCount * 4);
-      for (let i = 0; i < pixelCount; i++) {
-        rgbaData[i * 4] = rgbData[i * 3];
-        rgbaData[i * 4 + 1] = rgbData[i * 3 + 1];
-        rgbaData[i * 4 + 2] = rgbData[i * 3 + 2];
-        rgbaData[i * 4 + 3] = 255;
+      let rgb16;
+      if (rgbData instanceof Uint16Array) {
+        rgb16 = rgbData;
+      } else if (rgbData?.buffer instanceof ArrayBuffer && rgbData.length === pixelCount * 6) {
+        rgb16 = new Uint16Array(rgbData.buffer, rgbData.byteOffset, pixelCount * 3);
+      } else {
+        rgb16 = new Uint16Array(pixelCount * 3);
+        for (let i = 0; i < pixelCount * 3; i++) {
+          rgb16[i] = rgbData[i * 2] | (rgbData[i * 2 + 1] << 8);
+        }
       }
 
-      return new ImageData(rgbaData, width, height);
+      const image16 = packRGBToImage16(width, height, rgb16, 3);
+      const imageData = toImageData8(image16);
+      imageData.__image16 = image16;
+      return imageData;
     }
 
     function loadPngFile(buffer) {
@@ -6254,22 +6286,34 @@
         for (let i = 0; i < raw16.length; i++) raw16[i] = (data[2 * i] << 8) | data[2 * i + 1];
       }
 
+      // Build full RGBA Uint16Array (Image16) and the 8-bit derivative in one pass.
+      const rgba16 = new Uint16Array(pixelCount * 4);
       const final8 = new Uint8ClampedArray(pixelCount * 4);
       for (let i = 0; i < pixelCount; i++) {
         const idx16 = i * channelCount;
-        const idx8 = i * 4;
-        final8[idx8] = raw16[idx16] >>> 8;
-        if (channelCount >= 3) {
-          final8[idx8 + 1] = raw16[idx16 + 1] >>> 8;
-          final8[idx8 + 2] = raw16[idx16 + 2] >>> 8;
-        } else {
-          final8[idx8 + 1] = final8[idx8];
-          final8[idx8 + 2] = final8[idx8];
-        }
-        final8[idx8 + 3] = channelCount === 4 ? (raw16[idx16 + 3] >>> 8) : 255;
+        const dst = i * 4;
+
+        const r16 = raw16[idx16];
+        const g16 = channelCount >= 3 ? raw16[idx16 + 1] : r16;
+        const b16 = channelCount >= 3 ? raw16[idx16 + 2] : r16;
+        const a16 = channelCount === 4 ? raw16[idx16 + 3]
+                  : channelCount === 2 ? raw16[idx16 + 1]
+                  : 65535;
+
+        rgba16[dst] = r16;
+        rgba16[dst + 1] = g16;
+        rgba16[dst + 2] = b16;
+        rgba16[dst + 3] = a16;
+
+        final8[dst] = r16 >>> 8;
+        final8[dst + 1] = g16 >>> 8;
+        final8[dst + 2] = b16 >>> 8;
+        final8[dst + 3] = a16 >>> 8;
       }
 
-      return new ImageData(final8, width, height);
+      const imageData = new ImageData(final8, width, height);
+      imageData.__image16 = { width, height, data: rgba16 };
+      return imageData;
     }
 
     async function loadStandardImage(file) {
@@ -6281,7 +6325,9 @@
           tempCanvas.height = img.height;
           const tempCtx = tempCanvas.getContext('2d');
           tempCtx.drawImage(img, 0, 0);
-          resolve(tempCtx.getImageData(0, 0, img.width, img.height));
+          const imageData = tempCtx.getImageData(0, 0, img.width, img.height);
+          imageData.__image16 = fromImageData8(imageData);
+          resolve(imageData);
         };
         img.onerror = reject;
         img.src = URL.createObjectURL(file);
@@ -10219,6 +10265,27 @@
           croppedData.data[dstIdx + 2] = imageData.data[srcIdx + 2];
           croppedData.data[dstIdx + 3] = 255;
         }
+      }
+
+      // Mirror the crop on the attached 16-bit buffer so SilverCore (which prefers
+      // __image16 over the 8-bit data) sees the cropped region at full precision.
+      const src16 = imageData.__image16;
+      if (src16 && src16.data instanceof Uint16Array) {
+        const dst16 = new Uint16Array(width * height * 4);
+        const srcW = imageData.width;
+        for (let y = 0; y < height; y++) {
+          const srcRow = (top + y) * srcW * 4;
+          const dstRow = y * width * 4;
+          for (let x = 0; x < width; x++) {
+            const si = srcRow + (left + x) * 4;
+            const di = dstRow + x * 4;
+            dst16[di] = src16.data[si];
+            dst16[di + 1] = src16.data[si + 1];
+            dst16[di + 2] = src16.data[si + 2];
+            dst16[di + 3] = src16.data[si + 3];
+          }
+        }
+        croppedData.__image16 = { width, height, data: dst16 };
       }
 
       return croppedData;

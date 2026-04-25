@@ -4,9 +4,15 @@
  *
  * Core algorithm: tanh/atanh-based S-curve interpolation applied through
  * a multi-layer processing pipeline to generate per-channel LUT curves.
+ *
+ * 16-bit pipeline: LUTs are Uint16Array(65536) so applyLUT can index 16-bit
+ * pixels directly without precision loss. Inner math stays in [0, 1] floats.
  */
 
 import { toneProfiles } from './Presets.js';
+
+const PIXEL_MAX = 65535;
+const LUT_SIZE = 65536;
 
 // --- Math primitives ---
 
@@ -549,9 +555,9 @@ function computeClipPoints(channelData, settings) {
       whiteOverflow[ch] = -wp;
       wp = 0;
     }
-    if (bp > 255) {
-      blackUnderflow[ch] = bp - 255;
-      bp = 255;
+    if (bp > PIXEL_MAX) {
+      blackUnderflow[ch] = bp - PIXEL_MAX;
+      bp = PIXEL_MAX;
     }
     whites[ch] = wp;
     blacks[ch] = bp;
@@ -569,7 +575,8 @@ function computeClipPoints(channelData, settings) {
 // --- Build raw curve (scale normalized to pixel coordinates) ---
 
 function buildRawCurve(channelData, settings, normalizedGrid) {
-  const SOFT_CLIP = 6;
+  // 6-pixel soft clip in 8-bit space → scaled to 16-bit pixel domain.
+  const SOFT_CLIP = 6 * 257;
   const clip = computeClipPoints(channelData, settings);
   const numPoints = normalizedGrid[0].length;
   const raw = [[], [], []];
@@ -595,7 +602,7 @@ function buildRawCurve(channelData, settings, normalizedGrid) {
 
     // Soft shadow clipping (last point)
     if (i === numPoints - 1 && useSoftLow) {
-      const threshold = 255 - SOFT_CLIP;
+      const threshold = PIXEL_MAX - SOFT_CLIP;
       if (raw[0][i] < threshold && raw[1][i] < threshold && raw[2][i] < threshold) {
         raw[0][i] += SOFT_CLIP;
         raw[1][i] += SOFT_CLIP;
@@ -689,18 +696,18 @@ export function generateCurves(channelData, settings) {
   // 8. Invert for negative mode; skip for positive
   const finalCurve = imageType === 'positive' ? curve : invertCurve(curve);
 
-  // 9. Build interleaved curve points (X=raw input, Y=output*255)
+  // 9. Build interleaved curve points (X=raw input in [0,65535], Y=output*65535)
   const curvePoints = [[], [], []];
   for (let ch = 0; ch < 3; ch++) {
     for (let pt = 0; pt < curve[0].length; pt++) {
       curvePoints[ch].push({
         x: Math.round(raw[ch][pt]),
-        y: Math.round(finalCurve[ch][pt] * 255),
+        y: Math.round(finalCurve[ch][pt] * PIXEL_MAX),
       });
     }
   }
 
-  // 10. Interpolate to full 256-point LUT
+  // 10. Interpolate to full 65536-entry LUT
   return {
     r: interpolateToLUT(curvePoints[0]),
     g: interpolateToLUT(curvePoints[1]),
@@ -709,23 +716,23 @@ export function generateCurves(channelData, settings) {
 }
 
 /**
- * Interpolate sparse curve points to a full 256-entry LUT.
+ * Interpolate sparse curve points to a full 65536-entry LUT.
  * Uses linear interpolation with progressive index (O(n+m) instead of O(n*m)).
  */
 function interpolateToLUT(points) {
-  const lut = new Uint8Array(256);
+  const lut = new Uint16Array(LUT_SIZE);
 
   // Sort by x
   points.sort((a, b) => a.x - b.x);
 
-  const firstY = points[0].y < 0 ? 0 : points[0].y > 255 ? 255 : points[0].y;
-  const lastY = points[points.length - 1].y < 0 ? 0 : points[points.length - 1].y > 255 ? 255 : points[points.length - 1].y;
+  const firstY = points[0].y < 0 ? 0 : points[0].y > PIXEL_MAX ? PIXEL_MAX : points[0].y;
+  const lastY = points[points.length - 1].y < 0 ? 0 : points[points.length - 1].y > PIXEL_MAX ? PIXEL_MAX : points[points.length - 1].y;
   const lastX = points[points.length - 1].x;
 
   // Progressive index - lo only moves forward
   let lo = 0;
 
-  for (let i = 0; i < 256; i++) {
+  for (let i = 0; i < LUT_SIZE; i++) {
     if (i <= points[0].x) {
       lut[i] = firstY;
     } else if (i >= lastX) {
@@ -739,7 +746,7 @@ function interpolateToLUT(points) {
       const p1 = points[lo + 1];
       const t = (p1.x === p0.x) ? 0 : (i - p0.x) / (p1.x - p0.x);
       const v = p0.y + t * (p1.y - p0.y);
-      lut[i] = v < 0 ? 0 : v > 255 ? 255 : (v + 0.5) | 0;
+      lut[i] = v < 0 ? 0 : v > PIXEL_MAX ? PIXEL_MAX : (v + 0.5) | 0;
     }
   }
 

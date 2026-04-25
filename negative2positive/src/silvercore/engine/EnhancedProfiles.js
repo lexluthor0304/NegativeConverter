@@ -99,14 +99,19 @@ function sampleLut3D(data, r, g, b) {
   return out
 }
 
+const PIXEL_MAX = 65535
+
 /**
  * Pre-bake the 3D LUT into sRGB space during profile load.
  * Combines sRGB→ProPhoto/g1.8→LUT→ProPhoto/g1.8→sRGB into a single sRGB→sRGB 3D LUT.
  * Runs once per profile (~32^3 = 32768 iterations), eliminates all Math.pow from per-pixel loop.
+ *
+ * Output: 16-bit baked LUT so the per-pixel apply loop can mix with 16-bit input
+ * without intermediate up/down-conversion.
  */
 function bakeLutToSRGB(data, size) {
   const total = size * size * size
-  const baked = new Uint8Array(total * 3)
+  const baked = new Uint16Array(total * 3)
   const max = size - 1
 
   for (let ri = 0; ri < size; ri++) {
@@ -131,9 +136,9 @@ function bakeLutToSRGB(data, size) {
         const [outR, outG, outB] = convertSpace(lutR, lutG, lutB, 'ProPhoto', 'sRGBd50')
 
         const idx = ((ri * size + gi) * size + bi) * 3
-        baked[idx] = Math.max(0, Math.min(255, Math.round(outR * 255)))
-        baked[idx + 1] = Math.max(0, Math.min(255, Math.round(outG * 255)))
-        baked[idx + 2] = Math.max(0, Math.min(255, Math.round(outB * 255)))
+        baked[idx] = Math.max(0, Math.min(PIXEL_MAX, Math.round(outR * PIXEL_MAX)))
+        baked[idx + 1] = Math.max(0, Math.min(PIXEL_MAX, Math.round(outG * PIXEL_MAX)))
+        baked[idx + 2] = Math.max(0, Math.min(PIXEL_MAX, Math.round(outB * PIXEL_MAX)))
       }
     }
   }
@@ -143,9 +148,9 @@ function bakeLutToSRGB(data, size) {
 
 /**
  * Apply 3D LUT to image data (CPU path).
- * Uses pre-baked sRGB→sRGB LUT for pure trilinear interpolation (no Math.pow).
- * @param {ImageData} imageData
- * @param {{data: Uint16Array, size: number, bakedData: Uint8Array}} lut
+ * Uses pre-baked sRGB→sRGB 16-bit LUT for pure trilinear interpolation.
+ * @param {Image16} imageData - 16-bit RGBA, modified in place.
+ * @param {{data: Uint16Array, size: number, bakedData: Uint16Array}} lut
  * @param {number} strength - 0-200 (100 = full effect)
  */
 export function applyLut3D(imageData, lut, strength) {
@@ -157,7 +162,7 @@ export function applyLut3D(imageData, lut, strength) {
   const baked = lut.bakedData
   const size = lut.size
   const max = size - 1
-  const scale = max / 255
+  const scale = max / PIXEL_MAX
   const size3 = size * 3
   const sizeSize3 = size * size3
 
@@ -216,8 +221,8 @@ export function applyLut3D(imageData, lut, strength) {
     let vr = sR * invStr + lutR * str
     let vg = sG * invStr + lutG * str
     let vb = sB * invStr + lutB * str
-    data[i] = vr < 0 ? 0 : vr > 255 ? 255 : (vr + 0.5) | 0
-    data[i + 1] = vg < 0 ? 0 : vg > 255 ? 255 : (vg + 0.5) | 0
-    data[i + 2] = vb < 0 ? 0 : vb > 255 ? 255 : (vb + 0.5) | 0
+    data[i] = vr < 0 ? 0 : vr > PIXEL_MAX ? PIXEL_MAX : (vr + 0.5) | 0
+    data[i + 1] = vg < 0 ? 0 : vg > PIXEL_MAX ? PIXEL_MAX : (vg + 0.5) | 0
+    data[i + 2] = vb < 0 ? 0 : vb > PIXEL_MAX ? PIXEL_MAX : (vb + 0.5) | 0
   }
 }
