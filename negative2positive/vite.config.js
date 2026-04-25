@@ -17,6 +17,13 @@ export default defineConfig({
     port: 4173,
     strictPort: true,
   },
+  // libraw-wasm ships a Web Worker that itself uses `new Worker(new URL(...))`.
+  // Vite's dev-mode dep optimizer rewrites the entry but can't follow the
+  // nested worker import, leading to "worker.js?worker_file&type=module not found"
+  // and a hung RAW decode. Skipping optimization keeps the worker chain intact.
+  optimizeDeps: {
+    exclude: ['libraw-wasm'],
+  },
   build: {
     outDir: 'dist',
     emptyOutDir: true,

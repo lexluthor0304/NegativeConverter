@@ -139,16 +139,21 @@ function separableBlur(channel, width, height, kernel) {
   return output;
 }
 
+const PIXEL_MAX = 65535;
+// Threshold UI is 0-255 (8-bit perceptual scale). Internally we operate on
+// 16-bit luminance, so multiply by 257 to match the same perceptual cutoff.
+const THRESHOLD_8_TO_16 = 257;
+
 /**
  * Apply Unsharp Mask sharpening to image data.
- * @param {ImageData} imageData - Will be modified in place
+ * @param {Image16} imageData - 16-bit RGBA, modified in place
  * @param {Object} params - { amount: 0-200, radius: 0.5-3.0, threshold: 0-255 }
- * @returns {ImageData}
+ * @returns {Image16}
  */
 export function applyUnsharpMask(imageData, params = {}) {
   const amount = (params.amount ?? 0) / 100;
   const radius = params.radius ?? 1.0;
-  const threshold = params.threshold ?? 0;
+  const threshold = (params.threshold ?? 0) * THRESHOLD_8_TO_16;
 
   if (amount <= 0 || radius < 0.1) return imageData;
 
@@ -173,9 +178,9 @@ export function applyUnsharpMask(imageData, params = {}) {
 
     const idx = i * 4;
     const sharpen = amount * diff;
-    data[idx] = Math.max(0, Math.min(255, data[idx] + sharpen + 0.5)) | 0;
-    data[idx + 1] = Math.max(0, Math.min(255, data[idx + 1] + sharpen + 0.5)) | 0;
-    data[idx + 2] = Math.max(0, Math.min(255, data[idx + 2] + sharpen + 0.5)) | 0;
+    data[idx] = Math.max(0, Math.min(PIXEL_MAX, data[idx] + sharpen + 0.5)) | 0;
+    data[idx + 1] = Math.max(0, Math.min(PIXEL_MAX, data[idx + 1] + sharpen + 0.5)) | 0;
+    data[idx + 2] = Math.max(0, Math.min(PIXEL_MAX, data[idx + 2] + sharpen + 0.5)) | 0;
   }
 
   return imageData;

@@ -1,8 +1,14 @@
 import { Engine } from '../silvercore/engine/Engine.js';
 import { filmPresets } from '../silvercore/engine/FilmPresets.js';
 import { bwMixWeights } from '../silvercore/engine/Presets.js';
+import {
+  fromImageData8,
+  toImageData8,
+  cloneImage16,
+} from '../silvercore/util/image16.js';
 
 const ENHANCED_PROFILE_SET = new Set(['none', 'frontier', 'crystal', 'natural', 'pakon']);
+const PIXEL_MAX_16 = 65535;
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -14,12 +20,16 @@ function sanitizeNumber(value, fallback, min, max) {
   return clamp(base, min, max);
 }
 
-function cloneImageData(imageData) {
-  return new ImageData(
-    new Uint8ClampedArray(imageData.data),
-    imageData.width,
-    imageData.height
-  );
+// Resolve any input shape into Image16. Accepts:
+//   - Image16 directly ({ width, height, data: Uint16Array })
+//   - ImageData carrying an attached __image16 (loader output)
+//   - Plain ImageData (upcast via ×257)
+function toImage16(input) {
+  if (input && input.data instanceof Uint16Array) return input;
+  if (input && input.__image16 && input.__image16.data instanceof Uint16Array) {
+    return input.__image16;
+  }
+  return fromImageData8(input);
 }
 
 function normalizeSaturation(value) {
@@ -119,16 +129,16 @@ function buildSilverCoreParams(mode, settings = {}) {
   };
 }
 
-function toGrayscaleInPlace(imageData, mixPreset) {
+function toGrayscaleInPlace(image16, mixPreset) {
   const weights = bwMixWeights[mixPreset] || bwMixWeights.standard;
-  const data = imageData.data;
+  const data = image16.data;
   for (let i = 0; i < data.length; i += 4) {
     const y = Math.round(data[i] * weights.r + data[i + 1] * weights.g + data[i + 2] * weights.b);
     data[i] = y;
     data[i + 1] = y;
     data[i + 2] = y;
   }
-  return imageData;
+  return image16;
 }
 
 // --- Layer 1: Engine cache ---
@@ -175,16 +185,16 @@ async function _ensureProfile(slot, engine, profileName) {
   }
 }
 
-function _reuseInputBuffer(slot, imageData, filmBaseGains) {
-  const len = imageData.data.length;
-  const sourceRef = imageData.data;
+function _reuseInputBuffer(slot, image16, filmBaseGains) {
+  const len = image16.data.length;
+  const sourceRef = image16.data;
   const sourceChanged = sourceRef !== slot.lastSourceRef;
   const gainsChanged = !gainsEqual(slot.lastFilmBaseGains, filmBaseGains);
 
   // Ensure buffers are allocated
   if (!slot.inputBuffer || slot.inputBuffer.data.length !== len) {
-    slot.inputBuffer = cloneImageData(imageData);
-    slot.pristineBuffer = new Uint8ClampedArray(len);
+    slot.inputBuffer = cloneImage16(image16);
+    slot.pristineBuffer = new Uint16Array(len);
     // Build pristine: source + filmBase
     slot.pristineBuffer.set(sourceRef);
     if (filmBaseGains) {
@@ -213,9 +223,9 @@ function _reuseInputBuffer(slot, imageData, filmBaseGains) {
 
 function _applyGainsToBuffer(data, gains) {
   for (let i = 0; i < data.length; i += 4) {
-    data[i] = clamp(Math.round(data[i] * gains.r), 0, 255);
-    data[i + 1] = clamp(Math.round(data[i + 1] * gains.g), 0, 255);
-    data[i + 2] = clamp(Math.round(data[i + 2] * gains.b), 0, 255);
+    data[i] = clamp(Math.round(data[i] * gains.r), 0, PIXEL_MAX_16);
+    data[i + 1] = clamp(Math.round(data[i + 1] * gains.g), 0, PIXEL_MAX_16);
+    data[i + 2] = clamp(Math.round(data[i + 2] * gains.b), 0, PIXEL_MAX_16);
   }
 }
 
@@ -230,7 +240,11 @@ async function runSilverCore(imageData, settings, mode, options) {
   const slot = _slotFor(options);
   const params = buildSilverCoreParams(mode, settings);
 
-  const engine = _getOrCreateEngine(slot, imageData.width, imageData.height);
+  // Promote whatever the caller hands us into Image16. Loaders attach __image16
+  // directly so the upcast is zero-copy in the common case.
+  const input16 = toImage16(imageData);
+
+  const engine = _getOrCreateEngine(slot, input16.width, input16.height);
 
   // Profile loading (skip if unchanged)
   const profileName = params.enhancedProfile;
@@ -244,14 +258,21 @@ async function runSilverCore(imageData, settings, mode, options) {
   const filmBaseGains = mode !== 'positive' ? computeFilmBaseGains(settings && settings.filmBase) : null;
 
   // Reuse input buffer; skips filmBase per-pixel loop when source + gains unchanged
-  const input = _reuseInputBuffer(slot, imageData, filmBaseGains);
+  const input = _reuseInputBuffer(slot, input16, filmBaseGains);
 
   // Choose process() vs reprocess() based on whether histogram analysis is needed
-  const processed = _needsFullProcess(slot, options)
+  const processed16 = _needsFullProcess(slot, options)
     ? engine.process(input, params)
     : engine.reprocess(input, params);
 
-  return mode === 'bw' ? toGrayscaleInPlace(processed, params.bwMix) : processed;
+  const finalImage16 = mode === 'bw' ? toGrayscaleInPlace(processed16, params.bwMix) : processed16;
+
+  // Hand the caller an ImageData (the contract the rest of the app still uses) but
+  // leave the 16-bit handle attached so downstream stages (histogram, export) can
+  // read the full-precision result without re-deriving from 8-bit.
+  const result = toImageData8(finalImage16);
+  result.__image16 = finalImage16;
+  return result;
 }
 
 export function invalidateSilverCoreCache() {

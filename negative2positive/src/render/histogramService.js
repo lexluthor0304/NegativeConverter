@@ -24,21 +24,43 @@ export class HistogramService {
   draw(imageData) {
     if (!imageData) return;
     const { w, h } = this.resizeToDisplaySize();
-    const { data } = imageData;
+
+    // Prefer the attached 16-bit handle when available (loaders + SilverCore output
+    // attach __image16). Falls back to the 8-bit ImageData.data otherwise.
+    const source = imageData.__image16 && imageData.__image16.data instanceof Uint16Array
+      ? imageData.__image16
+      : imageData;
+    const { data } = source;
+    const is16 = data instanceof Uint16Array;
 
     this.rHist.fill(0);
     this.gHist.fill(0);
     this.bHist.fill(0);
     this.lHist.fill(0);
 
-    for (let i = 0; i < data.length; i += 4) {
-      const r = data[i];
-      const g = data[i + 1];
-      const b = data[i + 2];
-      this.rHist[r]++;
-      this.gHist[g]++;
-      this.bHist[b]++;
-      this.lHist[(r * 77 + g * 150 + b * 29) >> 8]++;
+    if (is16) {
+      // 16-bit input → 256-bin via >>8 indexing. Keeps bin count stable for the
+      // rendering code below; precision gain comes from the 16-bit pixel domain
+      // itself (visible on smooth gradients without re-quantization).
+      for (let i = 0; i < data.length; i += 4) {
+        const r = data[i] >>> 8;
+        const g = data[i + 1] >>> 8;
+        const b = data[i + 2] >>> 8;
+        this.rHist[r]++;
+        this.gHist[g]++;
+        this.bHist[b]++;
+        this.lHist[(r * 77 + g * 150 + b * 29) >> 8]++;
+      }
+    } else {
+      for (let i = 0; i < data.length; i += 4) {
+        const r = data[i];
+        const g = data[i + 1];
+        const b = data[i + 2];
+        this.rHist[r]++;
+        this.gHist[g]++;
+        this.bHist[b]++;
+        this.lHist[(r * 77 + g * 150 + b * 29) >> 8]++;
+      }
     }
 
     let maxVal = 0;
