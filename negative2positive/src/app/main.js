@@ -6270,7 +6270,7 @@
       const isIIQ = fileName.endsWith('.iiq');
       if (isIIQ && bufBytes > RAW_SIZE_HEAVY) {
         console.info('[RAW] heavy IIQ detected, taking embedded preview shortcut');
-        const previewImageData = tryNefJpegPreview(buffer);
+        const previewImageData = await tryNefJpegPreview(buffer);
         if (previewImageData) {
           console.warn('[RAW] embedded preview decoded — precision is downgraded to 8-bit for this file.');
           previewImageData.__image16 = fromImageData8(previewImageData);
@@ -6299,9 +6299,9 @@
         try { raw.worker?.terminate?.(); } catch {}
       };
 
-      const handleTimeoutFallback = () => {
+      const handleTimeoutFallback = async () => {
         killWorker();
-        const previewImageData = tryNefJpegPreview(buffer);
+        const previewImageData = await tryNefJpegPreview(buffer);
         if (previewImageData) {
           console.warn('[RAW] LibRaw timed out — using embedded preview (8-bit precision).');
           previewImageData.__image16 = fromImageData8(previewImageData);
@@ -6329,7 +6329,7 @@
       } catch (err) {
         if (err?.code === 'RAW_DECODE_TIMEOUT') {
           console.warn('[RAW] raw.open timed out');
-          return handleTimeoutFallback();
+          return await handleTimeoutFallback();
         }
         throw err;
       }
@@ -6362,7 +6362,7 @@
       } catch (err) {
         if (err?.code === 'RAW_DECODE_TIMEOUT') {
           console.warn('[RAW] raw.imageData timed out');
-          return handleTimeoutFallback();
+          return await handleTimeoutFallback();
         }
         throw err;
       }
@@ -6393,7 +6393,7 @@
       // NEF carries — same approach as the iPhone ProRaw handler above.
       if (looksLikeBayerSnow(image16)) {
         console.warn('[RAW] decoded output looks un-demosaiced; trying embedded JPEG preview fallback');
-        const previewImageData = tryNefJpegPreview(buffer);
+        const previewImageData = await tryNefJpegPreview(buffer);
         if (previewImageData) {
           console.warn('[RAW] embedded preview decoded — precision is downgraded to 8-bit for this file.');
           previewImageData.__image16 = fromImageData8(previewImageData);
