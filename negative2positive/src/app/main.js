@@ -6314,8 +6314,13 @@
       };
 
       try {
+        // libraw-wasm transfers the typed array's underlying buffer to its
+        // worker, which detaches the original ArrayBuffer on the main thread.
+        // We need `buffer` intact for the fallback path (UTIF), so hand
+        // LibRaw an independent copy.
+        const libRawInput = new Uint8Array(buffer.slice(0));
         await withTimeout(
-          raw.open(new Uint8Array(buffer), {
+          raw.open(libRawInput, {
             noInterpolation: false,
             useAutoWb: true,
             useCameraWb: true,
