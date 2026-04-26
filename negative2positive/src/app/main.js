@@ -21,6 +21,8 @@
       toImageData8,
       packRGBToImage16,
     } from '../silvercore/util/image16.js';
+    import { looksLikeBayerSnow } from '../silvercore/util/garbledCheck.js';
+    import { tryNefJpegPreview } from './nefJpegPreview.js';
     import { Histogram } from '../silvercore/ui/Histogram.js';
     import {
       detectDust, updateDustStrength, inpaintMasked,
@@ -78,6 +80,7 @@
 	        histogram: "直方图",
 	        loadError: "加载文件失败",
 	        rawUnsupported: "当前 Safari 版本不支持 RAW 解码，请升级 Safari（建议 iOS 16.4+）或先转为 TIFF/JPEG。",
+	        rawDecodeGarbled: "该 RAW 文件解码失败。如果是 Nikon Z 系列（Z9/Z8/Zf），请将相机设为「无损压缩」模式重拍，或用 Adobe DNG Converter 转 DNG 后再上传。",
         workflow: "工作流程",
         stepCrop: "裁剪图像（移除胶片外区域）",
         stepBase: "设置色罩基准（新手按步骤即可）",
@@ -416,6 +419,7 @@
 	        histogram: "Histogram",
 	        loadError: "Error loading file",
 	        rawUnsupported: "RAW decode is not supported in this Safari version. Update Safari (iOS 16.4+) or convert to TIFF/JPEG first.",
+	        rawDecodeGarbled: "Could not decode this RAW file. If it's a Nikon Z-series (Z9/Z8/Zf) shot in High-Efficiency (HE/HE*) mode, please reshoot in Lossless Compressed mode or convert to DNG via Adobe DNG Converter.",
         workflow: "Workflow",
         stepCrop: "Crop image (remove non-film areas)",
         stepBase: "Set Film Mask Baseline (Beginner Friendly)",
@@ -754,6 +758,7 @@
 	        histogram: "ヒストグラム",
 	        loadError: "ファイルの読み込みに失敗しました",
 	        rawUnsupported: "この Safari バージョンでは RAW デコードに対応していません。Safari（iOS 16.4+ 推奨）へ更新するか、先に TIFF/JPEG に変換してください。",
+	        rawDecodeGarbled: "この RAW ファイルをデコードできませんでした。Nikon Z シリーズ（Z9/Z8/Zf）の高効率（HE/HE*）圧縮モードの場合は、「ロスレス圧縮」モードで撮り直すか、Adobe DNG Converter で DNG に変換してから再アップロードしてください。",
         workflow: "ワークフロー",
         stepCrop: "画像をトリミング（フィルム外を除去）",
         stepBase: "マスク基準を設定（初回でも簡単）",
@@ -6178,9 +6183,12 @@
         console.error('Error loading file:', err);
         const text = String(err?.message || err || '');
         const isRawSupportIssue = isRawLikeFile && /module worker|worker|webassembly|wasm/i.test(text);
-        const message = isRawSupportIssue
-          ? (i18n[currentLang].rawUnsupported || 'RAW decode is not supported in this Safari version. Update Safari or convert to TIFF/JPEG first.')
-          : (i18n[currentLang].loadError || 'Error loading file');
+        const isGarbled = err?.code === 'RAW_DECODE_GARBLED';
+        const message = isGarbled
+          ? (i18n[currentLang].rawDecodeGarbled || 'Could not decode this RAW file. Try Lossless Compressed mode or convert to DNG.')
+          : isRawSupportIssue
+            ? (i18n[currentLang].rawUnsupported || 'RAW decode is not supported in this Safari version. Update Safari or convert to TIFF/JPEG first.')
+            : (i18n[currentLang].loadError || 'Error loading file');
         placeholder.innerHTML = `<p style="color: var(--danger);">${message}</p>`;
       }
     }
@@ -6237,13 +6245,25 @@
         outputBps: 16
       });
 
+      let rawMetadata = null;
+      try {
+        rawMetadata = await raw.metadata(true);
+      } catch (err) {
+        rawMetadata = null;
+      }
+      if (rawMetadata) {
+        // Surface key fields so users can self-diagnose camera/compression
+        // mismatches when reporting issues.
+        console.info('[RAW]', {
+          make: rawMetadata.make,
+          model: rawMetadata.model,
+          compression: rawMetadata.compression,
+          tiff_bps: rawMetadata.tiff_bps,
+          width: rawMetadata.width,
+          height: rawMetadata.height,
+        });
+      }
       if (onMetadata) {
-        let rawMetadata = null;
-        try {
-          rawMetadata = await raw.metadata(true);
-        } catch (err) {
-          rawMetadata = null;
-        }
         onMetadata(extractRawLensMetadata(rawMetadata));
       }
 
@@ -6267,6 +6287,25 @@
       }
 
       const image16 = packRGBToImage16(width, height, rgb16, 3);
+
+      // Sanity gate: if LibRaw didn't fully support this camera's compression
+      // mode (e.g. Nikon Z9/Z8/Zf high-efficiency HE/HE*), it can return raw
+      // un-demosaiced Bayer data which renders as colorful snow. Detect that
+      // and fall back to the camera-rendered embedded JPEG preview that every
+      // NEF carries — same approach as the iPhone ProRaw handler above.
+      if (looksLikeBayerSnow(image16)) {
+        console.warn('[RAW] decoded output looks un-demosaiced; trying embedded JPEG preview fallback');
+        const previewImageData = tryNefJpegPreview(buffer);
+        if (previewImageData) {
+          console.warn('[RAW] embedded preview decoded — precision is downgraded to 8-bit for this file.');
+          previewImageData.__image16 = fromImageData8(previewImageData);
+          return previewImageData;
+        }
+        const garbledErr = new Error('RAW decode produced garbled output and no usable embedded preview was found');
+        garbledErr.code = 'RAW_DECODE_GARBLED';
+        throw garbledErr;
+      }
+
       const imageData = toImageData8(image16);
       imageData.__image16 = image16;
       return imageData;
