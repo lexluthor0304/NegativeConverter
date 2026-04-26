@@ -76,4 +76,49 @@ function make(width, height, fill) {
   assert.equal(looksLikeBayerSnow({ width: 2, height: 2, data: new Uint16Array(16) }), false, 'tiny image returns false safely');
 }
 
+// 7. Partial garble: top half noise, bottom half flat fill
+//    This mimics Nikon Z f HE-mode failure — LibRaw aborts with
+//    "data corrupted at N" and emits a buffer where the lower portion
+//    is left as a flat sentinel color. Global-mean checks miss this.
+{
+  const w = 64, h = 64;
+  const data = new Uint16Array(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4;
+      if (y < h / 2) {
+        // noisy region
+        data[i]     = (Math.random() * 65536) | 0;
+        data[i + 1] = (Math.random() * 65536) | 0;
+        data[i + 2] = (Math.random() * 65536) | 0;
+      } else {
+        // flat pink fill (~ 60% red, 30% green, 50% blue)
+        data[i]     = 39000;
+        data[i + 1] = 19000;
+        data[i + 2] = 32000;
+      }
+      data[i + 3] = 65535;
+    }
+  }
+  assert.equal(looksLikeBayerSnow({ width: w, height: h, data }), true, 'partial garble must be flagged');
+}
+
+// 8. Sharp edges in a normal photo (high-frequency detail) → not flagged
+//    Builds a high-detail-but-coherent test pattern: alternating bright/dim
+//    rows with smooth gradients within each row. Mimics noisy texture
+//    without true noise. Real noisy negatives stay below 10%.
+{
+  const w = 64, h = 64;
+  const data = new Uint16Array(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    const isBright = (y >> 2) & 1;
+    for (let x = 0; x < w; x++) {
+      const v = (isBright ? 50000 : 12000) + Math.round(2000 * Math.sin(x * 0.1));
+      const i = (y * w + x) * 4;
+      data[i] = v; data[i + 1] = v; data[i + 2] = v; data[i + 3] = 65535;
+    }
+  }
+  assert.equal(looksLikeBayerSnow({ width: w, height: h, data }), false, 'sharp-edge photo should not be flagged');
+}
+
 console.log('garbledCheck tests: all passed');
