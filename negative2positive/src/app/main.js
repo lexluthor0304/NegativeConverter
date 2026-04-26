@@ -81,6 +81,7 @@
 	        loadError: "加载文件失败",
 	        rawUnsupported: "当前 Safari 版本不支持 RAW 解码，请升级 Safari（建议 iOS 16.4+）或先转为 TIFF/JPEG。",
 	        rawDecodeGarbled: "该 RAW 文件解码失败。如果是 Nikon Z 系列（Z9/Z8/Zf），请将相机设为「无损压缩」模式重拍，或用 Adobe DNG Converter 转 DNG 后再上传。",
+	        rawDecodeTimeout: "该 RAW 文件解码超时（可能格式过新或文件过大）。常见于 Phase One IQ4（IIQ）和未完全支持的 Z 系列高效压缩。请尝试用 Adobe DNG Converter / Capture One 转 DNG 或 TIFF 后再上传。",
         workflow: "工作流程",
         stepCrop: "裁剪图像（移除胶片外区域）",
         stepBase: "设置色罩基准（新手按步骤即可）",
@@ -420,6 +421,7 @@
 	        loadError: "Error loading file",
 	        rawUnsupported: "RAW decode is not supported in this Safari version. Update Safari (iOS 16.4+) or convert to TIFF/JPEG first.",
 	        rawDecodeGarbled: "Could not decode this RAW file. If it's a Nikon Z-series (Z9/Z8/Zf) shot in High-Efficiency (HE/HE*) mode, please reshoot in Lossless Compressed mode or convert to DNG via Adobe DNG Converter.",
+	        rawDecodeTimeout: "This RAW file took too long to decode (likely a new compression format or very large file). Common with Phase One IQ4 (IIQ) and incomplete Z-series high-efficiency support. Try converting to DNG or TIFF via Adobe DNG Converter / Capture One first.",
         workflow: "Workflow",
         stepCrop: "Crop image (remove non-film areas)",
         stepBase: "Set Film Mask Baseline (Beginner Friendly)",
@@ -759,6 +761,7 @@
 	        loadError: "ファイルの読み込みに失敗しました",
 	        rawUnsupported: "この Safari バージョンでは RAW デコードに対応していません。Safari（iOS 16.4+ 推奨）へ更新するか、先に TIFF/JPEG に変換してください。",
 	        rawDecodeGarbled: "この RAW ファイルをデコードできませんでした。Nikon Z シリーズ（Z9/Z8/Zf）の高効率（HE/HE*）圧縮モードの場合は、「ロスレス圧縮」モードで撮り直すか、Adobe DNG Converter で DNG に変換してから再アップロードしてください。",
+	        rawDecodeTimeout: "この RAW ファイルのデコードがタイムアウトしました（新しい圧縮形式または巨大ファイルの可能性）。Phase One IQ4 (IIQ) や Z シリーズ高効率圧縮で発生します。Adobe DNG Converter / Capture One で DNG または TIFF に変換してから再アップロードしてください。",
         workflow: "ワークフロー",
         stepCrop: "画像をトリミング（フィルム外を除去）",
         stepBase: "マスク基準を設定（初回でも簡単）",
@@ -6184,13 +6187,43 @@
         const text = String(err?.message || err || '');
         const isRawSupportIssue = isRawLikeFile && /module worker|worker|webassembly|wasm/i.test(text);
         const isGarbled = err?.code === 'RAW_DECODE_GARBLED';
-        const message = isGarbled
-          ? (i18n[currentLang].rawDecodeGarbled || 'Could not decode this RAW file. Try Lossless Compressed mode or convert to DNG.')
-          : isRawSupportIssue
-            ? (i18n[currentLang].rawUnsupported || 'RAW decode is not supported in this Safari version. Update Safari or convert to TIFF/JPEG first.')
-            : (i18n[currentLang].loadError || 'Error loading file');
+        const isTimeout = err?.code === 'RAW_DECODE_TIMEOUT';
+        const message = isTimeout
+          ? (i18n[currentLang].rawDecodeTimeout || 'This RAW file took too long to decode. Try converting to DNG or TIFF first.')
+          : isGarbled
+            ? (i18n[currentLang].rawDecodeGarbled || 'Could not decode this RAW file. Try Lossless Compressed mode or convert to DNG.')
+            : isRawSupportIssue
+              ? (i18n[currentLang].rawUnsupported || 'RAW decode is not supported in this Safari version. Update Safari or convert to TIFF/JPEG first.')
+              : (i18n[currentLang].loadError || 'Error loading file');
         placeholder.innerHTML = `<p style="color: var(--danger);">${message}</p>`;
       }
+    }
+
+    // RAW decode safety nets — see plan: Phase One IQ4 (.iiq) hangs LibRaw
+    // forever on large files, so we both proactively shortcut known-broken
+    // formats above a size threshold and put a wall-clock timeout on every
+    // LibRaw await.
+    const RAW_SIZE_HEAVY = 100 * 1024 * 1024;   // 100 MB
+    const RAW_SIZE_HUGE = 200 * 1024 * 1024;    // 200 MB
+    const RAW_OPEN_TIMEOUT_MS = 30_000;
+    const RAW_OPEN_TIMEOUT_MS_HUGE = 60_000;
+    const RAW_DECODE_TIMEOUT_MS = 90_000;
+    const RAW_DECODE_TIMEOUT_MS_HUGE = 180_000;
+
+    function withTimeout(promise, ms, onTimeout) {
+      let timer;
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          try { onTimeout?.(); } catch {}
+          const err = new Error(`Operation timed out after ${ms}ms`);
+          err.code = 'RAW_DECODE_TIMEOUT';
+          reject(err);
+        }, ms);
+      });
+      return Promise.race([
+        promise.finally(() => clearTimeout(timer)),
+        timeout,
+      ]);
     }
 
     async function loadRawFile(buffer, fileName, options = {}) {
@@ -6230,20 +6263,76 @@
         }
       }
 
+      // Proactive shortcut: large Phase One IIQ files reliably hang LibRaw.
+      // Skip straight to the embedded JPEG preview (every IIQ carries one),
+      // which decodes in ~1s vs waiting 60-120s for a timeout.
+      const bufBytes = buffer.byteLength;
+      const isIIQ = fileName.endsWith('.iiq');
+      if (isIIQ && bufBytes > RAW_SIZE_HEAVY) {
+        console.info('[RAW] heavy IIQ detected, taking embedded preview shortcut');
+        const previewImageData = tryNefJpegPreview(buffer);
+        if (previewImageData) {
+          console.warn('[RAW] embedded preview decoded — precision is downgraded to 8-bit for this file.');
+          previewImageData.__image16 = fromImageData8(previewImageData);
+          if (onMetadata) onMetadata(null);
+          return previewImageData;
+        }
+        // No usable preview — fall through to LibRaw and let the timeout
+        // gate eventually raise a friendly error.
+        console.warn('[RAW] heavy IIQ has no usable embedded preview, falling through to LibRaw');
+      }
+
+      const openTimeoutMs = bufBytes > RAW_SIZE_HUGE ? RAW_OPEN_TIMEOUT_MS_HUGE : RAW_OPEN_TIMEOUT_MS;
+      const decodeTimeoutMs = bufBytes > RAW_SIZE_HUGE ? RAW_DECODE_TIMEOUT_MS_HUGE : RAW_DECODE_TIMEOUT_MS;
+
       let raw;
       try {
         raw = new LibRaw();
       } catch (err) {
         throw new Error(`module worker not supported: ${err?.message || err}`);
       }
-      await raw.open(new Uint8Array(buffer), {
-        noInterpolation: false,
-        useAutoWb: true,
-        useCameraWb: true,
-        useCameraMatrix: 3,
-        outputColor: 1,
-        outputBps: 16
-      });
+
+      // Worker terminate is the only way to free the WASM pthread once it's
+      // off the rails. The internal `worker` field is stable in libraw-wasm
+      // 1.1.x but we guard it defensively.
+      const killWorker = () => {
+        try { raw.worker?.terminate?.(); } catch {}
+      };
+
+      const handleTimeoutFallback = () => {
+        killWorker();
+        const previewImageData = tryNefJpegPreview(buffer);
+        if (previewImageData) {
+          console.warn('[RAW] LibRaw timed out — using embedded preview (8-bit precision).');
+          previewImageData.__image16 = fromImageData8(previewImageData);
+          if (onMetadata) onMetadata(null);
+          return previewImageData;
+        }
+        const err = new Error('RAW decode timed out and no usable embedded preview was found');
+        err.code = 'RAW_DECODE_TIMEOUT';
+        throw err;
+      };
+
+      try {
+        await withTimeout(
+          raw.open(new Uint8Array(buffer), {
+            noInterpolation: false,
+            useAutoWb: true,
+            useCameraWb: true,
+            useCameraMatrix: 3,
+            outputColor: 1,
+            outputBps: 16
+          }),
+          openTimeoutMs,
+          killWorker,
+        );
+      } catch (err) {
+        if (err?.code === 'RAW_DECODE_TIMEOUT') {
+          console.warn('[RAW] raw.open timed out');
+          return handleTimeoutFallback();
+        }
+        throw err;
+      }
 
       let rawMetadata = null;
       try {
@@ -6267,7 +6356,16 @@
         onMetadata(extractRawLensMetadata(rawMetadata));
       }
 
-      const result = await raw.imageData();
+      let result;
+      try {
+        result = await withTimeout(raw.imageData(), decodeTimeoutMs, killWorker);
+      } catch (err) {
+        if (err?.code === 'RAW_DECODE_TIMEOUT') {
+          console.warn('[RAW] raw.imageData timed out');
+          return handleTimeoutFallback();
+        }
+        throw err;
+      }
       const { width, height, data: rgbData } = result;
 
       // LibRaw with outputBps:16 returns RGB packed little-endian. Prefer a
