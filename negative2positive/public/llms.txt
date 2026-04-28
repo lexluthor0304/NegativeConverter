@@ -1,0 +1,44 @@
+# Negative Converter
+
+> A free, browser-based tool that converts scanned film negatives to positive images. All processing happens client-side in the browser via WebAssembly — no images are uploaded to any server, no account is required, and the tool is completely free to use.
+
+Negative Converter targets photographers and film enthusiasts who scan their own film and want a fast, private way to invert and color-correct negatives without paying for desktop software like Negative Lab Pro or learning Photoshop curves manually. It supports both consumer scans (JPG, 16-bit PNG) and direct camera RAW files, including iPhone ProRaw DNGs.
+
+## Key facts
+
+- **Price**: Free ($0). No account, no signup, no paywall.
+- **Privacy**: 100% client-side processing. No image upload, no telemetry on photo content.
+- **Platforms**: Any modern browser (Chrome, Firefox, Safari, Edge). Also packaged as offline desktop apps (Windows / macOS / Linux) via Tauri.
+- **Supported input formats**: JPG, PNG (8-bit and 16-bit), CR2 (Canon), NEF (Nikon), ARW (Sony), DNG (Adobe / iPhone ProRaw), RW2 (Panasonic).
+- **Supported output formats**: PNG (8-bit / 16-bit), JPEG (8-bit), TIFF (8-bit / 16-bit).
+- **Film modes**: Color negative, B&W negative, positive slide.
+- **Film presets**: 37 presets covering Kodak Portra / Ektar / Gold / TriX, Fujifilm Pro 400H / Superia / Velvia / Provia, Ilford HP5 / FP4 / Delta, CineStill 800T / 50D, and others.
+
+## Pages
+
+- [Web app](https://negative-converter.tokugai.com/): the main converter, runs entirely in the browser.
+- [Guide](https://negative-converter.tokugai.com/guide.html): how the converter works, supported formats, film mode walkthrough, FAQ.
+- [Desktop downloads](https://negative-converter.tokugai.com/download.html): offline Tauri builds for Windows / macOS / Linux.
+- [Pricing](https://negative-converter.tokugai.com/pricing.md): machine-readable pricing (free).
+- [Privacy policy](https://negative-converter.tokugai.com/privacy.html): privacy details (no upload, no tracking of image content).
+- [GitHub repository](https://github.com/lexluthor0304/NegativeConverter): open source, MIT license.
+
+## How it works
+
+1. Crop and rotate the scanned negative.
+2. Pick film type (Color / B&W / Positive) and a film preset; for color negatives, set the orange-mask baseline (manual / auto / roll reference).
+3. Adjust white balance, temperature, tint, vibrance, saturation, and CMY channels in real time, then export as PNG / JPEG / TIFF.
+
+## Technology
+
+- **Language**: HTML, JavaScript (Vite)
+- **RAW decoding**: LibRaw compiled to WebAssembly (`libraw-wasm`)
+- **16-bit PNG**: UPNG.js
+- **TIFF/DNG parsing**: UTIF.js
+- **Auto-frame / auto-rotate**: OpenCV.js (`@techstark/opencv-js`)
+- **Optional lens correction**: Lensfun compiled to WebAssembly (`@neoanaloglabkk/lensfun-wasm`)
+- **Desktop wrapper**: Tauri 2
+
+## License
+
+MIT.
