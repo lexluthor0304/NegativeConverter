@@ -23,6 +23,7 @@
     } from '../silvercore/util/image16.js';
     import { looksLikeBayerSnow } from '../silvercore/util/garbledCheck.js';
     import { tryNefJpegPreview } from './nefJpegPreview.js';
+    import { canUseBrowserZipStreaming, ZipStoreWriter } from './zipStoreWriter.js';
     import { Histogram } from '../silvercore/ui/Histogram.js';
     import {
       detectDust, updateDustStrength, inpaintMasked,
@@ -338,6 +339,10 @@
         zipSavedTo: "ZIP 已保存到：\n{path}",
         zipSaveCancelled: "已取消 ZIP 保存，未写出文件。",
         zipDownloadStarted: "ZIP 下载已开始，请检查浏览器下载目录。",
+        zipStreamingSaved: "ZIP 已保存：{file}。成功导出 {success} / {total} 个文件。",
+        zipStreamingPartial: "ZIP 已保存：{file}。成功导出 {success} / {total} 个文件，失败 {failed} 个。",
+        zipStreamingCancelled: "已取消 ZIP 保存，未开始批量处理。",
+        zipStreamingUnsupportedFallback: "当前浏览器不支持安全的 ZIP 流式保存，将改为逐个下载全部文件。",
         batchDownloadCancelled: "已取消后续导出。已经保存的文件会保留。",
         desktopBatchExportProgress: "导出中 {current} / {total}",
         desktopBatchExportFolderCancelled: "已取消选择导出文件夹。",
@@ -678,6 +683,10 @@
         zipSavedTo: "ZIP saved to:\n{path}",
         zipSaveCancelled: "ZIP save cancelled. No file was written.",
         zipDownloadStarted: "ZIP download started. Check your Downloads folder.",
+        zipStreamingSaved: "ZIP saved: {file}. Exported {success} / {total} files.",
+        zipStreamingPartial: "ZIP saved: {file}. Exported {success} / {total} files; {failed} failed.",
+        zipStreamingCancelled: "ZIP save cancelled before batch processing started.",
+        zipStreamingUnsupportedFallback: "This browser cannot stream ZIP saves safely, so files will download individually instead.",
         batchDownloadCancelled: "Batch export cancelled. Files already saved were kept.",
         desktopBatchExportProgress: "Exporting {current} / {total}",
         desktopBatchExportFolderCancelled: "Folder selection cancelled. No files were exported.",
@@ -1018,6 +1027,10 @@
         zipSavedTo: "ZIP を保存しました:\n{path}",
         zipSaveCancelled: "ZIP の保存をキャンセルしました。ファイルは書き出されていません。",
         zipDownloadStarted: "ZIP のダウンロードを開始しました。ダウンロードフォルダを確認してください。",
+        zipStreamingSaved: "ZIP を保存しました: {file}。{success} / {total} 件を書き出しました。",
+        zipStreamingPartial: "ZIP を保存しました: {file}。{success} / {total} 件を書き出し、{failed} 件が失敗しました。",
+        zipStreamingCancelled: "ZIP 保存がキャンセルされたため、バッチ処理は開始していません。",
+        zipStreamingUnsupportedFallback: "このブラウザでは安全な ZIP ストリーミング保存が使えないため、各ファイルを個別にダウンロードします。",
         batchDownloadCancelled: "以降の書き出しをキャンセルしました。保存済みのファイルは保持されます。",
         desktopBatchExportProgress: "書き出し中 {current} / {total}",
         desktopBatchExportFolderCancelled: "出力フォルダの選択をキャンセルしました。",
@@ -9701,6 +9714,35 @@
       return { saved: true, path: null };
     }
 
+    function isBrowserSavePickerCancel(err) {
+      return Boolean(err && (
+        err.name === 'AbortError'
+        || err.code === 20
+      ));
+    }
+
+    async function createBrowserZipWritable(zipFileName) {
+      if (!canUseBrowserZipStreaming(window)) {
+        return null;
+      }
+
+      const handle = await window.showSaveFilePicker({
+        suggestedName: zipFileName,
+        types: [{
+          description: 'ZIP archive',
+          accept: { 'application/zip': ['.zip'] }
+        }]
+      });
+      if (!handle || typeof handle.createWritable !== 'function') {
+        return null;
+      }
+
+      return {
+        fileName: handle.name || zipFileName,
+        writable: await handle.createWritable()
+      };
+    }
+
     function canvasToBlobWithType(targetCanvas, mimeType, quality) {
       return new Promise((resolve, reject) => {
         targetCanvas.toBlob((blob) => {
@@ -10626,16 +10668,27 @@
       return applyAdjustmentsWithSettings(processed, settings);
     }
 
-    // Streaming ZIP export: process → add to zip → free memory → next
-    async function exportBatchAsZip() {
-      const selectedFiles = getSelectedFiles();
-      if (selectedFiles.length < 1) return;
+    function showBrowserZipStreamSummary({ zipFileName, successCount, failCount, total }) {
+      const key = failCount > 0 ? 'zipStreamingPartial' : 'zipStreamingSaved';
+      const fallback = failCount > 0
+        ? `ZIP saved: ${zipFileName}. Exported ${successCount} / ${total} files; ${failCount} failed.`
+        : `ZIP saved: ${zipFileName}. Exported ${successCount} / ${total} files.`;
+      showToast(
+        getInterpolatedText(key, {
+          file: zipFileName,
+          success: successCount,
+          failed: failCount,
+          total
+        }, fallback),
+        failCount > 0 ? 6000 : 4500
+      );
+    }
 
+    async function exportBatchAsZipDesktop(selectedFiles, zipFileName) {
       if (typeof JSZipCtor !== 'function') {
         throw new Error('JSZip module is unavailable');
       }
 
-      const zipFileName = 'converted_negatives.zip';
       let desktopZipTargetPath = null;
       if (isTauriDesktop()) {
         // Pick the destination before the long-running batch starts so macOS can
@@ -10714,6 +10767,166 @@
       } finally {
         overlay.hide();
       }
+    }
+
+    async function exportBatchAsZipBrowser(selectedFiles, zipFileName) {
+      if (!canUseBrowserZipStreaming(window)) {
+        showToast(
+          getLocalizedText(
+            'zipStreamingUnsupportedFallback',
+            'This browser cannot stream ZIP saves safely, so files will download individually instead.'
+          ),
+          5000
+        );
+        await exportBatchIndividuallyBrowser();
+        return;
+      }
+
+      let streamTarget;
+      try {
+        streamTarget = await createBrowserZipWritable(zipFileName);
+      } catch (err) {
+        if (isBrowserSavePickerCancel(err)) {
+          showToast(
+            getLocalizedText(
+              'zipStreamingCancelled',
+              'ZIP save cancelled before batch processing started.'
+            ),
+            3500
+          );
+          return;
+        }
+        throw err;
+      }
+
+      if (!streamTarget || !streamTarget.writable) {
+        showToast(
+          getLocalizedText(
+            'zipStreamingUnsupportedFallback',
+            'This browser cannot stream ZIP saves safely, so files will download individually instead.'
+          ),
+          5000
+        );
+        await exportBatchIndividuallyBrowser();
+        return;
+      }
+
+      const exportInfo = getExportInfo();
+      const lang = i18n[currentLang];
+      const overlay = getLoadingOverlay();
+      const total = selectedFiles.length;
+      let successCount = 0;
+      let failCount = 0;
+      let zipWriter = null;
+
+      await overlay.show({ title: lang.loadingExporting });
+
+      try {
+        zipWriter = new ZipStoreWriter(streamTarget.writable);
+
+        for (let i = 0; i < selectedFiles.length; i++) {
+          const { item, index } = selectedFiles[i];
+          const fileProgress = (i / total) * 95;
+          const fileSlice = 95 / total;
+          let adjusted = null;
+          let blob = null;
+          let name = '';
+
+          item.status = 'processing';
+          item.error = null;
+          updateFileListUI();
+          overlay.updateProgress(
+            fileProgress,
+            lang.loadingBatchFile.replace('{current}', i + 1).replace('{total}', total)
+          );
+
+          try {
+            const settingsForFile = getSettingsForExport(index, item);
+            adjusted = await processFileWithSettings(item.file, settingsForFile);
+            overlay.updateProgress(fileProgress + fileSlice * 0.55, lang.loadingEncoding);
+            blob = await imageDataToBlob(
+              adjusted,
+              exportInfo.format,
+              state.jpegQuality,
+              exportInfo.bitDepth,
+              (pct) => {
+                overlay.updateProgress(
+                  fileProgress + fileSlice * (0.55 + pct * 0.25),
+                  lang.loadingEncoding
+                );
+              }
+            );
+            name = buildExportFileName(item.file.name, exportInfo);
+          } catch (err) {
+            console.error(`Error processing ${item.file.name}:`, err);
+            item.status = 'error';
+            item.error = err && err.message ? err.message : String(err || 'Unknown error');
+            failCount++;
+            updateFileListUI();
+            overlay.updateProgress(
+              fileProgress + fileSlice,
+              lang.loadingBatchFile.replace('{current}', i + 1).replace('{total}', total)
+            );
+            adjusted = null;
+            blob = null;
+            await waitForNextFrame();
+            continue;
+          }
+
+          try {
+            overlay.updateProgress(fileProgress + fileSlice * 0.86, lang.loadingBatchZip);
+            await zipWriter.addBlob(name, blob);
+            item.status = 'done';
+            item.error = null;
+            successCount++;
+          } finally {
+            adjusted = null;
+            blob = null;
+          }
+
+          updateFileListUI();
+          overlay.updateProgress(
+            fileProgress + fileSlice,
+            lang.loadingBatchFile.replace('{current}', i + 1).replace('{total}', total)
+          );
+          await waitForNextFrame();
+        }
+
+        overlay.updateProgress(98, lang.loadingBatchZip);
+        await zipWriter.close();
+        zipWriter = null;
+        overlay.updateProgress(100, lang.loadingComplete);
+        showBrowserZipStreamSummary({
+          zipFileName: streamTarget.fileName || zipFileName,
+          successCount,
+          failCount,
+          total
+        });
+      } catch (err) {
+        if (zipWriter) {
+          try {
+            await zipWriter.abort();
+          } catch (abortErr) {
+            console.warn('Failed to abort ZIP stream:', abortErr);
+          }
+        }
+        throw err;
+      } finally {
+        overlay.hide();
+      }
+    }
+
+    async function exportBatchAsZip() {
+      const selectedFiles = getSelectedFiles();
+      if (selectedFiles.length < 1) return;
+
+      const zipFileName = 'converted_negatives.zip';
+      if (isTauriDesktop()) {
+        await exportBatchAsZipDesktop(selectedFiles, zipFileName);
+        return;
+      }
+
+      await exportBatchAsZipBrowser(selectedFiles, zipFileName);
     }
 
     function createBatchExportJobs(selectedFiles, exportInfo) {
@@ -10875,7 +11088,6 @@
       if (selectedFiles.length < 1) return;
 
       const exportInfo = getExportInfo();
-      let processedCount = 0;
       let cancelledByUser = false;
       const lang = i18n[currentLang];
       const overlay = getLoadingOverlay();
@@ -10884,26 +11096,37 @@
       await overlay.show({ title: lang.loadingExporting });
 
       try {
-        for (const { item, index } of selectedFiles) {
-          item.status = 'processing';
-          updateFileListUI();
-          processedCount++;
-          const fileProgress = ((processedCount - 1) / total) * 100;
+        for (let i = 0; i < selectedFiles.length; i++) {
+          const { item, index } = selectedFiles[i];
+          const fileProgress = (i / total) * 100;
           const fileSlice = 100 / total;
-          overlay.updateProgress(fileProgress, lang.loadingBatchFile.replace('{current}', processedCount).replace('{total}', total));
+          let adjusted = null;
+          let blob = null;
+          let name = '';
+
+          item.status = 'processing';
+          item.error = null;
+          updateFileListUI();
+          overlay.updateProgress(fileProgress, lang.loadingBatchFile.replace('{current}', i + 1).replace('{total}', total));
 
           try {
             const settingsForFile = getSettingsForExport(index, item);
-            const adjusted = await processFileWithSettings(item.file, settingsForFile);
+            adjusted = await processFileWithSettings(item.file, settingsForFile);
             overlay.updateProgress(fileProgress + fileSlice * 0.6, lang.loadingEncoding);
-            const blob = await imageDataToBlob(
+            blob = await imageDataToBlob(
               adjusted,
               exportInfo.format,
               state.jpegQuality,
-              exportInfo.bitDepth
+              exportInfo.bitDepth,
+              (pct) => {
+                overlay.updateProgress(
+                  fileProgress + fileSlice * (0.6 + pct * 0.3),
+                  lang.loadingEncoding
+                );
+              }
             );
 
-            const name = buildExportFileName(item.file.name, exportInfo);
+            name = buildExportFileName(item.file.name, exportInfo);
             overlay.hide(); // Hide overlay before save dialog
             const result = await saveBlob(blob, name, exportInfo.mimeType);
             if (!result.saved) {
@@ -10914,18 +11137,25 @@
               break;
             }
             // Re-show overlay for next file
-            if (processedCount < total) {
+            if (i + 1 < total) {
               await overlay.show({ title: lang.loadingExporting });
             }
 
             item.status = 'done';
+            item.error = null;
           } catch (err) {
             console.error(`Error processing ${item.file.name}:`, err);
             item.status = 'error';
+            item.error = err && err.message ? err.message : String(err || 'Unknown error');
+          } finally {
+            adjusted = null;
+            blob = null;
+            name = '';
           }
 
           updateFileListUI();
-          await new Promise(r => setTimeout(r, 100));
+          overlay.updateProgress(fileProgress + fileSlice, lang.loadingBatchFile.replace('{current}', i + 1).replace('{total}', total));
+          await waitForNextFrame();
         }
         if (cancelledByUser) {
           console.info('Batch individual export cancelled by user.');
