@@ -1,30 +1,36 @@
-    import pako from 'pako';
-    import UPNGImport from 'upng-js';
-    import UTIFImport from 'utif';
-    import JSZipImport from 'jszip';
     import opencvScriptUrl from '@techstark/opencv-js/dist/opencv.js?url';
-    import {
-      createLensfun,
-      LF_SEARCH_SORT_AND_UNIQUIFY
-    } from '@neoanaloglabkk/lensfun-wasm';
-    import createLensfunCoreModule from '@neoanaloglabkk/lensfun-wasm/core';
-    import lensfunCoreWasmUrl from '@neoanaloglabkk/lensfun-wasm/core-wasm?url';
-    import lensfunCoreDataUrl from '@neoanaloglabkk/lensfun-wasm/core-data?url';
     import '@fontsource/inter/400.css';
     import '@fontsource/inter/500.css';
     import '@fontsource/inter/600.css';
 
     import { convertFrameWithRouter } from '../pipeline/conversionRouter.js';
     import { invalidateSilverCoreCache } from '../pipeline/silverAdapter.js';
-    import {
-      fromImageData8,
-      toImageData8,
-      packRGBToImage16,
-    } from '../silvercore/util/image16.js';
-    import { looksLikeBayerSnow } from '../silvercore/util/garbledCheck.js';
-    import { tryNefJpegPreview } from './nefJpegPreview.js';
+    import { fromImageData8 } from '../silvercore/util/image16.js';
     import { canUseBrowserZipStreaming, ZipStoreWriter } from './zipStoreWriter.js';
+    import {
+      createAdjustmentLutScratch,
+      stripLegacyToneSettingsForSilverCore,
+      applyPreparedAdjustmentsToBuffer
+    } from './adjustmentPipeline.js';
+    import {
+      downsampleImageDataForMaxPixels,
+      downsampleImageDataForMaxDim,
+      cropImageDataRegion
+    } from './imageDataOps.js';
+    import {
+      createImageDataCanvasBlobEncoder
+    } from './canvasBlobEncoder.js';
+    import { renderFileList } from './fileListView.js';
+    import { loadLocalLensfunAssets } from './lensfunLoader.js';
+    import { createOpenCvLoader } from './opencvLoader.js';
+    import {
+      isRawLikeFileName,
+      loadPngImageData,
+      loadRawImageData,
+      loadStandardImage
+    } from './imageFileLoaders.js';
     import { Histogram } from '../silvercore/ui/Histogram.js';
+    import { loadFilmPresets } from '../silvercore/engine/filmPresetsLoader.js';
     import {
       detectDust, updateDustStrength, inpaintMasked,
       refineMaskIntelligent, refineMaskDirect, refineMaskRemove
@@ -36,20 +42,6 @@
       workerEncodeTiff,
       isWorkerAvailable
     } from '../workers/workerBridge.js';
-
-    const UPNG = (UPNGImport && typeof UPNGImport.decode === 'function')
-      ? UPNGImport
-      : (UPNGImport && UPNGImport.default && typeof UPNGImport.default.decode === 'function'
-        ? UPNGImport.default
-        : UPNGImport);
-    const UTIF = (UTIFImport && typeof UTIFImport.decode === 'function')
-      ? UTIFImport
-      : (UTIFImport && UTIFImport.default && typeof UTIFImport.default.decode === 'function'
-        ? UTIFImport.default
-        : UTIFImport);
-    const JSZipCtor = (typeof JSZipImport === 'function')
-      ? JSZipImport
-      : (JSZipImport && typeof JSZipImport.default === 'function' ? JSZipImport.default : null);
 
     // ===========================================
     // Internationalization
@@ -1091,7 +1083,7 @@
 
     const DEBUG_UI = new URLSearchParams(window.location.search).get('debug') === '1';
     const BUILD_ID = '2026-02-22-auto-frame-detect-4';
-    const OPENCV_SCRIPT_CANDIDATES = [opencvScriptUrl];
+    const ensureOpenCvReady = createOpenCvLoader([opencvScriptUrl]);
     const AUTO_FRAME_MAX_SIDE = 1600;
     const AUTO_FRAME_FORMAT_RATIOS = {
       '135': 1.5,
@@ -1113,8 +1105,6 @@
     const CORE_ENHANCED_PROFILE_OPTIONS = new Set(['none', 'frontier', 'crystal', 'natural', 'pakon']);
     const CORE_COLOR_MODEL_OPTIONS = new Set(['frontier', 'standard', 'warm', 'mono', 'noritsu', 'cine-log', 'cine-rich', 'cine-flat', 'neutral']);
     const CORE_COLOR_MODEL_MIGRATION_MAP = Object.freeze({});
-    let opencvReadyPromise = null;
-    let opencvActiveSource = null;
     const STEP3_GUIDE_COLLAPSED_SESSION_KEY = 'nc_step3_guide_collapsed_v1';
     const FRONTIER_GUIDE_POPUP_SESSION_KEY = 'nc_frontier_guide_popup_shown_v1';
     const PRIVACY_BANNER_COLLAPSED_STORAGE_KEY = 'nc_privacy_banner_collapsed_v1';
@@ -1136,6 +1126,7 @@
       initPromise: null,
       client: null,
       source: null,
+      searchFlags: 2,
       lastError: ''
     };
 
@@ -1145,7 +1136,6 @@
     let step3GuideCollapsedOnce = false;
     let frontierGuidePopupShownThisSession = false;
     let frontierGuidePopupPending = false;
-    let filmPresetsPromise = null;
     const desktopBatchExportState = {
       active: false,
       current: 0,
@@ -1330,14 +1320,6 @@
       if (stateReady) {
         renderNoviceGuide({ applyStep3Collapse: true });
       }
-    }
-
-    function loadFilmPresets() {
-      if (!filmPresetsPromise) {
-        filmPresetsPromise = import('../silvercore/engine/FilmPresets.js')
-          .then(({ filmPresets }) => filmPresets || {});
-      }
-      return filmPresetsPromise;
     }
 
     function isGrayPointGuideAvailable() {
@@ -1581,17 +1563,19 @@
       return raw.slice(0, 180);
     }
 
-    function getLensSourceAssets(source) {
+    async function getLensSourceAssets(source) {
       if (source === 'local') {
+        const localAssets = await loadLocalLensfunAssets();
         return {
           source: 'local',
-          moduleFactory: createLensfunCoreModule,
-          wasmUrl: lensfunCoreWasmUrl,
-          dataUrl: lensfunCoreDataUrl
+          ...localAssets
         };
       }
       return {
         source: 'cdn',
+        searchFlags: (window.LensfunWasm && Number.isFinite(window.LensfunWasm.LF_SEARCH_SORT_AND_UNIQUIFY))
+          ? window.LensfunWasm.LF_SEARCH_SORT_AND_UNIQUIFY
+          : 2,
         iifeUrl: `${LENSFUN_CDN_BASE}/umd/index.iife.js`,
         moduleJsUrl: `${LENSFUN_CDN_BASE}/assets/lensfun-core.js`,
         wasmUrl: `${LENSFUN_CDN_BASE}/assets/lensfun-core.wasm`,
@@ -1627,14 +1611,14 @@
     }
 
     async function initLensfunClientFromSource(source) {
-      const assets = getLensSourceAssets(source);
+      const assets = await getLensSourceAssets(source);
       if (source === 'local') {
-        const client = await createLensfun({
+        const client = await assets.createLensfun({
           moduleFactory: assets.moduleFactory,
           wasmUrl: assets.wasmUrl,
           dataUrl: assets.dataUrl
         });
-        return { client, source: assets.source };
+        return { client, source: assets.source, searchFlags: assets.searchFlags };
       }
 
       await loadLensScript(assets.iifeUrl);
@@ -1647,12 +1631,16 @@
         wasmUrl: assets.wasmUrl,
         dataUrl: assets.dataUrl
       });
-      return { client, source: assets.source };
+      return { client, source: assets.source, searchFlags: assets.searchFlags };
     }
 
     async function ensureLensfunClient() {
       if (lensfunRuntime.client) {
-        return { client: lensfunRuntime.client, source: lensfunRuntime.source };
+        return {
+          client: lensfunRuntime.client,
+          source: lensfunRuntime.source,
+          searchFlags: lensfunRuntime.searchFlags
+        };
       }
       if (lensfunRuntime.initPromise) {
         return lensfunRuntime.initPromise;
@@ -1663,6 +1651,7 @@
           const runtime = await initLensfunClientFromSource('local');
           lensfunRuntime.client = runtime.client;
           lensfunRuntime.source = runtime.source;
+          lensfunRuntime.searchFlags = runtime.searchFlags;
           lensfunRuntime.lastError = '';
           return runtime;
         } catch (localErr) {
@@ -1670,6 +1659,7 @@
             const runtime = await initLensfunClientFromSource('cdn');
             lensfunRuntime.client = runtime.client;
             lensfunRuntime.source = runtime.source;
+            lensfunRuntime.searchFlags = runtime.searchFlags;
             lensfunRuntime.lastError = '';
             return runtime;
           } catch (cdnErr) {
@@ -1942,76 +1932,6 @@
         }
         return imageData;
       }
-    }
-
-    function parseMetadataNumber(value) {
-      if (typeof value === 'number' && Number.isFinite(value)) return value;
-      if (typeof value !== 'string') return NaN;
-      const text = value.trim();
-      if (!text) return NaN;
-
-      const ratio = text.match(/(-?\d+(?:\.\d+)?)\s*\/\s*(-?\d+(?:\.\d+)?)/);
-      if (ratio) {
-        const num = Number(ratio[1]);
-        const den = Number(ratio[2]);
-        if (Number.isFinite(num) && Number.isFinite(den) && den !== 0) return num / den;
-      }
-
-      const direct = text.match(/-?\d+(?:\.\d+)?/);
-      if (!direct) return NaN;
-      const parsed = Number(direct[0]);
-      return Number.isFinite(parsed) ? parsed : NaN;
-    }
-
-    function normalizeMetadataKey(key) {
-      return String(key || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-    }
-
-    function findMetadataValue(metadata, candidateKeys) {
-      if (!metadata || typeof metadata !== 'object') return null;
-      const target = new Set(candidateKeys.map(normalizeMetadataKey));
-      const queue = [metadata];
-      const visited = new Set();
-      let depth = 0;
-
-      while (queue.length && depth < 3000) {
-        const node = queue.shift();
-        depth++;
-        if (!node || typeof node !== 'object' || visited.has(node)) continue;
-        visited.add(node);
-
-        for (const [rawKey, rawValue] of Object.entries(node)) {
-          const normalizedKey = normalizeMetadataKey(rawKey);
-          if (target.has(normalizedKey) && rawValue !== null && rawValue !== undefined && rawValue !== '') {
-            return rawValue;
-          }
-          if (rawValue && typeof rawValue === 'object') queue.push(rawValue);
-        }
-      }
-      return null;
-    }
-
-    function extractRawLensMetadata(metadata) {
-      if (!metadata || typeof metadata !== 'object') return null;
-      const lensModelRaw = findMetadataValue(metadata, ['lensModel', 'lens', 'lensName', 'lensDescription', 'lensInfo']);
-      const lensMakerRaw = findMetadataValue(metadata, ['lensMaker', 'lensMake']);
-      const cameraModelRaw = findMetadataValue(metadata, ['cameraModel', 'model', 'camera']);
-      const cameraMakerRaw = findMetadataValue(metadata, ['cameraMaker', 'make', 'cameraMake']);
-      const focalRaw = findMetadataValue(metadata, ['focalLength', 'focalLen', 'focal', 'focalMm']);
-      const apertureRaw = findMetadataValue(metadata, ['aperture', 'fNumber', 'fstop', 'fStop']);
-
-      const focal = parseMetadataNumber(focalRaw);
-      const aperture = parseMetadataNumber(apertureRaw);
-
-      const output = {
-        lensModel: lensModelRaw ? String(lensModelRaw).trim() : '',
-        lensMaker: lensMakerRaw ? String(lensMakerRaw).trim() : '',
-        cameraModel: cameraModelRaw ? String(cameraModelRaw).trim() : '',
-        cameraMaker: cameraMakerRaw ? String(cameraMakerRaw).trim() : '',
-        focal: Number.isFinite(focal) ? focal : NaN,
-        aperture: Number.isFinite(aperture) ? aperture : NaN
-      };
-      return output;
     }
 
     function applyLensMetadataPrefill(metadata) {
@@ -3114,6 +3034,10 @@
     const zoomControls = document.getElementById('zoomControls');
     const ZOOM_MIN = 1;
     const ZOOM_MAX = 8;
+    const ZOOM_BUTTON_FACTOR = 1.25;
+    const ZOOM_DOUBLE_CLICK_FACTOR = 2;
+    const ZOOM_WHEEL_SENSITIVITY = 0.0024;
+    const ZOOM_PINCH_WHEEL_SENSITIVITY = 0.0042;
     const beforeAfterBtn = document.getElementById('beforeAfterBtn');
     const histogramContainer = document.getElementById('histogramContainer');
     const histogramCanvas = document.getElementById('histogramCanvas');
@@ -3527,18 +3451,7 @@
       return new ImageData(new Uint8ClampedArray(width * height * 4), width, height);
     }
 
-    function hue2rgb(p, q, t) {
-      if (t < 0) t += 1;
-      if (t > 1) t -= 1;
-      if (t < 1 / 6) return p + (q - p) * 6 * t;
-      if (t < 1 / 2) return q;
-      if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
-      return p;
-    }
-
-    const channelLutR = new Uint8Array(256);
-    const channelLutG = new Uint8Array(256);
-    const channelLutB = new Uint8Array(256);
+    const adjustmentLutScratch = createAdjustmentLutScratch();
 
     function makeLinearCurveLut() {
       const curve = new Uint8Array(256);
@@ -3807,369 +3720,36 @@
         : settings;
     }
 
-    function buildChannelLuts({
-      lutR,
-      lutG,
-      lutB,
-      curveR,
-      curveG,
-      curveB,
-      rMult,
-      gMult,
-      bMult,
-      contrastFactor,
-      doContrast,
-      doTempTint,
-      tempRMult,
-      tintGMult,
-      tempBMult,
-      doCMY,
-      cmyRShift,
-      cmyGShift,
-      cmyBShift
-    }) {
-      for (let v = 0; v < 256; v++) {
-        let r = v * rMult;
-        let g = v * gMult;
-        let b = v * bMult;
-
-        if (doContrast) {
-          r = (r - 127.5) * contrastFactor + 127.5;
-          g = (g - 127.5) * contrastFactor + 127.5;
-          b = (b - 127.5) * contrastFactor + 127.5;
-        }
-
-        if (doTempTint) {
-          r *= tempRMult;
-          g *= tintGMult;
-          b *= tempBMult;
-        }
-
-        if (r < 0) r = 0; else if (r > 255) r = 255;
-        if (g < 0) g = 0; else if (g > 255) g = 255;
-        if (b < 0) b = 0; else if (b > 255) b = 255;
-
-        if (doCMY) {
-          r -= cmyRShift;
-          g -= cmyGShift;
-          b -= cmyBShift;
-
-          if (r < 0) r = 0; else if (r > 255) r = 255;
-          if (g < 0) g = 0; else if (g > 255) g = 255;
-          if (b < 0) b = 0; else if (b > 255) b = 255;
-        }
-
-        lutR[v] = curveR[(r + 0.5) | 0];
-        lutG[v] = curveG[(g + 0.5) | 0];
-        lutB[v] = curveB[(b + 0.5) | 0];
-      }
-    }
-
-    function applyAdjustmentsToBuffer(imageData, settings, output, quality = 'full') {
-      const { data } = imageData;
-      const outData = output.data;
+    function buildAdjustmentSettings(settings) {
       const safeSettings = sanitizeSettings(settings, {
         fallbackSettings: state,
         includeCurvePoints: false,
         includeCurves: true
       });
 
-      const useLegacyTone = !usesSilverCoreConversion(safeSettings);
+      if (!usesSilverCoreConversion(safeSettings)) return safeSettings;
 
-      const legacyExposure = useLegacyTone ? safeSettings.exposure : 0;
-      const legacyContrast = useLegacyTone ? safeSettings.contrast : 0;
-      const legacyHighlights = useLegacyTone ? safeSettings.highlights : 0;
-      const legacyShadows = useLegacyTone ? safeSettings.shadows : 0;
-      const legacyTemperature = useLegacyTone ? safeSettings.temperature : 0;
-      const legacyTint = useLegacyTone ? safeSettings.tint : 0;
-      const legacySaturation = useLegacyTone ? safeSettings.saturation : 0;
+      return stripLegacyToneSettingsForSilverCore(safeSettings);
+    }
 
-      const exposureMult = Math.pow(2, legacyExposure);
-      const contrastFactor = 1 + (legacyContrast / 100);
-      const tempFactor = legacyTemperature / 100;
-      const tintFactor = legacyTint / 100;
-      const satFactor = 1 + (legacySaturation / 100);
-      const vibFactor = safeSettings.vibrance / 100;
-      const highlightsFactor = legacyHighlights / 100;
-      const shadowsFactor = legacyShadows / 100;
-
-      const rMult = safeSettings.wbR * exposureMult;
-      const gMult = safeSettings.wbG * exposureMult;
-      const bMult = safeSettings.wbB * exposureMult;
-
-      const tempRMult = 1 + tempFactor * 0.3;
-      const tempBMult = 1 - tempFactor * 0.3;
-      const tintGMult = 1 + tintFactor * 0.3;
-
-      const cmyRShift = safeSettings.cyan * 2.55;
-      const cmyGShift = safeSettings.magenta * 2.55;
-      const cmyBShift = safeSettings.yellow * 2.55;
-
-      const curveR = safeSettings.curves.r;
-      const curveG = safeSettings.curves.g;
-      const curveB = safeSettings.curves.b;
-
-      const doContrast = contrastFactor !== 1;
-      const doHighlights = highlightsFactor !== 0;
-      const doShadows = shadowsFactor !== 0;
-      const doTempTint = tempFactor !== 0 || tintFactor !== 0;
-      const doHsl = satFactor !== 1 || vibFactor !== 0;
-      const doCMY = cmyRShift !== 0 || cmyGShift !== 0 || cmyBShift !== 0;
-
-      const lumaScale = 2 / 255;
-
-      // Fast path: when adjustments are per-channel only, precompute LUTs once and do 3 lookups per pixel.
-      if (!doHighlights && !doShadows && !doHsl) {
-        buildChannelLuts({
-          lutR: channelLutR,
-          lutG: channelLutG,
-          lutB: channelLutB,
-          curveR,
-          curveG,
-          curveB,
-          rMult,
-          gMult,
-          bMult,
-          contrastFactor,
-          doContrast,
-          doTempTint,
-          tempRMult,
-          tintGMult,
-          tempBMult,
-          doCMY,
-          cmyRShift,
-          cmyGShift,
-          cmyBShift
-        });
-
-        for (let i = 0; i < data.length; i += 4) {
-          outData[i] = channelLutR[data[i]];
-          outData[i + 1] = channelLutG[data[i + 1]];
-          outData[i + 2] = channelLutB[data[i + 2]];
-          outData[i + 3] = 255;
-        }
-        return;
-      }
-
-      for (let i = 0; i < data.length; i += 4) {
-        let r = data[i] * rMult;
-        let g = data[i + 1] * gMult;
-        let b = data[i + 2] * bMult;
-
-        if (doContrast) {
-          r = (r - 127.5) * contrastFactor + 127.5;
-          g = (g - 127.5) * contrastFactor + 127.5;
-          b = (b - 127.5) * contrastFactor + 127.5;
-        }
-
-        if (doHighlights || doShadows) {
-          const luma = (r * 0.299 + g * 0.587 + b * 0.114);
-          if (doHighlights && luma > 127.5) {
-            const mult = 1 + highlightsFactor * (luma - 127.5) * lumaScale;
-            r *= mult; g *= mult; b *= mult;
-          }
-          if (doShadows && luma < 127.5) {
-            const mult = 1 + shadowsFactor * (127.5 - luma) * lumaScale;
-            r *= mult; g *= mult; b *= mult;
-          }
-        }
-
-        if (doTempTint) {
-          r *= tempRMult;
-          b *= tempBMult;
-          g *= tintGMult;
-        }
-
-        if (r < 0) r = 0; else if (r > 255) r = 255;
-        if (g < 0) g = 0; else if (g > 255) g = 255;
-        if (b < 0) b = 0; else if (b > 255) b = 255;
-
-        // The old pipeline always rounded here (via an HSL round-trip),
-        // so keep rounding even when saturation/vibrance is neutral.
-        if (!doHsl) {
-          r = (r + 0.5) | 0;
-          g = (g + 0.5) | 0;
-          b = (b + 0.5) | 0;
-        }
-
-        if (doHsl) {
-          if (quality === 'preview') {
-            // Fast approximation in RGB space (much cheaper than HSL), used only for interactive previews.
-            const max = r > g ? (r > b ? r : b) : (g > b ? g : b);
-            const min = r < g ? (r < b ? r : b) : (g < b ? g : b);
-
-            // Per-pixel saturation measure (HSV saturation) to modulate vibrance.
-            const hsvSat = max <= 0 ? 0 : (max - min) / max;
-            let vibScale = 1;
-            if (vibFactor >= 0) vibScale = 1 + vibFactor * (1 - hsvSat);
-            else vibScale = 1 + vibFactor;
-
-            const scale = satFactor * vibScale;
-            const gray = (r * 0.299 + g * 0.587 + b * 0.114);
-
-            r = gray + (r - gray) * scale;
-            g = gray + (g - gray) * scale;
-            b = gray + (b - gray) * scale;
-
-            if (r < 0) r = 0; else if (r > 255) r = 255;
-            if (g < 0) g = 0; else if (g > 255) g = 255;
-            if (b < 0) b = 0; else if (b > 255) b = 255;
-
-            r = (r + 0.5) | 0;
-            g = (g + 0.5) | 0;
-            b = (b + 0.5) | 0;
-          } else {
-          let rn = r / 255;
-          let gn = g / 255;
-          let bn = b / 255;
-
-          const max = rn > gn ? (rn > bn ? rn : bn) : (gn > bn ? gn : bn);
-          const min = rn < gn ? (rn < bn ? rn : bn) : (gn < bn ? gn : bn);
-          let h = 0;
-          let s = 0;
-          const l = (max + min) / 2;
-
-          if (max !== min) {
-            const d = max - min;
-            s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-            if (max === rn) h = (gn - bn) / d + (gn < bn ? 6 : 0);
-            else if (max === gn) h = (bn - rn) / d + 2;
-            else h = (rn - gn) / d + 4;
-            h /= 6;
-          }
-
-          // Saturation + vibrance adjustments (same semantics as the original HSL approach)
-          s *= satFactor;
-          if (vibFactor >= 0) s += (1 - s) * vibFactor;
-          else s *= (1 + vibFactor);
-          if (s < 0) s = 0; else if (s > 1) s = 1;
-
-          if (s === 0) {
-            const v = Math.round(l * 255);
-            r = v; g = v; b = v;
-          } else {
-            const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
-            const p = 2 * l - q;
-            rn = hue2rgb(p, q, h + 1 / 3);
-            gn = hue2rgb(p, q, h);
-            bn = hue2rgb(p, q, h - 1 / 3);
-            r = Math.round(rn * 255);
-            g = Math.round(gn * 255);
-            b = Math.round(bn * 255);
-          }
-          }
-        }
-
-        if (doCMY) {
-          r -= cmyRShift;
-          g -= cmyGShift;
-          b -= cmyBShift;
-
-          if (r < 0) r = 0; else if (r > 255) r = 255;
-          if (g < 0) g = 0; else if (g > 255) g = 255;
-          if (b < 0) b = 0; else if (b > 255) b = 255;
-        }
-
-        r = curveR[(r + 0.5) | 0];
-        g = curveG[(g + 0.5) | 0];
-        b = curveB[(b + 0.5) | 0];
-
-        outData[i] = r;
-        outData[i + 1] = g;
-        outData[i + 2] = b;
-        outData[i + 3] = 255;
-      }
+    function applyAdjustmentsToBuffer(imageData, settings, output, quality = 'full') {
+      applyPreparedAdjustmentsToBuffer(imageData, buildAdjustmentSettings(settings), output, {
+        quality,
+        lutScratch: adjustmentLutScratch
+      });
     }
 
     function buildPreviewSourceImageData(imageData) {
-      const { width, height, data } = imageData;
-      const totalPixels = width * height;
       // Keep interactive preview responsive on slower machines.
-      const maxPixels = 250_000;
-
-      if (totalPixels <= maxPixels) return imageData;
-
-      const step = Math.ceil(Math.sqrt(totalPixels / maxPixels));
-      const outW = Math.max(1, Math.floor(width / step));
-      const outH = Math.max(1, Math.floor(height / step));
-
-      const out = new ImageData(new Uint8ClampedArray(outW * outH * 4), outW, outH);
-      const outData = out.data;
-
-      for (let y = 0; y < outH; y++) {
-        const sy = Math.min(height - 1, y * step);
-        for (let x = 0; x < outW; x++) {
-          const sx = Math.min(width - 1, x * step);
-          const srcIdx = (sy * width + sx) * 4;
-          const dstIdx = (y * outW + x) * 4;
-          outData[dstIdx] = data[srcIdx];
-          outData[dstIdx + 1] = data[srcIdx + 1];
-          outData[dstIdx + 2] = data[srcIdx + 2];
-          outData[dstIdx + 3] = 255;
-        }
-      }
-
-      return out;
+      return downsampleImageDataForMaxPixels(imageData, 250_000);
     }
 
     function buildHistogramSourceImageData(imageData) {
-      if (!imageData) return null;
-
-      const { width, height, data } = imageData;
-      const totalPixels = width * height;
-      const maxPixels = HISTOGRAM_MAX_SAMPLES;
-
-      if (totalPixels <= maxPixels) return imageData;
-
-      const step = Math.ceil(Math.sqrt(totalPixels / maxPixels));
-      const outW = Math.max(1, Math.floor(width / step));
-      const outH = Math.max(1, Math.floor(height / step));
-
-      const out = new ImageData(new Uint8ClampedArray(outW * outH * 4), outW, outH);
-      const outData = out.data;
-
-      for (let y = 0; y < outH; y++) {
-        const sy = Math.min(height - 1, y * step);
-        for (let x = 0; x < outW; x++) {
-          const sx = Math.min(width - 1, x * step);
-          const srcIdx = (sy * width + sx) * 4;
-          const dstIdx = (y * outW + x) * 4;
-          outData[dstIdx] = data[srcIdx];
-          outData[dstIdx + 1] = data[srcIdx + 1];
-          outData[dstIdx + 2] = data[srcIdx + 2];
-          outData[dstIdx + 3] = 255;
-        }
-      }
-
-      return out;
+      return downsampleImageDataForMaxPixels(imageData, HISTOGRAM_MAX_SAMPLES);
     }
 
     function buildWebglSourceImageData(imageData, maxDim = 2048) {
-      if (!imageData) return null;
-      const { width, height, data } = imageData;
-      const scale = Math.max(width / maxDim, height / maxDim, 1);
-      const step = Math.ceil(scale);
-      if (step <= 1) return imageData;
-
-      const outW = Math.max(1, Math.floor(width / step));
-      const outH = Math.max(1, Math.floor(height / step));
-      const out = new ImageData(new Uint8ClampedArray(outW * outH * 4), outW, outH);
-      const outData = out.data;
-
-      for (let y = 0; y < outH; y++) {
-        const sy = Math.min(height - 1, y * step);
-        for (let x = 0; x < outW; x++) {
-          const sx = Math.min(width - 1, x * step);
-          const srcIdx = (sy * width + sx) * 4;
-          const dstIdx = (y * outW + x) * 4;
-          outData[dstIdx] = data[srcIdx];
-          outData[dstIdx + 1] = data[srcIdx + 1];
-          outData[dstIdx + 2] = data[srcIdx + 2];
-          outData[dstIdx + 3] = 255;
-        }
-      }
-
-      return out;
+      return downsampleImageDataForMaxDim(imageData, maxDim);
     }
 
     // ===========================================
@@ -5175,6 +4755,10 @@
       // Full-res CPU rendering can be expensive on large scans; debounce aggressively.
       fullUpdateTimer = setTimeout(() => {
         fullUpdateTimer = null;
+        if (state.dustRemoval.enabled && state.dustRemoval.cleanSource) {
+          updateFull();
+          return;
+        }
         // If SilverCore mode and we were using preview-resolution, run full reprocess
         if (usesSilverCoreConversion(state) && state.conversionSourceImageData
           && state.conversionPreviewImageData && state.conversionPreviewImageData !== state.conversionSourceImageData) {
@@ -5185,6 +4769,12 @@
         }
         updateFull();
       }, 1200);
+    }
+
+    function cancelFullUpdate() {
+      if (!fullUpdateTimer) return;
+      clearTimeout(fullUpdateTimer);
+      fullUpdateTimer = null;
     }
 
     function updatePreview() {
@@ -5361,6 +4951,7 @@
     function applyProcessedImageToState(processed) {
       if (!processed) return;
       state.processedImageData = processed;
+      state.displayImageData = null;
       state.previewSourceImageData = buildPreviewSourceImageData(processed);
       state.histogramSourceImageData = buildHistogramSourceImageData(state.previewSourceImageData || processed);
       state.webglSourceImageData = buildWebglSourceImageData(processed);
@@ -5452,8 +5043,16 @@
     let _coreReprocessInFlight = false;
     let _coreReprocessPending = null;
 
+    function resetDustForCleanSource(source) {
+      state.dustRemoval.cleanSource = source || null;
+      state.dustRemoval._state = null;
+      state.dustRemoval.mask = null;
+      state.dustRemoval.inpaintedImageData = null;
+      state.dustRemoval.particleCount = 0;
+    }
+
     async function rerenderWithCoreControls(options = {}) {
-      const full = Boolean(options.full);
+      const full = Boolean(options.full) || Boolean(state.dustRemoval.enabled);
       const token = Number.isInteger(options.token) ? options.token : null;
       if (!usesSilverCoreConversion(state)) return;
       if (!state.conversionSourceImageData) return;
@@ -5473,6 +5072,10 @@
           if (token !== null && token !== coreReprocessToken) return;
           applyProcessedImageToState(processed);
           updateFull();
+          if (state.dustRemoval.enabled) {
+            resetDustForCleanSource(processed);
+            scheduleDustDetection();
+          }
         } else {
           // Check if preview source is actually smaller than full source
           const hasSmallPreview = state.conversionPreviewImageData
@@ -5648,16 +5251,16 @@
       }
 
       // Refresh display to show inpainted result
+      cancelFullUpdate();
       applyDustResultToState();
       updatePreview();
-      scheduleFullUpdate();
     }
 
     function applyDustResultToState() {
-      if (!state.dustRemoval.enabled || !state.dustRemoval.inpaintedImageData) return;
-      // Replace processedImageData with inpainted version for downstream adjustments
-      const inpainted = state.dustRemoval.inpaintedImageData;
-      applyProcessedImageToState(inpainted);
+      if (!state.dustRemoval.enabled) return;
+      const nextImage = state.dustRemoval.inpaintedImageData || state.dustRemoval.cleanSource;
+      if (!nextImage) return;
+      applyProcessedImageToState(nextImage);
     }
 
     function scheduleDustDetection() {
@@ -6022,7 +5625,7 @@
     // ===========================================
     function applyZoomPanTransform() {
       const z = state.zoomLevel;
-      canvasTransformWrapper.style.transform = `translate(${state.panX}px, ${state.panY}px) scale(${z})`;
+      canvasTransformWrapper.style.transform = `matrix(${z}, 0, 0, ${z}, ${state.panX}, ${state.panY})`;
       if (z > 1) {
         zoomIndicator.textContent = Math.round(z * 100) + '%';
         zoomIndicator.style.display = 'block';
@@ -6033,30 +5636,51 @@
       }
     }
 
-    function clampPan() {
-      const z = state.zoomLevel;
-      const wrapperW = parseFloat(canvasTransformWrapper.style.width) || 0;
-      const wrapperH = parseFloat(canvasTransformWrapper.style.height) || 0;
+    function getZoomGeometry(zoom = state.zoomLevel) {
+      const wrapperW = parseFloat(canvasTransformWrapper.style.width) || canvasTransformWrapper.offsetWidth || 0;
+      const wrapperH = parseFloat(canvasTransformWrapper.style.height) || canvasTransformWrapper.offsetHeight || 0;
       const containerW = canvasContainer.clientWidth;
       const containerH = canvasContainer.clientHeight;
-      const scaledW = wrapperW * z;
-      const scaledH = wrapperH * z;
+      const baseX = (containerW - wrapperW) / 2;
+      const baseY = (containerH - wrapperH) / 2;
+      const scaledW = wrapperW * zoom;
+      const scaledH = wrapperH * zoom;
 
-      if (scaledW <= containerW) {
-        state.panX = (containerW - scaledW) / 2;
-      } else {
-        const minX = containerW - scaledW;
-        const maxX = 0;
-        state.panX = Math.max(minX, Math.min(maxX, state.panX));
+      const centeredPanX = ((containerW - scaledW) / 2) - baseX;
+      const centeredPanY = ((containerH - scaledH) / 2) - baseY;
+
+      const minPanX = scaledW <= containerW ? centeredPanX : containerW - baseX - scaledW;
+      const maxPanX = scaledW <= containerW ? centeredPanX : -baseX;
+      const minPanY = scaledH <= containerH ? centeredPanY : containerH - baseY - scaledH;
+      const maxPanY = scaledH <= containerH ? centeredPanY : -baseY;
+
+      return {
+        wrapperW,
+        wrapperH,
+        containerW,
+        containerH,
+        baseX,
+        baseY,
+        scaledW,
+        scaledH,
+        minPanX,
+        maxPanX,
+        minPanY,
+        maxPanY
+      };
+    }
+
+    function clampPan() {
+      const z = state.zoomLevel;
+      if (z <= ZOOM_MIN) {
+        state.panX = 0;
+        state.panY = 0;
+        return;
       }
 
-      if (scaledH <= containerH) {
-        state.panY = (containerH - scaledH) / 2;
-      } else {
-        const minY = containerH - scaledH;
-        const maxY = 0;
-        state.panY = Math.max(minY, Math.min(maxY, state.panY));
-      }
+      const geometry = getZoomGeometry(z);
+      state.panX = Math.max(geometry.minPanX, Math.min(geometry.maxPanX, state.panX));
+      state.panY = Math.max(geometry.minPanY, Math.min(geometry.maxPanY, state.panY));
     }
 
     function resetZoomPan() {
@@ -6072,19 +5696,22 @@
     function zoomAtPoint(newZoom, clientX, clientY) {
       const oldZoom = state.zoomLevel;
       newZoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, newZoom));
+      if (newZoom <= ZOOM_MIN + 0.01) newZoom = ZOOM_MIN;
       if (newZoom === oldZoom) return;
 
       const containerRect = canvasContainer.getBoundingClientRect();
       const cursorX = clientX - containerRect.left;
       const cursorY = clientY - containerRect.top;
+      const oldGeometry = getZoomGeometry(oldZoom);
 
       // Content position under cursor in pre-transform space
-      const contentX = (cursorX - state.panX) / oldZoom;
-      const contentY = (cursorY - state.panY) / oldZoom;
+      const contentX = (cursorX - oldGeometry.baseX - state.panX) / oldZoom;
+      const contentY = (cursorY - oldGeometry.baseY - state.panY) / oldZoom;
+      const newGeometry = getZoomGeometry(newZoom);
 
       state.zoomLevel = newZoom;
-      state.panX = cursorX - contentX * newZoom;
-      state.panY = cursorY - contentY * newZoom;
+      state.panX = cursorX - newGeometry.baseX - contentX * newZoom;
+      state.panY = cursorY - newGeometry.baseY - contentY * newZoom;
 
       clampPan();
       applyZoomPanTransform();
@@ -6113,7 +5740,7 @@
       const placeholder = document.getElementById('uploadPlaceholder');
       placeholder.innerHTML = `<p>${i18n[currentLang].processing}</p>`;
       const fileName = file.name.toLowerCase();
-      const isRawLikeFile = ['.cr2', '.cr3', '.crw', '.nef', '.nrw', '.arw', '.dng', '.raf', '.raw', '.rw2', '.pef', '.srw', '.3fr', '.mef', '.orf', '.rwl', '.iiq', '.x3f', '.mrw', '.kdc', '.dcr', '.tif', '.tiff'].some(ext => fileName.endsWith(ext));
+      const isRawLikeFile = isRawLikeFileName(fileName);
       closeFrontierGuidePopup();
 
       const overlay = getLoadingOverlay();
@@ -6125,21 +5752,21 @@
           overlay.updateProgress(10, lang.loadingLoading);
         }
 
-        const arrayBuffer = await file.arrayBuffer();
-
         let imageData;
         let extractedRawMeta = null;
 
         if (isRawLikeFile) {
+          const arrayBuffer = await file.arrayBuffer();
           overlay.updateProgress(30, lang.loadingProcessing);
-          imageData = await loadRawFile(arrayBuffer, fileName, {
+          imageData = await loadRawImageData(arrayBuffer, fileName, {
             onMetadata(meta) {
               extractedRawMeta = meta;
             }
           });
           overlay.updateProgress(90, lang.loadingProcessing);
         } else if (file.type === 'image/png') {
-          imageData = loadPngFile(arrayBuffer);
+          const arrayBuffer = await file.arrayBuffer();
+          imageData = await loadPngImageData(arrayBuffer);
         } else {
           imageData = await loadStandardImage(file);
         }
@@ -6210,283 +5837,6 @@
               : (i18n[currentLang].loadError || 'Error loading file');
         placeholder.innerHTML = `<p style="color: var(--danger);">${message}</p>`;
       }
-    }
-
-    // RAW decode safety nets — see plan: Phase One IQ4 (.iiq) hangs LibRaw
-    // forever on large files, so we both proactively shortcut known-broken
-    // formats above a size threshold and put a wall-clock timeout on every
-    // LibRaw await.
-    const RAW_SIZE_HEAVY = 100 * 1024 * 1024;   // 100 MB
-    const RAW_SIZE_HUGE = 200 * 1024 * 1024;    // 200 MB
-    const RAW_OPEN_TIMEOUT_MS = 30_000;
-    const RAW_OPEN_TIMEOUT_MS_HUGE = 60_000;
-    const RAW_DECODE_TIMEOUT_MS = 90_000;
-    const RAW_DECODE_TIMEOUT_MS_HUGE = 180_000;
-
-    function withTimeout(promise, ms, onTimeout) {
-      let timer;
-      const timeout = new Promise((_, reject) => {
-        timer = setTimeout(() => {
-          try { onTimeout?.(); } catch {}
-          const err = new Error(`Operation timed out after ${ms}ms`);
-          err.code = 'RAW_DECODE_TIMEOUT';
-          reject(err);
-        }, ms);
-      });
-      return Promise.race([
-        promise.finally(() => clearTimeout(timer)),
-        timeout,
-      ]);
-    }
-
-    async function loadRawFile(buffer, fileName, options = {}) {
-      const onMetadata = typeof options.onMetadata === 'function' ? options.onMetadata : null;
-
-      // Handle TIF/TIFF files directly with UTIF.js
-      if (fileName.endsWith('.tif') || fileName.endsWith('.tiff')) {
-        try {
-          const ifds = UTIF.decode(buffer);
-          UTIF.decodeImage(buffer, ifds[0]);
-          const rgba = UTIF.toRGBA8(ifds[0]);
-          if (onMetadata) onMetadata(null);
-          const imageData = new ImageData(new Uint8ClampedArray(rgba), ifds[0].width, ifds[0].height);
-          imageData.__image16 = fromImageData8(imageData);
-          return imageData;
-        } catch (err) {
-          console.error('UTIF.js failed for TIFF:', err);
-          throw err;
-        }
-      }
-
-      // Handle iPhone DNG (ProRaw) with UTIF.js
-      if (fileName.endsWith('.dng')) {
-        const textSnippet = new TextDecoder().decode(buffer.slice(0, 1000));
-        if (textSnippet.includes('iPhone')) {
-          try {
-            const ifds = UTIF.decode(buffer);
-            UTIF.decodeImage(buffer, ifds[0]);
-            const rgba = UTIF.toRGBA8(ifds[0]);
-            if (onMetadata) onMetadata(null);
-            const imageData = new ImageData(new Uint8ClampedArray(rgba), ifds[0].width, ifds[0].height);
-            imageData.__image16 = fromImageData8(imageData);
-            return imageData;
-          } catch (err) {
-            console.error('UTIF.js failed:', err);
-          }
-        }
-      }
-
-      // Proactive shortcut: large Phase One IIQ files reliably hang LibRaw.
-      // Skip straight to the embedded JPEG preview (every IIQ carries one),
-      // which decodes in ~1s vs waiting 60-120s for a timeout.
-      const bufBytes = buffer.byteLength;
-      const isIIQ = fileName.endsWith('.iiq');
-      if (isIIQ && bufBytes > RAW_SIZE_HEAVY) {
-        console.info('[RAW] heavy IIQ detected, taking embedded preview shortcut');
-        const previewImageData = await tryNefJpegPreview(buffer);
-        if (previewImageData) {
-          console.warn('[RAW] embedded preview decoded — precision is downgraded to 8-bit for this file.');
-          previewImageData.__image16 = fromImageData8(previewImageData);
-          if (onMetadata) onMetadata(null);
-          return previewImageData;
-        }
-        // No usable preview — fall through to LibRaw and let the timeout
-        // gate eventually raise a friendly error.
-        console.warn('[RAW] heavy IIQ has no usable embedded preview, falling through to LibRaw');
-      }
-
-      const openTimeoutMs = bufBytes > RAW_SIZE_HUGE ? RAW_OPEN_TIMEOUT_MS_HUGE : RAW_OPEN_TIMEOUT_MS;
-      const decodeTimeoutMs = bufBytes > RAW_SIZE_HUGE ? RAW_DECODE_TIMEOUT_MS_HUGE : RAW_DECODE_TIMEOUT_MS;
-
-      let raw;
-      try {
-        raw = new LibRaw();
-      } catch (err) {
-        throw new Error(`module worker not supported: ${err?.message || err}`);
-      }
-
-      // Worker terminate is the only way to free the WASM pthread once it's
-      // off the rails. The internal `worker` field is stable in libraw-wasm
-      // 1.1.x but we guard it defensively.
-      const killWorker = () => {
-        try { raw.worker?.terminate?.(); } catch {}
-      };
-
-      const handleTimeoutFallback = async () => {
-        killWorker();
-        const previewImageData = await tryNefJpegPreview(buffer);
-        if (previewImageData) {
-          console.warn('[RAW] LibRaw timed out — using embedded preview (8-bit precision).');
-          previewImageData.__image16 = fromImageData8(previewImageData);
-          if (onMetadata) onMetadata(null);
-          return previewImageData;
-        }
-        const err = new Error('RAW decode timed out and no usable embedded preview was found');
-        err.code = 'RAW_DECODE_TIMEOUT';
-        throw err;
-      };
-
-      try {
-        // libraw-wasm transfers the typed array's underlying buffer to its
-        // worker, which detaches the original ArrayBuffer on the main thread.
-        // We need `buffer` intact for the fallback path (UTIF), so hand
-        // LibRaw an independent copy.
-        const libRawInput = new Uint8Array(buffer.slice(0));
-        await withTimeout(
-          raw.open(libRawInput, {
-            noInterpolation: false,
-            useAutoWb: true,
-            useCameraWb: true,
-            useCameraMatrix: 3,
-            outputColor: 1,
-            outputBps: 16
-          }),
-          openTimeoutMs,
-          killWorker,
-        );
-      } catch (err) {
-        if (err?.code === 'RAW_DECODE_TIMEOUT') {
-          console.warn('[RAW] raw.open timed out');
-          return await handleTimeoutFallback();
-        }
-        throw err;
-      }
-
-      let rawMetadata = null;
-      try {
-        rawMetadata = await raw.metadata(true);
-      } catch (err) {
-        rawMetadata = null;
-      }
-      if (rawMetadata) {
-        // Surface key fields so users can self-diagnose camera/compression
-        // mismatches when reporting issues.
-        console.info('[RAW]', {
-          make: rawMetadata.make,
-          model: rawMetadata.model,
-          compression: rawMetadata.compression,
-          tiff_bps: rawMetadata.tiff_bps,
-          width: rawMetadata.width,
-          height: rawMetadata.height,
-        });
-      }
-      if (onMetadata) {
-        onMetadata(extractRawLensMetadata(rawMetadata));
-      }
-
-      let result;
-      try {
-        result = await withTimeout(raw.imageData(), decodeTimeoutMs, killWorker);
-      } catch (err) {
-        if (err?.code === 'RAW_DECODE_TIMEOUT') {
-          console.warn('[RAW] raw.imageData timed out');
-          return await handleTimeoutFallback();
-        }
-        throw err;
-      }
-      const { width, height, data: rgbData } = result;
-
-      // LibRaw with outputBps:16 returns RGB packed little-endian. Prefer a
-      // zero-copy Uint16Array view; fall back to a manual repack only when the
-      // shape doesn't match expectations.
-      const pixelCount = width * height;
-      let rgb16;
-      if (rgbData instanceof Uint16Array) {
-        rgb16 = rgbData;
-      } else if (rgbData?.buffer instanceof ArrayBuffer && rgbData.length === pixelCount * 6) {
-        rgb16 = new Uint16Array(rgbData.buffer, rgbData.byteOffset, pixelCount * 3);
-      } else {
-        rgb16 = new Uint16Array(pixelCount * 3);
-        for (let i = 0; i < pixelCount * 3; i++) {
-          rgb16[i] = rgbData[i * 2] | (rgbData[i * 2 + 1] << 8);
-        }
-      }
-
-      const image16 = packRGBToImage16(width, height, rgb16, 3);
-
-      // Sanity gate: if LibRaw didn't fully support this camera's compression
-      // mode (e.g. Nikon Z9/Z8/Zf high-efficiency HE/HE*), it can return raw
-      // un-demosaiced Bayer data which renders as colorful snow. Detect that
-      // and fall back to the camera-rendered embedded JPEG preview that every
-      // NEF carries — same approach as the iPhone ProRaw handler above.
-      if (looksLikeBayerSnow(image16)) {
-        console.warn('[RAW] decoded output looks un-demosaiced; trying embedded JPEG preview fallback');
-        const previewImageData = await tryNefJpegPreview(buffer);
-        if (previewImageData) {
-          console.warn('[RAW] embedded preview decoded — precision is downgraded to 8-bit for this file.');
-          previewImageData.__image16 = fromImageData8(previewImageData);
-          return previewImageData;
-        }
-        const garbledErr = new Error('RAW decode produced garbled output and no usable embedded preview was found');
-        garbledErr.code = 'RAW_DECODE_GARBLED';
-        throw garbledErr;
-      }
-
-      const imageData = toImageData8(image16);
-      imageData.__image16 = image16;
-      return imageData;
-    }
-
-    function loadPngFile(buffer) {
-      const decoded = UPNG.decode(buffer);
-      const { width, height, ctype, depth, data } = decoded;
-
-      const channelCount = (ctype & 2 ? 3 : 1) + (ctype & 4 ? 1 : 0);
-      const pixelCount = width * height;
-
-      let raw16 = new Uint16Array(pixelCount * channelCount);
-      if (depth <= 8) {
-        for (let i = 0; i < raw16.length; i++) raw16[i] = data[i] * 257;
-      } else {
-        for (let i = 0; i < raw16.length; i++) raw16[i] = (data[2 * i] << 8) | data[2 * i + 1];
-      }
-
-      // Build full RGBA Uint16Array (Image16) and the 8-bit derivative in one pass.
-      const rgba16 = new Uint16Array(pixelCount * 4);
-      const final8 = new Uint8ClampedArray(pixelCount * 4);
-      for (let i = 0; i < pixelCount; i++) {
-        const idx16 = i * channelCount;
-        const dst = i * 4;
-
-        const r16 = raw16[idx16];
-        const g16 = channelCount >= 3 ? raw16[idx16 + 1] : r16;
-        const b16 = channelCount >= 3 ? raw16[idx16 + 2] : r16;
-        const a16 = channelCount === 4 ? raw16[idx16 + 3]
-                  : channelCount === 2 ? raw16[idx16 + 1]
-                  : 65535;
-
-        rgba16[dst] = r16;
-        rgba16[dst + 1] = g16;
-        rgba16[dst + 2] = b16;
-        rgba16[dst + 3] = a16;
-
-        final8[dst] = r16 >>> 8;
-        final8[dst + 1] = g16 >>> 8;
-        final8[dst + 2] = b16 >>> 8;
-        final8[dst + 3] = a16 >>> 8;
-      }
-
-      const imageData = new ImageData(final8, width, height);
-      imageData.__image16 = { width, height, data: rgba16 };
-      return imageData;
-    }
-
-    async function loadStandardImage(file) {
-      return new Promise((resolve, reject) => {
-        const img = new Image();
-        img.onload = () => {
-          const tempCanvas = document.createElement('canvas');
-          tempCanvas.width = img.width;
-          tempCanvas.height = img.height;
-          const tempCtx = tempCanvas.getContext('2d');
-          tempCtx.drawImage(img, 0, 0);
-          const imageData = tempCtx.getImageData(0, 0, img.width, img.height);
-          imageData.__image16 = fromImageData8(imageData);
-          resolve(imageData);
-        };
-        img.onerror = reject;
-        img.src = URL.createObjectURL(file);
-      });
     }
 
     function showImageUI() {
@@ -6916,11 +6266,7 @@
         state.lensCorrection.source = runtime.source;
         setLensStatus(resolveLensStatusKeyForSource(runtime.source));
 
-        const searchFlags = Number.isFinite(LF_SEARCH_SORT_AND_UNIQUIFY)
-          ? LF_SEARCH_SORT_AND_UNIQUIFY
-          : ((window.LensfunWasm && Number.isFinite(window.LensfunWasm.LF_SEARCH_SORT_AND_UNIQUIFY))
-            ? window.LensfunWasm.LF_SEARCH_SORT_AND_UNIQUIFY
-            : 2);
+        const searchFlags = Number.isFinite(runtime.searchFlags) ? runtime.searchFlags : 2;
         const results = runtime.client.searchLenses({
           lensModel: query.lensModel,
           lensMaker: query.lensMaker || undefined,
@@ -7682,771 +7028,16 @@
       return dstCtx.getImageData(0, 0, newW, newH);
     }
 
-    function resizeImageDataForDetection(imageData, maxSide = AUTO_FRAME_MAX_SIDE) {
-      if (!imageData) return null;
-      const longest = Math.max(imageData.width, imageData.height);
-      if (longest <= maxSide) return imageData;
-
-      const scale = maxSide / longest;
-      const targetW = Math.max(1, Math.round(imageData.width * scale));
-      const targetH = Math.max(1, Math.round(imageData.height * scale));
-
-      const srcCanvas = document.createElement('canvas');
-      srcCanvas.width = imageData.width;
-      srcCanvas.height = imageData.height;
-      const srcCtx = srcCanvas.getContext('2d', { willReadFrequently: true });
-      srcCtx.putImageData(imageData, 0, 0);
-
-      const dstCanvas = document.createElement('canvas');
-      dstCanvas.width = targetW;
-      dstCanvas.height = targetH;
-      const dstCtx = dstCanvas.getContext('2d', { willReadFrequently: true });
-      dstCtx.drawImage(srcCanvas, 0, 0, targetW, targetH);
-      return dstCtx.getImageData(0, 0, targetW, targetH);
-    }
-
-    function getOpenCvScriptBySource(src) {
-      return Array.from(document.querySelectorAll('script[data-opencv-loader="1"]'))
-        .find(script => script.dataset.opencvSource === src) || null;
-    }
-
-    function waitForScriptLoad(script, src) {
-      return new Promise((resolve, reject) => {
-        const loadState = script.dataset.loadState;
-        if (loadState === 'loaded') {
-          resolve();
-          return;
-        }
-        if (loadState === 'failed') {
-          reject(new Error(`OpenCV script load failed: ${src}`));
-          return;
-        }
-
-        const onLoad = () => {
-          cleanup();
-          resolve();
-        };
-        const onError = () => {
-          cleanup();
-          reject(new Error(`OpenCV script load failed: ${src}`));
-        };
-        const cleanup = () => {
-          script.removeEventListener('load', onLoad);
-          script.removeEventListener('error', onError);
-        };
-
-        script.addEventListener('load', onLoad);
-        script.addEventListener('error', onError);
-      });
-    }
-
-    function waitForOpenCvRuntime(timeoutMs = 15000) {
-      return new Promise((resolve, reject) => {
-        if (!window.cv) {
-          reject(new Error('OpenCV global is unavailable'));
-          return;
-        }
-        if (window.cv.Mat) {
-          resolve(true);
-          return;
-        }
-
-        let settled = false;
-        const timeoutId = window.setTimeout(() => {
-          if (settled) return;
-          settled = true;
-          reject(new Error('OpenCV runtime init timeout'));
-        }, timeoutMs);
-
-        const prev = window.cv.onRuntimeInitialized;
-        window.cv.onRuntimeInitialized = () => {
-          if (typeof prev === 'function') {
-            try {
-              prev();
-            } catch (err) {
-              console.warn('Previous OpenCV runtime hook failed:', err);
-            }
-          }
-          if (settled) return;
-          settled = true;
-          window.clearTimeout(timeoutId);
-          if (window.cv && window.cv.Mat) {
-            resolve(true);
-          } else {
-            reject(new Error('OpenCV initialized without Mat API'));
-          }
-        };
-      });
-    }
-
-    async function loadOpenCvFromSource(src) {
-      if (window.cv && window.cv.Mat) {
-        opencvActiveSource = src;
-        return true;
-      }
-
-      let script = getOpenCvScriptBySource(src);
-      if (script && script.dataset.loadState === 'failed') {
-        script.remove();
-        script = null;
-      }
-
-      if (!script) {
-        script = document.createElement('script');
-        script.src = src;
-        script.async = true;
-        script.defer = true;
-        script.dataset.opencvLoader = '1';
-        script.dataset.opencvSource = src;
-        script.dataset.loadState = 'loading';
-        script.onload = () => {
-          script.dataset.loadState = 'loaded';
-        };
-        script.onerror = () => {
-          script.dataset.loadState = 'failed';
-        };
-        document.head.appendChild(script);
-      }
-
-      await waitForScriptLoad(script, src);
-
-      if (!window.cv) {
-        throw new Error(`OpenCV global unavailable after loading ${src}`);
-      }
-      if (!window.cv.Mat) {
-        await waitForOpenCvRuntime();
-      }
-      if (!(window.cv && window.cv.Mat)) {
-        throw new Error(`OpenCV runtime incomplete after loading ${src}`);
-      }
-
-      opencvActiveSource = src;
-      return true;
-    }
-
-    async function ensureOpenCvReady() {
-      if (window.cv && window.cv.Mat) return true;
-      if (opencvReadyPromise) return opencvReadyPromise;
-
-      opencvReadyPromise = (async () => {
-        const errors = [];
-        for (const src of OPENCV_SCRIPT_CANDIDATES) {
-          try {
-            await loadOpenCvFromSource(src);
-            if (opencvActiveSource) {
-              console.info('OpenCV loaded from:', opencvActiveSource);
-            }
-            return true;
-          } catch (err) {
-            const message = err?.message || String(err);
-            errors.push(`[${src}] ${message}`);
-            console.warn('OpenCV source failed:', src, message);
-          }
-        }
-
-        console.error('OpenCV unavailable. Tried sources:', errors.join(' | '));
-        return false;
-      })();
-
-      const ready = await opencvReadyPromise;
-      if (!ready) {
-        opencvReadyPromise = null;
-      }
-      return ready;
-    }
-
-    function getAutoFrameAspectTargets() {
-      const pref = state.autoFrame && state.autoFrame.formatPreference ? state.autoFrame.formatPreference : 'auto';
-      const allowed120Map = (state.autoFrame && state.autoFrame.allowed120Formats) || {};
-      const enabled120 = AUTO_FRAME_DEFAULT_120_FORMATS.filter(fmt => allowed120Map[fmt] !== false);
-      const safe120 = enabled120.length ? enabled120 : ['6x6'];
-
-      const targets = [];
-      const addTarget = (key, weight = 1) => {
-        const ratio = AUTO_FRAME_FORMAT_RATIOS[key];
-        if (!Number.isFinite(ratio)) return;
-        targets.push({ key, ratio, weight: clampBetween(weight, 0.4, 1.2) });
-      };
-
-      if (pref === '135') {
-        addTarget('135', 1.05);
-        safe120.forEach(fmt => addTarget(`120-${fmt}`, 0.78));
-      } else if (pref === '120') {
-        safe120.forEach(fmt => addTarget(`120-${fmt}`, 1.05));
-        addTarget('135', 0.78);
-      } else {
-        addTarget('135', 1);
-        safe120.forEach(fmt => addTarget(`120-${fmt}`, 1));
-      }
-      return targets.length ? targets : [{ key: '135', ratio: 1.5, weight: 1 }];
-    }
-
-    function scoreAspectAgainstTargets(ratio, targets) {
-      const safeRatio = Math.max(0.01, Number(ratio) || 1);
-      let best = { score: 0, format: 'unknown' };
-      targets.forEach(target => {
-        const delta = Math.abs(safeRatio - target.ratio) / target.ratio;
-        const normalized = 1 - clampBetween(delta / 0.45, 0, 1);
-        const weighted = clampBetween(normalized * target.weight, 0, 1);
-        if (weighted > best.score) {
-          best = { score: weighted, format: target.key };
-        }
-      });
-      return best;
-    }
-
-    function sanitizeBound(bound, imageWidth, imageHeight) {
-      if (!bound) return null;
-      const left = clampBetween(Math.floor(Number(bound.x) || 0), 0, imageWidth - 1);
-      const top = clampBetween(Math.floor(Number(bound.y) || 0), 0, imageHeight - 1);
-      const maxWidth = imageWidth - left;
-      const maxHeight = imageHeight - top;
-      if (maxWidth < 1 || maxHeight < 1) return null;
-      const width = clampBetween(Math.floor(Number(bound.width) || 0), 1, maxWidth);
-      const height = clampBetween(Math.floor(Number(bound.height) || 0), 1, maxHeight);
-      if (width < 1 || height < 1) return null;
-      return { x: left, y: top, width, height };
-    }
-
-    function orderPointsClockwise(points) {
-      if (!Array.isArray(points) || points.length !== 4) return [];
-      const center = points.reduce((acc, p) => {
-        acc.x += p.x;
-        acc.y += p.y;
-        return acc;
-      }, { x: 0, y: 0 });
-      center.x /= points.length;
-      center.y /= points.length;
-      return [...points].sort((a, b) => {
-        const angleA = Math.atan2(a.y - center.y, a.x - center.x);
-        const angleB = Math.atan2(b.y - center.y, b.x - center.x);
-        return angleA - angleB;
-      });
-    }
-
-    function computeOrthogonality(points) {
-      if (!Array.isArray(points) || points.length !== 4) return 0.65;
-      const ordered = orderPointsClockwise(points);
-      if (ordered.length !== 4) return 0.65;
-
-      let deviationSum = 0;
-      for (let i = 0; i < 4; i++) {
-        const prev = ordered[(i + 3) % 4];
-        const curr = ordered[i];
-        const next = ordered[(i + 1) % 4];
-        const v1x = prev.x - curr.x;
-        const v1y = prev.y - curr.y;
-        const v2x = next.x - curr.x;
-        const v2y = next.y - curr.y;
-        const len1 = Math.hypot(v1x, v1y);
-        const len2 = Math.hypot(v2x, v2y);
-        if (len1 < 0.001 || len2 < 0.001) {
-          deviationSum += 45;
-          continue;
-        }
-        const cosTheta = clampBetween((v1x * v2x + v1y * v2y) / (len1 * len2), -1, 1);
-        const angle = Math.acos(cosTheta) * 180 / Math.PI;
-        deviationSum += Math.abs(90 - angle);
-      }
-      const avgDeviation = deviationSum / 4;
-      return 1 - clampBetween(avgDeviation / 30, 0, 1);
-    }
-
-    function computeParallelism(points) {
-      if (!Array.isArray(points) || points.length !== 4) return 0.65;
-      const ordered = orderPointsClockwise(points);
-      if (ordered.length !== 4) return 0.65;
-
-      const edges = [];
-      for (let i = 0; i < 4; i++) {
-        const p1 = ordered[i];
-        const p2 = ordered[(i + 1) % 4];
-        let orientation = Math.atan2(p2.y - p1.y, p2.x - p1.x) * 180 / Math.PI;
-        if (orientation < 0) orientation += 180;
-        edges.push(orientation);
-      }
-
-      const pairDelta = (a, b) => {
-        let delta = Math.abs(a - b);
-        if (delta > 90) delta = 180 - delta;
-        return delta;
-      };
-
-      const dev1 = pairDelta(edges[0], edges[2]);
-      const dev2 = pairDelta(edges[1], edges[3]);
-      const avgDeviation = (dev1 + dev2) / 2;
-      return 1 - clampBetween(avgDeviation / 20, 0, 1);
-    }
-
-    function extractApproxPoints(approxMat) {
-      if (!approxMat || !approxMat.data32S) return [];
-      const data = approxMat.data32S;
-      const points = [];
-      for (let i = 0; i + 1 < data.length; i += 2) {
-        points.push({ x: data[i], y: data[i + 1] });
-      }
-      return points;
-    }
-
-    function edgePixelAt(mat, x, y) {
-      if (!mat || !Number.isFinite(x) || !Number.isFinite(y)) return 0;
-      const safeX = clampBetween(Math.round(x), 0, mat.cols - 1);
-      const safeY = clampBetween(Math.round(y), 0, mat.rows - 1);
-      return mat.ucharPtr(safeY, safeX)[0] > 0 ? 1 : 0;
-    }
-
-    function computeEdgeSupport(edges, bound) {
-      if (!edges || !bound) return 0;
-      const left = bound.x;
-      const right = bound.x + bound.width - 1;
-      const top = bound.y;
-      const bottom = bound.y + bound.height - 1;
-      if (right <= left || bottom <= top) return 0;
-
-      const step = Math.max(1, Math.round(Math.min(bound.width, bound.height) / 120));
-      let hits = 0;
-      let total = 0;
-
-      for (let x = left; x <= right; x += step) {
-        hits += edgePixelAt(edges, x, top);
-        hits += edgePixelAt(edges, x, bottom);
-        total += 2;
-      }
-      for (let y = top; y <= bottom; y += step) {
-        hits += edgePixelAt(edges, left, y);
-        hits += edgePixelAt(edges, right, y);
-        total += 2;
-      }
-
-      return total > 0 ? clampBetween(hits / total, 0, 1) : 0;
-    }
-
-    function scoreFrameCandidate(candidate, context) {
-      if (!candidate || !context) return null;
-      const { imageWidth, imageHeight, imageArea, edges, aspectTargets } = context;
-      const bound = sanitizeBound(candidate.bound, imageWidth, imageHeight);
-      if (!bound) return null;
-
-      const area = Math.max(1, Number(candidate.area) || (bound.width * bound.height));
-      const areaRatio = area / imageArea;
-      const rectWidth = Math.max(1, Number(candidate.minRectWidth) || bound.width);
-      const rectHeight = Math.max(1, Number(candidate.minRectHeight) || bound.height);
-      const rectArea = Math.max(1, rectWidth * rectHeight);
-      const rectangularity = clampBetween(area / rectArea, 0, 1);
-
-      const areaCoverage = clampBetween(areaRatio / 0.88, 0, 1);
-      const overshootPenalty = areaRatio > 0.97 ? clampBetween((areaRatio - 0.97) / 0.03, 0, 1) * 0.35 : 0;
-      const areaScore = clampBetween(areaCoverage - overshootPenalty, 0, 1);
-
-      const points = Array.isArray(candidate.points) ? candidate.points : [];
-      const orthogonality = clampBetween(Number(candidate.orthogonalityHint), 0, 1) || computeOrthogonality(points);
-      const parallelism = clampBetween(Number(candidate.parallelismHint), 0, 1) || computeParallelism(points);
-      const edgeSupport = computeEdgeSupport(edges, bound);
-
-      const centerX = bound.x + (bound.width / 2);
-      const centerY = bound.y + (bound.height / 2);
-      const centerDist = Math.hypot(centerX - (imageWidth / 2), centerY - (imageHeight / 2));
-      const centerPrior = 1 - clampBetween(centerDist / (Math.hypot(imageWidth, imageHeight) * 0.45), 0, 1);
-
-      const ratio = Math.max(rectWidth, rectHeight) / Math.max(1, Math.min(rectWidth, rectHeight));
-      const aspect = scoreAspectAgainstTargets(ratio, aspectTargets);
-
-      const score = (
-        areaScore * AUTO_FRAME_SCORE_WEIGHTS.area +
-        rectangularity * AUTO_FRAME_SCORE_WEIGHTS.rectangularity +
-        orthogonality * AUTO_FRAME_SCORE_WEIGHTS.orthogonality +
-        parallelism * AUTO_FRAME_SCORE_WEIGHTS.parallelism +
-        edgeSupport * AUTO_FRAME_SCORE_WEIGHTS.edgeSupport +
-        centerPrior * AUTO_FRAME_SCORE_WEIGHTS.centerPrior +
-        aspect.score * AUTO_FRAME_SCORE_WEIGHTS.aspect
-      );
-
-      return {
-        ...candidate,
-        bound,
-        score: clampBetween(score, 0, 1),
-        areaRatio,
-        detectedFormat: aspect.format,
-        scoreBreakdown: {
-          area: Number(areaScore.toFixed(3)),
-          rectangularity: Number(rectangularity.toFixed(3)),
-          orthogonality: Number(orthogonality.toFixed(3)),
-          parallelism: Number(parallelism.toFixed(3)),
-          edgeSupport: Number(edgeSupport.toFixed(3)),
-          centerPrior: Number(centerPrior.toFixed(3)),
-          aspect: Number(aspect.score.toFixed(3))
-        },
-        minRect: {
-          angle: Number(candidate.minRectAngle) || 0,
-          width: rectWidth,
-          height: rectHeight
-        }
-      };
-    }
-
-    function buildHoughCandidate(edges, imageWidth, imageHeight) {
-      if (!window.cv.HoughLinesP) return null;
-      const lines = new window.cv.Mat();
-      try {
-        const minDim = Math.min(imageWidth, imageHeight);
-        window.cv.HoughLinesP(
-          edges,
-          lines,
-          1,
-          Math.PI / 180,
-          70,
-          Math.max(40, Math.round(minDim * 0.25)),
-          Math.max(8, Math.round(minDim * 0.02))
-        );
-
-        if (!lines.rows || !lines.data32S) return null;
-        const data = lines.data32S;
-        let left = Infinity;
-        let top = Infinity;
-        let right = -Infinity;
-        let bottom = -Infinity;
-        let hCount = 0;
-        let vCount = 0;
-
-        for (let i = 0; i < lines.rows; i++) {
-          const idx = i * 4;
-          const x1 = data[idx];
-          const y1 = data[idx + 1];
-          const x2 = data[idx + 2];
-          const y2 = data[idx + 3];
-          const dx = x2 - x1;
-          const dy = y2 - y1;
-          const length = Math.hypot(dx, dy);
-          if (length < minDim * 0.18) continue;
-
-          let angle = Math.abs(Math.atan2(dy, dx) * 180 / Math.PI);
-          if (angle > 90) angle = 180 - angle;
-
-          if (angle <= 16) {
-            hCount++;
-          } else if (angle >= 74) {
-            vCount++;
-          } else {
-            continue;
-          }
-
-          left = Math.min(left, x1, x2);
-          right = Math.max(right, x1, x2);
-          top = Math.min(top, y1, y2);
-          bottom = Math.max(bottom, y1, y2);
-        }
-
-        if (hCount < 2 || vCount < 2) return null;
-        if (!Number.isFinite(left) || !Number.isFinite(top) || !Number.isFinite(right) || !Number.isFinite(bottom)) {
-          return null;
-        }
-
-        const margin = Math.round(minDim * 0.006);
-        const bound = sanitizeBound({
-          x: left - margin,
-          y: top - margin,
-          width: (right - left) + margin * 2,
-          height: (bottom - top) + margin * 2
-        }, imageWidth, imageHeight);
-        if (!bound) return null;
-
-        return {
-          method: 'hough',
-          area: bound.width * bound.height,
-          bound,
-          minRectWidth: bound.width,
-          minRectHeight: bound.height,
-          minRectAngle: 0,
-          points: [
-            { x: bound.x, y: bound.y },
-            { x: bound.x + bound.width, y: bound.y },
-            { x: bound.x + bound.width, y: bound.y + bound.height },
-            { x: bound.x, y: bound.y + bound.height }
-          ],
-          orthogonalityHint: 1,
-          parallelismHint: 1
-        };
-      } catch (err) {
-        console.warn('Hough candidate failed:', err);
-        return null;
-      } finally {
-        lines.delete();
-      }
-    }
-
-    function detectFrameCandidatesWithCv(imageData, options = {}) {
-      if (!(window.cv && window.cv.Mat) || !imageData) return [];
-
-      const minAreaRatio = Number.isFinite(options.minAreaRatio) ? options.minAreaRatio : 0.05;
-      const retrievalMode = options.retrievalMode === 'external' ? window.cv.RETR_EXTERNAL : window.cv.RETR_LIST;
-      const aspectTargets = getAutoFrameAspectTargets();
-      const src = window.cv.matFromImageData(imageData);
-      const imageWidth = src.cols;
-      const imageHeight = src.rows;
-      const imageArea = Math.max(1, imageWidth * imageHeight);
-
-      let gray = null;
-      let claheEnhanced = null;
-      let topHat = null;
-      let blackHat = null;
-      let merged = null;
-      let blurred = null;
-      let edges = null;
-      let kernel3 = null;
-      let kernel7 = null;
-      let contours = null;
-      let hierarchy = null;
-
-      try {
-        gray = new window.cv.Mat();
-        claheEnhanced = new window.cv.Mat();
-        topHat = new window.cv.Mat();
-        blackHat = new window.cv.Mat();
-        merged = new window.cv.Mat();
-        blurred = new window.cv.Mat();
-        edges = new window.cv.Mat();
-        kernel3 = window.cv.getStructuringElement(window.cv.MORPH_RECT, new window.cv.Size(3, 3));
-        kernel7 = window.cv.getStructuringElement(window.cv.MORPH_RECT, new window.cv.Size(7, 7));
-        contours = new window.cv.MatVector();
-        hierarchy = new window.cv.Mat();
-
-        window.cv.cvtColor(src, gray, window.cv.COLOR_RGBA2GRAY);
-        let claheApplied = false;
-        let clahe = null;
-        try {
-          if (window.cv.createCLAHE && typeof window.cv.createCLAHE === 'function') {
-            clahe = window.cv.createCLAHE(2.0, new window.cv.Size(8, 8));
-          } else if (window.cv.CLAHE && typeof window.cv.CLAHE === 'function') {
-            clahe = new window.cv.CLAHE(2.0, new window.cv.Size(8, 8));
-          }
-          if (clahe && typeof clahe.apply === 'function') {
-            clahe.apply(gray, claheEnhanced);
-            claheApplied = true;
-          }
-        } catch (err) {
-          claheApplied = false;
-        } finally {
-          if (clahe && typeof clahe.delete === 'function') {
-            clahe.delete();
-          }
-        }
-        if (!claheApplied) {
-          window.cv.equalizeHist(gray, claheEnhanced);
-        }
-        window.cv.morphologyEx(claheEnhanced, topHat, window.cv.MORPH_TOPHAT, kernel7);
-        window.cv.morphologyEx(claheEnhanced, blackHat, window.cv.MORPH_BLACKHAT, kernel7);
-        window.cv.addWeighted(claheEnhanced, 1.0, topHat, 0.7, 0, merged);
-        window.cv.addWeighted(merged, 1.0, blackHat, -0.45, 0, merged);
-        window.cv.GaussianBlur(merged, blurred, new window.cv.Size(5, 5), 0, 0, window.cv.BORDER_DEFAULT);
-        window.cv.Canny(blurred, edges, 40, 140, 3, false);
-        window.cv.dilate(edges, edges, kernel3, new window.cv.Point(-1, -1), 1);
-
-        const candidates = [];
-        window.cv.findContours(edges, contours, hierarchy, retrievalMode, window.cv.CHAIN_APPROX_SIMPLE);
-        for (let i = 0; i < contours.size(); i++) {
-          const contour = contours.get(i);
-          let approx = null;
-          try {
-            const area = Math.abs(window.cv.contourArea(contour));
-            if (area < imageArea * minAreaRatio) continue;
-
-            const bound = window.cv.boundingRect(contour);
-            const minRect = window.cv.minAreaRect(contour);
-            const perimeter = window.cv.arcLength(contour, true);
-            approx = new window.cv.Mat();
-            window.cv.approxPolyDP(contour, approx, Math.max(2, perimeter * 0.02), true);
-            const approxPoints = extractApproxPoints(approx);
-
-            const scored = scoreFrameCandidate({
-              method: 'contour',
-              area,
-              bound,
-              minRectWidth: minRect.size.width,
-              minRectHeight: minRect.size.height,
-              minRectAngle: minRect.angle,
-              points: approxPoints.length === 4 ? approxPoints : []
-            }, {
-              imageWidth,
-              imageHeight,
-              imageArea,
-              edges,
-              aspectTargets
-            });
-            if (scored) candidates.push(scored);
-          } finally {
-            contour.delete();
-            if (approx) approx.delete();
-          }
-        }
-
-        const houghCandidate = buildHoughCandidate(edges, imageWidth, imageHeight);
-        if (houghCandidate) {
-          const scoredHough = scoreFrameCandidate(houghCandidate, {
-            imageWidth,
-            imageHeight,
-            imageArea,
-            edges,
-            aspectTargets
-          });
-          if (scoredHough) candidates.push(scoredHough);
-        }
-
-        return candidates
-          .filter(candidate => candidate.areaRatio >= minAreaRatio)
-          .sort((a, b) => b.score - a.score)
-          .slice(0, 10);
-      } catch (err) {
-        console.error('OpenCV border analysis failed:', err);
-        return [];
-      } finally {
-        src.delete();
-        if (gray) gray.delete();
-        if (claheEnhanced) claheEnhanced.delete();
-        if (topHat) topHat.delete();
-        if (blackHat) blackHat.delete();
-        if (merged) merged.delete();
-        if (blurred) blurred.delete();
-        if (edges) edges.delete();
-        if (kernel3) kernel3.delete();
-        if (kernel7) kernel7.delete();
-        if (contours) contours.delete();
-        if (hierarchy) hierarchy.delete();
-      }
-    }
-
-    function buildRotationCandidates(baseCandidates = []) {
-      const angleSet = new Set([0]);
-      baseCandidates.slice(0, 4).forEach(candidate => {
-        const minRect = candidate && candidate.minRect ? candidate.minRect : null;
-        if (!minRect) return;
-        let angle = Number(minRect.angle) || 0;
-        const width = Number(minRect.width) || 0;
-        const height = Number(minRect.height) || 0;
-        if (width < height) angle += 90;
-        [angle, -angle, angle + 90, angle - 90, angle + 180].forEach(raw => {
-          const normalized = normalizeAngleDegrees(raw);
-          const quantized = Math.round(normalized * 10) / 10;
-          if (Math.abs(quantized) <= 0.1) {
-            angleSet.add(0);
-          } else {
-            angleSet.add(quantized);
-          }
+    let autoFrameAnalyzerPromise = null;
+
+    function getAutoFrameAnalyzer() {
+      if (!autoFrameAnalyzerPromise) {
+        autoFrameAnalyzerPromise = import('./autoFrameAnalyzer.js').catch((err) => {
+          autoFrameAnalyzerPromise = null;
+          throw err;
         });
-      });
-      return Array.from(angleSet);
-    }
-
-    function getAutoFrameTargetRatiosForFormat(formatKey = 'unknown') {
-      const direct = AUTO_FRAME_FORMAT_RATIOS[formatKey];
-      if (Number.isFinite(direct)) return [direct];
-      const fallback = getAutoFrameAspectTargets()
-        .map(target => target.ratio)
-        .filter(ratio => Number.isFinite(ratio) && ratio > 0.01);
-      return fallback.length ? fallback : [AUTO_FRAME_FORMAT_RATIOS['135'] || 1.5];
-    }
-
-    function evaluateAutoFrameCropRegion(cropRegion, imageData, detectedFormat = 'unknown', candidate = null) {
-      if (!cropRegion || !imageData) {
-        return {
-          isValid: false,
-          areaRatio: 0,
-          aspectDelta: 1,
-          aspectScore: 0,
-          areaScore: 0,
-          edgeSupport: 0,
-          shortEdgeCoverage: 0
-        };
       }
-
-      const totalArea = Math.max(1, imageData.width * imageData.height);
-      const cropArea = Math.max(1, cropRegion.width * cropRegion.height);
-      const areaRatio = cropArea / totalArea;
-      const ratio = Math.max(cropRegion.width, cropRegion.height) / Math.max(1, Math.min(cropRegion.width, cropRegion.height));
-      const targetRatios = getAutoFrameTargetRatiosForFormat(detectedFormat);
-      let bestAspectDelta = Infinity;
-      targetRatios.forEach((targetRatio) => {
-        const delta = Math.abs(ratio - targetRatio) / targetRatio;
-        if (delta < bestAspectDelta) bestAspectDelta = delta;
-      });
-      if (!Number.isFinite(bestAspectDelta)) bestAspectDelta = 1;
-
-      const hasKnownFormat = Number.isFinite(AUTO_FRAME_FORMAT_RATIOS[detectedFormat]);
-      const aspectTolerance = hasKnownFormat ? 0.34 : 0.42;
-      const areaScore = clampBetween((areaRatio - 0.08) / 0.86, 0, 1);
-      const aspectScore = 1 - clampBetween(bestAspectDelta / aspectTolerance, 0, 1);
-      const shortEdgeCoverage = Math.min(cropRegion.width / imageData.width, cropRegion.height / imageData.height);
-      const edgeSupport = candidate && candidate.scoreBreakdown
-        ? clampBetween(Number(candidate.scoreBreakdown.edgeSupport) || 0, 0, 1)
-        : 0.5;
-
-      const isValid = areaRatio >= 0.10
-        && areaRatio <= 0.975
-        && bestAspectDelta <= aspectTolerance
-        && shortEdgeCoverage >= 0.22
-        && edgeSupport >= 0.12;
-
-      return {
-        isValid,
-        areaRatio: Number(areaRatio.toFixed(4)),
-        aspectDelta: Number(bestAspectDelta.toFixed(4)),
-        aspectScore: Number(aspectScore.toFixed(3)),
-        areaScore: Number(areaScore.toFixed(3)),
-        edgeSupport: Number(edgeSupport.toFixed(3)),
-        shortEdgeCoverage: Number(shortEdgeCoverage.toFixed(3)),
-        aspectTolerance: Number(aspectTolerance.toFixed(3))
-      };
-    }
-
-    function computeAutoFrameAnglePenalty(angle) {
-      const absAngle = Math.abs(normalizeAngleDegrees(Number(angle) || 0));
-      if (absAngle <= 0.12) return 0;
-      const remainder = absAngle % 90;
-      const distanceToRightAngle = Math.min(remainder, 90 - remainder);
-      const offAxisPenalty = clampBetween(distanceToRightAngle / 22, 0, 1) * 0.16;
-      const magnitudePenalty = clampBetween(absAngle / 120, 0, 1) * 0.07;
-      return clampBetween(offAxisPenalty + magnitudePenalty, 0, 0.25);
-    }
-
-    function buildCropRegionFromBound(bound, imageData, marginRatio = 0.02) {
-      if (!bound || !imageData) return null;
-      const margin = Math.round(Math.min(imageData.width, imageData.height) * Math.max(0, marginRatio));
-      const left = clampBetween(bound.x - margin, 0, imageData.width - 1);
-      const top = clampBetween(bound.y - margin, 0, imageData.height - 1);
-      const maxWidth = imageData.width - left;
-      const maxHeight = imageData.height - top;
-      const width = clampBetween(bound.width + margin * 2, 1, maxWidth);
-      const height = clampBetween(bound.height + margin * 2, 1, maxHeight);
-      return sanitizeCropRegionForImage({ left, top, width, height }, imageData);
-    }
-
-    function detectAxisAlignedCropRegion(imageData, marginRatio = 0.02) {
-      const candidates = detectFrameCandidatesWithCv(imageData, {
-        minAreaRatio: 0.04,
-        retrievalMode: 'external'
-      });
-      if (!candidates.length) return null;
-
-      for (const candidate of candidates) {
-        const cropRegion = buildCropRegionFromBound(candidate.bound, imageData, marginRatio);
-        if (!cropRegion) continue;
-        const validation = evaluateAutoFrameCropRegion(cropRegion, imageData, candidate.detectedFormat, candidate);
-        if (!validation.isValid) continue;
-        const confidence = clampBetween(
-          (candidate.score * 0.62) +
-          (Math.min(validation.areaRatio / 0.92, 1) * 0.16) +
-          (validation.aspectScore * 0.16) +
-          (validation.edgeSupport * 0.06),
-          0,
-          1
-        );
-        return {
-          cropRegion,
-          confidence,
-          candidate,
-          validation
-        };
-      }
-      return null;
+      return autoFrameAnalyzerPromise;
     }
 
     function inferConfidenceLevel(confidence) {
@@ -8462,69 +7053,16 @@
       const ready = await ensureOpenCvReady();
       if (!ready) return null;
 
-      const previewData = resizeImageDataForDetection(imageData, AUTO_FRAME_MAX_SIDE);
-      const previewCandidates = detectFrameCandidatesWithCv(previewData, { minAreaRatio: 0.04 });
-      if (!previewCandidates.length) return null;
-
-      const angleCandidates = buildRotationCandidates(previewCandidates);
-      let bestPreview = null;
-      for (const angle of angleCandidates) {
-        const rotatedPreview = Math.abs(angle) < 0.001 ? previewData : applyRotationToImageData(previewData, angle);
-        const cropPreview = detectAxisAlignedCropRegion(rotatedPreview, state.autoFrame.marginRatio);
-        if (!cropPreview) continue;
-        const baseScore = previewCandidates[0] ? previewCandidates[0].score : 0.5;
-        const anglePenalty = computeAutoFrameAnglePenalty(angle);
-        const validationAspect = cropPreview.validation ? cropPreview.validation.aspectScore : 0.6;
-        const score = clampBetween(
-          (baseScore * 0.24) +
-          (cropPreview.confidence * 0.66) +
-          (validationAspect * 0.10) -
-          anglePenalty,
-          0,
-          1
-        );
-        const isBetter = !bestPreview
-          || score > (bestPreview.score + 0.001)
-          || (Math.abs(score - bestPreview.score) <= 0.001 && Math.abs(angle) < Math.abs(bestPreview.angle));
-        if (isBetter) {
-          bestPreview = { angle, score, cropPreview, anglePenalty };
-        }
-      }
-
-      if (!bestPreview) return null;
-      const normalizedAngle = Math.abs(bestPreview.angle) < 0.15 ? 0 : Number(bestPreview.angle.toFixed(2));
-      const rotatedFull = Math.abs(normalizedAngle) < 0.001 ? imageData : applyRotationToImageData(imageData, normalizedAngle);
-      const cropFull = detectAxisAlignedCropRegion(rotatedFull, state.autoFrame.marginRatio);
-      if (!cropFull || !cropFull.validation || !cropFull.validation.isValid) return null;
-
-      const fullAnglePenalty = computeAutoFrameAnglePenalty(normalizedAngle);
-      const confidence = Number(clampBetween(
-        (bestPreview.score * 0.34) +
-        (cropFull.confidence * 0.56) +
-        (cropFull.validation.aspectScore * 0.10) -
-        (fullAnglePenalty * 0.4),
-        0,
-        1
-      ).toFixed(2));
-      const confidenceLevel = inferConfidenceLevel(confidence);
-      const detectedFormat = cropFull.candidate && cropFull.candidate.detectedFormat
-        ? cropFull.candidate.detectedFormat
-        : 'unknown';
-
-      return {
-        angle: normalizedAngle,
-        cropRegion: cropFull.cropRegion,
-        confidence,
-        confidenceLevel,
-        detectedFormat,
-        rotatedImageData: rotatedFull,
-        diagnostics: {
-          method: cropFull.candidate ? cropFull.candidate.method : 'unknown',
-          scoreBreakdown: cropFull.candidate ? cropFull.candidate.scoreBreakdown : null,
-          anglePenalty: Number(fullAnglePenalty.toFixed(3)),
-          cropValidation: cropFull.validation || null
-        }
-      };
+      const { detectFrameAndRotation: analyzeFrameAndRotation } = await getAutoFrameAnalyzer();
+      return analyzeFrameAndRotation(imageData, {
+        settings: state.autoFrame,
+        maxSide: AUTO_FRAME_MAX_SIDE,
+        formatRatios: AUTO_FRAME_FORMAT_RATIOS,
+        default120Formats: AUTO_FRAME_DEFAULT_120_FORMATS,
+        scoreWeights: AUTO_FRAME_SCORE_WEIGHTS,
+        rotateImageData: applyRotationToImageData,
+        sanitizeCropRegion: sanitizeCropRegionForImage
+      });
     }
 
     function formatAutoFrameDetail(result) {
@@ -9013,13 +7551,13 @@
         const containerRect = canvasContainer.getBoundingClientRect();
         const cx = containerRect.left + containerRect.width / 2;
         const cy = containerRect.top + containerRect.height / 2;
-        zoomAtPoint(state.zoomLevel * 1.5, cx, cy);
+        zoomAtPoint(state.zoomLevel * ZOOM_BUTTON_FACTOR, cx, cy);
       } else if (key === '-') {
         event.preventDefault();
         const containerRect = canvasContainer.getBoundingClientRect();
         const cx = containerRect.left + containerRect.width / 2;
         const cy = containerRect.top + containerRect.height / 2;
-        zoomAtPoint(state.zoomLevel / 1.5, cx, cy);
+        zoomAtPoint(state.zoomLevel / ZOOM_BUTTON_FACTOR, cx, cy);
       } else if (key === '0') {
         event.preventDefault();
         resetZoomPan();
@@ -9096,14 +7634,14 @@
       const containerRect = canvasContainer.getBoundingClientRect();
       const cx = containerRect.left + containerRect.width / 2;
       const cy = containerRect.top + containerRect.height / 2;
-      zoomAtPoint(state.zoomLevel * 1.5, cx, cy);
+      zoomAtPoint(state.zoomLevel * ZOOM_BUTTON_FACTOR, cx, cy);
     });
 
     document.getElementById('zoomOutBtn').addEventListener('click', () => {
       const containerRect = canvasContainer.getBoundingClientRect();
       const cx = containerRect.left + containerRect.width / 2;
       const cy = containerRect.top + containerRect.height / 2;
-      zoomAtPoint(state.zoomLevel / 1.5, cx, cy);
+      zoomAtPoint(state.zoomLevel / ZOOM_BUTTON_FACTOR, cx, cy);
     });
 
     document.getElementById('zoomResetBtn').addEventListener('click', () => {
@@ -9295,8 +7833,10 @@
     canvasContainer.addEventListener('wheel', (e) => {
       if (state.cropping || state.samplingMode) return;
       e.preventDefault();
-      const delta = e.ctrlKey ? -e.deltaY * 0.01 : -e.deltaY * 0.003;
-      const factor = Math.pow(2, delta);
+      const deltaUnit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? canvasContainer.clientHeight : 1;
+      const deltaY = e.deltaY * deltaUnit;
+      const sensitivity = e.ctrlKey ? ZOOM_PINCH_WHEEL_SENSITIVITY : ZOOM_WHEEL_SENSITIVITY;
+      const factor = Math.max(0.72, Math.min(1.38, Math.exp(-deltaY * sensitivity)));
       zoomAtPoint(state.zoomLevel * factor, e.clientX, e.clientY);
     }, { passive: false });
 
@@ -9306,7 +7846,7 @@
       if (state.zoomLevel > 1) {
         resetZoomPan();
       } else {
-        zoomAtPoint(2, e.clientX, e.clientY);
+        zoomAtPoint(ZOOM_DOUBLE_CLICK_FACTOR, e.clientX, e.clientY);
       }
     });
 
@@ -9743,169 +8283,32 @@
       };
     }
 
-    function canvasToBlobWithType(targetCanvas, mimeType, quality) {
-      return new Promise((resolve, reject) => {
-        targetCanvas.toBlob((blob) => {
-          if (!blob) {
-            reject(new Error('Failed to render export image.'));
-            return;
-          }
-          resolve(blob);
-        }, mimeType, quality);
-      });
+    const imageDataToCanvasBlob = createImageDataCanvasBlobEncoder();
+
+    let exportImageEncodersPromise = null;
+
+    function getExportImageEncoders() {
+      if (!exportImageEncodersPromise) {
+        exportImageEncodersPromise = import('./exportImageEncoders.js').catch((err) => {
+          exportImageEncodersPromise = null;
+          throw err;
+        });
+      }
+      return exportImageEncodersPromise;
     }
 
-    const pngCrcTable = (() => {
-      const table = new Uint32Array(256);
-      for (let n = 0; n < 256; n++) {
-        let c = n;
-        for (let k = 0; k < 8; k++) {
-          c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
-        }
-        table[n] = c >>> 0;
+    let jsZipCtorPromise = null;
+
+    async function getJSZipCtor() {
+      if (!jsZipCtorPromise) {
+        jsZipCtorPromise = import('jszip')
+          .then((mod) => (typeof mod.default === 'function' ? mod.default : mod))
+          .catch((err) => {
+            jsZipCtorPromise = null;
+            throw err;
+          });
       }
-      return table;
-    })();
-
-    function crc32OfBytes(bytes) {
-      let crc = 0xFFFFFFFF;
-      for (let i = 0; i < bytes.length; i++) {
-        crc = pngCrcTable[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8);
-      }
-      return (crc ^ 0xFFFFFFFF) >>> 0;
-    }
-
-    function createPngChunk(type, data) {
-      const dataBytes = data instanceof Uint8Array ? data : new Uint8Array(data);
-      const chunk = new Uint8Array(12 + dataBytes.length);
-      const view = new DataView(chunk.buffer);
-      view.setUint32(0, dataBytes.length, false);
-      for (let i = 0; i < 4; i++) chunk[4 + i] = type.charCodeAt(i);
-      chunk.set(dataBytes, 8);
-      const crc = crc32OfBytes(chunk.subarray(4, 8 + dataBytes.length));
-      view.setUint32(8 + dataBytes.length, crc, false);
-      return chunk;
-    }
-
-    function encodePng16Blob(imageData) {
-      const width = imageData.width;
-      const height = imageData.height;
-      const src = imageData.data;
-      const rowBytes = width * 4 * 2;
-      const raw = new Uint8Array((rowBytes + 1) * height);
-      let srcIndex = 0;
-      let rawIndex = 0;
-      for (let y = 0; y < height; y++) {
-        raw[rawIndex++] = 0; // filter type: None
-        for (let x = 0; x < width * 4; x++) {
-          const u16 = src[srcIndex++] * 257;
-          raw[rawIndex++] = (u16 >>> 8) & 0xFF;
-          raw[rawIndex++] = u16 & 0xFF;
-        }
-      }
-
-      const compressed = pako.deflate(raw, { level: 6 });
-      const signature = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
-      const ihdr = new Uint8Array(13);
-      const ihdrView = new DataView(ihdr.buffer);
-      ihdrView.setUint32(0, width, false);
-      ihdrView.setUint32(4, height, false);
-      ihdr[8] = 16; // bit depth
-      ihdr[9] = 6;  // RGBA
-      ihdr[10] = 0; // compression
-      ihdr[11] = 0; // filter
-      ihdr[12] = 0; // interlace
-
-      const ihdrChunk = createPngChunk('IHDR', ihdr);
-      const idatChunk = createPngChunk('IDAT', compressed);
-      const iendChunk = createPngChunk('IEND', new Uint8Array(0));
-
-      const totalLength = signature.length + ihdrChunk.length + idatChunk.length + iendChunk.length;
-      const png = new Uint8Array(totalLength);
-      let offset = 0;
-      png.set(signature, offset); offset += signature.length;
-      png.set(ihdrChunk, offset); offset += ihdrChunk.length;
-      png.set(idatChunk, offset); offset += idatChunk.length;
-      png.set(iendChunk, offset);
-
-      return new Blob([png], { type: 'image/png' });
-    }
-
-    function encodeTiffBlob(imageData, bitDepth = 8) {
-      const width = imageData.width;
-      const height = imageData.height;
-      const pixels = imageData.data;
-      const channels = 4;
-      const bytesPerSample = bitDepth === 16 ? 2 : 1;
-      const stripByteCount = width * height * channels * bytesPerSample;
-      const pixelData = new Uint8Array(stripByteCount);
-
-      if (bitDepth === 16) {
-        let p = 0;
-        for (let i = 0; i < pixels.length; i++) {
-          const value = pixels[i] * 257;
-          pixelData[p++] = value & 0xFF;
-          pixelData[p++] = (value >>> 8) & 0xFF;
-        }
-      } else {
-        pixelData.set(pixels);
-      }
-
-      const headerSize = 8;
-      const pixelOffset = headerSize;
-      const ifdOffset = pixelOffset + pixelData.length;
-      const entryCount = 12;
-      const ifdSize = 2 + (entryCount * 12) + 4;
-      const bitsArrayOffset = ifdOffset + ifdSize;
-      const sampleFormatOffset = bitsArrayOffset + 8;
-      const totalSize = sampleFormatOffset + 8;
-      const out = new Uint8Array(totalSize);
-      const view = new DataView(out.buffer);
-
-      const writeU16 = (off, val) => view.setUint16(off, val, true);
-      const writeU32 = (off, val) => view.setUint32(off, val, true);
-
-      // Header
-      out[0] = 0x49; out[1] = 0x49; // little-endian
-      writeU16(2, 42);
-      writeU32(4, ifdOffset);
-      out.set(pixelData, pixelOffset);
-
-      // IFD
-      writeU16(ifdOffset, entryCount);
-      let entryOffset = ifdOffset + 2;
-      const writeEntry = (tag, type, count, valueOrOffset) => {
-        writeU16(entryOffset, tag);
-        writeU16(entryOffset + 2, type);
-        writeU32(entryOffset + 4, count);
-        writeU32(entryOffset + 8, valueOrOffset);
-        entryOffset += 12;
-      };
-      const shortInline = (value) => value & 0xFFFF;
-
-      writeEntry(256, 4, 1, width);                 // ImageWidth
-      writeEntry(257, 4, 1, height);                // ImageLength
-      writeEntry(258, 3, 4, bitsArrayOffset);       // BitsPerSample
-      writeEntry(259, 3, 1, shortInline(1));        // Compression = none
-      writeEntry(262, 3, 1, shortInline(2));        // Photometric = RGB
-      writeEntry(273, 4, 1, pixelOffset);           // StripOffsets
-      writeEntry(277, 3, 1, shortInline(channels)); // SamplesPerPixel
-      writeEntry(278, 4, 1, height);                // RowsPerStrip
-      writeEntry(279, 4, 1, stripByteCount);        // StripByteCounts
-      writeEntry(284, 3, 1, shortInline(1));        // PlanarConfiguration
-      writeEntry(338, 3, 1, shortInline(1));        // ExtraSamples (associated alpha)
-      writeEntry(339, 3, 4, sampleFormatOffset);    // SampleFormat
-
-      writeU32(entryOffset, 0); // next IFD offset
-
-      // Extra value arrays
-      const sampleBit = bitDepth === 16 ? 16 : 8;
-      for (let i = 0; i < 4; i++) {
-        writeU16(bitsArrayOffset + (i * 2), sampleBit);
-        writeU16(sampleFormatOffset + (i * 2), 1); // unsigned integer
-      }
-
-      return new Blob([out], { type: 'image/tiff' });
+      return jsZipCtorPromise;
     }
 
     function getEffectiveExportBitDepth(format = state.exportFormat, requestedBitDepth = state.exportBitDepth) {
@@ -10362,26 +8765,20 @@
     }
 
     async function applyAdjustmentsWithSettings(imageData, settings) {
-      const safeSettings = sanitizeSettings(settings, {
-        fallbackSettings: state,
-        includeCurvePoints: false,
-        includeCurves: true
-      });
+      const adjustmentSettings = buildAdjustmentSettings(settings);
 
       // Try Worker for large images (>1MP)
-      if (isWorkerAvailable() && imageData.width * imageData.height > 1_000_000) {
-        // Mirror the useLegacyTone logic from applyAdjustmentsToBuffer:
-        // SilverCore handles tone internally, so zero out legacy tone params.
-        const workerSettings = usesSilverCoreConversion(safeSettings)
-          ? { ...safeSettings, exposure: 0, contrast: 0, highlights: 0, shadows: 0, temperature: 0, tint: 0, saturation: 0 }
-          : safeSettings;
-        const result = await workerApplyAdjustments(imageData, workerSettings, 'full');
+      if (imageData.width * imageData.height > 1_000_000 && isWorkerAvailable()) {
+        const result = await workerApplyAdjustments(imageData, adjustmentSettings, 'full');
         if (result) return result;
       }
 
       // Fallback to main thread
       const output = new ImageData(new Uint8ClampedArray(imageData.data.length), imageData.width, imageData.height);
-      applyAdjustmentsToBuffer(imageData, safeSettings, output, 'full');
+      applyPreparedAdjustmentsToBuffer(imageData, adjustmentSettings, output, {
+        quality: 'full',
+        lutScratch: adjustmentLutScratch
+      });
       return output;
     }
 
@@ -10433,56 +8830,18 @@
     function cropImageData(imageData, cropRegion) {
       const sanitized = sanitizeCropRegionForImage(cropRegion, imageData);
       if (!sanitized) return imageData;
-      const { left, top, width, height } = sanitized;
-      const croppedData = new ImageData(
-        new Uint8ClampedArray(width * height * 4),
-        width,
-        height
-      );
-
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          const srcIdx = ((top + y) * imageData.width + left + x) * 4;
-          const dstIdx = (y * width + x) * 4;
-          croppedData.data[dstIdx] = imageData.data[srcIdx];
-          croppedData.data[dstIdx + 1] = imageData.data[srcIdx + 1];
-          croppedData.data[dstIdx + 2] = imageData.data[srcIdx + 2];
-          croppedData.data[dstIdx + 3] = 255;
-        }
-      }
-
-      // Mirror the crop on the attached 16-bit buffer so SilverCore (which prefers
-      // __image16 over the 8-bit data) sees the cropped region at full precision.
-      const src16 = imageData.__image16;
-      if (src16 && src16.data instanceof Uint16Array) {
-        const dst16 = new Uint16Array(width * height * 4);
-        const srcW = imageData.width;
-        for (let y = 0; y < height; y++) {
-          const srcRow = (top + y) * srcW * 4;
-          const dstRow = y * width * 4;
-          for (let x = 0; x < width; x++) {
-            const si = srcRow + (left + x) * 4;
-            const di = dstRow + x * 4;
-            dst16[di] = src16.data[si];
-            dst16[di + 1] = src16.data[si + 1];
-            dst16[di + 2] = src16.data[si + 2];
-            dst16[di + 3] = src16.data[si + 3];
-          }
-        }
-        croppedData.__image16 = { width, height, data: dst16 };
-      }
-
-      return croppedData;
+      return cropImageDataRegion(imageData, sanitized);
     }
 
     async function loadFileToImageData(file) {
-      const arrayBuffer = await file.arrayBuffer();
       const fileName = file.name.toLowerCase();
 
-      if (['.cr2', '.cr3', '.crw', '.nef', '.nrw', '.arw', '.dng', '.raf', '.raw', '.rw2', '.pef', '.srw', '.3fr', '.mef', '.orf', '.rwl', '.iiq', '.x3f', '.mrw', '.kdc', '.dcr', '.tif', '.tiff'].some(ext => fileName.endsWith(ext))) {
-        return await loadRawFile(arrayBuffer, fileName);
+      if (isRawLikeFileName(fileName)) {
+        const arrayBuffer = await file.arrayBuffer();
+        return await loadRawImageData(arrayBuffer, fileName);
       } else if (file.type === 'image/png') {
-        return loadPngFile(arrayBuffer);
+        const arrayBuffer = await file.arrayBuffer();
+        return await loadPngImageData(arrayBuffer);
       } else {
         return await loadStandardImage(file);
       }
@@ -10498,6 +8857,7 @@
           const workerBlob = await workerEncodeTiff(imageData, exportInfo.bitDepth, onProgress);
           if (workerBlob) return workerBlob;
         }
+        const { encodeTiffBlob } = await getExportImageEncoders();
         return encodeTiffBlob(imageData, exportInfo.bitDepth);
       }
       if (exportInfo.format === 'png' && exportInfo.bitDepth === 16) {
@@ -10506,19 +8866,14 @@
           const workerBlob = await workerEncodePng16(imageData, onProgress);
           if (workerBlob) return workerBlob;
         }
+        const { encodePng16Blob } = await getExportImageEncoders();
         return encodePng16Blob(imageData);
       }
 
-      const tempCanvas = document.createElement('canvas');
-      tempCanvas.width = imageData.width;
-      tempCanvas.height = imageData.height;
-      const tempCtx = tempCanvas.getContext('2d');
-      tempCtx.putImageData(imageData, 0, 0);
-
       if (exportInfo.format === 'jpeg') {
-        return canvasToBlobWithType(tempCanvas, 'image/jpeg', jpegQuality / 100);
+        return imageDataToCanvasBlob(imageData, 'image/jpeg', jpegQuality / 100);
       }
-      return canvasToBlobWithType(tempCanvas, 'image/png');
+      return imageDataToCanvasBlob(imageData, 'image/png');
     }
 
     function updateBatchProgress(current, total, fileName) {
@@ -10685,6 +9040,7 @@
     }
 
     async function exportBatchAsZipDesktop(selectedFiles, zipFileName) {
+      const JSZipCtor = await getJSZipCtor();
       if (typeof JSZipCtor !== 'function') {
         throw new Error('JSZip module is unavailable');
       }
@@ -11186,46 +9542,25 @@
     function updateFileListUI() {
       const container = document.getElementById('fileListItems');
       const countEl = document.getElementById('fileListCount');
-      const selectedCount = state.fileQueue.filter(f => f.selected).length;
-      const settingsCount = state.fileQueue.filter(f => f.settings).length;
-
-      // Show: selected/total (settings saved count)
-      countEl.textContent = `${selectedCount}/${state.fileQueue.length} (${settingsCount} ${i18n[currentLang].configured || 'configured'})`;
-      container.innerHTML = '';
-
-      state.fileQueue.forEach((item, index) => {
-        const el = document.createElement('div');
-        el.className = 'file-list-item';
-        if (index === state.currentFileIndex) el.classList.add('active');
-        if (item.settings) el.classList.add('has-settings');
-        if (item.isDirty) el.classList.add('is-dirty');
-
-        const statusClass = item.status;
-        const statusText = i18n[currentLang][item.status === 'processing' ? 'processingStatus' : item.status] || item.status;
-        const settingsBadge = item.settings ? `<span class="file-list-settings-badge">${i18n[currentLang].customSettings || 'Custom'}</span>` : '';
-        const unsavedBadge = item.isDirty ? `<span class="file-list-unsaved-badge">${i18n[currentLang].unsaved || 'Unsaved'}</span>` : '';
-
-        el.innerHTML = `
-          <input type="checkbox" class="file-list-checkbox" ${item.selected ? 'checked' : ''} data-index="${index}">
-          <span class="file-list-name">${item.file.name}${settingsBadge}${unsavedBadge}</span>
-          <span class="file-list-status ${statusClass}">${statusText}</span>
-        `;
-
-        // Checkbox toggle
-        el.querySelector('.file-list-checkbox').addEventListener('click', (e) => {
-          e.stopPropagation();
-          state.fileQueue[index].selected = e.target.checked;
+      renderFileList({
+        container,
+        countEl,
+        items: state.fileQueue,
+        currentFileIndex: state.currentFileIndex,
+        labels: {
+          configured: i18n[currentLang].configured || 'configured',
+          customSettings: i18n[currentLang].customSettings || 'Custom',
+          unsaved: i18n[currentLang].unsaved || 'Unsaved',
+          statusText: (status) => i18n[currentLang][status === 'processing' ? 'processingStatus' : status] || status
+        },
+        onToggleSelected: (index, selected) => {
+          state.fileQueue[index].selected = selected;
           updateFileListUI();
           updateExportButtons();
-        });
-
-        // Click on item to view/edit
-        el.addEventListener('click', (e) => {
-          if (e.target.classList.contains('file-list-checkbox')) return;
+        },
+        onOpenFile: (index) => {
           switchToFile(index);
-        });
-
-        container.appendChild(el);
+        }
       });
 
       updateAutoFrameButtons();

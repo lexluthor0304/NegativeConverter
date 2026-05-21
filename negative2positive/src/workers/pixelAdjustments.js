@@ -67,8 +67,9 @@ export function buildChannelLuts({
  * @param {string} quality - 'preview' or 'full'
  * @param {function} [onProgress] - Optional progress callback(percent)
  * @param {number} [chunkSize=500000] - Pixels per progress chunk
+ * @param {object} [lutScratch] - Optional reusable { lutR, lutG, lutB } buffers
  */
-export function applyAdjustmentsToPixels(inputData, outputData, pixelCount, params, quality = 'full', onProgress = null, chunkSize = 500000) {
+export function applyAdjustmentsToPixels(inputData, outputData, pixelCount, params, quality = 'full', onProgress = null, chunkSize = 500000, lutScratch = null) {
   const {
     rMult, gMult, bMult,
     contrastFactor, doContrast,
@@ -86,9 +87,15 @@ export function applyAdjustmentsToPixels(inputData, outputData, pixelCount, para
 
   // Fast path: LUT-only when no highlights/shadows/HSL
   if (!doHighlights && !doShadows && !doHsl) {
-    const lutR = new Uint8Array(256);
-    const lutG = new Uint8Array(256);
-    const lutB = new Uint8Array(256);
+    const lutR = lutScratch && lutScratch.lutR instanceof Uint8Array && lutScratch.lutR.length >= 256
+      ? lutScratch.lutR
+      : new Uint8Array(256);
+    const lutG = lutScratch && lutScratch.lutG instanceof Uint8Array && lutScratch.lutG.length >= 256
+      ? lutScratch.lutG
+      : new Uint8Array(256);
+    const lutB = lutScratch && lutScratch.lutB instanceof Uint8Array && lutScratch.lutB.length >= 256
+      ? lutScratch.lutB
+      : new Uint8Array(256);
     buildChannelLuts({
       lutR, lutG, lutB,
       curveR, curveG, curveB,
