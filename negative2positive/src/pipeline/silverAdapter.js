@@ -1,5 +1,5 @@
 import { Engine } from '../silvercore/engine/Engine.js';
-import { filmPresets } from '../silvercore/engine/FilmPresets.js';
+import { loadFilmPresets } from '../silvercore/engine/filmPresetsLoader.js';
 import { bwMixWeights } from '../silvercore/engine/Presets.js';
 import {
   fromImageData8,
@@ -71,15 +71,16 @@ function computeFilmBaseGains(base) {
   };
 }
 
-function applyFilmPreset(baseSettings, presetId) {
+async function applyFilmPreset(baseSettings, presetId) {
   if (!presetId || presetId === 'none') return baseSettings;
+  const filmPresets = await loadFilmPresets();
   const preset = filmPresets[presetId];
   if (!preset) return baseSettings;
   return { ...baseSettings, ...preset.settings };
 }
 
-function buildSilverCoreParams(mode, settings = {}) {
-  const merged = applyFilmPreset(settings, settings.filmPreset);
+async function buildSilverCoreParams(mode, settings = {}) {
+  const merged = await applyFilmPreset(settings, settings.filmPreset);
   const colorModel = String(merged.colorModel || 'standard');
   const resolvedColorModel = mode === 'bw' ? 'mono' : colorModel;
 
@@ -238,7 +239,7 @@ function _needsFullProcess(slot, options) {
 
 async function runSilverCore(imageData, settings, mode, options) {
   const slot = _slotFor(options);
-  const params = buildSilverCoreParams(mode, settings);
+  const params = await buildSilverCoreParams(mode, settings);
 
   // Promote whatever the caller hands us into Image16. Loaders attach __image16
   // directly so the upcast is zero-copy in the common case.

@@ -6,6 +6,12 @@ import pako from 'pako';
 import { applyAdjustmentsToPixels, computeAdjustmentParams } from './pixelAdjustments.js';
 import { encodePng16Blob, encodeTiffBlob } from './imageEncoders.js';
 
+const adjustmentLutScratch = {
+  lutR: new Uint8Array(256),
+  lutG: new Uint8Array(256),
+  lutB: new Uint8Array(256)
+};
+
 self.onmessage = function (e) {
   const msg = e.data;
   try {
@@ -45,7 +51,7 @@ function handleApplyAdjustments(msg) {
 
   applyAdjustmentsToPixels(input, output, pixelCount, params, quality || 'full', (percent) => {
     self.postMessage({ type: 'progress', id, phase: 'adjustments', percent });
-  });
+  }, 500000, adjustmentLutScratch);
 
   // Transfer output buffer back (zero-copy)
   self.postMessage(
