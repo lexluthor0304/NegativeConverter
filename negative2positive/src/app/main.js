@@ -24,6 +24,11 @@
     import { loadLocalLensfunAssets } from './lensfunLoader.js';
     import { createOpenCvLoader } from './opencvLoader.js';
     import {
+      autoDetectFilmBase as detectFilmBaseAutomatically,
+      sampleFilmBase as sampleFilmBaseRobust,
+      sanitizeFilmBaseForSettings
+    } from './filmBaseDetection.js';
+    import {
       isRawLikeFileName,
       loadPngImageData,
       loadRawImageData,
@@ -61,9 +66,12 @@
         dropHint: "拖放图片到此处或点击读取",
         selectFile: "选择文件",
         applyRotate: "应用",
+        straightenLine: "拉直线",
         mirror: "镜像",
         crop: "裁剪",
-        applyCrop: "应用裁剪",
+        cropHintTitle: "裁剪和拉直",
+        cropHintBody: "拖动框内移动裁剪；拖动边角调整大小。按住 Command/Ctrl 并拖一条线拉直，也可以点「拉直线」后画线。",
+        applyCrop: "应用裁剪/拉直",
 	        cancelCrop: "取消",
 	        autoFrame: "自动识别边框",
 	        autoFrameSelected: "批量自动识别",
@@ -82,6 +90,9 @@
         step1: "第1步：裁剪",
         step2: "第2步：色罩",
         step3: "第3步：调整",
+        controlStageCrop: "裁剪",
+        controlStageMask: "色罩",
+        controlStageAdjust: "调整",
         step2ModeBorder: "有边框",
         step2ModeNoBorder: "无边框 / ES-2",
         filmSettings: "胶片设置",
@@ -122,7 +133,7 @@
         noviceGuideStatusAutoToStep3: "完成采样/自动检测后会自动进入第3步（无需再点下一步）。",
         noviceGuideStatusAutoToStep3Ready: "色罩已就绪，系统将自动进入第3步；你也可手动点“下一步：转换并进入调整”。",
         noviceGuideStatusManualConvert: "此模式不会自动跳转，请手动点击转换按钮进入第3步。",
-        noviceGuideStatusStep3Collapsed: "为降低新手复杂度，第3步面板已默认折叠；按需展开即可。",
+        noviceGuideStatusStep3Collapsed: "已保留常用调整，并默认收起颜色、风格和引擎等进阶面板。",
         noviceGuideWarningMaskUnset: "还未设置色罩，直接转换可能偏色。",
         noviceGuideWarningReferenceMissing: "尚未设置整卷参考值；自动检测结果不稳定时建议先设参考。",
 	        quickGuide: "快速引导：\n• 彩色负片：第1步裁剪 → 下一步：胶片设置 →（第2步）设置色罩（手动/自动/整卷参考）→ 下一步：转换并进入调整 → 第3步调色导出\n• 黑白负片：第1步裁剪 → 下一步：胶片设置 → 片种选“黑白”→ 下一步：转换并进入调整（无需色罩）\n• 正片：第1步裁剪 → 下一步：正片模式 → 下一步：转换并进入调整（无需色罩）\n批处理：添加多张 → 处理一张作为参考 →「保存设置/应用到已选中」→ 最后「批量导出 (ZIP)」。\n提示：两个“下一步”按钮只在第1步显示；看左上角步骤徽标确认当前在哪一步。",
@@ -175,6 +186,26 @@
         frontierGuidePopupNote: "如果你想换别的风格，仍可回到第 2 步手动修改。接下来建议在顶部使用“采样灰点”微调最佳白平衡。",
         frontierGuidePopupClose: "继续调整",
         sectionColorModel: "色彩模型",
+        sectionQuickFix: "快速修正",
+        groupFilmType: "片种",
+        groupMaskSource: "色罩来源",
+        groupMaskSourceHint: "看得到胶片边缘时用边缘取样；没有边缘时用自动检测或整卷参考。",
+        groupStartingLook: "风格起点",
+        groupOptionalCorrection: "可选校正",
+        sectionCleanup: "清理",
+        groupDustCleanup: "画面灰尘",
+        groupQuickBalance: "中性灰校正",
+        groupToneGlobal: "整体",
+        groupToneRange: "高光与阴影",
+        groupToneEndpoints: "黑白端点",
+        groupWhiteBalance: "白平衡",
+        groupColorStrength: "色彩强度",
+        groupLookProfile: "风格配置",
+        groupLookAtmosphere: "氛围",
+        groupEngineProcessing: "处理方式",
+        groupAdvancedRgb: "RGB 增益",
+        groupAdvancedCmy: "CMY 平衡",
+        groupAdvancedCurve: "曲线",
         coreColorModelLabel: "色彩模型",
         coreEnhancedProfile: "增强配置",
         coreProfileStrength: "配置强度",
@@ -209,6 +240,7 @@
         wbHighlightWeighted: "高光加权",
         wbMidtoneWeighted: "中间调加权",
         sectionEffects: "效果",
+        sectionLook: "风格",
         coreGlow: "辉光",
         coreFade: "褪色",
         sectionEngine: "引擎",
@@ -231,7 +263,7 @@
         cyan: "青色",
         magenta: "洋红",
         yellow: "黄色",
-        toneAdjustments: "色调调整",
+        toneAdjustments: "明暗",
         exposure: "曝光",
         contrast: "对比度",
         highlights: "高光",
@@ -405,9 +437,12 @@
         dropHint: "Drop image here or click to open",
         selectFile: "Select File",
         applyRotate: "Apply",
+        straightenLine: "Line",
         mirror: "Mirror",
         crop: "Crop",
-        applyCrop: "Apply Crop",
+        cropHintTitle: "Crop and straighten",
+        cropHintBody: "Drag inside the box to move it, or drag edges/corners to resize. Hold Command/Ctrl and draw a line to straighten, or click Line first.",
+        applyCrop: "Apply Crop/Straighten",
 	        cancelCrop: "Cancel",
 	        autoFrame: "Auto Frame",
 	        autoFrameSelected: "Auto Frame Selected",
@@ -426,6 +461,9 @@
         step1: "Step 1: Crop",
         step2: "Step 2: Mask",
         step3: "Step 3: Adjust",
+        controlStageCrop: "Crop",
+        controlStageMask: "Mask",
+        controlStageAdjust: "Adjust",
         step2ModeBorder: "Border Available",
         step2ModeNoBorder: "No Border / ES-2",
         filmSettings: "Film Settings",
@@ -466,7 +504,7 @@
         noviceGuideStatusAutoToStep3: "After sampling or auto-detect, conversion proceeds to Step 3 automatically.",
         noviceGuideStatusAutoToStep3Ready: "Mask baseline is ready. The app will enter Step 3 automatically; manual convert is still available.",
         noviceGuideStatusManualConvert: "This mode does not auto-jump. Click the convert button to enter Step 3.",
-        noviceGuideStatusStep3Collapsed: "Step 3 panels are collapsed by default for beginners. Expand only what you need.",
+        noviceGuideStatusStep3Collapsed: "Common controls stay visible; Color, Look, and Engine are folded until needed.",
         noviceGuideWarningMaskUnset: "Mask baseline is not set yet. Converting now may cause color cast.",
         noviceGuideWarningReferenceMissing: "No roll reference is set. If auto-detect is unstable, set one reference frame first.",
 	        quickGuide: "Quick Guide:\n• Color negative: Step 1 Crop → Next: Film Settings → (Step 2) set Mask (sample / auto-detect / roll reference) → Next: Convert and Continue → Step 3 Adjust & Export\n• B&W negative: Step 1 Crop → Next: Film Settings → set Film Type = B&W → Next: Convert and Continue (no mask)\n• Positive slide: Step 1 Crop → Next: Positive Mode → Next: Convert and Continue (no mask)\nBatch: Add multiple files → process one frame → Save Settings / Apply to Selected → Export All (ZIP) when ready.\nTip: The “Next” buttons only appear in Step 1. Check the badge to see your current step.",
@@ -519,6 +557,26 @@
         frontierGuidePopupNote: "You can still go back to Step 2 and change both options manually. Next, use the header gray-point sampler to fine-tune white balance.",
         frontierGuidePopupClose: "Continue",
         sectionColorModel: "Color Model",
+        sectionQuickFix: "Quick Fix",
+        groupFilmType: "Film type",
+        groupMaskSource: "Mask source",
+        groupMaskSourceHint: "Use the film edge when visible; use auto detection or roll reference when the border is missing.",
+        groupStartingLook: "Starting look",
+        groupOptionalCorrection: "Optional correction",
+        sectionCleanup: "Cleanup",
+        groupDustCleanup: "Dust cleanup",
+        groupQuickBalance: "Neutral balance",
+        groupToneGlobal: "Overall",
+        groupToneRange: "Highlights and shadows",
+        groupToneEndpoints: "Black and white points",
+        groupWhiteBalance: "White balance",
+        groupColorStrength: "Color strength",
+        groupLookProfile: "Profile character",
+        groupLookAtmosphere: "Atmosphere",
+        groupEngineProcessing: "Processing",
+        groupAdvancedRgb: "RGB gain",
+        groupAdvancedCmy: "CMY balance",
+        groupAdvancedCurve: "Curve",
         coreColorModelLabel: "Color Model",
         coreEnhancedProfile: "Enhanced Profile",
         coreProfileStrength: "Profile Strength",
@@ -553,6 +611,7 @@
         wbHighlightWeighted: "Highlight Weighted",
         wbMidtoneWeighted: "Midtone Weighted",
         sectionEffects: "Effects",
+        sectionLook: "Look",
         coreGlow: "Glow",
         coreFade: "Fade",
         sectionEngine: "Engine",
@@ -575,7 +634,7 @@
         cyan: "Cyan",
         magenta: "Magenta",
         yellow: "Yellow",
-        toneAdjustments: "Tone",
+        toneAdjustments: "Light",
         exposure: "Exposure",
         contrast: "Contrast",
         highlights: "Highlights",
@@ -749,9 +808,12 @@
         dropHint: "画像をドロップまたはクリックして読み込み",
         selectFile: "ファイル選択",
         applyRotate: "適用",
+        straightenLine: "傾き線",
         mirror: "ミラー",
         crop: "トリミング",
-        applyCrop: "適用",
+        cropHintTitle: "トリミングと傾き補正",
+        cropHintBody: "枠内をドラッグして移動、辺や角でサイズ調整。Command/Ctrl を押しながら線を引くか、「傾き線」を押して傾きを補正します。",
+        applyCrop: "トリミング/傾き補正を適用",
 	        cancelCrop: "キャンセル",
 	        autoFrame: "自動フレーム検出",
 	        autoFrameSelected: "選択画像を自動検出",
@@ -770,6 +832,9 @@
         step1: "ステップ1：トリミング",
         step2: "ステップ2：マスク",
         step3: "ステップ3：調整",
+        controlStageCrop: "トリミング",
+        controlStageMask: "マスク",
+        controlStageAdjust: "調整",
         step2ModeBorder: "端あり",
         step2ModeNoBorder: "端なし / ES-2",
         filmSettings: "フィルム設定",
@@ -810,7 +875,7 @@
         noviceGuideStatusAutoToStep3: "サンプリングまたは自動検出が完了すると、自動でステップ3へ進みます。",
         noviceGuideStatusAutoToStep3Ready: "マスク基準が準備できました。自動でステップ3へ進みます（手動変換も可能です）。",
         noviceGuideStatusManualConvert: "このモードは自動遷移しません。変換ボタンを押してステップ3へ進んでください。",
-        noviceGuideStatusStep3Collapsed: "初心者向けにステップ3の各パネルは初回のみ折りたたまれます。必要な項目だけ展開してください。",
+        noviceGuideStatusStep3Collapsed: "よく使う調整は表示し、カラー、ルック、エンジンは必要時まで折りたたみます。",
         noviceGuideWarningMaskUnset: "マスク基準が未設定です。このまま変換すると色かぶりの可能性があります。",
         noviceGuideWarningReferenceMissing: "ロール参照値が未設定です。自動検出が不安定な場合は先に参照コマを設定してください。",
 	        quickGuide: "クイックガイド：\n• カラーネガ：ステップ1 トリミング → 次へ：フィルム設定 →（ステップ2）マスク設定（手動/自動/ロール参照）→ 次へ：変換して調整へ → ステップ3 調整・書き出し\n• 白黒ネガ：ステップ1 → 次へ：フィルム設定 → 種類を「白黒」に → 次へ：変換して調整へ（マスク不要）\n• ポジ：ステップ1 → 次へ：ポジモード → 次へ：変換して調整へ（マスク不要）\n一括：複数追加 → 1枚を基準に調整 →「設定を保存/選択中に適用」→ 最後に ZIP 書き出し。\nヒント：「次へ」ボタンはステップ1でのみ表示。左上のバッジで現在のステップを確認。",
@@ -863,6 +928,26 @@
         frontierGuidePopupNote: "別の雰囲気にしたい場合は Step 2 に戻って手動で変更できます。次はヘッダーのグレーポイントサンプラーでホワイトバランスを整えてください。",
         frontierGuidePopupClose: "調整を続ける",
         sectionColorModel: "カラーモデル",
+        sectionQuickFix: "クイック補正",
+        groupFilmType: "フィルム種類",
+        groupMaskSource: "マスク元",
+        groupMaskSourceHint: "フィルム端が見える場合は端をサンプルし、端がない場合は自動検出またはロール参照を使います。",
+        groupStartingLook: "ルックの起点",
+        groupOptionalCorrection: "任意補正",
+        sectionCleanup: "クリーンアップ",
+        groupDustCleanup: "ダスト除去",
+        groupQuickBalance: "ニュートラル補正",
+        groupToneGlobal: "全体",
+        groupToneRange: "ハイライトとシャドウ",
+        groupToneEndpoints: "白黒ポイント",
+        groupWhiteBalance: "ホワイトバランス",
+        groupColorStrength: "色の強さ",
+        groupLookProfile: "プロファイルの個性",
+        groupLookAtmosphere: "雰囲気",
+        groupEngineProcessing: "処理方式",
+        groupAdvancedRgb: "RGB ゲイン",
+        groupAdvancedCmy: "CMY バランス",
+        groupAdvancedCurve: "カーブ",
         coreColorModelLabel: "カラーモデル",
         coreEnhancedProfile: "拡張プロファイル",
         coreProfileStrength: "プロファイル強度",
@@ -897,6 +982,7 @@
         wbHighlightWeighted: "ハイライト重み付け",
         wbMidtoneWeighted: "中間調重み付け",
         sectionEffects: "エフェクト",
+        sectionLook: "ルック",
         coreGlow: "グロー",
         coreFade: "フェード",
         sectionEngine: "エンジン",
@@ -919,7 +1005,7 @@
         cyan: "シアン",
         magenta: "マゼンタ",
         yellow: "イエロー",
-        toneAdjustments: "トーン調整",
+        toneAdjustments: "明暗",
         exposure: "露出",
         contrast: "コントラスト",
         highlights: "ハイライト",
@@ -1082,7 +1168,7 @@
     };
 
     const DEBUG_UI = new URLSearchParams(window.location.search).get('debug') === '1';
-    const BUILD_ID = '2026-02-22-auto-frame-detect-4';
+    const BUILD_ID = '2026-05-22-auto-frame-detect-5';
     const ensureOpenCvReady = createOpenCvLoader([opencvScriptUrl]);
     const AUTO_FRAME_MAX_SIDE = 1600;
     const AUTO_FRAME_FORMAT_RATIOS = {
@@ -1105,7 +1191,7 @@
     const CORE_ENHANCED_PROFILE_OPTIONS = new Set(['none', 'frontier', 'crystal', 'natural', 'pakon']);
     const CORE_COLOR_MODEL_OPTIONS = new Set(['frontier', 'standard', 'warm', 'mono', 'noritsu', 'cine-log', 'cine-rich', 'cine-flat', 'neutral']);
     const CORE_COLOR_MODEL_MIGRATION_MAP = Object.freeze({});
-    const STEP3_GUIDE_COLLAPSED_SESSION_KEY = 'nc_step3_guide_collapsed_v1';
+    const STEP3_GUIDE_COLLAPSED_SESSION_KEY = 'nc_step3_guide_collapsed_v2';
     const FRONTIER_GUIDE_POPUP_SESSION_KEY = 'nc_frontier_guide_popup_shown_v1';
     const PRIVACY_BANNER_COLLAPSED_STORAGE_KEY = 'nc_privacy_banner_collapsed_v1';
     const GUIDE_MODE_STORAGE_KEY = 'nc_guide_mode_enabled_v1';
@@ -1295,7 +1381,7 @@
       if (!guideModeEnabled) return;
       if (state.currentStep < 3) return;
       if (step3GuideCollapsedOnce) return;
-      ['conversion', 'tone', 'color', 'effects', 'engine'].forEach(section => {
+      ['color', 'effects', 'engine', 'additional'].forEach(section => {
         setSectionCollapsed(section, true);
       });
       step3GuideCollapsedOnce = true;
@@ -1428,7 +1514,7 @@
       }
 
       if (sampleBtn) {
-        sampleBtn.style.display = show ? 'none' : 'inline-flex';
+        sampleBtn.style.display = show ? 'inline-flex' : 'none';
         sampleBtn.classList.toggle('active', isActive);
       }
 
@@ -2058,6 +2144,12 @@
       useSelectedBtn.disabled = !hasResults;
 
       const selectedLens = state.lensCorrection.selectedLens;
+      const statusKey = state.lensCorrection.statusKey || 'lensStatusIdle';
+      panel.classList.toggle(
+        'is-open',
+        Boolean(state.lensCorrection.enabled || selectedLens || hasResults || statusKey !== 'lensStatusIdle')
+      );
+
       if (selectedLens) {
         selectedText.textContent = applyTemplate(
           getLocalizedText('lensSelectedPrefix', 'Selected profile: {lens}'),
@@ -2067,7 +2159,6 @@
         selectedText.textContent = getLocalizedText('lensSelectedNone', 'Selected profile: none');
       }
 
-      const statusKey = state.lensCorrection.statusKey || 'lensStatusIdle';
       const template = getLocalizedText(statusKey, getLocalizedText('lensStatusIdle', 'Lens correction is optional.'));
       statusBox.textContent = applyTemplate(template, state.lensCorrection.statusVars || {});
       statusBox.classList.remove('error', 'ready');
@@ -2528,11 +2619,12 @@
       // UI state
       cropping: false,
       cropStart: null,
+      cropDraft: null,
       croppingActive: false,
       samplingMode: null,  // null, 'filmBase', 'whiteBalance'
       rotationAngle: 0,
       beforeAfterActive: false,
-      beforeAfterSource: null, // null | 'button' | 'keyboard'
+      beforeAfterSource: null, // null | 'button' | 'shortcut'
 
       autoFrame: {
         enabled: true,
@@ -3246,6 +3338,19 @@
         }
       });
 
+      [1, 2, 3].forEach((stage) => {
+        const stageEl = document.getElementById('panelStage' + stage);
+        if (!stageEl) return;
+        stageEl.classList.remove('active', 'completed');
+        stageEl.removeAttribute('aria-current');
+        if (stage < state.currentStep) {
+          stageEl.classList.add('completed');
+        } else if (stage === state.currentStep) {
+          stageEl.classList.add('active');
+          stageEl.setAttribute('aria-current', 'step');
+        }
+      });
+
       // Update badge
       badge.className = 'status-badge step' + state.currentStep;
       badge.setAttribute('data-i18n', 'step' + state.currentStep);
@@ -3345,7 +3450,10 @@
 
       state.beforeAfterActive = true;
       state.beforeAfterSource = source;
-      if (beforeAfterBtn) beforeAfterBtn.classList.add('active');
+      if (beforeAfterBtn) {
+        beforeAfterBtn.classList.add('active');
+        beforeAfterBtn.setAttribute('aria-pressed', 'true');
+      }
       renderBeforeAfterReference(referenceImageData);
     }
 
@@ -3354,10 +3462,15 @@
 
       state.beforeAfterActive = false;
       state.beforeAfterSource = null;
-      if (beforeAfterBtn) beforeAfterBtn.classList.remove('active');
+      if (beforeAfterBtn) {
+        beforeAfterBtn.classList.remove('active');
+        beforeAfterBtn.setAttribute('aria-pressed', 'false');
+      }
 
       if (state.currentStep >= 3 && state.processedImageData) {
-        updatePreview();
+        glCanvas.style.display = 'none';
+        canvas.style.display = 'block';
+        updateFullCpu();
         return;
       }
 
@@ -3366,6 +3479,14 @@
         displayNegative(sourceData);
         renderHistogram(sourceData);
       }
+    }
+
+    function toggleBeforeAfter(source = 'button') {
+      if (state.beforeAfterActive) {
+        exitBeforeAfter();
+        return;
+      }
+      enterBeforeAfter(source);
     }
 
     function updateBeforeAfterButtonState() {
@@ -3377,6 +3498,7 @@
       }
       beforeAfterBtn.disabled = !enabled;
       beforeAfterBtn.classList.toggle('active', state.beforeAfterActive);
+      beforeAfterBtn.setAttribute('aria-pressed', state.beforeAfterActive ? 'true' : 'false');
     }
 
     function isEditableTarget(target) {
@@ -3388,59 +3510,11 @@
     // Core Negative Processing Algorithm
     // ===========================================
     function sampleFilmBase(imageData, x, y, radius = 10) {
-      const { width, height, data } = imageData;
-      let rSum = 0, gSum = 0, bSum = 0, count = 0;
-
-      const startX = Math.max(0, x - radius);
-      const endX = Math.min(width - 1, x + radius);
-      const startY = Math.max(0, y - radius);
-      const endY = Math.min(height - 1, y + radius);
-
-      for (let py = startY; py <= endY; py++) {
-        for (let px = startX; px <= endX; px++) {
-          const idx = (py * width + px) * 4;
-          rSum += data[idx];
-          gSum += data[idx + 1];
-          bSum += data[idx + 2];
-          count++;
-        }
-      }
-
-      return {
-        r: Math.round(rSum / count),
-        g: Math.round(gSum / count),
-        b: Math.round(bSum / count)
-      };
+      return sampleFilmBaseRobust(imageData, x, y, radius);
     }
 
     function autoDetectFilmBase(imageData, borderBufferPct = 10) {
-      const { width, height } = imageData;
-      const minSide = Math.max(1, Math.min(width, height));
-      const bufferPct = sanitizeNumeric(borderBufferPct, 10, 0, 30);
-      const edgeBand = Math.max(1, Math.round(minSide * (bufferPct / 100)));
-      const edgeOffset = Math.max(1, Math.round(edgeBand * 0.5));
-      const sampleRadius = Math.max(1, Math.min(80, Math.round(edgeBand * 0.5)));
-
-      let candidates = [];
-      const regions = [
-        { x: width / 2, y: edgeOffset },
-        { x: width / 2, y: height - edgeOffset },
-        { x: edgeOffset, y: height / 2 },
-        { x: width - edgeOffset, y: height / 2 },
-        { x: edgeOffset, y: edgeOffset },
-        { x: width - edgeOffset, y: edgeOffset },
-        { x: edgeOffset, y: height - edgeOffset },
-        { x: width - edgeOffset, y: height - edgeOffset }
-      ];
-
-      for (const region of regions) {
-        const sample = sampleFilmBase(imageData, Math.floor(region.x), Math.floor(region.y), sampleRadius);
-        const brightness = (sample.r + sample.g + sample.b) / 3;
-        candidates.push({ ...sample, brightness });
-      }
-
-      candidates.sort((a, b) => b.brightness - a.brightness);
-      return { r: candidates[0].r, g: candidates[0].g, b: candidates[0].b };
+      return detectFilmBaseAutomatically(imageData, borderBufferPct);
     }
 
     // ===========================================
@@ -3471,14 +3545,7 @@
     }
 
     function sanitizeFilmBase(input, fallback = null) {
-      const source = (input && typeof input === 'object')
-        ? input
-        : (fallback && typeof fallback === 'object' ? fallback : { r: 210, g: 140, b: 90 });
-      return {
-        r: Math.round(sanitizeNumeric(source.r, 210, 1, 255)),
-        g: Math.round(sanitizeNumeric(source.g, 140, 1, 255)),
-        b: Math.round(sanitizeNumeric(source.b, 90, 1, 255))
-      };
+      return sanitizeFilmBaseForSettings(input, fallback);
     }
 
     function sanitizeCurvePointChannel(points, fallbackPoints = null) {
@@ -3757,21 +3824,43 @@
     // ===========================================
 
     function resizeHistogramCanvas() {
-      if (!histogramContainer || !histogramCanvas) return;
-      const displayWidth = histogramContainer.clientWidth - 32; // subtract padding
+      if (!histogramContainer || !histogramCanvas) return false;
+      const rect = histogramContainer.getBoundingClientRect();
+      const styles = window.getComputedStyle(histogramContainer);
+      const paddingX = parseFloat(styles.paddingLeft || '0') + parseFloat(styles.paddingRight || '0');
+      const displayWidth = Math.max(1, Math.round(rect.width - paddingX));
+      let resized = false;
       if (displayWidth > 0 && histogramCanvas.width !== displayWidth) {
         histogramCanvas.width = displayWidth;
         histogram.width = displayWidth;
+        resized = true;
       }
       const h = histogramCanvas.height;
       if (histogram.height !== h) {
         histogram.height = h;
+        resized = true;
       }
+      return resized;
     }
 
     function renderHistogram(imageData) {
+      if (!imageData) return;
       resizeHistogramCanvas();
       histogram.draw(imageData);
+    }
+
+    function getCurrentHistogramSource() {
+      return state.displayImageData
+        || state.processedImageData
+        || state.croppedImageData
+        || state.originalImageData
+        || null;
+    }
+
+    function redrawHistogramIfPossible() {
+      const source = getCurrentHistogramSource();
+      if (!source) return;
+      renderHistogram(source);
     }
 
     // ===========================================
@@ -5853,7 +5942,7 @@
       document.getElementById('zoomOutBtn').title = lang.zoomOut || 'Zoom Out';
       document.getElementById('zoomResetBtn').title = lang.zoomReset || 'Reset Zoom';
 
-      resizeHistogramCanvas();
+      redrawHistogramIfPossible();
       updateCanvasVisibility();
       adjustCanvasDisplay(canvas.width, canvas.height);
       updateAutoFrameConfigUI();
@@ -6149,7 +6238,11 @@
       if (state.filmBaseSet) {
         preview.style.display = 'flex';
         colorBox.style.backgroundColor = `rgb(${state.filmBase.r}, ${state.filmBase.g}, ${state.filmBase.b})`;
-        values.textContent = `R: ${state.filmBase.r} G: ${state.filmBase.g} B: ${state.filmBase.b}`;
+        const confidence = Number(state.filmBase.confidence);
+        const confidenceText = Number.isFinite(confidence) ? ` C: ${Math.round(confidence * 100)}%` : '';
+        const selected = Number(state.filmBase.selected);
+        const selectedText = Number.isFinite(selected) && selected > 0 ? ` N: ${selected}` : '';
+        values.textContent = `R: ${state.filmBase.r} G: ${state.filmBase.g} B: ${state.filmBase.b}${confidenceText}${selectedText}`;
       } else {
         preview.style.display = 'none';
       }
@@ -7055,7 +7148,10 @@
 
       const { detectFrameAndRotation: analyzeFrameAndRotation } = await getAutoFrameAnalyzer();
       return analyzeFrameAndRotation(imageData, {
-        settings: state.autoFrame,
+        settings: {
+          ...state.autoFrame,
+          filmType: state.filmType
+        },
         maxSide: AUTO_FRAME_MAX_SIDE,
         formatRatios: AUTO_FRAME_FORMAT_RATIOS,
         default120Formats: AUTO_FRAME_DEFAULT_120_FORMATS,
@@ -7194,6 +7290,8 @@
       const normalizedAngle = normalizeAngleDegrees(Number(angle) || 0);
       if (Math.abs(normalizedAngle) < 0.001) return;
 
+      if (state.cropping && rotateCropDraftBy(normalizedAngle)) return;
+
       pushUndo('rotation');
       const sourceOriginal = state.originalImageData;
       const sourceCrop = state.cropRegion ? { ...state.cropRegion } : null;
@@ -7267,15 +7365,29 @@
       markCurrentFileDirty();
     }
 
-    document.getElementById('rotateLeftBtn').addEventListener('click', () => applyRotation(-90));
-    document.getElementById('rotateRightBtn').addEventListener('click', () => applyRotation(90));
-    document.getElementById('mirrorBtn').addEventListener('click', () => applyMirror());
+    document.getElementById('rotateLeftBtn').addEventListener('click', () => {
+      if (state.cropping && rotateCropDraftBy(-90)) return;
+      applyRotation(-90);
+    });
+    document.getElementById('rotateRightBtn').addEventListener('click', () => {
+      if (state.cropping && rotateCropDraftBy(90)) return;
+      applyRotation(90);
+    });
+    document.getElementById('mirrorBtn').addEventListener('click', () => {
+      if (state.cropping) return;
+      applyMirror();
+    });
 
     document.getElementById('applyRotateBtn').addEventListener('click', () => {
       const angle = parseFloat(document.getElementById('rotateAngle').value) || 0;
+      if (state.cropping) {
+        setCropDraftTotalAngle(angle);
+        return;
+      }
       if (angle !== 0) {
         applyRotation(angle);
         document.getElementById('rotateAngle').value = 0;
+        document.getElementById('straightenAngle').value = 0;
       }
     });
 
@@ -7476,69 +7588,24 @@
     });
 
     // ===========================================
-    // Before / After (hold to preview original)
+    // Before / After (toggle to preview original)
     // ===========================================
-    let beforeAfterPointerId = null;
-
-    function releaseBeforeAfterPointerCapture(pointerId) {
-      if (!beforeAfterBtn || pointerId == null) return;
-      if (typeof beforeAfterBtn.hasPointerCapture === 'function'
-          && beforeAfterBtn.hasPointerCapture(pointerId)) {
-        beforeAfterBtn.releasePointerCapture(pointerId);
-      }
-    }
-
     if (beforeAfterBtn) {
-      beforeAfterBtn.addEventListener('pointerdown', (event) => {
-        if (event.pointerType === 'mouse' && event.button !== 0) return;
+      beforeAfterBtn.setAttribute('aria-pressed', 'false');
+      beforeAfterBtn.addEventListener('click', (event) => {
         if (beforeAfterBtn.disabled) return;
         event.preventDefault();
-        beforeAfterPointerId = event.pointerId;
-        if (typeof beforeAfterBtn.setPointerCapture === 'function') {
-          beforeAfterBtn.setPointerCapture(event.pointerId);
-        }
-        enterBeforeAfter('button');
+        toggleBeforeAfter('button');
       });
-
-      const endBeforeAfterFromButton = (event) => {
-        if (beforeAfterPointerId !== null && event.pointerId !== beforeAfterPointerId) return;
-        exitBeforeAfter();
-        releaseBeforeAfterPointerCapture(beforeAfterPointerId);
-        beforeAfterPointerId = null;
-      };
-
-      beforeAfterBtn.addEventListener('pointerup', endBeforeAfterFromButton);
-      beforeAfterBtn.addEventListener('pointercancel', endBeforeAfterFromButton);
-      beforeAfterBtn.addEventListener('pointerleave', endBeforeAfterFromButton);
-      beforeAfterBtn.addEventListener('contextmenu', (event) => event.preventDefault());
     }
 
     document.addEventListener('keydown', (event) => {
       if (event.code !== 'Space' || event.repeat) return;
       if (isEditableTarget(event.target)) return;
+      if (event.target === beforeAfterBtn) return;
       if (!canActivateBeforeAfter()) return;
       event.preventDefault();
-      enterBeforeAfter('keyboard');
-    });
-
-    document.addEventListener('keyup', (event) => {
-      if (event.code !== 'Space') return;
-      if (state.beforeAfterSource !== 'keyboard') return;
-      event.preventDefault();
-      exitBeforeAfter();
-    });
-
-    window.addEventListener('blur', () => {
-      if (state.beforeAfterActive) exitBeforeAfter();
-      releaseBeforeAfterPointerCapture(beforeAfterPointerId);
-      beforeAfterPointerId = null;
-    });
-
-    document.addEventListener('visibilitychange', () => {
-      if (!document.hidden) return;
-      if (state.beforeAfterActive) exitBeforeAfter();
-      releaseBeforeAfterPointerCapture(beforeAfterPointerId);
-      beforeAfterPointerId = null;
+      toggleBeforeAfter('shortcut');
     });
 
     // Keyboard zoom shortcuts
@@ -7652,27 +7719,66 @@
     // Cropping
     // ===========================================
     const cropOverlay = document.getElementById('cropOverlay');
+    const cropBtn = document.getElementById('cropBtn');
+    const applyCropBtn = document.getElementById('applyCropBtn');
+    const cancelCropBtn = document.getElementById('cancelCropBtn');
+    const rotateAngleInput = document.getElementById('rotateAngle');
+    const straightenAngleInput = document.getElementById('straightenAngle');
+    const straightenLineBtn = document.getElementById('straightenLineBtn');
+    const straightenGuideLine = document.getElementById('straightenGuideLine');
+    const cropModeHint = document.getElementById('cropModeHint');
+    const cropModeHintTitle = document.getElementById('cropModeHintTitle');
+    const cropModeHintBody = document.getElementById('cropModeHintBody');
+    const CROP_HIT_TARGET_PX = 14;
+    const CROP_EDGE_TARGET_PX = 10;
+    const CROP_MIN_DISPLAY_PX = 28;
+    const CROP_PREVIEW_MAX_PIXELS = 700_000;
+    const STRAIGHTEN_LINE_MIN_DISPLAY_PX = 32;
+    let activeCropPointerId = null;
+    let cropPreviewRenderFrame = null;
+    let cropLineToolActive = false;
+    let cropHintTimer = null;
 
-    document.getElementById('cropBtn').addEventListener('click', () => {
-      exitBeforeAfter();
-      state.cropping = true;
-      state.croppingActive = false;
-      state.cropStart = null;
-      activeCropPointerId = null;
-      cropOverlay.style.display = 'block';
-      cropOverlay.style.left = '0';
-      cropOverlay.style.top = '0';
-      cropOverlay.style.width = '0';
-      cropOverlay.style.height = '0';
-      canvasContainer.style.touchAction = 'none';
-
-      document.getElementById('cropBtn').style.display = 'none';
-      document.getElementById('applyCropBtn').style.display = 'inline-flex';
-      document.getElementById('cancelCropBtn').style.display = 'inline-flex';
-      updateBeforeAfterButtonState();
+    cropBtn.addEventListener('click', () => {
+      beginCropMode();
     });
 
-    let activeCropPointerId = null;
+    straightenLineBtn?.addEventListener('click', () => {
+      if (!state.cropping) return;
+      cropLineToolActive = !cropLineToolActive;
+      setCropActionUi(true);
+      showCropModeHint({ durationMs: 4200 });
+    });
+
+    function showCropModeHint(options = {}) {
+      if (!cropModeHint || !cropModeHintTitle || !cropModeHintBody) return;
+      const durationMs = Number.isFinite(options.durationMs) ? options.durationMs : 4200;
+
+      cropModeHintTitle.textContent = getLocalizedText('cropHintTitle', 'Crop and straighten');
+      cropModeHintBody.textContent = getLocalizedText(
+        'cropHintBody',
+        'Drag inside the box to move it, or drag edges/corners to resize. Hold Command/Ctrl and draw a line to straighten, or click Line first.'
+      );
+
+      if (cropHintTimer) clearTimeout(cropHintTimer);
+      cropModeHint.style.display = 'flex';
+      requestAnimationFrame(() => cropModeHint.classList.add('visible'));
+      cropHintTimer = setTimeout(() => hideCropModeHint(), durationMs);
+    }
+
+    function hideCropModeHint() {
+      if (!cropModeHint) return;
+      if (cropHintTimer) {
+        clearTimeout(cropHintTimer);
+        cropHintTimer = null;
+      }
+      cropModeHint.classList.remove('visible');
+      cropModeHint.addEventListener('transitionend', () => {
+        if (!cropModeHint.classList.contains('visible')) {
+          cropModeHint.style.display = 'none';
+        }
+      }, { once: true });
+    }
 
     function getCropDisplayScale() {
       // Pre-transform CSS size of the canvas (unaffected by zoom)
@@ -7695,55 +7801,601 @@
       };
     }
 
-    function startCropDrag(clientX, clientY) {
-      if (!state.cropping) return;
+    function clampCropValue(value, min, max) {
+      return Math.max(min, Math.min(max, value));
+    }
+
+    function formatCropAngleValue(value) {
+      const rounded = Math.round((Number(value) || 0) * 10) / 10;
+      return rounded.toFixed(1).replace(/\.0$/, '');
+    }
+
+    function scaleCropRect(rect, scaleX, scaleY) {
+      if (!rect) return null;
+      return {
+        left: rect.left * scaleX,
+        top: rect.top * scaleY,
+        width: rect.width * scaleX,
+        height: rect.height * scaleY
+      };
+    }
+
+    function buildCropPreviewSourceImageData(imageData) {
+      return downsampleImageDataForMaxPixels(imageData, CROP_PREVIEW_MAX_PIXELS) || imageData;
+    }
+
+    function getDefaultCropRect(imageData) {
+      if (!imageData) return null;
+
+      const existing = sanitizeCropRegionForImage(state.cropRegion, imageData);
+      if (existing) return existing;
+
+      const marginX = Math.floor(imageData.width * 0.05);
+      const marginY = Math.floor(imageData.height * 0.05);
+      return sanitizeDraftCropRect({
+        left: marginX,
+        top: marginY,
+        width: imageData.width - marginX * 2,
+        height: imageData.height - marginY * 2
+      }, imageData);
+    }
+
+    function sanitizeDraftCropRect(rect, imageData, options = {}) {
+      if (!rect || !imageData) return null;
+
+      const scale = getCropDisplayScale();
+      const minWidth = options.minWidth || Math.max(1, Math.min(imageData.width, CROP_MIN_DISPLAY_PX * scale.scaleX));
+      const minHeight = options.minHeight || Math.max(1, Math.min(imageData.height, CROP_MIN_DISPLAY_PX * scale.scaleY));
+
+      let left = Number(rect.left);
+      let top = Number(rect.top);
+      let width = Number(rect.width);
+      let height = Number(rect.height);
+
+      if (!Number.isFinite(left)) left = 0;
+      if (!Number.isFinite(top)) top = 0;
+      if (!Number.isFinite(width)) width = imageData.width;
+      if (!Number.isFinite(height)) height = imageData.height;
+
+      if (width < 0) {
+        left += width;
+        width = Math.abs(width);
+      }
+      if (height < 0) {
+        top += height;
+        height = Math.abs(height);
+      }
+
+      width = clampCropValue(width, minWidth, imageData.width);
+      height = clampCropValue(height, minHeight, imageData.height);
+      left = clampCropValue(left, 0, Math.max(0, imageData.width - width));
+      top = clampCropValue(top, 0, Math.max(0, imageData.height - height));
+
+      return { left, top, width, height };
+    }
+
+    function createCropDraft(sourceImageData) {
+      if (!sourceImageData) return null;
+      const previewSourceImageData = buildCropPreviewSourceImageData(sourceImageData);
+      const initialSourceRect = getDefaultCropRect(sourceImageData);
+      if (!previewSourceImageData || !initialSourceRect) return null;
+
+      const previewRect = scaleCropRect(
+        initialSourceRect,
+        previewSourceImageData.width / sourceImageData.width,
+        previewSourceImageData.height / sourceImageData.height
+      );
+
+      return {
+        sourceImageData,
+        previewSourceImageData,
+        rotatedImageData: previewSourceImageData,
+        rect: previewRect,
+        interaction: null,
+        rotationBase: 0,
+        straightenAngle: 0,
+        straightenLineAngles: []
+      };
+    }
+
+    function getCropDraftTotalAngle() {
+      const draft = state.cropDraft;
+      if (!draft) return 0;
+      return normalizeAngleDegrees((draft.rotationBase || 0) + (draft.straightenAngle || 0));
+    }
+
+    function decomposeCropDraftAngle(angle) {
+      const total = normalizeAngleDegrees(Number(angle) || 0);
+      let rotationBase = Math.round(total / 90) * 90;
+      rotationBase = normalizeAngleDegrees(rotationBase);
+      let straightenAngle = normalizeAngleDegrees(total - rotationBase);
+
+      if (straightenAngle > 45) {
+        rotationBase = normalizeAngleDegrees(rotationBase + 90);
+        straightenAngle = normalizeAngleDegrees(total - rotationBase);
+      } else if (straightenAngle < -45) {
+        rotationBase = normalizeAngleDegrees(rotationBase - 90);
+        straightenAngle = normalizeAngleDegrees(total - rotationBase);
+      }
+
+      return {
+        rotationBase,
+        straightenAngle: clampCropValue(straightenAngle, -45, 45)
+      };
+    }
+
+    function syncCropAngleInputs() {
+      if (!rotateAngleInput || !straightenAngleInput) return;
+
+      const draft = state.cropDraft;
+      if (!draft) {
+        rotateAngleInput.value = '0';
+        straightenAngleInput.value = '0';
+        return;
+      }
+
+      rotateAngleInput.value = formatCropAngleValue(getCropDraftTotalAngle());
+      straightenAngleInput.value = formatCropAngleValue(draft.straightenAngle || 0);
+    }
+
+    function setCropDraftTotalAngle(angle, options = {}) {
+      const draft = state.cropDraft;
+      if (!draft) return false;
+
+      const next = decomposeCropDraftAngle(angle);
+      draft.rotationBase = next.rotationBase;
+      draft.straightenAngle = next.straightenAngle;
+      if (!options.keepLineSamples) draft.straightenLineAngles = [];
+      syncCropAngleInputs();
+      scheduleCropDraftPreview({ preserveRect: true });
+      return true;
+    }
+
+    function rotateCropDraftBy(angleDelta) {
+      const draft = state.cropDraft;
+      if (!draft) return false;
+
+      draft.rotationBase = normalizeAngleDegrees((draft.rotationBase || 0) + (Number(angleDelta) || 0));
+      draft.straightenLineAngles = [];
+      syncCropAngleInputs();
+      scheduleCropDraftPreview({ preserveRect: true });
+      return true;
+    }
+
+    function setCropActionUi(active) {
+      cropBtn.style.display = active ? 'none' : 'inline-flex';
+      applyCropBtn.style.display = active ? 'inline-flex' : 'none';
+      cancelCropBtn.style.display = active ? 'inline-flex' : 'none';
+      cropOverlay.style.display = active ? 'block' : 'none';
+      canvasContainer.classList.toggle('crop-mode', active);
+      canvasContainer.classList.toggle('straighten-line-mode', active && cropLineToolActive);
+      canvasContainer.style.touchAction = active ? 'none' : '';
+      canvasContainer.style.cursor = active ? 'crosshair' : '';
+      if (straightenLineBtn) {
+        straightenLineBtn.disabled = !active;
+        straightenLineBtn.classList.toggle('active', active && cropLineToolActive);
+      }
+      if (!active && straightenGuideLine) straightenGuideLine.style.display = 'none';
+
+      const mirrorBtn = document.getElementById('mirrorBtn');
+      const autoFrameBtn = document.getElementById('autoFrameBtn');
+      const autoFrameSelectedBtn = document.getElementById('autoFrameSelectedBtn');
+      if (mirrorBtn) mirrorBtn.disabled = active;
+      if (autoFrameBtn) autoFrameBtn.disabled = active;
+      if (autoFrameSelectedBtn) autoFrameSelectedBtn.disabled = active;
+    }
+
+    function beginCropMode() {
+      const sourceImageData = state.originalImageData;
+      if (!sourceImageData) return;
+
+      exitBeforeAfter();
+      if (cropPreviewRenderFrame) {
+        cancelAnimationFrame(cropPreviewRenderFrame);
+        cropPreviewRenderFrame = null;
+      }
+
+      resetZoomPan();
+      state.cropping = true;
+      state.croppingActive = false;
+      state.cropStart = null;
+      cropLineToolActive = false;
+      activeCropPointerId = null;
+      state.cropDraft = createCropDraft(sourceImageData);
+      if (!state.cropDraft) {
+        state.cropping = false;
+        return;
+      }
+
+      setCropActionUi(true);
+      syncCropAngleInputs();
+      renderCropDraftPreview({ preserveRect: false });
+      showCropModeHint();
+      updateBeforeAfterButtonState();
+    }
+
+    function updateCropOverlayFromDraft() {
+      const draft = state.cropDraft;
+      const imageData = draft?.rotatedImageData;
+      if (!state.cropping || !draft || !imageData || !draft.rect) return;
+
+      draft.rect = sanitizeDraftCropRect(draft.rect, imageData) || draft.rect;
+      const { scaleX, scaleY } = getCropDisplayScale();
+      cropOverlay.style.display = 'block';
+      cropOverlay.style.left = (draft.rect.left / scaleX) + 'px';
+      cropOverlay.style.top = (draft.rect.top / scaleY) + 'px';
+      cropOverlay.style.width = (draft.rect.width / scaleX) + 'px';
+      cropOverlay.style.height = (draft.rect.height / scaleY) + 'px';
+    }
+
+    function renderCropDraftPreview(options = {}) {
+      const draft = state.cropDraft;
+      if (!state.cropping || !draft || !draft.previewSourceImageData) return;
+
+      const previousImage = draft.rotatedImageData;
+      const previousRect = draft.rect;
+      let normalizedRect = null;
+      if (options.preserveRect && previousImage && previousRect) {
+        normalizedRect = {
+          left: previousRect.left / previousImage.width,
+          top: previousRect.top / previousImage.height,
+          width: previousRect.width / previousImage.width,
+          height: previousRect.height / previousImage.height
+        };
+      }
+
+      const angle = getCropDraftTotalAngle();
+      const rotatedImageData = Math.abs(angle) < 0.001
+        ? draft.previewSourceImageData
+        : applyRotationToImageData(draft.previewSourceImageData, angle);
+      if (!rotatedImageData) return;
+
+      draft.rotatedImageData = rotatedImageData;
+      displayNegative(rotatedImageData);
+      canvas.style.display = 'block';
+      glCanvas.style.display = 'none';
+
+      if (normalizedRect) {
+        draft.rect = sanitizeDraftCropRect({
+          left: normalizedRect.left * rotatedImageData.width,
+          top: normalizedRect.top * rotatedImageData.height,
+          width: normalizedRect.width * rotatedImageData.width,
+          height: normalizedRect.height * rotatedImageData.height
+        }, rotatedImageData);
+      } else {
+        draft.rect = sanitizeDraftCropRect(draft.rect || getDefaultCropRect(rotatedImageData), rotatedImageData);
+      }
+
+      renderHistogram(rotatedImageData);
+      updateCropOverlayFromDraft();
+    }
+
+    function scheduleCropDraftPreview(options = {}) {
+      if (cropPreviewRenderFrame) cancelAnimationFrame(cropPreviewRenderFrame);
+      cropPreviewRenderFrame = requestAnimationFrame(() => {
+        cropPreviewRenderFrame = null;
+        renderCropDraftPreview(options);
+      });
+    }
+
+    function restoreDisplayAfterCropDraft() {
+      const sourceImageData = state.croppedImageData || state.originalImageData;
+      if (state.currentStep >= 3 && state.processedImageData) {
+        updateCanvasVisibility();
+        updatePreview();
+        scheduleFullUpdate();
+        return;
+      }
+
+      if (sourceImageData) {
+        displayNegative(sourceImageData);
+        updateCanvasVisibility();
+        renderHistogram(sourceImageData);
+      }
+    }
+
+    function exitCropMode(options = {}) {
+      if (cropPreviewRenderFrame) {
+        cancelAnimationFrame(cropPreviewRenderFrame);
+        cropPreviewRenderFrame = null;
+      }
+
+      state.cropping = false;
+      state.croppingActive = false;
+      state.cropStart = null;
+      state.cropDraft = null;
+      cropLineToolActive = false;
+      activeCropPointerId = null;
+      hideCropModeHint();
+      setCropActionUi(false);
+      syncCropAngleInputs();
+      updateBeforeAfterButtonState();
+
+      if (options.restore) {
+        restoreDisplayAfterCropDraft();
+      }
+    }
+
+    function getCropPointerPosition(clientX, clientY) {
+      const draft = state.cropDraft;
+      const imageData = draft?.rotatedImageData;
+      if (!imageData) return null;
 
       const { scaleX, scaleY } = getCropDisplayScale();
       const local = screenToWrapperLocal(clientX, clientY);
-
-      state.cropStart = {
-        x: local.x * scaleX,
-        y: local.y * scaleY
+      return {
+        x: clampCropValue(local.x * scaleX, 0, imageData.width),
+        y: clampCropValue(local.y * scaleY, 0, imageData.height)
       };
+    }
+
+    function hitTestCropDraft(position) {
+      const draft = state.cropDraft;
+      const rect = draft?.rect;
+      if (!position || !rect) return 'draw';
+
+      const { scaleX, scaleY } = getCropDisplayScale();
+      const edgeX = CROP_EDGE_TARGET_PX * scaleX;
+      const edgeY = CROP_EDGE_TARGET_PX * scaleY;
+      const handleX = CROP_HIT_TARGET_PX * scaleX;
+      const handleY = CROP_HIT_TARGET_PX * scaleY;
+      const right = rect.left + rect.width;
+      const bottom = rect.top + rect.height;
+      const withinX = position.x >= rect.left - edgeX && position.x <= right + edgeX;
+      const withinY = position.y >= rect.top - edgeY && position.y <= bottom + edgeY;
+      const nearLeft = Math.abs(position.x - rect.left) <= handleX && withinY;
+      const nearRight = Math.abs(position.x - right) <= handleX && withinY;
+      const nearTop = Math.abs(position.y - rect.top) <= handleY && withinX;
+      const nearBottom = Math.abs(position.y - bottom) <= handleY && withinX;
+
+      if (nearLeft && nearTop) return 'nw';
+      if (nearRight && nearTop) return 'ne';
+      if (nearRight && nearBottom) return 'se';
+      if (nearLeft && nearBottom) return 'sw';
+      if (nearTop) return 'n';
+      if (nearRight) return 'e';
+      if (nearBottom) return 's';
+      if (nearLeft) return 'w';
+      if (position.x >= rect.left && position.x <= right && position.y >= rect.top && position.y <= bottom) {
+        return 'move';
+      }
+      return 'draw';
+    }
+
+    function getCropCursor(hit) {
+      switch (hit) {
+        case 'move': return 'move';
+        case 'n':
+        case 's': return 'ns-resize';
+        case 'e':
+        case 'w': return 'ew-resize';
+        case 'ne':
+        case 'sw': return 'nesw-resize';
+        case 'nw':
+        case 'se': return 'nwse-resize';
+        default: return 'crosshair';
+      }
+    }
+
+    function getCropMinSize(imageData) {
+      const { scaleX, scaleY } = getCropDisplayScale();
+      return {
+        width: Math.max(1, Math.min(imageData.width, CROP_MIN_DISPLAY_PX * scaleX)),
+        height: Math.max(1, Math.min(imageData.height, CROP_MIN_DISPLAY_PX * scaleY))
+      };
+    }
+
+    function resizeDraftRect(startRect, mode, position) {
+      const draft = state.cropDraft;
+      const imageData = draft?.rotatedImageData;
+      if (!imageData || !startRect) return null;
+
+      const minSize = getCropMinSize(imageData);
+      let left = startRect.left;
+      let top = startRect.top;
+      let right = startRect.left + startRect.width;
+      let bottom = startRect.top + startRect.height;
+
+      if (mode.includes('w')) left = position.x;
+      if (mode.includes('e')) right = position.x;
+      if (mode.includes('n')) top = position.y;
+      if (mode.includes('s')) bottom = position.y;
+
+      if (right - left < minSize.width) {
+        if (mode.includes('w')) left = right - minSize.width;
+        else right = left + minSize.width;
+      }
+      if (bottom - top < minSize.height) {
+        if (mode.includes('n')) top = bottom - minSize.height;
+        else bottom = top + minSize.height;
+      }
+
+      left = clampCropValue(left, 0, imageData.width - minSize.width);
+      top = clampCropValue(top, 0, imageData.height - minSize.height);
+      right = clampCropValue(right, left + minSize.width, imageData.width);
+      bottom = clampCropValue(bottom, top + minSize.height, imageData.height);
+
+      return {
+        left,
+        top,
+        width: right - left,
+        height: bottom - top
+      };
+    }
+
+    function positionStraightenGuideLine(line) {
+      if (!straightenGuideLine || !line) return;
+
+      const { scaleX, scaleY } = getCropDisplayScale();
+      const x1 = line.start.x / scaleX;
+      const y1 = line.start.y / scaleY;
+      const x2 = line.current.x / scaleX;
+      const y2 = line.current.y / scaleY;
+      const dx = x2 - x1;
+      const dy = y2 - y1;
+      const length = Math.hypot(dx, dy);
+      const angle = Math.atan2(dy, dx) * 180 / Math.PI;
+
+      straightenGuideLine.style.display = 'block';
+      straightenGuideLine.style.left = x1 + 'px';
+      straightenGuideLine.style.top = y1 + 'px';
+      straightenGuideLine.style.width = Math.max(1, length) + 'px';
+      straightenGuideLine.style.transform = `rotate(${angle}deg)`;
+    }
+
+    function hideStraightenGuideLine() {
+      if (!straightenGuideLine) return;
+      straightenGuideLine.style.display = 'none';
+    }
+
+    function getNearestAxisCorrection(lineAngle) {
+      const candidates = [0, 90, -90, 180, -180]
+        .map(target => normalizeAngleDegrees(target - lineAngle));
+      const best = candidates.reduce((closest, candidate) => (
+        Math.abs(candidate) < Math.abs(closest) ? candidate : closest
+      ), candidates[0]);
+      return clampCropValue(best, -45, 45);
+    }
+
+    function averageCropAngles(angles) {
+      if (!angles.length) return 0;
+      const base = angles[0];
+      const avgDelta = angles.reduce((sum, angle) => (
+        sum + normalizeAngleDegrees(angle - base)
+      ), 0) / angles.length;
+      return normalizeAngleDegrees(base + avgDelta);
+    }
+
+    function finishStraightenLine(interaction) {
+      const draft = state.cropDraft;
+      if (!draft || !interaction?.start || !interaction?.current) return;
+
+      const { scaleX, scaleY } = getCropDisplayScale();
+      const dx = interaction.current.x - interaction.start.x;
+      const dy = interaction.current.y - interaction.start.y;
+      const displayLength = Math.hypot(dx / scaleX, dy / scaleY);
+      if (displayLength < STRAIGHTEN_LINE_MIN_DISPLAY_PX) return;
+
+      const lineAngle = Math.atan2(dy, dx) * 180 / Math.PI;
+      const correction = getNearestAxisCorrection(lineAngle);
+      const targetAngle = normalizeAngleDegrees((interaction.startAngle || 0) + correction);
+      draft.straightenLineAngles = [...(draft.straightenLineAngles || []), targetAngle].slice(-2);
+      setCropDraftTotalAngle(averageCropAngles(draft.straightenLineAngles), { keepLineSamples: true });
+    }
+
+    function startCropDrag(clientX, clientY, options = {}) {
+      const draft = state.cropDraft;
+      if (!state.cropping || !draft) return;
+
+      const position = getCropPointerPosition(clientX, clientY);
+      if (!position) return;
+      const startStraightenLine = Boolean(options.straightenLine);
+      if (startStraightenLine) {
+        draft.interaction = {
+          mode: 'straighten-line',
+          start: position,
+          current: position,
+          startAngle: getCropDraftTotalAngle()
+        };
+        state.cropStart = position;
+        state.croppingActive = true;
+        positionStraightenGuideLine(draft.interaction);
+        canvasContainer.style.cursor = 'crosshair';
+        return;
+      }
+
+      const mode = hitTestCropDraft(position);
+
+      draft.interaction = {
+        mode,
+        start: position,
+        startRect: draft.rect ? { ...draft.rect } : null
+      };
+
+      if (mode === 'draw') {
+        draft.rect = sanitizeDraftCropRect({
+          left: position.x,
+          top: position.y,
+          width: 1,
+          height: 1
+        }, draft.rotatedImageData);
+      }
+
+      state.cropStart = position;
       state.croppingActive = true;
+      canvasContainer.style.cursor = getCropCursor(mode);
+      updateCropOverlayFromDraft();
     }
 
     function updateCropDrag(clientX, clientY) {
-      if (!state.cropping || !state.croppingActive || !state.cropStart) return;
+      const draft = state.cropDraft;
+      const imageData = draft?.rotatedImageData;
+      const interaction = draft?.interaction;
+      if (!state.cropping || !state.croppingActive || !interaction || !imageData) return;
 
-      const { scaleX, scaleY } = getCropDisplayScale();
-      const local = screenToWrapperLocal(clientX, clientY);
+      const position = getCropPointerPosition(clientX, clientY);
+      if (!position) return;
 
-      const current = {
-        x: local.x * scaleX,
-        y: local.y * scaleY
-      };
+      if (interaction.mode === 'straighten-line') {
+        interaction.current = position;
+        positionStraightenGuideLine(interaction);
+      } else if (interaction.mode === 'move') {
+        const startRect = interaction.startRect;
+        const dx = position.x - interaction.start.x;
+        const dy = position.y - interaction.start.y;
+        draft.rect = sanitizeDraftCropRect({
+          left: startRect.left + dx,
+          top: startRect.top + dy,
+          width: startRect.width,
+          height: startRect.height
+        }, imageData);
+      } else if (interaction.mode === 'draw') {
+        const left = Math.min(interaction.start.x, position.x);
+        const top = Math.min(interaction.start.y, position.y);
+        draft.rect = sanitizeDraftCropRect({
+          left,
+          top,
+          width: Math.abs(position.x - interaction.start.x),
+          height: Math.abs(position.y - interaction.start.y)
+        }, imageData);
+      } else {
+        draft.rect = resizeDraftRect(interaction.startRect, interaction.mode, position);
+      }
 
-      const left = Math.min(state.cropStart.x, current.x);
-      const top = Math.min(state.cropStart.y, current.y);
-      const width = Math.abs(current.x - state.cropStart.x);
-      const height = Math.abs(current.y - state.cropStart.y);
-
-      // Overlay is inside wrapper, so use pre-transform (wrapper-local) coords
-      const leftDisp = left / scaleX;
-      const topDisp = top / scaleY;
-      const widthDisp = width / scaleX;
-      const heightDisp = height / scaleY;
-
-      cropOverlay.style.left = leftDisp + 'px';
-      cropOverlay.style.top = topDisp + 'px';
-      cropOverlay.style.width = widthDisp + 'px';
-      cropOverlay.style.height = heightDisp + 'px';
+      updateCropOverlayFromDraft();
     }
 
     function finishCropDrag() {
       if (!state.cropping) return;
+      const interaction = state.cropDraft?.interaction;
       state.croppingActive = false;
+      if (interaction?.mode === 'straighten-line') {
+        finishStraightenLine(interaction);
+        hideStraightenGuideLine();
+      }
+      if (state.cropDraft) state.cropDraft.interaction = null;
+      canvasContainer.style.cursor = 'crosshair';
+      updateCropOverlayFromDraft();
+    }
+
+    function updateCropHoverCursor(clientX, clientY, options = {}) {
+      if (!state.cropping || state.croppingActive) return;
+      if (options.straightenLine || cropLineToolActive) {
+        canvasContainer.style.cursor = 'crosshair';
+        return;
+      }
+      const position = getCropPointerPosition(clientX, clientY);
+      canvasContainer.style.cursor = getCropCursor(hitTestCropDraft(position));
+    }
+
+    function shouldStartStraightenLine(event) {
+      return Boolean(cropLineToolActive || event.metaKey || event.ctrlKey);
     }
 
     canvasContainer.addEventListener('mousedown', (e) => {
       if (state.cropping) {
-        startCropDrag(e.clientX, e.clientY);
+        e.preventDefault();
+        startCropDrag(e.clientX, e.clientY, { straightenLine: shouldStartStraightenLine(e) });
       } else if (canPan()) {
         state.isPanning = true;
         state.panStartX = e.clientX;
@@ -7757,7 +8409,8 @@
 
     canvasContainer.addEventListener('mousemove', (e) => {
       if (state.cropping) {
-        updateCropDrag(e.clientX, e.clientY);
+        if (state.croppingActive) updateCropDrag(e.clientX, e.clientY);
+        else updateCropHoverCursor(e.clientX, e.clientY, { straightenLine: shouldStartStraightenLine(e) });
       } else if (state.isPanning) {
         state.panX = state.panStartPanX + (e.clientX - state.panStartX);
         state.panY = state.panStartPanY + (e.clientY - state.panStartY);
@@ -7782,7 +8435,7 @@
         e.preventDefault();
         activeCropPointerId = e.pointerId;
         canvasContainer.setPointerCapture(e.pointerId);
-        startCropDrag(e.clientX, e.clientY);
+        startCropDrag(e.clientX, e.clientY, { straightenLine: shouldStartStraightenLine(e) });
       } else if (canPan()) {
         e.preventDefault();
         state.isPanning = true;
@@ -7881,54 +8534,65 @@
       pinchStartDist = 0;
     });
 
-    document.getElementById('cancelCropBtn').addEventListener('click', () => {
-      state.cropping = false;
-      state.croppingActive = false;
-      state.cropStart = null;
-      activeCropPointerId = null;
-      cropOverlay.style.display = 'none';
-      canvasContainer.style.touchAction = '';
-      document.getElementById('cropBtn').style.display = 'inline-flex';
-      document.getElementById('applyCropBtn').style.display = 'none';
-      document.getElementById('cancelCropBtn').style.display = 'none';
-      updateBeforeAfterButtonState();
+    cancelCropBtn.addEventListener('click', () => {
+      exitCropMode({ restore: true });
     });
 
-    document.getElementById('applyCropBtn').addEventListener('click', () => {
+    applyCropBtn.addEventListener('click', () => {
+      const draft = state.cropDraft;
+      if (!draft || !draft.sourceImageData) return;
+
+      const angle = getCropDraftTotalAngle();
+      const previewRotatedImageData = draft.rotatedImageData;
+      const rotatedImageData = Math.abs(angle) < 0.001
+        ? draft.sourceImageData
+        : applyRotationToImageData(draft.sourceImageData, angle);
+      if (!rotatedImageData || !previewRotatedImageData) return;
+
+      const cropRegion = sanitizeCropRegionForImage(scaleCropRect(
+        draft.rect,
+        rotatedImageData.width / previewRotatedImageData.width,
+        rotatedImageData.height / previewRotatedImageData.height
+      ), rotatedImageData);
+      if (!cropRegion) return;
+
       pushUndo('crop');
-      // Overlay coords are wrapper-local (pre-transform), convert to canvas pixels
-      const { scaleX, scaleY } = getCropDisplayScale();
-
-      const left = Math.floor(parseFloat(cropOverlay.style.left) * scaleX);
-      const top = Math.floor(parseFloat(cropOverlay.style.top) * scaleY);
-      const width = Math.floor(parseFloat(cropOverlay.style.width) * scaleX);
-      const height = Math.floor(parseFloat(cropOverlay.style.height) * scaleY);
-
-      if (width <= 0 || height <= 0) return;
-
-      const baseCrop = state.cropRegion;
-      const hasNestedCropBase = Boolean(state.croppedImageData && baseCrop);
-      const absoluteCrop = {
-        left: hasNestedCropBase ? baseCrop.left + left : left,
-        top: hasNestedCropBase ? baseCrop.top + top : top,
-        width,
-        height
-      };
-      applyCropRegionToLoadedImage(absoluteCrop, { refreshDisplay: true });
+      state.originalImageData = rotatedImageData;
+      state.rotationAngle = normalizeAngleDegrees((state.rotationAngle || 0) + angle);
+      state.cropRegion = cropRegion;
+      state.croppedImageData = cropImageData(rotatedImageData, cropRegion);
+      invalidateProcessedPipelineState();
       resetZoomPan();
       setStep2Mode(suggestStep2Mode());
       markCurrentFileDirty();
+      exitCropMode({ restore: false });
 
-      state.cropping = false;
-      state.croppingActive = false;
-      state.cropStart = null;
-      activeCropPointerId = null;
-      cropOverlay.style.display = 'none';
-      canvasContainer.style.touchAction = '';
-      document.getElementById('cropBtn').style.display = 'inline-flex';
-      document.getElementById('applyCropBtn').style.display = 'none';
-      document.getElementById('cancelCropBtn').style.display = 'none';
-      updateBeforeAfterButtonState();
+      if (state.currentStep >= 3) {
+        void processNegative();
+      } else {
+        const sourceImageData = state.croppedImageData || state.originalImageData;
+        displayNegative(sourceImageData);
+        updateCanvasVisibility();
+        renderHistogram(sourceImageData);
+      }
+    });
+
+    straightenAngleInput?.addEventListener('input', (event) => {
+      const draft = state.cropDraft;
+      if (!state.cropping || !draft) {
+        if (rotateAngleInput) rotateAngleInput.value = formatCropAngleValue(parseFloat(event.target.value) || 0);
+        return;
+      }
+
+      draft.straightenAngle = clampCropValue(parseFloat(event.target.value) || 0, -45, 45);
+      draft.straightenLineAngles = [];
+      syncCropAngleInputs();
+      scheduleCropDraftPreview({ preserveRect: true });
+    });
+
+    rotateAngleInput?.addEventListener('change', (event) => {
+      if (!state.cropping) return;
+      setCropDraftTotalAngle(parseFloat(event.target.value) || 0);
     });
 
     // Convert button (skip to step 2)
@@ -10157,5 +10821,7 @@
       if (canvas.width > 0 && canvas.height > 0) {
         adjustCanvasDisplay(canvas.width, canvas.height);
       }
-      resizeHistogramCanvas();
+      if (state.cropping) updateCropOverlayFromDraft();
+      const histogramResized = resizeHistogramCanvas();
+      if (histogramResized) redrawHistogramIfPossible();
     });

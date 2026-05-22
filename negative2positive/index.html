@@ -663,14 +663,126 @@
 
     .canvas-container.zoom-pan-active { cursor: grab; }
     .canvas-container.zoom-panning { cursor: grabbing; }
+    .canvas-container.crop-mode { cursor: crosshair; }
+    .canvas-container.straighten-line-mode { cursor: crosshair; }
 
     .crop-overlay {
-      border: 2px dashed var(--accent);
       position: absolute;
       pointer-events: none;
       display: none;
-      background: rgba(74, 158, 255, 0.1);
+      border: 1px solid rgba(255, 255, 255, 0.95);
+      background: rgba(74, 158, 255, 0.06);
+      box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.44), 0 0 0 1px rgba(0, 0, 0, 0.4);
       z-index: 100;
+    }
+
+    .crop-grid {
+      position: absolute;
+      inset: 0;
+      background:
+        linear-gradient(to right,
+          transparent 33.333%,
+          rgba(255, 255, 255, 0.56) 33.333%,
+          rgba(255, 255, 255, 0.56) calc(33.333% + 1px),
+          transparent calc(33.333% + 1px),
+          transparent 66.666%,
+          rgba(255, 255, 255, 0.56) 66.666%,
+          rgba(255, 255, 255, 0.56) calc(66.666% + 1px),
+          transparent calc(66.666% + 1px)),
+        linear-gradient(to bottom,
+          transparent 33.333%,
+          rgba(255, 255, 255, 0.56) 33.333%,
+          rgba(255, 255, 255, 0.56) calc(33.333% + 1px),
+          transparent calc(33.333% + 1px),
+          transparent 66.666%,
+          rgba(255, 255, 255, 0.56) 66.666%,
+          rgba(255, 255, 255, 0.56) calc(66.666% + 1px),
+          transparent calc(66.666% + 1px));
+    }
+
+    .crop-handle {
+      position: absolute;
+      width: 12px;
+      height: 12px;
+      border: 2px solid rgba(255, 255, 255, 0.98);
+      background: rgba(14, 19, 25, 0.78);
+      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+    }
+
+    .crop-handle-nw { left: -6px; top: -6px; }
+    .crop-handle-n { left: calc(50% - 6px); top: -6px; }
+    .crop-handle-ne { right: -6px; top: -6px; }
+    .crop-handle-e { right: -6px; top: calc(50% - 6px); }
+    .crop-handle-se { right: -6px; bottom: -6px; }
+    .crop-handle-s { left: calc(50% - 6px); bottom: -6px; }
+    .crop-handle-sw { left: -6px; bottom: -6px; }
+    .crop-handle-w { left: -6px; top: calc(50% - 6px); }
+
+    .straighten-guide-line {
+      position: absolute;
+      display: none;
+      height: 2px;
+      min-width: 1px;
+      pointer-events: none;
+      transform-origin: 0 50%;
+      background: rgba(255, 255, 255, 0.96);
+      box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.72), 0 0 18px rgba(74, 158, 255, 0.52);
+      z-index: 125;
+    }
+
+    .straighten-guide-line::before,
+    .straighten-guide-line::after {
+      content: "";
+      position: absolute;
+      top: 50%;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.96);
+      border: 1px solid rgba(0, 0, 0, 0.72);
+      transform: translateY(-50%);
+    }
+
+    .straighten-guide-line::before { left: -4px; }
+    .straighten-guide-line::after { right: -4px; }
+
+    .crop-mode-hint {
+      position: absolute;
+      top: 14px;
+      left: 14px;
+      max-width: min(360px, calc(100% - 28px));
+      display: none;
+      flex-direction: column;
+      gap: 4px;
+      padding: 10px 12px;
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      border-radius: 8px;
+      background: rgba(18, 22, 28, 0.86);
+      color: rgba(255, 255, 255, 0.92);
+      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.38);
+      backdrop-filter: blur(10px);
+      pointer-events: none;
+      opacity: 0;
+      transform: translateY(-4px);
+      transition: opacity 0.2s ease, transform 0.2s ease;
+      z-index: 160;
+    }
+
+    .crop-mode-hint.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .crop-mode-hint-title {
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 1.25;
+    }
+
+    .crop-mode-hint-body {
+      font-size: 12px;
+      line-height: 1.42;
+      color: rgba(255, 255, 255, 0.76);
     }
 
     /* Sampling Loupe (Magnifier) */
@@ -881,12 +993,13 @@
 
     /* Histogram */
     .histogram-container {
-      padding: 12px 16px;
-      border-bottom: 1px solid var(--border);
-      background: var(--bg-secondary);
-      position: sticky;
-      top: 0;
-      z-index: 2;
+      min-height: 112px;
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.025);
+      position: relative;
+      z-index: 0;
       flex: 0 0 auto;
     }
 
@@ -913,6 +1026,8 @@
     .controls-panel {
       background: var(--bg-secondary);
       border-left: 1px solid var(--border);
+      padding: 10px;
+      gap: 10px;
       overflow-y: auto;
       overflow-x: hidden;
       display: flex;
@@ -923,15 +1038,107 @@
     }
 
     /* Prevent flexbox from collapsing earlier sections (e.g. File List) when Step 3 reveals more UI. */
+    .controls-panel > .histogram-container,
     .controls-panel > .file-list-section,
+    .controls-panel > .control-stage-bar,
     .controls-panel > .control-section {
       flex: 0 0 auto;
       flex-shrink: 0;
     }
 
+    .control-stage-bar {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 6px;
+      padding: 8px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.025);
+    }
+
+    .control-stage-pill {
+      min-width: 0;
+      min-height: 42px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      gap: 3px;
+      padding: 7px 8px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 6px;
+      color: var(--text-secondary);
+      background: rgba(0, 0, 0, 0.16);
+    }
+
+    .control-stage-index {
+      width: 18px;
+      height: 18px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 50%;
+      font-size: 10px;
+      font-weight: 700;
+      color: var(--text-secondary);
+      background: rgba(255, 255, 255, 0.07);
+    }
+
+    .control-stage-label {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 11px;
+      font-weight: 600;
+      line-height: 1.2;
+    }
+
+    .control-stage-pill.active {
+      border-color: rgba(74, 158, 255, 0.45);
+      background: rgba(74, 158, 255, 0.12);
+      color: var(--text-primary);
+    }
+
+    .control-stage-pill.active .control-stage-index {
+      background: var(--accent);
+      color: white;
+    }
+
+    .control-stage-pill.completed {
+      border-color: rgba(76, 175, 80, 0.35);
+      color: var(--success);
+    }
+
+    .control-stage-pill.completed .control-stage-index {
+      background: rgba(76, 175, 80, 0.22);
+      color: var(--success);
+    }
+
     .control-section {
-      border-bottom: 1px solid var(--border);
-      padding: 16px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      background: rgba(255, 255, 255, 0.025);
+    }
+
+    .control-section.task-primary {
+      border-color: rgba(74, 158, 255, 0.28);
+      background: rgba(74, 158, 255, 0.045);
+    }
+
+    .control-section.task-secondary {
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .control-section.task-advanced {
+      border-style: dashed;
+      opacity: 0.92;
+    }
+
+    .control-section.guide-section {
+      padding: 10px;
+      border-color: rgba(255, 255, 255, 0.08);
+      background: rgba(0, 0, 0, 0.12);
     }
 
     .section-header {
@@ -939,6 +1146,10 @@
       justify-content: space-between;
       align-items: center;
       margin-bottom: 12px;
+      cursor: default;
+    }
+
+    .section-header[data-section] {
       cursor: pointer;
     }
 
@@ -993,14 +1204,99 @@
       display: none;
     }
 
-    .novice-guide-card {
+    .control-group {
       display: flex;
       flex-direction: column;
       gap: 10px;
-      padding: 12px;
-      background: linear-gradient(160deg, rgba(74, 158, 255, 0.12), rgba(24, 24, 24, 0.85));
-      border: 1px solid rgba(74, 158, 255, 0.35);
-      border-radius: 8px;
+      padding: 10px;
+      border: 1px solid rgba(255, 255, 255, 0.07);
+      border-radius: 6px;
+      background: rgba(0, 0, 0, 0.1);
+    }
+
+    .control-group.is-primary {
+      border-color: rgba(74, 158, 255, 0.22);
+      background: rgba(74, 158, 255, 0.045);
+    }
+
+    .control-group.is-muted {
+      border-style: dashed;
+      background: rgba(255, 255, 255, 0.014);
+    }
+
+    .control-group-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      color: var(--text-primary);
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1.25;
+    }
+
+    .control-group-title span {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .control-group-hint {
+      margin-top: -4px;
+      color: var(--text-secondary);
+      font-size: 11px;
+      line-height: 1.4;
+    }
+
+    .control-group-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 10px;
+    }
+
+    .control-group-grid.two-up {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .control-group .info-box,
+    .control-group .roll-reference-controls,
+    .control-group .lens-correction-panel {
+      margin-top: 0;
+      margin-bottom: 0;
+    }
+
+    .control-help-card .gray-point-guide-card {
+      padding: 0;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+    }
+
+    .control-action-row {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .control-help-card {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      padding: 10px;
+      border: 1px solid rgba(255, 183, 77, 0.24);
+      border-radius: 6px;
+      background: rgba(255, 183, 77, 0.07);
+    }
+
+    .novice-guide-card {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 10px;
+      background: rgba(74, 158, 255, 0.08);
+      border: 1px solid rgba(74, 158, 255, 0.24);
+      border-radius: 6px;
     }
 
     .novice-guide-card-header {
@@ -1039,8 +1335,8 @@
       padding-left: 18px;
       display: flex;
       flex-direction: column;
-      gap: 6px;
-      font-size: 12px;
+      gap: 4px;
+      font-size: 11px;
       line-height: 1.4;
       color: var(--text-secondary);
     }
@@ -1135,10 +1431,38 @@
       color: white;
     }
 
+    #filmSettingsSection .step2-mode-toggle {
+      order: 1;
+    }
+
+    #filmSettingsSection .film-type-toggle {
+      order: 2;
+    }
+
+    #coreColorModelStep2Control {
+      order: 3;
+    }
+
+    #filmPresetControl {
+      order: 4;
+    }
+
+    #filmBaseControls,
+    #positiveFilmInfo {
+      order: 5;
+    }
+
+    #applyConvertBtn {
+      order: 6;
+    }
+
+    #lensCorrectionPanel {
+      order: 7;
+    }
+
     .step2-mode-toggle {
       display: flex;
       gap: 8px;
-      margin-bottom: 10px;
     }
 
     .step2-mode-btn {
@@ -1264,7 +1588,6 @@
     }
 
     .lens-correction-panel {
-      margin-top: 10px;
       padding: 10px;
       border: 1px solid var(--border);
       border-radius: 6px;
@@ -1272,6 +1595,15 @@
       display: flex;
       flex-direction: column;
       gap: 8px;
+    }
+
+    .lens-correction-panel:not(.is-open) {
+      background: rgba(255, 255, 255, 0.015);
+    }
+
+    .lens-correction-panel:not(.is-open) .lens-status,
+    .lens-correction-panel:not(.is-open) .lens-grid {
+      display: none;
     }
 
     .lens-section-title {
@@ -1381,7 +1713,6 @@
     }
 
     .autoframe-settings {
-      margin-top: 8px;
       padding: 10px;
       border: 1px solid var(--border);
       border-radius: 6px;
@@ -1713,6 +2044,11 @@
       gap: 8px;
     }
 
+    .straighten-slider {
+      width: 130px;
+      accent-color: var(--accent);
+    }
+
     .rotate-input {
       width: 60px;
       padding: 6px 8px;
@@ -1864,11 +2200,12 @@
     .file-list-section {
       max-height: 200px;
       overflow-y: auto;
-      border-bottom: 1px solid var(--border);
+      border: 1px solid var(--border);
+      border-radius: 8px;
       position: sticky;
-      top: 0;
+      top: 10px;
       z-index: 5;
-      background: var(--bg-secondary);
+      background: rgba(255, 255, 255, 0.025);
     }
 
     .file-list-header {
@@ -1881,6 +2218,7 @@
       position: sticky;
       top: 0;
       z-index: 10;
+      border-radius: 7px 7px 0 0;
     }
 
     .file-list-title {
@@ -2443,6 +2781,10 @@
         background: rgba(255, 255, 255, 0.03);
       }
 
+      .straighten-slider {
+        width: 96px;
+      }
+
       .rotate-input {
         width: 70px;
         height: 34px;
@@ -2450,6 +2792,8 @@
       }
 
       .controls-panel {
+        padding: 8px;
+        gap: 8px;
         border: 1px solid rgba(255, 255, 255, 0.08);
         border-radius: 16px;
         max-height: none;
@@ -2461,6 +2805,15 @@
 
       .control-section {
         padding: 14px;
+      }
+
+      .histogram-container,
+      .file-list-section {
+        top: 8px;
+      }
+
+      .control-group-grid.two-up {
+        grid-template-columns: 1fr;
       }
 
       .section-title {
@@ -2724,7 +3077,22 @@
         <div class="canvas-transform-wrapper" id="canvasTransformWrapper">
           <canvas id="canvas" style="display: none;"></canvas>
           <canvas id="glCanvas" style="display: none;"></canvas>
-          <div class="crop-overlay" id="cropOverlay"></div>
+          <div class="crop-overlay" id="cropOverlay">
+            <div class="crop-grid"></div>
+            <span class="crop-handle crop-handle-nw"></span>
+            <span class="crop-handle crop-handle-n"></span>
+            <span class="crop-handle crop-handle-ne"></span>
+            <span class="crop-handle crop-handle-e"></span>
+            <span class="crop-handle crop-handle-se"></span>
+            <span class="crop-handle crop-handle-s"></span>
+            <span class="crop-handle crop-handle-sw"></span>
+            <span class="crop-handle crop-handle-w"></span>
+          </div>
+          <div class="straighten-guide-line" id="straightenGuideLine"></div>
+        </div>
+        <div class="crop-mode-hint" id="cropModeHint" role="status" aria-live="polite">
+          <div class="crop-mode-hint-title" id="cropModeHintTitle"></div>
+          <div class="crop-mode-hint-body" id="cropModeHintBody"></div>
         </div>
         <div class="loupe" id="loupe">
           <canvas id="loupeCanvas" width="155" height="155"></canvas>
@@ -2758,9 +3126,11 @@
           <span data-i18n="mirror">Mirror</span>
         </button>
         <div class="rotate-controls">
+          <input type="range" class="straighten-slider" id="straightenAngle" value="0" min="-45" max="45" step="0.1" title="Straighten">
           <input type="number" class="rotate-input" id="rotateAngle" value="0" min="-180" max="180" step="0.1">
           <span>°</span>
           <button class="toolbar-btn" id="applyRotateBtn" data-i18n="applyRotate">Apply</button>
+          <button class="toolbar-btn" id="straightenLineBtn" data-i18n="straightenLine" disabled>Line</button>
         </div>
         <div class="toolbar-separator"></div>
         <button class="toolbar-btn" id="cropBtn" data-i18n="crop">Crop</button>
@@ -2803,26 +3173,41 @@
         </div>
       </div>
 
-	      <!-- Workflow Guide -->
-	      <div class="control-section" id="noviceGuideSection">
-	        <div class="section-header">
-	          <span class="section-title" data-i18n="workflow">Workflow</span>
-	          <button class="guide-toggle-btn" id="guideToggleBtn" type="button" aria-pressed="true" data-i18n="guideToggleOn">Guide: On</button>
-	        </div>
-          <div class="novice-guide-card" id="noviceGuideCard">
-            <div class="novice-guide-card-header">
-              <span class="novice-guide-title" data-i18n="noviceGuideTitle">Beginner Guide</span>
-              <span class="novice-guide-phase" id="noviceGuidePhase"></span>
-            </div>
-            <div class="novice-guide-primary" id="noviceGuidePrimary"></div>
-            <ol class="novice-guide-list" id="noviceGuideChecklist"></ol>
-            <div class="novice-guide-status" id="noviceGuideStatus"></div>
-            <div class="novice-guide-warning" id="noviceGuideWarning" style="display: none;"></div>
+      <div class="control-stage-bar" id="controlStageBar" role="list" aria-label="Workflow progress">
+        <div class="control-stage-pill" id="panelStage1" role="listitem" data-stage="1">
+          <span class="control-stage-index">1</span>
+          <span class="control-stage-label" data-i18n="controlStageCrop">Crop</span>
+        </div>
+        <div class="control-stage-pill" id="panelStage2" role="listitem" data-stage="2">
+          <span class="control-stage-index">2</span>
+          <span class="control-stage-label" data-i18n="controlStageMask">Mask</span>
+        </div>
+        <div class="control-stage-pill" id="panelStage3" role="listitem" data-stage="3">
+          <span class="control-stage-index">3</span>
+          <span class="control-stage-label" data-i18n="controlStageAdjust">Adjust</span>
+        </div>
+      </div>
+
+      <!-- Workflow Guide -->
+      <div class="control-section guide-section" id="noviceGuideSection">
+        <div class="section-header">
+          <span class="section-title" data-i18n="workflow">Workflow</span>
+          <button class="guide-toggle-btn" id="guideToggleBtn" type="button" aria-pressed="true" data-i18n="guideToggleOn">Guide: On</button>
+        </div>
+        <div class="novice-guide-card" id="noviceGuideCard">
+          <div class="novice-guide-card-header">
+            <span class="novice-guide-title" data-i18n="noviceGuideTitle">Beginner Guide</span>
+            <span class="novice-guide-phase" id="noviceGuidePhase"></span>
           </div>
+          <div class="novice-guide-primary" id="noviceGuidePrimary"></div>
+          <ol class="novice-guide-list" id="noviceGuideChecklist"></ol>
+          <div class="novice-guide-status" id="noviceGuideStatus"></div>
+          <div class="novice-guide-warning" id="noviceGuideWarning" style="display: none;"></div>
+        </div>
       </div>
 
       <!-- Auto Frame Settings (Step 1) -->
-      <div class="control-section" id="autoFrameSettingsSection" style="display: none;">
+      <div class="control-section task-primary" id="autoFrameSettingsSection" style="display: none;">
         <div class="section-header">
           <span class="section-title" data-i18n="autoFrameSettings">Auto Frame Settings</span>
         </div>
@@ -2886,489 +3271,548 @@
       </div>
 
       <!-- Film Settings (Step 2) -->
-      <div class="control-section" id="filmSettingsSection" style="display: none;">
+      <div class="control-section task-primary" id="filmSettingsSection" style="display: none;">
         <div class="section-header">
           <span class="section-title" data-i18n="filmSettings">Film Settings</span>
         </div>
         <div class="section-content">
-          <div class="step2-mode-toggle" id="step2ModeToggle">
-            <button class="step2-mode-btn active" id="step2ModeBorderBtn" data-mode="border" data-i18n="step2ModeBorder">Border Available</button>
-            <button class="step2-mode-btn" id="step2ModeNoBorderBtn" data-mode="noBorder" data-i18n="step2ModeNoBorder">No Border / ES-2</button>
-          </div>
-          <div class="film-type-toggle">
-            <button class="film-type-btn active" data-type="color" data-i18n="colorFilm">Color</button>
-            <button class="film-type-btn" data-type="bw" data-i18n="bwFilm">B&W</button>
-            <button class="film-type-btn" data-type="positive" data-i18n="positiveFilm">Positive</button>
-          </div>
-          <div class="slider-control" id="coreColorModelStep2Control">
-            <div class="slider-header">
-              <span class="slider-label" data-i18n="coreColorModelLabel">Color Model</span>
+          <div class="control-group is-primary">
+            <div class="control-group-title"><span data-i18n="groupFilmType">Film type</span></div>
+            <div class="film-type-toggle">
+              <button class="film-type-btn active" data-type="color" data-i18n="colorFilm">Color</button>
+              <button class="film-type-btn" data-type="bw" data-i18n="bwFilm">B&W</button>
+              <button class="film-type-btn" data-type="positive" data-i18n="positiveFilm">Positive</button>
             </div>
-            <select class="preset-select" id="coreColorModelStep2">
-              <option value="frontier">Frontier</option>
-              <option value="noritsu">Noritsu</option>
-              <option value="standard" selected data-i18n="coreModelStandard">Standard</option>
-              <option value="warm" data-i18n="coreModelWarm">Warm</option>
-              <option value="mono" data-i18n="coreModelMono">Mono</option>
-              <option value="cine-log" data-i18n="coreModelCineLog">Cine Log</option>
-              <option value="cine-rich" data-i18n="coreModelCineRich">Cine Rich</option>
-              <option value="cine-flat" data-i18n="coreModelCineFlat">Cine Flat</option>
-              <option value="neutral" data-i18n="coreModelNeutral">Neutral</option>
-            </select>
           </div>
-          <div class="slider-control" id="filmPresetControl">
-            <div class="slider-header">
-              <span class="slider-label" data-i18n="filmPresetLabel">Film Preset</span>
+
+          <div class="control-group is-primary">
+            <div class="control-group-title"><span data-i18n="groupMaskSource">Mask source</span></div>
+            <div class="control-group-hint" data-i18n="groupMaskSourceHint">Use the film edge when visible; use auto detection or roll reference when the border is missing.</div>
+            <div class="step2-mode-toggle" id="step2ModeToggle">
+              <button class="step2-mode-btn active" id="step2ModeBorderBtn" data-mode="border" data-i18n="step2ModeBorder">Border Available</button>
+              <button class="step2-mode-btn" id="step2ModeNoBorderBtn" data-mode="noBorder" data-i18n="step2ModeNoBorder">No Border / ES-2</button>
             </div>
-            <select class="preset-select" id="filmPreset">
-              <option value="none" selected data-i18n="presetNone">None (Manual)</option>
-              <optgroup label="Color" data-i18n-label="presetGroupColor">
-                <option value="frontier-lab">Frontier Lab</option>
-                <option value="noritsu-lab">Noritsu Lab</option>
-                <option value="portra-classic">Portra Classic</option>
-                <option value="gold-warm">Gold Warm</option>
-                <option value="superia-vivid">Superia Vivid</option>
-                <option value="crystal-archive">Crystal Archive</option>
-                <option value="cinema-stock">Cinema Stock</option>
-                <option value="standard-auto">Standard Auto</option>
-                <option value="rich-depth">Rich Depth</option>
-                <option value="neutral-clean">Neutral Clean</option>
-                <option value="clean-contrast">Clean Contrast</option>
-                <option value="bold-contrast">Bold Contrast</option>
-                <option value="portrait-warm">Portrait Warm</option>
-                <option value="fashion-tone">Fashion Tone</option>
-                <option value="scanner-rich">Scanner Rich</option>
-                <option value="standard-flat">Standard Flat</option>
-              </optgroup>
-              <optgroup label="B&W" data-i18n-label="presetGroupBW">
-                <option value="selenium-cold">Selenium Cold</option>
-                <option value="selenium-warm">Selenium Warm</option>
-                <option value="warmtone">Warmtone</option>
-                <option value="cooltone">Cooltone</option>
-                <option value="palladium">Palladium</option>
-                <option value="fomatone">Fomatone</option>
-                <option value="kodak-brown">Kodak Brown</option>
-                <option value="sepia-classic">Sepia Classic</option>
-                <option value="sepia-deep">Sepia Deep</option>
-                <option value="cyanotype">Cyanotype</option>
-                <option value="platinum">Platinum</option>
-                <option value="cold-neutral">Cold Neutral</option>
-                <option value="warm-neutral">Warm Neutral</option>
-                <option value="high-contrast-bw">High Contrast</option>
-                <option value="soft-bw">Soft B&W</option>
-                <option value="filmic-bw">Filmic B&W</option>
-                <option value="rich-bw">Rich B&W</option>
-                <option value="flat-bw">Flat B&W</option>
-              </optgroup>
-              <optgroup label="Positive" data-i18n-label="presetGroupPositive">
-                <option value="slide-neutral">Slide Neutral</option>
-                <option value="slide-rich">Slide Rich</option>
-                <option value="slide-soft">Slide Soft</option>
-              </optgroup>
-            </select>
+            <div id="filmBaseControls">
+              <div class="info-box" data-i18n="filmBaseInfo">Sample the unexposed film edge if available. If the border is already cropped out, use Auto Detect or reuse a reference frame.</div>
+              <div class="film-base-buttons">
+                <button class="film-base-btn" id="sampleBaseBtn" data-i18n="sampleBase">Sample Film Base</button>
+                <button class="film-base-btn" id="autoDetectBtn" data-i18n="autoDetect">Auto Detect</button>
+                <button class="film-base-btn" id="useReferenceBtn" data-i18n="useRollReference">Use Roll Reference</button>
+              </div>
+              <div class="film-base-preview" id="filmBasePreview" style="display: none;">
+                <div class="film-base-color" id="filmBaseColor"></div>
+                <div class="film-base-values" id="filmBaseValues">R: 0 G: 0 B: 0</div>
+              </div>
+              <div class="roll-reference-controls" id="rollReferenceControls">
+                <div class="roll-reference-title" data-i18n="rollReferenceTitle">Roll Reference</div>
+                <div class="roll-reference-status" id="rollReferenceStatus" data-i18n="rollReferenceNone">No roll reference set.</div>
+                <div class="film-base-buttons">
+                  <button class="film-base-btn" id="setRollReferenceBtn" data-i18n="setRollReference">Set Current as Reference</button>
+                  <button class="film-base-btn" id="applyRollReferenceBtn" data-i18n="applyRollReference">Apply Reference to Selected</button>
+                  <button class="film-base-btn" id="clearRollReferenceBtn" data-i18n="clearRollReference">Clear Reference</button>
+                </div>
+                <div class="roll-reference-options">
+                  <label class="roll-reference-option">
+                    <input type="checkbox" id="lockRollReference">
+                    <span data-i18n="lockRollReference">Lock reference for newly added files</span>
+                  </label>
+                  <label class="roll-reference-option">
+                    <input type="checkbox" id="applyCropWithReference">
+                    <span data-i18n="applyCropWithReference">Also apply crop from reference</span>
+                  </label>
+                </div>
+              </div>
+            </div>
+            <div class="info-box" id="positiveFilmInfo" data-i18n="positiveModeInfo" style="display: none;">Positive slide film mode does not require film base sampling.</div>
           </div>
-          <div class="lens-correction-panel" id="lensCorrectionPanel">
-            <div class="lens-section-title" data-i18n="lensSectionTitle">Lens Correction (Optional)</div>
-            <div class="lens-row">
-              <label class="lens-toggle-label">
-                <input type="checkbox" id="lensEnableInput">
-                <span data-i18n="lensEnable">Enable Lens Correction</span>
-              </label>
-              <button class="film-base-btn" id="lensSkipBtn" type="button" data-i18n="lensSkipBtn">Skip</button>
-            </div>
-            <div class="info-box lens-status" id="lensStatusBox" data-i18n="lensStatusIdle">Lens correction is optional. You can continue without selecting a profile.</div>
-            <div class="lens-grid">
-              <div class="lens-field wide">
-                <label for="lensLensModelInput" data-i18n="lensLensModel">Lens Model</label>
-                <input id="lensLensModelInput" type="text" placeholder="e.g. 50mm f/1.8">
-              </div>
-              <div class="lens-field">
-                <label for="lensLensMakerInput" data-i18n="lensLensMaker">Lens Maker</label>
-                <input id="lensLensMakerInput" type="text" placeholder="optional">
-              </div>
-              <div class="lens-field">
-                <label for="lensCameraModelInput" data-i18n="lensCameraModel">Camera Model</label>
-                <input id="lensCameraModelInput" type="text" placeholder="optional">
-              </div>
-              <div class="lens-field">
-                <label for="lensCameraMakerInput" data-i18n="lensCameraMaker">Camera Maker</label>
-                <input id="lensCameraMakerInput" type="text" placeholder="optional">
-              </div>
-              <div class="lens-field">
-                <button class="film-base-btn" id="lensSearchBtn" type="button" data-i18n="lensSearchBtn">Search Profiles</button>
-              </div>
-              <div class="lens-field">
-                <button class="film-base-btn" id="lensUseSelectedBtn" type="button" data-i18n="lensUseSelectedBtn">Use Selected Profile</button>
-              </div>
-              <div class="lens-field wide">
-                <label for="lensResultSelect" data-i18n="lensResults">Search Results</label>
-                <select id="lensResultSelect" disabled>
-                  <option value="" data-i18n="lensNoResult">No profiles loaded yet</option>
+
+          <div class="control-group">
+            <div class="control-group-title"><span data-i18n="groupStartingLook">Starting look</span></div>
+            <div class="control-group-grid two-up">
+              <div class="slider-control" id="coreColorModelStep2Control">
+                <div class="slider-header">
+                  <span class="slider-label" data-i18n="coreColorModelLabel">Color Model</span>
+                </div>
+                <select class="preset-select" id="coreColorModelStep2">
+                  <option value="frontier">Frontier</option>
+                  <option value="noritsu">Noritsu</option>
+                  <option value="standard" selected data-i18n="coreModelStandard">Standard</option>
+                  <option value="warm" data-i18n="coreModelWarm">Warm</option>
+                  <option value="mono" data-i18n="coreModelMono">Mono</option>
+                  <option value="cine-log" data-i18n="coreModelCineLog">Cine Log</option>
+                  <option value="cine-rich" data-i18n="coreModelCineRich">Cine Rich</option>
+                  <option value="cine-flat" data-i18n="coreModelCineFlat">Cine Flat</option>
+                  <option value="neutral" data-i18n="coreModelNeutral">Neutral</option>
                 </select>
               </div>
-              <div class="lens-field wide">
-                <p class="lens-selected" id="lensSelectedText" data-i18n="lensSelectedNone">Selected profile: none</p>
+              <div class="slider-control" id="filmPresetControl">
+                <div class="slider-header">
+                  <span class="slider-label" data-i18n="filmPresetLabel">Film Preset</span>
+                </div>
+                <select class="preset-select" id="filmPreset">
+                  <option value="none" selected data-i18n="presetNone">None (Manual)</option>
+                  <optgroup label="Color" data-i18n-label="presetGroupColor">
+                    <option value="frontier-lab">Frontier Lab</option>
+                    <option value="noritsu-lab">Noritsu Lab</option>
+                    <option value="portra-classic">Portra Classic</option>
+                    <option value="gold-warm">Gold Warm</option>
+                    <option value="superia-vivid">Superia Vivid</option>
+                    <option value="crystal-archive">Crystal Archive</option>
+                    <option value="cinema-stock">Cinema Stock</option>
+                    <option value="standard-auto">Standard Auto</option>
+                    <option value="rich-depth">Rich Depth</option>
+                    <option value="neutral-clean">Neutral Clean</option>
+                    <option value="clean-contrast">Clean Contrast</option>
+                    <option value="bold-contrast">Bold Contrast</option>
+                    <option value="portrait-warm">Portrait Warm</option>
+                    <option value="fashion-tone">Fashion Tone</option>
+                    <option value="scanner-rich">Scanner Rich</option>
+                    <option value="standard-flat">Standard Flat</option>
+                  </optgroup>
+                  <optgroup label="B&W" data-i18n-label="presetGroupBW">
+                    <option value="selenium-cold">Selenium Cold</option>
+                    <option value="selenium-warm">Selenium Warm</option>
+                    <option value="warmtone">Warmtone</option>
+                    <option value="cooltone">Cooltone</option>
+                    <option value="palladium">Palladium</option>
+                    <option value="fomatone">Fomatone</option>
+                    <option value="kodak-brown">Kodak Brown</option>
+                    <option value="sepia-classic">Sepia Classic</option>
+                    <option value="sepia-deep">Sepia Deep</option>
+                    <option value="cyanotype">Cyanotype</option>
+                    <option value="platinum">Platinum</option>
+                    <option value="cold-neutral">Cold Neutral</option>
+                    <option value="warm-neutral">Warm Neutral</option>
+                    <option value="high-contrast-bw">High Contrast</option>
+                    <option value="soft-bw">Soft B&W</option>
+                    <option value="filmic-bw">Filmic B&W</option>
+                    <option value="rich-bw">Rich B&W</option>
+                    <option value="flat-bw">Flat B&W</option>
+                  </optgroup>
+                  <optgroup label="Positive" data-i18n-label="presetGroupPositive">
+                    <option value="slide-neutral">Slide Neutral</option>
+                    <option value="slide-rich">Slide Rich</option>
+                    <option value="slide-soft">Slide Soft</option>
+                  </optgroup>
+                </select>
               </div>
-              <div class="lens-field">
-                <label for="lensFocalInput" data-i18n="lensFocal">Focal (mm)</label>
-                <input id="lensFocalInput" type="number" min="1" max="2000" step="0.1" value="50">
+            </div>
+          </div>
+
+          <div class="control-group is-muted">
+            <div class="control-group-title"><span data-i18n="groupOptionalCorrection">Optional correction</span></div>
+            <div class="lens-correction-panel" id="lensCorrectionPanel">
+              <div class="lens-section-title" data-i18n="lensSectionTitle">Lens Correction (Optional)</div>
+              <div class="lens-row">
+                <label class="lens-toggle-label">
+                  <input type="checkbox" id="lensEnableInput">
+                  <span data-i18n="lensEnable">Enable Lens Correction</span>
+                </label>
+                <button class="film-base-btn" id="lensSkipBtn" type="button" data-i18n="lensSkipBtn">Skip</button>
               </div>
-              <div class="lens-field">
-                <label for="lensCropInput" data-i18n="lensCrop">Crop Factor</label>
-                <input id="lensCropInput" type="number" min="0.1" max="10" step="0.01" value="1">
-              </div>
-              <div class="lens-field">
-                <label for="lensApertureInput" data-i18n="lensAperture">Aperture (f)</label>
-                <input id="lensApertureInput" type="number" min="0.5" max="64" step="0.1" value="8">
-              </div>
-              <div class="lens-field">
-                <label for="lensDistanceInput" data-i18n="lensDistance">Distance (m)</label>
-                <input id="lensDistanceInput" type="number" min="0.1" max="10000" step="0.1" value="1000">
-              </div>
-              <div class="lens-field wide">
-                <label for="lensStepModeSelect" data-i18n="lensStepMode">Map Detail</label>
-                <div class="lens-step-row">
-                  <select id="lensStepModeSelect">
-                    <option value="auto" data-i18n="lensStepAuto">Auto</option>
-                    <option value="manual" data-i18n="lensStepManual">Manual</option>
+              <div class="info-box lens-status" id="lensStatusBox" data-i18n="lensStatusIdle">Lens correction is optional. You can continue without selecting a profile.</div>
+              <div class="lens-grid">
+                <div class="lens-field wide">
+                  <label for="lensLensModelInput" data-i18n="lensLensModel">Lens Model</label>
+                  <input id="lensLensModelInput" type="text" placeholder="e.g. 50mm f/1.8">
+                </div>
+                <div class="lens-field">
+                  <label for="lensLensMakerInput" data-i18n="lensLensMaker">Lens Maker</label>
+                  <input id="lensLensMakerInput" type="text" placeholder="optional">
+                </div>
+                <div class="lens-field">
+                  <label for="lensCameraModelInput" data-i18n="lensCameraModel">Camera Model</label>
+                  <input id="lensCameraModelInput" type="text" placeholder="optional">
+                </div>
+                <div class="lens-field">
+                  <label for="lensCameraMakerInput" data-i18n="lensCameraMaker">Camera Maker</label>
+                  <input id="lensCameraMakerInput" type="text" placeholder="optional">
+                </div>
+                <div class="lens-field">
+                  <button class="film-base-btn" id="lensSearchBtn" type="button" data-i18n="lensSearchBtn">Search Profiles</button>
+                </div>
+                <div class="lens-field">
+                  <button class="film-base-btn" id="lensUseSelectedBtn" type="button" data-i18n="lensUseSelectedBtn">Use Selected Profile</button>
+                </div>
+                <div class="lens-field wide">
+                  <label for="lensResultSelect" data-i18n="lensResults">Search Results</label>
+                  <select id="lensResultSelect" disabled>
+                    <option value="" data-i18n="lensNoResult">No profiles loaded yet</option>
                   </select>
-                  <input id="lensStepInput" type="number" min="1" max="16" step="1" value="2" title="step">
+                </div>
+                <div class="lens-field wide">
+                  <p class="lens-selected" id="lensSelectedText" data-i18n="lensSelectedNone">Selected profile: none</p>
+                </div>
+                <div class="lens-field">
+                  <label for="lensFocalInput" data-i18n="lensFocal">Focal (mm)</label>
+                  <input id="lensFocalInput" type="number" min="1" max="2000" step="0.1" value="50">
+                </div>
+                <div class="lens-field">
+                  <label for="lensCropInput" data-i18n="lensCrop">Crop Factor</label>
+                  <input id="lensCropInput" type="number" min="0.1" max="10" step="0.01" value="1">
+                </div>
+                <div class="lens-field">
+                  <label for="lensApertureInput" data-i18n="lensAperture">Aperture (f)</label>
+                  <input id="lensApertureInput" type="number" min="0.5" max="64" step="0.1" value="8">
+                </div>
+                <div class="lens-field">
+                  <label for="lensDistanceInput" data-i18n="lensDistance">Distance (m)</label>
+                  <input id="lensDistanceInput" type="number" min="0.1" max="10000" step="0.1" value="1000">
+                </div>
+                <div class="lens-field wide">
+                  <label for="lensStepModeSelect" data-i18n="lensStepMode">Map Detail</label>
+                  <div class="lens-step-row">
+                    <select id="lensStepModeSelect">
+                      <option value="auto" data-i18n="lensStepAuto">Auto</option>
+                      <option value="manual" data-i18n="lensStepManual">Manual</option>
+                    </select>
+                    <input id="lensStepInput" type="number" min="1" max="16" step="1" value="2" title="step">
+                  </div>
                 </div>
               </div>
             </div>
           </div>
-          <div id="filmBaseControls">
-            <div class="info-box" data-i18n="filmBaseInfo">Sample the unexposed film edge if available. If the border is already cropped out, use Auto Detect or reuse a reference frame.</div>
-            <div class="film-base-buttons">
-              <button class="film-base-btn" id="sampleBaseBtn" data-i18n="sampleBase">Sample Film Base</button>
-              <button class="film-base-btn" id="autoDetectBtn" data-i18n="autoDetect">Auto Detect</button>
-              <button class="film-base-btn" id="useReferenceBtn" data-i18n="useRollReference">Use Roll Reference</button>
-            </div>
-            <div class="film-base-preview" id="filmBasePreview" style="display: none;">
-              <div class="film-base-color" id="filmBaseColor"></div>
-              <div class="film-base-values" id="filmBaseValues">R: 0 G: 0 B: 0</div>
-            </div>
-            <div class="roll-reference-controls" id="rollReferenceControls">
-              <div class="roll-reference-title" data-i18n="rollReferenceTitle">Roll Reference</div>
-              <div class="roll-reference-status" id="rollReferenceStatus" data-i18n="rollReferenceNone">No roll reference set.</div>
-              <div class="film-base-buttons">
-                <button class="film-base-btn" id="setRollReferenceBtn" data-i18n="setRollReference">Set Current as Reference</button>
-                <button class="film-base-btn" id="applyRollReferenceBtn" data-i18n="applyRollReference">Apply Reference to Selected</button>
-                <button class="film-base-btn" id="clearRollReferenceBtn" data-i18n="clearRollReference">Clear Reference</button>
-              </div>
-              <div class="roll-reference-options">
-                <label class="roll-reference-option">
-                  <input type="checkbox" id="lockRollReference">
-                  <span data-i18n="lockRollReference">Lock reference for newly added files</span>
-                </label>
-                <label class="roll-reference-option">
-                  <input type="checkbox" id="applyCropWithReference">
-                  <span data-i18n="applyCropWithReference">Also apply crop from reference</span>
-                </label>
-              </div>
-            </div>
+
+          <div class="control-action-row">
+            <button class="toolbar-btn primary" id="applyConvertBtn" style="width: 100%; justify-content: center;" data-i18n="applyConvert">Apply & Convert</button>
           </div>
-          <div class="info-box" id="positiveFilmInfo" data-i18n="positiveModeInfo" style="display: none;">Positive slide film mode does not require film base sampling.</div>
-          <button class="toolbar-btn primary" id="applyConvertBtn" style="margin-top: 8px; width: 100%; justify-content: center;" data-i18n="applyConvert">Apply & Convert</button>
         </div>
       </div>
 
-      <!-- Dust Removal (Step 3, before other adjustments) -->
-      <div class="control-section" id="dustRemovalSection" style="display: none;">
+      <!-- Cleanup (Step 3, before other adjustments) -->
+      <div class="control-section task-secondary" id="dustRemovalSection" style="display: none;">
         <div class="section-header" data-section="dustRemoval">
-          <span class="section-title" data-i18n="sectionDustRemoval">Dust Removal</span>
+          <span class="section-title" data-i18n="sectionCleanup">Cleanup</span>
           <span class="section-toggle">▼</span>
         </div>
         <div class="section-content" id="dustRemovalSectionContent">
-          <label class="roll-reference-option">
-            <input type="checkbox" id="dustRemovalEnabled">
-            <span data-i18n="dustRemovalEnable">Enable Dust Removal</span>
-          </label>
-          <div id="dustRemovalControls" style="display: none;">
-            <div class="slider-control">
-              <div class="slider-header">
-                <span class="slider-label" data-i18n="dustStrength">Sensitivity</span>
-                <input type="number" class="slider-number-input" id="dustStrengthValue" min="1" max="10" step="1" value="3">
-              </div>
-              <input type="range" class="slider-input" id="dustStrength" min="1" max="10" step="1" value="3">
-            </div>
-            <div class="info-box" id="dustStatus" data-i18n="dustStatusIdle">Ready</div>
-            <label class="roll-reference-option" style="margin-top: 6px;">
-              <input type="checkbox" id="dustShowMask">
-              <span data-i18n="dustShowMask">Show Mask</span>
+          <div class="control-group">
+            <div class="control-group-title"><span data-i18n="groupDustCleanup">Dust cleanup</span></div>
+            <label class="roll-reference-option">
+              <input type="checkbox" id="dustRemovalEnabled">
+              <span data-i18n="dustRemovalEnable">Enable Dust Removal</span>
             </label>
-            <div id="dustBrushControls" style="display: none;">
+            <div id="dustRemovalControls" style="display: none;">
               <div class="slider-control">
                 <div class="slider-header">
-                  <span class="slider-label" data-i18n="dustBrushSize">Brush Size</span>
-                  <input type="number" class="slider-number-input" id="dustBrushSizeValue" min="1" max="50" step="1" value="5">
+                  <span class="slider-label" data-i18n="dustStrength">Sensitivity</span>
+                  <input type="number" class="slider-number-input" id="dustStrengthValue" min="1" max="10" step="1" value="3">
                 </div>
-                <input type="range" class="slider-input" id="dustBrushSize" min="1" max="50" step="1" value="5">
+                <input type="range" class="slider-input" id="dustStrength" min="1" max="10" step="1" value="3">
               </div>
-              <div class="info-box" style="font-size: 11px; padding: 6px 8px;" data-i18n="dustBrushHint">Click = Smart | Alt+Click = Direct | Shift+Click = Erase</div>
+              <div class="info-box" id="dustStatus" data-i18n="dustStatusIdle">Ready</div>
+              <label class="roll-reference-option">
+                <input type="checkbox" id="dustShowMask">
+                <span data-i18n="dustShowMask">Show Mask</span>
+              </label>
+              <div id="dustBrushControls" style="display: none;">
+                <div class="slider-control">
+                  <div class="slider-header">
+                    <span class="slider-label" data-i18n="dustBrushSize">Brush Size</span>
+                    <input type="number" class="slider-number-input" id="dustBrushSizeValue" min="1" max="50" step="1" value="5">
+                  </div>
+                  <input type="range" class="slider-input" id="dustBrushSize" min="1" max="50" step="1" value="5">
+                </div>
+                <div class="info-box" style="font-size: 11px; padding: 6px 8px;" data-i18n="dustBrushHint">Click = Smart | Alt+Click = Direct | Shift+Click = Erase</div>
+              </div>
+              <button class="toolbar-btn" id="dustClearMaskBtn" style="width: 100%; justify-content: center;" data-i18n="dustClearMask">Clear Mask</button>
             </div>
-            <button class="toolbar-btn" id="dustClearMaskBtn" style="margin-top: 6px; width: 100%; justify-content: center;" data-i18n="dustClearMask">Clear Mask</button>
           </div>
-        </div>
-      </div>
-
-      <div class="control-section" id="grayPointGuideSection" style="display: none;">
-        <div class="gray-point-guide-card" id="grayPointGuideCard">
-          <div class="gray-point-guide-title" id="grayPointGuideTitle" data-i18n="grayPointGuideTitle">Find a neutral gray point</div>
-          <div class="gray-point-guide-body" id="grayPointGuideBody" data-i18n="grayPointGuideBody">After the mask is removed, sample a part of the frame that should look neutral gray to get the best white balance.</div>
-          <div class="gray-point-guide-hint" id="grayPointGuideHint" data-i18n="grayPointGuideHint">The main entry is now in the header. When sampling starts, click the gray area directly on the image.</div>
         </div>
       </div>
 
       <!-- Color Model (Step 3, SilverCore) -->
-      <div class="control-section" id="whiteBalanceSection" style="display: none;">
+      <div class="control-section task-secondary" id="whiteBalanceSection" style="display: none;">
         <div class="section-header" data-section="conversion">
-          <span class="section-title" data-i18n="sectionColorModel">Color Model</span>
+          <span class="section-title" data-i18n="sectionQuickFix">Quick Fix</span>
           <span class="section-toggle">▼</span>
         </div>
-          <div class="section-content" id="conversionSectionContent">
+        <div class="section-content" id="conversionSectionContent">
+          <div class="control-group is-primary">
+            <div class="control-group-title"><span data-i18n="groupQuickBalance">Neutral balance</span></div>
             <button class="film-base-btn" id="sampleWBBtn" data-i18n="sampleWB">Sample Gray Point</button>
-            <div class="slider-control">
-              <div class="slider-header">
-                <span class="slider-label" data-i18n="coreEnhancedProfile">Enhanced Profile</span>
+            <div class="control-help-card" id="grayPointGuideSection" style="display: none;">
+              <div class="gray-point-guide-card" id="grayPointGuideCard">
+                <div class="gray-point-guide-title" id="grayPointGuideTitle" data-i18n="grayPointGuideTitle">Find a neutral gray point</div>
+                <div class="gray-point-guide-body" id="grayPointGuideBody" data-i18n="grayPointGuideBody">After the mask is removed, sample a part of the frame that should look neutral gray to get the best white balance.</div>
+                <div class="gray-point-guide-hint" id="grayPointGuideHint" data-i18n="grayPointGuideHint">The main entry is now in the header. When sampling starts, click the gray area directly on the image.</div>
               </div>
-            <select class="preset-select" id="coreEnhancedProfile">
-              <option value="none" selected data-i18n="coreProfileNone">None</option>
-              <option value="frontier" data-i18n="coreProfileFrontier">Frontier</option>
-              <option value="crystal" data-i18n="coreProfileCrystal">Crystal</option>
-              <option value="natural" data-i18n="coreProfileNatural">Natural</option>
-              <option value="pakon" data-i18n="coreProfilePakon">Pakon</option>
-            </select>
-          </div>
-          <div class="slider-control">
-            <div class="slider-header">
-              <span class="slider-label" data-i18n="coreProfileStrength">Profile Strength</span>
-              <input type="number" class="slider-number-input" id="coreProfileStrengthValue" min="0" max="200" step="25" value="100">
             </div>
-            <input type="range" class="slider-input" id="coreProfileStrength" min="0" max="200" step="25" value="100">
-          </div>
-          <div class="slider-control">
-            <div class="slider-header">
-              <span class="slider-label" data-i18n="corePreSaturation">Pre-Saturation</span>
-              <input type="number" class="slider-number-input" id="corePreSaturationValue" min="0" max="200" step="1" value="100">
-            </div>
-            <input type="range" class="slider-input" id="corePreSaturation" min="0" max="200" step="1" value="100">
           </div>
         </div>
       </div>
 
       <!-- Tone (Step 3, SilverCore) -->
-      <div class="control-section" id="toneSection" style="display: none;">
+      <div class="control-section task-primary" id="toneSection" style="display: none;">
         <div class="section-header" data-section="tone">
           <span class="section-title" data-i18n="toneAdjustments">Tone</span>
           <span class="section-toggle">▼</span>
         </div>
         <div class="section-content" id="toneSectionContent">
-          <div class="slider-control">
-            <div class="slider-header">
-              <span class="slider-label" data-i18n="coreBrightness">Brightness</span>
-              <input type="number" class="slider-number-input" id="coreBrightnessValue" min="-100" max="100" step="1" value="0">
+          <div class="control-group is-primary">
+            <div class="control-group-title"><span data-i18n="groupToneGlobal">Overall</span></div>
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label" data-i18n="exposure">Exposure</span>
+                <input type="number" class="slider-number-input" id="coreExposureValue" min="-300" max="300" step="1" value="0">
+              </div>
+              <input type="range" class="slider-input" id="coreExposure" min="-300" max="300" step="1" value="0">
             </div>
-            <input type="range" class="slider-input" id="coreBrightness" min="-100" max="100" step="1" value="0">
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label" data-i18n="coreBrightness">Brightness</span>
+                <input type="number" class="slider-number-input" id="coreBrightnessValue" min="-100" max="100" step="1" value="0">
+              </div>
+              <input type="range" class="slider-input" id="coreBrightness" min="-100" max="100" step="1" value="0">
+            </div>
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label" data-i18n="contrast">Contrast</span>
+                <input type="number" class="slider-number-input" id="coreContrastValue" min="-100" max="100" step="1" value="0">
+              </div>
+              <input type="range" class="slider-input" id="coreContrast" min="-100" max="100" step="1" value="0">
+            </div>
           </div>
-          <div class="slider-control">
-            <div class="slider-header">
-              <span class="slider-label" data-i18n="exposure">Exposure</span>
-              <input type="number" class="slider-number-input" id="coreExposureValue" min="-300" max="300" step="1" value="0">
+          <div class="control-group">
+            <div class="control-group-title"><span data-i18n="groupToneRange">Highlight and shadow range</span></div>
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label" data-i18n="highlights">Highlights</span>
+                <input type="number" class="slider-number-input" id="coreHighlightsValue" min="-100" max="100" step="1" value="0">
+              </div>
+              <input type="range" class="slider-input" id="coreHighlights" min="-100" max="100" step="1" value="0">
             </div>
-            <input type="range" class="slider-input" id="coreExposure" min="-300" max="300" step="1" value="0">
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label" data-i18n="shadows">Shadows</span>
+                <input type="number" class="slider-number-input" id="coreShadowsValue" min="-100" max="100" step="1" value="0">
+              </div>
+              <input type="range" class="slider-input" id="coreShadows" min="-100" max="100" step="1" value="0">
+            </div>
           </div>
-          <div class="slider-control">
-            <div class="slider-header">
-              <span class="slider-label" data-i18n="contrast">Contrast</span>
-              <input type="number" class="slider-number-input" id="coreContrastValue" min="-100" max="100" step="1" value="0">
+          <div class="control-group">
+            <div class="control-group-title"><span data-i18n="groupToneEndpoints">Black and white points</span></div>
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label" data-i18n="coreWhites">Whites</span>
+                <input type="number" class="slider-number-input" id="coreWhitesValue" min="-100" max="100" step="1" value="0">
+              </div>
+              <input type="range" class="slider-input" id="coreWhites" min="-100" max="100" step="1" value="0">
             </div>
-            <input type="range" class="slider-input" id="coreContrast" min="-100" max="100" step="1" value="0">
-          </div>
-          <div class="slider-control">
-            <div class="slider-header">
-              <span class="slider-label" data-i18n="highlights">Highlights</span>
-              <input type="number" class="slider-number-input" id="coreHighlightsValue" min="-100" max="100" step="1" value="0">
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label" data-i18n="coreBlacks">Blacks</span>
+                <input type="number" class="slider-number-input" id="coreBlacksValue" min="-100" max="100" step="1" value="0">
+              </div>
+              <input type="range" class="slider-input" id="coreBlacks" min="-100" max="100" step="1" value="0">
             </div>
-            <input type="range" class="slider-input" id="coreHighlights" min="-100" max="100" step="1" value="0">
-          </div>
-          <div class="slider-control">
-            <div class="slider-header">
-              <span class="slider-label" data-i18n="shadows">Shadows</span>
-              <input type="number" class="slider-number-input" id="coreShadowsValue" min="-100" max="100" step="1" value="0">
-            </div>
-            <input type="range" class="slider-input" id="coreShadows" min="-100" max="100" step="1" value="0">
-          </div>
-          <div class="slider-control">
-            <div class="slider-header">
-              <span class="slider-label" data-i18n="coreWhites">Whites</span>
-              <input type="number" class="slider-number-input" id="coreWhitesValue" min="-100" max="100" step="1" value="0">
-            </div>
-            <input type="range" class="slider-input" id="coreWhites" min="-100" max="100" step="1" value="0">
-          </div>
-          <div class="slider-control">
-            <div class="slider-header">
-              <span class="slider-label" data-i18n="coreBlacks">Blacks</span>
-              <input type="number" class="slider-number-input" id="coreBlacksValue" min="-100" max="100" step="1" value="0">
-            </div>
-            <input type="range" class="slider-input" id="coreBlacks" min="-100" max="100" step="1" value="0">
           </div>
         </div>
       </div>
 
       <!-- Color (Step 3, SilverCore) -->
-      <div class="control-section" id="colorSection" style="display: none;">
+      <div class="control-section task-secondary" id="colorSection" style="display: none;">
         <div class="section-header" data-section="color">
           <span class="section-title" data-i18n="sectionColor">Color</span>
           <span class="section-toggle">▼</span>
         </div>
         <div class="section-content" id="colorSectionContent">
-          <div class="slider-control">
-            <div class="slider-header">
-              <span class="slider-label" data-i18n="coreWbModeLabel">White Balance</span>
+          <div class="control-group is-primary">
+            <div class="control-group-title"><span data-i18n="groupWhiteBalance">White balance</span></div>
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label" data-i18n="coreWbModeLabel">White Balance</span>
+              </div>
+              <select class="preset-select" id="coreWbMode">
+                <option value="auto" selected data-i18n="wbAutoLinearFixed">Auto (Linear Fixed)</option>
+                <option value="linearDynamic" data-i18n="wbLinearDynamic">Linear Dynamic</option>
+                <option value="shadowWeighted" data-i18n="wbShadowWeighted">Shadow Weighted</option>
+                <option value="highlightWeighted" data-i18n="wbHighlightWeighted">Highlight Weighted</option>
+                <option value="midtoneWeighted" data-i18n="wbMidtoneWeighted">Midtone Weighted</option>
+              </select>
             </div>
-            <select class="preset-select" id="coreWbMode">
-              <option value="auto" selected data-i18n="wbAutoLinearFixed">Auto (Linear Fixed)</option>
-              <option value="linearDynamic" data-i18n="wbLinearDynamic">Linear Dynamic</option>
-              <option value="shadowWeighted" data-i18n="wbShadowWeighted">Shadow Weighted</option>
-              <option value="highlightWeighted" data-i18n="wbHighlightWeighted">Highlight Weighted</option>
-              <option value="midtoneWeighted" data-i18n="wbMidtoneWeighted">Midtone Weighted</option>
-            </select>
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label" data-i18n="temperature">Temperature</span>
+                <input type="number" class="slider-number-input" id="coreTemperatureValue" min="-100" max="100" step="1" value="0">
+              </div>
+              <input type="range" class="slider-input" id="coreTemperature" min="-100" max="100" step="1" value="0">
+            </div>
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label" data-i18n="tint">Tint</span>
+                <input type="number" class="slider-number-input" id="coreTintValue" min="-100" max="100" step="1" value="0">
+              </div>
+              <input type="range" class="slider-input" id="coreTint" min="-100" max="100" step="1" value="0">
+            </div>
           </div>
-          <div class="slider-control">
-            <div class="slider-header">
-              <span class="slider-label" data-i18n="temperature">Temperature</span>
-              <input type="number" class="slider-number-input" id="coreTemperatureValue" min="-100" max="100" step="1" value="0">
+          <div class="control-group">
+            <div class="control-group-title"><span data-i18n="groupColorStrength">Color strength</span></div>
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label" data-i18n="saturation">Saturation</span>
+                <input type="number" class="slider-number-input" id="coreSaturationValue" min="0" max="200" step="1" value="100">
+              </div>
+              <input type="range" class="slider-input" id="coreSaturation" min="0" max="200" step="1" value="100">
             </div>
-            <input type="range" class="slider-input" id="coreTemperature" min="-100" max="100" step="1" value="0">
-          </div>
-          <div class="slider-control">
-            <div class="slider-header">
-              <span class="slider-label" data-i18n="tint">Tint</span>
-              <input type="number" class="slider-number-input" id="coreTintValue" min="-100" max="100" step="1" value="0">
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label" data-i18n="corePreSaturation">Pre-Saturation</span>
+                <input type="number" class="slider-number-input" id="corePreSaturationValue" min="0" max="200" step="1" value="100">
+              </div>
+              <input type="range" class="slider-input" id="corePreSaturation" min="0" max="200" step="1" value="100">
             </div>
-            <input type="range" class="slider-input" id="coreTint" min="-100" max="100" step="1" value="0">
-          </div>
-          <div class="slider-control">
-            <div class="slider-header">
-              <span class="slider-label" data-i18n="saturation">Saturation</span>
-              <input type="number" class="slider-number-input" id="coreSaturationValue" min="0" max="200" step="1" value="100">
-            </div>
-            <input type="range" class="slider-input" id="coreSaturation" min="0" max="200" step="1" value="100">
           </div>
         </div>
       </div>
 
       <!-- Effects (Step 3, SilverCore) -->
-      <div class="control-section" id="cmySection" style="display: none;">
+      <div class="control-section task-secondary" id="cmySection" style="display: none;">
         <div class="section-header" data-section="effects">
-          <span class="section-title" data-i18n="sectionEffects">Effects</span>
+          <span class="section-title" data-i18n="sectionLook">Look</span>
           <span class="section-toggle">▼</span>
         </div>
         <div class="section-content" id="effectsSectionContent">
-          <div class="slider-control">
-            <div class="slider-header">
-              <span class="slider-label" data-i18n="coreGlow">Glow</span>
-              <input type="number" class="slider-number-input" id="coreGlowValue" min="0" max="100" step="1" value="0">
+          <div class="control-group is-primary">
+            <div class="control-group-title"><span data-i18n="groupLookProfile">Profile character</span></div>
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label" data-i18n="coreEnhancedProfile">Enhanced Profile</span>
+              </div>
+              <select class="preset-select" id="coreEnhancedProfile">
+                <option value="none" selected data-i18n="coreProfileNone">None</option>
+                <option value="frontier" data-i18n="coreProfileFrontier">Frontier</option>
+                <option value="crystal" data-i18n="coreProfileCrystal">Crystal</option>
+                <option value="natural" data-i18n="coreProfileNatural">Natural</option>
+                <option value="pakon" data-i18n="coreProfilePakon">Pakon</option>
+              </select>
             </div>
-            <input type="range" class="slider-input" id="coreGlow" min="0" max="100" step="1" value="0">
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label" data-i18n="coreProfileStrength">Profile Strength</span>
+                <input type="number" class="slider-number-input" id="coreProfileStrengthValue" min="0" max="200" step="25" value="100">
+              </div>
+              <input type="range" class="slider-input" id="coreProfileStrength" min="0" max="200" step="25" value="100">
+            </div>
           </div>
-          <div class="slider-control">
-            <div class="slider-header">
-              <span class="slider-label" data-i18n="coreFade">Fade</span>
-              <input type="number" class="slider-number-input" id="coreFadeValue" min="0" max="100" step="1" value="0">
+          <div class="control-group">
+            <div class="control-group-title"><span data-i18n="groupLookAtmosphere">Atmosphere</span></div>
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label" data-i18n="coreGlow">Glow</span>
+                <input type="number" class="slider-number-input" id="coreGlowValue" min="0" max="100" step="1" value="0">
+              </div>
+              <input type="range" class="slider-input" id="coreGlow" min="0" max="100" step="1" value="0">
             </div>
-            <input type="range" class="slider-input" id="coreFade" min="0" max="100" step="1" value="0">
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label" data-i18n="coreFade">Fade</span>
+                <input type="number" class="slider-number-input" id="coreFadeValue" min="0" max="100" step="1" value="0">
+              </div>
+              <input type="range" class="slider-input" id="coreFade" min="0" max="100" step="1" value="0">
+            </div>
           </div>
         </div>
       </div>
 
       <!-- Engine (Step 3, SilverCore) -->
-      <div class="control-section" id="advancedSection" style="display: none;">
+      <div class="control-section task-advanced" id="advancedSection" style="display: none;">
         <div class="section-header" data-section="engine">
           <span class="section-title" data-i18n="sectionEngine">Engine</span>
           <span class="section-toggle">▼</span>
         </div>
         <div class="section-content" id="engineSectionContent">
-          <div class="slider-control">
-            <div class="slider-header">
-              <span class="slider-label" data-i18n="coreCurvePrecision">Curve Precision</span>
+          <div class="control-group">
+            <div class="control-group-title"><span data-i18n="groupEngineProcessing">Processing</span></div>
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label" data-i18n="coreCurvePrecision">Curve Precision</span>
+              </div>
+              <select class="preset-select" id="coreCurvePrecision">
+                <option value="auto" selected data-i18n="curvePrecisionAuto30">Auto (30 points)</option>
+                <option value="smooth" data-i18n="curvePrecisionSmooth70">Smooth (70 points)</option>
+                <option value="precise" data-i18n="curvePrecisionPrecise128">Precise (128 points)</option>
+              </select>
             </div>
-            <select class="preset-select" id="coreCurvePrecision">
-              <option value="auto" selected data-i18n="curvePrecisionAuto30">Auto (30 points)</option>
-              <option value="smooth" data-i18n="curvePrecisionSmooth70">Smooth (70 points)</option>
-              <option value="precise" data-i18n="curvePrecisionPrecise128">Precise (128 points)</option>
-            </select>
+            <label class="roll-reference-option">
+              <input type="checkbox" id="coreUseWebGL" checked>
+              <span data-i18n="coreUseWebGL">WebGL Acceleration</span>
+            </label>
           </div>
-          <label class="roll-reference-option">
-            <input type="checkbox" id="coreUseWebGL" checked>
-            <span data-i18n="coreUseWebGL">WebGL Acceleration</span>
-          </label>
         </div>
       </div>
 
       <!-- Additional (Legacy Fine Tune) -->
-      <div class="control-section" id="additionalSection" style="display: none;">
+      <div class="control-section task-advanced" id="additionalSection" style="display: none;">
         <div class="section-header" data-section="additional">
           <span class="section-title" data-i18n="advanced">Advanced</span>
           <span class="section-toggle collapsed">▼</span>
         </div>
         <div class="section-content collapsed" id="additionalSectionContent">
-          <div class="slider-control">
-            <div class="slider-header">
-              <span class="slider-label">R</span>
-              <input type="number" class="slider-number-input" id="wbRValue" min="0.5" max="2" step="0.01" value="1.00">
+          <div class="control-group">
+            <div class="control-group-title"><span data-i18n="groupAdvancedRgb">RGB gain</span></div>
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label">R</span>
+                <input type="number" class="slider-number-input" id="wbRValue" min="0.5" max="2" step="0.01" value="1.00">
+              </div>
+              <input type="range" class="slider-input" id="wbR" min="0.5" max="2" step="0.01" value="1">
             </div>
-            <input type="range" class="slider-input" id="wbR" min="0.5" max="2" step="0.01" value="1">
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label">G</span>
+                <input type="number" class="slider-number-input" id="wbGValue" min="0.5" max="2" step="0.01" value="1.00">
+              </div>
+              <input type="range" class="slider-input" id="wbG" min="0.5" max="2" step="0.01" value="1">
+            </div>
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label">B</span>
+                <input type="number" class="slider-number-input" id="wbBValue" min="0.5" max="2" step="0.01" value="1.00">
+              </div>
+              <input type="range" class="slider-input" id="wbB" min="0.5" max="2" step="0.01" value="1">
+            </div>
           </div>
-          <div class="slider-control">
-            <div class="slider-header">
-              <span class="slider-label">G</span>
-              <input type="number" class="slider-number-input" id="wbGValue" min="0.5" max="2" step="0.01" value="1.00">
+          <div class="control-group">
+            <div class="control-group-title"><span data-i18n="groupAdvancedCmy">CMY balance</span></div>
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label" data-i18n="cyan">Cyan</span>
+                <input type="number" class="slider-number-input" id="cyanValue" min="-100" max="100" step="1" value="0">
+              </div>
+              <input type="range" class="slider-input" id="cyan" min="-100" max="100" step="1" value="0">
             </div>
-            <input type="range" class="slider-input" id="wbG" min="0.5" max="2" step="0.01" value="1">
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label" data-i18n="magenta">Magenta</span>
+                <input type="number" class="slider-number-input" id="magentaValue" min="-100" max="100" step="1" value="0">
+              </div>
+              <input type="range" class="slider-input" id="magenta" min="-100" max="100" step="1" value="0">
+            </div>
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label" data-i18n="yellow">Yellow</span>
+                <input type="number" class="slider-number-input" id="yellowValue" min="-100" max="100" step="1" value="0">
+              </div>
+              <input type="range" class="slider-input" id="yellow" min="-100" max="100" step="1" value="0">
+            </div>
           </div>
-          <div class="slider-control">
-            <div class="slider-header">
-              <span class="slider-label">B</span>
-              <input type="number" class="slider-number-input" id="wbBValue" min="0.5" max="2" step="0.01" value="1.00">
-            </div>
-            <input type="range" class="slider-input" id="wbB" min="0.5" max="2" step="0.01" value="1">
-          </div>
-          <div class="slider-control">
-            <div class="slider-header">
-              <span class="slider-label" data-i18n="cyan">Cyan</span>
-              <input type="number" class="slider-number-input" id="cyanValue" min="-100" max="100" step="1" value="0">
-            </div>
-            <input type="range" class="slider-input" id="cyan" min="-100" max="100" step="1" value="0">
-          </div>
-          <div class="slider-control">
-            <div class="slider-header">
-              <span class="slider-label" data-i18n="magenta">Magenta</span>
-              <input type="number" class="slider-number-input" id="magentaValue" min="-100" max="100" step="1" value="0">
-            </div>
-            <input type="range" class="slider-input" id="magenta" min="-100" max="100" step="1" value="0">
-          </div>
-          <div class="slider-control">
-            <div class="slider-header">
-              <span class="slider-label" data-i18n="yellow">Yellow</span>
-              <input type="number" class="slider-number-input" id="yellowValue" min="-100" max="100" step="1" value="0">
-            </div>
-            <input type="range" class="slider-input" id="yellow" min="-100" max="100" step="1" value="0">
-          </div>
-          <div class="curve-editor">
-            <p class="curve-hint" data-i18n="curveHint">Click and drag to adjust the curve</p>
-            <div class="curve-tabs">
-              <button class="curve-tab r active" data-channel="r">R</button>
-              <button class="curve-tab g" data-channel="g">G</button>
-              <button class="curve-tab b" data-channel="b">B</button>
-              <button class="curve-tab reset" id="resetCurveBtn" data-i18n="resetCurve">Reset</button>
-            </div>
-            <canvas class="curve-canvas" id="curveCanvas"></canvas>
-            <div class="curve-presets">
-              <button class="curve-preset-btn" data-preset="linear" data-i18n="linear">Linear</button>
-              <button class="curve-preset-btn" data-preset="scurve" data-i18n="sCurve">S-Curve</button>
-              <button class="curve-preset-btn" data-preset="log" data-i18n="log">Log</button>
+          <div class="control-group">
+            <div class="control-group-title"><span data-i18n="groupAdvancedCurve">Curve</span></div>
+            <div class="curve-editor">
+              <p class="curve-hint" data-i18n="curveHint">Click and drag to adjust the curve</p>
+              <div class="curve-tabs">
+                <button class="curve-tab r active" data-channel="r">R</button>
+                <button class="curve-tab g" data-channel="g">G</button>
+                <button class="curve-tab b" data-channel="b">B</button>
+                <button class="curve-tab reset" id="resetCurveBtn" data-i18n="resetCurve">Reset</button>
+              </div>
+              <canvas class="curve-canvas" id="curveCanvas"></canvas>
+              <div class="curve-presets">
+                <button class="curve-preset-btn" data-preset="linear" data-i18n="linear">Linear</button>
+                <button class="curve-preset-btn" data-preset="scurve" data-i18n="sCurve">S-Curve</button>
+                <button class="curve-preset-btn" data-preset="log" data-i18n="log">Log</button>
+              </div>
             </div>
           </div>
         </div>

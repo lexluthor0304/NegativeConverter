@@ -6,9 +6,9 @@ import {
   toImageData8,
   cloneImage16,
 } from '../silvercore/util/image16.js';
+import { applyFilmBaseCompensationToBuffer } from './filmBaseCompensation.js';
 
 const ENHANCED_PROFILE_SET = new Set(['none', 'frontier', 'crystal', 'natural', 'pakon']);
-const PIXEL_MAX_16 = 65535;
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -44,31 +44,6 @@ function normalizeCurvePrecision(value) {
 function normalizeEnhancedProfile(value) {
   const normalized = String(value || 'none');
   return ENHANCED_PROFILE_SET.has(normalized) ? normalized : 'none';
-}
-
-function sanitizeFilmBase(base) {
-  if (!base || typeof base !== 'object') return null;
-  const r = Number(base.r);
-  const g = Number(base.g);
-  const b = Number(base.b);
-  if (!Number.isFinite(r) || !Number.isFinite(g) || !Number.isFinite(b)) return null;
-  return {
-    r: clamp(Math.round(r), 0, 255),
-    g: clamp(Math.round(g), 0, 255),
-    b: clamp(Math.round(b), 0, 255),
-  };
-}
-
-function computeFilmBaseGains(base) {
-  const safeBase = sanitizeFilmBase(base);
-  if (!safeBase) return null;
-  const gray = (safeBase.r + safeBase.g + safeBase.b) / 3;
-  if (!Number.isFinite(gray) || gray <= 0) return null;
-  return {
-    r: clamp(gray / Math.max(safeBase.r, 1), 0.25, 4),
-    g: clamp(gray / Math.max(safeBase.g, 1), 0.25, 4),
-    b: clamp(gray / Math.max(safeBase.b, 1), 0.25, 4),
-  };
 }
 
 async function applyFilmPreset(baseSettings, presetId) {
@@ -149,10 +124,21 @@ const _cache = {
   full:    { engine: null, width: 0, height: 0, profile: null, inputBuffer: null, pristineBuffer: null, lastSourceRef: null, lastFilmBaseGains: null },
 };
 
-function gainsEqual(a, b) {
+function filmBaseCompensationEqual(a, b) {
   if (a === b) return true;
   if (!a || !b) return false;
-  return a.r === b.r && a.g === b.g && a.b === b.b;
+  const aBase = a.base || {};
+  const bBase = b.base || {};
+  const aOptions = a.options || {};
+  const bOptions = b.options || {};
+  return aBase.r === bBase.r
+    && aBase.g === bBase.g
+    && aBase.b === bBase.b
+    && aBase.r16 === bBase.r16
+    && aBase.g16 === bBase.g16
+    && aBase.b16 === bBase.b16
+    && aOptions.method === bOptions.method
+    && aOptions.strength === bOptions.strength;
 }
 
 function _slotFor(options) {
@@ -186,11 +172,11 @@ async function _ensureProfile(slot, engine, profileName) {
   }
 }
 
-function _reuseInputBuffer(slot, image16, filmBaseGains) {
+function _reuseInputBuffer(slot, image16, filmBaseCompensation) {
   const len = image16.data.length;
   const sourceRef = image16.data;
   const sourceChanged = sourceRef !== slot.lastSourceRef;
-  const gainsChanged = !gainsEqual(slot.lastFilmBaseGains, filmBaseGains);
+  const gainsChanged = !filmBaseCompensationEqual(slot.lastFilmBaseGains, filmBaseCompensation);
 
   // Ensure buffers are allocated
   if (!slot.inputBuffer || slot.inputBuffer.data.length !== len) {
@@ -198,11 +184,13 @@ function _reuseInputBuffer(slot, image16, filmBaseGains) {
     slot.pristineBuffer = new Uint16Array(len);
     // Build pristine: source + filmBase
     slot.pristineBuffer.set(sourceRef);
-    if (filmBaseGains) {
-      _applyGainsToBuffer(slot.pristineBuffer, filmBaseGains);
+    if (filmBaseCompensation) {
+      applyFilmBaseCompensationToBuffer(slot.pristineBuffer, filmBaseCompensation.base, filmBaseCompensation.options);
     }
     slot.lastSourceRef = sourceRef;
-    slot.lastFilmBaseGains = filmBaseGains ? { ...filmBaseGains } : null;
+    slot.lastFilmBaseGains = filmBaseCompensation
+      ? { base: { ...filmBaseCompensation.base }, options: { ...filmBaseCompensation.options } }
+      : null;
     slot.inputBuffer.data.set(slot.pristineBuffer);
     return slot.inputBuffer;
   }
@@ -210,24 +198,18 @@ function _reuseInputBuffer(slot, image16, filmBaseGains) {
   if (sourceChanged || gainsChanged) {
     // Rebuild pristine: copy source + apply filmBase
     slot.pristineBuffer.set(sourceRef);
-    if (filmBaseGains) {
-      _applyGainsToBuffer(slot.pristineBuffer, filmBaseGains);
+    if (filmBaseCompensation) {
+      applyFilmBaseCompensationToBuffer(slot.pristineBuffer, filmBaseCompensation.base, filmBaseCompensation.options);
     }
     slot.lastSourceRef = sourceRef;
-    slot.lastFilmBaseGains = filmBaseGains ? { ...filmBaseGains } : null;
+    slot.lastFilmBaseGains = filmBaseCompensation
+      ? { base: { ...filmBaseCompensation.base }, options: { ...filmBaseCompensation.options } }
+      : null;
   }
 
   // Copy pristine → inputBuffer (engine modifies inputBuffer in-place)
   slot.inputBuffer.data.set(slot.pristineBuffer);
   return slot.inputBuffer;
-}
-
-function _applyGainsToBuffer(data, gains) {
-  for (let i = 0; i < data.length; i += 4) {
-    data[i] = clamp(Math.round(data[i] * gains.r), 0, PIXEL_MAX_16);
-    data[i + 1] = clamp(Math.round(data[i + 1] * gains.g), 0, PIXEL_MAX_16);
-    data[i + 2] = clamp(Math.round(data[i + 2] * gains.b), 0, PIXEL_MAX_16);
-  }
 }
 
 // Determine whether we need full process() (histogram re-analysis) or can use reprocess()
@@ -255,11 +237,19 @@ async function runSilverCore(imageData, settings, mode, options) {
     params.profileStrength = 0;
   }
 
-  // Compute filmBase gains (skip for positive mode - no orange mask)
-  const filmBaseGains = mode !== 'positive' ? computeFilmBaseGains(settings && settings.filmBase) : null;
+  // Compute filmBase compensation (skip for positive mode - no orange mask)
+  const filmBaseCompensation = mode !== 'positive' && settings && settings.filmBase
+    ? {
+        base: settings.filmBase,
+        options: {
+          method: settings.filmBaseCompensation || settings.filmBaseMethod || (mode === 'color' ? 'density' : 'linear'),
+          strength: settings.filmBaseStrength ?? 1
+        }
+      }
+    : null;
 
   // Reuse input buffer; skips filmBase per-pixel loop when source + gains unchanged
-  const input = _reuseInputBuffer(slot, input16, filmBaseGains);
+  const input = _reuseInputBuffer(slot, input16, filmBaseCompensation);
 
   // Choose process() vs reprocess() based on whether histogram analysis is needed
   const processed16 = _needsFullProcess(slot, options)

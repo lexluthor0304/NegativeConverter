@@ -1,6 +1,8 @@
-# 🎞️ Film Negative → Positive Converter
+# Film Negative → Positive Converter
 
-This is a browser-based tool built with HTML and JavaScript that converts scanned film negatives into positive images. It features real-time image adjustments such as rotation, cropping, white balance, temperature, tint, vibrance, saturation, and **cyan/magenta/yellow (CMY) fine-tuning** — all styled in a nostalgic 1980s American cyberpunk aesthetic.
+Negative Converter helps film photographers turn scanned or camera-digitized film into clean, natural-looking positives with a workflow made for everyday editing. It brings frame cleanup, film-aware conversion, roll consistency, finishing controls, and export into one focused workspace.
+
+Whether you are reviewing a fresh roll, restoring family negatives, or preparing a consistent set for sharing, the app is designed to make film conversion feel fast, approachable, and dependable while keeping your photos private.
 
 ## 🌟 Features
 

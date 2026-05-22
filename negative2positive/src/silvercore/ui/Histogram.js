@@ -27,11 +27,17 @@ export class Histogram {
     for (let i = 2; i < 254; i++) {
       maxVal = Math.max(maxVal, rHist[i], gHist[i], bHist[i], lHist[i]);
     }
+    if (maxVal <= 0) {
+      for (let i = 0; i < 256; i++) {
+        maxVal = Math.max(maxVal, rHist[i], gHist[i], bHist[i], lHist[i]);
+      }
+    }
 
     const ctx = this.ctx;
     const w = this.width;
     const h = this.height;
     ctx.clearRect(0, 0, w, h);
+    if (maxVal <= 0) return;
 
     // Draw channels
     const channels = [

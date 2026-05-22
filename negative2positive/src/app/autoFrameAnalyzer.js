@@ -20,6 +20,10 @@ const DEFAULT_SCORE_WEIGHTS = {
   aspect: 0.12
 };
 
+const DENSITY_TEMPLATE_MAX_PIXELS = 2_700_000;
+const DENSITY_TEMPLATE_SCALE_FACTORS = [0.98, 0.94, 0.90, 0.84, 0.78, 0.70, 0.62];
+const DENSITY_TEMPLATE_OFFSETS = [-0.055, -0.025, 0, 0.025, 0.055];
+
 function clampBetween(v, min, max) {
   if (v < min) return min;
   if (v > max) return max;
@@ -241,6 +245,397 @@ function computeEdgeSupport(edges, bound) {
   }
 
   return total > 0 ? clampBetween(hits / total, 0, 1) : 0;
+}
+
+function getRegionMean(integral, stride, x, y, width, height) {
+  if (!integral || width <= 0 || height <= 0) return 0;
+  const maxY = Math.max(0, Math.floor(integral.length / stride) - 1);
+  const x1 = clampBetween(Math.round(x), 0, stride - 1);
+  const y1 = clampBetween(Math.round(y), 0, maxY);
+  const x2 = clampBetween(Math.round(x + width), x1, stride - 1);
+  const y2 = clampBetween(Math.round(y + height), y1, maxY);
+  const area = Math.max(1, (x2 - x1) * (y2 - y1));
+  const idxA = y1 * stride + x1;
+  const idxB = y1 * stride + x2;
+  const idxC = y2 * stride + x1;
+  const idxD = y2 * stride + x2;
+  return (integral[idxD] - integral[idxB] - integral[idxC] + integral[idxA]) / area;
+}
+
+function addIntegralSample(integral, stride, x, y, rowSum, value, above) {
+  rowSum += value;
+  integral[(y + 1) * stride + (x + 1)] = above + rowSum;
+  return rowSum;
+}
+
+function buildDensityAnalysis(imageData) {
+  if (!imageData) return null;
+  const width = imageData.width;
+  const height = imageData.height;
+  const totalPixels = width * height;
+  if (totalPixels < 16 || totalPixels > DENSITY_TEMPLATE_MAX_PIXELS) return null;
+
+  const stride = width + 1;
+  const luma = new Uint8ClampedArray(totalPixels);
+  const lumaIntegral = new Float32Array((width + 1) * (height + 1));
+  const edgeIntegral = new Float32Array((width + 1) * (height + 1));
+  const chromaIntegral = new Float32Array((width + 1) * (height + 1));
+  const rowEdge = new Float32Array(height);
+  const colEdge = new Float32Array(width);
+  const { data } = imageData;
+
+  let chromaSum = 0;
+  for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    luma[p] = Math.round((r * 0.299) + (g * 0.587) + (b * 0.114));
+    chromaSum += Math.max(r, g, b) - Math.min(r, g, b);
+  }
+
+  for (let y = 0; y < height; y++) {
+    let rowLumaSum = 0;
+    let rowEdgeSum = 0;
+    let rowChromaSum = 0;
+    for (let x = 0; x < width; x++) {
+      const idx = y * width + x;
+      const v = luma[idx];
+      const left = x > 0 ? luma[idx - 1] : v;
+      const up = y > 0 ? luma[idx - width] : v;
+      const edge = Math.min(255, Math.abs(v - left) + Math.abs(v - up));
+      const chromaIdx = idx * 4;
+      const r = data[chromaIdx];
+      const g = data[chromaIdx + 1];
+      const b = data[chromaIdx + 2];
+      const chroma = Math.max(r, g, b) - Math.min(r, g, b);
+      const aboveIdx = y * stride + (x + 1);
+
+      rowLumaSum = addIntegralSample(lumaIntegral, stride, x, y, rowLumaSum, v, lumaIntegral[aboveIdx]);
+      rowEdgeSum = addIntegralSample(edgeIntegral, stride, x, y, rowEdgeSum, edge, edgeIntegral[aboveIdx]);
+      rowChromaSum = addIntegralSample(chromaIntegral, stride, x, y, rowChromaSum, chroma, chromaIntegral[aboveIdx]);
+      rowEdge[y] += edge;
+      colEdge[x] += edge;
+    }
+  }
+
+  for (let y = 0; y < height; y++) rowEdge[y] /= Math.max(1, width);
+  for (let x = 0; x < width; x++) colEdge[x] /= Math.max(1, height);
+
+  return {
+    width,
+    height,
+    stride,
+    lumaIntegral,
+    edgeIntegral,
+    chromaIntegral,
+    rowEdge,
+    colEdge,
+    globalChroma: chromaSum / Math.max(1, totalPixels)
+  };
+}
+
+function inferFrameMaterialMode(context, analysis) {
+  const filmType = String((context.settings && (context.settings.filmType || context.settings.sourceFilmType)) || 'color');
+  const positiveMode = filmType === 'positive' || filmType === 'slide' || filmType === 'bwPositive';
+  const bwMode = filmType === 'bw' || filmType === 'blackWhite' || filmType === 'bwNegative' || filmType === 'bwPositive';
+  const lowChroma = analysis ? analysis.globalChroma < 18 : false;
+
+  if (filmType === 'bwPositive') return 'bw-positive';
+  if (bwMode) return positiveMode ? 'bw-positive' : 'bw-negative';
+  if (filmType === 'color' || filmType === 'colorNegative') return 'color-negative';
+  if (filmType === 'colorPositive') return 'color-positive';
+  if (positiveMode) return lowChroma ? 'bw-positive' : 'color-positive';
+  return lowChroma ? 'bw-negative' : 'color-negative';
+}
+
+function getFrameModeScoringProfile(mode) {
+  switch (mode) {
+    case 'color-positive':
+      return { edgeWeight: 0.29, contrastWeight: 0.25, chromaWeight: 0.09, outsideWeight: 0.10 };
+    case 'bw-negative':
+      return { edgeWeight: 0.34, contrastWeight: 0.27, chromaWeight: 0.00, outsideWeight: 0.12 };
+    case 'bw-positive':
+      return { edgeWeight: 0.36, contrastWeight: 0.29, chromaWeight: 0.00, outsideWeight: 0.10 };
+    case 'color-negative':
+    default:
+      return { edgeWeight: 0.30, contrastWeight: 0.24, chromaWeight: 0.06, outsideWeight: 0.12 };
+  }
+}
+
+function computeBandStats(rect, analysis) {
+  const minSide = Math.max(1, Math.min(rect.width, rect.height));
+  const band = clampBetween(Math.round(minSide * 0.045), 4, 42);
+  const outer = clampBetween(Math.round(minSide * 0.06), 5, 56);
+  const left = rect.x;
+  const top = rect.y;
+  const right = rect.x + rect.width;
+  const bottom = rect.y + rect.height;
+  const stride = analysis.stride;
+
+  const insideBands = [
+    { x: left, y: top, width: rect.width, height: band },
+    { x: left, y: bottom - band, width: rect.width, height: band },
+    { x: left, y: top, width: band, height: rect.height },
+    { x: right - band, y: top, width: band, height: rect.height }
+  ];
+  const outsideBands = [
+    { x: left, y: top - outer, width: rect.width, height: outer },
+    { x: left, y: bottom, width: rect.width, height: outer },
+    { x: left - outer, y: top, width: outer, height: rect.height },
+    { x: right, y: top, width: outer, height: rect.height }
+  ].filter(b => b.x >= 0 && b.y >= 0 && b.x + b.width <= analysis.width && b.y + b.height <= analysis.height);
+
+  const meanFor = (integral, bands) => {
+    if (!bands.length) return 0;
+    let weighted = 0;
+    let area = 0;
+    bands.forEach(b => {
+      const a = Math.max(1, b.width * b.height);
+      weighted += getRegionMean(integral, stride, b.x, b.y, b.width, b.height) * a;
+      area += a;
+    });
+    return weighted / Math.max(1, area);
+  };
+
+  return {
+    innerLuma: meanFor(analysis.lumaIntegral, insideBands),
+    outerLuma: meanFor(analysis.lumaIntegral, outsideBands),
+    innerEdge: meanFor(analysis.edgeIntegral, insideBands),
+    outerEdge: meanFor(analysis.edgeIntegral, outsideBands),
+    innerChroma: meanFor(analysis.chromaIntegral, insideBands),
+    outerChroma: meanFor(analysis.chromaIntegral, outsideBands),
+    outsideBandCount: outsideBands.length
+  };
+}
+
+function scoreSprocketLaneSupport(analysis, rect) {
+  if (!analysis || !rect) return 0;
+  const { width, height } = analysis;
+  const crop = sanitizeBound(rect, width, height);
+  if (!crop) return 0;
+
+  const shortSide = Math.max(1, Math.min(crop.width, crop.height));
+  const laneDepth = clampBetween(Math.round(shortSide * 0.16), 5, 56);
+  const minLane = Math.max(4, Math.round(shortSide * 0.045));
+
+  if (crop.width >= crop.height) {
+    const topHeight = Math.min(laneDepth, crop.y);
+    const bottomHeight = Math.min(laneDepth, height - (crop.y + crop.height));
+    if (topHeight < minLane || bottomHeight < minLane) return 0;
+
+    const top = getRegionMean(analysis.edgeIntegral, analysis.stride, crop.x, crop.y - topHeight, crop.width, topHeight);
+    const bottom = getRegionMean(analysis.edgeIntegral, analysis.stride, crop.x, crop.y + crop.height, crop.width, bottomHeight);
+    const center = getRegionMean(
+      analysis.edgeIntegral,
+      analysis.stride,
+      crop.x + crop.width * 0.10,
+      crop.y + crop.height * 0.28,
+      crop.width * 0.80,
+      crop.height * 0.44
+    );
+    const balance = 1 - clampBetween(Math.abs(top - bottom) / Math.max(1, Math.max(top, bottom)), 0, 1);
+    return clampBetween(((top + bottom) * 0.5 - center * 0.52) / 18, 0, 1) * balance;
+  }
+
+  const leftWidth = Math.min(laneDepth, crop.x);
+  const rightWidth = Math.min(laneDepth, width - (crop.x + crop.width));
+  if (leftWidth < minLane || rightWidth < minLane) return 0;
+
+  const left = getRegionMean(analysis.edgeIntegral, analysis.stride, crop.x - leftWidth, crop.y, leftWidth, crop.height);
+  const right = getRegionMean(analysis.edgeIntegral, analysis.stride, crop.x + crop.width, crop.y, rightWidth, crop.height);
+  const center = getRegionMean(
+    analysis.edgeIntegral,
+    analysis.stride,
+    crop.x + crop.width * 0.28,
+    crop.y + crop.height * 0.10,
+    crop.width * 0.44,
+    crop.height * 0.80
+  );
+  const balance = 1 - clampBetween(Math.abs(left - right) / Math.max(1, Math.max(left, right)), 0, 1);
+  return clampBetween(((left + right) * 0.5 - center * 0.52) / 18, 0, 1) * balance;
+}
+
+function scoreDensityRect(rect, target, analysis, context, options = {}) {
+  if (!rect || !target || !analysis) return null;
+  const crop = sanitizeBound(rect, analysis.width, analysis.height);
+  if (!crop) return null;
+
+  const imageArea = Math.max(1, analysis.width * analysis.height);
+  const areaRatio = (crop.width * crop.height) / imageArea;
+  if (areaRatio < 0.12 || areaRatio > 0.965) return null;
+
+  const ratio = Math.max(crop.width, crop.height) / Math.max(1, Math.min(crop.width, crop.height));
+  const aspectDelta = Math.abs(ratio - target.ratio) / target.ratio;
+  const aspectScore = 1 - clampBetween(aspectDelta / 0.24, 0, 1);
+  if (aspectScore <= 0) return null;
+
+  const bandStats = computeBandStats(crop, analysis);
+  const boundaryCompleteness = clampBetween(bandStats.outsideBandCount / 4, 0, 1);
+  if (boundaryCompleteness < 0.5) return null;
+
+  const frameMode = inferFrameMaterialMode(context, analysis);
+  const profile = getFrameModeScoringProfile(frameMode);
+  const insideEdge = getRegionMean(
+    analysis.edgeIntegral,
+    analysis.stride,
+    crop.x + crop.width * 0.08,
+    crop.y + crop.height * 0.08,
+    crop.width * 0.84,
+    crop.height * 0.84
+  );
+  const outsideEdge = bandStats.outerEdge;
+  const contentTexture = clampBetween((insideEdge - outsideEdge * 0.72) / 24, 0, 1) * boundaryCompleteness;
+  const boundaryEdgeContrast = clampBetween(Math.abs(bandStats.innerEdge - bandStats.outerEdge) / 18, 0, 1) * boundaryCompleteness;
+  const edgeDelta = Math.max(contentTexture, boundaryEdgeContrast * 0.72);
+  const borderContrast = clampBetween(Math.abs(bandStats.innerLuma - bandStats.outerLuma) / 34, 0, 1) * boundaryCompleteness;
+  const chromaContrast = profile.chromaWeight > 0
+    ? clampBetween(Math.abs(bandStats.innerChroma - bandStats.outerChroma) / 22, 0, 1) * boundaryCompleteness
+    : 0;
+  const outsideClean = clampBetween(1 - (outsideEdge / Math.max(12, insideEdge + 1)), 0, 1) * boundaryCompleteness;
+  const centerX = crop.x + crop.width / 2;
+  const centerY = crop.y + crop.height / 2;
+  const centerDist = Math.hypot(centerX - analysis.width / 2, centerY - analysis.height / 2);
+  const centerPrior = 1 - clampBetween(centerDist / (Math.hypot(analysis.width, analysis.height) * 0.34), 0, 1);
+  const areaScore = 1 - clampBetween(Math.abs(areaRatio - 0.62) / 0.48, 0, 1);
+  const laneScore = options.sprocket
+    ? scoreSprocketLaneSupport(analysis, crop)
+    : 0;
+
+  const score = clampBetween(
+    (aspectScore * 0.19) +
+    (edgeDelta * profile.edgeWeight) +
+    (borderContrast * profile.contrastWeight) +
+    (chromaContrast * profile.chromaWeight) +
+    (outsideClean * profile.outsideWeight) +
+    (centerPrior * 0.10) +
+    (areaScore * 0.08) +
+    (laneScore * 0.08),
+    0,
+    1
+  );
+
+  if (score < 0.34) return null;
+
+  return {
+    method: options.sprocket ? 'density-sprocket-template' : 'density-template',
+    area: crop.width * crop.height,
+    bound: crop,
+    cropRegion: { left: crop.x, top: crop.y, width: crop.width, height: crop.height },
+    minRectWidth: crop.width,
+    minRectHeight: crop.height,
+    minRectAngle: 0,
+    points: [
+      { x: crop.x, y: crop.y },
+      { x: crop.x + crop.width, y: crop.y },
+      { x: crop.x + crop.width, y: crop.y + crop.height },
+      { x: crop.x, y: crop.y + crop.height }
+    ],
+    score,
+    areaRatio,
+    detectedFormat: target.key,
+    frameMode,
+    scoreBreakdown: {
+      area: Number(areaScore.toFixed(3)),
+      rectangularity: 1,
+      orthogonality: 1,
+      parallelism: 1,
+      edgeSupport: Number(Math.max(edgeDelta, borderContrast).toFixed(3)),
+      centerPrior: Number(centerPrior.toFixed(3)),
+      aspect: Number(aspectScore.toFixed(3)),
+      borderContrast: Number(borderContrast.toFixed(3)),
+      boundaryCompleteness: Number(boundaryCompleteness.toFixed(3)),
+      boundaryEdgeContrast: Number(boundaryEdgeContrast.toFixed(3)),
+      contentTexture: Number(contentTexture.toFixed(3)),
+      outsideClean: Number(outsideClean.toFixed(3)),
+      chromaContrast: Number(chromaContrast.toFixed(3)),
+      sprocketLane: Number(laneScore.toFixed(3)),
+      frameMode
+    },
+    minRect: {
+      angle: 0,
+      width: crop.width,
+      height: crop.height
+    }
+  };
+}
+
+function pushDensityRectCandidate(candidates, rect, target, analysis, context, options = {}) {
+  const scored = scoreDensityRect(rect, target, analysis, context, options);
+  if (scored) candidates.push(scored);
+}
+
+function buildDensityTemplateCandidates(imageData, context) {
+  const analysis = buildDensityAnalysis(imageData);
+  if (!analysis) return [];
+
+  const aspectTargets = getAutoFrameAspectTargets(context);
+  const candidates = [];
+  const maxW = analysis.width * 0.985;
+  const maxH = analysis.height * 0.985;
+  const centerX = analysis.width / 2;
+  const centerY = analysis.height / 2;
+
+  aspectTargets.forEach((target) => {
+    const orientations = [
+      { ratio: target.ratio, portrait: false },
+      { ratio: 1 / target.ratio, portrait: true }
+    ];
+
+    orientations.forEach((orientation) => {
+      const ratio = orientation.ratio;
+      const fitW = ratio >= 1 ? Math.min(maxW, maxH * ratio) : Math.min(maxW, maxH * ratio);
+      const fitH = ratio >= 1 ? fitW / ratio : Math.min(maxH, fitW / ratio);
+      if (fitW < analysis.width * 0.22 || fitH < analysis.height * 0.22) return;
+
+      DENSITY_TEMPLATE_SCALE_FACTORS.forEach((scale) => {
+        const width = fitW * scale;
+        const height = fitH * scale;
+        if (width < analysis.width * 0.22 || height < analysis.height * 0.22) return;
+        DENSITY_TEMPLATE_OFFSETS.forEach((offsetX) => {
+          DENSITY_TEMPLATE_OFFSETS.forEach((offsetY) => {
+            const x = centerX - width / 2 + (analysis.width * offsetX);
+            const y = centerY - height / 2 + (analysis.height * offsetY);
+            pushDensityRectCandidate(candidates, { x, y, width, height }, target, analysis, context);
+          });
+        });
+      });
+
+      if (target.key === '135') {
+        const shortRatios = [0.58, 0.64, 0.70, 0.76];
+        shortRatios.forEach((shortRatio) => {
+          const landscape = !orientation.portrait;
+          const shortSide = (landscape ? analysis.height : analysis.width) * shortRatio;
+          const width = landscape ? shortSide * target.ratio : shortSide;
+          const height = landscape ? shortSide : shortSide * target.ratio;
+          if (width > maxW || height > maxH) return;
+          DENSITY_TEMPLATE_OFFSETS.forEach((offsetX) => {
+            DENSITY_TEMPLATE_OFFSETS.forEach((offsetY) => {
+              const x = centerX - width / 2 + (analysis.width * offsetX);
+              const y = centerY - height / 2 + (analysis.height * offsetY);
+              pushDensityRectCandidate(candidates, { x, y, width, height }, target, analysis, context, { sprocket: true });
+            });
+          });
+        });
+      }
+    });
+  });
+
+  const seen = new Set();
+  return candidates
+    .sort((a, b) => b.score - a.score)
+    .filter((candidate) => {
+      const key = [
+        candidate.detectedFormat,
+        Math.round(candidate.bound.x / 4),
+        Math.round(candidate.bound.y / 4),
+        Math.round(candidate.bound.width / 4),
+        Math.round(candidate.bound.height / 4)
+      ].join(':');
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 18);
 }
 
 function scoreFrameCandidate(candidate, context) {
@@ -515,13 +910,18 @@ function detectFrameCandidatesWithCv(imageData, context, options = {}) {
       if (scoredHough) candidates.push(scoredHough);
     }
 
+    candidates.push(...buildDensityTemplateCandidates(imageData, context));
+
     return candidates
       .filter(candidate => candidate.areaRatio >= minAreaRatio)
       .sort((a, b) => b.score - a.score)
-      .slice(0, 10);
+      .slice(0, 16);
   } catch (err) {
     console.error('OpenCV border analysis failed:', err);
-    return [];
+    return buildDensityTemplateCandidates(imageData, context)
+      .filter(candidate => candidate.areaRatio >= minAreaRatio)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 12);
   } finally {
     src.delete();
     if (gray) gray.delete();
@@ -558,6 +958,99 @@ function buildRotationCandidates(baseCandidates = []) {
     });
   });
   return Array.from(angleSet);
+}
+
+function normalizeAxisDelta(angle) {
+  let normalized = normalizeAngleDegrees(Number(angle) || 0);
+  while (normalized > 90) normalized -= 180;
+  while (normalized <= -90) normalized += 180;
+  if (normalized > 45) normalized -= 90;
+  if (normalized <= -45) normalized += 90;
+  return normalized;
+}
+
+function mergeAngleCandidates(...candidateGroups) {
+  const angleSet = new Set([0]);
+  candidateGroups.flat().forEach((angle) => {
+    const normalized = normalizeAngleDegrees(Number(angle) || 0);
+    const quantized = Math.abs(normalized) < 0.12 ? 0 : Math.round(normalized * 10) / 10;
+    angleSet.add(quantized);
+  });
+  return Array.from(angleSet).sort((a, b) => Math.abs(a) - Math.abs(b));
+}
+
+function buildLineOrientationRotationCandidates(imageData) {
+  if (!(window.cv && window.cv.Mat && window.cv.HoughLinesP) || !imageData) return [];
+  const src = window.cv.matFromImageData(imageData);
+  let gray = null;
+  let blurred = null;
+  let edges = null;
+  let lines = null;
+  try {
+    const width = src.cols;
+    const height = src.rows;
+    const minDim = Math.min(width, height);
+    if (minDim < 80) return [];
+
+    gray = new window.cv.Mat();
+    blurred = new window.cv.Mat();
+    edges = new window.cv.Mat();
+    lines = new window.cv.Mat();
+
+    window.cv.cvtColor(src, gray, window.cv.COLOR_RGBA2GRAY);
+    window.cv.GaussianBlur(gray, blurred, new window.cv.Size(5, 5), 0, 0, window.cv.BORDER_DEFAULT);
+    window.cv.Canny(blurred, edges, 35, 120, 3, false);
+    window.cv.HoughLinesP(
+      edges,
+      lines,
+      1,
+      Math.PI / 180,
+      58,
+      Math.max(34, Math.round(minDim * 0.18)),
+      Math.max(7, Math.round(minDim * 0.016))
+    );
+
+    if (!lines.rows || !lines.data32S) return [];
+    const bins = new Map();
+    let totalWeight = 0;
+    const data = lines.data32S;
+    for (let i = 0; i < lines.rows; i++) {
+      const idx = i * 4;
+      const x1 = data[idx];
+      const y1 = data[idx + 1];
+      const x2 = data[idx + 2];
+      const y2 = data[idx + 3];
+      const dx = x2 - x1;
+      const dy = y2 - y1;
+      const length = Math.hypot(dx, dy);
+      if (length < minDim * 0.16) continue;
+
+      const rawAngle = Math.atan2(dy, dx) * 180 / Math.PI;
+      const axisDelta = normalizeAxisDelta(rawAngle);
+      if (Math.abs(axisDelta) > 35) continue;
+      const bin = Math.round(axisDelta * 2) / 2;
+      const weight = length * (1 - clampBetween(Math.abs(axisDelta) / 42, 0, 0.45));
+      bins.set(bin, (bins.get(bin) || 0) + weight);
+      totalWeight += weight;
+    }
+
+    if (totalWeight <= 0 || bins.size === 0) return [];
+    return Array.from(bins.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .filter(([, weight]) => weight / totalWeight >= 0.16)
+      .map(([delta]) => -delta)
+      .filter(angle => Math.abs(angle) >= 0.2);
+  } catch (err) {
+    console.warn('Auto frame line orientation failed:', err);
+    return [];
+  } finally {
+    src.delete();
+    if (gray) gray.delete();
+    if (blurred) blurred.delete();
+    if (edges) edges.delete();
+    if (lines) lines.delete();
+  }
 }
 
 function getAutoFrameTargetRatiosForFormat(formatKey, context) {
@@ -621,6 +1114,63 @@ function evaluateAutoFrameCropRegion(cropRegion, imageData, detectedFormat, cand
   };
 }
 
+function isDensityTemplateCandidate(candidate) {
+  return Boolean(candidate && typeof candidate.method === 'string' && candidate.method.startsWith('density'));
+}
+
+function getDensityTemplateReliability(candidate, validation) {
+  if (!isDensityTemplateCandidate(candidate)) {
+    return { usable: true, confidenceCap: 1 };
+  }
+
+  const breakdown = candidate.scoreBreakdown || {};
+  const boundaryCompleteness = clampBetween(Number(breakdown.boundaryCompleteness) || 0, 0, 1);
+  const boundaryStrength = Math.max(
+    Number(breakdown.borderContrast) || 0,
+    Number(breakdown.edgeSupport) || 0,
+    Number(breakdown.boundaryEdgeContrast) || 0
+  );
+  const contentTexture = clampBetween(Number(breakdown.contentTexture) || 0, 0, 1);
+  const outsideClean = clampBetween(Number(breakdown.outsideClean) || 0, 0, 1);
+  const sprocketLane = clampBetween(Number(breakdown.sprocketLane) || 0, 0, 1);
+  const aspectScore = validation && Number.isFinite(validation.aspectScore) ? validation.aspectScore : 0;
+  const areaRatio = validation && Number.isFinite(validation.areaRatio) ? validation.areaRatio : 1;
+  const is135 = candidate.detectedFormat === '135';
+  const isSprocketCandidate = candidate.method === 'density-sprocket-template';
+
+  const strong35mm = is135
+    && isSprocketCandidate
+    && sprocketLane >= 0.24
+    && boundaryStrength >= 0.24
+    && outsideClean >= 0.12
+    && boundaryCompleteness >= 0.5;
+
+  const strongImageWindow = boundaryCompleteness >= 0.75
+    && boundaryStrength >= 0.44
+    && outsideClean >= 0.20
+    && contentTexture >= 0.08
+    && aspectScore >= 0.78
+    && areaRatio <= 0.93;
+
+  const moderateImageWindow = boundaryCompleteness >= 0.75
+    && boundaryStrength >= 0.34
+    && outsideClean >= 0.18
+    && contentTexture >= 0.06
+    && aspectScore >= 0.84
+    && areaRatio <= 0.88;
+
+  if (!strong35mm && !strongImageWindow && !moderateImageWindow) {
+    return { usable: false, confidenceCap: 0 };
+  }
+
+  let confidenceCap = 0.66;
+  if (strong35mm) confidenceCap = 0.78;
+  if (strongImageWindow) confidenceCap = Math.max(confidenceCap, 0.74);
+  if (!isSprocketCandidate) confidenceCap = Math.min(confidenceCap, 0.68);
+
+  return { usable: true, confidenceCap };
+}
+
 function computeAutoFrameAnglePenalty(angle) {
   const absAngle = Math.abs(normalizeAngleDegrees(Number(angle) || 0));
   if (absAngle <= 0.12) return 0;
@@ -644,6 +1194,18 @@ function buildCropRegionFromBound(bound, imageData, marginRatio, context) {
   return context.sanitizeCropRegion({ left, top, width, height }, imageData);
 }
 
+function scaleCropRegion(cropRegion, sourceWidth, sourceHeight, targetImageData, context) {
+  if (!cropRegion || !targetImageData || !sourceWidth || !sourceHeight) return null;
+  const scaleX = targetImageData.width / sourceWidth;
+  const scaleY = targetImageData.height / sourceHeight;
+  return context.sanitizeCropRegion({
+    left: Math.round(cropRegion.left * scaleX),
+    top: Math.round(cropRegion.top * scaleY),
+    width: Math.round(cropRegion.width * scaleX),
+    height: Math.round(cropRegion.height * scaleY)
+  }, targetImageData);
+}
+
 function detectAxisAlignedCropRegion(imageData, marginRatio, context) {
   const candidates = detectFrameCandidatesWithCv(imageData, context, {
     minAreaRatio: 0.04,
@@ -652,21 +1214,26 @@ function detectAxisAlignedCropRegion(imageData, marginRatio, context) {
   if (!candidates.length) return null;
 
   for (const candidate of candidates) {
-    const cropRegion = buildCropRegionFromBound(candidate.bound, imageData, marginRatio, context);
+    const cropRegion = candidate.cropRegion
+      ? context.sanitizeCropRegion(candidate.cropRegion, imageData)
+      : buildCropRegionFromBound(candidate.bound, imageData, marginRatio, context);
     if (!cropRegion) continue;
     const validation = evaluateAutoFrameCropRegion(cropRegion, imageData, candidate.detectedFormat, candidate, context);
     if (!validation.isValid) continue;
-    const confidence = clampBetween(
+    const reliability = getDensityTemplateReliability(candidate, validation);
+    if (!reliability.usable) continue;
+    const confidence = Math.min(reliability.confidenceCap, clampBetween(
       (candidate.score * 0.62) +
       (Math.min(validation.areaRatio / 0.92, 1) * 0.16) +
       (validation.aspectScore * 0.16) +
       (validation.edgeSupport * 0.06),
       0,
       1
-    );
+    ));
     return {
       cropRegion,
       confidence,
+      confidenceCap: reliability.confidenceCap,
       candidate,
       validation
     };
@@ -689,9 +1256,13 @@ export function detectFrameAndRotation(imageData, options = {}) {
 
   const previewData = resizeImageDataToMaxSide(imageData, context.maxSide);
   const previewCandidates = detectFrameCandidatesWithCv(previewData, context, { minAreaRatio: 0.04 });
-  if (!previewCandidates.length) return null;
+  const lineAngleCandidates = buildLineOrientationRotationCandidates(previewData);
+  if (!previewCandidates.length && !lineAngleCandidates.length) return null;
 
-  const angleCandidates = buildRotationCandidates(previewCandidates);
+  const angleCandidates = mergeAngleCandidates(
+    buildRotationCandidates(previewCandidates),
+    lineAngleCandidates
+  );
   let bestPreview = null;
   for (const angle of angleCandidates) {
     const rotatedPreview = Math.abs(angle) < 0.001 ? previewData : context.rotateImageData(previewData, angle);
@@ -712,29 +1283,67 @@ export function detectFrameAndRotation(imageData, options = {}) {
       || score > (bestPreview.score + 0.001)
       || (Math.abs(score - bestPreview.score) <= 0.001 && Math.abs(angle) < Math.abs(bestPreview.angle));
     if (isBetter) {
-      bestPreview = { angle, score, cropPreview, anglePenalty };
+      bestPreview = {
+        angle,
+        score,
+        cropPreview,
+        anglePenalty,
+        rotatedPreviewWidth: rotatedPreview.width,
+        rotatedPreviewHeight: rotatedPreview.height
+      };
     }
   }
 
   if (!bestPreview) return null;
   const normalizedAngle = Math.abs(bestPreview.angle) < 0.15 ? 0 : Number(bestPreview.angle.toFixed(2));
   const rotatedFull = Math.abs(normalizedAngle) < 0.001 ? imageData : context.rotateImageData(imageData, normalizedAngle);
-  const cropFull = detectAxisAlignedCropRegion(rotatedFull, context.settings.marginRatio, context);
+  const scaledCropRegion = scaleCropRegion(
+    bestPreview.cropPreview.cropRegion,
+    bestPreview.rotatedPreviewWidth,
+    bestPreview.rotatedPreviewHeight,
+    rotatedFull,
+    context
+  );
+  const scaledValidation = evaluateAutoFrameCropRegion(
+    scaledCropRegion,
+    rotatedFull,
+    bestPreview.cropPreview.candidate ? bestPreview.cropPreview.candidate.detectedFormat : 'unknown',
+    bestPreview.cropPreview.candidate,
+    context
+  );
+  const cropFull = scaledCropRegion && scaledValidation.isValid
+    ? {
+      cropRegion: scaledCropRegion,
+      confidence: bestPreview.cropPreview.confidence,
+      confidenceCap: bestPreview.cropPreview.confidenceCap,
+      candidate: bestPreview.cropPreview.candidate,
+      validation: scaledValidation
+    }
+    : detectAxisAlignedCropRegion(rotatedFull, context.settings.marginRatio, context);
   if (!cropFull || !cropFull.validation || !cropFull.validation.isValid) return null;
 
   const fullAnglePenalty = computeAutoFrameAnglePenalty(normalizedAngle);
-  const confidence = Number(clampBetween(
+  const resultConfidenceCap = Math.min(
+    Number.isFinite(cropFull.confidenceCap) ? cropFull.confidenceCap : 1,
+    bestPreview.cropPreview && Number.isFinite(bestPreview.cropPreview.confidenceCap)
+      ? bestPreview.cropPreview.confidenceCap
+      : 1
+  );
+  const confidence = Number(Math.min(resultConfidenceCap, clampBetween(
     (bestPreview.score * 0.34) +
     (cropFull.confidence * 0.56) +
     (cropFull.validation.aspectScore * 0.10) -
     (fullAnglePenalty * 0.4),
     0,
     1
-  ).toFixed(2));
+  )).toFixed(2));
   const confidenceLevel = inferAutoFrameConfidenceLevel(confidence, context.settings);
   const detectedFormat = cropFull.candidate && cropFull.candidate.detectedFormat
     ? cropFull.candidate.detectedFormat
     : 'unknown';
+  const inferredFrameMode = cropFull.candidate && cropFull.candidate.frameMode
+    ? cropFull.candidate.frameMode
+    : inferFrameMaterialMode(context, buildDensityAnalysis(previewData));
 
   return {
     angle: normalizedAngle,
@@ -746,6 +1355,7 @@ export function detectFrameAndRotation(imageData, options = {}) {
     diagnostics: {
       method: cropFull.candidate ? cropFull.candidate.method : 'unknown',
       scoreBreakdown: cropFull.candidate ? cropFull.candidate.scoreBreakdown : null,
+      frameMode: inferredFrameMode,
       anglePenalty: Number(fullAnglePenalty.toFixed(3)),
       cropValidation: cropFull.validation || null
     }
