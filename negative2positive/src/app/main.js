@@ -48,6 +48,44 @@
       isWorkerAvailable
     } from '../workers/workerBridge.js';
 
+    const PERF_LOG_THRESHOLD_MS = 120;
+    const FULL_RESOLUTION_IDLE_DELAY_MS = 1800;
+
+    function getPerfNow() {
+      return (typeof performance !== 'undefined' && typeof performance.now === 'function')
+        ? performance.now()
+        : Date.now();
+    }
+
+    function createPerfTrace(label, details = {}) {
+      const startedAt = getPerfNow();
+      let lastAt = startedAt;
+      const stages = [];
+
+      return {
+        mark(stage, extra = {}) {
+          const now = getPerfNow();
+          stages.push({
+            stage,
+            ms: Math.round((now - lastAt) * 10) / 10,
+            totalMs: Math.round((now - startedAt) * 10) / 10,
+            ...extra
+          });
+          lastAt = now;
+        },
+        end(extra = {}) {
+          const totalMs = Math.round((getPerfNow() - startedAt) * 10) / 10;
+          if (totalMs >= PERF_LOG_THRESHOLD_MS) {
+            console.info('[perf]', label, { totalMs, ...details, ...extra, stages });
+          }
+        }
+      };
+    }
+
+    function getImageDataPixelCount(imageData) {
+      return imageData ? imageData.width * imageData.height : 0;
+    }
+
     // ===========================================
     // Internationalization
     // ===========================================
@@ -2681,11 +2719,26 @@
       jpegQuality: 92,      // 1-100
 
       // Render state
-      lastRenderQuality: 'full' // 'full' | 'preview' | 'gl'
+      lastRenderQuality: 'full', // 'full' | 'preview' | 'gl'
+      processedImageDataIsPreview: false,
+      fullResolutionPending: false,
+      fullResolutionPromise: null
     };
     stateReady = true;
     updateGuideModeUI();
     updateGrayPointGuideUI();
+
+    let fullResolutionRenderTimer = null;
+
+    function clearFullResolutionRenderState() {
+      if (fullResolutionRenderTimer) {
+        clearTimeout(fullResolutionRenderTimer);
+        fullResolutionRenderTimer = null;
+      }
+      state.processedImageDataIsPreview = false;
+      state.fullResolutionPending = false;
+      state.fullResolutionPromise = null;
+    }
 
     // ===========================================
     // Toast Notification System
@@ -4608,7 +4661,6 @@
     }
 
     function isWebGLActive() {
-      if (usesSilverCoreConversion(state)) return false;
       if (state.dustRemoval.enabled && state.dustRemoval.showMask) return false;
       return !!webglState.gl && !webglState.disabledByError && state.currentStep >= 3 && !!state.processedImageData;
     }
@@ -4830,6 +4882,7 @@
     }
 
     function schedulePreviewUpdate() {
+      postponeFullResolutionRenderForInteraction();
       if (!updateScheduled) {
         updateScheduled = true;
         requestAnimationFrame(() => {
@@ -4851,9 +4904,7 @@
         // If SilverCore mode and we were using preview-resolution, run full reprocess
         if (usesSilverCoreConversion(state) && state.conversionSourceImageData
           && state.conversionPreviewImageData && state.conversionPreviewImageData !== state.conversionSourceImageData) {
-          void rerenderWithCoreControls({ full: true }).catch((err) => {
-            console.error('Full reprocess from scheduleFullUpdate failed:', err);
-          });
+          scheduleFullResolutionRender('scheduleFullUpdate');
           return;
         }
         updateFull();
@@ -4875,6 +4926,7 @@
         updateCanvasVisibility();
         if (isWebGLActive() && renderWebGL()) {
           renderHistogramForWebGL(false);
+          state.displayImageData = null;
           state.lastRenderQuality = 'gl';
           return;
         }
@@ -4917,6 +4969,7 @@
         updateCanvasVisibility();
         if (isWebGLActive() && renderWebGL()) {
           renderHistogramForWebGL(true);
+          state.displayImageData = null;
           state.lastRenderQuality = 'gl';
           return;
         }
@@ -5037,9 +5090,24 @@
       updateFullCpu();
     }
 
-    function applyProcessedImageToState(processed) {
+    function isDisplayImageDataFullResolution() {
+      return Boolean(
+        state.displayImageData
+        && state.processedImageData
+        && !state.processedImageDataIsPreview
+        && state.displayImageData.width === state.processedImageData.width
+        && state.displayImageData.height === state.processedImageData.height
+      );
+    }
+
+    function applyProcessedImageToState(processed, options = {}) {
       if (!processed) return;
+      const previewOnly = Boolean(options.previewOnly);
       state.processedImageData = processed;
+      state.processedImageDataIsPreview = previewOnly;
+      if (!previewOnly) {
+        state.fullResolutionPending = false;
+      }
       state.displayImageData = null;
       state.previewSourceImageData = buildPreviewSourceImageData(processed);
       state.histogramSourceImageData = buildHistogramSourceImageData(state.previewSourceImageData || processed);
@@ -5050,6 +5118,7 @@
       }
       canvas.width = processed.width;
       canvas.height = processed.height;
+      adjustCanvasDisplay(processed.width, processed.height);
     }
 
     async function convertFromCurrentSource(settings = state, { preview = false } = {}) {
@@ -5115,6 +5184,10 @@
 
     function applyPreviewProcessedImageToState(processed) {
       if (!processed) return;
+      if (!state.processedImageData || state.processedImageDataIsPreview) {
+        applyProcessedImageToState(processed, { previewOnly: true });
+        return;
+      }
       // Only update preview-related state; leave processedImageData untouched
       // so that full-resolution export remains correct.
       state.previewSourceImageData = buildPreviewSourceImageData(processed);
@@ -5127,6 +5200,7 @@
       const fullH = state.processedImageData ? state.processedImageData.height : processed.height;
       canvas.width = fullW;
       canvas.height = fullH;
+      adjustCanvasDisplay(fullW, fullH);
     }
 
     let _coreReprocessInFlight = false;
@@ -5143,8 +5217,10 @@
     async function rerenderWithCoreControls(options = {}) {
       const full = Boolean(options.full) || Boolean(state.dustRemoval.enabled);
       const token = Number.isInteger(options.token) ? options.token : null;
+      const sourceRef = options.sourceRef || null;
       if (!usesSilverCoreConversion(state)) return;
       if (!state.conversionSourceImageData) return;
+      if (sourceRef && state.conversionSourceImageData !== sourceRef) return;
 
       // In-flight guard: if a reprocess is already running, queue the latest request
       if (_coreReprocessInFlight) {
@@ -5159,6 +5235,7 @@
           const processed = await convertFromCurrentSource(state, { preview: false });
           if (!processed) return;
           if (token !== null && token !== coreReprocessToken) return;
+          if (sourceRef && state.conversionSourceImageData !== sourceRef) return;
           applyProcessedImageToState(processed);
           updateFull();
           if (state.dustRemoval.enabled) {
@@ -5200,6 +5277,87 @@
       }
     }
 
+    function hasSeparateConversionPreview() {
+      return Boolean(
+        state.conversionSourceImageData
+        && state.conversionPreviewImageData
+        && state.conversionPreviewImageData !== state.conversionSourceImageData
+      );
+    }
+
+    function startFullResolutionRender(reason = 'background') {
+      if (!usesSilverCoreConversion(state)) return null;
+      if (!hasSeparateConversionPreview()) return null;
+      if (state.fullResolutionPromise) return state.fullResolutionPromise;
+      if (fullResolutionRenderTimer) {
+        clearTimeout(fullResolutionRenderTimer);
+        fullResolutionRenderTimer = null;
+      }
+
+      state.fullResolutionPending = true;
+      const sourceRef = state.conversionSourceImageData;
+      const trace = createPerfTrace('fullResolutionRender', {
+        reason,
+        pixels: getImageDataPixelCount(state.conversionSourceImageData)
+      });
+
+      const promise = waitForNextFrame()
+        .then(() => rerenderWithCoreControls({ full: true, sourceRef }))
+        .then(() => {
+          trace.end({
+            outputPixels: getImageDataPixelCount(state.processedImageData),
+            previewOnly: Boolean(state.processedImageDataIsPreview)
+          });
+        })
+        .finally(() => {
+          if (state.fullResolutionPromise === promise) {
+            state.fullResolutionPromise = null;
+          }
+          state.fullResolutionPending = Boolean(state.processedImageDataIsPreview);
+        });
+
+      state.fullResolutionPromise = promise;
+      return promise;
+    }
+
+    function scheduleFullResolutionRender(reason = 'idle', delayMs = FULL_RESOLUTION_IDLE_DELAY_MS) {
+      if (!usesSilverCoreConversion(state)) return null;
+      if (!hasSeparateConversionPreview()) return null;
+      if (state.fullResolutionPromise) return state.fullResolutionPromise;
+
+      state.fullResolutionPending = true;
+      const sourceRef = state.conversionSourceImageData;
+      if (fullResolutionRenderTimer) clearTimeout(fullResolutionRenderTimer);
+      fullResolutionRenderTimer = setTimeout(() => {
+        fullResolutionRenderTimer = null;
+        if (sourceRef && state.conversionSourceImageData !== sourceRef) return;
+        const pendingFullRender = startFullResolutionRender(reason);
+        void pendingFullRender?.catch((err) => {
+          console.error('Background full-resolution conversion failed:', err);
+        });
+      }, Math.max(0, delayMs));
+      return null;
+    }
+
+    function postponeFullResolutionRenderForInteraction() {
+      if (!state.fullResolutionPending) return;
+      if (state.fullResolutionPromise) return;
+      scheduleFullResolutionRender('interactive-idle', FULL_RESOLUTION_IDLE_DELAY_MS);
+    }
+
+    async function ensureFullResolutionReadyForExport() {
+      if (!state.processedImageDataIsPreview && !state.fullResolutionPending) return;
+      if (fullResolutionRenderTimer) {
+        clearTimeout(fullResolutionRenderTimer);
+        fullResolutionRenderTimer = null;
+      }
+      const pending = state.fullResolutionPromise || startFullResolutionRender('export');
+      if (pending) await pending;
+      if (state.processedImageDataIsPreview) {
+        throw new Error('Full-resolution processing is not ready yet. Please wait for the background render to finish.');
+      }
+    }
+
     function scheduleCoreReprocess(options = {}) {
       const full = Boolean(options.full);
       if (!usesSilverCoreConversion(state)) return;
@@ -5221,6 +5379,9 @@
       processNegativeInFlight = (async () => {
         const sourceData = state.croppedImageData || state.originalImageData;
         if (!sourceData) return;
+        const trace = createPerfTrace('processNegative', {
+          pixels: getImageDataPixelCount(sourceData)
+        });
 
         const overlay = getLoadingOverlay();
         const lang = i18n[currentLang];
@@ -5233,14 +5394,22 @@
           }
           overlay.updateProgress(10, lang.loadingConverting);
           const correctedSourceData = await applyLensCorrectionWithSettings(sourceData, state, { updateUi: true });
+          trace.mark('lensCorrection', {
+            outputPixels: getImageDataPixelCount(correctedSourceData)
+          });
           invalidateSilverCoreCache();
           state.conversionSourceImageData = correctedSourceData;
           state.conversionPreviewImageData = buildPreviewSourceImageData(correctedSourceData);
-          overlay.updateProgress(40, lang.loadingConverting);
-          const processed = await convertFromCurrentSource(state, { preview: false });
+          const hasPreviewSource = usesSilverCoreConversion(state) && hasSeparateConversionPreview();
+          overlay.updateProgress(hasPreviewSource ? 35 : 40, lang.loadingConverting);
+
+          const processed = await convertFromCurrentSource(state, { preview: hasPreviewSource });
           if (!processed) return;
-          overlay.updateProgress(85, lang.loadingProcessing);
-          applyProcessedImageToState(processed);
+          trace.mark(hasPreviewSource ? 'previewConversion' : 'fullConversion', {
+            outputPixels: getImageDataPixelCount(processed)
+          });
+          overlay.updateProgress(hasPreviewSource ? 78 : 85, lang.loadingProcessing);
+          applyProcessedImageToState(processed, { previewOnly: hasPreviewSource });
           // Reset dust removal state for new conversion
           state.dustRemoval._state = null;
           state.dustRemoval.mask = null;
@@ -5251,12 +5420,21 @@
           syncBatchUIState({ reason: 'processNegative' });
           revealBatchFileList('processNegative');
           updatePreview();
-          scheduleFullUpdate();
+          if (hasPreviewSource) {
+            state.fullResolutionPending = true;
+            scheduleFullResolutionRender('initial-preview');
+          } else {
+            scheduleFullUpdate();
+          }
           maybeShowFrontierGuidePopup();
           overlay.updateProgress(100, lang.loadingComplete);
+          trace.end({
+            previewFirst: hasPreviewSource,
+            outputPixels: getImageDataPixelCount(processed)
+          });
           await new Promise(r => setTimeout(r, 250));
           // Auto-run dust detection if enabled
-          if (state.dustRemoval.enabled) {
+          if (state.dustRemoval.enabled && !hasPreviewSource) {
             scheduleDustDetection();
           }
         } finally {
@@ -5868,6 +6046,7 @@
           state.rotationAngle = 0;
           state.processedImageData = null;
           state.displayImageData = null;
+          clearFullResolutionRenderState();
           invalidateSilverCoreCache();
           state.conversionSourceImageData = null;
           state.conversionPreviewImageData = null;
@@ -7091,10 +7270,94 @@
       return normalized;
     }
 
+    function copyRotatedRgbaBuffer(source, width, height, angle) {
+      const normalized = normalizeAngleDegrees(angle);
+      const rightAngle = Math.round(normalized / 90) * 90;
+      const dstWidth = Math.abs(rightAngle) === 90 ? height : width;
+      const dstHeight = Math.abs(rightAngle) === 90 ? width : height;
+      const output = source instanceof Uint16Array
+        ? new Uint16Array(source.length)
+        : new Uint8ClampedArray(source.length);
+
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          let dstX;
+          let dstY;
+          if (rightAngle === 90) {
+            dstX = height - 1 - y;
+            dstY = x;
+          } else if (rightAngle === -90) {
+            dstX = y;
+            dstY = width - 1 - x;
+          } else {
+            dstX = width - 1 - x;
+            dstY = height - 1 - y;
+          }
+
+          const srcIdx = (y * width + x) * 4;
+          const dstIdx = (dstY * dstWidth + dstX) * 4;
+          output[dstIdx] = source[srcIdx];
+          output[dstIdx + 1] = source[srcIdx + 1];
+          output[dstIdx + 2] = source[srcIdx + 2];
+          output[dstIdx + 3] = source[srcIdx + 3];
+        }
+      }
+
+      return { width: dstWidth, height: dstHeight, data: output };
+    }
+
+    function copyMirroredRgbaBuffer(source, width, height) {
+      const output = source instanceof Uint16Array
+        ? new Uint16Array(source.length)
+        : new Uint8ClampedArray(source.length);
+
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const srcIdx = (y * width + x) * 4;
+          const dstIdx = (y * width + (width - 1 - x)) * 4;
+          output[dstIdx] = source[srcIdx];
+          output[dstIdx + 1] = source[srcIdx + 1];
+          output[dstIdx + 2] = source[srcIdx + 2];
+          output[dstIdx + 3] = source[srcIdx + 3];
+        }
+      }
+
+      return { width, height, data: output };
+    }
+
+    function attachTransformedImage16(target, sourceImageData, transform) {
+      const source16 = sourceImageData?.__image16;
+      if (!source16 || !(source16.data instanceof Uint16Array)) return target;
+      target.__image16 = transform(source16.data, source16.width, source16.height);
+      return target;
+    }
+
+    function rotateImageDataRightAngle(imageData, angle) {
+      const rotated = copyRotatedRgbaBuffer(imageData.data, imageData.width, imageData.height, angle);
+      const result = new ImageData(rotated.data, rotated.width, rotated.height);
+      return attachTransformedImage16(result, imageData, (data, width, height) => {
+        const image16 = copyRotatedRgbaBuffer(data, width, height, angle);
+        return { width: image16.width, height: image16.height, data: image16.data };
+      });
+    }
+
+    function mirrorImageDataHorizontal(imageData) {
+      const mirrored = copyMirroredRgbaBuffer(imageData.data, imageData.width, imageData.height);
+      const result = new ImageData(mirrored.data, mirrored.width, mirrored.height);
+      return attachTransformedImage16(result, imageData, (data, width, height) => {
+        const image16 = copyMirroredRgbaBuffer(data, width, height);
+        return { width: image16.width, height: image16.height, data: image16.data };
+      });
+    }
+
     function applyRotationToImageData(imageData, angle) {
       if (!imageData) return null;
       const normalized = normalizeAngleDegrees(Number(angle) || 0);
       if (Math.abs(normalized) < 0.001) return imageData;
+      const rightAngle = Math.round(normalized / 90) * 90;
+      if (Math.abs(normalized - rightAngle) < 0.001 && Math.abs(rightAngle) % 90 === 0) {
+        return rotateImageDataRightAngle(imageData, rightAngle);
+      }
 
       const rad = normalized * Math.PI / 180;
       const w = imageData.width;
@@ -7263,6 +7526,7 @@
     function invalidateProcessedPipelineState() {
       state.processedImageData = null;
       state.displayImageData = null;
+      clearFullResolutionRenderState();
       invalidateSilverCoreCache();
       state.conversionSourceImageData = null;
       state.conversionPreviewImageData = null;
@@ -7337,31 +7601,22 @@
       if (!sourceData) return;
 
       pushUndo('mirror');
-      const w = canvas.width;
-      const h = canvas.height;
-      const offCanvas = document.createElement('canvas');
-      offCanvas.width = w;
-      offCanvas.height = h;
-      const offCtx = offCanvas.getContext('2d');
-
-      offCtx.translate(w, 0);
-      offCtx.scale(-1, 1);
-      offCtx.drawImage(canvas, 0, 0);
-
-      ctx.clearRect(0, 0, w, h);
-      ctx.drawImage(offCanvas, 0, 0);
-
-      const newImageData = ctx.getImageData(0, 0, w, h);
+      const newImageData = mirrorImageDataHorizontal(sourceData);
       if (state.croppedImageData) {
         state.croppedImageData = newImageData;
       } else {
         state.originalImageData = newImageData;
       }
 
-      transformCanvas.width = w;
-      transformCanvas.height = h;
-      transformCtx.drawImage(offCanvas, 0, 0);
-      adjustCanvasDisplay(w, h);
+      invalidateProcessedPipelineState();
+      resetZoomPan();
+      if (state.currentStep >= 3) {
+        void processNegative();
+      } else {
+        displayNegative(newImageData);
+        updateCanvasVisibility();
+        renderHistogram(newImageData);
+      }
       markCurrentFileDirty();
     }
 
@@ -8679,6 +8934,7 @@
         state.croppedImageData = null;
         state.processedImageData = null;
         state.displayImageData = null;
+        clearFullResolutionRenderState();
         invalidateSilverCoreCache();
         state.conversionSourceImageData = null;
         state.conversionPreviewImageData = null;
@@ -8728,6 +8984,7 @@
       state.rotationAngle = 0;
       state.processedImageData = null;
       state.displayImageData = null;
+      clearFullResolutionRenderState();
       invalidateSilverCoreCache();
       state.conversionSourceImageData = null;
       state.conversionPreviewImageData = null;
@@ -9001,7 +9258,8 @@
     }
 
     async function getCurrentExportImageData() {
-      if (state.displayImageData && state.currentStep >= 3) {
+      await ensureFullResolutionReadyForExport();
+      if (state.currentStep >= 3 && isDisplayImageDataFullResolution()) {
         return state.displayImageData;
       }
       if (state.processedImageData && state.currentStep >= 3) {
@@ -9040,6 +9298,7 @@
           });
           fileName = buildExportFileName(currentItem.file.name, exportInfo);
         } else {
+          await ensureFullResolutionReadyForExport();
           ensureFullRender();
           overlay.updateProgress(50, lang.loadingEncoding);
           const imageData = await getCurrentExportImageData();
@@ -9514,30 +9773,50 @@
     async function imageDataToBlob(imageData, format = null, quality = null, bitDepth = null, onProgress = null) {
       const exportInfo = getExportInfo(format || state.exportFormat, bitDepth ?? state.exportBitDepth);
       const jpegQuality = quality !== null ? quality : state.jpegQuality;
+      const trace = createPerfTrace('imageDataToBlob', {
+        format: exportInfo.format,
+        bitDepth: exportInfo.bitDepth,
+        pixels: getImageDataPixelCount(imageData)
+      });
+      let blob = null;
 
       if (exportInfo.format === 'tiff') {
         // Try Worker first for TIFF encoding
         if (isWorkerAvailable()) {
-          const workerBlob = await workerEncodeTiff(imageData, exportInfo.bitDepth, onProgress);
-          if (workerBlob) return workerBlob;
+          blob = await workerEncodeTiff(imageData, exportInfo.bitDepth, onProgress);
+          if (blob) {
+            trace.end({ bytes: blob.size || 0, worker: true });
+            return blob;
+          }
         }
         const { encodeTiffBlob } = await getExportImageEncoders();
-        return encodeTiffBlob(imageData, exportInfo.bitDepth);
+        blob = encodeTiffBlob(imageData, exportInfo.bitDepth);
+        trace.end({ bytes: blob.size || 0, worker: false });
+        return blob;
       }
       if (exportInfo.format === 'png' && exportInfo.bitDepth === 16) {
         // Try Worker first for 16-bit PNG encoding
         if (isWorkerAvailable()) {
-          const workerBlob = await workerEncodePng16(imageData, onProgress);
-          if (workerBlob) return workerBlob;
+          blob = await workerEncodePng16(imageData, onProgress);
+          if (blob) {
+            trace.end({ bytes: blob.size || 0, worker: true });
+            return blob;
+          }
         }
         const { encodePng16Blob } = await getExportImageEncoders();
-        return encodePng16Blob(imageData);
+        blob = encodePng16Blob(imageData);
+        trace.end({ bytes: blob.size || 0, worker: false });
+        return blob;
       }
 
       if (exportInfo.format === 'jpeg') {
-        return imageDataToCanvasBlob(imageData, 'image/jpeg', jpegQuality / 100);
+        blob = await imageDataToCanvasBlob(imageData, 'image/jpeg', jpegQuality / 100);
+        trace.end({ bytes: blob.size || 0, worker: false });
+        return blob;
       }
-      return imageDataToCanvasBlob(imageData, 'image/png');
+      blob = await imageDataToCanvasBlob(imageData, 'image/png');
+      trace.end({ bytes: blob.size || 0, worker: false });
+      return blob;
     }
 
     function updateBatchProgress(current, total, fileName) {
@@ -9646,8 +9925,15 @@
 
     // Process a file with its own settings or auto-detect
     async function processFileWithSettings(file, savedSettings, options = {}) {
+      const trace = createPerfTrace('processFileWithSettings', {
+        file: file?.name || '',
+        bytes: file?.size || 0
+      });
       // Load the image
       const imageData = await loadFileToImageData(file);
+      trace.mark('load', {
+        pixels: getImageDataPixelCount(imageData)
+      });
 
       // Use saved settings or create default with auto-detect
       const settings = sanitizeSettings(savedSettings || createDefaultSettings(imageData), {
@@ -9667,11 +9953,17 @@
         }
       }
       workingData = await applyLensCorrectionWithSettings(workingData, settings, { updateUi: false });
+      trace.mark('transform', {
+        pixels: getImageDataPixelCount(workingData)
+      });
 
       // Convert negative/positive via unified conversion router.
       let processed = await convertFrameWithRouter({
         imageData: workingData,
         settings: buildRouterSettings(settings)
+      });
+      trace.mark('convert', {
+        pixels: getImageDataPixelCount(processed)
       });
 
       // Apply dust removal if enabled (full resolution for export)
@@ -9681,10 +9973,20 @@
         const strength = Number.isFinite(dustRemoval.strength) ? dustRemoval.strength : state.dustRemoval.strength;
         const { mask } = detectDust(processed, { strength });
         processed = inpaintMasked(processed, mask, 3);
+        trace.mark('dustRemoval', {
+          pixels: getImageDataPixelCount(processed)
+        });
       }
 
       // Apply adjustments
-      return applyAdjustmentsWithSettings(processed, settings);
+      const adjusted = await applyAdjustmentsWithSettings(processed, settings);
+      trace.mark('adjustments', {
+        pixels: getImageDataPixelCount(adjusted)
+      });
+      trace.end({
+        outputPixels: getImageDataPixelCount(adjusted)
+      });
+      return adjusted;
     }
 
     function showBrowserZipStreamSummary({ zipFileName, successCount, failCount, total }) {

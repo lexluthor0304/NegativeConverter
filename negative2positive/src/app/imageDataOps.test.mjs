@@ -46,11 +46,17 @@ const byPixels = downsampleImageDataForMaxPixels(source, 6);
 assert.equal(byPixels.width, 3);
 assert.equal(byPixels.height, 2);
 assert.deepEqual(Array.from(byPixels.data.slice(0, 8)), [0, 0, 0, 255, 2, 0, 2, 255]);
+assert.ok(byPixels.__image16);
+assert.equal(byPixels.__image16.width, 3);
+assert.equal(byPixels.__image16.height, 2);
+assert.deepEqual(Array.from(byPixels.__image16.data.slice(0, 8)), [0, 0, 0, 65535, 514, 0, 514, 65535]);
 
 const byDim = downsampleImageDataForMaxDim(source, 3);
 assert.equal(byDim.width, 3);
 assert.equal(byDim.height, 2);
 assert.deepEqual(Array.from(byDim.data.slice(8, 16)), [4, 0, 4, 255, 0, 2, 2, 255]);
+assert.ok(byDim.__image16);
+assert.deepEqual(Array.from(byDim.__image16.data.slice(8, 16)), [1028, 0, 1028, 65535, 0, 514, 514, 65535]);
 
 const cropped = cropImageDataRegion(source, { left: 1, top: 1, width: 3, height: 2 });
 assert.equal(cropped.width, 3);

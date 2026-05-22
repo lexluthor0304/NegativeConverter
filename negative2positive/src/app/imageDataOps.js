@@ -4,22 +4,38 @@ export function downsampleImageDataByStep(imageData, step) {
   const outH = Math.max(1, Math.floor(height / step));
   const out = new ImageData(new Uint8ClampedArray(outW * outH * 4), outW, outH);
   const outData = out.data;
+  const source16 = imageData.__image16;
+  const canDownsample16 = source16
+    && source16.data instanceof Uint16Array
+    && source16.width === width
+    && source16.height === height;
+  const out16 = canDownsample16 ? new Uint16Array(outW * outH * 4) : null;
   const srcRowStride = width * 4;
   const dstRowStride = outW * 4;
-  const srcStep = step * 4;
 
   for (let y = 0; y < outH; y++) {
-    const srcRow = Math.min(height - 1, y * step) * srcRowStride;
-    let srcIdx = srcRow;
+    const srcY = Math.min(height - 1, y * step);
+    const srcRow = srcY * srcRowStride;
     let dstIdx = y * dstRowStride;
     for (let x = 0; x < outW; x++) {
+      const srcX = Math.min(width - 1, x * step);
+      const srcIdx = srcRow + srcX * 4;
       outData[dstIdx] = data[srcIdx];
       outData[dstIdx + 1] = data[srcIdx + 1];
       outData[dstIdx + 2] = data[srcIdx + 2];
       outData[dstIdx + 3] = 255;
-      srcIdx += srcStep;
+      if (out16) {
+        out16[dstIdx] = source16.data[srcIdx];
+        out16[dstIdx + 1] = source16.data[srcIdx + 1];
+        out16[dstIdx + 2] = source16.data[srcIdx + 2];
+        out16[dstIdx + 3] = source16.data[srcIdx + 3];
+      }
       dstIdx += 4;
     }
+  }
+
+  if (out16) {
+    out.__image16 = { width: outW, height: outH, data: out16 };
   }
 
   return out;
