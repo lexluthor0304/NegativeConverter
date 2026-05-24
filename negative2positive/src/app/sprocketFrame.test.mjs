@@ -150,7 +150,7 @@ assert.ok(thirtyFiveMetrics.dxCodeHeight >= Math.round(thirtyFiveMetrics.filmEdg
 
 const hasMarkingColor = (() => {
   for (let i = 0; i < marked.data.length; i += 4) {
-    if (marked.data[i] === 237 && marked.data[i + 1] === 156 && marked.data[i + 2] === 0) {
+    if (marked.data[i] >= 235 && marked.data[i + 1] >= 165 && marked.data[i + 2] <= 80) {
       return true;
     }
   }

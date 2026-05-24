@@ -194,7 +194,7 @@ export function getSprocketFrameMetrics(width, height, options = {}) {
   const holeRadius = Math.max(2, Math.round(holeHeight * 0.18));
   const outputWidth = sourceWidth + sideMargin * 2;
   const outputHeight = sourceHeight + bandHeight * 2;
-  const edgeTextPixelSize = Math.max(7, Math.round(filmEdgePxPerMmY * 0.78));
+  const edgeTextPixelSize = Math.max(7, Math.round(filmEdgePxPerMmY * 1.12));
   const edgeTextHeight = Math.max(1, Math.ceil(edgeTextPixelSize * 1.35));
   const pitch = Math.max(holeWidth + edgeGap * 2, Math.round(spec.perforationPitchMm * imagePxPerMmX));
   const holeCount = spec.perforationsPerStillFrame;
@@ -229,7 +229,11 @@ export function getSprocketFrameMetrics(width, height, options = {}) {
     ? bottomOuterTop + Math.max(edgeGap, Math.floor((bottomOuterHeight - dxCodeHeight) / 2))
     : 0;
   const bottomMarkingY = showMarkings
-    ? bottomOuterTop + Math.max(0, Math.floor((bottomOuterHeight - edgeTextHeight - edgeGap) / 2))
+    ? bottomOuterTop + (
+      bottomOuterHeight >= edgeTextHeight + edgeGap * 2
+        ? edgeGap
+        : Math.max(0, Math.floor((bottomOuterHeight - edgeTextHeight) / 2))
+    )
     : 0;
 
   return {
@@ -292,6 +296,25 @@ function addPixel(data, index, fill, alpha) {
   data[index + 1] = clamp(Math.round(data[index + 1] + fill[1] * amount), 0, 255);
   data[index + 2] = clamp(Math.round(data[index + 2] + fill[2] * amount), 0, 255);
   data[index + 3] = Math.max(data[index + 3], Math.round(fill[3] * amount));
+}
+
+function mixColor(a, b, amount) {
+  const t = clamp(amount, 0, 1);
+  const keep = 1 - t;
+  return [
+    clamp(Math.round(a[0] * keep + b[0] * t), 0, 255),
+    clamp(Math.round(a[1] * keep + b[1] * t), 0, 255),
+    clamp(Math.round(a[2] * keep + b[2] * t), 0, 255),
+    clamp(Math.round((a[3] ?? 255) * keep + (b[3] ?? 255) * t), 0, 255)
+  ];
+}
+
+function getExposedCoreColor(fill) {
+  return mixColor(fill, [255, 246, 168, fill[3] ?? 255], 0.56);
+}
+
+function getExposedGlowColor(fill) {
+  return mixColor(fill, [255, 205, 42, fill[3] ?? 255], 0.32);
 }
 
 function hashNoise(x, y, seed = NATURAL_FILM_TEXTURE_SEED) {
@@ -530,14 +553,16 @@ function drawBitmapText(data, metrics, text, x, y, scale, fill, align = 'left') 
     for (let row = 0; row < rows.length; row++) {
       for (let col = 0; col < rows[row].length; col++) {
         if (rows[row][col] !== '1') continue;
-        fillRect(
+        paintExposedRect(
           data,
           metrics,
           cursorX + col * scale,
           cursorY + row * scale,
           scale,
           scale,
-          fill
+          fill,
+          Math.max(1.1, scale * 1.25),
+          0.92
         );
       }
     }
@@ -571,6 +596,92 @@ function toCssFontFamilyList(input) {
   }).join(', ');
 }
 
+function paintExposedRect(data, metrics, left, top, width, height, fill, glowRadius = 3, exposure = 1) {
+  const amount = clamp(Number(exposure) || 0, 0, 2);
+  if (amount <= 0) return;
+  const radius = Math.max(1, Math.round(glowRadius));
+  const core = getExposedCoreColor(fill);
+  const glow = getExposedGlowColor(fill);
+  const rectLeft = Math.max(0, Math.floor(left - radius));
+  const rectTop = Math.max(0, Math.floor(top - radius));
+  const rectRight = Math.min(metrics.outputWidth, Math.ceil(left + width + radius));
+  const rectBottom = Math.min(metrics.outputHeight, Math.ceil(top + height + radius));
+
+  for (let y = rectTop; y < rectBottom; y++) {
+    for (let x = rectLeft; x < rectRight; x++) {
+      const px = x + 0.5;
+      const py = y + 0.5;
+      const dx = Math.max(left - px, 0, px - (left + width));
+      const dy = Math.max(top - py, 0, py - (top + height));
+      const distance = Math.hypot(dx, dy);
+      if (distance > radius) continue;
+      const index = (y * metrics.outputWidth + x) * 4;
+      const grain = clamp(0.74 + smoothNoise(x, y, 5, 4301) * 0.42 + hashNoise(x, y, 4302) * 0.18, 0.64, 1.28);
+      if (distance <= 0.001) {
+        addPixel(data, index, glow, 0.16 * amount * grain);
+        addPixel(data, index, core, 0.74 * amount * grain);
+      } else {
+        const falloff = 1 - distance / radius;
+        addPixel(data, index, glow, falloff * falloff * 0.30 * amount * grain);
+      }
+    }
+  }
+}
+
+function compositeExposedMask(data, metrics, maskPixels, maskWidth, maskHeight, dstLeft, dstTop, fill, pixelSize) {
+  const radius = clamp(Math.round(pixelSize * 0.28), 2, 7);
+  const core = getExposedCoreColor(fill);
+  const glow = getExposedGlowColor(fill);
+
+  for (let ty = 0; ty < maskHeight; ty++) {
+    const dy = dstTop + ty;
+    for (let tx = 0; tx < maskWidth; tx++) {
+      const srcIndex = (ty * maskWidth + tx) * 4;
+      const alpha = maskPixels[srcIndex + 3] / 255;
+      if (alpha <= 0.03) continue;
+      const dx = dstLeft + tx;
+      for (let oy = -radius; oy <= radius; oy++) {
+        const py = dy + oy;
+        if (py < 0 || py >= metrics.outputHeight) continue;
+        for (let ox = -radius; ox <= radius; ox++) {
+          const px = dx + ox;
+          if (px < 0 || px >= metrics.outputWidth) continue;
+          const distance = Math.hypot(ox, oy);
+          if (distance > radius) continue;
+          const falloff = 1 - distance / radius;
+          const grain = clamp(
+            0.74 + smoothNoise(px, py, 5, 4401) * 0.38 + hashNoise(px, py, 4402) * 0.22,
+            0.62,
+            1.32
+          );
+          const dstIndex = (py * metrics.outputWidth + px) * 4;
+          addPixel(data, dstIndex, glow, alpha * falloff * falloff * 0.11 * grain);
+        }
+      }
+    }
+  }
+
+  for (let ty = 0; ty < maskHeight; ty++) {
+    const dy = dstTop + ty;
+    if (dy < 0 || dy >= metrics.outputHeight) continue;
+    for (let tx = 0; tx < maskWidth; tx++) {
+      const dx = dstLeft + tx;
+      if (dx < 0 || dx >= metrics.outputWidth) continue;
+      const srcIndex = (ty * maskWidth + tx) * 4;
+      const alpha = maskPixels[srcIndex + 3] / 255;
+      if (alpha <= 0) continue;
+      const grain = clamp(
+        0.82 + smoothNoise(dx, dy, 4, 4411) * 0.28 + hashNoise(dx, dy, 4412) * 0.16,
+        0.68,
+        1.22
+      );
+      const dstIndex = (dy * metrics.outputWidth + dx) * 4;
+      addPixel(data, dstIndex, glow, alpha * 0.12 * grain);
+      addPixel(data, dstIndex, core, alpha * 0.78 * grain);
+    }
+  }
+}
+
 function drawCanvasText(data, metrics, text, x, y, pixelSize, fill, align, fontStyle, fontFamily = '') {
   const safeText = String(text || '').trim();
   if (!safeText || pixelSize <= 0) return false;
@@ -597,7 +708,7 @@ function drawCanvasText(data, metrics, text, x, y, pixelSize, fill, align, fontS
   textCtx.font = font;
   textCtx.textBaseline = 'top';
   textCtx.textAlign = 'left';
-  textCtx.fillStyle = `rgba(${fill[0]}, ${fill[1]}, ${fill[2]}, ${fill[3] / 255})`;
+  textCtx.fillStyle = 'rgba(255, 255, 255, 1)';
   textCtx.fillText(safeText, 3, 0);
 
   const textPixels = textCtx.getImageData(0, 0, textWidth, textHeight).data;
@@ -606,19 +717,7 @@ function drawCanvasText(data, metrics, text, x, y, pixelSize, fill, align, fontS
   if (align === 'right') dstLeft -= textWidth;
   const dstTop = Math.round(y);
 
-  for (let ty = 0; ty < textHeight; ty++) {
-    const dy = dstTop + ty;
-    if (dy < 0 || dy >= metrics.outputHeight) continue;
-    for (let tx = 0; tx < textWidth; tx++) {
-      const dx = dstLeft + tx;
-      if (dx < 0 || dx >= metrics.outputWidth) continue;
-      const srcIndex = (ty * textWidth + tx) * 4;
-      const alpha = textPixels[srcIndex + 3] / 255;
-      if (alpha <= 0) continue;
-      const dstIndex = (dy * metrics.outputWidth + dx) * 4;
-      blendPixel(data, dstIndex, fill, alpha);
-    }
-  }
+  compositeExposedMask(data, metrics, textPixels, textWidth, textHeight, dstLeft, dstTop, fill, pixelSize);
   return true;
 }
 
@@ -709,9 +808,8 @@ function isHorizontallyVisible(metrics, left, width) {
 }
 
 function paintDxBar(data, metrics, left, top, width, height, fill) {
-  const bleed = Math.max(1, Math.round(height * 0.12));
-  fillRect(data, metrics, left - 1, top - bleed, width + 2, height + bleed * 2, fill, 0.16);
-  fillRect(data, metrics, left, top, width, height, fill);
+  const bleed = Math.max(1.4, height * 0.38);
+  paintExposedRect(data, metrics, left, top, width, height, fill, bleed, 0.96);
 }
 
 function paintDxSequence(data, metrics, edge, left, top, modulePitch, barWidth, blockHeight, rowPitch, aFlag) {
@@ -782,6 +880,32 @@ function fillTriangle(data, metrics, p0, p1, p2, fill, alpha = 1) {
   }
 }
 
+function paintExposedTriangle(data, metrics, p0, p1, p2, fill) {
+  const radius = Math.max(1, Math.round(metrics.filmEdgePxPerMmY * 0.32));
+  const glow = getExposedGlowColor(fill);
+  const core = getExposedCoreColor(fill);
+  const offsets = [];
+  for (let oy = -radius; oy <= radius; oy++) {
+    for (let ox = -radius; ox <= radius; ox++) {
+      const distance = Math.hypot(ox, oy);
+      if (distance > radius) continue;
+      offsets.push({ x: ox, y: oy, alpha: Math.pow(1 - distance / radius, 2) * 0.13 });
+    }
+  }
+  for (const offset of offsets) {
+    fillTriangle(
+      data,
+      metrics,
+      { x: p0.x + offset.x, y: p0.y + offset.y },
+      { x: p1.x + offset.x, y: p1.y + offset.y },
+      { x: p2.x + offset.x, y: p2.y + offset.y },
+      glow,
+      offset.alpha
+    );
+  }
+  fillTriangle(data, metrics, p0, p1, p2, core, 0.88);
+}
+
 function paintHalfFrameMarker(data, metrics, edge, repeat) {
   const label = `${repeat.frameNumber}A`;
   const pixelSize = Math.max(6, Math.round(metrics.edgeTextPixelSize * 0.84));
@@ -795,7 +919,7 @@ function paintHalfFrameMarker(data, metrics, edge, repeat) {
   const triangleTop = metrics.bottomMarkingY + Math.max(0, Math.round((metrics.edgeTextHeight - triangleHeight) / 2));
 
   if (isHorizontallyVisible(metrics, triangleLeft, triangleWidth)) {
-    fillTriangle(
+    paintExposedTriangle(
       data,
       metrics,
       { x: triangleLeft, y: triangleTop },
