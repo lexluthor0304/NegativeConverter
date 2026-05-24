@@ -91,6 +91,16 @@ const marked = composeSprocketFrame(source, markedOptions);
 assert.equal(marked.width, markedMetrics.outputWidth);
 assert.equal(marked.height, markedMetrics.outputHeight);
 assert.ok(marked.height > framed.height);
+for (let y = 0; y < source.height; y++) {
+  for (let x = 0; x < source.width; x++) {
+    const srcIndex = (y * source.width + x) * 4;
+    const dstIndex = ((y + markedMetrics.bandHeight) * marked.width + markedMetrics.sideMargin + x) * 4;
+    assert.deepEqual(
+      Array.from(marked.data.slice(dstIndex, dstIndex + 4)),
+      Array.from(source.data.slice(srcIndex, srcIndex + 4))
+    );
+  }
+}
 
 const assertEdgeLayoutDoesNotOverlapHoles = (layoutMetrics) => {
   const topTextBottom = layoutMetrics.topMarkingY + layoutMetrics.edgeTextHeight;
@@ -141,7 +151,11 @@ approxEqual(
   0.01,
   '35mm edge band ratio'
 );
-assert.equal(thirtyFiveMetrics.holeCount, THIRTY_FIVE_MM_SPROCKET_SPEC.perforationsPerStillFrame);
+assert.equal(thirtyFiveMetrics.perforationsPerFrame, THIRTY_FIVE_MM_SPROCKET_SPEC.perforationsPerStillFrame);
+assert.ok(thirtyFiveMetrics.holeCount > THIRTY_FIVE_MM_SPROCKET_SPEC.perforationsPerStillFrame);
+assert.ok(thirtyFiveMetrics.startX < 0);
+assert.ok(thirtyFiveMetrics.startX + thirtyFiveMetrics.holeWidth <= 0);
+assert.ok(thirtyFiveMetrics.startX + (thirtyFiveMetrics.holeCount - 1) * thirtyFiveMetrics.pitch >= thirtyFiveMetrics.outputWidth);
 approxEqual(thirtyFiveMetrics.pitch / thirtyFiveMetrics.imagePxPerMmX, THIRTY_FIVE_MM_SPROCKET_SPEC.perforationPitchMm, 0.08, '35mm perforation pitch');
 approxEqual(thirtyFiveMetrics.holeWidth / thirtyFiveMetrics.imagePxPerMmX, THIRTY_FIVE_MM_SPROCKET_SPEC.perforationWidthMm, 0.08, '35mm perforation width');
 approxEqual(thirtyFiveMetrics.holeHeight / thirtyFiveMetrics.filmEdgePxPerMmY, THIRTY_FIVE_MM_SPROCKET_SPEC.perforationHeightMm, 0.08, '35mm perforation height');

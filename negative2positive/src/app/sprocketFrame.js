@@ -197,10 +197,14 @@ export function getSprocketFrameMetrics(width, height, options = {}) {
   const edgeTextPixelSize = Math.max(7, Math.round(filmEdgePxPerMmY * 1.12));
   const edgeTextHeight = Math.max(1, Math.ceil(edgeTextPixelSize * 1.35));
   const pitch = Math.max(holeWidth + edgeGap * 2, Math.round(spec.perforationPitchMm * imagePxPerMmX));
-  const holeCount = spec.perforationsPerStillFrame;
-  const span = (holeCount - 1) * pitch + holeWidth;
+  const perforationsPerFrame = spec.perforationsPerStillFrame;
+  const span = (perforationsPerFrame - 1) * pitch + holeWidth;
   const firstHoleOffsetPx = Math.round(edge.firstHoleOffsetMm * imagePxPerMmX);
-  const startX = Math.round((outputWidth - span) / 2 + firstHoleOffsetPx);
+  const frameStartX = Math.round((outputWidth - span) / 2 + firstHoleOffsetPx);
+  const firstHoleIndex = Math.floor((0 - frameStartX - holeWidth) / pitch);
+  const lastHoleIndex = Math.ceil((outputWidth - frameStartX) / pitch);
+  const holeCount = Math.max(0, lastHoleIndex - firstHoleIndex + 1);
+  const startX = frameStartX + firstHoleIndex * pitch;
   const outerPerfMargin = clamp(
     Math.round(spec.perforationOuterMarginMm * filmEdgePxPerMmY),
     edgeGap,
@@ -249,6 +253,9 @@ export function getSprocketFrameMetrics(width, height, options = {}) {
     holeRadius,
     pitch,
     holeCount,
+    perforationsPerFrame,
+    firstHoleIndex,
+    frameStartX,
     startX,
     topY,
     bottomY,
@@ -349,8 +356,9 @@ function filmBasePixel(metrics, filmColor, x, y) {
     : (inBottomBand ? (metrics.outputHeight - y - 1) / Math.max(1, metrics.bandHeight) : 0.48);
   const outerEdge = inTopBand || inBottomBand ? 1 - clamp(bandDepth, 0, 1) : 0.22;
   const framePitch = Math.max(1, getEdgeFramePitch(metrics));
-  const frameShade = Math.sin(((x - metrics.startX) / framePitch) * Math.PI * 2) * 1.6;
-  const sprocketShade = Math.sin(((x - metrics.startX) / Math.max(1, metrics.pitch)) * Math.PI * 2) * 0.55;
+  const phaseStartX = metrics.frameStartX ?? metrics.startX;
+  const frameShade = Math.sin(((x - phaseStartX) / framePitch) * Math.PI * 2) * 1.6;
+  const sprocketShade = Math.sin(((x - phaseStartX) / Math.max(1, metrics.pitch)) * Math.PI * 2) * 0.55;
   const coarse = smoothNoise(x, y, 18, NATURAL_FILM_TEXTURE_SEED + 19) - 0.5;
   const fine = hashNoise(x, y, NATURAL_FILM_TEXTURE_SEED + 31) - 0.5;
   const leakWave = Math.max(0, Math.sin((x * 0.018) + (y * 0.007) + 1.35));
@@ -464,9 +472,10 @@ function paintSprocketHole(data, metrics, left, top, fill) {
 
 function forEachSprocketHole(metrics, callback) {
   for (let i = 0; i < metrics.holeCount; i++) {
-    const left = metrics.startX + i * metrics.pitch;
-    callback(left, metrics.topY, i);
-    callback(left, metrics.bottomY, i);
+    const holeIndex = (metrics.firstHoleIndex || 0) + i;
+    const left = (metrics.frameStartX ?? metrics.startX) + holeIndex * metrics.pitch;
+    callback(left, metrics.topY, holeIndex);
+    callback(left, metrics.bottomY, holeIndex);
   }
 }
 
@@ -480,14 +489,21 @@ function roundedRectDistance(px, py, left, top, width, height, radius) {
   return outside + inside - radius;
 }
 
+function getSprocketBandClip(metrics, top) {
+  return top < metrics.bandHeight
+    ? { top: 0, bottom: metrics.bandHeight }
+    : { top: metrics.bottomBandTop, bottom: metrics.outputHeight };
+}
+
 function paintSprocketGlow(data, metrics, left, top, fill, strength = 1) {
   const amount = clamp(Number(strength) || 0, 0, 2);
   if (amount <= 0) return;
   const spread = Math.max(4, Math.round(metrics.holeHeight * (0.42 + amount * 0.38)));
+  const bandClip = getSprocketBandClip(metrics, top);
   const rectLeft = Math.max(0, Math.round(left - spread));
-  const rectTop = Math.max(0, Math.round(top - spread));
+  const rectTop = Math.max(bandClip.top, Math.round(top - spread));
   const rectRight = Math.min(metrics.outputWidth, Math.round(left + metrics.holeWidth + spread));
-  const rectBottom = Math.min(metrics.outputHeight, Math.round(top + metrics.holeHeight + spread));
+  const rectBottom = Math.min(bandClip.bottom, Math.round(top + metrics.holeHeight + spread));
 
   for (let y = rectTop; y < rectBottom; y++) {
     for (let x = rectLeft; x < rectRight; x++) {
@@ -784,7 +800,7 @@ function getEdgeFramePitch(metrics) {
 }
 
 function getFrameNumberAnchorX(metrics, edge) {
-  return Math.round(metrics.startX + metrics.holeWidth + (edge.frameNumberHole - 1) * metrics.pitch);
+  return Math.round((metrics.frameStartX ?? metrics.startX) + metrics.holeWidth + (edge.frameNumberHole - 1) * metrics.pitch);
 }
 
 function forEachVisibleFrameRepeat(metrics, edge, callback) {
@@ -965,10 +981,11 @@ function paintSprocketTextureSmear(data, metrics, sourceImageData, strength = 1)
 
   forEachSprocketHole(metrics, (left, top) => {
     const isTopRow = top < metrics.bandHeight;
+    const bandClip = getSprocketBandClip(metrics, top);
     const rectLeft = Math.max(0, Math.round(left - spread));
-    const rectTop = Math.max(0, Math.round(top - spread));
+    const rectTop = Math.max(bandClip.top, Math.round(top - spread));
     const rectRight = Math.min(metrics.outputWidth, Math.round(left + metrics.holeWidth + spread));
-    const rectBottom = Math.min(metrics.outputHeight, Math.round(top + metrics.holeHeight + spread));
+    const rectBottom = Math.min(bandClip.bottom, Math.round(top + metrics.holeHeight + spread));
 
     for (let y = rectTop; y < rectBottom; y++) {
       for (let x = rectLeft; x < rectRight; x++) {
