@@ -4,6 +4,7 @@ const DEFAULT_MARKING_COLOR = [237, 156, 0, 255];
 const DEFAULT_OVEREXPOSURE_COLOR = [237, 156, 0, 255];
 const DX_EDGE_COLUMN_COUNT = 31;
 const DX_EDGE_CODE_WIDTH_MM = 13;
+const NATURAL_FILM_TEXTURE_SEED = 3508;
 
 // 35mm still-film proportions: 34.98mm film width, 24x36mm image gate,
 // eight perforations per still frame, and KS/BH-style sprocket dimensions.
@@ -285,6 +286,95 @@ function blendPixel(data, index, fill, alpha) {
   data[index + 3] = Math.max(data[index + 3], Math.round(fill[3] * amount));
 }
 
+function addPixel(data, index, fill, alpha) {
+  const amount = clamp(alpha, 0, 1);
+  data[index] = clamp(Math.round(data[index] + fill[0] * amount), 0, 255);
+  data[index + 1] = clamp(Math.round(data[index + 1] + fill[1] * amount), 0, 255);
+  data[index + 2] = clamp(Math.round(data[index + 2] + fill[2] * amount), 0, 255);
+  data[index + 3] = Math.max(data[index + 3], Math.round(fill[3] * amount));
+}
+
+function hashNoise(x, y, seed = NATURAL_FILM_TEXTURE_SEED) {
+  let value = Math.imul(Math.round(x), 374761393)
+    ^ Math.imul(Math.round(y), 668265263)
+    ^ Math.imul(seed, 1442695041);
+  value = Math.imul(value ^ (value >>> 13), 1274126177);
+  return ((value ^ (value >>> 16)) >>> 0) / 4294967295;
+}
+
+function smoothNoise(x, y, scale, seed) {
+  const sx = Math.floor(x / scale);
+  const sy = Math.floor(y / scale);
+  return (
+    hashNoise(sx, sy, seed) +
+    hashNoise(sx + 1, sy, seed) +
+    hashNoise(sx, sy + 1, seed) +
+    hashNoise(sx + 1, sy + 1, seed)
+  ) * 0.25;
+}
+
+function filmBasePixel(metrics, filmColor, x, y) {
+  const cx = metrics.outputWidth / 2;
+  const cy = metrics.outputHeight / 2;
+  const nx = Math.abs((x + 0.5 - cx) / Math.max(1, cx));
+  const ny = Math.abs((y + 0.5 - cy) / Math.max(1, cy));
+  const radial = clamp((nx * nx + ny * ny) * 0.9, 0, 1);
+  const inTopBand = y < metrics.bandHeight;
+  const inBottomBand = y >= metrics.bottomBandTop;
+  const bandDepth = inTopBand
+    ? y / Math.max(1, metrics.bandHeight)
+    : (inBottomBand ? (metrics.outputHeight - y - 1) / Math.max(1, metrics.bandHeight) : 0.48);
+  const outerEdge = inTopBand || inBottomBand ? 1 - clamp(bandDepth, 0, 1) : 0.22;
+  const framePitch = Math.max(1, getEdgeFramePitch(metrics));
+  const frameShade = Math.sin(((x - metrics.startX) / framePitch) * Math.PI * 2) * 1.6;
+  const sprocketShade = Math.sin(((x - metrics.startX) / Math.max(1, metrics.pitch)) * Math.PI * 2) * 0.55;
+  const coarse = smoothNoise(x, y, 18, NATURAL_FILM_TEXTURE_SEED + 19) - 0.5;
+  const fine = hashNoise(x, y, NATURAL_FILM_TEXTURE_SEED + 31) - 0.5;
+  const leakWave = Math.max(0, Math.sin((x * 0.018) + (y * 0.007) + 1.35));
+  const warmLeak = Math.pow(leakWave, 6) * (inTopBand || inBottomBand ? 1 : 0.28);
+  const density = 1.5 + radial * 3.5 + outerEdge * 2.6 + frameShade + sprocketShade + coarse * 6 + fine * 2.4;
+
+  return [
+    clamp(Math.round(filmColor[0] + density + warmLeak * 10), 0, 255),
+    clamp(Math.round(filmColor[1] + density * 0.9 + warmLeak * 4.8), 0, 255),
+    clamp(Math.round(filmColor[2] + density * 0.62 + warmLeak * 1.4), 0, 255),
+    filmColor[3]
+  ];
+}
+
+function fillFilmBase(data, metrics, filmColor) {
+  for (let i = 0; i < data.length; i += 4) {
+    data[i] = filmColor[0];
+    data[i + 1] = filmColor[1];
+    data[i + 2] = filmColor[2];
+    data[i + 3] = filmColor[3];
+  }
+
+  const paintSpan = (left, top, width, height) => {
+    const right = Math.min(metrics.outputWidth, left + width);
+    const bottom = Math.min(metrics.outputHeight, top + height);
+    for (let y = Math.max(0, top); y < bottom; y++) {
+      for (let x = Math.max(0, left); x < right; x++) {
+        const fill = filmBasePixel(metrics, filmColor, x, y);
+        const index = (y * metrics.outputWidth + x) * 4;
+        data[index] = fill[0];
+        data[index + 1] = fill[1];
+        data[index + 2] = fill[2];
+        data[index + 3] = fill[3];
+      }
+    }
+  };
+
+  paintSpan(0, 0, metrics.outputWidth, metrics.bandHeight);
+  paintSpan(0, metrics.bottomBandTop, metrics.outputWidth, metrics.outputHeight - metrics.bottomBandTop);
+  if (metrics.sideMargin > 0) {
+    const middleTop = metrics.bandHeight;
+    const middleHeight = metrics.sourceHeight;
+    paintSpan(0, middleTop, metrics.sideMargin, middleHeight);
+    paintSpan(metrics.sideMargin + metrics.sourceWidth, middleTop, metrics.sideMargin, middleHeight);
+  }
+}
+
 function fillRect(data, metrics, left, top, width, height, fill, alpha = 1) {
   const rectLeft = Math.max(0, Math.round(left));
   const rectTop = Math.max(0, Math.round(top));
@@ -312,6 +402,13 @@ function paintSprocketHole(data, metrics, left, top, fill) {
   const rectTop = Math.max(0, top);
   const rectRight = Math.min(metrics.outputWidth, left + metrics.holeWidth);
   const rectBottom = Math.min(metrics.outputHeight, top + metrics.holeHeight);
+  const rim = Math.max(1, Math.round(Math.min(metrics.holeWidth, metrics.holeHeight) * 0.10));
+  const rimFill = [
+    clamp(fill[0] - 38, 0, 255),
+    clamp(fill[1] - 34, 0, 255),
+    clamp(fill[2] - 28, 0, 255),
+    fill[3]
+  ];
 
   for (let y = rectTop; y < rectBottom; y++) {
     for (let x = rectLeft; x < rectRight; x++) {
@@ -323,6 +420,21 @@ function paintSprocketHole(data, metrics, left, top, fill) {
       data[i + 1] = fill[1];
       data[i + 2] = fill[2];
       data[i + 3] = fill[3];
+      if (fill[3] > 0) {
+        const interiorDistance = -roundedRectDistance(
+          x + 0.5,
+          y + 0.5,
+          left,
+          top,
+          metrics.holeWidth,
+          metrics.holeHeight,
+          metrics.holeRadius
+        );
+        if (interiorDistance >= 0 && interiorDistance < rim) {
+          const rimAlpha = (1 - interiorDistance / rim) * 0.16;
+          blendPixel(data, i, rimFill, rimAlpha);
+        }
+      }
     }
   }
 }
@@ -367,8 +479,16 @@ function paintSprocketGlow(data, metrics, left, top, fill, strength = 1) {
       );
       if (distance < 0 || distance > spread) continue;
       const falloff = 1 - distance / spread;
-      const alpha = falloff * falloff * clamp(0.18 + amount * 0.44, 0.08, 0.9);
-      blendPixel(data, (y * metrics.outputWidth + x) * 4, fill, alpha);
+      const isTopRow = top < metrics.bandHeight;
+      const inward = isTopRow
+        ? clamp((y - top) / Math.max(1, metrics.holeHeight + spread), 0, 1)
+        : clamp((top + metrics.holeHeight - y) / Math.max(1, metrics.holeHeight + spread), 0, 1);
+      const coarse = smoothNoise(x, y, Math.max(3, Math.round(metrics.holeHeight * 0.32)), 914);
+      const fine = hashNoise(x, y, 915);
+      const streak = Math.pow(Math.max(0, Math.sin((x - left) * 0.16 + (isTopRow ? 0.5 : 2.2))), 3);
+      const irregularity = clamp(0.62 + coarse * 0.54 + fine * 0.22 + inward * 0.24 + streak * 0.18, 0.45, 1.45);
+      const alpha = falloff * falloff * clamp(0.16 + amount * 0.38, 0.08, 0.82) * irregularity;
+      addPixel(data, (y * metrics.outputWidth + x) * 4, fill, alpha);
     }
   }
 }
@@ -747,7 +867,8 @@ function paintSprocketTextureSmear(data, metrics, sourceImageData, strength = 1)
           : clampInt(metrics.sourceHeight - 1 - edgeDistance, 0, metrics.sourceHeight - 1);
         const srcIndex = (sourceY * metrics.sourceWidth + sourceX) * 4;
         const falloff = 1 - distance / spread;
-        const alpha = falloff * falloff * clamp(0.045 + amount * 0.055, 0.03, 0.16);
+        const grain = clamp(0.68 + smoothNoise(x, y, Math.max(4, Math.round(metrics.holeHeight * 0.4)), 777) * 0.62, 0.45, 1.3);
+        const alpha = falloff * falloff * clamp(0.045 + amount * 0.055, 0.03, 0.16) * grain;
         blendPixel(
           data,
           (y * metrics.outputWidth + x) * 4,
@@ -795,12 +916,7 @@ export function composeSprocketFrame(imageData, options = {}) {
     : sanitizeColor(options.holeColor ?? edge.holeColor, DEFAULT_HOLE_COLOR);
   const output = new Uint8ClampedArray(metrics.outputWidth * metrics.outputHeight * 4);
 
-  for (let i = 0; i < output.length; i += 4) {
-    output[i] = filmColor[0];
-    output[i + 1] = filmColor[1];
-    output[i + 2] = filmColor[2];
-    output[i + 3] = filmColor[3];
-  }
+  fillFilmBase(output, metrics, filmColor);
 
   const src = imageData.data;
   for (let y = 0; y < metrics.sourceHeight; y++) {

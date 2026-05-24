@@ -41,7 +41,18 @@ const firstPhotoPixel = ((metrics.bandHeight * framed.width) + metrics.sideMargi
 assert.deepEqual(Array.from(framed.data.slice(firstPhotoPixel, firstPhotoPixel + 4)), [20, 80, 140, 255]);
 
 const filmPixel = 0;
-assert.deepEqual(Array.from(framed.data.slice(filmPixel, filmPixel + 4)), [6, 6, 6, 255]);
+const filmPixelRgba = Array.from(framed.data.slice(filmPixel, filmPixel + 4));
+assert.equal(filmPixelRgba[3], 255);
+assert.ok(filmPixelRgba[0] >= 6 && filmPixelRgba[0] <= 32);
+assert.ok(filmPixelRgba[1] >= 6 && filmPixelRgba[1] <= 28);
+assert.ok(filmPixelRgba[2] >= 4 && filmPixelRgba[2] <= 24);
+assert.ok(filmPixelRgba[0] >= filmPixelRgba[1]);
+assert.ok(filmPixelRgba[1] >= filmPixelRgba[2]);
+assert.notDeepEqual(filmPixelRgba, [6, 6, 6, 255]);
+assert.deepEqual(
+  Array.from(composeSprocketFrame(source).data.slice(filmPixel, filmPixel + 4)),
+  filmPixelRgba
+);
 
 let visibleHoleLeft = metrics.startX;
 for (let i = 0; i < metrics.holeCount && visibleHoleLeft + metrics.holeWidth <= 0; i++) {
