@@ -20,6 +20,10 @@
     import {
       createImageDataCanvasBlobEncoder
     } from './canvasBlobEncoder.js';
+    import {
+      composeSprocketFrame,
+      getSprocketFrameMetrics
+    } from './sprocketFrame.js';
     import { renderFileList } from './fileListView.js';
     import { loadLocalLensfunAssets } from './lensfunLoader.js';
     import { createOpenCvLoader } from './opencvLoader.js';
@@ -114,6 +118,7 @@
 	        autoFrame: "自动识别边框",
 	        autoFrameSelected: "批量自动识别",
 	        beforeAfter: "前后对比",
+        sprocketPreview: "齿孔预览",
 	        convert: "下一步：胶片设置",
 	        convertPositive: "下一步：正片模式",
 	        histogram: "直方图",
@@ -330,6 +335,7 @@
         cancelledSampling: "已退出取样模式",
         cancelledBrush: "已取消笔刷",
         exportPng: "导出 PNG",
+        exportSprocketPng: "齿孔导出 PNG",
         colorFilms: "彩色负片",
         bwFilms: "黑白负片",
         positiveFilms: "正片",
@@ -394,6 +400,8 @@
         jpegQuality: "JPEG 质量",
         exportJpeg: "导出 JPEG",
         exportTiff: "导出 TIFF",
+        exportSprocketJpeg: "齿孔导出 JPEG",
+        exportSprocketTiff: "齿孔导出 TIFF",
         exportCurrentJpeg: "导出当前图片 (JPEG)",
         exportCurrentTiff: "导出当前图片 (TIFF)",
         exportZipJpeg: "批量导出 (ZIP/JPEG)",
@@ -485,6 +493,7 @@
 	        autoFrame: "Auto Frame",
 	        autoFrameSelected: "Auto Frame Selected",
 	        beforeAfter: "Before/After",
+        sprocketPreview: "Sprocket Preview",
 	        convert: "Next: Film Settings",
 	        convertPositive: "Next: Positive Mode",
 	        histogram: "Histogram",
@@ -701,6 +710,7 @@
         cancelledSampling: "Exited sampling mode",
         cancelledBrush: "Brush cancelled",
         exportPng: "Export PNG",
+        exportSprocketPng: "Export Sprocket PNG",
         colorFilms: "Color Films",
         bwFilms: "B&W Films",
         positiveFilms: "Positive Slides",
@@ -765,6 +775,8 @@
         jpegQuality: "JPEG Quality",
         exportJpeg: "Export JPEG",
         exportTiff: "Export TIFF",
+        exportSprocketJpeg: "Export Sprocket JPEG",
+        exportSprocketTiff: "Export Sprocket TIFF",
         exportCurrentJpeg: "Export Current (JPEG)",
         exportCurrentTiff: "Export Current (TIFF)",
         exportZipJpeg: "Export All (ZIP/JPEG)",
@@ -856,6 +868,7 @@
 	        autoFrame: "自動フレーム検出",
 	        autoFrameSelected: "選択画像を自動検出",
 	        beforeAfter: "ビフォー/アフター",
+        sprocketPreview: "パーフォレーション表示",
 	        convert: "次へ：フィルム設定",
 	        convertPositive: "次へ：ポジモード",
 	        histogram: "ヒストグラム",
@@ -1072,6 +1085,7 @@
         cancelledSampling: "サンプリングモードを終了",
         cancelledBrush: "ブラシをキャンセル",
         exportPng: "PNG出力",
+        exportSprocketPng: "パーフォレーションPNG出力",
         colorFilms: "カラーフィルム",
         bwFilms: "白黒フィルム",
         positiveFilms: "ポジフィルム",
@@ -1136,6 +1150,8 @@
         jpegQuality: "JPEG品質",
         exportJpeg: "JPEG出力",
         exportTiff: "TIFF出力",
+        exportSprocketJpeg: "パーフォレーションJPEG出力",
+        exportSprocketTiff: "パーフォレーションTIFF出力",
         exportCurrentJpeg: "現在の画像を出力 (JPEG)",
         exportCurrentTiff: "現在の画像を出力 (TIFF)",
         exportZipJpeg: "一括出力 (ZIP/JPEG)",
@@ -2717,6 +2733,8 @@
       exportFormat: 'png',  // 'png' | 'jpeg' | 'tiff'
       exportBitDepth: 8,    // 8 | 16
       jpegQuality: 92,      // 1-100
+      sprocketPreviewEnabled: false,
+      exportSprocketHolesEnabled: false,
 
       // Render state
       lastRenderQuality: 'full', // 'full' | 'preview' | 'gl'
@@ -2983,7 +3001,7 @@
       'coreWhites', 'coreBlacks', 'coreWbMode', 'coreTemperature', 'coreTint',
       'coreSaturation', 'coreGlow', 'coreFade', 'coreCurvePrecision', 'coreUseWebGL',
       'wbR', 'wbG', 'wbB', 'filmType', 'filmBaseSet', 'grayPointSampled', 'step2Mode', 'rotationAngle',
-      'currentStep',
+      'sprocketPreviewEnabled', 'currentStep',
     ];
 
     // Category B: heavy image data (stored by reference)
@@ -3080,6 +3098,7 @@
       updateSlidersFromState();
       renderCurve();
       updateDustControlsVisibility();
+      updateSprocketControlsUI();
 
       // Re-render
       if (state.processedImageData) {
@@ -3184,6 +3203,7 @@
     const ZOOM_WHEEL_SENSITIVITY = 0.0024;
     const ZOOM_PINCH_WHEEL_SENSITIVITY = 0.0042;
     const beforeAfterBtn = document.getElementById('beforeAfterBtn');
+    const sprocketPreviewBtn = document.getElementById('sprocketPreviewBtn');
     const histogramContainer = document.getElementById('histogramContainer');
     const histogramCanvas = document.getElementById('histogramCanvas');
     const histogram = new Histogram(histogramCanvas);
@@ -3200,6 +3220,8 @@
     const loupeSrcCtx = loupeSrcCanvas.getContext('2d', { willReadFrequently: true });
     const beforeAfterScratchCanvas = document.createElement('canvas');
     const beforeAfterScratchCtx = beforeAfterScratchCanvas.getContext('2d', { willReadFrequently: true });
+    const sprocketScratchCanvas = document.createElement('canvas');
+    const sprocketScratchCtx = sprocketScratchCanvas.getContext('2d', { willReadFrequently: true });
 
     let transformCanvas = document.createElement('canvas');
     let transformCtx = transformCanvas.getContext('2d');
@@ -3427,6 +3449,7 @@
       syncBatchUIState({ reason: 'updateWorkflowUI' });
       updateAutoFrameButtons();
       updateBeforeAfterButtonState();
+      updateSprocketControlsUI();
       renderNoviceGuide({ applyStep3Collapse: true });
     }
 
@@ -3507,6 +3530,7 @@
         beforeAfterBtn.classList.add('active');
         beforeAfterBtn.setAttribute('aria-pressed', 'true');
       }
+      updateSprocketControlsUI();
       renderBeforeAfterReference(referenceImageData);
     }
 
@@ -3519,6 +3543,7 @@
         beforeAfterBtn.classList.remove('active');
         beforeAfterBtn.setAttribute('aria-pressed', 'false');
       }
+      updateSprocketControlsUI();
 
       if (state.currentStep >= 3 && state.processedImageData) {
         glCanvas.style.display = 'none';
@@ -3552,6 +3577,92 @@
       beforeAfterBtn.disabled = !enabled;
       beforeAfterBtn.classList.toggle('active', state.beforeAfterActive);
       beforeAfterBtn.setAttribute('aria-pressed', state.beforeAfterActive ? 'true' : 'false');
+    }
+
+    function canPreviewSprocketFrame() {
+      if (state.beforeAfterActive || state.cropping || state.samplingMode) return false;
+      return Boolean(
+        (state.currentStep >= 3 && state.processedImageData)
+        || state.croppedImageData
+        || state.originalImageData
+      );
+    }
+
+    function updateSprocketControlsUI() {
+      const previewEnabled = Boolean(state.sprocketPreviewEnabled);
+      if (sprocketPreviewBtn) {
+        sprocketPreviewBtn.disabled = !canPreviewSprocketFrame();
+        sprocketPreviewBtn.classList.toggle('active', previewEnabled);
+        sprocketPreviewBtn.setAttribute('aria-pressed', previewEnabled ? 'true' : 'false');
+      }
+
+      const exportSprocketBtn = document.getElementById('exportSprocketBtn');
+      if (exportSprocketBtn) {
+        exportSprocketBtn.classList.toggle('active', Boolean(state.exportSprocketHolesEnabled));
+        exportSprocketBtn.setAttribute('aria-pressed', state.exportSprocketHolesEnabled ? 'true' : 'false');
+      }
+    }
+
+    function setSprocketPreviewEnabled(enabled, options = {}) {
+      const nextEnabled = Boolean(enabled);
+      state.sprocketPreviewEnabled = nextEnabled;
+      updateSprocketControlsUI();
+
+      if (options.render === false) return;
+      if (state.beforeAfterActive) exitBeforeAfter();
+      if (state.currentStep >= 3 && state.processedImageData) {
+        updatePreview();
+        scheduleFullUpdate();
+        return;
+      }
+
+      const sourceData = state.croppedImageData || state.originalImageData;
+      if (sourceData) {
+        displayNegative(sourceData);
+        renderHistogram(sourceData);
+      }
+    }
+
+    function setMainCanvasDimensions(width, height) {
+      const nextWidth = Math.max(1, Math.round(width));
+      const nextHeight = Math.max(1, Math.round(height));
+      if (canvas.width !== nextWidth) canvas.width = nextWidth;
+      if (canvas.height !== nextHeight) canvas.height = nextHeight;
+      adjustCanvasDisplay(nextWidth, nextHeight);
+    }
+
+    function drawImageDataToMainCanvas(imageData, targetWidth, targetHeight) {
+      if (imageData.width === targetWidth && imageData.height === targetHeight) {
+        ctx.putImageData(imageData, 0, 0);
+        return;
+      }
+
+      if (sprocketScratchCanvas.width !== imageData.width) sprocketScratchCanvas.width = imageData.width;
+      if (sprocketScratchCanvas.height !== imageData.height) sprocketScratchCanvas.height = imageData.height;
+      sprocketScratchCtx.putImageData(imageData, 0, 0);
+      ctx.clearRect(0, 0, targetWidth, targetHeight);
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(sprocketScratchCanvas, 0, 0, targetWidth, targetHeight);
+    }
+
+    function renderAdjustedImageDataToMainCanvas(imageData, fullSizeReference = imageData) {
+      if (state.sprocketPreviewEnabled && !state.cropping) {
+        const frameMetrics = getSprocketFrameMetrics(fullSizeReference.width, fullSizeReference.height);
+        const framed = composeSprocketFrame(imageData);
+        setMainCanvasDimensions(frameMetrics.outputWidth, frameMetrics.outputHeight);
+        drawImageDataToMainCanvas(framed, frameMetrics.outputWidth, frameMetrics.outputHeight);
+        return;
+      }
+
+      setMainCanvasDimensions(fullSizeReference.width, fullSizeReference.height);
+      drawImageDataToMainCanvas(imageData, fullSizeReference.width, fullSizeReference.height);
+    }
+
+    function syncTransformCanvasFromMainCanvas() {
+      transformCanvas.width = canvas.width;
+      transformCanvas.height = canvas.height;
+      transformCtx.clearRect(0, 0, transformCanvas.width, transformCanvas.height);
+      transformCtx.drawImage(canvas, 0, 0);
     }
 
     function isEditableTarget(target) {
@@ -4662,6 +4773,7 @@
 
     function isWebGLActive() {
       if (state.dustRemoval.enabled && state.dustRemoval.showMask) return false;
+      if (state.sprocketPreviewEnabled) return false;
       return !!webglState.gl && !webglState.disabledByError && state.currentStep >= 3 && !!state.processedImageData;
     }
 
@@ -4944,15 +5056,10 @@
       applyAdjustmentsToBuffer(source, state, previewAdjustedBuffer, 'preview');
 
       if (source !== state.processedImageData) {
-        if (previewCanvas.width !== source.width) previewCanvas.width = source.width;
-        if (previewCanvas.height !== source.height) previewCanvas.height = source.height;
-        previewCtx.putImageData(previewAdjustedBuffer, 0, 0);
-
-        ctx.imageSmoothingEnabled = true;
-        ctx.drawImage(previewCanvas, 0, 0, canvas.width, canvas.height);
+        renderAdjustedImageDataToMainCanvas(previewAdjustedBuffer, state.processedImageData);
         state.lastRenderQuality = 'preview';
       } else {
-        ctx.putImageData(previewAdjustedBuffer, 0, 0);
+        renderAdjustedImageDataToMainCanvas(previewAdjustedBuffer, source);
         state.displayImageData = previewAdjustedBuffer;
         state.lastRenderQuality = 'full';
       }
@@ -4986,12 +5093,10 @@
       fullAdjustedBuffer = ensureImageDataBuffer(fullAdjustedBuffer, source.width, source.height);
       applyAdjustmentsToBuffer(source, state, fullAdjustedBuffer, 'full');
       state.displayImageData = fullAdjustedBuffer;
-      ctx.putImageData(fullAdjustedBuffer, 0, 0);
+      renderAdjustedImageDataToMainCanvas(fullAdjustedBuffer, source);
       renderHistogram(fullAdjustedBuffer);
 
-      transformCanvas.width = canvas.width;
-      transformCanvas.height = canvas.height;
-      transformCtx.putImageData(fullAdjustedBuffer, 0, 0);
+      syncTransformCanvasFromMainCanvas();
       state.lastRenderQuality = 'full';
       if (state.dustRemoval.showMask && state.dustRemoval.mask) renderDustMaskOverlay();
     }
@@ -5076,11 +5181,9 @@
         const result = renderFullWebGL();
         if (result && result instanceof ImageData) {
           state.displayImageData = result;
-          ctx.putImageData(result, 0, 0);
+          renderAdjustedImageDataToMainCanvas(result, result);
           renderHistogram(result);
-          transformCanvas.width = canvas.width;
-          transformCanvas.height = canvas.height;
-          transformCtx.putImageData(result, 0, 0);
+          syncTransformCanvasFromMainCanvas();
           state.lastRenderQuality = 'full';
           return;
         }
@@ -5116,9 +5219,12 @@
         webglState.sourceDirty = true;
         webglState.curveDirty = true;
       }
-      canvas.width = processed.width;
-      canvas.height = processed.height;
-      adjustCanvasDisplay(processed.width, processed.height);
+      if (state.sprocketPreviewEnabled) {
+        const frameMetrics = getSprocketFrameMetrics(processed.width, processed.height);
+        setMainCanvasDimensions(frameMetrics.outputWidth, frameMetrics.outputHeight);
+      } else {
+        setMainCanvasDimensions(processed.width, processed.height);
+      }
     }
 
     async function convertFromCurrentSource(settings = state, { preview = false } = {}) {
@@ -5990,14 +6096,9 @@
 
     function displayNegative(imageData) {
       resetZoomPan();
-      canvas.width = imageData.width;
-      canvas.height = imageData.height;
-      ctx.putImageData(imageData, 0, 0);
-      adjustCanvasDisplay(imageData.width, imageData.height);
-
-      transformCanvas.width = imageData.width;
-      transformCanvas.height = imageData.height;
-      transformCtx.putImageData(imageData, 0, 0);
+      renderAdjustedImageDataToMainCanvas(imageData, imageData);
+      syncTransformCanvasFromMainCanvas();
+      updateSprocketControlsUI();
     }
 
     // ===========================================
@@ -6128,6 +6229,7 @@
       updateAutoFrameDiagnosticsUI();
       updateLensCorrectionUI();
       updateBeforeAfterButtonState();
+      updateSprocketControlsUI();
     }
 
     // ===========================================
@@ -7854,6 +7956,15 @@
       });
     }
 
+    if (sprocketPreviewBtn) {
+      sprocketPreviewBtn.setAttribute('aria-pressed', 'false');
+      sprocketPreviewBtn.addEventListener('click', (event) => {
+        if (sprocketPreviewBtn.disabled) return;
+        event.preventDefault();
+        setSprocketPreviewEnabled(!state.sprocketPreviewEnabled);
+      });
+    }
+
     document.addEventListener('keydown', (event) => {
       if (event.code !== 'Space' || event.repeat) return;
       if (isEditableTarget(event.target)) return;
@@ -8238,6 +8349,7 @@
       if (mirrorBtn) mirrorBtn.disabled = active;
       if (autoFrameBtn) autoFrameBtn.disabled = active;
       if (autoFrameSelectedBtn) autoFrameSelectedBtn.disabled = active;
+      updateSprocketControlsUI();
     }
 
     function beginCropMode() {
@@ -8245,6 +8357,9 @@
       if (!sourceImageData) return;
 
       exitBeforeAfter();
+      if (state.sprocketPreviewEnabled) {
+        setSprocketPreviewEnabled(false, { render: false });
+      }
       if (cropPreviewRenderFrame) {
         cancelAnimationFrame(cropPreviewRenderFrame);
         cropPreviewRenderFrame = null;
@@ -8943,6 +9058,7 @@
         state.webglSourceImageData = null;
         state.filmBaseSet = false;
         state.grayPointSampled = false;
+        state.sprocketPreviewEnabled = false;
         resetFrontierGuideImageState();
         state.lastRenderQuality = 'full';
         if (webglState.gl) {
@@ -8993,6 +9109,7 @@
       state.webglSourceImageData = null;
       state.filmBaseSet = false;
       state.grayPointSampled = false;
+      state.sprocketPreviewEnabled = false;
       state.rawMetadata = null;
       state.currentStep = 1;
       state.lastRenderQuality = 'full';
@@ -9031,6 +9148,7 @@
       document.getElementById('controlsPanel').style.display = 'none';
       document.getElementById('appFooter').style.display = 'none';
       updateBeforeAfterButtonState();
+      updateSprocketControlsUI();
 
       // Reset adjustments
       document.getElementById('resetBtn').click();
@@ -9045,12 +9163,30 @@
     // Export
     // ===========================================
     const exportBtn = document.getElementById('exportBtn');
+    const exportSprocketBtn = document.getElementById('exportSprocketBtn');
     const exportDropdownMenu = document.getElementById('exportDropdownMenu');
 
-    // Toggle dropdown on main export button click
+    function setExportSprocketMode(enabled) {
+      state.exportSprocketHolesEnabled = Boolean(enabled);
+      updateSprocketControlsUI();
+      updateExportUI();
+    }
+
+    function toggleExportDropdownForMode(enabled, event) {
+      event.stopPropagation();
+      const wasOpen = exportDropdownMenu.classList.contains('show');
+      const previousMode = Boolean(state.exportSprocketHolesEnabled);
+      setExportSprocketMode(enabled);
+      exportDropdownMenu.classList.toggle('show', !(wasOpen && previousMode === Boolean(enabled)));
+    }
+
+    // Toggle dropdown on export button click
     exportBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      exportDropdownMenu.classList.toggle('show');
+      toggleExportDropdownForMode(false, e);
+    });
+
+    exportSprocketBtn.addEventListener('click', (e) => {
+      toggleExportDropdownForMode(true, e);
     });
 
     // Prevent dropdown from closing when clicking inside it (for export settings)
@@ -9249,12 +9385,24 @@
       return { format: 'png', bitDepth, extension: '.png', mimeType: 'image/png' };
     }
 
-    function buildExportFileName(sourceName, exportInfo) {
+    function buildExportFileName(sourceName, exportInfo, options = {}) {
       const withConverted = sourceName
         ? sourceName.replace(/\.[^.]+$/, '_converted')
         : 'converted_negative';
+      const sprocketSuffix = options.sprocket ? '_sprocket' : '';
       const depthSuffix = exportInfo.bitDepth === 16 && exportInfo.format !== 'jpeg' ? '_16bit' : '';
-      return `${withConverted}${depthSuffix}${exportInfo.extension}`;
+      return `${withConverted}${sprocketSuffix}${depthSuffix}${exportInfo.extension}`;
+    }
+
+    function buildActiveExportFileName(sourceName, exportInfo) {
+      return buildExportFileName(sourceName, exportInfo, {
+        sprocket: state.exportSprocketHolesEnabled
+      });
+    }
+
+    function applySprocketFrameForExport(imageData, exportInfo) {
+      if (!state.exportSprocketHolesEnabled) return imageData;
+      return composeSprocketFrame(imageData);
     }
 
     async function getCurrentExportImageData() {
@@ -9264,6 +9412,10 @@
       }
       if (state.processedImageData && state.currentStep >= 3) {
         return await applyAdjustmentsWithSettings(state.processedImageData, state);
+      }
+      if (state.sprocketPreviewEnabled || state.exportSprocketHolesEnabled) {
+        const sourceData = state.croppedImageData || state.originalImageData;
+        if (sourceData) return sourceData;
       }
       if (canvas.width > 0 && canvas.height > 0) {
         return ctx.getImageData(0, 0, canvas.width, canvas.height);
@@ -9281,7 +9433,7 @@
       const lang = i18n[currentLang];
       const overlay = getLoadingOverlay();
       const exportInfo = getExportInfo();
-      let fileName = buildExportFileName(null, exportInfo);
+      let fileName = buildActiveExportFileName(null, exportInfo);
       let blob;
 
       await overlay.show({ title: lang.loadingExporting });
@@ -9292,18 +9444,20 @@
         if (currentItem && state.currentStep >= 3 && state.processedImageData) {
           persistCurrentFileSettings({ silent: true });
           const adjusted = await processFileWithSettings(currentItem.file, currentItem.settings);
+          const outputImageData = applySprocketFrameForExport(adjusted, exportInfo);
           overlay.updateProgress(60, lang.loadingEncoding);
-          blob = await imageDataToBlob(adjusted, exportInfo.format, state.jpegQuality, exportInfo.bitDepth, (pct) => {
+          blob = await imageDataToBlob(outputImageData, exportInfo.format, state.jpegQuality, exportInfo.bitDepth, (pct) => {
             overlay.updateProgress(60 + pct * 0.35, lang.loadingEncoding);
           });
-          fileName = buildExportFileName(currentItem.file.name, exportInfo);
+          fileName = buildActiveExportFileName(currentItem.file.name, exportInfo);
         } else {
           await ensureFullResolutionReadyForExport();
           ensureFullRender();
           overlay.updateProgress(50, lang.loadingEncoding);
           const imageData = await getCurrentExportImageData();
           if (!imageData) throw new Error('No image available for export.');
-          blob = await imageDataToBlob(imageData, exportInfo.format, state.jpegQuality, exportInfo.bitDepth, (pct) => {
+          const outputImageData = applySprocketFrameForExport(imageData, exportInfo);
+          blob = await imageDataToBlob(outputImageData, exportInfo.format, state.jpegQuality, exportInfo.bitDepth, (pct) => {
             overlay.updateProgress(50 + pct * 0.45, lang.loadingEncoding);
           });
         }
@@ -9407,6 +9561,13 @@
       exportBtn.textContent = i18n[currentLang][exportKey];
       exportBtn.setAttribute('data-i18n', exportKey);
 
+      const exportSprocketBtn = document.getElementById('exportSprocketBtn');
+      if (exportSprocketBtn) {
+        const sprocketKey = isJpeg ? 'exportSprocketJpeg' : (format === 'tiff' ? 'exportSprocketTiff' : 'exportSprocketPng');
+        exportSprocketBtn.textContent = i18n[currentLang][sprocketKey];
+        exportSprocketBtn.setAttribute('data-i18n', sprocketKey);
+      }
+
       // Update export current button text
       const exportSingleBtn = document.getElementById('exportSingleBtn');
       const exportSingleKey = isJpeg ? 'exportCurrentJpeg' : (format === 'tiff' ? 'exportCurrentTiff' : 'exportCurrent');
@@ -9418,6 +9579,7 @@
         const depth = parseInt(btn.dataset.bitdepth, 10) === 16 ? 16 : 8;
         btn.textContent = depth === 16 ? '16-bit' : '8-bit';
       });
+      updateSprocketControlsUI();
     }
 
     updateExportUI();
@@ -10046,15 +10208,16 @@
           try {
             const settingsForFile = getSettingsForExport(index, item);
             const adjusted = await processFileWithSettings(item.file, settingsForFile);
+            const outputImageData = applySprocketFrameForExport(adjusted, exportInfo);
             overlay.updateProgress(fileProgress + fileSlice * 0.6, lang.loadingEncoding);
             const blob = await imageDataToBlob(
-              adjusted,
+              outputImageData,
               exportInfo.format,
               state.jpegQuality,
               exportInfo.bitDepth
             );
 
-            const name = buildExportFileName(item.file.name, exportInfo);
+            const name = buildActiveExportFileName(item.file.name, exportInfo);
             zip.file(name, blob);
             item.status = 'done';
           } catch (err) {
@@ -10165,9 +10328,10 @@
           try {
             const settingsForFile = getSettingsForExport(index, item);
             adjusted = await processFileWithSettings(item.file, settingsForFile);
+            const outputImageData = applySprocketFrameForExport(adjusted, exportInfo);
             overlay.updateProgress(fileProgress + fileSlice * 0.55, lang.loadingEncoding);
             blob = await imageDataToBlob(
-              adjusted,
+              outputImageData,
               exportInfo.format,
               state.jpegQuality,
               exportInfo.bitDepth,
@@ -10178,7 +10342,7 @@
                 );
               }
             );
-            name = buildExportFileName(item.file.name, exportInfo);
+            name = buildActiveExportFileName(item.file.name, exportInfo);
           } catch (err) {
             console.error(`Error processing ${item.file.name}:`, err);
             item.status = 'error';
@@ -10256,7 +10420,7 @@
         item,
         index,
         file: item.file,
-        outputName: buildExportFileName(item.file.name, exportInfo),
+        outputName: buildActiveExportFileName(item.file.name, exportInfo),
         settings: cloneSettings(getSettingsForExport(index, item))
       }));
     }
@@ -10349,6 +10513,7 @@
 
           try {
             const adjusted = await processFileWithSettings(file, settings, { dustRemoval });
+            const outputImageData = applySprocketFrameForExport(adjusted, exportInfo);
             setDesktopBatchExportState({
               active: true,
               current: i + 1,
@@ -10359,7 +10524,7 @@
             });
 
             const blob = await imageDataToBlob(
-              adjusted,
+              outputImageData,
               exportInfo.format,
               jpegQuality,
               exportInfo.bitDepth,
@@ -10434,9 +10599,10 @@
           try {
             const settingsForFile = getSettingsForExport(index, item);
             adjusted = await processFileWithSettings(item.file, settingsForFile);
+            const outputImageData = applySprocketFrameForExport(adjusted, exportInfo);
             overlay.updateProgress(fileProgress + fileSlice * 0.6, lang.loadingEncoding);
             blob = await imageDataToBlob(
-              adjusted,
+              outputImageData,
               exportInfo.format,
               state.jpegQuality,
               exportInfo.bitDepth,
@@ -10448,7 +10614,7 @@
               }
             );
 
-            name = buildExportFileName(item.file.name, exportInfo);
+            name = buildActiveExportFileName(item.file.name, exportInfo);
             overlay.hide(); // Hide overlay before save dialog
             const result = await saveBlob(blob, name, exportInfo.mimeType);
             if (!result.saved) {
@@ -10695,10 +10861,12 @@
       const selectedCount = state.fileQueue.filter(f => f.selected).length;
       const exportLocked = isDesktopBatchExportLocked();
       const exportBtn = document.getElementById('exportBtn');
+      const exportSprocketBtn = document.getElementById('exportSprocketBtn');
       const exportSingleBtn = document.getElementById('exportSingleBtn');
       const exportZipBtn = document.getElementById('exportZipBtn');
       const exportAllBtn = document.getElementById('exportAllBtn');
       if (exportBtn) exportBtn.disabled = exportLocked;
+      if (exportSprocketBtn) exportSprocketBtn.disabled = exportLocked;
       if (exportSingleBtn) exportSingleBtn.disabled = exportLocked;
       if (exportZipBtn) exportZipBtn.disabled = selectedCount < 1 || exportLocked;
       if (exportAllBtn) exportAllBtn.disabled = selectedCount < 1 || exportLocked;

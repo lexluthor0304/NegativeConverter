@@ -2474,7 +2474,15 @@
     /* Export Dropdown */
     .export-dropdown {
       position: relative;
-      display: inline-block;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .export-dropdown .footer-btn.active {
+      background: rgba(255, 183, 77, 0.2);
+      border-color: rgba(255, 183, 77, 0.5);
+      color: #ffd28a;
     }
 
     .export-dropdown-menu {
@@ -3139,6 +3147,14 @@
         <button class="toolbar-btn" id="autoFrameBtn" data-i18n="autoFrame">Auto Frame</button>
         <button class="toolbar-btn" id="autoFrameSelectedBtn" data-i18n="autoFrameSelected">Auto Frame Selected</button>
         <button class="toolbar-btn" id="beforeAfterBtn" data-i18n="beforeAfter" disabled>Before/After</button>
+        <button class="toolbar-btn" id="sprocketPreviewBtn" disabled>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <rect x="4" y="5" width="16" height="14" rx="2"></rect>
+            <path d="M8 5v14M16 5v14"></path>
+            <path d="M6.5 8h1M6.5 12h1M6.5 16h1M16.5 8h1M16.5 12h1M16.5 16h1"></path>
+          </svg>
+          <span data-i18n="sprocketPreview">Sprocket Preview</span>
+        </button>
         <button class="toolbar-btn" id="addFilesToolbarBtn" data-i18n="addFiles">Add</button>
         <div class="toolbar-separator" id="convertSeparator" style="display: none;"></div>
         <button class="toolbar-btn primary" id="convertBtn" style="display: none;" data-i18n="convert">Convert Negative</button>
@@ -3840,6 +3856,7 @@
       <button class="footer-btn" id="applyToSelectedBtn" style="display: none;" data-i18n="applyToSelected">Apply to Selected</button>
       <div class="export-dropdown">
         <button class="footer-btn primary" id="exportBtn" data-i18n="exportPng">Export PNG</button>
+        <button class="footer-btn" id="exportSprocketBtn" data-i18n="exportSprocketPng" aria-pressed="false">Export Sprocket PNG</button>
         <div class="export-dropdown-menu" id="exportDropdownMenu">
           <div class="export-format-section">
             <div class="export-format-label" data-i18n="exportFormat">Export Format</div>
