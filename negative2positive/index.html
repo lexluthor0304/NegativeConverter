@@ -1401,6 +1401,33 @@
       border-color: var(--accent);
     }
 
+    .film-edge-text-input {
+      cursor: text;
+    }
+
+    .film-edge-color-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .film-edge-color-input {
+      width: 44px;
+      height: 30px;
+      padding: 2px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      cursor: pointer;
+    }
+
+    .film-edge-color-input:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
     /* Film Base Buttons */
     .film-base-buttons {
       display: flex;
@@ -3283,6 +3310,131 @@
             <input type="range" class="slider-input" id="coreBorderBuffer" min="0" max="30" step="1" value="10">
           </div>
           <div class="info-box autoframe-diagnostics" id="autoFrameDiagnosticsBox" style="display: none;"></div>
+        </div>
+      </div>
+
+      <!-- Film Edge / Sprocket Settings -->
+      <div class="control-section task-secondary" id="sprocketSettingsSection" style="display: none;">
+        <div class="section-header" data-section="sprocketEdge">
+          <span class="section-title" data-i18n="filmEdgeSettings">Film Edge</span>
+          <span class="section-toggle">▼</span>
+        </div>
+        <div class="section-content" id="sprocketEdgeSectionContent">
+          <div class="control-group is-primary">
+            <div class="control-group-title"><span data-i18n="filmEdgeVisibility">Visible markings</span></div>
+            <label class="roll-reference-option">
+              <input type="checkbox" id="sprocketTextEnabledInput">
+              <span data-i18n="filmEdgeEnableText">Text</span>
+            </label>
+            <label class="roll-reference-option">
+              <input type="checkbox" id="sprocketFrameNumberEnabledInput">
+              <span data-i18n="filmEdgeEnableFrameNumber">Frame number</span>
+            </label>
+            <label class="roll-reference-option">
+              <input type="checkbox" id="sprocketDxEnabledInput">
+              <span data-i18n="filmEdgeEnableDx">DX edge code</span>
+            </label>
+            <label class="roll-reference-option">
+              <input type="checkbox" id="sprocketOverexposureEnabledInput">
+              <span data-i18n="filmEdgeEnableOverexposure">Overexposed sprocket glow</span>
+            </label>
+          </div>
+          <div class="control-group">
+            <div class="control-group-title"><span data-i18n="filmEdgeText">Edge text</span></div>
+            <input type="text" class="preset-select film-edge-text-input" id="sprocketTextInput" value="GC 400-8 KODAK" maxlength="48">
+          </div>
+          <div class="control-group">
+            <div class="control-group-title"><span data-i18n="filmEdgeFont">Font</span></div>
+            <div class="control-group-grid two-up">
+              <div class="slider-control">
+                <div class="slider-header">
+                  <span class="slider-label" data-i18n="filmEdgeFontStyle">Style</span>
+                </div>
+                <select class="preset-select" id="sprocketFontStyleSelect">
+                  <option value="monoBold" data-i18n="filmEdgeFontMonoBold">Mono Bold</option>
+                  <option value="mono" data-i18n="filmEdgeFontMono">Mono</option>
+                  <option value="sansBold" data-i18n="filmEdgeFontSansBold">Sans Bold</option>
+                  <option value="serif" data-i18n="filmEdgeFontSerif">Serif</option>
+                </select>
+              </div>
+              <div class="slider-control">
+                <div class="slider-header">
+                  <span class="slider-label" data-i18n="filmEdgeFontFamily">Family</span>
+                </div>
+                <input type="text" class="preset-select film-edge-text-input" id="sprocketFontFamilyInput" value="" maxlength="80" placeholder="Monospace">
+              </div>
+            </div>
+          </div>
+          <div class="control-group">
+            <div class="control-group-title"><span data-i18n="filmEdgeFrameNumber">Frame number</span></div>
+            <div class="control-group-grid two-up">
+              <div class="slider-control">
+                <div class="slider-header">
+                  <span class="slider-label" data-i18n="filmEdgeFrameNumberValue">Number</span>
+                  <input type="number" class="slider-number-input" id="sprocketFrameNumberInput" min="0" max="99" step="1" value="18">
+                </div>
+              </div>
+              <div class="slider-control">
+                <div class="slider-header">
+                  <span class="slider-label" data-i18n="filmEdgeFrameNumberHole">Hole pos.</span>
+                  <input type="number" class="slider-number-input" id="sprocketFrameNumberHoleInput" min="1" max="8" step="1" value="1">
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="control-group">
+            <div class="control-group-title"><span data-i18n="filmEdgeDxCode">DX code</span></div>
+            <div class="control-group-grid two-up">
+              <div class="slider-control">
+                <div class="slider-header">
+                  <span class="slider-label" data-i18n="filmEdgeDx1">DX 1</span>
+                  <input type="number" class="slider-number-input" id="sprocketDx1Input" min="0" max="126" step="1" value="82">
+                </div>
+              </div>
+              <div class="slider-control">
+                <div class="slider-header">
+                  <span class="slider-label" data-i18n="filmEdgeDx2">DX 2</span>
+                  <input type="number" class="slider-number-input" id="sprocketDx2Input" min="0" max="15" step="1" value="3">
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="control-group">
+            <div class="control-group-title"><span data-i18n="filmEdgeGeometry">Geometry</span></div>
+            <div class="control-group-grid two-up">
+              <div class="slider-control">
+                <div class="slider-header">
+                  <span class="slider-label" data-i18n="filmEdgeHoleOffset">Hole offset mm</span>
+                  <input type="number" class="slider-number-input" id="sprocketFirstHoleOffsetInput" min="-2.5" max="2.5" step="0.1" value="0">
+                </div>
+              </div>
+              <div class="slider-control">
+                <div class="slider-header">
+                  <span class="slider-label" data-i18n="filmEdgeOverexposureStrength">Glow strength</span>
+                  <input type="number" class="slider-number-input" id="sprocketOverexposureStrengthInput" min="0" max="2" step="0.1" value="1">
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="control-group">
+            <div class="control-group-title"><span data-i18n="filmEdgeColor">Color</span></div>
+            <div class="control-group-grid">
+              <label class="film-edge-color-row">
+                <span class="slider-label" data-i18n="filmEdgeHoleColor">Sprocket holes</span>
+                <input type="color" class="film-edge-color-input" id="sprocketHoleColorInput" value="#ffffff">
+              </label>
+            </div>
+            <div class="control-group-grid two-up">
+              <label class="film-edge-color-row">
+                <span class="slider-label" data-i18n="filmEdgeLetteringColor">Markings</span>
+                <input type="color" class="film-edge-color-input" id="sprocketLetteringColorInput" value="#f2c252">
+              </label>
+              <label class="film-edge-color-row">
+                <span class="slider-label" data-i18n="filmEdgeGlowColor">Glow</span>
+                <input type="color" class="film-edge-color-input" id="sprocketGlowColorInput" value="#ed9c00">
+              </label>
+            </div>
+          </div>
         </div>
       </div>
 

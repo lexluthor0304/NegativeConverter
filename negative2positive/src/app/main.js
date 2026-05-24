@@ -21,8 +21,10 @@
       createImageDataCanvasBlobEncoder
     } from './canvasBlobEncoder.js';
     import {
+      DEFAULT_SPROCKET_EDGE_MARKINGS,
       composeSprocketFrame,
-      getSprocketFrameMetrics
+      getSprocketFrameMetrics,
+      normalizeSprocketEdgeMarkings
     } from './sprocketFrame.js';
     import { renderFileList } from './fileListView.js';
     import { loadLocalLensfunAssets } from './lensfunLoader.js';
@@ -116,9 +118,36 @@
         applyCrop: "应用裁剪/拉直",
 	        cancelCrop: "取消",
 	        autoFrame: "自动识别边框",
-	        autoFrameSelected: "批量自动识别",
-	        beforeAfter: "前后对比",
+        autoFrameSelected: "批量自动识别",
+        beforeAfter: "前后对比",
         sprocketPreview: "齿孔预览",
+        filmEdgeSettings: "胶片边码",
+        filmEdgeVisibility: "显示项目",
+        filmEdgeEnableText: "文字",
+        filmEdgeEnableFrameNumber: "帧编号",
+        filmEdgeEnableDx: "DX 边码",
+        filmEdgeEnableOverexposure: "过曝齿孔",
+        filmEdgeText: "边缘文字",
+        filmEdgeFrameNumber: "帧编号",
+        filmEdgeFrameNumberValue: "编号",
+        filmEdgeFrameNumberHole: "齿孔位置",
+        filmEdgeDxCode: "DX 边码",
+        filmEdgeDx1: "DX 1",
+        filmEdgeDx2: "DX 2",
+        filmEdgeGeometry: "齿孔位置",
+        filmEdgeHoleOffset: "齿孔偏移 mm",
+        filmEdgeOverexposureStrength: "过曝强度",
+        filmEdgeFont: "字体",
+        filmEdgeFontStyle: "样式",
+        filmEdgeFontFamily: "字体名",
+        filmEdgeFontMonoBold: "等宽粗体",
+        filmEdgeFontMono: "等宽",
+        filmEdgeFontSansBold: "无衬线粗体",
+        filmEdgeFontSerif: "衬线",
+        filmEdgeColor: "颜色",
+        filmEdgeHoleColor: "齿孔",
+        filmEdgeLetteringColor: "文字/边码",
+        filmEdgeGlowColor: "过曝晕染",
 	        convert: "下一步：胶片设置",
 	        convertPositive: "下一步：正片模式",
 	        histogram: "直方图",
@@ -491,9 +520,36 @@
         applyCrop: "Apply Crop/Straighten",
 	        cancelCrop: "Cancel",
 	        autoFrame: "Auto Frame",
-	        autoFrameSelected: "Auto Frame Selected",
-	        beforeAfter: "Before/After",
+        autoFrameSelected: "Auto Frame Selected",
+        beforeAfter: "Before/After",
         sprocketPreview: "Sprocket Preview",
+        filmEdgeSettings: "Film Edge",
+        filmEdgeVisibility: "Visible markings",
+        filmEdgeEnableText: "Text",
+        filmEdgeEnableFrameNumber: "Frame number",
+        filmEdgeEnableDx: "DX edge code",
+        filmEdgeEnableOverexposure: "Overexposed sprockets",
+        filmEdgeText: "Edge text",
+        filmEdgeFrameNumber: "Frame number",
+        filmEdgeFrameNumberValue: "Number",
+        filmEdgeFrameNumberHole: "Hole pos.",
+        filmEdgeDxCode: "DX code",
+        filmEdgeDx1: "DX 1",
+        filmEdgeDx2: "DX 2",
+        filmEdgeGeometry: "Geometry",
+        filmEdgeHoleOffset: "Hole offset mm",
+        filmEdgeOverexposureStrength: "Glow strength",
+        filmEdgeFont: "Font",
+        filmEdgeFontStyle: "Style",
+        filmEdgeFontFamily: "Family",
+        filmEdgeFontMonoBold: "Mono Bold",
+        filmEdgeFontMono: "Mono",
+        filmEdgeFontSansBold: "Sans Bold",
+        filmEdgeFontSerif: "Serif",
+        filmEdgeColor: "Color",
+        filmEdgeHoleColor: "Sprocket holes",
+        filmEdgeLetteringColor: "Markings",
+        filmEdgeGlowColor: "Glow",
 	        convert: "Next: Film Settings",
 	        convertPositive: "Next: Positive Mode",
 	        histogram: "Histogram",
@@ -866,9 +922,36 @@
         applyCrop: "トリミング/傾き補正を適用",
 	        cancelCrop: "キャンセル",
 	        autoFrame: "自動フレーム検出",
-	        autoFrameSelected: "選択画像を自動検出",
-	        beforeAfter: "ビフォー/アフター",
+        autoFrameSelected: "選択画像を自動検出",
+        beforeAfter: "ビフォー/アフター",
         sprocketPreview: "パーフォレーション表示",
+        filmEdgeSettings: "フィルム端表示",
+        filmEdgeVisibility: "表示項目",
+        filmEdgeEnableText: "文字",
+        filmEdgeEnableFrameNumber: "フレーム番号",
+        filmEdgeEnableDx: "DX エッジコード",
+        filmEdgeEnableOverexposure: "露光したパーフォレーション",
+        filmEdgeText: "端の文字",
+        filmEdgeFrameNumber: "フレーム番号",
+        filmEdgeFrameNumberValue: "番号",
+        filmEdgeFrameNumberHole: "穴位置",
+        filmEdgeDxCode: "DX コード",
+        filmEdgeDx1: "DX 1",
+        filmEdgeDx2: "DX 2",
+        filmEdgeGeometry: "位置",
+        filmEdgeHoleOffset: "穴オフセット mm",
+        filmEdgeOverexposureStrength: "にじみ強度",
+        filmEdgeFont: "フォント",
+        filmEdgeFontStyle: "スタイル",
+        filmEdgeFontFamily: "フォント名",
+        filmEdgeFontMonoBold: "等幅ボールド",
+        filmEdgeFontMono: "等幅",
+        filmEdgeFontSansBold: "サンセリフ太字",
+        filmEdgeFontSerif: "セリフ",
+        filmEdgeColor: "色",
+        filmEdgeHoleColor: "穴",
+        filmEdgeLetteringColor: "文字/コード",
+        filmEdgeGlowColor: "にじみ",
 	        convert: "次へ：フィルム設定",
 	        convertPositive: "次へ：ポジモード",
 	        histogram: "ヒストグラム",
@@ -1245,6 +1328,24 @@
     const CORE_ENHANCED_PROFILE_OPTIONS = new Set(['none', 'frontier', 'crystal', 'natural', 'pakon']);
     const CORE_COLOR_MODEL_OPTIONS = new Set(['frontier', 'standard', 'warm', 'mono', 'noritsu', 'cine-log', 'cine-rich', 'cine-flat', 'neutral']);
     const CORE_COLOR_MODEL_MIGRATION_MAP = Object.freeze({});
+    const SPROCKET_EDGE_CONTROL_IDS = Object.freeze({
+      textEnabled: 'sprocketTextEnabledInput',
+      frameNumberEnabled: 'sprocketFrameNumberEnabledInput',
+      dxEnabled: 'sprocketDxEnabledInput',
+      overexposedSprockets: 'sprocketOverexposureEnabledInput',
+      text: 'sprocketTextInput',
+      frameNumber: 'sprocketFrameNumberInput',
+      frameNumberHole: 'sprocketFrameNumberHoleInput',
+      firstHoleOffsetMm: 'sprocketFirstHoleOffsetInput',
+      dx1: 'sprocketDx1Input',
+      dx2: 'sprocketDx2Input',
+      overexposureStrength: 'sprocketOverexposureStrengthInput',
+      fontStyle: 'sprocketFontStyleSelect',
+      fontFamily: 'sprocketFontFamilyInput',
+      holeColor: 'sprocketHoleColorInput',
+      letteringColor: 'sprocketLetteringColorInput',
+      overexposureColor: 'sprocketGlowColorInput'
+    });
     const STEP3_GUIDE_COLLAPSED_SESSION_KEY = 'nc_step3_guide_collapsed_v2';
     const FRONTIER_GUIDE_POPUP_SESSION_KEY = 'nc_frontier_guide_popup_shown_v1';
     const PRIVACY_BANNER_COLLAPSED_STORAGE_KEY = 'nc_privacy_banner_collapsed_v1';
@@ -1269,6 +1370,40 @@
       searchFlags: 2,
       lastError: ''
     };
+
+    function rgbaToHex(color, fallback = '#ffffff') {
+      if (!Array.isArray(color) && !ArrayBuffer.isView(color)) return fallback;
+      const toHex = (value) => {
+        const n = Math.max(0, Math.min(255, Math.round(Number(value) || 0)));
+        return n.toString(16).padStart(2, '0');
+      };
+      return `#${toHex(color[0])}${toHex(color[1])}${toHex(color[2])}`;
+    }
+
+    function createSprocketEdgeSettings(input = {}) {
+      const normalized = normalizeSprocketEdgeMarkings({
+        ...DEFAULT_SPROCKET_EDGE_MARKINGS,
+        ...input
+      });
+      return {
+        textEnabled: normalized.textEnabled,
+        text: normalized.text,
+        frameNumberEnabled: normalized.frameNumberEnabled,
+        frameNumber: normalized.frameNumber,
+        frameNumberHole: normalized.frameNumberHole,
+        firstHoleOffsetMm: normalized.firstHoleOffsetMm,
+        dxEnabled: normalized.dxEnabled,
+        dx1: normalized.dx1,
+        dx2: normalized.dx2,
+        overexposedSprockets: normalized.overexposedSprockets,
+        overexposureStrength: normalized.overexposureStrength,
+        fontStyle: normalized.fontStyle,
+        fontFamily: normalized.fontFamily,
+        holeColor: rgbaToHex(normalized.holeColor, DEFAULT_SPROCKET_EDGE_MARKINGS.holeColor),
+        letteringColor: rgbaToHex(normalized.letteringColor, DEFAULT_SPROCKET_EDGE_MARKINGS.letteringColor),
+        overexposureColor: rgbaToHex(normalized.overexposureColor, DEFAULT_SPROCKET_EDGE_MARKINGS.overexposureColor)
+      };
+    }
 
     let currentLang = 'en';
     let guideModeEnabled = true;
@@ -2735,6 +2870,7 @@
       jpegQuality: 92,      // 1-100
       sprocketPreviewEnabled: false,
       exportSprocketHolesEnabled: false,
+      sprocketEdge: createSprocketEdgeSettings(),
 
       // Render state
       lastRenderQuality: 'full', // 'full' | 'preview' | 'gl'
@@ -3037,6 +3173,7 @@
         brushSize: state.dustRemoval.brushSize,
         showMask: state.dustRemoval.showMask,
       };
+      settings.sprocketEdge = createSprocketEdgeSettings(state.sprocketEdge);
 
       // Category B: references
       const refs = {};
@@ -3083,6 +3220,7 @@
       state.dustRemoval.strength = s.dustRemoval.strength;
       state.dustRemoval.brushSize = s.dustRemoval.brushSize;
       state.dustRemoval.showMask = s.dustRemoval.showMask;
+      state.sprocketEdge = createSprocketEdgeSettings(s.sprocketEdge);
 
       // Restore Category B refs
       const r = snapshot.refs;
@@ -3601,6 +3739,97 @@
         exportSprocketBtn.classList.toggle('active', Boolean(state.exportSprocketHolesEnabled));
         exportSprocketBtn.setAttribute('aria-pressed', state.exportSprocketHolesEnabled ? 'true' : 'false');
       }
+
+      const sprocketSettingsSection = document.getElementById('sprocketSettingsSection');
+      if (sprocketSettingsSection) {
+        sprocketSettingsSection.style.display = (
+          state.originalImageData || state.croppedImageData || state.processedImageData
+        ) ? 'block' : 'none';
+      }
+      syncSprocketEdgeSettingsUI();
+    }
+
+    function getSprocketFrameComposeOptions() {
+      return {
+        edgeMarkings: state.sprocketEdge
+      };
+    }
+
+    function syncSprocketEdgeSettingsUI() {
+      const settings = createSprocketEdgeSettings(state.sprocketEdge);
+      const setChecked = (key, value) => {
+        const el = document.getElementById(SPROCKET_EDGE_CONTROL_IDS[key]);
+        if (el) el.checked = Boolean(value);
+      };
+      const setValue = (key, value) => {
+        const el = document.getElementById(SPROCKET_EDGE_CONTROL_IDS[key]);
+        if (el && document.activeElement !== el) el.value = value;
+      };
+
+      setChecked('textEnabled', settings.textEnabled);
+      setChecked('frameNumberEnabled', settings.frameNumberEnabled);
+      setChecked('dxEnabled', settings.dxEnabled);
+      setChecked('overexposedSprockets', settings.overexposedSprockets);
+      setValue('text', settings.text);
+      setValue('frameNumber', settings.frameNumber);
+      setValue('frameNumberHole', settings.frameNumberHole);
+      setValue('firstHoleOffsetMm', settings.firstHoleOffsetMm);
+      setValue('dx1', settings.dx1);
+      setValue('dx2', settings.dx2);
+      setValue('overexposureStrength', settings.overexposureStrength);
+      setValue('fontStyle', settings.fontStyle);
+      setValue('fontFamily', settings.fontFamily);
+      setValue('holeColor', settings.holeColor);
+      setValue('letteringColor', settings.letteringColor);
+      setValue('overexposureColor', settings.overexposureColor);
+    }
+
+    function readSprocketEdgeSettingsFromUI() {
+      const getEl = (key) => document.getElementById(SPROCKET_EDGE_CONTROL_IDS[key]);
+      const getChecked = (key) => Boolean(getEl(key)?.checked);
+      const getValue = (key, fallback = '') => {
+        const el = getEl(key);
+        return el ? el.value : fallback;
+      };
+      return createSprocketEdgeSettings({
+        textEnabled: getChecked('textEnabled'),
+        frameNumberEnabled: getChecked('frameNumberEnabled'),
+        dxEnabled: getChecked('dxEnabled'),
+        overexposedSprockets: getChecked('overexposedSprockets'),
+        text: getValue('text', DEFAULT_SPROCKET_EDGE_MARKINGS.text),
+        frameNumber: getValue('frameNumber', DEFAULT_SPROCKET_EDGE_MARKINGS.frameNumber),
+        frameNumberHole: getValue('frameNumberHole', DEFAULT_SPROCKET_EDGE_MARKINGS.frameNumberHole),
+        firstHoleOffsetMm: getValue('firstHoleOffsetMm', DEFAULT_SPROCKET_EDGE_MARKINGS.firstHoleOffsetMm),
+        dx1: getValue('dx1', DEFAULT_SPROCKET_EDGE_MARKINGS.dx1),
+        dx2: getValue('dx2', DEFAULT_SPROCKET_EDGE_MARKINGS.dx2),
+        overexposureStrength: getValue('overexposureStrength', DEFAULT_SPROCKET_EDGE_MARKINGS.overexposureStrength),
+        fontStyle: getValue('fontStyle', DEFAULT_SPROCKET_EDGE_MARKINGS.fontStyle),
+        fontFamily: getValue('fontFamily', DEFAULT_SPROCKET_EDGE_MARKINGS.fontFamily),
+        holeColor: getValue('holeColor', DEFAULT_SPROCKET_EDGE_MARKINGS.holeColor),
+        letteringColor: getValue('letteringColor', DEFAULT_SPROCKET_EDGE_MARKINGS.letteringColor),
+        overexposureColor: getValue('overexposureColor', DEFAULT_SPROCKET_EDGE_MARKINGS.overexposureColor)
+      });
+    }
+
+    function refreshSprocketPreviewAfterSettingsChange() {
+      updateSprocketControlsUI();
+      if (!state.sprocketPreviewEnabled) return;
+
+      if (state.currentStep >= 3 && state.processedImageData) {
+        updatePreview();
+        return;
+      }
+
+      const sourceData = state.croppedImageData || state.originalImageData;
+      if (sourceData) {
+        displayNegative(sourceData);
+        renderHistogram(sourceData);
+      }
+    }
+
+    function handleSprocketEdgeSettingsChange() {
+      state.sprocketEdge = readSprocketEdgeSettingsFromUI();
+      refreshSprocketPreviewAfterSettingsChange();
     }
 
     function setSprocketPreviewEnabled(enabled, options = {}) {
@@ -3647,8 +3876,9 @@
 
     function renderAdjustedImageDataToMainCanvas(imageData, fullSizeReference = imageData) {
       if (state.sprocketPreviewEnabled && !state.cropping) {
-        const frameMetrics = getSprocketFrameMetrics(fullSizeReference.width, fullSizeReference.height);
-        const framed = composeSprocketFrame(imageData);
+        const composeOptions = getSprocketFrameComposeOptions();
+        const frameMetrics = getSprocketFrameMetrics(fullSizeReference.width, fullSizeReference.height, composeOptions);
+        const framed = composeSprocketFrame(imageData, composeOptions);
         setMainCanvasDimensions(frameMetrics.outputWidth, frameMetrics.outputHeight);
         drawImageDataToMainCanvas(framed, frameMetrics.outputWidth, frameMetrics.outputHeight);
         return;
@@ -7965,6 +8195,18 @@
       });
     }
 
+    Object.values(SPROCKET_EDGE_CONTROL_IDS).forEach((id) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      const eventName = (
+        el.tagName === 'SELECT'
+        || el.type === 'checkbox'
+        || el.type === 'color'
+      ) ? 'change' : 'input';
+      el.addEventListener(eventName, handleSprocketEdgeSettingsChange);
+    });
+    syncSprocketEdgeSettingsUI();
+
     document.addEventListener('keydown', (event) => {
       if (event.code !== 'Space' || event.repeat) return;
       if (isEditableTarget(event.target)) return;
@@ -9402,7 +9644,7 @@
 
     function applySprocketFrameForExport(imageData, exportInfo) {
       if (!state.exportSprocketHolesEnabled) return imageData;
-      return composeSprocketFrame(imageData);
+      return composeSprocketFrame(imageData, getSprocketFrameComposeOptions());
     }
 
     async function getCurrentExportImageData() {
