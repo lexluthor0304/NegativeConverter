@@ -3,6 +3,19 @@ const DEFAULT_HOLE_COLOR = [255, 255, 255, 255];
 const DEFAULT_MARKING_COLOR = [242, 194, 82, 255];
 const DEFAULT_OVEREXPOSURE_COLOR = [237, 156, 0, 255];
 
+// 35mm still-film proportions: 34.98mm film width, 24x36mm image gate,
+// eight perforations per still frame, and KS/BH-style sprocket dimensions.
+export const THIRTY_FIVE_MM_SPROCKET_SPEC = Object.freeze({
+  filmWidthMm: 34.98,
+  stillFrameWidthMm: 36,
+  stillFrameHeightMm: 24,
+  perforationsPerStillFrame: 8,
+  perforationPitchMm: 4.75,
+  perforationWidthMm: 1.98,
+  perforationHeightMm: 2.80,
+  perforationOuterMarginMm: 2.00
+});
+
 export const DEFAULT_SPROCKET_EDGE_MARKINGS = Object.freeze({
   textEnabled: false,
   text: 'GC 400-8 KODAK',
@@ -147,55 +160,59 @@ export function getSprocketFrameMetrics(width, height, options = {}) {
   const sourceHeight = Math.max(1, Math.round(Number(height) || 1));
   const shortSide = Math.min(sourceWidth, sourceHeight);
   const showMarkings = hasVisibleEdgeMarkings(edge);
-  const sideMargin = clamp(Math.round(sourceWidth * 0.028), 8, Math.max(8, Math.round(shortSide * 0.08)));
-  const bandRatio = showMarkings ? 0.24 : 0.12;
-  const bandMaxRatio = showMarkings ? 0.36 : 0.2;
+  const spec = THIRTY_FIVE_MM_SPROCKET_SPEC;
+  const imagePxPerMmX = sourceWidth / spec.stillFrameWidthMm;
+  const filmEdgeBandMm = (spec.filmWidthMm - spec.stillFrameHeightMm) / 2;
+  const physicalBandHeight = Math.round(sourceHeight * filmEdgeBandMm / spec.stillFrameHeightMm);
+  const sideMargin = clamp(
+    Math.round(imagePxPerMmX * 1.0),
+    8,
+    Math.max(8, Math.round(shortSide * 0.08))
+  );
   const bandMin = showMarkings ? 36 : 18;
   const bandHeight = clamp(
-    Math.round(sourceHeight * bandRatio),
+    physicalBandHeight,
     bandMin,
-    Math.max(bandMin, Math.round(sourceHeight * bandMaxRatio))
+    Math.max(bandMin, Math.round(sourceHeight * 0.36))
   );
-  const holeRatio = showMarkings ? 0.34 : 0.58;
-  const holeHeight = clamp(Math.round(bandHeight * holeRatio), 10, Math.max(10, bandHeight - (showMarkings ? 18 : 8)));
-  const holeWidth = Math.max(8, Math.round(holeHeight * 0.72));
+  const filmEdgePxPerMmY = bandHeight / filmEdgeBandMm;
+  const mm = Math.max(1, (imagePxPerMmX + filmEdgePxPerMmY) / 2);
+  const edgeGap = Math.max(2, Math.round(filmEdgePxPerMmY * 0.18));
+  const holeWidth = Math.max(8, Math.round(spec.perforationWidthMm * imagePxPerMmX));
+  const holeHeight = clamp(
+    Math.round(spec.perforationHeightMm * filmEdgePxPerMmY),
+    10,
+    Math.max(10, bandHeight - edgeGap * 2)
+  );
   const holeRadius = Math.max(2, Math.round(holeHeight * 0.18));
   const outputWidth = sourceWidth + sideMargin * 2;
   const outputHeight = sourceHeight + bandHeight * 2;
-  const mm = Math.max(1, outputHeight / 35);
-  const edgeTextPixelSize = Math.max(7, Math.round(mm * 1.0));
+  const edgeTextPixelSize = Math.max(7, Math.round(filmEdgePxPerMmY * 0.78));
   const edgeTextHeight = Math.max(1, Math.ceil(edgeTextPixelSize * 1.35));
-  const dxBlockHeight = Math.max(1, Math.round(mm * 0.52));
+  const dxBlockHeight = Math.max(1, Math.round(filmEdgePxPerMmY * 0.36));
   const dxCodeHeight = dxBlockHeight * 2;
-  const edgeGap = Math.max(2, Math.round(mm * 0.16));
-  const pitch = Math.max(holeWidth + 8, Math.round(showMarkings ? mm * 4.75 : holeHeight * 1.7));
-  const availableWidth = Math.max(holeWidth, outputWidth - sideMargin);
-  const holeCount = Math.max(2, Math.floor((availableWidth + pitch - holeWidth) / pitch));
+  const pitch = Math.max(holeWidth + edgeGap * 2, Math.round(spec.perforationPitchMm * imagePxPerMmX));
+  const holeCount = spec.perforationsPerStillFrame;
   const span = (holeCount - 1) * pitch + holeWidth;
-  const firstHoleOffsetPx = Math.round(edge.firstHoleOffsetMm * mm);
+  const firstHoleOffsetPx = Math.round(edge.firstHoleOffsetMm * imagePxPerMmX);
   const startX = Math.round((outputWidth - span) / 2 + firstHoleOffsetPx);
-  const topTextY = showMarkings ? edgeGap : 0;
-  const topMarkingY = showMarkings ? edgeGap : 0;
-  const topY = showMarkings
-    ? clamp(
-      Math.max(
-        Math.round(bandHeight * 0.42),
-        Math.max(topTextY, topMarkingY) + edgeTextHeight + edgeGap
-      ),
-      0,
-      Math.max(0, bandHeight - holeHeight - edgeGap)
-    )
-    : Math.round((bandHeight - holeHeight) / 2);
+  const outerPerfMargin = clamp(
+    Math.round(spec.perforationOuterMarginMm * filmEdgePxPerMmY),
+    edgeGap,
+    Math.max(edgeGap, bandHeight - holeHeight - edgeGap)
+  );
+  const topY = outerPerfMargin;
+  const topTextY = showMarkings ? Math.max(0, Math.floor((topY - edgeTextHeight - edgeGap) / 2)) : 0;
+  const topMarkingY = topTextY;
   const bottomBandTop = bandHeight + sourceHeight;
-  const bottomY = bottomBandTop + (showMarkings ? edgeGap : topY);
+  const bottomY = bottomBandTop + bandHeight - outerPerfMargin - holeHeight;
+  const bottomOuterTop = bottomY + holeHeight;
+  const bottomOuterHeight = Math.max(edgeGap, outputHeight - bottomOuterTop);
   const bottomDxY = showMarkings
-    ? bottomY + holeHeight + edgeGap
+    ? bottomOuterTop + Math.max(0, Math.floor((bottomOuterHeight - dxCodeHeight - edgeGap) / 2))
     : 0;
   const bottomMarkingY = showMarkings
-    ? Math.min(
-      outputHeight - edgeTextHeight - edgeGap,
-      bottomDxY + dxCodeHeight + edgeGap
-    )
+    ? bottomOuterTop + Math.max(0, Math.floor((bottomOuterHeight - edgeTextHeight - edgeGap) / 2))
     : 0;
 
   return {
@@ -222,6 +239,10 @@ export function getSprocketFrameMetrics(width, height, options = {}) {
     edgeTextHeight,
     dxCodeHeight,
     edgeGap,
+    filmEdgePxPerMmY,
+    imagePxPerMmX,
+    bottomOuterTop,
+    bottomOuterHeight,
     mm,
     showMarkings
   };
@@ -289,9 +310,7 @@ function paintSprocketHole(data, metrics, left, top, fill) {
 }
 
 function forEachSprocketHole(metrics, callback) {
-  const firstIndex = Math.floor((-metrics.startX - metrics.holeWidth) / metrics.pitch);
-  const lastIndex = Math.ceil((metrics.outputWidth - metrics.startX) / metrics.pitch);
-  for (let i = firstIndex; i <= lastIndex; i++) {
+  for (let i = 0; i < metrics.holeCount; i++) {
     const left = metrics.startX + i * metrics.pitch;
     callback(left, metrics.topY, i);
     callback(left, metrics.bottomY, i);
@@ -522,11 +541,11 @@ export function buildDxEdgeCodeBlocks(options = {}) {
 }
 
 function paintDxEdgeCode(data, metrics, edge) {
-  const blockWidth = Math.max(1, Math.round(metrics.mm * 0.42));
-  const blockHeight = Math.max(1, Math.round(metrics.mm * 0.52));
+  const blockWidth = Math.max(1, Math.round(metrics.imagePxPerMmX * 0.42));
+  const blockHeight = Math.max(1, Math.round(metrics.filmEdgePxPerMmY * 0.36));
   const codeWidth = blockWidth * 31;
   const frameLabelWidth = edge.frameNumberEnabled
-    ? Math.max(metrics.mm * 2.2, measureBitmapText(String(edge.frameNumber).padStart(2, '0'), Math.max(1, Math.round(metrics.mm * 1.0 / 7))))
+    ? Math.max(metrics.imagePxPerMmX * 2.2, measureBitmapText(String(edge.frameNumber).padStart(2, '0'), Math.max(1, Math.round(metrics.edgeTextPixelSize / 7))))
     : 0;
   const frameLabelCenter = edge.frameNumberEnabled
     ? clamp(
@@ -540,14 +559,11 @@ function paintDxEdgeCode(data, metrics, edge) {
   const margin = Math.max(2, Math.round(metrics.mm * 0.35));
   const leftCandidate = Math.round(metrics.sideMargin + metrics.mm * 1.2);
   const rightCandidate = Math.round(metrics.outputWidth - codeWidth - metrics.sideMargin - metrics.mm * 1.2);
-  const overlapsLeft = edge.frameNumberEnabled
-    && leftCandidate < avoidRight
-    && (leftCandidate + codeWidth) > avoidLeft;
-  const overlapsRight = edge.frameNumberEnabled
-    && rightCandidate < avoidRight
-    && (rightCandidate + codeWidth) > avoidLeft;
+  const overlapAmount = (left) => Math.max(0, Math.min(left + codeWidth, avoidRight) - Math.max(left, avoidLeft));
+  const leftOverlap = edge.frameNumberEnabled ? overlapAmount(leftCandidate) : 0;
+  const rightOverlap = edge.frameNumberEnabled ? overlapAmount(rightCandidate) : 0;
   const left = clamp(
-    overlapsLeft && !overlapsRight ? rightCandidate : leftCandidate,
+    rightOverlap < leftOverlap ? rightCandidate : leftCandidate,
     margin,
     Math.max(margin, metrics.outputWidth - codeWidth - margin)
   );

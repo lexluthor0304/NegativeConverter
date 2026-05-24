@@ -4,6 +4,7 @@
 import assert from 'node:assert/strict';
 import {
   DEFAULT_SPROCKET_EDGE_MARKINGS,
+  THIRTY_FIVE_MM_SPROCKET_SPEC,
   buildDxEdgeCodeBlocks,
   composeSprocketFrame,
   getSprocketFrameMetrics,
@@ -42,8 +43,12 @@ assert.deepEqual(Array.from(framed.data.slice(firstPhotoPixel, firstPhotoPixel +
 const filmPixel = 0;
 assert.deepEqual(Array.from(framed.data.slice(filmPixel, filmPixel + 4)), [6, 6, 6, 255]);
 
+let visibleHoleLeft = metrics.startX;
+for (let i = 0; i < metrics.holeCount && visibleHoleLeft + metrics.holeWidth <= 0; i++) {
+  visibleHoleLeft += metrics.pitch;
+}
 const topHoleCenter = ((metrics.topY + Math.floor(metrics.holeHeight / 2)) * framed.width
-  + metrics.startX + Math.floor(metrics.holeWidth / 2)) * 4;
+  + visibleHoleLeft + Math.floor(metrics.holeWidth / 2)) * 4;
 assert.deepEqual(Array.from(framed.data.slice(topHoleCenter, topHoleCenter + 4)), [255, 255, 255, 255]);
 
 const opaqueHoles = composeSprocketFrame(source, { transparentHoles: false, holeColor: [240, 230, 210, 255] });
@@ -81,10 +86,14 @@ const assertEdgeLayoutDoesNotOverlapHoles = (layoutMetrics) => {
   const bottomHoleBottom = layoutMetrics.bottomY + layoutMetrics.holeHeight;
   const bottomDxBottom = layoutMetrics.bottomDxY + layoutMetrics.dxCodeHeight;
   const bottomFrameBottom = layoutMetrics.bottomMarkingY + layoutMetrics.edgeTextHeight;
+  const bottomGap = layoutMetrics.bottomOuterHeight >= layoutMetrics.edgeTextHeight + layoutMetrics.edgeGap * 2
+    ? layoutMetrics.edgeGap
+    : 0;
 
   assert.ok(topTextBottom + layoutMetrics.edgeGap <= layoutMetrics.topY);
   assert.ok(bottomHoleBottom + layoutMetrics.edgeGap <= layoutMetrics.bottomDxY);
-  assert.ok(bottomDxBottom + layoutMetrics.edgeGap <= layoutMetrics.bottomMarkingY);
+  assert.ok(bottomHoleBottom + bottomGap <= layoutMetrics.bottomMarkingY);
+  assert.ok(bottomDxBottom <= layoutMetrics.outputHeight);
   assert.ok(bottomFrameBottom + layoutMetrics.edgeGap <= layoutMetrics.outputHeight);
 };
 
@@ -102,6 +111,30 @@ assertEdgeLayoutDoesNotOverlapHoles(getSprocketFrameMetrics(360, 240, {
   }
 }));
 
+const thirtyFiveMetrics = getSprocketFrameMetrics(360, 240, {
+  edgeMarkings: {
+    textEnabled: true,
+    frameNumberEnabled: true,
+    frameNumber: 18,
+    frameNumberHole: 2,
+    dxEnabled: true
+  }
+});
+const approxEqual = (actual, expected, tolerance, label) => {
+  assert.ok(Math.abs(actual - expected) <= tolerance, `${label}: ${actual} != ${expected}`);
+};
+approxEqual(
+  thirtyFiveMetrics.bandHeight / 240,
+  ((THIRTY_FIVE_MM_SPROCKET_SPEC.filmWidthMm - THIRTY_FIVE_MM_SPROCKET_SPEC.stillFrameHeightMm) / 2)
+    / THIRTY_FIVE_MM_SPROCKET_SPEC.stillFrameHeightMm,
+  0.01,
+  '35mm edge band ratio'
+);
+assert.equal(thirtyFiveMetrics.holeCount, THIRTY_FIVE_MM_SPROCKET_SPEC.perforationsPerStillFrame);
+approxEqual(thirtyFiveMetrics.pitch / thirtyFiveMetrics.imagePxPerMmX, THIRTY_FIVE_MM_SPROCKET_SPEC.perforationPitchMm, 0.08, '35mm perforation pitch');
+approxEqual(thirtyFiveMetrics.holeWidth / thirtyFiveMetrics.imagePxPerMmX, THIRTY_FIVE_MM_SPROCKET_SPEC.perforationWidthMm, 0.08, '35mm perforation width');
+approxEqual(thirtyFiveMetrics.holeHeight / thirtyFiveMetrics.filmEdgePxPerMmY, THIRTY_FIVE_MM_SPROCKET_SPEC.perforationHeightMm, 0.08, '35mm perforation height');
+
 const hasMarkingColor = (() => {
   for (let i = 0; i < marked.data.length; i += 4) {
     if (marked.data[i] === 242 && marked.data[i + 1] === 194 && marked.data[i + 2] === 82) {
@@ -112,10 +145,11 @@ const hasMarkingColor = (() => {
 })();
 assert.equal(hasMarkingColor, true);
 
-const shiftedMetrics = getSprocketFrameMetrics(source.width, source.height, {
+const shiftedBaseMetrics = getSprocketFrameMetrics(360, 240);
+const shiftedMetrics = getSprocketFrameMetrics(360, 240, {
   edgeMarkings: { firstHoleOffsetMm: 1 }
 });
-assert.notEqual(shiftedMetrics.startX, metrics.startX);
+assert.notEqual(shiftedMetrics.startX, shiftedBaseMetrics.startX);
 
 const normalized = normalizeSprocketEdgeMarkings({
   frameNumber: 999,
