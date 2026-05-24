@@ -32,6 +32,12 @@ export default defineConfig({
       input: {
         main: resolve(__dirname, 'index.html'),
         guide: resolve(__dirname, 'guide.html'),
+        rawNegativeConverter: resolve(__dirname, 'raw-negative-converter.html'),
+        iphoneProrawNegativeConverter: resolve(__dirname, 'iphone-proraw-negative-converter.html'),
+        negativeLabProAlternative: resolve(__dirname, 'negative-lab-pro-alternative.html'),
+        batchFilmNegativeConverter: resolve(__dirname, 'batch-film-negative-converter.html'),
+        filmOrangeMask: resolve(__dirname, 'film-orange-mask.html'),
+        filmBorderSprocketHoles: resolve(__dirname, '35mm-film-border-sprocket-holes.html'),
         privacy: resolve(__dirname, 'privacy.html'),
         download: resolve(__dirname, 'download.html'),
       },
