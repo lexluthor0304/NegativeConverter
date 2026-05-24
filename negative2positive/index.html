@@ -194,6 +194,24 @@
       white-space: nowrap;
     }
 
+    .header-site-links {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 11px;
+      white-space: nowrap;
+    }
+
+    .header-site-links a {
+      color: var(--text-secondary);
+      text-decoration: none;
+    }
+
+    .header-site-links a:hover {
+      color: var(--text-primary);
+      text-decoration: underline;
+    }
+
     .lang-selector {
       display: flex;
       gap: 4px;
@@ -831,6 +849,39 @@
       width: 64px;
       height: 64px;
       opacity: 0.5;
+    }
+
+    .upload-seo-summary {
+      max-width: min(620px, calc(100vw - 64px));
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      color: var(--text-secondary);
+      text-align: center;
+      line-height: 1.5;
+      font-size: 13px;
+    }
+
+    .upload-seo-summary strong {
+      color: var(--text-primary);
+      font-weight: 600;
+    }
+
+    .upload-seo-links {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 10px;
+      font-size: 12px;
+    }
+
+    .upload-seo-links a {
+      color: var(--accent-hover);
+      text-decoration: none;
+    }
+
+    .upload-seo-links a:hover {
+      text-decoration: underline;
     }
 
     .upload-btn {
@@ -2907,6 +2958,10 @@
       .header-copyright {
         display: none;
       }
+
+      .header-site-links {
+        display: none;
+      }
     }
 
     @media (max-width: 600px) {
@@ -2972,8 +3027,13 @@
     <div class="header-left">
       <h1 class="app-title" data-i18n="title">Negative Converter</h1>
       <span class="build-badge" id="buildBadge" style="display: none;"></span>
+      <nav class="header-site-links" aria-label="Site links">
+        <a href="./guide.html">Guide</a>
+        <a href="./raw-negative-converter.html">RAW guide</a>
+        <a href="./download.html">Desktop</a>
+      </nav>
       <span class="header-copyright">
-        © 2025 <a href="https://neoanaloglab.com" target="_blank">neoanaloglab.com</a>
+        © <span id="copyrightYear">2026</span> <a href="https://neoanaloglab.com" target="_blank">neoanaloglab.com</a>
         <span class="github-link">
           <iframe
             src="https://ghbtns.com/github-btn.html?user=lexluthor0304&repo=NegativeConverter&type=star&count=true&size=small"
@@ -3062,6 +3122,18 @@
           <input type="file" id="fileInput" class="hidden-file-input" accept=".cr2,.cr3,.crw,.nef,.nrw,.arw,.dng,.raf,.raw,.rw2,.pef,.srw,.3fr,.mef,.orf,.rwl,.iiq,.x3f,.mrw,.kdc,.dcr,.tif,.tiff,image/*" multiple>
           <input type="file" id="folderInput" class="hidden-file-input" accept=".cr2,.cr3,.crw,.nef,.nrw,.arw,.dng,.raf,.raw,.rw2,.pef,.srw,.3fr,.mef,.orf,.rwl,.iiq,.x3f,.mrw,.kdc,.dcr,.tif,.tiff,image/*" webkitdirectory directory multiple>
           <div class="upload-support-hint" id="folderPickerHint" data-i18n="folderPickerUnsupported">Folder selection is not supported in this browser. Please use Select File.</div>
+          <div class="upload-seo-summary" aria-label="Negative Converter overview">
+            <p>
+              <strong>Free online film negative converter.</strong>
+              Convert scanned film negatives to positives in your browser with local processing, no uploads, no signup, and no watermark. Supports JPG, 16-bit PNG, CR2, NEF, ARW, DNG, RW2, and iPhone ProRaw.
+            </p>
+            <div class="upload-seo-links">
+              <a href="./guide.html">How to convert film negatives</a>
+              <a href="./raw-negative-converter.html">RAW negative converter</a>
+              <a href="./negative-lab-pro-alternative.html">Negative Lab Pro alternative</a>
+              <a href="./film-orange-mask.html">Orange mask guide</a>
+            </div>
+          </div>
         </div>
         <div class="canvas-transform-wrapper" id="canvasTransformWrapper">
           <canvas id="canvas" style="display: none;"></canvas>
@@ -4017,6 +4089,9 @@
   </div>
 
   <div id="toastContainer"></div>
+  <script>
+    document.getElementById('copyrightYear').textContent = new Date().getFullYear();
+  </script>
   <script type="module" src="./src/app/main.js"></script>
 </body>
 </html>

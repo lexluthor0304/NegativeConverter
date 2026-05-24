@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Film Orange Mask Removal | Convert Color Negatives Correctly</title>
+  <meta name="description" content="Learn what the orange mask in color negative film is, why simple inversion looks wrong, and how Negative Converter removes the mask locally in the browser.">
+  <meta name="robots" content="index, follow, max-image-preview:large">
+  <link rel="canonical" href="https://negative-converter.tokugai.com/film-orange-mask.html">
+  <link rel="stylesheet" href="/seo-content.css">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Negative Converter">
+  <meta property="og:title" content="Film Orange Mask Removal">
+  <meta property="og:description" content="Why color negative film has an orange mask and how to remove it during negative conversion.">
+  <meta property="og:url" content="https://negative-converter.tokugai.com/film-orange-mask.html">
+  <meta property="og:image" content="https://negative-converter.tokugai.com/og-cover.png">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "Article",
+        "@id": "https://negative-converter.tokugai.com/film-orange-mask.html#article",
+        "headline": "Film Orange Mask Removal",
+        "description": "What the color negative orange mask is and how to correct it when converting film negatives to positives.",
+        "datePublished": "2026-05-24",
+        "dateModified": "2026-05-24",
+        "author": { "@type": "Organization", "name": "NegativeConverter" },
+        "publisher": { "@type": "Organization", "name": "NegativeConverter", "url": "https://negative-converter.tokugai.com/" },
+        "image": "https://negative-converter.tokugai.com/og-cover.png",
+        "mainEntityOfPage": "https://negative-converter.tokugai.com/film-orange-mask.html",
+        "isAccessibleForFree": true
+      },
+      {
+        "@type": "FAQPage",
+        "@id": "https://negative-converter.tokugai.com/film-orange-mask.html#faq",
+        "mainEntity": [
+          {
+            "@type": "Question",
+            "name": "Why do color negatives look orange?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Most color negative films include an orange mask in the film base. It helps the film printing process, but scanned negatives need that mask neutralized before the image looks natural."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Why does simple invert look blue or cyan?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Simple inversion flips the orange base into a strong blue or cyan cast. A negative converter needs a mask baseline and color correction, not only a pixel inversion."
+            }
+          }
+        ]
+      }
+    ]
+  }
+  </script>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="/">Negative<span>Converter</span></a>
+    <nav>
+      <a href="/guide.html">Guide</a>
+      <a href="/raw-negative-converter.html">RAW</a>
+      <a href="/download.html">Desktop</a>
+      <a class="cta" href="/">Open App</a>
+    </nav>
+  </header>
+  <main>
+    <article>
+      <section class="hero">
+        <div class="eyebrow">Color negative basics</div>
+        <h1>Remove the orange mask from color negative film scans.</h1>
+        <p class="lead">A color negative is not just an inverted photo. The orange film base has to be measured and neutralized before the scan can look like a natural positive image.</p>
+        <div class="cta-row">
+          <a class="btn primary" href="/">Open the converter</a>
+          <a class="btn ghost" href="/guide.html">Full negative conversion guide</a>
+        </div>
+      </section>
+
+      <section>
+        <h2>What is the orange mask?</h2>
+        <div class="answer-box">
+          <p>The orange mask is the warm-colored base found in most color negative film. When a scan is simply inverted, that orange base becomes a strong blue or cyan cast. Correct negative conversion first estimates the mask baseline, then balances the image around it.</p>
+        </div>
+        <p>The exact mask color changes with film stock, exposure, scanner light, camera white balance, and development. That is why one fixed inversion formula rarely works across every roll.</p>
+      </section>
+
+      <section>
+        <h2>How Negative Converter corrects the mask</h2>
+        <ol>
+          <li>Crop to the effective film frame and keep unexposed border if available.</li>
+          <li>Choose Color Negative mode.</li>
+          <li>Sample the orange border manually, use auto mask detection, or reuse a roll reference.</li>
+          <li>Convert the frame, then sample a neutral gray point if the positive still has a cast.</li>
+          <li>Use temperature, tint, saturation, vibrance, and CMY controls to finish the look.</li>
+        </ol>
+      </section>
+
+      <section>
+        <h2>Manual mask sampling vs auto detection</h2>
+        <table>
+          <thead>
+            <tr><th>Method</th><th>Best for</th><th>Tradeoff</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Manual border sample</td><td>Scans with visible unexposed film border</td><td>Most stable when the border is clean and evenly lit</td></tr>
+            <tr><td>Auto mask detection</td><td>Borderless scans or holders that hide the film base</td><td>Faster, but can be less stable on unusual scenes</td></tr>
+            <tr><td>Roll reference</td><td>Whole-roll processing with consistent scan light</td><td>Works best when frames share the same stock and setup</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section>
+        <h2>Related guides</h2>
+        <div class="link-grid">
+          <a class="link-card" href="/batch-film-negative-converter.html"><strong>Batch roll conversion</strong><span>Reuse a stable mask baseline across frames.</span></a>
+          <a class="link-card" href="/raw-negative-converter.html"><strong>RAW negative converter</strong><span>Use RAW files for more tonal headroom.</span></a>
+          <a class="link-card" href="/negative-lab-pro-alternative.html"><strong>Free standalone alternative</strong><span>Convert negatives without a Lightroom plugin.</span></a>
+        </div>
+      </section>
+    </article>
+  </main>
+  <footer class="site-footer">Negative Converter processes color mask correction locally in the browser.</footer>
+</body>
+</html>
