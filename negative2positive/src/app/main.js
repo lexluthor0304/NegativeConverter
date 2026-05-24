@@ -124,6 +124,7 @@
         filmEdgeEnableText: "文字",
         filmEdgeEnableFrameNumber: "帧编号",
         filmEdgeEnableDx: "DX 边码",
+        filmEdgeEnableHalfFrame: "半帧 A/三角",
         filmEdgeEnableOverexposure: "过曝齿孔",
         filmEdgeText: "边缘文字",
         filmEdgeFrameNumber: "帧编号",
@@ -524,6 +525,7 @@
         filmEdgeEnableText: "Text",
         filmEdgeEnableFrameNumber: "Frame number",
         filmEdgeEnableDx: "DX edge code",
+        filmEdgeEnableHalfFrame: "Half-frame A/triangle",
         filmEdgeEnableOverexposure: "Overexposed sprockets",
         filmEdgeText: "Edge text",
         filmEdgeFrameNumber: "Frame number",
@@ -924,6 +926,7 @@
         filmEdgeEnableText: "文字",
         filmEdgeEnableFrameNumber: "フレーム番号",
         filmEdgeEnableDx: "DX エッジコード",
+        filmEdgeEnableHalfFrame: "半コマ A/三角",
         filmEdgeEnableOverexposure: "露光したパーフォレーション",
         filmEdgeText: "端の文字",
         filmEdgeFrameNumber: "フレーム番号",
@@ -1326,6 +1329,7 @@
       textEnabled: 'sprocketTextEnabledInput',
       frameNumberEnabled: 'sprocketFrameNumberEnabledInput',
       dxEnabled: 'sprocketDxEnabledInput',
+      halfFrameMarksEnabled: 'sprocketHalfFrameMarksEnabledInput',
       overexposedSprockets: 'sprocketOverexposureEnabledInput',
       text: 'sprocketTextInput',
       frameNumber: 'sprocketFrameNumberInput',
@@ -1389,6 +1393,7 @@
         dxEnabled: normalized.dxEnabled,
         dx1: normalized.dx1,
         dx2: normalized.dx2,
+        halfFrameMarksEnabled: normalized.halfFrameMarksEnabled,
         overexposedSprockets: normalized.overexposedSprockets,
         overexposureStrength: normalized.overexposureStrength,
         fontStyle: normalized.fontStyle,
@@ -3763,6 +3768,7 @@
       setChecked('textEnabled', settings.textEnabled);
       setChecked('frameNumberEnabled', settings.frameNumberEnabled);
       setChecked('dxEnabled', settings.dxEnabled);
+      setChecked('halfFrameMarksEnabled', settings.halfFrameMarksEnabled);
       setChecked('overexposedSprockets', settings.overexposedSprockets);
       setValue('text', settings.text);
       setValue('frameNumber', settings.frameNumber);
@@ -3789,6 +3795,7 @@
         textEnabled: getChecked('textEnabled'),
         frameNumberEnabled: getChecked('frameNumberEnabled'),
         dxEnabled: getChecked('dxEnabled'),
+        halfFrameMarksEnabled: getChecked('halfFrameMarksEnabled'),
         overexposedSprockets: getChecked('overexposedSprockets'),
         text: getValue('text', DEFAULT_SPROCKET_EDGE_MARKINGS.text),
         frameNumber: getValue('frameNumber', DEFAULT_SPROCKET_EDGE_MARKINGS.frameNumber),

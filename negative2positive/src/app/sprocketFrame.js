@@ -1,6 +1,6 @@
 const DEFAULT_FILM_COLOR = [6, 6, 6, 255];
 const DEFAULT_HOLE_COLOR = [255, 255, 255, 255];
-const DEFAULT_MARKING_COLOR = [242, 194, 82, 255];
+const DEFAULT_MARKING_COLOR = [237, 156, 0, 255];
 const DEFAULT_OVEREXPOSURE_COLOR = [237, 156, 0, 255];
 const DX_EDGE_COLUMN_COUNT = 31;
 const DX_EDGE_CODE_WIDTH_MM = 13;
@@ -28,12 +28,13 @@ export const DEFAULT_SPROCKET_EDGE_MARKINGS = Object.freeze({
   dxEnabled: false,
   dx1: 82,
   dx2: 3,
+  halfFrameMarksEnabled: true,
   overexposedSprockets: false,
   overexposureStrength: 1,
   fontStyle: 'monoBold',
   fontFamily: '',
   holeColor: '#ffffff',
-  letteringColor: '#f2c252',
+  letteringColor: '#ed9c00',
   overexposureColor: '#ed9c00'
 });
 
@@ -138,6 +139,9 @@ export function normalizeSprocketEdgeMarkings(options = {}) {
     dxEnabled: Boolean(source.dxEnabled),
     dx1: clampInt(source.dx1 ?? defaults.dx1, 0, 126),
     dx2: clampInt(source.dx2 ?? defaults.dx2, 0, 15),
+    halfFrameMarksEnabled: source.halfFrameMarksEnabled === undefined
+      ? defaults.halfFrameMarksEnabled
+      : Boolean(source.halfFrameMarksEnabled),
     overexposedSprockets: Boolean(source.overexposedSprockets),
     overexposureStrength: clamp(Number(source.overexposureStrength ?? defaults.overexposureStrength) || 0, 0, 2),
     fontStyle: FONT_STYLE_OPTIONS.has(source.fontStyle) ? source.fontStyle : defaults.fontStyle,
@@ -498,7 +502,7 @@ function drawCanvasText(data, metrics, text, x, y, pixelSize, fill, align, fontS
   return true;
 }
 
-function drawEdgeText(data, metrics, edge, text, x, y, pixelSize, align = 'left') {
+function drawEdgeText(data, metrics, edge, text, x, y, pixelSize, align = 'left', fill = edge.letteringColor) {
   const rendered = drawCanvasText(
     data,
     metrics,
@@ -506,14 +510,14 @@ function drawEdgeText(data, metrics, edge, text, x, y, pixelSize, align = 'left'
     x,
     y,
     pixelSize,
-    edge.letteringColor,
+    fill,
     align,
     edge.fontStyle,
     edge.fontFamily
   );
   if (rendered) return;
   const scale = Math.max(1, Math.round(pixelSize / 7));
-  drawBitmapText(data, metrics, text, x, y, scale, edge.letteringColor, align);
+  drawBitmapText(data, metrics, text, x, y, scale, fill, align);
 }
 
 export function buildDxEdgeCodeBlocks(options = {}) {
@@ -556,93 +560,32 @@ export function buildDxEdgeCodeBlocks(options = {}) {
   return blocks;
 }
 
-function getDxFrameAvoidRange(metrics, edge) {
-  if (!edge.frameNumberEnabled) return null;
-  const label = String(edge.frameNumber).padStart(2, '0');
-  const bitmapScale = Math.max(1, Math.round(metrics.edgeTextPixelSize / 7));
-  const labelWidth = Math.max(
-    metrics.imagePxPerMmX * 3.4,
-    measureBitmapText(label, bitmapScale) + metrics.mm * 1.8
-  );
-  const center = clamp(
-    Math.round(metrics.startX + (edge.frameNumberHole - 0.5) * metrics.pitch),
-    metrics.sideMargin,
-    metrics.outputWidth - metrics.sideMargin
-  );
-  return {
-    left: center - labelWidth * 0.68,
-    right: center + labelWidth * 0.92
-  };
+function getEdgeFramePitch(metrics) {
+  return metrics.pitch * THIRTY_FIVE_MM_SPROCKET_SPEC.perforationsPerStillFrame;
 }
 
-function measureOverlap(left, width, range) {
-  if (!range) return 0;
-  return Math.max(0, Math.min(left + width, range.right) - Math.max(left, range.left));
+function getFrameNumberAnchorX(metrics, edge) {
+  return Math.round(metrics.startX + metrics.holeWidth + (edge.frameNumberHole - 1) * metrics.pitch);
 }
 
-function getDxBarcodeRuns(metrics, edge, codeWidth) {
-  const inset = Math.max(2, Math.round(metrics.imagePxPerMmX * 0.75));
-  const minLeft = Math.round(metrics.sideMargin + inset);
-  const maxLeft = Math.round(metrics.outputWidth - metrics.sideMargin - inset - codeWidth);
-  if (maxLeft < minLeft) {
-    return [{ left: Math.max(0, Math.round((metrics.outputWidth - codeWidth) / 2)), aFlag: 0 }];
-  }
-
-  const frameWidthPx = Math.round(THIRTY_FIVE_MM_SPROCKET_SPEC.stillFrameWidthMm * metrics.imagePxPerMmX);
-  const halfFramePx = Math.round(frameWidthPx / 2);
-  const gimpLikeStart = Math.round(
-    metrics.startX
-    + metrics.holeWidth
-    + (edge.frameNumberHole - 1) * metrics.pitch
-    + metrics.pitch
-    - metrics.imagePxPerMmX * 0.5
-  );
-  const rawCandidates = [
-    { left: gimpLikeStart, aFlag: 0, priority: 0 },
-    { left: gimpLikeStart + halfFramePx, aFlag: 1, priority: 1 },
-    { left: gimpLikeStart - halfFramePx, aFlag: 1, priority: 2 },
-    { left: maxLeft, aFlag: 1, priority: 3 },
-    { left: minLeft, aFlag: 0, priority: 4 }
-  ];
-  const avoidRange = getDxFrameAvoidRange(metrics, edge);
-  const candidates = [];
-  const seen = new Set();
-  for (const candidate of rawCandidates) {
-    if (candidate.left < minLeft || candidate.left > maxLeft) continue;
-    const left = Math.round(candidate.left);
-    if (seen.has(left)) continue;
-    seen.add(left);
-    candidates.push({
-      ...candidate,
-      left,
-      overlap: measureOverlap(left, codeWidth, avoidRange)
+function forEachVisibleFrameRepeat(metrics, edge, callback) {
+  const framePitch = getEdgeFramePitch(metrics);
+  const baseX = getFrameNumberAnchorX(metrics, edge);
+  const minIndex = Math.floor((0 - baseX - framePitch) / framePitch);
+  const maxIndex = Math.ceil((metrics.outputWidth - baseX + framePitch) / framePitch);
+  for (let index = minIndex; index <= maxIndex; index++) {
+    const frameNumber = clampInt(edge.frameNumber + index, 0, 99);
+    callback({
+      index,
+      frameNumber,
+      mainX: baseX + index * framePitch,
+      halfX: baseX + (index + 0.5) * framePitch
     });
   }
-  if (!candidates.length) {
-    const left = clamp(gimpLikeStart, minLeft, maxLeft);
-    candidates.push({ left, aFlag: 0, priority: 99, overlap: measureOverlap(left, codeWidth, avoidRange) });
-  }
+}
 
-  candidates.sort((a, b) => {
-    if (a.overlap !== b.overlap) return a.overlap - b.overlap;
-    return a.priority - b.priority;
-  });
-
-  const selected = [];
-  const minRunGap = Math.max(1, Math.round(metrics.imagePxPerMmX * 1.2));
-  for (const candidate of candidates) {
-    const conflicts = selected.some((run) => {
-      const left = Math.max(run.left, candidate.left);
-      const right = Math.min(run.left + codeWidth + minRunGap, candidate.left + codeWidth + minRunGap);
-      return right > left;
-    });
-    if (conflicts) continue;
-    selected.push(candidate);
-    if (selected.length >= 2) break;
-  }
-  if (!selected.length) selected.push(candidates[0]);
-  selected.sort((a, b) => a.left - b.left);
-  return selected;
+function isHorizontallyVisible(metrics, left, width) {
+  return left + width >= 0 && left <= metrics.outputWidth;
 }
 
 function paintDxBar(data, metrics, left, top, width, height, fill) {
@@ -651,13 +594,29 @@ function paintDxBar(data, metrics, left, top, width, height, fill) {
   fillRect(data, metrics, left, top, width, height, fill);
 }
 
+function paintDxSequence(data, metrics, edge, left, top, modulePitch, barWidth, blockHeight, rowPitch, aFlag) {
+  const codeWidth = modulePitch * DX_EDGE_COLUMN_COUNT;
+  if (!isHorizontallyVisible(metrics, left, codeWidth)) return;
+  for (const block of buildDxEdgeCodeBlocks({ ...edge, aFlag })) {
+    paintDxBar(
+      data,
+      metrics,
+      left + block.column * modulePitch,
+      top + block.row * rowPitch,
+      barWidth,
+      blockHeight,
+      edge.letteringColor
+    );
+  }
+}
+
 function paintDxEdgeCode(data, metrics, edge) {
   const codeWidth = Math.max(
     DX_EDGE_COLUMN_COUNT,
     Math.round(DX_EDGE_CODE_WIDTH_MM * metrics.imagePxPerMmX)
   );
   const modulePitch = codeWidth / DX_EDGE_COLUMN_COUNT;
-  const barWidth = Math.max(1, Math.ceil(modulePitch * 0.92));
+  const barWidth = Math.max(1, Math.ceil(modulePitch + 0.5));
   const blockHeight = Math.max(1, metrics.dxBarHeight || Math.round(metrics.filmEdgePxPerMmY * 0.78));
   const rowGap = Math.max(1, metrics.dxRowGap || Math.round(metrics.filmEdgePxPerMmY * 0.12));
   const rowPitch = blockHeight + rowGap;
@@ -666,49 +625,138 @@ function paintDxEdgeCode(data, metrics, edge) {
     metrics.bottomBandTop,
     Math.max(metrics.bottomBandTop, metrics.outputHeight - (blockHeight * 2 + rowGap) - 1)
   );
+  const dxOffset = Math.round(metrics.pitch - metrics.imagePxPerMmX * 0.5);
 
-  for (const run of getDxBarcodeRuns(metrics, edge, codeWidth)) {
-    for (const block of buildDxEdgeCodeBlocks({ ...edge, aFlag: run.aFlag })) {
-      paintDxBar(
-        data,
-        metrics,
-        run.left + block.column * modulePitch,
-        top + block.row * rowPitch,
-        barWidth,
-        blockHeight,
-        edge.letteringColor
-      );
+  forEachVisibleFrameRepeat(metrics, edge, (repeat) => {
+    paintDxSequence(data, metrics, edge, repeat.mainX + dxOffset, top, modulePitch, barWidth, blockHeight, rowPitch, false);
+    paintDxSequence(data, metrics, edge, repeat.halfX + dxOffset, top, modulePitch, barWidth, blockHeight, rowPitch, true);
+  });
+}
+
+function fillTriangle(data, metrics, p0, p1, p2, fill, alpha = 1) {
+  const minX = Math.max(0, Math.floor(Math.min(p0.x, p1.x, p2.x)));
+  const maxX = Math.min(metrics.outputWidth - 1, Math.ceil(Math.max(p0.x, p1.x, p2.x)));
+  const minY = Math.max(0, Math.floor(Math.min(p0.y, p1.y, p2.y)));
+  const maxY = Math.min(metrics.outputHeight - 1, Math.ceil(Math.max(p0.y, p1.y, p2.y)));
+  const area = (p1.y - p2.y) * (p0.x - p2.x) + (p2.x - p1.x) * (p0.y - p2.y);
+  if (area === 0) return;
+
+  for (let y = minY; y <= maxY; y++) {
+    for (let x = minX; x <= maxX; x++) {
+      const px = x + 0.5;
+      const py = y + 0.5;
+      const a = ((p1.y - p2.y) * (px - p2.x) + (p2.x - p1.x) * (py - p2.y)) / area;
+      const b = ((p2.y - p0.y) * (px - p2.x) + (p0.x - p2.x) * (py - p2.y)) / area;
+      const c = 1 - a - b;
+      if (a < 0 || b < 0 || c < 0) continue;
+      const index = (y * metrics.outputWidth + x) * 4;
+      if (alpha >= 1) {
+        data[index] = fill[0];
+        data[index + 1] = fill[1];
+        data[index + 2] = fill[2];
+        data[index + 3] = fill[3];
+      } else {
+        blendPixel(data, index, fill, alpha);
+      }
     }
   }
 }
 
-function paintFrameNumberMarker(data, metrics, edge) {
-  const pixelSize = metrics.edgeTextPixelSize;
-  const label = String(edge.frameNumber).padStart(2, '0');
-  const markerX = clamp(
-    Math.round(metrics.startX + (edge.frameNumberHole - 0.5) * metrics.pitch),
-    metrics.sideMargin,
-    metrics.outputWidth - metrics.sideMargin
+function paintHalfFrameMarker(data, metrics, edge, repeat) {
+  const label = `${repeat.frameNumber}A`;
+  const pixelSize = Math.max(6, Math.round(metrics.edgeTextPixelSize * 0.84));
+  const triangleHeight = clamp(
+    Math.round(metrics.filmEdgePxPerMmY * 1.45),
+    5,
+    Math.max(5, metrics.outputHeight - metrics.bottomMarkingY - 1)
   );
-  drawEdgeText(data, metrics, edge, label, markerX, metrics.topMarkingY, pixelSize, 'center');
+  const triangleWidth = Math.max(4, Math.round(metrics.imagePxPerMmX * 1.65));
+  const triangleLeft = repeat.halfX - metrics.imagePxPerMmX;
+  const triangleTop = metrics.bottomMarkingY + Math.max(0, Math.round((metrics.edgeTextHeight - triangleHeight) / 2));
+
+  if (isHorizontallyVisible(metrics, triangleLeft, triangleWidth)) {
+    fillTriangle(
+      data,
+      metrics,
+      { x: triangleLeft, y: triangleTop },
+      { x: triangleLeft + triangleWidth, y: triangleTop + triangleHeight / 2 },
+      { x: triangleLeft, y: triangleTop + triangleHeight },
+      edge.letteringColor
+    );
+  }
+
   drawEdgeText(
     data,
     metrics,
     edge,
     label,
-    markerX,
+    repeat.halfX + Math.round(metrics.imagePxPerMmX * 0.8),
     metrics.bottomMarkingY,
     pixelSize,
-    'center'
+    'left'
   );
+}
 
-  const arrowTop = metrics.bottomMarkingY + Math.max(1, Math.round(metrics.edgeTextHeight * 0.18));
-  const arrowLeft = markerX + Math.round(metrics.mm * 1.1);
-  const arrowSize = Math.max(2, Math.round(metrics.mm * 0.45));
-  for (let row = 0; row < arrowSize; row++) {
-    fillRect(data, metrics, arrowLeft + row, arrowTop + row, arrowSize - row, 1, edge.letteringColor);
-    fillRect(data, metrics, arrowLeft + row, arrowTop + (arrowSize * 2 - row), arrowSize - row, 1, edge.letteringColor);
-  }
+function paintFrameNumberMarker(data, metrics, edge) {
+  const pixelSize = metrics.edgeTextPixelSize;
+  const textWidth = Math.max(metrics.imagePxPerMmX * 2.2, pixelSize * 2);
+  forEachVisibleFrameRepeat(metrics, edge, (repeat) => {
+    const label = String(repeat.frameNumber);
+    if (isHorizontallyVisible(metrics, repeat.mainX, textWidth)) {
+      drawEdgeText(data, metrics, edge, label, repeat.mainX, metrics.topMarkingY, pixelSize, 'left');
+      drawEdgeText(data, metrics, edge, label, repeat.mainX, metrics.bottomMarkingY, pixelSize, 'left');
+    }
+    if (edge.halfFrameMarksEnabled) {
+      paintHalfFrameMarker(data, metrics, edge, repeat);
+    }
+  });
+}
+
+function paintSprocketTextureSmear(data, metrics, sourceImageData, strength = 1) {
+  const source = sourceImageData?.data;
+  if (!source) return;
+  const amount = clamp(Number(strength) || 0, 0, 2);
+  if (amount <= 0) return;
+  const spread = Math.max(5, Math.round(metrics.holeHeight * 0.58));
+
+  forEachSprocketHole(metrics, (left, top) => {
+    const isTopRow = top < metrics.bandHeight;
+    const rectLeft = Math.max(0, Math.round(left - spread));
+    const rectTop = Math.max(0, Math.round(top - spread));
+    const rectRight = Math.min(metrics.outputWidth, Math.round(left + metrics.holeWidth + spread));
+    const rectBottom = Math.min(metrics.outputHeight, Math.round(top + metrics.holeHeight + spread));
+
+    for (let y = rectTop; y < rectBottom; y++) {
+      for (let x = rectLeft; x < rectRight; x++) {
+        const distance = roundedRectDistance(
+          x + 0.5,
+          y + 0.5,
+          left,
+          top,
+          metrics.holeWidth,
+          metrics.holeHeight,
+          metrics.holeRadius
+        );
+        if (distance < 0 || distance > spread) continue;
+        const sourceX = clampInt(x - metrics.sideMargin, 0, metrics.sourceWidth - 1);
+        const edgeDistance = isTopRow
+          ? Math.max(0, metrics.bandHeight - y)
+          : Math.max(0, y - (metrics.bandHeight + metrics.sourceHeight - 1));
+        const sourceY = isTopRow
+          ? clampInt(edgeDistance, 0, metrics.sourceHeight - 1)
+          : clampInt(metrics.sourceHeight - 1 - edgeDistance, 0, metrics.sourceHeight - 1);
+        const srcIndex = (sourceY * metrics.sourceWidth + sourceX) * 4;
+        const falloff = 1 - distance / spread;
+        const alpha = falloff * falloff * clamp(0.045 + amount * 0.055, 0.03, 0.16);
+        blendPixel(
+          data,
+          (y * metrics.outputWidth + x) * 4,
+          [source[srcIndex], source[srcIndex + 1], source[srcIndex + 2], 255],
+          alpha
+        );
+      }
+    }
+  });
 }
 
 function paintPhotoText(data, metrics, edge) {
@@ -762,6 +810,7 @@ export function composeSprocketFrame(imageData, options = {}) {
   }
 
   if (edge.overexposedSprockets) {
+    paintSprocketTextureSmear(output, metrics, imageData, edge.overexposureStrength);
     paintOverexposedSprockets(output, metrics, edge.overexposureColor);
   }
   paintSprocketRows(output, metrics, holeColor);

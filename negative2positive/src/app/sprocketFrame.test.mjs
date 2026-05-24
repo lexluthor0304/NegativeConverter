@@ -71,7 +71,7 @@ const markedOptions = {
     dx1: 82,
     dx2: 3,
     overexposedSprockets: true,
-    letteringColor: '#f2c252',
+    letteringColor: '#ed9c00',
     overexposureColor: '#ed9c00'
   }
 };
@@ -139,7 +139,7 @@ assert.ok(thirtyFiveMetrics.dxCodeHeight >= Math.round(thirtyFiveMetrics.filmEdg
 
 const hasMarkingColor = (() => {
   for (let i = 0; i < marked.data.length; i += 4) {
-    if (marked.data[i] === 242 && marked.data[i + 1] === 194 && marked.data[i + 2] === 82) {
+    if (marked.data[i] === 237 && marked.data[i + 1] === 156 && marked.data[i + 2] === 0) {
       return true;
     }
   }
@@ -159,6 +159,7 @@ const normalized = normalizeSprocketEdgeMarkings({
   firstHoleOffsetMm: -9,
   dx1: 999,
   dx2: -5,
+  halfFrameMarksEnabled: false,
   overexposureStrength: 99,
   fontStyle: 'bad-style',
   fontFamily: 'A'.repeat(120),
@@ -170,6 +171,7 @@ assert.equal(normalized.frameNumberHole, 8);
 assert.equal(normalized.firstHoleOffsetMm, -2.5);
 assert.equal(normalized.dx1, 126);
 assert.equal(normalized.dx2, 0);
+assert.equal(normalized.halfFrameMarksEnabled, false);
 assert.equal(normalized.overexposureStrength, 2);
 assert.equal(normalized.fontStyle, DEFAULT_SPROCKET_EDGE_MARKINGS.fontStyle);
 assert.equal(normalized.fontFamily.length, 80);
