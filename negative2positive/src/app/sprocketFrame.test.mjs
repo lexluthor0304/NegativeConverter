@@ -76,6 +76,32 @@ assert.equal(marked.width, markedMetrics.outputWidth);
 assert.equal(marked.height, markedMetrics.outputHeight);
 assert.ok(marked.height > framed.height);
 
+const assertEdgeLayoutDoesNotOverlapHoles = (layoutMetrics) => {
+  const topTextBottom = layoutMetrics.topMarkingY + layoutMetrics.edgeTextHeight;
+  const bottomHoleBottom = layoutMetrics.bottomY + layoutMetrics.holeHeight;
+  const bottomDxBottom = layoutMetrics.bottomDxY + layoutMetrics.dxCodeHeight;
+  const bottomFrameBottom = layoutMetrics.bottomMarkingY + layoutMetrics.edgeTextHeight;
+
+  assert.ok(topTextBottom + layoutMetrics.edgeGap <= layoutMetrics.topY);
+  assert.ok(bottomHoleBottom + layoutMetrics.edgeGap <= layoutMetrics.bottomDxY);
+  assert.ok(bottomDxBottom + layoutMetrics.edgeGap <= layoutMetrics.bottomMarkingY);
+  assert.ok(bottomFrameBottom + layoutMetrics.edgeGap <= layoutMetrics.outputHeight);
+};
+
+assertEdgeLayoutDoesNotOverlapHoles(markedMetrics);
+assertEdgeLayoutDoesNotOverlapHoles(getSprocketFrameMetrics(360, 240, {
+  edgeMarkings: {
+    textEnabled: true,
+    text: 'KODAK PORTRA 400',
+    frameNumberEnabled: true,
+    frameNumber: 18,
+    frameNumberHole: 2,
+    dxEnabled: true,
+    dx1: 82,
+    dx2: 3
+  }
+}));
+
 const hasMarkingColor = (() => {
   for (let i = 0; i < marked.data.length; i += 4) {
     if (marked.data[i] === 242 && marked.data[i + 1] === 194 && marked.data[i + 2] === 82) {

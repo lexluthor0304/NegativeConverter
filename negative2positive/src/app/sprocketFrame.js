@@ -148,30 +148,55 @@ export function getSprocketFrameMetrics(width, height, options = {}) {
   const shortSide = Math.min(sourceWidth, sourceHeight);
   const showMarkings = hasVisibleEdgeMarkings(edge);
   const sideMargin = clamp(Math.round(sourceWidth * 0.028), 8, Math.max(8, Math.round(shortSide * 0.08)));
-  const bandRatio = showMarkings ? 0.18 : 0.12;
-  const bandMaxRatio = showMarkings ? 0.28 : 0.2;
-  const bandMin = showMarkings ? 28 : 18;
+  const bandRatio = showMarkings ? 0.24 : 0.12;
+  const bandMaxRatio = showMarkings ? 0.36 : 0.2;
+  const bandMin = showMarkings ? 36 : 18;
   const bandHeight = clamp(
     Math.round(sourceHeight * bandRatio),
     bandMin,
     Math.max(bandMin, Math.round(sourceHeight * bandMaxRatio))
   );
-  const holeRatio = showMarkings ? 0.42 : 0.58;
+  const holeRatio = showMarkings ? 0.34 : 0.58;
   const holeHeight = clamp(Math.round(bandHeight * holeRatio), 10, Math.max(10, bandHeight - (showMarkings ? 18 : 8)));
   const holeWidth = Math.max(8, Math.round(holeHeight * 0.72));
   const holeRadius = Math.max(2, Math.round(holeHeight * 0.18));
   const outputWidth = sourceWidth + sideMargin * 2;
   const outputHeight = sourceHeight + bandHeight * 2;
   const mm = Math.max(1, outputHeight / 35);
+  const edgeTextPixelSize = Math.max(7, Math.round(mm * 1.0));
+  const edgeTextHeight = Math.max(1, Math.ceil(edgeTextPixelSize * 1.35));
+  const dxBlockHeight = Math.max(1, Math.round(mm * 0.52));
+  const dxCodeHeight = dxBlockHeight * 2;
+  const edgeGap = Math.max(2, Math.round(mm * 0.16));
   const pitch = Math.max(holeWidth + 8, Math.round(showMarkings ? mm * 4.75 : holeHeight * 1.7));
   const availableWidth = Math.max(holeWidth, outputWidth - sideMargin);
   const holeCount = Math.max(2, Math.floor((availableWidth + pitch - holeWidth) / pitch));
   const span = (holeCount - 1) * pitch + holeWidth;
   const firstHoleOffsetPx = Math.round(edge.firstHoleOffsetMm * mm);
   const startX = Math.round((outputWidth - span) / 2 + firstHoleOffsetPx);
-  const topY = showMarkings ? Math.round(bandHeight * 0.43) : Math.round((bandHeight - holeHeight) / 2);
+  const topTextY = showMarkings ? edgeGap : 0;
+  const topMarkingY = showMarkings ? edgeGap : 0;
+  const topY = showMarkings
+    ? clamp(
+      Math.max(
+        Math.round(bandHeight * 0.42),
+        Math.max(topTextY, topMarkingY) + edgeTextHeight + edgeGap
+      ),
+      0,
+      Math.max(0, bandHeight - holeHeight - edgeGap)
+    )
+    : Math.round((bandHeight - holeHeight) / 2);
   const bottomBandTop = bandHeight + sourceHeight;
-  const bottomY = bottomBandTop + (showMarkings ? Math.round(bandHeight * 0.12) : topY);
+  const bottomY = bottomBandTop + (showMarkings ? edgeGap : topY);
+  const bottomDxY = showMarkings
+    ? bottomY + holeHeight + edgeGap
+    : 0;
+  const bottomMarkingY = showMarkings
+    ? Math.min(
+      outputHeight - edgeTextHeight - edgeGap,
+      bottomDxY + dxCodeHeight + edgeGap
+    )
+    : 0;
 
   return {
     sourceWidth,
@@ -189,6 +214,14 @@ export function getSprocketFrameMetrics(width, height, options = {}) {
     startX,
     topY,
     bottomY,
+    topMarkingY,
+    topTextY,
+    bottomMarkingY,
+    bottomDxY,
+    edgeTextPixelSize,
+    edgeTextHeight,
+    dxCodeHeight,
+    edgeGap,
     mm,
     showMarkings
   };
@@ -492,15 +525,36 @@ function paintDxEdgeCode(data, metrics, edge) {
   const blockWidth = Math.max(1, Math.round(metrics.mm * 0.42));
   const blockHeight = Math.max(1, Math.round(metrics.mm * 0.52));
   const codeWidth = blockWidth * 31;
+  const frameLabelWidth = edge.frameNumberEnabled
+    ? Math.max(metrics.mm * 2.2, measureBitmapText(String(edge.frameNumber).padStart(2, '0'), Math.max(1, Math.round(metrics.mm * 1.0 / 7))))
+    : 0;
+  const frameLabelCenter = edge.frameNumberEnabled
+    ? clamp(
+      Math.round(metrics.startX + (edge.frameNumberHole - 0.5) * metrics.pitch),
+      metrics.sideMargin,
+      metrics.outputWidth - metrics.sideMargin
+    )
+    : -9999;
+  const avoidLeft = frameLabelCenter - frameLabelWidth * 0.7;
+  const avoidRight = frameLabelCenter + frameLabelWidth * 0.7;
+  const margin = Math.max(2, Math.round(metrics.mm * 0.35));
+  const leftCandidate = Math.round(metrics.sideMargin + metrics.mm * 1.2);
+  const rightCandidate = Math.round(metrics.outputWidth - codeWidth - metrics.sideMargin - metrics.mm * 1.2);
+  const overlapsLeft = edge.frameNumberEnabled
+    && leftCandidate < avoidRight
+    && (leftCandidate + codeWidth) > avoidLeft;
+  const overlapsRight = edge.frameNumberEnabled
+    && rightCandidate < avoidRight
+    && (rightCandidate + codeWidth) > avoidLeft;
   const left = clamp(
-    Math.round(metrics.sideMargin + metrics.mm * 1.2),
-    2,
-    Math.max(2, metrics.outputWidth - codeWidth - 2)
+    overlapsLeft && !overlapsRight ? rightCandidate : leftCandidate,
+    margin,
+    Math.max(margin, metrics.outputWidth - codeWidth - margin)
   );
   const top = clamp(
-    Math.round(metrics.bottomBandTop + metrics.bandHeight * 0.68),
+    metrics.bottomDxY,
     metrics.bottomBandTop,
-    Math.max(metrics.bottomBandTop, metrics.outputHeight - blockHeight * 2 - 2)
+    Math.max(metrics.bottomBandTop, metrics.outputHeight - blockHeight * 2 - 1)
   );
 
   for (const block of buildDxEdgeCodeBlocks(edge)) {
@@ -517,28 +571,28 @@ function paintDxEdgeCode(data, metrics, edge) {
 }
 
 function paintFrameNumberMarker(data, metrics, edge) {
-  const pixelSize = Math.max(7, Math.round(metrics.mm * 1.35));
+  const pixelSize = metrics.edgeTextPixelSize;
   const label = String(edge.frameNumber).padStart(2, '0');
   const markerX = clamp(
     Math.round(metrics.startX + (edge.frameNumberHole - 0.5) * metrics.pitch),
     metrics.sideMargin,
     metrics.outputWidth - metrics.sideMargin
   );
-  drawEdgeText(data, metrics, edge, label, markerX, Math.round(metrics.bandHeight * 0.12), pixelSize, 'center');
+  drawEdgeText(data, metrics, edge, label, markerX, metrics.topMarkingY, pixelSize, 'center');
   drawEdgeText(
     data,
     metrics,
     edge,
     label,
     markerX,
-    Math.round(metrics.bottomBandTop + metrics.bandHeight * 0.64),
+    metrics.bottomMarkingY,
     pixelSize,
     'center'
   );
 
-  const arrowTop = Math.round(metrics.bottomBandTop + metrics.bandHeight * 0.22);
-  const arrowLeft = markerX + Math.round(metrics.mm * 1.7);
-  const arrowSize = Math.max(2, Math.round(metrics.mm * 0.8));
+  const arrowTop = metrics.bottomMarkingY + Math.max(1, Math.round(metrics.edgeTextHeight * 0.18));
+  const arrowLeft = markerX + Math.round(metrics.mm * 1.1);
+  const arrowSize = Math.max(2, Math.round(metrics.mm * 0.45));
   for (let row = 0; row < arrowSize; row++) {
     fillRect(data, metrics, arrowLeft + row, arrowTop + row, arrowSize - row, 1, edge.letteringColor);
     fillRect(data, metrics, arrowLeft + row, arrowTop + (arrowSize * 2 - row), arrowSize - row, 1, edge.letteringColor);
@@ -546,7 +600,7 @@ function paintFrameNumberMarker(data, metrics, edge) {
 }
 
 function paintPhotoText(data, metrics, edge) {
-  const pixelSize = Math.max(7, Math.round(metrics.mm * 1.25));
+  const pixelSize = metrics.edgeTextPixelSize;
   const text = edge.text.trim();
   if (!text) return;
   drawEdgeText(
@@ -555,7 +609,7 @@ function paintPhotoText(data, metrics, edge) {
     edge,
     text,
     Math.round(metrics.outputWidth / 2),
-    Math.round(metrics.bandHeight * 0.13),
+    metrics.topTextY,
     pixelSize,
     'center'
   );
