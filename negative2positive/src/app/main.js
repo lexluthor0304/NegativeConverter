@@ -109,12 +109,10 @@
         desktopUpdateLater: "稍后提醒",
         dropHint: "拖放图片到此处或点击读取",
         selectFile: "选择文件",
-        applyRotate: "应用",
-        straightenLine: "拉直线",
         mirror: "镜像",
         crop: "裁剪",
         cropHintTitle: "裁剪和拉直",
-        cropHintBody: "拖动框内移动裁剪；拖动边角调整大小。按住 Command/Ctrl 并拖一条线拉直，也可以点「拉直线」后画线。",
+        cropHintBody: "拖动框内移动裁剪；拖动边角调整大小。按住 Command/Ctrl 并拖一条线拉直。",
         applyCrop: "应用裁剪/拉直",
 	        cancelCrop: "取消",
 	        autoFrame: "自动识别边框",
@@ -511,12 +509,10 @@
         desktopUpdateLater: "Later",
         dropHint: "Drop image here or click to open",
         selectFile: "Select File",
-        applyRotate: "Apply",
-        straightenLine: "Line",
         mirror: "Mirror",
         crop: "Crop",
         cropHintTitle: "Crop and straighten",
-        cropHintBody: "Drag inside the box to move it, or drag edges/corners to resize. Hold Command/Ctrl and draw a line to straighten, or click Line first.",
+        cropHintBody: "Drag inside the box to move it, or drag edges/corners to resize. Hold Command/Ctrl and draw a line to straighten.",
         applyCrop: "Apply Crop/Straighten",
 	        cancelCrop: "Cancel",
 	        autoFrame: "Auto Frame",
@@ -913,12 +909,10 @@
         desktopUpdateLater: "後で",
         dropHint: "画像をドロップまたはクリックして読み込み",
         selectFile: "ファイル選択",
-        applyRotate: "適用",
-        straightenLine: "傾き線",
         mirror: "ミラー",
         crop: "トリミング",
         cropHintTitle: "トリミングと傾き補正",
-        cropHintBody: "枠内をドラッグして移動、辺や角でサイズ調整。Command/Ctrl を押しながら線を引くか、「傾き線」を押して傾きを補正します。",
+        cropHintBody: "枠内をドラッグして移動、辺や角でサイズ調整。Command/Ctrl を押しながら線を引いて傾きを補正します。",
         applyCrop: "トリミング/傾き補正を適用",
 	        cancelCrop: "キャンセル",
 	        autoFrame: "自動フレーム検出",
@@ -7965,19 +7959,6 @@
       applyMirror();
     });
 
-    document.getElementById('applyRotateBtn').addEventListener('click', () => {
-      const angle = parseFloat(document.getElementById('rotateAngle').value) || 0;
-      if (state.cropping) {
-        setCropDraftTotalAngle(angle);
-        return;
-      }
-      if (angle !== 0) {
-        applyRotation(angle);
-        document.getElementById('rotateAngle').value = 0;
-        document.getElementById('straightenAngle').value = 0;
-      }
-    });
-
     async function applyAutoFrameToCurrent() {
       if (state.currentStep !== 1) return;
       const source = state.loadedBaseImageData || state.originalImageData;
@@ -8330,9 +8311,6 @@
     const cropBtn = document.getElementById('cropBtn');
     const applyCropBtn = document.getElementById('applyCropBtn');
     const cancelCropBtn = document.getElementById('cancelCropBtn');
-    const rotateAngleInput = document.getElementById('rotateAngle');
-    const straightenAngleInput = document.getElementById('straightenAngle');
-    const straightenLineBtn = document.getElementById('straightenLineBtn');
     const straightenGuideLine = document.getElementById('straightenGuideLine');
     const cropModeHint = document.getElementById('cropModeHint');
     const cropModeHintTitle = document.getElementById('cropModeHintTitle');
@@ -8344,18 +8322,10 @@
     const STRAIGHTEN_LINE_MIN_DISPLAY_PX = 32;
     let activeCropPointerId = null;
     let cropPreviewRenderFrame = null;
-    let cropLineToolActive = false;
     let cropHintTimer = null;
 
     cropBtn.addEventListener('click', () => {
       beginCropMode();
-    });
-
-    straightenLineBtn?.addEventListener('click', () => {
-      if (!state.cropping) return;
-      cropLineToolActive = !cropLineToolActive;
-      setCropActionUi(true);
-      showCropModeHint({ durationMs: 4200 });
     });
 
     function showCropModeHint(options = {}) {
@@ -8365,7 +8335,7 @@
       cropModeHintTitle.textContent = getLocalizedText('cropHintTitle', 'Crop and straighten');
       cropModeHintBody.textContent = getLocalizedText(
         'cropHintBody',
-        'Drag inside the box to move it, or drag edges/corners to resize. Hold Command/Ctrl and draw a line to straighten, or click Line first.'
+        'Drag inside the box to move it, or drag edges/corners to resize. Hold Command/Ctrl and draw a line to straighten.'
       );
 
       if (cropHintTimer) clearTimeout(cropHintTimer);
@@ -8532,20 +8502,6 @@
       };
     }
 
-    function syncCropAngleInputs() {
-      if (!rotateAngleInput || !straightenAngleInput) return;
-
-      const draft = state.cropDraft;
-      if (!draft) {
-        rotateAngleInput.value = '0';
-        straightenAngleInput.value = '0';
-        return;
-      }
-
-      rotateAngleInput.value = formatCropAngleValue(getCropDraftTotalAngle());
-      straightenAngleInput.value = formatCropAngleValue(draft.straightenAngle || 0);
-    }
-
     function setCropDraftTotalAngle(angle, options = {}) {
       const draft = state.cropDraft;
       if (!draft) return false;
@@ -8554,7 +8510,6 @@
       draft.rotationBase = next.rotationBase;
       draft.straightenAngle = next.straightenAngle;
       if (!options.keepLineSamples) draft.straightenLineAngles = [];
-      syncCropAngleInputs();
       scheduleCropDraftPreview({ preserveRect: true });
       return true;
     }
@@ -8565,7 +8520,6 @@
 
       draft.rotationBase = normalizeAngleDegrees((draft.rotationBase || 0) + (Number(angleDelta) || 0));
       draft.straightenLineAngles = [];
-      syncCropAngleInputs();
       scheduleCropDraftPreview({ preserveRect: true });
       return true;
     }
@@ -8576,13 +8530,9 @@
       cancelCropBtn.style.display = active ? 'inline-flex' : 'none';
       cropOverlay.style.display = active ? 'block' : 'none';
       canvasContainer.classList.toggle('crop-mode', active);
-      canvasContainer.classList.toggle('straighten-line-mode', active && cropLineToolActive);
+      canvasContainer.classList.toggle('straighten-line-mode', false);
       canvasContainer.style.touchAction = active ? 'none' : '';
       canvasContainer.style.cursor = active ? 'crosshair' : '';
-      if (straightenLineBtn) {
-        straightenLineBtn.disabled = !active;
-        straightenLineBtn.classList.toggle('active', active && cropLineToolActive);
-      }
       if (!active && straightenGuideLine) straightenGuideLine.style.display = 'none';
 
       const mirrorBtn = document.getElementById('mirrorBtn');
@@ -8611,7 +8561,6 @@
       state.cropping = true;
       state.croppingActive = false;
       state.cropStart = null;
-      cropLineToolActive = false;
       activeCropPointerId = null;
       state.cropDraft = createCropDraft(sourceImageData);
       if (!state.cropDraft) {
@@ -8620,7 +8569,6 @@
       }
 
       setCropActionUi(true);
-      syncCropAngleInputs();
       renderCropDraftPreview({ preserveRect: false });
       showCropModeHint();
       updateBeforeAfterButtonState();
@@ -8716,11 +8664,9 @@
       state.croppingActive = false;
       state.cropStart = null;
       state.cropDraft = null;
-      cropLineToolActive = false;
       activeCropPointerId = null;
       hideCropModeHint();
       setCropActionUi(false);
-      syncCropAngleInputs();
       updateBeforeAfterButtonState();
 
       if (options.restore) {
@@ -8992,7 +8938,7 @@
 
     function updateCropHoverCursor(clientX, clientY, options = {}) {
       if (!state.cropping || state.croppingActive) return;
-      if (options.straightenLine || cropLineToolActive) {
+      if (options.straightenLine) {
         canvasContainer.style.cursor = 'crosshair';
         return;
       }
@@ -9001,7 +8947,7 @@
     }
 
     function shouldStartStraightenLine(event) {
-      return Boolean(cropLineToolActive || event.metaKey || event.ctrlKey);
+      return Boolean(event.metaKey || event.ctrlKey);
     }
 
     canvasContainer.addEventListener('mousedown', (e) => {
@@ -9187,24 +9133,6 @@
         updateCanvasVisibility();
         renderHistogram(sourceImageData);
       }
-    });
-
-    straightenAngleInput?.addEventListener('input', (event) => {
-      const draft = state.cropDraft;
-      if (!state.cropping || !draft) {
-        if (rotateAngleInput) rotateAngleInput.value = formatCropAngleValue(parseFloat(event.target.value) || 0);
-        return;
-      }
-
-      draft.straightenAngle = clampCropValue(parseFloat(event.target.value) || 0, -45, 45);
-      draft.straightenLineAngles = [];
-      syncCropAngleInputs();
-      scheduleCropDraftPreview({ preserveRect: true });
-    });
-
-    rotateAngleInput?.addEventListener('change', (event) => {
-      if (!state.cropping) return;
-      setCropDraftTotalAngle(parseFloat(event.target.value) || 0);
     });
 
     // Convert button (skip to step 2)

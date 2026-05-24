@@ -2066,34 +2066,6 @@
       cursor: not-allowed;
     }
 
-    /* Rotate Controls */
-    .rotate-controls {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-
-    .straighten-slider {
-      width: 130px;
-      accent-color: var(--accent);
-    }
-
-    .rotate-input {
-      width: 60px;
-      padding: 6px 8px;
-      background: var(--bg-tertiary);
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      color: var(--text-primary);
-      font-size: 13px;
-      text-align: center;
-    }
-
-    .rotate-input:focus {
-      outline: none;
-      border-color: var(--accent);
-    }
-
     /* Info Box */
     .info-box {
       padding: 10px 12px;
@@ -2788,8 +2760,7 @@
 
       .status-badge,
       .current-file-label,
-      .toolbar-btn,
-      .rotate-controls {
+      .toolbar-btn {
         flex-shrink: 0;
       }
 
@@ -2808,24 +2779,6 @@
         border-radius: 12px;
         font-size: 14px;
         white-space: nowrap;
-      }
-
-      .rotate-controls {
-        gap: 6px;
-        padding: 4px 8px;
-        border-radius: 12px;
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        background: rgba(255, 255, 255, 0.03);
-      }
-
-      .straighten-slider {
-        width: 96px;
-      }
-
-      .rotate-input {
-        width: 70px;
-        height: 34px;
-        font-size: 16px;
       }
 
       .controls-panel {
@@ -2868,7 +2821,6 @@
       }
 
       .preset-select,
-      .rotate-input,
       .slider-number-input,
       .file-list-btn,
       .footer-btn {
@@ -3162,13 +3114,6 @@
           </svg>
           <span data-i18n="mirror">Mirror</span>
         </button>
-        <div class="rotate-controls">
-          <input type="range" class="straighten-slider" id="straightenAngle" value="0" min="-45" max="45" step="0.1" title="Straighten">
-          <input type="number" class="rotate-input" id="rotateAngle" value="0" min="-180" max="180" step="0.1">
-          <span>°</span>
-          <button class="toolbar-btn" id="applyRotateBtn" data-i18n="applyRotate">Apply</button>
-          <button class="toolbar-btn" id="straightenLineBtn" data-i18n="straightenLine" disabled>Line</button>
-        </div>
         <div class="toolbar-separator"></div>
         <button class="toolbar-btn" id="cropBtn" data-i18n="crop">Crop</button>
         <button class="toolbar-btn" id="applyCropBtn" style="display: none;" data-i18n="applyCrop">Apply Crop</button>

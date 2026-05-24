@@ -2,6 +2,8 @@ const DEFAULT_FILM_COLOR = [6, 6, 6, 255];
 const DEFAULT_HOLE_COLOR = [255, 255, 255, 255];
 const DEFAULT_MARKING_COLOR = [242, 194, 82, 255];
 const DEFAULT_OVEREXPOSURE_COLOR = [237, 156, 0, 255];
+const DX_EDGE_COLUMN_COUNT = 31;
+const DX_EDGE_CODE_WIDTH_MM = 13;
 
 // 35mm still-film proportions: 34.98mm film width, 24x36mm image gate,
 // eight perforations per still frame, and KS/BH-style sprocket dimensions.
@@ -189,8 +191,6 @@ export function getSprocketFrameMetrics(width, height, options = {}) {
   const outputHeight = sourceHeight + bandHeight * 2;
   const edgeTextPixelSize = Math.max(7, Math.round(filmEdgePxPerMmY * 0.78));
   const edgeTextHeight = Math.max(1, Math.ceil(edgeTextPixelSize * 1.35));
-  const dxBlockHeight = Math.max(1, Math.round(filmEdgePxPerMmY * 0.36));
-  const dxCodeHeight = dxBlockHeight * 2;
   const pitch = Math.max(holeWidth + edgeGap * 2, Math.round(spec.perforationPitchMm * imagePxPerMmX));
   const holeCount = spec.perforationsPerStillFrame;
   const span = (holeCount - 1) * pitch + holeWidth;
@@ -208,8 +208,20 @@ export function getSprocketFrameMetrics(width, height, options = {}) {
   const bottomY = bottomBandTop + bandHeight - outerPerfMargin - holeHeight;
   const bottomOuterTop = bottomY + holeHeight;
   const bottomOuterHeight = Math.max(edgeGap, outputHeight - bottomOuterTop);
+  const dxRowGap = clamp(
+    Math.round(filmEdgePxPerMmY * 0.12),
+    1,
+    Math.max(1, bottomOuterHeight - edgeGap - 2)
+  );
+  const dxTargetBarHeight = Math.max(2, Math.round(filmEdgePxPerMmY * 0.82));
+  const dxBarHeight = clamp(
+    dxTargetBarHeight,
+    1,
+    Math.max(1, Math.floor((bottomOuterHeight - edgeGap - dxRowGap) / 2))
+  );
+  const dxCodeHeight = dxBarHeight * 2 + dxRowGap;
   const bottomDxY = showMarkings
-    ? bottomOuterTop + Math.max(0, Math.floor((bottomOuterHeight - dxCodeHeight - edgeGap) / 2))
+    ? bottomOuterTop + Math.max(edgeGap, Math.floor((bottomOuterHeight - dxCodeHeight) / 2))
     : 0;
   const bottomMarkingY = showMarkings
     ? bottomOuterTop + Math.max(0, Math.floor((bottomOuterHeight - edgeTextHeight - edgeGap) / 2))
@@ -238,6 +250,8 @@ export function getSprocketFrameMetrics(width, height, options = {}) {
     edgeTextPixelSize,
     edgeTextHeight,
     dxCodeHeight,
+    dxBarHeight,
+    dxRowGap,
     edgeGap,
     filmEdgePxPerMmY,
     imagePxPerMmX,
@@ -503,12 +517,15 @@ function drawEdgeText(data, metrics, edge, text, x, y, pixelSize, align = 'left'
 }
 
 export function buildDxEdgeCodeBlocks(options = {}) {
-  const edge = normalizeSprocketEdgeMarkings(options);
+  const source = options && typeof options === 'object' ? options : {};
+  const edge = normalizeSprocketEdgeMarkings(source);
+  const hasExplicitAFlag = Object.prototype.hasOwnProperty.call(source, 'aFlag');
+  const aFlag = hasExplicitAFlag ? (source.aFlag ? 1 : 0) : (edge.frameNumber > 36 ? 1 : 0);
   const blocks = [];
   const seen = new Set();
   const add = (column, row) => {
     const key = `${column}:${row}`;
-    if (column < 0 || column > 30 || row < 0 || row > 1 || seen.has(key)) return;
+    if (column < 0 || column >= DX_EDGE_COLUMN_COUNT || row < 0 || row > 1 || seen.has(key)) return;
     seen.add(key);
     blocks.push({ column, row });
   };
@@ -530,7 +547,6 @@ export function buildDxEdgeCodeBlocks(options = {}) {
   addBinary(edge.dx2, 14, 8);
   addBinary(clampInt(edge.frameNumber, 0, 63), 18, 32);
 
-  const aFlag = edge.frameNumber > 36 ? 1 : 0;
   if (aFlag) add(24, 1);
   if (((edge.dx1 + edge.dx2 + clampInt(edge.frameNumber, 0, 63) + aFlag) % 2) === 1) add(26, 1);
 
@@ -540,49 +556,129 @@ export function buildDxEdgeCodeBlocks(options = {}) {
   return blocks;
 }
 
-function paintDxEdgeCode(data, metrics, edge) {
-  const blockWidth = Math.max(1, Math.round(metrics.imagePxPerMmX * 0.42));
-  const blockHeight = Math.max(1, Math.round(metrics.filmEdgePxPerMmY * 0.36));
-  const codeWidth = blockWidth * 31;
-  const frameLabelWidth = edge.frameNumberEnabled
-    ? Math.max(metrics.imagePxPerMmX * 2.2, measureBitmapText(String(edge.frameNumber).padStart(2, '0'), Math.max(1, Math.round(metrics.edgeTextPixelSize / 7))))
-    : 0;
-  const frameLabelCenter = edge.frameNumberEnabled
-    ? clamp(
-      Math.round(metrics.startX + (edge.frameNumberHole - 0.5) * metrics.pitch),
-      metrics.sideMargin,
-      metrics.outputWidth - metrics.sideMargin
-    )
-    : -9999;
-  const avoidLeft = frameLabelCenter - frameLabelWidth * 0.7;
-  const avoidRight = frameLabelCenter + frameLabelWidth * 0.7;
-  const margin = Math.max(2, Math.round(metrics.mm * 0.35));
-  const leftCandidate = Math.round(metrics.sideMargin + metrics.mm * 1.2);
-  const rightCandidate = Math.round(metrics.outputWidth - codeWidth - metrics.sideMargin - metrics.mm * 1.2);
-  const overlapAmount = (left) => Math.max(0, Math.min(left + codeWidth, avoidRight) - Math.max(left, avoidLeft));
-  const leftOverlap = edge.frameNumberEnabled ? overlapAmount(leftCandidate) : 0;
-  const rightOverlap = edge.frameNumberEnabled ? overlapAmount(rightCandidate) : 0;
-  const left = clamp(
-    rightOverlap < leftOverlap ? rightCandidate : leftCandidate,
-    margin,
-    Math.max(margin, metrics.outputWidth - codeWidth - margin)
+function getDxFrameAvoidRange(metrics, edge) {
+  if (!edge.frameNumberEnabled) return null;
+  const label = String(edge.frameNumber).padStart(2, '0');
+  const bitmapScale = Math.max(1, Math.round(metrics.edgeTextPixelSize / 7));
+  const labelWidth = Math.max(
+    metrics.imagePxPerMmX * 3.4,
+    measureBitmapText(label, bitmapScale) + metrics.mm * 1.8
   );
+  const center = clamp(
+    Math.round(metrics.startX + (edge.frameNumberHole - 0.5) * metrics.pitch),
+    metrics.sideMargin,
+    metrics.outputWidth - metrics.sideMargin
+  );
+  return {
+    left: center - labelWidth * 0.68,
+    right: center + labelWidth * 0.92
+  };
+}
+
+function measureOverlap(left, width, range) {
+  if (!range) return 0;
+  return Math.max(0, Math.min(left + width, range.right) - Math.max(left, range.left));
+}
+
+function getDxBarcodeRuns(metrics, edge, codeWidth) {
+  const inset = Math.max(2, Math.round(metrics.imagePxPerMmX * 0.75));
+  const minLeft = Math.round(metrics.sideMargin + inset);
+  const maxLeft = Math.round(metrics.outputWidth - metrics.sideMargin - inset - codeWidth);
+  if (maxLeft < minLeft) {
+    return [{ left: Math.max(0, Math.round((metrics.outputWidth - codeWidth) / 2)), aFlag: 0 }];
+  }
+
+  const frameWidthPx = Math.round(THIRTY_FIVE_MM_SPROCKET_SPEC.stillFrameWidthMm * metrics.imagePxPerMmX);
+  const halfFramePx = Math.round(frameWidthPx / 2);
+  const gimpLikeStart = Math.round(
+    metrics.startX
+    + metrics.holeWidth
+    + (edge.frameNumberHole - 1) * metrics.pitch
+    + metrics.pitch
+    - metrics.imagePxPerMmX * 0.5
+  );
+  const rawCandidates = [
+    { left: gimpLikeStart, aFlag: 0, priority: 0 },
+    { left: gimpLikeStart + halfFramePx, aFlag: 1, priority: 1 },
+    { left: gimpLikeStart - halfFramePx, aFlag: 1, priority: 2 },
+    { left: maxLeft, aFlag: 1, priority: 3 },
+    { left: minLeft, aFlag: 0, priority: 4 }
+  ];
+  const avoidRange = getDxFrameAvoidRange(metrics, edge);
+  const candidates = [];
+  const seen = new Set();
+  for (const candidate of rawCandidates) {
+    if (candidate.left < minLeft || candidate.left > maxLeft) continue;
+    const left = Math.round(candidate.left);
+    if (seen.has(left)) continue;
+    seen.add(left);
+    candidates.push({
+      ...candidate,
+      left,
+      overlap: measureOverlap(left, codeWidth, avoidRange)
+    });
+  }
+  if (!candidates.length) {
+    const left = clamp(gimpLikeStart, minLeft, maxLeft);
+    candidates.push({ left, aFlag: 0, priority: 99, overlap: measureOverlap(left, codeWidth, avoidRange) });
+  }
+
+  candidates.sort((a, b) => {
+    if (a.overlap !== b.overlap) return a.overlap - b.overlap;
+    return a.priority - b.priority;
+  });
+
+  const selected = [];
+  const minRunGap = Math.max(1, Math.round(metrics.imagePxPerMmX * 1.2));
+  for (const candidate of candidates) {
+    const conflicts = selected.some((run) => {
+      const left = Math.max(run.left, candidate.left);
+      const right = Math.min(run.left + codeWidth + minRunGap, candidate.left + codeWidth + minRunGap);
+      return right > left;
+    });
+    if (conflicts) continue;
+    selected.push(candidate);
+    if (selected.length >= 2) break;
+  }
+  if (!selected.length) selected.push(candidates[0]);
+  selected.sort((a, b) => a.left - b.left);
+  return selected;
+}
+
+function paintDxBar(data, metrics, left, top, width, height, fill) {
+  const bleed = Math.max(1, Math.round(height * 0.12));
+  fillRect(data, metrics, left - 1, top - bleed, width + 2, height + bleed * 2, fill, 0.16);
+  fillRect(data, metrics, left, top, width, height, fill);
+}
+
+function paintDxEdgeCode(data, metrics, edge) {
+  const codeWidth = Math.max(
+    DX_EDGE_COLUMN_COUNT,
+    Math.round(DX_EDGE_CODE_WIDTH_MM * metrics.imagePxPerMmX)
+  );
+  const modulePitch = codeWidth / DX_EDGE_COLUMN_COUNT;
+  const barWidth = Math.max(1, Math.ceil(modulePitch * 0.92));
+  const blockHeight = Math.max(1, metrics.dxBarHeight || Math.round(metrics.filmEdgePxPerMmY * 0.78));
+  const rowGap = Math.max(1, metrics.dxRowGap || Math.round(metrics.filmEdgePxPerMmY * 0.12));
+  const rowPitch = blockHeight + rowGap;
   const top = clamp(
     metrics.bottomDxY,
     metrics.bottomBandTop,
-    Math.max(metrics.bottomBandTop, metrics.outputHeight - blockHeight * 2 - 1)
+    Math.max(metrics.bottomBandTop, metrics.outputHeight - (blockHeight * 2 + rowGap) - 1)
   );
 
-  for (const block of buildDxEdgeCodeBlocks(edge)) {
-    fillRect(
-      data,
-      metrics,
-      left + block.column * blockWidth,
-      top + block.row * blockHeight,
-      Math.max(1, blockWidth - 1),
-      Math.max(1, blockHeight - 1),
-      edge.letteringColor
-    );
+  for (const run of getDxBarcodeRuns(metrics, edge, codeWidth)) {
+    for (const block of buildDxEdgeCodeBlocks({ ...edge, aFlag: run.aFlag })) {
+      paintDxBar(
+        data,
+        metrics,
+        run.left + block.column * modulePitch,
+        top + block.row * rowPitch,
+        barWidth,
+        blockHeight,
+        edge.letteringColor
+      );
+    }
   }
 }
 
@@ -633,8 +729,8 @@ function paintPhotoText(data, metrics, edge) {
 
 function paintEdgeMarkings(data, metrics, edge) {
   if (edge.textEnabled) paintPhotoText(data, metrics, edge);
-  if (edge.frameNumberEnabled) paintFrameNumberMarker(data, metrics, edge);
   if (edge.dxEnabled) paintDxEdgeCode(data, metrics, edge);
+  if (edge.frameNumberEnabled) paintFrameNumberMarker(data, metrics, edge);
 }
 
 export function composeSprocketFrame(imageData, options = {}) {

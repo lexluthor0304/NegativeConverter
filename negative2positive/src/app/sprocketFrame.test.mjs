@@ -134,6 +134,8 @@ assert.equal(thirtyFiveMetrics.holeCount, THIRTY_FIVE_MM_SPROCKET_SPEC.perforati
 approxEqual(thirtyFiveMetrics.pitch / thirtyFiveMetrics.imagePxPerMmX, THIRTY_FIVE_MM_SPROCKET_SPEC.perforationPitchMm, 0.08, '35mm perforation pitch');
 approxEqual(thirtyFiveMetrics.holeWidth / thirtyFiveMetrics.imagePxPerMmX, THIRTY_FIVE_MM_SPROCKET_SPEC.perforationWidthMm, 0.08, '35mm perforation width');
 approxEqual(thirtyFiveMetrics.holeHeight / thirtyFiveMetrics.filmEdgePxPerMmY, THIRTY_FIVE_MM_SPROCKET_SPEC.perforationHeightMm, 0.08, '35mm perforation height');
+assert.equal(thirtyFiveMetrics.dxCodeHeight, thirtyFiveMetrics.dxBarHeight * 2 + thirtyFiveMetrics.dxRowGap);
+assert.ok(thirtyFiveMetrics.dxCodeHeight >= Math.round(thirtyFiveMetrics.filmEdgePxPerMmY * 1.5));
 
 const hasMarkingColor = (() => {
   for (let i = 0; i < marked.data.length; i += 4) {
@@ -178,6 +180,8 @@ const dxBlocks = buildDxEdgeCodeBlocks({ dx1: 82, dx2: 3, frameNumber: 18 });
 assert.ok(dxBlocks.some((block) => block.column === 26 && block.row === 1));
 assert.ok(dxBlocks.some((block) => block.column === 29 && block.row === 0));
 assert.ok(dxBlocks.some((block) => block.column === 30 && block.row === 1));
+const dxABlocks = buildDxEdgeCodeBlocks({ dx1: 82, dx2: 3, frameNumber: 18, aFlag: true });
+assert.ok(dxABlocks.some((block) => block.column === 24 && block.row === 1));
 
 assert.equal(hasSprocketFrameEnabled({ sprocketHolesEnabled: true }), true);
 assert.equal(hasSprocketFrameEnabled({ sprocketHolesEnabled: false }), false);
