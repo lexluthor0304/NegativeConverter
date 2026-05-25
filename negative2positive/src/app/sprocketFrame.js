@@ -413,13 +413,6 @@ function copyPhotoRegion(data, metrics, imageData) {
   }
 }
 
-function clearPhotoRegion(data, metrics) {
-  for (let y = 0; y < metrics.sourceHeight; y++) {
-    const dstOffset = ((y + metrics.bandHeight) * metrics.outputWidth + metrics.sideMargin) * 4;
-    data.fill(0, dstOffset, dstOffset + metrics.sourceWidth * 4);
-  }
-}
-
 function fillRect(data, metrics, left, top, width, height, fill, alpha = 1) {
   const rectLeft = Math.max(0, Math.round(left));
   const rectTop = Math.max(0, Math.round(top));
@@ -1142,7 +1135,7 @@ function paintEdgeMarkings(data, metrics, edge) {
   if (edge.frameNumberEnabled) paintFrameNumberMarker(data, metrics, edge);
 }
 
-function createSprocketFrameImageData(imageData, options = {}, { includePhoto = true } = {}) {
+export function composeSprocketFrame(imageData, options = {}) {
   if (!imageData || !imageData.data || !imageData.width || !imageData.height) {
     throw new Error('ImageData is required to compose sprocket holes.');
   }
@@ -1164,22 +1157,10 @@ function createSprocketFrameImageData(imageData, options = {}, { includePhoto = 
   }
   paintSprocketRows(output, metrics, holeColor);
   paintEdgeMarkings(output, metrics, edge);
-  if (includePhoto) {
-    // Hard guardrail: edge effects are allowed to touch only the added film border.
-    copyPhotoRegion(output, metrics, imageData);
-  } else {
-    clearPhotoRegion(output, metrics);
-  }
+  // Hard guardrail: edge effects are allowed to touch only the added film border.
+  copyPhotoRegion(output, metrics, imageData);
 
   return new ImageData(output, metrics.outputWidth, metrics.outputHeight);
-}
-
-export function composeSprocketFrame(imageData, options = {}) {
-  return createSprocketFrameImageData(imageData, options, { includePhoto: true });
-}
-
-export function composeSprocketFrameBackground(imageData, options = {}) {
-  return createSprocketFrameImageData(imageData, options, { includePhoto: false });
 }
 
 export function hasSprocketFrameEnabled(settings) {

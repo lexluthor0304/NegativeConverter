@@ -7,7 +7,6 @@ import {
   THIRTY_FIVE_MM_SPROCKET_SPEC,
   buildDxEdgeCodeBlocks,
   composeSprocketFrame,
-  composeSprocketFrameBackground,
   getSprocketFrameMetrics,
   hasSprocketFrameEnabled,
   normalizeSprocketEdgeMarkings
@@ -57,12 +56,6 @@ assert.equal(framed.height, metrics.outputHeight);
 const firstPhotoPixel = ((metrics.bandHeight * framed.width) + metrics.sideMargin) * 4;
 assert.deepEqual(Array.from(framed.data.slice(firstPhotoPixel, firstPhotoPixel + 4)), [20, 80, 140, 255]);
 assertPhotoRegionMatchesSource(framed, metrics, source);
-
-const frameBackground = composeSprocketFrameBackground(source);
-assert.equal(frameBackground.width, metrics.outputWidth);
-assert.equal(frameBackground.height, metrics.outputHeight);
-assert.deepEqual(Array.from(frameBackground.data.slice(firstPhotoPixel, firstPhotoPixel + 4)), [0, 0, 0, 0]);
-assert.notDeepEqual(Array.from(frameBackground.data.slice(0, 4)), [0, 0, 0, 0]);
 
 const filmPixel = 0;
 const filmPixelRgba = Array.from(framed.data.slice(filmPixel, filmPixel + 4));
