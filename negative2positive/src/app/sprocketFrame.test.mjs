@@ -23,11 +23,27 @@ if (typeof globalThis.ImageData === 'undefined') {
 }
 
 const sourcePixels = new Uint8ClampedArray(10 * 6 * 4);
-for (let i = 0; i < sourcePixels.length; i += 4) {
-  sourcePixels[i] = 20;
-  sourcePixels[i + 1] = 80;
-  sourcePixels[i + 2] = 140;
-  sourcePixels[i + 3] = 255;
+for (let y = 0; y < 6; y++) {
+  for (let x = 0; x < 10; x++) {
+    const i = (y * 10 + x) * 4;
+    sourcePixels[i] = 20 + x * 7 + y * 3;
+    sourcePixels[i + 1] = 80 + x * 5 + y * 11;
+    sourcePixels[i + 2] = 140 + x * 4 + y * 3;
+    sourcePixels[i + 3] = 255;
+  }
+}
+
+function assertPhotoRegionMatchesSource(framedImageData, frameMetrics, sourceImageData) {
+  for (let y = 0; y < sourceImageData.height; y++) {
+    for (let x = 0; x < sourceImageData.width; x++) {
+      const srcIndex = (y * sourceImageData.width + x) * 4;
+      const dstIndex = ((y + frameMetrics.bandHeight) * framedImageData.width + frameMetrics.sideMargin + x) * 4;
+      assert.deepEqual(
+        Array.from(framedImageData.data.slice(dstIndex, dstIndex + 4)),
+        Array.from(sourceImageData.data.slice(srcIndex, srcIndex + 4))
+      );
+    }
+  }
 }
 
 const source = new ImageData(sourcePixels, 10, 6);
@@ -39,6 +55,7 @@ assert.equal(framed.height, metrics.outputHeight);
 
 const firstPhotoPixel = ((metrics.bandHeight * framed.width) + metrics.sideMargin) * 4;
 assert.deepEqual(Array.from(framed.data.slice(firstPhotoPixel, firstPhotoPixel + 4)), [20, 80, 140, 255]);
+assertPhotoRegionMatchesSource(framed, metrics, source);
 
 const filmPixel = 0;
 const filmPixelRgba = Array.from(framed.data.slice(filmPixel, filmPixel + 4));
@@ -91,16 +108,7 @@ const marked = composeSprocketFrame(source, markedOptions);
 assert.equal(marked.width, markedMetrics.outputWidth);
 assert.equal(marked.height, markedMetrics.outputHeight);
 assert.ok(marked.height > framed.height);
-for (let y = 0; y < source.height; y++) {
-  for (let x = 0; x < source.width; x++) {
-    const srcIndex = (y * source.width + x) * 4;
-    const dstIndex = ((y + markedMetrics.bandHeight) * marked.width + markedMetrics.sideMargin + x) * 4;
-    assert.deepEqual(
-      Array.from(marked.data.slice(dstIndex, dstIndex + 4)),
-      Array.from(source.data.slice(srcIndex, srcIndex + 4))
-    );
-  }
-}
+assertPhotoRegionMatchesSource(marked, markedMetrics, source);
 
 const assertEdgeLayoutDoesNotOverlapHoles = (layoutMetrics) => {
   const topTextBottom = layoutMetrics.topMarkingY + layoutMetrics.edgeTextHeight;
