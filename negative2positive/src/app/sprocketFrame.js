@@ -404,6 +404,15 @@ function fillFilmBase(data, metrics, filmColor) {
   }
 }
 
+function copyPhotoRegion(data, metrics, imageData) {
+  const src = imageData.data;
+  for (let y = 0; y < metrics.sourceHeight; y++) {
+    const srcOffset = y * metrics.sourceWidth * 4;
+    const dstOffset = ((y + metrics.bandHeight) * metrics.outputWidth + metrics.sideMargin) * 4;
+    data.set(src.subarray(srcOffset, srcOffset + metrics.sourceWidth * 4), dstOffset);
+  }
+}
+
 function fillRect(data, metrics, left, top, width, height, fill, alpha = 1) {
   const rectLeft = Math.max(0, Math.round(left));
   const rectTop = Math.max(0, Math.round(top));
@@ -1142,19 +1151,14 @@ export function composeSprocketFrame(imageData, options = {}) {
 
   fillFilmBase(output, metrics, filmColor);
 
-  const src = imageData.data;
-  for (let y = 0; y < metrics.sourceHeight; y++) {
-    const srcOffset = y * metrics.sourceWidth * 4;
-    const dstOffset = ((y + metrics.bandHeight) * metrics.outputWidth + metrics.sideMargin) * 4;
-    output.set(src.subarray(srcOffset, srcOffset + metrics.sourceWidth * 4), dstOffset);
-  }
-
   if (edge.overexposedSprockets) {
     paintSprocketTextureSmear(output, metrics, imageData, edge.overexposureStrength);
     paintOverexposedSprockets(output, metrics, edge.overexposureColor);
   }
   paintSprocketRows(output, metrics, holeColor);
   paintEdgeMarkings(output, metrics, edge);
+  // Hard guardrail: edge effects are allowed to touch only the added film border.
+  copyPhotoRegion(output, metrics, imageData);
 
   return new ImageData(output, metrics.outputWidth, metrics.outputHeight);
 }

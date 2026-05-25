@@ -9603,6 +9603,14 @@
       return null;
     }
 
+    async function renderCurrentImageDataForExport() {
+      await ensureFullResolutionReadyForExport();
+      ensureFullRender();
+      const imageData = await getCurrentExportImageData();
+      if (!imageData) throw new Error('No image available for export.');
+      return imageData;
+    }
+
     function notifyExportError(err) {
       console.error('Export failed:', err);
       const message = err && err.message ? err.message : String(err || 'Unknown error');
@@ -9621,21 +9629,20 @@
         overlay.updateProgress(5, lang.loadingAdjusting);
 
         const currentItem = getCurrentQueueItem();
-        if (currentItem && state.currentStep >= 3 && state.processedImageData) {
-          persistCurrentFileSettings({ silent: true });
-          const adjusted = await processFileWithSettings(currentItem.file, currentItem.settings);
-          const outputImageData = applySprocketFrameForExport(adjusted, exportInfo);
+        if (state.currentStep >= 3 && state.processedImageData) {
+          persistCurrentFileSettings({ silent: true, force: true });
+          const imageData = await renderCurrentImageDataForExport();
+          const outputImageData = applySprocketFrameForExport(imageData, exportInfo);
           overlay.updateProgress(60, lang.loadingEncoding);
           blob = await imageDataToBlob(outputImageData, exportInfo.format, state.jpegQuality, exportInfo.bitDepth, (pct) => {
             overlay.updateProgress(60 + pct * 0.35, lang.loadingEncoding);
           });
-          fileName = buildActiveExportFileName(currentItem.file.name, exportInfo);
+          if (currentItem?.file?.name) {
+            fileName = buildActiveExportFileName(currentItem.file.name, exportInfo);
+          }
         } else {
-          await ensureFullResolutionReadyForExport();
-          ensureFullRender();
           overlay.updateProgress(50, lang.loadingEncoding);
-          const imageData = await getCurrentExportImageData();
-          if (!imageData) throw new Error('No image available for export.');
+          const imageData = await renderCurrentImageDataForExport();
           const outputImageData = applySprocketFrameForExport(imageData, exportInfo);
           blob = await imageDataToBlob(outputImageData, exportInfo.format, state.jpegQuality, exportInfo.bitDepth, (pct) => {
             overlay.updateProgress(50 + pct * 0.45, lang.loadingEncoding);
