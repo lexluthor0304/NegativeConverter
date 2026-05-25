@@ -23,6 +23,7 @@
     import {
       DEFAULT_SPROCKET_EDGE_MARKINGS,
       composeSprocketFrame,
+      composeSprocketFrameBackground,
       getSprocketFrameMetrics,
       normalizeSprocketEdgeMarkings
     } from './sprocketFrame.js';
@@ -3362,6 +3363,13 @@
     const beforeAfterScratchCtx = beforeAfterScratchCanvas.getContext('2d', { willReadFrequently: true });
     const sprocketScratchCanvas = document.createElement('canvas');
     const sprocketScratchCtx = sprocketScratchCanvas.getContext('2d', { willReadFrequently: true });
+    const sprocketPreviewFrameCanvas = document.createElement('canvas');
+    const sprocketPreviewFrameCtx = sprocketPreviewFrameCanvas.getContext('2d');
+    const sprocketPreviewFrameCache = {
+      key: '',
+      sourceRef: null,
+      metrics: null
+    };
 
     let transformCanvas = document.createElement('canvas');
     let transformCtx = transformCanvas.getContext('2d');
@@ -3878,9 +3886,73 @@
       ctx.drawImage(sprocketScratchCanvas, 0, 0, targetWidth, targetHeight);
     }
 
-    function renderAdjustedImageDataToMainCanvas(imageData, fullSizeReference = imageData) {
+    function getSprocketPreviewFrameCacheKey(imageData, fullSizeReference, composeOptions) {
+      return JSON.stringify({
+        sourceWidth: imageData.width,
+        sourceHeight: imageData.height,
+        targetWidth: fullSizeReference.width,
+        targetHeight: fullSizeReference.height,
+        edgeMarkings: composeOptions.edgeMarkings
+      });
+    }
+
+    function ensureSprocketPreviewFrameBackground(imageData, fullSizeReference, composeOptions) {
+      if (!sprocketPreviewFrameCtx) return null;
+      const key = getSprocketPreviewFrameCacheKey(imageData, fullSizeReference, composeOptions);
+      if (
+        sprocketPreviewFrameCache.key === key
+        && sprocketPreviewFrameCache.sourceRef === fullSizeReference
+        && sprocketPreviewFrameCache.metrics
+        && sprocketPreviewFrameCanvas.width > 0
+        && sprocketPreviewFrameCanvas.height > 0
+      ) {
+        return sprocketPreviewFrameCache;
+      }
+
+      const background = composeSprocketFrameBackground(imageData, composeOptions);
+      if (sprocketPreviewFrameCanvas.width !== background.width) sprocketPreviewFrameCanvas.width = background.width;
+      if (sprocketPreviewFrameCanvas.height !== background.height) sprocketPreviewFrameCanvas.height = background.height;
+      sprocketPreviewFrameCtx.clearRect(0, 0, background.width, background.height);
+      sprocketPreviewFrameCtx.putImageData(background, 0, 0);
+
+      sprocketPreviewFrameCache.key = key;
+      sprocketPreviewFrameCache.sourceRef = fullSizeReference;
+      sprocketPreviewFrameCache.metrics = getSprocketFrameMetrics(imageData.width, imageData.height, composeOptions);
+      return sprocketPreviewFrameCache;
+    }
+
+    function renderFastSprocketPreview(imageData, fullSizeReference, composeOptions) {
+      const targetMetrics = getSprocketFrameMetrics(fullSizeReference.width, fullSizeReference.height, composeOptions);
+      const frameCache = ensureSprocketPreviewFrameBackground(imageData, fullSizeReference, composeOptions);
+      if (!frameCache) return false;
+      const frameMetrics = frameCache.metrics;
+      setMainCanvasDimensions(targetMetrics.outputWidth, targetMetrics.outputHeight);
+      ctx.clearRect(0, 0, targetMetrics.outputWidth, targetMetrics.outputHeight);
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(sprocketPreviewFrameCanvas, 0, 0, targetMetrics.outputWidth, targetMetrics.outputHeight);
+
+      if (sprocketScratchCanvas.width !== imageData.width) sprocketScratchCanvas.width = imageData.width;
+      if (sprocketScratchCanvas.height !== imageData.height) sprocketScratchCanvas.height = imageData.height;
+      sprocketScratchCtx.putImageData(imageData, 0, 0);
+
+      const scaleX = targetMetrics.outputWidth / frameMetrics.outputWidth;
+      const scaleY = targetMetrics.outputHeight / frameMetrics.outputHeight;
+      ctx.drawImage(
+        sprocketScratchCanvas,
+        frameMetrics.sideMargin * scaleX,
+        frameMetrics.bandHeight * scaleY,
+        frameMetrics.sourceWidth * scaleX,
+        frameMetrics.sourceHeight * scaleY
+      );
+      return true;
+    }
+
+    function renderAdjustedImageDataToMainCanvas(imageData, fullSizeReference = imageData, options = {}) {
       if (state.sprocketPreviewEnabled && !state.cropping) {
         const composeOptions = getSprocketFrameComposeOptions();
+        if (options.fastSprocketPreview && renderFastSprocketPreview(imageData, fullSizeReference, composeOptions)) {
+          return;
+        }
         const frameMetrics = getSprocketFrameMetrics(fullSizeReference.width, fullSizeReference.height, composeOptions);
         const framed = composeSprocketFrame(imageData, composeOptions);
         setMainCanvasDimensions(frameMetrics.outputWidth, frameMetrics.outputHeight);
@@ -5290,10 +5362,14 @@
       applyAdjustmentsToBuffer(source, state, previewAdjustedBuffer, 'preview');
 
       if (source !== state.processedImageData) {
-        renderAdjustedImageDataToMainCanvas(previewAdjustedBuffer, state.processedImageData);
+        renderAdjustedImageDataToMainCanvas(previewAdjustedBuffer, state.processedImageData, {
+          fastSprocketPreview: true
+        });
         state.lastRenderQuality = 'preview';
       } else {
-        renderAdjustedImageDataToMainCanvas(previewAdjustedBuffer, source);
+        renderAdjustedImageDataToMainCanvas(previewAdjustedBuffer, source, {
+          fastSprocketPreview: true
+        });
         state.displayImageData = previewAdjustedBuffer;
         state.lastRenderQuality = 'full';
       }
