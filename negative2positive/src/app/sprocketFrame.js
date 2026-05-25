@@ -361,14 +361,12 @@ function filmBasePixel(metrics, filmColor, x, y) {
   const sprocketShade = Math.sin(((x - phaseStartX) / Math.max(1, metrics.pitch)) * Math.PI * 2) * 0.12;
   const coarse = smoothNoise(x, y, 18, NATURAL_FILM_TEXTURE_SEED + 19) - 0.5;
   const fine = hashNoise(x, y, NATURAL_FILM_TEXTURE_SEED + 31) - 0.5;
-  const leakWave = Math.max(0, Math.sin((x * 0.018) + (y * 0.007) + 1.35));
-  const warmLeak = Math.pow(leakWave, 6) * (inTopBand || inBottomBand ? 1 : 0.28);
   const density = 1.5 + radial * 3.5 + outerEdge * 2.6 + frameShade + sprocketShade + coarse * 6 + fine * 2.4;
 
   return [
-    clamp(Math.round(filmColor[0] + density + warmLeak * 10), 0, 255),
-    clamp(Math.round(filmColor[1] + density * 0.9 + warmLeak * 4.8), 0, 255),
-    clamp(Math.round(filmColor[2] + density * 0.62 + warmLeak * 1.4), 0, 255),
+    clamp(Math.round(filmColor[0] + density), 0, 255),
+    clamp(Math.round(filmColor[1] + density * 0.9), 0, 255),
+    clamp(Math.round(filmColor[2] + density * 0.62), 0, 255),
     filmColor[3]
   ];
 }

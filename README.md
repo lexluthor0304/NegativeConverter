@@ -1,5 +1,9 @@
 # Film Negative → Positive Converter
 
+<p align="center">
+  <img src="img/SAMPLE.jpg" alt="Negative Converter sample output" width="100%">
+</p>
+
 Negative Converter helps film photographers turn scanned or camera-digitized film into clean, natural-looking positives with a workflow made for everyday editing. It brings frame cleanup, film-aware conversion, roll consistency, finishing controls, and export into one focused workspace.
 
 Whether you are reviewing a fresh roll, restoring family negatives, or preparing a consistent set for sharing, the app is designed to make film conversion feel fast, approachable, and dependable while keeping your photos private.
