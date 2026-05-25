@@ -5636,13 +5636,14 @@
 
       state.fullResolutionPending = true;
       const sourceRef = state.conversionSourceImageData;
+      const token = coreReprocessToken;
       const trace = createPerfTrace('fullResolutionRender', {
         reason,
         pixels: getImageDataPixelCount(state.conversionSourceImageData)
       });
 
       const promise = waitForNextFrame()
-        .then(() => rerenderWithCoreControls({ full: true, sourceRef }))
+        .then(() => rerenderWithCoreControls({ full: true, sourceRef, token }))
         .then(() => {
           trace.end({
             outputPixels: getImageDataPixelCount(state.processedImageData),
@@ -5685,6 +5686,15 @@
       scheduleFullResolutionRender('interactive-idle', FULL_RESOLUTION_IDLE_DELAY_MS);
     }
 
+    function cancelScheduledFullResolutionRender() {
+      if (!fullResolutionRenderTimer) return;
+      clearTimeout(fullResolutionRenderTimer);
+      fullResolutionRenderTimer = null;
+      if (!state.fullResolutionPromise) {
+        state.fullResolutionPending = Boolean(state.processedImageDataIsPreview);
+      }
+    }
+
     async function ensureFullResolutionReadyForExport() {
       if (!state.processedImageDataIsPreview && !state.fullResolutionPending) return;
       if (fullResolutionRenderTimer) {
@@ -5704,6 +5714,7 @@
       if (!state.conversionSourceImageData || state.currentStep < 3) return;
 
       const token = ++coreReprocessToken;
+      cancelScheduledFullResolutionRender();
       if (coreReprocessTimer) clearTimeout(coreReprocessTimer);
       coreReprocessTimer = setTimeout(() => {
         coreReprocessTimer = null;
