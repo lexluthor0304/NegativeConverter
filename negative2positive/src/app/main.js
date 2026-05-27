@@ -39,6 +39,7 @@
       isRawLikeFileName,
       loadPngImageData,
       loadRawImageData,
+      loadRawImageDataPreview,
       loadStandardImage
     } from './imageFileLoaders.js';
     import { Histogram } from '../silvercore/ui/Histogram.js';
@@ -3864,9 +3865,19 @@
       }
     }
 
+    const MAX_CANVAS_PIXELS = 8_000_000;  // ~8MP, enough for 4K display
+
     function setMainCanvasDimensions(width, height) {
-      const nextWidth = Math.max(1, Math.round(width));
-      const nextHeight = Math.max(1, Math.round(height));
+      let nextWidth = Math.max(1, Math.round(width));
+      let nextHeight = Math.max(1, Math.round(height));
+      // Cap canvas size to avoid excessive GPU memory and draw latency.
+      // CSS scaling handles the visual upscale — imperceptible on screen.
+      const pixelCount = nextWidth * nextHeight;
+      if (pixelCount > MAX_CANVAS_PIXELS) {
+        const scale = Math.sqrt(MAX_CANVAS_PIXELS / pixelCount);
+        nextWidth = Math.max(1, Math.round(nextWidth * scale));
+        nextHeight = Math.max(1, Math.round(nextHeight * scale));
+      }
       if (canvas.width !== nextWidth) canvas.width = nextWidth;
       if (canvas.height !== nextHeight) canvas.height = nextHeight;
       adjustCanvasDisplay(nextWidth, nextHeight);
@@ -3964,7 +3975,7 @@
       }
 
       setMainCanvasDimensions(fullSizeReference.width, fullSizeReference.height);
-      drawImageDataToMainCanvas(imageData, fullSizeReference.width, fullSizeReference.height);
+      drawImageDataToMainCanvas(imageData, canvas.width, canvas.height);
     }
 
     function syncTransformCanvasFromMainCanvas() {
@@ -6449,13 +6460,31 @@
 
         if (isRawLikeFile) {
           const arrayBuffer = await file.arrayBuffer();
-          overlay.updateProgress(30, lang.loadingProcessing);
-          imageData = await loadRawImageData(arrayBuffer, fileName, {
-            onMetadata(meta) {
-              extractedRawMeta = meta;
-            }
-          });
-          overlay.updateProgress(90, lang.loadingProcessing);
+          const isHeavy = arrayBuffer.byteLength > 100 * 1024 * 1024;
+
+          if (isHeavy) {
+            // Two-stage loading: show fast half-size preview immediately,
+            // then decode full resolution in the background.
+            overlay.updateProgress(20, lang.loadingProcessing);
+            imageData = await loadRawImageDataPreview(arrayBuffer, fileName, {
+              onMetadata(meta) {
+                extractedRawMeta = meta;
+              }
+            });
+            overlay.updateProgress(60, lang.loadingProcessing);
+
+            // Schedule full-res decode. Store buffer so it stays alive.
+            state._pendingFullResBuffer = arrayBuffer;
+            state._pendingFullResFileName = fileName;
+          } else {
+            overlay.updateProgress(30, lang.loadingProcessing);
+            imageData = await loadRawImageData(arrayBuffer, fileName, {
+              onMetadata(meta) {
+                extractedRawMeta = meta;
+              }
+            });
+            overlay.updateProgress(90, lang.loadingProcessing);
+          }
         } else if (file.type === 'image/png') {
           const arrayBuffer = await file.arrayBuffer();
           imageData = await loadPngImageData(arrayBuffer);
@@ -6513,6 +6542,10 @@
           overlay.updateProgress(100, lang.loadingComplete);
           await new Promise(r => setTimeout(r, 200));
           overlay.hide();
+          // Schedule background full-resolution decode if we used fast preview
+          if (state._pendingFullResBuffer) {
+            scheduleBackgroundFullResDecode();
+          }
         }
       } catch (err) {
         overlay.hide();
@@ -6529,6 +6562,45 @@
               ? (i18n[currentLang].rawUnsupported || 'RAW decode is not supported in this Safari version. Update Safari or convert to TIFF/JPEG first.')
               : (i18n[currentLang].loadError || 'Error loading file');
         placeholder.innerHTML = `<p style="color: var(--danger);">${message}</p>`;
+      }
+    }
+
+    async function scheduleBackgroundFullResDecode() {
+      const buf = state._pendingFullResBuffer;
+      const name = state._pendingFullResFileName;
+      if (!buf || !name) return;
+      state._pendingFullResBuffer = null;
+      state._pendingFullResFileName = null;
+
+      console.info('[RAW] starting background full-res decode for', name, (buf.byteLength / 1024 / 1024).toFixed(0) + 'MB');
+
+      try {
+        const fullImageData = await loadRawImageData(buf, name, {
+          onMetadata(meta) {
+            if (meta && !state.rawMetadata) {
+              state.rawMetadata = meta;
+              applyLensMetadataPrefill(meta);
+            }
+          }
+        });
+        if (!fullImageData) return;
+
+        // Replace the preview with the full-res image.
+        const wasCropped = !!state.croppedImageData;
+        state.originalImageData = fullImageData;
+        state.loadedBaseImageData = fullImageData;
+        state.original16 = fullImageData.__image16 || fromImageData8(fullImageData);
+        if (!wasCropped) {
+          state.croppedImageData = null;
+          state.cropRegion = null;
+        }
+        invalidateSilverCoreCache();
+        displayNegative(fullImageData);
+        updateCanvasVisibility();
+        console.info('[RAW] background full-res decode complete');
+      } catch (err) {
+        console.warn('[RAW] background full-res decode failed, keeping preview', err.message);
+        // Keep the preview — it's still usable.
       }
     }
 
@@ -7590,8 +7662,10 @@
     }
 
     const coreReprocessHandlers = {
-      onInput: () => scheduleCoreReprocess({ full: false }),
-      onCommit: () => scheduleCoreReprocess({ full: true })
+      // Dragging: fast pixel-level adjustments only (no SilverCore reconversion).
+      onInput: () => schedulePreviewUpdate(),
+      // Release: re-run SilverCore on preview for accurate tone mapping.
+      onCommit: () => scheduleCoreReprocess({ full: false })
     };
 
     function cacheBorderBufferValueForBorderMode(value) {

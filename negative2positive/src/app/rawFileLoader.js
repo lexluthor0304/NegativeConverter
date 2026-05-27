@@ -110,6 +110,7 @@ function withTimeout(promise, ms, onTimeout) {
 export async function loadRawFile(buffer, fileName, options = {}) {
   const normalizedFileName = String(fileName || '').toLowerCase();
   const onMetadata = typeof options.onMetadata === 'function' ? options.onMetadata : null;
+  const fastPreview = options.preview === true;
 
   if (normalizedFileName.endsWith('.tif') || normalizedFileName.endsWith('.tiff')) {
     try {
@@ -157,8 +158,16 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     console.warn('[RAW] heavy IIQ has no usable embedded preview, falling through to LibRaw');
   }
 
-  const openTimeoutMs = bufBytes > RAW_SIZE_HUGE ? RAW_OPEN_TIMEOUT_MS_HUGE : RAW_OPEN_TIMEOUT_MS;
-  const decodeTimeoutMs = bufBytes > RAW_SIZE_HUGE ? RAW_DECODE_TIMEOUT_MS_HUGE : RAW_DECODE_TIMEOUT_MS;
+  // Fast preview: use half-size for ~4x speedup on large files
+  const useHalfSize = fastPreview && bufBytes > RAW_SIZE_HEAVY;
+  const use8Bit = fastPreview;
+
+  const openTimeoutMs = fastPreview
+    ? Math.min(bufBytes > RAW_SIZE_HUGE ? RAW_OPEN_TIMEOUT_MS_HUGE : RAW_OPEN_TIMEOUT_MS, 15_000)
+    : (bufBytes > RAW_SIZE_HUGE ? RAW_OPEN_TIMEOUT_MS_HUGE : RAW_OPEN_TIMEOUT_MS);
+  const decodeTimeoutMs = fastPreview
+    ? Math.min(bufBytes > RAW_SIZE_HUGE ? RAW_DECODE_TIMEOUT_MS_HUGE : RAW_DECODE_TIMEOUT_MS, 30_000)
+    : (bufBytes > RAW_SIZE_HUGE ? RAW_DECODE_TIMEOUT_MS_HUGE : RAW_DECODE_TIMEOUT_MS);
 
   let raw;
   try {
@@ -186,7 +195,7 @@ export async function loadRawFile(buffer, fileName, options = {}) {
   };
 
   try {
-    const libRawInput = new Uint8Array(buffer.slice(0));
+    const libRawInput = new Uint8Array(buffer);
     await withTimeout(
       raw.open(libRawInput, {
         noInterpolation: false,
@@ -194,7 +203,8 @@ export async function loadRawFile(buffer, fileName, options = {}) {
         useCameraWb: true,
         useCameraMatrix: 3,
         outputColor: 1,
-        outputBps: 16
+        outputBps: use8Bit ? 8 : 16,
+        halfSize: useHalfSize
       }),
       openTimeoutMs,
       killWorker,
