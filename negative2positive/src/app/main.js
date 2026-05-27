@@ -3937,15 +3937,10 @@
 
       const scaleX = targetMetrics.outputWidth / frameMetrics.outputWidth;
       const scaleY = targetMetrics.outputHeight / frameMetrics.outputHeight;
-      const photoX = frameMetrics.isPortrait
-        ? frameMetrics.bandHeight * scaleX
-        : frameMetrics.sideMargin * scaleX;
-      const photoY = frameMetrics.isPortrait
-        ? frameMetrics.sideMargin * scaleY
-        : frameMetrics.bandHeight * scaleY;
       ctx.drawImage(
         sprocketScratchCanvas,
-        photoX, photoY,
+        frameMetrics.sideMargin * scaleX,
+        frameMetrics.bandHeight * scaleY,
         frameMetrics.sourceWidth * scaleX,
         frameMetrics.sourceHeight * scaleY
       );
@@ -7987,7 +7982,7 @@
       pushUndo('rotation');
       const sourceOriginal = state.originalImageData;
       const sourceCrop = state.cropRegion ? { ...state.cropRegion } : null;
-      const shouldPreserveCrop = state.currentStep >= 3 && Boolean(sourceCrop);
+      const shouldPreserveCrop = Boolean(sourceCrop);
 
       const rotatedData = applyRotationToImageData(sourceOriginal, normalizedAngle);
       if (!rotatedData) return;

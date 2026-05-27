@@ -165,15 +165,13 @@ export function getSprocketFrameMetrics(width, height, options = {}) {
   const edge = getComposeEdgeMarkings(options);
   const sourceWidth = Math.max(1, Math.round(Number(width) || 1));
   const sourceHeight = Math.max(1, Math.round(Number(height) || 1));
-  const isPortrait = sourceHeight > sourceWidth;
   const shortSide = Math.min(sourceWidth, sourceHeight);
   const showMarkings = hasVisibleEdgeMarkings(edge);
   const spec = THIRTY_FIVE_MM_SPROCKET_SPEC;
 
-  // For portrait (2:3), the sprocket bands go on left/right instead of top/bottom.
-  // Internally swap width↔height so the existing calculations work correctly.
-  const sx = isPortrait ? sourceHeight : sourceWidth;
-  const sy = isPortrait ? sourceWidth : sourceHeight;
+  // Input is always landscape at this point (portrait images are pre-rotated by the caller).
+  const sx = sourceWidth;
+  const sy = sourceHeight;
   const imagePxPerMmX = sx / spec.stillFrameWidthMm;
   const filmEdgeBandMm = (spec.filmWidthMm - spec.stillFrameHeightMm) / 2;
   const physicalBandHeight = Math.round(sy * filmEdgeBandMm / spec.stillFrameHeightMm);
@@ -198,8 +196,8 @@ export function getSprocketFrameMetrics(width, height, options = {}) {
     Math.max(10, bandHeight - edgeGap * 2)
   );
   const holeRadius = Math.max(2, Math.round(holeHeight * 0.18));
-  const outputWidth = isPortrait ? sourceWidth + bandHeight * 2 : sourceWidth + sideMargin * 2;
-  const outputHeight = isPortrait ? sourceHeight + sideMargin * 2 : sourceHeight + bandHeight * 2;
+  const outputWidth = sourceWidth + sideMargin * 2;
+  const outputHeight = sourceHeight + bandHeight * 2;
   const edgeTextPixelSize = Math.max(7, Math.round(filmEdgePxPerMmY * 1.12));
   const edgeTextHeight = Math.max(1, Math.ceil(edgeTextPixelSize * 1.35));
   const pitch = Math.max(holeWidth + edgeGap * 2, Math.round(spec.perforationPitchMm * imagePxPerMmX));
@@ -246,12 +244,6 @@ export function getSprocketFrameMetrics(width, height, options = {}) {
     )
     : 0;
 
-  // For portrait, swap X/Y semantics: holes go on left/right instead of top/bottom.
-  const leftX = isPortrait ? outerPerfMargin : topY;
-  const rightX = isPortrait ? (bandHeight + sourceWidth + bandHeight - outerPerfMargin - holeHeight) : topY;
-  const leftMarkingY = isPortrait ? topMarkingY : 0;
-  const rightMarkingY = isPortrait ? bottomMarkingY : 0;
-
   return {
     sourceWidth,
     sourceHeight,
@@ -269,21 +261,12 @@ export function getSprocketFrameMetrics(width, height, options = {}) {
     firstHoleIndex,
     frameStartX,
     startX,
-    // Landscape: sprocket bands are top/bottom
     topY,
     bottomY,
     topMarkingY,
     topTextY,
     bottomMarkingY,
     bottomDxY,
-    // Portrait: sprocket bands are left/right
-    isPortrait,
-    leftX,
-    rightX,
-    leftMarkingY,
-    rightMarkingY,
-    leftBandWidth: bandHeight,    // same value, renamed for clarity
-    rightBandStart: sourceWidth + bandHeight,
     edgeTextPixelSize,
     edgeTextHeight,
     dxCodeHeight,
@@ -415,58 +398,29 @@ function fillFilmBase(data, metrics, filmColor) {
     }
   };
 
-  if (metrics.isPortrait) {
-    // Bands on left and right sides
-    paintSpan(0, 0, metrics.bandHeight, metrics.outputHeight);
-    paintSpan(metrics.rightBandStart, 0, metrics.outputWidth - metrics.rightBandStart, metrics.outputHeight);
-    if (metrics.sideMargin > 0) {
-      paintSpan(metrics.bandHeight, 0, metrics.sourceWidth, metrics.sideMargin);
-      paintSpan(metrics.bandHeight, metrics.sideMargin + metrics.sourceHeight, metrics.sourceWidth, metrics.sideMargin);
-    }
-  } else {
-    paintSpan(0, 0, metrics.outputWidth, metrics.bandHeight);
-    paintSpan(0, metrics.bottomBandTop, metrics.outputWidth, metrics.outputHeight - metrics.bottomBandTop);
-    if (metrics.sideMargin > 0) {
-      const middleTop = metrics.bandHeight;
-      const middleHeight = metrics.sourceHeight;
-      paintSpan(0, middleTop, metrics.sideMargin, middleHeight);
-      paintSpan(metrics.sideMargin + metrics.sourceWidth, middleTop, metrics.sideMargin, middleHeight);
-    }
+  paintSpan(0, 0, metrics.outputWidth, metrics.bandHeight);
+  paintSpan(0, metrics.bottomBandTop, metrics.outputWidth, metrics.outputHeight - metrics.bottomBandTop);
+  if (metrics.sideMargin > 0) {
+    const middleTop = metrics.bandHeight;
+    const middleHeight = metrics.sourceHeight;
+    paintSpan(0, middleTop, metrics.sideMargin, middleHeight);
+    paintSpan(metrics.sideMargin + metrics.sourceWidth, middleTop, metrics.sideMargin, middleHeight);
   }
 }
 
 function copyPhotoRegion(data, metrics, imageData) {
   const src = imageData.data;
-  if (metrics.isPortrait) {
-    for (let y = 0; y < metrics.sourceHeight; y++) {
-      const srcOffset = y * metrics.sourceWidth * 4;
-      const dstX = metrics.bandHeight;
-      const dstY = y + metrics.sideMargin;
-      const dstOffset = (dstY * metrics.outputWidth + dstX) * 4;
-      data.set(src.subarray(srcOffset, srcOffset + metrics.sourceWidth * 4), dstOffset);
-    }
-  } else {
-    for (let y = 0; y < metrics.sourceHeight; y++) {
-      const srcOffset = y * metrics.sourceWidth * 4;
-      const dstOffset = ((y + metrics.bandHeight) * metrics.outputWidth + metrics.sideMargin) * 4;
-      data.set(src.subarray(srcOffset, srcOffset + metrics.sourceWidth * 4), dstOffset);
-    }
+  for (let y = 0; y < metrics.sourceHeight; y++) {
+    const srcOffset = y * metrics.sourceWidth * 4;
+    const dstOffset = ((y + metrics.bandHeight) * metrics.outputWidth + metrics.sideMargin) * 4;
+    data.set(src.subarray(srcOffset, srcOffset + metrics.sourceWidth * 4), dstOffset);
   }
 }
 
 function clearPhotoRegion(data, metrics) {
-  if (metrics.isPortrait) {
-    for (let y = 0; y < metrics.sourceHeight; y++) {
-      const dstX = metrics.bandHeight;
-      const dstY = y + metrics.sideMargin;
-      const dstOffset = (dstY * metrics.outputWidth + dstX) * 4;
-      data.fill(0, dstOffset, dstOffset + metrics.sourceWidth * 4);
-    }
-  } else {
-    for (let y = 0; y < metrics.sourceHeight; y++) {
-      const dstOffset = ((y + metrics.bandHeight) * metrics.outputWidth + metrics.sideMargin) * 4;
-      data.fill(0, dstOffset, dstOffset + metrics.sourceWidth * 4);
-    }
+  for (let y = 0; y < metrics.sourceHeight; y++) {
+    const dstOffset = ((y + metrics.bandHeight) * metrics.outputWidth + metrics.sideMargin) * 4;
+    data.fill(0, dstOffset, dstOffset + metrics.sourceWidth * 4);
   }
 }
 
@@ -535,22 +489,11 @@ function paintSprocketHole(data, metrics, left, top, fill) {
 }
 
 function forEachSprocketHole(metrics, callback) {
-  if (metrics.isPortrait) {
-    // Portrait: holes are on left and right sides, running vertically
-    for (let i = 0; i < metrics.holeCount; i++) {
-      const holeIndex = (metrics.firstHoleIndex || 0) + i;
-      const top = (metrics.frameStartX ?? metrics.startX) + holeIndex * metrics.pitch;
-      callback(metrics.leftX, top, holeIndex);
-      callback(metrics.rightX, top, holeIndex);
-    }
-  } else {
-    // Landscape: holes on top and bottom
-    for (let i = 0; i < metrics.holeCount; i++) {
-      const holeIndex = (metrics.firstHoleIndex || 0) + i;
-      const left = (metrics.frameStartX ?? metrics.startX) + holeIndex * metrics.pitch;
-      callback(left, metrics.topY, holeIndex);
-      callback(left, metrics.bottomY, holeIndex);
-    }
+  for (let i = 0; i < metrics.holeCount; i++) {
+    const holeIndex = (metrics.firstHoleIndex || 0) + i;
+    const left = (metrics.frameStartX ?? metrics.startX) + holeIndex * metrics.pitch;
+    callback(left, metrics.topY, holeIndex);
+    callback(left, metrics.bottomY, holeIndex);
   }
 }
 
@@ -564,13 +507,8 @@ function roundedRectDistance(px, py, left, top, width, height, radius) {
   return outside + inside - radius;
 }
 
-function getSprocketBandClip(metrics, offset) {
-  if (metrics.isPortrait) {
-    return offset < metrics.bandHeight
-      ? { left: 0, right: metrics.bandHeight }
-      : { left: metrics.rightBandStart, right: metrics.outputWidth };
-  }
-  return offset < metrics.bandHeight
+function getSprocketBandClip(metrics, top) {
+  return top < metrics.bandHeight
     ? { top: 0, bottom: metrics.bandHeight }
     : { top: metrics.bottomBandTop, bottom: metrics.outputHeight };
 }
@@ -580,18 +518,10 @@ function paintSprocketGlow(data, metrics, left, top, fill, strength = 1) {
   if (amount <= 0) return;
   const spread = Math.max(4, Math.round(metrics.holeHeight * (0.42 + amount * 0.38)));
   const bandClip = getSprocketBandClip(metrics, top);
-  const isPortrait = metrics.isPortrait;
-
-  const rectLeft = Math.max(isPortrait ? (bandClip.left || 0) : 0, Math.round(left - spread));
-  const rectTop = Math.max(isPortrait ? 0 : (bandClip.top || 0), Math.round(top - spread));
-  const rectRight = Math.min(
-    isPortrait ? (bandClip.right || metrics.outputWidth) : metrics.outputWidth,
-    Math.round(left + metrics.holeWidth + spread)
-  );
-  const rectBottom = Math.min(
-    isPortrait ? metrics.outputHeight : (bandClip.bottom || metrics.outputHeight),
-    Math.round(top + metrics.holeHeight + spread)
-  );
+  const rectLeft = Math.max(0, Math.round(left - spread));
+  const rectTop = Math.max(bandClip.top, Math.round(top - spread));
+  const rectRight = Math.min(metrics.outputWidth, Math.round(left + metrics.holeWidth + spread));
+  const rectBottom = Math.min(bandClip.bottom, Math.round(top + metrics.holeHeight + spread));
 
   for (let y = rectTop; y < rectBottom; y++) {
     for (let x = rectLeft; x < rectRight; x++) {
@@ -601,10 +531,10 @@ function paintSprocketGlow(data, metrics, left, top, fill, strength = 1) {
       );
       if (distance < 0 || distance > spread) continue;
       const falloff = 1 - distance / spread;
-      const isNear = isPortrait ? (left < metrics.bandHeight) : (top < metrics.bandHeight);
-      const inward = isNear
-        ? clamp(isPortrait ? ((x - left) / Math.max(1, metrics.holeWidth + spread)) : ((y - top) / Math.max(1, metrics.holeHeight + spread)), 0, 1)
-        : clamp(isPortrait ? ((left + metrics.holeWidth - x) / Math.max(1, metrics.holeWidth + spread)) : ((top + metrics.holeHeight - y) / Math.max(1, metrics.holeHeight + spread)), 0, 1);
+      const isTopRow = top < metrics.bandHeight;
+      const inward = isTopRow
+        ? clamp((y - top) / Math.max(1, metrics.holeHeight + spread), 0, 1)
+        : clamp((top + metrics.holeHeight - y) / Math.max(1, metrics.holeHeight + spread), 0, 1);
       const localScale = Math.max(4, Math.round(metrics.holeHeight * 0.42));
       const coarse = smoothNoise(x - left, y - top, localScale, 914);
       const fine = hashNoise((x - left) * 1.7, (y - top) * 1.3, 915);
@@ -1243,11 +1173,59 @@ function createSprocketFrameImageData(imageData, options = {}, { includePhoto = 
   return new ImageData(output, metrics.outputWidth, metrics.outputHeight);
 }
 
+function isPortrait(imageData) {
+  return imageData && imageData.height > imageData.width;
+}
+
+function rotateImageData90(imageData) {
+  // Rotate 90° clockwise: landscape → portrait, or portrait → landscape
+  const srcW = imageData.width, srcH = imageData.height;
+  const dstW = srcH, dstH = srcW;
+  const src = imageData.data;
+  const dst = new Uint8ClampedArray(dstW * dstH * 4);
+  for (let y = 0; y < srcH; y++) {
+    for (let x = 0; x < srcW; x++) {
+      const si = (y * srcW + x) * 4;
+      const di = ((x) * dstW + (dstW - 1 - y)) * 4;
+      dst[di] = src[si]; dst[di + 1] = src[si + 1];
+      dst[di + 2] = src[si + 2]; dst[di + 3] = src[si + 3];
+    }
+  }
+  return new ImageData(dst, dstW, dstH);
+}
+
+function rotateImageData270(imageData) {
+  // Rotate 270° clockwise (90° counter-clockwise)
+  const srcW = imageData.width, srcH = imageData.height;
+  const dstW = srcH, dstH = srcW;
+  const src = imageData.data;
+  const dst = new Uint8ClampedArray(dstW * dstH * 4);
+  for (let y = 0; y < srcH; y++) {
+    for (let x = 0; x < srcW; x++) {
+      const si = (y * srcW + x) * 4;
+      const di = ((dstW - 1 - x) * dstW + y) * 4;
+      dst[di] = src[si]; dst[di + 1] = src[si + 1];
+      dst[di + 2] = src[si + 2]; dst[di + 3] = src[si + 3];
+    }
+  }
+  return new ImageData(dst, dstW, dstH);
+}
+
 export function composeSprocketFrame(imageData, options = {}) {
+  if (isPortrait(imageData)) {
+    const rotated = rotateImageData90(imageData);
+    const framed = createSprocketFrameImageData(rotated, options, { includePhoto: true });
+    return rotateImageData270(framed);
+  }
   return createSprocketFrameImageData(imageData, options, { includePhoto: true });
 }
 
 export function composeSprocketFrameBackground(imageData, options = {}) {
+  if (isPortrait(imageData)) {
+    const rotated = rotateImageData90(imageData);
+    const framed = createSprocketFrameImageData(rotated, options, { includePhoto: false });
+    return rotateImageData270(framed);
+  }
   return createSprocketFrameImageData(imageData, options, { includePhoto: false });
 }
 
