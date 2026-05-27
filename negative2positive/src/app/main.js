@@ -3853,7 +3853,12 @@
       if (options.render === false) return;
       if (state.beforeAfterActive) exitBeforeAfter();
       if (state.currentStep >= 3 && state.processedImageData) {
-        updatePreview();
+        // Draw the already-adjusted full-res buffer to canvas — no recompute, instant GPU copy.
+        const display = state.displayImageData || state.processedImageData;
+        renderAdjustedImageDataToMainCanvas(display, display, {
+          fastSprocketPreview: true
+        });
+        renderHistogram(display);
         return;
       }
 
