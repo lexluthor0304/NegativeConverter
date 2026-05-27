@@ -57,7 +57,7 @@
     } from '../workers/workerBridge.js';
 
     const PERF_LOG_THRESHOLD_MS = 120;
-    const FULL_RESOLUTION_IDLE_DELAY_MS = 1800;
+    const FULL_RESOLUTION_IDLE_DELAY_MS = 8000;  // long enough that user won't trigger it while adjusting
 
     function getPerfNow() {
       return (typeof performance !== 'undefined' && typeof performance.now === 'function')
@@ -3865,19 +3865,9 @@
       }
     }
 
-    const MAX_CANVAS_PIXELS = 8_000_000;  // ~8MP, enough for 4K display
-
     function setMainCanvasDimensions(width, height) {
-      let nextWidth = Math.max(1, Math.round(width));
-      let nextHeight = Math.max(1, Math.round(height));
-      // Cap canvas size to avoid excessive GPU memory and draw latency.
-      // CSS scaling handles the visual upscale — imperceptible on screen.
-      const pixelCount = nextWidth * nextHeight;
-      if (pixelCount > MAX_CANVAS_PIXELS) {
-        const scale = Math.sqrt(MAX_CANVAS_PIXELS / pixelCount);
-        nextWidth = Math.max(1, Math.round(nextWidth * scale));
-        nextHeight = Math.max(1, Math.round(nextHeight * scale));
-      }
+      const nextWidth = Math.max(1, Math.round(width));
+      const nextHeight = Math.max(1, Math.round(height));
       if (canvas.width !== nextWidth) canvas.width = nextWidth;
       if (canvas.height !== nextHeight) canvas.height = nextHeight;
       adjustCanvasDisplay(nextWidth, nextHeight);
@@ -3950,8 +3940,8 @@
       if (sprocketScratchCanvas.height !== imageData.height) sprocketScratchCanvas.height = imageData.height;
       sprocketScratchCtx.putImageData(imageData, 0, 0);
 
-      const scaleX = canvas.width / frameMetrics.outputWidth;
-      const scaleY = canvas.height / frameMetrics.outputHeight;
+      const scaleX = targetMetrics.outputWidth / frameMetrics.outputWidth;
+      const scaleY = targetMetrics.outputHeight / frameMetrics.outputHeight;
       ctx.drawImage(
         sprocketScratchCanvas,
         frameMetrics.sideMargin * scaleX,
@@ -3975,7 +3965,7 @@
       }
 
       setMainCanvasDimensions(fullSizeReference.width, fullSizeReference.height);
-      drawImageDataToMainCanvas(imageData, canvas.width, canvas.height);
+      drawImageDataToMainCanvas(imageData, fullSizeReference.width, fullSizeReference.height);
     }
 
     function syncTransformCanvasFromMainCanvas() {
