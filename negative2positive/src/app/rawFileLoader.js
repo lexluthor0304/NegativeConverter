@@ -237,6 +237,10 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     }
     throw err;
   }
+  if (!result || !result.data) {
+    console.error('[RAW] imageData returned empty result', result);
+    return await handleTimeoutFallback();
+  }
   const { width, height, data: rgbData } = result;
 
   const pixelCount = width * height;
