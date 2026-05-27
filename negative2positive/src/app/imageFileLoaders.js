@@ -16,6 +16,11 @@ export async function loadRawImageData(buffer, fileName, options) {
   return loadRawFile(buffer, fileName, options);
 }
 
+export async function loadRawImageDataPreview(buffer, fileName, options) {
+  const { loadRawFile } = await import('./rawFileLoader.js');
+  return loadRawFile(buffer, fileName, { ...options, preview: true });
+}
+
 export async function loadPngImageData(buffer) {
   const { loadPngFile } = await import('./pngFileLoader.js');
   return loadPngFile(buffer);
