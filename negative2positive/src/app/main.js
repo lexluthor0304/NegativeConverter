@@ -3950,8 +3950,8 @@
       if (sprocketScratchCanvas.height !== imageData.height) sprocketScratchCanvas.height = imageData.height;
       sprocketScratchCtx.putImageData(imageData, 0, 0);
 
-      const scaleX = targetMetrics.outputWidth / frameMetrics.outputWidth;
-      const scaleY = targetMetrics.outputHeight / frameMetrics.outputHeight;
+      const scaleX = canvas.width / frameMetrics.outputWidth;
+      const scaleY = canvas.height / frameMetrics.outputHeight;
       ctx.drawImage(
         sprocketScratchCanvas,
         frameMetrics.sideMargin * scaleX,
