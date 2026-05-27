@@ -3854,7 +3854,6 @@
       if (state.beforeAfterActive) exitBeforeAfter();
       if (state.currentStep >= 3 && state.processedImageData) {
         updatePreview();
-        scheduleFullUpdate();
         return;
       }
 
