@@ -3942,9 +3942,9 @@
       if (!frameCache) return false;
       const frameMetrics = frameCache.metrics;
       setMainCanvasDimensions(targetMetrics.outputWidth, targetMetrics.outputHeight);
-      ctx.clearRect(0, 0, targetMetrics.outputWidth, targetMetrics.outputHeight);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.imageSmoothingEnabled = true;
-      ctx.drawImage(sprocketPreviewFrameCanvas, 0, 0, targetMetrics.outputWidth, targetMetrics.outputHeight);
+      ctx.drawImage(sprocketPreviewFrameCanvas, 0, 0, canvas.width, canvas.height);
 
       if (sprocketScratchCanvas.width !== imageData.width) sprocketScratchCanvas.width = imageData.width;
       if (sprocketScratchCanvas.height !== imageData.height) sprocketScratchCanvas.height = imageData.height;
