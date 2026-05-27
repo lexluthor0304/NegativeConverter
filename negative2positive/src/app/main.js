@@ -5628,9 +5628,7 @@
       }
       const fullW = state.processedImageData ? state.processedImageData.width : processed.width;
       const fullH = state.processedImageData ? state.processedImageData.height : processed.height;
-      canvas.width = fullW;
-      canvas.height = fullH;
-      adjustCanvasDisplay(fullW, fullH);
+      setMainCanvasDimensions(fullW, fullH);
     }
 
     let _coreReprocessInFlight = false;
