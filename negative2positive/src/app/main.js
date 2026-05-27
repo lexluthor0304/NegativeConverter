@@ -3922,6 +3922,10 @@
     }
 
     function renderFastSprocketPreview(imageData, fullSizeReference, composeOptions) {
+      // Portrait images go through the full compose path (composeSprocketFrame
+      // handles pre/post rotation internally).
+      if (imageData.height > imageData.width) return false;
+
       const targetMetrics = getSprocketFrameMetrics(fullSizeReference.width, fullSizeReference.height, composeOptions);
       const frameCache = ensureSprocketPreviewFrameBackground(imageData, fullSizeReference, composeOptions);
       if (!frameCache) return false;
@@ -3953,10 +3957,9 @@
         if (options.fastSprocketPreview && renderFastSprocketPreview(imageData, fullSizeReference, composeOptions)) {
           return;
         }
-        const frameMetrics = getSprocketFrameMetrics(fullSizeReference.width, fullSizeReference.height, composeOptions);
         const framed = composeSprocketFrame(imageData, composeOptions);
-        setMainCanvasDimensions(frameMetrics.outputWidth, frameMetrics.outputHeight);
-        drawImageDataToMainCanvas(framed, frameMetrics.outputWidth, frameMetrics.outputHeight);
+        setMainCanvasDimensions(framed.width, framed.height);
+        drawImageDataToMainCanvas(framed, framed.width, framed.height);
         return;
       }
 
@@ -7982,7 +7985,7 @@
       pushUndo('rotation');
       const sourceOriginal = state.originalImageData;
       const sourceCrop = state.cropRegion ? { ...state.cropRegion } : null;
-      const shouldPreserveCrop = state.currentStep >= 3 && Boolean(sourceCrop);
+      const shouldPreserveCrop = Boolean(sourceCrop);
 
       const rotatedData = applyRotationToImageData(sourceOriginal, normalizedAngle);
       if (!rotatedData) return;

@@ -168,9 +168,13 @@ export function getSprocketFrameMetrics(width, height, options = {}) {
   const shortSide = Math.min(sourceWidth, sourceHeight);
   const showMarkings = hasVisibleEdgeMarkings(edge);
   const spec = THIRTY_FIVE_MM_SPROCKET_SPEC;
-  const imagePxPerMmX = sourceWidth / spec.stillFrameWidthMm;
+
+  // Input is always landscape at this point (portrait images are pre-rotated by the caller).
+  const sx = sourceWidth;
+  const sy = sourceHeight;
+  const imagePxPerMmX = sx / spec.stillFrameWidthMm;
   const filmEdgeBandMm = (spec.filmWidthMm - spec.stillFrameHeightMm) / 2;
-  const physicalBandHeight = Math.round(sourceHeight * filmEdgeBandMm / spec.stillFrameHeightMm);
+  const physicalBandHeight = Math.round(sy * filmEdgeBandMm / spec.stillFrameHeightMm);
   const sideMargin = clamp(
     Math.round(imagePxPerMmX * 1.0),
     8,
@@ -180,7 +184,7 @@ export function getSprocketFrameMetrics(width, height, options = {}) {
   const bandHeight = clamp(
     physicalBandHeight,
     bandMin,
-    Math.max(bandMin, Math.round(sourceHeight * 0.36))
+    Math.max(bandMin, Math.round(sy * 0.36))
   );
   const filmEdgePxPerMmY = bandHeight / filmEdgeBandMm;
   const mm = Math.max(1, (imagePxPerMmX + filmEdgePxPerMmY) / 2);
@@ -522,13 +526,8 @@ function paintSprocketGlow(data, metrics, left, top, fill, strength = 1) {
   for (let y = rectTop; y < rectBottom; y++) {
     for (let x = rectLeft; x < rectRight; x++) {
       const distance = roundedRectDistance(
-        x + 0.5,
-        y + 0.5,
-        left,
-        top,
-        metrics.holeWidth,
-        metrics.holeHeight,
-        metrics.holeRadius
+        x + 0.5, y + 0.5,
+        left, top, metrics.holeWidth, metrics.holeHeight, metrics.holeRadius
       );
       if (distance < 0 || distance > spread) continue;
       const falloff = 1 - distance / spread;
@@ -1174,11 +1173,60 @@ function createSprocketFrameImageData(imageData, options = {}, { includePhoto = 
   return new ImageData(output, metrics.outputWidth, metrics.outputHeight);
 }
 
+function isPortrait(imageData) {
+  return imageData && imageData.height > imageData.width;
+}
+
+function rotateImageData90(imageData) {
+  // Rotate 90° clockwise: landscape → portrait, or portrait → landscape
+  const srcW = imageData.width, srcH = imageData.height;
+  const dstW = srcH, dstH = srcW;
+  const src = imageData.data;
+  const dst = new Uint8ClampedArray(dstW * dstH * 4);
+  for (let y = 0; y < srcH; y++) {
+    for (let x = 0; x < srcW; x++) {
+      const si = (y * srcW + x) * 4;
+      const di = ((x) * dstW + (dstW - 1 - y)) * 4;
+      dst[di] = src[si]; dst[di + 1] = src[si + 1];
+      dst[di + 2] = src[si + 2]; dst[di + 3] = src[si + 3];
+    }
+  }
+  return new ImageData(dst, dstW, dstH);
+}
+
+function rotateImageData270(imageData) {
+  // Rotate 270° clockwise (90° counter-clockwise)
+  // Source (x,y) → Destination (dstH-1-x, y)
+  const srcW = imageData.width, srcH = imageData.height;
+  const dstW = srcH, dstH = srcW;
+  const src = imageData.data;
+  const dst = new Uint8ClampedArray(dstW * dstH * 4);
+  for (let y = 0; y < srcH; y++) {
+    for (let x = 0; x < srcW; x++) {
+      const si = (y * srcW + x) * 4;
+      const di = ((dstH - 1 - x) * dstW + y) * 4;
+      dst[di] = src[si]; dst[di + 1] = src[si + 1];
+      dst[di + 2] = src[si + 2]; dst[di + 3] = src[si + 3];
+    }
+  }
+  return new ImageData(dst, dstW, dstH);
+}
+
 export function composeSprocketFrame(imageData, options = {}) {
+  if (isPortrait(imageData)) {
+    const rotated = rotateImageData90(imageData);
+    const framed = createSprocketFrameImageData(rotated, options, { includePhoto: true });
+    return rotateImageData270(framed);
+  }
   return createSprocketFrameImageData(imageData, options, { includePhoto: true });
 }
 
 export function composeSprocketFrameBackground(imageData, options = {}) {
+  if (isPortrait(imageData)) {
+    const rotated = rotateImageData90(imageData);
+    const framed = createSprocketFrameImageData(rotated, options, { includePhoto: false });
+    return rotateImageData270(framed);
+  }
   return createSprocketFrameImageData(imageData, options, { includePhoto: false });
 }
 
