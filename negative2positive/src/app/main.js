@@ -7662,8 +7662,10 @@
     }
 
     const coreReprocessHandlers = {
-      onInput: () => scheduleCoreReprocess({ full: false }),
-      onCommit: () => scheduleCoreReprocess({ full: true })
+      // Dragging: fast pixel-level adjustments only (no SilverCore reconversion).
+      onInput: () => schedulePreviewUpdate(),
+      // Release: re-run SilverCore on preview for accurate tone mapping.
+      onCommit: () => scheduleCoreReprocess({ full: false })
     };
 
     function cacheBorderBufferValueForBorderMode(value) {
