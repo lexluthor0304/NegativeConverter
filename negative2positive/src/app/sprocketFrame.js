@@ -1196,6 +1196,7 @@ function rotateImageData90(imageData) {
 
 function rotateImageData270(imageData) {
   // Rotate 270° clockwise (90° counter-clockwise)
+  // Source (x,y) → Destination (dstH-1-x, y)
   const srcW = imageData.width, srcH = imageData.height;
   const dstW = srcH, dstH = srcW;
   const src = imageData.data;
@@ -1203,7 +1204,7 @@ function rotateImageData270(imageData) {
   for (let y = 0; y < srcH; y++) {
     for (let x = 0; x < srcW; x++) {
       const si = (y * srcW + x) * 4;
-      const di = ((dstW - 1 - x) * dstW + y) * 4;
+      const di = ((dstH - 1 - x) * dstW + y) * 4;
       dst[di] = src[si]; dst[di + 1] = src[si + 1];
       dst[di + 2] = src[si + 2]; dst[di + 3] = src[si + 3];
     }
