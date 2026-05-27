@@ -3922,6 +3922,10 @@
     }
 
     function renderFastSprocketPreview(imageData, fullSizeReference, composeOptions) {
+      // Portrait images go through the full compose path (composeSprocketFrame
+      // handles pre/post rotation internally).
+      if (imageData.height > imageData.width) return false;
+
       const targetMetrics = getSprocketFrameMetrics(fullSizeReference.width, fullSizeReference.height, composeOptions);
       const frameCache = ensureSprocketPreviewFrameBackground(imageData, fullSizeReference, composeOptions);
       if (!frameCache) return false;
