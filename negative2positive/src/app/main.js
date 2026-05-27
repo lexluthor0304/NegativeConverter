@@ -3957,10 +3957,9 @@
         if (options.fastSprocketPreview && renderFastSprocketPreview(imageData, fullSizeReference, composeOptions)) {
           return;
         }
-        const frameMetrics = getSprocketFrameMetrics(fullSizeReference.width, fullSizeReference.height, composeOptions);
         const framed = composeSprocketFrame(imageData, composeOptions);
-        setMainCanvasDimensions(frameMetrics.outputWidth, frameMetrics.outputHeight);
-        drawImageDataToMainCanvas(framed, frameMetrics.outputWidth, frameMetrics.outputHeight);
+        setMainCanvasDimensions(framed.width, framed.height);
+        drawImageDataToMainCanvas(framed, framed.width, framed.height);
         return;
       }
 
