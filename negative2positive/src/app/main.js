@@ -3975,7 +3975,7 @@
       }
 
       setMainCanvasDimensions(fullSizeReference.width, fullSizeReference.height);
-      drawImageDataToMainCanvas(imageData, fullSizeReference.width, fullSizeReference.height);
+      drawImageDataToMainCanvas(imageData, canvas.width, canvas.height);
     }
 
     function syncTransformCanvasFromMainCanvas() {
