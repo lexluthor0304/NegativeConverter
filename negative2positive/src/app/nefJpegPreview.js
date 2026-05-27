@@ -54,11 +54,25 @@ export function readJpegDimensionsFromSOF(buffer, offset, length) {
     // Start Of Frame markers (carry width/height).
     // Range C0–CF, but C4 (DHT), C8 (JPG reserved), CC (DAC) are NOT frames.
     if (marker >= 0xC0 && marker <= 0xCF && marker !== 0xC4 && marker !== 0xC8 && marker !== 0xCC) {
-      // Layout from marker byte: marker(1) + segLen(2) + precision(1) + height(2) + width(2)
-      if (p + 7 >= bytes.length) return null;
+      // Layout from marker byte: marker(1) + segLen(2) + precision(1) + height(2) + width(2) + numComponents(1)
+      if (p + 8 >= bytes.length) return null;
+      const segLen = (bytes[p + 1] << 8) | bytes[p + 2];
+      const precision = bytes[p + 3];
       const height = (bytes[p + 4] << 8) | bytes[p + 5];
       const width = (bytes[p + 6] << 8) | bytes[p + 7];
-      if (width <= 0 || height <= 0) return null;
+      const numComponents = bytes[p + 8];
+
+      // Validate: precision must be 8 or 12, segment length must match
+      // number of components, dimensions must be plausible for a camera preview.
+      if (precision !== 8 && precision !== 12) continue;
+      if (segLen < 8) continue;
+      // Expected segLen = 8 + 3*numComponents (8 = marker+segLen+precision+h+w)
+      // Allow some tolerance for different JPEG variants.
+      const expectedSegLen = 8 + 3 * numComponents;
+      if (segLen !== expectedSegLen && segLen !== expectedSegLen + 1) continue;
+      if (width < MIN_PREVIEW_WIDTH || height < 300) continue;
+      if (width > 20000 || height > 20000) continue;
+
       return { w: width, h: height };
     }
 
