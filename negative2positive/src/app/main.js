@@ -3937,10 +3937,15 @@
 
       const scaleX = targetMetrics.outputWidth / frameMetrics.outputWidth;
       const scaleY = targetMetrics.outputHeight / frameMetrics.outputHeight;
+      const photoX = frameMetrics.isPortrait
+        ? frameMetrics.bandHeight * scaleX
+        : frameMetrics.sideMargin * scaleX;
+      const photoY = frameMetrics.isPortrait
+        ? frameMetrics.sideMargin * scaleY
+        : frameMetrics.bandHeight * scaleY;
       ctx.drawImage(
         sprocketScratchCanvas,
-        frameMetrics.sideMargin * scaleX,
-        frameMetrics.bandHeight * scaleY,
+        photoX, photoY,
         frameMetrics.sourceWidth * scaleX,
         frameMetrics.sourceHeight * scaleY
       );
