@@ -1605,7 +1605,7 @@
       if (!stateReady) return false;
       return state.currentStep >= 3
         && usesSilverCoreConversion(state)
-        && sanitizePresetType(state.filmType || 'color') === 'color';
+        && sanitizePresetType(state.filmType || 'color') !== 'bw';
     }
 
     function setFrontierGuidePopupVisible(visible) {
