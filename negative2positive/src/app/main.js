@@ -3594,6 +3594,8 @@
         state.currentStep === 1 ? 'inline-flex' : 'none';
       document.getElementById('convertPositiveBtn').style.display =
         state.currentStep === 1 ? 'inline-flex' : 'none';
+      document.getElementById('applyConvertBtn').style.display =
+        state.currentStep === 2 ? 'flex' : 'none';
 
       syncBatchUIState({ reason: 'updateWorkflowUI' });
       updateAutoFrameButtons();
