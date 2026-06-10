@@ -3851,16 +3851,12 @@
       const nextEnabled = Boolean(enabled);
       state.sprocketPreviewEnabled = nextEnabled;
       updateSprocketControlsUI();
+      updateCanvasVisibility();
 
       if (options.render === false) return;
       if (state.beforeAfterActive) exitBeforeAfter();
       if (state.currentStep >= 3 && state.processedImageData) {
-        // Draw the already-adjusted full-res buffer to canvas — no recompute, instant GPU copy.
-        const display = state.displayImageData || state.processedImageData;
-        renderAdjustedImageDataToMainCanvas(display, display, {
-          fastSprocketPreview: true
-        });
-        renderHistogram(display);
+        updatePreview();
         return;
       }
 
@@ -5240,6 +5236,9 @@
       if (!webglState.gl || webglState.disabledByError || !state.processedImageData) return false;
 
       try {
+        const source = getWebglSourceImageData();
+        if (!source) return false;
+        adjustCanvasDisplay(source.width, source.height);
         resizeWebGLCanvas();
 
         const gl = webglState.gl;
@@ -5247,8 +5246,6 @@
         gl.useProgram(webglState.program);
 
         // Uploads if needed
-        const source = getWebglSourceImageData();
-        if (!source) return false;
         if (webglState.sourceDirty || webglState.sourceSize.w !== source.width || webglState.sourceSize.h !== source.height) {
           webglUploadSource(source);
         }
