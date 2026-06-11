@@ -84,17 +84,27 @@ def _classify_asset(name: str) -> dict:
     return result
 
 
-def _aws_s3_cp(*, src: Path, dest: str, endpoint: str, cache_control: str, content_type: str | None) -> None:
+def _aws_s3_put_object(
+    *,
+    src: Path,
+    bucket: str,
+    key: str,
+    endpoint: str,
+    cache_control: str,
+    content_type: str | None,
+) -> None:
     cmd = [
         "aws",
-        "s3",
-        "cp",
+        "s3api",
+        "put-object",
+        "--bucket",
+        bucket,
+        "--key",
+        key,
+        "--body",
         str(src),
-        dest,
         "--endpoint-url",
         endpoint,
-        "--only-show-errors",
-        "--no-progress",
         "--cache-control",
         cache_control,
     ]
@@ -326,9 +336,10 @@ def main() -> int:
             print(f"Uploading: {name} -> {dest}")
             _upload_with_retries(
                 name,
-                lambda path=path, dest=dest: _aws_s3_cp(
+                lambda path=path, key=key: _aws_s3_put_object(
                     src=path,
-                    dest=dest,
+                    bucket=args.bucket,
+                    key=key,
                     endpoint=args.endpoint,
                     cache_control="public, max-age=31536000, immutable",
                     content_type=None,
@@ -368,9 +379,10 @@ def main() -> int:
             print(f"Uploading: latest.json -> {dest}")
             _upload_with_retries(
                 "latest.json",
-                lambda: _aws_s3_cp(
+                lambda: _aws_s3_put_object(
                     src=latest_path,
-                    dest=dest,
+                    bucket=args.bucket,
+                    key=latest_key,
                     endpoint=args.endpoint,
                     cache_control="public, max-age=60",
                     content_type="application/json; charset=utf-8",
