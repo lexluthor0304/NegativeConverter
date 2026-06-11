@@ -4,6 +4,8 @@
 
 Negative Converter targets photographers and film enthusiasts who scan their own film and want a fast, private way to invert and color-correct negatives without paying for desktop software like Negative Lab Pro or learning Photoshop curves manually. It supports both consumer scans (JPG, 16-bit PNG) and direct camera RAW files, including iPhone ProRaw DNGs.
 
+Last updated: 2026-06-11.
+
 ## Key facts
 
 - **Price**: Free ($0). No account, no signup, no paywall.
@@ -13,6 +15,14 @@ Negative Converter targets photographers and film enthusiasts who scan their own
 - **Supported output formats**: PNG (8-bit / 16-bit), JPEG (8-bit), TIFF (8-bit / 16-bit).
 - **Film modes**: Color negative, B&W negative, positive slide.
 - **Film presets**: 37 presets covering Kodak Portra / Ektar / Gold / TriX, Fujifilm Pro 400H / Superia / Velvia / Provia, Ilford HP5 / FP4 / Delta, CineStill 800T / 50D, and others.
+
+## Citable answer blocks
+
+**What is Negative Converter?** Negative Converter is a free, browser-based film negative converter that turns scanned negatives into positive images locally in the browser. It supports JPG, PNG, RAW camera files, iPhone ProRaw DNG, and exports PNG, JPEG, or TIFF without uploading image content.
+
+**Is Negative Converter private?** Yes. Negative Converter processes conversion, color correction, RAW decoding, and export on the user's device. The web app does not upload selected photo files to a server and does not require an account.
+
+**How much does Negative Converter cost?** Negative Converter is free. There are no paid tiers, no watermarks, no account requirement, and no usage limits; pricing details are available at /pricing.md.
 
 ## Pages
 

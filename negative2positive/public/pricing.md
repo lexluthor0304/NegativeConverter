@@ -2,6 +2,19 @@
 
 Negative Converter is **free, with no paid tiers, no account, and no usage limits**.
 
+Last updated: 2026-06-11.
+
+## Machine-readable facts
+
+- Product: Negative Converter
+- Price: $0
+- Billing: none
+- Account required: no
+- Upload required: no
+- Watermark: no
+- Usage limits: none
+- Source license: MIT
+
 ## Free
 
 - **Price**: $0 / forever
