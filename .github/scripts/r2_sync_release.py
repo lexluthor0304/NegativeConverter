@@ -9,6 +9,7 @@ import re
 import ssl
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote, urlparse, urlunparse
@@ -22,6 +23,9 @@ INSTALLER_SUFFIXES = (
     ".rpm",
     ".AppImage",
 )
+
+DEFAULT_UPLOAD_ATTEMPTS = 5
+DEFAULT_UPLOAD_RETRY_BASE_SECONDS = 5.0
 
 
 def _sha256_file(path: Path) -> str:
@@ -98,6 +102,52 @@ def _aws_s3_cp(*, src: Path, dest: str, endpoint: str, cache_control: str, conte
         cmd.extend(["--content-type", content_type])
 
     subprocess.run(cmd, check=True)
+
+
+def _env_int(name: str, default: int, minimum: int) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        print(f"Ignoring invalid {name}={raw!r}; using {default}.", file=sys.stderr)
+        return default
+    return max(minimum, value)
+
+
+def _env_float(name: str, default: float, minimum: float) -> float:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        print(f"Ignoring invalid {name}={raw!r}; using {default}.", file=sys.stderr)
+        return default
+    return max(minimum, value)
+
+
+def _upload_with_retries(label: str, upload_fn) -> None:
+    attempts = _env_int("R2_UPLOAD_ATTEMPTS", DEFAULT_UPLOAD_ATTEMPTS, 1)
+    base_delay = _env_float("R2_UPLOAD_RETRY_BASE_SECONDS", DEFAULT_UPLOAD_RETRY_BASE_SECONDS, 0.1)
+
+    for attempt in range(1, attempts + 1):
+        try:
+            upload_fn()
+            return
+        except (subprocess.CalledProcessError, RuntimeError, TimeoutError, OSError) as error:
+            if attempt >= attempts:
+                print(f"Upload failed after {attempts} attempt(s): {label}", file=sys.stderr)
+                raise
+
+            delay = min(base_delay * (2 ** (attempt - 1)), 60.0)
+            print(
+                f"Upload failed for {label} on attempt {attempt}/{attempts}: {error}. "
+                f"Retrying in {delay:.1f}s...",
+                file=sys.stderr,
+            )
+            time.sleep(delay)
 
 
 def _cf_api_token() -> str | None:
@@ -274,23 +324,29 @@ def main() -> int:
         if upload_mode == "aws":
             dest = f"s3://{args.bucket}/{key}"
             print(f"Uploading: {name} -> {dest}")
-            _aws_s3_cp(
-                src=path,
-                dest=dest,
-                endpoint=args.endpoint,
-                cache_control="public, max-age=31536000, immutable",
-                content_type=None,
+            _upload_with_retries(
+                name,
+                lambda path=path, dest=dest: _aws_s3_cp(
+                    src=path,
+                    dest=dest,
+                    endpoint=args.endpoint,
+                    cache_control="public, max-age=31536000, immutable",
+                    content_type=None,
+                ),
             )
         else:
             dest = f"r2://{args.bucket}/{key}"
             print(f"Uploading: {name} -> {dest}")
-            _cf_r2_put_object(
-                account_id=cf_account_id or "",
-                bucket=args.bucket,
-                key=key,
-                src=path,
-                cache_control="public, max-age=31536000, immutable",
-                content_type=None,
+            _upload_with_retries(
+                name,
+                lambda path=path, key=key: _cf_r2_put_object(
+                    account_id=cf_account_id or "",
+                    bucket=args.bucket,
+                    key=key,
+                    src=path,
+                    cache_control="public, max-age=31536000, immutable",
+                    content_type=None,
+                ),
             )
 
     manifest = {
@@ -310,23 +366,29 @@ def main() -> int:
         if upload_mode == "aws":
             dest = f"s3://{args.bucket}/{latest_key}"
             print(f"Uploading: latest.json -> {dest}")
-            _aws_s3_cp(
-                src=latest_path,
-                dest=dest,
-                endpoint=args.endpoint,
-                cache_control="public, max-age=60",
-                content_type="application/json; charset=utf-8",
+            _upload_with_retries(
+                "latest.json",
+                lambda: _aws_s3_cp(
+                    src=latest_path,
+                    dest=dest,
+                    endpoint=args.endpoint,
+                    cache_control="public, max-age=60",
+                    content_type="application/json; charset=utf-8",
+                ),
             )
         else:
             dest = f"r2://{args.bucket}/{latest_key}"
             print(f"Uploading: latest.json -> {dest}")
-            _cf_r2_put_object(
-                account_id=cf_account_id or "",
-                bucket=args.bucket,
-                key=latest_key,
-                src=latest_path,
-                cache_control="public, max-age=60",
-                content_type="application/json; charset=utf-8",
+            _upload_with_retries(
+                "latest.json",
+                lambda: _cf_r2_put_object(
+                    account_id=cf_account_id or "",
+                    bucket=args.bucket,
+                    key=latest_key,
+                    src=latest_path,
+                    cache_control="public, max-age=60",
+                    content_type="application/json; charset=utf-8",
+                ),
             )
 
     return 0
