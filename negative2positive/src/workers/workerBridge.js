@@ -91,6 +91,11 @@ function serializeSettings(settings) {
   return copy;
 }
 
+function copyImageDataBuffer(imageData) {
+  const { buffer, byteOffset, byteLength } = imageData.data;
+  return buffer.slice(byteOffset, byteOffset + byteLength);
+}
+
 /**
  * Apply adjustments to image data via Worker.
  * @param {ImageData} imageData
@@ -101,7 +106,7 @@ function serializeSettings(settings) {
  */
 export async function workerApplyAdjustments(imageData, settings, quality = 'full', onProgress = null) {
   // Must copy: if worker fails, caller's fallback still needs the original buffer.
-  const inputBuffer = imageData.data.buffer.slice(0);
+  const inputBuffer = copyImageDataBuffer(imageData);
 
   try {
     const result = await sendToWorker(
@@ -130,15 +135,18 @@ export async function workerApplyAdjustments(imageData, settings, quality = 'ful
  * @returns {Promise<Blob>}
  */
 export async function workerEncodePng16(imageData, onProgress = null) {
+  // Transfer a copy so worker success/failure never detaches the caller's ImageData.
+  const pixelData = copyImageDataBuffer(imageData);
+
   try {
     return await sendToWorker(
       {
         type: 'encodePng16',
-        pixelData: imageData.data.buffer,
+        pixelData,
         width: imageData.width,
         height: imageData.height
       },
-      [imageData.data.buffer],
+      [pixelData],
       onProgress
     );
   } catch {
@@ -154,16 +162,19 @@ export async function workerEncodePng16(imageData, onProgress = null) {
  * @returns {Promise<Blob>}
  */
 export async function workerEncodeTiff(imageData, bitDepth = 8, onProgress = null) {
+  // Transfer a copy so worker success/failure never detaches the caller's ImageData.
+  const pixelData = copyImageDataBuffer(imageData);
+
   try {
     return await sendToWorker(
       {
         type: 'encodeTiff',
-        pixelData: imageData.data.buffer,
+        pixelData,
         width: imageData.width,
         height: imageData.height,
         bitDepth
       },
-      [imageData.data.buffer],
+      [pixelData],
       onProgress
     );
   } catch {
