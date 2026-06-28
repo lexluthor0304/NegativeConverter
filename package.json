@@ -19,7 +19,7 @@
     "@techstark/opencv-js": "4.12.0-release.1",
     "@vercel/analytics": "^2.0.1",
     "jszip": "3.10.1",
-    "libraw-wasm": "github:lexluthor0304/LibRaw-Wasm",
+    "libraw-wasm": "^1.5.0",
     "pako": "2.1.0",
     "three": "^0.183.2",
     "upng-js": "2.1.0",
