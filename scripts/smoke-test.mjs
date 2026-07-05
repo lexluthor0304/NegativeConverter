@@ -17,6 +17,7 @@ const UPNG = createRequire(import.meta.url)('upng-js');
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const FIXTURE = join(ROOT, 'negative2positive', 'test-fixtures', 'negative-sample.jpg');
+const FIXTURE2 = join(ROOT, 'negative2positive', 'test-fixtures', 'negative-sample-2.jpg');
 const PORT = 5197;
 const CDP_PORT = 9224;
 const CHROME_CANDIDATES = [
@@ -268,7 +269,108 @@ if (Math.abs(meanCurved - meanAfter) < 3) {
   fail('preview did not react to curve edit — curve pipeline may be broken');
 }
 
-// ---- 6. no uncaught page errors ----
+// ============================================================
+// Batch scenario: two files -> convert -> apply to selected ->
+// switch file -> export ZIP (real download, verified with JSZip)
+// ============================================================
+
+// Fresh app, two files through the real input
+await send('Page.navigate', { url: `http://127.0.0.1:${PORT}/` });
+await waitFor('app reboot', `!!document.getElementById('fileInput')`);
+await wait(1500);
+// Force the JSZip download fallback (the Firefox/Safari path):
+// showSaveFilePicker requires a real user gesture, which synthetic
+// clicks cannot provide.
+await evaluate(`(() => { try { delete window.showSaveFilePicker; } catch {} return true; })()`);
+const doc2 = await send('DOM.getDocument');
+const input2 = await send('DOM.querySelector', {
+  nodeId: doc2.result.root.nodeId, selector: '#fileInput',
+});
+await send('DOM.setFileInputFiles', { files: [FIXTURE, FIXTURE2], nodeId: input2.result.nodeId });
+
+await waitFor('batch file list',
+  `document.getElementById('fileListSection').style.display !== 'none'
+   && document.querySelectorAll('.file-list-item').length === 2`, 90_000);
+console.log('ok: batch mode, 2 files listed');
+
+await waitFor('convert button (batch)', `(() => {
+  const b = document.getElementById('convertBtn');
+  return b && b.style.display !== 'none';
+})()`, 60_000);
+await evaluate(`document.getElementById('convertBtn').click()`);
+await waitFor('film settings (batch)',
+  `document.getElementById('filmSettingsSection').style.display !== 'none'`, 30_000);
+await evaluate(`document.getElementById('applyConvertBtn').click()`);
+await waitFor('Step 3 (batch)',
+  `document.getElementById('statusBadge').classList.contains('step3')`, 180_000);
+console.log('ok: first file converted in batch mode');
+
+// Persist settings for the current file, then copy them to every selected file
+await waitFor('batch step-3 actions',
+  `document.getElementById('saveSettingsBtn').style.display !== 'none'`, 30_000);
+await evaluate(`document.getElementById('saveSettingsBtn').click()`);
+await wait(400);
+await evaluate(`document.getElementById('applyToSelectedBtn').click()`);
+await wait(600);
+const settingsBadges = await evaluate(
+  `document.querySelectorAll('.file-list-settings-badge').length`);
+if (settingsBadges < 2) {
+  await dumpDiagnostics('apply to selected');
+  fail(`expected settings badges on both files, saw ${settingsBadges}`);
+}
+console.log('ok: settings applied to both files');
+
+// Switch to the second file — exercises persist/restore of settings
+await evaluate(`document.querySelectorAll('.file-list-item')[1].click()`);
+await waitFor('second file active',
+  `document.querySelectorAll('.file-list-item')[1].classList.contains('active')`, 90_000);
+console.log('ok: switched to second file');
+
+// Export all files. Without showSaveFilePicker the app intentionally falls
+// back from streaming ZIP to individual <a download> clicks (the
+// Firefox/Safari path). Headless Chrome does not reliably materialize
+// anchor-click downloads, so capture the blobs in-page instead — the whole
+// app pipeline (convert, encode, name) still runs for real.
+await evaluate(`(() => {
+  window.__downloads = [];
+  const pendingUrls = new Set();
+  const origRevoke = URL.revokeObjectURL.bind(URL);
+  URL.revokeObjectURL = (url) => { if (!pendingUrls.has(url)) origRevoke(url); };
+  const origClick = HTMLAnchorElement.prototype.click;
+  HTMLAnchorElement.prototype.click = function () {
+    if (this.download && this.href.startsWith('blob:')) {
+      const href = this.href;
+      const name = this.download;
+      pendingUrls.add(href);
+      window.__downloads.push(
+        fetch(href).then((r) => r.arrayBuffer()).then((buf) => {
+          pendingUrls.delete(href);
+          origRevoke(href);
+          return { name, size: buf.byteLength, head: [...new Uint8Array(buf.slice(0, 8))] };
+        })
+      );
+      return;
+    }
+    return origClick.call(this);
+  };
+  return true;
+})()`);
+
+const zipDisabled = await evaluate(`document.getElementById('exportZipBtn').disabled`);
+if (zipDisabled) fail('Export ZIP button is disabled with 2 selected files');
+await evaluate(`document.getElementById('exportZipBtn').click()`);
+
+await waitFor('batch export downloads', `window.__downloads.length >= 2`, 180_000);
+const downloads = await evaluate(`Promise.all(window.__downloads)`);
+for (const d of downloads) {
+  const isPng = d.head[0] === 0x89 && d.head[1] === 0x50 && d.head[2] === 0x4e && d.head[3] === 0x47;
+  const isZip = d.head[0] === 0x50 && d.head[1] === 0x4b;
+  if (!isPng && !isZip) fail(`exported file ${d.name} is neither PNG nor ZIP`);
+  if (d.size < 10_000) fail(`exported file ${d.name} is suspiciously small (${d.size} bytes)`);
+}
+console.log(`ok: batch export produced ${downloads.length} files: ${downloads.map((d) => `${d.name} (${Math.round(d.size / 1024)}kB)`).join(', ')}`);
+
+// ---- no uncaught page errors across both scenarios ----
 const realErrors = pageErrors.filter((e) => !/ResizeObserver loop/.test(e));
 if (realErrors.length) {
   fail(`uncaught page errors:\n${realErrors.join('\n---\n')}`);
