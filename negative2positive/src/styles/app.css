@@ -417,6 +417,32 @@ body {
   color: #ffe6b8;
 }
 
+.header-link-btn.shop {
+  background: rgba(255, 77, 143, 0.12);
+  border: 1px solid rgba(255, 77, 143, 0.4);
+  color: #ffb1cd;
+}
+
+.header-link-btn.shop:hover {
+  background: rgba(255, 77, 143, 0.2);
+  border-color: rgba(255, 77, 143, 0.6);
+  color: #ffcede;
+  box-shadow: 0 0 12px var(--accent-glow), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+/* "Japan only" availability chip inside the shop button */
+.header-shop-badge {
+  padding: 2px 6px;
+  border-radius: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(8, 5, 16, 0.45);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--warning);
+  white-space: nowrap;
+}
+
 /* Trust note inside the empty state */
 .upload-privacy-note {
   display: inline-flex;
