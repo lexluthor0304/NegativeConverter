@@ -149,7 +149,6 @@
     });
     const STEP3_GUIDE_COLLAPSED_SESSION_KEY = 'nc_step3_guide_collapsed_v2';
     const FRONTIER_GUIDE_POPUP_SESSION_KEY = 'nc_frontier_guide_popup_shown_v1';
-    const PRIVACY_BANNER_COLLAPSED_STORAGE_KEY = 'nc_privacy_banner_collapsed_v1';
     const GUIDE_MODE_STORAGE_KEY = 'nc_guide_mode_enabled_v1';
     const DESKTOP_UPDATE_LAST_CHECK_TS_KEY = 'nc_desktop_update_last_check_ts';
     const DESKTOP_UPDATE_LAST_SEEN_LATEST_KEY = 'nc_desktop_update_last_seen_latest';
@@ -1309,21 +1308,6 @@
       });
     }
 
-    function initPrivacyBannerToggle() {
-      const banner = document.querySelector('.privacy-banner');
-      const toggle = document.getElementById('privacyBannerToggle');
-      if (!banner || !toggle) return;
-
-      const collapsed = safeStorageGet(PRIVACY_BANNER_COLLAPSED_STORAGE_KEY) === '1';
-      banner.classList.toggle('collapsed', collapsed);
-
-      toggle.addEventListener('click', () => {
-        banner.classList.add('collapsed');
-        safeStorageSet(PRIVACY_BANNER_COLLAPSED_STORAGE_KEY, '1');
-      });
-    }
-
-    initPrivacyBannerToggle();
     initDesktopUpdateCheck();
     window.addEventListener('beforeunload', () => {
       if (lensfunRuntime.client && typeof lensfunRuntime.client.dispose === 'function') {

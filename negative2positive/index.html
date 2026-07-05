@@ -110,7 +110,6 @@
       <nav class="header-site-links" aria-label="Site links">
         <a href="./guide.html">Guide</a>
         <a href="./raw-negative-converter.html">RAW guide</a>
-        <a href="./download.html">Desktop</a>
       </nav>
       <span class="header-copyright">
         © <span id="copyrightYear">2026</span> <a href="https://neoanaloglab.com" target="_blank">neoanaloglab.com</a>
@@ -136,6 +135,21 @@
           <div class="header-export-progress-fill" id="headerExportProgressFill"></div>
         </div>
       </div>
+      <a class="header-link-btn privacy" id="privacyDetailsLink" href="./privacy.html" target="_blank" rel="noopener">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <path d="M12 2l8 4v6c0 5-3.5 9.4-8 10-4.5-.6-8-5-8-10V6l8-4z"/>
+          <path d="M9 12l2 2 4-4"/>
+        </svg>
+        <span data-i18n="headerPrivacyLink">Privacy</span>
+      </a>
+      <a class="header-link-btn download" id="offlineDownloadLink" href="./download.html" target="_blank" rel="noopener">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <path d="M12 3v10"></path>
+          <path d="M7.5 9.5L12 14l4.5-4.5"></path>
+          <path d="M4 17h16"></path>
+        </svg>
+        <span data-i18n="headerDownloadLink">Desktop app</span>
+      </a>
       <div class="lang-selector">
         <button class="lang-btn" data-lang="zh">中文</button>
         <button class="lang-btn" data-lang="en">EN</button>
@@ -143,31 +157,6 @@
       </div>
     </div>
   </header>
-
-  <!-- Privacy Notice -->
-  <div class="privacy-banner" role="note" aria-label="Privacy notice">
-    <div class="privacy-banner-left">
-      <svg class="privacy-banner-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-        <path d="M12 2l8 4v6c0 5-3.5 9.4-8 10-4.5-.6-8-5-8-10V6l8-4z"/>
-        <path d="M9 12l2 2 4-4"/>
-      </svg>
-      <div class="privacy-banner-text">
-        <div class="privacy-banner-title" data-i18n="privacyBannerTitle">Runs locally · No photo uploads</div>
-        <div class="privacy-banner-body" data-i18n="privacyBannerBody">Your photos are processed in your browser. Our server never receives your images.</div>
-      </div>
-    </div>
-    <div class="privacy-banner-actions">
-      <a class="privacy-banner-btn" id="privacyDetailsLink" href="./privacy.html" target="_blank" rel="noopener" data-i18n="privacyBannerLink">Privacy details</a>
-      <a class="privacy-banner-btn" id="offlineDownloadLink" href="./download.html" target="_blank" rel="noopener" data-i18n="offlineDownloadLink">Download offline app</a>
-      <button class="privacy-banner-toggle" id="privacyBannerToggle" type="button">
-        <span class="sr-only" data-i18n="privacyBannerToggleLabel">Hide privacy notice</span>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-          <path d="M18 6L6 18"></path>
-          <path d="M6 6l12 12"></path>
-        </svg>
-      </button>
-    </div>
-  </div>
 
   <div class="desktop-update-banner" id="desktopUpdateBanner" role="status" aria-live="polite">
     <div class="desktop-update-left">
@@ -197,6 +186,13 @@
             <path d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
           </svg>
           <p data-i18n="dropHint">Drop image here or click to open</p>
+          <a class="upload-privacy-note" href="./privacy.html" target="_blank" rel="noopener">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M12 2l8 4v6c0 5-3.5 9.4-8 10-4.5-.6-8-5-8-10V6l8-4z"/>
+              <path d="M9 12l2 2 4-4"/>
+            </svg>
+            <span data-i18n="privacyBannerTitle">Runs locally · No photo uploads</span>
+          </a>
           <label class="upload-btn" id="uploadBtn" for="fileInput" role="button" tabindex="0" data-i18n="selectFile">Select File</label>
           <label class="upload-btn secondary" id="uploadFolderBtn" for="folderInput" role="button" tabindex="0" data-i18n="selectFolder">Select Folder</label>
           <input type="file" id="fileInput" class="hidden-file-input" accept=".cr2,.cr3,.crw,.nef,.nrw,.arw,.dng,.raf,.raw,.rw2,.pef,.srw,.3fr,.mef,.orf,.rwl,.iiq,.x3f,.mrw,.kdc,.dcr,.tif,.tiff,image/*" multiple>
