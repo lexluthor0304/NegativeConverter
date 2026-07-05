@@ -16,6 +16,9 @@ const tests = [];
   }
 })(root);
 
+// SEO head consistency counts as part of the suite
+tests.push(join(dirname(fileURLToPath(import.meta.url)), 'check-seo-heads.mjs'));
+
 let failed = 0;
 for (const t of tests) {
   const r = spawnSync(process.execPath, [t], { stdio: 'inherit' });
