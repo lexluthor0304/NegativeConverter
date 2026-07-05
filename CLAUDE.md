@@ -53,7 +53,7 @@ negative2positive/
 │   ├── render/                 # Histogram/render services
 │   ├── silvercore/             # Core conversion engine modules
 │   ├── ui/                     # UI components (loading overlay)
-│   └── workers/                # Export worker + worker bridge
+│   └── workers/                # Export worker + full-res conversion worker + bridges
 scripts/                        # run-tests.mjs, sync-web-dist.mjs, LUT derivation
 src-tauri/                      # Tauri desktop packaging
 ```
