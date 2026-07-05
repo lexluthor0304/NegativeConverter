@@ -2,6 +2,9 @@
     import '@fontsource/inter/400.css';
     import '@fontsource/inter/500.css';
     import '@fontsource/inter/600.css';
+    import '@fontsource/orbitron/500.css';
+    import '@fontsource/orbitron/700.css';
+    import '@fontsource/share-tech-mono/400.css';
 
     import { convertFrameWithRouter } from '../pipeline/conversionRouter.js';
     import { invalidateSilverCoreCache } from '../pipeline/silverAdapter.js';
