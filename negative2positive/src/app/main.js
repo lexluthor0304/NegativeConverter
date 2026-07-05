@@ -14,7 +14,6 @@
 
     import { convertFrameWithRouter } from '../pipeline/conversionRouter.js';
     import { invalidateSilverCoreCache } from '../pipeline/silverAdapter.js';
-    import { fromImageData8 } from '../silvercore/util/image16.js';
     import { canUseBrowserZipStreaming, ZipStoreWriter } from './zipStoreWriter.js';
     import {
       createAdjustmentLutScratch,
@@ -5119,10 +5118,11 @@
           state.previewSourceImageData = null;
           state.histogramSourceImageData = null;
           state.webglSourceImageData = null;
-          // Mirror 16-bit handle from loader. Falls back to upscaling the 8-bit copy
-          // when the loader did not attach __image16 (defensive — should not happen).
-          state.original16 = imageData.__image16
-            || (imageData instanceof ImageData ? fromImageData8(imageData) : null);
+          // Mirror the 16-bit handle when the loader attached one (RAW / 16-bit
+          // PNG). 8-bit sources stay 8-bit here — silverAdapter promotes on
+          // demand at conversion time, on the cropped region, so we never pay
+          // a full-resolution ×257 upscale at load.
+          state.original16 = imageData.__image16 || null;
           state.cropped16 = null;
           state.processed16 = null;
           state.lastRenderQuality = 'full';
@@ -5201,7 +5201,7 @@
         const wasCropped = !!state.croppedImageData;
         state.originalImageData = fullImageData;
         state.loadedBaseImageData = fullImageData;
-        state.original16 = fullImageData.__image16 || fromImageData8(fullImageData);
+        state.original16 = fullImageData.__image16 || null;
         if (!wasCropped) {
           state.croppedImageData = null;
           state.cropRegion = null;

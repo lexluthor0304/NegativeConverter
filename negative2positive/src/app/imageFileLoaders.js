@@ -1,5 +1,3 @@
-import { fromImageData8 } from '../silvercore/util/image16.js';
-
 export const RAW_LIKE_EXTENSIONS = [
   '.cr2', '.cr3', '.crw', '.nef', '.nrw', '.arw', '.dng', '.raf', '.raw', '.rw2',
   '.pef', '.srw', '.3fr', '.mef', '.orf', '.rwl', '.iiq', '.x3f', '.mrw', '.kdc',
@@ -39,7 +37,10 @@ export async function loadStandardImage(file) {
         const tempCtx = tempCanvas.getContext('2d');
         tempCtx.drawImage(img, 0, 0);
         const imageData = tempCtx.getImageData(0, 0, img.width, img.height);
-        imageData.__image16 = fromImageData8(imageData);
+        // No eager __image16 here: an 8-bit source holds no extra precision,
+        // and silverAdapter promotes to 16-bit on demand — on the cropped
+        // region instead of the full scan. For a 90+ MP scan the eager
+        // mirror cost ~750 MB and a 370M-iteration loop at load time.
         resolve(imageData);
       } catch (err) {
         reject(err);
