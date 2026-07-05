@@ -151,7 +151,7 @@ body {
   border-bottom: 1px solid var(--border);
 }
 
-/* Signature laser stripe: sunset magenta -> violet -> CRT cyan */
+/* Signature laser stripe: sunset magenta -> violet -> CRT cyan, drifting slowly */
 .app-header::after {
   content: "";
   position: absolute;
@@ -159,10 +159,18 @@ body {
   right: 0;
   bottom: -1px;
   height: 2px;
-  background: linear-gradient(90deg, var(--accent) 0%, #a06bff 45%, var(--info) 100%);
+  background: linear-gradient(90deg,
+    var(--accent) 0%, #a06bff 25%, var(--info) 50%, #a06bff 75%, var(--accent) 100%);
+  background-size: 200% 100%;
   opacity: 0.9;
   pointer-events: none;
   z-index: 2;
+  animation: laser-drift 14s linear infinite;
+}
+
+@keyframes laser-drift {
+  from { background-position: 0% 0; }
+  to { background-position: 200% 0; }
 }
 
 .header-left {
@@ -896,9 +904,15 @@ body {
       rgba(66, 32, 88, 0.45) 52%,
       transparent 58%);
   pointer-events: none;
+  animation: sun-breathe 6s ease-in-out infinite;
 }
 
-/* Perspective grid floor */
+@keyframes sun-breathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.78; }
+}
+
+/* Perspective grid floor — horizon lines roll toward the viewer */
 .upload-placeholder::after {
   content: "";
   position: absolute;
@@ -916,6 +930,13 @@ body {
   -webkit-mask-image: linear-gradient(180deg, transparent 0%, #000 16%, #000 78%, transparent 100%);
   mask-image: linear-gradient(180deg, transparent 0%, #000 16%, #000 78%, transparent 100%);
   pointer-events: none;
+  animation: grid-roll 2.4s linear infinite;
+}
+
+/* Shift only the horizontal-line layer by exactly one 44px tile per loop */
+@keyframes grid-roll {
+  from { background-position: 0 0, 0 0, 0 0; }
+  to { background-position: 0 0, 0 44px, 0 0; }
 }
 
 .upload-placeholder svg {
@@ -1211,14 +1232,17 @@ body {
 .control-stage-bar {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px;
+  gap: 10px;
   padding: 8px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  /* Docks onto the guide section below to read as one wayfinding unit */
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
   background: rgba(255, 255, 255, 0.025);
 }
 
 .control-stage-pill {
+  position: relative;
   min-width: 0;
   min-height: 42px;
   display: flex;
@@ -1230,6 +1254,19 @@ body {
   border-radius: 6px;
   color: var(--text-secondary);
   background: rgba(0, 0, 0, 0.16);
+}
+
+/* Flow chevrons between the steps */
+.control-stage-pill + .control-stage-pill::before {
+  content: "\203A";
+  position: absolute;
+  left: -9px;
+  top: 50%;
+  transform: translateY(-54%);
+  font-size: 13px;
+  line-height: 1;
+  color: var(--text-muted);
+  pointer-events: none;
 }
 
 .control-stage-index {
@@ -1276,7 +1313,14 @@ body {
 
 .control-stage-pill.completed .control-stage-index {
   background: rgba(61, 204, 128, 0.22);
+  border-color: transparent;
   color: var(--success);
+  font-size: 0; /* swap the number for a check mark */
+}
+
+.control-stage-pill.completed .control-stage-index::after {
+  content: "\2713";
+  font-size: 11px;
 }
 
 .control-section {
@@ -1286,24 +1330,59 @@ body {
   background: rgba(255, 255, 255, 0.025);
 }
 
+/* The current step's main task — "start here" */
 .control-section.task-primary {
-  border-color: rgba(69, 214, 205, 0.28);
-  background: rgba(69, 214, 205, 0.045);
+  border-color: rgba(255, 77, 143, 0.4);
+  background: rgba(255, 77, 143, 0.05);
+  box-shadow: 0 0 14px rgba(255, 77, 143, 0.07);
 }
 
+.control-section.task-primary > .section-header .section-title::before {
+  content: "\25B6\00A0";
+  color: var(--accent);
+  font-size: 9px;
+  vertical-align: 1px;
+}
+
+/* Secondary and advanced sections recede until you engage them */
 .control-section.task-secondary {
   background: rgba(255, 255, 255, 0.02);
+  opacity: 0.82;
+  transition: opacity 0.2s;
+}
+
+.control-section.task-secondary:hover,
+.control-section.task-secondary:focus-within {
+  opacity: 1;
 }
 
 .control-section.task-advanced {
   border-style: dashed;
-  opacity: 0.92;
+  opacity: 0.62;
+  transition: opacity 0.2s;
 }
 
+.control-section.task-advanced:hover,
+.control-section.task-advanced:focus-within {
+  opacity: 1;
+}
+
+/* Guide section docks under the stage bar — one wayfinding unit */
 .control-section.guide-section {
+  margin-top: -10px;
   padding: 10px;
-  border-color: rgba(255, 255, 255, 0.08);
-  background: rgba(0, 0, 0, 0.12);
+  border-color: var(--border);
+  border-radius: 0 0 8px 8px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.guide-section .section-header {
+  margin-bottom: 8px;
+}
+
+.guide-section .section-title {
+  font-size: 10px;
+  color: var(--text-muted);
 }
 
 .section-header {
@@ -1486,21 +1565,28 @@ body {
   letter-spacing: 0.2px;
 }
 
+/* The stage bar right above already names the current step */
 .novice-guide-phase {
-  font-size: 11px;
-  color: var(--text-primary);
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 7px;
-  padding: 3px 8px;
-  white-space: nowrap;
+  display: none;
 }
 
+/* "Do this next" — the one line a new user needs */
 .novice-guide-primary {
-  font-size: 12px;
-  line-height: 1.45;
+  display: flex;
+  gap: 7px;
+  font-size: 13px;
+  line-height: 1.5;
   color: var(--text-primary);
   font-weight: 600;
+}
+
+.novice-guide-primary::before {
+  content: "\25B6";
+  flex: 0 0 auto;
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--info);
+  text-shadow: 0 0 8px var(--info-glow);
 }
 
 .novice-guide-list {
@@ -1512,6 +1598,11 @@ body {
   font-size: 11px;
   line-height: 1.4;
   color: var(--text-secondary);
+}
+
+.novice-guide-list li::marker {
+  color: var(--info);
+  font-family: var(--font-mono);
 }
 
 .novice-guide-status {
@@ -3200,6 +3291,11 @@ input.preset-select {
 
   .control-section {
     padding: 14px;
+  }
+
+  /* Panel gap is 8px here — keep the guide docked to the stage bar */
+  .control-section.guide-section {
+    margin-top: -8px;
   }
 
   .histogram-container,
