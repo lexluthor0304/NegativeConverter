@@ -108,7 +108,11 @@ ws.onmessage = (e) => {
   if (msg.method === 'Page.javascriptDialogOpening') {
     // The guide flow uses alert(); with the Page domain enabled the dialog
     // blocks the renderer until we acknowledge it.
-    console.log(`dialog auto-accepted: ${msg.params?.message?.slice(0, 120)}`);
+    const text = msg.params?.message || '';
+    console.log(`dialog auto-accepted: ${text.slice(0, 120)}`);
+    if (/OpenCV/i.test(text)) {
+      pageErrors.push(`OpenCV load failure dialog: ${text.slice(0, 200)}`);
+    }
     ws.send(JSON.stringify({
       id: ++msgId,
       method: 'Page.handleJavaScriptDialog',
@@ -189,6 +193,13 @@ await send('DOM.setFileInputFiles', { files: [FIXTURE], nodeId: input.result.nod
 await waitFor('image loaded (toolbar visible)',
   `document.getElementById('previewToolbar').style.display !== 'none'`, 90_000);
 console.log('ok: image decoded, Step 1 reached');
+
+// ---- 1b. Auto Frame must actually load OpenCV (regression: opencv-js 5.x
+// exposes window.cv as a thenable that the loader has to resolve) ----
+await evaluate(`document.getElementById('autoFrameBtn').click()`);
+await waitFor('OpenCV runtime ready', `!!(window.cv && window.cv.Mat)`, 90_000);
+console.log('ok: OpenCV loaded, auto-frame analysis ran');
+await wait(2000); // let the analysis settle before moving on
 
 const meanBefore = await previewLuminance();
 if (!Number.isFinite(meanBefore)) fail('could not measure preview luminance');
