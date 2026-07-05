@@ -268,7 +268,7 @@ function addIntegralSample(integral, stride, x, y, rowSum, value, above) {
   return rowSum;
 }
 
-function buildDensityAnalysis(imageData) {
+export function buildDensityAnalysis(imageData) {
   if (!imageData) return null;
   const width = imageData.width;
   const height = imageData.height;
@@ -455,7 +455,62 @@ function scoreSprocketLaneSupport(analysis, rect) {
   return clampBetween(((left + right) * 0.5 - center * 0.52) / 18, 0, 1) * balance;
 }
 
-function scoreDensityRect(rect, target, analysis, context, options = {}) {
+// Detects a quiet "inter-frame gap" strip inside a candidate crop. A real
+// single frame has content activity across its width; a crop spanning 1.5
+// frames of a strip contains a low-edge gap column (blank film between
+// frames). Returns 0 (no gap) .. 1 (pronounced gap).
+function scoreInteriorGapPresence(crop, analysis) {
+  if (!crop || !analysis) return 0;
+  const landscape = crop.width >= crop.height;
+  const along = landscape ? crop.width : crop.height;
+  const across = landscape ? crop.height : crop.width;
+  // Keep the scan close to the candidate edges: when a crop spans 1.5 frames
+  // the gap strip sits near the 5-20% marks, not in the middle.
+  const inset = along * 0.05;
+  // Scan only the central band across the strip: candidates that swallowed
+  // the sprocket lanes would otherwise see hole edges inside the gap column
+  // and mask the quietness we are looking for.
+  const bandInset = across * 0.26;
+  const bandSize = across * 0.48;
+  const winSize = Math.max(3, Math.round(along * 0.035));
+  const step = Math.max(2, Math.round(winSize / 2));
+  const start = (landscape ? crop.x : crop.y) + inset;
+  const end = (landscape ? crop.x + crop.width : crop.y + crop.height) - inset - winSize;
+  if (end <= start) return 0;
+
+  const edges = [];
+  const lumas = [];
+  for (let pos = start; pos <= end; pos += step) {
+    if (landscape) {
+      edges.push(getRegionMean(analysis.edgeIntegral, analysis.stride, pos, crop.y + bandInset, winSize, bandSize));
+      lumas.push(getRegionMean(analysis.lumaIntegral, analysis.stride, pos, crop.y + bandInset, winSize, bandSize));
+    } else {
+      edges.push(getRegionMean(analysis.edgeIntegral, analysis.stride, crop.x + bandInset, pos, bandSize, winSize));
+      lumas.push(getRegionMean(analysis.lumaIntegral, analysis.stride, crop.x + bandInset, pos, bandSize, winSize));
+    }
+  }
+  if (edges.length < 6) return 0;
+
+  const sortedEdges = [...edges].sort((a, b) => a - b);
+  const sortedLumas = [...lumas].sort((a, b) => a - b);
+  const medianEdge = sortedEdges[Math.floor(sortedEdges.length / 2)];
+  const medianLuma = sortedLumas[Math.floor(sortedLumas.length / 2)];
+  if (medianEdge < 2.5) return 0; // essentially featureless crop — cannot judge
+
+  // A gap window is BOTH quieter than the frame content AND clearly brighter
+  // (negatives: unexposed film passes the light table) or darker (positives)
+  // than the median. Luma is the robust signal on low-contrast lightbox scans.
+  let gapness = 0;
+  for (let i = 0; i < edges.length; i++) {
+    const edgeQuiet = clampBetween((medianEdge * 0.85 - edges[i]) / Math.max(1e-6, medianEdge * 0.85), 0, 1);
+    const lumaDeviation = clampBetween((Math.abs(lumas[i] - medianLuma) - 8) / 26, 0, 1);
+    const g = edgeQuiet * lumaDeviation;
+    if (g > gapness) gapness = g;
+  }
+  return gapness;
+}
+
+export function scoreDensityRect(rect, target, analysis, context, options = {}) {
   if (!rect || !target || !analysis) return null;
   const crop = sanitizeBound(rect, analysis.width, analysis.height);
   if (!crop) return null;
@@ -496,10 +551,15 @@ function scoreDensityRect(rect, target, analysis, context, options = {}) {
   const centerY = crop.y + crop.height / 2;
   const centerDist = Math.hypot(centerX - analysis.width / 2, centerY - analysis.height / 2);
   const centerPrior = 1 - clampBetween(centerDist / (Math.hypot(analysis.width, analysis.height) * 0.34), 0, 1);
-  const areaScore = 1 - clampBetween(Math.abs(areaRatio - 0.62) / 0.48, 0, 1);
+  // Sprocket candidates model a single 135 frame on a longer strip, where the
+  // frame naturally covers a much smaller share of the scan than a lone frame.
+  const areaTarget = options.sprocket ? 0.30 : 0.62;
+  const areaScore = 1 - clampBetween(Math.abs(areaRatio - areaTarget) / 0.48, 0, 1);
   const laneScore = options.sprocket
     ? scoreSprocketLaneSupport(analysis, crop)
     : 0;
+  // Penalize candidates that span across an inter-frame gap on a film strip.
+  const interiorGap = scoreInteriorGapPresence(crop, analysis);
 
   const score = clampBetween(
     (aspectScore * 0.19) +
@@ -509,7 +569,8 @@ function scoreDensityRect(rect, target, analysis, context, options = {}) {
     (outsideClean * profile.outsideWeight) +
     (centerPrior * 0.10) +
     (areaScore * 0.08) +
-    (laneScore * 0.08),
+    (laneScore * 0.08) -
+    (interiorGap * 0.16),
     0,
     1
   );
@@ -549,6 +610,7 @@ function scoreDensityRect(rect, target, analysis, context, options = {}) {
       outsideClean: Number(outsideClean.toFixed(3)),
       chromaContrast: Number(chromaContrast.toFixed(3)),
       sprocketLane: Number(laneScore.toFixed(3)),
+      interiorGap: Number(interiorGap.toFixed(3)),
       frameMode
     },
     minRect: {
@@ -601,7 +663,7 @@ function buildDensityTemplateCandidates(imageData, context) {
       });
 
       if (target.key === '135') {
-        const shortRatios = [0.58, 0.64, 0.70, 0.76];
+        const shortRatios = [0.46, 0.52, 0.58, 0.64, 0.70, 0.76];
         shortRatios.forEach((shortRatio) => {
           const landscape = !orientation.portrait;
           const shortSide = (landscape ? analysis.height : analysis.width) * shortRatio;
