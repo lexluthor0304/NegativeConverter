@@ -1498,8 +1498,8 @@
           step: Math.round(sanitizeNumeric(sourceParams.step, fallbackParams.step ?? 2, 1, 16))
         },
         modes: {
-          includeTca: sourceModes.includeTca !== false,
-          includeVignetting: sourceModes.includeVignetting !== false
+          includeTca: (sourceModes.includeTca ?? fallbackModes.includeTca) !== false,
+          includeVignetting: (sourceModes.includeVignetting ?? fallbackModes.includeVignetting) !== false
         },
         lastError: String(source.lastError || fallbackValue.lastError || '').slice(0, 300)
       };
@@ -3934,8 +3934,6 @@
     let updateScheduled = false;
     let fullUpdateTimer = null;
 
-    const previewCanvas = document.createElement('canvas');
-    const previewCtx = previewCanvas.getContext('2d', { willReadFrequently: true });
     let fullAdjustedBuffer = null;
     let previewAdjustedBuffer = null;
     let histogramAdjustedBuffer = null;
@@ -7171,11 +7169,6 @@
       return Math.max(min, Math.min(max, value));
     }
 
-    function formatCropAngleValue(value) {
-      const rounded = Math.round((Number(value) || 0) * 10) / 10;
-      return rounded.toFixed(1).replace(/\.0$/, '');
-    }
-
     function scaleCropRect(rect, scaleX, scaleY) {
       if (!rect) return null;
       return {
@@ -8840,31 +8833,6 @@
     }
 
     // Process a single file with given settings (streaming - no memory accumulation)
-    async function processOneFile(file, settings) {
-      const safeSettings = sanitizeSettings(settings, { fallbackSettings: state });
-      const imageData = await loadFileToImageData(file);
-
-      let workingData = imageData;
-      const rotationAngle = Number.isFinite(safeSettings.rotationAngle) ? safeSettings.rotationAngle : 0;
-      if (Math.abs(rotationAngle) > 0.001) {
-        workingData = applyRotationToImageData(workingData, rotationAngle);
-      }
-      if (safeSettings.cropRegion) {
-        const cropRegion = sanitizeCropRegionForImage(safeSettings.cropRegion, workingData);
-        if (cropRegion) {
-          workingData = cropImageData(workingData, cropRegion);
-        }
-      }
-      workingData = await applyLensCorrectionWithSettings(workingData, safeSettings, { updateUi: false });
-
-      const processed = await convertFrameWithRouter({
-        imageData: workingData,
-        settings: buildRouterSettings(safeSettings)
-      });
-
-      return applyAdjustmentsWithSettings(processed, safeSettings);
-    }
-
     // Get selected files for batch processing
     function getSelectedFiles() {
       return state.fileQueue
