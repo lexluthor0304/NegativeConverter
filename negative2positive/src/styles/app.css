@@ -2709,11 +2709,12 @@ body {
   white-space: nowrap;
 }
 
-/* Loading Overlay (Three.js) */
+/* Loading Overlay — spinning film reel + sprocket progress strip */
 .loading-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.85);
+  background: rgba(14, 12, 20, 0.88);
+  backdrop-filter: blur(4px);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -2727,13 +2728,91 @@ body {
   opacity: 1;
   pointer-events: all;
 }
+
+.loading-reel-wrap {
+  width: 128px;
+  height: 128px;
+  filter: drop-shadow(0 0 18px rgba(69, 214, 205, 0.18));
+}
+
+.loading-reel {
+  width: 100%;
+  height: 100%;
+  animation: reel-spin 1.4s linear infinite;
+  will-change: transform;
+}
+
+@keyframes reel-spin {
+  to { transform: rotate(360deg); }
+}
+
+.loading-reel .reel-rim {
+  fill: none;
+  stroke: #b9aed2;
+  stroke-width: 3;
+}
+
+.loading-reel .reel-film {
+  fill: rgba(255, 194, 75, 0.1);
+  stroke: rgba(255, 194, 75, 0.55);
+  stroke-width: 2;
+}
+
+.loading-reel .reel-hub {
+  fill: #1f1a2c;
+  stroke: #b9aed2;
+  stroke-width: 2.5;
+}
+
+.loading-reel .reel-cutout {
+  fill: rgba(14, 12, 20, 0.85);
+  stroke: rgba(185, 174, 210, 0.55);
+  stroke-width: 1.5;
+}
+
+.loading-reel .reel-key {
+  fill: #b9aed2;
+}
+
+/* Film strip progress bar: sprocket holes top and bottom, amber exposure fill */
+.loading-film-strip {
+  position: relative;
+  width: min(280px, 72vw);
+  height: 28px;
+  margin-top: 22px;
+  border-radius: 4px;
+  background:
+    repeating-linear-gradient(90deg,
+      transparent 0 5px,
+      rgba(236, 231, 244, 0.5) 5px 9px,
+      transparent 9px 14px) 0 2px / 14px 4px repeat-x,
+    repeating-linear-gradient(90deg,
+      transparent 0 5px,
+      rgba(236, 231, 244, 0.5) 5px 9px,
+      transparent 9px 14px) 0 calc(100% - 2px) / 14px 4px repeat-x,
+    #0e0c14;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+
+.loading-film-fill {
+  position: absolute;
+  top: 7px;
+  bottom: 7px;
+  left: 0;
+  width: 0%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, rgba(255, 150, 92, 0.75), var(--warning));
+  box-shadow: 0 0 12px rgba(255, 194, 75, 0.4);
+  transition: width 0.25s ease;
+}
+
 .loading-progress-text {
-  font-family: 'Inter', monospace;
+  font-family: var(--font-mono);
   font-size: 28px;
-  font-weight: 700;
   color: #45d6cd;
-  text-shadow: 0 0 10px rgba(74,158,255,0.6), 0 0 30px rgba(74,158,255,0.3);
-  margin-top: 24px;
+  text-shadow: 0 0 10px rgba(69, 214, 205, 0.6), 0 0 30px rgba(69, 214, 205, 0.3);
+  margin-top: 16px;
 }
 .loading-phase-text {
   font-family: 'Inter', sans-serif;
