@@ -8,6 +8,7 @@
     import { i18n } from './i18n.js';
     import { interpolateText, summarizePathForUi } from './textUtils.js';
     import { computeSpline, buildCurveLut, getCurvePresetPoints, insertCurvePoint, moveCurvePoint, findNearPointIndex } from './curveMath.js';
+    import { deepCopySanitizedSettings } from './settingsSnapshot.js';
     import { computeZoomGeometry, clampPanValues } from './zoomGeometry.js';
     import { showToast } from '../ui/toast.js';
 
@@ -8553,133 +8554,15 @@
     // ===========================================
     function extractCurrentSettings() {
       const safe = sanitizeSettings(state, { fallbackSettings: state });
-      return {
-        cropRegion: safe.cropRegion ? { ...safe.cropRegion } : null,
-        rotationAngle: safe.rotationAngle || 0,
-        autoFrameMeta: state.autoFrame.lastDiagnostics ? { ...state.autoFrame.lastDiagnostics } : null,
-        filmType: safe.filmType,
-        filmBase: { ...safe.filmBase },
-        lensCorrection: {
-          enabled: Boolean(safe.lensCorrection.enabled),
-          selectedLens: safe.lensCorrection.selectedLens ? { ...safe.lensCorrection.selectedLens } : null,
-          params: { ...safe.lensCorrection.params },
-          modes: { ...safe.lensCorrection.modes },
-          lastError: safe.lensCorrection.lastError || ''
-        },
-        coreFilmPreset: safe.coreFilmPreset,
-        coreColorModel: safe.coreColorModel,
-        coreEnhancedProfile: safe.coreEnhancedProfile,
-        coreProfileStrength: safe.coreProfileStrength,
-        corePreSaturation: safe.corePreSaturation,
-        coreBorderBuffer: safe.coreBorderBuffer,
-        coreBorderBufferBorderValue: safe.coreBorderBufferBorderValue,
-        coreBrightness: safe.coreBrightness,
-        coreExposure: safe.coreExposure,
-        coreContrast: safe.coreContrast,
-        coreHighlights: safe.coreHighlights,
-        coreShadows: safe.coreShadows,
-        coreWhites: safe.coreWhites,
-        coreBlacks: safe.coreBlacks,
-        coreWbMode: safe.coreWbMode,
-        coreTemperature: safe.coreTemperature,
-        coreTint: safe.coreTint,
-        coreSaturation: safe.coreSaturation,
-        coreGlow: safe.coreGlow,
-        coreFade: safe.coreFade,
-        coreCurvePrecision: safe.coreCurvePrecision,
-        coreUseWebGL: safe.coreUseWebGL,
-        exposure: safe.exposure,
-        contrast: safe.contrast,
-        highlights: safe.highlights,
-        shadows: safe.shadows,
-        temperature: safe.temperature,
-        tint: safe.tint,
-        vibrance: safe.vibrance,
-        saturation: safe.saturation,
-        cyan: safe.cyan,
-        magenta: safe.magenta,
-        yellow: safe.yellow,
-        wbR: safe.wbR,
-        wbG: safe.wbG,
-        wbB: safe.wbB,
-        grayPointSampled: Boolean(safe.grayPointSampled),
-        curvePoints: {
-          r: safe.curvePoints.r.map(p => ({ ...p })),
-          g: safe.curvePoints.g.map(p => ({ ...p })),
-          b: safe.curvePoints.b.map(p => ({ ...p }))
-        },
-        curves: {
-          r: new Uint8Array(safe.curves.r),
-          g: new Uint8Array(safe.curves.g),
-          b: new Uint8Array(safe.curves.b)
-        }
-      };
+      return deepCopySanitizedSettings(safe, {
+        autoFrameMeta: state.autoFrame.lastDiagnostics
+      });
     }
 
     function cloneSettings(settings) {
       if (!settings) return null;
       const safe = sanitizeSettings(settings, { fallbackSettings: state });
-      return {
-        cropRegion: safe.cropRegion ? { ...safe.cropRegion } : null,
-        rotationAngle: safe.rotationAngle,
-        autoFrameMeta: safe.autoFrameMeta ? { ...safe.autoFrameMeta } : null,
-        filmType: safe.filmType,
-        filmBase: { ...safe.filmBase },
-        lensCorrection: {
-          enabled: Boolean(safe.lensCorrection.enabled),
-          selectedLens: safe.lensCorrection.selectedLens ? { ...safe.lensCorrection.selectedLens } : null,
-          params: { ...safe.lensCorrection.params },
-          modes: { ...safe.lensCorrection.modes },
-          lastError: safe.lensCorrection.lastError || ''
-        },
-        coreFilmPreset: safe.coreFilmPreset,
-        coreColorModel: safe.coreColorModel,
-        coreEnhancedProfile: safe.coreEnhancedProfile,
-        coreProfileStrength: safe.coreProfileStrength,
-        corePreSaturation: safe.corePreSaturation,
-        coreBorderBuffer: safe.coreBorderBuffer,
-        coreBorderBufferBorderValue: safe.coreBorderBufferBorderValue,
-        coreBrightness: safe.coreBrightness,
-        coreExposure: safe.coreExposure,
-        coreContrast: safe.coreContrast,
-        coreHighlights: safe.coreHighlights,
-        coreShadows: safe.coreShadows,
-        coreWhites: safe.coreWhites,
-        coreBlacks: safe.coreBlacks,
-        coreWbMode: safe.coreWbMode,
-        coreTemperature: safe.coreTemperature,
-        coreTint: safe.coreTint,
-        coreSaturation: safe.coreSaturation,
-        coreGlow: safe.coreGlow,
-        coreFade: safe.coreFade,
-        coreCurvePrecision: safe.coreCurvePrecision,
-        coreUseWebGL: safe.coreUseWebGL,
-        exposure: safe.exposure,
-        contrast: safe.contrast,
-        highlights: safe.highlights,
-        shadows: safe.shadows,
-        temperature: safe.temperature,
-        tint: safe.tint,
-        vibrance: safe.vibrance,
-        saturation: safe.saturation,
-        cyan: safe.cyan,
-        magenta: safe.magenta,
-        yellow: safe.yellow,
-        wbR: safe.wbR,
-        wbG: safe.wbG,
-        wbB: safe.wbB,
-        grayPointSampled: Boolean(safe.grayPointSampled),
-        curvePoints: {
-          r: safe.curvePoints.r.map(p => ({ ...p })),
-          g: safe.curvePoints.g.map(p => ({ ...p })),
-          b: safe.curvePoints.b.map(p => ({ ...p }))
-        },
-        curves: {
-          r: new Uint8Array(safe.curves.r),
-          g: new Uint8Array(safe.curves.g),
-          b: new Uint8Array(safe.curves.b)
-        }
-      };
+      return deepCopySanitizedSettings(safe);
     }
 
     function markCurrentFileDirty() {
