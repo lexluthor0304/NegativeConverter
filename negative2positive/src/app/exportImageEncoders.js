@@ -1,4 +1,5 @@
-import pako from 'pako';
+// pako 3.x dropped the default export — use named imports.
+import * as pako from 'pako';
 
 const pngCrcTable = (() => {
   const table = new Uint32Array(256);
