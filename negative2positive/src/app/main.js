@@ -6,6 +6,9 @@
     import '@fontsource/orbitron/700.css';
     import '@fontsource/share-tech-mono/400.css';
     import { i18n } from './i18n.js';
+    import { interpolateText, summarizePathForUi } from './textUtils.js';
+    import { computeZoomGeometry, clampPanValues } from './zoomGeometry.js';
+    import { showToast } from '../ui/toast.js';
 
     import { convertFrameWithRouter } from '../pipeline/conversionRouter.js';
     import { invalidateSilverCoreCache } from '../pipeline/silverAdapter.js';
@@ -1692,39 +1695,10 @@
     }
 
     // ===========================================
-    // Toast Notification System
+    // Localized text helpers (toast + text utils now live in modules)
     // ===========================================
-    function showToast(message, durationMs = 2000) {
-      const container = document.getElementById('toastContainer');
-      if (!container) return;
-      const el = document.createElement('div');
-      el.className = 'toast-message';
-      el.textContent = message;
-      container.appendChild(el);
-      requestAnimationFrame(() => el.classList.add('toast-visible'));
-      setTimeout(() => {
-        el.classList.remove('toast-visible');
-        el.addEventListener('transitionend', () => el.remove(), { once: true });
-      }, durationMs);
-    }
-
-    function interpolateText(template, replacements = {}) {
-      let text = String(template || '');
-      for (const [key, value] of Object.entries(replacements)) {
-        text = text.replaceAll(`{${key}}`, String(value ?? ''));
-      }
-      return text;
-    }
-
     function getInterpolatedText(key, replacements = {}, fallback = '') {
       return interpolateText(getLocalizedText(key, fallback), replacements);
-    }
-
-    function summarizePathForUi(path) {
-      const normalized = String(path || '').replace(/[\\/]+$/, '');
-      if (!normalized) return '';
-      const parts = normalized.split(/[\\/]/).filter(Boolean);
-      return parts.length ? parts[parts.length - 1] : normalized;
     }
 
     function updateDesktopBatchExportUI() {
@@ -5129,37 +5103,13 @@
     }
 
     function getZoomGeometry(zoom = state.zoomLevel) {
-      const wrapperW = parseFloat(canvasTransformWrapper.style.width) || canvasTransformWrapper.offsetWidth || 0;
-      const wrapperH = parseFloat(canvasTransformWrapper.style.height) || canvasTransformWrapper.offsetHeight || 0;
-      const containerW = canvasContainer.clientWidth;
-      const containerH = canvasContainer.clientHeight;
-      const baseX = (containerW - wrapperW) / 2;
-      const baseY = (containerH - wrapperH) / 2;
-      const scaledW = wrapperW * zoom;
-      const scaledH = wrapperH * zoom;
-
-      const centeredPanX = ((containerW - scaledW) / 2) - baseX;
-      const centeredPanY = ((containerH - scaledH) / 2) - baseY;
-
-      const minPanX = scaledW <= containerW ? centeredPanX : containerW - baseX - scaledW;
-      const maxPanX = scaledW <= containerW ? centeredPanX : -baseX;
-      const minPanY = scaledH <= containerH ? centeredPanY : containerH - baseY - scaledH;
-      const maxPanY = scaledH <= containerH ? centeredPanY : -baseY;
-
-      return {
-        wrapperW,
-        wrapperH,
-        containerW,
-        containerH,
-        baseX,
-        baseY,
-        scaledW,
-        scaledH,
-        minPanX,
-        maxPanX,
-        minPanY,
-        maxPanY
-      };
+      return computeZoomGeometry({
+        wrapperW: parseFloat(canvasTransformWrapper.style.width) || canvasTransformWrapper.offsetWidth || 0,
+        wrapperH: parseFloat(canvasTransformWrapper.style.height) || canvasTransformWrapper.offsetHeight || 0,
+        containerW: canvasContainer.clientWidth,
+        containerH: canvasContainer.clientHeight,
+        zoom
+      });
     }
 
     function clampPan() {
@@ -5170,9 +5120,9 @@
         return;
       }
 
-      const geometry = getZoomGeometry(z);
-      state.panX = Math.max(geometry.minPanX, Math.min(geometry.maxPanX, state.panX));
-      state.panY = Math.max(geometry.minPanY, Math.min(geometry.maxPanY, state.panY));
+      const clamped = clampPanValues(state.panX, state.panY, getZoomGeometry(z));
+      state.panX = clamped.panX;
+      state.panY = clamped.panY;
     }
 
     function resetZoomPan() {
