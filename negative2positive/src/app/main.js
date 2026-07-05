@@ -13,6 +13,7 @@
     import { showToast } from '../ui/toast.js';
 
     import { convertFrameWithRouter } from '../pipeline/conversionRouter.js';
+    import { convertFrameInWorker } from './conversionWorkerClient.js';
     import { invalidateSilverCoreCache } from '../pipeline/silverAdapter.js';
     import { canUseBrowserZipStreaming, ZipStoreWriter } from './zipStoreWriter.js';
     import {
@@ -4188,18 +4189,38 @@
       }
     }
 
+    // Full-resolution conversions run in a worker so a 90+ MP scan does not
+    // freeze the UI for seconds; the small interactive preview stays on the
+    // main thread. Falls back to the main thread if the worker fails.
+    let conversionWorkerBroken = false;
+    async function convertFrameOffMainThread({ imageData, settings, options }) {
+      if (!conversionWorkerBroken && usesSilverCoreConversion(state)) {
+        try {
+          return await convertFrameInWorker({ imageData, settings, options });
+        } catch (err) {
+          conversionWorkerBroken = true;
+          console.warn('Conversion worker unavailable, using main thread:', err?.message || err);
+        }
+      }
+      return convertFrameWithRouter({ imageData, settings, options });
+    }
+
     async function convertFromCurrentSource(settings = state, { preview = false } = {}) {
       const fullSource = state.conversionSourceImageData || state.croppedImageData || state.originalImageData;
       if (!fullSource) return null;
       const source = (preview && state.conversionPreviewImageData) ? state.conversionPreviewImageData : fullSource;
-      return await convertFrameWithRouter({
+      const request = {
         imageData: source,
         settings: buildRouterSettings(settings),
         options: {
           preview,
           forceFullProcess: !preview
         }
-      });
+      };
+      if (preview) {
+        return await convertFrameWithRouter(request);
+      }
+      return await convertFrameOffMainThread(request);
     }
 
     let coreReprocessTimer = null;
@@ -8934,10 +8955,12 @@
         pixels: getImageDataPixelCount(workingData)
       });
 
-      // Convert negative/positive via unified conversion router.
-      let processed = await convertFrameWithRouter({
+      // Convert negative/positive via unified conversion router (in a worker
+      // when available — keeps batch export from freezing the page).
+      let processed = await convertFrameOffMainThread({
         imageData: workingData,
-        settings: buildRouterSettings(settings)
+        settings: buildRouterSettings(settings),
+        options: {}
       });
       trace.mark('convert', {
         pixels: getImageDataPixelCount(processed)
