@@ -229,7 +229,46 @@ if (Math.abs(meanAfter - meanBefore) < 8) {
   fail('preview barely changed after conversion — pipeline may be broken');
 }
 
-// ---- 5. no uncaught page errors ----
+// ---- 5. curve editor: drag the midtones up, preview must brighten/change ----
+await evaluate(`(() => {
+  const content = document.getElementById('additionalSectionContent');
+  if (content.classList.contains('collapsed')) {
+    document.querySelector('#additionalSection .section-header').click();
+  }
+})()`);
+await wait(300);
+await evaluate(`document.getElementById('curveCanvas').scrollIntoView({ block: 'center' })`);
+await wait(300);
+const curveRect = await evaluate(`(() => {
+  const r = document.getElementById('curveCanvas').getBoundingClientRect();
+  return { x: r.x, y: r.y, width: r.width, height: r.height };
+})()`);
+if (!curveRect.width) fail('curve canvas not visible in Advanced section');
+if (curveRect.y < 0 || curveRect.y + curveRect.height > 900) {
+  fail(`curve canvas still outside viewport (y=${curveRect.y})`);
+}
+
+const cx = curveRect.x + curveRect.width / 2;
+const cy = curveRect.y + curveRect.height / 2;
+const mouse = (type, x, y, extra = {}) => send('Input.dispatchMouseEvent', {
+  type, x, y, button: 'left', clickCount: type === 'mousePressed' ? 1 : 0,
+  buttons: type === 'mouseReleased' ? 0 : 1, ...extra,
+});
+await mouse('mousePressed', cx, cy);
+for (let step = 1; step <= 6; step++) {
+  await mouse('mouseMoved', cx, cy - (curveRect.height * 0.3 * step) / 6);
+  await wait(60);
+}
+await mouse('mouseReleased', cx, cy - curveRect.height * 0.3);
+await wait(2500); // full-res reprocess after drag
+
+const meanCurved = await previewLuminance();
+console.log(`ok: curve drag luminance ${meanAfter.toFixed(1)} -> ${meanCurved.toFixed(1)}`);
+if (Math.abs(meanCurved - meanAfter) < 3) {
+  fail('preview did not react to curve edit — curve pipeline may be broken');
+}
+
+// ---- 6. no uncaught page errors ----
 const realErrors = pageErrors.filter((e) => !/ResizeObserver loop/.test(e));
 if (realErrors.length) {
   fail(`uncaught page errors:\n${realErrors.join('\n---\n')}`);
