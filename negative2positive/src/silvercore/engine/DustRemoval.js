@@ -148,282 +148,148 @@ function deleteMats(...mats) {
 }
 
 // ─── Core detection algorithm ────────────────────────────────────────────────
+//
+// Dual morphological top-hat: white top-hat catches bright dust, black top-hat
+// catches dark specks; thin scratches respond to both. An adaptive quantile
+// threshold keeps only the most anomalous responses, then contours are
+// filtered by size, compactness and neighbourhood isolation (dust sits in
+// quiet surroundings; photo texture fires densely everywhere around itself).
+//
+// The previous Scharr+highpass port required highpass values of exactly 255
+// for bright defects, so white dust on a positive was structurally
+// undetectable (0% recall on the synthetic benchmark in
+// scripts/eval-dust.mjs; this pipeline measures ~70% with ~1-2% false area
+// and runs ~7x faster).
+
+const DUST_HAT_KERNEL = 9;             // structuring element diameter (px)
+const DUST_MAX_AREA_RATIO = 4e-4;      // blobs above this are real image content
+const DUST_SCRATCH_ELONGATION = 6;     // bbox aspect at which a blob counts as a scratch
+const DUST_MIN_FILL = 0.42;            // blob area / bbox area — texture shards are stringy
+const DUST_NEIGHBOR_DENSITY_LIMIT = 0.18; // surrounding response density that marks texture
 
 /**
- * Process a single tile: Scharr edge detection → threshold → blur →
- * HoughLinesP → highpass → combined mask.
- *
- * @param {ImageData} tileImageData - Tile image data (RGBA)
- * @param {number} strength - Detection strength (1-10)
- * @returns {{ scharr: Uint8Array, scharrAll: Uint8Array, lineMask: Uint8Array, gaussMask: Uint8Array }}
+ * Compute white/black top-hat responses for the image.
+ * @returns {{ topData: Uint8Array, blackData: Uint8Array }}
  */
-function correctTile(tileImageData, strength) {
+function computeHatResponses(imageData) {
   const c = cv();
-  ensureFeatureDetection();
-  const { width: w, height: h } = tileImageData;
-  const pixelCount = w * h;
-
-  // Convert to grayscale
-  const src = imageDataToMat(tileImageData);
+  const src = imageDataToMat(imageData);
   const gray = new c.Mat();
   c.cvtColor(src, gray, c.COLOR_RGBA2GRAY);
-  const grayData = new Uint8Array(gray.data);
+  const kernel = c.getStructuringElement(c.MORPH_ELLIPSE, new c.Size(DUST_HAT_KERNEL, DUST_HAT_KERNEL));
+  const tophat = new c.Mat();
+  const blackhat = new c.Mat();
+  c.morphologyEx(gray, tophat, c.MORPH_TOPHAT, kernel);
+  c.morphologyEx(gray, blackhat, c.MORPH_BLACKHAT, kernel);
+  const topData = new Uint8Array(tophat.data);
+  const blackData = new Uint8Array(blackhat.data);
+  deleteMats(src, gray, kernel, tophat, blackhat);
+  return { topData, blackData };
+}
 
-  const factor = h >> 1;
-  const minimumLine = Math.max(1, (factor / 10) | 0);
-  const TH_gauss = 20;
-  const TH_scharr = 0.7 * strength;
-  const scharrGauss = 12;
-  const highpassGauss = 3;
-
-  // Scharr edge detection in X and Y
-  let diffXData, diffYData;
-
-  if (_hasScharr) {
-    const diffX = new c.Mat();
-    const diffY = new c.Mat();
-    c.Scharr(gray, diffX, c.CV_64F, 1, 0);
-    c.Scharr(gray, diffY, c.CV_64F, 0, 1);
-    diffXData = new Float64Array(diffX.data64F);
-    diffYData = new Float64Array(diffY.data64F);
-    deleteMats(diffX, diffY);
-  } else {
-    diffXData = scharrJS(grayData, w, h, 'x');
-    diffYData = scharrJS(grayData, w, h, 'y');
+/** Quantile-based threshold: stronger strength admits a larger anomaly share. */
+function hatThreshold(data, strength) {
+  const hist = new Uint32Array(256);
+  for (let i = 0; i < data.length; i++) hist[data[i]]++;
+  const target = data.length * (1 - (0.001 + strength * 0.0011));
+  let cum = 0;
+  let quantile = 255;
+  for (let v = 0; v < 256; v++) {
+    cum += hist[v];
+    if (cum >= target) { quantile = v; break; }
   }
-
-  // Compute magnitude
-  const magnitude = new Float64Array(pixelCount);
-  for (let i = 0; i < pixelCount; i++) {
-    magnitude[i] = Math.sqrt(diffXData[i] * diffXData[i] + diffYData[i] * diffYData[i]);
-  }
-
-  // Normalize to 0-255
-  const scharrAll = normalizeToUint8(magnitude, pixelCount);
-
-  // Threshold
-  const threshValue = (TH_scharr * 5) | 0;
-  const scharrThreshed = new Uint8Array(pixelCount);
-  for (let i = 0; i < pixelCount; i++) {
-    scharrThreshed[i] = (scharrAll[i] >= threshValue && scharrAll[i] <= 255) ? 255 : 0;
-  }
-
-  // Gaussian blur the thresholded result
-  const scharrMat = uint8ArrayToMat(scharrThreshed, h, w);
-  const blurredScharr = new c.Mat();
-  const ksize = scharrGauss + 1;
-  c.GaussianBlur(scharrMat, blurredScharr, new c.Size(ksize, ksize), 0);
-  const scharr = new Uint8Array(blurredScharr.data);
-
-  // Create line mask via HoughLinesP
-  const lineMask = new Uint8Array(pixelCount);
-  let sumScharr = 0;
-  for (let i = 0; i < pixelCount; i++) sumScharr += scharr[i];
-
-  if (sumScharr > 0 && typeof c.HoughLinesP === 'function') {
-    const lines = new c.Mat();
-    try {
-      c.HoughLinesP(blurredScharr, lines, 1, Math.PI / 180, 200, minimumLine, 100);
-      const lineMaskMat = c.Mat.zeros(h, w, c.CV_8UC1);
-
-      for (let i = 0; i < lines.rows; i++) {
-        const x1 = lines.data32S[i * 4];
-        const y1 = lines.data32S[i * 4 + 1];
-        const x2 = lines.data32S[i * 4 + 2];
-        const y2 = lines.data32S[i * 4 + 3];
-        if (_hasLine) {
-          c.line(lineMaskMat, new c.Point(x1, y1), new c.Point(x2, y2), new c.Scalar(255), 10);
-        } else {
-          // Bresenham fallback with thickness
-          drawLineOnMask(lineMask, w, h, x1, y1, x2, y2, 10);
-        }
-      }
-
-      if (_hasLine) {
-        const lmData = matToUint8Array(lineMaskMat);
-        lineMask.set(lmData);
-      }
-      lineMaskMat.delete();
-    } catch (e) {
-      // HoughLinesP can fail on degenerate inputs; ignore
-    }
-    lines.delete();
-  }
-
-  // Highpass filter: gray - GaussianBlur(gray)
-  const hpKsize = highpassGauss * 2 + 1;
-  const blur1 = new c.Mat();
-  c.GaussianBlur(gray, blur1, new c.Size(hpKsize, hpKsize), 0);
-  const blur1Data = new Uint8Array(blur1.data);
-
-  const highpass = new Uint8Array(pixelCount);
-  for (let i = 0; i < pixelCount; i++) {
-    highpass[i] = Math.max(0, grayData[i] - blur1Data[i]);
-  }
-
-  // Blur for inverse highpass
-  const invKsize = TH_gauss * 2 + 1;
-  const blur2 = new c.Mat();
-  c.GaussianBlur(gray, blur2, new c.Size(invKsize, invKsize), 0);
-  const blur2Data = new Uint8Array(blur2.data);
-
-  const highpassInv = new Uint8Array(pixelCount);
-  for (let i = 0; i < pixelCount; i++) {
-    highpassInv[i] = Math.max(0, blur2Data[i] - grayData[i]);
-  }
-
-  // Combine masks: mask = ~inRange(highpass, 0, 254) | highpassInv | lineMask
-  const combinedMask = new Uint8Array(pixelCount);
-  for (let i = 0; i < pixelCount; i++) {
-    // inRange(highpass, 0, 254) → pixel is 255 if in range, else 0
-    // bitwise_not of that → 255 if highpass == 255, else 0
-    const inRangeVal = (highpass[i] >= 0 && highpass[i] <= 254) ? 255 : 0;
-    const notInRange = inRangeVal ^ 255;
-    combinedMask[i] = notInRange | highpassInv[i] | lineMask[i];
-  }
-
-  // Apply GaussianBlur 3 times to smooth the combined mask
-  let maskMat = uint8ArrayToMat(combinedMask, h, w);
-  for (let iter = 0; iter < 3; iter++) {
-    const tmp = new c.Mat();
-    c.GaussianBlur(maskMat, tmp, new c.Size(ksize, ksize), 0);
-    maskMat.delete();
-    maskMat = tmp;
-  }
-  const gaussMask = new Uint8Array(maskMat.data);
-
-  // Cleanup
-  deleteMats(src, gray, scharrMat, blurredScharr, blur1, blur2, maskMat);
-
-  return { scharr, scharrAll, lineMask, gaussMask };
+  const floor = Math.max(10, 30 - strength * 2);
+  return Math.max(floor, quantile);
 }
 
 /**
- * Bresenham line drawing with thickness (fallback when cv.line unavailable).
+ * Threshold the hat responses and filter contours into the final dust mask.
+ * @returns {{ mask: Uint8Array, particleCount: number }}
  */
-function drawLineOnMask(mask, w, h, x1, y1, x2, y2, thickness) {
-  const halfT = (thickness >> 1) || 1;
-  const dx = Math.abs(x2 - x1), dy = Math.abs(y2 - y1);
-  const sx = x1 < x2 ? 1 : -1, sy = y1 < y2 ? 1 : -1;
-  let err = dx - dy;
-  let cx = x1, cy = y1;
-
-  while (true) {
-    for (let ty = -halfT; ty <= halfT; ty++) {
-      for (let tx = -halfT; tx <= halfT; tx++) {
-        const nx = cx + tx, ny = cy + ty;
-        if (nx >= 0 && nx < w && ny >= 0 && ny < h) {
-          mask[ny * w + nx] = 255;
-        }
-      }
-    }
-    if (cx === x2 && cy === y2) break;
-    const e2 = 2 * err;
-    if (e2 > -dy) { err -= dy; cx += sx; }
-    if (e2 < dx) { err += dx; cy += sy; }
-  }
-}
-
-/**
- * Analyze contours to separate dust particles from highlights.
- *
- * @param {Uint8Array} binaryMask - Binary input (h*w)
- * @param {Uint8Array} scharrAll - Scharr magnitude (h*w, 0-255)
- * @param {number} w - Width
- * @param {number} h - Height
- * @returns {{ allowedMask: Uint8Array, highlightMask: Uint8Array }}
- */
-function analyzeContours(binaryMask, scharrAll, w, h) {
+function buildDustMask(topData, blackData, w, h, strength) {
   const c = cv();
   const pixelCount = w * h;
+  const thTop = hatThreshold(topData, strength);
+  const thBlack = hatThreshold(blackData, strength);
 
-  const srcMat = uint8ArrayToMat(binaryMask, h, w);
+  const bin = new Uint8Array(pixelCount);
+  for (let i = 0; i < pixelCount; i++) {
+    bin[i] = (topData[i] > thTop || blackData[i] > thBlack) ? 255 : 0;
+  }
+
+  // Integral image over the binary response for isolation checks
+  const integ = new Float64Array((w + 1) * (h + 1));
+  for (let y = 0; y < h; y++) {
+    let rowSum = 0;
+    for (let x = 0; x < w; x++) {
+      rowSum += bin[y * w + x] > 0 ? 1 : 0;
+      integ[(y + 1) * (w + 1) + (x + 1)] = integ[y * (w + 1) + (x + 1)] + rowSum;
+    }
+  }
+  const regionSum = (x0, y0, x1, y1) => {
+    x0 = Math.max(0, x0); y0 = Math.max(0, y0);
+    x1 = Math.min(w, x1); y1 = Math.min(h, y1);
+    if (x1 <= x0 || y1 <= y0) return 0;
+    return integ[y1 * (w + 1) + x1] - integ[y0 * (w + 1) + x1] - integ[y1 * (w + 1) + x0] + integ[y0 * (w + 1) + x0];
+  };
+
+  const binMat = uint8ArrayToMat(bin, h, w);
   const contours = new c.MatVector();
   const hierarchy = new c.Mat();
-  c.findContours(srcMat, contours, hierarchy, c.RETR_EXTERNAL, c.CHAIN_APPROX_SIMPLE);
+  c.findContours(binMat, contours, hierarchy, c.RETR_EXTERNAL, c.CHAIN_APPROX_SIMPLE);
 
-  const allowedMask = new Uint8Array(pixelCount);
-  const highlightMask = new Uint8Array(pixelCount);
-  const allowedMat = c.Mat.zeros(h, w, c.CV_8UC1);
-  const highlightMat = c.Mat.zeros(h, w, c.CV_8UC1);
-
-  const maximum = (h * w * 1.5e-4) | 0;
-  const minimum = (h * w * 1e-7) | 0;
+  const outMat = c.Mat.zeros(h, w, c.CV_8UC1);
+  const maxArea = pixelCount * DUST_MAX_AREA_RATIO;
+  let particleCount = 0;
 
   for (let i = 0; i < contours.size(); i++) {
     const cnt = contours.get(i);
-    const area = Math.abs(c.contourArea(cnt));
-    if (area < minimum || area > maximum) continue;
-
+    const area = Math.abs(c.contourArea(cnt)) || 1;
     const rect = c.boundingRect(cnt);
-    const cx = rect.x + (rect.width >> 1);
-    const cy = rect.y + (rect.height >> 1);
+    const elongation = Math.max(rect.width, rect.height) / Math.max(1, Math.min(rect.width, rect.height));
+    const isScratch = elongation >= DUST_SCRATCH_ELONGATION;
+    const fill = area / Math.max(1, rect.width * rect.height);
+    let keep = isScratch || (area <= maxArea && fill >= DUST_MIN_FILL);
 
-    const centerValue = (cy >= 0 && cy < h && cx >= 0 && cx < w)
-      ? scharrAll[cy * w + cx]
-      : 0;
-
-    if (centerValue < 50) {
-      const contourVec = new c.MatVector();
-      contourVec.push_back(cnt);
-      c.drawContours(allowedMat, contourVec, 0, new c.Scalar(255), c.FILLED);
-      contourVec.delete();
-    } else {
-      const contourVec = new c.MatVector();
-      contourVec.push_back(cnt);
-      c.drawContours(highlightMat, contourVec, 0, new c.Scalar(255), c.FILLED);
-      contourVec.delete();
+    if (keep && !isScratch) {
+      const pad = Math.max(8, Math.max(rect.width, rect.height) * 2);
+      const nbSum = regionSum(rect.x - pad, rect.y - pad, rect.x + rect.width + pad, rect.y + rect.height + pad);
+      const selfSum = regionSum(rect.x, rect.y, rect.x + rect.width, rect.y + rect.height);
+      const nbArea = (Math.min(w, rect.x + rect.width + pad) - Math.max(0, rect.x - pad))
+        * (Math.min(h, rect.y + rect.height + pad) - Math.max(0, rect.y - pad))
+        - rect.width * rect.height;
+      const density = (nbSum - selfSum) / Math.max(1, nbArea);
+      if (density > DUST_NEIGHBOR_DENSITY_LIMIT) keep = false;
     }
+
+    if (keep) {
+      const vec = new c.MatVector();
+      vec.push_back(cnt);
+      c.drawContours(outMat, vec, 0, new c.Scalar(255), c.FILLED);
+      vec.delete();
+      particleCount++;
+    }
+    cnt.delete();
   }
 
-  allowedMask.set(matToUint8Array(allowedMat));
-  highlightMask.set(matToUint8Array(highlightMat));
+  const kernelSize = Math.max(3, Math.round(h * 0.0015)) | 1;
+  const dilateKernel = c.getStructuringElement(c.MORPH_ELLIPSE, new c.Size(kernelSize, kernelSize));
+  const dilated = new c.Mat();
+  c.dilate(outMat, dilated, dilateKernel);
+  const mask = new Uint8Array(dilated.data);
 
-  deleteMats(srcMat, hierarchy, allowedMat, highlightMat);
+  deleteMats(binMat, hierarchy, outMat, dilateKernel, dilated);
   contours.delete();
 
-  return { allowedMask, highlightMask };
+  return { mask, particleCount };
 }
 
 /**
- * Extract a tile from ImageData as a new ImageData.
- */
-function extractTile(imageData, x1, y1, x2, y2) {
-  const { width, data } = imageData;
-  const tw = x2 - x1;
-  const th = y2 - y1;
-  const tileData = new Uint8ClampedArray(tw * th * 4);
-
-  for (let y = 0; y < th; y++) {
-    const srcOffset = ((y1 + y) * width + x1) * 4;
-    const dstOffset = y * tw * 4;
-    tileData.set(data.subarray(srcOffset, srcOffset + tw * 4), dstOffset);
-  }
-
-  return new ImageData(tileData, tw, th);
-}
-
-/**
- * Place tile data back into a full-size array.
- */
-function placeTile(fullArr, fullW, tileArr, tileW, tileH, x1, y1) {
-  for (let y = 0; y < tileH; y++) {
-    const srcOffset = y * tileW;
-    const dstOffset = (y1 + y) * fullW + x1;
-    fullArr.set(tileArr.subarray(srcOffset, srcOffset + tileW), dstOffset);
-  }
-}
-
-// ─── Public API ──────────────────────────────────────────────────────────────
-
-/**
- * Detect dust particles in an image.
+ * Detect dust and scratches.
  *
- * @param {ImageData} imageData - Input RGBA image (post-conversion positive)
- * @param {{ strength: number }} options - Detection options
- * @returns {{ mask: Uint8Array, particleCount: number, _state: Object }}
- *   mask: single-channel Uint8Array (h*w), 255 = dust pixel
- *   _state: internal state for updateDustStrength()
+ * @param {ImageData} imageData - Input RGBA image
+ * @param {{ strength?: number }} [options] - strength 1-10 (higher = more aggressive)
+ * @returns {{ mask: Uint8Array, particleCount: number, _state: Object|null }}
  */
 export function detectDust(imageData, { strength = 3 } = {}) {
   const c = cv();
@@ -434,74 +300,19 @@ export function detectDust(imageData, { strength = 3 } = {}) {
   ensureFeatureDetection();
 
   const { width: w, height: h } = imageData;
-  const pixelCount = w * h;
-  const hStep = h >> 1;
-  const wStep = w >> 1;
-
-  const fullScharr = new Uint8Array(pixelCount);
-  const fullScharrAll = new Uint8Array(pixelCount);
-  const fullLinien = new Uint8Array(pixelCount);
-  const fullGauss = new Uint8Array(pixelCount);
-
-  // Process in 2x2 tiles
-  for (let row = 0; row < 2; row++) {
-    for (let col = 0; col < 2; col++) {
-      const y1 = row * hStep;
-      const y2 = row < 1 ? (row + 1) * hStep : h;
-      const x1 = col * wStep;
-      const x2 = col < 1 ? (col + 1) * wStep : w;
-      const tw = x2 - x1;
-      const th = y2 - y1;
-
-      const tile = extractTile(imageData, x1, y1, x2, y2);
-      const { scharr, scharrAll, lineMask, gaussMask } = correctTile(tile, strength);
-
-      placeTile(fullScharr, w, scharr, tw, th, x1, y1);
-      placeTile(fullScharrAll, w, scharrAll, tw, th, x1, y1);
-      placeTile(fullLinien, w, lineMask, tw, th, x1, y1);
-      placeTile(fullGauss, w, gaussMask, tw, th, x1, y1);
-    }
-  }
-
-  // Combine: increase = scharr AND NOT(linien)
-  // Then:    increase = multiply(increase, gauss)
-  const increase = new Uint8Array(pixelCount);
-  for (let i = 0; i < pixelCount; i++) {
-    const val = fullScharr[i] & (~fullLinien[i] & 0xFF);
-    // cv2.multiply saturated: min(255, a * b) for uint8
-    increase[i] = Math.min(255, val * fullGauss[i]);
-  }
-
-  // Analyze contours — cache allowedMask for reuse by updateDustStrength
-  const { allowedMask } = analyzeContours(increase, fullScharrAll, w, h);
-
-  // Dilate with elliptical kernel
-  const kernelSize = Math.max(3, Math.round(h * 0.0015)) | 1; // ensure odd
-  const kernel = c.getStructuringElement(c.MORPH_ELLIPSE, new c.Size(kernelSize, kernelSize));
-  const allowedMat = uint8ArrayToMat(allowedMask, h, w);
-  const dilatedMat = new c.Mat();
-  c.dilate(allowedMat, dilatedMat, kernel);
-  const mask = new Uint8Array(dilatedMat.data);
-
-  // Count particles (count contours in final mask)
-  const finalContours = new c.MatVector();
-  const finalHierarchy = new c.Mat();
-  c.findContours(dilatedMat, finalContours, finalHierarchy, c.RETR_EXTERNAL, c.CHAIN_APPROX_SIMPLE);
-  const particleCount = finalContours.size();
-
-  // Cleanup
-  deleteMats(kernel, allowedMat, dilatedMat, finalHierarchy);
-  finalContours.delete();
+  const { topData, blackData } = computeHatResponses(imageData);
+  const { mask, particleCount } = buildDustMask(topData, blackData, w, h, strength);
 
   return {
     mask,
     particleCount,
-    _state: { scharrAll: fullScharrAll, linien: fullLinien, gauss: fullGauss, allowedMask, width: w, height: h }
+    _state: { topData, blackData, width: w, height: h }
   };
 }
 
 /**
- * Update dust detection with a new strength value, reusing cached edge data.
+ * Update dust detection with a new strength value, reusing the cached top-hat
+ * responses (skips the morphology — only threshold + contour filtering rerun).
  *
  * @param {ImageData} imageData - Input RGBA image
  * @param {Object} existingState - _state from previous detectDust()
@@ -509,112 +320,17 @@ export function detectDust(imageData, { strength = 3 } = {}) {
  * @returns {{ mask: Uint8Array, particleCount: number, _state: Object }}
  */
 export function updateDustStrength(imageData, existingState, newStrength) {
-  if (!existingState) return detectDust(imageData, { strength: newStrength });
-
   const c = cv();
   if (!c || !c.Mat) return detectDust(imageData, { strength: newStrength });
-  ensureFeatureDetection();
-
-  const { width: w, height: h } = imageData;
-  const pixelCount = w * h;
-  const hStep = h >> 1;
-  const wStep = w >> 1;
-  const TH_scharr = 0.7;
-
-  // Convert to grayscale
-  const src = imageDataToMat(imageData);
-  const grayMat = new c.Mat();
-  c.cvtColor(src, grayMat, c.COLOR_RGBA2GRAY);
-  const grayData = new Uint8Array(grayMat.data);
-  deleteMats(src, grayMat);
-
-  const fullScharr = new Uint8Array(pixelCount);
-
-  // Re-run Scharr with new threshold per tile
-  for (let row = 0; row < 2; row++) {
-    for (let col = 0; col < 2; col++) {
-      const y1 = row * hStep;
-      const y2 = row < 1 ? (row + 1) * hStep : h;
-      const x1 = col * wStep;
-      const x2 = col < 1 ? (col + 1) * wStep : w;
-      const tw = x2 - x1;
-      const th = y2 - y1;
-
-      // Extract tile grayscale
-      const tileGray = new Uint8Array(tw * th);
-      for (let ty = 0; ty < th; ty++) {
-        for (let tx = 0; tx < tw; tx++) {
-          tileGray[ty * tw + tx] = grayData[(y1 + ty) * w + (x1 + tx)];
-        }
-      }
-
-      // Scharr
-      let diffX, diffY;
-      if (_hasScharr) {
-        const tileMat = uint8ArrayToMat(tileGray, th, tw);
-        const dxMat = new c.Mat();
-        const dyMat = new c.Mat();
-        c.Scharr(tileMat, dxMat, c.CV_64F, 1, 0);
-        c.Scharr(tileMat, dyMat, c.CV_64F, 0, 1);
-        diffX = new Float64Array(dxMat.data64F);
-        diffY = new Float64Array(dyMat.data64F);
-        deleteMats(tileMat, dxMat, dyMat);
-      } else {
-        diffX = scharrJS(tileGray, tw, th, 'x');
-        diffY = scharrJS(tileGray, tw, th, 'y');
-      }
-
-      const tilePixels = tw * th;
-      const mag = new Float64Array(tilePixels);
-      for (let i = 0; i < tilePixels; i++) {
-        mag[i] = Math.sqrt(diffX[i] * diffX[i] + diffY[i] * diffY[i]);
-      }
-      const normalized = normalizeToUint8(mag, tilePixels);
-
-      const threshVal = (TH_scharr * newStrength * 5) | 0;
-      const tileScharr = new Uint8Array(tilePixels);
-      for (let i = 0; i < tilePixels; i++) {
-        tileScharr[i] = (normalized[i] >= threshVal && normalized[i] <= 255) ? 255 : 0;
-      }
-
-      placeTile(fullScharr, w, tileScharr, tw, th, x1, y1);
-    }
+  if (!existingState || !existingState.topData
+    || existingState.width !== imageData.width
+    || existingState.height !== imageData.height) {
+    return detectDust(imageData, { strength: newStrength });
   }
 
-  const { linien, gauss, scharrAll } = existingState;
-
-  // Combine: increase = scharr AND NOT(linien), then multiply with gauss
-  const increase = new Uint8Array(pixelCount);
-  for (let i = 0; i < pixelCount; i++) {
-    const val = fullScharr[i] & (~linien[i] & 0xFF);
-    // cv2.multiply saturated: min(255, a * b) for uint8
-    increase[i] = Math.min(255, val * gauss[i]);
-  }
-
-  // Analyze contours with new threshold
-  const { allowedMask } = analyzeContours(increase, scharrAll, w, h);
-
-  // Dilate
-  const kernelSize = Math.max(3, Math.round(h * 0.0015)) | 1;
-  const kernel = c.getStructuringElement(c.MORPH_ELLIPSE, new c.Size(kernelSize, kernelSize));
-  const allowedMat = uint8ArrayToMat(allowedMask, h, w);
-  const dilatedMat = new c.Mat();
-  c.dilate(allowedMat, dilatedMat, kernel);
-  const mask = new Uint8Array(dilatedMat.data);
-
-  const finalContours = new c.MatVector();
-  const finalHierarchy = new c.Mat();
-  c.findContours(dilatedMat, finalContours, finalHierarchy, c.RETR_EXTERNAL, c.CHAIN_APPROX_SIMPLE);
-  const particleCount = finalContours.size();
-
-  deleteMats(kernel, allowedMat, dilatedMat, finalHierarchy);
-  finalContours.delete();
-
-  return {
-    mask,
-    particleCount,
-    _state: { scharrAll, linien, gauss, allowedMask, width: w, height: h }
-  };
+  const { topData, blackData, width: w, height: h } = existingState;
+  const { mask, particleCount } = buildDustMask(topData, blackData, w, h, newStrength);
+  return { mask, particleCount, _state: existingState };
 }
 
 /**

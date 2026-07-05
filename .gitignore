@@ -66,3 +66,12 @@ coverage/
 *.ARW
 *.rw2
 *.RW2
+
+# 根目录的本地研究资料（浏览器保存的网页、散图、旧的 wasm fork）
+/LibRaw-Wasm/
+/*.jpeg
+/*.jpg
+/*.png
+/*_files/
+/35 Mm Film*
+/Engineering_*

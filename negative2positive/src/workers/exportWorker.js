@@ -2,7 +2,8 @@
  * Export Worker — handles pixel adjustments and image encoding off the main thread.
  * ES module worker (Vite supports `new Worker(url, { type: 'module' })`).
  */
-import pako from 'pako';
+// pako 3.x dropped the default export — use named imports.
+import * as pako from 'pako';
 import { applyAdjustmentsToPixels, computeAdjustmentParams } from './pixelAdjustments.js';
 import { encodePng16Blob, encodeTiffBlob } from './imageEncoders.js';
 

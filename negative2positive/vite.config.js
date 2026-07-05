@@ -24,6 +24,11 @@ export default defineConfig({
   optimizeDeps: {
     exclude: ['libraw-wasm'],
   },
+  // conversionWorker pulls in the pipeline, which lazy-loads FilmPresets via
+  // dynamic import — the default iife worker format cannot code-split.
+  worker: {
+    format: 'es',
+  },
   build: {
     outDir: 'dist',
     emptyOutDir: true,
