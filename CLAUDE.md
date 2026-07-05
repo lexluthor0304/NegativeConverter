@@ -21,9 +21,18 @@ Build web assets:
 npm run build:web
 ```
 
-Run tests (standalone Node assert scripts, colocated as `*.test.mjs`):
+Run tests (standalone Node assert scripts, colocated as `*.test.mjs`, plus an
+SEO-head consistency check over the static pages):
 ```bash
 npm test
+```
+
+End-to-end smoke test (drives the real app in headless Chrome via CDP: loads
+`negative2positive/test-fixtures/negative-sample.jpg`, converts it through
+Step 3, asserts canvas pixels changed and no page errors). Run this after any
+change to `main.js`, the pipeline, or the app shell:
+```bash
+npm run test:smoke
 ```
 
 Live demo: https://negative-converter.tokugai.com

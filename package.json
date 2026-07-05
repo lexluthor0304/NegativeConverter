@@ -11,6 +11,7 @@
     "build:web": "vite build --config negative2positive/vite.config.js && node scripts/sync-web-dist.mjs",
     "preview:web": "vite preview --config negative2positive/vite.config.js",
     "test": "node scripts/run-tests.mjs",
+    "test:smoke": "node scripts/smoke-test.mjs",
     "tauri:dev": "tauri dev",
     "tauri:build": "npm run build:web && tauri build"
   },
