@@ -38,11 +38,11 @@ function buildMiniJpeg(width, height) {
 
 // 2. Embedded inside a larger buffer (simulating NEF: JPEG at non-zero offset)
 {
-  const jpg = buildMiniJpeg(800, 600);
+  const jpg = buildMiniJpeg(1600, 1200);
   const padded = new Uint8Array(jpg.length + 100);
   padded.set(jpg, 50);  // place at offset 50
   const dims = readJpegDimensionsFromSOF(padded.buffer, padded.byteOffset + 50, jpg.length);
-  assert.deepEqual(dims, { w: 800, h: 600 });
+  assert.deepEqual(dims, { w: 1600, h: 1200 });
 }
 
 // 3. Large dimensions (full-resolution camera preview)
@@ -86,7 +86,7 @@ function buildMiniJpeg(width, height) {
 
 // 8. SOF2 (progressive) is also recognized
 {
-  const jpg = buildMiniJpeg(500, 400);
+  const jpg = buildMiniJpeg(1500, 1000);
   // mutate SOF0 (0xC0) to SOF2 (0xC2) — same payload layout
   for (let i = 0; i < jpg.length - 1; i++) {
     if (jpg[i] === 0xFF && jpg[i + 1] === 0xC0) {
@@ -95,7 +95,14 @@ function buildMiniJpeg(width, height) {
     }
   }
   const dims = readJpegDimensionsFromSOF(jpg.buffer, jpg.byteOffset, jpg.byteLength);
-  assert.deepEqual(dims, { w: 500, h: 400 });
+  assert.deepEqual(dims, { w: 1500, h: 1000 });
+}
+
+// 9. Thumbnail-sized frames are rejected on purpose: the parser scans raw NEF
+// bytes and must skip small embedded thumbnails (< MIN_PREVIEW_WIDTH x 300).
+{
+  const jpg = buildMiniJpeg(320, 240);
+  assert.equal(readJpegDimensionsFromSOF(jpg.buffer, jpg.byteOffset, jpg.byteLength), null);
 }
 
 console.log('jpegSize tests: all passed');

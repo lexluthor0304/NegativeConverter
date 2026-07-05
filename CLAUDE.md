@@ -21,6 +21,11 @@ Build web assets:
 npm run build:web
 ```
 
+Run tests (standalone Node assert scripts, colocated as `*.test.mjs`):
+```bash
+npm test
+```
+
 Live demo: https://negative-converter.tokugai.com
 
 ## Architecture
@@ -28,26 +33,37 @@ Live demo: https://negative-converter.tokugai.com
 ### File Structure
 ```
 negative2positive/
-├── index.html                  # App shell + DOM markup
+├── index.html                  # App shell + DOM markup (SEO pages: guide.html etc. alongside)
+├── vite.config.js              # Multi-page Vite build (app + SEO pages)
 ├── src/
-│   ├── app/main.js             # Main app runtime (module entry)
+│   ├── app/main.js             # Main app runtime (module entry, all UI wiring)
+│   ├── app/i18n.js             # zh/en/ja translation dictionary (data-i18n keys)
+│   ├── app/*.js                # Loaders, encoders, analyzers (+ colocated *.test.mjs)
+│   ├── styles/app.css          # All app styles — 1980s retro theme, design tokens in :root
 │   ├── pipeline/               # Conversion routing + adapters
 │   ├── render/                 # Histogram/render services
-│   └── silvercore/             # Core conversion engine modules
-├── index.js                    # LibRaw ES module wrapper
-├── worker.js                   # Web Worker for async WASM processing
-├── libraw.js                   # WASM module binding
-└── libraw.wasm                 # Compiled LibRaw library for RAW format support
+│   ├── silvercore/             # Core conversion engine modules
+│   ├── ui/                     # UI components (loading overlay)
+│   └── workers/                # Export worker + worker bridge
+scripts/                        # run-tests.mjs, sync-web-dist.mjs, LUT derivation
+src-tauri/                      # Tauri desktop packaging
 ```
 
 ### Key Technologies
-- **HTML5 Canvas** for image rendering and manipulation
-- **WebAssembly (LibRaw)** for RAW file decoding (CR2, NEF, ARW, DNG, RW2)
-- **Web Workers** for non-blocking RAW processing
-- **jQuery 3.6.0** for DOM manipulation
+- **HTML5 Canvas / WebGL** for image rendering and manipulation
+- **libraw-wasm** (npm) for RAW file decoding (CR2, NEF, ARW, DNG, RW2)
+- **Web Workers** for non-blocking RAW processing and export encoding
 - **UPNG.js** (npm: `upng-js`) for 16-bit PNG support
 - **UTIF.js** (npm: `utif`) for TIFF/DNG parsing (iPhone ProRaw)
 - **OpenCV.js** (npm: `@techstark/opencv-js`) for automatic border detection / auto crop / auto rotation
+- **Fonts** bundled via `@fontsource/*` (Inter, Orbitron, Share Tech Mono) — no CDN, offline-safe for Tauri
+
+### UI Theme
+The app uses a 1980s American retro (synthwave/darkroom) theme. All design tokens live
+in `:root` of `negative2positive/src/styles/app.css`: violet-navy surfaces, magenta
+`--accent` for interactive states, cyan `--info` for guidance, gold `--warning`,
+`--font-display` (Orbitron) for structural labels, `--font-mono` (Share Tech Mono) for
+numeric/OSD readouts. Keep magenta for actions and cyan for information when adding UI.
 
 ### Rendering Strategy
 The app keeps dual-path rendering behavior:
