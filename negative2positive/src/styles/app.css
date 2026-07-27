@@ -3552,15 +3552,10 @@ input.preset-select {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  text-decoration: none;
 }
 
-.header-copyright .github-star-btn:hover {
-  text-decoration: none;
-}
-
-.github-star-btn-main,
-.github-star-btn-count {
+.header-copyright .github-star-btn-main,
+.header-copyright .github-star-btn-count {
   display: inline-flex;
   align-items: center;
   height: 20px;
@@ -3574,23 +3569,27 @@ input.preset-select {
   font-weight: 700;
   letter-spacing: 0.02em;
   line-height: 1;
+  text-decoration: none;
 }
 
-.github-star-btn-main {
+.header-copyright .github-star-btn-main {
   gap: 4px;
 }
 
-.github-star-btn-main svg {
+.header-copyright .github-star-btn-main svg {
   width: 13px;
   height: 13px;
   fill: currentColor;
 }
 
-.github-star-btn:hover .github-star-btn-main {
+.header-copyright .github-star-btn-main:hover,
+.header-copyright .github-star-btn-count:hover {
   background: linear-gradient(180deg, #ffffff 0%, #eef1f4 100%);
   border-color: #b8c0c8;
+  color: #0969da;
+  text-decoration: none;
 }
 
-.github-star-btn-count[hidden] {
+.header-copyright .github-star-btn-count[hidden] {
   display: none;
 }
