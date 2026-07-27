@@ -1186,7 +1186,8 @@
     // GitHub star count (official REST API, cached locally to stay well under the rate limit)
     (function loadGithubStars() {
       const countEl = document.getElementById('githubStarCount');
-      if (!countEl) return;
+      const hostEl = document.querySelector('.header-copyright');
+      if (!countEl || !hostEl) return;
       const CACHE_KEY = 'nc_github_stars';
       const CACHE_TTL = 6 * 60 * 60 * 1000;
       const render = (count) => {
@@ -1194,20 +1195,30 @@
         countEl.setAttribute('aria-label', count + ' stargazers on GitHub');
         countEl.hidden = false;
       };
-      let cached = null;
-      try { cached = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null'); } catch (err) { /* ignore */ }
-      if (cached && typeof cached.count === 'number') render(cached.count);
-      if (cached && Date.now() - cached.at < CACHE_TTL) return;
-      fetch('https://api.github.com/repos/lexluthor0304/NegativeConverter')
-        .then(res => (res.ok ? res.json() : null))
-        .then(data => {
-          if (!data || typeof data.stargazers_count !== 'number') return;
-          render(data.stargazers_count);
-          try {
-            localStorage.setItem(CACHE_KEY, JSON.stringify({ count: data.stargazers_count, at: Date.now() }));
-          } catch (err) { /* ignore */ }
-        })
-        .catch(() => { /* offline / blocked: keep the plain Star button */ });
+      let requested = false;
+      const load = () => {
+        // The header copyright block is hidden on narrow viewports; don't spend a
+        // GitHub API request (or leak one) for a count nobody can see.
+        if (requested || getComputedStyle(hostEl).display === 'none') return;
+        requested = true;
+        window.removeEventListener('resize', load);
+        let cached = null;
+        try { cached = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null'); } catch (err) { /* ignore */ }
+        if (cached && typeof cached.count === 'number') render(cached.count);
+        if (cached && Date.now() - cached.at < CACHE_TTL) return;
+        fetch('https://api.github.com/repos/lexluthor0304/NegativeConverter')
+          .then(res => (res.ok ? res.json() : null))
+          .then(data => {
+            if (!data || typeof data.stargazers_count !== 'number') return;
+            render(data.stargazers_count);
+            try {
+              localStorage.setItem(CACHE_KEY, JSON.stringify({ count: data.stargazers_count, at: Date.now() }));
+            } catch (err) { /* ignore */ }
+          })
+          .catch(() => { /* offline / blocked: keep the plain Star button */ });
+      };
+      load();
+      if (!requested) window.addEventListener('resize', load);
     })();
   </script>
   <script type="module" src="./src/app/main.js"></script>
