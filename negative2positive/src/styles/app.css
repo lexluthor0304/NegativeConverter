@@ -3548,7 +3548,48 @@ input.preset-select {
   vertical-align: middle;
 }
 
-.header-copyright .github-link iframe {
-  display: block;
-  border: 0;
+.header-copyright .github-star-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.header-copyright .github-star-btn-main,
+.header-copyright .github-star-btn-count {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 7px;
+  border: 1px solid #d1d9e0;
+  border-radius: 6px;
+  background: linear-gradient(180deg, #f6f8fa 0%, #eaeef2 100%);
+  color: #1f2328;
+  font-family: var(--font-display);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 1;
+  text-decoration: none;
+}
+
+.header-copyright .github-star-btn-main {
+  gap: 4px;
+}
+
+.header-copyright .github-star-btn-main svg {
+  width: 13px;
+  height: 13px;
+  fill: currentColor;
+}
+
+.header-copyright .github-star-btn-main:hover,
+.header-copyright .github-star-btn-count:hover {
+  background: linear-gradient(180deg, #ffffff 0%, #eef1f4 100%);
+  border-color: #b8c0c8;
+  color: #0969da;
+  text-decoration: none;
+}
+
+.header-copyright .github-star-btn-count[hidden] {
+  display: none;
 }
