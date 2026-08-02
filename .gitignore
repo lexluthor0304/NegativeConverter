@@ -75,3 +75,5 @@ coverage/
 /*_files/
 /35 Mm Film*
 /Engineering_*
+.vercel
+.env*

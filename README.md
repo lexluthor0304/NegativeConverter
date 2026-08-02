@@ -103,6 +103,15 @@ Required settings:
 
 If Vercel serves `negative2positive/index.html` directly, module imports like `pako` / `utif` / `jszip` will not resolve in browser and upload buttons can stop working.
 
+#### Feedback endpoint
+
+The header Feedback button posts to `api/feedback.mjs` (a Vercel serverless function), which files the message as a GitHub issue labeled `feedback`. Configure in Vercel → Project → Settings → Environment Variables:
+
+- `FEEDBACK_GITHUB_TOKEN` (required): fine-grained personal access token with **Issues: Read and write** on the target repo. Without it the endpoint returns 503 and the form shows the error state.
+- `FEEDBACK_GITHUB_REPO` (optional): `owner/repo` to file issues in; defaults to `lexluthor0304/NegativeConverter`.
+
+The endpoint allows cross-origin calls only from the production domain, Tauri desktop webviews, and localhost dev servers.
+
 ### Desktop dev (Tauri)
 
 ```bash

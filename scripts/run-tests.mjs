@@ -1,20 +1,25 @@
-// Runs every *.test.mjs under negative2positive/src with plain node.
+// Runs every *.test.mjs under negative2positive/src and api/ with plain node.
 // Test files are standalone assert scripts (see e.g. imageDataOps.test.mjs).
-import { readdirSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
-const root = join(dirname(fileURLToPath(import.meta.url)), '..', 'negative2positive', 'src');
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
+const roots = [
+  join(repoRoot, 'negative2positive', 'src'),
+  join(repoRoot, 'api'),
+].filter(existsSync);
 
 const tests = [];
-(function walk(dir) {
+function walk(dir) {
   for (const name of readdirSync(dir)) {
     const p = join(dir, name);
     if (statSync(p).isDirectory()) walk(p);
     else if (name.endsWith('.test.mjs')) tests.push(p);
   }
-})(root);
+}
+roots.forEach(walk);
 
 // SEO head consistency counts as part of the suite
 tests.push(join(dirname(fileURLToPath(import.meta.url)), 'check-seo-heads.mjs'));
