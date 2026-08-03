@@ -162,10 +162,42 @@ function deleteMats(...mats) {
 // and runs ~7x faster).
 
 const DUST_HAT_KERNEL = 9;             // structuring element diameter (px)
-const DUST_MAX_AREA_RATIO = 4e-4;      // blobs above this are real image content
+const DUST_MAX_AREA_RATIO = 4e-4;      // secondary guard: blobs above this are real image content
 const DUST_SCRATCH_ELONGATION = 6;     // bbox aspect at which a blob counts as a scratch
 const DUST_MIN_FILL = 0.42;            // blob area / bbox area — texture shards are stringy
 const DUST_NEIGHBOR_DENSITY_LIMIT = 0.18; // surrounding response density that marks texture
+const DUST_DEFAULT_MAX_SIZE_RATIO = 0.016; // default particle cap as a share of the short edge
+
+/** Default cap on a dust blob's long side, in px, for a given frame size. */
+export function defaultMaxParticleSize(width, height) {
+  return Math.max(8, Math.round(Math.min(width, height) * DUST_DEFAULT_MAX_SIZE_RATIO));
+}
+
+/**
+ * Decide whether a thresholded blob is removable dust.
+ *
+ * The size cap is the primary guard (#113): the old area-ratio-only limit let
+ * a single "dust" blob grow to ~110 px across on a 24MP scan, so small lamps
+ * and specular highlights were erased. Beyond the spot budget only thin lines
+ * survive — a hair can cross half the frame, but its stroke stays a few px
+ * wide. Bounding-box thickness fails on diagonal lines, so the stroke width
+ * is estimated as area / length; thick elongated shapes (light tubes, bright
+ * edges) fail that test and stay.
+ *
+ * @returns {{ keep: boolean, isScratch: boolean }}
+ */
+export function classifyDustBlob(rect, area, maxSize, imageWidth, imageHeight) {
+  const longSide = Math.max(rect.width, rect.height);
+  const maxArea = Math.min(imageWidth * imageHeight * DUST_MAX_AREA_RATIO, maxSize * maxSize);
+  const fill = area / Math.max(1, rect.width * rect.height);
+  if (longSide <= maxSize) {
+    return { keep: area <= maxArea && fill >= DUST_MIN_FILL, isScratch: false };
+  }
+  const effectiveThickness = area / Math.max(1, longSide);
+  const isScratch = effectiveThickness <= Math.max(3, maxSize / 3)
+    && longSide <= Math.min(imageWidth, imageHeight) * 0.6;
+  return { keep: isScratch, isScratch };
+}
 
 /**
  * Compute white/black top-hat responses for the image.
@@ -188,17 +220,20 @@ function computeHatResponses(imageData) {
 }
 
 /** Quantile-based threshold: stronger strength admits a larger anomaly share. */
-function hatThreshold(data, strength) {
+export function hatThreshold(data, strength) {
   const hist = new Uint32Array(256);
   for (let i = 0; i < data.length; i++) hist[data[i]]++;
-  const target = data.length * (1 - (0.001 + strength * 0.0011));
+  // Level 1 admits almost nothing (~0.03% of pixels); the old mapping of
+  // 0.001 + strength*0.0011 made even the minimum setting claim ~0.2% of the
+  // frame, which on clean film lands on real highlight detail (#113).
+  const target = data.length * (1 - (0.0003 + (strength - 1) * 0.0013));
   let cum = 0;
   let quantile = 255;
   for (let v = 0; v < 256; v++) {
     cum += hist[v];
     if (cum >= target) { quantile = v; break; }
   }
-  const floor = Math.max(10, 30 - strength * 2);
+  const floor = Math.max(12, 32 - strength * 2);
   return Math.max(floor, quantile);
 }
 
@@ -206,9 +241,12 @@ function hatThreshold(data, strength) {
  * Threshold the hat responses and filter contours into the final dust mask.
  * @returns {{ mask: Uint8Array, particleCount: number }}
  */
-function buildDustMask(topData, blackData, w, h, strength) {
+function buildDustMask(topData, blackData, w, h, strength, maxParticleSize) {
   const c = cv();
   const pixelCount = w * h;
+  const maxSize = Number.isFinite(maxParticleSize) && maxParticleSize > 0
+    ? maxParticleSize
+    : defaultMaxParticleSize(w, h);
   const thTop = hatThreshold(topData, strength);
   const thBlack = hatThreshold(blackData, strength);
 
@@ -239,20 +277,21 @@ function buildDustMask(topData, blackData, w, h, strength) {
   c.findContours(binMat, contours, hierarchy, c.RETR_EXTERNAL, c.CHAIN_APPROX_SIMPLE);
 
   const outMat = c.Mat.zeros(h, w, c.CV_8UC1);
-  const maxArea = pixelCount * DUST_MAX_AREA_RATIO;
   let particleCount = 0;
 
   for (let i = 0; i < contours.size(); i++) {
     const cnt = contours.get(i);
     const area = Math.abs(c.contourArea(cnt)) || 1;
     const rect = c.boundingRect(cnt);
-    const elongation = Math.max(rect.width, rect.height) / Math.max(1, Math.min(rect.width, rect.height));
-    const isScratch = elongation >= DUST_SCRATCH_ELONGATION;
-    const fill = area / Math.max(1, rect.width * rect.height);
-    let keep = isScratch || (area <= maxArea && fill >= DUST_MIN_FILL);
+    const shape = classifyDustBlob(rect, area, maxSize, w, h);
+    const isScratch = shape.isScratch;
+    let keep = shape.keep;
 
-    if (keep && !isScratch) {
-      const pad = Math.max(8, Math.max(rect.width, rect.height) * 2);
+    if (keep) {
+      // Scratches too must sit in quiet surroundings — dense responses around
+      // a thin candidate mean film-grain or texture, not a defect. They get a
+      // tight band (their bbox is already mostly background), spots a wide pad.
+      const pad = isScratch ? 16 : Math.max(8, Math.max(rect.width, rect.height) * 2);
       const nbSum = regionSum(rect.x - pad, rect.y - pad, rect.x + rect.width + pad, rect.y + rect.height + pad);
       const selfSum = regionSum(rect.x, rect.y, rect.x + rect.width, rect.y + rect.height);
       const nbArea = (Math.min(w, rect.x + rect.width + pad) - Math.max(0, rect.x - pad))
@@ -288,10 +327,12 @@ function buildDustMask(topData, blackData, w, h, strength) {
  * Detect dust and scratches.
  *
  * @param {ImageData} imageData - Input RGBA image
- * @param {{ strength?: number }} [options] - strength 1-10 (higher = more aggressive)
+ * @param {{ strength?: number, maxParticleSize?: number }} [options] -
+ *   strength 1-10 (higher = more aggressive); maxParticleSize caps a blob's
+ *   long side in px (defaults to defaultMaxParticleSize of the frame)
  * @returns {{ mask: Uint8Array, particleCount: number, _state: Object|null }}
  */
-export function detectDust(imageData, { strength = 3 } = {}) {
+export function detectDust(imageData, { strength = 3, maxParticleSize } = {}) {
   const c = cv();
   if (!c || !c.Mat) {
     console.warn('DustRemoval: OpenCV.js not available');
@@ -301,7 +342,7 @@ export function detectDust(imageData, { strength = 3 } = {}) {
 
   const { width: w, height: h } = imageData;
   const { topData, blackData } = computeHatResponses(imageData);
-  const { mask, particleCount } = buildDustMask(topData, blackData, w, h, strength);
+  const { mask, particleCount } = buildDustMask(topData, blackData, w, h, strength, maxParticleSize);
 
   return {
     mask,
@@ -317,19 +358,20 @@ export function detectDust(imageData, { strength = 3 } = {}) {
  * @param {ImageData} imageData - Input RGBA image
  * @param {Object} existingState - _state from previous detectDust()
  * @param {number} newStrength - New strength value (1-10)
+ * @param {number} [maxParticleSize] - Cap on a blob's long side in px
  * @returns {{ mask: Uint8Array, particleCount: number, _state: Object }}
  */
-export function updateDustStrength(imageData, existingState, newStrength) {
+export function updateDustStrength(imageData, existingState, newStrength, maxParticleSize) {
   const c = cv();
-  if (!c || !c.Mat) return detectDust(imageData, { strength: newStrength });
+  if (!c || !c.Mat) return detectDust(imageData, { strength: newStrength, maxParticleSize });
   if (!existingState || !existingState.topData
     || existingState.width !== imageData.width
     || existingState.height !== imageData.height) {
-    return detectDust(imageData, { strength: newStrength });
+    return detectDust(imageData, { strength: newStrength, maxParticleSize });
   }
 
   const { topData, blackData, width: w, height: h } = existingState;
-  const { mask, particleCount } = buildDustMask(topData, blackData, w, h, newStrength);
+  const { mask, particleCount } = buildDustMask(topData, blackData, w, h, newStrength, maxParticleSize);
   return { mask, particleCount, _state: existingState };
 }
 
