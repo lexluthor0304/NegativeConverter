@@ -139,6 +139,14 @@
           <div class="header-export-progress-fill" id="headerExportProgressFill"></div>
         </div>
       </div>
+      <button class="header-link-btn feedback" id="feedbackBtn" type="button">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <path d="M4 5h16v11h-8l-4 3v-3H4z"></path>
+          <path d="M8 9h8"></path>
+          <path d="M8 12h5"></path>
+        </svg>
+        <span data-i18n="headerFeedbackLink">Feedback</span>
+      </button>
       <a class="header-link-btn privacy" id="privacyDetailsLink" href="./privacy.html" target="_blank" rel="noopener">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
           <path d="M12 2l8 4v6c0 5-3.5 9.4-8 10-4.5-.6-8-5-8-10V6l8-4z"/>
@@ -1176,6 +1184,34 @@
       <div class="frontier-guide-popup-actions">
         <button class="frontier-guide-popup-btn" id="frontierGuidePopupCloseBtn" type="button" data-i18n="frontierGuidePopupClose">Continue</button>
       </div>
+    </div>
+  </div>
+
+  <div class="feedback-popup-overlay" id="feedbackPopupOverlay" aria-hidden="true">
+    <div class="feedback-popup" role="dialog" aria-modal="true" aria-labelledby="feedbackPopupTitle">
+      <div class="feedback-popup-title" id="feedbackPopupTitle" data-i18n="feedbackPopupTitle">Report a bug / suggest a feature</div>
+      <form class="feedback-form" id="feedbackForm" novalidate>
+        <div class="feedback-type-group" id="feedbackTypeGroup" role="group" aria-labelledby="feedbackPopupTitle">
+          <button type="button" class="feedback-type-btn active" data-feedback-type="bug" aria-pressed="true" data-i18n="feedbackTypeBug">Bug</button>
+          <button type="button" class="feedback-type-btn" data-feedback-type="idea" aria-pressed="false" data-i18n="feedbackTypeIdea">Idea</button>
+          <button type="button" class="feedback-type-btn" data-feedback-type="other" aria-pressed="false" data-i18n="feedbackTypeOther">Other</button>
+        </div>
+        <textarea class="feedback-message" id="feedbackMessage" rows="6" maxlength="4000"
+          data-i18n-placeholder="feedbackMessagePlaceholder"
+          placeholder="Describe the problem or the feature you'd like…"></textarea>
+        <input class="feedback-website-field" id="feedbackWebsite" name="website" type="text"
+          tabindex="-1" autocomplete="off" aria-hidden="true">
+        <div class="feedback-popup-note" data-i18n="feedbackPublicNote">Feedback is published as a public GitHub issue. Please don't include personal information.</div>
+        <div class="feedback-status" id="feedbackStatus" aria-live="polite">
+          <span class="feedback-status-text sending" id="feedbackStatusSending" data-i18n="feedbackSending" hidden>Sending…</span>
+          <span class="feedback-status-text success" id="feedbackStatusSuccess" data-i18n="feedbackSuccess" hidden>Got it — thanks for the feedback!</span>
+          <span class="feedback-status-text error" id="feedbackStatusError" data-i18n="feedbackError" hidden>Failed to send. Please try again later, or open an issue on GitHub.</span>
+        </div>
+        <div class="feedback-popup-actions">
+          <button type="button" class="feedback-popup-btn secondary" id="feedbackCancelBtn" data-i18n="feedbackCancel">Cancel</button>
+          <button type="submit" class="feedback-popup-btn primary" id="feedbackSubmitBtn" data-i18n="feedbackSubmit" disabled>Send</button>
+        </div>
+      </form>
     </div>
   </div>
 

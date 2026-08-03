@@ -251,6 +251,12 @@
           el.label = i18n[lang][key];
         }
       });
+      document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
+        const key = el.dataset.i18nPlaceholder;
+        if (i18n[lang][key]) {
+          el.placeholder = i18n[lang][key];
+        }
+      });
       document.title = getLocalizedText('title', document.title || 'Negative Converter');
       const privacyLink = document.getElementById('privacyDetailsLink');
       if (privacyLink) {
@@ -616,6 +622,105 @@
       if (event.target === event.currentTarget) {
         closeFrontierGuidePopup();
       }
+    });
+
+    // Feedback popup: posts to the Vercel function that files a GitHub issue.
+    // The desktop webview has a tauri:// origin, so it must hit the site by full URL.
+    const FEEDBACK_ENDPOINT = isTauriDesktop()
+      ? 'https://negative-converter.tokugai.com/api/feedback'
+      : '/api/feedback';
+    let feedbackType = 'bug';
+    let feedbackSending = false;
+
+    function setFeedbackStatus(status) {
+      ['Sending', 'Success', 'Error'].forEach((name) => {
+        const el = document.getElementById(`feedbackStatus${name}`);
+        if (el) el.hidden = status !== name.toLowerCase();
+      });
+    }
+
+    function updateFeedbackSubmitState() {
+      const messageEl = document.getElementById('feedbackMessage');
+      const submitBtn = document.getElementById('feedbackSubmitBtn');
+      if (submitBtn) submitBtn.disabled = feedbackSending || !messageEl?.value.trim();
+    }
+
+    function setFeedbackPopupVisible(visible) {
+      const overlay = document.getElementById('feedbackPopupOverlay');
+      if (!overlay) return;
+      overlay.classList.toggle('visible', Boolean(visible));
+      overlay.setAttribute('aria-hidden', visible ? 'false' : 'true');
+      if (visible) {
+        setFeedbackStatus('none');
+        updateFeedbackSubmitState();
+        document.getElementById('feedbackMessage')?.focus();
+      }
+    }
+
+    function closeFeedbackPopup() {
+      setFeedbackPopupVisible(false);
+    }
+
+    async function submitFeedback() {
+      if (feedbackSending) return;
+      const messageEl = document.getElementById('feedbackMessage');
+      const message = messageEl?.value.trim() || '';
+      if (!message) return;
+      feedbackSending = true;
+      setFeedbackStatus('sending');
+      updateFeedbackSubmitState();
+      try {
+        const res = await fetch(FEEDBACK_ENDPOINT, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: feedbackType,
+            message,
+            website: document.getElementById('feedbackWebsite')?.value || '',
+            lang: currentLang,
+            source: isTauriDesktop() ? 'desktop' : 'web'
+          })
+        });
+        if (!res.ok) throw new Error(`feedback endpoint returned ${res.status}`);
+        setFeedbackStatus('success');
+        if (messageEl) messageEl.value = '';
+        setTimeout(() => {
+          if (document.getElementById('feedbackPopupOverlay')?.classList.contains('visible')) {
+            closeFeedbackPopup();
+          }
+        }, 1600);
+      } catch (err) {
+        console.error('Feedback submit failed', err);
+        setFeedbackStatus('error');
+      } finally {
+        feedbackSending = false;
+        updateFeedbackSubmitState();
+      }
+    }
+
+    document.getElementById('feedbackBtn')?.addEventListener('click', () => {
+      setFeedbackPopupVisible(true);
+    });
+    document.getElementById('feedbackCancelBtn')?.addEventListener('click', closeFeedbackPopup);
+    document.getElementById('feedbackPopupOverlay')?.addEventListener('click', (event) => {
+      if (event.target === event.currentTarget) {
+        closeFeedbackPopup();
+      }
+    });
+    document.getElementById('feedbackTypeGroup')?.addEventListener('click', (event) => {
+      const btn = event.target.closest('[data-feedback-type]');
+      if (!btn) return;
+      feedbackType = btn.dataset.feedbackType;
+      document.querySelectorAll('#feedbackTypeGroup .feedback-type-btn').forEach((el) => {
+        const active = el === btn;
+        el.classList.toggle('active', active);
+        el.setAttribute('aria-pressed', active ? 'true' : 'false');
+      });
+    });
+    document.getElementById('feedbackMessage')?.addEventListener('input', updateFeedbackSubmitState);
+    document.getElementById('feedbackForm')?.addEventListener('submit', (event) => {
+      event.preventDefault();
+      submitFeedback();
     });
 
 	    function applyTemplate(template, vars = {}) {
@@ -7039,6 +7144,15 @@
     // Escape key handler
     document.addEventListener('keydown', (event) => {
       if (event.key !== 'Escape') return;
+      // Handled before isEditableTarget so Escape still closes the popup while
+      // typing in its textarea (but not mid-IME-composition).
+      const feedbackPopupOverlay = document.getElementById('feedbackPopupOverlay');
+      if (feedbackPopupOverlay?.classList.contains('visible')) {
+        if (event.isComposing) return;
+        event.preventDefault();
+        closeFeedbackPopup();
+        return;
+      }
       if (isEditableTarget(event.target)) return;
 
       const frontierGuidePopupOverlay = document.getElementById('frontierGuidePopupOverlay');
