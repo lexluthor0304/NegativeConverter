@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
 import {
+  MAX_IMAGES,
+  MAX_IMAGE_BYTES,
   MAX_MESSAGE_LENGTH,
   buildIssuePayload,
   resolveCorsOrigin,
   validateFeedback,
+  validateImages,
 } from './feedback-core.mjs';
 
 // --- resolveCorsOrigin ---
@@ -36,7 +39,7 @@ assert.equal(validateFeedback({ message: 'hi', website: '' }).spam, undefined);
 // --- validateFeedback: normalization ---
 {
   const { data } = validateFeedback({ message: '  hello  ', type: 'bug', lang: 'zh', source: 'desktop' });
-  assert.deepEqual(data, { type: 'bug', message: 'hello', lang: 'zh', source: 'desktop' });
+  assert.deepEqual(data, { type: 'bug', message: 'hello', lang: 'zh', source: 'desktop', images: [] });
 }
 {
   const { data } = validateFeedback({ message: 'hi', type: 'exploit', lang: 'ZH!', source: 'weird' });
@@ -78,6 +81,50 @@ assert.equal(validateFeedback({ message: 'hi', website: '' }).spam, undefined);
   // No user agent -> no UA line.
   const payload = buildIssuePayload({ type: 'other', message: 'm', lang: 'en', source: 'web' });
   assert.ok(!payload.body.includes('**User agent:**'));
+}
+
+// --- validateImages ---
+const B64 = 'aGVsbG8='; // "hello"
+assert.deepEqual(validateImages(undefined), { images: [] });
+assert.deepEqual(validateImages(null), { images: [] });
+assert.deepEqual(validateImages('nope'), { error: 'invalid_images' });
+assert.deepEqual(
+  validateImages(Array.from({ length: MAX_IMAGES + 1 }, () => ({ type: 'image/jpeg', data: B64 }))),
+  { error: 'too_many_images' }
+);
+assert.deepEqual(validateImages([{ type: 'image/gif', data: B64 }]), { error: 'unsupported_image_type' });
+assert.deepEqual(validateImages([{ type: 'image/jpeg', data: 'not base64!!' }]), { error: 'invalid_images' });
+assert.deepEqual(validateImages([{ type: 'image/jpeg', data: '' }]), { error: 'invalid_images' });
+{
+  const big = 'A'.repeat(Math.ceil((MAX_IMAGE_BYTES + 4) * 4 / 3 / 4) * 4);
+  assert.deepEqual(validateImages([{ type: 'image/jpeg', data: big }]), { error: 'image_too_large' });
+}
+{
+  const { images } = validateImages([
+    { type: 'image/jpeg', data: B64 },
+    { type: 'image/png', data: B64 },
+    { type: 'image/webp', data: B64 },
+  ]);
+  assert.deepEqual(images.map(i => i.ext), ['jpg', 'png', 'webp']);
+}
+{
+  // validateFeedback threads image errors and defaults to empty list
+  assert.deepEqual(validateFeedback({ message: 'hi', images: 'x' }), { error: 'invalid_images' });
+  assert.deepEqual(validateFeedback({ message: 'hi' }).data.images, []);
+}
+
+// --- buildIssuePayload with images ---
+{
+  const data = { type: 'bug', message: 'm', lang: 'en', source: 'web', images: [] };
+  const payload = buildIssuePayload(data, '', { urls: ['https://x/1.jpg', null, 'https://x/3.jpg'] });
+  assert.ok(payload.body.includes('![feedback image 1](https://x/1.jpg)'));
+  assert.ok(payload.body.includes('![feedback image 3](https://x/3.jpg)'));
+  assert.ok(payload.body.includes('_(1 attached image failed to upload)_'));
+}
+{
+  // No images -> no screenshots section
+  const payload = buildIssuePayload({ type: 'bug', message: 'm', lang: 'en', source: 'web' }, '', { urls: [] });
+  assert.ok(!payload.body.includes('feedback image'));
 }
 
 console.log('feedback-core tests passed');

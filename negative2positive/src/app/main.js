@@ -631,6 +631,58 @@
       : '/api/feedback';
     let feedbackType = 'bug';
     let feedbackSending = false;
+    const FEEDBACK_MAX_IMAGES = 3;
+    let feedbackImages = []; // JPEG data URLs, compressed client-side
+
+    async function compressFeedbackImage(file) {
+      const bitmap = await createImageBitmap(file);
+      const maxSide = 1600;
+      const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
+      const w = Math.max(1, Math.round(bitmap.width * scale));
+      const h = Math.max(1, Math.round(bitmap.height * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      canvas.getContext('2d').drawImage(bitmap, 0, 0, w, h);
+      if (bitmap.close) bitmap.close();
+      let quality = 0.82;
+      let dataUrl = canvas.toDataURL('image/jpeg', quality);
+      // Keep each image comfortably inside the endpoint's per-image cap.
+      while (dataUrl.length > 1200000 && quality > 0.4) {
+        quality -= 0.14;
+        dataUrl = canvas.toDataURL('image/jpeg', quality);
+      }
+      return dataUrl;
+    }
+
+    function renderFeedbackImages() {
+      const list = document.getElementById('feedbackImageList');
+      const attachBtn = document.getElementById('feedbackAttachBtn');
+      const count = document.getElementById('feedbackAttachCount');
+      if (!list) return;
+      list.textContent = '';
+      feedbackImages.forEach((dataUrl, index) => {
+        const thumb = document.createElement('div');
+        thumb.className = 'feedback-image-thumb';
+        const img = document.createElement('img');
+        img.src = dataUrl;
+        img.alt = `feedback image ${index + 1}`;
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.className = 'feedback-image-remove';
+        removeBtn.dataset.index = String(index);
+        removeBtn.textContent = '×';
+        removeBtn.setAttribute('aria-label', getLocalizedText('feedbackRemoveImage', 'Remove'));
+        thumb.appendChild(img);
+        thumb.appendChild(removeBtn);
+        list.appendChild(thumb);
+      });
+      if (attachBtn) attachBtn.disabled = feedbackImages.length >= FEEDBACK_MAX_IMAGES;
+      if (count) {
+        count.hidden = feedbackImages.length === 0;
+        count.textContent = `${feedbackImages.length}/${FEEDBACK_MAX_IMAGES}`;
+      }
+    }
 
     function setFeedbackStatus(status) {
       ['Sending', 'Success', 'Error'].forEach((name) => {
@@ -652,6 +704,9 @@
       overlay.setAttribute('aria-hidden', visible ? 'false' : 'true');
       if (visible) {
         setFeedbackStatus('none');
+        const skippedEl = document.getElementById('feedbackStatusImageSkipped');
+        if (skippedEl) skippedEl.hidden = true;
+        renderFeedbackImages();
         updateFeedbackSubmitState();
         document.getElementById('feedbackMessage')?.focus();
       }
@@ -678,12 +733,18 @@
             message,
             website: document.getElementById('feedbackWebsite')?.value || '',
             lang: currentLang,
-            source: isTauriDesktop() ? 'desktop' : 'web'
+            source: isTauriDesktop() ? 'desktop' : 'web',
+            images: feedbackImages.map((dataUrl) => ({
+              type: 'image/jpeg',
+              data: dataUrl.slice(dataUrl.indexOf(',') + 1)
+            }))
           })
         });
         if (!res.ok) throw new Error(`feedback endpoint returned ${res.status}`);
         setFeedbackStatus('success');
         if (messageEl) messageEl.value = '';
+        feedbackImages = [];
+        renderFeedbackImages();
         setTimeout(() => {
           if (document.getElementById('feedbackPopupOverlay')?.classList.contains('visible')) {
             closeFeedbackPopup();
@@ -718,6 +779,34 @@
       });
     });
     document.getElementById('feedbackMessage')?.addEventListener('input', updateFeedbackSubmitState);
+    document.getElementById('feedbackAttachBtn')?.addEventListener('click', () => {
+      document.getElementById('feedbackImageInput')?.click();
+    });
+    document.getElementById('feedbackImageInput')?.addEventListener('change', async (event) => {
+      const files = Array.from(event.target.files || []);
+      event.target.value = '';
+      let skipped = false;
+      for (const file of files) {
+        if (feedbackImages.length >= FEEDBACK_MAX_IMAGES) { skipped = true; break; }
+        try {
+          feedbackImages.push(await compressFeedbackImage(file));
+        } catch (err) {
+          console.warn('Feedback image skipped', err);
+          skipped = true;
+        }
+      }
+      const skippedEl = document.getElementById('feedbackStatusImageSkipped');
+      if (skippedEl) skippedEl.hidden = !skipped;
+      renderFeedbackImages();
+    });
+    document.getElementById('feedbackImageList')?.addEventListener('click', (event) => {
+      const btn = event.target.closest('.feedback-image-remove');
+      if (!btn) return;
+      const index = Number(btn.dataset.index);
+      if (!Number.isInteger(index)) return;
+      feedbackImages.splice(index, 1);
+      renderFeedbackImages();
+    });
     document.getElementById('feedbackForm')?.addEventListener('submit', (event) => {
       event.preventDefault();
       submitFeedback();

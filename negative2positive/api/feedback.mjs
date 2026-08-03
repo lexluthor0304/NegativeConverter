@@ -1,11 +1,59 @@
 // Vercel serverless function: receives feedback from the app and files it as a
-// GitHub issue. Requires env vars:
-//   FEEDBACK_GITHUB_TOKEN  fine-grained PAT with Issues read/write on the target repo
+// GitHub issue. Attached images are committed to the orphan branch
+// `feedback-assets` via the Contents API and embedded in the issue body.
+// Requires env vars:
+//   FEEDBACK_GITHUB_TOKEN  fine-grained PAT with Issues RW (+ Contents RW for images)
 //   FEEDBACK_GITHUB_REPO   optional "owner/repo" override (defaults to the app repo)
 import { buildIssuePayload, resolveCorsOrigin, validateFeedback } from './_lib/feedback-core.mjs';
 
 const DEFAULT_REPO = 'lexluthor0304/NegativeConverter';
 const REPO_PATTERN = /^[\w.-]+\/[\w.-]+$/;
+const ASSETS_BRANCH = 'feedback-assets';
+
+function githubHeaders(token) {
+  return {
+    Authorization: `Bearer ${token}`,
+    Accept: 'application/vnd.github+json',
+    'Content-Type': 'application/json',
+    'User-Agent': 'negative-converter-feedback',
+    'X-GitHub-Api-Version': '2022-11-28',
+  };
+}
+
+// Best effort: a failed upload becomes a null URL and the issue is still filed.
+async function uploadImages(repo, token, images) {
+  const urls = [];
+  const stamp = Date.now();
+  const month = new Date(stamp).toISOString().slice(0, 7);
+  for (let i = 0; i < images.length; i++) {
+    const img = images[i];
+    const path = `${month}/${stamp}-${i + 1}.${img.ext}`;
+    try {
+      const res = await fetch(`https://api.github.com/repos/${repo}/contents/${path}`, {
+        method: 'PUT',
+        headers: githubHeaders(token),
+        body: JSON.stringify({
+          message: `Add feedback image ${stamp}-${i + 1}`,
+          content: img.data,
+          branch: ASSETS_BRANCH,
+        }),
+      });
+      if (!res.ok) {
+        console.error('Feedback image upload failed', res.status, (await res.text().catch(() => '')).slice(0, 300));
+        urls.push(null);
+        continue;
+      }
+      const payload = await res.json();
+      urls.push(payload && payload.content && payload.content.download_url
+        ? payload.content.download_url
+        : `https://raw.githubusercontent.com/${repo}/${ASSETS_BRANCH}/${path}`);
+    } catch (err) {
+      console.error('Feedback image upload error', err);
+      urls.push(null);
+    }
+  }
+  return { urls };
+}
 
 export default async function handler(req, res) {
   const corsOrigin = resolveCorsOrigin(req.headers.origin);
@@ -43,17 +91,16 @@ export default async function handler(req, res) {
     return;
   }
 
-  const payload = buildIssuePayload(result.data, req.headers['user-agent']);
+  let imageOutcome = null;
+  if (result.data.images.length) {
+    imageOutcome = await uploadImages(repo, token, result.data.images);
+  }
+
+  const payload = buildIssuePayload(result.data, req.headers['user-agent'], imageOutcome);
   try {
     const ghRes = await fetch(`https://api.github.com/repos/${repo}/issues`, {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: 'application/vnd.github+json',
-        'Content-Type': 'application/json',
-        'User-Agent': 'negative-converter-feedback',
-        'X-GitHub-Api-Version': '2022-11-28',
-      },
+      headers: githubHeaders(token),
       body: JSON.stringify(payload),
     });
     if (!ghRes.ok) {
