@@ -105,7 +105,7 @@ If Vercel serves `negative2positive/index.html` directly, module imports like `p
 
 #### Feedback endpoint
 
-The header Feedback button posts to `api/feedback.mjs` (a Vercel serverless function), which files the message as a GitHub issue labeled `feedback`. Configure in Vercel → Project → Settings → Environment Variables:
+The header Feedback button posts to `negative2positive/api/feedback.mjs` (a Vercel serverless function). The Vercel project's Root Directory is `negative2positive`, so functions MUST live under `negative2positive/api/` — an `api/` directory at the repository root is silently ignored. The function files the message as a GitHub issue labeled `feedback`. Configure in Vercel → Project → Settings → Environment Variables:
 
 - `FEEDBACK_GITHUB_TOKEN` (required): fine-grained personal access token with **Issues: Read and write** on the target repo. Without it the endpoint returns 503 and the form shows the error state.
 - `FEEDBACK_GITHUB_REPO` (optional): `owner/repo` to file issues in; defaults to `lexluthor0304/NegativeConverter`.
