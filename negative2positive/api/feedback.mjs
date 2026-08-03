@@ -33,9 +33,9 @@ async function uploadImages(repo, token, images) {
         method: 'PUT',
         headers: githubHeaders(token),
         body: JSON.stringify({
-          // [vercel skip] keeps the Git integration from spawning a doomed
-          // build of the assets-only branch on every image commit.
-          message: `Add feedback image ${stamp}-${i + 1} [vercel skip]`,
+          // The assets branch carries a vercel.json with git.deploymentEnabled
+          // false, so these commits don't spawn doomed builds.
+          message: `Add feedback image ${stamp}-${i + 1}`,
           content: img.data,
           branch: ASSETS_BRANCH,
         }),
