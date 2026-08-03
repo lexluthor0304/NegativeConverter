@@ -80,12 +80,19 @@ function getAnalyzerContext(options = {}) {
   };
 }
 
-function getAutoFrameAspectTargets(context) {
+// Format preference is exclusive: locking to 135 or 120 restricts detection to
+// that family. A weighted bias is not enough — density-template candidates are
+// generated at each target's aspect ratio, so a higher-scoring 120 template
+// could still win and crop a 35mm scan at a 120 ratio (#112).
+export function getAutoFrameAspectTargets(context) {
   const { settings, default120Formats, formatRatios } = context;
   const pref = settings && settings.formatPreference ? settings.formatPreference : 'auto';
   const allowed120Map = (settings && settings.allowed120Formats) || {};
   const enabled120 = default120Formats.filter(fmt => allowed120Map[fmt] !== false);
-  const safe120 = enabled120.length ? enabled120 : ['6x6'];
+  // Only fall back to 6x6 when the user locked to 120 (an empty family would
+  // silently re-enable 135); in auto mode disabling every 120 sub-format is a
+  // legitimate way to keep detection 135-only.
+  const safe120 = enabled120.length ? enabled120 : (pref === '120' ? ['6x6'] : []);
 
   const targets = [];
   const addTarget = (key, weight = 1) => {
@@ -95,11 +102,9 @@ function getAutoFrameAspectTargets(context) {
   };
 
   if (pref === '135') {
-    addTarget('135', 1.05);
-    safe120.forEach(fmt => addTarget(`120-${fmt}`, 0.78));
+    addTarget('135', 1);
   } else if (pref === '120') {
-    safe120.forEach(fmt => addTarget(`120-${fmt}`, 1.05));
-    addTarget('135', 0.78);
+    safe120.forEach(fmt => addTarget(`120-${fmt}`, 1));
   } else {
     addTarget('135', 1);
     safe120.forEach(fmt => addTarget(`120-${fmt}`, 1));
