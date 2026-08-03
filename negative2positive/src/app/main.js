@@ -1747,6 +1747,7 @@
       dustRemoval: {
         enabled: false,
         strength: 3,
+        maxParticleSize: 40,   // px at full resolution; scaled down for preview detection
         mask: null,          // Uint8Array (h*w)
         showMask: false,
         processing: false,
@@ -1941,7 +1942,7 @@
         shadows: '阴影微调', temperature: '色温微调', tint: '色调微调',
         vibrance: '自然饱和度', saturation: '饱和度微调',
         cyan: '青色', magenta: '品红', yellow: '黄色',
-        dustStrength: '除尘灵敏度', dustBrushSize: '笔刷大小',
+        dustStrength: '除尘灵敏度', dustMaxSize: '最大颗粒尺寸', dustBrushSize: '笔刷大小',
       },
       en: {
         rotation: 'Rotation', mirror: 'Mirror', crop: 'Crop', filmType: 'Film Type',
@@ -1961,7 +1962,7 @@
         shadows: 'Shadows Fine', temperature: 'Temperature Fine', tint: 'Tint Fine',
         vibrance: 'Vibrance', saturation: 'Saturation Fine',
         cyan: 'Cyan', magenta: 'Magenta', yellow: 'Yellow',
-        dustStrength: 'Dust Sensitivity', dustBrushSize: 'Brush Size',
+        dustStrength: 'Dust Sensitivity', dustMaxSize: 'Max Particle Size', dustBrushSize: 'Brush Size',
       },
       ja: {
         rotation: '回転', mirror: 'ミラー', crop: 'トリミング', filmType: 'フィルムタイプ',
@@ -1981,7 +1982,7 @@
         shadows: 'シャドウ微調整', temperature: '色温度微調整', tint: '色合い微調整',
         vibrance: '自然な彩度', saturation: '彩度微調整',
         cyan: 'シアン', magenta: 'マゼンタ', yellow: 'イエロー',
-        dustStrength: '除塵感度', dustBrushSize: 'ブラシサイズ',
+        dustStrength: '除塵感度', dustMaxSize: '最大粒子サイズ', dustBrushSize: 'ブラシサイズ',
       }
     };
 
@@ -4647,6 +4648,19 @@
       return state.dustRemoval.cleanSource || state.processedImageData;
     }
 
+    // The UI value means px at full resolution; when detection runs on a
+    // smaller preview, scale it so both passes target the same physical specks.
+    function dustMaxParticleSizeFor(imageData) {
+      const ui = Number.isFinite(state.dustRemoval.maxParticleSize)
+        ? state.dustRemoval.maxParticleSize
+        : 40;
+      const full = state.croppedImageData || state.originalImageData;
+      const fullShort = full ? Math.min(full.width, full.height) : 0;
+      const short = imageData ? Math.min(imageData.width, imageData.height) : 0;
+      if (!fullShort || !short || short >= fullShort) return ui;
+      return Math.max(3, Math.round(ui * (short / fullShort)));
+    }
+
     function updateDustStatusUI(text) {
       const el = document.getElementById('dustStatus');
       if (el) el.textContent = text;
@@ -4679,9 +4693,10 @@
         }
 
         const prevState = state.dustRemoval._state;
+        const maxParticleSize = dustMaxParticleSizeFor(source);
         const { mask, particleCount, _state } = prevState
-          ? updateDustStrength(source, prevState, state.dustRemoval.strength)
-          : detectDust(source, { strength: state.dustRemoval.strength });
+          ? updateDustStrength(source, prevState, state.dustRemoval.strength, maxParticleSize)
+          : detectDust(source, { strength: state.dustRemoval.strength, maxParticleSize });
         state.dustRemoval.mask = mask;
         state.dustRemoval.particleCount = particleCount;
         state.dustRemoval._state = _state;
@@ -4804,6 +4819,42 @@
         redoStack.length = 0;
         dustStrengthPreSnapshot = null;
         updateUndoRedoButtons();
+      }
+    });
+
+    let dustMaxSizePreSnapshot = null;
+    document.getElementById('dustMaxSize')?.addEventListener('pointerdown', function () {
+      dustMaxSizePreSnapshot = captureSnapshot('dustMaxSize');
+    });
+    document.getElementById('dustMaxSize')?.addEventListener('input', function () {
+      const val = parseInt(this.value, 10);
+      state.dustRemoval.maxParticleSize = val;
+      const numInput = document.getElementById('dustMaxSizeValue');
+      if (numInput) numInput.value = String(val);
+
+      if (state.dustRemoval.enabled) {
+        scheduleDustDetection();
+      }
+    });
+    document.getElementById('dustMaxSize')?.addEventListener('change', function () {
+      if (dustMaxSizePreSnapshot) {
+        undoStack.push(dustMaxSizePreSnapshot);
+        if (undoStack.length > MAX_UNDO) undoStack.shift();
+        redoStack.length = 0;
+        dustMaxSizePreSnapshot = null;
+        updateUndoRedoButtons();
+      }
+    });
+
+    document.getElementById('dustMaxSizeValue')?.addEventListener('change', function () {
+      pushUndo('dustMaxSize');
+      const val = Math.max(6, Math.min(80, parseInt(this.value, 10) || 40));
+      this.value = String(val);
+      state.dustRemoval.maxParticleSize = val;
+      const slider = document.getElementById('dustMaxSize');
+      if (slider) slider.value = String(val);
+      if (state.dustRemoval.enabled) {
+        scheduleDustDetection();
       }
     });
 
@@ -9103,7 +9154,10 @@
       if (dustRemoval && dustRemoval.enabled && processed) {
         await ensureOpenCvReady();
         const strength = Number.isFinite(dustRemoval.strength) ? dustRemoval.strength : state.dustRemoval.strength;
-        const { mask } = detectDust(processed, { strength });
+        const maxParticleSize = Number.isFinite(dustRemoval.maxParticleSize)
+          ? dustRemoval.maxParticleSize
+          : state.dustRemoval.maxParticleSize;
+        const { mask } = detectDust(processed, { strength, maxParticleSize });
         processed = inpaintMasked(processed, mask, 3);
         trace.mark('dustRemoval', {
           pixels: getImageDataPixelCount(processed)

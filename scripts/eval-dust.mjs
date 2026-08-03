@@ -114,7 +114,7 @@ function score(mask) {
   return { recall: covered / gtArea, maskArea, falseRatio: falsePix / (w * h) };
 }
 
-for (const strength of [3, 5, 8]) {
+for (const strength of [1, 3, 5, 8]) {
   const t0 = Date.now();
   const { mask, particleCount } = detectDust(cloneImage(dirty.data), { strength });
   const ms = Date.now() - t0;
@@ -122,14 +122,15 @@ for (const strength of [3, 5, 8]) {
   console.log(`strength=${strength}: recall=${(s.recall * 100).toFixed(1)}%  falseArea=${(s.falseRatio * 100).toFixed(2)}%  maskArea=${s.maskArea}  particles=${particleCount}  ${ms} ms`);
 }
 
-// false-positive floor on the clean image
-{
+// false-positive floor on the clean image — strength 1 is the "I'd rather it
+// removes too little" setting, so it must stay close to zero (#113)
+for (const strength of [1, 3]) {
   const t0 = Date.now();
-  const { mask, particleCount } = detectDust(cloneImage(base), { strength: 3 });
+  const { mask, particleCount } = detectDust(cloneImage(base), { strength });
   const ms = Date.now() - t0;
   let area = 0;
   for (let i = 0; i < mask.length; i++) if (mask[i] > 0) area++;
-  console.log(`clean image (strength=3): maskArea=${area} (${(area / (w * h) * 100).toFixed(2)}% of frame)  particles=${particleCount}  ${ms} ms`);
+  console.log(`clean image (strength=${strength}): maskArea=${area} (${(area / (w * h) * 100).toFixed(2)}% of frame)  particles=${particleCount}  ${ms} ms`);
 }
 
 process.exit(0);
