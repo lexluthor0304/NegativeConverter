@@ -1720,6 +1720,7 @@
           '6x9': true
         },
         lowConfidenceBehavior: 'suggest', // 'suggest' | 'rotateOnly' | 'ignore'
+        rotate180Default: false,
         lastDiagnostics: null
       },
 
@@ -6658,17 +6659,45 @@
       return `${base}${formatPart}`;
     }
 
+    function autoFrameEffectiveAngle(angle) {
+      const base = normalizeAngleDegrees(angle || 0);
+      return state.autoFrame.rotate180Default ? normalizeAngleDegrees(base + 180) : base;
+    }
+
+    // 180° keeps the canvas size, so a crop region computed on the detector's
+    // rotated frame maps onto the flipped frame by mirroring both corners.
+    function rotate180CropRegion(cropRegion, frameWidth, frameHeight) {
+      if (!cropRegion) return null;
+      return {
+        left: Math.max(0, frameWidth - cropRegion.left - cropRegion.width),
+        top: Math.max(0, frameHeight - cropRegion.top - cropRegion.height),
+        width: cropRegion.width,
+        height: cropRegion.height
+      };
+    }
+
+    function computeAutoFrameRotatedImage(result, effectiveAngle) {
+      // The detector's pre-rotated frame is only valid when no 180° flip is added.
+      if (!state.autoFrame.rotate180Default && result.rotatedImageData) {
+        return result.rotatedImageData;
+      }
+      return Math.abs(effectiveAngle) < 0.001
+        ? state.originalImageData
+        : applyRotationToImageData(state.originalImageData, effectiveAngle);
+    }
+
     function applyAutoFrameResult(result) {
       if (!result || !state.originalImageData) return false;
 
-      state.rotationAngle = normalizeAngleDegrees(result.angle || 0);
+      const effectiveAngle = autoFrameEffectiveAngle(result.angle);
+      state.rotationAngle = effectiveAngle;
       state.croppedImageData = null;
       state.cropRegion = null;
-      state.originalImageData = result.rotatedImageData
-        || (Math.abs(state.rotationAngle) < 0.001
-          ? state.originalImageData
-          : applyRotationToImageData(state.originalImageData, state.rotationAngle));
-      applyCropRegionToLoadedImage(result.cropRegion, { refreshDisplay: true });
+      state.originalImageData = computeAutoFrameRotatedImage(result, effectiveAngle);
+      const cropRegion = state.autoFrame.rotate180Default
+        ? rotate180CropRegion(result.cropRegion, state.originalImageData.width, state.originalImageData.height)
+        : result.cropRegion;
+      applyCropRegionToLoadedImage(cropRegion, { refreshDisplay: true });
       state.autoFrame.lastDiagnostics = {
         confidence: result.confidence,
         detectedFormat: result.detectedFormat || 'unknown',
@@ -6685,13 +6714,11 @@
 
     function applyAutoFrameRotationOnly(result) {
       if (!result || !state.originalImageData) return false;
-      state.rotationAngle = normalizeAngleDegrees(result.angle || 0);
+      const effectiveAngle = autoFrameEffectiveAngle(result.angle);
+      state.rotationAngle = effectiveAngle;
       state.cropRegion = null;
       state.croppedImageData = null;
-      state.originalImageData = result.rotatedImageData
-        || (Math.abs(state.rotationAngle) < 0.001
-          ? state.originalImageData
-          : applyRotationToImageData(state.originalImageData, state.rotationAngle));
+      state.originalImageData = computeAutoFrameRotatedImage(result, effectiveAngle);
       displayNegative(state.originalImageData);
       state.autoFrame.lastDiagnostics = {
         confidence: result.confidence,
@@ -6887,7 +6914,7 @@
 
         if (result.confidenceLevel === 'low') {
           if (lowBehavior === 'rotateOnly') {
-            if (Math.abs(result.angle) > 0.05) {
+            if (Math.abs(result.angle) > 0.05 || state.autoFrame.rotate180Default) {
               applied = applyAutoFrameRotationOnly(result);
               if (applied) {
                 const template = i18n[currentLang].autoFrameRotateOnlyApplied
@@ -6978,16 +7005,23 @@
 
             const existing = item.settings ? cloneSettings(item.settings) : createDefaultSettings(imageData);
             const lowBehavior = state.autoFrame.lowConfidenceBehavior || 'suggest';
+            const effectiveAngle = autoFrameEffectiveAngle(result.angle);
+            const frame = result.rotatedImageData || imageData;
+            const effectiveCropRegion = !result.cropRegion
+              ? null
+              : (state.autoFrame.rotate180Default
+                ? rotate180CropRegion(result.cropRegion, frame.width, frame.height)
+                : { ...result.cropRegion });
             let appliedMode = 'none';
             if (result.confidenceLevel === 'low') {
-              if (lowBehavior === 'rotateOnly' && Math.abs(result.angle) > 0.05) {
-                existing.rotationAngle = result.angle;
+              if (lowBehavior === 'rotateOnly' && (Math.abs(result.angle) > 0.05 || state.autoFrame.rotate180Default)) {
+                existing.rotationAngle = effectiveAngle;
                 existing.cropRegion = null;
                 rotateOnlyCount++;
                 appliedMode = 'rotateOnly';
               } else if (lowBehavior === 'suggest') {
-                existing.rotationAngle = result.angle;
-                existing.cropRegion = result.cropRegion ? { ...result.cropRegion } : null;
+                existing.rotationAngle = effectiveAngle;
+                existing.cropRegion = effectiveCropRegion;
                 successCount++;
                 lowAppliedCount++;
                 appliedMode = 'crop';
@@ -6996,8 +7030,8 @@
                 continue;
               }
             } else {
-              existing.rotationAngle = result.angle;
-              existing.cropRegion = result.cropRegion ? { ...result.cropRegion } : null;
+              existing.rotationAngle = effectiveAngle;
+              existing.cropRegion = effectiveCropRegion;
               successCount++;
               appliedMode = 'crop';
             }
@@ -9838,6 +9872,8 @@
       normalizeAutoFrame120Options();
       enabledInput.checked = Boolean(state.autoFrame.enabled);
       autoApplyInput.checked = Boolean(state.autoFrame.autoApplyHighConfidence);
+      const rotate180Input = document.getElementById('autoFrameRotate180Input');
+      if (rotate180Input) rotate180Input.checked = Boolean(state.autoFrame.rotate180Default);
       formatSelect.value = state.autoFrame.formatPreference || 'auto';
       lowSelect.value = state.autoFrame.lowConfidenceBehavior || 'suggest';
       if (option645) option645.checked = state.autoFrame.allowed120Formats['6x4.5'] !== false;
@@ -9899,6 +9935,8 @@
 
       if (enabledInput) state.autoFrame.enabled = Boolean(enabledInput.checked);
       if (autoApplyInput) state.autoFrame.autoApplyHighConfidence = Boolean(autoApplyInput.checked);
+      const rotate180Input = document.getElementById('autoFrameRotate180Input');
+      if (rotate180Input) state.autoFrame.rotate180Default = Boolean(rotate180Input.checked);
       if (formatSelect) state.autoFrame.formatPreference = formatSelect.value === '135' || formatSelect.value === '120' ? formatSelect.value : 'auto';
       if (lowSelect) {
         const value = lowSelect.value;
@@ -9982,8 +10020,8 @@
       updateRollReferenceUI();
     });
 
-    ['autoFrameEnabledInput', 'autoFrameAutoApplyInput', 'autoFrameFormatSelect', 'autoFrameLowConfidenceSelect',
-      'autoFrame120_645', 'autoFrame120_66', 'autoFrame120_67', 'autoFrame120_69']
+    ['autoFrameEnabledInput', 'autoFrameAutoApplyInput', 'autoFrameRotate180Input', 'autoFrameFormatSelect',
+      'autoFrameLowConfidenceSelect', 'autoFrame120_645', 'autoFrame120_66', 'autoFrame120_67', 'autoFrame120_69']
       .forEach(id => {
         const el = document.getElementById(id);
         if (!el) return;
