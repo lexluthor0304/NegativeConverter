@@ -2568,6 +2568,99 @@ body {
   box-shadow: 0 0 0 2px var(--info-glow);
 }
 
+.feedback-image-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.feedback-attach-btn {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px dashed var(--border-light);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.feedback-attach-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+.feedback-attach-btn:hover:not(:disabled) {
+  border-color: var(--info);
+  color: var(--info);
+}
+
+.feedback-attach-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.feedback-attach-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.feedback-image-list {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.feedback-image-list:empty {
+  display: none;
+}
+
+.feedback-image-thumb {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border-light);
+}
+
+.feedback-image-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.feedback-image-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.feedback-image-remove:hover {
+  background: var(--danger);
+}
+
 /* Honeypot: visually removed but still submitted by naive bots. */
 .feedback-website-field {
   position: absolute;

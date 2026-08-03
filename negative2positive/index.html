@@ -1210,6 +1210,21 @@
         <textarea class="feedback-message" id="feedbackMessage" rows="6" maxlength="4000"
           data-i18n-placeholder="feedbackMessagePlaceholder"
           placeholder="Describe the problem or the feature you'd like…"></textarea>
+        <div class="feedback-image-row">
+          <button type="button" class="feedback-attach-btn" id="feedbackAttachBtn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M4 16l4.5-4.5a2 2 0 012.8 0L16 16"></path>
+              <path d="M14 14l1.5-1.5a2 2 0 012.8 0L20 14"></path>
+              <path d="M4 5h16v14H4z"></path>
+              <path d="M15.5 8.5h.01"></path>
+            </svg>
+            <span data-i18n="feedbackAttachImage">Add image</span>
+            <span class="feedback-attach-count" id="feedbackAttachCount" hidden></span>
+          </button>
+          <div class="feedback-image-list" id="feedbackImageList"></div>
+          <input type="file" id="feedbackImageInput" class="hidden-file-input"
+            accept="image/jpeg,image/png,image/webp,image/*" multiple>
+        </div>
         <input class="feedback-website-field" id="feedbackWebsite" name="website" type="text"
           tabindex="-1" autocomplete="off" aria-hidden="true">
         <div class="feedback-popup-note" data-i18n="feedbackPublicNote">Feedback is published as a public GitHub issue. Please don't include personal information.</div>
@@ -1217,6 +1232,7 @@
           <span class="feedback-status-text sending" id="feedbackStatusSending" data-i18n="feedbackSending" hidden>Sending…</span>
           <span class="feedback-status-text success" id="feedbackStatusSuccess" data-i18n="feedbackSuccess" hidden>Got it — thanks for the feedback!</span>
           <span class="feedback-status-text error" id="feedbackStatusError" data-i18n="feedbackError" hidden>Failed to send. Please try again later, or open an issue on GitHub.</span>
+          <span class="feedback-status-text error" id="feedbackStatusImageSkipped" data-i18n="feedbackImageSkipped" hidden>Some images couldn't be read and were skipped.</span>
         </div>
         <div class="feedback-popup-actions">
           <button type="button" class="feedback-popup-btn secondary" id="feedbackCancelBtn" data-i18n="feedbackCancel">Cancel</button>
