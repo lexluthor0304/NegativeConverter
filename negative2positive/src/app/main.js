@@ -265,6 +265,8 @@
       const offlineLink = document.getElementById('offlineDownloadLink');
       if (offlineLink) {
         offlineLink.href = `./download.html?lang=${encodeURIComponent(lang)}`;
+        // The desktop build must not advertise its own web download.
+        if (isTauriDesktop()) offlineLink.style.display = 'none';
       }
       updateDesktopUpdateBannerText();
       updateGuideModeUI();
