@@ -13,7 +13,8 @@
     "test": "node scripts/run-tests.mjs",
     "test:smoke": "node scripts/smoke-test.mjs",
     "tauri:dev": "tauri dev",
-    "tauri:build": "npm run build:web && tauri build"
+    "tauri:build": "npm run build:web && tauri build",
+    "tauri:build:mas": "bash scripts/build-mas.sh"
   },
   "dependencies": {
     "@fontsource/inter": "5.2.8",
