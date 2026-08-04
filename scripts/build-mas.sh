@@ -42,7 +42,15 @@ echo "==> Building signed installer package"
 xcrun productbuild --sign "$SIGN_PKG" \
   --component "$APP_PATH" /Applications "$PKG_PATH"
 
+SHORT_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Contents/Info.plist")"
+BUILD_NUMBER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Contents/Info.plist")"
+
 echo ""
 echo "Done: $PKG_PATH"
-echo "Upload it with the Transporter app (Mac App Store) after creating the app record in App Store Connect."
-echo "Remember: bump \"version\" in src-tauri/tauri.conf.json before each new upload."
+echo "     version $SHORT_VERSION, build $BUILD_NUMBER"
+echo ""
+echo "Upload it with the Transporter app (Mac App Store)."
+echo "The version must match the one in App Store Connect. Every upload also needs"
+echo "a build number higher than the last one accepted for that version — bump"
+echo "\"bundleVersion\" in src-tauri/tauri.appstore.conf.json when re-uploading the"
+echo "same version, or \"version\" in src-tauri/tauri.conf.json for a new release."

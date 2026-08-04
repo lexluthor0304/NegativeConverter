@@ -4,6 +4,7 @@
     "macOS": {
       "entitlements": "Entitlements.mas.plist",
       "hardenedRuntime": false,
+      "bundleVersion": "2",
       "signingIdentity": "Apple Distribution: NEO ANALOG LABO K.K. (X93Y44J36C)",
       "files": {
         "embedded.provisionprofile": "embedded.provisionprofile"
