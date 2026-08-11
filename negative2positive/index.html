@@ -180,6 +180,40 @@
     </div>
   </header>
 
+  <!-- Mac App Store launch notice. Web only (the store build is the desktop build), dismissible. -->
+  <aside class="mas-banner" id="masBanner" aria-label="Mac App Store release">
+    <div class="mas-banner-left">
+      <svg class="mas-banner-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+        <rect x="3" y="4" width="18" height="12" rx="1.5"></rect>
+        <path d="M2 20h20"></path>
+      </svg>
+      <div class="mas-banner-text">
+        <div class="mas-banner-title">
+          <span class="mas-banner-chip" data-i18n="masBannerChip">NEW</span>
+          <span data-i18n="masBannerTitle">The Mac app is now on the Mac App Store</span>
+        </div>
+        <div class="mas-banner-body" data-i18n="masBannerBody">Free download, automatic updates through the App Store, and your photos still never leave your Mac.</div>
+      </div>
+    </div>
+    <div class="mas-banner-actions">
+      <a class="mas-banner-cta" id="masBannerCta" href="https://apps.apple.com/app/id6797694070" target="_blank" rel="noopener">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <path d="M12 3v10"></path>
+          <path d="M7.5 9.5L12 14l4.5-4.5"></path>
+          <path d="M4 17h16"></path>
+        </svg>
+        <span data-i18n="masBannerAction">Get it on the Mac App Store</span>
+      </a>
+      <button class="mas-banner-close" id="masBannerCloseBtn" type="button">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <path d="M6 6l12 12"></path>
+          <path d="M18 6L6 18"></path>
+        </svg>
+        <span class="sr-only" data-i18n="masBannerDismiss">Dismiss</span>
+      </button>
+    </div>
+  </aside>
+
   <div class="desktop-update-banner" id="desktopUpdateBanner" role="status" aria-live="polite">
     <div class="desktop-update-left">
       <svg class="desktop-update-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">

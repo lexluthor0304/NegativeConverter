@@ -4,8 +4,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-  <title>Download Negative Converter Desktop App - Windows, macOS, Linux</title>
-  <meta name="description" content="Download the free offline Negative Converter desktop app for Windows, macOS, and Linux. Convert film negatives locally with no uploads, no account, and RAW support.">
+  <title>Download Negative Converter Desktop App - Mac App Store, Windows, Linux</title>
+  <meta name="description" content="Get the free Negative Converter desktop app on the Mac App Store, plus Windows and Linux downloads. Convert film negatives locally with no uploads and RAW support.">
   <meta name="robots" content="index, follow, max-image-preview:large">
   <link rel="canonical" href="https://negative-converter.tokugai.com/download.html">
   <link rel="alternate" hreflang="en" href="https://negative-converter.tokugai.com/download.html">
@@ -14,14 +14,14 @@
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Negative Converter">
   <meta property="og:title" content="Download Negative Converter Desktop App">
-  <meta property="og:description" content="Free offline desktop builds for Windows, macOS, and Linux. Convert scanned film negatives locally with no uploads.">
+  <meta property="og:description" content="Now on the Mac App Store, plus free offline builds for Windows and Linux. Convert scanned film negatives locally with no uploads.">
   <meta property="og:url" content="https://negative-converter.tokugai.com/download.html">
   <meta property="og:image" content="https://negative-converter.tokugai.com/og-cover.png">
   <meta property="og:image:alt" content="Negative Converter desktop app download page">
 
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Download Negative Converter Desktop App">
-  <meta name="twitter:description" content="Free offline desktop app for private film negative conversion on Windows, macOS, and Linux.">
+  <meta name="twitter:description" content="Free offline desktop app for private film negative conversion — on the Mac App Store, Windows, and Linux.">
   <meta name="twitter:image" content="https://negative-converter.tokugai.com/og-cover.png">
 
   <script type="application/ld+json">
@@ -46,7 +46,10 @@
         },
         "softwareRequirements": "Modern Windows, macOS, or Linux desktop environment",
         "downloadUrl": "https://negative-converter.tokugai.com/download.html",
-        "sameAs": "https://github.com/lexluthor0304/NegativeConverter/releases/latest",
+        "sameAs": [
+          "https://apps.apple.com/app/id6797694070",
+          "https://github.com/lexluthor0304/NegativeConverter/releases/latest"
+        ],
         "publisher": {
           "@type": "Organization",
           "name": "NegativeConverter",
@@ -334,6 +337,22 @@
       border-color: rgba(74, 158, 255, 0.75);
     }
 
+    /* The Mac App Store is the recommended macOS install, so it outranks the file buttons. */
+    .download-btn.store {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: #0b1c2f;
+    }
+
+    .download-btn.store:hover {
+      background: #6cb1ff;
+      border-color: #6cb1ff;
+    }
+
+    .download-btn.store .download-meta {
+      color: rgba(11, 28, 47, 0.75);
+    }
+
     .download-meta {
       font-size: 11px;
       color: var(--text-secondary);
@@ -441,6 +460,8 @@
       <div class="download-grid" id="downloadGrid" style="display:none;"></div>
       <div class="muted" id="fallbackLinks" style="display:none;">
         <span data-i18n="fallbackLabel">备用：</span>
+        <a href="https://apps.apple.com/app/id6797694070" target="_blank" rel="noopener" data-i18n="macAppStore">Mac App Store</a>
+        ·
         <a href="https://github.com/lexluthor0304/NegativeConverter/releases/latest" target="_blank" rel="noopener" data-i18n="githubReleases">GitHub Releases</a>
       </div>
     </section>
@@ -449,7 +470,7 @@
       <h2 data-i18n="notesTitle">提示</h2>
       <ul class="muted" style="padding-left: 18px;">
         <li data-i18n="noteWindows">Windows：优先下载 EXE（安装器）。</li>
-        <li data-i18n="noteMac">macOS：DMG 安装包。若提示“无法打开”，请在系统设置里允许打开。</li>
+        <li data-i18n="noteMac">macOS：推荐从 Mac App Store 安装（免费、自动更新）。也提供 DMG 直接下载；若提示“无法打开”，请在系统设置里允许打开。</li>
         <li data-i18n="noteLinux">Linux：优先 AppImage；也提供 deb/rpm。</li>
         <li data-i18n="noteVerify">下载后可校验 SHA-256（页面会显示）。</li>
       </ul>
@@ -458,6 +479,8 @@
 
   <script>
     const SUPPORTED_LANGS = ['zh', 'en', 'ja'];
+    // Storefront-less URL so Apple redirects each visitor to their own region's store.
+    const MAC_APP_STORE_URL = 'https://apps.apple.com/app/id6797694070';
     const uiText = {
       zh: {
         docTitle: '离线版下载',
@@ -471,9 +494,13 @@
         loadFailed: '获取失败：{error}',
         fallbackLabel: '备用：',
         githubReleases: 'GitHub Releases',
+        macAppStore: 'Mac App Store',
+        appStoreAction: '在 Mac App Store 下载',
+        appStoreMeta: '免费 · 自动更新',
+        directDownload: '直接下载',
         notesTitle: '提示',
         noteWindows: 'Windows：优先下载 EXE（安装器）。',
-        noteMac: 'macOS：DMG 安装包。若提示“无法打开”，请在系统设置里允许打开。',
+        noteMac: 'macOS：推荐从 Mac App Store 安装（免费、自动更新）。也提供 DMG 直接下载；若提示“无法打开”，请在系统设置里允许打开。',
         noteLinux: 'Linux：优先标准版 AppImage；请勿使用 sudo 运行。兼容版 AppImage 默认关闭 DMABUF 渲染以提升启动成功率，旧系统若出现 GLIBC 报错请使用兼容版。',
         noteVerify: '下载后可校验 SHA-256（页面会显示）。',
         latestVersion: '最新版本：{tag}',
@@ -503,9 +530,13 @@
         loadFailed: 'Failed to fetch: {error}',
         fallbackLabel: 'Fallback:',
         githubReleases: 'GitHub Releases',
+        macAppStore: 'Mac App Store',
+        appStoreAction: 'Get it on the Mac App Store',
+        appStoreMeta: 'Free · Auto-updates',
+        directDownload: 'Direct download',
         notesTitle: 'Notes',
         noteWindows: 'Windows: EXE installer is recommended.',
-        noteMac: 'macOS: DMG package. If blocked, allow it in System Settings.',
+        noteMac: 'macOS: install from the Mac App Store (free, auto-updating). A direct DMG is also available; if it is blocked, allow it in System Settings.',
         noteLinux: 'Linux: standard AppImage is recommended. Do not run with sudo. The compatibility AppImage defaults DMABUF off for startup reliability; if you still see GLIBC errors on older systems, use the compatibility AppImage.',
         noteVerify: 'You can verify the SHA-256 shown on this page.',
         latestVersion: 'Latest: {tag}',
@@ -535,9 +566,13 @@
         loadFailed: '取得に失敗しました: {error}',
         fallbackLabel: '代替:',
         githubReleases: 'GitHub Releases',
+        macAppStore: 'Mac App Store',
+        appStoreAction: 'Mac App Store で入手',
+        appStoreMeta: '無料 · 自動アップデート',
+        directDownload: '直接ダウンロード',
         notesTitle: 'ヒント',
         noteWindows: 'Windows：EXE（インストーラ）推奨。',
-        noteMac: 'macOS：DMG パッケージ。ブロックされた場合は設定から許可してください。',
+        noteMac: 'macOS：Mac App Store からのインストールを推奨（無料・自動アップデート）。DMG の直接ダウンロードも利用できます。ブロックされた場合は設定から許可してください。',
         noteLinux: 'Linux：標準版 AppImage 推奨。sudo では実行しないでください。互換版 AppImage は起動安定性のため DMABUF 描画をデフォルトで無効化しており、古い環境で GLIBC エラーが出る場合は互換版を使用してください。',
         noteVerify: '表示される SHA-256 で検証できます。',
         latestVersion: '最新：{tag}',
@@ -706,7 +741,7 @@
         {
           os: 'macos',
           titleKey: 'macos',
-          subtitle: 'DMG',
+          subtitle: 'Mac App Store / DMG',
           preferredTypes: ['dmg']
         },
         {
@@ -734,11 +769,29 @@
         const actions = document.createElement('div');
         actions.className = 'download-actions';
 
+        // macOS ships through the Mac App Store; the DMG stays as a direct-download fallback.
+        if (spec.os === 'macos') {
+          const store = document.createElement('a');
+          store.className = 'download-btn primary store';
+          store.href = MAC_APP_STORE_URL;
+          store.target = '_blank';
+          store.rel = 'noopener';
+          store.textContent = t('appStoreAction');
+
+          const storeMeta = document.createElement('span');
+          storeMeta.className = 'download-meta';
+          storeMeta.textContent = t('appStoreMeta');
+          store.appendChild(storeMeta);
+          actions.appendChild(store);
+        }
+
         if (osFiles.length === 0) {
-          const empty = document.createElement('div');
-          empty.className = 'muted';
-          empty.textContent = '—';
-          actions.appendChild(empty);
+          if (actions.childElementCount === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'muted';
+            empty.textContent = '—';
+            actions.appendChild(empty);
+          }
         } else {
           const appendDownloadAction = (file, options = {}) => {
             const { primary = false, text = '', showHash = false, extraMeta = '' } = options;
@@ -814,11 +867,15 @@
           } else {
             const preferred = pickPreferred(osFiles, spec.preferredTypes);
             const others = osFiles.filter(f => f !== preferred);
+            // On macOS the store button above is the recommended path, so the file is secondary.
+            const storeIsPrimary = spec.os === 'macos';
 
             if (preferred) {
               appendDownloadAction(preferred, {
-                primary: true,
-                text: `${t('recommended')} · ${t('download')}`,
+                primary: !storeIsPrimary,
+                text: storeIsPrimary
+                  ? `${t('directDownload')} (${(preferred.type || '').toUpperCase() || 'FILE'})`
+                  : `${t('recommended')} · ${t('download')}`,
                 showHash: true
               });
             }
