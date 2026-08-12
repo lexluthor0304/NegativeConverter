@@ -353,3 +353,176 @@ jobs:
             --prefix "negative-converter/release" \
             --tag "${TAG}" \
             --update-latest
+
+  mas-appstore:
+    name: Publish to Mac App Store
+    # Runs only after the GitHub release exists, so a broken build on any
+    # platform blocks the App Store submission too and the computed version
+    # is guaranteed to be tagged.
+    runs-on: macos-latest
+    needs: [prepare, release]
+    timeout-minutes: 120
+
+    steps:
+      - name: Check App Store secrets
+        id: gate
+        env:
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+          MAS_CERT_DIST_P12: ${{ secrets.MAS_CERT_DIST_P12 }}
+          MAS_CERT_INSTALLER_P12: ${{ secrets.MAS_CERT_INSTALLER_P12 }}
+          MAS_CERT_PASSWORD: ${{ secrets.MAS_CERT_PASSWORD }}
+          MAS_PROVISION_PROFILE: ${{ secrets.MAS_PROVISION_PROFILE }}
+        run: |
+          missing=""
+          for name in ASC_API_KEY_ID ASC_API_ISSUER_ID ASC_API_KEY_P8 \
+              MAS_CERT_DIST_P12 MAS_CERT_INSTALLER_P12 MAS_CERT_PASSWORD MAS_PROVISION_PROFILE; do
+            [ -n "${!name}" ] || missing="${missing} ${name}"
+          done
+          if [ -n "${missing}" ]; then
+            echo "enabled=false" >> "${GITHUB_OUTPUT}"
+            echo "::notice::Mac App Store publish skipped; missing secrets:${missing}"
+          else
+            echo "enabled=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Checkout
+        if: steps.gate.outputs.enabled == 'true'
+        uses: actions/checkout@v4
+        with:
+          # Full history + tags for the release-notes diff against the previous tag.
+          fetch-depth: 0
+
+      - name: Apply release version
+        if: steps.gate.outputs.enabled == 'true'
+        run: node .github/scripts/set_tauri_version.mjs "${{ needs.prepare.outputs.version }}"
+
+      - name: Apply MAS bundle version
+        if: steps.gate.outputs.enabled == 'true'
+        run: node .github/scripts/set_mas_bundle_version.mjs "${{ needs.prepare.outputs.version }}" "${{ github.run_attempt }}"
+
+      - name: Setup Node
+        if: steps.gate.outputs.enabled == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Rust
+        if: steps.gate.outputs.enabled == 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Rust cache
+        if: steps.gate.outputs.enabled == 'true'
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Install dependencies
+        if: steps.gate.outputs.enabled == 'true'
+        run: npm ci
+
+      - name: Import signing assets
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          MAS_CERT_DIST_P12: ${{ secrets.MAS_CERT_DIST_P12 }}
+          MAS_CERT_INSTALLER_P12: ${{ secrets.MAS_CERT_INSTALLER_P12 }}
+          MAS_CERT_PASSWORD: ${{ secrets.MAS_CERT_PASSWORD }}
+          MAS_PROVISION_PROFILE: ${{ secrets.MAS_PROVISION_PROFILE }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN_PATH="$RUNNER_TEMP/mas-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          for var in MAS_CERT_DIST_P12 MAS_CERT_INSTALLER_P12; do
+            CERT_PATH="$RUNNER_TEMP/$var.p12"
+            echo "${!var}" | base64 --decode > "$CERT_PATH"
+            security import "$CERT_PATH" \
+              -P "$MAS_CERT_PASSWORD" \
+              -A -t cert -f pkcs12 \
+              -k "$KEYCHAIN_PATH"
+            rm -f "$CERT_PATH"
+          done
+
+          # Both identities chain to the WWDR G3 intermediate; macOS ships
+          # only the Apple root, so import G3 to complete the chain.
+          curl -fsSL -o "$RUNNER_TEMP/AppleWWDRCAG3.cer" \
+            https://www.apple.com/certificateauthority/AppleWWDRCAG3.cer
+          security import "$RUNNER_TEMP/AppleWWDRCAG3.cer" -t cert -k "$KEYCHAIN_PATH"
+
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" >/dev/null
+
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+
+          echo "$MAS_PROVISION_PROFILE" | base64 --decode > src-tauri/embedded.provisionprofile
+
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+
+      - name: Build Mac App Store package
+        if: steps.gate.outputs.enabled == 'true'
+        run: npm run tauri:build:mas
+
+      - name: Collect build metadata
+        if: steps.gate.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          BUNDLE_DIR="src-tauri/target/universal-apple-darwin/release/bundle/macos"
+          APP_PATH="$BUNDLE_DIR/Negative Converter.app"
+          PKG_PATH="$BUNDLE_DIR/NegativeConverter-appstore.pkg"
+          test -f "$PKG_PATH"
+
+          APP_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Contents/Info.plist")"
+          BUILD_NUMBER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Contents/Info.plist")"
+
+          if [ "$APP_VERSION" != "${{ needs.prepare.outputs.version }}" ]; then
+            echo "Bundle version $APP_VERSION does not match release version ${{ needs.prepare.outputs.version }}" >&2
+            exit 1
+          fi
+
+          {
+            echo "PKG_PATH=$GITHUB_WORKSPACE/$PKG_PATH"
+            echo "APP_VERSION=$APP_VERSION"
+            echo "BUILD_NUMBER=$BUILD_NUMBER"
+          } >> "$GITHUB_ENV"
+
+      - name: Generate release notes
+        if: steps.gate.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.prepare.outputs.tag }}"
+          NOTES_PATH="$RUNNER_TEMP/release_notes.txt"
+          prev="$(git tag --list 'v*' --sort=-v:refname | grep -Fxv "$TAG" | head -n 1 || true)"
+          if [ -n "$prev" ] && git rev-parse -q --verify "$prev^{commit}" >/dev/null; then
+            git log --no-merges --pretty='format:- %s' "$prev..HEAD" | head -c 3500 > "$NOTES_PATH" || true
+          else
+            : > "$NOTES_PATH"
+          fi
+          echo "Release notes ($(wc -c < "$NOTES_PATH") bytes):"
+          cat "$NOTES_PATH" || true
+          echo "RELEASE_NOTES_PATH=$NOTES_PATH" >> "$GITHUB_ENV"
+
+      - name: Upload and submit to App Store
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          command -v fastlane >/dev/null || sudo gem install fastlane -N
+          fastlane mac mas_upload
+
+      - name: Cleanup signing keychain
+        if: always()
+        run: |
+          if [ -n "${KEYCHAIN_PATH:-}" ] && [ -f "${KEYCHAIN_PATH}" ]; then
+            security delete-keychain "$KEYCHAIN_PATH" || true
+          fi

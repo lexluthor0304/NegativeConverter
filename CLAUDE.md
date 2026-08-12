@@ -10,6 +10,10 @@ NegativeConverter is a browser-based film negative to positive converter. It pro
 
 This project now uses **Vite** for web dev/build and Tauri for desktop packaging.
 
+Merging to `main` auto-releases the desktop app (GitHub Release + R2), and —
+when the App Store secrets are configured — builds, uploads, and submits the
+Mac App Store version too (see `docs/mas-release.md`).
+
 Run locally:
 ```bash
 npm ci
