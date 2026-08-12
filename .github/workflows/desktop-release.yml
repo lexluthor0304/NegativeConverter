@@ -437,6 +437,21 @@ jobs:
           KEYCHAIN_PATH="$RUNNER_TEMP/mas-signing.keychain-db"
           KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
 
+          # security import exits 1 on duplicates (the runner image already
+          # ships Apple intermediates in its system keychain); tolerate only
+          # that error so wrong-password failures still abort.
+          import_tolerant() {
+            local out
+            if ! out="$(security import "$@" 2>&1)"; then
+              if grep -q "already exists in the keychain" <<<"$out"; then
+                echo "already in keychain, continuing"
+              else
+                printf '%s\n' "$out" >&2
+                return 1
+              fi
+            fi
+          }
+
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
@@ -444,18 +459,18 @@ jobs:
           for var in MAS_CERT_DIST_P12 MAS_CERT_INSTALLER_P12; do
             CERT_PATH="$RUNNER_TEMP/$var.p12"
             echo "${!var}" | base64 --decode > "$CERT_PATH"
-            security import "$CERT_PATH" \
+            import_tolerant "$CERT_PATH" \
               -P "$MAS_CERT_PASSWORD" \
               -A -t cert -f pkcs12 \
               -k "$KEYCHAIN_PATH"
             rm -f "$CERT_PATH"
           done
 
-          # Both identities chain to the WWDR G3 intermediate; macOS ships
-          # only the Apple root, so import G3 to complete the chain.
+          # Both identities chain to the WWDR G3 intermediate; import it in
+          # case the runner image lacks it (usually a tolerated duplicate).
           curl -fsSL -o "$RUNNER_TEMP/AppleWWDRCAG3.cer" \
             https://www.apple.com/certificateauthority/AppleWWDRCAG3.cer
-          security import "$RUNNER_TEMP/AppleWWDRCAG3.cer" -t cert -k "$KEYCHAIN_PATH"
+          import_tolerant "$RUNNER_TEMP/AppleWWDRCAG3.cer" -t cert -k "$KEYCHAIN_PATH"
 
           security set-key-partition-list -S apple-tool:,apple: \
             -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" >/dev/null
