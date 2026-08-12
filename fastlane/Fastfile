@@ -34,8 +34,11 @@ platform :mac do
       # build_number alongside pkg is rejected as conflicting options.
       pkg: ENV.fetch("PKG_PATH"),
       app_version: ENV.fetch("APP_VERSION"),
-      # "default" applies the same notes to every enabled locale.
-      release_notes: { "default" => notes },
+      # Locales must be listed explicitly: with no local metadata folder,
+      # deliver treats "default" as a literal language and the real locales
+      # never receive whatsNew, which then blocks the review submission.
+      # Extend this hash if more App Store locales are ever added.
+      release_notes: { "en-US" => notes },
       skip_screenshots: true,
       run_precheck_before_submit: false,
       precheck_include_in_app_purchases: false,
