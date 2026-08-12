@@ -6,7 +6,6 @@
 #   ASC_API_KEY_P8                      - base64-encoded AuthKey .p8
 #   PKG_PATH                            - absolute path to the signed MAS .pkg
 #   APP_VERSION                         - CFBundleShortVersionString (x.y.z)
-#   BUILD_NUMBER                        - CFBundleVersion of the uploaded build
 #   RELEASE_NOTES_PATH                  - optional file with "What's New" text
 
 opt_out_usage
@@ -31,9 +30,10 @@ platform :mac do
       api_key: api_key,
       app_identifier: "com.neoanaloglab.negativeconverter",
       platform: "osx",
+      # deliver reads the build number from the pkg itself; passing
+      # build_number alongside pkg is rejected as conflicting options.
       pkg: ENV.fetch("PKG_PATH"),
       app_version: ENV.fetch("APP_VERSION"),
-      build_number: ENV.fetch("BUILD_NUMBER"),
       # "default" applies the same notes to every enabled locale.
       release_notes: { "default" => notes },
       skip_screenshots: true,
