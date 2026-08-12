@@ -159,6 +159,7 @@
       'https://negative-converter.tokugai.com/negative-converter/release/latest.json'
     ];
     const DESKTOP_UPDATE_PAGE_URL = 'https://negative-converter.tokugai.com/download.html';
+    const MAS_BANNER_DISMISSED_KEY = 'nc_mas_banner_dismissed_v1';
     const LENSFUN_PACKAGE_VERSION = '0.1.3';
     const LENSFUN_CDN_BASE = `https://cdn.jsdelivr.net/npm/@neoanaloglabkk/lensfun-wasm@${LENSFUN_PACKAGE_VERSION}/dist`;
     const lensScriptLoadPromises = new Map();
@@ -1505,6 +1506,26 @@
     }
 
     initDesktopUpdateCheck();
+
+    function initMacAppStoreBanner() {
+      const banner = document.getElementById('masBanner');
+      if (!banner) return;
+      // The desktop build *is* the store build — it must not advertise the store to itself.
+      if (isTauriDesktop()) return;
+      if (safeStorageGet(MAS_BANNER_DISMISSED_KEY) === '1') return;
+
+      banner.classList.add('visible');
+      const closeBtn = document.getElementById('masBannerCloseBtn');
+      if (closeBtn) {
+        closeBtn.addEventListener('click', () => {
+          banner.classList.remove('visible');
+          safeStorageSet(MAS_BANNER_DISMISSED_KEY, '1');
+        });
+      }
+    }
+
+    initMacAppStoreBanner();
+
     window.addEventListener('beforeunload', () => {
       if (lensfunRuntime.client && typeof lensfunRuntime.client.dispose === 'function') {
         try {
