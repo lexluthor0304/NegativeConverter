@@ -1,0 +1,53 @@
+# Mac App Store release lane, driven by the mas-appstore job in
+# .github/workflows/desktop-release.yml (see docs/mas-release.md).
+#
+# Expects environment variables:
+#   ASC_API_KEY_ID / ASC_API_ISSUER_ID  - App Store Connect API key identity
+#   ASC_API_KEY_P8                      - base64-encoded AuthKey .p8
+#   PKG_PATH                            - absolute path to the signed MAS .pkg
+#   APP_VERSION                         - CFBundleShortVersionString (x.y.z)
+#   BUILD_NUMBER                        - CFBundleVersion of the uploaded build
+#   RELEASE_NOTES_PATH                  - optional file with "What's New" text
+
+opt_out_usage
+default_platform(:mac)
+
+platform :mac do
+  desc "Upload the signed .pkg to App Store Connect and submit for review"
+  lane :mas_upload do
+    api_key = app_store_connect_api_key(
+      key_id: ENV.fetch("ASC_API_KEY_ID"),
+      issuer_id: ENV.fetch("ASC_API_ISSUER_ID"),
+      key_content: ENV.fetch("ASC_API_KEY_P8"),
+      is_key_content_base64: true
+    )
+
+    notes = ""
+    notes_path = ENV["RELEASE_NOTES_PATH"]
+    notes = File.read(notes_path).strip if notes_path && File.exist?(notes_path)
+    notes = "Bug fixes and improvements." if notes.empty?
+
+    deliver(
+      api_key: api_key,
+      app_identifier: "com.neoanaloglab.negativeconverter",
+      platform: "osx",
+      pkg: ENV.fetch("PKG_PATH"),
+      app_version: ENV.fetch("APP_VERSION"),
+      build_number: ENV.fetch("BUILD_NUMBER"),
+      # "default" applies the same notes to every enabled locale.
+      release_notes: { "default" => notes },
+      skip_screenshots: true,
+      run_precheck_before_submit: false,
+      precheck_include_in_app_purchases: false,
+      force: true,
+      reject_if_possible: true,
+      submit_for_review: true,
+      automatic_release: true,
+      submission_information: {
+        add_id_info_uses_idfa: false,
+        export_compliance_uses_encryption: false,
+        content_rights_contains_third_party_content: false
+      }
+    )
+  end
+end
