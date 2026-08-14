@@ -4568,10 +4568,11 @@
       } finally {
         if (full) _coreReprocessFullInFlight = false;
         else _coreReprocessPreviewInFlight = false;
-        // If a new request came in while we were processing, run the latest
-        // one — but only once nothing else is still in flight (the other
-        // kind's finally block will pick it up otherwise).
-        if (_coreReprocessPending && !_coreReprocessFullInFlight && !_coreReprocessPreviewInFlight) {
+        // Re-dispatch the latest queued request. If it is still blocked
+        // (e.g. a queued full render while a preview is running) it simply
+        // re-queues itself and the next finally picks it up — but a queued
+        // preview must not wait for an in-flight full render.
+        if (_coreReprocessPending) {
           const pending = _coreReprocessPending;
           _coreReprocessPending = null;
           void rerenderWithCoreControls(pending).catch((err) => {
@@ -5252,10 +5253,15 @@
       let refW = full.width;
       let refH = full.height;
       if (state.sprocketPreviewEnabled) {
-        const metrics = getSprocketFrameMetrics(refW, refH, getSprocketFrameComposeOptions());
+        // Frame metrics expect landscape input; composeSprocketFrame rotates
+        // portrait images before framing and back afterwards, so mirror that.
+        const portrait = refH > refW;
+        const metrics = portrait
+          ? getSprocketFrameMetrics(refH, refW, getSprocketFrameComposeOptions())
+          : getSprocketFrameMetrics(refW, refH, getSprocketFrameComposeOptions());
         if (metrics && metrics.outputWidth > 0 && metrics.outputHeight > 0) {
-          refW = metrics.outputWidth;
-          refH = metrics.outputHeight;
+          refW = portrait ? metrics.outputHeight : metrics.outputWidth;
+          refH = portrait ? metrics.outputWidth : metrics.outputHeight;
         }
       }
       if (refW <= w || refH <= h) return null;
