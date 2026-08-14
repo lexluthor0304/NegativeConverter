@@ -66,7 +66,11 @@
     } from '../workers/workerBridge.js';
 
     const PERF_LOG_THRESHOLD_MS = 120;
-    const FULL_RESOLUTION_IDLE_DELAY_MS = 8000;  // long enough that user won't trigger it while adjusting
+    // Full-resolution renders run in a worker and no longer block interactive
+    // preview reprocessing, so they can start soon after the user pauses; a
+    // render made stale by further input is discarded and rescheduled.
+    const FULL_RESOLUTION_IDLE_DELAY_MS = 2500;
+    const FULL_RESOLUTION_INTERACTIVE_DELAY_MS = 600; // after a slider commit / stale retry
 
     function getPerfNow() {
       return (typeof performance !== 'undefined' && typeof performance.now === 'function')
@@ -4177,7 +4181,7 @@
         // If SilverCore mode and we were using preview-resolution, run full reprocess
         if (usesSilverCoreConversion(state) && state.conversionSourceImageData
           && state.conversionPreviewImageData && state.conversionPreviewImageData !== state.conversionSourceImageData) {
-          scheduleFullResolutionRender('scheduleFullUpdate');
+          scheduleFullResolutionRender('scheduleFullUpdate', FULL_RESOLUTION_INTERACTIVE_DELAY_MS);
           return;
         }
         updateFull();
@@ -4492,7 +4496,8 @@
       setMainCanvasDimensions(fullW, fullH);
     }
 
-    let _coreReprocessInFlight = false;
+    let _coreReprocessFullInFlight = false;
+    let _coreReprocessPreviewInFlight = false;
     let _coreReprocessPending = null;
 
     function resetDustForCleanSource(source) {
@@ -4511,12 +4516,19 @@
       if (!state.conversionSourceImageData) return;
       if (sourceRef && state.conversionSourceImageData !== sourceRef) return;
 
-      // In-flight guard: if a reprocess is already running, queue the latest request
-      if (_coreReprocessInFlight) {
+      // In-flight guard: serialize preview-vs-preview and full-vs-anything,
+      // but let a preview reprocess run while a full-resolution render is
+      // busy in the worker — queueing it behind the full render would freeze
+      // slider feedback for the whole render.
+      const blocked = full
+        ? (_coreReprocessFullInFlight || _coreReprocessPreviewInFlight)
+        : _coreReprocessPreviewInFlight;
+      if (blocked) {
         _coreReprocessPending = options;
         return;
       }
-      _coreReprocessInFlight = true;
+      if (full) _coreReprocessFullInFlight = true;
+      else _coreReprocessPreviewInFlight = true;
 
       try {
         if (full) {
@@ -4554,8 +4566,12 @@
           }
         }
       } finally {
-        _coreReprocessInFlight = false;
-        // If a new request came in while we were processing, run the latest one
+        if (full) _coreReprocessFullInFlight = false;
+        else _coreReprocessPreviewInFlight = false;
+        // Re-dispatch the latest queued request. If it is still blocked
+        // (e.g. a queued full render while a preview is running) it simply
+        // re-queues itself and the next finally picks it up — but a queued
+        // preview must not wait for an in-flight full render.
         if (_coreReprocessPending) {
           const pending = _coreReprocessPending;
           _coreReprocessPending = null;
@@ -4604,6 +4620,12 @@
             state.fullResolutionPromise = null;
           }
           state.fullResolutionPending = Boolean(state.processedImageDataIsPreview);
+          // Settings changed while this render was in flight, so its result
+          // was discarded. Schedule another pass so the display converges on
+          // the latest settings instead of staying at preview quality.
+          if (token !== coreReprocessToken && state.conversionSourceImageData === sourceRef) {
+            scheduleFullResolutionRender('stale-retry', FULL_RESOLUTION_INTERACTIVE_DELAY_MS);
+          }
         });
 
       state.fullResolutionPromise = promise;
@@ -5217,11 +5239,44 @@
     // ===========================================
     // Canvas Display
     // ===========================================
+    function getFullResDisplayReference(w, h) {
+      // Dimensions the on-screen image will have once full-resolution
+      // processing lands. While a preview-resolution stand-in is displayed
+      // (SilverCore preview reprocess, downscaled WebGL source), the CSS box
+      // must be fitted against this reference so the visible image keeps a
+      // stable footprint instead of shrinking to the stand-in's pixel size.
+      if (state.cropping || state.currentStep < 3) return null;
+      const full = (state.processedImageData && !state.processedImageDataIsPreview)
+        ? state.processedImageData
+        : state.conversionSourceImageData;
+      if (!full || !(full.width > 0) || !(full.height > 0)) return null;
+      let refW = full.width;
+      let refH = full.height;
+      if (state.sprocketPreviewEnabled) {
+        // Frame metrics expect landscape input; composeSprocketFrame rotates
+        // portrait images before framing and back afterwards, so mirror that.
+        const portrait = refH > refW;
+        const metrics = portrait
+          ? getSprocketFrameMetrics(refH, refW, getSprocketFrameComposeOptions())
+          : getSprocketFrameMetrics(refW, refH, getSprocketFrameComposeOptions());
+        if (metrics && metrics.outputWidth > 0 && metrics.outputHeight > 0) {
+          refW = portrait ? metrics.outputHeight : metrics.outputWidth;
+          refH = portrait ? metrics.outputWidth : metrics.outputHeight;
+        }
+      }
+      if (refW <= w || refH <= h) return null;
+      return { width: refW, height: refH };
+    }
+
     function adjustCanvasDisplay(w, h) {
       const container = document.getElementById('canvasContainer');
       const maxWidth = container.clientWidth - 20;
       const maxHeight = container.clientHeight - 20;
-      const scale = Math.min(maxWidth / w, maxHeight / h, 1);
+      // Never upscale past 100% — but for a preview-resolution stand-in,
+      // "100%" means the full-resolution image it temporarily represents.
+      const ref = getFullResDisplayReference(w, h);
+      const maxScale = ref ? Math.min(ref.width / w, ref.height / h) : 1;
+      const scale = Math.min(maxWidth / w, maxHeight / h, maxScale);
       const cssW = (w * scale) + 'px';
       const cssH = (h * scale) + 'px';
       canvas.style.width = cssW;
