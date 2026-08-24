@@ -21,8 +21,10 @@ function walk(dir) {
 }
 roots.forEach(walk);
 
-// SEO head consistency counts as part of the suite
-tests.push(join(dirname(fileURLToPath(import.meta.url)), 'check-seo-heads.mjs'));
+// Repo-wide consistency checks count as part of the suite
+const scriptsDir = dirname(fileURLToPath(import.meta.url));
+tests.push(join(scriptsDir, 'check-seo-heads.mjs'));
+tests.push(join(scriptsDir, 'check-pinned-versions.mjs'));
 
 let failed = 0;
 for (const t of tests) {

@@ -1,0 +1,62 @@
+# Keeps the three dependency layers of this repo current: the npm packages the
+# web app builds from, the Rust crates behind the Tauri shell, and the actions
+# the CI/release pipeline runs on. The actions layer is the one that drifted
+# worst without this (v4 while upstream was on v7/v8), because nothing else
+# surfaces it.
+#
+# Every merge to main triggers Desktop Release, which cuts a new patch version
+# (GitHub Release + R2 + Mac App Store submission). To keep that from turning
+# into a release per dependency, minor and patch updates are grouped into one PR
+# per ecosystem. Majors still arrive as individual PRs -- those need a real
+# review anyway, as the v4 -> v7/v8 actions jump showed.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Tokyo
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  # Cargo.toml keeps loose ranges ("2", "1", "0.22"), so most of this lands as
+  # Cargo.lock refreshes.
+  - package-ecosystem: cargo
+    directory: "/src-tauri"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Tokyo
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Tokyo
+    open-pull-requests-limit: 5
+    groups:
+      actions-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
