@@ -2534,6 +2534,15 @@ body {
     rgba(255, 255, 255, 0.02);
 }
 
+/* Auto WB applied: calm cyan info state — the gold nudge is only for frames
+   that still want a manual gray point. */
+.gray-point-guide-card.is-auto {
+  border-color: rgba(69, 214, 205, 0.28);
+  background:
+    linear-gradient(135deg, rgba(69, 214, 205, 0.10), rgba(69, 214, 205, 0.04)),
+    rgba(255, 255, 255, 0.02);
+}
+
 .gray-point-guide-title {
   font-size: 12px;
   font-weight: 700;
@@ -2541,6 +2550,10 @@ body {
 }
 
 .gray-point-guide-card.is-active .gray-point-guide-title {
+  color: #9fe8e2;
+}
+
+.gray-point-guide-card.is-auto .gray-point-guide-title {
   color: #9fe8e2;
 }
 

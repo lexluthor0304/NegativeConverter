@@ -56,6 +56,7 @@ export function deepCopySanitizedSettings(safe, { autoFrameMeta = safe.autoFrame
     wbR: safe.wbR,
     wbG: safe.wbG,
     wbB: safe.wbB,
+    wbAutoConfidence: safe.wbAutoConfidence ?? null,
     grayPointSampled: Boolean(safe.grayPointSampled),
     curvePoints: {
       r: safe.curvePoints.r.map(p => ({ ...p })),
