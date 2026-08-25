@@ -5405,8 +5405,11 @@
           if (isHeavy) {
             // Two-stage loading: show fast half-size preview immediately,
             // then decode full resolution in the background.
+            // The preview stage gets a COPY: LibRaw transfers its input buffer
+            // to a worker, which would detach arrayBuffer and break the
+            // full-resolution decode scheduled below.
             overlay.updateProgress(20, lang.loadingProcessing);
-            imageData = await loadRawImageDataPreview(arrayBuffer, fileName, {
+            imageData = await loadRawImageDataPreview(arrayBuffer.slice(0), fileName, {
               onMetadata(meta) {
                 extractedRawMeta = meta;
               }

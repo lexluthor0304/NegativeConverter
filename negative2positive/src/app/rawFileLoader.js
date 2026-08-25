@@ -7,7 +7,7 @@ import {
   toImageData8
 } from '../silvercore/util/image16.js';
 import { looksLikeBayerSnow } from '../silvercore/util/garbledCheck.js';
-import { tryNefJpegPreview } from './nefJpegPreview.js';
+import { tryNefJpegPreview, extractNefPreviewJpeg, decodeNefPreviewJpeg } from './nefJpegPreview.js';
 
 const UTIF = (UTIFImport && typeof UTIFImport.decode === 'function')
   ? UTIFImport
@@ -176,15 +176,31 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     throw new Error(`module worker not supported: ${err?.message || err}`);
   }
 
+  // LibRaw transfers the container ArrayBuffer to its worker on open(), which
+  // DETACHES `buffer` on this thread (byteLength drops to 0). Anything the
+  // fallback paths need must therefore be copied out first — extracting after
+  // open() silently finds nothing, which is exactly how the Zf/Z8/Z9
+  // high-efficiency fallback regressed. The copy is the JPEG tail only, and
+  // it is short-lived (function scope).
+  let stashedPreview = null;
+  try {
+    const extracted = extractNefPreviewJpeg(buffer);
+    if (extracted) {
+      const jpegCopy = new Uint8Array(extracted.jpegBytes.byteLength);
+      jpegCopy.set(extracted.jpegBytes);
+      stashedPreview = { jpegBytes: jpegCopy, width: extracted.width, height: extracted.height };
+    }
+  } catch {}
+
   const killWorker = () => {
     try { raw.worker?.terminate?.(); } catch {}
   };
 
   const handleTimeoutFallback = async () => {
     killWorker();
-    const previewImageData = await tryNefJpegPreview(buffer);
+    const previewImageData = await decodeNefPreviewJpeg(stashedPreview);
     if (previewImageData) {
-      console.warn('[RAW] LibRaw timed out — using embedded preview (8-bit precision).');
+      console.warn('[RAW] LibRaw could not decode this file — using embedded preview (8-bit precision).');
       previewImageData.__image16 = fromImageData8(previewImageData);
       if (onMetadata) onMetadata(null);
       return previewImageData;
@@ -270,7 +286,7 @@ export async function loadRawFile(buffer, fileName, options = {}) {
 
   if (looksLikeBayerSnow(image16)) {
     console.warn('[RAW] decoded output looks un-demosaiced; trying embedded JPEG preview fallback');
-    const previewImageData = await tryNefJpegPreview(buffer);
+    const previewImageData = await decodeNefPreviewJpeg(stashedPreview);
     if (previewImageData) {
       console.warn('[RAW] embedded preview decoded — precision is downgraded to 8-bit for this file.');
       previewImageData.__image16 = fromImageData8(previewImageData);

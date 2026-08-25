@@ -153,15 +153,41 @@ export function extractNefPreviewJpeg(arrayBuffer) {
 export async function tryNefJpegPreview(arrayBuffer) {
   const extracted = extractNefPreviewJpeg(arrayBuffer);
   if (!extracted) return null;
-  const { jpegBytes, width, height } = extracted;
 
   // Slice into a standalone ArrayBuffer so the Blob doesn't pin the entire
   // RAW container in memory while createImageBitmap is decoding.
+  let standalone;
+  try {
+    standalone = new Uint8Array(extracted.jpegBytes.byteLength);
+    standalone.set(extracted.jpegBytes);
+  } catch (err) {
+    console.warn('[NEF fallback] failed to wrap JPEG bytes:', err);
+    return null;
+  }
+  return decodeNefPreviewJpeg({
+    jpegBytes: standalone,
+    width: extracted.width,
+    height: extracted.height,
+  });
+}
+
+/**
+ * Decode an already-extracted (and already-standalone) preview JPEG into
+ * ImageData. Split from tryNefJpegPreview so callers can stash the extracted
+ * bytes BEFORE handing the container to LibRaw — LibRaw transfers the
+ * container ArrayBuffer to its worker, which detaches it on this thread and
+ * makes any later extraction from it silently return nothing.
+ *
+ * @param {{ jpegBytes: Uint8Array, width?: number, height?: number } | null} extracted
+ * @returns {Promise<ImageData | null>}
+ */
+export async function decodeNefPreviewJpeg(extracted) {
+  if (!extracted || !extracted.jpegBytes || extracted.jpegBytes.byteLength < 4) return null;
+  const { jpegBytes, width, height } = extracted;
+
   let blob;
   try {
-    const standalone = new Uint8Array(jpegBytes.byteLength);
-    standalone.set(jpegBytes);
-    blob = new Blob([standalone], { type: 'image/jpeg' });
+    blob = new Blob([jpegBytes], { type: 'image/jpeg' });
   } catch (err) {
     console.warn('[NEF fallback] failed to wrap JPEG bytes:', err);
     return null;
