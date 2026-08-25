@@ -242,6 +242,10 @@ if (Math.abs(meanAfter - meanBefore) < 8) {
 }
 
 // ---- 5. curve editor: drag the midtones up, preview must brighten/change ----
+// The default panel mode is the SP3000 console, which hides the detail
+// sections (including the curve editor) — switch to detail mode first.
+await evaluate(`document.getElementById('panelModeDetailBtn').click()`);
+await wait(300);
 await evaluate(`(() => {
   const content = document.getElementById('additionalSectionContent');
   if (content.classList.contains('collapsed')) {
