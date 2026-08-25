@@ -155,6 +155,7 @@
     const STEP3_GUIDE_COLLAPSED_SESSION_KEY = 'nc_step3_guide_collapsed_v2';
     const FRONTIER_GUIDE_POPUP_SESSION_KEY = 'nc_frontier_guide_popup_shown_v1';
     const GUIDE_MODE_STORAGE_KEY = 'nc_guide_mode_enabled_v1';
+    const PANEL_MODE_STORAGE_KEY = 'nc_panel_mode_v1';
     const DESKTOP_UPDATE_LAST_CHECK_TS_KEY = 'nc_desktop_update_last_check_ts';
     const DESKTOP_UPDATE_LAST_SEEN_LATEST_KEY = 'nc_desktop_update_last_seen_latest';
     const DESKTOP_UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -214,6 +215,7 @@
 
     let currentLang = 'en';
     let guideModeEnabled = true;
+    let panelMode = 'console'; // 'console' (SP3000 keypad only) | 'detail' (all sections)
     let stateReady = false;
     let step3GuideCollapsedOnce = false;
     let frontierGuidePopupShownThisSession = false;
@@ -627,6 +629,135 @@
       });
     }
     updateGuideModeUI();
+
+    // ===========================================
+    // SP3000-style correction console
+    // Discrete-step C/M/Y/D keys writing the existing state channels, so the
+    // whole undo/snapshot/batch/export machinery applies unchanged. C/M/Y hit
+    // the legacy pixel channels (kept live under SilverCore on purpose); D
+    // hits coreExposure and reconverts like any other core control.
+    // ===========================================
+    const CONSOLE_MAX_STEPS = 8; // Frontier-style key range: N ± 8
+    const CONSOLE_CHANNELS = {
+      cyan:    { stateKey: 'cyan',         step: 5,  commit: 'pixel', readoutId: 'consoleReadoutCyan' },
+      magenta: { stateKey: 'magenta',      step: 5,  commit: 'pixel', readoutId: 'consoleReadoutMagenta' },
+      yellow:  { stateKey: 'yellow',       step: 5,  commit: 'pixel', readoutId: 'consoleReadoutYellow' },
+      density: { stateKey: 'coreExposure', step: 10, commit: 'core',  readoutId: 'consoleReadoutDensity' },
+    };
+
+    function consoleChannelSteps(channel) {
+      return Math.round((Number(state[channel.stateKey]) || 0) / channel.step);
+    }
+
+    function consoleChannelsEnabled() {
+      return stateReady && Boolean(state.processedImageData);
+    }
+
+    function consoleColorKeysEnabled() {
+      return consoleChannelsEnabled() && sanitizePresetType(state.filmType || 'color') !== 'bw';
+    }
+
+    function updateConsoleReadouts() {
+      if (!stateReady) return;
+      const enabled = consoleChannelsEnabled();
+      const colorEnabled = consoleColorKeysEnabled();
+      for (const [name, channel] of Object.entries(CONSOLE_CHANNELS)) {
+        const readout = document.getElementById(channel.readoutId);
+        if (!readout) continue;
+        const steps = consoleChannelSteps(channel);
+        readout.textContent = steps === 0 ? 'N' : (steps > 0 ? `+${steps}` : `−${Math.abs(steps)}`);
+        readout.classList.toggle('is-live', steps !== 0);
+        const channelEnabled = name === 'density' ? enabled : colorEnabled;
+        const column = readout.closest('.console-channel');
+        if (column) column.classList.toggle('disabled', !channelEnabled);
+        document.querySelectorAll(`.console-key[data-channel="${name}"]`).forEach((key) => {
+          key.disabled = !channelEnabled;
+        });
+      }
+      const resetBtn = document.getElementById('consoleResetBtn');
+      if (resetBtn) resetBtn.disabled = !enabled;
+    }
+
+    function commitConsoleChannel(channel) {
+      syncSliderFromState(channel.stateKey);
+      markCurrentFileDirty();
+      schedulePreviewUpdate();
+      if (channel.commit === 'core') {
+        scheduleCoreReprocess({ full: false });
+      } else {
+        scheduleFullUpdate();
+      }
+    }
+
+    function nudgeConsoleChannel(name, dir) {
+      const channel = CONSOLE_CHANNELS[name];
+      if (!channel) return;
+      const enabled = name === 'density' ? consoleChannelsEnabled() : consoleColorKeysEnabled();
+      if (!enabled) return;
+      const current = consoleChannelSteps(channel);
+      const next = Math.max(-CONSOLE_MAX_STEPS, Math.min(CONSOLE_MAX_STEPS, current + dir));
+      const nextValue = next * channel.step;
+      // Snap: a press lands exactly on a step even if a detail-mode slider
+      // left the value between steps.
+      if (nextValue === state[channel.stateKey]) return;
+      pushUndo(channel.stateKey);
+      state[channel.stateKey] = nextValue;
+      commitConsoleChannel(channel);
+      updateConsoleReadouts();
+    }
+
+    function resetConsoleChannels() {
+      if (!consoleChannelsEnabled()) return;
+      const touched = Object.values(CONSOLE_CHANNELS).filter((c) => (Number(state[c.stateKey]) || 0) !== 0);
+      if (touched.length === 0) return;
+      pushUndo('consoleReset');
+      let coreTouched = false;
+      let pixelTouched = false;
+      for (const channel of touched) {
+        state[channel.stateKey] = 0;
+        syncSliderFromState(channel.stateKey);
+        if (channel.commit === 'core') coreTouched = true; else pixelTouched = true;
+      }
+      markCurrentFileDirty();
+      schedulePreviewUpdate();
+      if (coreTouched) scheduleCoreReprocess({ full: false });
+      if (pixelTouched) scheduleFullUpdate();
+      updateConsoleReadouts();
+    }
+
+    document.querySelectorAll('.console-key[data-channel]').forEach((key) => {
+      key.addEventListener('click', () => {
+        nudgeConsoleChannel(key.dataset.channel, key.dataset.dir === '-1' ? -1 : 1);
+      });
+    });
+    document.getElementById('consoleResetBtn')?.addEventListener('click', resetConsoleChannels);
+
+    function updatePanelModeUI() {
+      document.getElementById('panelModeQuickBtn')?.classList.toggle('active', panelMode === 'console');
+      document.getElementById('panelModeDetailBtn')?.classList.toggle('active', panelMode === 'detail');
+    }
+
+    function setPanelMode(mode, options = {}) {
+      const { persist = true } = options;
+      panelMode = mode === 'detail' ? 'detail' : 'console';
+      if (persist) safeStorageSet(PANEL_MODE_STORAGE_KEY, panelMode);
+      updatePanelModeUI();
+      if (stateReady) {
+        updateWorkflowUI(); // refreshes film settings + step-3 sections together
+        updateSprocketControlsUI();
+      }
+    }
+
+    panelMode = safeStorageGet(PANEL_MODE_STORAGE_KEY) === 'detail' ? 'detail' : 'console';
+    document.getElementById('panelModeQuickBtn')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      setPanelMode('console');
+    });
+    document.getElementById('panelModeDetailBtn')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      setPanelMode('detail');
+    });
+    updatePanelModeUI();
 
     document.getElementById('headerGrayPointBtn')?.addEventListener('click', () => {
       startWhiteBalanceSampling();
@@ -2577,8 +2708,10 @@
       // Show/hide sections based on step
       document.getElementById('autoFrameSettingsSection').style.display =
         state.currentStep === 1 ? 'block' : 'none';
+      // Film settings are a Step-2 concern; from Step 3 on they only stay in
+      // detail mode — the console keeps the panel down to the keypad.
       document.getElementById('filmSettingsSection').style.display =
-        state.currentStep >= 2 ? 'block' : 'none';
+        (state.currentStep === 2 || (state.currentStep >= 3 && panelMode === 'detail')) ? 'block' : 'none';
       updateStep3SectionVisibility();
 
       // Show convert button after cropping is done
@@ -2601,20 +2734,30 @@
     function updateStep3SectionVisibility() {
       const inStep3 = state.currentStep >= 3;
       const showCore = inStep3 && usesSilverCoreConversion(state);
+      const detail = panelMode === 'detail';
       const dustSection = document.getElementById('dustRemovalSection');
-      if (dustSection) dustSection.style.display = inStep3 ? 'block' : 'none';
+      if (dustSection) dustSection.style.display = (inStep3 && detail) ? 'block' : 'none';
 
-      ['whiteBalanceSection', 'toneSection', 'colorSection', 'cmySection', 'advancedSection'].forEach((id) => {
+      // Console mode: the SP3000 keypad + Quick Fix are the whole panel.
+      const consoleSection = document.getElementById('consoleSection');
+      if (consoleSection) consoleSection.style.display = showCore ? 'block' : 'none';
+      const quickFix = document.getElementById('whiteBalanceSection');
+      if (quickFix) quickFix.style.display = showCore ? 'block' : 'none';
+
+      ['toneSection', 'colorSection', 'cmySection', 'advancedSection'].forEach((id) => {
         const el = document.getElementById(id);
         if (!el) return;
-        el.style.display = showCore ? 'block' : 'none';
+        el.style.display = (showCore && detail) ? 'block' : 'none';
       });
 
       const additional = document.getElementById('additionalSection');
       if (additional) {
-        additional.style.display = inStep3 ? 'block' : 'none';
+        // The legacy (non-SilverCore) path has no other controls, so it keeps
+        // this section regardless of panel mode.
+        additional.style.display = (inStep3 && (detail || !showCore)) ? 'block' : 'none';
       }
 
+      updateConsoleReadouts();
       updateGrayPointGuideUI();
     }
 
@@ -2749,9 +2892,9 @@
 
       const sprocketSettingsSection = document.getElementById('sprocketSettingsSection');
       if (sprocketSettingsSection) {
-        sprocketSettingsSection.style.display = (
-          state.originalImageData || state.croppedImageData || state.processedImageData
-        ) ? 'block' : 'none';
+        const hasImage = state.originalImageData || state.croppedImageData || state.processedImageData;
+        const hiddenByConsole = state.currentStep >= 3 && panelMode !== 'detail';
+        sprocketSettingsSection.style.display = (hasImage && !hiddenByConsole) ? 'block' : 'none';
       }
       syncSprocketEdgeSettingsUI();
     }
@@ -7420,6 +7563,24 @@
     });
     syncSprocketEdgeSettingsUI();
 
+    // Keyboard: SP3000 console keys. c/m/y/d = +1 step, Shift+key = -1,
+    // n = reset all four channels. Guarded like the other global shortcuts.
+    document.addEventListener('keydown', (event) => {
+      if (!stateReady || state.currentStep < 3) return;
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      if (isEditableTarget(event.target)) return;
+      if (state.cropping || state.samplingMode) return;
+      const key = event.key.toLowerCase();
+      const channelByKey = { c: 'cyan', m: 'magenta', y: 'yellow', d: 'density' };
+      if (channelByKey[key]) {
+        event.preventDefault();
+        nudgeConsoleChannel(channelByKey[key], event.shiftKey ? -1 : 1);
+      } else if (key === 'n' && !event.shiftKey) {
+        event.preventDefault();
+        resetConsoleChannels();
+      }
+    });
+
     document.addEventListener('keydown', (event) => {
       if (event.code !== 'Space' || event.repeat) return;
       if (isEditableTarget(event.target)) return;
@@ -10171,6 +10332,7 @@
       setFilmTypeButtons(state.filmType);
       updateFilmModeUI();
       updateLensCorrectionUI();
+      updateConsoleReadouts();
     }
 
     function updateExportButtons() {

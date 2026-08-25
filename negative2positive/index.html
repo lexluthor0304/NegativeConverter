@@ -807,6 +807,48 @@
         </div>
       </div>
 
+      <!-- SP3000-style correction console (Step 3 default view) -->
+      <div class="control-section task-primary" id="consoleSection" style="display: none;">
+        <div class="section-header" data-section="console">
+          <span class="section-title" data-i18n="sectionConsole">Correction Console</span>
+          <div class="panel-mode-toggle" id="panelModeToggle">
+            <button type="button" class="panel-mode-btn" id="panelModeQuickBtn" data-i18n="panelModeQuick">Quick</button>
+            <button type="button" class="panel-mode-btn" id="panelModeDetailBtn" data-i18n="panelModeDetail">Detail</button>
+          </div>
+          <span class="section-toggle">▼</span>
+        </div>
+        <div class="section-content" id="consoleSectionContent">
+          <div class="console-keypad" id="consoleKeypad">
+            <div class="console-channel console-channel-c" data-channel="cyan">
+              <span class="console-channel-label">C</span>
+              <button type="button" class="console-key" data-channel="cyan" data-dir="1" aria-label="C +1">+</button>
+              <output class="console-readout" id="consoleReadoutCyan">N</output>
+              <button type="button" class="console-key" data-channel="cyan" data-dir="-1" aria-label="C −1">−</button>
+            </div>
+            <div class="console-channel console-channel-m" data-channel="magenta">
+              <span class="console-channel-label">M</span>
+              <button type="button" class="console-key" data-channel="magenta" data-dir="1" aria-label="M +1">+</button>
+              <output class="console-readout" id="consoleReadoutMagenta">N</output>
+              <button type="button" class="console-key" data-channel="magenta" data-dir="-1" aria-label="M −1">−</button>
+            </div>
+            <div class="console-channel console-channel-y" data-channel="yellow">
+              <span class="console-channel-label">Y</span>
+              <button type="button" class="console-key" data-channel="yellow" data-dir="1" aria-label="Y +1">+</button>
+              <output class="console-readout" id="consoleReadoutYellow">N</output>
+              <button type="button" class="console-key" data-channel="yellow" data-dir="-1" aria-label="Y −1">−</button>
+            </div>
+            <div class="console-channel console-channel-d" data-channel="density">
+              <span class="console-channel-label">D</span>
+              <button type="button" class="console-key" data-channel="density" data-dir="1" aria-label="D +1">+</button>
+              <output class="console-readout" id="consoleReadoutDensity">N</output>
+              <button type="button" class="console-key" data-channel="density" data-dir="-1" aria-label="D −1">−</button>
+            </div>
+          </div>
+          <button type="button" class="console-reset-key" id="consoleResetBtn" aria-label="Reset C M Y D">N</button>
+          <div class="console-key-hint" data-i18n="consoleKeyHint">Keys: c / m / y / d = +1 · Shift = −1 · n = reset</div>
+        </div>
+      </div>
+
       <!-- Cleanup (Step 3, before other adjustments) -->
       <div class="control-section task-secondary" id="dustRemovalSection" style="display: none;">
         <div class="section-header" data-section="dustRemoval">
