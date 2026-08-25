@@ -44,6 +44,7 @@
       sampleFilmBase as sampleFilmBaseRobust,
       sanitizeFilmBaseForSettings
     } from './filmBaseDetection.js';
+    import { estimateAutoWhiteBalance } from './autoWhiteBalance.js';
     import {
       isRawLikeFileName,
       loadPngImageData,
@@ -526,24 +527,34 @@
       }
       if (!show) return;
 
+      // Three resting states: auto WB applied (calm, info tone), manual sample
+      // done, or the default nudge toward clicking a gray point. The active
+      // sampling state overrides all of them.
+      const autoApplied = !state.grayPointSampled && Boolean(state.wbAutoConfidence);
       if (guideCard) {
         guideCard.classList.toggle('is-active', isActive);
+        guideCard.classList.toggle('is-auto', !isActive && autoApplied);
       }
+      const stateKey = (suffix, fallbackKey) => {
+        if (isActive) return `grayPointGuideActive${suffix}`;
+        if (autoApplied) return `grayPointGuideAuto${suffix}`;
+        return fallbackKey;
+      };
       if (guideTitle) {
         guideTitle.textContent = getLocalizedText(
-          isActive ? 'grayPointGuideActiveTitle' : 'grayPointGuideTitle',
+          stateKey('Title', 'grayPointGuideTitle'),
           'Find a neutral gray point'
         );
       }
       if (guideBody) {
         guideBody.textContent = getLocalizedText(
-          isActive ? 'grayPointGuideActiveBody' : 'grayPointGuideBody',
+          stateKey('Body', 'grayPointGuideBody'),
           'Sample a neutral gray area to refine white balance.'
         );
       }
       if (guideHint) {
         guideHint.textContent = getLocalizedText(
-          isActive ? 'grayPointGuideActiveHint' : 'grayPointGuideHint',
+          stateKey('Hint', 'grayPointGuideHint'),
           'Click the image directly after starting gray-point sampling.'
         );
       }
@@ -1775,6 +1786,12 @@
       wbR: 1.0,
       wbG: 1.0,
       wbB: 1.0,
+      // Provenance of the current gains: null = defaults / user-owned,
+      // 'high' | 'medium' = set by the automatic gray-point estimator.
+      wbAutoConfidence: null,
+      // True once the user touches the RGB gain sliders directly; the
+      // estimator then keeps its hands off this image.
+      wbUserOverride: false,
 
       // Tone adjustments
       exposure: 0,
@@ -2116,7 +2133,8 @@
       'coreBrightness', 'coreExposure', 'coreContrast', 'coreHighlights', 'coreShadows',
       'coreWhites', 'coreBlacks', 'coreWbMode', 'coreTemperature', 'coreTint',
       'coreSaturation', 'coreGlow', 'coreFade', 'coreCurvePrecision', 'coreUseWebGL',
-      'wbR', 'wbG', 'wbB', 'filmType', 'filmBaseSet', 'grayPointSampled', 'step2Mode', 'rotationAngle',
+      'wbR', 'wbG', 'wbB', 'wbAutoConfidence', 'wbUserOverride',
+      'filmType', 'filmBaseSet', 'grayPointSampled', 'step2Mode', 'rotationAngle',
       'sprocketPreviewEnabled', 'currentStep',
     ];
 
@@ -3152,6 +3170,9 @@
         wbR: sanitizeNumeric(source.wbR, fallbackSettings.wbR ?? 1, 0.5, 2),
         wbG: sanitizeNumeric(source.wbG, fallbackSettings.wbG ?? 1, 0.5, 2),
         wbB: sanitizeNumeric(source.wbB, fallbackSettings.wbB ?? 1, 0.5, 2),
+        wbAutoConfidence: (source.wbAutoConfidence === 'high' || source.wbAutoConfidence === 'medium')
+          ? source.wbAutoConfidence
+          : null,
         grayPointSampled: typeof source.grayPointSampled === 'boolean'
           ? source.grayPointSampled
           : Boolean(fallbackSettings.grayPointSampled)
@@ -4396,6 +4417,41 @@
       }
     }
 
+    // Automatic gray point: estimate WB gains from the freshly converted
+    // positive so most images never need a manual gray-point click. Runs only
+    // when a NEW positive is produced (processNegative) — never on preview
+    // re-renders, core-control tweaks, dust updates, or undo restores — and
+    // never once the user has sampled a gray point or touched the RGB gain
+    // sliders. Low-confidence estimates apply nothing and leave the existing
+    // gray-point guide nudging toward the manual click instead.
+    function maybeAutoWhiteBalance() {
+      if (!usesSilverCoreConversion(state)) return;
+      if (sanitizePresetType(state.filmType || 'color') === 'bw') return;
+      if (state.grayPointSampled || state.wbUserOverride) return;
+      const source = state.previewSourceImageData || state.processedImageData;
+      if (!source) return;
+      const estimate = estimateAutoWhiteBalance(source);
+      if (estimate.confidence === 'low') {
+        // Only clear a previous auto estimate; user-owned gains stay put.
+        if (state.wbAutoConfidence) {
+          state.wbR = 1;
+          state.wbG = 1;
+          state.wbB = 1;
+          state.wbAutoConfidence = null;
+          updateWBSliders();
+          updateGrayPointGuideUI();
+        }
+        return;
+      }
+      state.wbR = estimate.wbR;
+      state.wbG = estimate.wbG;
+      state.wbB = estimate.wbB;
+      state.wbAutoConfidence = estimate.confidence;
+      updateWBSliders();
+      updateGrayPointGuideUI();
+      markCurrentFileDirty();
+    }
+
     // Full-resolution conversions run in a worker so a 90+ MP scan does not
     // freeze the UI for seconds; the small interactive preview stays on the
     // main thread. Falls back to the main thread if the worker fails.
@@ -4732,6 +4788,7 @@
           });
           overlay.updateProgress(hasPreviewSource ? 78 : 85, lang.loadingProcessing);
           applyProcessedImageToState(processed, { previewOnly: hasPreviewSource });
+          maybeAutoWhiteBalance();
           // Reset dust removal state for new conversion
           state.dustRemoval._state = null;
           state.dustRemoval.mask = null;
@@ -5457,6 +5514,8 @@
           state.lastRenderQuality = 'full';
           state.filmBaseSet = false;
           state.grayPointSampled = false;
+          state.wbAutoConfidence = null;
+          state.wbUserOverride = false;
           resetFrontierGuideImageState();
           state.autoFrame.lastDiagnostics = null;
           state.rawMetadata = extractedRawMeta;
@@ -6354,6 +6413,7 @@
         state.wbG = 1;
         state.wbB /= norm;
         state.grayPointSampled = true;
+        state.wbAutoConfidence = null;
 
         state.samplingMode = null;
         updateSamplingModeUI();
@@ -6672,9 +6732,30 @@
       onChange: () => scheduleCoreReprocess({ full: true })
     });
 
-    setupSlider('wbR', 'wbR', { decimals: 2 });
-    setupSlider('wbG', 'wbG', { decimals: 2 });
-    setupSlider('wbB', 'wbB', { decimals: 2 });
+    // A manual RGB-gain drag hands WB ownership to the user: the automatic
+    // gray-point estimator must never overwrite it afterwards. The handlers
+    // replicate setupSlider's default scheduling on top of flagging that.
+    const markWbUserOverride = () => {
+      if (!state.wbUserOverride || state.wbAutoConfidence) {
+        state.wbUserOverride = true;
+        state.wbAutoConfidence = null;
+        updateGrayPointGuideUI();
+      }
+    };
+    const wbSliderOptions = {
+      decimals: 2,
+      onInput: () => {
+        markWbUserOverride();
+        schedulePreviewUpdate();
+      },
+      onCommit: () => {
+        markWbUserOverride();
+        scheduleFullUpdate();
+      },
+    };
+    setupSlider('wbR', 'wbR', wbSliderOptions);
+    setupSlider('wbG', 'wbG', wbSliderOptions);
+    setupSlider('wbB', 'wbB', wbSliderOptions);
     setupSlider('cyan', 'cyan');
     setupSlider('magenta', 'magenta');
     setupSlider('yellow', 'yellow');
@@ -8344,6 +8425,8 @@
       state.wbG = 1;
       state.wbB = 1;
       state.grayPointSampled = false;
+      state.wbAutoConfidence = null;
+      state.wbUserOverride = false;
 
       updateSlidersFromState();
       initCurves(true);
@@ -8380,6 +8463,8 @@
         state.webglSourceImageData = null;
         state.filmBaseSet = false;
         state.grayPointSampled = false;
+        state.wbAutoConfidence = null;
+        state.wbUserOverride = false;
         state.sprocketPreviewEnabled = false;
         resetFrontierGuideImageState();
         state.lastRenderQuality = 'full';
@@ -8431,6 +8516,8 @@
       state.webglSourceImageData = null;
       state.filmBaseSet = false;
       state.grayPointSampled = false;
+      state.wbAutoConfidence = null;
+      state.wbUserOverride = false;
       state.sprocketPreviewEnabled = false;
       state.rawMetadata = null;
       state.currentStep = 1;
@@ -8962,6 +9049,11 @@
       const includeCrop = Boolean(options.includeCrop);
       const copied = cloneSettings(baseSettings);
       if (!copied) return 0;
+      // An explicit apply-to-all means the user wants one uniform look across
+      // the roll — the receiving files must keep these exact gains, so strip
+      // the auto provenance: the restore heuristic then treats them as
+      // user-owned and the per-file estimator leaves them alone.
+      copied.wbAutoConfidence = null;
 
       let count = 0;
       items.forEach(item => {
@@ -9329,6 +9421,28 @@
         trace.mark('dustRemoval', {
           pixels: getImageDataPixelCount(processed)
         });
+      }
+
+      // Never-viewed batch files carry default settings — give them the same
+      // automatic gray point a viewed file would get, baked into the settings
+      // BEFORE the adjustment stage (which may run in the export worker).
+      // Saved settings are always respected as-is: they already hold manual,
+      // auto, or roll-applied gains.
+      if (
+        !savedSettings
+        && processed
+        && usesSilverCoreConversion(settings)
+        && sanitizePresetType(settings.filmType || 'color') !== 'bw'
+        && !settings.grayPointSampled
+      ) {
+        const estimate = estimateAutoWhiteBalance(processed);
+        if (estimate.confidence !== 'low') {
+          settings.wbR = estimate.wbR;
+          settings.wbG = estimate.wbG;
+          settings.wbB = estimate.wbB;
+          settings.wbAutoConfidence = estimate.confidence;
+        }
+        trace.mark('autoWhiteBalance', { confidence: estimate.confidence });
       }
 
       // Apply adjustments
@@ -10014,10 +10128,18 @@
       state.wbR = safe.wbR;
       state.wbG = safe.wbG;
       state.wbB = safe.wbB;
+      // Non-unity gains without a recorded origin mean the user set them (old
+      // snapshots, manual tweaks), so treat them as sampled. Gains the auto
+      // estimator produced are exempt — they stay auto-owned across file
+      // switches so a later conversion may refresh them.
+      state.wbAutoConfidence = safe.wbAutoConfidence || null;
+      state.wbUserOverride = false;
       state.grayPointSampled = Boolean(
         safe.grayPointSampled
-        || Math.abs(safe.wbR - 1) > 0.01
-        || Math.abs(safe.wbB - 1) > 0.01
+        || (!safe.wbAutoConfidence && (
+          Math.abs(safe.wbR - 1) > 0.01
+          || Math.abs(safe.wbB - 1) > 0.01
+        ))
       );
       state.frontierGuideStep2ChoiceTouched = state.coreColorModel !== 'standard' || state.coreFilmPreset !== 'none';
       state.frontierGuideAutoAppliedForImage = state.frontierGuideStep2ChoiceTouched;
