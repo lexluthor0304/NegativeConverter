@@ -7,6 +7,7 @@ import {
   toImageData8
 } from '../silvercore/util/image16.js';
 import { looksLikeBayerSnow } from '../silvercore/util/garbledCheck.js';
+import { suppressSensorDefectsInWorker } from './sensorDefectsClient.js';
 import { tryNefJpegPreview, extractNefPreviewJpeg, decodeNefPreviewJpeg } from './nefJpegPreview.js';
 
 const UTIF = (UTIFImport && typeof UTIFImport.decode === 'function')
@@ -295,6 +296,23 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     const garbledErr = new Error('RAW decode produced garbled output and no usable embedded preview was found');
     garbledErr.code = 'RAW_DECODE_GARBLED';
     throw garbledErr;
+  }
+
+  // LibRaw does no hot/dead pixel mapping. A stuck photosite is harmless in a
+  // normal photo but turns into a saturated single-colour dot once the
+  // negative is inverted (dead red photosite → red dot in every shadow).
+  try {
+    const defects = options.suppressSensorDefects === false
+      ? { repaired: 0 }
+      : await suppressSensorDefectsInWorker(image16);
+    if (defects.repaired > 0) {
+      console.info(`[RAW] suppressed ${defects.repaired} isolated sensor defect(s) (R ${defects.perChannel[0]}, G ${defects.perChannel[1]}, B ${defects.perChannel[2]}; dead ${defects.dead}, hot ${defects.hot})`);
+    }
+  } catch (err) {
+    // Only reachable if the worker died after taking the pixels; recover the
+    // way a decode timeout does rather than failing the whole load.
+    console.warn('[RAW] sensor defect suppression lost the decode, falling back to embedded preview:', err?.message || err);
+    return await handleTimeoutFallback();
   }
 
   const imageData = toImageData8(image16);
