@@ -12625,6 +12625,278 @@
     }
 
     // ===========================================
+    // Live loupe (camera scanning)
+    // ===========================================
+    const LOUPE_PREVIEW_SIDE = 640;
+    const liveLoupe = { stream: null, track: null, running: false, capturing: false, frames: 0, view: 'converted', surface: null };
+
+    function loupeElement(id) {
+      return document.getElementById(id);
+    }
+
+    function loupeSupported() {
+      return Boolean(navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function');
+    }
+
+    function setLoupeStatus(text) {
+      const status = loupeElement('loupeStatus');
+      if (status) status.textContent = text;
+    }
+
+    function stopLoupeStream() {
+      liveLoupe.running = false;
+      if (liveLoupe.stream) for (const track of liveLoupe.stream.getTracks()) track.stop();
+      liveLoupe.stream = null;
+      liveLoupe.track = null;
+      const video = loupeElement('loupeVideo');
+      if (video) video.srcObject = null;
+      const capture = loupeElement('loupeCaptureBtn');
+      if (capture) capture.disabled = true;
+    }
+
+    // The conversion the loupe looks through: the current photo's recipe when
+    // one is converted (film base, preset, colour controls and look, without
+    // its geometry, strokes, flat field or roll lock), otherwise the automatic
+    // defaults for the camera frame itself.
+    function loupeRecipe(frame) {
+      if (state.currentStep >= 3 && state.originalImageData) {
+        return {
+          settings: { ...state, cropRegion: null, rotationAngle: 0, mirrored: false, autoFrameMeta: null, localExposure: null, flatFieldId: null, rollFrame: null, filmEdge: null },
+          name: state.loadedFile?.name || ''
+        };
+      }
+      return { settings: createDefaultSettings(frame), name: getLocalizedText('loupeRecipeAuto', 'automatic') };
+    }
+
+    function grabLoupeFrame(video, maxSide) {
+      const scale = Math.min(1, maxSide / Math.max(video.videoWidth, video.videoHeight));
+      const width = Math.max(1, Math.round(video.videoWidth * scale));
+      const height = Math.max(1, Math.round(video.videoHeight * scale));
+      if (!liveLoupe.surface) liveLoupe.surface = document.createElement('canvas');
+      const surface = liveLoupe.surface;
+      if (surface.width !== width || surface.height !== height) {
+        surface.width = width;
+        surface.height = height;
+      }
+      const ctx = surface.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(video, 0, 0, width, height);
+      return ctx.getImageData(0, 0, width, height);
+    }
+
+    async function convertLoupeFrame(frame) {
+      const recipe = loupeRecipe(frame);
+      const converted = await convertFrameWithRouter({
+        imageData: frame,
+        settings: buildRouterSettings(recipe.settings, frame),
+        options: { preview: true, scratch: true, includeAnalysisPreview: false }
+      });
+      if (!converted) return null;
+      const output = new ImageData(converted.width, converted.height);
+      applyAdjustmentsToBuffer(converted, recipe.settings, output, 'preview');
+      return { imageData: output, recipe: recipe.name };
+    }
+
+    async function loupeLoop() {
+      const video = loupeElement('loupeVideo');
+      const canvas = loupeElement('loupeCanvas');
+      const overlay = loupeElement('loupeOverlay');
+      const stream = liveLoupe.stream;
+      while (liveLoupe.running && liveLoupe.stream === stream) {
+        if (video.readyState >= 2 && video.videoWidth > 0) {
+          try {
+            const frame = grabLoupeFrame(video, LOUPE_PREVIEW_SIDE);
+            const result = await convertLoupeFrame(frame);
+            if (!liveLoupe.running || liveLoupe.stream !== stream) break;
+            if (result) {
+              if (canvas.width !== result.imageData.width || canvas.height !== result.imageData.height) {
+                canvas.width = result.imageData.width;
+                canvas.height = result.imageData.height;
+              }
+              canvas.getContext('2d').putImageData(result.imageData, 0, 0);
+              liveLoupe.frames++;
+              overlay.dataset.frames = String(liveLoupe.frames);
+              if (liveLoupe.frames === 1 || liveLoupe.frames % 15 === 0) {
+                setLoupeStatus(getInterpolatedText('loupeLive', {
+                  width: String(video.videoWidth),
+                  height: String(video.videoHeight),
+                  recipe: result.recipe
+                }, `Live · ${video.videoWidth}×${video.videoHeight} · recipe: ${result.recipe}`));
+              }
+            }
+          } catch (error) {
+            console.warn('Loupe frame failed:', error);
+            await new Promise((resolve) => setTimeout(resolve, 300));
+          }
+        }
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+      }
+    }
+
+    async function populateLoupeCameras() {
+      const select = loupeElement('loupeCameraSelect');
+      if (!select || !navigator.mediaDevices?.enumerateDevices) return;
+      let devices = [];
+      try {
+        devices = (await navigator.mediaDevices.enumerateDevices()).filter((device) => device.kind === 'videoinput');
+      } catch (error) {
+        console.warn('Loupe camera list failed:', error);
+      }
+      const current = liveLoupe.track?.getSettings?.().deviceId || '';
+      select.replaceChildren(...devices.map((device, index) => {
+        const option = document.createElement('option');
+        option.value = device.deviceId;
+        option.textContent = device.label || getInterpolatedText('loupeCameraLabel', { index: String(index + 1) }, `Camera ${index + 1}`);
+        option.selected = device.deviceId === current;
+        return option;
+      }));
+      select.disabled = devices.length < 2;
+    }
+
+    function configureLoupeTrackControls() {
+      const zoom = loupeElement('loupeZoom');
+      const torch = loupeElement('loupeTorch');
+      let caps = {};
+      let current = {};
+      try { caps = liveLoupe.track?.getCapabilities?.() || {}; } catch { caps = {}; }
+      try { current = liveLoupe.track?.getSettings?.() || {}; } catch { current = {}; }
+      if (zoom) {
+        const range = caps.zoom;
+        const ok = Boolean(range && Number.isFinite(range.min) && Number.isFinite(range.max) && range.max > range.min);
+        zoom.disabled = !ok;
+        if (ok) {
+          zoom.min = String(range.min);
+          zoom.max = String(range.max);
+          zoom.step = String(range.step || 0.1);
+          zoom.value = String(current.zoom ?? range.min);
+        }
+      }
+      if (torch) {
+        const ok = Array.isArray(caps.torch) ? caps.torch.includes(true) : Boolean(caps.torch);
+        torch.disabled = !ok;
+        torch.checked = Boolean(current.torch);
+      }
+    }
+
+    async function applyLoupeConstraint(constraint) {
+      if (!liveLoupe.track) return;
+      try {
+        await liveLoupe.track.applyConstraints({ advanced: [constraint] });
+      } catch (error) {
+        console.warn('Loupe constraint failed:', error);
+      }
+    }
+
+    async function openLoupe(deviceId = null) {
+      const overlay = loupeElement('loupeOverlay');
+      if (!overlay) return;
+      if (!loupeSupported()) {
+        void appAlert(getLocalizedText('loupeUnsupported', 'This browser cannot open a camera.'));
+        return;
+      }
+      stopLoupeStream();
+      overlay.hidden = false;
+      overlay.dataset.view = liveLoupe.view;
+      overlay.dataset.frames = '0';
+      liveLoupe.frames = 0;
+      setLoupeStatus(getLocalizedText('loupeStarting', 'Starting camera…'));
+      const video = deviceId
+        ? { deviceId: { exact: deviceId } }
+        : { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } };
+      try {
+        liveLoupe.stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
+      } catch (error) {
+        console.warn('Loupe camera failed:', error);
+        const denied = error?.name === 'NotAllowedError' || error?.name === 'SecurityError';
+        setLoupeStatus(getLocalizedText(denied ? 'loupeDenied' : 'loupeNoCamera', denied ? 'Camera access was denied.' : 'No camera available.'));
+        return;
+      }
+      const videoEl = loupeElement('loupeVideo');
+      videoEl.srcObject = liveLoupe.stream;
+      liveLoupe.track = liveLoupe.stream.getVideoTracks()[0] || null;
+      try {
+        await videoEl.play();
+      } catch (error) {
+        console.warn('Loupe video play failed:', error);
+      }
+      await populateLoupeCameras();
+      configureLoupeTrackControls();
+      liveLoupe.running = true;
+      loupeElement('loupeCaptureBtn').disabled = false;
+      loupeElement('loupeCloseBtn')?.focus();
+      void loupeLoop();
+    }
+
+    function closeLoupe() {
+      const overlay = loupeElement('loupeOverlay');
+      if (!overlay || overlay.hidden) return;
+      stopLoupeStream();
+      overlay.hidden = true;
+      document.getElementById('studioLoupe')?.focus();
+      // Captures made before any photo was open behave like added files.
+      if (!state.originalImageData && state.fileQueue.length > 0) {
+        void loadFile(state.fileQueue[Math.max(0, Math.min(state.currentFileIndex, state.fileQueue.length - 1))].file);
+      }
+    }
+
+    async function captureLoupeFrame() {
+      if (!liveLoupe.running || liveLoupe.capturing) return;
+      const video = loupeElement('loupeVideo');
+      if (!(video.videoWidth > 0)) return;
+      liveLoupe.capturing = true;
+      const button = loupeElement('loupeCaptureBtn');
+      button.disabled = true;
+      try {
+        let blob = null;
+        // ImageCapture returns the sensor's still resolution where supported;
+        // otherwise the current video frame at stream resolution.
+        if (typeof ImageCapture === 'function' && liveLoupe.track) {
+          try {
+            blob = await new ImageCapture(liveLoupe.track).takePhoto();
+          } catch (error) {
+            blob = null;
+          }
+        }
+        if (!blob) {
+          const surface = document.createElement('canvas');
+          surface.width = video.videoWidth;
+          surface.height = video.videoHeight;
+          surface.getContext('2d').drawImage(video, 0, 0);
+          blob = await new Promise((resolve) => surface.toBlob(resolve, 'image/png'));
+        }
+        if (!blob) throw new Error('Capture produced no image');
+        const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, '').replace('T', '-');
+        const extension = blob.type === 'image/jpeg' ? 'jpg' : 'png';
+        const file = new File([blob], `loupe-${stamp}.${extension}`, { type: blob.type || 'image/png', lastModified: Date.now() });
+        addFilesToQueue([file]);
+        showToast(getInterpolatedText('loupeCaptured', { name: file.name }, `Captured ${file.name}`));
+      } catch (error) {
+        console.warn('Loupe capture failed:', error);
+        void appAlert(getLocalizedText('loupeCaptureFailed', 'The capture failed.'));
+      } finally {
+        liveLoupe.capturing = false;
+        button.disabled = !liveLoupe.running;
+      }
+    }
+
+    loupeElement('loupeCloseBtn')?.addEventListener('click', closeLoupe);
+    loupeElement('loupeCaptureBtn')?.addEventListener('click', () => { void captureLoupeFrame(); });
+    loupeElement('loupeCameraSelect')?.addEventListener('change', (event) => { void openLoupe(event.target.value || null); });
+    loupeElement('loupeZoom')?.addEventListener('input', (event) => { void applyLoupeConstraint({ zoom: Number(event.target.value) }); });
+    loupeElement('loupeTorch')?.addEventListener('change', (event) => { void applyLoupeConstraint({ torch: event.target.checked }); });
+    loupeElement('loupeRaw')?.addEventListener('change', (event) => {
+      liveLoupe.view = event.target.checked ? 'raw' : 'converted';
+      const overlay = loupeElement('loupeOverlay');
+      if (overlay) overlay.dataset.view = liveLoupe.view;
+    });
+    loupeElement('loupeOverlay')?.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeLoupe();
+      }
+    });
+    window.addEventListener('pagehide', stopLoupeStream);
+
+    // ===========================================
     // Flat field: blank light-source frame -> gain map for the roll
     // ===========================================
     function resetFlatFieldState() {
@@ -13090,7 +13362,8 @@
           void processNegative();
         },
         onConfirmAnalysis: () => beginCropMode({ analysisOnly: true }),
-        onMergeShots: (mode) => { void mergeSelectedShots(mode); }
+        onMergeShots: (mode) => { void mergeSelectedShots(mode); },
+        onLoupe: () => { void openLoupe(); }
       });
       updateWorkflowUI();
       studioWorkspace.sync();

@@ -87,6 +87,27 @@ const moving = make((x, y) => {
   assert.ok(transparent > 0, 'areas outside the moving frame stay transparent');
 }
 
+// A moving image at half size (a small lab JPEG) still aligns: both frames are
+// brought to a common scale before matching, and the homography carries the
+// 2x scale back to full-resolution coordinates.
+{
+  const half = new ImageData(new Uint8ClampedArray((W / 2) * (H / 2) * 4), W / 2, H / 2);
+  for (let y = 0; y < H / 2; y++) for (let x = 0; x < W / 2; x++) {
+    const si = ((y * 2) * W + x * 2) * 4; const di = (y * (W / 2) + x) * 4;
+    half.data[di] = moving.data[si]; half.data[di + 1] = moving.data[si + 1]; half.data[di + 2] = moving.data[si + 2]; half.data[di + 3] = moving.data[si + 3];
+  }
+  const result = estimateAlignment(reference, half, { maxSide: 480 });
+  assert.ok(result, 'half-size image aligned');
+  assert.ok(result.inliers >= 12, `half-size inliers ${result.inliers}`);
+  let worst = 0;
+  for (const [x, y] of [[40, 40], [200, 60], [100, 240], [420, 280]]) {
+    const [sx, sy] = movingFromReference(x, y);
+    const mapped = applyHomography(result.homography, x / 2, y / 2);
+    worst = Math.max(worst, Math.hypot(mapped.x - sx, mapped.y - sy));
+  }
+  assert.ok(worst < 3, `half-size homography error ${worst.toFixed(2)} px`);
+}
+
 // Unrelated content yields no alignment rather than a wild one.
 {
   const noise = make((x, y) => { const v = ((x * 1103515245 + y * 12345) >>> 8) & 255; return [v, v, v, 255]; });

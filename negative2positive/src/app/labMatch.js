@@ -77,10 +77,18 @@ export function fitAffineMatrix(pairs) {
       for (let c = 0; c < 3; c++) atb[c][a] += v[a] * dst[i * 3 + c];
     }
   }
-  // Ridge term keeps the fit sane when the pairs span little colour range.
-  for (let a = 0; a < 3; a++) ata[a][a] += count * 0.5;
+  // Ridge towards the identity. With little colour range (a near-grey scene)
+  // the normal equations are close to singular and a plain least-squares fit
+  // lands the grey gain on arbitrary channels; pulling the matrix towards I
+  // resolves that. The weight sits well above pixel noise and far below the
+  // colour covariance of a colourful scene, so a well-conditioned fit is not
+  // biased in any noticeable way.
+  const ridge = count * 64;
+  for (let a = 0; a < 3; a++) ata[a][a] += ridge;
   for (let c = 0; c < 3; c++) {
-    const x = solve(ata, atb[c], 4);
+    const rhs = atb[c].slice();
+    rhs[c] += ridge;
+    const x = solve(ata, rhs, 4);
     if (!x) return null;
     matrix[c * 3] = x[0]; matrix[c * 3 + 1] = x[1]; matrix[c * 3 + 2] = x[2];
     offset[c] = x[3];

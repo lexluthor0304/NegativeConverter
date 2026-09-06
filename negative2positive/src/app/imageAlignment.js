@@ -10,9 +10,10 @@ function getCv() {
   return cv;
 }
 
-// Grey 8-bit Mat of an ImageData downscaled to `maxSide`, plus the scale used.
-function toGray(cv, imageData, maxSide) {
-  const scale = Math.min(1, maxSide / Math.max(imageData.width, imageData.height));
+// Grey 8-bit Mat of an ImageData resampled so its longer side is `side`
+// (nearest neighbour, up or down), plus the scale used.
+function toGray(cv, imageData, side) {
+  const scale = side / Math.max(imageData.width, imageData.height);
   const width = Math.max(1, Math.round(imageData.width * scale));
   const height = Math.max(1, Math.round(imageData.height * scale));
   const gray = new cv.Mat(height, width, cv.CV_8UC1);
@@ -34,8 +35,12 @@ function toGray(cv, imageData, maxSide) {
 // weak; the caller then falls back to unaligned statistics.
 export function estimateAlignment(reference, moving, { maxSide = 1000, features = 2000, minInliers = 12, ransacThreshold = 4 } = {}) {
   const cv = getCv();
-  const ref = toGray(cv, reference, maxSide);
-  const mov = toGray(cv, moving, maxSide);
+  // Both images are brought to the same longer side (the smaller one is
+  // upscaled): a lab JPEG is usually far smaller than our conversion, and ORB
+  // matches far better when the two frames sit at the same scale.
+  const side = Math.min(maxSide, Math.max(reference.width, reference.height, moving.width, moving.height));
+  const ref = toGray(cv, reference, side);
+  const mov = toGray(cv, moving, side);
   const orb = new cv.ORB(features);
   const kpRef = new cv.KeyPointVector(); const kpMov = new cv.KeyPointVector();
   const descRef = new cv.Mat(); const descMov = new cv.Mat();

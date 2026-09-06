@@ -75,6 +75,24 @@ const theirs = make((x, y) => {
   assert.equal(fitAffineMatrix({ src: new Float32Array(9), dst: new Float32Array(9), count: 3 }), null, 'too few pairs');
 }
 
+// A near-grey scene (a black-and-white frame, or a neutral test target) still
+// gets a sane matrix: the identity ridge keeps the grey gain on the diagonal
+// instead of landing it on arbitrary channels and failing the sanity check.
+{
+  const grey = make((x, y) => { const v = 30 + (x / W) * 190 + 8 * Math.sin(y / 7); const jitter = ((x * 7 + y * 13) % 5) - 2; return [v + jitter, v, v - jitter]; });
+  const warm = make((x, y) => {
+    const i = (y * W + x) * 4;
+    return [1.12 * grey.data[i] + 6, 1.0 * grey.data[i + 1] + 2, 0.9 * grey.data[i + 2] - 8].map((v) => Math.round(Math.max(0, Math.min(255, v))));
+  });
+  const pairs = collectPairs(grey, warm, { step: 2 });
+  const fit = fitAffineMatrix(pairs);
+  assert.ok(fit, 'grey scene fits a matrix');
+  for (let c = 0; c < 3; c++) assert.ok(fit.matrix[c * 3 + c] > 0.5 && fit.matrix[c * 3 + c] < 1.5, `grey diagonal ${c}: ${fit.matrix[c * 3 + c]}`);
+  const look = fitLook(pairs, { aligned: true });
+  assert.equal(look.method, 'aligned-affine');
+  assert.ok(look.deltaAfter < look.deltaBefore * 0.5, `grey delta ${look.deltaBefore} -> ${look.deltaAfter}`);
+}
+
 // The full look (matrix + curves) brings ours close to theirs; histogram-only
 // fallback also helps but less.
 {

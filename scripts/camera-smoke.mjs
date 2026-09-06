@@ -1,6 +1,7 @@
 // Camera-scanning smoke: a blank light-pad frame becomes the roll's flat
 // field and flattens a negative shot on the same pad; a lab scan is matched;
-// several shots of one frame merge into a quieter 16-bit file.
+// several shots of one frame merge into a quieter 16-bit file; the live loupe
+// converts Chrome's fake camera and captures a frame.
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 
@@ -92,6 +93,7 @@ export async function runCameraSmoke({ send, evaluate, waitFor, wait, fail, inst
 
   await runLabMatchScenario({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, root });
   await runMultiShotScenario({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, root });
+  await runLoupeScenario({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port });
 }
 
 // Match a lab scan: a "lab JPEG" is made from the preview itself (warmer
@@ -149,6 +151,12 @@ async function runLabMatchScenario({ send, evaluate, waitFor, wait, fail, instal
   const dir = mkdtempSync(join(tmpdir(), 'nc-labmatch-'));
   const labPath = join(dir, 'lab-scan.png');
   writeFileSync(labPath, Buffer.from(UPNG.encode([lab.buffer], lw, lh, 0)));
+  writeFileSync(join(dir, 'preview.png'), Buffer.from(UPNG.encode([before.data.buffer], before.width, before.height, 0)));
+  const surfaces = await evaluate(`(() => {
+    const gl = document.getElementById('glCanvas'); const c = document.getElementById('canvas');
+    return { glShown: !!gl && getComputedStyle(gl).display !== 'none', glSize: gl ? [gl.width, gl.height] : null, canvasSize: c ? [c.width, c.height] : null, webgl2: !!document.createElement('canvas').getContext('webgl2'), dpr: devicePixelRatio, viewport: [innerWidth, innerHeight] };
+  })()`);
+  console.log('camera lab match input:', JSON.stringify({ canvas: await canvasRect(), screenshot: [before.width, before.height], lab: [lw, lh], labPath, ...surfaces }));
 
   await evaluate(`(() => {
     window.__labLog = [];
@@ -270,4 +278,53 @@ async function runMultiShotScenario({ send, evaluate, waitFor, wait, fail, insta
   const hdrToast = await evaluate(`(window.__cameraToasts || []).filter((t) => /Merged \\d+ shots/.test(t)).pop() || ''`);
   if (!/^Merged 2 shots into merged-hdr-/.test(hdrToast)) fail('hdr merge toast wrong: ' + hdrToast);
   console.log('ok: three shifted noisy shots align and average into a quieter 16-bit merge; a bracket pair merges as HDR and opens as the selected file');
+}
+
+// Live loupe: Chrome's fake camera (launch flags in smoke-test.mjs) is
+// converted live through the automatic recipe; a capture lands in the photo
+// list and opens when the loupe closes.
+async function runLoupeScenario({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port }) {
+  await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
+  await waitFor('loupe workspace boot', `!!document.getElementById('studioLoupe') && !!document.getElementById('loupeOverlay')`);
+  await installDialogAutoAccept();
+  await wait(300);
+  await evaluate(`(() => {
+    window.__cameraToasts = [];
+    new MutationObserver((records) => {
+      for (const record of records) for (const node of record.addedNodes) if (node.nodeType === 1) window.__cameraToasts.push(node.textContent);
+    }).observe(document.getElementById('toastContainer'), { childList: true });
+  })()`);
+  const offered = await evaluate(`!document.getElementById('studioLoupe').hidden && !document.getElementById('studioLoupe').disabled`);
+  if (!offered) fail('the loupe button should be offered when getUserMedia exists');
+  await evaluate(`document.getElementById('studioLoupe').click()`);
+  await waitFor('loupe converting frames', `Number(document.getElementById('loupeOverlay').dataset.frames) >= 5`, 30_000);
+  const status = await evaluate(`document.getElementById('loupeStatus').textContent`);
+  console.log('camera loupe:', status);
+  if (!/Live · \d+×\d+ · recipe: automatic/.test(status)) fail('loupe status wrong: ' + status);
+  const first = await evaluate(`Number(document.getElementById('loupeOverlay').dataset.frames)`);
+  await wait(1000);
+  const later = await evaluate(`Number(document.getElementById('loupeOverlay').dataset.frames)`);
+  if (!(later > first)) fail(`loupe stopped converting: ${first} -> ${later}`);
+  // The converted view is a conversion of the camera frame, not a copy: the
+  // tonal order is reversed, so luminance correlates negatively.
+  const compare = await evaluate(`(() => {
+    const video = document.getElementById('loupeVideo');
+    const canvas = document.getElementById('loupeCanvas');
+    const raw = document.createElement('canvas'); raw.width = canvas.width; raw.height = canvas.height;
+    raw.getContext('2d').drawImage(video, 0, 0, raw.width, raw.height);
+    const lum = (ctx, w, h) => { const d = ctx.getImageData(0, 0, w, h).data; const out = []; for (let i = 0; i < d.length; i += 16) out.push(0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]); return out; };
+    const a = lum(raw.getContext('2d'), raw.width, raw.height); const b = lum(canvas.getContext('2d'), canvas.width, canvas.height);
+    const mean = (v) => v.reduce((s, x) => s + x, 0) / v.length; const ma = mean(a), mb = mean(b);
+    let num = 0, da = 0, db = 0;
+    for (let i = 0; i < a.length; i++) { num += (a[i] - ma) * (b[i] - mb); da += (a[i] - ma) ** 2; db += (b[i] - mb) ** 2; }
+    return { width: canvas.width, height: canvas.height, rawMean: ma, convertedMean: mb, correlation: num / Math.sqrt(da * db || 1) };
+  })()`);
+  console.log('camera loupe frame:', JSON.stringify(compare));
+  if (!(compare.width > 0 && compare.correlation < -0.1)) fail('the loupe should show an inverted conversion of the camera frame: ' + JSON.stringify(compare));
+  await evaluate(`document.getElementById('loupeCaptureBtn').click()`);
+  await waitFor('loupe capture queued', `(window.__cameraToasts || []).some((t) => /^Captured loupe-/.test(t)) && document.querySelectorAll('.file-list-checkbox').length === 1`, 30_000);
+  await evaluate(`document.getElementById('loupeCloseBtn').click()`);
+  const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`;
+  await waitFor('capture opened', `document.getElementById('loupeOverlay').hidden && document.getElementById('loupeVideo').srcObject === null && ${ready} && /^loupe-/.test(document.getElementById('studioFilename').textContent)`, 150_000);
+  console.log('ok: the live loupe converts the camera feed through the automatic recipe, keeps converting, captures a frame into the photo list and opens it on close');
 }

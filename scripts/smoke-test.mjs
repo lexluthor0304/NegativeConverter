@@ -98,6 +98,8 @@ const chrome = execFile(chromeBin, [
   '--headless=new', `--remote-debugging-port=${CDP_PORT}`,
   `--user-data-dir=${chromeProfileDir}`,
   '--no-first-run', '--hide-scrollbars', '--window-size=1440,900',
+  // A fake camera, granted without a prompt, for the live loupe scenario.
+  '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream',
   'about:blank',
 ]);
 children.push(chrome);

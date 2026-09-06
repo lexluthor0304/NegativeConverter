@@ -5,6 +5,7 @@ import '../styles/studio-pixel.css';
 export const studioText = {
   zh: {
     preview: '本地胶片暗房', add: '添加照片', menu: '帮助与设置',
+    loupe: '实时放大镜', loupeHint: '把相机对准底片，实时看到转正后的画面；拍下即加入照片列表。',
     title: '把负片交给我们。', subtitle: '你只管调出喜欢的色彩。',
     importBatch: '可多选照片，也可把一组照片拖到这里',
     importHint: '自动取景与转换 · 保留原文件 · 照片不上传', formats: '支持 RAW、TIFF、PNG 和 JPEG',
@@ -45,6 +46,7 @@ export const studioText = {
   },
   en: {
     preview: 'Your local darkroom', add: 'Add photos', menu: 'Help & settings',
+    loupe: 'Live loupe', loupeHint: 'Point a camera at the negative and see it converted live; capture adds the frame to the photos.',
     title: 'Your negatives, brought to light.', subtitle: 'Make the colors your own.',
     importBatch: 'Select multiple photos, or drop a batch here',
     importHint: 'Auto frame & convert · Originals preserved · No uploads', formats: 'RAW, TIFF, PNG and JPEG welcome',
@@ -84,6 +86,7 @@ export const studioText = {
   },
   ja: {
     preview: 'ローカルのフィルム暗室', add: '写真を追加', menu: 'ヘルプと設定',
+    loupe: 'ライブルーペ', loupeHint: 'カメラを原板に向けると変換後の画面がライブで見え、撮影すると写真一覧に加わります。',
     title: 'ネガから、あなたの一枚へ。', subtitle: '好きな色に仕上げることに、集中。',
     importBatch: '複数選択、または写真をまとめてドロップ',
     importHint: '自動取景・変換 · 元画像を保持 · 写真の送信なし', formats: 'RAW・TIFF・PNG・JPEG に対応',
@@ -123,7 +126,7 @@ export const studioText = {
   }
 };
 
-export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, onStyle, onReset, onResetAll, onRestart, onNewSession, onSync, onRetry, onConfirm, onExportBorder, onAutoCrop, onRestoreFrame, onConfirmAnalysis, onMergeShots }) {
+export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, onStyle, onReset, onResetAll, onRestart, onNewSession, onSync, onRetry, onConfirm, onExportBorder, onAutoCrop, onRestoreFrame, onConfirmAnalysis, onMergeShots, onLoupe }) {
   const $ = id => document.getElementById(id);
   const t = key => (studioText[getLanguage()] || studioText.en)[key];
   const move = (id, target) => target.append($(id));
@@ -134,7 +137,7 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
   header.innerHTML = `
     <div class="studio-brand"><span class="studio-mark">NeoAnalogLab</span><span>Negative Converter</span></div>
     <nav id="studioPublicLinks" class="studio-public-links"></nav>
-    <nav class="studio-actions"><button id="studioAdd" type="button" data-studio="add"></button><span id="studioHistory"></span><div id="studioExport"></div>
+    <nav class="studio-actions"><button id="studioAdd" type="button" data-studio="add"></button><button id="studioLoupe" type="button" data-studio="loupe"></button><span id="studioHistory"></span><div id="studioExport"></div>
       <details id="studioMenu"><summary data-studio="menu"></summary><div class="studio-menu-content"><div id="studioLanguages"></div><div id="studioLinks"></div><button id="studioNewSession" type="button" data-studio="newSession"></button></div></details>
     </nav>`;
   body.prepend(header);
@@ -459,6 +462,8 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
   }
 
   $('studioAdd').addEventListener('click', () => $('addFilesToolbarBtn').click());
+  $('studioLoupe').hidden = !(navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function');
+  $('studioLoupe').addEventListener('click', () => onLoupe?.());
   $('studioReset').addEventListener('click', onReset);
   $('studioSync').addEventListener('click', onSync);
   $('studioRetry').addEventListener('click', onRetry);
@@ -538,6 +543,8 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
       $('studioMergeHdr').disabled = !mergeable;
       $('studioNewSession').disabled = locked;
       $('studioAdd').disabled = locked;
+      $('studioLoupe').disabled = locked;
+      $('studioLoupe').title = t('loupeHint');
       $('studioTogglePanel').disabled = state.cropping;
       $('studioToggleStrip').disabled = state.cropping;
       $('studioToggleLightTable').disabled = state.cropping;

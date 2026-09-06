@@ -1422,6 +1422,29 @@
     </div>
   </div>
 
+  <!-- Live loupe: the camera feed converted through the current recipe (camera scanning) -->
+  <div class="loupe-overlay" id="loupeOverlay" hidden>
+    <div class="loupe-modal" role="dialog" aria-modal="true" aria-labelledby="loupeTitle">
+      <div class="loupe-head">
+        <span class="loupe-title" id="loupeTitle" data-i18n="loupeTitle">Live loupe</span>
+        <span class="loupe-status" id="loupeStatus" role="status"></span>
+        <button type="button" class="toolbar-btn" id="loupeCloseBtn" data-i18n="loupeClose">Close</button>
+      </div>
+      <div class="loupe-stage">
+        <video id="loupeVideo" autoplay playsinline muted></video>
+        <canvas id="loupeCanvas" width="1" height="1"></canvas>
+      </div>
+      <div class="loupe-controls">
+        <label class="loupe-field"><span data-i18n="loupeCamera">Camera</span><select id="loupeCameraSelect" disabled></select></label>
+        <label class="loupe-field"><span data-i18n="loupeZoom">Zoom</span><input type="range" id="loupeZoom" min="1" max="1" step="0.1" value="1" disabled></label>
+        <label class="loupe-toggle"><input type="checkbox" id="loupeTorch" disabled><span data-i18n="loupeTorch">Torch</span></label>
+        <label class="loupe-toggle"><input type="checkbox" id="loupeRaw"><span data-i18n="loupeRaw">Show raw</span></label>
+        <button type="button" class="toolbar-btn loupe-capture" id="loupeCaptureBtn" data-i18n="loupeCapture" disabled>Capture to photos</button>
+      </div>
+      <p class="loupe-hint" data-i18n="loupeHint">Point the camera at the negative: the picture is converted live through the current photo’s recipe (or the automatic one) so you can focus and judge exposure. Capture saves the frame at the camera’s resolution and adds it to the photos.</p>
+    </div>
+  </div>
+
   <!-- Batch Progress Modal -->
   <div class="batch-progress-overlay" id="batchProgressOverlay" style="display: none;">
     <div class="batch-progress-modal" role="dialog" aria-modal="true" aria-labelledby="batchProgressTitle" aria-describedby="batchProgressText">
