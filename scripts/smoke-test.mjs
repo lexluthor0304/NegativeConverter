@@ -18,6 +18,7 @@ import { runWorkspaceUiSmoke } from './workspace-ui-smoke.mjs';
 import { runStudioRawAutoFrameSmoke } from './studio-raw-autoframe-smoke.mjs';
 import { runFilmEdgeSmoke } from './film-edge-smoke.mjs';
 import { runRollAnalysisSmoke } from './roll-analysis-smoke.mjs';
+import { runLightTableSmoke } from './light-table-smoke.mjs';
 
 // UPNG is already a runtime dependency of the app; reuse it to decode screenshots.
 const UPNG = createRequire(import.meta.url)('upng-js');
@@ -594,6 +595,7 @@ if (!process.argv.includes('--color-analysis-only') && !process.argv.includes('-
 if (!process.argv.includes('--film-edge-only')) await runStudioColorAnalysisSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
 await runFilmEdgeSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
 await runRollAnalysisSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+await runLightTableSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
 if (!process.argv.includes('--film-edge-only')) await runWorkspaceUiSmoke({ send, evaluate, waitFor, fail, port: PORT, root: ROOT });
 if (process.env.AUTOFRAME_RAW_DIR) await runStudioRawAutoFrameSmoke({ send, evaluate, waitFor, fail, port: PORT, root: ROOT, directory: process.env.AUTOFRAME_RAW_DIR });
 

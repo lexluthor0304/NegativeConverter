@@ -39,6 +39,20 @@ export async function runRollAnalysisSmoke({ send, evaluate, waitFor, wait, fail
   console.log('roll analysis before:', JSON.stringify(before));
   if (!before.groupVisible || !before.analyzeEnabled || before.clearEnabled) fail('roll analysis controls not in the expected initial state: ' + JSON.stringify(before));
 
+  const thumbnailMeans = `(async () => {
+    const out = [];
+    for (const img of document.querySelectorAll('img.file-list-thumbnail')) {
+      const bitmap = await createImageBitmap(await (await fetch(img.src)).blob());
+      const c = document.createElement('canvas'); c.width = bitmap.width; c.height = bitmap.height;
+      const ctx = c.getContext('2d'); ctx.drawImage(bitmap, 0, 0);
+      const d = ctx.getImageData(0, 0, c.width, c.height).data;
+      let r = 0, g = 0, b = 0, n = 0;
+      for (let i = 0; i < d.length; i += 16) { r += d[i]; g += d[i + 1]; b += d[i + 2]; n++; }
+      out.push([r / n, g / n, b / n].map(Math.round));
+    }
+    return out;
+  })()`;
+  const thumbsBefore = await evaluate(thumbnailMeans);
   await evaluate(`document.getElementById('analyzeRollBtn').click()`);
   await waitFor('roll analysis finished', `${ready} && /2\\/3 frames/.test(document.getElementById('rollAnalysisStatus').textContent)`, 180_000);
   await wait(1200);
@@ -59,6 +73,15 @@ export async function runRollAnalysisSmoke({ send, evaluate, waitFor, wait, fail
   if (!after.badges[2].some((b) => /roll-outlier/.test(b))) fail('outlier badge missing on the Portra strip: ' + JSON.stringify(after.badges));
   if (after.badges[0].some((b) => /roll-outlier/.test(b)) || after.badges[1].some((b) => /roll-outlier/.test(b))) fail('matching strips must not be flagged: ' + JSON.stringify(after.badges));
   if (!after.clearEnabled) fail('clear button stays disabled after an analysis');
+  // Unopened frames now show converted positives instead of orange negatives:
+  // the red share of the thumbnail drops once the orange mask is gone.
+  const thumbsAfter = await evaluate(thumbnailMeans);
+  console.log('roll analysis thumbnails:', JSON.stringify({ before: thumbsBefore, after: thumbsAfter }));
+  if (thumbsBefore.length !== 3 || thumbsAfter.length !== 3) fail('expected three thumbnails: ' + JSON.stringify({ thumbsBefore, thumbsAfter }));
+  for (const index of [1, 2]) {
+    const redShare = (rgb) => rgb[0] / Math.max(1, rgb[0] + rgb[1] + rgb[2]);
+    if (redShare(thumbsAfter[index]) > redShare(thumbsBefore[index]) - 0.04) fail(`thumbnail ${index} still looks like the negative: ` + JSON.stringify({ before: thumbsBefore[index], after: thumbsAfter[index] }));
+  }
   const rollBase = after.filmBase.match(/R: (\d+) G: (\d+) B: (\d+)/);
   if (!rollBase) fail('film base values missing after roll analysis: ' + after.filmBase);
 

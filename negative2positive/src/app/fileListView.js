@@ -119,6 +119,7 @@ export function renderFileList({
 
   const scrollLeft = container.scrollLeft;
   container.setAttribute('role', 'list');
+  installKeyboardNavigation(container);
   container.replaceChildren(fragment);
   container.scrollLeft = scrollLeft;
 
@@ -130,4 +131,31 @@ export function renderFileList({
   }
 
   return { selectedCount, settingsCount };
+}
+
+// Arrow keys move between the file buttons; in the light table grid Up/Down
+// jump by one row (the number of tiles sharing the first tile's top edge).
+function installKeyboardNavigation(container) {
+  if (container.dataset.keyNav) return;
+  container.dataset.keyNav = 'true';
+  container.addEventListener('keydown', (event) => {
+    const keys = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'];
+    if (!keys.includes(event.key)) return;
+    const buttons = [...container.querySelectorAll('.file-list-name')];
+    const index = buttons.indexOf(document.activeElement);
+    if (index < 0) return;
+    const firstTop = buttons[0].getBoundingClientRect().top;
+    const columns = Math.max(1, buttons.filter((b) => Math.abs(b.getBoundingClientRect().top - firstTop) < 2).length);
+    let next = index;
+    if (event.key === 'ArrowRight') next = index + 1;
+    else if (event.key === 'ArrowLeft') next = index - 1;
+    else if (event.key === 'ArrowDown') next = index + columns;
+    else if (event.key === 'ArrowUp') next = index - columns;
+    else if (event.key === 'Home') next = 0;
+    else if (event.key === 'End') next = buttons.length - 1;
+    if (next === index || next < 0 || next >= buttons.length) return;
+    event.preventDefault();
+    buttons[next].focus();
+    buttons[next].scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  });
 }

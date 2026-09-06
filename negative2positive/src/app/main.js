@@ -11440,12 +11440,20 @@
       studioThumbnailsRunning = true;
       try {
         let item;
-        // 一枚ずつ縮小し、RAW は実際に開いたときのプレビューを利用する。
+        // 一枚ずつ縮小する。RAW は埋め込みプレビューの高速デコードを使い、
+        // ライトテーブルで未開封のコマも見えるようにする。
         while ((item = state.fileQueue.find(entry => !entry.thumbnail && !entry.thumbnailAttempted
-          && /\.(jpe?g|png|webp|gif|bmp)$/i.test(entry.file.name)))) {
+          && (/\.(jpe?g|png|webp|gif|bmp)$/i.test(entry.file.name) || isRawLikeFileName(entry.file.name.toLowerCase()))))) {
           item.thumbnailAttempted = true;
           let bitmap;
           try {
+            if (isRawLikeFileName(item.file.name.toLowerCase())) {
+              const preview = await loadRawImageDataPreview(await item.file.arrayBuffer(), item.file.name.toLowerCase(), {});
+              if (!state.fileQueue.includes(item) || item.thumbnail || !preview) continue;
+              item.thumbnail = thumbnailDataUrl(preview);
+              updateFileListUI();
+              continue;
+            }
             bitmap = await createImageBitmap(item.file, { resizeWidth: 144, resizeQuality: 'low' });
             if (!state.fileQueue.includes(item) || item.thumbnail) continue;
             const surface = document.createElement('canvas');
@@ -11467,16 +11475,20 @@
     }
 
     // 標準暗室は既存の描画・履歴・書き出し経路を再利用する。
-    function updateStudioThumbnail() {
-      const item = getCurrentQueueItem();
-      const source = state.displayImageData || state.processedImageData || state.originalImageData;
-      if (!item || !source) return;
-      const thumbnail = createStudioThumbnail(source);
+    function thumbnailDataUrl(source, maxSize = 144) {
+      const thumbnail = createStudioThumbnail(source, maxSize);
       const thumbCanvas = document.createElement('canvas');
       thumbCanvas.width = thumbnail.width;
       thumbCanvas.height = thumbnail.height;
       thumbCanvas.getContext('2d').putImageData(new ImageData(thumbnail.data, thumbnail.width, thumbnail.height), 0, 0);
-      item.thumbnail = thumbCanvas.toDataURL('image/jpeg', 0.8);
+      return thumbCanvas.toDataURL('image/jpeg', 0.8);
+    }
+
+    function updateStudioThumbnail() {
+      const item = getCurrentQueueItem();
+      const source = state.displayImageData || state.processedImageData || state.originalImageData;
+      if (!item || !source) return;
+      item.thumbnail = thumbnailDataUrl(source);
       updateFileListUI();
     }
 
@@ -11894,6 +11906,23 @@
           m.item.isDirty = false;
           m.item.status = 'pending';
         }
+        // The light table shows the roll as it will convert: render a small
+        // positive of every analysed frame from the sample already in memory.
+        for (const m of measurements) {
+          if (!usesSilverCoreConversion(m.settings)) continue;
+          try {
+            const thumbSource = downsampleImageDataForMaxDim(m.sample, 288);
+            const converted = await convertFrameWithRouter({
+              imageData: thumbSource,
+              settings: { ...buildCoreConversionSettings(m.settings), analysisRegion: null },
+              options: { preview: true, includeAnalysisPreview: false }
+            });
+            if (converted) m.item.thumbnail = thumbnailDataUrl(converted);
+          } catch (error) {
+            console.warn('Roll thumbnail failed for', m.item.file.name, error);
+          }
+        }
+        invalidateSilverCoreCache();
       } finally {
         showBatchProgress(false);
         if (button) {
