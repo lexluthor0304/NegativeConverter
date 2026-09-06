@@ -8,6 +8,7 @@
  */
 
 import { colorModels } from './Presets.js'
+import { analysisPixelBounds } from '../../app/analysisRegion.js';
 
 const MAX_16 = 65535;
 const HIST_BINS = 256;
@@ -26,13 +27,13 @@ const BIN_TO_16 = 257;
  */
 export function analyzeImage(imageData, params) {
   const { data, width, height } = imageData;
-  const borderPct = (params.borderBuffer || 10) / 100;
+  // `?? 10`, not `|| 10`: Border Buffer 0 means "analyse the whole frame" (the slider
+  // and the adapter both allow it) and must not silently fall back to the 10% inset.
+  const borderPct = (params.borderBuffer ?? 10) / 100;
 
   // Crop region (center crop excluding film border)
-  const cropX = Math.round(width * borderPct);
-  const cropY = Math.round(height * borderPct);
-  const cropW = width - 2 * cropX;
-  const cropH = height - 2 * cropY;
+  const bounds = analysisPixelBounds(width, height, params.analysisRegion, borderPct);
+  const cropX = bounds.left, cropY = bounds.top, cropW = bounds.width, cropH = bounds.height;
 
   // Build per-channel 256-bin histograms from cropped region (>>8 indexing keeps cost
   // identical to the 8-bit version while operating on 16-bit pixels).
@@ -44,6 +45,8 @@ export function analyzeImage(imageData, params) {
   for (let y = cropY; y < cropY + cropH; y++) {
     for (let x = cropX; x < cropX + cropW; x++) {
       const i = (y * width + x) * 4;
+      // 解析標本の回転外側は黒い被写体ではない。
+      if (params.excludeTransparent && data[i + 3] === 0) continue;
       rHist[data[i] >>> 8]++;
       gHist[data[i + 1] >>> 8]++;
       bHist[data[i + 2] >>> 8]++;

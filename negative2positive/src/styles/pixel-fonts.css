@@ -1,0 +1,56 @@
+/* 固定版を同梱し、CJK とラテン文字を同じピクセル字体で表示する。 */
+@font-face {
+  font-family: 'Fusion Pixel SC';
+  src: url('/fonts/fusion-pixel/fusion-pixel-12px-proportional-zh_hans.otf.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Fusion Pixel TC';
+  src: url('/fonts/fusion-pixel/fusion-pixel-12px-proportional-zh_hant.otf.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Fusion Pixel JP';
+  src: url('/fonts/fusion-pixel/fusion-pixel-12px-proportional-ja.otf.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Fusion Pixel KR';
+  src: url('/fonts/fusion-pixel/fusion-pixel-12px-proportional-ko.otf.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+body.studio {
+  --font-pixel: 'Fusion Pixel SC', monospace;
+  --font-body: var(--font-pixel);
+  --font-display: var(--font-pixel);
+  --font-mono: var(--font-pixel);
+  font-family: var(--font-pixel);
+  font-size: 12px;
+  line-height: 1.6;
+  font-synthesis: none;
+}
+html:lang(ja) body.studio, body.studio :lang(ja) { --font-pixel: 'Fusion Pixel JP', 'Fusion Pixel SC', monospace; }
+html:lang(ko) body.studio, body.studio :lang(ko) { --font-pixel: 'Fusion Pixel KR', 'Fusion Pixel SC', monospace; }
+html:lang(zh-Hant) body.studio, body.studio :lang(zh-Hant) { --font-pixel: 'Fusion Pixel TC', 'Fusion Pixel SC', monospace; }
+body.studio :is(button, input, select, textarea, summary, code, pre) { font-family: var(--font-pixel); font-synthesis: none; }
+body.studio :is(.zoom-indicator, .loupe-info, .autoframe-diagnostics, .film-base-values, .debug-widget, .loading-phase-text) {
+  font-family: var(--font-pixel);
+  font-size: 12px;
+}
+body.studio .loading-progress-text { font-size: 24px; }
+body.studio .studio-brand { font-size: 12px; letter-spacing: 0; }
+body.studio .studio-mark, body.studio .studio-panel-heading h2 { font-size: 24px; letter-spacing: 0; }
+body.studio .studio-welcome h1 { font-size: 36px; letter-spacing: 0; }
+body.studio .studio-welcome p { font-size: 12px; }
+body.studio .studio-slider-ends { letter-spacing: 0; }
+@media (max-width: 600px) {
+  body.studio .studio-welcome h1 { font-size: 24px; }
+}

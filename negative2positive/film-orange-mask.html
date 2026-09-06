@@ -65,6 +65,9 @@
   </script>
   <script type="module" src="./src/app/analytics.js"></script>
   <meta name="theme-color" content="#17141f">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 </head>
 <body>
   <header class="site-header">
@@ -123,6 +126,18 @@
       </section>
 
       <section>
+        <h2>Frequently asked questions</h2>
+        <details>
+          <summary>Why do color negatives look orange?</summary>
+          <p>Most color negative films include an orange mask in the film base. It helps the film printing process, but scanned negatives need that mask neutralized before the image looks natural.</p>
+        </details>
+        <details>
+          <summary>Why does simple invert look blue or cyan?</summary>
+          <p>Simple inversion flips the orange base into a strong blue or cyan cast. A negative converter needs a mask baseline and color correction, not only a pixel inversion.</p>
+        </details>
+      </section>
+
+      <section>
         <h2>Related guides</h2>
         <div class="link-grid">
           <a class="link-card" href="/batch-film-negative-converter.html"><strong>Batch roll conversion</strong><span>Reuse a stable mask baseline across frames.</span></a>
@@ -132,6 +147,15 @@
       </section>
     </article>
   </main>
-  <footer class="site-footer">Negative Converter processes color mask correction locally in the browser.</footer>
+  <footer class="site-footer">
+    <div>Negative Converter processes color mask correction locally in the browser.</div>
+    <div>
+      <a href="/">App</a> ·
+      <a href="/guide.html">Guide</a> ·
+      <a href="/download.html">Desktop</a> ·
+      <a href="/privacy.html">Privacy</a> ·
+      <a href="https://github.com/lexluthor0304/NegativeConverter" rel="noopener">GitHub</a>
+    </div>
+  </footer>
 </body>
 </html>

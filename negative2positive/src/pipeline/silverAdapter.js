@@ -1,6 +1,7 @@
 import { Engine } from '../silvercore/engine/Engine.js';
 import { loadFilmPresets } from '../silvercore/engine/filmPresetsLoader.js';
-import { bwMixWeights } from '../silvercore/engine/Presets.js';
+import { bwMixWeights, toneProfiles } from '../silvercore/engine/Presets.js';
+import { PROFILES as ENHANCED_PROFILE_NAMES } from '../silvercore/engine/EnhancedProfiles.js';
 import {
   fromImageData8,
   toImageData8,
@@ -8,7 +9,11 @@ import {
 } from '../silvercore/util/image16.js';
 import { applyFilmBaseCompensationToBuffer } from './filmBaseCompensation.js';
 
-const ENHANCED_PROFILE_SET = new Set(['none', 'frontier', 'crystal', 'natural', 'pakon']);
+// EnhancedProfiles.js owns the list of shipped 3D-LUT profiles and their .bin URLs;
+// deriving the whitelist from it keeps the two in step. A hand-copied list here is
+// what silently dropped 'noritsu' — the 196 KB noritsu.bin shipped in every build
+// but the 'Noritsu Lab' preset's profile was rewritten to 'none' before it loaded.
+const ENHANCED_PROFILE_SET = new Set(ENHANCED_PROFILE_NAMES);
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -46,15 +51,46 @@ function normalizeEnhancedProfile(value) {
   return ENHANCED_PROFILE_SET.has(normalized) ? normalized : 'none';
 }
 
+// Film presets name a tone profile ('base', 'base_gamma', 'filmic', ...). Anything the
+// engine does not know about resolves to null, which leaves Engine.buildSettings free to
+// derive the profile from the colour model exactly as it did before.
+function normalizeToneProfile(value) {
+  if (!value) return null;
+  const name = String(value);
+  return Object.prototype.hasOwnProperty.call(toneProfiles, name) ? name : null;
+}
+
+// Merge a film preset into the caller's settings.
+//
+// Precedence: the PRESET supplies defaults, the CALLER wins. A preset carries 23 keys.
+// The app mirrors 8 of them (enhancedProfile, saturation, glow, fade, shadows,
+// highlights, blacks, whites) into its own state the moment the preset is picked and
+// sends them back on every conversion, so merging the preset on top — the old
+// `{ ...baseSettings, ...preset.settings }` — silently re-applied the preset's values
+// over the live sliders: the knob moved, the image did not. The other 15 keys
+// (toneProfile, shadow/highlight/mid toning, ranges, layerOrder, wbTonality, ...) have
+// no UI control and are never sent by the caller, so they still reach the engine from
+// the preset. Keys the caller leaves `undefined` never mask a preset value.
+function mergeFilmPresetSettings(baseSettings, presetSettings) {
+  const merged = { ...presetSettings };
+  for (const key of Object.keys(baseSettings)) {
+    const value = baseSettings[key];
+    if (value !== undefined) merged[key] = value;
+  }
+  return merged;
+}
+
 async function applyFilmPreset(baseSettings, presetId) {
   if (!presetId || presetId === 'none') return baseSettings;
   const filmPresets = await loadFilmPresets();
   const preset = filmPresets[presetId];
-  if (!preset) return baseSettings;
-  return { ...baseSettings, ...preset.settings };
+  if (!preset || !preset.settings) return baseSettings;
+  return mergeFilmPresetSettings(baseSettings, preset.settings);
 }
 
-async function buildSilverCoreParams(mode, settings = {}) {
+// Exported for tests and introspection: resolves caller settings + film preset into the
+// flat, range-checked parameter object the engine consumes.
+export async function buildSilverCoreParams(mode, settings = {}) {
   const merged = await applyFilmPreset(settings, settings.filmPreset);
   const colorModel = String(merged.colorModel || 'standard');
   const resolvedColorModel = mode === 'bw' ? 'mono' : colorModel;
@@ -65,8 +101,11 @@ async function buildSilverCoreParams(mode, settings = {}) {
   return {
     colorModel: resolvedColorModel,
     imageType,
+    // Optional override; null means "derive from the colour model" (Engine.buildSettings).
+    toneProfile: normalizeToneProfile(merged.toneProfile),
     preSaturation: Math.round(sanitizeNumber(merged.preSaturation, 100, 0, 200)),
     borderBuffer: Math.round(sanitizeNumber(merged.borderBuffer, 10, 0, 30)),
+    analysisRegion: merged.analysisRegion ? { ...merged.analysisRegion } : null,
     brightness: sanitizeNumber(merged.brightness, 0, -100, 100),
     exposure: sanitizeNumber(merged.exposure, 0, -300, 300),
     contrast: sanitizeNumber(merged.contrast, 0, -100, 100),
@@ -82,6 +121,8 @@ async function buildSilverCoreParams(mode, settings = {}) {
     fade: sanitizeNumber(merged.fade, 0, 0, 100),
     curvePrecision: normalizeCurvePrecision(merged.curvePrecision),
     source: String(merged.source || 'cameraScan'),
+    // Inert: the 16-bit pipeline has no GPU path (Engine._applyLuts is CPU-only and
+    // Engine.initWebGL is never called from here). Kept so the plumbing stays visible.
     useWebGL: merged.useWebGL !== false,
     enhancedProfile: normalizeEnhancedProfile(merged.enhancedProfile),
     profileStrength: Math.round(sanitizeNumber(merged.profileStrength, 100, 0, 200)),
@@ -118,10 +159,29 @@ function toGrayscaleInPlace(image16, mixPreset) {
 }
 
 // --- Layer 1: Engine cache ---
-// Dual cache for preview (small) and full (large) resolution engines
+// Dual cache for preview (small) and full (large) resolution engines.
+//
+// The cache holds the engine, the loaded 3D profile, the film-base-compensated
+// `pristineBuffer` and a description of the inputs the current histogram analysis was
+// computed from. It deliberately does NOT hold the buffer handed back to the caller —
+// see _takeWorkBuffer.
+function _createSlot() {
+  return {
+    engine: null,
+    width: 0,
+    height: 0,
+    profile: null,
+    pristineBuffer: null,
+    lastSourceRef: null,
+    lastFilmBaseGains: null,
+    analysis: null,
+    referencePixels: {},
+  };
+}
+
 const _cache = {
-  preview: { engine: null, width: 0, height: 0, profile: null, inputBuffer: null, pristineBuffer: null, lastSourceRef: null, lastFilmBaseGains: null },
-  full:    { engine: null, width: 0, height: 0, profile: null, inputBuffer: null, pristineBuffer: null, lastSourceRef: null, lastFilmBaseGains: null },
+  preview: _createSlot(),
+  full: _createSlot(),
 };
 
 function filmBaseCompensationEqual(a, b) {
@@ -149,14 +209,10 @@ function _getOrCreateEngine(slot, w, h) {
   if (slot.engine && slot.width === w && slot.height === h) {
     return slot.engine;
   }
+  Object.assign(slot, _createSlot());
   slot.engine = new Engine(w, h);
   slot.width = w;
   slot.height = h;
-  slot.profile = null; // force profile reload on new engine
-  slot.inputBuffer = null;
-  slot.pristineBuffer = null;
-  slot.lastSourceRef = null;
-  slot.lastFilmBaseGains = null;
   return slot.engine;
 }
 
@@ -172,51 +228,104 @@ async function _ensureProfile(slot, engine, profileName) {
   }
 }
 
-function _reuseInputBuffer(slot, image16, filmBaseCompensation) {
+// Hand the engine a buffer that it may scribble on and that the CALLER then owns.
+//
+// Contract: the Image16 returned here — and therefore the `__image16` attached to the
+// result — is never referenced by the cache again. The previous version kept it as
+// `slot.inputBuffer` and overwrote it on the next conversion, so every ImageData the
+// adapter had ever returned for a slot aliased a single plane: undo snapshots, the
+// dust-removal clean source, `state.processedImageData` and the gray-point sampler all
+// silently mutated to whatever the newest render produced, and the conversion worker's
+// transfer of `result.__image16.data.buffer` detached the cache out from under itself.
+//
+// This costs no extra copy: the per-call `pristine -> work` copy simply writes into a
+// fresh allocation instead of a recycled one. `pristineBuffer` still caches the part
+// that is actually expensive — the film-base per-pixel gain pass — and is rebuilt only
+// when the source buffer or the gains change. With no film-base compensation there is
+// nothing to precompute, so the cache is dropped and the copy comes straight from the
+// source (one buffer less resident on full-resolution scans).
+function _takeWorkBuffer(slot, image16, filmBaseCompensation) {
+  if (!filmBaseCompensation) {
+    slot.pristineBuffer = null;
+    slot.lastSourceRef = null;
+    slot.lastFilmBaseGains = null;
+    return cloneImage16(image16);
+  }
+
   const len = image16.data.length;
   const sourceRef = image16.data;
+  const sizeChanged = !slot.pristineBuffer || slot.pristineBuffer.length !== len;
   const sourceChanged = sourceRef !== slot.lastSourceRef;
   const gainsChanged = !filmBaseCompensationEqual(slot.lastFilmBaseGains, filmBaseCompensation);
 
-  // Ensure buffers are allocated
-  if (!slot.inputBuffer || slot.inputBuffer.data.length !== len) {
-    slot.inputBuffer = cloneImage16(image16);
-    slot.pristineBuffer = new Uint16Array(len);
-    // Build pristine: source + filmBase
+  if (sizeChanged || sourceChanged || gainsChanged) {
+    if (sizeChanged) slot.pristineBuffer = new Uint16Array(len);
     slot.pristineBuffer.set(sourceRef);
-    if (filmBaseCompensation) {
-      applyFilmBaseCompensationToBuffer(slot.pristineBuffer, filmBaseCompensation.base, filmBaseCompensation.options);
-    }
+    applyFilmBaseCompensationToBuffer(
+      slot.pristineBuffer,
+      filmBaseCompensation.base,
+      filmBaseCompensation.options
+    );
     slot.lastSourceRef = sourceRef;
-    slot.lastFilmBaseGains = filmBaseCompensation
-      ? { base: { ...filmBaseCompensation.base }, options: { ...filmBaseCompensation.options } }
-      : null;
-    slot.inputBuffer.data.set(slot.pristineBuffer);
-    return slot.inputBuffer;
+    slot.lastFilmBaseGains = {
+      base: { ...filmBaseCompensation.base },
+      options: { ...filmBaseCompensation.options },
+    };
   }
 
-  if (sourceChanged || gainsChanged) {
-    // Rebuild pristine: copy source + apply filmBase
-    slot.pristineBuffer.set(sourceRef);
-    if (filmBaseCompensation) {
-      applyFilmBaseCompensationToBuffer(slot.pristineBuffer, filmBaseCompensation.base, filmBaseCompensation.options);
-    }
-    slot.lastSourceRef = sourceRef;
-    slot.lastFilmBaseGains = filmBaseCompensation
-      ? { base: { ...filmBaseCompensation.base }, options: { ...filmBaseCompensation.options } }
-      : null;
-  }
-
-  // Copy pristine → inputBuffer (engine modifies inputBuffer in-place)
-  slot.inputBuffer.data.set(slot.pristineBuffer);
-  return slot.inputBuffer;
+  return {
+    width: image16.width,
+    height: image16.height,
+    data: new Uint16Array(slot.pristineBuffer),
+  };
 }
 
-// Determine whether we need full process() (histogram re-analysis) or can use reprocess()
-function _needsFullProcess(slot, options) {
+// Everything the histogram analysis depends on. analyzeImage() reads borderBuffer (the
+// analysis crop), colorModel (the black/white clip thresholds) and imageType, plus the
+// prepared pixels — which depend on the source buffer, the film-base gains, the
+// pre-tone saturation and, in B&W, the channel mix. Every other parameter only reshapes
+// the LUTs and can go through the cheap reprocess() path.
+function _analysisStateFor(params, filmBaseCompensation, sourceRef, mode, reference = null) {
+  const base = filmBaseCompensation ? filmBaseCompensation.base : null;
+  const options = filmBaseCompensation ? filmBaseCompensation.options : null;
+  return {
+    sourceRef,
+    referenceSize: reference ? `${reference.width}x${reference.height}` : null,
+    borderBuffer: params.borderBuffer,
+    analysisRegionKey: JSON.stringify(params.analysisRegion || null),
+    colorModel: params.colorModel,
+    imageType: params.imageType,
+    preSaturation: params.preSaturation,
+    bwMix: mode === 'bw' ? params.bwMix : null,
+    filmBaseKey: base
+      ? `${base.r}|${base.g}|${base.b}|${base.r16}|${base.g16}|${base.b16}|${options.method}|${options.strength}`
+      : '',
+  };
+}
+
+function _analysisChanged(previous, next) {
+  if (!previous) return true;
+  return previous.sourceRef !== next.sourceRef
+    || previous.referenceSize !== next.referenceSize
+    || previous.borderBuffer !== next.borderBuffer
+    || previous.analysisRegionKey !== next.analysisRegionKey
+    || previous.colorModel !== next.colorModel
+    || previous.imageType !== next.imageType
+    || previous.preSaturation !== next.preSaturation
+    || previous.bwMix !== next.bwMix
+    || previous.filmBaseKey !== next.filmBaseKey;
+}
+
+// Determine whether we need full process() (histogram re-analysis) or can use
+// reprocess(). Re-analysing on every slider tick would throw away the whole point of
+// the split, but skipping it whenever channelData merely exists meant Border Buffer,
+// Colour Model and a freshly sampled film base changed the pixels while the LUTs stayed
+// pinned to the previous frame's black/white points — the preview then disagreed with
+// the full-resolution render that followed.
+function _needsFullProcess(slot, options, analysisState) {
   if (!slot.engine || !slot.engine.channelData) return true;
   if (options && options.forceFullProcess) return true;
-  return false;
+  return _analysisChanged(slot.analysis, analysisState);
 }
 
 async function runSilverCore(imageData, settings, mode, options) {
@@ -237,45 +346,77 @@ async function runSilverCore(imageData, settings, mode, options) {
     params.profileStrength = 0;
   }
 
-  // Compute filmBase compensation (skip for positive mode - no orange mask)
-  const filmBaseCompensation = mode !== 'positive' && settings && settings.filmBase
+  // Film-base compensation cancels the orange mask, which only colour negative film
+  // has. B&W film has no mask (and the Step-2 UI hides the control for it) and slide
+  // film has none either — but the app still sends a filmBase object, so B&W scans were
+  // multiplied by the default {210,140,90} base (r 0.70 / g 1.05 / b 1.63 in linear
+  // mode, clipping blue above ~61% of range) or by whatever colour negative happened to
+  // be sampled last, making the same file convert differently from run to run.
+  const filmBaseCompensation = mode === 'color' && settings && settings.filmBase
     ? {
         base: settings.filmBase,
         options: {
-          method: settings.filmBaseCompensation || settings.filmBaseMethod || (mode === 'color' ? 'density' : 'linear'),
+          method: settings.filmBaseCompensation || settings.filmBaseMethod || 'density',
           strength: settings.filmBaseStrength ?? 1
         }
       }
     : null;
 
-  // Reuse input buffer; skips filmBase per-pixel loop when source + gains unchanged
-  const input = _reuseInputBuffer(slot, input16, filmBaseCompensation);
+  const candidate = options?.analysisImageData;
+  const reference = candidate?.data instanceof Uint16Array
+    && candidate.data.length === candidate.width * candidate.height * 4 ? candidate : null;
+  const analysisParams = reference ? { ...params, analysisRegion: null, excludeTransparent: true } : params;
+  const analysisState = _analysisStateFor(analysisParams, filmBaseCompensation, reference ? reference.data : input16.data, mode, reference);
+  const needsFullProcess = _needsFullProcess(slot, options, analysisState);
 
-  // Choose process() vs reprocess() based on whether histogram analysis is needed
-  const processed16 = _needsFullProcess(slot, options)
+  // Fresh working buffer, owned by the caller once we return it.
+  const input = _takeWorkBuffer(slot, input16, filmBaseCompensation);
+
+  // B&W: mix down to a neutral negative BEFORE the engine runs. Doing it afterwards
+  // (the old toGrayscaleInPlace on the result) discarded the shadow/highlight/mid
+  // toning every one of the 18 B&W presets is built around, so sepia, selenium,
+  // cyanotype and the rest all rendered identically neutral. Mixing on the way in also
+  // puts the channel-filter presets ('red', 'orange', ...) before the histogram
+  // analysis and the per-channel curves, where a taking filter belongs.
+  if (mode === 'bw') toGrayscaleInPlace(input, params.bwMix);
+
+  // 解析用の撮影窓は出力範囲とは独立。プレビュー・書き出しとも同じ標本で LUT を作る。
+  let analysisPreview = null;
+  const needsAnalysisPreview = options?.includeAnalysisPreview !== false;
+  if (reference && (needsFullProcess || needsAnalysisPreview)) {
+    const sample = _takeWorkBuffer(slot.referencePixels, reference, filmBaseCompensation);
+    if (mode === 'bw') toGrayscaleInPlace(sample, params.bwMix);
+    if (needsAnalysisPreview) {
+      analysisPreview = toImageData8(needsFullProcess
+        ? engine.process(sample, analysisParams)
+        : engine.reprocess(sample, analysisParams));
+    } else if (needsFullProcess) {
+      engine.analyze(sample, analysisParams);
+    }
+  }
+  const processed16 = analysisPreview
+    ? engine.applyCurrentCurves(input, params)
+    : !reference && needsFullProcess
     ? engine.process(input, params)
     : engine.reprocess(input, params);
 
-  const finalImage16 = mode === 'bw' ? toGrayscaleInPlace(processed16, params.bwMix) : processed16;
+  if (needsFullProcess) slot.analysis = analysisState;
 
   // Hand the caller an ImageData (the contract the rest of the app still uses) but
   // leave the 16-bit handle attached so downstream stages (histogram, export) can
-  // read the full-precision result without re-deriving from 8-bit.
-  const result = toImageData8(finalImage16);
-  result.__image16 = finalImage16;
+  // read the full-precision result without re-deriving from 8-bit. The attached plane
+  // belongs to the caller: nothing here writes to it again.
+  const result = toImageData8(processed16);
+  result.__image16 = processed16;
+  if (analysisPreview) result.__analysisPreview = analysisPreview;
+  // 参照の種類・寸法・画素バッファ・解析設定をキーにし、通常画像と混同しない。
+  if (!reference) slot.referencePixels = {};
   return result;
 }
 
 export function invalidateSilverCoreCache() {
   for (const slot of [_cache.preview, _cache.full]) {
-    slot.engine = null;
-    slot.width = 0;
-    slot.height = 0;
-    slot.profile = null;
-    slot.inputBuffer = null;
-    slot.pristineBuffer = null;
-    slot.lastSourceRef = null;
-    slot.lastFilmBaseGains = null;
+    Object.assign(slot, _createSlot());
   }
 }
 

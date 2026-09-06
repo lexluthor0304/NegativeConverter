@@ -19,7 +19,7 @@ Whether you are reviewing a fresh roll, restoring family negatives, or preparing
   - Vibrance & Saturation
   - Cyan / Magenta / Yellow (CMY) channels
 - 🎞️ **Film presets** for color negative, B&W negative, and positive slide stocks across Kodak / Fujifilm / Ilford
-- 🗂️ **Data-driven preset system** loaded from `negative2positive/presets/film_presets.json` (supports alias fallback for older preset IDs)
+- 🗂️ **Data-driven preset system** defined in `negative2positive/src/silvercore/engine/FilmPresets.js` (supports alias fallback for older preset IDs)
 - 🔍 **Optional lens profile workflow**: search/select Lensfun profiles manually, or skip lens correction and continue
 - 🧷 **Roll-level lens settings**: lens correction on/off and parameters can be applied to selected files or reused via roll reference
 - 🛡️ **Privacy-friendly**: all image processing happens locally in your browser
@@ -56,16 +56,15 @@ Whether you are reviewing a fresh roll, restoring family negatives, or preparing
 
 ### Guided Mode
 
-- The Workflow panel includes a **Guide** toggle to show/hide in-app instructions (stored in localStorage)
+- Studio is the only workspace: automatic conversion, color-first controls, and dedicated Crop / Retouch / Border / Convert tabs.
 
 ## ⚙️ Technical Highlights
 
 - Uses [`UPNG.js`](https://github.com/photopea/UPNG.js) to decode 16-bit PNGs  
-- Uses a custom WebAssembly module based on [`LibRaw-Wasm`](https://github.com/ybouane/LibRaw-Wasm) to support `.cr2`, `.nef`, `.arw`, `.dng`, `.raw`, `.rw2` formats  
+- Uses the [`libraw-wasm`](https://www.npmjs.com/package/libraw-wasm) npm package to support `.cr2`, `.nef`, `.arw`, `.dng`, `.raw`, `.rw2` formats
 - Uses UTIF.js + an in-app PNG encoder path to support TIFF export and 16-bit PNG/TIFF output options  
-- Includes a simplified AHD demosaicing algorithm for Bayer-pattern raw data  
 - Color adjustment logic is based on RGB ↔ HSL and RGB ↔ CMY conversions  
-- Film preset metadata is loaded from JSON and grouped dynamically by film type in the UI  
+- Film preset metadata lives in `FilmPresets.js` and is grouped dynamically by film type in the UI
 - Optional lens correction uses [`@neoanaloglabkk/lensfun-wasm`](https://www.jsdelivr.com/package/npm/@neoanaloglabkk/lensfun-wasm) with **npm local assets first + CDN fallback**  
 - Auto frame detection uses [`@techstark/opencv-js`](https://www.npmjs.com/package/@techstark/opencv-js) loaded dynamically from the npm package asset URL  
 - Performance optimizations include:
@@ -92,14 +91,16 @@ npm run dev:web
 
 This app must be deployed from the **Vite build output**, not by serving source files directly.
 
-Required settings:
+Required settings (as recorded in `.vercel/project.json`):
 
-- Root Directory: repository root
+- Root Directory: `negative2positive`
 - Install Command: `npm ci`
 - Build Command: `npm run build:web`
-- Output Directory: `dist`
+- Output Directory: `negative2positive/dist`
 
-`npm run build:web` generates `negative2positive/dist` (for local/Tauri) and also syncs it to root `dist` (for Vercel output pickup).
+`npm run build:web` generates `negative2positive/dist` (for local/Tauri) and also syncs it to root `dist`.
+
+Because the Root Directory is `negative2positive`, Vercel reads `negative2positive/vercel.json` (cache and security headers); the repository-root `vercel.json` is not applied to the deployment.
 
 If Vercel serves `negative2positive/index.html` directly, module imports like `pako` / `utif` / `jszip` will not resolve in browser and upload buttons can stop working.
 
@@ -107,7 +108,7 @@ If Vercel serves `negative2positive/index.html` directly, module imports like `p
 
 The header Feedback button posts to `negative2positive/api/feedback.mjs` (a Vercel serverless function). The Vercel project's Root Directory is `negative2positive`, so functions MUST live under `negative2positive/api/` — an `api/` directory at the repository root is silently ignored. The function files the message as a GitHub issue labeled `feedback`. Configure in Vercel → Project → Settings → Environment Variables:
 
-- `FEEDBACK_GITHUB_TOKEN` (required): fine-grained personal access token with **Issues: Read and write** on the target repo. Without it the endpoint returns 503 and the form shows the error state.
+- `FEEDBACK_GITHUB_TOKEN` (required): fine-grained personal access token with **Issues: Read and write** and **Contents: Read and write** on the target repo. Contents is what lets attached screenshots be uploaded to the orphan `feedback-assets` branch, which must already exist — without it the issue is still filed but the images are silently dropped. Without the token entirely the endpoint returns 503 and the form shows the error state.
 - `FEEDBACK_GITHUB_REPO` (optional): `owner/repo` to file issues in; defaults to `lexluthor0304/NegativeConverter`.
 
 The endpoint allows cross-origin calls only from the production domain, Tauri desktop webviews, and localhost dev servers.

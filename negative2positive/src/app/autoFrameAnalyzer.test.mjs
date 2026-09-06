@@ -2,7 +2,7 @@
 // node negative2positive/src/app/autoFrameAnalyzer.test.mjs
 
 import assert from 'node:assert/strict';
-import { getAutoFrameAspectTargets } from './autoFrameAnalyzer.js';
+import { getAutoFrameAspectTargets, getDensityTemplateReliability, inferAutoFrameConfidenceLevel } from './autoFrameAnalyzer.js';
 
 const RATIOS = { '135': 1.5, '120-6x4.5': 1.33, '120-6x6': 1, '120-6x7': 1.17, '120-6x9': 1.5 };
 const FORMATS_120 = ['6x4.5', '6x6', '6x7', '6x9'];
@@ -67,3 +67,35 @@ const keys = (targets) => targets.map(t => t.key).sort();
 }
 
 console.log('autoFrameAnalyzer aspect-target tests passed');
+
+// 比率テンプレートは生成経路名だけで信頼度を上げない。
+{
+  const candidate = {
+    detectedFormat: '135',
+    scoreBreakdown: {
+      boundaryCompleteness: 0.9, borderContrast: 0.5,
+      outsideClean: 0.3, contentTexture: 0.1, sprocketLane: 0,
+    },
+  };
+  const validation = { aspectScore: 0.9, areaRatio: 0.8 };
+  const plain = getDensityTemplateReliability({ ...candidate, method: 'density-template' }, validation);
+  const sprocket = getDensityTemplateReliability({ ...candidate, method: 'density-sprocket-template' }, validation);
+  assert.deepEqual(sprocket, plain);
+  assert.equal(sprocket.usable, true);
+  assert.equal(inferAutoFrameConfidenceLevel(sprocket.confidenceCap), 'medium');
+  const supported = getDensityTemplateReliability({
+    ...candidate, method: 'density-sprocket-template',
+    scoreBreakdown: { ...candidate.scoreBreakdown, sprocketLane: 0.3 },
+  }, validation);
+  assert.equal(inferAutoFrameConfidenceLevel(supported.confidenceCap), 'high');
+  assert.deepEqual(getDensityTemplateReliability({
+    ...candidate, method: 'density-template',
+    scoreBreakdown: { ...candidate.scoreBreakdown, sprocketLane: 0.3 },
+  }, validation), supported);
+  assert.deepEqual(getDensityTemplateReliability({ method: 'density-template' }, validation),
+    { usable: false, confidenceCap: 0 });
+  const moderate = getDensityTemplateReliability({ ...candidate,
+    method: 'density-template', scoreBreakdown: { ...candidate.scoreBreakdown, borderContrast: 0.35 }
+  }, validation);
+  assert.equal(inferAutoFrameConfidenceLevel(moderate.confidenceCap), 'medium');
+}

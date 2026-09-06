@@ -28,7 +28,9 @@
   <meta name="twitter:image" content="https://negative-converter.tokugai.com/og-cover.png">
 
   <meta name="theme-color" content="#17141f">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect x='4' y='8' width='56' height='48' rx='8' fill='%2317141f' stroke='%23ff4d8f' stroke-width='4'/%3E%3Ccircle cx='32' cy='28' r='9' fill='%23ffc24b'/%3E%3Cpath d='M14 46l10-12 8 9 6-7 12 10z' fill='%2345d6cd'/%3E%3C/svg%3E">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <script type="module" src="./src/app/analytics.js"></script>
   <meta name="application-name" content="Negative Converter">
   <meta name="apple-mobile-web-app-title" content="Negative Converter">
@@ -101,18 +103,15 @@
 
 </head>
 
-<body>
+<body class="studio">
   <!-- Header -->
-  <header class="app-header">
+  <div id="studioHeaderSource" hidden>
     <div class="header-left">
-      <h1 class="app-title" data-i18n="title">Negative Converter</h1>
       <span class="build-badge" id="buildBadge" style="display: none;"></span>
-      <nav class="header-site-links" aria-label="Site links">
-        <a href="./guide.html">Guide</a>
-        <a href="./raw-negative-converter.html">RAW guide</a>
+      <nav class="header-site-links" aria-label="Site links" data-i18n-aria-label="navSiteLinks">
+        <a href="./guide.html" data-i18n="navGuide">Guide</a>
+        <a href="./raw-negative-converter.html" data-i18n="navRawGuide">RAW guide</a>
       </nav>
-      <span class="header-copyright">
-        © <span id="copyrightYear">2026</span> <a href="https://neoanaloglab.com" target="_blank">neoanaloglab.com</a>
         <span class="github-link">
           <span class="github-star-btn">
             <a class="github-star-btn-main" href="https://github.com/lexluthor0304/NegativeConverter" target="_blank" rel="noopener"
@@ -126,7 +125,6 @@
               href="https://github.com/lexluthor0304/NegativeConverter/stargazers" target="_blank" rel="noopener" hidden></a>
           </span>
         </span>
-      </span>
     </div>
     <div class="header-actions">
       <button class="header-action-btn" id="headerGrayPointBtn" type="button" style="display: none;" data-i18n="sampleWB">Sample Gray Point</button>
@@ -162,7 +160,7 @@
         </svg>
         <span data-i18n="headerDownloadLink">Desktop app</span>
       </a>
-      <a class="header-link-btn shop" id="shopLink" href="http://shop.neoanaloglab.com/" target="_blank" rel="noopener">
+      <a class="header-link-btn shop" id="shopLink" href="https://shop.neoanaloglab.com/" target="_blank" rel="noopener">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
           <path d="M4 8l1.5-4h13L20 8"></path>
           <path d="M4 8h16"></path>
@@ -172,47 +170,14 @@
         <span data-i18n="headerShopLink">Shop</span>
         <span class="header-shop-badge" data-i18n="headerShopBadge">Japan only</span>
       </a>
-      <div class="lang-selector">
-        <button class="lang-btn" data-lang="zh">中文</button>
-        <button class="lang-btn" data-lang="en">EN</button>
-        <button class="lang-btn" data-lang="ja">日本語</button>
+      <div class="lang-selector" role="group" aria-label="Language" data-i18n-aria-label="groupLanguage">
+        <button class="lang-btn" type="button" data-lang="zh" lang="zh" aria-pressed="false">中文</button>
+        <button class="lang-btn" type="button" data-lang="en" lang="en" aria-pressed="false">EN</button>
+        <button class="lang-btn" type="button" data-lang="ja" lang="ja" aria-pressed="false">日本語</button>
       </div>
     </div>
-  </header>
+  </div>
 
-  <!-- Mac App Store launch notice. Web only (the store build is the desktop build), dismissible. -->
-  <aside class="mas-banner" id="masBanner" aria-label="Mac App Store release">
-    <div class="mas-banner-left">
-      <svg class="mas-banner-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-        <rect x="3" y="4" width="18" height="12" rx="1.5"></rect>
-        <path d="M2 20h20"></path>
-      </svg>
-      <div class="mas-banner-text">
-        <div class="mas-banner-title">
-          <span class="mas-banner-chip" data-i18n="masBannerChip">NEW</span>
-          <span data-i18n="masBannerTitle">The Mac app is now on the Mac App Store</span>
-        </div>
-        <div class="mas-banner-body" data-i18n="masBannerBody">Free download, automatic updates through the App Store, and your photos still never leave your Mac.</div>
-      </div>
-    </div>
-    <div class="mas-banner-actions">
-      <a class="mas-banner-cta" id="masBannerCta" href="https://apps.apple.com/app/id6797694070" target="_blank" rel="noopener">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-          <path d="M12 3v10"></path>
-          <path d="M7.5 9.5L12 14l4.5-4.5"></path>
-          <path d="M4 17h16"></path>
-        </svg>
-        <span data-i18n="masBannerAction">Get it on the Mac App Store</span>
-      </a>
-      <button class="mas-banner-close" id="masBannerCloseBtn" type="button">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-          <path d="M6 6l12 12"></path>
-          <path d="M18 6L6 18"></path>
-        </svg>
-        <span class="sr-only" data-i18n="masBannerDismiss">Dismiss</span>
-      </button>
-    </div>
-  </aside>
 
   <div class="desktop-update-banner" id="desktopUpdateBanner" role="status" aria-live="polite">
     <div class="desktop-update-left">
@@ -238,10 +203,6 @@
     <section class="preview-section">
       <div class="canvas-container" id="canvasContainer">
         <div class="upload-placeholder" id="uploadPlaceholder">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-            <path d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
-          </svg>
-          <p data-i18n="dropHint">Drop image here or click to open</p>
           <a class="upload-privacy-note" href="./privacy.html" target="_blank" rel="noopener">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
               <path d="M12 2l8 4v6c0 5-3.5 9.4-8 10-4.5-.6-8-5-8-10V6l8-4z"/>
@@ -254,18 +215,6 @@
           <input type="file" id="fileInput" class="hidden-file-input" accept=".cr2,.cr3,.crw,.nef,.nrw,.arw,.dng,.raf,.raw,.rw2,.pef,.srw,.3fr,.mef,.orf,.rwl,.iiq,.x3f,.mrw,.kdc,.dcr,.tif,.tiff,image/*" multiple>
           <input type="file" id="folderInput" class="hidden-file-input" accept=".cr2,.cr3,.crw,.nef,.nrw,.arw,.dng,.raf,.raw,.rw2,.pef,.srw,.3fr,.mef,.orf,.rwl,.iiq,.x3f,.mrw,.kdc,.dcr,.tif,.tiff,image/*" webkitdirectory directory multiple>
           <div class="upload-support-hint" id="folderPickerHint" data-i18n="folderPickerUnsupported">Folder selection is not supported in this browser. Please use Select File.</div>
-          <div class="upload-seo-summary" aria-label="Negative Converter overview">
-            <p>
-              <strong>Free online film negative converter.</strong>
-              Convert scanned film negatives to positives in your browser with local processing, no uploads, no signup, and no watermark. Supports JPG, 16-bit PNG, CR2, NEF, ARW, DNG, RW2, and iPhone ProRaw.
-            </p>
-            <div class="upload-seo-links">
-              <a href="./guide.html">How to convert film negatives</a>
-              <a href="./raw-negative-converter.html">RAW negative converter</a>
-              <a href="./negative-lab-pro-alternative.html">Negative Lab Pro alternative</a>
-              <a href="./film-orange-mask.html">Orange mask guide</a>
-            </div>
-          </div>
         </div>
         <div class="canvas-transform-wrapper" id="canvasTransformWrapper">
           <canvas id="canvas" style="display: none;"></canvas>
@@ -293,26 +242,26 @@
         </div>
         <div class="zoom-indicator" id="zoomIndicator"></div>
         <div class="zoom-controls" id="zoomControls" style="display: none;">
-          <button class="zoom-ctrl-btn" id="zoomInBtn" title="Zoom In">+</button>
-          <button class="zoom-ctrl-btn" id="zoomOutBtn" title="Zoom Out">−</button>
-          <button class="zoom-ctrl-btn" id="zoomResetBtn" title="Reset Zoom" style="font-size: 12px;">1:1</button>
+          <button class="zoom-ctrl-btn" id="zoomInBtn" type="button" title="Zoom In" data-i18n-title="zoomIn" aria-label="Zoom In" data-i18n-aria-label="zoomIn">+</button>
+          <button class="zoom-ctrl-btn" id="zoomOutBtn" type="button" title="Zoom Out" data-i18n-title="zoomOut" aria-label="Zoom Out" data-i18n-aria-label="zoomOut">−</button>
+          <button class="zoom-ctrl-btn" id="zoomResetBtn" type="button" title="Reset Zoom" data-i18n-title="zoomReset" aria-label="Reset Zoom" data-i18n-aria-label="zoomReset" style="font-size: 12px;">1:1</button>
         </div>
       </div>
 
       <!-- Toolbar -->
       <div class="preview-toolbar" id="previewToolbar" style="display: none;">
-        <span class="status-badge step1" id="statusBadge" data-i18n="step1">Step 1: Crop</span>
+        <span class="status-badge step1" id="statusBadge" role="status" data-i18n="step1">Step 1: Crop</span>
         <span class="current-file-label" id="currentFileLabel" style="display: none;"></span>
         <div class="toolbar-separator"></div>
-        <button class="toolbar-btn" id="rotateLeftBtn" title="Rotate Left">
+        <button class="toolbar-btn" id="rotateLeftBtn" type="button" title="Rotate Left" data-i18n-title="rotateLeft">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2.5 2v6h6M2.66 12a10 10 0 11.8 4"/></svg>
           <span>-90°</span>
         </button>
-        <button class="toolbar-btn" id="rotateRightBtn" title="Rotate Right">
+        <button class="toolbar-btn" id="rotateRightBtn" type="button" title="Rotate Right" data-i18n-title="rotateRight">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 12a10 10 0 11-.8 4" transform="scale(-1,1) translate(-24,0)"/></svg>
           <span>+90°</span>
         </button>
-        <button class="toolbar-btn" id="mirrorBtn" data-i18n="mirror" title="Mirror">
+        <button class="toolbar-btn" id="mirrorBtn" type="button" title="Mirror" data-i18n-title="mirror" aria-pressed="false">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M12 4v16M4 8l4 4-4 4M20 8l-4 4 4 4"/>
           </svg>
@@ -354,7 +303,7 @@
       <div class="file-list-section" id="fileListSection" style="display: none;">
         <div class="file-list-header">
           <span class="file-list-title" data-i18n="fileList">File List</span>
-          <span class="file-list-count" id="fileListCount">0 / 0</span>
+          <span class="file-list-count" id="fileListCount" role="status">0 / 0</span>
         </div>
         <div class="file-list-items" id="fileListItems">
           <!-- File items dynamically added here -->
@@ -367,38 +316,6 @@
         </div>
       </div>
 
-      <div class="control-stage-bar" id="controlStageBar" role="list" aria-label="Workflow progress">
-        <div class="control-stage-pill" id="panelStage1" role="listitem" data-stage="1">
-          <span class="control-stage-index">1</span>
-          <span class="control-stage-label" data-i18n="controlStageCrop">Crop</span>
-        </div>
-        <div class="control-stage-pill" id="panelStage2" role="listitem" data-stage="2">
-          <span class="control-stage-index">2</span>
-          <span class="control-stage-label" data-i18n="controlStageMask">Mask</span>
-        </div>
-        <div class="control-stage-pill" id="panelStage3" role="listitem" data-stage="3">
-          <span class="control-stage-index">3</span>
-          <span class="control-stage-label" data-i18n="controlStageAdjust">Adjust</span>
-        </div>
-      </div>
-
-      <!-- Workflow Guide -->
-      <div class="control-section guide-section" id="noviceGuideSection">
-        <div class="section-header">
-          <span class="section-title" data-i18n="workflow">Workflow</span>
-          <button class="guide-toggle-btn" id="guideToggleBtn" type="button" aria-pressed="true" data-i18n="guideToggleOn">Guide: On</button>
-        </div>
-        <div class="novice-guide-card" id="noviceGuideCard">
-          <div class="novice-guide-card-header">
-            <span class="novice-guide-title" data-i18n="noviceGuideTitle">Beginner Guide</span>
-            <span class="novice-guide-phase" id="noviceGuidePhase"></span>
-          </div>
-          <div class="novice-guide-primary" id="noviceGuidePrimary"></div>
-          <ol class="novice-guide-list" id="noviceGuideChecklist"></ol>
-          <div class="novice-guide-status" id="noviceGuideStatus"></div>
-          <div class="novice-guide-warning" id="noviceGuideWarning" style="display: none;"></div>
-        </div>
-      </div>
 
       <!-- Auto Frame Settings (Step 1) -->
       <div class="control-section task-primary" id="autoFrameSettingsSection" style="display: none;">
@@ -420,11 +337,21 @@
               <span data-i18n="autoFrameRotate180">Rotate 180° when applying</span>
             </label>
             <div class="autoframe-row">
-              <span data-i18n="autoFrameFormatLabel">Film Format</span>
-              <select id="autoFrameFormatSelect">
+              <span id="autoFrameFormatLabel" data-i18n="autoFrameFormatLabel">Film Format</span>
+              <select id="autoFrameFormatSelect" aria-labelledby="autoFrameFormatLabel">
                 <option value="auto" data-i18n="autoFrameFormatAuto">Auto (135/120)</option>
                 <option value="135" data-i18n="autoFrameFormat135">Prefer 135</option>
                 <option value="120" data-i18n="autoFrameFormat120">Prefer 120</option>
+                <option value="135-standard">135 · 24×36</option>
+                <option value="135-half">135 · 18×24</option>
+                <option value="135-panoramic">135 · 24×65</option>
+                <option value="120-6x4.5">120 · 6×4.5</option>
+                <option value="120-6x6">120 · 6×6</option>
+                <option value="120-6x7">120 · 6×7</option>
+                <option value="120-6x8">120 · 6×8</option>
+                <option value="120-6x9">120 · 6×9</option>
+                <option value="120-6x12">120 · 6×12</option>
+                <option value="120-6x17">120 · 6×17</option>
               </select>
             </div>
             <div class="autoframe-row" id="autoFrame120LabelRow">
@@ -447,22 +374,18 @@
                 <input type="checkbox" id="autoFrame120_69" checked>
                 <span>6x9</span>
               </label>
+              <label class="autoframe-option"><input type="checkbox" id="autoFrame120_68" checked><span>6x8</span></label>
+              <label class="autoframe-option"><input type="checkbox" id="autoFrame120_612" checked><span>6x12</span></label>
+              <label class="autoframe-option"><input type="checkbox" id="autoFrame120_617" checked><span>6x17</span></label>
             </div>
             <div class="autoframe-row">
-              <span data-i18n="autoFrameLowConfidenceBehavior">Low confidence</span>
-              <select id="autoFrameLowConfidenceSelect">
+              <span id="autoFrameLowConfidenceLabel" data-i18n="autoFrameLowConfidenceBehavior">Low confidence</span>
+              <select id="autoFrameLowConfidenceSelect" aria-labelledby="autoFrameLowConfidenceLabel">
                 <option value="suggest" data-i18n="autoFrameSuggestOnly">Try crop anyway</option>
                 <option value="rotateOnly" data-i18n="autoFrameRotateOnly">Rotate only</option>
                 <option value="ignore" data-i18n="autoFrameNoAction">Do nothing</option>
               </select>
             </div>
-          </div>
-          <div class="slider-control">
-            <div class="slider-header">
-              <span class="slider-label" data-i18n="coreBorderBuffer">Border Buffer %</span>
-              <input type="number" class="slider-number-input" id="coreBorderBufferValue" min="0" max="30" step="1" value="10">
-            </div>
-            <input type="range" class="slider-input" id="coreBorderBuffer" min="0" max="30" step="1" value="10">
           </div>
           <div class="info-box autoframe-diagnostics" id="autoFrameDiagnosticsBox" style="display: none;"></div>
         </div>
@@ -471,8 +394,8 @@
       <!-- Film Edge / Sprocket Settings -->
       <div class="control-section task-secondary" id="sprocketSettingsSection" style="display: none;">
         <div class="section-header" data-section="sprocketEdge">
-          <span class="section-title" data-i18n="filmEdgeSettings">Film Edge</span>
-          <span class="section-toggle">▼</span>
+          <button type="button" class="section-title" aria-expanded="true" aria-controls="sprocketEdgeSectionContent" data-i18n="filmEdgeSettings">Film Edge</button>
+          <span class="section-toggle" aria-hidden="true">▼</span>
         </div>
         <div class="section-content" id="sprocketEdgeSectionContent">
           <div class="control-group is-primary">
@@ -499,17 +422,17 @@
             </label>
           </div>
           <div class="control-group">
-            <div class="control-group-title"><span data-i18n="filmEdgeText">Edge text</span></div>
-            <input type="text" class="preset-select film-edge-text-input" id="sprocketTextInput" value="KODAK PORTRA 160" maxlength="48">
+            <div class="control-group-title"><span id="filmEdgeTextLabel" data-i18n="filmEdgeText">Edge text</span></div>
+            <input type="text" class="preset-select film-edge-text-input" id="sprocketTextInput" value="KODAK PORTRA 160" maxlength="48" aria-labelledby="filmEdgeTextLabel">
           </div>
           <div class="control-group">
             <div class="control-group-title"><span data-i18n="filmEdgeFont">Font</span></div>
             <div class="control-group-grid two-up">
               <div class="slider-control">
                 <div class="slider-header">
-                  <span class="slider-label" data-i18n="filmEdgeFontStyle">Style</span>
+                  <span class="slider-label" id="sprocketFontStyleSelectLabel" data-i18n="filmEdgeFontStyle">Style</span>
                 </div>
-                <select class="preset-select" id="sprocketFontStyleSelect">
+                <select class="preset-select" id="sprocketFontStyleSelect" aria-labelledby="sprocketFontStyleSelectLabel">
                   <option value="edgePixel" data-i18n="filmEdgeFontEdgePixel">Film Edge Pixel</option>
                   <option value="monoBold" data-i18n="filmEdgeFontMonoBold">Mono Bold</option>
                   <option value="mono" data-i18n="filmEdgeFontMono">Mono</option>
@@ -519,9 +442,9 @@
               </div>
               <div class="slider-control">
                 <div class="slider-header">
-                  <span class="slider-label" data-i18n="filmEdgeFontFamily">Family</span>
+                  <span class="slider-label" id="sprocketFontFamilyInputLabel" data-i18n="filmEdgeFontFamily">Family</span>
                 </div>
-                <input type="text" class="preset-select film-edge-text-input" id="sprocketFontFamilyInput" value="" maxlength="80" placeholder="Monospace">
+                <input type="text" class="preset-select film-edge-text-input" id="sprocketFontFamilyInput" value="" maxlength="80" placeholder="Monospace" data-i18n-placeholder="filmEdgeFontFamilyPlaceholder" aria-labelledby="sprocketFontFamilyInputLabel">
               </div>
             </div>
           </div>
@@ -530,14 +453,14 @@
             <div class="control-group-grid two-up">
               <div class="slider-control">
                 <div class="slider-header">
-                  <span class="slider-label" data-i18n="filmEdgeFrameNumberValue">Number</span>
-                  <input type="number" class="slider-number-input" id="sprocketFrameNumberInput" min="0" max="99" step="1" value="18">
+                  <span class="slider-label" id="sprocketFrameNumberInputLabel" data-i18n="filmEdgeFrameNumberValue">Number</span>
+                  <input type="number" class="slider-number-input" id="sprocketFrameNumberInput" min="0" max="99" step="1" value="18" aria-labelledby="sprocketFrameNumberInputLabel">
                 </div>
               </div>
               <div class="slider-control">
                 <div class="slider-header">
-                  <span class="slider-label" data-i18n="filmEdgeFrameNumberHole">Hole pos.</span>
-                  <input type="number" class="slider-number-input" id="sprocketFrameNumberHoleInput" min="1" max="8" step="1" value="1">
+                  <span class="slider-label" id="sprocketFrameNumberHoleInputLabel" data-i18n="filmEdgeFrameNumberHole">Hole pos.</span>
+                  <input type="number" class="slider-number-input" id="sprocketFrameNumberHoleInput" min="1" max="8" step="1" value="1" aria-labelledby="sprocketFrameNumberHoleInputLabel">
                 </div>
               </div>
             </div>
@@ -547,14 +470,14 @@
             <div class="control-group-grid two-up">
               <div class="slider-control">
                 <div class="slider-header">
-                  <span class="slider-label" data-i18n="filmEdgeDx1">DX 1</span>
-                  <input type="number" class="slider-number-input" id="sprocketDx1Input" min="0" max="126" step="1" value="82">
+                  <span class="slider-label" id="sprocketDx1InputLabel" data-i18n="filmEdgeDx1">DX 1</span>
+                  <input type="number" class="slider-number-input" id="sprocketDx1Input" min="0" max="126" step="1" value="82" aria-labelledby="sprocketDx1InputLabel">
                 </div>
               </div>
               <div class="slider-control">
                 <div class="slider-header">
-                  <span class="slider-label" data-i18n="filmEdgeDx2">DX 2</span>
-                  <input type="number" class="slider-number-input" id="sprocketDx2Input" min="0" max="15" step="1" value="3">
+                  <span class="slider-label" id="sprocketDx2InputLabel" data-i18n="filmEdgeDx2">DX 2</span>
+                  <input type="number" class="slider-number-input" id="sprocketDx2Input" min="0" max="15" step="1" value="3" aria-labelledby="sprocketDx2InputLabel">
                 </div>
               </div>
             </div>
@@ -564,14 +487,14 @@
             <div class="control-group-grid two-up">
               <div class="slider-control">
                 <div class="slider-header">
-                  <span class="slider-label" data-i18n="filmEdgeHoleOffset">Hole offset mm</span>
-                  <input type="number" class="slider-number-input" id="sprocketFirstHoleOffsetInput" min="-2.5" max="2.5" step="0.1" value="0">
+                  <span class="slider-label" id="sprocketFirstHoleOffsetInputLabel" data-i18n="filmEdgeHoleOffset">Hole offset mm</span>
+                  <input type="number" class="slider-number-input" id="sprocketFirstHoleOffsetInput" min="-2.5" max="2.5" step="0.1" value="0" aria-labelledby="sprocketFirstHoleOffsetInputLabel">
                 </div>
               </div>
               <div class="slider-control">
                 <div class="slider-header">
-                  <span class="slider-label" data-i18n="filmEdgeOverexposureStrength">Glow strength</span>
-                  <input type="number" class="slider-number-input" id="sprocketOverexposureStrengthInput" min="0" max="2" step="0.1" value="1">
+                  <span class="slider-label" id="sprocketOverexposureStrengthInputLabel" data-i18n="filmEdgeOverexposureStrength">Glow strength</span>
+                  <input type="number" class="slider-number-input" id="sprocketOverexposureStrengthInput" min="0" max="2" step="0.1" value="1" aria-labelledby="sprocketOverexposureStrengthInputLabel">
                 </div>
               </div>
             </div>
@@ -605,20 +528,20 @@
         </div>
         <div class="section-content">
           <div class="control-group is-primary">
-            <div class="control-group-title"><span data-i18n="groupFilmType">Film type</span></div>
-            <div class="film-type-toggle">
-              <button class="film-type-btn active" data-type="color" data-i18n="colorFilm">Color</button>
-              <button class="film-type-btn" data-type="bw" data-i18n="bwFilm">B&W</button>
-              <button class="film-type-btn" data-type="positive" data-i18n="positiveFilm">Positive</button>
+            <div class="control-group-title"><span id="groupFilmTypeLabel" data-i18n="groupFilmType">Film type</span></div>
+            <div class="film-type-toggle" role="group" aria-labelledby="groupFilmTypeLabel">
+              <button class="film-type-btn active" type="button" data-type="color" aria-pressed="true" data-i18n="colorFilm">Color</button>
+              <button class="film-type-btn" type="button" data-type="bw" aria-pressed="false" data-i18n="bwFilm">B&W</button>
+              <button class="film-type-btn" type="button" data-type="positive" aria-pressed="false" data-i18n="positiveFilm">Positive</button>
             </div>
           </div>
 
           <div class="control-group is-primary">
-            <div class="control-group-title"><span data-i18n="groupMaskSource">Mask source</span></div>
+            <div class="control-group-title"><span id="groupMaskSourceLabel" data-i18n="groupMaskSource">Mask source</span></div>
             <div class="control-group-hint" data-i18n="groupMaskSourceHint">Use the film edge when visible; use auto detection or roll reference when the border is missing.</div>
-            <div class="step2-mode-toggle" id="step2ModeToggle">
-              <button class="step2-mode-btn active" id="step2ModeBorderBtn" data-mode="border" data-i18n="step2ModeBorder">Border Available</button>
-              <button class="step2-mode-btn" id="step2ModeNoBorderBtn" data-mode="noBorder" data-i18n="step2ModeNoBorder">No Border / ES-2</button>
+            <div class="step2-mode-toggle" id="step2ModeToggle" role="group" aria-labelledby="groupMaskSourceLabel">
+              <button class="step2-mode-btn active" type="button" id="step2ModeBorderBtn" data-mode="border" aria-pressed="true" data-i18n="step2ModeBorder">Border Available</button>
+              <button class="step2-mode-btn" type="button" id="step2ModeNoBorderBtn" data-mode="noBorder" aria-pressed="false" data-i18n="step2ModeNoBorder">No Border / ES-2</button>
             </div>
             <div id="filmBaseControls">
               <div class="info-box" data-i18n="filmBaseInfo">Sample the unexposed film edge if available. If the border is already cropped out, use Auto Detect or reuse a reference frame.</div>
@@ -630,6 +553,18 @@
               <div class="film-base-preview" id="filmBasePreview" style="display: none;">
                 <div class="film-base-color" id="filmBaseColor"></div>
                 <div class="film-base-values" id="filmBaseValues">R: 0 G: 0 B: 0</div>
+              </div>
+              <!-- Drives where the film base is sampled from and how much of
+                   each edge the histogram analysis ignores. It belongs here, next
+                   to the mask controls that read it, not in the Step-1 auto-frame
+                   panel where it has no effect. -->
+              <div class="slider-control">
+                <div class="slider-header">
+                  <span class="slider-label" id="coreBorderBufferLabel" data-i18n="coreBorderBuffer">Edge Margin %</span>
+                  <input type="number" class="slider-number-input" id="coreBorderBufferValue" min="0" max="30" step="1" value="10" aria-labelledby="coreBorderBufferLabel">
+                </div>
+                <input type="range" class="slider-input" id="coreBorderBuffer" min="0" max="30" step="1" value="10" aria-labelledby="coreBorderBufferLabel">
+                <div class="control-group-hint" data-i18n="coreBorderBufferHint">Share of each edge used for film-base sampling and excluded from histogram analysis.</div>
               </div>
               <div class="roll-reference-controls" id="rollReferenceControls">
                 <div class="roll-reference-title" data-i18n="rollReferenceTitle">Roll Reference</div>
@@ -659,9 +594,9 @@
             <div class="control-group-grid two-up">
               <div class="slider-control" id="coreColorModelStep2Control">
                 <div class="slider-header">
-                  <span class="slider-label" data-i18n="coreColorModelLabel">Color Model</span>
+                  <span class="slider-label" id="coreColorModelStep2Label" data-i18n="coreColorModelLabel">Color Model</span>
                 </div>
-                <select class="preset-select" id="coreColorModelStep2">
+                <select class="preset-select" id="coreColorModelStep2" aria-labelledby="coreColorModelStep2Label">
                   <option value="frontier">Frontier</option>
                   <option value="noritsu">Noritsu</option>
                   <option value="standard" selected data-i18n="coreModelStandard">Standard</option>
@@ -675,9 +610,9 @@
               </div>
               <div class="slider-control" id="filmPresetControl">
                 <div class="slider-header">
-                  <span class="slider-label" data-i18n="filmPresetLabel">Film Preset</span>
+                  <span class="slider-label" id="filmPresetLabel" data-i18n="filmPresetLabel">Film Preset</span>
                 </div>
-                <select class="preset-select" id="filmPreset">
+                <select class="preset-select" id="filmPreset" aria-labelledby="filmPresetLabel">
                   <option value="none" selected data-i18n="presetNone">None (Manual)</option>
                   <optgroup label="Color" data-i18n-label="presetGroupColor">
                     <option value="frontier-lab">Frontier Lab</option>
@@ -738,23 +673,23 @@
                 </label>
                 <button class="film-base-btn" id="lensSkipBtn" type="button" data-i18n="lensSkipBtn">Skip</button>
               </div>
-              <div class="info-box lens-status" id="lensStatusBox" data-i18n="lensStatusIdle">Lens correction is optional. You can continue without selecting a profile.</div>
+              <div class="info-box lens-status" id="lensStatusBox" role="status" data-i18n="lensStatusIdle">Lens correction is optional. You can continue without selecting a profile.</div>
               <div class="lens-grid">
                 <div class="lens-field wide">
                   <label for="lensLensModelInput" data-i18n="lensLensModel">Lens Model</label>
-                  <input id="lensLensModelInput" type="text" placeholder="e.g. 50mm f/1.8">
+                  <input id="lensLensModelInput" type="text" placeholder="e.g. 50mm f/1.8" data-i18n-placeholder="lensLensModelPlaceholder">
                 </div>
                 <div class="lens-field">
                   <label for="lensLensMakerInput" data-i18n="lensLensMaker">Lens Maker</label>
-                  <input id="lensLensMakerInput" type="text" placeholder="optional">
+                  <input id="lensLensMakerInput" type="text" placeholder="optional" data-i18n-placeholder="lensOptionalPlaceholder">
                 </div>
                 <div class="lens-field">
                   <label for="lensCameraModelInput" data-i18n="lensCameraModel">Camera Model</label>
-                  <input id="lensCameraModelInput" type="text" placeholder="optional">
+                  <input id="lensCameraModelInput" type="text" placeholder="optional" data-i18n-placeholder="lensOptionalPlaceholder">
                 </div>
                 <div class="lens-field">
                   <label for="lensCameraMakerInput" data-i18n="lensCameraMaker">Camera Maker</label>
-                  <input id="lensCameraMakerInput" type="text" placeholder="optional">
+                  <input id="lensCameraMakerInput" type="text" placeholder="optional" data-i18n-placeholder="lensOptionalPlaceholder">
                 </div>
                 <div class="lens-field">
                   <button class="film-base-btn" id="lensSearchBtn" type="button" data-i18n="lensSearchBtn">Search Profiles</button>
@@ -794,7 +729,9 @@
                       <option value="auto" data-i18n="lensStepAuto">Auto</option>
                       <option value="manual" data-i18n="lensStepManual">Manual</option>
                     </select>
-                    <input id="lensStepInput" type="number" min="1" max="16" step="1" value="2" title="step">
+                    <input id="lensStepInput" type="number" min="1" max="16" step="1" value="2"
+                      data-i18n-title="lensStepValue" data-i18n-aria-label="lensStepValue"
+                      title="Map step" aria-label="Map step">
                   </div>
                 </div>
               </div>
@@ -810,12 +747,8 @@
       <!-- SP3000-style correction console (Step 3 default view) -->
       <div class="control-section task-primary" id="consoleSection" style="display: none;">
         <div class="section-header" data-section="console">
-          <span class="section-title" data-i18n="sectionConsole">Correction Console</span>
-          <div class="panel-mode-toggle" id="panelModeToggle">
-            <button type="button" class="panel-mode-btn" id="panelModeQuickBtn" data-i18n="panelModeQuick">Quick</button>
-            <button type="button" class="panel-mode-btn" id="panelModeDetailBtn" data-i18n="panelModeDetail">Detail</button>
-          </div>
-          <span class="section-toggle">▼</span>
+          <button type="button" class="section-title" aria-expanded="true" aria-controls="consoleSectionContent" data-i18n="sectionConsole">Correction Console</button>
+          <span class="section-toggle" aria-hidden="true">▼</span>
         </div>
         <div class="section-content" id="consoleSectionContent">
           <div class="console-keypad" id="consoleKeypad">
@@ -844,7 +777,7 @@
               <button type="button" class="console-key" data-channel="density" data-dir="-1" aria-label="D −1">−</button>
             </div>
           </div>
-          <button type="button" class="console-reset-key" id="consoleResetBtn" aria-label="Reset C M Y D">N</button>
+          <button type="button" class="console-reset-key" id="consoleResetBtn" aria-label="Reset C M Y D" data-i18n-aria-label="consoleResetAria">N</button>
           <div class="console-key-hint" data-i18n="consoleKeyHint">Keys: c / m / y / d = +1 · Shift = −1 · n = reset</div>
         </div>
       </div>
@@ -852,8 +785,8 @@
       <!-- Cleanup (Step 3, before other adjustments) -->
       <div class="control-section task-secondary" id="dustRemovalSection" style="display: none;">
         <div class="section-header" data-section="dustRemoval">
-          <span class="section-title" data-i18n="sectionCleanup">Cleanup</span>
-          <span class="section-toggle">▼</span>
+          <button type="button" class="section-title" aria-expanded="true" aria-controls="dustRemovalSectionContent" data-i18n="sectionCleanup">Cleanup</button>
+          <span class="section-toggle" aria-hidden="true">▼</span>
         </div>
         <div class="section-content" id="dustRemovalSectionContent">
           <div class="control-group">
@@ -865,19 +798,19 @@
             <div id="dustRemovalControls" style="display: none;">
               <div class="slider-control">
                 <div class="slider-header">
-                  <span class="slider-label" data-i18n="dustStrength">Sensitivity</span>
-                  <input type="number" class="slider-number-input" id="dustStrengthValue" min="1" max="10" step="1" value="3">
+                  <span class="slider-label" id="dustStrengthLabel" data-i18n="dustStrength">Sensitivity</span>
+                  <input type="number" class="slider-number-input" id="dustStrengthValue" min="1" max="10" step="1" value="3" aria-labelledby="dustStrengthLabel">
                 </div>
-                <input type="range" class="slider-input" id="dustStrength" min="1" max="10" step="1" value="3">
+                <input type="range" class="slider-input" id="dustStrength" min="1" max="10" step="1" value="3" aria-labelledby="dustStrengthLabel">
               </div>
               <div class="slider-control">
                 <div class="slider-header">
-                  <span class="slider-label" data-i18n="dustMaxSize">Max Particle Size (px)</span>
-                  <input type="number" class="slider-number-input" id="dustMaxSizeValue" min="6" max="80" step="1" value="40">
+                  <span class="slider-label" id="dustMaxSizeLabel" data-i18n="dustMaxSize">Max Particle Size (px)</span>
+                  <input type="number" class="slider-number-input" id="dustMaxSizeValue" min="6" max="80" step="1" value="40" aria-labelledby="dustMaxSizeLabel">
                 </div>
-                <input type="range" class="slider-input" id="dustMaxSize" min="6" max="80" step="1" value="40">
+                <input type="range" class="slider-input" id="dustMaxSize" min="6" max="80" step="1" value="40" aria-labelledby="dustMaxSizeLabel">
               </div>
-              <div class="info-box" id="dustStatus" data-i18n="dustStatusIdle">Ready</div>
+              <div class="info-box" id="dustStatus" role="status" data-i18n="dustStatusIdle">Ready</div>
               <label class="roll-reference-option">
                 <input type="checkbox" id="dustShowMask">
                 <span data-i18n="dustShowMask">Show Mask</span>
@@ -885,10 +818,10 @@
               <div id="dustBrushControls" style="display: none;">
                 <div class="slider-control">
                   <div class="slider-header">
-                    <span class="slider-label" data-i18n="dustBrushSize">Brush Size</span>
-                    <input type="number" class="slider-number-input" id="dustBrushSizeValue" min="1" max="50" step="1" value="5">
+                    <span class="slider-label" id="dustBrushSizeLabel" data-i18n="dustBrushSize">Brush Size</span>
+                    <input type="number" class="slider-number-input" id="dustBrushSizeValue" min="1" max="50" step="1" value="5" aria-labelledby="dustBrushSizeLabel">
                   </div>
-                  <input type="range" class="slider-input" id="dustBrushSize" min="1" max="50" step="1" value="5">
+                  <input type="range" class="slider-input" id="dustBrushSize" min="1" max="50" step="1" value="5" aria-labelledby="dustBrushSizeLabel">
                 </div>
                 <div class="info-box" style="font-size: 11px; padding: 6px 8px;" data-i18n="dustBrushHint">Click = Smart | Alt+Click = Direct | Shift+Click = Erase</div>
               </div>
@@ -901,8 +834,8 @@
       <!-- Color Model (Step 3, SilverCore) -->
       <div class="control-section task-secondary" id="whiteBalanceSection" style="display: none;">
         <div class="section-header" data-section="conversion">
-          <span class="section-title" data-i18n="sectionQuickFix">Quick Fix</span>
-          <span class="section-toggle">▼</span>
+          <button type="button" class="section-title" aria-expanded="true" aria-controls="conversionSectionContent" data-i18n="sectionQuickFix">Quick Fix</button>
+          <span class="section-toggle" aria-hidden="true">▼</span>
         </div>
         <div class="section-content" id="conversionSectionContent">
           <div class="control-group is-primary">
@@ -922,66 +855,66 @@
       <!-- Tone (Step 3, SilverCore) -->
       <div class="control-section task-primary" id="toneSection" style="display: none;">
         <div class="section-header" data-section="tone">
-          <span class="section-title" data-i18n="toneAdjustments">Tone</span>
-          <span class="section-toggle">▼</span>
+          <button type="button" class="section-title" aria-expanded="true" aria-controls="toneSectionContent" data-i18n="toneAdjustments">Tone</button>
+          <span class="section-toggle" aria-hidden="true">▼</span>
         </div>
         <div class="section-content" id="toneSectionContent">
           <div class="control-group is-primary">
             <div class="control-group-title"><span data-i18n="groupToneGlobal">Overall</span></div>
             <div class="slider-control">
               <div class="slider-header">
-                <span class="slider-label" data-i18n="exposure">Exposure</span>
-                <input type="number" class="slider-number-input" id="coreExposureValue" min="-300" max="300" step="1" value="0">
+                <span class="slider-label" id="coreExposureLabel" data-i18n="exposure">Exposure</span>
+                <input type="number" class="slider-number-input" id="coreExposureValue" min="-300" max="300" step="1" value="0" aria-labelledby="coreExposureLabel">
               </div>
-              <input type="range" class="slider-input" id="coreExposure" min="-300" max="300" step="1" value="0">
+              <input type="range" class="slider-input" id="coreExposure" min="-300" max="300" step="1" value="0" aria-labelledby="coreExposureLabel">
             </div>
             <div class="slider-control">
               <div class="slider-header">
-                <span class="slider-label" data-i18n="coreBrightness">Brightness</span>
-                <input type="number" class="slider-number-input" id="coreBrightnessValue" min="-100" max="100" step="1" value="0">
+                <span class="slider-label" id="coreBrightnessLabel" data-i18n="coreBrightness">Brightness</span>
+                <input type="number" class="slider-number-input" id="coreBrightnessValue" min="-100" max="100" step="1" value="0" aria-labelledby="coreBrightnessLabel">
               </div>
-              <input type="range" class="slider-input" id="coreBrightness" min="-100" max="100" step="1" value="0">
+              <input type="range" class="slider-input" id="coreBrightness" min="-100" max="100" step="1" value="0" aria-labelledby="coreBrightnessLabel">
             </div>
             <div class="slider-control">
               <div class="slider-header">
-                <span class="slider-label" data-i18n="contrast">Contrast</span>
-                <input type="number" class="slider-number-input" id="coreContrastValue" min="-100" max="100" step="1" value="0">
+                <span class="slider-label" id="coreContrastLabel" data-i18n="contrast">Contrast</span>
+                <input type="number" class="slider-number-input" id="coreContrastValue" min="-100" max="100" step="1" value="0" aria-labelledby="coreContrastLabel">
               </div>
-              <input type="range" class="slider-input" id="coreContrast" min="-100" max="100" step="1" value="0">
+              <input type="range" class="slider-input" id="coreContrast" min="-100" max="100" step="1" value="0" aria-labelledby="coreContrastLabel">
             </div>
           </div>
           <div class="control-group">
             <div class="control-group-title"><span data-i18n="groupToneRange">Highlight and shadow range</span></div>
             <div class="slider-control">
               <div class="slider-header">
-                <span class="slider-label" data-i18n="highlights">Highlights</span>
-                <input type="number" class="slider-number-input" id="coreHighlightsValue" min="-100" max="100" step="1" value="0">
+                <span class="slider-label" id="coreHighlightsLabel" data-i18n="highlights">Highlights</span>
+                <input type="number" class="slider-number-input" id="coreHighlightsValue" min="-100" max="100" step="1" value="0" aria-labelledby="coreHighlightsLabel">
               </div>
-              <input type="range" class="slider-input" id="coreHighlights" min="-100" max="100" step="1" value="0">
+              <input type="range" class="slider-input" id="coreHighlights" min="-100" max="100" step="1" value="0" aria-labelledby="coreHighlightsLabel">
             </div>
             <div class="slider-control">
               <div class="slider-header">
-                <span class="slider-label" data-i18n="shadows">Shadows</span>
-                <input type="number" class="slider-number-input" id="coreShadowsValue" min="-100" max="100" step="1" value="0">
+                <span class="slider-label" id="coreShadowsLabel" data-i18n="shadows">Shadows</span>
+                <input type="number" class="slider-number-input" id="coreShadowsValue" min="-100" max="100" step="1" value="0" aria-labelledby="coreShadowsLabel">
               </div>
-              <input type="range" class="slider-input" id="coreShadows" min="-100" max="100" step="1" value="0">
+              <input type="range" class="slider-input" id="coreShadows" min="-100" max="100" step="1" value="0" aria-labelledby="coreShadowsLabel">
             </div>
           </div>
           <div class="control-group">
             <div class="control-group-title"><span data-i18n="groupToneEndpoints">Black and white points</span></div>
             <div class="slider-control">
               <div class="slider-header">
-                <span class="slider-label" data-i18n="coreWhites">Whites</span>
-                <input type="number" class="slider-number-input" id="coreWhitesValue" min="-100" max="100" step="1" value="0">
+                <span class="slider-label" id="coreWhitesLabel" data-i18n="coreWhites">Whites</span>
+                <input type="number" class="slider-number-input" id="coreWhitesValue" min="-100" max="100" step="1" value="0" aria-labelledby="coreWhitesLabel">
               </div>
-              <input type="range" class="slider-input" id="coreWhites" min="-100" max="100" step="1" value="0">
+              <input type="range" class="slider-input" id="coreWhites" min="-100" max="100" step="1" value="0" aria-labelledby="coreWhitesLabel">
             </div>
             <div class="slider-control">
               <div class="slider-header">
-                <span class="slider-label" data-i18n="coreBlacks">Blacks</span>
-                <input type="number" class="slider-number-input" id="coreBlacksValue" min="-100" max="100" step="1" value="0">
+                <span class="slider-label" id="coreBlacksLabel" data-i18n="coreBlacks">Blacks</span>
+                <input type="number" class="slider-number-input" id="coreBlacksValue" min="-100" max="100" step="1" value="0" aria-labelledby="coreBlacksLabel">
               </div>
-              <input type="range" class="slider-input" id="coreBlacks" min="-100" max="100" step="1" value="0">
+              <input type="range" class="slider-input" id="coreBlacks" min="-100" max="100" step="1" value="0" aria-labelledby="coreBlacksLabel">
             </div>
           </div>
         </div>
@@ -990,17 +923,17 @@
       <!-- Color (Step 3, SilverCore) -->
       <div class="control-section task-secondary" id="colorSection" style="display: none;">
         <div class="section-header" data-section="color">
-          <span class="section-title" data-i18n="sectionColor">Color</span>
-          <span class="section-toggle">▼</span>
+          <button type="button" class="section-title" aria-expanded="true" aria-controls="colorSectionContent" data-i18n="sectionColor">Color</button>
+          <span class="section-toggle" aria-hidden="true">▼</span>
         </div>
         <div class="section-content" id="colorSectionContent">
           <div class="control-group is-primary">
             <div class="control-group-title"><span data-i18n="groupWhiteBalance">White balance</span></div>
             <div class="slider-control">
               <div class="slider-header">
-                <span class="slider-label" data-i18n="coreWbModeLabel">White Balance</span>
+                <span class="slider-label" id="coreWbModeLabel" data-i18n="coreWbModeLabel">White Balance</span>
               </div>
-              <select class="preset-select" id="coreWbMode">
+              <select class="preset-select" id="coreWbMode" aria-labelledby="coreWbModeLabel">
                 <option value="auto" selected data-i18n="wbAutoLinearFixed">Auto (Linear Fixed)</option>
                 <option value="linearDynamic" data-i18n="wbLinearDynamic">Linear Dynamic</option>
                 <option value="shadowWeighted" data-i18n="wbShadowWeighted">Shadow Weighted</option>
@@ -1010,34 +943,34 @@
             </div>
             <div class="slider-control">
               <div class="slider-header">
-                <span class="slider-label" data-i18n="temperature">Temperature</span>
-                <input type="number" class="slider-number-input" id="coreTemperatureValue" min="-100" max="100" step="1" value="0">
+                <span class="slider-label" id="coreTemperatureLabel" data-i18n="temperature">Temperature</span>
+                <input type="number" class="slider-number-input" id="coreTemperatureValue" min="-100" max="100" step="1" value="0" aria-labelledby="coreTemperatureLabel">
               </div>
-              <input type="range" class="slider-input" id="coreTemperature" min="-100" max="100" step="1" value="0">
+              <input type="range" class="slider-input" id="coreTemperature" min="-100" max="100" step="1" value="0" aria-labelledby="coreTemperatureLabel">
             </div>
             <div class="slider-control">
               <div class="slider-header">
-                <span class="slider-label" data-i18n="tint">Tint</span>
-                <input type="number" class="slider-number-input" id="coreTintValue" min="-100" max="100" step="1" value="0">
+                <span class="slider-label" id="coreTintLabel" data-i18n="tint">Tint</span>
+                <input type="number" class="slider-number-input" id="coreTintValue" min="-100" max="100" step="1" value="0" aria-labelledby="coreTintLabel">
               </div>
-              <input type="range" class="slider-input" id="coreTint" min="-100" max="100" step="1" value="0">
+              <input type="range" class="slider-input" id="coreTint" min="-100" max="100" step="1" value="0" aria-labelledby="coreTintLabel">
             </div>
           </div>
           <div class="control-group">
             <div class="control-group-title"><span data-i18n="groupColorStrength">Color strength</span></div>
             <div class="slider-control">
               <div class="slider-header">
-                <span class="slider-label" data-i18n="saturation">Saturation</span>
-                <input type="number" class="slider-number-input" id="coreSaturationValue" min="0" max="200" step="1" value="100">
+                <span class="slider-label" id="coreSaturationLabel" data-i18n="saturation">Saturation</span>
+                <input type="number" class="slider-number-input" id="coreSaturationValue" min="0" max="200" step="1" value="100" aria-labelledby="coreSaturationLabel">
               </div>
-              <input type="range" class="slider-input" id="coreSaturation" min="0" max="200" step="1" value="100">
+              <input type="range" class="slider-input" id="coreSaturation" min="0" max="200" step="1" value="100" aria-labelledby="coreSaturationLabel">
             </div>
             <div class="slider-control">
               <div class="slider-header">
-                <span class="slider-label" data-i18n="corePreSaturation">Pre-Saturation</span>
-                <input type="number" class="slider-number-input" id="corePreSaturationValue" min="0" max="200" step="1" value="100">
+                <span class="slider-label" id="corePreSaturationLabel" data-i18n="corePreSaturation">Pre-Saturation</span>
+                <input type="number" class="slider-number-input" id="corePreSaturationValue" min="0" max="200" step="1" value="100" aria-labelledby="corePreSaturationLabel">
               </div>
-              <input type="range" class="slider-input" id="corePreSaturation" min="0" max="200" step="1" value="100">
+              <input type="range" class="slider-input" id="corePreSaturation" min="0" max="200" step="1" value="100" aria-labelledby="corePreSaturationLabel">
             </div>
           </div>
         </div>
@@ -1046,47 +979,48 @@
       <!-- Effects (Step 3, SilverCore) -->
       <div class="control-section task-secondary" id="cmySection" style="display: none;">
         <div class="section-header" data-section="effects">
-          <span class="section-title" data-i18n="sectionLook">Look</span>
-          <span class="section-toggle">▼</span>
+          <button type="button" class="section-title" aria-expanded="true" aria-controls="effectsSectionContent" data-i18n="sectionLook">Look</button>
+          <span class="section-toggle" aria-hidden="true">▼</span>
         </div>
         <div class="section-content" id="effectsSectionContent">
           <div class="control-group is-primary">
             <div class="control-group-title"><span data-i18n="groupLookProfile">Profile character</span></div>
             <div class="slider-control">
               <div class="slider-header">
-                <span class="slider-label" data-i18n="coreEnhancedProfile">Enhanced Profile</span>
+                <span class="slider-label" id="coreEnhancedProfileLabel" data-i18n="coreEnhancedProfile">Enhanced Profile</span>
               </div>
-              <select class="preset-select" id="coreEnhancedProfile">
+              <select class="preset-select" id="coreEnhancedProfile" aria-labelledby="coreEnhancedProfileLabel">
                 <option value="none" selected data-i18n="coreProfileNone">None</option>
                 <option value="frontier" data-i18n="coreProfileFrontier">Frontier</option>
                 <option value="crystal" data-i18n="coreProfileCrystal">Crystal</option>
                 <option value="natural" data-i18n="coreProfileNatural">Natural</option>
                 <option value="pakon" data-i18n="coreProfilePakon">Pakon</option>
+                <option value="noritsu" data-i18n="coreProfileNoritsu">Noritsu</option>
               </select>
             </div>
             <div class="slider-control">
               <div class="slider-header">
-                <span class="slider-label" data-i18n="coreProfileStrength">Profile Strength</span>
-                <input type="number" class="slider-number-input" id="coreProfileStrengthValue" min="0" max="200" step="25" value="100">
+                <span class="slider-label" id="coreProfileStrengthLabel" data-i18n="coreProfileStrength">Profile Strength</span>
+                <input type="number" class="slider-number-input" id="coreProfileStrengthValue" min="0" max="200" step="25" value="100" aria-labelledby="coreProfileStrengthLabel">
               </div>
-              <input type="range" class="slider-input" id="coreProfileStrength" min="0" max="200" step="25" value="100">
+              <input type="range" class="slider-input" id="coreProfileStrength" min="0" max="200" step="25" value="100" aria-labelledby="coreProfileStrengthLabel">
             </div>
           </div>
           <div class="control-group">
             <div class="control-group-title"><span data-i18n="groupLookAtmosphere">Atmosphere</span></div>
             <div class="slider-control">
               <div class="slider-header">
-                <span class="slider-label" data-i18n="coreGlow">Glow</span>
-                <input type="number" class="slider-number-input" id="coreGlowValue" min="0" max="100" step="1" value="0">
+                <span class="slider-label" id="coreGlowLabel" data-i18n="coreGlow">Glow</span>
+                <input type="number" class="slider-number-input" id="coreGlowValue" min="0" max="100" step="1" value="0" aria-labelledby="coreGlowLabel">
               </div>
-              <input type="range" class="slider-input" id="coreGlow" min="0" max="100" step="1" value="0">
+              <input type="range" class="slider-input" id="coreGlow" min="0" max="100" step="1" value="0" aria-labelledby="coreGlowLabel">
             </div>
             <div class="slider-control">
               <div class="slider-header">
-                <span class="slider-label" data-i18n="coreFade">Fade</span>
-                <input type="number" class="slider-number-input" id="coreFadeValue" min="0" max="100" step="1" value="0">
+                <span class="slider-label" id="coreFadeLabel" data-i18n="coreFade">Fade</span>
+                <input type="number" class="slider-number-input" id="coreFadeValue" min="0" max="100" step="1" value="0" aria-labelledby="coreFadeLabel">
               </div>
-              <input type="range" class="slider-input" id="coreFade" min="0" max="100" step="1" value="0">
+              <input type="range" class="slider-input" id="coreFade" min="0" max="100" step="1" value="0" aria-labelledby="coreFadeLabel">
             </div>
           </div>
         </div>
@@ -1095,17 +1029,17 @@
       <!-- Engine (Step 3, SilverCore) -->
       <div class="control-section task-advanced" id="advancedSection" style="display: none;">
         <div class="section-header" data-section="engine">
-          <span class="section-title" data-i18n="sectionEngine">Engine</span>
-          <span class="section-toggle">▼</span>
+          <button type="button" class="section-title" aria-expanded="true" aria-controls="engineSectionContent" data-i18n="sectionEngine">Engine</button>
+          <span class="section-toggle" aria-hidden="true">▼</span>
         </div>
         <div class="section-content" id="engineSectionContent">
           <div class="control-group">
             <div class="control-group-title"><span data-i18n="groupEngineProcessing">Processing</span></div>
             <div class="slider-control">
               <div class="slider-header">
-                <span class="slider-label" data-i18n="coreCurvePrecision">Curve Precision</span>
+                <span class="slider-label" id="coreCurvePrecisionLabel" data-i18n="coreCurvePrecision">Curve Precision</span>
               </div>
-              <select class="preset-select" id="coreCurvePrecision">
+              <select class="preset-select" id="coreCurvePrecision" aria-labelledby="coreCurvePrecisionLabel">
                 <option value="auto" selected data-i18n="curvePrecisionAuto30">Auto (30 points)</option>
                 <option value="smooth" data-i18n="curvePrecisionSmooth70">Smooth (70 points)</option>
                 <option value="precise" data-i18n="curvePrecisionPrecise128">Precise (128 points)</option>
@@ -1122,67 +1056,67 @@
       <!-- Additional (Legacy Fine Tune) -->
       <div class="control-section task-advanced" id="additionalSection" style="display: none;">
         <div class="section-header" data-section="additional">
-          <span class="section-title" data-i18n="advanced">Advanced</span>
-          <span class="section-toggle collapsed">▼</span>
+          <button type="button" class="section-title" aria-expanded="false" aria-controls="additionalSectionContent" data-i18n="advanced">Advanced</button>
+          <span class="section-toggle collapsed" aria-hidden="true">▼</span>
         </div>
         <div class="section-content collapsed" id="additionalSectionContent">
           <div class="control-group">
-            <div class="control-group-title"><span data-i18n="groupAdvancedRgb">RGB gain</span></div>
+            <div class="control-group-title"><span id="groupAdvancedRgbLabel" data-i18n="groupAdvancedRgb">RGB gain</span></div>
             <div class="slider-control">
               <div class="slider-header">
-                <span class="slider-label">R</span>
-                <input type="number" class="slider-number-input" id="wbRValue" min="0.5" max="2" step="0.01" value="1.00">
+                <span class="slider-label" id="wbRLabel">R</span>
+                <input type="number" class="slider-number-input" id="wbRValue" min="0.5" max="2" step="0.01" value="1.00" aria-labelledby="groupAdvancedRgbLabel wbRLabel">
               </div>
-              <input type="range" class="slider-input" id="wbR" min="0.5" max="2" step="0.01" value="1">
+              <input type="range" class="slider-input" id="wbR" min="0.5" max="2" step="0.01" value="1" aria-labelledby="wbRLabel">
             </div>
             <div class="slider-control">
               <div class="slider-header">
-                <span class="slider-label">G</span>
-                <input type="number" class="slider-number-input" id="wbGValue" min="0.5" max="2" step="0.01" value="1.00">
+                <span class="slider-label" id="wbGLabel">G</span>
+                <input type="number" class="slider-number-input" id="wbGValue" min="0.5" max="2" step="0.01" value="1.00" aria-labelledby="groupAdvancedRgbLabel wbGLabel">
               </div>
-              <input type="range" class="slider-input" id="wbG" min="0.5" max="2" step="0.01" value="1">
+              <input type="range" class="slider-input" id="wbG" min="0.5" max="2" step="0.01" value="1" aria-labelledby="wbGLabel">
             </div>
             <div class="slider-control">
               <div class="slider-header">
-                <span class="slider-label">B</span>
-                <input type="number" class="slider-number-input" id="wbBValue" min="0.5" max="2" step="0.01" value="1.00">
+                <span class="slider-label" id="wbBLabel">B</span>
+                <input type="number" class="slider-number-input" id="wbBValue" min="0.5" max="2" step="0.01" value="1.00" aria-labelledby="groupAdvancedRgbLabel wbBLabel">
               </div>
-              <input type="range" class="slider-input" id="wbB" min="0.5" max="2" step="0.01" value="1">
+              <input type="range" class="slider-input" id="wbB" min="0.5" max="2" step="0.01" value="1" aria-labelledby="wbBLabel">
             </div>
           </div>
           <div class="control-group">
             <div class="control-group-title"><span data-i18n="groupAdvancedCmy">CMY balance</span></div>
             <div class="slider-control">
               <div class="slider-header">
-                <span class="slider-label" data-i18n="cyan">Cyan</span>
-                <input type="number" class="slider-number-input" id="cyanValue" min="-100" max="100" step="1" value="0">
+                <span class="slider-label" id="cyanLabel" data-i18n="cyan">Cyan</span>
+                <input type="number" class="slider-number-input" id="cyanValue" min="-100" max="100" step="1" value="0" aria-labelledby="cyanLabel">
               </div>
-              <input type="range" class="slider-input" id="cyan" min="-100" max="100" step="1" value="0">
+              <input type="range" class="slider-input" id="cyan" min="-100" max="100" step="1" value="0" aria-labelledby="cyanLabel">
             </div>
             <div class="slider-control">
               <div class="slider-header">
-                <span class="slider-label" data-i18n="magenta">Magenta</span>
-                <input type="number" class="slider-number-input" id="magentaValue" min="-100" max="100" step="1" value="0">
+                <span class="slider-label" id="magentaLabel" data-i18n="magenta">Magenta</span>
+                <input type="number" class="slider-number-input" id="magentaValue" min="-100" max="100" step="1" value="0" aria-labelledby="magentaLabel">
               </div>
-              <input type="range" class="slider-input" id="magenta" min="-100" max="100" step="1" value="0">
+              <input type="range" class="slider-input" id="magenta" min="-100" max="100" step="1" value="0" aria-labelledby="magentaLabel">
             </div>
             <div class="slider-control">
               <div class="slider-header">
-                <span class="slider-label" data-i18n="yellow">Yellow</span>
-                <input type="number" class="slider-number-input" id="yellowValue" min="-100" max="100" step="1" value="0">
+                <span class="slider-label" id="yellowLabel" data-i18n="yellow">Yellow</span>
+                <input type="number" class="slider-number-input" id="yellowValue" min="-100" max="100" step="1" value="0" aria-labelledby="yellowLabel">
               </div>
-              <input type="range" class="slider-input" id="yellow" min="-100" max="100" step="1" value="0">
+              <input type="range" class="slider-input" id="yellow" min="-100" max="100" step="1" value="0" aria-labelledby="yellowLabel">
             </div>
           </div>
           <div class="control-group">
             <div class="control-group-title"><span data-i18n="groupAdvancedCurve">Curve</span></div>
             <div class="curve-editor">
               <p class="curve-hint" data-i18n="curveHint">Click and drag to adjust the curve</p>
-              <div class="curve-tabs">
-                <button class="curve-tab r active" data-channel="r">R</button>
-                <button class="curve-tab g" data-channel="g">G</button>
-                <button class="curve-tab b" data-channel="b">B</button>
-                <button class="curve-tab reset" id="resetCurveBtn" data-i18n="resetCurve">Reset</button>
+              <div class="curve-tabs" role="group" aria-label="Curve channel" data-i18n-aria-label="groupCurveChannel">
+                <button class="curve-tab r active" type="button" data-channel="r" aria-pressed="true" aria-label="Red channel" data-i18n-aria-label="curveChannelR">R</button>
+                <button class="curve-tab g" type="button" data-channel="g" aria-pressed="false" aria-label="Green channel" data-i18n-aria-label="curveChannelG">G</button>
+                <button class="curve-tab b" type="button" data-channel="b" aria-pressed="false" aria-label="Blue channel" data-i18n-aria-label="curveChannelB">B</button>
+                <button class="curve-tab reset" type="button" id="resetCurveBtn" data-i18n="resetCurve">Reset</button>
               </div>
               <canvas class="curve-canvas" id="curveCanvas"></canvas>
               <div class="curve-presets">
@@ -1198,9 +1132,8 @@
   </main>
 
   <!-- Footer -->
-  <footer class="app-footer" id="appFooter" style="display: none;">
+  <div id="studioExportSource" hidden>
     <div class="footer-left">
-      <button class="footer-btn" id="newImageBtn" data-i18n="newImage">New Image</button>
       <button class="footer-btn" id="undoBtn" title="Ctrl+Z / ⌘Z" disabled>
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: -2px; margin-right: 2px;"><path d="M3 10h10a5 5 0 0 1 0 10H9"/><polyline points="7 14 3 10 7 6"/></svg>
         <span data-i18n="undo">Undo</span>
@@ -1209,38 +1142,37 @@
         <span data-i18n="redo">Redo</span>
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: -2px; margin-left: 2px;"><path d="M21 10H11a5 5 0 0 0 0 10h4"/><polyline points="17 14 21 10 17 6"/></svg>
       </button>
-      <button class="footer-btn" id="resetBtn" data-i18n="reset">Reset</button>
-      <button class="footer-btn" id="startOverBtn" data-i18n="startOver">Start Over</button>
     </div>
     <div class="footer-right">
       <button class="footer-btn" id="saveSettingsBtn" style="display: none;" data-i18n="saveSettings">Save Settings</button>
       <button class="footer-btn" id="applyToSelectedBtn" style="display: none;" data-i18n="applyToSelected">Apply to Selected</button>
       <div class="export-dropdown">
-        <button class="footer-btn primary" id="exportBtn" data-i18n="exportPng">Export PNG</button>
-        <button class="footer-btn" id="exportSprocketBtn" data-i18n="exportSprocketPng" aria-pressed="false">Export Sprocket PNG</button>
-        <div class="export-dropdown-menu" id="exportDropdownMenu">
+        <button class="footer-btn primary" id="exportBtn" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="exportDropdownMenu" data-i18n="exportPng">Export PNG</button>
+        <button class="footer-btn" id="exportSprocketBtn" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="exportDropdownMenu" aria-pressed="false" data-i18n="exportSprocketPng">Export Sprocket PNG</button>
+        <div class="export-dropdown-menu" id="exportDropdownMenu" role="group" aria-label="Export options" data-i18n-aria-label="exportOptions">
           <div class="export-format-section">
-            <div class="export-format-label" data-i18n="exportFormat">Export Format</div>
-            <div class="export-format-toggle">
-              <button class="format-btn active" data-format="png">PNG</button>
-              <button class="format-btn" data-format="jpeg">JPEG</button>
-              <button class="format-btn" data-format="tiff">TIFF</button>
+            <div class="export-format-label" id="exportFormatLabel" data-i18n="exportFormat">Export Format</div>
+            <div class="export-format-toggle" role="group" aria-labelledby="exportFormatLabel">
+              <button class="format-btn active" type="button" data-format="png" aria-pressed="true">PNG</button>
+              <button class="format-btn" type="button" data-format="jpeg" aria-pressed="false">JPEG</button>
+              <button class="format-btn" type="button" data-format="tiff" aria-pressed="false">TIFF</button>
             </div>
           </div>
           <div class="export-bitdepth-section" id="exportBitDepthSection">
-            <div class="export-format-label" data-i18n="exportBitDepth">Bit Depth</div>
-            <div class="export-bitdepth-toggle">
-              <button class="bitdepth-btn active" data-bitdepth="8">8-bit</button>
-              <button class="bitdepth-btn" data-bitdepth="16">16-bit</button>
+            <div class="export-format-label" id="exportBitDepthLabel" data-i18n="exportBitDepth">Bit Depth</div>
+            <div class="export-bitdepth-toggle" role="group" aria-labelledby="exportBitDepthLabel">
+              <button class="bitdepth-btn active" type="button" data-bitdepth="8" aria-pressed="true">8-bit</button>
+              <button class="bitdepth-btn" type="button" data-bitdepth="16" aria-pressed="false">16-bit</button>
             </div>
             <div class="export-bitdepth-note" id="exportBitDepthNote" data-i18n="bitDepthJpegLocked"></div>
+            <div class="export-bitdepth-note" id="exportBitDepthDowngradeNote" data-i18n="bitDepth8BitData"></div>
           </div>
           <div class="export-quality-section" id="exportQualitySection">
             <div class="export-quality-header">
-              <span class="export-quality-label" data-i18n="jpegQuality">JPEG Quality</span>
+              <span class="export-quality-label" id="exportQualityLabel" data-i18n="jpegQuality">JPEG Quality</span>
               <span class="export-quality-value" id="exportQualityValue">92%</span>
             </div>
-            <input type="range" class="export-quality-slider" id="exportQualitySlider" min="1" max="100" value="92">
+            <input type="range" class="export-quality-slider" id="exportQualitySlider" min="1" max="100" value="92" aria-labelledby="exportQualityLabel">
           </div>
           <button class="export-dropdown-item" id="exportSingleBtn" data-i18n="exportCurrent">Export Current (PNG)</button>
           <div class="export-dropdown-divider"></div>
@@ -1249,30 +1181,20 @@
         </div>
       </div>
     </div>
-  </footer>
+  </div>
 
   <!-- Batch Progress Modal -->
   <div class="batch-progress-overlay" id="batchProgressOverlay" style="display: none;">
-    <div class="batch-progress-modal">
-      <div class="batch-progress-title" data-i18n="batchProcessing">Batch Processing...</div>
-      <div class="batch-progress-bar">
+    <div class="batch-progress-modal" role="dialog" aria-modal="true" aria-labelledby="batchProgressTitle" aria-describedby="batchProgressText">
+      <div class="batch-progress-title" id="batchProgressTitle" data-i18n="batchProcessing">Batch Processing...</div>
+      <div class="batch-progress-bar" id="batchProgressBar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
         <div class="batch-progress-fill" id="batchProgressFill" style="width: 0%;"></div>
       </div>
-      <div class="batch-progress-text" id="batchProgressText">0 / 0</div>
+      <div class="batch-progress-text" id="batchProgressText" role="status">0 / 0</div>
       <div class="batch-progress-current" id="batchProgressCurrent"></div>
     </div>
   </div>
 
-  <div class="frontier-guide-popup-overlay" id="frontierGuidePopupOverlay" aria-hidden="true">
-    <div class="frontier-guide-popup" role="dialog" aria-modal="true" aria-labelledby="frontierGuidePopupTitle">
-      <div class="frontier-guide-popup-title" id="frontierGuidePopupTitle" data-i18n="frontierGuidePopupTitle">Frontier look is now enabled</div>
-      <div class="frontier-guide-popup-body" id="frontierGuidePopupBody" data-i18n="frontierGuidePopupBody">For more vivid color, this image was switched to Color Model = Frontier and Film Preset = Frontier Lab before entering Step 3.</div>
-      <div class="frontier-guide-popup-note" id="frontierGuidePopupNote" data-i18n="frontierGuidePopupNote">You can still change both options in Step 2 any time. In Step 3, use the header’s gray-point sampler to fine-tune white balance.</div>
-      <div class="frontier-guide-popup-actions">
-        <button class="frontier-guide-popup-btn" id="frontierGuidePopupCloseBtn" type="button" data-i18n="frontierGuidePopupClose">Continue</button>
-      </div>
-    </div>
-  </div>
 
   <div class="feedback-popup-overlay" id="feedbackPopupOverlay" aria-hidden="true">
     <div class="feedback-popup" role="dialog" aria-modal="true" aria-labelledby="feedbackPopupTitle">
@@ -1284,6 +1206,7 @@
           <button type="button" class="feedback-type-btn" data-feedback-type="other" aria-pressed="false" data-i18n="feedbackTypeOther">Other</button>
         </div>
         <textarea class="feedback-message" id="feedbackMessage" rows="6" maxlength="4000"
+          aria-labelledby="feedbackPopupTitle"
           data-i18n-placeholder="feedbackMessagePlaceholder"
           placeholder="Describe the problem or the feature you'd like…"></textarea>
         <div class="feedback-image-row">
@@ -1318,14 +1241,12 @@
     </div>
   </div>
 
-  <div id="toastContainer"></div>
+  <div id="toastContainer" role="status" aria-live="polite" aria-atomic="false"></div>
   <script>
-    document.getElementById('copyrightYear').textContent = new Date().getFullYear();
-
     // GitHub star count (official REST API, cached locally to stay well under the rate limit)
     (function loadGithubStars() {
       const countEl = document.getElementById('githubStarCount');
-      const hostEl = document.querySelector('.header-copyright');
+      const hostEl = document.querySelector('.github-link');
       if (!countEl || !hostEl) return;
       const CACHE_KEY = 'nc_github_stars';
       const CACHE_TTL = 6 * 60 * 60 * 1000;
@@ -1336,9 +1257,8 @@
       };
       let requested = false;
       const load = () => {
-        // The header copyright block is hidden on narrow viewports; don't spend a
-        // GitHub API request (or leak one) for a count nobody can see.
-        if (requested || getComputedStyle(hostEl).display === 'none') return;
+        // モバイルで非表示の星数のためだけに通信しない。
+        if (requested || innerWidth <= 700 || getComputedStyle(hostEl).display === 'none') return;
         requested = true;
         window.removeEventListener('resize', load);
         let cached = null;
@@ -1358,6 +1278,137 @@
       };
       load();
       if (!requested) window.addEventListener('resize', load);
+    })();
+  </script>
+  <script>
+    /**
+     * Accessibility bridge.
+     *
+     * main.js drives the UI through CSS classes (`.active` on segmented
+     * toggles, `.collapsed` on section content, `.show` on the export menu).
+     * Assistive tech reads ARIA, not classes, so this mirrors that state onto
+     * the attributes and adds the focus handling the modal popups lack.
+     * Each block is idempotent: if main.js later sets the attribute itself the
+     * corresponding block here can simply be deleted.
+     */
+    (function accessibilityBridge() {
+      const setAttr = (el, name, on) => {
+        const value = on ? 'true' : 'false';
+        if (el.getAttribute(name) !== value) el.setAttribute(name, value);
+      };
+
+      // Segmented toggles: film type, mask source, export format / bit depth,
+      // curve channel, panel mode, language.
+      const TOGGLES = '.film-type-btn, .step2-mode-btn, .format-btn, .bitdepth-btn,'
+        + ' .curve-tab[data-channel], .panel-mode-btn, .lang-btn';
+      const syncToggles = () => {
+        document.querySelectorAll(TOGGLES).forEach((btn) => {
+          setAttr(btn, 'aria-pressed', btn.classList.contains('active'));
+        });
+        // JPEG cannot carry 16 bits; main.js marks that with a class only.
+        document.querySelectorAll('.bitdepth-btn').forEach((btn) => {
+          btn.disabled = btn.classList.contains('disabled');
+        });
+      };
+
+      const syncSections = () => {
+        document.querySelectorAll('button.section-title[aria-controls]').forEach((btn) => {
+          const content = document.getElementById(btn.getAttribute('aria-controls'));
+          if (content) setAttr(btn, 'aria-expanded', !content.classList.contains('collapsed'));
+        });
+      };
+
+      const syncExportMenu = () => {
+        const menu = document.getElementById('exportDropdownMenu');
+        if (!menu) return;
+        const open = menu.classList.contains('show');
+        ['exportBtn', 'exportSprocketBtn'].forEach((id) => {
+          const btn = document.getElementById(id);
+          if (btn) setAttr(btn, 'aria-expanded', open);
+        });
+      };
+
+      const syncAll = () => { syncToggles(); syncSections(); syncExportMenu(); };
+      syncAll();
+
+      let queued = false;
+      const schedule = () => {
+        if (queued) return;
+        queued = true;
+        requestAnimationFrame(() => { queued = false; syncAll(); });
+      };
+
+      // Only class changes on the elements above matter; everything else (drag
+      // states, zoom, canvas classes) is filtered out before any DOM query.
+      const WATCHED = TOGGLES + ', .section-content, .export-dropdown-menu';
+      new MutationObserver((records) => {
+        for (const record of records) {
+          const target = record.target;
+          if (target.nodeType === 1 && target.matches(WATCHED)) { schedule(); return; }
+        }
+      }).observe(document.body, { subtree: true, attributes: true, attributeFilter: ['class'] });
+
+      // Escape closes the export menu and returns focus to its button.
+      document.addEventListener('keydown', (event) => {
+        if (event.key !== 'Escape') return;
+        const menu = document.getElementById('exportDropdownMenu');
+        if (!menu || !menu.classList.contains('show')) return;
+        event.preventDefault();
+        event.stopPropagation();
+        menu.classList.remove('show');
+        syncExportMenu();
+        document.getElementById('exportBtn')?.focus();
+      }, true);
+
+      // Modal popups: main.js toggles `.visible` but never moves or restores
+      // focus, so keyboard users tab through the page behind the dialog.
+      const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]),'
+        + ' select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+      const overlays = ['feedbackPopupOverlay']
+        .map((id) => document.getElementById(id))
+        .filter(Boolean);
+      const returnFocusTo = new WeakMap();
+      const openOverlay = () => overlays.find((el) => el.classList.contains('visible')) || null;
+      const focusablesIn = (root) => [...root.querySelectorAll(FOCUSABLE)]
+        .filter((el) => el.offsetParent !== null || el === document.activeElement);
+
+      overlays.forEach((overlay) => {
+        new MutationObserver(() => {
+          const visible = overlay.classList.contains('visible');
+          if (visible && !returnFocusTo.has(overlay)) {
+            returnFocusTo.set(overlay, document.activeElement);
+            // main.js already focuses the feedback textarea; don't fight it.
+            requestAnimationFrame(() => {
+              if (overlay.contains(document.activeElement)) return;
+              focusablesIn(overlay)[0]?.focus();
+            });
+          } else if (!visible && returnFocusTo.has(overlay)) {
+            const previous = returnFocusTo.get(overlay);
+            returnFocusTo.delete(overlay);
+            if (previous && document.contains(previous)) previous.focus();
+          }
+        }).observe(overlay, { attributes: true, attributeFilter: ['class'] });
+      });
+
+      document.addEventListener('keydown', (event) => {
+        if (event.key !== 'Tab') return;
+        const overlay = openOverlay();
+        if (!overlay) return;
+        const items = focusablesIn(overlay);
+        if (!items.length) return;
+        const first = items[0];
+        const last = items[items.length - 1];
+        if (!overlay.contains(document.activeElement)) {
+          event.preventDefault();
+          (event.shiftKey ? last : first).focus();
+        } else if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+      });
     })();
   </script>
   <script type="module" src="./src/app/main.js"></script>

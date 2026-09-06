@@ -15,7 +15,13 @@ export async function loadLocalLensfunAssets() {
       moduleFactory: core.default || core.createLensfunCoreModule,
       wasmUrl: wasm.default || wasm,
       dataUrl: data.default || data
-    }));
+    })).catch((err) => {
+      // Don't cache the failure: a transient chunk-fetch error would otherwise
+      // disable lens correction for the rest of the session. Matches how the
+      // other lazy loaders (export encoders, JSZip, auto-frame) behave.
+      localLensfunAssetsPromise = null;
+      throw err;
+    });
   }
 
   return localLensfunAssetsPromise;

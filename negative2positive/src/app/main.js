@@ -1,29 +1,33 @@
     import opencvScriptUrl from '@techstark/opencv-js/dist/opencv.js?url';
-    import '@fontsource/inter/400.css';
-    import '@fontsource/inter/500.css';
-    import '@fontsource/inter/600.css';
-    import '@fontsource/orbitron/500.css';
-    import '@fontsource/orbitron/700.css';
-    import '@fontsource/share-tech-mono/400.css';
     import { i18n } from './i18n.js';
     import { interpolateText, summarizePathForUi } from './textUtils.js';
     import { computeSpline, buildCurveLut, getCurvePresetPoints, insertCurvePoint, moveCurvePoint, findNearPointIndex } from './curveMath.js';
     import { deepCopySanitizedSettings } from './settingsSnapshot.js';
     import { computeZoomGeometry, clampPanValues } from './zoomGeometry.js';
     import { showToast } from '../ui/toast.js';
+    import { writeDesktopBlob } from './desktopExportWriter.js';
+    import { normalizeAngleDegrees, applyRotationToImageData, mirrorImageDataHorizontal } from './imageGeometry.js';
+    import { analyzeFrameInWorker } from './autoFrameWorkerClient.js';
+    import { detectFrameWithFallback } from './autoFrameExecution.js';
+    import { mountStudioWorkspace } from './studioWorkspace.js';
+    import { AUTO_FRAME_FORMAT_RATIOS, AUTO_FRAME_DEFAULT_120_FORMATS, canAutoApplyImportFrame } from './autoFrameFormats.js';
+    import { imageAreaFromDetection, resolveAnalysisRegion, analysisPixelBounds, imageAreaFromWorkingRect, sampleAnalysisArea } from './analysisRegion.js';
+    import { detectCropImageArea, workingPointsToBase, isSameAnalysisFrame } from './cropColorAnalysis.js';
+    import { pickStudioColors, mergeStudioColors, createStudioThumbnail } from './studioSettings.js';
 
     import { convertFrameWithRouter } from '../pipeline/conversionRouter.js';
-    import { convertFrameInWorker } from './conversionWorkerClient.js';
+    import { convertFrameInWorker, convertPreviewFrameInWorker, CONVERSION_FAILED, WORKER_TIMEOUT } from './conversionWorkerClient.js';
+    import { displayPreviewSize, resizeDisplayPreview } from './displayPreview.js';
     import { invalidateSilverCoreCache } from '../pipeline/silverAdapter.js';
-    import { canUseBrowserZipStreaming, ZipStoreWriter } from './zipStoreWriter.js';
+    import { canUseBrowserZipStreaming, ZipStoreWriter, createZipNameDeduper } from './zipStoreWriter.js';
     import {
       createAdjustmentLutScratch,
       stripLegacyToneSettingsForSilverCore,
-      applyPreparedAdjustmentsToBuffer
+      applyPreparedAdjustmentsToBuffer,
+      areAdjustmentsIdentity
     } from './adjustmentPipeline.js';
     import {
       downsampleImageDataForMaxPixels,
-      downsampleImageDataForMaxDim,
       cropImageDataRegion
     } from './imageDataOps.js';
     import {
@@ -47,6 +51,7 @@
     import { estimateAutoWhiteBalance } from './autoWhiteBalance.js';
     import {
       isRawLikeFileName,
+      isPngFile,
       loadPngImageData,
       loadRawImageData,
       loadRawImageDataPreview,
@@ -66,6 +71,10 @@
       isWorkerAvailable
     } from '../workers/workerBridge.js';
 
+    const DEBUG_UI = new URLSearchParams(window.location.search).get('debug') === '1';
+    // 暗室 UI に一本化。古い workspace パラメーターで別画面へ分岐しない。
+    let studioAutoFrameRunning = false;
+    let studioWorkspace = null;
     const PERF_LOG_THRESHOLD_MS = 120;
     // Full-resolution renders run in a worker and no longer block interactive
     // preview reprocessing, so they can start soon after the user pauses; a
@@ -97,7 +106,7 @@
         },
         end(extra = {}) {
           const totalMs = Math.round((getPerfNow() - startedAt) * 10) / 10;
-          if (totalMs >= PERF_LOG_THRESHOLD_MS) {
+          if (DEBUG_UI && totalMs >= PERF_LOG_THRESHOLD_MS) {
             console.info('[perf]', label, { totalMs, ...details, ...extra, stages });
           }
         }
@@ -109,18 +118,12 @@
     }
 
 
-    const DEBUG_UI = new URLSearchParams(window.location.search).get('debug') === '1';
-    const BUILD_ID = '2026-05-22-auto-frame-detect-5';
+    // Vite substitutes this at build time; the hard-coded string it replaced had
+    // been stale for months and was shown in the debug badge and the diagnostics
+    // dump as if it identified the running build.
+    const BUILD_ID = (typeof __BUILD_ID__ === 'string' && __BUILD_ID__) || 'dev';
     const ensureOpenCvReady = createOpenCvLoader([opencvScriptUrl]);
     const AUTO_FRAME_MAX_SIDE = 1600;
-    const AUTO_FRAME_FORMAT_RATIOS = {
-      '135': 1.5,
-      '120-6x4.5': 1.33,
-      '120-6x6': 1.0,
-      '120-6x7': 1.17,
-      '120-6x9': 1.5
-    };
-    const AUTO_FRAME_DEFAULT_120_FORMATS = ['6x4.5', '6x6', '6x7', '6x9'];
     const AUTO_FRAME_SCORE_WEIGHTS = {
       area: 0.18,
       rectangularity: 0.20,
@@ -130,7 +133,10 @@
       centerPrior: 0.08,
       aspect: 0.12
     };
-    const CORE_ENHANCED_PROFILE_OPTIONS = new Set(['none', 'frontier', 'crystal', 'natural', 'pakon']);
+    // Must stay in step with PROFILES in silvercore/engine/EnhancedProfiles.js.
+    // 'noritsu' was missing here, so the shipped noritsu.bin and the profile the
+    // "Noritsu Lab" film preset asks for were sanitised away to 'none'.
+    const CORE_ENHANCED_PROFILE_OPTIONS = new Set(['none', 'frontier', 'crystal', 'natural', 'pakon', 'noritsu']);
     const CORE_COLOR_MODEL_OPTIONS = new Set(['frontier', 'standard', 'warm', 'mono', 'noritsu', 'cine-log', 'cine-rich', 'cine-flat', 'neutral']);
     const CORE_COLOR_MODEL_MIGRATION_MAP = Object.freeze({});
     const SPROCKET_EDGE_CONTROL_IDS = Object.freeze({
@@ -152,10 +158,6 @@
       letteringColor: 'sprocketLetteringColorInput',
       overexposureColor: 'sprocketGlowColorInput'
     });
-    const STEP3_GUIDE_COLLAPSED_SESSION_KEY = 'nc_step3_guide_collapsed_v2';
-    const FRONTIER_GUIDE_POPUP_SESSION_KEY = 'nc_frontier_guide_popup_shown_v1';
-    const GUIDE_MODE_STORAGE_KEY = 'nc_guide_mode_enabled_v1';
-    const PANEL_MODE_STORAGE_KEY = 'nc_panel_mode_v1';
     const DESKTOP_UPDATE_LAST_CHECK_TS_KEY = 'nc_desktop_update_last_check_ts';
     const DESKTOP_UPDATE_LAST_SEEN_LATEST_KEY = 'nc_desktop_update_last_seen_latest';
     const DESKTOP_UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -165,7 +167,6 @@
       'https://negative-converter.tokugai.com/negative-converter/release/latest.json'
     ];
     const DESKTOP_UPDATE_PAGE_URL = 'https://negative-converter.tokugai.com/download.html';
-    const MAS_BANNER_DISMISSED_KEY = 'nc_mas_banner_dismissed_v1';
     const LENSFUN_PACKAGE_VERSION = '0.1.3';
     const LENSFUN_CDN_BASE = `https://cdn.jsdelivr.net/npm/@neoanaloglabkk/lensfun-wasm@${LENSFUN_PACKAGE_VERSION}/dist`;
     const lensScriptLoadPromises = new Map();
@@ -214,12 +215,7 @@
     }
 
     let currentLang = 'en';
-    let guideModeEnabled = true;
-    let panelMode = 'console'; // 'console' (SP3000 keypad only) | 'detail' (all sections)
     let stateReady = false;
-    let step3GuideCollapsedOnce = false;
-    let frontierGuidePopupShownThisSession = false;
-    let frontierGuidePopupPending = false;
     const desktopBatchExportState = {
       active: false,
       current: 0,
@@ -234,6 +230,143 @@
       latestVersion: ''
     };
 
+    // --- In-app modal dialogs -------------------------------------------
+    // window.alert() and window.confirm() are silently ignored inside the
+    // macOS desktop build: WKWebView only shows JavaScript dialogs when the
+    // host app implements the WKUIDelegate panels, and the Tauri runtime here
+    // registers none. An unimplemented alert panel behaves as if OK were
+    // pressed (nothing is shown) and an unimplemented confirm panel returns
+    // false, so export failures were invisible and the auto-frame prompt
+    // always answered "Cancel". These render in the page instead, which
+    // behaves identically on every platform.
+    let appDialogState = null;
+    const appDialogQueue = [];
+
+    function dismissAppDialog(result) {
+      if (!appDialogState) return;
+      const { overlay, resolve, onKeydown, previousFocus } = appDialogState;
+      appDialogState = null;
+      document.removeEventListener('keydown', onKeydown, true);
+      overlay.remove();
+      if (previousFocus && typeof previousFocus.focus === 'function') {
+        try {
+          previousFocus.focus();
+        } catch (err) {
+          // The element may have been removed while the dialog was open.
+        }
+      }
+      resolve(result);
+      presentNextAppDialog();
+    }
+
+    function presentNextAppDialog() {
+      if (appDialogState) return;
+      const next = appDialogQueue.shift();
+      if (!next) return;
+      const { message, showCancel, resolve } = next;
+
+      const overlay = document.createElement('div');
+      overlay.className = 'app-dialog-overlay';
+      overlay.dataset.appDialog = 'true';
+      overlay.style.cssText = [
+        'position:fixed', 'inset:0', 'z-index:10000', 'display:flex',
+        'align-items:center', 'justify-content:center', 'padding:24px',
+        'background:rgba(8,6,20,0.72)'
+      ].join(';');
+
+      const panel = document.createElement('div');
+      panel.setAttribute('role', showCancel ? 'alertdialog' : 'dialog');
+      panel.setAttribute('aria-modal', 'true');
+      panel.style.cssText = [
+        'max-width:min(460px,100%)', 'width:100%',
+        'background:var(--surface,#1a1430)',
+        'border:1px solid var(--border,#3d2f6b)', 'border-radius:10px',
+        'padding:20px', 'box-shadow:0 18px 48px rgba(0,0,0,0.55)',
+        'color:var(--text,#eee)'
+      ].join(';');
+
+      const text = document.createElement('p');
+      text.dataset.appDialogMessage = 'true';
+      text.textContent = String(message == null ? '' : message);
+      text.style.cssText = 'margin:0 0 18px;white-space:pre-wrap;line-height:1.5;font-size:14px';
+      panel.appendChild(text);
+      panel.setAttribute('aria-label', text.textContent);
+
+      const actions = document.createElement('div');
+      actions.style.cssText = 'display:flex;gap:10px;justify-content:flex-end';
+
+      const buttonBase = 'padding:8px 18px;border-radius:6px;font:inherit;font-size:13px;cursor:pointer';
+      let cancelBtn = null;
+      if (showCancel) {
+        cancelBtn = document.createElement('button');
+        cancelBtn.type = 'button';
+        cancelBtn.dataset.appDialogCancel = 'true';
+        cancelBtn.textContent = getLocalizedText('dialogCancel', 'Cancel');
+        cancelBtn.style.cssText = `${buttonBase};background:transparent;color:var(--text-muted,#b0a8c8);border:1px solid var(--border,#3d2f6b)`;
+        cancelBtn.addEventListener('click', () => dismissAppDialog(false));
+        actions.appendChild(cancelBtn);
+      }
+
+      const confirmBtn = document.createElement('button');
+      confirmBtn.type = 'button';
+      confirmBtn.dataset.appDialogConfirm = 'true';
+      confirmBtn.textContent = getLocalizedText('dialogOk', 'OK');
+      confirmBtn.style.cssText = `${buttonBase};background:var(--accent,#d63aa0);color:#fff;border:1px solid var(--accent,#d63aa0)`;
+      confirmBtn.addEventListener('click', () => dismissAppDialog(true));
+      actions.appendChild(confirmBtn);
+
+      panel.appendChild(actions);
+      overlay.appendChild(panel);
+
+      const onKeydown = (event) => {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          event.stopPropagation();
+          dismissAppDialog(false);
+        } else if (event.key === 'Enter') {
+          event.preventDefault();
+          event.stopPropagation();
+          dismissAppDialog(true);
+        } else if (event.key === 'Tab') {
+          // Keep focus inside the dialog.
+          const focusable = [cancelBtn, confirmBtn].filter(Boolean);
+          if (!focusable.length) return;
+          const first = focusable[0];
+          const last = focusable[focusable.length - 1];
+          const active = document.activeElement;
+          if (event.shiftKey && active === first) {
+            event.preventDefault();
+            last.focus();
+          } else if (!event.shiftKey && active === last) {
+            event.preventDefault();
+            first.focus();
+          }
+        }
+      };
+
+      appDialogState = { overlay, resolve, onKeydown, previousFocus: document.activeElement };
+      document.addEventListener('keydown', onKeydown, true);
+      document.body.appendChild(overlay);
+      confirmBtn.focus();
+    }
+
+    // Dialogs are queued so a burst behaves like the sequential alert() calls
+    // these replaced, instead of the last one hiding the rest.
+    function openAppDialog(message, { showCancel = false } = {}) {
+      return new Promise((resolve) => {
+        appDialogQueue.push({ message, showCancel, resolve });
+        presentNextAppDialog();
+      });
+    }
+
+    function appAlert(message) {
+      return openAppDialog(message, { showCancel: false });
+    }
+
+    function appConfirm(message) {
+      return openAppDialog(message, { showCancel: true });
+    }
+
     function getLocalizedText(key, fallback = '') {
       const dict = i18n[currentLang] || i18n.en || {};
       if (Object.prototype.hasOwnProperty.call(dict, key) && dict[key]) {
@@ -244,6 +377,9 @@
 
     function setLanguage(lang) {
       currentLang = lang;
+      // Screen readers pick their voice, and browsers pick Han glyph variants,
+      // from the document language rather than the text content.
+      document.documentElement.lang = lang;
       document.querySelectorAll('.lang-btn').forEach(btn => {
         btn.classList.toggle('active', btn.dataset.lang === lang);
       });
@@ -265,6 +401,20 @@
           el.placeholder = i18n[lang][key];
         }
       });
+      // Tooltips and accessible names are markup-driven too, so they follow the
+      // language instead of being frozen at the English fallback.
+      document.querySelectorAll('[data-i18n-title]').forEach(el => {
+        const key = el.dataset.i18nTitle;
+        if (i18n[lang][key]) {
+          el.title = i18n[lang][key];
+        }
+      });
+      document.querySelectorAll('[data-i18n-aria-label]').forEach(el => {
+        const key = el.dataset.i18nAriaLabel;
+        if (i18n[lang][key]) {
+          el.setAttribute('aria-label', i18n[lang][key]);
+        }
+      });
       document.title = getLocalizedText('title', document.title || 'Negative Converter');
       const privacyLink = document.getElementById('privacyDetailsLink');
       if (privacyLink) {
@@ -277,25 +427,39 @@
         if (isTauriDesktop()) offlineLink.style.display = 'none';
       }
       updateDesktopUpdateBannerText();
-      updateGuideModeUI();
       if (stateReady) {
         updateCurrentFileLabel();
         updateRollReferenceUI();
         updateAutoFrameConfigUI();
         updateAutoFrameDiagnosticsUI();
         updateAutoFrameButtons();
-        renderNoviceGuide({ applyStep3Collapse: false });
         updateGrayPointGuideUI();
         if (typeof updateLensCorrectionUI === 'function') updateLensCorrectionUI();
         if (typeof updateExportUI === 'function') updateExportUI();
         updateDesktopBatchExportUI();
       }
+      studioWorkspace?.sync();
     }
 
-    // Detect language
-    const browserLang = navigator.language.startsWith('ja') ? 'ja'
-      : navigator.language.startsWith('zh') ? 'zh' : 'en';
-    setLanguage(browserLang);
+    // Language: an explicit ?lang= wins, then the remembered choice, then the
+    // browser default. Anything unknown falls through, because setLanguage
+    // indexes i18n[lang] without a guard.
+    const LANGUAGE_STORAGE_KEY = 'nc_lang_v1';
+    function resolveInitialLanguage() {
+      const candidates = [];
+      try {
+        candidates.push(new URLSearchParams(location.search).get('lang'));
+      } catch (err) {
+        // location may be unavailable in exotic embeddings; ignore.
+      }
+      candidates.push(safeStorageGet(LANGUAGE_STORAGE_KEY));
+      candidates.push(
+        navigator.language.startsWith('ja') ? 'ja'
+          : navigator.language.startsWith('zh') ? 'zh' : 'en'
+      );
+      return candidates.find((lang) => lang && Object.prototype.hasOwnProperty.call(i18n, lang)) || 'en';
+    }
+    setLanguage(resolveInitialLanguage());
 
     if (DEBUG_UI) {
       const badge = document.getElementById('buildBadge');
@@ -307,7 +471,12 @@
 
     // Language selector
     document.querySelectorAll('.lang-btn').forEach(btn => {
-      btn.addEventListener('click', () => setLanguage(btn.dataset.lang));
+      btn.addEventListener('click', () => {
+        const lang = btn.dataset.lang;
+        if (!lang || !Object.prototype.hasOwnProperty.call(i18n, lang)) return;
+        safeStorageSet(LANGUAGE_STORAGE_KEY, lang);
+        setLanguage(lang);
+      });
     });
 
     function safeStorageGet(key) {
@@ -342,37 +511,7 @@
       }
     }
 
-    function clearRecommendedActions() {
-      [
-        'autoFrameBtn',
-        'cropBtn',
-        'convertBtn',
-        'convertPositiveBtn',
-        'sampleBaseBtn',
-        'autoDetectBtn',
-        'useReferenceBtn',
-        'applyConvertBtn',
-        'sampleWBBtn',
-        'headerGrayPointBtn',
-        'saveSettingsBtn',
-        'applyToSelectedBtn',
-        'exportBtn'
-      ].forEach(id => {
-        const btn = document.getElementById(id);
-        if (btn) btn.classList.remove('recommended-action');
-      });
-    }
 
-    function setRecommendedActions(actionIds = []) {
-      clearRecommendedActions();
-      if (!guideModeEnabled || !Array.isArray(actionIds)) return;
-      actionIds.forEach(id => {
-        const btn = document.getElementById(id);
-        if (!btn || btn.disabled) return;
-        if (btn.style.display === 'none') return;
-        btn.classList.add('recommended-action');
-      });
-    }
 
     function setSectionCollapsed(section, collapsed) {
       const header = document.querySelector(`.section-header[data-section="${section}"]`);
@@ -383,36 +522,7 @@
       if (content) content.classList.toggle('collapsed', Boolean(collapsed));
     }
 
-    function collapseStep3SectionsForGuideIfNeeded() {
-      if (!guideModeEnabled) return;
-      if (state.currentStep < 3) return;
-      if (step3GuideCollapsedOnce) return;
-      ['color', 'effects', 'engine', 'additional'].forEach(section => {
-        setSectionCollapsed(section, true);
-      });
-      step3GuideCollapsedOnce = true;
-      safeSessionStorageSet(STEP3_GUIDE_COLLAPSED_SESSION_KEY, '1');
-    }
 
-    function updateGuideModeUI() {
-      const toggleBtn = document.getElementById('guideToggleBtn');
-      if (toggleBtn) {
-        toggleBtn.setAttribute('aria-pressed', guideModeEnabled ? 'true' : 'false');
-        toggleBtn.textContent = guideModeEnabled
-          ? getLocalizedText('guideToggleOn', 'Guide: On')
-          : getLocalizedText('guideToggleOff', 'Guide: Off');
-      }
-
-      const card = document.getElementById('noviceGuideCard');
-      if (card) card.style.display = guideModeEnabled ? 'flex' : 'none';
-      if (!guideModeEnabled) {
-        clearRecommendedActions();
-      }
-
-      if (stateReady) {
-        renderNoviceGuide({ applyStep3Collapse: true });
-      }
-    }
 
     function isGrayPointGuideAvailable() {
       if (!stateReady) return false;
@@ -421,25 +531,8 @@
         && sanitizePresetType(state.filmType || 'color') !== 'bw';
     }
 
-    function setFrontierGuidePopupVisible(visible) {
-      const overlay = document.getElementById('frontierGuidePopupOverlay');
-      if (!overlay) return;
-      overlay.classList.toggle('visible', Boolean(visible));
-      overlay.setAttribute('aria-hidden', visible ? 'false' : 'true');
-    }
 
-    function closeFrontierGuidePopup() {
-      setFrontierGuidePopupVisible(false);
-    }
 
-    function maybeShowFrontierGuidePopup() {
-      if (!frontierGuidePopupPending) return;
-      frontierGuidePopupPending = false;
-      if (frontierGuidePopupShownThisSession) return;
-      frontierGuidePopupShownThisSession = true;
-      safeSessionStorageSet(FRONTIER_GUIDE_POPUP_SESSION_KEY, '1');
-      setFrontierGuidePopupVisible(true);
-    }
 
     async function applyFilmPresetSettingsToState(presetId) {
       const nextPresetId = String(presetId || 'none');
@@ -578,12 +671,12 @@
         hideLoupe();
       }
       updateGrayPointGuideUI();
+      studioWorkspace?.sync();
     }
 
     function resetFrontierGuideImageState() {
       state.frontierGuideAutoAppliedForImage = false;
       state.frontierGuideStep2ChoiceTouched = false;
-      frontierGuidePopupPending = false;
     }
 
     function startWhiteBalanceSampling() {
@@ -594,41 +687,7 @@
       updateBeforeAfterButtonState();
     }
 
-    async function maybeApplyFrontierGuideDefaults() {
-      if (!stateReady) return false;
-      if (state.currentStep >= 3) return false;
-      if (!usesSilverCoreConversion(state)) return false;
-      if (sanitizePresetType(state.filmType || 'color') !== 'color') return false;
-      if (state.frontierGuideAutoAppliedForImage) return false;
-      if (state.frontierGuideStep2ChoiceTouched) return false;
-      if (state.coreColorModel !== 'standard' || state.coreFilmPreset !== 'none') return false;
 
-      state.coreColorModel = 'frontier';
-      await applyFilmPresetSettingsToState('frontier-lab');
-      state.frontierGuideAutoAppliedForImage = true;
-      markCurrentFileDirty();
-      frontierGuidePopupPending = !frontierGuidePopupShownThisSession;
-      return true;
-    }
-
-    function setGuideModeEnabled(enabled, options = {}) {
-      const { persist = true } = options;
-      guideModeEnabled = Boolean(enabled);
-      if (persist) safeStorageSet(GUIDE_MODE_STORAGE_KEY, guideModeEnabled ? '1' : '0');
-      updateGuideModeUI();
-    }
-
-    guideModeEnabled = safeStorageGet(GUIDE_MODE_STORAGE_KEY) !== '0';
-    step3GuideCollapsedOnce = safeSessionStorageGet(STEP3_GUIDE_COLLAPSED_SESSION_KEY) === '1';
-    frontierGuidePopupShownThisSession = safeSessionStorageGet(FRONTIER_GUIDE_POPUP_SESSION_KEY) === '1';
-    const guideToggleBtn = document.getElementById('guideToggleBtn');
-    if (guideToggleBtn) {
-      guideToggleBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        setGuideModeEnabled(!guideModeEnabled);
-      });
-    }
-    updateGuideModeUI();
 
     // ===========================================
     // SP3000-style correction console
@@ -732,46 +791,13 @@
     });
     document.getElementById('consoleResetBtn')?.addEventListener('click', resetConsoleChannels);
 
-    function updatePanelModeUI() {
-      document.getElementById('panelModeQuickBtn')?.classList.toggle('active', panelMode === 'console');
-      document.getElementById('panelModeDetailBtn')?.classList.toggle('active', panelMode === 'detail');
-    }
 
-    function setPanelMode(mode, options = {}) {
-      const { persist = true } = options;
-      panelMode = mode === 'detail' ? 'detail' : 'console';
-      if (persist) safeStorageSet(PANEL_MODE_STORAGE_KEY, panelMode);
-      updatePanelModeUI();
-      if (stateReady) {
-        updateWorkflowUI(); // refreshes film settings + step-3 sections together
-        updateSprocketControlsUI();
-      }
-    }
 
-    panelMode = safeStorageGet(PANEL_MODE_STORAGE_KEY) === 'detail' ? 'detail' : 'console';
-    document.getElementById('panelModeQuickBtn')?.addEventListener('click', (e) => {
-      e.stopPropagation();
-      setPanelMode('console');
-    });
-    document.getElementById('panelModeDetailBtn')?.addEventListener('click', (e) => {
-      e.stopPropagation();
-      setPanelMode('detail');
-    });
-    updatePanelModeUI();
 
     document.getElementById('headerGrayPointBtn')?.addEventListener('click', () => {
       startWhiteBalanceSampling();
     });
 
-    document.getElementById('frontierGuidePopupCloseBtn')?.addEventListener('click', () => {
-      closeFrontierGuidePopup();
-    });
-
-    document.getElementById('frontierGuidePopupOverlay')?.addEventListener('click', (event) => {
-      if (event.target === event.currentTarget) {
-        closeFrontierGuidePopup();
-      }
-    });
 
     // Feedback popup: posts to the Vercel function that files a GitHub issue.
     // The desktop webview has a tauri:// origin, so it must hit the site by full URL.
@@ -1018,7 +1044,13 @@
         script.async = true;
         script.dataset.lensfunSrc = url;
         script.onload = () => resolve(url);
-        script.onerror = () => reject(new Error(`failed to load ${url}`));
+        script.onerror = () => {
+          // Drop the element: its load/error events have already fired, so a
+          // retry that found it via querySelector would attach listeners that
+          // never run and hang every later lens operation.
+          script.remove();
+          reject(new Error(`failed to load ${url}`));
+        };
         document.head.appendChild(script);
       }).catch((err) => {
         lensScriptLoadPromises.delete(url);
@@ -1074,6 +1106,12 @@
           lensfunRuntime.lastError = '';
           return runtime;
         } catch (localErr) {
+          if (isTauriDesktop()) {
+            // The desktop build bundles the lensfun assets and is expected to
+            // work offline: do not fall back to a CDN it should never contact.
+            lensfunRuntime.lastError = sanitizeLensRuntimeError(localErr);
+            throw new Error(lensfunRuntime.lastError);
+          }
           try {
             const runtime = await initLensfunClientFromSource('cdn');
             lensfunRuntime.client = runtime.client;
@@ -1207,6 +1245,20 @@
       const { width, height, data } = imageData;
       const output = new ImageData(new Uint8ClampedArray(data.length), width, height);
       const outData = output.data;
+      // Resample the 16-bit plane when the loader attached one, otherwise every
+      // RAW or 16-bit PNG converted with lens correction on would reach the
+      // engine as 8-bit data upcast back to 16.
+      const plane16 = imageData.__image16;
+      const use16 = Boolean(
+        plane16
+        && plane16.data instanceof Uint16Array
+        && plane16.width === width
+        && plane16.height === height
+        && plane16.data.length === data.length
+      );
+      const source = use16 ? plane16.data : data;
+      const maxValue = use16 ? 65535 : 255;
+      const out16 = use16 ? new Uint16Array(data.length) : null;
       const gridWidth = maps.gridWidth;
       const gridHeight = maps.gridHeight;
       const step = Math.max(1, maps.step || 1);
@@ -1239,9 +1291,9 @@
             bX = geometryCoords.x; bY = geometryCoords.y;
           }
 
-          let r = sampleImageChannelBilinear(data, width, height, rX, rY, 0);
-          let g = sampleImageChannelBilinear(data, width, height, gX, gY, 1);
-          let b = sampleImageChannelBilinear(data, width, height, bX, bY, 2);
+          let r = sampleImageChannelBilinear(source, width, height, rX, rY, 0);
+          let g = sampleImageChannelBilinear(source, width, height, gX, gY, 1);
+          let b = sampleImageChannelBilinear(source, width, height, bX, bY, 2);
 
           if (vignetting) {
             const gains = sampleGridTriple(vignetting, gridWidth, x0, x1, y0, y1, fx, fy);
@@ -1251,11 +1303,28 @@
           }
 
           const outIdx = (y * width + x) * 4;
-          outData[outIdx] = clampBetween(Math.round(r), 0, 255);
-          outData[outIdx + 1] = clampBetween(Math.round(g), 0, 255);
-          outData[outIdx + 2] = clampBetween(Math.round(b), 0, 255);
+          const rv = clampBetween(Math.round(r), 0, maxValue);
+          const gv = clampBetween(Math.round(g), 0, maxValue);
+          const bv = clampBetween(Math.round(b), 0, maxValue);
+          if (out16) {
+            out16[outIdx] = rv;
+            out16[outIdx + 1] = gv;
+            out16[outIdx + 2] = bv;
+            out16[outIdx + 3] = 65535;
+            // Keep the 8-bit view exactly consistent with the 16-bit plane.
+            outData[outIdx] = rv >>> 8;
+            outData[outIdx + 1] = gv >>> 8;
+            outData[outIdx + 2] = bv >>> 8;
+          } else {
+            outData[outIdx] = rv;
+            outData[outIdx + 1] = gv;
+            outData[outIdx + 2] = bv;
+          }
           outData[outIdx + 3] = 255;
         }
+      }
+      if (out16) {
+        output.__image16 = { width, height, data: out16 };
       }
       return output;
     }
@@ -1593,18 +1662,69 @@
       return url.toString();
     }
 
-    async function openDownloadPageForUpdate() {
-      const url = buildDesktopUpdateDownloadUrl();
+    const SITE_ORIGIN = 'https://negative-converter.tokugai.com/';
+
+    async function openExternalUrl(url) {
       if (isTauriDesktop()) {
         try {
           await window.__TAURI__.core.invoke('open_external_url', { url });
           return;
         } catch (err) {
-          console.warn('Desktop open_external_url failed, falling back to window.open:', err);
+          console.warn('Desktop open_external_url failed:', err);
+          // window.open opens nothing inside the desktop window (there is no
+          // new-window handler), so the link would just die silently. Show the
+          // address instead — under the App Store sandbox, launching the
+          // browser can be refused.
+          showToast(
+            getInterpolatedText(
+              'externalLinkFailed',
+              { url },
+              `Could not open the link. Open it manually: ${url}`
+            ),
+            8000
+          );
+          return;
         }
       }
       window.open(url, '_blank', 'noopener');
     }
+
+    async function openDownloadPageForUpdate() {
+      await openExternalUrl(buildDesktopUpdateDownloadUrl());
+    }
+
+    // Inside the desktop window there is no new-window handler and no tab bar,
+    // so a target="_blank" link does nothing at all and a same-window link to
+    // one of the bundled marketing pages replaces the app — silently discarding
+    // the loaded queue, per-file settings, roll reference and undo history with
+    // no way back. Route every outbound link to the system browser instead.
+    function installDesktopExternalLinkHandler() {
+      if (!isTauriDesktop()) return;
+      document.addEventListener('click', (event) => {
+        if (event.defaultPrevented || event.button !== 0) return;
+        if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        const anchor = event.target && event.target.closest ? event.target.closest('a[href]') : null;
+        if (!anchor || anchor.hasAttribute('download')) return;
+
+        const href = anchor.getAttribute('href') || '';
+        if (!href || href.startsWith('#') || href.startsWith('javascript:')) return;
+
+        let resolved;
+        try {
+          resolved = new URL(href, SITE_ORIGIN);
+        } catch (err) {
+          return;
+        }
+        // Upgrade http:// — the Rust side only opens https URLs.
+        if (resolved.protocol === 'http:') resolved.protocol = 'https:';
+        if (resolved.protocol !== 'https:') return;
+
+        event.preventDefault();
+        void openExternalUrl(resolved.toString());
+      });
+    }
+
+    installDesktopExternalLinkHandler();
 
     async function checkDesktopUpdate(options = {}) {
       if (!isTauriDesktop()) return;
@@ -1652,25 +1772,6 @@
     }
 
     initDesktopUpdateCheck();
-
-    function initMacAppStoreBanner() {
-      const banner = document.getElementById('masBanner');
-      if (!banner) return;
-      // The desktop build *is* the store build — it must not advertise the store to itself.
-      if (isTauriDesktop()) return;
-      if (safeStorageGet(MAS_BANNER_DISMISSED_KEY) === '1') return;
-
-      banner.classList.add('visible');
-      const closeBtn = document.getElementById('masBannerCloseBtn');
-      if (closeBtn) {
-        closeBtn.addEventListener('click', () => {
-          banner.classList.remove('visible');
-          safeStorageSet(MAS_BANNER_DISMISSED_KEY, '1');
-        });
-      }
-    }
-
-    initMacAppStoreBanner();
 
     window.addEventListener('beforeunload', () => {
       if (lensfunRuntime.client && typeof lensfunRuntime.client.dispose === 'function') {
@@ -1852,6 +1953,10 @@
       };
     }
 
+    // Neutral orange-mask estimate used until a real film base is detected or
+    // sampled. Shared so the initial state and the per-file reset cannot drift.
+    const DEFAULT_FILM_BASE = { r: 210, g: 140, b: 90 };
+
     // ===========================================
     // Application State
     // ===========================================
@@ -1880,7 +1985,8 @@
 
       // Film settings
       filmType: 'color',
-      filmBase: { r: 210, g: 140, b: 90 },
+      mirrored: false,
+      filmBase: { ...DEFAULT_FILM_BASE },
       filmBaseSet: false,
       grayPointSampled: false,
       step2Mode: 'border', // 'border' | 'noBorder'
@@ -1972,17 +2078,13 @@
 
       autoFrame: {
         enabled: true,
+        onImport: true,
         marginRatio: 0.02,
         minConfidence: 0.55,
         highConfidence: 0.72,
         autoApplyHighConfidence: true,
         formatPreference: 'auto', // 'auto' | '135' | '120'
-        allowed120Formats: {
-          '6x4.5': true,
-          '6x6': true,
-          '6x7': true,
-          '6x9': true
-        },
+        allowed120Formats: Object.fromEntries(AUTO_FRAME_DEFAULT_120_FORMATS.map(format => [format, true])),
         lowConfidenceBehavior: 'suggest', // 'suggest' | 'rotateOnly' | 'ignore'
         rotate180Default: false,
         lastDiagnostics: null
@@ -2036,7 +2138,6 @@
       fullResolutionPromise: null
     };
     stateReady = true;
-    updateGuideModeUI();
     updateGrayPointGuideUI();
 
     let fullResolutionRenderTimer = null;
@@ -2135,8 +2236,8 @@
     function updateDesktopBatchExportControlLock() {
       const locked = isDesktopBatchExportLocked();
       [
-        'newImageBtn',
-        'startOverBtn',
+        'studioNewSession',
+        'studioRestart',
         'selectAllBtn',
         'selectNoneBtn',
         'addMoreFilesBtn',
@@ -2172,7 +2273,7 @@
       }
 
       if (result.path && savedPathKey) {
-        alert(getInterpolatedText(savedPathKey, { path: result.path }, savedPathFallback));
+        void appAlert(getInterpolatedText(savedPathKey, { path: result.path }, savedPathFallback));
       } else if (browserSuccessKey) {
         showToast(getLocalizedText(browserSuccessKey, browserSuccessFallback), toastDurationMs);
       }
@@ -2207,6 +2308,7 @@
         vibrance: '自然饱和度', saturation: '饱和度微调',
         cyan: '青色', magenta: '品红', yellow: '黄色',
         dustStrength: '除尘灵敏度', dustMaxSize: '最大颗粒尺寸', dustBrushSize: '笔刷大小',
+        consoleReset: '校正台重置',
       },
       en: {
         rotation: 'Rotation', mirror: 'Mirror', crop: 'Crop', filmType: 'Film Type',
@@ -2227,6 +2329,7 @@
         vibrance: 'Vibrance', saturation: 'Saturation Fine',
         cyan: 'Cyan', magenta: 'Magenta', yellow: 'Yellow',
         dustStrength: 'Dust Sensitivity', dustMaxSize: 'Max Particle Size', dustBrushSize: 'Brush Size',
+        consoleReset: 'Console Reset',
       },
       ja: {
         rotation: '回転', mirror: 'ミラー', crop: 'トリミング', filmType: 'フィルムタイプ',
@@ -2247,10 +2350,13 @@
         vibrance: '自然な彩度', saturation: '彩度微調整',
         cyan: 'シアン', magenta: 'マゼンタ', yellow: 'イエロー',
         dustStrength: '除塵感度', dustMaxSize: '最大粒子サイズ', dustBrushSize: 'ブラシサイズ',
+        consoleReset: 'コンソールリセット',
       }
     };
 
     function getUndoLabel(label) {
+      if (studioWorkspace && label === 'studioStyle') return studioWorkspace.text('look');
+      if (studioWorkspace && label === 'studioReset') return studioWorkspace.text('reset');
       const map = undoLabelMap[currentLang] || undoLabelMap.en;
       return map[label] || label;
     }
@@ -2266,7 +2372,7 @@
       'coreSaturation', 'coreGlow', 'coreFade', 'coreCurvePrecision', 'coreUseWebGL',
       'wbR', 'wbG', 'wbB', 'wbAutoConfidence', 'wbUserOverride',
       'filmType', 'filmBaseSet', 'grayPointSampled', 'step2Mode', 'rotationAngle',
-      'sprocketPreviewEnabled', 'currentStep',
+      'mirrored', 'sprocketPreviewEnabled', 'currentStep',
     ];
 
     // Category B: heavy image data (stored by reference)
@@ -2299,10 +2405,12 @@
       settings.dustRemoval = {
         enabled: state.dustRemoval.enabled,
         strength: state.dustRemoval.strength,
+        maxParticleSize: state.dustRemoval.maxParticleSize,
         brushSize: state.dustRemoval.brushSize,
         showMask: state.dustRemoval.showMask,
       };
       settings.sprocketEdge = createSprocketEdgeSettings(state.sprocketEdge);
+      settings.autoFrameMeta = state.autoFrame.lastDiagnostics ? structuredClone(state.autoFrame.lastDiagnostics) : null;
 
       // Category B: references
       const refs = {};
@@ -2319,14 +2427,18 @@
     }
 
     function cancelPendingTimers() {
+      dustDetectionRevision += 1;
       if (fullUpdateTimer) { clearTimeout(fullUpdateTimer); fullUpdateTimer = null; }
       if (coreReprocessTimer) { clearTimeout(coreReprocessTimer); coreReprocessTimer = null; }
+      coreReprocessScheduled = null;
+      if (displayPreviewResizeTimer) { clearTimeout(displayPreviewResizeTimer); displayPreviewResizeTimer = null; }
       if (step2AutoConvertTimer) { clearTimeout(step2AutoConvertTimer); step2AutoConvertTimer = null; }
       if (dustDetectionTimer) { clearTimeout(dustDetectionTimer); dustDetectionTimer = null; }
     }
 
     function restoreSnapshot(snapshot) {
       cancelPendingTimers();
+      coreReprocessToken += 1;
 
       // Restore Category A
       const s = snapshot.settings;
@@ -2347,9 +2459,13 @@
       };
       state.dustRemoval.enabled = s.dustRemoval.enabled;
       state.dustRemoval.strength = s.dustRemoval.strength;
+      if (Number.isFinite(s.dustRemoval.maxParticleSize)) {
+        state.dustRemoval.maxParticleSize = s.dustRemoval.maxParticleSize;
+      }
       state.dustRemoval.brushSize = s.dustRemoval.brushSize;
       state.dustRemoval.showMask = s.dustRemoval.showMask;
       state.sprocketEdge = createSprocketEdgeSettings(s.sprocketEdge);
+      state.autoFrame.lastDiagnostics = s.autoFrameMeta ? structuredClone(s.autoFrameMeta) : null;
 
       // Restore Category B refs
       const r = snapshot.refs;
@@ -2371,7 +2487,9 @@
       if (state.processedImageData) {
         applyProcessedImageToState(state.processedImageData);
         if (usesSilverCoreConversion(state)) {
-          rerenderWithCoreControls({ full: true }).catch(() => {});
+          rerenderWithCoreControls({
+            full: true, token: coreReprocessToken, sourceRef: state.conversionSourceImageData
+          }).catch(() => {});
         } else {
           updateFull();
         }
@@ -2385,11 +2503,57 @@
       goToStep(s.currentStep);
     }
 
-    function pushUndo(label) {
-      undoStack.push(captureSnapshot(label));
+    // Snapshots hold references to up to eight full-resolution buffers each.
+    // Slider moves share them, but every rotate/crop/dust operation makes new
+    // ones, so a handful of transforms on a large scan can pin gigabytes in the
+    // history alone. Cap the history by retained bytes rather than by count,
+    // keeping a few steps of undo no matter how big the frames are.
+    const HISTORY_MEMORY_BUDGET_BYTES = 768 * 1024 * 1024;
+    const MIN_UNDO_DEPTH = 3;
+
+    function collectSnapshotBuffers(snapshot, seen) {
+      let bytes = 0;
+      const refs = snapshot && snapshot.refs ? snapshot.refs : null;
+      if (!refs) return bytes;
+      for (const value of Object.values(refs)) {
+        if (!value || typeof value !== 'object' || seen.has(value)) continue;
+        seen.add(value);
+        if (value.data && typeof value.data.byteLength === 'number') {
+          bytes += value.data.byteLength;
+        }
+        const plane16 = value.__image16;
+        if (plane16 && plane16.data && !seen.has(plane16)) {
+          seen.add(plane16);
+          bytes += plane16.data.byteLength;
+        }
+      }
+      return bytes;
+    }
+
+    function historyRetainedBytes() {
+      const seen = new Set();
+      let bytes = 0;
+      for (const snapshot of undoStack) bytes += collectSnapshotBuffers(snapshot, seen);
+      for (const snapshot of redoStack) bytes += collectSnapshotBuffers(snapshot, seen);
+      return bytes;
+    }
+
+    function pruneHistoryForMemory() {
+      while (undoStack.length > MIN_UNDO_DEPTH && historyRetainedBytes() > HISTORY_MEMORY_BUDGET_BYTES) {
+        undoStack.shift();
+      }
+    }
+
+    function commitUndoSnapshot(snapshot) {
+      undoStack.push(snapshot);
       if (undoStack.length > MAX_UNDO) undoStack.shift();
+      pruneHistoryForMemory();
       redoStack.length = 0;
       updateUndoRedoButtons();
+    }
+
+    function pushUndo(label) {
+      commitUndoSnapshot(captureSnapshot(label));
     }
 
     function performUndo() {
@@ -2397,8 +2561,10 @@
         showToast(getLocalizedText('nothingToUndo', 'Nothing to undo'));
         return;
       }
-      redoStack.push(captureSnapshot('redo'));
       const snapshot = undoStack.pop();
+      // Carry the action's own label across so the redo toast names the
+      // action rather than the literal word "undo".
+      redoStack.push(captureSnapshot(snapshot.label));
       restoreSnapshot(snapshot);
       const actionName = getUndoLabel(snapshot.label);
       const tmpl = getLocalizedText('undone', 'Undone: {action}');
@@ -2411,8 +2577,10 @@
         showToast(getLocalizedText('nothingToRedo', 'Nothing to redo'));
         return;
       }
-      undoStack.push(captureSnapshot('undo'));
       const snapshot = redoStack.pop();
+      undoStack.push(captureSnapshot(snapshot.label));
+      if (undoStack.length > MAX_UNDO) undoStack.shift();
+      pruneHistoryForMemory();
       restoreSnapshot(snapshot);
       const actionName = getUndoLabel(snapshot.label);
       const tmpl = getLocalizedText('redone', 'Redone: {action}');
@@ -2431,6 +2599,7 @@
       const redoBtn = document.getElementById('redoBtn');
       if (undoBtn) undoBtn.disabled = undoStack.length === 0;
       if (redoBtn) redoBtn.disabled = redoStack.length === 0;
+      studioWorkspace?.sync();
     }
 
     // Initialize curves
@@ -2565,7 +2734,6 @@
     }
 
     function updateBatchStep3GuideVisibility() {
-      renderNoviceGuide({ applyStep3Collapse: false });
     }
 
     function syncBatchUIState(options = {}) {
@@ -2588,6 +2756,7 @@
       updateRollReferenceUI();
       updateAutoFrameButtons();
       updateDebugWidget();
+      studioWorkspace?.sync();
     }
 
     function revealBatchFileList(reason = 'revealBatchFileList') {
@@ -2602,7 +2771,8 @@
 
     function getCurrentQueueItem() {
       if (state.currentFileIndex < 0 || state.currentFileIndex >= state.fileQueue.length) return null;
-      return state.fileQueue[state.currentFileIndex];
+      const item = state.fileQueue[state.currentFileIndex];
+      return item.file === state.loadedFile ? item : null;
     }
 
     function getQueueItemById(id) {
@@ -2687,18 +2857,6 @@
         }
       });
 
-      [1, 2, 3].forEach((stage) => {
-        const stageEl = document.getElementById('panelStage' + stage);
-        if (!stageEl) return;
-        stageEl.classList.remove('active', 'completed');
-        stageEl.removeAttribute('aria-current');
-        if (stage < state.currentStep) {
-          stageEl.classList.add('completed');
-        } else if (stage === state.currentStep) {
-          stageEl.classList.add('active');
-          stageEl.setAttribute('aria-current', 'step');
-        }
-      });
 
       // Update badge
       badge.className = 'status-badge step' + state.currentStep;
@@ -2708,10 +2866,9 @@
       // Show/hide sections based on step
       document.getElementById('autoFrameSettingsSection').style.display =
         state.currentStep === 1 ? 'block' : 'none';
-      // Film settings are a Step-2 concern; from Step 3 on they only stay in
-      // detail mode — the console keeps the panel down to the keypad.
+      // 変換ペインから処理設定へいつでも戻れる。
       document.getElementById('filmSettingsSection').style.display =
-        (state.currentStep === 2 || (state.currentStep >= 3 && panelMode === 'detail')) ? 'block' : 'none';
+        state.currentStep >= 2 ? 'block' : 'none';
       updateStep3SectionVisibility();
 
       // Show convert button after cropping is done
@@ -2728,17 +2885,16 @@
       updateAutoFrameButtons();
       updateBeforeAfterButtonState();
       updateSprocketControlsUI();
-      renderNoviceGuide({ applyStep3Collapse: true });
+      studioWorkspace?.sync();
     }
 
     function updateStep3SectionVisibility() {
       const inStep3 = state.currentStep >= 3;
       const showCore = inStep3 && usesSilverCoreConversion(state);
-      const detail = panelMode === 'detail';
       const dustSection = document.getElementById('dustRemovalSection');
-      if (dustSection) dustSection.style.display = (inStep3 && detail) ? 'block' : 'none';
+      if (dustSection) dustSection.style.display = inStep3 ? 'block' : 'none';
 
-      // Console mode: the SP3000 keypad + Quick Fix are the whole panel.
+      // CMYD キーパッドも通常の調色ペインで使う。
       const consoleSection = document.getElementById('consoleSection');
       if (consoleSection) consoleSection.style.display = showCore ? 'block' : 'none';
       const quickFix = document.getElementById('whiteBalanceSection');
@@ -2747,14 +2903,12 @@
       ['toneSection', 'colorSection', 'cmySection', 'advancedSection'].forEach((id) => {
         const el = document.getElementById(id);
         if (!el) return;
-        el.style.display = (showCore && detail) ? 'block' : 'none';
+        el.style.display = showCore ? 'block' : 'none';
       });
 
       const additional = document.getElementById('additionalSection');
       if (additional) {
-        // The legacy (non-SilverCore) path has no other controls, so it keeps
-        // this section regardless of panel mode.
-        additional.style.display = (inStep3 && (detail || !showCore)) ? 'block' : 'none';
+        additional.style.display = inStep3 ? 'block' : 'none';
       }
 
       updateConsoleReadouts();
@@ -2893,10 +3047,10 @@
       const sprocketSettingsSection = document.getElementById('sprocketSettingsSection');
       if (sprocketSettingsSection) {
         const hasImage = state.originalImageData || state.croppedImageData || state.processedImageData;
-        const hiddenByConsole = state.currentStep >= 3 && panelMode !== 'detail';
-        sprocketSettingsSection.style.display = (hasImage && !hiddenByConsole) ? 'block' : 'none';
+        sprocketSettingsSection.style.display = hasImage ? 'block' : 'none';
       }
       syncSprocketEdgeSettingsUI();
+      studioWorkspace?.sync();
     }
 
     function getSprocketFrameComposeOptions() {
@@ -2981,6 +3135,11 @@
 
     function handleSprocketEdgeSettingsChange() {
       state.sprocketEdge = readSprocketEdgeSettingsFromUI();
+      // 枠の設定を触ったら、その結果をすぐ見せる。書き出し指定は変更しない。
+      if (canPreviewSprocketFrame() && !state.sprocketPreviewEnabled) {
+        setSprocketPreviewEnabled(true);
+        return;
+      }
       refreshSprocketPreviewAfterSettingsChange();
     }
 
@@ -3259,11 +3418,14 @@
       const fallbackType = sanitizePresetType(fallbackSettings.filmType || 'color');
       const inferredType = inferFilmTypeFromLegacyPreset(source.filmPreset, fallbackType);
       const filmType = sanitizePresetType(source.filmType || inferredType || fallbackType);
+      const sourceMeta = source === state ? state.autoFrame.lastDiagnostics : source.autoFrameMeta;
+      const fallbackMeta = fallbackSettings === state ? state.autoFrame.lastDiagnostics : fallbackSettings.autoFrameMeta;
 
       const safe = {
         cropRegion: source.cropRegion ? { ...source.cropRegion } : (fallbackSettings.cropRegion ? { ...fallbackSettings.cropRegion } : null),
         rotationAngle: normalizeAngleDegrees(sanitizeNumeric(source.rotationAngle, fallbackSettings.rotationAngle || 0, -3600, 3600)),
-        autoFrameMeta: source.autoFrameMeta ? { ...source.autoFrameMeta } : (fallbackSettings.autoFrameMeta ? { ...fallbackSettings.autoFrameMeta } : null),
+        mirrored: Boolean('mirrored' in source ? source.mirrored : fallbackSettings.mirrored),
+        autoFrameMeta: sourceMeta ? structuredClone(sourceMeta) : ((source === state || Object.hasOwn(source, 'autoFrameMeta')) ? null : (fallbackMeta ? structuredClone(fallbackMeta) : null)),
         filmType,
         filmBase: sanitizeFilmBase(source.filmBase, fallbackSettings.filmBase),
         lensCorrection: sanitizeLensCorrection(source.lensCorrection, fallbackSettings.lensCorrection),
@@ -3397,10 +3559,26 @@
       };
     }
 
-    function buildRouterSettings(settings = state) {
-      return usesSilverCoreConversion(settings)
+    function buildRouterSettings(settings = state, source = state.loadedBaseImageData || state.originalImageData) {
+      const router = usesSilverCoreConversion(settings)
         ? buildCoreConversionSettings(settings)
         : settings;
+      const meta = settings === state ? state.autoFrame.lastDiagnostics : settings.autoFrameMeta;
+      return { ...router, analysisRegion: resolveAnalysisRegion({ ...settings, autoFrameMeta: meta }, source) };
+    }
+
+    const colorAnalysisSamples = new WeakMap();
+    function getColorAnalysisSample(settings = state, source = state.loadedBaseImageData || state.originalImageData) {
+      if (!source) return null;
+      const meta = settings === state ? state.autoFrame.lastDiagnostics : settings.autoFrameMeta;
+      const area = meta?.imageArea || meta?.analysisArea;
+      if (!area) return null;
+      const key = JSON.stringify(area);
+      const cached = colorAnalysisSamples.get(source);
+      if (cached?.key === key) return cached.sample;
+      const sample = sampleAnalysisArea(source, area);
+      colorAnalysisSamples.set(source, { key, sample });
+      return sample;
     }
 
     function buildAdjustmentSettings(settings) {
@@ -3422,17 +3600,41 @@
       });
     }
 
+    function getDisplayPreviewSize(imageData, maxDimension = webglState.maxTextureSize || 8192) {
+      return displayPreviewSize(imageData.width, imageData.height, {
+        viewportWidth: canvasContainer.clientWidth - 20 || 1280,
+        viewportHeight: canvasContainer.clientHeight - 20 || 900,
+        dpr: window.devicePixelRatio || 1,
+        zoom: state.zoomLevel,
+        maxDimension
+      });
+    }
+
     function buildPreviewSourceImageData(imageData) {
-      // Keep interactive preview responsive on slower machines.
-      return downsampleImageDataForMaxPixels(imageData, 250_000);
+      return resizeDisplayPreview(imageData, getDisplayPreviewSize(imageData));
     }
 
     function buildHistogramSourceImageData(imageData) {
       return downsampleImageDataForMaxPixels(imageData, HISTOGRAM_MAX_SAMPLES);
     }
 
-    function buildWebglSourceImageData(imageData, maxDim = 2048) {
-      return downsampleImageDataForMaxDim(imageData, maxDim);
+    function buildWebglSourceImageData(imageData, maxDim = webglState.maxTextureSize || 8192) {
+      return resizeDisplayPreview(imageData, getDisplayPreviewSize(imageData, maxDim));
+    }
+
+    let displayPreviewResizeTimer = null;
+    function scheduleDisplayPreviewResize() {
+      if (displayPreviewResizeTimer) clearTimeout(displayPreviewResizeTimer);
+      displayPreviewResizeTimer = setTimeout(() => {
+        displayPreviewResizeTimer = null;
+        const source = state.conversionSourceImageData;
+        if (!source || state.currentStep < 3 || state.cropping || state.beforeAfterActive) return;
+        const target = getDisplayPreviewSize(source);
+        const previous = state.conversionPreviewImageData;
+        if (previous?.width === target.width && previous?.height === target.height) return;
+        state.conversionPreviewImageData = resizeDisplayPreview(source, target);
+        scheduleCoreReprocess({ full: false });
+      }, 100);
     }
 
     // ===========================================
@@ -3662,9 +3864,7 @@
     curveCanvas.addEventListener('mouseup', () => {
       if (draggingPoint !== null) {
         if (curvePreUndoSnapshot) {
-          undoStack.push(curvePreUndoSnapshot);
-          if (undoStack.length > MAX_UNDO) undoStack.shift();
-          redoStack.length = 0;
+          commitUndoSnapshot(curvePreUndoSnapshot);
           curvePreUndoSnapshot = null;
           updateUndoRedoButtons();
         }
@@ -3676,9 +3876,7 @@
     curveCanvas.addEventListener('mouseleave', () => {
       if (draggingPoint !== null) {
         if (curvePreUndoSnapshot) {
-          undoStack.push(curvePreUndoSnapshot);
-          if (undoStack.length > MAX_UNDO) undoStack.shift();
-          redoStack.length = 0;
+          commitUndoSnapshot(curvePreUndoSnapshot);
           curvePreUndoSnapshot = null;
           updateUndoRedoButtons();
         }
@@ -3745,9 +3943,7 @@
       if (activeCurvePointerId !== pointerId) return;
       if (draggingPoint !== null) {
         if (curvePreUndoSnapshot) {
-          undoStack.push(curvePreUndoSnapshot);
-          if (undoStack.length > MAX_UNDO) undoStack.shift();
-          redoStack.length = 0;
+          commitUndoSnapshot(curvePreUndoSnapshot);
           curvePreUndoSnapshot = null;
           updateUndoRedoButtons();
         }
@@ -3848,6 +4044,10 @@
     }
 
     function initWebGLRenderer() {
+      // The "WebGL Acceleration" checkbox was plumbed all the way to the engine
+      // and read by nothing. Honour it here and in isWebGLActive: unchecking it
+      // now genuinely falls back to the CPU preview path.
+      if (state.coreUseWebGL === false) return false;
       if (webglState.disabledByError) return false;
       if (webglState.gl) return true;
 
@@ -4102,6 +4302,8 @@
     }
 
     function isWebGLActive() {
+      if (state.cropping) return false;
+      if (state.coreUseWebGL === false) return false;
       if (state.dustRemoval.enabled && state.dustRemoval.showMask) return false;
       if (state.sprocketPreviewEnabled) return false;
       return !!webglState.gl && !webglState.disabledByError && state.currentStep >= 3 && !!state.processedImageData;
@@ -4109,23 +4311,14 @@
 
     function resizeWebGLCanvas() {
       if (!webglState.gl) return;
-      // Use pre-transform CSS dimensions to avoid bloating the buffer when zoomed
+      // CSS の拡大率も含め、表示用テクスチャと同じ物理解像度で描く。
       const cssW = parseFloat(glCanvas.style.width) || 0;
       const cssH = parseFloat(glCanvas.style.height) || 0;
       if (cssW <= 0 || cssH <= 0) return;
 
-      const dpr = window.devicePixelRatio || 1;
-      let targetW = Math.max(1, Math.round(cssW * dpr));
-      let targetH = Math.max(1, Math.round(cssH * dpr));
-
-      // Limit interactive draw resolution to keep things smooth on very large displays.
-      const maxDim = 2048;
-      const maxCurrent = Math.max(targetW, targetH);
-      if (maxCurrent > maxDim) {
-        const scale = maxDim / maxCurrent;
-        targetW = Math.max(1, Math.floor(targetW * scale));
-        targetH = Math.max(1, Math.floor(targetH * scale));
-      }
+      const source = state.conversionSourceImageData || state.processedImageData;
+      if (!source) return;
+      const { width: targetW, height: targetH } = getDisplayPreviewSize(source);
 
       if (glCanvas.width !== targetW) glCanvas.width = targetW;
       if (glCanvas.height !== targetH) glCanvas.height = targetH;
@@ -4136,7 +4329,7 @@
       if (!full) return null;
 
       const maxTex = webglState.maxTextureSize || 0;
-      const targetMaxDim = Math.min(2048, maxTex || 2048);
+      const targetMaxDim = maxTex || 8192;
 
       let src = state.webglSourceImageData;
       if (!src || src.width !== Math.min(src.width, targetMaxDim) || src.height !== Math.min(src.height, targetMaxDim)) {
@@ -4251,7 +4444,7 @@
     }
 
     function renderWebGL() {
-      if (!webglState.gl || webglState.disabledByError || !state.processedImageData) return false;
+      if (state.cropping || !webglState.gl || webglState.disabledByError || !state.processedImageData) return false;
 
       try {
         const source = getWebglSourceImageData();
@@ -4360,7 +4553,7 @@
 
     function updatePreview() {
       if (!state.processedImageData) return;
-      if (state.beforeAfterActive) return;
+      if (state.beforeAfterActive || state.cropping) return;
 
       // Prefer GPU rendering in Step 3 when available.
       if (state.currentStep >= 3 && initWebGLRenderer()) {
@@ -4378,7 +4571,7 @@
     }
 
     function updatePreviewCpu() {
-      if (!state.processedImageData) return;
+      if (!state.processedImageData || state.cropping) return;
 
       const source = state.previewSourceImageData || state.processedImageData;
       previewAdjustedBuffer = ensureImageDataBuffer(previewAdjustedBuffer, source.width, source.height);
@@ -4402,7 +4595,10 @@
 
     function updateFull() {
       if (!state.processedImageData) return;
-      if (state.beforeAfterActive) return;
+      if (state.beforeAfterActive || state.cropping) return;
+      // Whether a 16-bit export keeps 16-bit samples depends on the Step-3
+      // controls, so the export panel's warning has to follow them.
+      updateExportUI();
 
       // Prefer GPU rendering in Step 3 when available.
       if (state.currentStep >= 3 && initWebGLRenderer()) {
@@ -4420,7 +4616,7 @@
     }
 
     function updateFullCpu() {
-      if (!state.processedImageData) return;
+      if (!state.processedImageData || state.cropping) return;
 
       const source = state.processedImageData;
       fullAdjustedBuffer = ensureImageDataBuffer(fullAdjustedBuffer, source.width, source.height);
@@ -4547,11 +4743,13 @@
       state.displayImageData = null;
       state.previewSourceImageData = buildPreviewSourceImageData(processed);
       state.histogramSourceImageData = buildHistogramSourceImageData(state.previewSourceImageData || processed);
-      state.webglSourceImageData = buildWebglSourceImageData(processed);
+      state.webglSourceImageData = state.previewSourceImageData;
       if (initWebGLRenderer()) {
         webglState.sourceDirty = true;
         webglState.curveDirty = true;
       }
+      // 非同期変換は結果を保存してよいが、切り抜き草稿の画布を変更しない。
+      if (state.cropping) return;
       if (state.sprocketPreviewEnabled) {
         const frameMetrics = getSprocketFrameMetrics(processed.width, processed.height);
         setMainCanvasDimensions(frameMetrics.outputWidth, frameMetrics.outputHeight);
@@ -4567,13 +4765,16 @@
     // never once the user has sampled a gray point or touched the RGB gain
     // sliders. Low-confidence estimates apply nothing and leave the existing
     // gray-point guide nudging toward the manual click instead.
-    function maybeAutoWhiteBalance() {
+    function maybeAutoWhiteBalance(processed) {
       if (!usesSilverCoreConversion(state)) return;
       if (sanitizePresetType(state.filmType || 'color') === 'bw') return;
       if (state.grayPointSampled || state.wbUserOverride) return;
-      const source = state.previewSourceImageData || state.processedImageData;
+      if (state.autoFrame.lastDiagnostics?.analysisNeedsReview) return;
+      const reference = processed?.__analysisPreview;
+      const source = reference || state.previewSourceImageData || state.processedImageData;
       if (!source) return;
-      const estimate = estimateAutoWhiteBalance(source);
+      const roi = resolveAnalysisRegion({ ...state, autoFrameMeta: state.autoFrame.lastDiagnostics }, state.loadedBaseImageData || state.originalImageData);
+      const estimate = estimateAutoWhiteBalance(reference ? source : roi ? cropImageData(source, analysisPixelBounds(source.width, source.height, roi, 0.02)) : source);
       if (estimate.confidence === 'low') {
         // Only clear a previous auto estimate; user-owned gains stay put.
         if (state.wbAutoConfidence) {
@@ -4596,22 +4797,40 @@
     }
 
     // Full-resolution conversions run in a worker so a 90+ MP scan does not
-    // freeze the UI for seconds; the small interactive preview stays on the
-    // main thread. Falls back to the main thread if the worker fails.
+    // freeze the UI for seconds. Interactive previews have a separate worker.
     let conversionWorkerBroken = false;
+    let conversionWorkerTimeouts = 0;
     async function convertFrameOffMainThread({ imageData, settings, options }) {
       if (!conversionWorkerBroken && usesSilverCoreConversion(state)) {
         try {
           return await convertFrameInWorker({ imageData, settings, options });
         } catch (err) {
-          conversionWorkerBroken = true;
-          console.warn('Conversion worker unavailable, using main thread:', err?.message || err);
+          // Only retire the worker for infrastructure failures. A conversion
+          // that threw inside it will throw on the main thread too, and
+          // disabling the worker for that costs every later full-resolution
+          // render a frozen UI on large scans. A timeout is the likeliest false
+          // positive of all — a big scan on a slow machine — so it gets two
+          // strikes before the worker is written off for the session.
+          if (err?.code === CONVERSION_FAILED) {
+            console.warn('Conversion failed in worker, retrying on main thread:', err?.message || err);
+          } else if (err?.code === WORKER_TIMEOUT) {
+            conversionWorkerTimeouts += 1;
+            if (conversionWorkerTimeouts >= 2) {
+              conversionWorkerBroken = true;
+              console.warn('Conversion worker timed out repeatedly, using main thread from now on');
+            } else {
+              console.warn('Conversion worker timed out, retrying on the main thread this once');
+            }
+          } else {
+            conversionWorkerBroken = true;
+            console.warn('Conversion worker unavailable, using main thread:', err?.message || err);
+          }
         }
       }
       return convertFrameWithRouter({ imageData, settings, options });
     }
 
-    async function convertFromCurrentSource(settings = state, { preview = false } = {}) {
+    async function convertFromCurrentSource(settings = state, { preview = false, interactive = false, includeAnalysisPreview = true } = {}) {
       const fullSource = state.conversionSourceImageData || state.croppedImageData || state.originalImageData;
       if (!fullSource) return null;
       const source = (preview && state.conversionPreviewImageData) ? state.conversionPreviewImageData : fullSource;
@@ -4620,16 +4839,24 @@
         settings: buildRouterSettings(settings),
         options: {
           preview,
-          forceFullProcess: !preview
+          includeAnalysisPreview,
+          analysisImageData: getColorAnalysisSample(settings),
+          forceFullProcess: !preview && !interactive
         }
       };
-      if (preview) {
-        return await convertFrameWithRouter(request);
+      if (preview || interactive) {
+        try {
+          return await convertPreviewFrameInWorker(request);
+        } catch (err) {
+          console.warn('Preview worker failed, retrying on main thread:', err?.message || err);
+          return await convertFrameWithRouter(request);
+        }
       }
       return await convertFrameOffMainThread(request);
     }
 
     let coreReprocessTimer = null;
+    let coreReprocessScheduled = null;
     let coreReprocessToken = 0;
     let step2AutoConvertTimer = null;
     let step2AutoConvertToken = 0;
@@ -4683,23 +4910,70 @@
         return;
       }
       // Only update preview-related state; leave processedImageData untouched
-      // so that full-resolution export remains correct.
+      // so that full-resolution export remains correct. It is now stale
+      // relative to what the user sees, so flag it: without this an export
+      // fired inside the debounce window passes the "already full resolution"
+      // check in ensureFullResolutionReadyForExport and silently writes the
+      // previous conversion.
+      state.fullResolutionPending = true;
       state.previewSourceImageData = buildPreviewSourceImageData(processed);
-      state.webglSourceImageData = buildWebglSourceImageData(processed);
+      state.histogramSourceImageData = buildHistogramSourceImageData(state.previewSourceImageData);
+      state.webglSourceImageData = state.previewSourceImageData;
       if (initWebGLRenderer()) {
         webglState.sourceDirty = true;
         webglState.curveDirty = true;
       }
       const fullW = state.processedImageData ? state.processedImageData.width : processed.width;
       const fullH = state.processedImageData ? state.processedImageData.height : processed.height;
-      setMainCanvasDimensions(fullW, fullH);
+      if (!state.cropping) setMainCanvasDimensions(fullW, fullH);
     }
 
     let _coreReprocessFullInFlight = false;
     let _coreReprocessPreviewInFlight = false;
     let _coreReprocessPending = null;
+    // An export has to wait for the reprocess chain to drain, and
+    // rerenderWithCoreControls returns immediately when it queues itself behind
+    // a run already in flight — so the caller's promise is not a usable handle.
+    // Count the calls that are genuinely doing work instead, and hand out a
+    // promise that settles when the count reaches zero.
+    let _coreReprocessActive = 0;
+    let _coreReprocessIdle = null;
+    let _resolveCoreReprocessIdle = null;
+
+    function coreReprocessBusy() {
+      return _coreReprocessActive > 0 || _coreReprocessPending !== null;
+    }
+
+    function whenCoreReprocessIdle() {
+      if (!coreReprocessBusy()) return null;
+      if (!_coreReprocessIdle) {
+        _coreReprocessIdle = new Promise((resolve) => { _resolveCoreReprocessIdle = resolve; });
+      }
+      return _coreReprocessIdle;
+    }
+
+    function noteCoreReprocessSettled() {
+      if (coreReprocessBusy()) return;
+      const resolve = _resolveCoreReprocessIdle;
+      _coreReprocessIdle = null;
+      _resolveCoreReprocessIdle = null;
+      if (resolve) resolve();
+    }
+
+    function runCoreReprocess(options) {
+      _coreReprocessActive += 1;
+      return rerenderWithCoreControls(options)
+        .catch((err) => {
+          console.error('Core reprocess failed:', err);
+        })
+        .finally(() => {
+          _coreReprocessActive -= 1;
+          noteCoreReprocessSettled();
+        });
+    }
 
     function resetDustForCleanSource(source) {
+      dustDetectionRevision += 1;
       state.dustRemoval.cleanSource = source || null;
       state.dustRemoval._state = null;
       state.dustRemoval.mask = null;
@@ -4707,13 +4981,17 @@
       state.dustRemoval.particleCount = 0;
     }
 
+    // Resolves true only when it actually rendered. Callers use that to decide
+    // whether the display is up to date: a blocked or superseded call queues
+    // itself and returns at once, and treating that as a completed render is
+    // how a stale frame reached the exporter.
     async function rerenderWithCoreControls(options = {}) {
       const full = Boolean(options.full) || Boolean(state.dustRemoval.enabled);
-      const token = Number.isInteger(options.token) ? options.token : null;
-      const sourceRef = options.sourceRef || null;
-      if (!usesSilverCoreConversion(state)) return;
-      if (!state.conversionSourceImageData) return;
-      if (sourceRef && state.conversionSourceImageData !== sourceRef) return;
+      const token = Number.isInteger(options.token) ? options.token : coreReprocessToken;
+      const sourceRef = options.sourceRef || state.conversionSourceImageData;
+      if (!usesSilverCoreConversion(state)) return false;
+      if (!state.conversionSourceImageData) return false;
+      if (sourceRef && state.conversionSourceImageData !== sourceRef) return false;
 
       // In-flight guard: serialize preview-vs-preview and full-vs-anything,
       // but let a preview reprocess run while a full-resolution render is
@@ -4724,7 +5002,7 @@
         : _coreReprocessPreviewInFlight;
       if (blocked) {
         _coreReprocessPending = options;
-        return;
+        return false;
       }
       if (full) _coreReprocessFullInFlight = true;
       else _coreReprocessPreviewInFlight = true;
@@ -4732,27 +5010,39 @@
       try {
         if (full) {
           // Full-resolution path
-          const processed = await convertFromCurrentSource(state, { preview: false });
-          if (!processed) return;
-          if (token !== null && token !== coreReprocessToken) return;
-          if (sourceRef && state.conversionSourceImageData !== sourceRef) return;
+          const processed = await convertFromCurrentSource(state, { preview: false, includeAnalysisPreview: false });
+          if (!processed) return false;
+          if (token !== null && token !== coreReprocessToken) return false;
+          if (sourceRef && state.conversionSourceImageData !== sourceRef) return false;
           applyProcessedImageToState(processed);
           updateFull();
           if (state.dustRemoval.enabled) {
             resetDustForCleanSource(processed);
             scheduleDustDetection();
           }
+          return true;
         } else {
+          // DPR の変更は CSS resize を発火しない場合もあるため、入力時にも確認。
+          const target = getDisplayPreviewSize(state.conversionSourceImageData);
+          if (state.conversionPreviewImageData?.width !== target.width
+            || state.conversionPreviewImageData?.height !== target.height) {
+            state.conversionPreviewImageData = resizeDisplayPreview(state.conversionSourceImageData, target);
+          }
           // Check if preview source is actually smaller than full source
           const hasSmallPreview = state.conversionPreviewImageData
             && state.conversionPreviewImageData !== state.conversionSourceImageData;
 
           // Preview-resolution path: run SilverCore on small image
-          const previewProcessed = await convertFromCurrentSource(state, { preview: hasSmallPreview });
-          if (!previewProcessed) return;
-          if (token !== null && token !== coreReprocessToken) return;
+          const previewProcessed = await convertFromCurrentSource(state, { preview: hasSmallPreview, interactive: true, includeAnalysisPreview: false });
+          if (!previewProcessed) return false;
+          if (state.conversionSourceImageData !== sourceRef) return false;
+          // 連続入力中も完了したフレームを表示する。別画像の結果は破棄し、
+          // 古い設定のフレームを「書き出し可能な原寸」としては扱わない。
+          const superseded = token !== coreReprocessToken;
+          const nextPreview = coreReprocessScheduled || _coreReprocessPending;
+          if (superseded && (!nextPreview || nextPreview.full || nextPreview.token !== coreReprocessToken)) return false;
 
-          if (hasSmallPreview) {
+          if (hasSmallPreview || superseded) {
             // Preview source is smaller — update preview display path only
             applyPreviewProcessedImageToState(previewProcessed);
             updatePreview();
@@ -4763,6 +5053,7 @@
             updatePreview();
             // No need to schedule full update; we already processed at full resolution
           }
+          return true;
         }
       } finally {
         if (full) _coreReprocessFullInFlight = false;
@@ -4773,9 +5064,13 @@
         // preview must not wait for an in-flight full render.
         if (_coreReprocessPending) {
           const pending = _coreReprocessPending;
+          // Claim the work before clearing the slot so coreReprocessBusy() never
+          // reads as idle in the gap between the two.
+          _coreReprocessActive += 1;
           _coreReprocessPending = null;
-          void rerenderWithCoreControls(pending).catch((err) => {
-            console.error('Core reprocess (pending) failed:', err);
+          void runCoreReprocess(pending).finally(() => {
+            _coreReprocessActive -= 1;
+            noteCoreReprocessSettled();
           });
         }
       }
@@ -4806,9 +5101,11 @@
         pixels: getImageDataPixelCount(state.conversionSourceImageData)
       });
 
+      let rendered = false;
       const promise = waitForNextFrame()
         .then(() => rerenderWithCoreControls({ full: true, sourceRef, token }))
-        .then(() => {
+        .then((didRender) => {
+          rendered = didRender === true;
           trace.end({
             outputPixels: getImageDataPixelCount(state.processedImageData),
             previewOnly: Boolean(state.processedImageDataIsPreview)
@@ -4818,7 +5115,9 @@
           if (state.fullResolutionPromise === promise) {
             state.fullResolutionPromise = null;
           }
-          state.fullResolutionPending = Boolean(state.processedImageDataIsPreview);
+          // A render that was queued behind another one has not produced
+          // anything yet, so the work is still outstanding.
+          state.fullResolutionPending = rendered ? Boolean(state.processedImageDataIsPreview) : true;
           // Settings changed while this render was in flight, so its result
           // was discarded. Schedule another pass so the display converges on
           // the latest settings instead of staying at preview quality.
@@ -4866,15 +5165,30 @@
     }
 
     async function ensureFullResolutionReadyForExport() {
+      // Settle the debounced/in-flight reprocess first. Exporting while one is
+      // running used to either ship the previous conversion or fail outright,
+      // because startFullResolutionRender hands back the queued render whose
+      // promise resolves before the new pixels exist.
+      await flushScheduledCoreReprocess();
       if (!state.processedImageDataIsPreview && !state.fullResolutionPending) return;
       if (fullResolutionRenderTimer) {
         clearTimeout(fullResolutionRenderTimer);
         fullResolutionRenderTimer = null;
       }
-      const pending = state.fullResolutionPromise || startFullResolutionRender('export');
-      if (pending) await pending;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const pending = state.fullResolutionPromise || startFullResolutionRender('export');
+        if (!pending) break;
+        await pending;
+        await flushScheduledCoreReprocess();
+        if (!state.processedImageDataIsPreview && !state.fullResolutionPending) return;
+      }
       if (state.processedImageDataIsPreview) {
         throw new Error('Full-resolution processing is not ready yet. Please wait for the background render to finish.');
+      }
+      // Only clear the flag when there really is no separate preview source, so
+      // that a still-pending render is not silently declared ready.
+      if (!hasSeparateConversionPreview()) {
+        state.fullResolutionPending = false;
       }
     }
 
@@ -4885,13 +5199,43 @@
 
       const token = ++coreReprocessToken;
       cancelScheduledFullResolutionRender();
+      // The controls moved, so processedImageData no longer matches the UI even
+      // while it is still full resolution. Mark it stale here rather than
+      // waiting for the debounce to fire, so an export issued in between waits
+      // for the new conversion instead of writing the previous one.
+      if (hasSeparateConversionPreview()) state.fullResolutionPending = true;
+      const wasFull = coreReprocessScheduled?.full;
+      coreReprocessScheduled = { full, token, sourceRef: state.conversionSourceImageData };
+      // 操作が続いても期限を延ばさず、最新入力を約 1 フレームごとに送る。
+      if (coreReprocessTimer && !full && !wasFull) return;
       if (coreReprocessTimer) clearTimeout(coreReprocessTimer);
       coreReprocessTimer = setTimeout(() => {
+        const scheduled = coreReprocessScheduled;
         coreReprocessTimer = null;
-        void rerenderWithCoreControls({ full, token }).catch((err) => {
-          console.error('Core reprocess failed:', err);
-        });
-      }, full ? 70 : 80);
+        coreReprocessScheduled = null;
+        if (scheduled) void runCoreReprocess(scheduled);
+      }, full ? 70 : 16);
+    }
+
+    // Run whatever the debounce is still holding, then wait for the reprocess
+    // chain to drain. Used before export so the file on disk matches the screen.
+    async function flushScheduledCoreReprocess() {
+      for (let guard = 0; guard < 8; guard++) {
+        if (coreReprocessTimer) {
+          clearTimeout(coreReprocessTimer);
+          coreReprocessTimer = null;
+          const scheduled = coreReprocessScheduled;
+          coreReprocessScheduled = null;
+          if (scheduled) await runCoreReprocess(scheduled);
+          continue;
+        }
+        const idle = whenCoreReprocessIdle();
+        if (idle) {
+          await idle;
+          continue;
+        }
+        return;
+      }
     }
 
     async function processNegative() {
@@ -4900,6 +5244,9 @@
       processNegativeInFlight = (async () => {
         const sourceData = state.croppedImageData || state.originalImageData;
         if (!sourceData) return;
+        const generation = loadGeneration;
+        const isCurrentConversion = () => isCurrentLoad(generation)
+          && sourceData === (state.croppedImageData || state.originalImageData);
         const trace = createPerfTrace('processNegative', {
           pixels: getImageDataPixelCount(sourceData)
         });
@@ -4909,12 +5256,10 @@
         await overlay.show({ title: lang.loadingConverting });
 
         try {
-          const frontierAutoApplied = await maybeApplyFrontierGuideDefaults();
-          if (frontierAutoApplied) {
-            updateSlidersFromState();
-          }
+          if (!isCurrentConversion()) return;
           overlay.updateProgress(10, lang.loadingConverting);
           const correctedSourceData = await applyLensCorrectionWithSettings(sourceData, state, { updateUi: true });
+          if (!isCurrentConversion()) return;
           trace.mark('lensCorrection', {
             outputPixels: getImageDataPixelCount(correctedSourceData)
           });
@@ -4925,13 +5270,13 @@
           overlay.updateProgress(hasPreviewSource ? 35 : 40, lang.loadingConverting);
 
           const processed = await convertFromCurrentSource(state, { preview: hasPreviewSource });
-          if (!processed) return;
+          if (!processed || !isCurrentConversion()) return;
           trace.mark(hasPreviewSource ? 'previewConversion' : 'fullConversion', {
             outputPixels: getImageDataPixelCount(processed)
           });
           overlay.updateProgress(hasPreviewSource ? 78 : 85, lang.loadingProcessing);
           applyProcessedImageToState(processed, { previewOnly: hasPreviewSource });
-          maybeAutoWhiteBalance();
+          maybeAutoWhiteBalance(processed);
           // Reset dust removal state for new conversion
           state.dustRemoval._state = null;
           state.dustRemoval.mask = null;
@@ -4942,13 +5287,13 @@
           syncBatchUIState({ reason: 'processNegative' });
           revealBatchFileList('processNegative');
           updatePreview();
+          updateStudioThumbnail();
           if (hasPreviewSource) {
             state.fullResolutionPending = true;
             scheduleFullResolutionRender('initial-preview');
           } else {
             scheduleFullUpdate();
           }
-          maybeShowFrontierGuidePopup();
           overlay.updateProgress(100, lang.loadingComplete);
           trace.end({
             previewFirst: hasPreviewSource,
@@ -4959,8 +5304,19 @@
           if (state.dustRemoval.enabled && !hasPreviewSource) {
             scheduleDustDetection();
           }
+        } catch (err) {
+          if (!isCurrentConversion()) return;
+          // Every caller fires this with `void`, so without a catch here a
+          // failed conversion became an unhandled rejection: the overlay
+          // vanished and the user was left on the previous image with no
+          // indication that anything went wrong.
+          console.error('Conversion failed:', err);
+          const detail = String(err?.message || err || '');
+          void appAlert(
+            `${getLocalizedText('conversionFailed', 'Conversion failed.')}${detail ? `\n${detail}` : ''}`
+          );
         } finally {
-          overlay.hide();
+          if (isCurrentLoad(generation)) overlay.hide();
         }
       })();
 
@@ -4975,6 +5331,7 @@
     // Dust Removal Pipeline
     // ===========================================
     let dustDetectionTimer = null;
+    let dustDetectionRevision = 0;
     let dustDrawing = false;
     let dustBrushMode = 'intelligent';
 
@@ -5008,19 +5365,35 @@
     }
 
     async function runDustDetection() {
-      const source = getDustSource();
-      if (!source) return;
-      if (state.dustRemoval.processing) return;
+      if (!state.dustRemoval.enabled || !state.processedImageData) return;
+      if (state.dustRemoval.processing) {
+        scheduleDustDetection();
+        return;
+      }
+
+      const sourceRef = state.conversionSourceImageData;
+      const token = coreReprocessToken;
+      const revision = dustDetectionRevision;
+      const isCurrent = () => state.dustRemoval.enabled
+        && state.conversionSourceImageData === sourceRef
+        && coreReprocessToken === token
+        && dustDetectionRevision === revision;
 
       state.dustRemoval.processing = true;
       updateDustStatusUI(getLocalizedText('dustStatusProcessing', 'Processing...'));
 
-      await ensureOpenCvReady();
-
-      // Use a short timeout to let the UI update
-      await new Promise(r => setTimeout(r, 10));
-
       try {
+        // プレビューに作ったマスクを原寸画像へ適用しない。
+        await ensureFullResolutionReadyForExport();
+        // 原寸レンダリングが新しい検出を予約した場合はそちらへ引き継ぐ。
+        if (!isCurrent()) return;
+        const source = getDustSource();
+        if (!source || state.processedImageDataIsPreview) return;
+        const ready = await ensureOpenCvReady();
+        await new Promise(r => setTimeout(r, 10));
+        if (!isCurrent() || source !== getDustSource()) return;
+        if (!ready) throw new Error('OpenCV is not available');
+
         // Save original source before inpainting overwrites processedImageData
         if (!state.dustRemoval.cleanSource) {
           state.dustRemoval.cleanSource = source;
@@ -5044,7 +5417,11 @@
           state.dustRemoval.inpaintedImageData = null;
           updateDustStatusUI(getLocalizedText('dustStatusNone', 'No dust detected'));
         }
+        cancelFullUpdate();
+        applyDustResultToState();
+        updatePreview();
       } catch (err) {
+        if (!isCurrent()) return;
         console.error('Dust detection failed:', err);
         state.dustRemoval.mask = null;
         state.dustRemoval.inpaintedImageData = null;
@@ -5052,21 +5429,17 @@
       } finally {
         state.dustRemoval.processing = false;
       }
-
-      // Refresh display to show inpainted result
-      cancelFullUpdate();
-      applyDustResultToState();
-      updatePreview();
     }
 
     function applyDustResultToState() {
       if (!state.dustRemoval.enabled) return;
       const nextImage = state.dustRemoval.inpaintedImageData || state.dustRemoval.cleanSource;
       if (!nextImage) return;
-      applyProcessedImageToState(nextImage);
+      applyProcessedImageToState(nextImage, { previewOnly: state.processedImageDataIsPreview });
     }
 
     function scheduleDustDetection() {
+      dustDetectionRevision += 1;
       if (dustDetectionTimer) clearTimeout(dustDetectionTimer);
       dustDetectionTimer = setTimeout(() => {
         dustDetectionTimer = null;
@@ -5075,6 +5448,9 @@
     }
 
     function clearDustState() {
+      dustDetectionRevision += 1;
+      if (dustDetectionTimer) clearTimeout(dustDetectionTimer);
+      dustDetectionTimer = null;
       state.dustRemoval.mask = null;
       state.dustRemoval.inpaintedImageData = null;
       state.dustRemoval.particleCount = 0;
@@ -5083,31 +5459,79 @@
       updateDustStatusUI(getLocalizedText('dustStatusIdle', 'Ready'));
     }
 
-    function renderDustMaskOverlay() {
-      if (!state.dustRemoval.showMask || !state.dustRemoval.mask || !state.processedImageData) return;
+    // The mask tint is cached as its own canvas: it only changes when the mask
+    // or the canvas size changes, so a brush drag composites a ready-made layer
+    // instead of running a full-canvas getImageData, per-pixel JS loop and
+    // putImageData on every pointer move.
+    const dustMaskOverlayCache = { canvas: null, mask: null, width: 0, height: 0 };
+
+    function getDustMaskOverlayCanvas() {
+      const mask = state.dustRemoval.mask;
+      if (!mask || !state.processedImageData) return null;
+      const w = canvas.width;
+      const h = canvas.height;
+      if (!w || !h) return null;
+
+      if (
+        dustMaskOverlayCache.canvas
+        && dustMaskOverlayCache.mask === mask
+        && dustMaskOverlayCache.width === w
+        && dustMaskOverlayCache.height === h
+      ) {
+        return dustMaskOverlayCache.canvas;
+      }
 
       const { width, height } = state.processedImageData;
-      const mask = state.dustRemoval.mask;
+      const layer = dustMaskOverlayCache.canvas && dustMaskOverlayCache.width === w && dustMaskOverlayCache.height === h
+        ? dustMaskOverlayCache.canvas
+        : document.createElement('canvas');
+      layer.width = w;
+      layer.height = h;
+      const layerCtx = layer.getContext('2d', { willReadFrequently: false });
+      if (!layerCtx) return null;
+      layerCtx.clearRect(0, 0, w, h);
 
-      // Draw red semi-transparent overlay on the canvas for masked areas
-      const overlayData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      const scaleX = width / canvas.width;
-      const scaleY = height / canvas.height;
-
-      for (let cy = 0; cy < canvas.height; cy++) {
-        for (let cx = 0; cx < canvas.width; cx++) {
+      const tint = layerCtx.createImageData(w, h);
+      const data = tint.data;
+      const scaleX = width / w;
+      const scaleY = height / h;
+      for (let cy = 0; cy < h; cy++) {
+        const my = Math.min(height - 1, Math.round(cy * scaleY));
+        const rowOffset = my * width;
+        for (let cx = 0; cx < w; cx++) {
           const mx = Math.min(width - 1, Math.round(cx * scaleX));
-          const my = Math.min(height - 1, Math.round(cy * scaleY));
-          if (mask[my * width + mx] > 0) {
-            const idx = (cy * canvas.width + cx) * 4;
-            // Red overlay at 50% opacity
-            overlayData.data[idx] = Math.min(255, overlayData.data[idx] * 0.5 + 255 * 0.5) | 0;
-            overlayData.data[idx + 1] = (overlayData.data[idx + 1] * 0.5) | 0;
-            overlayData.data[idx + 2] = (overlayData.data[idx + 2] * 0.5) | 0;
+          if (mask[rowOffset + mx] > 0) {
+            const idx = (cy * w + cx) * 4;
+            data[idx] = 255;
+            data[idx + 3] = 128; // 50% red, composited over the image below
           }
         }
       }
-      ctx.putImageData(overlayData, 0, 0);
+      layerCtx.putImageData(tint, 0, 0);
+
+      dustMaskOverlayCache.canvas = layer;
+      dustMaskOverlayCache.mask = mask;
+      dustMaskOverlayCache.width = w;
+      dustMaskOverlayCache.height = h;
+      return layer;
+    }
+
+    function renderDustMaskOverlay() {
+      if (state.cropping) return;
+      if (!state.dustRemoval.showMask || !state.dustRemoval.mask || !state.processedImageData) return;
+      const layer = getDustMaskOverlayCanvas();
+      if (!layer) return;
+      ctx.drawImage(layer, 0, 0);
+    }
+
+    // Repaint the image under the overlay first. Without this the tint is
+    // composited on top of the previous tint, so a brush drag turned the whole
+    // mask solid red and toggling the mask twice doubled its opacity.
+    function repaintDustMaskOverlay() {
+      const display = state.displayImageData || state.processedImageData;
+      if (!display) return;
+      renderAdjustedImageDataToMainCanvas(display, display);
+      renderDustMaskOverlay();
     }
 
     // ── Dust Removal UI Event Handlers ───────────────────────────────────────
@@ -5148,9 +5572,7 @@
     });
     document.getElementById('dustStrength')?.addEventListener('change', function () {
       if (dustStrengthPreSnapshot) {
-        undoStack.push(dustStrengthPreSnapshot);
-        if (undoStack.length > MAX_UNDO) undoStack.shift();
-        redoStack.length = 0;
+        commitUndoSnapshot(dustStrengthPreSnapshot);
         dustStrengthPreSnapshot = null;
         updateUndoRedoButtons();
       }
@@ -5172,9 +5594,7 @@
     });
     document.getElementById('dustMaxSize')?.addEventListener('change', function () {
       if (dustMaxSizePreSnapshot) {
-        undoStack.push(dustMaxSizePreSnapshot);
-        if (undoStack.length > MAX_UNDO) undoStack.shift();
-        redoStack.length = 0;
+        commitUndoSnapshot(dustMaxSizePreSnapshot);
         dustMaxSizePreSnapshot = null;
         updateUndoRedoButtons();
       }
@@ -5234,7 +5654,13 @@
 
     document.getElementById('dustClearMaskBtn')?.addEventListener('click', () => {
       if (!state.dustRemoval.enabled) return;
+      const source = getDustSource();
+      if (source) {
+        applyProcessedImageToState(source, { previewOnly: state.processedImageDataIsPreview });
+      }
       clearDustState();
+      state.dustRemoval.cleanSource = source;
+      updatePreview();
       // Re-run fresh detection
       scheduleDustDetection();
     });
@@ -5294,15 +5720,20 @@
     }
 
     let dustBrushPoints = [];
+    let dustBrushSource = null;
+    let dustBrushToken = null;
 
     function onDustBrushStart(e) {
       if (!state.dustRemoval.enabled || !state.dustRemoval.showMask) return;
       if (!state.dustRemoval.mask || !state.processedImageData) return;
+      if (state.dustRemoval.processing || state.processedImageDataIsPreview) return;
       if (state.samplingMode || state.cropping) return;
 
       e.preventDefault();
       dustDrawing = true;
       dustBrushPoints = [];
+      dustBrushSource = getDustSource();
+      dustBrushToken = coreReprocessToken;
 
       // Determine mode
       if (e.altKey) {
@@ -5332,7 +5763,7 @@
 
       // Visual feedback: draw brush stroke on canvas
       if (state.dustRemoval.showMask) {
-        renderDustMaskOverlay();
+        repaintDustMaskOverlay();
         // Draw brush points
         const scaleX = canvas.width / (state.processedImageData?.width || 1);
         const scaleY = canvas.height / (state.processedImageData?.height || 1);
@@ -5354,65 +5785,71 @@
       if (!dustDrawing) return;
       dustDrawing = false;
 
-      if (dustBrushPoints.length === 0 || !state.processedImageData || !state.dustRemoval.mask) return;
+      if (dustBrushPoints.length === 0 || !state.processedImageData || !state.dustRemoval.mask) {
+        dustBrushPoints = [];
+        dustBrushSource = null;
+        return;
+      }
+      const source = getDustSource();
+      if (!state.dustRemoval.enabled || !source || source !== dustBrushSource
+        || coreReprocessToken !== dustBrushToken) {
+        dustBrushPoints = [];
+        dustBrushSource = null;
+        return;
+      }
       pushUndo('dustBrushStroke');
 
-      const source = getDustSource();
-      if (!source) return;
+      try {
+        const { width, height } = source;
+        const brushMask = createBrushMask(dustBrushPoints, state.dustRemoval.brushSize, width, height);
 
-      const { width, height } = source;
-      const brushMask = createBrushMask(dustBrushPoints, state.dustRemoval.brushSize, width, height);
+        let newMask;
+        if (dustBrushMode === 'intelligent') {
+          newMask = refineMaskIntelligent(source, state.dustRemoval.mask, brushMask);
+        } else if (dustBrushMode === 'direct') {
+          newMask = refineMaskDirect(state.dustRemoval.mask, brushMask);
+        } else {
+          newMask = refineMaskRemove(state.dustRemoval.mask, brushMask);
+        }
 
-      let newMask;
-      if (dustBrushMode === 'intelligent') {
-        newMask = refineMaskIntelligent(source, state.dustRemoval.mask, brushMask);
-      } else if (dustBrushMode === 'direct') {
-        newMask = refineMaskDirect(state.dustRemoval.mask, brushMask);
-      } else {
-        newMask = refineMaskRemove(state.dustRemoval.mask, brushMask);
-      }
+        // 同じ解像度の未修復画像を再利用し、筆跡ごとの全画像変換を省く。
+        const inpainted = inpaintMasked(source, newMask, 3);
+        state.dustRemoval.mask = newMask;
+        state.dustRemoval.inpaintedImageData = inpainted;
 
-      state.dustRemoval.mask = newMask;
-
-      // Re-inpaint with updated mask
-      // We need the original pre-inpaint source.
-      // Re-convert to get clean source, then re-inpaint
-      const cleanSource = state.conversionSourceImageData || state.croppedImageData || state.originalImageData;
-      if (cleanSource) {
-        convertFromCurrentSource(state, { preview: false }).then(processed => {
-          if (!processed) return;
-          const inpainted = inpaintMasked(processed, newMask, 3);
-          state.dustRemoval.inpaintedImageData = inpainted;
-
-          // Count particles
-          const c = window.cv;
-          if (c && c.Mat) {
-            try {
-              const maskMat = new c.Mat(height, width, c.CV_8UC1);
-              maskMat.data.set(newMask);
-              const contours = new c.MatVector();
-              const hierarchy = new c.Mat();
-              c.findContours(maskMat, contours, hierarchy, c.RETR_EXTERNAL, c.CHAIN_APPROX_SIMPLE);
-              state.dustRemoval.particleCount = contours.size();
-              maskMat.delete();
-              contours.delete();
-              hierarchy.delete();
-            } catch (_e) { /* ignore */ }
+        const c = window.cv;
+        if (c && c.Mat) {
+          let maskMat, contours, hierarchy;
+          try {
+            maskMat = new c.Mat(height, width, c.CV_8UC1);
+            maskMat.data.set(newMask);
+            contours = new c.MatVector();
+            hierarchy = new c.Mat();
+            c.findContours(maskMat, contours, hierarchy, c.RETR_EXTERNAL, c.CHAIN_APPROX_SIMPLE);
+            state.dustRemoval.particleCount = contours.size();
+          } catch (_e) { /* ignore */ }
+          finally {
+            maskMat?.delete();
+            contours?.delete();
+            hierarchy?.delete();
           }
+        }
 
-          const tmpl = getLocalizedText('dustStatusDone', 'Detected {count} dust particles');
-          updateDustStatusUI(tmpl.replace('{count}', String(state.dustRemoval.particleCount)));
+        const tmpl = getLocalizedText('dustStatusDone', 'Detected {count} dust particles');
+        updateDustStatusUI(tmpl.replace('{count}', String(state.dustRemoval.particleCount)));
 
-          applyProcessedImageToState(inpainted);
-          updatePreview();
-          if (state.dustRemoval.showMask) {
-            // Need to re-render after updatePreview finishes
-            requestAnimationFrame(() => renderDustMaskOverlay());
-          }
-        });
+        applyDustResultToState();
+        updatePreview();
+        if (state.dustRemoval.showMask) {
+          requestAnimationFrame(() => renderDustMaskOverlay());
+        }
+      } catch (err) {
+        console.error('Dust brush failed:', err);
+        updateDustStatusUI('Error: ' + (err.message || err));
+      } finally {
+        dustBrushPoints = [];
+        dustBrushSource = null;
       }
-
-      dustBrushPoints = [];
     }
 
     // Attach brush handlers
@@ -5563,6 +6000,8 @@
 
       clampPan();
       applyZoomPanTransform();
+      schedulePreviewUpdate();
+      scheduleDisplayPreviewResize();
     }
 
     function canPan() {
@@ -5579,12 +6018,56 @@
     // ===========================================
     // File Loading
     // ===========================================
-    async function loadFile(file) {
+    // Bumped by every loadFile call. Decodes are long (a heavy RAW takes
+    // minutes) and are started fire-and-forget from the file list, the file
+    // input and the drop handler, so every continuation has to check that it is
+    // still the newest load before it touches state: otherwise a slow earlier
+    // decode lands on top of the file the user has since opened, and the
+    // settings written afterwards attach to the wrong queue entry.
+    let loadGeneration = 0;
+
+    function isCurrentLoad(generation) {
+      return generation === loadGeneration;
+    }
+
+    // Replacing the placeholder's innerHTML deleted the Select File / Select
+    // Folder labels and both hidden file inputs, and nothing ever put them
+    // back: after a load, "New Image" showed a placeholder reading only
+    // "Processing…" with no way to pick a file. Write into a dedicated status
+    // line instead and leave the controls in the DOM.
+    function setUploadPlaceholderStatus(text, { error = false } = {}) {
       const placeholder = document.getElementById('uploadPlaceholder');
-      placeholder.innerHTML = `<p>${i18n[currentLang].processing}</p>`;
+      if (!placeholder) return;
+      let status = document.getElementById('uploadStatus');
+      if (!status) {
+        status = document.createElement('p');
+        status.id = 'uploadStatus';
+        status.setAttribute('role', 'status');
+        placeholder.appendChild(status);
+      }
+      status.textContent = text || '';
+      status.style.color = error ? 'var(--danger)' : '';
+      status.style.display = text ? '' : 'none';
+    }
+
+    async function loadFile(file, { autoConvert = true } = {}) {
+      const generation = ++loadGeneration;
+      // A crop draft holds the previous image; leaving crop mode armed lets
+      // "Apply" replace the newly loaded file with the old one.
+      if (state.cropping) exitCropMode({ restore: false });
+      if (state.beforeAfterActive) exitBeforeAfter();
+      state.samplingMode = null;
+      // Any background full-resolution decode still queued belongs to the file
+      // being replaced.
+      state._pendingFullResBuffer = null;
+      state._pendingFullResFileName = null;
+      // Correction maps are keyed by image dimensions, so the outgoing file's
+      // entries can never be reused; they just hold Float32Array grids.
+      lensMapCache.clear();
+
+      setUploadPlaceholderStatus(i18n[currentLang].processing);
       const fileName = file.name.toLowerCase();
       const isRawLikeFile = isRawLikeFileName(fileName);
-      closeFrontierGuidePopup();
 
       const overlay = getLoadingOverlay();
       const lang = i18n[currentLang];
@@ -5628,19 +6111,29 @@
             });
             overlay.updateProgress(90, lang.loadingProcessing);
           }
-        } else if (file.type === 'image/png') {
+        } else if (isPngFile(file)) {
           const arrayBuffer = await file.arrayBuffer();
           imageData = await loadPngImageData(arrayBuffer);
         } else {
           imageData = await loadStandardImage(file);
         }
 
+        if (!isCurrentLoad(generation)) {
+          // A newer file was opened while this decode ran. Drop the result and
+          // leave the overlay alone — it belongs to that newer load now.
+          return { status: 'stale' };
+        }
+
+        if (!imageData) throw new Error('Image decoder returned no pixels');
         if (imageData) {
+          state.loadedFile = file;
           state.loadedBaseImageData = imageData;
           state.originalImageData = imageData;
           state.croppedImageData = null;
           state.cropRegion = null;
           state.rotationAngle = 0;
+          state.mirrored = false;
+          updateMirrorButtonState();
           state.processedImageData = null;
           state.displayImageData = null;
           clearFullResolutionRenderState();
@@ -5662,6 +6155,15 @@
           state.grayPointSampled = false;
           state.wbAutoConfidence = null;
           state.wbUserOverride = false;
+          // Reset the values too, not just the "was it set" flags. They used to
+          // survive a file switch, so a snapshot taken of the next file — which
+          // switchToFile does before the user has touched anything — carried
+          // the previous frame's film base and gray-point gains and then
+          // suppressed auto-detection for that file.
+          state.filmBase = { ...DEFAULT_FILM_BASE };
+          state.wbR = 1.0;
+          state.wbG = 1.0;
+          state.wbB = 1.0;
           resetFrontierGuideImageState();
           state.autoFrame.lastDiagnostics = null;
           state.rawMetadata = extractedRawMeta;
@@ -5690,35 +6192,63 @@
           overlay.hide();
           // Schedule background full-resolution decode if we used fast preview
           if (state._pendingFullResBuffer) {
-            scheduleBackgroundFullResDecode();
+            if (isCurrentLoad(generation)) {
+              scheduleBackgroundFullResDecode(generation);
+            } else {
+              state._pendingFullResBuffer = null;
+              state._pendingFullResFileName = null;
+            }
           }
         }
+        if (autoConvert && isCurrentLoad(generation)) {
+          await prepareStudioPhoto(generation);
+        }
+        return { status: isCurrentLoad(generation) ? 'loaded' : 'stale' };
       } catch (err) {
-        overlay.hide();
         console.error('Error loading file:', err);
+        // Only touch the overlay if this is still the current load; a newer one
+        // may already own it.
+        if (!isCurrentLoad(generation)) return { status: 'stale' };
+        overlay.hide();
         const text = String(err?.message || err || '');
         const isRawSupportIssue = isRawLikeFile && /module worker|worker|webassembly|wasm/i.test(text);
-        const isGarbled = err?.code === 'RAW_DECODE_GARBLED';
-        const isTimeout = err?.code === 'RAW_DECODE_TIMEOUT';
-        const message = isTimeout
-          ? (i18n[currentLang].rawDecodeTimeout || 'This RAW file took too long to decode. Try converting to DNG or TIFF first.')
-          : isGarbled
-            ? (i18n[currentLang].rawDecodeGarbled || 'Could not decode this RAW file. Try Lossless Compressed mode or convert to DNG.')
-            : isRawSupportIssue
-              ? (i18n[currentLang].rawUnsupported || 'RAW decode is not supported in this Safari version. Update Safari or convert to TIFF/JPEG first.')
-              : (i18n[currentLang].loadError || 'Error loading file');
-        placeholder.innerHTML = `<p style="color: var(--danger);">${message}</p>`;
+        // The loaders tag their failures; map each to its own explanation so a
+        // too-large scan or a HEIC from a phone camera roll does not read as a
+        // generic "Error loading file".
+        const messageByCode = {
+          RAW_DECODE_TIMEOUT: ['rawDecodeTimeout', 'This RAW file took too long to decode. Try converting to DNG or TIFF first.'],
+          RAW_DECODE_GARBLED: ['rawDecodeGarbled', 'Could not decode this RAW file. Try Lossless Compressed mode or convert to DNG.'],
+          TIFF_UNSUPPORTED_PHOTOMETRIC: ['rawDecodeGarbled', 'Could not decode this RAW file. Try Lossless Compressed mode or convert to DNG.'],
+          IMAGE_TOO_LARGE: ['imageTooLarge', 'This scan is too large for this browser to render. Downscale it or use the desktop app.'],
+          HEIC_UNSUPPORTED: ['heicUnsupported', 'HEIC/HEIF photos are not supported. Export the photo as JPEG or TIFF first.'],
+          DEVICE_MEMORY_LIMIT: ['deviceMemoryLimit', 'This device does not have enough memory for this file. Try a smaller scan or the desktop app.'],
+          IMAGE_DECODE_FAILED: ['loadError', 'Error loading file']
+        };
+        const mapped = messageByCode[err?.code];
+        const message = mapped
+          ? getLocalizedText(mapped[0], mapped[1])
+          : isRawSupportIssue
+            ? getLocalizedText('rawUnsupported', 'RAW decode is not supported in this Safari version. Update Safari or convert to TIFF/JPEG first.')
+            : getLocalizedText('loadError', 'Error loading file');
+        setUploadPlaceholderStatus(message, { error: true });
+        // The placeholder is hidden once an image is on screen, so a failure
+        // while switching files would otherwise be completely invisible.
+        showToast(message);
+        return { status: 'error', message };
       }
     }
 
-    async function scheduleBackgroundFullResDecode() {
+    async function scheduleBackgroundFullResDecode(generation = loadGeneration) {
       const buf = state._pendingFullResBuffer;
       const name = state._pendingFullResFileName;
       if (!buf || !name) return;
+      if (!isCurrentLoad(generation)) return;
       state._pendingFullResBuffer = null;
       state._pendingFullResFileName = null;
 
-      console.info('[RAW] starting background full-res decode for', name, (buf.byteLength / 1024 / 1024).toFixed(0) + 'MB');
+      if (DEBUG_UI) {
+        console.info('[RAW] starting background full-res decode for', name, (buf.byteLength / 1024 / 1024).toFixed(0) + 'MB');
+      }
 
       try {
         const fullImageData = await loadRawImageData(buf, name, {
@@ -5730,20 +6260,64 @@
           }
         });
         if (!fullImageData) return;
+        // The decode takes tens of seconds to minutes. Anything the user did
+        // in the meantime wins: a different file must not be replaced by this
+        // one, and a crop draft in progress must not be yanked out from under
+        // the pointer.
+        if (!isCurrentLoad(generation)) return;
+        if (state.cropping) return;
 
-        // Replace the preview with the full-res image.
-        const wasCropped = !!state.croppedImageData;
-        state.originalImageData = fullImageData;
+        // Replace the preview with the full-res image. Rotation and crop were
+        // set against the half-size preview, so they have to be re-applied to
+        // the full-size decode — the crop rectangle in particular is in
+        // preview pixels and would otherwise cut out the top-left quadrant and
+        // keep the export at half resolution.
+        const preview = state.loadedBaseImageData;
+        const scaleX = preview && preview.width ? fullImageData.width / preview.width : 1;
+        const scaleY = preview && preview.height ? fullImageData.height / preview.height : 1;
+        const previewCropRegion = state.cropRegion;
+
         state.loadedBaseImageData = fullImageData;
+        state.originalImageData = fullImageData;
         state.original16 = fullImageData.__image16 || null;
-        if (!wasCropped) {
-          state.croppedImageData = null;
-          state.cropRegion = null;
+        state.cropped16 = null;
+        state.processed16 = null;
+
+        if (Math.abs(state.rotationAngle) > 0.001) {
+          state.originalImageData = applyRotationToImageData(state.originalImageData, state.rotationAngle);
         }
+        if (state.mirrored) {
+          state.originalImageData = mirrorImageDataHorizontal(state.originalImageData);
+        }
+
+        if (previewCropRegion) {
+          applyCropRegionToLoadedImage({
+            left: previewCropRegion.left * scaleX,
+            top: previewCropRegion.top * scaleY,
+            width: previewCropRegion.width * scaleX,
+            height: previewCropRegion.height * scaleY
+          });
+        } else {
+          state.cropRegion = null;
+          state.croppedImageData = null;
+        }
+
+        clearFullResolutionRenderState();
         invalidateSilverCoreCache();
-        displayNegative(fullImageData);
-        updateCanvasVisibility();
-        console.info('[RAW] background full-res decode complete');
+        state.conversionSourceImageData = null;
+        state.conversionPreviewImageData = null;
+
+        if (state.currentStep >= 3) {
+          // Already converted against the preview: redo the conversion at full
+          // resolution rather than painting the raw negative over the result.
+          void processNegative().catch((err) => {
+            console.error('Re-conversion after full-res decode failed:', err);
+          });
+        } else {
+          displayNegative(state.croppedImageData || state.originalImageData);
+          updateCanvasVisibility();
+        }
+        if (DEBUG_UI) console.info('[RAW] background full-res decode complete');
       } catch (err) {
         console.warn('[RAW] background full-res decode failed, keeping preview', err.message);
         // Keep the preview — it's still usable.
@@ -5751,18 +6325,14 @@
     }
 
     function showImageUI() {
+      setUploadPlaceholderStatus('');
       document.getElementById('uploadPlaceholder').style.display = 'none';
       document.getElementById('previewToolbar').style.display = 'flex';
       document.getElementById('histogramContainer').style.display = 'block';
       document.getElementById('controlsPanel').style.display = 'flex';
-      document.getElementById('appFooter').style.display = 'flex';
 
-      // Show zoom controls and update i18n titles
+      // Zoom button tooltips come from data-i18n-title in the markup.
       zoomControls.style.display = 'flex';
-      const lang = i18n[currentLang] || i18n.en;
-      document.getElementById('zoomInBtn').title = lang.zoomIn || 'Zoom In';
-      document.getElementById('zoomOutBtn').title = lang.zoomOut || 'Zoom Out';
-      document.getElementById('zoomResetBtn').title = lang.zoomReset || 'Reset Zoom';
 
       redrawHistogramIfPossible();
       updateCanvasVisibility();
@@ -5797,27 +6367,16 @@
 
     function setStep2Mode(mode) {
       const nextMode = mode === 'noBorder' ? 'noBorder' : 'border';
-      if (requiresFilmBase()) {
-        if (nextMode === 'noBorder') {
-          if (state.step2Mode !== 'noBorder') {
-            state.coreBorderBufferBorderValue = sanitizeNumeric(state.coreBorderBuffer, 10, 0, 30);
-          } else {
-            state.coreBorderBufferBorderValue = sanitizeNumeric(state.coreBorderBufferBorderValue, 10, 0, 30);
-          }
-          state.coreBorderBuffer = 0;
-        } else {
-          const restoredBuffer = sanitizeNumeric(state.coreBorderBufferBorderValue, 10, 0, 30);
-          state.coreBorderBufferBorderValue = restoredBuffer;
-          state.coreBorderBuffer = restoredBuffer;
-        }
-      }
-
       state.step2Mode = nextMode;
       const borderBtn = document.getElementById('step2ModeBorderBtn');
       const noBorderBtn = document.getElementById('step2ModeNoBorderBtn');
       if (borderBtn) borderBtn.classList.toggle('active', state.step2Mode === 'border');
       if (noBorderBtn) noBorderBtn.classList.toggle('active', state.step2Mode === 'noBorder');
       syncSliderFromState('coreBorderBuffer');
+      const borderBufferSlider = document.getElementById('coreBorderBuffer');
+      const borderBufferValue = document.getElementById('coreBorderBufferValue');
+      if (borderBufferSlider) borderBufferSlider.disabled = false;
+      if (borderBufferValue) borderBufferValue.disabled = false;
       updateFilmModeUI();
     }
 
@@ -5845,160 +6404,12 @@
       updateSlidersFromState();
       updateLensCorrectionUI();
       updateFilmBasePreview();
-      updateStep2GuideCard();
       markCurrentFileDirty();
       return true;
     }
 
-    function buildNoviceGuideViewModel() {
-      const filmType = sanitizePresetType(state.filmType || 'color');
-      const inBatch = Boolean(state.batchSessionActive);
-      const model = {
-        phaseKey: 'noviceGuidePhaseStep1',
-        primaryKey: 'noviceGuidePrimaryStep1',
-        checklistKeys: ['noviceGuideChecklistStep1Crop', 'noviceGuideChecklistStep1Next'],
-        statusKey: '',
-        warningKey: '',
-        recommendedActionIds: []
-      };
 
-      if (state.currentStep <= 1) {
-        model.recommendedActionIds = state.cropRegion
-          ? ['convertBtn']
-          : ['autoFrameBtn', 'cropBtn'];
-        return model;
-      }
 
-      if (state.currentStep === 2) {
-        model.phaseKey = 'noviceGuidePhaseStep2';
-        if (filmType === 'color') {
-          const isNoBorder = state.step2Mode === 'noBorder';
-          const hasReference = hasRollReference();
-          if (isNoBorder) {
-            model.primaryKey = 'noviceGuidePrimaryStep2ColorNoBorder';
-            model.checklistKeys = [
-              'noviceGuideChecklistStep2ColorNoBorderAuto',
-              'noviceGuideChecklistStep2ColorNoBorderReference'
-            ];
-            model.recommendedActionIds = hasReference
-              ? ['useReferenceBtn', 'autoDetectBtn']
-              : ['autoDetectBtn'];
-            if (!state.filmBaseSet && !hasReference) {
-              model.warningKey = 'noviceGuideWarningReferenceMissing';
-            }
-          } else {
-            model.primaryKey = 'noviceGuidePrimaryStep2ColorBorder';
-            model.checklistKeys = [
-              'noviceGuideChecklistStep2ColorBorderSample',
-              'noviceGuideChecklistStep2ColorBorderFallback'
-            ];
-            model.recommendedActionIds = ['sampleBaseBtn', 'autoDetectBtn'];
-            if (!state.filmBaseSet) {
-              model.warningKey = 'noviceGuideWarningMaskUnset';
-            }
-          }
-
-          if (state.filmBaseSet) {
-            model.statusKey = 'noviceGuideStatusAutoToStep3Ready';
-            model.recommendedActionIds = ['applyConvertBtn'];
-          } else {
-            model.statusKey = 'noviceGuideStatusAutoToStep3';
-          }
-          return model;
-        }
-
-        if (filmType === 'bw') {
-          model.primaryKey = 'noviceGuidePrimaryStep2Bw';
-          model.checklistKeys = [
-            'noviceGuideChecklistStep2BwSelect',
-            'noviceGuideChecklistStep2BwAuto'
-          ];
-          model.statusKey = 'noviceGuideStatusAutoToStep3';
-          model.recommendedActionIds = ['applyConvertBtn'];
-          return model;
-        }
-
-        model.primaryKey = 'noviceGuidePrimaryStep2Positive';
-        model.checklistKeys = ['noviceGuideChecklistStep2PositiveConvert'];
-        model.statusKey = 'noviceGuideStatusManualConvert';
-        model.recommendedActionIds = ['applyConvertBtn'];
-        return model;
-      }
-
-      model.phaseKey = 'noviceGuidePhaseStep3';
-      model.primaryKey = inBatch
-        ? 'noviceGuidePrimaryStep3Batch'
-        : 'noviceGuidePrimaryStep3Single';
-      const desktopBatchExport = isTauriDesktop();
-      model.checklistKeys = inBatch
-        ? [
-            'noviceGuideChecklistStep3BatchSave',
-            'noviceGuideChecklistStep3BatchApply',
-            desktopBatchExport
-              ? 'noviceGuideChecklistStep3BatchExportDesktop'
-              : 'noviceGuideChecklistStep3BatchExport'
-          ]
-        : [
-            'noviceGuideChecklistStep3SampleGray',
-            desktopBatchExport
-              ? 'noviceGuideChecklistStep3ExportDesktop'
-              : 'noviceGuideChecklistStep3Export'
-          ];
-      model.statusKey = step3GuideCollapsedOnce ? 'noviceGuideStatusStep3Collapsed' : '';
-      model.recommendedActionIds = inBatch
-        ? ['saveSettingsBtn', 'applyToSelectedBtn', 'exportBtn']
-        : ['headerGrayPointBtn', 'exportBtn'];
-      return model;
-    }
-
-    function renderNoviceGuide(options = {}) {
-      const { applyStep3Collapse = false } = options;
-      const card = document.getElementById('noviceGuideCard');
-      const phaseEl = document.getElementById('noviceGuidePhase');
-      const primaryEl = document.getElementById('noviceGuidePrimary');
-      const checklistEl = document.getElementById('noviceGuideChecklist');
-      const statusEl = document.getElementById('noviceGuideStatus');
-      const warningEl = document.getElementById('noviceGuideWarning');
-      if (!card || !phaseEl || !primaryEl || !checklistEl || !statusEl || !warningEl) return;
-
-      if (!guideModeEnabled) {
-        card.style.display = 'none';
-        clearRecommendedActions();
-        return;
-      }
-      card.style.display = 'flex';
-
-      if (applyStep3Collapse) {
-        collapseStep3SectionsForGuideIfNeeded();
-      }
-
-      const model = buildNoviceGuideViewModel();
-      phaseEl.textContent = getLocalizedText(model.phaseKey, '');
-      primaryEl.textContent = getLocalizedText(model.primaryKey, '');
-
-      checklistEl.innerHTML = '';
-      model.checklistKeys.forEach(key => {
-        const text = getLocalizedText(key, '');
-        if (!text) return;
-        const item = document.createElement('li');
-        item.textContent = text;
-        checklistEl.appendChild(item);
-      });
-
-      const statusText = model.statusKey ? getLocalizedText(model.statusKey, '') : '';
-      statusEl.textContent = statusText;
-      statusEl.style.display = statusText ? 'block' : 'none';
-
-      const warningText = model.warningKey ? getLocalizedText(model.warningKey, '') : '';
-      warningEl.textContent = warningText;
-      warningEl.style.display = warningText ? 'block' : 'none';
-
-      setRecommendedActions(model.recommendedActionIds);
-    }
-
-    function updateStep2GuideCard() {
-      renderNoviceGuide({ applyStep3Collapse: false });
-    }
 
     function updateFilmModeUI() {
       const filmBaseControls = document.getElementById('filmBaseControls');
@@ -6026,7 +6437,6 @@
         }
         document.getElementById('filmBasePreview').style.display = 'none';
         updateRollReferenceUI();
-        updateStep2GuideCard();
         updateLensCorrectionUI();
         updateBeforeAfterButtonState();
         return;
@@ -6043,7 +6453,6 @@
 
       updateFilmBasePreview();
       updateRollReferenceUI();
-      updateStep2GuideCard();
       updateLensCorrectionUI();
       updateBeforeAfterButtonState();
     }
@@ -6088,20 +6497,18 @@
       state.filmBase = autoDetectFilmBase(sourceData, state.coreBorderBuffer);
       state.filmBaseSet = true;
       updateFilmBasePreview();
-      updateStep2GuideCard();
       markCurrentFileDirty();
       scheduleSilverSourceRefresh({ immediate: true });
     });
 
     document.getElementById('useReferenceBtn').addEventListener('click', () => {
       if (!hasRollReference()) {
-        alert(i18n[currentLang].rollReferenceMissing || 'No roll reference is set.');
+        void appAlert(i18n[currentLang].rollReferenceMissing || 'No roll reference is set.');
         return;
       }
       if (applyRollReferenceToCurrentForStep2()) {
-        updateStep2GuideCard();
         scheduleSilverSourceRefresh({ immediate: true });
-        alert(i18n[currentLang].rollReferenceAppliedCurrent || 'Roll reference applied to current image.');
+        void appAlert(i18n[currentLang].rollReferenceAppliedCurrent || 'Roll reference applied to current image.');
       }
     });
 
@@ -6114,12 +6521,11 @@
           state.filmBase = autoDetectFilmBase(sourceData, state.coreBorderBuffer);
           state.filmBaseSet = true;
           updateFilmBasePreview();
-          updateStep2GuideCard();
           markCurrentFileDirty();
           if (state.step2Mode === 'border') {
-            alert(getLocalizedText('guideAutoDetectFallback', 'Mask was not sampled manually, so auto-detect was applied.'));
+            void appAlert(getLocalizedText('guideAutoDetectFallback', 'Mask was not sampled manually, so auto-detect was applied.'));
           } else if (!hasRollReference()) {
-            alert(getLocalizedText('guideReferenceSuggestion', 'If auto-detect is unstable, set one frame as roll reference first.'));
+            void appAlert(getLocalizedText('guideReferenceSuggestion', 'If auto-detect is unstable, set one frame as roll reference first.'));
           }
         }
       }
@@ -6533,7 +6939,6 @@
         state.samplingMode = null;
         updateSamplingModeUI();
         updateFilmBasePreview();
-        updateStep2GuideCard();
         markCurrentFileDirty();
         updateBeforeAfterButtonState();
         scheduleSilverSourceRefresh({ immediate: true });
@@ -6693,9 +7098,7 @@
 
       slider.addEventListener('change', () => {
         if (preDragSnapshot) {
-          undoStack.push(preDragSnapshot);
-          if (undoStack.length > MAX_UNDO) undoStack.shift();
-          redoStack.length = 0;
+          commitUndoSnapshot(preDragSnapshot);
           preDragSnapshot = null;
           updateUndoRedoButtons();
         }
@@ -6756,14 +7159,8 @@
         select.value = state[stateKey];
       }
 
-      select.addEventListener('input', () => {
-        state[stateKey] = select.value;
-        markCurrentFileDirty();
-        if (onChange) onChange(select.value);
-        else schedulePreviewUpdate();
-      });
-
       select.addEventListener('change', () => {
+        if (state[stateKey] === select.value) return;
         pushUndo(stateKey);
         state[stateKey] = select.value;
         markCurrentFileDirty();
@@ -6809,9 +7206,8 @@
     }
 
     const coreReprocessHandlers = {
-      // Dragging: fast pixel-level adjustments only (no SilverCore reconversion).
-      onInput: () => schedulePreviewUpdate(),
-      // Release: re-run SilverCore on preview for accurate tone mapping.
+      // SilverCore の色調は画素に焼き込まれるため、ドラッグ中も変換する。
+      onInput: () => scheduleCoreReprocess({ full: false }),
       onCommit: () => scheduleCoreReprocess({ full: false })
     };
 
@@ -6931,126 +7327,6 @@
     // ===========================================
     // Rotation
     // ===========================================
-    function normalizeAngleDegrees(angle) {
-      let normalized = Number.isFinite(angle) ? angle : 0;
-      while (normalized > 180) normalized -= 360;
-      while (normalized <= -180) normalized += 360;
-      return normalized;
-    }
-
-    function copyRotatedRgbaBuffer(source, width, height, angle) {
-      const normalized = normalizeAngleDegrees(angle);
-      const rightAngle = Math.round(normalized / 90) * 90;
-      const dstWidth = Math.abs(rightAngle) === 90 ? height : width;
-      const dstHeight = Math.abs(rightAngle) === 90 ? width : height;
-      const output = source instanceof Uint16Array
-        ? new Uint16Array(source.length)
-        : new Uint8ClampedArray(source.length);
-
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          let dstX;
-          let dstY;
-          if (rightAngle === 90) {
-            dstX = height - 1 - y;
-            dstY = x;
-          } else if (rightAngle === -90) {
-            dstX = y;
-            dstY = width - 1 - x;
-          } else {
-            dstX = width - 1 - x;
-            dstY = height - 1 - y;
-          }
-
-          const srcIdx = (y * width + x) * 4;
-          const dstIdx = (dstY * dstWidth + dstX) * 4;
-          output[dstIdx] = source[srcIdx];
-          output[dstIdx + 1] = source[srcIdx + 1];
-          output[dstIdx + 2] = source[srcIdx + 2];
-          output[dstIdx + 3] = source[srcIdx + 3];
-        }
-      }
-
-      return { width: dstWidth, height: dstHeight, data: output };
-    }
-
-    function copyMirroredRgbaBuffer(source, width, height) {
-      const output = source instanceof Uint16Array
-        ? new Uint16Array(source.length)
-        : new Uint8ClampedArray(source.length);
-
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          const srcIdx = (y * width + x) * 4;
-          const dstIdx = (y * width + (width - 1 - x)) * 4;
-          output[dstIdx] = source[srcIdx];
-          output[dstIdx + 1] = source[srcIdx + 1];
-          output[dstIdx + 2] = source[srcIdx + 2];
-          output[dstIdx + 3] = source[srcIdx + 3];
-        }
-      }
-
-      return { width, height, data: output };
-    }
-
-    function attachTransformedImage16(target, sourceImageData, transform) {
-      const source16 = sourceImageData?.__image16;
-      if (!source16 || !(source16.data instanceof Uint16Array)) return target;
-      target.__image16 = transform(source16.data, source16.width, source16.height);
-      return target;
-    }
-
-    function rotateImageDataRightAngle(imageData, angle) {
-      const rotated = copyRotatedRgbaBuffer(imageData.data, imageData.width, imageData.height, angle);
-      const result = new ImageData(rotated.data, rotated.width, rotated.height);
-      return attachTransformedImage16(result, imageData, (data, width, height) => {
-        const image16 = copyRotatedRgbaBuffer(data, width, height, angle);
-        return { width: image16.width, height: image16.height, data: image16.data };
-      });
-    }
-
-    function mirrorImageDataHorizontal(imageData) {
-      const mirrored = copyMirroredRgbaBuffer(imageData.data, imageData.width, imageData.height);
-      const result = new ImageData(mirrored.data, mirrored.width, mirrored.height);
-      return attachTransformedImage16(result, imageData, (data, width, height) => {
-        const image16 = copyMirroredRgbaBuffer(data, width, height);
-        return { width: image16.width, height: image16.height, data: image16.data };
-      });
-    }
-
-    function applyRotationToImageData(imageData, angle) {
-      if (!imageData) return null;
-      const normalized = normalizeAngleDegrees(Number(angle) || 0);
-      if (Math.abs(normalized) < 0.001) return imageData;
-      const rightAngle = Math.round(normalized / 90) * 90;
-      if (Math.abs(normalized - rightAngle) < 0.001 && Math.abs(rightAngle) % 90 === 0) {
-        return rotateImageDataRightAngle(imageData, rightAngle);
-      }
-
-      const rad = normalized * Math.PI / 180;
-      const w = imageData.width;
-      const h = imageData.height;
-      const cos = Math.abs(Math.cos(rad));
-      const sin = Math.abs(Math.sin(rad));
-      const newW = Math.max(1, Math.ceil(w * cos + h * sin));
-      const newH = Math.max(1, Math.ceil(w * sin + h * cos));
-
-      const srcCanvas = document.createElement('canvas');
-      srcCanvas.width = w;
-      srcCanvas.height = h;
-      const srcCtx = srcCanvas.getContext('2d', { willReadFrequently: true });
-      srcCtx.putImageData(imageData, 0, 0);
-
-      const dstCanvas = document.createElement('canvas');
-      dstCanvas.width = newW;
-      dstCanvas.height = newH;
-      const dstCtx = dstCanvas.getContext('2d', { willReadFrequently: true });
-      dstCtx.translate(newW / 2, newH / 2);
-      dstCtx.rotate(rad);
-      dstCtx.drawImage(srcCanvas, -w / 2, -h / 2);
-
-      return dstCtx.getImageData(0, 0, newW, newH);
-    }
 
     let autoFrameAnalyzerPromise = null;
 
@@ -7074,11 +7350,14 @@
 
     async function detectFrameAndRotation(imageData) {
       if (!imageData) return null;
-      const ready = await ensureOpenCvReady();
-      if (!ready) return null;
-
-      const { detectFrameAndRotation: analyzeFrameAndRotation } = await getAutoFrameAnalyzer();
-      return analyzeFrameAndRotation(imageData, {
+      const overlay = getLoadingOverlay();
+      const ownsOverlay = !overlay.isVisible;
+      if (ownsOverlay) {
+        await overlay.show({ title: studioWorkspace.text('detectingFrame'), indeterminate: true });
+        await new Promise(resolve => requestAnimationFrame(resolve));
+      }
+      try {
+      const options = {
         settings: {
           ...state.autoFrame,
           filmType: state.filmType
@@ -7086,10 +7365,23 @@
         maxSide: AUTO_FRAME_MAX_SIDE,
         formatRatios: AUTO_FRAME_FORMAT_RATIOS,
         default120Formats: AUTO_FRAME_DEFAULT_120_FORMATS,
-        scoreWeights: AUTO_FRAME_SCORE_WEIGHTS,
-        rotateImageData: applyRotationToImageData,
-        sanitizeCropRegion: sanitizeCropRegionForImage
+        scoreWeights: AUTO_FRAME_SCORE_WEIGHTS
+      };
+      return await detectFrameWithFallback(imageData, options, {
+        workerSupported: typeof Worker === 'function' && typeof OffscreenCanvas === 'function',
+        analyzeInWorker: analyzeFrameInWorker,
+        ensureOpenCvReady,
+        onWorkerError: err => console.warn('Auto-frame worker unavailable, using fallback:', err),
+        analyzeOnMainThread: async (source, config) => {
+          const { detectFrameAndRotation: analyzeFrameAndRotation } = await getAutoFrameAnalyzer();
+          return analyzeFrameAndRotation(source, {
+            ...config, rotateImageData: applyRotationToImageData, sanitizeCropRegion: sanitizeCropRegionForImage
+          });
+        }
       });
+      } finally {
+        if (ownsOverlay) overlay.hide();
+      }
     }
 
     function formatAutoFrameDetail(result) {
@@ -7121,29 +7413,40 @@
       };
     }
 
-    function computeAutoFrameRotatedImage(result, effectiveAngle) {
+    function computeAutoFrameRotatedImage(result, effectiveAngle, baseImageData) {
       // The detector's pre-rotated frame is only valid when no 180° flip is added.
       if (!state.autoFrame.rotate180Default && result.rotatedImageData) {
         return result.rotatedImageData;
       }
+      const base = baseImageData || state.originalImageData;
       return Math.abs(effectiveAngle) < 0.001
-        ? state.originalImageData
-        : applyRotationToImageData(state.originalImageData, effectiveAngle);
+        ? base
+        : applyRotationToImageData(base, effectiveAngle);
     }
 
-    function applyAutoFrameResult(result) {
-      if (!result || !state.originalImageData) return false;
+    // `baseImageData` is the frame the detector analysed. It is only adopted as
+    // the new working image when the result is actually applied: assigning it
+    // up front left originalImageData as the unrotated base whenever the user
+    // declined the prompt, while rotationAngle, cropRegion and the canvas still
+    // described the rotated frame.
+    function applyAutoFrameResult(result, baseImageData) {
+      const base = baseImageData || state.originalImageData;
+      if (!result || !base) return false;
 
       const effectiveAngle = autoFrameEffectiveAngle(result.angle);
       state.rotationAngle = effectiveAngle;
+      state.mirrored = false; // the detector ran on the unmirrored base
+      updateMirrorButtonState();
       state.croppedImageData = null;
       state.cropRegion = null;
-      state.originalImageData = computeAutoFrameRotatedImage(result, effectiveAngle);
+      state.originalImageData = computeAutoFrameRotatedImage(result, effectiveAngle, base);
       const cropRegion = state.autoFrame.rotate180Default
         ? rotate180CropRegion(result.cropRegion, state.originalImageData.width, state.originalImageData.height)
         : result.cropRegion;
       applyCropRegionToLoadedImage(cropRegion, { refreshDisplay: true });
       state.autoFrame.lastDiagnostics = {
+        ...state.autoFrame.lastDiagnostics,
+        ...(canAutoApplyImportFrame(result, state.autoFrame) ? { imageArea: imageAreaFromDetection(result, base), analysisNeedsReview: false } : {}),
         confidence: result.confidence,
         detectedFormat: result.detectedFormat || 'unknown',
         method: result.diagnostics && result.diagnostics.method ? result.diagnostics.method : 'unknown',
@@ -7157,15 +7460,19 @@
       return true;
     }
 
-    function applyAutoFrameRotationOnly(result) {
-      if (!result || !state.originalImageData) return false;
+    function applyAutoFrameRotationOnly(result, baseImageData) {
+      const base = baseImageData || state.originalImageData;
+      if (!result || !base) return false;
       const effectiveAngle = autoFrameEffectiveAngle(result.angle);
       state.rotationAngle = effectiveAngle;
+      state.mirrored = false; // the detector ran on the unmirrored base
+      updateMirrorButtonState();
       state.cropRegion = null;
       state.croppedImageData = null;
-      state.originalImageData = computeAutoFrameRotatedImage(result, effectiveAngle);
+      state.originalImageData = computeAutoFrameRotatedImage(result, effectiveAngle, base);
       displayNegative(state.originalImageData);
       state.autoFrame.lastDiagnostics = {
+        ...state.autoFrame.lastDiagnostics,
         confidence: result.confidence,
         detectedFormat: result.detectedFormat || 'unknown',
         method: result.diagnostics && result.diagnostics.method ? result.diagnostics.method : 'unknown',
@@ -7242,6 +7549,16 @@
       }
     }
 
+    // rotationAngle is measured on the unmirrored base, and the geometry chain
+    // is base -> rotate -> mirror -> crop. Mirroring reverses the sense of a
+    // rotation (R(f) after M equals M after R(-f)), so an angle the user applies
+    // to a mirrored view must be recorded with the opposite sign; otherwise a
+    // rebuild — a file switch, an undo, or batch export — turns the frame the
+    // wrong way.
+    function storedRotationDelta(angle) {
+      return state.mirrored ? -angle : angle;
+    }
+
     function applyRotation(angle) {
       if (!state.originalImageData || !Number.isFinite(angle) || angle === 0) return;
 
@@ -7276,7 +7593,7 @@
         state.cropRegion = null;
       }
 
-      state.rotationAngle = normalizeAngleDegrees((state.rotationAngle || 0) + normalizedAngle);
+      state.rotationAngle = normalizeAngleDegrees((state.rotationAngle || 0) + storedRotationDelta(normalizedAngle));
       invalidateProcessedPipelineState();
       resetZoomPan();
 
@@ -7290,17 +7607,48 @@
       markCurrentFileDirty();
     }
 
+    // base -> rotation -> mirror -> crop. Mirror used to be applied straight to
+    // the working buffer and recorded nowhere, so it was silently dropped by the
+    // next crop, by a file switch, and by every batch export.
+    function updateMirrorButtonState() {
+      const mirrorBtn = document.getElementById('mirrorBtn');
+      if (!mirrorBtn) return;
+      const on = Boolean(state.mirrored);
+      mirrorBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+      mirrorBtn.classList.toggle('active', on);
+    }
+
+    function rebuildGeometryFromBase() {
+      const base = state.loadedBaseImageData || state.originalImageData;
+      if (!base) return;
+      let working = base;
+      if (Math.abs(state.rotationAngle) > 0.001) {
+        working = applyRotationToImageData(working, state.rotationAngle);
+      }
+      if (state.mirrored) {
+        working = mirrorImageDataHorizontal(working);
+      }
+      state.originalImageData = working;
+      applyCropRegionToLoadedImage(state.cropRegion);
+    }
+
     function applyMirror() {
-      const sourceData = state.croppedImageData || state.originalImageData;
-      if (!sourceData) return;
+      if (!state.originalImageData) return;
 
       pushUndo('mirror');
-      const newImageData = mirrorImageDataHorizontal(sourceData);
-      if (state.croppedImageData) {
-        state.croppedImageData = newImageData;
-      } else {
-        state.originalImageData = newImageData;
+      state.mirrored = !state.mirrored;
+      updateMirrorButtonState();
+      // The crop box was drawn on the pre-mirror view, so flip it to keep the
+      // framed area over the same part of the picture.
+      if (state.cropRegion) {
+        const frameWidth = state.originalImageData.width;
+        state.cropRegion = {
+          ...state.cropRegion,
+          left: frameWidth - (state.cropRegion.left + state.cropRegion.width)
+        };
       }
+      rebuildGeometryFromBase();
+      const newImageData = state.croppedImageData || state.originalImageData;
 
       invalidateProcessedPipelineState();
       resetZoomPan();
@@ -7340,52 +7688,50 @@
       }
 
       try {
-        const ready = await ensureOpenCvReady();
-        if (!ready) {
-          alert(i18n[currentLang].autoFrameCvLoadError || 'OpenCV failed to load. Auto frame is unavailable.');
-          return;
-        }
-
         const result = await detectFrameAndRotation(source);
+        if (state.currentStep !== 1 || (state.loadedBaseImageData || state.originalImageData) !== source) return;
         if (!result) {
-          alert(i18n[currentLang].autoFrameNoReliableBorder || 'No reliable frame border detected. Please crop manually.');
+          void appAlert(i18n[currentLang].autoFrameNoReliableBorder || 'No reliable frame border detected. Please crop manually.');
           return;
         }
 
         const detail = formatAutoFrameDetail(result);
-        state.originalImageData = source;
         const lowBehavior = state.autoFrame.lowConfidenceBehavior || 'suggest';
         let applied = false;
 
         if (result.confidenceLevel === 'low') {
           if (lowBehavior === 'rotateOnly') {
             if (Math.abs(result.angle) > 0.05 || state.autoFrame.rotate180Default) {
-              applied = applyAutoFrameRotationOnly(result);
+              applied = applyAutoFrameRotationOnly(result, source);
               if (applied) {
                 const template = i18n[currentLang].autoFrameRotateOnlyApplied
                   || 'Low confidence: applied rotation only ({angle}°).';
-                alert(template.replace('{angle}', String(result.angle)));
+                void appAlert(template.replace('{angle}', String(result.angle)));
               }
             } else {
-              alert(i18n[currentLang].autoFrameNoReliableBorder || 'No reliable frame border detected. Please crop manually.');
+              void appAlert(i18n[currentLang].autoFrameNoReliableBorder || 'No reliable frame border detected. Please crop manually.');
             }
           } else if (lowBehavior === 'ignore') {
-            alert(i18n[currentLang].autoFrameNoReliableBorder || 'No reliable frame border detected. Please crop manually.');
+            void appAlert(i18n[currentLang].autoFrameNoReliableBorder || 'No reliable frame border detected. Please crop manually.');
           } else {
-            applied = applyAutoFrameResult(result);
+            applied = applyAutoFrameResult(result, source);
             if (applied) {
               const template = i18n[currentLang].autoFrameLowConfidenceApplied
                 || 'Low confidence: crop applied. Please verify the result (confidence {confidence}).';
               const confidenceText = Number.isFinite(result.confidence) ? result.confidence.toFixed(2) : '0.00';
-              alert(template.replace('{confidence}', confidenceText));
+              void appAlert(template.replace('{confidence}', confidenceText));
             }
           }
         } else if (result.confidenceLevel === 'high' && state.autoFrame.autoApplyHighConfidence) {
-          applied = applyAutoFrameResult(result);
+          applied = applyAutoFrameResult(result, source);
         } else {
           const title = i18n[currentLang].autoFramePreviewTitle || 'Reliable frame detected. Apply auto rotation and crop?';
-          if (window.confirm(`${title}\n${detail}`)) {
-            applied = applyAutoFrameResult(result);
+          const confirmed = await appConfirm(`${title}\n${detail}`);
+          // Unlike window.confirm, this dialog does not freeze the page: a
+          // background full-resolution decode can land while it is open and
+          // replace the base the detection ran against.
+          if (confirmed && (state.loadedBaseImageData || state.originalImageData) === source) {
+            applied = applyAutoFrameResult(result, source);
           }
         }
 
@@ -7393,6 +7739,7 @@
           markCurrentFileDirty();
         } else {
           state.autoFrame.lastDiagnostics = {
+            ...state.autoFrame.lastDiagnostics,
             confidence: result.confidence,
             detectedFormat: result.detectedFormat || 'unknown',
             method: result.diagnostics && result.diagnostics.method ? result.diagnostics.method : 'unknown',
@@ -7415,12 +7762,6 @@
       if (state.currentStep !== 1) return;
       const selectedItems = state.fileQueue.filter(item => item.selected);
       if (selectedItems.length < 1) return;
-
-      const ready = await ensureOpenCvReady();
-      if (!ready) {
-        alert(i18n[currentLang].autoFrameCvLoadError || 'OpenCV failed to load. Auto frame is unavailable.');
-        return;
-      }
 
       const button = document.getElementById('autoFrameSelectedBtn');
       const previousText = button ? button.textContent : '';
@@ -7458,6 +7799,10 @@
                 ? rotate180CropRegion(result.cropRegion, frame.width, frame.height)
                 : { ...result.cropRegion });
             let appliedMode = 'none';
+            // detectFrameAndRotation ran on the unmirrored decode, so the crop
+            // it produced is in unmirrored coordinates — matching what
+            // applyAutoFrameResult does for the single-file path.
+            existing.mirrored = false;
             if (result.confidenceLevel === 'low') {
               if (lowBehavior === 'rotateOnly' && (Math.abs(result.angle) > 0.05 || state.autoFrame.rotate180Default)) {
                 existing.rotationAngle = effectiveAngle;
@@ -7482,6 +7827,8 @@
             }
 
             existing.autoFrameMeta = {
+              ...existing.autoFrameMeta,
+              ...(canAutoApplyImportFrame(result, state.autoFrame) ? { imageArea: imageAreaFromDetection(result, imageData), analysisNeedsReview: false } : {}),
               confidence: result.confidence,
               confidenceLevel: result.confidenceLevel || inferConfidenceLevel(result.confidence || 0),
               detectedFormat: result.detectedFormat || 'unknown',
@@ -7515,19 +7862,44 @@
       const template = i18n[currentLang].autoFrameBatchDoneExtended
         || i18n[currentLang].autoFrameBatchDone
         || 'Auto frame finished: {success} succeeded, {failed} failed.';
-      alert(template
+      void appAlert(template
         .replace('{success}', String(successCount))
         .replace('{lowApplied}', String(lowAppliedCount))
         .replace('{rotated}', String(rotateOnlyCount))
         .replace('{failed}', String(failCount)));
     }
 
+    async function runStudioAutoFrame(selected) {
+      if (document.body.dataset.studioBusy || state.cropping || isDesktopBatchExportLocked() || !state.originalImageData) return;
+      const generation = loadGeneration;
+      studioAutoFrameRunning = true;
+      document.body.dataset.studioBusy = 'true';
+      studioWorkspace?.sync();
+      try {
+        if (processNegativeInFlight) await processNegativeInFlight;
+        if (!isCurrentLoad(generation)) return;
+        persistCurrentFileSettings({ silent: true, force: true });
+        pushUndo('autoFrame');
+        // 旧 Step 1 の取景処理を内部で使い、完了後は同じ写真の調色へ戻す。
+        goToStep(1);
+        await (selected ? applyAutoFrameToSelected() : applyAutoFrameToCurrent());
+        if (isCurrentLoad(generation) && state.originalImageData) await processNegative();
+      } finally {
+        studioAutoFrameRunning = false;
+        if (isCurrentLoad(generation)) {
+          delete document.body.dataset.studioBusy;
+          updateAutoFrameButtons();
+          studioWorkspace?.sync();
+        }
+      }
+    }
+
     document.getElementById('autoFrameBtn').addEventListener('click', () => {
-      applyAutoFrameToCurrent();
+      void runStudioAutoFrame(false);
     });
 
     document.getElementById('autoFrameSelectedBtn').addEventListener('click', () => {
-      applyAutoFrameToSelected();
+      void runStudioAutoFrame(true);
     });
 
     // ===========================================
@@ -7593,7 +7965,11 @@
     // Keyboard zoom shortcuts
     document.addEventListener('keydown', (event) => {
       if (isEditableTarget(event.target)) return;
+      // Cmd/Ctrl +, - and 0 are the browser's own page zoom. Claiming them
+      // leaves the user with no keyboard way to resize the page.
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
       if (state.cropping || state.samplingMode) return;
+      if (!state.originalImageData) return;
       const key = event.key;
       if (key === '+' || key === '=') {
         event.preventDefault();
@@ -7652,12 +8028,6 @@
       }
       if (isEditableTarget(event.target)) return;
 
-      const frontierGuidePopupOverlay = document.getElementById('frontierGuidePopupOverlay');
-      if (frontierGuidePopupOverlay?.classList.contains('visible')) {
-        event.preventDefault();
-        closeFrontierGuidePopup();
-        return;
-      }
       if (state.beforeAfterActive) {
         event.preventDefault();
         exitBeforeAfter();
@@ -7938,14 +8308,20 @@
       if (mirrorBtn) mirrorBtn.disabled = active;
       if (autoFrameBtn) autoFrameBtn.disabled = active;
       if (autoFrameSelectedBtn) autoFrameSelectedBtn.disabled = active;
+      ['zoomInBtn', 'zoomOutBtn', 'zoomResetBtn'].forEach(id => {
+        document.getElementById(id).disabled = active;
+      });
       updateSprocketControlsUI();
+      studioWorkspace?.sync();
     }
 
-    function beginCropMode() {
+    function beginCropMode({ analysisOnly = false } = {}) {
       const sourceImageData = state.originalImageData;
       if (!sourceImageData) return;
 
       exitBeforeAfter();
+      state.samplingMode = null;
+      updateSamplingModeUI();
       if (state.sprocketPreviewEnabled) {
         setSprocketPreviewEnabled(false, { render: false });
       }
@@ -7964,10 +8340,20 @@
         state.cropping = false;
         return;
       }
+      state.cropDraft.analysisOnly = analysisOnly;
+      if (analysisOnly) {
+        const roi = resolveAnalysisRegion({ ...state, cropRegion: null, autoFrameMeta: state.autoFrame.lastDiagnostics }, state.loadedBaseImageData || sourceImageData);
+        if (roi) state.cropDraft.rect = scaleCropRect(analysisPixelBounds(sourceImageData.width, sourceImageData.height, roi), state.cropDraft.previewSourceImageData.width / sourceImageData.width, state.cropDraft.previewSourceImageData.height / sourceImageData.height);
+      }
+      applyCropBtn.textContent = analysisOnly ? studioWorkspace.text('confirmAnalysis') : i18n[currentLang].applyCrop;
 
       setCropActionUi(true);
       renderCropDraftPreview({ preserveRect: false });
       showCropModeHint();
+      if (analysisOnly) {
+        document.getElementById('cropModeHintTitle').textContent = studioWorkspace.text('confirmAnalysis');
+        document.getElementById('cropModeHintBody').textContent = studioWorkspace.text('analysisHint');
+      }
       updateBeforeAfterButtonState();
     }
 
@@ -8038,6 +8424,8 @@
     function restoreDisplayAfterCropDraft() {
       const sourceImageData = state.croppedImageData || state.originalImageData;
       if (state.currentStep >= 3 && state.processedImageData) {
+        // GPU 表示は CSS サイズだけを更新する。草稿用 2D 画布の寸法も戻す。
+        setMainCanvasDimensions(state.processedImageData.width, state.processedImageData.height);
         updateCanvasVisibility();
         updatePreview();
         scheduleFullUpdate();
@@ -8463,6 +8851,7 @@
     let pinchStartZoom = 1;
 
     canvasContainer.addEventListener('touchstart', (e) => {
+      if (state.cropping) return;
       if (e.touches.length === 2) {
         e.preventDefault();
         const dx = e.touches[0].clientX - e.touches[1].clientX;
@@ -8473,6 +8862,7 @@
     }, { passive: false });
 
     canvasContainer.addEventListener('touchmove', (e) => {
+      if (state.cropping) return;
       if (e.touches.length === 2 && pinchStartDist > 0) {
         e.preventDefault();
         const dx = e.touches[0].clientX - e.touches[1].clientX;
@@ -8493,9 +8883,9 @@
       exitCropMode({ restore: true });
     });
 
-    applyCropBtn.addEventListener('click', () => {
+    applyCropBtn.addEventListener('click', async () => {
       const draft = state.cropDraft;
-      if (!draft || !draft.sourceImageData) return;
+      if (!draft || !draft.sourceImageData || studioAutoFrameRunning) return;
 
       const angle = getCropDraftTotalAngle();
       const previewRotatedImageData = draft.rotatedImageData;
@@ -8511,11 +8901,58 @@
       ), rotatedImageData);
       if (!cropRegion) return;
 
+      const generation = loadGeneration;
+      const nextGeometry = { rotationAngle: normalizeAngleDegrees((state.rotationAngle || 0) + storedRotationDelta(angle)), mirrored: state.mirrored };
+      let nextMeta = state.autoFrame.lastDiagnostics;
+      {
+        studioAutoFrameRunning = true;
+        document.body.dataset.studioBusy = 'true';
+        applyCropBtn.disabled = cancelCropBtn.disabled = true;
+        studioWorkspace?.sync();
+        try {
+          if (processNegativeInFlight) await processNegativeInFlight;
+          const overlay = getLoadingOverlay();
+          await overlay.show({ title: studioWorkspace.text('detectingFrame'), indeterminate: true });
+          await new Promise(resolve => requestAnimationFrame(resolve));
+          const base = state.loadedBaseImageData || draft.sourceImageData;
+          const selectedArea = imageAreaFromWorkingRect(cropRegion, nextGeometry, base);
+          nextMeta = structuredClone(state.autoFrame.lastDiagnostics || {});
+          // 不確かな再検出では前回の解析範囲・WB を維持する。
+          nextMeta.analysisArea ||= imageAreaFromWorkingRect(state.cropRegion || { left: 0, top: 0, width: state.originalImageData.width, height: state.originalImageData.height }, state, base);
+          if (draft.analysisOnly) {
+            nextMeta.imageArea = selectedArea;
+            nextMeta.analysisNeedsReview = false;
+            nextMeta.method = 'manual-analysis-area';
+          } else if (!isSameAnalysisFrame(nextMeta.imageArea, selectedArea)) {
+            let points = null;
+            try {
+              if (await ensureOpenCvReady()) points = detectCropImageArea(rotatedImageData, cropRegion, Object.entries(AUTO_FRAME_FORMAT_RATIOS).map(([key, ratio]) => ({ key, ratio })));
+            } catch (error) { console.warn('Crop analysis detection failed; keeping the previous color reference:', error); }
+            if (points) {
+              nextMeta.imageArea = workingPointsToBase(points, nextGeometry, base);
+              nextMeta.analysisNeedsReview = false;
+              nextMeta.method = 'manual-image-window';
+            } else nextMeta.analysisNeedsReview = true;
+          }
+          nextMeta.importAuto = true;
+        } finally {
+          getLoadingOverlay().hide();
+          studioAutoFrameRunning = false;
+          delete document.body.dataset.studioBusy;
+          applyCropBtn.disabled = cancelCropBtn.disabled = false;
+          studioWorkspace?.sync();
+        }
+        if (!isCurrentLoad(generation) || state.cropDraft !== draft) return;
+      }
+
       pushUndo('crop');
-      state.originalImageData = rotatedImageData;
-      state.rotationAngle = normalizeAngleDegrees((state.rotationAngle || 0) + angle);
-      state.cropRegion = cropRegion;
-      state.croppedImageData = cropImageData(rotatedImageData, cropRegion);
+      state.autoFrame.lastDiagnostics = nextMeta;
+      if (!draft.analysisOnly) {
+        state.originalImageData = rotatedImageData;
+        state.rotationAngle = nextGeometry.rotationAngle;
+        state.cropRegion = cropRegion;
+        state.croppedImageData = cropImageData(rotatedImageData, cropRegion);
+      }
       invalidateProcessedPipelineState();
       resetZoomPan();
       setStep2Mode(suggestStep2Mode());
@@ -8523,7 +8960,7 @@
       exitCropMode({ restore: false });
 
       if (state.currentStep >= 3) {
-        void processNegative();
+        await processNegative();
       } else {
         const sourceImageData = state.croppedImageData || state.originalImageData;
         displayNegative(sourceImageData);
@@ -8549,7 +8986,8 @@
     // ===========================================
     // Reset & Start Over
     // ===========================================
-    document.getElementById('resetBtn').addEventListener('click', () => {
+    function resetAllAdjustments() {
+      if (state.originalImageData) pushUndo('resetAllAdjustments');
       // Reset adjustments only
       state.coreFilmPreset = 'none';
       state.coreColorModel = 'standard';
@@ -8603,17 +9041,22 @@
       } else {
         updateFull();
       }
-    });
+    }
 
-    document.getElementById('startOverBtn').addEventListener('click', () => {
+    function restartPhotoProcessing() {
       if (isDesktopBatchExportLocked()) return;
       clearUndoHistory();
-      closeFrontierGuidePopup();
+      // Leave crop mode first: the draft still points at the image
+      // being discarded, and Apply would restore it over the reset.
+      if (state.cropping) exitCropMode({ restore: false });
+      state.samplingMode = null;
       exitBeforeAfter();
       resetZoomPan();
       if (state.loadedBaseImageData || state.originalImageData) {
         state.originalImageData = state.loadedBaseImageData || state.originalImageData;
         state.rotationAngle = 0;
+        state.mirrored = false;
+        updateMirrorButtonState();
         state.cropRegion = null;
         state.croppedImageData = null;
         state.processedImageData = null;
@@ -8651,15 +9094,19 @@
         displayNegative(state.originalImageData);
         updateAutoFrameButtons();
         goToStep(1);
-        document.getElementById('resetBtn').click();
+        resetAllAdjustments();
         markCurrentFileDirty();
+        void processNegative();
       }
-    });
+    }
 
-    document.getElementById('newImageBtn').addEventListener('click', () => {
+    function closePhotoSession() {
       if (isDesktopBatchExportLocked()) return;
       clearUndoHistory();
-      closeFrontierGuidePopup();
+      // Leave crop mode first: the draft still points at the image
+      // being discarded, and Apply would restore it over the reset.
+      if (state.cropping) exitCropMode({ restore: false });
+      state.samplingMode = null;
       exitBeforeAfter();
       resetZoomPan();
       zoomControls.style.display = 'none';
@@ -8669,6 +9116,8 @@
       state.croppedImageData = null;
       state.cropRegion = null;
       state.rotationAngle = 0;
+      state.mirrored = false;
+      updateMirrorButtonState();
       state.processedImageData = null;
       state.displayImageData = null;
       clearFullResolutionRenderState();
@@ -8715,22 +9164,22 @@
       // Reset UI
       canvas.style.display = 'none';
       glCanvas.style.display = 'none';
+      setUploadPlaceholderStatus('');
       document.getElementById('uploadPlaceholder').style.display = 'flex';
       document.getElementById('previewToolbar').style.display = 'none';
       document.getElementById('histogramContainer').style.display = 'none';
       document.getElementById('controlsPanel').style.display = 'none';
-      document.getElementById('appFooter').style.display = 'none';
       updateBeforeAfterButtonState();
       updateSprocketControlsUI();
 
       // Reset adjustments
-      document.getElementById('resetBtn').click();
-      syncBatchUIState({ reason: 'newImageBtn' });
+      resetAllAdjustments();
+      syncBatchUIState({ reason: 'closePhotoSession' });
 
       // Trigger file selection
       fileInput.value = '';
       fileInput.click();
-    });
+    }
 
     // ===========================================
     // Export
@@ -8755,7 +9204,7 @@
 
     // Toggle dropdown on export button click
     exportBtn.addEventListener('click', (e) => {
-      toggleExportDropdownForMode(false, e);
+      toggleExportDropdownForMode(state.exportSprocketHolesEnabled, e);
     });
 
     exportSprocketBtn.addEventListener('click', (e) => {
@@ -8793,24 +9242,6 @@
       URL.revokeObjectURL(link.href);
     }
 
-    function blobToBase64(blob) {
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          const result = typeof reader.result === 'string' ? reader.result : '';
-          const commaIndex = result.indexOf(',');
-          if (commaIndex < 0) {
-            reject(new Error('Invalid export payload encoding.'));
-            return;
-          }
-          resolve(result.slice(commaIndex + 1));
-        };
-        reader.onerror = () => {
-          reject(reader.error || new Error('Failed to encode export payload.'));
-        };
-        reader.readAsDataURL(blob);
-      });
-    }
 
     function normalizeExportBlob(blob, mimeType = 'application/octet-stream') {
       if (!(blob instanceof Blob)) {
@@ -8846,11 +9277,7 @@
       }
 
       const normalizedBlob = normalizeExportBlob(blob, mimeType);
-      const bytesBase64 = await blobToBase64(normalizedBlob);
-      const result = await window.__TAURI__.core.invoke('write_export_file_to_path', {
-        path: targetPath,
-        bytesBase64
-      });
+      const result = await writeDesktopBlob(normalizedBlob, { path: targetPath }, window.__TAURI__.core.invoke);
       return normalizeSaveResult(result);
     }
 
@@ -8860,24 +9287,16 @@
       }
 
       const normalizedBlob = normalizeExportBlob(blob, mimeType);
-      const bytesBase64 = await blobToBase64(normalizedBlob);
-      const result = await window.__TAURI__.core.invoke('write_export_file_to_directory', {
-        directory,
-        suggestedName: fileName,
-        bytesBase64
-      });
+      const result = await writeDesktopBlob(normalizedBlob, { directory, suggestedName: fileName }, window.__TAURI__.core.invoke);
       return normalizeSaveResult(result);
     }
 
     async function saveBlob(blob, fileName, mimeType = 'application/octet-stream') {
       const normalizedBlob = normalizeExportBlob(blob, mimeType);
       if (isTauriDesktop()) {
-        const bytesBase64 = await blobToBase64(normalizedBlob);
-        const result = await window.__TAURI__.core.invoke('save_export_file', {
-          suggestedName: fileName,
-          bytesBase64
-        });
-        return normalizeSaveResult(result);
+        const path = await pickDesktopSavePath(fileName);
+        if (!path) return { saved: false, path: null };
+        return writeBlobToDesktopPath(normalizedBlob, path, mimeType);
       }
 
       downloadBlobInBrowser(normalizedBlob, fileName);
@@ -8958,18 +9377,42 @@
       return { format: 'png', bitDepth, extension: '.png', mimeType: 'image/png' };
     }
 
+    // The Step-3 adjustment stage is an 8-bit LUT pipeline, so a 16-bit export
+    // only carries real 16-bit samples when white balance, CMY, vibrance and
+    // the curves are all neutral. Anything else produces a 16-bit container
+    // holding 8-bit data, and the file name must not claim otherwise.
+    function exportKeeps16BitSamples(settings = state) {
+      // A batch file with no saved settings is converted from
+      // createDefaultSettings, whose Step-3 controls are all at identity, so it
+      // does keep its 16-bit samples.
+      if (!settings) return true;
+      try {
+        return areAdjustmentsIdentity(buildAdjustmentSettings(settings));
+      } catch (err) {
+        return false;
+      }
+    }
+
     function buildExportFileName(sourceName, exportInfo, options = {}) {
       const withConverted = sourceName
         ? sourceName.replace(/\.[^.]+$/, '_converted')
         : 'converted_negative';
       const sprocketSuffix = options.sprocket ? '_sprocket' : '';
-      const depthSuffix = exportInfo.bitDepth === 16 && exportInfo.format !== 'jpeg' ? '_16bit' : '';
+      const wants16 = exportInfo.bitDepth === 16 && exportInfo.format !== 'jpeg';
+      // In a batch each file carries its own adjustments, so the claim has to be
+      // judged against those rather than the frame that happens to be on screen.
+      const depthSuffix = wants16 && exportKeeps16BitSamples(options.settings || state)
+        ? '_16bit'
+        : '';
       return `${withConverted}${sprocketSuffix}${depthSuffix}${exportInfo.extension}`;
     }
 
-    function buildActiveExportFileName(sourceName, exportInfo) {
+    // `settings` is the per-file settings object in a batch, so the 16-bit
+    // claim in the name reflects that file rather than the live controls.
+    function buildActiveExportFileName(sourceName, exportInfo, settings = state) {
       return buildExportFileName(sourceName, exportInfo, {
-        sprocket: state.exportSprocketHolesEnabled
+        sprocket: state.exportSprocketHolesEnabled,
+        settings
       });
     }
 
@@ -8998,7 +9441,20 @@
 
     async function renderCurrentImageDataForExport() {
       await ensureFullResolutionReadyForExport();
-      ensureFullRender();
+      // ensureFullRender exists to leave a full-resolution CPU buffer in
+      // state.displayImageData, which getCurrentExportImageData then reuses.
+      // Skip it when there is nothing to reuse or it is already current: with
+      // the GPU preview active there is no CPU display buffer at all, so this
+      // was a full-resolution adjustment pass on the main thread — a second or
+      // more of frozen UI the moment the user clicks Export — purely to
+      // populate one. getCurrentExportImageData produces the same pixels
+      // through the export worker instead.
+      const displayAlreadyCurrent = state.lastRenderQuality === 'full'
+        && isDisplayImageDataFullResolution();
+      const previewIsGpu = state.lastRenderQuality === 'gl' && isWebGLActive();
+      if (!displayAlreadyCurrent && !previewIsGpu) {
+        ensureFullRender();
+      }
       const imageData = await getCurrentExportImageData();
       if (!imageData) throw new Error('No image available for export.');
       return imageData;
@@ -9007,7 +9463,7 @@
     function notifyExportError(err) {
       console.error('Export failed:', err);
       const message = err && err.message ? err.message : String(err || 'Unknown error');
-      alert(`Export failed: ${message}`);
+      void appAlert(`Export failed: ${message}`);
     }
 
     async function exportSingle() {
@@ -9128,6 +9584,14 @@
 
       const bitDepthNote = document.getElementById('exportBitDepthNote');
       bitDepthNote.classList.toggle('show', isJpeg);
+
+      const downgradeNote = document.getElementById('exportBitDepthDowngradeNote');
+      if (downgradeNote) {
+        downgradeNote.classList.toggle(
+          'show',
+          !isJpeg && state.exportBitDepth === 16 && !exportKeeps16BitSamples()
+        );
+      }
       document.querySelectorAll('.bitdepth-btn').forEach(btn => {
         const depth = parseInt(btn.dataset.bitdepth, 10) === 16 ? 16 : 8;
         const disabled = isJpeg && depth === 16;
@@ -9160,6 +9624,7 @@
         btn.textContent = depth === 16 ? '16-bit' : '8-bit';
       });
       updateSprocketControlsUI();
+      studioWorkspace?.sync();
     }
 
     updateExportUI();
@@ -9200,11 +9665,12 @@
       if (!force && !item.isDirty && item.settings) return false;
 
       item.settings = extractCurrentSettings();
+      updateStudioThumbnail();
       item.isDirty = false;
       updateFileListUI();
 
       if (!silent) {
-        alert(i18n[currentLang].settingsSaved || 'Settings saved for current image');
+        void appAlert(i18n[currentLang].settingsSaved || 'Settings saved for current image');
       }
       return true;
     }
@@ -9223,12 +9689,16 @@
       items.forEach(item => {
         const next = cloneSettings(copied);
         if (!includeCrop) {
+          next.autoFrameMeta = item.settings?.autoFrameMeta ? structuredClone(item.settings.autoFrameMeta) : null;
           const existingCrop = item.settings && item.settings.cropRegion ? { ...item.settings.cropRegion } : null;
           const existingRotation = item.settings && Number.isFinite(item.settings.rotationAngle)
             ? item.settings.rotationAngle
             : 0;
           next.cropRegion = existingCrop;
           next.rotationAngle = existingRotation;
+          // Mirroring is per-frame geometry like crop and rotation, not part of
+          // the look being copied across the roll.
+          next.mirrored = Boolean(item.settings && item.settings.mirrored);
         }
         item.settings = next;
         item.isDirty = false;
@@ -9237,29 +9707,30 @@
       return count;
     }
 
-    function applyCurrentSettingsToSelected() {
+    async function applyCurrentSettingsToSelected() {
       if (state.currentStep < 3 || !state.processedImageData) {
-        alert(i18n[currentLang].finishProcessing || 'Please complete the workflow (step 3) before saving settings.');
+        void appAlert(i18n[currentLang].finishProcessing || 'Please complete the workflow (step 3) before saving settings.');
         return;
       }
 
-      const selectedItems = state.fileQueue.filter(item => item.selected);
+      const selectedItems = state.fileQueue.filter(item => item.selected && item.file !== state.loadedFile);
       if (selectedItems.length < 1) {
-        alert(i18n[currentLang].noSelectedFiles || 'No selected images to apply settings.');
+        void appAlert(i18n[currentLang].noSelectedFiles || 'No selected images to apply settings.');
         return;
       }
 
       const baseSettings = extractCurrentSettings();
+      if (!await appConfirm(studioWorkspace.text('settingsConfirm'))) return;
       applySettingsToItems(baseSettings, selectedItems, { includeCrop: false });
 
       updateFileListUI();
       const template = i18n[currentLang].appliedToSelected || 'Applied current settings to {count} image(s).';
-      alert(template.replace('{count}', String(selectedItems.length)));
+      void appAlert(template.replace('{count}', String(selectedItems.length)));
     }
 
     function setRollReferenceFromCurrent() {
       if (state.currentStep < 3 || !state.processedImageData) {
-        alert(i18n[currentLang].finishProcessing || 'Please complete the workflow (step 3) before saving settings.');
+        void appAlert(i18n[currentLang].finishProcessing || 'Please complete the workflow (step 3) before saving settings.');
         return;
       }
       const currentItem = getCurrentQueueItem();
@@ -9268,18 +9739,17 @@
       state.rollReference.settingsSnapshot = extractCurrentSettings();
       persistCurrentFileSettings({ silent: true, force: true });
       updateRollReferenceUI();
-      updateStep2GuideCard({ skipFirstHint: true });
-      alert(i18n[currentLang].rollReferenceSet || 'Current image has been set as the roll reference.');
+      void appAlert(i18n[currentLang].rollReferenceSet || 'Current image has been set as the roll reference.');
     }
 
     function applyRollReferenceToSelected() {
       if (!hasRollReference()) {
-        alert(i18n[currentLang].rollReferenceMissing || 'No roll reference is set.');
+        void appAlert(i18n[currentLang].rollReferenceMissing || 'No roll reference is set.');
         return;
       }
       const selectedItems = state.fileQueue.filter(item => item.selected);
       if (selectedItems.length < 1) {
-        alert(i18n[currentLang].noSelectedFiles || 'No selected images to apply settings.');
+        void appAlert(i18n[currentLang].noSelectedFiles || 'No selected images to apply settings.');
         return;
       }
       const applied = applySettingsToItems(
@@ -9298,14 +9768,13 @@
 
       updateFileListUI();
       const template = i18n[currentLang].rollReferenceApplied || 'Applied roll reference to {count} image(s).';
-      alert(template.replace('{count}', String(applied)));
+      void appAlert(template.replace('{count}', String(applied)));
     }
 
     function clearRollReference() {
       resetRollReferenceState();
       updateRollReferenceUI();
-      updateStep2GuideCard({ skipFirstHint: true });
-      alert(i18n[currentLang].rollReferenceCleared || 'Roll reference cleared.');
+      void appAlert(i18n[currentLang].rollReferenceCleared || 'Roll reference cleared.');
     }
 
     function getSettingsForExport(index, item) {
@@ -9391,7 +9860,7 @@
       if (isRawLikeFileName(fileName)) {
         const arrayBuffer = await file.arrayBuffer();
         return await loadRawImageData(arrayBuffer, fileName);
-      } else if (file.type === 'image/png') {
+      } else if (isPngFile(file)) {
         const arrayBuffer = await file.arrayBuffer();
         return await loadPngImageData(arrayBuffer);
       } else {
@@ -9467,23 +9936,35 @@
         .filter(({ item }) => item.selected);
     }
 
-    // Create default settings with auto-detected film base
+    // Create default settings with auto-detected film base.
+    // Film type, lens correction and border buffer are session-level choices: a
+    // file the user opens inherits them from the previous frame, because
+    // loadFile never resets them. Files that are only ever exported must
+    // inherit the same values, otherwise pressing "Convert positive" and then
+    // Export All returns every unviewed slide inverted as a colour negative,
+    // and a B&W roll comes back tinted by an orange-mask compensation.
     function createDefaultSettings(imageData) {
-      const filmBase = autoDetectFilmBase(imageData, 10);
+      const filmType = sanitizePresetType(state.filmType || 'color');
+      const borderBuffer = sanitizeNumeric(state.coreBorderBuffer, 10, 0, 30);
+      const borderBufferBorderValue = sanitizeNumeric(state.coreBorderBufferBorderValue, 10, 0, 30);
+      const filmBase = autoDetectFilmBase(imageData, borderBuffer);
       return {
         cropRegion: null,
         rotationAngle: 0,
+        mirrored: false,
         autoFrameMeta: null,
-        filmType: 'color',
+        filmType,
         filmBase: filmBase,
-        lensCorrection: createDefaultLensCorrectionSettings(),
+        lensCorrection: state.lensCorrection
+          ? sanitizeLensCorrection(state.lensCorrection, createDefaultLensCorrectionSettings())
+          : createDefaultLensCorrectionSettings(),
         coreFilmPreset: 'none',
         coreColorModel: 'standard',
         coreEnhancedProfile: 'none',
         coreProfileStrength: 100,
         corePreSaturation: 100,
-        coreBorderBuffer: 10,
-        coreBorderBufferBorderValue: 10,
+        coreBorderBuffer: borderBuffer,
+        coreBorderBufferBorderValue: borderBufferBorderValue,
         coreBrightness: 0,
         coreExposure: 0,
         coreContrast: 0,
@@ -9539,9 +10020,17 @@
         pixels: getImageDataPixelCount(imageData)
       });
 
-      // Use saved settings or create default with auto-detect
-      const settings = sanitizeSettings(savedSettings || createDefaultSettings(imageData), {
-        fallbackSettings: state
+      // Use saved settings or create default with auto-detect.
+      // Geometry is per-file and must never leak in from whichever frame
+      // happens to be on screen: sanitizeSettings substitutes the fallback
+      // whenever cropRegion / autoFrameMeta are null, which is exactly what a
+      // never-cropped file carries, so the live crop would be stamped onto
+      // every other frame in the roll.
+      const studioColors = state.fileQueue.find(item => item.file === file)?.studioColors;
+      let initialSettings = savedSettings || mergeStudioColors(createDefaultSettings(imageData), studioColors || {});
+      if (!initialSettings.autoFrameMeta && !initialSettings.cropRegion) initialSettings = await analyzeStudioImportFrame(imageData, initialSettings, { allowCrop: !savedSettings });
+      const settings = sanitizeSettings(initialSettings, {
+        fallbackSettings: { ...state, cropRegion: null, autoFrameMeta: null, rotationAngle: 0, mirrored: false }
       });
 
       // Apply crop if set
@@ -9549,6 +10038,9 @@
       const rotationAngle = Number.isFinite(settings.rotationAngle) ? settings.rotationAngle : 0;
       if (Math.abs(rotationAngle) > 0.001) {
         workingData = applyRotationToImageData(workingData, rotationAngle);
+      }
+      if (settings.mirrored) {
+        workingData = mirrorImageDataHorizontal(workingData);
       }
       if (settings.cropRegion) {
         const cropRegion = sanitizeCropRegionForImage(settings.cropRegion, workingData);
@@ -9563,10 +10055,15 @@
 
       // Convert negative/positive via unified conversion router (in a worker
       // when available — keeps batch export from freezing the page).
+      // Every batch file is a new source, so it needs its own histogram
+      // analysis. Without forceFullProcess the adapter reuses the cached
+      // engine whenever the dimensions match and rebuilds the LUTs from the
+      // PREVIOUS frame's black/white points, so a thin negative in a roll of
+      // same-size scans is levelled against its neighbour.
       let processed = await convertFrameOffMainThread({
         imageData: workingData,
-        settings: buildRouterSettings(settings),
-        options: {}
+        settings: buildRouterSettings(settings, imageData),
+        options: { preview: false, forceFullProcess: true, analysisImageData: getColorAnalysisSample(settings, imageData) }
       });
       trace.mark('convert', {
         pixels: getImageDataPixelCount(processed)
@@ -9599,7 +10096,9 @@
         && sanitizePresetType(settings.filmType || 'color') !== 'bw'
         && !settings.grayPointSampled
       ) {
-        const estimate = estimateAutoWhiteBalance(processed);
+        const roi = resolveAnalysisRegion(settings, imageData);
+        const estimate = settings.autoFrameMeta?.analysisNeedsReview ? { confidence: 'low' }
+          : estimateAutoWhiteBalance(processed.__analysisPreview || (roi ? cropImageData(processed, analysisPixelBounds(processed.width, processed.height, roi, 0.02)) : processed));
         if (estimate.confidence !== 'low') {
           settings.wbR = estimate.wbR;
           settings.wbG = estimate.wbG;
@@ -9617,6 +10116,10 @@
       trace.end({
         outputPixels: getImageDataPixelCount(adjusted)
       });
+      if (!savedSettings) {
+        const item = state.fileQueue.find(item => item.file === file);
+        if (item) item.settings = cloneSettings(settings);
+      }
       return adjusted;
     }
 
@@ -9657,6 +10160,9 @@
       }
 
       const zip = new JSZipCtor();
+      // DSC_0001.NEF and DSC_0001.JPG both export as DSC_0001_converted.png,
+      // and JSZip would keep only the last one written under that name.
+      const claimZipName = createZipNameDeduper();
       const exportInfo = getExportInfo();
       let processedCount = 0;
       const lang = i18n[currentLang];
@@ -9686,7 +10192,7 @@
               exportInfo.bitDepth
             );
 
-            const name = buildActiveExportFileName(item.file.name, exportInfo);
+            const name = claimZipName(buildActiveExportFileName(item.file.name, exportInfo, settingsForFile));
             zip.file(name, blob);
             item.status = 'done';
           } catch (err) {
@@ -9811,7 +10317,7 @@
                 );
               }
             );
-            name = buildActiveExportFileName(item.file.name, exportInfo);
+            name = buildActiveExportFileName(item.file.name, exportInfo, settingsForFile);
           } catch (err) {
             console.error(`Error processing ${item.file.name}:`, err);
             item.status = 'error';
@@ -9885,11 +10391,19 @@
     }
 
     function createBatchExportJobs(selectedFiles, exportInfo) {
+      // Two source files can map to one output name (a RAW + JPEG pair, or the
+      // same frame number in two folders); without this the second write
+      // silently replaces the first.
+      const claimName = createZipNameDeduper();
       return selectedFiles.map(({ item, index }) => ({
         item,
         index,
         file: item.file,
-        outputName: buildActiveExportFileName(item.file.name, exportInfo),
+        outputName: claimName(buildActiveExportFileName(
+          item.file.name,
+          exportInfo,
+          getSettingsForExport(index, item)
+        )),
         settings: cloneSettings(getSettingsForExport(index, item))
       }));
     }
@@ -10083,7 +10597,7 @@
               }
             );
 
-            name = buildActiveExportFileName(item.file.name, exportInfo);
+            name = buildActiveExportFileName(item.file.name, exportInfo, settingsForFile);
             overlay.hide(); // Hide overlay before save dialog
             const result = await saveBlob(blob, name, exportInfo.mimeType);
             if (!result.saved) {
@@ -10140,6 +10654,7 @@
     // ===========================================
     // File List UI
     // ===========================================
+    let fileSelectionAnchor = null;
     function updateFileListUI() {
       const container = document.getElementById('fileListItems');
       const countEl = document.getElementById('fileListCount');
@@ -10152,9 +10667,17 @@
           configured: i18n[currentLang].configured || 'configured',
           customSettings: i18n[currentLang].customSettings || 'Custom',
           unsaved: i18n[currentLang].unsaved || 'Unsaved',
-          statusText: (status) => i18n[currentLang][status === 'processing' ? 'processingStatus' : status] || status
+          statusText: (status) => i18n[currentLang][status === 'processing' ? 'processingStatus' : status] || status,
+          selectFile: (name) => (i18n[currentLang].fileListSelectFile || 'Select {name}').replace('{name}', name)
         },
-        onToggleSelected: (index, selected) => {
+        onToggleSelected: (index, selected, { range = false } = {}) => {
+          const anchor = state.fileQueue.findIndex(item => item.id === fileSelectionAnchor);
+          if (range && anchor >= 0) {
+            for (let i = Math.min(anchor, index); i <= Math.max(anchor, index); i++) {
+              state.fileQueue[i].selected = selected;
+            }
+          }
+          fileSelectionAnchor = state.fileQueue[index].id;
           state.fileQueue[index].selected = selected;
           updateFileListUI();
           updateExportButtons();
@@ -10169,23 +10692,50 @@
     }
 
     async function switchToFile(index) {
+      if (studioAutoFrameRunning) return;
       if (index < 0 || index >= state.fileQueue.length) return;
-      if (index === state.currentFileIndex) return;
+      if (index === state.currentFileIndex && state.fileQueue[index].file === state.loadedFile) return;
 
-      clearUndoHistory();
-      resetZoomPan();
-      persistCurrentFileSettings({ silent: true });
+      // Snapshot the file being left only if there is something to snapshot.
+      // A file the user merely clicked through in Step 1/2 has no settings of
+      // its own, and freezing live state into it marks it "configured", which
+      // makes batch export skip its automatic film-base and gray-point passes.
+      const leavingItem = getCurrentQueueItem();
+      if (leavingItem && leavingItem.file === state.loadedFile
+        && (leavingItem.isDirty || leavingItem.settings || state.currentStep >= 3)) {
+        persistCurrentFileSettings({ silent: true });
+      }
       state.currentFileIndex = index;
       const fileItem = state.fileQueue[index];
 
       // Load the file
-      await loadFile(fileItem.file);
+      const loading = loadFile(fileItem.file, { autoConvert: false });
+      const generation = loadGeneration;
+      const result = await loading;
+
+      // A newer switch may have started (and finished) while this decode ran;
+      // applying these settings now would stamp them onto the file the user is
+      // actually looking at.
+      if (!isCurrentLoad(generation) || state.fileQueue[index] !== fileItem) return;
+      if (result?.status !== 'loaded') {
+        if (result?.status === 'error') {
+          fileItem.status = 'error';
+          fileItem.error = result.message;
+          state.currentFileIndex = state.fileQueue.findIndex(item => item.file === state.loadedFile);
+          updateFileListUI();
+        }
+        return;
+      }
+      resetZoomPan();
 
       // If this file has saved settings, restore them
       if (fileItem.settings) {
         restoreSettings(fileItem.settings);
         fileItem.isDirty = false;
       }
+
+      await prepareStudioPhoto(generation, fileItem);
+      if (!isCurrentLoad(generation)) return;
 
       updateFileListUI();
     }
@@ -10201,6 +10751,8 @@
       const safe = sanitizeSettings(settings, { fallbackSettings: state });
 
       state.rotationAngle = Number.isFinite(safe.rotationAngle) ? normalizeAngleDegrees(safe.rotationAngle) : 0;
+      state.mirrored = Boolean(safe.mirrored);
+      updateMirrorButtonState();
 
       if (state.loadedBaseImageData) {
         state.originalImageData = state.loadedBaseImageData;
@@ -10210,7 +10762,11 @@
         state.originalImageData = applyRotationToImageData(state.originalImageData, state.rotationAngle);
       }
 
-      // Restore crop region after rotation
+      if (state.originalImageData && state.mirrored) {
+        state.originalImageData = mirrorImageDataHorizontal(state.originalImageData);
+      }
+
+      // Restore crop region after rotation and mirroring
       applyCropRegionToLoadedImage(safe.cropRegion, { refreshDisplay: true });
       if (state.originalImageData) {
         safe.rotationAngle = state.rotationAngle;
@@ -10227,7 +10783,11 @@
           confidenceLevel: safe.autoFrameMeta.confidenceLevel || inferConfidenceLevel(safe.autoFrameMeta.confidence || 0),
           rotateOnly: restoredMode === 'rotateOnly',
           appliedMode: restoredMode,
-          lowConfidenceApplied: Boolean(safe.autoFrameMeta.lowConfidenceApplied)
+          lowConfidenceApplied: Boolean(safe.autoFrameMeta.lowConfidenceApplied),
+          importAuto: Boolean(safe.autoFrameMeta.importAuto),
+          imageArea: safe.autoFrameMeta.imageArea ? structuredClone(safe.autoFrameMeta.imageArea) : null,
+          analysisArea: safe.autoFrameMeta.analysisArea ? structuredClone(safe.autoFrameMeta.analysisArea) : null,
+          analysisNeedsReview: Boolean(safe.autoFrameMeta.analysisNeedsReview)
         };
       } else {
         state.autoFrame.lastDiagnostics = null;
@@ -10333,6 +10893,7 @@
       updateFilmModeUI();
       updateLensCorrectionUI();
       updateConsoleReadouts();
+      studioWorkspace?.sync();
     }
 
     function updateExportButtons() {
@@ -10349,6 +10910,7 @@
       if (exportZipBtn) exportZipBtn.disabled = selectedCount < 1 || exportLocked;
       if (exportAllBtn) exportAllBtn.disabled = selectedCount < 1 || exportLocked;
       updateAutoFrameButtons();
+      studioWorkspace?.sync();
     }
 
     function normalizeAutoFrame120Options() {
@@ -10370,10 +10932,6 @@
       const autoApplyInput = document.getElementById('autoFrameAutoApplyInput');
       const formatSelect = document.getElementById('autoFrameFormatSelect');
       const lowSelect = document.getElementById('autoFrameLowConfidenceSelect');
-      const option645 = document.getElementById('autoFrame120_645');
-      const option66 = document.getElementById('autoFrame120_66');
-      const option67 = document.getElementById('autoFrame120_67');
-      const option69 = document.getElementById('autoFrame120_69');
       const optionsContainer = document.getElementById('autoFrame120Options');
       if (!enabledInput || !autoApplyInput || !formatSelect || !lowSelect) return;
 
@@ -10384,10 +10942,10 @@
       if (rotate180Input) rotate180Input.checked = Boolean(state.autoFrame.rotate180Default);
       formatSelect.value = state.autoFrame.formatPreference || 'auto';
       lowSelect.value = state.autoFrame.lowConfidenceBehavior || 'suggest';
-      if (option645) option645.checked = state.autoFrame.allowed120Formats['6x4.5'] !== false;
-      if (option66) option66.checked = state.autoFrame.allowed120Formats['6x6'] !== false;
-      if (option67) option67.checked = state.autoFrame.allowed120Formats['6x7'] !== false;
-      if (option69) option69.checked = state.autoFrame.allowed120Formats['6x9'] !== false;
+      AUTO_FRAME_DEFAULT_120_FORMATS.forEach(format => {
+        const option = document.getElementById('autoFrame120_' + format.replace(/\D/g, ''));
+        if (option) option.checked = state.autoFrame.allowed120Formats[format] !== false;
+      });
       if (optionsContainer) {
         optionsContainer.style.opacity = formatSelect.value === '135' ? '0.55' : '1';
       }
@@ -10429,6 +10987,7 @@
         .replace('{confidence}', Number.isFinite(diag.confidence) ? diag.confidence.toFixed(2) : '0.00')
         .replace('{mode}', formatAppliedModeLabel(appliedMode));
       box.style.display = 'block';
+      box.dataset.angle = String(state.rotationAngle || 0);
     }
 
     function applyAutoFrameConfigFromUI() {
@@ -10436,30 +10995,24 @@
       const autoApplyInput = document.getElementById('autoFrameAutoApplyInput');
       const formatSelect = document.getElementById('autoFrameFormatSelect');
       const lowSelect = document.getElementById('autoFrameLowConfidenceSelect');
-      const option645 = document.getElementById('autoFrame120_645');
-      const option66 = document.getElementById('autoFrame120_66');
-      const option67 = document.getElementById('autoFrame120_67');
-      const option69 = document.getElementById('autoFrame120_69');
 
       if (enabledInput) state.autoFrame.enabled = Boolean(enabledInput.checked);
       if (autoApplyInput) state.autoFrame.autoApplyHighConfidence = Boolean(autoApplyInput.checked);
       const rotate180Input = document.getElementById('autoFrameRotate180Input');
       if (rotate180Input) state.autoFrame.rotate180Default = Boolean(rotate180Input.checked);
-      if (formatSelect) state.autoFrame.formatPreference = formatSelect.value === '135' || formatSelect.value === '120' ? formatSelect.value : 'auto';
+      if (formatSelect) state.autoFrame.formatPreference = ['135', '120', '135-standard'].includes(formatSelect.value) || Object.hasOwn(AUTO_FRAME_FORMAT_RATIOS, formatSelect.value) ? formatSelect.value : 'auto';
       if (lowSelect) {
         const value = lowSelect.value;
         state.autoFrame.lowConfidenceBehavior = (value === 'rotateOnly' || value === 'ignore') ? value : 'suggest';
       }
 
-      state.autoFrame.allowed120Formats = {
-        '6x4.5': option645 ? Boolean(option645.checked) : true,
-        '6x6': option66 ? Boolean(option66.checked) : true,
-        '6x7': option67 ? Boolean(option67.checked) : true,
-        '6x9': option69 ? Boolean(option69.checked) : true
-      };
+      state.autoFrame.allowed120Formats = Object.fromEntries(AUTO_FRAME_DEFAULT_120_FORMATS.map(format => [
+        format, document.getElementById('autoFrame120_' + format.replace(/\D/g, ''))?.checked !== false
+      ]));
       normalizeAutoFrame120Options();
       updateAutoFrameConfigUI();
       updateAutoFrameButtons();
+      studioWorkspace?.sync();
     }
 
     function updateAutoFrameButtons() {
@@ -10467,7 +11020,7 @@
       const selectedBtn = document.getElementById('autoFrameSelectedBtn');
       if (!currentBtn || !selectedBtn) return;
 
-      const stepReady = state.currentStep === 1;
+      const stepReady = !state.cropping && !document.body.dataset.studioBusy && !isDesktopBatchExportLocked();
       currentBtn.disabled = !state.originalImageData || !state.autoFrame.enabled || !stepReady;
       const selectedCount = state.fileQueue.filter(f => f.selected).length;
       selectedBtn.disabled = !state.autoFrame.enabled || selectedCount < 1 || !stepReady;
@@ -10496,7 +11049,7 @@
     // Save settings button
     document.getElementById('saveSettingsBtn').addEventListener('click', () => {
       if (state.currentStep < 3) {
-        alert(i18n[currentLang].finishProcessing || 'Please complete the workflow (step 3) before saving settings.');
+        void appAlert(i18n[currentLang].finishProcessing || 'Please complete the workflow (step 3) before saving settings.');
         return;
       }
       saveCurrentFileSettings();
@@ -10529,7 +11082,7 @@
     });
 
     ['autoFrameEnabledInput', 'autoFrameAutoApplyInput', 'autoFrameRotate180Input', 'autoFrameFormatSelect',
-      'autoFrameLowConfidenceSelect', 'autoFrame120_645', 'autoFrame120_66', 'autoFrame120_67', 'autoFrame120_69']
+      'autoFrameLowConfidenceSelect', 'autoFrame120_645', 'autoFrame120_66', 'autoFrame120_67', 'autoFrame120_68', 'autoFrame120_69', 'autoFrame120_612', 'autoFrame120_617']
       .forEach(id => {
         const el = document.getElementById(id);
         if (!el) return;
@@ -10626,6 +11179,7 @@
 
       updateFileListUI();
       updateExportButtons();
+      void loadStudioThumbnails();
     }
 
     // ===========================================
@@ -10695,6 +11249,8 @@
       state.currentFileIndex = 0;
       state.cropRegion = null;
       state.rotationAngle = 0;
+      state.mirrored = false;
+      updateMirrorButtonState();
       state.loadedBaseImageData = null;
       state.batchSessionActive = false;
       resetRollReferenceState();
@@ -10718,6 +11274,8 @@
       state.currentFileIndex = 0;
       state.cropRegion = null;
       state.rotationAngle = 0;
+      state.mirrored = false;
+      updateMirrorButtonState();
       state.loadedBaseImageData = null;
       state.batchSessionActive = false;
       resetRollReferenceState();
@@ -10730,6 +11288,12 @@
         loadFile(state.fileQueue[0].file);
       }
     });
+
+    // A file dropped outside the canvas would otherwise hit the browser
+    // default and navigate the tab to that image, discarding the file queue,
+    // per-file settings, roll reference and undo history without warning.
+    document.addEventListener('dragover', (e) => e.preventDefault());
+    document.addEventListener('drop', (e) => e.preventDefault());
 
     canvasContainer.addEventListener('dragover', (e) => {
       e.preventDefault();
@@ -10753,6 +11317,8 @@
       state.currentFileIndex = 0;
       state.cropRegion = null;
       state.rotationAngle = 0;
+      state.mirrored = false;
+      updateMirrorButtonState();
       state.loadedBaseImageData = null;
       state.batchSessionActive = false;
       resetRollReferenceState();
@@ -10772,8 +11338,182 @@
     window.addEventListener('resize', () => {
       if (canvas.width > 0 && canvas.height > 0) {
         adjustCanvasDisplay(canvas.width, canvas.height);
+        // WebGL の描画バッファはサイズ変更で消えるため、その場で描き直す。
+        if (isWebGLActive() && !state.beforeAfterActive && !state.cropping) renderWebGL();
       }
       if (state.cropping) updateCropOverlayFromDraft();
+      scheduleDisplayPreviewResize();
       const histogramResized = resizeHistogramCanvas();
       if (histogramResized) redrawHistogramIfPossible();
+      if (curveCanvas.getBoundingClientRect().width > 0) renderCurve();
     });
+
+    let studioThumbnailsRunning = false;
+    async function loadStudioThumbnails() {
+      if (studioThumbnailsRunning || typeof createImageBitmap !== 'function') return;
+      studioThumbnailsRunning = true;
+      try {
+        let item;
+        // 一枚ずつ縮小し、RAW は実際に開いたときのプレビューを利用する。
+        while ((item = state.fileQueue.find(entry => !entry.thumbnail && !entry.thumbnailAttempted
+          && /\.(jpe?g|png|webp|gif|bmp)$/i.test(entry.file.name)))) {
+          item.thumbnailAttempted = true;
+          let bitmap;
+          try {
+            bitmap = await createImageBitmap(item.file, { resizeWidth: 144, resizeQuality: 'low' });
+            if (!state.fileQueue.includes(item) || item.thumbnail) continue;
+            const surface = document.createElement('canvas');
+            surface.width = bitmap.width;
+            surface.height = bitmap.height;
+            surface.getContext('2d').drawImage(bitmap, 0, 0);
+            item.thumbnail = surface.toDataURL('image/jpeg', 0.75);
+            updateFileListUI();
+          } catch {
+            // 読めないファイルは番号表示のままにし、読み込み時に詳細を案内する。
+          } finally {
+            bitmap?.close();
+          }
+          await new Promise(resolve => setTimeout(resolve, 0));
+        }
+      } finally {
+        studioThumbnailsRunning = false;
+      }
+    }
+
+    // 標準暗室は既存の描画・履歴・書き出し経路を再利用する。
+    function updateStudioThumbnail() {
+      const item = getCurrentQueueItem();
+      const source = state.displayImageData || state.processedImageData || state.originalImageData;
+      if (!item || !source) return;
+      const thumbnail = createStudioThumbnail(source);
+      const thumbCanvas = document.createElement('canvas');
+      thumbCanvas.width = thumbnail.width;
+      thumbCanvas.height = thumbnail.height;
+      thumbCanvas.getContext('2d').putImageData(new ImageData(thumbnail.data, thumbnail.width, thumbnail.height), 0, 0);
+      item.thumbnail = thumbCanvas.toDataURL('image/jpeg', 0.8);
+      updateFileListUI();
+    }
+
+    async function prepareStudioPhoto(generation, item = getCurrentQueueItem()) {
+      // 切り替え前の変換が終了してから、新しい写真の変換を開始する。
+      if (processNegativeInFlight) await processNegativeInFlight;
+      if (!isCurrentLoad(generation) || !state.originalImageData) return;
+      if (!item?.settings) {
+        restoreSettings(mergeStudioColors(createDefaultSettings(state.originalImageData), item?.studioColors || {}));
+      }
+      document.body.dataset.studioBusy = 'true';
+      studioWorkspace?.sync();
+      try {
+        if (!item?.settings?.autoFrameMeta && !state.cropRegion && state.autoFrame.enabled) {
+          const source = state.loadedBaseImageData || state.originalImageData;
+          const settings = await analyzeStudioImportFrame(source, extractCurrentSettings(), { allowCrop: !item?.settings });
+          if (!isCurrentLoad(generation)) return;
+          restoreSettings(settings);
+        }
+        goToStep(2);
+        await processNegative();
+      } finally {
+        if (isCurrentLoad(generation)) {
+          delete document.body.dataset.studioBusy;
+          updateAutoFrameButtons();
+          studioWorkspace?.sync();
+        }
+      }
+    }
+
+    async function analyzeStudioImportFrame(source, settings, { allowCrop = true } = {}) {
+      if (!state.autoFrame.enabled || settings.cropRegion) return settings;
+      let result;
+      try { result = await detectFrameAndRotation(source); }
+      catch (error) { console.warn('Import frame detection failed; keeping the full image:', error); }
+      const reliable = canAutoApplyImportFrame(result, state.autoFrame);
+      const apply = reliable && state.autoFrame.onImport && allowCrop;
+      const meta = {
+        confidence: result?.confidence || 0,
+        confidenceLevel: result?.confidenceLevel || 'low',
+        detectedFormat: result?.detectedFormat || 'unknown',
+        method: result?.diagnostics?.method || 'unavailable',
+        appliedMode: apply ? 'crop' : 'none',
+        importAuto: true,
+        imageArea: reliable ? imageAreaFromDetection(result, source) : null
+      };
+      if (!apply) return { ...settings, autoFrameMeta: meta };
+      const angle = autoFrameEffectiveAngle(result.angle);
+      const rotated = computeAutoFrameRotatedImage(result, angle, source);
+      const cropRegion = state.autoFrame.rotate180Default
+        ? rotate180CropRegion(result.cropRegion, rotated.width, rotated.height) : result.cropRegion;
+      return { ...settings, rotationAngle: angle, mirrored: false, cropRegion, autoFrameMeta: meta };
+    }
+
+    {
+      // 共通コントロールを唯一の暗室 UI に配置する。
+      studioWorkspace = mountStudioWorkspace({
+        getState: () => state,
+        getLanguage: () => currentLang,
+        isExportLocked: isDesktopBatchExportLocked,
+        onResetAll: resetAllAdjustments,
+        onRestart: restartPhotoProcessing,
+        onNewSession: closePhotoSession,
+        onStyle: model => {
+          if (state.currentStep < 3) return;
+          pushUndo('studioStyle');
+          state.coreColorModel = model;
+          state.coreFilmPreset = 'none';
+          state.coreEnhancedProfile = 'none';
+          state.frontierGuideStep2ChoiceTouched = true;
+          markCurrentFileDirty();
+          updateSlidersFromState();
+          scheduleCoreReprocess({ full: false });
+        },
+        onReset: () => {
+          if (state.currentStep < 3) return;
+          pushUndo('studioReset');
+          Object.assign(state, pickStudioColors(createDefaultSettings(state.originalImageData)));
+          ['r', 'g', 'b'].forEach(ch => updateCurveFromPoints(ch));
+          updateSlidersFromState();
+          renderCurve();
+          markCurrentFileDirty();
+          scheduleCoreReprocess({ full: false });
+        },
+        onSync: () => {
+          if (state.currentStep < 3 || isDesktopBatchExportLocked()) return;
+          const colors = pickStudioColors(state);
+          const targets = state.fileQueue.filter(item => item.selected && item.file !== state.loadedFile);
+          targets.forEach(item => {
+            if (item.settings) item.settings = mergeStudioColors(item.settings, colors);
+            else item.studioColors = structuredClone(colors);
+            item.isDirty = false;
+            item.status = 'pending';
+          });
+          persistCurrentFileSettings({ silent: true, force: true });
+          updateFileListUI();
+          showToast(studioWorkspace.text('synced').replace('{count}', targets.length));
+        },
+        onRetry: () => {
+          if (!state.originalImageData) return;
+          document.getElementById('applyConvertBtn').click();
+        },
+        onConfirm: message => appConfirm(message),
+        onExportBorder: enabled => setExportSprocketMode(enabled),
+        onAutoCrop: enabled => {
+          state.autoFrame.onImport = enabled;
+          if (enabled) state.autoFrame.enabled = true;
+          updateAutoFrameConfigUI();
+          studioWorkspace?.sync();
+        },
+        onRestoreFrame: () => {
+          if (!state.originalImageData || state.cropping || document.body.dataset.studioBusy) return;
+          pushUndo('restoreFullFrame');
+          state.rotationAngle = 0;
+          state.mirrored = false;
+          state.cropRegion = null;
+          if (state.autoFrame.lastDiagnostics) state.autoFrame.lastDiagnostics.appliedMode = 'none';
+          rebuildGeometryFromBase();
+          markCurrentFileDirty();
+          void processNegative();
+        },
+        onConfirmAnalysis: () => beginCropMode({ analysisOnly: true })
+      });
+      updateWorkflowUI();
+      studioWorkspace.sync();
+    }

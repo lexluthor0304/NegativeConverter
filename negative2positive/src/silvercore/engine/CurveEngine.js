@@ -91,16 +91,25 @@ function prepareSettings(channelData, settings) {
   }
 
   return {
-    cyan: 1 - (settings.temp || 0) * 0.01,
+    // Channel slots follow the engine-wide convention cyan->R, tint->G, temp->B,
+    // the same order colorLinearLayer, shadowColorLayer and computeAutoColor use.
+    // These three were previously wired as cyan:=temp, temp:=temperature, which
+    // pushed the white-balance temperature (plus the automatic gray-point and
+    // film-WB corrections) onto the red channel and left settings.cyan unread.
+    cyan: 1 - (settings.cyan || 0) * 0.01,
     tint: 1 - (settings.tint || 0) * 0.01,
-    temp: 1 - (settings.temperature || 0) * 0.01,
+    temp: 1 - (settings.temp || 0) * 0.01,
     wbCyan: -(settings.wbCyan || 0) / 255,
     wbTint: -(settings.wbTint || 0) / 255,
     wbTemp: -(settings.wbTemp || 0) / 255,
-    brightness: (1 / (1 + (settings.brightness || 0) * 0.02)) *
+    // The brightness gamma is 1/(1 + b*0.02): it divides by zero at b = -50 and
+    // goes negative below that, which turns Math.pow(x, gamma) into an inverting
+    // curve and pushed mid-tones to white. Floor the divisor so the darkest
+    // setting saturates at gamma 10 (reached at b = -45, unchanged below that).
+    brightness: (1 / Math.max(1 + (settings.brightness || 0) * 0.02, 0.1)) *
                 (1 / (profile.defaultGamma || 1)) *
                 (1 / autoGamma),
-    exposure: 1 / (1 + (settings.exposure || 0) * 0.02),
+    exposure: Number.isFinite(settings.exposure) ? settings.exposure : 0,
     contrast: (settings.contrast || 0) + (profile.defaultContrast || 0),
     highlights: (settings.highlights || 0) + (profile.defaultHighlights || 0) + ((settings.glow || 0) / 1.5),
     shadows: (settings.shadows || 0) + (profile.defaultShadows || 0) - ((settings.fade || 0) / 1.5),
@@ -146,16 +155,33 @@ function createBaseGrid(resolution) {
 
 // --- Tone adjustment layers ---
 
-function exposureLayer(channels, exposure) {
-  if (exposure === 1) return channels;
-  return mapChannels(channels, (x) => {
-    if (exposure < 1) {
-      return 1 - Math.pow(1 - x, 1 / exposure);
-    }
-    const darkFactor = 2 - exposure;
-    const scale = 1 - (1 - darkFactor) * 0.4;
-    return x * scale;
-  });
+// Darkening scale for a negative exposure value, expressed in slider units
+// (u = -exposure). The original curve, 1 - 0.008u/(1 - 0.02u), crosses zero at
+// u ~= 35.7 and turns negative beyond it (NaN at u = 50), so every exposure
+// below about -36 rendered a black frame even though the slider reaches -300.
+// Keep that curve verbatim up to u = 20 and continue with the exponential that
+// matches its value and slope there: monotone, strictly positive, and identical
+// to the old response across the range people actually used.
+const EXPOSURE_TAIL_START = 20;
+const EXPOSURE_TAIL_SCALE = 1 - (0.008 * EXPOSURE_TAIL_START) / (1 - 0.02 * EXPOSURE_TAIL_START);
+const EXPOSURE_TAIL_DECAY =
+  (0.008 / Math.pow(1 - 0.02 * EXPOSURE_TAIL_START, 2)) / EXPOSURE_TAIL_SCALE;
+
+function exposureDarkenScale(u) {
+  if (u <= EXPOSURE_TAIL_START) {
+    return 1 - (0.008 * u) / (1 - 0.02 * u);
+  }
+  return EXPOSURE_TAIL_SCALE * Math.exp(-EXPOSURE_TAIL_DECAY * (u - EXPOSURE_TAIL_START));
+}
+
+function exposureLayer(channels, exposureValue) {
+  if (!exposureValue) return channels;
+  if (exposureValue > 0) {
+    const power = 1 + exposureValue * 0.02;
+    return mapChannels(channels, (x) => 1 - Math.pow(1 - x, power));
+  }
+  const scale = exposureDarkenScale(-exposureValue);
+  return mapChannels(channels, (x) => x * scale);
 }
 
 function gammaLayer(channels, gamma) {

@@ -22,6 +22,34 @@ const attr = (html, re) => {
   return m ? m[1].trim() : null;
 };
 
+const escapeHtml = (text) => text
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;');
+
+// Every Question name declared anywhere in the page's JSON-LD blocks.
+function faqQuestions(html) {
+  const names = [];
+  const blocks = html.match(/<script type="application\/ld\+json">[\s\S]*?<\/script>/gi) || [];
+  for (const block of blocks) {
+    const json = block.replace(/^<script[^>]*>/i, '').replace(/<\/script>$/i, '');
+    let parsed;
+    try {
+      parsed = JSON.parse(json);
+    } catch {
+      continue; // malformed JSON-LD is a separate problem, not this check's job
+    }
+    const walk = (node) => {
+      if (Array.isArray(node)) return node.forEach(walk);
+      if (!node || typeof node !== 'object') return;
+      if (node['@type'] === 'Question' && typeof node.name === 'string') names.push(node.name);
+      Object.values(node).forEach(walk);
+    };
+    walk(parsed);
+  }
+  return names;
+}
+
 for (const page of pages) {
   const html = readFileSync(join(PAGES_DIR, page), 'utf8');
   const head = html.slice(0, html.indexOf('</head>'));
@@ -63,6 +91,16 @@ for (const page of pages) {
   const theme = attr(head, /<meta\s+name="theme-color"\s+content="([^"]*)"/i);
   if (!theme) flag('missing theme-color');
   else themeColors.set(page, theme);
+
+  // Google requires FAQPage structured data to describe content the visitor can
+  // actually see; five landing pages once declared questions that appeared
+  // nowhere on the page, which risks losing rich results or a manual action.
+  const visibleText = html.replace(/<script[\s\S]*?<\/script>/gi, '');
+  for (const question of faqQuestions(html)) {
+    if (!visibleText.includes(question) && !visibleText.includes(escapeHtml(question))) {
+      flag(`FAQ question in structured data is not visible on the page: "${question}"`);
+    }
+  }
 }
 
 // All pages must agree on one theme-color (catches redesign drift)

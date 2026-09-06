@@ -1,9 +1,12 @@
 {
   "name": "negativeconverter",
   "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.4",
-    "http-server": "14.1.1",
     "vite": "^8.2.2"
   },
   "scripts": {
@@ -12,6 +15,7 @@
     "preview:web": "vite preview --config negative2positive/vite.config.js",
     "test": "node scripts/run-tests.mjs",
     "test:smoke": "node scripts/smoke-test.mjs",
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
     "tauri:dev": "tauri dev",
     "tauri:build": "npm run build:web && tauri build",
     "tauri:build:mas": "bash scripts/build-mas.sh"

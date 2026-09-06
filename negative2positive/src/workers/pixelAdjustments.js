@@ -250,6 +250,45 @@ export function applyAdjustmentsToPixels(inputData, outputData, pixelCount, para
 }
 
 /**
+ * True when a 256-entry curve LUT maps every input to itself.
+ * @param {ArrayLike<number>} curve
+ */
+export function isIdentityCurve(curve) {
+  if (!curve || curve.length < 256) return false;
+  for (let v = 0; v < 256; v++) {
+    if (curve[v] !== v) return false;
+  }
+  return true;
+}
+
+/**
+ * True when applyAdjustmentsToPixels would copy the RGB channels through
+ * unchanged (alpha is always forced opaque).
+ *
+ * This stage is 8-bit only — it reads and writes Uint8ClampedArray and builds
+ * 256-entry LUTs — so any non-identity adjustment quantises the image to 8 bits.
+ * Callers use this to decide whether the engine's 16-bit plane still describes
+ * the result and can therefore be exported at full precision.
+ *
+ * @param {object} params - Output of computeAdjustmentParams
+ */
+export function isIdentityAdjustmentParams(params) {
+  if (!params) return false;
+  return params.rMult === 1
+    && params.gMult === 1
+    && params.bMult === 1
+    && !params.doContrast
+    && !params.doHighlights
+    && !params.doShadows
+    && !params.doTempTint
+    && !params.doHsl
+    && !params.doCMY
+    && isIdentityCurve(params.curveR)
+    && isIdentityCurve(params.curveG)
+    && isIdentityCurve(params.curveB);
+}
+
+/**
  * Compute adjustment parameters from settings object.
  * This extracts pure numeric computations that don't depend on DOM state.
  */

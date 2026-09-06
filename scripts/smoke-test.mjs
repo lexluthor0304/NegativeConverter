@@ -2,15 +2,19 @@
 //
 //   node scripts/smoke-test.mjs
 //
-// Flow: start vite dev server -> load negative-sample.jpg through the real
-// file input -> Step 1 -> Convert -> Step 2 -> Apply & Convert -> Step 3.
+// Vite 起動 → 実際の入力から写真を読み込み → Studio 自動変換 → 調整・一括書き出し。
 // Asserts the canvas pixels actually changed (negative inverted) and that no
 // uncaught page errors occurred. Requires Google Chrome on this machine.
 import { spawn, execFile } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { runStudioSmoke } from './studio-smoke.mjs';
+import { runStudioAutoCropSmoke } from './studio-auto-crop-smoke.mjs';
+import { runStudioColorAnalysisSmoke } from './studio-color-analysis-smoke.mjs';
+import { runWorkspaceUiSmoke } from './workspace-ui-smoke.mjs';
 
 // UPNG is already a runtime dependency of the app; reuse it to decode screenshots.
 const UPNG = createRequire(import.meta.url)('upng-js');
@@ -29,6 +33,12 @@ const CHROME_CANDIDATES = [
 
 const chromeBin = CHROME_CANDIDATES.find((p) => existsSync(p));
 if (!chromeBin) {
+  // On CI a missing browser means the smoke never ran, which must not read as
+  // a pass; locally it is a legitimate skip.
+  if (process.env.CI) {
+    console.error('FAIL: no Chrome binary found (set CHROME_BIN)');
+    process.exit(1);
+  }
   console.error('SKIP: no Chrome binary found (set CHROME_BIN)');
   process.exit(0);
 }
@@ -38,13 +48,19 @@ if (!existsSync(FIXTURE)) {
 }
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+// A throwaway Chrome profile: without it headless Chrome writes into the
+// developer's default profile directory.
+const chromeProfileDir = mkdtempSync(join(tmpdir(), 'nc-smoke-'));
 const children = [];
 function cleanup() {
   for (const c of children) {
     try { c.kill('SIGKILL'); } catch {}
   }
+  try { rmSync(chromeProfileDir, { recursive: true, force: true }); } catch {}
 }
 process.on('exit', cleanup);
+// 'exit' does not fire on Ctrl-C or kill, which would orphan vite and Chrome.
+for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => process.exit(130));
 
 function fail(msg) {
   console.error(`FAIL: ${msg}`);
@@ -52,7 +68,10 @@ function fail(msg) {
 }
 
 // ---- start vite dev server ----
-const vite = spawn('npx', ['vite', '--config', 'negative2positive/vite.config.js', '--port', String(PORT), '--strictPort'], {
+// Spawning `npx` without a shell throws ENOENT on Windows (it is npx.cmd);
+// run vite's bin with the current node instead.
+const viteBin = join(ROOT, 'node_modules', 'vite', 'bin', 'vite.js');
+const vite = spawn(process.execPath, [viteBin, '--config', 'negative2positive/vite.config.js', '--port', String(PORT), '--strictPort'], {
   cwd: ROOT,
   stdio: 'ignore',
 });
@@ -71,6 +90,7 @@ if (!serverUp) fail('vite dev server did not start');
 // ---- start chrome ----
 const chrome = execFile(chromeBin, [
   '--headless=new', `--remote-debugging-port=${CDP_PORT}`,
+  `--user-data-dir=${chromeProfileDir}`,
   '--no-first-run', '--hide-scrollbars', '--window-size=1440,900',
   'about:blank',
 ]);
@@ -132,10 +152,45 @@ async function evaluate(expression) {
   }
   return res.result?.result?.value;
 }
+// The app renders its own modal dialogs instead of calling alert()/confirm(),
+// because native JavaScript dialogs are silently ignored inside the macOS
+// desktop webview. Auto-confirm them the way the CDP handler auto-accepted the
+// native ones, and record their text so the OpenCV failure check still works.
+async function installDialogAutoAccept() {
+  await evaluate(`(() => {
+    if (window.__ncDialogAuto) return true;
+    window.__ncDialogAuto = true;
+    window.__ncDialogLog = [];
+    setInterval(() => {
+      const btn = document.querySelector('[data-app-dialog-confirm]');
+      if (!btn) return;
+      const msgEl = document.querySelector('[data-app-dialog-message]');
+      window.__ncDialogLog.push(msgEl ? msgEl.textContent : '');
+      btn.click();
+    }, 150);
+    return true;
+  })()`);
+}
+
+async function drainDialogs() {
+  const messages = await evaluate(`(() => {
+    const log = window.__ncDialogLog || [];
+    window.__ncDialogLog = [];
+    return log;
+  })()`);
+  for (const text of messages || []) {
+    console.log(`dialog auto-accepted: ${String(text).slice(0, 120)}`);
+    if (/OpenCV/i.test(text)) {
+      pageErrors.push(`OpenCV load failure dialog: ${String(text).slice(0, 200)}`);
+    }
+  }
+}
+
 async function waitFor(description, expression, timeoutMs = 60_000, { soft = false } = {}) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     if (await evaluate(expression)) return true;
+    await drainDialogs();
     await wait(500);
   }
   if (soft) return false;
@@ -178,11 +233,14 @@ async function previewLuminance() {
 
 await send('Page.enable');
 await send('Runtime.enable');
-await send('Page.navigate', { url: `http://127.0.0.1:${PORT}/` });
-await waitFor('app boot', `!!document.getElementById('fileInput')`);
+await send('Page.navigate', { url: `http://127.0.0.1:${PORT}/?lang=en` });
+await waitFor('app boot', `!!document.getElementById('studioImportAutoCrop')`);
+await installDialogAutoAccept();
 await wait(1500); // let main.js finish wiring
+await evaluate(`document.getElementById('studioImportAutoCrop').click()`);
 
 // ---- 1. load the fixture through the real file input ----
+if (!process.argv.includes('--studio-only') && !process.argv.includes('--auto-crop-only') && !process.argv.includes('--color-analysis-only')) {
 const doc = await send('DOM.getDocument');
 const input = await send('DOM.querySelector', {
   nodeId: doc.result.root.nodeId, selector: '#fileInput',
@@ -192,45 +250,125 @@ await send('DOM.setFileInputFiles', { files: [FIXTURE], nodeId: input.result.nod
 
 await waitFor('image loaded (toolbar visible)',
   `document.getElementById('previewToolbar').style.display !== 'none'`, 90_000);
-console.log('ok: image decoded, Step 1 reached');
+console.log('ok: image decoded and automatically converted in the only workspace');
+await waitFor('automatic conversion ready', `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`,150000);
 
 // ---- 1b. Auto Frame must actually load OpenCV (regression: opencv-js 5.x
 // exposes window.cv as a thenable that the loader has to resolve) ----
-await evaluate(`document.getElementById('autoFrameBtn').click()`);
-await waitFor('OpenCV runtime ready', `!!(window.cv && window.cv.Mat)`, 90_000);
-console.log('ok: OpenCV loaded, auto-frame analysis ran');
-await wait(2000); // let the analysis settle before moving on
+await evaluate(`(() => {
+  window.__frameDone = false;
+  window.__frameTicks = 0;
+  const timer = setInterval(() => window.__frameTicks++, 20);
+  const original = Worker.prototype.postMessage;
+  Worker.prototype.postMessage = function (message, ...args) {
+    if (message.type === 'analyze-frame') {
+      window.__frameInput = structuredClone(message);
+      this.addEventListener('message', event => {
+        window.__frameResult = event.data;
+        window.__frameDone = true;
+        clearInterval(timer);
+      }, { once: true });
+    }
+    return original.call(this, message, ...args);
+  };
+  document.getElementById('autoFrameBtn').click();
+})()`);
+await waitFor('auto-frame worker result', `window.__frameDone`, 120_000);
+if (await evaluate(`!!window.cv || !!document.querySelector('script[data-opencv-loader="1"]')`)) fail('auto frame loaded redundant main-thread OpenCV');
+// 主スレッドとの数値比較のためにのみ、ここで別の OpenCV を明示的に初期化する。
+await evaluate(`(async () => {
+  const { createOpenCvLoader } = await import('/src/app/opencvLoader.js');
+  const { default: url } = await import('/@fs${ROOT}/node_modules/@techstark/opencv-js/dist/opencv.js?url');
+  if (!await createOpenCvLoader([url])()) throw new Error('comparison OpenCV failed');
+})()`);
+const frameCheck = await evaluate(`(async () => {
+  if (window.__frameResult.error) throw new Error(window.__frameResult.error);
+  const { detectFrameAndRotation } = await import('/src/app/autoFrameAnalyzer.js');
+  const { applyRotationToImageData } = await import('/src/app/imageGeometry.js');
+  const input = window.__frameInput;
+  const image = new ImageData(input.rgba, input.width, input.height);
+  const expected = detectFrameAndRotation(image, { ...input.options, rotateImageData: applyRotationToImageData });
+  const actual = window.__frameResult.result;
+  const summary = result => result && { angle: result.angle, cropRegion: result.cropRegion,
+    confidence: result.confidence, diagnostics: result.diagnostics };
+  return { equal: JSON.stringify(summary(expected)) === JSON.stringify(summary(actual)),
+    found: !!actual?.cropRegion, ticks: window.__frameTicks };
+})()`);
+if (!frameCheck.equal || !frameCheck.found || frameCheck.ticks < 2) fail('auto-frame worker mismatch or blocked UI');
+await drainDialogs();
+await wait(500);
+console.log('ok: auto-frame worker matches main-thread analysis, UI heartbeat continued');
 
+await waitFor('auto frame ready for comparison', `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`,150000);
+await evaluate(`document.getElementById('beforeAfterBtn').click()`);
 const meanBefore = await previewLuminance();
+await evaluate(`document.getElementById('beforeAfterBtn').click()`);
 if (!Number.isFinite(meanBefore)) fail('could not measure preview luminance');
 if (meanBefore < 3) fail('preview is black after load — decode may have failed');
 
-// ---- 2. Step 1 -> Step 2 ----
-await waitFor('convert button', `(() => {
-  const b = document.getElementById('convertBtn');
-  return b && b.style.display !== 'none';
-})()`, 30_000);
-await evaluate(`document.getElementById('convertBtn').click()`);
-await waitFor('film settings (Step 2)',
-  `document.getElementById('filmSettingsSection').style.display !== 'none'`, 30_000);
-console.log('ok: Step 2 reached');
+// 暗室の再変換から共通処理を検証する。旧ステップ UI は使わない。
+await waitFor('auto frame conversion ready', `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`,150000);
 
-// ---- 3. Apply & Convert -> Step 3 ----
-await evaluate(`document.getElementById('applyConvertBtn').click()`);
+// ---- 3. 変換タブから再変換 ----
+const fullSize = await evaluate(`({ width: window.__frameResult.result.cropRegion.width, height: window.__frameResult.result.cropRegion.height })`);
+await evaluate(`document.getElementById('studioTab-conversion').click(); document.getElementById('studioRetry').click()`);
+await wait(400);
+await waitFor('reconversion overlay closed', `!document.querySelector('.loading-overlay.visible')`,150000);
 const step3Expr = `document.getElementById('statusBadge').classList.contains('step3')`;
-let reached = await waitFor('Step 3 badge', step3Expr, 150_000, { soft: true });
-if (!reached) {
-  // Headless GL can be flaky — retry once on the CPU path.
-  console.log('warn: conversion slow/stuck with WebGL, retrying on CPU path');
-  await dumpDiagnostics('webgl attempt');
-  await evaluate(`(() => {
-    const gl = document.getElementById('coreUseWebGL');
-    if (gl && gl.checked) { gl.checked = false; gl.dispatchEvent(new Event('change', { bubbles: true })); }
-  })()`);
-  await evaluate(`document.getElementById('applyConvertBtn').click()`);
-  reached = await waitFor('Step 3 badge (CPU path)', step3Expr, 150_000);
+await waitFor('converted status', step3Expr, 150_000);
+console.log('ok: reconversion finished in the current workspace');
+
+// プレビュー表示直後に除塵を有効化しても原寸で処理する。
+await evaluate(`(() => {
+  document.getElementById('studioTab-repair').click();
+  window.__dustSources = [];
+  const original = window.cv.matFromImageData;
+  window.cv.matFromImageData = function (image) {
+    let hash = 2166136261;
+    for (const value of image.data) hash = Math.imul(hash ^ value, 16777619);
+    window.__dustSources.push({ width: image.width, height: image.height, hash });
+    return original.call(this, image);
+  };
+  document.getElementById('dustRemovalEnabled').click();
+})()`);
+await waitFor('dust detection at full resolution', `window.__dustSources.length > 0`, 90_000);
+const dustSource = await evaluate(`window.__dustSources[0]`);
+if (dustSource.width !== fullSize.width || dustSource.height !== fullSize.height) {
+  fail('dust detection used preview dimensions instead of full resolution');
 }
-console.log('ok: conversion finished, Step 3 reached');
+await wait(500);
+
+// クリア後も未修復の画素を使う。画像全体のハッシュで累積修復を検出する。
+await evaluate(`window.__dustSources = []; document.getElementById('dustClearMaskBtn').click()`);
+await waitFor('dust mask re-detection', `window.__dustSources.length > 0`, 30_000);
+const clearedSource = await evaluate(`window.__dustSources[0]`);
+if (clearedSource.hash !== dustSource.hash) fail('clear mask re-detected dust on an altered source');
+
+// 直接ブラシが変換Workerを呼び直さずに修復することを確認する。
+await evaluate(`(() => {
+  window.__brushConversions = 0;
+  window.__dustSources = [];
+  const post = Worker.prototype.postMessage;
+  Worker.prototype.postMessage = function (message, ...args) {
+    if (message?.type === 'convert') window.__brushConversions++;
+    return post.call(this, message, ...args);
+  };
+  document.getElementById('dustShowMask').click();
+  const canvas = document.getElementById('canvas');
+  const rect = canvas.getBoundingClientRect();
+  const options = { bubbles: true, clientX: rect.x + rect.width / 2,
+    clientY: rect.y + rect.height / 2, button: 0, altKey: true };
+  canvas.dispatchEvent(new MouseEvent('mousedown', options));
+  document.dispatchEvent(new MouseEvent('mouseup', options));
+})()`);
+await waitFor('dust brush inpaint', `window.__dustSources.length > 0`, 30_000);
+if (await evaluate(`window.__brushConversions !== 0`)) fail('dust brush reconverted the full image');
+if (await evaluate(`document.getElementById('dustStatus').textContent.startsWith('Error:')`)) {
+  fail('dust brush reported an error');
+}
+console.log(`ok: dust detection ${dustSource.width}x${dustSource.height}, clean-source reset, brush without reconversion`);
+// 後続の色調検証ではマスクの色を重ねない。
+await evaluate(`document.getElementById('dustShowMask').click()`);
 
 // ---- 4. the on-screen preview must have changed (negative -> positive) ----
 await wait(1500); // allow the final render to composite
@@ -242,9 +380,8 @@ if (Math.abs(meanAfter - meanBefore) < 8) {
 }
 
 // ---- 5. curve editor: drag the midtones up, preview must brighten/change ----
-// The default panel mode is the SP3000 console, which hides the detail
-// sections (including the curve editor) — switch to detail mode first.
-await evaluate(`document.getElementById('panelModeDetailBtn').click()`);
+// 調色タブの曲線を開く。旧パネルモードには依存しない。
+await evaluate(`document.getElementById('studioTab-edit').click(); document.getElementById('studioCurves').open = true; window.dispatchEvent(new Event('resize'));`);
 await wait(300);
 await evaluate(`(() => {
   const content = document.getElementById('additionalSectionContent');
@@ -289,10 +426,32 @@ if (Math.abs(meanCurved - meanAfter) < 3) {
 // switch file -> export ZIP (real download, verified with JSZip)
 // ============================================================
 
+// input→changeの通常順序でも、撤回・やり直しが元の選択値を保持する。
+const selectHistory = await evaluate(`(() => {
+  const select = document.getElementById('coreCurvePrecision');
+  const original = select.value;
+  const next = [...select.options].find(option => option.value !== original).value;
+  select.value = next;
+  select.dispatchEvent(new Event('input', { bubbles: true }));
+  select.dispatchEvent(new Event('change', { bubbles: true }));
+  document.getElementById('undoBtn').click();
+  const undone = select.value;
+  document.getElementById('redoBtn').click();
+  const redone = select.value;
+  document.getElementById('undoBtn').click();
+  return { original, next, undone, redone };
+})()`);
+if (selectHistory.original !== selectHistory.undone || selectHistory.next !== selectHistory.redone) {
+  fail('select undo/redo did not preserve pre-change state');
+}
+console.log('ok: select undo/redo restores both values');
+
 // Fresh app, two files through the real input
-await send('Page.navigate', { url: `http://127.0.0.1:${PORT}/` });
-await waitFor('app reboot', `!!document.getElementById('fileInput')`);
+await send('Page.navigate', { url: `http://127.0.0.1:${PORT}/?lang=en` });
+await waitFor('app reboot', `!!document.getElementById('studioImportAutoCrop')`);
+await installDialogAutoAccept();
 await wait(1500);
+await evaluate(`document.getElementById('studioImportAutoCrop').click()`);
 // Force the JSZip download fallback (the Firefox/Safari path):
 // showSaveFilePicker requires a real user gesture, which synthetic
 // clicks cannot provide.
@@ -308,14 +467,7 @@ await waitFor('batch file list',
    && document.querySelectorAll('.file-list-item').length === 2`, 90_000);
 console.log('ok: batch mode, 2 files listed');
 
-await waitFor('convert button (batch)', `(() => {
-  const b = document.getElementById('convertBtn');
-  return b && b.style.display !== 'none';
-})()`, 60_000);
-await evaluate(`document.getElementById('convertBtn').click()`);
-await waitFor('film settings (batch)',
-  `document.getElementById('filmSettingsSection').style.display !== 'none'`, 30_000);
-await evaluate(`document.getElementById('applyConvertBtn').click()`);
+await waitFor('batch automatic conversion', `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`,180000);
 await waitFor('Step 3 (batch)',
   `document.getElementById('statusBadge').classList.contains('step3')`, 180_000);
 console.log('ok: first file converted in batch mode');
@@ -384,6 +536,60 @@ for (const d of downloads) {
   if (d.size < 10_000) fail(`exported file ${d.name} is suspiciously small (${d.size} bytes)`);
 }
 console.log(`ok: batch export produced ${downloads.length} files: ${downloads.map((d) => `${d.name} (${Math.round(d.size / 1024)}kB)`).join(', ')}`);
+
+// 保存済み設定を持つ破損ファイルへ切り替えても、表示中の画像を変更しない。
+await wait(800);
+await evaluate(`(() => {
+  const originalCreate = document.createElement.bind(document);
+  document.createElement = function (tag, ...args) {
+    const element = originalCreate(tag, ...args);
+    if (tag === 'input') element.click = function () {
+      const transfer = new DataTransfer();
+      transfer.items.add(new File(['broken image'], 'broken.png', { type: 'image/png' }));
+      this.files = transfer.files;
+      this.dispatchEvent(new Event('change'));
+    };
+    return element;
+  };
+  try { document.getElementById('addMoreFilesBtn').click(); }
+  finally { document.createElement = originalCreate; }
+})()`);
+await evaluate(`document.getElementById('convertBtn').click()`);
+await waitFor('settings before failed-switch test', `document.getElementById('filmSettingsSection').style.display !== 'none'`);
+await evaluate(`document.getElementById('applyConvertBtn').click()`);
+await waitFor('conversion before failed-switch test', `document.getElementById('statusBadge').classList.contains('step3')`);
+await wait(1500);
+await evaluate(`document.getElementById('applyToSelectedBtn').click()`);
+await drainDialogs();
+await waitFor('third file with settings', `document.querySelectorAll('.file-list-settings-badge').length === 3`);
+// 原寸化は非同期。プレビュー→原寸の更新を「失敗した切替による破損」と誤認しない。
+const failureProbeSize = await evaluate(`(async () => {
+  const bitmap = await createImageBitmap(await (await fetch('/test-fixtures/negative-sample-2.jpg')).blob());
+  const size = [bitmap.width, bitmap.height]; bitmap.close(); return size;
+})()`);
+await waitFor('full-resolution canvas before failed switch', `document.getElementById('canvas').width === ${failureProbeSize[0]} && document.getElementById('canvas').height === ${failureProbeSize[1]}`, 30_000);
+const canvasFingerprint = `(() => {
+  const c = document.getElementById('canvas');
+  const data = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+  let hash = 2166136261;
+  for (const value of data) hash = Math.imul(hash ^ value, 16777619);
+  return [c.width, c.height, hash];
+})()`;
+const beforeFailure = await evaluate(canvasFingerprint);
+await evaluate(`document.querySelectorAll('.file-list-item')[2].click()`);
+await waitFor('failed file marked', `!!document.querySelectorAll('.file-list-item')[2]?.querySelector('.file-list-status.error')`);
+const restoredIndex = await evaluate(`[...document.querySelectorAll('.file-list-item')].findIndex(item => item.classList.contains('active'))`);
+const afterFailure = await evaluate(canvasFingerprint);
+if (restoredIndex !== 1 || JSON.stringify(beforeFailure) !== JSON.stringify(afterFailure)) {
+  fail('failed file switch changed the active image or queue index: ' + JSON.stringify({ beforeFailure, afterFailure, restoredIndex }));
+}
+console.log('ok: failed decode preserves the previous image and active file');
+}
+
+if (!process.argv.includes('--auto-crop-only') && !process.argv.includes('--color-analysis-only')) await runStudioSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, fixtures: [FIXTURE, FIXTURE2], root: ROOT });
+if (!process.argv.includes('--color-analysis-only')) await runStudioAutoCropSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
+await runStudioColorAnalysisSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
+await runWorkspaceUiSmoke({ send, evaluate, waitFor, fail, port: PORT, root: ROOT });
 
 // ---- no uncaught page errors across both scenarios ----
 const realErrors = pageErrors.filter((e) => !/ResizeObserver loop/.test(e));

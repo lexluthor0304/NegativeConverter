@@ -34,13 +34,29 @@ both). The provisioning profile is the same file as the local, gitignored
   existing `v*` tags; `set_tauri_version.mjs` writes it into
   `tauri.conf.json` / `Cargo.toml` as usual.
 - `set_mas_bundle_version.mjs` sets `CFBundleVersion` to
-  `(major*10000 + minor*100 + patch) * 100 + (run_attempt - 1)`
-  (e.g. `1.0.2` → `1000200`). Mac App Store build numbers must increase
+  `major*100000000 + minor*100000 + patch*100 + (run_attempt - 1)`
+  (e.g. `1.0.13` → `100001300`). Mac App Store build numbers must increase
   across **all** uploads, and the attempt digit lets a re-run re-upload the
-  same version after a failed submission.
+  same version after a failed submission. Three digits for patch keep
+  `1.0.100` below `1.1.0`; the script fails loudly if minor/patch exceed 999.
 - "What's New" is generated from `git log` between the previous tag and HEAD
   (capped at 3500 chars, fallback "Bug fixes and improvements."), applied to
   all locales.
+
+## ストア画像
+
+`fastlane/screenshots/en-US/` の 4 枚を新しい編集可能バージョンへアップロードし、
+古いスクリーンショットを置き換える。公開済みバージョンの画像は Apple の承認まで変わらない。
+アップロード前に `node scripts/check-appstore-screenshots.mjs` で全 4 枚の存在、
+2880×1800、RGB・透過なし、デコード可否を検証する。失敗時は提出を中止する。
+
+2026-09-06 の画像は L1009967.dng を実際の Studio で自動変換して撮影したもの。
+調色、CMYD／曲線、片基・変換、インポートを表示する。元 DNG はコミットしない。
+再撮影: `node scripts/appstore-screenshots.mjs`。まず `output/playwright/appstore/en-US/`
+で実画面を目視確認し、確認済み PNG だけを上記リリース用ディレクトリへコピーする。
+既存ストアのロケール en-US に合わせる。中国語・日本語 UI 自体は引き続き使用可能。
+
+仕様: https://developer.apple.com/help/app-store-connect/reference/app-information/screenshot-specifications/
 
 ## Renewals
 

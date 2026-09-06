@@ -25,17 +25,34 @@ roots.forEach(walk);
 const scriptsDir = dirname(fileURLToPath(import.meta.url));
 tests.push(join(scriptsDir, 'check-seo-heads.mjs'));
 tests.push(join(scriptsDir, 'check-pinned-versions.mjs'));
+tests.push(join(scriptsDir, 'check-vercel-config.mjs'));
+tests.push(join(scriptsDir, 'check-appstore-screenshots.mjs'));
+
+// A test that leaves an open handle would otherwise hang the whole suite.
+const TIMEOUT_MS = 120_000;
 
 let failed = 0;
+let timedOut = 0;
 for (const t of tests) {
-  const r = spawnSync(process.execPath, [t], { stdio: 'inherit' });
-  if (r.status !== 0) {
+  const started = Date.now();
+  const r = spawnSync(process.execPath, [t], {
+    stdio: 'inherit',
+    timeout: TIMEOUT_MS,
+    killSignal: 'SIGKILL',
+  });
+  const ms = Date.now() - started;
+  if (r.error?.code === 'ETIMEDOUT' || (r.status === null && r.signal === 'SIGKILL')) {
     failed += 1;
-    console.error(`FAIL ${t}`);
+    timedOut += 1;
+    console.error(`TIMEOUT ${t} (killed after ${TIMEOUT_MS / 1000}s)`);
+  } else if (r.status !== 0) {
+    failed += 1;
+    console.error(`FAIL ${t} (${ms}ms)`);
   } else {
-    console.log(`PASS ${t}`);
+    console.log(`PASS ${t} (${ms}ms)`);
   }
 }
 
-console.log(`\n${tests.length - failed}/${tests.length} test files passed`);
+console.log(`\n${tests.length - failed}/${tests.length} test files passed`
+  + (timedOut ? ` (${timedOut} timed out)` : ''));
 process.exit(failed ? 1 : 0);
