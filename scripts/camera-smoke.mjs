@@ -296,6 +296,20 @@ async function runLoupeScenario({ send, evaluate, waitFor, wait, fail, installDi
   })()`);
   const offered = await evaluate(`!document.getElementById('studioLoupe').hidden && !document.getElementById('studioLoupe').disabled`);
   if (!offered) fail('the loupe button should be offered when getUserMedia exists');
+  await evaluate(`(() => {
+    const open = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    navigator.mediaDevices.getUserMedia = async (...args) => {
+      const stream = await open(...args);
+      window.__delayedLoupeStream = stream;
+      await new Promise(resolve => { window.__finishLoupePermission = resolve; });
+      return stream;
+    };
+    window.__restoreLoupeCamera = () => { navigator.mediaDevices.getUserMedia = open; };
+    document.getElementById('studioLoupe').click();
+  })()`);
+  await waitFor('camera permission pending', `!!window.__finishLoupePermission`, 30_000);
+  await evaluate(`document.getElementById('loupeCloseBtn').click(); window.__finishLoupePermission(); window.__restoreLoupeCamera();`);
+  await waitFor('late camera stream released after close', `window.__delayedLoupeStream.getTracks().every(track => track.readyState === 'ended') && document.getElementById('loupeVideo').srcObject === null`, 10_000);
   await evaluate(`document.getElementById('studioLoupe').click()`);
   await waitFor('loupe converting frames', `Number(document.getElementById('loupeOverlay').dataset.frames) >= 5`, 30_000);
   const status = await evaluate(`document.getElementById('loupeStatus').textContent`);
@@ -309,7 +323,10 @@ async function runLoupeScenario({ send, evaluate, waitFor, wait, fail, installDi
   // tonal order is reversed, so luminance correlates negatively.
   const compare = await evaluate(`(() => {
     const video = document.getElementById('loupeVideo');
-    const canvas = document.getElementById('loupeCanvas');
+    const canvas = document.querySelector('#loupeOverlay .loupe-stage canvas');
+    const rect = canvas.getBoundingClientRect();
+    if (canvas.id !== 'liveLoupeCanvas' || rect.width < 100 || rect.height < 100 || getComputedStyle(canvas).visibility !== 'visible') throw new Error('Converted camera canvas must be visible in the live loupe');
+    if (document.getElementById('loupeCanvas').width !== 155) throw new Error('Camera rendering altered the sampling loupe');
     const raw = document.createElement('canvas'); raw.width = canvas.width; raw.height = canvas.height;
     raw.getContext('2d').drawImage(video, 0, 0, raw.width, raw.height);
     const lum = (ctx, w, h) => { const d = ctx.getImageData(0, 0, w, h).data; const out = []; for (let i = 0; i < d.length; i += 16) out.push(0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]); return out; };

@@ -13604,7 +13604,7 @@
     // Live loupe (camera scanning)
     // ===========================================
     const LOUPE_PREVIEW_SIDE = 640;
-    const liveLoupe = { stream: null, track: null, running: false, capturing: false, frames: 0, view: 'converted', surface: null };
+    const liveLoupe = { stream: null, track: null, running: false, capturing: false, frames: 0, view: 'converted', surface: null, generation: 0 };
 
     function loupeElement(id) {
       return document.getElementById(id);
@@ -13620,6 +13620,7 @@
     }
 
     function stopLoupeStream() {
+      liveLoupe.generation++;
       liveLoupe.running = false;
       if (liveLoupe.stream) for (const track of liveLoupe.stream.getTracks()) track.stop();
       liveLoupe.stream = null;
@@ -13674,7 +13675,7 @@
 
     async function loupeLoop() {
       const video = loupeElement('loupeVideo');
-      const canvas = loupeElement('loupeCanvas');
+      const canvas = loupeElement('liveLoupeCanvas');
       const overlay = loupeElement('loupeOverlay');
       const stream = liveLoupe.stream;
       while (liveLoupe.running && liveLoupe.stream === stream) {
@@ -13770,6 +13771,8 @@
         return;
       }
       stopLoupeStream();
+      const generation = liveLoupe.generation;
+      const isCurrent = () => liveLoupe.generation === generation && !overlay.hidden;
       overlay.hidden = false;
       overlay.dataset.view = liveLoupe.view;
       overlay.dataset.frames = '0';
@@ -13779,8 +13782,14 @@
         ? { deviceId: { exact: deviceId } }
         : { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } };
       try {
-        liveLoupe.stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
+        const stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
+        if (!isCurrent()) {
+          for (const track of stream.getTracks()) track.stop();
+          return;
+        }
+        liveLoupe.stream = stream;
       } catch (error) {
+        if (!isCurrent()) return;
         console.warn('Loupe camera failed:', error);
         const denied = error?.name === 'NotAllowedError' || error?.name === 'SecurityError';
         setLoupeStatus(getLocalizedText(denied ? 'loupeDenied' : 'loupeNoCamera', denied ? 'Camera access was denied.' : 'No camera available.'));
@@ -13794,7 +13803,9 @@
       } catch (error) {
         console.warn('Loupe video play failed:', error);
       }
+      if (!isCurrent()) return;
       await populateLoupeCameras();
+      if (!isCurrent()) return;
       configureLoupeTrackControls();
       liveLoupe.running = true;
       loupeElement('loupeCaptureBtn').disabled = false;
