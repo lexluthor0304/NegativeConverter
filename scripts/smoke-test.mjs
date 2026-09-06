@@ -15,6 +15,7 @@ import { runStudioSmoke } from './studio-smoke.mjs';
 import { runStudioAutoCropSmoke } from './studio-auto-crop-smoke.mjs';
 import { runStudioColorAnalysisSmoke } from './studio-color-analysis-smoke.mjs';
 import { runWorkspaceUiSmoke } from './workspace-ui-smoke.mjs';
+import { runStudioRawAutoFrameSmoke } from './studio-raw-autoframe-smoke.mjs';
 
 // UPNG is already a runtime dependency of the app; reuse it to decode screenshots.
 const UPNG = createRequire(import.meta.url)('upng-js');
@@ -292,9 +293,9 @@ const frameCheck = await evaluate(`(async () => {
   const summary = result => result && { angle: result.angle, cropRegion: result.cropRegion,
     confidence: result.confidence, diagnostics: result.diagnostics };
   return { equal: JSON.stringify(summary(expected)) === JSON.stringify(summary(actual)),
-    found: !!actual?.cropRegion, ticks: window.__frameTicks };
+    found: !!actual?.cropRegion, ticks: window.__frameTicks, expected: summary(expected), actual: summary(actual) };
 })()`);
-if (!frameCheck.equal || !frameCheck.found || frameCheck.ticks < 2) fail('auto-frame worker mismatch or blocked UI');
+if (!frameCheck.equal || !frameCheck.found || frameCheck.ticks < 2) fail('auto-frame worker mismatch or blocked UI: ' + JSON.stringify(frameCheck));
 await drainDialogs();
 await wait(500);
 console.log('ok: auto-frame worker matches main-thread analysis, UI heartbeat continued');
@@ -590,6 +591,7 @@ if (!process.argv.includes('--auto-crop-only') && !process.argv.includes('--colo
 if (!process.argv.includes('--color-analysis-only')) await runStudioAutoCropSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
 await runStudioColorAnalysisSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
 await runWorkspaceUiSmoke({ send, evaluate, waitFor, fail, port: PORT, root: ROOT });
+if (process.env.AUTOFRAME_RAW_DIR) await runStudioRawAutoFrameSmoke({ send, evaluate, waitFor, fail, port: PORT, root: ROOT, directory: process.env.AUTOFRAME_RAW_DIR });
 
 // ---- no uncaught page errors across both scenarios ----
 const realErrors = pageErrors.filter((e) => !/ResizeObserver loop/.test(e));
