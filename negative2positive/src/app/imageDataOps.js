@@ -55,6 +55,10 @@ export function downsampleImageDataForMaxDim(imageData, maxDim) {
   return step <= 1 ? imageData : downsampleImageDataByStep(imageData, step);
 }
 
+export function createImageCanvas() {
+  return typeof document === 'undefined' ? new OffscreenCanvas(1, 1) : document.createElement('canvas');
+}
+
 export function resizeImageDataToMaxSide(imageData, maxSide) {
   if (!imageData) return null;
   const longest = Math.max(imageData.width, imageData.height);
@@ -64,13 +68,13 @@ export function resizeImageDataToMaxSide(imageData, maxSide) {
   const targetW = Math.max(1, Math.round(imageData.width * scale));
   const targetH = Math.max(1, Math.round(imageData.height * scale));
 
-  const srcCanvas = document.createElement('canvas');
+  const srcCanvas = createImageCanvas();
   srcCanvas.width = imageData.width;
   srcCanvas.height = imageData.height;
   const srcCtx = srcCanvas.getContext('2d', { willReadFrequently: true });
   srcCtx.putImageData(imageData, 0, 0);
 
-  const dstCanvas = document.createElement('canvas');
+  const dstCanvas = createImageCanvas();
   dstCanvas.width = targetW;
   dstCanvas.height = targetH;
   const dstCtx = dstCanvas.getContext('2d', { willReadFrequently: true });

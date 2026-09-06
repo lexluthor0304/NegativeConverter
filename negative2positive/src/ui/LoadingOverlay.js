@@ -8,14 +8,12 @@
  */
 
 const REEL_SVG = `
-<svg class="loading-reel" viewBox="0 0 100 100" aria-hidden="true">
-  <circle cx="50" cy="50" r="46" class="reel-rim"/>
-  <circle cx="50" cy="50" r="38" class="reel-film"/>
-  <circle cx="50" cy="50" r="11" class="reel-hub"/>
-  <circle cx="50" cy="26.5" r="10" class="reel-cutout"/>
-  <circle cx="70.4" cy="61.7" r="10" class="reel-cutout"/>
-  <circle cx="29.6" cy="61.7" r="10" class="reel-cutout"/>
-  <rect x="47.6" y="45" width="4.8" height="10" rx="1.6" class="reel-key"/>
+<svg class="loading-reel" viewBox="0 0 32 32" shape-rendering="crispEdges" aria-hidden="true">
+  <path d="M10 2h12v2h4v4h4v4h1v8h-1v4h-4v4h-4v2H10v-2H6v-4H2v-4H1v-8h1V8h4V4h4Z" class="reel-rim"/>
+  <path d="M10 6h12v4h4v12h-4v4H10v-4H6V10h4Z" class="reel-film"/>
+  <rect x="12" y="12" width="8" height="8" class="reel-hub"/>
+  <path d="M14 6h4v4h-4ZM6 14h4v4H6Zm16 0h4v4h-4Zm-8 8h4v4h-4Z" class="reel-cutout"/>
+  <rect x="15" y="14" width="2" height="4" class="reel-key"/>
 </svg>`;
 
 export class LoadingOverlay {
@@ -26,6 +24,7 @@ export class LoadingOverlay {
     this._onCancelClick = null;
 
     this._overlay = null;
+    this._strip = null;
     this._fill = null;
     this._progressText = null;
     this._phaseText = null;
@@ -37,6 +36,12 @@ export class LoadingOverlay {
 
     this._overlay = document.createElement('div');
     this._overlay.className = 'loading-overlay';
+    // Announced as a busy status region rather than a dialog: it takes no
+    // input beyond the optional Cancel button, so trapping focus in it would
+    // strand the user when it hides itself.
+    this._overlay.setAttribute('role', 'status');
+    this._overlay.setAttribute('aria-live', 'polite');
+    this._overlay.setAttribute('aria-busy', 'true');
 
     const reelWrap = document.createElement('div');
     reelWrap.className = 'loading-reel-wrap';
@@ -45,6 +50,11 @@ export class LoadingOverlay {
 
     const strip = document.createElement('div');
     strip.className = 'loading-film-strip';
+    strip.setAttribute('role', 'progressbar');
+    strip.setAttribute('aria-valuemin', '0');
+    strip.setAttribute('aria-valuemax', '100');
+    strip.setAttribute('aria-valuenow', '0');
+    this._strip = strip;
     this._fill = document.createElement('div');
     this._fill.className = 'loading-film-fill';
     strip.appendChild(this._fill);
@@ -61,6 +71,7 @@ export class LoadingOverlay {
     this._overlay.appendChild(this._phaseText);
 
     this._cancelBtn = document.createElement('button');
+    this._cancelBtn.type = 'button';
     this._cancelBtn.className = 'loading-cancel-btn';
     this._cancelBtn.style.display = 'none';
     this._cancelBtn.textContent = 'Cancel';
@@ -90,6 +101,9 @@ export class LoadingOverlay {
     this._progressText.textContent = '0%';
     this._phaseText.textContent = title;
     this._fill.style.width = '0%';
+    this._strip.setAttribute('aria-valuenow', '0');
+    this._strip.setAttribute('aria-label', title || 'Processing');
+    this._overlay.setAttribute('aria-busy', 'true');
 
     this._cancelCallback = onCancel;
     this._cancelBtn.textContent = cancelText;
@@ -97,11 +111,14 @@ export class LoadingOverlay {
 
     this._visible = true;
     this._overlay.classList.add('visible');
+    this._overlay.classList.remove('indeterminate');
+    if (options.indeterminate) this.updateIndeterminate(title);
   }
 
   /** Hide the loading overlay. */
   hide() {
     this._visible = false;
+    this._overlay?.setAttribute('aria-busy', 'false');
     this._overlay?.classList.remove('visible');
   }
 
@@ -111,12 +128,25 @@ export class LoadingOverlay {
    * @param {string} [phaseText] - Optional phase description
    */
   updateProgress(percent, phaseText) {
+    this._overlay?.classList.remove('indeterminate');
     this._percent = Math.max(0, Math.min(100, percent));
     this._progressText.textContent = `${Math.round(this._percent)}%`;
     if (this._fill) this._fill.style.width = `${this._percent}%`;
+    if (this._strip) this._strip.setAttribute('aria-valuenow', String(Math.round(this._percent)));
     if (phaseText !== undefined) {
       this._phaseText.textContent = phaseText;
+      if (this._strip) this._strip.setAttribute('aria-label', phaseText || 'Processing');
     }
+  }
+
+  updateIndeterminate(phaseText) {
+    this._createDOM();
+    this._overlay.classList.add('indeterminate');
+    this._strip.removeAttribute('aria-valuenow');
+    this._strip.setAttribute('aria-label', phaseText || 'Processing');
+    this._progressText.textContent = '';
+    this._phaseText.textContent = phaseText || '';
+    this._fill.style.width = '35%';
   }
 
   /** Remove the overlay from the DOM. */
@@ -130,6 +160,7 @@ export class LoadingOverlay {
       this._overlay.parentNode.removeChild(this._overlay);
     }
     this._overlay = null;
+    this._strip = null;
     this._fill = null;
     this._progressText = null;
     this._phaseText = null;

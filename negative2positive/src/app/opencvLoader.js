@@ -3,7 +3,7 @@ function getOpenCvScriptBySource(src) {
     .find(script => script.dataset.opencvSource === src) || null;
 }
 
-function waitForScriptLoad(script, src) {
+function waitForScriptLoad(script, src, timeoutMs) {
   return new Promise((resolve, reject) => {
     const loadState = script.dataset.loadState;
     if (loadState === 'loaded') {
@@ -24,9 +24,18 @@ function waitForScriptLoad(script, src) {
       reject(new Error(`OpenCV script load failed: ${src}`));
     };
     const cleanup = () => {
+      window.clearTimeout(timer);
       script.removeEventListener('load', onLoad);
       script.removeEventListener('error', onError);
     };
+    const timer = window.setTimeout(() => {
+      cleanup();
+      script.dataset.loadState = 'failed';
+      script.onload = null;
+      script.onerror = null;
+      script.remove();
+      reject(new Error(`OpenCV script load timeout: ${src}`));
+    }, timeoutMs);
 
     script.addEventListener('load', onLoad);
     script.addEventListener('error', onError);
@@ -37,10 +46,16 @@ async function resolveThenableGlobal(timeoutMs) {
   // opencv-js 5.x UMD sets window.cv to a Promise that resolves to the
   // actual module once the wasm runtime is up. Await it and swap the real
   // module back into window.cv so all consumers keep reading window.cv.Mat.
-  const timeout = new Promise((_, reject) => {
-    window.setTimeout(() => reject(new Error('OpenCV runtime init timeout')), timeoutMs);
-  });
-  const module = await Promise.race([window.cv, timeout]);
+  let timer;
+  let module;
+  try {
+    const timeout = new Promise((_, reject) => {
+      timer = window.setTimeout(() => reject(new Error('OpenCV runtime init timeout')), timeoutMs);
+    });
+    module = await Promise.race([window.cv, timeout]);
+  } finally {
+    window.clearTimeout(timer);
+  }
   if (!module || !module.Mat) {
     throw new Error('OpenCV initialized without Mat API');
   }
@@ -91,7 +106,7 @@ function waitForOpenCvRuntime(timeoutMs = 15000) {
   });
 }
 
-export function createOpenCvLoader(sources) {
+export function createOpenCvLoader(sources, { scriptTimeoutMs = 20000, runtimeTimeoutMs = 15000 } = {}) {
   let readyPromise = null;
   let activeSource = null;
 
@@ -124,13 +139,13 @@ export function createOpenCvLoader(sources) {
       document.head.appendChild(script);
     }
 
-    await waitForScriptLoad(script, src);
+    await waitForScriptLoad(script, src, scriptTimeoutMs);
 
     if (!window.cv) {
       throw new Error(`OpenCV global unavailable after loading ${src}`);
     }
     if (!window.cv.Mat) {
-      await waitForOpenCvRuntime();
+      await waitForOpenCvRuntime(runtimeTimeoutMs);
     }
     if (!(window.cv && window.cv.Mat)) {
       throw new Error(`OpenCV runtime incomplete after loading ${src}`);
@@ -154,6 +169,14 @@ export function createOpenCvLoader(sources) {
           }
           return true;
         } catch (err) {
+          const failedScript = getOpenCvScriptBySource(src);
+          if (failedScript) {
+            failedScript.dataset.loadState = 'failed';
+            failedScript.onload = null;
+            failedScript.onerror = null;
+            failedScript.remove();
+          }
+          if (!window.cv?.Mat) window.cv = undefined;
           const message = err?.message || String(err);
           errors.push(`[${src}] ${message}`);
           console.warn('OpenCV source failed:', src, message);

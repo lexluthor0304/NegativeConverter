@@ -1,6 +1,6 @@
 [package]
 name = "negative-converter"
-version = "1.0.0"
+version = "1.0.12"
 description = "Film negative to positive converter"
 authors = ["neoanaloglab"]
 edition = "2021"

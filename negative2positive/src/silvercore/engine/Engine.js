@@ -36,7 +36,7 @@ export class Engine {
 
   /**
    * Load an enhanced profile 3D LUT.
-   * @param {string} name - Profile name ('none', 'frontier', 'crystal', 'natural', 'pakon')
+   * @param {string} name - Profile name; see PROFILES in EnhancedProfiles.js
    */
   async setEnhancedProfile(name) {
     if (name === 'none') {
@@ -55,11 +55,7 @@ export class Engine {
    * @returns {Image16} Processed positive image (16-bit RGBA)
    */
   process(imageData, params) {
-    // 1. Analyze the negative (histogram-based black/white/mean points)
-    this.channelData = analyzeImage(imageData, params)
-
-    // 2. Compute auto color correction
-    this.autoColor = computeAutoColor(this.channelData)
+    this.analyze(imageData, params)
 
     // 3. Build engine settings from UI params
     const settings = this.buildSettings(params)
@@ -73,11 +69,30 @@ export class Engine {
     return this._applyLuts(imageData, luts, params)
   }
 
+  // 撮影窓の統計だけを更新する。WB 用の正像標本が不要な調色では描画しない。
+  analyze(imageData, params) {
+    // 0. Pre-tone saturation, applied to the incoming negative before anything reads
+    //    it, so the histogram (and with it the auto white balance and the clip points)
+    //    sees the same pixels the curves will shape. Callers hand in a fresh working
+    //    buffer every time, so this never compounds across renders.
+    this._applyPreSaturation(imageData, params)
+
+    // 1. Analyze the negative (histogram-based black/white/mean points)
+    this.channelData = analyzeImage(imageData, params)
+
+    // 2. Compute auto color correction
+    this.autoColor = computeAutoColor(this.channelData)
+
+    this.lastLuts = null
+  }
+
   /**
    * Re-apply LUTs without re-analyzing (for slider changes).
    */
   reprocess(imageData, params) {
     if (!this.channelData) return this.process(imageData, params)
+
+    this._applyPreSaturation(imageData, params)
 
     const settings = this.buildSettings(params)
     this.lastSettings = settings
@@ -85,6 +100,28 @@ export class Engine {
     this.lastLuts = luts
 
     return this._applyLuts(imageData, luts, params)
+  }
+
+  // 同一設定で標本と出力画像を連続処理するときだけ使う。曲線を二重生成しない。
+  // 入力は未処理の独立バッファ。preSaturation をそれぞれ一度だけ適用する。
+  applyCurrentCurves(imageData, params) {
+    if (!this.lastLuts) return this.reprocess(imageData, params)
+    this._applyPreSaturation(imageData, params)
+    return this._applyLuts(imageData, this.lastLuts, params)
+  }
+
+  /**
+   * Pre-tone saturation (0-200, 100 = unchanged) on the input buffer. Because the
+   * negative is a linear inversion of the positive, scaling chroma around luma here is
+   * equivalent to scaling it on the positive — but it happens before the tone curves
+   * rather than after, so the curves and the histogram analysis both see it.
+   * The adapter treats preSaturation as an analysis input, so changing it re-runs
+   * process() rather than reprocess().
+   */
+  _applyPreSaturation(imageData, params) {
+    const preSaturation = params.preSaturation ?? 100
+    if (preSaturation === 100) return
+    adjustSaturation(imageData, preSaturation)
   }
 
   /**
@@ -121,7 +158,12 @@ export class Engine {
    * Map UI params to engine settings format.
    */
   buildSettings(params) {
-    const toneProfile = colorModelToToneProfile[params.colorModel] || 'standard'
+    // A film preset can name the tone profile outright (all 37 do). Without this the
+    // profile came from the colour model alone, so every preset ran on 'standard' —
+    // auto-tone on, contrast +10 — and none of the base_*/filmic_* designs applied.
+    const toneProfile = (params.toneProfile && toneProfiles[params.toneProfile])
+      ? params.toneProfile
+      : (colorModelToToneProfile[params.colorModel] || 'standard')
     const profileData = toneProfiles[toneProfile] || toneProfiles.standard
     const autoColor = this.autoColor || { tempCorrection: 0, tintCorrection: 0, cyanCorrection: 0 }
 
@@ -180,9 +222,11 @@ export class Engine {
       midTint: params.midTint || 0,
       midTemp: params.midTemp || 0,
       curvePrecision: params.curvePrecision || 'auto',
-      borderBuffer: params.borderBuffer || 10,
+      // `?? 10`, not `|| 10`: 0 is a legal Border Buffer (analyse the whole frame).
+      borderBuffer: params.borderBuffer ?? 10,
+      analysisRegion: params.analysisRegion || null,
       colorModel: params.colorModel || 'standard',
-      preSaturation: params.preSaturation || 100,
+      preSaturation: params.preSaturation ?? 100,
       saturation: params.saturation || 100,
       autoToneLevel,
       autoColorLevel,

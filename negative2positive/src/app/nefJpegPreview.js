@@ -7,8 +7,8 @@
 // locate them, we scan the buffer for the JPEG SOI marker pattern (0xFF 0xD8
 // 0xFF) and run each candidate through a SOF marker parser to get its real
 // width/height. The browser's native JPEG decoder (`createImageBitmap`) then
-// stops at EOI on its own, so we don't even need to find the JPEG end —
-// passing it everything from SOI to end-of-buffer works.
+// would stop at EOI on its own, but we locate the EOI anyway so the copy we
+// hand it is the preview and not the rest of the container.
 //
 // This eliminates the dependency on UTIF for this path. Container-level
 // IFD parsing is no longer needed for the simple "find largest embedded
@@ -52,8 +52,17 @@ export function readJpegDimensionsFromSOF(buffer, offset, length) {
     }
 
     // Start Of Frame markers (carry width/height).
-    // Range C0–CF, but C4 (DHT), C8 (JPG reserved), CC (DAC) are NOT frames.
-    if (marker >= 0xC0 && marker <= 0xCF && marker !== 0xC4 && marker !== 0xC8 && marker !== 0xCC) {
+    // Only SOF0/1/2 (baseline, extended sequential, progressive) at 8-bit
+    // precision are decodable by a browser. SOF3 and the 5-7/9-11/13-15 range
+    // are lossless/arithmetic frames — that is exactly how Canon CR2 and many
+    // DNGs store the raw mosaic, and picking one as "the largest preview"
+    // hands createImageBitmap a stream it can never decode.
+    // C4 (DHT), C8 (JPG reserved) and CC (DAC) are not frames at all and fall
+    // through to the generic segment skip below.
+    const isFrameMarker = marker >= 0xC0 && marker <= 0xCF
+      && marker !== 0xC4 && marker !== 0xC8 && marker !== 0xCC;
+    if (isFrameMarker) {
+      if (marker > 0xC2) return null;
       // Layout from marker byte: marker(1) + segLen(2) + precision(1) + height(2) + width(2) + numComponents(1)
       if (p + 8 >= bytes.length) return null;
       const segLen = (bytes[p + 1] << 8) | bytes[p + 2];
@@ -62,16 +71,16 @@ export function readJpegDimensionsFromSOF(buffer, offset, length) {
       const width = (bytes[p + 6] << 8) | bytes[p + 7];
       const numComponents = bytes[p + 8];
 
-      // Validate: precision must be 8 or 12, segment length must match
-      // number of components, dimensions must be plausible for a camera preview.
-      if (precision !== 8 && precision !== 12) continue;
-      if (segLen < 8) continue;
+      // Validate: 8-bit precision only, segment length must match the number
+      // of components, dimensions must be plausible for a camera preview.
+      if (precision !== 8) return null;
+      if (segLen < 8) return null;
       // Expected segLen = 8 + 3*numComponents (8 = marker+segLen+precision+h+w)
       // Allow some tolerance for different JPEG variants.
       const expectedSegLen = 8 + 3 * numComponents;
-      if (segLen !== expectedSegLen && segLen !== expectedSegLen + 1) continue;
-      if (width < MIN_PREVIEW_WIDTH || height < 300) continue;
-      if (width > 20000 || height > 20000) continue;
+      if (segLen !== expectedSegLen && segLen !== expectedSegLen + 1) return null;
+      if (width < MIN_PREVIEW_WIDTH || height < 300) return null;
+      if (width > 20000 || height > 20000) return null;
 
       return { w: width, h: height };
     }
@@ -94,8 +103,7 @@ export function readJpegDimensionsFromSOF(buffer, offset, length) {
  * "FF D8 FF" SOI-followed-by-marker pattern. Cheap O(n) scan, ~30 ms on a
  * 20 MB NEF.
  */
-function findJpegSoiPositions(arrayBuffer) {
-  const u8 = new Uint8Array(arrayBuffer);
+function findJpegSoiPositions(u8) {
   const positions = [];
   const limit = u8.length - 2;
   for (let i = 0; i < limit; i++) {
@@ -107,20 +115,70 @@ function findJpegSoiPositions(arrayBuffer) {
 }
 
 /**
+ * Byte offset just past the JPEG's EOI marker, starting from an SOI at
+ * `start`. Returns -1 when the stream has no reachable EOI.
+ *
+ * Inside entropy-coded data a 0xFF byte is always followed by 0x00 (a stuffed
+ * byte), a restart marker (D0–D7) or another 0xFF fill byte, so the first
+ * other marker really is a segment boundary — which is what lets us stop at
+ * the true end of a preview instead of copying the rest of the container.
+ *
+ * @param {Uint8Array} bytes
+ * @param {number} start offset of the SOI
+ * @returns {number} offset one past EOI, or -1
+ */
+export function findJpegEndOffset(bytes, start = 0) {
+  if (!bytes || start < 0 || start + 3 >= bytes.length) return -1;
+  if (bytes[start] !== 0xFF || bytes[start + 1] !== 0xD8) return -1;
+
+  const n = bytes.length;
+  let p = start + 2;
+  while (p + 1 < n) {
+    if (bytes[p] !== 0xFF) return -1;
+    let q = p + 1;
+    while (q < n && bytes[q] === 0xFF) q++;
+    if (q >= n) return -1;
+    const marker = bytes[q];
+    p = q + 1;
+
+    if (marker === 0xD9) return p;                                  // EOI
+    if (marker === 0x01 || (marker >= 0xD0 && marker <= 0xD7)) continue;
+    if (marker === 0xD8) continue;                                  // nested SOI
+
+    if (p + 1 >= n) return -1;
+    const segLen = (bytes[p] << 8) | bytes[p + 1];
+    if (segLen < 2) return -1;
+    p += segLen;
+
+    if (marker === 0xDA) {
+      // Skip the entropy-coded scan until the next real marker.
+      while (p + 1 < n) {
+        if (bytes[p] !== 0xFF) { p++; continue; }
+        const next = bytes[p + 1];
+        if (next === 0x00 || (next >= 0xD0 && next <= 0xD7)) { p += 2; continue; }
+        if (next === 0xFF) { p += 1; continue; }
+        break;
+      }
+    }
+  }
+  return -1;
+}
+
+/**
  * Find the embedded full-resolution JPEG preview inside a TIFF-based RAW
  * (NEF, IIQ, etc.) and return its starting bytes plus dimensions, without
  * decoding the JPEG. Pure synchronous parsing — usable from Node tests.
  *
- * `jpegBytes` is a Uint8Array view that starts at the JPEG's SOI and runs
- * to the end of the container; the browser JPEG decoder stops at EOI so
- * trailing container bytes are harmless.
+ * `jpegBytes` is a Uint8Array view that starts at the JPEG's SOI and ends at
+ * its EOI (or at the end of the container when no EOI can be found).
  *
  * @param {ArrayBuffer} arrayBuffer
  * @returns {{ jpegBytes: Uint8Array, width: number, height: number } | null}
  */
 export function extractNefPreviewJpeg(arrayBuffer) {
   if (!arrayBuffer || arrayBuffer.byteLength < 64) return null;
-  const positions = findJpegSoiPositions(arrayBuffer);
+  const u8 = new Uint8Array(arrayBuffer);
+  const positions = findJpegSoiPositions(u8);
   if (positions.length === 0) return null;
 
   let best = null;
@@ -137,7 +195,15 @@ export function extractNefPreviewJpeg(arrayBuffer) {
   }
   if (!best) return null;
 
-  const jpegBytes = new Uint8Array(arrayBuffer, best.offset, arrayBuffer.byteLength - best.offset);
+  // Copy only as far as the JPEG's own EOI. Nikon/Phase One put the full-size
+  // preview near the START of the container, so spanning to end-of-buffer
+  // pinned tens to hundreds of MB for the whole LibRaw decode.
+  const end = findJpegEndOffset(u8, best.offset);
+  const length = end > best.offset
+    ? end - best.offset
+    : arrayBuffer.byteLength - best.offset;
+
+  const jpegBytes = new Uint8Array(arrayBuffer, best.offset, length);
   return { jpegBytes, width: best.width, height: best.height };
 }
 

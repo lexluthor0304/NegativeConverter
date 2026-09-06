@@ -1,0 +1,110 @@
+/* 8-bit の輪郭と分節的な動き。写真の画素・色・描画方式は変更しない。 */
+body.studio { --pixel-shadow: 3px 3px 0 #0e0e0e; }
+body.studio :is(button, .upload-btn, select, .slider-number-input,
+  .footer-btn, .header-link-btn, .file-list-item, .studio-look-swatch,
+  .studio-menu-content, .studio-batch-content, .export-dropdown-menu,
+  .toast-message, .batch-progress-content, .batch-progress-bar,
+  .loading-film-strip, .loading-film-fill, .zoom-indicator) { border-radius: 0 !important; }
+body.studio :is(button, .upload-btn, summary, .header-link-btn) {
+  transition: background-color 120ms steps(2, end), color 120ms steps(2, end), transform 100ms steps(2, end);
+}
+body.studio :is(button, .upload-btn):active:not(:disabled) { transform: translate(1px, 1px); }
+body.studio .slider-input::-webkit-slider-thumb { border-radius: 0; box-shadow: 2px 2px 0 #111; }
+body.studio .slider-input::-moz-range-thumb { border-radius: 0; box-shadow: 2px 2px 0 #111; }
+body.studio .studio-header { border-bottom-width: 2px; }
+body.studio .studio-mark { color: var(--text-primary); }
+body.studio .studio-actions > button, body.studio #exportBtn {
+  border-width: 2px; box-shadow: var(--pixel-shadow);
+}
+body.studio .studio-tabs button[aria-selected="true"] { border-bottom-width: 3px; }
+body.studio .file-list-item.active { box-shadow: inset 0 0 0 1px var(--accent); }
+body.studio :is(.studio-menu-content, .studio-batch-content, .export-dropdown-menu) {
+  border-width: 2px; box-shadow: 5px 5px 0 #101010;
+}
+body.studio :is(.studio-menu-content, .studio-batch-content),
+body.studio .studio-drawer[open] > .studio-drawer-body {
+  animation: studio-pixel-enter 160ms steps(4, end) both;
+}
+
+/* 空の Canvas の既定幅 300px が導入欄を左へ押し出さないようにする。 */
+body.studio:not(.studio-loaded) :is(#canvasTransformWrapper, .studio-image-status) { display: none; }
+body.studio:not(.studio-loaded) .preview-section { padding: 0; }
+body.studio:not(.studio-loaded) .canvas-container {
+  background-color: var(--bg-canvas);
+  background-image: radial-gradient(#d6be9214 1px, transparent 1px);
+  background-size: 16px 16px;
+}
+body.studio .upload-placeholder {
+  flex: 0 1 680px;
+  width: 100%; max-width: 680px; min-width: 0;
+  margin-inline: auto; padding: 40px 24px;
+  text-align: center; gap: 16px;
+}
+body.studio .upload-placeholder > * { flex-shrink: 0; max-width: 100%; }
+body.studio .studio-welcome { width: 100%; margin: 0 0 16px; }
+body.studio .studio-welcome h1 {
+  margin: 28px 0 12px; color: var(--text-primary); text-wrap: balance;
+}
+body.studio .studio-welcome p { line-height: 1.8; }
+body.studio .studio-negative-icon {
+  position: relative; transform: none; padding: 14px 8px; gap: 6px;
+  border: 2px solid #8f8068; background: #302a22; box-shadow: 4px 4px 0 #0e0e0e;
+  animation: studio-pixel-enter 320ms steps(4, end) both;
+}
+body.studio .studio-negative-icon::before, body.studio .studio-negative-icon::after {
+  content: ''; position: absolute; left: 6px; right: 6px; height: 4px;
+  background: repeating-linear-gradient(90deg, #cfbb95 0 4px, transparent 4px 10px);
+}
+body.studio .studio-negative-icon::before { top: 4px; }
+body.studio .studio-negative-icon::after { bottom: 4px; }
+body.studio .studio-negative-icon span {
+  width: 32px; height: 40px; border: 2px solid #9f8d6e;
+  animation: studio-film-frame 4.8s steps(1, end) infinite;
+}
+body.studio .studio-negative-icon span:nth-child(2) { animation-delay: 1.6s; }
+body.studio .studio-negative-icon span:nth-child(3) { animation-delay: 3.2s; }
+body.studio .studio-import-actions { display: flex; justify-content: center; flex-wrap: wrap; gap: 12px; }
+body.studio .studio-import-actions .upload-btn {
+  min-height: 48px; min-width: 144px; border-width: 2px; margin: 0;
+  box-shadow: var(--pixel-shadow); cursor: pointer;
+}
+body.studio .studio-import-actions .upload-btn:hover { background: var(--accent-hover); color: #211d17; }
+body.studio .upload-placeholder .studio-import-hint { font-size: 12px; line-height: 1.8; color: var(--text-secondary); margin: 0; text-shadow: none; }
+body.studio .upload-placeholder .studio-formats { margin: 0; line-height: 1.8; text-shadow: none; }
+body.studio .upload-placeholder .studio-auto-crop {
+  margin-top: 8px; padding: 16px 0 0; border-top: 1px dashed var(--border-light);
+  line-height: 1.8; text-align: left; align-items: flex-start;
+}
+body.studio .upload-placeholder .studio-auto-crop input { flex-shrink: 0; margin-top: 4px; }
+body.studio .upload-placeholder .upload-privacy-note { margin: 0; line-height: 1.8; }
+body.studio .upload-placeholder .upload-privacy-note svg { filter: none; }
+
+/* ローディングはステップ回転と区切り付きの進捗。数値の進捗は従来どおり。 */
+body.studio .loading-overlay { background: #171717f2; backdrop-filter: none; transition-timing-function: steps(3, end); }
+body.studio .loading-reel { animation-timing-function: steps(8, end); }
+body.studio .loading-reel-wrap { width: 96px; height: 96px; filter: none; }
+body.studio .loading-reel .reel-rim { stroke: var(--accent); stroke-width: 1; }
+body.studio .loading-reel .reel-film { fill: #302a22; stroke: #8f8068; stroke-width: 1; }
+body.studio .loading-reel .reel-hub, body.studio .loading-reel .reel-cutout { fill: #171717; stroke: #8f8068; stroke-width: 1; }
+body.studio .loading-reel .reel-key { fill: var(--accent); }
+body.studio .loading-film-strip { border: 2px solid var(--border-light); box-shadow: var(--pixel-shadow); }
+body.studio .loading-film-fill {
+  background: repeating-linear-gradient(90deg, var(--accent) 0 8px, #302a22 8px 10px);
+  transition-timing-function: steps(8, end);
+}
+body.studio .loading-overlay.indeterminate .loading-film-fill { animation-timing-function: steps(8, end); }
+body.studio .toast-message { box-shadow: var(--pixel-shadow); transition-timing-function: steps(3, end); }
+@keyframes studio-pixel-enter { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes studio-film-frame { 0%, 32% { background-color: #b69b6d; } 33%, 100% { background-color: #6c5541; } }
+@media (max-width: 600px) {
+  body.studio .upload-placeholder { padding: 24px 16px; gap: 12px; }
+  body.studio .studio-welcome { margin-bottom: 8px; }
+  body.studio .studio-welcome h1 { margin-top: 24px; }
+  body.studio .studio-import-actions { width: 100%; gap: 10px; }
+  body.studio .studio-import-actions .upload-btn { min-width: 0; flex: 1 1 100px; padding: 12px 8px; }
+  body.studio .upload-placeholder .upload-privacy-note { max-width: 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  body.studio *, body.studio *::before, body.studio *::after { animation: none !important; scroll-behavior: auto !important; }
+  body.studio :is(button, .upload-btn):active:not(:disabled) { transform: none; }
+}

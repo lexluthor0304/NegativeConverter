@@ -4,9 +4,16 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+// Stamped into the bundle so the debug badge and the diagnostics dump identify
+// the build that is actually running, instead of a string edited by hand.
+const buildId = new Date().toISOString().replace(/[:.]/g, '-');
+
 export default defineConfig({
   root: __dirname,
   base: './',
+  define: {
+    __BUILD_ID__: JSON.stringify(buildId),
+  },
   server: {
     host: '127.0.0.1',
     port: 4173,

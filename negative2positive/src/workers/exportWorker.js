@@ -61,9 +61,17 @@ function handleApplyAdjustments(msg) {
   );
 }
 
+/**
+ * The bridge transfers either the 8-bit RGBA buffer or, when the conversion
+ * engine produced one, the genuine 16-bit RGBA plane. `sourceBits` says which.
+ */
+function viewSamples(buffer, sourceBits) {
+  return sourceBits === 16 ? new Uint16Array(buffer) : new Uint8ClampedArray(buffer);
+}
+
 function handleEncodePng16(msg) {
-  const { id, pixelData, width, height } = msg;
-  const data = new Uint8ClampedArray(pixelData);
+  const { id, pixelData, width, height, sourceBits } = msg;
+  const data = viewSamples(pixelData, sourceBits);
 
   self.postMessage({ type: 'progress', id, phase: 'encoding', percent: 10 });
 
@@ -74,8 +82,8 @@ function handleEncodePng16(msg) {
 }
 
 function handleEncodeTiff(msg) {
-  const { id, pixelData, width, height, bitDepth } = msg;
-  const data = new Uint8ClampedArray(pixelData);
+  const { id, pixelData, width, height, bitDepth, sourceBits } = msg;
+  const data = viewSamples(pixelData, sourceBits);
 
   self.postMessage({ type: 'progress', id, phase: 'encoding', percent: 10 });
 

@@ -38,3 +38,20 @@ assert.ok(Math.abs(pixels[1] - pixels[2]) <= 1);
 assert.equal(pixels[3], 65535);
 
 console.log('filmBaseCompensation.test.mjs passed');
+
+// 16-bit の全 65536 値・両方式・強度・キャッシュ切替で従来式と厳密一致する。
+for (const filmBase of [base, precise, { r16: 1, g16: 65535, b16: 30000 }]) {
+  for (const method of ['density', 'linear']) for (const strength of [0, .5, 1, 1.5]) {
+    const options = { method, strength };
+    const gains = computeFilmBaseGains(filmBase, options);
+    const input = new Uint16Array(262144 * 4);
+    for (let p = 0; p < 262144; p++) input.set([p & 65535, (65535 - p) & 65535, (p * 173) & 65535, p & 65535], p * 4);
+    const expected = input.slice();
+    for (let i = 0; i < expected.length; i += 4) for (const [c, gain] of [gains.r, gains.g, gains.b].entries()) {
+      expected[i + c] = Math.max(0, Math.min(65535, Math.round(expected[i + c] * gain)));
+    }
+    assert.deepEqual(applyFilmBaseCompensationToBuffer(input, filmBase, options), gains);
+    assert.deepEqual(input, expected);
+  }
+}
+console.log('filmBaseCompensation: 大画像 LUT と従来式の全階調一致を検証');

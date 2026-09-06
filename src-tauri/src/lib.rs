@@ -1,11 +1,15 @@
 use base64::Engine;
 use serde::Serialize;
+use std::collections::HashSet;
 #[cfg(target_os = "linux")]
 use std::io::ErrorKind;
-use std::path::PathBuf;
-#[cfg(target_os = "linux")]
-use std::path::Path;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
+use tauri::State;
+mod export_stream;
+use export_stream::ExportStreams;
 
 #[derive(Serialize)]
 struct SaveResult {
@@ -13,9 +17,64 @@ struct SaveResult {
     path: Option<String>,
 }
 
-#[tauri::command]
-fn get_app_version() -> String {
-    env!("CARGO_PKG_VERSION").to_string()
+/// Destinations the user picked in a native file dialog during this run.
+///
+/// The webview asks the backend to write bytes to a path it was handed
+/// earlier; without this list any script running in the webview could name an
+/// arbitrary path (`~/.zshrc`, a LaunchAgent plist) and have the backend
+/// write it. Granting only what the user chose in the powerbox also matches
+/// what the macOS App Store sandbox actually permits.
+#[derive(Default)]
+struct ExportGrants {
+    files: Mutex<HashSet<PathBuf>>,
+    directories: Mutex<HashSet<PathBuf>>,
+}
+
+impl ExportGrants {
+    fn grant_file(&self, path: &Path) {
+        if let Ok(mut files) = self.files.lock() {
+            files.insert(grant_key(path));
+        }
+    }
+
+    fn grant_directory(&self, path: &Path) {
+        if let Ok(mut directories) = self.directories.lock() {
+            directories.insert(grant_key(path));
+        }
+    }
+
+    fn allows_file(&self, path: &Path) -> bool {
+        let key = grant_key(path);
+        self.files
+            .lock()
+            .map(|files| files.contains(&key))
+            .unwrap_or(false)
+    }
+
+    fn allows_directory(&self, path: &Path) -> bool {
+        let key = grant_key(path);
+        self.directories
+            .lock()
+            .map(|directories| directories.contains(&key))
+            .unwrap_or(false)
+    }
+}
+
+/// A comparable form of a path: the file name kept as-is (the target may not
+/// exist yet) on top of the canonicalized parent, so `/a/./b/x.png` and
+/// `/a/b/x.png` are recognised as the same grant.
+fn grant_key(path: &Path) -> PathBuf {
+    if let Ok(canonical) = path.canonicalize() {
+        return canonical;
+    }
+
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => match parent.canonicalize() {
+            Ok(canonical_parent) => canonical_parent.join(name),
+            Err(_) => path.to_path_buf(),
+        },
+        _ => path.to_path_buf(),
+    }
 }
 
 fn normalize_export_path(mut path: PathBuf, suggested_name: &str) -> PathBuf {
@@ -33,15 +92,112 @@ fn normalize_export_path(mut path: PathBuf, suggested_name: &str) -> PathBuf {
     path
 }
 
+/// Reduces a name proposed by the webview to a single file name, so it can
+/// never walk out of the directory the user picked.
+fn sanitize_export_file_name(suggested_name: &str) -> String {
+    let candidate = Path::new(suggested_name.trim())
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("converted_negative");
+
+    // `Path::file_name` already strips `..` and the platform's own separator,
+    // but a Unix file name may legally contain `\` and `:`, which are
+    // separators elsewhere. Neutralise them so the same name is contained on
+    // every platform.
+    let sanitized = candidate.replace(['/', '\\', ':'], "_");
+    if sanitized.is_empty() {
+        return "converted_negative".to_string();
+    }
+    sanitized
+}
+
 fn decode_export_bytes(bytes_base64: &str) -> Result<Vec<u8>, String> {
     base64::engine::general_purpose::STANDARD
         .decode(bytes_base64)
         .map_err(|err| format!("decode base64 failed: {err}"))
 }
 
-fn write_export_bytes(path: &PathBuf, bytes_base64: &str) -> Result<SaveResult, String> {
-    let bytes = decode_export_bytes(bytes_base64)?;
-    std::fs::write(path, bytes).map_err(|err| format!("write file failed: {err}"))?;
+fn temp_export_path(parent: &Path, final_path: &Path, attempt: u32) -> PathBuf {
+    let name = final_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("export");
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or(0);
+    parent.join(format!(".{name}.{unique}-{attempt}.part"))
+}
+
+/// Writes to a sibling temporary file and renames it onto the target, so a
+/// failure part-way through leaves the previous file (or nothing) rather than
+/// a truncated export that the batch exporter would treat as finished.
+fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| "export path has no parent directory".to_string())?;
+
+    let mut last_error = "could not create a temporary file".to_string();
+    for attempt in 0..4 {
+        let temp_path = temp_export_path(parent, path, attempt);
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+        {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                last_error = format!("create temporary file failed: {err}");
+                continue;
+            }
+            Err(err) => {
+                // Anything else (most likely a sandbox denial on the chosen
+                // file's directory) will not improve with another name.
+                return Err(format!("create temporary file failed: {err}"));
+            }
+        };
+
+        let written = file.write_all(bytes).and_then(|()| file.sync_all());
+        drop(file);
+        if let Err(err) = written {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(format!("write file failed: {err}"));
+        }
+
+        if let Err(err) = std::fs::rename(&temp_path, path) {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(format!("rename temporary file failed: {err}"));
+        }
+
+        return Ok(());
+    }
+
+    Err(last_error)
+}
+
+/// Fallback for destinations where a sibling temporary file cannot be created
+/// — most importantly the macOS App Store sandbox, where the save panel grants
+/// access to the chosen file and not to its directory. A failed write deletes
+/// the half-written file instead of leaving it behind.
+fn write_directly(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut file = std::fs::File::create(path).map_err(|err| format!("write file failed: {err}"))?;
+    let written = file.write_all(bytes).and_then(|()| file.sync_all());
+    drop(file);
+    if let Err(err) = written {
+        let _ = std::fs::remove_file(path);
+        return Err(format!("write file failed: {err}"));
+    }
+    Ok(())
+}
+
+fn write_export_bytes(path: &Path, bytes: &[u8]) -> Result<SaveResult, String> {
+    if let Err(atomic_error) = write_atomically(path, bytes) {
+        eprintln!("[export] atomic write unavailable ({atomic_error}); writing in place.");
+        write_directly(path, bytes)?;
+    }
 
     Ok(SaveResult {
         saved: true,
@@ -49,13 +205,24 @@ fn write_export_bytes(path: &PathBuf, bytes_base64: &str) -> Result<SaveResult, 
     })
 }
 
-fn build_unique_export_path(directory: &PathBuf, suggested_name: &str) -> PathBuf {
-    let base_name = if suggested_name.trim().is_empty() {
-        "converted_negative"
-    } else {
-        suggested_name.trim()
-    };
-    let base_path = normalize_export_path(directory.join(base_name), base_name);
+/// Decodes and writes off the UI thread: a 16-bit TIFF of a 48 MP scan is a
+/// few hundred megabytes, and doing that on the native main thread freezes the
+/// window for the duration.
+async fn write_export_bytes_off_thread(
+    path: PathBuf,
+    bytes_base64: String,
+) -> Result<SaveResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let bytes = decode_export_bytes(&bytes_base64)?;
+        write_export_bytes(&path, &bytes)
+    })
+    .await
+    .map_err(|err| format!("export task failed: {err}"))?
+}
+
+fn build_unique_export_path(directory: &Path, suggested_name: &str) -> PathBuf {
+    let base_name = sanitize_export_file_name(suggested_name);
+    let base_path = normalize_export_path(directory.join(&base_name), &base_name);
     if !base_path.exists() {
         return base_path;
     }
@@ -86,26 +253,57 @@ fn build_unique_export_path(directory: &PathBuf, suggested_name: &str) -> PathBu
 }
 
 #[tauri::command]
-fn pick_export_file_path(suggested_name: String) -> Option<String> {
+fn get_app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+#[tauri::command]
+fn pick_export_file_path(grants: State<'_, ExportGrants>, suggested_name: String) -> Option<String> {
     let path = rfd::FileDialog::new()
         .set_file_name(&suggested_name)
         .save_file()?;
     let normalized = normalize_export_path(path, &suggested_name);
+    grants.grant_file(&normalized);
     Some(normalized.to_string_lossy().to_string())
 }
 
 #[tauri::command]
-fn pick_export_directory() -> Option<String> {
+fn pick_export_directory(grants: State<'_, ExportGrants>) -> Option<String> {
     let path = rfd::FileDialog::new().pick_folder()?;
+    grants.grant_directory(&path);
     Some(path.to_string_lossy().to_string())
 }
 
+/// Runs the save panel on the native main thread (AppKit/GTK require it) while
+/// the command itself stays off it, so the following write does not block the
+/// event loop.
+async fn pick_save_path_on_main_thread(
+    app: &tauri::AppHandle,
+    suggested_name: String,
+) -> Result<Option<PathBuf>, String> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    app.run_on_main_thread(move || {
+        let picked = rfd::FileDialog::new()
+            .set_file_name(&suggested_name)
+            .save_file();
+        // The receiver only disappears if the command was dropped.
+        let _ = sender.send(picked);
+    })
+    .map_err(|err| format!("failed to open the save dialog: {err}"))?;
+
+    tauri::async_runtime::spawn_blocking(move || receiver.recv().ok().flatten())
+        .await
+        .map_err(|err| format!("save dialog failed: {err}"))
+}
+
 #[tauri::command]
-fn save_export_file(suggested_name: String, bytes_base64: String) -> Result<SaveResult, String> {
-    let Some(path) = rfd::FileDialog::new()
-        .set_file_name(&suggested_name)
-        .save_file()
-    else {
+async fn save_export_file(
+    app: tauri::AppHandle,
+    grants: State<'_, ExportGrants>,
+    suggested_name: String,
+    bytes_base64: String,
+) -> Result<SaveResult, String> {
+    let Some(path) = pick_save_path_on_main_thread(&app, suggested_name.clone()).await? else {
         return Ok(SaveResult {
             saved: false,
             path: None,
@@ -113,21 +311,32 @@ fn save_export_file(suggested_name: String, bytes_base64: String) -> Result<Save
     };
 
     let normalized = normalize_export_path(path, &suggested_name);
-    write_export_bytes(&normalized, &bytes_base64)
+    grants.grant_file(&normalized);
+    write_export_bytes_off_thread(normalized, bytes_base64).await
 }
 
 #[tauri::command]
-fn write_export_file_to_path(path: String, bytes_base64: String) -> Result<SaveResult, String> {
+async fn write_export_file_to_path(
+    grants: State<'_, ExportGrants>,
+    path: String,
+    bytes_base64: String,
+) -> Result<SaveResult, String> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
         return Err("export path is empty".to_string());
     }
 
-    write_export_bytes(&PathBuf::from(trimmed), &bytes_base64)
+    let target = PathBuf::from(trimmed);
+    if !grants.allows_file(&target) {
+        return Err("export path was not chosen in a save dialog".to_string());
+    }
+
+    write_export_bytes_off_thread(target, bytes_base64).await
 }
 
 #[tauri::command]
-fn write_export_file_to_directory(
+async fn write_export_file_to_directory(
+    grants: State<'_, ExportGrants>,
     directory: String,
     suggested_name: String,
     bytes_base64: String,
@@ -141,9 +350,55 @@ fn write_export_file_to_directory(
     if !directory_path.is_dir() {
         return Err(format!("export directory is invalid: {trimmed}"));
     }
+    if !grants.allows_directory(&directory_path) {
+        return Err("export directory was not chosen in a folder dialog".to_string());
+    }
 
     let target_path = build_unique_export_path(&directory_path, &suggested_name);
-    write_export_bytes(&target_path, &bytes_base64)
+    write_export_bytes_off_thread(target_path, bytes_base64).await
+}
+
+#[tauri::command]
+fn begin_export_write(
+    grants: State<'_, ExportGrants>, streams: State<'_, ExportStreams>,
+    path: Option<String>, directory: Option<String>, suggested_name: Option<String>, expected_bytes: u64,
+) -> Result<String, String> {
+    let target = match (path, directory) {
+        (Some(path), None) => {
+            let target = PathBuf::from(path);
+            if !grants.allows_file(&target) { return Err("export path was not chosen in a save dialog".into()); }
+            target
+        }
+        (None, Some(directory)) => {
+            let directory = PathBuf::from(directory);
+            if !directory.is_dir() || !grants.allows_directory(&directory) {
+                return Err("export directory was not chosen in a folder dialog".into());
+            }
+            build_unique_export_path(&directory, &suggested_name.ok_or("missing export file name")?)
+        }
+        _ => return Err("choose one export destination".into()),
+    };
+    streams.begin(&target, expected_bytes)
+}
+
+#[tauri::command]
+async fn append_export_chunk(request: tauri::ipc::Request<'_>, streams: State<'_, ExportStreams>) -> Result<(), String> {
+    let id = request.headers().get("x-export-id").and_then(|value| value.to_str().ok()).ok_or("missing export id")?;
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err("expected binary export chunk".into()); };
+    streams.append(id, bytes)
+}
+
+#[tauri::command]
+async fn finish_export_write(streams: State<'_, ExportStreams>, id: String) -> Result<SaveResult, String> {
+    let pending = streams.take(&id)?;
+    let path = tauri::async_runtime::spawn_blocking(move || pending.finish()).await
+        .map_err(|err| format!("export task failed: {err}"))??;
+    Ok(SaveResult { saved: true, path: Some(path.to_string_lossy().into_owned()) })
+}
+
+#[tauri::command]
+fn abort_export_write(streams: State<'_, ExportStreams>, id: String) {
+    if let Ok(pending) = streams.take(&id) { drop(pending); }
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -499,32 +754,109 @@ fn apply_linux_appimage_compat_env() {
 #[cfg(not(target_os = "linux"))]
 fn apply_linux_appimage_compat_env() {}
 
+const MAX_EXTERNAL_URL_LEN: usize = 2048;
+
+fn strip_https_prefix(value: &str) -> Option<&str> {
+    const PREFIX: &str = "https://";
+    if value.len() < PREFIX.len() {
+        return None;
+    }
+    let (head, rest) = value.split_at(PREFIX.len());
+    head.eq_ignore_ascii_case(PREFIX).then_some(rest)
+}
+
+fn is_allowed_authority(authority: &str) -> bool {
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (authority, None),
+    };
+
+    if let Some(port) = port {
+        if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
+            return false;
+        }
+    }
+
+    if host.is_empty()
+        || host.len() > 253
+        || host.starts_with('.')
+        || host.ends_with('.')
+        || host.contains("..")
+    {
+        return false;
+    }
+
+    // No userinfo (`https://trusted.example@attacker.example`), no escapes, no
+    // IPv6 literals — the app only ever opens ordinary registered domains.
+    host.bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'.')
+}
+
+/// Every outbound desktop link goes through `open_external_url`, so the string
+/// arriving here is attacker-influenced as soon as anything can inject script
+/// into the webview. The page always hands over the output of `URL.toString()`,
+/// which is percent-encoded printable ASCII; anything else is rejected.
+fn sanitize_external_url(url: &str) -> Result<&str, String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err("URL is empty".to_string());
+    }
+    if trimmed.len() > MAX_EXTERNAL_URL_LEN {
+        return Err("URL is too long".to_string());
+    }
+    if trimmed
+        .bytes()
+        .any(|byte| !(0x21..=0x7e).contains(&byte))
+    {
+        // Control characters, spaces and non-ASCII bytes never survive URL
+        // serialization, and they are what argument-splitting tricks rely on.
+        return Err("URL contains characters that are not allowed".to_string());
+    }
+
+    let Some(rest) = strip_https_prefix(trimmed) else {
+        return Err("only https URLs are allowed".to_string());
+    };
+
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    if !is_allowed_authority(&rest[..authority_end]) {
+        return Err("URL host is not allowed".to_string());
+    }
+
+    Ok(trimmed)
+}
+
+/// Spawns the opener and reaps it on a helper thread; `spawn` alone leaves a
+/// zombie entry for every link the user clicks until the app quits.
+fn spawn_and_reap(command: &mut Command) -> Result<(), String> {
+    let mut child = command
+        .spawn()
+        .map_err(|err| format!("failed to launch browser: {err}"))?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
 fn open_url_with_system_browser(url: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        Command::new("open")
-            .arg(url)
-            .spawn()
-            .map_err(|err| format!("failed to launch browser: {err}"))?;
-        return Ok(());
+        return spawn_and_reap(Command::new("open").arg(url));
     }
 
     #[cfg(target_os = "windows")]
     {
-        Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .spawn()
-            .map_err(|err| format!("failed to launch browser: {err}"))?;
-        return Ok(());
+        // Never `cmd /C start`: cmd.exe would treat `&`, `|`, `^` and `%VAR%`
+        // inside the URL as shell syntax. rundll32 receives the URL as a plain
+        // CreateProcess argument and hands it to the registered protocol
+        // handler without a shell in between.
+        return spawn_and_reap(
+            Command::new("rundll32.exe").args(["url.dll,FileProtocolHandler", url]),
+        );
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        Command::new("xdg-open")
-            .arg(url)
-            .spawn()
-            .map_err(|err| format!("failed to launch browser: {err}"))?;
-        return Ok(());
+        return spawn_and_reap(Command::new("xdg-open").arg(url));
     }
 
     #[allow(unreachable_code)]
@@ -533,18 +865,21 @@ fn open_url_with_system_browser(url: &str) -> Result<(), String> {
 
 #[tauri::command]
 fn open_external_url(url: String) -> Result<(), String> {
-    let trimmed = url.trim();
-    if !trimmed.to_ascii_lowercase().starts_with("https://") {
-        return Err("only https URLs are allowed".to_string());
-    }
-    open_url_with_system_browser(trimmed)
+    let sanitized = sanitize_external_url(&url)?;
+    open_url_with_system_browser(sanitized)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     apply_linux_appimage_compat_env();
     tauri::Builder::default()
+        .manage(ExportGrants::default())
+        .manage(ExportStreams::default())
         .invoke_handler(tauri::generate_handler![
+            begin_export_write,
+            append_export_chunk,
+            finish_export_write,
+            abort_export_write,
             save_export_file,
             pick_export_file_path,
             pick_export_directory,
@@ -560,11 +895,22 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        decide_dmabuf_policy, looks_like_legacy_appimage_name, normalize_export_path,
-        parse_bool_flag, AppImageVariant, DmabufDecision, DmabufDisableReason,
-        DmabufKeepReason, DmabufProbeKind,
+        build_unique_export_path, decide_dmabuf_policy, looks_like_legacy_appimage_name,
+        normalize_export_path, parse_bool_flag, sanitize_export_file_name, sanitize_external_url,
+        write_export_bytes, AppImageVariant, DmabufDecision, DmabufDisableReason, DmabufKeepReason,
+        DmabufProbeKind, ExportGrants,
     };
     use std::path::PathBuf;
+
+    fn scratch_dir(label: &str) -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|value| value.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("negative-converter-test-{label}-{unique}"));
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
 
     #[test]
     fn parse_bool_flag_accepts_truthy_values() {
@@ -678,5 +1024,159 @@ mod tests {
             denied,
             DmabufDecision::Disable(DmabufDisableReason::PermissionDenied)
         );
+    }
+
+    #[test]
+    fn sanitize_external_url_accepts_the_urls_the_app_opens() {
+        assert_eq!(
+            sanitize_external_url("https://negative-converter.tokugai.com/download.html?lang=en&from=desktop-update"),
+            Ok("https://negative-converter.tokugai.com/download.html?lang=en&from=desktop-update")
+        );
+        assert_eq!(
+            sanitize_external_url("  https://apps.apple.com/app/id6797694070  "),
+            Ok("https://apps.apple.com/app/id6797694070")
+        );
+        // The scheme check has always been case-insensitive; keep it that way.
+        assert_eq!(
+            sanitize_external_url("HTTPS://github.com/lexluthor0304/NegativeConverter"),
+            Ok("HTTPS://github.com/lexluthor0304/NegativeConverter")
+        );
+    }
+
+    #[test]
+    fn sanitize_external_url_rejects_non_https_schemes() {
+        for url in [
+            "http://negative-converter.tokugai.com/",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "ftp://example.com/",
+            "",
+            "   ",
+            "https://",
+        ] {
+            assert!(
+                sanitize_external_url(url).is_err(),
+                "expected {url:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_external_url_rejects_argument_splitting_and_userinfo() {
+        for url in [
+            // Whitespace and control characters never survive URL serialization.
+            "https://example.com/a b",
+            "https://example.com/a\tb",
+            "https://example.com/a\nb",
+            "https://exa mple.com/",
+            "https://example.com/\u{0}",
+            // Credentials in the authority are a phishing shape, never used here.
+            "https://negative-converter.tokugai.com@attacker.example/",
+            // Non-ASCII must arrive percent-encoded.
+            "https://exämple.com/",
+        ] {
+            assert!(
+                sanitize_external_url(url).is_err(),
+                "expected {url:?} to be rejected"
+            );
+        }
+
+        let too_long = format!("https://example.com/{}", "a".repeat(4096));
+        assert!(sanitize_external_url(&too_long).is_err());
+    }
+
+    #[test]
+    fn sanitize_external_url_allows_ampersands_in_the_query() {
+        // `&` is legitimate in a query string; safety comes from never handing
+        // the URL to a shell, not from banning shell metacharacters.
+        let url = "https://negative-converter.tokugai.com/download.html?a=1&b=2%20c";
+        assert_eq!(sanitize_external_url(url), Ok(url));
+        // ...but the same characters in the host are still refused.
+        assert!(sanitize_external_url("https://exa&mple.com/").is_err());
+    }
+
+    #[test]
+    fn sanitize_export_file_name_keeps_only_the_file_name() {
+        assert_eq!(sanitize_export_file_name("scan_001.tif"), "scan_001.tif");
+        assert_eq!(
+            sanitize_export_file_name("../../../.zshrc"),
+            ".zshrc"
+        );
+        assert_eq!(sanitize_export_file_name("/etc/passwd"), "passwd");
+        assert_eq!(sanitize_export_file_name(".."), "converted_negative");
+        assert_eq!(sanitize_export_file_name(""), "converted_negative");
+        assert_eq!(sanitize_export_file_name("   "), "converted_negative");
+        // Whatever the platform makes of these, the result is always a single
+        // path component with no separator left in it.
+        for name in ["a\\b.png", "C:evil.png", "../..\\x/y.png", "..\\..\\.zshrc"] {
+            let sanitized = sanitize_export_file_name(name);
+            assert!(
+                !sanitized.contains(['/', '\\', ':']),
+                "{name:?} produced {sanitized:?}"
+            );
+            assert_eq!(
+                PathBuf::from(&sanitized).components().count(),
+                1,
+                "{name:?} produced {sanitized:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_unique_export_path_stays_inside_the_chosen_directory() {
+        let dir = scratch_dir("unique-path");
+        let escaped = build_unique_export_path(&dir, "../../escaped.png");
+        assert_eq!(escaped, dir.join("escaped.png"));
+
+        std::fs::write(dir.join("scan.png"), b"first").expect("seed file");
+        let second = build_unique_export_path(&dir, "scan.png");
+        assert_eq!(second, dir.join("scan_1.png"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn write_export_bytes_replaces_the_target_and_leaves_no_temporary_file() {
+        let dir = scratch_dir("atomic-write");
+        let target = dir.join("export.png");
+        std::fs::write(&target, b"stale contents that must be replaced").expect("seed file");
+
+        let result = write_export_bytes(&target, b"new").expect("write succeeds");
+        assert!(result.saved);
+        assert_eq!(std::fs::read(&target).expect("read back"), b"new");
+
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .expect("list dir")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name != "export.png")
+            .collect();
+        assert!(leftovers.is_empty(), "unexpected leftovers: {leftovers:?}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn export_grants_only_allow_paths_that_came_from_a_dialog() {
+        let dir = scratch_dir("grants");
+        let picked = dir.join("chosen.png");
+        let grants = ExportGrants::default();
+
+        assert!(!grants.allows_file(&picked));
+        assert!(!grants.allows_directory(&dir));
+
+        grants.grant_file(&picked);
+        grants.grant_directory(&dir);
+
+        assert!(grants.allows_file(&picked));
+        assert!(grants.allows_directory(&dir));
+        // The same destination spelled differently is still the same grant.
+        assert!(grants.allows_file(&dir.join(".").join("chosen.png")));
+        // Anything else the webview could name is refused.
+        assert!(!grants.allows_file(&dir.join("not-chosen.png")));
+        assert!(!grants.allows_file(&PathBuf::from("/etc/passwd")));
+        assert!(!grants.allows_directory(&dir.join("subdir")));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

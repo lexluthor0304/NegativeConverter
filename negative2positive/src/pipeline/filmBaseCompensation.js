@@ -1,4 +1,6 @@
 const PIXEL_MAX_16 = 65535;
+// 一組だけ保持し、写真枚数に比例したメモリー増加を防ぐ（384 KiB）。
+let gainLuts = null;
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -69,6 +71,27 @@ export function computeFilmBaseGains(base, options = {}) {
 export function applyFilmBaseCompensationToBuffer(data, base, options = {}) {
   const gains = computeFilmBaseGains(base, options);
   if (!gains) return null;
+
+  // 大きな 16-bit 画像は同じ整数値の丸め・乗算を繰り返さず、完全一致の表を参照する。
+  // 小さな標本と他の配列型は従来経路のままにして、表の構築コストを避ける。
+  if (data instanceof Uint16Array && data.length >= 4 * 262144) {
+    if (!gainLuts || gainLuts.rGain !== gains.r || gainLuts.gGain !== gains.g || gainLuts.bGain !== gains.b) {
+      const r = new Uint16Array(65536), g = new Uint16Array(65536), b = new Uint16Array(65536);
+      for (let v = 0; v <= PIXEL_MAX_16; v++) {
+        r[v] = clamp(Math.round(v * gains.r), 0, PIXEL_MAX_16);
+        g[v] = clamp(Math.round(v * gains.g), 0, PIXEL_MAX_16);
+        b[v] = clamp(Math.round(v * gains.b), 0, PIXEL_MAX_16);
+      }
+      gainLuts = { r, g, b, rGain: gains.r, gGain: gains.g, bGain: gains.b };
+    }
+    const { r, g, b } = gainLuts;
+    for (let i = 0; i < data.length; i += 4) {
+      data[i] = r[data[i]];
+      data[i + 1] = g[data[i + 1]];
+      data[i + 2] = b[data[i + 2]];
+    }
+    return gains;
+  }
 
   for (let i = 0; i < data.length; i += 4) {
     data[i] = clamp(Math.round(data[i] * gains.r), 0, PIXEL_MAX_16);

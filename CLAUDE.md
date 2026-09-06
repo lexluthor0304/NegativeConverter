@@ -25,19 +25,35 @@ Build web assets:
 npm run build:web
 ```
 
-Run tests (standalone Node assert scripts, colocated as `*.test.mjs`, plus an
-SEO-head consistency check over the static pages):
+Run tests (standalone Node assert scripts, colocated as `*.test.mjs`, plus
+repo-wide consistency checks: SEO heads and FAQ structured data over the static
+pages, pinned dependency versions, and the two Vercel header configs):
 ```bash
 npm test
 ```
 
-End-to-end smoke test (drives the real app in headless Chrome via CDP: loads
-`negative2positive/test-fixtures/negative-sample.jpg`, converts it through
-Step 3, asserts canvas pixels changed and no page errors). Run this after any
-change to `main.js`, the pipeline, or the app shell:
+Rust unit tests for the desktop layer (URL validation, export path grants):
+```bash
+npm run test:rust
+```
+
+実際の Chrome / CDP で唯一の Studio 画面に画像を読み込み、自動変換・除塵・曲線・
+履歴・一括書き出し・裁切時の色解析・ピクセル字体を検証する。
+`main.js`、パイプライン、画面構成を変更したら実行する:
 ```bash
 npm run test:smoke
 ```
+
+CI (`.github/workflows/desktop-ci.yml`) runs all three on every pull request
+before the four-platform Tauri build.
+
+When several agents or worktrees edit `negative2positive/` at once, the smoke
+test cannot be trusted: the Vite dev server hot-reloads mid-run and it fails on
+someone else's half-written file. Run it from an isolated `git worktree` with
+its own `PORT`/`CDP_PORT` instead.
+
+Known issues that were reviewed but not fixed are queued in
+`docs/audit-backlog.md`; delete an entry when it is done.
 
 Live demo: https://negative-converter.tokugai.com
 
@@ -69,14 +85,25 @@ src-tauri/                      # Tauri desktop packaging
 - **UPNG.js** (npm: `upng-js`) for 16-bit PNG support
 - **UTIF.js** (npm: `utif`) for TIFF/DNG parsing (iPhone ProRaw)
 - **OpenCV.js** (npm: `@techstark/opencv-js`) for automatic border detection / auto crop / auto rotation
-- **Fonts** bundled via `@fontsource/*` (Inter, Orbitron, Share Tech Mono) — no CDN, offline-safe for Tauri
+- **Fonts**: Fusion Pixel 12px proportional を `public/fonts/fusion-pixel/` にライセンスとともに同梱。英字・CJK 対応、CDN 不要、Tauri オフライン対応。
 
 ### UI Theme
-The app uses a 1980s American retro (synthwave/darkroom) theme. All design tokens live
-in `:root` of `negative2positive/src/styles/app.css`: violet-navy surfaces, magenta
-`--accent` for interactive states, cyan `--info` for guidance, gold `--warning`,
-`--font-display` (Orbitron) for structural labels, `--font-mono` (Share Tech Mono) for
-numeric/OSD readouts. Keep magenta for actions and cyan for information when adding UI.
+Studio が唯一の画面。旧 `workspace=classic` パラメーターも同じ画面を開く。
+`negative2positive/src/styles/studio.css` の中立的なダークグレーと暖色アクセントを使う。
+`pixel-fonts.css` で英字・CJK のピクセル字体を指定し、基本 12px、見出し 24px / 36px とする。
+`studio-pixel.css` は方角の部品と `steps()` の 8-bit 動作を担当。写真の描画にピクセル化を適用しない。
+旧ヘッダー・フッター・段階ガイド・表示モード切替の DOM は削除済み。再導入しない。
+空状態の `canvasTransformWrapper` はレイアウトから外し、アップロード欄を押し出さない。
+ブランド名は NeoAnalogLab。既存の共用コントロール・画像処理・履歴・一括処理を再利用し、旧画面への分岐を追加しない。
+
+### Geometry Chain
+Transforms compose in one fixed order, and every path that rebuilds an image
+must follow it: **base → rotation → mirror → crop**. `state.rotationAngle` is
+measured on the unmirrored base, so an angle the user applies to a mirrored view
+is stored negated (`storedRotationDelta` in `main.js`) — mirroring reverses the
+sense of rotation. `state.cropRegion` is relative to the post-mirror
+`originalImageData`. `rebuildGeometryFromBase()` is the reference
+implementation; `restoreSettings` and the batch export path reproduce it.
 
 ### Rendering Strategy
 The app keeps dual-path rendering behavior:

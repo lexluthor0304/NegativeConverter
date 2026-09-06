@@ -1,14 +1,6 @@
 import { resizeImageDataToMaxSide } from './imageDataOps.js';
-
-const DEFAULT_FORMAT_RATIOS = {
-  '135': 1.5,
-  '120-6x4.5': 1.33,
-  '120-6x6': 1,
-  '120-6x7': 1.17,
-  '120-6x9': 1.5
-};
-
-const DEFAULT_120_FORMATS = ['6x4.5', '6x6', '6x7', '6x9'];
+import { AUTO_FRAME_FORMAT_RATIOS as DEFAULT_FORMAT_RATIOS, AUTO_FRAME_DEFAULT_120_FORMATS as DEFAULT_120_FORMATS } from './autoFrameFormats.js';
+import { detectImageWindow, projectWindowCrop } from './imageWindowDetector.js';
 
 const DEFAULT_SCORE_WEIGHTS = {
   area: 0.18,
@@ -101,12 +93,16 @@ export function getAutoFrameAspectTargets(context) {
     targets.push({ key, ratio, weight: clampBetween(weight, 0.4, 1.2) });
   };
 
-  if (pref === '135') {
-    addTarget('135', 1);
+  if (pref === '135-standard') {
+    addTarget('135');
+  } else if (pref === '135') {
+    Object.keys(formatRatios).filter(key => key === '135' || key.startsWith('135-')).forEach(key => addTarget(key));
   } else if (pref === '120') {
     safe120.forEach(fmt => addTarget(`120-${fmt}`, 1));
+  } else if (Object.hasOwn(formatRatios, pref)) {
+    addTarget(pref);
   } else {
-    addTarget('135', 1);
+    Object.keys(formatRatios).filter(key => key === '135' || key.startsWith('135-')).forEach(key => addTarget(key));
     safe120.forEach(fmt => addTarget(`120-${fmt}`, 1));
   }
   return targets.length ? targets : [{ key: '135', ratio: 1.5, weight: 1 }];
@@ -667,7 +663,7 @@ function buildDensityTemplateCandidates(imageData, context) {
         });
       });
 
-      if (target.key === '135') {
+      if (target.key === '135' || target.key.startsWith('135-')) {
         const shortRatios = [0.46, 0.52, 0.58, 0.64, 0.70, 0.76];
         shortRatios.forEach((shortRatio) => {
           const landscape = !orientation.portrait;
@@ -769,11 +765,11 @@ function scoreFrameCandidate(candidate, context) {
 }
 
 function buildHoughCandidate(edges, imageWidth, imageHeight) {
-  if (!window.cv.HoughLinesP) return null;
-  const lines = new window.cv.Mat();
+  if (!globalThis.cv.HoughLinesP) return null;
+  const lines = new globalThis.cv.Mat();
   try {
     const minDim = Math.min(imageWidth, imageHeight);
-    window.cv.HoughLinesP(
+    globalThis.cv.HoughLinesP(
       edges,
       lines,
       1,
@@ -859,12 +855,12 @@ function buildHoughCandidate(edges, imageWidth, imageHeight) {
 }
 
 function detectFrameCandidatesWithCv(imageData, context, options = {}) {
-  if (!(window.cv && window.cv.Mat) || !imageData) return [];
+  if (!(globalThis.cv && globalThis.cv.Mat) || !imageData) return [];
 
   const minAreaRatio = Number.isFinite(options.minAreaRatio) ? options.minAreaRatio : 0.05;
-  const retrievalMode = options.retrievalMode === 'external' ? window.cv.RETR_EXTERNAL : window.cv.RETR_LIST;
+  const retrievalMode = options.retrievalMode === 'external' ? globalThis.cv.RETR_EXTERNAL : globalThis.cv.RETR_LIST;
   const aspectTargets = getAutoFrameAspectTargets(context);
-  const src = window.cv.matFromImageData(imageData);
+  const src = globalThis.cv.matFromImageData(imageData);
   const imageWidth = src.cols;
   const imageHeight = src.rows;
   const imageArea = Math.max(1, imageWidth * imageHeight);
@@ -882,26 +878,26 @@ function detectFrameCandidatesWithCv(imageData, context, options = {}) {
   let hierarchy = null;
 
   try {
-    gray = new window.cv.Mat();
-    claheEnhanced = new window.cv.Mat();
-    topHat = new window.cv.Mat();
-    blackHat = new window.cv.Mat();
-    merged = new window.cv.Mat();
-    blurred = new window.cv.Mat();
-    edges = new window.cv.Mat();
-    kernel3 = window.cv.getStructuringElement(window.cv.MORPH_RECT, new window.cv.Size(3, 3));
-    kernel7 = window.cv.getStructuringElement(window.cv.MORPH_RECT, new window.cv.Size(7, 7));
-    contours = new window.cv.MatVector();
-    hierarchy = new window.cv.Mat();
+    gray = new globalThis.cv.Mat();
+    claheEnhanced = new globalThis.cv.Mat();
+    topHat = new globalThis.cv.Mat();
+    blackHat = new globalThis.cv.Mat();
+    merged = new globalThis.cv.Mat();
+    blurred = new globalThis.cv.Mat();
+    edges = new globalThis.cv.Mat();
+    kernel3 = globalThis.cv.getStructuringElement(globalThis.cv.MORPH_RECT, new globalThis.cv.Size(3, 3));
+    kernel7 = globalThis.cv.getStructuringElement(globalThis.cv.MORPH_RECT, new globalThis.cv.Size(7, 7));
+    contours = new globalThis.cv.MatVector();
+    hierarchy = new globalThis.cv.Mat();
 
-    window.cv.cvtColor(src, gray, window.cv.COLOR_RGBA2GRAY);
+    globalThis.cv.cvtColor(src, gray, globalThis.cv.COLOR_RGBA2GRAY);
     let claheApplied = false;
     let clahe = null;
     try {
-      if (window.cv.createCLAHE && typeof window.cv.createCLAHE === 'function') {
-        clahe = window.cv.createCLAHE(2.0, new window.cv.Size(8, 8));
-      } else if (window.cv.CLAHE && typeof window.cv.CLAHE === 'function') {
-        clahe = new window.cv.CLAHE(2.0, new window.cv.Size(8, 8));
+      if (globalThis.cv.createCLAHE && typeof globalThis.cv.createCLAHE === 'function') {
+        clahe = globalThis.cv.createCLAHE(2.0, new globalThis.cv.Size(8, 8));
+      } else if (globalThis.cv.CLAHE && typeof globalThis.cv.CLAHE === 'function') {
+        clahe = new globalThis.cv.CLAHE(2.0, new globalThis.cv.Size(8, 8));
       }
       if (clahe && typeof clahe.apply === 'function') {
         clahe.apply(gray, claheEnhanced);
@@ -915,30 +911,30 @@ function detectFrameCandidatesWithCv(imageData, context, options = {}) {
       }
     }
     if (!claheApplied) {
-      window.cv.equalizeHist(gray, claheEnhanced);
+      globalThis.cv.equalizeHist(gray, claheEnhanced);
     }
-    window.cv.morphologyEx(claheEnhanced, topHat, window.cv.MORPH_TOPHAT, kernel7);
-    window.cv.morphologyEx(claheEnhanced, blackHat, window.cv.MORPH_BLACKHAT, kernel7);
-    window.cv.addWeighted(claheEnhanced, 1.0, topHat, 0.7, 0, merged);
-    window.cv.addWeighted(merged, 1.0, blackHat, -0.45, 0, merged);
-    window.cv.GaussianBlur(merged, blurred, new window.cv.Size(5, 5), 0, 0, window.cv.BORDER_DEFAULT);
-    window.cv.Canny(blurred, edges, 40, 140, 3, false);
-    window.cv.dilate(edges, edges, kernel3, new window.cv.Point(-1, -1), 1);
+    globalThis.cv.morphologyEx(claheEnhanced, topHat, globalThis.cv.MORPH_TOPHAT, kernel7);
+    globalThis.cv.morphologyEx(claheEnhanced, blackHat, globalThis.cv.MORPH_BLACKHAT, kernel7);
+    globalThis.cv.addWeighted(claheEnhanced, 1.0, topHat, 0.7, 0, merged);
+    globalThis.cv.addWeighted(merged, 1.0, blackHat, -0.45, 0, merged);
+    globalThis.cv.GaussianBlur(merged, blurred, new globalThis.cv.Size(5, 5), 0, 0, globalThis.cv.BORDER_DEFAULT);
+    globalThis.cv.Canny(blurred, edges, 40, 140, 3, false);
+    globalThis.cv.dilate(edges, edges, kernel3, new globalThis.cv.Point(-1, -1), 1);
 
     const candidates = [];
-    window.cv.findContours(edges, contours, hierarchy, retrievalMode, window.cv.CHAIN_APPROX_SIMPLE);
+    globalThis.cv.findContours(edges, contours, hierarchy, retrievalMode, globalThis.cv.CHAIN_APPROX_SIMPLE);
     for (let i = 0; i < contours.size(); i++) {
       const contour = contours.get(i);
       let approx = null;
       try {
-        const area = Math.abs(window.cv.contourArea(contour));
+        const area = Math.abs(globalThis.cv.contourArea(contour));
         if (area < imageArea * minAreaRatio) continue;
 
-        const bound = window.cv.boundingRect(contour);
-        const minRect = window.cv.minAreaRect(contour);
-        const perimeter = window.cv.arcLength(contour, true);
-        approx = new window.cv.Mat();
-        window.cv.approxPolyDP(contour, approx, Math.max(2, perimeter * 0.02), true);
+        const bound = globalThis.cv.boundingRect(contour);
+        const minRect = globalThis.cv.minAreaRect(contour);
+        const perimeter = globalThis.cv.arcLength(contour, true);
+        approx = new globalThis.cv.Mat();
+        globalThis.cv.approxPolyDP(contour, approx, Math.max(2, perimeter * 0.02), true);
         const approxPoints = extractApproxPoints(approx);
 
         const scored = scoreFrameCandidate({
@@ -1047,8 +1043,8 @@ function mergeAngleCandidates(...candidateGroups) {
 }
 
 function buildLineOrientationRotationCandidates(imageData) {
-  if (!(window.cv && window.cv.Mat && window.cv.HoughLinesP) || !imageData) return [];
-  const src = window.cv.matFromImageData(imageData);
+  if (!(globalThis.cv && globalThis.cv.Mat && globalThis.cv.HoughLinesP) || !imageData) return [];
+  const src = globalThis.cv.matFromImageData(imageData);
   let gray = null;
   let blurred = null;
   let edges = null;
@@ -1059,15 +1055,15 @@ function buildLineOrientationRotationCandidates(imageData) {
     const minDim = Math.min(width, height);
     if (minDim < 80) return [];
 
-    gray = new window.cv.Mat();
-    blurred = new window.cv.Mat();
-    edges = new window.cv.Mat();
-    lines = new window.cv.Mat();
+    gray = new globalThis.cv.Mat();
+    blurred = new globalThis.cv.Mat();
+    edges = new globalThis.cv.Mat();
+    lines = new globalThis.cv.Mat();
 
-    window.cv.cvtColor(src, gray, window.cv.COLOR_RGBA2GRAY);
-    window.cv.GaussianBlur(gray, blurred, new window.cv.Size(5, 5), 0, 0, window.cv.BORDER_DEFAULT);
-    window.cv.Canny(blurred, edges, 35, 120, 3, false);
-    window.cv.HoughLinesP(
+    globalThis.cv.cvtColor(src, gray, globalThis.cv.COLOR_RGBA2GRAY);
+    globalThis.cv.GaussianBlur(gray, blurred, new globalThis.cv.Size(5, 5), 0, 0, globalThis.cv.BORDER_DEFAULT);
+    globalThis.cv.Canny(blurred, edges, 35, 120, 3, false);
+    globalThis.cv.HoughLinesP(
       edges,
       lines,
       1,
@@ -1185,7 +1181,7 @@ function isDensityTemplateCandidate(candidate) {
   return Boolean(candidate && typeof candidate.method === 'string' && candidate.method.startsWith('density'));
 }
 
-function getDensityTemplateReliability(candidate, validation) {
+export function getDensityTemplateReliability(candidate, validation) {
   if (!isDensityTemplateCandidate(candidate)) {
     return { usable: true, confidenceCap: 1 };
   }
@@ -1202,11 +1198,8 @@ function getDensityTemplateReliability(candidate, validation) {
   const sprocketLane = clampBetween(Number(breakdown.sprocketLane) || 0, 0, 1);
   const aspectScore = validation && Number.isFinite(validation.aspectScore) ? validation.aspectScore : 0;
   const areaRatio = validation && Number.isFinite(validation.areaRatio) ? validation.areaRatio : 1;
-  const is135 = candidate.detectedFormat === '135';
-  const isSprocketCandidate = candidate.method === 'density-sprocket-template';
-
+  const is135 = candidate.detectedFormat === '135' || candidate.detectedFormat?.startsWith('135-');
   const strong35mm = is135
-    && isSprocketCandidate
     && sprocketLane >= 0.24
     && boundaryStrength >= 0.24
     && outsideClean >= 0.12
@@ -1232,8 +1225,10 @@ function getDensityTemplateReliability(candidate, validation) {
 
   let confidenceCap = 0.66;
   if (strong35mm) confidenceCap = 0.78;
+  // 比率テンプレートは実境界の検出とは区別し、穴列の裏付けがなければ要確認。
+  // 高信頼の 120 は detectImageWindow の四辺・四隅の経路で扱う。
   if (strongImageWindow) confidenceCap = Math.max(confidenceCap, 0.74);
-  if (!isSprocketCandidate) confidenceCap = Math.min(confidenceCap, 0.68);
+  if (!strong35mm) confidenceCap = Math.min(confidenceCap, 0.68);
 
   return { usable: true, confidenceCap };
 }
@@ -1317,11 +1312,23 @@ export function inferAutoFrameConfidenceLevel(confidence, settings = {}) {
 }
 
 export function detectFrameAndRotation(imageData, options = {}) {
-  if (!imageData || !(window.cv && window.cv.Mat)) return null;
+  if (!imageData || !(globalThis.cv && globalThis.cv.Mat)) return null;
   const context = getAnalyzerContext(options);
   if (!context.rotateImageData) return null;
 
   const previewData = resizeImageDataToMaxSide(imageData, context.maxSide);
+  const window = detectImageWindow(previewData, getAutoFrameAspectTargets(context));
+  if (window) {
+    const angle = Number(window.angle.toFixed(2));
+    const rotated = angle ? context.rotateImageData(imageData, angle) : imageData;
+    const cropRegion = projectWindowCrop({ ...window, angle }, previewData, imageData, rotated);
+    if (cropRegion) return {
+      angle, cropRegion, confidence: window.confidence,
+      confidenceLevel: inferAutoFrameConfidenceLevel(window.confidence, context.settings),
+      detectedFormat: window.detectedFormat, rotatedImageData: rotated,
+      diagnostics: { method: 'opencv-image-window', scoreBreakdown: window.evidence }
+    };
+  }
   const previewCandidates = detectFrameCandidatesWithCv(previewData, context, { minAreaRatio: 0.04 });
   const lineAngleCandidates = buildLineOrientationRotationCandidates(previewData);
   if (!previewCandidates.length && !lineAngleCandidates.length) return null;

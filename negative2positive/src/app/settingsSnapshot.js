@@ -10,7 +10,8 @@ export function deepCopySanitizedSettings(safe, { autoFrameMeta = safe.autoFrame
   return {
     cropRegion: safe.cropRegion ? { ...safe.cropRegion } : null,
     rotationAngle: safe.rotationAngle || 0,
-    autoFrameMeta: autoFrameMeta ? { ...autoFrameMeta } : null,
+    mirrored: Boolean(safe.mirrored),
+    autoFrameMeta: autoFrameMeta ? structuredClone(autoFrameMeta) : null,
     filmType: safe.filmType,
     filmBase: { ...safe.filmBase },
     lensCorrection: {

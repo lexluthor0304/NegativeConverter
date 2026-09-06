@@ -15,7 +15,7 @@ let _hasInpaint = null;
 let _hasLine = null;
 
 function cv() {
-  return window.cv;
+  return globalThis.window?.cv || globalThis.cv;
 }
 
 function detectFeatures() {
@@ -145,6 +145,62 @@ function deleteMats(...mats) {
   for (const m of mats) {
     if (m && !m.isDeleted()) m.delete();
   }
+}
+
+function validateMask(mask, length) {
+  if (!(mask instanceof Uint8Array) || mask.length !== length) {
+    throw new RangeError(`Dust mask must be a Uint8Array with ${length} pixels`);
+  }
+}
+
+function maskBounds(mask, width, height) {
+  let minX = width, minY = height, maxX = -1, maxY = -1;
+  for (let i = 0; i < mask.length; i++) {
+    if (!mask[i]) continue;
+    const x = i % width;
+    const y = Math.floor(i / width);
+    minX = Math.min(minX, x); minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x); maxY = Math.max(maxY, y);
+  }
+  return maxX < 0 ? null : { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 };
+}
+
+function cropRgba(source, region) {
+  const data = new Uint8ClampedArray(region.width * region.height * 4);
+  for (let y = 0; y < region.height; y++) {
+    const start = ((region.y + y) * source.width + region.x) * 4;
+    data.set(source.data.subarray(start, start + region.width * 4), y * region.width * 4);
+  }
+  return new ImageData(data, region.width, region.height);
+}
+
+function cloneImage(source) {
+  const result = new ImageData(new Uint8ClampedArray(source.data), source.width, source.height);
+  if (source.__image16) {
+    result.__image16 = {
+      width: source.width, height: source.height,
+      data: new Uint16Array(source.__image16.data),
+    };
+  }
+  return result;
+}
+
+// 修復対象以外の画素とアルファは元の精度のまま保持する。
+function preserveImagePrecision(source, result, mask) {
+  const plane = source.__image16;
+  const data16 = plane ? new Uint16Array(plane.data) : null;
+  for (let p = 0; p < mask.length; p++) {
+    const i = p * 4;
+    result.data[i + 3] = source.data[i + 3];
+    for (let channel = 0; channel < 3; channel++) {
+      if (!mask[p]) result.data[i + channel] = source.data[i + channel];
+      else if (data16) data16[i + channel] = result.data[i + channel] * 257;
+    }
+  }
+  if (data16) {
+    result.__image16 = { width: source.width, height: source.height, data: data16 };
+  }
+  return result;
 }
 
 // ─── Core detection algorithm ────────────────────────────────────────────────
@@ -385,36 +441,67 @@ export function updateDustStrength(imageData, existingState, newStrength, maxPar
  */
 export function inpaintMasked(imageData, mask, radius = 3) {
   const { width, height } = imageData;
+  validateMask(mask, width * height);
+  if (!Number.isInteger(radius) || radius < 1) {
+    throw new RangeError('Inpaint radius must be a positive integer');
+  }
+  const bounds = maskBounds(mask, width, height);
+  if (!bounds) return cloneImage(imageData);
+
+  // 全マスクと周辺画素を含め、TELEAの近傍・勾配計算に必要な余白を確保する。
+  const pad = radius + 2;
+  const x = Math.max(0, bounds.x - pad), y = Math.max(0, bounds.y - pad);
+  const right = Math.min(width, bounds.x + bounds.width + pad);
+  const bottom = Math.min(height, bounds.y + bounds.height + pad);
+  const region = { x, y, width: right - x, height: bottom - y };
+  if (region.width * region.height >= width * height * 0.75) {
+    return inpaintRegion(imageData, mask, radius);
+  }
+
+  const croppedMask = new Uint8Array(region.width * region.height);
+  for (let row = 0; row < region.height; row++) {
+    const start = (y + row) * width + x;
+    croppedMask.set(mask.subarray(start, start + region.width), row * region.width);
+  }
+  const patch = inpaintRegion(cropRgba(imageData, region), croppedMask, radius);
+  const result = cloneImage(imageData);
+  for (let row = 0; row < region.height; row++) for (let col = 0; col < region.width; col++) {
+    const p = row * region.width + col;
+    if (!croppedMask[p]) continue;
+    const target = ((y + row) * width + x + col) * 4;
+    for (let channel = 0; channel < 3; channel++) {
+      result.data[target + channel] = patch.data[p * 4 + channel];
+      if (result.__image16) result.__image16.data[target + channel] = patch.data[p * 4 + channel] * 257;
+    }
+  }
+  return result;
+}
+
+function inpaintRegion(imageData, mask, radius) {
+  const { width, height } = imageData;
   const c = cv();
   ensureFeatureDetection();
 
   if (c && c.Mat && _hasInpaint) {
     // Use OpenCV inpaint
-    const src = imageDataToMat(imageData);
-    const bgr = new c.Mat();
-    c.cvtColor(src, bgr, c.COLOR_RGBA2RGB);
-
-    const maskMat = uint8ArrayToMat(mask, height, width);
-    const dst = new c.Mat();
-
+    let src, bgr, maskMat, dst, rgba;
     try {
+      src = imageDataToMat(imageData);
+      bgr = new c.Mat();
+      c.cvtColor(src, bgr, c.COLOR_RGBA2RGB);
+      maskMat = uint8ArrayToMat(mask, height, width);
+      dst = new c.Mat();
       c.inpaint(bgr, maskMat, dst, radius, c.INPAINT_TELEA);
+      rgba = new c.Mat();
+      c.cvtColor(dst, rgba, c.COLOR_RGB2RGBA);
+      const result = new ImageData(new Uint8ClampedArray(rgba.data), width, height);
+      return preserveImagePrecision(imageData, result, mask);
     } catch (e) {
       // If inpaint fails, fall through to JS fallback
       console.warn('DustRemoval: cv.inpaint failed, using JS fallback', e);
-      deleteMats(src, bgr, maskMat, dst);
-      return inpaintMaskedJS(imageData, mask, radius);
+    } finally {
+      deleteMats(src, bgr, maskMat, dst, rgba);
     }
-
-    // Convert back to RGBA
-    const rgba = new c.Mat();
-    c.cvtColor(dst, rgba, c.COLOR_RGB2RGBA);
-
-    const outData = new Uint8ClampedArray(rgba.data);
-    const result = new ImageData(outData, width, height);
-
-    deleteMats(src, bgr, maskMat, dst, rgba);
-    return result;
   }
 
   return inpaintMaskedJS(imageData, mask, radius);
@@ -426,7 +513,7 @@ export function inpaintMasked(imageData, mask, radius = 3) {
 function inpaintMaskedJS(imageData, mask, radius) {
   const { width, height } = imageData;
   const outData = inpaintTeleaJS(imageData, mask, radius);
-  return new ImageData(outData, width, height);
+  return preserveImagePrecision(imageData, new ImageData(outData, width, height), mask);
 }
 
 /**
@@ -438,55 +525,26 @@ function inpaintMaskedJS(imageData, mask, radius) {
  * @returns {Uint8Array} Updated mask
  */
 export function refineMaskIntelligent(imageData, existingMask, brushMask) {
+  validateMask(existingMask, imageData.width * imageData.height);
+  validateMask(brushMask, imageData.width * imageData.height);
   const c = cv();
   if (!c || !c.Mat) return existingMask;
   ensureFeatureDetection();
 
   const { width: w, height: h } = imageData;
 
-  // Convert to grayscale
-  const src = imageDataToMat(imageData);
-  const grayMat = new c.Mat();
-  c.cvtColor(src, grayMat, c.COLOR_RGBA2GRAY);
-  const grayData = new Uint8Array(grayMat.data);
-  deleteMats(src, grayMat);
-
-  // Find bounding rect of brush area
-  const brushMat = uint8ArrayToMat(brushMask, h, w);
-  const brushContours = new c.MatVector();
-  const brushHierarchy = new c.Mat();
-  c.findContours(brushMat, brushContours, brushHierarchy, c.RETR_EXTERNAL, c.CHAIN_APPROX_SIMPLE);
-
-  if (brushContours.size() === 0) {
-    deleteMats(brushMat, brushHierarchy);
-    brushContours.delete();
-    return existingMask;
-  }
-
-  // Get overall bounding rect
-  let minX = w, minY = h, maxX = 0, maxY = 0;
-  for (let i = 0; i < brushContours.size(); i++) {
-    const rect = c.boundingRect(brushContours.get(i));
-    minX = Math.min(minX, rect.x);
-    minY = Math.min(minY, rect.y);
-    maxX = Math.max(maxX, rect.x + rect.width);
-    maxY = Math.max(maxY, rect.y + rect.height);
-  }
-  deleteMats(brushMat, brushHierarchy);
-  brushContours.delete();
-
-  const rx = Math.max(0, minX);
-  const ry = Math.max(0, minY);
-  const rw = Math.min(w, maxX) - rx;
-  const rh = Math.min(h, maxY) - ry;
-  if (rw < 1 || rh < 1) return existingMask;
-
-  // Extract cropped gray region
-  const croppedGray = new Uint8Array(rw * rh);
-  for (let y = 0; y < rh; y++) {
-    for (let x = 0; x < rw; x++) {
-      croppedGray[y * rw + x] = grayData[(ry + y) * w + (rx + x)];
-    }
+  // 輪郭抽出と全画像のグレースケール化を省き、筆跡範囲だけ変換する。
+  const region = maskBounds(brushMask, w, h);
+  if (!region) return existingMask;
+  const { x: rx, y: ry, width: rw, height: rh } = region;
+  let src, grayMat, croppedGray;
+  try {
+    src = imageDataToMat(cropRgba(imageData, region));
+    grayMat = new c.Mat();
+    c.cvtColor(src, grayMat, c.COLOR_RGBA2GRAY);
+    croppedGray = new Uint8Array(grayMat.data);
+  } finally {
+    deleteMats(src, grayMat);
   }
 
   // Scharr on cropped region
@@ -556,6 +614,8 @@ export function refineMaskIntelligent(imageData, existingMask, brushMask) {
  * Direct brush: add brush area directly to mask.
  */
 export function refineMaskDirect(existingMask, brushMask) {
+  validateMask(existingMask, brushMask?.length);
+  validateMask(brushMask, existingMask.length);
   const result = new Uint8Array(existingMask);
   for (let i = 0; i < result.length; i++) {
     result[i] = result[i] | brushMask[i];
@@ -567,6 +627,8 @@ export function refineMaskDirect(existingMask, brushMask) {
  * Remove brush: erase brush area from mask.
  */
 export function refineMaskRemove(existingMask, brushMask) {
+  validateMask(existingMask, brushMask?.length);
+  validateMask(brushMask, existingMask.length);
   const result = new Uint8Array(existingMask);
   for (let i = 0; i < result.length; i++) {
     result[i] = result[i] & (~brushMask[i] & 0xFF);
