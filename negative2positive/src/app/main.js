@@ -5994,6 +5994,7 @@
 
         applyDustResultToState();
         updatePreview();
+        if (aiRepairReady()) void repairBrushWithAi(source, newMask, coreReprocessToken);
         if (state.dustRemoval.showMask) {
           requestAnimationFrame(() => renderDustMaskOverlay());
         }
@@ -9616,6 +9617,18 @@
 
     async function renderCurrentImageDataForExport(exportInfo = null) {
       await ensureFullResolutionReadyForExport();
+      // A quick export after a stroke must use MI-GAN, not its temporary preview.
+      if (aiRepairReady() && state.dustRemoval.enabled && state.dustRemoval.mask) {
+        const source = getDustSource();
+        const mask = state.dustRemoval.mask;
+        const token = coreReprocessToken;
+        const repaired = await inpaintForCommit(source, mask);
+        if (token !== coreReprocessToken || source !== getDustSource() || mask !== state.dustRemoval.mask) {
+          throw new Error('Photo changed during AI repair. Please export again.');
+        }
+        state.dustRemoval.inpaintedImageData = repaired;
+        applyDustResultToState();
+      }
       // ensureFullRender exists to leave a full-resolution CPU buffer in
       // state.displayImageData, which getCurrentExportImageData then reuses.
       // Skip it when there is nothing to reuse or it is already current: with
@@ -12643,7 +12656,7 @@
     // ===========================================
     // AI repair: learned inpainting on the commit and export paths
     // ===========================================
-    const aiRepair = { status: 'idle', provider: '', run: null, source: '', sourceRef: null, error: '', percent: 0, tiles: 0, ms: 0 };
+    const aiRepair = { release: null, status: 'idle', provider: '', run: null, source: '', sourceRef: null, error: '', percent: 0, tiles: 0, ms: 0 };
 
     function aiRepairReady() {
       return Boolean(state.dustRemoval.ai && aiRepair.status === 'ready' && typeof aiRepair.run === 'function');
@@ -12664,7 +12677,7 @@
         text = getInterpolatedText('dustAiStatusReady', { source: aiRepair.source, provider: providerName }, `Model ready: ${aiRepair.source} on ${providerName}`);
         if (aiRepair.tiles) text += ' · ' + getInterpolatedText('dustAiStatusLast', { tiles: String(aiRepair.tiles), ms: String(aiRepair.ms) }, `last run ${aiRepair.tiles} tile(s) in ${aiRepair.ms} ms`);
       } else if (aiRepair.status === 'error') {
-        text = getInterpolatedText('dustAiStatusError', { message: aiRepair.error }, `Model failed: ${aiRepair.error}. Load a LaMa ONNX file instead.`);
+        text = getInterpolatedText('dustAiStatusError', { message: aiRepair.error }, `Model failed: ${aiRepair.error}. Load a MI-GAN Pipeline ONNX file instead.`);
       } else {
         text = getLocalizedText(inpaintBackends().webgpu ? 'dustAiStatusIdleGpu' : 'dustAiStatusIdleWasm', 'No model loaded.');
       }
@@ -12680,6 +12693,9 @@
       aiRepair.error = '';
       updateAiRepairUI();
       try {
+        aiRepair.run = null;
+        await aiRepair.release?.();
+        aiRepair.release = null;
         let bytes; let label;
         if (source instanceof File) {
           bytes = await source.arrayBuffer();
@@ -12695,6 +12711,7 @@
         }
         const session = await createInpaintSession(bytes, { prefer });
         aiRepair.run = session.run;
+        aiRepair.release = session.release;
         aiRepair.provider = session.provider;
         aiRepair.source = label;
         aiRepair.sourceRef = source;
@@ -12708,7 +12725,7 @@
         aiRepair.run = null;
       }
       updateAiRepairUI();
-      if (aiRepairReady() && state.dustRemoval.enabled) scheduleDustDetection();
+      if (prefer !== 'wasm' && aiRepairReady() && state.dustRemoval.enabled) scheduleDustDetection();
     }
 
     // The commit-path inpaint: the learned model when it is on and ready,
@@ -12738,6 +12755,22 @@
         updateAiRepairUI();
         return inpaintMasked(source, mask, 3);
       }
+    }
+
+    async function repairBrushWithAi(source, mask, token) {
+      const isCurrent = () => state.dustRemoval.enabled && state.dustRemoval.ai
+        && getDustSource() === source && state.dustRemoval.mask === mask
+        && coreReprocessToken === token;
+      // Coalesce quick brush strokes and discard work after switching photos or undo.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      if (!isCurrent()) return;
+      const result = await inpaintForCommit(source, mask);
+      if (!isCurrent()) return;
+      state.dustRemoval.inpaintedImageData = result;
+      applyDustResultToState();
+      updatePreview();
+      updateDustStatusUI(getLocalizedText('dustStatusDone', 'Detected {count} dust particles')
+        .replace('{count}', String(state.dustRemoval.particleCount)));
     }
 
     document.getElementById('dustAiEnabled')?.addEventListener('change', (event) => {
