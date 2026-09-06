@@ -300,6 +300,13 @@ body.studio {
 .contact-sheet-options select { max-width: 150px; font-size: 12px; }
 .contact-sheet-check { flex-basis: 100%; }
 
+/* Recipes: code box, QR, diff list. */
+.recipe-code { width: 100%; margin: 8px 0; padding: 6px 8px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; line-height: 1.4; color: var(--text-primary); background: var(--bg-primary); border: 1px solid var(--border-light); border-radius: 4px; resize: vertical; word-break: break-all; }
+.recipe-qr { display: block; width: 184px; height: 184px; margin: 8px 0; image-rendering: pixelated; background: #fff; border-radius: 4px; }
+.recipe-note { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; color: var(--text-secondary); }
+.recipe-note input { flex: 1; min-width: 0; padding: 5px 8px; font: inherit; font-size: 12px; color: var(--text-primary); background: var(--bg-primary); border: 1px solid var(--border-light); border-radius: 4px; }
+.recipe-diff { list-style: none; margin: 8px 0 0; padding: 0; max-height: 150px; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; line-height: 1.6; color: var(--text-secondary); }
+
 /* Analog metadata panel (roll + frame). */
 .metadata-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; }
 .metadata-grid label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--text-secondary); min-width: 0; }

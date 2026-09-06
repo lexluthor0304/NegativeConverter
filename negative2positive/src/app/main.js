@@ -26,6 +26,9 @@
     import { estimateExposureRatio, mergeFrames, coverageRect, toImage16, image16ToImageData } from './multiShot.js';
     import { sanitizeRollMetadata, sanitizeFrameMetadata, buildExportMetadata, frameNumberFor } from './analogMetadata.js';
     import { attachMetadataToBlob } from './exportMetadata.js';
+    import { buildRollProject, serializeRollProject, parseRollProject, matchProjectFiles, hashFileForProject, projectFileName, isProjectFileName, saveProjectRecovery, loadProjectRecovery, clearProjectRecovery } from './rollProject.js';
+    import { encodeRecipe, decodeRecipe, recipeDiff, describeRecipeChange, RECIPE_KEYS } from './recipes.js';
+    import qrcode from 'qrcode-generator';
     import { layoutContactSheet, pagesFor, renderContactSheetPage, contactSheetHeader, normalizeLayoutId, normalizePageId } from './contactSheet.js';
 
     import { convertFrameWithRouter, resolveConversionMode } from '../pipeline/conversionRouter.js';
@@ -2052,6 +2055,8 @@
       // Analog metadata: the roll (session-wide) and this frame (per file).
       rollMetadata: sanitizeRollMetadata({}),
       frameMetadata: sanitizeFrameMetadata({}),
+      // A recovery copy of the last roll exists in IndexedDB (see rollProject.js).
+      projectRecoveryAvailable: false,
       // Flat field: session registry of gain maps and the current file's choice.
       flatFields: {},
       flatFieldActiveId: null,
@@ -2477,6 +2482,7 @@
       settings.sprocketEdge = createSprocketEdgeSettings(state.sprocketEdge);
       settings.localExposure = state.localExposure ? structuredClone(state.localExposure) : null;
       settings.look = state.look ? structuredClone(state.look) : null;
+      settings.frameMetadata = sanitizeFrameMetadata(state.frameMetadata);
       settings.autoFrameMeta = state.autoFrame.lastDiagnostics ? structuredClone(state.autoFrame.lastDiagnostics) : null;
 
       // Category B: references
@@ -2534,8 +2540,10 @@
       state.sprocketEdge = createSprocketEdgeSettings(s.sprocketEdge);
       state.localExposure = s.localExposure ? structuredClone(s.localExposure) : null;
       state.look = s.look ? structuredClone(s.look) : null;
+      state.frameMetadata = sanitizeFrameMetadata(s.frameMetadata);
       updateDodgeBurnUI();
       updateLabMatchUI();
+      updateMetadataUI();
       state.autoFrame.lastDiagnostics = s.autoFrameMeta ? structuredClone(s.autoFrameMeta) : null;
 
       // Restore Category B refs
@@ -9271,6 +9279,8 @@
     function closePhotoSession() {
       if (isDesktopBatchExportLocked()) return;
       clearUndoHistory();
+      pendingProject = null;
+      void clearProjectRecovery();
       // Leave crop mode first: the draft still points at the image
       // being discarded, and Apply would restore it over the reset.
       if (state.cropping) exitCropMode({ restore: false });
@@ -9816,6 +9826,7 @@
     function markCurrentFileDirty() {
       const item = getCurrentQueueItem();
       if (!item) return;
+      scheduleProjectRecovery();
       if (item.isDirty) return;
       item.isDirty = true;
       if (state.batchSessionActive) {
@@ -11070,6 +11081,7 @@
       state.frameMetadata = sanitizeFrameMetadata(safe.frameMetadata);
       prefillRollStockFromFilmEdge();
       updateMetadataUI();
+      updateRecipeUI();
       updateLabMatchUI();
       state.coreSaturation = safe.coreSaturation;
       state.coreGlow = safe.coreGlow;
@@ -11371,6 +11383,8 @@
       state.fileQueue = [];
       state.rollMetadata = sanitizeRollMetadata({});
       updateMetadataUI();
+      pendingProject = null;
+      void clearProjectRecovery();
       state.currentFileIndex = 0;
       state.batchSessionActive = false;
       resetRollReferenceState();
@@ -11429,6 +11443,7 @@
       updateFileListUI();
       updateExportButtons();
       void loadStudioThumbnails();
+      scheduleProjectRecovery();
     }
 
     // ===========================================
@@ -11492,6 +11507,7 @@
       if (isDesktopBatchExportLocked()) return;
       const files = Array.from(e.target.files);
       if (files.length === 0) return;
+      const projectFile = files.find((file) => isProjectFileName(file.name));
 
       // Reset state for new batch
       state.fileQueue = [];
@@ -11507,8 +11523,12 @@
 
       addFilesToQueue(files);
 
-      // Load the first file
-      if (state.fileQueue.length > 0) {
+      // A project file among the drop restores the roll once the photos are queued.
+      if (projectFile) {
+        void openProjectFile(projectFile);
+      } else if (pendingProject) {
+        void applyPendingProject();
+      } else if (state.fileQueue.length > 0) {
         loadFile(state.fileQueue[0].file);
       }
     });
@@ -11517,6 +11537,7 @@
       if (isDesktopBatchExportLocked()) return;
       const files = Array.from(e.target.files);
       if (files.length === 0) return;
+      const projectFile = files.find((file) => isProjectFileName(file.name));
 
       // Reset state for new batch
       state.fileQueue = [];
@@ -11532,8 +11553,12 @@
 
       addFilesToQueue(files);
 
-      // Load the first file
-      if (state.fileQueue.length > 0) {
+      // A project file among the drop restores the roll once the photos are queued.
+      if (projectFile) {
+        void openProjectFile(projectFile);
+      } else if (pendingProject) {
+        void applyPendingProject();
+      } else if (state.fileQueue.length > 0) {
         loadFile(state.fileQueue[0].file);
       }
     });
@@ -11560,6 +11585,7 @@
 
       const files = Array.from(e.dataTransfer.files);
       if (files.length === 0) return;
+      const projectFile = files.find((file) => isProjectFileName(file.name));
 
       // Reset state for new batch
       state.fileQueue = [];
@@ -11575,8 +11601,12 @@
 
       addFilesToQueue(files);
 
-      // Load the first file
-      if (state.fileQueue.length > 0) {
+      // A project file among the drop restores the roll once the photos are queued.
+      if (projectFile) {
+        void openProjectFile(projectFile);
+      } else if (pendingProject) {
+        void applyPendingProject();
+      } else if (state.fileQueue.length > 0) {
         loadFile(state.fileQueue[0].file);
       }
     });
@@ -12703,6 +12733,417 @@
     });
 
     // ===========================================
+    // Roll project file: save, open, recovery copy
+    // ===========================================
+    let pendingProject = null;
+    let recoveredProject = null;
+    let projectRecoveryTimer = null;
+
+    async function queueItemHash(item) {
+      if (item.hash === undefined) {
+        try { item.hash = await hashFileForProject(item.file); } catch { item.hash = ''; }
+      }
+      return item.hash || '';
+    }
+
+    // Project settings come from disk: geometry that is null must stay null
+    // rather than inherit the open photo's crop (see processFileWithSettings).
+    function sanitizeProjectSettings(settings) {
+      if (!settings) return null;
+      const safe = sanitizeSettings(settings, {
+        fallbackSettings: { ...state, cropRegion: null, autoFrameMeta: null, rotationAngle: 0, mirrored: false }
+      });
+      return deepCopySanitizedSettings(safe);
+    }
+
+    // The roll as a project object. Without `persist` the open photo's live
+    // settings are read without touching its dirty flag (the recovery copy).
+    function buildCurrentProject({ persist = false } = {}) {
+      if (persist) persistCurrentFileSettings({ silent: true, force: true });
+      const current = getCurrentQueueItem();
+      const files = state.fileQueue.map((item) => ({
+        name: item.file.name,
+        size: item.file.size,
+        lastModified: item.file.lastModified || 0,
+        path: item.file.path || '',
+        hash: item.hash || '',
+        settings: item === current && state.originalImageData && !persist ? extractCurrentSettings() : (item.settings || null),
+        studioColors: item.studioColors || null,
+        selected: item.selected !== false
+      }));
+      return buildRollProject({
+        files,
+        rollMetadata: state.rollMetadata,
+        rollReference: state.rollReference,
+        rollAnalysis: state.rollAnalysis,
+        lensCorrection: state.lensCorrection
+      });
+    }
+
+    async function saveProject() {
+      if (!state.fileQueue.length || isDesktopBatchExportLocked()) return;
+      for (const item of state.fileQueue) await queueItemHash(item);
+      const project = buildCurrentProject({ persist: true });
+      const blob = new Blob([serializeRollProject(project)], { type: 'application/json' });
+      const result = await saveBlob(blob, projectFileName(state.rollMetadata), 'application/json');
+      handleSaveResult(result, {
+        cancelledKey: 'exportSaveCancelled',
+        cancelledFallback: 'Save cancelled. No file was written.'
+      });
+      if (result?.saved) showToast(getInterpolatedText('projectSaved', { count: String(project.files.length) }, `Project saved (${project.files.length} photo(s))`));
+    }
+
+    // Recovery copy: a debounced snapshot in IndexedDB so a crash does not lose the roll.
+    function scheduleProjectRecovery() {
+      if (projectRecoveryTimer) clearTimeout(projectRecoveryTimer);
+      projectRecoveryTimer = setTimeout(() => {
+        projectRecoveryTimer = null;
+        if (!state.fileQueue.length) return;
+        try {
+          const text = serializeRollProject(buildCurrentProject());
+          saveProjectRecovery(text).catch((error) => console.warn('Project recovery save failed:', error));
+        } catch (error) {
+          console.warn('Project recovery failed:', error);
+        }
+      }, 2500);
+    }
+
+    async function offerProjectRecovery() {
+      try {
+        const record = await loadProjectRecovery();
+        if (!record || Date.now() - (record.savedAt || 0) > 14 * 24 * 3600 * 1000) return;
+        const project = parseRollProject(record.text);
+        if (!project.files.length) return;
+        recoveredProject = project;
+        state.projectRecoveryAvailable = true;
+        studioWorkspace?.sync();
+        showToast(getLocalizedText('projectRecoveryAvailable', 'A recovery copy of the last roll is available under Batch tools.'), 5000);
+      } catch (error) {
+        console.warn('Project recovery unavailable:', error);
+      }
+    }
+
+    function restoreRecoveredProject() {
+      if (!recoveredProject) return;
+      pendingProject = recoveredProject;
+      if (state.fileQueue.length) void applyPendingProject();
+      else showToast(getLocalizedText('projectNeedsFiles', 'Project read. Add the original photos to restore it.'), 4000);
+    }
+
+    async function openProjectFile(file) {
+      let project;
+      try {
+        project = parseRollProject(await file.text());
+      } catch (error) {
+        const newer = error?.message === 'newer-version';
+        void appAlert(getLocalizedText(newer ? 'projectNewer' : 'projectOpenFailed', newer ? 'This project was saved by a newer version of the app.' : 'This is not a NeoAnalogLab project file.'));
+        return;
+      }
+      pendingProject = project;
+      if (state.fileQueue.length) await applyPendingProject();
+      else showToast(getLocalizedText('projectNeedsFiles', 'Project read. Add the original photos to restore it.'), 4000);
+    }
+
+    // Matches the queued photos to the project (hash, then name and size,
+    // then name), restores their settings and order plus the roll-level
+    // state, reports what is missing or changed, and opens the first photo.
+    async function applyPendingProject() {
+      const project = pendingProject;
+      if (!project || !state.fileQueue.length) return;
+      pendingProject = null;
+      const hashes = new Map();
+      for (const item of state.fileQueue) hashes.set(item.file, await queueItemHash(item));
+      const result = matchProjectFiles(project, state.fileQueue.map((item) => item.file), hashes);
+      const byFile = new Map(state.fileQueue.map((item) => [item.file, item]));
+      const ordered = [];
+      for (const { entry, file } of [...result.matched, ...result.changed]) {
+        const item = byFile.get(file);
+        if (!item) continue;
+        item.settings = sanitizeProjectSettings(entry.settings);
+        item.studioColors = entry.studioColors && typeof entry.studioColors === 'object' ? structuredClone(entry.studioColors) : null;
+        item.selected = entry.selected !== false;
+        item.status = 'pending';
+        item.error = null;
+        item.isDirty = false;
+        ordered.push({ order: entry.order, item });
+      }
+      ordered.sort((a, b) => a.order - b.order);
+      const restored = ordered.map((o) => o.item);
+      state.fileQueue = [...restored, ...result.extra.map((file) => byFile.get(file)).filter(Boolean)];
+      state.rollMetadata = sanitizeRollMetadata(project.roll?.metadata);
+      const reference = project.roll?.reference;
+      if (reference && typeof reference === 'object') {
+        state.rollReference = {
+          ...state.rollReference,
+          enabled: Boolean(reference.enabled),
+          sourceFileId: reference.sourceFileId || null,
+          applyLock: Boolean(reference.applyLock),
+          applyCrop: Boolean(reference.applyCrop),
+          settingsSnapshot: reference.settingsSnapshot ? sanitizeProjectSettings(reference.settingsSnapshot) : null
+        };
+      }
+      const analysis = project.roll?.analysis;
+      if (analysis && typeof analysis === 'object') state.rollAnalysis = { ...state.rollAnalysis, ...structuredClone(analysis) };
+      if (project.lensCorrection && typeof project.lensCorrection === 'object') {
+        // Keep the UI-only fields (search box state) the sanitiser strips.
+        state.lensCorrection = { ...state.lensCorrection, ...sanitizeLensCorrection(project.lensCorrection, createDefaultLensCorrectionSettings()) };
+      }
+      state.currentFileIndex = 0;
+      state.batchSessionActive = state.fileQueue.length > 1;
+      updateFileListUI();
+      updateExportButtons();
+      updateMetadataUI();
+      updateRollReferenceUI();
+      updateRollAnalysisUI();
+      syncBatchUIState({ reason: 'project' });
+      let message = getInterpolatedText('projectOpened', { count: String(restored.length) }, `Project opened: ${restored.length} photo(s) restored`);
+      if (result.changed.length) message += ' · ' + getInterpolatedText('projectChanged', { count: String(result.changed.length) }, `${result.changed.length} changed since it was saved`);
+      showToast(message, 4200);
+      if (result.missing.length) {
+        void appAlert(getInterpolatedText('projectMissing', { names: result.missing.map((entry) => entry.name).join(', ') }, `Missing originals: ${result.missing.map((entry) => entry.name).join(', ')}`));
+      }
+      // switchToFile is the path that restores a queued item's saved settings.
+      state.currentFileIndex = -1;
+      if (state.fileQueue.length) await switchToFile(0);
+      scheduleProjectRecovery();
+    }
+
+    document.getElementById('projectInput')?.addEventListener('change', (e) => {
+      if (isDesktopBatchExportLocked()) return;
+      const files = Array.from(e.target.files);
+      if (files.length === 0) return;
+      const projectFile = files.find((file) => isProjectFileName(file.name));
+      state.fileQueue = [];
+      state.currentFileIndex = 0;
+      state.cropRegion = null;
+      state.rotationAngle = 0;
+      state.mirrored = false;
+      updateMirrorButtonState();
+      state.loadedBaseImageData = null;
+      state.batchSessionActive = false;
+      resetRollReferenceState();
+      syncBatchUIState({ reason: 'projectInput_change_reset' });
+      addFilesToQueue(files);
+      if (projectFile) {
+        void openProjectFile(projectFile);
+      } else if (pendingProject) {
+        void applyPendingProject();
+      } else if (state.fileQueue.length > 0) {
+        loadFile(state.fileQueue[0].file);
+      }
+    });
+
+    // ===========================================
+    // Shareable recipes: code, QR, paste, scan
+    // ===========================================
+    let decodedRecipe = null;
+
+    function recipeTags() {
+      return { stock: state.rollMetadata.stock, lab: state.rollMetadata.lab, note: document.getElementById('recipeNote')?.value || '' };
+    }
+
+    // The film type always travels; every other key only when it differs
+    // from this photo's automatic defaults, which keeps the code short.
+    function currentRecipeCode() {
+      let defaults = null;
+      if (state.originalImageData) {
+        const { filmType, ...rest } = createDefaultSettings(state.originalImageData);
+        defaults = rest;
+      }
+      return encodeRecipe(extractCurrentSettings(), recipeTags(), { defaults });
+    }
+
+    async function copyRecipe() {
+      if (state.currentStep < 3 || !state.processedImageData) {
+        void appAlert(getLocalizedText('recipeNeedPhoto', 'Convert a photo first.'));
+        return;
+      }
+      const code = currentRecipeCode();
+      const box = document.getElementById('recipeCode');
+      if (box) box.value = code;
+      try {
+        await navigator.clipboard.writeText(code);
+        showToast(getInterpolatedText('recipeCopied', { chars: String(code.length) }, `Recipe copied (${code.length} characters)`));
+      } catch {
+        showToast(getLocalizedText('recipeShown', 'Recipe code shown below; copy it from the box.'));
+      }
+      const canvas = document.getElementById('recipeQrCanvas');
+      if (canvas && !canvas.hidden) drawRecipeQr(code);
+    }
+
+    function drawRecipeQr(code) {
+      const canvas = document.getElementById('recipeQrCanvas');
+      if (!canvas || !code) return;
+      const qr = qrcode(0, 'M');
+      qr.addData(code, 'Byte');
+      qr.make();
+      const modules = qr.getModuleCount();
+      const scale = 4;
+      const quiet = 4;
+      canvas.width = canvas.height = (modules + quiet * 2) * scale;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#000000';
+      for (let row = 0; row < modules; row++) {
+        for (let col = 0; col < modules; col++) {
+          if (qr.isDark(row, col)) ctx.fillRect((col + quiet) * scale, (row + quiet) * scale, scale, scale);
+        }
+      }
+      canvas.hidden = false;
+    }
+
+    function toggleRecipeQr() {
+      const canvas = document.getElementById('recipeQrCanvas');
+      if (!canvas) return;
+      if (!canvas.hidden) { canvas.hidden = true; return; }
+      const box = document.getElementById('recipeCode');
+      let code = box?.value.trim() || '';
+      if (!code && state.currentStep >= 3 && state.processedImageData) {
+        code = currentRecipeCode();
+        if (box) box.value = code;
+      }
+      if (code) drawRecipeQr(code);
+    }
+
+    function readRecipeFromBox() {
+      const text = document.getElementById('recipeCode')?.value || '';
+      try {
+        decodedRecipe = decodeRecipe(text);
+      } catch (error) {
+        decodedRecipe = null;
+        const key = error?.reason === 'version' ? 'recipeNewer' : error?.reason === 'corrupt' ? 'recipeCorrupt' : 'recipeInvalid';
+        showToast(getLocalizedText(key, 'That is not a recipe code.'), 3500);
+      }
+      updateRecipeUI();
+    }
+
+    function updateRecipeUI() {
+      if (!stateReady) return;
+      const list = document.getElementById('recipeDiff');
+      const status = document.getElementById('recipeStatus');
+      const applyBtn = document.getElementById('recipeApplyBtn');
+      const applySelectedBtn = document.getElementById('recipeApplySelectedBtn');
+      const scanBtn = document.getElementById('recipeScanBtn');
+      const box = document.getElementById('recipeCode');
+      if (!list || !status) return;
+      if (box) box.placeholder = getLocalizedText('recipePlaceholder', 'Paste a recipe code here');
+      if (scanBtn) scanBtn.hidden = !(typeof BarcodeDetector === 'function' && navigator.mediaDevices?.getUserMedia);
+      const ready = state.currentStep >= 3 && Boolean(state.processedImageData);
+      if (!decodedRecipe) {
+        list.replaceChildren();
+        status.textContent = getLocalizedText('recipeStatusNone', 'No recipe read yet.');
+        if (applyBtn) applyBtn.disabled = true;
+        if (applySelectedBtn) applySelectedBtn.disabled = true;
+        return;
+      }
+      const diff = recipeDiff(state, decodedRecipe.settings);
+      list.replaceChildren(...diff.map((change) => {
+        const li = document.createElement('li');
+        li.textContent = describeRecipeChange(change);
+        return li;
+      }));
+      const tags = Object.entries(decodedRecipe.tags).map(([key, value]) => `${key}: ${value}`).join(' · ');
+      status.textContent = getInterpolatedText('recipeStatusRead', { count: String(diff.length), tags: tags ? ` · ${tags}` : '' }, `Recipe read: ${diff.length} change(s)${tags ? ` · ${tags}` : ''}`);
+      if (applyBtn) applyBtn.disabled = !ready || !diff.length;
+      if (applySelectedBtn) applySelectedBtn.disabled = !state.fileQueue.some((item) => item.selected && item.file !== state.loadedFile);
+    }
+
+    // Recipe settings sanitised against the current photo, keyed by recipe key.
+    function recipePatch() {
+      const next = decodedRecipe?.settings || {};
+      const safe = sanitizeSettings({ ...extractCurrentSettings(), ...next }, { fallbackSettings: state });
+      const patch = {};
+      for (const key of RECIPE_KEYS) if (Object.hasOwn(next, key) && safe[key] !== undefined) patch[key] = structuredClone(safe[key]);
+      return patch;
+    }
+
+    function applyRecipeToCurrent() {
+      if (!decodedRecipe || state.currentStep < 3 || !state.processedImageData) return;
+      const patch = recipePatch();
+      if (!Object.keys(patch).length) return;
+      pushUndo('recipe');
+      const filmTypeChanged = Object.hasOwn(patch, 'filmType') && patch.filmType !== state.filmType;
+      if (filmTypeChanged) {
+        state.filmType = patch.filmType;
+        setFilmTypeButtons(state.filmType);
+        if (requiresFilmBase()) setStep2Mode(suggestStep2Mode());
+        else updateFilmModeUI();
+      }
+      for (const [key, value] of Object.entries(patch)) if (key !== 'filmType') state[key] = value;
+      if (patch.curvePoints) ['r', 'g', 'b'].forEach((ch) => updateCurveFromPoints(ch));
+      state.frontierGuideStep2ChoiceTouched = true;
+      updateSlidersFromState();
+      renderCurve();
+      updateEnlargerUI();
+      updateLabMatchUI();
+      markCurrentFileDirty();
+      if (filmTypeChanged || usesSilverCoreConversion(state)) scheduleSilverSourceRefresh();
+      else schedulePreviewUpdate();
+      showToast(getLocalizedText('recipeApplied', 'Recipe applied.'));
+      updateRecipeUI();
+    }
+
+    function applyRecipeToSelected() {
+      if (!decodedRecipe) return;
+      const patch = recipePatch();
+      const targets = state.fileQueue.filter((item) => item.selected && item.file !== state.loadedFile);
+      for (const item of targets) {
+        if (item.settings) item.settings = { ...item.settings, ...structuredClone(patch) };
+        else item.studioColors = { ...(item.studioColors || {}), ...structuredClone(patch) };
+        item.isDirty = false;
+        item.status = 'pending';
+      }
+      updateFileListUI();
+      showToast(getInterpolatedText('recipeAppliedSelected', { count: String(targets.length) }, `Recipe applied to ${targets.length} photo(s)`));
+      scheduleProjectRecovery();
+    }
+
+    async function scanRecipeQr() {
+      if (typeof BarcodeDetector !== 'function' || !navigator.mediaDevices?.getUserMedia) return;
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+      } catch (error) {
+        console.warn('Recipe scan camera failed:', error);
+        showToast(getLocalizedText('loupeNoCamera', 'No camera available.'));
+        return;
+      }
+      const video = document.createElement('video');
+      video.srcObject = stream;
+      video.muted = true;
+      video.playsInline = true;
+      try { await video.play(); } catch {}
+      showToast(getLocalizedText('recipeScanning', 'Point the camera at the recipe QR…'), 3000);
+      const detector = new BarcodeDetector({ formats: ['qr_code'] });
+      const started = Date.now();
+      let found = '';
+      while (!found && Date.now() - started < 20000) {
+        try {
+          const codes = await detector.detect(video);
+          found = codes.map((code) => code.rawValue).find((value) => /NC\d+\./.test(value || '')) || '';
+        } catch {}
+        if (!found) await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+      for (const track of stream.getTracks()) track.stop();
+      if (found) {
+        const box = document.getElementById('recipeCode');
+        if (box) box.value = found;
+        readRecipeFromBox();
+      } else {
+        showToast(getLocalizedText('recipeScanNone', 'No recipe QR found.'));
+      }
+    }
+
+    document.getElementById('recipeCopyBtn')?.addEventListener('click', () => { void copyRecipe(); });
+    document.getElementById('recipeQrBtn')?.addEventListener('click', toggleRecipeQr);
+    document.getElementById('recipeScanBtn')?.addEventListener('click', () => { void scanRecipeQr(); });
+    document.getElementById('recipeDecodeBtn')?.addEventListener('click', readRecipeFromBox);
+    document.getElementById('recipeApplyBtn')?.addEventListener('click', applyRecipeToCurrent);
+    document.getElementById('recipeApplySelectedBtn')?.addEventListener('click', applyRecipeToSelected);
+    document.getElementById('recipeCode')?.addEventListener('input', () => { decodedRecipe = null; updateRecipeUI(); });
+
+    // ===========================================
     // Multi-shot merge (camera scanning)
     // ===========================================
     const MULTI_SHOT_MAX = 5;
@@ -13520,8 +13961,12 @@
         },
         onConfirmAnalysis: () => beginCropMode({ analysisOnly: true }),
         onMergeShots: (mode) => { void mergeSelectedShots(mode); },
-        onLoupe: () => { void openLoupe(); }
+        onLoupe: () => { void openLoupe(); },
+        onSaveProject: () => { void saveProject(); },
+        onOpenProject: () => { const input = document.getElementById('projectInput'); if (input) { input.value = ''; input.click(); } },
+        onRestoreProject: () => { restoreRecoveredProject(); }
       });
+      void offerProjectRecovery();
       updateWorkflowUI();
       studioWorkspace.sync();
     }

@@ -213,6 +213,7 @@
           <label class="upload-btn" id="uploadBtn" for="fileInput" role="button" tabindex="0" data-i18n="selectFile">Select File</label>
           <label class="upload-btn secondary" id="uploadFolderBtn" for="folderInput" role="button" tabindex="0" data-i18n="selectFolder">Select Folder</label>
           <input type="file" id="fileInput" class="hidden-file-input" accept=".cr2,.cr3,.crw,.nef,.nrw,.arw,.dng,.raf,.raw,.rw2,.pef,.srw,.3fr,.mef,.orf,.rwl,.iiq,.x3f,.mrw,.kdc,.dcr,.tif,.tiff,image/*" multiple>
+          <input type="file" id="projectInput" class="hidden-file-input" accept=".json,.cr2,.cr3,.crw,.nef,.nrw,.arw,.dng,.raf,.raw,.rw2,.pef,.srw,.3fr,.mef,.orf,.rwl,.iiq,.x3f,.mrw,.kdc,.dcr,.tif,.tiff,image/*" multiple>
           <input type="file" id="folderInput" class="hidden-file-input" accept=".cr2,.cr3,.crw,.nef,.nrw,.arw,.dng,.raf,.raw,.rw2,.pef,.srw,.3fr,.mef,.orf,.rwl,.iiq,.x3f,.mrw,.kdc,.dcr,.tif,.tiff,image/*" webkitdirectory directory multiple>
           <div class="upload-support-hint" id="folderPickerHint" data-i18n="folderPickerUnsupported">Folder selection is not supported in this browser. Please use Select File.</div>
         </div>
@@ -1046,6 +1047,27 @@
             </div>
           </div>
           <div class="control-group-hint" data-i18n="metadataHint">Written into EXIF and XMP on every export.</div>
+        </div>
+      </div>
+      <div class="control-section task-secondary" id="recipeSection" style="display: none;">
+        <div class="section-content">
+          <div class="control-group">
+            <div class="roll-reference-status" id="recipeStatus" role="status"></div>
+            <div class="film-base-buttons">
+              <button class="film-base-btn" id="recipeCopyBtn" data-i18n="recipeCopy">Copy recipe code</button>
+              <button class="film-base-btn" id="recipeQrBtn" data-i18n="recipeQr">Show QR</button>
+              <button class="film-base-btn" id="recipeScanBtn" data-i18n="recipeScan" hidden>Scan QR</button>
+            </div>
+            <canvas id="recipeQrCanvas" class="recipe-qr" width="1" height="1" hidden></canvas>
+            <label class="recipe-note"><span data-i18n="recipeNote">Note</span><input type="text" id="recipeNote" maxlength="80" autocomplete="off"></label>
+            <textarea id="recipeCode" class="recipe-code" rows="3" spellcheck="false"></textarea>
+            <div class="film-base-buttons">
+              <button class="film-base-btn" id="recipeDecodeBtn" data-i18n="recipeDecode">Read recipe</button>
+              <button class="film-base-btn" id="recipeApplyBtn" data-i18n="recipeApply" disabled>Apply to this photo</button>
+              <button class="film-base-btn" id="recipeApplySelectedBtn" data-i18n="recipeApplySelected" disabled>Apply to selected</button>
+            </div>
+            <ul id="recipeDiff" class="recipe-diff"></ul>
+          </div>
         </div>
       </div>
       <div class="control-section task-secondary" id="labMatchSection" style="display: none;">

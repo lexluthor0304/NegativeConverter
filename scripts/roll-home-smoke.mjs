@@ -2,6 +2,8 @@
 // (EXIF + XMP), the contact sheet renders at page size, a roll project saves
 // and reopens, and a recipe round-trips through copy and paste.
 import { join } from 'node:path';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { parseTiff, TIFF_TAGS, EXIF_TAGS } from '../negative2positive/src/workers/tiffWriter.js';
 import { listPngChunks, listJpegSegments } from '../negative2positive/src/app/exportMetadata.js';
 
@@ -104,6 +106,73 @@ export async function runRollHomeSmoke({ send, evaluate, waitFor, wait, fail, in
   console.log('ok: roll and frame metadata land in the PNG (eXIf + iTXt), TIFF (IFD0 + Exif + XMP) and JPEG (APP1 EXIF + XMP) exports');
 
   await runContactSheetScenario({ evaluate, waitFor, wait, fail });
+  await runProjectScenario({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, fixture });
+  await runRecipeScenario({ evaluate, waitFor, wait, fail });
+}
+
+// ---- 3. Roll project: save from the batch menu, reopen in a fresh page with the original. ----
+async function runProjectScenario({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, fixture }) {
+  await evaluate(`document.getElementById('studioSaveProject').click()`);
+  const saved = await takeDownload(evaluate, waitFor, 'project captured');
+  const text = new TextDecoder().decode(saved.bytes);
+  const project = JSON.parse(text);
+  console.log('roll home project:', JSON.stringify({ name: saved.name, version: project.version, files: project.files.map((f) => f.name), iso: project.roll?.metadata?.iso, hashed: Boolean(project.files[0]?.hash) }));
+  if (!/\.ncroll\.json$/.test(saved.name)) fail('project file name wrong: ' + saved.name);
+  if (project.files[0]?.name !== 'negative-strip-dx.png' || project.roll?.metadata?.iso !== '400') fail('project content wrong: ' + text.slice(0, 300));
+  if (project.files[0]?.settings?.frameMetadata?.frameNumber !== '31A') fail('project lacks the frame settings: ' + JSON.stringify(project.files[0]?.settings?.frameMetadata));
+  if (!project.files[0]?.hash) fail('project entries carry no content hash');
+  const projectPath = join(mkdtempSync(join(tmpdir(), 'nc-project-')), saved.name);
+  writeFileSync(projectPath, text);
+
+  await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
+  await waitFor('roll home reboot', `!!document.getElementById('projectInput')`);
+  await installDialogAutoAccept();
+  await installDownloadCapture(evaluate);
+  await wait(300);
+  await evaluate(`(() => {
+    window.__rollToasts = [];
+    new MutationObserver((records) => { for (const r of records) for (const n of r.addedNodes) if (n.nodeType === 1) window.__rollToasts.push(n.textContent); }).observe(document.getElementById('toastContainer'), { childList: true });
+  })()`);
+  const doc = await send('DOM.getDocument');
+  const input = await send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector: '#projectInput' });
+  await send('DOM.setFileInputFiles', { files: [fixture, projectPath], nodeId: input.result.nodeId });
+  await waitFor('project reopened', `${ready} && document.getElementById('studioFilename').textContent === 'negative-strip-dx.png' && document.getElementById('metaIso').value === '400'`, 150_000);
+  await wait(800);
+  const restored = await evaluate(`({ iso: document.getElementById('metaIso').value, frame: document.getElementById('metaFrameNumber').value, camera: document.getElementById('metaCamera').value, toasts: window.__rollToasts.filter((t) => /Project/.test(t)) })`);
+  console.log('roll home project restored:', JSON.stringify(restored));
+  if (restored.frame !== '31A' || restored.camera !== 'Nikon FM2') fail('project did not restore the metadata: ' + JSON.stringify(restored));
+  if (!restored.toasts.some((t) => /Project opened: 1 photo/.test(t))) fail('project toast missing: ' + JSON.stringify(restored.toasts));
+  console.log('ok: the roll project saves the queue, settings and metadata and restores them when reopened with the original');
+}
+
+// ---- 4. Recipe: copy a short NC1 code with a QR, read it back with a diff, apply it, refuse a newer version. ----
+async function runRecipeScenario({ evaluate, waitFor, wait, fail }) {
+  await evaluate(`document.getElementById('studioTab-edit').click(); document.getElementById('studioRecipe').open = true;`);
+  const setSlider = (id, value) => evaluate(`(() => { const el = document.getElementById(${JSON.stringify(id)}); el.value = ${JSON.stringify(value)}; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+  await setSlider('coreExposure', '20');
+  await waitFor('exposure set', `document.getElementById('coreExposureValue').value === '20'`, 10_000);
+  await wait(600);
+  await evaluate(`document.getElementById('recipeCopyBtn').click()`);
+  await waitFor('recipe code shown', `/^NC1\\./.test(document.getElementById('recipeCode').value)`, 10_000);
+  const code = await evaluate(`document.getElementById('recipeCode').value`);
+  console.log('roll home recipe:', code.length, 'chars');
+  if (code.length > 300) fail('recipe code too long: ' + code.length);
+  await evaluate(`document.getElementById('recipeQrBtn').click()`);
+  const qr = await evaluate(`(() => { const c = document.getElementById('recipeQrCanvas'); return { hidden: c.hidden, width: c.width }; })()`);
+  if (qr.hidden || qr.width < 100) fail('QR not drawn: ' + JSON.stringify(qr));
+  await setSlider('coreExposure', '0');
+  await waitFor('exposure reset', `document.getElementById('coreExposureValue').value === '0'`, 10_000);
+  await evaluate(`document.getElementById('recipeDecodeBtn').click()`);
+  await waitFor('recipe read', `/Recipe read: \\d+ change/.test(document.getElementById('recipeStatus').textContent)`, 10_000);
+  const diff = await evaluate(`[...document.querySelectorAll('#recipeDiff li')].map((li) => li.textContent)`);
+  console.log('roll home recipe diff:', JSON.stringify(diff));
+  if (!diff.some((line) => /coreExposure: 0 → 20/.test(line))) fail('recipe diff does not list the exposure change: ' + JSON.stringify(diff));
+  await evaluate(`document.getElementById('recipeApplyBtn').click()`);
+  await waitFor('recipe applied', `document.getElementById('coreExposureValue').value === '20'`, 10_000);
+  await evaluate(`(() => { const box = document.getElementById('recipeCode'); box.value = 'NC99.AAAA'; box.dispatchEvent(new Event('input', { bubbles: true })); document.getElementById('recipeDecodeBtn').click(); })()`);
+  await waitFor('newer recipe refused', `window.__rollToasts.some((t) => /newer version/.test(t))`, 10_000);
+  await wait(300);
+  console.log('ok: a recipe copies as a short NC1 code with a QR, reads back with a diff, applies to the photo, and a newer-version code is refused');
 }
 
 const pngSize = (bytes) => ({ width: (bytes[16] << 24 | bytes[17] << 16 | bytes[18] << 8 | bytes[19]) >>> 0, height: (bytes[20] << 24 | bytes[21] << 16 | bytes[22] << 8 | bytes[23]) >>> 0 });
