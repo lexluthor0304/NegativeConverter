@@ -31,7 +31,7 @@ export function encodePng16Blob(imageData) {
  * @param {number} [bitDepth] - 8 or 16
  * @returns {Blob}
  */
-export function encodeTiffBlob(imageData, bitDepth = 8) {
+export function encodeTiffBlob(imageData, bitDepth = 8, metadata = null) {
   const { samples } = selectExportSamples(imageData, bitDepth);
-  return encodeTiffSamples(samples, imageData.width, imageData.height, bitDepth);
+  return encodeTiffSamples(samples, imageData.width, imageData.height, bitDepth, metadata);
 }

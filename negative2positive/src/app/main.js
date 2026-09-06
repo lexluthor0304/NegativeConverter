@@ -17,6 +17,19 @@
     import { readFilmEdge, sanitizeFilmEdgeForSettings, formatFilmEdgeFrames } from './filmEdgeReader.js';
     import { loadDxFilmTable, describeDxFilm, shortFilmName } from './dxFilmDatabase.js';
     import { aggregateRollAnalysis, measureNegativeMean, sanitizeRollFrameForSettings, rollFrameExposureUnits } from './rollAnalysis.js';
+    import { filtrationFromSliders, slidersFromFiltration, stopsFromExposureUnits, exposureUnitsFromStops, contrastForGradeValue, gradeValueForContrast, gradeLabelForValue, TEST_STRIP_AXES, formatAxisValue, testStripValues } from './enlarger.js';
+    import { sanitizeLocalExposureForSettings, workingPointToBase, basePointToWorking, rotatedDimensions } from './localExposure.js';
+    import { paperProfiles, paperIdsForFilmKind, normalizePaperId, normalizeToningId } from '../silvercore/engine/PaperProfiles.js';
+    import { buildFlatFieldMap, scoreBlankFrame } from './flatField.js';
+    import { estimateAlignment, warpImageData } from './imageAlignment.js';
+    import { collectPairs, fitLook, sanitizeLookForSettings } from './labMatch.js';
+    import { estimateExposureRatio, mergeFrames, coverageRect, toImage16, image16ToImageData } from './multiShot.js';
+    import { sanitizeRollMetadata, sanitizeFrameMetadata, buildExportMetadata, frameNumberFor } from './analogMetadata.js';
+    import { attachMetadataToBlob } from './exportMetadata.js';
+    import { buildRollProject, serializeRollProject, parseRollProject, matchProjectFiles, hashFileForProject, projectFileName, isProjectFileName, saveProjectRecovery, loadProjectRecovery, clearProjectRecovery } from './rollProject.js';
+    import { encodeRecipe, decodeRecipe, recipeDiff, describeRecipeChange, RECIPE_KEYS } from './recipes.js';
+    import qrcode from 'qrcode-generator';
+    import { layoutContactSheet, pagesFor, renderContactSheetPage, contactSheetHeader, normalizeLayoutId, normalizePageId } from './contactSheet.js';
 
     import { convertFrameWithRouter, resolveConversionMode } from '../pipeline/conversionRouter.js';
     import { convertFrameInWorker, convertPreviewFrameInWorker, CONVERSION_FAILED, WORKER_TIMEOUT } from './conversionWorkerClient.js';
@@ -27,8 +40,11 @@
       createAdjustmentLutScratch,
       stripLegacyToneSettingsForSilverCore,
       applyPreparedAdjustmentsToBuffer,
+      applyPreparedAdjustmentsToBuffer16,
       areAdjustmentsIdentity
     } from './adjustmentPipeline.js';
+    import { buildLinearPositive, encodeLinearDngBlob } from './linearDng.js';
+    import { inpaintWithModel, createInpaintSession, fetchModelBytes, inpaintBackends, DEFAULT_MODEL_URL } from './aiInpaint.js';
     import {
       downsampleImageDataForMaxPixels,
       downsampleImageDataForMaxDim,
@@ -70,6 +86,7 @@
     import { getLoadingOverlay } from '../ui/LoadingOverlay.js';
     import {
       workerApplyAdjustments,
+      workerApplyAdjustments16,
       workerEncodePng16,
       workerEncodeTiff,
       isWorkerAvailable
@@ -440,6 +457,12 @@
         updateGrayPointGuideUI();
         updateFilmEdgeUI();
         updateRollAnalysisUI();
+        updateEnlargerUI();
+        updatePaperUI();
+        updateDodgeBurnUI();
+        updateFlatFieldUI();
+        updateLabMatchUI();
+        populateTestStripAxes();
         if (typeof updateLensCorrectionUI === 'function') updateLensCorrectionUI();
         if (typeof updateExportUI === 'function') updateExportUI();
         updateDesktopBatchExportUI();
@@ -1985,9 +2008,6 @@
       // 16-bit pipeline (Stage 2+) — full-precision counterparts to the 8-bit fields above.
       // Shape: { width, height, data: Uint16Array }, RGBA, range [0, 65535].
       // SilverCore Engine consumes Image16 starting in Stage 3; until then these are dormant.
-      original16: null,
-      cropped16: null,
-      processed16: null,
 
       // Film settings
       filmType: 'color',
@@ -2023,6 +2043,29 @@
       coreWbMode: 'auto',
       coreTemperature: 0,
       coreTint: 0,
+      // Cyan/red balance: the enlarger's C filtration.
+      coreCyan: 0,
+      // Paper emulation (print character after every colour decision).
+      corePaper: 'none',
+      corePaperToning: 'none',
+      corePaperToningStrength: 100,
+      // Dodge and burn strokes (per-file setting), see localExposure.js.
+      localExposure: null,
+      // Lab-match look (colour setting, see labMatch.js).
+      look: null,
+      // Analog metadata: the roll (session-wide) and this frame (per file).
+      rollMetadata: sanitizeRollMetadata({}),
+      frameMetadata: sanitizeFrameMetadata({}),
+      // A recovery copy of the last roll exists in IndexedDB (see rollProject.js).
+      projectRecoveryAvailable: false,
+      // Flat field: session registry of gain maps and the current file's choice.
+      flatFields: {},
+      flatFieldActiveId: null,
+      flatFieldId: null,
+      // Control paradigm (UI preference): 'digital' sliders or 'enlarger' head.
+      controlParadigm: 'digital',
+      // Dodge and burn brush UI state (session only).
+      dodgeBurn: { active: false, mode: 'burn', stops: 0.5, size: 12, feather: 50, showOverlay: true },
       coreSaturation: 100,
       coreGlow: 0,
       coreFade: 0,
@@ -2142,6 +2185,7 @@
         _state: null,        // Internal state for updateDustStrength
         inpaintedImageData: null, // ImageData after inpainting
         brushSize: 5,
+        ai: false,           // learned inpainter on commit and export (aiInpaint.js)
       },
 
       // Export settings
@@ -2316,6 +2360,7 @@
         curveReset: '重置曲线', dustBrushStroke: '除尘笔刷', dustToggle: '除尘开关',
         filmBase: '色罩基准', whiteBalance: '白平衡', autoDetectBase: '自动检测色罩',
         filmEdgeApply: '应用片边识别', filmEdgeBase: '片边片基', rollAnalysis: '整卷分析',
+        testStrip: '试条', dodgeBurn: '加减光', enlarger: '放大机', flatField: '平场校正', labMatch: '匹配店扫', coreCyan: '青 / 红', corePaper: '相纸', corePaperToning: '调色', corePaperToningStrength: '调色强度',
         coreExposure: '曝光', coreContrast: '对比度', coreHighlights: '高光',
         coreShadows: '阴影', coreWhites: '白色', coreBlacks: '黑色',
         coreBrightness: '亮度', coreTemperature: '色温', coreTint: '色调',
@@ -2338,6 +2383,7 @@
         curveReset: 'Reset Curves', dustBrushStroke: 'Dust Brush', dustToggle: 'Dust Toggle',
         filmBase: 'Film Base', whiteBalance: 'White Balance', autoDetectBase: 'Auto Detect Base',
         filmEdgeApply: 'Apply Detected Film', filmEdgeBase: 'Rebate Film Base', rollAnalysis: 'Roll Analysis',
+        testStrip: 'Test Strip', dodgeBurn: 'Dodge and Burn', enlarger: 'Enlarger', flatField: 'Flat Field', labMatch: 'Match Lab Scan', coreCyan: 'Cyan / Red', corePaper: 'Paper', corePaperToning: 'Toning', corePaperToningStrength: 'Toning Strength',
         coreExposure: 'Exposure', coreContrast: 'Contrast', coreHighlights: 'Highlights',
         coreShadows: 'Shadows', coreWhites: 'Whites', coreBlacks: 'Blacks',
         coreBrightness: 'Brightness', coreTemperature: 'Temperature', coreTint: 'Tint',
@@ -2360,6 +2406,7 @@
         curveReset: 'カーブリセット', dustBrushStroke: '除塵ブラシ', dustToggle: '除塵切替',
         filmBase: 'フィルムベース', whiteBalance: 'ホワイトバランス', autoDetectBase: '自動検出',
         filmEdgeApply: 'フィルム縁を適用', filmEdgeBase: '縁のベース', rollAnalysis: 'ロール解析',
+        testStrip: 'テストストリップ', dodgeBurn: '覆い焼き・焼き込み', enlarger: '引き伸ばし機', flatField: 'フラットフィールド', labMatch: 'ラボスキャンに合わせる', coreCyan: 'シアン / 赤', corePaper: '印画紙', corePaperToning: '調色', corePaperToningStrength: '調色の強さ',
         coreExposure: '露出', coreContrast: 'コントラスト', coreHighlights: 'ハイライト',
         coreShadows: 'シャドウ', coreWhites: 'ホワイト', coreBlacks: 'ブラック',
         coreBrightness: '明るさ', coreTemperature: '色温度', coreTint: '色合い',
@@ -2394,6 +2441,7 @@
       'coreBrightness', 'coreExposure', 'coreContrast', 'coreHighlights', 'coreShadows',
       'coreWhites', 'coreBlacks', 'coreWbMode', 'coreTemperature', 'coreTint',
       'coreSaturation', 'coreGlow', 'coreFade', 'coreCurvePrecision', 'coreUseWebGL',
+      'coreCyan', 'corePaper', 'corePaperToning', 'corePaperToningStrength', 'flatFieldId',
       'wbR', 'wbG', 'wbB', 'wbAutoConfidence', 'wbUserOverride',
       'filmType', 'filmBaseSet', 'grayPointSampled', 'step2Mode', 'rotationAngle',
       'mirrored', 'sprocketPreviewEnabled', 'currentStep',
@@ -2434,6 +2482,9 @@
         showMask: state.dustRemoval.showMask,
       };
       settings.sprocketEdge = createSprocketEdgeSettings(state.sprocketEdge);
+      settings.localExposure = state.localExposure ? structuredClone(state.localExposure) : null;
+      settings.look = state.look ? structuredClone(state.look) : null;
+      settings.frameMetadata = sanitizeFrameMetadata(state.frameMetadata);
       settings.autoFrameMeta = state.autoFrame.lastDiagnostics ? structuredClone(state.autoFrame.lastDiagnostics) : null;
 
       // Category B: references
@@ -2489,6 +2540,12 @@
       state.dustRemoval.brushSize = s.dustRemoval.brushSize;
       state.dustRemoval.showMask = s.dustRemoval.showMask;
       state.sprocketEdge = createSprocketEdgeSettings(s.sprocketEdge);
+      state.localExposure = s.localExposure ? structuredClone(s.localExposure) : null;
+      state.look = s.look ? structuredClone(s.look) : null;
+      state.frameMetadata = sanitizeFrameMetadata(s.frameMetadata);
+      updateDodgeBurnUI();
+      updateLabMatchUI();
+      updateMetadataUI();
       state.autoFrame.lastDiagnostics = s.autoFrameMeta ? structuredClone(s.autoFrameMeta) : null;
 
       // Restore Category B refs
@@ -2815,6 +2872,7 @@
       state.rollReference.applyLock = false;
       state.rollReference.applyCrop = false;
       resetRollAnalysisState();
+      resetFlatFieldState();
     }
 
     function resetRollAnalysisState() {
@@ -3084,10 +3142,16 @@
       studioWorkspace?.sync();
     }
 
-    function getSprocketFrameComposeOptions() {
-      return {
-        edgeMarkings: state.sprocketEdge
-      };
+    // Edge text and frame number default to the roll's stock and this frame's
+    // number while the user has not typed their own values.
+    function getSprocketFrameComposeOptions(settings = state, position = state.currentFileIndex) {
+      const edge = { ...state.sprocketEdge };
+      const roll = state.rollMetadata || {};
+      const frame = settings === state || !settings ? state.frameMetadata : settings.frameMetadata;
+      if (roll.stock && (!edge.text || edge.text === DEFAULT_SPROCKET_EDGE_MARKINGS.text)) edge.text = roll.stock.toUpperCase();
+      const number = parseInt(frameNumberFor(frame, position), 10);
+      if (Number.isFinite(number) && edge.frameNumber === DEFAULT_SPROCKET_EDGE_MARKINGS.frameNumber) edge.frameNumber = Math.max(0, Math.min(99, number));
+      return { edgeMarkings: edge };
     }
 
     function syncSprocketEdgeSettingsUI() {
@@ -3488,6 +3552,17 @@
         coreWbMode: String(source.coreWbMode || fallbackSettings.coreWbMode || 'auto'),
         coreTemperature: sanitizeNumeric(source.coreTemperature, fallbackSettings.coreTemperature ?? 0, -100, 100),
         coreTint: sanitizeNumeric(source.coreTint, fallbackSettings.coreTint ?? 0, -100, 100),
+        coreCyan: sanitizeNumeric(source.coreCyan, fallbackSettings.coreCyan ?? 0, -100, 100),
+        corePaper: normalizePaperId(source.corePaper ?? fallbackSettings.corePaper),
+        corePaperToning: normalizeToningId(source.corePaperToning ?? fallbackSettings.corePaperToning),
+        corePaperToningStrength: sanitizeNumeric(source.corePaperToningStrength, fallbackSettings.corePaperToningStrength ?? 100, 0, 100),
+        // Per-file like the crop: strokes are never inherited from the fallback frame.
+        localExposure: sanitizeLocalExposureForSettings(source === state ? state.localExposure : source.localExposure),
+        // A colour setting like the curves: copied with the look, inherited from the fallback frame.
+        look: sanitizeLookForSettings(source === state ? state.look : (Object.hasOwn(source, 'look') ? source.look : fallbackSettings.look)),
+        frameMetadata: sanitizeFrameMetadata(source === state ? state.frameMetadata : (Object.hasOwn(source, 'frameMetadata') ? source.frameMetadata : fallbackSettings.frameMetadata)),
+        // Roll-level like the film base: a new file inherits the roll's flat field.
+        flatFieldId: typeof (source.flatFieldId ?? fallbackSettings.flatFieldId) === 'string' ? String(source.flatFieldId ?? fallbackSettings.flatFieldId).slice(0, 64) : null,
         coreSaturation: sanitizeNumeric(source.coreSaturation, fallbackSettings.coreSaturation ?? 100, 0, 200),
         coreGlow: sanitizeNumeric(source.coreGlow, fallbackSettings.coreGlow ?? 0, 0, 100),
         coreFade: sanitizeNumeric(source.coreFade, fallbackSettings.coreFade ?? 0, 0, 100),
@@ -3588,6 +3663,11 @@
         wbMode: safe.coreWbMode,
         temperature: safe.coreTemperature,
         tint: safe.coreTint,
+        colorCyan: safe.coreCyan,
+        paper: safe.corePaper,
+        paperToning: safe.corePaperToning,
+        paperToningStrength: safe.corePaperToningStrength,
+        localExposure: safe.localExposure,
         saturation: safe.coreSaturation,
         glow: safe.coreGlow,
         fade: safe.coreFade,
@@ -3601,7 +3681,38 @@
         ? buildCoreConversionSettings(settings)
         : settings;
       const meta = settings === state ? state.autoFrame.lastDiagnostics : settings.autoFrameMeta;
-      return { ...router, analysisRegion: resolveAnalysisRegion({ ...settings, autoFrameMeta: meta }, source) };
+      const flatField = router.flatFieldId ? state.flatFields[router.flatFieldId] || null : null;
+      return {
+        ...router,
+        analysisRegion: resolveAnalysisRegion({ ...settings, autoFrameMeta: meta }, source),
+        // Dodge and burn strokes are stored on the unrotated base; the adapter
+        // rasterises them for the working frame it converts.
+        localExposureGeometry: router.localExposure ? localExposureGeometryFor(settings, source) : null,
+        // Flat field gain map (session registry) with the same frame geometry.
+        flatField,
+        flatFieldGeometry: flatField ? localExposureGeometryFor(settings, source) : null
+      };
+    }
+
+    // Geometry chain (base -> rotation -> mirror -> crop) for mapping strokes.
+    // width/height are filled in by the adapter for the buffer it converts.
+    function localExposureGeometryFor(settings = state, source = state.loadedBaseImageData || state.originalImageData) {
+      if (!source) return null;
+      const live = settings === state;
+      const angle = Number.isFinite(settings.rotationAngle) ? settings.rotationAngle : 0;
+      const rotated = live && state.originalImageData
+        ? { width: state.originalImageData.width, height: state.originalImageData.height }
+        : rotatedDimensions(source.width, source.height, angle);
+      const crop = live ? state.cropRegion : settings.cropRegion;
+      return {
+        baseWidth: source.width,
+        baseHeight: source.height,
+        rotationAngle: angle,
+        mirrored: Boolean(settings.mirrored),
+        rotatedWidth: rotated.width,
+        rotatedHeight: rotated.height,
+        cropRegion: crop ? { left: crop.left ?? crop.x ?? 0, top: crop.top ?? crop.y ?? 0, width: crop.width, height: crop.height } : null
+      };
     }
 
     const colorAnalysisSamples = new WeakMap();
@@ -4342,6 +4453,8 @@
       if (state.cropping) return false;
       if (state.coreUseWebGL === false) return false;
       if (state.dustRemoval.enabled && state.dustRemoval.showMask) return false;
+      if (state.dodgeBurn && state.dodgeBurn.active) return false;
+      if (state.look) return false;
       if (state.sprocketPreviewEnabled) return false;
       return !!webglState.gl && !webglState.disabledByError && state.currentStep >= 3 && !!state.processedImageData;
     }
@@ -4628,6 +4741,7 @@
       }
       // Histogram updates are deferred to full renders for responsiveness.
       if (state.dustRemoval.showMask && state.dustRemoval.mask) renderDustMaskOverlay();
+      renderDodgeBurnOverlay();
     }
 
     function updateFull() {
@@ -4665,6 +4779,7 @@
       syncTransformCanvasFromMainCanvas();
       state.lastRenderQuality = 'full';
       if (state.dustRemoval.showMask && state.dustRemoval.mask) renderDustMaskOverlay();
+      renderDodgeBurnOverlay();
     }
 
     function renderFullWebGL() {
@@ -4672,6 +4787,7 @@
       // WebGL only usable for legacy tone path (non-SilverCore)
       if (usesSilverCoreConversion(state)) return false;
       if (state.dustRemoval.enabled && state.dustRemoval.showMask) return false;
+      if (state.dodgeBurn && state.dodgeBurn.active) return false;
 
       const source = state.processedImageData;
       const gl = webglState.gl;
@@ -5446,7 +5562,8 @@
         state.dustRemoval._state = _state;
 
         if (particleCount > 0) {
-          const inpainted = inpaintMasked(source, mask, 3);
+          const inpainted = await inpaintForCommit(source, mask);
+          if (!isCurrent() || source !== getDustSource()) return;
           state.dustRemoval.inpaintedImageData = inpainted;
           const tmpl = getLocalizedText('dustStatusDone', 'Detected {count} dust particles');
           updateDustStatusUI(tmpl.replace('{count}', String(particleCount)));
@@ -6180,13 +6297,6 @@
           state.previewSourceImageData = null;
           state.histogramSourceImageData = null;
           state.webglSourceImageData = null;
-          // Mirror the 16-bit handle when the loader attached one (RAW / 16-bit
-          // PNG). 8-bit sources stay 8-bit here — silverAdapter promotes on
-          // demand at conversion time, on the cropped region, so we never pay
-          // a full-resolution ×257 upscale at load.
-          state.original16 = imageData.__image16 || null;
-          state.cropped16 = null;
-          state.processed16 = null;
           state.lastRenderQuality = 'full';
           state.filmBaseSet = false;
           state.grayPointSampled = false;
@@ -6205,6 +6315,7 @@
           state.autoFrame.lastDiagnostics = null;
           state.filmEdge = null;
           state.rollFrame = null;
+          state.localExposure = null;
           state.rawMetadata = extractedRawMeta;
           if (webglState.gl) {
             webglState.sourceDirty = true;
@@ -6318,9 +6429,6 @@
 
         state.loadedBaseImageData = fullImageData;
         state.originalImageData = fullImageData;
-        state.original16 = fullImageData.__image16 || null;
-        state.cropped16 = null;
-        state.processed16 = null;
 
         if (Math.abs(state.rotationAngle) > 0.001) {
           state.originalImageData = applyRotationToImageData(state.originalImageData, state.rotationAngle);
@@ -7246,8 +7354,9 @@
 
     const coreReprocessHandlers = {
       // SilverCore の色調は画素に焼き込まれるため、ドラッグ中も変換する。
-      onInput: () => scheduleCoreReprocess({ full: false }),
-      onCommit: () => scheduleCoreReprocess({ full: false })
+      // The enlarger head mirrors the same values, so it follows every change.
+      onInput: () => { updateEnlargerUI(); scheduleCoreReprocess({ full: false }); },
+      onCommit: () => { updateEnlargerUI(); scheduleCoreReprocess({ full: false }); }
     };
 
     function cacheBorderBufferValueForBorderMode(value) {
@@ -7291,6 +7400,15 @@
     setupSlider('coreBlacks', 'coreBlacks', coreReprocessHandlers);
     setupSlider('coreTemperature', 'coreTemperature', coreReprocessHandlers);
     setupSlider('coreTint', 'coreTint', coreReprocessHandlers);
+    setupSlider('coreCyan', 'coreCyan', coreReprocessHandlers);
+    populatePaperOptions();
+    setupSelect('corePaper', 'corePaper', {
+      onChange: () => { updatePaperUI(); scheduleCoreReprocess({ full: false }); }
+    });
+    setupSelect('corePaperToning', 'corePaperToning', {
+      onChange: () => scheduleCoreReprocess({ full: false })
+    });
+    setupSlider('corePaperToningStrength', 'corePaperToningStrength', coreReprocessHandlers);
     setupSlider('coreSaturation', 'coreSaturation', coreReprocessHandlers);
     setupSlider('coreGlow', 'coreGlow', coreReprocessHandlers);
     setupSlider('coreFade', 'coreFade', coreReprocessHandlers);
@@ -9052,6 +9170,11 @@
       state.coreWbMode = 'auto';
       state.coreTemperature = 0;
       state.coreTint = 0;
+      state.coreCyan = 0;
+      state.corePaper = 'none';
+      state.corePaperToning = 'none';
+      state.corePaperToningStrength = 100;
+      state.look = null;
       state.coreSaturation = 100;
       state.coreGlow = 0;
       state.coreFade = 0;
@@ -9149,6 +9272,8 @@
     function closePhotoSession() {
       if (isDesktopBatchExportLocked()) return;
       clearUndoHistory();
+      pendingProject = null;
+      void clearProjectRecovery();
       // Leave crop mode first: the draft still points at the image
       // being discarded, and Apply would restore it over the reset.
       if (state.cropping) exitCropMode({ restore: false });
@@ -9408,14 +9533,18 @@
 
     function getEffectiveExportBitDepth(format = state.exportFormat, requestedBitDepth = state.exportBitDepth) {
       if (format === 'jpeg') return 8;
+      if (format === 'dng') return 16;
       return Number(requestedBitDepth) === 16 ? 16 : 8;
     }
 
     function getExportInfo(format = state.exportFormat, requestedBitDepth = state.exportBitDepth) {
-      const normalizedFormat = format === 'jpeg' || format === 'tiff' ? format : 'png';
+      const normalizedFormat = format === 'jpeg' || format === 'tiff' || format === 'dng' ? format : 'png';
       const bitDepth = getEffectiveExportBitDepth(normalizedFormat, requestedBitDepth);
       if (normalizedFormat === 'jpeg') {
         return { format: normalizedFormat, bitDepth, extension: '.jpg', mimeType: 'image/jpeg' };
+      }
+      if (normalizedFormat === 'dng') {
+        return { format: normalizedFormat, bitDepth: 16, extension: '.dng', mimeType: 'image/x-adobe-dng' };
       }
       if (normalizedFormat === 'tiff') {
         return { format: normalizedFormat, bitDepth, extension: '.tiff', mimeType: 'image/tiff' };
@@ -9423,20 +9552,14 @@
       return { format: 'png', bitDepth, extension: '.png', mimeType: 'image/png' };
     }
 
-    // The Step-3 adjustment stage is an 8-bit LUT pipeline, so a 16-bit export
-    // only carries real 16-bit samples when white balance, CMY, vibrance and
-    // the curves are all neutral. Anything else produces a 16-bit container
-    // holding 8-bit data, and the file name must not claim otherwise.
+    // A 16-bit export carries real 16-bit samples whenever the conversion
+    // produced a 16-bit plane: the Step-3 stage runs at 16 bits on export
+    // (applyPreparedAdjustmentsToBuffer16). Only the legacy (non-SilverCore)
+    // path, which has no plane, is limited to 8-bit data.
     function exportKeeps16BitSamples(settings = state) {
-      // A batch file with no saved settings is converted from
-      // createDefaultSettings, whose Step-3 controls are all at identity, so it
-      // does keep its 16-bit samples.
       if (!settings) return true;
-      try {
-        return areAdjustmentsIdentity(buildAdjustmentSettings(settings));
-      } catch (err) {
-        return false;
-      }
+      if (settings === state) return Boolean(state.processedImageData?.__image16) || usesSilverCoreConversion(state);
+      return usesSilverCoreConversion(settings);
     }
 
     function buildExportFileName(sourceName, exportInfo, options = {}) {
@@ -9450,6 +9573,7 @@
       const depthSuffix = wants16 && exportKeeps16BitSamples(options.settings || state)
         ? '_16bit'
         : '';
+      if (exportInfo.format === 'dng') return `${withConverted.replace(/_converted$/, '')}_linear${exportInfo.extension}`;
       return `${withConverted}${sprocketSuffix}${depthSuffix}${exportInfo.extension}`;
     }
 
@@ -9462,13 +9586,18 @@
       });
     }
 
-    function applySprocketFrameForExport(imageData, exportInfo) {
+    function applySprocketFrameForExport(imageData, exportInfo, settings = state, position = state.currentFileIndex) {
       if (!state.exportSprocketHolesEnabled) return imageData;
-      return composeSprocketFrame(imageData, getSprocketFrameComposeOptions());
+      return composeSprocketFrame(imageData, getSprocketFrameComposeOptions(settings, position));
     }
 
-    async function getCurrentExportImageData() {
+    async function getCurrentExportImageData({ bitDepth = 8 } = {}) {
       await ensureFullResolutionReadyForExport();
+      // A 16-bit export re-runs the adjustment stage on the engine's 16-bit
+      // plane instead of reusing the 8-bit display buffer.
+      if (bitDepth === 16 && state.currentStep >= 3 && state.processedImageData?.__image16) {
+        return await applyAdjustmentsWithSettings(state.processedImageData, state, { bitDepth: 16 });
+      }
       if (state.currentStep >= 3 && isDisplayImageDataFullResolution()) {
         return state.displayImageData;
       }
@@ -9485,7 +9614,7 @@
       return null;
     }
 
-    async function renderCurrentImageDataForExport() {
+    async function renderCurrentImageDataForExport(exportInfo = null) {
       await ensureFullResolutionReadyForExport();
       // ensureFullRender exists to leave a full-resolution CPU buffer in
       // state.displayImageData, which getCurrentExportImageData then reuses.
@@ -9501,7 +9630,7 @@
       if (!displayAlreadyCurrent && !previewIsGpu) {
         ensureFullRender();
       }
-      const imageData = await getCurrentExportImageData();
+      const imageData = await getCurrentExportImageData({ bitDepth: exportInfo?.bitDepth || 8 });
       if (!imageData) throw new Error('No image available for export.');
       return imageData;
     }
@@ -9524,20 +9653,25 @@
         overlay.updateProgress(5, lang.loadingAdjusting);
 
         const currentItem = getCurrentQueueItem();
-        if (state.currentStep >= 3 && state.processedImageData) {
+        if (exportInfo.format === 'dng') {
           persistCurrentFileSettings({ silent: true, force: true });
-          const imageData = await renderCurrentImageDataForExport();
+          overlay.updateProgress(40, lang.loadingEncoding);
+          blob = renderLinearDngBlob(state.conversionSourceImageData || state.croppedImageData || state.originalImageData, state, Math.max(0, state.currentFileIndex));
+          if (currentItem?.file?.name) fileName = buildActiveExportFileName(currentItem.file.name, exportInfo);
+        } else if (state.currentStep >= 3 && state.processedImageData) {
+          persistCurrentFileSettings({ silent: true, force: true });
+          const imageData = await renderCurrentImageDataForExport(exportInfo);
           const outputImageData = applySprocketFrameForExport(imageData, exportInfo);
           overlay.updateProgress(60, lang.loadingEncoding);
           blob = await imageDataToBlob(outputImageData, exportInfo.format, state.jpegQuality, exportInfo.bitDepth, (pct) => {
             overlay.updateProgress(60 + pct * 0.35, lang.loadingEncoding);
-          });
+          }, exportMetadataFor(state, Math.max(0, state.currentFileIndex)));
           if (currentItem?.file?.name) {
             fileName = buildActiveExportFileName(currentItem.file.name, exportInfo);
           }
         } else {
           overlay.updateProgress(50, lang.loadingEncoding);
-          const imageData = await renderCurrentImageDataForExport();
+          const imageData = await renderCurrentImageDataForExport(exportInfo);
           const outputImageData = applySprocketFrameForExport(imageData, exportInfo);
           blob = await imageDataToBlob(outputImageData, exportInfo.format, state.jpegQuality, exportInfo.bitDepth, (pct) => {
             overlay.updateProgress(50 + pct * 0.45, lang.loadingEncoding);
@@ -9624,20 +9758,18 @@
       updateDesktopExportMenuUI();
       const format = state.exportFormat;
       const isJpeg = format === 'jpeg';
+      const isDng = format === 'dng';
       if (isJpeg) state.exportBitDepth = 8;
+      const bitDepthSection = document.getElementById('exportBitDepthSection');
+      if (bitDepthSection) bitDepthSection.style.display = isDng ? 'none' : '';
+      const dngNote = document.getElementById('exportDngNote');
+      if (dngNote) dngNote.classList.toggle('show', isDng);
       const qualitySection = document.getElementById('exportQualitySection');
       qualitySection.classList.toggle('show', isJpeg);
 
       const bitDepthNote = document.getElementById('exportBitDepthNote');
       bitDepthNote.classList.toggle('show', isJpeg);
 
-      const downgradeNote = document.getElementById('exportBitDepthDowngradeNote');
-      if (downgradeNote) {
-        downgradeNote.classList.toggle(
-          'show',
-          !isJpeg && state.exportBitDepth === 16 && !exportKeeps16BitSamples()
-        );
-      }
       document.querySelectorAll('.bitdepth-btn').forEach(btn => {
         const depth = parseInt(btn.dataset.bitdepth, 10) === 16 ? 16 : 8;
         const disabled = isJpeg && depth === 16;
@@ -9647,20 +9779,21 @@
 
       // Update export button text
       const exportBtn = document.getElementById('exportBtn');
-      const exportKey = isJpeg ? 'exportJpeg' : (format === 'tiff' ? 'exportTiff' : 'exportPng');
+      const exportKey = isJpeg ? 'exportJpeg' : (format === 'tiff' ? 'exportTiff' : isDng ? 'exportDng' : 'exportPng');
       exportBtn.textContent = i18n[currentLang][exportKey];
       exportBtn.setAttribute('data-i18n', exportKey);
 
       const exportSprocketBtn = document.getElementById('exportSprocketBtn');
       if (exportSprocketBtn) {
-        const sprocketKey = isJpeg ? 'exportSprocketJpeg' : (format === 'tiff' ? 'exportSprocketTiff' : 'exportSprocketPng');
+        const sprocketKey = isJpeg ? 'exportSprocketJpeg' : (format === 'tiff' ? 'exportSprocketTiff' : isDng ? 'exportSprocketDng' : 'exportSprocketPng');
+        exportSprocketBtn.disabled = isDng || isDesktopBatchExportLocked();
         exportSprocketBtn.textContent = i18n[currentLang][sprocketKey];
         exportSprocketBtn.setAttribute('data-i18n', sprocketKey);
       }
 
       // Update export current button text
       const exportSingleBtn = document.getElementById('exportSingleBtn');
-      const exportSingleKey = isJpeg ? 'exportCurrentJpeg' : (format === 'tiff' ? 'exportCurrentTiff' : 'exportCurrent');
+      const exportSingleKey = isJpeg ? 'exportCurrentJpeg' : (format === 'tiff' ? 'exportCurrentTiff' : isDng ? 'exportCurrentDng' : 'exportCurrent');
       exportSingleBtn.textContent = i18n[currentLang][exportSingleKey];
       exportSingleBtn.setAttribute('data-i18n', exportSingleKey);
 
@@ -9694,6 +9827,7 @@
     function markCurrentFileDirty() {
       const item = getCurrentQueueItem();
       if (!item) return;
+      scheduleProjectRecovery();
       if (item.isDirty) return;
       item.isDirty = true;
       if (state.batchSessionActive) {
@@ -9834,21 +9968,31 @@
       return item.settings || null;
     }
 
-    async function applyAdjustmentsWithSettings(imageData, settings) {
+    // `bitDepth` 16 runs the stage on the engine's 16-bit plane (when the
+    // image carries one) so the export gets real 16-bit samples; 8 keeps the
+    // LUT stage the preview uses.
+    async function applyAdjustmentsWithSettings(imageData, settings, { bitDepth = 8 } = {}) {
       const adjustmentSettings = buildAdjustmentSettings(settings);
+      const wants16 = bitDepth === 16 && Boolean(imageData.__image16 && imageData.__image16.data instanceof Uint16Array);
 
       // Try Worker for large images (>1MP)
       if (imageData.width * imageData.height > 1_000_000 && isWorkerAvailable()) {
-        const result = await workerApplyAdjustments(imageData, adjustmentSettings, 'full');
+        const result = wants16
+          ? await workerApplyAdjustments16(imageData, adjustmentSettings, 'full')
+          : await workerApplyAdjustments(imageData, adjustmentSettings, 'full');
         if (result) return result;
       }
 
       // Fallback to main thread
       const output = new ImageData(new Uint8ClampedArray(imageData.data.length), imageData.width, imageData.height);
-      applyPreparedAdjustmentsToBuffer(imageData, adjustmentSettings, output, {
-        quality: 'full',
-        lutScratch: adjustmentLutScratch
-      });
+      if (wants16) {
+        applyPreparedAdjustmentsToBuffer16(imageData, adjustmentSettings, output, { quality: 'full' });
+      } else {
+        applyPreparedAdjustmentsToBuffer(imageData, adjustmentSettings, output, {
+          quality: 'full',
+          lutScratch: adjustmentLutScratch
+        });
+      }
       return output;
     }
 
@@ -9917,7 +10061,7 @@
       }
     }
 
-    async function imageDataToBlob(imageData, format = null, quality = null, bitDepth = null, onProgress = null) {
+    async function imageDataToBlob(imageData, format = null, quality = null, bitDepth = null, onProgress = null, metadata = null) {
       const exportInfo = getExportInfo(format || state.exportFormat, bitDepth ?? state.exportBitDepth);
       const jpegQuality = quality !== null ? quality : state.jpegQuality;
       const trace = createPerfTrace('imageDataToBlob', {
@@ -9930,14 +10074,14 @@
       if (exportInfo.format === 'tiff') {
         // Try Worker first for TIFF encoding
         if (isWorkerAvailable()) {
-          blob = await workerEncodeTiff(imageData, exportInfo.bitDepth, onProgress);
+          blob = await workerEncodeTiff(imageData, exportInfo.bitDepth, onProgress, metadata);
           if (blob) {
             trace.end({ bytes: blob.size || 0, worker: true });
             return blob;
           }
         }
         const { encodeTiffBlob } = await getExportImageEncoders();
-        blob = encodeTiffBlob(imageData, exportInfo.bitDepth);
+        blob = encodeTiffBlob(imageData, exportInfo.bitDepth, metadata);
         trace.end({ bytes: blob.size || 0, worker: false });
         return blob;
       }
@@ -9947,7 +10091,7 @@
           blob = await workerEncodePng16(imageData, onProgress);
           if (blob) {
             trace.end({ bytes: blob.size || 0, worker: true });
-            return blob;
+            return attachMetadataToBlob(blob, 'png', metadata);
           }
         }
         const { encodePng16Blob } = await getExportImageEncoders();
@@ -9959,11 +10103,19 @@
       if (exportInfo.format === 'jpeg') {
         blob = await imageDataToCanvasBlob(imageData, 'image/jpeg', jpegQuality / 100);
         trace.end({ bytes: blob.size || 0, worker: false });
-        return blob;
+        return attachMetadataToBlob(blob, 'jpeg', metadata);
       }
       blob = await imageDataToCanvasBlob(imageData, 'image/png');
       trace.end({ bytes: blob.size || 0, worker: false });
-      return blob;
+      return attachMetadataToBlob(blob, 'png', metadata);
+    }
+
+    // Analog metadata for one exported frame: the roll fields plus this file's
+    // frame fields; `position` is the frame's place in the export order and
+    // numbers frames that carry no number of their own.
+    function exportMetadataFor(settings, position) {
+      const frame = settings === state || !settings ? state.frameMetadata : settings.frameMetadata;
+      return buildExportMetadata({ roll: state.rollMetadata, frame, index: position });
     }
 
     function updateBatchProgress(current, total, fileName) {
@@ -10026,6 +10178,14 @@
         coreWbMode: 'auto',
         coreTemperature: 0,
         coreTint: 0,
+        coreCyan: 0,
+        corePaper: 'none',
+        corePaperToning: 'none',
+        corePaperToningStrength: 100,
+        localExposure: null,
+        look: null,
+        frameMetadata: sanitizeFrameMetadata({}),
+        flatFieldId: state.flatFieldId || null,
         coreSaturation: 100,
         coreGlow: 0,
         coreFade: 0,
@@ -10107,6 +10267,15 @@
       trace.mark('transform', {
         pixels: getImageDataPixelCount(workingData)
       });
+      // The linear DNG wants the geometry-applied negative, not the conversion.
+      if (options.stage === 'source') {
+        trace.end({ outputPixels: getImageDataPixelCount(workingData) });
+        if (!savedSettings) {
+          const item = state.fileQueue.find((entry) => entry.file === file);
+          if (item) item.settings = cloneSettings(settings);
+        }
+        return { source: workingData, settings };
+      }
 
       // Convert negative/positive via unified conversion router (in a worker
       // when available — keeps batch export from freezing the page).
@@ -10133,7 +10302,7 @@
           ? dustRemoval.maxParticleSize
           : state.dustRemoval.maxParticleSize;
         const { mask } = detectDust(processed, { strength, maxParticleSize });
-        processed = inpaintMasked(processed, mask, 3);
+        processed = await inpaintForCommit(processed, mask);
         trace.mark('dustRemoval', {
           pixels: getImageDataPixelCount(processed)
         });
@@ -10163,8 +10332,8 @@
         trace.mark('autoWhiteBalance', { confidence: estimate.confidence });
       }
 
-      // Apply adjustments
-      const adjusted = await applyAdjustmentsWithSettings(processed, settings);
+      // Apply adjustments (at 16 bits when the export asks for it)
+      const adjusted = await applyAdjustmentsWithSettings(processed, settings, { bitDepth: options.bitDepth === 16 ? 16 : 8 });
       trace.mark('adjustments', {
         pixels: getImageDataPixelCount(adjusted)
       });
@@ -10237,15 +10406,23 @@
 
           try {
             const settingsForFile = getSettingsForExport(index, item);
-            const adjusted = await processFileWithSettings(item.file, settingsForFile);
-            const outputImageData = applySprocketFrameForExport(adjusted, exportInfo);
-            overlay.updateProgress(fileProgress + fileSlice * 0.6, lang.loadingEncoding);
-            const blob = await imageDataToBlob(
-              outputImageData,
-              exportInfo.format,
-              state.jpegQuality,
-              exportInfo.bitDepth
-            );
+            let blob;
+            if (exportInfo.format === 'dng') {
+              const { source, settings: usedSettings } = await processFileWithSettings(item.file, settingsForFile, { stage: 'source' });
+              blob = renderLinearDngBlob(source, usedSettings, processedCount - 1);
+            } else {
+              const adjusted = await processFileWithSettings(item.file, settingsForFile, { bitDepth: exportInfo.bitDepth });
+              const outputImageData = applySprocketFrameForExport(adjusted, exportInfo, settingsForFile, processedCount - 1);
+              overlay.updateProgress(fileProgress + fileSlice * 0.6, lang.loadingEncoding);
+              blob = await imageDataToBlob(
+                outputImageData,
+                exportInfo.format,
+                state.jpegQuality,
+                exportInfo.bitDepth,
+                null,
+                exportMetadataFor(settingsForFile, processedCount - 1)
+              );
+            }
 
             const name = claimZipName(buildActiveExportFileName(item.file.name, exportInfo, settingsForFile));
             zip.file(name, blob);
@@ -10357,8 +10534,14 @@
 
           try {
             const settingsForFile = getSettingsForExport(index, item);
-            adjusted = await processFileWithSettings(item.file, settingsForFile);
-            const outputImageData = applySprocketFrameForExport(adjusted, exportInfo);
+            if (exportInfo.format === 'dng') {
+              const { source, settings: usedSettings } = await processFileWithSettings(item.file, settingsForFile, { stage: 'source' });
+              blob = renderLinearDngBlob(source, usedSettings, i);
+              adjusted = null;
+              name = buildActiveExportFileName(item.file.name, exportInfo, settingsForFile);
+            } else {
+            adjusted = await processFileWithSettings(item.file, settingsForFile, { bitDepth: exportInfo.bitDepth });
+            const outputImageData = applySprocketFrameForExport(adjusted, exportInfo, settingsForFile, i);
             overlay.updateProgress(fileProgress + fileSlice * 0.55, lang.loadingEncoding);
             blob = await imageDataToBlob(
               outputImageData,
@@ -10370,9 +10553,11 @@
                   fileProgress + fileSlice * (0.55 + pct * 0.25),
                   lang.loadingEncoding
                 );
-              }
+              },
+              exportMetadataFor(settingsForFile, i)
             );
             name = buildActiveExportFileName(item.file.name, exportInfo, settingsForFile);
+            }
           } catch (err) {
             console.error(`Error processing ${item.file.name}:`, err);
             item.status = 'error';
@@ -10636,8 +10821,14 @@
 
           try {
             const settingsForFile = getSettingsForExport(index, item);
-            adjusted = await processFileWithSettings(item.file, settingsForFile);
-            const outputImageData = applySprocketFrameForExport(adjusted, exportInfo);
+            if (exportInfo.format === 'dng') {
+              const { source, settings: usedSettings } = await processFileWithSettings(item.file, settingsForFile, { stage: 'source' });
+              blob = renderLinearDngBlob(source, usedSettings, i);
+              adjusted = null;
+              name = buildActiveExportFileName(item.file.name, exportInfo, settingsForFile);
+            } else {
+            adjusted = await processFileWithSettings(item.file, settingsForFile, { bitDepth: exportInfo.bitDepth });
+            const outputImageData = applySprocketFrameForExport(adjusted, exportInfo, settingsForFile, i);
             overlay.updateProgress(fileProgress + fileSlice * 0.6, lang.loadingEncoding);
             blob = await imageDataToBlob(
               outputImageData,
@@ -10649,10 +10840,12 @@
                   fileProgress + fileSlice * (0.6 + pct * 0.3),
                   lang.loadingEncoding
                 );
-              }
+              },
+              exportMetadataFor(settingsForFile, i)
             );
 
             name = buildActiveExportFileName(item.file.name, exportInfo, settingsForFile);
+            }
             overlay.hide(); // Hide overlay before save dialog
             const result = await saveBlob(blob, name, exportInfo.mimeType);
             if (!result.saved) {
@@ -10917,6 +11110,19 @@
       state.coreWbMode = safe.coreWbMode;
       state.coreTemperature = safe.coreTemperature;
       state.coreTint = safe.coreTint;
+      state.coreCyan = safe.coreCyan ?? 0;
+      state.corePaper = safe.corePaper || 'none';
+      state.corePaperToning = safe.corePaperToning || 'none';
+      state.corePaperToningStrength = safe.corePaperToningStrength ?? 100;
+      state.localExposure = safe.localExposure ? structuredClone(safe.localExposure) : null;
+      state.flatFieldId = safe.flatFieldId && state.flatFields[safe.flatFieldId] ? safe.flatFieldId : null;
+      updateFlatFieldUI();
+      state.look = safe.look ? structuredClone(safe.look) : null;
+      state.frameMetadata = sanitizeFrameMetadata(safe.frameMetadata);
+      prefillRollStockFromFilmEdge();
+      updateMetadataUI();
+      updateRecipeUI();
+      updateLabMatchUI();
       state.coreSaturation = safe.coreSaturation;
       state.coreGlow = safe.coreGlow;
       state.coreFade = safe.coreFade;
@@ -10978,6 +11184,9 @@
       updateFilmModeUI();
       updateLensCorrectionUI();
       updateConsoleReadouts();
+      updateEnlargerUI();
+      updatePaperUI();
+      updateDodgeBurnUI();
       studioWorkspace?.sync();
     }
 
@@ -10994,6 +11203,8 @@
       if (exportSingleBtn) exportSingleBtn.disabled = exportLocked;
       if (exportZipBtn) exportZipBtn.disabled = selectedCount < 1 || exportLocked;
       if (exportAllBtn) exportAllBtn.disabled = selectedCount < 1 || exportLocked;
+      const contactSheetBtn = document.getElementById('exportContactSheetBtn');
+      if (contactSheetBtn) contactSheetBtn.disabled = selectedCount < 1 || exportLocked;
       updateAutoFrameButtons();
       studioWorkspace?.sync();
     }
@@ -11111,6 +11322,8 @@
       selectedBtn.disabled = !state.autoFrame.enabled || selectedCount < 1 || !stepReady;
       updateAutoFrameConfigUI();
       updateRollAnalysisUI();
+      updateFlatFieldUI();
+      updateLabMatchUI();
     }
 
     function showBatchUI(show, reason) {
@@ -11208,6 +11421,10 @@
     document.getElementById('clearFileListBtn').addEventListener('click', () => {
       if (isDesktopBatchExportLocked()) return;
       state.fileQueue = [];
+      state.rollMetadata = sanitizeRollMetadata({});
+      updateMetadataUI();
+      pendingProject = null;
+      void clearProjectRecovery();
       state.currentFileIndex = 0;
       state.batchSessionActive = false;
       resetRollReferenceState();
@@ -11266,6 +11483,7 @@
       updateFileListUI();
       updateExportButtons();
       void loadStudioThumbnails();
+      scheduleProjectRecovery();
     }
 
     // ===========================================
@@ -11329,6 +11547,7 @@
       if (isDesktopBatchExportLocked()) return;
       const files = Array.from(e.target.files);
       if (files.length === 0) return;
+      const projectFile = files.find((file) => isProjectFileName(file.name));
 
       // Reset state for new batch
       state.fileQueue = [];
@@ -11344,8 +11563,12 @@
 
       addFilesToQueue(files);
 
-      // Load the first file
-      if (state.fileQueue.length > 0) {
+      // A project file among the drop restores the roll once the photos are queued.
+      if (projectFile) {
+        void openProjectFile(projectFile);
+      } else if (pendingProject) {
+        void applyPendingProject();
+      } else if (state.fileQueue.length > 0) {
         loadFile(state.fileQueue[0].file);
       }
     });
@@ -11354,6 +11577,7 @@
       if (isDesktopBatchExportLocked()) return;
       const files = Array.from(e.target.files);
       if (files.length === 0) return;
+      const projectFile = files.find((file) => isProjectFileName(file.name));
 
       // Reset state for new batch
       state.fileQueue = [];
@@ -11369,8 +11593,12 @@
 
       addFilesToQueue(files);
 
-      // Load the first file
-      if (state.fileQueue.length > 0) {
+      // A project file among the drop restores the roll once the photos are queued.
+      if (projectFile) {
+        void openProjectFile(projectFile);
+      } else if (pendingProject) {
+        void applyPendingProject();
+      } else if (state.fileQueue.length > 0) {
         loadFile(state.fileQueue[0].file);
       }
     });
@@ -11397,6 +11625,7 @@
 
       const files = Array.from(e.dataTransfer.files);
       if (files.length === 0) return;
+      const projectFile = files.find((file) => isProjectFileName(file.name));
 
       // Reset state for new batch
       state.fileQueue = [];
@@ -11412,8 +11641,12 @@
 
       addFilesToQueue(files);
 
-      // Load the first file
-      if (state.fileQueue.length > 0) {
+      // A project file among the drop restores the roll once the photos are queued.
+      if (projectFile) {
+        void openProjectFile(projectFile);
+      } else if (pendingProject) {
+        void applyPendingProject();
+      } else if (state.fileQueue.length > 0) {
         loadFile(state.fileQueue[0].file);
       }
     });
@@ -11726,6 +11959,490 @@
     document.getElementById('useFilmEdgeBaseBtn')?.addEventListener('click', useFilmEdgeBaseForCurrent);
 
     // ===========================================
+    // Enlarger paradigm: dichroic filtration, stops and paper grade as a view
+    // of the core sliders (enlarger.js holds the deterministic mapping).
+    // ===========================================
+    const PARADIGM_STORAGE_KEY = 'nc_paradigm_v1';
+    let enlargerSyncing = false;
+
+    function setControlParadigm(paradigm, { persist = true } = {}) {
+      state.controlParadigm = paradigm === 'enlarger' ? 'enlarger' : 'digital';
+      const enlarger = state.controlParadigm === 'enlarger';
+      document.body.classList.toggle('studio-enlarger', enlarger);
+      const digitalBtn = document.getElementById('paradigmDigitalBtn');
+      const enlargerBtn = document.getElementById('paradigmEnlargerBtn');
+      if (digitalBtn) { digitalBtn.classList.toggle('active', !enlarger); digitalBtn.setAttribute('aria-pressed', String(!enlarger)); }
+      if (enlargerBtn) { enlargerBtn.classList.toggle('active', enlarger); enlargerBtn.setAttribute('aria-pressed', String(enlarger)); }
+      if (persist) safeStorageSet(PARADIGM_STORAGE_KEY, state.controlParadigm);
+      updateEnlargerUI();
+      populateTestStripAxes();
+    }
+
+    function setEnlargerInput(id, value, decimals = 0) {
+      const range = document.getElementById(id);
+      const number = document.getElementById(`${id}Value`);
+      const text = Number(value).toFixed(decimals);
+      if (range && range.value !== text) range.value = text;
+      if (number && number.tagName === 'INPUT' && number.value !== text) number.value = text;
+    }
+
+    function updateEnlargerUI() {
+      if (!stateReady) return;
+      const controls = document.getElementById('enlargerControls');
+      if (!controls) return;
+      enlargerSyncing = true;
+      try {
+        const filters = filtrationFromSliders({ cyan: state.coreCyan, tint: state.coreTint, temperature: state.coreTemperature });
+        setEnlargerInput('enlargerCyan', filters.cyan);
+        setEnlargerInput('enlargerMagenta', filters.magenta);
+        setEnlargerInput('enlargerYellow', filters.yellow);
+        setEnlargerInput('enlargerExposure', stopsFromExposureUnits(state.coreExposure), 1);
+        const gradeValue = gradeValueForContrast(state.coreContrast);
+        const grade = document.getElementById('enlargerGrade');
+        const gradeReadout = document.getElementById('enlargerGradeValue');
+        if (grade && Number(grade.value) !== gradeValue) grade.value = String(gradeValue);
+        if (gradeReadout) gradeReadout.textContent = gradeLabelForValue(gradeValue);
+        const gradeControl = document.getElementById('enlargerGradeControl');
+        // Multigrade paper has grades; RA-4 colour paper does not.
+        if (gradeControl) gradeControl.style.display = getEffectiveFilmType() === 'bw' ? '' : 'none';
+      } finally {
+        enlargerSyncing = false;
+      }
+    }
+
+    function applyEnlargerFiltration() {
+      const read = (id) => Number(document.getElementById(id)?.value);
+      const sliders = slidersFromFiltration({ cyan: read('enlargerCyan'), magenta: read('enlargerMagenta'), yellow: read('enlargerYellow') });
+      state.coreCyan = sliders.cyan;
+      state.coreTint = sliders.tint;
+      state.coreTemperature = sliders.temperature;
+      ['coreCyan', 'coreTint', 'coreTemperature'].forEach(syncSliderFromState);
+    }
+
+    function bindEnlargerControl(id, apply) {
+      const range = document.getElementById(id);
+      const number = document.getElementById(`${id}Value`);
+      if (!range) return;
+      let preDragSnapshot = null;
+      const commit = (source) => {
+        if (enlargerSyncing) return;
+        if (number && number.tagName === 'INPUT') {
+          if (source === range) number.value = range.value;
+          else range.value = number.value;
+        }
+        apply();
+        markCurrentFileDirty();
+        updateEnlargerUI();
+        scheduleCoreReprocess({ full: false });
+      };
+      range.addEventListener('pointerdown', () => { preDragSnapshot = captureSnapshot('enlarger'); });
+      range.addEventListener('input', () => commit(range));
+      range.addEventListener('change', () => {
+        if (preDragSnapshot) { commitUndoSnapshot(preDragSnapshot); preDragSnapshot = null; }
+      });
+      if (number && number.tagName === 'INPUT') {
+        number.addEventListener('change', () => { pushUndo('enlarger'); commit(number); });
+      }
+    }
+
+    bindEnlargerControl('enlargerCyan', applyEnlargerFiltration);
+    bindEnlargerControl('enlargerMagenta', applyEnlargerFiltration);
+    bindEnlargerControl('enlargerYellow', applyEnlargerFiltration);
+    bindEnlargerControl('enlargerExposure', () => {
+      state.coreExposure = exposureUnitsFromStops(Number(document.getElementById('enlargerExposure').value));
+      syncSliderFromState('coreExposure');
+    });
+    bindEnlargerControl('enlargerGrade', () => {
+      state.coreContrast = contrastForGradeValue(Number(document.getElementById('enlargerGrade').value));
+      syncSliderFromState('coreContrast');
+    });
+    document.getElementById('paradigmDigitalBtn')?.addEventListener('click', () => setControlParadigm('digital'));
+    document.getElementById('paradigmEnlargerBtn')?.addEventListener('click', () => setControlParadigm('enlarger'));
+    setControlParadigm(safeStorageGet(PARADIGM_STORAGE_KEY) === 'enlarger' ? 'enlarger' : 'digital', { persist: false });
+
+    // ===========================================
+    // Test strip: several patches of the photo along one axis; click to apply.
+    // ===========================================
+    const testStrip = { rendering: false, values: [], axisKey: null };
+
+    function currentTestStripAxes() {
+      const axes = TEST_STRIP_AXES[state.controlParadigm === 'enlarger' ? 'enlarger' : 'digital'];
+      return axes.filter((axis) => !(axis.format === 'grade' && getEffectiveFilmType() !== 'bw'));
+    }
+
+    function currentTestStripAxis() {
+      const select = document.getElementById('testStripAxis');
+      const axes = currentTestStripAxes();
+      return axes.find((axis) => axis.key === select?.value) || axes[0];
+    }
+
+    function populateTestStripAxes() {
+      if (!stateReady) return;
+      const select = document.getElementById('testStripAxis');
+      if (!select) return;
+      const previous = select.value;
+      const axes = currentTestStripAxes();
+      select.replaceChildren(...axes.map((axis) => {
+        const option = document.createElement('option');
+        option.value = axis.key;
+        option.textContent = getLocalizedText(axis.label, axis.key);
+        return option;
+      }));
+      select.value = axes.some((axis) => axis.key === previous) ? previous : axes[0].key;
+    }
+
+    function readTestStripStep(axis) {
+      const input = document.getElementById('testStripStep');
+      const value = Math.round(Number(input?.value));
+      return Number.isFinite(value) && value >= 1 ? Math.min(100, value) : axis.step;
+    }
+
+    function setTestStripStep(step) {
+      const input = document.getElementById('testStripStep');
+      if (input) input.value = String(step);
+    }
+
+    async function renderTestStrip() {
+      const tiles = document.getElementById('testStripTiles');
+      const button = document.getElementById('testStripRenderBtn');
+      if (!tiles || testStrip.rendering) return;
+      const source = state.conversionPreviewImageData || state.conversionSourceImageData;
+      if (state.currentStep < 3 || !source || !usesSilverCoreConversion(state)) {
+        tiles.replaceChildren(Object.assign(document.createElement('span'), { className: 'test-strip-empty', textContent: getLocalizedText('testStripEmpty', 'Convert a photo first.') }));
+        return;
+      }
+      const axis = currentTestStripAxis();
+      const step = readTestStripStep(axis);
+      const count = Number(document.getElementById('testStripCount')?.value) || 5;
+      const area = document.getElementById('testStripArea')?.value || 'full';
+      const centre = Number(state[axis.key]) || 0;
+      const values = testStripValues(axis, centre, step, count);
+      const small = downsampleImageDataForMaxDim(source, 360);
+      const base = state.loadedBaseImageData || state.originalImageData;
+      testStrip.rendering = true;
+      testStrip.axisKey = axis.key;
+      testStrip.values = values;
+      if (button) button.disabled = true;
+      const rendered = [];
+      try {
+        for (const value of values) {
+          const variant = { ...state, [axis.key]: value };
+          const converted = await convertFrameWithRouter({
+            imageData: small,
+            settings: buildRouterSettings(variant, base),
+            options: { preview: true, scratch: true, includeAnalysisPreview: false }
+          });
+          const output = new ImageData(converted.width, converted.height);
+          applyAdjustmentsToBuffer(converted, state, output, 'preview');
+          rendered.push({ value, imageData: output });
+        }
+      } catch (error) {
+        console.warn('Test strip render failed:', error);
+      } finally {
+        testStrip.rendering = false;
+        if (button) button.disabled = false;
+      }
+      if (testStrip.axisKey !== axis.key) return;
+      tiles.replaceChildren(...rendered.map(({ value, imageData }) => {
+        const tile = document.createElement('button');
+        tile.type = 'button';
+        tile.className = 'test-strip-tile' + (value === centre ? ' current' : '');
+        tile.dataset.value = String(value);
+        tile.setAttribute('role', 'option');
+        tile.setAttribute('aria-selected', String(value === centre));
+        const surface = document.createElement('canvas');
+        const sx = area === 'centre' ? Math.floor(imageData.width * 0.25) : 0;
+        const sy = area === 'centre' ? Math.floor(imageData.height * 0.25) : 0;
+        const sw = area === 'centre' ? Math.max(1, Math.floor(imageData.width * 0.5)) : imageData.width;
+        const sh = area === 'centre' ? Math.max(1, Math.floor(imageData.height * 0.5)) : imageData.height;
+        surface.width = sw;
+        surface.height = sh;
+        const scratch = document.createElement('canvas');
+        scratch.width = imageData.width;
+        scratch.height = imageData.height;
+        scratch.getContext('2d').putImageData(imageData, 0, 0);
+        surface.getContext('2d').drawImage(scratch, sx, sy, sw, sh, 0, 0, sw, sh);
+        const label = document.createElement('span');
+        label.textContent = formatAxisValue(axis, value);
+        tile.append(surface, label);
+        tile.addEventListener('click', (event) => applyTestStripValue(axis, value, { narrow: event.shiftKey }));
+        return tile;
+      }));
+    }
+
+    function applyTestStripValue(axis, value, { narrow = false } = {}) {
+      if (state.currentStep < 3) return;
+      pushUndo('testStrip');
+      state[axis.key] = value;
+      markCurrentFileDirty();
+      syncSliderFromState(axis.key);
+      updateEnlargerUI();
+      scheduleCoreReprocess({ full: false });
+      showToast(getInterpolatedText('testStripApplied', { label: formatAxisValue(axis, value) }, `Applied ${formatAxisValue(axis, value)}`));
+      if (narrow) setTestStripStep(Math.max(1, Math.round(readTestStripStep(axis) / 2)));
+      void renderTestStrip();
+    }
+
+    document.getElementById('testStripRenderBtn')?.addEventListener('click', () => { void renderTestStrip(); });
+    document.getElementById('testStripAxis')?.addEventListener('change', () => {
+      const axis = currentTestStripAxis();
+      setTestStripStep(axis.step);
+      if (document.getElementById('testStripTiles')?.childElementCount) void renderTestStrip();
+    });
+    document.getElementById('testStripTiles')?.addEventListener('keydown', (event) => {
+      const tiles = [...document.querySelectorAll('#testStripTiles .test-strip-tile')];
+      if (/^[1-9]$/.test(event.key)) {
+        const tile = tiles[Number(event.key) - 1];
+        if (tile) { event.preventDefault(); tile.click(); }
+        return;
+      }
+      if (event.key === '[' || event.key === ']') {
+        event.preventDefault();
+        const axis = currentTestStripAxis();
+        const step = readTestStripStep(axis);
+        setTestStripStep(event.key === '[' ? Math.max(1, Math.round(step / 2)) : Math.min(100, step * 2));
+        void renderTestStrip();
+      }
+    });
+
+    // ===========================================
+    // Paper emulation selector (Looks drawer)
+    // ===========================================
+    function paperKindForState() {
+      const type = getEffectiveFilmType();
+      return type === 'positive' ? 'positive' : type;
+    }
+
+    function populatePaperOptions() {
+      const select = document.getElementById('corePaper');
+      if (!select) return;
+      const ids = paperIdsForFilmKind(paperKindForState());
+      const current = ids.includes(state.corePaper) ? state.corePaper : 'none';
+      select.replaceChildren(...ids.map((id) => {
+        const option = document.createElement('option');
+        option.value = id;
+        option.textContent = id === 'none' ? getLocalizedText('paperNone', 'None') : paperProfiles[id].label;
+        return option;
+      }));
+      select.value = current;
+    }
+
+    function updatePaperUI() {
+      if (!stateReady) return;
+      const section = document.getElementById('paperSection');
+      const select = document.getElementById('corePaper');
+      if (!section || !select) return;
+      const kind = paperKindForState();
+      const ids = paperIdsForFilmKind(kind);
+      if (!ids.includes(state.corePaper)) state.corePaper = 'none';
+      populatePaperOptions();
+      const bw = kind === 'bw' && state.corePaper !== 'none';
+      const toningControl = document.getElementById('corePaperToningControl');
+      const strengthControl = document.getElementById('corePaperToningStrengthControl');
+      if (toningControl) toningControl.style.display = bw ? '' : 'none';
+      if (strengthControl) strengthControl.style.display = bw && state.corePaperToning !== 'none' ? '' : 'none';
+      section.dataset.paperKind = kind;
+    }
+
+    // ===========================================
+    // Dodge and burn brush (Retouch tab)
+    // ===========================================
+    let dodgeBurnDrawing = false;
+    let dodgeBurnPointerId = null;
+    let dodgeBurnPoints = [];
+    let dodgeBurnFrame = 0;
+
+    function dodgeBurnGeometry() {
+      const geometry = localExposureGeometryFor(state);
+      const working = state.processedImageData || state.croppedImageData || state.originalImageData;
+      if (!geometry || !working) return null;
+      return { ...geometry, width: working.width, height: working.height };
+    }
+
+    function canPaintDodgeBurn() {
+      return Boolean(state.dodgeBurn?.active && state.currentStep >= 3 && state.processedImageData
+        && !state.samplingMode && !state.cropping && !document.body.dataset.studioBusy && usesSilverCoreConversion(state));
+    }
+
+    function pointerToWorkingPoint(event) {
+      const activeCanvas = isWebGLActive() ? glCanvas : canvas;
+      const rect = activeCanvas.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return null;
+      const cx = (event.clientX - rect.left) * (canvas.width / rect.width);
+      const cy = (event.clientY - rect.top) * (canvas.height / rect.height);
+      const point = canvasToImageCoords(cx, cy);
+      if (!point) return null;
+      return { x: point.x, y: point.y, p: event.pressure && event.pressure > 0 && event.pointerType === 'pen' ? event.pressure : 1 };
+    }
+
+    function onDodgeBurnPointerDown(event) {
+      if (!canPaintDodgeBurn() || (event.button !== 0 && event.pointerType === 'mouse')) return;
+      const point = pointerToWorkingPoint(event);
+      if (!point) return;
+      event.preventDefault();
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+      dodgeBurnDrawing = true;
+      dodgeBurnPointerId = event.pointerId;
+      dodgeBurnPoints = [point];
+      scheduleDodgeBurnLivePaint();
+    }
+
+    function onDodgeBurnPointerMove(event) {
+      if (!dodgeBurnDrawing || event.pointerId !== dodgeBurnPointerId) return;
+      const point = pointerToWorkingPoint(event);
+      if (!point) return;
+      const last = dodgeBurnPoints[dodgeBurnPoints.length - 1];
+      if (last && Math.hypot(point.x - last.x, point.y - last.y) < 2) return;
+      dodgeBurnPoints.push(point);
+      scheduleDodgeBurnLivePaint();
+    }
+
+    function onDodgeBurnPointerUp(event) {
+      if (!dodgeBurnDrawing || event.pointerId !== dodgeBurnPointerId) return;
+      dodgeBurnDrawing = false;
+      dodgeBurnPointerId = null;
+      const points = dodgeBurnPoints;
+      dodgeBurnPoints = [];
+      const geometry = dodgeBurnGeometry();
+      if (!points.length || !geometry) { updatePreview(); return; }
+      const stroke = {
+        stops: state.dodgeBurn.mode === 'dodge' ? -Math.abs(state.dodgeBurn.stops) : Math.abs(state.dodgeBurn.stops),
+        size: state.dodgeBurn.size / 100,
+        feather: state.dodgeBurn.feather / 100,
+        points: points.map((p) => ({ ...workingPointToBase(p, geometry), p: p.p }))
+      };
+      pushUndo('dodgeBurn');
+      const strokes = [...(state.localExposure?.strokes || []), stroke];
+      state.localExposure = sanitizeLocalExposureForSettings({ strokes });
+      markCurrentFileDirty();
+      updateDodgeBurnUI();
+      scheduleCoreReprocess({ full: false });
+    }
+
+    function scheduleDodgeBurnLivePaint() {
+      if (dodgeBurnFrame) return;
+      dodgeBurnFrame = requestAnimationFrame(() => {
+        dodgeBurnFrame = 0;
+        const display = state.displayImageData || state.processedImageData;
+        if (!display) return;
+        renderAdjustedImageDataToMainCanvas(display, display);
+        renderDodgeBurnOverlay();
+        drawDodgeBurnPath(dodgeBurnPoints.map((p) => ({ x: p.x, y: p.y, p: p.p })), state.dodgeBurn.mode === 'dodge' ? -1 : 1, true);
+      });
+    }
+
+    // Draws one stroke path (working-frame pixel points) on the main canvas.
+    function drawDodgeBurnPath(points, sign, live = false) {
+      if (!points.length || !state.processedImageData) return;
+      const ctx = canvas.getContext('2d');
+      const scaleX = canvas.width / state.processedImageData.width;
+      const scaleY = canvas.height / state.processedImageData.height;
+      const shortSide = Math.min(state.processedImageData.width, state.processedImageData.height);
+      const width = Math.max(2, state.dodgeBurn.size / 100 * shortSide * Math.min(scaleX, scaleY));
+      ctx.save();
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.lineWidth = width;
+      ctx.strokeStyle = sign < 0 ? `rgba(120, 200, 255, ${live ? 0.45 : 0.3})` : `rgba(255, 170, 0, ${live ? 0.45 : 0.3})`;
+      ctx.beginPath();
+      points.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x * scaleX, p.y * scaleY); else ctx.lineTo(p.x * scaleX, p.y * scaleY); });
+      if (points.length === 1) ctx.lineTo(points[0].x * scaleX + 0.01, points[0].y * scaleY);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function renderDodgeBurnOverlay() {
+      if (!state.dodgeBurn?.active || !state.dodgeBurn.showOverlay) return;
+      const strokes = state.localExposure?.strokes;
+      if (!Array.isArray(strokes) || !strokes.length || !state.processedImageData) return;
+      const geometry = dodgeBurnGeometry();
+      if (!geometry) return;
+      for (const stroke of strokes) {
+        const points = stroke.points.map((p) => basePointToWorking(p, geometry));
+        const saved = state.dodgeBurn.size;
+        state.dodgeBurn.size = stroke.size * 100;
+        drawDodgeBurnPath(points, stroke.stops < 0 ? -1 : 1);
+        state.dodgeBurn.size = saved;
+      }
+    }
+
+    function updateDodgeBurnUI() {
+      if (!stateReady) return;
+      const enabled = document.getElementById('dodgeBurnEnabled');
+      const controls = document.getElementById('dodgeBurnControls');
+      const status = document.getElementById('dodgeBurnStatus');
+      if (!enabled || !controls || !status) return;
+      const brush = state.dodgeBurn;
+      enabled.checked = Boolean(brush.active);
+      controls.style.display = brush.active ? '' : 'none';
+      document.body.classList.toggle('dodge-burn-active', Boolean(brush.active));
+      const dodgeBtn = document.getElementById('dodgeBurnModeDodge');
+      const burnBtn = document.getElementById('dodgeBurnModeBurn');
+      if (dodgeBtn) { dodgeBtn.classList.toggle('active', brush.mode === 'dodge'); dodgeBtn.setAttribute('aria-pressed', String(brush.mode === 'dodge')); }
+      if (burnBtn) { burnBtn.classList.toggle('active', brush.mode === 'burn'); burnBtn.setAttribute('aria-pressed', String(brush.mode === 'burn')); }
+      setEnlargerInput('dodgeBurnStops', brush.stops, 1);
+      setEnlargerInput('dodgeBurnSize', brush.size);
+      setEnlargerInput('dodgeBurnFeather', brush.feather);
+      const overlay = document.getElementById('dodgeBurnShowOverlay');
+      if (overlay) overlay.checked = Boolean(brush.showOverlay);
+      const count = state.localExposure?.strokes?.length || 0;
+      status.textContent = count
+        ? getInterpolatedText('dodgeBurnStatusCount', { count: String(count) }, `${count} stroke(s)`)
+        : getLocalizedText('dodgeBurnStatusNone', 'No strokes.');
+      const undoBtn = document.getElementById('dodgeBurnUndoStrokeBtn');
+      const clearBtn = document.getElementById('dodgeBurnClearBtn');
+      if (undoBtn) undoBtn.disabled = count === 0;
+      if (clearBtn) clearBtn.disabled = count === 0;
+    }
+
+    function setDodgeBurnActive(active) {
+      state.dodgeBurn.active = Boolean(active);
+      updateDodgeBurnUI();
+      // The overlay needs the 2D canvas; leaving the mode may hand the preview back to WebGL.
+      updatePreview();
+    }
+
+    function removeDodgeBurnStrokes(count) {
+      const strokes = state.localExposure?.strokes || [];
+      if (!strokes.length) return;
+      pushUndo('dodgeBurn');
+      const kept = count >= strokes.length ? [] : strokes.slice(0, strokes.length - count);
+      state.localExposure = kept.length ? { strokes: kept } : null;
+      markCurrentFileDirty();
+      updateDodgeBurnUI();
+      scheduleCoreReprocess({ full: false });
+    }
+
+    function bindDodgeBurnNumber(id, key, decimals = 0) {
+      const range = document.getElementById(id);
+      const number = document.getElementById(`${id}Value`);
+      const apply = (value) => {
+        if (!Number.isFinite(value)) return;
+        state.dodgeBurn[key] = value;
+        updateDodgeBurnUI();
+      };
+      range?.addEventListener('input', () => apply(Number(range.value)));
+      number?.addEventListener('change', () => apply(Number(number.value)));
+      void decimals;
+    }
+
+    document.getElementById('dodgeBurnEnabled')?.addEventListener('change', (event) => setDodgeBurnActive(event.target.checked));
+    document.getElementById('dodgeBurnModeDodge')?.addEventListener('click', () => { state.dodgeBurn.mode = 'dodge'; updateDodgeBurnUI(); });
+    document.getElementById('dodgeBurnModeBurn')?.addEventListener('click', () => { state.dodgeBurn.mode = 'burn'; updateDodgeBurnUI(); });
+    document.getElementById('dodgeBurnShowOverlay')?.addEventListener('change', (event) => { state.dodgeBurn.showOverlay = event.target.checked; updatePreview(); });
+    document.getElementById('dodgeBurnUndoStrokeBtn')?.addEventListener('click', () => removeDodgeBurnStrokes(1));
+    document.getElementById('dodgeBurnClearBtn')?.addEventListener('click', () => removeDodgeBurnStrokes(Infinity));
+    bindDodgeBurnNumber('dodgeBurnStops', 'stops', 1);
+    bindDodgeBurnNumber('dodgeBurnSize', 'size');
+    bindDodgeBurnNumber('dodgeBurnFeather', 'feather');
+    for (const surface of [canvas, glCanvas]) {
+      surface.addEventListener('pointerdown', onDodgeBurnPointerDown);
+    }
+    document.addEventListener('pointermove', onDodgeBurnPointerMove);
+    document.addEventListener('pointerup', onDodgeBurnPointerUp);
+    document.addEventListener('pointercancel', onDodgeBurnPointerUp);
+
+    // ===========================================
     // Roll analysis: one film base and one tone analysis for the whole roll
     // ===========================================
     function formatRollReasons(reasons) {
@@ -11759,6 +12476,1374 @@
       }
       return working;
     }
+
+    // ===========================================
+    // Match a lab scan: align the lab's JPEG and fit a colour look
+    // ===========================================
+    let labMatchReferenceFile = null;
+    let labMatchRunning = false;
+
+    function updateLabMatchUI() {
+      if (!stateReady) return;
+      const status = document.getElementById('labMatchStatus');
+      const runBtn = document.getElementById('labMatchRunBtn');
+      const applyBtn = document.getElementById('labMatchApplySelectedBtn');
+      const clearBtn = document.getElementById('labMatchClearBtn');
+      if (!status || !runBtn || !applyBtn || !clearBtn) return;
+      const look = state.look;
+      if (labMatchRunning) {
+        status.textContent = getLocalizedText('labMatchRunning', 'Aligning and fitting…');
+      } else if (look && look.source) {
+        const key = look.method === 'aligned-affine' ? 'labMatchStatusAligned' : 'labMatchStatusHistogram';
+        status.textContent = getInterpolatedText(key, {
+          name: look.source,
+          inliers: String(look.inliers || 0),
+          before: look.deltaBefore === null ? '?' : String(look.deltaBefore),
+          after: look.deltaAfter === null ? '?' : String(look.deltaAfter)
+        }, `From ${look.source}`);
+      } else if (labMatchReferenceFile) {
+        status.textContent = getInterpolatedText('labMatchStatusPicked', { name: labMatchReferenceFile.name }, `${labMatchReferenceFile.name} chosen; press Match.`);
+      } else {
+        status.textContent = getLocalizedText('labMatchStatusNone', 'No lab scan matched yet.');
+      }
+      const ready = state.currentStep >= 3 && Boolean(state.processedImageData) && !document.body.dataset.studioBusy;
+      runBtn.disabled = !labMatchReferenceFile || !ready || labMatchRunning;
+      applyBtn.disabled = !look || labMatchRunning;
+      clearBtn.disabled = !look || labMatchRunning;
+    }
+
+    async function decodeReferenceImage(file, maxSide) {
+      const bitmap = await createImageBitmap(file);
+      try {
+        const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
+        const width = Math.max(1, Math.round(bitmap.width * scale));
+        const height = Math.max(1, Math.round(bitmap.height * scale));
+        const surface = document.createElement('canvas');
+        surface.width = width;
+        surface.height = height;
+        const ctx = surface.getContext('2d');
+        ctx.drawImage(bitmap, 0, 0, width, height);
+        return ctx.getImageData(0, 0, width, height);
+      } finally {
+        bitmap.close?.();
+      }
+    }
+
+    // Our current rendering without the look, at analysis size.
+    function renderCurrentForMatching(maxSide) {
+      const positive = state.processedImageData;
+      if (!positive) return null;
+      const small = downsampleImageDataForMaxDim(positive, maxSide);
+      const output = new ImageData(small.width, small.height);
+      applyAdjustmentsToBuffer(small, { ...state, look: null }, output, 'preview');
+      return output;
+    }
+
+    function resizeImageDataNearest(imageData, width, height) {
+      const out = new ImageData(width, height);
+      for (let y = 0; y < height; y++) {
+        const sy = Math.min(imageData.height - 1, Math.floor((y / height) * imageData.height));
+        for (let x = 0; x < width; x++) {
+          const sx = Math.min(imageData.width - 1, Math.floor((x / width) * imageData.width));
+          const si = (sy * imageData.width + sx) * 4; const di = (y * width + x) * 4;
+          out.data[di] = imageData.data[si]; out.data[di + 1] = imageData.data[si + 1]; out.data[di + 2] = imageData.data[si + 2]; out.data[di + 3] = imageData.data[si + 3];
+        }
+      }
+      return out;
+    }
+
+    async function runLabMatch() {
+      if (labMatchRunning || !labMatchReferenceFile) return;
+      if (state.currentStep < 3 || !state.processedImageData) {
+        void appAlert(getLocalizedText('labMatchNeedPhoto', 'Convert a photo first.'));
+        return;
+      }
+      labMatchRunning = true;
+      updateLabMatchUI();
+      try {
+        const ours = renderCurrentForMatching(1000);
+        let reference;
+        try {
+          reference = await decodeReferenceImage(labMatchReferenceFile, 1600);
+        } catch (error) {
+          console.warn('Lab match reference decode failed:', error);
+          void appAlert(getLocalizedText('labMatchFailed', 'The reference image could not be read.'));
+          return;
+        }
+        let alignment = null;
+        if (await ensureOpenCvReady()) {
+          try { alignment = estimateAlignment(ours, reference, { maxSide: 1000 }); }
+          catch (error) { console.warn('Lab match alignment failed:', error); }
+        }
+        let pairs; let aligned = false;
+        if (alignment) {
+          const warped = warpImageData(reference, alignment.homography, ours.width, ours.height);
+          pairs = collectPairs(ours, warped, { step: 2 });
+          aligned = pairs.count >= 400;
+        }
+        if (!aligned) {
+          pairs = collectPairs(ours, resizeImageDataNearest(reference, ours.width, ours.height), { step: 2, skipClipped: true });
+        }
+        const fit = fitLook(pairs, { aligned });
+        if (!fit) {
+          void appAlert(getLocalizedText('labMatchFailed', 'The reference image could not be read.'));
+          return;
+        }
+        pushUndo('labMatch');
+        state.look = sanitizeLookForSettings({
+          ...fit.look,
+          source: labMatchReferenceFile.name,
+          method: fit.method,
+          inliers: aligned ? alignment.inliers : 0,
+          deltaBefore: fit.deltaBefore,
+          deltaAfter: fit.deltaAfter
+        });
+        markCurrentFileDirty();
+        schedulePreviewUpdate();
+        scheduleFullUpdate();
+      } finally {
+        labMatchRunning = false;
+        updateLabMatchUI();
+      }
+    }
+
+    function applyLookToSelected() {
+      if (!state.look) return;
+      const targets = state.fileQueue.filter((item) => item.selected && item.file !== state.loadedFile);
+      for (const item of targets) {
+        const look = structuredClone(state.look);
+        if (item.settings) item.settings = { ...item.settings, look };
+        else item.studioColors = { ...(item.studioColors || {}), look };
+        item.isDirty = false;
+        item.status = 'pending';
+      }
+      updateFileListUI();
+      showToast(getInterpolatedText('labMatchApplied', { count: String(targets.length) }, `Look applied to ${targets.length} photo(s)`));
+    }
+
+    function clearLook() {
+      if (!state.look) return;
+      pushUndo('labMatch');
+      state.look = null;
+      markCurrentFileDirty();
+      updateLabMatchUI();
+      showToast(getLocalizedText('labMatchCleared', 'Look cleared.'));
+      schedulePreviewUpdate();
+      scheduleFullUpdate();
+    }
+
+    document.getElementById('labMatchInput')?.addEventListener('change', (event) => {
+      labMatchReferenceFile = event.target.files && event.target.files[0] ? event.target.files[0] : null;
+      updateLabMatchUI();
+    });
+    document.getElementById('labMatchRunBtn')?.addEventListener('click', () => { void runLabMatch(); });
+    document.getElementById('labMatchApplySelectedBtn')?.addEventListener('click', applyLookToSelected);
+    document.getElementById('labMatchClearBtn')?.addEventListener('click', clearLook);
+
+    // ===========================================
+    // AI repair: learned inpainting on the commit and export paths
+    // ===========================================
+    const aiRepair = { status: 'idle', provider: '', run: null, source: '', error: '', percent: 0, tiles: 0, ms: 0 };
+
+    function aiRepairReady() {
+      return Boolean(state.dustRemoval.ai && aiRepair.status === 'ready' && typeof aiRepair.run === 'function');
+    }
+
+    function updateAiRepairUI() {
+      const status = document.getElementById('dustAiStatus');
+      const enabled = document.getElementById('dustAiEnabled');
+      const loadBtn = document.getElementById('dustAiLoadBtn');
+      if (enabled) enabled.checked = Boolean(state.dustRemoval.ai);
+      if (loadBtn) loadBtn.disabled = aiRepair.status === 'loading';
+      if (!status) return;
+      const providerName = aiRepair.provider === 'webgpu' ? 'WebGPU' : 'WASM';
+      let text;
+      if (aiRepair.status === 'loading') {
+        text = getInterpolatedText('dustAiStatusLoading', { percent: String(aiRepair.percent) }, `Loading model… ${aiRepair.percent}%`);
+      } else if (aiRepair.status === 'ready') {
+        text = getInterpolatedText('dustAiStatusReady', { source: aiRepair.source, provider: providerName }, `Model ready: ${aiRepair.source} on ${providerName}`);
+        if (aiRepair.tiles) text += ' · ' + getInterpolatedText('dustAiStatusLast', { tiles: String(aiRepair.tiles), ms: String(aiRepair.ms) }, `last run ${aiRepair.tiles} tile(s) in ${aiRepair.ms} ms`);
+      } else if (aiRepair.status === 'error') {
+        text = getInterpolatedText('dustAiStatusError', { message: aiRepair.error }, `Model failed: ${aiRepair.error}. Load a LaMa ONNX file instead.`);
+      } else {
+        text = getLocalizedText(inpaintBackends().webgpu ? 'dustAiStatusIdleGpu' : 'dustAiStatusIdleWasm', 'No model loaded.');
+      }
+      status.textContent = text;
+    }
+
+    // `source` is a File (a model the user picked) or a URL (the self-hosted
+    // asset, fetched once and cached in IndexedDB).
+    async function loadAiRepairModel(source) {
+      if (aiRepair.status === 'loading') return;
+      aiRepair.status = 'loading';
+      aiRepair.percent = 0;
+      aiRepair.error = '';
+      updateAiRepairUI();
+      try {
+        let bytes; let label;
+        if (source instanceof File) {
+          bytes = await source.arrayBuffer();
+          label = source.name;
+        } else {
+          bytes = await fetchModelBytes(source, {
+            onProgress: (received, total) => {
+              aiRepair.percent = total ? Math.round((received / total) * 100) : 0;
+              updateAiRepairUI();
+            }
+          });
+          label = String(source).split('/').pop();
+        }
+        const session = await createInpaintSession(bytes);
+        aiRepair.run = session.run;
+        aiRepair.provider = session.provider;
+        aiRepair.source = label;
+        aiRepair.status = 'ready';
+        aiRepair.tiles = 0;
+        showToast(getInterpolatedText('dustAiLoaded', { provider: session.provider === 'webgpu' ? 'WebGPU' : 'WASM' }, `AI repair model loaded (${session.provider})`));
+      } catch (error) {
+        console.warn('AI repair model failed:', error);
+        aiRepair.status = 'error';
+        aiRepair.error = error?.message || String(error);
+        aiRepair.run = null;
+      }
+      updateAiRepairUI();
+      if (aiRepairReady() && state.dustRemoval.enabled) scheduleDustDetection();
+    }
+
+    // The commit-path inpaint: the learned model when it is on and ready,
+    // TELEA otherwise (and always for brush strokes, which stay interactive).
+    async function inpaintForCommit(source, mask) {
+      if (!aiRepairReady()) return inpaintMasked(source, mask, 3);
+      const started = performance.now();
+      try {
+        const { imageData, tiles } = await inpaintWithModel(source, mask, aiRepair.run, {
+          onProgress: (done, total) => updateDustStatusUI(getInterpolatedText('dustAiStatusRunning', { done: String(done), total: String(total) }, `AI repair: tile ${done} / ${total}`))
+        });
+        aiRepair.tiles = tiles;
+        aiRepair.ms = Math.round(performance.now() - started);
+        updateAiRepairUI();
+        return imageData;
+      } catch (error) {
+        console.warn('AI repair failed, falling back to TELEA:', error);
+        aiRepair.status = 'error';
+        aiRepair.error = error?.message || String(error);
+        updateAiRepairUI();
+        return inpaintMasked(source, mask, 3);
+      }
+    }
+
+    document.getElementById('dustAiEnabled')?.addEventListener('change', (event) => {
+      state.dustRemoval.ai = Boolean(event.target.checked);
+      updateAiRepairUI();
+      if (state.dustRemoval.ai && aiRepair.status === 'idle') void loadAiRepairModel(DEFAULT_MODEL_URL);
+      else if (state.dustRemoval.enabled) scheduleDustDetection();
+    });
+    document.getElementById('dustAiLoadBtn')?.addEventListener('click', () => { void loadAiRepairModel(DEFAULT_MODEL_URL); });
+    document.getElementById('dustAiModelInput')?.addEventListener('change', (event) => {
+      const file = event.target.files && event.target.files[0];
+      if (file) void loadAiRepairModel(file);
+      event.target.value = '';
+    });
+    updateAiRepairUI();
+
+    // ===========================================
+    // Linear DNG export (inverted, base-normalised raw)
+    // ===========================================
+    // `source` is the geometry-applied negative (16-bit plane when the file
+    // carries one); the film base and film type come from `settings`.
+    function renderLinearDngBlob(source, settings, position) {
+      if (!source) throw new Error('No image available for export.');
+      const plane = source.__image16 && source.__image16.data instanceof Uint16Array ? source.__image16 : toImage16(source);
+      const positive = sanitizePresetType(settings.filmType || 'color') === 'positive';
+      const filmBase = requiresFilmBase(settings) && settings.filmBase ? settings.filmBase : null;
+      const linear = buildLinearPositive(plane, filmBase, { positive });
+      return encodeLinearDngBlob(linear, { metadata: exportMetadataFor(settings, position) });
+    }
+
+    // ===========================================
+    // Contact sheet export
+    // ===========================================
+    const CONTACT_SHEET_FONT = 'Inter, "Helvetica Neue", Arial, sans-serif';
+
+    function contactSheetFileName(pageIndex, pageCount, exportInfo) {
+      const roll = state.rollMetadata || {};
+      const stem = (roll.rollName || roll.stock || roll.date || 'roll').replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '') || 'roll';
+      const page = pageCount > 1 ? `-p${pageIndex + 1}` : '';
+      return `contact-sheet-${stem}${page}${exportInfo.extension}`;
+    }
+
+    // Renders the selected photos in roll order onto 300 dpi pages: header from
+    // the roll metadata, frame numbers under each frame, optional sprocket
+    // borders through the same renderer as the sprocket export. Frames are
+    // converted through the batch path and downscaled twice the cell size
+    // before drawing; TIFF when that is the export format, otherwise PNG.
+    async function exportContactSheet() {
+      if (isDesktopBatchExportLocked()) return;
+      const selected = state.fileQueue.map((item, index) => ({ item, index })).filter(({ item }) => item.selected);
+      if (!selected.length) return;
+      const layoutId = normalizeLayoutId(document.getElementById('contactSheetLayout')?.value);
+      const pageId = normalizePageId(document.getElementById('contactSheetPage')?.value);
+      const sprockets = Boolean(document.getElementById('contactSheetSprockets')?.checked);
+      const exportInfo = getExportInfo(state.exportFormat === 'tiff' ? 'tiff' : 'png', 8);
+      const lang = i18n[currentLang];
+      const overlay = getLoadingOverlay();
+      const thumbs = [];
+      const pages = [];
+      await overlay.show({ title: lang.loadingExporting });
+      try {
+        persistCurrentFileSettings({ silent: true, force: true });
+        const probe = layoutContactSheet({ pageId, layoutId, count: selected.length });
+        const cell = probe.cells[0].frame;
+        const target = Math.max(cell.width, cell.height) * 2;
+        for (let i = 0; i < selected.length; i++) {
+          const { item, index } = selected[i];
+          overlay.updateProgress((i / selected.length) * 80, lang.loadingBatchFile.replace('{current}', i + 1).replace('{total}', selected.length));
+          const settingsForFile = getSettingsForExport(index, item);
+          const label = frameNumberFor(settingsForFile?.frameMetadata, i);
+          try {
+            let adjusted = await processFileWithSettings(item.file, settingsForFile);
+            if (Math.max(adjusted.width, adjusted.height) > target) adjusted = downsampleImageDataForMaxDim(adjusted, target);
+            if (sprockets) adjusted = composeSprocketFrame(adjusted, getSprocketFrameComposeOptions(settingsForFile, i));
+            const bitmap = await createImageBitmap(adjusted);
+            thumbs.push({ image: bitmap, width: bitmap.width, height: bitmap.height, label });
+          } catch (error) {
+            console.warn('Contact sheet frame failed:', item.file.name, error);
+            thumbs.push({ image: null, width: 1, height: 1, label });
+          }
+          await waitForNextFrame();
+        }
+        const header = contactSheetHeader(state.rollMetadata, { fallbackTitle: getLocalizedText('contactSheetTitle', 'Contact sheet') });
+        const pageCount = pagesFor(selected.length, layoutId);
+        for (let pageIndex = 0; pageIndex < pageCount; pageIndex++) {
+          const sheet = layoutContactSheet({ pageId, layoutId, count: selected.length, pageIndex });
+          const perPage = sheet.layout.columns * sheet.layout.rows;
+          const surface = document.createElement('canvas');
+          surface.width = sheet.page.width;
+          surface.height = sheet.page.height;
+          const ctx = surface.getContext('2d');
+          renderContactSheetPage(ctx, sheet, thumbs.slice(pageIndex * perPage, (pageIndex + 1) * perPage), {
+            header,
+            footer: 'NeoAnalogLab Negative Converter',
+            fontFamily: CONTACT_SHEET_FONT
+          });
+          overlay.updateProgress(80 + ((pageIndex + 1) / pageCount) * 18, lang.loadingEncoding);
+          const imageData = ctx.getImageData(0, 0, surface.width, surface.height);
+          const blob = await imageDataToBlob(imageData, exportInfo.format, null, 8, null, buildExportMetadata({ roll: state.rollMetadata, frame: {}, index: -1 }));
+          pages.push({ blob, name: contactSheetFileName(pageIndex, pageCount, exportInfo) });
+          await waitForNextFrame();
+        }
+        overlay.updateProgress(100, lang.loadingComplete);
+      } finally {
+        overlay.hide();
+        for (const thumb of thumbs) thumb.image?.close?.();
+      }
+      for (const page of pages) {
+        const result = await saveBlob(page.blob, page.name, exportInfo.mimeType);
+        handleSaveResult(result, {
+          cancelledKey: 'exportSaveCancelled',
+          cancelledFallback: 'Save cancelled. No file was written.'
+        });
+        if (!result?.saved) break;
+      }
+      if (pages.length) showToast(getInterpolatedText('contactSheetDone', { pages: String(pages.length) }, `Contact sheet exported (${pages.length} page(s))`));
+    }
+
+    document.getElementById('exportContactSheetBtn')?.addEventListener('click', async () => {
+      try {
+        await exportContactSheet();
+      } catch (error) {
+        console.error('Contact sheet export failed:', error);
+        void appAlert(getLocalizedText('contactSheetFailed', 'The contact sheet could not be exported.'));
+      }
+    });
+    document.querySelector('.contact-sheet-options')?.addEventListener('click', (event) => event.stopPropagation());
+
+    // ===========================================
+    // Analog metadata panel (roll + frame)
+    // ===========================================
+    function updateMetadataUI() {
+      if (!stateReady) return;
+      for (const input of document.querySelectorAll('[data-meta-roll]')) {
+        if (document.activeElement !== input) input.value = state.rollMetadata[input.dataset.metaRoll] || '';
+      }
+      for (const input of document.querySelectorAll('[data-meta-frame]')) {
+        if (document.activeElement !== input) input.value = state.frameMetadata[input.dataset.metaFrame] || '';
+      }
+      const frameNumber = document.getElementById('metaFrameNumber');
+      if (frameNumber) frameNumber.placeholder = frameNumberFor({}, Math.max(0, state.currentFileIndex));
+    }
+
+    // The DX read names the stock; the roll takes it while the field is empty.
+    function prefillRollStockFromFilmEdge() {
+      const edge = state.filmEdge;
+      const name = edge?.found ? (edge.shortName || edge.filmName) : '';
+      if (name && !state.rollMetadata.stock) state.rollMetadata = sanitizeRollMetadata({ ...state.rollMetadata, stock: name });
+    }
+
+    document.querySelectorAll('[data-meta-roll]').forEach((input) => {
+      input.addEventListener('input', () => {
+        state.rollMetadata = sanitizeRollMetadata({ ...state.rollMetadata, [input.dataset.metaRoll]: input.value });
+      });
+    });
+    document.querySelectorAll('[data-meta-frame]').forEach((input) => {
+      input.addEventListener('input', () => {
+        state.frameMetadata = sanitizeFrameMetadata({ ...state.frameMetadata, [input.dataset.metaFrame]: input.value });
+        markCurrentFileDirty();
+      });
+    });
+
+    // ===========================================
+    // Roll project file: save, open, recovery copy
+    // ===========================================
+    let pendingProject = null;
+    let recoveredProject = null;
+    let projectRecoveryTimer = null;
+
+    async function queueItemHash(item) {
+      if (item.hash === undefined) {
+        try { item.hash = await hashFileForProject(item.file); } catch { item.hash = ''; }
+      }
+      return item.hash || '';
+    }
+
+    // Project settings come from disk: geometry that is null must stay null
+    // rather than inherit the open photo's crop (see processFileWithSettings).
+    function sanitizeProjectSettings(settings) {
+      if (!settings) return null;
+      const safe = sanitizeSettings(settings, {
+        fallbackSettings: { ...state, cropRegion: null, autoFrameMeta: null, rotationAngle: 0, mirrored: false }
+      });
+      return deepCopySanitizedSettings(safe);
+    }
+
+    // The roll as a project object. Without `persist` the open photo's live
+    // settings are read without touching its dirty flag (the recovery copy).
+    function buildCurrentProject({ persist = false } = {}) {
+      if (persist) persistCurrentFileSettings({ silent: true, force: true });
+      const current = getCurrentQueueItem();
+      const files = state.fileQueue.map((item) => ({
+        name: item.file.name,
+        size: item.file.size,
+        lastModified: item.file.lastModified || 0,
+        path: item.file.path || '',
+        hash: item.hash || '',
+        settings: item === current && state.originalImageData && !persist ? extractCurrentSettings() : (item.settings || null),
+        studioColors: item.studioColors || null,
+        selected: item.selected !== false
+      }));
+      return buildRollProject({
+        files,
+        rollMetadata: state.rollMetadata,
+        rollReference: state.rollReference,
+        rollAnalysis: state.rollAnalysis,
+        lensCorrection: state.lensCorrection
+      });
+    }
+
+    async function saveProject() {
+      if (!state.fileQueue.length || isDesktopBatchExportLocked()) return;
+      for (const item of state.fileQueue) await queueItemHash(item);
+      const project = buildCurrentProject({ persist: true });
+      const blob = new Blob([serializeRollProject(project)], { type: 'application/json' });
+      const result = await saveBlob(blob, projectFileName(state.rollMetadata), 'application/json');
+      handleSaveResult(result, {
+        cancelledKey: 'exportSaveCancelled',
+        cancelledFallback: 'Save cancelled. No file was written.'
+      });
+      if (result?.saved) showToast(getInterpolatedText('projectSaved', { count: String(project.files.length) }, `Project saved (${project.files.length} photo(s))`));
+    }
+
+    // Recovery copy: a debounced snapshot in IndexedDB so a crash does not lose the roll.
+    function scheduleProjectRecovery() {
+      if (projectRecoveryTimer) clearTimeout(projectRecoveryTimer);
+      projectRecoveryTimer = setTimeout(() => {
+        projectRecoveryTimer = null;
+        if (!state.fileQueue.length) return;
+        try {
+          const text = serializeRollProject(buildCurrentProject());
+          saveProjectRecovery(text).catch((error) => console.warn('Project recovery save failed:', error));
+        } catch (error) {
+          console.warn('Project recovery failed:', error);
+        }
+      }, 2500);
+    }
+
+    async function offerProjectRecovery() {
+      try {
+        const record = await loadProjectRecovery();
+        if (!record || Date.now() - (record.savedAt || 0) > 14 * 24 * 3600 * 1000) return;
+        const project = parseRollProject(record.text);
+        if (!project.files.length) return;
+        recoveredProject = project;
+        state.projectRecoveryAvailable = true;
+        studioWorkspace?.sync();
+        showToast(getLocalizedText('projectRecoveryAvailable', 'A recovery copy of the last roll is available under Batch tools.'), 5000);
+      } catch (error) {
+        console.warn('Project recovery unavailable:', error);
+      }
+    }
+
+    function restoreRecoveredProject() {
+      if (!recoveredProject) return;
+      pendingProject = recoveredProject;
+      if (state.fileQueue.length) void applyPendingProject();
+      else showToast(getLocalizedText('projectNeedsFiles', 'Project read. Add the original photos to restore it.'), 4000);
+    }
+
+    async function openProjectFile(file) {
+      let project;
+      try {
+        project = parseRollProject(await file.text());
+      } catch (error) {
+        const newer = error?.message === 'newer-version';
+        void appAlert(getLocalizedText(newer ? 'projectNewer' : 'projectOpenFailed', newer ? 'This project was saved by a newer version of the app.' : 'This is not a NeoAnalogLab project file.'));
+        return;
+      }
+      pendingProject = project;
+      if (state.fileQueue.length) await applyPendingProject();
+      else showToast(getLocalizedText('projectNeedsFiles', 'Project read. Add the original photos to restore it.'), 4000);
+    }
+
+    // Matches the queued photos to the project (hash, then name and size,
+    // then name), restores their settings and order plus the roll-level
+    // state, reports what is missing or changed, and opens the first photo.
+    async function applyPendingProject() {
+      const project = pendingProject;
+      if (!project || !state.fileQueue.length) return;
+      pendingProject = null;
+      const hashes = new Map();
+      for (const item of state.fileQueue) hashes.set(item.file, await queueItemHash(item));
+      const result = matchProjectFiles(project, state.fileQueue.map((item) => item.file), hashes);
+      const byFile = new Map(state.fileQueue.map((item) => [item.file, item]));
+      const ordered = [];
+      for (const { entry, file } of [...result.matched, ...result.changed]) {
+        const item = byFile.get(file);
+        if (!item) continue;
+        item.settings = sanitizeProjectSettings(entry.settings);
+        item.studioColors = entry.studioColors && typeof entry.studioColors === 'object' ? structuredClone(entry.studioColors) : null;
+        item.selected = entry.selected !== false;
+        item.status = 'pending';
+        item.error = null;
+        item.isDirty = false;
+        ordered.push({ order: entry.order, item });
+      }
+      ordered.sort((a, b) => a.order - b.order);
+      const restored = ordered.map((o) => o.item);
+      state.fileQueue = [...restored, ...result.extra.map((file) => byFile.get(file)).filter(Boolean)];
+      state.rollMetadata = sanitizeRollMetadata(project.roll?.metadata);
+      const reference = project.roll?.reference;
+      if (reference && typeof reference === 'object') {
+        state.rollReference = {
+          ...state.rollReference,
+          enabled: Boolean(reference.enabled),
+          sourceFileId: reference.sourceFileId || null,
+          applyLock: Boolean(reference.applyLock),
+          applyCrop: Boolean(reference.applyCrop),
+          settingsSnapshot: reference.settingsSnapshot ? sanitizeProjectSettings(reference.settingsSnapshot) : null
+        };
+      }
+      const analysis = project.roll?.analysis;
+      if (analysis && typeof analysis === 'object') state.rollAnalysis = { ...state.rollAnalysis, ...structuredClone(analysis) };
+      if (project.lensCorrection && typeof project.lensCorrection === 'object') {
+        // Keep the UI-only fields (search box state) the sanitiser strips.
+        state.lensCorrection = { ...state.lensCorrection, ...sanitizeLensCorrection(project.lensCorrection, createDefaultLensCorrectionSettings()) };
+      }
+      state.currentFileIndex = 0;
+      state.batchSessionActive = state.fileQueue.length > 1;
+      updateFileListUI();
+      updateExportButtons();
+      updateMetadataUI();
+      updateRollReferenceUI();
+      updateRollAnalysisUI();
+      syncBatchUIState({ reason: 'project' });
+      let message = getInterpolatedText('projectOpened', { count: String(restored.length) }, `Project opened: ${restored.length} photo(s) restored`);
+      if (result.changed.length) message += ' · ' + getInterpolatedText('projectChanged', { count: String(result.changed.length) }, `${result.changed.length} changed since it was saved`);
+      showToast(message, 4200);
+      if (result.missing.length) {
+        void appAlert(getInterpolatedText('projectMissing', { names: result.missing.map((entry) => entry.name).join(', ') }, `Missing originals: ${result.missing.map((entry) => entry.name).join(', ')}`));
+      }
+      // switchToFile is the path that restores a queued item's saved settings.
+      state.currentFileIndex = -1;
+      if (state.fileQueue.length) await switchToFile(0);
+      scheduleProjectRecovery();
+    }
+
+    document.getElementById('projectInput')?.addEventListener('change', (e) => {
+      if (isDesktopBatchExportLocked()) return;
+      const files = Array.from(e.target.files);
+      if (files.length === 0) return;
+      const projectFile = files.find((file) => isProjectFileName(file.name));
+      state.fileQueue = [];
+      state.currentFileIndex = 0;
+      state.cropRegion = null;
+      state.rotationAngle = 0;
+      state.mirrored = false;
+      updateMirrorButtonState();
+      state.loadedBaseImageData = null;
+      state.batchSessionActive = false;
+      resetRollReferenceState();
+      syncBatchUIState({ reason: 'projectInput_change_reset' });
+      addFilesToQueue(files);
+      if (projectFile) {
+        void openProjectFile(projectFile);
+      } else if (pendingProject) {
+        void applyPendingProject();
+      } else if (state.fileQueue.length > 0) {
+        loadFile(state.fileQueue[0].file);
+      }
+    });
+
+    // ===========================================
+    // Shareable recipes: code, QR, paste, scan
+    // ===========================================
+    let decodedRecipe = null;
+
+    function recipeTags() {
+      return { stock: state.rollMetadata.stock, lab: state.rollMetadata.lab, note: document.getElementById('recipeNote')?.value || '' };
+    }
+
+    // The film type always travels; every other key only when it differs
+    // from this photo's automatic defaults, which keeps the code short.
+    function currentRecipeCode() {
+      let defaults = null;
+      if (state.originalImageData) {
+        const { filmType, ...rest } = createDefaultSettings(state.originalImageData);
+        defaults = rest;
+      }
+      return encodeRecipe(extractCurrentSettings(), recipeTags(), { defaults });
+    }
+
+    async function copyRecipe() {
+      if (state.currentStep < 3 || !state.processedImageData) {
+        void appAlert(getLocalizedText('recipeNeedPhoto', 'Convert a photo first.'));
+        return;
+      }
+      const code = currentRecipeCode();
+      const box = document.getElementById('recipeCode');
+      if (box) box.value = code;
+      try {
+        await navigator.clipboard.writeText(code);
+        showToast(getInterpolatedText('recipeCopied', { chars: String(code.length) }, `Recipe copied (${code.length} characters)`));
+      } catch {
+        showToast(getLocalizedText('recipeShown', 'Recipe code shown below; copy it from the box.'));
+      }
+      const canvas = document.getElementById('recipeQrCanvas');
+      if (canvas && !canvas.hidden) drawRecipeQr(code);
+    }
+
+    function drawRecipeQr(code) {
+      const canvas = document.getElementById('recipeQrCanvas');
+      if (!canvas || !code) return;
+      const qr = qrcode(0, 'M');
+      qr.addData(code, 'Byte');
+      qr.make();
+      const modules = qr.getModuleCount();
+      const scale = 4;
+      const quiet = 4;
+      canvas.width = canvas.height = (modules + quiet * 2) * scale;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#000000';
+      for (let row = 0; row < modules; row++) {
+        for (let col = 0; col < modules; col++) {
+          if (qr.isDark(row, col)) ctx.fillRect((col + quiet) * scale, (row + quiet) * scale, scale, scale);
+        }
+      }
+      canvas.hidden = false;
+    }
+
+    function toggleRecipeQr() {
+      const canvas = document.getElementById('recipeQrCanvas');
+      if (!canvas) return;
+      if (!canvas.hidden) { canvas.hidden = true; return; }
+      const box = document.getElementById('recipeCode');
+      let code = box?.value.trim() || '';
+      if (!code && state.currentStep >= 3 && state.processedImageData) {
+        code = currentRecipeCode();
+        if (box) box.value = code;
+      }
+      if (code) drawRecipeQr(code);
+    }
+
+    function readRecipeFromBox() {
+      const text = document.getElementById('recipeCode')?.value || '';
+      try {
+        decodedRecipe = decodeRecipe(text);
+      } catch (error) {
+        decodedRecipe = null;
+        const key = error?.reason === 'version' ? 'recipeNewer' : error?.reason === 'corrupt' ? 'recipeCorrupt' : 'recipeInvalid';
+        showToast(getLocalizedText(key, 'That is not a recipe code.'), 3500);
+      }
+      updateRecipeUI();
+    }
+
+    function updateRecipeUI() {
+      if (!stateReady) return;
+      const list = document.getElementById('recipeDiff');
+      const status = document.getElementById('recipeStatus');
+      const applyBtn = document.getElementById('recipeApplyBtn');
+      const applySelectedBtn = document.getElementById('recipeApplySelectedBtn');
+      const scanBtn = document.getElementById('recipeScanBtn');
+      const box = document.getElementById('recipeCode');
+      if (!list || !status) return;
+      if (box) box.placeholder = getLocalizedText('recipePlaceholder', 'Paste a recipe code here');
+      if (scanBtn) scanBtn.hidden = !(typeof BarcodeDetector === 'function' && navigator.mediaDevices?.getUserMedia);
+      const ready = state.currentStep >= 3 && Boolean(state.processedImageData);
+      if (!decodedRecipe) {
+        list.replaceChildren();
+        status.textContent = getLocalizedText('recipeStatusNone', 'No recipe read yet.');
+        if (applyBtn) applyBtn.disabled = true;
+        if (applySelectedBtn) applySelectedBtn.disabled = true;
+        return;
+      }
+      const diff = recipeDiff(state, decodedRecipe.settings);
+      list.replaceChildren(...diff.map((change) => {
+        const li = document.createElement('li');
+        li.textContent = describeRecipeChange(change);
+        return li;
+      }));
+      const tags = Object.entries(decodedRecipe.tags).map(([key, value]) => `${key}: ${value}`).join(' · ');
+      status.textContent = getInterpolatedText('recipeStatusRead', { count: String(diff.length), tags: tags ? ` · ${tags}` : '' }, `Recipe read: ${diff.length} change(s)${tags ? ` · ${tags}` : ''}`);
+      if (applyBtn) applyBtn.disabled = !ready || !diff.length;
+      if (applySelectedBtn) applySelectedBtn.disabled = !state.fileQueue.some((item) => item.selected && item.file !== state.loadedFile);
+    }
+
+    // Recipe settings sanitised against the current photo, keyed by recipe key.
+    function recipePatch() {
+      const next = decodedRecipe?.settings || {};
+      const safe = sanitizeSettings({ ...extractCurrentSettings(), ...next }, { fallbackSettings: state });
+      const patch = {};
+      for (const key of RECIPE_KEYS) if (Object.hasOwn(next, key) && safe[key] !== undefined) patch[key] = structuredClone(safe[key]);
+      return patch;
+    }
+
+    function applyRecipeToCurrent() {
+      if (!decodedRecipe || state.currentStep < 3 || !state.processedImageData) return;
+      const patch = recipePatch();
+      if (!Object.keys(patch).length) return;
+      pushUndo('recipe');
+      const filmTypeChanged = Object.hasOwn(patch, 'filmType') && patch.filmType !== state.filmType;
+      if (filmTypeChanged) {
+        state.filmType = patch.filmType;
+        setFilmTypeButtons(state.filmType);
+        if (requiresFilmBase()) setStep2Mode(suggestStep2Mode());
+        else updateFilmModeUI();
+      }
+      for (const [key, value] of Object.entries(patch)) if (key !== 'filmType') state[key] = value;
+      if (patch.curvePoints) ['r', 'g', 'b'].forEach((ch) => updateCurveFromPoints(ch));
+      state.frontierGuideStep2ChoiceTouched = true;
+      updateSlidersFromState();
+      renderCurve();
+      updateEnlargerUI();
+      updateLabMatchUI();
+      markCurrentFileDirty();
+      if (filmTypeChanged || usesSilverCoreConversion(state)) scheduleSilverSourceRefresh();
+      else schedulePreviewUpdate();
+      showToast(getLocalizedText('recipeApplied', 'Recipe applied.'));
+      updateRecipeUI();
+    }
+
+    function applyRecipeToSelected() {
+      if (!decodedRecipe) return;
+      const patch = recipePatch();
+      const targets = state.fileQueue.filter((item) => item.selected && item.file !== state.loadedFile);
+      for (const item of targets) {
+        if (item.settings) item.settings = { ...item.settings, ...structuredClone(patch) };
+        else item.studioColors = { ...(item.studioColors || {}), ...structuredClone(patch) };
+        item.isDirty = false;
+        item.status = 'pending';
+      }
+      updateFileListUI();
+      showToast(getInterpolatedText('recipeAppliedSelected', { count: String(targets.length) }, `Recipe applied to ${targets.length} photo(s)`));
+      scheduleProjectRecovery();
+    }
+
+    async function scanRecipeQr() {
+      if (typeof BarcodeDetector !== 'function' || !navigator.mediaDevices?.getUserMedia) return;
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+      } catch (error) {
+        console.warn('Recipe scan camera failed:', error);
+        showToast(getLocalizedText('loupeNoCamera', 'No camera available.'));
+        return;
+      }
+      const video = document.createElement('video');
+      video.srcObject = stream;
+      video.muted = true;
+      video.playsInline = true;
+      try { await video.play(); } catch {}
+      showToast(getLocalizedText('recipeScanning', 'Point the camera at the recipe QR…'), 3000);
+      const detector = new BarcodeDetector({ formats: ['qr_code'] });
+      const started = Date.now();
+      let found = '';
+      while (!found && Date.now() - started < 20000) {
+        try {
+          const codes = await detector.detect(video);
+          found = codes.map((code) => code.rawValue).find((value) => /NC\d+\./.test(value || '')) || '';
+        } catch {}
+        if (!found) await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+      for (const track of stream.getTracks()) track.stop();
+      if (found) {
+        const box = document.getElementById('recipeCode');
+        if (box) box.value = found;
+        readRecipeFromBox();
+      } else {
+        showToast(getLocalizedText('recipeScanNone', 'No recipe QR found.'));
+      }
+    }
+
+    document.getElementById('recipeCopyBtn')?.addEventListener('click', () => { void copyRecipe(); });
+    document.getElementById('recipeQrBtn')?.addEventListener('click', toggleRecipeQr);
+    document.getElementById('recipeScanBtn')?.addEventListener('click', () => { void scanRecipeQr(); });
+    document.getElementById('recipeDecodeBtn')?.addEventListener('click', readRecipeFromBox);
+    document.getElementById('recipeApplyBtn')?.addEventListener('click', applyRecipeToCurrent);
+    document.getElementById('recipeApplySelectedBtn')?.addEventListener('click', applyRecipeToSelected);
+    document.getElementById('recipeCode')?.addEventListener('input', () => { decodedRecipe = null; updateRecipeUI(); });
+
+    // ===========================================
+    // Multi-shot merge (camera scanning)
+    // ===========================================
+    const MULTI_SHOT_MAX = 5;
+
+    // Aligns the selected shots to the first one, merges them in linear light
+    // and adds the result to the queue as a 16-bit PNG, opened and selected in
+    // place of its sources.
+    async function mergeSelectedShots(mode = 'average') {
+      if (document.body.dataset.studioBusy || state.cropping || isDesktopBatchExportLocked()) return;
+      const selectedItems = state.fileQueue.filter((item) => item.selected);
+      if (selectedItems.length < 2 || selectedItems.length > MULTI_SHOT_MAX) return;
+      if (!(await ensureOpenCvReady())) {
+        void appAlert(getLocalizedText('multiShotOpenCv', 'Alignment needs OpenCV, which could not be loaded.'));
+        return;
+      }
+      studioAutoFrameRunning = true;
+      document.body.dataset.studioBusy = 'true';
+      studioWorkspace?.sync();
+      showBatchProgress(true);
+      let merged = null; let used = 0; let skipped = 0;
+      try {
+        persistCurrentFileSettings({ silent: true, force: true });
+        let reference = null;
+        const frames = [];
+        for (let i = 0; i < selectedItems.length; i++) {
+          const item = selectedItems[i];
+          updateBatchProgress(i + 1, selectedItems.length + 1, item.file.name);
+          let imageData;
+          try {
+            imageData = await loadFileToImageData(item.file);
+          } catch (error) {
+            console.warn('Multi-shot decode failed for', item.file.name, error);
+            skipped++;
+            continue;
+          }
+          if (!reference) {
+            reference = imageData;
+            frames.push({ image16: toImage16(imageData), ratio: 1 });
+          } else {
+            let alignment = null;
+            try { alignment = estimateAlignment(reference, imageData, { maxSide: 1200 }); }
+            catch (error) { console.warn('Multi-shot alignment failed for', item.file.name, error); }
+            if (!alignment) { skipped++; continue; }
+            const warped = warpImageData(imageData, alignment.homography, reference.width, reference.height);
+            const image16 = toImage16(warped);
+            frames.push({ image16, ratio: estimateExposureRatio(frames[0].image16, image16) });
+          }
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+        if (frames.length >= 2) {
+          updateBatchProgress(selectedItems.length + 1, selectedItems.length + 1, getLocalizedText('multiShotMerging', 'Merging…'));
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          merged = mergeFrames(frames, { mode, region: coverageRect(frames), opaque: true });
+          used = frames.length;
+        }
+      } finally {
+        showBatchProgress(false);
+        studioAutoFrameRunning = false;
+        delete document.body.dataset.studioBusy;
+        studioWorkspace?.sync();
+      }
+      if (!merged) {
+        void appAlert(getLocalizedText('multiShotFailed', 'The selected shots could not be aligned, so nothing was merged.'));
+        return;
+      }
+      const blob = await imageDataToBlob(image16ToImageData(merged), 'png', null, 16);
+      const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, '').replace('T', '-');
+      const name = `merged-${mode}-${stamp}.png`;
+      const file = new File([blob], name, { type: 'image/png', lastModified: Date.now() });
+      for (const item of selectedItems) item.selected = false;
+      addFilesToQueue([file]);
+      let message = getInterpolatedText('multiShotDone', { count: String(used), name }, `Merged ${used} shots into ${name}`);
+      if (skipped) message += ' · ' + getInterpolatedText('multiShotSkipped', { count: String(skipped) }, `${skipped} shot(s) could not be aligned and were skipped`);
+      showToast(message, 3600);
+      const index = state.fileQueue.findIndex((item) => item.file === file);
+      if (index >= 0) await switchToFile(index);
+    }
+
+    // ===========================================
+    // Live loupe (camera scanning)
+    // ===========================================
+    const LOUPE_PREVIEW_SIDE = 640;
+    const liveLoupe = { stream: null, track: null, running: false, capturing: false, frames: 0, view: 'converted', surface: null };
+
+    function loupeElement(id) {
+      return document.getElementById(id);
+    }
+
+    function loupeSupported() {
+      return Boolean(navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function');
+    }
+
+    function setLoupeStatus(text) {
+      const status = loupeElement('loupeStatus');
+      if (status) status.textContent = text;
+    }
+
+    function stopLoupeStream() {
+      liveLoupe.running = false;
+      if (liveLoupe.stream) for (const track of liveLoupe.stream.getTracks()) track.stop();
+      liveLoupe.stream = null;
+      liveLoupe.track = null;
+      const video = loupeElement('loupeVideo');
+      if (video) video.srcObject = null;
+      const capture = loupeElement('loupeCaptureBtn');
+      if (capture) capture.disabled = true;
+    }
+
+    // The conversion the loupe looks through: the current photo's recipe when
+    // one is converted (film base, preset, colour controls and look, without
+    // its geometry, strokes, flat field or roll lock), otherwise the automatic
+    // defaults for the camera frame itself.
+    function loupeRecipe(frame) {
+      if (state.currentStep >= 3 && state.originalImageData) {
+        return {
+          settings: { ...state, cropRegion: null, rotationAngle: 0, mirrored: false, autoFrameMeta: null, localExposure: null, flatFieldId: null, rollFrame: null, filmEdge: null },
+          name: state.loadedFile?.name || ''
+        };
+      }
+      return { settings: createDefaultSettings(frame), name: getLocalizedText('loupeRecipeAuto', 'automatic') };
+    }
+
+    function grabLoupeFrame(video, maxSide) {
+      const scale = Math.min(1, maxSide / Math.max(video.videoWidth, video.videoHeight));
+      const width = Math.max(1, Math.round(video.videoWidth * scale));
+      const height = Math.max(1, Math.round(video.videoHeight * scale));
+      if (!liveLoupe.surface) liveLoupe.surface = document.createElement('canvas');
+      const surface = liveLoupe.surface;
+      if (surface.width !== width || surface.height !== height) {
+        surface.width = width;
+        surface.height = height;
+      }
+      const ctx = surface.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(video, 0, 0, width, height);
+      return ctx.getImageData(0, 0, width, height);
+    }
+
+    async function convertLoupeFrame(frame) {
+      const recipe = loupeRecipe(frame);
+      const converted = await convertFrameWithRouter({
+        imageData: frame,
+        settings: buildRouterSettings(recipe.settings, frame),
+        options: { preview: true, scratch: true, includeAnalysisPreview: false }
+      });
+      if (!converted) return null;
+      const output = new ImageData(converted.width, converted.height);
+      applyAdjustmentsToBuffer(converted, recipe.settings, output, 'preview');
+      return { imageData: output, recipe: recipe.name };
+    }
+
+    async function loupeLoop() {
+      const video = loupeElement('loupeVideo');
+      const canvas = loupeElement('loupeCanvas');
+      const overlay = loupeElement('loupeOverlay');
+      const stream = liveLoupe.stream;
+      while (liveLoupe.running && liveLoupe.stream === stream) {
+        if (video.readyState >= 2 && video.videoWidth > 0) {
+          try {
+            const frame = grabLoupeFrame(video, LOUPE_PREVIEW_SIDE);
+            const result = await convertLoupeFrame(frame);
+            if (!liveLoupe.running || liveLoupe.stream !== stream) break;
+            if (result) {
+              if (canvas.width !== result.imageData.width || canvas.height !== result.imageData.height) {
+                canvas.width = result.imageData.width;
+                canvas.height = result.imageData.height;
+              }
+              canvas.getContext('2d').putImageData(result.imageData, 0, 0);
+              liveLoupe.frames++;
+              overlay.dataset.frames = String(liveLoupe.frames);
+              if (liveLoupe.frames === 1 || liveLoupe.frames % 15 === 0) {
+                setLoupeStatus(getInterpolatedText('loupeLive', {
+                  width: String(video.videoWidth),
+                  height: String(video.videoHeight),
+                  recipe: result.recipe
+                }, `Live · ${video.videoWidth}×${video.videoHeight} · recipe: ${result.recipe}`));
+              }
+            }
+          } catch (error) {
+            console.warn('Loupe frame failed:', error);
+            await new Promise((resolve) => setTimeout(resolve, 300));
+          }
+        }
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+      }
+    }
+
+    async function populateLoupeCameras() {
+      const select = loupeElement('loupeCameraSelect');
+      if (!select || !navigator.mediaDevices?.enumerateDevices) return;
+      let devices = [];
+      try {
+        devices = (await navigator.mediaDevices.enumerateDevices()).filter((device) => device.kind === 'videoinput');
+      } catch (error) {
+        console.warn('Loupe camera list failed:', error);
+      }
+      const current = liveLoupe.track?.getSettings?.().deviceId || '';
+      select.replaceChildren(...devices.map((device, index) => {
+        const option = document.createElement('option');
+        option.value = device.deviceId;
+        option.textContent = device.label || getInterpolatedText('loupeCameraLabel', { index: String(index + 1) }, `Camera ${index + 1}`);
+        option.selected = device.deviceId === current;
+        return option;
+      }));
+      select.disabled = devices.length < 2;
+    }
+
+    function configureLoupeTrackControls() {
+      const zoom = loupeElement('loupeZoom');
+      const torch = loupeElement('loupeTorch');
+      let caps = {};
+      let current = {};
+      try { caps = liveLoupe.track?.getCapabilities?.() || {}; } catch { caps = {}; }
+      try { current = liveLoupe.track?.getSettings?.() || {}; } catch { current = {}; }
+      if (zoom) {
+        const range = caps.zoom;
+        const ok = Boolean(range && Number.isFinite(range.min) && Number.isFinite(range.max) && range.max > range.min);
+        zoom.disabled = !ok;
+        if (ok) {
+          zoom.min = String(range.min);
+          zoom.max = String(range.max);
+          zoom.step = String(range.step || 0.1);
+          zoom.value = String(current.zoom ?? range.min);
+        }
+      }
+      if (torch) {
+        const ok = Array.isArray(caps.torch) ? caps.torch.includes(true) : Boolean(caps.torch);
+        torch.disabled = !ok;
+        torch.checked = Boolean(current.torch);
+      }
+    }
+
+    async function applyLoupeConstraint(constraint) {
+      if (!liveLoupe.track) return;
+      try {
+        await liveLoupe.track.applyConstraints({ advanced: [constraint] });
+      } catch (error) {
+        console.warn('Loupe constraint failed:', error);
+      }
+    }
+
+    async function openLoupe(deviceId = null) {
+      const overlay = loupeElement('loupeOverlay');
+      if (!overlay) return;
+      if (!loupeSupported()) {
+        void appAlert(getLocalizedText('loupeUnsupported', 'This browser cannot open a camera.'));
+        return;
+      }
+      stopLoupeStream();
+      overlay.hidden = false;
+      overlay.dataset.view = liveLoupe.view;
+      overlay.dataset.frames = '0';
+      liveLoupe.frames = 0;
+      setLoupeStatus(getLocalizedText('loupeStarting', 'Starting camera…'));
+      const video = deviceId
+        ? { deviceId: { exact: deviceId } }
+        : { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } };
+      try {
+        liveLoupe.stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
+      } catch (error) {
+        console.warn('Loupe camera failed:', error);
+        const denied = error?.name === 'NotAllowedError' || error?.name === 'SecurityError';
+        setLoupeStatus(getLocalizedText(denied ? 'loupeDenied' : 'loupeNoCamera', denied ? 'Camera access was denied.' : 'No camera available.'));
+        return;
+      }
+      const videoEl = loupeElement('loupeVideo');
+      videoEl.srcObject = liveLoupe.stream;
+      liveLoupe.track = liveLoupe.stream.getVideoTracks()[0] || null;
+      try {
+        await videoEl.play();
+      } catch (error) {
+        console.warn('Loupe video play failed:', error);
+      }
+      await populateLoupeCameras();
+      configureLoupeTrackControls();
+      liveLoupe.running = true;
+      loupeElement('loupeCaptureBtn').disabled = false;
+      loupeElement('loupeCloseBtn')?.focus();
+      void loupeLoop();
+    }
+
+    function closeLoupe() {
+      const overlay = loupeElement('loupeOverlay');
+      if (!overlay || overlay.hidden) return;
+      stopLoupeStream();
+      overlay.hidden = true;
+      document.getElementById('studioLoupe')?.focus();
+      // Captures made before any photo was open behave like added files.
+      if (!state.originalImageData && state.fileQueue.length > 0) {
+        void loadFile(state.fileQueue[Math.max(0, Math.min(state.currentFileIndex, state.fileQueue.length - 1))].file);
+      }
+    }
+
+    async function captureLoupeFrame() {
+      if (!liveLoupe.running || liveLoupe.capturing) return;
+      const video = loupeElement('loupeVideo');
+      if (!(video.videoWidth > 0)) return;
+      liveLoupe.capturing = true;
+      const button = loupeElement('loupeCaptureBtn');
+      button.disabled = true;
+      try {
+        let blob = null;
+        // ImageCapture returns the sensor's still resolution where supported;
+        // otherwise the current video frame at stream resolution.
+        if (typeof ImageCapture === 'function' && liveLoupe.track) {
+          try {
+            blob = await new ImageCapture(liveLoupe.track).takePhoto();
+          } catch (error) {
+            blob = null;
+          }
+        }
+        if (!blob) {
+          const surface = document.createElement('canvas');
+          surface.width = video.videoWidth;
+          surface.height = video.videoHeight;
+          surface.getContext('2d').drawImage(video, 0, 0);
+          blob = await new Promise((resolve) => surface.toBlob(resolve, 'image/png'));
+        }
+        if (!blob) throw new Error('Capture produced no image');
+        const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, '').replace('T', '-');
+        const extension = blob.type === 'image/jpeg' ? 'jpg' : 'png';
+        const file = new File([blob], `loupe-${stamp}.${extension}`, { type: blob.type || 'image/png', lastModified: Date.now() });
+        addFilesToQueue([file]);
+        showToast(getInterpolatedText('loupeCaptured', { name: file.name }, `Captured ${file.name}`));
+      } catch (error) {
+        console.warn('Loupe capture failed:', error);
+        void appAlert(getLocalizedText('loupeCaptureFailed', 'The capture failed.'));
+      } finally {
+        liveLoupe.capturing = false;
+        button.disabled = !liveLoupe.running;
+      }
+    }
+
+    loupeElement('loupeCloseBtn')?.addEventListener('click', closeLoupe);
+    loupeElement('loupeCaptureBtn')?.addEventListener('click', () => { void captureLoupeFrame(); });
+    loupeElement('loupeCameraSelect')?.addEventListener('change', (event) => { void openLoupe(event.target.value || null); });
+    loupeElement('loupeZoom')?.addEventListener('input', (event) => { void applyLoupeConstraint({ zoom: Number(event.target.value) }); });
+    loupeElement('loupeTorch')?.addEventListener('change', (event) => { void applyLoupeConstraint({ torch: event.target.checked }); });
+    loupeElement('loupeRaw')?.addEventListener('change', (event) => {
+      liveLoupe.view = event.target.checked ? 'raw' : 'converted';
+      const overlay = loupeElement('loupeOverlay');
+      if (overlay) overlay.dataset.view = liveLoupe.view;
+    });
+    loupeElement('loupeOverlay')?.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeLoupe();
+      }
+    });
+    window.addEventListener('pagehide', stopLoupeStream);
+
+    // ===========================================
+    // Flat field: blank light-source frame -> gain map for the roll
+    // ===========================================
+    function resetFlatFieldState() {
+      state.flatFields = {};
+      state.flatFieldActiveId = null;
+      state.flatFieldId = null;
+      if (stateReady) updateFlatFieldUI();
+    }
+
+    function flatFieldUsageCount(id) {
+      return state.fileQueue.filter((item) => (item.file === state.loadedFile ? state.flatFieldId : item.settings?.flatFieldId) === id).length;
+    }
+
+    function updateFlatFieldUI() {
+      if (!stateReady) return;
+      const status = document.getElementById('flatFieldStatus');
+      const enabled = document.getElementById('flatFieldEnabled');
+      if (!status || !enabled) return;
+      const active = state.flatFieldActiveId ? state.flatFields[state.flatFieldActiveId] : null;
+      status.textContent = active
+        ? getInterpolatedText('flatFieldStatusActive', {
+          source: active.source || active.id,
+          falloff: String(Math.round((active.stats?.cornerFalloff || 0) * 100)),
+          count: String(flatFieldUsageCount(active.id))
+        }, `From ${active.source}`)
+        : getLocalizedText('flatFieldStatusNone', 'No flat field yet.');
+      enabled.checked = Boolean(active && state.flatFieldId === active.id);
+      enabled.disabled = !active || !state.originalImageData;
+      const busy = Boolean(document.body.dataset.studioBusy);
+      const useBtn = document.getElementById('flatFieldUseCurrentBtn');
+      const detectBtn = document.getElementById('flatFieldDetectBtn');
+      const applyBtn = document.getElementById('flatFieldApplySelectedBtn');
+      const clearBtn = document.getElementById('flatFieldClearBtn');
+      if (useBtn) useBtn.disabled = !state.loadedBaseImageData && !state.originalImageData || busy;
+      if (detectBtn) detectBtn.disabled = state.fileQueue.filter((item) => item.selected).length < 2 || busy;
+      if (applyBtn) applyBtn.disabled = !active || busy;
+      if (clearBtn) clearBtn.disabled = !active || busy;
+      const warning = document.getElementById('flatFieldLensWarning');
+      if (warning) {
+        const lensVignetting = Boolean(state.lensCorrection?.enabled && state.lensCorrection.modes?.includeVignetting !== false && state.lensCorrection.selectedLens);
+        warning.style.display = active && state.flatFieldId === active.id && lensVignetting ? '' : 'none';
+      }
+    }
+
+    function registerFlatField(map) {
+      state.flatFields[map.id] = map;
+      state.flatFieldActiveId = map.id;
+    }
+
+    // Sets the roll's flat field on the selected files (never on the blank
+    // itself) and on the open file.
+    function applyFlatFieldToItems(id, items, { sourceFile = null } = {}) {
+      let count = 0;
+      for (const item of items) {
+        if (sourceFile && item.file === sourceFile) continue;
+        if (item.file === state.loadedFile) {
+          if (state.flatFieldId !== id) {
+            state.flatFieldId = id;
+            markCurrentFileDirty();
+          }
+          count++;
+          continue;
+        }
+        if (item.settings) {
+          if (item.settings.flatFieldId !== id) {
+            item.settings = { ...item.settings, flatFieldId: id };
+            item.status = 'pending';
+          }
+        } else {
+          item.settings = { ...createDefaultSettings(state.originalImageData || { width: 1, height: 1 }), flatFieldId: id };
+          item.isDirty = false;
+        }
+        count++;
+      }
+      return count;
+    }
+
+    async function useCurrentAsFlatField() {
+      const source = state.loadedBaseImageData || state.originalImageData;
+      const currentItem = getCurrentQueueItem();
+      if (!source || document.body.dataset.studioBusy) return;
+      const score = scoreBlankFrame(source);
+      if (!score.blank) {
+        const ok = await appConfirm(getLocalizedText('flatFieldNotBlankConfirm', 'This photo does not look like a blank frame of the light source. Use it as the flat field anyway?'));
+        if (!ok) return;
+      }
+      const map = buildFlatFieldMap(source, { source: currentItem?.file?.name || state.loadedFile?.name || 'current photo' });
+      if (!map) return;
+      pushUndo('flatField');
+      registerFlatField(map);
+      const targets = state.fileQueue.filter((item) => item.selected && item.file !== currentItem?.file);
+      const count = applyFlatFieldToItems(map.id, targets, { sourceFile: currentItem?.file || null });
+      updateFlatFieldUI();
+      updateFileListUI();
+      showToast(getInterpolatedText('flatFieldApplied', { count: String(count) }, `Flat field applied to ${count} photo(s)`));
+    }
+
+    async function detectBlankFrameInSelection() {
+      if (document.body.dataset.studioBusy || state.cropping || isDesktopBatchExportLocked()) return;
+      const selectedItems = state.fileQueue.filter((item) => item.selected);
+      if (selectedItems.length < 2) return;
+      const generation = loadGeneration;
+      studioAutoFrameRunning = true;
+      document.body.dataset.studioBusy = 'true';
+      studioWorkspace?.sync();
+      showBatchProgress(true);
+      let best = null;
+      try {
+        persistCurrentFileSettings({ silent: true, force: true });
+        for (let i = 0; i < selectedItems.length; i++) {
+          const item = selectedItems[i];
+          updateBatchProgress(i + 1, selectedItems.length, item.file.name);
+          try {
+            const imageData = await loadFileToImageData(item.file);
+            const score = scoreBlankFrame(imageData);
+            if (score.blank && (!best || score.score > best.score.score)) best = { item, imageData, score };
+          } catch (error) {
+            console.warn('Blank frame check failed for', item.file.name, error);
+          }
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+        if (!isCurrentLoad(generation)) return;
+        if (!best) {
+          void appAlert(getLocalizedText('flatFieldDetectNone', 'No blank light-source frame found among the selected photos.'));
+          return;
+        }
+        pushUndo('flatField');
+        const map = buildFlatFieldMap(best.imageData, { source: best.item.file.name });
+        registerFlatField(map);
+        const count = applyFlatFieldToItems(map.id, selectedItems, { sourceFile: best.item.file });
+        showToast(getInterpolatedText('flatFieldDetected', { name: best.item.file.name }, `Blank frame found: ${best.item.file.name}`) + ' · ' + getInterpolatedText('flatFieldApplied', { count: String(count) }, `Flat field applied to ${count} photo(s)`), 3200);
+      } finally {
+        showBatchProgress(false);
+        studioAutoFrameRunning = false;
+        delete document.body.dataset.studioBusy;
+        studioWorkspace?.sync();
+      }
+      updateFlatFieldUI();
+      updateFileListUI();
+      if (state.originalImageData && state.flatFieldId) scheduleSilverSourceRefresh({ immediate: true });
+    }
+
+    function applyFlatFieldToSelected() {
+      const id = state.flatFieldActiveId;
+      if (!id || !state.flatFields[id]) return;
+      pushUndo('flatField');
+      const source = state.flatFields[id].source;
+      const targets = state.fileQueue.filter((item) => item.selected && item.file.name !== source);
+      const count = applyFlatFieldToItems(id, targets);
+      updateFlatFieldUI();
+      updateFileListUI();
+      showToast(getInterpolatedText('flatFieldApplied', { count: String(count) }, `Flat field applied to ${count} photo(s)`));
+      if (state.flatFieldId === id) scheduleSilverSourceRefresh({ immediate: true });
+    }
+
+    function clearFlatField() {
+      if (!state.flatFieldActiveId) return;
+      pushUndo('flatField');
+      const hadCurrent = Boolean(state.flatFieldId);
+      for (const item of state.fileQueue) {
+        if (item.settings?.flatFieldId) {
+          item.settings = { ...item.settings, flatFieldId: null };
+          item.status = 'pending';
+        }
+      }
+      resetFlatFieldState();
+      markCurrentFileDirty();
+      updateFileListUI();
+      showToast(getLocalizedText('flatFieldCleared', 'Flat field cleared.'));
+      if (hadCurrent) scheduleSilverSourceRefresh({ immediate: true });
+    }
+
+    function setFlatFieldForCurrent(enabled) {
+      const id = state.flatFieldActiveId;
+      if (!id || !state.flatFields[id]) return;
+      const next = enabled ? id : null;
+      if (state.flatFieldId === next) return;
+      pushUndo('flatField');
+      state.flatFieldId = next;
+      markCurrentFileDirty();
+      updateFlatFieldUI();
+      scheduleSilverSourceRefresh({ immediate: true });
+    }
+
+    document.getElementById('flatFieldUseCurrentBtn')?.addEventListener('click', () => { void useCurrentAsFlatField(); });
+    document.getElementById('flatFieldDetectBtn')?.addEventListener('click', () => { void detectBlankFrameInSelection(); });
+    document.getElementById('flatFieldApplySelectedBtn')?.addEventListener('click', applyFlatFieldToSelected);
+    document.getElementById('flatFieldClearBtn')?.addEventListener('click', clearFlatField);
+    document.getElementById('flatFieldEnabled')?.addEventListener('change', (event) => setFlatFieldForCurrent(event.target.checked));
 
     function updateRollAnalysisUI() {
       if (!stateReady) return;
@@ -12034,8 +14119,14 @@
           markCurrentFileDirty();
           void processNegative();
         },
-        onConfirmAnalysis: () => beginCropMode({ analysisOnly: true })
+        onConfirmAnalysis: () => beginCropMode({ analysisOnly: true }),
+        onMergeShots: (mode) => { void mergeSelectedShots(mode); },
+        onLoupe: () => { void openLoupe(); },
+        onSaveProject: () => { void saveProject(); },
+        onOpenProject: () => { const input = document.getElementById('projectInput'); if (input) { input.value = ''; input.click(); } },
+        onRestoreProject: () => { restoreRecoveredProject(); }
       });
+      void offerProjectRecovery();
       updateWorkflowUI();
       studioWorkspace.sync();
     }

@@ -298,6 +298,42 @@ export async function workerApplyAdjustments(imageData, settings, quality = 'ful
 }
 
 /**
+ * Apply adjustments to the engine's 16-bit plane via Worker. Resolves to an
+ * ImageData whose `data` holds the high bytes and whose `__image16` is the
+ * adjusted plane; null when there is no plane or the worker failed.
+ */
+export async function workerApplyAdjustments16(imageData, settings, quality = 'full', onProgressOrOptions = null) {
+  const plane = imageData && imageData.__image16;
+  if (!plane || !(plane.data instanceof Uint16Array)) return null;
+  const opts = normalizeRequestOptions(onProgressOrOptions);
+  const inputBuffer = copyTypedArrayBuffer(plane.data);
+  try {
+    const result = await sendToWorker(
+      {
+        type: 'applyAdjustments16',
+        inputBuffer,
+        width: plane.width,
+        height: plane.height,
+        settings: serializeSettings(settings),
+        quality
+      },
+      [inputBuffer],
+      opts.onProgress,
+      requestOptionsFor(imageData, opts)
+    );
+    const out16 = new Uint16Array(result.data);
+    const data8 = new Uint8ClampedArray(out16.length);
+    for (let i = 0; i < out16.length; i++) data8[i] = out16[i] >>> 8;
+    const output = new ImageData(data8, result.width, result.height);
+    output.__image16 = { width: result.width, height: result.height, data: out16 };
+    return output;
+  } catch (err) {
+    if (isAbortError(err)) throw err;
+    return null;
+  }
+}
+
+/**
  * Encode 16-bit PNG via Worker.
  * @param {ImageData} imageData
  * @param {function|{onProgress?:function,signal?:AbortSignal,timeoutMs?:number}} [onProgressOrOptions]
@@ -334,7 +370,7 @@ export async function workerEncodePng16(imageData, onProgressOrOptions = null) {
  * @param {function|{onProgress?:function,signal?:AbortSignal,timeoutMs?:number}} [onProgressOrOptions]
  * @returns {Promise<Blob|null>}
  */
-export async function workerEncodeTiff(imageData, bitDepth = 8, onProgressOrOptions = null) {
+export async function workerEncodeTiff(imageData, bitDepth = 8, onProgressOrOptions = null, metadata = null) {
   const opts = normalizeRequestOptions(onProgressOrOptions);
   // Transfer a copy so worker success/failure never detaches the caller's ImageData.
   const { buffer, sampleBits } = copyExportSamples(imageData, bitDepth);
@@ -347,7 +383,9 @@ export async function workerEncodeTiff(imageData, bitDepth = 8, onProgressOrOpti
         sourceBits: sampleBits,
         width: imageData.width,
         height: imageData.height,
-        bitDepth
+        bitDepth,
+        // Analog metadata (EXIF fields + XMP packet) written into the IFD.
+        metadata: metadata || null
       },
       [buffer],
       opts.onProgress,

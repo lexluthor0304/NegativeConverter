@@ -3,6 +3,7 @@ import {
   computeAdjustmentParams,
   isIdentityAdjustmentParams
 } from '../workers/pixelAdjustments.js';
+import { applyAdjustmentsToPixels16, downconvertPlane16 } from '../workers/pixelAdjustments16.js';
 
 export function createAdjustmentLutScratch() {
   return {
@@ -55,6 +56,26 @@ function syncImage16(imageData, output, identity) {
   } else if (output.__image16) {
     output.__image16 = null;
   }
+}
+
+/**
+ * The same stage at 16 bits: reads the engine's `imageData.__image16` plane,
+ * writes the adjusted plane to `output.__image16` and its high bytes to
+ * `output.data`, so a 16-bit export carries real 16-bit samples whatever the
+ * controls say. Falls back to the 8-bit stage when there is no plane.
+ */
+export function applyPreparedAdjustmentsToBuffer16(imageData, adjustmentSettings, output, options = {}) {
+  const plane = imageData && imageData.__image16;
+  if (!plane || !(plane.data instanceof Uint16Array) || plane.width !== imageData.width || plane.height !== imageData.height) {
+    applyPreparedAdjustmentsToBuffer(imageData, adjustmentSettings, output, options);
+    return;
+  }
+  const { quality = 'full', onProgress = null, chunkSize = 500000, lutScratch16 = null } = options;
+  const params = computeAdjustmentParams(adjustmentSettings);
+  const out16 = new Uint16Array(plane.data.length);
+  applyAdjustmentsToPixels16(plane.data, out16, plane.width * plane.height, params, quality, onProgress, chunkSize, lutScratch16);
+  downconvertPlane16(out16, output.data);
+  output.__image16 = { width: plane.width, height: plane.height, data: out16 };
 }
 
 export function applyPreparedAdjustmentsToBuffer(imageData, adjustmentSettings, output, options = {}) {

@@ -72,10 +72,10 @@ export async function runStudioSmoke({ send, evaluate, waitFor, wait, fail, inst
     conversionClosed: document.getElementById('studioPane-conversion').hidden,
     popup: document.querySelector('.frontier-guide-popup-overlay.show') !== null
   }))()`);
-  if (startup.sliders !== 5 || startup.model !== 'standard' || startup.queue !== 3 || !startup.stageHidden || !startup.basicVisible || !startup.conversionClosed || startup.popup) {
+  if (startup.sliders !== 6 || startup.model !== 'standard' || startup.queue !== 3 || !startup.stageHidden || !startup.basicVisible || !startup.conversionClosed || startup.popup) {
     fail(`studio initial state: ${JSON.stringify(startup)}`);
   }
-  console.log('ok: studio imports three synthetic negatives, automatically converts, shows five controls without guide popup');
+  console.log('ok: studio imports three synthetic negatives, automatically converts, shows six controls without guide popup');
   await capture('studio-desktop.png');
   await runRealtimePreviewSmoke({ send, evaluate, wait, fail });
 
