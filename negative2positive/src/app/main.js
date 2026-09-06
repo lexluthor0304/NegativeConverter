@@ -40,8 +40,11 @@
       createAdjustmentLutScratch,
       stripLegacyToneSettingsForSilverCore,
       applyPreparedAdjustmentsToBuffer,
+      applyPreparedAdjustmentsToBuffer16,
       areAdjustmentsIdentity
     } from './adjustmentPipeline.js';
+    import { buildLinearPositive, encodeLinearDngBlob } from './linearDng.js';
+    import { inpaintWithModel, createInpaintSession, fetchModelBytes, inpaintBackends, DEFAULT_MODEL_URL } from './aiInpaint.js';
     import {
       downsampleImageDataForMaxPixels,
       downsampleImageDataForMaxDim,
@@ -83,6 +86,7 @@
     import { getLoadingOverlay } from '../ui/LoadingOverlay.js';
     import {
       workerApplyAdjustments,
+      workerApplyAdjustments16,
       workerEncodePng16,
       workerEncodeTiff,
       isWorkerAvailable
@@ -2004,9 +2008,6 @@
       // 16-bit pipeline (Stage 2+) — full-precision counterparts to the 8-bit fields above.
       // Shape: { width, height, data: Uint16Array }, RGBA, range [0, 65535].
       // SilverCore Engine consumes Image16 starting in Stage 3; until then these are dormant.
-      original16: null,
-      cropped16: null,
-      processed16: null,
 
       // Film settings
       filmType: 'color',
@@ -2184,6 +2185,7 @@
         _state: null,        // Internal state for updateDustStrength
         inpaintedImageData: null, // ImageData after inpainting
         brushSize: 5,
+        ai: false,           // learned inpainter on commit and export (aiInpaint.js)
       },
 
       // Export settings
@@ -5560,7 +5562,8 @@
         state.dustRemoval._state = _state;
 
         if (particleCount > 0) {
-          const inpainted = inpaintMasked(source, mask, 3);
+          const inpainted = await inpaintForCommit(source, mask);
+          if (!isCurrent() || source !== getDustSource()) return;
           state.dustRemoval.inpaintedImageData = inpainted;
           const tmpl = getLocalizedText('dustStatusDone', 'Detected {count} dust particles');
           updateDustStatusUI(tmpl.replace('{count}', String(particleCount)));
@@ -6294,13 +6297,6 @@
           state.previewSourceImageData = null;
           state.histogramSourceImageData = null;
           state.webglSourceImageData = null;
-          // Mirror the 16-bit handle when the loader attached one (RAW / 16-bit
-          // PNG). 8-bit sources stay 8-bit here — silverAdapter promotes on
-          // demand at conversion time, on the cropped region, so we never pay
-          // a full-resolution ×257 upscale at load.
-          state.original16 = imageData.__image16 || null;
-          state.cropped16 = null;
-          state.processed16 = null;
           state.lastRenderQuality = 'full';
           state.filmBaseSet = false;
           state.grayPointSampled = false;
@@ -6433,9 +6429,6 @@
 
         state.loadedBaseImageData = fullImageData;
         state.originalImageData = fullImageData;
-        state.original16 = fullImageData.__image16 || null;
-        state.cropped16 = null;
-        state.processed16 = null;
 
         if (Math.abs(state.rotationAngle) > 0.001) {
           state.originalImageData = applyRotationToImageData(state.originalImageData, state.rotationAngle);
@@ -9540,14 +9533,18 @@
 
     function getEffectiveExportBitDepth(format = state.exportFormat, requestedBitDepth = state.exportBitDepth) {
       if (format === 'jpeg') return 8;
+      if (format === 'dng') return 16;
       return Number(requestedBitDepth) === 16 ? 16 : 8;
     }
 
     function getExportInfo(format = state.exportFormat, requestedBitDepth = state.exportBitDepth) {
-      const normalizedFormat = format === 'jpeg' || format === 'tiff' ? format : 'png';
+      const normalizedFormat = format === 'jpeg' || format === 'tiff' || format === 'dng' ? format : 'png';
       const bitDepth = getEffectiveExportBitDepth(normalizedFormat, requestedBitDepth);
       if (normalizedFormat === 'jpeg') {
         return { format: normalizedFormat, bitDepth, extension: '.jpg', mimeType: 'image/jpeg' };
+      }
+      if (normalizedFormat === 'dng') {
+        return { format: normalizedFormat, bitDepth: 16, extension: '.dng', mimeType: 'image/x-adobe-dng' };
       }
       if (normalizedFormat === 'tiff') {
         return { format: normalizedFormat, bitDepth, extension: '.tiff', mimeType: 'image/tiff' };
@@ -9555,20 +9552,14 @@
       return { format: 'png', bitDepth, extension: '.png', mimeType: 'image/png' };
     }
 
-    // The Step-3 adjustment stage is an 8-bit LUT pipeline, so a 16-bit export
-    // only carries real 16-bit samples when white balance, CMY, vibrance and
-    // the curves are all neutral. Anything else produces a 16-bit container
-    // holding 8-bit data, and the file name must not claim otherwise.
+    // A 16-bit export carries real 16-bit samples whenever the conversion
+    // produced a 16-bit plane: the Step-3 stage runs at 16 bits on export
+    // (applyPreparedAdjustmentsToBuffer16). Only the legacy (non-SilverCore)
+    // path, which has no plane, is limited to 8-bit data.
     function exportKeeps16BitSamples(settings = state) {
-      // A batch file with no saved settings is converted from
-      // createDefaultSettings, whose Step-3 controls are all at identity, so it
-      // does keep its 16-bit samples.
       if (!settings) return true;
-      try {
-        return areAdjustmentsIdentity(buildAdjustmentSettings(settings));
-      } catch (err) {
-        return false;
-      }
+      if (settings === state) return Boolean(state.processedImageData?.__image16) || usesSilverCoreConversion(state);
+      return usesSilverCoreConversion(settings);
     }
 
     function buildExportFileName(sourceName, exportInfo, options = {}) {
@@ -9582,6 +9573,7 @@
       const depthSuffix = wants16 && exportKeeps16BitSamples(options.settings || state)
         ? '_16bit'
         : '';
+      if (exportInfo.format === 'dng') return `${withConverted.replace(/_converted$/, '')}_linear${exportInfo.extension}`;
       return `${withConverted}${sprocketSuffix}${depthSuffix}${exportInfo.extension}`;
     }
 
@@ -9599,8 +9591,13 @@
       return composeSprocketFrame(imageData, getSprocketFrameComposeOptions(settings, position));
     }
 
-    async function getCurrentExportImageData() {
+    async function getCurrentExportImageData({ bitDepth = 8 } = {}) {
       await ensureFullResolutionReadyForExport();
+      // A 16-bit export re-runs the adjustment stage on the engine's 16-bit
+      // plane instead of reusing the 8-bit display buffer.
+      if (bitDepth === 16 && state.currentStep >= 3 && state.processedImageData?.__image16) {
+        return await applyAdjustmentsWithSettings(state.processedImageData, state, { bitDepth: 16 });
+      }
       if (state.currentStep >= 3 && isDisplayImageDataFullResolution()) {
         return state.displayImageData;
       }
@@ -9617,7 +9614,7 @@
       return null;
     }
 
-    async function renderCurrentImageDataForExport() {
+    async function renderCurrentImageDataForExport(exportInfo = null) {
       await ensureFullResolutionReadyForExport();
       // ensureFullRender exists to leave a full-resolution CPU buffer in
       // state.displayImageData, which getCurrentExportImageData then reuses.
@@ -9633,7 +9630,7 @@
       if (!displayAlreadyCurrent && !previewIsGpu) {
         ensureFullRender();
       }
-      const imageData = await getCurrentExportImageData();
+      const imageData = await getCurrentExportImageData({ bitDepth: exportInfo?.bitDepth || 8 });
       if (!imageData) throw new Error('No image available for export.');
       return imageData;
     }
@@ -9656,9 +9653,14 @@
         overlay.updateProgress(5, lang.loadingAdjusting);
 
         const currentItem = getCurrentQueueItem();
-        if (state.currentStep >= 3 && state.processedImageData) {
+        if (exportInfo.format === 'dng') {
           persistCurrentFileSettings({ silent: true, force: true });
-          const imageData = await renderCurrentImageDataForExport();
+          overlay.updateProgress(40, lang.loadingEncoding);
+          blob = renderLinearDngBlob(state.conversionSourceImageData || state.croppedImageData || state.originalImageData, state, Math.max(0, state.currentFileIndex));
+          if (currentItem?.file?.name) fileName = buildActiveExportFileName(currentItem.file.name, exportInfo);
+        } else if (state.currentStep >= 3 && state.processedImageData) {
+          persistCurrentFileSettings({ silent: true, force: true });
+          const imageData = await renderCurrentImageDataForExport(exportInfo);
           const outputImageData = applySprocketFrameForExport(imageData, exportInfo);
           overlay.updateProgress(60, lang.loadingEncoding);
           blob = await imageDataToBlob(outputImageData, exportInfo.format, state.jpegQuality, exportInfo.bitDepth, (pct) => {
@@ -9669,7 +9671,7 @@
           }
         } else {
           overlay.updateProgress(50, lang.loadingEncoding);
-          const imageData = await renderCurrentImageDataForExport();
+          const imageData = await renderCurrentImageDataForExport(exportInfo);
           const outputImageData = applySprocketFrameForExport(imageData, exportInfo);
           blob = await imageDataToBlob(outputImageData, exportInfo.format, state.jpegQuality, exportInfo.bitDepth, (pct) => {
             overlay.updateProgress(50 + pct * 0.45, lang.loadingEncoding);
@@ -9756,20 +9758,18 @@
       updateDesktopExportMenuUI();
       const format = state.exportFormat;
       const isJpeg = format === 'jpeg';
+      const isDng = format === 'dng';
       if (isJpeg) state.exportBitDepth = 8;
+      const bitDepthSection = document.getElementById('exportBitDepthSection');
+      if (bitDepthSection) bitDepthSection.style.display = isDng ? 'none' : '';
+      const dngNote = document.getElementById('exportDngNote');
+      if (dngNote) dngNote.classList.toggle('show', isDng);
       const qualitySection = document.getElementById('exportQualitySection');
       qualitySection.classList.toggle('show', isJpeg);
 
       const bitDepthNote = document.getElementById('exportBitDepthNote');
       bitDepthNote.classList.toggle('show', isJpeg);
 
-      const downgradeNote = document.getElementById('exportBitDepthDowngradeNote');
-      if (downgradeNote) {
-        downgradeNote.classList.toggle(
-          'show',
-          !isJpeg && state.exportBitDepth === 16 && !exportKeeps16BitSamples()
-        );
-      }
       document.querySelectorAll('.bitdepth-btn').forEach(btn => {
         const depth = parseInt(btn.dataset.bitdepth, 10) === 16 ? 16 : 8;
         const disabled = isJpeg && depth === 16;
@@ -9779,20 +9779,21 @@
 
       // Update export button text
       const exportBtn = document.getElementById('exportBtn');
-      const exportKey = isJpeg ? 'exportJpeg' : (format === 'tiff' ? 'exportTiff' : 'exportPng');
+      const exportKey = isJpeg ? 'exportJpeg' : (format === 'tiff' ? 'exportTiff' : isDng ? 'exportDng' : 'exportPng');
       exportBtn.textContent = i18n[currentLang][exportKey];
       exportBtn.setAttribute('data-i18n', exportKey);
 
       const exportSprocketBtn = document.getElementById('exportSprocketBtn');
       if (exportSprocketBtn) {
-        const sprocketKey = isJpeg ? 'exportSprocketJpeg' : (format === 'tiff' ? 'exportSprocketTiff' : 'exportSprocketPng');
+        const sprocketKey = isJpeg ? 'exportSprocketJpeg' : (format === 'tiff' ? 'exportSprocketTiff' : isDng ? 'exportSprocketDng' : 'exportSprocketPng');
+        exportSprocketBtn.disabled = isDng || isDesktopBatchExportLocked();
         exportSprocketBtn.textContent = i18n[currentLang][sprocketKey];
         exportSprocketBtn.setAttribute('data-i18n', sprocketKey);
       }
 
       // Update export current button text
       const exportSingleBtn = document.getElementById('exportSingleBtn');
-      const exportSingleKey = isJpeg ? 'exportCurrentJpeg' : (format === 'tiff' ? 'exportCurrentTiff' : 'exportCurrent');
+      const exportSingleKey = isJpeg ? 'exportCurrentJpeg' : (format === 'tiff' ? 'exportCurrentTiff' : isDng ? 'exportCurrentDng' : 'exportCurrent');
       exportSingleBtn.textContent = i18n[currentLang][exportSingleKey];
       exportSingleBtn.setAttribute('data-i18n', exportSingleKey);
 
@@ -9967,21 +9968,31 @@
       return item.settings || null;
     }
 
-    async function applyAdjustmentsWithSettings(imageData, settings) {
+    // `bitDepth` 16 runs the stage on the engine's 16-bit plane (when the
+    // image carries one) so the export gets real 16-bit samples; 8 keeps the
+    // LUT stage the preview uses.
+    async function applyAdjustmentsWithSettings(imageData, settings, { bitDepth = 8 } = {}) {
       const adjustmentSettings = buildAdjustmentSettings(settings);
+      const wants16 = bitDepth === 16 && Boolean(imageData.__image16 && imageData.__image16.data instanceof Uint16Array);
 
       // Try Worker for large images (>1MP)
       if (imageData.width * imageData.height > 1_000_000 && isWorkerAvailable()) {
-        const result = await workerApplyAdjustments(imageData, adjustmentSettings, 'full');
+        const result = wants16
+          ? await workerApplyAdjustments16(imageData, adjustmentSettings, 'full')
+          : await workerApplyAdjustments(imageData, adjustmentSettings, 'full');
         if (result) return result;
       }
 
       // Fallback to main thread
       const output = new ImageData(new Uint8ClampedArray(imageData.data.length), imageData.width, imageData.height);
-      applyPreparedAdjustmentsToBuffer(imageData, adjustmentSettings, output, {
-        quality: 'full',
-        lutScratch: adjustmentLutScratch
-      });
+      if (wants16) {
+        applyPreparedAdjustmentsToBuffer16(imageData, adjustmentSettings, output, { quality: 'full' });
+      } else {
+        applyPreparedAdjustmentsToBuffer(imageData, adjustmentSettings, output, {
+          quality: 'full',
+          lutScratch: adjustmentLutScratch
+        });
+      }
       return output;
     }
 
@@ -10256,6 +10267,15 @@
       trace.mark('transform', {
         pixels: getImageDataPixelCount(workingData)
       });
+      // The linear DNG wants the geometry-applied negative, not the conversion.
+      if (options.stage === 'source') {
+        trace.end({ outputPixels: getImageDataPixelCount(workingData) });
+        if (!savedSettings) {
+          const item = state.fileQueue.find((entry) => entry.file === file);
+          if (item) item.settings = cloneSettings(settings);
+        }
+        return { source: workingData, settings };
+      }
 
       // Convert negative/positive via unified conversion router (in a worker
       // when available — keeps batch export from freezing the page).
@@ -10282,7 +10302,7 @@
           ? dustRemoval.maxParticleSize
           : state.dustRemoval.maxParticleSize;
         const { mask } = detectDust(processed, { strength, maxParticleSize });
-        processed = inpaintMasked(processed, mask, 3);
+        processed = await inpaintForCommit(processed, mask);
         trace.mark('dustRemoval', {
           pixels: getImageDataPixelCount(processed)
         });
@@ -10312,8 +10332,8 @@
         trace.mark('autoWhiteBalance', { confidence: estimate.confidence });
       }
 
-      // Apply adjustments
-      const adjusted = await applyAdjustmentsWithSettings(processed, settings);
+      // Apply adjustments (at 16 bits when the export asks for it)
+      const adjusted = await applyAdjustmentsWithSettings(processed, settings, { bitDepth: options.bitDepth === 16 ? 16 : 8 });
       trace.mark('adjustments', {
         pixels: getImageDataPixelCount(adjusted)
       });
@@ -10386,17 +10406,23 @@
 
           try {
             const settingsForFile = getSettingsForExport(index, item);
-            const adjusted = await processFileWithSettings(item.file, settingsForFile);
-            const outputImageData = applySprocketFrameForExport(adjusted, exportInfo, settingsForFile, processedCount - 1);
-            overlay.updateProgress(fileProgress + fileSlice * 0.6, lang.loadingEncoding);
-            const blob = await imageDataToBlob(
-              outputImageData,
-              exportInfo.format,
-              state.jpegQuality,
-              exportInfo.bitDepth,
-              null,
-              exportMetadataFor(settingsForFile, processedCount - 1)
-            );
+            let blob;
+            if (exportInfo.format === 'dng') {
+              const { source, settings: usedSettings } = await processFileWithSettings(item.file, settingsForFile, { stage: 'source' });
+              blob = renderLinearDngBlob(source, usedSettings, processedCount - 1);
+            } else {
+              const adjusted = await processFileWithSettings(item.file, settingsForFile, { bitDepth: exportInfo.bitDepth });
+              const outputImageData = applySprocketFrameForExport(adjusted, exportInfo, settingsForFile, processedCount - 1);
+              overlay.updateProgress(fileProgress + fileSlice * 0.6, lang.loadingEncoding);
+              blob = await imageDataToBlob(
+                outputImageData,
+                exportInfo.format,
+                state.jpegQuality,
+                exportInfo.bitDepth,
+                null,
+                exportMetadataFor(settingsForFile, processedCount - 1)
+              );
+            }
 
             const name = claimZipName(buildActiveExportFileName(item.file.name, exportInfo, settingsForFile));
             zip.file(name, blob);
@@ -10508,7 +10534,13 @@
 
           try {
             const settingsForFile = getSettingsForExport(index, item);
-            adjusted = await processFileWithSettings(item.file, settingsForFile);
+            if (exportInfo.format === 'dng') {
+              const { source, settings: usedSettings } = await processFileWithSettings(item.file, settingsForFile, { stage: 'source' });
+              blob = renderLinearDngBlob(source, usedSettings, i);
+              adjusted = null;
+              name = buildActiveExportFileName(item.file.name, exportInfo, settingsForFile);
+            } else {
+            adjusted = await processFileWithSettings(item.file, settingsForFile, { bitDepth: exportInfo.bitDepth });
             const outputImageData = applySprocketFrameForExport(adjusted, exportInfo, settingsForFile, i);
             overlay.updateProgress(fileProgress + fileSlice * 0.55, lang.loadingEncoding);
             blob = await imageDataToBlob(
@@ -10525,6 +10557,7 @@
               exportMetadataFor(settingsForFile, i)
             );
             name = buildActiveExportFileName(item.file.name, exportInfo, settingsForFile);
+            }
           } catch (err) {
             console.error(`Error processing ${item.file.name}:`, err);
             item.status = 'error';
@@ -10788,7 +10821,13 @@
 
           try {
             const settingsForFile = getSettingsForExport(index, item);
-            adjusted = await processFileWithSettings(item.file, settingsForFile);
+            if (exportInfo.format === 'dng') {
+              const { source, settings: usedSettings } = await processFileWithSettings(item.file, settingsForFile, { stage: 'source' });
+              blob = renderLinearDngBlob(source, usedSettings, i);
+              adjusted = null;
+              name = buildActiveExportFileName(item.file.name, exportInfo, settingsForFile);
+            } else {
+            adjusted = await processFileWithSettings(item.file, settingsForFile, { bitDepth: exportInfo.bitDepth });
             const outputImageData = applySprocketFrameForExport(adjusted, exportInfo, settingsForFile, i);
             overlay.updateProgress(fileProgress + fileSlice * 0.6, lang.loadingEncoding);
             blob = await imageDataToBlob(
@@ -10806,6 +10845,7 @@
             );
 
             name = buildActiveExportFileName(item.file.name, exportInfo, settingsForFile);
+            }
             overlay.hide(); // Hide overlay before save dialog
             const result = await saveBlob(blob, name, exportInfo.mimeType);
             if (!result.saved) {
@@ -12599,6 +12639,126 @@
     document.getElementById('labMatchRunBtn')?.addEventListener('click', () => { void runLabMatch(); });
     document.getElementById('labMatchApplySelectedBtn')?.addEventListener('click', applyLookToSelected);
     document.getElementById('labMatchClearBtn')?.addEventListener('click', clearLook);
+
+    // ===========================================
+    // AI repair: learned inpainting on the commit and export paths
+    // ===========================================
+    const aiRepair = { status: 'idle', provider: '', run: null, source: '', error: '', percent: 0, tiles: 0, ms: 0 };
+
+    function aiRepairReady() {
+      return Boolean(state.dustRemoval.ai && aiRepair.status === 'ready' && typeof aiRepair.run === 'function');
+    }
+
+    function updateAiRepairUI() {
+      const status = document.getElementById('dustAiStatus');
+      const enabled = document.getElementById('dustAiEnabled');
+      const loadBtn = document.getElementById('dustAiLoadBtn');
+      if (enabled) enabled.checked = Boolean(state.dustRemoval.ai);
+      if (loadBtn) loadBtn.disabled = aiRepair.status === 'loading';
+      if (!status) return;
+      const providerName = aiRepair.provider === 'webgpu' ? 'WebGPU' : 'WASM';
+      let text;
+      if (aiRepair.status === 'loading') {
+        text = getInterpolatedText('dustAiStatusLoading', { percent: String(aiRepair.percent) }, `Loading model… ${aiRepair.percent}%`);
+      } else if (aiRepair.status === 'ready') {
+        text = getInterpolatedText('dustAiStatusReady', { source: aiRepair.source, provider: providerName }, `Model ready: ${aiRepair.source} on ${providerName}`);
+        if (aiRepair.tiles) text += ' · ' + getInterpolatedText('dustAiStatusLast', { tiles: String(aiRepair.tiles), ms: String(aiRepair.ms) }, `last run ${aiRepair.tiles} tile(s) in ${aiRepair.ms} ms`);
+      } else if (aiRepair.status === 'error') {
+        text = getInterpolatedText('dustAiStatusError', { message: aiRepair.error }, `Model failed: ${aiRepair.error}. Load a LaMa ONNX file instead.`);
+      } else {
+        text = getLocalizedText(inpaintBackends().webgpu ? 'dustAiStatusIdleGpu' : 'dustAiStatusIdleWasm', 'No model loaded.');
+      }
+      status.textContent = text;
+    }
+
+    // `source` is a File (a model the user picked) or a URL (the self-hosted
+    // asset, fetched once and cached in IndexedDB).
+    async function loadAiRepairModel(source) {
+      if (aiRepair.status === 'loading') return;
+      aiRepair.status = 'loading';
+      aiRepair.percent = 0;
+      aiRepair.error = '';
+      updateAiRepairUI();
+      try {
+        let bytes; let label;
+        if (source instanceof File) {
+          bytes = await source.arrayBuffer();
+          label = source.name;
+        } else {
+          bytes = await fetchModelBytes(source, {
+            onProgress: (received, total) => {
+              aiRepair.percent = total ? Math.round((received / total) * 100) : 0;
+              updateAiRepairUI();
+            }
+          });
+          label = String(source).split('/').pop();
+        }
+        const session = await createInpaintSession(bytes);
+        aiRepair.run = session.run;
+        aiRepair.provider = session.provider;
+        aiRepair.source = label;
+        aiRepair.status = 'ready';
+        aiRepair.tiles = 0;
+        showToast(getInterpolatedText('dustAiLoaded', { provider: session.provider === 'webgpu' ? 'WebGPU' : 'WASM' }, `AI repair model loaded (${session.provider})`));
+      } catch (error) {
+        console.warn('AI repair model failed:', error);
+        aiRepair.status = 'error';
+        aiRepair.error = error?.message || String(error);
+        aiRepair.run = null;
+      }
+      updateAiRepairUI();
+      if (aiRepairReady() && state.dustRemoval.enabled) scheduleDustDetection();
+    }
+
+    // The commit-path inpaint: the learned model when it is on and ready,
+    // TELEA otherwise (and always for brush strokes, which stay interactive).
+    async function inpaintForCommit(source, mask) {
+      if (!aiRepairReady()) return inpaintMasked(source, mask, 3);
+      const started = performance.now();
+      try {
+        const { imageData, tiles } = await inpaintWithModel(source, mask, aiRepair.run, {
+          onProgress: (done, total) => updateDustStatusUI(getInterpolatedText('dustAiStatusRunning', { done: String(done), total: String(total) }, `AI repair: tile ${done} / ${total}`))
+        });
+        aiRepair.tiles = tiles;
+        aiRepair.ms = Math.round(performance.now() - started);
+        updateAiRepairUI();
+        return imageData;
+      } catch (error) {
+        console.warn('AI repair failed, falling back to TELEA:', error);
+        aiRepair.status = 'error';
+        aiRepair.error = error?.message || String(error);
+        updateAiRepairUI();
+        return inpaintMasked(source, mask, 3);
+      }
+    }
+
+    document.getElementById('dustAiEnabled')?.addEventListener('change', (event) => {
+      state.dustRemoval.ai = Boolean(event.target.checked);
+      updateAiRepairUI();
+      if (state.dustRemoval.ai && aiRepair.status === 'idle') void loadAiRepairModel(DEFAULT_MODEL_URL);
+      else if (state.dustRemoval.enabled) scheduleDustDetection();
+    });
+    document.getElementById('dustAiLoadBtn')?.addEventListener('click', () => { void loadAiRepairModel(DEFAULT_MODEL_URL); });
+    document.getElementById('dustAiModelInput')?.addEventListener('change', (event) => {
+      const file = event.target.files && event.target.files[0];
+      if (file) void loadAiRepairModel(file);
+      event.target.value = '';
+    });
+    updateAiRepairUI();
+
+    // ===========================================
+    // Linear DNG export (inverted, base-normalised raw)
+    // ===========================================
+    // `source` is the geometry-applied negative (16-bit plane when the file
+    // carries one); the film base and film type come from `settings`.
+    function renderLinearDngBlob(source, settings, position) {
+      if (!source) throw new Error('No image available for export.');
+      const plane = source.__image16 && source.__image16.data instanceof Uint16Array ? source.__image16 : toImage16(source);
+      const positive = sanitizePresetType(settings.filmType || 'color') === 'positive';
+      const filmBase = requiresFilmBase(settings) && settings.filmBase ? settings.filmBase : null;
+      const linear = buildLinearPositive(plane, filmBase, { positive });
+      return encodeLinearDngBlob(linear, { metadata: exportMetadataFor(settings, position) });
+    }
 
     // ===========================================
     // Contact sheet export

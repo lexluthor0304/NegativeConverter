@@ -838,6 +838,18 @@
                 <input type="range" class="slider-input" id="dustMaxSize" min="6" max="80" step="1" value="40" aria-labelledby="dustMaxSizeLabel">
               </div>
               <div class="info-box" id="dustStatus" role="status" data-i18n="dustStatusIdle">Ready</div>
+              <div class="control-group-title"><span data-i18n="dustAiTitle">AI repair (on-device)</span></div>
+              <label class="roll-reference-option">
+                <input type="checkbox" id="dustAiEnabled">
+                <span data-i18n="dustAiEnable">Fill the mask with the learned inpainter on commit and export</span>
+              </label>
+              <div class="film-base-buttons">
+                <button class="film-base-btn" id="dustAiLoadBtn" data-i18n="dustAiLoad">Load model</button>
+                <label class="film-base-btn lab-match-pick" for="dustAiModelInput" data-i18n="dustAiPick">Use a model file (.onnx)</label>
+                <input type="file" id="dustAiModelInput" accept=".onnx" hidden>
+              </div>
+              <div class="info-box" id="dustAiStatus" role="status"></div>
+              <div class="control-group-hint" data-i18n="dustAiHint">Brush strokes preview with TELEA; the learned fill replaces it when detection commits and on export. Nothing leaves the device.</div>
               <label class="roll-reference-option">
                 <input type="checkbox" id="dustShowMask">
                 <span data-i18n="dustShowMask">Show Mask</span>
@@ -1442,7 +1454,9 @@
               <button class="format-btn active" type="button" data-format="png" aria-pressed="true">PNG</button>
               <button class="format-btn" type="button" data-format="jpeg" aria-pressed="false">JPEG</button>
               <button class="format-btn" type="button" data-format="tiff" aria-pressed="false">TIFF</button>
+              <button class="format-btn" type="button" data-format="dng" aria-pressed="false">DNG</button>
             </div>
+            <div class="export-bitdepth-note" id="exportDngNote" data-i18n="exportDngNote"></div>
           </div>
           <div class="export-bitdepth-section" id="exportBitDepthSection">
             <div class="export-format-label" id="exportBitDepthLabel" data-i18n="exportBitDepth">Bit Depth</div>
@@ -1451,7 +1465,6 @@
               <button class="bitdepth-btn" type="button" data-bitdepth="16" aria-pressed="false">16-bit</button>
             </div>
             <div class="export-bitdepth-note" id="exportBitDepthNote" data-i18n="bitDepthJpegLocked"></div>
-            <div class="export-bitdepth-note" id="exportBitDepthDowngradeNote" data-i18n="bitDepth8BitData"></div>
           </div>
           <div class="export-quality-section" id="exportQualitySection">
             <div class="export-quality-header">
