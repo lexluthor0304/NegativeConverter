@@ -102,4 +102,35 @@ export async function runRollHomeSmoke({ send, evaluate, waitFor, wait, fail, in
   if (!/AnalogExif:RollId|AnalogExif:Film>/.test(new TextDecoder().decode(app1[1].data))) fail('JPEG XMP missing');
   await evaluate(`document.querySelector('.format-btn[data-format="png"]').click()`);
   console.log('ok: roll and frame metadata land in the PNG (eXIf + iTXt), TIFF (IFD0 + Exif + XMP) and JPEG (APP1 EXIF + XMP) exports');
+
+  await runContactSheetScenario({ evaluate, waitFor, wait, fail });
+}
+
+const pngSize = (bytes) => ({ width: (bytes[16] << 24 | bytes[17] << 16 | bytes[18] << 8 | bytes[19]) >>> 0, height: (bytes[20] << 24 | bytes[21] << 16 | bytes[22] << 8 | bytes[23]) >>> 0 });
+
+// ---- 2. Contact sheet: one A4 page at 300 dpi with sprockets, then Letter. ----
+async function runContactSheetScenario({ evaluate, waitFor, wait, fail }) {
+  const enabled = await evaluate(`!document.getElementById('exportContactSheetBtn').disabled`);
+  if (!enabled) fail('contact sheet button should be enabled with a selected photo');
+  await evaluate(`(() => {
+    document.getElementById('contactSheetLayout').value = '35mm';
+    document.getElementById('contactSheetPage').value = 'a4';
+    document.getElementById('contactSheetSprockets').checked = true;
+    document.getElementById('exportContactSheetBtn').click();
+  })()`);
+  const started = Date.now();
+  const sheet = await takeDownload(evaluate, waitFor, 'contact sheet captured');
+  const elapsed = Date.now() - started;
+  const size = pngSize(sheet.bytes);
+  console.log('roll home contact sheet:', JSON.stringify({ name: sheet.name, ...size, ms: elapsed, bytes: sheet.bytes.length }));
+  if (!/^contact-sheet-.*\.png$/.test(sheet.name)) fail('contact sheet file name wrong: ' + sheet.name);
+  if (size.width !== 2480 || size.height !== 3508) fail('contact sheet is not A4 at 300 dpi: ' + JSON.stringify(size));
+  const chunks = listPngChunks(sheet.bytes);
+  if (!/AnalogExif:Film>[^<]*ULTRA MAX/i.test(new TextDecoder().decode(chunks.find((c) => c.type === 'iTXt')?.data || new Uint8Array()))) fail('contact sheet carries no roll XMP');
+  await evaluate(`(() => { document.getElementById('contactSheetPage').value = 'letter'; document.getElementById('contactSheetSprockets').checked = false; document.getElementById('exportContactSheetBtn').click(); })()`);
+  const letter = await takeDownload(evaluate, waitFor, 'letter contact sheet captured');
+  const letterSize = pngSize(letter.bytes);
+  if (letterSize.width !== 2550 || letterSize.height !== 3300) fail('Letter contact sheet has the wrong size: ' + JSON.stringify(letterSize));
+  await wait(300);
+  console.log('ok: the contact sheet renders the selection at A4 and Letter 300 dpi with the roll header and XMP');
 }

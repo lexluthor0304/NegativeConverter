@@ -294,6 +294,12 @@ body.studio {
 .loupe-capture { margin-left: auto; color: var(--text-primary); border: 1px solid var(--border-light) !important; }
 .loupe-hint { font-size: 12px; color: var(--text-muted); line-height: 1.6; margin: 0; }
 
+/* Contact sheet options in the export menu. */
+.contact-sheet-options { display: flex; flex-wrap: wrap; gap: 6px 10px; padding: 4px 12px 6px; font-size: 12px; color: var(--text-secondary); }
+.contact-sheet-options label { display: flex; align-items: center; gap: 6px; }
+.contact-sheet-options select { max-width: 150px; font-size: 12px; }
+.contact-sheet-check { flex-basis: 100%; }
+
 /* Analog metadata panel (roll + frame). */
 .metadata-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; }
 .metadata-grid label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--text-secondary); min-width: 0; }

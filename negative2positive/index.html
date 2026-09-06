@@ -1442,6 +1442,28 @@
           <div class="export-dropdown-divider"></div>
           <button class="export-dropdown-item" id="exportZipBtn" data-i18n="exportZip" disabled>Export All (ZIP)</button>
           <button class="export-dropdown-item" id="exportAllBtn" data-i18n="exportIndividual" disabled>Download All Individually</button>
+          <div class="export-dropdown-divider"></div>
+          <div class="export-contact-sheet" id="contactSheetControls">
+            <div class="export-format-label" id="contactSheetTitle" data-i18n="contactSheetTitle">Contact sheet</div>
+            <div class="contact-sheet-options">
+              <label><span data-i18n="contactSheetLayout">Layout</span>
+                <select id="contactSheetLayout" aria-labelledby="contactSheetTitle">
+                  <option value="35mm" data-i18n="contactSheetLayout35">35mm · 6 × 6</option>
+                  <option value="half-frame" data-i18n="contactSheetLayoutHalf">Half-frame · 8 × 9</option>
+                  <option value="120-6x6" data-i18n="contactSheetLayout66">120 6×6 · 4 × 5</option>
+                  <option value="120-6x7" data-i18n="contactSheetLayout67">120 6×7 · 4 × 4</option>
+                  <option value="120-6x9" data-i18n="contactSheetLayout69">120 6×9 · 3 × 4</option>
+                  <option value="panoramic" data-i18n="contactSheetLayoutPano">Panoramic · 2 × 6</option>
+                </select></label>
+              <label><span data-i18n="contactSheetPage">Page</span>
+                <select id="contactSheetPage">
+                  <option value="a4" data-i18n="contactSheetPageA4">A4 · 300 dpi</option>
+                  <option value="letter" data-i18n="contactSheetPageLetter">Letter · 300 dpi</option>
+                </select></label>
+              <label class="contact-sheet-check"><input type="checkbox" id="contactSheetSprockets"><span data-i18n="contactSheetSprockets">Sprockets and frame numbers on the rebate</span></label>
+            </div>
+            <button class="export-dropdown-item" id="exportContactSheetBtn" data-i18n="exportContactSheet" disabled>Export contact sheet</button>
+          </div>
         </div>
       </div>
     </div>

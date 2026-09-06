@@ -26,6 +26,7 @@
     import { estimateExposureRatio, mergeFrames, coverageRect, toImage16, image16ToImageData } from './multiShot.js';
     import { sanitizeRollMetadata, sanitizeFrameMetadata, buildExportMetadata, frameNumberFor } from './analogMetadata.js';
     import { attachMetadataToBlob } from './exportMetadata.js';
+    import { layoutContactSheet, pagesFor, renderContactSheetPage, contactSheetHeader, normalizeLayoutId, normalizePageId } from './contactSheet.js';
 
     import { convertFrameWithRouter, resolveConversionMode } from '../pipeline/conversionRouter.js';
     import { convertFrameInWorker, convertPreviewFrameInWorker, CONVERSION_FAILED, WORKER_TIMEOUT } from './conversionWorkerClient.js';
@@ -11150,6 +11151,8 @@
       if (exportSingleBtn) exportSingleBtn.disabled = exportLocked;
       if (exportZipBtn) exportZipBtn.disabled = selectedCount < 1 || exportLocked;
       if (exportAllBtn) exportAllBtn.disabled = selectedCount < 1 || exportLocked;
+      const contactSheetBtn = document.getElementById('exportContactSheetBtn');
+      if (contactSheetBtn) contactSheetBtn.disabled = selectedCount < 1 || exportLocked;
       updateAutoFrameButtons();
       studioWorkspace?.sync();
     }
@@ -12566,6 +12569,104 @@
     document.getElementById('labMatchRunBtn')?.addEventListener('click', () => { void runLabMatch(); });
     document.getElementById('labMatchApplySelectedBtn')?.addEventListener('click', applyLookToSelected);
     document.getElementById('labMatchClearBtn')?.addEventListener('click', clearLook);
+
+    // ===========================================
+    // Contact sheet export
+    // ===========================================
+    const CONTACT_SHEET_FONT = 'Inter, "Helvetica Neue", Arial, sans-serif';
+
+    function contactSheetFileName(pageIndex, pageCount, exportInfo) {
+      const roll = state.rollMetadata || {};
+      const stem = (roll.rollName || roll.stock || roll.date || 'roll').replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '') || 'roll';
+      const page = pageCount > 1 ? `-p${pageIndex + 1}` : '';
+      return `contact-sheet-${stem}${page}${exportInfo.extension}`;
+    }
+
+    // Renders the selected photos in roll order onto 300 dpi pages: header from
+    // the roll metadata, frame numbers under each frame, optional sprocket
+    // borders through the same renderer as the sprocket export. Frames are
+    // converted through the batch path and downscaled twice the cell size
+    // before drawing; TIFF when that is the export format, otherwise PNG.
+    async function exportContactSheet() {
+      if (isDesktopBatchExportLocked()) return;
+      const selected = state.fileQueue.map((item, index) => ({ item, index })).filter(({ item }) => item.selected);
+      if (!selected.length) return;
+      const layoutId = normalizeLayoutId(document.getElementById('contactSheetLayout')?.value);
+      const pageId = normalizePageId(document.getElementById('contactSheetPage')?.value);
+      const sprockets = Boolean(document.getElementById('contactSheetSprockets')?.checked);
+      const exportInfo = getExportInfo(state.exportFormat === 'tiff' ? 'tiff' : 'png', 8);
+      const lang = i18n[currentLang];
+      const overlay = getLoadingOverlay();
+      const thumbs = [];
+      const pages = [];
+      await overlay.show({ title: lang.loadingExporting });
+      try {
+        persistCurrentFileSettings({ silent: true, force: true });
+        const probe = layoutContactSheet({ pageId, layoutId, count: selected.length });
+        const cell = probe.cells[0].frame;
+        const target = Math.max(cell.width, cell.height) * 2;
+        for (let i = 0; i < selected.length; i++) {
+          const { item, index } = selected[i];
+          overlay.updateProgress((i / selected.length) * 80, lang.loadingBatchFile.replace('{current}', i + 1).replace('{total}', selected.length));
+          const settingsForFile = getSettingsForExport(index, item);
+          const label = frameNumberFor(settingsForFile?.frameMetadata, i);
+          try {
+            let adjusted = await processFileWithSettings(item.file, settingsForFile);
+            if (Math.max(adjusted.width, adjusted.height) > target) adjusted = downsampleImageDataForMaxDim(adjusted, target);
+            if (sprockets) adjusted = composeSprocketFrame(adjusted, getSprocketFrameComposeOptions(settingsForFile, i));
+            const bitmap = await createImageBitmap(adjusted);
+            thumbs.push({ image: bitmap, width: bitmap.width, height: bitmap.height, label });
+          } catch (error) {
+            console.warn('Contact sheet frame failed:', item.file.name, error);
+            thumbs.push({ image: null, width: 1, height: 1, label });
+          }
+          await waitForNextFrame();
+        }
+        const header = contactSheetHeader(state.rollMetadata, { fallbackTitle: getLocalizedText('contactSheetTitle', 'Contact sheet') });
+        const pageCount = pagesFor(selected.length, layoutId);
+        for (let pageIndex = 0; pageIndex < pageCount; pageIndex++) {
+          const sheet = layoutContactSheet({ pageId, layoutId, count: selected.length, pageIndex });
+          const perPage = sheet.layout.columns * sheet.layout.rows;
+          const surface = document.createElement('canvas');
+          surface.width = sheet.page.width;
+          surface.height = sheet.page.height;
+          const ctx = surface.getContext('2d');
+          renderContactSheetPage(ctx, sheet, thumbs.slice(pageIndex * perPage, (pageIndex + 1) * perPage), {
+            header,
+            footer: 'NeoAnalogLab Negative Converter',
+            fontFamily: CONTACT_SHEET_FONT
+          });
+          overlay.updateProgress(80 + ((pageIndex + 1) / pageCount) * 18, lang.loadingEncoding);
+          const imageData = ctx.getImageData(0, 0, surface.width, surface.height);
+          const blob = await imageDataToBlob(imageData, exportInfo.format, null, 8, null, buildExportMetadata({ roll: state.rollMetadata, frame: {}, index: -1 }));
+          pages.push({ blob, name: contactSheetFileName(pageIndex, pageCount, exportInfo) });
+          await waitForNextFrame();
+        }
+        overlay.updateProgress(100, lang.loadingComplete);
+      } finally {
+        overlay.hide();
+        for (const thumb of thumbs) thumb.image?.close?.();
+      }
+      for (const page of pages) {
+        const result = await saveBlob(page.blob, page.name, exportInfo.mimeType);
+        handleSaveResult(result, {
+          cancelledKey: 'exportSaveCancelled',
+          cancelledFallback: 'Save cancelled. No file was written.'
+        });
+        if (!result?.saved) break;
+      }
+      if (pages.length) showToast(getInterpolatedText('contactSheetDone', { pages: String(pages.length) }, `Contact sheet exported (${pages.length} page(s))`));
+    }
+
+    document.getElementById('exportContactSheetBtn')?.addEventListener('click', async () => {
+      try {
+        await exportContactSheet();
+      } catch (error) {
+        console.error('Contact sheet export failed:', error);
+        void appAlert(getLocalizedText('contactSheetFailed', 'The contact sheet could not be exported.'));
+      }
+    });
+    document.querySelector('.contact-sheet-options')?.addEventListener('click', (event) => event.stopPropagation());
 
     // ===========================================
     // Analog metadata panel (roll + frame)
