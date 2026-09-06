@@ -79,14 +79,15 @@ export function applyAdjustmentsToPixels(inputData, outputData, pixelCount, para
     doTempTint,
     satFactor, vibFactor, doHsl,
     cmyRShift, cmyGShift, cmyBShift, doCMY,
-    curveR, curveG, curveB
+    curveR, curveG, curveB,
+    doLook, doLookMatrix, lookMatrix, lookOffset, lookR, lookG, lookB
   } = params;
 
   const lumaScale = 2 / 255;
   const totalBytes = pixelCount * 4;
 
-  // Fast path: LUT-only when no highlights/shadows/HSL
-  if (!doHighlights && !doShadows && !doHsl) {
+  // Fast path: LUT-only when no highlights/shadows/HSL and no cross-channel look matrix
+  if (!doHighlights && !doShadows && !doHsl && !doLookMatrix) {
     const lutR = lutScratch && lutScratch.lutR instanceof Uint8Array && lutScratch.lutR.length >= 256
       ? lutScratch.lutR
       : new Uint8Array(256);
@@ -104,6 +105,14 @@ export function applyAdjustmentsToPixels(inputData, outputData, pixelCount, para
       doTempTint, tempRMult, tintGMult, tempBMult,
       doCMY, cmyRShift, cmyGShift, cmyBShift
     });
+    if (doLook && lookR) {
+      // A per-channel look curve folds into the channel LUTs.
+      for (let v = 0; v < 256; v++) {
+        lutR[v] = lookR[lutR[v]];
+        lutG[v] = lookG[lutG[v]];
+        lutB[v] = lookB[lutB[v]];
+      }
+    }
 
     let progressNext = chunkSize * 4;
     for (let i = 0; i < totalBytes; i += 4) {
@@ -236,6 +245,23 @@ export function applyAdjustmentsToPixels(inputData, outputData, pixelCount, para
     g = curveG[(g + 0.5) | 0];
     b = curveB[(b + 0.5) | 0];
 
+    if (doLook) {
+      // Lab-match look: 3x3 matrix with offset, then per-channel curves.
+      if (doLookMatrix) {
+        const lr = lookMatrix[0] * r + lookMatrix[1] * g + lookMatrix[2] * b + lookOffset[0];
+        const lg = lookMatrix[3] * r + lookMatrix[4] * g + lookMatrix[5] * b + lookOffset[1];
+        const lb = lookMatrix[6] * r + lookMatrix[7] * g + lookMatrix[8] * b + lookOffset[2];
+        r = lr < 0 ? 0 : lr > 255 ? 255 : lr;
+        g = lg < 0 ? 0 : lg > 255 ? 255 : lg;
+        b = lb < 0 ? 0 : lb > 255 ? 255 : lb;
+      }
+      if (lookR) {
+        r = lookR[(r + 0.5) | 0];
+        g = lookG[(g + 0.5) | 0];
+        b = lookB[(b + 0.5) | 0];
+      }
+    }
+
     outputData[i] = r;
     outputData[i + 1] = g;
     outputData[i + 2] = b;
@@ -283,6 +309,7 @@ export function isIdentityAdjustmentParams(params) {
     && !params.doTempTint
     && !params.doHsl
     && !params.doCMY
+    && !params.doLook
     && isIdentityCurve(params.curveR)
     && isIdentityCurve(params.curveG)
     && isIdentityCurve(params.curveB);
@@ -321,6 +348,16 @@ export function computeAdjustmentParams(settings) {
   const doHsl = satFactor !== 1 || vibFactor !== 0;
   const doCMY = cmyRShift !== 0 || cmyGShift !== 0 || cmyBShift !== 0;
 
+  // Lab-match look (see labMatch.js): identity matrix and null curves mean off.
+  const look = settings.look && typeof settings.look === 'object' ? settings.look : null;
+  const identityMatrix = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+  const lookMatrix = look && Array.isArray(look.matrix) && look.matrix.length === 9 ? look.matrix : identityMatrix;
+  const lookOffset = look && Array.isArray(look.offset) && look.offset.length === 3 ? look.offset : [0, 0, 0];
+  const doLookMatrix = Boolean(look) && (lookMatrix.some((v, i) => Math.abs(v - identityMatrix[i]) > 1e-6) || lookOffset.some((v) => Math.abs(v) > 1e-6));
+  const lookCurves = look && look.curves && look.curves.r && look.curves.g && look.curves.b ? look.curves : null;
+  const doLookCurves = Boolean(lookCurves) && !(isIdentityCurve(lookCurves.r) && isIdentityCurve(lookCurves.g) && isIdentityCurve(lookCurves.b));
+  const doLook = doLookMatrix || doLookCurves;
+
   return {
     rMult, gMult, bMult,
     contrastFactor, doContrast,
@@ -332,6 +369,10 @@ export function computeAdjustmentParams(settings) {
     cmyRShift, cmyGShift, cmyBShift, doCMY,
     curveR: settings.curves.r,
     curveG: settings.curves.g,
-    curveB: settings.curves.b
+    curveB: settings.curves.b,
+    doLook, doLookMatrix, lookMatrix, lookOffset,
+    lookR: doLookCurves ? lookCurves.r : null,
+    lookG: doLookCurves ? lookCurves.g : null,
+    lookB: doLookCurves ? lookCurves.b : null
   };
 }

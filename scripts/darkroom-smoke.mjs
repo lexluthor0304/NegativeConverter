@@ -82,15 +82,17 @@ export async function runDarkroomSmoke({ send, evaluate, waitFor, wait, fail, in
   // ---- 2. Enlarger paradigm ----
   // The undo's reprocess may still be in flight when the slider value has
   // already gone back to 0: read until two readings agree.
+  // The preview lands first and the full-resolution render follows a moment
+  // later, so a reading has to hold for three consecutive samples.
   const settledLuminance = async () => {
-    let last = await canvasLuminance();
-    for (let i = 0; i < 12; i++) {
-      await wait(400);
-      const next = await canvasLuminance();
-      if (Math.abs(next - last) < 0.3) return next;
-      last = next;
+    const readings = [await canvasLuminance()];
+    for (let i = 0; i < 16; i++) {
+      await wait(500);
+      readings.push(await canvasLuminance());
+      const tail = readings.slice(-3);
+      if (tail.length === 3 && Math.max(...tail) - Math.min(...tail) < 0.3) return tail[2];
     }
-    return last;
+    return readings.at(-1);
   };
   const before = await settledLuminance();
   await evaluate(`document.getElementById('paradigmEnlargerBtn').click()`);

@@ -4,7 +4,7 @@ export const STUDIO_COLOR_KEYS = [
   'corePreSaturation', 'coreBrightness', 'coreExposure', 'coreContrast',
   'coreHighlights', 'coreShadows', 'coreWhites', 'coreBlacks', 'coreWbMode',
   'coreTemperature', 'coreTint', 'coreCyan', 'coreSaturation', 'coreGlow', 'coreFade',
-  'corePaper', 'corePaperToning', 'corePaperToningStrength',
+  'corePaper', 'corePaperToning', 'corePaperToningStrength', 'look',
   'exposure', 'contrast', 'highlights', 'shadows', 'temperature', 'tint',
   'vibrance', 'saturation', 'cyan', 'magenta', 'yellow', 'curvePoints', 'curves'
 ];

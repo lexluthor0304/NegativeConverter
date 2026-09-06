@@ -213,6 +213,7 @@
           <label class="upload-btn" id="uploadBtn" for="fileInput" role="button" tabindex="0" data-i18n="selectFile">Select File</label>
           <label class="upload-btn secondary" id="uploadFolderBtn" for="folderInput" role="button" tabindex="0" data-i18n="selectFolder">Select Folder</label>
           <input type="file" id="fileInput" class="hidden-file-input" accept=".cr2,.cr3,.crw,.nef,.nrw,.arw,.dng,.raf,.raw,.rw2,.pef,.srw,.3fr,.mef,.orf,.rwl,.iiq,.x3f,.mrw,.kdc,.dcr,.tif,.tiff,image/*" multiple>
+          <input type="file" id="projectInput" class="hidden-file-input" accept=".json,.cr2,.cr3,.crw,.nef,.nrw,.arw,.dng,.raf,.raw,.rw2,.pef,.srw,.3fr,.mef,.orf,.rwl,.iiq,.x3f,.mrw,.kdc,.dcr,.tif,.tiff,image/*" multiple>
           <input type="file" id="folderInput" class="hidden-file-input" accept=".cr2,.cr3,.crw,.nef,.nrw,.arw,.dng,.raf,.raw,.rw2,.pef,.srw,.3fr,.mef,.orf,.rwl,.iiq,.x3f,.mrw,.kdc,.dcr,.tif,.tiff,image/*" webkitdirectory directory multiple>
           <div class="upload-support-hint" id="folderPickerHint" data-i18n="folderPickerUnsupported">Folder selection is not supported in this browser. Please use Select File.</div>
         </div>
@@ -837,6 +838,18 @@
                 <input type="range" class="slider-input" id="dustMaxSize" min="6" max="80" step="1" value="40" aria-labelledby="dustMaxSizeLabel">
               </div>
               <div class="info-box" id="dustStatus" role="status" data-i18n="dustStatusIdle">Ready</div>
+              <div class="control-group-title"><span data-i18n="dustAiTitle">AI repair (on-device)</span></div>
+              <label class="roll-reference-option">
+                <input type="checkbox" id="dustAiEnabled">
+                <span data-i18n="dustAiEnable">Fill the mask with the learned inpainter on commit and export</span>
+              </label>
+              <div class="film-base-buttons">
+                <button class="film-base-btn" id="dustAiLoadBtn" data-i18n="dustAiLoad">Load model</button>
+                <label class="film-base-btn lab-match-pick" for="dustAiModelInput" data-i18n="dustAiPick">Use a model file (.onnx)</label>
+                <input type="file" id="dustAiModelInput" accept=".onnx" hidden>
+              </div>
+              <div class="info-box" id="dustAiStatus" role="status"></div>
+              <div class="control-group-hint" data-i18n="dustAiHint">Brush strokes preview with TELEA; the learned fill replaces it when detection commits and on export. Nothing leaves the device.</div>
               <label class="roll-reference-option">
                 <input type="checkbox" id="dustShowMask">
                 <span data-i18n="dustShowMask">Show Mask</span>
@@ -1018,6 +1031,94 @@
               <button class="film-base-btn" id="dodgeBurnClearBtn" data-i18n="dodgeBurnClear">Clear strokes</button>
             </div>
             <div class="control-group-hint" data-i18n="dodgeBurnHint">Drag on the photo. Strokes stay with the frame through rotation and crop and are applied at full resolution on export.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Match a lab scan: learn a look from the lab's JPEG of the same frame. Moved into the Edit tab. -->
+      <div class="control-section task-secondary" id="metadataSection" style="display: none;">
+        <div class="section-content">
+          <div class="control-group">
+            <div class="control-group-title" data-i18n="metadataRollTitle">Roll</div>
+            <div class="metadata-grid">
+              <label><span data-i18n="metadataRollName">Roll name</span><input type="text" id="metaRollName" data-meta-roll="rollName" maxlength="120" autocomplete="off"></label>
+              <label><span data-i18n="metadataStock">Film stock</span><input type="text" id="metaStock" data-meta-roll="stock" maxlength="120" autocomplete="off"></label>
+              <label><span data-i18n="metadataIso">ISO</span><input type="text" id="metaIso" data-meta-roll="iso" inputmode="numeric" maxlength="12" autocomplete="off"></label>
+              <label><span data-i18n="metadataDate">Date</span><input type="date" id="metaDate" data-meta-roll="date"></label>
+              <label><span data-i18n="metadataCamera">Camera</span><input type="text" id="metaCamera" data-meta-roll="camera" maxlength="120" autocomplete="off"></label>
+              <label><span data-i18n="metadataLens">Lens</span><input type="text" id="metaLens" data-meta-roll="lens" maxlength="120" autocomplete="off"></label>
+              <label><span data-i18n="metadataProcess">Process / developer</span><input type="text" id="metaProcess" data-meta-roll="process" maxlength="120" autocomplete="off"></label>
+              <label><span data-i18n="metadataLab">Lab</span><input type="text" id="metaLab" data-meta-roll="lab" maxlength="120" autocomplete="off"></label>
+            </div>
+          </div>
+          <div class="control-group">
+            <div class="control-group-title" data-i18n="metadataFrameTitle">This frame</div>
+            <div class="metadata-grid">
+              <label><span data-i18n="metadataFrameNumber">Frame number</span><input type="text" id="metaFrameNumber" data-meta-frame="frameNumber" maxlength="8" autocomplete="off"></label>
+              <label class="metadata-wide"><span data-i18n="metadataNotes">Notes</span><textarea id="metaNotes" data-meta-frame="notes" rows="2" maxlength="500"></textarea></label>
+            </div>
+          </div>
+          <div class="control-group-hint" data-i18n="metadataHint">Written into EXIF and XMP on every export.</div>
+        </div>
+      </div>
+      <div class="control-section task-secondary" id="recipeSection" style="display: none;">
+        <div class="section-content">
+          <div class="control-group">
+            <div class="roll-reference-status" id="recipeStatus" role="status"></div>
+            <div class="film-base-buttons">
+              <button class="film-base-btn" id="recipeCopyBtn" data-i18n="recipeCopy">Copy recipe code</button>
+              <button class="film-base-btn" id="recipeQrBtn" data-i18n="recipeQr">Show QR</button>
+              <button class="film-base-btn" id="recipeScanBtn" data-i18n="recipeScan" hidden>Scan QR</button>
+            </div>
+            <canvas id="recipeQrCanvas" class="recipe-qr" width="1" height="1" hidden></canvas>
+            <label class="recipe-note"><span data-i18n="recipeNote">Note</span><input type="text" id="recipeNote" maxlength="80" autocomplete="off"></label>
+            <textarea id="recipeCode" class="recipe-code" rows="3" spellcheck="false"></textarea>
+            <div class="film-base-buttons">
+              <button class="film-base-btn" id="recipeDecodeBtn" data-i18n="recipeDecode">Read recipe</button>
+              <button class="film-base-btn" id="recipeApplyBtn" data-i18n="recipeApply" disabled>Apply to this photo</button>
+              <button class="film-base-btn" id="recipeApplySelectedBtn" data-i18n="recipeApplySelected" disabled>Apply to selected</button>
+            </div>
+            <ul id="recipeDiff" class="recipe-diff"></ul>
+          </div>
+        </div>
+      </div>
+      <div class="control-section task-secondary" id="labMatchSection" style="display: none;">
+        <div class="section-content">
+          <div class="control-group">
+            <div class="roll-reference-status" id="labMatchStatus" role="status"></div>
+            <div class="film-base-buttons">
+              <label class="film-base-btn lab-match-pick" for="labMatchInput" data-i18n="labMatchPick">Choose the lab's JPEG</label>
+              <input type="file" id="labMatchInput" accept="image/*" hidden>
+              <button class="film-base-btn" id="labMatchRunBtn" data-i18n="labMatchRun" disabled>Match</button>
+            </div>
+            <div class="film-base-buttons">
+              <button class="film-base-btn" id="labMatchApplySelectedBtn" data-i18n="labMatchApplySelected" disabled>Apply look to selected</button>
+              <button class="film-base-btn" id="labMatchClearBtn" data-i18n="labMatchClear" disabled>Clear look</button>
+            </div>
+            <div class="control-group-hint" data-i18n="labMatchHint">Pick the lab's scan of this same frame. It is aligned to your conversion and a colour matrix plus per-channel curves are fitted so your result takes on the lab's look. Without a reliable alignment the colours are matched by histogram.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Flat field: a blank light-source frame removes the light pad's falloff. Moved into the Retouch tab. -->
+      <div class="control-section task-secondary" id="flatFieldSection" style="display: none;">
+        <div class="section-content">
+          <div class="control-group">
+            <div class="roll-reference-status" id="flatFieldStatus" role="status"></div>
+            <label class="roll-reference-option">
+              <input type="checkbox" id="flatFieldEnabled">
+              <span data-i18n="flatFieldEnable">Correct this photo with the flat field</span>
+            </label>
+            <div class="info-box" id="flatFieldLensWarning" data-i18n="flatFieldLensWarning" style="display: none;">Lens vignetting correction is also on; the flat field already removes the falloff, so switch one of them off.</div>
+            <div class="film-base-buttons">
+              <button class="film-base-btn" id="flatFieldUseCurrentBtn" data-i18n="flatFieldUseCurrent">Use this photo as flat field</button>
+              <button class="film-base-btn" id="flatFieldDetectBtn" data-i18n="flatFieldDetect">Find blank frame in selection</button>
+            </div>
+            <div class="film-base-buttons">
+              <button class="film-base-btn" id="flatFieldApplySelectedBtn" data-i18n="flatFieldApplySelected">Apply to selected</button>
+              <button class="film-base-btn" id="flatFieldClearBtn" data-i18n="flatFieldClear">Clear flat field</button>
+            </div>
+            <div class="control-group-hint" data-i18n="flatFieldHint">Shoot one empty frame of the light source with the same lens and exposure. Its brightness map divides every frame in linear light before inversion, removing corner falloff and colour unevenness of the pad.</div>
           </div>
         </div>
       </div>
@@ -1353,7 +1454,9 @@
               <button class="format-btn active" type="button" data-format="png" aria-pressed="true">PNG</button>
               <button class="format-btn" type="button" data-format="jpeg" aria-pressed="false">JPEG</button>
               <button class="format-btn" type="button" data-format="tiff" aria-pressed="false">TIFF</button>
+              <button class="format-btn" type="button" data-format="dng" aria-pressed="false">DNG</button>
             </div>
+            <div class="export-bitdepth-note" id="exportDngNote" data-i18n="exportDngNote"></div>
           </div>
           <div class="export-bitdepth-section" id="exportBitDepthSection">
             <div class="export-format-label" id="exportBitDepthLabel" data-i18n="exportBitDepth">Bit Depth</div>
@@ -1362,7 +1465,6 @@
               <button class="bitdepth-btn" type="button" data-bitdepth="16" aria-pressed="false">16-bit</button>
             </div>
             <div class="export-bitdepth-note" id="exportBitDepthNote" data-i18n="bitDepthJpegLocked"></div>
-            <div class="export-bitdepth-note" id="exportBitDepthDowngradeNote" data-i18n="bitDepth8BitData"></div>
           </div>
           <div class="export-quality-section" id="exportQualitySection">
             <div class="export-quality-header">
@@ -1375,8 +1477,53 @@
           <div class="export-dropdown-divider"></div>
           <button class="export-dropdown-item" id="exportZipBtn" data-i18n="exportZip" disabled>Export All (ZIP)</button>
           <button class="export-dropdown-item" id="exportAllBtn" data-i18n="exportIndividual" disabled>Download All Individually</button>
+          <div class="export-dropdown-divider"></div>
+          <div class="export-contact-sheet" id="contactSheetControls">
+            <div class="export-format-label" id="contactSheetTitle" data-i18n="contactSheetTitle">Contact sheet</div>
+            <div class="contact-sheet-options">
+              <label><span data-i18n="contactSheetLayout">Layout</span>
+                <select id="contactSheetLayout" aria-labelledby="contactSheetTitle">
+                  <option value="35mm" data-i18n="contactSheetLayout35">35mm · 6 × 6</option>
+                  <option value="half-frame" data-i18n="contactSheetLayoutHalf">Half-frame · 8 × 9</option>
+                  <option value="120-6x6" data-i18n="contactSheetLayout66">120 6×6 · 4 × 5</option>
+                  <option value="120-6x7" data-i18n="contactSheetLayout67">120 6×7 · 4 × 4</option>
+                  <option value="120-6x9" data-i18n="contactSheetLayout69">120 6×9 · 3 × 4</option>
+                  <option value="panoramic" data-i18n="contactSheetLayoutPano">Panoramic · 2 × 6</option>
+                </select></label>
+              <label><span data-i18n="contactSheetPage">Page</span>
+                <select id="contactSheetPage">
+                  <option value="a4" data-i18n="contactSheetPageA4">A4 · 300 dpi</option>
+                  <option value="letter" data-i18n="contactSheetPageLetter">Letter · 300 dpi</option>
+                </select></label>
+              <label class="contact-sheet-check"><input type="checkbox" id="contactSheetSprockets"><span data-i18n="contactSheetSprockets">Sprockets and frame numbers on the rebate</span></label>
+            </div>
+            <button class="export-dropdown-item" id="exportContactSheetBtn" data-i18n="exportContactSheet" disabled>Export contact sheet</button>
+          </div>
         </div>
       </div>
+    </div>
+  </div>
+
+  <!-- Live loupe: the camera feed converted through the current recipe (camera scanning) -->
+  <div class="loupe-overlay" id="loupeOverlay" hidden>
+    <div class="loupe-modal" role="dialog" aria-modal="true" aria-labelledby="loupeTitle">
+      <div class="loupe-head">
+        <span class="loupe-title" id="loupeTitle" data-i18n="loupeTitle">Live loupe</span>
+        <span class="loupe-status" id="loupeStatus" role="status"></span>
+        <button type="button" class="toolbar-btn" id="loupeCloseBtn" data-i18n="loupeClose">Close</button>
+      </div>
+      <div class="loupe-stage">
+        <video id="loupeVideo" autoplay playsinline muted></video>
+        <canvas id="loupeCanvas" width="1" height="1"></canvas>
+      </div>
+      <div class="loupe-controls">
+        <label class="loupe-field"><span data-i18n="loupeCamera">Camera</span><select id="loupeCameraSelect" disabled></select></label>
+        <label class="loupe-field"><span data-i18n="loupeZoom">Zoom</span><input type="range" id="loupeZoom" min="1" max="1" step="0.1" value="1" disabled></label>
+        <label class="loupe-toggle"><input type="checkbox" id="loupeTorch" disabled><span data-i18n="loupeTorch">Torch</span></label>
+        <label class="loupe-toggle"><input type="checkbox" id="loupeRaw"><span data-i18n="loupeRaw">Show raw</span></label>
+        <button type="button" class="toolbar-btn loupe-capture" id="loupeCaptureBtn" data-i18n="loupeCapture" disabled>Capture to photos</button>
+      </div>
+      <p class="loupe-hint" data-i18n="loupeHint">Point the camera at the negative: the picture is converted live through the current photo’s recipe (or the automatic one) so you can focus and judge exposure. Capture saves the frame at the camera’s resolution and adds it to the photos.</p>
     </div>
   </div>
 

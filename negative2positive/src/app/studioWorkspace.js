@@ -5,6 +5,7 @@ import '../styles/studio-pixel.css';
 export const studioText = {
   zh: {
     preview: '本地胶片暗房', add: '添加照片', menu: '帮助与设置',
+    loupe: '实时放大镜', loupeHint: '把相机对准底片，实时看到转正后的画面；拍下即加入照片列表。',
     title: '把负片交给我们。', subtitle: '你只管调出喜欢的色彩。',
     importBatch: '可多选照片，也可把一组照片拖到这里',
     importHint: '自动取景与转换 · 保留原文件 · 照片不上传', formats: '支持 RAW、TIFF、PNG 和 JPEG',
@@ -19,7 +20,7 @@ export const studioText = {
     syncHint: '只同步色彩，不改变其他照片的裁切、片基和修复。', synced: '已同步到 {count} 张照片',
     export: '导出', sampleHint: '在照片上点击应为中性灰的区域；按 Esc 取消。',
     retry: '重新转换', advancedHint: '只在需要时展开。这里保留原来的精细控制。',
-    exportSettings: '文件格式与质量', exportSelected: '导出所选 {count} 张', exportCurrent: '导出当前照片', undo: '撤销', redo: '重做',
+    exportSettings: '文件格式与质量', exportSelected: '导出所选 {count} 张', exportCurrent: '导出当前照片', exportCurrentDng: '导出当前照片（线性 DNG）', undo: '撤销', redo: '重做',
     exportIndividualSelected: '逐张下载所选 {count} 张', selectionHint: '勾选照片；按住 Shift 可连续选择。',
     composition: '构图', border: '边框', curves: '曲线', fine: 'RGB / CMY 精调', looks: '全部风格与预设',
     lens: '镜头校正', autoFrame: '自动取景设置', compositionHint: '导入时自动识别成像区域。支持 135、半格、宽幅及 120 多种画幅；识别不可靠时保留完整画面，供你确认。',
@@ -27,11 +28,15 @@ export const studioText = {
     borderPreview: '预览胶片边框', borderExport: '导出时包含边框与边码', borderExportAction: '导出带边框照片',
     batch: '批量工具', batchHint: '同步调色只复制色彩。处理设置还包括片基、白平衡校正和镜头等；两者都保留各照片的构图。',
     allSettings: '同步片基与处理设置…', saveSettings: '保存当前照片设置', clearQueue: '清空照片列表…', newSession: '关闭照片，重新开始…',
+    mergeHint: '把同一格底片的 2–5 次拍摄合成一个 16 位文件：平均叠加降噪，HDR 合并不同曝光。', mergeAverage: '合成已选：平均叠加', mergeHdr: '合成已选：HDR 包围曝光',
     clearConfirm: '清空照片列表后，将无法再切换到这些照片。请先导出需要保留的结果。继续吗？',
     newConfirm: '关闭当前照片和列表？未导出的结果将丢失，原始文件不会被删除。',
     hidePanel: '收起调整', showPanel: '展开调整', hideStrip: '收起照片条', showStrip: '展开照片条', tabs: '照片工具',
+    recipe: '配方', recipeHint: '把这张照片的转换设置压缩成一段短代码或二维码分享；粘贴别人的代码即可套用。不含裁切与文件信息。',
+    projectHint: '工程文件记录整卷：照片列表、每张的设置、片基参考和元数据。之后把它和原片一起拖进来即可恢复。', saveProject: '保存工程文件…', openProject: '打开工程文件…', restoreProject: '恢复上次的胶卷',
+    metadata: '胶卷与画格', metadataHint: '胶片、ISO、相机、镜头、冲洗、冲印店、日期和画格号会写进导出文件的 EXIF 与 XMP。',
     lightTable: '光桌', stripView: '照片条', lightTableHint: '以网格查看整卷，颜色是否统一一眼可见。',
-    cyan: '青 / 红', testStrip: '试条', dodgeBurn: '加减光',
+    cyan: '青 / 红', testStrip: '试条', dodgeBurn: '加减光', flatField: '平场校正', labMatch: '匹配店扫',
     baseSampleHint: '点击未曝光的胶片边缘采样；按 Esc 取消。', resetAll: '重置全部调整',
     scope: '当前照片', fullResetConfirm: '重置当前照片的色彩、白平衡和引擎调整？此操作可以撤销。',
     restart: '从原片重新处理…', restartConfirm: '清除当前照片的构图、调色和历史记录，从原片重新转换？请先导出需要保留的结果。',
@@ -44,6 +49,7 @@ export const studioText = {
   },
   en: {
     preview: 'Your local darkroom', add: 'Add photos', menu: 'Help & settings',
+    loupe: 'Live loupe', loupeHint: 'Point a camera at the negative and see it converted live; capture adds the frame to the photos.',
     title: 'Your negatives, brought to light.', subtitle: 'Make the colors your own.',
     importBatch: 'Select multiple photos, or drop a batch here',
     importHint: 'Auto frame & convert · Originals preserved · No uploads', formats: 'RAW, TIFF, PNG and JPEG welcome',
@@ -58,7 +64,7 @@ export const studioText = {
     syncHint: 'Only color is synced. Each photo keeps its crop, film base and retouching.', synced: 'Color synced to {count} photos',
     export: 'Export', sampleHint: 'Click an area that should be neutral gray. Press Esc to cancel.',
     retry: 'Convert again', advancedHint: 'Optional controls for a more precise finish.',
-    exportSettings: 'File format & quality', exportSelected: 'Export {count} selected', exportCurrent: 'Export current photo', undo: 'Undo', redo: 'Redo',
+    exportSettings: 'File format & quality', exportSelected: 'Export {count} selected', exportCurrent: 'Export current photo', exportCurrentDng: 'Export current photo (linear DNG)', undo: 'Undo', redo: 'Redo',
     exportIndividualSelected: 'Download {count} selected individually', selectionHint: 'Check photos to select. Shift-click selects a range.',
     composition: 'Crop', border: 'Border', curves: 'Curves', fine: 'RGB / CMY fine tuning', looks: 'All styles & presets',
     lens: 'Lens correction', autoFrame: 'Auto frame settings', compositionHint: 'Detect the image area on import: 135, half frame, panoramic and 120 formats. Uncertain detections keep the full image for review.',
@@ -66,10 +72,14 @@ export const studioText = {
     borderPreview: 'Preview film border', borderExport: 'Include border & markings in export', borderExportAction: 'Export with film border',
     batch: 'Batch tools', batchHint: 'Sync color copies color only. Processing settings also copy film base, WB gains and lens settings. Both preserve each photo’s geometry.',
     allSettings: 'Sync base & processing settings…', saveSettings: 'Save current photo settings', clearQueue: 'Clear photo list…', newSession: 'Close photos & start again…',
+    mergeHint: 'Merge 2–5 shots of the same frame into one 16-bit file: average stacks for less noise, HDR combines exposure brackets.', mergeAverage: 'Merge selected: average', mergeHdr: 'Merge selected: HDR brackets',
     clearConfirm: 'Clear the photo list? Export any results you want to keep first.', newConfirm: 'Close this photo and the list? Unexported results will be lost. Original files will not be deleted.',
     hidePanel: 'Hide controls', showPanel: 'Show controls', hideStrip: 'Hide photos', showStrip: 'Show photos', tabs: 'Photo tools',
+    recipe: 'Recipe', recipeHint: 'Share this photo’s conversion as a short code or QR; paste someone else’s code to apply it. No crop or file data travels.',
+    projectHint: 'A project file records the roll: the photo list, every frame’s settings, the roll reference and the metadata. Drop it back in with the originals to restore everything.', saveProject: 'Save project…', openProject: 'Open project…', restoreProject: 'Restore last roll',
+    metadata: 'Roll & frame', metadataHint: 'Film, ISO, camera, lens, process, lab, date and frame number go into the EXIF and XMP of every export.',
     lightTable: 'Light table', stripView: 'Film strip', lightTableHint: 'Show the whole roll as a grid so colour consistency is visible at a glance.',
-    cyan: 'Cyan / red', testStrip: 'Test strip', dodgeBurn: 'Dodge and burn',
+    cyan: 'Cyan / red', testStrip: 'Test strip', dodgeBurn: 'Dodge and burn', flatField: 'Flat field', labMatch: 'Match a lab scan',
     baseSampleHint: 'Click an unexposed film edge to sample it. Press Esc to cancel.', resetAll: 'Reset all adjustments',
     scope: 'Current photo', fullResetConfirm: 'Reset color, white balance and engine adjustments for this photo? You can undo this change.',
     restart: 'Reprocess from original…', restartConfirm: 'Clear geometry, color and history for this photo and convert the original again? Export any results you want to keep first.',
@@ -82,6 +92,7 @@ export const studioText = {
   },
   ja: {
     preview: 'ローカルのフィルム暗室', add: '写真を追加', menu: 'ヘルプと設定',
+    loupe: 'ライブルーペ', loupeHint: 'カメラを原板に向けると変換後の画面がライブで見え、撮影すると写真一覧に加わります。',
     title: 'ネガから、あなたの一枚へ。', subtitle: '好きな色に仕上げることに、集中。',
     importBatch: '複数選択、または写真をまとめてドロップ',
     importHint: '自動取景・変換 · 元画像を保持 · 写真の送信なし', formats: 'RAW・TIFF・PNG・JPEG に対応',
@@ -96,7 +107,7 @@ export const studioText = {
     syncHint: '色だけを同期します。切り抜き・フィルムベース・修復は各写真の設定を保ちます。', synced: '{count} 枚に色調整を同期しました',
     export: '書き出し', sampleHint: '写真の中の無彩色の部分をクリック。Esc で終了します。',
     retry: '再変換', advancedHint: '必要なときだけ使える、細かな仕上げのための設定。',
-    exportSettings: '形式と画質', exportSelected: '選択した {count} 枚を書き出す', exportCurrent: '現在の写真を書き出す', undo: '取り消す', redo: 'やり直す',
+    exportSettings: '形式と画質', exportSelected: '選択した {count} 枚を書き出す', exportCurrent: '現在の写真を書き出す', exportCurrentDng: '現在の写真を書き出す（リニア DNG）', undo: '取り消す', redo: 'やり直す',
     exportIndividualSelected: '選択した {count} 枚を個別に保存', selectionHint: 'チェックで選択。Shift を押しながらクリックで範囲を選べます。',
     composition: '構図', border: '枠', curves: 'カーブ', fine: 'RGB / CMY 微調整', looks: '全スタイルとプリセット',
     lens: 'レンズ補正', autoFrame: '自動フレーム設定', compositionHint: '読み込み時に画像領域を検出。135・ハーフ・パノラマ・120 各画幅に対応。不確かな場合は全体を保持して確認を促します。',
@@ -104,10 +115,14 @@ export const studioText = {
     borderPreview: 'フィルム枠を表示', borderExport: '枠と端文字を書き出しに含める', borderExportAction: '枠付きで書き出す',
     batch: '一括操作', batchHint: '色同期は色だけをコピーします。処理設定はベース・WB補正・レンズなども同期します。どちらも各写真の構図を保ちます。',
     allSettings: 'ベースと処理設定を同期…', saveSettings: '現在の写真の設定を保存', clearQueue: '写真一覧を空にする…', newSession: '写真を閉じてやり直す…',
+    mergeHint: '同じコマの 2〜5 枚の撮影を 1 つの 16 bit ファイルに合成します。平均でノイズを減らし、HDR で露出ブラケットを統合します。', mergeAverage: '選択を合成：平均', mergeHdr: '選択を合成：HDR ブラケット',
     clearConfirm: '写真一覧を空にしますか？必要な結果を先に書き出してください。', newConfirm: '現在の写真と一覧を閉じますか？未保存の結果は失われますが、元ファイルは削除しません。',
     hidePanel: '調整を隠す', showPanel: '調整を表示', hideStrip: '写真一覧を隠す', showStrip: '写真一覧を表示', tabs: '写真ツール',
+    recipe: 'レシピ', recipeHint: 'この写真の変換設定を短いコードや QR で共有し、他の人のコードを貼り付けて適用できます。切り抜きやファイル情報は含みません。',
+    projectHint: 'プロジェクトには写真一覧・各コマの設定・ロール基準・メタデータが入ります。原板と一緒に戻せば復元できます。', saveProject: 'プロジェクトを保存…', openProject: 'プロジェクトを開く…', restoreProject: '前回のロールを復元',
+    metadata: 'ロールとコマ', metadataHint: 'フィルム・ISO・カメラ・レンズ・現像・ラボ・日付・コマ番号を書き出しファイルの EXIF と XMP に書き込みます。',
     lightTable: 'ライトテーブル', stripView: 'フィルムストリップ', lightTableHint: 'ロール全体をサムネイルの一覧で表示し、色の統一を一目で確認します。',
-    cyan: 'シアン / 赤', testStrip: 'テストストリップ', dodgeBurn: '覆い焼き・焼き込み',
+    cyan: 'シアン / 赤', testStrip: 'テストストリップ', dodgeBurn: '覆い焼き・焼き込み', flatField: 'フラットフィールド', labMatch: 'ラボスキャンに合わせる',
     baseSampleHint: '未露光のフィルム端をクリック。Esc で終了します。', resetAll: '全調整をリセット',
     scope: '現在の写真', fullResetConfirm: '色・ホワイトバランス・エンジンの調整をリセットしますか？取り消し可能です。',
     restart: '元画像から再処理…', restartConfirm: '現在の写真の構図・色・履歴を消去して再変換しますか？必要な結果を先に書き出してください。',
@@ -120,7 +135,7 @@ export const studioText = {
   }
 };
 
-export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, onStyle, onReset, onResetAll, onRestart, onNewSession, onSync, onRetry, onConfirm, onExportBorder, onAutoCrop, onRestoreFrame, onConfirmAnalysis }) {
+export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, onStyle, onReset, onResetAll, onRestart, onNewSession, onSync, onRetry, onConfirm, onExportBorder, onAutoCrop, onRestoreFrame, onConfirmAnalysis, onMergeShots, onLoupe, onSaveProject, onOpenProject, onRestoreProject }) {
   const $ = id => document.getElementById(id);
   const t = key => (studioText[getLanguage()] || studioText.en)[key];
   const move = (id, target) => target.append($(id));
@@ -131,7 +146,7 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
   header.innerHTML = `
     <div class="studio-brand"><span class="studio-mark">NeoAnalogLab</span><span>Negative Converter</span></div>
     <nav id="studioPublicLinks" class="studio-public-links"></nav>
-    <nav class="studio-actions"><button id="studioAdd" type="button" data-studio="add"></button><span id="studioHistory"></span><div id="studioExport"></div>
+    <nav class="studio-actions"><button id="studioAdd" type="button" data-studio="add"></button><button id="studioLoupe" type="button" data-studio="loupe"></button><span id="studioHistory"></span><div id="studioExport"></div>
       <details id="studioMenu"><summary data-studio="menu"></summary><div class="studio-menu-content"><div id="studioLanguages"></div><div id="studioLinks"></div><button id="studioNewSession" type="button" data-studio="newSession"></button></div></details>
     </nav>`;
   body.prepend(header);
@@ -305,6 +320,9 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
   };
   move('consoleSection', panes.edit);
   makeDrawer(panes.edit, 'studioTestStrip', 'testStrip', ['testStripSection']);
+  makeDrawer(panes.edit, 'studioLabMatch', 'labMatch', ['labMatchSection']);
+  makeDrawer(panes.edit, 'studioMetadata', 'metadata', ['metadataSection'], 'metadataHint');
+  makeDrawer(panes.edit, 'studioRecipe', 'recipe', ['recipeSection'], 'recipeHint');
   const curve = makeDrawer(panes.edit, 'studioCurves', 'curves', []);
   curve.lastElementChild.append($('curveCanvas').closest('.control-group'));
   const looks = makeDrawer(panes.edit, 'studioLooks', 'looks', []);
@@ -350,6 +368,7 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
   makeDrawer(composition, 'studioAutoFrame', 'autoFrame', ['autoFrameSettingsSection']);
   move('dustRemovalSection', panes.repair);
   makeDrawer(panes.repair, 'studioDodgeBurn', 'dodgeBurn', ['dodgeBurnSection']);
+  makeDrawer(panes.repair, 'studioFlatField', 'flatField', ['flatFieldSection']);
   const lens = makeDrawer(panes.repair, 'studioLens', 'lens', []);
   lens.lastElementChild.append($('lensCorrectionPanel').closest('.control-group'));
   const applyLens = document.createElement('button');
@@ -406,7 +425,7 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
   const strip = document.createElement('section');
   strip.className = 'studio-filmstrip';
   strip.id = 'studioFilmstrip';
-  strip.innerHTML = `<div class="studio-strip-header"><button id="studioToggleStrip" type="button" aria-controls="fileListSection" aria-expanded="true" data-studio="photos"></button><button id="studioToggleLightTable" type="button" aria-pressed="false" data-studio="lightTable"></button><span id="studioSelection"></span><button id="studioSync" type="button" data-studio="sync"></button><details id="studioBatchMenu"><summary data-studio="batch"></summary><div class="studio-batch-content"><p data-studio="batchHint"></p><div id="studioBatchActions"></div><button id="studioClearQueue" type="button" data-studio="clearQueue"></button></div></details></div>`;
+  strip.innerHTML = `<div class="studio-strip-header"><button id="studioToggleStrip" type="button" aria-controls="fileListSection" aria-expanded="true" data-studio="photos"></button><button id="studioToggleLightTable" type="button" aria-pressed="false" data-studio="lightTable"></button><span id="studioSelection"></span><button id="studioSync" type="button" data-studio="sync"></button><details id="studioBatchMenu"><summary data-studio="batch"></summary><div class="studio-batch-content"><p data-studio="batchHint"></p><div id="studioBatchActions"></div><p data-studio="mergeHint"></p><button id="studioMergeAverage" type="button" data-studio="mergeAverage"></button><button id="studioMergeHdr" type="button" data-studio="mergeHdr"></button><p data-studio="projectHint"></p><button id="studioSaveProject" type="button" data-studio="saveProject"></button><button id="studioOpenProject" type="button" data-studio="openProject"></button><button id="studioRestoreProject" type="button" data-studio="restoreProject" hidden></button><button id="studioClearQueue" type="button" data-studio="clearQueue"></button></div></details></div>`;
   document.querySelector('.app-main').append(strip);
   move('fileListSection', strip);
   $('studioSync').title = t('syncHint');
@@ -417,6 +436,12 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
   $('studioClearQueue').addEventListener('click', async () => {
     if (await onConfirm(t('clearConfirm'))) $('clearFileListBtn').click();
   });
+  for (const [id, mode] of [['studioMergeAverage', 'average'], ['studioMergeHdr', 'hdr']]) {
+    $(id).addEventListener('click', () => { $('studioBatchMenu').open = false; onMergeShots?.(mode); });
+  }
+  $('studioSaveProject').addEventListener('click', () => { $('studioBatchMenu').open = false; onSaveProject?.(); });
+  $('studioOpenProject').addEventListener('click', () => { $('studioBatchMenu').open = false; onOpenProject?.(); });
+  $('studioRestoreProject').addEventListener('click', () => { $('studioBatchMenu').open = false; onRestoreProject?.(); });
   $('studioNewSession').addEventListener('click', async () => {
     if (!getState().originalImageData || await onConfirm(t('newConfirm'))) onNewSession();
   });
@@ -451,6 +476,8 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
   }
 
   $('studioAdd').addEventListener('click', () => $('addFilesToolbarBtn').click());
+  $('studioLoupe').hidden = !(navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function');
+  $('studioLoupe').addEventListener('click', () => onLoupe?.());
   $('studioReset').addEventListener('click', onReset);
   $('studioSync').addEventListener('click', onSync);
   $('studioRetry').addEventListener('click', onRetry);
@@ -512,7 +539,7 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
       $('studioSync').disabled = !ready || busy || state.cropping || isExportLocked() || !state.fileQueue.some(item => item.selected && item.file !== state.loadedFile);
       $('studioSync').title = t('syncHint');
       $('exportZipBtn').textContent = t('exportSelected').replace('{count}', count);
-      $('exportSingleBtn').textContent = t('exportCurrent');
+      $('exportSingleBtn').textContent = t(state.exportFormat === 'dng' ? 'exportCurrentDng' : 'exportCurrent');
       $('exportAllBtn').textContent = t('exportIndividualSelected').replace('{count}', count);
       $('studioSelection').title = t('selectionHint');
       $('studioUndo').disabled = $('undoBtn').disabled;
@@ -521,12 +548,20 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
       $('studioApplyLens').disabled = !loaded || locked;
       $('studioResetAll').disabled = !ready || locked;
       $('studioRestart').disabled = !loaded || locked;
-      $('exportSprocketBtn').disabled = !ready || locked;
+      $('exportSprocketBtn').disabled = !ready || locked || state.exportFormat === 'dng';
       $('studioExportBorder').checked = Boolean(state.exportSprocketHolesEnabled);
       $('studioExportBorder').disabled = !ready || locked;
       $('studioClearQueue').disabled = locked || !state.fileQueue.length;
+      $('studioSaveProject').disabled = locked || !state.fileQueue.length;
+      $('studioOpenProject').disabled = locked;
+      $('studioRestoreProject').hidden = !state.projectRecoveryAvailable;
+      const mergeable = !locked && count >= 2 && count <= 5;
+      $('studioMergeAverage').disabled = !mergeable;
+      $('studioMergeHdr').disabled = !mergeable;
       $('studioNewSession').disabled = locked;
       $('studioAdd').disabled = locked;
+      $('studioLoupe').disabled = locked;
+      $('studioLoupe').title = t('loupeHint');
       $('studioTogglePanel').disabled = state.cropping;
       $('studioToggleStrip').disabled = state.cropping;
       $('studioToggleLightTable').disabled = state.cropping;
@@ -549,7 +584,7 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
         panel.style.display = 'flex';
         $('filmSettingsSection').style.display = 'block';
         ['autoFrameSettingsSection', 'sprocketSettingsSection'].forEach(id => { $(id).style.display = 'block'; });
-        ['toneSection', 'colorSection', 'cmySection', 'additionalSection', 'consoleSection', 'dustRemovalSection', 'advancedSection', 'enlargerSection', 'testStripSection', 'paperSection', 'dodgeBurnSection'].forEach(id => {
+        ['toneSection', 'colorSection', 'cmySection', 'additionalSection', 'consoleSection', 'dustRemovalSection', 'advancedSection', 'enlargerSection', 'testStripSection', 'paperSection', 'dodgeBurnSection', 'flatFieldSection', 'labMatchSection', 'metadataSection', 'recipeSection'].forEach(id => {
           $(id).style.display = ready ? 'block' : 'none';
         });
       }
