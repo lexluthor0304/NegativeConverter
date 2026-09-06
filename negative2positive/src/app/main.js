@@ -11722,8 +11722,11 @@
 
     // Reads the rebate of a loaded image and folds the result into `settings`.
     // Returns { settings, toast } or null when the reader was unavailable.
-    // With applyDefaults the detected stock also sets film type, preset and
-    // film base, but only on values the user has not chosen yet.
+    // With applyDefaults the detected stock also sets the film type (B&W or
+    // slide film from the database). The matched preset and the rebate film
+    // base are only offered, through the Film edge buttons: applying both on
+    // import cost 0.7 stop and cooled the render on a real Ultra Max strip
+    // against the border auto-detect with no preset.
     async function analyzeImportFilmEdge(source, settings, { applyDefaults = true } = {}) {
       if (!source || settings.filmEdge?.checked) return null;
       let result = null;
@@ -11759,19 +11762,9 @@
       // app rendered itself); a colour-negative DX number read that way is
       // contradictory, so it is shown but not applied automatically.
       const contradictory = record.polarity === 'light' && record.filmKind !== 'positive';
-      if (applyDefaults && !contradictory) {
-        if (record.filmKind && record.filmKind !== next.filmType) {
-          next.filmType = record.filmKind;
-          record.appliedFilmType = true;
-        }
-        if (record.presetId && (next.coreFilmPreset || 'none') === 'none' && (!record.filmKind || record.filmKind === next.filmType)) {
-          record.appliedPreset = await applyFilmPresetToSettings(next, record.presetId);
-        }
-        const baseMethod = next.filmBase?.method || 'auto';
-        if (record.filmBase && next.filmType === 'color' && baseMethod !== 'manual' && baseMethod !== 'reference') {
-          next.filmBase = rebateFilmBaseForSettings(record.filmBase);
-          record.appliedFilmBase = true;
-        }
+      if (applyDefaults && !contradictory && record.filmKind && record.filmKind !== next.filmType) {
+        next.filmType = record.filmKind;
+        record.appliedFilmType = true;
       }
       next.filmEdge = sanitizeFilmEdgeForSettings(record);
       const dx = `${record.dx1}-${record.dx2}`;
@@ -11779,8 +11772,7 @@
       let toast = name
         ? getInterpolatedText('filmEdgeToastDetected', { name, dx }, `Detected ${name} (DX ${dx})`)
         : getInterpolatedText('filmEdgeToastUnknown', { dx }, `Read DX ${dx}; no matching film in the database`);
-      if (record.appliedPreset) toast += getLocalizedText('filmEdgeToastPresetApplied', ', preset applied');
-      if (record.appliedFilmBase) toast += getLocalizedText('filmEdgeToastBaseApplied', ', film base from the rebate');
+      if (!contradictory && (record.presetId || record.filmBase)) toast += getLocalizedText('filmEdgeToastSuggest', '; its preset and rebate film base are under Film edge');
       return { settings: next, toast };
     }
 

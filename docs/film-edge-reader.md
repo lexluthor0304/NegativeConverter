@@ -10,13 +10,15 @@ samples the film base from the unexposed rebate.
 `prepareStudioPhoto` (and the headless `processFileWithSettings` path used for
 unopened files in batch export) calls `analyzeImportFilmEdge` once per file.
 The reader runs in the auto-frame worker (`read-film-edge` message; no OpenCV
-needed) with a main-thread fallback. For a fresh file the detection also sets:
-
-- film type, when the database says the stock is B&W or a slide film;
-- the film preset, when none was chosen (`gold-warm` for Gold/Ultra Max,
-  `portra-classic` for Portra, `superia-vivid` for Fuji consumer films, ...);
-- the film base, taken from the unexposed rebate (`method: 'rebate'`), unless
-  the base was sampled manually or came from a roll reference.
+needed) with a main-thread fallback. For a fresh file the detection also sets
+the film type when the database says the stock is B&W or a slide film. The
+matched preset (`gold-warm` for Gold/Ultra Max, `portra-classic` for Portra,
+`superia-vivid` for Fuji consumer films, ...) and the film base sampled from
+the unexposed rebate (`method: 'rebate'`) are **offered, not applied**: the
+*Apply detected film* and *Use rebate as film base* buttons apply them with
+one click. Applying both on import was measured on a real Ultra Max strip at
+−0.7 stop and a cooler render than the border auto-detect with no preset, so
+the default rendering stays what it was before the reader existed.
 
 The result is stored per file as `settings.filmEdge` (`checked`, `found`,
 `dxNumber`, `filmName`, `frames`, `filmBase`, `applied*`), shown in the Convert
@@ -82,11 +84,12 @@ Unit tests (`npm test`):
 
 Smoke (`npm run test:smoke`, `scripts/film-edge-smoke.mjs`): imports
 `test-fixtures/negative-strip-dx.png` through the file input and requires the
-toast "Detected Kodak ULTRA MAX 400 GC400 (DX 95-7), preset applied, film base
-from the rebate", the status "DX 95-7 · … · frames 30–32 · 5/5 codes agree",
-preset `gold-warm`, film base 215/150/95 from the rebate, the strip badge, the
-*Apply detected film* button after clearing the preset, and silence on
-`negative-plain.png`. The gated RAW smoke (`AUTOFRAME_RAW_DIR=. npm run test:smoke`)
+toast "Detected Kodak ULTRA MAX 400 GC400 (DX 95-7); its preset and rebate
+film base are under Film edge", the status "DX 95-7 · … · frames 30–32 · 5/5
+codes agree", preset still `none` and the film base still from the border
+auto-detect, the strip badge, then the *Use rebate as film base* button giving
+215/150/95 and the *Apply detected film* button selecting `gold-warm`, and
+silence on `negative-plain.png`. The gated RAW smoke (`AUTOFRAME_RAW_DIR=. npm run test:smoke`)
 adds the real strips below.
 
 Real scans (repository root, Nikon Zf camera scans of Kodak Ultra Max 400,

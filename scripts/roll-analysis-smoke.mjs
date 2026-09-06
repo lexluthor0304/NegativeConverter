@@ -74,13 +74,16 @@ export async function runRollAnalysisSmoke({ send, evaluate, waitFor, wait, fail
   if (after.badges[0].some((b) => /roll-outlier/.test(b)) || after.badges[1].some((b) => /roll-outlier/.test(b))) fail('matching strips must not be flagged: ' + JSON.stringify(after.badges));
   if (!after.clearEnabled) fail('clear button stays disabled after an analysis');
   // Unopened frames now show converted positives instead of orange negatives:
-  // the red share of the thumbnail drops once the orange mask is gone.
+  // the red share of the thumbnail drops once the orange mask is gone. The
+  // outlier strip converts with the border auto-detect base (the import no
+  // longer applies the rebate base), which leaves it a little warmer, so the
+  // required drop is modest; an unconverted negative would not drop at all.
   const thumbsAfter = await evaluate(thumbnailMeans);
   console.log('roll analysis thumbnails:', JSON.stringify({ before: thumbsBefore, after: thumbsAfter }));
   if (thumbsBefore.length !== 3 || thumbsAfter.length !== 3) fail('expected three thumbnails: ' + JSON.stringify({ thumbsBefore, thumbsAfter }));
   for (const index of [1, 2]) {
     const redShare = (rgb) => rgb[0] / Math.max(1, rgb[0] + rgb[1] + rgb[2]);
-    if (redShare(thumbsAfter[index]) > redShare(thumbsBefore[index]) - 0.04) fail(`thumbnail ${index} still looks like the negative: ` + JSON.stringify({ before: thumbsBefore[index], after: thumbsAfter[index] }));
+    if (redShare(thumbsAfter[index]) > redShare(thumbsBefore[index]) - 0.02) fail(`thumbnail ${index} still looks like the negative: ` + JSON.stringify({ before: thumbsBefore[index], after: thumbsAfter[index] }));
   }
   const rollBase = after.filmBase.match(/R: (\d+) G: (\d+) B: (\d+)/);
   if (!rollBase) fail('film base values missing after roll analysis: ' + after.filmBase);
