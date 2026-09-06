@@ -1,6 +1,7 @@
 import { resizeImageDataToMaxSide } from './imageDataOps.js';
 import { AUTO_FRAME_FORMAT_RATIOS as DEFAULT_FORMAT_RATIOS, AUTO_FRAME_DEFAULT_120_FORMATS as DEFAULT_120_FORMATS } from './autoFrameFormats.js';
 import { detectImageWindow, projectWindowCrop } from './imageWindowDetector.js';
+import { houghLineCount } from './opencvLines.js';
 
 const DEFAULT_SCORE_WEIGHTS = {
   area: 0.18,
@@ -788,7 +789,7 @@ function buildHoughCandidate(edges, imageWidth, imageHeight) {
     let hCount = 0;
     let vCount = 0;
 
-    for (let i = 0; i < lines.rows; i++) {
+    for (let i = 0, count = houghLineCount(lines); i < count; i++) {
       const idx = i * 4;
       const x1 = data[idx];
       const y1 = data[idx + 1];
@@ -1077,7 +1078,7 @@ function buildLineOrientationRotationCandidates(imageData) {
     const bins = new Map();
     let totalWeight = 0;
     const data = lines.data32S;
-    for (let i = 0; i < lines.rows; i++) {
+    for (let i = 0, count = houghLineCount(lines); i < count; i++) {
       const idx = i * 4;
       const x1 = data[idx];
       const y1 = data[idx + 1];
@@ -1318,6 +1319,13 @@ export function detectFrameAndRotation(imageData, options = {}) {
 
   const previewData = resizeImageDataToMaxSide(imageData, context.maxSide);
   const window = detectImageWindow(previewData, getAutoFrameAspectTargets(context));
+  // 撮影範囲外の辺は比率で補完しない。密度テンプレートにもフォールバックせず、
+  // 自動・一括処理のいずれも元画像を保持して手動確認へ回す。
+  if (window?.incomplete || window?.requiresReview) return {
+    angle: 0, cropRegion: null, confidence: 0, confidenceLevel: 'low',
+    detectedFormat: 'unknown', requiresReview: true, rotatedImageData: imageData,
+    diagnostics: { method: window.ambiguous ? 'opencv-ambiguous-window' : 'opencv-incomplete-window', incomplete: Boolean(window.incomplete) }
+  };
   if (window) {
     const angle = Number(window.angle.toFixed(2));
     const rotated = angle ? context.rotateImageData(imageData, angle) : imageData;
@@ -1326,7 +1334,7 @@ export function detectFrameAndRotation(imageData, options = {}) {
       angle, cropRegion, confidence: window.confidence,
       confidenceLevel: inferAutoFrameConfidenceLevel(window.confidence, context.settings),
       detectedFormat: window.detectedFormat, rotatedImageData: rotated,
-      diagnostics: { method: 'opencv-image-window', scoreBreakdown: window.evidence }
+      diagnostics: { method: window.method || 'opencv-image-window', scoreBreakdown: window.evidence }
     };
   }
   const previewCandidates = detectFrameCandidatesWithCv(previewData, context, { minAreaRatio: 0.04 });

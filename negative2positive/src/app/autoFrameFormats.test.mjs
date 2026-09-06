@@ -13,6 +13,7 @@ for (const key of Object.keys(AUTO_FRAME_FORMAT_RATIOS).filter(key => key !== '1
 }
 const result = { cropRegion: { left: 10, top: 10, width: 500, height: 400 }, angle: -4.5, confidence: 0.78, confidenceLevel: 'high' };
 assert.equal(canAutoApplyImportFrame(result), true);
+assert.equal(canAutoApplyImportFrame({ ...result, requiresReview: true }, { highConfidence: 0 }), false);
 assert.equal(canAutoApplyImportFrame(null), false);
 assert.equal(canAutoApplyImportFrame({ ...result, confidence: 0.66, confidenceLevel: 'medium' }), false);
 assert.equal(canAutoApplyImportFrame({ ...result, confidence: NaN }), false);

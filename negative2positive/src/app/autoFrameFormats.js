@@ -16,7 +16,7 @@ export const AUTO_FRAME_DEFAULT_120_FORMATS = Object.freeze(['6x4.5', '6x6', '6x
 // 自動適用は強い境界根拠がある場合のみ。低信頼結果を無言で確定しない。
 export function canAutoApplyImportFrame(result, settings = {}) {
   const threshold = Number.isFinite(settings.highConfidence) ? settings.highConfidence : 0.72;
-  return Boolean(result?.cropRegion && Number.isFinite(result.confidence)
+  return Boolean(!result?.requiresReview && result?.cropRegion && Number.isFinite(result.confidence)
     && result.confidence >= threshold && result.confidenceLevel === 'high'
     && Number.isFinite(result.angle)
     && ['left', 'top', 'width', 'height'].every(key => Number.isFinite(result.cropRegion[key]))

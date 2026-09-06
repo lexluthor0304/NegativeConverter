@@ -7431,7 +7431,7 @@
     // described the rotated frame.
     function applyAutoFrameResult(result, baseImageData) {
       const base = baseImageData || state.originalImageData;
-      if (!result || !base) return false;
+      if (!result || result.requiresReview || !result.cropRegion || !base) return false;
 
       const effectiveAngle = autoFrameEffectiveAngle(result.angle);
       state.rotationAngle = effectiveAngle;
@@ -7695,6 +7695,11 @@
           return;
         }
 
+        if (result.requiresReview) {
+          void appAlert(studioWorkspace.text(result.diagnostics?.incomplete ? 'frameIncomplete' : 'frameReview'));
+          return;
+        }
+
         const detail = formatAutoFrameDetail(result);
         const lowBehavior = state.autoFrame.lowConfidenceBehavior || 'suggest';
         let applied = false;
@@ -7784,7 +7789,7 @@
           try {
             const imageData = await loadFileToImageData(item.file);
             const result = await detectFrameAndRotation(imageData);
-            if (!result) {
+            if (!result || result.requiresReview) {
               failCount++;
               continue;
             }
@@ -8922,6 +8927,7 @@
           if (draft.analysisOnly) {
             nextMeta.imageArea = selectedArea;
             nextMeta.analysisNeedsReview = false;
+            nextMeta.frameIncomplete = false;
             nextMeta.method = 'manual-analysis-area';
           } else if (!isSameAnalysisFrame(nextMeta.imageArea, selectedArea)) {
             let points = null;
@@ -8931,6 +8937,7 @@
             if (points) {
               nextMeta.imageArea = workingPointsToBase(points, nextGeometry, base);
               nextMeta.analysisNeedsReview = false;
+              nextMeta.frameIncomplete = false;
               nextMeta.method = 'manual-image-window';
             } else nextMeta.analysisNeedsReview = true;
           }
@@ -10787,7 +10794,8 @@
           importAuto: Boolean(safe.autoFrameMeta.importAuto),
           imageArea: safe.autoFrameMeta.imageArea ? structuredClone(safe.autoFrameMeta.imageArea) : null,
           analysisArea: safe.autoFrameMeta.analysisArea ? structuredClone(safe.autoFrameMeta.analysisArea) : null,
-          analysisNeedsReview: Boolean(safe.autoFrameMeta.analysisNeedsReview)
+          analysisNeedsReview: Boolean(safe.autoFrameMeta.analysisNeedsReview),
+          frameIncomplete: Boolean(safe.autoFrameMeta.frameIncomplete)
         };
       } else {
         state.autoFrame.lastDiagnostics = null;
@@ -11435,6 +11443,7 @@
         method: result?.diagnostics?.method || 'unavailable',
         appliedMode: apply ? 'crop' : 'none',
         importAuto: true,
+        frameIncomplete: Boolean(result?.diagnostics?.incomplete),
         imageArea: reliable ? imageAreaFromDetection(result, source) : null
       };
       if (!apply) return { ...settings, autoFrameMeta: meta };

@@ -37,6 +37,7 @@ export const studioText = {
     borderScope: '边框与边码设置用于本次导出的所有所选照片。', quickColor: '快速定位调色工具',
     autoCrop: '自动裁切成像区域（关闭则保留边字与齿孔）', restoreFrame: '恢复完整画面', frameApplied: '已自动裁切 · 查看构图', frameReview: '未自动裁切 · 请确认构图',
     detectingFrame: '正在识别成像区域与倾斜角度…', frameAnalysis: '颜色仅分析成像区域',
+    frameIncomplete: '画格边界不完整 · 已保留全图，请手动确认构图',
     confirmAnalysis: '确认成像区域', analysisHint: '框住要处理的那一格画面，避开片边和齿孔。这里只改变颜色分析范围，不裁切输出，也不重新取样片基。', analysisReview: '成像区域待确认 · 保留原有颜色基准'
   },
   en: {
@@ -72,6 +73,7 @@ export const studioText = {
     borderScope: 'These border and marking settings apply to all photos in this export.', quickColor: 'Jump to color tools',
     autoCrop: 'Crop image area (off: keep original film edges)', restoreFrame: 'Restore full image', frameApplied: 'Auto-cropped · Review framing', frameReview: 'Not auto-cropped · Review framing',
     detectingFrame: 'Detecting the image area and tilt…', frameAnalysis: 'Color analysis uses the image area only',
+    frameIncomplete: 'Incomplete frame edges · Full image kept; review framing manually',
     confirmAnalysis: 'Confirm image area', analysisHint: 'Frame the intended image, excluding film edges and holes. This changes color analysis only, not output framing or film-base sampling.', analysisReview: 'Confirm image area · Previous color reference retained'
   },
   ja: {
@@ -107,6 +109,7 @@ export const studioText = {
     borderScope: '枠と端文字の設定は、今回書き出す選択写真すべてに適用します。', quickColor: '色調整ツールへの移動',
     autoCrop: '撮影窓を切り抜く（オフで元の端文字・穴を保持）', restoreFrame: '画像全体に戻す', frameApplied: '自動切り抜き済み · 構図確認', frameReview: '未切り抜き · 構図を確認',
     detectingFrame: '撮影窓と傾きを検出しています…', frameAnalysis: '撮影窓のみで色を解析',
+    frameIncomplete: '画枠の端が不足 · 全体を保持しました。構図を確認してください',
     confirmAnalysis: '撮影窓を確認', analysisHint: '目的の一コマを、端や穴を除いて囲んでください。色の解析範囲のみ変更し、出力の構図やベース採取は変更しません。', analysisReview: '撮影窓の確認が必要 · 前の色基準を維持'
   }
 };
@@ -463,7 +466,7 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
       $('studioConfirmAnalysis').disabled = !loaded || locked || state.cropping || busy;
       $('studioAnalysisStatus').textContent = t(frameMeta?.analysisNeedsReview ? 'analysisReview' : 'analysisHint');
       $('studioFrameNotice').hidden = !ready || !frameMeta?.importAuto || state.samplingMode;
-      $('studioFrameNotice').textContent = t(frameMeta?.analysisNeedsReview ? 'analysisReview' : frameMeta?.appliedMode === 'crop' ? 'frameApplied' : frameMeta?.imageArea ? 'frameAnalysis' : 'frameReview');
+      $('studioFrameNotice').textContent = t(frameMeta?.analysisNeedsReview ? 'analysisReview' : frameMeta?.appliedMode === 'crop' ? 'frameApplied' : frameMeta?.frameIncomplete ? 'frameIncomplete' : frameMeta?.imageArea ? 'frameAnalysis' : 'frameReview');
       $('studioFrameNotice').dataset.status = frameMeta?.appliedMode || '';
       $('studioFrameNotice').disabled = state.cropping || busy;
       panel.inert = busy;
