@@ -12643,7 +12643,7 @@
     // ===========================================
     // AI repair: learned inpainting on the commit and export paths
     // ===========================================
-    const aiRepair = { status: 'idle', provider: '', run: null, source: '', error: '', percent: 0, tiles: 0, ms: 0 };
+    const aiRepair = { status: 'idle', provider: '', run: null, source: '', sourceRef: null, error: '', percent: 0, tiles: 0, ms: 0 };
 
     function aiRepairReady() {
       return Boolean(state.dustRemoval.ai && aiRepair.status === 'ready' && typeof aiRepair.run === 'function');
@@ -12673,7 +12673,7 @@
 
     // `source` is a File (a model the user picked) or a URL (the self-hosted
     // asset, fetched once and cached in IndexedDB).
-    async function loadAiRepairModel(source) {
+    async function loadAiRepairModel(source, { prefer = 'webgpu' } = {}) {
       if (aiRepair.status === 'loading') return;
       aiRepair.status = 'loading';
       aiRepair.percent = 0;
@@ -12693,10 +12693,11 @@
           });
           label = String(source).split('/').pop();
         }
-        const session = await createInpaintSession(bytes);
+        const session = await createInpaintSession(bytes, { prefer });
         aiRepair.run = session.run;
         aiRepair.provider = session.provider;
         aiRepair.source = label;
+        aiRepair.sourceRef = source;
         aiRepair.status = 'ready';
         aiRepair.tiles = 0;
         showToast(getInterpolatedText('dustAiLoaded', { provider: session.provider === 'webgpu' ? 'WebGPU' : 'WASM' }, `AI repair model loaded (${session.provider})`));
@@ -12724,9 +12725,16 @@
         updateAiRepairUI();
         return imageData;
       } catch (error) {
-        console.warn('AI repair failed, falling back to TELEA:', error);
+        console.warn('AI repair failed:', error);
+        // A WebGPU session that fails mid-run is rebuilt on WASM once; only
+        // when that fails too does TELEA take over.
+        if (aiRepair.provider === 'webgpu' && aiRepair.sourceRef) {
+          await loadAiRepairModel(aiRepair.sourceRef, { prefer: 'wasm' });
+          if (aiRepairReady()) return inpaintForCommit(source, mask);
+        }
         aiRepair.status = 'error';
         aiRepair.error = error?.message || String(error);
+        aiRepair.run = null;
         updateAiRepairUI();
         return inpaintMasked(source, mask, 3);
       }

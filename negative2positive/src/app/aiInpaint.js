@@ -317,35 +317,44 @@ export async function fetchModelBytes(url, { onProgress = null } = {}) {
   return bytes.buffer;
 }
 
-/**
- * Creates the inference session, WebGPU first, WASM otherwise. Returns
- * { session, provider, run } where `run` matches inpaintWithModel's callback.
- */
-export async function createInpaintSession(modelBytes, { prefer = 'webgpu' } = {}) {
-  const ort = await loadOrt();
-  const backends = inpaintBackends();
-  const attempts = prefer === 'webgpu' && backends.webgpu ? [['webgpu', 'wasm'], ['wasm']] : [['wasm']];
-  let session = null; let provider = 'wasm'; let lastError = null;
-  for (const executionProviders of attempts) {
-    try {
-      session = await ort.InferenceSession.create(modelBytes, { executionProviders, graphOptimizationLevel: 'all' });
-      provider = executionProviders[0];
-      break;
-    } catch (error) {
-      lastError = error;
-      session = null;
-    }
-  }
-  if (!session) throw lastError || new Error('no execution provider');
+function runnerFor(ort, session) {
   const [imageName, maskName] = session.inputNames;
-  const run = async (image, mask, size) => {
+  return async (image, mask, size) => {
     const feeds = {
       [imageName]: new ort.Tensor('float32', image, [1, 3, size, size]),
       [maskName]: new ort.Tensor('float32', mask, [1, 1, size, size])
     };
     const results = await session.run(feeds);
-    const output = results[session.outputNames[0]];
-    return output.data;
+    return results[session.outputNames[0]].data;
   };
-  return { session, provider, run, inputNames: session.inputNames, outputNames: session.outputNames };
+}
+
+/**
+ * Creates the inference session, WebGPU first, WASM otherwise. A WebGPU
+ * session is warmed up on one blank tile before it is trusted: a model whose
+ * operators the WebGPU provider cannot run (LaMa's Fourier layers today)
+ * creates fine and fails on the first inference, so the failure has to be
+ * caught here and the session rebuilt on WASM. Returns { session, provider,
+ * run } where `run` matches inpaintWithModel's callback.
+ */
+export async function createInpaintSession(modelBytes, { prefer = 'webgpu', warmUp = true } = {}) {
+  const ort = await loadOrt();
+  const backends = inpaintBackends();
+  const attempts = prefer === 'webgpu' && backends.webgpu ? [['webgpu', 'wasm'], ['wasm']] : [['wasm']];
+  let lastError = null;
+  for (const executionProviders of attempts) {
+    let session = null;
+    try {
+      session = await ort.InferenceSession.create(modelBytes, { executionProviders, graphOptimizationLevel: 'all' });
+      const run = runnerFor(ort, session);
+      if (warmUp && executionProviders[0] === 'webgpu') {
+        await run(new Float32Array(3 * TILE * TILE), new Float32Array(TILE * TILE), TILE);
+      }
+      return { session, provider: executionProviders[0], run, inputNames: session.inputNames, outputNames: session.outputNames };
+    } catch (error) {
+      lastError = error;
+      if (session) { try { await session.release?.(); } catch {} }
+    }
+  }
+  throw lastError || new Error('no execution provider');
 }

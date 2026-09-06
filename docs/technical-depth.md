@@ -91,8 +91,14 @@ the reported tiles / milliseconds.
 Status against the acceptance criteria: the runtime, tiling, blending and
 fallback are done and tested; the model asset still has to be uploaded to
 `download.neoanaloglab.com/models/lama_fp32.onnx` (208 MB, Apache-2.0) for
-the one-click path, and the timing / quality numbers measured with a local
-model are recorded in the pull request. LaMa's Fourier convolutions are not
-covered by the WebGPU execution provider today, so the session falls back to
-WASM on this model; a WebGPU-friendly student model (MI-GAN) would bring the
-per-tile time down and is the natural follow-up.
+the one-click path. Measured with the local model on an Apple-silicon Mac
+(headless Chrome): the WebGPU session creates in about 7 s but the first
+inference fails inside LaMa's Fourier layers (`/generator/model/model.5/
+conv1/ffc/convg2g/Add`: "Can't perform binary op on the given tensors",
+onnxruntime-web 1.19.2), so `createInpaintSession` warms every WebGPU
+session up on a blank tile and rebuilds it on WASM when that fails, and
+`inpaintForCommit` does the same once at run time. On WASM the fp32 model
+takes tens of seconds per 512-px tile, which is far from the 200 ms target;
+a WebGPU-friendly student model (MI-GAN, no Fourier units, about 6 M
+parameters) is the follow-up that makes the tile budget realistic, and the
+runtime here is model-agnostic (two float32 inputs, one output).
