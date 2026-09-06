@@ -1,7 +1,7 @@
 // Film edge reader smoke: a synthetic 35mm strip with DX edge barcodes
 // (test-fixtures/negative-strip-dx.png, DX 95-7 = Kodak Ultra Max 400) is
 // imported through the real file input. The import must decode the code, name
-// the stock, apply its preset and the rebate film base, badge the file, and a
+// the stock, offer its preset and the rebate film base, badge the file, and a
 // plain frame without perforations (negative-plain.png) must report that no
 // code was found. The older negative-sample fixtures carry the app's own
 // rendered border with DX 82-3, so they are not usable as a negative control.
@@ -53,30 +53,32 @@ export async function runFilmEdgeSmoke({ send, evaluate, waitFor, wait, fail, in
   if (!detected.groupVisible) fail('film edge group is hidden after importing a strip with DX codes');
   if (!/95-7/.test(detected.status) || !/ULTRA MAX 400/i.test(detected.status)) fail('film edge status does not name DX 95-7 / Ultra Max: ' + detected.status);
   if (!/frames 30–32/.test(detected.status)) fail('film edge status does not list the decoded frame range: ' + detected.status);
-  if (!detected.toasts.some((t) => /Detected .*ULTRA MAX 400.*DX 95-7.*preset applied.*film base from the rebate/i.test(t))) fail('detection toast missing: ' + JSON.stringify(detected.toasts));
-  if (detected.preset !== 'gold-warm') fail('Ultra Max did not select the gold-warm preset: ' + detected.preset);
+  if (!detected.toasts.some((t) => /Detected .*ULTRA MAX 400.*DX 95-7.*under Film edge/i.test(t))) fail('detection toast missing: ' + JSON.stringify(detected.toasts));
+  if (detected.toasts.some((t) => /preset applied|film base from the rebate/i.test(t))) fail('detection must only suggest, not apply: ' + JSON.stringify(detected.toasts));
+  // Detection suggests; the preset and the rebate base are applied only through the buttons.
+  if (detected.preset !== 'none') fail('the detected preset was applied on import: ' + detected.preset);
   if (detected.filmType !== 'color') fail('film type changed unexpectedly: ' + detected.filmType);
-  const base = detected.filmBase.match(/R: (\d+) G: (\d+) B: (\d+)/);
-  if (!base) fail('film base values not shown: ' + detected.filmBase);
-  const [r, g, b] = base.slice(1).map(Number);
-  // The synthetic rebate is (215,150,95); an interior auto-detect would land on the darker frame colours.
-  if (Math.abs(r - 215) > 6 || Math.abs(g - 150) > 6 || Math.abs(b - 95) > 6) fail('film base was not taken from the rebate: ' + detected.filmBase);
+  const readBase = (text) => {
+    const m = text.match(/R: (\d+) G: (\d+) B: (\d+)/);
+    if (!m) fail('film base values not shown: ' + text);
+    return m.slice(1).map(Number);
+  };
+  const [r0, g0, b0] = readBase(detected.filmBase);
+  // The synthetic rebate is (215,150,95); the import keeps the border auto-detect, which lands elsewhere.
+  if (Math.abs(r0 - 215) <= 6 && Math.abs(g0 - 150) <= 6 && Math.abs(b0 - 95) <= 6) fail('film base was taken from the rebate on import: ' + detected.filmBase);
   if (!detected.badges.some((t) => /ULTRA MAX/i.test(t))) fail('file list has no film stock badge: ' + JSON.stringify(detected.badges));
+  if (!detected.applyVisible) fail('apply detected film button hidden');
   if (!detected.baseVisible) fail('rebate film base button hidden');
 
-  // Manual path: clear the preset, then re-apply the detected film with the button.
-  await evaluate(`(() => {
-    const select = document.getElementById('filmPreset');
-    select.value = 'none';
-    select.dispatchEvent(new Event('change', { bubbles: true }));
-  })()`);
-  await wait(400);
-  const cleared = await evaluate(`document.getElementById('filmPreset').value`);
-  if (cleared !== 'none') fail('could not clear the preset before re-applying: ' + cleared);
+  // Manual path: the buttons apply the rebate base and the detected film.
+  await evaluate(`document.getElementById('useFilmEdgeBaseBtn').click()`);
+  await waitFor('rebate base applied', `/Film base taken from the unexposed rebate/.test(window.__filmEdgeToasts.at(-1) || '')`, 20_000);
+  const [r, g, b] = readBase(await evaluate(`document.getElementById('filmBaseValues').textContent`));
+  if (Math.abs(r - 215) > 6 || Math.abs(g - 150) > 6 || Math.abs(b - 95) > 6) fail('film base button did not take the rebate: ' + [r, g, b]);
   await evaluate(`document.getElementById('applyFilmEdgePresetBtn').click()`);
-  await waitFor('detected film re-applied', `document.getElementById('filmPreset').value === 'gold-warm'`, 20_000);
-  const reapplied = await evaluate(`window.__filmEdgeToasts.at(-1)`);
-  if (!/Applied the .*ULTRA MAX 400.* preset/i.test(reapplied)) fail('apply button toast missing: ' + reapplied);
+  await waitFor('detected film applied', `document.getElementById('filmPreset').value === 'gold-warm'`, 20_000);
+  const applied = await evaluate(`window.__filmEdgeToasts.at(-1)`);
+  if (!/Applied the .*ULTRA MAX 400.* preset/i.test(applied)) fail('apply button toast missing: ' + applied);
 
   // A frame without perforations reports no code and gets no badge.
   await evaluate(`document.querySelectorAll('.file-list-name')[1].click()`);
@@ -95,5 +97,5 @@ export async function runFilmEdgeSmoke({ send, evaluate, waitFor, wait, fail, in
   if (plainResult.applyVisible) fail('apply button shown without a detected film');
   if (!plainResult.badges[0] || plainResult.badges[1]) fail('badges are not per file: ' + JSON.stringify(plainResult.badges));
 
-  console.log('ok: film edge reader decodes DX 95-7 on import, applies the Ultra Max preset and rebate film base, badges the strip and stays quiet on a plain frame');
+  console.log('ok: film edge reader decodes DX 95-7 on import, offers the Ultra Max preset and rebate film base through the buttons, badges the strip and stays quiet on a plain frame');
 }
