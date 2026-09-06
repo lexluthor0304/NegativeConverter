@@ -241,6 +241,9 @@ async function previewLuminance() {
 
 await send('Page.enable');
 await send('Runtime.enable');
+// The fake-camera flags make headless Chrome reserve part of the window (the
+// viewport came out 1440x757); pin the layout the scenarios were written for.
+await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
 await send('Page.navigate', { url: `http://127.0.0.1:${PORT}/?lang=en` });
 await waitFor('app boot', `!!document.getElementById('studioImportAutoCrop')`);
 await installDialogAutoAccept();
