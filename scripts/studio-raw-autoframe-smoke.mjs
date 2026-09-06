@@ -4,12 +4,15 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 export async function runStudioRawAutoFrameSmoke({ send, evaluate, waitFor, fail, port, root, directory }) {
+  // `dx` is the DX edge barcode expected from the rebate (Kodak Ultra Max 400
+  // prints GC 400 and encodes 95-7); `dx: null` means the strip shows no
+  // rebate and the film edge reader must stay silent.
   const examples = [
-    { file: 'DSC_4127.NEF', incomplete: true },
-    { file: 'DSC_8798.NEF', bounds: [488, 261, 1215, 756] },
-    { file: 'DSC_8800.NEF', bounds: [377, 309, 1100, 795] },
-    { file: 'DSC_8806.NEF', bounds: [485, 315, 1214, 811] },
-    { file: '_DSC5290.dng', bounds: [193, 145, 1425, 970], tolerance: 18 }
+    { file: 'DSC_4127.NEF', incomplete: true, dx: null },
+    { file: 'DSC_8798.NEF', bounds: [488, 261, 1215, 756], dx: '95-7', frames: /36/ },
+    { file: 'DSC_8800.NEF', bounds: [377, 309, 1100, 795], dx: '95-7', frames: /30A–31A/ },
+    { file: 'DSC_8806.NEF', bounds: [485, 315, 1214, 811], dx: '95-7', frames: /21/ },
+    { file: '_DSC5290.dng', bounds: [193, 145, 1425, 970], tolerance: 18, dx: null }
   ];
   const output = join(root, 'output', 'playwright', 'raw-autoframe-regression');
   mkdirSync(output, { recursive: true });
@@ -71,7 +74,13 @@ export async function runStudioRawAutoFrameSmoke({ send, evaluate, waitFor, fail
     })()`);
     await waitFor('RAW import ' + example.file, `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy && document.getElementById('studioFilename').textContent === ${JSON.stringify(example.file)}`, 120_000);
     await waitFor('RAW overlay dismissed', `[...document.querySelectorAll('.loading-overlay')].every(element => getComputedStyle(element).display === 'none' || Number(getComputedStyle(element).opacity) === 0)`, 30_000);
-    row.ui = await evaluate(`(() => ({status:document.getElementById('studioFrameNotice').dataset.status, notice:document.getElementById('studioFrameNotice').textContent, size:[document.getElementById('canvas').width,document.getElementById('canvas').height]}))()`);
+    row.ui = await evaluate(`(() => ({status:document.getElementById('studioFrameNotice').dataset.status, notice:document.getElementById('studioFrameNotice').textContent, size:[document.getElementById('canvas').width,document.getElementById('canvas').height], filmEdge:document.getElementById('filmEdgeStatus').textContent, filmEdgeVisible:document.getElementById('filmEdgeGroup').style.display !== 'none', filmBase:document.getElementById('filmBaseValues').textContent}))()`);
+    if (example.dx) {
+      if (!row.ui.filmEdgeVisible || !row.ui.filmEdge.includes('DX ' + example.dx) || !/ULTRA MAX 400/i.test(row.ui.filmEdge)) fail('film edge reader did not identify the real strip: ' + JSON.stringify(row.ui));
+      if (example.frames && !example.frames.test(row.ui.filmEdge)) fail('film edge reader frame numbers differ from the printed ones: ' + JSON.stringify(row.ui));
+    } else if (row.ui.filmEdgeVisible && !/找不到|No DX|見つかりません|未在片边/.test(row.ui.filmEdge)) {
+      fail('film edge reader claimed a code on a scan without a rebate: ' + JSON.stringify(row.ui));
+    }
     if (example.incomplete ? row.ui.status === 'crop' || !row.ui.notice.includes('边界不完整') : row.ui.status !== 'crop') fail('RAW の画面反映が正しくありません: ' + JSON.stringify(row));
     const screenshot = await send('Page.captureScreenshot', {format:'png'});
     writeFileSync(join(output, example.file + '-studio.png'), Buffer.from(screenshot.result.data, 'base64'));

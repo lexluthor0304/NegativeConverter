@@ -1,6 +1,7 @@
 import opencvScriptUrl from '@techstark/opencv-js/dist/opencv.js?url';
 import { detectFrameAndRotation } from '../app/autoFrameAnalyzer.js';
 import { applyRotationToImageData } from '../app/imageGeometry.js';
+import { readFilmEdge } from '../app/filmEdgeReader.js';
 
 let ready;
 async function loadCv() {
@@ -14,6 +15,13 @@ async function loadCv() {
 
 self.onmessage = async ({ data: message }) => {
   try {
+    if (message.type === 'read-film-edge') {
+      // Perforation lanes and the DX edge barcode need no OpenCV; the result
+      // is plain data (no ImageData), so it clones without transfers.
+      const image = { width: message.width, height: message.height, data: message.rgba };
+      self.postMessage({ id: message.id, result: readFilmEdge(image, message.options || {}) });
+      return;
+    }
     await loadCv();
     const image = new ImageData(message.rgba, message.width, message.height);
     if (message.image16) image.__image16 = { width: image.width, height: image.height, data: message.image16 };

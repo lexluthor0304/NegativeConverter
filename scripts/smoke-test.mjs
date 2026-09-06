@@ -16,6 +16,13 @@ import { runStudioAutoCropSmoke } from './studio-auto-crop-smoke.mjs';
 import { runStudioColorAnalysisSmoke } from './studio-color-analysis-smoke.mjs';
 import { runWorkspaceUiSmoke } from './workspace-ui-smoke.mjs';
 import { runStudioRawAutoFrameSmoke } from './studio-raw-autoframe-smoke.mjs';
+import { runFilmEdgeSmoke } from './film-edge-smoke.mjs';
+import { runRollAnalysisSmoke } from './roll-analysis-smoke.mjs';
+import { runLightTableSmoke } from './light-table-smoke.mjs';
+import { runDarkroomSmoke } from './darkroom-smoke.mjs';
+import { runCameraSmoke } from './camera-smoke.mjs';
+import { runRollHomeSmoke } from './roll-home-smoke.mjs';
+import { runTechnicalDepthSmoke } from './technical-depth-smoke.mjs';
 
 // UPNG is already a runtime dependency of the app; reuse it to decode screenshots.
 const UPNG = createRequire(import.meta.url)('upng-js');
@@ -23,8 +30,9 @@ const UPNG = createRequire(import.meta.url)('upng-js');
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const FIXTURE = join(ROOT, 'negative2positive', 'test-fixtures', 'negative-sample.jpg');
 const FIXTURE2 = join(ROOT, 'negative2positive', 'test-fixtures', 'negative-sample-2.jpg');
-const PORT = 5197;
-const CDP_PORT = 9224;
+// PORT / CDP_PORT let an isolated worktree run its own copy alongside another.
+const PORT = Number(process.env.PORT) || 5197;
+const CDP_PORT = Number(process.env.CDP_PORT) || 9224;
 const CHROME_CANDIDATES = [
   process.env.CHROME_BIN,
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
@@ -93,6 +101,8 @@ const chrome = execFile(chromeBin, [
   '--headless=new', `--remote-debugging-port=${CDP_PORT}`,
   `--user-data-dir=${chromeProfileDir}`,
   '--no-first-run', '--hide-scrollbars', '--window-size=1440,900',
+  // A fake camera, granted without a prompt, for the live loupe scenario.
+  '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream',
   'about:blank',
 ]);
 children.push(chrome);
@@ -234,6 +244,9 @@ async function previewLuminance() {
 
 await send('Page.enable');
 await send('Runtime.enable');
+// The fake-camera flags make headless Chrome reserve part of the window (the
+// viewport came out 1440x757); pin the layout the scenarios were written for.
+await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
 await send('Page.navigate', { url: `http://127.0.0.1:${PORT}/?lang=en` });
 await waitFor('app boot', `!!document.getElementById('studioImportAutoCrop')`);
 await installDialogAutoAccept();
@@ -241,7 +254,7 @@ await wait(1500); // let main.js finish wiring
 await evaluate(`document.getElementById('studioImportAutoCrop').click()`);
 
 // ---- 1. load the fixture through the real file input ----
-if (!process.argv.includes('--studio-only') && !process.argv.includes('--auto-crop-only') && !process.argv.includes('--color-analysis-only')) {
+if (!process.argv.includes('--studio-only') && !process.argv.includes('--auto-crop-only') && !process.argv.includes('--color-analysis-only') && !process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) {
 const doc = await send('DOM.getDocument');
 const input = await send('DOM.querySelector', {
   nodeId: doc.result.root.nodeId, selector: '#fileInput',
@@ -587,10 +600,19 @@ if (restoredIndex !== 1 || JSON.stringify(beforeFailure) !== JSON.stringify(afte
 console.log('ok: failed decode preserves the previous image and active file');
 }
 
-if (!process.argv.includes('--auto-crop-only') && !process.argv.includes('--color-analysis-only')) await runStudioSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, fixtures: [FIXTURE, FIXTURE2], root: ROOT });
-if (!process.argv.includes('--color-analysis-only')) await runStudioAutoCropSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
-await runStudioColorAnalysisSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
-await runWorkspaceUiSmoke({ send, evaluate, waitFor, fail, port: PORT, root: ROOT });
+if (!process.argv.includes('--auto-crop-only') && !process.argv.includes('--color-analysis-only') && !process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) await runStudioSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, fixtures: [FIXTURE, FIXTURE2], root: ROOT });
+if (!process.argv.includes('--color-analysis-only') && !process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) await runStudioAutoCropSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
+if (!process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) await runStudioColorAnalysisSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
+if (!process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) {
+  await runFilmEdgeSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+  await runRollAnalysisSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+  await runLightTableSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+}
+if (!process.argv.includes('--film-edge-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) await runDarkroomSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+if (!process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) await runCameraSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+if (!process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--technical-only')) await runRollHomeSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+if (!process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only')) await runTechnicalDepthSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+if (!process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) await runWorkspaceUiSmoke({ send, evaluate, waitFor, fail, port: PORT, root: ROOT });
 if (process.env.AUTOFRAME_RAW_DIR) await runStudioRawAutoFrameSmoke({ send, evaluate, waitFor, fail, port: PORT, root: ROOT, directory: process.env.AUTOFRAME_RAW_DIR });
 
 // ---- no uncaught page errors across both scenarios ----

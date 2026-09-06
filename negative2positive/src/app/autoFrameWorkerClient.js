@@ -14,7 +14,7 @@ export function createAutoFrameWorkerClient({
     for (const entry of pending.values()) { clearTimeout(entry.timer); entry.reject(error); }
     pending.clear();
   }
-  return (image, options) => new Promise((resolve, reject) => {
+  return (image, options, type = 'analyze-frame') => new Promise((resolve, reject) => {
     try {
       clearTimeout(idleTimer);
       if (!worker) {
@@ -50,12 +50,15 @@ export function createAutoFrameWorkerClient({
       const timer = setTimeout(() => fail(new Error('Auto-frame worker timed out')), timeoutMs);
       pending.set(id, { resolve, reject, timer });
       const rgba = image.data.slice();
-      const image16 = image.__image16?.data.slice();
+      const image16 = type === 'analyze-frame' ? image.__image16?.data.slice() : undefined;
       const transfers = [rgba.buffer];
       if (image16) transfers.push(image16.buffer);
-      worker.postMessage({ type: 'analyze-frame', id, width: image.width, height: image.height, rgba, image16, options }, transfers);
+      worker.postMessage({ type, id, width: image.width, height: image.height, rgba, image16, options }, transfers);
     } catch (error) { fail(error); reject(error); }
   });
 }
 
 export const analyzeFrameInWorker = createAutoFrameWorkerClient();
+// Shares the auto-frame worker so the full-resolution image is posted to a
+// single worker instance; the film edge reader does not need OpenCV.
+export const readFilmEdgeInWorker = (image, options = {}) => analyzeFrameInWorker(image, options, 'read-film-edge');

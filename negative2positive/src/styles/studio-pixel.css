@@ -1,7 +1,7 @@
 /* 8-bit の輪郭と分節的な動き。写真の画素・色・描画方式は変更しない。 */
 body.studio { --pixel-shadow: 3px 3px 0 #0e0e0e; }
 body.studio :is(button, .upload-btn, select, .slider-number-input,
-  .footer-btn, .header-link-btn, .file-list-item, .studio-look-swatch,
+  .footer-btn, .header-link-btn, .file-list-item, .file-list-badge, .studio-look-swatch, .paradigm-btn, .test-strip-tile,
   .studio-menu-content, .studio-batch-content, .export-dropdown-menu,
   .toast-message, .batch-progress-content, .batch-progress-bar,
   .loading-film-strip, .loading-film-fill, .zoom-indicator) { border-radius: 0 !important; }

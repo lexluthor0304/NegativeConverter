@@ -702,7 +702,15 @@ export function buildDxEdgeCodeBlocks(options = {}) {
   addBinary(clampInt(edge.frameNumber, 0, 63), 18, 32);
 
   if (aFlag) add(24, 1);
-  if (((edge.dx1 + edge.dx2 + clampInt(edge.frameNumber, 0, 63) + aFlag) % 2) === 1) add(26, 1);
+  // ISO 1007 parity: the parity bit equals the number of set data bits
+  // (product, generation, frame number and half-frame flag) modulo 2.
+  const setBits = (value) => {
+    let count = 0;
+    for (let v = value; v > 0; v >>= 1) count += v & 1;
+    return count;
+  };
+  const dataBitCount = setBits(edge.dx1) + setBits(edge.dx2) + setBits(clampInt(edge.frameNumber, 0, 63)) + aFlag;
+  if (dataBitCount % 2 === 1) add(26, 1);
 
   add(29, 0);
   add(28, 1);

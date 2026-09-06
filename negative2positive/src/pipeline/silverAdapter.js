@@ -8,6 +8,10 @@ import {
   cloneImage16,
 } from '../silvercore/util/image16.js';
 import { applyFilmBaseCompensationToBuffer } from './filmBaseCompensation.js';
+import { analyzeImage, adjustSaturation } from '../silvercore/engine/ImageProcessor.js';
+import { normalizePaperId, normalizeToningId } from '../silvercore/engine/PaperProfiles.js';
+import { rasterizeExposureStops } from '../app/localExposure.js';
+import { applyFlatFieldToImage16 } from '../app/flatField.js';
 
 // EnhancedProfiles.js owns the list of shipped 3D-LUT profiles and their .bin URLs;
 // deriving the whitelist from it keeps the two in step. A hand-copied list here is
@@ -35,6 +39,24 @@ function toImage16(input) {
     return input.__image16;
   }
   return fromImageData8(input);
+}
+
+function normalizeAnalysisOverride(value) {
+  if (!Array.isArray(value) || value.length !== 3) return null;
+  const channels = value.map((channel) => {
+    if (!channel || typeof channel !== 'object') return null;
+    const white = Number(channel.whitePointOrigin);
+    const black = Number(channel.blackPointOrigin);
+    const mean = Number(channel.meanPoint);
+    if (![white, black, mean].every(Number.isFinite)) return null;
+    return {
+      whitePointOrigin: Math.round(Math.max(0, Math.min(65535, white))),
+      blackPointOrigin: Math.round(Math.max(0, Math.min(65535, black))),
+      meanPoint: Math.max(0, Math.min(1, mean)),
+      settingName: String(channel.settingName || ''),
+    };
+  });
+  return channels.every(Boolean) ? channels : null;
 }
 
 function normalizeSaturation(value) {
@@ -106,6 +128,8 @@ export async function buildSilverCoreParams(mode, settings = {}) {
     preSaturation: Math.round(sanitizeNumber(merged.preSaturation, 100, 0, 200)),
     borderBuffer: Math.round(sanitizeNumber(merged.borderBuffer, 10, 0, 30)),
     analysisRegion: merged.analysisRegion ? { ...merged.analysisRegion } : null,
+    // Roll analysis: shared channelData that replaces this frame's histogram.
+    analysisOverride: normalizeAnalysisOverride(merged.analysisOverride),
     brightness: sanitizeNumber(merged.brightness, 0, -100, 100),
     exposure: sanitizeNumber(merged.exposure, 0, -300, 300),
     contrast: sanitizeNumber(merged.contrast, 0, -100, 100),
@@ -116,6 +140,13 @@ export async function buildSilverCoreParams(mode, settings = {}) {
     wbMode: String(merged.wbMode || 'auto'),
     temperature: sanitizeNumber(merged.temperature, 0, -100, 100),
     tint: sanitizeNumber(merged.tint, 0, -100, 100),
+    // Cyan/red balance (the enlarger's C filtration); distinct from the legacy
+    // step-3 `cyan` adjustment that the app's settings object also carries.
+    colorCyan: sanitizeNumber(merged.colorCyan, 0, -100, 100),
+    // Paper emulation, gated by the mode so RA-4 papers never reach a B&W print.
+    paper: normalizePaperId(merged.paper, mode === 'positive' ? 'positive' : mode),
+    paperToning: normalizeToningId(merged.paperToning),
+    paperToningStrength: Math.round(sanitizeNumber(merged.paperToningStrength, 100, 0, 100)),
     saturation: normalizeSaturation(merged.saturation),
     glow: sanitizeNumber(merged.glow, 0, 0, 100),
     fade: sanitizeNumber(merged.fade, 0, 0, 100),
@@ -182,6 +213,8 @@ function _createSlot() {
 const _cache = {
   preview: _createSlot(),
   full: _createSlot(),
+  // Test strips and other side renders: never disturbs the preview or export cache.
+  scratch: _createSlot(),
 };
 
 function filmBaseCompensationEqual(a, b) {
@@ -198,10 +231,36 @@ function filmBaseCompensationEqual(a, b) {
     && aBase.g16 === bBase.g16
     && aBase.b16 === bBase.b16
     && aOptions.method === bOptions.method
-    && aOptions.strength === bOptions.strength;
+    && aOptions.strength === bOptions.strength
+    && (a.flatFieldKey || '') === (b.flatFieldKey || '');
+}
+
+// Identity of a flat-field correction for the cache: which map, in which frame geometry.
+function flatFieldKeyOf(settings) {
+  const map = settings && settings.flatField;
+  if (!map || !map.gains) return '';
+  const g = settings.flatFieldGeometry || {};
+  const crop = g.cropRegion ? `${g.cropRegion.left ?? g.cropRegion.x}|${g.cropRegion.top ?? g.cropRegion.y}|${g.cropRegion.width}|${g.cropRegion.height}` : '';
+  return `${map.id || 'map'}|${g.baseWidth}x${g.baseHeight}|${g.rotationAngle || 0}|${g.mirrored ? 1 : 0}|${crop}`;
+}
+
+// Preprocessing that is baked into the cached pristine buffer: the flat field
+// (light-pad falloff) first, then the film base compensation.
+function _preprocessBuffer(data, width, height, preprocess) {
+  if (preprocess.flatField && preprocess.flatFieldGeometry) {
+    applyFlatFieldToImage16({ width, height, data }, preprocess.flatField, {
+      ...preprocess.flatFieldGeometry,
+      width,
+      height,
+    });
+  }
+  if (preprocess.base) {
+    applyFilmBaseCompensationToBuffer(data, preprocess.base, preprocess.options);
+  }
 }
 
 function _slotFor(options) {
+  if (options && options.scratch) return _cache.scratch;
   return (options && options.preview) ? _cache.preview : _cache.full;
 }
 
@@ -261,15 +320,12 @@ function _takeWorkBuffer(slot, image16, filmBaseCompensation) {
   if (sizeChanged || sourceChanged || gainsChanged) {
     if (sizeChanged) slot.pristineBuffer = new Uint16Array(len);
     slot.pristineBuffer.set(sourceRef);
-    applyFilmBaseCompensationToBuffer(
-      slot.pristineBuffer,
-      filmBaseCompensation.base,
-      filmBaseCompensation.options
-    );
+    _preprocessBuffer(slot.pristineBuffer, image16.width, image16.height, filmBaseCompensation);
     slot.lastSourceRef = sourceRef;
     slot.lastFilmBaseGains = {
-      base: { ...filmBaseCompensation.base },
-      options: { ...filmBaseCompensation.options },
+      base: filmBaseCompensation.base ? { ...filmBaseCompensation.base } : null,
+      options: filmBaseCompensation.options ? { ...filmBaseCompensation.options } : {},
+      flatFieldKey: filmBaseCompensation.flatFieldKey || '',
     };
   }
 
@@ -297,9 +353,10 @@ function _analysisStateFor(params, filmBaseCompensation, sourceRef, mode, refere
     imageType: params.imageType,
     preSaturation: params.preSaturation,
     bwMix: mode === 'bw' ? params.bwMix : null,
-    filmBaseKey: base
+    analysisOverrideKey: params.analysisOverride ? JSON.stringify(params.analysisOverride) : '',
+    filmBaseKey: (base
       ? `${base.r}|${base.g}|${base.b}|${base.r16}|${base.g16}|${base.b16}|${options.method}|${options.strength}`
-      : '',
+      : '') + (filmBaseCompensation && filmBaseCompensation.flatFieldKey ? `|ff:${filmBaseCompensation.flatFieldKey}` : ''),
   };
 }
 
@@ -313,6 +370,7 @@ function _analysisChanged(previous, next) {
     || previous.imageType !== next.imageType
     || previous.preSaturation !== next.preSaturation
     || previous.bwMix !== next.bwMix
+    || previous.analysisOverrideKey !== next.analysisOverrideKey
     || previous.filmBaseKey !== next.filmBaseKey;
 }
 
@@ -352,13 +410,19 @@ async function runSilverCore(imageData, settings, mode, options) {
   // multiplied by the default {210,140,90} base (r 0.70 / g 1.05 / b 1.63 in linear
   // mode, clipping blue above ~61% of range) or by whatever colour negative happened to
   // be sampled last, making the same file convert differently from run to run.
-  const filmBaseCompensation = mode === 'color' && settings && settings.filmBase
+  // The flat field (camera-scan light pad) applies to every mode; it is baked
+  // into the same cached buffer as the film base compensation.
+  const flatFieldKey = flatFieldKeyOf(settings);
+  const filmBaseCompensation = (mode === 'color' && settings && settings.filmBase) || flatFieldKey
     ? {
-        base: settings.filmBase,
+        base: mode === 'color' && settings && settings.filmBase ? settings.filmBase : null,
         options: {
           method: settings.filmBaseCompensation || settings.filmBaseMethod || 'density',
           strength: settings.filmBaseStrength ?? 1
-        }
+        },
+        flatField: flatFieldKey ? settings.flatField : null,
+        flatFieldGeometry: flatFieldKey ? settings.flatFieldGeometry : null,
+        flatFieldKey
       }
     : null;
 
@@ -371,6 +435,17 @@ async function runSilverCore(imageData, settings, mode, options) {
 
   // Fresh working buffer, owned by the caller once we return it.
   const input = _takeWorkBuffer(slot, input16, filmBaseCompensation);
+
+  // Dodge and burn: rasterise the strokes for this buffer's size. The engine
+  // applies them after the analysis and before the curves; the analysis
+  // sample (reference) is never dodged, like the base exposure in a darkroom.
+  if (settings && settings.localExposure && settings.localExposureGeometry) {
+    params.localExposureStops = rasterizeExposureStops(settings.localExposure, {
+      ...settings.localExposureGeometry,
+      width: input.width,
+      height: input.height,
+    });
+  }
 
   // B&W: mix down to a neutral negative BEFORE the engine runs. Doing it afterwards
   // (the old toGrayscaleInPlace on the result) discarded the shadow/highlight/mid
@@ -414,8 +489,30 @@ async function runSilverCore(imageData, settings, mode, options) {
   return result;
 }
 
+// Runs the histogram analysis exactly as a conversion would (film-base
+// compensation, B&W mix, pre-tone saturation, analysis crop) without building
+// curves or touching the engine cache. Roll analysis calls this per frame and
+// aggregates the channelData across the roll. `analysisOverride` in the settings
+// is ignored here on purpose: the point is to measure this frame.
+export async function analyzeSilverCoreFrame(imageData, settings = {}, mode = 'color') {
+  const params = await buildSilverCoreParams(mode, { ...settings, analysisOverride: null });
+  const input = cloneImage16(toImage16(imageData));
+  _preprocessBuffer(input.data, input.width, input.height, {
+    base: mode === 'color' && settings && settings.filmBase ? settings.filmBase : null,
+    options: {
+      method: settings.filmBaseCompensation || settings.filmBaseMethod || 'density',
+      strength: settings.filmBaseStrength ?? 1,
+    },
+    flatField: settings.flatField || null,
+    flatFieldGeometry: settings.flatFieldGeometry || null,
+  });
+  if (mode === 'bw') toGrayscaleInPlace(input, params.bwMix);
+  if (params.preSaturation !== 100) adjustSaturation(input, params.preSaturation);
+  return analyzeImage(input, params);
+}
+
 export function invalidateSilverCoreCache() {
-  for (const slot of [_cache.preview, _cache.full]) {
+  for (const slot of [_cache.preview, _cache.full, _cache.scratch]) {
     Object.assign(slot, _createSlot());
   }
 }
