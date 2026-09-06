@@ -34,6 +34,20 @@ function write(name, pixel) {
 }
 
 write('lightpad-blank.png', (x, y) => pad(x, y));
+// A textured scene (for feature matching): tiled blocks of varying tone, a
+// few discs and diagonal lines, as an orange-mask negative without falloff.
+let seed = 4242;
+const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+const blocks = [];
+for (let by = 0; by < 6; by++) for (let bx = 0; bx < 9; bx++) blocks.push(0.15 + 0.75 * rnd());
+const discs = Array.from({ length: 14 }, () => [rnd() * W, rnd() * H, 15 + rnd() * 40, 0.1 + 0.8 * rnd()]);
+write('negative-textured.png', (x, y) => {
+  let t = blocks[Math.floor(y / (H / 6)) * 9 + Math.floor(x / (W / 9))];
+  for (const [cx, cy, r, v] of discs) if (Math.hypot(x - cx, y - cy) < r) t = v;
+  if ((x + y) % 97 < 4 || (x - y + 3000) % 131 < 3) t = 0.95;
+  return [0.62 * (0.25 + 0.75 * (1 - t)), 0.42 * (0.25 + 0.75 * (1 - t)), 0.28 * (0.25 + 0.75 * (1 - t))];
+});
+
 write('negative-vignetted.png', (x, y) => {
   const [r, g, b] = pad(x, y);
   // Uniform orange-mask negative (a mid-grey scene) with a dark subject in the

@@ -21,6 +21,8 @@
     import { sanitizeLocalExposureForSettings, workingPointToBase, basePointToWorking, rotatedDimensions } from './localExposure.js';
     import { paperProfiles, paperIdsForFilmKind, normalizePaperId, normalizeToningId } from '../silvercore/engine/PaperProfiles.js';
     import { buildFlatFieldMap, scoreBlankFrame } from './flatField.js';
+    import { estimateAlignment, warpImageData } from './imageAlignment.js';
+    import { collectPairs, fitLook, sanitizeLookForSettings } from './labMatch.js';
 
     import { convertFrameWithRouter, resolveConversionMode } from '../pipeline/conversionRouter.js';
     import { convertFrameInWorker, convertPreviewFrameInWorker, CONVERSION_FAILED, WORKER_TIMEOUT } from './conversionWorkerClient.js';
@@ -448,6 +450,7 @@
         updatePaperUI();
         updateDodgeBurnUI();
         updateFlatFieldUI();
+        updateLabMatchUI();
         populateTestStripAxes();
         if (typeof updateLensCorrectionUI === 'function') updateLensCorrectionUI();
         if (typeof updateExportUI === 'function') updateExportUI();
@@ -2040,6 +2043,8 @@
       corePaperToningStrength: 100,
       // Dodge and burn strokes (per-file setting), see localExposure.js.
       localExposure: null,
+      // Lab-match look (colour setting, see labMatch.js).
+      look: null,
       // Flat field: session registry of gain maps and the current file's choice.
       flatFields: {},
       flatFieldActiveId: null,
@@ -2341,7 +2346,7 @@
         curveReset: '重置曲线', dustBrushStroke: '除尘笔刷', dustToggle: '除尘开关',
         filmBase: '色罩基准', whiteBalance: '白平衡', autoDetectBase: '自动检测色罩',
         filmEdgeApply: '应用片边识别', filmEdgeBase: '片边片基', rollAnalysis: '整卷分析',
-        testStrip: '试条', dodgeBurn: '加减光', enlarger: '放大机', flatField: '平场校正', coreCyan: '青 / 红', corePaper: '相纸', corePaperToning: '调色', corePaperToningStrength: '调色强度',
+        testStrip: '试条', dodgeBurn: '加减光', enlarger: '放大机', flatField: '平场校正', labMatch: '匹配店扫', coreCyan: '青 / 红', corePaper: '相纸', corePaperToning: '调色', corePaperToningStrength: '调色强度',
         coreExposure: '曝光', coreContrast: '对比度', coreHighlights: '高光',
         coreShadows: '阴影', coreWhites: '白色', coreBlacks: '黑色',
         coreBrightness: '亮度', coreTemperature: '色温', coreTint: '色调',
@@ -2364,7 +2369,7 @@
         curveReset: 'Reset Curves', dustBrushStroke: 'Dust Brush', dustToggle: 'Dust Toggle',
         filmBase: 'Film Base', whiteBalance: 'White Balance', autoDetectBase: 'Auto Detect Base',
         filmEdgeApply: 'Apply Detected Film', filmEdgeBase: 'Rebate Film Base', rollAnalysis: 'Roll Analysis',
-        testStrip: 'Test Strip', dodgeBurn: 'Dodge and Burn', enlarger: 'Enlarger', flatField: 'Flat Field', coreCyan: 'Cyan / Red', corePaper: 'Paper', corePaperToning: 'Toning', corePaperToningStrength: 'Toning Strength',
+        testStrip: 'Test Strip', dodgeBurn: 'Dodge and Burn', enlarger: 'Enlarger', flatField: 'Flat Field', labMatch: 'Match Lab Scan', coreCyan: 'Cyan / Red', corePaper: 'Paper', corePaperToning: 'Toning', corePaperToningStrength: 'Toning Strength',
         coreExposure: 'Exposure', coreContrast: 'Contrast', coreHighlights: 'Highlights',
         coreShadows: 'Shadows', coreWhites: 'Whites', coreBlacks: 'Blacks',
         coreBrightness: 'Brightness', coreTemperature: 'Temperature', coreTint: 'Tint',
@@ -2387,7 +2392,7 @@
         curveReset: 'カーブリセット', dustBrushStroke: '除塵ブラシ', dustToggle: '除塵切替',
         filmBase: 'フィルムベース', whiteBalance: 'ホワイトバランス', autoDetectBase: '自動検出',
         filmEdgeApply: 'フィルム縁を適用', filmEdgeBase: '縁のベース', rollAnalysis: 'ロール解析',
-        testStrip: 'テストストリップ', dodgeBurn: '覆い焼き・焼き込み', enlarger: '引き伸ばし機', flatField: 'フラットフィールド', coreCyan: 'シアン / 赤', corePaper: '印画紙', corePaperToning: '調色', corePaperToningStrength: '調色の強さ',
+        testStrip: 'テストストリップ', dodgeBurn: '覆い焼き・焼き込み', enlarger: '引き伸ばし機', flatField: 'フラットフィールド', labMatch: 'ラボスキャンに合わせる', coreCyan: 'シアン / 赤', corePaper: '印画紙', corePaperToning: '調色', corePaperToningStrength: '調色の強さ',
         coreExposure: '露出', coreContrast: 'コントラスト', coreHighlights: 'ハイライト',
         coreShadows: 'シャドウ', coreWhites: 'ホワイト', coreBlacks: 'ブラック',
         coreBrightness: '明るさ', coreTemperature: '色温度', coreTint: '色合い',
@@ -2464,6 +2469,7 @@
       };
       settings.sprocketEdge = createSprocketEdgeSettings(state.sprocketEdge);
       settings.localExposure = state.localExposure ? structuredClone(state.localExposure) : null;
+      settings.look = state.look ? structuredClone(state.look) : null;
       settings.autoFrameMeta = state.autoFrame.lastDiagnostics ? structuredClone(state.autoFrame.lastDiagnostics) : null;
 
       // Category B: references
@@ -2520,7 +2526,9 @@
       state.dustRemoval.showMask = s.dustRemoval.showMask;
       state.sprocketEdge = createSprocketEdgeSettings(s.sprocketEdge);
       state.localExposure = s.localExposure ? structuredClone(s.localExposure) : null;
+      state.look = s.look ? structuredClone(s.look) : null;
       updateDodgeBurnUI();
+      updateLabMatchUI();
       state.autoFrame.lastDiagnostics = s.autoFrameMeta ? structuredClone(s.autoFrameMeta) : null;
 
       // Restore Category B refs
@@ -3527,6 +3535,8 @@
         corePaperToningStrength: sanitizeNumeric(source.corePaperToningStrength, fallbackSettings.corePaperToningStrength ?? 100, 0, 100),
         // Per-file like the crop: strokes are never inherited from the fallback frame.
         localExposure: sanitizeLocalExposureForSettings(source === state ? state.localExposure : source.localExposure),
+        // A colour setting like the curves: copied with the look, inherited from the fallback frame.
+        look: sanitizeLookForSettings(source === state ? state.look : (Object.hasOwn(source, 'look') ? source.look : fallbackSettings.look)),
         // Roll-level like the film base: a new file inherits the roll's flat field.
         flatFieldId: typeof (source.flatFieldId ?? fallbackSettings.flatFieldId) === 'string' ? String(source.flatFieldId ?? fallbackSettings.flatFieldId).slice(0, 64) : null,
         coreSaturation: sanitizeNumeric(source.coreSaturation, fallbackSettings.coreSaturation ?? 100, 0, 200),
@@ -4420,6 +4430,7 @@
       if (state.coreUseWebGL === false) return false;
       if (state.dustRemoval.enabled && state.dustRemoval.showMask) return false;
       if (state.dodgeBurn && state.dodgeBurn.active) return false;
+      if (state.look) return false;
       if (state.sprocketPreviewEnabled) return false;
       return !!webglState.gl && !webglState.disabledByError && state.currentStep >= 3 && !!state.processedImageData;
     }
@@ -9148,6 +9159,7 @@
       state.corePaper = 'none';
       state.corePaperToning = 'none';
       state.corePaperToningStrength = 100;
+      state.look = null;
       state.coreSaturation = 100;
       state.coreGlow = 0;
       state.coreFade = 0;
@@ -10127,6 +10139,7 @@
         corePaperToning: 'none',
         corePaperToningStrength: 100,
         localExposure: null,
+        look: null,
         flatFieldId: state.flatFieldId || null,
         coreSaturation: 100,
         coreGlow: 0,
@@ -11026,6 +11039,8 @@
       state.localExposure = safe.localExposure ? structuredClone(safe.localExposure) : null;
       state.flatFieldId = safe.flatFieldId && state.flatFields[safe.flatFieldId] ? safe.flatFieldId : null;
       updateFlatFieldUI();
+      state.look = safe.look ? structuredClone(safe.look) : null;
+      updateLabMatchUI();
       state.coreSaturation = safe.coreSaturation;
       state.coreGlow = safe.coreGlow;
       state.coreFade = safe.coreFade;
@@ -11224,6 +11239,7 @@
       updateAutoFrameConfigUI();
       updateRollAnalysisUI();
       updateFlatFieldUI();
+      updateLabMatchUI();
     }
 
     function showBatchUI(show, reason) {
@@ -12364,6 +12380,169 @@
       }
       return working;
     }
+
+    // ===========================================
+    // Match a lab scan: align the lab's JPEG and fit a colour look
+    // ===========================================
+    let labMatchReferenceFile = null;
+    let labMatchRunning = false;
+
+    function updateLabMatchUI() {
+      if (!stateReady) return;
+      const status = document.getElementById('labMatchStatus');
+      const runBtn = document.getElementById('labMatchRunBtn');
+      const applyBtn = document.getElementById('labMatchApplySelectedBtn');
+      const clearBtn = document.getElementById('labMatchClearBtn');
+      if (!status || !runBtn || !applyBtn || !clearBtn) return;
+      const look = state.look;
+      if (labMatchRunning) {
+        status.textContent = getLocalizedText('labMatchRunning', 'Aligning and fitting…');
+      } else if (look && look.source) {
+        const key = look.method === 'aligned-affine' ? 'labMatchStatusAligned' : 'labMatchStatusHistogram';
+        status.textContent = getInterpolatedText(key, {
+          name: look.source,
+          inliers: String(look.inliers || 0),
+          before: look.deltaBefore === null ? '?' : String(look.deltaBefore),
+          after: look.deltaAfter === null ? '?' : String(look.deltaAfter)
+        }, `From ${look.source}`);
+      } else if (labMatchReferenceFile) {
+        status.textContent = getInterpolatedText('labMatchStatusPicked', { name: labMatchReferenceFile.name }, `${labMatchReferenceFile.name} chosen; press Match.`);
+      } else {
+        status.textContent = getLocalizedText('labMatchStatusNone', 'No lab scan matched yet.');
+      }
+      const ready = state.currentStep >= 3 && Boolean(state.processedImageData) && !document.body.dataset.studioBusy;
+      runBtn.disabled = !labMatchReferenceFile || !ready || labMatchRunning;
+      applyBtn.disabled = !look || labMatchRunning;
+      clearBtn.disabled = !look || labMatchRunning;
+    }
+
+    async function decodeReferenceImage(file, maxSide) {
+      const bitmap = await createImageBitmap(file);
+      try {
+        const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
+        const width = Math.max(1, Math.round(bitmap.width * scale));
+        const height = Math.max(1, Math.round(bitmap.height * scale));
+        const surface = document.createElement('canvas');
+        surface.width = width;
+        surface.height = height;
+        const ctx = surface.getContext('2d');
+        ctx.drawImage(bitmap, 0, 0, width, height);
+        return ctx.getImageData(0, 0, width, height);
+      } finally {
+        bitmap.close?.();
+      }
+    }
+
+    // Our current rendering without the look, at analysis size.
+    function renderCurrentForMatching(maxSide) {
+      const positive = state.processedImageData;
+      if (!positive) return null;
+      const small = downsampleImageDataForMaxDim(positive, maxSide);
+      const output = new ImageData(small.width, small.height);
+      applyAdjustmentsToBuffer(small, { ...state, look: null }, output, 'preview');
+      return output;
+    }
+
+    function resizeImageDataNearest(imageData, width, height) {
+      const out = new ImageData(width, height);
+      for (let y = 0; y < height; y++) {
+        const sy = Math.min(imageData.height - 1, Math.floor((y / height) * imageData.height));
+        for (let x = 0; x < width; x++) {
+          const sx = Math.min(imageData.width - 1, Math.floor((x / width) * imageData.width));
+          const si = (sy * imageData.width + sx) * 4; const di = (y * width + x) * 4;
+          out.data[di] = imageData.data[si]; out.data[di + 1] = imageData.data[si + 1]; out.data[di + 2] = imageData.data[si + 2]; out.data[di + 3] = imageData.data[si + 3];
+        }
+      }
+      return out;
+    }
+
+    async function runLabMatch() {
+      if (labMatchRunning || !labMatchReferenceFile) return;
+      if (state.currentStep < 3 || !state.processedImageData) {
+        void appAlert(getLocalizedText('labMatchNeedPhoto', 'Convert a photo first.'));
+        return;
+      }
+      labMatchRunning = true;
+      updateLabMatchUI();
+      try {
+        const ours = renderCurrentForMatching(1000);
+        let reference;
+        try {
+          reference = await decodeReferenceImage(labMatchReferenceFile, 1600);
+        } catch (error) {
+          console.warn('Lab match reference decode failed:', error);
+          void appAlert(getLocalizedText('labMatchFailed', 'The reference image could not be read.'));
+          return;
+        }
+        let alignment = null;
+        if (await ensureOpenCvReady()) {
+          try { alignment = estimateAlignment(ours, reference, { maxSide: 1000 }); }
+          catch (error) { console.warn('Lab match alignment failed:', error); }
+        }
+        let pairs; let aligned = false;
+        if (alignment) {
+          const warped = warpImageData(reference, alignment.homography, ours.width, ours.height);
+          pairs = collectPairs(ours, warped, { step: 2 });
+          aligned = pairs.count >= 400;
+        }
+        if (!aligned) {
+          pairs = collectPairs(ours, resizeImageDataNearest(reference, ours.width, ours.height), { step: 2, skipClipped: true });
+        }
+        const fit = fitLook(pairs, { aligned });
+        if (!fit) {
+          void appAlert(getLocalizedText('labMatchFailed', 'The reference image could not be read.'));
+          return;
+        }
+        pushUndo('labMatch');
+        state.look = sanitizeLookForSettings({
+          ...fit.look,
+          source: labMatchReferenceFile.name,
+          method: fit.method,
+          inliers: aligned ? alignment.inliers : 0,
+          deltaBefore: fit.deltaBefore,
+          deltaAfter: fit.deltaAfter
+        });
+        markCurrentFileDirty();
+        schedulePreviewUpdate();
+        scheduleFullUpdate();
+      } finally {
+        labMatchRunning = false;
+        updateLabMatchUI();
+      }
+    }
+
+    function applyLookToSelected() {
+      if (!state.look) return;
+      const targets = state.fileQueue.filter((item) => item.selected && item.file !== state.loadedFile);
+      for (const item of targets) {
+        const look = structuredClone(state.look);
+        if (item.settings) item.settings = { ...item.settings, look };
+        else item.studioColors = { ...(item.studioColors || {}), look };
+        item.isDirty = false;
+        item.status = 'pending';
+      }
+      updateFileListUI();
+      showToast(getInterpolatedText('labMatchApplied', { count: String(targets.length) }, `Look applied to ${targets.length} photo(s)`));
+    }
+
+    function clearLook() {
+      if (!state.look) return;
+      pushUndo('labMatch');
+      state.look = null;
+      markCurrentFileDirty();
+      updateLabMatchUI();
+      showToast(getLocalizedText('labMatchCleared', 'Look cleared.'));
+      schedulePreviewUpdate();
+      scheduleFullUpdate();
+    }
+
+    document.getElementById('labMatchInput')?.addEventListener('change', (event) => {
+      labMatchReferenceFile = event.target.files && event.target.files[0] ? event.target.files[0] : null;
+      updateLabMatchUI();
+    });
+    document.getElementById('labMatchRunBtn')?.addEventListener('click', () => { void runLabMatch(); });
+    document.getElementById('labMatchApplySelectedBtn')?.addEventListener('click', applyLookToSelected);
+    document.getElementById('labMatchClearBtn')?.addEventListener('click', clearLook);
 
     // ===========================================
     // Flat field: blank light-source frame -> gain map for the roll

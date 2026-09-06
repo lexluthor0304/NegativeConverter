@@ -1022,6 +1022,25 @@
         </div>
       </div>
 
+      <!-- Match a lab scan: learn a look from the lab's JPEG of the same frame. Moved into the Edit tab. -->
+      <div class="control-section task-secondary" id="labMatchSection" style="display: none;">
+        <div class="section-content">
+          <div class="control-group">
+            <div class="roll-reference-status" id="labMatchStatus" role="status"></div>
+            <div class="film-base-buttons">
+              <label class="film-base-btn lab-match-pick" for="labMatchInput" data-i18n="labMatchPick">Choose the lab's JPEG</label>
+              <input type="file" id="labMatchInput" accept="image/*" hidden>
+              <button class="film-base-btn" id="labMatchRunBtn" data-i18n="labMatchRun" disabled>Match</button>
+            </div>
+            <div class="film-base-buttons">
+              <button class="film-base-btn" id="labMatchApplySelectedBtn" data-i18n="labMatchApplySelected" disabled>Apply look to selected</button>
+              <button class="film-base-btn" id="labMatchClearBtn" data-i18n="labMatchClear" disabled>Clear look</button>
+            </div>
+            <div class="control-group-hint" data-i18n="labMatchHint">Pick the lab's scan of this same frame. It is aligned to your conversion and a colour matrix plus per-channel curves are fitted so your result takes on the lab's look. Without a reliable alignment the colours are matched by histogram.</div>
+          </div>
+        </div>
+      </div>
+
       <!-- Flat field: a blank light-source frame removes the light pad's falloff. Moved into the Retouch tab. -->
       <div class="control-section task-secondary" id="flatFieldSection" style="display: none;">
         <div class="section-content">
