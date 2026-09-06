@@ -17,6 +17,9 @@
     import { readFilmEdge, sanitizeFilmEdgeForSettings, formatFilmEdgeFrames } from './filmEdgeReader.js';
     import { loadDxFilmTable, describeDxFilm, shortFilmName } from './dxFilmDatabase.js';
     import { aggregateRollAnalysis, measureNegativeMean, sanitizeRollFrameForSettings, rollFrameExposureUnits } from './rollAnalysis.js';
+    import { filtrationFromSliders, slidersFromFiltration, stopsFromExposureUnits, exposureUnitsFromStops, contrastForGradeValue, gradeValueForContrast, gradeLabelForValue, TEST_STRIP_AXES, formatAxisValue, testStripValues } from './enlarger.js';
+    import { sanitizeLocalExposureForSettings, workingPointToBase, basePointToWorking, rotatedDimensions } from './localExposure.js';
+    import { paperProfiles, paperIdsForFilmKind, normalizePaperId, normalizeToningId } from '../silvercore/engine/PaperProfiles.js';
 
     import { convertFrameWithRouter, resolveConversionMode } from '../pipeline/conversionRouter.js';
     import { convertFrameInWorker, convertPreviewFrameInWorker, CONVERSION_FAILED, WORKER_TIMEOUT } from './conversionWorkerClient.js';
@@ -440,6 +443,10 @@
         updateGrayPointGuideUI();
         updateFilmEdgeUI();
         updateRollAnalysisUI();
+        updateEnlargerUI();
+        updatePaperUI();
+        updateDodgeBurnUI();
+        populateTestStripAxes();
         if (typeof updateLensCorrectionUI === 'function') updateLensCorrectionUI();
         if (typeof updateExportUI === 'function') updateExportUI();
         updateDesktopBatchExportUI();
@@ -2023,6 +2030,18 @@
       coreWbMode: 'auto',
       coreTemperature: 0,
       coreTint: 0,
+      // Cyan/red balance: the enlarger's C filtration.
+      coreCyan: 0,
+      // Paper emulation (print character after every colour decision).
+      corePaper: 'none',
+      corePaperToning: 'none',
+      corePaperToningStrength: 100,
+      // Dodge and burn strokes (per-file setting), see localExposure.js.
+      localExposure: null,
+      // Control paradigm (UI preference): 'digital' sliders or 'enlarger' head.
+      controlParadigm: 'digital',
+      // Dodge and burn brush UI state (session only).
+      dodgeBurn: { active: false, mode: 'burn', stops: 0.5, size: 12, feather: 50, showOverlay: true },
       coreSaturation: 100,
       coreGlow: 0,
       coreFade: 0,
@@ -2316,6 +2335,7 @@
         curveReset: '重置曲线', dustBrushStroke: '除尘笔刷', dustToggle: '除尘开关',
         filmBase: '色罩基准', whiteBalance: '白平衡', autoDetectBase: '自动检测色罩',
         filmEdgeApply: '应用片边识别', filmEdgeBase: '片边片基', rollAnalysis: '整卷分析',
+        testStrip: '试条', dodgeBurn: '加减光', enlarger: '放大机', coreCyan: '青 / 红', corePaper: '相纸', corePaperToning: '调色', corePaperToningStrength: '调色强度',
         coreExposure: '曝光', coreContrast: '对比度', coreHighlights: '高光',
         coreShadows: '阴影', coreWhites: '白色', coreBlacks: '黑色',
         coreBrightness: '亮度', coreTemperature: '色温', coreTint: '色调',
@@ -2338,6 +2358,7 @@
         curveReset: 'Reset Curves', dustBrushStroke: 'Dust Brush', dustToggle: 'Dust Toggle',
         filmBase: 'Film Base', whiteBalance: 'White Balance', autoDetectBase: 'Auto Detect Base',
         filmEdgeApply: 'Apply Detected Film', filmEdgeBase: 'Rebate Film Base', rollAnalysis: 'Roll Analysis',
+        testStrip: 'Test Strip', dodgeBurn: 'Dodge and Burn', enlarger: 'Enlarger', coreCyan: 'Cyan / Red', corePaper: 'Paper', corePaperToning: 'Toning', corePaperToningStrength: 'Toning Strength',
         coreExposure: 'Exposure', coreContrast: 'Contrast', coreHighlights: 'Highlights',
         coreShadows: 'Shadows', coreWhites: 'Whites', coreBlacks: 'Blacks',
         coreBrightness: 'Brightness', coreTemperature: 'Temperature', coreTint: 'Tint',
@@ -2360,6 +2381,7 @@
         curveReset: 'カーブリセット', dustBrushStroke: '除塵ブラシ', dustToggle: '除塵切替',
         filmBase: 'フィルムベース', whiteBalance: 'ホワイトバランス', autoDetectBase: '自動検出',
         filmEdgeApply: 'フィルム縁を適用', filmEdgeBase: '縁のベース', rollAnalysis: 'ロール解析',
+        testStrip: 'テストストリップ', dodgeBurn: '覆い焼き・焼き込み', enlarger: '引き伸ばし機', coreCyan: 'シアン / 赤', corePaper: '印画紙', corePaperToning: '調色', corePaperToningStrength: '調色の強さ',
         coreExposure: '露出', coreContrast: 'コントラスト', coreHighlights: 'ハイライト',
         coreShadows: 'シャドウ', coreWhites: 'ホワイト', coreBlacks: 'ブラック',
         coreBrightness: '明るさ', coreTemperature: '色温度', coreTint: '色合い',
@@ -2394,6 +2416,7 @@
       'coreBrightness', 'coreExposure', 'coreContrast', 'coreHighlights', 'coreShadows',
       'coreWhites', 'coreBlacks', 'coreWbMode', 'coreTemperature', 'coreTint',
       'coreSaturation', 'coreGlow', 'coreFade', 'coreCurvePrecision', 'coreUseWebGL',
+      'coreCyan', 'corePaper', 'corePaperToning', 'corePaperToningStrength',
       'wbR', 'wbG', 'wbB', 'wbAutoConfidence', 'wbUserOverride',
       'filmType', 'filmBaseSet', 'grayPointSampled', 'step2Mode', 'rotationAngle',
       'mirrored', 'sprocketPreviewEnabled', 'currentStep',
@@ -2434,6 +2457,7 @@
         showMask: state.dustRemoval.showMask,
       };
       settings.sprocketEdge = createSprocketEdgeSettings(state.sprocketEdge);
+      settings.localExposure = state.localExposure ? structuredClone(state.localExposure) : null;
       settings.autoFrameMeta = state.autoFrame.lastDiagnostics ? structuredClone(state.autoFrame.lastDiagnostics) : null;
 
       // Category B: references
@@ -2489,6 +2513,8 @@
       state.dustRemoval.brushSize = s.dustRemoval.brushSize;
       state.dustRemoval.showMask = s.dustRemoval.showMask;
       state.sprocketEdge = createSprocketEdgeSettings(s.sprocketEdge);
+      state.localExposure = s.localExposure ? structuredClone(s.localExposure) : null;
+      updateDodgeBurnUI();
       state.autoFrame.lastDiagnostics = s.autoFrameMeta ? structuredClone(s.autoFrameMeta) : null;
 
       // Restore Category B refs
@@ -3488,6 +3514,12 @@
         coreWbMode: String(source.coreWbMode || fallbackSettings.coreWbMode || 'auto'),
         coreTemperature: sanitizeNumeric(source.coreTemperature, fallbackSettings.coreTemperature ?? 0, -100, 100),
         coreTint: sanitizeNumeric(source.coreTint, fallbackSettings.coreTint ?? 0, -100, 100),
+        coreCyan: sanitizeNumeric(source.coreCyan, fallbackSettings.coreCyan ?? 0, -100, 100),
+        corePaper: normalizePaperId(source.corePaper ?? fallbackSettings.corePaper),
+        corePaperToning: normalizeToningId(source.corePaperToning ?? fallbackSettings.corePaperToning),
+        corePaperToningStrength: sanitizeNumeric(source.corePaperToningStrength, fallbackSettings.corePaperToningStrength ?? 100, 0, 100),
+        // Per-file like the crop: strokes are never inherited from the fallback frame.
+        localExposure: sanitizeLocalExposureForSettings(source === state ? state.localExposure : source.localExposure),
         coreSaturation: sanitizeNumeric(source.coreSaturation, fallbackSettings.coreSaturation ?? 100, 0, 200),
         coreGlow: sanitizeNumeric(source.coreGlow, fallbackSettings.coreGlow ?? 0, 0, 100),
         coreFade: sanitizeNumeric(source.coreFade, fallbackSettings.coreFade ?? 0, 0, 100),
@@ -3588,6 +3620,11 @@
         wbMode: safe.coreWbMode,
         temperature: safe.coreTemperature,
         tint: safe.coreTint,
+        colorCyan: safe.coreCyan,
+        paper: safe.corePaper,
+        paperToning: safe.corePaperToning,
+        paperToningStrength: safe.corePaperToningStrength,
+        localExposure: safe.localExposure,
         saturation: safe.coreSaturation,
         glow: safe.coreGlow,
         fade: safe.coreFade,
@@ -3601,7 +3638,34 @@
         ? buildCoreConversionSettings(settings)
         : settings;
       const meta = settings === state ? state.autoFrame.lastDiagnostics : settings.autoFrameMeta;
-      return { ...router, analysisRegion: resolveAnalysisRegion({ ...settings, autoFrameMeta: meta }, source) };
+      return {
+        ...router,
+        analysisRegion: resolveAnalysisRegion({ ...settings, autoFrameMeta: meta }, source),
+        // Dodge and burn strokes are stored on the unrotated base; the adapter
+        // rasterises them for the working frame it converts.
+        localExposureGeometry: router.localExposure ? localExposureGeometryFor(settings, source) : null
+      };
+    }
+
+    // Geometry chain (base -> rotation -> mirror -> crop) for mapping strokes.
+    // width/height are filled in by the adapter for the buffer it converts.
+    function localExposureGeometryFor(settings = state, source = state.loadedBaseImageData || state.originalImageData) {
+      if (!source) return null;
+      const live = settings === state;
+      const angle = Number.isFinite(settings.rotationAngle) ? settings.rotationAngle : 0;
+      const rotated = live && state.originalImageData
+        ? { width: state.originalImageData.width, height: state.originalImageData.height }
+        : rotatedDimensions(source.width, source.height, angle);
+      const crop = live ? state.cropRegion : settings.cropRegion;
+      return {
+        baseWidth: source.width,
+        baseHeight: source.height,
+        rotationAngle: angle,
+        mirrored: Boolean(settings.mirrored),
+        rotatedWidth: rotated.width,
+        rotatedHeight: rotated.height,
+        cropRegion: crop ? { left: crop.left ?? crop.x ?? 0, top: crop.top ?? crop.y ?? 0, width: crop.width, height: crop.height } : null
+      };
     }
 
     const colorAnalysisSamples = new WeakMap();
@@ -4342,6 +4406,7 @@
       if (state.cropping) return false;
       if (state.coreUseWebGL === false) return false;
       if (state.dustRemoval.enabled && state.dustRemoval.showMask) return false;
+      if (state.dodgeBurn && state.dodgeBurn.active) return false;
       if (state.sprocketPreviewEnabled) return false;
       return !!webglState.gl && !webglState.disabledByError && state.currentStep >= 3 && !!state.processedImageData;
     }
@@ -4628,6 +4693,7 @@
       }
       // Histogram updates are deferred to full renders for responsiveness.
       if (state.dustRemoval.showMask && state.dustRemoval.mask) renderDustMaskOverlay();
+      renderDodgeBurnOverlay();
     }
 
     function updateFull() {
@@ -4665,6 +4731,7 @@
       syncTransformCanvasFromMainCanvas();
       state.lastRenderQuality = 'full';
       if (state.dustRemoval.showMask && state.dustRemoval.mask) renderDustMaskOverlay();
+      renderDodgeBurnOverlay();
     }
 
     function renderFullWebGL() {
@@ -4672,6 +4739,7 @@
       // WebGL only usable for legacy tone path (non-SilverCore)
       if (usesSilverCoreConversion(state)) return false;
       if (state.dustRemoval.enabled && state.dustRemoval.showMask) return false;
+      if (state.dodgeBurn && state.dodgeBurn.active) return false;
 
       const source = state.processedImageData;
       const gl = webglState.gl;
@@ -6205,6 +6273,7 @@
           state.autoFrame.lastDiagnostics = null;
           state.filmEdge = null;
           state.rollFrame = null;
+          state.localExposure = null;
           state.rawMetadata = extractedRawMeta;
           if (webglState.gl) {
             webglState.sourceDirty = true;
@@ -7246,8 +7315,9 @@
 
     const coreReprocessHandlers = {
       // SilverCore の色調は画素に焼き込まれるため、ドラッグ中も変換する。
-      onInput: () => scheduleCoreReprocess({ full: false }),
-      onCommit: () => scheduleCoreReprocess({ full: false })
+      // The enlarger head mirrors the same values, so it follows every change.
+      onInput: () => { updateEnlargerUI(); scheduleCoreReprocess({ full: false }); },
+      onCommit: () => { updateEnlargerUI(); scheduleCoreReprocess({ full: false }); }
     };
 
     function cacheBorderBufferValueForBorderMode(value) {
@@ -7291,6 +7361,15 @@
     setupSlider('coreBlacks', 'coreBlacks', coreReprocessHandlers);
     setupSlider('coreTemperature', 'coreTemperature', coreReprocessHandlers);
     setupSlider('coreTint', 'coreTint', coreReprocessHandlers);
+    setupSlider('coreCyan', 'coreCyan', coreReprocessHandlers);
+    populatePaperOptions();
+    setupSelect('corePaper', 'corePaper', {
+      onChange: () => { updatePaperUI(); scheduleCoreReprocess({ full: false }); }
+    });
+    setupSelect('corePaperToning', 'corePaperToning', {
+      onChange: () => scheduleCoreReprocess({ full: false })
+    });
+    setupSlider('corePaperToningStrength', 'corePaperToningStrength', coreReprocessHandlers);
     setupSlider('coreSaturation', 'coreSaturation', coreReprocessHandlers);
     setupSlider('coreGlow', 'coreGlow', coreReprocessHandlers);
     setupSlider('coreFade', 'coreFade', coreReprocessHandlers);
@@ -9052,6 +9131,10 @@
       state.coreWbMode = 'auto';
       state.coreTemperature = 0;
       state.coreTint = 0;
+      state.coreCyan = 0;
+      state.corePaper = 'none';
+      state.corePaperToning = 'none';
+      state.corePaperToningStrength = 100;
       state.coreSaturation = 100;
       state.coreGlow = 0;
       state.coreFade = 0;
@@ -10026,6 +10109,11 @@
         coreWbMode: 'auto',
         coreTemperature: 0,
         coreTint: 0,
+        coreCyan: 0,
+        corePaper: 'none',
+        corePaperToning: 'none',
+        corePaperToningStrength: 100,
+        localExposure: null,
         coreSaturation: 100,
         coreGlow: 0,
         coreFade: 0,
@@ -10917,6 +11005,11 @@
       state.coreWbMode = safe.coreWbMode;
       state.coreTemperature = safe.coreTemperature;
       state.coreTint = safe.coreTint;
+      state.coreCyan = safe.coreCyan ?? 0;
+      state.corePaper = safe.corePaper || 'none';
+      state.corePaperToning = safe.corePaperToning || 'none';
+      state.corePaperToningStrength = safe.corePaperToningStrength ?? 100;
+      state.localExposure = safe.localExposure ? structuredClone(safe.localExposure) : null;
       state.coreSaturation = safe.coreSaturation;
       state.coreGlow = safe.coreGlow;
       state.coreFade = safe.coreFade;
@@ -10978,6 +11071,9 @@
       updateFilmModeUI();
       updateLensCorrectionUI();
       updateConsoleReadouts();
+      updateEnlargerUI();
+      updatePaperUI();
+      updateDodgeBurnUI();
       studioWorkspace?.sync();
     }
 
@@ -11732,6 +11828,490 @@
 
     document.getElementById('applyFilmEdgePresetBtn')?.addEventListener('click', () => { void applyDetectedFilmToCurrent(); });
     document.getElementById('useFilmEdgeBaseBtn')?.addEventListener('click', useFilmEdgeBaseForCurrent);
+
+    // ===========================================
+    // Enlarger paradigm: dichroic filtration, stops and paper grade as a view
+    // of the core sliders (enlarger.js holds the deterministic mapping).
+    // ===========================================
+    const PARADIGM_STORAGE_KEY = 'nc_paradigm_v1';
+    let enlargerSyncing = false;
+
+    function setControlParadigm(paradigm, { persist = true } = {}) {
+      state.controlParadigm = paradigm === 'enlarger' ? 'enlarger' : 'digital';
+      const enlarger = state.controlParadigm === 'enlarger';
+      document.body.classList.toggle('studio-enlarger', enlarger);
+      const digitalBtn = document.getElementById('paradigmDigitalBtn');
+      const enlargerBtn = document.getElementById('paradigmEnlargerBtn');
+      if (digitalBtn) { digitalBtn.classList.toggle('active', !enlarger); digitalBtn.setAttribute('aria-pressed', String(!enlarger)); }
+      if (enlargerBtn) { enlargerBtn.classList.toggle('active', enlarger); enlargerBtn.setAttribute('aria-pressed', String(enlarger)); }
+      if (persist) safeStorageSet(PARADIGM_STORAGE_KEY, state.controlParadigm);
+      updateEnlargerUI();
+      populateTestStripAxes();
+    }
+
+    function setEnlargerInput(id, value, decimals = 0) {
+      const range = document.getElementById(id);
+      const number = document.getElementById(`${id}Value`);
+      const text = Number(value).toFixed(decimals);
+      if (range && range.value !== text) range.value = text;
+      if (number && number.tagName === 'INPUT' && number.value !== text) number.value = text;
+    }
+
+    function updateEnlargerUI() {
+      if (!stateReady) return;
+      const controls = document.getElementById('enlargerControls');
+      if (!controls) return;
+      enlargerSyncing = true;
+      try {
+        const filters = filtrationFromSliders({ cyan: state.coreCyan, tint: state.coreTint, temperature: state.coreTemperature });
+        setEnlargerInput('enlargerCyan', filters.cyan);
+        setEnlargerInput('enlargerMagenta', filters.magenta);
+        setEnlargerInput('enlargerYellow', filters.yellow);
+        setEnlargerInput('enlargerExposure', stopsFromExposureUnits(state.coreExposure), 1);
+        const gradeValue = gradeValueForContrast(state.coreContrast);
+        const grade = document.getElementById('enlargerGrade');
+        const gradeReadout = document.getElementById('enlargerGradeValue');
+        if (grade && Number(grade.value) !== gradeValue) grade.value = String(gradeValue);
+        if (gradeReadout) gradeReadout.textContent = gradeLabelForValue(gradeValue);
+        const gradeControl = document.getElementById('enlargerGradeControl');
+        // Multigrade paper has grades; RA-4 colour paper does not.
+        if (gradeControl) gradeControl.style.display = getEffectiveFilmType() === 'bw' ? '' : 'none';
+      } finally {
+        enlargerSyncing = false;
+      }
+    }
+
+    function applyEnlargerFiltration() {
+      const read = (id) => Number(document.getElementById(id)?.value);
+      const sliders = slidersFromFiltration({ cyan: read('enlargerCyan'), magenta: read('enlargerMagenta'), yellow: read('enlargerYellow') });
+      state.coreCyan = sliders.cyan;
+      state.coreTint = sliders.tint;
+      state.coreTemperature = sliders.temperature;
+      ['coreCyan', 'coreTint', 'coreTemperature'].forEach(syncSliderFromState);
+    }
+
+    function bindEnlargerControl(id, apply) {
+      const range = document.getElementById(id);
+      const number = document.getElementById(`${id}Value`);
+      if (!range) return;
+      let preDragSnapshot = null;
+      const commit = (source) => {
+        if (enlargerSyncing) return;
+        if (number && number.tagName === 'INPUT') {
+          if (source === range) number.value = range.value;
+          else range.value = number.value;
+        }
+        apply();
+        markCurrentFileDirty();
+        updateEnlargerUI();
+        scheduleCoreReprocess({ full: false });
+      };
+      range.addEventListener('pointerdown', () => { preDragSnapshot = captureSnapshot('enlarger'); });
+      range.addEventListener('input', () => commit(range));
+      range.addEventListener('change', () => {
+        if (preDragSnapshot) { commitUndoSnapshot(preDragSnapshot); preDragSnapshot = null; }
+      });
+      if (number && number.tagName === 'INPUT') {
+        number.addEventListener('change', () => { pushUndo('enlarger'); commit(number); });
+      }
+    }
+
+    bindEnlargerControl('enlargerCyan', applyEnlargerFiltration);
+    bindEnlargerControl('enlargerMagenta', applyEnlargerFiltration);
+    bindEnlargerControl('enlargerYellow', applyEnlargerFiltration);
+    bindEnlargerControl('enlargerExposure', () => {
+      state.coreExposure = exposureUnitsFromStops(Number(document.getElementById('enlargerExposure').value));
+      syncSliderFromState('coreExposure');
+    });
+    bindEnlargerControl('enlargerGrade', () => {
+      state.coreContrast = contrastForGradeValue(Number(document.getElementById('enlargerGrade').value));
+      syncSliderFromState('coreContrast');
+    });
+    document.getElementById('paradigmDigitalBtn')?.addEventListener('click', () => setControlParadigm('digital'));
+    document.getElementById('paradigmEnlargerBtn')?.addEventListener('click', () => setControlParadigm('enlarger'));
+    setControlParadigm(safeStorageGet(PARADIGM_STORAGE_KEY) === 'enlarger' ? 'enlarger' : 'digital', { persist: false });
+
+    // ===========================================
+    // Test strip: several patches of the photo along one axis; click to apply.
+    // ===========================================
+    const testStrip = { rendering: false, values: [], axisKey: null };
+
+    function currentTestStripAxes() {
+      const axes = TEST_STRIP_AXES[state.controlParadigm === 'enlarger' ? 'enlarger' : 'digital'];
+      return axes.filter((axis) => !(axis.format === 'grade' && getEffectiveFilmType() !== 'bw'));
+    }
+
+    function currentTestStripAxis() {
+      const select = document.getElementById('testStripAxis');
+      const axes = currentTestStripAxes();
+      return axes.find((axis) => axis.key === select?.value) || axes[0];
+    }
+
+    function populateTestStripAxes() {
+      if (!stateReady) return;
+      const select = document.getElementById('testStripAxis');
+      if (!select) return;
+      const previous = select.value;
+      const axes = currentTestStripAxes();
+      select.replaceChildren(...axes.map((axis) => {
+        const option = document.createElement('option');
+        option.value = axis.key;
+        option.textContent = getLocalizedText(axis.label, axis.key);
+        return option;
+      }));
+      select.value = axes.some((axis) => axis.key === previous) ? previous : axes[0].key;
+    }
+
+    function readTestStripStep(axis) {
+      const input = document.getElementById('testStripStep');
+      const value = Math.round(Number(input?.value));
+      return Number.isFinite(value) && value >= 1 ? Math.min(100, value) : axis.step;
+    }
+
+    function setTestStripStep(step) {
+      const input = document.getElementById('testStripStep');
+      if (input) input.value = String(step);
+    }
+
+    async function renderTestStrip() {
+      const tiles = document.getElementById('testStripTiles');
+      const button = document.getElementById('testStripRenderBtn');
+      if (!tiles || testStrip.rendering) return;
+      const source = state.conversionPreviewImageData || state.conversionSourceImageData;
+      if (state.currentStep < 3 || !source || !usesSilverCoreConversion(state)) {
+        tiles.replaceChildren(Object.assign(document.createElement('span'), { className: 'test-strip-empty', textContent: getLocalizedText('testStripEmpty', 'Convert a photo first.') }));
+        return;
+      }
+      const axis = currentTestStripAxis();
+      const step = readTestStripStep(axis);
+      const count = Number(document.getElementById('testStripCount')?.value) || 5;
+      const area = document.getElementById('testStripArea')?.value || 'full';
+      const centre = Number(state[axis.key]) || 0;
+      const values = testStripValues(axis, centre, step, count);
+      const small = downsampleImageDataForMaxDim(source, 360);
+      const base = state.loadedBaseImageData || state.originalImageData;
+      testStrip.rendering = true;
+      testStrip.axisKey = axis.key;
+      testStrip.values = values;
+      if (button) button.disabled = true;
+      const rendered = [];
+      try {
+        for (const value of values) {
+          const variant = { ...state, [axis.key]: value };
+          const converted = await convertFrameWithRouter({
+            imageData: small,
+            settings: buildRouterSettings(variant, base),
+            options: { preview: true, scratch: true, includeAnalysisPreview: false }
+          });
+          const output = new ImageData(converted.width, converted.height);
+          applyAdjustmentsToBuffer(converted, state, output, 'preview');
+          rendered.push({ value, imageData: output });
+        }
+      } catch (error) {
+        console.warn('Test strip render failed:', error);
+      } finally {
+        testStrip.rendering = false;
+        if (button) button.disabled = false;
+      }
+      if (testStrip.axisKey !== axis.key) return;
+      tiles.replaceChildren(...rendered.map(({ value, imageData }) => {
+        const tile = document.createElement('button');
+        tile.type = 'button';
+        tile.className = 'test-strip-tile' + (value === centre ? ' current' : '');
+        tile.dataset.value = String(value);
+        tile.setAttribute('role', 'option');
+        tile.setAttribute('aria-selected', String(value === centre));
+        const surface = document.createElement('canvas');
+        const sx = area === 'centre' ? Math.floor(imageData.width * 0.25) : 0;
+        const sy = area === 'centre' ? Math.floor(imageData.height * 0.25) : 0;
+        const sw = area === 'centre' ? Math.max(1, Math.floor(imageData.width * 0.5)) : imageData.width;
+        const sh = area === 'centre' ? Math.max(1, Math.floor(imageData.height * 0.5)) : imageData.height;
+        surface.width = sw;
+        surface.height = sh;
+        const scratch = document.createElement('canvas');
+        scratch.width = imageData.width;
+        scratch.height = imageData.height;
+        scratch.getContext('2d').putImageData(imageData, 0, 0);
+        surface.getContext('2d').drawImage(scratch, sx, sy, sw, sh, 0, 0, sw, sh);
+        const label = document.createElement('span');
+        label.textContent = formatAxisValue(axis, value);
+        tile.append(surface, label);
+        tile.addEventListener('click', (event) => applyTestStripValue(axis, value, { narrow: event.shiftKey }));
+        return tile;
+      }));
+    }
+
+    function applyTestStripValue(axis, value, { narrow = false } = {}) {
+      if (state.currentStep < 3) return;
+      pushUndo('testStrip');
+      state[axis.key] = value;
+      markCurrentFileDirty();
+      syncSliderFromState(axis.key);
+      updateEnlargerUI();
+      scheduleCoreReprocess({ full: false });
+      showToast(getInterpolatedText('testStripApplied', { label: formatAxisValue(axis, value) }, `Applied ${formatAxisValue(axis, value)}`));
+      if (narrow) setTestStripStep(Math.max(1, Math.round(readTestStripStep(axis) / 2)));
+      void renderTestStrip();
+    }
+
+    document.getElementById('testStripRenderBtn')?.addEventListener('click', () => { void renderTestStrip(); });
+    document.getElementById('testStripAxis')?.addEventListener('change', () => {
+      const axis = currentTestStripAxis();
+      setTestStripStep(axis.step);
+      if (document.getElementById('testStripTiles')?.childElementCount) void renderTestStrip();
+    });
+    document.getElementById('testStripTiles')?.addEventListener('keydown', (event) => {
+      const tiles = [...document.querySelectorAll('#testStripTiles .test-strip-tile')];
+      if (/^[1-9]$/.test(event.key)) {
+        const tile = tiles[Number(event.key) - 1];
+        if (tile) { event.preventDefault(); tile.click(); }
+        return;
+      }
+      if (event.key === '[' || event.key === ']') {
+        event.preventDefault();
+        const axis = currentTestStripAxis();
+        const step = readTestStripStep(axis);
+        setTestStripStep(event.key === '[' ? Math.max(1, Math.round(step / 2)) : Math.min(100, step * 2));
+        void renderTestStrip();
+      }
+    });
+
+    // ===========================================
+    // Paper emulation selector (Looks drawer)
+    // ===========================================
+    function paperKindForState() {
+      const type = getEffectiveFilmType();
+      return type === 'positive' ? 'positive' : type;
+    }
+
+    function populatePaperOptions() {
+      const select = document.getElementById('corePaper');
+      if (!select) return;
+      const ids = paperIdsForFilmKind(paperKindForState());
+      const current = ids.includes(state.corePaper) ? state.corePaper : 'none';
+      select.replaceChildren(...ids.map((id) => {
+        const option = document.createElement('option');
+        option.value = id;
+        option.textContent = id === 'none' ? getLocalizedText('paperNone', 'None') : paperProfiles[id].label;
+        return option;
+      }));
+      select.value = current;
+    }
+
+    function updatePaperUI() {
+      if (!stateReady) return;
+      const section = document.getElementById('paperSection');
+      const select = document.getElementById('corePaper');
+      if (!section || !select) return;
+      const kind = paperKindForState();
+      const ids = paperIdsForFilmKind(kind);
+      if (!ids.includes(state.corePaper)) state.corePaper = 'none';
+      populatePaperOptions();
+      const bw = kind === 'bw' && state.corePaper !== 'none';
+      const toningControl = document.getElementById('corePaperToningControl');
+      const strengthControl = document.getElementById('corePaperToningStrengthControl');
+      if (toningControl) toningControl.style.display = bw ? '' : 'none';
+      if (strengthControl) strengthControl.style.display = bw && state.corePaperToning !== 'none' ? '' : 'none';
+      section.dataset.paperKind = kind;
+    }
+
+    // ===========================================
+    // Dodge and burn brush (Retouch tab)
+    // ===========================================
+    let dodgeBurnDrawing = false;
+    let dodgeBurnPointerId = null;
+    let dodgeBurnPoints = [];
+    let dodgeBurnFrame = 0;
+
+    function dodgeBurnGeometry() {
+      const geometry = localExposureGeometryFor(state);
+      const working = state.processedImageData || state.croppedImageData || state.originalImageData;
+      if (!geometry || !working) return null;
+      return { ...geometry, width: working.width, height: working.height };
+    }
+
+    function canPaintDodgeBurn() {
+      return Boolean(state.dodgeBurn?.active && state.currentStep >= 3 && state.processedImageData
+        && !state.samplingMode && !state.cropping && !document.body.dataset.studioBusy && usesSilverCoreConversion(state));
+    }
+
+    function pointerToWorkingPoint(event) {
+      const activeCanvas = isWebGLActive() ? glCanvas : canvas;
+      const rect = activeCanvas.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return null;
+      const cx = (event.clientX - rect.left) * (canvas.width / rect.width);
+      const cy = (event.clientY - rect.top) * (canvas.height / rect.height);
+      const point = canvasToImageCoords(cx, cy);
+      if (!point) return null;
+      return { x: point.x, y: point.y, p: event.pressure && event.pressure > 0 && event.pointerType === 'pen' ? event.pressure : 1 };
+    }
+
+    function onDodgeBurnPointerDown(event) {
+      if (!canPaintDodgeBurn() || (event.button !== 0 && event.pointerType === 'mouse')) return;
+      const point = pointerToWorkingPoint(event);
+      if (!point) return;
+      event.preventDefault();
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+      dodgeBurnDrawing = true;
+      dodgeBurnPointerId = event.pointerId;
+      dodgeBurnPoints = [point];
+      scheduleDodgeBurnLivePaint();
+    }
+
+    function onDodgeBurnPointerMove(event) {
+      if (!dodgeBurnDrawing || event.pointerId !== dodgeBurnPointerId) return;
+      const point = pointerToWorkingPoint(event);
+      if (!point) return;
+      const last = dodgeBurnPoints[dodgeBurnPoints.length - 1];
+      if (last && Math.hypot(point.x - last.x, point.y - last.y) < 2) return;
+      dodgeBurnPoints.push(point);
+      scheduleDodgeBurnLivePaint();
+    }
+
+    function onDodgeBurnPointerUp(event) {
+      if (!dodgeBurnDrawing || event.pointerId !== dodgeBurnPointerId) return;
+      dodgeBurnDrawing = false;
+      dodgeBurnPointerId = null;
+      const points = dodgeBurnPoints;
+      dodgeBurnPoints = [];
+      const geometry = dodgeBurnGeometry();
+      if (!points.length || !geometry) { updatePreview(); return; }
+      const stroke = {
+        stops: state.dodgeBurn.mode === 'dodge' ? -Math.abs(state.dodgeBurn.stops) : Math.abs(state.dodgeBurn.stops),
+        size: state.dodgeBurn.size / 100,
+        feather: state.dodgeBurn.feather / 100,
+        points: points.map((p) => ({ ...workingPointToBase(p, geometry), p: p.p }))
+      };
+      pushUndo('dodgeBurn');
+      const strokes = [...(state.localExposure?.strokes || []), stroke];
+      state.localExposure = sanitizeLocalExposureForSettings({ strokes });
+      markCurrentFileDirty();
+      updateDodgeBurnUI();
+      scheduleCoreReprocess({ full: false });
+    }
+
+    function scheduleDodgeBurnLivePaint() {
+      if (dodgeBurnFrame) return;
+      dodgeBurnFrame = requestAnimationFrame(() => {
+        dodgeBurnFrame = 0;
+        const display = state.displayImageData || state.processedImageData;
+        if (!display) return;
+        renderAdjustedImageDataToMainCanvas(display, display);
+        renderDodgeBurnOverlay();
+        drawDodgeBurnPath(dodgeBurnPoints.map((p) => ({ x: p.x, y: p.y, p: p.p })), state.dodgeBurn.mode === 'dodge' ? -1 : 1, true);
+      });
+    }
+
+    // Draws one stroke path (working-frame pixel points) on the main canvas.
+    function drawDodgeBurnPath(points, sign, live = false) {
+      if (!points.length || !state.processedImageData) return;
+      const ctx = canvas.getContext('2d');
+      const scaleX = canvas.width / state.processedImageData.width;
+      const scaleY = canvas.height / state.processedImageData.height;
+      const shortSide = Math.min(state.processedImageData.width, state.processedImageData.height);
+      const width = Math.max(2, state.dodgeBurn.size / 100 * shortSide * Math.min(scaleX, scaleY));
+      ctx.save();
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.lineWidth = width;
+      ctx.strokeStyle = sign < 0 ? `rgba(120, 200, 255, ${live ? 0.45 : 0.3})` : `rgba(255, 170, 0, ${live ? 0.45 : 0.3})`;
+      ctx.beginPath();
+      points.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x * scaleX, p.y * scaleY); else ctx.lineTo(p.x * scaleX, p.y * scaleY); });
+      if (points.length === 1) ctx.lineTo(points[0].x * scaleX + 0.01, points[0].y * scaleY);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function renderDodgeBurnOverlay() {
+      if (!state.dodgeBurn?.active || !state.dodgeBurn.showOverlay) return;
+      const strokes = state.localExposure?.strokes;
+      if (!Array.isArray(strokes) || !strokes.length || !state.processedImageData) return;
+      const geometry = dodgeBurnGeometry();
+      if (!geometry) return;
+      for (const stroke of strokes) {
+        const points = stroke.points.map((p) => basePointToWorking(p, geometry));
+        const saved = state.dodgeBurn.size;
+        state.dodgeBurn.size = stroke.size * 100;
+        drawDodgeBurnPath(points, stroke.stops < 0 ? -1 : 1);
+        state.dodgeBurn.size = saved;
+      }
+    }
+
+    function updateDodgeBurnUI() {
+      if (!stateReady) return;
+      const enabled = document.getElementById('dodgeBurnEnabled');
+      const controls = document.getElementById('dodgeBurnControls');
+      const status = document.getElementById('dodgeBurnStatus');
+      if (!enabled || !controls || !status) return;
+      const brush = state.dodgeBurn;
+      enabled.checked = Boolean(brush.active);
+      controls.style.display = brush.active ? '' : 'none';
+      document.body.classList.toggle('dodge-burn-active', Boolean(brush.active));
+      const dodgeBtn = document.getElementById('dodgeBurnModeDodge');
+      const burnBtn = document.getElementById('dodgeBurnModeBurn');
+      if (dodgeBtn) { dodgeBtn.classList.toggle('active', brush.mode === 'dodge'); dodgeBtn.setAttribute('aria-pressed', String(brush.mode === 'dodge')); }
+      if (burnBtn) { burnBtn.classList.toggle('active', brush.mode === 'burn'); burnBtn.setAttribute('aria-pressed', String(brush.mode === 'burn')); }
+      setEnlargerInput('dodgeBurnStops', brush.stops, 1);
+      setEnlargerInput('dodgeBurnSize', brush.size);
+      setEnlargerInput('dodgeBurnFeather', brush.feather);
+      const overlay = document.getElementById('dodgeBurnShowOverlay');
+      if (overlay) overlay.checked = Boolean(brush.showOverlay);
+      const count = state.localExposure?.strokes?.length || 0;
+      status.textContent = count
+        ? getInterpolatedText('dodgeBurnStatusCount', { count: String(count) }, `${count} stroke(s)`)
+        : getLocalizedText('dodgeBurnStatusNone', 'No strokes.');
+      const undoBtn = document.getElementById('dodgeBurnUndoStrokeBtn');
+      const clearBtn = document.getElementById('dodgeBurnClearBtn');
+      if (undoBtn) undoBtn.disabled = count === 0;
+      if (clearBtn) clearBtn.disabled = count === 0;
+    }
+
+    function setDodgeBurnActive(active) {
+      state.dodgeBurn.active = Boolean(active);
+      updateDodgeBurnUI();
+      // The overlay needs the 2D canvas; leaving the mode may hand the preview back to WebGL.
+      updatePreview();
+    }
+
+    function removeDodgeBurnStrokes(count) {
+      const strokes = state.localExposure?.strokes || [];
+      if (!strokes.length) return;
+      pushUndo('dodgeBurn');
+      const kept = count >= strokes.length ? [] : strokes.slice(0, strokes.length - count);
+      state.localExposure = kept.length ? { strokes: kept } : null;
+      markCurrentFileDirty();
+      updateDodgeBurnUI();
+      scheduleCoreReprocess({ full: false });
+    }
+
+    function bindDodgeBurnNumber(id, key, decimals = 0) {
+      const range = document.getElementById(id);
+      const number = document.getElementById(`${id}Value`);
+      const apply = (value) => {
+        if (!Number.isFinite(value)) return;
+        state.dodgeBurn[key] = value;
+        updateDodgeBurnUI();
+      };
+      range?.addEventListener('input', () => apply(Number(range.value)));
+      number?.addEventListener('change', () => apply(Number(number.value)));
+      void decimals;
+    }
+
+    document.getElementById('dodgeBurnEnabled')?.addEventListener('change', (event) => setDodgeBurnActive(event.target.checked));
+    document.getElementById('dodgeBurnModeDodge')?.addEventListener('click', () => { state.dodgeBurn.mode = 'dodge'; updateDodgeBurnUI(); });
+    document.getElementById('dodgeBurnModeBurn')?.addEventListener('click', () => { state.dodgeBurn.mode = 'burn'; updateDodgeBurnUI(); });
+    document.getElementById('dodgeBurnShowOverlay')?.addEventListener('change', (event) => { state.dodgeBurn.showOverlay = event.target.checked; updatePreview(); });
+    document.getElementById('dodgeBurnUndoStrokeBtn')?.addEventListener('click', () => removeDodgeBurnStrokes(1));
+    document.getElementById('dodgeBurnClearBtn')?.addEventListener('click', () => removeDodgeBurnStrokes(Infinity));
+    bindDodgeBurnNumber('dodgeBurnStops', 'stops', 1);
+    bindDodgeBurnNumber('dodgeBurnSize', 'size');
+    bindDodgeBurnNumber('dodgeBurnFeather', 'feather');
+    for (const surface of [canvas, glCanvas]) {
+      surface.addEventListener('pointerdown', onDodgeBurnPointerDown);
+    }
+    document.addEventListener('pointermove', onDodgeBurnPointerMove);
+    document.addEventListener('pointerup', onDodgeBurnPointerUp);
+    document.addEventListener('pointercancel', onDodgeBurnPointerUp);
 
     // ===========================================
     // Roll analysis: one film base and one tone analysis for the whole roll

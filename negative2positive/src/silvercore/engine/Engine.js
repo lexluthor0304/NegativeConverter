@@ -10,6 +10,8 @@ import { colorModelToToneProfile, colorModels, toneProfiles, filmWBPresets } fro
 import { WebGLRenderer } from './WebGLRenderer.js'
 import { loadProfile, applyLut3D } from './EnhancedProfiles.js'
 import { applyUnsharpMask } from './Sharpening.js'
+import { buildPaperLuts, applyPaperLuts } from './PaperProfiles.js'
+import { applyExposureStopsToImage16 } from '../util/localExposure.js'
 
 function isChannelDataOverride(value) {
   return Array.isArray(value) && value.length === 3 && value.every((channel) => channel
@@ -72,6 +74,11 @@ export class Engine {
     const luts = generateCurves(this.channelData, settings)
     this.lastLuts = luts
 
+    // 4b. Dodge and burn: local exposure on the negative, after the histogram
+    //     analysis (the base exposure is decided before dodging) and before
+    //     the curves, like light held back or added under the enlarger.
+    this._applyLocalExposure(imageData, params)
+
     // 5. Apply LUTs + 3D LUT + HSL + saturation (all CPU 16-bit for precision).
     return this._applyLuts(imageData, luts, params)
   }
@@ -110,6 +117,7 @@ export class Engine {
     const luts = generateCurves(this.channelData, settings)
     this.lastLuts = luts
 
+    this._applyLocalExposure(imageData, params)
     return this._applyLuts(imageData, luts, params)
   }
 
@@ -118,7 +126,29 @@ export class Engine {
   applyCurrentCurves(imageData, params) {
     if (!this.lastLuts) return this.reprocess(imageData, params)
     this._applyPreSaturation(imageData, params)
+    this._applyLocalExposure(imageData, params)
     return this._applyLuts(imageData, this.lastLuts, params)
+  }
+
+  _applyLocalExposure(imageData, params) {
+    const stops = params.localExposureStops
+    if (!stops || stops.length !== imageData.width * imageData.height) return
+    applyExposureStopsToImage16(imageData, stops)
+  }
+
+  // Paper LUTs are rebuilt only when the paper, toning or strength change.
+  _paperLuts(settings) {
+    const key = `${settings.paper}|${settings.paperToning}|${settings.paperToningStrength}`
+    if (!this._paperCache || this._paperCache.key !== key) {
+      this._paperCache = {
+        key,
+        luts: buildPaperLuts(settings.paper, {
+          toning: settings.paperToning,
+          toningStrength: settings.paperToningStrength / 100,
+        }),
+      }
+    }
+    return this._paperCache.luts
   }
 
   /**
@@ -154,6 +184,11 @@ export class Engine {
     }
     if (saturation !== 100) {
       adjustSaturation(imageData, saturation)
+    }
+    // Paper emulation: the print's characteristic curve, density limits, base
+    // tint and toning, after every colour decision and before sharpening.
+    if (this.lastSettings && this.lastSettings.paper && this.lastSettings.paper !== 'none') {
+      applyPaperLuts(imageData, this._paperLuts(this.lastSettings))
     }
     if (this.lastSettings && this.lastSettings.sharpenAmount > 0) {
       applyUnsharpMask(imageData, {
@@ -191,7 +226,9 @@ export class Engine {
 
     const tempVal = (params.temperature || 0) + autoColor.tempCorrection * autoColorLevel + (model.defaultTemp || 0) * pStr + filmWB.temp
     const tintVal = (params.tint || 0) + autoColor.tintCorrection * autoColorLevel + (model.defaultTint || 0) * pStr + filmWB.tint
-    const cyanVal = autoColor.cyanCorrection * autoColorLevel + (model.defaultCyan || 0) * pStr + filmWB.cyan
+    // colorCyan is the user's cyan/red control (the enlarger's C filtration);
+    // it joins the automatic and model corrections like temperature and tint.
+    const cyanVal = (params.colorCyan || 0) + autoColor.cyanCorrection * autoColorLevel + (model.defaultCyan || 0) * pStr + filmWB.cyan
 
     const imageType = params.imageType || 'negative'
 
@@ -244,6 +281,9 @@ export class Engine {
       sharpenAmount: params.sharpenAmount || 0,
       sharpenRadius: params.sharpenRadius ?? 1.0,
       sharpenThreshold: params.sharpenThreshold ?? 0,
+      paper: params.paper || 'none',
+      paperToning: params.paperToning || 'none',
+      paperToningStrength: params.paperToningStrength ?? 100,
       hslAdjustments: model.hslAdjustments ? {
         redHue: (model.hslAdjustments.redHue || 0) * pStr,
         redSaturation: (model.hslAdjustments.redSaturation || 0) * pStr,

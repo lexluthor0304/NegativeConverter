@@ -22,6 +22,7 @@ Whether you are reviewing a fresh roll, restoring family negatives, or preparing
 - 🔍 **Film edge reader**: whole-strip scans that show the perforations get their DX edge barcode decoded (ISO 1007), the stock named from The Big Film Database, a matching preset suggested and the film base sampled from the unexposed rebate (see `docs/film-edge-reader.md`)
 - 🎞️ **Roll analysis**: analyse the selected frames together like a minilab — one film base and one tone analysis for the roll, a per-frame exposure offset, and frames that do not belong flagged as outliers (see `docs/roll-analysis.md`)
 - 🗂️ **Light table**: grow the film strip into a thumbnail grid of the whole roll with stock and outlier badges, RAW thumbnails and keyboard navigation (see `docs/light-table.md`)
+- 🔬 **Darkroom paradigm**: a test strip of patches along one axis (click to apply), enlarger controls with CMY filtration, exposure in stops and multigrade paper grades, a dodge & burn brush applied in linear light before the curves and at full resolution on export, and paper emulation for RA-4 and B&W papers with toning (see `docs/darkroom.md`)
 - 🗂️ **Data-driven preset system** defined in `negative2positive/src/silvercore/engine/FilmPresets.js` (supports alias fallback for older preset IDs)
 - 🔍 **Optional lens profile workflow**: search/select Lensfun profiles manually, or skip lens correction and continue
 - 🧷 **Roll-level lens settings**: lens correction on/off and parameters can be applied to selected files or reused via roll reference

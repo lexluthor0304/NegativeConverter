@@ -9,6 +9,8 @@ import {
 } from '../silvercore/util/image16.js';
 import { applyFilmBaseCompensationToBuffer } from './filmBaseCompensation.js';
 import { analyzeImage, adjustSaturation } from '../silvercore/engine/ImageProcessor.js';
+import { normalizePaperId, normalizeToningId } from '../silvercore/engine/PaperProfiles.js';
+import { rasterizeExposureStops } from '../app/localExposure.js';
 
 // EnhancedProfiles.js owns the list of shipped 3D-LUT profiles and their .bin URLs;
 // deriving the whitelist from it keeps the two in step. A hand-copied list here is
@@ -137,6 +139,13 @@ export async function buildSilverCoreParams(mode, settings = {}) {
     wbMode: String(merged.wbMode || 'auto'),
     temperature: sanitizeNumber(merged.temperature, 0, -100, 100),
     tint: sanitizeNumber(merged.tint, 0, -100, 100),
+    // Cyan/red balance (the enlarger's C filtration); distinct from the legacy
+    // step-3 `cyan` adjustment that the app's settings object also carries.
+    colorCyan: sanitizeNumber(merged.colorCyan, 0, -100, 100),
+    // Paper emulation, gated by the mode so RA-4 papers never reach a B&W print.
+    paper: normalizePaperId(merged.paper, mode === 'positive' ? 'positive' : mode),
+    paperToning: normalizeToningId(merged.paperToning),
+    paperToningStrength: Math.round(sanitizeNumber(merged.paperToningStrength, 100, 0, 100)),
     saturation: normalizeSaturation(merged.saturation),
     glow: sanitizeNumber(merged.glow, 0, 0, 100),
     fade: sanitizeNumber(merged.fade, 0, 0, 100),
@@ -203,6 +212,8 @@ function _createSlot() {
 const _cache = {
   preview: _createSlot(),
   full: _createSlot(),
+  // Test strips and other side renders: never disturbs the preview or export cache.
+  scratch: _createSlot(),
 };
 
 function filmBaseCompensationEqual(a, b) {
@@ -223,6 +234,7 @@ function filmBaseCompensationEqual(a, b) {
 }
 
 function _slotFor(options) {
+  if (options && options.scratch) return _cache.scratch;
   return (options && options.preview) ? _cache.preview : _cache.full;
 }
 
@@ -395,6 +407,17 @@ async function runSilverCore(imageData, settings, mode, options) {
   // Fresh working buffer, owned by the caller once we return it.
   const input = _takeWorkBuffer(slot, input16, filmBaseCompensation);
 
+  // Dodge and burn: rasterise the strokes for this buffer's size. The engine
+  // applies them after the analysis and before the curves; the analysis
+  // sample (reference) is never dodged, like the base exposure in a darkroom.
+  if (settings && settings.localExposure && settings.localExposureGeometry) {
+    params.localExposureStops = rasterizeExposureStops(settings.localExposure, {
+      ...settings.localExposureGeometry,
+      width: input.width,
+      height: input.height,
+    });
+  }
+
   // B&W: mix down to a neutral negative BEFORE the engine runs. Doing it afterwards
   // (the old toGrayscaleInPlace on the result) discarded the shadow/highlight/mid
   // toning every one of the 18 B&W presets is built around, so sepia, selenium,
@@ -457,7 +480,7 @@ export async function analyzeSilverCoreFrame(imageData, settings = {}, mode = 'c
 }
 
 export function invalidateSilverCoreCache() {
-  for (const slot of [_cache.preview, _cache.full]) {
+  for (const slot of [_cache.preview, _cache.full, _cache.scratch]) {
     Object.assign(slot, _createSlot());
   }
 }

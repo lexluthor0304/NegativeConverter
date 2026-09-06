@@ -1590,6 +1590,108 @@ button.section-title {
   margin-top: -4px;
 }
 
+/* Darkroom paradigm toggle and brush mode buttons */
+.paradigm-toggle {
+  display: flex;
+  gap: 6px;
+  margin: 4px 0 10px;
+}
+
+.paradigm-btn {
+  flex: 1;
+  padding: 6px 8px;
+  font-size: 12px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.paradigm-btn.active,
+.paradigm-btn[aria-pressed="true"] {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--bg-hover);
+}
+
+.enlarger-controls {
+  display: none;
+}
+
+body.studio-enlarger .enlarger-controls {
+  display: block;
+}
+
+body.studio-enlarger #studioSliders {
+  display: none;
+}
+
+.slider-readout {
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+}
+
+/* Test strip */
+.test-strip {
+  display: flex;
+  gap: 4px;
+  margin: 8px 0 6px;
+  overflow-x: auto;
+  outline: none;
+}
+
+.test-strip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.test-strip-tile {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  background: var(--bg-tertiary);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  border-radius: 3px;
+}
+
+.test-strip-tile canvas {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.test-strip-tile span {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  text-align: center;
+  padding: 2px 0;
+  color: var(--text-secondary);
+}
+
+.test-strip-tile.current {
+  border-color: var(--accent);
+}
+
+.test-strip-tile.current span {
+  color: var(--accent);
+}
+
+.test-strip-step {
+  width: 100%;
+}
+
+body.dodge-burn-active #canvas,
+body.dodge-burn-active #glCanvas {
+  touch-action: none;
+  cursor: crosshair;
+}
+
 .roll-reference-title {
   font-size: 11px;
   text-transform: uppercase;

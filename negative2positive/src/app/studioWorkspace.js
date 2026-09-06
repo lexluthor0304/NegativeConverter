@@ -31,6 +31,7 @@ export const studioText = {
     newConfirm: '关闭当前照片和列表？未导出的结果将丢失，原始文件不会被删除。',
     hidePanel: '收起调整', showPanel: '展开调整', hideStrip: '收起照片条', showStrip: '展开照片条', tabs: '照片工具',
     lightTable: '光桌', stripView: '照片条', lightTableHint: '以网格查看整卷，颜色是否统一一眼可见。',
+    cyan: '青 / 红', testStrip: '试条', dodgeBurn: '加减光',
     baseSampleHint: '点击未曝光的胶片边缘采样；按 Esc 取消。', resetAll: '重置全部调整',
     scope: '当前照片', fullResetConfirm: '重置当前照片的色彩、白平衡和引擎调整？此操作可以撤销。',
     restart: '从原片重新处理…', restartConfirm: '清除当前照片的构图、调色和历史记录，从原片重新转换？请先导出需要保留的结果。',
@@ -68,6 +69,7 @@ export const studioText = {
     clearConfirm: 'Clear the photo list? Export any results you want to keep first.', newConfirm: 'Close this photo and the list? Unexported results will be lost. Original files will not be deleted.',
     hidePanel: 'Hide controls', showPanel: 'Show controls', hideStrip: 'Hide photos', showStrip: 'Show photos', tabs: 'Photo tools',
     lightTable: 'Light table', stripView: 'Film strip', lightTableHint: 'Show the whole roll as a grid so colour consistency is visible at a glance.',
+    cyan: 'Cyan / red', testStrip: 'Test strip', dodgeBurn: 'Dodge and burn',
     baseSampleHint: 'Click an unexposed film edge to sample it. Press Esc to cancel.', resetAll: 'Reset all adjustments',
     scope: 'Current photo', fullResetConfirm: 'Reset color, white balance and engine adjustments for this photo? You can undo this change.',
     restart: 'Reprocess from original…', restartConfirm: 'Clear geometry, color and history for this photo and convert the original again? Export any results you want to keep first.',
@@ -105,6 +107,7 @@ export const studioText = {
     clearConfirm: '写真一覧を空にしますか？必要な結果を先に書き出してください。', newConfirm: '現在の写真と一覧を閉じますか？未保存の結果は失われますが、元ファイルは削除しません。',
     hidePanel: '調整を隠す', showPanel: '調整を表示', hideStrip: '写真一覧を隠す', showStrip: '写真一覧を表示', tabs: '写真ツール',
     lightTable: 'ライトテーブル', stripView: 'フィルムストリップ', lightTableHint: 'ロール全体をサムネイルの一覧で表示し、色の統一を一目で確認します。',
+    cyan: 'シアン / 赤', testStrip: 'テストストリップ', dodgeBurn: '覆い焼き・焼き込み',
     baseSampleHint: '未露光のフィルム端をクリック。Esc で終了します。', resetAll: '全調整をリセット',
     scope: '現在の写真', fullResetConfirm: '色・ホワイトバランス・エンジンの調整をリセットしますか？取り消し可能です。',
     restart: '元画像から再処理…', restartConfirm: '現在の写真の構図・色・履歴を消去して再変換しますか？必要な結果を先に書き出してください。',
@@ -271,7 +274,7 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
     <div class="studio-color-actions" id="studioColorActions"><button id="studioReset" type="button" data-studio="reset"></button></div>
     </fieldset><p id="studioSampleHint" role="status" data-studio="sampleHint" hidden></p>`;
   panes.edit.append(basic);
-  const sliderLabels = { coreExposure: 'brightness', coreContrast: 'contrast', coreTemperature: 'temperature', coreTint: 'tint', coreSaturation: 'saturation' };
+  const sliderLabels = { coreExposure: 'brightness', coreContrast: 'contrast', coreTemperature: 'temperature', coreTint: 'tint', coreCyan: 'cyan', coreSaturation: 'saturation' };
   for (const [id, key] of Object.entries(sliderLabels)) {
     const control = $(id).closest('.slider-control');
     $(id + 'Label').dataset.studio = key;
@@ -288,6 +291,9 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
   move('sampleWBBtn', $('studioColorActions'));
   $('sampleWBBtn').dataset.studio = 'balance';
 
+  // Enlarger paradigm (filtration, stops, grade) lives beside the digital
+  // sliders; the toggle inside it switches body.studio-enlarger.
+  $('studioSliders').after($('enlargerSection'));
   const makeDrawer = (target, id, label, items, hint) => {
     const drawer = document.createElement('details');
     drawer.id = id;
@@ -298,11 +304,13 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
     return drawer;
   };
   move('consoleSection', panes.edit);
+  makeDrawer(panes.edit, 'studioTestStrip', 'testStrip', ['testStripSection']);
   const curve = makeDrawer(panes.edit, 'studioCurves', 'curves', []);
   curve.lastElementChild.append($('curveCanvas').closest('.control-group'));
   const looks = makeDrawer(panes.edit, 'studioLooks', 'looks', []);
   looks.lastElementChild.append($('coreColorModelStep2').closest('.control-group'));
   move('cmySection', looks.lastElementChild);
+  move('paperSection', looks.lastElementChild);
   makeDrawer(panes.edit, 'studioMore', 'more', ['toneSection', 'colorSection', 'additionalSection']);
   $('additionalSection').querySelector('.section-title').dataset.studio = 'fine';
   const composition = panes.composition;
@@ -341,6 +349,7 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
   move('autoFrameSelectedBtn', $('studioGeometryActions'));
   makeDrawer(composition, 'studioAutoFrame', 'autoFrame', ['autoFrameSettingsSection']);
   move('dustRemovalSection', panes.repair);
+  makeDrawer(panes.repair, 'studioDodgeBurn', 'dodgeBurn', ['dodgeBurnSection']);
   const lens = makeDrawer(panes.repair, 'studioLens', 'lens', []);
   lens.lastElementChild.append($('lensCorrectionPanel').closest('.control-group'));
   const applyLens = document.createElement('button');
@@ -540,7 +549,7 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
         panel.style.display = 'flex';
         $('filmSettingsSection').style.display = 'block';
         ['autoFrameSettingsSection', 'sprocketSettingsSection'].forEach(id => { $(id).style.display = 'block'; });
-        ['toneSection', 'colorSection', 'cmySection', 'additionalSection', 'consoleSection', 'dustRemovalSection', 'advancedSection'].forEach(id => {
+        ['toneSection', 'colorSection', 'cmySection', 'additionalSection', 'consoleSection', 'dustRemovalSection', 'advancedSection', 'enlargerSection', 'testStripSection', 'paperSection', 'dodgeBurnSection'].forEach(id => {
           $(id).style.display = ready ? 'block' : 'none';
         });
       }

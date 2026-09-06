@@ -858,6 +858,170 @@
       </div>
 
       <!-- Color Model (Step 3, SilverCore) -->
+      <!-- Darkroom paradigm: dichroic filtration, exposure in stops and paper
+           grade as a second view of the core colour controls. Moved into the
+           Edit tab by studioWorkspace. -->
+      <div class="control-section task-secondary" id="enlargerSection" style="display: none;">
+        <div class="section-content">
+          <div class="paradigm-toggle" role="group" aria-label="Controls">
+            <button type="button" class="paradigm-btn active" id="paradigmDigitalBtn" aria-pressed="true" data-i18n="paradigmDigital">Digital</button>
+            <button type="button" class="paradigm-btn" id="paradigmEnlargerBtn" aria-pressed="false" data-i18n="paradigmEnlarger">Enlarger</button>
+          </div>
+          <div class="enlarger-controls" id="enlargerControls">
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label" id="enlargerExposureLabel" data-i18n="enlargerExposure">Exposure (stops)</span>
+                <input type="number" class="slider-number-input" id="enlargerExposureValue" min="-2" max="0.9" step="0.1" value="0" aria-labelledby="enlargerExposureLabel">
+              </div>
+              <input type="range" class="slider-input" id="enlargerExposure" min="-2" max="0.9" step="0.1" value="0" aria-labelledby="enlargerExposureLabel">
+            </div>
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label" id="enlargerCyanLabel" data-i18n="enlargerCyan">Cyan filtration</span>
+                <input type="number" class="slider-number-input" id="enlargerCyanValue" min="0" max="200" step="5" value="20" aria-labelledby="enlargerCyanLabel">
+              </div>
+              <input type="range" class="slider-input" id="enlargerCyan" min="0" max="200" step="5" value="20" aria-labelledby="enlargerCyanLabel">
+            </div>
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label" id="enlargerMagentaLabel" data-i18n="enlargerMagenta">Magenta filtration</span>
+                <input type="number" class="slider-number-input" id="enlargerMagentaValue" min="0" max="200" step="5" value="50" aria-labelledby="enlargerMagentaLabel">
+              </div>
+              <input type="range" class="slider-input" id="enlargerMagenta" min="0" max="200" step="5" value="50" aria-labelledby="enlargerMagentaLabel">
+            </div>
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label" id="enlargerYellowLabel" data-i18n="enlargerYellow">Yellow filtration</span>
+                <input type="number" class="slider-number-input" id="enlargerYellowValue" min="0" max="200" step="5" value="40" aria-labelledby="enlargerYellowLabel">
+              </div>
+              <input type="range" class="slider-input" id="enlargerYellow" min="0" max="200" step="5" value="40" aria-labelledby="enlargerYellowLabel">
+            </div>
+            <div class="slider-control" id="enlargerGradeControl">
+              <div class="slider-header">
+                <span class="slider-label" id="enlargerGradeLabel" data-i18n="enlargerGrade">Paper grade</span>
+                <output class="slider-readout" id="enlargerGradeValue" for="enlargerGrade">2</output>
+              </div>
+              <input type="range" class="slider-input" id="enlargerGrade" min="0" max="6" step="0.5" value="3" aria-labelledby="enlargerGradeLabel">
+            </div>
+            <div class="control-group-hint" data-i18n="enlargerHint">Adding a filter removes that colour from the print: +10M prints greener. Values are the head's numbers around a 20C 50M 40Y reference pack.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Test strip: several patches of the current photo along one axis. -->
+      <div class="control-section task-secondary" id="testStripSection" style="display: none;">
+        <div class="section-content">
+          <div class="control-group-grid two-up">
+            <div class="slider-control">
+              <div class="slider-header"><span class="slider-label" id="testStripAxisLabel" data-i18n="testStripAxis">Axis</span></div>
+              <select class="preset-select" id="testStripAxis" aria-labelledby="testStripAxisLabel"></select>
+            </div>
+            <div class="slider-control">
+              <div class="slider-header"><span class="slider-label" id="testStripStepLabel" data-i18n="testStripStep">Step</span></div>
+              <input type="number" class="slider-number-input test-strip-step" id="testStripStep" min="1" max="100" step="1" value="20" aria-labelledby="testStripStepLabel">
+            </div>
+            <div class="slider-control">
+              <div class="slider-header"><span class="slider-label" id="testStripCountLabel" data-i18n="testStripCount">Patches</span></div>
+              <select class="preset-select" id="testStripCount" aria-labelledby="testStripCountLabel">
+                <option value="5">5</option>
+                <option value="7">7</option>
+              </select>
+            </div>
+            <div class="slider-control">
+              <div class="slider-header"><span class="slider-label" id="testStripAreaLabel" data-i18n="testStripArea">Area</span></div>
+              <select class="preset-select" id="testStripArea" aria-labelledby="testStripAreaLabel">
+                <option value="full" data-i18n="testStripAreaFull">Full frame</option>
+                <option value="centre" data-i18n="testStripAreaCentre">Centre</option>
+              </select>
+            </div>
+          </div>
+          <div class="film-base-buttons">
+            <button class="film-base-btn" id="testStripRenderBtn" data-i18n="testStripRender">Make strip</button>
+          </div>
+          <div class="test-strip" id="testStripTiles" role="listbox" aria-label="Test strip" tabindex="0"></div>
+          <div class="control-group-hint" data-i18n="testStripHint">Click a patch to apply it; Shift-click narrows the step around it. Keys 1–9 pick a patch, [ and ] change the step.</div>
+        </div>
+      </div>
+
+      <!-- Paper emulation: printed on which paper. Moved into the Looks drawer. -->
+      <div class="control-section task-secondary" id="paperSection" style="display: none;">
+        <div class="section-content">
+          <div class="control-group">
+            <div class="control-group-title"><span data-i18n="paperTitle">Paper</span></div>
+            <div class="slider-control">
+              <div class="slider-header"><span class="slider-label" id="corePaperLabel" data-i18n="paperSelect">Paper</span></div>
+              <select class="preset-select" id="corePaper" aria-labelledby="corePaperLabel"></select>
+            </div>
+            <div class="slider-control" id="corePaperToningControl">
+              <div class="slider-header"><span class="slider-label" id="corePaperToningLabel" data-i18n="paperToning">Toning</span></div>
+              <select class="preset-select" id="corePaperToning" aria-labelledby="corePaperToningLabel">
+                <option value="none" data-i18n="toningNone">None</option>
+                <option value="selenium" data-i18n="toningSelenium">Selenium</option>
+                <option value="sepia" data-i18n="toningSepia">Sepia</option>
+                <option value="split" data-i18n="toningSplit">Split (sepia + selenium)</option>
+              </select>
+            </div>
+            <div class="slider-control" id="corePaperToningStrengthControl">
+              <div class="slider-header">
+                <span class="slider-label" id="corePaperToningStrengthLabel" data-i18n="paperToningStrength">Toning strength</span>
+                <input type="number" class="slider-number-input" id="corePaperToningStrengthValue" min="0" max="100" step="1" value="100" aria-labelledby="corePaperToningStrengthLabel">
+              </div>
+              <input type="range" class="slider-input" id="corePaperToningStrength" min="0" max="100" step="1" value="100" aria-labelledby="corePaperToningStrengthLabel">
+            </div>
+            <div class="control-group-hint" data-i18n="paperHint">The print's characteristic curve, density limits and base tint, applied after every colour decision.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Dodge and burn: local exposure strokes painted on the photo. Moved into the Retouch tab. -->
+      <div class="control-section task-secondary" id="dodgeBurnSection" style="display: none;">
+        <div class="section-content">
+          <div class="control-group">
+            <label class="roll-reference-option">
+              <input type="checkbox" id="dodgeBurnEnabled">
+              <span data-i18n="dodgeBurnEnable">Paint on the photo</span>
+            </label>
+            <div id="dodgeBurnControls" style="display: none;">
+              <div class="paradigm-toggle" role="group" aria-label="Brush mode">
+                <button type="button" class="paradigm-btn" id="dodgeBurnModeDodge" aria-pressed="false" data-i18n="dodgeBurnModeDodge">Dodge (lighter)</button>
+                <button type="button" class="paradigm-btn active" id="dodgeBurnModeBurn" aria-pressed="true" data-i18n="dodgeBurnModeBurn">Burn (darker)</button>
+              </div>
+              <div class="slider-control">
+                <div class="slider-header">
+                  <span class="slider-label" id="dodgeBurnStopsLabel" data-i18n="dodgeBurnStops">Stops</span>
+                  <input type="number" class="slider-number-input" id="dodgeBurnStopsValue" min="0.1" max="2" step="0.1" value="0.5" aria-labelledby="dodgeBurnStopsLabel">
+                </div>
+                <input type="range" class="slider-input" id="dodgeBurnStops" min="0.1" max="2" step="0.1" value="0.5" aria-labelledby="dodgeBurnStopsLabel">
+              </div>
+              <div class="slider-control">
+                <div class="slider-header">
+                  <span class="slider-label" id="dodgeBurnSizeLabel" data-i18n="dodgeBurnSize">Brush size %</span>
+                  <input type="number" class="slider-number-input" id="dodgeBurnSizeValue" min="1" max="60" step="1" value="12" aria-labelledby="dodgeBurnSizeLabel">
+                </div>
+                <input type="range" class="slider-input" id="dodgeBurnSize" min="1" max="60" step="1" value="12" aria-labelledby="dodgeBurnSizeLabel">
+              </div>
+              <div class="slider-control">
+                <div class="slider-header">
+                  <span class="slider-label" id="dodgeBurnFeatherLabel" data-i18n="dodgeBurnFeather">Feather %</span>
+                  <input type="number" class="slider-number-input" id="dodgeBurnFeatherValue" min="0" max="100" step="1" value="50" aria-labelledby="dodgeBurnFeatherLabel">
+                </div>
+                <input type="range" class="slider-input" id="dodgeBurnFeather" min="0" max="100" step="1" value="50" aria-labelledby="dodgeBurnFeatherLabel">
+              </div>
+              <label class="roll-reference-option">
+                <input type="checkbox" id="dodgeBurnShowOverlay" checked>
+                <span data-i18n="dodgeBurnShowOverlay">Show strokes</span>
+              </label>
+            </div>
+            <div class="info-box" id="dodgeBurnStatus" role="status"></div>
+            <div class="film-base-buttons">
+              <button class="film-base-btn" id="dodgeBurnUndoStrokeBtn" data-i18n="dodgeBurnUndoStroke">Remove last stroke</button>
+              <button class="film-base-btn" id="dodgeBurnClearBtn" data-i18n="dodgeBurnClear">Clear strokes</button>
+            </div>
+            <div class="control-group-hint" data-i18n="dodgeBurnHint">Drag on the photo. Strokes stay with the frame through rotation and crop and are applied at full resolution on export.</div>
+          </div>
+        </div>
+      </div>
+
       <div class="control-section task-secondary" id="whiteBalanceSection" style="display: none;">
         <div class="section-header" data-section="conversion">
           <button type="button" class="section-title" aria-expanded="true" aria-controls="conversionSectionContent" data-i18n="sectionQuickFix">Quick Fix</button>
@@ -980,6 +1144,13 @@
                 <input type="number" class="slider-number-input" id="coreTintValue" min="-100" max="100" step="1" value="0" aria-labelledby="coreTintLabel">
               </div>
               <input type="range" class="slider-input" id="coreTint" min="-100" max="100" step="1" value="0" aria-labelledby="coreTintLabel">
+            </div>
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label" id="coreCyanLabel" data-i18n="cyanRed">Cyan / Red</span>
+                <input type="number" class="slider-number-input" id="coreCyanValue" min="-100" max="100" step="1" value="0" aria-labelledby="coreCyanLabel">
+              </div>
+              <input type="range" class="slider-input" id="coreCyan" min="-100" max="100" step="1" value="0" aria-labelledby="coreCyanLabel">
             </div>
           </div>
           <div class="control-group">
