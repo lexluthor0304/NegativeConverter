@@ -334,7 +334,7 @@ export async function workerEncodePng16(imageData, onProgressOrOptions = null) {
  * @param {function|{onProgress?:function,signal?:AbortSignal,timeoutMs?:number}} [onProgressOrOptions]
  * @returns {Promise<Blob|null>}
  */
-export async function workerEncodeTiff(imageData, bitDepth = 8, onProgressOrOptions = null) {
+export async function workerEncodeTiff(imageData, bitDepth = 8, onProgressOrOptions = null, metadata = null) {
   const opts = normalizeRequestOptions(onProgressOrOptions);
   // Transfer a copy so worker success/failure never detaches the caller's ImageData.
   const { buffer, sampleBits } = copyExportSamples(imageData, bitDepth);
@@ -347,7 +347,9 @@ export async function workerEncodeTiff(imageData, bitDepth = 8, onProgressOrOpti
         sourceBits: sampleBits,
         width: imageData.width,
         height: imageData.height,
-        bitDepth
+        bitDepth,
+        // Analog metadata (EXIF fields + XMP packet) written into the IFD.
+        metadata: metadata || null
       },
       [buffer],
       opts.onProgress,

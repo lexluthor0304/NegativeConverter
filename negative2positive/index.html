@@ -1023,6 +1023,31 @@
       </div>
 
       <!-- Match a lab scan: learn a look from the lab's JPEG of the same frame. Moved into the Edit tab. -->
+      <div class="control-section task-secondary" id="metadataSection" style="display: none;">
+        <div class="section-content">
+          <div class="control-group">
+            <div class="control-group-title" data-i18n="metadataRollTitle">Roll</div>
+            <div class="metadata-grid">
+              <label><span data-i18n="metadataRollName">Roll name</span><input type="text" id="metaRollName" data-meta-roll="rollName" maxlength="120" autocomplete="off"></label>
+              <label><span data-i18n="metadataStock">Film stock</span><input type="text" id="metaStock" data-meta-roll="stock" maxlength="120" autocomplete="off"></label>
+              <label><span data-i18n="metadataIso">ISO</span><input type="text" id="metaIso" data-meta-roll="iso" inputmode="numeric" maxlength="12" autocomplete="off"></label>
+              <label><span data-i18n="metadataDate">Date</span><input type="date" id="metaDate" data-meta-roll="date"></label>
+              <label><span data-i18n="metadataCamera">Camera</span><input type="text" id="metaCamera" data-meta-roll="camera" maxlength="120" autocomplete="off"></label>
+              <label><span data-i18n="metadataLens">Lens</span><input type="text" id="metaLens" data-meta-roll="lens" maxlength="120" autocomplete="off"></label>
+              <label><span data-i18n="metadataProcess">Process / developer</span><input type="text" id="metaProcess" data-meta-roll="process" maxlength="120" autocomplete="off"></label>
+              <label><span data-i18n="metadataLab">Lab</span><input type="text" id="metaLab" data-meta-roll="lab" maxlength="120" autocomplete="off"></label>
+            </div>
+          </div>
+          <div class="control-group">
+            <div class="control-group-title" data-i18n="metadataFrameTitle">This frame</div>
+            <div class="metadata-grid">
+              <label><span data-i18n="metadataFrameNumber">Frame number</span><input type="text" id="metaFrameNumber" data-meta-frame="frameNumber" maxlength="8" autocomplete="off"></label>
+              <label class="metadata-wide"><span data-i18n="metadataNotes">Notes</span><textarea id="metaNotes" data-meta-frame="notes" rows="2" maxlength="500"></textarea></label>
+            </div>
+          </div>
+          <div class="control-group-hint" data-i18n="metadataHint">Written into EXIF and XMP on every export.</div>
+        </div>
+      </div>
       <div class="control-section task-secondary" id="labMatchSection" style="display: none;">
         <div class="section-content">
           <div class="control-group">

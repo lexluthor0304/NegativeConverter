@@ -24,6 +24,8 @@
     import { estimateAlignment, warpImageData } from './imageAlignment.js';
     import { collectPairs, fitLook, sanitizeLookForSettings } from './labMatch.js';
     import { estimateExposureRatio, mergeFrames, coverageRect, toImage16, image16ToImageData } from './multiShot.js';
+    import { sanitizeRollMetadata, sanitizeFrameMetadata, buildExportMetadata, frameNumberFor } from './analogMetadata.js';
+    import { attachMetadataToBlob } from './exportMetadata.js';
 
     import { convertFrameWithRouter, resolveConversionMode } from '../pipeline/conversionRouter.js';
     import { convertFrameInWorker, convertPreviewFrameInWorker, CONVERSION_FAILED, WORKER_TIMEOUT } from './conversionWorkerClient.js';
@@ -2046,6 +2048,9 @@
       localExposure: null,
       // Lab-match look (colour setting, see labMatch.js).
       look: null,
+      // Analog metadata: the roll (session-wide) and this frame (per file).
+      rollMetadata: sanitizeRollMetadata({}),
+      frameMetadata: sanitizeFrameMetadata({}),
       // Flat field: session registry of gain maps and the current file's choice.
       flatFields: {},
       flatFieldActiveId: null,
@@ -3126,10 +3131,16 @@
       studioWorkspace?.sync();
     }
 
-    function getSprocketFrameComposeOptions() {
-      return {
-        edgeMarkings: state.sprocketEdge
-      };
+    // Edge text and frame number default to the roll's stock and this frame's
+    // number while the user has not typed their own values.
+    function getSprocketFrameComposeOptions(settings = state, position = state.currentFileIndex) {
+      const edge = { ...state.sprocketEdge };
+      const roll = state.rollMetadata || {};
+      const frame = settings === state || !settings ? state.frameMetadata : settings.frameMetadata;
+      if (roll.stock && (!edge.text || edge.text === DEFAULT_SPROCKET_EDGE_MARKINGS.text)) edge.text = roll.stock.toUpperCase();
+      const number = parseInt(frameNumberFor(frame, position), 10);
+      if (Number.isFinite(number) && edge.frameNumber === DEFAULT_SPROCKET_EDGE_MARKINGS.frameNumber) edge.frameNumber = Math.max(0, Math.min(99, number));
+      return { edgeMarkings: edge };
     }
 
     function syncSprocketEdgeSettingsUI() {
@@ -3538,6 +3549,7 @@
         localExposure: sanitizeLocalExposureForSettings(source === state ? state.localExposure : source.localExposure),
         // A colour setting like the curves: copied with the look, inherited from the fallback frame.
         look: sanitizeLookForSettings(source === state ? state.look : (Object.hasOwn(source, 'look') ? source.look : fallbackSettings.look)),
+        frameMetadata: sanitizeFrameMetadata(source === state ? state.frameMetadata : (Object.hasOwn(source, 'frameMetadata') ? source.frameMetadata : fallbackSettings.frameMetadata)),
         // Roll-level like the film base: a new file inherits the roll's flat field.
         flatFieldId: typeof (source.flatFieldId ?? fallbackSettings.flatFieldId) === 'string' ? String(source.flatFieldId ?? fallbackSettings.flatFieldId).slice(0, 64) : null,
         coreSaturation: sanitizeNumeric(source.coreSaturation, fallbackSettings.coreSaturation ?? 100, 0, 200),
@@ -9571,9 +9583,9 @@
       });
     }
 
-    function applySprocketFrameForExport(imageData, exportInfo) {
+    function applySprocketFrameForExport(imageData, exportInfo, settings = state, position = state.currentFileIndex) {
       if (!state.exportSprocketHolesEnabled) return imageData;
-      return composeSprocketFrame(imageData, getSprocketFrameComposeOptions());
+      return composeSprocketFrame(imageData, getSprocketFrameComposeOptions(settings, position));
     }
 
     async function getCurrentExportImageData() {
@@ -9640,7 +9652,7 @@
           overlay.updateProgress(60, lang.loadingEncoding);
           blob = await imageDataToBlob(outputImageData, exportInfo.format, state.jpegQuality, exportInfo.bitDepth, (pct) => {
             overlay.updateProgress(60 + pct * 0.35, lang.loadingEncoding);
-          });
+          }, exportMetadataFor(state, Math.max(0, state.currentFileIndex)));
           if (currentItem?.file?.name) {
             fileName = buildActiveExportFileName(currentItem.file.name, exportInfo);
           }
@@ -10026,7 +10038,7 @@
       }
     }
 
-    async function imageDataToBlob(imageData, format = null, quality = null, bitDepth = null, onProgress = null) {
+    async function imageDataToBlob(imageData, format = null, quality = null, bitDepth = null, onProgress = null, metadata = null) {
       const exportInfo = getExportInfo(format || state.exportFormat, bitDepth ?? state.exportBitDepth);
       const jpegQuality = quality !== null ? quality : state.jpegQuality;
       const trace = createPerfTrace('imageDataToBlob', {
@@ -10039,14 +10051,14 @@
       if (exportInfo.format === 'tiff') {
         // Try Worker first for TIFF encoding
         if (isWorkerAvailable()) {
-          blob = await workerEncodeTiff(imageData, exportInfo.bitDepth, onProgress);
+          blob = await workerEncodeTiff(imageData, exportInfo.bitDepth, onProgress, metadata);
           if (blob) {
             trace.end({ bytes: blob.size || 0, worker: true });
             return blob;
           }
         }
         const { encodeTiffBlob } = await getExportImageEncoders();
-        blob = encodeTiffBlob(imageData, exportInfo.bitDepth);
+        blob = encodeTiffBlob(imageData, exportInfo.bitDepth, metadata);
         trace.end({ bytes: blob.size || 0, worker: false });
         return blob;
       }
@@ -10056,7 +10068,7 @@
           blob = await workerEncodePng16(imageData, onProgress);
           if (blob) {
             trace.end({ bytes: blob.size || 0, worker: true });
-            return blob;
+            return attachMetadataToBlob(blob, 'png', metadata);
           }
         }
         const { encodePng16Blob } = await getExportImageEncoders();
@@ -10068,11 +10080,19 @@
       if (exportInfo.format === 'jpeg') {
         blob = await imageDataToCanvasBlob(imageData, 'image/jpeg', jpegQuality / 100);
         trace.end({ bytes: blob.size || 0, worker: false });
-        return blob;
+        return attachMetadataToBlob(blob, 'jpeg', metadata);
       }
       blob = await imageDataToCanvasBlob(imageData, 'image/png');
       trace.end({ bytes: blob.size || 0, worker: false });
-      return blob;
+      return attachMetadataToBlob(blob, 'png', metadata);
+    }
+
+    // Analog metadata for one exported frame: the roll fields plus this file's
+    // frame fields; `position` is the frame's place in the export order and
+    // numbers frames that carry no number of their own.
+    function exportMetadataFor(settings, position) {
+      const frame = settings === state || !settings ? state.frameMetadata : settings.frameMetadata;
+      return buildExportMetadata({ roll: state.rollMetadata, frame, index: position });
     }
 
     function updateBatchProgress(current, total, fileName) {
@@ -10141,6 +10161,7 @@
         corePaperToningStrength: 100,
         localExposure: null,
         look: null,
+        frameMetadata: sanitizeFrameMetadata({}),
         flatFieldId: state.flatFieldId || null,
         coreSaturation: 100,
         coreGlow: 0,
@@ -10354,13 +10375,15 @@
           try {
             const settingsForFile = getSettingsForExport(index, item);
             const adjusted = await processFileWithSettings(item.file, settingsForFile);
-            const outputImageData = applySprocketFrameForExport(adjusted, exportInfo);
+            const outputImageData = applySprocketFrameForExport(adjusted, exportInfo, settingsForFile, processedCount - 1);
             overlay.updateProgress(fileProgress + fileSlice * 0.6, lang.loadingEncoding);
             const blob = await imageDataToBlob(
               outputImageData,
               exportInfo.format,
               state.jpegQuality,
-              exportInfo.bitDepth
+              exportInfo.bitDepth,
+              null,
+              exportMetadataFor(settingsForFile, processedCount - 1)
             );
 
             const name = claimZipName(buildActiveExportFileName(item.file.name, exportInfo, settingsForFile));
@@ -10474,7 +10497,7 @@
           try {
             const settingsForFile = getSettingsForExport(index, item);
             adjusted = await processFileWithSettings(item.file, settingsForFile);
-            const outputImageData = applySprocketFrameForExport(adjusted, exportInfo);
+            const outputImageData = applySprocketFrameForExport(adjusted, exportInfo, settingsForFile, i);
             overlay.updateProgress(fileProgress + fileSlice * 0.55, lang.loadingEncoding);
             blob = await imageDataToBlob(
               outputImageData,
@@ -10486,7 +10509,8 @@
                   fileProgress + fileSlice * (0.55 + pct * 0.25),
                   lang.loadingEncoding
                 );
-              }
+              },
+              exportMetadataFor(settingsForFile, i)
             );
             name = buildActiveExportFileName(item.file.name, exportInfo, settingsForFile);
           } catch (err) {
@@ -10753,7 +10777,7 @@
           try {
             const settingsForFile = getSettingsForExport(index, item);
             adjusted = await processFileWithSettings(item.file, settingsForFile);
-            const outputImageData = applySprocketFrameForExport(adjusted, exportInfo);
+            const outputImageData = applySprocketFrameForExport(adjusted, exportInfo, settingsForFile, i);
             overlay.updateProgress(fileProgress + fileSlice * 0.6, lang.loadingEncoding);
             blob = await imageDataToBlob(
               outputImageData,
@@ -10765,7 +10789,8 @@
                   fileProgress + fileSlice * (0.6 + pct * 0.3),
                   lang.loadingEncoding
                 );
-              }
+              },
+              exportMetadataFor(settingsForFile, i)
             );
 
             name = buildActiveExportFileName(item.file.name, exportInfo, settingsForFile);
@@ -11041,6 +11066,9 @@
       state.flatFieldId = safe.flatFieldId && state.flatFields[safe.flatFieldId] ? safe.flatFieldId : null;
       updateFlatFieldUI();
       state.look = safe.look ? structuredClone(safe.look) : null;
+      state.frameMetadata = sanitizeFrameMetadata(safe.frameMetadata);
+      prefillRollStockFromFilmEdge();
+      updateMetadataUI();
       updateLabMatchUI();
       state.coreSaturation = safe.coreSaturation;
       state.coreGlow = safe.coreGlow;
@@ -11338,6 +11366,8 @@
     document.getElementById('clearFileListBtn').addEventListener('click', () => {
       if (isDesktopBatchExportLocked()) return;
       state.fileQueue = [];
+      state.rollMetadata = sanitizeRollMetadata({});
+      updateMetadataUI();
       state.currentFileIndex = 0;
       state.batchSessionActive = false;
       resetRollReferenceState();
@@ -12536,6 +12566,40 @@
     document.getElementById('labMatchRunBtn')?.addEventListener('click', () => { void runLabMatch(); });
     document.getElementById('labMatchApplySelectedBtn')?.addEventListener('click', applyLookToSelected);
     document.getElementById('labMatchClearBtn')?.addEventListener('click', clearLook);
+
+    // ===========================================
+    // Analog metadata panel (roll + frame)
+    // ===========================================
+    function updateMetadataUI() {
+      if (!stateReady) return;
+      for (const input of document.querySelectorAll('[data-meta-roll]')) {
+        if (document.activeElement !== input) input.value = state.rollMetadata[input.dataset.metaRoll] || '';
+      }
+      for (const input of document.querySelectorAll('[data-meta-frame]')) {
+        if (document.activeElement !== input) input.value = state.frameMetadata[input.dataset.metaFrame] || '';
+      }
+      const frameNumber = document.getElementById('metaFrameNumber');
+      if (frameNumber) frameNumber.placeholder = frameNumberFor({}, Math.max(0, state.currentFileIndex));
+    }
+
+    // The DX read names the stock; the roll takes it while the field is empty.
+    function prefillRollStockFromFilmEdge() {
+      const edge = state.filmEdge;
+      const name = edge?.found ? (edge.shortName || edge.filmName) : '';
+      if (name && !state.rollMetadata.stock) state.rollMetadata = sanitizeRollMetadata({ ...state.rollMetadata, stock: name });
+    }
+
+    document.querySelectorAll('[data-meta-roll]').forEach((input) => {
+      input.addEventListener('input', () => {
+        state.rollMetadata = sanitizeRollMetadata({ ...state.rollMetadata, [input.dataset.metaRoll]: input.value });
+      });
+    });
+    document.querySelectorAll('[data-meta-frame]').forEach((input) => {
+      input.addEventListener('input', () => {
+        state.frameMetadata = sanitizeFrameMetadata({ ...state.frameMetadata, [input.dataset.metaFrame]: input.value });
+        markCurrentFileDirty();
+      });
+    });
 
     // ===========================================
     // Multi-shot merge (camera scanning)

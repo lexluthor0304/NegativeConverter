@@ -82,12 +82,12 @@ function handleEncodePng16(msg) {
 }
 
 function handleEncodeTiff(msg) {
-  const { id, pixelData, width, height, bitDepth, sourceBits } = msg;
+  const { id, pixelData, width, height, bitDepth, sourceBits, metadata } = msg;
   const data = viewSamples(pixelData, sourceBits);
 
   self.postMessage({ type: 'progress', id, phase: 'encoding', percent: 10 });
 
-  const blob = encodeTiffBlob(data, width, height, bitDepth || 8);
+  const blob = encodeTiffBlob(data, width, height, bitDepth || 8, metadata || null);
 
   self.postMessage({ type: 'progress', id, phase: 'encoding', percent: 100 });
   self.postMessage({ type: 'blobResult', id, blob });

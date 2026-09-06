@@ -6,6 +6,9 @@
  * Blob, which exists in both scopes.
  */
 
+import { buildTiffParts, shortEntry, longEntry, TIFF_TAGS } from './tiffWriter.js';
+import { exifIfd0Entries, exifSubIfdEntries } from './exifWriter.js';
+
 /** Largest value a 16-bit sample can hold. */
 export const SAMPLE16_MAX = 65535;
 
@@ -41,6 +44,27 @@ export function createPngChunk(type, data) {
   const crc = crc32OfBytes(chunk.subarray(4, 8 + dataBytes.length));
   view.setUint32(8 + dataBytes.length, crc, false);
   return chunk;
+}
+
+/** Signature plus IHDR: the metadata chunks are inserted right after it. */
+export const PNG_HEADER_LENGTH = 33;
+
+/** eXIf chunk carrying a TIFF-structured EXIF payload (PNG 1.5 extension). */
+export function pngExifChunk(exifPayload) {
+  return createPngChunk('eXIf', exifPayload);
+}
+
+/** iTXt chunk with the XMP packet under the standard "XML:com.adobe.xmp" keyword. */
+export function pngXmpChunk(xml) {
+  const keyword = new TextEncoder().encode('XML:com.adobe.xmp');
+  const text = new TextEncoder().encode(xml);
+  // keyword \0 compressionFlag(0) compressionMethod(0) languageTag \0 translatedKeyword \0 text
+  const data = new Uint8Array(keyword.length + 1 + 1 + 1 + 1 + 1 + text.length);
+  data.set(keyword, 0);
+  let p = keyword.length;
+  data[p++] = 0; data[p++] = 0; data[p++] = 0; data[p++] = 0; data[p++] = 0;
+  data.set(text, p);
+  return createPngChunk('iTXt', data);
 }
 
 /**
@@ -143,88 +167,58 @@ export function encodePng16Blob(pixelData, width, height, deflate) {
  * @param {number} width
  * @param {number} height
  * @param {number} bitDepth - 8 or 16
+ * @param {{exif?: object, xmp?: string}|null} [metadata] - analog metadata:
+ *   descriptive EXIF fields go into IFD0 and an Exif sub-IFD, the XMP packet
+ *   into tag 700.
  * @returns {Blob}
  */
-export function encodeTiffBlob(pixels, width, height, bitDepth = 8) {
+export function encodeTiffBlob(pixels, width, height, bitDepth = 8, metadata = null) {
   const channels = 4;
   const wants16 = bitDepth === 16;
   const source16 = pixels instanceof Uint16Array;
   const bytesPerSample = wants16 ? 2 : 1;
   const sampleCount = width * height * channels;
   const stripByteCount = sampleCount * bytesPerSample;
-
-  const headerSize = 8;
-  const pixelOffset = headerSize;
-  const ifdOffset = pixelOffset + stripByteCount;
-  const entryCount = 12;
-  const ifdSize = 2 + (entryCount * 12) + 4;
-  const bitsArrayOffset = ifdOffset + ifdSize;
-  const sampleFormatOffset = bitsArrayOffset + 8;
-  const totalSize = sampleFormatOffset + 8;
-  // Write the strip straight into the output buffer — a separate scratch buffer
-  // would double peak memory for large exports.
-  const out = new Uint8Array(totalSize);
-  const view = new DataView(out.buffer);
-
-  let p = pixelOffset;
+  // The strip is the only large buffer; the IFDs are a few hundred bytes and
+  // the Blob concatenates the parts without copying the strip again.
+  const strip = new Uint8Array(stripByteCount);
+  let p = 0;
   if (wants16) {
     for (let i = 0; i < sampleCount; i++) {
       // Alpha is forced opaque; see the note in encodePng16Blob.
       const value = source16
         ? ((i & 3) === 3 ? SAMPLE16_MAX : pixels[i])
         : pixels[i] * 257;
-      out[p++] = value & 0xFF;
-      out[p++] = (value >>> 8) & 0xFF;
+      strip[p++] = value & 0xFF;
+      strip[p++] = (value >>> 8) & 0xFF;
     }
   } else if (source16) {
     for (let i = 0; i < sampleCount; i++) {
-      out[p++] = (i & 3) === 3 ? 255 : (pixels[i] >>> 8);
+      strip[p++] = (i & 3) === 3 ? 255 : (pixels[i] >>> 8);
     }
   } else {
-    out.set(pixels.subarray(0, sampleCount), pixelOffset);
+    strip.set(pixels.subarray(0, sampleCount));
   }
 
-  const writeU16 = (off, val) => view.setUint16(off, val, true);
-  const writeU32 = (off, val) => view.setUint32(off, val, true);
-
-  // Header
-  out[0] = 0x49; out[1] = 0x49; // little-endian
-  writeU16(2, 42);
-  writeU32(4, ifdOffset);
-
-  // IFD
-  writeU16(ifdOffset, entryCount);
-  let entryOffset = ifdOffset + 2;
-  const writeEntry = (tag, type, count, valueOrOffset) => {
-    writeU16(entryOffset, tag);
-    writeU16(entryOffset + 2, type);
-    writeU32(entryOffset + 4, count);
-    writeU32(entryOffset + 8, valueOrOffset);
-    entryOffset += 12;
-  };
-  const shortInline = (value) => value & 0xFFFF;
-
-  writeEntry(256, 4, 1, width);                 // ImageWidth
-  writeEntry(257, 4, 1, height);                // ImageLength
-  writeEntry(258, 3, 4, bitsArrayOffset);       // BitsPerSample
-  writeEntry(259, 3, 1, shortInline(1));        // Compression = none
-  writeEntry(262, 3, 1, shortInline(2));        // Photometric = RGB
-  writeEntry(273, 4, 1, pixelOffset);           // StripOffsets
-  writeEntry(277, 3, 1, shortInline(channels)); // SamplesPerPixel
-  writeEntry(278, 4, 1, height);                // RowsPerStrip
-  writeEntry(279, 4, 1, stripByteCount);        // StripByteCounts
-  writeEntry(284, 3, 1, shortInline(1));        // PlanarConfiguration
-  writeEntry(338, 3, 1, shortInline(1));        // ExtraSamples (associated alpha)
-  writeEntry(339, 3, 4, sampleFormatOffset);    // SampleFormat
-
-  writeU32(entryOffset, 0); // next IFD offset
-
-  // Extra value arrays
   const sampleBit = wants16 ? 16 : 8;
-  for (let i = 0; i < 4; i++) {
-    writeU16(bitsArrayOffset + (i * 2), sampleBit);
-    writeU16(sampleFormatOffset + (i * 2), 1); // unsigned integer
-  }
-
-  return new Blob([out], { type: 'image/tiff' });
+  const entries = [
+    longEntry(TIFF_TAGS.ImageWidth, width),
+    longEntry(TIFF_TAGS.ImageLength, height),
+    shortEntry(TIFF_TAGS.BitsPerSample, [sampleBit, sampleBit, sampleBit, sampleBit]),
+    shortEntry(TIFF_TAGS.Compression, 1),
+    shortEntry(TIFF_TAGS.PhotometricInterpretation, 2),
+    shortEntry(TIFF_TAGS.SamplesPerPixel, channels),
+    longEntry(TIFF_TAGS.RowsPerStrip, height),
+    longEntry(TIFF_TAGS.StripByteCounts, stripByteCount),
+    shortEntry(TIFF_TAGS.PlanarConfiguration, 1),
+    shortEntry(TIFF_TAGS.ExtraSamples, 1),
+    shortEntry(TIFF_TAGS.SampleFormat, [1, 1, 1, 1]),
+    ...(metadata ? exifIfd0Entries(metadata.exif || {}, { xmp: metadata.xmp || null }) : [])
+  ];
+  const parts = buildTiffParts({
+    entries,
+    exif: metadata && metadata.exif ? exifSubIfdEntries(metadata.exif) : null,
+    blocks: [{ tag: TIFF_TAGS.StripOffsets, bytes: strip }]
+  });
+  return new Blob(parts, { type: 'image/tiff' });
 }

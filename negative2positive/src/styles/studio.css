@@ -293,3 +293,10 @@ body.studio {
 .loupe-field input[type="range"] { width: 120px; }
 .loupe-capture { margin-left: auto; color: var(--text-primary); border: 1px solid var(--border-light) !important; }
 .loupe-hint { font-size: 12px; color: var(--text-muted); line-height: 1.6; margin: 0; }
+
+/* Analog metadata panel (roll + frame). */
+.metadata-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; }
+.metadata-grid label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--text-secondary); min-width: 0; }
+.metadata-grid input, .metadata-grid textarea { width: 100%; min-width: 0; padding: 6px 8px; font: inherit; font-size: 12px; color: var(--text-primary); background: var(--bg-primary); border: 1px solid var(--border-light); border-radius: 4px; }
+.metadata-grid textarea { resize: vertical; }
+.metadata-wide { grid-column: 1 / -1; }

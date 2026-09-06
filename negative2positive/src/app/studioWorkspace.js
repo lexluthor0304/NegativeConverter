@@ -32,6 +32,7 @@ export const studioText = {
     clearConfirm: '清空照片列表后，将无法再切换到这些照片。请先导出需要保留的结果。继续吗？',
     newConfirm: '关闭当前照片和列表？未导出的结果将丢失，原始文件不会被删除。',
     hidePanel: '收起调整', showPanel: '展开调整', hideStrip: '收起照片条', showStrip: '展开照片条', tabs: '照片工具',
+    metadata: '胶卷与画格', metadataHint: '胶片、ISO、相机、镜头、冲洗、冲印店、日期和画格号会写进导出文件的 EXIF 与 XMP。',
     lightTable: '光桌', stripView: '照片条', lightTableHint: '以网格查看整卷，颜色是否统一一眼可见。',
     cyan: '青 / 红', testStrip: '试条', dodgeBurn: '加减光', flatField: '平场校正', labMatch: '匹配店扫',
     baseSampleHint: '点击未曝光的胶片边缘采样；按 Esc 取消。', resetAll: '重置全部调整',
@@ -72,6 +73,7 @@ export const studioText = {
     mergeHint: 'Merge 2–5 shots of the same frame into one 16-bit file: average stacks for less noise, HDR combines exposure brackets.', mergeAverage: 'Merge selected: average', mergeHdr: 'Merge selected: HDR brackets',
     clearConfirm: 'Clear the photo list? Export any results you want to keep first.', newConfirm: 'Close this photo and the list? Unexported results will be lost. Original files will not be deleted.',
     hidePanel: 'Hide controls', showPanel: 'Show controls', hideStrip: 'Hide photos', showStrip: 'Show photos', tabs: 'Photo tools',
+    metadata: 'Roll & frame', metadataHint: 'Film, ISO, camera, lens, process, lab, date and frame number go into the EXIF and XMP of every export.',
     lightTable: 'Light table', stripView: 'Film strip', lightTableHint: 'Show the whole roll as a grid so colour consistency is visible at a glance.',
     cyan: 'Cyan / red', testStrip: 'Test strip', dodgeBurn: 'Dodge and burn', flatField: 'Flat field', labMatch: 'Match a lab scan',
     baseSampleHint: 'Click an unexposed film edge to sample it. Press Esc to cancel.', resetAll: 'Reset all adjustments',
@@ -112,6 +114,7 @@ export const studioText = {
     mergeHint: '同じコマの 2〜5 枚の撮影を 1 つの 16 bit ファイルに合成します。平均でノイズを減らし、HDR で露出ブラケットを統合します。', mergeAverage: '選択を合成：平均', mergeHdr: '選択を合成：HDR ブラケット',
     clearConfirm: '写真一覧を空にしますか？必要な結果を先に書き出してください。', newConfirm: '現在の写真と一覧を閉じますか？未保存の結果は失われますが、元ファイルは削除しません。',
     hidePanel: '調整を隠す', showPanel: '調整を表示', hideStrip: '写真一覧を隠す', showStrip: '写真一覧を表示', tabs: '写真ツール',
+    metadata: 'ロールとコマ', metadataHint: 'フィルム・ISO・カメラ・レンズ・現像・ラボ・日付・コマ番号を書き出しファイルの EXIF と XMP に書き込みます。',
     lightTable: 'ライトテーブル', stripView: 'フィルムストリップ', lightTableHint: 'ロール全体をサムネイルの一覧で表示し、色の統一を一目で確認します。',
     cyan: 'シアン / 赤', testStrip: 'テストストリップ', dodgeBurn: '覆い焼き・焼き込み', flatField: 'フラットフィールド', labMatch: 'ラボスキャンに合わせる',
     baseSampleHint: '未露光のフィルム端をクリック。Esc で終了します。', resetAll: '全調整をリセット',
@@ -312,6 +315,7 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
   move('consoleSection', panes.edit);
   makeDrawer(panes.edit, 'studioTestStrip', 'testStrip', ['testStripSection']);
   makeDrawer(panes.edit, 'studioLabMatch', 'labMatch', ['labMatchSection']);
+  makeDrawer(panes.edit, 'studioMetadata', 'metadata', ['metadataSection'], 'metadataHint');
   const curve = makeDrawer(panes.edit, 'studioCurves', 'curves', []);
   curve.lastElementChild.append($('curveCanvas').closest('.control-group'));
   const looks = makeDrawer(panes.edit, 'studioLooks', 'looks', []);
@@ -567,7 +571,7 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
         panel.style.display = 'flex';
         $('filmSettingsSection').style.display = 'block';
         ['autoFrameSettingsSection', 'sprocketSettingsSection'].forEach(id => { $(id).style.display = 'block'; });
-        ['toneSection', 'colorSection', 'cmySection', 'additionalSection', 'consoleSection', 'dustRemovalSection', 'advancedSection', 'enlargerSection', 'testStripSection', 'paperSection', 'dodgeBurnSection', 'flatFieldSection', 'labMatchSection'].forEach(id => {
+        ['toneSection', 'colorSection', 'cmySection', 'additionalSection', 'consoleSection', 'dustRemovalSection', 'advancedSection', 'enlargerSection', 'testStripSection', 'paperSection', 'dodgeBurnSection', 'flatFieldSection', 'labMatchSection', 'metadataSection'].forEach(id => {
           $(id).style.display = ready ? 'block' : 'none';
         });
       }
