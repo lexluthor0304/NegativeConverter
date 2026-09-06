@@ -116,7 +116,7 @@ export async function runTechnicalDepthSmoke({ send, evaluate, waitFor, wait, fa
 }
 
 // ---- 3. AI repair: the controls and the TELEA fallback always; the learned
-// model only when AI_INPAINT_MODEL points at a LaMa ONNX file (local runs). ----
+// bundled MI-GAN model, with an optional AI_INPAINT_MODEL override. ----
 async function runAiRepairScenario({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, root }) {
   const fixture = join(root, 'negative2positive', 'test-fixtures', 'negative-sample.jpg');
   await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
@@ -138,22 +138,30 @@ async function runAiRepairScenario({ send, evaluate, waitFor, wait, fail, instal
   console.log('technical ai repair idle:', idle);
   if (!/No model loaded/.test(idle)) fail('AI repair should report no model: ' + idle);
 
-  const modelPath = process.env.AI_INPAINT_MODEL;
-  if (!modelPath) {
-    // Without a model the toggle must fail cleanly and leave TELEA in charge.
-    await evaluate(`document.getElementById('dustAiEnabled').click()`);
-    await waitFor('model download refused or failed', `/Model failed|Loading model|Model ready/.test(document.getElementById('dustAiStatus').textContent)`, 60_000);
-    await waitFor('model state settled', `/Model failed|Model ready/.test(document.getElementById('dustAiStatus').textContent)`, 120_000);
-    const after = await evaluate(`({ status: document.getElementById('dustAiStatus').textContent, dust: document.getElementById('dustStatus').textContent })`);
-    console.log('technical ai repair without a model:', JSON.stringify(after));
-    if (!/Detected \d+ dust/.test(after.dust)) fail('TELEA result must survive a failed model load: ' + JSON.stringify(after));
-    console.log('ok: AI repair exposes its controls, fails cleanly without a reachable model and leaves the TELEA result in place');
-    return;
-  }
+  // Invalid local bytes exercise real runtime failure without depending on a 404.
+  await evaluate(`(() => {
+    const input = document.getElementById('dustAiModelInput');
+    const transfer = new DataTransfer();
+    transfer.items.add(new File(['invalid model'], 'broken.onnx'));
+    input.files = transfer.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await waitFor('invalid model rejected', `/Model failed/.test(document.getElementById('dustAiStatus').textContent)`);
+  const fallback = await evaluate(`document.getElementById('dustStatus').textContent`);
+  if (!/Detected \d+ dust/.test(fallback)) fail('Basic repair lost after invalid model: ' + fallback);
 
-  const pick = await send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector: '#dustAiModelInput' });
+  await installDownloadCapture(evaluate);
+  await evaluate(`document.querySelector('.format-btn[data-format="png"]').click(); document.querySelector('.bitdepth-btn[data-bitdepth="8"]').click(); document.getElementById('exportSingleBtn').click()`);
+  const beforeAi = await takeDownload(evaluate, waitFor, 'basic repair PNG');
+
+  const modelPath = process.env.AI_INPAINT_MODEL;
   const loadStart = Date.now();
-  await send('DOM.setFileInputFiles', { files: [modelPath], nodeId: pick.result.nodeId });
+  if (modelPath) {
+    const pick = await send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector: '#dustAiModelInput' });
+    await send('DOM.setFileInputFiles', { files: [modelPath], nodeId: pick.result.nodeId });
+  } else {
+    await evaluate(`document.getElementById('dustAiLoadBtn').click()`);
+  }
   await waitFor('model ready', `/Model ready/.test(document.getElementById('dustAiStatus').textContent)`, 600_000);
   const loadMs = Date.now() - loadStart;
   await evaluate(`document.getElementById('dustAiEnabled').click()`);
@@ -163,4 +171,56 @@ async function runAiRepairScenario({ send, evaluate, waitFor, wait, fail, instal
   const match = result.status.match(/(\d+) tile\(s\) in (\d+) ms/);
   if (!match) fail('AI repair did not report its run: ' + result.status);
   console.log(`ok: the learned inpainter loaded in ${Math.round(loadMs / 1000)} s and filled ${match[1]} tile(s) in ${match[2]} ms (${Math.round(match[2] / Math.max(1, match[1]))} ms per 512-px tile)`);
+  await evaluate(`(() => {
+    window.__aiBrushRuns = 0;
+    new MutationObserver(() => { window.__aiBrushRuns++; }).observe(document.getElementById('dustAiStatus'), { childList: true });
+    if (!document.getElementById('dustShowMask').checked) document.getElementById('dustShowMask').click();
+    const canvas = document.getElementById('canvas');
+    const rect = canvas.getBoundingClientRect();
+    const options = { bubbles: true, clientX: rect.x + rect.width / 2,
+      clientY: rect.y + rect.height / 2, button: 0, altKey: true };
+    canvas.dispatchEvent(new MouseEvent('mousedown', options));
+    document.dispatchEvent(new MouseEvent('mouseup', options));
+  })()`);
+  await waitFor('MI-GAN replaces brush preview', `window.__aiBrushRuns > 0 && /last run/.test(document.getElementById('dustAiStatus').textContent)`, 120_000);
+  await evaluate(`document.getElementById('dustShowMask').click()`);
+  console.log('ok: brush release runs MI-GAN');
+  await evaluate(`document.getElementById('exportSingleBtn').click()`);
+  const afterAi = await takeDownload(evaluate, waitFor, 'MI-GAN repaired PNG');
+  const decode = (entry) => UPNG.decode(entry.bytes.buffer.slice(entry.bytes.byteOffset, entry.bytes.byteOffset + entry.bytes.byteLength));
+  const before = decode(beforeAi); const after = decode(afterAi);
+  if (before.width !== after.width || before.height !== after.height) fail('AI repair changed export dimensions');
+  const a = new Uint8Array(UPNG.toRGBA8(before)[0]); const b = new Uint8Array(UPNG.toRGBA8(after)[0]);
+  if (!a.some((value, index) => value !== b[index])) fail('AI export equals basic repair; model result was not used');
+  console.log('ok: full-resolution PNG export contains the MI-GAN result');
+
+  // Exercise CPU fallback with real weights, and verify compositing preserves all
+  // unmasked pixels including 16-bit values not representable by 8-bit samples.
+  const cpu = await evaluate(`(async () => {
+    const ai = await import('/src/app/aiInpaint.js');
+    const session = await ai.createInpaintSession(await ai.fetchModelBytes(ai.DEFAULT_MODEL_URL), { prefer: 'wasm' });
+    try {
+      const width = 64; const source = new ImageData(width, width);
+      source.data.fill(128);
+      const plane = new Uint16Array(width * width * 4).fill(32891);
+      source.__image16 = { width, height: width, data: plane };
+      const mask = new Uint8Array(width * width);
+      for (let y = 29; y < 35; y++) for (let x = 29; x < 35; x++) {
+        const i = y * width + x; mask[i] = 255;
+        source.data.fill(255, i * 4, i * 4 + 3);
+        plane.fill(65535, i * 4, i * 4 + 3);
+      }
+      const started = performance.now();
+      const { imageData: result } = await ai.inpaintWithModel(source, mask, session.run, { feather: 0 });
+      let changed = 0; let outsideChanges = 0;
+      for (let i = 0; i < mask.length; i++) for (let c = 0; c < 3; c++) {
+        if (mask[i]) changed += result.data[i * 4 + c] !== source.data[i * 4 + c] ? 1 : 0;
+        else outsideChanges += result.__image16.data[i * 4 + c] !== plane[i * 4 + c] ? 1 : 0;
+      }
+      return { provider: session.provider, ms: Math.round(performance.now() - started), changed, outsideChanges };
+    } finally { await session.release(); }
+  })()`);
+  if (cpu.provider !== 'wasm' || !cpu.changed || cpu.outsideChanges) fail('MI-GAN CPU/compositing regression: ' + JSON.stringify(cpu));
+  console.log('ok: real MI-GAN CPU repair and untouched 16-bit pixels:', JSON.stringify(cpu));
+
 }

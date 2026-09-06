@@ -63,42 +63,43 @@ possible in this environment; the file follows the DNG 1.4 LinearRaw
 requirements, and the comparison of Lightroom's default rendering with the
 app's neutral rendering is still to be recorded once a licence is at hand.
 
-## On-device AI repair (#163)
+## On-device AI repair (#163): MI-GAN
 
-**AI repair (on-device)** in the Cleanup drawer. `aiInpaint.js` runs a
-learned inpainter (the LaMa ONNX export, Apache-2.0) through onnxruntime-web
-on WebGPU where the browser has it and on WASM otherwise, only over the
-512-px tiles that hold masked pixels: the mask is looked at through a coarse
-grid, touching cells merge into boxes grown by 64 px of context, boxes are
-covered by overlapping windows kept inside the image (smaller images are
-edge-padded), and each tile's output is blended back with a 4-px feather,
-against the original, once per pixel. The 16-bit plane follows. The model
-is fetched once from the self-hosted asset URL (`download.neoanaloglab.com`,
-already in the desktop CSP) and cached in IndexedDB, or loaded from a
-`.onnx` file the user picks; the onnxruntime-web wasm ships with the app, so
-the desktop build needs no CDN. Same mask source as before (detection plus
-brush): brush strokes preview with TELEA, the learned fill replaces TELEA
-when detection commits and on export (`inpaintForCommit`). Without a model
-or a runtime everything falls back to TELEA and says so.
+2026-09-06: 標準モデルを LaMa から **MI-GAN Places2 Pipeline v2** に変更。
+Studio の Retouch → Dust cleanup → **AI repair · MI-GAN** で有効化する。
+モデルは `public/models/migan_pipeline_v2.onnx`（約 27 MiB）に同梱し、
+Web / Tauri のビルドに含める。初回読み込み後は IndexedDB にキャッシュする。
+外部ホストのモデル配信や写真のアップロードは不要。
 
-Tests: `aiInpaint.test.mjs` (boxes, tiles, padding, feathering, blending
-against the original with a fake model, 0..1 and 0..255 output scales,
-progress). Smoke: the controls, a failed model load that leaves the TELEA
-result in place, and, when `AI_INPAINT_MODEL` points at a LaMa ONNX file
-(local runs only), a real load, inference over the sample's dust mask and
-the reported tiles / milliseconds.
+### 入出力と処理経路
 
-Status against the acceptance criteria: the runtime, tiling, blending and
-fallback are done and tested; the model asset still has to be uploaded to
-`download.neoanaloglab.com/models/lama_fp32.onnx` (208 MB, Apache-2.0) for
-the one-click path. Measured with the local model on an Apple-silicon Mac
-(headless Chrome): the WebGPU session creates in about 7 s but the first
-inference fails inside LaMa's Fourier layers (`/generator/model/model.5/
-conv1/ffc/convg2g/Add`: "Can't perform binary op on the given tensors",
-onnxruntime-web 1.19.2), so `createInpaintSession` warms every WebGPU
-session up on a blank tile and rebuilds it on WASM when that fails, and
-`inpaintForCommit` does the same once at run time. On WASM the fp32 model
-takes tens of seconds per 512-px tile, which is far from the 200 ms target;
-a WebGPU-friendly student model (MI-GAN, no Fourier units, about 6 M
-parameters) is the follow-up that makes the tile budget realistic, and the
-runtime here is model-agnostic (two float32 inputs, one output).
+- 公式 Pipeline の入力は `image`: uint8 NCHW RGB、`mask`: uint8 NCHW。
+  **255 = 保持、0 = 修復**。アプリ内部の `1 = 修復` を境界で反転する。
+- `result` は uint8 NCHW。必ず 255 で割って正規化し、暗い画像の値域を推測しない。
+  別形式の ONNX は明示的に拒否する。ローカル選択も同じ Pipeline 形式に限定。
+- マスク周辺を 512 px タイルで推論し、4 px の境界フェザーで合成する。
+  マスクとフェザー領域外は元の画素を保持する。16-bit 出力でも非修復領域の
+  精度を保持するが、モデル自身の入出力は 8-bit であり、失われた原画素の復元ではない。
+- GPU と CPU の両方を実際の小さなマスクでウォームアップする。
+  WebGPU が失敗すれば WASM を試し、両方失敗すれば通常修復とエラー表示へ戻る。
+- 推論はセッションごとに直列化し、テンソルと置き換えたセッションを解放する。
+- ブラシは通常修復で即時表示し、離した後に MI-GAN で置き換える。
+  写真切替・マスク変更・取り消し後の古い結果は適用しない。
+- 現在の写真の PNG/JPEG/TIFF 書き出しは現在のマスクで再推論するため、
+  ブラシ直後の通常修復プレビューがそのまま書き出されることはない。
+  一括書き出しは各写真で再検出してから MI-GAN を適用する。
+  Linear DNG は従来どおり修復を焼き込まない。
+
+### モデルの出典と検証
+
+モデルの固定リビジョン・SHA-256・ライセンスは
+`negative2positive/public/models/README.md` に記録。
+`aiInpaint.migan.test.mjs` でバンドルのハッシュ、マスクの向き、RGB 配置、
+暗部の正規化、空マスク、エラー時の解放を検証する。
+`technical-depth-smoke.mjs` は壊れたモデルからの復帰、標準モデルの読み込み、
+実推論、PNG 書き出しへの反映、WASM 推論と非マスク領域の 16-bit 保持を検証。
+
+初回の実測（Apple silicon / headless Chrome、ONNX Runtime Web 1.19.2）:
+WebGPU 読み込み約 2.5 秒、13 タイル約 3.3 秒（約 254 ms / タイル）。
+端末・ブラウザ・マスクの分布で時間は変わり、200 ms 目標の達成は保証しない。
+実際のフィルムの粒子・毛髪・細い構造物については目視評価を継続する。

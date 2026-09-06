@@ -1,5 +1,5 @@
 // On-device AI inpainting for dust and scratches: a learned inpainter (the
-// LaMa ONNX export, Apache-2.0) run by onnxruntime-web on WebGPU where the
+// MI-GAN Places2 pipeline, MIT) run by onnxruntime-web on WebGPU where the
 // browser has it and on WASM otherwise, over 512-px tiles restricted to the
 // mask's bounding boxes with context padding, blended back with a feathered
 // edge. Nothing leaves the device; the model is fetched once and cached in
@@ -10,9 +10,9 @@
 // The onnxruntime-web wasm binary ships with the app (Vite emits it as an
 // asset next to the lazy chunk), so the runtime works offline in the desktop
 // build and needs no CDN entry in the CSP.
-// Self-hosted model asset (the domain the desktop CSP already allows).
-export const DEFAULT_MODEL_URL = 'https://download.neoanaloglab.com/models/lama_fp32.onnx';
-export const MODEL_LICENCE = 'LaMa (Samsung AI / advimman) Apache-2.0, ONNX export by Carve';
+// Bundled with web and desktop builds; no third-party request is required.
+export const DEFAULT_MODEL_URL = `${import.meta.env?.BASE_URL || '/'}models/migan_pipeline_v2.onnx`;
+export const MODEL_LICENCE = 'MI-GAN (Picsart AI Research), MIT; see models/MI-GAN-LICENSE.txt';
 export const TILE = 512;
 export const CONTEXT = 64;
 export const OVERLAP = 32;
@@ -298,7 +298,7 @@ export async function fetchModelBytes(url, { onProgress = null } = {}) {
   const reader = response.body?.getReader();
   if (!reader) {
     const bytes = await response.arrayBuffer();
-    await writeCachedModel(url, bytes);
+    await writeCachedModel(url, bytes).catch(() => false);
     return bytes;
   }
   const chunks = [];
@@ -313,19 +313,40 @@ export async function fetchModelBytes(url, { onProgress = null } = {}) {
   const bytes = new Uint8Array(received);
   let offset = 0;
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
-  await writeCachedModel(url, bytes.buffer);
+  await writeCachedModel(url, bytes.buffer).catch(() => false);
   return bytes.buffer;
 }
 
-function runnerFor(ort, session) {
-  const [imageName, maskName] = session.inputNames;
+// Official MI-GAN pipeline: uint8 NCHW RGB, 255 = known / 0 = repair.
+// Keep the tiling API in 0..1 with 1 = repair, converting only at this boundary.
+export function runnerFor(ort, session) {
+  if (!session.inputNames.includes('image') || !session.inputNames.includes('mask') ||
+      !session.outputNames.includes('result')) {
+    throw new Error('Expected the MI-GAN pipeline ONNX model (image, mask → result)');
+  }
   return async (image, mask, size) => {
+    const pixels = size * size;
+    if (image.length !== pixels * 3 || mask.length !== pixels) throw new RangeError('Invalid MI-GAN tile');
+    // Empty masks need no inference (also avoids empty-bounds model operators).
+    if (!mask.some((value) => value > 0)) return image.slice();
+    const rgb = Uint8Array.from(image, (value) => Math.round(Math.min(1, Math.max(0, value)) * 255));
+    const known = Uint8Array.from(mask, (value) => value > 0 ? 0 : 255);
     const feeds = {
-      [imageName]: new ort.Tensor('float32', image, [1, 3, size, size]),
-      [maskName]: new ort.Tensor('float32', mask, [1, 1, size, size])
+      image: new ort.Tensor('uint8', rgb, [1, 3, size, size]),
+      mask: new ort.Tensor('uint8', known, [1, 1, size, size])
     };
-    const results = await session.run(feeds);
-    return results[session.outputNames[0]].data;
+    let results;
+    try {
+      results = await session.run(feeds);
+      const output = results.result;
+      if (output.type !== 'uint8' || output.dims.length !== 4 ||
+          output.dims.some((value, index) => value !== [1, 3, size, size][index]) ||
+          output.data.length !== pixels * 3) throw new Error('Invalid MI-GAN output');
+      // Explicit normalization also handles nearly black results without guessing scale.
+      return Float32Array.from(output.data, (value) => value / 255);
+    } finally {
+      for (const tensor of new Set([...Object.values(feeds), ...Object.values(results || {})])) tensor.dispose?.();
+    }
   };
 }
 
@@ -346,11 +367,20 @@ export async function createInpaintSession(modelBytes, { prefer = 'webgpu', warm
     let session = null;
     try {
       session = await ort.InferenceSession.create(modelBytes, { executionProviders, graphOptimizationLevel: 'all' });
-      const run = runnerFor(ort, session);
-      if (warmUp && executionProviders[0] === 'webgpu') {
-        await run(new Float32Array(3 * TILE * TILE), new Float32Array(TILE * TILE), TILE);
+      const infer = runnerFor(ort, session);
+      let pending = Promise.resolve();
+      const run = (...args) => {
+        const task = pending.then(() => infer(...args));
+        pending = task.catch(() => {});
+        return task;
+      };
+      const release = async () => { await pending; await session.release(); };
+      if (warmUp) {
+        const mask = new Float32Array(TILE * TILE);
+        mask[(TILE / 2) * TILE + TILE / 2] = 1;
+        await run(new Float32Array(3 * TILE * TILE).fill(0.5), mask, TILE);
       }
-      return { session, provider: executionProviders[0], run, inputNames: session.inputNames, outputNames: session.outputNames };
+      return { session, release, provider: executionProviders[0], run, inputNames: session.inputNames, outputNames: session.outputNames };
     } catch (error) {
       lastError = error;
       if (session) { try { await session.release?.(); } catch {} }
