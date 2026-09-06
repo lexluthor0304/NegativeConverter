@@ -11,6 +11,13 @@ import { WebGLRenderer } from './WebGLRenderer.js'
 import { loadProfile, applyLut3D } from './EnhancedProfiles.js'
 import { applyUnsharpMask } from './Sharpening.js'
 
+function isChannelDataOverride(value) {
+  return Array.isArray(value) && value.length === 3 && value.every((channel) => channel
+    && Number.isFinite(channel.whitePointOrigin)
+    && Number.isFinite(channel.blackPointOrigin)
+    && Number.isFinite(channel.meanPoint))
+}
+
 export class Engine {
   constructor(width, height) {
     this.width = width
@@ -77,8 +84,12 @@ export class Engine {
     //    buffer every time, so this never compounds across renders.
     this._applyPreSaturation(imageData, params)
 
-    // 1. Analyze the negative (histogram-based black/white/mean points)
-    this.channelData = analyzeImage(imageData, params)
+    // 1. Analyze the negative (histogram-based black/white/mean points). A roll
+    //    analysis hands in shared channelData instead so every frame of the roll
+    //    gets the same curves; this frame's own histogram is then not consulted.
+    this.channelData = isChannelDataOverride(params.analysisOverride)
+      ? params.analysisOverride.map((channel) => ({ ...channel }))
+      : analyzeImage(imageData, params)
 
     // 2. Compute auto color correction
     this.autoColor = computeAutoColor(this.channelData)

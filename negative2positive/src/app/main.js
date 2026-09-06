@@ -16,11 +16,12 @@
     import { pickStudioColors, mergeStudioColors, createStudioThumbnail } from './studioSettings.js';
     import { readFilmEdge, sanitizeFilmEdgeForSettings, formatFilmEdgeFrames } from './filmEdgeReader.js';
     import { loadDxFilmTable, describeDxFilm, shortFilmName } from './dxFilmDatabase.js';
+    import { aggregateRollAnalysis, measureNegativeMean, sanitizeRollFrameForSettings, rollFrameExposureUnits } from './rollAnalysis.js';
 
-    import { convertFrameWithRouter } from '../pipeline/conversionRouter.js';
+    import { convertFrameWithRouter, resolveConversionMode } from '../pipeline/conversionRouter.js';
     import { convertFrameInWorker, convertPreviewFrameInWorker, CONVERSION_FAILED, WORKER_TIMEOUT } from './conversionWorkerClient.js';
     import { displayPreviewSize, resizeDisplayPreview } from './displayPreview.js';
-    import { invalidateSilverCoreCache } from '../pipeline/silverAdapter.js';
+    import { invalidateSilverCoreCache, analyzeSilverCoreFrame } from '../pipeline/silverAdapter.js';
     import { canUseBrowserZipStreaming, ZipStoreWriter, createZipNameDeduper } from './zipStoreWriter.js';
     import {
       createAdjustmentLutScratch,
@@ -30,6 +31,7 @@
     } from './adjustmentPipeline.js';
     import {
       downsampleImageDataForMaxPixels,
+      downsampleImageDataForMaxDim,
       cropImageDataRegion
     } from './imageDataOps.js';
     import {
@@ -437,6 +439,7 @@
         updateAutoFrameButtons();
         updateGrayPointGuideUI();
         updateFilmEdgeUI();
+        updateRollAnalysisUI();
         if (typeof updateLensCorrectionUI === 'function') updateLensCorrectionUI();
         if (typeof updateExportUI === 'function') updateExportUI();
         updateDesktopBatchExportUI();
@@ -1999,6 +2002,8 @@
       rawMetadata: null,
       // Perforation / DX edge barcode reading for the current file (per-file setting).
       filmEdge: null,
+      // Whole-roll analysis: the current file's share (per-file setting) ...
+      rollFrame: null,
 
       // SilverCore conversion controls (for color/bw negatives)
       coreFilmPreset: 'none',
@@ -2112,6 +2117,17 @@
         settingsSnapshot: null,
         applyLock: false,
         applyCrop: false
+      },
+      // ... and the roll-wide result (session scoped, like the roll reference).
+      rollAnalysis: {
+        id: null,
+        filmBase: null,
+        channelData: null,
+        count: 0,
+        usable: 0,
+        outlierCount: 0,
+        outliers: [],
+        equalize: true
       },
 
       // Dust removal
@@ -2299,7 +2315,7 @@
         curveEdit: '曲线编辑', curvePointDelete: '删除曲线点', curvePreset: '曲线预设',
         curveReset: '重置曲线', dustBrushStroke: '除尘笔刷', dustToggle: '除尘开关',
         filmBase: '色罩基准', whiteBalance: '白平衡', autoDetectBase: '自动检测色罩',
-        filmEdgeApply: '应用片边识别', filmEdgeBase: '片边片基',
+        filmEdgeApply: '应用片边识别', filmEdgeBase: '片边片基', rollAnalysis: '整卷分析',
         coreExposure: '曝光', coreContrast: '对比度', coreHighlights: '高光',
         coreShadows: '阴影', coreWhites: '白色', coreBlacks: '黑色',
         coreBrightness: '亮度', coreTemperature: '色温', coreTint: '色调',
@@ -2321,7 +2337,7 @@
         curveEdit: 'Curve Edit', curvePointDelete: 'Delete Curve Point', curvePreset: 'Curve Preset',
         curveReset: 'Reset Curves', dustBrushStroke: 'Dust Brush', dustToggle: 'Dust Toggle',
         filmBase: 'Film Base', whiteBalance: 'White Balance', autoDetectBase: 'Auto Detect Base',
-        filmEdgeApply: 'Apply Detected Film', filmEdgeBase: 'Rebate Film Base',
+        filmEdgeApply: 'Apply Detected Film', filmEdgeBase: 'Rebate Film Base', rollAnalysis: 'Roll Analysis',
         coreExposure: 'Exposure', coreContrast: 'Contrast', coreHighlights: 'Highlights',
         coreShadows: 'Shadows', coreWhites: 'Whites', coreBlacks: 'Blacks',
         coreBrightness: 'Brightness', coreTemperature: 'Temperature', coreTint: 'Tint',
@@ -2343,7 +2359,7 @@
         curveEdit: 'カーブ編集', curvePointDelete: 'カーブポイント削除', curvePreset: 'カーブプリセット',
         curveReset: 'カーブリセット', dustBrushStroke: '除塵ブラシ', dustToggle: '除塵切替',
         filmBase: 'フィルムベース', whiteBalance: 'ホワイトバランス', autoDetectBase: '自動検出',
-        filmEdgeApply: 'フィルム縁を適用', filmEdgeBase: '縁のベース',
+        filmEdgeApply: 'フィルム縁を適用', filmEdgeBase: '縁のベース', rollAnalysis: 'ロール解析',
         coreExposure: '露出', coreContrast: 'コントラスト', coreHighlights: 'ハイライト',
         coreShadows: 'シャドウ', coreWhites: 'ホワイト', coreBlacks: 'ブラック',
         coreBrightness: '明るさ', coreTemperature: '色温度', coreTint: '色合い',
@@ -2798,6 +2814,13 @@
       state.rollReference.settingsSnapshot = null;
       state.rollReference.applyLock = false;
       state.rollReference.applyCrop = false;
+      resetRollAnalysisState();
+    }
+
+    function resetRollAnalysisState() {
+      const equalize = state.rollAnalysis ? state.rollAnalysis.equalize : true;
+      state.rollAnalysis = { id: null, filmBase: null, channelData: null, count: 0, usable: 0, outlierCount: 0, outliers: [], equalize };
+      if (stateReady) updateRollAnalysisUI();
     }
 
     function updateCurrentFileLabel() {
@@ -3438,6 +3461,7 @@
         filmBase: sanitizeFilmBase(source.filmBase, fallbackSettings.filmBase),
         // Per-file like the crop: never inherited from the fallback frame.
         filmEdge: sanitizeFilmEdgeForSettings(source === state ? state.filmEdge : source.filmEdge),
+        rollFrame: sanitizeRollFrameForSettings(source === state ? state.rollFrame : source.rollFrame),
         lensCorrection: sanitizeLensCorrection(source.lensCorrection, fallbackSettings.lensCorrection),
         coreFilmPreset: String(source.coreFilmPreset || fallbackSettings.coreFilmPreset || 'none'),
         coreColorModel: sanitizeCoreColorModel(
@@ -3551,8 +3575,11 @@
         profileStrength: safe.coreProfileStrength,
         preSaturation: safe.corePreSaturation,
         borderBuffer: safe.coreBorderBuffer,
+        // Roll analysis: shared histogram levels for every locked frame and the
+        // per-frame density offset folded into the exposure the engine sees.
+        analysisOverride: safe.rollFrame?.locked ? safe.rollFrame.channelData : null,
         brightness: safe.coreBrightness,
-        exposure: safe.coreExposure,
+        exposure: Math.max(-300, Math.min(300, safe.coreExposure + rollFrameExposureUnits(safe.rollFrame))),
         contrast: safe.coreContrast,
         highlights: safe.coreHighlights,
         shadows: safe.coreShadows,
@@ -6177,6 +6204,7 @@
           resetFrontierGuideImageState();
           state.autoFrame.lastDiagnostics = null;
           state.filmEdge = null;
+          state.rollFrame = null;
           state.rawMetadata = extractedRawMeta;
           if (webglState.gl) {
             webglState.sourceDirty = true;
@@ -9706,6 +9734,9 @@
       let count = 0;
       items.forEach(item => {
         const next = cloneSettings(copied);
+        // The roll analysis share (lock, offset, outlier flag) describes the
+        // receiving frame, not the reference, so each item keeps its own.
+        next.rollFrame = item.settings?.rollFrame ? structuredClone(item.settings.rollFrame) : null;
         if (!includeCrop) {
           next.autoFrameMeta = item.settings?.autoFrameMeta ? structuredClone(item.settings.autoFrameMeta) : null;
           const existingCrop = item.settings && item.settings.cropRegion ? { ...item.settings.cropRegion } : null;
@@ -9974,6 +10005,7 @@
         filmType,
         filmBase: filmBase,
         filmEdge: null,
+        rollFrame: null,
         lensCorrection: state.lensCorrection
           ? sanitizeLensCorrection(state.lensCorrection, createDefaultLensCorrectionSettings())
           : createDefaultLensCorrectionSettings(),
@@ -10693,16 +10725,29 @@
           statusText: (status) => i18n[currentLang][status === 'processing' ? 'processingStatus' : status] || status,
           selectFile: (name) => (i18n[currentLang].fileListSelectFile || 'Select {name}').replace('{name}', name),
           badges: (item) => {
-            // The open file's detection lives in state until its settings are persisted.
-            const edge = item.file === state.loadedFile && state.filmEdge ? state.filmEdge : item.settings?.filmEdge;
-            if (!edge?.found) return [];
-            const name = edge.shortName || edge.filmName || (edge.dxNumber ? `DX ${edge.dxNumber}` : null);
-            if (!name) return [];
-            return [{
-              className: 'film-stock',
-              text: name,
-              title: getInterpolatedText('filmEdgeBadgeTitle', { name: edge.filmName || name, dx: edge.dxNumber || '' }, `Film edge: ${name}`)
-            }];
+            const badges = [];
+            // The open file's records live in state until its settings are persisted.
+            const live = item.file === state.loadedFile;
+            const edge = live && state.filmEdge ? state.filmEdge : item.settings?.filmEdge;
+            if (edge?.found) {
+              const name = edge.shortName || edge.filmName || (edge.dxNumber ? `DX ${edge.dxNumber}` : null);
+              if (name) {
+                badges.push({
+                  className: 'film-stock',
+                  text: name,
+                  title: getInterpolatedText('filmEdgeBadgeTitle', { name: edge.filmName || name, dx: edge.dxNumber || '' }, `Film edge: ${name}`)
+                });
+              }
+            }
+            const roll = live && state.rollFrame ? state.rollFrame : item.settings?.rollFrame;
+            if (roll?.outlier) {
+              badges.push({
+                className: 'roll-outlier',
+                text: getLocalizedText('rollOutlierBadge', '≠ roll'),
+                title: getInterpolatedText('rollOutlierBadgeTitle', { reasons: formatRollReasons(roll.reasons) }, `Differs from the roll: ${formatRollReasons(roll.reasons)}`)
+              });
+            }
+            return badges;
           }
         },
         onToggleSelected: (index, selected, { range = false } = {}) => {
@@ -10836,6 +10881,8 @@
       state.filmBaseSet = true;
       state.filmEdge = safe.filmEdge ? structuredClone(safe.filmEdge) : null;
       updateFilmEdgeUI();
+      state.rollFrame = safe.rollFrame ? structuredClone(safe.rollFrame) : null;
+      updateRollAnalysisUI();
       state.lensCorrection.enabled = Boolean(safe.lensCorrection.enabled);
       state.lensCorrection.selectedLens = safe.lensCorrection.selectedLens ? { ...safe.lensCorrection.selectedLens } : null;
       state.lensCorrection.params = { ...safe.lensCorrection.params };
@@ -11063,6 +11110,7 @@
       const selectedCount = state.fileQueue.filter(f => f.selected).length;
       selectedBtn.disabled = !state.autoFrame.enabled || selectedCount < 1 || !stepReady;
       updateAutoFrameConfigUI();
+      updateRollAnalysisUI();
     }
 
     function showBatchUI(show, reason) {
@@ -11672,6 +11720,231 @@
 
     document.getElementById('applyFilmEdgePresetBtn')?.addEventListener('click', () => { void applyDetectedFilmToCurrent(); });
     document.getElementById('useFilmEdgeBaseBtn')?.addEventListener('click', useFilmEdgeBaseForCurrent);
+
+    // ===========================================
+    // Roll analysis: one film base and one tone analysis for the whole roll
+    // ===========================================
+    function formatRollReasons(reasons) {
+      const keys = { 'base-colour': 'rollReasonBaseColour', 'base-density': 'rollReasonBaseDensity', 'no-base': 'rollReasonNoBase' };
+      const fallback = { 'base-colour': 'film base colour', 'base-density': 'film base density', 'no-base': 'no film base' };
+      return (Array.isArray(reasons) ? reasons : []).map((r) => getLocalizedText(keys[r] || '', fallback[r] || r)).join(', ');
+    }
+
+    function formatStops(stops) {
+      const value = Number(stops) || 0;
+      return `${value > 0 ? '+' : ''}${value.toFixed(1)}`;
+    }
+
+    // Downsampled, geometry-applied negative used for the roll measurements.
+    function buildRollAnalysisSample(imageData, settings) {
+      const reduced = downsampleImageDataForMaxDim(imageData, 900);
+      const factor = reduced.width / imageData.width;
+      let working = reduced;
+      const angle = Number.isFinite(settings.rotationAngle) ? settings.rotationAngle : 0;
+      if (Math.abs(angle) > 0.001) working = applyRotationToImageData(working, angle);
+      if (settings.mirrored) working = mirrorImageDataHorizontal(working);
+      if (settings.cropRegion) {
+        const scaled = {
+          x: settings.cropRegion.x * factor,
+          y: settings.cropRegion.y * factor,
+          width: settings.cropRegion.width * factor,
+          height: settings.cropRegion.height * factor
+        };
+        const region = sanitizeCropRegionForImage(scaled, working);
+        if (region) working = cropImageData(working, region);
+      }
+      return working;
+    }
+
+    function updateRollAnalysisUI() {
+      if (!stateReady) return;
+      const group = document.getElementById('rollAnalysisGroup');
+      const status = document.getElementById('rollAnalysisStatus');
+      const frameStatus = document.getElementById('rollAnalysisFrameStatus');
+      const analyzeBtn = document.getElementById('analyzeRollBtn');
+      const clearBtn = document.getElementById('clearRollAnalysisBtn');
+      const equalizeInput = document.getElementById('rollEqualizeExposure');
+      if (!group || !status || !frameStatus || !analyzeBtn || !clearBtn || !equalizeInput) return;
+      const roll = state.rollAnalysis || {};
+      const hasRoll = Boolean(roll.id);
+      group.style.display = state.originalImageData ? '' : 'none';
+      const selectedCount = state.fileQueue.filter((item) => item.selected).length;
+      analyzeBtn.disabled = selectedCount < 2 || Boolean(document.body.dataset.studioBusy) || state.cropping || isDesktopBatchExportLocked();
+      clearBtn.disabled = !hasRoll;
+      equalizeInput.checked = Boolean(roll.equalize);
+      if (!hasRoll) {
+        status.textContent = getLocalizedText('rollAnalysisNone', 'Not analysed yet. Select the frames of one roll and analyse them together.');
+      } else {
+        const parts = [getInterpolatedText('rollAnalysisSummary', { usable: String(roll.usable), count: String(roll.count) }, `${roll.usable}/${roll.count} frames share one film base and tone analysis`)];
+        if (roll.filmBase) parts.push(`R ${roll.filmBase.r} G ${roll.filmBase.g} B ${roll.filmBase.b}`);
+        if (roll.outlierCount > 0) parts.push(getInterpolatedText('rollAnalysisOutliers', { count: String(roll.outlierCount), names: roll.outliers.join(', ') }, `${roll.outlierCount} outlier(s): ${roll.outliers.join(', ')}`));
+        status.textContent = parts.join(' · ');
+      }
+      const frame = state.rollFrame;
+      if (!frame) {
+        frameStatus.textContent = hasRoll ? getLocalizedText('rollAnalysisFrameNone', 'This frame: not analysed') : '';
+      } else if (frame.outlier) {
+        frameStatus.textContent = getInterpolatedText('rollAnalysisFrameOutlier', { reasons: formatRollReasons(frame.reasons) }, `This frame: outlier (${formatRollReasons(frame.reasons)})`);
+      } else {
+        frameStatus.textContent = getInterpolatedText('rollAnalysisFrameLocked', { offset: formatStops(frame.offsetStops) }, `This frame: locked to the roll, ${formatStops(frame.offsetStops)} stop`);
+      }
+    }
+
+    async function runRollAnalysis() {
+      if (document.body.dataset.studioBusy || state.cropping || isDesktopBatchExportLocked() || !state.originalImageData) return;
+      const selectedItems = state.fileQueue.filter((item) => item.selected);
+      if (selectedItems.length < 2) {
+        void appAlert(getLocalizedText('rollAnalysisNeedFiles', 'Select at least two frames of the same roll first.'));
+        return;
+      }
+      const generation = loadGeneration;
+      studioAutoFrameRunning = true;
+      document.body.dataset.studioBusy = 'true';
+      studioWorkspace?.sync();
+      const button = document.getElementById('analyzeRollBtn');
+      const previousText = button ? button.textContent : '';
+      if (button) {
+        button.disabled = true;
+        button.textContent = getLocalizedText('rollAnalysisRunning', 'Analysing roll…');
+      }
+      showBatchProgress(true);
+      const measurements = [];
+      let roll = null;
+      try {
+        if (processNegativeInFlight) await processNegativeInFlight;
+        if (!isCurrentLoad(generation)) return;
+        persistCurrentFileSettings({ silent: true, force: true });
+        pushUndo('rollAnalysis');
+        // Pass 1: decode every frame once, read its rebate, keep a small
+        // geometry-applied sample and measure base and density.
+        for (let i = 0; i < selectedItems.length; i++) {
+          const item = selectedItems[i];
+          updateBatchProgress(i + 1, selectedItems.length, item.file.name);
+          try {
+            const imageData = await loadFileToImageData(item.file);
+            let settings = item.settings ? cloneSettings(item.settings) : createDefaultSettings(imageData);
+            if (!settings.filmEdge?.checked) {
+              const edge = await analyzeImportFilmEdge(imageData, settings, { applyDefaults: !item.settings });
+              if (edge) settings = edge.settings;
+            }
+            const sample = buildRollAnalysisSample(imageData, settings);
+            measurements.push({
+              item,
+              settings,
+              sample,
+              negativeMean: measureNegativeMean(sample, (settings.coreBorderBuffer ?? 10) / 100),
+              filmBase: requiresFilmBase(settings) ? settings.filmBase : null
+            });
+          } catch (error) {
+            console.error('Roll analysis failed for', item.file.name, error);
+          }
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+        if (!isCurrentLoad(generation) || !measurements.length) return;
+        // Pass 2: the roll base decides the outliers, then every inlier is analysed
+        // with that base so the shared channelData matches what the conversion sees.
+        const colorRoll = measurements.some((m) => m.filmBase);
+        const first = aggregateRollAnalysis(measurements.map((m) => ({ id: m.item.id, filmBase: colorRoll ? m.filmBase : { r: 128, g: 128, b: 128, method: 'manual' }, negativeMean: m.negativeMean })));
+        for (const m of measurements) {
+          const frame = first.frames.find((f) => f.id === m.item.id);
+          if (frame?.outlier) continue;
+          const settings = { ...m.settings, rollFrame: null };
+          if (colorRoll && first.filmBase && requiresFilmBase(settings)) settings.filmBase = { ...first.filmBase };
+          try {
+            m.channelData = await analyzeSilverCoreFrame(m.sample, buildCoreConversionSettings(settings), resolveConversionMode(settings));
+          } catch (error) {
+            console.error('Roll analysis could not analyse', m.item.file.name, error);
+          }
+        }
+        roll = aggregateRollAnalysis(measurements.map((m) => ({
+          id: m.item.id,
+          filmBase: colorRoll ? m.filmBase : { r: 128, g: 128, b: 128, method: 'manual' },
+          channelData: m.channelData,
+          negativeMean: m.negativeMean
+        })));
+        const rollId = `roll-${Date.now().toString(36)}`;
+        const equalize = Boolean(state.rollAnalysis.equalize);
+        state.rollAnalysis = {
+          id: rollId,
+          filmBase: colorRoll ? roll.filmBase : null,
+          channelData: roll.channelData,
+          count: roll.count,
+          usable: roll.usable,
+          outlierCount: roll.outlierCount,
+          outliers: roll.frames.filter((f) => f.outlier).map((f) => measurements.find((m) => m.item.id === f.id)?.item.file.name).filter(Boolean),
+          equalize
+        };
+        for (const m of measurements) {
+          const frame = roll.frames.find((f) => f.id === m.item.id);
+          if (!frame) continue;
+          const next = m.settings;
+          next.rollFrame = sanitizeRollFrameForSettings({
+            rollId,
+            locked: !frame.outlier && Boolean(roll.channelData),
+            channelData: frame.outlier ? null : roll.channelData,
+            offsetStops: frame.offsetStops,
+            equalize,
+            outlier: frame.outlier,
+            reasons: frame.reasons
+          });
+          if (!frame.outlier && colorRoll && roll.filmBase && requiresFilmBase(next) && next.filmBase?.method !== 'manual') {
+            next.filmBase = { ...roll.filmBase };
+          }
+          m.item.settings = next;
+          m.item.isDirty = false;
+          m.item.status = 'pending';
+        }
+      } finally {
+        showBatchProgress(false);
+        if (button) {
+          button.disabled = false;
+          button.textContent = previousText;
+        }
+        studioAutoFrameRunning = false;
+        delete document.body.dataset.studioBusy;
+        studioWorkspace?.sync();
+      }
+      if (!isCurrentLoad(generation)) return;
+      const currentItem = getCurrentQueueItem();
+      if (currentItem?.settings && measurements.some((m) => m.item === currentItem)) restoreSettings(currentItem.settings);
+      updateRollAnalysisUI();
+      updateFileListUI();
+      if (roll) {
+        showToast(getInterpolatedText('rollAnalysisToast', { usable: String(roll.usable), count: String(roll.count), outliers: String(roll.outlierCount) }, `Roll analysis: ${roll.usable} of ${roll.count} frames locked, ${roll.outlierCount} outlier(s)`), 3200);
+      }
+      if (state.originalImageData) await processNegative();
+    }
+
+    function clearRollAnalysis() {
+      if (!state.rollAnalysis?.id) return;
+      pushUndo('rollAnalysis');
+      for (const item of state.fileQueue) {
+        if (item.settings?.rollFrame) {
+          item.settings = { ...item.settings, rollFrame: null };
+          item.status = 'pending';
+        }
+      }
+      state.rollFrame = null;
+      resetRollAnalysisState();
+      markCurrentFileDirty();
+      updateFileListUI();
+      if (usesSilverCoreConversion(state)) scheduleSilverSourceRefresh({ immediate: true });
+      else schedulePreviewUpdate();
+    }
+
+    function setRollEqualize(enabled) {
+      state.rollAnalysis.equalize = Boolean(enabled);
+      for (const item of state.fileQueue) {
+        if (item.settings?.rollFrame) item.settings = { ...item.settings, rollFrame: { ...item.settings.rollFrame, equalize: state.rollAnalysis.equalize } };
+      }
+      if (state.rollFrame) state.rollFrame = { ...state.rollFrame, equalize: state.rollAnalysis.equalize };
+      updateRollAnalysisUI();
+      if (state.rollFrame && usesSilverCoreConversion(state)) scheduleSilverSourceRefresh({ immediate: true });
+    }
+
+    document.getElementById('analyzeRollBtn')?.addEventListener('click', () => { void runRollAnalysis(); });
+    document.getElementById('clearRollAnalysisBtn')?.addEventListener('click', clearRollAnalysis);
+    document.getElementById('rollEqualizeExposure')?.addEventListener('change', (event) => setRollEqualize(event.target.checked));
 
     {
       // 共通コントロールを唯一の暗室 UI に配置する。

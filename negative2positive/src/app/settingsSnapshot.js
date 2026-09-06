@@ -15,6 +15,7 @@ export function deepCopySanitizedSettings(safe, { autoFrameMeta = safe.autoFrame
     filmType: safe.filmType,
     filmBase: { ...safe.filmBase },
     filmEdge: safe.filmEdge ? structuredClone(safe.filmEdge) : null,
+    rollFrame: safe.rollFrame ? structuredClone(safe.rollFrame) : null,
     lensCorrection: {
       enabled: Boolean(safe.lensCorrection.enabled),
       selectedLens: safe.lensCorrection.selectedLens ? { ...safe.lensCorrection.selectedLens } : null,

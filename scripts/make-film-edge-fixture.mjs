@@ -17,6 +17,17 @@ const out = join(here, '..', 'negative2positive', 'test-fixtures', 'negative-str
 writeFileSync(out, Buffer.from(png));
 console.log(`wrote ${out} ${strip.image.width}x${strip.image.height}, codes ${strip.codes.map((c) => `${c.frameNumber}${c.halfFrame ? 'A' : ''}`).join(' ')}`);
 
+// Roll analysis fixtures: the same stock with denser frames (an exposure
+// offset, same base) and a different stock with a different base colour and
+// DX 79-13 (Kodak Portra 400), which the roll analysis must flag.
+const dark = makeStrip({ widthMm: 100, pxPerMm: 14, noise: 0, frameDark: [80, 50, 35], firstFrame: 12 });
+writeFileSync(join(here, '..', 'negative2positive', 'test-fixtures', 'negative-strip-dx-dark.png'),
+  Buffer.from(UPNG.encode([dark.image.data.buffer], dark.image.width, dark.image.height, 0)));
+const other = makeStrip({ widthMm: 100, pxPerMm: 14, noise: 0, base: [196, 168, 128], bars: [60, 50, 40], frameDark: [110, 95, 75], dx: { dx1: 79, dx2: 13 }, firstFrame: 5 });
+writeFileSync(join(here, '..', 'negative2positive', 'test-fixtures', 'negative-strip-other.png'),
+  Buffer.from(UPNG.encode([other.image.data.buffer], other.image.width, other.image.height, 0)));
+console.log('wrote negative-strip-dx-dark.png and negative-strip-other.png');
+
 // A negative control: one orange-masked frame in a dark holder, no
 // perforations and no edge print, so the reader must report nothing.
 const plainW = 900; const plainH = 600;

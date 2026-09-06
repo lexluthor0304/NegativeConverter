@@ -8,6 +8,7 @@ import {
   cloneImage16,
 } from '../silvercore/util/image16.js';
 import { applyFilmBaseCompensationToBuffer } from './filmBaseCompensation.js';
+import { analyzeImage, adjustSaturation } from '../silvercore/engine/ImageProcessor.js';
 
 // EnhancedProfiles.js owns the list of shipped 3D-LUT profiles and their .bin URLs;
 // deriving the whitelist from it keeps the two in step. A hand-copied list here is
@@ -35,6 +36,24 @@ function toImage16(input) {
     return input.__image16;
   }
   return fromImageData8(input);
+}
+
+function normalizeAnalysisOverride(value) {
+  if (!Array.isArray(value) || value.length !== 3) return null;
+  const channels = value.map((channel) => {
+    if (!channel || typeof channel !== 'object') return null;
+    const white = Number(channel.whitePointOrigin);
+    const black = Number(channel.blackPointOrigin);
+    const mean = Number(channel.meanPoint);
+    if (![white, black, mean].every(Number.isFinite)) return null;
+    return {
+      whitePointOrigin: Math.round(Math.max(0, Math.min(65535, white))),
+      blackPointOrigin: Math.round(Math.max(0, Math.min(65535, black))),
+      meanPoint: Math.max(0, Math.min(1, mean)),
+      settingName: String(channel.settingName || ''),
+    };
+  });
+  return channels.every(Boolean) ? channels : null;
 }
 
 function normalizeSaturation(value) {
@@ -106,6 +125,8 @@ export async function buildSilverCoreParams(mode, settings = {}) {
     preSaturation: Math.round(sanitizeNumber(merged.preSaturation, 100, 0, 200)),
     borderBuffer: Math.round(sanitizeNumber(merged.borderBuffer, 10, 0, 30)),
     analysisRegion: merged.analysisRegion ? { ...merged.analysisRegion } : null,
+    // Roll analysis: shared channelData that replaces this frame's histogram.
+    analysisOverride: normalizeAnalysisOverride(merged.analysisOverride),
     brightness: sanitizeNumber(merged.brightness, 0, -100, 100),
     exposure: sanitizeNumber(merged.exposure, 0, -300, 300),
     contrast: sanitizeNumber(merged.contrast, 0, -100, 100),
@@ -297,6 +318,7 @@ function _analysisStateFor(params, filmBaseCompensation, sourceRef, mode, refere
     imageType: params.imageType,
     preSaturation: params.preSaturation,
     bwMix: mode === 'bw' ? params.bwMix : null,
+    analysisOverrideKey: params.analysisOverride ? JSON.stringify(params.analysisOverride) : '',
     filmBaseKey: base
       ? `${base.r}|${base.g}|${base.b}|${base.r16}|${base.g16}|${base.b16}|${options.method}|${options.strength}`
       : '',
@@ -313,6 +335,7 @@ function _analysisChanged(previous, next) {
     || previous.imageType !== next.imageType
     || previous.preSaturation !== next.preSaturation
     || previous.bwMix !== next.bwMix
+    || previous.analysisOverrideKey !== next.analysisOverrideKey
     || previous.filmBaseKey !== next.filmBaseKey;
 }
 
@@ -412,6 +435,25 @@ async function runSilverCore(imageData, settings, mode, options) {
   // 参照の種類・寸法・画素バッファ・解析設定をキーにし、通常画像と混同しない。
   if (!reference) slot.referencePixels = {};
   return result;
+}
+
+// Runs the histogram analysis exactly as a conversion would (film-base
+// compensation, B&W mix, pre-tone saturation, analysis crop) without building
+// curves or touching the engine cache. Roll analysis calls this per frame and
+// aggregates the channelData across the roll. `analysisOverride` in the settings
+// is ignored here on purpose: the point is to measure this frame.
+export async function analyzeSilverCoreFrame(imageData, settings = {}, mode = 'color') {
+  const params = await buildSilverCoreParams(mode, { ...settings, analysisOverride: null });
+  const input = cloneImage16(toImage16(imageData));
+  if (mode === 'color' && settings && settings.filmBase) {
+    applyFilmBaseCompensationToBuffer(input.data, settings.filmBase, {
+      method: settings.filmBaseCompensation || settings.filmBaseMethod || 'density',
+      strength: settings.filmBaseStrength ?? 1,
+    });
+  }
+  if (mode === 'bw') toGrayscaleInPlace(input, params.bwMix);
+  if (params.preSaturation !== 100) adjustSaturation(input, params.preSaturation);
+  return analyzeImage(input, params);
 }
 
 export function invalidateSilverCoreCache() {

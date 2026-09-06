@@ -598,6 +598,23 @@
             <div class="info-box" id="positiveFilmInfo" data-i18n="positiveModeInfo" style="display: none;">Positive slide film mode does not require film base sampling.</div>
           </div>
 
+          <div class="control-group roll-analysis-group" id="rollAnalysisGroup" style="display: none;">
+            <div class="control-group-title"><span data-i18n="rollAnalysisTitle">Roll analysis</span></div>
+            <div class="control-group-hint" data-i18n="rollAnalysisHint">Analyse the selected frames together: one film base and one tone analysis for the roll, frames that differ are flagged.</div>
+            <div class="roll-reference-status" id="rollAnalysisStatus" role="status"></div>
+            <div class="roll-reference-status roll-analysis-frame" id="rollAnalysisFrameStatus"></div>
+            <div class="film-base-buttons">
+              <button class="film-base-btn" id="analyzeRollBtn" data-i18n="analyzeRoll">Analyse roll</button>
+              <button class="film-base-btn" id="clearRollAnalysisBtn" data-i18n="clearRollAnalysis">Clear roll analysis</button>
+            </div>
+            <div class="roll-reference-options">
+              <label class="roll-reference-option">
+                <input type="checkbox" id="rollEqualizeExposure" checked>
+                <span data-i18n="rollEqualizeExposure">Equalise exposure across frames</span>
+              </label>
+            </div>
+          </div>
+
           <div class="control-group">
             <div class="control-group-title"><span data-i18n="groupStartingLook">Starting look</span></div>
             <div class="control-group-grid two-up">

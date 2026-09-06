@@ -1581,6 +1581,15 @@ button.section-title {
   color: var(--accent);
 }
 
+.file-list-badge.roll-outlier {
+  border-color: var(--warning);
+  color: var(--warning);
+}
+
+.roll-analysis-frame {
+  margin-top: -4px;
+}
+
 .roll-reference-title {
   font-size: 11px;
   text-transform: uppercase;
