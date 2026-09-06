@@ -49,9 +49,7 @@ what shipped — delete an entry when it is done.
   `isRawSupportIssue` is true for any RAW-like file whose error text matches `/module worker|worker|webassembly|wasm/i`, so 'Conversion worker crashed', 'Sensor defect worker crashed' or a wasm OOM ('RuntimeError: ... wasm') on Chrome/Firefox/Android produces 'RAW decode is not supported in this Safari version. Update Safari (iOS 16.4+) or convert to TIFF/JPEG first.' Conversely the intended trigger…  
   _Suggested fix:_ Feature-detect up front instead of parsing messages: `const supportsModuleWorkers = (() => { let s = false; try { new Worker('data:,', { get type() { s = true; return 'module'; } }).terminate(); } catch {} return s; })()` plus `typeof WebAssembly === 'object'`; show `rawUnsupport…
 
-- **low/quality** — state.original16 / cropped16 / processed16 are written but never read anywhere  
   `negative2positive/src/app/main.js:5657`  
-  loadFile and scheduleBackgroundFullResDecode maintain state.original16/cropped16/processed16 as if they tracked the 16-bit working buffers, but no code in negative2positive/src reads them (grep across src finds only the three assignment sites plus state init at 1877-1879). applyRotation, applyMirror and applyCropBtn never update them either, so they are stale dead state that misleads maintainers a…  
   _Suggested fix:_ Delete the three fields and their assignments, and document that __image16 attached to the ImageData is the single source of 16-bit data.
 
 - **low/quality** — suggestStep2Mode's orangeBias > 10 test is not a border detector: any C-41 scan returns 'border', so 'noBorder' is only ever suggested when a crop already exists  
@@ -277,7 +275,6 @@ what shipped — delete an entry when it is done.
   Three small defects in the desktop update logic: (1) `DESKTOP_UPDATE_LAST_SEEN_LATEST_KEY` is written at 1624 but never read anywhere, and the 'Later' button only calls `hideDesktopUpdateBanner()`, so a user who declines is nagged again on the next 24-hour check for every launch until they update. (2) `markDesktopUpdateChecked()` sits in `finally`, so when the app starts offline (or `get_app_versi…  
   _Suggested fix:_ Read the last-seen key in `checkDesktopUpdate` and skip the banner when `latestParsed.normalized === safeStorageGet(DESKTOP_UPDATE_LAST_SEEN_LATEST_KEY)`, writing the key from the 'Later' handler instead of on every detection. Move `markDesktopUpdateChecked()` into the success pa…
 
-- **low/quality** — state.original16 / cropped16 / processed16 are written but never read _(verified)_  
   `negative2positive/src/app/main.js:1877`  
   The three 16-bit mirror fields are declared at 1877-1879 with a comment saying they are 'dormant' until a later stage; the codebase has since moved to attaching `__image16` directly on ImageData (silverAdapter.js:23-33, 264-266). The fields are still assigned at 5657-5659 and 5738 but no code reads them, so they only pin a second reference to the largest buffer in the app.  
   _Suggested fix:_ Delete the three fields, the comment block at 1873-1876, and the four assignments.

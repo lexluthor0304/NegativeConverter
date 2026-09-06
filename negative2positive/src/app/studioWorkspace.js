@@ -20,7 +20,7 @@ export const studioText = {
     syncHint: '只同步色彩，不改变其他照片的裁切、片基和修复。', synced: '已同步到 {count} 张照片',
     export: '导出', sampleHint: '在照片上点击应为中性灰的区域；按 Esc 取消。',
     retry: '重新转换', advancedHint: '只在需要时展开。这里保留原来的精细控制。',
-    exportSettings: '文件格式与质量', exportSelected: '导出所选 {count} 张', exportCurrent: '导出当前照片', undo: '撤销', redo: '重做',
+    exportSettings: '文件格式与质量', exportSelected: '导出所选 {count} 张', exportCurrent: '导出当前照片', exportCurrentDng: '导出当前照片（线性 DNG）', undo: '撤销', redo: '重做',
     exportIndividualSelected: '逐张下载所选 {count} 张', selectionHint: '勾选照片；按住 Shift 可连续选择。',
     composition: '构图', border: '边框', curves: '曲线', fine: 'RGB / CMY 精调', looks: '全部风格与预设',
     lens: '镜头校正', autoFrame: '自动取景设置', compositionHint: '导入时自动识别成像区域。支持 135、半格、宽幅及 120 多种画幅；识别不可靠时保留完整画面，供你确认。',
@@ -64,7 +64,7 @@ export const studioText = {
     syncHint: 'Only color is synced. Each photo keeps its crop, film base and retouching.', synced: 'Color synced to {count} photos',
     export: 'Export', sampleHint: 'Click an area that should be neutral gray. Press Esc to cancel.',
     retry: 'Convert again', advancedHint: 'Optional controls for a more precise finish.',
-    exportSettings: 'File format & quality', exportSelected: 'Export {count} selected', exportCurrent: 'Export current photo', undo: 'Undo', redo: 'Redo',
+    exportSettings: 'File format & quality', exportSelected: 'Export {count} selected', exportCurrent: 'Export current photo', exportCurrentDng: 'Export current photo (linear DNG)', undo: 'Undo', redo: 'Redo',
     exportIndividualSelected: 'Download {count} selected individually', selectionHint: 'Check photos to select. Shift-click selects a range.',
     composition: 'Crop', border: 'Border', curves: 'Curves', fine: 'RGB / CMY fine tuning', looks: 'All styles & presets',
     lens: 'Lens correction', autoFrame: 'Auto frame settings', compositionHint: 'Detect the image area on import: 135, half frame, panoramic and 120 formats. Uncertain detections keep the full image for review.',
@@ -107,7 +107,7 @@ export const studioText = {
     syncHint: '色だけを同期します。切り抜き・フィルムベース・修復は各写真の設定を保ちます。', synced: '{count} 枚に色調整を同期しました',
     export: '書き出し', sampleHint: '写真の中の無彩色の部分をクリック。Esc で終了します。',
     retry: '再変換', advancedHint: '必要なときだけ使える、細かな仕上げのための設定。',
-    exportSettings: '形式と画質', exportSelected: '選択した {count} 枚を書き出す', exportCurrent: '現在の写真を書き出す', undo: '取り消す', redo: 'やり直す',
+    exportSettings: '形式と画質', exportSelected: '選択した {count} 枚を書き出す', exportCurrent: '現在の写真を書き出す', exportCurrentDng: '現在の写真を書き出す（リニア DNG）', undo: '取り消す', redo: 'やり直す',
     exportIndividualSelected: '選択した {count} 枚を個別に保存', selectionHint: 'チェックで選択。Shift を押しながらクリックで範囲を選べます。',
     composition: '構図', border: '枠', curves: 'カーブ', fine: 'RGB / CMY 微調整', looks: '全スタイルとプリセット',
     lens: 'レンズ補正', autoFrame: '自動フレーム設定', compositionHint: '読み込み時に画像領域を検出。135・ハーフ・パノラマ・120 各画幅に対応。不確かな場合は全体を保持して確認を促します。',
@@ -539,7 +539,7 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
       $('studioSync').disabled = !ready || busy || state.cropping || isExportLocked() || !state.fileQueue.some(item => item.selected && item.file !== state.loadedFile);
       $('studioSync').title = t('syncHint');
       $('exportZipBtn').textContent = t('exportSelected').replace('{count}', count);
-      $('exportSingleBtn').textContent = t('exportCurrent');
+      $('exportSingleBtn').textContent = t(state.exportFormat === 'dng' ? 'exportCurrentDng' : 'exportCurrent');
       $('exportAllBtn').textContent = t('exportIndividualSelected').replace('{count}', count);
       $('studioSelection').title = t('selectionHint');
       $('studioUndo').disabled = $('undoBtn').disabled;
@@ -548,7 +548,7 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
       $('studioApplyLens').disabled = !loaded || locked;
       $('studioResetAll').disabled = !ready || locked;
       $('studioRestart').disabled = !loaded || locked;
-      $('exportSprocketBtn').disabled = !ready || locked;
+      $('exportSprocketBtn').disabled = !ready || locked || state.exportFormat === 'dng';
       $('studioExportBorder').checked = Boolean(state.exportSprocketHolesEnabled);
       $('studioExportBorder').disabled = !ready || locked;
       $('studioClearQueue').disabled = locked || !state.fileQueue.length;
