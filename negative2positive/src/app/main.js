@@ -7,13 +7,15 @@
     import { showToast } from '../ui/toast.js';
     import { writeDesktopBlob } from './desktopExportWriter.js';
     import { normalizeAngleDegrees, applyRotationToImageData, mirrorImageDataHorizontal } from './imageGeometry.js';
-    import { analyzeFrameInWorker } from './autoFrameWorkerClient.js';
+    import { analyzeFrameInWorker, readFilmEdgeInWorker } from './autoFrameWorkerClient.js';
     import { detectFrameWithFallback } from './autoFrameExecution.js';
     import { mountStudioWorkspace } from './studioWorkspace.js';
     import { AUTO_FRAME_FORMAT_RATIOS, AUTO_FRAME_DEFAULT_120_FORMATS, canAutoApplyImportFrame } from './autoFrameFormats.js';
     import { imageAreaFromDetection, resolveAnalysisRegion, analysisPixelBounds, imageAreaFromWorkingRect, sampleAnalysisArea } from './analysisRegion.js';
     import { detectCropImageArea, workingPointsToBase, isSameAnalysisFrame } from './cropColorAnalysis.js';
     import { pickStudioColors, mergeStudioColors, createStudioThumbnail } from './studioSettings.js';
+    import { readFilmEdge, sanitizeFilmEdgeForSettings, formatFilmEdgeFrames } from './filmEdgeReader.js';
+    import { loadDxFilmTable, describeDxFilm, shortFilmName } from './dxFilmDatabase.js';
 
     import { convertFrameWithRouter } from '../pipeline/conversionRouter.js';
     import { convertFrameInWorker, convertPreviewFrameInWorker, CONVERSION_FAILED, WORKER_TIMEOUT } from './conversionWorkerClient.js';
@@ -434,6 +436,7 @@
         updateAutoFrameDiagnosticsUI();
         updateAutoFrameButtons();
         updateGrayPointGuideUI();
+        updateFilmEdgeUI();
         if (typeof updateLensCorrectionUI === 'function') updateLensCorrectionUI();
         if (typeof updateExportUI === 'function') updateExportUI();
         updateDesktopBatchExportUI();
@@ -1994,6 +1997,8 @@
       frontierGuideStep2ChoiceTouched: false,
       lensCorrection: createInitialLensCorrectionState(),
       rawMetadata: null,
+      // Perforation / DX edge barcode reading for the current file (per-file setting).
+      filmEdge: null,
 
       // SilverCore conversion controls (for color/bw negatives)
       coreFilmPreset: 'none',
@@ -2294,6 +2299,7 @@
         curveEdit: '曲线编辑', curvePointDelete: '删除曲线点', curvePreset: '曲线预设',
         curveReset: '重置曲线', dustBrushStroke: '除尘笔刷', dustToggle: '除尘开关',
         filmBase: '色罩基准', whiteBalance: '白平衡', autoDetectBase: '自动检测色罩',
+        filmEdgeApply: '应用片边识别', filmEdgeBase: '片边片基',
         coreExposure: '曝光', coreContrast: '对比度', coreHighlights: '高光',
         coreShadows: '阴影', coreWhites: '白色', coreBlacks: '黑色',
         coreBrightness: '亮度', coreTemperature: '色温', coreTint: '色调',
@@ -2315,6 +2321,7 @@
         curveEdit: 'Curve Edit', curvePointDelete: 'Delete Curve Point', curvePreset: 'Curve Preset',
         curveReset: 'Reset Curves', dustBrushStroke: 'Dust Brush', dustToggle: 'Dust Toggle',
         filmBase: 'Film Base', whiteBalance: 'White Balance', autoDetectBase: 'Auto Detect Base',
+        filmEdgeApply: 'Apply Detected Film', filmEdgeBase: 'Rebate Film Base',
         coreExposure: 'Exposure', coreContrast: 'Contrast', coreHighlights: 'Highlights',
         coreShadows: 'Shadows', coreWhites: 'Whites', coreBlacks: 'Blacks',
         coreBrightness: 'Brightness', coreTemperature: 'Temperature', coreTint: 'Tint',
@@ -2336,6 +2343,7 @@
         curveEdit: 'カーブ編集', curvePointDelete: 'カーブポイント削除', curvePreset: 'カーブプリセット',
         curveReset: 'カーブリセット', dustBrushStroke: '除塵ブラシ', dustToggle: '除塵切替',
         filmBase: 'フィルムベース', whiteBalance: 'ホワイトバランス', autoDetectBase: '自動検出',
+        filmEdgeApply: 'フィルム縁を適用', filmEdgeBase: '縁のベース',
         coreExposure: '露出', coreContrast: 'コントラスト', coreHighlights: 'ハイライト',
         coreShadows: 'シャドウ', coreWhites: 'ホワイト', coreBlacks: 'ブラック',
         coreBrightness: '明るさ', coreTemperature: '色温度', coreTint: '色合い',
@@ -3428,6 +3436,8 @@
         autoFrameMeta: sourceMeta ? structuredClone(sourceMeta) : ((source === state || Object.hasOwn(source, 'autoFrameMeta')) ? null : (fallbackMeta ? structuredClone(fallbackMeta) : null)),
         filmType,
         filmBase: sanitizeFilmBase(source.filmBase, fallbackSettings.filmBase),
+        // Per-file like the crop: never inherited from the fallback frame.
+        filmEdge: sanitizeFilmEdgeForSettings(source === state ? state.filmEdge : source.filmEdge),
         lensCorrection: sanitizeLensCorrection(source.lensCorrection, fallbackSettings.lensCorrection),
         coreFilmPreset: String(source.coreFilmPreset || fallbackSettings.coreFilmPreset || 'none'),
         coreColorModel: sanitizeCoreColorModel(
@@ -6166,6 +6176,7 @@
           state.wbB = 1.0;
           resetFrontierGuideImageState();
           state.autoFrame.lastDiagnostics = null;
+          state.filmEdge = null;
           state.rawMetadata = extractedRawMeta;
           if (webglState.gl) {
             webglState.sourceDirty = true;
@@ -9962,6 +9973,7 @@
         autoFrameMeta: null,
         filmType,
         filmBase: filmBase,
+        filmEdge: null,
         lensCorrection: state.lensCorrection
           ? sanitizeLensCorrection(state.lensCorrection, createDefaultLensCorrectionSettings())
           : createDefaultLensCorrectionSettings(),
@@ -10036,6 +10048,10 @@
       const studioColors = state.fileQueue.find(item => item.file === file)?.studioColors;
       let initialSettings = savedSettings || mergeStudioColors(createDefaultSettings(imageData), studioColors || {});
       if (!initialSettings.autoFrameMeta && !initialSettings.cropRegion) initialSettings = await analyzeStudioImportFrame(imageData, initialSettings, { allowCrop: !savedSettings });
+      if (!initialSettings.filmEdge?.checked) {
+        const edge = await analyzeImportFilmEdge(imageData, initialSettings, { applyDefaults: !savedSettings });
+        if (edge) initialSettings = edge.settings;
+      }
       const settings = sanitizeSettings(initialSettings, {
         fallbackSettings: { ...state, cropRegion: null, autoFrameMeta: null, rotationAngle: 0, mirrored: false }
       });
@@ -10675,7 +10691,19 @@
           customSettings: i18n[currentLang].customSettings || 'Custom',
           unsaved: i18n[currentLang].unsaved || 'Unsaved',
           statusText: (status) => i18n[currentLang][status === 'processing' ? 'processingStatus' : status] || status,
-          selectFile: (name) => (i18n[currentLang].fileListSelectFile || 'Select {name}').replace('{name}', name)
+          selectFile: (name) => (i18n[currentLang].fileListSelectFile || 'Select {name}').replace('{name}', name),
+          badges: (item) => {
+            // The open file's detection lives in state until its settings are persisted.
+            const edge = item.file === state.loadedFile && state.filmEdge ? state.filmEdge : item.settings?.filmEdge;
+            if (!edge?.found) return [];
+            const name = edge.shortName || edge.filmName || (edge.dxNumber ? `DX ${edge.dxNumber}` : null);
+            if (!name) return [];
+            return [{
+              className: 'film-stock',
+              text: name,
+              title: getInterpolatedText('filmEdgeBadgeTitle', { name: edge.filmName || name, dx: edge.dxNumber || '' }, `Film edge: ${name}`)
+            }];
+          }
         },
         onToggleSelected: (index, selected, { range = false } = {}) => {
           const anchor = state.fileQueue.findIndex(item => item.id === fileSelectionAnchor);
@@ -10806,6 +10834,8 @@
       state.filmType = sanitizePresetType(safe.filmType || 'color');
       state.filmBase = { ...safe.filmBase };
       state.filmBaseSet = true;
+      state.filmEdge = safe.filmEdge ? structuredClone(safe.filmEdge) : null;
+      updateFilmEdgeUI();
       state.lensCorrection.enabled = Boolean(safe.lensCorrection.enabled);
       state.lensCorrection.selectedLens = safe.lensCorrection.selectedLens ? { ...safe.lensCorrection.selectedLens } : null;
       state.lensCorrection.params = { ...safe.lensCorrection.params };
@@ -11412,12 +11442,29 @@
       document.body.dataset.studioBusy = 'true';
       studioWorkspace?.sync();
       try {
+        const source = state.loadedBaseImageData || state.originalImageData;
+        const freshFile = !item?.settings;
+        let settings = extractCurrentSettings();
+        let changed = false;
+        let filmEdgeToast = null;
         if (!item?.settings?.autoFrameMeta && !state.cropRegion && state.autoFrame.enabled) {
-          const source = state.loadedBaseImageData || state.originalImageData;
-          const settings = await analyzeStudioImportFrame(source, extractCurrentSettings(), { allowCrop: !item?.settings });
+          settings = await analyzeStudioImportFrame(source, settings, { allowCrop: freshFile });
           if (!isCurrentLoad(generation)) return;
-          restoreSettings(settings);
+          changed = true;
         }
+        if (!settings.filmEdge?.checked) {
+          // Read the rebate once per file: perforations, DX edge barcode, film base.
+          const edge = await analyzeImportFilmEdge(source, settings, { applyDefaults: freshFile });
+          if (!isCurrentLoad(generation)) return;
+          if (edge) {
+            settings = edge.settings;
+            filmEdgeToast = edge.toast;
+            changed = true;
+          }
+        }
+        if (changed) restoreSettings(settings);
+        if (filmEdgeToast) showToast(filmEdgeToast, 3200);
+        if (settings.filmEdge?.found) updateFileListUI();
         goToStep(2);
         await processNegative();
       } finally {
@@ -11453,6 +11500,178 @@
         ? rotate180CropRegion(result.cropRegion, rotated.width, rotated.height) : result.cropRegion;
       return { ...settings, rotationAngle: angle, mirrored: false, cropRegion, autoFrameMeta: meta };
     }
+
+    // ===========================================
+    // Film edge: perforation lanes, DX edge barcode, rebate film base
+    // ===========================================
+    async function readFilmEdgeForImage(imageData) {
+      if (!imageData) return null;
+      if (typeof Worker === 'function') {
+        try { return await readFilmEdgeInWorker(imageData, {}); }
+        catch (error) { console.warn('Film edge worker unavailable, reading on the main thread:', error); }
+      }
+      return readFilmEdge(imageData, {});
+    }
+
+    // Mirrors applyFilmPresetSettingsToState for a detached settings object.
+    async function applyFilmPresetToSettings(settings, presetId) {
+      const filmPresets = await loadFilmPresets();
+      const preset = filmPresets[presetId];
+      if (!preset || !preset.settings) return false;
+      const s = preset.settings;
+      settings.coreFilmPreset = presetId;
+      if (s.enhancedProfile) settings.coreEnhancedProfile = s.enhancedProfile;
+      const fields = { saturation: 'coreSaturation', glow: 'coreGlow', fade: 'coreFade', shadows: 'coreShadows', highlights: 'coreHighlights', blacks: 'coreBlacks', whites: 'coreWhites' };
+      for (const [from, to] of Object.entries(fields)) if (s[from] !== undefined) settings[to] = s[from];
+      return true;
+    }
+
+    function rebateFilmBaseForSettings(filmBase) {
+      return sanitizeFilmBaseForSettings({ ...filmBase, method: 'rebate', confidence: 0.92, precision: 8 });
+    }
+
+    // Reads the rebate of a loaded image and folds the result into `settings`.
+    // Returns { settings, toast } or null when the reader was unavailable.
+    // With applyDefaults the detected stock also sets film type, preset and
+    // film base, but only on values the user has not chosen yet.
+    async function analyzeImportFilmEdge(source, settings, { applyDefaults = true } = {}) {
+      if (!source || settings.filmEdge?.checked) return null;
+      let result = null;
+      try { result = await readFilmEdgeForImage(source); }
+      catch (error) { console.warn('Film edge detection failed:', error); return null; }
+      if (!result?.found || !result.dx) {
+        return { settings: { ...settings, filmEdge: sanitizeFilmEdgeForSettings({ found: false }) }, toast: null };
+      }
+      let table = null;
+      try { table = await loadDxFilmTable(); }
+      catch (error) { console.warn('DX film table unavailable:', error); }
+      const description = describeDxFilm(result.dx.dx1, result.dx.dx2, table);
+      const record = {
+        found: true,
+        dx1: result.dx.dx1,
+        dx2: result.dx.dx2,
+        votes: result.dx.votes,
+        total: result.dx.total,
+        filmName: description?.primaryName || null,
+        shortName: description?.primaryName ? shortFilmName(description.primaryName) : null,
+        names: description?.names || [],
+        filmKind: description?.filmKind || null,
+        presetId: description?.presetId || null,
+        frames: result.dx.frames,
+        filmBase: result.filmBase,
+        pxPerMm: result.geometry?.pxPerMm,
+        angleDeg: result.geometry?.angleDeg,
+        axis: result.geometry?.axis,
+        polarity: result.polarity
+      };
+      const next = { ...settings };
+      // Clear marks on a dense rebate belong to slide film (or to a border the
+      // app rendered itself); a colour-negative DX number read that way is
+      // contradictory, so it is shown but not applied automatically.
+      const contradictory = record.polarity === 'light' && record.filmKind !== 'positive';
+      if (applyDefaults && !contradictory) {
+        if (record.filmKind && record.filmKind !== next.filmType) {
+          next.filmType = record.filmKind;
+          record.appliedFilmType = true;
+        }
+        if (record.presetId && (next.coreFilmPreset || 'none') === 'none' && (!record.filmKind || record.filmKind === next.filmType)) {
+          record.appliedPreset = await applyFilmPresetToSettings(next, record.presetId);
+        }
+        const baseMethod = next.filmBase?.method || 'auto';
+        if (record.filmBase && next.filmType === 'color' && baseMethod !== 'manual' && baseMethod !== 'reference') {
+          next.filmBase = rebateFilmBaseForSettings(record.filmBase);
+          record.appliedFilmBase = true;
+        }
+      }
+      next.filmEdge = sanitizeFilmEdgeForSettings(record);
+      const dx = `${record.dx1}-${record.dx2}`;
+      const name = record.shortName || record.filmName;
+      let toast = name
+        ? getInterpolatedText('filmEdgeToastDetected', { name, dx }, `Detected ${name} (DX ${dx})`)
+        : getInterpolatedText('filmEdgeToastUnknown', { dx }, `Read DX ${dx}; no matching film in the database`);
+      if (record.appliedPreset) toast += getLocalizedText('filmEdgeToastPresetApplied', ', preset applied');
+      if (record.appliedFilmBase) toast += getLocalizedText('filmEdgeToastBaseApplied', ', film base from the rebate');
+      return { settings: next, toast };
+    }
+
+    function updateFilmEdgeUI() {
+      if (!stateReady) return;
+      const group = document.getElementById('filmEdgeGroup');
+      const status = document.getElementById('filmEdgeStatus');
+      const applyBtn = document.getElementById('applyFilmEdgePresetBtn');
+      const baseBtn = document.getElementById('useFilmEdgeBaseBtn');
+      if (!group || !status || !applyBtn || !baseBtn) return;
+      const edge = state.filmEdge;
+      if (!edge?.checked || !state.originalImageData) {
+        group.style.display = 'none';
+        return;
+      }
+      group.style.display = '';
+      if (!edge.found) {
+        status.textContent = getLocalizedText('filmEdgeStatusNone', 'No DX edge code found on the rebate.');
+        applyBtn.style.display = 'none';
+        baseBtn.style.display = 'none';
+        return;
+      }
+      const dx = edge.dxNumber || `${edge.dx1}-${edge.dx2}`;
+      const name = edge.filmName || edge.shortName;
+      const parts = [
+        name
+          ? getInterpolatedText('filmEdgeStatusDetected', { dx, name }, `DX ${dx} · ${name}`)
+          : getInterpolatedText('filmEdgeStatusUnknown', { dx }, `DX ${dx} (not in the film database)`)
+      ];
+      if (edge.frames?.length) {
+        parts.push(getInterpolatedText('filmEdgeStatusFrames', { frames: formatFilmEdgeFrames(edge.frames) }, `frames ${formatFilmEdgeFrames(edge.frames)}`));
+      }
+      if (edge.total > 1) {
+        parts.push(getInterpolatedText('filmEdgeStatusVotes', { votes: String(edge.votes), total: String(edge.total) }, `${edge.votes}/${edge.total} codes agree`));
+      }
+      status.textContent = parts.join(' · ');
+      const canApply = Boolean(edge.presetId) || Boolean(edge.filmKind && edge.filmKind !== state.filmType);
+      applyBtn.style.display = canApply ? '' : 'none';
+      baseBtn.style.display = edge.filmBase && requiresFilmBase() ? '' : 'none';
+    }
+
+    async function applyDetectedFilmToCurrent() {
+      const edge = state.filmEdge;
+      if (!edge?.found || !state.originalImageData) return;
+      pushUndo('filmEdgeApply');
+      if (edge.filmKind && edge.filmKind !== state.filmType) {
+        state.filmType = edge.filmKind;
+        setFilmTypeButtons(state.filmType);
+        if (requiresFilmBase()) setStep2Mode(suggestStep2Mode());
+        else updateFilmModeUI();
+      }
+      if (edge.presetId && (!edge.filmKind || edge.filmKind === state.filmType)) {
+        state.frontierGuideStep2ChoiceTouched = true;
+        await applyFilmPresetSettingsToState(edge.presetId);
+      }
+      state.filmEdge = { ...edge, appliedPreset: Boolean(edge.presetId), appliedFilmType: true };
+      markCurrentFileDirty();
+      updateSlidersFromState();
+      updateFilmEdgeUI();
+      const label = edge.shortName || edge.filmName || edge.dxNumber;
+      showToast(getInterpolatedText('filmEdgeAppliedPreset', { name: label }, `Applied the ${label} preset.`));
+      if (usesSilverCoreConversion(state)) scheduleSilverSourceRefresh();
+      else schedulePreviewUpdate();
+    }
+
+    function useFilmEdgeBaseForCurrent() {
+      const edge = state.filmEdge;
+      if (!edge?.found || !edge.filmBase || !requiresFilmBase()) return;
+      pushUndo('filmEdgeBase');
+      state.filmBase = rebateFilmBaseForSettings(edge.filmBase);
+      state.filmBaseSet = true;
+      state.filmEdge = { ...edge, appliedFilmBase: true };
+      updateFilmBasePreview();
+      markCurrentFileDirty();
+      updateFilmEdgeUI();
+      showToast(getLocalizedText('filmEdgeAppliedBase', 'Film base taken from the unexposed rebate.'));
+      scheduleSilverSourceRefresh({ immediate: true });
+    }
+
+    document.getElementById('applyFilmEdgePresetBtn')?.addEventListener('click', () => { void applyDetectedFilmToCurrent(); });
+    document.getElementById('useFilmEdgeBaseBtn')?.addEventListener('click', useFilmEdgeBaseForCurrent);
 
     {
       // 共通コントロールを唯一の暗室 UI に配置する。

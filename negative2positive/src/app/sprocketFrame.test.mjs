@@ -221,6 +221,13 @@ assert.ok(dxBlocks.some((block) => block.column === 29 && block.row === 0));
 assert.ok(dxBlocks.some((block) => block.column === 30 && block.row === 1));
 const dxABlocks = buildDxEdgeCodeBlocks({ dx1: 82, dx2: 3, frameNumber: 18, aFlag: true });
 assert.ok(dxABlocks.some((block) => block.column === 24 && block.row === 1));
+// Parity counts set bits, not the numeric sum: 2 = 0b10 has one set bit (odd)
+// although the value itself is even, so the parity bar must be present.
+const dxParityBlocks = buildDxEdgeCodeBlocks({ dx1: 2, dx2: 0, frameNumber: 0, aFlag: false });
+assert.ok(dxParityBlocks.some((block) => block.column === 26 && block.row === 1), 'DX parity follows the set-bit count');
+// 3 = 0b11 has two set bits (even) although the value is odd: no parity bar.
+const dxEvenBlocks = buildDxEdgeCodeBlocks({ dx1: 3, dx2: 0, frameNumber: 0, aFlag: false });
+assert.ok(!dxEvenBlocks.some((block) => block.column === 26 && block.row === 1), 'even set-bit count clears the parity bar');
 
 assert.equal(hasSprocketFrameEnabled({ sprocketHolesEnabled: true }), true);
 assert.equal(hasSprocketFrameEnabled({ sprocketHolesEnabled: false }), false);

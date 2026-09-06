@@ -71,6 +71,18 @@ export function renderFileList({
       nameEl.append(badge);
     }
 
+    // Optional per-file badges (detected film stock, roll outlier, ...):
+    // labels.badges(item) returns [{ className, text, title }].
+    const extraBadges = typeof labels.badges === 'function' ? labels.badges(item) || [] : [];
+    for (const spec of extraBadges) {
+      if (!spec || !spec.text) continue;
+      const badge = document.createElement('span');
+      badge.className = `file-list-badge ${spec.className || ''}`.trim();
+      badge.textContent = spec.text;
+      if (spec.title) badge.title = spec.title;
+      el.append(badge);
+    }
+
     const statusEl = document.createElement('span');
     statusEl.className = `file-list-status ${item.status}`;
     statusEl.textContent = labels.statusText(item.status);

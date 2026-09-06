@@ -19,6 +19,7 @@ Whether you are reviewing a fresh roll, restoring family negatives, or preparing
   - Vibrance & Saturation
   - Cyan / Magenta / Yellow (CMY) channels
 - 🎞️ **Film presets** for color negative, B&W negative, and positive slide stocks across Kodak / Fujifilm / Ilford
+- 🔍 **Film edge reader**: whole-strip scans that show the perforations get their DX edge barcode decoded (ISO 1007), the stock named from The Big Film Database, a matching preset suggested and the film base sampled from the unexposed rebate (see `docs/film-edge-reader.md`)
 - 🗂️ **Data-driven preset system** defined in `negative2positive/src/silvercore/engine/FilmPresets.js` (supports alias fallback for older preset IDs)
 - 🔍 **Optional lens profile workflow**: search/select Lensfun profiles manually, or skip lens correction and continue
 - 🧷 **Roll-level lens settings**: lens correction on/off and parameters can be applied to selected files or reused via roll reference
