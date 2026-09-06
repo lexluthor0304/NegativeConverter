@@ -1022,6 +1022,29 @@
         </div>
       </div>
 
+      <!-- Flat field: a blank light-source frame removes the light pad's falloff. Moved into the Retouch tab. -->
+      <div class="control-section task-secondary" id="flatFieldSection" style="display: none;">
+        <div class="section-content">
+          <div class="control-group">
+            <div class="roll-reference-status" id="flatFieldStatus" role="status"></div>
+            <label class="roll-reference-option">
+              <input type="checkbox" id="flatFieldEnabled">
+              <span data-i18n="flatFieldEnable">Correct this photo with the flat field</span>
+            </label>
+            <div class="info-box" id="flatFieldLensWarning" data-i18n="flatFieldLensWarning" style="display: none;">Lens vignetting correction is also on; the flat field already removes the falloff, so switch one of them off.</div>
+            <div class="film-base-buttons">
+              <button class="film-base-btn" id="flatFieldUseCurrentBtn" data-i18n="flatFieldUseCurrent">Use this photo as flat field</button>
+              <button class="film-base-btn" id="flatFieldDetectBtn" data-i18n="flatFieldDetect">Find blank frame in selection</button>
+            </div>
+            <div class="film-base-buttons">
+              <button class="film-base-btn" id="flatFieldApplySelectedBtn" data-i18n="flatFieldApplySelected">Apply to selected</button>
+              <button class="film-base-btn" id="flatFieldClearBtn" data-i18n="flatFieldClear">Clear flat field</button>
+            </div>
+            <div class="control-group-hint" data-i18n="flatFieldHint">Shoot one empty frame of the light source with the same lens and exposure. Its brightness map divides every frame in linear light before inversion, removing corner falloff and colour unevenness of the pad.</div>
+          </div>
+        </div>
+      </div>
+
       <div class="control-section task-secondary" id="whiteBalanceSection" style="display: none;">
         <div class="section-header" data-section="conversion">
           <button type="button" class="section-title" aria-expanded="true" aria-controls="conversionSectionContent" data-i18n="sectionQuickFix">Quick Fix</button>

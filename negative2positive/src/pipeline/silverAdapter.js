@@ -11,6 +11,7 @@ import { applyFilmBaseCompensationToBuffer } from './filmBaseCompensation.js';
 import { analyzeImage, adjustSaturation } from '../silvercore/engine/ImageProcessor.js';
 import { normalizePaperId, normalizeToningId } from '../silvercore/engine/PaperProfiles.js';
 import { rasterizeExposureStops } from '../app/localExposure.js';
+import { applyFlatFieldToImage16 } from '../app/flatField.js';
 
 // EnhancedProfiles.js owns the list of shipped 3D-LUT profiles and their .bin URLs;
 // deriving the whitelist from it keeps the two in step. A hand-copied list here is
@@ -230,7 +231,32 @@ function filmBaseCompensationEqual(a, b) {
     && aBase.g16 === bBase.g16
     && aBase.b16 === bBase.b16
     && aOptions.method === bOptions.method
-    && aOptions.strength === bOptions.strength;
+    && aOptions.strength === bOptions.strength
+    && (a.flatFieldKey || '') === (b.flatFieldKey || '');
+}
+
+// Identity of a flat-field correction for the cache: which map, in which frame geometry.
+function flatFieldKeyOf(settings) {
+  const map = settings && settings.flatField;
+  if (!map || !map.gains) return '';
+  const g = settings.flatFieldGeometry || {};
+  const crop = g.cropRegion ? `${g.cropRegion.left ?? g.cropRegion.x}|${g.cropRegion.top ?? g.cropRegion.y}|${g.cropRegion.width}|${g.cropRegion.height}` : '';
+  return `${map.id || 'map'}|${g.baseWidth}x${g.baseHeight}|${g.rotationAngle || 0}|${g.mirrored ? 1 : 0}|${crop}`;
+}
+
+// Preprocessing that is baked into the cached pristine buffer: the flat field
+// (light-pad falloff) first, then the film base compensation.
+function _preprocessBuffer(data, width, height, preprocess) {
+  if (preprocess.flatField && preprocess.flatFieldGeometry) {
+    applyFlatFieldToImage16({ width, height, data }, preprocess.flatField, {
+      ...preprocess.flatFieldGeometry,
+      width,
+      height,
+    });
+  }
+  if (preprocess.base) {
+    applyFilmBaseCompensationToBuffer(data, preprocess.base, preprocess.options);
+  }
 }
 
 function _slotFor(options) {
@@ -294,15 +320,12 @@ function _takeWorkBuffer(slot, image16, filmBaseCompensation) {
   if (sizeChanged || sourceChanged || gainsChanged) {
     if (sizeChanged) slot.pristineBuffer = new Uint16Array(len);
     slot.pristineBuffer.set(sourceRef);
-    applyFilmBaseCompensationToBuffer(
-      slot.pristineBuffer,
-      filmBaseCompensation.base,
-      filmBaseCompensation.options
-    );
+    _preprocessBuffer(slot.pristineBuffer, image16.width, image16.height, filmBaseCompensation);
     slot.lastSourceRef = sourceRef;
     slot.lastFilmBaseGains = {
-      base: { ...filmBaseCompensation.base },
-      options: { ...filmBaseCompensation.options },
+      base: filmBaseCompensation.base ? { ...filmBaseCompensation.base } : null,
+      options: filmBaseCompensation.options ? { ...filmBaseCompensation.options } : {},
+      flatFieldKey: filmBaseCompensation.flatFieldKey || '',
     };
   }
 
@@ -331,9 +354,9 @@ function _analysisStateFor(params, filmBaseCompensation, sourceRef, mode, refere
     preSaturation: params.preSaturation,
     bwMix: mode === 'bw' ? params.bwMix : null,
     analysisOverrideKey: params.analysisOverride ? JSON.stringify(params.analysisOverride) : '',
-    filmBaseKey: base
+    filmBaseKey: (base
       ? `${base.r}|${base.g}|${base.b}|${base.r16}|${base.g16}|${base.b16}|${options.method}|${options.strength}`
-      : '',
+      : '') + (filmBaseCompensation && filmBaseCompensation.flatFieldKey ? `|ff:${filmBaseCompensation.flatFieldKey}` : ''),
   };
 }
 
@@ -387,13 +410,19 @@ async function runSilverCore(imageData, settings, mode, options) {
   // multiplied by the default {210,140,90} base (r 0.70 / g 1.05 / b 1.63 in linear
   // mode, clipping blue above ~61% of range) or by whatever colour negative happened to
   // be sampled last, making the same file convert differently from run to run.
-  const filmBaseCompensation = mode === 'color' && settings && settings.filmBase
+  // The flat field (camera-scan light pad) applies to every mode; it is baked
+  // into the same cached buffer as the film base compensation.
+  const flatFieldKey = flatFieldKeyOf(settings);
+  const filmBaseCompensation = (mode === 'color' && settings && settings.filmBase) || flatFieldKey
     ? {
-        base: settings.filmBase,
+        base: mode === 'color' && settings && settings.filmBase ? settings.filmBase : null,
         options: {
           method: settings.filmBaseCompensation || settings.filmBaseMethod || 'density',
           strength: settings.filmBaseStrength ?? 1
-        }
+        },
+        flatField: flatFieldKey ? settings.flatField : null,
+        flatFieldGeometry: flatFieldKey ? settings.flatFieldGeometry : null,
+        flatFieldKey
       }
     : null;
 
@@ -468,12 +497,15 @@ async function runSilverCore(imageData, settings, mode, options) {
 export async function analyzeSilverCoreFrame(imageData, settings = {}, mode = 'color') {
   const params = await buildSilverCoreParams(mode, { ...settings, analysisOverride: null });
   const input = cloneImage16(toImage16(imageData));
-  if (mode === 'color' && settings && settings.filmBase) {
-    applyFilmBaseCompensationToBuffer(input.data, settings.filmBase, {
+  _preprocessBuffer(input.data, input.width, input.height, {
+    base: mode === 'color' && settings && settings.filmBase ? settings.filmBase : null,
+    options: {
       method: settings.filmBaseCompensation || settings.filmBaseMethod || 'density',
       strength: settings.filmBaseStrength ?? 1,
-    });
-  }
+    },
+    flatField: settings.flatField || null,
+    flatFieldGeometry: settings.flatFieldGeometry || null,
+  });
   if (mode === 'bw') toGrayscaleInPlace(input, params.bwMix);
   if (params.preSaturation !== 100) adjustSaturation(input, params.preSaturation);
   return analyzeImage(input, params);

@@ -45,6 +45,7 @@ export function deepCopySanitizedSettings(safe, { autoFrameMeta = safe.autoFrame
     corePaperToning: safe.corePaperToning || 'none',
     corePaperToningStrength: safe.corePaperToningStrength ?? 100,
     localExposure: safe.localExposure ? structuredClone(safe.localExposure) : null,
+    flatFieldId: safe.flatFieldId || null,
     coreSaturation: safe.coreSaturation,
     coreGlow: safe.coreGlow,
     coreFade: safe.coreFade,

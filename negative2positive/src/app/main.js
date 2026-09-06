@@ -20,6 +20,7 @@
     import { filtrationFromSliders, slidersFromFiltration, stopsFromExposureUnits, exposureUnitsFromStops, contrastForGradeValue, gradeValueForContrast, gradeLabelForValue, TEST_STRIP_AXES, formatAxisValue, testStripValues } from './enlarger.js';
     import { sanitizeLocalExposureForSettings, workingPointToBase, basePointToWorking, rotatedDimensions } from './localExposure.js';
     import { paperProfiles, paperIdsForFilmKind, normalizePaperId, normalizeToningId } from '../silvercore/engine/PaperProfiles.js';
+    import { buildFlatFieldMap, scoreBlankFrame } from './flatField.js';
 
     import { convertFrameWithRouter, resolveConversionMode } from '../pipeline/conversionRouter.js';
     import { convertFrameInWorker, convertPreviewFrameInWorker, CONVERSION_FAILED, WORKER_TIMEOUT } from './conversionWorkerClient.js';
@@ -446,6 +447,7 @@
         updateEnlargerUI();
         updatePaperUI();
         updateDodgeBurnUI();
+        updateFlatFieldUI();
         populateTestStripAxes();
         if (typeof updateLensCorrectionUI === 'function') updateLensCorrectionUI();
         if (typeof updateExportUI === 'function') updateExportUI();
@@ -2038,6 +2040,10 @@
       corePaperToningStrength: 100,
       // Dodge and burn strokes (per-file setting), see localExposure.js.
       localExposure: null,
+      // Flat field: session registry of gain maps and the current file's choice.
+      flatFields: {},
+      flatFieldActiveId: null,
+      flatFieldId: null,
       // Control paradigm (UI preference): 'digital' sliders or 'enlarger' head.
       controlParadigm: 'digital',
       // Dodge and burn brush UI state (session only).
@@ -2335,7 +2341,7 @@
         curveReset: '重置曲线', dustBrushStroke: '除尘笔刷', dustToggle: '除尘开关',
         filmBase: '色罩基准', whiteBalance: '白平衡', autoDetectBase: '自动检测色罩',
         filmEdgeApply: '应用片边识别', filmEdgeBase: '片边片基', rollAnalysis: '整卷分析',
-        testStrip: '试条', dodgeBurn: '加减光', enlarger: '放大机', coreCyan: '青 / 红', corePaper: '相纸', corePaperToning: '调色', corePaperToningStrength: '调色强度',
+        testStrip: '试条', dodgeBurn: '加减光', enlarger: '放大机', flatField: '平场校正', coreCyan: '青 / 红', corePaper: '相纸', corePaperToning: '调色', corePaperToningStrength: '调色强度',
         coreExposure: '曝光', coreContrast: '对比度', coreHighlights: '高光',
         coreShadows: '阴影', coreWhites: '白色', coreBlacks: '黑色',
         coreBrightness: '亮度', coreTemperature: '色温', coreTint: '色调',
@@ -2358,7 +2364,7 @@
         curveReset: 'Reset Curves', dustBrushStroke: 'Dust Brush', dustToggle: 'Dust Toggle',
         filmBase: 'Film Base', whiteBalance: 'White Balance', autoDetectBase: 'Auto Detect Base',
         filmEdgeApply: 'Apply Detected Film', filmEdgeBase: 'Rebate Film Base', rollAnalysis: 'Roll Analysis',
-        testStrip: 'Test Strip', dodgeBurn: 'Dodge and Burn', enlarger: 'Enlarger', coreCyan: 'Cyan / Red', corePaper: 'Paper', corePaperToning: 'Toning', corePaperToningStrength: 'Toning Strength',
+        testStrip: 'Test Strip', dodgeBurn: 'Dodge and Burn', enlarger: 'Enlarger', flatField: 'Flat Field', coreCyan: 'Cyan / Red', corePaper: 'Paper', corePaperToning: 'Toning', corePaperToningStrength: 'Toning Strength',
         coreExposure: 'Exposure', coreContrast: 'Contrast', coreHighlights: 'Highlights',
         coreShadows: 'Shadows', coreWhites: 'Whites', coreBlacks: 'Blacks',
         coreBrightness: 'Brightness', coreTemperature: 'Temperature', coreTint: 'Tint',
@@ -2381,7 +2387,7 @@
         curveReset: 'カーブリセット', dustBrushStroke: '除塵ブラシ', dustToggle: '除塵切替',
         filmBase: 'フィルムベース', whiteBalance: 'ホワイトバランス', autoDetectBase: '自動検出',
         filmEdgeApply: 'フィルム縁を適用', filmEdgeBase: '縁のベース', rollAnalysis: 'ロール解析',
-        testStrip: 'テストストリップ', dodgeBurn: '覆い焼き・焼き込み', enlarger: '引き伸ばし機', coreCyan: 'シアン / 赤', corePaper: '印画紙', corePaperToning: '調色', corePaperToningStrength: '調色の強さ',
+        testStrip: 'テストストリップ', dodgeBurn: '覆い焼き・焼き込み', enlarger: '引き伸ばし機', flatField: 'フラットフィールド', coreCyan: 'シアン / 赤', corePaper: '印画紙', corePaperToning: '調色', corePaperToningStrength: '調色の強さ',
         coreExposure: '露出', coreContrast: 'コントラスト', coreHighlights: 'ハイライト',
         coreShadows: 'シャドウ', coreWhites: 'ホワイト', coreBlacks: 'ブラック',
         coreBrightness: '明るさ', coreTemperature: '色温度', coreTint: '色合い',
@@ -2416,7 +2422,7 @@
       'coreBrightness', 'coreExposure', 'coreContrast', 'coreHighlights', 'coreShadows',
       'coreWhites', 'coreBlacks', 'coreWbMode', 'coreTemperature', 'coreTint',
       'coreSaturation', 'coreGlow', 'coreFade', 'coreCurvePrecision', 'coreUseWebGL',
-      'coreCyan', 'corePaper', 'corePaperToning', 'corePaperToningStrength',
+      'coreCyan', 'corePaper', 'corePaperToning', 'corePaperToningStrength', 'flatFieldId',
       'wbR', 'wbG', 'wbB', 'wbAutoConfidence', 'wbUserOverride',
       'filmType', 'filmBaseSet', 'grayPointSampled', 'step2Mode', 'rotationAngle',
       'mirrored', 'sprocketPreviewEnabled', 'currentStep',
@@ -2841,6 +2847,7 @@
       state.rollReference.applyLock = false;
       state.rollReference.applyCrop = false;
       resetRollAnalysisState();
+      resetFlatFieldState();
     }
 
     function resetRollAnalysisState() {
@@ -3520,6 +3527,8 @@
         corePaperToningStrength: sanitizeNumeric(source.corePaperToningStrength, fallbackSettings.corePaperToningStrength ?? 100, 0, 100),
         // Per-file like the crop: strokes are never inherited from the fallback frame.
         localExposure: sanitizeLocalExposureForSettings(source === state ? state.localExposure : source.localExposure),
+        // Roll-level like the film base: a new file inherits the roll's flat field.
+        flatFieldId: typeof (source.flatFieldId ?? fallbackSettings.flatFieldId) === 'string' ? String(source.flatFieldId ?? fallbackSettings.flatFieldId).slice(0, 64) : null,
         coreSaturation: sanitizeNumeric(source.coreSaturation, fallbackSettings.coreSaturation ?? 100, 0, 200),
         coreGlow: sanitizeNumeric(source.coreGlow, fallbackSettings.coreGlow ?? 0, 0, 100),
         coreFade: sanitizeNumeric(source.coreFade, fallbackSettings.coreFade ?? 0, 0, 100),
@@ -3638,12 +3647,16 @@
         ? buildCoreConversionSettings(settings)
         : settings;
       const meta = settings === state ? state.autoFrame.lastDiagnostics : settings.autoFrameMeta;
+      const flatField = router.flatFieldId ? state.flatFields[router.flatFieldId] || null : null;
       return {
         ...router,
         analysisRegion: resolveAnalysisRegion({ ...settings, autoFrameMeta: meta }, source),
         // Dodge and burn strokes are stored on the unrotated base; the adapter
         // rasterises them for the working frame it converts.
-        localExposureGeometry: router.localExposure ? localExposureGeometryFor(settings, source) : null
+        localExposureGeometry: router.localExposure ? localExposureGeometryFor(settings, source) : null,
+        // Flat field gain map (session registry) with the same frame geometry.
+        flatField,
+        flatFieldGeometry: flatField ? localExposureGeometryFor(settings, source) : null
       };
     }
 
@@ -10114,6 +10127,7 @@
         corePaperToning: 'none',
         corePaperToningStrength: 100,
         localExposure: null,
+        flatFieldId: state.flatFieldId || null,
         coreSaturation: 100,
         coreGlow: 0,
         coreFade: 0,
@@ -11010,6 +11024,8 @@
       state.corePaperToning = safe.corePaperToning || 'none';
       state.corePaperToningStrength = safe.corePaperToningStrength ?? 100;
       state.localExposure = safe.localExposure ? structuredClone(safe.localExposure) : null;
+      state.flatFieldId = safe.flatFieldId && state.flatFields[safe.flatFieldId] ? safe.flatFieldId : null;
+      updateFlatFieldUI();
       state.coreSaturation = safe.coreSaturation;
       state.coreGlow = safe.coreGlow;
       state.coreFade = safe.coreFade;
@@ -11207,6 +11223,7 @@
       selectedBtn.disabled = !state.autoFrame.enabled || selectedCount < 1 || !stepReady;
       updateAutoFrameConfigUI();
       updateRollAnalysisUI();
+      updateFlatFieldUI();
     }
 
     function showBatchUI(show, reason) {
@@ -12347,6 +12364,197 @@
       }
       return working;
     }
+
+    // ===========================================
+    // Flat field: blank light-source frame -> gain map for the roll
+    // ===========================================
+    function resetFlatFieldState() {
+      state.flatFields = {};
+      state.flatFieldActiveId = null;
+      state.flatFieldId = null;
+      if (stateReady) updateFlatFieldUI();
+    }
+
+    function flatFieldUsageCount(id) {
+      return state.fileQueue.filter((item) => (item.file === state.loadedFile ? state.flatFieldId : item.settings?.flatFieldId) === id).length;
+    }
+
+    function updateFlatFieldUI() {
+      if (!stateReady) return;
+      const status = document.getElementById('flatFieldStatus');
+      const enabled = document.getElementById('flatFieldEnabled');
+      if (!status || !enabled) return;
+      const active = state.flatFieldActiveId ? state.flatFields[state.flatFieldActiveId] : null;
+      status.textContent = active
+        ? getInterpolatedText('flatFieldStatusActive', {
+          source: active.source || active.id,
+          falloff: String(Math.round((active.stats?.cornerFalloff || 0) * 100)),
+          count: String(flatFieldUsageCount(active.id))
+        }, `From ${active.source}`)
+        : getLocalizedText('flatFieldStatusNone', 'No flat field yet.');
+      enabled.checked = Boolean(active && state.flatFieldId === active.id);
+      enabled.disabled = !active || !state.originalImageData;
+      const busy = Boolean(document.body.dataset.studioBusy);
+      const useBtn = document.getElementById('flatFieldUseCurrentBtn');
+      const detectBtn = document.getElementById('flatFieldDetectBtn');
+      const applyBtn = document.getElementById('flatFieldApplySelectedBtn');
+      const clearBtn = document.getElementById('flatFieldClearBtn');
+      if (useBtn) useBtn.disabled = !state.loadedBaseImageData && !state.originalImageData || busy;
+      if (detectBtn) detectBtn.disabled = state.fileQueue.filter((item) => item.selected).length < 2 || busy;
+      if (applyBtn) applyBtn.disabled = !active || busy;
+      if (clearBtn) clearBtn.disabled = !active || busy;
+      const warning = document.getElementById('flatFieldLensWarning');
+      if (warning) {
+        const lensVignetting = Boolean(state.lensCorrection?.enabled && state.lensCorrection.modes?.includeVignetting !== false && state.lensCorrection.selectedLens);
+        warning.style.display = active && state.flatFieldId === active.id && lensVignetting ? '' : 'none';
+      }
+    }
+
+    function registerFlatField(map) {
+      state.flatFields[map.id] = map;
+      state.flatFieldActiveId = map.id;
+    }
+
+    // Sets the roll's flat field on the selected files (never on the blank
+    // itself) and on the open file.
+    function applyFlatFieldToItems(id, items, { sourceFile = null } = {}) {
+      let count = 0;
+      for (const item of items) {
+        if (sourceFile && item.file === sourceFile) continue;
+        if (item.file === state.loadedFile) {
+          if (state.flatFieldId !== id) {
+            state.flatFieldId = id;
+            markCurrentFileDirty();
+          }
+          count++;
+          continue;
+        }
+        if (item.settings) {
+          if (item.settings.flatFieldId !== id) {
+            item.settings = { ...item.settings, flatFieldId: id };
+            item.status = 'pending';
+          }
+        } else {
+          item.settings = { ...createDefaultSettings(state.originalImageData || { width: 1, height: 1 }), flatFieldId: id };
+          item.isDirty = false;
+        }
+        count++;
+      }
+      return count;
+    }
+
+    async function useCurrentAsFlatField() {
+      const source = state.loadedBaseImageData || state.originalImageData;
+      const currentItem = getCurrentQueueItem();
+      if (!source || document.body.dataset.studioBusy) return;
+      const score = scoreBlankFrame(source);
+      if (!score.blank) {
+        const ok = await appConfirm(getLocalizedText('flatFieldNotBlankConfirm', 'This photo does not look like a blank frame of the light source. Use it as the flat field anyway?'));
+        if (!ok) return;
+      }
+      const map = buildFlatFieldMap(source, { source: currentItem?.file?.name || state.loadedFile?.name || 'current photo' });
+      if (!map) return;
+      pushUndo('flatField');
+      registerFlatField(map);
+      const targets = state.fileQueue.filter((item) => item.selected && item.file !== currentItem?.file);
+      const count = applyFlatFieldToItems(map.id, targets, { sourceFile: currentItem?.file || null });
+      updateFlatFieldUI();
+      updateFileListUI();
+      showToast(getInterpolatedText('flatFieldApplied', { count: String(count) }, `Flat field applied to ${count} photo(s)`));
+    }
+
+    async function detectBlankFrameInSelection() {
+      if (document.body.dataset.studioBusy || state.cropping || isDesktopBatchExportLocked()) return;
+      const selectedItems = state.fileQueue.filter((item) => item.selected);
+      if (selectedItems.length < 2) return;
+      const generation = loadGeneration;
+      studioAutoFrameRunning = true;
+      document.body.dataset.studioBusy = 'true';
+      studioWorkspace?.sync();
+      showBatchProgress(true);
+      let best = null;
+      try {
+        persistCurrentFileSettings({ silent: true, force: true });
+        for (let i = 0; i < selectedItems.length; i++) {
+          const item = selectedItems[i];
+          updateBatchProgress(i + 1, selectedItems.length, item.file.name);
+          try {
+            const imageData = await loadFileToImageData(item.file);
+            const score = scoreBlankFrame(imageData);
+            if (score.blank && (!best || score.score > best.score.score)) best = { item, imageData, score };
+          } catch (error) {
+            console.warn('Blank frame check failed for', item.file.name, error);
+          }
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+        if (!isCurrentLoad(generation)) return;
+        if (!best) {
+          void appAlert(getLocalizedText('flatFieldDetectNone', 'No blank light-source frame found among the selected photos.'));
+          return;
+        }
+        pushUndo('flatField');
+        const map = buildFlatFieldMap(best.imageData, { source: best.item.file.name });
+        registerFlatField(map);
+        const count = applyFlatFieldToItems(map.id, selectedItems, { sourceFile: best.item.file });
+        showToast(getInterpolatedText('flatFieldDetected', { name: best.item.file.name }, `Blank frame found: ${best.item.file.name}`) + ' · ' + getInterpolatedText('flatFieldApplied', { count: String(count) }, `Flat field applied to ${count} photo(s)`), 3200);
+      } finally {
+        showBatchProgress(false);
+        studioAutoFrameRunning = false;
+        delete document.body.dataset.studioBusy;
+        studioWorkspace?.sync();
+      }
+      updateFlatFieldUI();
+      updateFileListUI();
+      if (state.originalImageData && state.flatFieldId) scheduleSilverSourceRefresh({ immediate: true });
+    }
+
+    function applyFlatFieldToSelected() {
+      const id = state.flatFieldActiveId;
+      if (!id || !state.flatFields[id]) return;
+      pushUndo('flatField');
+      const source = state.flatFields[id].source;
+      const targets = state.fileQueue.filter((item) => item.selected && item.file.name !== source);
+      const count = applyFlatFieldToItems(id, targets);
+      updateFlatFieldUI();
+      updateFileListUI();
+      showToast(getInterpolatedText('flatFieldApplied', { count: String(count) }, `Flat field applied to ${count} photo(s)`));
+      if (state.flatFieldId === id) scheduleSilverSourceRefresh({ immediate: true });
+    }
+
+    function clearFlatField() {
+      if (!state.flatFieldActiveId) return;
+      pushUndo('flatField');
+      const hadCurrent = Boolean(state.flatFieldId);
+      for (const item of state.fileQueue) {
+        if (item.settings?.flatFieldId) {
+          item.settings = { ...item.settings, flatFieldId: null };
+          item.status = 'pending';
+        }
+      }
+      resetFlatFieldState();
+      markCurrentFileDirty();
+      updateFileListUI();
+      showToast(getLocalizedText('flatFieldCleared', 'Flat field cleared.'));
+      if (hadCurrent) scheduleSilverSourceRefresh({ immediate: true });
+    }
+
+    function setFlatFieldForCurrent(enabled) {
+      const id = state.flatFieldActiveId;
+      if (!id || !state.flatFields[id]) return;
+      const next = enabled ? id : null;
+      if (state.flatFieldId === next) return;
+      pushUndo('flatField');
+      state.flatFieldId = next;
+      markCurrentFileDirty();
+      updateFlatFieldUI();
+      scheduleSilverSourceRefresh({ immediate: true });
+    }
+
+    document.getElementById('flatFieldUseCurrentBtn')?.addEventListener('click', () => { void useCurrentAsFlatField(); });
+    document.getElementById('flatFieldDetectBtn')?.addEventListener('click', () => { void detectBlankFrameInSelection(); });
+    document.getElementById('flatFieldApplySelectedBtn')?.addEventListener('click', applyFlatFieldToSelected);
+    document.getElementById('flatFieldClearBtn')?.addEventListener('click', clearFlatField);
+    document.getElementById('flatFieldEnabled')?.addEventListener('change', (event) => setFlatFieldForCurrent(event.target.checked));
 
     function updateRollAnalysisUI() {
       if (!stateReady) return;
