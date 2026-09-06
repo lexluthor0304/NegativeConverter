@@ -543,6 +543,11 @@ export const i18n = {
         labMatchNeedPhoto: "请先转换一张照片。",
         labMatchApplied: "外观已应用到 {count} 张照片",
         labMatchCleared: "已清除外观。",
+        multiShotDone: "已将 {count} 张拍摄合成为 {name}",
+        multiShotSkipped: "{count} 张无法对齐，已跳过",
+        multiShotFailed: "所选拍摄无法对齐，未能合成。",
+        multiShotOpenCv: "对齐需要 OpenCV，但未能加载。",
+        multiShotMerging: "正在合成…",
       },
       en: {
         title: "Negative Converter",
@@ -1086,6 +1091,11 @@ export const i18n = {
         labMatchNeedPhoto: "Convert a photo first.",
         labMatchApplied: "Look applied to {count} photo(s)",
         labMatchCleared: "Look cleared.",
+        multiShotDone: "Merged {count} shots into {name}",
+        multiShotSkipped: "{count} shot(s) could not be aligned and were skipped",
+        multiShotFailed: "The selected shots could not be aligned, so nothing was merged.",
+        multiShotOpenCv: "Alignment needs OpenCV, which could not be loaded.",
+        multiShotMerging: "Merging…",
       },
       ja: {
         title: "ネガポジ変換",
@@ -1629,5 +1639,10 @@ export const i18n = {
         labMatchNeedPhoto: "先に写真を変換してください。",
         labMatchApplied: "ルックを {count} 枚に適用しました",
         labMatchCleared: "ルックを解除しました。",
+        multiShotDone: "{count} 枚の撮影を {name} に合成しました",
+        multiShotSkipped: "{count} 枚は位置合わせできずスキップしました",
+        multiShotFailed: "選択した撮影を位置合わせできず、合成できませんでした。",
+        multiShotOpenCv: "位置合わせには OpenCV が必要ですが読み込めませんでした。",
+        multiShotMerging: "合成中…",
       }
 };

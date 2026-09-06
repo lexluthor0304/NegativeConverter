@@ -1,5 +1,6 @@
 // Camera-scanning smoke: a blank light-pad frame becomes the roll's flat
-// field and flattens a negative shot on the same pad.
+// field and flattens a negative shot on the same pad; a lab scan is matched;
+// several shots of one frame merge into a quieter 16-bit file.
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 
@@ -90,6 +91,7 @@ export async function runCameraSmoke({ send, evaluate, waitFor, wait, fail, inst
   console.log('ok: a blank light-pad frame becomes the flat field, flattens the vignetted negative when applied, and clears cleanly');
 
   await runLabMatchScenario({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, root });
+  await runMultiShotScenario({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, root });
 }
 
 // Match a lab scan: a "lab JPEG" is made from the preview itself (warmer
@@ -187,4 +189,85 @@ async function runLabMatchScenario({ send, evaluate, waitFor, wait, fail, instal
   const cleared = meanRgb(await screenshotRgba());
   if (Math.abs(cleared[0] / Math.max(1, cleared[2]) - warmBefore) > 0.03) fail('clearing the look did not restore the preview');
   console.log('ok: a lab scan of the same frame aligns with ORB, the fitted look reduces the difference and pulls the preview towards the lab, and clears cleanly');
+}
+
+// Multi-shot merge: three noisy, shifted and slightly rotated shots of the
+// same negative merge into one 16-bit file with less grain; the first shot
+// plus a one-stop darker bracket merge as HDR.
+async function runMultiShotScenario({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, root }) {
+  const fixture = (name) => join(root, 'negative2positive', 'test-fixtures', name);
+  await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
+  await waitFor('multi-shot workspace boot', `!!document.getElementById('fileInput') && !!document.getElementById('studioMergeAverage')`);
+  await installDialogAutoAccept();
+  await wait(300);
+  await evaluate(`(() => {
+    window.__cameraToasts = [];
+    new MutationObserver((records) => {
+      for (const record of records) for (const node of record.addedNodes) if (node.nodeType === 1) window.__cameraToasts.push(node.textContent);
+    }).observe(document.getElementById('toastContainer'), { childList: true });
+  })()`);
+  const doc = await send('DOM.getDocument');
+  const input = await send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector: '#fileInput' });
+  // All four shots go in at once (the add-files picker is a transient input
+  // CDP cannot reach); the bracket is deselected for the average merge.
+  await send('DOM.setFileInputFiles', { files: ['shot-a.png', 'shot-b.png', 'shot-c.png', 'shot-dark.png'].map(fixture), nodeId: input.result.nodeId });
+  const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`;
+  await waitFor('first shot converted', `${ready} && document.getElementById('studioFilename').textContent === 'shot-a.png'`, 150_000);
+  await wait(1200);
+  const select = async (wanted) => {
+    await evaluate(`(() => {
+      const wanted = ${JSON.stringify(wanted)};
+      for (let i = 0; i < document.querySelectorAll('.file-list-checkbox').length; i++) {
+        const box = document.querySelectorAll('.file-list-checkbox')[i];
+        if (box.checked !== wanted.includes(i)) box.click();
+      }
+    })()`);
+    await waitFor(`${wanted.length} shots selected`, `document.getElementById('studioSelection').textContent.startsWith('${wanted.length} ')`, 10_000);
+  };
+  await select([0, 1, 2]);
+
+  // Grain: the median absolute difference between horizontal neighbours over
+  // the frame interior. Robust to the fixture's edges, sensitive to noise.
+  const grain = async () => {
+    const rect = await evaluate(`(() => {
+      const gl = document.getElementById('glCanvas');
+      const el = gl && getComputedStyle(gl).display !== 'none' ? gl : document.getElementById('canvas');
+      const b = el.getBoundingClientRect();
+      return { x: b.x, y: b.y, width: b.width, height: b.height };
+    })()`);
+    const shot = await send('Page.captureScreenshot', { format: 'png', clip: { ...rect, scale: 1 } });
+    const png = UPNG.decode(Buffer.from(shot.result.data, 'base64'));
+    const d = new Uint8Array(UPNG.toRGBA8(png)[0]);
+    const diffs = [];
+    for (let y = Math.floor(png.height * 0.1); y < png.height * 0.9; y += 3) {
+      for (let x = Math.floor(png.width * 0.1); x < png.width * 0.9 - 1; x += 2) {
+        const i = (y * png.width + x) * 4; const j = i + 4;
+        diffs.push(Math.abs((d[i] + d[i + 1] + d[i + 2]) - (d[j] + d[j + 1] + d[j + 2])));
+      }
+    }
+    diffs.sort((a, b) => a - b);
+    return diffs[diffs.length >> 1];
+  };
+  const single = await grain();
+  const enabled = await evaluate(`!document.getElementById('studioMergeAverage').disabled && !document.getElementById('studioMergeHdr').disabled`);
+  if (!enabled) fail('merge buttons should be enabled with three selected shots');
+  await evaluate(`document.getElementById('studioMergeAverage').click()`);
+  await waitFor('average merge finished', `${ready} && /^merged-average-/.test(document.getElementById('studioFilename').textContent)`, 180_000);
+  await wait(1500);
+  const toast = await evaluate(`(window.__cameraToasts || []).find((t) => /Merged \\d+ shots/.test(t)) || ''`);
+  console.log('camera multi-shot:', toast);
+  if (!/^Merged 3 shots into merged-average-/.test(toast)) fail('average merge toast wrong: ' + toast);
+  const boxes = await evaluate(`Array.from(document.querySelectorAll('.file-list-checkbox')).map((el) => el.checked)`);
+  if (boxes.length !== 5 || boxes.filter(Boolean).length !== 1 || !boxes[4]) fail('the merged file should be the only selected item: ' + JSON.stringify(boxes));
+  const merged = await grain();
+  console.log('camera multi-shot grain:', JSON.stringify({ single, merged }));
+  if (!(merged < single * 0.8)) fail(`averaging three shots did not reduce grain: ${single} -> ${merged}`);
+
+  await select([0, 3]);
+  if (await evaluate(`document.getElementById('studioMergeHdr').disabled`)) fail('HDR merge should be enabled for the bracket pair');
+  await evaluate(`document.getElementById('studioMergeHdr').click()`);
+  await waitFor('hdr merge finished', `${ready} && /^merged-hdr-/.test(document.getElementById('studioFilename').textContent)`, 180_000);
+  const hdrToast = await evaluate(`(window.__cameraToasts || []).filter((t) => /Merged \\d+ shots/.test(t)).pop() || ''`);
+  if (!/^Merged 2 shots into merged-hdr-/.test(hdrToast)) fail('hdr merge toast wrong: ' + hdrToast);
+  console.log('ok: three shifted noisy shots align and average into a quieter 16-bit merge; a bracket pair merges as HDR and opens as the selected file');
 }

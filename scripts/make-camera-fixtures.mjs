@@ -3,6 +3,11 @@
 //                                          30 % radial falloff and a colour drift
 //   test-fixtures/negative-vignetted.png  a uniform orange-mask negative with a
 //                                          dark subject, shot on the same pad
+//   test-fixtures/negative-textured.png   a textured orange-mask negative for
+//                                          feature matching (lab match)
+//   test-fixtures/shot-{a,b,c}.png        three noisy, slightly shifted and
+//                                          rotated camera shots of that negative
+//   test-fixtures/shot-dark.png           the same frame one stop darker
 // Usage: node scripts/make-camera-fixtures.mjs
 import { writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -41,12 +46,34 @@ const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed
 const blocks = [];
 for (let by = 0; by < 6; by++) for (let bx = 0; bx < 9; bx++) blocks.push(0.15 + 0.75 * rnd());
 const discs = Array.from({ length: 14 }, () => [rnd() * W, rnd() * H, 15 + rnd() * 40, 0.1 + 0.8 * rnd()]);
-write('negative-textured.png', (x, y) => {
+function texturedRgb(x, y) {
   let t = blocks[Math.floor(y / (H / 6)) * 9 + Math.floor(x / (W / 9))];
   for (const [cx, cy, r, v] of discs) if (Math.hypot(x - cx, y - cy) < r) t = v;
   if ((x + y) % 97 < 4 || (x - y + 3000) % 131 < 3) t = 0.95;
   return [0.62 * (0.25 + 0.75 * (1 - t)), 0.42 * (0.25 + 0.75 * (1 - t)), 0.28 * (0.25 + 0.75 * (1 - t))];
-});
+}
+write('negative-textured.png', texturedRgb);
+
+// A camera shot of the textured negative: shifted by (dx, dy) pixels and
+// rotated by `degrees` about the centre, with multiplicative noise and an
+// exposure gain; `speck` adds a dust particle present only in that shot.
+function shot(name, { dx = 0, dy = 0, degrees = 0, gain = 1, noise = 0.08, seedValue = 1, speck = null }) {
+  const angle = (degrees * Math.PI) / 180;
+  const c = Math.cos(angle); const s = Math.sin(angle);
+  let n = seedValue;
+  const rn = () => { n = (n * 1103515245 + 12345) & 0x7fffffff; return n / 0x7fffffff - 0.5; };
+  write(name, (x, y) => {
+    const ox = x - W / 2 - dx; const oy = y - H / 2 - dy;
+    const sx = ox * c + oy * s + W / 2; const sy = -ox * s + oy * c + H / 2;
+    let rgb = sx < 0 || sy < 0 || sx >= W || sy >= H ? [0.04, 0.03, 0.02] : texturedRgb(sx, sy);
+    if (speck && Math.hypot(x - speck[0], y - speck[1]) < speck[2]) rgb = [0.03, 0.03, 0.03];
+    return rgb.map((v) => v * gain * (1 + noise * rn()));
+  });
+}
+shot('shot-a.png', { seedValue: 11 });
+shot('shot-b.png', { dx: 14, dy: -9, degrees: 1.2, seedValue: 22 });
+shot('shot-c.png', { dx: -10, dy: 7, degrees: -0.8, seedValue: 33, speck: [300, 200, 6] });
+shot('shot-dark.png', { dx: 6, dy: 4, degrees: 0.4, gain: 0.5, seedValue: 44 });
 
 write('negative-vignetted.png', (x, y) => {
   const [r, g, b] = pad(x, y);

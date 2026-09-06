@@ -27,6 +27,7 @@ export const studioText = {
     borderPreview: '预览胶片边框', borderExport: '导出时包含边框与边码', borderExportAction: '导出带边框照片',
     batch: '批量工具', batchHint: '同步调色只复制色彩。处理设置还包括片基、白平衡校正和镜头等；两者都保留各照片的构图。',
     allSettings: '同步片基与处理设置…', saveSettings: '保存当前照片设置', clearQueue: '清空照片列表…', newSession: '关闭照片，重新开始…',
+    mergeHint: '把同一格底片的 2–5 次拍摄合成一个 16 位文件：平均叠加降噪，HDR 合并不同曝光。', mergeAverage: '合成已选：平均叠加', mergeHdr: '合成已选：HDR 包围曝光',
     clearConfirm: '清空照片列表后，将无法再切换到这些照片。请先导出需要保留的结果。继续吗？',
     newConfirm: '关闭当前照片和列表？未导出的结果将丢失，原始文件不会被删除。',
     hidePanel: '收起调整', showPanel: '展开调整', hideStrip: '收起照片条', showStrip: '展开照片条', tabs: '照片工具',
@@ -66,6 +67,7 @@ export const studioText = {
     borderPreview: 'Preview film border', borderExport: 'Include border & markings in export', borderExportAction: 'Export with film border',
     batch: 'Batch tools', batchHint: 'Sync color copies color only. Processing settings also copy film base, WB gains and lens settings. Both preserve each photo’s geometry.',
     allSettings: 'Sync base & processing settings…', saveSettings: 'Save current photo settings', clearQueue: 'Clear photo list…', newSession: 'Close photos & start again…',
+    mergeHint: 'Merge 2–5 shots of the same frame into one 16-bit file: average stacks for less noise, HDR combines exposure brackets.', mergeAverage: 'Merge selected: average', mergeHdr: 'Merge selected: HDR brackets',
     clearConfirm: 'Clear the photo list? Export any results you want to keep first.', newConfirm: 'Close this photo and the list? Unexported results will be lost. Original files will not be deleted.',
     hidePanel: 'Hide controls', showPanel: 'Show controls', hideStrip: 'Hide photos', showStrip: 'Show photos', tabs: 'Photo tools',
     lightTable: 'Light table', stripView: 'Film strip', lightTableHint: 'Show the whole roll as a grid so colour consistency is visible at a glance.',
@@ -104,6 +106,7 @@ export const studioText = {
     borderPreview: 'フィルム枠を表示', borderExport: '枠と端文字を書き出しに含める', borderExportAction: '枠付きで書き出す',
     batch: '一括操作', batchHint: '色同期は色だけをコピーします。処理設定はベース・WB補正・レンズなども同期します。どちらも各写真の構図を保ちます。',
     allSettings: 'ベースと処理設定を同期…', saveSettings: '現在の写真の設定を保存', clearQueue: '写真一覧を空にする…', newSession: '写真を閉じてやり直す…',
+    mergeHint: '同じコマの 2〜5 枚の撮影を 1 つの 16 bit ファイルに合成します。平均でノイズを減らし、HDR で露出ブラケットを統合します。', mergeAverage: '選択を合成：平均', mergeHdr: '選択を合成：HDR ブラケット',
     clearConfirm: '写真一覧を空にしますか？必要な結果を先に書き出してください。', newConfirm: '現在の写真と一覧を閉じますか？未保存の結果は失われますが、元ファイルは削除しません。',
     hidePanel: '調整を隠す', showPanel: '調整を表示', hideStrip: '写真一覧を隠す', showStrip: '写真一覧を表示', tabs: '写真ツール',
     lightTable: 'ライトテーブル', stripView: 'フィルムストリップ', lightTableHint: 'ロール全体をサムネイルの一覧で表示し、色の統一を一目で確認します。',
@@ -120,7 +123,7 @@ export const studioText = {
   }
 };
 
-export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, onStyle, onReset, onResetAll, onRestart, onNewSession, onSync, onRetry, onConfirm, onExportBorder, onAutoCrop, onRestoreFrame, onConfirmAnalysis }) {
+export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, onStyle, onReset, onResetAll, onRestart, onNewSession, onSync, onRetry, onConfirm, onExportBorder, onAutoCrop, onRestoreFrame, onConfirmAnalysis, onMergeShots }) {
   const $ = id => document.getElementById(id);
   const t = key => (studioText[getLanguage()] || studioText.en)[key];
   const move = (id, target) => target.append($(id));
@@ -408,7 +411,7 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
   const strip = document.createElement('section');
   strip.className = 'studio-filmstrip';
   strip.id = 'studioFilmstrip';
-  strip.innerHTML = `<div class="studio-strip-header"><button id="studioToggleStrip" type="button" aria-controls="fileListSection" aria-expanded="true" data-studio="photos"></button><button id="studioToggleLightTable" type="button" aria-pressed="false" data-studio="lightTable"></button><span id="studioSelection"></span><button id="studioSync" type="button" data-studio="sync"></button><details id="studioBatchMenu"><summary data-studio="batch"></summary><div class="studio-batch-content"><p data-studio="batchHint"></p><div id="studioBatchActions"></div><button id="studioClearQueue" type="button" data-studio="clearQueue"></button></div></details></div>`;
+  strip.innerHTML = `<div class="studio-strip-header"><button id="studioToggleStrip" type="button" aria-controls="fileListSection" aria-expanded="true" data-studio="photos"></button><button id="studioToggleLightTable" type="button" aria-pressed="false" data-studio="lightTable"></button><span id="studioSelection"></span><button id="studioSync" type="button" data-studio="sync"></button><details id="studioBatchMenu"><summary data-studio="batch"></summary><div class="studio-batch-content"><p data-studio="batchHint"></p><div id="studioBatchActions"></div><p data-studio="mergeHint"></p><button id="studioMergeAverage" type="button" data-studio="mergeAverage"></button><button id="studioMergeHdr" type="button" data-studio="mergeHdr"></button><button id="studioClearQueue" type="button" data-studio="clearQueue"></button></div></details></div>`;
   document.querySelector('.app-main').append(strip);
   move('fileListSection', strip);
   $('studioSync').title = t('syncHint');
@@ -419,6 +422,9 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
   $('studioClearQueue').addEventListener('click', async () => {
     if (await onConfirm(t('clearConfirm'))) $('clearFileListBtn').click();
   });
+  for (const [id, mode] of [['studioMergeAverage', 'average'], ['studioMergeHdr', 'hdr']]) {
+    $(id).addEventListener('click', () => { $('studioBatchMenu').open = false; onMergeShots?.(mode); });
+  }
   $('studioNewSession').addEventListener('click', async () => {
     if (!getState().originalImageData || await onConfirm(t('newConfirm'))) onNewSession();
   });
@@ -527,6 +533,9 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
       $('studioExportBorder').checked = Boolean(state.exportSprocketHolesEnabled);
       $('studioExportBorder').disabled = !ready || locked;
       $('studioClearQueue').disabled = locked || !state.fileQueue.length;
+      const mergeable = !locked && count >= 2 && count <= 5;
+      $('studioMergeAverage').disabled = !mergeable;
+      $('studioMergeHdr').disabled = !mergeable;
       $('studioNewSession').disabled = locked;
       $('studioAdd').disabled = locked;
       $('studioTogglePanel').disabled = state.cropping;

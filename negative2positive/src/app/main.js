@@ -23,6 +23,7 @@
     import { buildFlatFieldMap, scoreBlankFrame } from './flatField.js';
     import { estimateAlignment, warpImageData } from './imageAlignment.js';
     import { collectPairs, fitLook, sanitizeLookForSettings } from './labMatch.js';
+    import { estimateExposureRatio, mergeFrames, coverageRect, toImage16, image16ToImageData } from './multiShot.js';
 
     import { convertFrameWithRouter, resolveConversionMode } from '../pipeline/conversionRouter.js';
     import { convertFrameInWorker, convertPreviewFrameInWorker, CONVERSION_FAILED, WORKER_TIMEOUT } from './conversionWorkerClient.js';
@@ -12545,6 +12546,85 @@
     document.getElementById('labMatchClearBtn')?.addEventListener('click', clearLook);
 
     // ===========================================
+    // Multi-shot merge (camera scanning)
+    // ===========================================
+    const MULTI_SHOT_MAX = 5;
+
+    // Aligns the selected shots to the first one, merges them in linear light
+    // and adds the result to the queue as a 16-bit PNG, opened and selected in
+    // place of its sources.
+    async function mergeSelectedShots(mode = 'average') {
+      if (document.body.dataset.studioBusy || state.cropping || isDesktopBatchExportLocked()) return;
+      const selectedItems = state.fileQueue.filter((item) => item.selected);
+      if (selectedItems.length < 2 || selectedItems.length > MULTI_SHOT_MAX) return;
+      if (!(await ensureOpenCvReady())) {
+        void appAlert(getLocalizedText('multiShotOpenCv', 'Alignment needs OpenCV, which could not be loaded.'));
+        return;
+      }
+      studioAutoFrameRunning = true;
+      document.body.dataset.studioBusy = 'true';
+      studioWorkspace?.sync();
+      showBatchProgress(true);
+      let merged = null; let used = 0; let skipped = 0;
+      try {
+        persistCurrentFileSettings({ silent: true, force: true });
+        let reference = null;
+        const frames = [];
+        for (let i = 0; i < selectedItems.length; i++) {
+          const item = selectedItems[i];
+          updateBatchProgress(i + 1, selectedItems.length + 1, item.file.name);
+          let imageData;
+          try {
+            imageData = await loadFileToImageData(item.file);
+          } catch (error) {
+            console.warn('Multi-shot decode failed for', item.file.name, error);
+            skipped++;
+            continue;
+          }
+          if (!reference) {
+            reference = imageData;
+            frames.push({ image16: toImage16(imageData), ratio: 1 });
+          } else {
+            let alignment = null;
+            try { alignment = estimateAlignment(reference, imageData, { maxSide: 1200 }); }
+            catch (error) { console.warn('Multi-shot alignment failed for', item.file.name, error); }
+            if (!alignment) { skipped++; continue; }
+            const warped = warpImageData(imageData, alignment.homography, reference.width, reference.height);
+            const image16 = toImage16(warped);
+            frames.push({ image16, ratio: estimateExposureRatio(frames[0].image16, image16) });
+          }
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+        if (frames.length >= 2) {
+          updateBatchProgress(selectedItems.length + 1, selectedItems.length + 1, getLocalizedText('multiShotMerging', 'Merging…'));
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          merged = mergeFrames(frames, { mode, region: coverageRect(frames), opaque: true });
+          used = frames.length;
+        }
+      } finally {
+        showBatchProgress(false);
+        studioAutoFrameRunning = false;
+        delete document.body.dataset.studioBusy;
+        studioWorkspace?.sync();
+      }
+      if (!merged) {
+        void appAlert(getLocalizedText('multiShotFailed', 'The selected shots could not be aligned, so nothing was merged.'));
+        return;
+      }
+      const blob = await imageDataToBlob(image16ToImageData(merged), 'png', null, 16);
+      const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, '').replace('T', '-');
+      const name = `merged-${mode}-${stamp}.png`;
+      const file = new File([blob], name, { type: 'image/png', lastModified: Date.now() });
+      for (const item of selectedItems) item.selected = false;
+      addFilesToQueue([file]);
+      let message = getInterpolatedText('multiShotDone', { count: String(used), name }, `Merged ${used} shots into ${name}`);
+      if (skipped) message += ' · ' + getInterpolatedText('multiShotSkipped', { count: String(skipped) }, `${skipped} shot(s) could not be aligned and were skipped`);
+      showToast(message, 3600);
+      const index = state.fileQueue.findIndex((item) => item.file === file);
+      if (index >= 0) await switchToFile(index);
+    }
+
+    // ===========================================
     // Flat field: blank light-source frame -> gain map for the roll
     // ===========================================
     function resetFlatFieldState() {
@@ -13009,7 +13089,8 @@
           markCurrentFileDirty();
           void processNegative();
         },
-        onConfirmAnalysis: () => beginCropMode({ analysisOnly: true })
+        onConfirmAnalysis: () => beginCropMode({ analysisOnly: true }),
+        onMergeShots: (mode) => { void mergeSelectedShots(mode); }
       });
       updateWorkflowUI();
       studioWorkspace.sync();
