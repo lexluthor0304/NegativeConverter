@@ -80,7 +80,19 @@ export async function runDarkroomSmoke({ send, evaluate, waitFor, wait, fail, in
   await waitFor('test strip undone', `document.getElementById('coreExposureValue').value === '0'`, 10_000);
 
   // ---- 2. Enlarger paradigm ----
-  const before = await canvasLuminance();
+  // The undo's reprocess may still be in flight when the slider value has
+  // already gone back to 0: read until two readings agree.
+  const settledLuminance = async () => {
+    let last = await canvasLuminance();
+    for (let i = 0; i < 12; i++) {
+      await wait(400);
+      const next = await canvasLuminance();
+      if (Math.abs(next - last) < 0.3) return next;
+      last = next;
+    }
+    return last;
+  };
+  const before = await settledLuminance();
   await evaluate(`document.getElementById('paradigmEnlargerBtn').click()`);
   const paradigm = await evaluate(`(() => ({
     enlarger: document.body.classList.contains('studio-enlarger'),
@@ -96,7 +108,7 @@ export async function runDarkroomSmoke({ send, evaluate, waitFor, wait, fail, in
   if (paradigm.magenta !== '50' || paradigm.yellow !== '40' || paradigm.cyan !== '20') fail('reference pack is not shown for neutral sliders: ' + JSON.stringify(paradigm));
   if (!paradigm.gradeHidden) fail('paper grade must be hidden for colour film');
   await wait(300);
-  const afterToggle = await canvasLuminance();
+  const afterToggle = await settledLuminance();
   if (Math.abs(afterToggle - before) > 0.5) fail(`switching paradigm changed the image: ${before} -> ${afterToggle}`);
   await setInput('enlargerMagenta', '60');
   await waitFor('magenta filtration applied', `document.getElementById('coreTintValue').value === '-10'`, 10_000);
