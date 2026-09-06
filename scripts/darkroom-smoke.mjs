@@ -80,21 +80,30 @@ export async function runDarkroomSmoke({ send, evaluate, waitFor, wait, fail, in
   await waitFor('test strip undone', `document.getElementById('coreExposureValue').value === '0'`, 10_000);
 
   // ---- 2. Enlarger paradigm ----
-  // The undo's reprocess may still be in flight when the slider value has
-  // already gone back to 0: read until two readings agree.
-  // The preview lands first and the full-resolution render follows a moment
-  // later, so a reading has to hold for three consecutive samples.
-  const settledLuminance = async () => {
-    const readings = [await canvasLuminance()];
-    for (let i = 0; i < 16; i++) {
-      await wait(500);
-      readings.push(await canvasLuminance());
-      const tail = readings.slice(-3);
-      if (tail.length === 3 && Math.max(...tail) - Math.min(...tail) < 0.3) return tail[2];
-    }
-    return readings.at(-1);
+  // Compare the rendered photo itself. Screenshot brightness can change when
+  // the controls resize the preview or a background render replaces it.
+  // Export waits for the full-resolution render, including the preceding undo.
+  await evaluate(`(() => {
+    const click = HTMLAnchorElement.prototype.click;
+    HTMLAnchorElement.prototype.click = function () {
+      if (!this.download || !this.href.startsWith('blob:')) return click.call(this);
+      fetch(this.href).then(r => r.blob()).then(blob => {
+        const reader = new FileReader();
+        reader.onload = () => { window.__darkroomExport = reader.result; };
+        reader.readAsDataURL(blob);
+      });
+    };
+    document.querySelector('.format-btn[data-format="png"]').click();
+    document.querySelector('.bitdepth-btn[data-bitdepth="8"]').click();
+  })()`);
+  const exportedPixels = async () => {
+    await evaluate(`window.__darkroomExport = null; document.getElementById('exportSingleBtn').click()`);
+    await waitFor('darkroom full-resolution export', `!!window.__darkroomExport`, 120_000);
+    const dataUrl = await evaluate(`window.__darkroomExport`);
+    const png = UPNG.decode(Buffer.from(dataUrl.split(',')[1], 'base64'));
+    return { width: png.width, height: png.height, pixels: Buffer.from(UPNG.toRGBA8(png)[0]) };
   };
-  const before = await settledLuminance();
+  const before = await exportedPixels();
   await evaluate(`document.getElementById('paradigmEnlargerBtn').click()`);
   const paradigm = await evaluate(`(() => ({
     enlarger: document.body.classList.contains('studio-enlarger'),
@@ -109,9 +118,9 @@ export async function runDarkroomSmoke({ send, evaluate, waitFor, wait, fail, in
   if (!paradigm.enlarger || !paradigm.slidersHidden || !paradigm.controlsShown) fail('enlarger paradigm did not switch: ' + JSON.stringify(paradigm));
   if (paradigm.magenta !== '50' || paradigm.yellow !== '40' || paradigm.cyan !== '20') fail('reference pack is not shown for neutral sliders: ' + JSON.stringify(paradigm));
   if (!paradigm.gradeHidden) fail('paper grade must be hidden for colour film');
-  await wait(300);
-  const afterToggle = await settledLuminance();
-  if (Math.abs(afterToggle - before) > 0.5) fail(`switching paradigm changed the image: ${before} -> ${afterToggle}`);
+  const afterToggle = await exportedPixels();
+  if (before.width !== afterToggle.width || before.height !== afterToggle.height || !before.pixels.equals(afterToggle.pixels)) fail('switching paradigm changed the exported photo');
+  console.log('ok: switching darkroom paradigm preserves every exported pixel');
   await setInput('enlargerMagenta', '60');
   await waitFor('magenta filtration applied', `document.getElementById('coreTintValue').value === '-10'`, 10_000);
   await setInput('enlargerYellow', '30');
