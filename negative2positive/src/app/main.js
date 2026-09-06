@@ -19,6 +19,7 @@
     import { aggregateRollAnalysis, measureNegativeMean, sanitizeRollFrameForSettings, rollFrameExposureUnits } from './rollAnalysis.js';
     import { filtrationFromSliders, slidersFromFiltration, stopsFromExposureUnits, exposureUnitsFromStops, contrastForGradeValue, gradeValueForContrast, gradeLabelForValue, TEST_STRIP_AXES, formatAxisValue, testStripValues } from './enlarger.js';
     import { sanitizeLocalExposureForSettings, workingPointToBase, basePointToWorking, rotatedDimensions } from './localExposure.js';
+    import { sanitizeRepairStrokes, repairMask, pointerToRepairPoint } from './repairBrush.js';
     import { paperProfiles, paperIdsForFilmKind, normalizePaperId, normalizeToningId } from '../silvercore/engine/PaperProfiles.js';
     import { buildFlatFieldMap, scoreBlankFrame } from './flatField.js';
     import { estimateAlignment, warpImageData } from './imageAlignment.js';
@@ -2051,6 +2052,7 @@
       corePaperToningStrength: 100,
       // Dodge and burn strokes (per-file setting), see localExposure.js.
       localExposure: null,
+      repairStrokes: [],
       // Lab-match look (colour setting, see labMatch.js).
       look: null,
       // Analog metadata: the roll (session-wide) and this frame (per file).
@@ -2185,7 +2187,7 @@
         _state: null,        // Internal state for updateDustStrength
         inpaintedImageData: null, // ImageData after inpainting
         brushSize: 5,
-        ai: false,           // learned inpainter on commit and export (aiInpaint.js)
+        ai: true,            // MI-GAN by default; loaded lazily when dust is repaired
       },
 
       // Export settings
@@ -2483,6 +2485,7 @@
       };
       settings.sprocketEdge = createSprocketEdgeSettings(state.sprocketEdge);
       settings.localExposure = state.localExposure ? structuredClone(state.localExposure) : null;
+      settings.repairStrokes = structuredClone(state.repairStrokes);
       settings.look = state.look ? structuredClone(state.look) : null;
       settings.frameMetadata = sanitizeFrameMetadata(state.frameMetadata);
       settings.autoFrameMeta = state.autoFrame.lastDiagnostics ? structuredClone(state.autoFrame.lastDiagnostics) : null;
@@ -2541,6 +2544,7 @@
       state.dustRemoval.showMask = s.dustRemoval.showMask;
       state.sprocketEdge = createSprocketEdgeSettings(s.sprocketEdge);
       state.localExposure = s.localExposure ? structuredClone(s.localExposure) : null;
+      state.repairStrokes = sanitizeRepairStrokes(s.repairStrokes);
       state.look = s.look ? structuredClone(s.look) : null;
       state.frameMetadata = sanitizeFrameMetadata(s.frameMetadata);
       updateDodgeBurnUI();
@@ -2982,6 +2986,7 @@
       const showCore = inStep3 && usesSilverCoreConversion(state);
       const dustSection = document.getElementById('dustRemovalSection');
       if (dustSection) dustSection.style.display = inStep3 ? 'block' : 'none';
+      document.getElementById('aiBrushSection').style.display = inStep3 ? 'block' : 'none';
 
       // CMYD キーパッドも通常の調色ペインで使う。
       const consoleSection = document.getElementById('consoleSection');
@@ -3558,6 +3563,7 @@
         corePaperToningStrength: sanitizeNumeric(source.corePaperToningStrength, fallbackSettings.corePaperToningStrength ?? 100, 0, 100),
         // Per-file like the crop: strokes are never inherited from the fallback frame.
         localExposure: sanitizeLocalExposureForSettings(source === state ? state.localExposure : source.localExposure),
+        repairStrokes: sanitizeRepairStrokes(source.repairStrokes),
         // A colour setting like the curves: copied with the look, inherited from the fallback frame.
         look: sanitizeLookForSettings(source === state ? state.look : (Object.hasOwn(source, 'look') ? source.look : fallbackSettings.look)),
         frameMetadata: sanitizeFrameMetadata(source === state ? state.frameMetadata : (Object.hasOwn(source, 'frameMetadata') ? source.frameMetadata : fallbackSettings.frameMetadata)),
@@ -4681,7 +4687,7 @@
       // Full-res CPU rendering can be expensive on large scans; debounce aggressively.
       fullUpdateTimer = setTimeout(() => {
         fullUpdateTimer = null;
-        if (state.dustRemoval.enabled && state.dustRemoval.cleanSource) {
+        if (hasFrameRepairs() && state.dustRemoval.cleanSource) {
           updateFull();
           return;
         }
@@ -5139,7 +5145,7 @@
     // itself and returns at once, and treating that as a completed render is
     // how a stale frame reached the exporter.
     async function rerenderWithCoreControls(options = {}) {
-      const full = Boolean(options.full) || Boolean(state.dustRemoval.enabled);
+      const full = Boolean(options.full) || hasFrameRepairs();
       const token = Number.isInteger(options.token) ? options.token : coreReprocessToken;
       const sourceRef = options.sourceRef || state.conversionSourceImageData;
       if (!usesSilverCoreConversion(state)) return false;
@@ -5169,7 +5175,7 @@
           if (sourceRef && state.conversionSourceImageData !== sourceRef) return false;
           applyProcessedImageToState(processed);
           updateFull();
-          if (state.dustRemoval.enabled) {
+          if (hasFrameRepairs()) {
             resetDustForCleanSource(processed);
             scheduleDustDetection();
           }
@@ -5437,6 +5443,7 @@
           state.dustRemoval.particleCount = 0;
           state.dustRemoval.cleanSource = null;
           goToStep(3);
+          if (aiRepair.status === 'idle') void loadAiRepairModel(DEFAULT_MODEL_URL, { refresh: false });
           syncBatchUIState({ reason: 'processNegative' });
           revealBatchFileList('processNegative');
           updatePreview();
@@ -5454,7 +5461,7 @@
           });
           await new Promise(r => setTimeout(r, 250));
           // Auto-run dust detection if enabled
-          if (state.dustRemoval.enabled && !hasPreviewSource) {
+          if (hasFrameRepairs() && !hasPreviewSource) {
             scheduleDustDetection();
           }
         } catch (err) {
@@ -5517,8 +5524,12 @@
       if (brushControls) brushControls.style.display = state.dustRemoval.showMask ? 'block' : 'none';
     }
 
+    function hasFrameRepairs() {
+      return Boolean(state.dustRemoval.enabled || state.repairStrokes?.length);
+    }
+
     async function runDustDetection() {
-      if (!state.dustRemoval.enabled || !state.processedImageData) return;
+      if (!hasFrameRepairs() || !state.processedImageData) return;
       if (state.dustRemoval.processing) {
         scheduleDustDetection();
         return;
@@ -5527,7 +5538,8 @@
       const sourceRef = state.conversionSourceImageData;
       const token = coreReprocessToken;
       const revision = dustDetectionRevision;
-      const isCurrent = () => state.dustRemoval.enabled
+      const strokes = state.repairStrokes;
+      const isCurrent = () => hasFrameRepairs() && state.repairStrokes === strokes
         && state.conversionSourceImageData === sourceRef
         && coreReprocessToken === token
         && dustDetectionRevision === revision;
@@ -5542,7 +5554,7 @@
         if (!isCurrent()) return;
         const source = getDustSource();
         if (!source || state.processedImageDataIsPreview) return;
-        const ready = await ensureOpenCvReady();
+        const ready = !state.dustRemoval.enabled || await ensureOpenCvReady();
         await new Promise(r => setTimeout(r, 10));
         if (!isCurrent() || source !== getDustSource()) return;
         if (!ready) throw new Error('OpenCV is not available');
@@ -5554,15 +5566,18 @@
 
         const prevState = state.dustRemoval._state;
         const maxParticleSize = dustMaxParticleSizeFor(source);
-        const { mask, particleCount, _state } = prevState
+        const { mask, particleCount, _state } = !state.dustRemoval.enabled
+          ? { mask: new Uint8Array(source.width * source.height), particleCount: 0, _state: null }
+          : prevState
           ? updateDustStrength(source, prevState, state.dustRemoval.strength, maxParticleSize)
           : detectDust(source, { strength: state.dustRemoval.strength, maxParticleSize });
         state.dustRemoval.mask = mask;
         state.dustRemoval.particleCount = particleCount;
         state.dustRemoval._state = _state;
 
-        if (particleCount > 0) {
-          const inpainted = await inpaintForCommit(source, mask);
+        if (particleCount > 0 || strokes.length) {
+          const dustImage = particleCount > 0 ? await inpaintForCommit(source, mask) : source;
+          const inpainted = await inpaintManualBrush(dustImage);
           if (!isCurrent() || source !== getDustSource()) return;
           state.dustRemoval.inpaintedImageData = inpainted;
           const tmpl = getLocalizedText('dustStatusDone', 'Detected {count} dust particles');
@@ -5586,7 +5601,7 @@
     }
 
     function applyDustResultToState() {
-      if (!state.dustRemoval.enabled) return;
+      if (!hasFrameRepairs()) return;
       const nextImage = state.dustRemoval.inpaintedImageData || state.dustRemoval.cleanSource;
       if (!nextImage) return;
       applyProcessedImageToState(nextImage, { previewOnly: state.processedImageDataIsPreview });
@@ -5781,6 +5796,7 @@
 
     document.getElementById('dustShowMask')?.addEventListener('change', function () {
       state.dustRemoval.showMask = this.checked;
+      if (this.checked) document.getElementById('aiBrushEnabled').checked = false;
       updateDustControlsVisibility();
       updateCanvasVisibility();
       if (state.dustRemoval.showMask) {
@@ -5878,12 +5894,14 @@
     let dustBrushToken = null;
 
     function onDustBrushStart(e) {
+      if (canPaintAiBrush()) return;
       if (!state.dustRemoval.enabled || !state.dustRemoval.showMask) return;
       if (!state.dustRemoval.mask || !state.processedImageData) return;
       if (state.dustRemoval.processing || state.processedImageDataIsPreview) return;
       if (state.samplingMode || state.cropping) return;
 
       e.preventDefault();
+      e.stopPropagation();
       dustDrawing = true;
       dustBrushPoints = [];
       dustBrushSource = getDustSource();
@@ -5994,7 +6012,10 @@
 
         applyDustResultToState();
         updatePreview();
-        if (aiRepairReady()) void repairBrushWithAi(source, newMask, coreReprocessToken);
+        if (aiRepairReady() || state.repairStrokes.length) void repairBrushWithAi(source, newMask, coreReprocessToken).catch((error) => {
+          console.warn('Brush repair failed:', error);
+          showToast(error?.message || String(error), 'error');
+        });
         if (state.dustRemoval.showMask) {
           requestAnimationFrame(() => renderDustMaskOverlay());
         }
@@ -6018,6 +6039,7 @@
       if (!state.dustRemoval.enabled || !state.dustRemoval.showMask) return;
       if (!e.ctrlKey) return;
       e.preventDefault();
+      e.stopPropagation();
       const delta = e.deltaY > 0 ? -1 : 1;
       state.dustRemoval.brushSize = Math.max(1, Math.min(50, state.dustRemoval.brushSize + delta));
       const slider = document.getElementById('dustBrushSize');
@@ -6160,7 +6182,8 @@
     }
 
     function canPan() {
-      return state.zoomLevel > 1 && !state.cropping && !state.samplingMode;
+      return state.zoomLevel > 1 && !state.cropping && !state.samplingMode
+        && !canPaintAiBrush() && !(state.dustRemoval.enabled && state.dustRemoval.showMask);
     }
 
     function displayNegative(imageData) {
@@ -6317,6 +6340,7 @@
           state.filmEdge = null;
           state.rollFrame = null;
           state.localExposure = null;
+          state.repairStrokes = [];
           state.rawMetadata = extractedRawMeta;
           if (webglState.gl) {
             webglState.sourceDirty = true;
@@ -8990,7 +9014,7 @@
 
     // Wheel zoom
     canvasContainer.addEventListener('wheel', (e) => {
-      if (state.cropping || state.samplingMode) return;
+      if (state.cropping || state.samplingMode || aiBrushDrawing) return;
       e.preventDefault();
       const deltaUnit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? canvasContainer.clientHeight : 1;
       const deltaY = e.deltaY * deltaUnit;
@@ -9001,7 +9025,7 @@
 
     // Double-click: toggle zoom
     canvasContainer.addEventListener('dblclick', (e) => {
-      if (state.cropping || state.samplingMode) return;
+      if (state.cropping || state.samplingMode || canPaintAiBrush() || state.dustRemoval.showMask) return;
       if (state.zoomLevel > 1) {
         resetZoomPan();
       } else {
@@ -9618,12 +9642,14 @@
     async function renderCurrentImageDataForExport(exportInfo = null) {
       await ensureFullResolutionReadyForExport();
       // A quick export after a stroke must use MI-GAN, not its temporary preview.
-      if (aiRepairReady() && state.dustRemoval.enabled && state.dustRemoval.mask) {
+      if ((aiRepairReady() && state.dustRemoval.enabled && state.dustRemoval.mask) || state.repairStrokes.length) {
         const source = getDustSource();
         const mask = state.dustRemoval.mask;
+        const strokes = state.repairStrokes;
         const token = coreReprocessToken;
-        const repaired = await inpaintForCommit(source, mask);
-        if (token !== coreReprocessToken || source !== getDustSource() || mask !== state.dustRemoval.mask) {
+        const dustImage = state.dustRemoval.enabled && mask ? await inpaintForCommit(source, mask) : source;
+        const repaired = await inpaintManualBrush(dustImage);
+        if (token !== coreReprocessToken || source !== getDustSource() || mask !== state.dustRemoval.mask || strokes !== state.repairStrokes) {
           throw new Error('Photo changed during AI repair. Please export again.');
         }
         state.dustRemoval.inpaintedImageData = repaired;
@@ -9881,6 +9907,7 @@
       let count = 0;
       items.forEach(item => {
         const next = cloneSettings(copied);
+        next.repairStrokes = structuredClone(item.settings?.repairStrokes || []);
         // The roll analysis share (lock, offset, outlier flag) describes the
         // receiving frame, not the reference, so each item keeps its own.
         next.rollFrame = item.settings?.rollFrame ? structuredClone(item.settings.rollFrame) : null;
@@ -10196,6 +10223,7 @@
         corePaperToning: 'none',
         corePaperToningStrength: 100,
         localExposure: null,
+        repairStrokes: [],
         look: null,
         frameMetadata: sanitizeFrameMetadata({}),
         flatFieldId: state.flatFieldId || null,
@@ -10320,6 +10348,8 @@
           pixels: getImageDataPixelCount(processed)
         });
       }
+
+      processed = await inpaintManualBrush(processed, settings, imageData);
 
       // Never-viewed batch files carry default settings — give them the same
       // automatic gray point a viewed file would get, baked into the settings
@@ -11128,6 +11158,7 @@
       state.corePaperToning = safe.corePaperToning || 'none';
       state.corePaperToningStrength = safe.corePaperToningStrength ?? 100;
       state.localExposure = safe.localExposure ? structuredClone(safe.localExposure) : null;
+      state.repairStrokes = sanitizeRepairStrokes(safe.repairStrokes);
       state.flatFieldId = safe.flatFieldId && state.flatFields[safe.flatFieldId] ? safe.flatFieldId : null;
       updateFlatFieldUI();
       state.look = safe.look ? structuredClone(safe.look) : null;
@@ -12410,6 +12441,7 @@
 
     function setDodgeBurnActive(active) {
       state.dodgeBurn.active = Boolean(active);
+      if (active) document.getElementById('aiBrushEnabled').checked = false;
       updateDodgeBurnUI();
       // The overlay needs the 2D canvas; leaving the mode may hand the preview back to WebGL.
       updatePreview();
@@ -12658,6 +12690,147 @@
     // ===========================================
     const aiRepair = { release: null, status: 'idle', provider: '', run: null, source: '', sourceRef: null, error: '', percent: 0, tiles: 0, ms: 0 };
 
+    async function inpaintManualBrush(source, settings = state, base = state.loadedBaseImageData || state.originalImageData) {
+      const strokes = settings.repairStrokes || [];
+      if (!strokes.length) return source;
+      while (aiRepair.status === 'loading') await new Promise(resolve => setTimeout(resolve, 50));
+      if (aiRepair.status !== 'ready') await loadAiRepairModel(DEFAULT_MODEL_URL, { refresh: false });
+      if (aiRepair.status !== 'ready') throw new Error(aiRepair.error || 'AI repair model is not ready');
+      const geometry = { ...localExposureGeometryFor(settings, base), width: source.width, height: source.height };
+      const mask = repairMask(strokes, geometry);
+      const started = performance.now();
+      let result;
+      try {
+        result = await inpaintWithModel(source, mask, aiRepair.run, { onProgress: (done, total) => {
+          document.getElementById('dustAiStatus').textContent = getInterpolatedText('dustAiStatusRunning', { done, total });
+        } });
+      } catch (error) {
+        if (aiRepair.provider === 'webgpu') {
+          await loadAiRepairModel(aiRepair.sourceRef || DEFAULT_MODEL_URL, { prefer: 'wasm', refresh: false });
+          if (aiRepair.status === 'ready') return inpaintManualBrush(source, settings, base);
+        }
+        aiRepair.status = 'error';
+        aiRepair.error = error?.message || String(error);
+        updateAiRepairUI();
+        throw error;
+      }
+      aiRepair.tiles = result.tiles;
+      aiRepair.ms = Math.round(performance.now() - started);
+      updateAiRepairUI();
+      return result.imageData;
+    }
+
+    function canPaintAiBrush() {
+      return Boolean(document.getElementById('aiBrushEnabled')?.checked
+        && document.getElementById('studioTab-repair')?.getAttribute('aria-selected') === 'true'
+        && state.currentStep >= 3 && !state.cropping && !state.samplingMode);
+    }
+
+    let aiBrushDrawing = null;
+    const brushOverlay = document.createElement('canvas');
+    brushOverlay.id = 'aiBrushOverlay';
+    brushOverlay.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:20;';
+    document.getElementById('canvasTransformWrapper').append(brushOverlay);
+
+    function paintAiBrushOverlay() {
+      brushOverlay.width = canvas.width;
+      brushOverlay.height = canvas.height;
+      if (!aiBrushDrawing) return;
+      const ctx = brushOverlay.getContext('2d');
+      const { geometry, points, size } = aiBrushDrawing;
+      const cropShort = Math.min(geometry.cropRegion?.width || geometry.rotatedWidth, geometry.cropRegion?.height || geometry.rotatedHeight);
+      const radius = size * Math.min(geometry.baseWidth, geometry.baseHeight) * Math.min(geometry.width, geometry.height) / cropShort / 2;
+      ctx.scale(canvas.width / geometry.width, canvas.height / geometry.height);
+      ctx.lineWidth = radius * 2;
+      ctx.lineCap = ctx.lineJoin = 'round';
+      ctx.strokeStyle = ctx.fillStyle = 'rgba(244, 180, 105, 0.55)';
+      ctx.beginPath();
+      points.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
+      ctx.stroke();
+      if (points.length === 1) { ctx.beginPath(); ctx.arc(points[0].x, points[0].y, radius, 0, Math.PI * 2); ctx.fill(); }
+    }
+
+    function finishAiBrush(event, cancelled = false) {
+      const drawing = aiBrushDrawing;
+      if (!drawing || event.pointerId !== drawing.pointerId) return;
+      aiBrushDrawing = null;
+      paintAiBrushOverlay();
+      if (drawing.surface.hasPointerCapture?.(event.pointerId)) drawing.surface.releasePointerCapture(event.pointerId);
+      if (cancelled || !canPaintAiBrush() || drawing.source !== state.conversionSourceImageData || drawing.token !== coreReprocessToken) return;
+      pushUndo('dustBrushStroke');
+      state.repairStrokes = sanitizeRepairStrokes([...state.repairStrokes, {
+        size: drawing.size,
+        points: drawing.points.map(point => workingPointToBase(point, drawing.geometry))
+      }]);
+      markCurrentFileDirty();
+      if (!state.dustRemoval.cleanSource) state.dustRemoval.cleanSource = state.processedImageData;
+      scheduleDustDetection();
+    }
+
+    for (const surface of [canvas, glCanvas]) {
+      surface.addEventListener('pointerdown', event => {
+        if (!canPaintAiBrush() || event.button !== 0) return;
+        if (aiBrushDrawing) {
+          finishAiBrush({ pointerId: aiBrushDrawing.pointerId }, true);
+          return;
+        }
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        if (aiRepair.status !== 'ready' || state.processedImageDataIsPreview || state.dustRemoval.processing) return;
+        const source = state.processedImageData;
+        const rect = surface.getBoundingClientRect();
+        const point = pointerToRepairPoint(event, rect, source.width, source.height);
+        if (!point) return;
+        aiBrushDrawing = {
+          pointerId: event.pointerId, surface, rect, source: state.conversionSourceImageData, token: coreReprocessToken,
+          geometry: { ...localExposureGeometryFor(state), width: source.width, height: source.height },
+          points: [point], size: Number(document.getElementById('aiBrushSize').value) / 100
+        };
+        surface.setPointerCapture?.(event.pointerId);
+        paintAiBrushOverlay();
+      }, { capture: true, passive: false });
+      surface.addEventListener('pointermove', event => {
+        if (!aiBrushDrawing || event.pointerId !== aiBrushDrawing.pointerId) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const { geometry, rect } = aiBrushDrawing;
+        const point = pointerToRepairPoint(event, rect, geometry.width, geometry.height);
+        if (point) aiBrushDrawing.points.push(point);
+        paintAiBrushOverlay();
+      }, { passive: false });
+      surface.addEventListener('pointerup', event => finishAiBrush(event));
+      surface.addEventListener('pointercancel', event => finishAiBrush(event, true));
+      surface.addEventListener('lostpointercapture', event => finishAiBrush(event, true));
+    }
+    document.getElementById('aiBrushEnabled').addEventListener('change', async event => {
+      if (event.target.checked) {
+        state.dodgeBurn.active = false;
+        updateDodgeBurnUI();
+        state.dustRemoval.showMask = false;
+        document.getElementById('dustShowMask').checked = false;
+        updateDustControlsVisibility();
+        updateCanvasVisibility();
+        updatePreview();
+        await ensureFullResolutionReadyForExport();
+        if (aiRepair.status !== 'ready') await loadAiRepairModel(DEFAULT_MODEL_URL);
+      } else if (aiBrushDrawing) finishAiBrush({ pointerId: aiBrushDrawing.pointerId }, true);
+    });
+    document.getElementById('aiBrushSize').addEventListener('input', event => {
+      document.getElementById('aiBrushSizeValue').textContent = `${event.target.value}%`;
+    });
+    document.getElementById('aiBrushClear').addEventListener('click', () => {
+      if (!state.repairStrokes.length) return;
+      pushUndo('dustBrushStroke');
+      state.repairStrokes = [];
+      markCurrentFileDirty();
+      const source = getDustSource();
+      if (source) applyProcessedImageToState(source, { previewOnly: state.processedImageDataIsPreview });
+      clearDustState();
+      state.dustRemoval.cleanSource = source;
+      if (state.dustRemoval.enabled) scheduleDustDetection();
+      updatePreview();
+    });
+
     function aiRepairReady() {
       return Boolean(state.dustRemoval.ai && aiRepair.status === 'ready' && typeof aiRepair.run === 'function');
     }
@@ -12686,7 +12859,7 @@
 
     // `source` is a File (a model the user picked) or a URL (the self-hosted
     // asset, fetched once and cached in IndexedDB).
-    async function loadAiRepairModel(source, { prefer = 'webgpu' } = {}) {
+    async function loadAiRepairModel(source, { prefer = 'webgpu', refresh = true } = {}) {
       if (aiRepair.status === 'loading') return;
       aiRepair.status = 'loading';
       aiRepair.percent = 0;
@@ -12725,12 +12898,14 @@
         aiRepair.run = null;
       }
       updateAiRepairUI();
-      if (prefer !== 'wasm' && aiRepairReady() && state.dustRemoval.enabled) scheduleDustDetection();
+      if (refresh && prefer !== 'wasm' && hasFrameRepairs()) scheduleDustDetection();
     }
 
     // The commit-path inpaint: the learned model when it is on and ready,
     // TELEA otherwise (and always for brush strokes, which stay interactive).
     async function inpaintForCommit(source, mask) {
+      if (state.dustRemoval.ai && aiRepair.status === 'idle') await loadAiRepairModel(DEFAULT_MODEL_URL, { refresh: false });
+      while (state.dustRemoval.ai && aiRepair.status === 'loading') await new Promise(resolve => setTimeout(resolve, 50));
       if (!aiRepairReady()) return inpaintMasked(source, mask, 3);
       const started = performance.now();
       try {
@@ -12758,13 +12933,15 @@
     }
 
     async function repairBrushWithAi(source, mask, token) {
-      const isCurrent = () => state.dustRemoval.enabled && state.dustRemoval.ai
+      const strokes = state.repairStrokes;
+      const isCurrent = () => state.dustRemoval.enabled && (state.dustRemoval.ai || strokes.length)
+        && state.repairStrokes === strokes
         && getDustSource() === source && state.dustRemoval.mask === mask
         && coreReprocessToken === token;
       // Coalesce quick brush strokes and discard work after switching photos or undo.
       await new Promise((resolve) => setTimeout(resolve, 200));
       if (!isCurrent()) return;
-      const result = await inpaintForCommit(source, mask);
+      const result = await inpaintManualBrush(await inpaintForCommit(source, mask));
       if (!isCurrent()) return;
       state.dustRemoval.inpaintedImageData = result;
       applyDustResultToState();

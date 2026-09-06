@@ -366,6 +366,7 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
   move('autoFrameBtn', $('studioGeometryActions'));
   move('autoFrameSelectedBtn', $('studioGeometryActions'));
   makeDrawer(composition, 'studioAutoFrame', 'autoFrame', ['autoFrameSettingsSection']);
+  move('aiBrushSection', panes.repair);
   move('dustRemovalSection', panes.repair);
   makeDrawer(panes.repair, 'studioDodgeBurn', 'dodgeBurn', ['dodgeBurnSection']);
   makeDrawer(panes.repair, 'studioFlatField', 'flatField', ['flatFieldSection']);
@@ -584,7 +585,7 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
         panel.style.display = 'flex';
         $('filmSettingsSection').style.display = 'block';
         ['autoFrameSettingsSection', 'sprocketSettingsSection'].forEach(id => { $(id).style.display = 'block'; });
-        ['toneSection', 'colorSection', 'cmySection', 'additionalSection', 'consoleSection', 'dustRemovalSection', 'advancedSection', 'enlargerSection', 'testStripSection', 'paperSection', 'dodgeBurnSection', 'flatFieldSection', 'labMatchSection', 'metadataSection', 'recipeSection'].forEach(id => {
+        ['toneSection', 'colorSection', 'cmySection', 'additionalSection', 'consoleSection', 'aiBrushSection', 'dustRemovalSection', 'advancedSection', 'enlargerSection', 'testStripSection', 'paperSection', 'dodgeBurnSection', 'flatFieldSection', 'labMatchSection', 'metadataSection', 'recipeSection'].forEach(id => {
           $(id).style.display = ready ? 'block' : 'none';
         });
       }

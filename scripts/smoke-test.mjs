@@ -343,6 +343,8 @@ await evaluate(`(() => {
     window.__dustSources.push({ width: image.width, height: image.height, hash });
     return original.call(this, image);
   };
+  // This scenario instruments TELEA; learned inference has its own real-model tests.
+  if (document.getElementById('dustAiEnabled').checked) document.getElementById('dustAiEnabled').click();
   document.getElementById('dustRemovalEnabled').click();
 })()`);
 await waitFor('dust detection at full resolution', `window.__dustSources.length > 0`, 90_000);

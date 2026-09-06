@@ -115,6 +115,10 @@ body.studio {
 .studio-drawer-hint { margin: 0 10px 14px; color: var(--text-secondary); font-size: 12px; line-height: 1.8; }
 .studio .control-section { border: 0; background: transparent; box-shadow: none; margin-bottom: 8px; }
 .studio .section-header { background: transparent; }
+.studio:has(#aiBrushEnabled:checked):has(#studioTab-repair[aria-selected="true"]) #canvasContainer { cursor: crosshair; touch-action: none; }
+.studio #aiBrushSection { padding: 16px; }
+.studio #aiBrushSection .control-group { margin: 0; }
+.studio #aiBrushSection details { margin-top: 12px; }
 .studio .section-title { font-family: var(--font-body); font-size: 12px; letter-spacing: 0; text-transform: none; }
 .studio #studioExportSettings { border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px; }
 .studio #studioExportSettings > summary { cursor: pointer; font-size: 12px; color: var(--text-secondary); padding: 10px; }
