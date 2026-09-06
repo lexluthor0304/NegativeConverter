@@ -170,9 +170,9 @@ export function getSprocketFrameMetrics(width, height, options = {}) {
   const spec = THIRTY_FIVE_MM_SPROCKET_SPEC;
 
   // Input is always landscape at this point (portrait images are pre-rotated by the caller).
-  const sx = sourceWidth;
   const sy = sourceHeight;
-  const imagePxPerMmX = sx / spec.stillFrameWidthMm;
+  // 画面の縦横比で穴を伸ばさない。パノラマではピッチを保って穴の数を増やす。
+  const imagePxPerMmX = sy / spec.stillFrameHeightMm;
   const filmEdgeBandMm = (spec.filmWidthMm - spec.stillFrameHeightMm) / 2;
   const physicalBandHeight = Math.round(sy * filmEdgeBandMm / spec.stillFrameHeightMm);
   const sideMargin = clamp(
@@ -195,11 +195,12 @@ export function getSprocketFrameMetrics(width, height, options = {}) {
     10,
     Math.max(10, bandHeight - edgeGap * 2)
   );
-  const holeRadius = Math.max(2, Math.round(holeHeight * 0.18));
+  const holeRadius = Math.max(1, filmEdgePxPerMmY * 0.32);
   const outputWidth = sourceWidth + sideMargin * 2;
   const outputHeight = sourceHeight + bandHeight * 2;
-  const edgeTextPixelSize = Math.max(7, Math.round(filmEdgePxPerMmY * 1.12));
-  const edgeTextHeight = Math.max(1, Math.ceil(edgeTextPixelSize * 1.35));
+  const edgeTextPixelSize = Math.max(7, filmEdgePxPerMmY * 1.35);
+  const frameNumberPixelSize = Math.max(7, filmEdgePxPerMmY * 1.65);
+  const edgeTextHeight = Math.ceil(frameNumberPixelSize);
   const pitch = Math.max(holeWidth + edgeGap * 2, Math.round(spec.perforationPitchMm * imagePxPerMmX));
   const perforationsPerFrame = spec.perforationsPerStillFrame;
   const span = (perforationsPerFrame - 1) * pitch + holeWidth;
@@ -221,27 +222,14 @@ export function getSprocketFrameMetrics(width, height, options = {}) {
   const bottomY = bottomBandTop + bandHeight - outerPerfMargin - holeHeight;
   const bottomOuterTop = bottomY + holeHeight;
   const bottomOuterHeight = Math.max(edgeGap, outputHeight - bottomOuterTop);
-  const dxRowGap = clamp(
-    Math.round(filmEdgePxPerMmY * 0.12),
-    1,
-    Math.max(1, bottomOuterHeight - edgeGap - 2)
-  );
-  const dxTargetBarHeight = Math.max(2, Math.round(filmEdgePxPerMmY * 0.82));
-  const dxBarHeight = clamp(
-    dxTargetBarHeight,
-    1,
-    Math.max(1, Math.floor((bottomOuterHeight - edgeGap - dxRowGap) / 2))
-  );
+  const dxRowGap = 0;
+  const dxBarHeight = Math.max(1, filmEdgePxPerMmY * 1.15);
   const dxCodeHeight = dxBarHeight * 2 + dxRowGap;
   const bottomDxY = showMarkings
-    ? bottomOuterTop + Math.max(edgeGap, Math.floor((bottomOuterHeight - dxCodeHeight) / 2))
+    ? outputHeight - dxCodeHeight
     : 0;
   const bottomMarkingY = showMarkings
-    ? bottomOuterTop + (
-      bottomOuterHeight >= edgeTextHeight + edgeGap * 2
-        ? edgeGap
-        : Math.max(0, Math.floor((bottomOuterHeight - edgeTextHeight) / 2))
-    )
+    ? outputHeight - edgeTextHeight - Math.max(1, filmEdgePxPerMmY * 0.08)
     : 0;
 
   return {
@@ -268,6 +256,7 @@ export function getSprocketFrameMetrics(width, height, options = {}) {
     bottomMarkingY,
     bottomDxY,
     edgeTextPixelSize,
+    frameNumberPixelSize,
     edgeTextHeight,
     dxCodeHeight,
     dxBarHeight,
@@ -280,16 +269,6 @@ export function getSprocketFrameMetrics(width, height, options = {}) {
     mm,
     showMarkings
   };
-}
-
-function isInsideRoundedRect(x, y, width, height, radius) {
-  const px = x + 0.5;
-  const py = y + 0.5;
-  const innerRight = width - radius;
-  const innerBottom = height - radius;
-  const dx = px < radius ? radius - px : (px > innerRight ? px - innerRight : 0);
-  const dy = py < radius ? radius - py : (py > innerBottom ? py - innerBottom : 0);
-  return (dx * dx + dy * dy) <= radius * radius;
 }
 
 function blendPixel(data, index, fill, alpha) {
@@ -320,14 +299,6 @@ function mixColor(a, b, amount) {
   ];
 }
 
-function getExposedCoreColor(fill) {
-  return mixColor(fill, [255, 246, 168, fill[3] ?? 255], 0.56);
-}
-
-function getExposedGlowColor(fill) {
-  return mixColor(fill, [255, 205, 42, fill[3] ?? 255], 0.32);
-}
-
 function hashNoise(x, y, seed = NATURAL_FILM_TEXTURE_SEED) {
   let value = Math.imul(Math.round(x), 374761393)
     ^ Math.imul(Math.round(y), 668265263)
@@ -337,14 +308,12 @@ function hashNoise(x, y, seed = NATURAL_FILM_TEXTURE_SEED) {
 }
 
 function smoothNoise(x, y, scale, seed) {
-  const sx = Math.floor(x / scale);
-  const sy = Math.floor(y / scale);
-  return (
-    hashNoise(sx, sy, seed) +
-    hashNoise(sx + 1, sy, seed) +
-    hashNoise(sx, sy + 1, seed) +
-    hashNoise(sx + 1, sy + 1, seed)
-  ) * 0.25;
+  const sx = Math.floor(x / scale), sy = Math.floor(y / scale);
+  const fx = x / scale - sx, fy = y / scale - sy;
+  const tx = fx * fx * (3 - 2 * fx), ty = fy * fy * (3 - 2 * fy);
+  const a = hashNoise(sx, sy, seed) * (1 - tx) + hashNoise(sx + 1, sy, seed) * tx;
+  const b = hashNoise(sx, sy + 1, seed) * (1 - tx) + hashNoise(sx + 1, sy + 1, seed) * tx;
+  return a * (1 - ty) + b * ty;
 }
 
 function filmBasePixel(metrics, filmColor, x, y) {
@@ -424,65 +393,25 @@ function clearPhotoRegion(data, metrics) {
   }
 }
 
-function fillRect(data, metrics, left, top, width, height, fill, alpha = 1) {
-  const rectLeft = Math.max(0, Math.round(left));
-  const rectTop = Math.max(0, Math.round(top));
-  const rectRight = Math.min(metrics.outputWidth, Math.round(left + width));
-  const rectBottom = Math.min(metrics.outputHeight, Math.round(top + height));
-  if (rectRight <= rectLeft || rectBottom <= rectTop) return;
-
-  for (let y = rectTop; y < rectBottom; y++) {
-    for (let x = rectLeft; x < rectRight; x++) {
-      const i = (y * metrics.outputWidth + x) * 4;
-      if (alpha >= 1) {
-        data[i] = fill[0];
-        data[i + 1] = fill[1];
-        data[i + 2] = fill[2];
-        data[i + 3] = fill[3];
-      } else {
-        blendPixel(data, i, fill, alpha);
-      }
-    }
-  }
-}
-
 function paintSprocketHole(data, metrics, left, top, fill) {
-  const rectLeft = Math.max(0, left);
-  const rectTop = Math.max(0, top);
-  const rectRight = Math.min(metrics.outputWidth, left + metrics.holeWidth);
-  const rectBottom = Math.min(metrics.outputHeight, top + metrics.holeHeight);
-  const rim = Math.max(1, Math.round(Math.min(metrics.holeWidth, metrics.holeHeight) * 0.10));
-  const rimFill = [
-    clamp(fill[0] - 38, 0, 255),
-    clamp(fill[1] - 34, 0, 255),
-    clamp(fill[2] - 28, 0, 255),
-    fill[3]
-  ];
-
+  // 薄い打ち抜き縁。立体的なベベルではなく、走査時の柔らかい境界を描く。
+  const softness = Math.max(0.65, metrics.mm * 0.035);
+  const rectLeft = Math.max(0, Math.floor(left - softness));
+  const rectTop = Math.max(0, Math.floor(top - softness));
+  const rectRight = Math.min(metrics.outputWidth, Math.ceil(left + metrics.holeWidth + softness));
+  const rectBottom = Math.min(metrics.outputHeight, Math.ceil(top + metrics.holeHeight + softness));
   for (let y = rectTop; y < rectBottom; y++) {
     for (let x = rectLeft; x < rectRight; x++) {
-      if (!isInsideRoundedRect(x - left, y - top, metrics.holeWidth, metrics.holeHeight, metrics.holeRadius)) {
-        continue;
-      }
+      const edgeVariation = (smoothNoise(x / metrics.mm, y / metrics.mm, 0.2, 8107) - 0.5) * metrics.mm * 0.025;
+      const distance = roundedRectDistance(x + 0.5, y + 0.5, left, top, metrics.holeWidth, metrics.holeHeight, metrics.holeRadius) + edgeVariation;
+      const coverage = clamp(0.5 - distance / (softness * 2), 0, 1);
+      if (coverage === 0) continue;
       const i = (y * metrics.outputWidth + x) * 4;
-      data[i] = fill[0];
-      data[i + 1] = fill[1];
-      data[i + 2] = fill[2];
-      data[i + 3] = fill[3];
-      if (fill[3] > 0) {
-        const interiorDistance = -roundedRectDistance(
-          x + 0.5,
-          y + 0.5,
-          left,
-          top,
-          metrics.holeWidth,
-          metrics.holeHeight,
-          metrics.holeRadius
-        );
-        if (interiorDistance >= 0 && interiorDistance < rim) {
-          const rimAlpha = (1 - interiorDistance / rim) * 0.16;
-          blendPixel(data, i, rimFill, rimAlpha);
-        }
+      if (fill[3] === 0) {
+        data[i + 3] = Math.round(data[i + 3] * (1 - coverage));
+        if (coverage === 1) data.fill(0, i, i + 3);
+      } else {
+        for (let c = 0; c < 4; c++) data[i + c] = Math.round(data[i + c] * (1 - coverage) + fill[c] * coverage);
       }
     }
   }
@@ -516,7 +445,10 @@ function getSprocketBandClip(metrics, top) {
 function paintSprocketGlow(data, metrics, left, top, fill, strength = 1) {
   const amount = clamp(Number(strength) || 0, 0, 2);
   if (amount <= 0) return;
-  const spread = Math.max(4, Math.round(metrics.holeHeight * (0.42 + amount * 0.38)));
+  // 拡張した孔マスクの二段階の羽根ぼかし。外側の低密度ハローと内側の暖色芯を分ける。
+  const sigma = Math.max(1, metrics.mm * (0.42 + amount * 0.15));
+  const spread = Math.ceil(sigma * 3.5);
+  const core = mixColor(fill, [255, 235, 155, fill[3]], 0.35);
   const bandClip = getSprocketBandClip(metrics, top);
   const rectLeft = Math.max(0, Math.round(left - spread));
   const rectTop = Math.max(bandClip.top, Math.round(top - spread));
@@ -530,17 +462,13 @@ function paintSprocketGlow(data, metrics, left, top, fill, strength = 1) {
         left, top, metrics.holeWidth, metrics.holeHeight, metrics.holeRadius
       );
       if (distance < 0 || distance > spread) continue;
-      const falloff = 1 - distance / spread;
-      const isTopRow = top < metrics.bandHeight;
-      const inward = isTopRow
-        ? clamp((y - top) / Math.max(1, metrics.holeHeight + spread), 0, 1)
-        : clamp((top + metrics.holeHeight - y) / Math.max(1, metrics.holeHeight + spread), 0, 1);
-      const localScale = Math.max(4, Math.round(metrics.holeHeight * 0.42));
-      const coarse = smoothNoise(x - left, y - top, localScale, 914);
-      const fine = hashNoise((x - left) * 1.7, (y - top) * 1.3, 915);
-      const irregularity = clamp(0.64 + coarse * 0.5 + fine * 0.16 + inward * 0.18, 0.45, 1.32);
-      const alpha = falloff * falloff * clamp(0.16 + amount * 0.38, 0.08, 0.82) * irregularity;
-      addPixel(data, (y * metrics.outputWidth + x) * 4, fill, alpha);
+      const d = Math.max(0, distance - metrics.mm * 0.18);
+      const localExposure = 0.92 + (smoothNoise(x / metrics.mm, y / metrics.mm, 1.1, 914) - 0.5) * 0.3;
+      const inner = Math.exp(-(d * d) / (2 * sigma * sigma));
+      const outer = Math.exp(-(d * d) / (4 * sigma * sigma));
+      const index = (y * metrics.outputWidth + x) * 4;
+      addPixel(data, index, fill, outer * amount * 0.16 * localExposure);
+      addPixel(data, index, core, inner * amount * 0.54 * localExposure);
     }
   }
 }
@@ -572,32 +500,22 @@ function drawBitmapText(data, metrics, text, x, y, scale, fill, align = 'left') 
   if (!safeText || scale <= 0) return;
 
   const measured = measureBitmapText(safeText, scale);
-  let cursorX = Math.round(x);
-  if (align === 'center') cursorX -= Math.round(measured / 2);
+  let cursorX = x;
+  if (align === 'center') cursorX -= measured / 2;
   if (align === 'right') cursorX -= measured;
 
-  const cursorY = Math.round(y);
-  const blockSize = Math.max(1, scale - (scale >= 3 ? 1 : 0));
+  const rectangles = [];
   for (const char of safeText) {
     const rows = getGlyphRows(char);
     for (let row = 0; row < rows.length; row++) {
       for (let col = 0; col < rows[row].length; col++) {
         if (rows[row][col] !== '1') continue;
-        paintEdgeLetteringRect(
-          data,
-          metrics,
-          cursorX + col * scale,
-          cursorY + row * scale,
-          blockSize,
-          blockSize,
-          fill,
-          Math.max(1, scale * 0.86),
-          0.96
-        );
+        rectangles.push([cursorX + col * scale, y + row * scale, scale, scale]);
       }
     }
     cursorX += 6 * scale;
   }
+  paintMarkingRectangles(data, metrics, rectangles, fill);
 }
 
 function createTextCanvas(width, height) {
@@ -626,127 +544,67 @@ function toCssFontFamilyList(input) {
   }).join(', ');
 }
 
-function paintExposedRect(data, metrics, left, top, width, height, fill, glowRadius = 3, exposure = 1) {
-  const amount = clamp(Number(exposure) || 0, 0, 2);
-  if (amount <= 0) return;
-  const radius = Math.max(1, Math.round(glowRadius));
-  const core = getExposedCoreColor(fill);
-  const glow = getExposedGlowColor(fill);
-  const rectLeft = Math.max(0, Math.floor(left - radius));
-  const rectTop = Math.max(0, Math.floor(top - radius));
-  const rectRight = Math.min(metrics.outputWidth, Math.ceil(left + width + radius));
-  const rectBottom = Math.min(metrics.outputHeight, Math.ceil(top + height + radius));
+// 文字とバーコードを一枚の露光マスクにしてから走査の柔らかさを付ける。
+// 隣接する筆画を加算しないので、交点だけ黄色く発光することがない。
+function softenMarkingMask(mask, width, height, sigma) {
+  const radius = Math.max(1, Math.ceil(sigma * 2.5));
+  const kernel = Array.from({ length: radius * 2 + 1 }, (_, i) => Math.exp(-((i - radius) ** 2) / (2 * sigma * sigma)));
+  const total = kernel.reduce((a, b) => a + b, 0);
+  for (let i = 0; i < kernel.length; i++) kernel[i] /= total;
+  const horizontal = new Float32Array(mask.length), result = new Float32Array(mask.length);
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    let value = 0;
+    for (let k = -radius; k <= radius; k++) if (x + k >= 0 && x + k < width) value += mask[y * width + x + k] * kernel[k + radius];
+    horizontal[y * width + x] = value;
+  }
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    let value = 0;
+    for (let k = -radius; k <= radius; k++) if (y + k >= 0 && y + k < height) value += horizontal[(y + k) * width + x] * kernel[k + radius];
+    result[y * width + x] = value;
+  }
+  return result;
+}
 
-  for (let y = rectTop; y < rectBottom; y++) {
-    for (let x = rectLeft; x < rectRight; x++) {
-      const px = x + 0.5;
-      const py = y + 0.5;
-      const dx = Math.max(left - px, 0, px - (left + width));
-      const dy = Math.max(top - py, 0, py - (top + height));
-      const distance = Math.hypot(dx, dy);
-      if (distance > radius) continue;
-      const index = (y * metrics.outputWidth + x) * 4;
-      const grain = clamp(0.74 + smoothNoise(x, y, 5, 4301) * 0.42 + hashNoise(x, y, 4302) * 0.18, 0.64, 1.28);
-      if (distance <= 0.001) {
-        addPixel(data, index, glow, 0.16 * amount * grain);
-        addPixel(data, index, core, 0.74 * amount * grain);
-      } else {
-        const falloff = 1 - distance / radius;
-        addPixel(data, index, glow, falloff * falloff * 0.30 * amount * grain);
-      }
-    }
+function compositeMarkingMask(data, metrics, mask, width, height, left, top, fill) {
+  const softened = softenMarkingMask(mask, width, height, Math.max(0.38, metrics.mm * 0.026));
+  const glow = metrics.edgeOverexposed ? metrics.edgeOverexposureStrength : 0;
+  const core = mixColor(fill, [255, 232, 125, fill[3]], glow * 0.22);
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    const px = left + x, py = top + y;
+    if (px < 0 || px >= metrics.outputWidth || py < 0 || py >= metrics.outputHeight) continue;
+    const coverage = softened[y * width + x];
+    if (coverage < 0.002) continue;
+    const density = 0.88 + (smoothNoise(px / metrics.mm, py / metrics.mm, 0.27, 4501) - 0.5) * 0.14;
+    blendPixel(data, (py * metrics.outputWidth + px) * 4, core, coverage * density);
   }
 }
 
-function paintEdgeLetteringRect(data, metrics, left, top, width, height, fill, glowRadius = 2, exposure = 1) {
-  const amount = clamp(Number(exposure) || 0, 0, 2);
-  if (amount <= 0) return;
-  const radius = Math.max(1, Math.round(glowRadius));
-  const core = mixColor(fill, [255, 176, 34, fill[3] ?? 255], 0.16);
-  const glow = mixColor(fill, [255, 128, 0, fill[3] ?? 255], 0.08);
-  const rectLeft = Math.max(0, Math.floor(left - radius));
-  const rectTop = Math.max(0, Math.floor(top - radius));
-  const rectRight = Math.min(metrics.outputWidth, Math.ceil(left + width + radius));
-  const rectBottom = Math.min(metrics.outputHeight, Math.ceil(top + height + radius));
-
-  for (let y = rectTop; y < rectBottom; y++) {
-    for (let x = rectLeft; x < rectRight; x++) {
-      const px = x + 0.5;
-      const py = y + 0.5;
-      const dx = Math.max(left - px, 0, px - (left + width));
-      const dy = Math.max(top - py, 0, py - (top + height));
-      const distance = Math.hypot(dx, dy);
-      if (distance > radius) continue;
-      const index = (y * metrics.outputWidth + x) * 4;
-      const grain = clamp(
-        0.74 + smoothNoise(x, y, 4, 4501) * 0.34 + hashNoise(x, y, 4502) * 0.18,
-        0.58,
-        1.18
-      );
-
-      if (distance <= 0.001) {
-        blendPixel(data, index, core, clamp(0.66 * amount * grain, 0.34, 0.9));
-        addPixel(data, index, glow, 0.08 * amount * grain);
-      } else {
-        const falloff = 1 - distance / radius;
-        addPixel(data, index, glow, falloff * falloff * 0.13 * amount * grain);
+function paintMarkingRectangles(data, metrics, rectangles, fill) {
+  if (!rectangles.length) return;
+  const pad = Math.ceil(Math.max(0.38, metrics.mm * 0.026) * 2.5) + 1;
+  const left = Math.max(-pad, Math.floor(Math.min(...rectangles.map(r => r[0]))) - pad);
+  const top = Math.max(-pad, Math.floor(Math.min(...rectangles.map(r => r[1]))) - pad);
+  const right = Math.min(metrics.outputWidth + pad, Math.ceil(Math.max(...rectangles.map(r => r[0] + r[2]))) + pad);
+  const bottom = Math.min(metrics.outputHeight + pad, Math.ceil(Math.max(...rectangles.map(r => r[1] + r[3]))) + pad);
+  const width = right - left, height = bottom - top;
+  if (width <= 0 || height <= 0) return;
+  const mask = new Float32Array(width * height);
+  for (const [rx, ry, rw, rh] of rectangles) {
+    for (let y = Math.max(top, Math.floor(ry)); y < Math.min(bottom, Math.ceil(ry + rh)); y++) {
+      for (let x = Math.max(left, Math.floor(rx)); x < Math.min(right, Math.ceil(rx + rw)); x++) {
+        const coverage = Math.max(0, Math.min(x + 1, rx + rw) - Math.max(x, rx)) * Math.max(0, Math.min(y + 1, ry + rh) - Math.max(y, ry));
+        const i = (y - top) * width + x - left;
+        mask[i] = Math.min(1, mask[i] + coverage);
       }
     }
   }
+  compositeMarkingMask(data, metrics, mask, width, height, left, top, fill);
 }
 
-function compositeExposedMask(data, metrics, maskPixels, maskWidth, maskHeight, dstLeft, dstTop, fill, pixelSize) {
-  const radius = clamp(Math.round(pixelSize * 0.28), 2, 7);
-  const core = getExposedCoreColor(fill);
-  const glow = getExposedGlowColor(fill);
-
-  for (let ty = 0; ty < maskHeight; ty++) {
-    const dy = dstTop + ty;
-    for (let tx = 0; tx < maskWidth; tx++) {
-      const srcIndex = (ty * maskWidth + tx) * 4;
-      const alpha = maskPixels[srcIndex + 3] / 255;
-      if (alpha <= 0.03) continue;
-      const dx = dstLeft + tx;
-      for (let oy = -radius; oy <= radius; oy++) {
-        const py = dy + oy;
-        if (py < 0 || py >= metrics.outputHeight) continue;
-        for (let ox = -radius; ox <= radius; ox++) {
-          const px = dx + ox;
-          if (px < 0 || px >= metrics.outputWidth) continue;
-          const distance = Math.hypot(ox, oy);
-          if (distance > radius) continue;
-          const falloff = 1 - distance / radius;
-          const grain = clamp(
-            0.74 + smoothNoise(px, py, 5, 4401) * 0.38 + hashNoise(px, py, 4402) * 0.22,
-            0.62,
-            1.32
-          );
-          const dstIndex = (py * metrics.outputWidth + px) * 4;
-          addPixel(data, dstIndex, glow, alpha * falloff * falloff * 0.11 * grain);
-        }
-      }
-    }
-  }
-
-  for (let ty = 0; ty < maskHeight; ty++) {
-    const dy = dstTop + ty;
-    if (dy < 0 || dy >= metrics.outputHeight) continue;
-    for (let tx = 0; tx < maskWidth; tx++) {
-      const dx = dstLeft + tx;
-      if (dx < 0 || dx >= metrics.outputWidth) continue;
-      const srcIndex = (ty * maskWidth + tx) * 4;
-      const alpha = maskPixels[srcIndex + 3] / 255;
-      if (alpha <= 0) continue;
-      const grain = clamp(
-        0.82 + smoothNoise(dx, dy, 4, 4411) * 0.28 + hashNoise(dx, dy, 4412) * 0.16,
-        0.68,
-        1.22
-      );
-      const dstIndex = (dy * metrics.outputWidth + dx) * 4;
-      addPixel(data, dstIndex, glow, alpha * 0.12 * grain);
-      addPixel(data, dstIndex, core, alpha * 0.78 * grain);
-    }
-  }
+function compositeExposedMask(data, metrics, maskPixels, maskWidth, maskHeight, dstLeft, dstTop, fill) {
+  const mask = new Float32Array(maskWidth * maskHeight);
+  for (let i = 0; i < mask.length; i++) mask[i] = maskPixels[i * 4 + 3] / 255;
+  compositeMarkingMask(data, metrics, mask, maskWidth, maskHeight, dstLeft, dstTop, fill);
 }
 
 function drawCanvasText(data, metrics, text, x, y, pixelSize, fill, align, fontStyle, fontFamily = '') {
@@ -790,7 +648,7 @@ function drawCanvasText(data, metrics, text, x, y, pixelSize, fill, align, fontS
 
 function drawEdgeText(data, metrics, edge, text, x, y, pixelSize, align = 'left', fill = edge.letteringColor) {
   if (edge.fontStyle === 'edgePixel') {
-    const scale = Math.max(1, Math.round(pixelSize / 7));
+    const scale = pixelSize / 7;
     drawBitmapText(data, metrics, text, x, y, scale, fill, align);
     return;
   }
@@ -808,7 +666,7 @@ function drawEdgeText(data, metrics, edge, text, x, y, pixelSize, align = 'left'
     edge.fontFamily
   );
   if (rendered) return;
-  const scale = Math.max(1, Math.round(pixelSize / 7));
+  const scale = pixelSize / 7;
   drawBitmapText(data, metrics, text, x, y, scale, fill, align);
 }
 
@@ -860,21 +718,6 @@ function getFrameNumberAnchorX(metrics, edge) {
   return Math.round((metrics.frameStartX ?? metrics.startX) + metrics.holeWidth + (edge.frameNumberHole - 1) * metrics.pitch);
 }
 
-function forEachVisibleEdgeFrame(metrics, callback) {
-  const framePitch = getEdgeFramePitch(metrics);
-  const baseStartX = metrics.frameStartX ?? metrics.startX;
-  const minIndex = Math.floor((0 - baseStartX - framePitch) / framePitch);
-  const maxIndex = Math.ceil((metrics.outputWidth - baseStartX + framePitch) / framePitch);
-  for (let index = minIndex; index <= maxIndex; index++) {
-    const frameLeft = baseStartX + index * framePitch;
-    callback({
-      index,
-      frameLeft,
-      centerX: frameLeft + framePitch / 2
-    });
-  }
-}
-
 function forEachVisibleFrameRepeat(metrics, edge, callback) {
   const framePitch = getEdgeFramePitch(metrics);
   const baseX = getFrameNumberAnchorX(metrics, edge);
@@ -895,25 +738,12 @@ function isHorizontallyVisible(metrics, left, width) {
   return left + width >= 0 && left <= metrics.outputWidth;
 }
 
-function paintDxBar(data, metrics, left, top, width, height, fill) {
-  const bleed = Math.max(1.4, height * 0.38);
-  paintExposedRect(data, metrics, left, top, width, height, fill, bleed, 0.96);
-}
-
-function paintDxSequence(data, metrics, edge, left, top, modulePitch, barWidth, blockHeight, rowPitch, aFlag) {
-  const codeWidth = modulePitch * DX_EDGE_COLUMN_COUNT;
-  if (!isHorizontallyVisible(metrics, left, codeWidth)) return;
-  for (const block of buildDxEdgeCodeBlocks({ ...edge, aFlag })) {
-    paintDxBar(
-      data,
-      metrics,
-      left + block.column * modulePitch,
-      top + block.row * rowPitch,
-      barWidth,
-      blockHeight,
-      edge.letteringColor
-    );
-  }
+function paintDxSequence(data, metrics, edge, left, top, modulePitch, barWidth, blockHeight, rowPitch, aFlag, frameNumber) {
+  if (!isHorizontallyVisible(metrics, left, modulePitch * DX_EDGE_COLUMN_COUNT)) return;
+  const rectangles = buildDxEdgeCodeBlocks({ ...edge, frameNumber, aFlag }).map(block => [
+    left + block.column * modulePitch, top + block.row * rowPitch, barWidth, blockHeight
+  ]);
+  paintMarkingRectangles(data, metrics, rectangles, edge.letteringColor);
 }
 
 function paintDxEdgeCode(data, metrics, edge) {
@@ -922,20 +752,20 @@ function paintDxEdgeCode(data, metrics, edge) {
     Math.round(DX_EDGE_CODE_WIDTH_MM * metrics.imagePxPerMmX)
   );
   const modulePitch = codeWidth / DX_EDGE_COLUMN_COUNT;
-  const barWidth = Math.max(1, Math.ceil(modulePitch + 0.5));
+  const barWidth = modulePitch * 0.96;
   const blockHeight = Math.max(1, metrics.dxBarHeight || Math.round(metrics.filmEdgePxPerMmY * 0.78));
-  const rowGap = Math.max(1, metrics.dxRowGap || Math.round(metrics.filmEdgePxPerMmY * 0.12));
+  const rowGap = metrics.dxRowGap;
   const rowPitch = blockHeight + rowGap;
   const top = clamp(
     metrics.bottomDxY,
     metrics.bottomBandTop,
-    Math.max(metrics.bottomBandTop, metrics.outputHeight - (blockHeight * 2 + rowGap) - 1)
+    Math.max(metrics.bottomBandTop, metrics.outputHeight - (blockHeight * 2 + rowGap))
   );
   const dxOffset = Math.round(metrics.pitch - metrics.imagePxPerMmX * 0.5);
 
   forEachVisibleFrameRepeat(metrics, edge, (repeat) => {
-    paintDxSequence(data, metrics, edge, repeat.mainX + dxOffset, top, modulePitch, barWidth, blockHeight, rowPitch, false);
-    paintDxSequence(data, metrics, edge, repeat.halfX + dxOffset, top, modulePitch, barWidth, blockHeight, rowPitch, true);
+    paintDxSequence(data, metrics, edge, repeat.mainX + dxOffset, top, modulePitch, barWidth, blockHeight, rowPitch, false, repeat.frameNumber);
+    paintDxSequence(data, metrics, edge, repeat.halfX + dxOffset, top, modulePitch, barWidth, blockHeight, rowPitch, true, repeat.frameNumber);
   });
 }
 
@@ -952,24 +782,6 @@ function isInsideTriangle(px, py, p0, p1, p2) {
   return Boolean(bary && bary.a >= 0 && bary.b >= 0 && bary.c >= 0);
 }
 
-function distanceToSegment(px, py, p0, p1) {
-  const vx = p1.x - p0.x;
-  const vy = p1.y - p0.y;
-  const lenSq = vx * vx + vy * vy;
-  if (lenSq <= 0) return Math.hypot(px - p0.x, py - p0.y);
-  const t = clamp(((px - p0.x) * vx + (py - p0.y) * vy) / lenSq, 0, 1);
-  return Math.hypot(px - (p0.x + vx * t), py - (p0.y + vy * t));
-}
-
-function distanceToTriangle(px, py, p0, p1, p2) {
-  if (isInsideTriangle(px, py, p0, p1, p2)) return 0;
-  return Math.min(
-    distanceToSegment(px, py, p0, p1),
-    distanceToSegment(px, py, p1, p2),
-    distanceToSegment(px, py, p2, p0)
-  );
-}
-
 function getTriangleCoverage(x, y, p0, p1, p2) {
   let hits = 0;
   const samples = [0.25, 0.5, 0.75];
@@ -982,38 +794,16 @@ function getTriangleCoverage(x, y, p0, p1, p2) {
 }
 
 function paintExposedTriangle(data, metrics, p0, p1, p2, fill) {
-  const radius = Math.max(1.2, metrics.filmEdgePxPerMmY * 0.24);
-  const glow = mixColor(fill, [255, 128, 0, fill[3] ?? 255], 0.08);
-  const core = mixColor(fill, [255, 176, 34, fill[3] ?? 255], 0.14);
-  const minX = Math.max(0, Math.floor(Math.min(p0.x, p1.x, p2.x) - radius));
-  const maxX = Math.min(metrics.outputWidth - 1, Math.ceil(Math.max(p0.x, p1.x, p2.x) + radius));
-  const minY = Math.max(0, Math.floor(Math.min(p0.y, p1.y, p2.y) - radius));
-  const maxY = Math.min(metrics.outputHeight - 1, Math.ceil(Math.max(p0.y, p1.y, p2.y) + radius));
-
-  for (let y = minY; y <= maxY; y++) {
-    for (let x = minX; x <= maxX; x++) {
-      const coverage = getTriangleCoverage(x, y, p0, p1, p2);
-      const distance = coverage > 0 ? 0 : distanceToTriangle(x + 0.5, y + 0.5, p0, p1, p2);
-      if (coverage <= 0 && distance > radius) continue;
-
-      const index = (y * metrics.outputWidth + x) * 4;
-      const grain = clamp(
-        0.76 + smoothNoise(x, y, 4, 4601) * 0.32 + hashNoise(x, y, 4602) * 0.16,
-        0.6,
-        1.18
-      );
-
-      if (coverage > 0) {
-        blendPixel(data, index, core, clamp(coverage * 0.68 * grain, 0.12, 0.86));
-        addPixel(data, index, glow, coverage * 0.07 * grain);
-      }
-
-      if (distance > 0) {
-        const falloff = 1 - distance / radius;
-        addPixel(data, index, glow, falloff * falloff * 0.12 * grain);
-      }
-    }
+  const pad = Math.ceil(metrics.mm * 0.08) + 2;
+  const left = Math.floor(Math.min(p0.x, p1.x, p2.x)) - pad;
+  const top = Math.floor(Math.min(p0.y, p1.y, p2.y)) - pad;
+  const width = Math.ceil(Math.max(p0.x, p1.x, p2.x)) - left + pad;
+  const height = Math.ceil(Math.max(p0.y, p1.y, p2.y)) - top + pad;
+  const mask = new Float32Array(width * height);
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    mask[y * width + x] = getTriangleCoverage(left + x, top + y, p0, p1, p2);
   }
+  compositeMarkingMask(data, metrics, mask, width, height, left, top, fill);
 }
 
 function paintHalfFrameMarker(data, metrics, edge, repeat) {
@@ -1052,7 +842,7 @@ function paintHalfFrameMarker(data, metrics, edge, repeat) {
 }
 
 function paintFrameNumberMarker(data, metrics, edge) {
-  const pixelSize = metrics.edgeTextPixelSize;
+  const pixelSize = metrics.frameNumberPixelSize;
   const textWidth = Math.max(metrics.imagePxPerMmX * 2.2, pixelSize * 2);
   forEachVisibleFrameRepeat(metrics, edge, (repeat) => {
     const label = String(repeat.frameNumber);
@@ -1121,13 +911,13 @@ function paintPhotoText(data, metrics, edge) {
   const pixelSize = metrics.edgeTextPixelSize;
   const text = edge.text.trim();
   if (!text) return;
-  forEachVisibleEdgeFrame(metrics, (frame) => {
+  forEachVisibleFrameRepeat(metrics, edge, (frame) => {
     drawEdgeText(
       data,
       metrics,
       edge,
       text,
-      Math.round(frame.centerX),
+      frame.mainX + getEdgeFramePitch(metrics) / 2,
       metrics.topTextY,
       pixelSize,
       'center'
@@ -1149,6 +939,7 @@ function createSprocketFrameImageData(imageData, options = {}, { includePhoto = 
   const edge = getComposeEdgeMarkings(options);
   const metrics = getSprocketFrameMetrics(imageData.width, imageData.height, { edgeMarkings: edge });
   metrics.edgeOverexposureStrength = edge.overexposureStrength;
+  metrics.edgeOverexposed = edge.overexposedSprockets;
   const filmColor = sanitizeColor(options.filmColor, DEFAULT_FILM_COLOR);
   const holeColor = options.transparentHoles === true
     ? [0, 0, 0, 0]
@@ -1161,8 +952,9 @@ function createSprocketFrameImageData(imageData, options = {}, { includePhoto = 
     paintSprocketTextureSmear(output, metrics, imageData, edge.overexposureStrength);
     paintOverexposedSprockets(output, metrics, edge.overexposureColor);
   }
-  paintSprocketRows(output, metrics, holeColor);
   paintEdgeMarkings(output, metrics, edge);
+  // バーコードは孔の外に隔離せず外縁まで印字し、打ち抜き部分を最後に抜く。
+  paintSprocketRows(output, metrics, holeColor);
   if (includePhoto) {
     // Hard guardrail: edge effects are allowed to touch only the added film border.
     copyPhotoRegion(output, metrics, imageData);

@@ -117,24 +117,21 @@ assert.equal(marked.height, markedMetrics.outputHeight);
 assert.ok(marked.height > framed.height);
 assertPhotoRegionMatchesSource(marked, markedMetrics, source);
 
-const assertEdgeLayoutDoesNotOverlapHoles = (layoutMetrics) => {
+const assertEdgeLayoutUsesFilmLanes = (layoutMetrics) => {
   const topTextBottom = layoutMetrics.topMarkingY + layoutMetrics.edgeTextHeight;
   const bottomHoleBottom = layoutMetrics.bottomY + layoutMetrics.holeHeight;
   const bottomDxBottom = layoutMetrics.bottomDxY + layoutMetrics.dxCodeHeight;
   const bottomFrameBottom = layoutMetrics.bottomMarkingY + layoutMetrics.edgeTextHeight;
-  const bottomGap = layoutMetrics.bottomOuterHeight >= layoutMetrics.edgeTextHeight + layoutMetrics.edgeGap * 2
-    ? layoutMetrics.edgeGap
-    : 0;
-
   assert.ok(topTextBottom + layoutMetrics.edgeGap <= layoutMetrics.topY);
-  assert.ok(bottomHoleBottom + layoutMetrics.edgeGap <= layoutMetrics.bottomDxY);
-  assert.ok(bottomHoleBottom + bottomGap <= layoutMetrics.bottomMarkingY);
-  assert.ok(bottomDxBottom <= layoutMetrics.outputHeight);
-  assert.ok(bottomFrameBottom + layoutMetrics.edgeGap <= layoutMetrics.outputHeight);
+  assert.ok(layoutMetrics.bottomDxY < bottomHoleBottom, 'DX は孔の外端とわずかに重なる');
+  assert.ok(layoutMetrics.bottomDxY > layoutMetrics.bottomY + layoutMetrics.holeHeight / 2);
+  assert.ok(layoutMetrics.bottomMarkingY >= bottomHoleBottom);
+  assert.ok(Math.abs(bottomDxBottom - layoutMetrics.outputHeight) < 0.001);
+  assert.ok(bottomFrameBottom < layoutMetrics.outputHeight);
 };
 
-assertEdgeLayoutDoesNotOverlapHoles(markedMetrics);
-assertEdgeLayoutDoesNotOverlapHoles(getSprocketFrameMetrics(360, 240, {
+assertEdgeLayoutUsesFilmLanes(markedMetrics);
+assertEdgeLayoutUsesFilmLanes(getSprocketFrameMetrics(360, 240, {
   edgeMarkings: {
     textEnabled: true,
     text: 'KODAK PORTRA 400',
@@ -228,5 +225,67 @@ assert.ok(dxABlocks.some((block) => block.column === 24 && block.row === 1));
 assert.equal(hasSprocketFrameEnabled({ sprocketHolesEnabled: true }), true);
 assert.equal(hasSprocketFrameEnabled({ sprocketHolesEnabled: false }), false);
 assert.equal(hasSprocketFrameEnabled(null), false);
+
+// 走査風の柔辺・露光は追加した縁だけに限定し、通常/背景経路を一致させる。
+const naturalSource = new ImageData(new Uint8ClampedArray(360 * 240 * 4).fill(90), 360, 240);
+for (let i = 3; i < naturalSource.data.length; i += 4) naturalSource.data[i] = 255;
+for (const overexposedSprockets of [false, true]) {
+  const options = { edgeMarkings: { ...markedOptions.edgeMarkings, overexposedSprockets } };
+  const layout = getSprocketFrameMetrics(360, 240, options);
+  const composed = composeSprocketFrame(naturalSource, options);
+  const background = composeSprocketFrameBackground(naturalSource, options);
+  assertPhotoRegionMatchesSource(composed, layout, naturalSource);
+  assert.deepEqual(composeSprocketFrame(naturalSource, options).data, composed.data, '再描画で粒状感がちらつかない');
+  for (let y = 0; y < composed.height; y++) for (let x = 0; x < composed.width; x++) {
+    const inPhoto = y >= layout.bandHeight && y < layout.bottomBandTop && x >= layout.sideMargin && x < layout.sideMargin + 360;
+    const i = (y * composed.width + x) * 4;
+    if (!inPhoto) assert.deepEqual(background.data.subarray(i, i + 4), composed.data.subarray(i, i + 4));
+    else assert.equal(background.data[i + 3], 0);
+  }
+}
+
+const softLayout = getSprocketFrameMetrics(360, 240);
+const cutout = composeSprocketFrame(naturalSource, { transparentHoles: true });
+let softPixels = 0;
+for (let i = 0; i < cutout.data.length; i += 4) {
+  if (cutout.data[i + 3] > 0 && cutout.data[i + 3] < 255) softPixels++;
+}
+assert.ok(softPixels > 100, '齿孔の輪郭に連続した部分被覆を含む');
+assertPhotoRegionMatchesSource(cutout, softLayout, naturalSource);
+
+const quietOptions = { edgeMarkings: { textEnabled: true, text: 'HARMAN PHOENIX II 200', dxEnabled: true, frameNumberEnabled: true, letteringColor: '#c47a00' } };
+const quietLayout = getSprocketFrameMetrics(360, 240, quietOptions);
+const quiet = composeSprocketFrame(naturalSource, quietOptions);
+let inkPixels = 0;
+for (let y = 0; y < quietLayout.topY - 2; y++) for (let x = 0; x < quiet.width; x++) {
+  const i = (y * quiet.width + x) * 4;
+  if (quiet.data[i] > 40) {
+    inkPixels++;
+    assert.ok(quiet.data[i] <= 196 && quiet.data[i + 1] <= 122, '連結部も加算発光せず設定色の範囲内');
+  }
+}
+assert.ok(inkPixels > 100);
+for (let n = 0; n < quietLayout.holeCount; n++) {
+  const x = Math.round(quietLayout.startX + n * quietLayout.pitch + quietLayout.holeWidth / 2);
+  if (x < 0 || x >= quiet.width) continue;
+  const y = Math.floor(quietLayout.bottomY + quietLayout.holeHeight - 2);
+  const i = (y * quiet.width + x) * 4;
+  assert.deepEqual(Array.from(quiet.data.subarray(i, i + 4)), [255, 255, 255, 255], 'DX は打ち抜き部分に残らない');
+}
+const panoramicLayout = getSprocketFrameMetrics(720, 240, quietOptions);
+assert.equal(panoramicLayout.holeWidth, quietLayout.holeWidth);
+assert.equal(panoramicLayout.holeHeight, quietLayout.holeHeight);
+assert.equal(panoramicLayout.pitch, quietLayout.pitch);
+assert.ok(panoramicLayout.holeCount > quietLayout.holeCount, '横長では齿孔を引き伸ばさず個数を増やす');
+
+const portraitSource = new ImageData(new Uint8ClampedArray(240 * 360 * 4).fill(90), 240, 360);
+for (let i = 3; i < portraitSource.data.length; i += 4) portraitSource.data[i] = 255;
+const portraitFrame = composeSprocketFrame(portraitSource, quietOptions);
+assert.equal(portraitFrame.width, quiet.height);
+assert.equal(portraitFrame.height, quiet.width);
+for (let y = 0; y < 360; y++) for (let x = 0; x < 240; x++) {
+  const i = ((y + quietLayout.sideMargin) * portraitFrame.width + x + quietLayout.bandHeight) * 4;
+  assert.deepEqual(Array.from(portraitFrame.data.subarray(i, i + 4)), [90, 90, 90, 255]);
+}
 
 console.log('sprocketFrame.test.mjs passed');
