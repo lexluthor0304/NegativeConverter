@@ -13547,6 +13547,36 @@
       scheduleProjectRecovery();
     }
 
+    let recipeImageReading = false;
+    async function importRecipeQrImage(file) {
+      if (!file || recipeImageReading) return;
+      recipeImageReading = true;
+      decodedRecipe = null;
+      const recipeBox = document.getElementById('recipeCode');
+      if (recipeBox) recipeBox.value = '';
+      updateRecipeUI();
+      const button = document.getElementById('recipeUploadBtn');
+      if (button) button.disabled = true;
+      showToast(getLocalizedText('recipeImageReading', 'Reading QR image…'));
+      try {
+        const { readRecipeQrImage } = await import('./recipeQrImage.js');
+        const code = await readRecipeQrImage(file);
+        if (!code) {
+          showToast(getLocalizedText('recipeScanNone', 'No recipe QR found.'), 3500);
+          return;
+        }
+        const box = document.getElementById('recipeCode');
+        if (box) box.value = code;
+        readRecipeFromBox();
+      } catch (error) {
+        const key = error?.message === 'size' ? 'recipeImageSize' : 'recipeImageError';
+        showToast(getLocalizedText(key, 'Could not read this image. Please choose another image.'), 3500);
+      } finally {
+        recipeImageReading = false;
+        if (button) button.disabled = false;
+      }
+    }
+
     async function scanRecipeQr() {
       if (typeof BarcodeDetector !== 'function' || !navigator.mediaDevices?.getUserMedia) return;
       let stream;
@@ -13585,6 +13615,12 @@
 
     document.getElementById('recipeCopyBtn')?.addEventListener('click', () => { void copyRecipe(); });
     document.getElementById('recipeQrBtn')?.addEventListener('click', toggleRecipeQr);
+    document.getElementById('recipeUploadBtn')?.addEventListener('click', () => document.getElementById('recipeQrInput')?.click());
+    document.getElementById('recipeQrInput')?.addEventListener('change', (event) => {
+      const file = event.target.files?.[0];
+      event.target.value = '';
+      void importRecipeQrImage(file);
+    });
     document.getElementById('recipeScanBtn')?.addEventListener('click', () => { void scanRecipeQr(); });
     document.getElementById('recipeDecodeBtn')?.addEventListener('click', readRecipeFromBox);
     document.getElementById('recipeApplyBtn')?.addEventListener('click', applyRecipeToCurrent);
