@@ -10,7 +10,7 @@ const UPNG = createRequire(import.meta.url)('upng-js');
 export async function runCameraSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, root }) {
   const fixtures = ['lightpad-blank.png', 'negative-vignetted.png'].map((name) => join(root, 'negative2positive', 'test-fixtures', name));
   await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
-  await waitFor('camera workspace boot', `!!document.getElementById('fileInput') && !!document.getElementById('flatFieldUseCurrentBtn')`);
+  await waitFor('camera workspace boot', `!!document.getElementById('studioImportAutoCrop') && (!!document.getElementById('fileInput') && !!document.getElementById('flatFieldUseCurrentBtn'))`);
   await installDialogAutoAccept();
   await wait(300);
   // Flat-field regression measures negative inversion on known synthetic input.
@@ -107,7 +107,7 @@ async function runLabMatchScenario({ send, evaluate, waitFor, wait, fail, instal
   const { tmpdir } = await import('node:os');
   const fixture = join(root, 'negative2positive', 'test-fixtures', 'negative-textured.png');
   await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
-  await waitFor('lab match workspace boot', `!!document.getElementById('fileInput') && !!document.getElementById('labMatchRunBtn')`);
+  await waitFor('lab match workspace boot', `!!document.getElementById('studioImportAutoCrop') && (!!document.getElementById('fileInput') && !!document.getElementById('labMatchRunBtn'))`);
   await installDialogAutoAccept();
   await wait(300);
   const doc = await send('DOM.getDocument');
@@ -208,7 +208,7 @@ async function runLabMatchScenario({ send, evaluate, waitFor, wait, fail, instal
 async function runMultiShotScenario({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, root }) {
   const fixture = (name) => join(root, 'negative2positive', 'test-fixtures', name);
   await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
-  await waitFor('multi-shot workspace boot', `!!document.getElementById('fileInput') && !!document.getElementById('studioMergeAverage')`);
+  await waitFor('multi-shot workspace boot', `!!document.getElementById('studioImportAutoCrop') && (!!document.getElementById('fileInput') && !!document.getElementById('studioMergeAverage'))`);
   await installDialogAutoAccept();
   await wait(300);
   await evaluate(`document.getElementById('importFilmTypeAuto').checked && document.getElementById('importFilmTypeAuto').click()`);
@@ -289,7 +289,7 @@ async function runMultiShotScenario({ send, evaluate, waitFor, wait, fail, insta
 // list and opens when the loupe closes.
 async function runLoupeScenario({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port }) {
   await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
-  await waitFor('loupe workspace boot', `!!document.getElementById('studioLoupe') && !!document.getElementById('loupeOverlay')`);
+  await waitFor('loupe workspace boot', `!!document.getElementById('studioImportAutoCrop') && (!!document.getElementById('studioLoupe') && !!document.getElementById('loupeOverlay'))`);
   await installDialogAutoAccept();
   await wait(300);
   // Chrome's fake camera is a finished positive test chart. Explicitly select

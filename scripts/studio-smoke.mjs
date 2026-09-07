@@ -7,7 +7,7 @@ const UPNG = createRequire(import.meta.url)('upng-js');
 // 実際の読み込み・変換・色同期を検証する。画面を偽の状態で描画しない。
 export async function runStudioSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, fixtures, root }) {
   await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=zh` });
-  await waitFor('studio boot', `!!document.getElementById('studioBasic')`);
+  await waitFor('studio boot', `!!document.getElementById('studioImportAutoCrop') && (!!document.getElementById('studioBasic'))`);
   await installDialogAutoAccept();
   await wait(400);
   const output = join(root, 'output', 'playwright');

@@ -56,7 +56,7 @@ function levelsPerChannel(png) {
 export async function runTechnicalDepthSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, root }) {
   const fixture = join(root, 'negative2positive', 'test-fixtures', 'negative-gradient-16.png');
   await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
-  await waitFor('technical workspace boot', `!!document.getElementById('fileInput') && !!document.querySelector('.format-btn[data-format="dng"]')`);
+  await waitFor('technical workspace boot', `!!document.getElementById('studioImportAutoCrop') && (!!document.getElementById('fileInput') && !!document.querySelector('.format-btn[data-format="dng"]'))`);
   await installDialogAutoAccept();
   await installDownloadCapture(evaluate);
   await wait(300);
@@ -120,7 +120,7 @@ export async function runTechnicalDepthSmoke({ send, evaluate, waitFor, wait, fa
 async function runAiRepairScenario({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, root }) {
   const fixture = join(root, 'negative2positive', 'test-fixtures', 'negative-sample.jpg');
   await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
-  await waitFor('ai repair workspace boot', `!!document.getElementById('dustAiEnabled')`);
+  await waitFor('ai repair workspace boot', `!!document.getElementById('studioImportAutoCrop') && (/No model loaded/.test(document.getElementById('dustAiStatus')?.textContent))`);
   await installDialogAutoAccept();
   await wait(300);
   if (!await evaluate(`document.getElementById('dustAiEnabled').checked`)) fail('AI dust removal must be enabled by default');
@@ -231,7 +231,7 @@ async function runAiRepairScenario({ send, evaluate, waitFor, wait, fail, instal
 
 async function runManualBrushSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, root }) {
   await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
-  await waitFor('manual brush boot', `/No model loaded/.test(document.getElementById('dustAiStatus')?.textContent)`);
+  await waitFor('manual brush boot', `!!document.getElementById('studioImportAutoCrop') && (/No model loaded/.test(document.getElementById('dustAiStatus')?.textContent))`);
   await installDialogAutoAccept();
   await wait(300);
   const doc = await send('DOM.getDocument');
@@ -333,7 +333,7 @@ async function runManualBrushSmoke({ send, evaluate, waitFor, wait, fail, instal
   await waitFor('AI dust remains usable with manual strokes', `/Detected \\d+ dust/.test(document.getElementById('dustStatus').textContent)`, 120_000);
   console.log('ok: independent manual AI brush, zoom/pan coordinates, mouse and touch, localized export, undo/redo and AI dust together:', JSON.stringify({ changed, outside }));
   await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
-  await waitFor('default AI dust boot', `/No model loaded/.test(document.getElementById('dustAiStatus')?.textContent)`);
+  await waitFor('default AI dust boot', `!!document.getElementById('studioImportAutoCrop') && (/No model loaded/.test(document.getElementById('dustAiStatus')?.textContent))`);
   await installDialogAutoAccept();
   await wait(300);
   const dustDoc = await send('DOM.getDocument');

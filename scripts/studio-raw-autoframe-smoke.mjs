@@ -21,7 +21,7 @@ export async function runStudioRawAutoFrameSmoke({ send, evaluate, waitFor, fail
     const path = resolve(directory, example.file);
     if (!existsSync(path)) fail('RAW 回帰用ファイルがありません: ' + path);
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=zh` });
-    await waitFor('RAW workspace boot', `!!document.getElementById('studioBasic')`);
+    await waitFor('RAW workspace boot', `!!document.getElementById('studioImportAutoCrop') && (!!document.getElementById('studioBasic'))`);
     await evaluate(`(() => {
       const input = document.createElement('input'); input.type = 'file'; input.id = 'rawRegressionInput'; input.hidden = true; document.body.append(input);
       const format = document.getElementById('autoFrameFormatSelect'); format.value = 'auto'; format.dispatchEvent(new Event('change', { bubbles: true }));

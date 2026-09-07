@@ -51,7 +51,7 @@ async function exportAs(evaluate, waitFor, format) {
 export async function runRollHomeSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, root }) {
   const fixture = join(root, 'negative2positive', 'test-fixtures', 'negative-strip-dx.png');
   await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
-  await waitFor('roll home workspace boot', `!!document.getElementById('fileInput') && !!document.getElementById('metaStock')`);
+  await waitFor('roll home workspace boot', `!!document.getElementById('studioImportAutoCrop') && (!!document.getElementById('fileInput') && !!document.getElementById('metaStock'))`);
   await installDialogAutoAccept();
   await installDownloadCapture(evaluate);
   await wait(300);
@@ -125,7 +125,7 @@ async function runProjectScenario({ send, evaluate, waitFor, wait, fail, install
   writeFileSync(projectPath, text);
 
   await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
-  await waitFor('roll home reboot', `!!document.getElementById('projectInput')`);
+  await waitFor('roll home reboot', `!!document.getElementById('studioImportAutoCrop') && (!!document.getElementById('projectInput'))`);
   await installDialogAutoAccept();
   await installDownloadCapture(evaluate);
   await wait(300);

@@ -8,7 +8,7 @@ const UPNG = createRequire(import.meta.url)('upng-js');
 export async function runDarkroomSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, root }) {
   const fixture = join(root, 'negative2positive', 'test-fixtures', 'negative-strip-dx.png');
   await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
-  await waitFor('darkroom workspace boot', `!!document.getElementById('fileInput') && !!document.getElementById('testStripRenderBtn')`);
+  await waitFor('darkroom workspace boot', `!!document.getElementById('studioImportAutoCrop') && (!!document.getElementById('fileInput') && !!document.getElementById('testStripRenderBtn'))`);
   await installDialogAutoAccept();
   await wait(300);
   await evaluate(`(() => {
