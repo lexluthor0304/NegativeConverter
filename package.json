@@ -29,6 +29,7 @@
     "@neoanaloglabkk/lensfun-wasm": "0.1.3",
     "@techstark/opencv-js": "^5.0.0-release.1",
     "@vercel/analytics": "^2.0.1",
+    "jsqr": "1.4.0",
     "jszip": "3.10.1",
     "libraw-wasm": "^1.6.0",
     "onnxruntime-web": "1.19.2",

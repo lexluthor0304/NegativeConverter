@@ -160,10 +160,34 @@ async function runRecipeScenario({ evaluate, waitFor, wait, fail }) {
   await evaluate(`document.getElementById('recipeQrBtn').click()`);
   const qr = await evaluate(`(() => { const c = document.getElementById('recipeQrCanvas'); return { hidden: c.hidden, width: c.width }; })()`);
   if (qr.hidden || qr.width < 100) fail('QR not drawn: ' + JSON.stringify(qr));
+  await evaluate(`(async () => {
+    window.BarcodeDetector = undefined;
+    window.__recipeQrBlob = await new Promise((resolve) => document.getElementById('recipeQrCanvas').toBlob(resolve));
+  })()`);
   await setSlider('coreExposure', '0');
   await waitFor('exposure reset', `document.getElementById('coreExposureValue').value === '0'`, 10_000);
-  await evaluate(`document.getElementById('recipeDecodeBtn').click()`);
+  // Import the actual generated QR as a file without BarcodeDetector or a camera.
+  await evaluate(`(() => {
+    const box = document.getElementById('recipeCode');
+    box.value = ''; box.dispatchEvent(new Event('input', { bubbles: true }));
+    const input = document.getElementById('recipeQrInput');
+    const files = new DataTransfer();
+    files.items.add(new File([window.__recipeQrBlob], 'friend-recipe.png', { type: 'image/png' }));
+    input.files = files.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+
   await waitFor('recipe read', `/Recipe read: \\d+ change/.test(document.getElementById('recipeStatus').textContent)`, 10_000);
+  const imported = await evaluate(`({ code: document.getElementById('recipeCode').value, exposure: document.getElementById('coreExposureValue').value, reset: document.getElementById('recipeQrInput').value })`);
+  if (imported.code !== code || imported.exposure !== '0' || imported.reset !== '') fail('QR import must preview without applying and reset the file input: ' + JSON.stringify(imported));
+  await waitFor('QR reader available again', `!document.getElementById('recipeUploadBtn').disabled`);
+  await evaluate(`(() => {
+    const files = new DataTransfer();
+    files.items.add(new File(['broken'], 'broken.png', { type: 'image/png' }));
+    const input = document.getElementById('recipeQrInput'); input.files = files.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await waitFor('invalid QR image handled', `window.__rollToasts.some((t) => /Could not read this image/.test(t)) && !document.getElementById('recipeUploadBtn').disabled`);
   const diff = await evaluate(`[...document.querySelectorAll('#recipeDiff li')].map((li) => li.textContent)`);
   console.log('roll home recipe diff:', JSON.stringify(diff));
   if (!diff.some((line) => /coreExposure: 0 → 20/.test(line))) fail('recipe diff does not list the exposure change: ' + JSON.stringify(diff));
