@@ -13551,6 +13551,10 @@
     async function importRecipeQrImage(file) {
       if (!file || recipeImageReading) return;
       recipeImageReading = true;
+      decodedRecipe = null;
+      const recipeBox = document.getElementById('recipeCode');
+      if (recipeBox) recipeBox.value = '';
+      updateRecipeUI();
       const button = document.getElementById('recipeUploadBtn');
       if (button) button.disabled = true;
       showToast(getLocalizedText('recipeImageReading', 'Reading QR image…'));
