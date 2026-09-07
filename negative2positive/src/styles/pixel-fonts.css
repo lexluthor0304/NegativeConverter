@@ -1,4 +1,12 @@
-/* 固定版を同梱し、CJK とラテン文字を同じピクセル字体で表示する。 */
+/* Latin glyphs share the original design without downloading the full CJK font. */
+@font-face {
+  font-family: 'NC Studio Latin';
+  src: url('/fonts/fusion-pixel/nc-studio-latin.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  unicode-range: U+0020-024F, U+2000-206F, U+2190-21FF, U+2212;
+}
 @font-face {
   font-family: 'Fusion Pixel SC';
   src: url('/fonts/fusion-pixel/fusion-pixel-12px-proportional-zh_hans.otf.woff2') format('woff2');
@@ -28,7 +36,7 @@
   font-display: swap;
 }
 body.studio {
-  --font-pixel: 'Fusion Pixel SC', monospace;
+  --font-pixel: 'NC Studio Latin', 'Fusion Pixel SC', monospace;
   --font-body: var(--font-pixel);
   --font-display: var(--font-pixel);
   --font-mono: var(--font-pixel);

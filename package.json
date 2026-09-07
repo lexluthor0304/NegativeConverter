@@ -18,7 +18,9 @@
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
     "tauri:dev": "tauri dev",
     "tauri:build": "npm run build:web && tauri build",
-    "tauri:build:mas": "bash scripts/build-mas.sh"
+    "tauri:build:mas": "bash scripts/build-mas.sh",
+    "seo:generate": "node scripts/generate-search-pages.mjs && node scripts/generate-sitemap.mjs",
+    "test:seo": "node scripts/check-seo-heads.mjs && node scripts/check-search-contract.mjs"
   },
   "dependencies": {
     "@fontsource/inter": "5.3.0",

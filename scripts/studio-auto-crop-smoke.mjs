@@ -1,7 +1,7 @@
 // 合成した既知の撮影窓を、通常のファイル入力から読み込んで検証する。
 export async function runStudioAutoCropSmoke({ send, evaluate, waitFor, wait, fail, port, installDialogAutoAccept }) {
   await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=zh` });
-  await waitFor('auto crop workspace boot', `!!document.getElementById('studioFrameNotice') && document.querySelector('[role=tab][aria-selected=true]')`);
+  await waitFor('auto crop workspace boot', `!!document.getElementById('studioImportAutoCrop') && (!!document.getElementById('studioFrameNotice') && document.querySelector('[role=tab][aria-selected=true]'))`);
   await installDialogAutoAccept();
   await wait(300);
   await evaluate(`(() => {

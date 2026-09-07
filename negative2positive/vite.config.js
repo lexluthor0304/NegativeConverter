@@ -44,6 +44,12 @@ export default defineConfig({
       input: {
         main: resolve(__dirname, 'index.html'),
         guide: resolve(__dirname, 'guide.html'),
+        positiveGuide: resolve(__dirname, 'slide-film-correction.html'),
+        aiRepairGuide: resolve(__dirname, 'ai-film-photo-repair.html'),
+        typeGuide: resolve(__dirname, 'film-type-detection.html'),
+        about: resolve(__dirname, 'about.html'),
+        chinese: resolve(__dirname, 'zh/index.html'),
+        japanese: resolve(__dirname, 'ja/index.html'),
         rawNegativeConverter: resolve(__dirname, 'raw-negative-converter.html'),
         iphoneProrawNegativeConverter: resolve(__dirname, 'iphone-proraw-negative-converter.html'),
         negativeLabProAlternative: resolve(__dirname, 'negative-lab-pro-alternative.html'),

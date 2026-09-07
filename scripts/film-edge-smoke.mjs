@@ -12,7 +12,7 @@ export async function runFilmEdgeSmoke({ send, evaluate, waitFor, wait, fail, in
   const plain = join(root, 'negative2positive', 'test-fixtures', 'negative-plain.png');
 
   await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
-  await waitFor('film edge workspace boot', `!!document.getElementById('fileInput') && !!document.getElementById('filmEdgeGroup')`);
+  await waitFor('film edge workspace boot', `!!document.getElementById('studioImportAutoCrop') && (!!document.getElementById('fileInput') && !!document.getElementById('filmEdgeGroup'))`);
   await installDialogAutoAccept();
   await wait(300);
   await evaluate(`(() => {

@@ -8,7 +8,7 @@ export async function runLightTableSmoke({ send, evaluate, waitFor, wait, fail, 
     .map((name) => join(root, 'negative2positive', 'test-fixtures', name));
 
   await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
-  await waitFor('light table workspace boot', `!!document.getElementById('fileInput') && !!document.getElementById('studioToggleLightTable')`);
+  await waitFor('light table workspace boot', `!!document.getElementById('studioImportAutoCrop') && (!!document.getElementById('fileInput') && !!document.getElementById('studioToggleLightTable'))`);
   await installDialogAutoAccept();
   await wait(300);
   const doc = await send('DOM.getDocument');

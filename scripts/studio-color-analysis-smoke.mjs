@@ -1,7 +1,7 @@
 // 実際の PNG 書き出しを比較し、解析範囲と出力範囲の分離を検証する。
 export async function runStudioColorAnalysisSmoke({ send, evaluate, waitFor, wait, fail, port, installDialogAutoAccept }) {
   await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=zh` });
-  await waitFor('color analysis boot', `!!document.getElementById('studioConfirmAnalysis')`);
+  await waitFor('color analysis boot', `!!document.getElementById('studioImportAutoCrop') && (!!document.getElementById('studioConfirmAnalysis'))`);
   await installDialogAutoAccept(); await wait(300);
   await evaluate(`(async () => {
     document.getElementById('studioImportAutoCrop').click();

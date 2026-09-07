@@ -6,8 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>How to Convert Film Negatives Online | Negative Converter</title>
   <meta name="description" content="Step-by-step guide to converting scanned film negatives to positives in your browser. Free, private, no uploads, with RAW, 16-bit PNG, TIFF, and ProRaw support.">
-  <meta name="keywords" content="how to convert film negative to positive, free film negative converter online, NEF to positive online, browser film converter, iPhone ProRaw negative converter">
-  <meta name="author" content="NegativeConverter">
+  <meta name="author" content="NeoAnalogLab">
   <meta name="robots" content="index, follow, max-image-preview:large">
   <link rel="canonical" href="https://negative-converter.tokugai.com/guide.html">
   <link rel="alternate" hreflang="en" href="https://negative-converter.tokugai.com/guide.html">
@@ -43,18 +42,18 @@
         "headline": "How to Convert Film Negatives to Positives Online — A Complete Guide",
         "description": "A complete guide to converting scanned film negatives into positive images for free in the browser, including supported RAW formats, film presets, and a step-by-step walkthrough.",
         "datePublished": "2026-04-28",
-        "dateModified": "2026-06-11",
+        "dateModified": "2026-09-07",
         "inLanguage": "en",
         "url": "https://negative-converter.tokugai.com/guide.html",
         "mainEntityOfPage": "https://negative-converter.tokugai.com/guide.html",
         "author": {
           "@type": "Organization",
-          "name": "NegativeConverter",
+          "name": "NeoAnalogLab",
           "url": "https://negative-converter.tokugai.com/"
         },
         "publisher": {
           "@type": "Organization",
-          "name": "NegativeConverter",
+          "name": "NeoAnalogLab",
           "url": "https://negative-converter.tokugai.com/"
         },
         "image": "https://negative-converter.tokugai.com/og-cover.png",
@@ -78,13 +77,13 @@
           {
             "@type": "HowToStep",
             "position": 1,
-            "name": "Upload and crop",
+            "name": "Import and inspect",
             "text": "Open Negative Converter in your browser and drag in your scanned negative. Use the crop box to keep only the film area; rotate or auto-frame if needed."
           },
           {
             "@type": "HowToStep",
             "position": 2,
-            "name": "Pick film type and preset",
+            "name": "Confirm film type and rendering",
             "text": "Choose Color, B&W, or Positive mode. Pick a film preset (Portra Classic, Frontier Lab, Sepia Classic, Slide Rich). For color negatives, sample the orange mask manually, automatically, or via a roll reference."
           },
           {
@@ -467,7 +466,7 @@
       <p class="lead">
         Negative Converter is a free online tool that turns scanned film negatives into finished positive images. Every step — RAW decoding, inversion, color correction, export — runs locally in your browser. No account, no upload, no watermark.
       </p>
-      <p class="page-meta"><time datetime="2026-06-11">Last updated: June 11, 2026</time></p>
+      <p class="page-meta"><time datetime="2026-09-07">Last updated: September 7, 2026</time></p>
       <div class="badges">
         <span class="badge">Free · MIT</span>
         <span class="badge">100% client-side</span>
@@ -489,7 +488,7 @@
         </p>
       </div>
       <p>
-        Most photographers use either a paid Lightroom plugin (like Negative Lab Pro) or a desktop app to do this. <strong>Negative Converter</strong> takes a different approach: it runs entirely in your browser using WebAssembly, so it works on any operating system, requires no install, and never uploads your photos.
+        Most photographers use either a paid Lightroom plugin (like Negative Lab Pro) or a desktop app to do this. <strong>Negative Converter</strong> takes a different approach: it runs entirely in your browser using WebAssembly, so it works on any operating system, requires no install, and never uploads selected photo pixels for processing. The web site downloads program assets and records page-view analytics; see the <a href="/privacy.html">privacy policy</a>.
       </p>
     </section>
 
@@ -497,12 +496,12 @@
       <h2>How to convert a film negative to a positive (3 steps)</h2>
       <ol class="step-list">
         <li>
-          <strong>Upload and crop</strong>
+          <strong>Import and inspect</strong>
           Open the converter and drop in your scanned negative — JPG, 16-bit PNG, or a RAW file (NEF, CR2, ARW, DNG, RW2). Crop to the film area, and rotate or auto-frame if needed.
         </li>
         <li>
-          <strong>Pick film type and preset</strong>
-          Choose <em>Color</em>, <em>B&amp;W</em>, or <em>Positive</em> mode. Select a film preset (Portra Classic, Frontier Lab, Sepia Classic, Slide Rich, etc.). For color negatives, sample the orange mask manually, automatically, or via a roll reference.
+          <strong>Confirm film type and rendering</strong>
+          Check the suggested <em>Color</em>, <em>B&amp;W</em>, or <em>Positive</em> type and correct it if needed. The film border is optional. For slides, choose Correct slide or Edit only. Select a film preset (Portra Classic, Frontier Lab, Sepia Classic, Slide Rich, etc.). For color negatives, sample the orange mask manually, automatically, or via a roll reference.
         </li>
         <li>
           <strong>Adjust and export</strong>
@@ -511,6 +510,11 @@
       </ol>
     </section>
 
+    <section id="positive-and-repair">
+      <h2>Positive slides, borderless scans and AI repair</h2>
+      <p><a href="/slide-film-correction.html">Positive correction</a> preserves orientation and uses a shared tone mapping. Edit only skips automatic analysis for already finished scans. <a href="/film-type-detection.html">Import detection</a> supports scans without film borders, but a borderless grayscale photo may require a manual positive or negative choice.</p>
+      <p>The <a href="/ai-film-photo-repair.html">AI repair brush</a> works independently of automatic dust detection. Open Retouch, wait for the model-ready status, paint a small defect and inspect the result. AI predicts replacement texture rather than recovering hidden original detail.</p>
+    </section>
     <section id="formats">
       <h2>Supported file formats</h2>
       <p>Negative Converter handles the formats most film scanners and digital camera scans produce, including direct camera RAW.</p>
@@ -541,7 +545,7 @@
       <h2>Why use a browser-based film converter?</h2>
       <div class="feature-grid">
         <div class="feature">
-          <h3>Free, forever</h3>
+          <h3>Free and open source</h3>
           <p>$0, no signup, no watermark, no usage cap. MIT-licensed open source.</p>
         </div>
         <div class="feature">
@@ -720,7 +724,8 @@
       </div>
     </section>
 
-  </main>
+  <aside class="product-guides" aria-label="Product guides"><p>Published by <a href="/about.html">NeoAnalogLab</a>. Explore <a href="/slide-film-correction.html">slide correction</a>, <a href="/ai-film-photo-repair.html">AI film repair</a> and <a href="/film-type-detection.html">film-type detection without borders</a>. <a href="/zh/" lang="zh-Hans">中文介绍</a> · <a href="/ja/" lang="ja">日本語ガイド</a></p></aside>
+</main>
 
   <footer class="site-footer">
     <div>© <span id="year">2026</span> Negative Converter · MIT License</div>

@@ -1,3 +1,5 @@
+    import { detectedImportSettings } from './filmTypeDetection.js';
+    import { createAiModelLoader } from './aiModelLoading.js';
     import opencvScriptUrl from '@techstark/opencv-js/dist/opencv.js?url';
     import { i18n } from './i18n.js';
     import { interpolateText, summarizePathForUi } from './textUtils.js';
@@ -19,6 +21,7 @@
     import { aggregateRollAnalysis, measureNegativeMean, sanitizeRollFrameForSettings, rollFrameExposureUnits } from './rollAnalysis.js';
     import { filtrationFromSliders, slidersFromFiltration, stopsFromExposureUnits, exposureUnitsFromStops, contrastForGradeValue, gradeValueForContrast, gradeLabelForValue, TEST_STRIP_AXES, formatAxisValue, testStripValues } from './enlarger.js';
     import { sanitizeLocalExposureForSettings, workingPointToBase, basePointToWorking, rotatedDimensions } from './localExposure.js';
+    import { sanitizeRepairStrokes, repairMask, pointerToRepairPoint, lensSourcePoint } from './repairBrush.js';
     import { paperProfiles, paperIdsForFilmKind, normalizePaperId, normalizeToningId } from '../silvercore/engine/PaperProfiles.js';
     import { buildFlatFieldMap, scoreBlankFrame } from './flatField.js';
     import { estimateAlignment, warpImageData } from './imageAlignment.js';
@@ -1436,6 +1439,9 @@
         }
 
         const corrected = applyLensMapsToImage(imageData, maps, lensCorrection.modes);
+        // Keep the display-to-source map for brush coordinates. Non-enumerable
+        // metadata avoids copying the grid into conversion worker messages.
+        Object.defineProperty(corrected, '__lensMapping', { value: { maps, includeTca: lensCorrection.modes.includeTca } });
         if (updateUi) {
           state.lensCorrection.lastError = '';
           setLensStatus('lensStatusApplied');
@@ -2011,6 +2017,11 @@
 
       // Film settings
       filmType: 'color',
+      importFilmTypeAuto: true,
+      positiveMode: 'correct',
+      filmTypeSource: 'manual',
+      filmTypeConfidence: null,
+      filmTypeReason: null,
       mirrored: false,
       filmBase: { ...DEFAULT_FILM_BASE },
       filmBaseSet: false,
@@ -2051,6 +2062,7 @@
       corePaperToningStrength: 100,
       // Dodge and burn strokes (per-file setting), see localExposure.js.
       localExposure: null,
+      repairStrokes: [],
       // Lab-match look (colour setting, see labMatch.js).
       look: null,
       // Analog metadata: the roll (session-wide) and this frame (per file).
@@ -2185,7 +2197,7 @@
         _state: null,        // Internal state for updateDustStrength
         inpaintedImageData: null, // ImageData after inpainting
         brushSize: 5,
-        ai: false,           // learned inpainter on commit and export (aiInpaint.js)
+        ai: true,            // MI-GAN by default; loaded lazily when dust is repaired
       },
 
       // Export settings
@@ -2443,7 +2455,7 @@
       'coreSaturation', 'coreGlow', 'coreFade', 'coreCurvePrecision', 'coreUseWebGL',
       'coreCyan', 'corePaper', 'corePaperToning', 'corePaperToningStrength', 'flatFieldId',
       'wbR', 'wbG', 'wbB', 'wbAutoConfidence', 'wbUserOverride',
-      'filmType', 'filmBaseSet', 'grayPointSampled', 'step2Mode', 'rotationAngle',
+      'filmType', 'positiveMode', 'filmTypeSource', 'filmTypeConfidence', 'filmTypeReason', 'filmBaseSet', 'grayPointSampled', 'step2Mode', 'rotationAngle',
       'mirrored', 'sprocketPreviewEnabled', 'currentStep',
     ];
 
@@ -2483,6 +2495,7 @@
       };
       settings.sprocketEdge = createSprocketEdgeSettings(state.sprocketEdge);
       settings.localExposure = state.localExposure ? structuredClone(state.localExposure) : null;
+      settings.repairStrokes = structuredClone(state.repairStrokes);
       settings.look = state.look ? structuredClone(state.look) : null;
       settings.frameMetadata = sanitizeFrameMetadata(state.frameMetadata);
       settings.autoFrameMeta = state.autoFrame.lastDiagnostics ? structuredClone(state.autoFrame.lastDiagnostics) : null;
@@ -2541,6 +2554,7 @@
       state.dustRemoval.showMask = s.dustRemoval.showMask;
       state.sprocketEdge = createSprocketEdgeSettings(s.sprocketEdge);
       state.localExposure = s.localExposure ? structuredClone(s.localExposure) : null;
+      state.repairStrokes = sanitizeRepairStrokes(s.repairStrokes);
       state.look = s.look ? structuredClone(s.look) : null;
       state.frameMetadata = sanitizeFrameMetadata(s.frameMetadata);
       updateDodgeBurnUI();
@@ -2559,6 +2573,7 @@
       state.dustRemoval._state = r.dustState;
 
       // Sync UI
+      updateFilmModeUI();
       updateSlidersFromState();
       renderCurve();
       updateDustControlsVisibility();
@@ -2982,6 +2997,7 @@
       const showCore = inStep3 && usesSilverCoreConversion(state);
       const dustSection = document.getElementById('dustRemovalSection');
       if (dustSection) dustSection.style.display = inStep3 ? 'block' : 'none';
+      document.getElementById('aiBrushSection').style.display = inStep3 ? 'block' : 'none';
 
       // CMYD キーパッドも通常の調色ペインで使う。
       const consoleSection = document.getElementById('consoleSection');
@@ -3522,6 +3538,10 @@
         mirrored: Boolean('mirrored' in source ? source.mirrored : fallbackSettings.mirrored),
         autoFrameMeta: sourceMeta ? structuredClone(sourceMeta) : ((source === state || Object.hasOwn(source, 'autoFrameMeta')) ? null : (fallbackMeta ? structuredClone(fallbackMeta) : null)),
         filmType,
+        positiveMode: source.positiveMode === 'edit' ? 'edit' : 'correct',
+        filmTypeSource: source.filmTypeSource === 'auto' ? 'auto' : 'manual',
+        filmTypeConfidence: ['high', 'medium', 'low'].includes(source.filmTypeConfidence) ? source.filmTypeConfidence : null,
+        filmTypeReason: typeof source.filmTypeReason === 'string' ? source.filmTypeReason : null,
         filmBase: sanitizeFilmBase(source.filmBase, fallbackSettings.filmBase),
         // Per-file like the crop: never inherited from the fallback frame.
         filmEdge: sanitizeFilmEdgeForSettings(source === state ? state.filmEdge : source.filmEdge),
@@ -3558,6 +3578,7 @@
         corePaperToningStrength: sanitizeNumeric(source.corePaperToningStrength, fallbackSettings.corePaperToningStrength ?? 100, 0, 100),
         // Per-file like the crop: strokes are never inherited from the fallback frame.
         localExposure: sanitizeLocalExposureForSettings(source === state ? state.localExposure : source.localExposure),
+        repairStrokes: sanitizeRepairStrokes(source.repairStrokes),
         // A colour setting like the curves: copied with the look, inherited from the fallback frame.
         look: sanitizeLookForSettings(source === state ? state.look : (Object.hasOwn(source, 'look') ? source.look : fallbackSettings.look)),
         frameMetadata: sanitizeFrameMetadata(source === state ? state.frameMetadata : (Object.hasOwn(source, 'frameMetadata') ? source.frameMetadata : fallbackSettings.frameMetadata)),
@@ -4681,7 +4702,7 @@
       // Full-res CPU rendering can be expensive on large scans; debounce aggressively.
       fullUpdateTimer = setTimeout(() => {
         fullUpdateTimer = null;
-        if (state.dustRemoval.enabled && state.dustRemoval.cleanSource) {
+        if (hasFrameRepairs() && state.dustRemoval.cleanSource) {
           updateFull();
           return;
         }
@@ -4920,7 +4941,7 @@
     // gray-point guide nudging toward the manual click instead.
     function maybeAutoWhiteBalance(processed) {
       if (!usesSilverCoreConversion(state)) return;
-      if (sanitizePresetType(state.filmType || 'color') === 'bw') return;
+      if (sanitizePresetType(state.filmType || 'color') !== 'color') return;
       if (state.grayPointSampled || state.wbUserOverride) return;
       if (state.autoFrame.lastDiagnostics?.analysisNeedsReview) return;
       const reference = processed?.__analysisPreview;
@@ -5139,7 +5160,7 @@
     // itself and returns at once, and treating that as a completed render is
     // how a stale frame reached the exporter.
     async function rerenderWithCoreControls(options = {}) {
-      const full = Boolean(options.full) || Boolean(state.dustRemoval.enabled);
+      const full = Boolean(options.full) || hasFrameRepairs();
       const token = Number.isInteger(options.token) ? options.token : coreReprocessToken;
       const sourceRef = options.sourceRef || state.conversionSourceImageData;
       if (!usesSilverCoreConversion(state)) return false;
@@ -5169,7 +5190,7 @@
           if (sourceRef && state.conversionSourceImageData !== sourceRef) return false;
           applyProcessedImageToState(processed);
           updateFull();
-          if (state.dustRemoval.enabled) {
+          if (hasFrameRepairs()) {
             resetDustForCleanSource(processed);
             scheduleDustDetection();
           }
@@ -5437,6 +5458,7 @@
           state.dustRemoval.particleCount = 0;
           state.dustRemoval.cleanSource = null;
           goToStep(3);
+          if (aiRepair.status === 'idle') void loadAiRepairModel(DEFAULT_MODEL_URL, { refresh: false });
           syncBatchUIState({ reason: 'processNegative' });
           revealBatchFileList('processNegative');
           updatePreview();
@@ -5454,7 +5476,7 @@
           });
           await new Promise(r => setTimeout(r, 250));
           // Auto-run dust detection if enabled
-          if (state.dustRemoval.enabled && !hasPreviewSource) {
+          if (hasFrameRepairs() && !hasPreviewSource) {
             scheduleDustDetection();
           }
         } catch (err) {
@@ -5517,8 +5539,12 @@
       if (brushControls) brushControls.style.display = state.dustRemoval.showMask ? 'block' : 'none';
     }
 
+    function hasFrameRepairs() {
+      return Boolean(state.dustRemoval.enabled || state.repairStrokes?.length);
+    }
+
     async function runDustDetection() {
-      if (!state.dustRemoval.enabled || !state.processedImageData) return;
+      if (!hasFrameRepairs() || !state.processedImageData) return;
       if (state.dustRemoval.processing) {
         scheduleDustDetection();
         return;
@@ -5527,7 +5553,8 @@
       const sourceRef = state.conversionSourceImageData;
       const token = coreReprocessToken;
       const revision = dustDetectionRevision;
-      const isCurrent = () => state.dustRemoval.enabled
+      const strokes = state.repairStrokes;
+      const isCurrent = () => hasFrameRepairs() && state.repairStrokes === strokes
         && state.conversionSourceImageData === sourceRef
         && coreReprocessToken === token
         && dustDetectionRevision === revision;
@@ -5542,7 +5569,7 @@
         if (!isCurrent()) return;
         const source = getDustSource();
         if (!source || state.processedImageDataIsPreview) return;
-        const ready = await ensureOpenCvReady();
+        const ready = !state.dustRemoval.enabled || await ensureOpenCvReady();
         await new Promise(r => setTimeout(r, 10));
         if (!isCurrent() || source !== getDustSource()) return;
         if (!ready) throw new Error('OpenCV is not available');
@@ -5554,15 +5581,18 @@
 
         const prevState = state.dustRemoval._state;
         const maxParticleSize = dustMaxParticleSizeFor(source);
-        const { mask, particleCount, _state } = prevState
+        const { mask, particleCount, _state } = !state.dustRemoval.enabled
+          ? { mask: new Uint8Array(source.width * source.height), particleCount: 0, _state: null }
+          : prevState
           ? updateDustStrength(source, prevState, state.dustRemoval.strength, maxParticleSize)
           : detectDust(source, { strength: state.dustRemoval.strength, maxParticleSize });
         state.dustRemoval.mask = mask;
         state.dustRemoval.particleCount = particleCount;
         state.dustRemoval._state = _state;
 
-        if (particleCount > 0) {
-          const inpainted = await inpaintForCommit(source, mask);
+        if (particleCount > 0 || strokes.length) {
+          const dustImage = particleCount > 0 ? await inpaintForCommit(source, mask) : source;
+          const inpainted = await inpaintManualBrush(dustImage);
           if (!isCurrent() || source !== getDustSource()) return;
           state.dustRemoval.inpaintedImageData = inpainted;
           const tmpl = getLocalizedText('dustStatusDone', 'Detected {count} dust particles');
@@ -5586,7 +5616,7 @@
     }
 
     function applyDustResultToState() {
-      if (!state.dustRemoval.enabled) return;
+      if (!hasFrameRepairs()) return;
       const nextImage = state.dustRemoval.inpaintedImageData || state.dustRemoval.cleanSource;
       if (!nextImage) return;
       applyProcessedImageToState(nextImage, { previewOnly: state.processedImageDataIsPreview });
@@ -5781,6 +5811,7 @@
 
     document.getElementById('dustShowMask')?.addEventListener('change', function () {
       state.dustRemoval.showMask = this.checked;
+      if (this.checked) document.getElementById('aiBrushEnabled').checked = false;
       updateDustControlsVisibility();
       updateCanvasVisibility();
       if (state.dustRemoval.showMask) {
@@ -5878,12 +5909,14 @@
     let dustBrushToken = null;
 
     function onDustBrushStart(e) {
+      if (canPaintAiBrush()) return;
       if (!state.dustRemoval.enabled || !state.dustRemoval.showMask) return;
       if (!state.dustRemoval.mask || !state.processedImageData) return;
       if (state.dustRemoval.processing || state.processedImageDataIsPreview) return;
       if (state.samplingMode || state.cropping) return;
 
       e.preventDefault();
+      e.stopPropagation();
       dustDrawing = true;
       dustBrushPoints = [];
       dustBrushSource = getDustSource();
@@ -5994,7 +6027,10 @@
 
         applyDustResultToState();
         updatePreview();
-        if (aiRepairReady()) void repairBrushWithAi(source, newMask, coreReprocessToken);
+        if (aiRepairReady() || state.repairStrokes.length) void repairBrushWithAi(source, newMask, coreReprocessToken).catch((error) => {
+          console.warn('Brush repair failed:', error);
+          showToast(error?.message || String(error), 'error');
+        });
         if (state.dustRemoval.showMask) {
           requestAnimationFrame(() => renderDustMaskOverlay());
         }
@@ -6018,6 +6054,7 @@
       if (!state.dustRemoval.enabled || !state.dustRemoval.showMask) return;
       if (!e.ctrlKey) return;
       e.preventDefault();
+      e.stopPropagation();
       const delta = e.deltaY > 0 ? -1 : 1;
       state.dustRemoval.brushSize = Math.max(1, Math.min(50, state.dustRemoval.brushSize + delta));
       const slider = document.getElementById('dustBrushSize');
@@ -6160,7 +6197,8 @@
     }
 
     function canPan() {
-      return state.zoomLevel > 1 && !state.cropping && !state.samplingMode;
+      return state.zoomLevel > 1 && !state.cropping && !state.samplingMode
+        && !canPaintAiBrush() && !(state.dustRemoval.enabled && state.dustRemoval.showMask);
     }
 
     function displayNegative(imageData) {
@@ -6317,6 +6355,7 @@
           state.filmEdge = null;
           state.rollFrame = null;
           state.localExposure = null;
+          state.repairStrokes = [];
           state.rawMetadata = extractedRawMeta;
           if (webglState.gl) {
             webglState.sourceDirty = true;
@@ -6574,6 +6613,20 @@
       modeToggle.style.display = showFilmBase ? 'flex' : 'none';
       filmBaseControls.style.display = showFilmBase ? 'block' : 'none';
       positiveFilmInfo.style.display = showFilmBase ? 'none' : 'block';
+      const positiveControls = document.getElementById('positiveModeControl');
+      if (positiveControls) {
+        positiveControls.hidden = state.filmType !== 'positive';
+        document.getElementById('positiveModeSelect').value = state.positiveMode;
+      }
+      const detectionStatus = document.getElementById('filmTypeDetectionStatus');
+      if (detectionStatus) {
+        const automatic = state.filmTypeSource === 'auto' && state.filmTypeConfidence;
+        const key = !automatic ? 'filmTypeManual' : state.filmTypeConfidence === 'low' ? (state.filmTypeReason === 'monochrome' ? 'filmTypeMonochrome' : 'filmTypeUncertain')
+          : state.filmTypeConfidence === 'high' ? 'filmTypeDetected' : 'filmTypeSuggested';
+        detectionStatus.dataset.i18n = key;
+        detectionStatus.textContent = i18n[currentLang][key];
+        detectionStatus.dataset.confidence = automatic ? state.filmTypeConfidence : 'manual';
+      }
       if (step2CoreColorModelControl) {
         step2CoreColorModelControl.style.display = showStep2CoreModel ? 'block' : 'none';
       }
@@ -7145,6 +7198,14 @@
       btn.addEventListener('click', () => {
         pushUndo('filmType');
         state.filmType = btn.dataset.type;
+        state.filmTypeSource = 'manual';
+        state.filmTypeConfidence = null;
+        state.filmTypeReason = null;
+        if (state.wbAutoConfidence && !state.wbUserOverride && !state.grayPointSampled) {
+          state.wbR = state.wbG = state.wbB = 1;
+          state.wbAutoConfidence = null;
+          updateWBSliders();
+        }
         setFilmTypeButtons(state.filmType);
         let modeUpdated = false;
         if (requiresFilmBase()) {
@@ -7164,6 +7225,20 @@
       });
     });
 
+    document.getElementById('importFilmTypeAuto').addEventListener('change', event => {
+      state.importFilmTypeAuto = event.target.checked;
+    });
+    document.getElementById('positiveModeSelect').addEventListener('change', event => {
+      pushUndo('filmType');
+      state.positiveMode = event.target.value === 'edit' ? 'edit' : 'correct';
+      if (state.wbAutoConfidence && !state.wbUserOverride && !state.grayPointSampled) {
+        state.wbR = state.wbG = state.wbB = 1;
+        state.wbAutoConfidence = null;
+        updateWBSliders();
+      }
+      markCurrentFileDirty();
+      scheduleSilverSourceRefresh();
+    });
     setFilmTypeButtons(state.filmType);
 
     // ===========================================
@@ -8990,7 +9065,7 @@
 
     // Wheel zoom
     canvasContainer.addEventListener('wheel', (e) => {
-      if (state.cropping || state.samplingMode) return;
+      if (state.cropping || state.samplingMode || aiBrushDrawing) return;
       e.preventDefault();
       const deltaUnit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? canvasContainer.clientHeight : 1;
       const deltaY = e.deltaY * deltaUnit;
@@ -9001,7 +9076,7 @@
 
     // Double-click: toggle zoom
     canvasContainer.addEventListener('dblclick', (e) => {
-      if (state.cropping || state.samplingMode) return;
+      if (state.cropping || state.samplingMode || canPaintAiBrush() || state.dustRemoval.showMask) return;
       if (state.zoomLevel > 1) {
         resetZoomPan();
       } else {
@@ -9142,6 +9217,9 @@
     // Convert positive button (skip to step 2 with positive mode selected)
     document.getElementById('convertPositiveBtn').addEventListener('click', () => {
       state.filmType = 'positive';
+      state.filmTypeSource = 'manual';
+      state.filmTypeConfidence = null;
+      state.filmTypeReason = null;
       setFilmTypeButtons(state.filmType);
       updateFilmModeUI();
       markCurrentFileDirty();
@@ -9216,6 +9294,7 @@
     function restartPhotoProcessing() {
       if (isDesktopBatchExportLocked()) return;
       clearUndoHistory();
+      state.repairStrokes = [];
       // Leave crop mode first: the draft still points at the image
       // being discarded, and Apply would restore it over the reset.
       if (state.cropping) exitCropMode({ restore: false });
@@ -9618,12 +9697,14 @@
     async function renderCurrentImageDataForExport(exportInfo = null) {
       await ensureFullResolutionReadyForExport();
       // A quick export after a stroke must use MI-GAN, not its temporary preview.
-      if (aiRepairReady() && state.dustRemoval.enabled && state.dustRemoval.mask) {
+      if ((aiRepairReady() && state.dustRemoval.enabled && state.dustRemoval.mask) || state.repairStrokes.length) {
         const source = getDustSource();
         const mask = state.dustRemoval.mask;
+        const strokes = state.repairStrokes;
         const token = coreReprocessToken;
-        const repaired = await inpaintForCommit(source, mask);
-        if (token !== coreReprocessToken || source !== getDustSource() || mask !== state.dustRemoval.mask) {
+        const dustImage = state.dustRemoval.enabled && mask ? await inpaintForCommit(source, mask) : source;
+        const repaired = await inpaintManualBrush(dustImage);
+        if (token !== coreReprocessToken || source !== getDustSource() || mask !== state.dustRemoval.mask || strokes !== state.repairStrokes) {
           throw new Error('Photo changed during AI repair. Please export again.');
         }
         state.dustRemoval.inpaintedImageData = repaired;
@@ -9881,6 +9962,7 @@
       let count = 0;
       items.forEach(item => {
         const next = cloneSettings(copied);
+        next.repairStrokes = structuredClone(item.settings?.repairStrokes || []);
         // The roll analysis share (lock, offset, outlier flag) describes the
         // receiving frame, not the reference, so each item keeps its own.
         next.rollFrame = item.settings?.rollFrame ? structuredClone(item.settings.rollFrame) : null;
@@ -10158,7 +10240,7 @@
     // Export All returns every unviewed slide inverted as a colour negative,
     // and a B&W roll comes back tinted by an orange-mask compensation.
     function createDefaultSettings(imageData) {
-      const filmType = sanitizePresetType(state.filmType || 'color');
+      const importSettings = detectedImportSettings(imageData, { automatic: state.importFilmTypeAuto, filmType: state.filmType, positiveMode: state.positiveMode });
       const borderBuffer = sanitizeNumeric(state.coreBorderBuffer, 10, 0, 30);
       const borderBufferBorderValue = sanitizeNumeric(state.coreBorderBufferBorderValue, 10, 0, 30);
       const filmBase = autoDetectFilmBase(imageData, borderBuffer);
@@ -10167,7 +10249,7 @@
         rotationAngle: 0,
         mirrored: false,
         autoFrameMeta: null,
-        filmType,
+        ...importSettings,
         filmBase: filmBase,
         filmEdge: null,
         rollFrame: null,
@@ -10196,6 +10278,7 @@
         corePaperToning: 'none',
         corePaperToningStrength: 100,
         localExposure: null,
+        repairStrokes: [],
         look: null,
         frameMetadata: sanitizeFrameMetadata({}),
         flatFieldId: state.flatFieldId || null,
@@ -10254,7 +10337,7 @@
       let initialSettings = savedSettings || mergeStudioColors(createDefaultSettings(imageData), studioColors || {});
       if (!initialSettings.autoFrameMeta && !initialSettings.cropRegion) initialSettings = await analyzeStudioImportFrame(imageData, initialSettings, { allowCrop: !savedSettings });
       if (!initialSettings.filmEdge?.checked) {
-        const edge = await analyzeImportFilmEdge(imageData, initialSettings, { applyDefaults: !savedSettings });
+        const edge = await analyzeImportFilmEdge(imageData, initialSettings, { applyDefaults: !savedSettings && state.importFilmTypeAuto });
         if (edge) initialSettings = edge.settings;
       }
       const settings = sanitizeSettings(initialSettings, {
@@ -10321,6 +10404,8 @@
         });
       }
 
+      processed = await inpaintManualBrush(processed, settings, imageData, workingData.__lensMapping);
+
       // Never-viewed batch files carry default settings — give them the same
       // automatic gray point a viewed file would get, baked into the settings
       // BEFORE the adjustment stage (which may run in the export worker).
@@ -10330,7 +10415,7 @@
         !savedSettings
         && processed
         && usesSilverCoreConversion(settings)
-        && sanitizePresetType(settings.filmType || 'color') !== 'bw'
+        && sanitizePresetType(settings.filmType || 'color') === 'color'
         && !settings.grayPointSampled
       ) {
         const roi = resolveAnalysisRegion(settings, imageData);
@@ -11083,6 +11168,10 @@
 
       // Restore film settings
       state.filmType = sanitizePresetType(safe.filmType || 'color');
+      state.positiveMode = safe.positiveMode;
+      state.filmTypeSource = safe.filmTypeSource;
+      state.filmTypeConfidence = safe.filmTypeConfidence;
+      state.filmTypeReason = safe.filmTypeReason;
       state.filmBase = { ...safe.filmBase };
       state.filmBaseSet = true;
       state.filmEdge = safe.filmEdge ? structuredClone(safe.filmEdge) : null;
@@ -11128,6 +11217,7 @@
       state.corePaperToning = safe.corePaperToning || 'none';
       state.corePaperToningStrength = safe.corePaperToningStrength ?? 100;
       state.localExposure = safe.localExposure ? structuredClone(safe.localExposure) : null;
+      state.repairStrokes = sanitizeRepairStrokes(safe.repairStrokes);
       state.flatFieldId = safe.flatFieldId && state.flatFields[safe.flatFieldId] ? safe.flatFieldId : null;
       updateFlatFieldUI();
       state.look = safe.look ? structuredClone(safe.look) : null;
@@ -11760,7 +11850,7 @@
         }
         if (!settings.filmEdge?.checked) {
           // Read the rebate once per file: perforations, DX edge barcode, film base.
-          const edge = await analyzeImportFilmEdge(source, settings, { applyDefaults: freshFile });
+          const edge = await analyzeImportFilmEdge(source, settings, { applyDefaults: freshFile && state.importFilmTypeAuto });
           if (!isCurrentLoad(generation)) return;
           if (edge) {
             settings = edge.settings;
@@ -11770,6 +11860,9 @@
         }
         if (changed) restoreSettings(settings);
         if (filmEdgeToast) showToast(filmEdgeToast, 3200);
+        else if (freshFile && settings.filmTypeConfidence === 'low') {
+          showToast(i18n[currentLang][settings.filmTypeReason === 'monochrome' ? 'filmTypeMonochrome' : 'filmTypeUncertain'], 6500);
+        }
         if (settings.filmEdge?.found) updateFileListUI();
         goToStep(2);
         await processNegative();
@@ -11878,9 +11971,12 @@
       // app rendered itself); a colour-negative DX number read that way is
       // contradictory, so it is shown but not applied automatically.
       const contradictory = record.polarity === 'light' && record.filmKind !== 'positive';
-      if (applyDefaults && !contradictory && record.filmKind && record.filmKind !== next.filmType) {
+      if (applyDefaults && !contradictory && record.filmKind) {
+        record.appliedFilmType = record.filmKind !== next.filmType;
         next.filmType = record.filmKind;
-        record.appliedFilmType = true;
+        next.filmTypeSource = 'auto';
+        next.filmTypeConfidence = 'high';
+        next.filmTypeReason = 'dx';
       }
       next.filmEdge = sanitizeFilmEdgeForSettings(record);
       const dx = `${record.dx1}-${record.dx2}`;
@@ -12410,6 +12506,7 @@
 
     function setDodgeBurnActive(active) {
       state.dodgeBurn.active = Boolean(active);
+      if (active) document.getElementById('aiBrushEnabled').checked = false;
       updateDodgeBurnUI();
       // The overlay needs the 2D canvas; leaving the mode may hand the preview back to WebGL.
       updatePreview();
@@ -12658,6 +12755,149 @@
     // ===========================================
     const aiRepair = { release: null, status: 'idle', provider: '', run: null, source: '', sourceRef: null, error: '', percent: 0, tiles: 0, ms: 0 };
 
+    async function inpaintManualBrush(source, settings = state, base = state.loadedBaseImageData || state.originalImageData,
+      lensMapping = settings === state ? state.conversionSourceImageData?.__lensMapping : null) {
+      const strokes = settings.repairStrokes || [];
+      if (!strokes.length) return source;
+      while (aiRepair.status === 'loading') await new Promise(resolve => setTimeout(resolve, 50));
+      if (aiRepair.status !== 'ready') await loadAiRepairModel(DEFAULT_MODEL_URL, { refresh: false });
+      if (aiRepair.status !== 'ready') throw new Error(aiRepair.error || 'AI repair model is not ready');
+      const geometry = { ...localExposureGeometryFor(settings, base), width: source.width, height: source.height };
+      const mask = repairMask(strokes, geometry, lensMapping);
+      const started = performance.now();
+      let result;
+      try {
+        result = await inpaintWithModel(source, mask, aiRepair.run, { onProgress: (done, total) => {
+          document.getElementById('dustAiStatus').textContent = getInterpolatedText('dustAiStatusRunning', { done, total });
+        } });
+      } catch (error) {
+        if (aiRepair.provider === 'webgpu') {
+          await loadAiRepairModel(aiRepair.sourceRef || DEFAULT_MODEL_URL, { prefer: 'wasm', refresh: false });
+          if (aiRepair.status === 'ready') return inpaintManualBrush(source, settings, base, lensMapping);
+        }
+        aiRepair.status = 'error';
+        aiRepair.error = error?.message || String(error);
+        updateAiRepairUI();
+        throw error;
+      }
+      aiRepair.tiles = result.tiles;
+      aiRepair.ms = Math.round(performance.now() - started);
+      updateAiRepairUI();
+      return result.imageData;
+    }
+
+    function canPaintAiBrush() {
+      return Boolean(document.getElementById('aiBrushEnabled')?.checked
+        && document.getElementById('studioTab-repair')?.getAttribute('aria-selected') === 'true'
+        && state.currentStep >= 3 && !state.cropping && !state.samplingMode);
+    }
+
+    let aiBrushDrawing = null;
+    const brushOverlay = document.createElement('canvas');
+    brushOverlay.id = 'aiBrushOverlay';
+    brushOverlay.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:20;';
+    document.getElementById('canvasTransformWrapper').append(brushOverlay);
+
+    function paintAiBrushOverlay() {
+      brushOverlay.width = canvas.width;
+      brushOverlay.height = canvas.height;
+      if (!aiBrushDrawing) return;
+      const ctx = brushOverlay.getContext('2d');
+      const { geometry, points, size } = aiBrushDrawing;
+      const cropShort = Math.min(geometry.cropRegion?.width || geometry.rotatedWidth, geometry.cropRegion?.height || geometry.rotatedHeight);
+      const radius = size * Math.min(geometry.baseWidth, geometry.baseHeight) * Math.min(geometry.width, geometry.height) / cropShort / 2;
+      ctx.scale(canvas.width / geometry.width, canvas.height / geometry.height);
+      ctx.lineWidth = radius * 2;
+      ctx.lineCap = ctx.lineJoin = 'round';
+      ctx.strokeStyle = ctx.fillStyle = 'rgba(244, 180, 105, 0.55)';
+      ctx.beginPath();
+      points.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
+      ctx.stroke();
+      if (points.length === 1) { ctx.beginPath(); ctx.arc(points[0].x, points[0].y, radius, 0, Math.PI * 2); ctx.fill(); }
+    }
+
+    function finishAiBrush(event, cancelled = false) {
+      const drawing = aiBrushDrawing;
+      if (!drawing || event.pointerId !== drawing.pointerId) return;
+      aiBrushDrawing = null;
+      paintAiBrushOverlay();
+      if (drawing.surface.hasPointerCapture?.(event.pointerId)) drawing.surface.releasePointerCapture(event.pointerId);
+      if (cancelled || !canPaintAiBrush() || drawing.source !== state.conversionSourceImageData || drawing.token !== coreReprocessToken) return;
+      pushUndo('dustBrushStroke');
+      state.repairStrokes = sanitizeRepairStrokes([...state.repairStrokes, {
+        size: drawing.size,
+        points: drawing.points.map(point => workingPointToBase(lensSourcePoint(point, drawing.lensMapping), drawing.geometry))
+      }]);
+      markCurrentFileDirty();
+      if (!state.dustRemoval.cleanSource) state.dustRemoval.cleanSource = state.processedImageData;
+      scheduleDustDetection();
+    }
+
+    for (const surface of [canvas, glCanvas]) {
+      surface.addEventListener('pointerdown', event => {
+        if (!canPaintAiBrush() || event.button !== 0) return;
+        if (aiBrushDrawing) {
+          finishAiBrush({ pointerId: aiBrushDrawing.pointerId }, true);
+          return;
+        }
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        if (aiRepair.status !== 'ready' || state.processedImageDataIsPreview || state.dustRemoval.processing) return;
+        const source = state.processedImageData;
+        const rect = surface.getBoundingClientRect();
+        const point = pointerToRepairPoint(event, rect, source.width, source.height);
+        if (!point) return;
+        aiBrushDrawing = {
+          pointerId: event.pointerId, surface, rect, source: state.conversionSourceImageData, token: coreReprocessToken,
+          geometry: { ...localExposureGeometryFor(state), width: source.width, height: source.height },
+          lensMapping: state.conversionSourceImageData?.__lensMapping,
+          points: [point], size: Number(document.getElementById('aiBrushSize').value) / 100
+        };
+        surface.setPointerCapture?.(event.pointerId);
+        paintAiBrushOverlay();
+      }, { capture: true, passive: false });
+      surface.addEventListener('pointermove', event => {
+        if (!aiBrushDrawing || event.pointerId !== aiBrushDrawing.pointerId) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const { geometry, rect } = aiBrushDrawing;
+        const point = pointerToRepairPoint(event, rect, geometry.width, geometry.height);
+        if (point) aiBrushDrawing.points.push(point);
+        paintAiBrushOverlay();
+      }, { passive: false });
+      surface.addEventListener('pointerup', event => finishAiBrush(event));
+      surface.addEventListener('pointercancel', event => finishAiBrush(event, true));
+      surface.addEventListener('lostpointercapture', event => finishAiBrush(event, true));
+    }
+    document.getElementById('aiBrushEnabled').addEventListener('change', async event => {
+      if (event.target.checked) {
+        state.dodgeBurn.active = false;
+        updateDodgeBurnUI();
+        state.dustRemoval.showMask = false;
+        document.getElementById('dustShowMask').checked = false;
+        updateDustControlsVisibility();
+        updateCanvasVisibility();
+        updatePreview();
+        await ensureFullResolutionReadyForExport();
+        if (aiRepair.status !== 'ready') await loadAiRepairModel(DEFAULT_MODEL_URL);
+      } else if (aiBrushDrawing) finishAiBrush({ pointerId: aiBrushDrawing.pointerId }, true);
+    });
+    document.getElementById('aiBrushSize').addEventListener('input', event => {
+      document.getElementById('aiBrushSizeValue').textContent = `${event.target.value}%`;
+    });
+    document.getElementById('aiBrushClear').addEventListener('click', () => {
+      if (!state.repairStrokes.length) return;
+      pushUndo('dustBrushStroke');
+      state.repairStrokes = [];
+      markCurrentFileDirty();
+      const source = getDustSource();
+      if (source) applyProcessedImageToState(source, { previewOnly: state.processedImageDataIsPreview });
+      clearDustState();
+      state.dustRemoval.cleanSource = state.dustRemoval.enabled ? source : null;
+      if (state.dustRemoval.enabled) scheduleDustDetection();
+      updatePreview();
+    });
+
     function aiRepairReady() {
       return Boolean(state.dustRemoval.ai && aiRepair.status === 'ready' && typeof aiRepair.run === 'function');
     }
@@ -12686,8 +12926,9 @@
 
     // `source` is a File (a model the user picked) or a URL (the self-hosted
     // asset, fetched once and cached in IndexedDB).
-    async function loadAiRepairModel(source, { prefer = 'webgpu' } = {}) {
-      if (aiRepair.status === 'loading') return;
+    const loadAiRepairModel = createAiModelLoader(performAiRepairModelLoad, DEFAULT_MODEL_URL);
+
+    async function performAiRepairModelLoad(source, { prefer = 'webgpu', refresh = true } = {}) {
       aiRepair.status = 'loading';
       aiRepair.percent = 0;
       aiRepair.error = '';
@@ -12725,12 +12966,14 @@
         aiRepair.run = null;
       }
       updateAiRepairUI();
-      if (prefer !== 'wasm' && aiRepairReady() && state.dustRemoval.enabled) scheduleDustDetection();
+      if (refresh && prefer !== 'wasm' && hasFrameRepairs()) scheduleDustDetection();
     }
 
     // The commit-path inpaint: the learned model when it is on and ready,
     // TELEA otherwise (and always for brush strokes, which stay interactive).
     async function inpaintForCommit(source, mask) {
+      if (state.dustRemoval.ai && aiRepair.status === 'idle') await loadAiRepairModel(DEFAULT_MODEL_URL, { refresh: false });
+      while (state.dustRemoval.ai && aiRepair.status === 'loading') await new Promise(resolve => setTimeout(resolve, 50));
       if (!aiRepairReady()) return inpaintMasked(source, mask, 3);
       const started = performance.now();
       try {
@@ -12758,13 +13001,15 @@
     }
 
     async function repairBrushWithAi(source, mask, token) {
-      const isCurrent = () => state.dustRemoval.enabled && state.dustRemoval.ai
+      const strokes = state.repairStrokes;
+      const isCurrent = () => state.dustRemoval.enabled && (state.dustRemoval.ai || strokes.length)
+        && state.repairStrokes === strokes
         && getDustSource() === source && state.dustRemoval.mask === mask
         && coreReprocessToken === token;
       // Coalesce quick brush strokes and discard work after switching photos or undo.
       await new Promise((resolve) => setTimeout(resolve, 200));
       if (!isCurrent()) return;
-      const result = await inpaintForCommit(source, mask);
+      const result = await inpaintManualBrush(await inpaintForCommit(source, mask));
       if (!isCurrent()) return;
       state.dustRemoval.inpaintedImageData = result;
       applyDustResultToState();
@@ -13148,7 +13393,7 @@
     function currentRecipeCode() {
       let defaults = null;
       if (state.originalImageData) {
-        const { filmType, ...rest } = createDefaultSettings(state.originalImageData);
+        const { filmType, positiveMode, ...rest } = createDefaultSettings(state.originalImageData);
         defaults = rest;
       }
       return encodeRecipe(extractCurrentSettings(), recipeTags(), { defaults });
@@ -13272,6 +13517,8 @@
         else updateFilmModeUI();
       }
       for (const [key, value] of Object.entries(patch)) if (key !== 'filmType') state[key] = value;
+      if (Object.hasOwn(patch, 'filmType')) state.filmTypeSource = 'manual';
+      updateFilmModeUI();
       if (patch.curvePoints) ['r', 'g', 'b'].forEach((ch) => updateCurveFromPoints(ch));
       state.frontierGuideStep2ChoiceTouched = true;
       updateSlidersFromState();
@@ -13427,7 +13674,7 @@
     // Live loupe (camera scanning)
     // ===========================================
     const LOUPE_PREVIEW_SIDE = 640;
-    const liveLoupe = { stream: null, track: null, running: false, capturing: false, frames: 0, view: 'converted', surface: null };
+    const liveLoupe = { stream: null, track: null, running: false, capturing: false, frames: 0, view: 'converted', surface: null, generation: 0 };
 
     function loupeElement(id) {
       return document.getElementById(id);
@@ -13443,6 +13690,7 @@
     }
 
     function stopLoupeStream() {
+      liveLoupe.generation++;
       liveLoupe.running = false;
       if (liveLoupe.stream) for (const track of liveLoupe.stream.getTracks()) track.stop();
       liveLoupe.stream = null;
@@ -13497,7 +13745,7 @@
 
     async function loupeLoop() {
       const video = loupeElement('loupeVideo');
-      const canvas = loupeElement('loupeCanvas');
+      const canvas = loupeElement('liveLoupeCanvas');
       const overlay = loupeElement('loupeOverlay');
       const stream = liveLoupe.stream;
       while (liveLoupe.running && liveLoupe.stream === stream) {
@@ -13593,6 +13841,8 @@
         return;
       }
       stopLoupeStream();
+      const generation = liveLoupe.generation;
+      const isCurrent = () => liveLoupe.generation === generation && !overlay.hidden;
       overlay.hidden = false;
       overlay.dataset.view = liveLoupe.view;
       overlay.dataset.frames = '0';
@@ -13602,8 +13852,14 @@
         ? { deviceId: { exact: deviceId } }
         : { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } };
       try {
-        liveLoupe.stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
+        const stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
+        if (!isCurrent()) {
+          for (const track of stream.getTracks()) track.stop();
+          return;
+        }
+        liveLoupe.stream = stream;
       } catch (error) {
+        if (!isCurrent()) return;
         console.warn('Loupe camera failed:', error);
         const denied = error?.name === 'NotAllowedError' || error?.name === 'SecurityError';
         setLoupeStatus(getLocalizedText(denied ? 'loupeDenied' : 'loupeNoCamera', denied ? 'Camera access was denied.' : 'No camera available.'));
@@ -13617,7 +13873,9 @@
       } catch (error) {
         console.warn('Loupe video play failed:', error);
       }
+      if (!isCurrent()) return;
       await populateLoupeCameras();
+      if (!isCurrent()) return;
       configureLoupeTrackControls();
       liveLoupe.running = true;
       loupeElement('loupeCaptureBtn').disabled = false;

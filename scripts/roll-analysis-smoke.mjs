@@ -11,7 +11,7 @@ export async function runRollAnalysisSmoke({ send, evaluate, waitFor, wait, fail
     .map((name) => join(root, 'negative2positive', 'test-fixtures', name));
 
   await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
-  await waitFor('roll analysis workspace boot', `!!document.getElementById('fileInput') && !!document.getElementById('analyzeRollBtn')`);
+  await waitFor('roll analysis workspace boot', `!!document.getElementById('studioImportAutoCrop') && (!!document.getElementById('fileInput') && !!document.getElementById('analyzeRollBtn'))`);
   await installDialogAutoAccept();
   await wait(300);
   await evaluate(`(() => {

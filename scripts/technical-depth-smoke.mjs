@@ -56,7 +56,7 @@ function levelsPerChannel(png) {
 export async function runTechnicalDepthSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, root }) {
   const fixture = join(root, 'negative2positive', 'test-fixtures', 'negative-gradient-16.png');
   await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
-  await waitFor('technical workspace boot', `!!document.getElementById('fileInput') && !!document.querySelector('.format-btn[data-format="dng"]')`);
+  await waitFor('technical workspace boot', `!!document.getElementById('studioImportAutoCrop') && (!!document.getElementById('fileInput') && !!document.querySelector('.format-btn[data-format="dng"]'))`);
   await installDialogAutoAccept();
   await installDownloadCapture(evaluate);
   await wait(300);
@@ -120,9 +120,11 @@ export async function runTechnicalDepthSmoke({ send, evaluate, waitFor, wait, fa
 async function runAiRepairScenario({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, root }) {
   const fixture = join(root, 'negative2positive', 'test-fixtures', 'negative-sample.jpg');
   await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
-  await waitFor('ai repair workspace boot', `!!document.getElementById('dustAiEnabled')`);
+  await waitFor('ai repair workspace boot', `!!document.getElementById('studioImportAutoCrop') && (/No model loaded/.test(document.getElementById('dustAiStatus')?.textContent))`);
   await installDialogAutoAccept();
   await wait(300);
+  if (!await evaluate(`document.getElementById('dustAiEnabled').checked`)) fail('AI dust removal must be enabled by default');
+  await evaluate(`document.getElementById('dustAiEnabled').click()`);
   await evaluate(`(() => {
     window.__aiToasts = [];
     new MutationObserver((records) => { for (const r of records) for (const n of r.addedNodes) if (n.nodeType === 1) window.__aiToasts.push(n.textContent); }).observe(document.getElementById('toastContainer'), { childList: true });
@@ -131,12 +133,13 @@ async function runAiRepairScenario({ send, evaluate, waitFor, wait, fail, instal
   const input = await send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector: '#fileInput' });
   await send('DOM.setFileInputFiles', { files: [fixture], nodeId: input.result.nodeId });
   await waitFor('sample converted', `${ready} && document.getElementById('studioFilename').textContent === 'negative-sample.jpg'`, 150_000);
+  await waitFor('model automatically loads after photo import', `/Model ready/.test(document.getElementById('dustAiStatus').textContent)`, 180_000);
   await wait(600);
   await evaluate(`document.getElementById('studioTab-repair').click(); document.getElementById('dustRemovalEnabled').click();`);
   await waitFor('dust detected with TELEA', `/Detected \\d+ dust/.test(document.getElementById('dustStatus').textContent)`, 60_000);
   const idle = await evaluate(`document.getElementById('dustAiStatus').textContent`);
   console.log('technical ai repair idle:', idle);
-  if (!/No model loaded/.test(idle)) fail('AI repair should report no model: ' + idle);
+  if (!/Model ready/.test(idle) || /last run/.test(idle)) fail('Model should preload without repairing when AI dust is off: ' + idle);
 
   // Invalid local bytes exercise real runtime failure without depending on a 404.
   await evaluate(`(() => {
@@ -223,4 +226,128 @@ async function runAiRepairScenario({ send, evaluate, waitFor, wait, fail, instal
   if (cpu.provider !== 'wasm' || !cpu.changed || cpu.outsideChanges) fail('MI-GAN CPU/compositing regression: ' + JSON.stringify(cpu));
   console.log('ok: real MI-GAN CPU repair and untouched 16-bit pixels:', JSON.stringify(cpu));
 
+  await runManualBrushSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, root });
+}
+
+async function runManualBrushSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, root }) {
+  await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
+  await waitFor('manual brush boot', `!!document.getElementById('studioImportAutoCrop') && (/No model loaded/.test(document.getElementById('dustAiStatus')?.textContent))`);
+  await installDialogAutoAccept();
+  await wait(300);
+  await evaluate(`document.getElementById('studioImportAutoCrop').click()`);
+  const doc = await send('DOM.getDocument');
+  const input = await send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector: '#fileInput' });
+  await send('DOM.setFileInputFiles', { files: [join(root, 'negative2positive/test-fixtures/negative-sample.jpg')], nodeId: input.result.nodeId });
+  await waitFor('manual brush photo', `${ready} && document.getElementById('studioFilename').textContent === 'negative-sample.jpg'`, 150_000);
+  await evaluate(`document.getElementById('studioTab-repair').click()`);
+  const entry = await evaluate(`({ visible: document.getElementById('aiBrushSection').getBoundingClientRect().height > 0,
+    first: document.getElementById('studioPane-repair').firstElementChild.id,
+    dust: document.getElementById('dustRemovalEnabled').checked })`);
+  if (!entry.visible || entry.first !== 'aiBrushSection' || entry.dust) fail('Manual brush must be visible without enabling dust: ' + JSON.stringify(entry));
+  await evaluate(`document.getElementById('aiBrushEnabled').click()`);
+  await waitFor('manual brush model ready', `/Model ready/.test(document.getElementById('dustAiStatus').textContent)`, 120_000);
+  if (await evaluate(`document.getElementById('dustRemovalEnabled').checked || /last run/.test(document.getElementById('dustAiStatus').textContent)`)) fail('Enabling the brush must not detect or repair anything');
+  await installDownloadCapture(evaluate);
+  await evaluate(`document.querySelector('.format-btn[data-format="png"]').click(); document.querySelector('.bitdepth-btn[data-bitdepth="8"]').click()`);
+  const exportPixels = async () => {
+    await evaluate(`document.getElementById('exportSingleBtn').click()`);
+    const entry = await takeDownload(evaluate, waitFor, 'manual brush PNG');
+    const png = UPNG.decode(entry.bytes.buffer.slice(entry.bytes.byteOffset, entry.bytes.byteOffset + entry.bytes.byteLength));
+    return { width: png.width, height: png.height, data: new Uint8Array(UPNG.toRGBA8(png)[0]) };
+  };
+  const before = await exportPixels();
+  await evaluate(`document.getElementById('zoomInBtn').click(); document.getElementById('zoomInBtn').click(); document.getElementById('zoomInBtn').click()`);
+  await wait(500);
+  await evaluate(`document.getElementById('aiBrushEnabled').click()`);
+  const center = await evaluate(`(() => { const r = document.getElementById('canvasContainer').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
+  await send('Input.dispatchMouseEvent', { type: 'mousePressed', ...center, button: 'left', clickCount: 1 });
+  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: center.x + 40, y: center.y + 25, button: 'left', buttons: 1 });
+  await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: center.x + 40, y: center.y + 25, button: 'left', clickCount: 1 });
+  await evaluate(`document.getElementById('aiBrushEnabled').click()`);
+  const location = await evaluate(`(() => {
+    const surface = [...document.querySelectorAll('#canvas, #glCanvas')].find(el => getComputedStyle(el).display !== 'none');
+    const rect = surface.getBoundingClientRect();
+    const box = document.getElementById('canvasContainer').getBoundingClientRect();
+    const x = box.x + box.width / 2; const y = box.y + box.height / 2;
+    return { x, y, endX: x + 35, nx: (x - rect.x) / rect.width, ny: (y - rect.y) / rect.height,
+      endNx: (x + 35 - rect.x) / rect.width, transform: document.getElementById('canvasTransformWrapper').style.transform };
+  })()`);
+  if (!location.transform || location.transform.startsWith('matrix(1,')) fail('Zoom regression requires a magnified photo');
+  await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: location.x, y: location.y, button: 'left', clickCount: 1 });
+  for (let i = 1; i <= 5; i++) await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: location.x + 7 * i, y: location.y, button: 'left', buttons: 1 });
+  await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: location.endX, y: location.y, button: 'left', clickCount: 1 });
+  await waitFor('zoomed manual brush inferred', `/last run/.test(document.getElementById('dustAiStatus').textContent)`, 120_000);
+  const transform = await evaluate(`document.getElementById('canvasTransformWrapper').style.transform`);
+  if (transform !== location.transform) fail('Painting panned the image');
+  const after = await exportPixels();
+  let changed = 0; let outside = 0;
+  const radius = Math.min(after.width, after.height) * 0.02 / 2 + 7;
+  for (let y = 0; y < after.height; y++) for (let x = 0; x < after.width; x++) {
+    const o = (y * after.width + x) * 4;
+    if (after.data[o] === before.data[o] && after.data[o + 1] === before.data[o + 1] && after.data[o + 2] === before.data[o + 2]) continue;
+    changed++;
+    if (x < location.nx * after.width - radius || x > location.endNx * after.width + radius || Math.abs(y - location.ny * after.height) > radius) outside++;
+  }
+  if (!changed || outside) fail('Zoomed repair changed wrong pixels: ' + JSON.stringify({ changed, outside, location }));
+  await evaluate(`document.getElementById('undoBtn').click()`);
+  await wait(600);
+  const undone = await exportPixels();
+  if (undone.data.some((v, i) => v !== before.data[i])) fail('Undo did not restore the unpainted photo');
+  await evaluate(`document.getElementById('redoBtn').click()`);
+  await wait(600);
+  const redone = await exportPixels();
+  if (!redone.data.some((v, i) => v !== before.data[i])) fail('Redo lost manual repair');
+  await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 2 });
+  const touchTransform = await evaluate(`document.getElementById('canvasTransformWrapper').style.transform`);
+  await send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: location.x, y: location.y + 55 }] });
+  await send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: location.x + 30, y: location.y + 55 }] });
+  await send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await wait(1500);
+  const touched = await exportPixels();
+  if (!touched.data.some((v, i) => v !== redone.data[i])) fail('Touch brush did not repair the photo');
+  const afterTouchTransform = await evaluate(`document.getElementById('canvasTransformWrapper').style.transform`);
+  if (afterTouchTransform !== touchTransform) fail('Touch brush panned the photo: ' + JSON.stringify({ before: touchTransform, after: afterTouchTransform }));
+  await send('Emulation.setTouchEmulationEnabled', { enabled: false });
+  await evaluate(`document.getElementById('aiBrushClear').click()`);
+  await wait(500);
+  const cleared = await exportPixels();
+  if (cleared.data.some((v, i) => v !== before.data[i])) fail('Clear repairs did not restore the original');
+  await evaluate(`(() => { const e = document.getElementById('coreExposure'); e.value = '24'; e.dispatchEvent(new Event('input', { bubbles:true })); e.dispatchEvent(new Event('change', { bubbles:true })); })()`);
+  await wait(1200);
+  const adjusted = await exportPixels();
+  if (!adjusted.data.some((v, i) => v !== before.data[i])) fail('Exposure change after clearing was not applied');
+  await send('Input.dispatchMouseEvent', { type:'mousePressed', x:location.x, y:location.y, button:'left', clickCount:1 });
+  await send('Input.dispatchMouseEvent', { type:'mouseReleased', x:location.x, y:location.y, button:'left', clickCount:1 });
+  await wait(1500);
+  const repainted = await exportPixels();
+  let repairedAgain = 0, rolledBack = 0;
+  for (let y = 0; y < repainted.height; y++) for (let x = 0; x < repainted.width; x++) {
+    const i = (y * repainted.width + x) * 4;
+    if ([0,1,2].every(c => repainted.data[i+c] === adjusted.data[i+c])) continue;
+    repairedAgain++;
+    if (Math.abs(x-location.nx*repainted.width)>radius || Math.abs(y-location.ny*repainted.height)>radius) rolledBack++;
+  }
+  if (!repairedAgain || rolledBack) fail('Repainting after clear reverted later edits: '+JSON.stringify({repairedAgain,rolledBack}));
+  console.log('ok: clear repairs, adjust exposure and repaint preserves every pixel outside the new selection');
+  if (!await evaluate(`document.getElementById('dustAiEnabled').checked`)) fail('Manual brush must preserve default AI dust removal');
+  await evaluate(`document.getElementById('dustRemovalEnabled').click()`);
+  await waitFor('AI dust remains usable with manual strokes', `/Detected \\d+ dust/.test(document.getElementById('dustStatus').textContent)`, 120_000);
+  console.log('ok: independent manual AI brush, zoom/pan coordinates, mouse and touch, localized export, undo/redo and AI dust together:', JSON.stringify({ changed, outside }));
+  await evaluate(`document.getElementById('dustRemovalEnabled').click(); document.getElementById('studioRestart').click()`);
+  await waitFor('restart from original converted', `${ready} && document.getElementById('coreExposure').value === '0'`, 120_000);
+  const restarted = await exportPixels();
+  if (restarted.width !== before.width || restarted.height !== before.height
+      || restarted.data.some((v,i) => v !== before.data[i])) fail('Reprocess from original retained discarded repairs or adjustments');
+  console.log('ok: reprocess from original discards manual repairs and restores the original conversion pixels');
+  await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
+  await waitFor('default AI dust boot', `!!document.getElementById('studioImportAutoCrop') && (/No model loaded/.test(document.getElementById('dustAiStatus')?.textContent))`);
+  await installDialogAutoAccept();
+  await wait(300);
+  const dustDoc = await send('DOM.getDocument');
+  const dustInput = await send('DOM.querySelector', { nodeId: dustDoc.result.root.nodeId, selector: '#fileInput' });
+  await send('DOM.setFileInputFiles', { files: [join(root, 'negative2positive/test-fixtures/negative-sample.jpg')], nodeId: dustInput.result.nodeId });
+  await waitFor('default AI dust photo', `${ready} && document.getElementById('studioFilename').textContent === 'negative-sample.jpg'`, 150_000);
+  await evaluate(`document.getElementById('studioTab-repair').click(); document.getElementById('dustRemovalEnabled').click()`);
+  await waitFor('default AI dust automatically loads and repairs', `/Model ready.*last run [1-9]/.test(document.getElementById('dustAiStatus').textContent)`, 180_000);
+  console.log('ok: enabling dust alone automatically loads MI-GAN and repairs with AI');
 }

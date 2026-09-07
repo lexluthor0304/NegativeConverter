@@ -39,6 +39,11 @@ body.studio {
   z-index: 20;
   background: var(--bg-primary);
 }
+/* Reserve the measured Studio header space before the editor module mounts. */
+.studio-header.studio-header-pending { min-height: 60px; }
+@media (max-width: 1000px) { .studio-header.studio-header-pending { min-height: 110px; } }
+@media (max-width: 700px) { .studio-header.studio-header-pending { min-height: 181px; } }
+.studio-discovery a[lang] { font-family: system-ui, sans-serif; }
 .studio-brand { display: flex; flex-direction: column; align-items: flex-start; gap: 0; flex-shrink: 0; font-size: 12px; font-weight: 400; }
 .studio-brand > span:last-child { color: var(--text-secondary); }
 .studio-mark { font-size: 24px; line-height: 1.2; white-space: nowrap; }
@@ -115,6 +120,10 @@ body.studio {
 .studio-drawer-hint { margin: 0 10px 14px; color: var(--text-secondary); font-size: 12px; line-height: 1.8; }
 .studio .control-section { border: 0; background: transparent; box-shadow: none; margin-bottom: 8px; }
 .studio .section-header { background: transparent; }
+.studio:has(#aiBrushEnabled:checked):has(#studioTab-repair[aria-selected="true"]) #canvasContainer { cursor: crosshair; touch-action: none; }
+.studio #aiBrushSection { padding: 16px; }
+.studio #aiBrushSection .control-group { margin: 0; }
+.studio #aiBrushSection details { margin-top: 12px; }
 .studio .section-title { font-family: var(--font-body); font-size: 12px; letter-spacing: 0; text-transform: none; }
 .studio #studioExportSettings { border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px; }
 .studio #studioExportSettings > summary { cursor: pointer; font-size: 12px; color: var(--text-secondary); padding: 10px; }
@@ -313,3 +322,7 @@ body.studio {
 .metadata-grid input, .metadata-grid textarea { width: 100%; min-width: 0; padding: 6px 8px; font: inherit; font-size: 12px; color: var(--text-primary); background: var(--bg-primary); border: 1px solid var(--border-light); border-radius: 4px; }
 .metadata-grid textarea { resize: vertical; }
 .metadata-wide { grid-column: 1 / -1; }
+
+.studio-discovery { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px 14px; max-width: 560px; margin: 14px auto 0; font-size: 12px; line-height: 1.6; }
+.studio-discovery a { color: var(--text-secondary); text-underline-offset: 3px; }
+.studio-discovery a:hover, .studio-discovery a:focus-visible { color: var(--text-primary); text-decoration: underline; }

@@ -3,6 +3,8 @@
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <key>NSCameraUsageDescription</key>
+    <string>Use the camera to preview film negatives live and capture frames into your photo list.</string>
     <key>ITSAppUsesNonExemptEncryption</key>
     <false/>
     <key>NSHumanReadableCopyright</key>

@@ -4,14 +4,15 @@
 // without imposing a templating system on the authoring flow.
 //
 //   node scripts/check-seo-heads.mjs
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
+import { searchFiles } from './search-files.mjs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const SITE = 'https://negative-converter.tokugai.com';
 const PAGES_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'negative2positive');
 
-const pages = readdirSync(PAGES_DIR).filter((f) => f.endsWith('.html'));
+const pages = searchFiles();
 const problems = [];
 const seenTitles = new Map();
 const seenDescriptions = new Map();

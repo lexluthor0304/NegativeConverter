@@ -5,12 +5,13 @@
 // Vite 起動 → 実際の入力から写真を読み込み → Studio 自動変換 → 調整・一括書き出し。
 // Asserts the canvas pixels actually changed (negative inverted) and that no
 // uncaught page errors occurred. Requires Google Chrome on this machine.
-import { spawn, execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { runPositiveImportSmoke } from './positive-import-smoke.mjs';
 import { runStudioSmoke } from './studio-smoke.mjs';
 import { runStudioAutoCropSmoke } from './studio-auto-crop-smoke.mjs';
 import { runStudioColorAnalysisSmoke } from './studio-color-analysis-smoke.mjs';
@@ -97,14 +98,20 @@ for (let i = 0; i < 60; i++) {
 if (!serverUp) fail('vite dev server did not start');
 
 // ---- start chrome ----
-const chrome = execFile(chromeBin, [
+const chrome = spawn(chromeBin, [
   '--headless=new', `--remote-debugging-port=${CDP_PORT}`,
   `--user-data-dir=${chromeProfileDir}`,
   '--no-first-run', '--hide-scrollbars', '--window-size=1440,900',
   // A fake camera, granted without a prompt, for the live loupe scenario.
   '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream',
   'about:blank',
-]);
+], { stdio: ['ignore', 'ignore', 'pipe'] });
+// execFile buffers stderr and kills the browser after its default 1 MiB
+// limit; repeated WebGPU model sessions can exceed it. Keep a bounded tail.
+let chromeDiagnostics = '';
+chrome.stderr.on('data', chunk => { chromeDiagnostics = (chromeDiagnostics + chunk).slice(-8000); });
+chrome.once('error', error => fail(`Chrome startup failed: ${error.message}`));
+chrome.once('exit', (code, signal) => fail(`Chrome exited before the smoke completed (${code ?? signal}): ${chromeDiagnostics}`));
 children.push(chrome);
 
 async function getWsUrl() {
@@ -121,6 +128,7 @@ async function getWsUrl() {
 
 const ws = new WebSocket(await getWsUrl());
 await new Promise((r, j) => { ws.onopen = r; ws.onerror = j; });
+ws.onclose = () => fail(`Chrome debugging connection closed: ${chromeDiagnostics}`);
 
 let msgId = 0;
 const pending = new Map();
@@ -153,7 +161,8 @@ ws.onmessage = (e) => {
 };
 const send = (method, params = {}) => new Promise((resolve) => {
   const id = ++msgId;
-  pending.set(id, (m) => resolve(m));
+  const timeout = setTimeout(() => fail(`Chrome command timed out: ${method}`), 180_000);
+  pending.set(id, (m) => { clearTimeout(timeout); resolve(m); });
   ws.send(JSON.stringify({ id, method, params }));
 });
 async function evaluate(expression) {
@@ -253,6 +262,17 @@ await installDialogAutoAccept();
 await wait(1500); // let main.js finish wiring
 await evaluate(`document.getElementById('studioImportAutoCrop').click()`);
 
+if (process.argv.includes('--positive-only')) {
+  await runPositiveImportSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS');
+  process.exit(0);
+}
+
+// The historical JPEG fixture is a finished positive. This scenario
+// deliberately exercises negative inversion, so choose the import type explicitly.
+await evaluate(`document.getElementById('importFilmTypeAuto').checked && document.getElementById('importFilmTypeAuto').click()`);
+
 // ---- 1. load the fixture through the real file input ----
 if (!process.argv.includes('--studio-only') && !process.argv.includes('--auto-crop-only') && !process.argv.includes('--color-analysis-only') && !process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) {
 const doc = await send('DOM.getDocument');
@@ -343,6 +363,8 @@ await evaluate(`(() => {
     window.__dustSources.push({ width: image.width, height: image.height, hash });
     return original.call(this, image);
   };
+  // This scenario instruments TELEA; learned inference has its own real-model tests.
+  if (document.getElementById('dustAiEnabled').checked) document.getElementById('dustAiEnabled').click();
   document.getElementById('dustRemovalEnabled').click();
 })()`);
 await waitFor('dust detection at full resolution', `window.__dustSources.length > 0`, 90_000);
@@ -614,6 +636,8 @@ if (!process.argv.includes('--film-edge-only') && !process.argv.includes('--dark
 if (!process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only')) await runTechnicalDepthSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
 if (!process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) await runWorkspaceUiSmoke({ send, evaluate, waitFor, fail, port: PORT, root: ROOT });
 if (process.env.AUTOFRAME_RAW_DIR) await runStudioRawAutoFrameSmoke({ send, evaluate, waitFor, fail, port: PORT, root: ROOT, directory: process.env.AUTOFRAME_RAW_DIR });
+
+if (!process.argv.some(arg => arg.endsWith('-only'))) await runPositiveImportSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
 
 // ---- no uncaught page errors across both scenarios ----
 const realErrors = pageErrors.filter((e) => !/ResizeObserver loop/.test(e));

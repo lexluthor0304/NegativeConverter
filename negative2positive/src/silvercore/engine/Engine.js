@@ -3,6 +3,7 @@
  * Coordinates image analysis, curve generation, and LUT application.
  */
 
+import { analyzePositive, applyPositiveAnalysis, identityPositiveChannels } from './PositiveProcessing.js'
 import { analyzeImage, applyLUT, adjustSaturation, applyHSLAdjustments } from './ImageProcessor.js'
 import { generateCurves } from './CurveEngine.js'
 import { computeAutoColor } from './WhiteBalance.js'
@@ -77,6 +78,7 @@ export class Engine {
     // 4b. Dodge and burn: local exposure on the negative, after the histogram
     //     analysis (the base exposure is decided before dodging) and before
     //     the curves, like light held back or added under the enlarger.
+    applyPositiveAnalysis(imageData, this.positiveAnalysis)
     this._applyLocalExposure(imageData, params)
 
     // 5. Apply LUTs + 3D LUT + HSL + saturation (all CPU 16-bit for precision).
@@ -94,12 +96,13 @@ export class Engine {
     // 1. Analyze the negative (histogram-based black/white/mean points). A roll
     //    analysis hands in shared channelData instead so every frame of the roll
     //    gets the same curves; this frame's own histogram is then not consulted.
-    this.channelData = isChannelDataOverride(params.analysisOverride)
+    this.positiveAnalysis = params.imageType === 'positive' ? analyzePositive(imageData, params) : null
+    this.channelData = params.imageType === 'positive' ? identityPositiveChannels() : isChannelDataOverride(params.analysisOverride)
       ? params.analysisOverride.map((channel) => ({ ...channel }))
       : analyzeImage(imageData, params)
 
     // 2. Compute auto color correction
-    this.autoColor = computeAutoColor(this.channelData)
+    this.autoColor = params.imageType === 'positive' ? null : computeAutoColor(this.channelData)
 
     this.lastLuts = null
   }
@@ -117,6 +120,7 @@ export class Engine {
     const luts = generateCurves(this.channelData, settings)
     this.lastLuts = luts
 
+    applyPositiveAnalysis(imageData, this.positiveAnalysis)
     this._applyLocalExposure(imageData, params)
     return this._applyLuts(imageData, luts, params)
   }
@@ -126,6 +130,7 @@ export class Engine {
   applyCurrentCurves(imageData, params) {
     if (!this.lastLuts) return this.reprocess(imageData, params)
     this._applyPreSaturation(imageData, params)
+    applyPositiveAnalysis(imageData, this.positiveAnalysis)
     this._applyLocalExposure(imageData, params)
     return this._applyLuts(imageData, this.lastLuts, params)
   }

@@ -26,9 +26,27 @@
         },
         {
           "key": "Permissions-Policy",
-          "value": "camera=(), microphone=(), geolocation=()"
+          "value": "camera=(self), microphone=(), geolocation=()"
         }
       ]
+    }
+  ],
+  "trailingSlash": true,
+  "redirects": [
+    {
+      "source": "/index.html",
+      "destination": "/",
+      "permanent": true
+    },
+    {
+      "source": "/zh/index.html",
+      "destination": "/zh/",
+      "permanent": true
+    },
+    {
+      "source": "/ja/index.html",
+      "destination": "/ja/",
+      "permanent": true
     }
   ]
 }
