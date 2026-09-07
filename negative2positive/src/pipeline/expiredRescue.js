@@ -1,7 +1,7 @@
 // Expired film rescue: a separate correction stage for rolls that were shot
 // or developed long past their date. Age shows up in a positive as
 //
-//   * fog       — every channel's black point floats up, contrast collapses;
+//   * fog       — the black point floats up, contrast collapses;
 //   * a cast    — the dye layers lose speed at different rates, so one or
 //                 two channels sit high everywhere (blue/magenta, green…);
 //   * crossover — the layers also fade with different gammas, so shadows
@@ -10,24 +10,31 @@
 //   * thin shadows — an old roll is slower than its box speed, so the frame
 //                 is in effect underexposed.
 //
-// The stage models exactly that per channel: black/white points, a gamma
-// that neutralises the midtones, and a bounded split-tone offset for the
-// remaining crossover, followed by a master brightness gamma and a soft
-// S-curve. Everything is a per-channel 1-D curve, so it folds into the
-// adjustment LUTs and costs nothing per pixel. No OpenCV, no DOM.
+// Colour and tone are corrected separately, and both by luminance:
 //
-// analyzeExpiredFilm() measures a positive once and returns a small plain
-// object (percentiles, gammas, band offsets) that is stored with the photo's
-// settings; buildExpiredRescueCurves() turns that plus the five strengths
-// into three 256-entry curves (0..255 in, 0..255 float out) at any time.
-
-export const EXPIRED_RESCUE_VERSION = 1;
-
+//   * colour: for each luminance band of the positive, the near-neutral
+//     pixels' mean colour is measured; the offset that brings it onto its
+//     luminance, interpolated over luminance, is added to every pixel of that
+//     density. A cyan sky and a magenta wall may share a red value and need
+//     opposite corrections, so this cannot be a per-channel curve; and a grey
+//     object that is already neutral at its density is left alone, which
+//     per-channel levels (which assume a neutral black) would not do.
+//   * tone: one curve shared by the three channels — black and white points
+//     from the luminance histogram, a brightness gamma for lost speed, a soft
+//     S-curve — so neutrals stay neutral.
+//
+// No OpenCV, no DOM. analyzeExpiredFilm() measures a positive once and returns
+// a small plain object that is stored with the photo's settings;
+// buildExpiredRescueStages() turns that plus the strengths into the per-pixel
+// stage (applyExpiredTone) at any time, in the worker as well as on screen.
+//
 // The spatial part (uneven fog, local contrast) is measured with OpenCV.js
 // on the main thread (app/expiredRescueOpenCv.js) and stored as a small
 // quadratic fog surface plus a local-mean grid; this module fits, stores
 // and applies them without OpenCV, so the export worker and the 16-bit
 // path reproduce the preview exactly.
+
+export const EXPIRED_RESCUE_VERSION = 3;
 export const EXPIRED_SPATIAL_VERSION = 1;
 
 export const EXPIRED_RESCUE_KEYS = Object.freeze([
@@ -38,8 +45,8 @@ export const EXPIRED_RESCUE_KEYS = Object.freeze([
 export const EXPIRED_RESCUE_DEFAULTS = Object.freeze({
   expiredEnabled: false,
   expiredLevels: 100,
-  expiredNeutralize: 80,
-  expiredCrossover: 70,
+  expiredNeutralize: 100,
+  expiredCrossover: 100,
   expiredBrightness: 0,
   expiredContrast: 25,
   expiredUnevenFog: 100,
@@ -56,28 +63,31 @@ const EXPIRED_RESCUE_RANGES = Object.freeze({
   expiredLocalContrast: [0, 100]
 });
 
+const HIST_BINS = 1024;
+const LOW_PERCENTILE = 0.005;
+const HIGH_PERCENTILE = 0.995;
+// Tonal bands of the positive (by luminance, normalised to the frame's own
+// range) whose near-neutral pixels decide the colour correction at that
+// density.
+const BAND_EDGES = [0, 0.06, 0.15, 0.3, 0.45, 0.6, 0.75, 0.9, 1.0001];
+// The farthest a band may move a channel (the strengths scale it).
+const BAND_MOVE_LIMIT = 0.35;
+// A band needs this share of the neutral-weighted population to count.
+const MIN_BAND_SHARE = 0.004;
+const NEUTRAL_CHROMA = 0.12;
+// Mean-shift radius (per channel, 0..1) for the densest near-neutral cluster.
+const CLUSTER_RADIUS = 0.06;
+const MIN_SAMPLES = 400;
+// sRGB middle grey; a leveled positive whose midtones sit well below it was
+// underexposed (an aged roll has lost speed) and gets a brightness lift.
+const TARGET_MIDTONE = 0.42;
 // The fitted fog surface never removes more than this much of the range at
 // any point, so a failed fit (a bright wall read as fog) stays a mild error.
 const FOG_SURFACE_LIMIT = 0.15;
 // Local contrast at 100 %: deviations from the local mean grow by this much.
 const LOCAL_CONTRAST_MAX = 0.6;
 const IDENTITY_PLACEMENT = Object.freeze({ left: 0, top: 0, width: 1, height: 1 });
-
-const HIST_BINS = 1024;
-const LOW_PERCENTILE = 0.005;
-const HIGH_PERCENTILE = 0.995;
-const MID_BAND = [0.12, 0.88];
-const SHADOW_BAND = [0.04, 0.42];
-const HIGHLIGHT_BAND = [0.58, 0.96];
-const NEUTRAL_CHROMA = 0.12;
-const GAMMA_RANGE = [0.55, 1.8];
-// Offsets beyond this would dent the curve's slope; the monotonic guard in
-// buildExpiredRescueCurves() covers the rest.
-const CROSSOVER_LIMIT = 0.12;
-const MIN_SAMPLES = 400;
-// sRGB middle grey; a leveled positive whose midtones sit well below it was
-// underexposed (an aged roll has lost speed) and gets a brightness lift.
-const TARGET_MIDTONE = 0.42;
+const OFFSET_BINS = 64;
 
 function clamp(value, min, max) {
   return value < min ? min : value > max ? max : value;
@@ -92,18 +102,8 @@ function luminance(r, g, b) {
   return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
 
-// Split-tone weights: zero at both ends of the range (the levels already
-// fixed black and white), peaking in the shadows / highlights.
-function shadowWeight(x) {
-  if (x >= 0.5) return 0;
-  const t = x / 0.5;
-  return 4 * t * (1 - t);
-}
-
-function highlightWeight(x) {
-  if (x <= 0.5) return 0;
-  const t = (x - 0.5) / 0.5;
-  return 4 * t * (1 - t);
+function round4(value) {
+  return Math.round(value * 10000) / 10000;
 }
 
 // Near-neutral pixels decide the colour balance: a strongly coloured
@@ -123,6 +123,50 @@ function percentileFromHistogram(hist, total, fraction) {
     if (acc >= target) return (i + 0.5) / hist.length;
   }
   return 1;
+}
+
+// Shape-preserving cubic through anchors with increasing x (Fritsch–Carlson
+// slopes): no overshoot between anchors, flat beyond the ends.
+function shapeCubic(xs, ys) {
+  const n = xs.length;
+  if (n === 1) return () => ys[0];
+  const h = new Array(n - 1);
+  const delta = new Array(n - 1);
+  for (let i = 0; i < n - 1; i++) {
+    h[i] = xs[i + 1] - xs[i];
+    delta[i] = (ys[i + 1] - ys[i]) / h[i];
+  }
+  const d = new Array(n).fill(0);
+  d[0] = delta[0];
+  d[n - 1] = delta[n - 2];
+  for (let i = 1; i < n - 1; i++) {
+    if (delta[i - 1] * delta[i] <= 0) {
+      d[i] = 0;
+    } else {
+      const w1 = 2 * h[i] + h[i - 1];
+      const w2 = h[i] + 2 * h[i - 1];
+      d[i] = (w1 + w2) / (w1 / delta[i - 1] + w2 / delta[i]);
+    }
+  }
+  return (x) => {
+    if (x <= xs[0]) return ys[0];
+    if (x >= xs[n - 1]) return ys[n - 1];
+    let i = 0;
+    while (i < n - 2 && x > xs[i + 1]) i++;
+    const t = (x - xs[i]) / h[i];
+    const t2 = t * t;
+    const t3 = t2 * t;
+    return (2 * t3 - 3 * t2 + 1) * ys[i] + (t3 - 2 * t2 + t) * h[i] * d[i]
+      + (-2 * t3 + 3 * t2) * ys[i + 1] + (t3 - t2) * h[i] * d[i + 1];
+  };
+}
+
+function lerpCurve(curve, x) {
+  if (x <= 0) return curve[0];
+  if (x >= 255) return curve[255];
+  const i = x | 0;
+  const f = x - i;
+  return curve[i] + (curve[i + 1] - curve[i]) * f;
 }
 
 export function resolveExpiredSamplePlane(image) {
@@ -167,13 +211,23 @@ function resolveBounds(image, options) {
   };
 }
 
+function sanitizePlacement(value) {
+  if (!value || typeof value !== 'object') return IDENTITY_PLACEMENT;
+  const left = finite(value.left, 0);
+  const top = finite(value.top, 0);
+  const width = finite(value.width, 1);
+  const height = finite(value.height, 1);
+  if (width <= 0 || height <= 0) return IDENTITY_PLACEMENT;
+  return { left, top, width, height };
+}
+
 /**
  * Measures how an aged roll has shifted this positive.
  *
  * `options.spatial` (a stage from buildExpiredSpatialStage) flattens each
- * sample first, so the curves are measured on the frame the way the stage
- * will hand it to them; `options.placement` says where `image` sits in the
- * frame (normalised), for images that are already a crop of it.
+ * sample first, so the colour and tone are measured on the frame the way
+ * the stage will hand it on; `options.placement` says where `image` sits
+ * in the frame (normalised), for images that are already a crop of it.
  *
  * @param {{width:number,height:number,data:Uint8ClampedArray|Uint16Array,__image16?:object}} image
  * @param {{region?:{left:number,top:number,width:number,height:number}, borderBuffer?:number, maxSamples?:number, spatial?:object|null, placement?:object}} [options]
@@ -192,7 +246,6 @@ export function analyzeExpiredFilm(image, options = {}) {
   const placement = sanitizePlacement(options.placement);
   const px = new Float32Array(3);
 
-  const hist = [new Uint32Array(HIST_BINS), new Uint32Array(HIST_BINS), new Uint32Array(HIST_BINS)];
   const lumHist = new Uint32Array(HIST_BINS);
   const capacity = (Math.ceil(bounds.width / stride) + 1) * (Math.ceil(bounds.height / stride) + 1);
   const samples = new Float32Array(capacity * 3);
@@ -213,148 +266,153 @@ export function analyzeExpiredFilm(image, options = {}) {
       samples[count * 3] = r;
       samples[count * 3 + 1] = g;
       samples[count * 3 + 2] = b;
-      hist[0][Math.min(HIST_BINS - 1, (r * HIST_BINS) | 0)]++;
-      hist[1][Math.min(HIST_BINS - 1, (g * HIST_BINS) | 0)]++;
-      hist[2][Math.min(HIST_BINS - 1, (b * HIST_BINS) | 0)]++;
       lumHist[Math.min(HIST_BINS - 1, (luminance(r, g, b) * HIST_BINS) | 0)]++;
       count++;
     }
   }
   if (count < MIN_SAMPLES) return null;
 
-  // 1. Fog and range: black / white points per channel.
-  const low = [0, 1, 2].map((c) => percentileFromHistogram(hist[c], count, LOW_PERCENTILE));
-  const high = [0, 1, 2].map((c) => percentileFromHistogram(hist[c], count, HIGH_PERCENTILE));
-  for (let c = 0; c < 3; c++) {
-    if (high[c] - low[c] < 0.02) {
-      // A flat channel: leave it alone rather than amplify noise 50×.
-      low[c] = 0;
-      high[c] = 1;
-    }
+  // 1. Tone: where the frame's density sits. The colour correction below
+  //    keeps every pixel's luminance, so these serve the shared tone curve.
+  let lumLow = percentileFromHistogram(lumHist, count, LOW_PERCENTILE);
+  let lumHigh = percentileFromHistogram(lumHist, count, HIGH_PERCENTILE);
+  if (lumHigh - lumLow < 0.02) {
+    lumLow = 0;
+    lumHigh = 1;
   }
   const lumMedian = percentileFromHistogram(lumHist, count, 0.5);
-  const medians = [0, 1, 2].map((c) => percentileFromHistogram(hist[c], count, 0.5));
+  const leveledMedian = clamp((lumMedian - lumLow) / (lumHigh - lumLow), 0, 1);
 
-  // 2. Midtone neutrality after the levels: per-channel gamma so the
-  //    near-neutral midtones land on their luminance.
-  const leveled = new Float32Array(count * 3);
-  const logSum = [0, 0, 0];
-  let logTargetSum = 0;
-  let midWeight = 0;
+  // 2. Colour by density: per band of (range-normalised) luminance, the
+  //    near-neutral-weighted mean colour and mean luminance.
+  const bandCount = BAND_EDGES.length - 1;
+  const span = Math.max(0.02, lumHigh - lumLow);
+  const bandSum = Array.from({ length: bandCount }, () => [0, 0, 0]);
+  const bandLumSum = new Float64Array(bandCount);
+  const bandWeight = new Float64Array(bandCount);
+  let bandTotal = 0;
   let neutralPopulation = 0;
   for (let i = 0; i < count; i++) {
-    const r = clamp((samples[i * 3] - low[0]) / (high[0] - low[0]), 0, 1);
-    const g = clamp((samples[i * 3 + 1] - low[1]) / (high[1] - low[1]), 0, 1);
-    const b = clamp((samples[i * 3 + 2] - low[2]) / (high[2] - low[2]), 0, 1);
-    leveled[i * 3] = r;
-    leveled[i * 3 + 1] = g;
-    leveled[i * 3 + 2] = b;
+    const r = samples[i * 3];
+    const g = samples[i * 3 + 1];
+    const b = samples[i * 3 + 2];
     const lum = luminance(r, g, b);
-    if (lum < MID_BAND[0] || lum > MID_BAND[1]) continue;
+    const t = clamp((lum - lumLow) / span, 0, 1);
     const w = neutralWeight(r, g, b);
     neutralPopulation += w;
-    const floor = 1 / 512;
-    logSum[0] += w * Math.log(Math.max(floor, r));
-    logSum[1] += w * Math.log(Math.max(floor, g));
-    logSum[2] += w * Math.log(Math.max(floor, b));
-    logTargetSum += w * Math.log(Math.max(floor, lum));
-    midWeight += w;
+    let k = 0;
+    while (k < bandCount - 1 && t >= BAND_EDGES[k + 1]) k++;
+    bandSum[k][0] += w * r;
+    bandSum[k][1] += w * g;
+    bandSum[k][2] += w * b;
+    bandLumSum[k] += w * lum;
+    bandWeight[k] += w;
+    bandTotal += w;
   }
-  const gamma = [1, 1, 1];
-  if (midWeight > 0) {
-    const logTarget = logTargetSum / midWeight;
-    for (let c = 0; c < 3; c++) {
-      const logChannel = logSum[c] / midWeight;
-      gamma[c] = logChannel < -1e-6 ? clamp(logTarget / logChannel, GAMMA_RANGE[0], GAMMA_RANGE[1]) : 1;
-    }
-  }
-
-  // 3. Crossover: what remains in the shadows and highlights once the
-  //    midtones are neutral, as an offset per channel, with the mean of the
-  //    split-tone weight over the same pixels so the curve removes exactly
-  //    the measured mean.
-  const shadowOffset = [0, 0, 0];
-  const highlightOffset = [0, 0, 0];
-  const shadowWeightMean = [0, 0, 0];
-  const highlightWeightMean = [0, 0, 0];
-  let shadowTotal = 0;
-  let highlightTotal = 0;
-  const leveledLum = new Float32Array(count);
+  // Within a band the near-neutral pixels can still be two populations (a
+  // grey ramp under a green fog next to a lawn); the mean would sit between
+  // them. Three mean-shift steps pull each band's estimate onto its densest
+  // colour cluster instead, which is where a film's neutrals gather.
+  const bandMean = bandSum.map((sum, k) => (bandWeight[k] > 0 ? sum.map((v) => v / bandWeight[k]) : null));
+  const bandOf = new Uint8Array(count);
   for (let i = 0; i < count; i++) {
-    const r = Math.pow(leveled[i * 3], gamma[0]);
-    const g = Math.pow(leveled[i * 3 + 1], gamma[1]);
-    const b = Math.pow(leveled[i * 3 + 2], gamma[2]);
-    const lum = luminance(r, g, b);
-    leveledLum[i] = lum;
-    const w = neutralWeight(r, g, b);
-    if (lum >= SHADOW_BAND[0] && lum <= SHADOW_BAND[1]) {
-      shadowOffset[0] += w * (r - lum);
-      shadowOffset[1] += w * (g - lum);
-      shadowOffset[2] += w * (b - lum);
-      shadowWeightMean[0] += w * shadowWeight(r);
-      shadowWeightMean[1] += w * shadowWeight(g);
-      shadowWeightMean[2] += w * shadowWeight(b);
-      shadowTotal += w;
-    } else if (lum >= HIGHLIGHT_BAND[0] && lum <= HIGHLIGHT_BAND[1]) {
-      highlightOffset[0] += w * (r - lum);
-      highlightOffset[1] += w * (g - lum);
-      highlightOffset[2] += w * (b - lum);
-      highlightWeightMean[0] += w * highlightWeight(r);
-      highlightWeightMean[1] += w * highlightWeight(g);
-      highlightWeightMean[2] += w * highlightWeight(b);
-      highlightTotal += w;
+    const lum = luminance(samples[i * 3], samples[i * 3 + 1], samples[i * 3 + 2]);
+    const t = clamp((lum - lumLow) / span, 0, 1);
+    let k = 0;
+    while (k < bandCount - 1 && t >= BAND_EDGES[k + 1]) k++;
+    bandOf[i] = k;
+  }
+  for (let iteration = 0; iteration < 3; iteration++) {
+    const shiftSum = Array.from({ length: bandCount }, () => [0, 0, 0]);
+    const shiftLum = new Float64Array(bandCount);
+    const shiftWeight = new Float64Array(bandCount);
+    for (let i = 0; i < count; i++) {
+      const k = bandOf[i];
+      const mean = bandMean[k];
+      if (!mean) continue;
+      const r = samples[i * 3];
+      const g = samples[i * 3 + 1];
+      const b = samples[i * 3 + 2];
+      const distance = Math.max(Math.abs(r - mean[0]), Math.abs(g - mean[1]), Math.abs(b - mean[2])) / CLUSTER_RADIUS;
+      const w = neutralWeight(r, g, b) / (1 + distance * distance);
+      shiftSum[k][0] += w * r;
+      shiftSum[k][1] += w * g;
+      shiftSum[k][2] += w * b;
+      shiftLum[k] += w * luminance(r, g, b);
+      shiftWeight[k] += w;
+    }
+    for (let k = 0; k < bandCount; k++) {
+      if (!bandMean[k] || shiftWeight[k] < 8) continue;
+      bandMean[k] = shiftSum[k].map((v) => v / shiftWeight[k]);
+      bandLumSum[k] = shiftLum[k];
+      bandWeight[k] = shiftWeight[k];
     }
   }
-  const shadow = [0, 0, 0];
-  const highlight = [0, 0, 0];
-  // A band needs a real population before its offset is trusted.
-  const minBandWeight = Math.max(30, count * 0.01);
-  for (let c = 0; c < 3; c++) {
-    if (shadowTotal >= minBandWeight) {
-      const meanWeight = Math.max(0.25, shadowWeightMean[c] / shadowTotal);
-      shadow[c] = clamp((shadowOffset[c] / shadowTotal) / meanWeight, -CROSSOVER_LIMIT, CROSSOVER_LIMIT);
+  const bands = [];
+  for (let k = 0; k < bandCount; k++) {
+    const share = bandTotal > 0 ? bandWeight[k] / bandTotal : 0;
+    if (!bandMean[k] || share < MIN_BAND_SHARE || bandWeight[k] < 8) {
+      bands.push(null);
+      continue;
     }
-    if (highlightTotal >= minBandWeight) {
-      const meanWeight = Math.max(0.25, highlightWeightMean[c] / highlightTotal);
-      highlight[c] = clamp((highlightOffset[c] / highlightTotal) / meanWeight, -CROSSOVER_LIMIT, CROSSOVER_LIMIT);
-    }
+    bands.push({
+      lum: round4(bandLumSum[k] / bandWeight[k]),
+      mean: bandMean[k].map(round4),
+      share: round4(share)
+    });
   }
-
-  // 4. Exposure: where the leveled, neutral midtones sit.
-  const sortedLum = leveledLum.slice().sort();
-  const leveledMedian = sortedLum[Math.floor((count - 1) * 0.5)];
+  // The overall cast: how far the near-neutral population leans, weighted
+  // by band population.
+  let lean = [0, 0, 0];
+  let leanWeight = 0;
+  for (const band of bands) {
+    if (!band) continue;
+    for (let c = 0; c < 3; c++) lean[c] += band.share * (band.mean[c] - band.lum);
+    leanWeight += band.share;
+  }
+  lean = lean.map((v) => (leanWeight > 0 ? v / leanWeight : 0));
 
   return {
     version: EXPIRED_RESCUE_VERSION,
     bits: plane.bits,
     samples: count,
-    low: low.map(round4),
-    high: high.map(round4),
-    gamma: gamma.map(round4),
-    shadow: shadow.map(round4),
-    highlight: highlight.map(round4),
-    medians: medians.map(round4),
+    lumLow: round4(lumLow),
+    lumHigh: round4(lumHigh),
     lumMedian: round4(lumMedian),
     leveledMedian: round4(leveledMedian),
+    bands,
+    lean: lean.map(round4),
     neutralShare: round4(count ? neutralPopulation / count : 0)
   };
 }
 
-function round4(value) {
-  return Math.round(value * 10000) / 10000;
+// The colour correction as a table over luminance (0..255 units): each
+// band's lean (its near-neutral mean minus its luminance) is an anchor, the
+// anchors are joined by a shape-preserving cubic over luminance, and the
+// offset is the negative lean, split into the overall cast (scaled by
+// `neutralize`) and what varies with density (scaled by `crossover`), held
+// flat beyond the outermost bands. Null when nothing leans.
+function offsetsFromBands(bands, lean, neutralize, crossover) {
+  const points = bands.filter(Boolean);
+  if (!points.length) return null;
+  const anchors = points.map((band) => ({ lum: band.lum, lean: band.mean.map((m) => m - band.lum) }));
+  const xs = anchors.map((a) => a.lum);
+  const lo = xs[0];
+  const hi = xs[xs.length - 1];
+  const table = new Float32Array(OFFSET_BINS * 3);
+  let moved = false;
+  for (let c = 0; c < 3; c++) {
+    const curve = shapeCubic(xs, anchors.map((a) => a.lean[c]));
+    for (let i = 0; i < OFFSET_BINS; i++) {
+      const bandLean = curve(clamp(i / (OFFSET_BINS - 1), lo, hi));
+      const delta = clamp(-(lean[c] * neutralize + (bandLean - lean[c]) * crossover), -BAND_MOVE_LIMIT, BAND_MOVE_LIMIT);
+      if (Math.abs(delta) > 0.002) moved = true;
+      table[i * 3 + c] = delta * 255;
+    }
+  }
+  return moved ? table : null;
 }
 
-function sanitizePlacement(value) {
-  if (!value || typeof value !== 'object') return IDENTITY_PLACEMENT;
-  const left = finite(value.left, 0);
-  const top = finite(value.top, 0);
-  const width = finite(value.width, 1);
-  const height = finite(value.height, 1);
-  if (width <= 0 || height <= 0) return IDENTITY_PLACEMENT;
-  return { left, top, width, height };
-}
-
-// ---------------------------------------------------------------------------
 // Spatial part: a fog surface and a local-mean grid measured by OpenCV.
 
 function evaluateQuadratic(c, u, v) {
@@ -604,37 +662,46 @@ export function applyExpiredSpatial(stage, u, v, px) {
   }
 }
 
+
+function sanitizeBands(value) {
+  if (!Array.isArray(value) || value.length !== BAND_EDGES.length - 1) return null;
+  return value.map((band) => {
+    if (!band || typeof band !== 'object') return null;
+    const mean = Array.isArray(band.mean) && band.mean.length === 3 ? band.mean.map((v) => clamp(finite(v, 0.5), 0, 1)) : null;
+    if (!mean) return null;
+    return { lum: clamp(finite(band.lum, 0.5), 0, 1), mean, share: clamp(finite(band.share, 0), 0, 1) };
+  });
+}
+
 /** True when `value` is an analysis this module produced (or a faithful copy). */
 export function isExpiredAnalysis(value) {
   if (!value || typeof value !== 'object') return false;
   if (value.version !== EXPIRED_RESCUE_VERSION) return false;
-  for (const key of ['low', 'high', 'gamma', 'shadow', 'highlight']) {
-    const arr = value[key];
-    if (!Array.isArray(arr) || arr.length !== 3 || !arr.every((v) => Number.isFinite(Number(v)))) return false;
-  }
-  return Number.isFinite(Number(value.leveledMedian));
+  if (!sanitizeBands(value.bands)) return false;
+  return ['lumLow', 'lumHigh', 'leveledMedian'].every((key) => Number.isFinite(Number(value[key])));
 }
 
 /** A plain, range-checked copy of an analysis, or null. */
 export function sanitizeExpiredAnalysis(value) {
   if (!isExpiredAnalysis(value)) return null;
-  const triple = (arr, min, max) => arr.map((v) => clamp(Number(v), min, max));
-  const low = triple(value.low, 0, 0.98);
-  const high = triple(value.high, 0.02, 1);
-  for (let c = 0; c < 3; c++) if (high[c] - low[c] < 0.02) { low[c] = 0; high[c] = 1; }
+  let lumLow = clamp(finite(value.lumLow, 0), 0, 0.98);
+  let lumHigh = clamp(finite(value.lumHigh, 1), 0.02, 1);
+  if (lumHigh - lumLow < 0.02) {
+    lumLow = 0;
+    lumHigh = 1;
+  }
+  const lean = Array.isArray(value.lean) && value.lean.length === 3 ? value.lean.map((v) => clamp(finite(v, 0), -1, 1)) : [0, 0, 0];
   const spatial = sanitizeExpiredSpatial(value.spatial);
   return {
     version: EXPIRED_RESCUE_VERSION,
     bits: value.bits === 16 ? 16 : 8,
     samples: Math.max(0, Number(value.samples) | 0),
-    low,
-    high,
-    gamma: triple(value.gamma, GAMMA_RANGE[0], GAMMA_RANGE[1]),
-    shadow: triple(value.shadow, -CROSSOVER_LIMIT, CROSSOVER_LIMIT),
-    highlight: triple(value.highlight, -CROSSOVER_LIMIT, CROSSOVER_LIMIT),
-    medians: Array.isArray(value.medians) && value.medians.length === 3 ? triple(value.medians, 0, 1) : [0.5, 0.5, 0.5],
+    lumLow,
+    lumHigh,
     lumMedian: clamp(finite(value.lumMedian, 0.5), 0, 1),
     leveledMedian: clamp(finite(value.leveledMedian, 0.5), 0, 1),
+    bands: sanitizeBands(value.bands),
+    lean,
     neutralShare: clamp(finite(value.neutralShare, 0), 0, 1),
     ...(spatial ? { spatial } : {})
   };
@@ -653,10 +720,9 @@ export function defaultExpiredRescueParams(analysis) {
   // brightness b applies gamma 2^(-b/100); solve for the gamma that puts the
   // median on middle grey, then keep it inside a lift that does not flatten.
   const gammaNeeded = Math.log(TARGET_MIDTONE) / Math.log(median);
-  const brightness = Math.round(clamp(-100 * Math.log2(gammaNeeded), -25, 60));
-  params.expiredBrightness = brightness;
-  const range = (safe.high[0] - safe.low[0] + safe.high[1] - safe.low[1] + safe.high[2] - safe.low[2]) / 3;
+  params.expiredBrightness = Math.round(clamp(-100 * Math.log2(gammaNeeded), -25, 60));
   // A roll that only used half the range was flat; a little S-curve helps.
+  const range = safe.lumHigh - safe.lumLow;
   params.expiredContrast = Math.round(clamp(20 + (1 - range) * 30, 10, 45));
   return params;
 }
@@ -684,45 +750,73 @@ function softContrast(x, strength) {
   return x + strength * (shaped - x);
 }
 
+function buildColourOffsets(analysis, neutralize, crossover) {
+  return offsetsFromBands(analysis.bands, analysis.lean, neutralize, crossover);
+}
+
 /**
- * The rescue as three 256-entry curves (input 0..255 -> output 0..255 as
- * floats, monotonic), or null when the stage is off / has no analysis.
+ * The rescue's stages for a frame, or null when the stage is off / has no
+ * analysis: `offsets`, the luminance-indexed colour table (null when nothing
+ * leans), then `tone`, the shared 256-entry float curve (levels, brightness,
+ * contrast) in the 0..255 domain. `composed` carries the tone curve for
+ * each channel when there are no offsets, for the separable fast path.
  */
-export function buildExpiredRescueCurves(settings) {
+export function buildExpiredRescueStages(settings) {
   if (!settings || typeof settings !== 'object' || !settings.expiredEnabled) return null;
   const analysis = sanitizeExpiredAnalysis(settings.expiredAnalysis);
   if (!analysis) return null;
   const params = sanitizeExpiredRescueParams(settings);
   const levels = params.expiredLevels / 100;
-  const neutralize = params.expiredNeutralize / 100;
-  const crossover = params.expiredCrossover / 100;
   const brightnessGamma = Math.pow(2, -params.expiredBrightness / 100);
   const contrast = params.expiredContrast / 100;
-  const curves = { r: new Float32Array(256), g: new Float32Array(256), b: new Float32Array(256) };
-  const channels = [curves.r, curves.g, curves.b];
-  for (let c = 0; c < 3; c++) {
-    const lo = analysis.low[c] * levels;
-    const hi = 1 - (1 - analysis.high[c]) * levels;
-    const span = Math.max(0.02, hi - lo);
-    const gamma = 1 + (analysis.gamma[c] - 1) * neutralize;
-    const shadowAmp = analysis.shadow[c] * crossover;
-    const highlightAmp = analysis.highlight[c] * crossover;
-    const curve = channels[c];
-    let previous = 0;
-    for (let v = 0; v < 256; v++) {
-      let x = clamp((v / 255 - lo) / span, 0, 1);
-      x = Math.pow(x, gamma);
-      x = clamp(x - shadowAmp * shadowWeight(x) - highlightAmp * highlightWeight(x), 0, 1);
-      x = Math.pow(x, brightnessGamma);
-      if (contrast > 0) x = softContrast(x, contrast);
-      let out = clamp(x * 255, 0, 255);
-      // Split-tone offsets could dent the slope; keep the curve monotonic.
-      if (out < previous) out = previous;
-      previous = out;
-      curve[v] = out;
-    }
+  const lo = analysis.lumLow * levels;
+  const hi = 1 - (1 - analysis.lumHigh) * levels;
+  const span = Math.max(0.02, hi - lo);
+  const tone = new Float32Array(256);
+  for (let v = 0; v < 256; v++) {
+    let x = clamp((v / 255 - lo) / span, 0, 1);
+    x = Math.pow(x, brightnessGamma);
+    if (contrast > 0) x = softContrast(x, contrast);
+    tone[v] = clamp(x * 255, 0, 255);
   }
-  return curves;
+  const offsets = buildColourOffsets(analysis, params.expiredNeutralize / 100, params.expiredCrossover / 100);
+  return { offsets, tone, composed: offsets ? null : { r: tone, g: tone, b: tone } };
+}
+
+/**
+ * One pixel through the stages: the colour offsets for its luminance, then
+ * the shared tone curve. `px` holds R, G, B in 0..255 (floats), updated in
+ * place.
+ */
+export function applyExpiredTone(stages, px) {
+  let r = px[0];
+  let g = px[1];
+  let b = px[2];
+  const table = stages.offsets;
+  if (table) {
+    const pos = clamp((0.2126 * r + 0.7152 * g + 0.0722 * b) / 255, 0, 1) * (OFFSET_BINS - 1);
+    const i0 = pos | 0;
+    const i1 = i0 + 1 < OFFSET_BINS ? i0 + 1 : i0;
+    const f = pos - i0;
+    r = clamp(r + table[i0 * 3] * (1 - f) + table[i1 * 3] * f, 0, 255);
+    g = clamp(g + table[i0 * 3 + 1] * (1 - f) + table[i1 * 3 + 1] * f, 0, 255);
+    b = clamp(b + table[i0 * 3 + 2] * (1 - f) + table[i1 * 3 + 2] * f, 0, 255);
+  }
+  px[0] = lerpCurve(stages.tone, r);
+  px[1] = lerpCurve(stages.tone, g);
+  px[2] = lerpCurve(stages.tone, b);
+}
+
+/**
+ * The separable part of the rescue as three 256-entry curves: the shared
+ * tone curve. The luminance-indexed colour offsets are not a per-channel
+ * curve; callers that need the whole rescue use buildExpiredRescueStages()
+ * and applyExpiredTone().
+ */
+export function buildExpiredRescueCurves(settings) {
+  const stages = buildExpiredRescueStages(settings);
+  if (!stages) return null;
+  return { r: stages.tone, g: stages.tone, b: stages.tone };
 }
 
 /** True when the curves would change nothing (all identity within half a level). */
@@ -760,13 +854,30 @@ function castName(offset) {
 export function describeExpiredAnalysis(analysis) {
   const safe = sanitizeExpiredAnalysis(analysis);
   if (!safe) return null;
-  const fog = (safe.low[0] + safe.low[1] + safe.low[2]) / 3;
-  const range = (safe.high[0] - safe.low[0] + safe.high[1] - safe.low[1] + safe.high[2] - safe.low[2]) / 3;
-  const lum = luminance(safe.medians[0], safe.medians[1], safe.medians[2]);
-  const castOffset = safe.medians.map((m) => m - lum);
-  const castStrength = Math.max(...castOffset) - Math.min(...castOffset);
-  const shadowStrength = Math.max(...safe.shadow) - Math.min(...safe.shadow);
-  const highlightStrength = Math.max(...safe.highlight) - Math.min(...safe.highlight);
+  const spread = (offset) => Math.max(...offset) - Math.min(...offset);
+  const fog = safe.lumLow;
+  const range = safe.lumHigh - safe.lumLow;
+  const castStrength = spread(safe.lean);
+  // Shadows = the bands below 0.3 of the range, highlights = 0.6 to 0.9: how
+  // far their near-neutral pixels lean beyond the overall cast.
+  const bandLean = (from, to) => {
+    const acc = [0, 0, 0];
+    let weight = 0;
+    for (let k = from; k <= to; k++) {
+      const band = safe.bands[k];
+      if (!band) continue;
+      for (let c = 0; c < 3; c++) acc[c] += band.share * (band.mean[c] - band.lum - safe.lean[c]);
+      weight += band.share;
+    }
+    return weight > 0 ? acc.map((v) => v / weight) : [0, 0, 0];
+  };
+  const shadow = bandLean(1, 2);
+  const highlight = bandLean(5, 6);
+  let crossoverStrength = 0;
+  for (let k = 1; k <= 6; k++) {
+    const band = safe.bands[k];
+    if (band) crossoverStrength = Math.max(crossoverStrength, spread(band.mean.map((m, c) => m - band.lum - safe.lean[c])));
+  }
   // A midtone at 0.42 is "correct"; every halving of the linear value is a stop.
   const linear = Math.pow(clamp(safe.leveledMedian, 0.01, 1), 2.2);
   const exposureStops = Math.log2(linear / Math.pow(TARGET_MIDTONE, 2.2));
@@ -777,11 +888,11 @@ export function describeExpiredAnalysis(analysis) {
     unevenFogPercent: Math.round(unevenFog * 100),
     fogPercent: Math.round(fog * 100),
     rangePercent: Math.round(range * 100),
-    cast: castStrength >= 0.03 ? castName(castOffset) : null,
+    cast: castStrength >= 0.03 ? castName(safe.lean) : null,
     castPercent: Math.round(castStrength * 100),
-    shadowCast: shadowStrength >= 0.02 ? castName(safe.shadow) : null,
-    highlightCast: highlightStrength >= 0.02 ? castName(safe.highlight) : null,
-    crossoverPercent: Math.round(Math.max(shadowStrength, highlightStrength) * 100),
+    shadowCast: spread(shadow) >= 0.02 ? castName(shadow) : null,
+    highlightCast: spread(highlight) >= 0.02 ? castName(highlight) : null,
+    crossoverPercent: Math.round(crossoverStrength * 100),
     exposureStops: Math.round(exposureStops * 10) / 10,
     levelsUsed,
     lowBitDepth: safe.bits === 8 && levelsUsed < 110,

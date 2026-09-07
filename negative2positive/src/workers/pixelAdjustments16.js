@@ -7,7 +7,7 @@
 // No DOM: shared by the export worker and the main-thread fallback.
 
 import { hue2rgb } from './pixelAdjustments.js';
-import { applyExpiredSpatial } from '../pipeline/expiredRescue.js';
+import { applyExpiredSpatial, applyExpiredTone } from '../pipeline/expiredRescue.js';
 
 const SCALE_16_TO_8 = 255 / 65535;
 const SCALE_8_TO_16 = 65535 / 255;
@@ -24,7 +24,7 @@ export function curveAt(curve, x) {
 // True when the chain has no stage that mixes channels or depends on the
 // pixel's neighbours in colour space, so a per-channel LUT reproduces it.
 function isSeparable(params) {
-  return !params.doHighlights && !params.doShadows && !params.doHsl && !params.doLookMatrix && !params.doRescueSpatial;
+  return !params.doHighlights && !params.doShadows && !params.doHsl && !params.doLookMatrix && !params.doRescueSpatial && !params.doRescuePixel;
 }
 
 // The per-channel chain for one channel value (0..255 float) of a separable
@@ -98,12 +98,12 @@ export function applyAdjustmentsToPixels16(input16, output16, pixelCount, params
     rMult, gMult, bMult, contrastFactor, doContrast, highlightsFactor, shadowsFactor, doHighlights, doShadows,
     tempRMult, tempBMult, tintGMult, doTempTint, satFactor, vibFactor, doHsl, cmyRShift, cmyGShift, cmyBShift, doCMY,
     curveR, curveG, curveB, doLook, doLookMatrix, lookMatrix, lookOffset, lookR, lookG, lookB,
-    doRescue, rescueR, rescueG, rescueB, doRescueSpatial, rescueSpatial, frameWidth, frameHeight
+    doRescue, rescueR, rescueG, rescueB, doRescueSpatial, rescueSpatial, doRescuePixel, rescueStages, frameWidth, frameHeight
   } = params;
   const lumaScale = 2 / 255;
   const spatialWidth = doRescueSpatial && frameWidth > 0 ? frameWidth : 0;
   const spatialHeight = doRescueSpatial && frameHeight > 0 ? frameHeight : 1;
-  const spatialPx = doRescueSpatial ? new Float32Array(3) : null;
+  const rescuePx = doRescueSpatial || doRescuePixel ? new Float32Array(3) : null;
   let px = 0;
   let py = 0;
 
@@ -111,13 +111,16 @@ export function applyAdjustmentsToPixels16(input16, output16, pixelCount, params
     let r = input16[i] * SCALE_16_TO_8;
     let g = input16[i + 1] * SCALE_16_TO_8;
     let b = input16[i + 2] * SCALE_16_TO_8;
-    if (spatialWidth) {
-      spatialPx[0] = r; spatialPx[1] = g; spatialPx[2] = b;
-      applyExpiredSpatial(rescueSpatial, (px + 0.5) / spatialWidth, (py + 0.5) / spatialHeight, spatialPx);
-      if (++px === spatialWidth) { px = 0; py++; }
-      r = spatialPx[0]; g = spatialPx[1]; b = spatialPx[2];
+    if (rescuePx) {
+      rescuePx[0] = r; rescuePx[1] = g; rescuePx[2] = b;
+      if (spatialWidth) {
+        applyExpiredSpatial(rescueSpatial, (px + 0.5) / spatialWidth, (py + 0.5) / spatialHeight, rescuePx);
+        if (++px === spatialWidth) { px = 0; py++; }
+      }
+      if (doRescuePixel) applyExpiredTone(rescueStages, rescuePx);
+      r = rescuePx[0]; g = rescuePx[1]; b = rescuePx[2];
     }
-    if (doRescue) {
+    if (doRescue && !doRescuePixel) {
       r = curveAt(rescueR, r);
       g = curveAt(rescueG, g);
       b = curveAt(rescueB, b);

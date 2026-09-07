@@ -2,7 +2,7 @@
  * Pure pixel adjustment functions extracted from main.js for use in Web Workers.
  * No DOM dependencies — operates only on typed arrays and plain objects.
  */
-import { buildExpiredRescueCurves, buildExpiredSpatialStage, applyExpiredSpatial } from '../pipeline/expiredRescue.js';
+import { buildExpiredRescueStages, buildExpiredSpatialStage, applyExpiredSpatial, applyExpiredTone } from '../pipeline/expiredRescue.js';
 
 // Linear interpolation of a 256-entry float curve at a fractional position.
 function lerpCurve(curve, x) {
@@ -93,15 +93,15 @@ export function applyAdjustmentsToPixels(inputData, outputData, pixelCount, para
     cmyRShift, cmyGShift, cmyBShift, doCMY,
     curveR, curveG, curveB,
     doLook, doLookMatrix, lookMatrix, lookOffset, lookR, lookG, lookB,
-    rescueR, rescueG, rescueB, doRescueSpatial, rescueSpatial, frameWidth, frameHeight
+    rescueR, rescueG, rescueB, doRescueSpatial, rescueSpatial, doRescuePixel, rescueStages, frameWidth, frameHeight
   } = params;
 
   const lumaScale = 2 / 255;
   const totalBytes = pixelCount * 4;
 
   // Fast path: LUT-only when no highlights/shadows/HSL, no cross-channel look
-  // matrix and no position-dependent rescue stage
-  if (!doHighlights && !doShadows && !doHsl && !doLookMatrix && !doRescueSpatial) {
+  // matrix and no per-pixel rescue stage (position or luminance dependent)
+  if (!doHighlights && !doShadows && !doHsl && !doLookMatrix && !doRescueSpatial && !doRescuePixel) {
     const lutR = lutScratch && lutScratch.lutR instanceof Uint8Array && lutScratch.lutR.length >= 256
       ? lutScratch.lutR
       : new Uint8Array(256);
@@ -147,25 +147,35 @@ export function applyAdjustmentsToPixels(inputData, outputData, pixelCount, para
 
   // Full path with highlights/shadows/HSL
   let progressNext = chunkSize * 4;
-  // The spatial rescue stage needs each pixel's position in the frame.
+  // The spatial rescue stage needs each pixel's position in the frame; the
+  // luminance-indexed crossover needs the whole pixel. Both run here.
   const spatialWidth = doRescueSpatial && frameWidth > 0 ? frameWidth : 0;
   const spatialHeight = doRescueSpatial && frameHeight > 0 ? frameHeight : 1;
-  const spatialPx = doRescueSpatial ? new Float32Array(3) : null;
+  const rescuePx = doRescueSpatial || doRescuePixel ? new Float32Array(3) : null;
   let px = 0;
   let py = 0;
   for (let i = 0; i < totalBytes; i += 4) {
     let r;
     let g;
     let b;
-    if (spatialWidth) {
-      spatialPx[0] = inputData[i];
-      spatialPx[1] = inputData[i + 1];
-      spatialPx[2] = inputData[i + 2];
-      applyExpiredSpatial(rescueSpatial, (px + 0.5) / spatialWidth, (py + 0.5) / spatialHeight, spatialPx);
-      if (++px === spatialWidth) { px = 0; py++; }
-      r = (rescueR ? lerpCurve(rescueR, spatialPx[0]) : spatialPx[0]) * rMult;
-      g = (rescueG ? lerpCurve(rescueG, spatialPx[1]) : spatialPx[1]) * gMult;
-      b = (rescueB ? lerpCurve(rescueB, spatialPx[2]) : spatialPx[2]) * bMult;
+    if (rescuePx) {
+      rescuePx[0] = inputData[i];
+      rescuePx[1] = inputData[i + 1];
+      rescuePx[2] = inputData[i + 2];
+      if (spatialWidth) {
+        applyExpiredSpatial(rescueSpatial, (px + 0.5) / spatialWidth, (py + 0.5) / spatialHeight, rescuePx);
+        if (++px === spatialWidth) { px = 0; py++; }
+      }
+      if (doRescuePixel) {
+        applyExpiredTone(rescueStages, rescuePx);
+      } else if (rescueR) {
+        rescuePx[0] = lerpCurve(rescueR, rescuePx[0]);
+        rescuePx[1] = lerpCurve(rescueG, rescuePx[1]);
+        rescuePx[2] = lerpCurve(rescueB, rescuePx[2]);
+      }
+      r = rescuePx[0] * rMult;
+      g = rescuePx[1] * gMult;
+      b = rescuePx[2] * bMult;
     } else {
       r = (rescueR ? rescueR[inputData[i]] : inputData[i]) * rMult;
       g = (rescueG ? rescueG[inputData[i + 1]] : inputData[i + 1]) * gMult;
@@ -396,13 +406,17 @@ export function computeAdjustmentParams(settings, frame = null) {
   const doLookCurves = Boolean(lookCurves) && !(isIdentityCurve(lookCurves.r) && isIdentityCurve(lookCurves.g) && isIdentityCurve(lookCurves.b));
   const doLook = doLookMatrix || doLookCurves;
 
-  // Expired-film rescue (see pipeline/expiredRescue.js): per-channel curves
-  // rebuilt from the stored analysis and strengths; null when off.
-  const rescue = buildExpiredRescueCurves(settings);
-  const doRescue = Boolean(rescue);
+  // Expired-film rescue (see pipeline/expiredRescue.js): tone stages rebuilt
+  // from the stored analysis and strengths; null when off. With the
+  // luminance-indexed crossover active the stages run per pixel, otherwise
+  // they compose into one curve per channel for the LUT path.
+  const rescueStages = buildExpiredRescueStages(settings);
+  const doRescue = Boolean(rescueStages);
+  const rescue = rescueStages ? rescueStages.composed : null;
+  const doRescuePixel = Boolean(rescueStages && !rescueStages.composed);
   const frameWidth = frame && Number.isFinite(frame.width) ? frame.width | 0 : 0;
   const frameHeight = frame && Number.isFinite(frame.height) ? frame.height | 0 : 0;
-  const rescueSpatial = rescue && frameWidth > 0 && frameHeight > 0 ? buildExpiredSpatialStage(settings) : null;
+  const rescueSpatial = rescueStages && frameWidth > 0 && frameHeight > 0 ? buildExpiredSpatialStage(settings) : null;
   const doRescueSpatial = Boolean(rescueSpatial);
 
   return {
@@ -427,6 +441,8 @@ export function computeAdjustmentParams(settings, frame = null) {
     rescueB: rescue ? rescue.b : null,
     doRescueSpatial,
     rescueSpatial,
+    doRescuePixel,
+    rescueStages,
     frameWidth,
     frameHeight
   };

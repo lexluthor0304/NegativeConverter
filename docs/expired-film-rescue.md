@@ -13,13 +13,18 @@ the negative pipeline and works the same for RAW, TIFF, PNG and JPEG.
 
 ## What an aged roll does to a positive
 
+Colour and tone are corrected separately, and both by density (luminance).
+Per-channel levels — the classic "auto colour" — assume the darkest pixels
+are neutral black; on a roll with heavy crossover the darkest pixels are
+green, and per-channel levels then turn a grey excavator cab magenta. So:
+
 | Symptom | Cause | Stage that answers it |
 | --- | --- | --- |
-| Fog: every channel's black point floats up, contrast collapses | base density grows with age | per-channel black / white points (0.5 % / 99.5 % percentiles) |
-| Overall cast (blue, magenta, green…) | the dye layers lose speed at different rates | per-channel gamma that puts the near-neutral midtones on their luminance |
-| Crossover: shadows lean one way, highlights the other | the layers also fade with different gammas | a bounded split-tone offset per channel, zero at both ends of the range |
-| Thin, dark midtones | an old roll is slower than its box speed | a master brightness gamma, defaulting from where the leveled midtones sit |
-| Flat tonality | range loss | a soft tanh S-curve, defaulting from how much range the levels had to recover |
+| Overall cast (blue, magenta, green…) | the dye layers lose speed at different rates | the colour table: per luminance band, the near-neutral pixels' mean colour is measured; the offset that brings it onto its luminance is added to every pixel of that density (the overall cast is the population-weighted part, "Neutralise") |
+| Crossover: shadows lean one way, highlights the other | the layers also fade with different gammas | the same table: what varies with density beyond the overall cast ("Crossover"). A cyan sky and a magenta wall may share a red value and need opposite corrections, so this is indexed by the pixel's luminance, not a per-channel curve |
+| Fog: the black point floats up, contrast collapses | base density grows with age | one tone curve shared by the three channels: black / white points from the luminance histogram (0.5 % / 99.5 %), so neutrals stay neutral |
+| Thin, dark midtones | an old roll is slower than its box speed | the shared curve's brightness gamma, defaulting from where the leveled midtones sit |
+| Flat tonality | range loss | the shared curve's soft tanh S-curve, defaulting from how much range the levels had to recover |
 
 | Uneven fog: one edge or corner fogged more (light piping at the cassette lip, the outer turns of the roll, an uneven bath) | fog is not the same everywhere on the frame | **OpenCV**: per-channel local dark floor (wide erosion = minimum filter, light blur) on a small copy, a robust quadratic surface fitted to it, subtracted per pixel |
 | Flat local detail | haze inside the emulsion | **OpenCV**: local luminance mean (Gaussian blur) as a grid; deviations from it are amplified (a wide-radius clarity), opt-in because it also lifts grain |
@@ -61,16 +66,25 @@ DOM and no OpenCV:
 
 - `analyzeExpiredFilm(image, { region, borderBuffer, maxSamples })` samples
   the positive (8-bit, a 16-bit plane, or an ImageData carrying `__image16`)
-  and returns a small plain object: black / white points, per-channel gamma,
-  shadow and highlight offsets, medians. Near-neutral pixels weigh the colour
-  decisions, so an orange cat on green grass keeps its colours.
-- `buildExpiredRescueCurves(settings)` turns the analysis plus the five
-  strengths into three monotonic 256-entry curves (0..255 in, float out).
+  and returns a small plain object: luminance black / white points, eight
+  luminance bands with their near-neutral mean colour, the overall lean.
+  Near-neutral pixels weigh the colour decisions, and within a band three
+  mean-shift steps settle on the densest near-neutral cluster (a film's
+  neutrals gather there), so an orange cat on green grass keeps its
+  colours. What it cannot decide: two populations at the same density that
+  lean opposite ways (a magenta locomotive against green foliage, a grey
+  cab against green rubble) — the larger one is taken as neutral, and the
+  existing gray-point click, whose gains apply after the rescue, says
+  otherwise when it should.
+- `buildExpiredRescueStages(settings)` turns the analysis plus the strengths
+  into the colour table (64 luminance bins × 3 offsets) and the shared tone
+  curve; `applyExpiredTone(stages, px)` runs one pixel through them. When
+  nothing leans the tone curve alone composes into the LUT fast path.
 - `describeExpiredAnalysis(analysis)` gives the diagnosis panel its numbers
   and hue names.
 
-The spatial stage and then the curves are the first stages of the Step-3
-adjustment chain in `workers/pixelAdjustments.js` and
+The spatial stage, the colour table and the tone curve are the first stages
+of the Step-3 adjustment chain in `workers/pixelAdjustments.js` and
 `workers/pixelAdjustments16.js`, ahead of the WB gains, so the preview (CPU
 path, like the lab-match look), the export worker, the 16-bit export and
 batch exports all render the same result. The chain receives the frame size
@@ -107,11 +121,13 @@ of the per-band balance would fight it); a gray point sampled by hand still
 applies after the rescue.
 
 A fogged, borderless positive scan (a lab's JPEG of an expired roll) keeps
-its full frame on import in the rescue flow: it has nothing to crop, and the
-fog makes the image-window detector see the subject as the window (two of
-the three real test scans were cropped to the cat). The detected area still
-bounds the colour analysis, and the Crop tab works as usual. Negatives are
-auto-framed exactly as outside the flow.
+its full frame on import in the rescue flow and skips the frame detection:
+it has nothing to crop, the fog makes the image-window detector see the
+subject as the window (two of the three real test scans were cropped to the
+cat), and on a 6 MP scan the detection worker times out and its main-thread
+fallback freezes the page for about a minute. The colour analysis uses the
+frame inside the border buffer, and the Crop tab works as usual. Negatives
+are auto-framed exactly as outside the flow.
 
 ## Validation
 
@@ -139,6 +155,7 @@ OpenCV's unevenness reading, that the left-right tilt is flattened and the
 uneven-fog slider drives it, the hold-to-compare, the single and batch
 exports.
 
-Defaults were tuned on three real expired-roll scans (a blue-fogged backlit
-frame, and two green-shadow / pink-highlight frames): neutralise 80 %,
-crossover 70 %, levels 100 %, brightness and contrast from the measurement.
+Defaults were tuned on five real expired-roll scans (a blue-fogged backlit
+frame, two green-shadow / pink-highlight frames, and two with a heavy
+green-shadow / cyan-sky crossover): every colour strength at 100 %, levels
+100 %, brightness and contrast from the measurement.

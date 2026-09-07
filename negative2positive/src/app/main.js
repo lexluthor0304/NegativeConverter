@@ -2081,8 +2081,8 @@
       expiredSession: false,
       expiredEnabled: false,
       expiredLevels: 100,
-      expiredNeutralize: 80,
-      expiredCrossover: 70,
+      expiredNeutralize: 100,
+      expiredCrossover: 100,
       expiredBrightness: 0,
       expiredContrast: 25,
       expiredUnevenFog: 100,
@@ -10399,7 +10399,7 @@
       // every other frame in the roll.
       const studioColors = state.fileQueue.find(item => item.file === file)?.studioColors;
       let initialSettings = savedSettings || mergeStudioColors(createDefaultSettings(imageData), studioColors || {});
-      if (!initialSettings.autoFrameMeta && !initialSettings.cropRegion) initialSettings = await analyzeStudioImportFrame(imageData, initialSettings, { allowCrop: !savedSettings && !expiredImportKeepsFullFrame(initialSettings) });
+      if (!initialSettings.autoFrameMeta && !initialSettings.cropRegion && !expiredImportKeepsFullFrame(initialSettings)) initialSettings = await analyzeStudioImportFrame(imageData, initialSettings, { allowCrop: !savedSettings });
       if (!initialSettings.filmEdge?.checked) {
         const edge = await analyzeImportFilmEdge(imageData, initialSettings, { applyDefaults: !savedSettings && state.importFilmTypeAuto });
         if (edge) initialSettings = edge.settings;
@@ -11929,8 +11929,8 @@
         let settings = extractCurrentSettings();
         let changed = false;
         let filmEdgeToast = null;
-        if (!item?.settings?.autoFrameMeta && !state.cropRegion && state.autoFrame.enabled) {
-          settings = await analyzeStudioImportFrame(source, settings, { allowCrop: freshFile && !expiredImportKeepsFullFrame(settings) });
+        if (!item?.settings?.autoFrameMeta && !state.cropRegion && state.autoFrame.enabled && !expiredImportKeepsFullFrame(settings)) {
+          settings = await analyzeStudioImportFrame(source, settings, { allowCrop: freshFile });
           if (!isCurrentLoad(generation)) return;
           changed = true;
         }
@@ -12688,7 +12688,9 @@
     // A fogged, borderless positive scan (a lab's JPEG of an expired roll) has
     // nothing to crop, and the fog makes the image-window detector see the
     // subject as the window: in the rescue flow such a photo keeps its full
-    // frame. The detected area still bounds the colour analysis.
+    // frame and skips the detection altogether (on a large scan the worker
+    // times out and the main-thread fallback freezes the page for a minute).
+    // The colour analysis then uses the frame inside the border buffer.
     function expiredImportKeepsFullFrame(settings) {
       return Boolean(settings?.expiredEnabled) && sanitizePresetType(settings?.filmType || 'color') === 'positive';
     }
