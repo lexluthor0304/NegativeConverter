@@ -307,6 +307,27 @@ async function runManualBrushSmoke({ send, evaluate, waitFor, wait, fail, instal
   const afterTouchTransform = await evaluate(`document.getElementById('canvasTransformWrapper').style.transform`);
   if (afterTouchTransform !== touchTransform) fail('Touch brush panned the photo: ' + JSON.stringify({ before: touchTransform, after: afterTouchTransform }));
   await send('Emulation.setTouchEmulationEnabled', { enabled: false });
+  await evaluate(`document.getElementById('aiBrushClear').click()`);
+  await wait(500);
+  const cleared = await exportPixels();
+  if (cleared.data.some((v, i) => v !== before.data[i])) fail('Clear repairs did not restore the original');
+  await evaluate(`(() => { const e = document.getElementById('coreExposure'); e.value = '24'; e.dispatchEvent(new Event('input', { bubbles:true })); e.dispatchEvent(new Event('change', { bubbles:true })); })()`);
+  await wait(1200);
+  const adjusted = await exportPixels();
+  if (!adjusted.data.some((v, i) => v !== before.data[i])) fail('Exposure change after clearing was not applied');
+  await send('Input.dispatchMouseEvent', { type:'mousePressed', x:location.x, y:location.y, button:'left', clickCount:1 });
+  await send('Input.dispatchMouseEvent', { type:'mouseReleased', x:location.x, y:location.y, button:'left', clickCount:1 });
+  await wait(1500);
+  const repainted = await exportPixels();
+  let repairedAgain = 0, rolledBack = 0;
+  for (let y = 0; y < repainted.height; y++) for (let x = 0; x < repainted.width; x++) {
+    const i = (y * repainted.width + x) * 4;
+    if ([0,1,2].every(c => repainted.data[i+c] === adjusted.data[i+c])) continue;
+    repairedAgain++;
+    if (Math.abs(x-location.nx*repainted.width)>radius || Math.abs(y-location.ny*repainted.height)>radius) rolledBack++;
+  }
+  if (!repairedAgain || rolledBack) fail('Repainting after clear reverted later edits: '+JSON.stringify({repairedAgain,rolledBack}));
+  console.log('ok: clear repairs, adjust exposure and repaint preserves every pixel outside the new selection');
   if (!await evaluate(`document.getElementById('dustAiEnabled').checked`)) fail('Manual brush must preserve default AI dust removal');
   await evaluate(`document.getElementById('dustRemovalEnabled').click()`);
   await waitFor('AI dust remains usable with manual strokes', `/Detected \\d+ dust/.test(document.getElementById('dustStatus').textContent)`, 120_000);

@@ -292,6 +292,9 @@ async function runLoupeScenario({ send, evaluate, waitFor, wait, fail, installDi
   await waitFor('loupe workspace boot', `!!document.getElementById('studioLoupe') && !!document.getElementById('loupeOverlay')`);
   await installDialogAutoAccept();
   await wait(300);
+  // Chrome's fake camera is a finished positive test chart. Explicitly select
+  // negative polarity here to verify the live inversion path.
+  await evaluate(`document.getElementById('importFilmTypeAuto').checked && document.getElementById('importFilmTypeAuto').click()`);
   await evaluate(`(() => {
     window.__cameraToasts = [];
     new MutationObserver((records) => {

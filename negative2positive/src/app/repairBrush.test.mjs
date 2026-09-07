@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { repairMask, pointerToRepairPoint, sanitizeRepairStrokes } from './repairBrush.js';
+import { repairMask, pointerToRepairPoint, sanitizeRepairStrokes, lensSourcePoint } from './repairBrush.js';
 import { workingPointToBase, basePointToWorking } from './localExposure.js';
 import { deepCopySanitizedSettings } from './settingsSnapshot.js';
 
@@ -32,6 +32,19 @@ const copy = deepCopySanitizedSettings({ repairStrokes: strokes, lensCorrection:
 copy.repairStrokes[0].points[0].x = 0.9;
 assert.equal(strokes[0].points[0].x, 0.3, 'photo settings must not share mutable strokes');
 assert.deepEqual(sanitizeRepairStrokes(null), []);
+// A synthetic lens map shifts display pixels right by ten pixels. A mark at
+// display x=40 belongs to base x=30, and must stay there when correction is off.
+const lens = { maps: { gridWidth: 2, gridHeight: 2, step: 100,
+  geometry: Float32Array.from([-10,0, 90,0, -10,100, 90,100]) } };
+const originalPoint = lensSourcePoint({ x:40, y:32 }, lens);
+assert.deepEqual(originalPoint, { x:30, y:32 });
+const lensStroke = sanitizeRepairStrokes([{ size:.08, points:[workingPointToBase(originalPoint, geometry)] }]);
+assert.equal(repairMask(lensStroke, geometry, lens)[32*100+40],255);
+assert.equal(repairMask(lensStroke, geometry)[32*100+30],255);
+assert.equal(repairMask(lensStroke, geometry)[32*100+40],0);
+assert.equal(repairMask(lensStroke, cropped)[12*50+10],255,'crop follows uncorrected base coordinates');
+const rotatedPoint = basePointToWorking(lensStroke[0].points[0], rotated);
+assert.equal(repairMask(lensStroke, rotated)[Math.floor(rotatedPoint.y)*80+Math.floor(rotatedPoint.x)],255);
 const long = sanitizeRepairStrokes([{ size: 0.1, points: Array.from({ length: 800 }, (_, i) => ({ x: i / 799, y: 0.5 })) }]);
 assert.equal(long[0].points.at(-1).x, 1, 'long strokes retain their endpoint');
 console.log('Repair brush zoom, geometry, masks and per-photo settings passed');

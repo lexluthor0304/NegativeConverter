@@ -1,0 +1,27 @@
+import assert from 'node:assert/strict';
+import { createAiModelLoader } from './aiModelLoading.js';
+const calls = [], releases = [];
+const request = createAiModelLoader((source, options) => {
+  calls.push({ source, options });
+  return new Promise(resolve => releases.push(resolve));
+}, 'default', value => typeof value === 'object');
+const first = request('default');
+const custom = { name: 'my-model.onnx' };
+const choice = request(custom);
+assert.equal(request('default'), choice, 'preload must not replace a queued user selection');
+await Promise.resolve();
+assert.equal(calls.length, 1);
+releases.shift()(); await first; await Promise.resolve();
+assert.equal(calls[1].source, custom);
+const cpu = request(custom, { prefer: 'wasm' });
+assert.notEqual(cpu, choice, 'CPU fallback must load a new session');
+releases.shift()(); await choice; await Promise.resolve();
+assert.equal(calls[2].options.prefer, 'wasm');
+releases.shift()(); await cpu;
+let count = 0;
+const recover = createAiModelLoader(async () => { if (++count === 1) throw Error('bad file'); return 'ready'; }, 'default', () => false);
+const bad = recover('bad');
+const good = recover('good');
+await assert.rejects(bad, /bad file/);
+assert.equal(await good, 'ready', 'a rejected model must not poison the queue');
+console.log('AI model loading preserves explicit selection, fallback and recovery');

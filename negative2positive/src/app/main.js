@@ -1,4 +1,5 @@
     import { detectedImportSettings } from './filmTypeDetection.js';
+    import { createAiModelLoader } from './aiModelLoading.js';
     import opencvScriptUrl from '@techstark/opencv-js/dist/opencv.js?url';
     import { i18n } from './i18n.js';
     import { interpolateText, summarizePathForUi } from './textUtils.js';
@@ -20,7 +21,7 @@
     import { aggregateRollAnalysis, measureNegativeMean, sanitizeRollFrameForSettings, rollFrameExposureUnits } from './rollAnalysis.js';
     import { filtrationFromSliders, slidersFromFiltration, stopsFromExposureUnits, exposureUnitsFromStops, contrastForGradeValue, gradeValueForContrast, gradeLabelForValue, TEST_STRIP_AXES, formatAxisValue, testStripValues } from './enlarger.js';
     import { sanitizeLocalExposureForSettings, workingPointToBase, basePointToWorking, rotatedDimensions } from './localExposure.js';
-    import { sanitizeRepairStrokes, repairMask, pointerToRepairPoint } from './repairBrush.js';
+    import { sanitizeRepairStrokes, repairMask, pointerToRepairPoint, lensSourcePoint } from './repairBrush.js';
     import { paperProfiles, paperIdsForFilmKind, normalizePaperId, normalizeToningId } from '../silvercore/engine/PaperProfiles.js';
     import { buildFlatFieldMap, scoreBlankFrame } from './flatField.js';
     import { estimateAlignment, warpImageData } from './imageAlignment.js';
@@ -1438,6 +1439,9 @@
         }
 
         const corrected = applyLensMapsToImage(imageData, maps, lensCorrection.modes);
+        // Keep the display-to-source map for brush coordinates. Non-enumerable
+        // metadata avoids copying the grid into conversion worker messages.
+        Object.defineProperty(corrected, '__lensMapping', { value: { maps, includeTca: lensCorrection.modes.includeTca } });
         if (updateUi) {
           state.lensCorrection.lastError = '';
           setLensStatus('lensStatusApplied');
@@ -10399,7 +10403,7 @@
         });
       }
 
-      processed = await inpaintManualBrush(processed, settings, imageData);
+      processed = await inpaintManualBrush(processed, settings, imageData, workingData.__lensMapping);
 
       // Never-viewed batch files carry default settings — give them the same
       // automatic gray point a viewed file would get, baked into the settings
@@ -11966,12 +11970,12 @@
       // app rendered itself); a colour-negative DX number read that way is
       // contradictory, so it is shown but not applied automatically.
       const contradictory = record.polarity === 'light' && record.filmKind !== 'positive';
-      if (applyDefaults && !contradictory && record.filmKind && record.filmKind !== next.filmType) {
+      if (applyDefaults && !contradictory && record.filmKind) {
+        record.appliedFilmType = record.filmKind !== next.filmType;
         next.filmType = record.filmKind;
         next.filmTypeSource = 'auto';
         next.filmTypeConfidence = 'high';
         next.filmTypeReason = 'dx';
-        record.appliedFilmType = true;
       }
       next.filmEdge = sanitizeFilmEdgeForSettings(record);
       const dx = `${record.dx1}-${record.dx2}`;
@@ -12750,14 +12754,15 @@
     // ===========================================
     const aiRepair = { release: null, status: 'idle', provider: '', run: null, source: '', sourceRef: null, error: '', percent: 0, tiles: 0, ms: 0 };
 
-    async function inpaintManualBrush(source, settings = state, base = state.loadedBaseImageData || state.originalImageData) {
+    async function inpaintManualBrush(source, settings = state, base = state.loadedBaseImageData || state.originalImageData,
+      lensMapping = settings === state ? state.conversionSourceImageData?.__lensMapping : null) {
       const strokes = settings.repairStrokes || [];
       if (!strokes.length) return source;
       while (aiRepair.status === 'loading') await new Promise(resolve => setTimeout(resolve, 50));
       if (aiRepair.status !== 'ready') await loadAiRepairModel(DEFAULT_MODEL_URL, { refresh: false });
       if (aiRepair.status !== 'ready') throw new Error(aiRepair.error || 'AI repair model is not ready');
       const geometry = { ...localExposureGeometryFor(settings, base), width: source.width, height: source.height };
-      const mask = repairMask(strokes, geometry);
+      const mask = repairMask(strokes, geometry, lensMapping);
       const started = performance.now();
       let result;
       try {
@@ -12767,7 +12772,7 @@
       } catch (error) {
         if (aiRepair.provider === 'webgpu') {
           await loadAiRepairModel(aiRepair.sourceRef || DEFAULT_MODEL_URL, { prefer: 'wasm', refresh: false });
-          if (aiRepair.status === 'ready') return inpaintManualBrush(source, settings, base);
+          if (aiRepair.status === 'ready') return inpaintManualBrush(source, settings, base, lensMapping);
         }
         aiRepair.status = 'error';
         aiRepair.error = error?.message || String(error);
@@ -12820,7 +12825,7 @@
       pushUndo('dustBrushStroke');
       state.repairStrokes = sanitizeRepairStrokes([...state.repairStrokes, {
         size: drawing.size,
-        points: drawing.points.map(point => workingPointToBase(point, drawing.geometry))
+        points: drawing.points.map(point => workingPointToBase(lensSourcePoint(point, drawing.lensMapping), drawing.geometry))
       }]);
       markCurrentFileDirty();
       if (!state.dustRemoval.cleanSource) state.dustRemoval.cleanSource = state.processedImageData;
@@ -12844,6 +12849,7 @@
         aiBrushDrawing = {
           pointerId: event.pointerId, surface, rect, source: state.conversionSourceImageData, token: coreReprocessToken,
           geometry: { ...localExposureGeometryFor(state), width: source.width, height: source.height },
+          lensMapping: state.conversionSourceImageData?.__lensMapping,
           points: [point], size: Number(document.getElementById('aiBrushSize').value) / 100
         };
         surface.setPointerCapture?.(event.pointerId);
@@ -12886,7 +12892,7 @@
       const source = getDustSource();
       if (source) applyProcessedImageToState(source, { previewOnly: state.processedImageDataIsPreview });
       clearDustState();
-      state.dustRemoval.cleanSource = source;
+      state.dustRemoval.cleanSource = state.dustRemoval.enabled ? source : null;
       if (state.dustRemoval.enabled) scheduleDustDetection();
       updatePreview();
     });
@@ -12919,8 +12925,9 @@
 
     // `source` is a File (a model the user picked) or a URL (the self-hosted
     // asset, fetched once and cached in IndexedDB).
-    async function loadAiRepairModel(source, { prefer = 'webgpu', refresh = true } = {}) {
-      if (aiRepair.status === 'loading') return;
+    const loadAiRepairModel = createAiModelLoader(performAiRepairModelLoad, DEFAULT_MODEL_URL);
+
+    async function performAiRepairModelLoad(source, { prefer = 'webgpu', refresh = true } = {}) {
       aiRepair.status = 'loading';
       aiRepair.percent = 0;
       aiRepair.error = '';
