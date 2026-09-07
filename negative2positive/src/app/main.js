@@ -9294,6 +9294,7 @@
     function restartPhotoProcessing() {
       if (isDesktopBatchExportLocked()) return;
       clearUndoHistory();
+      state.repairStrokes = [];
       // Leave crop mode first: the draft still points at the image
       // being discarded, and Apply would restore it over the reset.
       if (state.cropping) exitCropMode({ restore: false });

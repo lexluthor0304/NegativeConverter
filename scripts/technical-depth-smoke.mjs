@@ -234,6 +234,7 @@ async function runManualBrushSmoke({ send, evaluate, waitFor, wait, fail, instal
   await waitFor('manual brush boot', `!!document.getElementById('studioImportAutoCrop') && (/No model loaded/.test(document.getElementById('dustAiStatus')?.textContent))`);
   await installDialogAutoAccept();
   await wait(300);
+  await evaluate(`document.getElementById('studioImportAutoCrop').click()`);
   const doc = await send('DOM.getDocument');
   const input = await send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector: '#fileInput' });
   await send('DOM.setFileInputFiles', { files: [join(root, 'negative2positive/test-fixtures/negative-sample.jpg')], nodeId: input.result.nodeId });
@@ -332,6 +333,12 @@ async function runManualBrushSmoke({ send, evaluate, waitFor, wait, fail, instal
   await evaluate(`document.getElementById('dustRemovalEnabled').click()`);
   await waitFor('AI dust remains usable with manual strokes', `/Detected \\d+ dust/.test(document.getElementById('dustStatus').textContent)`, 120_000);
   console.log('ok: independent manual AI brush, zoom/pan coordinates, mouse and touch, localized export, undo/redo and AI dust together:', JSON.stringify({ changed, outside }));
+  await evaluate(`document.getElementById('dustRemovalEnabled').click(); document.getElementById('studioRestart').click()`);
+  await waitFor('restart from original converted', `${ready} && document.getElementById('coreExposure').value === '0'`, 120_000);
+  const restarted = await exportPixels();
+  if (restarted.width !== before.width || restarted.height !== before.height
+      || restarted.data.some((v,i) => v !== before.data[i])) fail('Reprocess from original retained discarded repairs or adjustments');
+  console.log('ok: reprocess from original discards manual repairs and restores the original conversion pixels');
   await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
   await waitFor('default AI dust boot', `!!document.getElementById('studioImportAutoCrop') && (/No model loaded/.test(document.getElementById('dustAiStatus')?.textContent))`);
   await installDialogAutoAccept();
