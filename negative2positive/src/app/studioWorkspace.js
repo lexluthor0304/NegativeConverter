@@ -141,7 +141,7 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
   const move = (id, target) => target.append($(id));
   const body = document.body;
   body.classList.add('studio');
-  const header = document.createElement('header');
+  const header = $('studioHeader');
   header.className = 'studio-header';
   header.innerHTML = `
     <div class="studio-brand"><span class="studio-mark">NeoAnalogLab</span><span>Negative Converter</span></div>

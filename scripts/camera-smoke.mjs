@@ -13,6 +13,9 @@ export async function runCameraSmoke({ send, evaluate, waitFor, wait, fail, inst
   await waitFor('camera workspace boot', `!!document.getElementById('fileInput') && !!document.getElementById('flatFieldUseCurrentBtn')`);
   await installDialogAutoAccept();
   await wait(300);
+  // Flat-field regression measures negative inversion on known synthetic input.
+  // Automatic mixed-film import behavior has its own browser scenario.
+  await evaluate(`document.getElementById('importFilmTypeAuto').checked && document.getElementById('importFilmTypeAuto').click()`);
   await evaluate(`(() => {
     window.__cameraToasts = [];
     new MutationObserver((records) => {
@@ -208,6 +211,7 @@ async function runMultiShotScenario({ send, evaluate, waitFor, wait, fail, insta
   await waitFor('multi-shot workspace boot', `!!document.getElementById('fileInput') && !!document.getElementById('studioMergeAverage')`);
   await installDialogAutoAccept();
   await wait(300);
+  await evaluate(`document.getElementById('importFilmTypeAuto').checked && document.getElementById('importFilmTypeAuto').click()`);
   await evaluate(`(() => {
     window.__cameraToasts = [];
     new MutationObserver((records) => {

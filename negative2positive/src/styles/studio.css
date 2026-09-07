@@ -39,6 +39,11 @@ body.studio {
   z-index: 20;
   background: var(--bg-primary);
 }
+/* Reserve the measured Studio header space before the editor module mounts. */
+.studio-header.studio-header-pending { min-height: 60px; }
+@media (max-width: 1000px) { .studio-header.studio-header-pending { min-height: 110px; } }
+@media (max-width: 700px) { .studio-header.studio-header-pending { min-height: 181px; } }
+.studio-discovery a[lang] { font-family: system-ui, sans-serif; }
 .studio-brand { display: flex; flex-direction: column; align-items: flex-start; gap: 0; flex-shrink: 0; font-size: 12px; font-weight: 400; }
 .studio-brand > span:last-child { color: var(--text-secondary); }
 .studio-mark { font-size: 24px; line-height: 1.2; white-space: nowrap; }

@@ -38,7 +38,17 @@ Answers precede detailed instructions. Visible FAQs and structured answers share
 - `node scripts/audit-search.mjs <deployment-origin>` checks every sitemap HTML URL, response status, source headings, metadata, schema presence, robots and an unknown URL. Timings are single HTTP observations, not Core Web Vitals.
 - A real headless Chrome check against the production build verified nine changed/new pages at 390px: visible single H1, no horizontal overflow and parseable rendered JSON-LD. The home heading and discovery links also passed with page JavaScript disabled.
 
-The original browser-tool profile was already occupied, so the browser check used its own temporary profile. No Lighthouse score is claimed. Redirects, headers and final canonical responses require the deployed preview/production environment, since Vite preview does not apply Vercel configuration.
+The original browser-tool profile was already occupied, so the browser check used its own temporary profile. Lighthouse CLI 13.4.1 then measured the local production build with mobile simulation. A 10 KB Latin subset replaces the unnecessary 646 KB CJK download on the English home, and a static header reserves initial layout space. The original CJK fonts remain available. A missing accessible name on the project file input was also fixed.
+
+| Local mobile lab observation | Before performance fixes | After |
+| --- | --- | --- |
+| Performance | 53 | 94 |
+| FCP / LCP | 5.7s / 5.9s | 2.4s / 2.4s |
+| CLS | 0.22 | 0.06 |
+| Accessibility | 94 | 100 |
+| SEO | 100 | 100 |
+
+These single-run observations are not field Core Web Vitals. Best Practices was 96 because the local preview does not provide Vercel's analytics endpoint. Redirects, headers and final canonical responses require deployment, since Vite preview does not apply Vercel configuration. The remote preview is protected by Vercel SSO; unauthenticated requests cannot inspect its application responses.
 
 ## Measurement still requiring site-owner data
 
