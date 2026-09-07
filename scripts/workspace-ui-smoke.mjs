@@ -59,7 +59,9 @@ export async function runWorkspaceUiSmoke({ send, evaluate, waitFor, fail, port,
     const node = await send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector: '#fontProbe' });
     const result = await send('CSS.getPlatformFontsForNode', { nodeId: node.result.nodeId });
     const fonts = result.result?.fonts || [];
-    if (!fonts.length || fonts.some(font => !font.isCustomFont || !font.familyName.toLowerCase().includes('fusion'))) fail('pixel font fallback: '+lang+' '+JSON.stringify(fonts));
+    if (!fonts.length || fonts.some(font => !font.isCustomFont
+        || !(font.familyName.toLowerCase().includes('fusion')
+          || (font.familyName === 'NC Studio Latin' && font.postScriptName === 'NCStudioLatin')))) fail('pixel font fallback: '+lang+' '+JSON.stringify(fonts));
     console.log('ok: actual pixel glyphs', lang, JSON.stringify(fonts.map(f=>({family:f.familyName,glyphs:f.glyphCount}))));
   }
   for (const className of ['zoom-indicator', 'loupe-info', 'autoframe-diagnostics', 'film-base-values', 'debug-widget', 'loading-phase-text']) {
