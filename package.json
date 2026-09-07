@@ -34,7 +34,7 @@
     "libraw-wasm": "^1.6.0",
     "onnxruntime-web": "1.19.2",
     "pako": "^3.0.1",
-    "qrcode-generator": "1.4.4",
+    "qrcode-generator": "2.0.4",
     "upng-js": "2.1.0",
     "utif": "3.1.0"
   }
