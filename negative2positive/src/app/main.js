@@ -12796,7 +12796,11 @@
           state.loadedBaseImageData || state.originalImageData
         );
         if (!analysis || key !== expiredSourceKey() || !isCurrentLoad(generation)) return false;
-        applyExpiredAnalysisDefaults(state, analysis);
+        // Brightness and contrast that still hold the first phase's measured
+        // values follow the new measurement; values the user moved stay.
+        const previousAuto = defaultExpiredRescueParams(state.expiredAnalysis);
+        const untouched = state.expiredBrightness === previousAuto.expiredBrightness && state.expiredContrast === previousAuto.expiredContrast;
+        applyExpiredAnalysisDefaults(state, analysis, { force: untouched });
         expiredAnalysisKey = key;
         syncAllSlidersFromState();
         updateExpiredRescueUI();
