@@ -16,6 +16,11 @@
     import { imageAreaFromDetection, resolveAnalysisRegion, analysisPixelBounds, imageAreaFromWorkingRect, sampleAnalysisArea } from './analysisRegion.js';
     import { detectCropImageArea, workingPointsToBase, isSameAnalysisFrame } from './cropColorAnalysis.js';
     import { pickStudioColors, mergeStudioColors, createStudioThumbnail } from './studioSettings.js';
+    import {
+      analyzeExpiredFilm, defaultExpiredRescueParams, sanitizeExpiredRescueParams, sanitizeExpiredAnalysis,
+      describeExpiredAnalysis, fitExpiredSpatial, buildExpiredSpatialStage, EXPIRED_RESCUE_DEFAULTS, EXPIRED_RESCUE_KEYS
+    } from '../pipeline/expiredRescue.js';
+    import { measureExpiredSpatialMaps } from './expiredRescueOpenCv.js';
     import { readFilmEdge, sanitizeFilmEdgeForSettings, formatFilmEdgeFrames } from './filmEdgeReader.js';
     import { loadDxFilmTable, describeDxFilm, shortFilmName } from './dxFilmDatabase.js';
     import { aggregateRollAnalysis, measureNegativeMean, sanitizeRollFrameForSettings, rollFrameExposureUnits } from './rollAnalysis.js';
@@ -240,6 +245,10 @@
 
     let currentLang = 'en';
     let stateReady = false;
+    // Expired-film rescue session flags (see the "Expired film rescue" block).
+    let expiredCompareHeld = false;
+    let expiredTabPending = false;
+    let expiredAnalysisKey = null;
     const desktopBatchExportState = {
       active: false,
       current: 0,
@@ -2065,6 +2074,20 @@
       repairStrokes: [],
       // Lab-match look (colour setting, see labMatch.js).
       look: null,
+      // Expired-film rescue (pipeline/expiredRescue.js). The strengths are
+      // colour settings; the analysis is this frame's own measurement.
+      // `expiredSession` is the separate entry: photos added while it is on
+      // start rescued.
+      expiredSession: false,
+      expiredEnabled: false,
+      expiredLevels: 100,
+      expiredNeutralize: 100,
+      expiredCrossover: 100,
+      expiredBrightness: 0,
+      expiredContrast: 25,
+      expiredUnevenFog: 100,
+      expiredLocalContrast: 0,
+      expiredAnalysis: null,
       // Analog metadata: the roll (session-wide) and this frame (per file).
       rollMetadata: sanitizeRollMetadata({}),
       frameMetadata: sanitizeFrameMetadata({}),
@@ -2373,6 +2396,10 @@
         filmBase: '色罩基准', whiteBalance: '白平衡', autoDetectBase: '自动检测色罩',
         filmEdgeApply: '应用片边识别', filmEdgeBase: '片边片基', rollAnalysis: '整卷分析',
         testStrip: '试条', dodgeBurn: '加减光', enlarger: '放大机', flatField: '平场校正', labMatch: '匹配店扫', coreCyan: '青 / 红', corePaper: '相纸', corePaperToning: '调色', corePaperToningStrength: '调色强度',
+        expiredEnabled: '过期卷矫正开关', expiredReset: '过期卷：恢复自动值', expiredAnalyze: '过期卷：重新分析',
+        expiredLevels: '过期卷：去雾与范围', expiredNeutralize: '过期卷：中和偏色', expiredCrossover: '过期卷：交叉偏色',
+        expiredBrightness: '过期卷：亮度补偿', expiredContrast: '过期卷：对比恢复',
+        expiredUnevenFog: '过期卷：不均匀雾化', expiredLocalContrast: '过期卷：局部对比',
         coreExposure: '曝光', coreContrast: '对比度', coreHighlights: '高光',
         coreShadows: '阴影', coreWhites: '白色', coreBlacks: '黑色',
         coreBrightness: '亮度', coreTemperature: '色温', coreTint: '色调',
@@ -2396,6 +2423,10 @@
         filmBase: 'Film Base', whiteBalance: 'White Balance', autoDetectBase: 'Auto Detect Base',
         filmEdgeApply: 'Apply Detected Film', filmEdgeBase: 'Rebate Film Base', rollAnalysis: 'Roll Analysis',
         testStrip: 'Test Strip', dodgeBurn: 'Dodge and Burn', enlarger: 'Enlarger', flatField: 'Flat Field', labMatch: 'Match Lab Scan', coreCyan: 'Cyan / Red', corePaper: 'Paper', corePaperToning: 'Toning', corePaperToningStrength: 'Toning Strength',
+        expiredEnabled: 'Expired-film rescue', expiredReset: 'Expired film: automatic values', expiredAnalyze: 'Expired film: analyse again',
+        expiredLevels: 'Expired film: fog and range', expiredNeutralize: 'Expired film: neutralise cast', expiredCrossover: 'Expired film: crossover',
+        expiredBrightness: 'Expired film: brightness', expiredContrast: 'Expired film: contrast',
+        expiredUnevenFog: 'Expired film: uneven fog', expiredLocalContrast: 'Expired film: local contrast',
         coreExposure: 'Exposure', coreContrast: 'Contrast', coreHighlights: 'Highlights',
         coreShadows: 'Shadows', coreWhites: 'Whites', coreBlacks: 'Blacks',
         coreBrightness: 'Brightness', coreTemperature: 'Temperature', coreTint: 'Tint',
@@ -2419,6 +2450,10 @@
         filmBase: 'フィルムベース', whiteBalance: 'ホワイトバランス', autoDetectBase: '自動検出',
         filmEdgeApply: 'フィルム縁を適用', filmEdgeBase: '縁のベース', rollAnalysis: 'ロール解析',
         testStrip: 'テストストリップ', dodgeBurn: '覆い焼き・焼き込み', enlarger: '引き伸ばし機', flatField: 'フラットフィールド', labMatch: 'ラボスキャンに合わせる', coreCyan: 'シアン / 赤', corePaper: '印画紙', corePaperToning: '調色', corePaperToningStrength: '調色の強さ',
+        expiredEnabled: '期限切れ補正の切替', expiredReset: '期限切れ：自動値に戻す', expiredAnalyze: '期限切れ：再解析',
+        expiredLevels: '期限切れ：かぶりと階調範囲', expiredNeutralize: '期限切れ：色かぶりの中和', expiredCrossover: '期限切れ：クロスオーバー',
+        expiredBrightness: '期限切れ：明るさ補正', expiredContrast: '期限切れ：コントラスト',
+        expiredUnevenFog: '期限切れ：かぶりのむら', expiredLocalContrast: '期限切れ：局所コントラスト',
         coreExposure: '露出', coreContrast: 'コントラスト', coreHighlights: 'ハイライト',
         coreShadows: 'シャドウ', coreWhites: 'ホワイト', coreBlacks: 'ブラック',
         coreBrightness: '明るさ', coreTemperature: '色温度', coreTint: '色合い',
@@ -2457,6 +2492,8 @@
       'wbR', 'wbG', 'wbB', 'wbAutoConfidence', 'wbUserOverride',
       'filmType', 'positiveMode', 'filmTypeSource', 'filmTypeConfidence', 'filmTypeReason', 'filmBaseSet', 'grayPointSampled', 'step2Mode', 'rotationAngle',
       'mirrored', 'sprocketPreviewEnabled', 'currentStep',
+      'expiredEnabled', 'expiredLevels', 'expiredNeutralize', 'expiredCrossover', 'expiredBrightness', 'expiredContrast',
+      'expiredUnevenFog', 'expiredLocalContrast',
     ];
 
     // Category B: heavy image data (stored by reference)
@@ -2497,6 +2534,7 @@
       settings.localExposure = state.localExposure ? structuredClone(state.localExposure) : null;
       settings.repairStrokes = structuredClone(state.repairStrokes);
       settings.look = state.look ? structuredClone(state.look) : null;
+      settings.expiredAnalysis = state.expiredAnalysis ? structuredClone(state.expiredAnalysis) : null;
       settings.frameMetadata = sanitizeFrameMetadata(state.frameMetadata);
       settings.autoFrameMeta = state.autoFrame.lastDiagnostics ? structuredClone(state.autoFrame.lastDiagnostics) : null;
 
@@ -2556,9 +2594,11 @@
       state.localExposure = s.localExposure ? structuredClone(s.localExposure) : null;
       state.repairStrokes = sanitizeRepairStrokes(s.repairStrokes);
       state.look = s.look ? structuredClone(s.look) : null;
+      state.expiredAnalysis = s.expiredAnalysis ? structuredClone(s.expiredAnalysis) : null;
       state.frameMetadata = sanitizeFrameMetadata(s.frameMetadata);
       updateDodgeBurnUI();
       updateLabMatchUI();
+      updateExpiredRescueUI();
       updateMetadataUI();
       state.autoFrame.lastDiagnostics = s.autoFrameMeta ? structuredClone(s.autoFrameMeta) : null;
 
@@ -2989,6 +3029,7 @@
       updateAutoFrameButtons();
       updateBeforeAfterButtonState();
       updateSprocketControlsUI();
+      updateExpiredRescueUI();
       studioWorkspace?.sync();
     }
 
@@ -3581,6 +3622,10 @@
         repairStrokes: sanitizeRepairStrokes(source.repairStrokes),
         // A colour setting like the curves: copied with the look, inherited from the fallback frame.
         look: sanitizeLookForSettings(source === state ? state.look : (Object.hasOwn(source, 'look') ? source.look : fallbackSettings.look)),
+        // Expired-film rescue: the strengths are colour settings and inherit like
+        // the look; the analysis is this frame's own measurement, never inherited.
+        ...sanitizeExpiredRescueParams(source, fallbackSettings),
+        expiredAnalysis: sanitizeExpiredAnalysis(source === state ? state.expiredAnalysis : source.expiredAnalysis),
         frameMetadata: sanitizeFrameMetadata(source === state ? state.frameMetadata : (Object.hasOwn(source, 'frameMetadata') ? source.frameMetadata : fallbackSettings.frameMetadata)),
         // Roll-level like the film base: a new file inherits the roll's flat field.
         flatFieldId: typeof (source.flatFieldId ?? fallbackSettings.flatFieldId) === 'string' ? String(source.flatFieldId ?? fallbackSettings.flatFieldId).slice(0, 64) : null,
@@ -3763,7 +3808,11 @@
     }
 
     function applyAdjustmentsToBuffer(imageData, settings, output, quality = 'full') {
-      applyPreparedAdjustmentsToBuffer(imageData, buildAdjustmentSettings(settings), output, {
+      const prepared = buildAdjustmentSettings(settings);
+      // "Hold to see before" on the expired-film panel affects the screen only;
+      // exports go through applyAdjustmentsWithSettings.
+      if (expiredCompareHeld && prepared.expiredEnabled) prepared.expiredEnabled = false;
+      applyPreparedAdjustmentsToBuffer(imageData, prepared, output, {
         quality,
         lutScratch: adjustmentLutScratch
       });
@@ -4476,6 +4525,8 @@
       if (state.dustRemoval.enabled && state.dustRemoval.showMask) return false;
       if (state.dodgeBurn && state.dodgeBurn.active) return false;
       if (state.look) return false;
+      // The rescue curves live in the CPU adjustment stage, like the look.
+      if (state.expiredEnabled && state.expiredAnalysis) return false;
       if (state.sprocketPreviewEnabled) return false;
       return !!webglState.gl && !webglState.disabledByError && state.currentStep >= 3 && !!state.processedImageData;
     }
@@ -4942,6 +4993,9 @@
     function maybeAutoWhiteBalance(processed) {
       if (!usesSilverCoreConversion(state)) return;
       if (sanitizePresetType(state.filmType || 'color') !== 'color') return;
+      // The expired-film rescue balances per tonal band; a global gain on top
+      // would fight it.
+      if (state.expiredEnabled) return;
       if (state.grayPointSampled || state.wbUserOverride) return;
       if (state.autoFrame.lastDiagnostics?.analysisNeedsReview) return;
       const reference = processed?.__analysisPreview;
@@ -5451,6 +5505,7 @@
           overlay.updateProgress(hasPreviewSource ? 78 : 85, lang.loadingProcessing);
           applyProcessedImageToState(processed, { previewOnly: hasPreviewSource });
           maybeAutoWhiteBalance(processed);
+          maybeAnalyzeExpiredRescue(processed);
           // Reset dust removal state for new conversion
           state.dustRemoval._state = null;
           state.dustRemoval.mask = null;
@@ -9254,6 +9309,7 @@
       state.corePaperToning = 'none';
       state.corePaperToningStrength = 100;
       state.look = null;
+      resetExpiredStrengthsInState();
       state.coreSaturation = 100;
       state.coreGlow = 0;
       state.coreFade = 0;
@@ -9393,6 +9449,11 @@
       state.lensCorrection = createInitialLensCorrectionState();
       resetFrontierGuideImageState();
       resetRollReferenceState();
+      state.expiredSession = false;
+      state.expiredEnabled = false;
+      state.expiredAnalysis = null;
+      expiredAnalysisKey = null;
+      expiredTabPending = false;
       fullAdjustedBuffer = null;
       previewAdjustedBuffer = null;
       if (webglState.gl) {
@@ -10280,6 +10341,9 @@
         localExposure: null,
         repairStrokes: [],
         look: null,
+        ...EXPIRED_RESCUE_DEFAULTS,
+        expiredEnabled: Boolean(state.expiredSession),
+        expiredAnalysis: null,
         frameMetadata: sanitizeFrameMetadata({}),
         flatFieldId: state.flatFieldId || null,
         coreSaturation: 100,
@@ -10335,7 +10399,7 @@
       // every other frame in the roll.
       const studioColors = state.fileQueue.find(item => item.file === file)?.studioColors;
       let initialSettings = savedSettings || mergeStudioColors(createDefaultSettings(imageData), studioColors || {});
-      if (!initialSettings.autoFrameMeta && !initialSettings.cropRegion) initialSettings = await analyzeStudioImportFrame(imageData, initialSettings, { allowCrop: !savedSettings });
+      if (!initialSettings.autoFrameMeta && !initialSettings.cropRegion && !expiredImportKeepsFullFrame(initialSettings)) initialSettings = await analyzeStudioImportFrame(imageData, initialSettings, { allowCrop: !savedSettings });
       if (!initialSettings.filmEdge?.checked) {
         const edge = await analyzeImportFilmEdge(imageData, initialSettings, { applyDefaults: !savedSettings && state.importFilmTypeAuto });
         if (edge) initialSettings = edge.settings;
@@ -10417,6 +10481,7 @@
         && usesSilverCoreConversion(settings)
         && sanitizePresetType(settings.filmType || 'color') === 'color'
         && !settings.grayPointSampled
+        && !settings.expiredEnabled
       ) {
         const roi = resolveAnalysisRegion(settings, imageData);
         const estimate = settings.autoFrameMeta?.analysisNeedsReview ? { confidence: 'low' }
@@ -10428,6 +10493,15 @@
           settings.wbAutoConfidence = estimate.confidence;
         }
         trace.mark('autoWhiteBalance', { confidence: estimate.confidence });
+      }
+
+      // Expired-film rescue: a frame the user never opened carries no
+      // measurement yet, so take it from this frame's own positive (with the
+      // OpenCV fog map when OpenCV is available).
+      if (settings.expiredEnabled && !settings.expiredAnalysis && processed) {
+        const analysis = await measureExpiredAnalysisForExport(processed, settings, imageData);
+        if (analysis) applyExpiredAnalysisDefaults(settings, analysis);
+        trace.mark('expiredRescue', { analysed: Boolean(analysis), spatial: Boolean(analysis?.spatial) });
       }
 
       // Apply adjustments (at 16 bits when the export asks for it)
@@ -11221,11 +11295,16 @@
       state.flatFieldId = safe.flatFieldId && state.flatFields[safe.flatFieldId] ? safe.flatFieldId : null;
       updateFlatFieldUI();
       state.look = safe.look ? structuredClone(safe.look) : null;
+      for (const key of EXPIRED_RESCUE_KEYS) state[key] = safe[key];
+      state.expiredAnalysis = safe.expiredAnalysis ? structuredClone(safe.expiredAnalysis) : null;
+      // A saved measurement belongs to this file; adopt it instead of re-measuring.
+      expiredAnalysisKey = null;
       state.frameMetadata = sanitizeFrameMetadata(safe.frameMetadata);
       prefillRollStockFromFilmEdge();
       updateMetadataUI();
       updateRecipeUI();
       updateLabMatchUI();
+      updateExpiredRescueUI();
       state.coreSaturation = safe.coreSaturation;
       state.coreGlow = safe.coreGlow;
       state.coreFade = safe.coreFade;
@@ -11632,9 +11711,16 @@
       if (folderPickerHint) folderPickerHint.classList.add('visible');
     }
 
-    [uploadBtn, uploadFolderBtn].forEach(label => {
+    const uploadExpiredBtn = document.getElementById('uploadExpiredBtn');
+    [uploadBtn, uploadFolderBtn, uploadExpiredBtn].forEach(label => {
       if (!label) return;
       label.addEventListener('keydown', handleUploadLabelKeydown);
+    });
+    // The separate entry for an expired roll: the same picker, with the
+    // session switched to rescue before the photos arrive.
+    uploadExpiredBtn?.addEventListener('click', () => setExpiredSession(true, { fromEntry: true }));
+    uploadExpiredBtn?.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') setExpiredSession(true, { fromEntry: true });
     });
 
     applyFolderPickerAvailability();
@@ -11843,7 +11929,7 @@
         let settings = extractCurrentSettings();
         let changed = false;
         let filmEdgeToast = null;
-        if (!item?.settings?.autoFrameMeta && !state.cropRegion && state.autoFrame.enabled) {
+        if (!item?.settings?.autoFrameMeta && !state.cropRegion && state.autoFrame.enabled && !expiredImportKeepsFullFrame(settings)) {
           settings = await analyzeStudioImportFrame(source, settings, { allowCrop: freshFile });
           if (!isCurrentLoad(generation)) return;
           changed = true;
@@ -11870,6 +11956,7 @@
         if (isCurrentLoad(generation)) {
           delete document.body.dataset.studioBusy;
           updateAutoFrameButtons();
+          updateExpiredRescueUI();
           studioWorkspace?.sync();
         }
       }
@@ -12585,6 +12672,393 @@
         if (region) working = cropImageData(working, region);
       }
       return working;
+    }
+
+    // ===========================================
+    // Expired film rescue: a separate entry and flow for aged rolls
+    // (pipeline/expiredRescue.js). Negatives are converted as usual first;
+    // the rescue then measures the positive and reshapes it per channel.
+    // ===========================================
+    function expiredSourceKey() {
+      const source = state.croppedImageData || state.originalImageData;
+      if (!source) return null;
+      return `${state.loadedFile?.name || ''}|${source.width}x${source.height}|${state.filmType}|${state.positiveMode}`;
+    }
+
+    // A fogged, borderless positive scan (a lab's JPEG of an expired roll) has
+    // nothing to crop, and the fog makes the image-window detector see the
+    // subject as the window: in the rescue flow such a photo keeps its full
+    // frame and skips the detection altogether (on a large scan the worker
+    // times out and the main-thread fallback freezes the page for a minute).
+    // The colour analysis then uses the frame inside the border buffer.
+    function expiredImportKeepsFullFrame(settings) {
+      return Boolean(settings?.expiredEnabled) && sanitizePresetType(settings?.filmType || 'color') === 'positive';
+    }
+
+    function hasCurrentExpiredAnalysis() {
+      if (!state.expiredAnalysis) return false;
+      return expiredAnalysisKey === null || expiredAnalysisKey === expiredSourceKey();
+    }
+
+    // The sample the rescue measures: the engine's analysis-area preview when
+    // the conversion produced one, otherwise the positive inside the colour
+    // analysis region (its 16-bit plane when there is one). Without a region
+    // the same border buffer as the engine's histogram keeps a rebate or a
+    // scanner edge out of the measurement.
+    // `placement` says where the sample sits in the frame (normalised), so
+    // the spatial stage measured on it lands on the right pixels of the
+    // full frame.
+    function expiredAnalysisSample(processed, settings, sourceImageData) {
+      const roi = resolveAnalysisRegion(settings, sourceImageData);
+      const borderBuffer = Math.max(0, Math.min(0.3, sanitizeNumeric(settings.coreBorderBuffer, 10, 0, 30) / 100));
+      const whole = { left: 0, top: 0, width: 1, height: 1 };
+      const inset = (rect, amount) => ({
+        left: rect.left + rect.width * amount,
+        top: rect.top + rect.height * amount,
+        width: rect.width * (1 - 2 * amount),
+        height: rect.height * (1 - 2 * amount)
+      });
+      if (processed.__image16 && processed.__image16.data instanceof Uint16Array) {
+        return {
+          image: processed,
+          options: { region: roi ? analysisPixelBounds(processed.width, processed.height, roi, 0.02) : null, borderBuffer },
+          placement: whole
+        };
+      }
+      if (processed.__analysisPreview) {
+        return { image: processed.__analysisPreview, options: {}, placement: inset(roi || whole, borderBuffer) };
+      }
+      const base = downsampleImageDataForMaxPixels(processed, 600000);
+      return {
+        image: roi ? cropImageData(base, analysisPixelBounds(base.width, base.height, roi, 0.02)) : base,
+        options: { borderBuffer: roi ? 0 : borderBuffer },
+        placement: roi ? inset(roi, 0.02) : whole
+      };
+    }
+
+    // OpenCV's part of the measurement: the fog surface and the local mean
+    // across the frame, then the curves measured on the flattened frame.
+    function measureExpiredAnalysisWithSpatial(processed, settings, sourceImageData) {
+      const sample = expiredAnalysisSample(processed, settings, sourceImageData);
+      const maps = measureExpiredSpatialMaps(sample.image, { ...sample.options, placement: sample.placement });
+      const spatial = maps ? fitExpiredSpatial(maps) : null;
+      if (!spatial) return null;
+      // Local contrast does not move the histogram's floor; leave it out here.
+      const stage = buildExpiredSpatialStage({
+        ...sanitizeExpiredRescueParams(settings),
+        expiredEnabled: true,
+        expiredLocalContrast: 0,
+        expiredAnalysis: { spatial }
+      });
+      const analysis = analyzeExpiredFilm(sample.image, { ...sample.options, placement: sample.placement, spatial: stage });
+      return analysis ? { ...analysis, spatial } : null;
+    }
+
+    // Batch exports measure a never-opened frame in one go: with OpenCV when
+    // it loads, the global measurement alone otherwise.
+    async function measureExpiredAnalysisForExport(processed, settings, sourceImageData) {
+      if (await ensureOpenCvReady()) {
+        try {
+          const analysis = measureExpiredAnalysisWithSpatial(processed, settings, sourceImageData);
+          if (analysis) return analysis;
+        } catch (error) {
+          console.warn('Expired film: OpenCV measurement failed', error);
+        }
+      }
+      const sample = expiredAnalysisSample(processed, settings, sourceImageData);
+      return analyzeExpiredFilm(sample.image, sample.options);
+    }
+
+    let expiredOpenCvState = 'idle';
+
+    // Phase two of the interactive measurement. The global result is on
+    // screen immediately; OpenCV loads (once per session) and the frame is
+    // re-measured with its fog surface, replacing the analysis in place.
+    async function runExpiredSpatialAnalysis() {
+      const key = expiredSourceKey();
+      const generation = loadGeneration;
+      if (expiredOpenCvState !== 'ready') {
+        expiredOpenCvState = 'loading';
+        updateExpiredRescueUI();
+      }
+      const ready = await ensureOpenCvReady();
+      expiredOpenCvState = ready ? 'ready' : 'failed';
+      if (!ready) {
+        updateExpiredRescueUI();
+        return false;
+      }
+      const current = state.processedImageData;
+      if (!current || !isCurrentLoad(generation) || key !== expiredSourceKey() || !state.expiredEnabled || !state.expiredAnalysis) return false;
+      try {
+        const analysis = measureExpiredAnalysisWithSpatial(
+          current,
+          { ...state, autoFrameMeta: state.autoFrame.lastDiagnostics },
+          state.loadedBaseImageData || state.originalImageData
+        );
+        if (!analysis || key !== expiredSourceKey() || !isCurrentLoad(generation)) return false;
+        // Brightness and contrast that still hold the first phase's measured
+        // values follow the new measurement; values the user moved stay.
+        const previousAuto = defaultExpiredRescueParams(state.expiredAnalysis);
+        const untouched = state.expiredBrightness === previousAuto.expiredBrightness && state.expiredContrast === previousAuto.expiredContrast;
+        applyExpiredAnalysisDefaults(state, analysis, { force: untouched });
+        expiredAnalysisKey = key;
+        syncAllSlidersFromState();
+        updateExpiredRescueUI();
+        markCurrentFileDirty();
+        schedulePreviewUpdate();
+        scheduleFullUpdate();
+        return true;
+      } catch (error) {
+        console.warn('Expired film: OpenCV measurement failed', error);
+        updateExpiredRescueUI();
+        return false;
+      }
+    }
+
+    // A frame's first measurement sets brightness and contrast from what it
+    // measured, unless the user (or a sync) already moved them off the defaults.
+    function applyExpiredAnalysisDefaults(target, analysis, { force = false } = {}) {
+      const auto = defaultExpiredRescueParams(analysis);
+      if (force || target.expiredBrightness === EXPIRED_RESCUE_DEFAULTS.expiredBrightness) target.expiredBrightness = auto.expiredBrightness;
+      if (force || target.expiredContrast === EXPIRED_RESCUE_DEFAULTS.expiredContrast) target.expiredContrast = auto.expiredContrast;
+      target.expiredAnalysis = analysis;
+    }
+
+    function resetExpiredStrengthsInState({ force = true } = {}) {
+      for (const key of EXPIRED_RESCUE_KEYS) if (key !== 'expiredEnabled') state[key] = EXPIRED_RESCUE_DEFAULTS[key];
+      if (state.expiredAnalysis) applyExpiredAnalysisDefaults(state, state.expiredAnalysis, { force });
+    }
+
+    function runExpiredAnalysis(processed = state.processedImageData, { force = false } = {}) {
+      if (!processed) return false;
+      const sample = expiredAnalysisSample(
+        processed,
+        { ...state, autoFrameMeta: state.autoFrame.lastDiagnostics },
+        state.loadedBaseImageData || state.originalImageData
+      );
+      const analysis = analyzeExpiredFilm(sample.image, sample.options);
+      if (!analysis) {
+        updateExpiredRescueUI();
+        return false;
+      }
+      applyExpiredAnalysisDefaults(state, analysis, { force });
+      expiredAnalysisKey = expiredSourceKey();
+      syncAllSlidersFromState();
+      updateExpiredRescueUI();
+      markCurrentFileDirty();
+      void runExpiredSpatialAnalysis();
+      return true;
+    }
+
+    // Runs once per conversion source (file, crop, film type). A rescued frame
+    // keeps its measurement across core-control tweaks, so the sliders never
+    // chase the user's own adjustments.
+    function maybeAnalyzeExpiredRescue(processed) {
+      if (!state.expiredEnabled) return;
+      const key = expiredSourceKey();
+      if (state.expiredAnalysis && expiredAnalysisKey === null) {
+        expiredAnalysisKey = key;
+        // A measurement saved before OpenCV had its say gets its fog map now.
+        if (!state.expiredAnalysis.spatial) void runExpiredSpatialAnalysis();
+      } else if (!state.expiredAnalysis || expiredAnalysisKey !== key) {
+        runExpiredAnalysis(processed);
+      }
+      if (expiredTabPending) {
+        expiredTabPending = false;
+        studioWorkspace?.selectTab?.('expired');
+      }
+    }
+
+    function expiredHueName(hue) {
+      if (!hue) return getLocalizedText('expiredNone', 'none');
+      return getLocalizedText(`hue${hue[0].toUpperCase()}${hue.slice(1)}`, hue);
+    }
+
+    function updateExpiredRescueUI() {
+      if (!stateReady) return;
+      const section = document.getElementById('expiredSection');
+      const checkbox = document.getElementById('expiredEnabled');
+      if (!section || !checkbox) return;
+      const ready = state.currentStep >= 3 && Boolean(state.processedImageData) && !document.body.dataset.studioBusy;
+      const enabled = Boolean(state.expiredEnabled);
+      checkbox.checked = enabled;
+      checkbox.disabled = !ready;
+      document.getElementById('expiredControls').hidden = !enabled;
+      const info = enabled && state.expiredAnalysis ? describeExpiredAnalysis(state.expiredAnalysis) : null;
+      const lines = [];
+      if (!ready) {
+        lines.push(getLocalizedText('expiredNeedPhoto', 'Add and convert a photo first.'));
+      } else if (!enabled) {
+        lines.push(getLocalizedText('expiredOff', 'Expired-film rescue is off for this photo.'));
+      } else if (!info) {
+        lines.push(getLocalizedText('expiredNoAnalysis', 'Not analysed yet.'));
+      } else {
+        const type = sanitizePresetType(state.filmType || 'color');
+        lines.push(type === 'positive'
+          ? getLocalizedText('expiredDiagSourcePositive', 'Source: positive scan, rescued directly')
+          : getInterpolatedText('expiredDiagSourceNegative', { type: getLocalizedText(type === 'bw' ? 'bwFilm' : 'colorFilm', type) }, 'Source: negative, converted first'));
+        lines.push(getInterpolatedText('expiredDiagFog', { fog: String(info.fogPercent), range: String(info.rangePercent) }, `Fog: black point raised ${info.fogPercent}%`));
+        lines.push(info.cast
+          ? getInterpolatedText('expiredDiagCast', { hue: expiredHueName(info.cast), strength: String(info.castPercent) }, `Overall cast: ${info.cast}`)
+          : getLocalizedText('expiredDiagNoCast', 'Overall cast: none to speak of'));
+        lines.push(info.shadowCast || info.highlightCast
+          ? getInterpolatedText('expiredDiagCrossover', { shadow: expiredHueName(info.shadowCast), highlight: expiredHueName(info.highlightCast) }, 'Crossover present')
+          : getLocalizedText('expiredDiagNoCrossover', 'Crossover: none to speak of'));
+        const stops = Math.abs(info.exposureStops).toFixed(1);
+        lines.push(info.exposureStops <= -0.3
+          ? getInterpolatedText('expiredDiagUnderexposed', { stops }, `Underexposed by about ${stops} stops`)
+          : info.exposureStops >= 0.3
+            ? getInterpolatedText('expiredDiagOverexposed', { stops }, `Overexposed by about ${stops} stops`)
+            : getLocalizedText('expiredDiagExposureOk', 'Exposure: midtones sit where they should'));
+        if (info.hasSpatial) {
+          lines.push(info.unevenFogPercent >= 2
+            ? getInterpolatedText('expiredDiagUneven', { amp: String(info.unevenFogPercent) }, `Uneven fog: ${info.unevenFogPercent}% across the frame, flattened`)
+            : getLocalizedText('expiredDiagEven', 'Uneven fog: none to speak of'));
+        } else {
+          lines.push(getLocalizedText(expiredOpenCvState === 'failed' ? 'expiredDiagOpenCvFailed' : 'expiredDiagOpenCvLoading', expiredOpenCvState === 'failed' ? 'OpenCV unavailable: global rescue only' : 'OpenCV is loading…'));
+        }
+        if (info.lowBitDepth) lines.push(getInterpolatedText('expiredDiagBits', { levels: String(info.levelsUsed) }, `Only about ${info.levelsUsed} usable levels`));
+      }
+      for (const id of ['expiredUnevenFog', 'expiredLocalContrast']) {
+        const disabled = !ready || !enabled || !info?.hasSpatial;
+        document.getElementById(id).disabled = disabled;
+        document.getElementById(`${id}Value`).disabled = disabled;
+      }
+      const list = document.getElementById('expiredDiagnosis');
+      list.replaceChildren(...lines.map((text) => {
+        const item = document.createElement('li');
+        item.textContent = text;
+        return item;
+      }));
+      list.dataset.state = !ready ? 'idle' : !enabled ? 'off' : info ? 'analysed' : 'pending';
+      const hasOthers = state.fileQueue.some((item) => item.selected && item.file !== state.loadedFile);
+      document.getElementById('expiredAnalyzeBtn').disabled = !ready || !enabled;
+      document.getElementById('expiredResetBtn').disabled = !ready || !enabled;
+      document.getElementById('expiredCompareBtn').disabled = !ready || !enabled || !state.expiredAnalysis;
+      document.getElementById('expiredApplySelectedBtn').disabled = !ready || !hasOthers;
+    }
+
+    function setExpiredEnabled(enabled) {
+      const next = Boolean(enabled);
+      if (Boolean(state.expiredEnabled) === next) {
+        updateExpiredRescueUI();
+        return;
+      }
+      pushUndo('expiredEnabled');
+      state.expiredEnabled = next;
+      if (next) {
+        // Gains from the automatic gray point would fight the per-band balance.
+        if (state.wbAutoConfidence) {
+          state.wbR = 1;
+          state.wbG = 1;
+          state.wbB = 1;
+          state.wbAutoConfidence = null;
+          updateWBSliders();
+          updateGrayPointGuideUI();
+        }
+        if (state.processedImageData && !hasCurrentExpiredAnalysis()) runExpiredAnalysis(state.processedImageData);
+      }
+      markCurrentFileDirty();
+      updateExpiredRescueUI();
+      studioWorkspace?.sync();
+      schedulePreviewUpdate();
+      scheduleFullUpdate();
+    }
+
+    // The session-level entry: photos added while it is on start rescued, and
+    // the Studio shows the rescue tab first.
+    function setExpiredSession(on, { fromEntry = false } = {}) {
+      const next = Boolean(on);
+      const changed = state.expiredSession !== next;
+      state.expiredSession = next;
+      if (next) expiredTabPending = true;
+      if (state.originalImageData && Boolean(state.expiredEnabled) !== next) setExpiredEnabled(next);
+      else updateExpiredRescueUI();
+      if (next && state.processedImageData && expiredTabPending) {
+        expiredTabPending = false;
+        studioWorkspace?.selectTab?.('expired');
+      }
+      studioWorkspace?.sync();
+      if (changed && !fromEntry) {
+        showToast(getLocalizedText(next ? 'expiredSessionOn' : 'expiredSessionOff', next ? 'Expired-roll rescue is on.' : 'Expired-roll rescue is off.'), 3500);
+      }
+    }
+
+    function resetExpiredStrengths() {
+      if (!state.processedImageData) return;
+      pushUndo('expiredReset');
+      resetExpiredStrengthsInState({ force: true });
+      syncAllSlidersFromState();
+      markCurrentFileDirty();
+      updateExpiredRescueUI();
+      schedulePreviewUpdate();
+      scheduleFullUpdate();
+    }
+
+    // After "Reset color" put back the defaults: strengths from this frame's
+    // measurement, and a measurement if the rescue is now on without one.
+    function refreshExpiredAfterColorReset() {
+      if (state.expiredEnabled && state.processedImageData && !hasCurrentExpiredAnalysis()) runExpiredAnalysis(state.processedImageData);
+      else if (state.expiredAnalysis) applyExpiredAnalysisDefaults(state, state.expiredAnalysis, { force: true });
+      updateExpiredRescueUI();
+    }
+
+    function applyExpiredToSelected() {
+      const patch = {};
+      for (const key of EXPIRED_RESCUE_KEYS) patch[key] = state[key];
+      const targets = state.fileQueue.filter((item) => item.selected && item.file !== state.loadedFile);
+      for (const item of targets) {
+        if (item.settings) item.settings = { ...item.settings, ...patch };
+        else item.studioColors = { ...(item.studioColors || {}), ...patch };
+        item.isDirty = false;
+        item.status = 'pending';
+      }
+      updateFileListUI();
+      showToast(getInterpolatedText('expiredAppliedSelected', { count: String(targets.length) }, `Strengths applied to ${targets.length} photo(s)`));
+      scheduleProjectRecovery();
+    }
+
+    const expiredSliderHandlers = {
+      onInput: () => schedulePreviewUpdate(),
+      onCommit: () => {
+        schedulePreviewUpdate();
+        scheduleFullUpdate();
+      }
+    };
+    for (const key of ['expiredLevels', 'expiredNeutralize', 'expiredCrossover', 'expiredBrightness', 'expiredContrast', 'expiredUnevenFog', 'expiredLocalContrast']) {
+      setupSlider(key, key, expiredSliderHandlers);
+    }
+    document.getElementById('expiredEnabled')?.addEventListener('change', (event) => setExpiredEnabled(event.target.checked));
+    document.getElementById('expiredAnalyzeBtn')?.addEventListener('click', () => {
+      if (!state.processedImageData) return;
+      pushUndo('expiredAnalyze');
+      runExpiredAnalysis(state.processedImageData, { force: true });
+      schedulePreviewUpdate();
+      scheduleFullUpdate();
+    });
+    document.getElementById('expiredResetBtn')?.addEventListener('click', resetExpiredStrengths);
+    document.getElementById('expiredApplySelectedBtn')?.addEventListener('click', applyExpiredToSelected);
+    {
+      const compareBtn = document.getElementById('expiredCompareBtn');
+      const holdCompare = (held) => {
+        if (!compareBtn || expiredCompareHeld === held) return;
+        expiredCompareHeld = held;
+        compareBtn.classList.toggle('active', held);
+        compareBtn.setAttribute('aria-pressed', held ? 'true' : 'false');
+        schedulePreviewUpdate();
+        if (!held) scheduleFullUpdate();
+      };
+      compareBtn?.addEventListener('pointerdown', (event) => {
+        event.preventDefault();
+        holdCompare(true);
+      });
+      for (const type of ['pointerup', 'pointercancel', 'pointerleave', 'blur']) compareBtn?.addEventListener(type, () => holdCompare(false));
+      compareBtn?.addEventListener('keydown', (event) => {
+        if (event.key !== ' ' && event.key !== 'Enter') return;
+        event.preventDefault();
+        holdCompare(true);
+      });
+      compareBtn?.addEventListener('keyup', () => holdCompare(false));
     }
 
     // ===========================================
@@ -13525,6 +13999,7 @@
       renderCurve();
       updateEnlargerUI();
       updateLabMatchUI();
+      updateExpiredRescueUI();
       markCurrentFileDirty();
       if (filmTypeChanged || usesSilverCoreConversion(state)) scheduleSilverSourceRefresh();
       else schedulePreviewUpdate();
@@ -14411,6 +14886,7 @@
           if (state.currentStep < 3) return;
           pushUndo('studioReset');
           Object.assign(state, pickStudioColors(createDefaultSettings(state.originalImageData)));
+          refreshExpiredAfterColorReset();
           ['r', 'g', 'b'].forEach(ch => updateCurveFromPoints(ch));
           updateSlidersFromState();
           renderCurve();
@@ -14435,6 +14911,7 @@
           if (!state.originalImageData) return;
           document.getElementById('applyConvertBtn').click();
         },
+        onExpiredMode: () => setExpiredSession(!state.expiredSession),
         onConfirm: message => appConfirm(message),
         onExportBorder: enabled => setExportSprocketMode(enabled),
         onAutoCrop: enabled => {

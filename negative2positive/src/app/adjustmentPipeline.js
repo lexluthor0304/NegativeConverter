@@ -71,7 +71,7 @@ export function applyPreparedAdjustmentsToBuffer16(imageData, adjustmentSettings
     return;
   }
   const { quality = 'full', onProgress = null, chunkSize = 500000, lutScratch16 = null } = options;
-  const params = computeAdjustmentParams(adjustmentSettings);
+  const params = computeAdjustmentParams(adjustmentSettings, { width: plane.width, height: plane.height });
   const out16 = new Uint16Array(plane.data.length);
   applyAdjustmentsToPixels16(plane.data, out16, plane.width * plane.height, params, quality, onProgress, chunkSize, lutScratch16);
   downconvertPlane16(out16, output.data);
@@ -85,7 +85,7 @@ export function applyPreparedAdjustmentsToBuffer(imageData, adjustmentSettings, 
     onProgress = null,
     chunkSize = 500000
   } = options;
-  const params = computeAdjustmentParams(adjustmentSettings);
+  const params = computeAdjustmentParams(adjustmentSettings, { width: imageData.width, height: imageData.height });
 
   applyAdjustmentsToPixels(
     imageData.data,

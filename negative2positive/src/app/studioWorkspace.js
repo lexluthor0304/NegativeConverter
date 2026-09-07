@@ -45,7 +45,9 @@ export const studioText = {
     autoCrop: '自动裁切成像区域（关闭则保留边字与齿孔）', restoreFrame: '恢复完整画面', frameApplied: '已自动裁切 · 查看构图', frameReview: '未自动裁切 · 请确认构图',
     detectingFrame: '正在识别成像区域与倾斜角度…', frameAnalysis: '颜色仅分析成像区域',
     frameIncomplete: '画格边界不完整 · 已保留全图，请手动确认构图',
-    confirmAnalysis: '确认成像区域', analysisHint: '框住要处理的那一格画面，避开片边和齿孔。这里只改变颜色分析范围，不裁切输出，也不重新取样片基。', analysisReview: '成像区域待确认 · 保留原有颜色基准'
+    confirmAnalysis: '确认成像区域', analysisHint: '框住要处理的那一格画面，避开片边和齿孔。这里只改变颜色分析范围，不裁切输出，也不重新取样片基。', analysisReview: '成像区域待确认 · 保留原有颜色基准',
+    expired: '过期卷', expiredHint: '专门处理放久了的胶卷：先看诊断，再用五个滑块决定去雾、中和偏色、交叉偏色、亮度和对比的强度。负片会先按常规转正，再进入这里。',
+    expiredModeOn: '进入过期卷抢救', expiredModeOff: '退出过期卷抢救'
   },
   en: {
     preview: 'Your local darkroom', add: 'Add photos', menu: 'Help & settings',
@@ -88,7 +90,9 @@ export const studioText = {
     autoCrop: 'Crop image area (off: keep original film edges)', restoreFrame: 'Restore full image', frameApplied: 'Auto-cropped · Review framing', frameReview: 'Not auto-cropped · Review framing',
     detectingFrame: 'Detecting the image area and tilt…', frameAnalysis: 'Color analysis uses the image area only',
     frameIncomplete: 'Incomplete frame edges · Full image kept; review framing manually',
-    confirmAnalysis: 'Confirm image area', analysisHint: 'Frame the intended image, excluding film edges and holes. This changes color analysis only, not output framing or film-base sampling.', analysisReview: 'Confirm image area · Previous color reference retained'
+    confirmAnalysis: 'Confirm image area', analysisHint: 'Frame the intended image, excluding film edges and holes. This changes color analysis only, not output framing or film-base sampling.', analysisReview: 'Confirm image area · Previous color reference retained',
+    expired: 'Expired', expiredHint: 'For rolls that sat too long: read the diagnosis, then set how far fog removal, cast neutralising, crossover, brightness and contrast go. Negatives are converted first as usual, then rescued here.',
+    expiredModeOn: 'Start expired-roll rescue', expiredModeOff: 'Leave expired-roll rescue'
   },
   ja: {
     preview: 'ローカルのフィルム暗室', add: '写真を追加', menu: 'ヘルプと設定',
@@ -131,11 +135,13 @@ export const studioText = {
     autoCrop: '撮影窓を切り抜く（オフで元の端文字・穴を保持）', restoreFrame: '画像全体に戻す', frameApplied: '自動切り抜き済み · 構図確認', frameReview: '未切り抜き · 構図を確認',
     detectingFrame: '撮影窓と傾きを検出しています…', frameAnalysis: '撮影窓のみで色を解析',
     frameIncomplete: '画枠の端が不足 · 全体を保持しました。構図を確認してください',
-    confirmAnalysis: '撮影窓を確認', analysisHint: '目的の一コマを、端や穴を除いて囲んでください。色の解析範囲のみ変更し、出力の構図やベース採取は変更しません。', analysisReview: '撮影窓の確認が必要 · 前の色基準を維持'
+    confirmAnalysis: '撮影窓を確認', analysisHint: '目的の一コマを、端や穴を除いて囲んでください。色の解析範囲のみ変更し、出力の構図やベース採取は変更しません。', analysisReview: '撮影窓の確認が必要 · 前の色基準を維持',
+    expired: '期限切れ', expiredHint: '古くなったフィルム専用。診断を確認し、かぶり除去・色かぶり中和・クロスオーバー・明るさ・コントラストの強さを決めます。ネガは通常どおり先に変換してからここへ進みます。',
+    expiredModeOn: '期限切れフィルムの救済を開始', expiredModeOff: '期限切れフィルムの救済を終了'
   }
 };
 
-export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, onStyle, onReset, onResetAll, onRestart, onNewSession, onSync, onRetry, onConfirm, onExportBorder, onAutoCrop, onRestoreFrame, onConfirmAnalysis, onMergeShots, onLoupe, onSaveProject, onOpenProject, onRestoreProject }) {
+export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, onStyle, onReset, onResetAll, onRestart, onNewSession, onSync, onRetry, onConfirm, onExportBorder, onAutoCrop, onRestoreFrame, onConfirmAnalysis, onMergeShots, onLoupe, onSaveProject, onOpenProject, onRestoreProject, onExpiredMode }) {
   const $ = id => document.getElementById(id);
   const t = key => (studioText[getLanguage()] || studioText.en)[key];
   const move = (id, target) => target.append($(id));
@@ -147,7 +153,7 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
     <div class="studio-brand"><span class="studio-mark">NeoAnalogLab</span><span>Negative Converter</span></div>
     <nav id="studioPublicLinks" class="studio-public-links"></nav>
     <nav class="studio-actions"><button id="studioAdd" type="button" data-studio="add"></button><button id="studioLoupe" type="button" data-studio="loupe"></button><span id="studioHistory"></span><div id="studioExport"></div>
-      <details id="studioMenu"><summary data-studio="menu"></summary><div class="studio-menu-content"><div id="studioLanguages"></div><div id="studioLinks"></div><button id="studioNewSession" type="button" data-studio="newSession"></button></div></details>
+      <details id="studioMenu"><summary data-studio="menu"></summary><div class="studio-menu-content"><div id="studioLanguages"></div><div id="studioLinks"></div><button id="studioExpiredMode" type="button"></button><button id="studioNewSession" type="button" data-studio="newSession"></button></div></details>
     </nav>`;
   body.prepend(header);
   // GitHub はヘルプ内ではなく、編集中も常に見えるトップバーに置く。
@@ -200,7 +206,7 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
   const importActions = document.createElement('div');
   importActions.className = 'studio-import-actions';
   welcome.after(importActions);
-  ['uploadBtn', 'uploadFolderBtn'].forEach(id => move(id, importActions));
+  ['uploadBtn', 'uploadFolderBtn', 'uploadExpiredBtn'].forEach(id => move(id, importActions));
   const batchHint = document.createElement('p');
   batchHint.className = 'studio-import-hint';
   batchHint.dataset.studio = 'importBatch';
@@ -224,7 +230,9 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
   tabs.className = 'studio-tabs';
   tabs.setAttribute('role', 'tablist');
   const panes = {};
-  for (const key of ['edit', 'composition', 'repair', 'border', 'conversion']) {
+  // 'expired' is the separate flow for aged rolls; its tab only shows while
+  // the session or the current photo uses the rescue.
+  for (const key of ['expired', 'edit', 'composition', 'repair', 'border', 'conversion']) {
     const tab = document.createElement('button');
     tab.type = 'button';
     tab.id = `studioTab-${key}`;
@@ -265,8 +273,8 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
     requestAnimationFrame(resize);
   }
   tabs.addEventListener('keydown', event => {
-    const keys = Object.keys(panes);
-    let index = keys.indexOf(activeTab);
+    const keys = Object.keys(panes).filter(key => !$(`studioTab-${key}`).hidden);
+    let index = Math.max(0, keys.indexOf(activeTab));
     if (event.key === 'ArrowRight') index = (index + 1) % keys.length;
     else if (event.key === 'ArrowLeft') index = (index + keys.length - 1) % keys.length;
     else if (event.key === 'Home') index = 0;
@@ -385,6 +393,9 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
   panes.conversion.innerHTML = '<p class="studio-pane-hint" data-studio="conversionHint"></p>';
   move('filmSettingsSection', panes.conversion);
   move('advancedSection', panes.conversion);
+  panes.expired.innerHTML = '<p class="studio-pane-hint" data-studio="expiredHint"></p>';
+  move('expiredSection', panes.expired);
+  $('studioExpiredMode').addEventListener('click', () => { $('studioMenu').open = false; onExpiredMode?.(); });
   const retry = document.createElement('button');
   retry.id = 'studioRetry';
   retry.type = 'button';
@@ -501,6 +512,7 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
   let observedReady;
   return {
     text: t,
+    selectTab,
     sync() {
       const state = getState();
       const loaded = Boolean(state.originalImageData);
@@ -508,6 +520,12 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
       body.classList.toggle('studio-loaded', loaded);
       body.classList.toggle('studio-ready', ready);
       document.querySelectorAll('[data-studio]').forEach(el => { el.textContent = t(el.dataset.studio); });
+      const expiredFlow = Boolean(state.expiredSession || state.expiredEnabled);
+      body.classList.toggle('studio-expired', expiredFlow);
+      $('studioTab-expired').hidden = !expiredFlow;
+      if (!expiredFlow && activeTab === 'expired') selectTab('edit');
+      $('studioExpiredMode').textContent = t(state.expiredSession ? 'expiredModeOff' : 'expiredModeOn');
+      $('studioExpiredMode').setAttribute('aria-pressed', String(Boolean(state.expiredSession)));
       const busy = body.dataset.studioBusy === 'true';
       const locked = busy || state.cropping || isExportLocked();
       for (const id of ['studioImportAutoCrop', 'studioAutoCrop']) $(id).checked = Boolean(state.autoFrame.onImport);
@@ -582,7 +600,7 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
         panel.style.display = 'flex';
         $('filmSettingsSection').style.display = 'block';
         ['autoFrameSettingsSection', 'sprocketSettingsSection'].forEach(id => { $(id).style.display = 'block'; });
-        ['toneSection', 'colorSection', 'cmySection', 'additionalSection', 'consoleSection', 'aiBrushSection', 'dustRemovalSection', 'advancedSection', 'enlargerSection', 'testStripSection', 'paperSection', 'dodgeBurnSection', 'flatFieldSection', 'labMatchSection', 'metadataSection', 'recipeSection'].forEach(id => {
+        ['toneSection', 'colorSection', 'cmySection', 'additionalSection', 'consoleSection', 'aiBrushSection', 'dustRemovalSection', 'advancedSection', 'enlargerSection', 'testStripSection', 'paperSection', 'dodgeBurnSection', 'flatFieldSection', 'labMatchSection', 'metadataSection', 'recipeSection', 'expiredSection'].forEach(id => {
           $(id).style.display = ready ? 'block' : 'none';
         });
       }

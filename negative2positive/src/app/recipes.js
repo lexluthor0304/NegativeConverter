@@ -23,7 +23,10 @@ export const RECIPE_KEYS = Object.freeze([
   'exposure', 'contrast', 'highlights', 'shadows', 'temperature', 'tint',
   'vibrance', 'saturation', 'cyan', 'magenta', 'yellow', 'curvePoints',
   'wbR', 'wbG', 'wbB', 'wbUserOverride',
-  'coreSharpenAmount', 'coreSharpenRadius', 'coreSharpenThreshold', 'positiveMode'
+  'coreSharpenAmount', 'coreSharpenRadius', 'coreSharpenThreshold', 'positiveMode',
+  // Expired-film rescue strengths; the per-frame analysis is never shared.
+  'expiredEnabled', 'expiredLevels', 'expiredNeutralize', 'expiredCrossover',
+  'expiredBrightness', 'expiredContrast', 'expiredUnevenFog', 'expiredLocalContrast'
 ]);
 
 export const RECIPE_TAG_KEYS = Object.freeze(['stock', 'lab', 'scanner', 'note']);

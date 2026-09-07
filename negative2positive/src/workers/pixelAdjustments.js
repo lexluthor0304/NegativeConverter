@@ -2,6 +2,16 @@
  * Pure pixel adjustment functions extracted from main.js for use in Web Workers.
  * No DOM dependencies — operates only on typed arrays and plain objects.
  */
+import { buildExpiredRescueStages, buildExpiredSpatialStage, applyExpiredSpatial, applyExpiredTone } from '../pipeline/expiredRescue.js';
+
+// Linear interpolation of a 256-entry float curve at a fractional position.
+function lerpCurve(curve, x) {
+  if (x <= 0) return curve[0];
+  if (x >= 255) return curve[255];
+  const i = x | 0;
+  const f = x - i;
+  return curve[i] + (curve[i + 1] - curve[i]) * f;
+}
 
 export function hue2rgb(p, q, t) {
   if (t < 0) t += 1;
@@ -18,12 +28,14 @@ export function buildChannelLuts({
   rMult, gMult, bMult,
   contrastFactor, doContrast,
   doTempTint, tempRMult, tintGMult, tempBMult,
-  doCMY, cmyRShift, cmyGShift, cmyBShift
+  doCMY, cmyRShift, cmyGShift, cmyBShift,
+  rescueR = null, rescueG = null, rescueB = null
 }) {
   for (let v = 0; v < 256; v++) {
-    let r = v * rMult;
-    let g = v * gMult;
-    let b = v * bMult;
+    // The expired-film rescue reshapes the positive before every other control.
+    let r = (rescueR ? rescueR[v] : v) * rMult;
+    let g = (rescueG ? rescueG[v] : v) * gMult;
+    let b = (rescueB ? rescueB[v] : v) * bMult;
 
     if (doContrast) {
       r = (r - 127.5) * contrastFactor + 127.5;
@@ -80,14 +92,16 @@ export function applyAdjustmentsToPixels(inputData, outputData, pixelCount, para
     satFactor, vibFactor, doHsl,
     cmyRShift, cmyGShift, cmyBShift, doCMY,
     curveR, curveG, curveB,
-    doLook, doLookMatrix, lookMatrix, lookOffset, lookR, lookG, lookB
+    doLook, doLookMatrix, lookMatrix, lookOffset, lookR, lookG, lookB,
+    rescueR, rescueG, rescueB, doRescueSpatial, rescueSpatial, doRescuePixel, rescueStages, frameWidth, frameHeight
   } = params;
 
   const lumaScale = 2 / 255;
   const totalBytes = pixelCount * 4;
 
-  // Fast path: LUT-only when no highlights/shadows/HSL and no cross-channel look matrix
-  if (!doHighlights && !doShadows && !doHsl && !doLookMatrix) {
+  // Fast path: LUT-only when no highlights/shadows/HSL, no cross-channel look
+  // matrix and no per-pixel rescue stage (position or luminance dependent)
+  if (!doHighlights && !doShadows && !doHsl && !doLookMatrix && !doRescueSpatial && !doRescuePixel) {
     const lutR = lutScratch && lutScratch.lutR instanceof Uint8Array && lutScratch.lutR.length >= 256
       ? lutScratch.lutR
       : new Uint8Array(256);
@@ -103,7 +117,8 @@ export function applyAdjustmentsToPixels(inputData, outputData, pixelCount, para
       rMult, gMult, bMult,
       contrastFactor, doContrast,
       doTempTint, tempRMult, tintGMult, tempBMult,
-      doCMY, cmyRShift, cmyGShift, cmyBShift
+      doCMY, cmyRShift, cmyGShift, cmyBShift,
+      rescueR, rescueG, rescueB
     });
     if (doLook && lookR) {
       // A per-channel look curve folds into the channel LUTs.
@@ -132,10 +147,40 @@ export function applyAdjustmentsToPixels(inputData, outputData, pixelCount, para
 
   // Full path with highlights/shadows/HSL
   let progressNext = chunkSize * 4;
+  // The spatial rescue stage needs each pixel's position in the frame; the
+  // luminance-indexed crossover needs the whole pixel. Both run here.
+  const spatialWidth = doRescueSpatial && frameWidth > 0 ? frameWidth : 0;
+  const spatialHeight = doRescueSpatial && frameHeight > 0 ? frameHeight : 1;
+  const rescuePx = doRescueSpatial || doRescuePixel ? new Float32Array(3) : null;
+  let px = 0;
+  let py = 0;
   for (let i = 0; i < totalBytes; i += 4) {
-    let r = inputData[i] * rMult;
-    let g = inputData[i + 1] * gMult;
-    let b = inputData[i + 2] * bMult;
+    let r;
+    let g;
+    let b;
+    if (rescuePx) {
+      rescuePx[0] = inputData[i];
+      rescuePx[1] = inputData[i + 1];
+      rescuePx[2] = inputData[i + 2];
+      if (spatialWidth) {
+        applyExpiredSpatial(rescueSpatial, (px + 0.5) / spatialWidth, (py + 0.5) / spatialHeight, rescuePx);
+        if (++px === spatialWidth) { px = 0; py++; }
+      }
+      if (doRescuePixel) {
+        applyExpiredTone(rescueStages, rescuePx);
+      } else if (rescueR) {
+        rescuePx[0] = lerpCurve(rescueR, rescuePx[0]);
+        rescuePx[1] = lerpCurve(rescueG, rescuePx[1]);
+        rescuePx[2] = lerpCurve(rescueB, rescuePx[2]);
+      }
+      r = rescuePx[0] * rMult;
+      g = rescuePx[1] * gMult;
+      b = rescuePx[2] * bMult;
+    } else {
+      r = (rescueR ? rescueR[inputData[i]] : inputData[i]) * rMult;
+      g = (rescueG ? rescueG[inputData[i + 1]] : inputData[i + 1]) * gMult;
+      b = (rescueB ? rescueB[inputData[i + 2]] : inputData[i + 2]) * bMult;
+    }
 
     if (doContrast) {
       r = (r - 127.5) * contrastFactor + 127.5;
@@ -310,6 +355,7 @@ export function isIdentityAdjustmentParams(params) {
     && !params.doHsl
     && !params.doCMY
     && !params.doLook
+    && !params.doRescue
     && isIdentityCurve(params.curveR)
     && isIdentityCurve(params.curveG)
     && isIdentityCurve(params.curveB);
@@ -318,8 +364,10 @@ export function isIdentityAdjustmentParams(params) {
 /**
  * Compute adjustment parameters from settings object.
  * This extracts pure numeric computations that don't depend on DOM state.
+ * `frame` ({ width, height }) is needed only by the position-dependent
+ * expired-film stage; without it that stage is left out.
  */
-export function computeAdjustmentParams(settings) {
+export function computeAdjustmentParams(settings, frame = null) {
   const exposureMult = Math.pow(2, settings.exposure || 0);
   const contrastFactor = 1 + ((settings.contrast || 0) / 100);
   const tempFactor = (settings.temperature || 0) / 100;
@@ -358,6 +406,19 @@ export function computeAdjustmentParams(settings) {
   const doLookCurves = Boolean(lookCurves) && !(isIdentityCurve(lookCurves.r) && isIdentityCurve(lookCurves.g) && isIdentityCurve(lookCurves.b));
   const doLook = doLookMatrix || doLookCurves;
 
+  // Expired-film rescue (see pipeline/expiredRescue.js): tone stages rebuilt
+  // from the stored analysis and strengths; null when off. With the
+  // luminance-indexed crossover active the stages run per pixel, otherwise
+  // they compose into one curve per channel for the LUT path.
+  const rescueStages = buildExpiredRescueStages(settings);
+  const doRescue = Boolean(rescueStages);
+  const rescue = rescueStages ? rescueStages.composed : null;
+  const doRescuePixel = Boolean(rescueStages && !rescueStages.composed);
+  const frameWidth = frame && Number.isFinite(frame.width) ? frame.width | 0 : 0;
+  const frameHeight = frame && Number.isFinite(frame.height) ? frame.height | 0 : 0;
+  const rescueSpatial = rescueStages && frameWidth > 0 && frameHeight > 0 ? buildExpiredSpatialStage(settings) : null;
+  const doRescueSpatial = Boolean(rescueSpatial);
+
   return {
     rMult, gMult, bMult,
     contrastFactor, doContrast,
@@ -373,6 +434,16 @@ export function computeAdjustmentParams(settings) {
     doLook, doLookMatrix, lookMatrix, lookOffset,
     lookR: doLookCurves ? lookCurves.r : null,
     lookG: doLookCurves ? lookCurves.g : null,
-    lookB: doLookCurves ? lookCurves.b : null
+    lookB: doLookCurves ? lookCurves.b : null,
+    doRescue,
+    rescueR: rescue ? rescue.r : null,
+    rescueG: rescue ? rescue.g : null,
+    rescueB: rescue ? rescue.b : null,
+    doRescueSpatial,
+    rescueSpatial,
+    doRescuePixel,
+    rescueStages,
+    frameWidth,
+    frameHeight
   };
 }
