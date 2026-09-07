@@ -6,11 +6,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>Negative Converter | Free Film Negative to Positive Tool</title>
   <meta name="description" content="Convert scanned film negatives to positives in your browser. Free, private, no uploads, no signup. Supports JPG, 16-bit PNG, RAW, ProRaw, and TIFF export.">
-  <meta name="keywords" content="film negative converter, negative to positive online, free film scanner converter, NEF to positive, CR2 negative converter, ARW negative converter, DNG negative converter, browser film converter, Kodak Fujifilm Ilford presets, iPhone ProRaw negative">
-  <meta name="author" content="NegativeConverter">
+  <meta name="author" content="NeoAnalogLab">
   <meta name="robots" content="index, follow, max-image-preview:large">
   <link rel="canonical" href="https://negative-converter.tokugai.com/">
   <link rel="alternate" hreflang="en" href="https://negative-converter.tokugai.com/">
+  <link rel="alternate" hreflang="zh-Hans" href="https://negative-converter.tokugai.com/zh/">
+  <link rel="alternate" hreflang="ja" href="https://negative-converter.tokugai.com/ja/">
   <link rel="alternate" hreflang="x-default" href="https://negative-converter.tokugai.com/">
 
   <meta property="og:type" content="website">
@@ -49,9 +50,12 @@
         "operatingSystem": "Any (web browser)",
         "browserRequirements": "Requires WebAssembly and modern browser (Chrome, Firefox, Safari, Edge)",
         "description": "Free, browser-based tool that converts scanned film negatives to positive images. All processing happens locally in the browser; no images are uploaded to any server. Supports JPG, 16-bit PNG, and RAW formats including CR2 (Canon), NEF (Nikon), ARW (Sony), DNG (Adobe / iPhone ProRaw), and RW2 (Panasonic).",
-        "dateModified": "2026-06-11",
+        "dateModified": "2026-09-07",
         "featureList": [
           "Color, B&W, and positive (slide) film modes",
+          "Positive correction and Edit only modes",
+          "Import film-type suggestions with or without a border",
+          "Local MI-GAN repair brush and AI-assisted dust removal",
           "RAW decoding via LibRaw WebAssembly (CR2, NEF, ARW, DNG, RW2)",
           "16-bit PNG decoding via UPNG.js",
           "iPhone ProRaw DNG support via UTIF.js",
@@ -70,18 +74,18 @@
           "availability": "https://schema.org/InStock"
         },
         "isAccessibleForFree": true,
-        "permissions": "No account, no upload, no tracking",
+        "permissions": "Local photo processing; optional camera access for camera tools",
         "inLanguage": ["en", "zh", "ja"],
         "creator": {
           "@type": "Organization",
-          "name": "NegativeConverter",
+          "name": "NeoAnalogLab",
           "url": "https://negative-converter.tokugai.com/"
         }
       },
       {
         "@type": "Organization",
         "@id": "https://negative-converter.tokugai.com/#org",
-        "name": "NegativeConverter",
+        "name": "NeoAnalogLab",
         "url": "https://negative-converter.tokugai.com/",
         "sameAs": [
           "https://github.com/lexluthor0304/NegativeConverter"
@@ -100,6 +104,7 @@
   </script>
 
   <link rel="stylesheet" href="./src/styles/app.css">
+  <noscript><style>.app-main{display:block!important}#uploadPlaceholder{display:block!important}.studio-welcome{display:block!important}</style></noscript>
 
 </head>
 
@@ -203,6 +208,15 @@
     <section class="preview-section">
       <div class="canvas-container" id="canvasContainer">
         <div class="upload-placeholder" id="uploadPlaceholder">
+          <div class="studio-welcome" id="studioWelcome">
+            <div class="studio-negative-icon" aria-hidden="true"><span></span><span></span><span></span></div>
+            <h1 data-studio="title">Free film negative converter</h1>
+            <p data-studio="subtitle">Convert negatives and correct slides on your device. No photo uploads.</p>
+            <nav class="studio-discovery" aria-label="Learn about Negative Converter">
+              <a href="./guide.html">Conversion guide</a><a href="./slide-film-correction.html">Slide correction</a><a href="./ai-film-photo-repair.html">AI repair</a><a href="./film-type-detection.html">Scans without borders</a><a href="./about.html">About NeoAnalogLab</a>
+              <a href="./zh/" lang="zh-Hans" hreflang="zh-Hans">中文介绍</a><a href="./ja/" lang="ja" hreflang="ja">日本語ガイド</a>
+            </nav>
+          </div>
           <a class="upload-privacy-note" href="./privacy.html" target="_blank" rel="noopener">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
               <path d="M12 2l8 4v6c0 5-3.5 9.4-8 10-4.5-.6-8-5-8-10V6l8-4z"/>

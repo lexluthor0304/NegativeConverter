@@ -24,6 +24,7 @@ roots.forEach(walk);
 // Repo-wide consistency checks count as part of the suite
 const scriptsDir = dirname(fileURLToPath(import.meta.url));
 tests.push(join(scriptsDir, 'check-seo-heads.mjs'));
+tests.push(join(scriptsDir, 'check-search-contract.mjs'));
 tests.push(join(scriptsDir, 'check-pinned-versions.mjs'));
 tests.push(join(scriptsDir, 'check-vercel-config.mjs'));
 tests.push(join(scriptsDir, 'check-appstore-screenshots.mjs'));

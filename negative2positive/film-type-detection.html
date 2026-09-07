@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Positive or Negative? Film Scan Detection Guide</title>
+  <meta name="description" content="Identify color negatives, B&amp;W negatives and positive scans, including photos without film borders. Learn confidence labels, manual overrides and mixed-batch import.">
+  <meta name="author" content="NeoAnalogLab">
+  <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
+  <link rel="canonical" href="https://negative-converter.tokugai.com/film-type-detection.html">
+  <link rel="alternate" hreflang="en" href="https://negative-converter.tokugai.com/film-type-detection.html">
+  <link rel="alternate" hreflang="x-default" href="https://negative-converter.tokugai.com/film-type-detection.html">
+  <link rel="stylesheet" href="/seo-content.css">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Negative Converter by NeoAnalogLab">
+  <meta property="og:title" content="Positive or Negative? Film Scan Detection Guide">
+  <meta property="og:description" content="Identify color negatives, B&amp;W negatives and positive scans, including photos without film borders. Learn confidence labels, manual overrides and mixed-batch import.">
+  <meta property="og:url" content="https://negative-converter.tokugai.com/film-type-detection.html">
+  <meta property="og:image" content="https://negative-converter.tokugai.com/og-cover.png">
+  <meta property="og:image:alt" content="Negative Converter by NeoAnalogLab">
+  <meta property="og:locale" content="en_US">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Positive or Negative? Film Scan Detection Guide">
+  <meta name="twitter:description" content="Identify color negatives, B&amp;W negatives and positive scans, including photos without film borders. Learn confidence labels, manual overrides and mixed-batch import.">
+  <meta name="twitter:image" content="https://negative-converter.tokugai.com/og-cover.png">
+  <meta name="theme-color" content="#17141f">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "Article",
+      "@id": "https://negative-converter.tokugai.com/film-type-detection.html#article",
+      "headline": "Identify a film scan with or without its border",
+      "name": "Identify a film scan with or without its border",
+      "description": "Identify color negatives, B&W negatives and positive scans, including photos without film borders. Learn confidence labels, manual overrides and mixed-batch import.",
+      "url": "https://negative-converter.tokugai.com/film-type-detection.html",
+      "inLanguage": "en",
+      "datePublished": "2026-09-07",
+      "dateModified": "2026-09-07",
+      "mainEntityOfPage": "https://negative-converter.tokugai.com/film-type-detection.html",
+      "author": {
+        "@id": "https://negative-converter.tokugai.com/#org"
+      },
+      "publisher": {
+        "@id": "https://negative-converter.tokugai.com/#org"
+      },
+      "image": "https://negative-converter.tokugai.com/og-cover.png",
+      "isAccessibleForFree": true
+    },
+    {
+      "@type": "Organization",
+      "@id": "https://negative-converter.tokugai.com/#org",
+      "name": "NeoAnalogLab",
+      "url": "https://negative-converter.tokugai.com/about.html",
+      "sameAs": [
+        "https://github.com/lexluthor0304/NegativeConverter"
+      ]
+    },
+    {
+      "@type": "BreadcrumbList",
+      "@id": "https://negative-converter.tokugai.com/film-type-detection.html#breadcrumbs",
+      "itemListElement": [
+        {
+          "@type": "ListItem",
+          "position": 1,
+          "name": "Home",
+          "item": "https://negative-converter.tokugai.com/"
+        },
+        {
+          "@type": "ListItem",
+          "position": 2,
+          "name": "Identify a film scan with or without its border",
+          "item": "https://negative-converter.tokugai.com/film-type-detection.html"
+        }
+      ]
+    },
+    {
+      "@type": "FAQPage",
+      "@id": "https://negative-converter.tokugai.com/film-type-detection.html#faq",
+      "inLanguage": "en",
+      "mainEntity": [
+        {
+          "@type": "Question",
+          "name": "Must I photograph the film border for automatic detection?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "No. The detector also uses the image area, including broad orange-mask evidence. A visible rebate or readable DX code can provide stronger evidence but is not required."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Can every B&W scan be identified automatically?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "No. A borderless grayscale positive and negative can both fit the same pixel evidence. The app prompts you to choose the polarity instead of claiming certainty."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Does a RAW file mean the photo is a negative?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "No. RAW describes the file encoding, not the subject. A camera RAW file can contain a negative scan, a positive slide or an ordinary digital photograph."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Will the app overwrite my manual film-type choice?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Saved per-photo settings retain the selected type. Automatic detection applies to new photos and never-viewed batch items."
+          }
+        }
+      ]
+    }
+  ]
+}
+  </script>
+  <script type="module" src="./src/app/analytics.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#content">Skip to content</a>
+  <header class="site-header"><a class="brand" href="/">NeoAnalogLab · Negative Converter</a><nav aria-label="Guide"><a href="/guide.html">Guide</a><a href="/about.html">About</a><a class="cta" href="/">Open converter</a></nav></header>
+  <main id="content">
+    <nav class="breadcrumbs" aria-label="Breadcrumb"><a href="/">Home</a> / <span>Identify a film scan with or without its border</span></nav>
+    <article>
+      <section class="hero"><h1>Identify a film scan with or without its border</h1><p class="lead">Negative Converter suggests a film type when you import a new photo. It can use image-wide orange-mask evidence even if you did not photograph the film edge. The result is a suggestion: some positive and negative images cannot be distinguished from pixels alone.</p><p class="page-meta">Published by <a href="/about.html">NeoAnalogLab</a> · Updated: <time datetime="2026-09-07">2026-09-07</time></p><div class="cta-row"><a class="btn primary" href="/">Open converter</a></div></section>
+      <section id="section-1"><h2>What evidence does detection use?</h2><table><thead><tr><th>Scan evidence</th><th>Likely interpretation</th><th>Limitation</th></tr></thead><tbody><tr><td>A consistent orange mask across the image</td><td>Color negative</td><td>A very warm positive scene can look similar.</td></tr><tr><td>A uniform orange rebate brighter than the image</td><td>Stronger color-negative evidence</td><td>The photographed edge must actually be film rebate.</td></tr><tr><td>A clear neutral rebate around a grayscale image</td><td>B&amp;W negative suggestion</td><td>A white border on a positive image can resemble it.</td></tr><tr><td>Consistent readable DX film information</td><td>Film type from the film database</td><td>Unreadable or contradictory markings are not automatically trusted.</td></tr><tr><td>No mask and varied colors</td><td>Positive suggestion</td><td>A previously color-balanced negative may have no orange mask.</td></tr></tbody></table></section>
+      <section id="section-2"><h2>What if my scan has no film edge?</h2><p>You do not have to recapture the border. Detection inspects the whole image and supports cropped orange-mask negatives. After choosing Color negative, use the No Border / ES-2 mask workflow, automatic film-base estimation, or a reference from the same roll if available.</p><p>For an already color-corrected scan, inspect the preview and set the type yourself. File extensions and camera model names do not establish positive or negative polarity: a RAW file can contain either kind of photograph.</p></section>
+      <section id="section-3"><h2>Why is a borderless black-and-white scan uncertain?</h2><p>Both a B&amp;W negative and its positive inversion contain only gray values. Without additional evidence, the image does not provide a unique answer. The app therefore keeps the positive orientation and prompts you to select B&amp;W negative or Positive in Conversion.</p><p>This avoids pretending a contrast or brightness heuristic is a reliable identification. There is no published accuracy percentage for a representative real-film dataset.</p></section>
+      <section id="section-4"><h2>Correct a suggestion and keep the decision</h2><ol><li>Open Conversion and inspect the confidence message and preview.</li><li>Select Color, B&amp;W or Positive explicitly if the suggestion is wrong.</li><li>For positives, choose Correct slide or Edit only.</li><li>Continue editing. Saved settings preserve that photo’s manual type when you switch away and return.</li></ol><p>For a known uniform batch, disable Detect film type on import and choose the type to apply to new photos. With automatic detection enabled, never-viewed batch exports are assessed individually instead of inheriting the preceding photo’s type.</p></section>
+      <section id="section-5"><h2>Related workflow guides</h2><p>Read the <a href="/film-orange-mask.html">orange-mask guide</a>, <a href="/slide-film-correction.html">positive slide correction guide</a> and <a href="/batch-film-negative-converter.html">batch export guide</a>. Implementation and tests are public in the <a href="https://github.com/lexluthor0304/NegativeConverter">source repository</a>.</p></section>
+      <section id="faq"><h2>Questions and answers</h2><h3>Must I photograph the film border for automatic detection?</h3><p>No. The detector also uses the image area, including broad orange-mask evidence. A visible rebate or readable DX code can provide stronger evidence but is not required.</p>
+<h3>Can every B&amp;W scan be identified automatically?</h3><p>No. A borderless grayscale positive and negative can both fit the same pixel evidence. The app prompts you to choose the polarity instead of claiming certainty.</p>
+<h3>Does a RAW file mean the photo is a negative?</h3><p>No. RAW describes the file encoding, not the subject. A camera RAW file can contain a negative scan, a positive slide or an ordinary digital photograph.</p>
+<h3>Will the app overwrite my manual film-type choice?</h3><p>Saved per-photo settings retain the selected type. Automatic detection applies to new photos and never-viewed batch items.</p></section>
+      <section><h2>Related guides</h2><ul><li><a href="/slide-film-correction.html">Correct slide film without inverting it</a></li><li><a href="/ai-film-photo-repair.html">Repair dust and selected areas of a film scan locally</a></li></ul></section>
+    </article>
+  </main>
+  <footer><p>NeoAnalogLab · <a href="/about.html">About</a> · <a href="/privacy.html">Privacy</a></p><nav aria-label="Languages"><a href="/" lang="en" hreflang="en">English</a> · <a href="/zh/" lang="zh-Hans" hreflang="zh-Hans">中文</a> · <a href="/ja/" lang="ja" hreflang="ja">日本語</a></nav></footer>
+</body>
+</html>

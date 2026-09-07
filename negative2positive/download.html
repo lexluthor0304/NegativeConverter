@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh">
+<html lang="en">
 
 <head>
   <meta charset="UTF-8" />
@@ -37,7 +37,7 @@
         "applicationSubCategory": "Photo Editor",
         "operatingSystem": ["Windows", "macOS", "Linux"],
         "description": "Free offline desktop app for converting scanned film negatives to positive images locally, with RAW support and 16-bit PNG/TIFF export.",
-        "dateModified": "2026-06-11",
+        "dateModified": "2026-09-07",
         "isAccessibleForFree": true,
         "offers": {
           "@type": "Offer",
@@ -52,7 +52,7 @@
         ],
         "publisher": {
           "@type": "Organization",
-          "name": "NegativeConverter",
+          "name": "NeoAnalogLab",
           "url": "https://negative-converter.tokugai.com/"
         }
       },
@@ -425,8 +425,8 @@
 <body>
   <header class="topbar">
     <div class="topbar-left">
-      <h1 class="page-title" data-i18n="pageTitle">离线版下载</h1>
-      <div class="page-subtitle" data-i18n="pageSubtitle">下载 Windows / macOS / Linux 离线桌面版（本地运行，不需要联网）。</div>
+      <h1 class="page-title" data-i18n="pageTitle">Offline Download</h1>
+      <div class="page-subtitle" data-i18n="pageSubtitle">Download the offline desktop app for Windows / macOS / Linux.</div>
     </div>
     <div class="topbar-right">
       <div class="lang-selector" aria-label="Language selector">
@@ -434,7 +434,7 @@
         <button class="lang-btn" data-lang="en">EN</button>
         <button class="lang-btn" data-lang="ja">日本語</button>
       </div>
-      <button class="topbar-btn" id="backBtn" type="button" data-i18n="backToApp">返回应用</button>
+      <button class="topbar-btn" id="backBtn" type="button" data-i18n="backToApp">Back to App</button>
     </div>
   </header>
 
@@ -445,24 +445,22 @@
           <path d="M12 2l8 4v6c0 5-3.5 9.4-8 10-4.5-.6-8-5-8-10V6l8-4z"></path>
           <path d="M9 12l2 2 4-4"></path>
         </svg>
-        <span data-i18n="heroTitle">离线桌面版（更安心）</span>
+        <span data-i18n="heroTitle">Offline desktop app</span>
       </div>
-      <div class="hero-body" data-i18n="heroBody">
-        离线版安装后可直接在本地运行：不需要联网、照片也不会上传。适合对隐私和稳定性要求更高的使用场景。
-      </div>
+      <div class="hero-body" data-i18n="heroBody">Runs locally after installation: no internet required, and your photos are never uploaded. Great for privacy and reliability.</div>
     </section>
 
     <section class="card" aria-label="Downloads">
-      <h2 data-i18n="downloadsTitle">下载</h2>
+      <h2 data-i18n="downloadsTitle">Downloads</h2>
       <div class="status-line">
         <span class="badge ok" id="latestTagBadge" style="display:none;"></span>
         <span class="badge" id="sourceBadge" style="display:none;"></span>
         <span class="badge warn" id="statusBadge" style="display:none;"></span>
       </div>
-      <div class="muted" id="latestInfo" data-i18n="loading">正在获取最新版本…</div>
+      <div class="muted" id="latestInfo" data-i18n="loading">Fetching the latest version…</div>
       <div class="download-grid" id="downloadGrid" style="display:none;"></div>
       <div class="muted" id="fallbackLinks" style="display:none;">
-        <span data-i18n="fallbackLabel">备用：</span>
+        <span data-i18n="fallbackLabel">Fallback:</span>
         <a href="https://apps.apple.com/app/id6797694070" target="_blank" rel="noopener" data-i18n="macAppStore">Mac App Store</a>
         ·
         <a href="https://github.com/lexluthor0304/NegativeConverter/releases/latest" target="_blank" rel="noopener" data-i18n="githubReleases">GitHub Releases</a>
@@ -470,15 +468,16 @@
     </section>
 
     <section class="card" aria-label="Notes">
-      <h2 data-i18n="notesTitle">提示</h2>
+      <h2 data-i18n="notesTitle">Notes</h2>
       <ul class="muted" style="padding-left: 18px;">
-        <li data-i18n="noteWindows">Windows：优先下载 EXE（安装器）。</li>
-        <li data-i18n="noteMac">macOS：推荐从 Mac App Store 安装（免费、自动更新）。也提供 DMG 直接下载；若提示“无法打开”，请在系统设置里允许打开。</li>
-        <li data-i18n="noteLinux">Linux：优先 AppImage；也提供 deb/rpm。</li>
-        <li data-i18n="noteVerify">下载后可校验 SHA-256（页面会显示）。</li>
+        <li data-i18n="noteWindows">Windows: EXE installer is recommended.</li>
+        <li data-i18n="noteMac">macOS: install from the Mac App Store (free, auto-updating). A direct DMG is also available; if it is blocked, allow it in System Settings.</li>
+        <li data-i18n="noteLinux">Linux: standard AppImage is recommended. Do not run with sudo. The compatibility AppImage defaults DMABUF off for startup reliability; if you still see GLIBC errors on older systems, use the compatibility AppImage.</li>
+        <li data-i18n="noteVerify">You can verify the SHA-256 shown on this page.</li>
       </ul>
     </section>
-  </main>
+  <aside class="product-guides" aria-label="Product guides"><p>Published by <a href="/about.html">NeoAnalogLab</a>. Explore <a href="/slide-film-correction.html">slide correction</a>, <a href="/ai-film-photo-repair.html">AI film repair</a> and <a href="/film-type-detection.html">film-type detection without borders</a>. <a href="/zh/" lang="zh-Hans">中文介绍</a> · <a href="/ja/" lang="ja">日本語ガイド</a></p></aside>
+</main>
 
   <script>
     const SUPPORTED_LANGS = ['zh', 'en', 'ja'];

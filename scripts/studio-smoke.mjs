@@ -33,6 +33,10 @@ export async function runStudioSmoke({ send, evaluate, waitFor, wait, fail, inst
   if (!await evaluate(`document.getElementById('studioImportAutoCrop').checked`)) fail('auto crop is not enabled by default');
   // 既存の裁切・履歴シナリオは自動取景を明示的に無効化。自動取景は末尾で別途検証。
   await evaluate(`document.getElementById('studioImportAutoCrop').click()`);
+  // This scenario tests negative-only controls, not classifier accuracy. Its
+  // synthetic mask does not model a physical stock; import the known type.
+  // Mixed automatic imports are covered by positive-import-smoke.mjs.
+  await evaluate(`document.getElementById('importFilmTypeAuto').checked && document.getElementById('importFilmTypeAuto').click()`);
   if (!await evaluate(`(() => {
     const link = document.querySelector('.studio-header .github-star-btn-main');
     return link?.href === 'https://github.com/lexluthor0304/NegativeConverter' && link.getBoundingClientRect().width > 0;

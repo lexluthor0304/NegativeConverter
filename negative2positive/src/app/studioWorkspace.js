@@ -6,7 +6,7 @@ export const studioText = {
   zh: {
     preview: '本地胶片暗房', add: '添加照片', menu: '帮助与设置',
     loupe: '实时放大镜', loupeHint: '把相机对准底片，实时看到转正后的画面；拍下即加入照片列表。',
-    title: '把负片交给我们。', subtitle: '你只管调出喜欢的色彩。',
+    title: '免费胶片负片转换', subtitle: '在本机转换负片、校正正片，无需上传照片。',
     importBatch: '可多选照片，也可把一组照片拖到这里',
     importHint: '自动取景与转换 · 保留原文件 · 照片不上传', formats: '支持 RAW、TIFF、PNG 和 JPEG',
     edit: '调色', editHint: '从自然的正片开始，找到你的色彩。', look: '色彩风格',
@@ -50,7 +50,7 @@ export const studioText = {
   en: {
     preview: 'Your local darkroom', add: 'Add photos', menu: 'Help & settings',
     loupe: 'Live loupe', loupeHint: 'Point a camera at the negative and see it converted live; capture adds the frame to the photos.',
-    title: 'Your negatives, brought to light.', subtitle: 'Make the colors your own.',
+    title: 'Free film negative converter', subtitle: 'Convert negatives and correct slides on your device. No photo uploads.',
     importBatch: 'Select multiple photos, or drop a batch here',
     importHint: 'Auto frame & convert · Originals preserved · No uploads', formats: 'RAW, TIFF, PNG and JPEG welcome',
     edit: 'Color', editHint: 'A natural starting point. A look that is yours.', look: 'Color style',
@@ -93,7 +93,7 @@ export const studioText = {
   ja: {
     preview: 'ローカルのフィルム暗室', add: '写真を追加', menu: 'ヘルプと設定',
     loupe: 'ライブルーペ', loupeHint: 'カメラを原板に向けると変換後の画面がライブで見え、撮影すると写真一覧に加わります。',
-    title: 'ネガから、あなたの一枚へ。', subtitle: '好きな色に仕上げることに、集中。',
+    title: '無料のフィルムネガ変換', subtitle: 'ネガ変換もポジ補正も端末内で。写真のアップロードは不要です。',
     importBatch: '複数選択、または写真をまとめてドロップ',
     importHint: '自動取景・変換 · 元画像を保持 · 写真の送信なし', formats: 'RAW・TIFF・PNG・JPEG に対応',
     edit: '色調整', editHint: '自然な仕上がりから、自分らしい色へ。', look: '色のスタイル',
@@ -196,10 +196,7 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
   const guide = document.querySelector('.header-site-links');
   if (guide) $('studioLinks').append(guide);
 
-  const welcome = document.createElement('div');
-  welcome.className = 'studio-welcome';
-  welcome.innerHTML = `<div class="studio-negative-icon" aria-hidden="true"><span></span><span></span><span></span></div><h1 data-studio="title"></h1><p data-studio="subtitle"></p>`;
-  $('uploadPlaceholder').prepend(welcome);
+  const welcome = $('studioWelcome');
   const importActions = document.createElement('div');
   importActions.className = 'studio-import-actions';
   welcome.after(importActions);

@@ -261,6 +261,10 @@ if (process.argv.includes('--positive-only')) {
   process.exit(0);
 }
 
+// The historical JPEG fixture is a finished positive. This scenario
+// deliberately exercises negative inversion, so choose the import type explicitly.
+await evaluate(`document.getElementById('importFilmTypeAuto').checked && document.getElementById('importFilmTypeAuto').click()`);
+
 // ---- 1. load the fixture through the real file input ----
 if (!process.argv.includes('--studio-only') && !process.argv.includes('--auto-crop-only') && !process.argv.includes('--color-analysis-only') && !process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) {
 const doc = await send('DOM.getDocument');

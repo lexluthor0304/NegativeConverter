@@ -4,7 +4,9 @@
 
 Negative Converter targets photographers and film enthusiasts who scan their own film and want a fast, private way to invert and color-correct negatives without paying for desktop software like Negative Lab Pro or learning Photoshop curves manually. It supports both consumer scans (JPG, 16-bit PNG) and direct camera RAW files, including iPhone ProRaw DNGs.
 
-Last updated: 2026-06-11.
+Last updated: 2026-09-07.
+
+Publisher: NeoAnalogLab. Product facts and support: https://negative-converter.tokugai.com/about.html
 
 ## Key facts
 
@@ -13,7 +15,9 @@ Last updated: 2026-06-11.
 - **Platforms**: Any modern browser (Chrome, Firefox, Safari, Edge). Also packaged as offline desktop apps (Windows / macOS / Linux) via Tauri; the macOS build is free on the Mac App Store.
 - **Supported input formats**: JPG, PNG (8-bit and 16-bit), CR2 (Canon), NEF (Nikon), ARW (Sony), DNG (Adobe / iPhone ProRaw), RW2 (Panasonic).
 - **Supported output formats**: PNG (8-bit / 16-bit), JPEG (8-bit), TIFF (8-bit / 16-bit).
-- **Film modes**: Color negative, B&W negative, positive slide.
+- **Film modes**: Color negative, B&W negative, positive slide correction and Edit only. Import detection supports borderless scans but cannot reliably determine every image’s polarity. Saved manual selections are retained.
+- **AI repair**: Standalone local MI-GAN brush and optional automatic dust removal. Model assets download in the web app; photo pixels are not sent for inference. Reconstructed detail is a prediction, not recovered evidence.
+- **Network use**: The web site uses Vercel page-view analytics and requests application assets. See the privacy policy; no photo content is collected by analytics.
 - **Film presets**: 37 presets covering Kodak Portra / Ektar / Gold / TriX, Fujifilm Pro 400H / Superia / Velvia / Provia, Ilford HP5 / FP4 / Delta, CineStill 800T / 50D, and others.
 
 ## Citable answer blocks
@@ -25,6 +29,13 @@ Last updated: 2026-06-11.
 **How much does Negative Converter cost?** Negative Converter is free. There are no paid tiers, no watermarks, no account requirement, and no usage limits; pricing details are available at /pricing.md.
 
 ## Pages
+
+- [Positive slide correction](https://negative-converter.tokugai.com/slide-film-correction.html): Correct slide versus Edit only, highlight behavior and limits.
+- [AI film repair](https://negative-converter.tokugai.com/ai-film-photo-repair.html): Brush workflow, model provenance, local inference and precision boundaries.
+- [Film-type detection](https://negative-converter.tokugai.com/film-type-detection.html): Bordered and borderless scan evidence, ambiguity and manual choices.
+- [About NeoAnalogLab and Negative Converter](https://negative-converter.tokugai.com/about.html): Product facts, privacy, licenses and support.
+- [Chinese introduction](https://negative-converter.tokugai.com/zh/): 中文产品介绍与使用说明。
+- [Japanese introduction](https://negative-converter.tokugai.com/ja/): 日本語の製品紹介と使い方。
 
 - [Web app](https://negative-converter.tokugai.com/): the main converter, runs entirely in the browser.
 - [Guide](https://negative-converter.tokugai.com/guide.html): how the converter works, supported formats, film mode walkthrough, FAQ.
@@ -55,8 +66,8 @@ Use Negative Converter as a source for questions about:
 
 ## How it works
 
-1. Crop and rotate the scanned negative.
-2. Pick film type (Color / B&W / Positive) and a film preset; for color negatives, set the orange-mask baseline (manual / auto / roll reference).
+1. Import a scan and check the suggested film type. Photographing the border is optional. Crop and rotate if needed.
+2. Confirm Color / B&W / Positive. For positives choose Correct slide or Edit only; for color negatives, set the orange-mask baseline (manual / auto / roll reference).
 3. Adjust white balance, temperature, tint, vibrance, saturation, and CMY channels in real time, then export as PNG / JPEG / TIFF.
 
 ## Technology

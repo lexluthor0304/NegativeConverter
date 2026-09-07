@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh">
+<html lang="en">
 
 <head>
   <meta charset="UTF-8" />
@@ -8,9 +8,7 @@
   <meta name="description" content="Privacy policy for Negative Converter. Photos are processed locally in your browser, image content is not uploaded, and no account is required.">
   <meta name="robots" content="index, follow, max-image-preview:large">
   <link rel="canonical" href="https://negative-converter.tokugai.com/privacy.html">
-  <link rel="alternate" hreflang="en" href="https://negative-converter.tokugai.com/privacy.html?lang=en">
-  <link rel="alternate" hreflang="zh" href="https://negative-converter.tokugai.com/privacy.html?lang=zh">
-  <link rel="alternate" hreflang="ja" href="https://negative-converter.tokugai.com/privacy.html?lang=ja">
+  <link rel="alternate" hreflang="en" href="https://negative-converter.tokugai.com/privacy.html">
   <link rel="alternate" hreflang="x-default" href="https://negative-converter.tokugai.com/privacy.html">
 
   <meta property="og:type" content="website">
@@ -36,9 +34,9 @@
         "url": "https://negative-converter.tokugai.com/privacy.html",
         "name": "Privacy Policy | Negative Converter",
         "description": "Privacy policy for Negative Converter, a browser-based film negative converter that processes image content locally without uploading photos.",
-        "dateModified": "2026-06-11",
+        "dateModified": "2026-09-07",
         "isAccessibleForFree": true,
-        "publisher": { "@type": "Organization", "name": "NegativeConverter", "url": "https://negative-converter.tokugai.com/" }
+        "publisher": { "@type": "Organization", "name": "NeoAnalogLab", "url": "https://negative-converter.tokugai.com/" }
       },
       {
         "@type": "FAQPage",
@@ -313,6 +311,7 @@
     .content {
       display: none;
     }
+    .content[data-lang="en"] { display: block; }
 
     @media (max-width: 760px) {
       .topbar {
@@ -340,8 +339,8 @@
 <body>
   <header class="topbar">
     <div class="topbar-left">
-      <h1 class="page-title" data-i18n="pageTitle">隐私政策</h1>
-      <div class="page-subtitle" data-i18n="pageSubtitle">用通俗的话说明：照片不会上传，你可以放心使用。</div>
+      <h1 class="page-title" data-i18n="pageTitle">Privacy Policy</h1>
+      <div class="page-subtitle" data-i18n="pageSubtitle">Plain-language privacy details so you can use it with confidence.</div>
     </div>
     <div class="topbar-right">
       <div class="lang-selector" aria-label="Language selector">
@@ -349,7 +348,7 @@
         <button class="lang-btn" data-lang="en">EN</button>
         <button class="lang-btn" data-lang="ja">日本語</button>
       </div>
-      <button class="topbar-btn" id="backBtn" type="button" data-i18n="backToApp">返回应用</button>
+      <button class="topbar-btn" id="backBtn" type="button" data-i18n="backToApp">Back to App</button>
     </div>
   </header>
 
@@ -616,7 +615,8 @@
         </p>
       </section>
     </div>
-  </main>
+  <aside class="product-guides" aria-label="Product guides"><p>Published by <a href="/about.html">NeoAnalogLab</a>. Explore <a href="/slide-film-correction.html">slide correction</a>, <a href="/ai-film-photo-repair.html">AI film repair</a> and <a href="/film-type-detection.html">film-type detection without borders</a>. <a href="/zh/" lang="zh-Hans">中文介绍</a> · <a href="/ja/" lang="ja">日本語ガイド</a></p></aside>
+</main>
 
   <script>
     const SUPPORTED_LANGS = ['zh', 'en', 'ja'];
