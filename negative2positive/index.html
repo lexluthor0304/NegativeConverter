@@ -227,6 +227,7 @@
           </a>
           <label class="upload-btn" id="uploadBtn" for="fileInput" role="button" tabindex="0" data-i18n="selectFile">Select File</label>
           <label class="upload-btn secondary" id="uploadFolderBtn" for="folderInput" role="button" tabindex="0" data-i18n="selectFolder">Select Folder</label>
+          <label class="upload-btn secondary" id="uploadExpiredBtn" for="fileInput" role="button" tabindex="0" data-i18n="selectExpired">Rescue an expired roll</label>
           <input type="file" id="fileInput" class="hidden-file-input" accept=".cr2,.cr3,.crw,.nef,.nrw,.arw,.dng,.raf,.raw,.rw2,.pef,.srw,.3fr,.mef,.orf,.rwl,.iiq,.x3f,.mrw,.kdc,.dcr,.tif,.tiff,image/*" multiple>
           <input type="file" id="projectInput" aria-label="Open roll project and source photos" class="hidden-file-input" accept=".json,.cr2,.cr3,.crw,.nef,.nrw,.arw,.dng,.raf,.raw,.rw2,.pef,.srw,.3fr,.mef,.orf,.rwl,.iiq,.x3f,.mrw,.kdc,.dcr,.tif,.tiff,image/*" multiple>
           <input type="file" id="folderInput" class="hidden-file-input" accept=".cr2,.cr3,.crw,.nef,.nrw,.arw,.dng,.raf,.raw,.rw2,.pef,.srw,.3fr,.mef,.orf,.rwl,.iiq,.x3f,.mrw,.kdc,.dcr,.tif,.tiff,image/*" webkitdirectory directory multiple>
@@ -1142,6 +1143,77 @@
               <button class="film-base-btn" id="labMatchClearBtn" data-i18n="labMatchClear" disabled>Clear look</button>
             </div>
             <div class="control-group-hint" data-i18n="labMatchHint">Pick the lab's scan of this same frame. It is aligned to your conversion and a colour matrix plus per-channel curves are fitted so your result takes on the lab's look. Without a reliable alignment the colours are matched by histogram.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Expired film rescue: its own Studio tab (studioWorkspace.js), driven by pipeline/expiredRescue.js -->
+      <div class="control-section task-primary" id="expiredSection" style="display: none;">
+        <div class="section-content">
+          <div class="control-group is-primary">
+            <label class="checkbox-label"><input type="checkbox" id="expiredEnabled"><span data-i18n="expiredEnable">Rescue this photo as expired film</span></label>
+            <ul class="expired-diagnosis" id="expiredDiagnosis" role="status" aria-live="polite"></ul>
+            <div class="film-base-buttons">
+              <button type="button" class="film-base-btn" id="expiredAnalyzeBtn" data-i18n="expiredAnalyze">Analyse again</button>
+              <button type="button" class="film-base-btn" id="expiredResetBtn" data-i18n="expiredAutoValues">Automatic values</button>
+            </div>
+          </div>
+          <div class="control-group" id="expiredControls" hidden>
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label" id="expiredLevelsLabel" data-i18n="expiredLevels">Fog and range</span>
+                <input type="number" class="slider-number-input" id="expiredLevelsValue" min="0" max="100" step="1" value="100" aria-labelledby="expiredLevelsLabel">
+              </div>
+              <input type="range" class="slider-input" id="expiredLevels" min="0" max="100" step="1" value="100" aria-labelledby="expiredLevelsLabel">
+            </div>
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label" id="expiredNeutralizeLabel" data-i18n="expiredNeutralize">Neutralise cast</span>
+                <input type="number" class="slider-number-input" id="expiredNeutralizeValue" min="0" max="100" step="1" value="80" aria-labelledby="expiredNeutralizeLabel">
+              </div>
+              <input type="range" class="slider-input" id="expiredNeutralize" min="0" max="100" step="1" value="80" aria-labelledby="expiredNeutralizeLabel">
+            </div>
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label" id="expiredCrossoverLabel" data-i18n="expiredCrossover">Crossover</span>
+                <input type="number" class="slider-number-input" id="expiredCrossoverValue" min="0" max="100" step="1" value="70" aria-labelledby="expiredCrossoverLabel">
+              </div>
+              <input type="range" class="slider-input" id="expiredCrossover" min="0" max="100" step="1" value="70" aria-labelledby="expiredCrossoverLabel">
+            </div>
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label" id="expiredBrightnessLabel" data-i18n="expiredBrightness">Brightness</span>
+                <input type="number" class="slider-number-input" id="expiredBrightnessValue" min="-100" max="100" step="1" value="0" aria-labelledby="expiredBrightnessLabel">
+              </div>
+              <input type="range" class="slider-input" id="expiredBrightness" min="-100" max="100" step="1" value="0" aria-labelledby="expiredBrightnessLabel">
+            </div>
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label" id="expiredContrastLabel" data-i18n="expiredContrast">Contrast</span>
+                <input type="number" class="slider-number-input" id="expiredContrastValue" min="0" max="100" step="1" value="25" aria-labelledby="expiredContrastLabel">
+              </div>
+              <input type="range" class="slider-input" id="expiredContrast" min="0" max="100" step="1" value="25" aria-labelledby="expiredContrastLabel">
+            </div>
+            <div class="control-group-title"><span data-i18n="expiredSpatialTitle">Across the frame (OpenCV)</span></div>
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label" id="expiredUnevenFogLabel" data-i18n="expiredUnevenFog">Uneven fog</span>
+                <input type="number" class="slider-number-input" id="expiredUnevenFogValue" min="0" max="100" step="1" value="100" aria-labelledby="expiredUnevenFogLabel">
+              </div>
+              <input type="range" class="slider-input" id="expiredUnevenFog" min="0" max="100" step="1" value="100" aria-labelledby="expiredUnevenFogLabel">
+            </div>
+            <div class="slider-control">
+              <div class="slider-header">
+                <span class="slider-label" id="expiredLocalContrastLabel" data-i18n="expiredLocalContrast">Local contrast</span>
+                <input type="number" class="slider-number-input" id="expiredLocalContrastValue" min="0" max="100" step="1" value="0" aria-labelledby="expiredLocalContrastLabel">
+              </div>
+              <input type="range" class="slider-input" id="expiredLocalContrast" min="0" max="100" step="1" value="0" aria-labelledby="expiredLocalContrastLabel">
+            </div>
+            <div class="film-base-buttons">
+              <button type="button" class="film-base-btn" id="expiredCompareBtn" aria-pressed="false" data-i18n="expiredCompare">Hold to see before</button>
+              <button type="button" class="film-base-btn" id="expiredApplySelectedBtn" data-i18n="expiredApplySelected">Apply strengths to selected</button>
+            </div>
+            <div class="control-group-hint" data-i18n="expiredHint">An expired roll usually shows fog, an overall cast, a crossover and underexposure. The rescue treats each channel in that order and leaves the grain alone.</div>
           </div>
         </div>
       </div>

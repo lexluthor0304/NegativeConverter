@@ -54,7 +54,7 @@ function handleApplyAdjustments(msg) {
     if (!(c.b instanceof Uint8Array)) c.b = new Uint8Array(c.b);
   }
 
-  const params = computeAdjustmentParams(settings);
+  const params = computeAdjustmentParams(settings, { width, height });
   const input = new Uint8ClampedArray(inputBuffer);
   const output = new Uint8ClampedArray(input.length);
   const pixelCount = width * height;
@@ -79,7 +79,7 @@ function handleApplyAdjustments16(msg) {
     if (!(c.g instanceof Uint8Array)) c.g = new Uint8Array(c.g);
     if (!(c.b instanceof Uint8Array)) c.b = new Uint8Array(c.b);
   }
-  const params = computeAdjustmentParams(settings);
+  const params = computeAdjustmentParams(settings, { width, height });
   const input = new Uint16Array(inputBuffer);
   const output = new Uint16Array(input.length);
   applyAdjustmentsToPixels16(input, output, width * height, params, quality || 'full', (percent) => {

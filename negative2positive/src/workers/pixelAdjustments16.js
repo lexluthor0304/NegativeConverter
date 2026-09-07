@@ -7,6 +7,7 @@
 // No DOM: shared by the export worker and the main-thread fallback.
 
 import { hue2rgb } from './pixelAdjustments.js';
+import { applyExpiredSpatial } from '../pipeline/expiredRescue.js';
 
 const SCALE_16_TO_8 = 255 / 65535;
 const SCALE_8_TO_16 = 65535 / 255;
@@ -23,13 +24,13 @@ export function curveAt(curve, x) {
 // True when the chain has no stage that mixes channels or depends on the
 // pixel's neighbours in colour space, so a per-channel LUT reproduces it.
 function isSeparable(params) {
-  return !params.doHighlights && !params.doShadows && !params.doHsl && !params.doLookMatrix;
+  return !params.doHighlights && !params.doShadows && !params.doHsl && !params.doLookMatrix && !params.doRescueSpatial;
 }
 
 // The per-channel chain for one channel value (0..255 float) of a separable
-// pipeline: gains, contrast, temp/tint, CMY, curve, look curve.
-function channelChain(v, mult, tempMult, cmyShift, curve, lookCurve, params) {
-  let x = v * mult;
+// pipeline: expired-film rescue, gains, contrast, temp/tint, CMY, curve, look curve.
+function channelChain(v, mult, tempMult, cmyShift, curve, lookCurve, params, rescue = null) {
+  let x = (rescue ? curveAt(rescue, v) : v) * mult;
   if (params.doContrast) x = (x - 127.5) * params.contrastFactor + 127.5;
   if (params.doTempTint) x *= tempMult;
   if (x < 0) x = 0; else if (x > 255) x = 255;
@@ -51,11 +52,12 @@ export function buildChannelLuts16(params, scratch = null) {
   const lutR = make('lutR'); const lutG = make('lutG'); const lutB = make('lutB');
   const { curveR, curveG, curveB, lookR, lookG, lookB } = params;
   const lookCurves = params.doLook && lookR ? [lookR, lookG, lookB] : [null, null, null];
+  const rescue = params.doRescue ? [params.rescueR, params.rescueG, params.rescueB] : [null, null, null];
   for (let v = 0; v < 65536; v++) {
     const x = v * SCALE_16_TO_8;
-    lutR[v] = Math.round(channelChain(x, params.rMult, params.tempRMult, params.cmyRShift, curveR, lookCurves[0], params) * SCALE_8_TO_16);
-    lutG[v] = Math.round(channelChain(x, params.gMult, params.tintGMult, params.cmyGShift, curveG, lookCurves[1], params) * SCALE_8_TO_16);
-    lutB[v] = Math.round(channelChain(x, params.bMult, params.tempBMult, params.cmyBShift, curveB, lookCurves[2], params) * SCALE_8_TO_16);
+    lutR[v] = Math.round(channelChain(x, params.rMult, params.tempRMult, params.cmyRShift, curveR, lookCurves[0], params, rescue[0]) * SCALE_8_TO_16);
+    lutG[v] = Math.round(channelChain(x, params.gMult, params.tintGMult, params.cmyGShift, curveG, lookCurves[1], params, rescue[1]) * SCALE_8_TO_16);
+    lutB[v] = Math.round(channelChain(x, params.bMult, params.tempBMult, params.cmyBShift, curveB, lookCurves[2], params, rescue[2]) * SCALE_8_TO_16);
   }
   return { lutR, lutG, lutB };
 }
@@ -95,14 +97,34 @@ export function applyAdjustmentsToPixels16(input16, output16, pixelCount, params
   const {
     rMult, gMult, bMult, contrastFactor, doContrast, highlightsFactor, shadowsFactor, doHighlights, doShadows,
     tempRMult, tempBMult, tintGMult, doTempTint, satFactor, vibFactor, doHsl, cmyRShift, cmyGShift, cmyBShift, doCMY,
-    curveR, curveG, curveB, doLook, doLookMatrix, lookMatrix, lookOffset, lookR, lookG, lookB
+    curveR, curveG, curveB, doLook, doLookMatrix, lookMatrix, lookOffset, lookR, lookG, lookB,
+    doRescue, rescueR, rescueG, rescueB, doRescueSpatial, rescueSpatial, frameWidth, frameHeight
   } = params;
   const lumaScale = 2 / 255;
+  const spatialWidth = doRescueSpatial && frameWidth > 0 ? frameWidth : 0;
+  const spatialHeight = doRescueSpatial && frameHeight > 0 ? frameHeight : 1;
+  const spatialPx = doRescueSpatial ? new Float32Array(3) : null;
+  let px = 0;
+  let py = 0;
 
   for (let i = 0; i < total; i += 4) {
-    let r = input16[i] * SCALE_16_TO_8 * rMult;
-    let g = input16[i + 1] * SCALE_16_TO_8 * gMult;
-    let b = input16[i + 2] * SCALE_16_TO_8 * bMult;
+    let r = input16[i] * SCALE_16_TO_8;
+    let g = input16[i + 1] * SCALE_16_TO_8;
+    let b = input16[i + 2] * SCALE_16_TO_8;
+    if (spatialWidth) {
+      spatialPx[0] = r; spatialPx[1] = g; spatialPx[2] = b;
+      applyExpiredSpatial(rescueSpatial, (px + 0.5) / spatialWidth, (py + 0.5) / spatialHeight, spatialPx);
+      if (++px === spatialWidth) { px = 0; py++; }
+      r = spatialPx[0]; g = spatialPx[1]; b = spatialPx[2];
+    }
+    if (doRescue) {
+      r = curveAt(rescueR, r);
+      g = curveAt(rescueG, g);
+      b = curveAt(rescueB, b);
+    }
+    r *= rMult;
+    g *= gMult;
+    b *= bMult;
 
     if (doContrast) {
       r = (r - 127.5) * contrastFactor + 127.5;

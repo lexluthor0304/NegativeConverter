@@ -105,6 +105,13 @@ sense of rotation. `state.cropRegion` is relative to the post-mirror
 `originalImageData`. `rebuildGeometryFromBase()` is the reference
 implementation; `restoreSettings` and the batch export path reproduce it.
 
+### Expired Film Rescue
+A separate entry (welcome button / menu) and Studio tab for aged rolls. It is
+a post-conversion stage on the positive: `pipeline/expiredRescue.js` measures
+fog, cast, crossover and exposure, and the curves it builds run first in the
+Step-3 adjustment chain (8-bit and 16-bit). Negatives convert as usual first;
+positives are rescued directly. See `docs/expired-film-rescue.md`.
+
 ### Rendering Strategy
 The app keeps dual-path rendering behavior:
 1. **Preview path** for responsive slider feedback.

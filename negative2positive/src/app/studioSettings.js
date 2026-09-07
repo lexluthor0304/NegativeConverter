@@ -1,4 +1,5 @@
 // 調色だけを同期する。片基・レンズ・切り抜き・修復は各写真に残す。
+// 期限切れフィルムの救済は強度のみ同期し、解析結果は写真ごとに測り直す。
 export const STUDIO_COLOR_KEYS = [
   'coreFilmPreset', 'coreColorModel', 'coreEnhancedProfile', 'coreProfileStrength',
   'corePreSaturation', 'coreBrightness', 'coreExposure', 'coreContrast',
@@ -6,7 +7,9 @@ export const STUDIO_COLOR_KEYS = [
   'coreTemperature', 'coreTint', 'coreCyan', 'coreSaturation', 'coreGlow', 'coreFade',
   'corePaper', 'corePaperToning', 'corePaperToningStrength', 'look',
   'exposure', 'contrast', 'highlights', 'shadows', 'temperature', 'tint',
-  'vibrance', 'saturation', 'cyan', 'magenta', 'yellow', 'curvePoints', 'curves'
+  'vibrance', 'saturation', 'cyan', 'magenta', 'yellow', 'curvePoints', 'curves',
+  'expiredEnabled', 'expiredLevels', 'expiredNeutralize', 'expiredCrossover',
+  'expiredBrightness', 'expiredContrast', 'expiredUnevenFog', 'expiredLocalContrast'
 ];
 
 export function pickStudioColors(settings) {
