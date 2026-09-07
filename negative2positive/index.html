@@ -530,6 +530,7 @@
         <div class="section-content">
           <div class="control-group is-primary">
             <div class="control-group-title"><span id="groupFilmTypeLabel" data-i18n="groupFilmType">Film type</span></div>
+            <label class="checkbox-label"><input type="checkbox" id="importFilmTypeAuto" checked><span data-i18n="importFilmTypeAuto">Detect film type on import</span></label>
             <div class="film-type-toggle" role="group" aria-labelledby="groupFilmTypeLabel">
               <button class="film-type-btn active" type="button" data-type="color" aria-pressed="true" data-i18n="colorFilm">Color</button>
               <button class="film-type-btn" type="button" data-type="bw" aria-pressed="false" data-i18n="bwFilm">B&W</button>
@@ -537,6 +538,15 @@
             </div>
           </div>
 
+          <p id="filmTypeDetectionStatus" class="info-box" role="status" data-i18n="filmTypeManual">Manual film type</p>
+          <div class="control-group" id="positiveModeControl" hidden>
+            <label for="positiveModeSelect" data-i18n="positiveProcessing">Positive processing</label>
+            <select id="positiveModeSelect" class="control-select">
+              <option value="correct" data-i18n="positiveCorrect">Correct slide</option>
+              <option value="edit" data-i18n="positiveEditOnly">Edit only</option>
+            </select>
+            <p class="info-box" data-i18n="positiveProcessingHint">Correct slide adjusts tone and reliable neutrals while retaining highlights. Edit only skips automatic analysis.</p>
+          </div>
           <div class="control-group film-edge-group" id="filmEdgeGroup" style="display: none;">
             <div class="control-group-title"><span data-i18n="filmEdgeTitle">Film edge</span></div>
             <div class="film-edge-status" id="filmEdgeStatus" role="status"></div>

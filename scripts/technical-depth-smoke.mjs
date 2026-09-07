@@ -304,7 +304,8 @@ async function runManualBrushSmoke({ send, evaluate, waitFor, wait, fail, instal
   await wait(1500);
   const touched = await exportPixels();
   if (!touched.data.some((v, i) => v !== redone.data[i])) fail('Touch brush did not repair the photo');
-  if (await evaluate(`document.getElementById('canvasTransformWrapper').style.transform`) !== touchTransform) fail('Touch brush panned the photo');
+  const afterTouchTransform = await evaluate(`document.getElementById('canvasTransformWrapper').style.transform`);
+  if (afterTouchTransform !== touchTransform) fail('Touch brush panned the photo: ' + JSON.stringify({ before: touchTransform, after: afterTouchTransform }));
   await send('Emulation.setTouchEmulationEnabled', { enabled: false });
   if (!await evaluate(`document.getElementById('dustAiEnabled').checked`)) fail('Manual brush must preserve default AI dust removal');
   await evaluate(`document.getElementById('dustRemovalEnabled').click()`);

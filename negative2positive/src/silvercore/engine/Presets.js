@@ -47,6 +47,13 @@ export const defaultSettings = {
 };
 
 export const toneProfiles = {
+  positive: {
+    defaultBrightness: 0, defaultBlacks: 0, defaultWhites: 0,
+    defaultShadows: 0, defaultHighlights: 0,
+    defaultGamma: 1, defaultContrast: 0,
+    defaultSoftHigh: 0, defaultSoftLow: 0,
+    autoTone: false,
+  },
   autotone: {
     defaultBrightness: 0, defaultBlacks: 5, defaultWhites: -1,
     defaultShadows: 0, defaultHighlights: 0,

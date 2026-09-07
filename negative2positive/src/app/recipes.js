@@ -23,7 +23,7 @@ export const RECIPE_KEYS = Object.freeze([
   'exposure', 'contrast', 'highlights', 'shadows', 'temperature', 'tint',
   'vibrance', 'saturation', 'cyan', 'magenta', 'yellow', 'curvePoints',
   'wbR', 'wbG', 'wbB', 'wbUserOverride',
-  'coreSharpenAmount', 'coreSharpenRadius', 'coreSharpenThreshold'
+  'coreSharpenAmount', 'coreSharpenRadius', 'coreSharpenThreshold', 'positiveMode'
 ]);
 
 export const RECIPE_TAG_KEYS = Object.freeze(['stock', 'lab', 'scanner', 'note']);

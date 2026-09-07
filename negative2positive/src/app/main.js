@@ -1,3 +1,4 @@
+    import { detectedImportSettings } from './filmTypeDetection.js';
     import opencvScriptUrl from '@techstark/opencv-js/dist/opencv.js?url';
     import { i18n } from './i18n.js';
     import { interpolateText, summarizePathForUi } from './textUtils.js';
@@ -2012,6 +2013,11 @@
 
       // Film settings
       filmType: 'color',
+      importFilmTypeAuto: true,
+      positiveMode: 'correct',
+      filmTypeSource: 'manual',
+      filmTypeConfidence: null,
+      filmTypeReason: null,
       mirrored: false,
       filmBase: { ...DEFAULT_FILM_BASE },
       filmBaseSet: false,
@@ -2445,7 +2451,7 @@
       'coreSaturation', 'coreGlow', 'coreFade', 'coreCurvePrecision', 'coreUseWebGL',
       'coreCyan', 'corePaper', 'corePaperToning', 'corePaperToningStrength', 'flatFieldId',
       'wbR', 'wbG', 'wbB', 'wbAutoConfidence', 'wbUserOverride',
-      'filmType', 'filmBaseSet', 'grayPointSampled', 'step2Mode', 'rotationAngle',
+      'filmType', 'positiveMode', 'filmTypeSource', 'filmTypeConfidence', 'filmTypeReason', 'filmBaseSet', 'grayPointSampled', 'step2Mode', 'rotationAngle',
       'mirrored', 'sprocketPreviewEnabled', 'currentStep',
     ];
 
@@ -2563,6 +2569,7 @@
       state.dustRemoval._state = r.dustState;
 
       // Sync UI
+      updateFilmModeUI();
       updateSlidersFromState();
       renderCurve();
       updateDustControlsVisibility();
@@ -3527,6 +3534,10 @@
         mirrored: Boolean('mirrored' in source ? source.mirrored : fallbackSettings.mirrored),
         autoFrameMeta: sourceMeta ? structuredClone(sourceMeta) : ((source === state || Object.hasOwn(source, 'autoFrameMeta')) ? null : (fallbackMeta ? structuredClone(fallbackMeta) : null)),
         filmType,
+        positiveMode: source.positiveMode === 'edit' ? 'edit' : 'correct',
+        filmTypeSource: source.filmTypeSource === 'auto' ? 'auto' : 'manual',
+        filmTypeConfidence: ['high', 'medium', 'low'].includes(source.filmTypeConfidence) ? source.filmTypeConfidence : null,
+        filmTypeReason: typeof source.filmTypeReason === 'string' ? source.filmTypeReason : null,
         filmBase: sanitizeFilmBase(source.filmBase, fallbackSettings.filmBase),
         // Per-file like the crop: never inherited from the fallback frame.
         filmEdge: sanitizeFilmEdgeForSettings(source === state ? state.filmEdge : source.filmEdge),
@@ -4926,7 +4937,7 @@
     // gray-point guide nudging toward the manual click instead.
     function maybeAutoWhiteBalance(processed) {
       if (!usesSilverCoreConversion(state)) return;
-      if (sanitizePresetType(state.filmType || 'color') === 'bw') return;
+      if (sanitizePresetType(state.filmType || 'color') !== 'color') return;
       if (state.grayPointSampled || state.wbUserOverride) return;
       if (state.autoFrame.lastDiagnostics?.analysisNeedsReview) return;
       const reference = processed?.__analysisPreview;
@@ -6598,6 +6609,20 @@
       modeToggle.style.display = showFilmBase ? 'flex' : 'none';
       filmBaseControls.style.display = showFilmBase ? 'block' : 'none';
       positiveFilmInfo.style.display = showFilmBase ? 'none' : 'block';
+      const positiveControls = document.getElementById('positiveModeControl');
+      if (positiveControls) {
+        positiveControls.hidden = state.filmType !== 'positive';
+        document.getElementById('positiveModeSelect').value = state.positiveMode;
+      }
+      const detectionStatus = document.getElementById('filmTypeDetectionStatus');
+      if (detectionStatus) {
+        const automatic = state.filmTypeSource === 'auto' && state.filmTypeConfidence;
+        const key = !automatic ? 'filmTypeManual' : state.filmTypeConfidence === 'low' ? (state.filmTypeReason === 'monochrome' ? 'filmTypeMonochrome' : 'filmTypeUncertain')
+          : state.filmTypeConfidence === 'high' ? 'filmTypeDetected' : 'filmTypeSuggested';
+        detectionStatus.dataset.i18n = key;
+        detectionStatus.textContent = i18n[currentLang][key];
+        detectionStatus.dataset.confidence = automatic ? state.filmTypeConfidence : 'manual';
+      }
       if (step2CoreColorModelControl) {
         step2CoreColorModelControl.style.display = showStep2CoreModel ? 'block' : 'none';
       }
@@ -7169,6 +7194,14 @@
       btn.addEventListener('click', () => {
         pushUndo('filmType');
         state.filmType = btn.dataset.type;
+        state.filmTypeSource = 'manual';
+        state.filmTypeConfidence = null;
+        state.filmTypeReason = null;
+        if (state.wbAutoConfidence && !state.wbUserOverride && !state.grayPointSampled) {
+          state.wbR = state.wbG = state.wbB = 1;
+          state.wbAutoConfidence = null;
+          updateWBSliders();
+        }
         setFilmTypeButtons(state.filmType);
         let modeUpdated = false;
         if (requiresFilmBase()) {
@@ -7188,6 +7221,20 @@
       });
     });
 
+    document.getElementById('importFilmTypeAuto').addEventListener('change', event => {
+      state.importFilmTypeAuto = event.target.checked;
+    });
+    document.getElementById('positiveModeSelect').addEventListener('change', event => {
+      pushUndo('filmType');
+      state.positiveMode = event.target.value === 'edit' ? 'edit' : 'correct';
+      if (state.wbAutoConfidence && !state.wbUserOverride && !state.grayPointSampled) {
+        state.wbR = state.wbG = state.wbB = 1;
+        state.wbAutoConfidence = null;
+        updateWBSliders();
+      }
+      markCurrentFileDirty();
+      scheduleSilverSourceRefresh();
+    });
     setFilmTypeButtons(state.filmType);
 
     // ===========================================
@@ -9166,6 +9213,9 @@
     // Convert positive button (skip to step 2 with positive mode selected)
     document.getElementById('convertPositiveBtn').addEventListener('click', () => {
       state.filmType = 'positive';
+      state.filmTypeSource = 'manual';
+      state.filmTypeConfidence = null;
+      state.filmTypeReason = null;
       setFilmTypeButtons(state.filmType);
       updateFilmModeUI();
       markCurrentFileDirty();
@@ -10185,7 +10235,7 @@
     // Export All returns every unviewed slide inverted as a colour negative,
     // and a B&W roll comes back tinted by an orange-mask compensation.
     function createDefaultSettings(imageData) {
-      const filmType = sanitizePresetType(state.filmType || 'color');
+      const importSettings = detectedImportSettings(imageData, { automatic: state.importFilmTypeAuto, filmType: state.filmType, positiveMode: state.positiveMode });
       const borderBuffer = sanitizeNumeric(state.coreBorderBuffer, 10, 0, 30);
       const borderBufferBorderValue = sanitizeNumeric(state.coreBorderBufferBorderValue, 10, 0, 30);
       const filmBase = autoDetectFilmBase(imageData, borderBuffer);
@@ -10194,7 +10244,7 @@
         rotationAngle: 0,
         mirrored: false,
         autoFrameMeta: null,
-        filmType,
+        ...importSettings,
         filmBase: filmBase,
         filmEdge: null,
         rollFrame: null,
@@ -10282,7 +10332,7 @@
       let initialSettings = savedSettings || mergeStudioColors(createDefaultSettings(imageData), studioColors || {});
       if (!initialSettings.autoFrameMeta && !initialSettings.cropRegion) initialSettings = await analyzeStudioImportFrame(imageData, initialSettings, { allowCrop: !savedSettings });
       if (!initialSettings.filmEdge?.checked) {
-        const edge = await analyzeImportFilmEdge(imageData, initialSettings, { applyDefaults: !savedSettings });
+        const edge = await analyzeImportFilmEdge(imageData, initialSettings, { applyDefaults: !savedSettings && state.importFilmTypeAuto });
         if (edge) initialSettings = edge.settings;
       }
       const settings = sanitizeSettings(initialSettings, {
@@ -10360,7 +10410,7 @@
         !savedSettings
         && processed
         && usesSilverCoreConversion(settings)
-        && sanitizePresetType(settings.filmType || 'color') !== 'bw'
+        && sanitizePresetType(settings.filmType || 'color') === 'color'
         && !settings.grayPointSampled
       ) {
         const roi = resolveAnalysisRegion(settings, imageData);
@@ -11113,6 +11163,10 @@
 
       // Restore film settings
       state.filmType = sanitizePresetType(safe.filmType || 'color');
+      state.positiveMode = safe.positiveMode;
+      state.filmTypeSource = safe.filmTypeSource;
+      state.filmTypeConfidence = safe.filmTypeConfidence;
+      state.filmTypeReason = safe.filmTypeReason;
       state.filmBase = { ...safe.filmBase };
       state.filmBaseSet = true;
       state.filmEdge = safe.filmEdge ? structuredClone(safe.filmEdge) : null;
@@ -11791,7 +11845,7 @@
         }
         if (!settings.filmEdge?.checked) {
           // Read the rebate once per file: perforations, DX edge barcode, film base.
-          const edge = await analyzeImportFilmEdge(source, settings, { applyDefaults: freshFile });
+          const edge = await analyzeImportFilmEdge(source, settings, { applyDefaults: freshFile && state.importFilmTypeAuto });
           if (!isCurrentLoad(generation)) return;
           if (edge) {
             settings = edge.settings;
@@ -11801,6 +11855,9 @@
         }
         if (changed) restoreSettings(settings);
         if (filmEdgeToast) showToast(filmEdgeToast, 3200);
+        else if (freshFile && settings.filmTypeConfidence === 'low') {
+          showToast(i18n[currentLang][settings.filmTypeReason === 'monochrome' ? 'filmTypeMonochrome' : 'filmTypeUncertain'], 6500);
+        }
         if (settings.filmEdge?.found) updateFileListUI();
         goToStep(2);
         await processNegative();
@@ -11911,6 +11968,9 @@
       const contradictory = record.polarity === 'light' && record.filmKind !== 'positive';
       if (applyDefaults && !contradictory && record.filmKind && record.filmKind !== next.filmType) {
         next.filmType = record.filmKind;
+        next.filmTypeSource = 'auto';
+        next.filmTypeConfidence = 'high';
+        next.filmTypeReason = 'dx';
         record.appliedFilmType = true;
       }
       next.filmEdge = sanitizeFilmEdgeForSettings(record);
@@ -13325,7 +13385,7 @@
     function currentRecipeCode() {
       let defaults = null;
       if (state.originalImageData) {
-        const { filmType, ...rest } = createDefaultSettings(state.originalImageData);
+        const { filmType, positiveMode, ...rest } = createDefaultSettings(state.originalImageData);
         defaults = rest;
       }
       return encodeRecipe(extractCurrentSettings(), recipeTags(), { defaults });
@@ -13449,6 +13509,8 @@
         else updateFilmModeUI();
       }
       for (const [key, value] of Object.entries(patch)) if (key !== 'filmType') state[key] = value;
+      if (Object.hasOwn(patch, 'filmType')) state.filmTypeSource = 'manual';
+      updateFilmModeUI();
       if (patch.curvePoints) ['r', 'g', 'b'].forEach((ch) => updateCurveFromPoints(ch));
       state.frontierGuideStep2ChoiceTouched = true;
       updateSlidersFromState();

@@ -115,7 +115,9 @@ async function applyFilmPreset(baseSettings, presetId) {
 export async function buildSilverCoreParams(mode, settings = {}) {
   const merged = await applyFilmPreset(settings, settings.filmPreset);
   const colorModel = String(merged.colorModel || 'standard');
-  const resolvedColorModel = mode === 'bw' ? 'mono' : colorModel;
+  // Standard negatives carry a blue hue correction; positive scans already
+  // have positive colour, so their neutral starting model must be identity.
+  const resolvedColorModel = mode === 'bw' ? 'mono' : mode === 'positive' && colorModel === 'standard' ? 'none' : colorModel;
 
   // Determine imageType from mode
   const imageType = mode === 'positive' ? 'positive' : 'negative';
@@ -124,7 +126,8 @@ export async function buildSilverCoreParams(mode, settings = {}) {
     colorModel: resolvedColorModel,
     imageType,
     // Optional override; null means "derive from the colour model" (Engine.buildSettings).
-    toneProfile: normalizeToneProfile(merged.toneProfile),
+    toneProfile: normalizeToneProfile(merged.toneProfile) || (mode === 'positive' ? 'positive' : null),
+    positiveMode: merged.positiveMode === 'edit' ? 'edit' : 'correct',
     preSaturation: Math.round(sanitizeNumber(merged.preSaturation, 100, 0, 200)),
     borderBuffer: Math.round(sanitizeNumber(merged.borderBuffer, 10, 0, 30)),
     analysisRegion: merged.analysisRegion ? { ...merged.analysisRegion } : null,
@@ -351,6 +354,7 @@ function _analysisStateFor(params, filmBaseCompensation, sourceRef, mode, refere
     analysisRegionKey: JSON.stringify(params.analysisRegion || null),
     colorModel: params.colorModel,
     imageType: params.imageType,
+    positiveMode: params.positiveMode,
     preSaturation: params.preSaturation,
     bwMix: mode === 'bw' ? params.bwMix : null,
     analysisOverrideKey: params.analysisOverride ? JSON.stringify(params.analysisOverride) : '',
@@ -368,6 +372,7 @@ function _analysisChanged(previous, next) {
     || previous.analysisRegionKey !== next.analysisRegionKey
     || previous.colorModel !== next.colorModel
     || previous.imageType !== next.imageType
+    || previous.positiveMode !== next.positiveMode
     || previous.preSaturation !== next.preSaturation
     || previous.bwMix !== next.bwMix
     || previous.analysisOverrideKey !== next.analysisOverrideKey

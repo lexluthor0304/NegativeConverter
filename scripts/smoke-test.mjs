@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { runPositiveImportSmoke } from './positive-import-smoke.mjs';
 import { runStudioSmoke } from './studio-smoke.mjs';
 import { runStudioAutoCropSmoke } from './studio-auto-crop-smoke.mjs';
 import { runStudioColorAnalysisSmoke } from './studio-color-analysis-smoke.mjs';
@@ -252,6 +253,13 @@ await waitFor('app boot', `!!document.getElementById('studioImportAutoCrop')`);
 await installDialogAutoAccept();
 await wait(1500); // let main.js finish wiring
 await evaluate(`document.getElementById('studioImportAutoCrop').click()`);
+
+if (process.argv.includes('--positive-only')) {
+  await runPositiveImportSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS');
+  process.exit(0);
+}
 
 // ---- 1. load the fixture through the real file input ----
 if (!process.argv.includes('--studio-only') && !process.argv.includes('--auto-crop-only') && !process.argv.includes('--color-analysis-only') && !process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) {
@@ -616,6 +624,8 @@ if (!process.argv.includes('--film-edge-only') && !process.argv.includes('--dark
 if (!process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only')) await runTechnicalDepthSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
 if (!process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) await runWorkspaceUiSmoke({ send, evaluate, waitFor, fail, port: PORT, root: ROOT });
 if (process.env.AUTOFRAME_RAW_DIR) await runStudioRawAutoFrameSmoke({ send, evaluate, waitFor, fail, port: PORT, root: ROOT, directory: process.env.AUTOFRAME_RAW_DIR });
+
+if (!process.argv.some(arg => arg.endsWith('-only'))) await runPositiveImportSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
 
 // ---- no uncaught page errors across both scenarios ----
 const realErrors = pageErrors.filter((e) => !/ResizeObserver loop/.test(e));
