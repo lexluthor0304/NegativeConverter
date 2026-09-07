@@ -5,7 +5,7 @@
 // Vite 起動 → 実際の入力から写真を読み込み → Studio 自動変換 → 調整・一括書き出し。
 // Asserts the canvas pixels actually changed (negative inverted) and that no
 // uncaught page errors occurred. Requires Google Chrome on this machine.
-import { spawn, execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -98,14 +98,20 @@ for (let i = 0; i < 60; i++) {
 if (!serverUp) fail('vite dev server did not start');
 
 // ---- start chrome ----
-const chrome = execFile(chromeBin, [
+const chrome = spawn(chromeBin, [
   '--headless=new', `--remote-debugging-port=${CDP_PORT}`,
   `--user-data-dir=${chromeProfileDir}`,
   '--no-first-run', '--hide-scrollbars', '--window-size=1440,900',
   // A fake camera, granted without a prompt, for the live loupe scenario.
   '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream',
   'about:blank',
-]);
+], { stdio: ['ignore', 'ignore', 'pipe'] });
+// execFile buffers stderr and kills the browser after its default 1 MiB
+// limit; repeated WebGPU model sessions can exceed it. Keep a bounded tail.
+let chromeDiagnostics = '';
+chrome.stderr.on('data', chunk => { chromeDiagnostics = (chromeDiagnostics + chunk).slice(-8000); });
+chrome.once('error', error => fail(`Chrome startup failed: ${error.message}`));
+chrome.once('exit', (code, signal) => fail(`Chrome exited before the smoke completed (${code ?? signal}): ${chromeDiagnostics}`));
 children.push(chrome);
 
 async function getWsUrl() {
@@ -122,6 +128,7 @@ async function getWsUrl() {
 
 const ws = new WebSocket(await getWsUrl());
 await new Promise((r, j) => { ws.onopen = r; ws.onerror = j; });
+ws.onclose = () => fail(`Chrome debugging connection closed: ${chromeDiagnostics}`);
 
 let msgId = 0;
 const pending = new Map();
@@ -154,7 +161,8 @@ ws.onmessage = (e) => {
 };
 const send = (method, params = {}) => new Promise((resolve) => {
   const id = ++msgId;
-  pending.set(id, (m) => resolve(m));
+  const timeout = setTimeout(() => fail(`Chrome command timed out: ${method}`), 180_000);
+  pending.set(id, (m) => { clearTimeout(timeout); resolve(m); });
   ws.send(JSON.stringify({ id, method, params }));
 });
 async function evaluate(expression) {
