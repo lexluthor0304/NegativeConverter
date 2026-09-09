@@ -257,6 +257,95 @@ fn get_app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// Build-time override for the key this binary looks up in `updater.json`.
+///
+/// The default lookup is `<os>-<arch>[-<installer>]`. The legacy glibc 2.35
+/// AppImage is compiled with `NC_UPDATER_TARGET=linux-x86_64-glibc235` so it
+/// keeps pulling the legacy variant: the standard AppImage would not start on
+/// the older distributions that build exists for.
+const UPDATER_TARGET_OVERRIDE: Option<&str> = option_env!("NC_UPDATER_TARGET");
+
+fn updater_target_override(raw: Option<&str>) -> Option<String> {
+    let value = raw?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let well_formed = value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    well_formed.then(|| value.to_string())
+}
+
+/// What the running build can do about a newer release. The webview shows a
+/// "download and install" button only when `in_app` is true; otherwise it
+/// links to the download page as before.
+#[derive(Serialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct DesktopUpdateCapability {
+    in_app: bool,
+    target: Option<String>,
+    installer: Option<&'static str>,
+    reason: &'static str,
+}
+
+fn describe_update_capability(
+    updater_enabled: bool,
+    os: &str,
+    installer: Option<&'static str>,
+    target: Option<String>,
+) -> DesktopUpdateCapability {
+    // The Mac App Store build is compiled without the updater feature: store
+    // apps must not replace themselves.
+    if !updater_enabled {
+        return DesktopUpdateCapability {
+            in_app: false,
+            target,
+            installer,
+            reason: "updater-disabled",
+        };
+    }
+    // On Windows and Linux the bundler stamps the installer format into the
+    // binary. Without it (a bare executable, a dev build, an unknown package)
+    // there is nothing the updater could safely replace.
+    if os != "macos" && installer.is_none() {
+        return DesktopUpdateCapability {
+            in_app: false,
+            target,
+            installer,
+            reason: "unpackaged",
+        };
+    }
+    DesktopUpdateCapability {
+        in_app: true,
+        target,
+        installer,
+        reason: "ok",
+    }
+}
+
+fn current_installer_name() -> Option<&'static str> {
+    use tauri::utils::config::BundleType;
+    match tauri::utils::platform::bundle_type()? {
+        BundleType::AppImage => Some("appimage"),
+        BundleType::Deb => Some("deb"),
+        BundleType::Rpm => Some("rpm"),
+        BundleType::Msi => Some("msi"),
+        BundleType::Nsis => Some("nsis"),
+        BundleType::App => Some("app"),
+        _ => Some("other"),
+    }
+}
+
+#[tauri::command]
+fn get_desktop_update_capability() -> DesktopUpdateCapability {
+    describe_update_capability(
+        cfg!(feature = "updater"),
+        std::env::consts::OS,
+        current_installer_name(),
+        updater_target_override(UPDATER_TARGET_OVERRIDE),
+    )
+}
+
 #[tauri::command]
 fn pick_export_file_path(grants: State<'_, ExportGrants>, suggested_name: String) -> Option<String> {
     let path = rfd::FileDialog::new()
@@ -872,9 +961,18 @@ fn open_external_url(url: String) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     apply_linux_appimage_compat_env();
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .manage(ExportGrants::default())
-        .manage(ExportStreams::default())
+        .manage(ExportStreams::default());
+    #[cfg(feature = "updater")]
+    let builder = builder.plugin(tauri_plugin_process::init()).plugin({
+        let mut updater = tauri_plugin_updater::Builder::new();
+        if let Some(target) = updater_target_override(UPDATER_TARGET_OVERRIDE) {
+            updater = updater.target(target);
+        }
+        updater.build()
+    });
+    builder
         .invoke_handler(tauri::generate_handler![
             begin_export_write,
             append_export_chunk,
@@ -886,6 +984,7 @@ pub fn run() {
             write_export_file_to_path,
             write_export_file_to_directory,
             get_app_version,
+            get_desktop_update_capability,
             open_external_url
         ])
         .run(tauri::generate_context!())
@@ -895,12 +994,76 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_unique_export_path, decide_dmabuf_policy, looks_like_legacy_appimage_name,
-        normalize_export_path, parse_bool_flag, sanitize_export_file_name, sanitize_external_url,
-        write_export_bytes, AppImageVariant, DmabufDecision, DmabufDisableReason, DmabufKeepReason,
-        DmabufProbeKind, ExportGrants,
+        build_unique_export_path, decide_dmabuf_policy, describe_update_capability,
+        looks_like_legacy_appimage_name, normalize_export_path, parse_bool_flag,
+        sanitize_export_file_name, sanitize_external_url, updater_target_override,
+        write_export_bytes, AppImageVariant, DesktopUpdateCapability, DmabufDecision,
+        DmabufDisableReason, DmabufKeepReason, DmabufProbeKind, ExportGrants,
     };
     use std::path::PathBuf;
+
+    #[test]
+    fn updater_target_override_ignores_blank_values() {
+        assert_eq!(updater_target_override(None), None);
+        assert_eq!(updater_target_override(Some("")), None);
+        assert_eq!(updater_target_override(Some("   ")), None);
+    }
+
+    #[test]
+    fn updater_target_override_keeps_manifest_keys() {
+        assert_eq!(
+            updater_target_override(Some(" linux-x86_64-glibc235 ")),
+            Some("linux-x86_64-glibc235".to_string())
+        );
+    }
+
+    #[test]
+    fn updater_target_override_rejects_malformed_keys() {
+        assert_eq!(updater_target_override(Some("linux x86_64")), None);
+        assert_eq!(updater_target_override(Some("linux/x86_64")), None);
+    }
+
+    #[test]
+    fn update_capability_is_off_without_the_updater_feature() {
+        let capability = describe_update_capability(false, "windows", Some("nsis"), None);
+        assert_eq!(
+            capability,
+            DesktopUpdateCapability {
+                in_app: false,
+                target: None,
+                installer: Some("nsis"),
+                reason: "updater-disabled",
+            }
+        );
+    }
+
+    #[test]
+    fn update_capability_requires_a_known_installer_outside_macos() {
+        assert!(!describe_update_capability(true, "linux", None, None).in_app);
+        assert!(!describe_update_capability(true, "windows", None, None).in_app);
+        assert!(describe_update_capability(true, "linux", Some("appimage"), None).in_app);
+        assert!(describe_update_capability(true, "linux", Some("deb"), None).in_app);
+        assert!(describe_update_capability(true, "windows", Some("msi"), None).in_app);
+    }
+
+    #[test]
+    fn update_capability_on_macos_needs_no_installer_stamp() {
+        let capability = describe_update_capability(true, "macos", Some("app"), None);
+        assert!(capability.in_app);
+        assert_eq!(capability.reason, "ok");
+    }
+
+    #[test]
+    fn update_capability_reports_the_legacy_target() {
+        let capability = describe_update_capability(
+            true,
+            "linux",
+            Some("appimage"),
+            Some("linux-x86_64-glibc235".to_string()),
+        );
+        assert!(capability.in_app);
+        assert_eq!(capability.target.as_deref(), Some("linux-x86_64-glibc235"));
+    }
 
     fn scratch_dir(label: &str) -> PathBuf {
         let unique = std::time::SystemTime::now()

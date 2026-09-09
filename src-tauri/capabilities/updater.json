@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "updater",
+  "description": "In-app updates for the direct-download builds. tauri.appstore.conf.json leaves this capability out: Mac App Store apps must not update themselves.",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "updater:default",
+    "process:allow-restart"
+  ]
+}

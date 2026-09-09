@@ -1,5 +1,12 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "security": {
+      "capabilities": [
+        "default"
+      ]
+    }
+  },
   "bundle": {
     "macOS": {
       "entitlements": "Entitlements.mas.plist",
