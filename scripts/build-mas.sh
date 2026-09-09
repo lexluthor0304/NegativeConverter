@@ -28,8 +28,12 @@ echo "==> Building web assets"
 npm run build:web
 
 echo "==> Building universal .app with App Store config"
+# `-- --no-default-features` drops the `updater` cargo feature: the App Store
+# build must not carry the self-update plugin (tauri.appstore.conf.json also
+# leaves the `updater` capability out so the ACL still resolves).
 npx tauri build --bundles app --target universal-apple-darwin \
-  --config src-tauri/tauri.appstore.conf.json
+  --config src-tauri/tauri.appstore.conf.json \
+  -- --no-default-features
 
 echo "==> Verifying bundle"
 test -f "$APP_PATH/Contents/embedded.provisionprofile" \

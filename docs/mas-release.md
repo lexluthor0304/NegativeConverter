@@ -10,6 +10,11 @@ missing the job skips with a notice instead of failing.
 The web app on Vercel deploys on every merge regardless; this pipeline only
 concerns the packaged desktop app.
 
+The App Store package is built with `--no-default-features`, which drops the
+`updater` cargo feature: the in-app updater of the direct-download builds
+(`docs/desktop-updater.md`) is not allowed in App Store apps, and `build.rs`
+leaves the `updater` capability out of the ACL for that build.
+
 ## Required GitHub secrets
 
 | Secret | Content |

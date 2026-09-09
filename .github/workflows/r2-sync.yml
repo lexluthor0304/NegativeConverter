@@ -39,6 +39,8 @@ jobs:
             -p '*.AppImage' \
             -p '*.deb' \
             -p '*.rpm' \
+            -p '*.sig' \
+            -p '*.app.tar.gz' \
             -D artifacts
 
       - name: Ensure AWS CLI
@@ -104,5 +106,6 @@ jobs:
             --bucket "${R2_BUCKET}" \
             --endpoint "${R2_ENDPOINT}" \
             --prefix "negative-converter/release" \
+            --public-base-url "https://download.neoanaloglab.com" \
             --tag "${TAG}" \
             "${extra[@]}"

@@ -12,7 +12,10 @@ This project now uses **Vite** for web dev/build and Tauri for desktop packaging
 
 Merging to `main` auto-releases the desktop app (GitHub Release + R2), and —
 when the App Store secrets are configured — builds, uploads, and submits the
-Mac App Store version too (see `docs/mas-release.md`).
+Mac App Store version too (see `docs/mas-release.md`). The direct-download
+builds then update themselves in-app from `updater.json` on R2
+(`docs/desktop-updater.md`); the App Store build is compiled without the
+`updater` cargo feature.
 
 Run locally:
 ```bash

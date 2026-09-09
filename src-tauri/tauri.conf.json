@@ -38,5 +38,16 @@
     },
     "category": "Photography",
     "shortDescription": "Film negative to positive converter"
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDcxOUIyQTgyRTUyMURBMTAKUldRUTJpSGxnaXFiY1R1blQvTkF3NkZzYWlTRFJhbkx6dVlPMU9mUHZwQ3l1bEJvZkRHdE41NFIK",
+      "endpoints": [
+        "https://download.neoanaloglab.com/negative-converter/release/updater.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

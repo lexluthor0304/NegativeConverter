@@ -260,7 +260,10 @@
     const desktopUpdateState = {
       visible: false,
       currentVersion: '',
-      latestVersion: ''
+      latestVersion: '',
+      // From get_desktop_update_capability: whether this build may replace itself.
+      capability: null,
+      installing: false
     };
 
     // --- In-app modal dialogs -------------------------------------------
@@ -1795,13 +1798,165 @@
       }
     }
 
+    function formatMegabytes(bytes) {
+      return (Math.max(0, Number(bytes) || 0) / (1024 * 1024)).toFixed(1);
+    }
+
+    function setDesktopUpdateBusy(busy) {
+      const actionBtn = document.getElementById('desktopUpdateActionBtn');
+      const laterBtn = document.getElementById('desktopUpdateLaterBtn');
+      const banner = document.getElementById('desktopUpdateBanner');
+      if (actionBtn) actionBtn.disabled = busy;
+      if (laterBtn) laterBtn.disabled = busy;
+      if (banner) banner.setAttribute('aria-busy', busy ? 'true' : 'false');
+    }
+
+    function setDesktopUpdateBody(key, vars, fallback) {
+      const body = document.getElementById('desktopUpdateBody');
+      if (!body) return;
+      body.textContent = applyTemplate(getLocalizedText(key, fallback), vars || {});
+    }
+
+    // The action button installs in place when the running build can, and
+    // opens the download page otherwise: the App Store build, a package the
+    // manifest has no signed entry for, or an in-app attempt that failed.
+    function applyDesktopUpdateActionMode() {
+      const actionBtn = document.getElementById('desktopUpdateActionBtn');
+      if (!actionBtn) return;
+      const inApp = Boolean(desktopUpdateState.capability && desktopUpdateState.capability.inApp);
+      const key = inApp ? 'desktopUpdateInstall' : 'desktopUpdateAction';
+      actionBtn.dataset.i18n = key;
+      actionBtn.textContent = getLocalizedText(key, inApp ? 'Download and install' : 'Download update');
+    }
+
+    async function loadDesktopUpdateCapability() {
+      if (!isTauriDesktop()) return null;
+      try {
+        const capability = await window.__TAURI__.core.invoke('get_desktop_update_capability');
+        desktopUpdateState.capability = capability && typeof capability === 'object' ? capability : null;
+      } catch (err) {
+        console.info('Desktop update capability unavailable:', err);
+        desktopUpdateState.capability = null;
+      }
+      applyDesktopUpdateActionMode();
+      return desktopUpdateState.capability;
+    }
+
+    function describeDesktopUpdateError(err) {
+      if (!err) return 'unknown error';
+      if (typeof err === 'string') return err;
+      if (err.message) return String(err.message);
+      try {
+        return JSON.stringify(err);
+      } catch (e) {
+        return String(err);
+      }
+    }
+
+    // Downloads the signed package for this build through tauri-plugin-updater
+    // and applies it. Resolves false when updater.json has no entry for this
+    // build, so the caller can fall back to the download page.
+    async function runInAppDesktopUpdate() {
+      const updater = window.__TAURI__ && window.__TAURI__.updater;
+      const processApi = window.__TAURI__ && window.__TAURI__.process;
+      if (!updater || typeof updater.check !== 'function') {
+        throw new Error('updater plugin unavailable');
+      }
+      desktopUpdateState.installing = true;
+      setDesktopUpdateBusy(true);
+      setDesktopUpdateBody('desktopUpdateChecking', {}, 'Fetching update package details…');
+      try {
+        const update = await updater.check();
+        if (!update) return false;
+
+        let total = 0;
+        let received = 0;
+        const report = () => {
+          const receivedMb = formatMegabytes(received);
+          if (total > 0) {
+            const percent = Math.min(100, Math.round((received / total) * 100));
+            setDesktopUpdateBody(
+              'desktopUpdateDownloading',
+              { percent, received: receivedMb, total: formatMegabytes(total) },
+              'Downloading update {percent}% ({received} / {total} MB)'
+            );
+          } else {
+            setDesktopUpdateBody(
+              'desktopUpdateDownloadingUnknown',
+              { received: receivedMb },
+              'Downloading update… ({received} MB so far)'
+            );
+          }
+        };
+        report();
+        await update.downloadAndInstall((event) => {
+          if (!event || typeof event !== 'object') return;
+          if (event.event === 'Started') {
+            total = Number(event.data && event.data.contentLength) || 0;
+            report();
+          } else if (event.event === 'Progress') {
+            received += Number(event.data && event.data.chunkLength) || 0;
+            report();
+          } else if (event.event === 'Finished') {
+            setDesktopUpdateBody('desktopUpdateInstalling', {}, 'Installing… the app will restart when done.');
+          }
+        });
+        // On Windows the plugin hands over to the installer and exits the
+        // process before this resolves; macOS and Linux need the relaunch.
+        setDesktopUpdateBody('desktopUpdateRestarting', {}, 'Update installed. Restarting…');
+        if (processApi && typeof processApi.relaunch === 'function') {
+          await processApi.relaunch();
+        }
+        return true;
+      } finally {
+        desktopUpdateState.installing = false;
+        setDesktopUpdateBusy(false);
+      }
+    }
+
+    async function handleDesktopUpdateAction() {
+      if (desktopUpdateState.installing) return;
+      const capability = desktopUpdateState.capability;
+      if (capability && capability.inApp) {
+        try {
+          const installed = await runInAppDesktopUpdate();
+          if (installed) return;
+          updateDesktopUpdateBannerText();
+          showToast(
+            getLocalizedText(
+              'desktopUpdateNoPackage',
+              'No in-app update package for this build. Opening the download page.'
+            ),
+            6000
+          );
+        } catch (err) {
+          console.warn('In-app update failed:', err);
+          updateDesktopUpdateBannerText();
+          const error = describeDesktopUpdateError(err);
+          showToast(
+            getInterpolatedText(
+              'desktopUpdateFailed',
+              { error },
+              `Automatic update failed: ${error}. Opening the download page.`
+            ),
+            8000
+          );
+        }
+        // Retrying the same download would just loop; from here the button
+        // leads to the download page.
+        desktopUpdateState.capability = { ...capability, inApp: false, reason: 'fallback' };
+        applyDesktopUpdateActionMode();
+      }
+      await openDownloadPageForUpdate();
+    }
+
     function initDesktopUpdateCheck() {
       const actionBtn = document.getElementById('desktopUpdateActionBtn');
       const laterBtn = document.getElementById('desktopUpdateLaterBtn');
       if (actionBtn) {
         actionBtn.addEventListener('click', () => {
-          openDownloadPageForUpdate().catch((err) => {
-            console.warn('Failed to open download page:', err);
+          handleDesktopUpdateAction().catch((err) => {
+            console.warn('Desktop update action failed:', err);
           });
         });
       }
@@ -1810,8 +1965,10 @@
           hideDesktopUpdateBanner();
         });
       }
-      checkDesktopUpdate().catch((err) => {
-        console.info('Desktop update check failed:', err);
+      loadDesktopUpdateCapability().finally(() => {
+        checkDesktopUpdate().catch((err) => {
+          console.info('Desktop update check failed:', err);
+        });
       });
     }
 

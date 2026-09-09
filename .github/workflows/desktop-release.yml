@@ -112,6 +112,16 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Check updater signing key
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY}" ]; then
+            echo "TAURI_SIGNING_PRIVATE_KEY is not set. Release builds sign the updater artifacts; see docs/desktop-updater.md." >&2
+            exit 1
+          fi
+
       - name: Import Apple certificate
         if: matrix.os == 'macos-latest' && env.APPLE_CERTIFICATE != ''
         env:
@@ -154,13 +164,44 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: npm run tauri:build
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run tauri:build -- --config src-tauri/tauri.release.conf.json
 
       - name: Build app
         if: matrix.os != 'macos-latest' || env.APPLE_CERTIFICATE == ''
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-        run: npm run tauri:build
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run tauri:build -- --config src-tauri/tauri.release.conf.json
+
+      # The bundler names the updater archive after the product only
+      # ("Negative Converter.app.tar.gz"); add version and architecture so the
+      # R2 manifest can classify it like the other assets.
+      - name: Name macOS updater archive
+        if: matrix.os == 'macos-latest'
+        run: |
+          set -euo pipefail
+          arch="$(uname -m)"
+          case "${arch}" in
+            arm64) arch="aarch64" ;;
+          esac
+          version="${{ needs.prepare.outputs.version }}"
+          count=0
+          for archive in src-tauri/target/release/bundle/macos/*.app.tar.gz; do
+            [ -e "${archive}" ] || continue
+            [ -f "${archive}.sig" ] || { echo "Missing updater signature for ${archive}" >&2; exit 1; }
+            target="${archive%.app.tar.gz}_${version}_${arch}.app.tar.gz"
+            mv "${archive}" "${target}"
+            mv "${archive}.sig" "${target}.sig"
+            echo "Updater archive: $(basename "${target}")"
+            count=$((count + 1))
+          done
+          if [ "${count}" -lt 1 ]; then
+            echo "No macOS updater archive produced." >&2
+            exit 1
+          fi
 
       - name: Ad-hoc sign macOS app (fallback when no certificate)
         if: matrix.os == 'macos-latest' && env.APPLE_CERTIFICATE == ''
@@ -192,6 +233,8 @@ jobs:
             src-tauri/target/release/bundle/**/*.AppImage
             src-tauri/target/release/bundle/**/*.deb
             src-tauri/target/release/bundle/**/*.rpm
+            src-tauri/target/release/bundle/**/*.sig
+            src-tauri/target/release/bundle/macos/*.app.tar.gz
           if-no-files-found: error
 
   build-linux-legacy:
@@ -230,8 +273,24 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Check updater signing key
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY}" ]; then
+            echo "TAURI_SIGNING_PRIVATE_KEY is not set. Release builds sign the updater artifacts; see docs/desktop-updater.md." >&2
+            exit 1
+          fi
+
       - name: Build legacy AppImage
-        run: npm run tauri:build -- --bundles appimage
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Compiled into the binary: this build looks up its own manifest key
+          # so it never updates itself to the standard AppImage.
+          NC_UPDATER_TARGET: linux-x86_64-glibc235
+        run: npm run tauri:build -- --bundles appimage --config src-tauri/tauri.release.conf.json
 
       - name: Mark legacy AppImage variant
         run: |
@@ -239,8 +298,10 @@ jobs:
           count=0
           for file in src-tauri/target/release/bundle/appimage/*.AppImage; do
             [ -e "${file}" ] || continue
+            [ -f "${file}.sig" ] || { echo "Missing updater signature for ${file}" >&2; exit 1; }
             legacy="${file%.AppImage}_legacy-glibc235.AppImage"
             mv "${file}" "${legacy}"
+            mv "${file}.sig" "${legacy}.sig"
             echo "Marked legacy AppImage: $(basename "${legacy}")"
             count=$((count + 1))
           done
@@ -253,7 +314,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: bundle-linux-legacy
-          path: src-tauri/target/release/bundle/appimage/*_legacy-glibc235.AppImage
+          path: |
+            src-tauri/target/release/bundle/appimage/*_legacy-glibc235.AppImage
+            src-tauri/target/release/bundle/appimage/*_legacy-glibc235.AppImage.sig
           if-no-files-found: error
 
   release:
@@ -286,6 +349,8 @@ jobs:
             artifacts/**/*.AppImage
             artifacts/**/*.deb
             artifacts/**/*.rpm
+            artifacts/**/*.sig
+            artifacts/**/*.app.tar.gz
           fail_on_unmatched_files: true
           append_body: |
 
@@ -353,6 +418,7 @@ jobs:
             --bucket "${R2_BUCKET}" \
             --endpoint "${R2_ENDPOINT}" \
             --prefix "negative-converter/release" \
+            --public-base-url "https://download.neoanaloglab.com" \
             --tag "${TAG}" \
             --update-latest
 
