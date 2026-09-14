@@ -25,6 +25,7 @@ import { runCameraSmoke } from './camera-smoke.mjs';
 import { runRollHomeSmoke } from './roll-home-smoke.mjs';
 import { runTechnicalDepthSmoke } from './technical-depth-smoke.mjs';
 import { runExpiredFilmSmoke } from './expired-film-smoke.mjs';
+import { runNativeFilmFontSmoke } from './native-film-font-smoke.mjs';
 
 // UPNG is already a runtime dependency of the app; reuse it to decode screenshots.
 const UPNG = createRequire(import.meta.url)('upng-js');
@@ -265,6 +266,12 @@ await evaluate(`document.getElementById('studioImportAutoCrop').click()`);
 
 if (process.argv.includes('--positive-only')) {
   await runPositiveImportSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS');
+  process.exit(0);
+}
+if (process.argv.includes('--native-font-only')) {
+  await runNativeFilmFontSmoke({ send, evaluate, waitFor, wait, fail, port: PORT, root: ROOT });
   if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
   console.log('SMOKE PASS');
   process.exit(0);
@@ -646,6 +653,7 @@ if (process.env.AUTOFRAME_RAW_DIR) await runStudioRawAutoFrameSmoke({ send, eval
 
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runPositiveImportSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+if (!process.argv.some(arg => arg.endsWith('-only'))) await runNativeFilmFontSmoke({ send, evaluate, waitFor, wait, fail, port: PORT, root: ROOT });
 
 // ---- no uncaught page errors across both scenarios ----
 const realErrors = pageErrors.filter((e) => !/ResizeObserver loop/.test(e));

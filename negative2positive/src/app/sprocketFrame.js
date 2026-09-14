@@ -1,3 +1,8 @@
+import {
+  NATIVE_PIXEL_SIZE, nativePixelFontLocale, nativePixelFontFamily,
+  hasNativePixelGlyph, isNativePixelFontReady, ensureNativePixelFont
+} from './nativePixelFont.js';
+
 const DEFAULT_FILM_COLOR = [6, 6, 6, 255];
 const DEFAULT_HOLE_COLOR = [255, 255, 255, 255];
 const DEFAULT_MARKING_COLOR = [196, 122, 0, 255];
@@ -147,6 +152,7 @@ export function normalizeSprocketEdgeMarkings(options = {}) {
     overexposureStrength: clamp(Number(source.overexposureStrength ?? defaults.overexposureStrength) || 0, 0, 2),
     fontStyle: FONT_STYLE_OPTIONS.has(source.fontStyle) ? source.fontStyle : defaults.fontStyle,
     fontFamily: String(source.fontFamily ?? defaults.fontFamily).slice(0, 80),
+    fontLocale: nativePixelFontLocale(source.fontLocale),
     holeColor: sanitizeColor(source.holeColor ?? defaults.holeColor, DEFAULT_HOLE_COLOR),
     letteringColor: sanitizeColor(source.letteringColor ?? defaults.letteringColor, DEFAULT_MARKING_COLOR),
     overexposureColor: sanitizeColor(source.overexposureColor ?? defaults.overexposureColor, DEFAULT_OVEREXPOSURE_COLOR)
@@ -486,37 +492,65 @@ function paintOverexposedSprockets(data, metrics, fill) {
 }
 
 const unicodeBitmapGlyphs = new Map();
+const pendingGlyphRows = Array(NATIVE_PIXEL_SIZE).fill('0'.repeat(NATIVE_PIXEL_SIZE));
 
-function getGlyphRows(char, fontFamily) {
+function needsNativePixelFont(options) {
+  const edge = getComposeEdgeMarkings(options);
+  return edge.fontStyle === 'edgePixel' && edge.textEnabled
+    && Array.from(edge.text.toUpperCase()).some(char => !BITMAP_FONT[char] && hasNativePixelGlyph(char));
+}
+
+export function areSprocketFrameFontsReady(options = {}) {
+  return !needsNativePixelFont(options) || isNativePixelFontReady(getComposeEdgeMarkings(options).fontLocale);
+}
+
+export async function ensureSprocketFrameFonts(options = {}) {
+  if (needsNativePixelFont(options)) await ensureNativePixelFont(getComposeEdgeMarkings(options).fontLocale);
+}
+
+function getGlyphRows(char, fontLocale) {
   if (BITMAP_FONT[char]) return BITMAP_FONT[char];
-  const key = `${fontFamily}\0${char}`;
+  const native = hasNativePixelGlyph(char);
+  // A temporary blank must never be cached as the final glyph.
+  if (native && !isNativePixelFontReady(fontLocale)) return pendingGlyphRows;
+  const family = native ? nativePixelFontFamily(fontLocale) : 'sans-serif';
+  const key = `${family}\0${char}`;
   if (unicodeBitmapGlyphs.has(key)) return unicodeBitmapGlyphs.get(key);
 
-  // CJK needs more detail than the Latin 5x7 alphabet. Sample a fixed 16x16
-  // binary grid, then paint its cells exactly like the built-in bitmap glyphs.
-  // Never rasterize at export resolution: that would turn it into smooth text.
-  const size = 16;
+  // Fusion Pixel's outlines use a 100-unit grid at 1200 units/em. At 12px,
+  // each designed pixel is exactly one canvas pixel. Keep the native grid:
+  // no fitting transforms, fractional origins, or synthetic font weights.
+  // Rare characters outside the bundled cmap retain the previous system-font
+  // fallback instead of regressing to question marks. It is never used for a
+  // supported native glyph, including while its font is still loading.
+  const size = native ? NATIVE_PIXEL_SIZE : 16;
   const canvas = createTextCanvas(size, size);
   const ctx = canvas?.getContext('2d');
   if (!ctx || typeof ctx.measureText !== 'function' || typeof ctx.getImageData !== 'function') {
     return BITMAP_FONT['?'];
   }
-  const customFamily = toCssFontFamilyList(fontFamily);
-  const family = customFamily ? `${customFamily}, sans-serif` : 'sans-serif';
-  ctx.font = `400 ${size}px ${family}`;
+  const font = `400 ${size}px ${native ? `"${family}"` : family}`;
+  ctx.font = font;
   ctx.textBaseline = 'alphabetic';
   const measured = ctx.measureText(char);
-  const left = measured.actualBoundingBoxLeft ?? 0;
-  const right = measured.actualBoundingBoxRight ?? measured.width;
-  const ascent = measured.actualBoundingBoxAscent ?? size;
-  const descent = measured.actualBoundingBoxDescent ?? 0;
-  const fit = Math.min(1, size / Math.max(1, left + right), size / Math.max(1, ascent + descent));
-  ctx.scale(fit, fit);
+  // Native coordinates are integers; browser text metrics can return values
+  // like 10.0000019. Ceil would add a spurious row and shrink the whole glyph.
+  const snap = native ? Math.round : Math.ceil;
+  const left = snap(measured.actualBoundingBoxLeft ?? 0);
+  const right = snap(measured.actualBoundingBoxRight ?? measured.width);
+  const ascent = snap(measured.actualBoundingBoxAscent ?? size);
+  const descent = snap(measured.actualBoundingBoxDescent ?? 0);
+  const height = Math.max(size, Math.ceil(ascent) + Math.ceil(descent));
+  const width = Math.max(1, Math.ceil(measured.width), Math.ceil(left) + Math.ceil(right));
+  canvas.width = width;
+  canvas.height = height;
+  ctx.font = font;
+  ctx.textBaseline = 'alphabetic';
   ctx.fillStyle = '#fff';
-  ctx.fillText(char, (size / fit - left - right) / 2 + left, (size / fit - ascent - descent) / 2 + ascent);
-  const pixels = ctx.getImageData(0, 0, size, size).data;
-  const rows = Array.from({ length: size }, (_, y) => Array.from({ length: size }, (_, x) => (
-    pixels[(y * size + x) * 4 + 3] >= 96 ? '1' : '0'
+  ctx.fillText(char, Math.max(0, Math.ceil(left)), Math.floor((height - Math.ceil(ascent) - Math.ceil(descent)) / 2) + Math.ceil(ascent));
+  const pixels = ctx.getImageData(0, 0, width, height).data;
+  const rows = Array.from({ length: height }, (_, y) => Array.from({ length: width }, (_, x) => (
+    pixels[(y * width + x) * 4 + 3] >= 128 ? '1' : '0'
   )).join(''));
   // Bound the cache when users repeatedly edit labels or font families.
   if (unicodeBitmapGlyphs.size >= 256) unicodeBitmapGlyphs.delete(unicodeBitmapGlyphs.keys().next().value);
@@ -524,12 +558,12 @@ function getGlyphRows(char, fontFamily) {
   return rows;
 }
 
-function drawBitmapText(data, metrics, text, x, y, scale, fill, align = 'left', fontFamily = '') {
+function drawBitmapText(data, metrics, text, x, y, scale, fill, align = 'left', fontLocale = 'sc') {
   const safeText = String(text || '').toUpperCase();
   if (!safeText || scale <= 0) return;
 
   const glyphs = Array.from(safeText, (char) => {
-    const rows = getGlyphRows(char, fontFamily);
+    const rows = getGlyphRows(char, fontLocale);
     const cellSize = scale * 7 / rows.length;
     return { rows, cellSize, width: rows[0].length * cellSize };
   });
@@ -682,7 +716,7 @@ function drawCanvasText(data, metrics, text, x, y, pixelSize, fill, align, fontS
 function drawEdgeText(data, metrics, edge, text, x, y, pixelSize, align = 'left', fill = edge.letteringColor) {
   if (edge.fontStyle === 'edgePixel') {
     const scale = pixelSize / 7;
-    drawBitmapText(data, metrics, text, x, y, scale, fill, align, edge.fontFamily);
+    drawBitmapText(data, metrics, text, x, y, scale, fill, align, edge.fontLocale);
     return;
   }
 

@@ -65,6 +65,8 @@
       DEFAULT_SPROCKET_EDGE_MARKINGS,
       composeSprocketFrame,
       composeSprocketFrameBackground,
+      areSprocketFrameFontsReady,
+      ensureSprocketFrameFonts,
       getSprocketFrameMetrics,
       normalizeSprocketEdgeMarkings
     } from './sprocketFrame.js';
@@ -481,6 +483,7 @@
         if (typeof updateLensCorrectionUI === 'function') updateLensCorrectionUI();
         if (typeof updateExportUI === 'function') updateExportUI();
         updateDesktopBatchExportUI();
+        if (state.sprocketPreviewEnabled) refreshSprocketPreviewAfterSettingsChange();
       }
       studioWorkspace?.sync();
     }
@@ -3359,7 +3362,7 @@
     // Edge text and frame number default to the roll's stock and this frame's
     // number while the user has not typed their own values.
     function getSprocketFrameComposeOptions(settings = state, position = state.currentFileIndex) {
-      const edge = { ...state.sprocketEdge };
+      const edge = { ...state.sprocketEdge, fontLocale: currentLang };
       const roll = state.rollMetadata || {};
       const frame = settings === state || !settings ? state.frameMetadata : settings.frameMetadata;
       if (roll.stock && (!edge.text || edge.text === DEFAULT_SPROCKET_EDGE_MARKINGS.text)) edge.text = roll.stock.toUpperCase();
@@ -3559,9 +3562,27 @@
       return true;
     }
 
+    let pendingSprocketPreviewFont = null;
+
+    function prepareSprocketPreviewFont(composeOptions) {
+      if (areSprocketFrameFontsReady(composeOptions)) return;
+      const locale = composeOptions.edgeMarkings.fontLocale;
+      if (pendingSprocketPreviewFont === locale) return;
+      pendingSprocketPreviewFont = locale;
+      void ensureSprocketFrameFonts(composeOptions).then(() => {
+        sprocketPreviewFrameCache.key = null;
+        refreshSprocketPreviewAfterSettingsChange();
+      }).catch(error => {
+        console.warn('Film-edge font could not be loaded:', error);
+      }).finally(() => {
+        if (pendingSprocketPreviewFont === locale) pendingSprocketPreviewFont = null;
+      });
+    }
+
     function renderAdjustedImageDataToMainCanvas(imageData, fullSizeReference = imageData, options = {}) {
       if (state.sprocketPreviewEnabled && !state.cropping) {
         const composeOptions = getSprocketFrameComposeOptions();
+        prepareSprocketPreviewFont(composeOptions);
         if (options.fastSprocketPreview && renderFastSprocketPreview(imageData, fullSizeReference, composeOptions)) {
           return;
         }
@@ -9884,9 +9905,11 @@
       });
     }
 
-    function applySprocketFrameForExport(imageData, exportInfo, settings = state, position = state.currentFileIndex) {
+    async function applySprocketFrameForExport(imageData, exportInfo, settings = state, position = state.currentFileIndex) {
       if (!state.exportSprocketHolesEnabled) return imageData;
-      return composeSprocketFrame(imageData, getSprocketFrameComposeOptions(settings, position));
+      const options = getSprocketFrameComposeOptions(settings, position);
+      await ensureSprocketFrameFonts(options);
+      return composeSprocketFrame(imageData, options);
     }
 
     async function getCurrentExportImageData({ bitDepth = 8 } = {}) {
@@ -9973,7 +9996,7 @@
         } else if (state.currentStep >= 3 && state.processedImageData) {
           persistCurrentFileSettings({ silent: true, force: true });
           const imageData = await renderCurrentImageDataForExport(exportInfo);
-          const outputImageData = applySprocketFrameForExport(imageData, exportInfo);
+          const outputImageData = await applySprocketFrameForExport(imageData, exportInfo);
           overlay.updateProgress(60, lang.loadingEncoding);
           blob = await imageDataToBlob(outputImageData, exportInfo.format, state.jpegQuality, exportInfo.bitDepth, (pct) => {
             overlay.updateProgress(60 + pct * 0.35, lang.loadingEncoding);
@@ -9984,7 +10007,7 @@
         } else {
           overlay.updateProgress(50, lang.loadingEncoding);
           const imageData = await renderCurrentImageDataForExport(exportInfo);
-          const outputImageData = applySprocketFrameForExport(imageData, exportInfo);
+          const outputImageData = await applySprocketFrameForExport(imageData, exportInfo);
           blob = await imageDataToBlob(outputImageData, exportInfo.format, state.jpegQuality, exportInfo.bitDepth, (pct) => {
             overlay.updateProgress(50 + pct * 0.45, lang.loadingEncoding);
           });
@@ -10741,7 +10764,7 @@
               blob = renderLinearDngBlob(source, usedSettings, processedCount - 1);
             } else {
               const adjusted = await processFileWithSettings(item.file, settingsForFile, { bitDepth: exportInfo.bitDepth });
-              const outputImageData = applySprocketFrameForExport(adjusted, exportInfo, settingsForFile, processedCount - 1);
+              const outputImageData = await applySprocketFrameForExport(adjusted, exportInfo, settingsForFile, processedCount - 1);
               overlay.updateProgress(fileProgress + fileSlice * 0.6, lang.loadingEncoding);
               blob = await imageDataToBlob(
                 outputImageData,
@@ -10870,7 +10893,7 @@
               name = buildActiveExportFileName(item.file.name, exportInfo, settingsForFile);
             } else {
             adjusted = await processFileWithSettings(item.file, settingsForFile, { bitDepth: exportInfo.bitDepth });
-            const outputImageData = applySprocketFrameForExport(adjusted, exportInfo, settingsForFile, i);
+            const outputImageData = await applySprocketFrameForExport(adjusted, exportInfo, settingsForFile, i);
             overlay.updateProgress(fileProgress + fileSlice * 0.55, lang.loadingEncoding);
             blob = await imageDataToBlob(
               outputImageData,
@@ -11065,7 +11088,7 @@
 
           try {
             const adjusted = await processFileWithSettings(file, settings, { dustRemoval });
-            const outputImageData = applySprocketFrameForExport(adjusted, exportInfo);
+            const outputImageData = await applySprocketFrameForExport(adjusted, exportInfo);
             setDesktopBatchExportState({
               active: true,
               current: i + 1,
@@ -11157,7 +11180,7 @@
               name = buildActiveExportFileName(item.file.name, exportInfo, settingsForFile);
             } else {
             adjusted = await processFileWithSettings(item.file, settingsForFile, { bitDepth: exportInfo.bitDepth });
-            const outputImageData = applySprocketFrameForExport(adjusted, exportInfo, settingsForFile, i);
+            const outputImageData = await applySprocketFrameForExport(adjusted, exportInfo, settingsForFile, i);
             overlay.updateProgress(fileProgress + fileSlice * 0.6, lang.loadingEncoding);
             blob = await imageDataToBlob(
               outputImageData,
@@ -13720,7 +13743,11 @@
           try {
             let adjusted = await processFileWithSettings(item.file, settingsForFile);
             if (Math.max(adjusted.width, adjusted.height) > target) adjusted = downsampleImageDataForMaxDim(adjusted, target);
-            if (sprockets) adjusted = composeSprocketFrame(adjusted, getSprocketFrameComposeOptions(settingsForFile, i));
+            if (sprockets) {
+              const options = getSprocketFrameComposeOptions(settingsForFile, i);
+              await ensureSprocketFrameFonts(options);
+              adjusted = composeSprocketFrame(adjusted, options);
+            }
             const bitmap = await createImageBitmap(adjusted);
             thumbs.push({ image: bitmap, width: bitmap.width, height: bitmap.height, label });
           } catch (error) {
