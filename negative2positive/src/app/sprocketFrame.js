@@ -132,7 +132,7 @@ export function normalizeSprocketEdgeMarkings(options = {}) {
   const defaults = DEFAULT_SPROCKET_EDGE_MARKINGS;
   return {
     textEnabled: Boolean(source.textEnabled),
-    text: String(source.text ?? defaults.text).slice(0, 48),
+    text: Array.from(String(source.text ?? defaults.text)).slice(0, 48).join(''),
     frameNumberEnabled: Boolean(source.frameNumberEnabled),
     frameNumber: clampInt(source.frameNumber ?? defaults.frameNumber, 0, 99),
     frameNumberHole: clampInt(source.frameNumberHole ?? defaults.frameNumberHole, 1, 8),
@@ -485,35 +485,68 @@ function paintOverexposedSprockets(data, metrics, fill) {
   });
 }
 
-function getGlyphRows(char) {
-  return BITMAP_FONT[char] || BITMAP_FONT['?'];
+const unicodeBitmapGlyphs = new Map();
+
+function getGlyphRows(char, fontFamily) {
+  if (BITMAP_FONT[char]) return BITMAP_FONT[char];
+  const key = `${fontFamily}\0${char}`;
+  if (unicodeBitmapGlyphs.has(key)) return unicodeBitmapGlyphs.get(key);
+
+  // CJK needs more detail than the Latin 5x7 alphabet. Sample a fixed 16x16
+  // binary grid, then paint its cells exactly like the built-in bitmap glyphs.
+  // Never rasterize at export resolution: that would turn it into smooth text.
+  const size = 16;
+  const canvas = createTextCanvas(size, size);
+  const ctx = canvas?.getContext('2d');
+  if (!ctx || typeof ctx.measureText !== 'function' || typeof ctx.getImageData !== 'function') {
+    return BITMAP_FONT['?'];
+  }
+  const customFamily = toCssFontFamilyList(fontFamily);
+  const family = customFamily ? `${customFamily}, sans-serif` : 'sans-serif';
+  ctx.font = `400 ${size}px ${family}`;
+  ctx.textBaseline = 'alphabetic';
+  const measured = ctx.measureText(char);
+  const left = measured.actualBoundingBoxLeft ?? 0;
+  const right = measured.actualBoundingBoxRight ?? measured.width;
+  const ascent = measured.actualBoundingBoxAscent ?? size;
+  const descent = measured.actualBoundingBoxDescent ?? 0;
+  const fit = Math.min(1, size / Math.max(1, left + right), size / Math.max(1, ascent + descent));
+  ctx.scale(fit, fit);
+  ctx.fillStyle = '#fff';
+  ctx.fillText(char, (size / fit - left - right) / 2 + left, (size / fit - ascent - descent) / 2 + ascent);
+  const pixels = ctx.getImageData(0, 0, size, size).data;
+  const rows = Array.from({ length: size }, (_, y) => Array.from({ length: size }, (_, x) => (
+    pixels[(y * size + x) * 4 + 3] >= 96 ? '1' : '0'
+  )).join(''));
+  // Bound the cache when users repeatedly edit labels or font families.
+  if (unicodeBitmapGlyphs.size >= 256) unicodeBitmapGlyphs.delete(unicodeBitmapGlyphs.keys().next().value);
+  unicodeBitmapGlyphs.set(key, rows);
+  return rows;
 }
 
-function measureBitmapText(text, scale) {
-  const safeText = String(text || '');
-  if (!safeText) return 0;
-  return safeText.length * 6 * scale - scale;
-}
-
-function drawBitmapText(data, metrics, text, x, y, scale, fill, align = 'left') {
+function drawBitmapText(data, metrics, text, x, y, scale, fill, align = 'left', fontFamily = '') {
   const safeText = String(text || '').toUpperCase();
   if (!safeText || scale <= 0) return;
 
-  const measured = measureBitmapText(safeText, scale);
+  const glyphs = Array.from(safeText, (char) => {
+    const rows = getGlyphRows(char, fontFamily);
+    const cellSize = scale * 7 / rows.length;
+    return { rows, cellSize, width: rows[0].length * cellSize };
+  });
+  const measured = glyphs.reduce((sum, glyph) => sum + glyph.width + scale, -scale);
   let cursorX = x;
   if (align === 'center') cursorX -= measured / 2;
   if (align === 'right') cursorX -= measured;
 
   const rectangles = [];
-  for (const char of safeText) {
-    const rows = getGlyphRows(char);
+  for (const { rows, cellSize, width } of glyphs) {
     for (let row = 0; row < rows.length; row++) {
       for (let col = 0; col < rows[row].length; col++) {
         if (rows[row][col] !== '1') continue;
-        rectangles.push([cursorX + col * scale, y + row * scale, scale, scale]);
+        rectangles.push([cursorX + col * cellSize, y + row * cellSize, cellSize, cellSize]);
       }
     }
-    cursorX += 6 * scale;
+    cursorX += width + scale;
   }
   paintMarkingRectangles(data, metrics, rectangles, fill);
 }
@@ -649,7 +682,7 @@ function drawCanvasText(data, metrics, text, x, y, pixelSize, fill, align, fontS
 function drawEdgeText(data, metrics, edge, text, x, y, pixelSize, align = 'left', fill = edge.letteringColor) {
   if (edge.fontStyle === 'edgePixel') {
     const scale = pixelSize / 7;
-    drawBitmapText(data, metrics, text, x, y, scale, fill, align);
+    drawBitmapText(data, metrics, text, x, y, scale, fill, align, edge.fontFamily);
     return;
   }
 

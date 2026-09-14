@@ -295,4 +295,55 @@ for (let y = 0; y < 360; y++) for (let x = 0; x < 240; x++) {
   assert.deepEqual(Array.from(portraitFrame.data.subarray(i, i + 4)), [90, 90, 90, 255]);
 }
 
+// Missing glyphs are sampled on a fixed grid for both export and preview.
+const originalOffscreenCanvas = globalThis.OffscreenCanvas;
+const canvasLabels = [];
+const canvasSizes = [];
+globalThis.OffscreenCanvas = class {
+  constructor(width, height) {
+    this.width = width;
+    this.height = height;
+    canvasSizes.push([width, height]);
+  }
+  getContext() {
+    return {
+      measureText: (text) => ({ width: Array.from(text).length * 7 }),
+      clearRect() {},
+      scale() {},
+      fillText: (text) => canvasLabels.push(text),
+      getImageData: () => ({ data: new Uint8ClampedArray(this.width * this.height * 4) })
+    };
+  }
+};
+try {
+  for (const compose of [composeSprocketFrame, composeSprocketFrameBackground]) {
+    for (const text of ['中文胶片', '日本語フィルム', '한국어 필름', 'Portra 400 東京・京都', '𠮷野家']) {
+      canvasLabels.length = 0;
+      canvasSizes.length = 0;
+      // Unique families also exercise glyph generation rather than cache hits.
+      const fontFamily = `Test ${compose.name} ${text}`;
+      compose(source, { edgeMarkings: { textEnabled: true, text, fontFamily } });
+      assert.ok(canvasLabels.length > 0, `Unicode bitmap required for ${text}`);
+      assert.ok(canvasLabels.every((label) => Array.from(text).includes(label)), 'Sample the original Unicode code points');
+      assert.ok(canvasSizes.every(([w, h]) => w === 16 && h === 16), 'CJK uses a 16x16 grid, not smooth output-size text');
+      canvasLabels.length = 0;
+      compose(naturalSource, { edgeMarkings: { textEnabled: true, text, fontFamily } });
+      assert.equal(canvasLabels.length, 0, 'Reuse the same bitmap at larger output sizes');
+    }
+    canvasLabels.length = 0;
+    compose(source, { edgeMarkings: { textEnabled: true, text: 'Kodak Portra 160' } });
+    assert.equal(canvasLabels.length, 0, 'Supported Latin labels retain the original bitmap style');
+    compose(source, { edgeMarkings: { textEnabled: true, text: 'Kodak', fontStyle: 'serif' } });
+    assert.ok(canvasLabels.includes('Kodak'), 'Explicit canvas font selections still apply');
+  }
+} finally {
+  if (originalOffscreenCanvas === undefined) delete globalThis.OffscreenCanvas;
+  else globalThis.OffscreenCanvas = originalOffscreenCanvas;
+}
+assert.equal(
+  normalizeSprocketEdgeMarkings({ text: '中'.repeat(47) + '𠮷尾' }).text,
+  '中'.repeat(47) + '𠮷',
+  'The text limit must not split supplementary CJK characters'
+);
+
 console.log('sprocketFrame.test.mjs passed');
