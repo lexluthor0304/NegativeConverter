@@ -7,7 +7,7 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.4",
-    "vite": "^8.2.2"
+    "vite": "^8.3.0"
   },
   "scripts": {
     "dev:web": "vite --config negative2positive/vite.config.js",
@@ -30,9 +30,9 @@
     "@techstark/opencv-js": "^5.0.0-release.1",
     "@vercel/analytics": "^2.0.1",
     "jsqr": "1.4.0",
-    "jszip": "3.10.1",
+    "jszip": "3.10.2",
     "libraw-wasm": "^1.6.0",
-    "onnxruntime-web": "1.19.2",
+    "onnxruntime-web": "1.29.0",
     "pako": "^3.0.1",
     "qrcode-generator": "1.4.4",
     "upng-js": "2.1.0",
