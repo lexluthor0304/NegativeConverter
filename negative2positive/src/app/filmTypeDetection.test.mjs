@@ -13,6 +13,22 @@ const orange = (x, y) => { const t = (x + y) % 70; return [130 + t, 60 + t * .6,
 const croppedNegative = fixture(orange);
 assert.equal(detectFilmType(croppedNegative).filmType, 'color', 'orange-mask scan needs no border');
 assert.equal(detectFilmType(croppedNegative).confidence, 'medium', 'warm scenes can resemble mask; do not claim certainty');
+// Borderless negative with magenta subject regions, as in the L1009967 DNG:
+// the orange-only threshold misses it, but the mask covers every region.
+for (const sixteen of [false, true]) {
+  for (const orangeWidth of [88, 104, 112]) {
+    const mixedMask = fixture((x, y) => {
+      const t = (x + y) % 40;
+      return x < orangeWidth ? [180 + t, 90 + t * .6, 45 + t * .5] : [150 + t, 70 + t * .4, 105 + t * .3];
+    }, sixteen);
+    assert.deepEqual(detectFilmType(mixedMask), { filmType: 'color', confidence: 'medium', reason: 'orangeMask' });
+    assert.equal(detectedImportSettings(mixedMask, { automatic: false, filmType: 'positive' }).filmType, 'positive');
+  }
+}
+const warmSubject = fixture((x, y) => x < 108 ? orange(x, y) : [55, 115, 170]);
+assert.equal(detectFilmType(warmSubject).filmType, 'positive', 'orange subject with blue sky has no global mask');
+const warmWithNeutrals = fixture((x, y) => x < 108 ? orange(x, y) : [100, 102, 99]);
+assert.equal(detectFilmType(warmWithNeutrals).filmType, 'positive', 'neutral regions contradict a global orange mask');
 const negative = fixture((x, y, edge) => edge ? [230, 160, 85] : orange(x, y));
 assert.equal(detectFilmType(negative).filmType, 'color');
 assert.equal(detectFilmType(negative).confidence, 'high');

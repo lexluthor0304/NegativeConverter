@@ -20,6 +20,7 @@ export function detectFilmType(image, { fallback = 'positive', filmEdge = null }
     if (peak < .02 || low > .98) continue;
     const pixel = { r, g, b, luma: .2126 * r + .7152 * g + .0722 * b,
       gray: peak - low < .035,
+      maskRed: r > g * 1.15 && r > b * 1.15,
       orange: r > g * 1.18 && g > b * 1.18 && r - b > .16 };
     all.push(pixel);
     if (x < width * .05 || x >= width * .95 || y < height * .05 || y >= height * .95) edge.push(pixel);
@@ -40,7 +41,13 @@ export function detectFilmType(image, { fallback = 'positive', filmEdge = null }
       && edgeLuma > innerLuma + .07 && orangeFraction > .35) {
     return { filmType: 'color', confidence: 'high', reason: 'orangeRebate' };
   }
-  if (orangeFraction > .72 && quantile(all, 'r', .1) > quantile(all, 'b', .9) * .9) {
+  // Subject colours can make a masked negative magenta instead of orange
+  // (B >= G), even though the red mask remains over the entire frame. Require
+  // both majority orange and near-global red dominance for this second path;
+  // a warm subject beside neutral shadows or blue sky is not enough.
+  const coherentMask = orangeFraction > .5 && fraction(all, 'maskRed') > .95;
+  if ((orangeFraction > .72 || coherentMask)
+      && quantile(all, 'r', .1) > quantile(all, 'b', .9) * .9) {
     return { filmType: 'color', confidence: 'medium', reason: 'orangeMask' };
   }
   if (fraction(all, 'gray') > .96) {

@@ -79,11 +79,11 @@ export async function runRollHomeSmoke({ send, evaluate, waitFor, wait, fail, in
   const chunks = listPngChunks(png.bytes);
   const types = chunks.map((c) => c.type);
   console.log('roll home png chunks:', types.slice(0, 5).join(','), png.name);
-  if (types[1] !== 'eXIf' || types[2] !== 'iTXt') fail('PNG export lacks eXIf/iTXt after IHDR: ' + types.join(','));
-  const pngExif = parseTiff(chunks[1].data);
+  if (types.slice(0, 4).join(',') !== 'IHDR,iCCP,eXIf,iTXt') fail('PNG export lacks ICC/EXIF/XMP after IHDR: ' + types.join(','));
+  const pngExif = parseTiff(chunks.find(c => c.type === 'eXIf').data);
   if (pngExif.exif?.[EXIF_TAGS.ISOSpeedRatings]?.values[0] !== 400) fail('PNG EXIF ISO missing');
   if (pngExif.ifd0[TIFF_TAGS.Model]?.values !== 'Nikon FM2') fail('PNG EXIF camera missing');
-  const pngXmp = new TextDecoder().decode(chunks[2].data);
+  const pngXmp = new TextDecoder().decode(chunks.find(c => c.type === 'iTXt').data);
   if (!/AnalogExif:Film>[^<]*ULTRA MAX/i.test(pngXmp) || !/AnalogExif:ExposureNumber>31A</.test(pngXmp) || !/<rdf:li>Corner Lab<\/rdf:li>/.test(pngXmp)) fail('PNG XMP lacks film fields: ' + pngXmp.slice(0, 400));
 
   const tiff = await exportAs(evaluate, waitFor, 'tiff');
@@ -92,6 +92,7 @@ export async function runRollHomeSmoke({ send, evaluate, waitFor, wait, fail, in
   if (parsed.ifd0[TIFF_TAGS.Model]?.values !== 'Nikon FM2') fail('TIFF Model tag missing');
   if (parsed.exif?.[EXIF_TAGS.LensModel]?.values !== 'Nikkor 50mm f/1.8') fail('TIFF Exif lens missing');
   if (!/AnalogExif:Lab>Corner Lab</.test(new TextDecoder().decode(parsed.ifd0[TIFF_TAGS.XMP]?.raw || new Uint8Array()))) fail('TIFF XMP tag missing the lab');
+  if (!parsed.ifd0[34675]?.raw?.length) fail('TIFF ICC profile tag missing');
   if (parsed.ifd0[TIFF_TAGS.ImageWidth]?.values[0] < 100) fail('TIFF image width implausible');
 
   const jpeg = await exportAs(evaluate, waitFor, 'jpeg');
@@ -99,9 +100,13 @@ export async function runRollHomeSmoke({ send, evaluate, waitFor, wait, fail, in
   const app1 = segments.filter((s) => s.marker === 0xE1);
   console.log('roll home jpeg segments:', segments.map((s) => s.marker.toString(16)).join(','), jpeg.name);
   if (app1.length !== 2) fail('JPEG export lacks the two APP1 segments');
-  const jpegExif = parseTiff(app1[0].data.subarray(6));
+  const exifSegment = app1.find(s => new TextDecoder().decode(s.data.subarray(0, 6)) === 'Exif\0\0');
+  const xmpSegment = app1.find(s => new TextDecoder().decode(s.data).startsWith('http://ns.adobe.com/xap/1.0/'));
+  if (!exifSegment || !xmpSegment) fail('JPEG must retain both typed EXIF and XMP packets');
+  if (!segments.some(s => s.marker === 0xE2 && new TextDecoder().decode(s.data).startsWith('ICC_PROFILE'))) fail('JPEG ICC missing');
+  const jpegExif = parseTiff(exifSegment.data.subarray(6));
   if (jpegExif.exif?.[EXIF_TAGS.DateTimeOriginal]?.values !== '2026:09:06 00:00:00') fail('JPEG EXIF date missing');
-  if (!/AnalogExif:RollId|AnalogExif:Film>/.test(new TextDecoder().decode(app1[1].data))) fail('JPEG XMP missing');
+  if (!/AnalogExif:RollId|AnalogExif:Film>/.test(new TextDecoder().decode(xmpSegment.data))) fail('JPEG XMP missing');
   await evaluate(`document.querySelector('.format-btn[data-format="png"]').click()`);
   console.log('ok: roll and frame metadata land in the PNG (eXIf + iTXt), TIFF (IFD0 + Exif + XMP) and JPEG (APP1 EXIF + XMP) exports');
 

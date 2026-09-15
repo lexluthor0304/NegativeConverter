@@ -28,7 +28,7 @@ export function sanitizeRollMetadata(input) {
     lens: cleanText(source.lens),
     process: cleanText(source.process),
     lab: cleanText(source.lab),
-    date: /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : ''
+    date: /^\d{4}(?:-\d{2}-\d{2})?$/.test(date) ? date : ''
   };
 }
 
@@ -112,7 +112,7 @@ export function buildXmpPacket({ roll, frame, index, software = 'NeoAnalogLab Ne
   let body = '';
   body += xmpElement('xmp:CreatorTool', software);
   if (safeRoll.date) body += xmpElement('xmp:CreateDate', safeRoll.date);
-  if (safeRoll.date) body += xmpElement('exif:DateTimeOriginal', `${safeRoll.date}T00:00:00`);
+  if (safeRoll.date.length === 10) body += xmpElement('exif:DateTimeOriginal', `${safeRoll.date}T00:00:00`);
   if (safeRoll.iso) body += `      <exif:ISOSpeedRatings><rdf:Seq><rdf:li>${escapeXml(safeRoll.iso)}</rdf:li></rdf:Seq></exif:ISOSpeedRatings>\n`;
   body += xmpElement('tiff:Model', safeRoll.camera);
   body += xmpElement('aux:Lens', safeRoll.lens);

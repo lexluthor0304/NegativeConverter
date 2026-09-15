@@ -332,3 +332,32 @@ body.studio {
 .studio-discovery { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px 14px; max-width: 560px; margin: 14px auto 0; font-size: 12px; line-height: 1.6; }
 .studio-discovery a { color: var(--text-secondary); text-underline-offset: 3px; }
 .studio-discovery a:hover, .studio-discovery a:focus-visible { color: var(--text-primary); text-decoration: underline; }
+
+.studio [hidden] { display: none !important; }
+.studio .needs-review { color: #edbf76; border: 1px solid currentColor; padding: 0 5px; }
+.file-review-menu { position: relative; }
+.file-review-menu > button { position: absolute; z-index: 10; bottom: 100%; right: 0; min-width: 150px; }
+#studioReviewFilter[aria-pressed="true"] { color: var(--accent); }
+
+/* Secondary tools switch; CMYD stays in the primary adjustment flow. */
+.studio-panel-options { display: flex; justify-content: flex-end; padding: 4px 0 14px; }
+.studio .studio-advanced-toggle {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  min-height: 34px; padding: 7px 10px; border: 1px solid var(--border-light);
+  border-radius: 5px; background: #282826; color: var(--text-secondary);
+  font: inherit; font-size: 12px; line-height: 1; cursor: pointer;
+  box-shadow: inset 0 1px 0 #ffffff06;
+  transition: color 140ms ease, border-color 140ms ease, background 140ms ease;
+}
+.studio .studio-advanced-toggle svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.3; }
+.studio .studio-advanced-toggle svg circle { fill: #282826; }
+.studio .studio-advanced-toggle:hover { color: var(--text-primary); border-color: var(--accent-dim); background: #32312d; }
+.studio .studio-advanced-toggle[aria-pressed="true"] { color: var(--accent); border-color: #88785c; background: #343026; }
+.studio .studio-advanced-toggle[aria-pressed="true"] svg circle { fill: #343026; }
+.studio-toggle-indicator { position: relative; width: 22px; height: 12px; border: 1px solid #66635c; border-radius: 7px; margin-left: 2px; }
+.studio-toggle-indicator::after { content: ''; position: absolute; left: 2px; top: 2px; width: 6px; height: 6px; border-radius: 50%; background: #8a877f; transition: transform 140ms ease, background 140ms ease; }
+.studio-advanced-toggle[aria-pressed="true"] .studio-toggle-indicator { border-color: var(--accent-dim); }
+.studio-advanced-toggle[aria-pressed="true"] .studio-toggle-indicator::after { transform: translateX(10px); background: var(--accent); }
+.studio .studio-advanced-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+@media (pointer: coarse) { .studio .studio-advanced-toggle { min-height: 44px; } }
+@media (prefers-reduced-motion: reduce) { .studio .studio-advanced-toggle, .studio-toggle-indicator::after { transition: none; } }

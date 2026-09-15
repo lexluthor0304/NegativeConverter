@@ -1,3 +1,4 @@
+import { SRGB_PROFILE } from '../app/srgbProfile.js';
 /**
  * Pure image encoding functions extracted from main.js for use in Web Workers.
  * No DOM dependencies — this module is imported by both the export Worker
@@ -6,7 +7,7 @@
  * Blob, which exists in both scopes.
  */
 
-import { buildTiffParts, shortEntry, longEntry, TIFF_TAGS } from './tiffWriter.js';
+import { buildTiffParts, shortEntry, longEntry, bytesEntry, TIFF_TAGS } from './tiffWriter.js';
 import { exifIfd0Entries, exifSubIfdEntries } from './exifWriter.js';
 
 /** Largest value a 16-bit sample can hold. */
@@ -202,6 +203,7 @@ export function encodeTiffBlob(pixels, width, height, bitDepth = 8, metadata = n
 
   const sampleBit = wants16 ? 16 : 8;
   const entries = [
+    bytesEntry(34675, SRGB_PROFILE),
     longEntry(TIFF_TAGS.ImageWidth, width),
     longEntry(TIFF_TAGS.ImageLength, height),
     shortEntry(TIFF_TAGS.BitsPerSample, [sampleBit, sampleBit, sampleBit, sampleBit]),

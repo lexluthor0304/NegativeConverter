@@ -53,7 +53,7 @@ const CANVAS_FONT_STYLES = Object.freeze({
   serif: { family: 'Georgia, Times, serif', weight: '700' }
 });
 
-const BITMAP_FONT = Object.freeze({
+export const BITMAP_FONT = Object.freeze({
   '0': ['01110', '10001', '10011', '10101', '11001', '10001', '01110'],
   '1': ['00100', '01100', '00100', '00100', '00100', '00100', '01110'],
   '2': ['01110', '10001', '00001', '00010', '00100', '01000', '11111'],

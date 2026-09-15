@@ -24,6 +24,7 @@ default = ["updater"]
 updater = ["dep:tauri-plugin-updater", "dep:tauri-plugin-process"]
 
 [dependencies]
+notify = "8.2"
 tauri = { version = "2", features = [] }
 tauri-plugin-updater = { version = "2", optional = true }
 tauri-plugin-process = { version = "2", optional = true }

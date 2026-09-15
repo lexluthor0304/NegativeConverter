@@ -1,0 +1,17 @@
+import assert from 'node:assert/strict';
+import { panelRelevance, inferSourceKind } from './panelRelevance.js';
+const scanner = { filmType: 'color', sourceKind: 'scanner', fileCount: 1 };
+assert.equal(panelRelevance(scanner).consoleSection, true);
+assert.equal(panelRelevance({ ...scanner, filmType: 'positive' }).consoleSection, true);
+assert.equal(panelRelevance(scanner).studioFlatField, false);
+assert.equal(panelRelevance(scanner).studioLabMatch, true);
+assert.equal(panelRelevance(scanner).studioMergeAverage, false);
+assert.equal(panelRelevance({ ...scanner, sourceKind: 'camera-raw' }).studioFlatField, true);
+assert.equal(panelRelevance({ ...scanner, filmType: 'bw' }).studioLabMatch, false);
+assert.equal(panelRelevance({ ...scanner, filmType: 'positive' }).paperSection, false);
+assert.equal(panelRelevance(scanner, { active: { studioFlatField: true } }).studioFlatField, true);
+assert.ok(Object.values(panelRelevance(scanner, { advanced: true })).every(Boolean));
+assert.equal(inferSourceKind({ name: 'a.heic' }), 'phone');
+assert.equal(inferSourceKind({ name: 'a.tif', make: 'EPSON' }), 'scanner');
+assert.equal(inferSourceKind({ name: 'a.NEF' }), 'camera-raw');
+console.log('panel relevance: source, film, active state and Advanced passed');

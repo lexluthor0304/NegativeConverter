@@ -786,6 +786,11 @@ export function sanitizeFilmEdgeForSettings(input) {
   record.dxExtract = dx1 !== null && dx2 !== null ? dx1 * 16 + dx2 : null;
   record.votes = int(input.votes, 0, 999) ?? 0;
   record.total = int(input.total, 0, 999) ?? 0;
+  record.text = typeof input.text === 'string' ? input.text.slice(0, 160) : null;
+  record.frameNumber = /^\d{1,2}A?$/.test(String(input.frameNumber || '')) ? String(input.frameNumber) : null;
+  record.mirrorDetected = Boolean(input.mirrorDetected);
+  record.yearCandidates = Array.isArray(input.yearCandidates) ? input.yearCandidates.filter(y => Number.isInteger(y) && y >= 1910 && y <= 2099).slice(0, 8) : [];
+  record.year = Number.isInteger(input.year) && input.year >= 1910 && input.year <= 2099 ? input.year : null;
   record.filmName = typeof input.filmName === 'string' ? input.filmName.slice(0, 120) : null;
   record.shortName = typeof input.shortName === 'string' ? input.shortName.slice(0, 40) : null;
   record.names = Array.isArray(input.names) ? input.names.filter((n) => typeof n === 'string').slice(0, MAX_FILM_EDGE_NAMES).map((n) => n.slice(0, 120)) : [];

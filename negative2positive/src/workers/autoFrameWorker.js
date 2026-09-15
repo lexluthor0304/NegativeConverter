@@ -1,7 +1,8 @@
+import { readTextInBands, borderTextBands } from '../app/filmEdgeText.js';
 import opencvScriptUrl from '@techstark/opencv-js/dist/opencv.js?url';
 import { detectFrameAndRotation } from '../app/autoFrameAnalyzer.js';
 import { applyRotationToImageData } from '../app/imageGeometry.js';
-import { readFilmEdge } from '../app/filmEdgeReader.js';
+import { readFilmEdge, rectifyLaneBand } from '../app/filmEdgeReader.js';
 
 let ready;
 async function loadCv() {
@@ -19,7 +20,16 @@ self.onmessage = async ({ data: message }) => {
       // Perforation lanes and the DX edge barcode need no OpenCV; the result
       // is plain data (no ImageData), so it clones without transfers.
       const image = { width: message.width, height: message.height, data: message.rgba };
-      self.postMessage({ id: message.id, result: readFilmEdge(image, message.options || {}) });
+      const result = readFilmEdge(image, message.options || {});
+      try {
+        await loadCv();
+        const textBands = result.geometry
+          ? result.geometry.lanes.map(lane => rectifyLaneBand(image, result.geometry, lane, { columnStepMm: 0.04, rowStepMm: 0.04 }))
+          : borderTextBands(image);
+        const text = readTextInBands(textBands, { cv: globalThis.cv });
+        if (text) { result.text = text; result.found = true; }
+      } catch (error) { console.warn('Film edge text unavailable:', error.message); }
+      self.postMessage({ id: message.id, result });
       return;
     }
     await loadCv();

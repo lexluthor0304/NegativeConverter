@@ -9,6 +9,8 @@ use std::process::Command;
 use std::sync::Mutex;
 use tauri::State;
 mod export_stream;
+mod import_folder;
+use import_folder::{ImportWatch, watch_import_folder, stop_watch_import_folder, read_import_file};
 use export_stream::ExportStreams;
 
 #[derive(Serialize)]
@@ -963,7 +965,8 @@ pub fn run() {
     apply_linux_appimage_compat_env();
     let builder = tauri::Builder::default()
         .manage(ExportGrants::default())
-        .manage(ExportStreams::default());
+        .manage(ExportStreams::default())
+        .manage(ImportWatch::default());
     #[cfg(feature = "updater")]
     let builder = builder.plugin(tauri_plugin_process::init()).plugin({
         let mut updater = tauri_plugin_updater::Builder::new();
@@ -974,6 +977,9 @@ pub fn run() {
     });
     builder
         .invoke_handler(tauri::generate_handler![
+            watch_import_folder,
+            stop_watch_import_folder,
+            read_import_file,
             begin_export_write,
             append_export_chunk,
             finish_export_write,

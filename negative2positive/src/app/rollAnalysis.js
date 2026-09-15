@@ -239,3 +239,20 @@ export function rollFrameExposureUnits(rollFrame) {
   if (!rollFrame || !rollFrame.equalize || rollFrame.outlier) return 0;
   return exposureUnitsForStops(rollFrame.offsetStops);
 }
+
+// Input is restricted to one import transaction by the caller. Mixed named
+// stocks and colour/B&W must never acquire each other's base or channel data.
+export function groupAutomaticRollFrames(items, { referenceLocked = false } = {}) {
+  if (referenceLocked) return [];
+  const groups = new Map();
+  for (const item of items) {
+    const s = item.settings;
+    if (!item.selected || !s || item.savedSettings || item.isDirty || item.userEdited
+      || s.rollFrame || s.filmBase?.method === 'manual' || !['color', 'bw'].includes(s.filmType)) continue;
+    const stock = String(s.filmEdge?.filmName || '').trim().toUpperCase();
+    const key = `${s.filmType}:${stock}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(item);
+  }
+  return [...groups.values()].filter(group => group.length >= 3);
+}

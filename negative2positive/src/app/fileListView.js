@@ -5,7 +5,9 @@ export function renderFileList({
   currentFileIndex,
   labels,
   onToggleSelected,
-  onOpenFile
+  onOpenFile,
+  visible = () => true,
+  onMarkReviewed
 }) {
   let selectedCount = 0;
   let settingsCount = 0;
@@ -14,6 +16,7 @@ export function renderFileList({
   items.forEach((item, index) => {
     if (item.selected) selectedCount++;
     if (item.settings) settingsCount++;
+    if (!visible(item)) return;
 
     const el = document.createElement('div');
     el.className = 'file-list-item';
@@ -83,6 +86,18 @@ export function renderFileList({
       el.append(badge);
     }
 
+    if (onMarkReviewed && labels.canReview?.(item)) {
+      const menu = document.createElement('details');
+      menu.className = 'file-review-menu';
+      const summary = document.createElement('summary');
+      summary.textContent = '…';
+      summary.setAttribute('aria-label', labels.markReviewed);
+      const button = document.createElement('button');
+      button.type = 'button'; button.textContent = labels.markReviewed;
+      button.addEventListener('click', () => onMarkReviewed(index));
+      menu.addEventListener('click', event => event.stopPropagation());
+      menu.append(summary, button); el.append(menu);
+    }
     const statusEl = document.createElement('span');
     statusEl.className = `file-list-status ${item.status}`;
     statusEl.textContent = labels.statusText(item.status);

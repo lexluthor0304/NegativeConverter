@@ -1,3 +1,10 @@
+import { sanitizeSemanticMap } from './semanticAnchors.js';
+import { analyzeSemanticPreview } from './semanticModel.js';
+import { readDesktopImportFile } from './desktopImportReader.js';
+import { learnedDefaultsKey, learnedDelta, recordLearnedObservation, applyLearnedDefaults, LEARNED_NUMERIC_KEYS, LEARNED_CATEGORY_KEYS } from './learnedDefaults.js';
+import { readLearnedDefaults, writeLearnedDefaults, resetLearnedDefaults } from './learnedDefaultsStore.js';
+import { exportNameStem } from './exportFileName.js';
+import { frameNeedsReview } from './reviewQueue.js';
     import { detectedImportSettings } from './filmTypeDetection.js';
     import { createAiModelLoader } from './aiModelLoading.js';
     import opencvScriptUrl from '@techstark/opencv-js/dist/opencv.js?url';
@@ -23,7 +30,7 @@
     import { measureExpiredSpatialMaps } from './expiredRescueOpenCv.js';
     import { readFilmEdge, sanitizeFilmEdgeForSettings, formatFilmEdgeFrames } from './filmEdgeReader.js';
     import { loadDxFilmTable, describeDxFilm, shortFilmName } from './dxFilmDatabase.js';
-    import { aggregateRollAnalysis, measureNegativeMean, sanitizeRollFrameForSettings, rollFrameExposureUnits } from './rollAnalysis.js';
+    import { groupAutomaticRollFrames, aggregateRollAnalysis, measureNegativeMean, sanitizeRollFrameForSettings, rollFrameExposureUnits } from './rollAnalysis.js';
     import { filtrationFromSliders, slidersFromFiltration, stopsFromExposureUnits, exposureUnitsFromStops, contrastForGradeValue, gradeValueForContrast, gradeLabelForValue, TEST_STRIP_AXES, formatAxisValue, testStripValues } from './enlarger.js';
     import { sanitizeLocalExposureForSettings, workingPointToBase, basePointToWorking, rotatedDimensions } from './localExposure.js';
     import { sanitizeRepairStrokes, repairMask, pointerToRepairPoint, lensSourcePoint } from './repairBrush.js';
@@ -672,7 +679,7 @@
       // Three resting states: auto WB applied (calm, info tone), manual sample
       // done, or the default nudge toward clicking a gray point. The active
       // sampling state overrides all of them.
-      const autoApplied = !state.grayPointSampled && Boolean(state.wbAutoConfidence);
+      const autoApplied = !state.grayPointSampled && ['high', 'medium'].includes(state.wbAutoConfidence);
       if (guideCard) {
         guideCard.classList.toggle('is-active', isActive);
         guideCard.classList.toggle('is-auto', !isActive && autoApplied);
@@ -2274,6 +2281,7 @@
       // Provenance of the current gains: null = defaults / user-owned,
       // 'high' | 'medium' = set by the automatic gray-point estimator.
       wbAutoConfidence: null,
+      wbSemanticApplied: false,
       // True once the user touches the RGB gain sliders directly; the
       // estimator then keeps its hands off this image.
       wbUserOverride: false,
@@ -2641,7 +2649,7 @@
 
     // Snapshot keys for Category A (lightweight, deep-copied)
     const SNAPSHOT_SCALAR_KEYS = [
-      'exposure', 'contrast', 'highlights', 'shadows', 'temperature', 'tint',
+      'reviewed', 'exposure', 'contrast', 'highlights', 'shadows', 'temperature', 'tint',
       'vibrance', 'saturation', 'cyan', 'magenta', 'yellow',
       'coreFilmPreset', 'coreColorModel', 'coreEnhancedProfile', 'coreProfileStrength',
       'corePreSaturation', 'coreBorderBuffer', 'coreBorderBufferBorderValue',
@@ -2649,7 +2657,7 @@
       'coreWhites', 'coreBlacks', 'coreWbMode', 'coreTemperature', 'coreTint',
       'coreSaturation', 'coreGlow', 'coreFade', 'coreCurvePrecision', 'coreUseWebGL',
       'coreCyan', 'corePaper', 'corePaperToning', 'corePaperToningStrength', 'flatFieldId',
-      'wbR', 'wbG', 'wbB', 'wbAutoConfidence', 'wbUserOverride',
+      'wbR', 'wbG', 'wbB', 'wbAutoConfidence', 'wbUserOverride', 'wbSemanticApplied',
       'filmType', 'positiveMode', 'filmTypeSource', 'filmTypeConfidence', 'filmTypeReason', 'filmBaseSet', 'grayPointSampled', 'step2Mode', 'rotationAngle',
       'mirrored', 'sprocketPreviewEnabled', 'currentStep',
       'expiredEnabled', 'expiredLevels', 'expiredNeutralize', 'expiredCrossover', 'expiredBrightness', 'expiredContrast',
@@ -2668,6 +2676,16 @@
       for (const key of SNAPSHOT_SCALAR_KEYS) {
         settings[key] = state[key];
       }
+      // A roll action changes multiple detached settings records. Capture them
+      // with the live state so Undo/Redo is atomic across the whole import.
+      if (label === 'rollAnalysis') {
+        settings.rollTransaction = {
+          analysis: structuredClone(state.rollAnalysis),
+          frames: state.fileQueue.map(item => ({ id: item.id, settings: item.settings ? structuredClone(item.settings) : null, thumbnail: item.thumbnail, status: item.status }))
+        };
+      }
+      settings.semanticMap = state.semanticMap ? structuredClone(state.semanticMap) : null;
+      settings.rollFrame = state.rollFrame ? structuredClone(state.rollFrame) : null;
       // Deep copy objects
       settings.filmBase = state.filmBase ? { ...state.filmBase } : null;
       settings.cropRegion = state.cropRegion ? { ...state.cropRegion } : null;
@@ -2728,9 +2746,22 @@
 
       // Restore Category A
       const s = snapshot.settings;
+      state.semanticMap = s.semanticMap ? structuredClone(s.semanticMap) : null;
+      state.rollFrame = s.rollFrame ? structuredClone(s.rollFrame) : null;
+      if (s.rollTransaction) {
+        state.rollAnalysis = structuredClone(s.rollTransaction.analysis);
+        for (const frame of s.rollTransaction.frames) {
+          const item = state.fileQueue.find(item => item.id === frame.id);
+          if (item) Object.assign(item, { settings: frame.settings ? structuredClone(frame.settings) : null, thumbnail: frame.thumbnail, status: frame.status, isDirty: false });
+        }
+        invalidateSilverCoreCache();
+        updateRollAnalysisUI();
+        updateFileListUI();
+      }
       for (const key of SNAPSHOT_SCALAR_KEYS) {
         state[key] = s[key];
       }
+      updateFileListUI();
       state.filmBase = s.filmBase ? { ...s.filmBase } : { r: 210, g: 140, b: 90 };
       state.cropRegion = s.cropRegion ? { ...s.cropRegion } : null;
       state.curves = {
@@ -2849,7 +2880,16 @@
     }
 
     function pushUndo(label) {
+      if (!['rollAnalysis', 'semanticColor'].includes(label)) {
+        manualEditRevision++;
+        const item = getCurrentQueueItem();
+        if (item) {
+          item.userEdited = true;
+          if ([...LEARNED_NUMERIC_KEYS, ...LEARNED_CATEGORY_KEYS].includes(label)) (item.touchedKeys ||= new Set()).add(label);
+        }
+      }
       commitUndoSnapshot(captureSnapshot(label));
+      if (['crop', 'rotation', 'mirror', 'autoFrame', 'restoreFullFrame'].includes(label)) state.semanticMap = null;
     }
 
     function performUndo() {
@@ -2857,6 +2897,8 @@
         showToast(getLocalizedText('nothingToUndo', 'Nothing to undo'));
         return;
       }
+      manualEditRevision++;
+      if (getCurrentQueueItem()) getCurrentQueueItem().userEdited = true;
       const snapshot = undoStack.pop();
       // Carry the action's own label across so the redo toast names the
       // action rather than the literal word "undo".
@@ -2873,6 +2915,8 @@
         showToast(getLocalizedText('nothingToRedo', 'Nothing to redo'));
         return;
       }
+      manualEditRevision++;
+      if (getCurrentQueueItem()) getCurrentQueueItem().userEdited = true;
       const snapshot = redoStack.pop();
       undoStack.push(captureSnapshot(snapshot.label));
       if (undoStack.length > MAX_UNDO) undoStack.shift();
@@ -3756,6 +3800,11 @@
         rotationAngle: normalizeAngleDegrees(sanitizeNumeric(source.rotationAngle, fallbackSettings.rotationAngle || 0, -3600, 3600)),
         mirrored: Boolean('mirrored' in source ? source.mirrored : fallbackSettings.mirrored),
         autoFrameMeta: sourceMeta ? structuredClone(sourceMeta) : ((source === state || Object.hasOwn(source, 'autoFrameMeta')) ? null : (fallbackMeta ? structuredClone(fallbackMeta) : null)),
+        semanticMap: sanitizeSemanticMap(source.semanticMap),
+        learnedDefaults: source.learnedDefaults && typeof source.learnedDefaults.key === 'string' ? { key: source.learnedDefaults.key.slice(0, 500), n: Math.max(0, Math.min(32, Number(source.learnedDefaults.n) || 0)) } : null,
+        reviewed: Boolean(source.reviewed),
+        wbUserOverride: Boolean(source.wbUserOverride),
+        wbSemanticApplied: Boolean(source.wbSemanticApplied),
         filmType,
         positiveMode: source.positiveMode === 'edit' ? 'edit' : 'correct',
         filmTypeSource: source.filmTypeSource === 'auto' ? 'auto' : 'manual',
@@ -3828,7 +3877,7 @@
         wbR: sanitizeNumeric(source.wbR, fallbackSettings.wbR ?? 1, 0.5, 2),
         wbG: sanitizeNumeric(source.wbG, fallbackSettings.wbG ?? 1, 0.5, 2),
         wbB: sanitizeNumeric(source.wbB, fallbackSettings.wbB ?? 1, 0.5, 2),
-        wbAutoConfidence: (source.wbAutoConfidence === 'high' || source.wbAutoConfidence === 'medium')
+        wbAutoConfidence: (['high', 'medium', 'low'].includes(source.wbAutoConfidence))
           ? source.wbAutoConfidence
           : null,
         grayPointSampled: typeof source.grayPointSampled === 'boolean'
@@ -5174,23 +5223,24 @@
       // The expired-film rescue balances per tonal band; a global gain on top
       // would fight it.
       if (state.expiredEnabled) return;
-      if (state.grayPointSampled || state.wbUserOverride) return;
+      if (state.grayPointSampled || state.wbUserOverride || state.wbSemanticApplied) return;
       if (state.autoFrame.lastDiagnostics?.analysisNeedsReview) return;
       const reference = processed?.__analysisPreview;
       const source = reference || state.previewSourceImageData || state.processedImageData;
       if (!source) return;
       const roi = resolveAnalysisRegion({ ...state, autoFrameMeta: state.autoFrame.lastDiagnostics }, state.loadedBaseImageData || state.originalImageData);
-      const estimate = estimateAutoWhiteBalance(reference ? source : roi ? cropImageData(source, analysisPixelBounds(source.width, source.height, roi, 0.02)) : source);
+      const estimate = state.semanticMap ? estimateAutoWhiteBalance(processed, { anchors: state.semanticMap }) : estimateAutoWhiteBalance(reference ? source : roi ? cropImageData(source, analysisPixelBounds(source.width, source.height, roi, 0.02)) : source);
       if (estimate.confidence === 'low') {
         // Only clear a previous auto estimate; user-owned gains stay put.
-        if (state.wbAutoConfidence) {
+        if (state.wbAutoConfidence && state.wbAutoConfidence !== 'low') {
           state.wbR = 1;
           state.wbG = 1;
           state.wbB = 1;
-          state.wbAutoConfidence = null;
+          state.wbAutoConfidence = null; state.wbSemanticApplied = false;
           updateWBSliders();
           updateGrayPointGuideUI();
         }
+        state.wbAutoConfidence = 'low';
         return;
       }
       state.wbR = estimate.wbR;
@@ -5571,6 +5621,10 @@
     }
 
     async function ensureFullResolutionReadyForExport() {
+      // Crop/analysis confirmation also runs processNegative directly. Its
+      // preview may be temporarily cleared even though no debounced render is
+      // pending, so export must settle that conversion before choosing pixels.
+      if (processNegativeInFlight) await processNegativeInFlight;
       // Settle the debounced/in-flight reprocess first. Exporting while one is
       // running used to either ship the previous conversion or fail outright,
       // because startFullResolutionRender hands back the queued render whose
@@ -6572,7 +6626,7 @@
           state.lastRenderQuality = 'full';
           state.filmBaseSet = false;
           state.grayPointSampled = false;
-          state.wbAutoConfidence = null;
+          state.wbAutoConfidence = null; state.wbSemanticApplied = false;
           state.wbUserOverride = false;
           // Reset the values too, not just the "was it set" flags. They used to
           // survive a file switch, so a snapshot taken of the next file — which
@@ -6643,7 +6697,7 @@
           RAW_DECODE_GARBLED: ['rawDecodeGarbled', 'Could not decode this RAW file. Try Lossless Compressed mode or convert to DNG.'],
           TIFF_UNSUPPORTED_PHOTOMETRIC: ['rawDecodeGarbled', 'Could not decode this RAW file. Try Lossless Compressed mode or convert to DNG.'],
           IMAGE_TOO_LARGE: ['imageTooLarge', 'This scan is too large for this browser to render. Downscale it or use the desktop app.'],
-          HEIC_UNSUPPORTED: ['heicUnsupported', 'HEIC/HEIF photos are not supported. Export the photo as JPEG or TIFF first.'],
+          HEIC_DECODE_FAILED: ['heicDecodeFailed', 'Could not decode this HEIC/HEIF photo. Please try another copy.'],
           DEVICE_MEMORY_LIMIT: ['deviceMemoryLimit', 'This device does not have enough memory for this file. Try a smaller scan or the desktop app.'],
           IMAGE_DECODE_FAILED: ['loadError', 'Error loading file']
         };
@@ -7398,7 +7452,7 @@
         state.wbG = 1;
         state.wbB /= norm;
         state.grayPointSampled = true;
-        state.wbAutoConfidence = null;
+        state.wbAutoConfidence = null; state.wbSemanticApplied = false;
 
         state.samplingMode = null;
         updateSamplingModeUI();
@@ -7436,7 +7490,7 @@
         state.filmTypeReason = null;
         if (state.wbAutoConfidence && !state.wbUserOverride && !state.grayPointSampled) {
           state.wbR = state.wbG = state.wbB = 1;
-          state.wbAutoConfidence = null;
+          state.wbAutoConfidence = null; state.wbSemanticApplied = false;
           updateWBSliders();
         }
         setFilmTypeButtons(state.filmType);
@@ -7466,7 +7520,7 @@
       state.positiveMode = event.target.value === 'edit' ? 'edit' : 'correct';
       if (state.wbAutoConfidence && !state.wbUserOverride && !state.grayPointSampled) {
         state.wbR = state.wbG = state.wbB = 1;
-        state.wbAutoConfidence = null;
+        state.wbAutoConfidence = null; state.wbSemanticApplied = false;
         updateWBSliders();
       }
       markCurrentFileDirty();
@@ -7746,7 +7800,7 @@
     const markWbUserOverride = () => {
       if (!state.wbUserOverride || state.wbAutoConfidence) {
         state.wbUserOverride = true;
-        state.wbAutoConfidence = null;
+        state.wbAutoConfidence = null; state.wbSemanticApplied = false;
         updateGrayPointGuideUI();
       }
     };
@@ -9509,7 +9563,7 @@
       state.wbG = 1;
       state.wbB = 1;
       state.grayPointSampled = false;
-      state.wbAutoConfidence = null;
+      state.wbAutoConfidence = null; state.wbSemanticApplied = false;
       state.wbUserOverride = false;
 
       updateSlidersFromState();
@@ -9553,7 +9607,7 @@
         state.webglSourceImageData = null;
         state.filmBaseSet = false;
         state.grayPointSampled = false;
-        state.wbAutoConfidence = null;
+        state.wbAutoConfidence = null; state.wbSemanticApplied = false;
         state.wbUserOverride = false;
         state.sprocketPreviewEnabled = false;
         resetFrontierGuideImageState();
@@ -9614,12 +9668,13 @@
       state.webglSourceImageData = null;
       state.filmBaseSet = false;
       state.grayPointSampled = false;
-      state.wbAutoConfidence = null;
+      state.wbAutoConfidence = null; state.wbSemanticApplied = false;
       state.wbUserOverride = false;
       state.sprocketPreviewEnabled = false;
       state.rawMetadata = null;
       state.currentStep = 1;
       state.lastRenderQuality = 'full';
+      void stopHotFolder();
       state.fileQueue = [];
       state.currentFileIndex = 0;
       state.batchSessionActive = false;
@@ -9850,6 +9905,11 @@
       return jsZipCtorPromise;
     }
 
+    const hdrGainInput = document.getElementById('exportHdrGainMap');
+    if (hdrGainInput) {
+      hdrGainInput.checked = safeStorageGet('nc_hdr_gain_map_v1') !== 'off';
+      hdrGainInput.addEventListener('change', () => safeStorageSet('nc_hdr_gain_map_v1', hdrGainInput.checked ? 'on' : 'off'));
+    }
     function getEffectiveExportBitDepth(format = state.exportFormat, requestedBitDepth = state.exportBitDepth) {
       if (format === 'jpeg') return 8;
       if (format === 'dng') return 16;
@@ -9882,9 +9942,8 @@
     }
 
     function buildExportFileName(sourceName, exportInfo, options = {}) {
-      const withConverted = sourceName
-        ? sourceName.replace(/\.[^.]+$/, '_converted')
-        : 'converted_negative';
+      const index = state.fileQueue.findIndex(item => item.file.name === sourceName);
+      const withConverted = exportNameStem(sourceName || '', options.settings || state, state.rollMetadata, index >= 0 ? index + 1 : null);
       const sprocketSuffix = options.sprocket ? '_sprocket' : '';
       const wants16 = exportInfo.bitDepth === 16 && exportInfo.format !== 'jpeg';
       // In a batch each file carries its own adjustments, so the claim has to be
@@ -9966,6 +10025,10 @@
         ensureFullRender();
       }
       const imageData = await getCurrentExportImageData({ bitDepth: exportInfo?.bitDepth || 8 });
+      if (exportInfo?.format === 'jpeg' && safeStorageGet('nc_hdr_gain_map_v1') !== 'off' && state.processedImageData?.__image16) {
+        const high = await getCurrentExportImageData({ bitDepth: 16 });
+        if (high?.__image16) imageData.__image16 = high.__image16;
+      }
       if (!imageData) throw new Error('No image available for export.');
       return imageData;
     }
@@ -9977,6 +10040,11 @@
     }
 
     async function exportSingle() {
+      // Export freezes the result visible when the user requested it. A late
+      // background colour estimate must not replace the recipe mid-encode.
+      manualEditRevision++;
+      notifyReviewExport([getCurrentQueueItem()].filter(Boolean));
+      if (processNegativeInFlight) await processNegativeInFlight;
       const lang = i18n[currentLang];
       const overlay = getLoadingOverlay();
       const exportInfo = getExportInfo();
@@ -10019,7 +10087,9 @@
         overlay.hide();
       }
 
-      return await saveBlob(blob, fileName, exportInfo.mimeType);
+      const result = await saveBlob(blob, fileName, exportInfo.mimeType);
+      if (result?.saved) await learnFromExport(getCurrentQueueItem());
+      return result;
     }
 
     document.getElementById('exportSingleBtn').addEventListener('click', async () => {
@@ -10095,6 +10165,8 @@
       const isJpeg = format === 'jpeg';
       const isDng = format === 'dng';
       if (isJpeg) state.exportBitDepth = 8;
+      const hdrSection = document.getElementById('exportHdrGainMapSection');
+      if (hdrSection) hdrSection.hidden = !isJpeg;
       const bitDepthSection = document.getElementById('exportBitDepthSection');
       if (bitDepthSection) bitDepthSection.style.display = isDng ? 'none' : '';
       const dngNote = document.getElementById('exportDngNote');
@@ -10159,6 +10231,17 @@
       return deepCopySanitizedSettings(safe);
     }
 
+    let manualEditRevision = 0;
+    document.addEventListener('input', event => {
+      if (!event.target.closest('#controlsPanel')) return;
+      manualEditRevision++;
+      const item = getCurrentQueueItem();
+      if (item) {
+        item.userEdited = true;
+        const key = event.target.id.replace(/Value$/, '');
+        if ([...LEARNED_NUMERIC_KEYS, ...LEARNED_CATEGORY_KEYS].includes(key)) (item.touchedKeys ||= new Set()).add(key);
+      }
+    }, true);
     function markCurrentFileDirty() {
       const item = getCurrentQueueItem();
       if (!item) return;
@@ -10198,12 +10281,17 @@
       // the roll — the receiving files must keep these exact gains, so strip
       // the auto provenance: the restore heuristic then treats them as
       // user-owned and the per-file estimator leaves them alone.
-      copied.wbAutoConfidence = null;
+      copied.wbAutoConfidence = null; copied.wbSemanticApplied = false;
 
       let count = 0;
       items.forEach(item => {
         const next = cloneSettings(copied);
         next.repairStrokes = structuredClone(item.settings?.repairStrokes || []);
+        // These describe the receiving photograph, not the copied colour recipe.
+        next.reviewed = Boolean(item.settings?.reviewed);
+        next.semanticMap = !includeCrop && item.settings?.semanticMap ? structuredClone(item.settings.semanticMap) : null;
+        next.frameMetadata = sanitizeFrameMetadata(item.settings?.frameMetadata);
+        next.filmEdge = item.settings?.filmEdge ? structuredClone(item.settings.filmEdge) : null;
         // The roll analysis share (lock, offset, outlier flag) describes the
         // receiving frame, not the reference, so each item keeps its own.
         next.rollFrame = item.settings?.rollFrame ? structuredClone(item.settings.rollFrame) : null;
@@ -10433,13 +10521,22 @@
         const { encodePng16Blob } = await getExportImageEncoders();
         blob = encodePng16Blob(imageData);
         trace.end({ bytes: blob.size || 0, worker: false });
-        return blob;
+        return attachMetadataToBlob(blob, 'png', metadata);
       }
 
       if (exportInfo.format === 'jpeg') {
         blob = await imageDataToCanvasBlob(imageData, 'image/jpeg', jpegQuality / 100);
         trace.end({ bytes: blob.size || 0, worker: false });
-        return attachMetadataToBlob(blob, 'jpeg', metadata);
+        blob = await attachMetadataToBlob(blob, 'jpeg', metadata);
+        if (safeStorageGet('nc_hdr_gain_map_v1') !== 'off' && imageData.__image16) {
+          const { computeGainMap, packGainMapJpeg } = await import('./gainMapJpeg.js');
+          const map = computeGainMap(imageData, imageData.__image16);
+          if (map) {
+            const gain = await imageDataToCanvasBlob(new ImageData(map.data, map.width, map.height), 'image/jpeg', 0.85);
+            blob = await packGainMapJpeg(blob, gain, map);
+          }
+        }
+        return blob;
       }
       blob = await imageDataToCanvasBlob(imageData, 'image/png');
       trace.end({ bytes: blob.size || 0, worker: false });
@@ -10584,6 +10681,7 @@
         const edge = await analyzeImportFilmEdge(imageData, initialSettings, { applyDefaults: !savedSettings && state.importFilmTypeAuto });
         if (edge) initialSettings = edge.settings;
       }
+      if (!savedSettings) initialSettings = await learnedImportSettings(initialSettings, state.fileQueue.find(item => item.file === file));
       const settings = sanitizeSettings(initialSettings, {
         fallbackSettings: { ...state, cropRegion: null, autoFrameMeta: null, rotationAngle: 0, mirrored: false }
       });
@@ -10656,7 +10754,9 @@
       // Saved settings are always respected as-is: they already hold manual,
       // auto, or roll-applied gains.
       if (
-        !savedSettings
+        (!savedSettings || state.fileQueue.find(item => item.file === file)?.automaticSettings)
+        && !settings.wbUserOverride
+        && !settings.wbSemanticApplied
         && processed
         && usesSilverCoreConversion(settings)
         && sanitizePresetType(settings.filmType || 'color') === 'color'
@@ -10665,6 +10765,7 @@
       ) {
         const roi = resolveAnalysisRegion(settings, imageData);
         const estimate = settings.autoFrameMeta?.analysisNeedsReview ? { confidence: 'low' }
+          : settings.semanticMap ? estimateAutoWhiteBalance(processed, { anchors: settings.semanticMap })
           : estimateAutoWhiteBalance(processed.__analysisPreview || (roi ? cropImageData(processed, analysisPixelBounds(processed.width, processed.height, roi, 0.02)) : processed));
         if (estimate.confidence !== 'low') {
           settings.wbR = estimate.wbR;
@@ -10672,6 +10773,7 @@
           settings.wbB = estimate.wbB;
           settings.wbAutoConfidence = estimate.confidence;
         }
+        settings.wbAutoConfidence = estimate.confidence;
         trace.mark('autoWhiteBalance', { confidence: estimate.confidence });
       }
 
@@ -10686,6 +10788,10 @@
 
       // Apply adjustments (at 16 bits when the export asks for it)
       const adjusted = await applyAdjustmentsWithSettings(processed, settings, { bitDepth: options.bitDepth === 16 ? 16 : 8 });
+      if (state.exportFormat === 'jpeg' && safeStorageGet('nc_hdr_gain_map_v1') !== 'off' && processed.__image16) {
+        const high = await applyAdjustmentsWithSettings(processed, settings, { bitDepth: 16 });
+        if (high?.__image16) adjusted.__image16 = high.__image16;
+      }
       trace.mark('adjustments', {
         pixels: getImageDataPixelCount(adjusted)
       });
@@ -10800,6 +10906,7 @@
         const result = desktopZipTargetPath
           ? await writeBlobToDesktopPath(zipBlob, desktopZipTargetPath, 'application/zip')
           : await saveBlob(zipBlob, zipFileName, 'application/zip');
+        if (result?.saved) for (const { item } of selectedFiles) if (item.status === 'done') void learnFromExport(item);
         handleSaveResult(result, {
           cancelledKey: 'zipSaveCancelled',
           cancelledFallback: 'ZIP save cancelled. No file was written.',
@@ -10947,6 +11054,7 @@
 
         overlay.updateProgress(98, lang.loadingBatchZip);
         await zipWriter.close();
+        for (const { item } of selectedFiles) if (item.status === 'done') void learnFromExport(item);
         zipWriter = null;
         overlay.updateProgress(100, lang.loadingComplete);
         showBrowserZipStreamSummary({
@@ -10970,6 +11078,7 @@
     }
 
     async function exportBatchAsZip() {
+      notifyReviewExport();
       const selectedFiles = getSelectedFiles();
       if (selectedFiles.length < 1) return;
 
@@ -11117,6 +11226,7 @@
 
             await writeBlobToDesktopDirectory(blob, targetDirectory, outputName, exportInfo.mimeType);
             item.status = 'done';
+            void learnFromExport(item);
             item.error = null;
             successCount++;
           } catch (err) {
@@ -11213,6 +11323,7 @@
             }
 
             item.status = 'done';
+            void learnFromExport(item);
             item.error = null;
           } catch (err) {
             console.error(`Error processing ${item.file.name}:`, err);
@@ -11244,6 +11355,7 @@
     }
 
     async function exportBatchIndividually() {
+      notifyReviewExport();
       if (isTauriDesktop()) {
         await exportBatchIndividuallyDesktop();
         return;
@@ -11255,15 +11367,49 @@
     // File List UI
     // ===========================================
     let fileSelectionAnchor = null;
+    let reviewFilter = false;
+    const reviewForItem = item => frameNeedsReview(item, item.file === state.loadedFile ? state : null);
+    function updateReviewFilter() {
+      const button = document.getElementById('studioReviewFilter');
+      const count = state.fileQueue.filter(item => reviewForItem(item).needs).length;
+      if (!button) return;
+      if (!count) reviewFilter = false;
+      button.hidden = !count;
+      button.textContent = getInterpolatedText('reviewFilter', { count }, `Needs a look (${count})`);
+      button.setAttribute('aria-pressed', String(reviewFilter));
+      if (!button.dataset.bound) {
+        button.dataset.bound = 'true';
+        button.addEventListener('click', () => { reviewFilter = !reviewFilter; updateFileListUI(); });
+      }
+    }
+    function notifyImportReview(items) {
+      const converted = items.filter(item => item?.status === 'done');
+      const review = converted.filter(item => reviewForItem(item).needs).length;
+      if (review) showToast(getInterpolatedText('reviewImport', { count: converted.length, review }, `Converted ${converted.length} · ${review} need review`), 5000);
+    }
+    function notifyReviewExport(items = state.fileQueue.filter(item => item.selected)) {
+      const count = items.filter(item => reviewForItem(item).needs).length;
+      if (count) showToast(getInterpolatedText('reviewExport', { count }, `${count} frames were flagged for review and will be exported as they are.`), 5000);
+    }
     function updateFileListUI() {
       const container = document.getElementById('fileListItems');
       const countEl = document.getElementById('fileListCount');
+      updateReviewFilter();
       renderFileList({
+        visible: item => !reviewFilter || reviewForItem(item).needs,
+        onMarkReviewed: index => {
+          const item = state.fileQueue[index];
+          if (item.file === state.loadedFile) { pushUndo('reviewed'); state.reviewed = true; persistCurrentFileSettings({ force: true, silent: true }); }
+          else item.settings = { ...(item.settings || {}), reviewed: true };
+          updateFileListUI(); scheduleProjectRecovery();
+        },
         container,
         countEl,
         items: state.fileQueue,
         currentFileIndex: state.currentFileIndex,
         labels: {
+          markReviewed: getLocalizedText('reviewMark', 'Mark as reviewed'),
+          canReview: item => reviewForItem(item).needs && item.status !== 'error',
           configured: i18n[currentLang].configured || 'configured',
           customSettings: i18n[currentLang].customSettings || 'Custom',
           unsaved: i18n[currentLang].unsaved || 'Unsaved',
@@ -11271,6 +11417,8 @@
           selectFile: (name) => (i18n[currentLang].fileListSelectFile || 'Select {name}').replace('{name}', name),
           badges: (item) => {
             const badges = [];
+            const review = reviewForItem(item);
+            if (review.needs) badges.push({ className: 'needs-review', text: '?', title: review.reasons.map(key => getLocalizedText(key, key)).join(' · ') });
             // The open file's records live in state until its settings are persisted.
             const live = item.file === state.loadedFile;
             const edge = live && state.filmEdge ? state.filmEdge : item.settings?.filmEdge;
@@ -11368,6 +11516,7 @@
     // Save current settings to the current file's queue entry
     function saveCurrentFileSettings() {
       persistCurrentFileSettings({ silent: false, force: true });
+      void learnFromExport(getCurrentQueueItem());
     }
 
     // Restore settings from a saved settings object
@@ -11430,6 +11579,11 @@
       state.filmBaseSet = true;
       state.filmEdge = safe.filmEdge ? structuredClone(safe.filmEdge) : null;
       updateFilmEdgeUI();
+      state.semanticMap = safe.semanticMap;
+      state.learnedDefaults = safe.learnedDefaults;
+      state.reviewed = safe.reviewed;
+      state.wbUserOverride = safe.wbUserOverride;
+      state.wbSemanticApplied = safe.wbSemanticApplied;
       state.rollFrame = safe.rollFrame ? structuredClone(safe.rollFrame) : null;
       updateRollAnalysisUI();
       state.lensCorrection.enabled = Boolean(safe.lensCorrection.enabled);
@@ -11510,7 +11664,7 @@
       // estimator produced are exempt — they stay auto-owned across file
       // switches so a later conversion may refresh them.
       state.wbAutoConfidence = safe.wbAutoConfidence || null;
-      state.wbUserOverride = false;
+      state.wbUserOverride = Boolean(safe.wbUserOverride);
       state.grayPointSampled = Boolean(
         safe.grayPointSampled
         || (!safe.wbAutoConfidence && (
@@ -11782,6 +11936,7 @@
     // Clear file list button
     document.getElementById('clearFileListBtn').addEventListener('click', () => {
       if (isDesktopBatchExportLocked()) return;
+      void stopHotFolder();
       state.fileQueue = [];
       state.rollMetadata = sanitizeRollMetadata({});
       updateMetadataUI();
@@ -11801,7 +11956,7 @@
 
     function addFilesToQueue(files) {
       // Filter for supported image files
-      const supportedExtensions = ['.cr2', '.cr3', '.crw', '.nef', '.nrw', '.arw', '.dng', '.raf', '.raw', '.rw2', '.pef', '.srw', '.3fr', '.mef', '.orf', '.rwl', '.iiq', '.x3f', '.mrw', '.kdc', '.dcr', '.tif', '.tiff', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'];
+      const supportedExtensions = ['.cr2', '.cr3', '.crw', '.nef', '.nrw', '.arw', '.dng', '.raf', '.raw', '.rw2', '.pef', '.srw', '.3fr', '.mef', '.orf', '.rwl', '.iiq', '.x3f', '.mrw', '.kdc', '.dcr', '.tif', '.tiff', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.heic', '.heif', '.hif'];
       const validFiles = files.filter(file => {
         const ext = '.' + file.name.split('.').pop().toLowerCase();
         return supportedExtensions.includes(ext) || file.type.startsWith('image/');
@@ -11809,6 +11964,8 @@
 
       if (validFiles.length === 0) return;
 
+      const imported = [];
+      const importId = crypto.randomUUID();
       // Add files to queue
       for (const file of validFiles) {
         // Avoid duplicates
@@ -11816,6 +11973,8 @@
         if (!state.fileQueue.some(f => f.id === id)) {
           const newItem = {
             id,
+            importId,
+            touchedKeys: new Set(),
             file: file,
             selected: true,  // Selected by default
             status: 'pending',
@@ -11834,6 +11993,7 @@
             }
           }
           state.fileQueue.push(newItem);
+          imported.push(newItem);
         }
       }
 
@@ -11841,6 +12001,7 @@
         state.batchSessionActive = true;
       }
       syncBatchUIState({ reason: 'addFilesToQueue' });
+      if (imported.length >= 3) scheduleAutomaticRollImport(imported);
 
       updateFileListUI();
       updateExportButtons();
@@ -11919,6 +12080,7 @@
       const projectFile = files.find((file) => isProjectFileName(file.name));
 
       // Reset state for new batch
+      void stopHotFolder();
       state.fileQueue = [];
       state.currentFileIndex = 0;
       state.cropRegion = null;
@@ -11949,6 +12111,7 @@
       const projectFile = files.find((file) => isProjectFileName(file.name));
 
       // Reset state for new batch
+      void stopHotFolder();
       state.fileQueue = [];
       state.currentFileIndex = 0;
       state.cropRegion = null;
@@ -11997,6 +12160,7 @@
       const projectFile = files.find((file) => isProjectFileName(file.name));
 
       // Reset state for new batch
+      void stopHotFolder();
       state.fileQueue = [];
       state.currentFileIndex = 0;
       state.cropRegion = null;
@@ -12045,7 +12209,7 @@
         // 一枚ずつ縮小する。RAW は埋め込みプレビューの高速デコードを使い、
         // ライトテーブルで未開封のコマも見えるようにする。
         while ((item = state.fileQueue.find(entry => !entry.thumbnail && !entry.thumbnailAttempted
-          && (/\.(jpe?g|png|webp|gif|bmp)$/i.test(entry.file.name) || isRawLikeFileName(entry.file.name.toLowerCase()))))) {
+          && (/\.(jpe?g|png|webp|gif|bmp|heic|heif|hif)$/i.test(entry.file.name) || isRawLikeFileName(entry.file.name.toLowerCase()))))) {
           item.thumbnailAttempted = true;
           let bitmap;
           try {
@@ -12053,6 +12217,12 @@
               const preview = await loadRawImageDataPreview(await item.file.arrayBuffer(), item.file.name.toLowerCase(), {});
               if (!state.fileQueue.includes(item) || item.thumbnail || !preview) continue;
               item.thumbnail = thumbnailDataUrl(preview);
+              updateFileListUI();
+              continue;
+            }
+            if (/\.(heic|heif|hif)$/i.test(item.file.name) || /hei[cf]/i.test(item.file.type)) {
+              const preview = await loadStandardImage(item.file);
+              if (state.fileQueue.includes(item) && !item.thumbnail) item.thumbnail = thumbnailDataUrl(preview);
               updateFileListUI();
               continue;
             }
@@ -12124,6 +12294,7 @@
             changed = true;
           }
         }
+        if (freshFile) { settings = await learnedImportSettings(settings, item); changed = true; }
         if (changed) restoreSettings(settings);
         if (filmEdgeToast) showToast(filmEdgeToast, 3200);
         else if (freshFile && settings.filmTypeConfidence === 'low') {
@@ -12132,6 +12303,7 @@
         if (settings.filmEdge?.found) updateFileListUI();
         goToStep(2);
         await processNegative();
+        if (freshFile) { scheduleSemanticColour(item, generation); notifyImportReview([item]); }
       } finally {
         if (isCurrentLoad(generation)) {
           delete document.body.dataset.studioBusy;
@@ -12140,6 +12312,40 @@
           studioWorkspace?.sync();
         }
       }
+    }
+
+    function scheduleSemanticColour(item, generation) {
+      if (!item || item.semanticAttempted || item.savedSettings || item.userEdited || state.wbUserOverride || state.grayPointSampled || state.rollReference.applyLock || state.filmBase?.method === 'manual' || (state.filmType === 'positive' && state.positiveMode === 'edit')) return;
+      item.semanticAttempted = true;
+      const source = state.processedImageData;
+      if (!source) return;
+      const revision = manualEditRevision;
+      const valid = () => isCurrentLoad(generation) && item === getCurrentQueueItem() && revision === manualEditRevision && !state.cropping && !studioAutoFrameRunning && !state.rollFrame?.locked && !state.wbUserOverride && !state.grayPointSampled && !state.rollReference.applyLock && !item.savedSettings;
+      // Whole converted preview coordinates are used for both WB and rescue.
+      const preview = downsampleImageDataForMaxDim(source, 512);
+      setTimeout(async () => {
+        try {
+          const map = sanitizeSemanticMap(await analyzeSemanticPreview(preview));
+          if (!map || !valid()) return;
+          if (state.expiredEnabled) {
+            const analysis = await measureExpiredAnalysisForExport(source, { ...state, semanticMap: map, autoFrameMeta: state.autoFrame.lastDiagnostics }, state.loadedBaseImageData || state.originalImageData);
+            if (!analysis || !valid()) return;
+            pushUndo('semanticColor'); state.semanticMap = map;
+            applyExpiredAnalysisDefaults(state, analysis);
+            updateExpiredRescueUI();
+          } else {
+            if (state.filmType !== 'color') return;
+            const estimate = estimateAutoWhiteBalance(preview, { anchors: map });
+            if (!estimate.anchored || estimate.confidence === 'low') return;
+            pushUndo('semanticColor'); state.semanticMap = map;
+            state.wbR = estimate.wbR; state.wbG = estimate.wbG; state.wbB = estimate.wbB;
+            state.wbSemanticApplied = true;
+            state.wbAutoConfidence = estimate.confidence; updateWBSliders(); updateGrayPointGuideUI();
+          }
+          markCurrentFileDirty(); persistCurrentFileSettings({ force: true, silent: true });
+          schedulePreviewUpdate();
+        } catch (error) { console.warn('Semantic colour skipped:', error); }
+      }, 0);
     }
 
     async function analyzeStudioImportFrame(source, settings, { allowCrop = true } = {}) {
@@ -12208,6 +12414,23 @@
       let result = null;
       try { result = await readFilmEdgeForImage(source); }
       catch (error) { console.warn('Film edge detection failed:', error); return null; }
+      if (result?.text && !result.dx) {
+        const text = result.text;
+        const next = { ...settings, filmEdge: sanitizeFilmEdgeForSettings({ ...text, found: true, shortName: text.filmName, text: text.text }) };
+        if (applyDefaults && text.year && !state.rollMetadata.date) { state.rollMetadata.date = String(text.year); updateMetadataUI(); }
+        if (applyDefaults && text.filmKind) {
+          next.filmType = text.filmKind; next.filmTypeSource = 'auto'; next.filmTypeConfidence = 'high'; next.filmTypeReason = 'edge-text';
+        }
+        if (!next.frameMetadata?.frameNumber && text.frameNumber) next.frameMetadata = { ...next.frameMetadata, frameNumber: text.frameNumber };
+        if (applyDefaults && text.mirrorDetected && !settings.mirrored) {
+          next.mirrored = true;
+          if (next.cropRegion) {
+            const rotated = Math.abs(next.rotationAngle || 0) > 0.001 ? applyRotationToImageData(source, next.rotationAngle) : source;
+            next.cropRegion = { ...next.cropRegion, left: rotated.width - next.cropRegion.left - next.cropRegion.width };
+          }
+        }
+        return { settings: next, toast: getInterpolatedText('filmEdgeTextDetected', { text: text.text, frame: text.frameNumber || '' }, `Film edge: ${text.text} ${text.frameNumber || ''}`) };
+      }
       if (!result?.found || !result.dx) {
         return { settings: { ...settings, filmEdge: sanitizeFilmEdgeForSettings({ found: false }) }, toast: null };
       }
@@ -12217,6 +12440,7 @@
       const description = describeDxFilm(result.dx.dx1, result.dx.dx2, table);
       const record = {
         found: true,
+        text: result.text?.text, frameNumber: result.text?.frameNumber, mirrorDetected: result.text?.mirrorDetected,
         dx1: result.dx.dx1,
         dx2: result.dx.dx2,
         votes: result.dx.votes,
@@ -12245,7 +12469,15 @@
         next.filmTypeConfidence = 'high';
         next.filmTypeReason = 'dx';
       }
+      if (applyDefaults && result.text?.mirrorDetected && !settings.mirrored) {
+        next.mirrored = true;
+        if (next.cropRegion) {
+          const rotated = Math.abs(next.rotationAngle || 0) > 0.001 ? applyRotationToImageData(source, next.rotationAngle) : source;
+          next.cropRegion = { ...next.cropRegion, left: rotated.width - next.cropRegion.left - next.cropRegion.width };
+        }
+      }
       next.filmEdge = sanitizeFilmEdgeForSettings(record);
+      if (!next.frameMetadata?.frameNumber && record.frameNumber) next.frameMetadata = { ...next.frameMetadata, frameNumber: record.frameNumber };
       const dx = `${record.dx1}-${record.dx2}`;
       const name = record.shortName || record.filmName;
       let toast = name
@@ -12274,13 +12506,15 @@
         baseBtn.style.display = 'none';
         return;
       }
-      const dx = edge.dxNumber || `${edge.dx1}-${edge.dx2}`;
+      const dx = edge.dxNumber || (edge.dx1 !== null && edge.dx2 !== null ? `${edge.dx1}-${edge.dx2}` : '');
       const name = edge.filmName || edge.shortName;
       const parts = [
-        name
+        edge.text && !dx ? edge.text : name
           ? getInterpolatedText('filmEdgeStatusDetected', { dx, name }, `DX ${dx} · ${name}`)
           : getInterpolatedText('filmEdgeStatusUnknown', { dx }, `DX ${dx} (not in the film database)`)
       ];
+      if (edge.frameNumber) parts.push(edge.frameNumber);
+      if (edge.year) parts.push(String(edge.year));
       if (edge.frames?.length) {
         parts.push(getInterpolatedText('filmEdgeStatusFrames', { frames: formatFilmEdgeFrames(edge.frames) }, `frames ${formatFilmEdgeFrames(edge.frames)}`));
       }
@@ -12930,7 +13164,7 @@
         expiredLocalContrast: 0,
         expiredAnalysis: { spatial }
       });
-      const analysis = analyzeExpiredFilm(sample.image, { ...sample.options, placement: sample.placement, spatial: stage });
+      const analysis = analyzeExpiredFilm(sample.image, { ...sample.options, anchors: settings.semanticMap, placement: sample.placement, spatial: stage });
       return analysis ? { ...analysis, spatial } : null;
     }
 
@@ -12946,7 +13180,7 @@
         }
       }
       const sample = expiredAnalysisSample(processed, settings, sourceImageData);
-      return analyzeExpiredFilm(sample.image, sample.options);
+      return analyzeExpiredFilm(sample.image, { ...sample.options, anchors: settings.semanticMap, placement: sample.placement });
     }
 
     let expiredOpenCvState = 'idle';
@@ -13016,7 +13250,7 @@
         { ...state, autoFrameMeta: state.autoFrame.lastDiagnostics },
         state.loadedBaseImageData || state.originalImageData
       );
-      const analysis = analyzeExpiredFilm(sample.image, sample.options);
+      const analysis = analyzeExpiredFilm(sample.image, { ...sample.options, anchors: state.semanticMap, placement: sample.placement });
       if (!analysis) {
         updateExpiredRescueUI();
         return false;
@@ -13128,11 +13362,11 @@
       state.expiredEnabled = next;
       if (next) {
         // Gains from the automatic gray point would fight the per-band balance.
-        if (state.wbAutoConfidence) {
+        if (state.wbAutoConfidence && state.wbAutoConfidence !== 'low') {
           state.wbR = 1;
           state.wbG = 1;
           state.wbB = 1;
-          state.wbAutoConfidence = null;
+          state.wbAutoConfidence = null; state.wbSemanticApplied = false;
           updateWBSliders();
           updateGrayPointGuideUI();
         }
@@ -13963,6 +14197,7 @@
       for (const { entry, file } of [...result.matched, ...result.changed]) {
         const item = byFile.get(file);
         if (!item) continue;
+        item.savedSettings = true;
         item.settings = sanitizeProjectSettings(entry.settings);
         item.studioColors = entry.studioColors && typeof entry.studioColors === 'object' ? structuredClone(entry.studioColors) : null;
         item.selected = entry.selected !== false;
@@ -14017,6 +14252,7 @@
       const files = Array.from(e.target.files);
       if (files.length === 0) return;
       const projectFile = files.find((file) => isProjectFileName(file.name));
+      void stopHotFolder();
       state.fileQueue = [];
       state.currentFileIndex = 0;
       state.cropRegion = null;
@@ -14748,8 +14984,8 @@
 
     async function detectBlankFrameInSelection() {
       if (document.body.dataset.studioBusy || state.cropping || isDesktopBatchExportLocked()) return;
-      const selectedItems = state.fileQueue.filter((item) => item.selected);
-      if (selectedItems.length < 2) return;
+      const selectedItems = items || state.fileQueue.filter((item) => item.selected);
+      if (selectedItems.length < (automatic ? 3 : 2)) return;
       const generation = loadGeneration;
       studioAutoFrameRunning = true;
       document.body.dataset.studioBusy = 'true';
@@ -14839,6 +15075,158 @@
     document.getElementById('flatFieldClearBtn')?.addEventListener('click', clearFlatField);
     document.getElementById('flatFieldEnabled')?.addEventListener('change', (event) => setFlatFieldForCurrent(event.target.checked));
 
+    queueMicrotask(mountLearningUI);
+    queueMicrotask(mountHotFolderUI);
+    let hotFolder = null, hotFolderUnlisten = null, hotFolderEpoch = 0, hotFolderFiles = [], hotFolderQuiet;
+    let hotFolderImports = Promise.resolve();
+    async function stopHotFolder() {
+      hotFolderEpoch++; hotFolder = null; hotFolderFiles = []; clearTimeout(hotFolderQuiet);
+      if (hotFolderUnlisten) { hotFolderUnlisten(); hotFolderUnlisten = null; }
+      if (isTauriDesktop()) await window.__TAURI__.core.invoke('stop_watch_import_folder');
+      updateHotFolderUI();
+    }
+    function updateHotFolderUI() {
+      const button = document.getElementById('studioWatchFolder');
+      if (!button) return;
+      const existing = document.getElementById('studioWatchExisting');
+      if (existing) existing.disabled = Boolean(hotFolder);
+      button.textContent = hotFolder ? getInterpolatedText('watchFolderActive', { folder: hotFolder.path.split(/[\\/]/).pop() }, `Watching ${hotFolder.path} · Stop`) : getLocalizedText('watchFolder', 'Watch a folder…');
+    }
+    function mountHotFolderUI() {
+      if (!isTauriDesktop()) return;
+      const button = document.createElement('button'); button.type = 'button'; button.id = 'studioWatchFolder';
+      const existing = document.createElement('label'); existing.className = 'studio-watch-existing';
+      existing.innerHTML = '<input type="checkbox" id="studioWatchExisting"><span data-i18n="watchFolderExisting"></span>';
+      existing.querySelector('span').textContent = getLocalizedText('watchFolderExisting', 'Import existing files too');
+      const controls = document.createElement('div'); controls.id = 'studioWatchControls'; controls.append(button, existing);
+      document.getElementById(state.originalImageData ? 'studioBatchActions' : 'uploadPlaceholder')?.append(controls); updateHotFolderUI();
+      button.addEventListener('click', async () => {
+        if (hotFolder) { await stopHotFolder(); return; }
+        button.disabled = true;
+        try {
+          const epoch = ++hotFolderEpoch;
+          hotFolderUnlisten = await window.__TAURI__.event.listen('import-folder-file', ({ payload }) => {
+            hotFolderImports = hotFolderImports.then(async () => {
+              if (epoch !== hotFolderEpoch || payload.session !== hotFolder?.session) return;
+              const file = await readDesktopImportFile(payload, window.__TAURI__.core.invoke, () => epoch === hotFolderEpoch);
+              if (state.fileQueue.some(item => item.file.name === file.name && item.file.size === file.size)) return;
+              addFilesToQueue([file]);
+              const item = state.fileQueue.find(item => item.file === file);
+              if (!item) return;
+              item.importId = `watch:${payload.session}`;
+              if (!state.originalImageData) await switchToFile(state.fileQueue.indexOf(item));
+              else {
+                const image = await processFileWithSettings(file, null, { bitDepth: 8 });
+                if (epoch !== hotFolderEpoch || !state.fileQueue.includes(item)) return;
+                item.thumbnail = thumbnailDataUrl(image); item.status = 'done'; updateFileListUI();
+              }
+              showToast(getInterpolatedText('watchFolderArrival', { name: file.name }, `Imported ${file.name}`));
+              hotFolderFiles.push(item); clearTimeout(hotFolderQuiet);
+              hotFolderQuiet = setTimeout(() => {
+                const arrived = hotFolderFiles; hotFolderFiles = [];
+                if (arrived.length >= 3) scheduleAutomaticRollImport(arrived, { prepared: true });
+              }, 2500);
+            }).catch(error => { console.warn('Hot folder import failed:', error); showToast(getLocalizedText('watchFolderFailed', 'Could not import the new file.')); });
+          });
+          hotFolder = await window.__TAURI__.core.invoke('watch_import_folder', { importExisting: document.getElementById('studioWatchExisting').checked });
+          if (!hotFolder && hotFolderUnlisten) { hotFolderUnlisten(); hotFolderUnlisten = null; }
+          updateHotFolderUI();
+        } catch (error) { await stopHotFolder(); console.warn('Folder watch failed:', error); showToast(getLocalizedText('watchFolderFailed', 'Could not watch this folder.')); }
+        finally { button.disabled = false; }
+      });
+    }
+    const learnedRecords = new Map();
+    let learningEpoch = 0;
+    const learnedReady = readLearnedDefaults().then(records => {
+      for (const record of records) learnedRecords.set(record.key, record);
+      updateLearningUI();
+    }).catch(error => console.warn('Learned defaults storage unavailable:', error));
+    async function learnedImportSettings(settings, item) {
+      if (!item || item.savedSettings || state.rollReference.applyLock || item.userEdited) return settings;
+      await learnedReady;
+      item.automaticDefaults ||= structuredClone(settings);
+      const key = learnedDefaultsKey(settings, state.rollMetadata);
+      return applyLearnedDefaults(settings, learnedRecords.get(key));
+    }
+    let learningWrites = Promise.resolve();
+    function learnFromExport(item) {
+      if (!item || item.savedSettings || state.rollReference.applyLock || !item.automaticDefaults || !item.touchedKeys?.size) return Promise.resolve();
+      const final = item === getCurrentQueueItem() ? extractCurrentSettings() : item.settings;
+      if (!final) return Promise.resolve();
+      const key = learnedDefaultsKey(final, state.rollMetadata);
+      const delta = learnedDelta(item.automaticDefaults, final, [...item.touchedKeys]);
+      const epoch = learningEpoch;
+      learningWrites = learningWrites.then(async () => {
+        await learnedReady;
+        if (epoch !== learningEpoch) return;
+        const record = recordLearnedObservation(learnedRecords.get(key), { key, rollId: item.importId, frameId: item.id, delta });
+        if (!record) return;
+        await writeLearnedDefaults(record);
+        if (epoch !== learningEpoch) return;
+        learnedRecords.set(key, record); updateLearningUI();
+      }).catch(error => console.warn('Could not save learned defaults:', error));
+      return learningWrites;
+    }
+    function updateLearningUI() {
+      const line = document.getElementById('learnedDefaultsCount');
+      if (line) line.textContent = getInterpolatedText('learnedDefaultsCount', { count: learnedRecords.size }, `Learned defaults: ${learnedRecords.size} stocks`);
+    }
+    // Mounted below with the workspace, and kept local to this device.
+    function mountLearningUI() {
+      const content = document.querySelector('#studioMenu .studio-menu-content');
+      if (!content) return;
+      const line = document.createElement('div'); line.id = 'learnedDefaultsLine';
+      const label = document.createElement('span'); label.id = 'learnedDefaultsCount';
+      const button = document.createElement('button'); button.type = 'button'; button.id = 'resetLearnedDefaults';
+      button.dataset.i18n = 'learnedDefaultsReset'; button.textContent = getLocalizedText('learnedDefaultsReset', 'Reset');
+      button.addEventListener('click', async () => {
+        if (!await appConfirm(getLocalizedText('learnedDefaultsResetConfirm', 'Reset the learned defaults on this device?'))) return;
+        learningEpoch++;
+        await learningWrites;
+        await resetLearnedDefaults(); learnedRecords.clear(); updateLearningUI();
+      });
+      line.append(label, button); content.append(line); updateLearningUI();
+    }
+
+    const AUTO_ROLL_KEY = 'nc_auto_roll_import_v1';
+    function scheduleAutomaticRollImport(imported, { prepared = false } = {}) {
+      if (safeStorageGet(AUTO_ROLL_KEY) === 'off') return;
+      // Defer past first paint and keep imports separate; no selection mutation.
+      const pending = imported.filter(item => !item.savedSettings && (!item.settings || prepared));
+      if (pending.length < 3) return;
+      const attempt = async () => {
+        if (safeStorageGet(AUTO_ROLL_KEY) === 'off' || state.rollReference.applyLock || !pending.every(item => state.fileQueue.includes(item))) return;
+        if (document.body.dataset.studioBusy || processNegativeInFlight || state.currentStep < 3 || isDesktopBatchExportLocked()) {
+          setTimeout(() => { void attempt().catch(error => console.warn('Automatic roll analysis failed:', error)); }, 750); return;
+        }
+        const generation = loadGeneration, revision = manualEditRevision;
+        const valid = () => generation === loadGeneration && revision === manualEditRevision && !state.rollReference.applyLock && pending.every(item => state.fileQueue.includes(item));
+        persistCurrentFileSettings({ silent: true, force: true });
+        for (const item of pending) {
+          if (!valid()) return;
+          if (item.settings || item.userEdited) continue;
+          try {
+            const image = await loadFileToImageData(item.file);
+            let settings = await analyzeStudioImportFrame(image, createDefaultSettings(image));
+            const edge = await analyzeImportFilmEdge(image, settings, { applyDefaults: state.importFilmTypeAuto });
+            if (edge) settings = edge.settings;
+            if (!valid() || item.settings || item.userEdited) return;
+            item.settings = await learnedImportSettings(settings, item);
+            item.automaticSettings = true;
+          } catch (error) { item.status = 'error'; item.error = error.message; }
+        }
+        if (!valid()) return;
+        for (const group of groupAutomaticRollFrames(pending, { referenceLocked: state.rollReference.applyLock })) {
+          if (!valid()) return;
+          await runRollAnalysis({ items: group, automatic: true });
+        }
+        notifyImportReview(pending);
+        updateFileListUI();
+        scheduleProjectRecovery();
+      };
+      setTimeout(() => { void attempt().catch(error => console.warn('Automatic roll analysis failed:', error)); }, 1200);
+    }
+
     function updateRollAnalysisUI() {
       if (!stateReady) return;
       const group = document.getElementById('rollAnalysisGroup');
@@ -14873,14 +15261,16 @@
       }
     }
 
-    async function runRollAnalysis() {
+    async function runRollAnalysis({ items = null, automatic = false } = {}) {
       if (document.body.dataset.studioBusy || state.cropping || isDesktopBatchExportLocked() || !state.originalImageData) return;
-      const selectedItems = state.fileQueue.filter((item) => item.selected);
-      if (selectedItems.length < 2) {
-        void appAlert(getLocalizedText('rollAnalysisNeedFiles', 'Select at least two frames of the same roll first.'));
+      const selectedItems = items || state.fileQueue.filter((item) => item.selected);
+      if (selectedItems.length < (automatic ? 3 : 2)) {
+        if (!automatic) void appAlert(getLocalizedText('rollAnalysisNeedFiles', 'Select at least two frames of the same roll first.'));
         return;
       }
       const generation = loadGeneration;
+      const editRevision = manualEditRevision;
+      const isValid = () => isCurrentLoad(generation) && (!automatic || (editRevision === manualEditRevision && !state.rollReference.applyLock)) && selectedItems.every(item => state.fileQueue.includes(item));
       studioAutoFrameRunning = true;
       document.body.dataset.studioBusy = 'true';
       studioWorkspace?.sync();
@@ -14895,9 +15285,8 @@
       let roll = null;
       try {
         if (processNegativeInFlight) await processNegativeInFlight;
-        if (!isCurrentLoad(generation)) return;
+        if (!isValid()) return;
         persistCurrentFileSettings({ silent: true, force: true });
-        pushUndo('rollAnalysis');
         // Pass 1: decode every frame once, read its rebate, keep a small
         // geometry-applied sample and measure base and density.
         for (let i = 0; i < selectedItems.length; i++) {
@@ -14923,7 +15312,7 @@
           }
           await new Promise((resolve) => setTimeout(resolve, 0));
         }
-        if (!isCurrentLoad(generation) || !measurements.length) return;
+        if (!isValid() || !measurements.length) return;
         // Pass 2: the roll base decides the outliers, then every inlier is analysed
         // with that base so the shared channelData matches what the conversion sees.
         const colorRoll = measurements.some((m) => m.filmBase);
@@ -14945,6 +15334,8 @@
           channelData: m.channelData,
           negativeMean: m.negativeMean
         })));
+        if (!isValid()) return;
+        pushUndo('rollAnalysis');
         const rollId = `roll-${Date.now().toString(36)}`;
         const equalize = Boolean(state.rollAnalysis.equalize);
         state.rollAnalysis = {
@@ -15004,7 +15395,7 @@
         delete document.body.dataset.studioBusy;
         studioWorkspace?.sync();
       }
-      if (!isCurrentLoad(generation)) return;
+      if (!isValid()) return;
       const currentItem = getCurrentQueueItem();
       if (currentItem?.settings && measurements.some((m) => m.item === currentItem)) restoreSettings(currentItem.settings);
       updateRollAnalysisUI();
@@ -15044,11 +15435,17 @@
 
     document.getElementById('analyzeRollBtn')?.addEventListener('click', () => { void runRollAnalysis(); });
     document.getElementById('clearRollAnalysisBtn')?.addEventListener('click', clearRollAnalysis);
+    const autoRollInput = document.getElementById('autoRollOnImport');
+    if (autoRollInput) {
+      autoRollInput.checked = safeStorageGet(AUTO_ROLL_KEY) !== 'off';
+      autoRollInput.addEventListener('change', () => safeStorageSet(AUTO_ROLL_KEY, autoRollInput.checked ? 'on' : 'off'));
+    }
     document.getElementById('rollEqualizeExposure')?.addEventListener('change', (event) => setRollEqualize(event.target.checked));
 
     {
       // 共通コントロールを唯一の暗室 UI に配置する。
       studioWorkspace = mountStudioWorkspace({
+        getText: key => getLocalizedText(key),
         getState: () => state,
         getLanguage: () => currentLang,
         isExportLocked: isDesktopBatchExportLocked,
