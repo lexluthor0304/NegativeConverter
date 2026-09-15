@@ -1,0 +1,10 @@
+import assert from 'node:assert/strict';
+import { decodeHeifInWorker } from './heifLoader.js';
+let terminated = 0;
+const good = () => ({ terminate() { terminated++; }, postMessage() { queueMicrotask(() => this.onmessage({ data: { width: 1, height: 1, data: new Uint8ClampedArray([1, 2, 3, 255]) } })); } });
+assert.equal((await decodeHeifInWorker({}, { workerFactory: good })).width, 1);
+assert.equal(terminated, 1);
+await assert.rejects(decodeHeifInWorker({}, { timeoutMs: 2, workerFactory: () => ({ postMessage() {}, terminate() { terminated++; } }) }), /timed out/);
+assert.equal(terminated, 2);
+assert.equal((await decodeHeifInWorker({}, { workerFactory: good })).height, 1, 'a timeout must not poison the next decode');
+console.log('HEIF worker timeout, retry and heap disposal passed');

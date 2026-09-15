@@ -1,3 +1,4 @@
+import { panelRelevance, inferSourceKind } from './panelRelevance.js';
 import '../styles/studio.css';
 import '../styles/pixel-fonts.css';
 import '../styles/studio-pixel.css';
@@ -8,7 +9,7 @@ export const studioText = {
     loupe: '实时放大镜', loupeHint: '把相机对准底片，实时看到转正后的画面；拍下即加入照片列表。',
     title: '免费胶片负片转换', subtitle: '在本机转换负片、校正正片，无需上传照片。',
     importBatch: '可多选照片，也可把一组照片拖到这里',
-    importHint: '自动取景与转换 · 保留原文件 · 照片不上传', formats: '支持 RAW、TIFF、PNG 和 JPEG',
+    importHint: '自动取景与转换 · 保留原文件 · 照片不上传', formats: '支持 HEIC、RAW、TIFF、PNG 和 JPEG',
     edit: '调色', editHint: '从自然的正片开始，找到你的色彩。', look: '色彩风格',
     natural: '自然', warm: '暖调', frontier: '鲜明', noritsu: '柔和',
     basic: '基本调整', brightness: '亮度', contrast: '对比', temperature: '冷暖', tint: '色偏', saturation: '饱和',
@@ -54,7 +55,7 @@ export const studioText = {
     loupe: 'Live loupe', loupeHint: 'Point a camera at the negative and see it converted live; capture adds the frame to the photos.',
     title: 'Free film negative converter', subtitle: 'Convert negatives and correct slides on your device. No photo uploads.',
     importBatch: 'Select multiple photos, or drop a batch here',
-    importHint: 'Auto frame & convert · Originals preserved · No uploads', formats: 'RAW, TIFF, PNG and JPEG welcome',
+    importHint: 'Auto frame & convert · Originals preserved · No uploads', formats: 'HEIC, RAW, TIFF, PNG and JPEG welcome',
     edit: 'Color', editHint: 'A natural starting point. A look that is yours.', look: 'Color style',
     natural: 'Natural', warm: 'Warm', frontier: 'Vivid', noritsu: 'Soft',
     basic: 'Adjustments', brightness: 'Brightness', contrast: 'Contrast', temperature: 'Warmth', tint: 'Tint', saturation: 'Saturation',
@@ -99,7 +100,7 @@ export const studioText = {
     loupe: 'ライブルーペ', loupeHint: 'カメラを原板に向けると変換後の画面がライブで見え、撮影すると写真一覧に加わります。',
     title: '無料のフィルムネガ変換', subtitle: 'ネガ変換もポジ補正も端末内で。写真のアップロードは不要です。',
     importBatch: '複数選択、または写真をまとめてドロップ',
-    importHint: '自動取景・変換 · 元画像を保持 · 写真の送信なし', formats: 'RAW・TIFF・PNG・JPEG に対応',
+    importHint: '自動取景・変換 · 元画像を保持 · 写真の送信なし', formats: 'HEIC・RAW・TIFF・PNG・JPEG に対応',
     edit: '色調整', editHint: '自然な仕上がりから、自分らしい色へ。', look: '色のスタイル',
     natural: '自然', warm: '暖色', frontier: '鮮やか', noritsu: '柔らか',
     basic: '基本調整', brightness: '明るさ', contrast: 'コントラスト', temperature: '色温度', tint: '色かぶり', saturation: '彩度',
@@ -141,7 +142,7 @@ export const studioText = {
   }
 };
 
-export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, onStyle, onReset, onResetAll, onRestart, onNewSession, onSync, onRetry, onConfirm, onExportBorder, onAutoCrop, onRestoreFrame, onConfirmAnalysis, onMergeShots, onLoupe, onSaveProject, onOpenProject, onRestoreProject, onExpiredMode }) {
+export function mountStudioWorkspace({ getState, getLanguage, getText, isExportLocked, onStyle, onReset, onResetAll, onRestart, onNewSession, onSync, onRetry, onConfirm, onExportBorder, onAutoCrop, onRestoreFrame, onConfirmAnalysis, onMergeShots, onLoupe, onSaveProject, onOpenProject, onRestoreProject, onExpiredMode }) {
   const $ = id => document.getElementById(id);
   const t = key => (studioText[getLanguage()] || studioText.en)[key];
   const move = (id, target) => target.append($(id));
@@ -174,6 +175,36 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
   move('undoBtn', $('studioHistory'));
   move('redoBtn', $('studioHistory'));
   $('studioExport').append(document.querySelector('.export-dropdown'));
+  let advancedPanels = false;
+  try { advancedPanels = localStorage.getItem('nc_advanced_panels_v1') === 'on' || (!localStorage.getItem('nc_advanced_panels_v1') && localStorage.getItem('nc_paradigm_v1') === 'enlarger'); } catch {}
+  const advancedButton = document.createElement('button');
+  advancedButton.id = 'studioAdvancedPanels'; advancedButton.type = 'button';
+  advancedButton.className = 'studio-advanced-toggle';
+  advancedButton.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5h14M3 10h14M3 15h14"/><circle cx="7" cy="5" r="2"/><circle cx="13" cy="10" r="2"/><circle cx="8" cy="15" r="2"/></svg><span data-i18n="advancedPanels">Advanced</span><i class="studio-toggle-indicator" aria-hidden="true"></i>';
+  $('studioMenu').querySelector('.studio-menu-content').prepend(advancedButton);
+  advancedButton.addEventListener('click', () => {
+    advancedPanels = !advancedPanels;
+    try { localStorage.setItem('nc_advanced_panels_v1', advancedPanels ? 'on' : 'off'); } catch {}
+    applyPanelRelevance(getState());
+  });
+  function applyPanelRelevance(state) {
+    advancedButton.setAttribute('aria-pressed', String(advancedPanels));
+    advancedButton.querySelector('span').textContent = getText?.('advancedPanels') || 'Advanced';
+    const visible = panelRelevance({
+      filmType: state.filmType, positiveMode: state.positiveMode,
+      expiredEnabled: state.expiredEnabled || state.expiredSession,
+      sourceKind: inferSourceKind({ ...state.loadedFile, name: state.loadedFile?.name, type: state.loadedFile?.type, make: state.rawMetadata?.cameraMaker, model: state.rawMetadata?.cameraModel }),
+      fileCount: state.fileQueue.length, hasRebate: state.filmEdge?.found || state.sprocketPreviewEnabled || state.exportSprocketHolesEnabled,
+    }, { advanced: advancedPanels, active: {
+      studioFlatField: Boolean(state.flatFieldId || Object.keys(state.flatFields || {}).length),
+      studioLabMatch: Boolean(state.look), paperSection: state.corePaper && state.corePaper !== 'none',
+      enlargerSection: state.controlParadigm === 'enlarger',
+      studioDodgeBurn: Boolean(state.localExposure?.strokes?.length),
+      studioTestStrip: Boolean($('testStripTiles')?.children.length),
+    } });
+    for (const [id, show] of Object.entries(visible)) if ($(id)) $(id).hidden = !show;
+    document.querySelectorAll('[data-jump="consoleSection"]').forEach(button => { button.hidden = !visible.consoleSection; });
+  }
   const exportSettings = document.createElement('details');
   exportSettings.id = 'studioExportSettings';
   exportSettings.innerHTML = '<summary data-studio="exportSettings"></summary>';
@@ -251,9 +282,11 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
     panes[key] = pane;
   }
   panel.prepend(tabs);
+  const panelHeader = document.createElement('div'); panelHeader.className = 'studio-panel-options';
+  panelHeader.append(advancedButton); tabs.after(panelHeader);
   const quickColor = document.createElement('nav');
   quickColor.className = 'studio-color-jumps';
-  quickColor.innerHTML = '<button type="button" data-jump="studioBasic" data-studio="basic"></button><button type="button" data-jump="consoleSection">CMYD</button><button type="button" data-jump="studioCurves" data-studio="curves"></button>';
+  quickColor.innerHTML = '<button type="button" data-jump="consoleSection">CMYD</button><button type="button" data-jump="studioBasic" data-studio="basic"></button><button type="button" data-jump="studioCurves" data-studio="curves"></button>';
   quickColor.querySelectorAll('button').forEach(button => button.addEventListener('click', () => {
     const target = $(button.dataset.jump);
     if (target.tagName === 'DETAILS') target.open = true;
@@ -323,7 +356,7 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
     items.forEach(item => move(item, drawer.lastElementChild));
     return drawer;
   };
-  move('consoleSection', panes.edit);
+  panes.edit.insertBefore($('consoleSection'), basic);
   makeDrawer(panes.edit, 'studioTestStrip', 'testStrip', ['testStripSection']);
   makeDrawer(panes.edit, 'studioLabMatch', 'labMatch', ['labMatchSection']);
   makeDrawer(panes.edit, 'studioMetadata', 'metadata', ['metadataSection'], 'metadataHint');
@@ -434,7 +467,7 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
   const strip = document.createElement('section');
   strip.className = 'studio-filmstrip';
   strip.id = 'studioFilmstrip';
-  strip.innerHTML = `<div class="studio-strip-header"><button id="studioToggleStrip" type="button" aria-controls="fileListSection" aria-expanded="true" data-studio="photos"></button><button id="studioToggleLightTable" type="button" aria-pressed="false" data-studio="lightTable"></button><span id="studioSelection"></span><button id="studioSync" type="button" data-studio="sync"></button><details id="studioBatchMenu"><summary data-studio="batch"></summary><div class="studio-batch-content"><p data-studio="batchHint"></p><div id="studioBatchActions"></div><p data-studio="mergeHint"></p><button id="studioMergeAverage" type="button" data-studio="mergeAverage"></button><button id="studioMergeHdr" type="button" data-studio="mergeHdr"></button><p data-studio="projectHint"></p><button id="studioSaveProject" type="button" data-studio="saveProject"></button><button id="studioOpenProject" type="button" data-studio="openProject"></button><button id="studioRestoreProject" type="button" data-studio="restoreProject" hidden></button><button id="studioClearQueue" type="button" data-studio="clearQueue"></button></div></details></div>`;
+  strip.innerHTML = `<div class="studio-strip-header"><button id="studioToggleStrip" type="button" aria-controls="fileListSection" aria-expanded="true" data-studio="photos"></button><button id="studioToggleLightTable" type="button" aria-pressed="false" data-studio="lightTable"></button><button id="studioReviewFilter" type="button" aria-pressed="false" hidden></button><span id="studioSelection"></span><button id="studioSync" type="button" data-studio="sync"></button><details id="studioBatchMenu"><summary data-studio="batch"></summary><div class="studio-batch-content"><p data-studio="batchHint"></p><div id="studioBatchActions"></div><p data-studio="mergeHint"></p><button id="studioMergeAverage" type="button" data-studio="mergeAverage"></button><button id="studioMergeHdr" type="button" data-studio="mergeHdr"></button><p data-studio="projectHint"></p><button id="studioSaveProject" type="button" data-studio="saveProject"></button><button id="studioOpenProject" type="button" data-studio="openProject"></button><button id="studioRestoreProject" type="button" data-studio="restoreProject" hidden></button><button id="studioClearQueue" type="button" data-studio="clearQueue"></button></div></details></div>`;
   document.querySelector('.app-main').append(strip);
   move('fileListSection', strip);
   $('studioSync').title = t('syncHint');
@@ -517,6 +550,9 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
       const state = getState();
       const loaded = Boolean(state.originalImageData);
       const ready = loaded && state.currentStep >= 3 && Boolean(state.processedImageData);
+      const watcher = $('studioWatchControls');
+      const watchParent = loaded ? $('studioBatchActions') : $('uploadPlaceholder');
+      if (watcher && watcher.parentElement !== watchParent) watchParent.append(watcher);
       body.classList.toggle('studio-loaded', loaded);
       body.classList.toggle('studio-ready', ready);
       document.querySelectorAll('[data-studio]').forEach(el => { el.textContent = t(el.dataset.studio); });
@@ -604,6 +640,7 @@ export function mountStudioWorkspace({ getState, getLanguage, isExportLocked, on
           $(id).style.display = ready ? 'block' : 'none';
         });
       }
+      applyPanelRelevance(state);
       if (ready !== observedReady) {
         observedReady = ready;
         requestAnimationFrame(resize);

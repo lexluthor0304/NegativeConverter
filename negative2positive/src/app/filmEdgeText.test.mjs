@@ -1,0 +1,18 @@
+import assert from 'node:assert/strict';
+import { edgeTextTemplate, normalizedCorrelation, readEdgeTextLine, readTextInBands } from './filmEdgeText.js';
+const template = edgeTextTemplate('KODAK PORTRA   12A');
+assert.equal(normalizedCorrelation(template.data, template.data), 1);
+const result = readEdgeTextLine(template);
+assert.equal(result.filmName, 'KODAK PORTRA');
+assert.equal(result.frameNumber, '12A');
+assert.equal(readEdgeTextLine(edgeTextTemplate('UNKNOWN 12')), null);
+assert.equal(readEdgeTextLine(edgeTextTemplate('18    KODAK PORTRA 160')).frameNumber, '18', 'do not read the last digit or ISO as a frame');
+assert.equal(readEdgeTextLine(edgeTextTemplate('KODAK PORTRA 160')).frameNumber, null);
+assert.equal(readEdgeTextLine(edgeTextTemplate('KODAK PORTRA 160')).filmName, 'KODAK PORTRA 160');
+const width = template.width + 20, rows = 15, values = new Float32Array(width * rows).fill(180);
+for (let y = 0; y < 7; y++) for (let x = 0; x < template.width; x++) values[(y + 4) * width + x + 10] = template.data[y * template.width + x] ? 30 : 180;
+assert.equal(readTextInBands([{ cols: width, rows, values }]).mirrorDetected, false);
+const mirrored = new Float32Array(values.length);
+for (let y = 0; y < rows; y++) for (let x = 0; x < width; x++) mirrored[y * width + x] = values[y * width + width - x - 1];
+assert.equal(readTextInBands([{ cols: width, rows, values: mirrored }]).mirrorDetected, true);
+console.log('film edge text: shared templates, vocabulary, frames and mirrored reading passed');

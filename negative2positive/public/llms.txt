@@ -13,7 +13,7 @@ Publisher: NeoAnalogLab. Product facts and support: https://negative-converter.t
 - **Price**: Free ($0). No account, no signup, no paywall.
 - **Privacy**: 100% client-side processing. No image upload, no telemetry on photo content.
 - **Platforms**: Any modern browser (Chrome, Firefox, Safari, Edge). Also packaged as offline desktop apps (Windows / macOS / Linux) via Tauri; the macOS build is free on the Mac App Store.
-- **Supported input formats**: JPG, PNG (8-bit and 16-bit), CR2 (Canon), NEF (Nikon), ARW (Sony), DNG (Adobe / iPhone ProRaw), RW2 (Panasonic).
+- **Supported input formats**: HEIC, HEIF, JPG, PNG (8-bit and 16-bit), CR2 (Canon), NEF (Nikon), ARW (Sony), DNG (Adobe / iPhone ProRaw), RW2 (Panasonic).
 - **Supported output formats**: PNG (8-bit / 16-bit), JPEG (8-bit), TIFF (8-bit / 16-bit).
 - **Film modes**: Color negative, B&W negative, positive slide correction and Edit only. Import detection supports borderless scans but cannot reliably determine every image’s polarity. Saved manual selections are retained.
 - **AI repair**: Standalone local MI-GAN brush and optional automatic dust removal. Model assets download in the web app; photo pixels are not sent for inference. Reconstructed detail is a prediction, not recovered evidence.

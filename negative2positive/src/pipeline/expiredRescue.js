@@ -1,3 +1,4 @@
+import { sanitizeSemanticMap, semanticClassAt, semanticNeutralWeight } from '../app/semanticAnchors.js';
 // Expired film rescue: a separate correction stage for rolls that were shot
 // or developed long past their date. Age shows up in a positive as
 //
@@ -249,6 +250,8 @@ export function analyzeExpiredFilm(image, options = {}) {
   const lumHist = new Uint32Array(HIST_BINS);
   const capacity = (Math.ceil(bounds.width / stride) + 1) * (Math.ceil(bounds.height / stride) + 1);
   const samples = new Float32Array(capacity * 3);
+  const anchors = sanitizeSemanticMap(options.anchors);
+  const semanticWeights = anchors ? new Float32Array(capacity) : null;
   let count = 0;
   for (let y = bounds.top; y < bounds.top + bounds.height; y += stride) {
     let index = (y * width + bounds.left) * 4;
@@ -263,6 +266,7 @@ export function analyzeExpiredFilm(image, options = {}) {
         applyExpiredSpatial(spatial, placement.left + ((x + 0.5) / width) * placement.width, v, px);
         r = px[0] / 255; g = px[1] / 255; b = px[2] / 255;
       }
+      if (semanticWeights) semanticWeights[count] = semanticNeutralWeight(semanticClassAt(anchors, placement.left + (x + 0.5) / width * placement.width, v, 1, 1));
       samples[count * 3] = r;
       samples[count * 3 + 1] = g;
       samples[count * 3 + 2] = b;
@@ -298,7 +302,7 @@ export function analyzeExpiredFilm(image, options = {}) {
     const b = samples[i * 3 + 2];
     const lum = luminance(r, g, b);
     const t = clamp((lum - lumLow) / span, 0, 1);
-    const w = neutralWeight(r, g, b);
+    const w = neutralWeight(r, g, b) * (semanticWeights ? semanticWeights[i] : 1);
     neutralPopulation += w;
     let k = 0;
     while (k < bandCount - 1 && t >= BAND_EDGES[k + 1]) k++;
@@ -334,7 +338,7 @@ export function analyzeExpiredFilm(image, options = {}) {
       const g = samples[i * 3 + 1];
       const b = samples[i * 3 + 2];
       const distance = Math.max(Math.abs(r - mean[0]), Math.abs(g - mean[1]), Math.abs(b - mean[2])) / CLUSTER_RADIUS;
-      const w = neutralWeight(r, g, b) / (1 + distance * distance);
+      const w = neutralWeight(r, g, b) * (semanticWeights ? semanticWeights[i] : 1) / (1 + distance * distance);
       shiftSum[k][0] += w * r;
       shiftSum[k][1] += w * g;
       shiftSum[k][2] += w * b;

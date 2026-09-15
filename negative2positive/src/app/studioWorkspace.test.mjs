@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 
 // ブラウザー用 CSS import だけを除き、翻訳データを同じモジュールから検証する。
 const source = readFileSync(new URL('./studioWorkspace.js', import.meta.url), 'utf8');
-const moduleSource = source.replace(/import '\.\.\/styles\/[^']+\.css';/g, '');
+const moduleSource = source.replace("from './panelRelevance.js'", `from '${new URL('./panelRelevance.js', import.meta.url).href}'`).replace(/import '\.\.\/styles\/[^']+\.css';/g, '');
 const { studioText } = await import('data:text/javascript;base64,' + Buffer.from(moduleSource).toString('base64'));
 const keys = Object.keys(studioText.en).sort();
 for (const [lang, messages] of Object.entries(studioText)) {

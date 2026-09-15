@@ -17,6 +17,7 @@ const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'));
 
 const pins = [
+  { dependency: 'libheif-js', constant: 'HEIF_PACKAGE_VERSION', file: 'negative2positive/src/app/heifLoader.js' },
   {
     dependency: '@neoanaloglabkk/lensfun-wasm',
     constant: 'LENSFUN_PACKAGE_VERSION',

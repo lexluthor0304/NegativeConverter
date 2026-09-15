@@ -80,6 +80,11 @@ export async function runStudioSmoke({ send, evaluate, waitFor, wait, fail, inst
     fail(`studio initial state: ${JSON.stringify(startup)}`);
   }
   console.log('ok: studio imports three synthetic negatives, automatically converts, shows six controls without guide popup');
+  const cmyd = await evaluate(`(() => {
+    const console = document.getElementById('consoleSection'), basic = document.getElementById('studioBasic');
+    return { visible: !console.hidden && console.getBoundingClientRect().height > 0, beforeBasic: !!(console.compareDocumentPosition(basic) & Node.DOCUMENT_POSITION_FOLLOWING) };
+  })()`);
+  if (!cmyd.visible || !cmyd.beforeBasic) fail('CMYD must be visible before basic adjustments: ' + JSON.stringify(cmyd));
   await capture('studio-desktop.png');
   await runRealtimePreviewSmoke({ send, evaluate, wait, fail });
 
@@ -121,6 +126,8 @@ export async function runStudioSmoke({ send, evaluate, waitFor, wait, fail, inst
   await clickVisible('studioTab-edit');
   console.log('ok: default workspace exposes border tab; real clicks render sprockets and enable text, frame numbers and DX');
 
+  // Advanced tools remain reachable through the explicit global toggle.
+  if (await evaluate(`document.getElementById('studioAdvancedPanels').getAttribute('aria-pressed') !== 'true'`)) await clickVisible('studioAdvancedPanels');
   // 色・構図・修復・変換の主要コントロールを実際に開く。
   for (const [tab, drawers, ids] of [
     ['edit', ['studioCurves', 'studioLooks', 'studioMore'], ['histogramCanvas', 'consoleKeypad', 'curveCanvas', 'coreColorModelStep2', 'filmPreset', 'coreHighlights']],

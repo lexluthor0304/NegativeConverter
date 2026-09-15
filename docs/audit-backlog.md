@@ -688,3 +688,20 @@ what shipped — delete an entry when it is done.
   `scripts/smoke-test.mjs:199`  
   After clicking #autoFrameBtn the script waits for `window.cv.Mat` and logs 'auto-frame analysis ran'. `applyAutoFrameToCurrent()` is fire-and-forget (main.js:7525-7527); a detection that returns null, throws inside its promise chain, or declines on low confidence leaves the DOM unchanged and the smoke passes. The whole autoFrameAnalyzer (1,430 lines) therefore has no end-to-end assertion, and the …  
   _Suggested fix:_ Record canvas dimensions / the crop overlay before the click and wait for a visible outcome: the auto-frame toast text (i18n `autoFramePreviewDetail`) or a change in `#mainCanvas.width/height`; fail if neither appears within 30 s. For determinism, add a fixture with a clear frame…
+
+## Simplicity roadmap #181 — validation still outstanding
+
+- **#182 real colour accuracy:** the bundled model executes in Chrome, but the
+  repo lacks paired manually balanced references/masks for face ΔE and named
+  locomotive/cab files. Establish a real-scene before/after set before claiming
+  those quality acceptance criteria. Synthetic tests with hand labels do not
+  validate model recognition accuracy.
+- **#186 HDR headroom:** the current 16-bit output is bounded sRGB. The gain-map
+  container preserves its measured ratio, usually near identity; it cannot
+  restore clipped highlights. Add a scene-linear HDR rendition and validate
+  an HDR display/Photos/Safari before claiming enhanced highlight range.
+- **#188/#183 physical inputs:** validate camera-original HEIC orientation on
+  Safari/iPhone and real 120/135 edge text, mirrored lettering and year symbols.
+- **#190 platform acceptance:** run native folder arrival/stop tests on macOS
+  and Windows/Linux, plus the MAS App Sandbox lifetime test in mas-release.md.
+  The Rust/JS tests alone do not establish platform picker permissions.

@@ -12,7 +12,7 @@ export function isRawLikeFileName(fileName) {
 const PNG_SIGNATURE = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 
 // Enough for the PNG signature + IHDR chunk header + IHDR payload.
-export const IMAGE_SNIFF_BYTES = 33;
+export const IMAGE_SNIFF_BYTES = 128;
 
 function asBytes(source) {
   if (source instanceof Uint8Array) return source;
@@ -56,7 +56,7 @@ export function sniffImageKind(source) {
 
   if (bytes.length >= 12 && bytes[4] === 0x66 && bytes[5] === 0x74 && bytes[6] === 0x79 && bytes[7] === 0x70) {
     const brand = String.fromCharCode(bytes[8], bytes[9], bytes[10], bytes[11]);
-    if (/^(heic|heix|hevc|hevx|heim|heis|hevm|hevs|mif1|msf1)$/.test(brand)) return { kind: 'heif', brand };
+    if (/^(heic|heix|hevc|hevx|heim|heis|hevm|hevs|heif|mif1|msf1)$/.test(brand)) return { kind: 'heif', brand };
     if (/^avi[fs]$/.test(brand)) return { kind: 'avif', brand };
     return { kind: 'iso-bmff', brand };
   }
@@ -186,7 +186,7 @@ function decodeFailureError(file) {
   // HEIC/HEIF is what phone camera rolls hand over and what Chrome/Firefox
   // cannot decode; it deserves its own message instead of "[object Event]".
   err.code = /\.(heic|heif|hif)$/i.test(name) || /hei[cf]/i.test(type)
-    ? 'HEIC_UNSUPPORTED'
+    ? 'HEIC_DECODE_FAILED'
     : 'IMAGE_DECODE_FAILED';
   return err;
 }
@@ -224,7 +224,7 @@ export async function loadStandardImage(file) {
     }
   }
 
-  return new Promise((resolve, reject) => {
+  const nativeImage = new Promise((resolve, reject) => {
     const img = new Image();
     let objectUrl = null;
 
@@ -248,4 +248,13 @@ export async function loadStandardImage(file) {
     objectUrl = URL.createObjectURL(file);
     img.src = objectUrl;
   });
+  try { return await nativeImage; }
+  catch (error) {
+    if (error?.code === 'IMAGE_TOO_LARGE') throw error;
+    if (sniffed?.kind !== 'heif' && !/\.(heic|heif|hif)$/i.test(file?.name || '') && !/hei[cf]/i.test(file?.type || '')) throw error;
+    const { decodeHeifInWorker } = await import('./heifLoader.js');
+    const decoded = await decodeHeifInWorker(file);
+    assertCanvasSize(decoded.width, decoded.height);
+    return new ImageData(new Uint8ClampedArray(decoded.data), decoded.width, decoded.height);
+  }
 }

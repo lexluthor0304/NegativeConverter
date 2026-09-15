@@ -68,7 +68,7 @@ export async function runStudioColorAnalysisSmoke({ send, evaluate, waitFor, wai
   await evaluate(`document.getElementById('applyCropBtn').click()`);
   await waitFor('analysis confirmed', `!document.body.dataset.studioBusy && !document.getElementById('canvasContainer').classList.contains('crop-mode')`,120000);
   const confirmed = await exportImage();
-  if (String(confirmed) !== String(cropped)) fail('confirming analysis changed output geometry');
+  if (String(confirmed) !== String(cropped)) fail('confirming analysis changed output geometry: ' + JSON.stringify({ cropped, confirmed }));
   await evaluate(`document.getElementById('undoBtn').click()`); await wait(300);
   if (String(await exportImage()) !== String(cropped)) fail('undo analysis changed geometry');
   await evaluate(`document.getElementById('redoBtn').click()`); await wait(300);

@@ -1,3 +1,4 @@
+import { runSimplicitySmoke } from './simplicity-smoke.mjs';
 // End-to-end smoke test: drives the real app in headless Chrome via CDP.
 //
 //   node scripts/smoke-test.mjs
@@ -146,6 +147,15 @@ ws.onmessage = (e) => {
     pageErrors.push(msg.params?.exceptionDetails?.exception?.description
       || msg.params?.exceptionDetails?.text || 'unknown exception');
   }
+  if (msg.method === 'Runtime.consoleAPICalled' && msg.params?.type === 'error') {
+    const message = (msg.params.args || []).map(arg => arg.description || arg.value || arg.type).join(' ');
+    // ONNX Runtime emits provider-placement warnings through console.error.
+    if (/\[W:onnxruntime:/.test(message)) return;
+    console.error('page console error:', message);
+    if (/^Export failed:/.test(message)) pageErrors.push(message);
+    const frames = msg.params.stackTrace?.callFrames || [];
+    if (frames.length) console.error(frames.slice(0, 5).map(frame => `  ${frame.functionName} (${frame.url}:${frame.lineNumber + 1})`).join('\n'));
+  }
   if (msg.method === 'Page.javascriptDialogOpening') {
     // The guide flow uses alert(); with the Page domain enabled the dialog
     // blocks the renderer until we acknowledge it.
@@ -264,6 +274,11 @@ await installDialogAutoAccept();
 await wait(1500); // let main.js finish wiring
 await evaluate(`document.getElementById('studioImportAutoCrop').click()`);
 
+if (process.argv.includes('--simplicity-only')) {
+  await runSimplicitySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
 if (process.argv.includes('--positive-only')) {
   await runPositiveImportSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
   if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
@@ -654,6 +669,8 @@ if (process.env.AUTOFRAME_RAW_DIR) await runStudioRawAutoFrameSmoke({ send, eval
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runPositiveImportSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runNativeFilmFontSmoke({ send, evaluate, waitFor, wait, fail, port: PORT, root: ROOT });
+
+if (!process.argv.some(arg => arg.endsWith('-only'))) await runSimplicitySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
 
 // ---- no uncaught page errors across both scenarios ----
 const realErrors = pageErrors.filter((e) => !/ResizeObserver loop/.test(e));

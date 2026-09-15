@@ -212,6 +212,10 @@ async function runMultiShotScenario({ send, evaluate, waitFor, wait, fail, insta
   await installDialogAutoAccept();
   await wait(300);
   await evaluate(`document.getElementById('importFilmTypeAuto').checked && document.getElementById('importFilmTypeAuto').click()`);
+  // These are repeated/bracketed exposures of ONE frame. Keep the noise
+  // comparison independent of the new automatic whole-roll histogram pass;
+  // default-on roll import and atomic undo have their own smoke scenario.
+  await evaluate(`document.getElementById('autoRollOnImport').checked && document.getElementById('autoRollOnImport').click()`);
   await evaluate(`(() => {
     window.__cameraToasts = [];
     new MutationObserver((records) => {

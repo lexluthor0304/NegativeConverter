@@ -1,3 +1,4 @@
+import { sanitizeSemanticMap, estimateAnchoredWhiteBalance } from './semanticAnchors.js';
 // Automatic gray-point estimation for the converted positive.
 //
 // Runs the same math as the manual gray-point click (gains = gray / channel
@@ -102,6 +103,11 @@ function lowResult(extra = {}) {
  *   confidence they are identity — the caller should not apply anything.
  */
 export function estimateAutoWhiteBalance(imageData, options = {}) {
+  const anchors = sanitizeSemanticMap(options.anchors);
+  if (anchors && imageData?.data) {
+    const statistics = estimateAutoWhiteBalance(imageData, { ...options, anchors: null });
+    return estimateAnchoredWhiteBalance(imageData, statistics, anchors);
+  }
   const opts = { ...DEFAULTS, ...options };
   if (!imageData || !imageData.data || !imageData.width || !imageData.height) {
     return lowResult();

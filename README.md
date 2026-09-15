@@ -8,9 +8,19 @@ Negative Converter helps film photographers turn scanned or camera-digitized fil
 
 Whether you are reviewing a fresh roll, restoring family negatives, or preparing a consistent set for sharing, the app is designed to make film conversion feel fast, approachable, and dependable while keeping your photos private.
 
+## Simpler local workflow
+
+HEIC import, automatic same-stock roll analysis, local semantic colour anchors,
+learned defaults, review filtering and consistent colour-profile export are
+available in the local workflow. CMYD remains a primary control above basic
+adjustments; Advanced reveals the optional tools. Desktop folder watching is
+optional. See the [automation design](docs/simplicity-automation.md),
+[workflow guide](docs/simplicity-workflow.md) and
+[validation and remaining acceptance](docs/simplicity-validation.md).
+
 ## 🌟 Features
 
-- 📷 **Supports PNG/JPG file uploads** (including 16-bit PNGs via UPNG.js and .cr2, .nef, .arw, .dng, .raw, .rw2 raw files via LibRaw-Wasm)
+- 📷 **Supports HEIC/HEIF, PNG/JPG file uploads** (including 16-bit PNGs via UPNG.js and .cr2, .nef, .arw, .dng, .raw, .rw2 raw files via LibRaw-Wasm)
 - 🔄 **Rotation correction** via slider or number input
 - ✂️ **Visual cropping** with drag-and-drop overlay
 - ⚖️ **One-click white balance** by clicking a gray area in the image
@@ -205,3 +215,5 @@ MIT License
 Special thanks to [LibRaw-Wasm by ybouane](https://github.com/ybouane/LibRaw-Wasm),  
 which made it possible to support various raw image formats such as `.cr2`, `.nef`, `.arw`, `.dng`, `.raw`, and `.rw2` directly in the browser via WebAssembly.  
 Your work was an essential reference and greatly accelerated development.
+
+HEIC/HEIF decoding uses the browser when supported, then the bundled libheif WASM decoder in a worker. See `negative2positive/public/codecs/README.md` for licence and replacement instructions.

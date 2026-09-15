@@ -83,3 +83,15 @@ the fastest way to run the latest merge on a Mac.
 
 `npm run tauri:build:mas` still produces the signed .pkg locally, uploadable
 with Transporter.app — nothing in the pipeline removes the manual path.
+
+## Folder-watch validation (#190)
+
+The new import watcher obtains its directory from an `rfd` native open panel,
+keeps a session-only directory grant and rejects reads outside it. No bookmark
+is persisted and no additional broad filesystem capability is requested.
+Rust scope/stability tests pass, but they do not establish App Sandbox access.
+Before releasing this feature in MAS, run `scripts/build-mas.sh`, choose a
+folder in the sandboxed app, copy three scans into it, verify conversion, then
+Stop/new session and verify imports cease. Also verify access remains valid
+for the watch lifetime. This sandboxed manual check has not been performed in
+the issue #181 local-preview work.

@@ -228,9 +228,9 @@
           <label class="upload-btn" id="uploadBtn" for="fileInput" role="button" tabindex="0" data-i18n="selectFile">Select File</label>
           <label class="upload-btn secondary" id="uploadFolderBtn" for="folderInput" role="button" tabindex="0" data-i18n="selectFolder">Select Folder</label>
           <label class="upload-btn secondary" id="uploadExpiredBtn" for="fileInput" role="button" tabindex="0" data-i18n="selectExpired">Rescue an expired roll</label>
-          <input type="file" id="fileInput" class="hidden-file-input" accept=".cr2,.cr3,.crw,.nef,.nrw,.arw,.dng,.raf,.raw,.rw2,.pef,.srw,.3fr,.mef,.orf,.rwl,.iiq,.x3f,.mrw,.kdc,.dcr,.tif,.tiff,image/*" multiple>
-          <input type="file" id="projectInput" aria-label="Open roll project and source photos" class="hidden-file-input" accept=".json,.cr2,.cr3,.crw,.nef,.nrw,.arw,.dng,.raf,.raw,.rw2,.pef,.srw,.3fr,.mef,.orf,.rwl,.iiq,.x3f,.mrw,.kdc,.dcr,.tif,.tiff,image/*" multiple>
-          <input type="file" id="folderInput" class="hidden-file-input" accept=".cr2,.cr3,.crw,.nef,.nrw,.arw,.dng,.raf,.raw,.rw2,.pef,.srw,.3fr,.mef,.orf,.rwl,.iiq,.x3f,.mrw,.kdc,.dcr,.tif,.tiff,image/*" webkitdirectory directory multiple>
+          <input type="file" id="fileInput" class="hidden-file-input" accept=".cr2,.cr3,.crw,.nef,.nrw,.arw,.dng,.raf,.raw,.rw2,.pef,.srw,.3fr,.mef,.orf,.rwl,.iiq,.x3f,.mrw,.kdc,.dcr,.tif,.tiff,.heic,.heif,.hif,image/*" multiple>
+          <input type="file" id="projectInput" aria-label="Open roll project and source photos" class="hidden-file-input" accept=".json,.cr2,.cr3,.crw,.nef,.nrw,.arw,.dng,.raf,.raw,.rw2,.pef,.srw,.3fr,.mef,.orf,.rwl,.iiq,.x3f,.mrw,.kdc,.dcr,.tif,.tiff,.heic,.heif,.hif,image/*" multiple>
+          <input type="file" id="folderInput" class="hidden-file-input" accept=".cr2,.cr3,.crw,.nef,.nrw,.arw,.dng,.raf,.raw,.rw2,.pef,.srw,.3fr,.mef,.orf,.rwl,.iiq,.x3f,.mrw,.kdc,.dcr,.tif,.tiff,.heic,.heif,.hif,image/*" webkitdirectory directory multiple>
           <div class="upload-support-hint" id="folderPickerHint" data-i18n="folderPickerUnsupported">Folder selection is not supported in this browser. Please use Select File.</div>
         </div>
         <div class="canvas-transform-wrapper" id="canvasTransformWrapper">
@@ -638,6 +638,10 @@
               <label class="roll-reference-option">
                 <input type="checkbox" id="rollEqualizeExposure" checked>
                 <span data-i18n="rollEqualizeExposure">Equalise exposure across frames</span>
+              </label>
+              <label class="checkbox-label" data-i18n-title="autoRollOnImportHint">
+                <input type="checkbox" id="autoRollOnImport" checked>
+                <span data-i18n="autoRollOnImport">Analyse rolls on import</span>
               </label>
             </div>
           </div>
@@ -1089,7 +1093,7 @@
               <label><span data-i18n="metadataRollName">Roll name</span><input type="text" id="metaRollName" data-meta-roll="rollName" maxlength="120" autocomplete="off"></label>
               <label><span data-i18n="metadataStock">Film stock</span><input type="text" id="metaStock" data-meta-roll="stock" maxlength="120" autocomplete="off"></label>
               <label><span data-i18n="metadataIso">ISO</span><input type="text" id="metaIso" data-meta-roll="iso" inputmode="numeric" maxlength="12" autocomplete="off"></label>
-              <label><span data-i18n="metadataDate">Date</span><input type="date" id="metaDate" data-meta-roll="date"></label>
+              <label><span data-i18n="metadataDate">Date</span><input type="text" placeholder="YYYY-MM-DD" id="metaDate" data-meta-roll="date"></label>
               <label><span data-i18n="metadataCamera">Camera</span><input type="text" id="metaCamera" data-meta-roll="camera" maxlength="120" autocomplete="off"></label>
               <label><span data-i18n="metadataLens">Lens</span><input type="text" id="metaLens" data-meta-roll="lens" maxlength="120" autocomplete="off"></label>
               <label><span data-i18n="metadataProcess">Process / developer</span><input type="text" id="metaProcess" data-meta-roll="process" maxlength="120" autocomplete="off"></label>
@@ -1576,7 +1580,8 @@
             </div>
             <div class="export-bitdepth-note" id="exportDngNote" data-i18n="exportDngNote"></div>
           </div>
-          <div class="export-bitdepth-section" id="exportBitDepthSection">
+          <label class="checkbox-label" id="exportHdrGainMapSection"><input type="checkbox" id="exportHdrGainMap" checked><span data-i18n="hdrGainMap">HDR gain map</span></label>
+<div class="export-bitdepth-section" id="exportBitDepthSection">
             <div class="export-format-label" id="exportBitDepthLabel" data-i18n="exportBitDepth">Bit Depth</div>
             <div class="export-bitdepth-toggle" role="group" aria-labelledby="exportBitDepthLabel">
               <button class="bitdepth-btn active" type="button" data-bitdepth="8" aria-pressed="true">8-bit</button>

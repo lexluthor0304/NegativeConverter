@@ -1,0 +1,16 @@
+import assert from 'node:assert/strict';
+import { learnedDefaultsKey, learnedDelta, recordLearnedObservation, estimateLearnedDefaults, applyLearnedDefaults, sanitizeLearnedRecord } from './learnedDefaults.js';
+const key = learnedDefaultsKey({ filmType: 'color', filmEdge: { filmName: 'Portra' } }, { lab: 'Lab A' });
+assert.notEqual(key, learnedDefaultsKey({ filmType: 'color', filmEdge: { filmName: 'Gold' } }, { lab: 'Lab A' }));
+assert.deepEqual(learnedDelta({ coreTemperature: 0, wbR: 1 }, { coreTemperature: 12, wbR: 1.4 }, ['coreTemperature', 'wbR']), { coreTemperature: 12 });
+let record;
+for (let i = 0; i < 3; i++) record = recordLearnedObservation(record, { key, rollId: String(i), frameId: 'a', delta: { coreTemperature: 12, corePaper: 'ra4' } });
+assert.equal(estimateLearnedDefaults(record).offsets.coreTemperature, 6, 'three roll medians, k=3');
+assert.equal(estimateLearnedDefaults(record).choices.corePaper, 'ra4');
+record = recordLearnedObservation(record, { key, rollId: '2', frameId: 'a', delta: { coreTemperature: 12, corePaper: 'ra4' } });
+assert.equal(record.rolls.length, 3, 'repeated export is not another vote');
+assert.equal(applyLearnedDefaults({ coreTemperature: 2 }, record).coreTemperature, 8);
+assert.equal(sanitizeLearnedRecord({ ...record, version: 999 }), null);
+assert.equal(estimateLearnedDefaults({ ...record, rolls: record.rolls.slice(0, 2) }).choices.corePaper, undefined);
+assert.deepEqual(learnedDelta({ coreTemperature: 0 }, { coreTemperature: 0 }, ['coreTemperature']), {});
+console.log('learned defaults: stock/lab keys, shrinkage, majority, idempotence, whitelist passed');

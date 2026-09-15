@@ -157,3 +157,17 @@ const channels = (white, black, mean) => [0, 1, 2].map((ch) => ({
 }
 
 console.log('rollAnalysis.test.mjs passed');
+
+// Automatic grouping never crosses stock or manual/saved choices.
+{
+ const { groupAutomaticRollFrames } = await import('./rollAnalysis.js');
+ const make = (id, stock = 'Gold') => ({ id, selected: true, settings: { filmType: 'color', filmEdge: { filmName: stock }, filmBase: { method: 'auto' } } });
+ const items = [make('1'),make('2'),make('3'),make('4','Portra')];
+ assert.equal(groupAutomaticRollFrames(items).length,1);
+ assert.deepEqual(groupAutomaticRollFrames(items)[0].map(i=>i.id),['1','2','3']);
+ assert.equal(groupAutomaticRollFrames(items.slice(0,2)).length,0);
+ assert.equal(groupAutomaticRollFrames(items,{referenceLocked:true}).length,0);
+ for(const flag of ['savedSettings','userEdited','isDirty']) {
+   const copy=structuredClone(items);copy[0][flag]=true;assert.equal(groupAutomaticRollFrames(copy).length,0);
+ }
+}
