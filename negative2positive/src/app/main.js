@@ -18,8 +18,8 @@ import { frameNeedsReview } from './reviewQueue.js';
     import { computeZoomGeometry, clampPanValues } from './zoomGeometry.js';
     import { showToast } from '../ui/toast.js';
     import { writeDesktopBlob } from './desktopExportWriter.js';
-    import { normalizeAngleDegrees, applyRotationToImageData, mirrorImageDataHorizontal } from './imageGeometry.js';
-    import { analyzeFrameInWorker, readFilmEdgeInWorker } from './autoFrameWorkerClient.js';
+    import { normalizeAngleDegrees, applyRotationToImageData, mirrorImageDataHorizontal, applyGeometryChainToImageData } from './imageGeometry.js';
+    import { analyzeFrameInWorker, readFilmEdgeInWorker, createAutoFrameWorkerPool } from './autoFrameWorkerClient.js';
     import { detectFrameWithFallback } from './autoFrameExecution.js';
     import { createRollSampleCache } from './rollSampleCache.js';
     import { mountStudioWorkspace } from './studioWorkspace.js';
@@ -51,7 +51,8 @@ import { frameNeedsReview } from './reviewQueue.js';
     import { layoutContactSheet, pagesFor, renderContactSheetPage, contactSheetHeader, normalizeLayoutId, normalizePageId } from './contactSheet.js';
 
     import { convertFrameWithRouter, resolveConversionMode } from '../pipeline/conversionRouter.js';
-    import { convertFrameInWorker, convertPreviewFrameInWorker, CONVERSION_FAILED, WORKER_TIMEOUT } from './conversionWorkerClient.js';
+    import { convertFrameInWorker, convertPreviewFrameInWorker, createConversionWorkerPool, CONVERSION_FAILED, WORKER_TIMEOUT } from './conversionWorkerClient.js';
+    import { planBatchParallelism, runBatchPipeline } from './batchExportScheduler.js';
     import { displayPreviewSize, resizeDisplayPreview } from './displayPreview.js';
     import { invalidateSilverCoreCache, analyzeSilverCoreFrame } from '../pipeline/silverAdapter.js';
     import { canUseBrowserZipStreaming, ZipStoreWriter, createZipNameDeduper } from './zipStoreWriter.js';
@@ -110,10 +111,14 @@ import { frameNeedsReview } from './reviewQueue.js';
       workerApplyAdjustments16,
       workerEncodePng16,
       workerEncodeTiff,
-      isWorkerAvailable
+      isWorkerAvailable,
+      createExportWorkerPool
     } from '../workers/workerBridge.js';
 
     const DEBUG_UI = new URLSearchParams(window.location.search).get('debug') === '1';
+    // The single export path's adjustment/encode workers; a batch export
+    // passes its own pool through `bridge` instead.
+    const defaultExportWorkers = { workerApplyAdjustments, workerApplyAdjustments16, workerEncodePng16, workerEncodeTiff, isWorkerAvailable };
     // 暗室 UI に一本化。古い workspace パラメーターで別画面へ分岐しない。
     let studioAutoFrameRunning = false;
     let studioWorkspace = null;
@@ -7902,10 +7907,13 @@ import { frameNeedsReview } from './reviewQueue.js';
       return 'low';
     }
 
-    async function detectFrameAndRotation(imageData) {
+    // `silent` runs without the blocking overlay (background roll analysis
+    // must not cover the editor); `analyzeInWorker` picks a worker other than
+    // the shared one so several frames can be detected at once.
+    async function detectFrameAndRotation(imageData, { silent = false, analyzeInWorker = analyzeFrameInWorker } = {}) {
       if (!imageData) return null;
       const overlay = getLoadingOverlay();
-      const ownsOverlay = !overlay.isVisible;
+      const ownsOverlay = !silent && !overlay.isVisible;
       if (ownsOverlay) {
         await overlay.show({ title: studioWorkspace.text('detectingFrame'), indeterminate: true });
         await new Promise(resolve => requestAnimationFrame(resolve));
@@ -7923,7 +7931,7 @@ import { frameNeedsReview } from './reviewQueue.js';
       };
       return await detectFrameWithFallback(imageData, options, {
         workerSupported: typeof Worker === 'function' && typeof OffscreenCanvas === 'function',
-        analyzeInWorker: analyzeFrameInWorker,
+        analyzeInWorker,
         ensureOpenCvReady,
         onWorkerError: err => console.warn('Auto-frame worker unavailable, using fallback:', err),
         analyzeOnMainThread: async (source, config) => {
@@ -9925,20 +9933,6 @@ import { frameNeedsReview } from './reviewQueue.js';
       return exportImageEncodersPromise;
     }
 
-    let jsZipCtorPromise = null;
-
-    async function getJSZipCtor() {
-      if (!jsZipCtorPromise) {
-        jsZipCtorPromise = import('jszip')
-          .then((mod) => (typeof mod.default === 'function' ? mod.default : mod))
-          .catch((err) => {
-            jsZipCtorPromise = null;
-            throw err;
-          });
-      }
-      return jsZipCtorPromise;
-    }
-
     const hdrGainInput = document.getElementById('exportHdrGainMap');
     if (hdrGainInput) {
       hdrGainInput.checked = safeStorageGet('nc_hdr_gain_map_v1') !== 'off';
@@ -10443,15 +10437,16 @@ import { frameNeedsReview } from './reviewQueue.js';
     // `bitDepth` 16 runs the stage on the engine's 16-bit plane (when the
     // image carries one) so the export gets real 16-bit samples; 8 keeps the
     // LUT stage the preview uses.
-    async function applyAdjustmentsWithSettings(imageData, settings, { bitDepth = 8 } = {}) {
+    async function applyAdjustmentsWithSettings(imageData, settings, { bitDepth = 8, bridge = null } = {}) {
       const adjustmentSettings = buildAdjustmentSettings(settings);
       const wants16 = bitDepth === 16 && Boolean(imageData.__image16 && imageData.__image16.data instanceof Uint16Array);
+      const exportWorkers = bridge || defaultExportWorkers;
 
       // Try Worker for large images (>1MP)
-      if (imageData.width * imageData.height > 1_000_000 && isWorkerAvailable()) {
+      if (imageData.width * imageData.height > 1_000_000 && exportWorkers.isWorkerAvailable()) {
         const result = wants16
-          ? await workerApplyAdjustments16(imageData, adjustmentSettings, 'full')
-          : await workerApplyAdjustments(imageData, adjustmentSettings, 'full');
+          ? await exportWorkers.workerApplyAdjustments16(imageData, adjustmentSettings, 'full')
+          : await exportWorkers.workerApplyAdjustments(imageData, adjustmentSettings, 'full');
         if (result) return result;
       }
 
@@ -10519,6 +10514,27 @@ import { frameNeedsReview } from './reviewQueue.js';
       return cropImageDataRegion(imageData, sanitized);
     }
 
+    // Step implementations for applyGeometryChainToImageData. crop(null,
+    // region, bounds) only sanitises the region against `bounds`.
+    const exportGeometrySteps = {
+      rotate: applyRotationToImageData,
+      mirror: mirrorImageDataHorizontal,
+      crop: (image, cropRegion, bounds = image) => {
+        const rect = sanitizeCropRegionForImage(cropRegion, bounds);
+        if (!image) return rect;
+        return rect ? cropImageDataRegion(image, rect) : image;
+      }
+    };
+
+    // The on-device repair model has a single session, so batch lanes take
+    // turns with it instead of running it concurrently.
+    let aiRepairTurn = Promise.resolve();
+    function withAiRepairTurn(task) {
+      const run = aiRepairTurn.then(task, task);
+      aiRepairTurn = run.then(() => undefined, () => undefined);
+      return run;
+    }
+
     async function loadFileToImageData(file) {
       const fileName = file.name.toLowerCase();
 
@@ -10533,9 +10549,10 @@ import { frameNeedsReview } from './reviewQueue.js';
       }
     }
 
-    async function imageDataToBlob(imageData, format = null, quality = null, bitDepth = null, onProgress = null, metadata = null) {
+    async function imageDataToBlob(imageData, format = null, quality = null, bitDepth = null, onProgress = null, metadata = null, { bridge = null } = {}) {
       const exportInfo = getExportInfo(format || state.exportFormat, bitDepth ?? state.exportBitDepth);
       const jpegQuality = quality !== null ? quality : state.jpegQuality;
+      const exportWorkers = bridge || defaultExportWorkers;
       const trace = createPerfTrace('imageDataToBlob', {
         format: exportInfo.format,
         bitDepth: exportInfo.bitDepth,
@@ -10545,8 +10562,8 @@ import { frameNeedsReview } from './reviewQueue.js';
 
       if (exportInfo.format === 'tiff') {
         // Try Worker first for TIFF encoding
-        if (isWorkerAvailable()) {
-          blob = await workerEncodeTiff(imageData, exportInfo.bitDepth, onProgress, metadata);
+        if (exportWorkers.isWorkerAvailable()) {
+          blob = await exportWorkers.workerEncodeTiff(imageData, exportInfo.bitDepth, onProgress, metadata);
           if (blob) {
             trace.end({ bytes: blob.size || 0, worker: true });
             return blob;
@@ -10559,8 +10576,8 @@ import { frameNeedsReview } from './reviewQueue.js';
       }
       if (exportInfo.format === 'png' && exportInfo.bitDepth === 16) {
         // Try Worker first for 16-bit PNG encoding
-        if (isWorkerAvailable()) {
-          blob = await workerEncodePng16(imageData, onProgress);
+        if (exportWorkers.isWorkerAvailable()) {
+          blob = await exportWorkers.workerEncodePng16(imageData, onProgress);
           if (blob) {
             trace.end({ bytes: blob.size || 0, worker: true });
             return attachMetadataToBlob(blob, 'png', metadata);
@@ -10735,21 +10752,14 @@ import { frameNeedsReview } from './reviewQueue.js';
         fallbackSettings: { ...state, cropRegion: null, autoFrameMeta: null, rotationAngle: 0, mirrored: false }
       });
 
-      // Apply crop if set
-      let workingData = imageData;
-      const rotationAngle = Number.isFinite(settings.rotationAngle) ? settings.rotationAngle : 0;
-      if (Math.abs(rotationAngle) > 0.001) {
-        workingData = applyRotationToImageData(workingData, rotationAngle);
-      }
-      if (settings.mirrored) {
-        workingData = mirrorImageDataHorizontal(workingData);
-      }
-      if (settings.cropRegion) {
-        const cropRegion = sanitizeCropRegionForImage(settings.cropRegion, workingData);
-        if (cropRegion) {
-          workingData = cropImageData(workingData, cropRegion);
-        }
-      }
+      // Geometry chain (base -> rotation -> mirror -> crop). One pass that
+      // only resamples the cropped window: rotating a whole 24 MP scan to keep
+      // a 5 MP frame of it was the largest main-thread block per file.
+      let workingData = applyGeometryChainToImageData(imageData, {
+        rotationAngle: Number.isFinite(settings.rotationAngle) ? settings.rotationAngle : 0,
+        mirrored: Boolean(settings.mirrored),
+        cropRegion: settings.cropRegion || null
+      }, exportGeometrySteps);
       workingData = await applyLensCorrectionWithSettings(workingData, settings, { updateUi: false });
       trace.mark('transform', {
         pixels: getImageDataPixelCount(workingData)
@@ -10771,7 +10781,9 @@ import { frameNeedsReview } from './reviewQueue.js';
       // engine whenever the dimensions match and rebuilds the LUTs from the
       // PREVIOUS frame's black/white points, so a thin negative in a roll of
       // same-size scans is levelled against its neighbour.
-      let processed = await convertFrameOffMainThread({
+      // A batch export brings its own pooled workers (options.convert).
+      const convert = typeof options.convert === 'function' ? options.convert : convertFrameOffMainThread;
+      let processed = await convert({
         imageData: workingData,
         settings: buildRouterSettings(settings, imageData),
         options: { preview: false, forceFullProcess: true, analysisImageData: getColorAnalysisSample(settings, imageData) }
@@ -10789,13 +10801,17 @@ import { frameNeedsReview } from './reviewQueue.js';
           ? dustRemoval.maxParticleSize
           : state.dustRemoval.maxParticleSize;
         const { mask } = detectDust(processed, { strength, maxParticleSize });
-        processed = await inpaintForCommit(processed, mask);
+        const dustSource = processed;
+        processed = await withAiRepairTurn(() => inpaintForCommit(dustSource, mask));
         trace.mark('dustRemoval', {
           pixels: getImageDataPixelCount(processed)
         });
       }
 
-      processed = await inpaintManualBrush(processed, settings, imageData, workingData.__lensMapping);
+      if (settings.repairStrokes?.length) {
+        const brushSource = processed;
+        processed = await withAiRepairTurn(() => inpaintManualBrush(brushSource, settings, imageData, workingData.__lensMapping));
+      }
 
       // Never-viewed batch files carry default settings — give them the same
       // automatic gray point a viewed file would get, baked into the settings
@@ -10836,9 +10852,9 @@ import { frameNeedsReview } from './reviewQueue.js';
       }
 
       // Apply adjustments (at 16 bits when the export asks for it)
-      const adjusted = await applyAdjustmentsWithSettings(processed, settings, { bitDepth: options.bitDepth === 16 ? 16 : 8 });
+      const adjusted = await applyAdjustmentsWithSettings(processed, settings, { bitDepth: options.bitDepth === 16 ? 16 : 8, bridge: options.bridge });
       if (state.exportFormat === 'jpeg' && safeStorageGet('nc_hdr_gain_map_v1') !== 'off' && processed.__image16) {
-        const high = await applyAdjustmentsWithSettings(processed, settings, { bitDepth: 16 });
+        const high = await applyAdjustmentsWithSettings(processed, settings, { bitDepth: 16, bridge: options.bridge });
         if (high?.__image16) adjusted.__image16 = high.__image16;
       }
       trace.mark('adjustments', {
@@ -10870,103 +10886,154 @@ import { frameNeedsReview } from './reviewQueue.js';
       );
     }
 
-    async function exportBatchAsZipDesktop(selectedFiles, zipFileName) {
-      const JSZipCtor = await getJSZipCtor();
-      if (typeof JSZipCtor !== 'function') {
-        throw new Error('JSZip module is unavailable');
-      }
+    // ===========================================
+    // Batch export: one pipelined driver, three sinks
+    // ===========================================
+    // Every selected file runs decode -> geometry -> convert -> adjust ->
+    // encode. The scheduler keeps several files in flight so their stages
+    // interleave across the main thread, the RAW decoders and the worker
+    // pools, and hands the encoded results to the sink in the original order
+    // (ZIP entries, folder writes and downloads keep the roll's sequence).
 
-      let desktopZipTargetPath = null;
-      if (isTauriDesktop()) {
-        // Pick the destination before the long-running batch starts so macOS can
-        // surface the save panel immediately instead of after processing finishes.
-        desktopZipTargetPath = await pickDesktopSavePath(zipFileName);
-        if (!desktopZipTargetPath) {
-          handleSaveResult({ saved: false, path: null }, {
-            cancelledKey: 'zipSaveCancelled',
-            cancelledFallback: 'ZIP save cancelled. No file was written.'
-          });
-          return;
-        }
-      }
+    // The files are not decoded yet when the lane count is chosen, so the
+    // frame size comes from the file size: a 24 MP RAW is ~25 MB, a 24 MP
+    // JPEG ~10 MB, a 16-bit TIFF ~150 MB.
+    function estimateFilePixels(file) {
+      const bytes = Number(file?.size) || 0;
+      const name = String(file?.name || '').toLowerCase();
+      let bytesPerPixel = 0.4;
+      if (/\.(tif|tiff)$/.test(name)) bytesPerPixel = 4;
+      else if (/\.png$/.test(name)) bytesPerPixel = 2.5;
+      else if (isRawLikeFileName(name)) bytesPerPixel = 1.4;
+      return Math.max(2_000_000, Math.min(150_000_000, Math.round(bytes / bytesPerPixel)));
+    }
 
-      const zip = new JSZipCtor();
-      // DSC_0001.NEF and DSC_0001.JPG both export as DSC_0001_converted.png,
-      // and JSZip would keep only the last one written under that name.
-      const claimZipName = createZipNameDeduper();
-      const exportInfo = getExportInfo();
-      let processedCount = 0;
-      const lang = i18n[currentLang];
-      const overlay = getLoadingOverlay();
-      const total = selectedFiles.length;
+    // Lanes for a batch of files. `nc_batch_lanes_v1` in localStorage pins the
+    // count (1-4) for support and benchmarking; otherwise it follows the
+    // device's cores and memory and the size of the largest file.
+    function planBatchLanes(files) {
+      const pinned = Number.parseInt(safeStorageGet('nc_batch_lanes_v1') || '', 10);
+      if (Number.isInteger(pinned) && pinned >= 1 && pinned <= 4) return Math.min(pinned, Math.max(1, files.length));
+      const pixelsPerFile = files.reduce((max, file) => Math.max(max, estimateFilePixels(file)), 0);
+      return planBatchParallelism({
+        hardwareConcurrency: navigator.hardwareConcurrency,
+        deviceMemory: navigator.deviceMemory,
+        pixelsPerFile,
+        fileCount: files.length
+      });
+    }
 
-      await overlay.show({ title: lang.loadingExporting });
+    function planBatchExportLanes(jobs) {
+      return planBatchLanes(jobs.map(job => job.file));
+    }
 
-      try {
-        for (const { item, index } of selectedFiles) {
-          item.status = 'processing';
-          updateFileListUI();
-          processedCount++;
-          const fileProgress = ((processedCount - 1) / total) * 90;
-          const fileSlice = 90 / total;
-          overlay.updateProgress(fileProgress, lang.loadingBatchFile.replace('{current}', processedCount).replace('{total}', total));
-
+    // Workers one batch shares and releases when it ends: `lanes` conversion
+    // workers kept alive across frames (no per-file restart) and, with more
+    // than one lane, as many export workers for the adjustment/encode stages.
+    function createBatchExportWorkers(lanes) {
+      const pool = !conversionWorkerBroken && usesSilverCoreConversion(state)
+        ? createConversionWorkerPool({ size: lanes })
+        : null;
+      const bridge = lanes > 1 ? createExportWorkerPool({ size: lanes }) : null;
+      return {
+        convert: pool ? async (request) => {
           try {
-            const settingsForFile = getSettingsForExport(index, item);
-            let blob;
-            if (exportInfo.format === 'dng') {
-              const { source, settings: usedSettings } = await processFileWithSettings(item.file, settingsForFile, { stage: 'source' });
-              blob = renderLinearDngBlob(source, usedSettings, processedCount - 1);
-            } else {
-              const adjusted = await processFileWithSettings(item.file, settingsForFile, { bitDepth: exportInfo.bitDepth });
-              const outputImageData = await applySprocketFrameForExport(adjusted, exportInfo, settingsForFile, processedCount - 1);
-              overlay.updateProgress(fileProgress + fileSlice * 0.6, lang.loadingEncoding);
-              blob = await imageDataToBlob(
-                outputImageData,
-                exportInfo.format,
-                state.jpegQuality,
-                exportInfo.bitDepth,
-                null,
-                exportMetadataFor(settingsForFile, processedCount - 1)
-              );
-            }
-
-            const name = claimZipName(buildActiveExportFileName(item.file.name, exportInfo, settingsForFile));
-            zip.file(name, blob);
-            item.status = 'done';
+            return await pool(request);
           } catch (err) {
-            console.error(`Error processing ${item.file.name}:`, err);
-            item.status = 'error';
-            item.error = err.message;
+            // Same policy as convertFrameOffMainThread: the frame still exports.
+            console.warn('Batch conversion worker failed, converting on the main thread:', err?.message || err);
+            return convertFrameWithRouter(request);
           }
-
-          overlay.updateProgress(fileProgress + fileSlice, lang.loadingBatchFile.replace('{current}', processedCount).replace('{total}', total));
-          updateFileListUI();
-          await new Promise(r => setTimeout(r, 10));
+        } : null,
+        bridge,
+        dispose() {
+          if (pool) pool.dispose();
+          if (bridge) bridge.dispose();
         }
+      };
+    }
 
-        overlay.updateProgress(92, lang.loadingBatchZip);
-        const zipBlob = await zip.generateAsync({
-          type: 'blob',
-          compression: 'DEFLATE',
-          compressionOptions: { level: 6 }
-        });
+    // One frame: the per-file pipeline plus the sprocket border and encoder.
+    async function renderBatchExportFile(job, position, { exportInfo, workers, dustRemoval }) {
+      const { file, settings } = job;
+      if (exportInfo.format === 'dng') {
+        const { source, settings: usedSettings } = await processFileWithSettings(file, settings, { stage: 'source', convert: workers.convert });
+        return renderLinearDngBlob(source, usedSettings, position);
+      }
+      const adjusted = await processFileWithSettings(file, settings, {
+        bitDepth: exportInfo.bitDepth,
+        dustRemoval,
+        convert: workers.convert,
+        bridge: workers.bridge
+      });
+      const outputImageData = await applySprocketFrameForExport(adjusted, exportInfo, settings, position);
+      return imageDataToBlob(
+        outputImageData,
+        exportInfo.format,
+        state.jpegQuality,
+        exportInfo.bitDepth,
+        null,
+        exportMetadataFor(settings, position),
+        { bridge: workers.bridge }
+      );
+    }
 
-        const result = desktopZipTargetPath
-          ? await writeBlobToDesktopPath(zipBlob, desktopZipTargetPath, 'application/zip')
-          : await saveBlob(zipBlob, zipFileName, 'application/zip');
-        if (result?.saved) for (const { item } of selectedFiles) if (item.status === 'done') void learnFromExport(item);
-        handleSaveResult(result, {
-          cancelledKey: 'zipSaveCancelled',
-          cancelledFallback: 'ZIP save cancelled. No file was written.',
-          savedPathKey: 'zipSavedTo',
-          savedPathFallback: 'ZIP saved to:\n{path}',
-          browserSuccessKey: 'zipDownloadStarted',
-          browserSuccessFallback: 'ZIP download started. Check your Downloads folder.'
+    // Runs `jobs` through the pipeline, keeps the file-list statuses current
+    // and releases the workers afterwards. `sink` writes one encoded frame and
+    // throws to fail that frame; `signal` stops further frames from starting.
+    async function runBatchExport(jobs, { exportInfo, sink, onProgress = null, signal = null, dustRemoval = null }) {
+      const lanes = planBatchExportLanes(jobs);
+      const workers = createBatchExportWorkers(lanes);
+      const trace = createPerfTrace('batchExport', { files: jobs.length, lanes });
+      try {
+        return await runBatchPipeline(jobs, {
+          maxParallel: lanes,
+          signal,
+          process: (job, index) => renderBatchExportFile(job, index, { exportInfo, workers, dustRemoval }),
+          sink,
+          onEvent: (event) => {
+            const { item } = event.job;
+            if (event.type === 'start') {
+              item.status = 'processing';
+              item.error = null;
+            } else if (event.type === 'done') {
+              item.status = 'done';
+              item.error = null;
+            } else if (event.type === 'error') {
+              console.error(`Error processing ${item.file.name}:`, event.error);
+              item.status = 'error';
+              item.error = event.error && event.error.message ? event.error.message : String(event.error || 'Unknown error');
+            }
+            updateFileListUI();
+            if (onProgress) onProgress(event);
+          }
         });
       } finally {
-        overlay.hide();
+        workers.dispose();
+        trace.end();
       }
+    }
+
+    function batchProgressLabel(done, total) {
+      return i18n[currentLang].loadingBatchFile
+        .replace('{current}', Math.min(total, done + 1))
+        .replace('{total}', total);
+    }
+
+    function showBatchExportOverlay(onCancel) {
+      return getLoadingOverlay().show({
+        title: i18n[currentLang].loadingExporting,
+        cancelable: true,
+        cancelText: getLocalizedText('loadingCancel', 'Cancel'),
+        onCancel
+      });
+    }
+
+    function notifyBatchCancelled() {
+      showToast(
+        getLocalizedText('batchDownloadCancelled', 'Batch export cancelled. Files already saved were kept.'),
+        3500
+      );
     }
 
     async function exportBatchAsZipBrowser(selectedFiles, zipFileName) {
@@ -11012,106 +11079,40 @@ import { frameNeedsReview } from './reviewQueue.js';
       }
 
       const exportInfo = getExportInfo();
+      const jobs = createBatchExportJobs(selectedFiles, exportInfo);
+      const total = jobs.length;
       const lang = i18n[currentLang];
       const overlay = getLoadingOverlay();
-      const total = selectedFiles.length;
-      let successCount = 0;
-      let failCount = 0;
+      const cancel = new AbortController();
       let zipWriter = null;
 
-      await overlay.show({ title: lang.loadingExporting });
+      resetBatchExportStatuses(jobs);
+      await showBatchExportOverlay(() => cancel.abort());
 
       try {
         zipWriter = new ZipStoreWriter(streamTarget.writable);
-
-        for (let i = 0; i < selectedFiles.length; i++) {
-          const { item, index } = selectedFiles[i];
-          const fileProgress = (i / total) * 95;
-          const fileSlice = 95 / total;
-          let adjusted = null;
-          let blob = null;
-          let name = '';
-
-          item.status = 'processing';
-          item.error = null;
-          updateFileListUI();
-          overlay.updateProgress(
-            fileProgress,
-            lang.loadingBatchFile.replace('{current}', i + 1).replace('{total}', total)
-          );
-
-          try {
-            const settingsForFile = getSettingsForExport(index, item);
-            if (exportInfo.format === 'dng') {
-              const { source, settings: usedSettings } = await processFileWithSettings(item.file, settingsForFile, { stage: 'source' });
-              blob = renderLinearDngBlob(source, usedSettings, i);
-              adjusted = null;
-              name = buildActiveExportFileName(item.file.name, exportInfo, settingsForFile);
-            } else {
-            adjusted = await processFileWithSettings(item.file, settingsForFile, { bitDepth: exportInfo.bitDepth });
-            const outputImageData = await applySprocketFrameForExport(adjusted, exportInfo, settingsForFile, i);
-            overlay.updateProgress(fileProgress + fileSlice * 0.55, lang.loadingEncoding);
-            blob = await imageDataToBlob(
-              outputImageData,
-              exportInfo.format,
-              state.jpegQuality,
-              exportInfo.bitDepth,
-              (pct) => {
-                overlay.updateProgress(
-                  fileProgress + fileSlice * (0.55 + pct * 0.25),
-                  lang.loadingEncoding
-                );
-              },
-              exportMetadataFor(settingsForFile, i)
-            );
-            name = buildActiveExportFileName(item.file.name, exportInfo, settingsForFile);
-            }
-          } catch (err) {
-            console.error(`Error processing ${item.file.name}:`, err);
-            item.status = 'error';
-            item.error = err && err.message ? err.message : String(err || 'Unknown error');
-            failCount++;
-            updateFileListUI();
-            overlay.updateProgress(
-              fileProgress + fileSlice,
-              lang.loadingBatchFile.replace('{current}', i + 1).replace('{total}', total)
-            );
-            adjusted = null;
-            blob = null;
-            await waitForNextFrame();
-            continue;
-          }
-
-          try {
-            overlay.updateProgress(fileProgress + fileSlice * 0.86, lang.loadingBatchZip);
-            await zipWriter.addBlob(name, blob);
-            item.status = 'done';
-            item.error = null;
-            successCount++;
-          } finally {
-            adjusted = null;
-            blob = null;
-          }
-
-          updateFileListUI();
-          overlay.updateProgress(
-            fileProgress + fileSlice,
-            lang.loadingBatchFile.replace('{current}', i + 1).replace('{total}', total)
-          );
-          await waitForNextFrame();
-        }
+        const result = await runBatchExport(jobs, {
+          exportInfo,
+          signal: cancel.signal,
+          sink: (job, blob) => zipWriter.addBlob(job.outputName, blob),
+          onProgress: (event) => overlay.updateProgress((event.done / total) * 95, batchProgressLabel(event.done, total))
+        });
 
         overlay.updateProgress(98, lang.loadingBatchZip);
         await zipWriter.close();
-        for (const { item } of selectedFiles) if (item.status === 'done') void learnFromExport(item);
         zipWriter = null;
+        for (const { item } of jobs) if (item.status === 'done') void learnFromExport(item);
         overlay.updateProgress(100, lang.loadingComplete);
-        showBrowserZipStreamSummary({
-          zipFileName: streamTarget.fileName || zipFileName,
-          successCount,
-          failCount,
-          total
-        });
+        if (result.cancelled) {
+          notifyBatchCancelled();
+        } else {
+          showBrowserZipStreamSummary({
+            zipFileName: streamTarget.fileName || zipFileName,
+            successCount: result.successCount,
+            failCount: result.failCount,
+            total
+          });
+        }
       } catch (err) {
         if (zipWriter) {
           try {
@@ -11130,14 +11131,7 @@ import { frameNeedsReview } from './reviewQueue.js';
       notifyReviewExport();
       const selectedFiles = getSelectedFiles();
       if (selectedFiles.length < 1) return;
-
-      const zipFileName = 'converted_negatives.zip';
-      if (isTauriDesktop()) {
-        await exportBatchAsZipDesktop(selectedFiles, zipFileName);
-        return;
-      }
-
-      await exportBatchAsZipBrowser(selectedFiles, zipFileName);
+      await exportBatchAsZipBrowser(selectedFiles, 'converted_negatives.zip');
     }
 
     function createBatchExportJobs(selectedFiles, exportInfo) {
@@ -11187,6 +11181,13 @@ import { frameNeedsReview } from './reviewQueue.js';
       );
     }
 
+    // The desktop batch shows no overlay (the editor stays usable), so its
+    // cancel button lives in the header progress strip.
+    let desktopBatchCancelController = null;
+    document.getElementById('headerExportProgressCancel')?.addEventListener('click', () => {
+      if (desktopBatchCancelController) desktopBatchCancelController.abort();
+    });
+
     async function exportBatchIndividuallyDesktop() {
       const selectedFiles = getSelectedFiles();
       if (selectedFiles.length < 1) return;
@@ -11206,13 +11207,14 @@ import { frameNeedsReview } from './reviewQueue.js';
       const exportInfo = getExportInfo();
       const jobs = createBatchExportJobs(selectedFiles, exportInfo);
       const total = jobs.length;
-      const jpegQuality = state.jpegQuality;
+      // Snapshot: toggling dust removal mid-batch must not change later frames.
       const dustRemoval = {
         enabled: Boolean(state.dustRemoval.enabled),
-        strength: state.dustRemoval.strength
+        strength: state.dustRemoval.strength,
+        maxParticleSize: state.dustRemoval.maxParticleSize
       };
-      let successCount = 0;
-      let failCount = 0;
+      const cancel = new AbortController();
+      desktopBatchCancelController = cancel;
 
       resetBatchExportStatuses(jobs);
       setDesktopBatchExportState({
@@ -11225,181 +11227,70 @@ import { frameNeedsReview } from './reviewQueue.js';
       });
       await waitForNextFrame();
 
+      let result;
       try {
-        for (let i = 0; i < jobs.length; i++) {
-          const { item, file, outputName, settings } = jobs[i];
-          const fileBaseProgress = (i / total) * 100;
-          const fileSlice = 100 / total;
-
-          item.status = 'processing';
-          item.error = null;
-          updateFileListUI();
-          setDesktopBatchExportState({
+        result = await runBatchExport(jobs, {
+          exportInfo,
+          dustRemoval,
+          signal: cancel.signal,
+          sink: async (job, blob) => {
+            await writeBlobToDesktopDirectory(blob, targetDirectory, job.outputName, exportInfo.mimeType);
+            void learnFromExport(job.item);
+          },
+          onProgress: (event) => setDesktopBatchExportState({
             active: true,
-            current: i + 1,
+            current: Math.min(total, event.done + 1),
             total,
-            percent: fileBaseProgress + fileSlice * 0.05,
-            fileName: file.name,
+            percent: (event.done / total) * 100,
+            fileName: event.type === 'start' ? event.job.file.name : desktopBatchExportState.fileName,
             targetDirectory
-          });
-          await waitForNextFrame();
-
-          try {
-            const adjusted = await processFileWithSettings(file, settings, { dustRemoval });
-            const outputImageData = await applySprocketFrameForExport(adjusted, exportInfo);
-            setDesktopBatchExportState({
-              active: true,
-              current: i + 1,
-              total,
-              percent: fileBaseProgress + fileSlice * 0.62,
-              fileName: file.name,
-              targetDirectory
-            });
-
-            const blob = await imageDataToBlob(
-              outputImageData,
-              exportInfo.format,
-              jpegQuality,
-              exportInfo.bitDepth,
-              (pct) => {
-                setDesktopBatchExportState({
-                  active: true,
-                  current: i + 1,
-                  total,
-                  percent: fileBaseProgress + fileSlice * (0.62 + pct * 0.3),
-                  fileName: file.name,
-                  targetDirectory
-                });
-              }
-            );
-
-            await writeBlobToDesktopDirectory(blob, targetDirectory, outputName, exportInfo.mimeType);
-            item.status = 'done';
-            void learnFromExport(item);
-            item.error = null;
-            successCount++;
-          } catch (err) {
-            console.error(`Error processing ${file.name}:`, err);
-            item.status = 'error';
-            item.error = err && err.message ? err.message : String(err || 'Unknown error');
-            failCount++;
-          }
-
-          updateFileListUI();
-          setDesktopBatchExportState({
-            active: true,
-            current: i + 1,
-            total,
-            percent: fileBaseProgress + fileSlice,
-            fileName: file.name,
-            targetDirectory
-          });
-          await waitForNextFrame();
-        }
+          })
+        });
       } finally {
+        desktopBatchCancelController = null;
         resetDesktopBatchExportState();
       }
 
-      showDesktopBatchExportSummary({ successCount, failCount, total, targetDirectory });
+      if (result.cancelled) notifyBatchCancelled();
+      showDesktopBatchExportSummary({ successCount: result.successCount, failCount: result.failCount, total, targetDirectory });
     }
 
-    // Streaming individual download: process → download → free → next
+    // Browser: each frame becomes its own download as soon as it is written.
     async function exportBatchIndividuallyBrowser() {
       const selectedFiles = getSelectedFiles();
       if (selectedFiles.length < 1) return;
 
       const exportInfo = getExportInfo();
-      let cancelledByUser = false;
-      const lang = i18n[currentLang];
+      const jobs = createBatchExportJobs(selectedFiles, exportInfo);
+      const total = jobs.length;
       const overlay = getLoadingOverlay();
-      const total = selectedFiles.length;
+      const cancel = new AbortController();
 
-      await overlay.show({ title: lang.loadingExporting });
+      resetBatchExportStatuses(jobs);
+      await showBatchExportOverlay(() => cancel.abort());
 
+      let result;
       try {
-        for (let i = 0; i < selectedFiles.length; i++) {
-          const { item, index } = selectedFiles[i];
-          const fileProgress = (i / total) * 100;
-          const fileSlice = 100 / total;
-          let adjusted = null;
-          let blob = null;
-          let name = '';
-
-          item.status = 'processing';
-          item.error = null;
-          updateFileListUI();
-          overlay.updateProgress(fileProgress, lang.loadingBatchFile.replace('{current}', i + 1).replace('{total}', total));
-
-          try {
-            const settingsForFile = getSettingsForExport(index, item);
-            if (exportInfo.format === 'dng') {
-              const { source, settings: usedSettings } = await processFileWithSettings(item.file, settingsForFile, { stage: 'source' });
-              blob = renderLinearDngBlob(source, usedSettings, i);
-              adjusted = null;
-              name = buildActiveExportFileName(item.file.name, exportInfo, settingsForFile);
-            } else {
-            adjusted = await processFileWithSettings(item.file, settingsForFile, { bitDepth: exportInfo.bitDepth });
-            const outputImageData = await applySprocketFrameForExport(adjusted, exportInfo, settingsForFile, i);
-            overlay.updateProgress(fileProgress + fileSlice * 0.6, lang.loadingEncoding);
-            blob = await imageDataToBlob(
-              outputImageData,
-              exportInfo.format,
-              state.jpegQuality,
-              exportInfo.bitDepth,
-              (pct) => {
-                overlay.updateProgress(
-                  fileProgress + fileSlice * (0.6 + pct * 0.3),
-                  lang.loadingEncoding
-                );
-              },
-              exportMetadataFor(settingsForFile, i)
-            );
-
-            name = buildActiveExportFileName(item.file.name, exportInfo, settingsForFile);
+        result = await runBatchExport(jobs, {
+          exportInfo,
+          signal: cancel.signal,
+          sink: async (job, blob) => {
+            const saved = await saveBlob(blob, job.outputName, exportInfo.mimeType);
+            if (!saved.saved) {
+              cancel.abort();
+              throw new Error('Save cancelled');
             }
-            overlay.hide(); // Hide overlay before save dialog
-            const result = await saveBlob(blob, name, exportInfo.mimeType);
-            if (!result.saved) {
-              cancelledByUser = true;
-              item.status = 'pending';
-              item.error = null;
-              updateFileListUI();
-              break;
-            }
-            // Re-show overlay for next file
-            if (i + 1 < total) {
-              await overlay.show({ title: lang.loadingExporting });
-            }
-
-            item.status = 'done';
-            void learnFromExport(item);
-            item.error = null;
-          } catch (err) {
-            console.error(`Error processing ${item.file.name}:`, err);
-            item.status = 'error';
-            item.error = err && err.message ? err.message : String(err || 'Unknown error');
-          } finally {
-            adjusted = null;
-            blob = null;
-            name = '';
-          }
-
-          updateFileListUI();
-          overlay.updateProgress(fileProgress + fileSlice, lang.loadingBatchFile.replace('{current}', i + 1).replace('{total}', total));
-          await waitForNextFrame();
-        }
-        if (cancelledByUser) {
-          console.info('Batch individual export cancelled by user.');
-          showToast(
-            getLocalizedText(
-              'batchDownloadCancelled',
-              'Batch export cancelled. Files already saved were kept.'
-            ),
-            3500
-          );
-        }
+            void learnFromExport(job.item);
+          },
+          onProgress: (event) => overlay.updateProgress((event.done / total) * 100, batchProgressLabel(event.done, total))
+        });
       } finally {
         overlay.hide();
+      }
+
+      if (result.cancelled) {
+        console.info('Batch individual export cancelled by user.');
+        notifyBatchCancelled();
       }
     }
 
@@ -12352,6 +12243,10 @@ import { frameNeedsReview } from './reviewQueue.js';
       }
       document.body.dataset.studioBusy = 'true';
       studioWorkspace?.sync();
+      const trace = createPerfTrace('prepareStudioPhoto', {
+        file: item?.file?.name || '',
+        pixels: getImageDataPixelCount(state.loadedBaseImageData || state.originalImageData)
+      });
       try {
         const source = state.loadedBaseImageData || state.originalImageData;
         const freshFile = !item?.settings;
@@ -12362,6 +12257,7 @@ import { frameNeedsReview } from './reviewQueue.js';
           settings = await analyzeStudioImportFrame(source, settings, { allowCrop: freshFile });
           if (!isCurrentLoad(generation)) return;
           changed = true;
+          trace.mark('autoFrame', { applied: settings.autoFrameMeta?.appliedMode || 'none' });
         }
         if (!settings.filmEdge?.checked) {
           // Read the rebate once per file: perforations, DX edge barcode, film base.
@@ -12372,6 +12268,7 @@ import { frameNeedsReview } from './reviewQueue.js';
             filmEdgeToast = edge.toast;
             changed = true;
           }
+          trace.mark('filmEdge', { found: Boolean(settings.filmEdge?.found) });
         }
         if (freshFile) { settings = await learnedImportSettings(settings, item); changed = true; }
         if (changed) restoreSettings(settings);
@@ -12381,9 +12278,12 @@ import { frameNeedsReview } from './reviewQueue.js';
         }
         if (settings.filmEdge?.found) updateFileListUI();
         goToStep(2);
+        trace.mark('settings');
         await processNegative();
+        trace.mark('processNegative');
         if (freshFile) { scheduleSemanticColour(item, generation); notifyImportReview([item]); }
       } finally {
+        trace.end();
         if (isCurrentLoad(generation)) {
           delete document.body.dataset.studioBusy;
           updateAutoFrameButtons();
@@ -12427,10 +12327,10 @@ import { frameNeedsReview } from './reviewQueue.js';
       }, 0);
     }
 
-    async function analyzeStudioImportFrame(source, settings, { allowCrop = true } = {}) {
+    async function analyzeStudioImportFrame(source, settings, { allowCrop = true, silent = false, analyzeInWorker = analyzeFrameInWorker } = {}) {
       if (!state.autoFrame.enabled || settings.cropRegion) return settings;
       let result;
-      try { result = await detectFrameAndRotation(source); }
+      try { result = await detectFrameAndRotation(source, { silent, analyzeInWorker }); }
       catch (error) { console.warn('Import frame detection failed; keeping the full image:', error); }
       const reliable = canAutoApplyImportFrame(result, state.autoFrame);
       const apply = reliable && state.autoFrame.onImport && allowCrop;
@@ -12455,10 +12355,10 @@ import { frameNeedsReview } from './reviewQueue.js';
     // ===========================================
     // Film edge: perforation lanes, DX edge barcode, rebate film base
     // ===========================================
-    async function readFilmEdgeForImage(imageData) {
+    async function readFilmEdgeForImage(imageData, readInWorker = readFilmEdgeInWorker) {
       if (!imageData) return null;
       if (typeof Worker === 'function') {
-        try { return await readFilmEdgeInWorker(imageData, {}); }
+        try { return await readInWorker(imageData, {}); }
         catch (error) { console.warn('Film edge worker unavailable, reading on the main thread:', error); }
       }
       return readFilmEdge(imageData, {});
@@ -12488,11 +12388,11 @@ import { frameNeedsReview } from './reviewQueue.js';
     // base are only offered, through the Film edge buttons: applying both on
     // import cost 0.7 stop and cooled the render on a real Ultra Max strip
     // against the border auto-detect with no preset.
-    async function analyzeImportFilmEdge(source, settings, { applyDefaults = true } = {}) {
+    async function analyzeImportFilmEdge(source, settings, { applyDefaults = true, readFilmEdge = readFilmEdgeInWorker } = {}) {
       if (!source || settings.filmEdge?.checked) return null;
       applyDefaults = applyDefaults && settings.filmTypeSource !== 'manual';
       let result = null;
-      try { result = await readFilmEdgeForImage(source); }
+      try { result = await readFilmEdgeForImage(source, readFilmEdge); }
       catch (error) { console.warn('Film edge detection failed:', error); return null; }
       if (result?.text && !result.dx) {
         const text = result.text;
@@ -15296,25 +15196,43 @@ import { frameNeedsReview } from './reviewQueue.js';
           if (pending.includes(current) && current.settings && canReuseLoadedRollSource(current)) {
             samples.put(current, buildRollAnalysisSample(state.loadedBaseImageData || state.originalImageData, current.settings));
           }
-          for (const item of pending) {
-            if (!valid()) return;
-            if (item.settings || item.userEdited) continue;
-            try {
-              const image = await loadFileToImageData(item.file);
-              if (!valid()) return;
-              let settings = await analyzeStudioImportFrame(image, createDefaultSettings(image, item));
-              if (!valid()) return;
-              const edge = await analyzeImportFilmEdge(image, settings, { applyDefaults: state.importFilmTypeAuto });
-              if (edge) settings = edge.settings;
-              settings = await learnedImportSettings(settings, item);
-              if (!valid() || item.settings || item.userEdited) return;
-              item.settings = settings; item.automaticSettings = true;
-              samples.put(item, buildRollAnalysisSample(image, settings));
-            } catch (error) {
-              if (!valid()) return;
-              item.status = 'error'; item.error = error.message;
-            }
-            await new Promise(resolve => setTimeout(resolve, 30));
+          // Frames are decoded and measured a few at a time (same lane planning
+          // as the batch export), each lane with its own frame analyzer, and
+          // never behind the blocking overlay: the editor stays usable.
+          const toAnalyze = pending.filter(item => !item.settings && !item.userEdited);
+          const lanes = planBatchLanes(toAnalyze.map(item => item.file));
+          const analyzers = createAutoFrameWorkerPool({ size: lanes });
+          const stop = new AbortController();
+          const trace = createPerfTrace('automaticRollImport', { files: toAnalyze.length, lanes });
+          try {
+            await runBatchPipeline(toAnalyze, {
+              maxParallel: lanes,
+              signal: stop.signal,
+              process: async (item) => {
+                if (!valid()) { stop.abort(); return null; }
+                if (item.settings || item.userEdited) return null;
+                const image = await loadFileToImageData(item.file);
+                if (!valid()) { stop.abort(); return null; }
+                let settings = await analyzeStudioImportFrame(image, createDefaultSettings(image, item), { silent: true, analyzeInWorker: analyzers.analyze });
+                if (!valid()) { stop.abort(); return null; }
+                const edge = await analyzeImportFilmEdge(image, settings, { applyDefaults: state.importFilmTypeAuto, readFilmEdge: analyzers.readFilmEdge });
+                if (edge) settings = edge.settings;
+                settings = await learnedImportSettings(settings, item);
+                return { settings, sample: buildRollAnalysisSample(image, settings) };
+              },
+              sink: async (item, payload) => {
+                if (!payload || !valid() || item.settings || item.userEdited) return;
+                item.settings = payload.settings; item.automaticSettings = true;
+                samples.put(item, payload.sample);
+              },
+              onEvent: (event) => {
+                if (event.type !== 'error' || !valid()) return;
+                event.job.status = 'error'; event.job.error = event.error?.message || String(event.error);
+              }
+            });
+          } finally {
+            analyzers.dispose();
+            trace.end();
           }
           if (!valid()) return;
           for (const group of groupAutomaticRollFrames(pending, { referenceLocked: state.rollReference.applyLock })) {

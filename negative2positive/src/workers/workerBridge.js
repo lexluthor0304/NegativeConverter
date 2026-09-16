@@ -6,14 +6,16 @@
  * AbortSignal. A Worker that stalls without throwing (a lost message, a renderer
  * OOM-kill that fires no `error` event, a runaway loop) would otherwise leave
  * the export overlay spinning forever.
+ *
+ * `createExportWorkerBridge()` builds an independent bridge with its own
+ * Worker; the module-level functions are the default bridge that the single
+ * export path uses. A batch export runs several bridges side by side
+ * (`createExportWorkerPool`) so the adjustment and encode stages of different
+ * frames do not queue behind each other.
  */
 
 import { selectExportSamples } from './imageEncoders.js';
 import { computeAdjustmentParams, isIdentityAdjustmentParams } from './pixelAdjustments.js';
-
-let worker = null;
-let requestId = 0;
-const pending = new Map();
 
 /** Base allowance for a request, plus a per-megapixel allowance on top. */
 export const WORKER_TIMEOUT_BASE_MS = 30_000;
@@ -40,167 +42,6 @@ export function isAbortError(err) {
 
 export function isWorkerTimeoutError(err) {
   return Boolean(err) && err.name === 'WorkerTimeoutError';
-}
-
-function settleEntry(id, entry) {
-  pending.delete(id);
-  if (entry.timer !== null) {
-    clearTimeout(entry.timer);
-    entry.timer = null;
-  }
-  if (entry.detachAbort) {
-    entry.detachAbort();
-    entry.detachAbort = null;
-  }
-}
-
-function rejectAllPending(error) {
-  for (const [id, entry] of Array.from(pending)) {
-    settleEntry(id, entry);
-    entry.reject(error);
-  }
-  pending.clear();
-}
-
-/**
- * Drop the current Worker. The instance is terminated (not merely dropped) so a
- * crashed-but-alive Worker does not keep its heap until page unload.
- */
-function disposeWorker() {
-  const dying = worker;
-  worker = null;
-  if (!dying) return;
-  try {
-    dying.terminate();
-  } catch {
-    // Terminating a dead worker is not actionable.
-  }
-}
-
-function getWorker() {
-  if (worker) return worker;
-  try {
-    worker = new Worker(
-      new URL('./exportWorker.js', import.meta.url),
-      { type: 'module' }
-    );
-    worker.onmessage = handleWorkerMessage;
-    worker.onmessageerror = () => {
-      // The event carries no usable payload, so the failing request cannot be
-      // identified — fail everything in flight rather than stranding it.
-      console.error('Export worker message could not be deserialized');
-      disposeWorker();
-      rejectAllPending(new Error('Worker message could not be deserialized'));
-    };
-    worker.onerror = (err) => {
-      console.error('Export worker error:', err);
-      disposeWorker();
-      rejectAllPending(new Error('Worker crashed'));
-    };
-    return worker;
-  } catch (err) {
-    console.warn('Failed to create export worker, will use main thread:', err);
-    worker = null;
-    return null;
-  }
-}
-
-function handleWorkerMessage(e) {
-  const msg = e.data;
-  const entry = pending.get(msg.id);
-  if (!entry) return;
-
-  switch (msg.type) {
-    case 'progress':
-      if (entry.onProgress) {
-        entry.onProgress(msg.percent, msg.phase);
-      }
-      break;
-    case 'result':
-      settleEntry(msg.id, entry);
-      entry.resolve({
-        data: new Uint8ClampedArray(msg.data),
-        width: msg.width,
-        height: msg.height
-      });
-      break;
-    case 'blobResult':
-      settleEntry(msg.id, entry);
-      entry.resolve(msg.blob);
-      break;
-    case 'error':
-      settleEntry(msg.id, entry);
-      entry.reject(new Error(msg.message));
-      break;
-  }
-}
-
-/**
- * @param {object} message
- * @param {Transferable[]} [transfers]
- * @param {function} [onProgress]
- * @param {{timeoutMs?: number, signal?: AbortSignal}} [options]
- */
-function sendToWorker(message, transfers, onProgress, options = {}) {
-  return new Promise((resolve, reject) => {
-    const { signal } = options;
-    if (signal && signal.aborted) {
-      reject(makeError('Worker request aborted', 'AbortError'));
-      return;
-    }
-
-    const w = getWorker();
-    if (!w) {
-      reject(new Error('Worker unavailable'));
-      return;
-    }
-
-    const id = ++requestId;
-    message.id = id;
-    const entry = { resolve, reject, onProgress, timer: null, detachAbort: null };
-    pending.set(id, entry);
-
-    const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : WORKER_TIMEOUT_BASE_MS;
-    if (timeoutMs > 0) {
-      entry.timer = setTimeout(() => {
-        if (!pending.has(id)) return;
-        // A hung worker cannot be reasoned with: kill it and let the next call
-        // spin up a fresh one.
-        console.warn(`Export worker request ${message.type} timed out after ${timeoutMs}ms`);
-        disposeWorker();
-        settleEntry(id, entry);
-        entry.reject(makeError(`Worker request timed out after ${timeoutMs}ms`, 'WorkerTimeoutError'));
-        rejectAllPending(makeError('Worker terminated after a timed-out request', 'WorkerTimeoutError'));
-      }, timeoutMs);
-      // Never hold a Node process (or the test runner) open on this timer.
-      if (typeof entry.timer === 'object' && entry.timer && typeof entry.timer.unref === 'function') {
-        entry.timer.unref();
-      }
-    }
-
-    if (signal) {
-      const onAbort = () => {
-        if (!pending.has(id)) return;
-        // The worker is single-threaded and already busy; the only way to free
-        // it is to terminate it.
-        disposeWorker();
-        settleEntry(id, entry);
-        entry.reject(makeError('Worker request aborted', 'AbortError'));
-        rejectAllPending(makeError('Worker terminated by cancellation', 'AbortError'));
-      };
-      signal.addEventListener('abort', onAbort, { once: true });
-      entry.detachAbort = () => signal.removeEventListener('abort', onAbort);
-    }
-
-    try {
-      w.postMessage(message, transfers || []);
-    } catch (err) {
-      // A synchronous postMessage failure (e.g. DataCloneError) must not leave
-      // the id in `pending` forever.
-      settleEntry(id, entry);
-      entry.reject(err instanceof Error ? err : new Error(String(err)));
-    }
-  });
 }
 
 /**
@@ -252,172 +93,393 @@ function requestOptionsFor(imageData, opts) {
   };
 }
 
-/**
- * Apply adjustments to image data via Worker.
- * @param {ImageData} imageData
- * @param {object} settings - Sanitized settings with curves
- * @param {string} quality - 'preview' or 'full'
- * @param {function|{onProgress?:function,signal?:AbortSignal,timeoutMs?:number}} [onProgressOrOptions]
- * @returns {Promise<ImageData|null>} null when the worker failed and the caller
- *   should fall back to the main thread. Cancellation rejects instead, so a
- *   cancelled export does not silently redo the work on the main thread.
- */
-export async function workerApplyAdjustments(imageData, settings, quality = 'full', onProgressOrOptions = null) {
-  const opts = normalizeRequestOptions(onProgressOrOptions);
-  // Must copy: if worker fails, caller's fallback still needs the original buffer.
-  const inputBuffer = copyImageDataBuffer(imageData);
+function defaultWorkerFactory() {
+  return new Worker(
+    new URL('./exportWorker.js', import.meta.url),
+    { type: 'module' }
+  );
+}
 
-  try {
-    const result = await sendToWorker(
-      {
-        type: 'applyAdjustments',
-        inputBuffer,
-        width: imageData.width,
-        height: imageData.height,
-        settings: serializeSettings(settings),
-        quality
-      },
-      [inputBuffer],
-      opts.onProgress,
-      requestOptionsFor(imageData, opts)
-    );
-    const output = new ImageData(result.data, result.width, result.height);
-    // The adjustment stage is 8-bit only. When it is a no-op the engine's
-    // 16-bit plane is still an exact description of the result, so keep it
-    // attached for the exporter; otherwise it must be dropped as stale.
-    if (imageData.__image16 && settings && settings.curves
-      && isIdentityAdjustmentParams(computeAdjustmentParams(settings))) {
-      output.__image16 = imageData.__image16;
+/**
+ * One export Worker with its own request queue.
+ * @param {{workerFactory?: () => Worker}} [options]
+ */
+export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory } = {}) {
+  let worker = null;
+  let requestId = 0;
+  const pending = new Map();
+
+  function settleEntry(id, entry) {
+    pending.delete(id);
+    if (entry.timer !== null) {
+      clearTimeout(entry.timer);
+      entry.timer = null;
     }
-    return output;
-  } catch (err) {
-    if (isAbortError(err)) throw err;
-    // Fallback to main thread
-    return null;
+    if (entry.detachAbort) {
+      entry.detachAbort();
+      entry.detachAbort = null;
+    }
   }
-}
 
-/**
- * Apply adjustments to the engine's 16-bit plane via Worker. Resolves to an
- * ImageData whose `data` holds the high bytes and whose `__image16` is the
- * adjusted plane; null when there is no plane or the worker failed.
- */
-export async function workerApplyAdjustments16(imageData, settings, quality = 'full', onProgressOrOptions = null) {
-  const plane = imageData && imageData.__image16;
-  if (!plane || !(plane.data instanceof Uint16Array)) return null;
-  const opts = normalizeRequestOptions(onProgressOrOptions);
-  const inputBuffer = copyTypedArrayBuffer(plane.data);
-  try {
-    const result = await sendToWorker(
-      {
-        type: 'applyAdjustments16',
-        inputBuffer,
-        width: plane.width,
-        height: plane.height,
-        settings: serializeSettings(settings),
-        quality
-      },
-      [inputBuffer],
-      opts.onProgress,
-      requestOptionsFor(imageData, opts)
-    );
-    const out16 = new Uint16Array(result.data);
-    const data8 = new Uint8ClampedArray(out16.length);
-    for (let i = 0; i < out16.length; i++) data8[i] = out16[i] >>> 8;
-    const output = new ImageData(data8, result.width, result.height);
-    output.__image16 = { width: result.width, height: result.height, data: out16 };
-    return output;
-  } catch (err) {
-    if (isAbortError(err)) throw err;
-    return null;
+  function rejectAllPending(error) {
+    for (const [id, entry] of Array.from(pending)) {
+      settleEntry(id, entry);
+      entry.reject(error);
+    }
+    pending.clear();
   }
-}
 
-/**
- * Encode 16-bit PNG via Worker.
- * @param {ImageData} imageData
- * @param {function|{onProgress?:function,signal?:AbortSignal,timeoutMs?:number}} [onProgressOrOptions]
- * @returns {Promise<Blob|null>}
- */
-export async function workerEncodePng16(imageData, onProgressOrOptions = null) {
-  const opts = normalizeRequestOptions(onProgressOrOptions);
-  // Transfer a copy so worker success/failure never detaches the caller's ImageData.
-  const { buffer, sampleBits } = copyExportSamples(imageData, 16);
-
-  try {
-    return await sendToWorker(
-      {
-        type: 'encodePng16',
-        pixelData: buffer,
-        sourceBits: sampleBits,
-        width: imageData.width,
-        height: imageData.height
-      },
-      [buffer],
-      opts.onProgress,
-      requestOptionsFor(imageData, opts)
-    );
-  } catch (err) {
-    if (isAbortError(err)) throw err;
-    return null;
+  /**
+   * Drop the current Worker. The instance is terminated (not merely dropped) so a
+   * crashed-but-alive Worker does not keep its heap until page unload.
+   */
+  function disposeWorker() {
+    const dying = worker;
+    worker = null;
+    if (!dying) return;
+    try {
+      dying.terminate();
+    } catch {
+      // Terminating a dead worker is not actionable.
+    }
   }
-}
 
-/**
- * Encode TIFF via Worker.
- * @param {ImageData} imageData
- * @param {number} bitDepth
- * @param {function|{onProgress?:function,signal?:AbortSignal,timeoutMs?:number}} [onProgressOrOptions]
- * @returns {Promise<Blob|null>}
- */
-export async function workerEncodeTiff(imageData, bitDepth = 8, onProgressOrOptions = null, metadata = null) {
-  const opts = normalizeRequestOptions(onProgressOrOptions);
-  // Transfer a copy so worker success/failure never detaches the caller's ImageData.
-  const { buffer, sampleBits } = copyExportSamples(imageData, bitDepth);
+  function handleWorkerMessage(e) {
+    const msg = e.data;
+    const entry = pending.get(msg.id);
+    if (!entry) return;
 
-  try {
-    return await sendToWorker(
-      {
-        type: 'encodeTiff',
-        pixelData: buffer,
-        sourceBits: sampleBits,
-        width: imageData.width,
-        height: imageData.height,
-        bitDepth,
-        // Analog metadata (EXIF fields + XMP packet) written into the IFD.
-        metadata: metadata || null
-      },
-      [buffer],
-      opts.onProgress,
-      requestOptionsFor(imageData, opts)
-    );
-  } catch (err) {
-    if (isAbortError(err)) throw err;
-    return null;
+    switch (msg.type) {
+      case 'progress':
+        if (entry.onProgress) {
+          entry.onProgress(msg.percent, msg.phase);
+        }
+        break;
+      case 'result':
+        settleEntry(msg.id, entry);
+        entry.resolve({
+          data: new Uint8ClampedArray(msg.data),
+          width: msg.width,
+          height: msg.height
+        });
+        break;
+      case 'blobResult':
+        settleEntry(msg.id, entry);
+        entry.resolve(msg.blob);
+        break;
+      case 'error':
+        settleEntry(msg.id, entry);
+        entry.reject(new Error(msg.message));
+        break;
+    }
   }
+
+  function getWorker() {
+    if (worker) return worker;
+    try {
+      worker = workerFactory();
+      worker.onmessage = handleWorkerMessage;
+      worker.onmessageerror = () => {
+        // The event carries no usable payload, so the failing request cannot be
+        // identified — fail everything in flight rather than stranding it.
+        console.error('Export worker message could not be deserialized');
+        disposeWorker();
+        rejectAllPending(new Error('Worker message could not be deserialized'));
+      };
+      worker.onerror = (err) => {
+        console.error('Export worker error:', err);
+        disposeWorker();
+        rejectAllPending(new Error('Worker crashed'));
+      };
+      return worker;
+    } catch (err) {
+      console.warn('Failed to create export worker, will use main thread:', err);
+      worker = null;
+      return null;
+    }
+  }
+
+  /**
+   * @param {object} message
+   * @param {Transferable[]} [transfers]
+   * @param {function} [onProgress]
+   * @param {{timeoutMs?: number, signal?: AbortSignal}} [options]
+   */
+  function sendToWorker(message, transfers, onProgress, options = {}) {
+    return new Promise((resolve, reject) => {
+      const { signal } = options;
+      if (signal && signal.aborted) {
+        reject(makeError('Worker request aborted', 'AbortError'));
+        return;
+      }
+
+      const w = getWorker();
+      if (!w) {
+        reject(new Error('Worker unavailable'));
+        return;
+      }
+
+      const id = ++requestId;
+      message.id = id;
+      const entry = { resolve, reject, onProgress, timer: null, detachAbort: null };
+      pending.set(id, entry);
+
+      const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : WORKER_TIMEOUT_BASE_MS;
+      if (timeoutMs > 0) {
+        entry.timer = setTimeout(() => {
+          if (!pending.has(id)) return;
+          // A hung worker cannot be reasoned with: kill it and let the next call
+          // spin up a fresh one.
+          console.warn(`Export worker request ${message.type} timed out after ${timeoutMs}ms`);
+          disposeWorker();
+          settleEntry(id, entry);
+          entry.reject(makeError(`Worker request timed out after ${timeoutMs}ms`, 'WorkerTimeoutError'));
+          rejectAllPending(makeError('Worker terminated after a timed-out request', 'WorkerTimeoutError'));
+        }, timeoutMs);
+        // Never hold a Node process (or the test runner) open on this timer.
+        if (typeof entry.timer === 'object' && entry.timer && typeof entry.timer.unref === 'function') {
+          entry.timer.unref();
+        }
+      }
+
+      if (signal) {
+        const onAbort = () => {
+          if (!pending.has(id)) return;
+          // The worker is single-threaded and already busy; the only way to free
+          // it is to terminate it.
+          disposeWorker();
+          settleEntry(id, entry);
+          entry.reject(makeError('Worker request aborted', 'AbortError'));
+          rejectAllPending(makeError('Worker terminated by cancellation', 'AbortError'));
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
+        entry.detachAbort = () => signal.removeEventListener('abort', onAbort);
+      }
+
+      try {
+        w.postMessage(message, transfers || []);
+      } catch (err) {
+        // A synchronous postMessage failure (e.g. DataCloneError) must not leave
+        // the id in `pending` forever.
+        settleEntry(id, entry);
+        entry.reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+  }
+
+  /**
+   * Apply adjustments to image data via Worker.
+   * @param {ImageData} imageData
+   * @param {object} settings - Sanitized settings with curves
+   * @param {string} quality - 'preview' or 'full'
+   * @param {function|{onProgress?:function,signal?:AbortSignal,timeoutMs?:number}} [onProgressOrOptions]
+   * @returns {Promise<ImageData|null>} null when the worker failed and the caller
+   *   should fall back to the main thread. Cancellation rejects instead, so a
+   *   cancelled export does not silently redo the work on the main thread.
+   */
+  async function workerApplyAdjustments(imageData, settings, quality = 'full', onProgressOrOptions = null) {
+    const opts = normalizeRequestOptions(onProgressOrOptions);
+    // Must copy: if worker fails, caller's fallback still needs the original buffer.
+    const inputBuffer = copyImageDataBuffer(imageData);
+
+    try {
+      const result = await sendToWorker(
+        {
+          type: 'applyAdjustments',
+          inputBuffer,
+          width: imageData.width,
+          height: imageData.height,
+          settings: serializeSettings(settings),
+          quality
+        },
+        [inputBuffer],
+        opts.onProgress,
+        requestOptionsFor(imageData, opts)
+      );
+      const output = new ImageData(result.data, result.width, result.height);
+      // The adjustment stage is 8-bit only. When it is a no-op the engine's
+      // 16-bit plane is still an exact description of the result, so keep it
+      // attached for the exporter; otherwise it must be dropped as stale.
+      if (imageData.__image16 && settings && settings.curves
+        && isIdentityAdjustmentParams(computeAdjustmentParams(settings))) {
+        output.__image16 = imageData.__image16;
+      }
+      return output;
+    } catch (err) {
+      if (isAbortError(err)) throw err;
+      // Fallback to main thread
+      return null;
+    }
+  }
+
+  /**
+   * Apply adjustments to the engine's 16-bit plane via Worker. Resolves to an
+   * ImageData whose `data` holds the high bytes and whose `__image16` is the
+   * adjusted plane; null when there is no plane or the worker failed.
+   */
+  async function workerApplyAdjustments16(imageData, settings, quality = 'full', onProgressOrOptions = null) {
+    const plane = imageData && imageData.__image16;
+    if (!plane || !(plane.data instanceof Uint16Array)) return null;
+    const opts = normalizeRequestOptions(onProgressOrOptions);
+    const inputBuffer = copyTypedArrayBuffer(plane.data);
+    try {
+      const result = await sendToWorker(
+        {
+          type: 'applyAdjustments16',
+          inputBuffer,
+          width: plane.width,
+          height: plane.height,
+          settings: serializeSettings(settings),
+          quality
+        },
+        [inputBuffer],
+        opts.onProgress,
+        requestOptionsFor(imageData, opts)
+      );
+      const out16 = new Uint16Array(result.data);
+      const data8 = new Uint8ClampedArray(out16.length);
+      for (let i = 0; i < out16.length; i++) data8[i] = out16[i] >>> 8;
+      const output = new ImageData(data8, result.width, result.height);
+      output.__image16 = { width: result.width, height: result.height, data: out16 };
+      return output;
+    } catch (err) {
+      if (isAbortError(err)) throw err;
+      return null;
+    }
+  }
+
+  /**
+   * Encode 16-bit PNG via Worker.
+   * @param {ImageData} imageData
+   * @param {function|{onProgress?:function,signal?:AbortSignal,timeoutMs?:number}} [onProgressOrOptions]
+   * @returns {Promise<Blob|null>}
+   */
+  async function workerEncodePng16(imageData, onProgressOrOptions = null) {
+    const opts = normalizeRequestOptions(onProgressOrOptions);
+    // Transfer a copy so worker success/failure never detaches the caller's ImageData.
+    const { buffer, sampleBits } = copyExportSamples(imageData, 16);
+
+    try {
+      return await sendToWorker(
+        {
+          type: 'encodePng16',
+          pixelData: buffer,
+          sourceBits: sampleBits,
+          width: imageData.width,
+          height: imageData.height
+        },
+        [buffer],
+        opts.onProgress,
+        requestOptionsFor(imageData, opts)
+      );
+    } catch (err) {
+      if (isAbortError(err)) throw err;
+      return null;
+    }
+  }
+
+  /**
+   * Encode TIFF via Worker.
+   * @param {ImageData} imageData
+   * @param {number} bitDepth
+   * @param {function|{onProgress?:function,signal?:AbortSignal,timeoutMs?:number}} [onProgressOrOptions]
+   * @returns {Promise<Blob|null>}
+   */
+  async function workerEncodeTiff(imageData, bitDepth = 8, onProgressOrOptions = null, metadata = null) {
+    const opts = normalizeRequestOptions(onProgressOrOptions);
+    // Transfer a copy so worker success/failure never detaches the caller's ImageData.
+    const { buffer, sampleBits } = copyExportSamples(imageData, bitDepth);
+
+    try {
+      return await sendToWorker(
+        {
+          type: 'encodeTiff',
+          pixelData: buffer,
+          sourceBits: sampleBits,
+          width: imageData.width,
+          height: imageData.height,
+          bitDepth,
+          // Analog metadata (EXIF fields + XMP packet) written into the IFD.
+          metadata: metadata || null
+        },
+        [buffer],
+        opts.onProgress,
+        requestOptionsFor(imageData, opts)
+      );
+    } catch (err) {
+      if (isAbortError(err)) throw err;
+      return null;
+    }
+  }
+
+  /**
+   * Check if the export worker is available.
+   */
+  function isWorkerAvailable() {
+    return getWorker() !== null;
+  }
+
+  /**
+   * Cancel every in-flight request without tearing the bridge down permanently.
+   * The Worker is terminated (there is no way to interrupt a running encode) and
+   * the next call transparently spins up a fresh one.
+   */
+  function cancelWorkerRequests(reason = 'Worker request cancelled') {
+    disposeWorker();
+    rejectAllPending(makeError(reason, 'AbortError'));
+  }
+
+  /**
+   * Terminate the worker (cleanup).
+   */
+  function terminateWorker() {
+    disposeWorker();
+    rejectAllPending(new Error('Worker terminated'));
+  }
+
+  return {
+    workerApplyAdjustments,
+    workerApplyAdjustments16,
+    workerEncodePng16,
+    workerEncodeTiff,
+    isWorkerAvailable,
+    cancelWorkerRequests,
+    terminateWorker,
+    /** Requests in flight on this bridge (for least-busy dispatch). */
+    get pendingCount() { return pending.size; }
+  };
 }
 
 /**
- * Check if the export worker is available.
+ * Several bridges for a batch export. Each call goes to the bridge with the
+ * fewest requests in flight; `dispose()` terminates every worker once the
+ * batch is over. The same API as a single bridge, so callers can take either.
  */
-export function isWorkerAvailable() {
-  return getWorker() !== null;
+export function createExportWorkerPool({ size = 2, workerFactory } = {}) {
+  const laneCount = Math.max(1, Math.floor(size) || 1);
+  const options = workerFactory ? { workerFactory } : {};
+  const lanes = Array.from({ length: laneCount }, () => createExportWorkerBridge(options));
+  const pick = () => lanes.reduce((best, lane) => (lane.pendingCount < best.pendingCount ? lane : best), lanes[0]);
+  return {
+    size: laneCount,
+    workerApplyAdjustments: (...args) => pick().workerApplyAdjustments(...args),
+    workerApplyAdjustments16: (...args) => pick().workerApplyAdjustments16(...args),
+    workerEncodePng16: (...args) => pick().workerEncodePng16(...args),
+    workerEncodeTiff: (...args) => pick().workerEncodeTiff(...args),
+    isWorkerAvailable: () => lanes.every(lane => lane.isWorkerAvailable()),
+    cancelWorkerRequests: (reason) => lanes.forEach(lane => lane.cancelWorkerRequests(reason)),
+    terminateWorker: () => lanes.forEach(lane => lane.terminateWorker()),
+    dispose: () => lanes.forEach(lane => lane.terminateWorker()),
+    get pendingCount() { return lanes.reduce((sum, lane) => sum + lane.pendingCount, 0); }
+  };
 }
 
-/**
- * Cancel every in-flight request without tearing the bridge down permanently.
- * The Worker is terminated (there is no way to interrupt a running encode) and
- * the next call transparently spins up a fresh one.
- */
-export function cancelWorkerRequests(reason = 'Worker request cancelled') {
-  disposeWorker();
-  rejectAllPending(makeError(reason, 'AbortError'));
-}
+const defaultBridge = createExportWorkerBridge();
 
-/**
- * Terminate the worker (cleanup).
- */
-export function terminateWorker() {
-  disposeWorker();
-  rejectAllPending(new Error('Worker terminated'));
-}
+export const workerApplyAdjustments = defaultBridge.workerApplyAdjustments;
+export const workerApplyAdjustments16 = defaultBridge.workerApplyAdjustments16;
+export const workerEncodePng16 = defaultBridge.workerEncodePng16;
+export const workerEncodeTiff = defaultBridge.workerEncodeTiff;
+export const isWorkerAvailable = defaultBridge.isWorkerAvailable;
+export const cancelWorkerRequests = defaultBridge.cancelWorkerRequests;
+export const terminateWorker = defaultBridge.terminateWorker;

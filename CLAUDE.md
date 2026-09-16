@@ -58,6 +58,11 @@ its own `PORT`/`CDP_PORT` instead.
 Known issues that were reviewed but not fixed are queued in
 `docs/audit-backlog.md`; delete an entry when it is done.
 
+Batch export and the post-import roll analysis run several files at once
+through `batchExportScheduler.js` (lane planning by cores/memory/file size,
+in-order sinks, worker pools); see `docs/batch-export-pipeline.md` before
+changing `processFileWithSettings` or the export loops.
+
 Live demo: https://negative-converter.tokugai.com
 
 ## Architecture

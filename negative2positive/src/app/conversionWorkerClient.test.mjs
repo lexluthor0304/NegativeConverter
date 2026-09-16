@@ -75,3 +75,33 @@ const smallResult = largeClient(request);
 largeWorkers[2].complete(); await smallResult;
 assert.equal(largeWorkers[2].terminated, undefined, 'small conversions retain the reusable worker');
 console.log('conversionWorkerClient: 入力再利用・参照解除・再起動・独立キュー・部分配列を検証');
+
+// ---- pool: least-busy dispatch, retained workers, dispose ----
+{
+  const { createConversionWorkerPool } = await import('./conversionWorkerClient.js');
+  const poolWorkers = [];
+  const pool = createConversionWorkerPool({ size: 2, workerFactory: () => { const w = new FakeWorker(); poolWorkers.push(w); return w; } });
+  assert.equal(pool.size, 2);
+  const big = { ...input, width: 9536, height: 6336 };
+  const a = pool({ imageData: big, settings: {}, options: {} });
+  const b = pool({ imageData: big, settings: {}, options: {} });
+  const c = pool({ imageData: big, settings: {}, options: {} });
+  assert.equal(poolWorkers.length, 2, 'two lanes start two workers');
+  assert.equal(poolWorkers[0].messages.length, 2, 'third request joins the least-busy lane (tie -> first)');
+  assert.equal(poolWorkers[1].messages.length, 1);
+  const answer = (w, message, value) => w.onmessage({ data: { id: message.id, type: 'result', width: 1, height: 1, rgba: new Uint8ClampedArray([value, value, value, 255]).buffer } });
+  answer(poolWorkers[0], poolWorkers[0].messages[0], 1); answer(poolWorkers[1], poolWorkers[1].messages[0], 2);
+  assert.equal((await a).data[0], 1); assert.equal((await b).data[0], 2);
+  assert.equal(poolWorkers[0].terminated, undefined, 'a batch lane keeps its worker after a large frame');
+  assert.equal(poolWorkers[1].terminated, undefined);
+  answer(poolWorkers[0], poolWorkers[0].messages[1], 9);
+  assert.equal((await c).data[0], 9);
+  const d = pool({ imageData: big, settings: {}, options: {} });
+  assert.equal(poolWorkers.length, 2, 'no new worker for the next frame');
+  pool.dispose();
+  await assert.rejects(d, { code: WORKER_CRASHED });
+  assert.equal(poolWorkers[0].terminated, true);
+  assert.equal(poolWorkers[1].terminated, true);
+  await assert.rejects(pool({ imageData: input, settings: {}, options: {} }), { code: WORKER_UNAVAILABLE });
+  console.log('conversionWorkerPool: least-busy dispatch, retained lanes, dispose verified');
+}

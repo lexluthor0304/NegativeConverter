@@ -8,7 +8,6 @@ cited code. They are ordered by severity within each area.
 Items already fixed are not listed. This file is a work queue, not a record of
 what shipped — delete an entry when it is done.
 
-
 ## Auto frame detection
 
 - **medium/ux** — Non-sprocket density templates are capped at 0.68 < highConfidence 0.72, so 'high' confidence and the 'Auto-apply high confidence' setting are unreachable for 120 film and most single 135 frames _(verified)_  
@@ -21,8 +20,12 @@ what shipped — delete an entry when it is done.
   Only getAutoFrameAspectTargets is tested. `inferAutoFrameConfidenceLevel` (:1311, the 0.72/0.55 classifier that round 1 found duplicated three times), `buildDensityAnalysis` (:276) and `scoreDensityRect` (:518) contain no OpenCV references between lines 276-560 and run in plain Node, yet have no tests. main.js:116-130 re-declares DEFAULT_FORMAT_RATIOS/DEFAULT_120_FORMATS/DEFAULT_SCORE_WEIGHTS verb…  
   _Suggested fix:_ Export DEFAULT_FORMAT_RATIOS/DEFAULT_120_FORMATS/DEFAULT_SCORE_WEIGHTS from the analyzer, import them in main.js and the test. Add tests: `inferAutoFrameConfidenceLevel` at 0.72/0.719/0.55/0.549 and with custom thresholds; `buildDensityAnalysis` on a synthetic dark frame inside a…
 
-
 ## Dust removal
+
+- **high/perf** — Auto-frame line search dominates import: `findWindowLineQuads` runs `cv.HoughLinesP` at θ = π/1800 over four channels (gray + R/G/B) of the 1600 px preview, 10–23 s per frame on 18 MP camera scans; the first photo of a roll waits ~24 s on it before anything is shown  
+  `negative2positive/src/app/imageWindowLines.js:96`  
+  Profiled 2026-09-16 (Chrome CPU profile of the auto-frame worker): 17 s of a 21 s first-photo analysis is inside `HoughLinesP`. Coarser θ (π/900, π/720, π/360) is 2.5–5× faster but changes results on the local RAW regression set (DSC_8806 flips to a bogus 90° "hough" crop at π/900, DSC_4127 at π/720), so it cannot be changed blindly. Two result-preserving options: (a) run the four channel passes in parallel helper workers (HoughLinesP is deterministic for identical input, so merging in channel order gives identical lines; only the 1600 px preview needs to be posted) — cuts per-frame latency ~4×; (b) show the converted, uncropped first photo immediately and apply the detected frame when it lands, so the roll opens in ~3 s instead of ~25 s. A redesign (coarse Hough + edge-pixel refinement) would be faster still but needs the eval harness extended to a large labelled set first.  
+  _Suggested fix:_ (b) first, then (a); validate with `scripts/eval-autoframe.mjs`, `AUTOFRAME_RAW_DIR=… npm run test:smoke` and the 63-DNG roll used for the batch benchmark.
 
 - **high/perf** — Dust detection and TELEA inpainting run synchronously on the main thread at full resolution, retriggered every 300 ms while dragging the strength slider  
   `negative2positive/src/app/main.js:5033`  
@@ -61,7 +64,6 @@ what shipped — delete an entry when it is done.
   `negative2positive/src/app/main.js:5018`  
   createOpenCvLoader's ensureOpenCvReady resolves false (never throws) when all OpenCV sources fail (opencvLoader.js:157-171). The other four call sites check `const ready = await ensureOpenCvReady()` (7077, 7343, 7419) and bail with a message; runDustDetection discards the value and proceeds into detectDust, which throws an internal error (e.g. 'cv is undefined') that is shown raw and unlocalized v…  
   _Suggested fix:_ `const ready = await ensureOpenCvReady(); if (!ready) { updateDustStatusUI(getLocalizedText('opencvUnavailable', ...)); state.dustRemoval.processing = false; return; }` and use a localized key for the generic error status.
-
 
 ## App runtime (main.js)
 
@@ -125,10 +127,6 @@ what shipped — delete an entry when it is done.
   transformCanvas/transformCtx are created at 2500-2501 and written by syncTransformCanvasFromMainCanvas (called from updateFullCpu 4432, ensureFullRender 4519 and displayNegative 5575) but are never read anywhere in main.js. Each call resizes the canvas to the full image size and blits the whole main canvas into it, so a 90 MP scan keeps an extra ~360 MB backing store alive for the session and pays…  
   _Suggested fix:_ Delete transformCanvas, transformCtx, syncTransformCanvasFromMainCanvas and its three call sites (4432, 4519, 5575).
 
-- **medium/memory** — Desktop batch ZIP accumulates every encoded file in memory in JSZip and DEFLATEs already-compressed images  
-  `negative2positive/src/app/main.js:9690`  
-  exportBatchAsZipDesktop calls `zip.file(name, blob)` for every frame and only writes at the end via generateAsync, so peak memory is the sum of all exported files (a 36-frame roll of 16-bit TIFFs at 300 MB each = 10.8 GB) plus the generated archive plus the base64 IPC copy. `compression: 'DEFLATE', level 6` re-compresses PNG/JPEG/deflated data — CPU cost of minutes for no size gain, and the whole …  
-  _Suggested fix:_ On desktop write each frame directly to the chosen directory via write_export_file_to_directory (streamed, see previous finding) or build the ZIP incrementally in Rust (zip crate, Stored method) by pushing entries one at a time; at minimum switch JSZip to `compression: 'STORE'` a…
 
 - **medium/quality** — main.js refactor map: 10,779 lines decompose into ~20 cohesive blocks; six can be extracted with almost no coupling _(verified)_  
   `negative2positive/src/app/main.js:76`  
@@ -144,16 +142,6 @@ what shipped — delete an entry when it is done.
   `negative2positive/src/app/main.js:3900`  
   The preview shader (main.js:3900-3947 hue2rgb/rgbToHsl/hslToRgb; 3956-3999 exposure→contrast→highlights/shadows→temp/tint→HSL sat/vibrance→CMY→curves) is a hand transliteration of workers/pixelAdjustments.js (hue2rgb 6-13; per-pixel stages 127-237). ImageProcessor.js carries a third hue2rgb (373-380) and a third RGB↔HSL round-trip (309-364). Verified drift today: the CPU *preview* quality path (pi…  
   _Suggested fix:_ (1) Export hue2rgb/rgbToHsl/hslToRgb once from a `colorMath.js` and import it in both pixelAdjustments.js and ImageProcessor.js. (2) Move the fragment shader into `render/adjustmentShader.glsl.js` next to a small table of stage constants (TEMP_TINT_GAIN=0.3, LUMA coefficients, co…
-
-- **medium/quality** — Four copy-pasted batch-export loops (ZIP desktop, ZIP browser, individual desktop, individual browser)  
-  `negative2positive/src/app/main.js:9639`  
-  exportBatchAsZipDesktop (9639-9724), exportBatchAsZipBrowser (9726-9872), exportBatchIndividuallyDesktop (9926-10040) and exportBatchIndividuallyBrowser (10042-10130) each re-implement: item.status='processing' → updateFileListUI → progress → getSettingsForExport → processFileWithSettings → applySprocketFrameForExport → imageDataToBlob → sink → status 'done'/'error' with `console.error(`Error proc…  
-  _Suggested fix:_ Extract `app/batchExport.js` with one `runBatchExport(jobs, { prepare, sink, progress })` driver that owns the loop, status bookkeeping and error capture; implement the four variants as ~15-line sink/progress adapters. Keep `processFileWithSettings` as the per-item pipeline.
-
-- **medium/ux** — Loading overlay's cancel button is never enabled and hard-codes 'Cancel'; long batch exports cannot be cancelled from the UI _(verified)_  
-  `negative2positive/src/app/main.js:4909`  
-  LoadingOverlay.show() supports { cancelable, onCancel, cancelText } but every one of the seven overlay.show() calls in main.js passes only { title }, so the cancel button is permanently display:none. The default label is the English literal 'Cancel' even though i18n defines loadingCancel/loadingCancelled in all three languages (never referenced). Result: a multi-file ZIP export (exportBatchAsZipDe…  
-  _Suggested fix:_ For the batch/ZIP export paths pass { title, cancelable: true, cancelText: lang.loadingCancel, onCancel: () => { cancelRequested = true; } } and check cancelRequested inside the per-file loops (the loops already support cancelledByUser); show showToast(lang.loadingCancelled) on a…
 
 - **medium/ux** — Film-base / gray-point sampling has no touch flow: a tap samples immediately and the loupe is positioned under the finger  
   `negative2positive/src/app/main.js:6497`  
@@ -289,11 +277,6 @@ what shipped — delete an entry when it is done.
   main.js:5600-5637 (loadFile) and 9388-9400 (loadFileToImageData, used by batch/auto-frame) both implement `isRawLikeFileName → loadRawImageData; file.type==='image/png' → loadPngImageData; else loadStandardImage`. loadFile additionally checks `arrayBuffer.byteLength > 100 * 1024 * 1024` at 5603 to choose the two-stage preview path — the same constant rawFileLoader.js:19 defines as RAW_SIZE_HEAVY. …  
   _Suggested fix:_ Move `loadFileToImageData(file, { preview, onMetadata })` into app/imageFileLoaders.js (it already owns isRawLikeFileName and the three loaders), export RAW_SIZE_HEAVY from rawFileLoader.js, and have loadFile call the shared function with the extra options.
 
-- **low/quality** — exportBatchAsZipDesktop (JSZip in-memory ZIP loop) is unreachable: the ZIP button is hidden on desktop and the web build never takes the desktop branch  
-  `negative2positive/src/app/main.js:9639`  
-  exportBatchAsZip() routes to exportBatchAsZipDesktop only when isTauriDesktop(), but updateDesktopExportMenuUI() (called at init, 9122) sets `#exportZipBtn.style.display = 'none'` on desktop, and exportZipBtn's click handler (9068) is the only caller of exportBatchAsZip. On the web isTauriDesktop() is false, so the JSZip path is dead in both builds, together with getJSZipCtor (8932) and the jszip …  
-  _Suggested fix:_ Delete exportBatchAsZipDesktop and getJSZipCtor, drop jszip from package.json, and make exportBatchAsZip call exportBatchAsZipBrowser directly (or, if desktop ZIP is wanted, implement it with ZipStoreWriter over a Tauri file stream and unhide the button). Fold the remaining three…
-
 - **low/ux** — Export path silently drops lens correction when the runtime fails, with no user-visible warning _(verified)_  
   `negative2positive/src/app/main.js:1287`  
   applyLensCorrectionWithSettings returns the uncorrected imageData on ensureLensfunClient failure or buildCorrectionMaps/apply exceptions and only surfaces the reason through setLensStatus when updateUi is true. The export/batch path calls it with `{ updateUi: false }` (line 9559), so an exported or batch-exported file can silently lack the distortion/TCA/vignetting correction the user enabled and …  
@@ -333,7 +316,6 @@ what shipped — delete an entry when it is done.
   `negative2positive/src/app/main.js:10640`  
   `supportsFolderPicker()` returns `'webkitdirectory' in folderInput`, which is true on every Chromium/WebKit/Gecko build because the property exists on the prototype regardless of whether the engine can actually present a directory chooser. Two concrete platforms expose this: (1) Linux Tauri/AppImage: WebKitGTK's default file chooser (`webkitWebViewRunFileChooser` in WebKitWebViewGtk.cpp) always cr…  
   _Suggested fix:_ Strengthen the detection instead of relying on property presence: (a) on Linux desktop (`isTauriDesktop()` plus a tiny `get_platform` command, or `navigator.platform`/`navigator.userAgent` containing 'Linux'), treat the folder picker as unsupported and run the existing `applyFold…
-
 
 ## Engine and rendering
 
@@ -452,14 +434,12 @@ what shipped — delete an entry when it is done.
   The smoke passes today from the repo root (the ignored DSC_4127.NEF is present) but `path.resolve(process.cwd(), 'DSC_4127.NEF')` means running it from any other directory prints a warning and exits 0, identical to a pass from the runner's point of view. No npm script or runner picks it up, so the Z f fallback regression it documents (#81) is protected only when a developer remembers the exact com…  
   _Suggested fix:_ Read the fixture path from `process.env.NC_NEF_FIXTURE` with a repo-root default computed from `import.meta.url`; wire it into run-tests.mjs as an optional test that prints `SKIP` (and counts it separately) when the env var/file is missing; document the env var in CLAUDE.md next …
 
-
 ## Build and release
 
 - **medium/ci** — macOS release build is Apple-Silicon-only while download.html hands the arm64 DMG to every Mac user _(verified)_  
   `.github/workflows/desktop-release.yml:163`  
   `npm run tauri:build` on `macos-latest` builds only the host target (aarch64). The published assets and R2 manifest contain a single `..._aarch64.dmg` (verified `lipo -info` -> 'architecture: arm64'), yet download.html's macOS card picks `preferredTypes: ['dmg']` with no arch check, so Intel Mac visitors download a binary that macOS refuses to launch. The Mac App Store build already goes universal…  
   _Suggested fix:_ In the macOS matrix entry add `targets: aarch64-apple-darwin,x86_64-apple-darwin` to the dtolnay/rust-toolchain step and run `npm run tauri:build -- --target universal-apple-darwin` (upload path becomes `src-tauri/target/universal-apple-darwin/release/bundle/**`). If binary size …
-
 
 ## Public pages
 
@@ -522,7 +502,6 @@ what shipped — delete an entry when it is done.
   `negative2positive/negative-lab-pro-alternative.html:135`  
   The Related-guides grid links /pricing.md. Vercel serves it as text/markdown and Chrome renders it as unstyled plain text starting with '# Pricing — Negative Converter' — no header, no navigation, no way back, on a page positioned as a conversion aid against a paid competitor. It also gives search engines a duplicate, un-styled 'free / no account' page competing with the HTML pages (and it is list…  
   _Suggested fix:_ Point the card at a human page (e.g. guide.html#why or a small pricing.html rendered from pricing.md at build), keep pricing.md only as the llms.txt target, and remove it from sitemap.xml.
-
 
 ## Other
 
@@ -630,7 +609,6 @@ what shipped — delete an entry when it is done.
   `negative2positive/src/styles/app.css:3722`  
   At <=900px the grid rows are `minmax(220px, 1.08fr) minmax(0, 1fr)` and only the `.app-main:has(> .controls-panel[style*="none"])` rule collapses the second row while the panel is hidden. `:has()` is unsupported in Firefox < 121 (Dec 2023, incl. some Firefox Android builds), Safari/iOS < 15.4 and Chrome < 105; there the empty controls row keeps ~48% of the height and the drop/upload placeholder is…  
   _Suggested fix:_ Toggle a class from JS instead (`appMain.classList.toggle('panel-hidden', controlsPanel.style.display === 'none')` in showImageUI/hide paths) and write the rule as `.app-main.panel-hidden { grid-template-rows: 1fr 0; }`.
-
 
 ## Test coverage
 

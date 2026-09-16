@@ -253,6 +253,24 @@ body {
   white-space: nowrap;
 }
 
+.header-export-progress-cancel {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  background: transparent;
+  border: 1px solid var(--accent, #45d6cd);
+  color: var(--accent, #45d6cd);
+  border-radius: 4px;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.header-export-progress-cancel:hover {
+  background: var(--accent, #45d6cd);
+  color: #000;
+}
+
 .header-export-progress-file {
   min-width: 0;
   font-size: 11px;
