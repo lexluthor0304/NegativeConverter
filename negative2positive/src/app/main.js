@@ -20,6 +20,7 @@ import { frameNeedsReview } from './reviewQueue.js';
     import { normalizeAngleDegrees, applyRotationToImageData, mirrorImageDataHorizontal } from './imageGeometry.js';
     import { analyzeFrameInWorker, readFilmEdgeInWorker } from './autoFrameWorkerClient.js';
     import { detectFrameWithFallback } from './autoFrameExecution.js';
+    import { studioStyleSettings } from './studioStyles.js';
     import { mountStudioWorkspace } from './studioWorkspace.js';
     import { AUTO_FRAME_FORMAT_RATIOS, AUTO_FRAME_DEFAULT_120_FORMATS, canAutoApplyImportFrame } from './autoFrameFormats.js';
     import { imageAreaFromDetection, resolveAnalysisRegion, analysisPixelBounds, imageAreaFromWorkingRect, sampleAnalysisArea } from './analysisRegion.js';
@@ -13214,6 +13215,13 @@ import { frameNeedsReview } from './reviewQueue.js';
     async function runExpiredSpatialAnalysis() {
       const key = expiredSourceKey();
       const generation = loadGeneration;
+      // Measure the same conversion as phase one. Loading OpenCV may take
+      // several seconds; a style chosen meanwhile must not become the new
+      // colour-correction baseline and cancel out the user's look.
+      const current = state.processedImageData;
+      const initialAnalysis = state.expiredAnalysis;
+      const settings = { ...state, autoFrameMeta: state.autoFrame.lastDiagnostics };
+      const source = state.loadedBaseImageData || state.originalImageData;
       if (expiredOpenCvState !== 'ready') {
         expiredOpenCvState = 'loading';
         updateExpiredRescueUI();
@@ -13224,14 +13232,9 @@ import { frameNeedsReview } from './reviewQueue.js';
         updateExpiredRescueUI();
         return false;
       }
-      const current = state.processedImageData;
-      if (!current || !isCurrentLoad(generation) || key !== expiredSourceKey() || !state.expiredEnabled || !state.expiredAnalysis) return false;
+      if (!current || !isCurrentLoad(generation) || key !== expiredSourceKey() || !state.expiredEnabled || state.expiredAnalysis !== initialAnalysis) return false;
       try {
-        const analysis = measureExpiredAnalysisWithSpatial(
-          current,
-          { ...state, autoFrameMeta: state.autoFrame.lastDiagnostics },
-          state.loadedBaseImageData || state.originalImageData
-        );
+        const analysis = measureExpiredAnalysisWithSpatial(current, settings, source);
         if (!analysis || key !== expiredSourceKey() || !isCurrentLoad(generation)) return false;
         // Brightness and contrast that still hold the first phase's measured
         // values follow the new measurement; values the user moved stay.
@@ -15479,11 +15482,10 @@ import { frameNeedsReview } from './reviewQueue.js';
         onRestart: restartPhotoProcessing,
         onNewSession: closePhotoSession,
         onStyle: model => {
-          if (state.currentStep < 3) return;
+          const style = studioStyleSettings(model);
+          if (state.currentStep < 3 || !style) return;
           pushUndo('studioStyle');
-          state.coreColorModel = model;
-          state.coreFilmPreset = 'none';
-          state.coreEnhancedProfile = 'none';
+          Object.assign(state, style);
           state.frontierGuideStep2ChoiceTouched = true;
           markCurrentFileDirty();
           updateSlidersFromState();
