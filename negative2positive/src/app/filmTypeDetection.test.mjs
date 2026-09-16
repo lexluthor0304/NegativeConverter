@@ -52,3 +52,23 @@ assert.equal(detectedImportSettings(positive, { automatic: false, filmType: 'bw'
 assert.equal(detectedImportSettings(positive, { filmType: 'color' }).filmType, 'positive', 'mixed imports do not inherit preceding negative type');
 assert.equal(detectedImportSettings(croppedNegative, { filmType: 'positive' }).filmType, 'color');
 console.log('filmTypeDetection: borderless/bordered scans, ambiguity, DX, precision and manual import passed');
+
+for (const sixteen of [false, true]) {
+  for (const base of [230, 255]) {
+    const scan = fixture((x, y) => {
+      const v = x < 3 || x >= 157 ? base : 30 + (x + y) % 100;
+      return [v, v * .91, v * .84];
+    }, sixteen);
+    assert.deepEqual(detectFilmType(scan), { filmType: 'bw', confidence: 'medium', reason: 'clearRebate' }, 'tinted black-and-white with only two thin rebates');
+  }
+  const clipped = fixture((x, y, edge) => { const v = edge ? 255 : 30 + (x + y) % 100; return [v, v, v]; }, sixteen);
+  assert.equal(detectFilmType(clipped).filmType, 'bw', 'clipped clear film must not discard rebate evidence');
+  const tinted = fixture((x, y) => { const v = 40 + (x + y) % 160; return [v, v * .91, v * .84]; }, sixteen);
+  assert.equal(detectFilmType(tinted).reason, 'monochrome', 'borderless tinted monochrome keeps uncertain polarity');
+  assert.equal(detectFilmType(tinted).confidence, 'low');
+}
+const mutedColor = fixture((x, y) => x < 80 ? [110, 115, 120] : [120, 115, 110]);
+assert.notEqual(detectFilmType(mutedColor).filmType, 'bw', 'muted colour alone is not negative evidence');
+
+const clippedColorBorder = fixture((x, y) => x < 30 || x >= 130 ? [255, 255, 255] : orange(x, y));
+assert.equal(detectFilmType(clippedColorBorder).filmType, 'color', 'clipped margins must not dilute existing orange-mask evidence');

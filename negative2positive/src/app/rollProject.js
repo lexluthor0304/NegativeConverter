@@ -65,7 +65,8 @@ export function buildRollProject({ files = [], rollMetadata = {}, rollReference 
       hash: entry.hash ? String(entry.hash) : '',
       selected: entry.selected !== false,
       settings: entry.settings || null,
-      studioColors: entry.studioColors || null
+      studioColors: entry.studioColors || null,
+      filmTypeOverride: entry.filmTypeOverride || null
     }))
   };
 }
