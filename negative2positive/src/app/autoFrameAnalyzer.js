@@ -1011,26 +1011,44 @@ function detectFrameCandidatesWithCv(imageData, context, options = {}) {
   }
 }
 
-function buildRotationCandidates(baseCandidates = []) {
+// Straightening angles to try in the fallback path, from the minimum-area
+// rectangles of the contour candidates. Only the tilt matters: a frame that
+// lies sideways in the scan is cropped as a portrait box, it is never rotated
+// by a right angle. The old ±90° / 180° variants let a borderless camera
+// scan come back rotated by 90° with a "high confidence" box covering the
+// whole capture.
+export function buildRotationCandidates(baseCandidates = []) {
   const angleSet = new Set([0]);
   baseCandidates.slice(0, 4).forEach(candidate => {
     const minRect = candidate && candidate.minRect ? candidate.minRect : null;
     if (!minRect) return;
-    let angle = Number(minRect.angle) || 0;
-    const width = Number(minRect.width) || 0;
-    const height = Number(minRect.height) || 0;
-    if (width < height) angle += 90;
-    [angle, -angle, angle + 90, angle - 90, angle + 180].forEach(raw => {
-      const normalized = normalizeAngleDegrees(raw);
-      const quantized = Math.round(normalized * 10) / 10;
-      if (Math.abs(quantized) <= 0.1) {
-        angleSet.add(0);
-      } else {
-        angleSet.add(quantized);
-      }
+    const angle = Number(minRect.angle) || 0;
+    // OpenCV versions disagree on the sign convention, so both are tried.
+    [angle, -angle].forEach(raw => {
+      const quantized = Math.round(normalizeAxisDelta(raw) * 10) / 10;
+      angleSet.add(Math.abs(quantized) <= 0.1 ? 0 : quantized);
     });
   });
   return Array.from(angleSet);
+}
+
+/**
+ * How many sides of the image a crop touches (within `tolerance` px, by
+ * default 0.6 % of the short side). A frame window sits inside the rebate or
+ * holder on every side; a box on two or more edges is the capture itself or
+ * a frame cut off by it, never a window to auto-apply.
+ */
+export function countCropEdgeContacts(cropRegion, image, tolerance = null) {
+  if (!cropRegion || !image || !(image.width > 0) || !(image.height > 0)) return 0;
+  const tol = Number.isFinite(tolerance)
+    ? tolerance
+    : Math.max(2, Math.round(Math.min(image.width, image.height) * 0.006));
+  let contacts = 0;
+  if (cropRegion.left <= tol) contacts++;
+  if (cropRegion.top <= tol) contacts++;
+  if (image.width - (cropRegion.left + cropRegion.width) <= tol) contacts++;
+  if (image.height - (cropRegion.top + cropRegion.height) <= tol) contacts++;
+  return contacts;
 }
 
 function normalizeAxisDelta(angle) {
@@ -1290,6 +1308,9 @@ function detectAxisAlignedCropRegion(imageData, marginRatio, context) {
       ? context.sanitizeCropRegion(candidate.cropRegion, imageData)
       : buildCropRegionFromBound(candidate.bound, imageData, marginRatio, context);
     if (!cropRegion) continue;
+    // A box on two or more image edges is not a window (see countCropEdgeContacts).
+    const edgeContacts = countCropEdgeContacts(cropRegion, imageData);
+    if (edgeContacts >= 2) continue;
     const validation = evaluateAutoFrameCropRegion(cropRegion, imageData, candidate.detectedFormat, candidate, context);
     if (!validation.isValid) continue;
     const reliability = getDensityTemplateReliability(candidate, validation);
@@ -1307,7 +1328,8 @@ function detectAxisAlignedCropRegion(imageData, marginRatio, context) {
       confidence,
       confidenceCap: reliability.confidenceCap,
       candidate,
-      validation
+      validation,
+      edgeContacts
     };
   }
   return null;
@@ -1445,6 +1467,11 @@ export function detectFrameAndRotation(imageData, options = {}) {
     : detectAxisAlignedCropRegion(rotatedFull, context.settings.marginRatio, context);
   clock.mark('fullFallback');
   if (!cropFull || !cropFull.validation || !cropFull.validation.isValid) return withStages(null);
+  const edgeContacts = Math.max(
+    countCropEdgeContacts(cropFull.cropRegion, rotatedFull),
+    Number(cropFull.edgeContacts) || 0
+  );
+  if (edgeContacts >= 2) return withStages(null);
 
   const fullAnglePenalty = computeAutoFrameAnglePenalty(normalizedAngle);
   const resultConfidenceCap = Math.min(
@@ -1453,7 +1480,7 @@ export function detectFrameAndRotation(imageData, options = {}) {
       ? bestPreview.cropPreview.confidenceCap
       : 1
   );
-  const confidence = Number(Math.min(resultConfidenceCap, clampBetween(
+  let confidence = Number(Math.min(resultConfidenceCap, clampBetween(
     (bestPreview.score * 0.34) +
     (cropFull.confidence * 0.56) +
     (cropFull.validation.aspectScore * 0.10) -
@@ -1461,7 +1488,16 @@ export function detectFrameAndRotation(imageData, options = {}) {
     0,
     1
   )).toFixed(2));
-  const confidenceLevel = inferAutoFrameConfidenceLevel(confidence, context.settings);
+  let confidenceLevel = inferAutoFrameConfidenceLevel(confidence, context.settings);
+  // A box that reaches one image edge, or covers nearly the whole capture,
+  // has no rebate to verify against on that side: it may be offered, never
+  // applied on its own.
+  const nearlyWholeCapture = cropFull.validation.areaRatio > 0.93;
+  if (confidenceLevel === 'high' && (edgeContacts === 1 || nearlyWholeCapture)) {
+    const high = Number.isFinite(context.settings.highConfidence) ? context.settings.highConfidence : 0.72;
+    confidence = Number(Math.min(confidence, high - 0.01).toFixed(2));
+    confidenceLevel = inferAutoFrameConfidenceLevel(confidence, context.settings);
+  }
   const detectedFormat = cropFull.candidate && cropFull.candidate.detectedFormat
     ? cropFull.candidate.detectedFormat
     : 'unknown';
@@ -1481,7 +1517,8 @@ export function detectFrameAndRotation(imageData, options = {}) {
       scoreBreakdown: cropFull.candidate ? cropFull.candidate.scoreBreakdown : null,
       frameMode: inferredFrameMode,
       anglePenalty: Number(fullAnglePenalty.toFixed(3)),
-      cropValidation: cropFull.validation || null
+      cropValidation: cropFull.validation || null,
+      edgeContacts
     }
   });
 }
