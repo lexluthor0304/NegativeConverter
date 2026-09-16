@@ -1,7 +1,16 @@
 # Expired film rescue (过期卷抢救)
 
-A separate entry and a separate flow for rolls that were shot or developed
-long past their date. It applies to both kinds of input:
+The ordinary Color pane exposes **One-click color correction / 一键色彩校正**
+as a prominent button above the CMYD Correction Console. It measures the
+converted photo and applies the same automatic rescue defaults to the current
+photo, without changing the roll's import mode, geometry, film type or active
+tab. The action is one undo step; CMYD remains available for manual refinement.
+Pressing it again remeasures the uncorrected conversion instead of stacking
+corrections. Preview, export, saved projects and color sync share the existing
+rescue settings.
+
+The separate expired-roll entry remains available for rolls that were shot
+or developed long past their date. It applies to both kinds of input:
 
 - **Expired negatives** go through the normal conversion first (film base,
   histogram levels, tone curves) and are then rescued as a positive.

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { parseTiff, TIFF_TAGS } from '../negative2positive/src/workers/tiffWriter.js';
 import { DNG_TAGS, PHOTOMETRIC_LINEAR_RAW } from '../negative2positive/src/app/linearDng.js';
+import { runExportCancelSmoke } from './export-cancel-smoke.mjs';
 
 const UPNG = createRequire(import.meta.url)('upng-js');
 const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`;
@@ -74,6 +75,7 @@ export async function runTechnicalDepthSmoke({ send, evaluate, waitFor, wait, fa
   await setSlider('coreExposure', '12');
   await waitFor('adjustments applied', `document.getElementById('coreExposureValue').value === '12'`, 10_000);
   await wait(1500);
+  await runExportCancelSmoke({ evaluate, waitFor, fail });
   const note = await evaluate(`!!document.getElementById('exportBitDepthDowngradeNote')`);
   if (note) fail('the 8-bit-data warning must be gone: the export is true 16-bit now');
   await evaluate(`document.querySelector('.format-btn[data-format="png"]').click(); document.querySelector('.bitdepth-btn[data-bitdepth="16"]').click();`);

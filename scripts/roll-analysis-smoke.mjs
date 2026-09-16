@@ -52,6 +52,8 @@ export async function runRollAnalysisSmoke({ send, evaluate, waitFor, wait, fail
     }
     return out;
   })()`;
+  // Thumbnails intentionally yield to the active photo and import analysis.
+  await waitFor('background roll thumbnails ready', `document.querySelectorAll('img.file-list-thumbnail').length === 3`, 120_000);
   const thumbsBefore = await evaluate(thumbnailMeans);
   await evaluate(`document.getElementById('analyzeRollBtn').click()`);
   await waitFor('roll analysis finished', `${ready} && /2\\/3 frames/.test(document.getElementById('rollAnalysisStatus').textContent)`, 180_000);

@@ -1,4 +1,5 @@
 import { defineConfig } from 'vite';
+import { realpathSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -18,6 +19,9 @@ export default defineConfig({
     host: '127.0.0.1',
     port: 4173,
     strictPort: true,
+    // Isolated worktrees may share node_modules via a symlink. LibRaw's
+    // nested workers need their real package path in the dev-server allowlist.
+    fs: { allow: [resolve(__dirname, '..'), realpathSync(resolve(__dirname, '../node_modules/libraw-wasm'))] },
   },
   preview: {
     host: '127.0.0.1',

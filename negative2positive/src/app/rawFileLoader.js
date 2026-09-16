@@ -522,6 +522,9 @@ export async function loadRawFile(buffer, fileName, options = {}) {
       console.error('[RAW] imageData returned empty result', result);
       return await handleTimeoutFallback();
     }
+    // imageData() has returned an owned copy. The demosaicer's WASM heap is
+    // no longer needed while we allocate the RGBA planes and repair defects.
+    disposeRaw();
     const { width, height } = result;
 
     let image16;

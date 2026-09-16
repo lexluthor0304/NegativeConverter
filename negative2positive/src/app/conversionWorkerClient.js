@@ -1,3 +1,5 @@
+import { isLargeImage } from './imageMemoryBudget.js';
+
 /**
  * Promise bridge to the conversion worker. Callers should fall back to the
  * main-thread convertFrameWithRouter when convertFrameInWorker rejects
@@ -41,6 +43,7 @@ export function createConversionWorkerClient({ cacheInput = false, workerFactory
   const pending = new Map();
   let lastSource = null;
   let lastAnalysis = null;
+  let releaseWhenIdle = false;
   function getWorker() {
     if (worker) return worker;
     worker = workerFactory();
@@ -54,6 +57,15 @@ export function createConversionWorkerClient({ cacheInput = false, workerFactory
       pending.delete(msg.id);
       if (msg.type === 'result') entry.resolve(msg);
       else entry.reject(workerError(msg.message || 'Conversion worker error', CONVERSION_FAILED));
+      // The result buffers have transferred to the caller. Release the large
+      // source/pristine planes and the worker heap instead of pinning them in
+      // the adapter cache until the next photo or application restart.
+      if (releaseWhenIdle && !pending.size && worker === currentWorker) {
+        currentWorker.terminate();
+        worker = null;
+        lastSource = lastAnalysis = null;
+        releaseWhenIdle = false;
+      }
     };
     worker.onerror = (err) => {
       if (worker !== currentWorker) return;
@@ -81,6 +93,7 @@ export function createConversionWorkerClient({ cacheInput = false, workerFactory
       throw workerError(`Conversion worker could not start: ${err?.message || err}`, WORKER_UNAVAILABLE);
     }
     const id = ++requestId;
+    if (!cacheInput && isLargeImage(imageData)) releaseWhenIdle = true;
     const message = {
       type: 'convert',
       id,

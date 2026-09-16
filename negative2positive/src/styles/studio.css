@@ -361,3 +361,30 @@ body.studio {
 .studio .studio-advanced-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 @media (pointer: coarse) { .studio .studio-advanced-toggle { min-height: 44px; } }
 @media (prefers-reduced-motion: reduce) { .studio .studio-advanced-toggle, .studio-toggle-indicator::after { transition: none; } }
+
+/* The primary color action precedes the manual CMYD controls. */
+.studio-color-correction { margin: 12px 18px 18px; }
+body.studio #studioColorCorrect {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 52px;
+  padding: 12px 14px;
+  color: #211a10;
+  background: var(--accent);
+  border: 1px solid var(--accent-hover);
+  box-shadow: inset 0 1px 0 #fff5, 0 3px 0 #100e0a;
+  font-size: 14px;
+  line-height: 1.5;
+  font-weight: 700;
+  text-align: center;
+}
+body.studio #studioColorCorrect:hover:not(:disabled) { background: var(--accent-hover); }
+body.studio #studioColorCorrect:focus-visible { outline: 2px solid var(--text-primary); outline-offset: 3px; }
+body.studio #studioColorCorrect:active:not(:disabled) { transform: translateY(1px); box-shadow: inset 0 1px 0 #fff5, 0 1px 0 #100e0a; }
+body.studio #studioColorCorrect:disabled { opacity: .45; cursor: default; }
+#studioColorCorrect svg { width: 22px; height: 22px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.6; }
+.studio-color-correction p { margin: 8px 0 0; font-size: 12px; line-height: 1.6; color: var(--text-secondary); }
+#studioColorCorrectStatus { color: var(--accent); }

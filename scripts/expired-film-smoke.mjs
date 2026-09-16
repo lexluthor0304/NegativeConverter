@@ -294,6 +294,51 @@ export async function runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail,
   await wait(700);
   const left = await evaluate(`(() => ({ flow: document.body.classList.contains('studio-expired'), hidden: document.getElementById('studioTab-expired').hidden, enabled: document.getElementById('expiredEnabled').checked, active: document.querySelector('.studio-tabs [aria-selected="true"]').id }))()`);
   if (left.flow || !left.hidden || left.enabled || left.active === 'studioTab-expired') fail(`leaving the flow: ${JSON.stringify(left)}`);
+  // Compare exported pixels: enabling rescue switches between WebGL and CPU
+  // previews, and a hidden backing canvas can contain an older render.
+  const exportColorPixels = async () => {
+    const count = await evaluate('window.__expiredExports.length');
+    await evaluate(`document.getElementById('exportSingleBtn').click()`);
+    await waitFor('color correction verification export', `window.__expiredExports.length > ${count} && !document.getElementById('exportSingleBtn').disabled`, 120000);
+    return evaluate(`(async () => {
+      const bitmap = await createImageBitmap(window.__expiredExports.at(-1));
+      const c = document.createElement('canvas'); c.width = bitmap.width; c.height = bitmap.height;
+      c.getContext('2d').drawImage(bitmap, 0, 0); bitmap.close();
+      return { width: c.width, height: c.height, pixels: c.toDataURL() };
+    })()`);
+  };
+  const ordinaryPixels = await exportColorPixels();
+  // Ordinary negative workflow exposes the same algorithm above CMYD, even
+  // with Advanced off. One action, one undo; geometry and manual CMYD survive.
+  await evaluate(`(() => { document.getElementById('studioTab-edit').click(); const advanced = document.getElementById('studioAdvancedPanels'); if (advanced.getAttribute('aria-pressed') === 'true') advanced.click(); })()`);
+  const ordinary = await evaluate(`(() => {
+    const button = document.getElementById('studioColorCorrect');
+    const console = document.getElementById('consoleSection');
+    return { visible: button.getBoundingClientRect().height >= 44 && !button.disabled,
+      above: !!(button.compareDocumentPosition(console) & Node.DOCUMENT_POSITION_FOLLOWING),
+      label: button.textContent.trim(), advanced: document.getElementById('studioAdvancedPanels').getAttribute('aria-pressed') };
+  })()`);
+  if (!ordinary.visible || !ordinary.above || ordinary.label !== 'One-click color correction' || ordinary.advanced !== 'false') fail('ordinary color correction entry: ' + JSON.stringify(ordinary));
+  await evaluate(`document.getElementById('studioColorCorrect').click()`);
+  await waitFor('one-click color correction applied', `document.getElementById('expiredEnabled').checked && document.getElementById('expiredDiagnosis').dataset.state === 'analysed'`);
+  await wait(1600);
+  const corrected = await evaluate(`(() => {
+    return {
+      active: document.querySelector('.studio-tabs [aria-selected="true"]').id,
+      type: document.querySelector('.film-type-btn.active').dataset.type,
+      status: !document.getElementById('studioColorCorrectStatus').hidden,
+      session: document.getElementById('studioExpiredMode').getAttribute('aria-pressed') };
+  })()`);
+  const correctedPixels = await exportColorPixels();
+  if (correctedPixels.pixels === ordinaryPixels.pixels || correctedPixels.width !== ordinaryPixels.width || correctedPixels.height !== ordinaryPixels.height || corrected.active !== 'studioTab-edit' || corrected.type !== 'color' || !corrected.status || corrected.session !== 'false') fail('ordinary one-click correction: ' + JSON.stringify(corrected));
+  await capture('one-click-color-correction.png');
+  await evaluate(`document.getElementById('undoBtn').click()`);
+  await waitFor('one-click correction undo', `!document.getElementById('expiredEnabled').checked`);
+  await wait(1000);
+  const undonePixels = await exportColorPixels();
+  if (undonePixels.pixels !== ordinaryPixels.pixels) fail('one-click correction undo changed exported pixels');
+  console.log('ok: ordinary negative one-click correction is prominent above CMYD, changes pixels, preserves geometry/type/tab, and undoes in one step');
+
   await evaluate(`document.getElementById('studioExpiredMode').click()`);
   await wait(700);
   const back = await evaluate(`(() => ({ flow: document.body.classList.contains('studio-expired'), enabled: document.getElementById('expiredEnabled').checked, active: document.querySelector('.studio-tabs [aria-selected="true"]').id, state: document.getElementById('expiredDiagnosis').dataset.state }))()`);

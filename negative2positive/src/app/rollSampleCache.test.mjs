@@ -1,0 +1,12 @@
+import assert from 'node:assert/strict';
+import {createRollSampleCache} from './rollSampleCache.js';
+const cache=createRollSampleCache(48);
+const a={data:new Uint8ClampedArray(8),__image16:{data:new Uint16Array([1,500,60000,65535])}};
+const b={data:new Uint8ClampedArray(32)};
+cache.put('a',a);cache.put('b',b);assert.equal(cache.bytes,48);
+assert.equal(cache.take('a'),a);assert.equal(cache.bytes,32);assert.equal(a.__image16.data[2],60000);
+cache.put('a',a);cache.put('c',{data:new Uint8ClampedArray(24)});
+assert.equal(cache.take('b'),null);assert.equal(cache.bytes,40);
+cache.put('large',{data:new Uint8ClampedArray(100)});assert.equal(cache.bytes,40);
+cache.clear();assert.equal(cache.bytes,0);assert.equal(cache.take('a'),null);
+console.log('roll sample cache: exact 16-bit samples, consumption, eviction and byte cap passed');

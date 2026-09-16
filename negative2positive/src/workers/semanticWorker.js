@@ -1,18 +1,19 @@
-import * as ort from 'onnxruntime-web/webgpu';
-import wasmUrl from '../../../node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.wasm?url';
-ort.env.wasm.wasmPaths = { 'ort-wasm-simd-threaded.jsep.wasm': wasmUrl };
-ort.env.wasm.numThreads = 1;
+import { loadInferenceRuntime } from '../app/inferenceRuntime.js';
+import { defaultInferencePreference } from '../app/inferenceBackend.js';
+let ort;
 let session, bytes, provider;
 async function create(preferGpu) {
   if (session) await session.release().catch(() => {});
-  provider = preferGpu && navigator.gpu ? 'webgpu' : 'wasm';
+  ort ||= await loadInferenceRuntime();
+  ort.env.wasm.numThreads = 1;
+  provider = defaultInferencePreference() !== 'wasm' && preferGpu && navigator.gpu ? 'webgpu' : 'wasm';
   session = await ort.InferenceSession.create(bytes, { executionProviders: provider === 'webgpu' ? ['webgpu', 'wasm'] : ['wasm'], graphOptimizationLevel: 'all' });
   await session.run({ image: new ort.Tensor('float32', new Float32Array(3 * 512 * 512), [1, 3, 512, 512]) });
 }
-self.onmessage = async ({ data: { image, modelUrl } }) => {
+self.onmessage = async ({ data: { image, modelUrl, preferGpu = true } }) => {
   try {
     if (!bytes) { const response = await fetch(modelUrl); if (!response.ok) throw new Error('Semantic model unavailable'); bytes = await response.arrayBuffer(); }
-    if (!session) { try { await create(true); } catch { await create(false); } }
+    if (!session) { try { await create(preferGpu); } catch { await create(false); } }
     const scale = Math.min(512 / image.width, 512 / image.height);
     const w = Math.round(image.width * scale), h = Math.round(image.height * scale);
     const left = Math.floor((512 - w) / 2), top = Math.floor((512 - h) / 2);
