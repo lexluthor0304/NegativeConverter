@@ -1,3 +1,5 @@
+import { defaultInferencePreference } from './inferenceBackend.js';
+
 // A disposable worker bounds memory and time. Calls are serialized so a roll
 // cannot allocate several ONNX heaps while the first frame is being rendered.
 let pending = Promise.resolve();
@@ -13,7 +15,7 @@ export function analyzeSemanticPreview(image, { timeoutMs = 30000 } = {}) {
     const timer = setTimeout(() => finish(null, 'timeout'), timeoutMs);
     worker.onerror = event => finish(null, event.message);
     worker.onmessage = ({ data }) => finish(data.error ? null : data, data.error);
-    worker.postMessage({ image: { width: image.width, height: image.height, data: image.data }, modelUrl: new URL(`${import.meta.env.BASE_URL}models/efficientvit-b1-ade20k.onnx`, location.href).href });
+    worker.postMessage({ image: { width: image.width, height: image.height, data: image.data }, preferGpu: defaultInferencePreference() === 'webgpu', modelUrl: new URL(`${import.meta.env.BASE_URL}models/efficientvit-b1-ade20k.onnx`, location.href).href });
   }));
   pending = task.catch(() => null);
   return task;

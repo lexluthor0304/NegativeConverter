@@ -1,3 +1,5 @@
+import { loadInferenceRuntime } from './inferenceRuntime.js';
+import { defaultInferencePreference } from './inferenceBackend.js';
 // On-device AI inpainting for dust and scratches: a learned inpainter (the
 // MI-GAN Places2 pipeline, MIT) run by onnxruntime-web on WebGPU where the
 // browser has it and on WASM otherwise, over 512-px tiles restricted to the
@@ -242,13 +244,7 @@ export function inpaintBackends() {
   };
 }
 
-let ortPromise = null;
-export function loadOrt() {
-  if (!ortPromise) {
-    ortPromise = import('onnxruntime-web/webgpu').catch((error) => { ortPromise = null; throw error; });
-  }
-  return ortPromise;
-}
+export const loadOrt = loadInferenceRuntime;
 
 function openModelDb() {
   return new Promise((resolve, reject) => {
@@ -358,10 +354,10 @@ export function runnerFor(ort, session) {
  * caught here and the session rebuilt on WASM. Returns { session, provider,
  * run } where `run` matches inpaintWithModel's callback.
  */
-export async function createInpaintSession(modelBytes, { prefer = 'webgpu', warmUp = true } = {}) {
+export async function createInpaintSession(modelBytes, { prefer = defaultInferencePreference(), warmUp = true } = {}) {
   const ort = await loadOrt();
   const backends = inpaintBackends();
-  const attempts = prefer === 'webgpu' && backends.webgpu ? [['webgpu', 'wasm'], ['wasm']] : [['wasm']];
+  const attempts = defaultInferencePreference() !== 'wasm' && prefer === 'webgpu' && backends.webgpu ? [['webgpu', 'wasm'], ['wasm']] : [['wasm']];
   let lastError = null;
   for (const executionProviders of attempts) {
     let session = null;

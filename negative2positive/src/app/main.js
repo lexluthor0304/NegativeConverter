@@ -1,5 +1,7 @@
 import { sanitizeSemanticMap } from './semanticAnchors.js';
 import { analyzeSemanticPreview } from './semanticModel.js';
+import { isLargeImage } from './imageMemoryBudget.js';
+import { defaultInferencePreference } from './inferenceBackend.js';
 import { readDesktopImportFile } from './desktopImportReader.js';
 import { learnedDefaultsKey, learnedDelta, recordLearnedObservation, applyLearnedDefaults, LEARNED_NUMERIC_KEYS, LEARNED_CATEGORY_KEYS } from './learnedDefaults.js';
 import { readLearnedDefaults, writeLearnedDefaults, resetLearnedDefaults } from './learnedDefaultsStore.js';
@@ -258,6 +260,7 @@ import { frameNeedsReview } from './reviewQueue.js';
     let expiredCompareHeld = false;
     let expiredTabPending = false;
     let expiredAnalysisKey = null;
+    let singleExportActive = false;
     const desktopBatchExportState = {
       active: false,
       current: 0,
@@ -2641,6 +2644,7 @@ import { frameNeedsReview } from './reviewQueue.js';
     };
 
     function getUndoLabel(label) {
+      if (studioWorkspace && label === 'colorCorrect') return studioWorkspace.text('colorCorrect');
       if (studioWorkspace && label === 'studioStyle') return studioWorkspace.text('look');
       if (studioWorkspace && label === 'studioReset') return studioWorkspace.text('reset');
       const map = undoLabelMap[currentLang] || undoLabelMap.en;
@@ -5594,6 +5598,11 @@ import { frameNeedsReview } from './reviewQueue.js';
       state.fullResolutionPending = true;
       const sourceRef = state.conversionSourceImageData;
       if (fullResolutionRenderTimer) clearTimeout(fullResolutionRenderTimer);
+      fullResolutionRenderTimer = null;
+      // A 60 MP RAW plus its working 16-bit planes can exhaust WKWebView
+      // before the user even exports. The display already has its own preview;
+      // original-resolution export/repair calls startFullResolutionRender directly.
+      if (isLargeImage(sourceRef) && !hasFrameRepairs()) return null;
       fullResolutionRenderTimer = setTimeout(() => {
         fullResolutionRenderTimer = null;
         if (sourceRef && state.conversionSourceImageData !== sourceRef) return;
@@ -10040,27 +10049,35 @@ import { frameNeedsReview } from './reviewQueue.js';
     }
 
     async function exportSingle() {
+      const currentItem = getCurrentQueueItem();
+      const exportInfo = getExportInfo();
+      const fileName = buildActiveExportFileName(currentItem?.file?.name, exportInfo);
+      // Ask before rendering: even a cancelled 60 MP export used to allocate
+      // full-resolution buffers and encode an image. Repeated cancellations
+      // could exceed WKWebView's memory limit and reload the entire workspace.
+      const desktop = isTauriDesktop();
+      const targetPath = desktop ? await pickDesktopSavePath(fileName) : null;
+      if (desktop && !targetPath) return { saved: false, path: null };
+      if (currentItem !== getCurrentQueueItem()) {
+        throw new Error('Photo changed while choosing a save location. Please export again.');
+      }
       // Export freezes the result visible when the user requested it. A late
       // background colour estimate must not replace the recipe mid-encode.
       manualEditRevision++;
-      notifyReviewExport([getCurrentQueueItem()].filter(Boolean));
+      notifyReviewExport([currentItem].filter(Boolean));
       if (processNegativeInFlight) await processNegativeInFlight;
       const lang = i18n[currentLang];
       const overlay = getLoadingOverlay();
-      const exportInfo = getExportInfo();
-      let fileName = buildActiveExportFileName(null, exportInfo);
       let blob;
 
       await overlay.show({ title: lang.loadingExporting });
       try {
         overlay.updateProgress(5, lang.loadingAdjusting);
 
-        const currentItem = getCurrentQueueItem();
         if (exportInfo.format === 'dng') {
           persistCurrentFileSettings({ silent: true, force: true });
           overlay.updateProgress(40, lang.loadingEncoding);
           blob = renderLinearDngBlob(state.conversionSourceImageData || state.croppedImageData || state.originalImageData, state, Math.max(0, state.currentFileIndex));
-          if (currentItem?.file?.name) fileName = buildActiveExportFileName(currentItem.file.name, exportInfo);
         } else if (state.currentStep >= 3 && state.processedImageData) {
           persistCurrentFileSettings({ silent: true, force: true });
           const imageData = await renderCurrentImageDataForExport(exportInfo);
@@ -10069,9 +10086,6 @@ import { frameNeedsReview } from './reviewQueue.js';
           blob = await imageDataToBlob(outputImageData, exportInfo.format, state.jpegQuality, exportInfo.bitDepth, (pct) => {
             overlay.updateProgress(60 + pct * 0.35, lang.loadingEncoding);
           }, exportMetadataFor(state, Math.max(0, state.currentFileIndex)));
-          if (currentItem?.file?.name) {
-            fileName = buildActiveExportFileName(currentItem.file.name, exportInfo);
-          }
         } else {
           overlay.updateProgress(50, lang.loadingEncoding);
           const imageData = await renderCurrentImageDataForExport(exportInfo);
@@ -10087,12 +10101,17 @@ import { frameNeedsReview } from './reviewQueue.js';
         overlay.hide();
       }
 
-      const result = await saveBlob(blob, fileName, exportInfo.mimeType);
-      if (result?.saved) await learnFromExport(getCurrentQueueItem());
+      const result = desktop
+        ? await writeBlobToDesktopPath(blob, targetPath, exportInfo.mimeType)
+        : await saveBlob(blob, fileName, exportInfo.mimeType);
+      if (result?.saved) await learnFromExport(currentItem);
       return result;
     }
 
     document.getElementById('exportSingleBtn').addEventListener('click', async () => {
+      if (singleExportActive || isDesktopBatchExportLocked()) return;
+      singleExportActive = true;
+      updateExportButtons();
       try {
         const result = await exportSingle();
         handleSaveResult(result, {
@@ -10101,6 +10120,10 @@ import { frameNeedsReview } from './reviewQueue.js';
         });
       } catch (err) {
         notifyExportError(err);
+      } finally {
+        singleExportActive = false;
+        updateExportButtons();
+        updateExportUI();
       }
     });
 
@@ -11708,7 +11731,7 @@ import { frameNeedsReview } from './reviewQueue.js';
 
     function updateExportButtons() {
       const selectedCount = state.fileQueue.filter(f => f.selected).length;
-      const exportLocked = isDesktopBatchExportLocked();
+      const exportLocked = singleExportActive || isDesktopBatchExportLocked();
       const exportBtn = document.getElementById('exportBtn');
       const exportSprocketBtn = document.getElementById('exportSprocketBtn');
       const exportSingleBtn = document.getElementById('exportSingleBtn');
@@ -13352,13 +13375,13 @@ import { frameNeedsReview } from './reviewQueue.js';
       document.getElementById('expiredApplySelectedBtn').disabled = !ready || !hasOthers;
     }
 
-    function setExpiredEnabled(enabled) {
+    function setExpiredEnabled(enabled, { reanalyze = false, undoLabel = 'expiredEnabled' } = {}) {
       const next = Boolean(enabled);
-      if (Boolean(state.expiredEnabled) === next) {
+      if (Boolean(state.expiredEnabled) === next && !reanalyze) {
         updateExpiredRescueUI();
         return;
       }
-      pushUndo('expiredEnabled');
+      pushUndo(undoLabel);
       state.expiredEnabled = next;
       if (next) {
         // Gains from the automatic gray point would fight the per-band balance.
@@ -13370,7 +13393,10 @@ import { frameNeedsReview } from './reviewQueue.js';
           updateWBSliders();
           updateGrayPointGuideUI();
         }
-        if (state.processedImageData && !hasCurrentExpiredAnalysis()) runExpiredAnalysis(state.processedImageData);
+        if (reanalyze) resetExpiredStrengthsInState({ force: true });
+        if (state.processedImageData && (reanalyze || !hasCurrentExpiredAnalysis())) {
+          runExpiredAnalysis(state.processedImageData, { force: reanalyze });
+        }
       }
       markCurrentFileDirty();
       updateExpiredRescueUI();
@@ -13816,7 +13842,7 @@ import { frameNeedsReview } from './reviewQueue.js';
     // asset, fetched once and cached in IndexedDB).
     const loadAiRepairModel = createAiModelLoader(performAiRepairModelLoad, DEFAULT_MODEL_URL);
 
-    async function performAiRepairModelLoad(source, { prefer = 'webgpu', refresh = true } = {}) {
+    async function performAiRepairModelLoad(source, { prefer = defaultInferencePreference(), refresh = true } = {}) {
       aiRepair.status = 'loading';
       aiRepair.percent = 0;
       aiRepair.error = '';
@@ -13854,7 +13880,7 @@ import { frameNeedsReview } from './reviewQueue.js';
         aiRepair.run = null;
       }
       updateAiRepairUI();
-      if (refresh && prefer !== 'wasm' && hasFrameRepairs()) scheduleDustDetection();
+      if (refresh && hasFrameRepairs()) scheduleDustDetection();
     }
 
     // The commit-path inpaint: the learned model when it is on and ready,
@@ -13877,7 +13903,7 @@ import { frameNeedsReview } from './reviewQueue.js';
         // A WebGPU session that fails mid-run is rebuilt on WASM once; only
         // when that fails too does TELEA take over.
         if (aiRepair.provider === 'webgpu' && aiRepair.sourceRef) {
-          await loadAiRepairModel(aiRepair.sourceRef, { prefer: 'wasm' });
+          await loadAiRepairModel(aiRepair.sourceRef, { prefer: 'wasm', refresh: false });
           if (aiRepairReady()) return inpaintForCommit(source, mask);
         }
         aiRepair.status = 'error';
@@ -15448,7 +15474,7 @@ import { frameNeedsReview } from './reviewQueue.js';
         getText: key => getLocalizedText(key),
         getState: () => state,
         getLanguage: () => currentLang,
-        isExportLocked: isDesktopBatchExportLocked,
+        isExportLocked: () => singleExportActive || isDesktopBatchExportLocked(),
         onResetAll: resetAllAdjustments,
         onRestart: restartPhotoProcessing,
         onNewSession: closePhotoSession,
@@ -15493,6 +15519,10 @@ import { frameNeedsReview } from './reviewQueue.js';
           document.getElementById('applyConvertBtn').click();
         },
         onExpiredMode: () => setExpiredSession(!state.expiredSession),
+        onColorCorrect: () => {
+          if (!state.processedImageData || state.cropping || singleExportActive || isDesktopBatchExportLocked() || document.body.dataset.studioBusy) return;
+          setExpiredEnabled(true, { reanalyze: true, undoLabel: 'colorCorrect' });
+        },
         onConfirm: message => appConfirm(message),
         onExportBorder: enabled => setExportSprocketMode(enabled),
         onAutoCrop: enabled => {

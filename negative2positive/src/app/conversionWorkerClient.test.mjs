@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createConversionWorkerClient, WORKER_CRASHED, WORKER_UNAVAILABLE, CONVERSION_FAILED } from './conversionWorkerClient.js';
+import { isLargeImage } from './imageMemoryBudget.js';
 globalThis.ImageData = class {
   constructor(data, width, height) { Object.assign(this, { data, width, height }); }
 };
@@ -55,4 +56,22 @@ assert.equal(fullWorker.messages.length, 1, 'プレビューは原寸処理の�
 fullWorker.complete(); await fullPromise;
 const unavailable = createConversionWorkerClient({ workerFactory: () => { throw new Error('blocked'); } });
 await assert.rejects(unavailable(request), { code: WORKER_UNAVAILABLE });
+assert.equal(isLargeImage({ width: 4000, height: 4000 }), false);
+assert.equal(isLargeImage({ width: 9536, height: 6336 }), true);
+// A fake payload exercises lifetime only; no large allocation is needed.
+const largeWorkers = [];
+const largeClient = createConversionWorkerClient({ workerFactory: () => {
+  const w = new FakeWorker(); largeWorkers.push(w); return w;
+} });
+const largeRequest = { ...request, imageData: { ...input, width: 9536, height: 6336 } };
+let largeResult = largeClient(largeRequest);
+largeWorkers[0].complete();
+assert.equal((await largeResult).data[0], 1, 'result remains usable after worker release');
+assert.equal(largeWorkers[0].terminated, true, 'large conversion releases its source/cache heap');
+largeResult = largeClient(largeRequest);
+assert.equal(largeWorkers.length, 2, 'next large export starts a fresh worker');
+largeWorkers[1].complete(); await largeResult;
+const smallResult = largeClient(request);
+largeWorkers[2].complete(); await smallResult;
+assert.equal(largeWorkers[2].terminated, undefined, 'small conversions retain the reusable worker');
 console.log('conversionWorkerClient: 入力再利用・参照解除・再起動・独立キュー・部分配列を検証');
