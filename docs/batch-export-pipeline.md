@@ -53,14 +53,25 @@ in the background pass, covering the editor for minutes on a long roll.
 | Renderer RSS peak during export | ~1.2 GB | 2.7 GB | 2.8 GB | 3.7 GB |
 | Background roll analysis | 170 s | 98 s | 82 s | 78 s |
 
-The output pixels are unchanged (same conversion, same encoder). What still
-dominates: the RAW decode (LibRaw, ~2.7 s per 18.5 MP DNG, single-threaded
-WASM, one worker per lane) and, in the import pass, the auto-frame line
-search (`findWindowLineQuads`: `cv.HoughLinesP` at π/1800 over four
-channels, 10–20 s per frame on these scans). Coarser Hough resolutions are
-2.5–5× faster but change detections on the RAW regression set, so they were
-not adopted; see the notes in `docs/auto-frame-regression.md` before touching
-it.
+The output pixels are unchanged (same conversion, same encoder).
+
+The follow-up (branch `feat/roll-analysis-speed`) replaced the auto-frame
+line search: `findWindowLineQuads` used `cv.HoughLinesP` over all 1800
+directions of four channels (10–20 s per 18 MP frame); it now runs a
+standard Hough restricted to ±15° around each axis and walks the edge pixels
+of each strong line into segments (same thresholds, sub-pixel slopes), with
+identical detections on the regression set. The fallback candidate builder
+reuses its Hough bound for the repeated angle-0 pass, and the worker loads
+OpenCV while the first photo decodes. Same 12 DNGs: first photo ready
+28.8 s → 13.0 s, background roll analysis 170 s → 51.5 s (4 lanes).
+
+What still dominates: the RAW decode (LibRaw, ~2.7 s per 18.5 MP DNG,
+single-threaded WASM, one worker per lane), and in the auto-frame fallback
+the per-angle candidate passes (`detectAxisAlignedCropRegion`, ~0.5 s each,
+3–4 angles) plus the window search itself (~2.3 s for 8 restricted Hough
+calls). Both could run across helper workers for the first photo; the
+background lanes already saturate the cores. See `docs/auto-frame-regression.md`
+before touching the detector.
 
 ## Verification
 

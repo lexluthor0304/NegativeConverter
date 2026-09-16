@@ -765,6 +765,8 @@ function scoreFrameCandidate(candidate, context) {
   };
 }
 
+const houghCandidateByImage = new WeakMap();
+
 function buildHoughCandidate(edges, imageWidth, imageHeight) {
   if (!globalThis.cv.HoughLinesP) return null;
   const lines = new globalThis.cv.Mat();
@@ -961,7 +963,14 @@ function detectFrameCandidatesWithCv(imageData, context, options = {}) {
       }
     }
 
-    const houghCandidate = buildHoughCandidate(edges, imageWidth, imageHeight);
+    // The Hough bound depends only on the edge map, which is a pure function
+    // of the image: the preview is analysed once for candidates and again at
+    // angle 0 for the axis-aligned crop, so the second pass reuses the first.
+    let houghCandidate = houghCandidateByImage.get(imageData);
+    if (houghCandidate === undefined) {
+      houghCandidate = buildHoughCandidate(edges, imageWidth, imageHeight);
+      houghCandidateByImage.set(imageData, houghCandidate);
+    }
     if (houghCandidate) {
       const scoredHough = scoreFrameCandidate(houghCandidate, {
         imageWidth,
@@ -1312,43 +1321,73 @@ export function inferAutoFrameConfidenceLevel(confidence, settings = {}) {
   return 'low';
 }
 
+// Wall time per stage, attached to the result as `stageMs` (outside
+// `diagnostics`, which must stay deterministic: the smoke suite compares the
+// worker's diagnostics with a main-thread run) so the app can log where a
+// slow detection spent its time.
+function createStageClock() {
+  const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+  const stages = {};
+  let last = now();
+  return {
+    mark(stage) {
+      const t = now();
+      stages[stage] = Math.round((stages[stage] || 0) + (t - last));
+      last = t;
+    },
+    stages
+  };
+}
+
 export function detectFrameAndRotation(imageData, options = {}) {
   if (!imageData || !(globalThis.cv && globalThis.cv.Mat)) return null;
   const context = getAnalyzerContext(options);
   if (!context.rotateImageData) return null;
+  const clock = createStageClock();
+  const withStages = (result) => {
+    if (result) result.stageMs = clock.stages;
+    return result;
+  };
 
   const previewData = resizeImageDataToMaxSide(imageData, context.maxSide);
+  clock.mark('preview');
   const window = detectImageWindow(previewData, getAutoFrameAspectTargets(context));
+  clock.mark('window');
   // 撮影範囲外の辺は比率で補完しない。密度テンプレートにもフォールバックせず、
   // 自動・一括処理のいずれも元画像を保持して手動確認へ回す。
-  if (window?.incomplete || window?.requiresReview) return {
+  if (window?.incomplete || window?.requiresReview) return withStages({
     angle: 0, cropRegion: null, confidence: 0, confidenceLevel: 'low',
     detectedFormat: 'unknown', requiresReview: true, rotatedImageData: imageData,
     diagnostics: { method: window.ambiguous ? 'opencv-ambiguous-window' : 'opencv-incomplete-window', incomplete: Boolean(window.incomplete) }
-  };
+  });
   if (window) {
     const angle = Number(window.angle.toFixed(2));
     const rotated = angle ? context.rotateImageData(imageData, angle) : imageData;
     const cropRegion = projectWindowCrop({ ...window, angle }, previewData, imageData, rotated);
-    if (cropRegion) return {
+    clock.mark('rotateFull');
+    if (cropRegion) return withStages({
       angle, cropRegion, confidence: window.confidence,
       confidenceLevel: inferAutoFrameConfidenceLevel(window.confidence, context.settings),
       detectedFormat: window.detectedFormat, rotatedImageData: rotated,
       diagnostics: { method: window.method || 'opencv-image-window', scoreBreakdown: window.evidence }
-    };
+    });
   }
   const previewCandidates = detectFrameCandidatesWithCv(previewData, context, { minAreaRatio: 0.04 });
+  clock.mark('previewCandidates');
   const lineAngleCandidates = buildLineOrientationRotationCandidates(previewData);
-  if (!previewCandidates.length && !lineAngleCandidates.length) return null;
+  clock.mark('lineAngles');
+  if (!previewCandidates.length && !lineAngleCandidates.length) return withStages(null);
 
   const angleCandidates = mergeAngleCandidates(
     buildRotationCandidates(previewCandidates),
     lineAngleCandidates
   );
   let bestPreview = null;
+  clock.stages.angleCount = angleCandidates.length;
   for (const angle of angleCandidates) {
     const rotatedPreview = Math.abs(angle) < 0.001 ? previewData : context.rotateImageData(previewData, angle);
     const cropPreview = detectAxisAlignedCropRegion(rotatedPreview, context.settings.marginRatio, context);
+    clock.mark('anglePasses');
     if (!cropPreview) continue;
     const baseScore = previewCandidates[0] ? previewCandidates[0].score : 0.5;
     const anglePenalty = computeAutoFrameAnglePenalty(angle);
@@ -1376,9 +1415,10 @@ export function detectFrameAndRotation(imageData, options = {}) {
     }
   }
 
-  if (!bestPreview) return null;
+  if (!bestPreview) return withStages(null);
   const normalizedAngle = Math.abs(bestPreview.angle) < 0.15 ? 0 : Number(bestPreview.angle.toFixed(2));
   const rotatedFull = Math.abs(normalizedAngle) < 0.001 ? imageData : context.rotateImageData(imageData, normalizedAngle);
+  clock.mark('rotateFull');
   const scaledCropRegion = scaleCropRegion(
     bestPreview.cropPreview.cropRegion,
     bestPreview.rotatedPreviewWidth,
@@ -1393,6 +1433,7 @@ export function detectFrameAndRotation(imageData, options = {}) {
     bestPreview.cropPreview.candidate,
     context
   );
+  clock.mark('fullValidation');
   const cropFull = scaledCropRegion && scaledValidation.isValid
     ? {
       cropRegion: scaledCropRegion,
@@ -1402,7 +1443,8 @@ export function detectFrameAndRotation(imageData, options = {}) {
       validation: scaledValidation
     }
     : detectAxisAlignedCropRegion(rotatedFull, context.settings.marginRatio, context);
-  if (!cropFull || !cropFull.validation || !cropFull.validation.isValid) return null;
+  clock.mark('fullFallback');
+  if (!cropFull || !cropFull.validation || !cropFull.validation.isValid) return withStages(null);
 
   const fullAnglePenalty = computeAutoFrameAnglePenalty(normalizedAngle);
   const resultConfidenceCap = Math.min(
@@ -1427,7 +1469,7 @@ export function detectFrameAndRotation(imageData, options = {}) {
     ? cropFull.candidate.frameMode
     : inferFrameMaterialMode(context, buildDensityAnalysis(previewData));
 
-  return {
+  return withStages({
     angle: normalizedAngle,
     cropRegion: cropFull.cropRegion,
     confidence,
@@ -1441,5 +1483,5 @@ export function detectFrameAndRotation(imageData, options = {}) {
       anglePenalty: Number(fullAnglePenalty.toFixed(3)),
       cropValidation: cropFull.validation || null
     }
-  };
+  });
 }

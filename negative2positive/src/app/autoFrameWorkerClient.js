@@ -62,6 +62,14 @@ export function createAutoFrameWorkerClient({
 
 export const analyzeFrameInWorker = createAutoFrameWorkerClient();
 
+// Starts the shared worker and loads OpenCV ahead of the first detection.
+// Safe to call repeatedly; failures are ignored (the detection will load it).
+export function warmUpAutoFrameWorker() {
+  if (typeof Worker !== 'function' || typeof OffscreenCanvas !== 'function') return Promise.resolve(false);
+  const pixel = { width: 1, height: 1, data: new Uint8ClampedArray(4) };
+  return analyzeFrameInWorker(pixel, {}, 'warm-up').then(() => true, () => false);
+}
+
 /**
  * Several auto-frame workers for the import roll analysis: each lane gets
  * the analyzer with the fewest requests in flight, so frames of a roll are

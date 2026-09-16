@@ -19,7 +19,7 @@ import { frameNeedsReview } from './reviewQueue.js';
     import { showToast } from '../ui/toast.js';
     import { writeDesktopBlob } from './desktopExportWriter.js';
     import { normalizeAngleDegrees, applyRotationToImageData, mirrorImageDataHorizontal, applyGeometryChainToImageData } from './imageGeometry.js';
-    import { analyzeFrameInWorker, readFilmEdgeInWorker, createAutoFrameWorkerPool } from './autoFrameWorkerClient.js';
+    import { analyzeFrameInWorker, readFilmEdgeInWorker, createAutoFrameWorkerPool, warmUpAutoFrameWorker } from './autoFrameWorkerClient.js';
     import { detectFrameWithFallback } from './autoFrameExecution.js';
     import { createRollSampleCache } from './rollSampleCache.js';
     import { mountStudioWorkspace } from './studioWorkspace.js';
@@ -6549,6 +6549,9 @@ import { frameNeedsReview } from './reviewQueue.js';
 
     async function loadFile(file, { autoConvert = true } = {}) {
       const generation = ++loadGeneration;
+      // The frame detector needs OpenCV compiled in its worker; start that
+      // now so it overlaps the decode instead of following it.
+      if (autoConvert && state.autoFrame.enabled) void warmUpAutoFrameWorker();
       // A crop draft holds the previous image; leaving crop mode armed lets
       // "Apply" replace the newly loaded file with the old one.
       if (state.cropping) exitCropMode({ restore: false });
@@ -12332,6 +12335,7 @@ import { frameNeedsReview } from './reviewQueue.js';
       let result;
       try { result = await detectFrameAndRotation(source, { silent, analyzeInWorker }); }
       catch (error) { console.warn('Import frame detection failed; keeping the full image:', error); }
+      if (DEBUG_UI && result?.stageMs) console.info('[perf]', 'autoFrameStages', { method: result.diagnostics?.method, ...result.stageMs });
       const reliable = canAutoApplyImportFrame(result, state.autoFrame);
       const apply = reliable && state.autoFrame.onImport && allowCrop;
       const meta = {
