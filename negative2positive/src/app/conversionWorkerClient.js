@@ -35,7 +35,7 @@ function workerError(message, code) {
 }
 
 // 原寸の書き出しと操作中のプレビューでキューを共有しない。
-export function createConversionWorkerClient({ cacheInput = false, workerFactory = () => new Worker(
+export function createConversionWorkerClient({ cacheInput = false, retainWorker = false, workerFactory = () => new Worker(
   new URL('../workers/conversionWorker.js', import.meta.url), { type: 'module' }
 ) } = {}) {
   let worker = null;
@@ -84,7 +84,7 @@ export function createConversionWorkerClient({ cacheInput = false, workerFactory
    * Run convertFrameWithRouter in the worker.
    * Returns an ImageData with __image16 attached (same contract as the router).
    */
-  return async function convert({ imageData, settings, options = {} }) {
+  async function convert({ imageData, settings, options = {} }) {
 
     let w;
     try {
@@ -93,7 +93,9 @@ export function createConversionWorkerClient({ cacheInput = false, workerFactory
       throw workerError(`Conversion worker could not start: ${err?.message || err}`, WORKER_UNAVAILABLE);
     }
     const id = ++requestId;
-    if (!cacheInput && isLargeImage(imageData)) releaseWhenIdle = true;
+    // A batch lane keeps its worker for the whole roll: restarting a module
+    // worker per frame re-fetches the engine and rebuilds its tables.
+    if (!cacheInput && !retainWorker && isLargeImage(imageData)) releaseWhenIdle = true;
     const message = {
       type: 'convert',
       id,
@@ -178,7 +180,61 @@ export function createConversionWorkerClient({ cacheInput = false, workerFactory
       out.__analysisPreview = new ImageData(new Uint8ClampedArray(sample.rgba), sample.width, sample.height);
     }
     return out;
+  }
+
+  // Terminate the worker and fail whatever it still owed. The next convert()
+  // call starts a fresh worker, so this is safe to call at the end of a batch.
+  convert.dispose = () => {
+    const dying = worker;
+    worker = null;
+    lastSource = lastAnalysis = null;
+    releaseWhenIdle = false;
+    for (const [id, entry] of pending) {
+      pending.delete(id);
+      entry.reject(workerError('Conversion worker was released', WORKER_CRASHED));
+    }
+    if (dying) { try { dying.terminate(); } catch { /* already gone */ } }
   };
+
+  return convert;
+}
+
+/**
+ * Several independent conversion workers for batch export. Each request goes
+ * to the lane with the fewest conversions in flight, so up to `size` frames
+ * convert at the same time instead of queueing on one worker while the main
+ * thread decodes the next file. The interactive preview / full-resolution
+ * clients above are untouched; a pool lives only for one batch and is
+ * released with dispose().
+ */
+export function createConversionWorkerPool({ size = 2, workerFactory } = {}) {
+  const laneCount = Math.max(1, Math.floor(size) || 1);
+  const lanes = [];
+  const laneOptions = { retainWorker: true };
+  if (workerFactory) laneOptions.workerFactory = workerFactory;
+  for (let i = 0; i < laneCount; i++) {
+    lanes.push({ inFlight: 0, convert: createConversionWorkerClient(laneOptions) });
+  }
+  let disposed = false;
+
+  async function convert(request) {
+    if (disposed) throw workerError('Conversion worker pool was released', WORKER_UNAVAILABLE);
+    let lane = lanes[0];
+    for (const candidate of lanes) if (candidate.inFlight < lane.inFlight) lane = candidate;
+    lane.inFlight += 1;
+    try {
+      return await lane.convert(request);
+    } finally {
+      lane.inFlight -= 1;
+    }
+  }
+
+  convert.size = laneCount;
+  convert.dispose = () => {
+    disposed = true;
+    for (const lane of lanes) lane.convert.dispose();
+  };
+  return convert;
 }
 
 export const convertFrameInWorker = createConversionWorkerClient();

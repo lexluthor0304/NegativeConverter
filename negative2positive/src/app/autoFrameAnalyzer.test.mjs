@@ -99,3 +99,33 @@ console.log('autoFrameAnalyzer aspect-target tests passed');
   }, validation);
   assert.equal(inferAutoFrameConfidenceLevel(moderate.confidenceCap), 'medium');
 }
+
+// ---- fallback guards: straightening angles only, no boxes on the image edges ----
+{
+  const { buildRotationCandidates, countCropEdgeContacts } = await import('./autoFrameAnalyzer.js');
+  // Axis-aligned rectangles reported as ±90° by minAreaRect are 0° tilts;
+  // a 1.5° tilt reported as -88.5° is 1.5°; nothing ever rotates by a right angle.
+  const angles = buildRotationCandidates([
+    { minRect: { angle: -90, width: 300, height: 200 } },
+    { minRect: { angle: 90, width: 200, height: 300 } },
+    { minRect: { angle: -88.5, width: 300, height: 200 } },
+    { minRect: { angle: 3.2, width: 300, height: 200 } },
+    { minRect: { angle: 180, width: 300, height: 200 } }
+  ]);
+  assert.ok(angles.includes(0));
+  assert.ok(angles.every(angle => Math.abs(angle) <= 45), `fallback angles stay within ±45°: ${angles}`);
+  assert.ok(angles.includes(1.5) && angles.includes(-1.5), `sign ambiguity keeps both tilts: ${angles}`);
+  assert.ok(angles.includes(3.2) && angles.includes(-3.2));
+  assert.ok(!angles.some(angle => Math.abs(Math.abs(angle) - 90) < 1), 'no right-angle candidates');
+
+  const image = { width: 1600, height: 1066 };
+  assert.equal(countCropEdgeContacts({ left: 100, top: 90, width: 1200, height: 800 }, image), 0);
+  assert.equal(countCropEdgeContacts({ left: 0, top: 90, width: 1200, height: 800 }, image), 1, 'left edge');
+  assert.equal(countCropEdgeContacts({ left: 0, top: 0, width: 1262, height: 809 }, image), 2, 'left and top');
+  assert.equal(countCropEdgeContacts({ left: 0, top: 40, width: 1600, height: 1026 }, image), 3, 'three sides (a whole-capture box)');
+  assert.equal(countCropEdgeContacts({ left: 5, top: 5, width: 1590, height: 1056 }, image), 4, 'within the 0.6 % tolerance counts as touching');
+  assert.equal(countCropEdgeContacts({ left: 12, top: 12, width: 1576, height: 1042 }, image), 0, 'a 12 px rebate is inside');
+  assert.equal(countCropEdgeContacts(null, image), 0);
+  assert.equal(countCropEdgeContacts({ left: 0, top: 0, width: 10, height: 10 }, { width: 0, height: 0 }), 0);
+  console.log('autoFrameAnalyzer fallback guard tests passed');
+}

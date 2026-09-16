@@ -327,3 +327,38 @@ assert.ok(computeWorkerTimeoutMs(Number.MAX_SAFE_INTEGER) <= 600_000);
 terminateWorker();
 
 console.log('workerBridge.test.mjs passed');
+
+// ------------------------- independent bridges and the batch pool
+{
+  const { createExportWorkerBridge, createExportWorkerPool } = await import('./workerBridge.js');
+  reset(() => ({ kind: 'hang' }));
+  const a = createExportWorkerBridge();
+  const b = createExportWorkerBridge();
+  const pa = a.workerEncodePng16(createImageData(), { timeoutMs: 0 });
+  assert.equal(workers.length, 1, 'a bridge starts its own worker lazily');
+  assert.equal(a.pendingCount, 1);
+  assert.equal(b.pendingCount, 0);
+  const pb = b.workerEncodePng16(createImageData(), { timeoutMs: 0 });
+  assert.equal(workers.length, 2, 'the second bridge gets a second worker');
+  a.terminateWorker();
+  assert.equal(await pa, null, 'terminating one bridge fails only its own request');
+  assert.equal(b.pendingCount, 1, 'the other bridge is untouched');
+  assert.ok(workers[0].terminated && !workers[1].terminated);
+  b.terminateWorker();
+  assert.equal(await pb, null);
+
+  reset(() => ({ kind: 'hang' }));
+  const pool = createExportWorkerPool({ size: 2 });
+  assert.equal(pool.size, 2);
+  const r1 = pool.workerEncodeTiff(createImageData(), 8, { timeoutMs: 0 });
+  const r2 = pool.workerEncodeTiff(createImageData(), 8, { timeoutMs: 0 });
+  const r3 = pool.workerEncodeTiff(createImageData(), 8, { timeoutMs: 0 });
+  assert.equal(workers.length, 2, 'the pool spreads requests over its lanes');
+  assert.equal(workers[0].posts.length, 2, 'the third request joins the least-busy lane');
+  assert.equal(workers[1].posts.length, 1);
+  assert.equal(pool.pendingCount, 3);
+  pool.dispose();
+  assert.deepEqual(await Promise.all([r1, r2, r3]), [null, null, null]);
+  assert.ok(workers.every(w => w.terminated), 'dispose terminates every lane');
+  console.log('workerBridge: independent bridges and pool dispatch verified');
+}

@@ -253,6 +253,24 @@ body {
   white-space: nowrap;
 }
 
+.header-export-progress-cancel {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  background: transparent;
+  border: 1px solid var(--accent, #45d6cd);
+  color: var(--accent, #45d6cd);
+  border-radius: 4px;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.header-export-progress-cancel:hover {
+  background: var(--accent, #45d6cd);
+  color: #000;
+}
+
 .header-export-progress-file {
   min-width: 0;
   font-size: 11px;
@@ -978,6 +996,29 @@ body {
   height: 24px;
   background: var(--border);
   margin: 0 4px;
+}
+
+/* Crop aspect-ratio lock (shown only in crop mode) */
+.toolbar-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.toolbar-select {
+  padding: 6px 8px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.crop-ratio-flip.portrait svg {
+  transform: rotate(90deg);
 }
 
 /* Status Badge — VHS on-screen display */
@@ -3202,8 +3243,13 @@ input.preset-select {
 
   .status-badge,
   .current-file-label,
-  .toolbar-btn {
+  .toolbar-btn,
+  .toolbar-field {
     flex-shrink: 0;
+  }
+
+  .toolbar-select {
+    min-height: 36px;
   }
 
   .status-badge,

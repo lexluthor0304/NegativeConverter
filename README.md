@@ -22,7 +22,7 @@ optional. See the [automation design](docs/simplicity-automation.md),
 
 - 📷 **Supports HEIC/HEIF, PNG/JPG file uploads** (including 16-bit PNGs via UPNG.js and .cr2, .nef, .arw, .dng, .raw, .rw2 raw files via LibRaw-Wasm)
 - 🔄 **Rotation correction** via slider or number input
-- ✂️ **Visual cropping** with drag-and-drop overlay
+- ✂️ **Visual cropping** with drag-and-drop overlay and a film-format ratio lock (135, 120, 4×5/8×10, 5×7)
 - ⚖️ **One-click white balance** by clicking a gray area in the image
 - 🎛️ **Live controls** for:
   - Temperature & Tint

@@ -16,6 +16,13 @@ async function loadCv() {
 
 self.onmessage = async ({ data: message }) => {
   try {
+    if (message.type === 'warm-up') {
+      // Load and compile OpenCV while the first photo is still decoding, so
+      // the first detection does not pay for it.
+      await loadCv();
+      self.postMessage({ id: message.id, result: { ready: true } });
+      return;
+    }
     if (message.type === 'read-film-edge') {
       // Perforation lanes and the DX edge barcode need no OpenCV; the result
       // is plain data (no ImageData), so it clones without transfers.
