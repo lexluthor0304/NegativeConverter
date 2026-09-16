@@ -24,6 +24,7 @@ import { frameNeedsReview } from './reviewQueue.js';
     import { createRollSampleCache } from './rollSampleCache.js';
     import { mountStudioWorkspace } from './studioWorkspace.js';
     import { AUTO_FRAME_FORMAT_RATIOS, AUTO_FRAME_DEFAULT_120_FORMATS, canAutoApplyImportFrame } from './autoFrameFormats.js';
+    import { DEFAULT_CROP_RATIO_CHOICE, findCropRatioPreset, parseCropRatioChoice, serializeCropRatioChoice, fitRectToRatio, resizeRectWithRatio, drawRectWithRatio, preferredCropOrientation, flipOrientation } from './cropRatio.js';
     import { imageAreaFromDetection, resolveAnalysisRegion, analysisPixelBounds, imageAreaFromWorkingRect, sampleAnalysisArea } from './analysisRegion.js';
     import { detectCropImageArea, workingPointsToBase, isSameAnalysisFrame } from './cropColorAnalysis.js';
     import { pickStudioColors, mergeStudioColors, createStudioThumbnail } from './studioSettings.js';
@@ -8655,6 +8656,63 @@ import { frameNeedsReview } from './reviewQueue.js';
     let cropPreviewRenderFrame = null;
     let cropHintTimer = null;
 
+    // Aspect-ratio lock. The choice is remembered across photos so a roll is
+    // cropped to one format. The box orientation follows the frame; the
+    // remembered orientation only decides square frames (preferredCropOrientation).
+    const CROP_RATIO_STORAGE_KEY = 'nc_crop_ratio_v1';
+    const cropRatioField = document.getElementById('cropRatioField');
+    const cropRatioSelect = document.getElementById('cropRatioSelect');
+    const cropRatioFlipBtn = document.getElementById('cropRatioFlipBtn');
+    let cropRatioChoice = { ...DEFAULT_CROP_RATIO_CHOICE };
+
+    function getCropRatioLock() {
+      const draft = state.cropDraft;
+      if (!draft || draft.analysisOnly) return null;
+      const preset = findCropRatioPreset(cropRatioChoice.id);
+      return preset.ratio ? { ratio: preset.ratio, orientation: draft.ratioOrientation } : null;
+    }
+
+    // Re-shapes the draft box to the locked ratio. The box keeps the
+    // orientation it already has (a rotated portrait frame gets a portrait
+    // box) unless `orientation` forces one, as the flip button does.
+    function fitCropDraftToRatio(orientation = null) {
+      const draft = state.cropDraft;
+      const imageData = draft?.rotatedImageData;
+      if (!draft?.rect || !imageData) return;
+      draft.ratioOrientation = orientation || preferredCropOrientation(draft.rect, draft.ratioOrientation);
+      const lock = getCropRatioLock();
+      if (lock) {
+        draft.rect = fitRectToRatio(draft.rect, lock.ratio, imageData, { orientation: lock.orientation, minSize: getCropMinSize(imageData) });
+      }
+      updateCropRatioUi();
+    }
+
+    function updateCropRatioUi() {
+      const visible = state.cropping && Boolean(state.cropDraft) && !state.cropDraft.analysisOnly;
+      cropRatioField.style.display = visible ? 'inline-flex' : 'none';
+      cropRatioFlipBtn.style.display = visible ? 'inline-flex' : 'none';
+      if (!visible) return;
+      cropRatioSelect.value = cropRatioChoice.id;
+      const lock = getCropRatioLock();
+      cropRatioFlipBtn.disabled = !lock || lock.ratio === 1;
+      cropRatioFlipBtn.classList.toggle('portrait', Boolean(lock) && lock.orientation === 'portrait');
+    }
+
+    function setCropRatioChoice(id, orientation = null) {
+      cropRatioChoice = { id: findCropRatioPreset(id).id, orientation: cropRatioChoice.orientation };
+      fitCropDraftToRatio(orientation);
+      // The orientation the box ended up with is what a square frame reuses.
+      cropRatioChoice.orientation = state.cropDraft?.ratioOrientation || cropRatioChoice.orientation;
+      safeStorageSet(CROP_RATIO_STORAGE_KEY, serializeCropRatioChoice(cropRatioChoice));
+      updateCropOverlayFromDraft();
+    }
+
+    cropRatioSelect.addEventListener('change', () => setCropRatioChoice(cropRatioSelect.value));
+    cropRatioFlipBtn.addEventListener('click', () => {
+      const lock = getCropRatioLock();
+      if (lock) setCropRatioChoice(cropRatioChoice.id, flipOrientation(lock.orientation));
+    });
+
     cropBtn.addEventListener('click', () => {
       beginCropMode();
     });
@@ -8666,7 +8724,7 @@ import { frameNeedsReview } from './reviewQueue.js';
       cropModeHintTitle.textContent = getLocalizedText('cropHintTitle', 'Crop and straighten');
       cropModeHintBody.textContent = getLocalizedText(
         'cropHintBody',
-        'Drag inside the box to move it, or drag edges/corners to resize. Hold Command/Ctrl and draw a line to straighten.'
+        'Drag inside the box to move it, or drag edges/corners to resize. Hold Command/Ctrl and draw a line to straighten. Lock a film ratio (135, 120, 4×5…) in the toolbar.'
       );
 
       if (cropHintTimer) clearTimeout(cropHintTimer);
@@ -8796,6 +8854,7 @@ import { frameNeedsReview } from './reviewQueue.js';
         rotatedImageData: previewSourceImageData,
         rect: previewRect,
         interaction: null,
+        ratioOrientation: cropRatioChoice.orientation,
         rotationBase: 0,
         straightenAngle: 0,
         straightenLineAngles: []
@@ -8854,6 +8913,7 @@ import { frameNeedsReview } from './reviewQueue.js';
       cropBtn.style.display = active ? 'none' : 'inline-flex';
       applyCropBtn.style.display = active ? 'inline-flex' : 'none';
       cancelCropBtn.style.display = active ? 'inline-flex' : 'none';
+      updateCropRatioUi();
       cropOverlay.style.display = active ? 'block' : 'none';
       canvasContainer.classList.toggle('crop-mode', active);
       canvasContainer.classList.toggle('straighten-line-mode', false);
@@ -8894,6 +8954,7 @@ import { frameNeedsReview } from './reviewQueue.js';
       state.croppingActive = false;
       state.cropStart = null;
       activeCropPointerId = null;
+      cropRatioChoice = parseCropRatioChoice(safeStorageGet(CROP_RATIO_STORAGE_KEY));
       state.cropDraft = createCropDraft(sourceImageData);
       if (!state.cropDraft) {
         state.cropping = false;
@@ -8967,6 +9028,7 @@ import { frameNeedsReview } from './reviewQueue.js';
       } else {
         draft.rect = sanitizeDraftCropRect(draft.rect || getDefaultCropRect(rotatedImageData), rotatedImageData);
       }
+      fitCropDraftToRatio();
 
       renderHistogram(rotatedImageData);
       updateCropOverlayFromDraft();
@@ -9093,6 +9155,10 @@ import { frameNeedsReview } from './reviewQueue.js';
       if (!imageData || !startRect) return null;
 
       const minSize = getCropMinSize(imageData);
+      const lock = getCropRatioLock();
+      const locked = lock && resizeRectWithRatio(startRect, mode, position, lock.ratio, imageData, minSize, { orientation: lock.orientation });
+      if (locked) return locked;
+
       let left = startRect.left;
       let top = startRect.top;
       let right = startRect.left + startRect.width;
@@ -9123,6 +9189,23 @@ import { frameNeedsReview } from './reviewQueue.js';
         width: right - left,
         height: bottom - top
       };
+    }
+
+    function drawDraftRect(start, position) {
+      const draft = state.cropDraft;
+      const imageData = draft?.rotatedImageData;
+      if (!imageData || !start || !position) return null;
+
+      const lock = getCropRatioLock();
+      const locked = lock && drawRectWithRatio(start, position, lock.ratio, imageData, getCropMinSize(imageData), { orientation: lock.orientation });
+      if (locked) return locked;
+
+      return sanitizeDraftCropRect({
+        left: Math.min(start.x, position.x),
+        top: Math.min(start.y, position.y),
+        width: Math.abs(position.x - start.x),
+        height: Math.abs(position.y - start.y)
+      }, imageData);
     }
 
     function positionStraightenGuideLine(line) {
@@ -9214,14 +9297,7 @@ import { frameNeedsReview } from './reviewQueue.js';
         startRect: draft.rect ? { ...draft.rect } : null
       };
 
-      if (mode === 'draw') {
-        draft.rect = sanitizeDraftCropRect({
-          left: position.x,
-          top: position.y,
-          width: 1,
-          height: 1
-        }, draft.rotatedImageData);
-      }
+      if (mode === 'draw') draft.rect = drawDraftRect(position, position);
 
       state.cropStart = position;
       state.croppingActive = true;
@@ -9252,14 +9328,7 @@ import { frameNeedsReview } from './reviewQueue.js';
           height: startRect.height
         }, imageData);
       } else if (interaction.mode === 'draw') {
-        const left = Math.min(interaction.start.x, position.x);
-        const top = Math.min(interaction.start.y, position.y);
-        draft.rect = sanitizeDraftCropRect({
-          left,
-          top,
-          width: Math.abs(position.x - interaction.start.x),
-          height: Math.abs(position.y - interaction.start.y)
-        }, imageData);
+        draft.rect = drawDraftRect(interaction.start, position);
       } else {
         draft.rect = resizeDraftRect(interaction.startRect, interaction.mode, position);
       }
