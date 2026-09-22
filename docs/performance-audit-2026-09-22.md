@@ -4,10 +4,20 @@ This audit records 18 concrete performance findings as GitHub issues
 [#199–#216](https://github.com/lexluthor0304/NegativeConverter/issues?q=is%3Aissue+perf).
 The implementation is in an isolated worktree. "Implemented" below means
 the change exists on the implementation branch; it does not mean merged,
-deployed, or accepted by every browser. All 110 Node test files, 34 Rust tests,
+deployed, or accepted by every browser. All 111 Node test files, 34 Rust tests,
 the web build, complete Chrome smoke and five available RAW fixtures passed.
 The final comparison/lifetime guard also passed its focused CPU/GPU regression.
 Final branch CI and desktop platform builds remain merge gates.
+
+Release preflight also found and corrected two compatibility regressions within
+these findings: ZIP32 streaming local headers now zero their descriptor-owned
+size fields, and AI workers signal readiness before model dispatch so asynchronous
+bootstrap failures can use the existing main-thread fallback. Model initialization
+and inference errors remain errors rather than triggering a second inference
+backend. The follow-up checks cover exact ZIP32/ZIP64 headers and independent
+Info-ZIP extraction, worker startup failure/timeout, model-byte ownership and
+the boundary between startup fallback and actual model errors. Final follow-up
+test and release results are recorded in PR #217.
 
 The audit covered import/decoding, batch scheduling and memory, conversion,
 display rendering, file lists, roll analysis, dust/AI repair, semantic work,
@@ -100,7 +110,7 @@ precision/cleanup and bundled dust-worker checks to the browser suite.
 
 Recorded local results:
 
-- `npm test`: 110/110 test files (baseline 98/98).
+- `npm test`: 111/111 test files (baseline 98/98; includes release-preflight regression coverage).
 - `npm run build:web`: passed, including all new workers.
 - `cargo test --manifest-path src-tauri/Cargo.toml --locked`: 34 tests passed.
 - Complete Chrome smoke with `AUTOFRAME_RAW_DIR`: passed, including PNG16/TIFF

@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict';
-import { createInpaintWorkerSession } from './aiInpaintWorkerClient.js';
+import { createInpaintWorkerSession, createInpaintSessionInWorker } from './aiInpaintWorkerClient.js';
 import { createInpaintWorkerProcessor } from '../workers/aiInpaintWorkerProcessor.js';
 import { inpaintWithModel } from './aiInpaint.js';
 globalThis.ImageData ||= class { constructor(data, width, height) { Object.assign(this, { data, width, height }); } };
 const bytes = new Uint8Array([1, 2, 3]).buffer;
+function announceReady(worker) {
+  queueMicrotask(() => worker.onmessage?.({ data: { ready: true } }));
+  return worker;
+}
 let creates = 0, releases = 0, active = 0, peakActive = 0, failNext = false, blockRun = null;
 const messages = [];
 const process = createInpaintWorkerProcessor({ createSession: async (modelBytes, options) => {
@@ -32,7 +36,10 @@ const worker = {
   },
   terminate() { this.terminated = true; }
 };
-const session = await createInpaintWorkerSession(bytes, { prefer: 'wasm' }, { workerFactory: () => worker });
+const session = await createInpaintWorkerSession(bytes, { prefer: 'wasm' }, { workerFactory: () => {
+  queueMicrotask(() => assert.equal(messages.length, 0, 'model dispatch waits for the worker ready handshake'));
+  return announceReady(worker);
+} });
 assert.equal(bytes.byteLength, 3, 'model bytes remain available for a backend retry');
 assert.equal(session.provider, 'wasm');
 const image = new Float32Array([0.2, 0.5, 0.8]), mask = new Float32Array([1]);
@@ -72,14 +79,72 @@ assert.equal(peakActive, 1); assert.equal(releases, 1); assert.equal(worker.term
 assert.equal(messages.filter(message => message.type === 'initialize').length, 1);
 
 let timedWorker;
-await assert.rejects(createInpaintWorkerSession(bytes, {}, { timeoutMs: 5, workerFactory: () => timedWorker = {
+await assert.rejects(createInpaintWorkerSession(bytes, {}, { timeoutMs: 5, workerFactory: () => announceReady(timedWorker = {
   postMessage() {}, terminate() { this.terminated = true; }
-} }), /timed out/);
+}) }), error => /timed out/.test(error.message) && error.code !== 'WORKER_UNAVAILABLE');
 assert.equal(timedWorker.terminated, true);
 await assert.rejects(createInpaintWorkerSession(bytes, {}, { workerFactory: () => { throw new Error('blocked'); } }), { code: 'WORKER_UNAVAILABLE' });
 let crashedWorker;
-await assert.rejects(createInpaintWorkerSession(bytes, {}, { workerFactory: () => crashedWorker = {
+await assert.rejects(createInpaintWorkerSession(bytes, {}, { workerFactory: () => announceReady(crashedWorker = {
   postMessage() { queueMicrotask(() => this.onerror()); }, terminate() { this.terminated = true; }
-} }), /crashed/);
+}) }), error => /crashed/.test(error.message) && error.code !== 'WORKER_UNAVAILABLE');
 assert.equal(crashedWorker.terminated, true);
-console.log('AI worker session reuses model, transfers exclusive tiles, serializes runs and cleans timeout/release/crash');
+
+// Exercise the public fallback path with real client bootstrap behavior. No
+// model bytes may leave the caller before a failed worker announces readiness.
+for (const failure of ['error', 'messageerror', 'timeout', 'malformed']) {
+  let startupWorker, fallbackCalls = 0, posted = 0;
+  const originalBytes = new Uint8Array([7, 8, 9]).buffer;
+  const options = { prefer: 'wasm', warmUp: false };
+  const fallbackSession = { provider: 'wasm', run() {}, release() {} };
+  const actual = await createInpaintSessionInWorker(originalBytes, options, {
+    workerSupported: true,
+    createWorkerSession: (model, settings) => createInpaintWorkerSession(model, settings, {
+      startupTimeoutMs: 5,
+      workerFactory: () => {
+        startupWorker = { postMessage() { posted++; }, terminate() { this.terminated = true; } };
+        if (failure === 'error' || failure === 'messageerror') queueMicrotask(() => startupWorker[`on${failure}`]());
+        if (failure === 'malformed') queueMicrotask(() => startupWorker.onmessage({ data: null }));
+        return startupWorker;
+      }
+    }),
+    createMainThreadSession: async (model, settings) => {
+      fallbackCalls++;
+      assert.equal(model, originalBytes, 'fallback receives the original, attached model buffer');
+      assert.deepEqual([...new Uint8Array(model)], [7, 8, 9]);
+      assert.equal(settings, options, 'fallback retains the requested backend and warmup options');
+      return fallbackSession;
+    }
+  });
+  assert.equal(actual, fallbackSession);
+  assert.equal(fallbackCalls, 1, `${failure} during bootstrap invokes fallback exactly once`);
+  assert.equal(posted, 0, 'unready workers never receive the model');
+  assert.equal(startupWorker.terminated, true);
+  assert.equal(startupWorker.onmessage, null);
+  assert.equal(startupWorker.onerror, null);
+}
+
+// Readiness separates runtime/model failures from unavailable-worker failures:
+// a malformed model, stalled initialization, or crash after ready must surface.
+for (const failure of ['model', 'timeout', 'crash']) {
+  let modelWorker, fallbackCalls = 0;
+  await assert.rejects(createInpaintSessionInWorker(bytes, {}, {
+    workerSupported: true,
+    createWorkerSession: (model, settings) => createInpaintWorkerSession(model, settings, {
+      timeoutMs: 5,
+      workerFactory: () => announceReady(modelWorker = {
+        postMessage(message) {
+          if (failure === 'model') queueMicrotask(() => this.onmessage({ data: { id: message.id, error: 'Invalid MI-GAN model' } }));
+          if (failure === 'crash') queueMicrotask(() => this.onerror());
+        },
+        terminate() { this.terminated = true; }
+      })
+    }),
+    createMainThreadSession: async () => { fallbackCalls++; throw new Error('unexpected fallback'); }
+  }), error => error.code !== 'WORKER_UNAVAILABLE' && /Invalid MI-GAN model|timed out|crashed/.test(error.message));
+  assert.equal(fallbackCalls, 0, `${failure} after ready must not run main-thread inference`);
+  assert.equal(modelWorker.terminated, true);
+  assert.equal(bytes.byteLength, 3);
+}
+
+console.log('AI worker session transfer/queue/cancel/release passed; bootstrap failures fall back while model failures surface');

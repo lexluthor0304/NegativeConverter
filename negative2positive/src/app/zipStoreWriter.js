@@ -162,8 +162,11 @@ function createLocalFileHeader(entry) {
   view.setUint16(10, entry.dosTime, true);
   view.setUint16(12, entry.dosDate, true);
   view.setUint32(14, 0, true); // CRC follows the payload in its data descriptor.
-  view.setUint32(18, entry.zip64 ? ZIP_MAX_U32 : entry.size, true);
-  view.setUint32(22, entry.zip64 ? ZIP_MAX_U32 : entry.size, true);
+  // With bit 3 set, ZIP32 local sizes must be zero (APPNOTE 4.4.8/4.4.9).
+  // Actual sizes follow in the descriptor and central directory; ZIP64 keeps
+  // its sentinel fields and corresponding 64-bit size extras.
+  view.setUint32(18, entry.zip64 ? ZIP_MAX_U32 : 0, true);
+  view.setUint32(22, entry.zip64 ? ZIP_MAX_U32 : 0, true);
   view.setUint16(26, entry.nameBytes.length, true);
   view.setUint16(28, extraLength, true);
   header.set(entry.nameBytes, 30);
