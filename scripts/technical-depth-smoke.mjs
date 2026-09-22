@@ -152,6 +152,10 @@ async function runAiRepairScenario({ send, evaluate, waitFor, wait, fail, instal
     input.dispatchEvent(new Event('change', { bubbles: true }));
   })()`);
   await waitFor('invalid model rejected', `/Model failed/.test(document.getElementById('dustAiStatus').textContent)`);
+  // Model replacement refreshes the repair asynchronously. The worker may
+  // still be finishing TELEA when the model's error state becomes visible.
+  await waitFor('basic repair settled after invalid model',
+    `/Detected \\d+ dust|Error:/.test(document.getElementById('dustStatus').textContent)`, 60_000);
   const fallback = await evaluate(`document.getElementById('dustStatus').textContent`);
   if (!/Detected \d+ dust/.test(fallback)) fail('Basic repair lost after invalid model: ' + fallback);
 
