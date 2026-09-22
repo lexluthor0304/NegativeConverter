@@ -292,8 +292,11 @@ async function runMultiShotScenario({ send, evaluate, waitFor, wait, fail, insta
 // converted live through the automatic recipe; a capture lands in the photo
 // list and opens when the loupe closes.
 async function runLoupeScenario({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port }) {
+  const previousDocument = await evaluate('performance.timeOrigin');
   await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
-  await waitFor('loupe workspace boot', `!!document.getElementById('studioImportAutoCrop') && (!!document.getElementById('studioLoupe') && !!document.getElementById('loupeOverlay'))`);
+  // The previous multi-shot page exposes the same controls. Do not install the
+  // permission probe in that document while navigation is still committing.
+  await waitFor('loupe workspace boot', `performance.timeOrigin !== ${previousDocument} && document.readyState === 'complete' && !!document.getElementById('studioImportAutoCrop') && (!!document.getElementById('studioLoupe') && !!document.getElementById('loupeOverlay'))`);
   await installDialogAutoAccept();
   await wait(300);
   // Chrome's fake camera is a finished positive test chart. Explicitly select
@@ -309,8 +312,17 @@ async function runLoupeScenario({ send, evaluate, waitFor, wait, fail, installDi
   if (!offered) fail('the loupe button should be offered when getUserMedia exists');
   await evaluate(`(() => {
     const open = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    window.__loupePermissionProbe = { phase: 'installed', timeOrigin: performance.timeOrigin,
+      buttonDisabled: document.getElementById('studioLoupe').disabled };
     navigator.mediaDevices.getUserMedia = async (...args) => {
-      const stream = await open(...args);
+      window.__loupePermissionProbe.phase = 'requested';
+      let stream;
+      try { stream = await open(...args); }
+      catch (error) {
+        window.__loupePermissionProbe.error = error.name + ': ' + error.message;
+        throw error;
+      }
+      window.__loupePermissionProbe.phase = 'acquired';
       window.__delayedLoupeStream = stream;
       await new Promise(resolve => { window.__finishLoupePermission = resolve; });
       return stream;
@@ -318,7 +330,9 @@ async function runLoupeScenario({ send, evaluate, waitFor, wait, fail, installDi
     window.__restoreLoupeCamera = () => { navigator.mediaDevices.getUserMedia = open; };
     document.getElementById('studioLoupe').click();
   })()`);
-  await waitFor('camera permission pending', `!!window.__finishLoupePermission`, 30_000);
+  await waitFor('camera permission pending', `!!window.__finishLoupePermission || !!window.__loupePermissionProbe?.error`, 30_000);
+  const cameraError = await evaluate(`window.__loupePermissionProbe?.error`);
+  if (cameraError) fail('fake camera acquisition failed: ' + cameraError);
   await evaluate(`document.getElementById('loupeCloseBtn').click(); window.__finishLoupePermission(); window.__restoreLoupeCamera();`);
   await waitFor('late camera stream released after close', `window.__delayedLoupeStream.getTracks().every(track => track.readyState === 'ended') && document.getElementById('loupeVideo').srcObject === null`, 10_000);
   await evaluate(`document.getElementById('studioLoupe').click()`);

@@ -4,6 +4,7 @@ import { runSimplicitySmoke } from './simplicity-smoke.mjs';
 // End-to-end smoke test: drives the real app in headless Chrome via CDP.
 //
 //   node scripts/smoke-test.mjs
+//   node scripts/smoke-test.mjs --dust-only --dust-delay-inpaint
 //
 // Vite 起動 → 実際の入力から写真を読み込み → Studio 自動変換 → 調整・一括書き出し。
 // Asserts the canvas pixels actually changed (negative inverted) and that no
@@ -241,6 +242,13 @@ async function dumpDiagnostics(context) {
       overlay: document.querySelector('.loading-overlay')?.className,
       loadingText: document.querySelector('.loading-progress-text')?.textContent,
       phaseText: document.querySelector('.loading-phase-text')?.textContent,
+      dustStatus: document.getElementById('dustStatus')?.textContent,
+      dustWorkerResponses: window.__dustSources,
+      dustStatusUpdates: window.__dustStatusUpdates,
+      loupeStatus: document.getElementById('loupeStatus')?.textContent,
+      loupeHidden: document.getElementById('loupeOverlay')?.hidden,
+      loupePermissionProbe: window.__loupePermissionProbe,
+      timeOrigin: performance.timeOrigin,
       toast: [...document.querySelectorAll('.toast-message')].map((t) => t.textContent),
     }))()`);
     console.error(`diagnostics [${context}]: ${JSON.stringify(info)}`);
@@ -408,9 +416,25 @@ await waitFor('converted status', step3Expr, 150_000);
 console.log('ok: reconversion finished in the current workspace');
 
 // プレビュー表示直後に除塵を有効化しても原寸で処理する。
+async function waitForDustSettled(description, { freshStatus = false } = {}) {
+  // A detect response only supplies the mask. The app still awaits inpainting
+  // before committing pixels and accepting brush input. Brush completion also
+  // needs a fresh status mutation: its previous Detected status stays visible.
+  await waitFor(description, `(${!freshStatus} || window.__dustStatusUpdates > 0) &&
+    /^(Detected [0-9]+ dust particles|No dust detected|Error:)/.test(document.getElementById('dustStatus').textContent)`, 60_000);
+  const status = await evaluate(`document.getElementById('dustStatus').textContent`);
+  if (!/^(Detected [0-9]+ dust particles|No dust detected)$/.test(status)) {
+    await dumpDiagnostics(description);
+    fail(`${description}: ${status}`);
+  }
+}
 await evaluate(`(() => {
   document.getElementById('studioTab-repair').click();
   window.__dustSources = [];
+  window.__dustDelayedInpaintResponses = 0;
+  window.__dustStatusUpdates = 0;
+  window.__dustStatusObserver = new MutationObserver(() => window.__dustStatusUpdates++);
+  window.__dustStatusObserver.observe(document.getElementById('dustStatus'), { childList: true });
   const workerSources = new WeakMap();
   const postDust = Worker.prototype.postMessage;
   Worker.prototype.postMessage = function (message, ...args) {
@@ -420,6 +444,17 @@ await evaluate(`(() => {
       if (!record) {
         record = { source: null, pending: new Map() };
         workerSources.set(this, record);
+        if (${process.argv.includes('--dust-delay-inpaint')}) {
+          // Optional fault injection reproduces slow CI repair delivery without
+          // delaying detection, so worker-return and app-commit cannot coincide.
+          const receive = this.onmessage;
+          this.onmessage = event => {
+            if (record.pending.get(event.data?.id)?.type === 'inpaint') {
+              window.__dustDelayedInpaintResponses++;
+              setTimeout(() => receive.call(this, event), 2000);
+            } else receive.call(this, event);
+          };
+        }
         this.addEventListener('message', ({ data }) => {
           const request = record.pending.get(data.id);
           if (!request) return;
@@ -445,18 +480,20 @@ const dustSource = await evaluate(`window.__dustSources.find(source => source.ty
 if (dustSource.width !== fullSize.width || dustSource.height !== fullSize.height) {
   fail('dust detection used preview dimensions instead of full resolution');
 }
-await wait(500);
+await waitForDustSettled('initial dust repair committed');
 
 // クリア後も未修復の画素を使う。画像全体のハッシュで累積修復を検出する。
 await evaluate(`window.__dustSources = []; document.getElementById('dustClearMaskBtn').click()`);
 await waitFor('dust mask re-detection', `window.__dustSources.some(source => source.type === 'detect')`, 30_000);
 const clearedSource = await evaluate(`window.__dustSources.find(source => source.type === 'detect')`);
 if (clearedSource.hash !== dustSource.hash) fail('clear mask re-detected dust on an altered source');
+await waitForDustSettled('cleared dust repair committed');
 
 // 直接ブラシが変換Workerを呼び直さずに修復することを確認する。
 await evaluate(`(() => {
   window.__brushConversions = 0;
   window.__dustSources = [];
+  window.__dustStatusUpdates = 0;
   const post = Worker.prototype.postMessage;
   Worker.prototype.postMessage = function (message, ...args) {
     if (message?.type === 'convert') window.__brushConversions++;
@@ -471,13 +508,23 @@ await evaluate(`(() => {
   document.dispatchEvent(new MouseEvent('mouseup', options));
 })()`);
 await waitFor('dust brush inpaint', `window.__dustSources.some(source => source.type === 'refine')`, 30_000);
+await waitForDustSettled('dust brush repair committed', { freshStatus: true });
 if (await evaluate(`window.__brushConversions !== 0`)) fail('dust brush reconverted the full image');
 if (await evaluate(`document.getElementById('dustStatus').textContent.startsWith('Error:')`)) {
   fail('dust brush reported an error');
 }
 console.log(`ok: dust detection ${dustSource.width}x${dustSource.height}, clean-source reset, brush without reconversion`);
 // 後続の色調検証ではマスクの色を重ねない。
-await evaluate(`document.getElementById('dustShowMask').click()`);
+await evaluate(`window.__dustStatusObserver.disconnect(); document.getElementById('dustShowMask').click()`);
+if (process.argv.includes('--dust-delay-inpaint')) {
+  const delayed = await evaluate(`window.__dustDelayedInpaintResponses`);
+  if (delayed < 2) fail(`dust delay injection missed detection repairs: ${delayed}`);
+  console.log(`ok: ${delayed} delayed inpaint responses settled before subsequent dust actions`);
+}
+if (process.argv.includes('--dust-only')) {
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
 
 // ---- 4. the on-screen preview must have changed (negative -> positive) ----
 await wait(1500); // allow the final render to composite
