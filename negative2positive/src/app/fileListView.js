@@ -1,5 +1,29 @@
 const listStates = new WeakMap();
 
+function updateRowThumbnail(record, thumbnail, index, studio) {
+  if (studio) {
+    let preview = record.nameEl.querySelector('.file-list-thumbnail, .file-list-placeholder');
+    const tagName = thumbnail ? 'IMG' : 'SPAN';
+    if (!preview || preview.tagName !== tagName) {
+      const replacement = document.createElement(thumbnail ? 'img' : 'span');
+      if (preview) preview.replaceWith(replacement);
+      else record.nameEl.prepend(replacement);
+      preview = replacement;
+    }
+    preview.className = thumbnail ? 'file-list-thumbnail' : 'file-list-placeholder';
+    if (thumbnail) {
+      preview.alt = '';
+      // Background thumbnail generation can already have changed this DOM
+      // node. Synchronize the cache without restarting the same image request.
+      if (preview.getAttribute('src') !== thumbnail) preview.src = thumbnail;
+    } else {
+      preview.textContent = String(index + 1).padStart(2, '0');
+      preview.setAttribute('aria-hidden', 'true');
+    }
+  }
+  record.thumbnail = thumbnail;
+}
+
 export function renderFileList({
   container,
   countEl,
@@ -35,7 +59,8 @@ export function renderFileList({
       Boolean(item.isDirty), labels.customSettings, labels.unsaved, selectLabel,
       extraBadges, canReview, labels.markReviewed]);
     let record = list.rows.get(item);
-    if (record?.signature === signature && record.thumbnail === item.thumbnail) {
+    if (record?.signature === signature) {
+      if (record.thumbnail !== item.thumbnail) updateRowThumbnail(record, item.thumbnail, index, studio);
       record.checkbox.checked = Boolean(item.selected);
       if (record.index !== index) {
         record.checkbox.dataset.index = record.nameEl.dataset.index = String(index);

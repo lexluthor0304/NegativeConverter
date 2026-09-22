@@ -19,6 +19,13 @@ Info-ZIP extraction, worker startup failure/timeout, model-byte ownership and
 the boundary between startup fallback and actual model errors. Final follow-up
 test and release results are recorded in PR #217.
 
+Compiled-build preflight also caught a stale thumbnail-cache case within #206:
+background thumbnail DOM updates caused the next selection to recreate a row.
+Thumbnail additions, changes and removal now reconcile in place, preserving the
+row, button, checkbox and focus even on the first interaction after background
+loading. Browser coverage reproduces the old failure and checks 14 studio and
+non-studio cases, including no duplicate image-source writes.
+
 The audit covered import/decoding, batch scheduling and memory, conversion,
 display rendering, file lists, roll analysis, dust/AI repair, semantic work,
 lossless encoders and ZIP/desktop output. Historical backlog statements were

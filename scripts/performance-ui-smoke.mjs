@@ -27,6 +27,75 @@ export async function runPerformanceUiSmoke({ evaluate, fail }) {
       const filtered = container.children.length;
       renderFileList(options);
       const restored = container.children.length===200 && container.lastElementChild===rows[0];
+      const thumbnailChecks=[];
+      const wasStudio=document.body.classList.contains('studio');
+      const thumbnailContainer=document.createElement('div'), thumbnailCount=document.createElement('span');
+      thumbnailContainer.style.cssText='position:fixed;left:-10000px;top:0';document.body.append(thumbnailContainer);
+      try {
+        const surface=document.createElement('canvas');surface.width=surface.height=2;
+        const context=surface.getContext('2d');context.fillStyle='red';context.fillRect(0,0,2,2);
+        const first=surface.toDataURL();context.fillStyle='blue';context.fillRect(0,0,2,2);const second=surface.toDataURL();
+        for(const studio of [true,false]) {
+          document.body.classList.toggle('studio',studio);
+          const target={file:{name:'thumbnail.jpg'},selected:true,status:'pending'};
+          const other={file:{name:'other.jpg'},selected:true,status:'pending'};
+          const thumbnailItems=[target,other];let thumbnailOpened=-1,thumbnailToggled=-1;
+          const thumbnailOptions={...options,container:thumbnailContainer,countEl:thumbnailCount,items:thumbnailItems,
+            onOpenFile:i=>{thumbnailOpened=i},onToggleSelected:i=>{thumbnailToggled=i}};
+          renderFileList(thumbnailOptions);
+          let row=thumbnailContainer.firstElementChild, checkbox=row.querySelector('input'), name=row.querySelector('.file-list-name');
+          const verify=(scenario,expected,focus,extra=true)=>{
+            const index=thumbnailItems.indexOf(target), preview=name.querySelector('.file-list-thumbnail');
+            const placeholder=name.querySelector('.file-list-placeholder');
+            const stable=thumbnailContainer.children[index]===row && row.querySelector('input')===checkbox && row.querySelector('.file-list-name')===name;
+            const focused=document.activeElement===focus;
+            const correct=studio ? expected ? preview?.getAttribute('src')===expected && !placeholder
+              : !preview && placeholder?.textContent===String(index+1).padStart(2,'0') && placeholder.getAttribute('aria-hidden')==='true'
+              : !preview && !placeholder && name.textContent==='thumbnail.jpg';
+            thumbnailChecks.push({scenario,studio,stable,focused,correct,extra,passed:stable&&focused&&correct&&extra});
+            // Rebase the next case on the live DOM even when this one fails, so
+            // direct updates and out-of-band updates are independently checked.
+            row=thumbnailContainer.children[index];checkbox=row.querySelector('input');name=row.querySelector('.file-list-name');
+          };
+          checkbox.focus();target.thumbnail=first;renderFileList(thumbnailOptions);
+          verify('direct addition',first,checkbox);
+          const image=name.querySelector('.file-list-thumbnail');
+          name.focus();target.thumbnail=second;renderFileList(thumbnailOptions);
+          verify('direct replacement',second,name,!studio||name.querySelector('.file-list-thumbnail')===image);
+          checkbox.focus();target.thumbnail=null;renderFileList(thumbnailOptions);
+          verify('direct removal',null,checkbox);
+          if(studio) {
+            // Mirror main.js updateFileThumbnail: it writes item.thumbnail and
+            // the DOM before the next selection/list render can update its cache.
+            target.thumbnail=first;
+            const inserted=document.createElement('img');inserted.className='file-list-thumbnail';inserted.alt='';inserted.src=first;
+            name.querySelector('.file-list-placeholder')?.replaceWith(inserted);
+            name.focus();
+            const observer=new MutationObserver(()=>{});observer.observe(name,{attributes:true,subtree:true});
+            other.selected=!other.selected;renderFileList(thumbnailOptions);
+            const additionWrites=observer.takeRecords().filter(record=>record.attributeName==='src').length;
+            verify('out-of-band addition',first,name,name.querySelector('.file-list-thumbnail')===inserted && additionWrites===0);
+            observer.disconnect();
+            const updatedImage=name.querySelector('.file-list-thumbnail');
+            target.thumbnail=second;updatedImage.src=second;
+            observer.observe(name,{attributes:true,subtree:true});
+            checkbox.focus();renderFileList(thumbnailOptions);
+            const replacementWrites=observer.takeRecords().filter(record=>record.attributeName==='src').length;
+            verify('out-of-band replacement',second,checkbox,name.querySelector('.file-list-thumbnail')===updatedImage && replacementWrites===0);
+            renderFileList(thumbnailOptions);
+            verify('unchanged thumbnail',second,checkbox,observer.takeRecords().every(record=>record.attributeName!=='src'));
+            observer.disconnect();
+          } else {
+            target.thumbnail=second;renderFileList(thumbnailOptions);verify('nonstudio thumbnail update',second,checkbox);
+          }
+          thumbnailItems.reverse();renderFileList({...thumbnailOptions,currentFileIndex:1});
+          name.click();checkbox.click();
+          verify('reorder with thumbnail',target.thumbnail,checkbox,thumbnailOpened===1 && thumbnailToggled===1
+            && checkbox.dataset.index==='1' && name.dataset.index==='1');
+          target.thumbnail=null;name.focus();renderFileList(thumbnailOptions);
+          verify('removal after reorder',null,name);
+        }
+      } finally {document.body.classList.toggle('studio',wasStudio);thumbnailContainer.remove();}
       const prior = (await indexedDB.databases()).map(db=>db.name);
       const sample = new ImageData(Uint8ClampedArray.from({length:32*20*4},(_,i)=>i%256),32,20);
       sample.__image16={width:32,height:20,data:Uint16Array.from({length:32*20*4},(_,i)=>(i*37)%65536)};
@@ -64,12 +133,13 @@ export async function runPerformanceUiSmoke({ evaluate, fail }) {
         dust={particles:detection.particleCount,maskPixels:detection.mask.reduce((n,v)=>n+(v>0),0),
           width:repaired.width,height:repaired.height,sourceIntact:dustSource.data.length===256*256*4};
       } finally {disposeDustWorker();}
-      return {stable,focusStable,opened,toggled,filtered,restored,updateMs,exact,storeStats,cleaned,scanner,dust};
+      return {stable,focusStable,opened,toggled,filtered,restored,updateMs,thumbnailChecks,exact,storeStats,cleaned,scanner,dust};
     } finally {container.remove();}
   })()`);
   console.log('performance UI:', JSON.stringify(result));
   if (!result.stable || !result.focusStable || result.opened !== 199 || result.toggled !== 199
     || result.filtered !== 10 || !result.restored) fail('file-list DOM identity/reorder/filter regression');
+  if (!result.thumbnailChecks.every(check=>check.passed)) fail('thumbnail update rebuilt rows or changed focus/src: '+JSON.stringify(result.thumbnailChecks.filter(check=>!check.passed)));
   if (!result.exact || !result.cleaned || result.storeStats.spilledEntries !== 10
     || result.storeStats.droppedSamples !== 0) fail('native IndexedDB spill/precision/cleanup regression');
   if (!result.scanner.every(scan=>scan.transferred && scan.exact)) fail('native PNG16/TIFF worker dispatch/precision regression');
