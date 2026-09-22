@@ -135,8 +135,8 @@ export async function loadRawImageDataPreview(buffer, fileName, options) {
 /**
  * Decode a PNG buffer.
  *
- * Only genuinely 16-bit PNGs go through UPNG (JS inflate on the main thread
- * plus a full-size 16-bit mirror). Everything else — 8-bit, palette,
+ * Only genuinely 16-bit PNGs go through UPNG in a disposable decode worker
+ * (with a synchronous fallback when workers are unavailable). Everything else — 8-bit, palette,
  * 1/2/4-bit, interlaced, tRNS — is handed to the browser decoder, which is
  * off-thread, handles every colour type correctly and costs ~1/5 the memory.
  */
@@ -153,6 +153,9 @@ export async function loadPngImageData(buffer) {
     }
   }
 
+  const { decodeScanInWorker } = await import('./scanDecodeClient.js');
+  const decoded = await decodeScanInWorker(buffer, 'png');
+  if (decoded) return decoded;
   const { loadPngFile } = await import('./pngFileLoader.js');
   return loadPngFile(buffer);
 }

@@ -8,6 +8,12 @@ cited code. They are ordered by severity within each area.
 Items already fixed are not listed. This file is a work queue, not a record of
 what shipped — delete an entry when it is done.
 
+Performance entries were rechecked on 2026-09-22. Implemented findings and
+verified stale claims removed here are accounted for in
+[performance-audit-2026-09-22.md](performance-audit-2026-09-22.md), which also
+distinguishes completed local changes from pending browser/release validation.
+Remaining performance proposals below are not claims of completed work.
+
 ## Auto frame detection
 
 - **medium/ux** — Non-sprocket density templates are capped at 0.68 < highConfidence 0.72, so 'high' confidence and the 'Auto-apply high confidence' setting are unreachable for 120 film and most single 135 frames _(verified)_  
@@ -20,22 +26,12 @@ what shipped — delete an entry when it is done.
   Only getAutoFrameAspectTargets is tested. `inferAutoFrameConfidenceLevel` (:1311, the 0.72/0.55 classifier that round 1 found duplicated three times), `buildDensityAnalysis` (:276) and `scoreDensityRect` (:518) contain no OpenCV references between lines 276-560 and run in plain Node, yet have no tests. main.js:116-130 re-declares DEFAULT_FORMAT_RATIOS/DEFAULT_120_FORMATS/DEFAULT_SCORE_WEIGHTS verb…  
   _Suggested fix:_ Export DEFAULT_FORMAT_RATIOS/DEFAULT_120_FORMATS/DEFAULT_SCORE_WEIGHTS from the analyzer, import them in main.js and the test. Add tests: `inferAutoFrameConfidenceLevel` at 0.72/0.719/0.55/0.549 and with custom thresholds; `buildDensityAnalysis` on a synthetic dark frame inside a…
 
+- **low/research** — Profile the remaining full auto-frame detector after exact preprocessing reuse
+  `negative2positive/src/app/autoFrameAnalyzer.js` / `negative2positive/src/app/imageWindowLines.js`
+  Issue #216 now reuses identical per-detection zero-angle edge preprocessing and density candidates, and skips later line evidence once a candidate already fails. Its isolated repeated preprocessing fixture fell from 99.05 ms to 2.40 ms with equal candidate order. This does not eliminate the detector's necessary per-channel Hough searches or distinct rotated passes; the earlier 3–4 s fallback estimate is historical, not a measurement of current code.
+  _Next step:_ The five available RAW fixtures passed the regression checks recorded in `docs/performance-audit-2026-09-22.md`. Profile remaining stages before choosing additional lossless work. Coarser Hough/search thresholds previously changed detections and are not an accepted shortcut.
+
 ## Dust removal
-
-- **medium/perf** — Auto-frame fallback still costs 3–4 s per frame and the first photo waits for it; the window search is ~2.3 s more  
-  `negative2positive/src/app/autoFrameAnalyzer.js:1315`  
-  After the restricted-Hough line search (2026-09-16) the per-frame split on an 18 MP DNG is: window search 2.3 s (8 standard Hough calls over 4 channels × 2 orientations), fallback `detectFrameCandidatesWithCv` 1.2 s plus `detectAxisAlignedCropRegion` 0.5 s per angle candidate (3–4 angles). Result-preserving options: run the four channel passes and the per-angle passes across helper workers for the interactive first photo (the background lanes already saturate the cores); show the converted, uncropped first photo before the detection lands (needs the smoke scenarios that read `studio-ready` as "analysis done" to wait for the deferred apply instead); decode the background-analysis copy at half size (frame detection works on a 1600 px preview anyway, but crop/film-edge coordinates must be scaled back and DX/edge-text reading re-validated). Coarser Hough θ or a half-size vote map change detections on the RAW regression set (DSC_8806, DSC_4127) and were rejected.  
-  _Suggested fix:_ parallel channel/angle passes behind the existing worker pool first; validate with `scripts/eval-autoframe.mjs`, `AUTOFRAME_RAW_DIR=… npm run test:smoke` and the 63-DNG roll used for the batch benchmark.
-
-- **high/perf** — Dust detection and TELEA inpainting run synchronously on the main thread at full resolution, retriggered every 300 ms while dragging the strength slider  
-  `negative2positive/src/app/main.js:5033`  
-  runDustDetection (5010-5045) calls detectDust/updateDustStrength and then inpaintMasked synchronously on getDustSource() (4981-4983 = cleanSource || processedImageData, i.e. the full-resolution positive once the background render has landed). detectDust → computeHatResponses (DustRemoval.js 206-220) builds a full RGBA Mat, cvtColor, and two 9×9 ellipse morphologyEx passes; buildDustMask (244-324) …  
-  _Suggested fix:_ Run detection on the preview-resolution positive (dustMaxParticleSizeFor at 4989 already scales the size cap for that) and only inpaint full-res once on commit; better, move detectDust/inpaintMasked into a worker that loads opencv.js (it is already a plain module with no DOM use …
-
-- **medium/perf** — 除塵ブラシの修復はまだ画像全体を走査する  
-  `negative2positive/src/app/main.js` / `negative2positive/src/silvercore/engine/DustRemoval.js`  
-  2026-09-05に筆跡ごとのSilverCore再変換を廃止。追加改善では、inpaintを全マスクの外接矩形＋近傍余白に限定し、スマートブラシのグレースケール化も筆跡領域に限定した。空マスクはOpenCVを呼ばずに原画像を複製する。ただし、マスク作成・範囲探索・出力の複製・粒子数集計は画像全体に比例し、広範囲のマスクは全画面inpaintへ戻る。  
-  _次の改善案:_ 離れたマスクを連結成分に分けて処理するか、検出・集計をWorkerへ移す。修復領域が互いに近い場合の影響と、追加・削除・取り消しの画素一致を検証する。
 
 - **medium/bug** — Thin real content (power lines, antennas, masts, fence wire, thin branches against sky) is classified as a 'scratch' and inpainted: any line up to 60 % of the short side and <= max(3, maxSize/3) px thick is kept with no area cap  
   `negative2positive/src/silvercore/engine/DustRemoval.js:197`  
@@ -52,18 +48,10 @@ what shipped — delete an entry when it is done.
   `isRawSupportIssue` is true for any RAW-like file whose error text matches `/module worker|worker|webassembly|wasm/i`, so 'Conversion worker crashed', 'Sensor defect worker crashed' or a wasm OOM ('RuntimeError: ... wasm') on Chrome/Firefox/Android produces 'RAW decode is not supported in this Safari version. Update Safari (iOS 16.4+) or convert to TIFF/JPEG first.' Conversely the intended trigger…  
   _Suggested fix:_ Feature-detect up front instead of parsing messages: `const supportsModuleWorkers = (() => { let s = false; try { new Worker('data:,', { get type() { s = true; return 'module'; } }).terminate(); } catch {} return s; })()` plus `typeof WebAssembly === 'object'`; show `rawUnsupport…
 
-  `negative2positive/src/app/main.js:5657`  
-  _Suggested fix:_ Delete the three fields and their assignments, and document that __image16 attached to the ImageData is the single source of 16-bit data.
-
 - **low/quality** — suggestStep2Mode's orangeBias > 10 test is not a border detector: any C-41 scan returns 'border', so 'noBorder' is only ever suggested when a crop already exists  
   `negative2positive/src/app/main.js:5794`  
   autoDetectFilmBase samples the outer band (filmBaseDetection.js:289-297: edgeBand = borderBufferPct % of the short side, samples centred at half that band) and the caller treats an orange result as proof of a visible film rebate. But the darkest content of any colour negative is orange too. Probe: a 600x400 synthetic C-41 frame with no rebate at all (content R120-230/G60-150/B30-90) -> autoDetectF…  
   _Suggested fix:_ Decide border vs no-border from a real border signal: compare the edge-band estimate with an interior-grid estimate (autoDetectFilmBase with bufferPct 0 already computes both); suggest 'border' only when the edge band is both brighter (thinner) and lower-spread than the interior …
-
-- **low/ux** — runDustDetection ignores ensureOpenCvReady's boolean result, unlike every other call site  
-  `negative2positive/src/app/main.js:5018`  
-  createOpenCvLoader's ensureOpenCvReady resolves false (never throws) when all OpenCV sources fail (opencvLoader.js:157-171). The other four call sites check `const ready = await ensureOpenCvReady()` (7077, 7343, 7419) and bail with a message; runDustDetection discards the value and proceeds into detectDust, which throws an internal error (e.g. 'cv is undefined') that is shown raw and unlocalized v…  
-  _Suggested fix:_ `const ready = await ensureOpenCvReady(); if (!ready) { updateDustStatusUI(getLocalizedText('opencvUnavailable', ...)); state.dustRemoval.processing = false; return; }` and use a localized key for the generic error status.
 
 ## App runtime (main.js)
 
@@ -122,10 +110,6 @@ what shipped — delete an entry when it is done.
   The window resize handler calls `adjustCanvasDisplay(canvas.width, canvas.height)`, which (line ~5453) calls `resizeWebGLCanvas()` when WebGL is active. `resizeWebGLCanvas` assigns `glCanvas.width/height` when the CSS size changed (4130-4131); assigning a canvas's width/height attribute discards the drawing buffer, and the context was created with `preserveDrawingBuffer: false` (3861). Nothing re-…  
   _Suggested fix:_ In the resize handler, after `adjustCanvasDisplay(...)`, call `if (isWebGLActive()) schedulePreviewUpdate();` (or have `resizeWebGLCanvas` set a `webglState.needsRedraw` flag consumed by a rAF that calls `renderWebGL()`). Also listen to `window.visualViewport` `resize` for iOS to…
 
-- **medium/memory** — syncTransformCanvasFromMainCanvas copies the full-res canvas into a canvas nobody reads, on every full render and export _(verified)_  
-  `negative2positive/src/app/main.js:3110`  
-  transformCanvas/transformCtx are created at 2500-2501 and written by syncTransformCanvasFromMainCanvas (called from updateFullCpu 4432, ensureFullRender 4519 and displayNegative 5575) but are never read anywhere in main.js. Each call resizes the canvas to the full image size and blits the whole main canvas into it, so a 90 MP scan keeps an extra ~360 MB backing store alive for the session and pays…  
-  _Suggested fix:_ Delete transformCanvas, transformCtx, syncTransformCanvasFromMainCanvas and its three call sites (4432, 4519, 5575).
 
 
 - **medium/quality** — main.js refactor map: 10,779 lines decompose into ~20 cohesive blocks; six can be extracted with almost no coupling _(verified)_  
@@ -248,15 +232,7 @@ what shipped — delete an entry when it is done.
   notifyExportError shows alert(`Export failed: ${message}`) where message is one of several English-only Error strings thrown in the export path ('Full-resolution processing is not ready yet. Please wait…', 'Export payload is not a Blob.', 'No image available for export.', 'JSZip module is unavailable'). Chinese/Japanese users see an English dialog for the most important failure in the app. showDes…  
   _Suggested fix:_ Add exportFailed: 'Export failed: {message}' (plus zh/ja) and use getInterpolatedText; attach an i18n key (err.i18nKey) to the known thrown errors so notifyExportError can localize them, falling back to err.message only for unknown errors. Add a desktopBatchExportFolderFallback k…
 
-- **low/memory** — Crop/rotate undo entries retain full-resolution ImageData references; 30-entry stack can pin gigabytes  
-  `negative2positive/src/app/main.js:8514`  
-  pushUndo('crop') captures a snapshot whose refs include originalImageData, croppedImageData, processedImageData, conversionSourceImageData, conversionPreviewImageData, previewSourceImageData, histogramSourceImageData and webglSourceImageData (SNAPSHOT_REF_KEYS 2273-2277). applyCropBtn immediately replaces originalImageData/croppedImageData with new buffers, so each crop/rotate/straighten iteration…  
-  _Suggested fix:_ For geometry actions store only {rotationAngle, cropRegion} and recompute from loadedBaseImageData on undo (they are deterministic), or cap the stack by estimated bytes (e.g. drop oldest entries once retained pixel bytes exceed ~500 MB) instead of by count.
 
-- **low/perf** — exitBeforeAfter forces a full-resolution CPU render even when WebGL preview is active _(verified)_  
-  `negative2positive/src/app/main.js:2839`  
-  When leaving before/after in Step 3, exitBeforeAfter hides the GL canvas and calls updateFullCpu() directly instead of updateFull(). That runs applyAdjustmentsToBuffer over the entire full-res processedImageData on the main thread (plus histogram and the transform-canvas copy) on every release of the Space key / button, freezing the UI for roughly 0.5-3 s on 24-90 MP scans even though updateFull()…  
-  _Suggested fix:_ Replace the block with `updateFull();` (it calls updateCanvasVisibility and falls back to updateFullCpu only when WebGL is unavailable).
 
 - **low/quality** — Update check bookkeeping: 'Later' is not persisted (dead last-seen key), a failed/offline launch suppresses the next check for 24 h, and any pre-release tag silently disables the check _(verified)_  
   `negative2positive/src/app/main.js:1629`  
@@ -329,30 +305,18 @@ what shipped — delete an entry when it is done.
   The header assumes real content is neutral, but on C-41 a small red light source becomes a single-channel dip (cyan dye absorbs only red) and a blue light a blue-only dip; both are isolated 3x3 features after demosaic. The CORRELATED_FRACTION test (other channel must move >= 25 % of the defect's excess) does not fire because the other channels are genuinely unchanged, so the pixel is rewritten wit…  
   _Suggested fix:_ Only repair values that sit at a sensor rail (v <= absoluteThreshold for dead, v >= PIXEL_MAX - absoluteThreshold for hot) rather than any isolated outlier: a stuck photosite reads the black level or clips, an optical point light does not. Also expose the repair as a setting (def…
 
-- **medium/memory** — Unsharp mask allocates three full-frame Float32 planes per call and walks the vertical pass column-strided  
-  `negative2positive/src/silvercore/engine/Sharpening.js:52`  
-  Every applyUnsharpMask call allocates lum (164), temp and output (52-53) as Float32Array(width*height) — 3 × 96 MB = 288 MB transient at 24MP, on every full render with sharpenAmount > 0 and on every core-slider commit at preview size, with no reuse. The vertical interior loop (115-124) iterates k innermost over `temp[(baseY + k) * width + x]`, touching a different row per k for each x; the 64-col…  
-  _Suggested fix:_ Keep module-level scratch planes reused when the size matches (or pass a scratch object like lutScratch), reuse `lum` as the vertical-pass output, and restructure the vertical pass as k-outer/x-inner (accumulate `output[row] += temp[row+k*width] * kernel[k]` across a contiguous r…
 
-- **medium/perf** — Histogram scans the full-resolution image (16-bit plane when present) on the main thread; the pre-built downsampled histogram source is bypassed on redraws  
-  `negative2positive/src/render/histogramService.js:45`  
-  draw() iterates every pixel of whatever ImageData it is given and prefers `__image16`. main.js passes full-resolution buffers in most call sites — updateFullCpu passes the full adjusted buffer, redrawHistogramIfPossible (called on every resize) passes `displayImageData || processedImageData || croppedImageData || originalImageData`, and the load/crop/rotate paths pass the raw source with its 16-bi…  
-  _Suggested fix:_ Inside draw(), compute a pixel stride so at most ~1 M pixels are sampled (`step = ceil(sqrt(pixels / MAX))`, iterate rows/cols with that step) — the 256-bin histogram is statistically identical. Alternatively make renderHistogram always route through buildHistogramSourceImageData…
 
-- **medium/perf** — _applyLuts chains up to nine separate full-image read/write passes that could be fused  
-  `negative2positive/src/silvercore/engine/Engine.js:102`  
-  For each reprocess the 16-bit buffer is walked by applyLUT (ImageProcessor 133-142), applyHSLAdjustments, applyLut3D, adjustSaturation (387-399, which uses Math.max/Math.min function calls per channel and recomputes luminance), applyUnsharpMask (luma extract + horizontal blur + vertical blur + apply = 4 passes), then silverAdapter's toGrayscaleInPlace (108-118, Math.round per pixel, B&W only) and …  
-  _Suggested fix:_ Fuse applyLUT + adjustSaturation (+ B&W mix) into one loop with inline clamps; have applyUnsharpMask accept a precomputed luma plane and write the 8-bit output directly in its final pass when no further stage follows; in toImageData8 skip alpha (write 255) and process pixels with…
+- **low/research** — Evaluate exact pass fusion only where enabled stages and rounding semantics permit it
+  `negative2positive/src/silvercore/engine/Engine.js:_applyLuts`
+  The old blanket nine-pass accounting is stale: optional saturation/profile/paper/sharpening stages are conditional, B&W preparation occurs elsewhere, and #202 replaced full-frame sharpening scratch with row buffers. Cross-channel color operations and spatial neighborhoods still require real computation. No additional fusion is implemented by this audit.
+  _Next step:_ Profile a concrete enabled-stage combination and preserve intermediate clamping/rounding, profile strength and bit-exact reference output before accepting a fused implementation.
 
-- **medium/perf** — SilverCore HSL pass does a full RGB→HSL→RGB round-trip per pixel on every reprocess for basic/frontier/noritsu models  
-  `negative2positive/src/silvercore/engine/ImageProcessor.js:308`  
-  applyHSLAdjustments is called unconditionally from Engine._applyLuts (Engine.js 103) and runs whenever the color model has hslAdjustments (Presets.js: basic, frontier, noritsu — 'standard' and 'mono' skip). Per pixel it does three divisions, Math.floor, three hue2rgb calls and three clamped writes on the 16-bit buffer. Its output depends only on (colorModel, profileStrength) and the input color, i…  
-  _Suggested fix:_ Bake the HSL adjustment into a 33³ (or 65³) RGB 3D LUT once per (colorModel, profileStrength) — 35k evaluations — and apply it with the existing trilinear applyLut3D (EnhancedProfiles.js 156-227), ideally pre-composed with the enhanced-profile LUT when both are active so the imag…
+- **low/research** — Exact HSL model transforms still cost a per-pixel color conversion
+  `negative2positive/src/silvercore/engine/ImageProcessor.js:applyHSLAdjustments`
+  The basic/frontier/noritsu model adjustment requires cross-channel RGB/HSL arithmetic when enabled. Baking that transform into a coarse 33³/65³ trilinear LUT would approximate its output, so the historical suggestion is not an accepted lossless fix. Existing enhanced profiles already use prepared 3D tables.
+  _Next step:_ Consider only measured implementations that preserve the current 16-bit transform, or make a separately reviewed quality/speed mode explicit; this audit does not silently replace exact HSL with interpolation.
 
-- **medium/perf** — Full-resolution histogram uses the slow per-draw-allocating Histogram.js while the optimized render/histogramService.js is dead code  
-  `negative2positive/src/silvercore/ui/Histogram.js:16`  
-  main.js imports Histogram from silvercore/ui/Histogram.js (line 55) and calls renderHistogram with full-resolution buffers: updateFullCpu (4430, the adjusted 24MP buffer), ensureFullRender (4518), before/after (2804), displayNegative sources at load/crop-exit (2846, 2978, 3003, 8050, 8531). Histogram.draw allocates four Uint32Array(256) per call and computes `Math.round(0.299*r + 0.587*g + 0.114*b…  
-  _Suggested fix:_ Switch main.js to HistogramService (or delete the duplicate) and feed renderHistogram a stride-decimated buffer (downsampleImageDataForMaxPixels(…, HISTOGRAM_MAX_SAMPLES) as renderHistogramForWebGL does) in updateFullCpu, ensureFullRender, displayNegative and the before/after pat…
 
 - **medium/quality** — silvercore WebGLRenderer.js (369 lines) is dead code shipped in the worker bundle — Engine.initWebGL is never called — and, with other unreachable engine exports, hides latent bugs (256-entry LUT upload, null matrices, log(1) division)  
   `negative2positive/src/silvercore/engine/WebGLRenderer.js:134`  
@@ -384,10 +348,6 @@ what shipped — delete an entry when it is done.
   The main loop runs y from 2 to height-3 and x from 2 to width-3 because the Chebyshev-2 ring would fall outside the image. Defects in the 2-px border are skipped entirely. Probe: four dead red photosites placed at (1,1), (1,30), (W-2,30), (30,H-2) -> repaired=0. On a full-frame scan that is cropped afterwards this is usually invisible, but on a frame used edge-to-edge (sprocket export, borderless …  
   _Suggested fix:_ Clamp/mirror ring coordinates at the border (readRing with clamped dx/dy) and scan from 0 to width-1/height-1, or run a reduced 3x3-ring variant on the two border rows/columns. Add a test with a defect at x=1.
 
-- **low/perf** — toImage16 fabricates a fresh x257 plane on every call for 8-bit inputs, so the adapter's source/film-base reuse cache never hits for JPEG scans or lens-corrected RAW  
-  `negative2positive/src/pipeline/silverAdapter.js:32`  
-  _reuseInputBuffer keys its cache on the identity of `image16.data` (:177-178). For inputs without a plane, toImage16 returns a brand-new Uint16Array each call (:32), so `sourceChanged` is always true: every core-slider move on the main-thread preview re-promotes the 250k-pixel preview and re-runs the film-base compensation loop, and every full render on the main thread (worker disabled, or small i…  
-  _Suggested fix:_ Memoise the promotion per slot on the 8-bit input identity: store `slot.lastSource8Ref = input.data` and, when it matches and lengths agree, skip fromImageData8 and treat the source as unchanged; or promote directly into `slot.pristineBuffer` (loop `pristine[i] = data[i] * 257`) …
 
 - **low/quality** — pipeline/legacyPositive.js is unreachable: settings.positiveEngine is never set to 'legacy'  
   `negative2positive/src/pipeline/legacyPositive.js:10`  
@@ -505,20 +465,12 @@ what shipped — delete an entry when it is done.
 
 ## Other
 
-- **medium/memory** — Every full-resolution render materialises, transfers and retains a 16-bit output plane (8 bytes/px) that no code path reads, including for 8-bit JPEG sources where it is fabricated by x257 _(verified)_  
-  `negative2positive/src/app/conversionWorkerClient.js:77`  
-  The adapter always attaches an output plane (silverAdapter.js:264-265), the worker always transfers it back (conversionWorker.js:41-44) and the client always re-wraps it as `out.__image16` (conversionWorkerClient.js:77-83). applyProcessedImageToState then keeps it on `state.processedImageData` and downsampleImageDataByStep copies it again into previewSourceImageData, histogramSourceImageData and w…  
-  _Suggested fix:_ Make the output plane opt-in: pass `options.wantImage16` only from the export path (once finding 2 lands) and from any future 16-bit consumer; in the worker skip `payload.image16` and in the adapter skip `result.__image16` when it is not requested; never copy the plane into the p…
 
-- **medium/perf** — Every full-resolution render structured-clones the whole source into the worker and defeats silverAdapter's input-buffer reuse cache, so three full-size 16-bit buffers are reallocated/refilled per render _(verified)_  
-  `negative2positive/src/app/conversionWorkerClient.js:59`  
-  convertFrameInWorker posts `src16.data.buffer` (16-bit sources) or `imageData.data.buffer` (8-bit sources) with no transfer list, so every full render — scheduled after every slider commit via scheduleFullResolutionRender (main.js 4834-4849) and on export — synchronously structured-clones the entire source on the main thread: 720 MB for a 90 MP 16-bit scan, 96 MB (8-bit) / 192 MB (16-bit) at 24 MP…  
-  _Suggested fix:_ Keep the source resident in the worker: post the 16-bit source once with a sourceId (transferring a one-off copy) and have later messages send only {sourceId, settings, options}; in the worker keep the upcast Uint16 plane keyed by sourceId so toImage16 does not re-run fromImageDa…
+- **low/research** — Full-resolution conversion preserves an independent source by copying it into the worker
+  `negative2positive/src/app/conversionWorkerClient.js:createConversionWorkerClient`
+  The preview client already caches source/analysis inputs, and #204 adds main-thread per-slot 8-bit promotion reuse. Full-resolution conversions still copy the required source plane because the caller continues using it; large one-off worker heaps are then released, while batch workers live only for their batch. This is an explicit ownership/memory tradeoff, not a claim that all current slider previews clone full scans.
+  _Next step:_ Measure repeated full-resolution workloads before changing residency or ownership. Any redesign must retain caller usability, bound resident worker heaps, avoid detached cache buffers and preserve cancellation/export behavior.
 
-- **medium/perf** — Full-resolution sprocket frame is recomposed with per-pixel procedural noise on the main thread for every full render and export _(verified)_  
-  `negative2positive/src/app/sprocketFrame.js:386`  
-  When sprocket preview is on, the non-fast path in renderAdjustedImageDataToMainCanvas (main.js 3100) and applySprocketFrameForExport (8975-8978) call composeSprocketFrame on the full-res image. createSprocketFrameImageData (1144-1178) allocates a new output buffer, fillFilmBase (378-408) first fills the whole output (including the photo region that copyPhotoRegion overwrites), then paintSpan evalu…  
-  _Suggested fix:_ Cache the composed background per (sourceWidth, sourceHeight, edge options) at full resolution too (reuse ensureSprocketPreviewFrameBackground's cache with a full-size key) and only copyPhotoRegion into a copy of it; drop the initial whole-buffer fill; generate the noise on a til…
 
 - **low/a11y** — Focus ring removed on the JPEG quality slider and weakened on selects/number inputs; .recommended-action outline masks the focus ring  
   `negative2positive/src/styles/app.css:3431`  
@@ -550,20 +502,8 @@ what shipped — delete an entry when it is done.
   getGlyphRows falls back to BITMAP_FONT['?'] for any character outside A-Z, 0-9 and a few punctuation marks; drawBitmapText upper-cases and then paints '?' for each glyph. The app ships zh/ja UIs (i18n.js) and the edge-text input is free text (index.html sprocket edge controls, default 'KODAK PORTRA 160'). With the default fontStyle 'edgePixel' a user entering 'フジカラー 400' or '柯达' gets a row of ques…  
   _Suggested fix:_ In drawEdgeText, if the text contains any character not in BITMAP_FONT, fall through to drawCanvasText (which already handles arbitrary Unicode) and only use the bitmap glyphs for the covered set; add a test with a CJK string asserting no '?' glyph is painted.
 
-- **low/memory** — PNG16 encoder concatenates the whole file into one extra Uint8Array instead of handing chunks to Blob  
-  `negative2positive/src/workers/imageEncoders.js:77`  
-  After deflating the 8 B/px raw buffer, encodePng16Blob allocates `png` of the full file size and copies signature/IHDR/IDAT/IEND into it before `new Blob([png])`. Blob accepts an array of parts, so the copy is pure overhead (hundreds of MB for large scans, on top of `raw` + `compressed`). It also writes RGBA (colour type 6) although alpha is constant, inflating the raw buffer and the file by 25%. …  
-  _Suggested fix:_ `return new Blob([signature, ihdrChunk, idatChunk, iendChunk], { type: 'image/png' })`, use colour type 2 (RGB, rowBytes = width*6), and consider a PNG filter (Sub/Up) for materially better compression.
 
-- **low/memory** — TIFF encoder builds the strip in a temp buffer and then copies it into the file buffer (2× file size), and writes a redundant alpha channel  
-  `negative2positive/src/workers/imageEncoders.js:99`  
-  encodeTiffBlob allocates `pixelData` (w*h*4*bytesPerSample), fills it, then allocates `out` of the same size + header and `out.set(pixelData, 8)`. For a 90 MP 16-bit export that is 720 MB + 720 MB live in the worker at once. The alpha sample is always 255/65535 (the adjustment stage forces alpha to 255) but is still written with SamplesPerPixel=4 and ExtraSamples=1 (associated alpha), making files…  
-  _Suggested fix:_ Write samples straight into `out` at offset 8 (pass a subarray to the conversion loop), emit 3 samples per pixel (drop ExtraSamples), and add XResolution/YResolution (e.g. 300/1 RATIONAL) + ResolutionUnit=2. Export the encoder from one module and import it in both the worker and …
 
-- **low/memory** — Crashed export worker is nulled but never terminated; rejected requests also leak pending entries on postMessage failure  
-  `negative2positive/src/workers/workerBridge.js:18`  
-  On `onerror` the bridge rejects pending requests and sets `worker = null` without calling `terminate()`, so the crashed (but still alive) worker and its heap survive until page unload while a new one is created on the next call. In sendToWorker a synchronous `postMessage` failure (DataCloneError from a non-cloneable setting) rejects the promise but leaves the id in `pending` forever. conversionWor…  
-  _Suggested fix:_ Call `worker.terminate()` before nulling in onerror, and wrap postMessage in try/catch that deletes the pending entry before rejecting.
 
 - **low/quality** — Hard high/medium switch changes the applied correction by a third (0.9 vs 0.6 damping) and the verdict is computed from different sample sets in the interactive (250k-pixel preview) and batch (full-res) paths _(verified)_  
   `negative2positive/src/app/autoWhiteBalance.js:229`  

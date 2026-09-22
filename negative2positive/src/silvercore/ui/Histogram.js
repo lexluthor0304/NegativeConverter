@@ -1,26 +1,49 @@
+// This is a display histogram, independent from the full-precision conversion
+// analysis. Stratified sampling bounds redraw work even for very large scans.
+export const HISTOGRAM_MAX_SAMPLES = 262144;
+
+export function fillHistogramBins(imageData, bins, maxSamples = HISTOGRAM_MAX_SAMPLES) {
+  const source = imageData.__image16?.data instanceof Uint16Array ? imageData.__image16 : imageData;
+  const { data, width, height } = source;
+  const is16 = data instanceof Uint16Array;
+  const { rHist, gHist, bHist, lHist } = bins;
+  rHist.fill(0); gHist.fill(0); bHist.fill(0); lHist.fill(0);
+  if (!width || !height || !data.length) return 0;
+  maxSamples = Math.max(1, Math.floor(maxSamples));
+  const step = Math.max(1, Math.ceil(Math.sqrt(width * height / maxSamples)));
+  const columns = Math.max(1, Math.min(maxSamples, Math.floor(width / step)));
+  const rows = Math.max(1, Math.min(Math.floor(height / step), Math.floor(maxSamples / columns)));
+  for (let y = 0; y < rows; y++) {
+    const sy = Math.floor((y + 0.5) * height / rows);
+    for (let x = 0; x < columns; x++) {
+      const sx = Math.floor((x + 0.5) * width / columns);
+      const i = (sy * width + sx) * 4;
+      const r = is16 ? data[i] >>> 8 : data[i];
+      const g = is16 ? data[i + 1] >>> 8 : data[i + 1];
+      const b = is16 ? data[i + 2] >>> 8 : data[i + 2];
+      rHist[r]++; gHist[g]++; bHist[b]++;
+      lHist[Math.round(0.299 * r + 0.587 * g + 0.114 * b)]++;
+    }
+  }
+  return columns * rows;
+}
+
 export class Histogram {
   constructor(canvas) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
     this.width = canvas.width;
     this.height = canvas.height;
+    this.rHist = new Uint32Array(256);
+    this.gHist = new Uint32Array(256);
+    this.bHist = new Uint32Array(256);
+    this.lHist = new Uint32Array(256);
   }
 
   draw(imageData) {
-    const { data } = imageData;
-    const rHist = new Uint32Array(256);
-    const gHist = new Uint32Array(256);
-    const bHist = new Uint32Array(256);
-    const lHist = new Uint32Array(256);
-
-    for (let i = 0; i < data.length; i += 4) {
-      const r = data[i], g = data[i + 1], b = data[i + 2];
-      rHist[r]++;
-      gHist[g]++;
-      bHist[b]++;
-      // Luminance
-      lHist[Math.round(0.299 * r + 0.587 * g + 0.114 * b)]++;
-    }
+    if (!imageData) return;
+    const { rHist, gHist, bHist, lHist } = this;
+    fillHistogramBins(imageData, this);
 
     // Find max for scaling (ignore extremes)
     let maxVal = 0;

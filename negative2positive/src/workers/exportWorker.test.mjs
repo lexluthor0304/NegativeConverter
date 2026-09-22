@@ -37,9 +37,11 @@ function png16Samples(bytes) {
   assert.equal(bytes[24], 16, 'IHDR bit depth');
   const decoded = UPNG.decode(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
   assert.equal(decoded.depth, 16);
+  const channels = decoded.ctype === 2 ? 3 : 4;
   const samples = new Uint16Array(decoded.width * decoded.height * 4);
   for (let i = 0; i < samples.length; i++) {
-    samples[i] = (decoded.data[i * 2] << 8) | decoded.data[i * 2 + 1];
+    const offset = (Math.floor(i / 4) * channels + i % 4) * 2;
+    samples[i] = i % 4 === 3 && channels === 3 ? 65535 : (decoded.data[offset] << 8) | decoded.data[offset + 1];
   }
   return samples;
 }
@@ -51,6 +53,7 @@ function tiff16Samples(bytes) {
   let stripOffset = 0;
   let stripByteCount = 0;
   let bitsOffset = 0;
+  let channels = 4;
   for (let i = 0; i < entryCount; i++) {
     const off = ifdOffset + 2 + i * 12;
     const tag = view.getUint16(off, true);
@@ -58,10 +61,14 @@ function tiff16Samples(bytes) {
     if (tag === 273) stripOffset = value;
     if (tag === 279) stripByteCount = value;
     if (tag === 258) bitsOffset = value;
+    if (tag === 277) channels = value;
   }
   assert.equal(view.getUint16(bitsOffset, true), 16, 'BitsPerSample must be 16');
-  const samples = new Uint16Array(stripByteCount / 2);
-  for (let i = 0; i < samples.length; i++) samples[i] = view.getUint16(stripOffset + i * 2, true);
+  const samples = new Uint16Array(stripByteCount / 2 / channels * 4);
+  for (let i = 0; i < samples.length; i++) {
+    const offset = (Math.floor(i / 4) * channels + i % 4) * 2;
+    samples[i] = i % 4 === 3 && channels === 3 ? 65535 : view.getUint16(stripOffset + offset, true);
+  }
   return samples;
 }
 

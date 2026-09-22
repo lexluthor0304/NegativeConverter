@@ -21,7 +21,7 @@ import { frameNeedsReview } from './reviewQueue.js';
     import { normalizeAngleDegrees, applyRotationToImageData, mirrorImageDataHorizontal, applyGeometryChainToImageData } from './imageGeometry.js';
     import { analyzeFrameInWorker, readFilmEdgeInWorker, createAutoFrameWorkerPool, warmUpAutoFrameWorker } from './autoFrameWorkerClient.js';
     import { detectFrameWithFallback } from './autoFrameExecution.js';
-    import { createRollSampleCache } from './rollSampleCache.js';
+    import { createAnalysisSampleStore } from './analysisSampleStore.js';
     import { mountStudioWorkspace } from './studioWorkspace.js';
     import { AUTO_FRAME_FORMAT_RATIOS, AUTO_FRAME_DEFAULT_120_FORMATS, canAutoApplyImportFrame } from './autoFrameFormats.js';
     import { DEFAULT_CROP_RATIO_CHOICE, findCropRatioPreset, parseCropRatioChoice, serializeCropRatioChoice, fitRectToRatio, resizeRectWithRatio, drawRectWithRatio, preferredCropOrientation, flipOrientation } from './cropRatio.js';
@@ -65,7 +65,8 @@ import { frameNeedsReview } from './reviewQueue.js';
       areAdjustmentsIdentity
     } from './adjustmentPipeline.js';
     import { buildLinearPositive, encodeLinearDngBlob } from './linearDng.js';
-    import { inpaintWithModel, createInpaintSession, fetchModelBytes, inpaintBackends, DEFAULT_MODEL_URL } from './aiInpaint.js';
+    import { inpaintWithModel, fetchModelBytes, inpaintBackends, DEFAULT_MODEL_URL } from './aiInpaint.js';
+    import { createInpaintSessionInWorker } from './aiInpaintWorkerClient.js';
     import {
       downsampleImageDataForMaxPixels,
       downsampleImageDataForMaxDim,
@@ -84,6 +85,9 @@ import { frameNeedsReview } from './reviewQueue.js';
       normalizeSprocketEdgeMarkings
     } from './sprocketFrame.js';
     import { renderFileList } from './fileListView.js';
+    import { createSprocketFrameCache } from './sprocketFrameCache.js';
+    import { imagePixelsForBatch, rememberImageDimensions } from './imageDimensions.js';
+    import { createDustWorkerClient, detectDustInWorker, inpaintDustInWorker, refineDustMaskInWorker, disposeDustWorker } from './dustWorkerClient.js';
     import { loadLocalLensfunAssets } from './lensfunLoader.js';
     import { createOpenCvLoader } from './opencvLoader.js';
     import {
@@ -3018,9 +3022,7 @@ import { frameNeedsReview } from './reviewQueue.js';
       sourceRef: null,
       metrics: null
     };
-
-    let transformCanvas = document.createElement('canvas');
-    let transformCtx = transformCanvas.getContext('2d');
+    const composeDisplaySprocketFrame = createSprocketFrameCache();
 
     // ===========================================
     // Workflow Management
@@ -3351,9 +3353,11 @@ import { frameNeedsReview } from './reviewQueue.js';
       updateSprocketControlsUI();
 
       if (state.currentStep >= 3 && state.processedImageData) {
-        glCanvas.style.display = 'none';
-        canvas.style.display = 'block';
-        updateFullCpu();
+        // A previous full-size buffer may predate a recent preview adjustment,
+        // including edits made while comparison suppressed normal redraws.
+        updatePreview();
+        if (isWebGLActive()) renderHistogramForWebGL(true);
+        else renderHistogram(previewAdjustedBuffer || state.processedImageData);
         return;
       }
 
@@ -3643,7 +3647,7 @@ import { frameNeedsReview } from './reviewQueue.js';
         if (options.fastSprocketPreview && renderFastSprocketPreview(imageData, fullSizeReference, composeOptions)) {
           return;
         }
-        const framed = composeSprocketFrame(imageData, composeOptions);
+        const framed = composeDisplaySprocketFrame(imageData, composeOptions);
         setMainCanvasDimensions(framed.width, framed.height);
         drawImageDataToMainCanvas(framed, framed.width, framed.height);
         return;
@@ -3651,13 +3655,6 @@ import { frameNeedsReview } from './reviewQueue.js';
 
       setMainCanvasDimensions(fullSizeReference.width, fullSizeReference.height);
       drawImageDataToMainCanvas(imageData, fullSizeReference.width, fullSizeReference.height);
-    }
-
-    function syncTransformCanvasFromMainCanvas() {
-      transformCanvas.width = canvas.width;
-      transformCanvas.height = canvas.height;
-      transformCtx.clearRect(0, 0, transformCanvas.width, transformCanvas.height);
-      transformCtx.drawImage(canvas, 0, 0);
     }
 
     function isEditableTarget(target) {
@@ -5088,7 +5085,6 @@ import { frameNeedsReview } from './reviewQueue.js';
       renderAdjustedImageDataToMainCanvas(fullAdjustedBuffer, source);
       renderHistogram(fullAdjustedBuffer);
 
-      syncTransformCanvasFromMainCanvas();
       state.lastRenderQuality = 'full';
       if (state.dustRemoval.showMask && state.dustRemoval.mask) renderDustMaskOverlay();
       renderDodgeBurnOverlay();
@@ -5177,7 +5173,6 @@ import { frameNeedsReview } from './reviewQueue.js';
           state.displayImageData = result;
           renderAdjustedImageDataToMainCanvas(result, result);
           renderHistogram(result);
-          syncTransformCanvasFromMainCanvas();
           state.lastRenderQuality = 'full';
           return;
         }
@@ -5848,6 +5843,37 @@ import { frameNeedsReview } from './reviewQueue.js';
       return Boolean(state.dustRemoval.enabled || state.repairStrokes?.length);
     }
 
+    function assertRepairCurrent(isCurrent) {
+      if (!isCurrent()) throw new DOMException('Repair superseded', 'AbortError');
+    }
+
+    async function detectDustOffMainThread(source, options, previous = null, isCurrent = () => true, worker = null) {
+      assertRepairCurrent(isCurrent);
+      try { return await (worker?.detect || detectDustInWorker)(source, options); }
+      catch (error) {
+        assertRepairCurrent(isCurrent);
+        if (error?.name === 'AbortError') throw error;
+        console.warn('Dust worker unavailable; using OpenCV fallback:', error);
+        if (!(await ensureOpenCvReady())) throw new Error('OpenCV is not available');
+        assertRepairCurrent(isCurrent);
+        return previous ? updateDustStrength(source, previous, options.strength, options.maxParticleSize)
+          : detectDust(source, options);
+      }
+    }
+
+    async function inpaintDustOffMainThread(source, mask, isCurrent = () => true, worker = null) {
+      assertRepairCurrent(isCurrent);
+      try { return await (worker?.inpaint || inpaintDustInWorker)(source, mask, 3); }
+      catch (error) {
+        assertRepairCurrent(isCurrent);
+        if (error?.name === 'AbortError') throw error;
+        console.warn('Dust worker unavailable; using TELEA fallback:', error);
+        if (!(await ensureOpenCvReady())) throw new Error('OpenCV is not available');
+        assertRepairCurrent(isCurrent);
+        return inpaintMasked(source, mask, 3);
+      }
+    }
+
     async function runDustDetection() {
       if (!hasFrameRepairs() || !state.processedImageData) return;
       if (state.dustRemoval.processing) {
@@ -5874,10 +5900,7 @@ import { frameNeedsReview } from './reviewQueue.js';
         if (!isCurrent()) return;
         const source = getDustSource();
         if (!source || state.processedImageDataIsPreview) return;
-        const ready = !state.dustRemoval.enabled || await ensureOpenCvReady();
-        await new Promise(r => setTimeout(r, 10));
         if (!isCurrent() || source !== getDustSource()) return;
-        if (!ready) throw new Error('OpenCV is not available');
 
         // Save original source before inpainting overwrites processedImageData
         if (!state.dustRemoval.cleanSource) {
@@ -5888,16 +5911,16 @@ import { frameNeedsReview } from './reviewQueue.js';
         const maxParticleSize = dustMaxParticleSizeFor(source);
         const { mask, particleCount, _state } = !state.dustRemoval.enabled
           ? { mask: new Uint8Array(source.width * source.height), particleCount: 0, _state: null }
-          : prevState
-          ? updateDustStrength(source, prevState, state.dustRemoval.strength, maxParticleSize)
-          : detectDust(source, { strength: state.dustRemoval.strength, maxParticleSize });
+          : await detectDustOffMainThread(source, { strength: state.dustRemoval.strength, maxParticleSize }, prevState, isCurrent);
+        if (!isCurrent() || source !== getDustSource()) return;
         state.dustRemoval.mask = mask;
         state.dustRemoval.particleCount = particleCount;
         state.dustRemoval._state = _state;
 
         if (particleCount > 0 || strokes.length) {
-          const dustImage = particleCount > 0 ? await inpaintForCommit(source, mask) : source;
-          const inpainted = await inpaintManualBrush(dustImage);
+          const dustImage = particleCount > 0 ? await inpaintForCommit(source, mask, isCurrent) : source;
+          const inpainted = await inpaintManualBrush(dustImage, state, state.loadedBaseImageData || state.originalImageData,
+            state.conversionSourceImageData?.__lensMapping, isCurrent);
           if (!isCurrent() || source !== getDustSource()) return;
           state.dustRemoval.inpaintedImageData = inpainted;
           const tmpl = getLocalizedText('dustStatusDone', 'Detected {count} dust particles');
@@ -5938,6 +5961,7 @@ import { frameNeedsReview } from './reviewQueue.js';
 
     function clearDustState() {
       dustDetectionRevision += 1;
+      disposeDustWorker();
       if (dustDetectionTimer) clearTimeout(dustDetectionTimer);
       dustDetectionTimer = null;
       state.dustRemoval.mask = null;
@@ -6273,7 +6297,8 @@ import { frameNeedsReview } from './reviewQueue.js';
       }
     }
 
-    function onDustBrushEnd(e) {
+    let dustBrushTurn = Promise.resolve();
+    async function onDustBrushEnd(e) {
       if (!dustDrawing) return;
       dustDrawing = false;
 
@@ -6289,43 +6314,51 @@ import { frameNeedsReview } from './reviewQueue.js';
         dustBrushSource = null;
         return;
       }
-      pushUndo('dustBrushStroke');
-
+      const points = dustBrushPoints;
+      const mode = dustBrushMode;
+      const brushSize = state.dustRemoval.brushSize;
+      const token = dustBrushToken;
+      const revision = dustDetectionRevision;
+      dustBrushPoints = [];
+      dustBrushSource = null;
+      const previousTurn = dustBrushTurn;
+      let releaseTurn;
+      dustBrushTurn = new Promise(resolve => { releaseTurn = resolve; });
+      const isCurrent = () => state.dustRemoval.enabled && source === getDustSource()
+        && coreReprocessToken === token && dustDetectionRevision === revision;
       try {
+        await previousTurn;
+        if (!isCurrent() || !state.dustRemoval.mask) return;
+        pushUndo('dustBrushStroke');
         const { width, height } = source;
-        const brushMask = createBrushMask(dustBrushPoints, state.dustRemoval.brushSize, width, height);
-
-        let newMask;
-        if (dustBrushMode === 'intelligent') {
-          newMask = refineMaskIntelligent(source, state.dustRemoval.mask, brushMask);
-        } else if (dustBrushMode === 'direct') {
-          newMask = refineMaskDirect(state.dustRemoval.mask, brushMask);
-        } else {
-          newMask = refineMaskRemove(state.dustRemoval.mask, brushMask);
-        }
-
-        // 同じ解像度の未修復画像を再利用し、筆跡ごとの全画像変換を省く。
-        const inpainted = inpaintMasked(source, newMask, 3);
-        state.dustRemoval.mask = newMask;
-        state.dustRemoval.inpaintedImageData = inpainted;
-
-        const c = window.cv;
-        if (c && c.Mat) {
+        const brushMask = createBrushMask(points, brushSize, width, height);
+        let result;
+        try { result = await refineDustMaskInWorker(source, state.dustRemoval.mask, brushMask, mode); }
+        catch (error) {
+          assertRepairCurrent(isCurrent);
+          if (error?.name === 'AbortError') throw error;
+          if (!(await ensureOpenCvReady())) throw new Error('OpenCV is not available');
+          assertRepairCurrent(isCurrent);
+          const mask = mode === 'intelligent' ? refineMaskIntelligent(source, state.dustRemoval.mask, brushMask)
+            : mode === 'direct' ? refineMaskDirect(state.dustRemoval.mask, brushMask)
+              : refineMaskRemove(state.dustRemoval.mask, brushMask);
+          result = { mask, imageData: inpaintMasked(source, mask, 3), particleCount: state.dustRemoval.particleCount };
           let maskMat, contours, hierarchy;
           try {
-            maskMat = new c.Mat(height, width, c.CV_8UC1);
-            maskMat.data.set(newMask);
-            contours = new c.MatVector();
-            hierarchy = new c.Mat();
+            const c = window.cv;
+            maskMat = new c.Mat(height, width, c.CV_8UC1); maskMat.data.set(mask);
+            contours = new c.MatVector(); hierarchy = new c.Mat();
             c.findContours(maskMat, contours, hierarchy, c.RETR_EXTERNAL, c.CHAIN_APPROX_SIMPLE);
-            state.dustRemoval.particleCount = contours.size();
-          } catch (_e) { /* ignore */ }
-          finally {
-            maskMat?.delete();
-            contours?.delete();
-            hierarchy?.delete();
+            result.particleCount = contours.size();
+          } finally {
+            maskMat?.delete(); contours?.delete(); hierarchy?.delete();
           }
         }
+        if (!isCurrent()) return;
+        const newMask = result.mask;
+        state.dustRemoval.mask = newMask;
+        state.dustRemoval.inpaintedImageData = result.imageData;
+        state.dustRemoval.particleCount = result.particleCount;
 
         const tmpl = getLocalizedText('dustStatusDone', 'Detected {count} dust particles');
         updateDustStatusUI(tmpl.replace('{count}', String(state.dustRemoval.particleCount)));
@@ -6333,6 +6366,7 @@ import { frameNeedsReview } from './reviewQueue.js';
         applyDustResultToState();
         updatePreview();
         if (aiRepairReady() || state.repairStrokes.length) void repairBrushWithAi(source, newMask, coreReprocessToken).catch((error) => {
+          if (error?.name === 'AbortError') return;
           console.warn('Brush repair failed:', error);
           showToast(error?.message || String(error), 'error');
         });
@@ -6340,11 +6374,11 @@ import { frameNeedsReview } from './reviewQueue.js';
           requestAnimationFrame(() => renderDustMaskOverlay());
         }
       } catch (err) {
+        if (!isCurrent() || err?.name === 'AbortError') return;
         console.error('Dust brush failed:', err);
         updateDustStatusUI('Error: ' + (err.message || err));
       } finally {
-        dustBrushPoints = [];
-        dustBrushSource = null;
+        releaseTurn();
       }
     }
 
@@ -6509,7 +6543,6 @@ import { frameNeedsReview } from './reviewQueue.js';
     function displayNegative(imageData) {
       resetZoomPan();
       renderAdjustedImageDataToMainCanvas(imageData, imageData);
-      syncTransformCanvasFromMainCanvas();
       updateSprocketControlsUI();
     }
 
@@ -9753,6 +9786,7 @@ import { frameNeedsReview } from './reviewQueue.js';
 
     function closePhotoSession() {
       if (isDesktopBatchExportLocked()) return;
+      clearDustState();
       clearUndoHistory();
       pendingProject = null;
       void clearProjectRecovery();
@@ -9761,6 +9795,14 @@ import { frameNeedsReview } from './reviewQueue.js';
       if (state.cropping) exitCropMode({ restore: false });
       state.samplingMode = null;
       exitBeforeAfter();
+      // Comparison exit can draw once more; release caches after that draw.
+      composeDisplaySprocketFrame.clear();
+      sprocketPreviewFrameCache.key = '';
+      sprocketPreviewFrameCache.sourceRef = null;
+      sprocketPreviewFrameCache.metrics = null;
+      for (const scratch of [sprocketPreviewFrameCanvas, sprocketScratchCanvas, beforeAfterScratchCanvas]) {
+        scratch.width = scratch.height = 1;
+      }
       resetZoomPan();
       zoomControls.style.display = 'none';
       // Reset all state
@@ -10609,16 +10651,18 @@ import { frameNeedsReview } from './reviewQueue.js';
 
     async function loadFileToImageData(file) {
       const fileName = file.name.toLowerCase();
-
+      let image;
       if (isRawLikeFileName(fileName)) {
         const arrayBuffer = await file.arrayBuffer();
-        return await loadRawImageData(arrayBuffer, fileName);
+        image = await loadRawImageData(arrayBuffer, fileName);
       } else if (isPngFile(file)) {
         const arrayBuffer = await file.arrayBuffer();
-        return await loadPngImageData(arrayBuffer);
+        image = await loadPngImageData(arrayBuffer);
       } else {
-        return await loadStandardImage(file);
+        image = await loadStandardImage(file);
       }
+      rememberImageDimensions(file, image);
+      return image;
     }
 
     async function imageDataToBlob(imageData, format = null, quality = null, bitDepth = null, onProgress = null, metadata = null, { bridge = null } = {}) {
@@ -10867,14 +10911,13 @@ import { frameNeedsReview } from './reviewQueue.js';
       // Apply dust removal if enabled (full resolution for export)
       const dustRemoval = options.dustRemoval || state.dustRemoval;
       if (dustRemoval && dustRemoval.enabled && processed) {
-        await ensureOpenCvReady();
         const strength = Number.isFinite(dustRemoval.strength) ? dustRemoval.strength : state.dustRemoval.strength;
         const maxParticleSize = Number.isFinite(dustRemoval.maxParticleSize)
           ? dustRemoval.maxParticleSize
           : state.dustRemoval.maxParticleSize;
-        const { mask } = detectDust(processed, { strength, maxParticleSize });
+        const { mask, particleCount } = await detectDustOffMainThread(processed, { strength, maxParticleSize }, null, () => true, options.dustWorker);
         const dustSource = processed;
-        processed = await withAiRepairTurn(() => inpaintForCommit(dustSource, mask));
+        if (particleCount > 0) processed = await withAiRepairTurn(() => inpaintForCommit(dustSource, mask, () => true, options.dustWorker));
         trace.mark('dustRemoval', {
           pixels: getImageDataPixelCount(processed)
         });
@@ -10967,31 +11010,19 @@ import { frameNeedsReview } from './reviewQueue.js';
     // pools, and hands the encoded results to the sink in the original order
     // (ZIP entries, folder writes and downloads keep the roll's sequence).
 
-    // The files are not decoded yet when the lane count is chosen, so the
-    // frame size comes from the file size: a 24 MP RAW is ~25 MB, a 24 MP
-    // JPEG ~10 MB, a 16-bit TIFF ~150 MB.
-    function estimateFilePixels(file) {
-      const bytes = Number(file?.size) || 0;
-      const name = String(file?.name || '').toLowerCase();
-      let bytesPerPixel = 0.4;
-      if (/\.(tif|tiff)$/.test(name)) bytesPerPixel = 4;
-      else if (/\.png$/.test(name)) bytesPerPixel = 2.5;
-      else if (isRawLikeFileName(name)) bytesPerPixel = 1.4;
-      return Math.max(2_000_000, Math.min(150_000_000, Math.round(bytes / bytesPerPixel)));
-    }
-
-    // Lanes for a batch of files. `nc_batch_lanes_v1` in localStorage pins the
-    // count (1-4) for support and benchmarking; otherwise it follows the
-    // device's cores and memory and the size of the largest file.
-    function planBatchLanes(files) {
+    // `nc_batch_lanes_v1` is a 1-4 lane ceiling for support/benchmarks; cores,
+    // device memory and the largest decoded frame may require fewer lanes.
+    async function planBatchLanes(files) {
       const pinned = Number.parseInt(safeStorageGet('nc_batch_lanes_v1') || '', 10);
-      if (Number.isInteger(pinned) && pinned >= 1 && pinned <= 4) return Math.min(pinned, Math.max(1, files.length));
-      const pixelsPerFile = files.reduce((max, file) => Math.max(max, estimateFilePixels(file)), 0);
+      // Read a bounded header at a time so a long roll cannot flood IO either.
+      let pixelsPerFile = 0;
+      for (const file of files) pixelsPerFile = Math.max(pixelsPerFile, await imagePixelsForBatch(file));
       return planBatchParallelism({
         hardwareConcurrency: navigator.hardwareConcurrency,
         deviceMemory: navigator.deviceMemory,
         pixelsPerFile,
-        fileCount: files.length
+        fileCount: files.length,
+        maxParallel: Number.isInteger(pinned) && pinned >= 1 && pinned <= 4 ? pinned : 4
       });
     }
 
@@ -11003,6 +11034,7 @@ import { frameNeedsReview } from './reviewQueue.js';
     // workers kept alive across frames (no per-file restart) and, with more
     // than one lane, as many export workers for the adjustment/encode stages.
     function createBatchExportWorkers(lanes) {
+      const dust = createDustWorkerClient();
       const pool = !conversionWorkerBroken && usesSilverCoreConversion(state)
         ? createConversionWorkerPool({ size: lanes })
         : null;
@@ -11018,7 +11050,9 @@ import { frameNeedsReview } from './reviewQueue.js';
           }
         } : null,
         bridge,
+        dust,
         dispose() {
+          dust.dispose();
           if (pool) pool.dispose();
           if (bridge) bridge.dispose();
         }
@@ -11035,6 +11069,7 @@ import { frameNeedsReview } from './reviewQueue.js';
       const adjusted = await processFileWithSettings(file, settings, {
         bitDepth: exportInfo.bitDepth,
         dustRemoval,
+        dustWorker: workers.dust,
         convert: workers.convert,
         bridge: workers.bridge
       });
@@ -11054,7 +11089,7 @@ import { frameNeedsReview } from './reviewQueue.js';
     // and releases the workers afterwards. `sink` writes one encoded frame and
     // throws to fail that frame; `signal` stops further frames from starting.
     async function runBatchExport(jobs, { exportInfo, sink, onProgress = null, signal = null, dustRemoval = null }) {
-      const lanes = planBatchExportLanes(jobs);
+      const lanes = await planBatchExportLanes(jobs);
       const workers = createBatchExportWorkers(lanes);
       const trace = createPerfTrace('batchExport', { files: jobs.length, lanes });
       try {
@@ -12303,7 +12338,7 @@ import { frameNeedsReview } from './reviewQueue.js';
       const source = state.displayImageData || state.processedImageData || state.originalImageData;
       if (!item || !source) return;
       item.thumbnail = thumbnailDataUrl(source);
-      updateFileListUI();
+      updateFileThumbnail(item);
     }
 
     async function prepareStudioPhoto(generation, item = getCurrentQueueItem()) {
@@ -12376,7 +12411,8 @@ import { frameNeedsReview } from './reviewQueue.js';
       const preview = downsampleImageDataForMaxDim(source, 512);
       setTimeout(async () => {
         try {
-          const map = sanitizeSemanticMap(await analyzeSemanticPreview(preview));
+          if (!valid()) return;
+          const map = sanitizeSemanticMap(await analyzeSemanticPreview(preview, { isCurrent: valid }));
           if (!map || !valid()) return;
           if (state.expiredEnabled) {
             const analysis = await measureExpiredAnalysisForExport(source, { ...state, semanticMap: map, autoFrameMeta: state.autoFrame.lastDiagnostics }, state.loadedBaseImageData || state.originalImageData);
@@ -13700,24 +13736,31 @@ import { frameNeedsReview } from './reviewQueue.js';
     const aiRepair = { release: null, status: 'idle', provider: '', run: null, source: '', sourceRef: null, error: '', percent: 0, tiles: 0, ms: 0 };
 
     async function inpaintManualBrush(source, settings = state, base = state.loadedBaseImageData || state.originalImageData,
-      lensMapping = settings === state ? state.conversionSourceImageData?.__lensMapping : null) {
+      lensMapping = settings === state ? state.conversionSourceImageData?.__lensMapping : null, isCurrent = () => true) {
+      assertRepairCurrent(isCurrent);
       const strokes = settings.repairStrokes || [];
       if (!strokes.length) return source;
-      while (aiRepair.status === 'loading') await new Promise(resolve => setTimeout(resolve, 50));
+      while (aiRepair.status === 'loading') {
+        await new Promise(resolve => setTimeout(resolve, 50));
+        assertRepairCurrent(isCurrent);
+      }
       if (aiRepair.status !== 'ready') await loadAiRepairModel(DEFAULT_MODEL_URL, { refresh: false });
+      assertRepairCurrent(isCurrent);
       if (aiRepair.status !== 'ready') throw new Error(aiRepair.error || 'AI repair model is not ready');
       const geometry = { ...localExposureGeometryFor(settings, base), width: source.width, height: source.height };
       const mask = repairMask(strokes, geometry, lensMapping);
       const started = performance.now();
       let result;
       try {
-        result = await inpaintWithModel(source, mask, aiRepair.run, { onProgress: (done, total) => {
+        result = await inpaintWithModel(source, mask, aiRepair.run, { shouldContinue: isCurrent, onProgress: (done, total) => {
           document.getElementById('dustAiStatus').textContent = getInterpolatedText('dustAiStatusRunning', { done, total });
         } });
       } catch (error) {
+        if (error?.name === 'AbortError') throw error;
+        assertRepairCurrent(isCurrent);
         if (aiRepair.provider === 'webgpu') {
           await loadAiRepairModel(aiRepair.sourceRef || DEFAULT_MODEL_URL, { prefer: 'wasm', refresh: false });
-          if (aiRepair.status === 'ready') return inpaintManualBrush(source, settings, base, lensMapping);
+          if (aiRepair.status === 'ready') return inpaintManualBrush(source, settings, base, lensMapping, isCurrent);
         }
         aiRepair.status = 'error';
         aiRepair.error = error?.message || String(error);
@@ -13894,7 +13937,7 @@ import { frameNeedsReview } from './reviewQueue.js';
           });
           label = String(source).split('/').pop();
         }
-        const session = await createInpaintSession(bytes, { prefer });
+        const session = await createInpaintSessionInWorker(bytes, { prefer });
         aiRepair.run = session.run;
         aiRepair.release = session.release;
         aiRepair.provider = session.provider;
@@ -13915,13 +13958,19 @@ import { frameNeedsReview } from './reviewQueue.js';
 
     // The commit-path inpaint: the learned model when it is on and ready,
     // TELEA otherwise (and always for brush strokes, which stay interactive).
-    async function inpaintForCommit(source, mask) {
+    async function inpaintForCommit(source, mask, isCurrent = () => true, worker = null) {
+      assertRepairCurrent(isCurrent);
       if (state.dustRemoval.ai && aiRepair.status === 'idle') await loadAiRepairModel(DEFAULT_MODEL_URL, { refresh: false });
-      while (state.dustRemoval.ai && aiRepair.status === 'loading') await new Promise(resolve => setTimeout(resolve, 50));
-      if (!aiRepairReady()) return inpaintMasked(source, mask, 3);
+      while (state.dustRemoval.ai && aiRepair.status === 'loading') {
+        await new Promise(resolve => setTimeout(resolve, 50));
+        assertRepairCurrent(isCurrent);
+      }
+      assertRepairCurrent(isCurrent);
+      if (!aiRepairReady()) return inpaintDustOffMainThread(source, mask, isCurrent, worker);
       const started = performance.now();
       try {
         const { imageData, tiles } = await inpaintWithModel(source, mask, aiRepair.run, {
+          shouldContinue: isCurrent,
           onProgress: (done, total) => updateDustStatusUI(getInterpolatedText('dustAiStatusRunning', { done: String(done), total: String(total) }, `AI repair: tile ${done} / ${total}`))
         });
         aiRepair.tiles = tiles;
@@ -13929,18 +13978,20 @@ import { frameNeedsReview } from './reviewQueue.js';
         updateAiRepairUI();
         return imageData;
       } catch (error) {
+        if (error?.name === 'AbortError') throw error;
+        assertRepairCurrent(isCurrent);
         console.warn('AI repair failed:', error);
         // A WebGPU session that fails mid-run is rebuilt on WASM once; only
         // when that fails too does TELEA take over.
         if (aiRepair.provider === 'webgpu' && aiRepair.sourceRef) {
           await loadAiRepairModel(aiRepair.sourceRef, { prefer: 'wasm', refresh: false });
-          if (aiRepairReady()) return inpaintForCommit(source, mask);
+          if (aiRepairReady()) return inpaintForCommit(source, mask, isCurrent, worker);
         }
         aiRepair.status = 'error';
         aiRepair.error = error?.message || String(error);
         aiRepair.run = null;
         updateAiRepairUI();
-        return inpaintMasked(source, mask, 3);
+        return inpaintDustOffMainThread(source, mask, isCurrent, worker);
       }
     }
 
@@ -13953,7 +14004,8 @@ import { frameNeedsReview } from './reviewQueue.js';
       // Coalesce quick brush strokes and discard work after switching photos or undo.
       await new Promise((resolve) => setTimeout(resolve, 200));
       if (!isCurrent()) return;
-      const result = await inpaintManualBrush(await inpaintForCommit(source, mask));
+      const result = await inpaintManualBrush(await inpaintForCommit(source, mask, isCurrent), state,
+        state.loadedBaseImageData || state.originalImageData, state.conversionSourceImageData?.__lensMapping, isCurrent);
       if (!isCurrent()) return;
       state.dustRemoval.inpaintedImageData = result;
       applyDustResultToState();
@@ -15261,19 +15313,19 @@ import { frameNeedsReview } from './reviewQueue.js';
         const valid = () => generation === loadGeneration && revision === manualEditRevision
           && requestRevision === automaticRollRevision && safeStorageGet(AUTO_ROLL_KEY) !== 'off'
           && !state.cropping && !state.rollReference.applyLock && pending.every(item => state.fileQueue.includes(item));
-        const samples = createRollSampleCache();
+        const samples = createAnalysisSampleStore();
         automaticRollImportRunning = true;
         try {
           persistCurrentFileSettings({ silent: true, force: true });
           const current = getCurrentQueueItem();
           if (pending.includes(current) && current.settings && canReuseLoadedRollSource(current)) {
-            samples.put(current, buildRollAnalysisSample(state.loadedBaseImageData || state.originalImageData, current.settings));
+            await samples.put(current, buildRollAnalysisSample(state.loadedBaseImageData || state.originalImageData, current.settings));
           }
           // Frames are decoded and measured a few at a time (same lane planning
           // as the batch export), each lane with its own frame analyzer, and
           // never behind the blocking overlay: the editor stays usable.
           const toAnalyze = pending.filter(item => !item.settings && !item.userEdited);
-          const lanes = planBatchLanes(toAnalyze.map(item => item.file));
+          const lanes = await planBatchLanes(toAnalyze.map(item => item.file));
           const analyzers = createAutoFrameWorkerPool({ size: lanes });
           const stop = new AbortController();
           const trace = createPerfTrace('automaticRollImport', { files: toAnalyze.length, lanes });
@@ -15296,7 +15348,7 @@ import { frameNeedsReview } from './reviewQueue.js';
               sink: async (item, payload) => {
                 if (!payload || !valid() || item.settings || item.userEdited) return;
                 item.settings = payload.settings; item.automaticSettings = true;
-                samples.put(item, payload.sample);
+                await samples.put(item, payload.sample);
               },
               onEvent: (event) => {
                 if (event.type !== 'error' || !valid()) return;
@@ -15314,7 +15366,7 @@ import { frameNeedsReview } from './reviewQueue.js';
           }
           if (!valid()) return;
           notifyImportReview(pending); updateFileListUI(); scheduleProjectRecovery();
-        } finally { samples.clear(); automaticRollImportRunning = false; }
+        } finally { await samples.clear(); automaticRollImportRunning = false; }
       };
       setTimeout(() => { void attempt().catch(error => console.warn('Automatic roll analysis failed:', error)); }, 1200);
     }
@@ -15375,6 +15427,18 @@ import { frameNeedsReview } from './reviewQueue.js';
       }
       if (!automatic) showBatchProgress(true);
       const measurements = [];
+      const analysisSamples = samples || createAnalysisSampleStore();
+      async function sampleForMeasurement(measurement) {
+        const cached = await analysisSamples.get(measurement.item);
+        if (cached) return cached;
+        // Storage-disabled/private-mode fallback stays bounded and lossless.
+        const image = canReuseLoadedRollSource(measurement.item)
+          ? state.loadedBaseImageData || state.originalImageData : await loadFileToImageData(measurement.item.file);
+        assertRepairCurrent(isValid);
+        const sample = buildRollAnalysisSample(image, measurement.settings);
+        await analysisSamples.put(measurement.item, sample);
+        return sample;
+      }
       let roll = null;
       try {
         if (processNegativeInFlight) await processNegativeInFlight;
@@ -15387,7 +15451,7 @@ import { frameNeedsReview } from './reviewQueue.js';
           if (!isValid()) return;
           if (!automatic) updateBatchProgress(i + 1, selectedItems.length, item.file.name);
           try {
-            let sample = samples?.take(item);
+            let sample = await analysisSamples.get(item);
             let settings;
             if (sample && item.settings) settings = cloneSettings(item.settings);
             else {
@@ -15401,11 +15465,11 @@ import { frameNeedsReview } from './reviewQueue.js';
               }
               if (!isValid()) return;
               sample = buildRollAnalysisSample(imageData, settings);
+              await analysisSamples.put(item, sample);
             }
             measurements.push({
               item,
               settings,
-              sample,
               negativeMean: measureNegativeMean(sample, (settings.coreBorderBuffer ?? 10) / 100),
               filmBase: requiresFilmBase(settings) ? settings.filmBase : null
             });
@@ -15426,7 +15490,9 @@ import { frameNeedsReview } from './reviewQueue.js';
           const settings = { ...m.settings, rollFrame: null };
           if (colorRoll && first.filmBase && requiresFilmBase(settings)) settings.filmBase = { ...first.filmBase };
           try {
-            m.channelData = await analyzeSilverCoreFrame(m.sample, buildCoreConversionSettings(settings), resolveConversionMode(settings));
+            const sample = await sampleForMeasurement(m);
+            if (!isValid()) return;
+            m.channelData = await analyzeSilverCoreFrame(sample, buildCoreConversionSettings(settings), resolveConversionMode(settings));
           } catch (error) {
             console.error('Roll analysis could not analyse', m.item.file.name, error);
           }
@@ -15459,12 +15525,13 @@ import { frameNeedsReview } from './reviewQueue.js';
 
         }
         // The light table shows the roll as it will convert: render a small
-        // positive of every analysed frame from the sample already in memory.
+        // positive from one lossless sample at a time, then release that sample.
         for (const m of measurements) {
           if (!isValid()) return;
           if (!usesSilverCoreConversion(m.settings)) continue;
           try {
-            const thumbSource = downsampleImageDataForMaxDim(m.sample, 288);
+            const thumbSource = downsampleImageDataForMaxDim(await sampleForMeasurement(m), 288);
+            if (!isValid()) return;
             const converted = await convertFrameWithRouter({
               imageData: thumbSource,
               settings: { ...buildCoreConversionSettings(m.settings), analysisRegion: null },
@@ -15473,7 +15540,7 @@ import { frameNeedsReview } from './reviewQueue.js';
             if (converted) m.thumbnail = thumbnailDataUrl(converted);
           } catch (error) {
             console.warn('Roll thumbnail failed for', m.item.file.name, error);
-          }
+          } finally { await analysisSamples.delete(m.item); }
         }
         if (!isValid()) return;
         pushUndo('rollAnalysis');
@@ -15493,6 +15560,7 @@ import { frameNeedsReview } from './reviewQueue.js';
         }
         invalidateSilverCoreCache();
       } finally {
+        if (!samples) await analysisSamples.clear();
         if (!automatic) showBatchProgress(false);
         if (button) {
           button.disabled = false;

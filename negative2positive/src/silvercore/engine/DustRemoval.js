@@ -294,9 +294,24 @@ export function hatThreshold(data, strength) {
 }
 
 /**
- * Threshold the hat responses and filter contours into the final dust mask.
- * @returns {{ mask: Uint8Array, particleCount: number }}
+ * Exact summed-area counts of nonzero mask pixels, using four bytes per pixel.
  */
+export function buildBinaryIntegralImage(bin, w, h) {
+  // Each pixel contributes either zero or one. Integer counts remain exact;
+  // only frames exceeding uint32's count range need the wider representation.
+  const Counts = w * h <= 0xffffffff ? Uint32Array : Float64Array;
+  const integ = new Counts((w + 1) * (h + 1));
+  for (let y = 0; y < h; y++) {
+    let rowSum = 0;
+    for (let x = 0; x < w; x++) {
+      rowSum += bin[y * w + x] > 0 ? 1 : 0;
+      integ[(y + 1) * (w + 1) + x + 1] = integ[y * (w + 1) + x + 1] + rowSum;
+    }
+  }
+  return integ;
+}
+
+/** Threshold the hat responses and filter contours into the final dust mask. */
 function buildDustMask(topData, blackData, w, h, strength, maxParticleSize) {
   const c = cv();
   const pixelCount = w * h;
@@ -312,14 +327,7 @@ function buildDustMask(topData, blackData, w, h, strength, maxParticleSize) {
   }
 
   // Integral image over the binary response for isolation checks
-  const integ = new Float64Array((w + 1) * (h + 1));
-  for (let y = 0; y < h; y++) {
-    let rowSum = 0;
-    for (let x = 0; x < w; x++) {
-      rowSum += bin[y * w + x] > 0 ? 1 : 0;
-      integ[(y + 1) * (w + 1) + (x + 1)] = integ[y * (w + 1) + (x + 1)] + rowSum;
-    }
-  }
+  const integ = buildBinaryIntegralImage(bin, w, h);
   const regionSum = (x0, y0, x1, y1) => {
     x0 = Math.max(0, x0); y0 = Math.max(0, y0);
     x1 = Math.min(w, x1); y1 = Math.min(h, y1);

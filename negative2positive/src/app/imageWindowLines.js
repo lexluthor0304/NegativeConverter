@@ -11,7 +11,7 @@ function sample(image, x, y) {
 
 // 長さだけでは被写体の建物・木・粒状性が上位を占める。片側に均一な片基が
 // 連続している線を優先し、穴や隣接コマを横切る仮想線は支持率で落とす。
-function lineEvidence(image, p, q) {
+export function lineEvidence(image, p, q) {
   const length = Math.hypot(q.x - p.x, q.y - p.y);
   const nx = -(q.y - p.y) / length, ny = (q.x - p.x) / length;
   const gap = Math.max(3, Math.min(image.width, image.height) * .004);
@@ -29,8 +29,11 @@ function lineEvidence(image, p, q) {
     return median(pixels.map(p => Math.max(...p.map((v, c) => Math.abs(v - color[c])))));
   };
   const contrast = median(deltas), support = deltas.filter(d => d >= 10).length / deltas.length;
+  // Most scanned candidate lines have no real border. Reject on the already
+  // measured evidence before sorting eight more arrays for base uniformity.
+  if (contrast < 12 || support < .65) return 0;
   const clean = Math.min(variation(a), variation(b));
-  if (contrast < 12 || support < .65 || clean > 18) return 0;
+  if (clean > 18) return 0;
   return support * .5 + Math.min(contrast / 80, 1) * .25 + (1 - clean / 24) * .25;
 }
 

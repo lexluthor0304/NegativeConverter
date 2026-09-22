@@ -2,6 +2,10 @@
 // node negative2positive/src/app/zipStoreWriter.test.mjs
 
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import JSZip from 'jszip';
 import { ZipStoreWriter, createZipNameDeduper, dedupeEntryName } from './zipStoreWriter.js';
 
@@ -64,6 +68,79 @@ assert.ok(writable.chunks.length > 6, 'writer should stream multiple chunks');
 
 const archive = writable.bytes();
 const zip = await JSZip.loadAsync(archive, { checkCRC32: true });
+
+// APPNOTE 4.4.4 / 4.4.8 / 4.4.9: with bit 3, ZIP32 local CRC/sizes
+// are zero; actual values live in the descriptor and central directory.
+// ZIP64 still uses size sentinels and its 64-bit local extra fields.
+const independentArchives = [];
+for (const forceZip64 of [false, true]) {
+  const target = new MemoryWritable();
+  const writer = new ZipStoreWriter(target, { forceZip64 });
+  await writer.addBlob('a.txt', new Blob(['abc']));
+  await writer.close();
+  const bytes = target.bytes();
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  assert.equal(view.getUint32(0, true), 0x04034b50);
+  assert.equal(view.getUint16(6, true) & 8, 8, 'local header sets descriptor flag');
+  assert.equal(view.getUint32(14, true), 0, 'local CRC belongs to descriptor');
+  assert.equal(view.getUint32(18, true), forceZip64 ? 0xffffffff : 0, 'local compressed size');
+  assert.equal(view.getUint32(22, true), forceZip64 ? 0xffffffff : 0, 'local uncompressed size');
+  const nameLength = view.getUint16(26, true), extraLength = view.getUint16(28, true);
+  assert.equal(extraLength, forceZip64 ? 20 : 0);
+  if (forceZip64) {
+    const extra = 30 + nameLength;
+    assert.equal(view.getUint16(extra, true), 1, 'ZIP64 extra field ID');
+    assert.equal(view.getUint16(extra + 2, true), 16, 'two ZIP64 size fields');
+    assert.equal(view.getBigUint64(extra + 4, true), 3n);
+    assert.equal(view.getBigUint64(extra + 12, true), 3n);
+  }
+  const descriptor = 30 + nameLength + extraLength + 3;
+  assert.equal(view.getUint32(descriptor, true), 0x08074b50);
+  assert.equal(view.getUint32(descriptor + 4, true), 0x352441c2, 'known CRC32 of abc');
+  if (forceZip64) {
+    assert.equal(view.getBigUint64(descriptor + 8, true), 3n);
+    assert.equal(view.getBigUint64(descriptor + 16, true), 3n);
+  } else {
+    assert.equal(view.getUint32(descriptor + 8, true), 3);
+    assert.equal(view.getUint32(descriptor + 12, true), 3);
+  }
+  const central = descriptor + (forceZip64 ? 24 : 16);
+  assert.equal(view.getUint32(central, true), 0x02014b50);
+  assert.equal(view.getUint16(central + 8, true) & 8, 8);
+  assert.equal(view.getUint32(central + 16, true), 0x352441c2);
+  assert.equal(view.getUint32(central + 20, true), forceZip64 ? 0xffffffff : 3);
+  assert.equal(view.getUint32(central + 24, true), forceZip64 ? 0xffffffff : 3);
+  if (forceZip64) {
+    const extra = central + 46 + nameLength;
+    assert.equal(view.getBigUint64(extra + 4, true), 3n);
+    assert.equal(view.getBigUint64(extra + 12, true), 3n);
+  }
+  independentArchives.push({ forceZip64, bytes });
+}
+
+// Info-ZIP is independent of the JavaScript reader. Keep the exact structural
+// assertions above mandatory even on environments without this optional tool.
+const unzip = spawnSync('unzip', ['-v'], { encoding: 'utf8' });
+if (unzip.error?.code === 'ENOENT') {
+  console.log('SKIP: optional Info-ZIP extraction check (unzip unavailable)');
+} else {
+  assert.equal(unzip.status, 0, unzip.stderr || unzip.error?.message);
+  const directory = mkdtempSync(join(tmpdir(), 'nc-zip-descriptor-'));
+  try {
+    for (const { forceZip64, bytes } of independentArchives) {
+      const path = join(directory, forceZip64 ? 'zip64.zip' : 'zip32.zip');
+      writeFileSync(path, bytes);
+      const check = spawnSync('unzip', ['-t', path], { encoding: 'utf8' });
+      assert.equal(check.status, 0, check.stdout + check.stderr);
+      const extracted = spawnSync('unzip', ['-p', path, 'a.txt'], { encoding: 'utf8' });
+      assert.equal(extracted.status, 0, extracted.stderr);
+      assert.equal(extracted.stdout, 'abc');
+    }
+    console.log('ZIP32/ZIP64 exact headers and independent Info-ZIP CRC/extraction passed');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
 
 assert.deepEqual(Object.keys(zip.files).sort(), [
   'alpha.txt',
@@ -152,3 +229,30 @@ console.log('zipStoreWriter.test.mjs passed');
 }
 
 console.log('zipStoreWriter.test.mjs extended cases passed');
+
+// A payload is read once; even a single giant producer chunk is written in
+// bounded pieces, with task yields while computing its checksum.
+{
+  let reads = 0;
+  let ticks = 0;
+  const bytes = new Uint8Array(16 * 1024 * 1024);
+  bytes[0] = 19; bytes[bytes.length - 1] = 237;
+  class SingleReadBlob extends Blob {
+    stream() {
+      assert.equal(++reads, 1, 'ZIP payload must not be read twice');
+      return new ReadableStream({ start(controller) { controller.enqueue(bytes); controller.close(); } });
+    }
+  }
+  const target = new MemoryWritable();
+  const writer = new ZipStoreWriter(target);
+  const timer = setInterval(() => ticks++, 0);
+  try { await writer.addBlob('large.bin', new SingleReadBlob([bytes])); }
+  finally { clearInterval(timer); }
+  await writer.addBlob('empty.bin', new Blob([]));
+  await writer.close();
+  assert.ok(ticks > 0, 'CRC computation should yield to input and paint tasks');
+  assert.ok(target.chunks.every(chunk => chunk.length <= 256 * 1024), 'bounded write chunks');
+  const zip = await JSZip.loadAsync(target.bytes(), { checkCRC32: true });
+  assert.deepEqual(await zip.file('large.bin').async('uint8array'), bytes);
+  assert.equal((await zip.file('empty.bin').async('uint8array')).length, 0);
+}

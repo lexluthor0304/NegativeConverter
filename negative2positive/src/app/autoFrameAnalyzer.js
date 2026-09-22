@@ -59,7 +59,7 @@ function sanitizeCropRegionForImage(cropRegion, imageData) {
   return { left, top, width, height };
 }
 
-function getAnalyzerContext(options = {}) {
+export function getAnalyzerContext(options = {}) {
   return {
     settings: options.settings || {},
     maxSide: Number.isFinite(options.maxSide) ? options.maxSide : 1600,
@@ -629,8 +629,10 @@ function pushDensityRectCandidate(candidates, rect, target, analysis, context, o
 }
 
 function buildDensityTemplateCandidates(imageData, context) {
+  if (imageData === context.reusablePreview && context.previewDensityCandidates) return context.previewDensityCandidates;
   const analysis = buildDensityAnalysis(imageData);
   if (!analysis) return [];
+  if (imageData === context.reusablePreview) context.previewGlobalChroma = analysis.globalChroma;
 
   const aspectTargets = getAutoFrameAspectTargets(context);
   const candidates = [];
@@ -685,7 +687,7 @@ function buildDensityTemplateCandidates(imageData, context) {
   });
 
   const seen = new Set();
-  return candidates
+  const result = candidates
     .sort((a, b) => b.score - a.score)
     .filter((candidate) => {
       const key = [
@@ -700,6 +702,11 @@ function buildDensityTemplateCandidates(imageData, context) {
       return true;
     })
     .slice(0, 18);
+  // The preview's initial and zero-angle contour passes share exactly the same
+  // pixels/settings. Retain only the small candidate list, not the three large
+  // density integral planes. Other rotation candidates are never cached here.
+  if (imageData === context.reusablePreview) context.previewDensityCandidates = result;
+  return result;
 }
 
 function scoreFrameCandidate(candidate, context) {
@@ -765,6 +772,8 @@ function scoreFrameCandidate(candidate, context) {
   };
 }
 
+// Keep the existing weak cache across repeated calls on the same small source;
+// the new edge/density caches below remain bounded to one detection context.
 const houghCandidateByImage = new WeakMap();
 
 function buildHoughCandidate(edges, imageWidth, imageHeight) {
@@ -857,15 +866,16 @@ function buildHoughCandidate(edges, imageWidth, imageHeight) {
   }
 }
 
-function detectFrameCandidatesWithCv(imageData, context, options = {}) {
+export function detectFrameCandidatesWithCv(imageData, context, options = {}) {
   if (!(globalThis.cv && globalThis.cv.Mat) || !imageData) return [];
 
   const minAreaRatio = Number.isFinite(options.minAreaRatio) ? options.minAreaRatio : 0.05;
   const retrievalMode = options.retrievalMode === 'external' ? globalThis.cv.RETR_EXTERNAL : globalThis.cv.RETR_LIST;
   const aspectTargets = getAutoFrameAspectTargets(context);
-  const src = globalThis.cv.matFromImageData(imageData);
-  const imageWidth = src.cols;
-  const imageHeight = src.rows;
+  const cachedEdges = imageData === context.reusablePreview ? context.previewEdges : null;
+  const src = cachedEdges ? null : globalThis.cv.matFromImageData(imageData);
+  const imageWidth = imageData.width;
+  const imageHeight = imageData.height;
   const imageArea = Math.max(1, imageWidth * imageHeight);
 
   let gray = null;
@@ -881,48 +891,55 @@ function detectFrameCandidatesWithCv(imageData, context, options = {}) {
   let hierarchy = null;
 
   try {
-    gray = new globalThis.cv.Mat();
-    claheEnhanced = new globalThis.cv.Mat();
-    topHat = new globalThis.cv.Mat();
-    blackHat = new globalThis.cv.Mat();
-    merged = new globalThis.cv.Mat();
-    blurred = new globalThis.cv.Mat();
-    edges = new globalThis.cv.Mat();
-    kernel3 = globalThis.cv.getStructuringElement(globalThis.cv.MORPH_RECT, new globalThis.cv.Size(3, 3));
-    kernel7 = globalThis.cv.getStructuringElement(globalThis.cv.MORPH_RECT, new globalThis.cv.Size(7, 7));
     contours = new globalThis.cv.MatVector();
     hierarchy = new globalThis.cv.Mat();
-
-    globalThis.cv.cvtColor(src, gray, globalThis.cv.COLOR_RGBA2GRAY);
-    let claheApplied = false;
-    let clahe = null;
-    try {
-      if (globalThis.cv.createCLAHE && typeof globalThis.cv.createCLAHE === 'function') {
-        clahe = globalThis.cv.createCLAHE(2.0, new globalThis.cv.Size(8, 8));
-      } else if (globalThis.cv.CLAHE && typeof globalThis.cv.CLAHE === 'function') {
-        clahe = new globalThis.cv.CLAHE(2.0, new globalThis.cv.Size(8, 8));
+    if (cachedEdges) {
+      edges = new globalThis.cv.Mat(imageHeight, imageWidth, globalThis.cv.CV_8UC1);
+      edges.data.set(cachedEdges);
+    } else {
+      gray = new globalThis.cv.Mat();
+      claheEnhanced = new globalThis.cv.Mat();
+      topHat = new globalThis.cv.Mat();
+      blackHat = new globalThis.cv.Mat();
+      merged = new globalThis.cv.Mat();
+      blurred = new globalThis.cv.Mat();
+      edges = new globalThis.cv.Mat();
+      kernel3 = globalThis.cv.getStructuringElement(globalThis.cv.MORPH_RECT, new globalThis.cv.Size(3, 3));
+      kernel7 = globalThis.cv.getStructuringElement(globalThis.cv.MORPH_RECT, new globalThis.cv.Size(7, 7));
+      globalThis.cv.cvtColor(src, gray, globalThis.cv.COLOR_RGBA2GRAY);
+      let claheApplied = false;
+      let clahe = null;
+      try {
+        if (globalThis.cv.createCLAHE && typeof globalThis.cv.createCLAHE === 'function') {
+          clahe = globalThis.cv.createCLAHE(2.0, new globalThis.cv.Size(8, 8));
+        } else if (globalThis.cv.CLAHE && typeof globalThis.cv.CLAHE === 'function') {
+          clahe = new globalThis.cv.CLAHE(2.0, new globalThis.cv.Size(8, 8));
+        }
+        if (clahe && typeof clahe.apply === 'function') {
+          clahe.apply(gray, claheEnhanced);
+          claheApplied = true;
+        }
+      } catch (err) {
+        claheApplied = false;
+      } finally {
+        if (clahe && typeof clahe.delete === 'function') {
+          clahe.delete();
+        }
       }
-      if (clahe && typeof clahe.apply === 'function') {
-        clahe.apply(gray, claheEnhanced);
-        claheApplied = true;
+      if (!claheApplied) {
+        globalThis.cv.equalizeHist(gray, claheEnhanced);
       }
-    } catch (err) {
-      claheApplied = false;
-    } finally {
-      if (clahe && typeof clahe.delete === 'function') {
-        clahe.delete();
-      }
+      globalThis.cv.morphologyEx(claheEnhanced, topHat, globalThis.cv.MORPH_TOPHAT, kernel7);
+      globalThis.cv.morphologyEx(claheEnhanced, blackHat, globalThis.cv.MORPH_BLACKHAT, kernel7);
+      globalThis.cv.addWeighted(claheEnhanced, 1.0, topHat, 0.7, 0, merged);
+      globalThis.cv.addWeighted(merged, 1.0, blackHat, -0.45, 0, merged);
+      globalThis.cv.GaussianBlur(merged, blurred, new globalThis.cv.Size(5, 5), 0, 0, globalThis.cv.BORDER_DEFAULT);
+      globalThis.cv.Canny(blurred, edges, 40, 140, 3, false);
+      globalThis.cv.dilate(edges, edges, kernel3, new globalThis.cv.Point(-1, -1), 1);
+      // Copy before findContours, whose mutation behaviour differs across CV
+      // versions. Cache lifetime is this single detection, never the next file.
+      if (imageData === context.reusablePreview) context.previewEdges = edges.data.slice();
     }
-    if (!claheApplied) {
-      globalThis.cv.equalizeHist(gray, claheEnhanced);
-    }
-    globalThis.cv.morphologyEx(claheEnhanced, topHat, globalThis.cv.MORPH_TOPHAT, kernel7);
-    globalThis.cv.morphologyEx(claheEnhanced, blackHat, globalThis.cv.MORPH_BLACKHAT, kernel7);
-    globalThis.cv.addWeighted(claheEnhanced, 1.0, topHat, 0.7, 0, merged);
-    globalThis.cv.addWeighted(merged, 1.0, blackHat, -0.45, 0, merged);
-    globalThis.cv.GaussianBlur(merged, blurred, new globalThis.cv.Size(5, 5), 0, 0, globalThis.cv.BORDER_DEFAULT);
-    globalThis.cv.Canny(blurred, edges, 40, 140, 3, false);
-    globalThis.cv.dilate(edges, edges, kernel3, new globalThis.cv.Point(-1, -1), 1);
 
     const candidates = [];
     globalThis.cv.findContours(edges, contours, hierarchy, retrievalMode, globalThis.cv.CHAIN_APPROX_SIMPLE);
@@ -996,7 +1013,7 @@ function detectFrameCandidatesWithCv(imageData, context, options = {}) {
       .sort((a, b) => b.score - a.score)
       .slice(0, 12);
   } finally {
-    src.delete();
+    if (src) src.delete();
     if (gray) gray.delete();
     if (claheEnhanced) claheEnhanced.delete();
     if (topHat) topHat.delete();
@@ -1372,6 +1389,7 @@ export function detectFrameAndRotation(imageData, options = {}) {
   };
 
   const previewData = resizeImageDataToMaxSide(imageData, context.maxSide);
+  context.reusablePreview = previewData;
   clock.mark('preview');
   const window = detectImageWindow(previewData, getAutoFrameAspectTargets(context));
   clock.mark('window');
@@ -1503,7 +1521,8 @@ export function detectFrameAndRotation(imageData, options = {}) {
     : 'unknown';
   const inferredFrameMode = cropFull.candidate && cropFull.candidate.frameMode
     ? cropFull.candidate.frameMode
-    : inferFrameMaterialMode(context, buildDensityAnalysis(previewData));
+    : inferFrameMaterialMode(context, context.previewGlobalChroma === undefined
+      ? buildDensityAnalysis(previewData) : { globalChroma: context.previewGlobalChroma });
 
   return withStages({
     angle: normalizedAngle,
