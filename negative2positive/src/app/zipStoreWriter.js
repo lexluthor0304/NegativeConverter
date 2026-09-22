@@ -3,8 +3,10 @@ const ZIP_MAX_U32 = 0xFFFFFFFF;
 const ZIP_VERSION_NEEDED = 20;
 const ZIP_VERSION_ZIP64 = 45;
 const ZIP_GENERAL_PURPOSE_UTF8 = 0x0800;
+const ZIP_GENERAL_PURPOSE_DESCRIPTOR = 0x0008;
 const ZIP_METHOD_STORE = 0;
 const ZIP64_EXTRA_ID = 0x0001;
+const ZIP_CHUNK_BYTES = 256 * 1024;
 
 const textEncoder = new TextEncoder();
 
@@ -108,7 +110,12 @@ async function* readBlobChunks(blob) {
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
-        if (value) yield toUint8Array(value);
+        if (value) {
+          const bytes = toUint8Array(value);
+          for (let offset = 0; offset < bytes.length; offset += ZIP_CHUNK_BYTES) {
+            yield bytes.subarray(offset, offset + ZIP_CHUNK_BYTES);
+          }
+        }
       }
     } finally {
       reader.releaseLock();
@@ -116,22 +123,14 @@ async function* readBlobChunks(blob) {
     return;
   }
 
-  if (blob && typeof blob.arrayBuffer === 'function') {
-    yield new Uint8Array(await blob.arrayBuffer());
+  if (blob && typeof blob.slice === 'function' && typeof blob.arrayBuffer === 'function') {
+    for (let offset = 0; offset < blob.size; offset += ZIP_CHUNK_BYTES) {
+      yield new Uint8Array(await blob.slice(offset, offset + ZIP_CHUNK_BYTES).arrayBuffer());
+    }
     return;
   }
 
   throw new Error('ZIP entry payload is not a Blob.');
-}
-
-async function crc32OfBlob(blob) {
-  let crc = 0xFFFFFFFF;
-  for await (const chunk of readBlobChunks(blob)) {
-    for (let i = 0; i < chunk.length; i++) {
-      crc = crc32Table[(crc ^ chunk[i]) & 0xFF] ^ (crc >>> 8);
-    }
-  }
-  return (crc ^ 0xFFFFFFFF) >>> 0;
 }
 
 function getDosDateTime(date = new Date()) {
@@ -158,11 +157,11 @@ function createLocalFileHeader(entry) {
   const view = new DataView(header.buffer);
   view.setUint32(0, 0x04034B50, true);
   view.setUint16(4, entry.zip64 ? ZIP_VERSION_ZIP64 : ZIP_VERSION_NEEDED, true);
-  view.setUint16(6, ZIP_GENERAL_PURPOSE_UTF8, true);
+  view.setUint16(6, ZIP_GENERAL_PURPOSE_UTF8 | ZIP_GENERAL_PURPOSE_DESCRIPTOR, true);
   view.setUint16(8, ZIP_METHOD_STORE, true);
   view.setUint16(10, entry.dosTime, true);
   view.setUint16(12, entry.dosDate, true);
-  view.setUint32(14, entry.crc32, true);
+  view.setUint32(14, 0, true); // CRC follows the payload in its data descriptor.
   view.setUint32(18, entry.zip64 ? ZIP_MAX_U32 : entry.size, true);
   view.setUint32(22, entry.zip64 ? ZIP_MAX_U32 : entry.size, true);
   view.setUint16(26, entry.nameBytes.length, true);
@@ -189,7 +188,7 @@ function createCentralDirectoryHeader(entry) {
   view.setUint32(0, 0x02014B50, true);
   view.setUint16(4, extraValues ? ZIP_VERSION_ZIP64 : ZIP_VERSION_NEEDED, true);
   view.setUint16(6, extraValues ? ZIP_VERSION_ZIP64 : ZIP_VERSION_NEEDED, true);
-  view.setUint16(8, ZIP_GENERAL_PURPOSE_UTF8, true);
+  view.setUint16(8, ZIP_GENERAL_PURPOSE_UTF8 | ZIP_GENERAL_PURPOSE_DESCRIPTOR, true);
   view.setUint16(10, ZIP_METHOD_STORE, true);
   view.setUint16(12, entry.dosTime, true);
   view.setUint16(14, entry.dosDate, true);
@@ -219,6 +218,21 @@ function createCentralDirectoryHeader(entry) {
     if (bigOffset) view.setBigUint64(at, BigInt(entry.localHeaderOffset), true);
   }
   return header;
+}
+
+function createDataDescriptor(entry) {
+  const bytes = new Uint8Array(entry.zip64 ? 24 : 16);
+  const view = new DataView(bytes.buffer);
+  view.setUint32(0, 0x08074B50, true);
+  view.setUint32(4, entry.crc32, true);
+  if (entry.zip64) {
+    view.setBigUint64(8, BigInt(entry.size), true);
+    view.setBigUint64(16, BigInt(entry.size), true);
+  } else {
+    view.setUint32(8, entry.size, true);
+    view.setUint32(12, entry.size, true);
+  }
+  return bytes;
 }
 
 function createEndOfCentralDirectory(entryCount, centralDirectorySize, centralDirectoryOffset, forceZip64) {
@@ -302,7 +316,6 @@ export class ZipStoreWriter {
     }
 
     const size = ensureSafeSize(blob.size, 'ZIP entry size');
-    const crc32 = await crc32OfBlob(blob);
     const { time, date } = getDosDateTime(this.now || new Date());
     // Two frames from different folders can share a basename; without this the
     // archive gets duplicate entries and extractors silently drop one.
@@ -312,7 +325,7 @@ export class ZipStoreWriter {
     const entry = {
       nameBytes,
       size,
-      crc32,
+      crc32: 0,
       dosTime: time,
       dosDate: date,
       localHeaderOffset,
@@ -320,9 +333,22 @@ export class ZipStoreWriter {
     };
 
     await this.writeChunk(createLocalFileHeader(entry));
+    let crc = 0xFFFFFFFF;
+    let yieldAt = performance.now() + 12;
     for await (const chunk of readBlobChunks(blob)) {
+      for (let i = 0; i < chunk.length; i++) {
+        crc = crc32Table[(crc ^ chunk[i]) & 0xFF] ^ (crc >>> 8);
+      }
       await this.writeChunk(chunk);
+      // An immediately-ready Blob reader and sink only yield microtasks. Give
+      // input/paint/cancel handlers a real task boundary during long exports.
+      if (performance.now() >= yieldAt) {
+        await new Promise(resolve => setTimeout(resolve, 0));
+        yieldAt = performance.now() + 12;
+      }
     }
+    entry.crc32 = (crc ^ 0xFFFFFFFF) >>> 0;
+    await this.writeChunk(createDataDescriptor(entry));
     this.entries.push(entry);
     this.usedNames.add(uniqueName.toLowerCase());
     return uniqueName;

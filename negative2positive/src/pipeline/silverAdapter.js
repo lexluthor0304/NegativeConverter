@@ -41,6 +41,41 @@ function toImage16(input) {
   return fromImageData8(input);
 }
 
+// Plain JPEG/PNG previews have no attached plane. Keep their promotion with the
+// engine slot so unchanged inputs retain both the analysis and film-base cache.
+// forceFullProcess also supports callers that explicitly refresh pixels in place.
+function toImage16ForSlot(slot, input, force = false) {
+  if (input.data instanceof Uint16Array || input.__image16?.data instanceof Uint16Array) {
+    slot.promotedSource = null;
+    return toImage16(input);
+  }
+  const cached = slot.promotedSource;
+  if (!force && cached && cached.source === input.data
+      && cached.image.width === input.width && cached.image.height === input.height) {
+    return cached.image;
+  }
+  const image = fromImageData8(input);
+  slot.promotedSource = { source: input.data, image };
+  return image;
+}
+
+function localExposureStopsForSlot(slot, settings, width, height) {
+  const exposure = settings?.localExposure;
+  const geometry = settings?.localExposureGeometry;
+  if (!geometry || !exposure?.strokes?.length) {
+    slot.exposureMap = null;
+    return null;
+  }
+  const workingGeometry = { ...geometry, width, height };
+  // Settings snapshots are copied on each render: object identity alone cannot
+  // identify an unchanged stroke. The exact content also catches undo and edits.
+  const key = JSON.stringify([exposure, workingGeometry]);
+  if (!slot.exposureMap || slot.exposureMap.key !== key) {
+    slot.exposureMap = { key, stops: rasterizeExposureStops(exposure, workingGeometry) };
+  }
+  return slot.exposureMap.stops;
+}
+
 function normalizeAnalysisOverride(value) {
   if (!Array.isArray(value) || value.length !== 3) return null;
   const channels = value.map((channel) => {
@@ -210,6 +245,8 @@ function _createSlot() {
     lastFilmBaseGains: null,
     analysis: null,
     referencePixels: {},
+    promotedSource: null,
+    exposureMap: null,
   };
 }
 
@@ -397,9 +434,9 @@ async function runSilverCore(imageData, settings, mode, options) {
 
   // Promote whatever the caller hands us into Image16. Loaders attach __image16
   // directly so the upcast is zero-copy in the common case.
-  const input16 = toImage16(imageData);
-
-  const engine = _getOrCreateEngine(slot, input16.width, input16.height);
+  const sourceShape = imageData.__image16?.data instanceof Uint16Array ? imageData.__image16 : imageData;
+  const engine = _getOrCreateEngine(slot, sourceShape.width, sourceShape.height);
+  const input16 = toImage16ForSlot(slot, imageData, options?.forceFullProcess);
 
   // Profile loading (skip if unchanged)
   const profileName = params.enhancedProfile;
@@ -444,13 +481,7 @@ async function runSilverCore(imageData, settings, mode, options) {
   // Dodge and burn: rasterise the strokes for this buffer's size. The engine
   // applies them after the analysis and before the curves; the analysis
   // sample (reference) is never dodged, like the base exposure in a darkroom.
-  if (settings && settings.localExposure && settings.localExposureGeometry) {
-    params.localExposureStops = rasterizeExposureStops(settings.localExposure, {
-      ...settings.localExposureGeometry,
-      width: input.width,
-      height: input.height,
-    });
-  }
+  params.localExposureStops = localExposureStopsForSlot(slot, settings, input.width, input.height);
 
   // B&W: mix down to a neutral negative BEFORE the engine runs. Doing it afterwards
   // (the old toGrayscaleInPlace on the result) discarded the shadow/highlight/mid

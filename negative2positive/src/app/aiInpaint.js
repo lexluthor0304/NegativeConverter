@@ -163,6 +163,32 @@ export function featherWeights(maskTile, size, feather = FEATHER) {
   return weights;
 }
 
+// Allocate overlap history only in blocks reached by a repaired pixel. A single
+// speck on a 60 MP scan must not reserve a 240 MB full-frame float plane.
+export function createSparseBlendWeights(width, { blockSize = 64 } = {}) {
+  const columns = Math.ceil(width / blockSize);
+  const blocks = new Map();
+  return {
+    accept(pixel, value) {
+      const y = Math.floor(pixel / width), x = pixel - y * width;
+      const key = Math.floor(y / blockSize) * columns + Math.floor(x / blockSize);
+      const offset = (y % blockSize) * blockSize + x % blockSize;
+      let block = blocks.get(key);
+      if (!block) { block = new Float32Array(blockSize * blockSize); blocks.set(key, block); }
+      if (block[offset] >= value) return false;
+      block[offset] = value;
+      return true;
+    },
+    get allocatedBytes() { return blocks.size * blockSize * blockSize * Float32Array.BYTES_PER_ELEMENT; }
+  };
+}
+
+function checkInpaintCurrent(signal, shouldContinue) {
+  if (signal?.aborted || (shouldContinue && !shouldContinue())) {
+    throw new DOMException('AI repair was superseded', 'AbortError');
+  }
+}
+
 /**
  * Writes the model output for a tile into `result` (8-bit data plus the
  * 16-bit plane when present), only where the weights are non-zero, blending
@@ -189,8 +215,14 @@ export function blendTile(result, source, tile, output, weights, applied = null)
       const w = weights[ty * size + tx];
       if (w <= 0) continue;
       const pixel = y * width + x;
-      if (applied && applied[pixel] >= w) continue;
-      if (applied) applied[pixel] = w;
+      if (applied) {
+        if (applied.accept) {
+          if (!applied.accept(pixel, w)) continue;
+        } else {
+          if (applied[pixel] >= w) continue;
+          applied[pixel] = w;
+        }
+      }
       const src = ty * size + tx;
       const dst = pixel * 4;
       for (let c = 0; c < 3; c++) {
@@ -211,7 +243,10 @@ export function blendTile(result, source, tile, output, weights, applied = null)
  * the inference call: it receives the NCHW inputs and resolves to the NCHW
  * output. Returns a new ImageData (16-bit plane copied when present).
  */
-export async function inpaintWithModel(imageData, mask, run, { tile = TILE, onProgress = null, feather = FEATHER } = {}) {
+export async function inpaintWithModel(imageData, mask, run, {
+  tile = TILE, onProgress = null, feather = FEATHER, signal = null, shouldContinue = null
+} = {}) {
+  checkInpaintCurrent(signal, shouldContinue);
   const { width, height } = imageData;
   const result = new ImageData(new Uint8ClampedArray(imageData.data), width, height);
   if (imageData.__image16 && imageData.__image16.data instanceof Uint16Array) {
@@ -219,15 +254,20 @@ export async function inpaintWithModel(imageData, mask, run, { tile = TILE, onPr
   }
   const boxes = maskBoundingBoxes(mask, width, height);
   const tiles = uniqueTiles(boxes.flatMap((box) => tilesForBox(box, width, height, { tile })));
-  const applied = new Float32Array(width * height);
+  const applied = createSparseBlendWeights(width);
   let done = 0;
   for (const t of tiles) {
+    checkInpaintCurrent(signal, shouldContinue);
     const inputs = extractTile(imageData, mask, t);
     let anyMask = false;
     for (let i = 0; i < inputs.mask.length; i++) if (inputs.mask[i]) { anyMask = true; break; }
     if (anyMask) {
-      const output = await run(inputs.image, inputs.mask, t.size);
-      blendTile(result, imageData, t, output, featherWeights(inputs.mask, t.size, feather), applied);
+      // These tile-local inputs are no longer needed after this point. Worker
+      // sessions can transfer them instead of copying 4 MB on every tile.
+      const weights = featherWeights(inputs.mask, t.size, feather);
+      const output = await run(inputs.image, inputs.mask, t.size, { transferInputs: true, signal, shouldContinue });
+      checkInpaintCurrent(signal, shouldContinue);
+      blendTile(result, imageData, t, output, weights, applied);
     }
     done++;
     if (onProgress) onProgress(done, tiles.length);

@@ -35,16 +35,17 @@ function decodePng(bytes) {
   assert.deepEqual(Array.from(bytes.slice(0, 8)), [137, 80, 78, 71, 13, 10, 26, 10]);
   assert.equal(new TextDecoder().decode(bytes.slice(12, 16)), 'IHDR');
   assert.equal(bytes[24], 16, 'IHDR bit depth must be 16');
-  assert.equal(bytes[25], 6, 'IHDR colour type must be 6 (RGBA)');
+  assert.ok([2, 6].includes(bytes[25]), 'PNG must be RGB or RGBA');
   const decoded = UPNG.decode(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
   assert.equal(decoded.depth, 16);
-  assert.equal(decoded.ctype, 6);
+  const channels = decoded.ctype === 2 ? 3 : 4;
   // UPNG hands back the raw post-defilter bytes; 16-bit samples are big-endian.
   const samples = new Uint16Array(decoded.width * decoded.height * 4);
   for (let i = 0; i < samples.length; i++) {
-    samples[i] = (decoded.data[i * 2] << 8) | decoded.data[i * 2 + 1];
+    const offset = (Math.floor(i / 4) * channels + i % 4) * 2;
+    samples[i] = i % 4 === 3 && channels === 3 ? 65535 : (decoded.data[offset] << 8) | decoded.data[offset + 1];
   }
-  return { width: decoded.width, height: decoded.height, samples };
+  return { width: decoded.width, height: decoded.height, samples, channels };
 }
 
 // --------------------------------------------------------------- TIFF helpers
@@ -79,12 +80,17 @@ function decodeTiff(bytes) {
       ? view.getUint16(stripOffset + i * 2, true)
       : bytes[stripOffset + i];
   }
+  const channels = tags.get(277).value & 0xFFFF;
+  const rgba = depth === 16 ? new Uint16Array(sampleCount / channels * 4) : new Uint8Array(sampleCount / channels * 4);
+  for (let i = 0; i < rgba.length; i++) {
+    rgba[i] = i % 4 === 3 && channels === 3 ? (depth === 16 ? 65535 : 255) : samples[Math.floor(i / 4) * channels + i % 4];
+  }
   return {
     width: tags.get(256).value,
     height: tags.get(257).value,
-    samplesPerPixel: tags.get(277).value & 0xFFFF,
+    samplesPerPixel: channels,
     bitsPerSample,
-    samples
+    samples: rgba
   };
 }
 
@@ -169,15 +175,15 @@ function make16BitImageData() {
 {
   const imageData = make8BitImageData();
   const tiff = decodeTiff(await bytesOf(encodeTiffBlob(imageData, 16)));
-  assert.deepEqual(tiff.bitsPerSample, [16, 16, 16, 16]);
-  assert.equal(tiff.samplesPerPixel, 4);
+  assert.deepEqual(tiff.bitsPerSample, [16, 16, 16]);
+  assert.equal(tiff.samplesPerPixel, 3);
   assert.deepEqual(Array.from(tiff.samples), Array.from(imageData.data).map((v) => v * 257));
 }
 
 {
   const imageData = make16BitImageData();
   const tiff = decodeTiff(await bytesOf(encodeTiffBlob(imageData, 16)));
-  assert.deepEqual(tiff.bitsPerSample, [16, 16, 16, 16]);
+  assert.deepEqual(tiff.bitsPerSample, [16, 16, 16]);
   const expected = Array.from(TRUE16);
   expected[3] = 65535;
   expected[7] = 65535;
@@ -189,7 +195,7 @@ function make16BitImageData() {
   // 8-bit TIFF requested while a 16-bit plane exists: reduce, never upscale.
   const imageData = make16BitImageData();
   const tiff = decodeTiff(await bytesOf(encodeTiffBlob(imageData, 8)));
-  assert.deepEqual(tiff.bitsPerSample, [8, 8, 8, 8]);
+  assert.deepEqual(tiff.bitsPerSample, [8, 8, 8]);
   assert.deepEqual(Array.from(tiff.samples), Array.from(imageData.data));
 }
 
@@ -212,3 +218,27 @@ for (const imageData of [make8BitImageData(), make16BitImageData()]) {
 }
 
 console.log('exportImageEncoders tests passed');
+
+// Opaque exports omit alpha, while real 8-bit transparency remains exact.
+{
+  const transparent = make8BitImageData();
+  transparent.data[3] = 27;
+  const png = decodePng(await bytesOf(encodePng16Blob(transparent)));
+  assert.equal(png.channels, 4);
+  assert.deepEqual(Array.from(png.samples), Array.from(transparent.data, value => value * 257));
+  for (const bits of [8, 16]) {
+    const tiff = decodeTiff(await bytesOf(encodeTiffBlob(transparent, bits)));
+    assert.equal(tiff.samplesPerPixel, 4);
+    assert.deepEqual(Array.from(tiff.samples), Array.from(transparent.data, value => bits === 16 ? value * 257 : value));
+  }
+  assert.equal(decodePng(await bytesOf(encodePng16Blob(make16BitImageData()))).channels, 3);
+}
+
+// Multiple rows exercise Sub's row reset and low-byte wrapping independently
+// of the previous pixel's alpha. Check decoded samples, not encoded bytes.
+{
+  const width = 13, height = 7;
+  const pixels = Uint16Array.from({ length: width * height * 4 }, (_, i) => (i * 15313) & 65535);
+  const png = decodePng(await bytesOf(workerEncodePng16Samples(pixels, width, height, pako.deflate)));
+  assert.deepEqual(png.samples, Uint16Array.from(pixels, (value, i) => i % 4 === 3 ? 65535 : value));
+}

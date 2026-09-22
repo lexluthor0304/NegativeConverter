@@ -1,8 +1,45 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { createSemanticAnalyzer } from './semanticModel.js';
 const bytes = readFileSync(new URL('../../public/models/efficientvit-b1-ade20k.onnx', import.meta.url));
 assert.equal(createHash('sha256').update(bytes).digest('hex'), '904544216395cf81b583771c9ca107994b388dc379fc3beabeaf57cd1e76d3f9');
 assert.match(readFileSync(new URL('../../public/models/EfficientViT-LICENSE.txt', import.meta.url), 'utf8'), /Apache License/);
 assert.ok(bytes.includes(Buffer.from('image')) && bytes.includes(Buffer.from('logits')));
 console.log('semantic model hash, licence and named contract passed');
+const image = { width: 1, height: 1, data: new Uint8ClampedArray(4) };
+const workers = [];
+const analyze = createSemanticAnalyzer({ modelUrl: () => '/model.onnx', workerFactory: () => {
+  const worker = { postMessage(message) { this.message = message; }, terminate() { this.terminated = true; } };
+  workers.push(worker); return worker;
+} });
+const first = analyze(image);
+let current = true;
+const stale = analyze(image, { isCurrent: () => current });
+const latest = analyze(image);
+await Promise.resolve();
+assert.equal(workers.length, 1, 'only one ONNX heap can be active');
+current = false;
+workers[0].onmessage({ data: { labels: [1] } });
+assert.deepEqual(await first, { labels: [1] });
+assert.equal(await stale, null);
+await Promise.resolve();
+assert.equal(workers.length, 2, 'stale queued preview never creates or downloads a model');
+assert.equal(workers[0].terminated, true);
+workers[1].onmessage({ data: { labels: [2] } });
+assert.deepEqual(await latest, { labels: [2] });
+const timed = analyze(image, { timeoutMs: 5 });
+assert.equal(await timed, null);
+assert.equal(workers[2].terminated, true);
+const invalid = analyze(image);
+await Promise.resolve();
+workers[3].onmessageerror();
+assert.equal(await invalid, null);
+assert.equal(workers[3].terminated, true);
+let failedWorker;
+const broken = createSemanticAnalyzer({ modelUrl: () => '/model.onnx', workerFactory: () => failedWorker = {
+  postMessage() { throw new Error('post failed'); }, terminate() { this.terminated = true; }
+} });
+assert.equal(await broken(image), null);
+assert.equal(failedWorker.terminated, true);
+console.log('Semantic queue skips stale photos and releases workers on all failure paths');

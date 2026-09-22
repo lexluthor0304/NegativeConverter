@@ -23,6 +23,8 @@ import { runStudioRawAutoFrameSmoke } from './studio-raw-autoframe-smoke.mjs';
 import { runFilmEdgeSmoke } from './film-edge-smoke.mjs';
 import { runRollAnalysisSmoke } from './roll-analysis-smoke.mjs';
 import { runLightTableSmoke } from './light-table-smoke.mjs';
+import { runPerformanceUiSmoke } from './performance-ui-smoke.mjs';
+import { runComparePreviewSmoke } from './compare-preview-smoke.mjs';
 import { runDarkroomSmoke } from './darkroom-smoke.mjs';
 import { runCameraSmoke } from './camera-smoke.mjs';
 import { runRollHomeSmoke } from './roll-home-smoke.mjs';
@@ -276,6 +278,18 @@ await installDialogAutoAccept();
 await wait(1500); // let main.js finish wiring
 await evaluate(`document.getElementById('studioImportAutoCrop').click()`);
 
+if (process.argv.includes('--performance-only')) {
+  await runPerformanceUiSmoke({ evaluate, fail });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
+
+if (process.argv.includes('--compare-preview-only')) {
+  await runComparePreviewSmoke({ send, evaluate, waitFor, wait, fail, port: PORT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
+
 if (process.argv.includes('--simplicity-only')) {
   await runSimplicitySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
   if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
@@ -397,19 +411,37 @@ console.log('ok: reconversion finished in the current workspace');
 await evaluate(`(() => {
   document.getElementById('studioTab-repair').click();
   window.__dustSources = [];
-  const original = window.cv.matFromImageData;
-  window.cv.matFromImageData = function (image) {
-    let hash = 2166136261;
-    for (const value of image.data) hash = Math.imul(hash ^ value, 16777619);
-    window.__dustSources.push({ width: image.width, height: image.height, hash });
-    return original.call(this, image);
+  const workerSources = new WeakMap();
+  const postDust = Worker.prototype.postMessage;
+  Worker.prototype.postMessage = function (message, ...args) {
+    if (['detect', 'inpaint', 'refine'].includes(message?.type) &&
+        typeof message.reuseSource === 'boolean') {
+      let record = workerSources.get(this);
+      if (!record) {
+        record = { source: null, pending: new Map() };
+        workerSources.set(this, record);
+        this.addEventListener('message', ({ data }) => {
+          const request = record.pending.get(data.id);
+          if (!request) return;
+          record.pending.delete(data.id);
+          if (!data.error) window.__dustSources.push(request);
+        });
+      }
+      if (message.rgba) {
+        let hash = 2166136261;
+        for (const value of message.rgba) hash = Math.imul(hash ^ value, 16777619);
+        record.source = { width: message.width, height: message.height, hash };
+      }
+      record.pending.set(message.id, { ...record.source, type: message.type });
+    }
+    return postDust.call(this, message, ...args);
   };
   // This scenario instruments TELEA; learned inference has its own real-model tests.
   if (document.getElementById('dustAiEnabled').checked) document.getElementById('dustAiEnabled').click();
   document.getElementById('dustRemovalEnabled').click();
 })()`);
-await waitFor('dust detection at full resolution', `window.__dustSources.length > 0`, 90_000);
-const dustSource = await evaluate(`window.__dustSources[0]`);
+await waitFor('dust detection at full resolution', `window.__dustSources.some(source => source.type === 'detect')`, 90_000);
+const dustSource = await evaluate(`window.__dustSources.find(source => source.type === 'detect')`);
 if (dustSource.width !== fullSize.width || dustSource.height !== fullSize.height) {
   fail('dust detection used preview dimensions instead of full resolution');
 }
@@ -417,8 +449,8 @@ await wait(500);
 
 // クリア後も未修復の画素を使う。画像全体のハッシュで累積修復を検出する。
 await evaluate(`window.__dustSources = []; document.getElementById('dustClearMaskBtn').click()`);
-await waitFor('dust mask re-detection', `window.__dustSources.length > 0`, 30_000);
-const clearedSource = await evaluate(`window.__dustSources[0]`);
+await waitFor('dust mask re-detection', `window.__dustSources.some(source => source.type === 'detect')`, 30_000);
+const clearedSource = await evaluate(`window.__dustSources.find(source => source.type === 'detect')`);
 if (clearedSource.hash !== dustSource.hash) fail('clear mask re-detected dust on an altered source');
 
 // 直接ブラシが変換Workerを呼び直さずに修復することを確認する。
@@ -438,7 +470,7 @@ await evaluate(`(() => {
   canvas.dispatchEvent(new MouseEvent('mousedown', options));
   document.dispatchEvent(new MouseEvent('mouseup', options));
 })()`);
-await waitFor('dust brush inpaint', `window.__dustSources.length > 0`, 30_000);
+await waitFor('dust brush inpaint', `window.__dustSources.some(source => source.type === 'refine')`, 30_000);
 if (await evaluate(`window.__brushConversions !== 0`)) fail('dust brush reconverted the full image');
 if (await evaluate(`document.getElementById('dustStatus').textContent.startsWith('Error:')`)) {
   fail('dust brush reported an error');
@@ -663,6 +695,10 @@ if (restoredIndex !== 1 || JSON.stringify(beforeFailure) !== JSON.stringify(afte
 console.log('ok: failed decode preserves the previous image and active file');
 }
 
+await runPerformanceUiSmoke({ evaluate, fail });
+if (!process.argv.some(arg => arg.endsWith('-only'))) {
+  await runComparePreviewSmoke({ send, evaluate, waitFor, wait, fail, port: PORT });
+}
 if (!process.argv.includes('--auto-crop-only') && !process.argv.includes('--color-analysis-only') && !process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) await runStudioSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, fixtures: [FIXTURE, FIXTURE2], root: ROOT });
 if (!process.argv.includes('--color-analysis-only') && !process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) await runStudioAutoCropSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
 if (!process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) await runStudioColorAnalysisSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });

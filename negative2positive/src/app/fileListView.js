@@ -1,3 +1,5 @@
+const listStates = new WeakMap();
+
 export function renderFileList({
   container,
   countEl,
@@ -11,12 +13,50 @@ export function renderFileList({
 }) {
   let selectedCount = 0;
   let settingsCount = 0;
-  const fragment = document.createDocumentFragment();
+  let list = listStates.get(container);
+  if (!list) { list = { rows: new Map() }; listStates.set(container, list); }
+  list.onToggleSelected = onToggleSelected;
+  list.onOpenFile = onOpenFile;
+  list.onMarkReviewed = onMarkReviewed;
+  const rows = [];
+  const retained = new Set(items);
+  for (const item of list.rows.keys()) if (!retained.has(item)) list.rows.delete(item);
+  const studio = document.body.classList.contains('studio');
 
   items.forEach((item, index) => {
     if (item.selected) selectedCount++;
     if (item.settings) settingsCount++;
     if (!visible(item)) return;
+
+    const extraBadges = typeof labels.badges === 'function' ? labels.badges(item) || [] : [];
+    const canReview = Boolean(onMarkReviewed && labels.canReview?.(item));
+    const selectLabel = labels.selectFile ? labels.selectFile(item.file.name) : item.file.name;
+    const signature = JSON.stringify([studio, item.file.name, Boolean(item.settings),
+      Boolean(item.isDirty), labels.customSettings, labels.unsaved, selectLabel,
+      extraBadges, canReview, labels.markReviewed]);
+    let record = list.rows.get(item);
+    if (record?.signature === signature && record.thumbnail === item.thumbnail) {
+      record.checkbox.checked = Boolean(item.selected);
+      if (record.index !== index) {
+        record.checkbox.dataset.index = record.nameEl.dataset.index = String(index);
+        const placeholder = record.nameEl.querySelector('.file-list-placeholder');
+        if (placeholder) placeholder.textContent = String(index + 1).padStart(2, '0');
+        record.index = index;
+      }
+      const active = index === currentFileIndex;
+      if (record.active !== active) {
+        record.el.classList.toggle('active', active);
+        if (active) record.nameEl.setAttribute('aria-current', 'true');
+        else record.nameEl.removeAttribute('aria-current');
+        record.active = active;
+      }
+      const statusClass = `file-list-status ${item.status}`;
+      if (record.statusEl.className !== statusClass) record.statusEl.className = statusClass;
+      const statusText = labels.statusText(item.status);
+      if (record.statusEl.textContent !== statusText) record.statusEl.textContent = statusText;
+      rows.push(record.el);
+      return;
+    }
 
     const el = document.createElement('div');
     el.className = 'file-list-item';
@@ -31,9 +71,7 @@ export function renderFileList({
     checkbox.checked = Boolean(item.selected);
     checkbox.dataset.index = String(index);
     // Without this every row is announced as an anonymous "checkbox".
-    checkbox.setAttribute('aria-label', labels.selectFile
-      ? labels.selectFile(item.file.name)
-      : item.file.name);
+    checkbox.setAttribute('aria-label', selectLabel);
 
     // A button, not a span: opening another queued file was mouse-only before.
     const nameEl = document.createElement('button');
@@ -41,7 +79,7 @@ export function renderFileList({
     nameEl.className = 'file-list-name';
     nameEl.dataset.index = String(index);
     if (index === currentFileIndex) nameEl.setAttribute('aria-current', 'true');
-    if (document.body.classList.contains('studio')) {
+    if (studio) {
       const preview = document.createElement(item.thumbnail ? 'img' : 'span');
       preview.className = item.thumbnail ? 'file-list-thumbnail' : 'file-list-placeholder';
       if (item.thumbnail) {
@@ -76,7 +114,6 @@ export function renderFileList({
 
     // Optional per-file badges (detected film stock, roll outlier, ...):
     // labels.badges(item) returns [{ className, text, title }].
-    const extraBadges = typeof labels.badges === 'function' ? labels.badges(item) || [] : [];
     for (const spec of extraBadges) {
       if (!spec || !spec.text) continue;
       const badge = document.createElement('span');
@@ -86,7 +123,7 @@ export function renderFileList({
       el.append(badge);
     }
 
-    if (onMarkReviewed && labels.canReview?.(item)) {
+    if (canReview) {
       const menu = document.createElement('details');
       menu.className = 'file-review-menu';
       const summary = document.createElement('summary');
@@ -94,7 +131,7 @@ export function renderFileList({
       summary.setAttribute('aria-label', labels.markReviewed);
       const button = document.createElement('button');
       button.type = 'button'; button.textContent = labels.markReviewed;
-      button.addEventListener('click', () => onMarkReviewed(index));
+      button.addEventListener('click', () => list.onMarkReviewed?.(record.index));
       menu.addEventListener('click', event => event.stopPropagation());
       menu.append(summary, button); el.append(menu);
     }
@@ -104,29 +141,30 @@ export function renderFileList({
 
     checkbox.addEventListener('click', (e) => {
       e.stopPropagation();
-      onToggleSelected(index, e.target.checked, { range: e.shiftKey });
+      list.onToggleSelected(record.index, e.target.checked, { range: e.shiftKey });
     });
 
     el.addEventListener('click', (e) => {
       if (e.target.classList.contains('file-list-checkbox')) return;
-      onOpenFile(index);
+      list.onOpenFile(record.index);
     });
 
     let selectionControl = checkbox;
-    if (document.body.classList.contains('studio')) {
+    if (studio) {
       selectionControl = document.createElement('label');
       selectionControl.className = 'file-list-select-control';
       selectionControl.append(checkbox);
       selectionControl.addEventListener('click', event => event.stopPropagation());
     }
     el.append(selectionControl, nameEl, statusEl);
-    fragment.appendChild(el);
+    record = { signature, thumbnail: item.thumbnail, index, active: index === currentFileIndex, el, checkbox, nameEl, statusEl };
+    list.rows.set(item, record);
+    rows.push(el);
   });
 
   countEl.textContent = `${selectedCount}/${items.length} (${settingsCount} ${labels.configured})`;
 
-  // The whole list is rebuilt on every state change, so a checkbox toggled by
-  // keyboard would otherwise drop focus to <body> mid-interaction.
+  // Restore focus only when the focused row's contents actually changed.
   const active = document.activeElement;
   const restore = active && container.contains(active)
     ? { cls: active.className, index: active.dataset.index }
@@ -135,14 +173,19 @@ export function renderFileList({
   const scrollLeft = container.scrollLeft;
   container.setAttribute('role', 'list');
   installKeyboardNavigation(container);
-  container.replaceChildren(fragment);
+  let cursor = container.firstElementChild;
+  for (const row of rows) {
+    if (row === cursor) cursor = cursor.nextElementSibling;
+    else container.insertBefore(row, cursor);
+  }
+  while (cursor) { const next = cursor.nextElementSibling; cursor.remove(); cursor = next; }
   container.scrollLeft = scrollLeft;
 
   if (restore && restore.index !== undefined) {
     const next = container.querySelector(
       `.${restore.cls.split(' ')[0]}[data-index="${restore.index}"]`
     );
-    if (next) next.focus();
+    if (next && next !== document.activeElement) next.focus({ preventScroll: true });
   }
 
   return { selectedCount, settingsCount };

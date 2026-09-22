@@ -152,3 +152,30 @@ console.log('zipStoreWriter.test.mjs passed');
 }
 
 console.log('zipStoreWriter.test.mjs extended cases passed');
+
+// A payload is read once; even a single giant producer chunk is written in
+// bounded pieces, with task yields while computing its checksum.
+{
+  let reads = 0;
+  let ticks = 0;
+  const bytes = new Uint8Array(16 * 1024 * 1024);
+  bytes[0] = 19; bytes[bytes.length - 1] = 237;
+  class SingleReadBlob extends Blob {
+    stream() {
+      assert.equal(++reads, 1, 'ZIP payload must not be read twice');
+      return new ReadableStream({ start(controller) { controller.enqueue(bytes); controller.close(); } });
+    }
+  }
+  const target = new MemoryWritable();
+  const writer = new ZipStoreWriter(target);
+  const timer = setInterval(() => ticks++, 0);
+  try { await writer.addBlob('large.bin', new SingleReadBlob([bytes])); }
+  finally { clearInterval(timer); }
+  await writer.addBlob('empty.bin', new Blob([]));
+  await writer.close();
+  assert.ok(ticks > 0, 'CRC computation should yield to input and paint tasks');
+  assert.ok(target.chunks.every(chunk => chunk.length <= 256 * 1024), 'bounded write chunks');
+  const zip = await JSZip.loadAsync(target.bytes(), { checkCRC32: true });
+  assert.deepEqual(await zip.file('large.bin').async('uint8array'), bytes);
+  assert.equal((await zip.file('empty.bin').async('uint8array')).length, 0);
+}

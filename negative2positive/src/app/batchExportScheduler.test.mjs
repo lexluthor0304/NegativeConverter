@@ -91,6 +91,37 @@ assert.equal(planBatchParallelism({ hardwareConcurrency: 8, pixelsPerFile: BATCH
 }
 
 // A failing process() marks only that job and the rest are still written in order.
+// Completed payloads count toward the lane budget, even behind a slow first
+// decode or sink. Otherwise one fast lane buffers an entire roll in memory.
+for (const stalledStage of ['process', 'sink']) {
+  let release;
+  const stalled = new Promise(resolve => { release = resolve; });
+  const started = [];
+  const written = [];
+  const controller = new AbortController();
+  const run = runBatchPipeline(Array.from({ length: 100 }, (_, i) => i), {
+    maxParallel: 2,
+    signal: controller.signal,
+    process: async (job) => {
+      started.push(job);
+      if (job === 0 && stalledStage === 'process') await stalled;
+      return new Uint8Array(1024);
+    },
+    sink: async (job) => {
+      if (job === 0 && stalledStage === 'sink') await stalled;
+      written.push(job);
+    }
+  });
+  await tick();
+  assert.deepEqual(started, [0, 1], `${stalledStage}: pending payloads must retain their lane`);
+  controller.abort();
+  release();
+  const result = await run;
+  assert.deepEqual(written, [0, 1]);
+  assert.equal(result.cancelled, true);
+}
+
+// A failing process() marks only that job and the rest are still written in order.
 {
   const sunk = [];
   const errors = [];

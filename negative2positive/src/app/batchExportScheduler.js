@@ -119,6 +119,10 @@ export async function runBatchPipeline(jobs, { process, sink, maxParallel = 1, s
           emit({ type: 'error', job, index, error: entry.error, done, total });
         }
         nextToSink += 1;
+        // Keep this lane occupied until its payload has actually been consumed.
+        // A later frame may finish first, but it must not start another decode
+        // while its encoded output waits behind a slow predecessor.
+        entry.release();
       }
     });
     return drainPromise;
@@ -134,8 +138,10 @@ export async function runBatchPipeline(jobs, { process, sink, maxParallel = 1, s
     } catch (error) {
       entry = { ok: false, error };
     }
+    const consumed = new Promise(resolve => { entry.release = resolve; });
     sinkQueue.set(index, entry);
     await drain();
+    await consumed;
   };
 
   const worker = async () => {

@@ -203,7 +203,11 @@ async function runAiRepairScenario({ send, evaluate, waitFor, wait, fail, instal
   // unmasked pixels including 16-bit values not representable by 8-bit samples.
   const cpu = await evaluate(`(async () => {
     const ai = await import('/src/app/aiInpaint.js');
-    const session = await ai.createInpaintSession(await ai.fetchModelBytes(ai.DEFAULT_MODEL_URL), { prefer: 'wasm' });
+    const worker = await import('/src/app/aiInpaintWorkerClient.js');
+    const bytes = await ai.fetchModelBytes(ai.DEFAULT_MODEL_URL);
+    // The low-level worker creator never falls back to the main thread.
+    const session = await worker.createInpaintWorkerSession(bytes, { prefer: 'wasm' });
+    let heartbeatTimer;
     try {
       const width = 64; const source = new ImageData(width, width);
       source.data.fill(128);
@@ -215,18 +219,35 @@ async function runAiRepairScenario({ send, evaluate, waitFor, wait, fail, instal
         source.data.fill(255, i * 4, i * 4 + 3);
         plane.fill(65535, i * 4, i * 4 + 3);
       }
+      let heartbeatTicks = 0; let maxHeartbeatGapMs = 0; let lastBeat = performance.now();
+      heartbeatTimer = setInterval(() => {
+        const now = performance.now();
+        maxHeartbeatGapMs = Math.max(maxHeartbeatGapMs, now - lastBeat);
+        lastBeat = now; heartbeatTicks++;
+      }, 10);
       const started = performance.now();
       const { imageData: result } = await ai.inpaintWithModel(source, mask, session.run, { feather: 0 });
+      const ms = Math.round(performance.now() - started);
+      clearInterval(heartbeatTimer);
       let changed = 0; let outsideChanges = 0;
       for (let i = 0; i < mask.length; i++) for (let c = 0; c < 3; c++) {
         if (mask[i]) changed += result.data[i * 4 + c] !== source.data[i * 4 + c] ? 1 : 0;
         else outsideChanges += result.__image16.data[i * 4 + c] !== plane[i * 4 + c] ? 1 : 0;
       }
-      return { provider: session.provider, ms: Math.round(performance.now() - started), changed, outsideChanges };
-    } finally { await session.release(); }
+      await session.release();
+      const direct = await ai.createInpaintSession(bytes, { prefer: 'wasm', warmUp: false });
+      let equalsDirect;
+      try {
+        const baseline = await ai.inpaintWithModel(source, mask, direct.run, { feather: 0 });
+        equalsDirect = result.data.every((value, i) => value === baseline.imageData.data[i])
+          && result.__image16.data.every((value, i) => value === baseline.imageData.__image16.data[i]);
+      } finally { await direct.release(); }
+      return { provider: session.provider, ms, changed, outsideChanges, equalsDirect,
+        heartbeatTicks, maxHeartbeatGapMs: Math.round(maxHeartbeatGapMs) };
+    } finally { clearInterval(heartbeatTimer); await session.release(); }
   })()`);
-  if (cpu.provider !== 'wasm' || !cpu.changed || cpu.outsideChanges) fail('MI-GAN CPU/compositing regression: ' + JSON.stringify(cpu));
-  console.log('ok: real MI-GAN CPU repair and untouched 16-bit pixels:', JSON.stringify(cpu));
+  if (cpu.provider !== 'wasm' || !cpu.changed || cpu.outsideChanges || !cpu.equalsDirect || (cpu.ms > 50 && !cpu.heartbeatTicks)) fail('MI-GAN CPU worker/compositing regression: ' + JSON.stringify(cpu));
+  console.log('ok: real MI-GAN CPU worker matches direct pixels and keeps UI responsive:', JSON.stringify(cpu));
 
   await runManualBrushSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, root });
 }

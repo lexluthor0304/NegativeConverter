@@ -27,12 +27,25 @@ const pngCrcTable = /* @__PURE__ */ (() => {
   return table;
 })();
 
-export function crc32OfBytes(bytes) {
-  let crc = 0xFFFFFFFF;
+function updatePngCrc(bytes, crc) {
   for (let i = 0; i < bytes.length; i++) {
     crc = pngCrcTable[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8);
   }
-  return (crc ^ 0xFFFFFFFF) >>> 0;
+  return crc;
+}
+
+export function crc32OfBytes(bytes) {
+  return (updatePngCrc(bytes, 0xFFFFFFFF) ^ 0xFFFFFFFF) >>> 0;
+}
+
+function pngChunkParts(type, data) {
+  const header = new Uint8Array(8);
+  new DataView(header.buffer).setUint32(0, data.length, false);
+  for (let i = 0; i < 4; i++) header[i + 4] = type.charCodeAt(i);
+  const crc = updatePngCrc(data, updatePngCrc(header.subarray(4), 0xFFFFFFFF));
+  const trailer = new Uint8Array(4);
+  new DataView(trailer.buffer).setUint32(0, (crc ^ 0xFFFFFFFF) >>> 0, false);
+  return [header, data, trailer];
 }
 
 export function createPngChunk(type, data) {
@@ -102,7 +115,7 @@ export function selectExportSamples(imageData, bitDepth = 8) {
 }
 
 /**
- * Encode a 16-bit PNG (colour type 6, RGBA, bit depth 16).
+ * Encode a 16-bit PNG (RGB for opaque images, RGBA for real transparency).
  *
  * @param {Uint16Array|Uint8ClampedArray|Uint8Array} pixelData - RGBA samples.
  *   A `Uint16Array` carries genuine 16-bit samples and is written verbatim.
@@ -116,23 +129,20 @@ export function selectExportSamples(imageData, bitDepth = 8) {
  */
 export function encodePng16Blob(pixelData, width, height, deflate) {
   const is16 = pixelData instanceof Uint16Array;
-  const rowBytes = width * 4 * 2;
+  const channels = exportChannelCount(pixelData);
+  const rowBytes = width * channels * 2;
   const raw = new Uint8Array((rowBytes + 1) * height);
-  const samplesPerRow = width * 4;
-  let srcIndex = 0;
   let rawIndex = 0;
   for (let y = 0; y < height; y++) {
-    raw[rawIndex++] = 0; // filter type: None
-    for (let x = 0; x < samplesPerRow; x++) {
-      // The app never carries real transparency (the 8-bit adjustment stage
-      // forces alpha to 255), so keep 16-bit exports fully opaque rather than
-      // trusting whatever alpha the engine plane happens to hold.
-      const u16 = is16
-        ? ((x & 3) === 3 ? SAMPLE16_MAX : pixelData[srcIndex])
-        : pixelData[srcIndex] * 257;
-      srcIndex++;
-      raw[rawIndex++] = (u16 >>> 8) & 0xFF;
-      raw[rawIndex++] = u16 & 0xFF;
+    raw[rawIndex++] = 1; // Sub: subtract the byte in the previous pixel.
+    for (let x = 0; x < width; x++) {
+      const source = (y * width + x) * 4;
+      for (let c = 0; c < channels; c++) {
+        const u16 = is16 ? pixelData[source + c] : pixelData[source + c] * 257;
+        const left = x === 0 ? 0 : is16 ? pixelData[source + c - 4] : pixelData[source + c - 4] * 257;
+        raw[rawIndex++] = (u16 >>> 8) - (left >>> 8);
+        raw[rawIndex++] = (u16 & 0xFF) - (left & 0xFF);
+      }
     }
   }
 
@@ -143,18 +153,25 @@ export function encodePng16Blob(pixelData, width, height, deflate) {
   ihdrView.setUint32(0, width, false);
   ihdrView.setUint32(4, height, false);
   ihdr[8] = 16; // bit depth
-  ihdr[9] = 6;  // RGBA
+  ihdr[9] = channels === 3 ? 2 : 6;
   ihdr[10] = 0; // compression
   ihdr[11] = 0; // filter
   ihdr[12] = 0; // interlace
 
   const ihdrChunk = createPngChunk('IHDR', ihdr);
-  const idatChunk = createPngChunk('IDAT', compressed);
   const iendChunk = createPngChunk('IEND', new Uint8Array(0));
 
   // Blob accepts an array of parts — concatenating into one buffer first would
   // duplicate the whole file (hundreds of MB for a large scan) for nothing.
-  return new Blob([signature, ihdrChunk, idatChunk, iendChunk], { type: 'image/png' });
+  return new Blob([signature, ihdrChunk, ...pngChunkParts('IDAT', compressed), iendChunk], { type: 'image/png' });
+}
+
+function exportChannelCount(pixels) {
+  // The existing 16-bit export contract makes alpha opaque. Eight-bit
+  // callers may supply transparency, which must continue to round-trip.
+  if (pixels instanceof Uint16Array) return 3;
+  for (let i = 3; i < pixels.length; i += 4) if (pixels[i] !== 255) return 4;
+  return 3;
 }
 
 /**
@@ -174,7 +191,7 @@ export function encodePng16Blob(pixelData, width, height, deflate) {
  * @returns {Blob}
  */
 export function encodeTiffBlob(pixels, width, height, bitDepth = 8, metadata = null) {
-  const channels = 4;
+  const channels = exportChannelCount(pixels);
   const wants16 = bitDepth === 16;
   const source16 = pixels instanceof Uint16Array;
   const bytesPerSample = wants16 ? 2 : 1;
@@ -184,21 +201,17 @@ export function encodeTiffBlob(pixels, width, height, bitDepth = 8, metadata = n
   // the Blob concatenates the parts without copying the strip again.
   const strip = new Uint8Array(stripByteCount);
   let p = 0;
-  if (wants16) {
-    for (let i = 0; i < sampleCount; i++) {
-      // Alpha is forced opaque; see the note in encodePng16Blob.
-      const value = source16
-        ? ((i & 3) === 3 ? SAMPLE16_MAX : pixels[i])
-        : pixels[i] * 257;
-      strip[p++] = value & 0xFF;
-      strip[p++] = (value >>> 8) & 0xFF;
+  for (let i = 0; i < width * height * 4; i += 4) {
+    for (let channel = 0; channel < channels; channel++) {
+      const sample = pixels[i + channel];
+      if (wants16) {
+        const value = source16 ? sample : sample * 257;
+        strip[p++] = value & 0xFF;
+        strip[p++] = value >>> 8;
+      } else {
+        strip[p++] = source16 ? sample >>> 8 : sample;
+      }
     }
-  } else if (source16) {
-    for (let i = 0; i < sampleCount; i++) {
-      strip[p++] = (i & 3) === 3 ? 255 : (pixels[i] >>> 8);
-    }
-  } else {
-    strip.set(pixels.subarray(0, sampleCount));
   }
 
   const sampleBit = wants16 ? 16 : 8;
@@ -206,15 +219,15 @@ export function encodeTiffBlob(pixels, width, height, bitDepth = 8, metadata = n
     bytesEntry(34675, SRGB_PROFILE),
     longEntry(TIFF_TAGS.ImageWidth, width),
     longEntry(TIFF_TAGS.ImageLength, height),
-    shortEntry(TIFF_TAGS.BitsPerSample, [sampleBit, sampleBit, sampleBit, sampleBit]),
+    shortEntry(TIFF_TAGS.BitsPerSample, Array(channels).fill(sampleBit)),
     shortEntry(TIFF_TAGS.Compression, 1),
     shortEntry(TIFF_TAGS.PhotometricInterpretation, 2),
     shortEntry(TIFF_TAGS.SamplesPerPixel, channels),
     longEntry(TIFF_TAGS.RowsPerStrip, height),
     longEntry(TIFF_TAGS.StripByteCounts, stripByteCount),
     shortEntry(TIFF_TAGS.PlanarConfiguration, 1),
-    shortEntry(TIFF_TAGS.ExtraSamples, 1),
-    shortEntry(TIFF_TAGS.SampleFormat, [1, 1, 1, 1]),
+    ...(channels === 4 ? [shortEntry(TIFF_TAGS.ExtraSamples, 1)] : []),
+    shortEntry(TIFF_TAGS.SampleFormat, Array(channels).fill(1)),
     ...(metadata ? exifIfd0Entries(metadata.exif || {}, { xmp: metadata.xmp || null }) : [])
   ];
   const parts = buildTiffParts({

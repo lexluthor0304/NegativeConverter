@@ -1,5 +1,7 @@
 import LibRaw from 'libraw-wasm';
-import UTIFImport from 'utif';
+import { decodeTiffBuffer } from './tiffFileLoader.js';
+import { decodeScanInWorker } from './scanDecodeClient.js';
+export { tiffIfdToRgb16 } from './tiffFileLoader.js';
 
 import {
   fromImageData8,
@@ -10,12 +12,6 @@ import { looksLikeBayerSnow } from '../silvercore/util/garbledCheck.js';
 import { suppressSensorDefectsInWorker } from './sensorDefectsClient.js';
 import { tryNefJpegPreview, extractNefPreviewJpeg, decodeNefPreviewJpeg } from './nefJpegPreview.js';
 import { sniffImageKind, loadStandardImage, loadPngImageData } from './imageFileLoaders.js';
-
-const UTIF = (UTIFImport && typeof UTIFImport.decode === 'function')
-  ? UTIFImport
-  : (UTIFImport && UTIFImport.default && typeof UTIFImport.default.decode === 'function'
-    ? UTIFImport.default
-    : UTIFImport);
 
 const RAW_SIZE_HEAVY = 100 * 1024 * 1024;
 // The LibRaw worker starts with a 256 MB WASM heap and grows while it holds the
@@ -170,59 +166,6 @@ function asDecodeMemoryError(err, width, height) {
   return wrapped;
 }
 
-// TIFF PhotometricInterpretation values we can promote losslessly.
-const TIFF_PHOTOMETRIC_BLACK_IS_ZERO = 1;
-const TIFF_PHOTOMETRIC_RGB = 2;
-// Everything UTIF.toRGBA8 knows how to render: WhiteIsZero, BlackIsZero, RGB,
-// palette and CMYK. For anything else it logs and returns an all-zero buffer,
-// i.e. a black frame presented as a successful decode.
-const TIFF_PHOTOMETRIC_RENDERABLE = new Set([0, 1, 2, 3, 5]);
-
-/**
- * Build a true 16-bit sample view over a decoded UTIF IFD.
- *
- * `UTIF.toRGBA8` keeps only the high byte of every 16-bit sample, so a 48-bit
- * scanner TIFF — the standard output of Epson Scan / VueScan / SilverFast —
- * would lose exactly the precision the 16-bit pipeline exists for. UTIF has
- * already byte-swapped big-endian samples to little-endian in decodeImage, so
- * the decoded bytes can be reinterpreted directly.
- *
- * @returns {{ rgb16: Uint16Array, channels: number, width: number, height: number } | null}
- *          null when the IFD is not a plain 16-bit grey/RGB image, in which
- *          case the caller must fall back to UTIF.toRGBA8.
- */
-export function tiffIfdToRgb16(ifd) {
-  if (!ifd || !ifd.data) return null;
-  const width = ifd.width | 0;
-  const height = ifd.height | 0;
-  if (width <= 0 || height <= 0) return null;
-
-  const bitsPerSample = Array.isArray(ifd.t258) ? ifd.t258 : null;
-  if (!bitsPerSample || !bitsPerSample.length) return null;
-  if (!bitsPerSample.every((bits) => bits === 16)) return null;
-
-  // PlanarConfiguration 2 stores channels in separate planes; UTIF does not
-  // even decode it (it only logs), so never claim it here.
-  if (Array.isArray(ifd.t284) && ifd.t284[0] === 2) return null;
-
-  const photometric = Array.isArray(ifd.t262) ? ifd.t262[0] : TIFF_PHOTOMETRIC_RGB;
-  const channels = Array.isArray(ifd.t277) ? ifd.t277[0] : bitsPerSample.length;
-
-  const supported = (photometric === TIFF_PHOTOMETRIC_RGB && (channels === 3 || channels === 4))
-    || (photometric === TIFF_PHOTOMETRIC_BLACK_IS_ZERO && channels === 1);
-  if (!supported) return null;
-
-  const sampleCount = width * height * channels;
-  const data = ifd.data;
-  if (!ArrayBuffer.isView(data) || data.byteLength < sampleCount * 2) return null;
-
-  const rgb16 = (data.byteOffset % 2 === 0)
-    ? new Uint16Array(data.buffer, data.byteOffset, sampleCount)
-    : new Uint16Array(data.buffer.slice(data.byteOffset, data.byteOffset + sampleCount * 2));
-
-  return { rgb16, channels, width, height };
-}
-
 /**
  * Normalise whatever `LibRaw.imageData()` returned into 16-bit samples.
  *
@@ -294,40 +237,8 @@ export function rawResultToRgb16(result) {
  * no 16-bit mirror, so nothing downstream can mistake ×257 padding for real
  * precision (silverAdapter promotes on demand for those).
  */
-function decodeTiffBuffer(buffer) {
-  const ifds = UTIF.decode(buffer);
-  const ifd = ifds[0];
-  UTIF.decodeImage(buffer, ifd, ifds);
-
-  const wide = tiffIfdToRgb16(ifd);
-  if (wide) {
-    try {
-      const image16 = packRGBToImage16(wide.width, wide.height, wide.rgb16, wide.channels);
-      const imageData = toImageData8(image16);
-      imageData.__image16 = image16;
-      return imageData;
-    } catch (err) {
-      throw asDecodeMemoryError(err, wide.width, wide.height);
-    }
-  }
-
-  const photometric = Array.isArray(ifd.t262) ? ifd.t262[0] : TIFF_PHOTOMETRIC_RGB;
-  if (!TIFF_PHOTOMETRIC_RENDERABLE.has(photometric)) {
-    // Raw CFA / LinearRaw payloads (32803 / 34892, e.g. iPhone ProRAW) end up
-    // here. Fail instead of returning UTIF's all-zero buffer, so the DNG path
-    // falls through to LibRaw rather than showing a black frame.
-    const err = new Error(`Unsupported TIFF PhotometricInterpretation: ${photometric}`);
-    err.code = 'TIFF_UNSUPPORTED_PHOTOMETRIC';
-    throw err;
-  }
-
-  const rgba = UTIF.toRGBA8(ifd);
-  // toRGBA8 already allocates a fresh Uint8Array; wrap it instead of copying.
-  return new ImageData(
-    new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, rgba.byteLength),
-    ifd.width,
-    ifd.height
-  );
+async function loadTiffBuffer(buffer) {
+  return await decodeScanInWorker(buffer, 'tiff') || decodeTiffBuffer(buffer);
 }
 
 export async function loadRawFile(buffer, fileName, options = {}) {
@@ -346,7 +257,7 @@ export async function loadRawFile(buffer, fileName, options = {}) {
       return await loadStandardImage(new Blob([buffer]));
     }
     try {
-      const imageData = decodeTiffBuffer(buffer);
+      const imageData = await loadTiffBuffer(buffer);
       if (onMetadata) onMetadata(null);
       return imageData;
     } catch (err) {
@@ -359,7 +270,9 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     const textSnippet = new TextDecoder().decode(buffer.slice(0, 1000));
     if (textSnippet.includes('iPhone')) {
       try {
-        const imageData = decodeTiffBuffer(buffer);
+        // Preserve the original container for LibRaw if this is a CFA DNG
+        // rather than a scanner-style TIFF that UTIF can actually render.
+        const imageData = await loadTiffBuffer(buffer.slice(0));
         if (onMetadata) onMetadata(null);
         return imageData;
       } catch (err) {
