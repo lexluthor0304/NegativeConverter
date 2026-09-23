@@ -1,7 +1,9 @@
 # Photo navigation and light-table previews
 
 Issues: [#220](https://github.com/lexluthor0304/NegativeConverter/issues/220),
-[#221](https://github.com/lexluthor0304/NegativeConverter/issues/221).
+[#221](https://github.com/lexluthor0304/NegativeConverter/issues/221),
+[#223](https://github.com/lexluthor0304/NegativeConverter/issues/223),
+[#224](https://github.com/lexluthor0304/NegativeConverter/issues/224).
 
 ## Ownership and invalidation
 
@@ -35,6 +37,16 @@ do not impose the loading-overlay dwell or deliberately display a negative
 between processed views. Cache misses still require real processing; no
 unbounded cache or promise of instant first opens is made.
 
+Cold navigation immediately identifies the target in the status bar and tile,
+and paints a viewer-local loading surface before starting expensive work.
+The outgoing pixels are covered so they cannot be mistaken for the target;
+the filmstrip stays interactive while editing and export are locked. The
+localized, live-announced status distinguishes opening from preparing the
+photo. Only the current activation may remove its feedback. Warm session
+restoration skips the loading surface and introduces no artificial dwell.
+Global history, color-console and zoom shortcuts cannot change the outgoing
+photo while another target is loading; the history controls are locked too.
+
 ## Light table
 
 `photoPreview.js` downsamples an already converted source and applies the
@@ -51,6 +63,12 @@ during invalidation, accompanied by a pending indicator; a failed preview is
 marked rather than retried indefinitely. This includes two-photo imports,
 which do not run automatic roll analysis.
 
+The expanded light table uses the entire allocated row below its header.
+Its grid is the only vertical scrollport; the legacy file panel's 200px cap
+and sticky positioning must not apply. Mobile grid tile sizing is separate
+from compact filmstrip sizing. Keyboard navigation scrolls only the list and
+reveals the complete tile, including its border, rather than its inset button.
+
 If roll analysis takes ownership while a thumbnail is in flight, that
 thumbnail stays invalid even after analysis becomes idle. It cannot publish
 prepared settings or errors over the analysis result; a fresh preview job
@@ -63,6 +81,7 @@ decode per photo while allowing the separate final-recipe preview lane.
 ```sh
 npm test
 PORT=5214 CDP_PORT=9238 npm run test:smoke -- --photo-session-only
+PORT=5214 CDP_PORT=9238 npm run test:smoke -- --light-table-only
 PHOTO_SESSION_RAW_FILES='["/absolute/a.dng","/absolute/b.nef"]' npm run test:smoke -- --photo-session-raw-only
 npm run test:smoke
 npm run build:web
@@ -73,12 +92,18 @@ messages and original-file reads during warm A/B/A navigation. It compares
 settled GPU dimensions and sampled patch hashes, zoom, and exact decoded 8/16-bit PNG export
 pixels. It also checks active CMY thumbnail changes, identical unopened
 negative previews, whole-roll black-and-white pending-to-ready transitions,
-and a delayed cold-file read losing to a newer selection. Synthetic fixtures
+and a delayed cold-file read losing to a newer selection. Cold navigation
+also checks synchronous target feedback, accessible visible loading state,
+successful completion and read-failure recovery. The light-table regression
+imports 39 photos and checks full-height occupancy, final-tile access,
+mobile sizing, short landscapes and collapsed/reopened layouts. Synthetic fixtures
 are used; private user photographs are not published.
 
 Browser tests must run against frozen runtime files so Vite hot reload cannot
 invalidate the measurements. The generated visual artifact is
-`output/playwright/photo-session-lighttable.png` (not committed).
+`output/playwright/photo-session-lighttable.png` and
+`output/playwright/photo-switch-loading.png` (not committed), along with
+the light-table desktop/mobile captures.
 
 Local targeted evidence (2026-09-23, Chrome, synthetic 900 × 600 PNGs): three
 warm activations were observed at 114, 75 and 117 ms by the CDP polling probe,

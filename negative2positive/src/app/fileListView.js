@@ -238,7 +238,26 @@ function installKeyboardNavigation(container) {
     else if (event.key === 'End') next = buttons.length - 1;
     if (next === index || next < 0 || next >= buttons.length) return;
     event.preventDefault();
-    buttons[next].focus();
-    buttons[next].scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    buttons[next].focus({ preventScroll: true });
+    // Reveal the whole tile, not just its inset button (which clips the last
+    // 5px of the tile). Scroll this list only: native focus/scrollIntoView can
+    // also move overflow:hidden editor ancestors on smaller viewports.
+    let top = container.scrollTop, left = container.scrollLeft;
+    if (event.key === 'Home') {
+      top = left = 0;
+    } else if (event.key === 'End') {
+      top = Math.max(0, container.scrollHeight - container.clientHeight);
+      left = Math.max(0, container.scrollWidth - container.clientWidth);
+    } else {
+      const tile = buttons[next].closest('.file-list-item') || buttons[next];
+      const rect = tile.getBoundingClientRect(), viewport = container.getBoundingClientRect();
+      const viewportTop = viewport.top + container.clientTop;
+      const viewportLeft = viewport.left + container.clientLeft;
+      if (rect.top < viewportTop) top += rect.top - viewportTop;
+      else if (rect.bottom > viewportTop + container.clientHeight) top += rect.bottom - viewportTop - container.clientHeight;
+      if (rect.left < viewportLeft) left += rect.left - viewportLeft;
+      else if (rect.right > viewportLeft + container.clientWidth) left += rect.right - viewportLeft - container.clientWidth;
+    }
+    container.scrollTo({ top, left });
   });
 }

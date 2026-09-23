@@ -2,6 +2,7 @@ import { panelRelevance, inferSourceKind } from './panelRelevance.js';
 import '../styles/studio.css';
 import '../styles/pixel-fonts.css';
 import '../styles/studio-pixel.css';
+import '../styles/photo-switch-feedback.css';
 
 export const studioText = {
   zh: {
@@ -18,6 +19,8 @@ export const studioText = {
     balance: '校正偏色', reset: '重置调色', more: '更多调整', repair: '修复',
     conversion: '转换', conversionHint: '胶片类型、片基与引擎。默认自动处理，需要时可以手动校正。',
     processing: '正在处理照片…', ready: '正片已就绪', failed: '转换未完成，请在“转换”中重试',
+    openingPhoto: '正在打开 {name}…', preparingPhoto: '正在转换 {name}…',
+    photoSwitchHint: '正在本机加载与处理，你可以继续选择其他照片。', photoSwitchTile: '打开中…',
     empty: '添加照片后开始调色', photos: '照片', sync: '同步调色', selected: '已选 {count} 张',
     syncHint: '只同步色彩，不改变其他照片的裁切、片基和修复。', synced: '已同步到 {count} 张照片',
     export: '导出', sampleHint: '在照片上点击应为中性灰的区域；按 Esc 取消。',
@@ -65,6 +68,8 @@ export const studioText = {
     balance: 'Correct color cast', reset: 'Reset color', more: 'More adjustments', repair: 'Retouch',
     conversion: 'Convert', conversionHint: 'Film type, film base and engine. Start automatically, refine when needed.',
     processing: 'Processing photo…', ready: 'Positive ready', failed: 'Conversion incomplete. Open Convert to retry.',
+    openingPhoto: 'Opening {name}…', preparingPhoto: 'Converting {name}…',
+    photoSwitchHint: 'Loading and processing on your device. You can choose another photo.', photoSwitchTile: 'Opening…',
     empty: 'Add a photo to start editing', photos: 'Photos', sync: 'Sync color', selected: '{count} selected',
     syncHint: 'Only color is synced. Each photo keeps its crop, film base and retouching.', synced: 'Color synced to {count} photos',
     export: 'Export', sampleHint: 'Click an area that should be neutral gray. Press Esc to cancel.',
@@ -111,6 +116,8 @@ export const studioText = {
     balance: '色かぶりを補正', reset: '色調整をリセット', more: '詳細な調整', repair: '修復',
     conversion: '変換', conversionHint: 'フィルム種類・ベース・エンジン。自動変換を出発点に、必要なところを調整できます。',
     processing: '写真を処理しています…', ready: '変換完了', failed: '変換が完了していません。「変換」から再試行してください。',
+    openingPhoto: '{name} を開いています…', preparingPhoto: '{name} を変換しています…',
+    photoSwitchHint: 'この端末で読み込み・処理中です。他の写真も選択できます。', photoSwitchTile: '読み込み中…',
     empty: '写真を追加すると色調整できます', photos: '写真', sync: '色調整を同期', selected: '{count} 枚選択中',
     syncHint: '色だけを同期します。切り抜き・フィルムベース・修復は各写真の設定を保ちます。', synced: '{count} 枚に色調整を同期しました',
     export: '書き出し', sampleHint: '写真の中の無彩色の部分をクリック。Esc で終了します。',
@@ -144,6 +151,45 @@ export const studioText = {
     expiredModeOn: '期限切れフィルムの救済を開始', expiredModeOff: '期限切れフィルムの救済を終了'
   }
 };
+
+// Keep switching feedback separate from background thumbnail work: a tile can
+// have its canonical preview ready while its full editor source is still loading.
+export function syncPhotoSwitchFeedback({ state, document, text }) {
+  const item = document.body.dataset.photoSwitching === 'true'
+    && state.fileQueue.includes(state.photoSwitchTarget) ? state.photoSwitchTarget : null;
+  const message = item ? text(state.photoSwitchPhase === 'preparing' ? 'preparingPhoto' : 'openingPhoto')
+    .replace('{name}', item.file.name) : '';
+  const feedback = document.getElementById('studioPhotoSwitchFeedback');
+  feedback.hidden = !item;
+  document.getElementById('studioPhotoSwitchMessage').textContent = message;
+  document.getElementById('studioPhotoSwitchHint').textContent = item ? text('photoSwitchHint') : '';
+  document.getElementById('canvasContainer').setAttribute('aria-busy', String(Boolean(item)));
+  for (const button of document.querySelectorAll('#fileListItems .file-list-name')) {
+    const target = Boolean(item && state.fileQueue[Number(button.dataset.index)] === item);
+    if (target) button.dataset.photoSwitchTarget = 'true';
+    else delete button.dataset.photoSwitchTarget;
+    // The list renderer memoizes its last active index. Immediate feedback
+    // changes the DOM between list renders, so also reconcile on cleanup:
+    // returning to the outgoing photo may otherwise be a memoized no-op.
+    const active = item ? target : Number(button.dataset.index) === state.currentFileIndex;
+    button.closest('.file-list-item')?.classList.toggle('active', active);
+    if (active) button.setAttribute('aria-current', 'true');
+    else button.removeAttribute('aria-current');
+    const previewPending = button.dataset.previewState === 'pending';
+    button.setAttribute('aria-busy', String(target || previewPending));
+    let badge = button.querySelector('.file-list-switch-state');
+    if (target && !badge) {
+      badge = document.createElement('span');
+      badge.className = 'file-list-switch-state';
+      button.append(badge);
+    }
+    if (badge) {
+      badge.hidden = !target;
+      badge.textContent = target ? text('photoSwitchTile') : '';
+    }
+  }
+  return item ? { item, message } : null;
+}
 
 export function mountStudioWorkspace({ getState, getLanguage, getText, isExportLocked, onStyle, onReset, onResetAll, onRestart, onNewSession, onSync, onRetry, onConfirm, onExportBorder, onAutoCrop, onRestoreFrame, onConfirmAnalysis, onMergeShots, onLoupe, onSaveProject, onOpenProject, onRestoreProject, onExpiredMode, onColorCorrect }) {
   const $ = id => document.getElementById(id);
@@ -476,6 +522,22 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
     syncLayout();
   });
   document.querySelector('.preview-section').prepend(status);
+  const photoSwitchFeedback = document.createElement('div');
+  photoSwitchFeedback.id = 'studioPhotoSwitchFeedback';
+  photoSwitchFeedback.hidden = true;
+  photoSwitchFeedback.setAttribute('role', 'status');
+  photoSwitchFeedback.setAttribute('aria-live', 'polite');
+  photoSwitchFeedback.setAttribute('aria-atomic', 'true');
+  photoSwitchFeedback.innerHTML = '<div class="studio-photo-switch-card"><span class="studio-photo-switch-indicator" aria-hidden="true"></span><strong id="studioPhotoSwitchMessage"></strong><p id="studioPhotoSwitchHint"></p></div>';
+  // The viewer remains visible, but dragging/clicking its loading surface must
+  // not pan, sample or repair the outgoing photo underneath it.
+  for (const type of ['pointerdown', 'mousedown', 'touchstart', 'click', 'dblclick', 'wheel']) {
+    photoSwitchFeedback.addEventListener(type, event => {
+      event.preventDefault();
+      event.stopPropagation();
+    }, { passive: false });
+  }
+  $('canvasContainer').append(photoSwitchFeedback);
   const strip = document.createElement('section');
   strip.className = 'studio-filmstrip';
   strip.id = 'studioFilmstrip';
@@ -574,7 +636,8 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
       if (!expiredFlow && activeTab === 'expired') selectTab('edit');
       $('studioExpiredMode').textContent = t(state.expiredSession ? 'expiredModeOff' : 'expiredModeOn');
       $('studioExpiredMode').setAttribute('aria-pressed', String(Boolean(state.expiredSession)));
-      const busy = body.dataset.studioBusy === 'true';
+      const switching = syncPhotoSwitchFeedback({ state, document, text: t });
+      const busy = body.dataset.studioBusy === 'true' || Boolean(switching);
       const locked = busy || state.cropping || isExportLocked();
       $('studioColorCorrect').disabled = !ready || locked;
       $('studioColorCorrectStatus').hidden = !ready || !state.expiredEnabled || !state.expiredAnalysis;
@@ -583,7 +646,7 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
       const frameMeta = state.autoFrame.lastDiagnostics;
       $('studioConfirmAnalysis').disabled = !loaded || locked || state.cropping || busy;
       $('studioAnalysisStatus').textContent = t(frameMeta?.analysisNeedsReview ? 'analysisReview' : 'analysisHint');
-      $('studioFrameNotice').hidden = !ready || !frameMeta?.importAuto || state.samplingMode;
+      $('studioFrameNotice').hidden = Boolean(switching) || !ready || !frameMeta?.importAuto || state.samplingMode;
       $('studioFrameNotice').textContent = t(frameMeta?.analysisNeedsReview ? 'analysisReview' : frameMeta?.appliedMode === 'crop' ? 'frameApplied' : frameMeta?.frameIncomplete ? 'frameIncomplete' : frameMeta?.imageArea ? 'frameAnalysis' : 'frameReview');
       $('studioFrameNotice').dataset.status = frameMeta?.appliedMode || '';
       $('studioFrameNotice').disabled = state.cropping || busy;
@@ -596,9 +659,13 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
       syncLayout();
       $('studioColorControls').disabled = !ready || busy || state.cropping;
       $('studioHistory').hidden = !loaded;
+      $('studioHistory').inert = busy;
       $('studioExport').hidden = !loaded;
-      $('studioStatus').textContent = t(busy ? 'processing' : ready ? 'ready' : loaded ? 'failed' : 'empty');
-      $('studioFilename').textContent = state.loadedFile?.name || '';
+      // Only the viewer-local live region announces a pending activation, so
+      // assistive technology does not read two competing progress messages.
+      $('studioStatus').setAttribute('aria-live', switching ? 'off' : 'polite');
+      $('studioStatus').textContent = switching?.message || t(busy ? 'processing' : ready ? 'ready' : loaded ? 'failed' : 'empty');
+      $('studioFilename').textContent = switching?.item.file.name || state.loadedFile?.name || '';
       $('studioSampleHint').hidden = !state.samplingMode;
       $('studioSampleHint').textContent = t(state.samplingMode === 'filmBase' ? 'baseSampleHint' : 'sampleHint');
       if (state.samplingMode) $('studioStatus').textContent = $('studioSampleHint').textContent;
@@ -610,8 +677,8 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
       $('exportSingleBtn').textContent = t(state.exportFormat === 'dng' ? 'exportCurrentDng' : 'exportCurrent');
       $('exportAllBtn').textContent = t('exportIndividualSelected').replace('{count}', count);
       $('studioSelection').title = t('selectionHint');
-      $('studioUndo').disabled = $('undoBtn').disabled;
-      $('studioRedo').disabled = $('redoBtn').disabled;
+      $('studioUndo').disabled = busy || $('undoBtn').disabled;
+      $('studioRedo').disabled = busy || $('redoBtn').disabled;
       $('studioRetry').disabled = !loaded || busy || state.cropping;
       $('studioApplyLens').disabled = !loaded || locked;
       $('studioResetAll').disabled = !ready || locked;
