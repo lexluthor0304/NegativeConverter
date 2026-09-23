@@ -74,10 +74,10 @@ export async function runStudioColorAnalysisSmoke({ send, evaluate, waitFor, wai
   await evaluate(`document.getElementById('redoBtn').click()`); await wait(300);
   if (String(await exportImage()) !== String(cropped)) fail('redo analysis changed geometry');
   const confirmedIndex = await evaluate('window.__colorExports.length - 1');
-  await evaluate(`document.querySelectorAll('.file-list-name')[1].click()`);
+  await evaluate(`document.querySelector('.file-list-name[data-index="1"]').click()`);
   await waitFor('second color reference', `document.getElementById('studioFilename').textContent === 'color-reference-2.png' && !document.body.dataset.studioBusy`,120000);
   if (String(await exportImage()) !== '640,480') fail('analysis confirmation leaked output geometry to the second photo');
-  await evaluate(`document.querySelectorAll('.file-list-name')[0].click()`);
+  await evaluate(`document.querySelector('.file-list-name[data-index="0"]').click()`);
   await waitFor('reopened color reference', `document.getElementById('studioFilename').textContent === 'color-reference.png' && !document.body.dataset.studioBusy`,120000);
   if (String(await exportImage()) !== String(cropped)) fail('reopening lost per-photo geometry');
   const reopeningMatches = await evaluate(`(async()=>{const a=await window.__colorExports[${confirmedIndex}],b=await window.__colorExports.at(-1);return a.data.every((v,i)=>v===b.data[i]);})()`);

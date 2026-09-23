@@ -71,18 +71,18 @@ export async function runPositiveImportSmoke({ send, evaluate, waitFor, wait, fa
     if (/negative/.test(name) && pixels[0] === 130 && pixels[1] === 60 && pixels[2] === 25) fail('unviewed negative was exported without conversion');
   }
   console.log('ok: mixed batch exports saved positive settings and identifies never-viewed negative/monochrome frames');
-  await evaluate(`document.querySelectorAll('.file-list-name')[1].click()`);
+  await evaluate(`document.querySelector('.file-list-name[data-index="1"]').click()`);
   await waitFor('cropped negative imported', `${ready} && document.getElementById('studioFilename').textContent === 'negative.png'`,150000);
   if(await evaluate(`document.querySelector('.film-type-btn.active').dataset.type`)!=='color') fail('borderless orange negative not identified');
-  await evaluate(`document.querySelectorAll('.file-list-name')[2].click()`);
+  await evaluate(`document.querySelector('.file-list-name[data-index="2"]').click()`);
   await waitFor('mono imported', `${ready} && document.getElementById('studioFilename').textContent === 'mono.png'`,150000);
   if(await evaluate(`document.getElementById('filmTypeDetectionStatus').dataset.confidence`)!=='low') fail('monochrome polarity claimed as certain');
   await evaluate(`document.querySelector('.film-type-btn[data-type="bw"]').click()`);
   await wait(1500);
-  await evaluate(`document.querySelectorAll('.file-list-name')[0].click()`);
+  await evaluate(`document.querySelector('.file-list-name[data-index="0"]').click()`);
   await waitFor('slide reopened', `${ready} && document.getElementById('studioFilename').textContent === 'slide.png'`,150000);
   if(await evaluate(`document.getElementById('positiveModeSelect').value`)!=='edit') fail('per-photo positive mode not restored');
-  await evaluate(`document.querySelectorAll('.file-list-name')[2].click()`);
+  await evaluate(`document.querySelector('.file-list-name[data-index="2"]').click()`);
   await waitFor('mono reopened', `${ready} && document.getElementById('studioFilename').textContent === 'mono.png'`,150000);
   if(await evaluate(`document.querySelector('.film-type-btn.active').dataset.type`)!=='bw') fail('manual B&W choice overwritten on reload');
   if(await evaluate(`document.getElementById('filmTypeDetectionStatus').dataset.confidence`)!=='manual') fail('manual type was labelled automatic');

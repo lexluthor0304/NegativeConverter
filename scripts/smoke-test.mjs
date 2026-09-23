@@ -24,6 +24,7 @@ import { runStudioRawAutoFrameSmoke } from './studio-raw-autoframe-smoke.mjs';
 import { runFilmEdgeSmoke } from './film-edge-smoke.mjs';
 import { runRollAnalysisSmoke } from './roll-analysis-smoke.mjs';
 import { runLightTableSmoke } from './light-table-smoke.mjs';
+import { runPhotoSortSmoke } from './photo-sort-smoke.mjs';
 import { runPerformanceUiSmoke } from './performance-ui-smoke.mjs';
 import { runComparePreviewSmoke } from './compare-preview-smoke.mjs';
 import { runRestartRenderSmoke } from './restart-render-smoke.mjs';
@@ -310,6 +311,13 @@ if (process.argv.includes('--photo-session-only')) {
   await runPhotoSessionSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
   if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
   console.log('SMOKE PASS'); process.exit(0);
+}
+
+if (process.argv.includes('--photo-sort-only')) {
+  await runPhotoSortSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+  if (pageErrors.length) fail('uncaught page errors: ' + pageErrors.join('\n'));
+  console.log('SMOKE PASS (photo sorting)');
+  process.exit(0);
 }
 
 if (process.argv.includes('--light-table-only')) {
@@ -671,9 +679,9 @@ if (settingsBadges < 2) {
 console.log('ok: settings applied to both files');
 
 // Switch to the second file — exercises persist/restore of settings
-await evaluate(`document.querySelectorAll('.file-list-item')[1].click()`);
+await evaluate(`document.querySelector('.file-list-name[data-index="1"]').click()`);
 await waitFor('second file active',
-  `document.querySelectorAll('.file-list-item')[1].classList.contains('active')`, 90_000);
+  `document.querySelector('.file-list-name[data-index="1"]').closest('.file-list-item').classList.contains('active')`, 90_000);
 console.log('ok: switched to second file');
 
 // Export all files. Without showSaveFilePicker the app intentionally falls
@@ -759,9 +767,11 @@ const canvasFingerprint = `(() => {
   return [c.width, c.height, hash];
 })()`;
 const beforeFailure = await evaluate(canvasFingerprint);
-await evaluate(`document.querySelectorAll('.file-list-item')[2].click()`);
-await waitFor('failed file marked', `!!document.querySelectorAll('.file-list-item')[2]?.querySelector('.file-list-status.error')`);
-const restoredIndex = await evaluate(`[...document.querySelectorAll('.file-list-item')].findIndex(item => item.classList.contains('active'))`);
+// Display order follows file modification time, not append/queue order.
+// Address the corrupt fixture by its stable source index, wherever it appears.
+await evaluate(`document.querySelector('.file-list-name[data-index="2"]').click()`);
+await waitFor('failed file marked', `!!document.querySelector('.file-list-name[data-index="2"]')?.closest('.file-list-item').querySelector('.file-list-status.error')`);
+const restoredIndex = await evaluate(`Number(document.querySelector('.file-list-item.active .file-list-name')?.dataset.index ?? -1)`);
 const afterFailure = await evaluate(canvasFingerprint);
 if (restoredIndex !== 1 || JSON.stringify(beforeFailure) !== JSON.stringify(afterFailure)) {
   fail('failed file switch changed the active image or queue index: ' + JSON.stringify({ beforeFailure, afterFailure, restoredIndex }));
@@ -798,6 +808,7 @@ if (!process.argv.some(arg => arg.endsWith('-only'))) await runSimplicitySmoke({
 
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runRollFilmTypeSmoke({send,evaluate,waitFor,wait,fail,installDialogAutoAccept,port:PORT});
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runFolderImportSmoke({send,evaluate,waitFor,wait,fail,installDialogAutoAccept,port:PORT,root:ROOT});
+if (!process.argv.some(arg => arg.endsWith('-only'))) await runPhotoSortSmoke({send,evaluate,waitFor,wait,fail,installDialogAutoAccept,port:PORT,root:ROOT});
 
 // ---- no uncaught page errors across both scenarios ----
 const realErrors = pageErrors.filter((e) => !/ResizeObserver loop/.test(e));

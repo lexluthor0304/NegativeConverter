@@ -87,6 +87,7 @@ import { frameNeedsReview } from './reviewQueue.js';
       normalizeSprocketEdgeMarkings
     } from './sprocketFrame.js';
     import { renderFileList } from './fileListView.js';
+    import { normalizeFileListSort, orderedFileIndices, selectionRangeIndices } from './fileListOrder.js';
     import { createSprocketFrameCache } from './sprocketFrameCache.js';
     import { imagePixelsForBatch, rememberImageDimensions } from './imageDimensions.js';
     import { createDustWorkerClient, detectDustInWorker, inpaintDustInWorker, refineDustMaskInWorker, disposeDustWorker } from './dustWorkerClient.js';
@@ -2369,6 +2370,7 @@ import { frameNeedsReview } from './reviewQueue.js';
       // fileQueue item: {id, file, selected, status, error, settings: null | {...}, isDirty: boolean}
       // settings = null means use auto-detect for film base
       fileQueue: [],
+      fileListSort: normalizeFileListSort(safeStorageGet('nc_photo_sort_v1')),
       currentFileIndex: 0,
       // Saved crop region for current image (used when saving settings)
       cropRegion: null,
@@ -10888,8 +10890,8 @@ import { frameNeedsReview } from './reviewQueue.js';
     // Process a single file with given settings (streaming - no memory accumulation)
     // Get selected files for batch processing
     function getSelectedFiles() {
-      return state.fileQueue
-        .map((item, index) => ({ item, index }))
+      return getFileListOrder()
+        .map(index => ({ item: state.fileQueue[index], index }))
         .filter(({ item }) => item.selected);
     }
 
@@ -11582,6 +11584,27 @@ import { frameNeedsReview } from './reviewQueue.js';
     // ===========================================
     let fileSelectionAnchor = null;
     let reviewFilter = false;
+    let fileOrderCache = null;
+    function getFileListOrder() {
+      // Files have immutable names/timestamps. Cache by queue identity, append
+      // length and preference so thumbnail/status updates do not keep sorting.
+      const mode = normalizeFileListSort(state.fileListSort);
+      if (!fileOrderCache || fileOrderCache.queue !== state.fileQueue
+        || fileOrderCache.length !== state.fileQueue.length || fileOrderCache.mode !== mode) {
+        fileOrderCache = { queue: state.fileQueue, length: state.fileQueue.length,
+          mode, order: orderedFileIndices(state.fileQueue, mode) };
+      }
+      return fileOrderCache.order;
+    }
+    function setFileListSort(mode) {
+      if (singleExportActive || isDesktopBatchExportLocked()) return;
+      state.fileListSort = normalizeFileListSort(mode);
+      safeStorageSet('nc_photo_sort_v1', state.fileListSort);
+      // Only the presentation order changes. Queue indices and item objects
+      // remain stable for current edits, in-flight work and photo-session keys.
+      updateFileListUI();
+      studioWorkspace?.sync();
+    }
     const reviewForItem = item => frameNeedsReview(item, item.file === state.loadedFile ? state : null);
     function updateReviewFilter() {
       const button = document.getElementById('studioReviewFilter');
@@ -11631,6 +11654,7 @@ import { frameNeedsReview } from './reviewQueue.js';
         container,
         countEl,
         items: state.fileQueue,
+        order: getFileListOrder(),
         currentFileIndex: state.currentFileIndex,
         labels: {
           markReviewed: getLocalizedText('reviewMark', 'Mark as reviewed'),
@@ -11671,7 +11695,8 @@ import { frameNeedsReview } from './reviewQueue.js';
         onToggleSelected: (index, selected, { range = false } = {}) => {
           const anchor = state.fileQueue.findIndex(item => item.id === fileSelectionAnchor);
           if (range && anchor >= 0) {
-            for (let i = Math.min(anchor, index); i <= Math.max(anchor, index); i++) {
+            const visibleOrder = getFileListOrder().filter(i => !reviewFilter || reviewForItem(state.fileQueue[i]).needs);
+            for (const i of selectionRangeIndices(visibleOrder, anchor, index)) {
               state.fileQueue[i].selected = selected;
             }
           }
@@ -14383,7 +14408,7 @@ import { frameNeedsReview } from './reviewQueue.js';
     // before drawing; TIFF when that is the export format, otherwise PNG.
     async function exportContactSheet() {
       if (isDesktopBatchExportLocked()) return;
-      const selected = state.fileQueue.map((item, index) => ({ item, index })).filter(({ item }) => item.selected);
+      const selected = getSelectedFiles();
       if (!selected.length) return;
       const layoutId = normalizeLayoutId(document.getElementById('contactSheetLayout')?.value);
       const pageId = normalizePageId(document.getElementById('contactSheetPage')?.value);
@@ -16044,6 +16069,7 @@ import { frameNeedsReview } from './reviewQueue.js';
         onResetAll: resetAllAdjustments,
         onRestart: restartPhotoProcessing,
         onNewSession: closePhotoSession,
+        onSortFiles: setFileListSort,
         onStyle: model => {
           if (state.currentStep < 3) return;
           pushUndo('studioStyle');
