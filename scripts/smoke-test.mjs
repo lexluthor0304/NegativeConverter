@@ -26,6 +26,7 @@ import { runRollAnalysisSmoke } from './roll-analysis-smoke.mjs';
 import { runLightTableSmoke } from './light-table-smoke.mjs';
 import { runPerformanceUiSmoke } from './performance-ui-smoke.mjs';
 import { runComparePreviewSmoke } from './compare-preview-smoke.mjs';
+import { runRestartRenderSmoke } from './restart-render-smoke.mjs';
 import { runDarkroomSmoke } from './darkroom-smoke.mjs';
 import { runCameraSmoke } from './camera-smoke.mjs';
 import { runRollHomeSmoke } from './roll-home-smoke.mjs';
@@ -294,6 +295,12 @@ if (process.argv.includes('--performance-only')) {
 
 if (process.argv.includes('--compare-preview-only')) {
   await runComparePreviewSmoke({ send, evaluate, waitFor, wait, fail, port: PORT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
+
+if (process.argv.includes('--restart-only')) {
+  await runRestartRenderSmoke({ send, evaluate, waitFor, fail, port: PORT });
   if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
   console.log('SMOKE PASS'); process.exit(0);
 }
@@ -745,6 +752,7 @@ console.log('ok: failed decode preserves the previous image and active file');
 await runPerformanceUiSmoke({ evaluate, fail });
 if (!process.argv.some(arg => arg.endsWith('-only'))) {
   await runComparePreviewSmoke({ send, evaluate, waitFor, wait, fail, port: PORT });
+  await runRestartRenderSmoke({ send, evaluate, waitFor, fail, port: PORT });
 }
 if (!process.argv.includes('--auto-crop-only') && !process.argv.includes('--color-analysis-only') && !process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) await runStudioSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, fixtures: [FIXTURE, FIXTURE2], root: ROOT });
 if (!process.argv.includes('--color-analysis-only') && !process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) await runStudioAutoCropSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });

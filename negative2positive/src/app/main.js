@@ -5322,6 +5322,9 @@ import { frameNeedsReview } from './reviewQueue.js';
     let coreReprocessTimer = null;
     let coreReprocessScheduled = null;
     let coreReprocessToken = 0;
+    // Unlike slider tokens, a restart generation must never admit an older
+    // preview, even when a newer preview is already queued for the same source.
+    let coreReprocessGeneration = 0;
     let step2AutoConvertTimer = null;
     let step2AutoConvertToken = 0;
     let processNegativeInFlight = null;
@@ -5405,7 +5408,8 @@ import { frameNeedsReview } from './reviewQueue.js';
     let _resolveCoreReprocessIdle = null;
 
     function coreReprocessBusy() {
-      return _coreReprocessActive > 0 || _coreReprocessPending !== null;
+      return _coreReprocessActive > 0 || _coreReprocessPending !== null
+        || _coreReprocessFullInFlight || _coreReprocessPreviewInFlight;
     }
 
     function whenCoreReprocessIdle() {
@@ -5452,7 +5456,9 @@ import { frameNeedsReview } from './reviewQueue.js';
     async function rerenderWithCoreControls(options = {}) {
       const full = Boolean(options.full) || hasFrameRepairs();
       const token = Number.isInteger(options.token) ? options.token : coreReprocessToken;
+      const generation = options.generation ?? coreReprocessGeneration;
       const sourceRef = options.sourceRef || state.conversionSourceImageData;
+      if (generation !== coreReprocessGeneration) return false;
       if (!usesSilverCoreConversion(state)) return false;
       if (!state.conversionSourceImageData) return false;
       if (sourceRef && state.conversionSourceImageData !== sourceRef) return false;
@@ -5465,7 +5471,7 @@ import { frameNeedsReview } from './reviewQueue.js';
         ? (_coreReprocessFullInFlight || _coreReprocessPreviewInFlight)
         : _coreReprocessPreviewInFlight;
       if (blocked) {
-        _coreReprocessPending = options;
+        _coreReprocessPending = { ...options, full, token, sourceRef, generation };
         return false;
       }
       if (full) _coreReprocessFullInFlight = true;
@@ -5476,6 +5482,7 @@ import { frameNeedsReview } from './reviewQueue.js';
           // Full-resolution path
           const processed = await convertFromCurrentSource(state, { preview: false, includeAnalysisPreview: false });
           if (!processed) return false;
+          if (generation !== coreReprocessGeneration) return false;
           if (token !== null && token !== coreReprocessToken) return false;
           if (sourceRef && state.conversionSourceImageData !== sourceRef) return false;
           applyProcessedImageToState(processed);
@@ -5499,6 +5506,7 @@ import { frameNeedsReview } from './reviewQueue.js';
           // Preview-resolution path: run SilverCore on small image
           const previewProcessed = await convertFromCurrentSource(state, { preview: hasSmallPreview, interactive: true, includeAnalysisPreview: false });
           if (!previewProcessed) return false;
+          if (generation !== coreReprocessGeneration) return false;
           if (state.conversionSourceImageData !== sourceRef) return false;
           // 連続入力中も完了したフレームを表示する。別画像の結果は破棄し、
           // 古い設定のフレームを「書き出し可能な原寸」としては扱わない。
@@ -5537,6 +5545,9 @@ import { frameNeedsReview } from './reviewQueue.js';
             noteCoreReprocessSettled();
           });
         }
+        // Direct callers (dust toggle, undo, reset and background promotion)
+        // also participate in the export barrier, without runCoreReprocess.
+        noteCoreReprocessSettled();
       }
     }
 
@@ -5560,6 +5571,7 @@ import { frameNeedsReview } from './reviewQueue.js';
       state.fullResolutionPending = true;
       const sourceRef = state.conversionSourceImageData;
       const token = coreReprocessToken;
+      const generation = coreReprocessGeneration;
       const trace = createPerfTrace('fullResolutionRender', {
         reason,
         pixels: getImageDataPixelCount(state.conversionSourceImageData)
@@ -5567,7 +5579,7 @@ import { frameNeedsReview } from './reviewQueue.js';
 
       let rendered = false;
       const promise = waitForNextFrame()
-        .then(() => rerenderWithCoreControls({ full: true, sourceRef, token }))
+        .then(() => rerenderWithCoreControls({ full: true, sourceRef, token, generation }))
         .then((didRender) => {
           rendered = didRender === true;
           trace.end({
@@ -5576,9 +5588,10 @@ import { frameNeedsReview } from './reviewQueue.js';
           });
         })
         .finally(() => {
-          if (state.fullResolutionPromise === promise) {
-            state.fullResolutionPromise = null;
-          }
+          // A reset may already own a new promise (and even the same source
+          // object). The discarded render cannot change its readiness flags.
+          if (state.fullResolutionPromise !== promise) return;
+          state.fullResolutionPromise = null;
           // A render that was queued behind another one has not produced
           // anything yet, so the work is still outstanding.
           state.fullResolutionPending = rendered ? Boolean(state.processedImageDataIsPreview) : true;
@@ -5714,11 +5727,13 @@ import { frameNeedsReview } from './reviewQueue.js';
     async function processNegative() {
       if (processNegativeInFlight) return processNegativeInFlight;
 
-      processNegativeInFlight = (async () => {
+      const processingGeneration = coreReprocessGeneration;
+      const promise = (async () => {
         const sourceData = state.croppedImageData || state.originalImageData;
         if (!sourceData) return;
         const generation = loadGeneration;
         const isCurrentConversion = () => isCurrentLoad(generation)
+          && processingGeneration === coreReprocessGeneration
           && sourceData === (state.croppedImageData || state.originalImageData);
         const trace = createPerfTrace('processNegative', {
           pixels: getImageDataPixelCount(sourceData)
@@ -5776,7 +5791,7 @@ import { frameNeedsReview } from './reviewQueue.js';
           });
           await new Promise(r => setTimeout(r, 250));
           // Auto-run dust detection if enabled
-          if (hasFrameRepairs() && !hasPreviewSource) {
+          if (isCurrentConversion() && hasFrameRepairs() && !hasPreviewSource) {
             scheduleDustDetection();
           }
         } catch (err) {
@@ -5791,14 +5806,15 @@ import { frameNeedsReview } from './reviewQueue.js';
             `${getLocalizedText('conversionFailed', 'Conversion failed.')}${detail ? `\n${detail}` : ''}`
           );
         } finally {
-          if (isCurrentLoad(generation)) overlay.hide();
+          if (isCurrentLoad(generation) && processingGeneration === coreReprocessGeneration) overlay.hide();
         }
       })();
+      processNegativeInFlight = promise;
 
       try {
-        return await processNegativeInFlight;
+        return await promise;
       } finally {
-        processNegativeInFlight = null;
+        if (processNegativeInFlight === promise) processNegativeInFlight = null;
       }
     }
 
@@ -9728,6 +9744,14 @@ import { frameNeedsReview } from './reviewQueue.js';
 
     function restartPhotoProcessing() {
       if (isDesktopBatchExportLocked()) return;
+      // Lens correction can return the original object unchanged. Source
+      // identity alone cannot distinguish a discarded render from this reset.
+      coreReprocessGeneration += 1;
+      coreReprocessToken += 1;
+      cancelPendingTimers();
+      _coreReprocessPending = null;
+      processNegativeInFlight = null;
+      noteCoreReprocessSettled();
       clearUndoHistory();
       state.repairStrokes = [];
       // Leave crop mode first: the draft still points at the image
@@ -9762,18 +9786,6 @@ import { frameNeedsReview } from './reviewQueue.js';
         if (webglState.gl) {
           webglState.sourceDirty = true;
           webglState.sourceSize = { w: 0, h: 0 };
-        }
-        if (fullUpdateTimer) {
-          clearTimeout(fullUpdateTimer);
-          fullUpdateTimer = null;
-        }
-        if (coreReprocessTimer) {
-          clearTimeout(coreReprocessTimer);
-          coreReprocessTimer = null;
-        }
-        if (step2AutoConvertTimer) {
-          clearTimeout(step2AutoConvertTimer);
-          step2AutoConvertTimer = null;
         }
         displayNegative(state.originalImageData);
         updateAutoFrameButtons();
