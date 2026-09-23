@@ -338,7 +338,7 @@ for (const locked of [false, true]) {
   const f = fixture(), c = f.context;
   c.rememberPhotoSession(f.item);
   assert.ok(f.photoSessions.bytes > 0 && f.photoPreviews.bytes > 0);
-  let pickerOpened = 0;
+  let pickerOpened = 0, emptyListRefreshes = 0;
   Object.assign(c, {
     isDesktopBatchExportLocked: () => locked,
     clearDustState: noop, clearUndoHistory: noop, clearProjectRecovery: noop,
@@ -356,6 +356,7 @@ for (const locked of [false, true]) {
     fullUpdateTimer: null, step2AutoConvertTimer: null,
     setUploadPlaceholderStatus: noop, updateBeforeAfterButtonState: noop,
     updateSprocketControlsUI: noop, resetAllAdjustments: noop, syncBatchUIState: noop,
+    updateFileListUI: () => { assert.equal(f.state.fileQueue.length, 0); emptyListRefreshes++; },
     fileInput: { value: 'old', click: () => { pickerOpened++; } },
   });
   c.document.body.dataset = { studioBusy: 'true', photoSwitching: 'true' };
@@ -368,6 +369,7 @@ for (const locked of [false, true]) {
     assert.equal(c.loadGeneration, oldGeneration);
     assert.ok(f.photoSessions.bytes > 0 && f.photoPreviews.bytes > 0);
     assert.equal(pickerOpened, 0);
+    assert.equal(emptyListRefreshes, 0);
   } else {
     assert.equal(f.photoSessions.bytes, 0, 'close releases inactive snapshots without a later file-list refresh');
     assert.equal(f.photoPreviews.bytes, 0, 'close releases presentation previews even when picker is cancelled');
@@ -384,6 +386,7 @@ for (const locked of [false, true]) {
     assert.equal(c.sprocketPreviewFrameCache.sourceRef, null);
     assert.equal(c.sprocketPreviewFrameCanvas.width, 1);
     assert.equal(pickerOpened, 1);
+    assert.equal(emptyListRefreshes, 1, 'close releases memoized file-list rows even if the picker is cancelled');
   }
 }
 

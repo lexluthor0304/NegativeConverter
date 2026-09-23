@@ -10009,6 +10009,9 @@ import { frameNeedsReview } from './reviewQueue.js';
       // Reset adjustments
       resetAllAdjustments();
       syncBatchUIState({ reason: 'closePhotoSession' });
+      // Drop the rendered rows and their memoized File references too, even
+      // when the next picker is cancelled and no import triggers a refresh.
+      updateFileListUI();
 
       // Trigger file selection
       fileInput.value = '';
