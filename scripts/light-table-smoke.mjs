@@ -231,5 +231,42 @@ export async function runLightTableSmoke({ send, evaluate, waitFor, wait, fail, 
     await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
   }
 
+  // A new session keeps the user's light-table preference. Cancelling its
+  // picker must still leave the empty welcome screen, not a ghost grid row.
+  await evaluate(`(() => {
+    const input = document.getElementById('fileInput');
+    const original = Object.getOwnPropertyDescriptor(input, 'click');
+    window.__lightTablePickerCancelled = false;
+    input.click = () => { window.__lightTablePickerCancelled = true; };
+    window.__restoreLightTablePicker = () => {
+      if (original) Object.defineProperty(input, 'click', original);
+      else delete input.click;
+      delete window.__restoreLightTablePicker;
+    };
+    document.getElementById('studioNewSession').click();
+  })()`);
+  try {
+    await waitFor('new session cancels its picker after light table', `window.__lightTablePickerCancelled && !document.body.classList.contains('studio-loaded')`, 30_000);
+    const empty = await evaluate(`(() => {
+      const main = document.querySelector('.app-main');
+      return {
+        loaded: document.body.classList.contains('studio-loaded'),
+        lightTable: document.body.classList.contains('studio-lighttable'),
+        stripDisplay: getComputedStyle(document.getElementById('studioFilmstrip')).display,
+        itemCount: document.querySelectorAll('#fileListItems .file-list-item').length,
+        rows: getComputedStyle(main).gridTemplateRows.trim().split(/\\s+/).length,
+        feedbackHidden: document.getElementById('studioPhotoSwitchFeedback').hidden,
+        welcomeVisible: getComputedStyle(document.getElementById('uploadPlaceholder')).display !== 'none',
+      };
+    })()`);
+    console.log('light table empty workspace:', JSON.stringify(empty));
+    if (empty.loaded || !empty.lightTable || empty.stripDisplay !== 'none' || empty.itemCount !== 0 || empty.rows !== 1
+      || !empty.feedbackHidden || !empty.welcomeVisible) {
+      fail('cancelled new session leaves a light-table row or stale switch feedback: ' + JSON.stringify(empty));
+    }
+  } finally {
+    await evaluate(`window.__restoreLightTablePicker?.()`);
+  }
+
   console.log('ok: light table fills the available height for 39 photos at five viewport sizes, the final tile is reachable, keyboard/badges/thumbnails survive and compact strip dimensions return');
 }
