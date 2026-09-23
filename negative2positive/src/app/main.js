@@ -10277,12 +10277,18 @@ import { frameNeedsReview } from './reviewQueue.js';
       // A quick export after a stroke must use MI-GAN, not its temporary preview.
       if ((aiRepairReady() && state.dustRemoval.enabled && state.dustRemoval.mask) || state.repairStrokes.length) {
         const source = getDustSource();
+        const dustEnabled = Boolean(state.dustRemoval.enabled);
         const mask = state.dustRemoval.mask;
         const strokes = state.repairStrokes;
         const token = coreReprocessToken;
-        const dustImage = state.dustRemoval.enabled && mask ? await inpaintForCommit(source, mask) : source;
+        const dustImage = dustEnabled && mask ? await inpaintForCommit(source, mask) : source;
         const repaired = await inpaintManualBrush(dustImage);
-        if (token !== coreReprocessToken || source !== getDustSource() || mask !== state.dustRemoval.mask || strokes !== state.repairStrokes) {
+        // Manual-only background repair creates a fresh, unused zero dust
+        // mask. Its identity does not change the export recipe. Actual dust
+        // mode/mask changes and photo/stroke changes still invalidate it.
+        if (token !== coreReprocessToken || source !== getDustSource() || strokes !== state.repairStrokes
+          || dustEnabled !== Boolean(state.dustRemoval.enabled)
+          || (dustEnabled && mask !== state.dustRemoval.mask)) {
           throw new Error('Photo changed during AI repair. Please export again.');
         }
         state.dustRemoval.inpaintedImageData = repaired;
