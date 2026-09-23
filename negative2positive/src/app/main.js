@@ -6593,7 +6593,11 @@ import { frameNeedsReview } from './reviewQueue.js';
     // Only inactive photos are retained here. Taking the destination before
     // storing the outgoing photo lets A -> B -> A fit a one-photo budget.
     const photoSessions = createPhotoSessionCache({
-      maxBytes: (navigator.deviceMemory && navigator.deviceMemory <= 4 ? 128 : 512) * 1024 * 1024
+      // A 60 MP RAW base has both 8/16-bit planes (~692 MiB). Keep one
+      // inactive large-frame preview session on desktop, while unknown-memory
+      // touch devices and devices reporting <=4 GiB stay conservative.
+      maxBytes: ((navigator.deviceMemory && navigator.deviceMemory <= 4)
+        || (!navigator.deviceMemory && navigator.maxTouchPoints > 1) ? 128 : 768) * 1024 * 1024
     });
     const photoPreviews = createPhotoSessionCache({ maxBytes: 48 * 1024 * 1024 });
 
@@ -10990,7 +10994,14 @@ import { frameNeedsReview } from './reviewQueue.js';
       }, exportGeometrySteps);
       workingData = await applyLensCorrectionWithSettings(workingData, settings, { updateUi: false });
       assertRepairCurrent(isCurrent);
-      if (previewMax) workingData = downsampleImageDataForMaxDim(workingData, previewMax);
+      const fullWorkingShortSide = Math.min(workingData.width, workingData.height);
+      // Lensfun's repair mapping is expressed in native working pixels.
+      // Downsampling drops that map; reusing it unscaled would also misplace
+      // strokes. Keep this combination native until repair, then shrink only
+      // the final adjusted thumbnail. Other previews retain the small path.
+      const nativeMappedRepair = Boolean(workingData.__lensMapping && settings.repairStrokes?.length);
+      const reducedPreview = Boolean(previewMax && !nativeMappedRepair);
+      if (reducedPreview) workingData = downsampleImageDataForMaxDim(workingData, previewMax);
       trace.mark('transform', {
         pixels: getImageDataPixelCount(workingData)
       });
@@ -11016,7 +11027,7 @@ import { frameNeedsReview } from './reviewQueue.js';
       let processed = await convert({
         imageData: workingData,
         settings: buildRouterSettings(settings, imageData),
-        options: { preview: Boolean(previewMax), forceFullProcess: true, analysisImageData: getColorAnalysisSample(settings, imageData) }
+        options: { preview: reducedPreview, forceFullProcess: true, analysisImageData: getColorAnalysisSample(settings, imageData) }
       });
       assertRepairCurrent(isCurrent);
       trace.mark('convert', {
@@ -11027,9 +11038,13 @@ import { frameNeedsReview } from './reviewQueue.js';
       const dustRemoval = options.dustRemoval || state.dustRemoval;
       if (dustRemoval && dustRemoval.enabled && processed) {
         const strength = Number.isFinite(dustRemoval.strength) ? dustRemoval.strength : state.dustRemoval.strength;
-        const maxParticleSize = Number.isFinite(dustRemoval.maxParticleSize)
+        let maxParticleSize = Number.isFinite(dustRemoval.maxParticleSize)
           ? dustRemoval.maxParticleSize
           : state.dustRemoval.maxParticleSize;
+        const processedShortSide = Math.min(processed.width, processed.height);
+        if (previewMax && processedShortSide > 0 && processedShortSide < fullWorkingShortSide) {
+          maxParticleSize = Math.max(3, Math.round(maxParticleSize * processedShortSide / fullWorkingShortSide));
+        }
         const { mask, particleCount } = await detectDustOffMainThread(processed, { strength, maxParticleSize }, null, isCurrent, options.dustWorker);
         const dustSource = processed;
         if (particleCount > 0) processed = await withAiRepairTurn(() => inpaintForCommit(dustSource, mask, isCurrent, options.dustWorker));

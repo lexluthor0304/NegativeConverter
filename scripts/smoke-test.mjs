@@ -27,7 +27,7 @@ import { runLightTableSmoke } from './light-table-smoke.mjs';
 import { runPerformanceUiSmoke } from './performance-ui-smoke.mjs';
 import { runComparePreviewSmoke } from './compare-preview-smoke.mjs';
 import { runRestartRenderSmoke } from './restart-render-smoke.mjs';
-import { runPhotoSessionSmoke } from './photo-session-smoke.mjs';
+import { runPhotoSessionSmoke, runPhotoSessionRawSmoke } from './photo-session-smoke.mjs';
 import { runDarkroomSmoke } from './darkroom-smoke.mjs';
 import { runCameraSmoke } from './camera-smoke.mjs';
 import { runRollHomeSmoke } from './roll-home-smoke.mjs';
@@ -308,6 +308,12 @@ if (process.argv.includes('--restart-only')) {
 
 if (process.argv.includes('--photo-session-only')) {
   await runPhotoSessionSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
+
+if (process.argv.includes('--photo-session-raw-only')) {
+  await runPhotoSessionRawSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
   if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
   console.log('SMOKE PASS'); process.exit(0);
 }

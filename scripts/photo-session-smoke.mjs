@@ -2,9 +2,9 @@
 // without another decode or conversion, and every light-table tile must show
 // the edited positive rather than an embedded/original negative.
 import { createHash } from 'node:crypto';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, stat, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { dirname } from 'node:path';
+import { basename, dirname, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const UPNG = createRequire(import.meta.url)('upng-js');
@@ -23,7 +23,7 @@ function installPhotoSessionProbe() {
   };
   const workers = new Map(), heldUrls = new Set();
   const probe = window.__photoSessionProbe = {
-    requests: [], reads: [], bitmaps: [], exports: [], inFlight: 0,
+    requests: [], reads: [], bitmaps: [], exports: [], rawImages: [], inFlight: 0,
     lastActivity: performance.now(), gpuFrames: 0, lastGpu: null,
     holdFile: null, heldFile: null, releaseFile: null, holdTimedOut: false,
   };
@@ -31,7 +31,8 @@ function installPhotoSessionProbe() {
   const changed = () => { probe.lastActivity = performance.now(); };
   Worker.prototype.postMessage = function(message, ...args) {
     const kind = message?.type === 'convert' ? 'convert'
-      : message?.buffer instanceof ArrayBuffer && /^(png|tiff)$/.test(message.format) ? 'decode' : null;
+      : message?.buffer instanceof ArrayBuffer && /^(png|tiff)$/.test(message.format) ? 'decode'
+        : /^(open|metadata|imageData|rawImageData|thumbnailData)$/.test(message?.fn) && Array.isArray(message.args) ? 'raw' : null;
     if (kind) {
       let record = workers.get(this);
       if (!record) {
@@ -39,6 +40,10 @@ function installPhotoSessionProbe() {
         record.receive = event => {
           if (event.data?.ready) return;
           const key = event.data?.id ?? 'decode';
+          if (kind === 'raw' && event.data?.out?.data && event.data.out.width > 0 && event.data.out.height > 0) {
+            const { width, height, bits, colors } = event.data.out;
+            probe.rawImages.push({ width, height, bits, colors });
+          }
           if (record.pending.delete(key)) { probe.inFlight--; changed(); }
         };
         this.addEventListener('message', record.receive);
@@ -46,7 +51,7 @@ function installPhotoSessionProbe() {
       }
       const key = message.id ?? 'decode';
       record.pending.add(key); probe.inFlight++; changed();
-      probe.requests.push({ kind, id: message.id, width: message.width, height: message.height,
+      probe.requests.push({ kind, fn: message.fn, id: message.id, width: message.width, height: message.height,
         preview: message.options?.preview, file: document.getElementById('studioFilename')?.textContent });
     }
     return original.post.call(this, message, ...args);
@@ -159,12 +164,7 @@ function decodePng(dataUrl) {
     sha256: createHash('sha256').update(pixels).digest('hex'), levels: levels.map(values => values.size) };
 }
 
-export async function runPhotoSessionSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port }) {
-  const expect = (condition, message) => { if (!condition) throw new Error(message); };
-  const until = async (description, expression, timeout = 60000) => {
-    expect(await waitFor(description, expression, timeout, { soft: true }), `timeout waiting for ${description}`);
-  };
-  const boot = async () => {
+async function bootPhotoSession({ send, evaluate, until, installDialogAutoAccept, port }) {
     const origin = await evaluate('performance.timeOrigin');
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
     await until('fresh photo-session workspace', `performance.timeOrigin !== ${origin} && document.readyState === 'complete' && !!document.getElementById('applyFilmTypeToRollBtn')`);
@@ -192,7 +192,14 @@ export async function runPhotoSessionSmoke({ send, evaluate, waitFor, fail, inst
       }
       document.querySelector('.film-type-btn[data-type="color"]').click();
     })()`);
+}
+
+export async function runPhotoSessionSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port }) {
+  const expect = (condition, message) => { if (!condition) throw new Error(message); };
+  const until = async (description, expression, timeout = 60000) => {
+    expect(await waitFor(description, expression, timeout, { soft: true }), `timeout waiting for ${description}`);
   };
+  const boot = () => bootPhotoSession({ send, evaluate, until, installDialogAutoAccept, port });
   const idle = async () => until('photo-session worker/render idle', `${ready} && window.__photoSessionProbe.inFlight === 0 && performance.now() - window.__photoSessionProbe.lastActivity > 1800`);
   const importFiles = async fixtures => {
     await evaluate(`(async () => {
@@ -375,6 +382,115 @@ export async function runPhotoSessionSmoke({ send, evaluate, waitFor, fail, inst
             placeholder: !!row.querySelector('.file-list-placeholder'), classes: row.className })) } : null;
       })()`)));
     } catch { /* Keep the original assertion if the document itself failed. */ }
+  } finally {
+    await evaluate('window.__restorePhotoSessionProbe?.()');
+  }
+  if (failure) fail(failure.message);
+}
+
+// Optional local evidence with actual camera files. The environment contains
+// their private paths; neither the files nor their paths belong in the repo.
+// PHOTO_SESSION_RAW_FILES='["/absolute/photo-a.dng","/absolute/photo-b.nef"]'
+// npm run test:smoke -- --photo-session-raw-only
+export async function runPhotoSessionRawSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port }) {
+  const expect = (condition, message) => { if (!condition) throw new Error(message); };
+  const until = async (description, expression, timeout = 300000) => {
+    expect(await waitFor(description, expression, timeout, { soft: true }), `timeout waiting for ${description}`);
+  };
+  const snapshot = () => evaluate('window.__photoSessionProbe.snapshot()');
+  const settlePreview = () => until('actual RAW preview and worker work settled', `${ready}
+    && window.__photoSessionProbe.inFlight === 0
+    && document.querySelectorAll('.file-list-name[data-preview-state="ready"]').length === 2
+    && performance.now() - window.__photoSessionProbe.lastActivity > 3200`);
+  const open = async (index, name) => {
+    const start = performance.now();
+    await evaluate(`document.querySelector('.file-list-name[data-index="${index}"]').click()`);
+    await until(`actual RAW ${name} active`, `${ready}
+      && document.getElementById('studioFilename').textContent === ${JSON.stringify(name)}
+      && document.querySelector('.file-list-name[aria-current="true"]')?.dataset.index === '${index}'`);
+    const activationMs = Math.round(performance.now() - start);
+    await settlePreview();
+    return activationMs;
+  };
+  const noRebuild = (before, after) => before.requests === after.requests
+    && before.reads === after.reads && before.bitmaps === after.bitmaps;
+  let failure;
+  try {
+    let paths;
+    try { paths = JSON.parse(process.env.PHOTO_SESSION_RAW_FILES || 'null'); }
+    catch { throw new Error('PHOTO_SESSION_RAW_FILES must be a JSON array of two absolute RAW file paths'); }
+    expect(Array.isArray(paths) && paths.length === 2 && paths.every(path => typeof path === 'string' && isAbsolute(path))
+      && paths[0] !== paths[1], 'PHOTO_SESSION_RAW_FILES must specify two different absolute RAW file paths');
+    const files = await Promise.all(paths.map(async path => {
+      const metadata = await stat(path);
+      expect(metadata.isFile() && metadata.size > 0, 'RAW fixture is not a nonempty file: ' + basename(path));
+      expect(/\.(dng|nef|arw|cr2|cr3|crw|raf|rw2|pef|orf|raw|iiq)$/i.test(path), 'RAW fixture extension is not supported: ' + basename(path));
+      return { name: basename(path), bytes: metadata.size };
+    }));
+    await bootPhotoSession({ send, evaluate, until, installDialogAutoAccept, port });
+    await evaluate(`(() => {
+      for (const id of ['dustRemovalEnabled', 'dustAiEnabled']) {
+        const input = document.getElementById(id); if (input.checked) input.click();
+      }
+      const gl = document.getElementById('coreUseWebGL'); if (!gl.checked) gl.click();
+    })()`);
+    const document = await send('DOM.getDocument');
+    const input = await send('DOM.querySelector', { nodeId: document.result.root.nodeId, selector: '#fileInput' });
+    expect(input.result?.nodeId, '#fileInput not found for actual RAW files');
+    await send('DOM.setFileInputFiles', { files: paths, nodeId: input.result.nodeId });
+    await until('first actual RAW imported', `${ready} && document.getElementById('studioFilename').textContent === ${JSON.stringify(files[0].name)}`);
+    await settlePreview();
+    const draws = await evaluate(`(() => {
+      const count = window.__photoSessionProbe.gpuFrames;
+      document.getElementById('zoomInBtn').click(); document.getElementById('zoomInBtn').click();
+      return count;
+    })()`);
+    await until('actual RAW zoom repainted', `window.__photoSessionProbe.gpuFrames > ${draws}`);
+    // Observe normal preview/full-idle activity for longer than its 2.5-second
+    // timer, without requesting an export or forcing full-resolution work.
+    await settlePreview();
+    const saved = await snapshot();
+    expect(saved.gpuVisible && saved.gpu && saved.gpu.width === saved.backing[0]
+      && saved.gpu.height === saved.backing[1] && saved.transform && saved.zoom !== '100%',
+    'actual RAW GPU/zoom precondition missing: ' + JSON.stringify(saved));
+    const coldBActivationMs = await open(1, files[1].name);
+    const warm = await snapshot();
+    expect(await evaluate(`window.__photoSessionProbe.requests.some(request => request.kind === 'raw' && request.fn === 'imageData')
+      && window.__photoSessionProbe.requests.some(request => request.kind === 'convert')
+      && window.__photoSessionProbe.rawImages.some(image => image.width * image.height > 1000000)`),
+    'actual RAW demosaic, large decoded dimensions and conversion were not observed');
+    const firstWarmActivationMs = await open(0, files[0].name);
+    const restored = await snapshot();
+    expect(noRebuild(warm, restored), 'actual RAW warm A return reread/decoded/converted: ' + JSON.stringify({ warm, restored }));
+    expect(restored.gpuVisible && JSON.stringify(restored.viewport) === JSON.stringify(saved.viewport)
+      && JSON.stringify(restored.backing) === JSON.stringify(saved.backing)
+      && JSON.stringify(restored.gpu) === JSON.stringify(saved.gpu)
+      && restored.zoom === saved.zoom && restored.transform === saved.transform,
+    'actual RAW warm return changed exact GPU pixels, viewport or zoom: ' + JSON.stringify({ saved, restored }));
+    const repeatWarmActivationMs = [await open(1, files[1].name), await open(0, files[0].name)];
+    const repeated = await snapshot();
+    expect(noRebuild(restored, repeated) && JSON.stringify(repeated.gpu) === JSON.stringify(saved.gpu)
+      && repeated.zoom === saved.zoom && repeated.transform === saved.transform,
+    'actual RAW repeated warm navigation rebuilt or changed the preview: ' + JSON.stringify({ restored, repeated }));
+    const evidence = await evaluate(`({ decodedImages: window.__photoSessionProbe.rawImages,
+      conversionInputs: window.__photoSessionProbe.requests.filter(request => request.kind === 'convert').map(({ width, height, preview }) => ({ width, height, preview })),
+      rawCalls: window.__photoSessionProbe.requests.filter(request => request.kind === 'raw').map(request => request.fn),
+      exports: window.__photoSessionProbe.exports.length })`);
+    expect(evidence.exports === 0, 'actual RAW cache test must not force an export/full-resolution render');
+    console.log('actual RAW warm photo sessions:', JSON.stringify({ files, coldBActivationMs,
+      observedWarmActivationMs: [firstWarmActivationMs, ...repeatWarmActivationMs], saved, restored, repeated, ...evidence }));
+    console.log('ok: actual RAW warm A/B/A preserves exact GPU preview and zoom with zero new file reads, RAW decode or conversion; no forced export');
+  } catch (error) {
+    failure = error;
+    try {
+      console.error('actual RAW session diagnostics:', JSON.stringify(await evaluate(`(() => {
+        const probe = window.__photoSessionProbe;
+        return probe ? { ...probe.snapshot(), rawImages: probe.rawImages, requests: probe.requests, reads: probe.reads,
+          bitmaps: probe.bitmaps, rows: [...document.querySelectorAll('.file-list-name')].map(button => ({
+            name: button.textContent, previewState: button.dataset.previewState, busy: button.getAttribute('aria-busy')
+          })) } : null;
+      })()`)));
+    } catch { /* Keep the original failure if Chrome is no longer available. */ }
   } finally {
     await evaluate('window.__restorePhotoSessionProbe?.()');
   }

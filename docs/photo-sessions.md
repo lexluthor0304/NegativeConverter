@@ -12,8 +12,11 @@ storing the outgoing photo. This avoids evicting the destination in an A/B/A
 sequence that fits only one inactive photo.
 
 The inactive cache counts unique backing buffers, including high-bit-depth
-planes and buffers shared with history. Its limit is 512 MiB, or 128 MiB on
-devices reporting at most 4 GiB of memory. Oversized sessions retain only their
+planes and buffers shared with history. Its limit is 768 MiB, or 128 MiB on
+devices reporting at most 4 GiB of memory and unknown-memory touch devices.
+The desktop budget fits a 60 MP RAW base with its 8/16-bit planes and small
+editing previews; 512 MiB did not fit the measured 9536 × 6336 fixture.
+Oversized sessions retain only their
 decoded base if it fits. A separate 48 MiB cache holds small adjusted previews
 for revisits after full-session eviction. These are retained-buffer limits,
 not a total renderer-memory promise; the active editor, workers, native GPU
@@ -53,6 +56,7 @@ which do not run automatic roll analysis.
 ```sh
 npm test
 PORT=5214 CDP_PORT=9238 npm run test:smoke -- --photo-session-only
+PHOTO_SESSION_RAW_FILES='["/absolute/a.dng","/absolute/b.nef"]' npm run test:smoke -- --photo-session-raw-only
 npm run test:smoke
 npm run build:web
 ```
@@ -82,3 +86,16 @@ The roll analyzer's quick thumbnails are provisional: they omit stages such
 as lens correction and repair, so the canonical preview lane replaces them
 before marking them ready. This can require another decode for an uncached
 RAW; correctness is not traded for a misleading cache hit.
+
+Lens-corrected photographs with saved repair strokes keep native coordinates
+through repair before the thumbnail is reduced. Other small previews scale
+the dust particle-size threshold to their working dimensions. The ordinary
+full-resolution 8/16-bit export path is unchanged.
+
+The optional real-file regression also passed with a 76 MB DNG decoded to
+9536 × 6336 RGB16 and a 17 MB NEF. Three warm activations were observed at
+72/94/87 ms with zero new file reads, LibRaw calls or conversion requests;
+the DNG GPU sample hash and zoom matched before/after. The NEF decoder used
+its existing embedded-preview fallback in this run, so this is not evidence
+of full-precision NEF decoding. No export was forced in the large-file cache
+test; exact export precision is covered separately by the 16-bit PNG test.
