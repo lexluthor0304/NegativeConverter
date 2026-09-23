@@ -28,6 +28,7 @@ export function renderFileList({
   container,
   countEl,
   items,
+  order = items.map((_, index) => index),
   currentFileIndex,
   labels,
   onToggleSelected,
@@ -47,7 +48,8 @@ export function renderFileList({
   for (const item of list.rows.keys()) if (!retained.has(item)) list.rows.delete(item);
   const studio = document.body.classList.contains('studio');
 
-  items.forEach((item, index) => {
+  order.forEach((index, displayIndex) => {
+    const item = items[index];
     if (item.selected) selectedCount++;
     if (item.settings) settingsCount++;
     if (!visible(item)) return;
@@ -60,13 +62,16 @@ export function renderFileList({
       extraBadges, canReview, labels.markReviewed]);
     let record = list.rows.get(item);
     if (record?.signature === signature) {
-      if (record.thumbnail !== item.thumbnail) updateRowThumbnail(record, item.thumbnail, index, studio);
+      if (record.thumbnail !== item.thumbnail) updateRowThumbnail(record, item.thumbnail, displayIndex, studio);
       record.checkbox.checked = Boolean(item.selected);
       if (record.index !== index) {
         record.checkbox.dataset.index = record.nameEl.dataset.index = String(index);
-        const placeholder = record.nameEl.querySelector('.file-list-placeholder');
-        if (placeholder) placeholder.textContent = String(index + 1).padStart(2, '0');
         record.index = index;
+      }
+      if (record.displayIndex !== displayIndex) {
+        const placeholder = record.nameEl.querySelector('.file-list-placeholder');
+        if (placeholder) placeholder.textContent = String(displayIndex + 1).padStart(2, '0');
+        record.displayIndex = displayIndex;
       }
       const active = index === currentFileIndex;
       if (record.active !== active) {
@@ -111,7 +116,7 @@ export function renderFileList({
         preview.src = item.thumbnail;
         preview.alt = '';
       } else {
-        preview.textContent = String(index + 1).padStart(2, '0');
+        preview.textContent = String(displayIndex + 1).padStart(2, '0');
         preview.setAttribute('aria-hidden', 'true');
       }
       const filename = document.createElement('span');
@@ -182,7 +187,7 @@ export function renderFileList({
       selectionControl.addEventListener('click', event => event.stopPropagation());
     }
     el.append(selectionControl, nameEl, statusEl);
-    record = { signature, thumbnail: item.thumbnail, index, active: index === currentFileIndex, el, checkbox, nameEl, statusEl };
+    record = { signature, thumbnail: item.thumbnail, index, displayIndex, active: index === currentFileIndex, el, checkbox, nameEl, statusEl };
     list.rows.set(item, record);
     rows.push(el);
   });

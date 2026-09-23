@@ -24,6 +24,7 @@ import { runStudioRawAutoFrameSmoke } from './studio-raw-autoframe-smoke.mjs';
 import { runFilmEdgeSmoke } from './film-edge-smoke.mjs';
 import { runRollAnalysisSmoke } from './roll-analysis-smoke.mjs';
 import { runLightTableSmoke } from './light-table-smoke.mjs';
+import { runPhotoSortSmoke } from './photo-sort-smoke.mjs';
 import { runPerformanceUiSmoke } from './performance-ui-smoke.mjs';
 import { runComparePreviewSmoke } from './compare-preview-smoke.mjs';
 import { runRestartRenderSmoke } from './restart-render-smoke.mjs';
@@ -310,6 +311,13 @@ if (process.argv.includes('--photo-session-only')) {
   await runPhotoSessionSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
   if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
   console.log('SMOKE PASS'); process.exit(0);
+}
+
+if (process.argv.includes('--photo-sort-only')) {
+  await runPhotoSortSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+  if (pageErrors.length) fail('uncaught page errors: ' + pageErrors.join('\n'));
+  console.log('SMOKE PASS (photo sorting)');
+  process.exit(0);
 }
 
 if (process.argv.includes('--light-table-only')) {
@@ -798,6 +806,7 @@ if (!process.argv.some(arg => arg.endsWith('-only'))) await runSimplicitySmoke({
 
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runRollFilmTypeSmoke({send,evaluate,waitFor,wait,fail,installDialogAutoAccept,port:PORT});
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runFolderImportSmoke({send,evaluate,waitFor,wait,fail,installDialogAutoAccept,port:PORT,root:ROOT});
+if (!process.argv.some(arg => arg.endsWith('-only'))) await runPhotoSortSmoke({send,evaluate,waitFor,wait,fail,installDialogAutoAccept,port:PORT,root:ROOT});
 
 // ---- no uncaught page errors across both scenarios ----
 const realErrors = pageErrors.filter((e) => !/ResizeObserver loop/.test(e));

@@ -3,8 +3,8 @@ import { readFileSync } from 'node:fs';
 
 // ブラウザー用 CSS import だけを除き、翻訳データを同じモジュールから検証する。
 const source = readFileSync(new URL('./studioWorkspace.js', import.meta.url), 'utf8');
-const moduleSource = source.replace("from './panelRelevance.js'", `from '${new URL('./panelRelevance.js', import.meta.url).href}'`).replace(/import '\.\.\/styles\/[^']+\.css';/g, '');
-const { studioText, syncPhotoSwitchFeedback } = await import('data:text/javascript;base64,' + Buffer.from(moduleSource).toString('base64'));
+const moduleSource = source.replace(/from '(\.\/(?:panelRelevance|fileListOrder)\.js)'/g, (_, relative) => `from '${new URL(relative, import.meta.url).href}'`).replace(/import '\.\.\/styles\/[^']+\.css';/g, '');
+const { studioText, syncPhotoSwitchFeedback, createPhotoSortControl } = await import('data:text/javascript;base64,' + Buffer.from(moduleSource).toString('base64'));
 const keys = Object.keys(studioText.en).sort();
 for (const [lang, messages] of Object.entries(studioText)) {
   assert.deepEqual(Object.keys(messages).sort(), keys, lang);
@@ -92,3 +92,72 @@ assert.equal(nodes.get('studioPhotoSwitchFeedback').hidden, true);
 assert.deepEqual(buttons.map(button => button.attributes['aria-busy']), ['false', 'true', 'false']);
 assert.ok(buttons.every(button => button.dataset.photoSwitchTarget === undefined));
 console.log('studioWorkspace: localized cold-switch identity, target ownership and independent thumbnail state passed');
+
+// Execute the same select adapter used by the mounted strip and light table.
+// State synchronization must not emit a user sort or activate any photo.
+const sortHandlers = new Map();
+const select = { value: '', disabled: false, addEventListener(type, handler) {
+  assert.ok(!sortHandlers.has(type), 'only one listener per event');
+  sortHandlers.set(type, handler);
+} };
+const sorted = [];
+const sort = createPhotoSortControl({ select, onSortFiles: mode => sorted.push(mode) });
+const sortState = { fileQueue: [{ file: { name: 'frame-2.png' } }], fileListSort: 'modified-desc', cropping: false };
+assert.equal(select.value, 'modified-desc', 'the initial control uses modification date, newest first');
+assert.deepEqual([...sortHandlers.keys()], ['change']);
+const sortModes = ['modified-desc', 'modified-asc', 'name-asc', 'name-desc'];
+for (const mode of sortModes) {
+  sortState.fileListSort = mode;
+  sort.sync({ state: sortState, busy: false, photoSwitching: false, exportLocked: false });
+  assert.equal(select.value, mode);
+  assert.equal(select.disabled, false);
+}
+assert.deepEqual(sorted, [], 'normal UI and language updates do not call the sort handler');
+for (const mode of sortModes) {
+  select.value = mode;
+  sortHandlers.get('change')();
+}
+assert.deepEqual(sorted, sortModes, 'each user change calls the handler exactly once');
+sortState.fileListSort = 'invalid';
+sort.sync({ state: sortState });
+assert.equal(select.value, 'modified-desc', 'invalid persisted state uses the default mode');
+select.value = 'invalid';
+sortHandlers.get('change')();
+assert.equal(sorted.at(-1), 'modified-desc', 'an invalid DOM value is normalized before callback');
+for (const [label, override, expected] of [
+  ['cold photo switch', { busy: true, photoSwitching: true }, false],
+  ['other processing', { busy: true, photoSwitching: false }, true],
+  ['export during photo switch', { busy: true, photoSwitching: true, exportLocked: true }, true],
+  ['empty queue', { state: { ...sortState, fileQueue: [] } }, true],
+  ['cropping', { state: { ...sortState, cropping: true } }, true],
+  ['ready', {}, false],
+]) {
+  sort.sync({ state: sortState, busy: false, photoSwitching: false, exportLocked: false, ...override });
+  assert.equal(select.disabled, expected, label);
+  if (expected) {
+    const before = sorted.length;
+    sortHandlers.get('change')();
+    assert.equal(sorted.length, before, label + ': even a synthetic change cannot call the sort handler');
+  }
+}
+const sortMarkup = source.match(/<label class="studio-photo-sort"[\s\S]*?<\/label>/)?.[0];
+assert.ok(sortMarkup, 'the shared header has one visible sort control');
+assert.equal((source.match(/id="studioPhotoSort"/g) || []).length, 1, 'strip and light table share the same control');
+assert.match(sortMarkup, /for="studioPhotoSort"/);
+assert.match(sortMarkup, /<span data-studio="photoSort"><\/span><select id="studioPhotoSort">/,
+  'a visible localized label names the native keyboard-accessible select');
+assert.deepEqual([...sortMarkup.matchAll(/<option value="([^"]+)"/g)].map(match => match[1]), sortModes);
+for (const lang of ['en', 'zh', 'ja']) {
+  const messages = studioText[lang];
+  assert.ok(messages.photoSort.trim());
+  const labels = ['sortModifiedDesc', 'sortModifiedAsc', 'sortNameAsc', 'sortNameDesc'].map(key => messages[key]);
+  assert.equal(new Set(labels).size, 4, lang + ': every direction has an explicit distinct label');
+  assert.match(messages.sortNameAsc, /A–Z/);
+  assert.match(messages.sortNameDesc, /Z–A/);
+}
+assert.equal(studioText.en.sortModifiedDesc, 'Modified: newest first');
+assert.equal(studioText.zh.sortModifiedDesc, '修改日期：新到旧');
+assert.equal(studioText.ja.sortModifiedDesc, '更新日時：新しい順');
+assert.match(source, /const photoSort = createPhotoSortControl\(\{ select: \$\('studioPhotoSort'\), onSortFiles \}\)/);
+assert.match(source, /photoSort\.sync\(\{ state, busy, photoSwitching: body\.dataset\.photoSwitching === 'true', exportLocked: isExportLocked\(\) \}\)/);
+console.log('studioWorkspace: shared localized sort select, callback ownership and navigation locks passed');

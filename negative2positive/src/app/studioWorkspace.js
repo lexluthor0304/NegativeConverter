@@ -1,4 +1,5 @@
 import { panelRelevance, inferSourceKind } from './panelRelevance.js';
+import { DEFAULT_FILE_LIST_SORT, normalizeFileListSort } from './fileListOrder.js';
 import '../styles/studio.css';
 import '../styles/pixel-fonts.css';
 import '../styles/studio-pixel.css';
@@ -41,6 +42,7 @@ export const studioText = {
     projectHint: '工程文件记录整卷：照片列表、每张的设置、片基参考和元数据。之后把它和原片一起拖进来即可恢复。', saveProject: '保存工程文件…', openProject: '打开工程文件…', restoreProject: '恢复上次的胶卷',
     metadata: '胶卷与画格', metadataHint: '胶片、ISO、相机、镜头、冲洗、冲印店、日期和画格号会写进导出文件的 EXIF 与 XMP。',
     lightTable: '光桌', stripView: '照片条', lightTableHint: '以网格查看整卷，颜色是否统一一眼可见。',
+    photoSort: '排序', sortModifiedDesc: '修改日期：新到旧', sortModifiedAsc: '修改日期：旧到新', sortNameAsc: '名称：A–Z', sortNameDesc: '名称：Z–A',
     cyan: '青 / 红', testStrip: '试条', dodgeBurn: '加减光', flatField: '平场校正', labMatch: '匹配店扫',
     baseSampleHint: '点击未曝光的胶片边缘采样；按 Esc 取消。', resetAll: '重置全部调整',
     scope: '当前照片', fullResetConfirm: '重置当前照片的色彩、白平衡和引擎调整？此操作可以撤销。',
@@ -89,6 +91,7 @@ export const studioText = {
     projectHint: 'A project file records the roll: the photo list, every frame’s settings, the roll reference and the metadata. Drop it back in with the originals to restore everything.', saveProject: 'Save project…', openProject: 'Open project…', restoreProject: 'Restore last roll',
     metadata: 'Roll & frame', metadataHint: 'Film, ISO, camera, lens, process, lab, date and frame number go into the EXIF and XMP of every export.',
     lightTable: 'Light table', stripView: 'Film strip', lightTableHint: 'Show the whole roll as a grid so colour consistency is visible at a glance.',
+    photoSort: 'Sort', sortModifiedDesc: 'Modified: newest first', sortModifiedAsc: 'Modified: oldest first', sortNameAsc: 'Name: A–Z', sortNameDesc: 'Name: Z–A',
     cyan: 'Cyan / red', testStrip: 'Test strip', dodgeBurn: 'Dodge and burn', flatField: 'Flat field', labMatch: 'Match a lab scan',
     baseSampleHint: 'Click an unexposed film edge to sample it. Press Esc to cancel.', resetAll: 'Reset all adjustments',
     scope: 'Current photo', fullResetConfirm: 'Reset color, white balance and engine adjustments for this photo? You can undo this change.',
@@ -137,6 +140,7 @@ export const studioText = {
     projectHint: 'プロジェクトには写真一覧・各コマの設定・ロール基準・メタデータが入ります。原板と一緒に戻せば復元できます。', saveProject: 'プロジェクトを保存…', openProject: 'プロジェクトを開く…', restoreProject: '前回のロールを復元',
     metadata: 'ロールとコマ', metadataHint: 'フィルム・ISO・カメラ・レンズ・現像・ラボ・日付・コマ番号を書き出しファイルの EXIF と XMP に書き込みます。',
     lightTable: 'ライトテーブル', stripView: 'フィルムストリップ', lightTableHint: 'ロール全体をサムネイルの一覧で表示し、色の統一を一目で確認します。',
+    photoSort: '並び順', sortModifiedDesc: '更新日時：新しい順', sortModifiedAsc: '更新日時：古い順', sortNameAsc: '名前：A–Z', sortNameDesc: '名前：Z–A',
     cyan: 'シアン / 赤', testStrip: 'テストストリップ', dodgeBurn: '覆い焼き・焼き込み', flatField: 'フラットフィールド', labMatch: 'ラボスキャンに合わせる',
     baseSampleHint: '未露光のフィルム端をクリック。Esc で終了します。', resetAll: '全調整をリセット',
     scope: '現在の写真', fullResetConfirm: '色・ホワイトバランス・エンジンの調整をリセットしますか？取り消し可能です。',
@@ -191,7 +195,23 @@ export function syncPhotoSwitchFeedback({ state, document, text }) {
   return item ? { item, message } : null;
 }
 
-export function mountStudioWorkspace({ getState, getLanguage, getText, isExportLocked, onStyle, onReset, onResetAll, onRestart, onNewSession, onSync, onRetry, onConfirm, onExportBorder, onAutoCrop, onRestoreFrame, onConfirmAnalysis, onMergeShots, onLoupe, onSaveProject, onOpenProject, onRestoreProject, onExpiredMode, onColorCorrect }) {
+// The shared strip/grid control changes list order only. Synchronizing its
+// state never dispatches change, so language and processing updates cannot
+// accidentally reorder the roll or start photo activation.
+export function createPhotoSortControl({ select, onSortFiles }) {
+  select.value = DEFAULT_FILE_LIST_SORT;
+  select.addEventListener('change', () => {
+    if (!select.disabled) onSortFiles?.(normalizeFileListSort(select.value));
+  });
+  return {
+    sync({ state, busy, photoSwitching, exportLocked }) {
+      select.value = normalizeFileListSort(state.fileListSort);
+      select.disabled = !state.fileQueue.length || Boolean(state.cropping || exportLocked || (busy && !photoSwitching));
+    },
+  };
+}
+
+export function mountStudioWorkspace({ getState, getLanguage, getText, isExportLocked, onStyle, onReset, onResetAll, onRestart, onNewSession, onSync, onSortFiles, onRetry, onConfirm, onExportBorder, onAutoCrop, onRestoreFrame, onConfirmAnalysis, onMergeShots, onLoupe, onSaveProject, onOpenProject, onRestoreProject, onExpiredMode, onColorCorrect }) {
   const $ = id => document.getElementById(id);
   const t = key => (studioText[getLanguage()] || studioText.en)[key];
   const move = (id, target) => target.append($(id));
@@ -541,9 +561,10 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
   const strip = document.createElement('section');
   strip.className = 'studio-filmstrip';
   strip.id = 'studioFilmstrip';
-  strip.innerHTML = `<div class="studio-strip-header"><button id="studioToggleStrip" type="button" aria-controls="fileListSection" aria-expanded="true" data-studio="photos"></button><button id="studioToggleLightTable" type="button" aria-pressed="false" data-studio="lightTable"></button><button id="studioReviewFilter" type="button" aria-pressed="false" hidden></button><span id="studioSelection"></span><button id="studioSync" type="button" data-studio="sync"></button><details id="studioBatchMenu"><summary data-studio="batch"></summary><div class="studio-batch-content"><p data-studio="batchHint"></p><div id="studioBatchActions"></div><p data-studio="mergeHint"></p><button id="studioMergeAverage" type="button" data-studio="mergeAverage"></button><button id="studioMergeHdr" type="button" data-studio="mergeHdr"></button><p data-studio="projectHint"></p><button id="studioSaveProject" type="button" data-studio="saveProject"></button><button id="studioOpenProject" type="button" data-studio="openProject"></button><button id="studioRestoreProject" type="button" data-studio="restoreProject" hidden></button><button id="studioClearQueue" type="button" data-studio="clearQueue"></button></div></details></div>`;
+  strip.innerHTML = `<div class="studio-strip-header"><button id="studioToggleStrip" type="button" aria-controls="fileListSection" aria-expanded="true" data-studio="photos"></button><button id="studioToggleLightTable" type="button" aria-pressed="false" data-studio="lightTable"></button><label class="studio-photo-sort" for="studioPhotoSort"><span data-studio="photoSort"></span><select id="studioPhotoSort"><option value="modified-desc" data-studio="sortModifiedDesc"></option><option value="modified-asc" data-studio="sortModifiedAsc"></option><option value="name-asc" data-studio="sortNameAsc"></option><option value="name-desc" data-studio="sortNameDesc"></option></select></label><button id="studioReviewFilter" type="button" aria-pressed="false" hidden></button><span id="studioSelection"></span><button id="studioSync" type="button" data-studio="sync"></button><details id="studioBatchMenu"><summary data-studio="batch"></summary><div class="studio-batch-content"><p data-studio="batchHint"></p><div id="studioBatchActions"></div><p data-studio="mergeHint"></p><button id="studioMergeAverage" type="button" data-studio="mergeAverage"></button><button id="studioMergeHdr" type="button" data-studio="mergeHdr"></button><p data-studio="projectHint"></p><button id="studioSaveProject" type="button" data-studio="saveProject"></button><button id="studioOpenProject" type="button" data-studio="openProject"></button><button id="studioRestoreProject" type="button" data-studio="restoreProject" hidden></button><button id="studioClearQueue" type="button" data-studio="clearQueue"></button></div></details></div>`;
   document.querySelector('.app-main').append(strip);
   move('fileListSection', strip);
+  const photoSort = createPhotoSortControl({ select: $('studioPhotoSort'), onSortFiles });
   $('studioSync').title = t('syncHint');
   move('saveSettingsBtn', $('studioBatchActions'));
   move('applyToSelectedBtn', $('studioBatchActions'));
@@ -654,6 +675,7 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
       // Photo activation locks editing, not navigation: rapid browsing must
       // be able to supersede a slow decode without touching the old photo.
       strip.inert = busy && body.dataset.photoSwitching !== 'true';
+      photoSort.sync({ state, busy, photoSwitching: body.dataset.photoSwitching === 'true', exportLocked: isExportLocked() });
       tabs.setAttribute('aria-label', t('tabs'));
       quickColor.setAttribute('aria-label', t('quickColor'));
       syncLayout();
