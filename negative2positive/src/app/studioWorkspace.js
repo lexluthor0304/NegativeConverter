@@ -588,7 +588,9 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
       $('studioFrameNotice').dataset.status = frameMeta?.appliedMode || '';
       $('studioFrameNotice').disabled = state.cropping || busy;
       panel.inert = busy;
-      strip.inert = busy;
+      // Photo activation locks editing, not navigation: rapid browsing must
+      // be able to supersede a slow decode without touching the old photo.
+      strip.inert = busy && body.dataset.photoSwitching !== 'true';
       tabs.setAttribute('aria-label', t('tabs'));
       quickColor.setAttribute('aria-label', t('quickColor'));
       syncLayout();

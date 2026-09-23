@@ -1,4 +1,6 @@
 import { applyFilmTypeOverride, sanitizeFilmTypeOverride } from './filmTypeOverride.js';
+import { createPhotoSessionCache } from './photoSessionCache.js';
+import { createAdjustedPhotoPreview } from './photoPreview.js';
 import { sanitizeSemanticMap } from './semanticAnchors.js';
 import { analyzeSemanticPreview } from './semanticModel.js';
 import { isLargeImage } from './imageMemoryBudget.js';
@@ -2726,6 +2728,9 @@ import { frameNeedsReview } from './reviewQueue.js';
         showMask: state.dustRemoval.showMask,
       };
       settings.sprocketEdge = createSprocketEdgeSettings(state.sprocketEdge);
+      settings.lensCorrection = structuredClone(state.lensCorrection);
+      settings.filmEdge = state.filmEdge ? structuredClone(state.filmEdge) : null;
+      settings.learnedDefaults = state.learnedDefaults ? structuredClone(state.learnedDefaults) : null;
       settings.localExposure = state.localExposure ? structuredClone(state.localExposure) : null;
       settings.repairStrokes = structuredClone(state.repairStrokes);
       settings.look = state.look ? structuredClone(state.look) : null;
@@ -2757,7 +2762,7 @@ import { frameNeedsReview } from './reviewQueue.js';
       if (dustDetectionTimer) { clearTimeout(dustDetectionTimer); dustDetectionTimer = null; }
     }
 
-    function restoreSnapshot(snapshot) {
+    function restoreSnapshot(snapshot, { reprocess = true, previewOnly = false } = {}) {
       cancelPendingTimers();
       coreReprocessToken += 1;
 
@@ -2778,6 +2783,7 @@ import { frameNeedsReview } from './reviewQueue.js';
       for (const key of SNAPSHOT_SCALAR_KEYS) {
         state[key] = s[key];
       }
+      updateMirrorButtonState();
       updateFileListUI();
       state.filmBase = s.filmBase ? { ...s.filmBase } : { r: 210, g: 140, b: 90 };
       state.cropRegion = s.cropRegion ? { ...s.cropRegion } : null;
@@ -2799,6 +2805,11 @@ import { frameNeedsReview } from './reviewQueue.js';
       state.dustRemoval.brushSize = s.dustRemoval.brushSize;
       state.dustRemoval.showMask = s.dustRemoval.showMask;
       state.sprocketEdge = createSprocketEdgeSettings(s.sprocketEdge);
+      if (s.lensCorrection) state.lensCorrection = structuredClone(s.lensCorrection);
+      state.filmEdge = s.filmEdge ? structuredClone(s.filmEdge) : null;
+      state.learnedDefaults = s.learnedDefaults ? structuredClone(s.learnedDefaults) : null;
+      updateLensCorrectionUI();
+      updateFilmEdgeUI();
       state.localExposure = s.localExposure ? structuredClone(s.localExposure) : null;
       state.repairStrokes = sanitizeRepairStrokes(s.repairStrokes);
       state.look = s.look ? structuredClone(s.look) : null;
@@ -2829,8 +2840,8 @@ import { frameNeedsReview } from './reviewQueue.js';
 
       // Re-render
       if (state.processedImageData) {
-        applyProcessedImageToState(state.processedImageData);
-        if (usesSilverCoreConversion(state)) {
+        applyProcessedImageToState(state.processedImageData, { previewOnly });
+        if (reprocess && usesSilverCoreConversion(state)) {
           rerenderWithCoreControls({
             full: true, token: coreReprocessToken, sourceRef: state.conversionSourceImageData
           }).catch(() => {});
@@ -4961,6 +4972,7 @@ import { frameNeedsReview } from './reviewQueue.js';
     let previewAdjustedBuffer = null;
     let histogramAdjustedBuffer = null;
     let lastHistogramUpdateTime = 0;
+    let studioThumbnailUpdateFrame = 0;
 
     function renderHistogramForWebGL(force = false) {
       if (!state.processedImageData) return;
@@ -5013,6 +5025,7 @@ import { frameNeedsReview } from './reviewQueue.js';
     function updatePreview() {
       if (!state.processedImageData) return;
       if (state.beforeAfterActive || state.cropping) return;
+      scheduleStudioThumbnailUpdate();
 
       // Prefer GPU rendering in Step 3 when available.
       if (state.currentStep >= 3 && initWebGLRenderer()) {
@@ -5056,6 +5069,7 @@ import { frameNeedsReview } from './reviewQueue.js';
     function updateFull() {
       if (!state.processedImageData) return;
       if (state.beforeAfterActive || state.cropping) return;
+      scheduleStudioThumbnailUpdate();
       // Whether a 16-bit export keeps 16-bit samples depends on the Step-3
       // controls, so the export panel's warning has to follow them.
       updateExportUI();
@@ -5724,7 +5738,7 @@ import { frameNeedsReview } from './reviewQueue.js';
       }
     }
 
-    async function processNegative() {
+    async function processNegative({ quiet = false } = {}) {
       if (processNegativeInFlight) return processNegativeInFlight;
 
       const processingGeneration = coreReprocessGeneration;
@@ -5739,7 +5753,7 @@ import { frameNeedsReview } from './reviewQueue.js';
           pixels: getImageDataPixelCount(sourceData)
         });
 
-        const overlay = getLoadingOverlay();
+        const overlay = quiet ? quietLoadingOverlay : getLoadingOverlay();
         const lang = i18n[currentLang];
         await overlay.show({ title: lang.loadingConverting });
 
@@ -5789,7 +5803,7 @@ import { frameNeedsReview } from './reviewQueue.js';
             previewFirst: hasPreviewSource,
             outputPixels: getImageDataPixelCount(processed)
           });
-          await new Promise(r => setTimeout(r, 250));
+          if (!quiet) await new Promise(r => setTimeout(r, 250));
           // Auto-run dust detection if enabled
           if (isCurrentConversion() && hasFrameRepairs() && !hasPreviewSource) {
             scheduleDustDetection();
@@ -5900,6 +5914,7 @@ import { frameNeedsReview } from './reviewQueue.js';
       const sourceRef = state.conversionSourceImageData;
       const token = coreReprocessToken;
       const revision = dustDetectionRevision;
+      const activation = loadGeneration;
       const strokes = state.repairStrokes;
       const isCurrent = () => hasFrameRepairs() && state.repairStrokes === strokes
         && state.conversionSourceImageData === sourceRef
@@ -5955,7 +5970,7 @@ import { frameNeedsReview } from './reviewQueue.js';
         state.dustRemoval.inpaintedImageData = null;
         updateDustStatusUI('Error: ' + (err.message || err));
       } finally {
-        state.dustRemoval.processing = false;
+        if (isCurrentLoad(activation)) state.dustRemoval.processing = false;
       }
     }
 
@@ -6342,6 +6357,7 @@ import { frameNeedsReview } from './reviewQueue.js';
       dustBrushTurn = new Promise(resolve => { releaseTurn = resolve; });
       const isCurrent = () => state.dustRemoval.enabled && source === getDustSource()
         && coreReprocessToken === token && dustDetectionRevision === revision;
+      pendingBrushRepairs += 1;
       try {
         await previousTurn;
         if (!isCurrent() || !state.dustRemoval.mask) return;
@@ -6394,6 +6410,7 @@ import { frameNeedsReview } from './reviewQueue.js';
         console.error('Dust brush failed:', err);
         updateDustStatusUI('Error: ' + (err.message || err));
       } finally {
+        pendingBrushRepairs -= 1;
         releaseTurn();
       }
     }
@@ -6572,6 +6589,68 @@ import { frameNeedsReview } from './reviewQueue.js';
     // decode lands on top of the file the user has since opened, and the
     // settings written afterwards attach to the wrong queue entry.
     let loadGeneration = 0;
+    const quietLoadingOverlay = { show: async () => {}, updateProgress() {}, hide() {} };
+    // Only inactive photos are retained here. Taking the destination before
+    // storing the outgoing photo lets A -> B -> A fit a one-photo budget.
+    const photoSessions = createPhotoSessionCache({
+      maxBytes: (navigator.deviceMemory && navigator.deviceMemory <= 4 ? 128 : 512) * 1024 * 1024
+    });
+    const photoPreviews = createPhotoSessionCache({ maxBytes: 48 * 1024 * 1024 });
+
+    function photoSettingsKey(item) {
+      return JSON.stringify([item.settings, item.studioColors, item.filmTypeOverride,
+        state.dustRemoval.enabled, state.dustRemoval.strength, state.dustRemoval.maxParticleSize,
+        state.dustRemoval.ai,
+        state.dustRemoval.enabled || item.settings?.repairStrokes?.length ? aiRepair.revision : null,
+        state.flatFields[item.settings?.flatFieldId]?.id || null]);
+    }
+
+    function rememberPhotoSession(item) {
+      if (!item || item.file !== state.loadedFile || !state.loadedBaseImageData || state.rawDecodePending) return;
+      const settled = state.currentStep >= 3 && state.processedImageData && !processNegativeInFlight
+        && !coreReprocessBusy() && !coreReprocessTimer && !state.dustRemoval.processing
+        && !dustDetectionTimer && !pendingBrushRepairs && !dustDrawing;
+      const entry = {
+        file: item.file, base: state.loadedBaseImageData, rawMetadata: state.rawMetadata,
+        key: photoSettingsKey(item), snapshot: settled ? captureSnapshot('photoSession') : null,
+        undo: settled ? undoStack.slice() : [], redo: settled ? redoStack.slice() : [],
+        previewOnly: state.processedImageDataIsPreview, fullResolutionPending: state.fullResolutionPending,
+        zoom: state.zoomLevel, panX: state.panX, panY: state.panY,
+        filmEdge: state.filmEdge, particleCount: state.dustRemoval.particleCount
+      };
+      if (entry.snapshot && state.fullResolutionPending && state.previewSourceImageData) {
+        // Full pixels can intentionally lag a newer slider preview. Never
+        // restore those older pixels under the newer saved settings.
+        entry.snapshot.refs.processedImageData = state.previewSourceImageData;
+        entry.previewOnly = true;
+      }
+      if (!photoSessions.put(item, entry)) {
+        // Huge geometry/history must not prevent reuse of a base that fits.
+        photoSessions.put(item, { file: entry.file, base: entry.base, rawMetadata: entry.rawMetadata });
+      }
+      if (settled) {
+        photoPreviews.put(item, {
+          key: entry.key,
+          image: createAdjustedPhotoPreview(currentConvertedPreviewSource(), buildAdjustmentSettings(state), { maxSize: 1200 })
+        });
+      }
+    }
+
+    function invalidatePhotoActivation() {
+      cancelPendingTimers();
+      if (studioThumbnailUpdateFrame) cancelAnimationFrame(studioThumbnailUpdateFrame);
+      studioThumbnailUpdateFrame = 0;
+      cancelScheduledFullResolutionRender();
+      coreReprocessGeneration += 1;
+      coreReprocessToken += 1;
+      _coreReprocessPending = null;
+      processNegativeInFlight = null;
+      state.fullResolutionPromise = null;
+      state.dustRemoval.processing = false;
+      state.rawDecodePending = false;
+      getLoadingOverlay().hide();
+      noteCoreReprocessSettled();
+    }
 
     function isCurrentLoad(generation) {
       return generation === loadGeneration;
@@ -6597,8 +6676,9 @@ import { frameNeedsReview } from './reviewQueue.js';
       status.style.display = text ? '' : 'none';
     }
 
-    async function loadFile(file, { autoConvert = true } = {}) {
+    async function loadFile(file, { autoConvert = true, decoded = null, quiet = false } = {}) {
       const generation = ++loadGeneration;
+      invalidatePhotoActivation();
       // The frame detector needs OpenCV compiled in its worker; start that
       // now so it overlaps the decode instead of following it.
       if (autoConvert && state.autoFrame.enabled) void warmUpAutoFrameWorker();
@@ -6619,7 +6699,7 @@ import { frameNeedsReview } from './reviewQueue.js';
       const fileName = file.name.toLowerCase();
       const isRawLikeFile = isRawLikeFileName(fileName);
 
-      const overlay = getLoadingOverlay();
+      const overlay = quiet ? quietLoadingOverlay : getLoadingOverlay();
       const lang = i18n[currentLang];
 
       try {
@@ -6629,11 +6709,13 @@ import { frameNeedsReview } from './reviewQueue.js';
         }
 
         let imageData;
-        let extractedRawMeta = null;
+        let extractedRawMeta = decoded?.rawMetadata || null;
 
-        if (isRawLikeFile) {
+        if (decoded?.file === file && decoded.base) {
+          imageData = decoded.base;
+        } else if (isRawLikeFile) {
           const arrayBuffer = await file.arrayBuffer();
-          const isHeavy = arrayBuffer.byteLength > 100 * 1024 * 1024;
+          const isHeavy = arrayBuffer.byteLength > 100 * 1024 * 1024 && !/\.tiff?$/.test(fileName);
 
           if (isHeavy) {
             // Two-stage loading: show fast half-size preview immediately,
@@ -6647,11 +6729,13 @@ import { frameNeedsReview } from './reviewQueue.js';
                 extractedRawMeta = meta;
               }
             });
+            if (!isCurrentLoad(generation)) return { status: 'stale' };
             overlay.updateProgress(60, lang.loadingProcessing);
 
             // Schedule full-res decode. Store buffer so it stays alive.
             state._pendingFullResBuffer = arrayBuffer;
             state._pendingFullResFileName = fileName;
+            state.rawDecodePending = true;
           } else {
             overlay.updateProgress(30, lang.loadingProcessing);
             imageData = await loadRawImageData(arrayBuffer, fileName, {
@@ -6724,7 +6808,7 @@ import { frameNeedsReview } from './reviewQueue.js';
           } else {
             updateLensCorrectionUI();
           }
-          displayNegative(imageData);
+          if (!quiet) displayNegative(imageData);
           showImageUI();
           goToStep(1);
           clearUndoHistory();
@@ -6735,7 +6819,7 @@ import { frameNeedsReview } from './reviewQueue.js';
         }
         if (isRawLikeFile) {
           overlay.updateProgress(100, lang.loadingComplete);
-          await new Promise(r => setTimeout(r, 200));
+          if (!quiet) await new Promise(r => setTimeout(r, 200));
           overlay.hide();
           // Schedule background full-resolution decode if we used fast preview
           if (state._pendingFullResBuffer) {
@@ -6748,7 +6832,7 @@ import { frameNeedsReview } from './reviewQueue.js';
           }
         }
         if (autoConvert && isCurrentLoad(generation)) {
-          await prepareStudioPhoto(generation);
+          await prepareStudioPhoto(generation, undefined, { quiet });
         }
         return { status: isCurrentLoad(generation) ? 'loaded' : 'stale' };
       } catch (err) {
@@ -6800,7 +6884,7 @@ import { frameNeedsReview } from './reviewQueue.js';
       try {
         const fullImageData = await loadRawImageData(buf, name, {
           onMetadata(meta) {
-            if (meta && !state.rawMetadata) {
+            if (isCurrentLoad(generation) && meta && !state.rawMetadata) {
               state.rawMetadata = meta;
               applyLensMetadataPrefill(meta);
             }
@@ -6825,6 +6909,7 @@ import { frameNeedsReview } from './reviewQueue.js';
         const previewCropRegion = state.cropRegion;
 
         state.loadedBaseImageData = fullImageData;
+        state.rawDecodePending = false;
         state.originalImageData = fullImageData;
 
         if (Math.abs(state.rotationAngle) > 0.001) {
@@ -7592,7 +7677,7 @@ import { frameNeedsReview } from './reviewQueue.js';
       for (const item of state.fileQueue) {
         item.filmTypeOverride = { ...choice };
         if (item.settings) item.settings = applyFilmTypeOverride(item.settings, choice);
-        item.thumbnail = null; item.thumbnailAttempted = false;
+        item.thumbnailKey = null; item.thumbnailAttempted = false;
         item.status = 'pending'; item.isDirty = false;
       }
       state.rollAnalysis = { equalize: Boolean(state.rollAnalysis.equalize) };
@@ -9798,6 +9883,12 @@ import { frameNeedsReview } from './reviewQueue.js';
 
     function closePhotoSession() {
       if (isDesktopBatchExportLocked()) return;
+      ++loadGeneration;
+      invalidatePhotoActivation();
+      photoSessions.clear();
+      photoPreviews.clear();
+      delete document.body.dataset.photoSwitching;
+      delete document.body.dataset.studioBusy;
       clearDustState();
       clearUndoHistory();
       pendingProject = null;
@@ -9818,6 +9909,9 @@ import { frameNeedsReview } from './reviewQueue.js';
       resetZoomPan();
       zoomControls.style.display = 'none';
       // Reset all state
+      state.loadedFile = null;
+      state._pendingFullResBuffer = null;
+      state._pendingFullResFileName = null;
       state.loadedBaseImageData = null;
       state.originalImageData = null;
       state.croppedImageData = null;
@@ -10852,12 +10946,16 @@ import { frameNeedsReview } from './reviewQueue.js';
 
     // Process a file with its own settings or auto-detect
     async function processFileWithSettings(file, savedSettings, options = {}) {
+      const isCurrent = options.isCurrent || (() => true);
+      const previewMax = Math.max(0, Number(options.previewMaxDimension) || 0);
       const trace = createPerfTrace('processFileWithSettings', {
         file: file?.name || '',
         bytes: file?.size || 0
       });
       // Load the image
-      const imageData = await loadFileToImageData(file);
+      const imageData = options.sourceImageData || await loadFileToImageData(file);
+      assertRepairCurrent(isCurrent);
+      options.onDecoded?.(imageData);
       trace.mark('load', {
         pixels: getImageDataPixelCount(imageData)
       });
@@ -10870,12 +10968,14 @@ import { frameNeedsReview } from './reviewQueue.js';
       // every other frame in the roll.
       const studioColors = state.fileQueue.find(item => item.file === file)?.studioColors;
       let initialSettings = savedSettings || mergeStudioColors(createDefaultSettings(imageData, state.fileQueue.find(item => item.file === file)), studioColors || {});
-      if (!initialSettings.autoFrameMeta && !initialSettings.cropRegion && !expiredImportKeepsFullFrame(initialSettings)) initialSettings = await analyzeStudioImportFrame(imageData, initialSettings, { allowCrop: !savedSettings });
+      if (!initialSettings.autoFrameMeta && !initialSettings.cropRegion && !expiredImportKeepsFullFrame(initialSettings)) initialSettings = await analyzeStudioImportFrame(imageData, initialSettings, { allowCrop: !savedSettings, silent: Boolean(previewMax) });
+      assertRepairCurrent(isCurrent);
       if (!initialSettings.filmEdge?.checked) {
         const edge = await analyzeImportFilmEdge(imageData, initialSettings, { applyDefaults: !savedSettings && state.importFilmTypeAuto });
         if (edge) initialSettings = edge.settings;
       }
       if (!savedSettings) initialSettings = await learnedImportSettings(initialSettings, state.fileQueue.find(item => item.file === file));
+      assertRepairCurrent(isCurrent);
       const settings = sanitizeSettings(initialSettings, {
         fallbackSettings: { ...state, cropRegion: null, autoFrameMeta: null, rotationAngle: 0, mirrored: false }
       });
@@ -10889,6 +10989,8 @@ import { frameNeedsReview } from './reviewQueue.js';
         cropRegion: settings.cropRegion || null
       }, exportGeometrySteps);
       workingData = await applyLensCorrectionWithSettings(workingData, settings, { updateUi: false });
+      assertRepairCurrent(isCurrent);
+      if (previewMax) workingData = downsampleImageDataForMaxDim(workingData, previewMax);
       trace.mark('transform', {
         pixels: getImageDataPixelCount(workingData)
       });
@@ -10914,8 +11016,9 @@ import { frameNeedsReview } from './reviewQueue.js';
       let processed = await convert({
         imageData: workingData,
         settings: buildRouterSettings(settings, imageData),
-        options: { preview: false, forceFullProcess: true, analysisImageData: getColorAnalysisSample(settings, imageData) }
+        options: { preview: Boolean(previewMax), forceFullProcess: true, analysisImageData: getColorAnalysisSample(settings, imageData) }
       });
+      assertRepairCurrent(isCurrent);
       trace.mark('convert', {
         pixels: getImageDataPixelCount(processed)
       });
@@ -10927,9 +11030,9 @@ import { frameNeedsReview } from './reviewQueue.js';
         const maxParticleSize = Number.isFinite(dustRemoval.maxParticleSize)
           ? dustRemoval.maxParticleSize
           : state.dustRemoval.maxParticleSize;
-        const { mask, particleCount } = await detectDustOffMainThread(processed, { strength, maxParticleSize }, null, () => true, options.dustWorker);
+        const { mask, particleCount } = await detectDustOffMainThread(processed, { strength, maxParticleSize }, null, isCurrent, options.dustWorker);
         const dustSource = processed;
-        if (particleCount > 0) processed = await withAiRepairTurn(() => inpaintForCommit(dustSource, mask, () => true, options.dustWorker));
+        if (particleCount > 0) processed = await withAiRepairTurn(() => inpaintForCommit(dustSource, mask, isCurrent, options.dustWorker));
         trace.mark('dustRemoval', {
           pixels: getImageDataPixelCount(processed)
         });
@@ -10937,7 +11040,7 @@ import { frameNeedsReview } from './reviewQueue.js';
 
       if (settings.repairStrokes?.length) {
         const brushSource = processed;
-        processed = await withAiRepairTurn(() => inpaintManualBrush(brushSource, settings, imageData, workingData.__lensMapping));
+        processed = await withAiRepairTurn(() => inpaintManualBrush(brushSource, settings, imageData, workingData.__lensMapping, isCurrent));
       }
 
       // Never-viewed batch files carry default settings — give them the same
@@ -10979,8 +11082,11 @@ import { frameNeedsReview } from './reviewQueue.js';
       }
 
       // Apply adjustments (at 16 bits when the export asks for it)
-      const adjusted = await applyAdjustmentsWithSettings(processed, settings, { bitDepth: options.bitDepth === 16 ? 16 : 8, bridge: options.bridge });
-      if (state.exportFormat === 'jpeg' && safeStorageGet('nc_hdr_gain_map_v1') !== 'off' && processed.__image16) {
+      assertRepairCurrent(isCurrent);
+      const adjusted = previewMax
+        ? createAdjustedPhotoPreview(processed, buildAdjustmentSettings(settings), { maxSize: previewMax })
+        : await applyAdjustmentsWithSettings(processed, settings, { bitDepth: options.bitDepth === 16 ? 16 : 8, bridge: options.bridge });
+      if (!previewMax && state.exportFormat === 'jpeg' && safeStorageGet('nc_hdr_gain_map_v1') !== 'off' && processed.__image16) {
         const high = await applyAdjustmentsWithSettings(processed, settings, { bitDepth: 16, bridge: options.bridge });
         if (high?.__image16) adjusted.__image16 = high.__image16;
       }
@@ -10990,7 +11096,9 @@ import { frameNeedsReview } from './reviewQueue.js';
       trace.end({
         outputPixels: getImageDataPixelCount(adjusted)
       });
-      if (!savedSettings) {
+      assertRepairCurrent(isCurrent);
+      options.onPreparedSettings?.(settings);
+      if (!savedSettings && options.updateItemSettings !== false) {
         const item = state.fileQueue.find(item => item.file === file);
         if (item) item.settings = cloneSettings(settings);
       }
@@ -11451,6 +11559,8 @@ import { frameNeedsReview } from './reviewQueue.js';
       if (count) showToast(getInterpolatedText('reviewExport', { count }, `${count} frames were flagged for review and will be exported as they are.`), 5000);
     }
     function updateFileListUI() {
+      photoSessions.retainKeys(state.fileQueue);
+      photoPreviews.retainKeys(state.fileQueue);
       const container = document.getElementById('fileListItems');
       const countEl = document.getElementById('fileListCount');
       updateReviewFilter();
@@ -11521,27 +11631,78 @@ import { frameNeedsReview } from './reviewQueue.js';
 
       updateAutoFrameButtons();
       syncBatchUIState({ reason: 'updateFileListUI' });
+      refreshThumbnailStates();
+      void loadStudioThumbnails();
     }
 
     async function switchToFile(index) {
-      if (studioAutoFrameRunning) return;
+      if (studioAutoFrameRunning || isDesktopBatchExportLocked() || singleExportActive) return;
       if (index < 0 || index >= state.fileQueue.length) return;
       if (index === state.currentFileIndex && state.fileQueue[index].file === state.loadedFile) return;
+      if (state.cropping) exitCropMode({ restore: false });
+      if (state.beforeAfterActive) exitBeforeAfter();
+      state.samplingMode = null;
 
       // Snapshot the file being left only if there is something to snapshot.
       // A file the user merely clicked through in Step 1/2 has no settings of
       // its own, and freezing live state into it marks it "configured", which
       // makes batch export skip its automatic film-base and gray-point passes.
       const leavingItem = getCurrentQueueItem();
+      const fileItem = state.fileQueue[index];
+      const cached = photoSessions.take(fileItem);
       if (leavingItem && leavingItem.file === state.loadedFile
         && (leavingItem.isDirty || leavingItem.settings || state.currentStep >= 3)) {
-        persistCurrentFileSettings({ silent: true });
+        persistCurrentFileSettings({ silent: true, force: true });
+        rememberPhotoSession(leavingItem);
       }
       state.currentFileIndex = index;
-      const fileItem = state.fileQueue[index];
+      document.body.dataset.photoSwitching = 'true';
+      document.body.dataset.studioBusy = 'true';
+      studioWorkspace?.sync();
+
+      if (cached?.snapshot && cached.file === fileItem.file && cached.key === photoSettingsKey(fileItem)) {
+        ++loadGeneration;
+        invalidatePhotoActivation();
+        state._pendingFullResBuffer = null;
+        state._pendingFullResFileName = null;
+        state.loadedFile = fileItem.file;
+        state.loadedBaseImageData = cached.base;
+        state.rawMetadata = cached.rawMetadata;
+        state.filmEdge = cached.filmEdge;
+        expiredAnalysisKey = null;
+        state.displayImageData = null;
+        state.samplingMode = null;
+        lensMapCache.clear();
+        invalidateSilverCoreCache();
+        // Preview raster size depends on zoom. Restore it before rebuilding
+        // display sources, not after sampling them at the outgoing photo's zoom.
+        state.zoomLevel = cached.zoom; state.panX = cached.panX; state.panY = cached.panY;
+        restoreSnapshot(cached.snapshot, { reprocess: false, previewOnly: cached.previewOnly });
+        state.fullResolutionPending = cached.fullResolutionPending;
+        state.dustRemoval.particleCount = cached.particleCount;
+        undoStack.splice(0, undoStack.length, ...cached.undo);
+        redoStack.splice(0, redoStack.length, ...cached.redo);
+        applyZoomPanTransform();
+        updateUndoRedoButtons();
+        updatePreview();
+        updateStudioThumbnail();
+        if (state.fullResolutionPending) scheduleFullResolutionRender('photo-restored');
+        delete document.body.dataset.studioBusy;
+        delete document.body.dataset.photoSwitching;
+        updateFileListUI();
+        studioWorkspace?.sync();
+        void loadStudioThumbnails();
+        return;
+      }
+
+      const preview = photoPreviews.peek(fileItem);
+      if (preview?.key === photoSettingsKey(fileItem)) {
+        canvas.style.display = 'block'; glCanvas.style.display = 'none';
+        renderAdjustedImageDataToMainCanvas(preview.image, preview.image);
+      }
 
       // Load the file
-      const loading = loadFile(fileItem.file, { autoConvert: false });
+      const loading = loadFile(fileItem.file, { autoConvert: false, decoded: cached, quiet: true });
       const generation = loadGeneration;
       const result = await loading;
 
@@ -11550,6 +11711,8 @@ import { frameNeedsReview } from './reviewQueue.js';
       // actually looking at.
       if (!isCurrentLoad(generation) || state.fileQueue[index] !== fileItem) return;
       if (result?.status !== 'loaded') {
+        delete document.body.dataset.studioBusy;
+        delete document.body.dataset.photoSwitching;
         if (result?.status === 'error') {
           fileItem.status = 'error';
           fileItem.error = result.message;
@@ -11562,14 +11725,16 @@ import { frameNeedsReview } from './reviewQueue.js';
 
       // If this file has saved settings, restore them
       if (fileItem.settings) {
-        restoreSettings(fileItem.settings);
+        restoreSettings(fileItem.settings, { refreshDisplay: false });
         fileItem.isDirty = false;
       }
 
-      await prepareStudioPhoto(generation, fileItem);
+      await prepareStudioPhoto(generation, fileItem, { quiet: true });
       if (!isCurrentLoad(generation)) return;
 
+      delete document.body.dataset.photoSwitching;
       updateFileListUI();
+      void loadStudioThumbnails();
     }
 
     // Save current settings to the current file's queue entry
@@ -11579,7 +11744,7 @@ import { frameNeedsReview } from './reviewQueue.js';
     }
 
     // Restore settings from a saved settings object
-    function restoreSettings(settings) {
+    function restoreSettings(settings, { refreshDisplay = true } = {}) {
       if (!settings) return;
       const safe = sanitizeSettings(settings, { fallbackSettings: state });
 
@@ -11600,7 +11765,7 @@ import { frameNeedsReview } from './reviewQueue.js';
       }
 
       // Restore crop region after rotation and mirroring
-      applyCropRegionToLoadedImage(safe.cropRegion, { refreshDisplay: true });
+      applyCropRegionToLoadedImage(safe.cropRegion, { refreshDisplay });
       if (state.originalImageData) {
         safe.rotationAngle = state.rotationAngle;
         safe.cropRegion = state.cropRegion ? { ...state.cropRegion } : null;
@@ -12273,9 +12438,32 @@ import { frameNeedsReview } from './reviewQueue.js';
       let image = button.querySelector('.file-list-thumbnail');
       if (!image) {
         image = document.createElement('img'); image.className = 'file-list-thumbnail'; image.alt = '';
-        button.querySelector('.file-list-placeholder')?.replaceWith(image);
+        const placeholder = button.querySelector('.file-list-placeholder');
+        if (placeholder) placeholder.replaceWith(image);
+        else button.prepend(image);
       }
-      image.src = item.thumbnail;
+      if (image.getAttribute('src') !== item.thumbnail) image.src = item.thumbnail;
+      refreshThumbnailStates();
+    }
+    function refreshThumbnailStates() {
+      for (const button of document.querySelectorAll('#fileListItems .file-list-name')) {
+        const item = state.fileQueue[Number(button.dataset.index)];
+        if (!item) continue;
+        const ready = item.thumbnail && item.thumbnailKind === 'processed'
+          && item.thumbnailKey === photoSettingsKey(item);
+        const failed = item.thumbnailErrorKey === photoSettingsKey(item);
+        button.dataset.previewState = ready ? 'ready' : failed ? 'error' : 'pending';
+        button.setAttribute('aria-busy', String(!ready && !failed));
+        let status = button.querySelector('.file-list-preview-state');
+        if (!status) {
+          status = document.createElement('span');
+          status.className = 'file-list-preview-state';
+          button.append(status);
+        }
+        status.hidden = Boolean(ready);
+        status.textContent = failed ? '!' : '…';
+        status.title = failed ? getLocalizedText('error', 'Error') : getLocalizedText('processingStatus', 'Processing');
+      }
     }
     function canReuseLoadedRollSource(item) {
       // Large RAW imports may still hold a temporary half-size preview.
@@ -12288,8 +12476,9 @@ import { frameNeedsReview } from './reviewQueue.js';
         && !isDesktopBatchExportLocked();
     }
     async function loadStudioThumbnails() {
-      if (studioThumbnailsRunning || typeof createImageBitmap !== 'function') return;
+      if (studioThumbnailsRunning || !state.fileQueue.length) return;
       studioThumbnailsRunning = true;
+      let workers = null;
       try {
         // Let the import handler start the active photo first. Background work
         // must not demosaic a whole folder alongside the foreground RAW.
@@ -12298,41 +12487,42 @@ import { frameNeedsReview } from './reviewQueue.js';
           if (!studioBackgroundReady() || automaticRollImportRunning) {
             await new Promise(resolve => setTimeout(resolve, 250)); continue;
           }
-          const item = state.fileQueue.find(entry => entry.file !== state.loadedFile
-            && !entry.thumbnail && !entry.thumbnailAttempted
-            && (/\.(jpe?g|png|webp|gif|bmp|heic|heif|hif)$/i.test(entry.file.name) || isRawLikeFileName(entry.file.name.toLowerCase())));
+          const item = state.fileQueue.find(entry => entry !== getCurrentQueueItem()
+            && (!entry.thumbnail || entry.thumbnailKind !== 'processed' || entry.thumbnailKey !== photoSettingsKey(entry))
+            && entry.thumbnailErrorKey !== photoSettingsKey(entry));
           if (!item) break;
-          item.thumbnailAttempted = true;
-          let bitmap;
+          const key = photoSettingsKey(item);
+          const valid = () => state.fileQueue.includes(item) && item !== getCurrentQueueItem()
+            && key === photoSettingsKey(item) && !document.body.dataset.photoSwitching;
           try {
-            if (isRawLikeFileName(item.file.name.toLowerCase())) {
-              // A camera JPEG is sufficient for the contact sheet only. Never
-              // start LibRaw just to fill a 144 px thumbnail. Files without a
-              // preview keep their number until opened or analysed normally.
-              const { extractNefPreviewJpeg } = await import('./nefJpegPreview.js');
-              const preview = extractNefPreviewJpeg(await item.file.arrayBuffer());
-              if (preview) bitmap = await createImageBitmap(new Blob([preview.jpegBytes], { type: 'image/jpeg' }), { resizeWidth: 144, resizeQuality: 'low' });
-            } else if (/\.(heic|heif|hif)$/i.test(item.file.name) || /hei[cf]/i.test(item.file.type)) {
-              const preview = await loadStandardImage(item.file);
-              if (state.fileQueue.includes(item) && !item.thumbnail) {
-                item.thumbnail = thumbnailDataUrl(preview); updateFileThumbnail(item);
-              }
-            } else {
-              bitmap = await createImageBitmap(item.file, { resizeWidth: 144, resizeQuality: 'low' });
+            workers ||= createConversionWorkerPool({ size: 1 });
+            let prepared;
+            const image = await processFileWithSettings(item.file, item.settings, {
+              previewMaxDimension: 288, updateItemSettings: false,
+              sourceImageData: photoSessions.peek(item)?.base,
+              isCurrent: valid, convert: request => workers(request),
+              onPreparedSettings: settings => { prepared = settings; }
+            });
+            if (!valid()) continue;
+            if (!item.settings && prepared) {
+              item.settings = cloneSettings(prepared);
+              item.automaticSettings = true;
             }
-            if (bitmap && state.fileQueue.includes(item) && !item.thumbnail) {
-              const surface = document.createElement('canvas');
-              surface.width = bitmap.width; surface.height = bitmap.height;
-              surface.getContext('2d').drawImage(bitmap, 0, 0);
-              item.thumbnail = surface.toDataURL('image/jpeg', 0.75);
-              updateFileThumbnail(item);
+            item.thumbnail = thumbnailDataUrl(image);
+            item.thumbnailKind = 'processed';
+            item.thumbnailKey = photoSettingsKey(item);
+            item.thumbnailErrorKey = null;
+            updateFileThumbnail(item);
+          } catch (error) {
+            if (error?.name !== 'AbortError' && valid()) {
+              item.thumbnailErrorKey = key;
+              console.warn('Photo preview failed:', item.file.name, error);
+              refreshThumbnailStates();
             }
-          } catch {
-            // Keep a numbered tile; opening the photo reports decoder errors.
-          } finally { bitmap?.close(); }
+          }
           await new Promise(resolve => setTimeout(resolve, 30));
         }
-      } finally { studioThumbnailsRunning = false; }
+      } finally { workers?.dispose(); studioThumbnailsRunning = false; }
     }
 
     // 標準暗室は既存の描画・履歴・書き出し経路を再利用する。
@@ -12347,18 +12537,35 @@ import { frameNeedsReview } from './reviewQueue.js';
 
     function updateStudioThumbnail() {
       const item = getCurrentQueueItem();
-      const source = state.displayImageData || state.processedImageData || state.originalImageData;
-      if (!item || !source) return;
-      item.thumbnail = thumbnailDataUrl(source);
+      const source = currentConvertedPreviewSource();
+      if (!item || item.file !== state.loadedFile || !source) return;
+      item.thumbnail = thumbnailDataUrl(createAdjustedPhotoPreview(source, buildAdjustmentSettings(state)));
+      item.thumbnailKind = 'processed';
+      item.thumbnailKey = photoSettingsKey(item);
+      item.thumbnailErrorKey = null;
       updateFileThumbnail(item);
     }
 
-    async function prepareStudioPhoto(generation, item = getCurrentQueueItem()) {
+    function currentConvertedPreviewSource() {
+      return state.fullResolutionPending && state.previewSourceImageData
+        ? state.previewSourceImageData : state.processedImageData;
+    }
+
+    function scheduleStudioThumbnailUpdate() {
+      if (studioThumbnailUpdateFrame) return;
+      const generation = loadGeneration;
+      studioThumbnailUpdateFrame = requestAnimationFrame(() => {
+        studioThumbnailUpdateFrame = 0;
+        if (isCurrentLoad(generation)) updateStudioThumbnail();
+      });
+    }
+
+    async function prepareStudioPhoto(generation, item = getCurrentQueueItem(), { quiet = false } = {}) {
       // 切り替え前の変換が終了してから、新しい写真の変換を開始する。
       if (processNegativeInFlight) await processNegativeInFlight;
       if (!isCurrentLoad(generation) || !state.originalImageData) return;
       if (!item?.settings) {
-        restoreSettings(mergeStudioColors(createDefaultSettings(state.originalImageData, item), item?.studioColors || {}));
+        restoreSettings(mergeStudioColors(createDefaultSettings(state.originalImageData, item), item?.studioColors || {}), { refreshDisplay: !quiet });
       }
       document.body.dataset.studioBusy = 'true';
       studioWorkspace?.sync();
@@ -12390,7 +12597,8 @@ import { frameNeedsReview } from './reviewQueue.js';
           trace.mark('filmEdge', { found: Boolean(settings.filmEdge?.found) });
         }
         if (freshFile) { settings = await learnedImportSettings(settings, item); changed = true; }
-        if (changed) restoreSettings(settings);
+        if (!isCurrentLoad(generation)) return;
+        if (changed) restoreSettings(settings, { refreshDisplay: !quiet });
         if (filmEdgeToast) showToast(filmEdgeToast, 3200);
         else if (freshFile && settings.filmTypeConfidence === 'low') {
           showToast(i18n[currentLang][settings.filmTypeReason === 'monochrome' ? 'filmTypeMonochrome' : 'filmTypeUncertain'], 6500);
@@ -12398,7 +12606,7 @@ import { frameNeedsReview } from './reviewQueue.js';
         if (settings.filmEdge?.found) updateFileListUI();
         goToStep(2);
         trace.mark('settings');
-        await processNegative();
+        await processNegative({ quiet });
         trace.mark('processNegative');
         if (freshFile) { scheduleSemanticColour(item, generation); notifyImportReview([item]); }
       } finally {
@@ -13178,8 +13386,8 @@ import { frameNeedsReview } from './reviewQueue.js';
       if (settings.mirrored) working = mirrorImageDataHorizontal(working);
       if (settings.cropRegion) {
         const scaled = {
-          x: settings.cropRegion.x * factor,
-          y: settings.cropRegion.y * factor,
+          left: (settings.cropRegion.left ?? settings.cropRegion.x ?? 0) * factor,
+          top: (settings.cropRegion.top ?? settings.cropRegion.y ?? 0) * factor,
           width: settings.cropRegion.width * factor,
           height: settings.cropRegion.height * factor
         };
@@ -13745,7 +13953,8 @@ import { frameNeedsReview } from './reviewQueue.js';
     // ===========================================
     // AI repair: learned inpainting on the commit and export paths
     // ===========================================
-    const aiRepair = { release: null, status: 'idle', provider: '', run: null, source: '', sourceRef: null, error: '', percent: 0, tiles: 0, ms: 0 };
+    const aiRepair = { release: null, status: 'idle', provider: '', run: null, source: '', sourceRef: null, error: '', percent: 0, tiles: 0, ms: 0, revision: 0 };
+    let pendingBrushRepairs = 0;
 
     async function inpaintManualBrush(source, settings = state, base = state.loadedBaseImageData || state.originalImageData,
       lensMapping = settings === state ? state.conversionSourceImageData?.__lensMapping : null, isCurrent = () => true) {
@@ -13777,6 +13986,7 @@ import { frameNeedsReview } from './reviewQueue.js';
         aiRepair.status = 'error';
         aiRepair.error = error?.message || String(error);
         updateAiRepairUI();
+        aiRepair.revision += 1;
         throw error;
       }
       aiRepair.tiles = result.tiles;
@@ -13928,6 +14138,7 @@ import { frameNeedsReview } from './reviewQueue.js';
     const loadAiRepairModel = createAiModelLoader(performAiRepairModelLoad, DEFAULT_MODEL_URL);
 
     async function performAiRepairModelLoad(source, { prefer = defaultInferencePreference(), refresh = true } = {}) {
+      aiRepair.revision += 1;
       aiRepair.status = 'loading';
       aiRepair.percent = 0;
       aiRepair.error = '';
@@ -13956,6 +14167,7 @@ import { frameNeedsReview } from './reviewQueue.js';
         aiRepair.source = label;
         aiRepair.sourceRef = source;
         aiRepair.status = 'ready';
+        aiRepair.revision += 1;
         aiRepair.tiles = 0;
         showToast(getInterpolatedText('dustAiLoaded', { provider: session.provider === 'webgpu' ? 'WebGPU' : 'WASM' }, `AI repair model loaded (${session.provider})`));
       } catch (error) {
@@ -14000,6 +14212,7 @@ import { frameNeedsReview } from './reviewQueue.js';
           if (aiRepairReady()) return inpaintForCommit(source, mask, isCurrent, worker);
         }
         aiRepair.status = 'error';
+        aiRepair.revision += 1;
         aiRepair.error = error?.message || String(error);
         aiRepair.run = null;
         updateAiRepairUI();
@@ -14008,6 +14221,8 @@ import { frameNeedsReview } from './reviewQueue.js';
     }
 
     async function repairBrushWithAi(source, mask, token) {
+      pendingBrushRepairs += 1;
+      try {
       const strokes = state.repairStrokes;
       const isCurrent = () => state.dustRemoval.enabled && (state.dustRemoval.ai || strokes.length)
         && state.repairStrokes === strokes
@@ -14024,6 +14239,7 @@ import { frameNeedsReview } from './reviewQueue.js';
       updatePreview();
       updateDustStatusUI(getLocalizedText('dustStatusDone', 'Detected {count} dust particles')
         .replace('{count}', String(state.dustRemoval.particleCount)));
+      } finally { pendingBrushRepairs -= 1; }
     }
 
     document.getElementById('dustAiEnabled')?.addEventListener('change', (event) => {
@@ -15311,32 +15527,81 @@ import { frameNeedsReview } from './reviewQueue.js';
     }
 
     const AUTO_ROLL_KEY = 'nc_auto_roll_import_v1';
+    function automaticRollItemKey(item) {
+      // Navigation alone does not invalidate detached measurements. Unsaved
+      // edits to the live photo do: its queue recipe has not caught up yet.
+      return JSON.stringify([item.settings, item.studioColors, item.filmTypeOverride,
+        item.file === state.loadedFile && item.isDirty ? extractCurrentSettings() : null]);
+    }
+
     function scheduleAutomaticRollImport(imported, { prepared = false } = {}) {
       if (safeStorageGet(AUTO_ROLL_KEY) === 'off') return;
       const pending = imported.filter(item => !item.savedSettings && (!item.settings || prepared));
       if (pending.length < 3) return;
       const requestRevision = automaticRollRevision;
+      const failed = new Set();
+      const sampleKeys = new Map();
+      let storage = null;
+      let timer = null;
+      let finished = false;
+      const eligible = item => state.fileQueue.includes(item) && !item.savedSettings && !item.userEdited && !failed.has(item);
+      const valid = () => requestRevision === automaticRollRevision && safeStorageGet(AUTO_ROLL_KEY) !== 'off'
+        && !state.rollReference.applyLock && pending.some(eligible);
+      // Keep lossless, byte-bounded samples across a deferred attempt. A recipe
+      // change invalidates its sample without re-decoding unchanged neighbours.
+      const samples = {
+        async get(item) {
+          if (sampleKeys.get(item) !== automaticRollItemKey(item)) {
+            await samples.delete(item);
+            return null;
+          }
+          return storage ? storage.get(item) : null;
+        },
+        async put(item, sample) {
+          const key = automaticRollItemKey(item);
+          storage ||= createAnalysisSampleStore();
+          await storage.put(item, sample);
+          sampleKeys.set(item, key);
+        },
+        async delete(item) { sampleKeys.delete(item); await storage?.delete(item); }
+      };
+      const finish = async () => {
+        finished = true;
+        if (timer !== null) clearTimeout(timer);
+        timer = null;
+        await storage?.clear();
+      };
+      const schedule = delay => {
+        if (finished || timer !== null) return;
+        timer = setTimeout(() => {
+          timer = null;
+          void attempt().catch(async error => {
+            console.warn('Automatic roll analysis failed:', error);
+            await finish();
+          });
+        }, delay);
+      };
       const attempt = async () => {
-        if (requestRevision !== automaticRollRevision || safeStorageGet(AUTO_ROLL_KEY) === 'off' || state.rollReference.applyLock || !pending.every(item => state.fileQueue.includes(item))) return;
+        if (finished) return;
+        if (!valid()) { await finish(); return; }
         if (!studioBackgroundReady() || automaticRollImportRunning || state.cropping) {
-          setTimeout(() => { void attempt().catch(error => console.warn('Automatic roll analysis failed:', error)); }, 750); return;
+          schedule(750); return;
         }
-        const generation = loadGeneration, revision = manualEditRevision;
-        const valid = () => generation === loadGeneration && revision === manualEditRevision
-          && requestRevision === automaticRollRevision && safeStorageGet(AUTO_ROLL_KEY) !== 'off'
-          && !state.cropping && !state.rollReference.applyLock && pending.every(item => state.fileQueue.includes(item));
-        const samples = createAnalysisSampleStore();
         automaticRollImportRunning = true;
+        let retry = false;
         try {
           persistCurrentFileSettings({ silent: true, force: true });
           const current = getCurrentQueueItem();
-          if (pending.includes(current) && current.settings && canReuseLoadedRollSource(current)) {
+          if (pending.includes(current) && eligible(current) && current.settings && canReuseLoadedRollSource(current)
+            && !await samples.get(current)) {
             await samples.put(current, buildRollAnalysisSample(state.loadedBaseImageData || state.originalImageData, current.settings));
           }
           // Frames are decoded and measured a few at a time (same lane planning
           // as the batch export), each lane with its own frame analyzer, and
           // never behind the blocking overlay: the editor stays usable.
-          const toAnalyze = pending.filter(item => !item.settings && !item.userEdited);
+          // The requested foreground item already owns its decode even before
+          // loadedFile catches up and getCurrentQueueItem becomes non-null.
+          const toAnalyze = pending.filter(item => eligible(item) && !item.settings && item !== state.fileQueue[state.currentFileIndex]);
           const lanes = await planBatchLanes(toAnalyze.map(item => item.file));
           const analyzers = createAutoFrameWorkerPool({ size: lanes });
           const stop = new AbortController();
@@ -15347,23 +15612,31 @@ import { frameNeedsReview } from './reviewQueue.js';
               signal: stop.signal,
               process: async (item) => {
                 if (!valid()) { stop.abort(); return null; }
-                if (item.settings || item.userEdited) return null;
+                const key = automaticRollItemKey(item);
+                const itemValid = () => valid() && eligible(item) && !item.settings
+                  && item !== state.fileQueue[state.currentFileIndex] && key === automaticRollItemKey(item);
+                if (!itemValid()) return null;
                 const image = await loadFileToImageData(item.file);
-                if (!valid()) { stop.abort(); return null; }
+                if (!itemValid()) { retry = true; return null; }
                 let settings = await analyzeStudioImportFrame(image, createDefaultSettings(image, item), { silent: true, analyzeInWorker: analyzers.analyze });
-                if (!valid()) { stop.abort(); return null; }
+                if (!itemValid()) { retry = true; return null; }
                 const edge = await analyzeImportFilmEdge(image, settings, { applyDefaults: state.importFilmTypeAuto, readFilmEdge: analyzers.readFilmEdge });
+                if (!itemValid()) { retry = true; return null; }
                 if (edge) settings = edge.settings;
                 settings = await learnedImportSettings(settings, item);
-                return { settings, sample: buildRollAnalysisSample(image, settings) };
+                if (!itemValid()) { retry = true; return null; }
+                return { settings, sample: buildRollAnalysisSample(image, settings), key };
               },
               sink: async (item, payload) => {
-                if (!payload || !valid() || item.settings || item.userEdited) return;
+                if (!payload || !valid() || !eligible(item) || item.settings || item === state.fileQueue[state.currentFileIndex]
+                  || payload.key !== automaticRollItemKey(item)) return;
                 item.settings = payload.settings; item.automaticSettings = true;
                 await samples.put(item, payload.sample);
               },
               onEvent: (event) => {
-                if (event.type !== 'error' || !valid()) return;
+                if (event.type !== 'error' || !valid() || !eligible(event.job)
+                  || event.job.settings || event.job === state.fileQueue[state.currentFileIndex]) return;
+                failed.add(event.job);
                 event.job.status = 'error'; event.job.error = event.error?.message || String(event.error);
               }
             });
@@ -15372,15 +15645,25 @@ import { frameNeedsReview } from './reviewQueue.js';
             trace.end();
           }
           if (!valid()) return;
-          for (const group of groupAutomaticRollFrames(pending, { referenceLocked: state.rollReference.applyLock })) {
+          if (studioBackgroundReady()) persistCurrentFileSettings({ silent: true, force: true });
+          for (const group of groupAutomaticRollFrames(pending.filter(eligible), { referenceLocked: state.rollReference.applyLock })) {
             if (!valid()) return;
-            await runRollAnalysis({ items: group, automatic: true, samples });
+            const result = await runRollAnalysis({ items: group, automatic: true, samples });
+            if (result?.status === 'deferred' || result?.status === 'stale') retry = true;
           }
           if (!valid()) return;
+          // A foreground load owns its recipe while it is being prepared.
+          // Resume once it settles instead of permanently dropping the roll.
+          if (pending.some(item => eligible(item) && !item.settings)) retry = true;
+          if (pending.includes(getCurrentQueueItem()) && eligible(getCurrentQueueItem()) && !studioBackgroundReady()) retry = true;
           notifyImportReview(pending); updateFileListUI(); scheduleProjectRecovery();
-        } finally { await samples.clear(); automaticRollImportRunning = false; }
+        } finally {
+          automaticRollImportRunning = false;
+          if (retry && valid()) schedule(750);
+          else await finish();
+        }
       };
-      setTimeout(() => { void attempt().catch(error => console.warn('Automatic roll analysis failed:', error)); }, 1200);
+      schedule(1200);
     }
 
     function updateRollAnalysisUI() {
@@ -15418,7 +15701,7 @@ import { frameNeedsReview } from './reviewQueue.js';
     }
 
     async function runRollAnalysis({ items = null, automatic = false, samples = null } = {}) {
-      if (studioAutoFrameRunning || automaticRollAnalysisRunning || document.body.dataset.studioBusy || state.cropping || isDesktopBatchExportLocked() || !state.originalImageData) return;
+      if (studioAutoFrameRunning || automaticRollAnalysisRunning || document.body.dataset.studioBusy || state.cropping || isDesktopBatchExportLocked() || !state.originalImageData) return { status: 'deferred' };
       if (!automatic) automaticRollRevision++;
       const selectedItems = items || state.fileQueue.filter((item) => item.selected);
       if (selectedItems.length < (automatic ? 3 : 2)) {
@@ -15426,8 +15709,15 @@ import { frameNeedsReview } from './reviewQueue.js';
         return;
       }
       const generation = loadGeneration;
-      const editRevision = manualEditRevision;
-      const isValid = () => isCurrentLoad(generation) && (!automatic || (editRevision === manualEditRevision && !state.rollReference.applyLock && !state.cropping && safeStorageGet(AUTO_ROLL_KEY) !== 'off')) && selectedItems.every(item => state.fileQueue.includes(item));
+      const requestRevision = automaticRollRevision;
+      let recipeKeys = null;
+      let committed = false;
+      const isValid = () => (automatic
+        ? requestRevision === automaticRollRevision && !state.rollReference.applyLock
+          && safeStorageGet(AUTO_ROLL_KEY) !== 'off'
+          && (committed || selectedItems.every(item => !item.savedSettings && !item.userEdited
+            && (!recipeKeys || recipeKeys.get(item) === automaticRollItemKey(item))))
+        : isCurrentLoad(generation)) && selectedItems.every(item => state.fileQueue.includes(item));
       if (automatic) automaticRollAnalysisRunning = true;
       else { studioAutoFrameRunning = true; document.body.dataset.studioBusy = 'true'; }
       studioWorkspace?.sync();
@@ -15444,7 +15734,7 @@ import { frameNeedsReview } from './reviewQueue.js';
         const cached = await analysisSamples.get(measurement.item);
         if (cached) return cached;
         // Storage-disabled/private-mode fallback stays bounded and lossless.
-        const image = canReuseLoadedRollSource(measurement.item)
+        const image = measurement.item.file === state.loadedFile && !state.rawDecodePending && canReuseLoadedRollSource(measurement.item)
           ? state.loadedBaseImageData || state.originalImageData : await loadFileToImageData(measurement.item.file);
         assertRepairCurrent(isValid);
         const sample = buildRollAnalysisSample(image, measurement.settings);
@@ -15453,29 +15743,30 @@ import { frameNeedsReview } from './reviewQueue.js';
       }
       let roll = null;
       try {
-        if (processNegativeInFlight) await processNegativeInFlight;
-        if (!isValid()) return;
-        persistCurrentFileSettings({ silent: true, force: true });
+        if (!automatic && processNegativeInFlight) await processNegativeInFlight;
+        if (!isValid()) return { status: 'stale' };
+        if (!automatic || studioBackgroundReady()) persistCurrentFileSettings({ silent: true, force: true });
+        recipeKeys = new Map(selectedItems.map(item => [item, automaticRollItemKey(item)]));
         // Pass 1: decode every frame once, read its rebate, keep a small
         // geometry-applied sample and measure base and density.
         for (let i = 0; i < selectedItems.length; i++) {
           const item = selectedItems[i];
-          if (!isValid()) return;
+          if (!isValid()) return { status: 'stale' };
           if (!automatic) updateBatchProgress(i + 1, selectedItems.length, item.file.name);
           try {
             let sample = await analysisSamples.get(item);
             let settings;
             if (sample && item.settings) settings = cloneSettings(item.settings);
             else {
-              const imageData = canReuseLoadedRollSource(item)
+              const imageData = item.file === state.loadedFile && !state.rawDecodePending && canReuseLoadedRollSource(item)
                 ? state.loadedBaseImageData || state.originalImageData : await loadFileToImageData(item.file);
-              if (!isValid()) return;
+              if (!isValid()) return { status: 'stale' };
               settings = item.settings ? cloneSettings(item.settings) : createDefaultSettings(imageData, item);
               if (!settings.filmEdge?.checked) {
                 const edge = await analyzeImportFilmEdge(imageData, settings, { applyDefaults: !item.settings });
                 if (edge) settings = edge.settings;
               }
-              if (!isValid()) return;
+              if (!isValid()) return { status: 'stale' };
               sample = buildRollAnalysisSample(imageData, settings);
               await analysisSamples.put(item, sample);
             }
@@ -15490,20 +15781,21 @@ import { frameNeedsReview } from './reviewQueue.js';
           }
           await new Promise((resolve) => setTimeout(resolve, 0));
         }
-        if (!isValid() || !measurements.length) return;
+        if (!isValid()) return { status: 'stale' };
+        if (!measurements.length) return { status: 'skipped' };
         // Pass 2: the roll base decides the outliers, then every inlier is analysed
         // with that base so the shared channelData matches what the conversion sees.
         const colorRoll = measurements.some((m) => m.filmBase);
         const first = aggregateRollAnalysis(measurements.map((m) => ({ id: m.item.id, filmBase: colorRoll ? m.filmBase : { r: 128, g: 128, b: 128, method: 'manual' }, negativeMean: m.negativeMean })));
         for (const m of measurements) {
-          if (!isValid()) return;
+          if (!isValid()) return { status: 'stale' };
           const frame = first.frames.find((f) => f.id === m.item.id);
           if (frame?.outlier) continue;
           const settings = { ...m.settings, rollFrame: null };
           if (colorRoll && first.filmBase && requiresFilmBase(settings)) settings.filmBase = { ...first.filmBase };
           try {
             const sample = await sampleForMeasurement(m);
-            if (!isValid()) return;
+            if (!isValid()) return { status: 'stale' };
             m.channelData = await analyzeSilverCoreFrame(sample, buildCoreConversionSettings(settings), resolveConversionMode(settings));
           } catch (error) {
             console.error('Roll analysis could not analyse', m.item.file.name, error);
@@ -15515,7 +15807,7 @@ import { frameNeedsReview } from './reviewQueue.js';
           channelData: m.channelData,
           negativeMean: m.negativeMean
         })));
-        if (!isValid()) return;
+        if (!isValid()) return { status: 'stale' };
         const rollId = `roll-${Date.now().toString(36)}`;
         const equalize = Boolean(state.rollAnalysis.equalize);
         for (const m of measurements) {
@@ -15536,25 +15828,33 @@ import { frameNeedsReview } from './reviewQueue.js';
           }
 
         }
-        // The light table shows the roll as it will convert: render a small
-        // positive from one lossless sample at a time, then release that sample.
+        // The light table shows the roll as it will convert. Automatic imports
+        // retain byte-bounded samples until commit, so a deferred group can reuse
+        // them; an explicit analysis releases each sample after its thumbnail.
         for (const m of measurements) {
-          if (!isValid()) return;
+          if (!isValid()) return { status: 'stale' };
           if (!usesSilverCoreConversion(m.settings)) continue;
           try {
             const thumbSource = downsampleImageDataForMaxDim(await sampleForMeasurement(m), 288);
-            if (!isValid()) return;
+            if (!isValid()) return { status: 'stale' };
             const converted = await convertFrameWithRouter({
               imageData: thumbSource,
               settings: { ...buildCoreConversionSettings(m.settings), analysisRegion: null },
               options: { preview: true, includeAnalysisPreview: false }
             });
-            if (converted) m.thumbnail = thumbnailDataUrl(converted);
+            if (converted) m.thumbnail = thumbnailDataUrl(createAdjustedPhotoPreview(converted, buildAdjustmentSettings(m.settings)));
           } catch (error) {
             console.warn('Roll thumbnail failed for', m.item.file.name, error);
-          } finally { await analysisSamples.delete(m.item); }
+          } finally { if (!automatic) await analysisSamples.delete(m.item); }
         }
-        if (!isValid()) return;
+        if (!isValid()) return { status: 'stale' };
+        // Measurements can continue across navigation, but the atomic undo
+        // snapshot and live recipe adoption must belong to a settled editor.
+        // Keep completed measurements while foreground decoding finishes.
+        while (automatic && (!studioBackgroundReady() || state.cropping)) {
+          await new Promise(resolve => setTimeout(resolve, 250));
+          if (!isValid()) return { status: 'stale' };
+        }
         pushUndo('rollAnalysis');
         state.rollAnalysis = {
           id: rollId,
@@ -15568,8 +15868,15 @@ import { frameNeedsReview } from './reviewQueue.js';
         };
         for (const m of measurements) {
           m.item.settings = m.settings; m.item.isDirty = false; m.item.status = 'pending';
-          if (m.thumbnail) m.item.thumbnail = m.thumbnail;
+          if (m.thumbnail) {
+            m.item.thumbnail = m.thumbnail;
+            // Roll samples omit lens correction, repairs and per-photo WB.
+            // Keep the useful first preview, then let the canonical lane finish.
+            m.item.thumbnailKind = 'analysis';
+            m.item.thumbnailKey = null;
+          }
         }
+        committed = true;
         invalidateSilverCoreCache();
       } finally {
         if (!samples) await analysisSamples.clear();
@@ -15583,15 +15890,18 @@ import { frameNeedsReview } from './reviewQueue.js';
         if (!automatic && isCurrentLoad(generation)) delete document.body.dataset.studioBusy;
         studioWorkspace?.sync();
       }
-      if (!isValid()) return;
+      if (!isValid()) return { status: 'stale' };
       const currentItem = getCurrentQueueItem();
-      if (currentItem?.settings && measurements.some((m) => m.item === currentItem)) restoreSettings(currentItem.settings);
+      const updateCurrent = currentItem?.settings && measurements.some((m) => m.item === currentItem)
+        && (!automatic || studioBackgroundReady());
+      if (updateCurrent) restoreSettings(currentItem.settings);
       updateRollAnalysisUI();
       updateFileListUI();
       if (roll) {
         showToast(getInterpolatedText('rollAnalysisToast', { usable: String(roll.usable), count: String(roll.count), outliers: String(roll.outlierCount) }, `Roll analysis: ${roll.usable} of ${roll.count} frames locked, ${roll.outlierCount} outlier(s)`), 3200);
       }
-      if (state.originalImageData) await processNegative();
+      if (state.originalImageData && (!automatic || updateCurrent)) await processNegative({ quiet: automatic });
+      return { status: 'committed' };
     }
 
     function clearRollAnalysis() {
