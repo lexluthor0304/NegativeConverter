@@ -12507,8 +12507,19 @@ import { frameNeedsReview } from './reviewQueue.js';
             && entry.thumbnailErrorKey !== photoSettingsKey(entry));
           if (!item) break;
           const key = photoSettingsKey(item);
-          const valid = () => state.fileQueue.includes(item) && item !== getCurrentQueueItem()
-            && key === photoSettingsKey(item) && !document.body.dataset.photoSwitching;
+          const rollRevision = automaticRollRevision;
+          let superseded = false;
+          const valid = () => {
+            // A thumbnail may start in the brief gap before roll analysis.
+            // Once that analysis takes over, its prepared recipe/sample owns
+            // the frame; a late thumbnail must not replace it and force a
+            // second analysis decode. Cancellation cannot revive after idle.
+            superseded ||= automaticRollImportRunning || studioAutoFrameRunning
+              || rollRevision !== automaticRollRevision || !state.fileQueue.includes(item)
+              || item === getCurrentQueueItem() || key !== photoSettingsKey(item)
+              || Boolean(document.body.dataset.photoSwitching);
+            return !superseded;
+          };
           try {
             workers ||= createConversionWorkerPool({ size: 1 });
             let prepared;

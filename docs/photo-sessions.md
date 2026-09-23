@@ -51,6 +51,13 @@ during invalidation, accompanied by a pending indicator; a failed preview is
 marked rather than retried indefinitely. This includes two-photo imports,
 which do not run automatic roll analysis.
 
+If roll analysis takes ownership while a thumbnail is in flight, that
+thumbnail stays invalid even after analysis becomes idle. It cannot publish
+prepared settings or errors over the analysis result; a fresh preview job
+refreshes the tile. The folder regression tracks foreground, analysis and
+thumbnail reads separately, and requires exactly one foreground/analysis
+decode per photo while allowing the separate final-recipe preview lane.
+
 ## Verification
 
 ```sh
@@ -63,7 +70,7 @@ npm run build:web
 
 The targeted browser regression measures actual decode/conversion worker
 messages and original-file reads during warm A/B/A navigation. It compares
-settled GPU dimensions/pixels, zoom, and exact decoded 8/16-bit PNG export
+settled GPU dimensions and sampled patch hashes, zoom, and exact decoded 8/16-bit PNG export
 pixels. It also checks active CMY thumbnail changes, identical unopened
 negative previews, whole-roll black-and-white pending-to-ready transitions,
 and a delayed cold-file read losing to a newer selection. Synthetic fixtures
