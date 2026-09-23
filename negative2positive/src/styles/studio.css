@@ -226,8 +226,12 @@ body.studio {
 .studio.studio-loaded.studio-panel-hidden .app-main { grid-template-columns: minmax(0, 1fr); }
 /* Light table: the strip row grows and the thumbnails wrap into a grid. */
 .studio.studio-loaded.studio-lighttable:not(.studio-strip-hidden) .app-main { grid-template-rows: minmax(0, 1fr) minmax(220px, 44vh); }
-.studio-lighttable #fileListSection { align-items: stretch; height: 100%; min-height: 0; }
-.studio-lighttable .file-list-items { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); grid-auto-rows: 122px; gap: 10px; align-content: start; overflow-x: hidden; overflow-y: auto; padding: 4px 4px 6px 0; }
+/* The old batch panel has a 200px/mobile-vh cap and sticky positioning. The
+   light table instead fills its grid row below the header, with one scrollport. */
+.studio-loaded.studio-lighttable .studio-filmstrip { display: flex; flex-direction: column; min-height: 0; }
+.studio-lighttable .studio-strip-header { flex-shrink: 0; }
+.studio-lighttable #fileListSection { flex: 1; align-items: stretch; height: auto; min-height: 0; max-height: none; position: static; overflow: hidden; }
+.studio-lighttable .file-list-items { display: grid; min-height: 0; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); grid-auto-rows: 122px; gap: 10px; align-content: start; overflow-x: hidden; overflow-y: auto; padding: 4px 4px 6px 0; }
 .studio-lighttable .file-list-item { width: auto; height: 122px; flex: none; }
 .studio-lighttable .file-list-thumbnail { height: 84px; }
 .studio-lighttable .file-list-placeholder { height: 92px; font-size: 24px; }
@@ -269,8 +273,10 @@ body.studio {
   .studio.studio-loaded.studio-lighttable:not(.studio-strip-hidden) .app-main { grid-template-rows: minmax(180px, 1fr) minmax(180px, 40vh) minmax(180px, .85fr); }
   .studio.studio-loaded.studio-lighttable.studio-panel-hidden:not(.studio-strip-hidden) .app-main { grid-template-rows: minmax(180px, 1fr) minmax(180px, 40vh); }
   .studio-lighttable .file-list-items { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); grid-auto-rows: 100px; }
-  .studio-lighttable .file-list-item { height: 100px; }
-  .studio-lighttable .file-list-thumbnail { height: 62px; }
+  /* Keep the grid tiles above the compact strip overrides below. */
+  .studio.studio-lighttable .file-list-item { width: auto; height: 100px; flex: none; }
+  .studio.studio-lighttable .file-list-thumbnail { height: 62px; }
+  .studio.studio-lighttable .file-list-placeholder { height: 70px; }
   .studio .controls-panel { grid-column: 1; grid-row: 3; width: 100%; height: 100%; border-left: 0; border-top: 1px solid var(--border); }
   .studio .studio-filmstrip { grid-row: 2; padding: 7px 12px; }
   .studio .file-list-item { height: 63px; flex-basis: 88px; width: 88px; }

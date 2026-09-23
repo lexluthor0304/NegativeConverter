@@ -320,21 +320,89 @@ async function runManualBrushSmoke({ send, evaluate, waitFor, wait, fail, instal
   await wait(600);
   const undone = await exportPixels();
   if (undone.data.some((v, i) => v !== before.data[i])) fail('Undo did not restore the unpainted photo');
-  await evaluate(`document.getElementById('redoBtn').click()`);
-  await wait(600);
-  const redone = await exportPixels();
-  if (!redone.data.some((v, i) => v !== before.data[i])) fail('Redo lost manual repair');
-  await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 2 });
-  const touchTransform = await evaluate(`document.getElementById('canvasTransformWrapper').style.transform`);
-  await send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: location.x, y: location.y + 55 }] });
-  await send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: location.x + 30, y: location.y + 55 }] });
-  await send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-  await wait(1500);
-  const touched = await exportPixels();
-  if (!touched.data.some((v, i) => v !== redone.data[i])) fail('Touch brush did not repair the photo');
-  const afterTouchTransform = await evaluate(`document.getElementById('canvasTransformWrapper').style.transform`);
-  if (afterTouchTransform !== touchTransform) fail('Touch brush panned the photo: ' + JSON.stringify({ before: touchTransform, after: afterTouchTransform }));
-  await send('Emulation.setTouchEmulationEnabled', { enabled: false });
+  // Export has its own repair pass: its completion does not imply that the
+  // independent background brush pass has released pointer admission. Observe
+  // a fresh processing/completion cycle instead of reusing an old "last run"
+  // label or waiting a fixed number of milliseconds before the next gesture.
+  await evaluate(`(() => {
+    const status = document.getElementById('dustStatus');
+    const probe = window.__manualBrushUi = { cycle: null, events: [] };
+    probe.arm = label => { probe.cycle = { label, processing: false, done: false, error: null }; };
+    probe.observer = new MutationObserver(() => {
+      const text = status.textContent;
+      probe.events.push({ label: probe.cycle?.label, text });
+      if (!probe.cycle) return;
+      if (/^Processing/.test(text)) { probe.cycle.processing = true; probe.cycle.done = false; }
+      if (probe.cycle.processing && text === 'Detected 0 dust particles') probe.cycle.done = true;
+      if (/^Error:/.test(text)) probe.cycle.error = text;
+    });
+    probe.observer.observe(status, { childList: true, subtree: true, characterData: true });
+    probe.arm('redo');
+  })()`);
+  const brushDiagnostics = `(() => {
+    const surface = [...document.querySelectorAll('#canvas, #glCanvas')].find(el => getComputedStyle(el).display !== 'none');
+    const points = [{ x: ${location.x}, y: ${location.y + 55} }, { x: ${location.x + 30}, y: ${location.y + 55} }];
+    const overlay = document.getElementById('aiBrushOverlay');
+    let alpha = 0;
+    if (overlay.width && overlay.height) {
+      const pixels = overlay.getContext('2d').getImageData(0, 0, overlay.width, overlay.height).data;
+      for (let i = 3; i < pixels.length; i += 4) if (pixels[i]) alpha++;
+    }
+    const rect = surface?.getBoundingClientRect();
+    return { cycle: window.__manualBrushUi?.cycle, events: window.__manualBrushUi?.events,
+      model: document.getElementById('dustAiStatus').textContent, dust: document.getElementById('dustStatus').textContent,
+      enabled: document.getElementById('aiBrushEnabled').checked,
+      repairTab: document.getElementById('studioTab-repair').getAttribute('aria-selected'),
+      loading: !!document.querySelector('.loading-overlay.visible'), exportDisabled: document.getElementById('exportBtn').disabled,
+      surface: surface?.id, bounds: rect && { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom },
+      points: points.map(point => { const hit = document.elementFromPoint(point.x, point.y);
+        return { ...point, hit: hit?.id || hit?.tagName, hitsSurface: hit === surface }; }),
+      canvasSize: [document.getElementById('canvas').width, document.getElementById('canvas').height],
+      overlaySize: [overlay.width, overlay.height], alpha,
+      transform: document.getElementById('canvasTransformWrapper').style.transform };
+  })()`;
+  const awaitBrushCycle = async label => {
+    const settled = await waitFor(label, `window.__manualBrushUi?.cycle?.error || (
+      window.__manualBrushUi?.cycle?.done && ${ready}
+      && /Model ready/.test(document.getElementById('dustAiStatus').textContent)
+      && !document.querySelector('.loading-overlay.visible') && !document.getElementById('exportBtn').disabled)`, 120_000, { soft: true });
+    const diagnostics = await evaluate(brushDiagnostics);
+    console.log('manual brush UI readiness:', JSON.stringify(diagnostics));
+    if (!settled || diagnostics.cycle?.error) fail(label + ': ' + JSON.stringify(diagnostics));
+  };
+  try {
+    await evaluate(`document.getElementById('redoBtn').click()`);
+    await awaitBrushCycle('redo background repair completed before export');
+    const redone = await exportPixels();
+    if (!redone.data.some((v, i) => v !== before.data[i])) fail('Redo lost manual repair');
+    await awaitBrushCycle('manual brush ready after redo export');
+    await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 2 });
+    const beforeTouch = await evaluate(brushDiagnostics);
+    console.log('manual brush touch target:', JSON.stringify(beforeTouch));
+    if (!beforeTouch.enabled || beforeTouch.repairTab !== 'true' || beforeTouch.loading
+      || beforeTouch.exportDisabled || !beforeTouch.points.every(point => point.hitsSurface)
+      || beforeTouch.alpha !== 0) {
+      fail('Touch brush target is not ready at its original coordinates: ' + JSON.stringify(beforeTouch));
+    }
+    const touchTransform = beforeTouch.transform;
+    await evaluate(`window.__manualBrushUi.arm('touch')`);
+    await send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: location.x, y: location.y + 55 }] });
+    const touchStart = await evaluate(brushDiagnostics);
+    if (!touchStart.alpha) fail('Touch start was not admitted by the brush: ' + JSON.stringify(touchStart));
+    await send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: location.x + 30, y: location.y + 55 }] });
+    const touchMove = await evaluate(brushDiagnostics);
+    if (touchMove.alpha <= touchStart.alpha) fail('Touch move did not extend the admitted brush stroke: ' + JSON.stringify({ touchStart, touchMove }));
+    console.log('manual brush touch admitted:', JSON.stringify({ startAlpha: touchStart.alpha, moveAlpha: touchMove.alpha }));
+    await send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await awaitBrushCycle('touch background repair completed before export');
+    const touched = await exportPixels();
+    if (!touched.data.some((v, i) => v !== redone.data[i])) fail('Touch brush did not repair the photo');
+    const afterTouchTransform = await evaluate(`document.getElementById('canvasTransformWrapper').style.transform`);
+    if (afterTouchTransform !== touchTransform) fail('Touch brush panned the photo: ' + JSON.stringify({ before: touchTransform, after: afterTouchTransform }));
+  } finally {
+    await send('Emulation.setTouchEmulationEnabled', { enabled: false });
+    await evaluate(`window.__manualBrushUi?.observer.disconnect(); delete window.__manualBrushUi`);
+  }
   await evaluate(`document.getElementById('aiBrushClear').click()`);
   await wait(500);
   const cleared = await exportPixels();

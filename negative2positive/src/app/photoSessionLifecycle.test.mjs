@@ -155,9 +155,12 @@ for (const outcome of ['success', 'stale', 'abort']) {
   Object.assign(f.state, { currentFileIndex: -1, loadedFile: new Blob(['other photo']),
     zoomLevel: .25, panX: -100, panY: 100 });
   let restored = 0, scheduled = 0, cancelledFrame = 0;
+  const warmFeedback = [];
   Object.assign(c, {
     studioAutoFrameRunning: false, isDesktopBatchExportLocked: () => false,
-    singleExportActive: false, getCurrentQueueItem: () => null, studioWorkspace: null,
+    singleExportActive: false, getCurrentQueueItem: () => null,
+    studioWorkspace: { sync: () => warmFeedback.push(f.state.photoSwitchTarget) },
+    requestAnimationFrame: () => assert.fail('warm cache hit must not yield for loading feedback'),
     expiredAnalysisKey: null, lensMapCache: new Map(), invalidateSilverCoreCache: noop,
     studioThumbnailUpdateFrame: 19, cancelAnimationFrame: id => { cancelledFrame = id; },
     restoreSnapshot: (snapshot, options) => {
@@ -180,13 +183,162 @@ for (const outcome of ['success', 'stale', 'abort']) {
   assert.equal(c.studioThumbnailUpdateFrame, 0);
   assert.equal(f.state.loadedFile, f.item.file);
   assert.equal(f.photoSessions.size, 0, 'the active photo owns its buffers instead of retaining a cache alias');
+  assert.ok(warmFeedback.length > 0 && warmFeedback.every(target => target == null),
+    'warm restoration never announces a cold loading target');
+}
+
+function coldFixture() {
+  const f = fixture(), c = f.context;
+  const frames = [], loads = [], preparations = [], feedback = [];
+  const second = { file: new File(['second'], 'second.png'), settings: null };
+  const third = { file: new File(['third'], 'third.png'), settings: null };
+  f.state.fileQueue.push(second, third);
+  f.state.currentFileIndex = 0;
+  Object.assign(c, {
+    studioAutoFrameRunning: false, isDesktopBatchExportLocked: () => false,
+    singleExportActive: false, getCurrentQueueItem: () => null,
+    studioWorkspace: { sync: () => feedback.push({ target: f.state.photoSwitchTarget, phase: f.state.photoSwitchPhase }) },
+    requestAnimationFrame: callback => frames.push(callback), setTimeout: callback => callback(),
+    resetZoomPan: noop, updateFileListUI: noop, loadStudioThumbnails: noop,
+    showToast: noop,
+    loadFile: (file, options) => {
+      assert.equal(options.quiet, true);
+      const generation = ++c.loadGeneration;
+      const gate = deferred();
+      loads.push({ ...gate, file });
+      return gate.promise.then(result => {
+        if (c.isCurrentLoad(generation) && result.status === 'loaded') f.state.loadedFile = file;
+        return result;
+      });
+    },
+    prepareStudioPhoto: (generation, item) => {
+      assert.equal(f.state.photoSwitchPhase, 'preparing');
+      assert.equal(f.state.photoSwitchTarget, item);
+      const gate = deferred();
+      preparations.push(gate);
+      return gate.promise;
+    },
+  });
+  vm.runInContext(functionSource('switchToFile'), c);
+  return { ...f, second, third, frames, loads, preparations, feedback };
+}
+for (const outcome of ['success', 'load-error', 'prepare-error']) {
+  const f = coldFixture(), c = f.context;
+  let redraws = 0;
+  c.updatePreview = () => { redraws++; };
+  const pending = c.switchToFile(1);
+  assert.equal(f.state.photoSwitchTarget, f.second, 'target feedback is set synchronously on click');
+  assert.equal(f.state.photoSwitchPhase, 'loading');
+  assert.equal(f.feedback.at(-1).target, f.second);
+  assert.equal(f.loads.length, 0, 'decoding cannot begin before the feedback paint');
+  assert.equal(f.frames.length, 1);
+  f.frames.shift()(); await tick();
+  assert.equal(f.loads.length, 1);
+  f.loads[0].resolve(outcome === 'load-error' ? { status: 'error', message: 'decode failed' } : { status: 'loaded' });
+  await tick();
+  if (outcome !== 'load-error') {
+    assert.equal(f.preparations.length, 1);
+    assert.equal(f.state.photoSwitchTarget, f.second, 'feedback remains through conversion, not just decoding');
+    if (outcome === 'prepare-error') f.preparations[0].reject(new Error('conversion failed'));
+    else f.preparations[0].resolve();
+  }
+  await pending;
+  assert.equal(f.state.photoSwitchTarget, null);
+  assert.equal(f.state.photoSwitchPhase, null);
+  assert.equal(c.document.body.dataset.photoSwitching, undefined);
+  assert.equal(c.document.body.dataset.studioBusy, undefined);
+  if (outcome !== 'success') assert.equal(f.second.status, 'error');
+  if (outcome === 'load-error') {
+    assert.equal(f.state.currentFileIndex, 0);
+    assert.equal(f.state.loadedFile, f.item.file);
+    assert.equal(redraws, 1, 'failed target/proxy restores the actual loaded photo before removing its veil');
+  }
+}
+
+for (const supersedeBeforePaint of [false, true]) {
+  const f = coldFixture(), c = f.context;
+  const older = c.switchToFile(1);
+  if (!supersedeBeforePaint) { f.frames.shift()(); await tick(); }
+  const newer = c.switchToFile(2);
+  assert.equal(f.state.photoSwitchTarget, f.third);
+  if (supersedeBeforePaint) { f.frames.shift()(); await tick(); }
+  else f.loads[0].resolve({ status: 'loaded' });
+  await older;
+  assert.equal(f.state.photoSwitchTarget, f.third, 'stale completion cannot erase the newer target');
+  assert.equal(c.document.body.dataset.photoSwitching, 'true');
+  assert.equal(c.document.body.dataset.studioBusy, 'true');
+  f.frames.shift()(); await tick();
+  assert.equal(f.loads.at(-1).file, f.third.file);
+  assert.equal(f.loads.length, supersedeBeforePaint ? 1 : 2,
+    'a superseded pre-paint request does not decode');
+  f.loads.at(-1).resolve({ status: 'loaded' }); await tick();
+  f.preparations[0].resolve();
+  await newer;
+  assert.equal(f.state.loadedFile, f.third.file);
+  assert.equal(f.state.photoSwitchTarget, null);
+  assert.equal(c.document.body.dataset.photoSwitching, undefined);
+}
+
+{
+  const f = fixture(), c = f.context;
+  const undo = { label: 'cyan' }, redo = { label: 'density' };
+  let restored = 0, consoleCommits = 0;
+  Object.assign(c, {
+    stateReady: true, manualEditRevision: 8, MAX_UNDO: 20,
+    undoStack: [undo], redoStack: [redo],
+    getCurrentQueueItem: () => f.item, getUndoLabel: value => value,
+    restoreSnapshot: () => { restored++; }, updateUndoRedoButtons: noop,
+    showToast: noop, pruneHistoryForMemory: noop,
+    sanitizePresetType: value => value,
+    CONSOLE_CHANNELS: { density: { stateKey: 'coreExposure', step: 10 }, cyan: { stateKey: 'cyan', step: 5 } },
+    CONSOLE_MAX_STEPS: 8,
+    commitConsoleChannel: () => { consoleCommits++; }, updateConsoleReadouts: noop,
+    getBeforeAfterReferenceImageData: () => f.converted,
+  });
+  f.state.coreExposure = 20;
+  f.state.cyan = 10;
+  vm.runInContext(['performUndo', 'performRedo', 'consoleChannelsEnabled', 'consoleColorKeysEnabled',
+    'consoleChannelSteps', 'nudgeConsoleChannel', 'resetConsoleChannels', 'canActivateBeforeAfter']
+    .map(functionSource).join('\n'), c);
+  c.document.body.dataset.photoSwitching = 'true';
+  c.performUndo(); c.performRedo();
+  c.nudgeConsoleChannel('density', 1); c.nudgeConsoleChannel('cyan', -1); c.resetConsoleChannels();
+  assert.equal(restored, 0, 'global undo/redo cannot restore outgoing snapshots onto a pending target');
+  assert.equal(consoleCommits, 0);
+  assert.equal(c.undoStack[0], undo); assert.equal(c.redoStack[0], redo);
+  assert.equal(c.manualEditRevision, 8);
+  assert.equal(f.item.userEdited, undefined);
+  assert.equal(f.state.coreExposure, 20); assert.equal(f.state.cyan, 10);
+  assert.equal(c.canActivateBeforeAfter(), false, 'Space cannot reveal the outgoing comparison while loading');
+
+  let zoomKeydown, zoomCalls = 0;
+  c.document.addEventListener = (type, listener) => { assert.equal(type, 'keydown'); zoomKeydown = listener; };
+  Object.assign(c, {
+    isEditableTarget: () => false, canvasContainer: { getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 80 }) },
+    ZOOM_BUTTON_FACTOR: 1.2, zoomAtPoint: () => { zoomCalls++; }, resetZoomPan: () => { zoomCalls++; },
+  });
+  const zoomStart = source.indexOf('    // Keyboard zoom shortcuts');
+  const zoomEnd = source.indexOf('    // Undo/Redo keyboard shortcuts', zoomStart);
+  vm.runInContext(source.slice(zoomStart, zoomEnd), c);
+  for (const key of ['+', '-', '0']) zoomKeydown({ key, preventDefault: noop });
+  assert.equal(zoomCalls, 0, 'global zoom keys cannot change the cached outgoing view');
+
+  delete c.document.body.dataset.photoSwitching;
+  assert.equal(c.canActivateBeforeAfter(), true);
+  c.performUndo(); c.performRedo();
+  assert.equal(restored, 2, 'ordinary undo/redo resumes immediately after activation');
+  c.nudgeConsoleChannel('density', 1);
+  assert.equal(f.state.coreExposure, 30);
+  assert.equal(consoleCommits, 1);
+  for (const key of ['+', '-', '0']) zoomKeydown({ key, preventDefault: noop });
+  assert.equal(zoomCalls, 3, 'ordinary keyboard zoom resumes without a sticky lock');
 }
 
 for (const locked of [false, true]) {
   const f = fixture(), c = f.context;
   c.rememberPhotoSession(f.item);
   assert.ok(f.photoSessions.bytes > 0 && f.photoPreviews.bytes > 0);
-  let pickerOpened = 0;
+  let pickerOpened = 0, emptyListRefreshes = 0;
   Object.assign(c, {
     isDesktopBatchExportLocked: () => locked,
     clearDustState: noop, clearUndoHistory: noop, clearProjectRecovery: noop,
@@ -204,9 +356,12 @@ for (const locked of [false, true]) {
     fullUpdateTimer: null, step2AutoConvertTimer: null,
     setUploadPlaceholderStatus: noop, updateBeforeAfterButtonState: noop,
     updateSprocketControlsUI: noop, resetAllAdjustments: noop, syncBatchUIState: noop,
+    updateFileListUI: () => { assert.equal(f.state.fileQueue.length, 0); emptyListRefreshes++; },
     fileInput: { value: 'old', click: () => { pickerOpened++; } },
   });
   c.document.body.dataset = { studioBusy: 'true', photoSwitching: 'true' };
+  f.state.photoSwitchTarget = f.item;
+  f.state.photoSwitchPhase = 'loading';
   vm.runInContext(functionSource('closePhotoSession'), c);
   const oldGeneration = c.loadGeneration, oldToken = c.coreReprocessToken;
   c.closePhotoSession();
@@ -214,6 +369,7 @@ for (const locked of [false, true]) {
     assert.equal(c.loadGeneration, oldGeneration);
     assert.ok(f.photoSessions.bytes > 0 && f.photoPreviews.bytes > 0);
     assert.equal(pickerOpened, 0);
+    assert.equal(emptyListRefreshes, 0);
   } else {
     assert.equal(f.photoSessions.bytes, 0, 'close releases inactive snapshots without a later file-list refresh');
     assert.equal(f.photoPreviews.bytes, 0, 'close releases presentation previews even when picker is cancelled');
@@ -225,9 +381,12 @@ for (const locked of [false, true]) {
     assert.ok(c.coreReprocessToken > oldToken);
     assert.equal(c.document.body.dataset.photoSwitching, undefined);
     assert.equal(c.document.body.dataset.studioBusy, undefined);
+    assert.equal(f.state.photoSwitchTarget, null);
+    assert.equal(f.state.photoSwitchPhase, null);
     assert.equal(c.sprocketPreviewFrameCache.sourceRef, null);
     assert.equal(c.sprocketPreviewFrameCanvas.width, 1);
     assert.equal(pickerOpened, 1);
+    assert.equal(emptyListRefreshes, 1, 'close releases memoized file-list rows even if the picker is cancelled');
   }
 }
 

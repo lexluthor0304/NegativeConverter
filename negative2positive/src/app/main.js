@@ -780,7 +780,7 @@ import { frameNeedsReview } from './reviewQueue.js';
     }
 
     function consoleChannelsEnabled() {
-      return stateReady && Boolean(state.processedImageData);
+      return document.body.dataset.photoSwitching !== 'true' && stateReady && Boolean(state.processedImageData);
     }
 
     function consoleColorKeysEnabled() {
@@ -2921,6 +2921,7 @@ import { frameNeedsReview } from './reviewQueue.js';
     }
 
     function performUndo() {
+      if (document.body.dataset.photoSwitching === 'true') return;
       if (undoStack.length === 0) {
         showToast(getLocalizedText('nothingToUndo', 'Nothing to undo'));
         return;
@@ -2939,6 +2940,7 @@ import { frameNeedsReview } from './reviewQueue.js';
     }
 
     function performRedo() {
+      if (document.body.dataset.photoSwitching === 'true') return;
       if (redoStack.length === 0) {
         showToast(getLocalizedText('nothingToRedo', 'Nothing to redo'));
         return;
@@ -3308,7 +3310,7 @@ import { frameNeedsReview } from './reviewQueue.js';
     }
 
     function canActivateBeforeAfter() {
-      if (state.cropping || state.samplingMode) return false;
+      if (document.body.dataset.photoSwitching === 'true' || state.cropping || state.samplingMode) return false;
       return Boolean(getBeforeAfterReferenceImageData());
     }
 
@@ -6683,6 +6685,14 @@ import { frameNeedsReview } from './reviewQueue.js';
     async function loadFile(file, { autoConvert = true, decoded = null, quiet = false } = {}) {
       const generation = ++loadGeneration;
       invalidatePhotoActivation();
+      // Direct imports/drops supersede any pending quiet file-list activation.
+      if (!quiet && state.photoSwitchTarget) {
+        state.photoSwitchTarget = null;
+        state.photoSwitchPhase = null;
+        delete document.body.dataset.photoSwitching;
+        delete document.body.dataset.studioBusy;
+        studioWorkspace?.sync();
+      }
       // The frame detector needs OpenCV compiled in its worker; start that
       // now so it overlaps the decode instead of following it.
       if (autoConvert && state.autoFrame.enabled) void warmUpAutoFrameWorker();
@@ -8673,6 +8683,7 @@ import { frameNeedsReview } from './reviewQueue.js';
 
     // Keyboard zoom shortcuts
     document.addEventListener('keydown', (event) => {
+      if (document.body.dataset.photoSwitching === 'true') return;
       if (isEditableTarget(event.target)) return;
       // Cmd/Ctrl +, - and 0 are the browser's own page zoom. Claiming them
       // leaves the user with no keyboard way to resize the page.
@@ -9833,6 +9844,16 @@ import { frameNeedsReview } from './reviewQueue.js';
 
     function restartPhotoProcessing() {
       if (isDesktopBatchExportLocked()) return;
+      if (state.photoSwitchTarget) {
+        ++loadGeneration;
+        state.photoSwitchTarget = null;
+        state.photoSwitchPhase = null;
+        delete document.body.dataset.photoSwitching;
+        delete document.body.dataset.studioBusy;
+        state.currentFileIndex = state.fileQueue.findIndex(item => item.file === state.loadedFile);
+        updateFileListUI();
+        studioWorkspace?.sync();
+      }
       // Lens correction can return the original object unchanged. Source
       // identity alone cannot distinguish a discarded render from this reset.
       coreReprocessGeneration += 1;
@@ -9891,6 +9912,8 @@ import { frameNeedsReview } from './reviewQueue.js';
       invalidatePhotoActivation();
       photoSessions.clear();
       photoPreviews.clear();
+      state.photoSwitchTarget = null;
+      state.photoSwitchPhase = null;
       delete document.body.dataset.photoSwitching;
       delete document.body.dataset.studioBusy;
       clearDustState();
@@ -9986,6 +10009,9 @@ import { frameNeedsReview } from './reviewQueue.js';
       // Reset adjustments
       resetAllAdjustments();
       syncBatchUIState({ reason: 'closePhotoSession' });
+      // Drop the rendered rows and their memoized File references too, even
+      // when the next picker is cancelled and no import triggers a refresh.
+      updateFileListUI();
 
       // Trigger file selection
       fileInput.value = '';
@@ -10251,12 +10277,18 @@ import { frameNeedsReview } from './reviewQueue.js';
       // A quick export after a stroke must use MI-GAN, not its temporary preview.
       if ((aiRepairReady() && state.dustRemoval.enabled && state.dustRemoval.mask) || state.repairStrokes.length) {
         const source = getDustSource();
+        const dustEnabled = Boolean(state.dustRemoval.enabled);
         const mask = state.dustRemoval.mask;
         const strokes = state.repairStrokes;
         const token = coreReprocessToken;
-        const dustImage = state.dustRemoval.enabled && mask ? await inpaintForCommit(source, mask) : source;
+        const dustImage = dustEnabled && mask ? await inpaintForCommit(source, mask) : source;
         const repaired = await inpaintManualBrush(dustImage);
-        if (token !== coreReprocessToken || source !== getDustSource() || mask !== state.dustRemoval.mask || strokes !== state.repairStrokes) {
+        // Manual-only background repair creates a fresh, unused zero dust
+        // mask. Its identity does not change the export recipe. Actual dust
+        // mode/mask changes and photo/stroke changes still invalidate it.
+        if (token !== coreReprocessToken || source !== getDustSource() || strokes !== state.repairStrokes
+          || dustEnabled !== Boolean(state.dustRemoval.enabled)
+          || (dustEnabled && mask !== state.dustRemoval.mask)) {
           throw new Error('Photo changed during AI repair. Please export again.');
         }
         state.dustRemoval.inpaintedImageData = repaired;
@@ -11574,6 +11606,15 @@ import { frameNeedsReview } from './reviewQueue.js';
       if (count) showToast(getInterpolatedText('reviewExport', { count }, `${count} frames were flagged for review and will be exported as they are.`), 5000);
     }
     function updateFileListUI() {
+      // Queue replacement/removal must also invalidate a delayed activation.
+      if (state.photoSwitchTarget && !state.fileQueue.includes(state.photoSwitchTarget)) {
+        ++loadGeneration;
+        invalidatePhotoActivation();
+        state.photoSwitchTarget = null;
+        state.photoSwitchPhase = null;
+        delete document.body.dataset.photoSwitching;
+        delete document.body.dataset.studioBusy;
+      }
       photoSessions.retainKeys(state.fileQueue);
       photoPreviews.retainKeys(state.fileQueue);
       const container = document.getElementById('fileListItems');
@@ -11671,85 +11712,111 @@ import { frameNeedsReview } from './reviewQueue.js';
         rememberPhotoSession(leavingItem);
       }
       state.currentFileIndex = index;
+      state.photoSwitchTarget = null;
+      state.photoSwitchPhase = null;
       document.body.dataset.photoSwitching = 'true';
       document.body.dataset.studioBusy = 'true';
-      studioWorkspace?.sync();
-
-      if (cached?.snapshot && cached.file === fileItem.file && cached.key === photoSettingsKey(fileItem)) {
-        ++loadGeneration;
-        invalidatePhotoActivation();
-        state._pendingFullResBuffer = null;
-        state._pendingFullResFileName = null;
-        state.loadedFile = fileItem.file;
-        state.loadedBaseImageData = cached.base;
-        state.rawMetadata = cached.rawMetadata;
-        state.filmEdge = cached.filmEdge;
-        expiredAnalysisKey = null;
-        state.displayImageData = null;
-        state.samplingMode = null;
-        lensMapCache.clear();
-        invalidateSilverCoreCache();
-        // Preview raster size depends on zoom. Restore it before rebuilding
-        // display sources, not after sampling them at the outgoing photo's zoom.
-        state.zoomLevel = cached.zoom; state.panX = cached.panX; state.panY = cached.panY;
-        restoreSnapshot(cached.snapshot, { reprocess: false, previewOnly: cached.previewOnly });
-        state.fullResolutionPending = cached.fullResolutionPending;
-        state.dustRemoval.particleCount = cached.particleCount;
-        undoStack.splice(0, undoStack.length, ...cached.undo);
-        redoStack.splice(0, redoStack.length, ...cached.redo);
-        applyZoomPanTransform();
-        updateUndoRedoButtons();
-        updatePreview();
-        updateStudioThumbnail();
-        if (state.fullResolutionPending) scheduleFullResolutionRender('photo-restored');
-        delete document.body.dataset.studioBusy;
-        delete document.body.dataset.photoSwitching;
-        updateFileListUI();
-        studioWorkspace?.sync();
-        void loadStudioThumbnails();
-        return;
-      }
-
-      const preview = photoPreviews.peek(fileItem);
-      if (preview?.key === photoSettingsKey(fileItem)) {
-        canvas.style.display = 'block'; glCanvas.style.display = 'none';
-        renderAdjustedImageDataToMainCanvas(preview.image, preview.image);
-      }
-
-      // Load the file
-      const loading = loadFile(fileItem.file, { autoConvert: false, decoded: cached, quiet: true });
-      const generation = loadGeneration;
-      const result = await loading;
-
-      // A newer switch may have started (and finished) while this decode ran;
-      // applying these settings now would stamp them onto the file the user is
-      // actually looking at.
-      if (!isCurrentLoad(generation) || state.fileQueue[index] !== fileItem) return;
-      if (result?.status !== 'loaded') {
-        delete document.body.dataset.studioBusy;
-        delete document.body.dataset.photoSwitching;
-        if (result?.status === 'error') {
-          fileItem.status = 'error';
-          fileItem.error = result.message;
-          state.currentFileIndex = state.fileQueue.findIndex(item => item.file === state.loadedFile);
-          updateFileListUI();
+      let generation = ++loadGeneration;
+      invalidatePhotoActivation();
+      try {
+        // A settled cache hit is synchronous: do not paint a loading veil or
+        // announce a new live-region message for an already available photo.
+        if (cached?.snapshot && cached.file === fileItem.file && cached.key === photoSettingsKey(fileItem)) {
+          state._pendingFullResBuffer = null;
+          state._pendingFullResFileName = null;
+          state.loadedFile = fileItem.file;
+          state.loadedBaseImageData = cached.base;
+          state.rawMetadata = cached.rawMetadata;
+          state.filmEdge = cached.filmEdge;
+          expiredAnalysisKey = null;
+          state.displayImageData = null;
+          state.samplingMode = null;
+          lensMapCache.clear();
+          invalidateSilverCoreCache();
+          // Preview raster size depends on zoom. Restore it before rebuilding
+          // display sources, not after sampling them at the outgoing photo's zoom.
+          state.zoomLevel = cached.zoom; state.panX = cached.panX; state.panY = cached.panY;
+          restoreSnapshot(cached.snapshot, { reprocess: false, previewOnly: cached.previewOnly });
+          state.fullResolutionPending = cached.fullResolutionPending;
+          state.dustRemoval.particleCount = cached.particleCount;
+          undoStack.splice(0, undoStack.length, ...cached.undo);
+          redoStack.splice(0, redoStack.length, ...cached.redo);
+          applyZoomPanTransform();
+          updateUndoRedoButtons();
+          updatePreview();
+          updateStudioThumbnail();
+          if (state.fullResolutionPending) scheduleFullResolutionRender('photo-restored');
+          return;
         }
-        return;
+
+        state.photoSwitchTarget = fileItem;
+        state.photoSwitchPhase = 'loading';
+        studioWorkspace?.sync();
+        // Paint the target identity before decoder or cached-base preparation
+        // can occupy the main thread. Hidden tabs need not await a paused rAF.
+        await new Promise(resolve => {
+          if (document.visibilityState === 'hidden') setTimeout(resolve, 0);
+          else requestAnimationFrame(() => setTimeout(resolve, 0));
+        });
+        if (!isCurrentLoad(generation) || state.fileQueue[index] !== fileItem) return;
+
+        const preview = photoPreviews.peek(fileItem);
+        if (preview?.key === photoSettingsKey(fileItem)) {
+          canvas.style.display = 'block'; glCanvas.style.display = 'none';
+          renderAdjustedImageDataToMainCanvas(preview.image, preview.image);
+        }
+
+        // Load the file
+        const loading = loadFile(fileItem.file, { autoConvert: false, decoded: cached, quiet: true });
+        generation = loadGeneration;
+        const result = await loading;
+
+        // A newer switch may have started (and finished) while this decode ran;
+        // applying these settings now would stamp them onto the file the user is
+        // actually looking at.
+        if (!isCurrentLoad(generation) || state.fileQueue[index] !== fileItem) return;
+        if (result?.status !== 'loaded') {
+          if (result?.status === 'error') {
+            fileItem.status = 'error';
+            fileItem.error = result.message;
+            state.currentFileIndex = state.fileQueue.findIndex(item => item.file === state.loadedFile);
+            // A retained presentation proxy may already have been drawn for
+            // this target. Restore the actual loaded image before revealing it.
+            if (state.loadedFile !== fileItem.file && state.originalImageData) updatePreview();
+          }
+          return;
+        }
+        state.photoSwitchPhase = 'preparing';
+        studioWorkspace?.sync();
+        resetZoomPan();
+
+        // If this file has saved settings, restore them
+        if (fileItem.settings) {
+          restoreSettings(fileItem.settings, { refreshDisplay: false });
+          fileItem.isDirty = false;
+        }
+
+        await prepareStudioPhoto(generation, fileItem, { quiet: true });
+      } catch (error) {
+        if (!isCurrentLoad(generation)) return;
+        console.error('Error switching photo:', error);
+        fileItem.status = 'error';
+        fileItem.error = String(error?.message || error);
+        state.currentFileIndex = state.fileQueue.findIndex(item => item.file === state.loadedFile);
+        if (state.loadedFile !== fileItem.file && state.originalImageData) updatePreview();
+        showToast(getLocalizedText('loadError', 'Error loading file'));
+      } finally {
+        // An old completion must never clear the newest target's feedback.
+        if (isCurrentLoad(generation)) {
+          state.photoSwitchTarget = null;
+          state.photoSwitchPhase = null;
+          delete document.body.dataset.photoSwitching;
+          delete document.body.dataset.studioBusy;
+          updateFileListUI();
+          studioWorkspace?.sync();
+          void loadStudioThumbnails();
+        }
       }
-      resetZoomPan();
-
-      // If this file has saved settings, restore them
-      if (fileItem.settings) {
-        restoreSettings(fileItem.settings, { refreshDisplay: false });
-        fileItem.isDirty = false;
-      }
-
-      await prepareStudioPhoto(generation, fileItem, { quiet: true });
-      if (!isCurrentLoad(generation)) return;
-
-      delete document.body.dataset.photoSwitching;
-      updateFileListUI();
-      void loadStudioThumbnails();
     }
 
     // Save current settings to the current file's queue entry
@@ -12468,7 +12535,8 @@ import { frameNeedsReview } from './reviewQueue.js';
           && item.thumbnailKey === photoSettingsKey(item);
         const failed = item.thumbnailErrorKey === photoSettingsKey(item);
         button.dataset.previewState = ready ? 'ready' : failed ? 'error' : 'pending';
-        button.setAttribute('aria-busy', String(!ready && !failed));
+        const switching = state.photoSwitchTarget === item && document.body.dataset.photoSwitching === 'true';
+        button.setAttribute('aria-busy', String(switching || (!ready && !failed)));
         let status = button.querySelector('.file-list-preview-state');
         if (!status) {
           status = document.createElement('span');

@@ -312,6 +312,13 @@ if (process.argv.includes('--photo-session-only')) {
   console.log('SMOKE PASS'); process.exit(0);
 }
 
+if (process.argv.includes('--light-table-only')) {
+  await runLightTableSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+  if (pageErrors.length) fail('uncaught page errors: ' + pageErrors.join('\n'));
+  console.log('SMOKE PASS (light table)');
+  process.exit(0);
+}
+
 if (process.argv.includes('--photo-session-raw-only')) {
   await runPhotoSessionRawSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
   if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));

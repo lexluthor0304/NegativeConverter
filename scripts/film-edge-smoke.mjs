@@ -71,13 +71,16 @@ export async function runFilmEdgeSmoke({ send, evaluate, waitFor, wait, fail, in
   if (!detected.baseVisible) fail('rebate film base button hidden');
 
   // Manual path: the buttons apply the rebate base and the detected film.
-  await evaluate(`document.getElementById('useFilmEdgeBaseBtn').click()`);
-  await waitFor('rebate base applied', `/Film base taken from the unexposed rebate/.test(window.__filmEdgeToasts.at(-1) || '')`, 20_000);
+  // Model preloading may publish an unrelated toast after the button's own
+  // acknowledgement. Require a fresh matching message, not the newest toast.
+  await evaluate(`window.__filmEdgeActionToastStart = window.__filmEdgeToasts.length; document.getElementById('useFilmEdgeBaseBtn').click()`);
+  await waitFor('rebate base applied', `window.__filmEdgeToasts.slice(window.__filmEdgeActionToastStart).some(text => /Film base taken from the unexposed rebate/.test(text))`, 20_000);
   const [r, g, b] = readBase(await evaluate(`document.getElementById('filmBaseValues').textContent`));
   if (Math.abs(r - 215) > 6 || Math.abs(g - 150) > 6 || Math.abs(b - 95) > 6) fail('film base button did not take the rebate: ' + [r, g, b]);
-  await evaluate(`document.getElementById('applyFilmEdgePresetBtn').click()`);
-  await waitFor('detected film applied', `document.getElementById('filmPreset').value === 'gold-warm'`, 20_000);
-  const applied = await evaluate(`window.__filmEdgeToasts.at(-1)`);
+  await evaluate(`window.__filmEdgeActionToastStart = window.__filmEdgeToasts.length; document.getElementById('applyFilmEdgePresetBtn').click()`);
+  await waitFor('detected film applied', `document.getElementById('filmPreset').value === 'gold-warm'
+    && window.__filmEdgeToasts.slice(window.__filmEdgeActionToastStart).some(text => /Applied the .*ULTRA MAX 400.* preset/i.test(text))`, 20_000);
+  const applied = await evaluate(`window.__filmEdgeToasts.slice(window.__filmEdgeActionToastStart).find(text => /Applied the .*ULTRA MAX 400.* preset/i.test(text))`);
   if (!/Applied the .*ULTRA MAX 400.* preset/i.test(applied)) fail('apply button toast missing: ' + applied);
 
   // A frame without perforations reports no code and gets no badge.

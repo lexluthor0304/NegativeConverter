@@ -25,7 +25,7 @@ function installPhotoSessionProbe() {
   const probe = window.__photoSessionProbe = {
     requests: [], reads: [], bitmaps: [], exports: [], rawImages: [], inFlight: 0,
     lastActivity: performance.now(), gpuFrames: 0, lastGpu: null,
-    holdFile: null, heldFile: null, releaseFile: null, holdTimedOut: false,
+    holdFile: null, heldFile: null, releaseFile: null, holdTimedOut: false, rejectFile: null,
   };
   let holdTimer;
   const changed = () => { probe.lastActivity = performance.now(); };
@@ -70,7 +70,13 @@ function installPhotoSessionProbe() {
         holdTimer = setTimeout(() => { probe.holdTimedOut = true; probe.releaseFile?.(); }, 15000);
       });
     }
-    try { return await original.read.apply(this, args); } finally { changed(); }
+    try {
+      if (probe.rejectFile === this.name) {
+        probe.rejectFile = null;
+        throw new Error('Deliberate cold-photo read failure for UI recovery regression');
+      }
+      return await original.read.apply(this, args);
+    } finally { changed(); }
   };
   window.createImageBitmap = function(source, ...args) {
     if (source instanceof File) { probe.bitmaps.push(source.name); changed(); }
@@ -347,9 +353,9 @@ export async function runPhotoSessionSmoke({ send, evaluate, waitFor, fail, inst
     // Add a genuinely new File through the existing "add photos" picker, then
     // open it before idle thumbnail work can populate any decoded-source cache.
     // Holding this actual read makes the late-result race deterministic.
-    await evaluate(`(async () => {
+    await evaluate(`window.__startColdPhoto = async (name, index) => {
       const blob = await (await fetch('/test-fixtures/negative-gradient-16.png')).blob();
-      const transfer = new DataTransfer(); transfer.items.add(new File([blob], 'session-cold.png', { type: 'image/png' }));
+      const transfer = new DataTransfer(); transfer.items.add(new File([blob], name, { type: 'image/png' }));
       const originalClick = HTMLInputElement.prototype.click;
       HTMLInputElement.prototype.click = function(...args) {
         if (this.type !== 'file' || this.id) return originalClick.apply(this, args);
@@ -357,17 +363,118 @@ export async function runPhotoSessionSmoke({ send, evaluate, waitFor, fail, inst
       };
       try { document.getElementById('addFilesToolbarBtn').click(); }
       finally { HTMLInputElement.prototype.click = originalClick; }
-      window.__photoSessionProbe.holdFile = 'session-cold.png';
-      document.querySelector('.file-list-name[data-index="3"]').click();
-    })()`);
+      window.__photoSessionProbe.holdFile = name;
+      document.querySelector('.file-list-name[data-index="' + index + '"]').click();
+      // Capture in the click's own turn, before the held asynchronous read.
+      return {
+        filename: document.getElementById('studioFilename').textContent,
+        hidden: document.getElementById('studioPhotoSwitchFeedback')?.hidden,
+        message: document.getElementById('studioPhotoSwitchMessage')?.textContent,
+        target: document.querySelector('.file-list-name[data-photo-switch-target="true"]')?.dataset.index,
+      };
+    }`);
+    const immediate = await evaluate(`window.__startColdPhoto('session-cold.png', 3)`);
+    expect(immediate.filename === 'session-cold.png' && immediate.hidden === false
+      && immediate.target === '3' && immediate.message?.includes('session-cold.png'),
+    'cold click did not synchronously identify and announce its target: ' + JSON.stringify(immediate));
     await until('cold switch read held', `!!window.__photoSessionProbe.releaseFile`, 10000);
+    const feedbackMeasure = `(() => {
+      const veil = document.getElementById('studioPhotoSwitchFeedback');
+      const viewer = document.getElementById('canvasContainer');
+      const target = document.querySelector('.file-list-name[data-photo-switch-target="true"]');
+      const box = veil.getBoundingClientRect(), view = viewer.getBoundingClientRect();
+      return { hidden: veil.hidden, role: veil.getAttribute('role'), live: veil.getAttribute('aria-live'),
+        message: document.getElementById('studioPhotoSwitchMessage').textContent,
+        filename: document.getElementById('studioFilename').textContent,
+        busy: viewer.getAttribute('aria-busy'), stripInert: document.getElementById('studioFilmstrip').inert,
+        target: target?.dataset.index, targetBusy: target?.getAttribute('aria-busy'),
+        active: target?.closest('.file-list-item').classList.contains('active'),
+        indicator: target?.querySelector('.file-list-switch-state')?.textContent,
+        box: { width: box.width, height: box.height, left: box.left, top: box.top, right: box.right, bottom: box.bottom },
+        view: { width: view.width, height: view.height, left: view.left, top: view.top, right: view.right, bottom: view.bottom },
+        exportDisabled: document.getElementById('exportBtn').disabled,
+        panelInert: document.querySelector('.controls-panel').inert };
+    })()`;
+    const coldFeedback = await evaluate(feedbackMeasure);
+    expect(!coldFeedback.hidden && coldFeedback.role === 'status' && coldFeedback.live === 'polite'
+      && coldFeedback.busy === 'true' && !coldFeedback.stripInert && coldFeedback.target === '3'
+      && coldFeedback.targetBusy === 'true' && coldFeedback.active && coldFeedback.indicator
+      && coldFeedback.panelInert && coldFeedback.exportDisabled
+      && coldFeedback.box.width > 100 && coldFeedback.box.height > 50
+      && coldFeedback.box.left <= coldFeedback.view.left + 2 && coldFeedback.box.top <= coldFeedback.view.top + 2
+      && coldFeedback.box.right >= coldFeedback.view.right - 2 && coldFeedback.box.bottom >= coldFeedback.view.bottom - 2,
+    'cold loading feedback is not visible, accessible, viewer-scoped and navigable: ' + JSON.stringify(coldFeedback));
+    const pendingShortcuts = await evaluate(`(() => {
+      const snapshot = () => ({ values: ['cyan', 'magenta', 'yellow', 'coreExposure'].map(id => document.getElementById(id).value),
+        zoom: document.getElementById('canvasTransformWrapper').style.transform,
+        filmType: document.querySelector('.film-type-btn.active')?.dataset.type });
+      const before = snapshot();
+      for (const [key, modifiers] of [['d', {}], ['n', {}], ['c', {}], ['m', {}], ['y', {}],
+        ['z', { ctrlKey: true }], ['Z', { metaKey: true, shiftKey: true }], ['+', {}], ['0', {}]]) {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, ...modifiers }));
+      }
+      return { before, after: snapshot(), undoDisabled: document.getElementById('studioUndo').disabled,
+        redoDisabled: document.getElementById('studioRedo').disabled,
+        historyInert: document.getElementById('studioHistory').inert };
+    })()`);
+    expect(JSON.stringify(pendingShortcuts.before) === JSON.stringify(pendingShortcuts.after)
+      && pendingShortcuts.undoDisabled && pendingShortcuts.redoDisabled && pendingShortcuts.historyInert,
+    'global edit/history/zoom shortcuts bypassed the cold-photo lock: ' + JSON.stringify(pendingShortcuts));
+    await evaluate(`document.querySelector('.lang-btn[data-lang="zh"]').click()`);
+    await until('Chinese target-specific cold feedback', `document.getElementById('studioPhotoSwitchMessage').textContent.includes('session-cold.png')
+      && /[\u4e00-\u9fff]/.test(document.getElementById('studioPhotoSwitchMessage').textContent)`, 5000);
+    const coldScreenshot = await send('Page.captureScreenshot', { format: 'png' });
+    expect(coldScreenshot.result?.data, 'cold switch screenshot was not captured');
+    const coldScreenshotPath = fileURLToPath(new URL('../output/playwright/photo-switch-loading.png', import.meta.url));
+    await writeFile(coldScreenshotPath, Buffer.from(coldScreenshot.result.data, 'base64'));
+    await evaluate(`document.querySelector('.lang-btn[data-lang="ja"]').click()`);
+    await until('Japanese target-specific cold feedback', `document.getElementById('studioPhotoSwitchMessage').textContent.includes('session-cold.png')
+      && /[\u3040-\u30ff]/.test(document.getElementById('studioPhotoSwitchMessage').textContent)`, 5000);
+    await evaluate(`document.querySelector('.lang-btn[data-lang="en"]').click()`);
     await evaluate(`document.querySelector('.file-list-name[data-index="0"]').click()`);
     await until('newer warm click wins while older decode waits', `${ready} && document.getElementById('studioFilename').textContent === 'session-roll-1.png'`, 10000);
+    const feedbackCleared = `document.getElementById('studioPhotoSwitchFeedback').hidden
+      && document.getElementById('canvasContainer').getAttribute('aria-busy') !== 'true'
+      && !document.getElementById('studioHistory').inert
+      && !document.body.dataset.photoSwitching
+      && !document.querySelector('.file-list-name[data-photo-switch-target="true"]')
+      && !document.querySelector('.file-list-switch-state:not([hidden])')`;
+    expect(await evaluate(feedbackCleared), 'warm supersession left stale cold-photo indicators');
     await evaluate('window.__photoSessionProbe.releaseFile()');
     await idle();
     const latest = await evaluate('window.__photoSessionProbe.snapshot()');
     expect(latest.filename === 'session-roll-1.png' && latest.active === '0'
       && !await evaluate('window.__photoSessionProbe.holdTimedOut'), 'late cold decode replaced the newer clicked photo: ' + JSON.stringify(latest));
+    expect(await evaluate(feedbackCleared), 'stale cold completion restored a superseded indicator');
+
+    // A successful first open must clear feedback only after the new positive
+    // is ready, not merely after decoding the source container.
+    await evaluate(`window.__startColdPhoto('session-cold-success.png', 4)`);
+    await until('successful cold switch read held', `!!window.__photoSessionProbe.releaseFile`, 10000);
+    const successPending = await evaluate(feedbackMeasure);
+    expect(successPending.target === '4' && !successPending.hidden && successPending.busy === 'true',
+      'second cold target did not receive loading ownership: ' + JSON.stringify(successPending));
+    await evaluate('window.__photoSessionProbe.releaseFile()');
+    await until('cold positive ready and feedback cleared', `${ready} && ${feedbackCleared}
+      && document.getElementById('studioFilename').textContent === 'session-cold-success.png'
+      && document.querySelector('.file-list-name[aria-current="true"]')?.dataset.index === '4'`, 120000);
+    await idle();
+
+    // Exercise the real loadFile error path after visible pending feedback;
+    // the deliberate read failure must not leave controls/veil stuck.
+    await evaluate(`window.__photoSessionProbe.rejectFile = 'session-cold-error.png';
+      window.__startColdPhoto('session-cold-error.png', 5)`);
+    await until('failed cold switch read held', `!!window.__photoSessionProbe.releaseFile`, 10000);
+    expect((await evaluate(feedbackMeasure)).target === '5', 'failed cold target was not announced');
+    await evaluate('window.__photoSessionProbe.releaseFile()');
+    await until('failed cold switch releases feedback and controls', `${feedbackCleared}
+      && !document.body.dataset.studioBusy && !document.querySelector('.controls-panel').inert`, 30000);
+    await evaluate(`document.querySelector('.file-list-name[data-index="0"]').click()`);
+    await until('navigation works after failed cold read', `${ready} && ${feedbackCleared}
+      && document.getElementById('studioFilename').textContent === 'session-roll-1.png'`, 30000);
+    expect(!await evaluate('window.__photoSessionProbe.holdTimedOut'), 'a held cold read auto-released instead of being tested');
+    console.log('photo switch feedback:', JSON.stringify({ immediate, coldFeedback, pendingShortcuts, successPending, screenshot: coldScreenshotPath,
+      supersessionCleared: true, coldSuccessCleared: true, coldErrorRecovered: true }));
     console.log('photo sessions roll thumbnails:', JSON.stringify({ initial: initialRoll.map(({ means }) => means), pending,
       final: roll.map(({ means, chroma }) => ({ means, chroma })) }));
     console.log('ok: warm photo sessions preserve edited GPU pixels, zoom and exact 8/16-bit exports without decoding/converting; roll thumbnails refresh and latest click wins');
@@ -384,6 +491,7 @@ export async function runPhotoSessionSmoke({ send, evaluate, waitFor, fail, inst
     } catch { /* Keep the original assertion if the document itself failed. */ }
   } finally {
     await evaluate('window.__restorePhotoSessionProbe?.()');
+    await evaluate('delete window.__startColdPhoto');
   }
   if (failure) fail(failure.message);
 }
