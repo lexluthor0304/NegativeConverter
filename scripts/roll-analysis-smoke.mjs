@@ -10,15 +10,21 @@ export async function runRollAnalysisSmoke({ send, evaluate, waitFor, wait, fail
   const fixtures = ['negative-strip-dx.png', 'negative-strip-dx-dark.png', 'negative-strip-other.png']
     .map((name) => join(root, 'negative2positive', 'test-fixtures', name));
 
+  const previousOrigin = await evaluate('performance.timeOrigin');
   await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
-  await waitFor('roll analysis workspace boot', `!!document.getElementById('studioImportAutoCrop') && (!!document.getElementById('fileInput') && !!document.getElementById('analyzeRollBtn'))`);
+  await waitFor('roll analysis workspace boot', `performance.timeOrigin !== ${previousOrigin} && document.readyState === 'complete' && !!document.getElementById('studioImportAutoCrop') && (!!document.getElementById('fileInput') && !!document.getElementById('analyzeRollBtn'))`);
   await installDialogAutoAccept();
   await wait(300);
-  await evaluate(`(() => {
+  const automaticRollWasEnabled = await evaluate(`(() => {
+    // This scenario explicitly tests the manual analyse/clear buttons. Do not
+    // let a slower background thumbnail pass turn it into a second analysis.
+    const autoRoll = document.getElementById('autoRollOnImport');
+    const automatic = autoRoll.checked; if (automatic) autoRoll.click();
     window.__rollToasts = [];
     new MutationObserver((records) => {
       for (const record of records) for (const node of record.addedNodes) if (node.nodeType === 1) window.__rollToasts.push(node.textContent);
     }).observe(document.getElementById('toastContainer'), { childList: true });
+    return automatic;
   })()`);
 
   const doc = await send('DOM.getDocument');
@@ -45,6 +51,7 @@ export async function runRollAnalysisSmoke({ send, evaluate, waitFor, wait, fail
       const bitmap = await createImageBitmap(await (await fetch(img.src)).blob());
       const c = document.createElement('canvas'); c.width = bitmap.width; c.height = bitmap.height;
       const ctx = c.getContext('2d'); ctx.drawImage(bitmap, 0, 0);
+      bitmap.close();
       const d = ctx.getImageData(0, 0, c.width, c.height).data;
       let r = 0, g = 0, b = 0, n = 0;
       for (let i = 0; i < d.length; i += 16) { r += d[i]; g += d[i + 1]; b += d[i + 2]; n++; }
@@ -52,12 +59,29 @@ export async function runRollAnalysisSmoke({ send, evaluate, waitFor, wait, fail
     }
     return out;
   })()`;
+  const previewsReady = `document.querySelectorAll('.file-list-name[data-preview-state="ready"] img.file-list-thumbnail').length === 3 && document.querySelectorAll('.file-list-name[aria-busy="true"]').length === 0`;
+  // Ordinary background previews are already converted positives; compare to
+  // independently decoded source negatives, not to a now-obsolete raw tile.
+  const rawMeans = await evaluate(`(async () => {
+    const out = [];
+    for (const name of ['negative-strip-dx.png', 'negative-strip-dx-dark.png', 'negative-strip-other.png']) {
+      const bitmap = await createImageBitmap(await (await fetch('/test-fixtures/' + name)).blob(), { resizeWidth: 144, resizeQuality: 'low' });
+      const canvas = document.createElement('canvas'); canvas.width = bitmap.width; canvas.height = bitmap.height;
+      const context = canvas.getContext('2d'); context.drawImage(bitmap, 0, 0); bitmap.close();
+      const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+      const sums = [0, 0, 0]; let count = 0;
+      for (let i = 0; i < pixels.length; i += 16) { for (let c = 0; c < 3; c++) sums[c] += pixels[i + c]; count++; }
+      out.push(sums.map(value => Math.round(value / count)));
+    }
+    return out;
+  })()`);
   // Thumbnails intentionally yield to the active photo and import analysis.
-  await waitFor('background roll thumbnails ready', `document.querySelectorAll('img.file-list-thumbnail').length === 3`, 120_000);
+  await waitFor('background processed roll thumbnails ready', previewsReady, 120_000);
   const thumbsBefore = await evaluate(thumbnailMeans);
+  const urlsBefore = await evaluate(`[...document.querySelectorAll('img.file-list-thumbnail')].map(image => image.src)`);
   await evaluate(`document.getElementById('analyzeRollBtn').click()`);
   await waitFor('roll analysis finished', `${ready} && /2\\/3 frames/.test(document.getElementById('rollAnalysisStatus').textContent)`, 180_000);
-  await wait(1200);
+  await waitFor('roll-adjusted processed thumbnails ready', `${ready} && ${previewsReady}`, 120_000);
 
   const after = await evaluate(`(() => ({
     status: document.getElementById('rollAnalysisStatus').textContent,
@@ -75,18 +99,19 @@ export async function runRollAnalysisSmoke({ send, evaluate, waitFor, wait, fail
   if (!after.badges[2].some((b) => /roll-outlier/.test(b))) fail('outlier badge missing on the Portra strip: ' + JSON.stringify(after.badges));
   if (after.badges[0].some((b) => /roll-outlier/.test(b)) || after.badges[1].some((b) => /roll-outlier/.test(b))) fail('matching strips must not be flagged: ' + JSON.stringify(after.badges));
   if (!after.clearEnabled) fail('clear button stays disabled after an analysis');
-  // Unopened frames now show converted positives instead of orange negatives:
-  // the red share of the thumbnail drops once the orange mask is gone. The
-  // outlier strip converts with the border auto-detect base (the import no
-  // longer applies the rebate base), which leaves it a little warmer, so the
-  // required drop is modest; an unconverted negative would not drop at all.
+  // Before and after roll analysis every tile must be a positive. In addition,
+  // the locked inliers must actually receive refreshed pixels, not just badges.
   const thumbsAfter = await evaluate(thumbnailMeans);
-  console.log('roll analysis thumbnails:', JSON.stringify({ before: thumbsBefore, after: thumbsAfter }));
+  const urlsAfter = await evaluate(`[...document.querySelectorAll('img.file-list-thumbnail')].map(image => image.src)`);
+  console.log('roll analysis thumbnails:', JSON.stringify({ sourceNegatives: rawMeans, before: thumbsBefore, after: thumbsAfter }));
   if (thumbsBefore.length !== 3 || thumbsAfter.length !== 3) fail('expected three thumbnails: ' + JSON.stringify({ thumbsBefore, thumbsAfter }));
-  for (const index of [1, 2]) {
+  for (const index of [0, 1, 2]) {
     const redShare = (rgb) => rgb[0] / Math.max(1, rgb[0] + rgb[1] + rgb[2]);
-    if (redShare(thumbsAfter[index]) > redShare(thumbsBefore[index]) - 0.02) fail(`thumbnail ${index} still looks like the negative: ` + JSON.stringify({ before: thumbsBefore[index], after: thumbsAfter[index] }));
+    for (const [phase, thumbnails] of [['before analysis', thumbsBefore], ['after analysis', thumbsAfter]]) {
+      if (redShare(thumbnails[index]) > redShare(rawMeans[index]) - 0.02) fail(`thumbnail ${index} still looks like the negative ${phase}: ` + JSON.stringify({ raw: rawMeans[index], actual: thumbnails[index] }));
+    }
   }
+  if (![0, 1].some(index => urlsBefore[index] !== urlsAfter[index])) fail('roll locking did not change either inlier thumbnail');
   const rollBase = after.filmBase.match(/R: (\d+) G: (\d+) B: (\d+)/);
   if (!rollBase) fail('film base values missing after roll analysis: ' + after.filmBase);
 
@@ -112,7 +137,7 @@ export async function runRollAnalysisSmoke({ send, evaluate, waitFor, wait, fail
 
   // Clearing releases every frame.
   await evaluate(`document.getElementById('clearRollAnalysisBtn').click()`);
-  await wait(800);
+  await waitFor('cleared roll previews ready', `${ready} && ${previewsReady} && /Not analysed yet/.test(document.getElementById('rollAnalysisStatus').textContent)`, 120_000);
   const cleared = await evaluate(`(() => ({
     status: document.getElementById('rollAnalysisStatus').textContent,
     frame: document.getElementById('rollAnalysisFrameStatus').textContent,
@@ -121,6 +146,9 @@ export async function runRollAnalysisSmoke({ send, evaluate, waitFor, wait, fail
   }))()`);
   console.log('roll analysis cleared:', JSON.stringify(cleared));
   if (!/Not analysed yet/.test(cleared.status) || cleared.frame !== '' || cleared.clearEnabled || cleared.outlierBadges !== 0) fail('clear roll analysis did not reset the roll: ' + JSON.stringify(cleared));
+  const urlsCleared = await evaluate(`[...document.querySelectorAll('img.file-list-thumbnail')].map(image => image.src)`);
+  if (![0, 1].some(index => urlsCleared[index] !== urlsAfter[index])) fail('clearing roll analysis retained both locked inlier previews');
+  if (automaticRollWasEnabled) await evaluate(`document.getElementById('autoRollOnImport').click()`);
 
   console.log('ok: roll analysis locks two matching strips to one base and tone analysis, offsets the denser strip, flags the Portra strip and clears cleanly');
 }
