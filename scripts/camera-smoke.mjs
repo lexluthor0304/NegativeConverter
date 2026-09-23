@@ -69,7 +69,7 @@ export async function runCameraSmoke({ send, evaluate, waitFor, wait, fail, inst
   if (!(falloff >= 20 && falloff <= 40)) fail('measured falloff is not the 30 % of the fixture: ' + built);
   if (!(await evaluate(`window.__cameraToasts.some((t) => /Flat field applied to 1 photo/.test(t))`))) fail('flat field apply toast missing');
 
-  await evaluate(`document.querySelectorAll('.file-list-name')[1].click()`);
+  await evaluate(`document.querySelector('.file-list-name[data-index="1"]').click()`);
   await waitFor('vignetted negative opened', `${ready} && document.getElementById('studioFilename').textContent === 'negative-vignetted.png'`, 150_000);
   await wait(1500);
   const applied = await evaluate(`document.getElementById('flatFieldEnabled').checked`);
@@ -233,9 +233,8 @@ async function runMultiShotScenario({ send, evaluate, waitFor, wait, fail, insta
   const select = async (wanted) => {
     await evaluate(`(() => {
       const wanted = ${JSON.stringify(wanted)};
-      for (let i = 0; i < document.querySelectorAll('.file-list-checkbox').length; i++) {
-        const box = document.querySelectorAll('.file-list-checkbox')[i];
-        if (box.checked !== wanted.includes(i)) box.click();
+      for (const box of document.querySelectorAll('.file-list-checkbox')) {
+        if (box.checked !== wanted.includes(Number(box.dataset.index))) box.click();
       }
     })()`);
     await waitFor(`${wanted.length} shots selected`, `document.getElementById('studioSelection').textContent.startsWith('${wanted.length} ')`, 10_000);
@@ -273,7 +272,7 @@ async function runMultiShotScenario({ send, evaluate, waitFor, wait, fail, insta
   const toast = await evaluate(`(window.__cameraToasts || []).find((t) => /Merged \\d+ shots/.test(t)) || ''`);
   console.log('camera multi-shot:', toast);
   if (!/^Merged 3 shots into merged-average-/.test(toast)) fail('average merge toast wrong: ' + toast);
-  const boxes = await evaluate(`Array.from(document.querySelectorAll('.file-list-checkbox')).map((el) => el.checked)`);
+  const boxes = await evaluate(`[...document.querySelectorAll('.file-list-checkbox')].sort((a, b) => Number(a.dataset.index) - Number(b.dataset.index)).map(el => el.checked)`);
   if (boxes.length !== 5 || boxes.filter(Boolean).length !== 1 || !boxes[4]) fail('the merged file should be the only selected item: ' + JSON.stringify(boxes));
   const merged = await grain();
   console.log('camera multi-shot grain:', JSON.stringify({ single, merged }));

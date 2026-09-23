@@ -84,7 +84,7 @@ export async function runFilmEdgeSmoke({ send, evaluate, waitFor, wait, fail, in
   if (!/Applied the .*ULTRA MAX 400.* preset/i.test(applied)) fail('apply button toast missing: ' + applied);
 
   // A frame without perforations reports no code and gets no badge.
-  await evaluate(`document.querySelectorAll('.file-list-name')[1].click()`);
+  await evaluate(`document.querySelector('.file-list-name[data-index="1"]').click()`);
   await waitFor('plain frame opened',
     `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy && document.getElementById('studioFilename').textContent === 'negative-plain.png'`,
     150_000);
@@ -92,7 +92,7 @@ export async function runFilmEdgeSmoke({ send, evaluate, waitFor, wait, fail, in
   const plainResult = await evaluate(`(() => ({
     groupVisible: document.getElementById('filmEdgeGroup').style.display !== 'none',
     status: document.getElementById('filmEdgeStatus').textContent,
-    badges: [...document.querySelectorAll('.file-list-item')].map((el) => el.querySelector('.file-list-badge.film-stock')?.textContent || null),
+    badges: [0, 1].map(index => document.querySelector('.file-list-name[data-index="' + index + '"]').closest('.file-list-item').querySelector('.file-list-badge.film-stock')?.textContent || null),
     applyVisible: document.getElementById('applyFilmEdgePresetBtn').style.display !== 'none'
   }))()`);
   console.log('film edge plain-frame evidence:', JSON.stringify(plainResult));

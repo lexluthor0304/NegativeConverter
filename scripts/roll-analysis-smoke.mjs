@@ -45,9 +45,13 @@ export async function runRollAnalysisSmoke({ send, evaluate, waitFor, wait, fail
   console.log('roll analysis before:', JSON.stringify(before));
   if (!before.groupVisible || !before.analyzeEnabled || before.clearEnabled) fail('roll analysis controls not in the expected initial state: ' + JSON.stringify(before));
 
+  // These arrays are compared to the source fixture list, not visual order.
+  const buttonsBySourceIndex = `[...document.querySelectorAll('.file-list-name')].sort((a, b) => Number(a.dataset.index) - Number(b.dataset.index))`;
+  const thumbnailUrls = `${buttonsBySourceIndex}.map(button => button.querySelector('img.file-list-thumbnail').src)`;
   const thumbnailMeans = `(async () => {
     const out = [];
-    for (const img of document.querySelectorAll('img.file-list-thumbnail')) {
+    for (const button of ${buttonsBySourceIndex}) {
+      const img = button.querySelector('img.file-list-thumbnail');
       const bitmap = await createImageBitmap(await (await fetch(img.src)).blob());
       const c = document.createElement('canvas'); c.width = bitmap.width; c.height = bitmap.height;
       const ctx = c.getContext('2d'); ctx.drawImage(bitmap, 0, 0);
@@ -78,7 +82,7 @@ export async function runRollAnalysisSmoke({ send, evaluate, waitFor, wait, fail
   // Thumbnails intentionally yield to the active photo and import analysis.
   await waitFor('background processed roll thumbnails ready', previewsReady, 120_000);
   const thumbsBefore = await evaluate(thumbnailMeans);
-  const urlsBefore = await evaluate(`[...document.querySelectorAll('img.file-list-thumbnail')].map(image => image.src)`);
+  const urlsBefore = await evaluate(thumbnailUrls);
   await evaluate(`document.getElementById('analyzeRollBtn').click()`);
   await waitFor('roll analysis finished', `${ready} && /2\\/3 frames/.test(document.getElementById('rollAnalysisStatus').textContent)`, 180_000);
   await waitFor('roll-adjusted processed thumbnails ready', `${ready} && ${previewsReady}`, 120_000);
@@ -87,7 +91,7 @@ export async function runRollAnalysisSmoke({ send, evaluate, waitFor, wait, fail
     status: document.getElementById('rollAnalysisStatus').textContent,
     frame: document.getElementById('rollAnalysisFrameStatus').textContent,
     filmBase: document.getElementById('filmBaseValues').textContent,
-    badges: [...document.querySelectorAll('.file-list-item')].map((el) => [...el.querySelectorAll('.file-list-badge')].map((b) => b.className.replace('file-list-badge', '').trim() + ':' + b.textContent)),
+    badges: ${buttonsBySourceIndex}.map(button => [...button.closest('.file-list-item').querySelectorAll('.file-list-badge')].map(b => b.className.replace('file-list-badge', '').trim() + ':' + b.textContent)),
     toasts: window.__rollToasts.slice(),
     clearEnabled: !document.getElementById('clearRollAnalysisBtn').disabled
   }))()`);
@@ -102,7 +106,7 @@ export async function runRollAnalysisSmoke({ send, evaluate, waitFor, wait, fail
   // Before and after roll analysis every tile must be a positive. In addition,
   // the locked inliers must actually receive refreshed pixels, not just badges.
   const thumbsAfter = await evaluate(thumbnailMeans);
-  const urlsAfter = await evaluate(`[...document.querySelectorAll('img.file-list-thumbnail')].map(image => image.src)`);
+  const urlsAfter = await evaluate(thumbnailUrls);
   console.log('roll analysis thumbnails:', JSON.stringify({ sourceNegatives: rawMeans, before: thumbsBefore, after: thumbsAfter }));
   if (thumbsBefore.length !== 3 || thumbsAfter.length !== 3) fail('expected three thumbnails: ' + JSON.stringify({ thumbsBefore, thumbsAfter }));
   for (const index of [0, 1, 2]) {
@@ -116,7 +120,7 @@ export async function runRollAnalysisSmoke({ send, evaluate, waitFor, wait, fail
   if (!rollBase) fail('film base values missing after roll analysis: ' + after.filmBase);
 
   // The denser strip shares the roll base and carries a negative exposure offset.
-  await evaluate(`document.querySelectorAll('.file-list-name')[1].click()`);
+  await evaluate(`document.querySelector('.file-list-name[data-index="1"]').click()`);
   await waitFor('dark strip opened', `${ready} && document.getElementById('studioFilename').textContent === 'negative-strip-dx-dark.png'`, 150_000);
   await wait(600);
   const dark = await evaluate(`(() => ({
@@ -129,7 +133,7 @@ export async function runRollAnalysisSmoke({ send, evaluate, waitFor, wait, fail
   if (!/locked to the roll, -\d\.\d stop/.test(dark.frame)) fail('denser strip should carry a negative exposure offset: ' + dark.frame);
 
   // The Portra strip keeps its own analysis and says why.
-  await evaluate(`document.querySelectorAll('.file-list-name')[2].click()`);
+  await evaluate(`document.querySelector('.file-list-name[data-index="2"]').click()`);
   await waitFor('other strip opened', `${ready} && document.getElementById('studioFilename').textContent === 'negative-strip-other.png'`, 150_000);
   await wait(600);
   const other = await evaluate(`document.getElementById('rollAnalysisFrameStatus').textContent`);
@@ -146,7 +150,7 @@ export async function runRollAnalysisSmoke({ send, evaluate, waitFor, wait, fail
   }))()`);
   console.log('roll analysis cleared:', JSON.stringify(cleared));
   if (!/Not analysed yet/.test(cleared.status) || cleared.frame !== '' || cleared.clearEnabled || cleared.outlierBadges !== 0) fail('clear roll analysis did not reset the roll: ' + JSON.stringify(cleared));
-  const urlsCleared = await evaluate(`[...document.querySelectorAll('img.file-list-thumbnail')].map(image => image.src)`);
+  const urlsCleared = await evaluate(thumbnailUrls);
   if (![0, 1].some(index => urlsCleared[index] !== urlsAfter[index])) fail('clearing roll analysis retained both locked inlier previews');
   if (automaticRollWasEnabled) await evaluate(`document.getElementById('autoRollOnImport').click()`);
 

@@ -17,7 +17,7 @@ export async function runRollFilmTypeSmoke({send,evaluate,waitFor,wait,fail,inst
     const input=document.getElementById('folderInput');input.files=dt.files;input.dispatchEvent(new Event('change',{bubbles:true}));
   })()`);
   await waitFor('background import paused',`${ready}&&!!window.__release`,120000);
-  await evaluate(`document.querySelectorAll('.file-list-checkbox')[2].click()`);
+  await evaluate(`document.querySelector('.file-list-checkbox[data-index="2"]').click()`);
   await evaluate(`document.querySelector('.film-type-btn[data-type="bw"]').click()`);
   await wait(1200);
   await evaluate(`document.getElementById('applyFilmTypeToRollBtn').click()`);

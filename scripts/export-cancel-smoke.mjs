@@ -11,7 +11,7 @@ export async function runExportCancelSmoke({ evaluate, waitFor, fail }) {
         file: document.getElementById('studioFilename').textContent,
         cyan: document.getElementById('cyan').value,
         exposure: document.getElementById('coreExposure').value,
-        active: [...document.querySelectorAll('.file-list-item')].findIndex(el => el.classList.contains('active')) });
+        active: document.querySelector('.file-list-item.active .file-list-name')?.dataset.index });
     };
     const probe = window.__exportCancelProbe = {
       snapshot, before: snapshot(), calls: [], work: [], bytes: 0,

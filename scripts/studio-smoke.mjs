@@ -225,7 +225,7 @@ export async function runStudioSmoke({ send, evaluate, waitFor, wait, fail, inst
   })()`);
   await wait(1200);
   await evaluate(`document.getElementById('studioSync').click()`);
-  await evaluate(`document.querySelectorAll('.file-list-name')[1].click()`);
+  await evaluate(`document.querySelector('.file-list-name[data-index="1"]').click()`);
   await waitFor('studio second photo', `document.getElementById('studioFilename').textContent.includes('negative-sample-2') && document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`, 120_000);
   const restored = await evaluate(`Number(document.getElementById('coreTemperature').value)`);
   if (restored !== 24) fail(`studio synced color was not restored: ${restored}`);
@@ -238,7 +238,7 @@ export async function runStudioSmoke({ send, evaluate, waitFor, wait, fail, inst
   console.log('ok: studio sync applies color to an unopened photo; reset and undo preserve it');
 
   // 開いたことがある写真に戻っても、自動変換が保存済みの調色を上書きしない。
-  await evaluate(`document.querySelectorAll('.file-list-name')[0].click()`);
+  await evaluate(`document.querySelector('.file-list-name[data-index="0"]').click()`);
   await waitFor('studio first photo restored', `document.getElementById('studioFilename').textContent.endsWith('negative-sample.png') && document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`, 120_000);
   if (await evaluate(`Number(document.getElementById('coreTemperature').value)`) !== 24) fail('studio switching lost color settings');
   await wait(1000);

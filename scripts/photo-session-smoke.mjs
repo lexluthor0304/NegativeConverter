@@ -330,12 +330,14 @@ export async function runPhotoSessionSmoke({ send, evaluate, waitFor, fail, inst
     const pending = await evaluate(`(() => {
       document.getElementById('applyFilmTypeToRollBtn').click();
       return [...document.querySelectorAll('.file-list-name')].map(button => ({
+        index: Number(button.dataset.index),
         state: button.dataset.previewState, busy: button.getAttribute('aria-busy'),
         thumbnail: !!button.querySelector('img.file-list-thumbnail'), placeholder: !!button.querySelector('.file-list-placeholder')
       }));
     })()`);
     expect(pending.length === 3 && pending.every(row => row.thumbnail && !row.placeholder)
-      && pending.slice(1).every(row => row.state === 'pending' && row.busy === 'true'),
+      && pending.filter(row => row.index !== 0).length === 2
+      && pending.filter(row => row.index !== 0).every(row => row.state === 'pending' && row.busy === 'true'),
     'whole-roll invalidation must retain previews and mark unopened tiles pending: ' + JSON.stringify(pending));
     await until('roll apply refreshes active and unopened previews', `${ready} && document.querySelectorAll('.file-list-name[data-preview-state="ready"] img.file-list-thumbnail').length === 3 && document.querySelectorAll('.file-list-placeholder').length === 0 && document.querySelectorAll('.file-list-name[aria-busy="true"]').length === 0`, 120000);
     await exportPixels(8);

@@ -278,7 +278,7 @@ export async function runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail,
 
   // Open the negative: identified by its rebate, converted first, then
   // rescued from the converted positive with its own diagnosis.
-  await evaluate(`document.querySelectorAll('.file-list-name')[1].click()`);
+  await evaluate(`document.querySelector('.file-list-name[data-index="1"]').click()`);
   await waitFor('aged negative opened', `${ready} && document.getElementById('studioFilename').textContent === 'expired-negative.png'`, 150000);
   await wait(1200);
   const second = await evaluate(panel);
