@@ -14,7 +14,8 @@
 // typed film statistics against the frozen comparator versions at buffers
 // 0/10/30; and the lazy (Blob) embedded-preview path against the eager one —
 // for DSC_8800/8798/8806/4127.NEF that is the preview decode itself.
-// Prints SHA-256 of the RGBA16 plane, the 8-bit plane and the defect stats.
+// Prints SHA-256 of the RGBA16 plane, the 8-bit plane and the defect stats,
+// plus both kernels' times on the real plane under Chrome's V8.
 // RAW_PARITY_EXPECTED=/abs/hashes.json compares them with values recorded from
 // 1703835 (record there with RAW_PARITY_RECORD=1, which only needs loadRawFile).
 import { readFileSync } from 'node:fs';
@@ -137,11 +138,20 @@ export async function runRawParitySmoke({ send, evaluate, waitFor, fail, port })
       if (shippedRgba16 && !previewFallback) {
         const raw = await loadRawFile(await file.arrayBuffer(), file.name, { sourceBlob: file, suppressSensorDefects: false });
         const plane = { width: raw.width, height: raw.height, data: raw.__image16.data };
+        // Both kernels on this real plane, timed under Chrome's V8.
+        const { suppressSensorDefects } = await import('/src/silvercore/util/sensorDefects.js');
+        const fast = { width: raw.width, height: raw.height, data: new Uint16Array(plane.data) };
+        let t = performance.now();
+        const fastStats = suppressSensorDefects(fast);
+        out.fastKernelMs = Math.round(performance.now() - t);
+        t = performance.now();
         const stats = suppressSensorDefectsReference(plane);
+        out.referenceKernelMs = Math.round(performance.now() - t);
+        out.kernelStatsMatch = JSON.stringify(fastStats) === JSON.stringify(stats);
         let same16 = plane.data.length === shippedRgba16.length, same8 = true;
         for (let i = 0; same16 && i < plane.data.length; i++) if (plane.data[i] !== shippedRgba16[i]) same16 = false;
         for (let i = 0; same8 && i < plane.data.length; i++) if ((plane.data[i] >>> 8) !== shippedRgba8[i]) same8 = false;
-        out.kernelParity = same16 && same8;
+        out.kernelParity = same16 && same8 && out.kernelStatsMatch;
         out.referenceDefects = stats.repaired;
       }
       shippedRgba16 = shippedRgba8 = null;

@@ -306,7 +306,8 @@ if (process.argv.includes('--performance-only')) {
 
 // Opt-in: real RAW files, see scripts/raw-post-decode-smoke.mjs.
 if (process.argv.includes('--raw-parity-only')) {
-  await runRawPostDecodeSmoke({ evaluate, fail });
+  // Recording on 1703835 (RAW_PARITY_RECORD=1) only needs loadRawFile there.
+  if (process.env.RAW_PARITY_RECORD !== '1') await runRawPostDecodeSmoke({ evaluate, fail });
   await runRawParitySmoke({ send, evaluate, waitFor, fail, port: PORT });
   if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
   console.log('SMOKE PASS'); process.exit(0);
