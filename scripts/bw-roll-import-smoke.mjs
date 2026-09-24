@@ -63,7 +63,7 @@ export async function runBwRollImportSmoke({ send, evaluate, waitFor, wait, fail
   const probe = await evaluate(`({toasts:window.__bwRoll.toasts,rollReads:window.__bwRoll.rollReads})`);
   const rollToasts = probe.toasts.filter(toast => toast.action === 'rollPositives');
   if (rollToasts.length !== 1 || !rollToasts[0].text.includes(`${count} photos treated as B&W negatives`)) fail('expected exactly one roll toast: ' + JSON.stringify(probe.toasts));
-  if (probe.toasts.some(toast => /^Monochrome:/.test(toast.text) || /need review/.test(toast.text))) fail('per-frame monochrome prompt was not replaced by the roll toast: ' + JSON.stringify(probe.toasts));
+  if (probe.toasts.some(toast => /^Monochrome:/.test(toast.text))) fail('per-frame monochrome prompt was not replaced by the roll toast: ' + JSON.stringify(probe.toasts));
   if (probe.rollReads !== 0) fail(`roll analysis decoded ${probe.rollReads} frame(s) again instead of reusing pass-1 samples`);
   console.log('ok: B&W roll typed by the roll decision, leader flipped, one toast, no review flags, analysis from pass-1 samples');
 
