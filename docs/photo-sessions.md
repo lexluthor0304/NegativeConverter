@@ -59,6 +59,18 @@ the filmstrip stays interactive while editing and export are locked. The
 localized, live-announced status distinguishes opening from preparing the
 photo. Only the current activation may remove its feedback. Warm session
 restoration skips the loading surface and introduces no artificial dwell.
+
+A photo that still needs its frame and film-edge detection is converted first
+(#236): its provisional settings, the snapshot plus learned values, are
+rendered while both detections run, and the loading surface lifts at that
+paint. During the detection tail the frame notice reads "Detecting the image
+area and tilt…", the filmstrip navigates, and editing, history and export stay
+locked (`studioBusy`). The final settings are then built in the old order
+(frame, film edge, learned defaults); when their conversion key equals the
+provisional one only the detection descriptions are applied, otherwise the
+photo is rendered once more. A provisional photo is never persisted, cached
+as a session snapshot or read by roll analysis: leaving it mid-tail keeps its
+decoded base only, and its settings stay as they were.
 Global history, color-console and zoom shortcuts cannot change the outgoing
 photo while another target is loading; the history controls are locked too.
 

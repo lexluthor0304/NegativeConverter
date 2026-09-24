@@ -59,7 +59,7 @@ function fixture() {
     corePreviewRetained: null, corePreviewCommit: null,
     pendingBrushRepairs: 0, dustDrawing: false, undoStack: [], redoStack: [],
     coreReprocessGeneration: 3, coreReprocessToken: 4, dustDetectionRevision: 5,
-    loadGeneration: 6, _coreReprocessPending: null,
+    loadGeneration: 6, _coreReprocessPending: null, importDetectionAbort: null,
     studioThumbnailUpdateFrame: 0, cancelAnimationFrame: noop,
     studioThumbnailUpdateTimer: 0, clearTimeout: noop,
     exactSettingsKey, schedulePostPaintTask: task => postPaint.push(task),
@@ -266,6 +266,37 @@ function coldFixture() {
   vm.runInContext(functionSource('switchToFile'), c);
   return { ...f, second, third, frames, loads, preparations, feedback };
 }
+// #236: a photo left during its detection tail holds provisional settings.
+// It is neither persisted nor snapshotted: its settings stay null (roll
+// analysis or the next visit detects again) and only its decoded base is kept.
+{
+  const f = coldFixture(), c = f.context;
+  vm.runInContext(functionSource('rememberPhotoBase'), c);
+  f.item.settings = null;
+  f.item.isDirty = true;
+  f.item.provisional = { wasDirty: false };
+  c.getCurrentQueueItem = () => f.item;
+  c.persistCurrentFileSettings = () => assert.fail('a provisional photo is never persisted');
+  c.rememberPhotoSession = () => assert.fail('nor snapshotted into a photo session');
+  // With its base in the cache, its planes are released like any photo left
+  // (#244); a failed switch takes it back from there.
+  let releases = 0;
+  const reactivated = [];
+  c.releaseOutgoingPhotoPlanes = () => { releases++; };
+  c.reactivateReleasedPhoto = item => { reactivated.push(item); return true; };
+  const pending = c.switchToFile(1);
+  assert.equal(f.item.settings, null);
+  assert.equal(f.item.isDirty, false, 'the automatic WB of the provisional render is not kept');
+  assert.equal(f.item.provisional, undefined);
+  const entry = f.photoSessions.peek(f.item);
+  assert.equal(entry.base, f.base, 'the decoded base is reusable on return');
+  assert.equal(entry.snapshot, undefined, 'no provisional snapshot is restored as settled');
+  f.frames.shift()(); await tick();
+  assert.equal(releases, 1, 'the provisional photo\'s planes are released once its base is kept');
+  f.loads[0].resolve({ status: 'stale' });
+  await pending;
+}
+
 for (const outcome of ['success', 'load-error', 'prepare-error']) {
   const f = coldFixture(), c = f.context;
   let redraws = 0;

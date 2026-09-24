@@ -159,5 +159,10 @@ assert.equal(studioText.en.sortModifiedDesc, 'Modified: newest first');
 assert.equal(studioText.zh.sortModifiedDesc, '修改日期：新到旧');
 assert.equal(studioText.ja.sortModifiedDesc, '更新日時：新しい順');
 assert.match(source, /const photoSort = createPhotoSortControl\(\{ select: \$\('studioPhotoSort'\), onSortFiles \}\)/);
-assert.match(source, /photoSort\.sync\(\{ state, busy, photoSwitching: body\.dataset\.photoSwitching === 'true', exportLocked: isExportLocked\(\) \}\)/);
+assert.match(source, /photoSort\.sync\(\{ state, busy, photoSwitching: navigable, exportLocked: isExportLocked\(\) \}\)/);
+// A cold switch and the detection tail of a provisional photo lock editing,
+// not navigation (#236): the strip stays usable while the panel is inert.
+assert.match(source, /const navigable = body\.dataset\.photoSwitching === 'true' \|\| Boolean\(detecting\);\n\s+strip\.inert = busy && !navigable;/);
+assert.match(source, /panel\.inert = busy;/);
+assert.match(source, /t\(detecting === 'frame' \? 'detectingFrame' :/, 'the frame notice reports the running detection');
 console.log('studioWorkspace: shared localized sort select, callback ownership and navigation locks passed');

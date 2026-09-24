@@ -30,6 +30,7 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
     import { createGeometryPool, yieldToEventLoop } from './geometryPool.js';
     import { analyzeFrameInWorker, readFilmEdgeInWorker, createAutoFrameWorkerPool, warmUpAutoFrameWorker } from './autoFrameWorkerClient.js';
     import { detectFrameWithFallback } from './autoFrameExecution.js';
+    import { importConversionKey } from './importDetection.js';
     import { createAnalysisSampleStore } from './analysisSampleStore.js';
     import { mountStudioWorkspace } from './studioWorkspace.js';
     import { AUTO_FRAME_FORMAT_RATIOS, AUTO_FRAME_DEFAULT_120_FORMATS, canAutoApplyImportFrame } from './autoFrameFormats.js';
@@ -3495,7 +3496,8 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
     }
 
     function canActivateBeforeAfter() {
-      if (document.body.dataset.photoSwitching === 'true' || state.cropping || state.samplingMode) return false;
+      if (document.body.dataset.photoSwitching === 'true' || document.body.dataset.studioDetecting
+        || state.cropping || state.samplingMode) return false;
       return Boolean(getBeforeAfterReferenceImageData());
     }
 
@@ -4247,6 +4249,16 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       if (!usesSilverCoreConversion(safeSettings)) return safeSettings;
 
       return stripLegacyToneSettingsForSilverCore(safeSettings);
+    }
+
+    // Two settings objects with the same key convert to the same pixels and
+    // the same automatic analysis (see importDetection.js).
+    function conversionKey(settings, source = state.loadedBaseImageData || state.originalImageData) {
+      return importConversionKey({
+        router: buildRouterSettings(settings, source),
+        adjustment: buildAdjustmentSettings(settings),
+        meta: settings.autoFrameMeta || null
+      });
     }
 
     function applyAdjustmentsToBuffer(imageData, settings, output, quality = 'full') {
@@ -6073,6 +6085,9 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       const sourceRef = state.conversionSourceImageData;
       if (fullResolutionRenderTimer) clearTimeout(fullResolutionRenderTimer);
       fullResolutionRenderTimer = null;
+      // Provisional import settings are never rendered at full resolution;
+      // the final settings arm this render (armSettledConversion).
+      if (getCurrentQueueItem()?.provisional) return null;
       // A 60 MP RAW plus its working 16-bit planes can exhaust WKWebView
       // before the user even exports. The display already has its own preview;
       // original-resolution export/repair calls startFullResolutionRender directly.
@@ -6268,8 +6283,11 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
 
     // `automatic: false` keeps the automatic measurements (white balance,
     // expired analysis) the settings already hold, for rebuilding pixels of a
-    // restored snapshot.
-    async function processNegative({ quiet = false, automatic = true } = {}) {
+    // restored snapshot. `provisional` renders settings that the import
+    // detections may still replace (prepareStudioPhoto): it arms neither the
+    // idle full-resolution render nor the dust pass, which
+    // armSettledConversion starts later.
+    async function processNegative({ quiet = false, automatic = true, provisional = false } = {}) {
       if (processNegativeInFlight) return processNegativeInFlight;
 
       const processingGeneration = coreReprocessGeneration;
@@ -6338,7 +6356,7 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
           updateStudioThumbnail();
           if (hasPreviewSource) {
             state.fullResolutionPending = true;
-            scheduleFullResolutionRender('initial-preview');
+            if (!provisional) scheduleFullResolutionRender('initial-preview');
           } else {
             scheduleFullUpdate();
           }
@@ -6347,9 +6365,10 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
             previewFirst: hasPreviewSource,
             outputPixels: getImageDataPixelCount(processed)
           });
-          if (!quiet) await new Promise(r => setTimeout(r, 250));
+          // The overlay hides in this task; its CSS delay keeps a fast
+          // conversion from flashing it at all.
           // Auto-run dust detection if enabled
-          if (isCurrentConversion() && hasFrameRepairs() && !hasPreviewSource) {
+          if (!provisional && isCurrentConversion() && hasFrameRepairs() && !hasPreviewSource) {
             scheduleDustDetection();
           }
         } catch (err) {
@@ -7434,6 +7453,9 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
     // decode lands on top of the file the user has since opened, and the
     // settings written afterwards attach to the wrong queue entry.
     let loadGeneration = 0;
+    // The background detections of the photo being prepared. A newer
+    // activation aborts both requests (invalidatePhotoActivation).
+    let importDetectionAbort = null;
     const quietLoadingOverlay = { show: async () => {}, updateProgress() {}, hide() {} };
     // Only inactive photos are retained here. Taking the destination before
     // storing the outgoing photo lets A -> B -> A fit a one-photo budget.
@@ -7699,9 +7721,18 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       };
     }
 
+    // Only the decoded base: used for a photo left while its import
+    // detections still ran, whose provisional state must not be restored.
+    function rememberPhotoBase(item) {
+      if (hiddenJobs.safeMode) return false;
+      if (!item || item.file !== state.loadedFile || !state.loadedBaseImageData || state.rawDecodePending) return false;
+      return photoSessions.put(item, { file: item.file, base: state.loadedBaseImageData, rawMetadata: state.rawMetadata });
+    }
+
     function rememberPhotoSession(item) {
       // The crash-loop guard runs a resumed job with the caches off.
       if (hiddenJobs.safeMode) return;
+      if (item?.provisional) return rememberPhotoBase(item);
       if (!item || item.file !== state.loadedFile || !state.loadedBaseImageData || state.rawDecodePending) return;
       const settled = state.currentStep >= 3 && state.processedImageData && !processNegativeInFlight
         && !state.geometryPending
@@ -7818,6 +7849,10 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       state.fullResolutionPromise = null;
       state.dustRemoval.processing = false;
       state.rawDecodePending = false;
+      // The outgoing photo's background detections are dropped with it.
+      importDetectionAbort?.abort(new DOMException('Superseded photo activation', 'AbortError'));
+      importDetectionAbort = null;
+      delete document.body.dataset.studioDetecting;
       getLoadingOverlay().hide();
       noteCoreReprocessSettled();
     }
@@ -7848,9 +7883,12 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
 
     async function loadFile(file, { autoConvert = true, decoded = null, quiet = false } = {}) {
       const generation = ++loadGeneration;
+      // The canvas is uncovered during a photo's detection tail, so a drop
+      // can supersede it; its busy lock belongs to the dropped tail.
+      const supersedesTail = Boolean(document.body.dataset.studioDetecting);
       invalidatePhotoActivation();
       // Direct imports/drops supersede any pending quiet file-list activation.
-      if (!quiet && state.photoSwitchTarget) {
+      if (!quiet && (state.photoSwitchTarget || supersedesTail)) {
         state.photoSwitchTarget = null;
         state.photoSwitchPhase = null;
         delete document.body.dataset.photoSwitching;
@@ -8009,8 +8047,9 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
         }
         if (isRawLikeFile) {
           overlay.updateProgress(100, lang.loadingComplete);
-          if (!quiet) await new Promise(r => setTimeout(r, 200));
-          overlay.hide();
+          // One overlay session from decode to positive: with autoConvert the
+          // conversion re-titles this overlay and hides it after the paint.
+          if (!autoConvert && isCurrentLoad(generation)) overlay.hide();
           // Schedule background full-resolution decode if we used fast preview
           if (state._pendingFullResBuffer) {
             if (isCurrentLoad(generation)) {
@@ -9277,8 +9316,14 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
 
     // `silent` runs without the blocking overlay (background roll analysis
     // must not cover the editor); `analyzeInWorker` picks a worker other than
-    // the shared one so several frames can be detected at once.
-    async function detectFrameAndRotation(imageData, { silent = false, analyzeInWorker = analyzeFrameInWorker, filmType = state.filmType } = {}) {
+    // the shared one so several frames can be detected at once. The import
+    // path passes the auto-frame settings and film type of its snapshot, so a
+    // provisional render cannot change what the detector sees, and a signal
+    // that a superseded activation aborts.
+    async function detectFrameAndRotation(imageData, {
+      silent = false, analyzeInWorker = analyzeFrameInWorker,
+      autoFrame = state.autoFrame, filmType = state.filmType, signal = null
+    } = {}) {
       if (!imageData) return null;
       const overlay = getLoadingOverlay();
       const ownsOverlay = !silent && !overlay.isVisible;
@@ -9290,7 +9335,7 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       try {
       const options = {
         settings: {
-          ...state.autoFrame,
+          ...autoFrame,
           filmType
         },
         maxSide: AUTO_FRAME_MAX_SIDE,
@@ -9301,7 +9346,7 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       let mainThread = false;
       const result = await detectFrameWithFallback(imageData, options, {
         workerSupported: typeof Worker === 'function' && typeof OffscreenCanvas === 'function',
-        analyzeInWorker,
+        analyzeInWorker: signal ? (image, config) => analyzeInWorker(image, config, 'analyze-frame', { signal }) : analyzeInWorker,
         ensureOpenCvReady,
         onWorkerError: err => console.warn('Auto-frame worker unavailable, using fallback:', err),
         analyzeOnMainThread: async (source, config) => {
@@ -10326,6 +10371,9 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
     // n = reset all four channels. Guarded like the other global shortcuts.
     document.addEventListener('keydown', (event) => {
       if (!stateReady || state.currentStep < 3) return;
+      // A photo being prepared (e.g. its provisional render while detection
+      // runs) is not editable yet; the panel is inert then too.
+      if (document.body.dataset.studioBusy) return;
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       if (isEditableTarget(event.target)) return;
       if (state.cropping || state.samplingMode) return;
@@ -12424,6 +12472,9 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       const { silent = false, force = false } = options;
       const item = getCurrentQueueItem();
       if (!item) return false;
+      // Provisional import settings (detections still running) are never
+      // saved; `isDirty` cannot tell, since their automatic WB sets it.
+      if (item.provisional) return false;
       if (!state.originalImageData) return false;
       if (!force && !item.isDirty && item.settings) return false;
 
@@ -13916,7 +13967,14 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       // list. Refresh it once: before the cold feedback paints, or in finally.
       const flushFileList = deferFileListRefresh();
       let released = null;
-      if (leavingItem && leavingItem.file === state.loadedFile
+      if (leavingItem?.provisional) {
+        // Left while its detections still ran: its settings stay as they were
+        // (null for a fresh photo, so roll analysis or the next visit detects
+        // again), and only the decoded base is kept.
+        leavingItem.isDirty = leavingItem.provisional.wasDirty;
+        if (rememberPhotoBase(leavingItem)) released = leavingItem;
+        delete leavingItem.provisional;
+      } else if (leavingItem && leavingItem.file === state.loadedFile
         && (leavingItem.isDirty || leavingItem.settings || state.currentStep >= 3)) {
         persistCurrentFileSettings({ silent: true, force: true });
         if (rememberPhotoSession(leavingItem)) released = leavingItem;
@@ -14056,6 +14114,50 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       void learnFromExport(getCurrentQueueItem());
     }
 
+    function restoreAutoFrameDiagnostics(meta) {
+      if (meta) {
+        const restoredMode = meta.appliedMode
+          || (Boolean(meta.rotateOnly) ? 'rotateOnly' : 'none');
+        state.autoFrame.lastDiagnostics = {
+          confidence: meta.confidence,
+          detectedFormat: meta.detectedFormat || 'unknown',
+          method: meta.method || 'unknown',
+          confidenceLevel: meta.confidenceLevel || inferConfidenceLevel(meta.confidence || 0),
+          rotateOnly: restoredMode === 'rotateOnly',
+          appliedMode: restoredMode,
+          lowConfidenceApplied: Boolean(meta.lowConfidenceApplied),
+          importAuto: Boolean(meta.importAuto),
+          imageArea: meta.imageArea ? structuredClone(meta.imageArea) : null,
+          analysisArea: meta.analysisArea ? structuredClone(meta.analysisArea) : null,
+          analysisNeedsReview: Boolean(meta.analysisNeedsReview),
+          frameIncomplete: Boolean(meta.frameIncomplete)
+        };
+      } else {
+        state.autoFrame.lastDiagnostics = null;
+      }
+      updateAutoFrameDiagnosticsUI();
+    }
+
+    // Applies only the META_ONLY_KEYS of `settings` (what the import
+    // detections describe), exactly as restoreSettings would, without touching
+    // geometry or the rendered pixels. Used when the final import settings
+    // convert identically to the provisional ones.
+    function applyImportMetaToState(settings) {
+      const safe = sanitizeSettings(settings, { fallbackSettings: state });
+      restoreAutoFrameDiagnostics(safe.autoFrameMeta);
+      state.filmTypeSource = safe.filmTypeSource;
+      state.filmTypeConfidence = safe.filmTypeConfidence;
+      state.filmTypeReason = safe.filmTypeReason;
+      state.filmEdge = safe.filmEdge ? structuredClone(safe.filmEdge) : null;
+      updateFilmEdgeUI();
+      state.learnedDefaults = safe.learnedDefaults;
+      state.frameMetadata = sanitizeFrameMetadata(safe.frameMetadata);
+      prefillRollStockFromFilmEdge();
+      updateMetadataUI();
+      updateFilmModeUI();
+      studioWorkspace?.sync();
+    }
+
     // Restore settings from a saved settings object
     function restoreSettings(settings, { refreshDisplay = true } = {}) {
       if (!settings) return;
@@ -14073,27 +14175,7 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
         safe.cropRegion = state.cropRegion ? { ...state.cropRegion } : null;
       }
 
-      if (safe.autoFrameMeta) {
-        const restoredMode = safe.autoFrameMeta.appliedMode
-          || (Boolean(safe.autoFrameMeta.rotateOnly) ? 'rotateOnly' : 'none');
-        state.autoFrame.lastDiagnostics = {
-          confidence: safe.autoFrameMeta.confidence,
-          detectedFormat: safe.autoFrameMeta.detectedFormat || 'unknown',
-          method: safe.autoFrameMeta.method || 'unknown',
-          confidenceLevel: safe.autoFrameMeta.confidenceLevel || inferConfidenceLevel(safe.autoFrameMeta.confidence || 0),
-          rotateOnly: restoredMode === 'rotateOnly',
-          appliedMode: restoredMode,
-          lowConfidenceApplied: Boolean(safe.autoFrameMeta.lowConfidenceApplied),
-          importAuto: Boolean(safe.autoFrameMeta.importAuto),
-          imageArea: safe.autoFrameMeta.imageArea ? structuredClone(safe.autoFrameMeta.imageArea) : null,
-          analysisArea: safe.autoFrameMeta.analysisArea ? structuredClone(safe.autoFrameMeta.analysisArea) : null,
-          analysisNeedsReview: Boolean(safe.autoFrameMeta.analysisNeedsReview),
-          frameIncomplete: Boolean(safe.autoFrameMeta.frameIncomplete)
-        };
-      } else {
-        state.autoFrame.lastDiagnostics = null;
-      }
-      updateAutoFrameDiagnosticsUI();
+      restoreAutoFrameDiagnostics(safe.autoFrameMeta);
 
       // Restore film settings
       state.filmType = sanitizePresetType(safe.filmType || 'color');
@@ -15043,10 +15125,85 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       studioThumbnailUpdateFrame = 0;
     }
 
+    // Starts the frame and film-edge detections of a snapshot without awaiting
+    // them. They are queued from a zero-delay task so their main-thread plane
+    // copies overlap the provisional conversion instead of delaying its preview
+    // resize, and read their options from the snapshot, never from the state
+    // the provisional restore changes. Resolves [framedSettings, filmEdgeRead].
+    function startImportDetection(source, snapshot, { detectFrame, readEdge, allowCrop, autoFrame, signal, trace, onRotation = null }) {
+      const detected = new Promise(resolve => setTimeout(resolve, 0)).then(() => {
+        if (signal.aborted) throw new DOMException('Superseded photo activation', 'AbortError');
+        const frame = detectFrame
+          ? analyzeStudioImportFrame(source, snapshot, { allowCrop, silent: true, autoFrame, filmType: snapshot.filmType, signal, onRotation })
+            .then(settings => { trace.mark('autoFrame', { applied: settings.autoFrameMeta?.appliedMode || 'none' }); return settings; })
+          : Promise.resolve(snapshot);
+        const edge = readEdge
+          ? readImportFilmEdge(source, { signal })
+            .then(read => { trace.mark('filmEdge', { found: Boolean(read?.result?.found || read?.result?.text) }); return read; })
+          : Promise.resolve(null);
+        frame.catch(() => {});
+        edge.catch(() => {});
+        return Promise.all([frame, edge]);
+      });
+      detected.catch(() => {});
+      return detected;
+    }
+
+    // The settings of today's single conversion, in today's order from the
+    // pre-provisional snapshot: the auto-frame result, the film edge (with its
+    // roll-date side effect), then learned defaults, which alone record
+    // `automaticDefaults`.
+    async function buildFinalImportSettings(source, framed, read, item, { readEdge, freshFile, applyEdgeDefaults }) {
+      let settings = framed;
+      let toast = null;
+      if (readEdge) {
+        const edge = await mergeImportFilmEdge(source, settings, read, { applyDefaults: applyEdgeDefaults });
+        if (edge) { settings = edge.settings; toast = edge.toast; }
+      }
+      // The frame's own verdict (after DX and edge text) joins the import's
+      // roll film-type decision (#231), which then applies to it.
+      if (freshFile) settings = await learnedImportSettings(settleImportFilmType(item, settings), item);
+      return { settings, toast };
+    }
+
+    // The provisional positive is on screen: uncover it, and let the filmstrip
+    // navigate while editing stays locked until the detections end.
+    function revealProvisionalPhoto(overlay, detectingFrame) {
+      overlay.hide();
+      state.photoSwitchTarget = null;
+      state.photoSwitchPhase = null;
+      delete document.body.dataset.photoSwitching;
+      document.body.dataset.studioDetecting = detectingFrame ? 'frame' : 'edge';
+      studioWorkspace?.sync();
+    }
+
+    // A provisional processNegative leaves the idle full-resolution render and
+    // the dust pass to the final settings; arm them when those settings did not
+    // need a second conversion.
+    function armSettledConversion() {
+      if (usesSilverCoreConversion(state) && hasSeparateConversionPreview()) {
+        if (state.fullResolutionPending) scheduleFullResolutionRender('initial-preview');
+      } else if (hasFrameRepairs()) {
+        scheduleDustDetection();
+      }
+    }
+
+    // A photo activation converts first and detects in the background: the
+    // provisional settings (snapshot plus learned values) are rendered at once
+    // while the frame and film-edge detections run; their final settings are
+    // then built exactly as before and, only when they convert differently,
+    // rendered once more. Without detection work this is today's single pass.
     async function prepareStudioPhoto(generation, item = getCurrentQueueItem(), { quiet = false } = {}) {
+      const overlay = quiet ? quietLoadingOverlay : getLoadingOverlay();
+      // loadFile leaves its overlay up for the conversion; until a conversion
+      // has hidden it, every return of this load must.
+      let painted = false;
       // 切り替え前の変換が終了してから、新しい写真の変換を開始する。
       if (processNegativeInFlight) await processNegativeInFlight;
-      if (!isCurrentLoad(generation) || !state.originalImageData) return;
+      if (!isCurrentLoad(generation) || !state.originalImageData) {
+        if (isCurrentLoad(generation)) overlay.hide();
+        return;
+      }
       if (!item?.settings) {
         restoreSettings(mergeStudioColors(createDefaultSettings(state.originalImageData, item), item?.studioColors || {}), { refreshDisplay: !quiet });
       }
@@ -15056,35 +15213,98 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
         file: item?.file?.name || '',
         pixels: getImageDataPixelCount(state.loadedBaseImageData || state.originalImageData)
       });
+      // Marks the item while its live state holds provisional settings, which
+      // are never persisted, cached as a session or read by the roll lane.
+      const provisionalToken = { wasDirty: Boolean(item?.isDirty) };
+      let detection = null;
       try {
         const source = state.loadedBaseImageData || state.originalImageData;
         const freshFile = !item?.settings;
-        let settings = extractCurrentSettings();
-        let changed = false;
+        const snapshot = extractCurrentSettings();
+        const detectFrame = !item?.settings?.autoFrameMeta && !state.cropRegion && state.autoFrame.enabled && !expiredImportKeepsFullFrame(snapshot);
+        // Read the rebate once per file: perforations, DX edge barcode, film base.
+        const readEdge = !snapshot.filmEdge?.checked;
+        let settings = snapshot;
         let filmEdgeToast = null;
-        if (!item?.settings?.autoFrameMeta && !state.cropRegion && state.autoFrame.enabled && !expiredImportKeepsFullFrame(settings)) {
-          settings = await analyzeStudioImportFrame(source, settings, {
-            allowCrop: freshFile,
-            onRotation: rotation => { if (isCurrentLoad(generation)) pendingImportRotation = rotation; }
+        if (detectFrame || readEdge) {
+          detection = new AbortController();
+          importDetectionAbort = detection;
+          const applyEdgeDefaults = freshFile && state.importFilmTypeAuto;
+          // The auto-frame worker's rotated frame: the final restore adopts it
+          // instead of rotating the base again (#244).
+          let importRotation = null;
+          const detected = startImportDetection(source, snapshot, {
+            detectFrame, readEdge, allowCrop: freshFile, autoFrame: { ...state.autoFrame }, signal: detection.signal, trace,
+            onRotation: rotation => { importRotation = rotation; }
           });
+          const provisional = freshFile ? await provisionalLearnedSettings(snapshot, item) : snapshot;
           if (!isCurrentLoad(generation)) return;
-          changed = true;
-          trace.mark('autoFrame', { applied: settings.autoFrameMeta?.appliedMode || 'none' });
-        }
-        if (!settings.filmEdge?.checked) {
-          // Read the rebate once per file: perforations, DX edge barcode, film base.
-          const edge = await analyzeImportFilmEdge(source, settings, { applyDefaults: freshFile && state.importFilmTypeAuto });
+          if (item) item.provisional = provisionalToken;
+          const step2Mode = state.step2Mode;
+          restoreSettings(provisional, { refreshDisplay: false });
+          // The border-mode suggestion of Step 2 reads the new planes.
+          await whenGeometrySettled();
           if (!isCurrentLoad(generation)) return;
-          if (edge) {
-            settings = edge.settings;
-            filmEdgeToast = edge.toast;
-            changed = true;
+          goToStep(2);
+          const provisionalKey = conversionKey(provisional, source);
+          trace.mark('provisionalSettings');
+          await processNegative({ quiet, provisional: true });
+          painted = true;
+          trace.mark('provisionalConversion');
+          if (!isCurrentLoad(generation)) return;
+          revealProvisionalPhoto(overlay, detectFrame);
+          let framed, read;
+          try { [framed, read] = await detected; }
+          catch (error) {
+            if (!isCurrentLoad(generation)) return;
+            throw error;
           }
-          trace.mark('filmEdge', { found: Boolean(settings.filmEdge?.found) });
+          if (!isCurrentLoad(generation)) return;
+          const final = await buildFinalImportSettings(source, framed, read, item, { readEdge, freshFile, applyEdgeDefaults });
+          if (!isCurrentLoad(generation)) return;
+          settings = final.settings;
+          filmEdgeToast = final.toast;
+          trace.mark('settings', { found: Boolean(settings.filmEdge?.found) });
+          if (conversionKey(settings, source) === provisionalKey) {
+            // Same conversion: the provisional render, its automatic WB and
+            // rescue measurement are exactly today's. Only the detection
+            // descriptions change.
+            applyImportMetaToState(settings);
+            if (item?.provisional === provisionalToken) delete item.provisional;
+            armSettledConversion();
+            trace.mark('metaOnly');
+          } else {
+            if (processNegativeInFlight) await processNegativeInFlight;
+            if (!isCurrentLoad(generation)) return;
+            // Start from the state today's single render started from.
+            if (item) {
+              item.isDirty = provisionalToken.wasDirty;
+              if (item.provisional === provisionalToken) delete item.provisional;
+            }
+            state.step2Mode = step2Mode;
+            pendingImportRotation = importRotation;
+            restoreSettings(settings, { refreshDisplay: false });
+            // The frame changed under the provisional view: fit it again.
+            resetZoomPan();
+            await whenGeometrySettled();
+            if (!isCurrentLoad(generation)) return;
+            goToStep(2);
+            await processNegative({ quiet: true });
+            trace.mark('processNegative');
+          }
+        } else {
+          if (freshFile) settings = await learnedImportSettings(settleImportFilmType(item, settings), item);
+          if (!isCurrentLoad(generation)) return;
+          if (freshFile) restoreSettings(settings, { refreshDisplay: !quiet });
+          await whenGeometrySettled();
+          if (!isCurrentLoad(generation)) return;
+          goToStep(2);
+          trace.mark('settings');
+          await processNegative({ quiet });
+          painted = true;
+          trace.mark('processNegative');
         }
-        if (freshFile) { settings = await learnedImportSettings(settleImportFilmType(item, settings), item); changed = true; }
         if (!isCurrentLoad(generation)) return;
-        if (changed) restoreSettings(settings, { refreshDisplay: !quiet });
         let filmTypeDeferred = false;
         if (filmEdgeToast) showToast(filmEdgeToast, 3200);
         else if (freshFile && settings.filmTypeConfidence === 'low') {
@@ -15092,21 +15312,23 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
           if (!filmTypeDeferred) showToast(i18n[currentLang][settings.filmTypeReason === 'monochrome' ? 'filmTypeMonochrome' : 'filmTypeUncertain'], 6500);
         }
         if (settings.filmEdge?.found) updateFileListUI();
-        // The border-mode suggestion of Step 2 reads the new planes.
-        await whenGeometrySettled();
-        if (!isCurrentLoad(generation)) return;
-        goToStep(2);
-        trace.mark('settings');
-        await processNegative({ quiet });
-        trace.mark('processNegative');
         if (freshFile) {
           scheduleSemanticColour(item, generation);
           // A deferred film-type prompt is not repeated as a review toast.
           if (!filmTypeDeferred || reviewForItem(item).reasons.some(reason => reason !== 'reviewFilmType')) notifyImportReview([item]);
         }
+        // The provisional render may have queued the recovery copy early.
+        if (item?.isDirty) scheduleProjectRecovery();
       } finally {
         trace.end();
+        if (item?.provisional === provisionalToken) {
+          item.isDirty = provisionalToken.wasDirty;
+          delete item.provisional;
+        }
+        if (importDetectionAbort === detection) importDetectionAbort = null;
         if (isCurrentLoad(generation)) {
+          if (!painted) overlay.hide();
+          delete document.body.dataset.studioDetecting;
           delete document.body.dataset.studioBusy;
           updateAutoFrameButtons();
           updateExpiredRescueUI();
@@ -15158,14 +15380,23 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
 
     // `onRotation` receives the worker's rotated frame of an applied result so
     // the caller can adopt it instead of rotating the base again (#244).
-    async function analyzeStudioImportFrame(source, settings, { allowCrop = true, silent = false, analyzeInWorker = analyzeFrameInWorker, onRotation = null, filmType = state.filmType } = {}) {
-      if (!state.autoFrame.enabled || settings.cropRegion) return settings;
+    // `autoFrame`/`filmType` default to the live state; the first-photo path
+    // passes its snapshot's (see prepareStudioPhoto). An aborted request
+    // rejects instead of keeping the full image.
+    async function analyzeStudioImportFrame(source, settings, {
+      allowCrop = true, silent = false, analyzeInWorker = analyzeFrameInWorker, onRotation = null,
+      autoFrame = state.autoFrame, filmType = state.filmType, signal = null
+    } = {}) {
+      if (!autoFrame.enabled || settings.cropRegion) return settings;
       let result;
-      try { result = await detectFrameAndRotation(source, { silent, analyzeInWorker, filmType }); }
-      catch (error) { console.warn('Import frame detection failed; keeping the full image:', error); }
+      try { result = await detectFrameAndRotation(source, { silent, analyzeInWorker, autoFrame, filmType, signal }); }
+      catch (error) {
+        if (error?.name === 'AbortError') throw error;
+        console.warn('Import frame detection failed; keeping the full image:', error);
+      }
       if (result?.stageMs) recordPerfStages('autoFrameStages', result.stageMs, { method: result.diagnostics?.method });
-      const reliable = canAutoApplyImportFrame(result, state.autoFrame);
-      const apply = reliable && state.autoFrame.onImport && allowCrop;
+      const reliable = canAutoApplyImportFrame(result, autoFrame);
+      const apply = reliable && autoFrame.onImport && allowCrop;
       const meta = {
         confidence: result?.confidence || 0,
         confidenceLevel: result?.confidenceLevel || 'low',
@@ -15181,10 +15412,10 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       // Only the rotated frame's size is needed here: the one pixel build of
       // this geometry is restoreSettings' (#244), not a second rotation.
       const rotated = rotatedDimensions(source.width, source.height, angle);
-      if (onRotation && !state.autoFrame.rotate180Default && result.rotatedImageData) {
+      if (onRotation && !autoFrame.rotate180Default && result.rotatedImageData) {
         onRotation({ base: source, angle: effectiveGeometryAngle(angle), image: result.rotatedImageData });
       }
-      const cropRegion = state.autoFrame.rotate180Default
+      const cropRegion = autoFrame.rotate180Default
         ? rotate180CropRegion(result.cropRegion, rotated.width, rotated.height) : result.cropRegion;
       return { ...settings, rotationAngle: angle, mirrored: false, cropRegion, autoFrameMeta: meta };
     }
@@ -15192,11 +15423,15 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
     // ===========================================
     // Film edge: perforation lanes, DX edge barcode, rebate film base
     // ===========================================
-    async function readFilmEdgeForImage(imageData, readInWorker = readFilmEdgeInWorker) {
+    async function readFilmEdgeForImage(imageData, readInWorker = readFilmEdgeInWorker, { signal = null } = {}) {
       if (!imageData) return null;
       if (typeof Worker === 'function') {
-        try { return await readInWorker(imageData, {}); }
-        catch (error) { console.warn('Film edge worker unavailable, reading on the main thread:', error); }
+        try { return await (signal ? readInWorker(imageData, {}, { signal }) : readInWorker(imageData, {})); }
+        catch (error) {
+          // A superseded read must not repeat itself on the main thread.
+          if (error?.name === 'AbortError') throw error;
+          console.warn('Film edge worker unavailable, reading on the main thread:', error);
+        }
       }
       return readFilmEdge(imageData, {});
     }
@@ -15236,10 +15471,27 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
     // against the border auto-detect with no preset.
     async function analyzeImportFilmEdge(source, settings, { applyDefaults = true, readFilmEdge = readFilmEdgeInWorker } = {}) {
       if (!source || settings.filmEdge?.checked) return null;
+      return mergeImportFilmEdge(source, settings, await readImportFilmEdge(source, { readFilmEdge }), { applyDefaults });
+    }
+
+    // The read depends only on the pixels, so the first photo starts it before
+    // its provisional conversion. Resolves { result } (result may be null), or
+    // null when the reader failed; an abort rejects.
+    async function readImportFilmEdge(source, { readFilmEdge = readFilmEdgeInWorker, signal = null } = {}) {
+      try { return { result: await readFilmEdgeForImage(source, readFilmEdge, { signal }) }; }
+      catch (error) {
+        if (error?.name === 'AbortError') throw error;
+        console.warn('Film edge detection failed:', error);
+        return null;
+      }
+    }
+
+    // Folds a read into `settings` (after any auto-frame result, whose geometry
+    // the mirror flip follows). Sets the roll date as a side effect.
+    async function mergeImportFilmEdge(source, settings, read, { applyDefaults = true } = {}) {
+      if (!source || settings.filmEdge?.checked || !read) return null;
       applyDefaults = applyDefaults && settings.filmTypeSource !== 'manual';
-      let result = null;
-      try { result = await readFilmEdgeForImage(source, readFilmEdge); }
-      catch (error) { console.warn('Film edge detection failed:', error); return null; }
+      const result = read.result;
       if (result?.text && !result.dx) {
         const text = result.text;
         const next = { ...settings, filmEdge: sanitizeFilmEdgeForSettings({ ...text, found: true, shortName: text.filmName, text: text.text }) };
@@ -17172,7 +17424,7 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
         lastModified: item.file.lastModified || 0,
         path: item.file.path || '',
         hash: item.hash || '',
-        settings: item === current && state.originalImageData && !persist ? extractCurrentSettings() : (item.settings || null),
+        settings: item === current && state.originalImageData && !persist && !item.provisional ? extractCurrentSettings() : (item.settings || null),
         studioColors: item.studioColors || null,
         filmTypeOverride: sanitizeFilmTypeOverride(item.filmTypeOverride),
         selected: item.selected !== false
@@ -18486,12 +18738,22 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       for (const record of records) learnedRecords.set(record.key, record);
       updateLearningUI();
     }).catch(error => console.warn('Learned defaults storage unavailable:', error));
+    function learnsImportDefaults(item) {
+      return Boolean(item && !item.savedSettings && !state.rollReference.applyLock && !item.userEdited);
+    }
     async function learnedImportSettings(settings, item) {
-      if (!item || item.savedSettings || state.rollReference.applyLock || item.userEdited) return settings;
+      if (!learnsImportDefaults(item)) return settings;
       await learnedReady;
       item.automaticDefaults ||= structuredClone(settings);
       const key = learnedDefaultsKey(settings, state.rollMetadata);
       return applyLearnedDefaults(settings, learnedRecords.get(key));
+    }
+    // The same learned values for a provisional render, without recording
+    // `automaticDefaults`: only the final (post-detection) settings may.
+    async function provisionalLearnedSettings(settings, item) {
+      if (!learnsImportDefaults(item)) return settings;
+      await learnedReady;
+      return applyLearnedDefaults(settings, learnedRecords.get(learnedDefaultsKey(settings, state.rollMetadata)));
     }
     let learningWrites = Promise.resolve();
     function learnFromExport(item) {
@@ -18752,7 +19014,7 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       // Navigation alone does not invalidate detached measurements. Unsaved
       // edits to the live photo do: its queue recipe has not caught up yet.
       return JSON.stringify([item.settings, item.studioColors, item.filmTypeOverride,
-        item.file === state.loadedFile && item.isDirty ? extractCurrentSettings() : null]);
+        item.file === state.loadedFile && item.isDirty && !item.provisional ? extractCurrentSettings() : null]);
     }
 
     // `resumeAttempt` and `safeMode` resume an interrupted analysis (#241).

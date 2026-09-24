@@ -2865,6 +2865,14 @@ body.dodge-burn-active #glCanvas {
 .loading-overlay.visible {
   opacity: 1;
   pointer-events: all;
+  /* Work that ends within 150 ms never shows the overlay; it still blocks
+     input at once, and studioBusy/inert remain the real lock. */
+  transition-delay: 150ms;
+}
+/* The one hidden-state rule: the image is uncovered within one short fade. */
+.loading-overlay:not(.visible) {
+  --loading-overlay-hide: 90ms;
+  transition-duration: var(--loading-overlay-hide);
 }
 
 .loading-reel-wrap {

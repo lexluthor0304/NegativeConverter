@@ -665,17 +665,21 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
       for (const id of ['studioImportAutoCrop', 'studioAutoCrop']) $(id).checked = Boolean(state.autoFrame.onImport);
       $('studioRestoreFrame').disabled = !loaded || locked || !(state.cropRegion || state.rotationAngle || state.mirrored);
       const frameMeta = state.autoFrame.lastDiagnostics;
+      // The provisional positive is shown while the frame detection finishes.
+      const detecting = body.dataset.studioDetecting;
       $('studioConfirmAnalysis').disabled = !loaded || locked || state.cropping || busy;
       $('studioAnalysisStatus').textContent = t(frameMeta?.analysisNeedsReview ? 'analysisReview' : 'analysisHint');
-      $('studioFrameNotice').hidden = Boolean(switching) || !ready || !frameMeta?.importAuto || state.samplingMode;
-      $('studioFrameNotice').textContent = t(frameMeta?.analysisNeedsReview ? 'analysisReview' : frameMeta?.appliedMode === 'crop' ? 'frameApplied' : frameMeta?.frameIncomplete ? 'frameIncomplete' : frameMeta?.imageArea ? 'frameAnalysis' : 'frameReview');
-      $('studioFrameNotice').dataset.status = frameMeta?.appliedMode || '';
+      $('studioFrameNotice').hidden = Boolean(switching) || !ready || (detecting !== 'frame' && !frameMeta?.importAuto) || state.samplingMode;
+      $('studioFrameNotice').textContent = t(detecting === 'frame' ? 'detectingFrame' : frameMeta?.analysisNeedsReview ? 'analysisReview' : frameMeta?.appliedMode === 'crop' ? 'frameApplied' : frameMeta?.frameIncomplete ? 'frameIncomplete' : frameMeta?.imageArea ? 'frameAnalysis' : 'frameReview');
+      $('studioFrameNotice').dataset.status = detecting === 'frame' ? 'detecting' : frameMeta?.appliedMode || '';
       $('studioFrameNotice').disabled = state.cropping || busy;
       panel.inert = busy;
       // Photo activation locks editing, not navigation: rapid browsing must
-      // be able to supersede a slow decode without touching the old photo.
-      strip.inert = busy && body.dataset.photoSwitching !== 'true';
-      photoSort.sync({ state, busy, photoSwitching: body.dataset.photoSwitching === 'true', exportLocked: isExportLocked() });
+      // be able to supersede a slow decode, or the detection tail of a photo
+      // already on screen, without touching the old photo.
+      const navigable = body.dataset.photoSwitching === 'true' || Boolean(detecting);
+      strip.inert = busy && !navigable;
+      photoSort.sync({ state, busy, photoSwitching: navigable, exportLocked: isExportLocked() });
       tabs.setAttribute('aria-label', t('tabs'));
       quickColor.setAttribute('aria-label', t('quickColor'));
       syncLayout();
