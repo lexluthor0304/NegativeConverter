@@ -254,7 +254,8 @@ export function createEmbeddedPreviewPool({
       const ready = workers.filter(w => w.ready && w.jobs.size < perWorker).sort((a, b) => a.jobs.size - b.jobs.size)[0];
       if (!ready || ready.jobs.size) {
         if (workers.length < maxWorkers && workers.every(w => w.ready)) spawn();
-        if (!ready) break;
+        // A failed spawn retires every worker and drains the queue itself.
+        if (!ready || capability === false) break;
       }
       const entry = queue.shift();
       if (entry.signal?.aborted) { settle(entry, null); continue; }
