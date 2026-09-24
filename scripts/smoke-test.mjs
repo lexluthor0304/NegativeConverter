@@ -35,6 +35,7 @@ import { runRollHomeSmoke } from './roll-home-smoke.mjs';
 import { runTechnicalDepthSmoke } from './technical-depth-smoke.mjs';
 import { runExpiredFilmSmoke } from './expired-film-smoke.mjs';
 import { runNativeFilmFontSmoke } from './native-film-font-smoke.mjs';
+import { runExportGainMapSmoke } from './export-gain-map-smoke.mjs';
 
 // UPNG is already a runtime dependency of the app; reuse it to decode screenshots.
 const UPNG = createRequire(import.meta.url)('upng-js');
@@ -359,6 +360,12 @@ if (process.argv.includes('--folder-only')) {
   await runFolderImportSmoke({send,evaluate,waitFor,wait,fail,installDialogAutoAccept,port:PORT,root:ROOT});
   if(pageErrors.filter(e=>!/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
   console.log('SMOKE PASS');process.exit(0);
+}
+if (process.argv.includes('--gain-map-only')) {
+  await runExportGainMapSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS');
+  process.exit(0);
 }
 if (process.argv.includes('--expired-only')) {
   await runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
@@ -803,6 +810,7 @@ if (process.env.AUTOFRAME_RAW_DIR) await runStudioRawAutoFrameSmoke({ send, eval
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runPositiveImportSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runNativeFilmFontSmoke({ send, evaluate, waitFor, wait, fail, port: PORT, root: ROOT });
+if (!process.argv.some(arg => arg.endsWith('-only'))) await runExportGainMapSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
 
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runSimplicitySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
 
