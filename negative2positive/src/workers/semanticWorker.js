@@ -8,7 +8,9 @@ async function create(preferGpu) {
   ort.env.wasm.numThreads = 1;
   provider = defaultInferencePreference() !== 'wasm' && preferGpu && navigator.gpu ? 'webgpu' : 'wasm';
   session = await ort.InferenceSession.create(bytes, { executionProviders: provider === 'webgpu' ? ['webgpu', 'wasm'] : ['wasm'], graphOptimizationLevel: 'all' });
-  await session.run({ image: new ort.Tensor('float32', new Float32Array(3 * 512 * 512), [1, 3, 512, 512]) });
+  // The worker is single-use, so a WASM warm-up only doubled the one real run.
+  // On WebGPU it still probes the kernels here, where a failure can fall back.
+  if (provider === 'webgpu') await session.run({ image: new ort.Tensor('float32', new Float32Array(3 * 512 * 512), [1, 3, 512, 512]) });
 }
 self.onmessage = async ({ data: { image, modelUrl, model, preferGpu = true } }) => {
   try {

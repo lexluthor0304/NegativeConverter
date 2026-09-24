@@ -47,6 +47,15 @@ const broken = createSemanticAnalyzer({ modelUrl: () => '/model.onnx', loadModel
 } });
 assert.equal(await broken(image), null);
 assert.equal(failedWorker.terminated, true);
+let stillCurrent = true;
+const leftMidRun = analyze(image, { isCurrent: () => stillCurrent, pollMs: 5 });
+await Promise.resolve();
+const running = workers.at(-1);
+assert.ok(running.message, 'the inference was started');
+stillCurrent = false;
+assert.equal(await leftMidRun, null, 'leaving the photo mid-inference resolves without an answer');
+assert.equal(running.terminated, true, 'and terminates the model worker without waiting for the run');
+running.onmessage?.({ data: { labels: [9] } });
 console.log('Semantic queue skips stale photos and releases workers on all failure paths');
 
 // The model is loaded once per page session and posted to every short-lived

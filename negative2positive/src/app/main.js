@@ -14768,6 +14768,9 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
     let automaticRollAnalysisRunning = false;
     let manualRollAnalysisRunning = false;
     let automaticRollRevision = 0;
+    // Frames a scheduled roll analysis will prepare. Their first photo skips
+    // the semantic pass: the roll assigns (and locks) its recipe meanwhile.
+    const automaticRollPendingItems = new Set();
     let studioThumbnailsRunning = false;
     function fileListButtonFor(item) {
       const index = state.fileQueue.indexOf(item);
@@ -15088,6 +15091,12 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
     }
 
     function scheduleSemanticColour(item, generation) {
+      // Only colour film (or any film under rescue) can use the map: the same
+      // test the result is dropped by below, taken before the downsample and
+      // the worker. A roll that analyses this import takes over its recipe
+      // while the inference would still run, so its frames skip it too.
+      if (!state.expiredEnabled && state.filmType !== 'color') return;
+      if (automaticRollPendingItems.has(item)) return;
       if (!item || item.semanticAttempted || item.savedSettings || item.userEdited || state.wbUserOverride || state.grayPointSampled || state.rollReference.applyLock || state.filmBase?.method === 'manual' || (state.filmType === 'positive' && state.positiveMode === 'edit')) return;
       item.semanticAttempted = true;
       const source = state.processedImageData;
@@ -18726,6 +18735,7 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       const pending = imported.filter(item => !item.savedSettings && (!item.settings || prepared));
       if (pending.length < 3) return;
       const filmTypeRoll = createImportFilmTypeRoll(imported);
+      for (const item of pending) automaticRollPendingItems.add(item);
       const requestRevision = automaticRollRevision;
       const failed = new Set();
       const sampleKeys = new Map();
@@ -18779,6 +18789,7 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       };
       filmTypeRoll?.rekeys.add(rekeySample);
       const finish = async () => {
+        if (!finished) for (const item of pending) automaticRollPendingItems.delete(item);
         finished = true;
         if (timer !== null) clearTimeout(timer);
         timer = null;

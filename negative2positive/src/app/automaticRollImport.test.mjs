@@ -64,7 +64,7 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
   const noop = () => {};
   const context = vm.createContext({
     state, console, Map, Set, AbortController, structuredClone,
-    AUTO_ROLL_KEY: 'auto', automaticRollRevision: 0,
+    AUTO_ROLL_KEY: 'auto', automaticRollRevision: 0, automaticRollPendingItems: new Set(),
     automaticRollImportRunning: false, automaticRollAnalysisRunning: false,
     studioAutoFrameRunning: false, processNegativeInFlight: null,
     loadGeneration: 1, manualEditRevision: 0, off: false,
@@ -188,6 +188,18 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
   f.context.scheduleAutomaticRollImport(f.items);
   assert.equal(f.timers.size, 0);
   assert.equal(f.context.automaticRollImportRunning, false);
+  assert.equal(f.context.automaticRollPendingItems.size, 0, 'a two-photo import keeps its semantic pass');
+}
+
+// A scheduled roll marks its frames (the first photo's semantic pass skips
+// them) until it finishes, then releases them.
+{
+  const f = fixture();
+  f.context.scheduleAutomaticRollImport(f.items);
+  assert.deepEqual([...f.context.automaticRollPendingItems], f.items);
+  await f.fire(1200);
+  assert.equal(f.groups.length, 1);
+  assert.equal(f.context.automaticRollPendingItems.size, 0, 'finish releases the frames');
 }
 
 // Navigation during decode no longer throws away other detached measurements.
