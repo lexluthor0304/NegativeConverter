@@ -111,10 +111,10 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     import { loadLocalLensfunAssets } from './lensfunLoader.js';
     import { createOpenCvLoader } from './opencvLoader.js';
     import {
-      autoDetectFilmBase as detectFilmBaseAutomatically,
       sampleFilmBase as sampleFilmBaseRobust,
       sanitizeFilmBaseForSettings
     } from './filmBaseDetection.js';
+    import { cachedAutoDetectFilmBase, cachedDetectFilmType } from './filmStatsCache.js';
     import { estimateAutoWhiteBalance } from './autoWhiteBalance.js';
     import {
       isRawLikeFileName,
@@ -3855,8 +3855,11 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       return sampleFilmBaseRobust(imageData, x, y, radius);
     }
 
+    // Memoised per decoded plane and effective buffer (filmStatsCache.js): the
+    // import defaults and the Step-2 suggestion ask for the same numbers, and a
+    // fresh RAW decode arrives with them already computed by its worker.
     function autoDetectFilmBase(imageData, borderBufferPct = 10) {
-      return detectFilmBaseAutomatically(imageData, borderBufferPct);
+      return cachedAutoDetectFilmBase(imageData, borderBufferPct);
     }
 
     // ===========================================
@@ -12598,12 +12601,21 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     // inherit the same values, otherwise pressing "Convert positive" and then
     // Export All returns every unviewed slide inverted as a colour negative,
     // and a B&W roll comes back tinted by an orange-mask compensation.
+    // The border buffer new-photo defaults detect the film base with. A RAW
+    // decode that will need defaults asks its worker for the statistics at
+    // this buffer, so createDefaultSettings finds them cached.
+    function defaultFilmBaseBuffer() {
+      return sanitizeNumeric(state.coreBorderBuffer, 10, 0, 30);
+    }
+
     function createDefaultSettings(imageData, item = null) {
+      const trace = createPerfTrace('createDefaultSettings', { pixels: getImageDataPixelCount(imageData) });
       const choice = sanitizeFilmTypeOverride(item?.filmTypeOverride);
-      const importSettings = detectedImportSettings(imageData, { automatic: !choice && state.importFilmTypeAuto, filmType: choice?.filmType || state.filmType, positiveMode: choice?.positiveMode || state.positiveMode });
-      const borderBuffer = sanitizeNumeric(state.coreBorderBuffer, 10, 0, 30);
+      const importSettings = detectedImportSettings(imageData, { automatic: !choice && state.importFilmTypeAuto, filmType: choice?.filmType || state.filmType, positiveMode: choice?.positiveMode || state.positiveMode, detect: cachedDetectFilmType });
+      const borderBuffer = defaultFilmBaseBuffer();
       const borderBufferBorderValue = sanitizeNumeric(state.coreBorderBufferBorderValue, 10, 0, 30);
       const filmBase = autoDetectFilmBase(imageData, borderBuffer);
+      trace.end();
       return {
         cropRegion: null,
         rotationAngle: 0,

@@ -1,5 +1,11 @@
-import { selectKth, minFrom } from './orderStatistics.js';
+// Frozen copies of the film statistics as they shipped at 1703835, with their
+// comparator sorts over plain arrays (#232 part 4a). Imported only by tests
+// and the opt-in RAW parity script: the typed-array rewrites in
+// filmBaseDetection.js and filmTypeDetection.js must deep-equal these.
+// Do not edit, except to follow a deliberate change of the detection itself
+// (such as #231) so the reference stays "what main computes".
 
+// ---- filmBaseDetection.js @ 1703835 ----
 const DEFAULT_FILM_BASE = Object.freeze({ r: 210, g: 140, b: 90 });
 const UINT8_MAX = 255;
 const UINT16_MAX = 65535;
@@ -53,19 +59,6 @@ function percentile(sorted, p) {
   return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
 }
 
-// percentile() over the ascending order of values[0..n) without sorting.
-// Only for finite values (no NaN).
-function percentileUnsorted(values, n, p) {
-  if (n === 0) return 0;
-  const pos = clamp(p, 0, 1) * (n - 1);
-  const lo = Math.floor(pos);
-  const hi = Math.ceil(pos);
-  const loValue = selectKth(values, lo, n);
-  if (lo === hi) return loValue;
-  const hiValue = minFrom(values, lo + 1, n);
-  return loValue + (hiValue - loValue) * (pos - lo);
-}
-
 function trimmedMean(sorted, trim = 0.1) {
   if (sorted.length === 0) return 0;
   const start = Math.min(sorted.length - 1, Math.floor(sorted.length * trim));
@@ -88,26 +81,6 @@ function sortNumeric(values) {
   return values;
 }
 
-// Scratch columns for summarizeRegion, grown on demand. Typed arrays sort
-// numerically without a comparator, which is what the comparator sort over
-// plain arrays did (the samples are finite, non-negative numbers). Channel
-// samples of an 8/16-bit plane are integers and sort fastest as Uint16;
-// anything else, and the luma, stays Float64 so no value is ever rounded.
-// Never use Float32.
-const scratchColumns = new Map();
-function scratchColumn(name, Type, capacity) {
-  let column = scratchColumns.get(name);
-  if (!column || !(column instanceof Type) || column.length < capacity) {
-    column = new Type(Math.max(capacity, column ? column.length * 2 : 0));
-    scratchColumns.set(name, column);
-  }
-  return column;
-}
-
-function isIntegerPlane(data) {
-  return data instanceof Uint16Array || data instanceof Uint8ClampedArray || data instanceof Uint8Array;
-}
-
 function summarizeRegion(source, bounds, options = {}) {
   const maxSamples = Math.max(64, Math.round(finiteNumber(options.maxSamples, 18000)));
   const trim = clamp(finiteNumber(options.trim, 0.1), 0, 0.35);
@@ -117,17 +90,10 @@ function summarizeRegion(source, bounds, options = {}) {
   const regionH = Math.max(1, bounds.endY - bounds.startY + 1);
   const step = Math.max(1, Math.ceil(Math.sqrt((regionW * regionH) / maxSamples)));
 
-  const capacity = Math.ceil(regionW / step) * Math.ceil(regionH / step);
-  // A read past the end of a malformed (e.g. 0×0) plane yields undefined,
-  // which the old arrays carried as NaN arithmetic; Float64 keeps that.
-  const integerSamples = isIntegerPlane(data)
-    && ((bounds.endY * width + bounds.endX) * 4 + 3) < data.length;
-  const ChannelType = integerSamples ? Uint16Array : Float64Array;
-  const rCol = scratchColumn('r', ChannelType, capacity);
-  const gCol = scratchColumn('g', ChannelType, capacity);
-  const bCol = scratchColumn('b', ChannelType, capacity);
-  const lumaCol = scratchColumn('luma', Float64Array, capacity);
-  let count = 0;
+  const rVals = [];
+  const gVals = [];
+  const bVals = [];
+  const lumaVals = [];
 
   for (let y = bounds.startY; y <= bounds.endY; y += step) {
     for (let x = bounds.startX; x <= bounds.endX; x += step) {
@@ -138,15 +104,14 @@ function summarizeRegion(source, bounds, options = {}) {
       const r = data[idx];
       const g = data[idx + 1];
       const b = data[idx + 2];
-      rCol[count] = r;
-      gCol[count] = g;
-      bCol[count] = b;
-      lumaCol[count] = 0.299 * r + 0.587 * g + 0.114 * b;
-      count++;
+      rVals.push(r);
+      gVals.push(g);
+      bVals.push(b);
+      lumaVals.push(0.299 * r + 0.587 * g + 0.114 * b);
     }
   }
 
-  if (count === 0) {
+  if (rVals.length === 0) {
     return makeFilmBaseResult(DEFAULT_FILM_BASE.r, DEFAULT_FILM_BASE.g, DEFAULT_FILM_BASE.b, UINT8_MAX, {
       method: options.method || 'fallback',
       precision: 8,
@@ -155,25 +120,16 @@ function summarizeRegion(source, bounds, options = {}) {
     });
   }
 
-  const rVals = rCol.subarray(0, count).sort();
-  const gVals = gCol.subarray(0, count).sort();
-  const bVals = bCol.subarray(0, count).sort();
+  sortNumeric(rVals);
+  sortNumeric(gVals);
+  sortNumeric(bVals);
+  sortNumeric(lumaVals);
 
   const r = trimmedMean(rVals, trim);
   const g = trimmedMean(gVals, trim);
   const b = trimmedMean(bVals, trim);
-  // The luma only needs two percentiles: select them instead of sorting.
-  // (Float planes and malformed ones can carry NaN; they keep the full sort.)
-  let l10;
-  let l90;
-  if (integerSamples) {
-    l10 = percentileUnsorted(lumaCol, count, 0.1);
-    l90 = percentileUnsorted(lumaCol, count, 0.9);
-  } else {
-    const lumaVals = lumaCol.subarray(0, count).sort();
-    l10 = percentile(lumaVals, 0.1);
-    l90 = percentile(lumaVals, 0.9);
-  }
+  const l10 = percentile(lumaVals, 0.1);
+  const l90 = percentile(lumaVals, 0.9);
   const spread8 = ((l90 - l10) / source.max) * UINT8_MAX;
   const r8 = to8Bit(r, source.max);
   const g8 = to8Bit(g, source.max);
@@ -237,7 +193,7 @@ function makeRegionBounds(source, x, y, radius) {
   };
 }
 
-export function sampleFilmBase(imageData, x, y, radius = 10, options = {}) {
+export function sampleFilmBaseReference(imageData, x, y, radius = 10, options = {}) {
   const source = getSampleSource(imageData);
   if (!source) return sanitizeFilmBaseForSettings(null);
   const bounds = makeRegionBounds(source, x, y, radius);
@@ -253,14 +209,14 @@ function addEdgeCandidates(candidates, imageData, source, edgeOffset, radius, fr
 
   for (const f of fractions) {
     const x = Math.round(maxX * f);
-    candidates.push(sampleFilmBase(imageData, x, edgeOffset, radius, { method: 'auto-edge' }));
-    candidates.push(sampleFilmBase(imageData, x, maxY - edgeOffset, radius, { method: 'auto-edge' }));
+    candidates.push(sampleFilmBaseReference(imageData, x, edgeOffset, radius, { method: 'auto-edge' }));
+    candidates.push(sampleFilmBaseReference(imageData, x, maxY - edgeOffset, radius, { method: 'auto-edge' }));
   }
 
   for (const f of fractions) {
     const y = Math.round(maxY * f);
-    candidates.push(sampleFilmBase(imageData, edgeOffset, y, radius, { method: 'auto-edge' }));
-    candidates.push(sampleFilmBase(imageData, maxX - edgeOffset, y, radius, { method: 'auto-edge' }));
+    candidates.push(sampleFilmBaseReference(imageData, edgeOffset, y, radius, { method: 'auto-edge' }));
+    candidates.push(sampleFilmBaseReference(imageData, maxX - edgeOffset, y, radius, { method: 'auto-edge' }));
   }
 }
 
@@ -270,7 +226,7 @@ function addInteriorCandidates(candidates, imageData, source, radius) {
   const maxY = source.height - 1;
   for (const fy of fractions) {
     for (const fx of fractions) {
-      candidates.push(sampleFilmBase(
+      candidates.push(sampleFilmBaseReference(
         imageData,
         Math.round(maxX * fx),
         Math.round(maxY * fy),
@@ -331,18 +287,12 @@ function combineCandidates(candidates, selected, hadEligible) {
   });
 }
 
-// The border buffer autoDetectFilmBase actually uses for a requested value.
-// Callers that cache its result key on this.
-export function normalizeBorderBufferPct(borderBufferPct = 10) {
-  return clamp(finiteNumber(borderBufferPct, 10), 0, 30);
-}
-
-export function autoDetectFilmBase(imageData, borderBufferPct = 10) {
+export function autoDetectFilmBaseReference(imageData, borderBufferPct = 10) {
   const source = getSampleSource(imageData);
   if (!source) return sanitizeFilmBaseForSettings(null);
 
   const minSide = Math.max(1, Math.min(source.width, source.height));
-  const bufferPct = normalizeBorderBufferPct(borderBufferPct);
+  const bufferPct = clamp(finiteNumber(borderBufferPct, 10), 0, 30);
   const hasBorderHint = bufferPct > 0.5;
   const edgeBand = Math.max(4, Math.round(minSide * ((hasBorderHint ? bufferPct : 6) / 100)));
   const radius = clamp(Math.round(edgeBand * 0.42), 3, 72);
@@ -375,7 +325,7 @@ export function autoDetectFilmBase(imageData, borderBufferPct = 10) {
   return combineCandidates(scored, selected, eligible.length > 0);
 }
 
-export function sanitizeFilmBaseForSettings(input, fallback = null) {
+function sanitizeFilmBaseForSettings(input, fallback = null) {
   const source = (input && typeof input === 'object')
     ? input
     : (fallback && typeof fallback === 'object' ? fallback : DEFAULT_FILM_BASE);
@@ -404,4 +354,91 @@ export function sanitizeFilmBaseForSettings(input, fallback = null) {
   if (source.method) result.method = String(source.method).slice(0, 32);
 
   return result;
+}
+
+// ---- filmTypeDetection.js @ 1703835 ----
+// Pixel evidence is advisory: without a rebate/DX code, polarity is not
+// uniquely recoverable (a grayscale positive and negative are both gray).
+// Keep this bounded and independent of file names, camera metadata and format.
+export function detectFilmTypeReference(image, { fallback = 'positive', filmEdge = null } = {}) {
+  if (filmEdge?.found && ['color', 'bw', 'positive'].includes(filmEdge.filmKind)
+      && !(filmEdge.polarity === 'light' && filmEdge.filmKind !== 'positive')) {
+    return { filmType: filmEdge.filmKind, confidence: 'high', reason: 'dx' };
+  }
+  const source = image?.__image16 || image;
+  if (!source?.data || !source.width || !source.height) return { filmType: fallback, confidence: 'low', reason: 'empty' };
+  const { width, height, data } = source;
+  const maximum = data instanceof Uint16Array ? 65535 : 255;
+  const stride = Math.max(1, Math.ceil(Math.sqrt(width * height / 24000)));
+  const all = [], inner = [], edge = [], sides = [[], [], [], []];
+  for (let y = 0; y < height; y += stride) for (let x = 0; x < width; x += stride) {
+    const i = (y * width + x) * 4;
+    if (!data[i + 3]) continue;
+    const r = data[i] / maximum, g = data[i + 1] / maximum, b = data[i + 2] / maximum;
+    const peak = Math.max(r, g, b), low = Math.min(r, g, b);
+    if (peak < .02) continue;
+    const pixel = { r, g, b, luma: .2126 * r + .7152 * g + .0722 * b,
+      gray: peak - low < .035,
+      maskRed: r > g * 1.15 && r > b * 1.15,
+      orange: r > g * 1.18 && g > b * 1.18 && r - b > .16 };
+    if (x < width * .015) sides[0].push(pixel);
+    if (x >= width * .985) sides[1].push(pixel);
+    if (y < height * .015) sides[2].push(pixel);
+    if (y >= height * .985) sides[3].push(pixel);
+    // Clipped clear film helps polarity, but must not dilute orange-mask
+    // statistics used by the existing colour-negative classifier.
+    if (low > .98) continue;
+    all.push(pixel);
+    if (x < width * .05 || x >= width * .95 || y < height * .05 || y >= height * .95) edge.push(pixel);
+    else inner.push(pixel);
+  }
+  if (all.length < 64) return { filmType: fallback, confidence: 'low', reason: 'empty' };
+  const fraction = (pixels, key) => pixels.filter(p => p[key]).length / Math.max(1, pixels.length);
+  const quantile = (pixels, key, q) => {
+    const values = pixels.map(p => p[key]).sort((a, b) => a - b);
+    return values[Math.floor((values.length - 1) * q)] ?? 0;
+  };
+  const edgeRange = quantile(edge, 'luma', .9) - quantile(edge, 'luma', .1);
+  const edgeLuma = quantile(edge, 'luma', .5), innerLuma = quantile(inner, 'luma', .5);
+  const orangeFraction = fraction(all, 'orange');
+  // A uniform orange rebate substantially brighter than the image is stronger
+  // evidence than a warm scene. Cropped scans still use whole-image mask evidence.
+  if (edge.length >= 32 && fraction(edge, 'orange') > .85 && edgeRange < .14
+      && edgeLuma > innerLuma + .07 && orangeFraction > .35) {
+    return { filmType: 'color', confidence: 'high', reason: 'orangeRebate' };
+  }
+  // Subject colours can make a masked negative magenta instead of orange
+  // (B >= G), even though the red mask remains over the entire frame. Require
+  // both majority orange and near-global red dominance for this second path;
+  // a warm subject beside neutral shadows or blue sky is not enough.
+  const coherentMask = orangeFraction > .5 && fraction(all, 'maskRed') > .95;
+  if ((orangeFraction > .72 || coherentMask)
+      && quantile(all, 'r', .1) > quantile(all, 'b', .9) * .9) {
+    return { filmType: 'color', confidence: 'medium', reason: 'orangeMask' };
+  }
+  // Camera white balance and the film base can tint a monochrome scan.
+  // Require nearly all pixels to follow the same RGB ratios after a bounded
+  // gain correction; low saturation alone also describes many colour scenes.
+  const medians = ['r', 'g', 'b'].map(key => quantile(all, key, .5));
+  const balance = Math.max(...medians) / Math.max(.02, Math.min(...medians));
+  const coherentGray = balance < 1.6 && all.filter(p => {
+    const channels = [p.r, p.g, p.b].map((v, i) => v / Math.max(.02, medians[i]));
+    return Math.max(...channels) - Math.min(...channels) < .055;
+  }).length / all.length > .96;
+  if (fraction(all, 'gray') > .96 || coherentGray) {
+    // Two opposing thin rebates survive a tight crop, perforations and an
+    // incomplete outer border. Include clipped clear film in this evidence.
+    const clearSides = sides.map(pixels => pixels.length >= 16
+      && quantile(pixels, 'luma', .8) - quantile(pixels, 'luma', .2) < .08
+      && quantile(pixels, 'luma', .5) > .55
+      && quantile(pixels, 'luma', .5) > innerLuma + .22);
+    if ((clearSides[0] && clearSides[1]) || (clearSides[2] && clearSides[3])) {
+      return { filmType: 'bw', confidence: 'medium', reason: 'clearRebate' };
+    }
+    // A borderless grayscale positive and negative cannot be distinguished
+    // reliably from colour statistics. Keep the uncertainty explicit.
+    return { filmType: fallback, confidence: 'low', reason: 'monochrome' };
+  }
+  if (orangeFraction > .35) return { filmType: fallback, confidence: 'low', reason: 'warmScene' };
+  return { filmType: 'positive', confidence: 'medium', reason: 'noMask' };
 }
