@@ -18,9 +18,20 @@ const client = createConversionWorkerClient({ cacheInput: true, workerFactory: (
 const input = new ImageData(new Uint8ClampedArray([10, 20, 30, 255]), 1, 1);
 const analysis = new ImageData(input.data.slice(), 1, 1);
 const request = { imageData: input, settings: {}, options: { analysisImageData: analysis } };
+// The import warm-up starts the worker the first conversion then uses.
+let warm = client.warmUp();
+assert.equal(workers.length, 1);
+assert.deepEqual(workers[0].messages[0], { type: 'warm-up', id: 1 });
+workers[0].onmessage({ data: { type: 'ready', id: 1 } });
+assert.equal(await warm, true);
 let promise = client(request);
 workers[0].complete(); await promise;
-assert.equal(workers[0].messages[0].reuseSource, false);
+assert.equal(workers.length, 1, 'the conversion reuses the warmed worker');
+assert.equal(workers[0].messages[1].reuseSource, false);
+// A warm-up while a photo is open leaves the cached preview source alone.
+warm = client.warmUp();
+workers[0].onmessage({ data: { type: 'ready', id: workers[0].messages.at(-1).id } });
+assert.equal(await warm, true);
 promise = client(request);
 assert.equal(workers[0].messages.at(-1).reuseSource, true);
 assert.equal(workers[0].messages.at(-1).reuseAnalysis, true);
@@ -56,6 +67,7 @@ assert.equal(fullWorker.messages.length, 1, 'プレビューは原寸処理の�
 fullWorker.complete(); await fullPromise;
 const unavailable = createConversionWorkerClient({ workerFactory: () => { throw new Error('blocked'); } });
 await assert.rejects(unavailable(request), { code: WORKER_UNAVAILABLE });
+assert.equal(await unavailable.warmUp(), false, 'a blocked worker never rejects the warm-up');
 assert.equal(isLargeImage({ width: 4000, height: 4000 }), false);
 assert.equal(isLargeImage({ width: 9536, height: 6336 }), true);
 // A fake payload exercises lifetime only; no large allocation is needed.

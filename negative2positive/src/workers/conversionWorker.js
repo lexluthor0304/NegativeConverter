@@ -141,6 +141,12 @@ function commit(msg) {
 }
 
 async function handleMessage(msg) {
+  // The import warm-up only needs this module (and the engine it imports)
+  // loaded; the cached preview source stays as it is.
+  if (msg.type === 'warm-up') {
+    self.postMessage({ type: 'ready', id: msg.id });
+    return;
+  }
   if (msg.type === 'convert') return convert(msg);
   if (msg.type === 'commit') return commit(msg);
   self.postMessage({ type: 'error', id: msg.id, message: `Unknown message type: ${msg.type}` });

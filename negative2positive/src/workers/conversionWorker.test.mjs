@@ -144,4 +144,21 @@ for (const filmType of ['color', 'bw', 'positive']) {
   await post('stale', null, true);
   assert.equal(received.type, 'error', 'a reuse without retained strokes fails instead of converting without them');
 }
-console.log('conversionWorker: 実ルーター・転送後の再利用・解析参照切替・全モードの 16bit 一致、操作中の 16bit 保持と確定を検証');
+{
+  // The import warm-up answers without touching the cached preview source:
+  // the next reuse still converts the source cached before it.
+  const cached = source(11);
+  const settings = { filmType: 'color', colorModel: 'standard', filmBase: { r: 210, g: 140, b: 90 }, exposure: 5 };
+  const options = { preview: true, includeAnalysisPreview: false, analysisImageData: null };
+  await self.onmessage({ data: { type: 'convert', id: ++id, cacheInput: true, width: 40, height: 30,
+    image16: cached.data.buffer.slice(0), settings, options: { ...options } } });
+  assert.equal(received.type, 'result', received.message);
+  await self.onmessage({ data: { type: 'warm-up', id: ++id } });
+  assert.deepEqual(received, { type: 'ready', id });
+  await self.onmessage({ data: { type: 'convert', id: ++id, cacheInput: true, reuseSource: true, reuseAnalysis: false,
+    width: 40, height: 30, settings, options: { ...options } } });
+  assert.equal(received.type, 'result', received.message);
+  const expected = await convertFrameWithRouter({ imageData: cached, settings, options: { ...options, forceFullProcess: true } });
+  assert.deepEqual(new Uint16Array(received.image16), expected.__image16.data, 'warm-up keeps the cached source');
+}
+console.log('conversionWorker: 実ルーター・転送後の再利用・解析参照切替・全モードの 16bit 一致、操作中の 16bit 保持と確定、ウォームアップ後のキャッシュ維持を検証');

@@ -23,8 +23,12 @@ require a full date.
 
 The bundled Apache-2.0 EfficientViT B1 ADE20K model runs on a maximum 512-pixel
 preview in a disposable worker, after statistical conversion has rendered.
-WebGPU is preferred; initialization, warm-up or inference failure rebuilds on
-WASM. Failure keeps statistical colour. The result is a sanitised 64 × 64 label
+It only runs where the map can be used: colour film, or any film under
+expired-film rescue, and not for the frames of a scheduled automatic roll
+analysis, which assigns their recipes meanwhile. A photo left mid-inference
+terminates the worker at once. WebGPU is preferred and probed with a warm-up
+run (a WASM session makes just the real run); initialization, warm-up or
+inference failure rebuilds on WASM. Failure keeps statistical colour. The result is a sanitised 64 × 64 label
 map stored with the photo recipe. Manual WB, a sampled grey point, manual base,
 saved settings, reference locks and positive Edit only take precedence.
 

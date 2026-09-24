@@ -483,6 +483,7 @@ for (const locked of [false, true]) {
     updateSprocketControlsUI: noop, resetAllAdjustments: noop, syncBatchUIState: noop,
     updateFileListUI: () => { assert.equal(f.state.fileQueue.length, 0); emptyListRefreshes++; },
     fileInput: { value: 'old', click: () => { pickerOpened++; } },
+    warmImportPipeline: () => { assert.equal(pickerOpened, 0, 'the import pipeline warms before the picker opens'); },
   });
   c.document.body.dataset = { studioBusy: 'true', photoSwitching: 'true' };
   f.state.photoSwitchTarget = f.item;

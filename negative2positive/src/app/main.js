@@ -7858,8 +7858,10 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
         studioWorkspace?.sync();
       }
       // The frame detector needs OpenCV compiled in its worker; start that
-      // now so it overlaps the decode instead of following it.
+      // now so it overlaps the decode instead of following it. The preview
+      // conversion follows the decode directly, so its worker starts too.
       if (autoConvert && state.autoFrame.enabled) void warmUpAutoFrameWorker();
+      void convertPreviewFrameInWorker.warmUp();
       // A crop draft holds the previous image; leaving crop mode armed lets
       // "Apply" replace the newly loaded file with the old one.
       if (state.cropping) exitCropMode({ restore: false });
@@ -11701,6 +11703,7 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       updateFileListUI();
 
       // Trigger file selection
+      warmImportPipeline();
       fileInput.value = '';
       fileInput.click();
     }
@@ -14577,10 +14580,32 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       if (folderPickerHint) folderPickerHint.classList.add('visible');
     }
 
+    // Import intent (opening a picker, dragging files in, watching a folder)
+    // starts what the first photo needs: the RAW loader chunk, the OpenCV
+    // frame detector and the preview conversion worker. Never on page load:
+    // an unused OpenCV worker ends on its own 30 s idle timer.
+    const IMPORT_WARM_UP_INTERVAL_MS = 30_000;
+    let importWarmUpAt = -Infinity;
+    function warmImportPipeline() {
+      const now = getPerfNow();
+      if (now - importWarmUpAt < IMPORT_WARM_UP_INTERVAL_MS) return;
+      importWarmUpAt = now;
+      void import('./rawFileLoader.js').catch(() => {});
+      if (state.autoFrame.enabled) void warmUpAutoFrameWorker();
+      void convertPreviewFrameInWorker.warmUp();
+    }
+
     const uploadExpiredBtn = document.getElementById('uploadExpiredBtn');
     [uploadBtn, uploadFolderBtn, uploadExpiredBtn].forEach(label => {
       if (!label) return;
       label.addEventListener('keydown', handleUploadLabelKeydown);
+      label.addEventListener('pointerdown', warmImportPipeline);
+      label.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === ' ') warmImportPipeline();
+      });
+    });
+    document.addEventListener('dragenter', (event) => {
+      if (Array.from(event.dataTransfer?.types || []).includes('Files')) warmImportPipeline();
     });
     // The separate entry for an expired roll: the same picker, with the
     // session switched to rescue before the photos arrive.
@@ -18416,6 +18441,7 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       button.addEventListener('click', async () => {
         if (hotFolder) { await stopHotFolder(); return; }
         button.disabled = true;
+        warmImportPipeline();
         try {
           const epoch = ++hotFolderEpoch;
           hotFolderUnlisten = await window.__TAURI__.event.listen('import-folder-file', ({ payload }) => {

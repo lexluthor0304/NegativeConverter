@@ -69,7 +69,7 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
       const entry = pending.get(msg.id);
       if (!entry) return;
       pending.delete(msg.id);
-      if (msg.type === 'result' || msg.type === 'committed') entry.resolve(msg);
+      if (msg.type === 'result' || msg.type === 'committed' || msg.type === 'ready') entry.resolve(msg);
       else {
         const err = workerError(msg.message || 'Conversion worker error', CONVERSION_FAILED);
         // A lent source the worker hands back with its error.
@@ -297,6 +297,21 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
       }
     });
     return reply.image16 ? new Uint16Array(reply.image16) : null;
+  };
+
+  // Start the worker (module imports, engine tables) ahead of the first
+  // conversion, e.g. when the user opens the file picker. It never touches the
+  // cached preview source, so it is safe while a photo is open; a dummy
+  // convert() would replace that cache. Resolves false instead of rejecting.
+  convert.warmUp = () => {
+    let w;
+    try { w = getWorker(); } catch { return Promise.resolve(false); }
+    const id = ++requestId;
+    return new Promise((resolve) => {
+      pending.set(id, { resolve: () => resolve(true), reject: () => resolve(false) });
+      try { w.postMessage({ type: 'warm-up', id }); }
+      catch { pending.delete(id); resolve(false); }
+    });
   };
 
   // Terminate the worker and fail whatever it still owed. The next convert()
