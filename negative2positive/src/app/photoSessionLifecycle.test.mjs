@@ -215,6 +215,9 @@ for (const outcome of ['success', 'stale', 'abort']) {
     updateFileListUI: noop, loadStudioThumbnails: noop,
     scheduleFullResolutionRender: reason => { assert.equal(reason, 'photo-restored'); scheduled++; },
     scheduleAiRepairPreloadForRecipe: () => { preloadChecks++; },
+    cancelProvisionalFrame: noop,
+    presentRetainedPreview: () => assert.fail('a warm restore shows no presentation image'),
+    requestProvisionalFrame: () => assert.fail('a warm restore decodes no embedded preview'),
   });
   let preloadChecks = 0;
   vm.runInContext(functionSource('switchToFile'), c);
@@ -232,9 +235,9 @@ for (const outcome of ['success', 'stale', 'abort']) {
     'warm restoration never announces a cold loading target');
 }
 
-function coldFixture() {
+function coldFixture({ presented = null } = {}) {
   const f = fixture(), c = f.context;
-  const frames = [], loads = [], preparations = [], feedback = [];
+  const frames = [], loads = [], preparations = [], feedback = [], presentations = [], provisional = [];
   const second = { file: new File(['second'], 'second.png'), settings: null };
   const third = { file: new File(['third'], 'third.png'), settings: null };
   f.state.fileQueue.push(second, third);
@@ -248,6 +251,12 @@ function coldFixture() {
     yieldToPaint: () => new Promise(resolve => c.requestAnimationFrame(() => c.setTimeout(resolve, 0))),
     resetZoomPan: noop, updateFileListUI: noop, loadStudioThumbnails: noop,
     showToast: noop,
+    cancelProvisionalFrame: noop,
+    presentRetainedPreview: item => {
+      presentations.push({ item, target: f.state.photoSwitchTarget, frames: frames.length });
+      return presented;
+    },
+    requestProvisionalFrame: item => provisional.push({ item, loads: loads.length }),
     loadFile: (file, options) => {
       assert.equal(options.quiet, true);
       const generation = ++c.loadGeneration;
@@ -267,7 +276,7 @@ function coldFixture() {
     },
   });
   vm.runInContext(functionSource('switchToFile'), c);
-  return { ...f, second, third, frames, loads, preparations, feedback };
+  return { ...f, second, third, frames, loads, preparations, feedback, presentations, provisional };
 }
 // #236: a photo left during its detection tail holds provisional settings.
 // It is neither persisted nor snapshotted: its settings stay null (roll
@@ -310,6 +319,10 @@ for (const outcome of ['success', 'load-error', 'prepare-error']) {
   assert.equal(f.feedback.at(-1).target, f.second);
   assert.equal(f.loads.length, 0, 'decoding cannot begin before the feedback paint');
   assert.equal(f.frames.length, 1);
+  assert.deepEqual(f.presentations.map(p => [p.item, p.target, p.frames]), [[f.second, f.second, 0]],
+    'retained pixels are presented in the same task that shows the veil');
+  assert.deepEqual(f.provisional.map(p => [p.item, p.loads]), [[f.second, 0]],
+    'the embedded-preview job is posted before the container read');
   f.frames.shift()(); await tick();
   assert.equal(f.loads.length, 1);
   f.loads[0].resolve(outcome === 'load-error' ? { status: 'error', message: 'decode failed' } : { status: 'loaded' });
@@ -329,8 +342,37 @@ for (const outcome of ['success', 'load-error', 'prepare-error']) {
   if (outcome === 'load-error') {
     assert.equal(f.state.currentFileIndex, 0);
     assert.equal(f.state.loadedFile, f.item.file);
-    assert.equal(redraws, 1, 'failed target/proxy restores the actual loaded photo before removing its veil');
+    assert.equal(redraws, 0, 'presentation images live on the veil: a failed target has nothing to restore');
   }
+}
+
+{
+  // An exact 1200 px copy is already on screen: no camera JPEG is decoded.
+  const f = coldFixture({ presented: 'cached' }), c = f.context;
+  const pending = c.switchToFile(1);
+  assert.equal(f.presentations.length, 1);
+  assert.equal(f.provisional.length, 0, 'a matching photoPreviews entry needs no embedded preview');
+  f.frames.shift()(); await tick();
+  f.loads[0].resolve({ status: 'loaded' }); await tick();
+  f.preparations[0].resolve(); await pending;
+}
+{
+  // A retained decoded base reaches the exact positive in ~0.3 s: no job.
+  const f = coldFixture(), c = f.context;
+  f.photoSessions.put(f.second, { file: f.second.file, base: image(), rawMetadata: null });
+  const pending = c.switchToFile(1);
+  assert.equal(f.presentations.length, 1);
+  assert.equal(f.provisional.length, 0, 'a base-only session skips the embedded preview');
+  f.frames.shift()(); await tick();
+  f.loads[0].resolve({ status: 'error', message: 'x' }); await pending;
+}
+{
+  // A thumbnail is only a stand-in: the embedded preview is still requested.
+  const f = coldFixture({ presented: 'thumbnail' }), c = f.context;
+  const pending = c.switchToFile(1);
+  assert.equal(f.provisional.length, 1);
+  f.frames.shift()(); await tick();
+  f.loads[0].resolve({ status: 'error', message: 'x' }); await pending;
 }
 
 for (const supersedeBeforePaint of [false, true]) {

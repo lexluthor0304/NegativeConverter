@@ -16,6 +16,10 @@ import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
 import { createHiddenJobGate, hiddenJobLimitsApply, estimateHiddenJobBytes } from './hiddenJobGate.js';
 import { createJobMarker, readJobMarkers, clearJobMarker, matchJobFiles, planResumedExport, resumedJobMarker, jobNeedsSafeMode } from './jobMarker.js';
 import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
+import { createEmbeddedPreviewPool } from './scanDecodeClient.js';
+import { isTiffContainerRawName } from './rawEmbeddedPreview.js';
+import { renderEmbeddedPreview, createDocumentPreviewEnv } from './embeddedPreviewRender.js';
+import { canPublishThumbnail } from './thumbnailRank.js';
     import { detectedImportSettings } from './filmTypeDetection.js';
     import { createAiModelLoader } from './aiModelLoading.js';
     import opencvScriptUrl from '@techstark/opencv-js/dist/opencv.js?url';
@@ -7829,6 +7833,165 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       else requestAnimationFrame(() => setTimeout(task, 0));
     }
 
+    // ===========================================
+    // Provisional pixels for cold opens and tiles (#235)
+    // ===========================================
+    // Everything here is presentation-only. Retained previews, thumbnails and
+    // embedded camera JPEGs are drawn by the switch veil or published as
+    // `embedded` / `analysis` tiles. None of it is ever assigned to the image
+    // fields of `state`, to photoSessions, or passed to frame, film-edge, roll,
+    // dust or semantic analysis, or to export.
+    let embeddedPreviewPool = null;
+    let provisionalRequest = null;
+    function getEmbeddedPreviewPool() {
+      embeddedPreviewPool ||= createEmbeddedPreviewPool({
+        // Only where workers cannot decode images: small tiles, one per frame.
+        mainThreadRender: job => renderEmbeddedPreview(job, createDocumentPreviewEnv(document)),
+      });
+      return embeddedPreviewPool;
+    }
+
+    function viewerLongSidePx() {
+      const box = document.getElementById('canvasContainer')?.getBoundingClientRect();
+      const css = Math.max(box?.width || 0, box?.height || 0) || Math.max(window.innerWidth || 0, window.innerHeight || 0);
+      return Math.round(css * (window.devicePixelRatio || 1));
+    }
+
+    // Invert unless the exact render will not invert either, so the frame does
+    // not flip between negative and positive when the exact render lands. A
+    // frame without settings is never typed from the camera JPEG (#231): it
+    // inverts by default. B&W frames show luminance.
+    function provisionalToneFor(item) {
+      const filmType = sanitizeFilmTypeOverride(item?.filmTypeOverride)?.filmType
+        || item?.settings?.filmType || (!state.importFilmTypeAuto ? state.filmType : null);
+      return { invert: filmType !== 'positive', monochrome: filmType === 'bw' };
+    }
+
+    // Slice 1: show what the app already holds for a cold target, in the same
+    // task that shows the veil: the retained 1200 px converted copy when its
+    // recipe still matches, otherwise the tile's thumbnail of any kind.
+    function presentRetainedPreview(item) {
+      const presentation = studioWorkspace?.photoSwitchPresentation;
+      if (!presentation || state.photoSwitchTarget !== item) return null;
+      const retained = photoPreviews.peek(item);
+      if (retained?.key === photoSettingsKey(item) && presentation.showImageData(item, retained.image, 'cached')) return 'cached';
+      if (item.thumbnail && presentation.showUrl(item, item.thumbnail, 'thumbnail')) return 'thumbnail';
+      return null;
+    }
+
+    function cancelProvisionalFrame() {
+      provisionalRequest?.abort();
+      provisionalRequest = null;
+    }
+
+    // Slice 2: decode the camera JPEG in a worker and show a quick positive
+    // (inverted, geometry-mapped, colour-matched to a converted thumbnail when
+    // one exists) in the veil. Posted before the container read is issued.
+    function requestProvisionalFrame(item) {
+      cancelProvisionalFrame();
+      if (!item?.file || !studioWorkspace?.photoSwitchPresentation || !isTiffContainerRawName(item.file.name)) return;
+      const controller = provisionalRequest = new AbortController();
+      const settings = item.settings;
+      const converted = item.thumbnail && (item.thumbnailKind === 'analysis' || item.thumbnailKind === 'processed');
+      const job = {
+        file: item.file, purpose: 'viewer', output: 'bitmap', longSidePx: viewerLongSidePx(),
+        geometry: settings ? { rotationAngle: settings.rotationAngle || 0, mirrored: Boolean(settings.mirrored),
+          cropRegion: settings.cropRegion || null } : null,
+        matchTo: converted ? item.thumbnail : null,
+        ...provisionalToneFor(item),
+      };
+      performance.mark?.('nc:provisional-request');
+      void getEmbeddedPreviewPool().request(job, { priority: -1, signal: controller.signal }).then(result => {
+        const bitmap = result?.bitmap;
+        if (!bitmap) return;
+        // Only the activation that asked may draw, and only while its veil is up.
+        if (provisionalRequest !== controller || state.photoSwitchTarget !== item
+          || document.body.dataset.photoSwitching !== 'true') { bitmap.close?.(); return; }
+        if (studioWorkspace.photoSwitchPresentation.showBitmap(item, bitmap, 'embedded')) performance.mark?.('nc:provisional-paint');
+      });
+    }
+
+    // Import-time tiles: every TIFF-container RAW gets an `embedded` tile from
+    // its smallest adequate preview (~50-140 KB read). Not gated on roll import
+    // or the editor: the jobs cost a few ms of worker time each.
+    const embeddedTileItems = new Set();
+    const visibleTileItems = new Set();
+    const tileFlushItems = new Set();
+    let tileVisibility = null;
+    let tileFlushFrame = 0;
+
+    // At most one thumbnail flush and one state refresh per frame.
+    function scheduleTileFlush(item) {
+      tileFlushItems.add(item);
+      if (tileFlushFrame) return;
+      tileFlushFrame = requestAnimationFrame(() => {
+        tileFlushFrame = 0;
+        const items = [...tileFlushItems];
+        tileFlushItems.clear();
+        for (const entry of items) updateFileThumbnail(entry, { refresh: false });
+        refreshThumbnailStates();
+      });
+    }
+
+    // The first photo first, then rows on screen, then the rest.
+    function tilePriority(item) {
+      if (item === state.fileQueue[state.currentFileIndex]) return 0;
+      return visibleTileItems.has(item) ? 1 : 2;
+    }
+
+    function observeTileVisibility() {
+      if (typeof IntersectionObserver !== 'function') return;
+      tileVisibility ||= new IntersectionObserver(entries => {
+        for (const entry of entries) {
+          const item = state.fileQueue[Number(entry.target.dataset.index)];
+          if (!item) continue;
+          if (entry.isIntersecting) visibleTileItems.add(item);
+          else visibleTileItems.delete(item);
+        }
+        embeddedPreviewPool?.reprioritize((job, priority) => {
+          if (job.purpose !== 'tile') return priority;
+          const item = state.fileQueue.find(entry => entry.file === job.file);
+          return item ? tilePriority(item) : priority;
+        });
+      });
+      for (const button of document.querySelectorAll('#fileListItems .file-list-name')) tileVisibility.observe(button);
+    }
+
+    function queueEmbeddedTiles(items) {
+      const raws = items.filter(item => isTiffContainerRawName(item.file?.name) && !item.thumbnail && !embeddedTileItems.has(item));
+      if (!raws.length) return;
+      const pool = getEmbeddedPreviewPool();
+      pool.setKeepWarm(true);
+      observeTileVisibility();
+      for (const item of raws) {
+        embeddedTileItems.add(item);
+        void pool.request({ file: item.file, purpose: 'tile', output: 'dataUrl', ...provisionalToneFor(item) },
+          { priority: tilePriority(item) }).then(result => {
+          embeddedTileItems.delete(item);
+          if (!result?.dataUrl || !state.fileQueue.includes(item) || !canPublishThumbnail(item, 'embedded')) return;
+          item.thumbnail = result.dataUrl;
+          item.thumbnailKind = 'embedded';
+          item.thumbnailKey = null;
+          scheduleTileFlush(item);
+        });
+      }
+    }
+
+    // Queue changes: drop jobs of removed photos, keep one worker warm only
+    // while TIFF RAWs remain, and release the pool with the queue.
+    function syncEmbeddedPreviewQueue() {
+      if (!embeddedPreviewPool) return;
+      if (!state.fileQueue.length) {
+        embeddedPreviewPool.clear();
+        visibleTileItems.clear();
+        return;
+      }
+      const files = new Set(state.fileQueue.map(item => item.file));
+      embeddedPreviewPool.cancel(job => job.purpose === 'tile' && !files.has(job.file));
+      for (const item of visibleTileItems) if (!files.has(item.file)) visibleTileItems.delete(item);
+      embeddedPreviewPool.setKeepWarm(state.fileQueue.some(item => isTiffContainerRawName(item.file?.name)));
+    }
+
     function invalidatePhotoActivation() {
       // A newer activation supersedes a photo parked while hidden (#241).
       parkedPhoto = null;
@@ -7889,6 +8052,7 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       invalidatePhotoActivation();
       // Direct imports/drops supersede any pending quiet file-list activation.
       if (!quiet && (state.photoSwitchTarget || supersedesTail)) {
+        cancelProvisionalFrame();
         state.photoSwitchTarget = null;
         state.photoSwitchPhase = null;
         delete document.body.dataset.photoSwitching;
@@ -7917,8 +8081,15 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       setUploadPlaceholderStatus(i18n[currentLang].processing);
       const fileName = file.name.toLowerCase();
       const isRawLikeFile = isRawLikeFileName(fileName);
+      // A TIFF-container RAW import opens through the same viewer-local veil
+      // as a cold switch (busy/locked datasets, "Opening {name}" live region),
+      // not the full-screen overlay, so its provisional frame is visible. The
+      // embedded-preview job is posted before the container read is issued.
+      const openingItem = !quiet && studioWorkspace && isRawLikeFile && isTiffContainerRawName(fileName)
+        ? state.fileQueue.find(entry => entry.file === file) || null : null;
+      if (openingItem) beginImportOpening(openingItem);
 
-      const overlay = quiet ? quietLoadingOverlay : getLoadingOverlay();
+      const overlay = quiet || openingItem ? quietLoadingOverlay : getLoadingOverlay();
       const lang = i18n[currentLang];
 
       try {
@@ -8036,8 +8207,9 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
           } else {
             updateLensCorrectionUI();
           }
-          if (!quiet) displayNegative(imageData);
+          if (!quiet && !openingItem) displayNegative(imageData);
           showImageUI();
+          if (openingItem && state.photoSwitchTarget === openingItem) state.photoSwitchPhase = 'preparing';
           goToStep(1);
           clearUndoHistory();
           updateAutoFrameDiagnosticsUI();
@@ -8062,7 +8234,7 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
           }
         }
         if (autoConvert && isCurrentLoad(generation)) {
-          await prepareStudioPhoto(generation, undefined, { quiet });
+          await prepareStudioPhoto(generation, undefined, { quiet: quiet || Boolean(openingItem) });
         }
         return { status: isCurrentLoad(generation) ? 'loaded' : 'stale' };
       } catch (err) {
@@ -8096,7 +8268,34 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
         // while switching files would otherwise be completely invisible.
         showToast(message);
         return { status: 'error', message };
+      } finally {
+        // Only the current import may remove its own opening feedback.
+        if (openingItem && isCurrentLoad(generation)) endImportOpening(openingItem);
       }
+    }
+
+    function beginImportOpening(item) {
+      state.photoSwitchTarget = item;
+      state.photoSwitchPhase = 'loading';
+      document.body.dataset.photoSwitching = 'true';
+      document.body.dataset.studioBusy = 'true';
+      // sync() also lays the viewer out ahead of the decode: the empty state
+      // otherwise removes it (body.studio-opening, photo-switch-feedback.css).
+      studioWorkspace.sync();
+      presentRetainedPreview(item);
+      requestProvisionalFrame(item);
+    }
+
+    function endImportOpening(item) {
+      cancelProvisionalFrame();
+      if (state.photoSwitchTarget === item) {
+        state.photoSwitchTarget = null;
+        state.photoSwitchPhase = null;
+        delete document.body.dataset.photoSwitching;
+        delete document.body.dataset.studioBusy;
+      }
+      updateFileListUI();
+      studioWorkspace?.sync();
     }
 
     async function scheduleBackgroundFullResDecode(generation = loadGeneration) {
@@ -13866,6 +14065,7 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       }
       photoSessions.retainKeys(state.fileQueue);
       photoPreviews.retainKeys(state.fileQueue);
+      syncEmbeddedPreviewQueue();
       const container = document.getElementById('fileListItems');
       const countEl = document.getElementById('fileListCount');
       updateReviewFilter();
@@ -13939,6 +14139,7 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       updateAutoFrameButtons();
       syncBatchUIState({ reason: 'updateFileListUI' });
       refreshThumbnailStates();
+      if (tileVisibility) observeTileVisibility();
       void loadStudioThumbnails();
     }
 
@@ -13955,6 +14156,7 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       if (state.cropping) exitCropMode({ restore: false });
       if (state.beforeAfterActive) exitBeforeAfter();
       state.samplingMode = null;
+      cancelProvisionalFrame();
 
       // Snapshot the file being left only if there is something to snapshot.
       // A file the user merely clicked through in Step 1/2 has no settings of
@@ -14041,16 +14243,15 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
         state.photoSwitchPhase = 'loading';
         flushFileList();
         studioWorkspace?.sync();
+        // The veil shows the target's own pixels in this same task when the
+        // app holds any. An exact 1200 px copy needs no camera JPEG, and a
+        // retained decoded base reaches the exact positive in ~0.3 s.
+        const presented = presentRetainedPreview(fileItem);
+        if (presented !== 'cached' && !(cached?.base && cached.file === fileItem.file)) requestProvisionalFrame(fileItem);
         // Paint the target identity before decoder or cached-base preparation
         // can occupy the main thread. Hidden tabs need not await a paused rAF.
         await yieldToPaint();
         if (!isCurrentLoad(generation) || state.fileQueue[index] !== fileItem) return;
-
-        const preview = photoPreviews.peek(fileItem);
-        if (preview?.key === photoSettingsKey(fileItem)) {
-          canvas.style.display = 'block'; glCanvas.style.display = 'none';
-          renderAdjustedImageDataToMainCanvas(preview.image, preview.image);
-        }
 
         // Load the file
         const loading = loadFile(fileItem.file, { autoConvert: false, decoded: cached, quiet: true });
@@ -14065,11 +14266,12 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
           if (result?.status === 'error') {
             fileItem.status = 'error';
             fileItem.error = result.message;
+            // Presentation images live on the veil, never on #canvas: the
+            // outgoing photo's display is untouched and needs no restoring.
             state.currentFileIndex = state.fileQueue.findIndex(item => item.file === state.loadedFile);
-            // A retained presentation proxy may already have been drawn for
-            // this target. Restore the actual loaded image before revealing it.
+            // Planes released for the switch come back through the outgoing
+            // photo's session.
             if (released) reactivateReleasedPhoto(released);
-            else if (state.loadedFile !== fileItem.file && state.originalImageData) updatePreview();
           }
           return;
         }
@@ -14091,13 +14293,13 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
         fileItem.error = String(error?.message || error);
         state.currentFileIndex = state.fileQueue.findIndex(item => item.file === state.loadedFile);
         if (released && state.loadedFile !== fileItem.file) reactivateReleasedPhoto(released);
-        else if (state.loadedFile !== fileItem.file && state.originalImageData) updatePreview();
         showToast(getLocalizedText('loadError', 'Error loading file'));
       } finally {
         // The warm switch's refresh is the one below.
         flushFileList({ flush: !isCurrentLoad(generation) });
         // An old completion must never clear the newest target's feedback.
         if (isCurrentLoad(generation)) {
+          cancelProvisionalFrame();
           state.photoSwitchTarget = null;
           state.photoSwitchPhase = null;
           delete document.body.dataset.photoSwitching;
@@ -14615,6 +14817,7 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       if (imported.length >= 3) scheduleAutomaticRollImport(imported);
 
       updateFileListUI();
+      queueEmbeddedTiles(imported);
       updateExportButtons();
       void loadStudioThumbnails();
       scheduleProjectRecovery();
@@ -14884,7 +15087,9 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       const index = state.fileQueue.indexOf(item);
       return index < 0 ? null : document.querySelector(`#fileListItems .file-list-name[data-index="${index}"]`);
     }
-    function updateFileThumbnail(item) {
+    // `refresh: false` leaves the row's state to a later refreshThumbnailStates
+    // (a batch of embedded tiles publishes in one pass per frame, #235).
+    function updateFileThumbnail(item, { refresh = true } = {}) {
       const button = item.thumbnail ? fileListButtonFor(item) : null;
       if (!button) return;
       let image = button.querySelector('.file-list-thumbnail');
@@ -14895,7 +15100,7 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
         else button.prepend(image);
       }
       if (image.getAttribute('src') !== item.thumbnail) image.src = item.thumbnail;
-      refreshThumbnailState(button, item);
+      if (refresh) refreshThumbnailState(button, item);
     }
     function refreshThumbnailRow(item) {
       const button = fileListButtonFor(item);
@@ -14909,6 +15114,9 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       const failed = item.thumbnailErrorKey === key;
       const previewState = ready ? 'ready' : failed ? 'error' : 'pending';
       if (button.dataset.previewState !== previewState) button.dataset.previewState = previewState;
+      // embedded < analysis < processed; an embedded tile is never ready.
+      const thumbnailKind = item.thumbnail ? item.thumbnailKind || '' : '';
+      if (button.dataset.thumbnailKind !== thumbnailKind) button.dataset.thumbnailKind = thumbnailKind;
       const switching = state.photoSwitchTarget === item && document.body.dataset.photoSwitching === 'true';
       const busy = String(switching || (!ready && !failed));
       if (button.getAttribute('aria-busy') !== busy) button.setAttribute('aria-busy', busy);
@@ -19247,6 +19455,10 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
                 scheduleProjectRecovery();
                 // Apply a decision that changed while this frame was measured.
                 scheduleImportFilmTypeUpdate(filmTypeRoll);
+                // The tile shows this frame's converted look as soon as it is
+                // measured; the next decode does not wait for the render.
+                renderFrameAnalysisThumbnail(item, payload,
+                  () => valid() && eligible(item) && item.settings === payload.settings);
               },
               onEvent: (event) => {
                 if (event.type !== 'error' || !valid() || !eligible(event.job)
@@ -19280,11 +19492,50 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
           notifyImportReview(pending); updateFileListUI(); scheduleProjectRecovery();
         } finally {
           automaticRollImportRunning = false;
+          releaseFrameThumbnailWorkers();
           if (retry && valid()) schedule(750);
           else await finish();
         }
       };
       schedule(1200);
+    }
+
+    // Per-frame `analysis` tiles during automatic roll import, rendered from
+    // the frame's 900 px sample with the same recipe the roll commit uses
+    // (worker conversion, then createAdjustedPhotoPreview with the frame's
+    // adjustment settings). They only fill empty or `embedded` tiles; the
+    // commit and the canonical lane replace them as before.
+    let frameThumbnailWorkers = null;
+    const frameThumbnailJobs = new Set();
+    function renderFrameAnalysisThumbnail(item, { sample, settings }, isValid) {
+      if (!sample || !settings || !usesSilverCoreConversion(settings) || !canPublishThumbnail(item, 'analysis')) return;
+      const job = (async () => {
+        try {
+          frameThumbnailWorkers ||= createConversionWorkerPool({ size: 1 });
+          const converted = await frameThumbnailWorkers({
+            imageData: downsampleImageDataForMaxDim(sample, 288),
+            settings: { ...buildCoreConversionSettings(settings), analysisRegion: null },
+            options: { preview: true, includeAnalysisPreview: false }
+          });
+          if (!converted || !isValid() || !state.fileQueue.includes(item) || !canPublishThumbnail(item, 'analysis')) return;
+          item.thumbnail = thumbnailDataUrl(createAdjustedPhotoPreview(converted, buildAdjustmentSettings(settings)));
+          item.thumbnailKind = 'analysis';
+          item.thumbnailKey = null;
+          scheduleTileFlush(item);
+        } catch (error) {
+          if (error?.name !== 'AbortError') console.warn('Frame thumbnail failed for', item.file?.name, error);
+        }
+      })();
+      frameThumbnailJobs.add(job);
+      void job.finally(() => {
+        frameThumbnailJobs.delete(job);
+        releaseFrameThumbnailWorkers();
+      });
+    }
+    function releaseFrameThumbnailWorkers() {
+      if (frameThumbnailJobs.size || automaticRollImportRunning || !frameThumbnailWorkers) return;
+      frameThumbnailWorkers.dispose();
+      frameThumbnailWorkers = null;
     }
 
     function updateRollAnalysisUI() {

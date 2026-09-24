@@ -20,7 +20,7 @@ export const studioText = {
     balance: '校正偏色', reset: '重置调色', more: '更多调整', repair: '修复',
     conversion: '转换', conversionHint: '胶片类型、片基与引擎。默认自动处理，需要时可以手动校正。',
     processing: '正在处理照片…', ready: '正片已就绪', failed: '转换未完成，请在“转换”中重试',
-    openingPhoto: '正在打开 {name}…', preparingPhoto: '正在转换 {name}…',
+    openingPhoto: '正在打开 {name}…', preparingPhoto: '正在转换 {name}…', provisionalPreview: '预览',
     photoSwitchHint: '正在本机加载与处理，你可以继续选择其他照片。', photoSwitchTile: '打开中…',
     empty: '添加照片后开始调色', photos: '照片', sync: '同步调色', selected: '已选 {count} 张',
     syncHint: '只同步色彩，不改变其他照片的裁切、片基和修复。', synced: '已同步到 {count} 张照片',
@@ -70,7 +70,7 @@ export const studioText = {
     balance: 'Correct color cast', reset: 'Reset color', more: 'More adjustments', repair: 'Retouch',
     conversion: 'Convert', conversionHint: 'Film type, film base and engine. Start automatically, refine when needed.',
     processing: 'Processing photo…', ready: 'Positive ready', failed: 'Conversion incomplete. Open Convert to retry.',
-    openingPhoto: 'Opening {name}…', preparingPhoto: 'Converting {name}…',
+    openingPhoto: 'Opening {name}…', preparingPhoto: 'Converting {name}…', provisionalPreview: 'preview',
     photoSwitchHint: 'Loading and processing on your device. You can choose another photo.', photoSwitchTile: 'Opening…',
     empty: 'Add a photo to start editing', photos: 'Photos', sync: 'Sync color', selected: '{count} selected',
     syncHint: 'Only color is synced. Each photo keeps its crop, film base and retouching.', synced: 'Color synced to {count} photos',
@@ -119,7 +119,7 @@ export const studioText = {
     balance: '色かぶりを補正', reset: '色調整をリセット', more: '詳細な調整', repair: '修復',
     conversion: '変換', conversionHint: 'フィルム種類・ベース・エンジン。自動変換を出発点に、必要なところを調整できます。',
     processing: '写真を処理しています…', ready: '変換完了', failed: '変換が完了していません。「変換」から再試行してください。',
-    openingPhoto: '{name} を開いています…', preparingPhoto: '{name} を変換しています…',
+    openingPhoto: '{name} を開いています…', preparingPhoto: '{name} を変換しています…', provisionalPreview: 'プレビュー',
     photoSwitchHint: 'この端末で読み込み・処理中です。他の写真も選択できます。', photoSwitchTile: '読み込み中…',
     empty: '写真を追加すると色調整できます', photos: '写真', sync: '色調整を同期', selected: '{count} 枚選択中',
     syncHint: '色だけを同期します。切り抜き・フィルムベース・修復は各写真の設定を保ちます。', synced: '{count} 枚に色調整を同期しました',
@@ -156,15 +156,100 @@ export const studioText = {
   }
 };
 
+/**
+ * Presentation surfaces inside the viewer-local switch veil.
+ *
+ * A cold target's own pixels (the retained 1200 px `photoPreviews` copy, its
+ * filmstrip thumbnail or a provisional embedded-preview frame) are drawn here,
+ * on the veil's opaque background, never on #canvas: they cannot inherit the
+ * outgoing zoom/pan or touch display state, and nothing needs restoring on an
+ * error. Everything shown is presentation-only and bound to one target; it is
+ * released whenever the veil hides or the target changes.
+ */
+export function createPhotoSwitchPresentation(feedback, { label = () => '' } = {}) {
+  const surface = kind => feedback.querySelector(`[data-surface="${kind}"]`);
+  const suffix = () => feedback.querySelector('.studio-photo-switch-provisional');
+  let target = null;
+  let bitmapContext = null;
+  const reveal = (item, kind, shown) => {
+    target = item;
+    for (const name of ['image', 'thumbnail', 'bitmap']) {
+      const node = surface(name);
+      if (node) node.hidden = name !== shown;
+    }
+    feedback.dataset.provisional = kind;
+    const chip = suffix();
+    if (chip) chip.textContent = label();
+  };
+  const presentation = {
+    get target() { return target; },
+    get kind() { return feedback.dataset.provisional || null; },
+    // The retained converted copy (ImageData), drawn synchronously.
+    showImageData(item, image, kind = 'cached') {
+      const canvas = surface('image');
+      if (!canvas || !image?.width || !image?.height) return false;
+      canvas.width = image.width;
+      canvas.height = image.height;
+      canvas.getContext('2d').putImageData(image, 0, 0);
+      reveal(item, kind, 'image');
+      return true;
+    },
+    // A filmstrip thumbnail (data URL of any kind), upscaled by the browser.
+    showUrl(item, url, kind = 'thumbnail') {
+      const image = surface('thumbnail');
+      if (!image || !url) return false;
+      if (image.getAttribute('src') !== url) image.src = url;
+      reveal(item, kind, 'thumbnail');
+      return true;
+    },
+    // A provisional ImageBitmap: transferFromImageBitmap does no per-pixel
+    // main-thread work and takes ownership of the bitmap.
+    showBitmap(item, bitmap, kind = 'embedded') {
+      const canvas = surface('bitmap');
+      bitmapContext ||= canvas?.getContext('bitmaprenderer');
+      if (!bitmapContext || !bitmap) { bitmap?.close?.(); return false; }
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      bitmapContext.transferFromImageBitmap(bitmap);
+      reveal(item, kind, 'bitmap');
+      return true;
+    },
+    relabel() {
+      const chip = suffix();
+      if (chip) chip.textContent = target ? label() : '';
+    },
+    clear() {
+      if (!target && !feedback.dataset.provisional) return;
+      target = null;
+      delete feedback.dataset.provisional;
+      const canvas = surface('image');
+      if (canvas) { canvas.hidden = true; canvas.width = 0; canvas.height = 0; }
+      const image = surface('thumbnail');
+      if (image) { image.hidden = true; image.removeAttribute('src'); }
+      const bitmap = surface('bitmap');
+      if (bitmap) {
+        bitmap.hidden = true;
+        try { bitmapContext?.transferFromImageBitmap(null); } catch { /* engines without the null release */ }
+      }
+      const chip = suffix();
+      if (chip) chip.textContent = '';
+    },
+  };
+  return presentation;
+}
+
 // Keep switching feedback separate from background thumbnail work: a tile can
 // have its canonical preview ready while its full editor source is still loading.
-export function syncPhotoSwitchFeedback({ state, document, text }) {
+export function syncPhotoSwitchFeedback({ state, document, text, presentation = null }) {
   const item = document.body.dataset.photoSwitching === 'true'
     && state.fileQueue.includes(state.photoSwitchTarget) ? state.photoSwitchTarget : null;
   const message = item ? text(state.photoSwitchPhase === 'preparing' ? 'preparingPhoto' : 'openingPhoto')
     .replace('{name}', item.file.name) : '';
   const feedback = document.getElementById('studioPhotoSwitchFeedback');
   feedback.hidden = !item;
+  // A presentation belongs to exactly one target and ends with the veil.
+  if (presentation && presentation.target !== item) presentation.clear();
+  else presentation?.relabel();
   document.getElementById('studioPhotoSwitchMessage').textContent = message;
   document.getElementById('studioPhotoSwitchHint').textContent = item ? text('photoSwitchHint') : '';
   document.getElementById('canvasContainer').setAttribute('aria-busy', String(Boolean(item)));
@@ -549,7 +634,10 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
   photoSwitchFeedback.setAttribute('role', 'status');
   photoSwitchFeedback.setAttribute('aria-live', 'polite');
   photoSwitchFeedback.setAttribute('aria-atomic', 'true');
-  photoSwitchFeedback.innerHTML = '<div class="studio-photo-switch-card"><span class="studio-photo-switch-indicator" aria-hidden="true"></span><strong id="studioPhotoSwitchMessage"></strong><p id="studioPhotoSwitchHint"></p></div>';
+  // The live region announces the message only; the image surfaces and the
+  // " · preview" chip suffix are presentational.
+  photoSwitchFeedback.innerHTML = '<canvas class="studio-photo-switch-image" data-surface="image" aria-hidden="true" hidden></canvas><img class="studio-photo-switch-image" data-surface="thumbnail" alt="" hidden><canvas class="studio-photo-switch-image" data-surface="bitmap" aria-hidden="true" hidden></canvas><div class="studio-photo-switch-card"><span class="studio-photo-switch-indicator" aria-hidden="true"></span><strong id="studioPhotoSwitchMessage"></strong><span class="studio-photo-switch-provisional" aria-hidden="true"></span><p id="studioPhotoSwitchHint"></p></div>';
+  const photoSwitchPresentation = createPhotoSwitchPresentation(photoSwitchFeedback, { label: () => ' · ' + t('provisionalPreview') });
   // The viewer remains visible, but dragging/clicking its loading surface must
   // not pan, sample or repair the outgoing photo underneath it.
   for (const type of ['pointerdown', 'mousedown', 'touchstart', 'click', 'dblclick', 'wheel']) {
@@ -642,6 +730,7 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
   return {
     text: t,
     selectTab,
+    photoSwitchPresentation,
     sync() {
       const state = getState();
       const loaded = Boolean(state.originalImageData);
@@ -658,7 +747,10 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
       if (!expiredFlow && activeTab === 'expired') selectTab('edit');
       $('studioExpiredMode').textContent = t(state.expiredSession ? 'expiredModeOff' : 'expiredModeOn');
       $('studioExpiredMode').setAttribute('aria-pressed', String(Boolean(state.expiredSession)));
-      const switching = syncPhotoSwitchFeedback({ state, document, text: t });
+      const switching = syncPhotoSwitchFeedback({ state, document, text: t, presentation: photoSwitchPresentation });
+      // A RAW import opens through the veil before anything is decoded: lay
+      // the viewer and filmstrip out instead of the empty state.
+      body.classList.toggle('studio-opening', !loaded && Boolean(switching));
       const busy = body.dataset.studioBusy === 'true' || Boolean(switching);
       const locked = busy || state.cropping || isExportLocked();
       $('studioColorCorrect').disabled = !ready || locked;

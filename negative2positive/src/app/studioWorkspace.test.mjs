@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 // ブラウザー用 CSS import だけを除き、翻訳データを同じモジュールから検証する。
 const source = readFileSync(new URL('./studioWorkspace.js', import.meta.url), 'utf8');
 const moduleSource = source.replace(/from '(\.\/(?:panelRelevance|fileListOrder)\.js)'/g, (_, relative) => `from '${new URL(relative, import.meta.url).href}'`).replace(/import '\.\.\/styles\/[^']+\.css';/g, '');
-const { studioText, syncPhotoSwitchFeedback, createPhotoSortControl } = await import('data:text/javascript;base64,' + Buffer.from(moduleSource).toString('base64'));
+const { studioText, syncPhotoSwitchFeedback, createPhotoSortControl, createPhotoSwitchPresentation } = await import('data:text/javascript;base64,' + Buffer.from(moduleSource).toString('base64'));
 const keys = Object.keys(studioText.en).sort();
 for (const [lang, messages] of Object.entries(studioText)) {
   assert.deepEqual(Object.keys(messages).sort(), keys, lang);
@@ -92,6 +92,64 @@ assert.equal(nodes.get('studioPhotoSwitchFeedback').hidden, true);
 assert.deepEqual(buttons.map(button => button.attributes['aria-busy']), ['false', 'true', 'false']);
 assert.ok(buttons.every(button => button.dataset.photoSwitchTarget === undefined));
 console.log('studioWorkspace: localized cold-switch identity, target ownership and independent thumbnail state passed');
+
+// Presentation surfaces in the veil: one target, one visible surface, released
+// with the veil. The live-region message is unchanged; the chip suffix is
+// presentational (aria-hidden in the markup).
+{
+  const surface = (kind, extra = {}) => ({ hidden: true, width: 0, height: 0, dataset: {}, attributes: {}, ...extra,
+    setAttribute(name, value) { this.attributes[name] = value; }, getAttribute(name) { return this.attributes[name]; },
+    removeAttribute(name) { delete this.attributes[name]; delete this.src; } });
+  const drawn = [], transfers = [];
+  const image = surface('image', { getContext: () => ({ putImageData: (data, x, y) => drawn.push([data, x, y]) }) });
+  const thumb = surface('thumbnail');
+  Object.defineProperty(thumb, 'src', { set(value) { this.attributes.src = value; }, get() { return this.attributes.src; }, configurable: true });
+  const bitmap = surface('bitmap', { getContext: kind => (kind === 'bitmaprenderer' ? { transferFromImageBitmap: value => transfers.push(value) } : null) });
+  const chip = { textContent: '' };
+  const veil = { dataset: {}, querySelector: selector => ({
+    '[data-surface="image"]': image, '[data-surface="thumbnail"]': thumb, '[data-surface="bitmap"]': bitmap,
+    '.studio-photo-switch-provisional': chip })[selector] };
+  let lang = 'en';
+  const presentation = createPhotoSwitchPresentation(veil, { label: () => ' · ' + studioText[lang].provisionalPreview });
+  const [a, b] = [{ file: { name: 'a.dng' } }, { file: { name: 'b.dng' } }];
+  const pixels = { width: 1200, height: 797, data: new Uint8ClampedArray(4) };
+  assert.equal(presentation.showImageData(a, pixels), true);
+  assert.deepEqual([veil.dataset.provisional, image.hidden, thumb.hidden, bitmap.hidden, image.width, image.height],
+    ['cached', false, true, true, 1200, 797]);
+  assert.equal(drawn[0][0], pixels, 'the retained copy is drawn once, synchronously');
+  assert.equal(chip.textContent, ' · preview');
+  lang = 'ja'; presentation.relabel();
+  assert.equal(chip.textContent, ' · ' + studioText.ja.provisionalPreview);
+  assert.equal(presentation.showUrl(a, 'data:image/jpeg;base64,AAAA'), true);
+  assert.deepEqual([veil.dataset.provisional, image.hidden, thumb.hidden, thumb.src], ['thumbnail', true, false, 'data:image/jpeg;base64,AAAA']);
+  let closed = 0;
+  const frame = { width: 2112, height: 1408, close: () => { closed++; } };
+  assert.equal(presentation.showBitmap(a, frame), true);
+  assert.deepEqual([veil.dataset.provisional, bitmap.hidden, thumb.hidden, bitmap.width, transfers[0]], ['embedded', false, true, 2112, frame]);
+  assert.equal(presentation.target, a);
+  // A different target (or a hidden veil) releases every surface.
+  document.body.dataset.photoSwitching = 'true';
+  const presentationNodes = new Map([...nodes]);
+  const queue = { fileQueue: [a, b], photoSwitchTarget: b, photoSwitchPhase: 'loading', currentFileIndex: 0 };
+  syncPhotoSwitchFeedback({ state: queue, document, text: key => studioText.en[key], presentation });
+  assert.equal(presentation.target, null);
+  assert.equal(veil.dataset.provisional, undefined);
+  assert.deepEqual([image.hidden, thumb.hidden, bitmap.hidden, image.width, thumb.src], [true, true, true, 0, undefined]);
+  assert.equal(transfers.at(-1), null, 'the bitmap is released with transferFromImageBitmap(null)');
+  assert.equal(chip.textContent, '');
+  assert.equal(nodes.get('studioPhotoSwitchMessage').textContent, studioText.en.openingPhoto.replace('{name}', 'b.dng'),
+    'the announced message never carries the chip suffix');
+  presentation.showUrl(b, 'data:b');
+  syncPhotoSwitchFeedback({ state: queue, document, text: key => studioText.en[key], presentation });
+  assert.equal(presentation.target, b, 'the same target keeps its presentation across syncs');
+  delete document.body.dataset.photoSwitching;
+  syncPhotoSwitchFeedback({ state: queue, document, text: key => studioText.en[key], presentation });
+  assert.equal(presentation.target, null, 'hiding the veil ends the presentation');
+  assert.equal(closed, 0, 'ownership moved to the canvas; it is released by the null transfer, not closed twice');
+  assert.equal(presentation.showImageData(a, null), false);
+  assert.ok(presentationNodes.size > 0);
+  console.log('studioWorkspace: veil presentation surfaces, target binding and release passed');
+}
 
 // Execute the same select adapter used by the mounted strip and light table.
 // State synchronization must not emit a user sort or activate any photo.

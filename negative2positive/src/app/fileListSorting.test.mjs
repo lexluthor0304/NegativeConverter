@@ -36,6 +36,7 @@ const context = vm.createContext({
   currentLang: 'en', i18n: { en: {} },
   updateAutoFrameButtons: noop, syncBatchUIState: noop, refreshThumbnailStates: noop,
   loadStudioThumbnails: noop, updateExportButtons: noop,
+  syncEmbeddedPreviewQueue: noop, tileVisibility: null, observeTileVisibility: noop,
 });
 vm.runInContext('let fileOrderCache = null, fileSelectionAnchor = null, reviewFilter = false;\n'
   + 'let fileListRefreshDeferrals = 0, fileListRefreshDeferred = false;\n'

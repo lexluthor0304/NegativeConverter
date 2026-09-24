@@ -8,6 +8,7 @@ import { aggregateRollAnalysis, groupAutomaticRollFrames, sanitizeRollFrameForSe
 import { decideRollFilmType, mergeRollDecision, ownFilmTypeVerdict, rollDecisionFrame, rollFilmTypeTarget, ROLL_MONOCHROME } from './rollFilmType.js';
 import { applyAutomaticFilmType, applyFilmTypeOverride, sanitizeFilmTypeOverride } from './filmTypeOverride.js';
 import { applyLearnedDefaults, learnedDefaultsKey, withoutLearnedDefaults } from './learnedDefaults.js';
+import { canPublishThumbnail } from './thumbnailRank.js';
 
 // Test the actual orchestration functions, not a second scheduler. Deferred
 // decoders/analysis replies make navigation and recipe races deterministic.
@@ -60,6 +61,8 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
   const markerMap = new Map();
   const markerStorage = { get: key => markerMap.get(key) ?? null, set: (key, value) => markerMap.set(key, value), remove: key => markerMap.delete(key) };
   const toasts = [], frameTypes = [], samplesBuilt = [];
+  const frameRenders = [], flushed = [];
+  let frameWorkersDisposed = 0;
   let timerId = 0;
   const noop = () => {};
   const context = vm.createContext({
@@ -152,9 +155,18 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
     importFilmTypeRolls: new Map(), learnedRecords: new Map(), i18n: { en: { filmTypeMonochrome: 'Monochrome' } }, currentLang: 'en',
     decideRollFilmType, mergeRollDecision, ownFilmTypeVerdict, rollDecisionFrame, rollFilmTypeTarget, ROLL_MONOCHROME,
     applyAutomaticFilmType, applyFilmTypeOverride, sanitizeFilmTypeOverride, applyLearnedDefaults, learnedDefaultsKey, withoutLearnedDefaults,
-    scheduleSilverSourceRefresh: noop, schedulePreviewUpdate: noop
+    scheduleSilverSourceRefresh: noop, schedulePreviewUpdate: noop,
+    // Per-frame analysis tiles: a deferred worker conversion per frame.
+    canPublishThumbnail, frameThumbnailWorkers: null, frameThumbnailJobs: new Set(),
+    createConversionWorkerPool: () => Object.assign(request => {
+      const gate = deferred();
+      frameRenders.push({ request, ...gate });
+      return gate.promise;
+    }, { dispose: () => { frameWorkersDisposed++; } }),
+    scheduleTileFlush: item => flushed.push(item.id),
   });
-  vm.runInContext(['getCurrentQueueItem', 'automaticRollItemKey', 'scheduleAutomaticRollImport', ...FILM_TYPE_FUNCTIONS, ...(realRoll ? ['runRollAnalysis'] : [])]
+  vm.runInContext(['getCurrentQueueItem', 'automaticRollItemKey', 'scheduleAutomaticRollImport', ...FILM_TYPE_FUNCTIONS,
+    'renderFrameAnalysisThumbnail', 'releaseFrameThumbnailWorkers', ...(realRoll ? ['runRollAnalysis'] : [])]
     .map(functionSource).join('\n'), context);
   const fire = async (ms) => {
     const entry = [...timers].find(([, timer]) => ms === undefined || timer.ms === ms);
@@ -179,7 +191,8 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
     items[index].settings = settings;
     for (const key of ['filmType', 'filmTypeSource', 'filmTypeConfidence', 'filmTypeReason']) state[key] = settings[key];
   };
-  return { context, state, items, timers, decoded, analyzed, groups, stores, restored, renders, undos, toasts, frameTypes, samplesBuilt, fire, navigate, make, prepareForeground, marker };
+  return { context, state, items, timers, decoded, analyzed, groups, stores, restored, renders, undos, toasts, frameTypes, samplesBuilt, fire, navigate, make, prepareForeground, marker,
+    frameRenders, flushed, frameWorkersDisposed: () => frameWorkersDisposed };
 }
 
 // Exactly two imported photos must leave the thumbnail queue independent.
@@ -442,6 +455,45 @@ for (const change of ['recipe', 'edit', 'dirty', 'remove', 'cancel', 'off']) {
   assert.equal(f.items[3].settings.filmType, 'bw');
   assert.equal(f.items[3].settings.learnedDefaults?.key, key, 'learned defaults follow the new key');
   assert.equal(f.items[3].automaticDefaults.filmType, 'bw', 'later learning compares against the B&W recipe');
+}
+
+// Per-frame analysis thumbnails: each measured frame gets a converted tile
+// without blocking the next decode; they never downgrade a converted tile and
+// the roll commit still replaces them.
+{
+  const f = fixture({ count: 5 });
+  f.items[2].thumbnail = 'data:processed'; f.items[2].thumbnailKind = 'processed';
+  f.items[3].thumbnail = 'data:embedded'; f.items[3].thumbnailKind = 'embedded';
+  f.context.scheduleAutomaticRollImport(f.items);
+  await f.fire(1200);
+  // Frames 1-4 were decoded and sunk while every render is still pending.
+  assert.deepEqual(f.decoded, [1, 2, 3, 4], 'renders never hold back the next decode');
+  assert.equal(f.frameRenders.length, 3, 'a processed tile needs no per-frame render');
+  assert.ok(f.frameRenders.every(job => job.request.options.preview && job.request.settings.analysisRegion === null));
+  // Complete the renders after the commit took over frame 4's tile.
+  f.items[4].thumbnail = 'thumbnail:commit'; f.items[4].thumbnailKind = 'analysis';
+  f.items[1].thumbnail = 'data:live'; f.items[1].thumbnailKind = 'processed';
+  for (const job of f.frameRenders) job.resolve({ id: job.request.imageData.id });
+  await flush();
+  assert.equal(f.items[3].thumbnail, 'thumbnail:3', 'an embedded tile becomes the converted analysis look');
+  assert.equal(f.items[3].thumbnailKind, 'analysis');
+  assert.equal(f.items[3].thumbnailKey, null, 'an analysis tile is never counted as canonical');
+  assert.equal(f.items[1].thumbnail, 'data:live', 'never back from processed');
+  assert.equal(f.items[4].thumbnail, 'thumbnail:commit', 'a late per-frame render never replaces the commit');
+  assert.equal(f.items[2].thumbnail, 'data:processed');
+  assert.deepEqual(f.flushed, [3], 'published tiles go through the batched flush');
+  assert.ok(f.frameWorkersDisposed() >= 1, 'the render worker is released after the import');
+}
+{
+  // A stale import (recipe changed) never publishes its late render.
+  const f = fixture({ count: 4 });
+  f.context.scheduleAutomaticRollImport(f.items);
+  await f.fire(1200);
+  f.items[2].settings = { ...recipe(2), coreExposure: 12 };
+  for (const job of f.frameRenders) job.resolve({ id: job.request.imageData.id });
+  await flush();
+  assert.equal(f.items[2].thumbnail, undefined, 'a changed recipe drops its per-frame tile');
+  assert.equal(f.items[1].thumbnailKind, 'analysis');
 }
 
 console.log('automaticRollImport tests passed');
