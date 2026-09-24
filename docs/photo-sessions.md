@@ -90,7 +90,8 @@ npm run build:web
 The targeted browser regression measures actual decode/conversion worker
 messages and original-file reads during warm A/B/A navigation. It compares
 settled GPU dimensions and sampled patch hashes, zoom, and exact decoded 8/16-bit PNG export
-pixels. It also checks active CMY thumbnail changes, identical unopened
+pixels. Zoom steps are a compositor transform: they must not draw, and only a
+display preview of a new size repaints, at its texture's size. It also checks active CMY thumbnail changes, identical unopened
 negative previews, whole-roll black-and-white pending-to-ready transitions,
 and a delayed cold-file read losing to a newer selection. Cold navigation
 also checks synchronous target feedback, accessible visible loading state,
