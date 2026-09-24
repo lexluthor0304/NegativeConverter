@@ -74,6 +74,45 @@ decoded base only, and its settings stay as they were.
 Global history, color-console and zoom shortcuts cannot change the outgoing
 photo while another target is loading; the history controls are locked too.
 
+### Provisional pixels (#235)
+
+The loading surface may show a marked, provisional positive of the target
+instead of a blank card. It is drawn on surfaces owned by the veil
+(`createPhotoSwitchPresentation` in `studioWorkspace.js`), on the veil's opaque
+background, never on `#canvas`: it cannot inherit the outgoing zoom/pan, and
+an error has nothing to restore. The veil keeps `inset: 0`, pointer blocking,
+`role=status`/`aria-live=polite`/`aria-atomic` and its announced message; the
+centred card becomes a corner chip with an `aria-hidden` " · preview" suffix,
+and the veil carries `data-provisional="cached|thumbnail|embedded"`:
+
+- `cached`: the retained 1200 px `photoPreviews` copy, when its key equals
+  `photoSettingsKey(item)`, drawn in the same task that shows the veil;
+- `thumbnail`: otherwise the tile's thumbnail of any kind, upscaled;
+- `embedded`: the camera JPEG inside a TIFF-container RAW, decoded in the
+  scan-decode worker (`rawEmbeddedPreview.js`, `embeddedPreviewRender.js`):
+  inverted and stretched per channel (0.5/99.5 percentiles of the mapped crop,
+  or of the central 80 %, with a mild gamma lift), mapped through the frame's
+  rotation → mirror → crop, and histogram-matched to a converted thumbnail when
+  one exists. It is skipped when a `cached` copy is shown or a base-only session
+  makes the exact positive ~0.3 s away. Frames without settings are never typed
+  from the camera JPEG: they invert by default; frames whose film type (or
+  override, or the manual import type) is positive are shown uninverted.
+
+The embedded job is posted before the container read, and its bitmap is shown
+through `ImageBitmapRenderingContext.transferFromImageBitmap` only while the
+same activation's target is still loading; hiding the veil releases it with
+`transferFromImageBitmap(null)`. A TIFF-container RAW import activates its
+first photo through the same viewer-local surface (not the full-screen
+overlay), so the provisional frame is visible while the decode runs; other
+files keep today's loading card.
+
+All provisional and cached pixels are presentation-only: they are never
+assigned to `loadedBaseImageData`, `originalImageData`, `processedImageData`,
+any conversion, preview, histogram or WebGL source, or `photoSessions`, and
+never passed to frame, film-edge, roll, dust or semantic analysis or to export.
+`provisionalPreview.test.mjs` runs the actual main.js functions against a
+`state` that throws on any such write.
+
 ## Light table
 
 `photoPreview.js` downsamples an already converted source and applies the
@@ -167,7 +206,10 @@ phase, and the delayed cold-read race left the latest selection active.
 
 The roll analyzer's quick thumbnails are provisional: they omit stages such
 as lens correction and repair, so the canonical preview lane replaces them
-before marking them ready. This can require another decode for an uncached
+before marking them ready. Tiles rank `embedded` < `analysis` < `processed`
+(`thumbnailRank.js`): import-time embedded tiles and per-frame analysis tiles
+only fill empty or `embedded` tiles, so a tile never moves back, and neither
+kind carries a `thumbnailKey` or counts as ready. This can require another decode for an uncached
 RAW; correctness is not traded for a misleading cache hit.
 
 Lens-corrected photographs with saved repair strokes keep native coordinates

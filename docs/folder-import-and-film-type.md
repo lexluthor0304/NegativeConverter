@@ -2,10 +2,17 @@
 
 ## Folder import
 
-The active photo loads before background thumbnails. RAW contact-sheet tiles use
-an embedded JPEG when one is available; they never invoke LibRaw just to make a
-144-pixel tile. Files without an embedded JPEG keep a numbered tile until opened
-or analysed. The image used for conversion/export still uses the normal decoder.
+The active photo loads before background thumbnails and roll analysis. RAW tiles
+fill at import from the embedded JPEG previews of TIFF-container RAWs, read with
+small Blob slices and decoded in the scan-decode worker; they never invoke
+LibRaw or read the whole file just to make a tile, and they are marked
+provisional (`embedded`, pending) until a converted preview replaces them.
+Files without a usable baseline JPEG preview (CR3, RAF, JPEG XL-only DNGs) keep
+a numbered tile until opened or analysed. The image used for conversion/export
+still uses the normal decoder; embedded previews are never an editing, analysis
+or export source. The folder regression counts these jobs as their own
+`embedded` route with a byte budget (tiles ≤ 200 KB per DNG, the viewer frame
+≤ its preview + 32 KB).
 
 Automatic roll preparation keeps the same geometry-applied, 900-pixel analysis
 samples for the subsequent roll analysis. The cache counts both 8-bit and 16-bit

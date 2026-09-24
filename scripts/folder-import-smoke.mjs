@@ -13,8 +13,9 @@ export function classifyFolderReadStack(stack = '') {
 }
 
 function installFolderImportProbe(classify) {
-  const p = window.__folderProbe = { reads: [], decodes: [], thumbs: [], firstReady: null,
+  const p = window.__folderProbe = { reads: [], decodes: [], thumbs: [], embedded: [], firstReady: null,
     busyAfterReady: 0, start: performance.now() };
+  const embeddedWorkers = new WeakSet();
   const buffers = new WeakMap(), blobs = new WeakMap(), rawWorkers = new WeakMap();
   const oldStackLimit = Error.stackTraceLimit;
   Error.stackTraceLimit = 50;
@@ -44,6 +45,21 @@ function installFolderImportProbe(classify) {
   window.Blob = BlobWithOrigin;
   const post = Worker.prototype.postMessage;
   function postWithOrigin(message, ...args) {
+    // Embedded-preview jobs carry the File itself and read Blob slices inside
+    // the worker, so File.prototype.arrayBuffer never sees them. Count them as
+    // their own route, with the bytes each job reports having read.
+    if (message?.type === 'embedded-preview') {
+      if (!embeddedWorkers.has(this)) {
+        embeddedWorkers.add(this);
+        this.addEventListener('message', ({ data }) => {
+          const job = p.embedded.find(entry => entry.worker === this && entry.id === data?.id && entry.bytesRead === null);
+          if (job) Object.assign(job, { bytesRead: data.bytesRead ?? 0, preview: data.preview?.length ?? null,
+            empty: Boolean(data.empty), error: data.error || null, doneAt: performance.now() - p.start });
+        });
+      }
+      p.embedded.push({ worker: this, id: message.id, name: message.file?.name ?? null, purpose: message.purpose,
+        bytesRead: null, preview: null, ...stamp() });
+    }
     // LibRaw serializes open/metadata/imageData separately. Carry the origin
     // from the actual transferred input buffer, never from the later stack.
     if (message?.fn === 'open') {
@@ -108,6 +124,16 @@ export function assertFolderDecodeBudget(result, count, rawFixture, fail) {
     || result.reads.some(read => result.decodes.filter(decode => decode.readId === read.id).length !== 1)) {
     fail('folder source reads and decoder requests are not one-to-one');
   }
+  // The embedded route is separate from foreground/analysis/thumbnail reads
+  // and may run before the editor is ready. It never reads a whole file:
+  // tiles stay within 200 KB per DNG, the viewer within its preview + 32 KB.
+  for (const job of result.embedded || []) {
+    if (!job.name || !names.includes(job.name)) fail('embedded preview job for an unknown file: ' + JSON.stringify(job));
+    if (job.bytesRead === null) fail('embedded preview job never answered: ' + JSON.stringify(job));
+    if (job.purpose === 'tile' && job.bytesRead > 200 * 1024) fail('embedded tile read exceeds 200 KB: ' + JSON.stringify(job));
+    if (job.purpose === 'viewer' && job.bytesRead > (job.preview || 0) + 32 * 1024) fail('embedded viewer read exceeds preview + 32 KB: ' + JSON.stringify(job));
+  }
+  if (rawFixture && !(result.embedded || []).some(job => job.purpose === 'tile')) fail('RAW folder import queued no embedded tiles');
   const early = result.decodes.filter(decode => decode.beforeReady);
   if (early.length !== 1 || early[0].name !== names[0] || early[0].route !== 'foreground') {
     fail('folder must decode the first active photo before background work');
@@ -139,10 +165,11 @@ export async function runFolderImportSmoke({send,evaluate,waitFor,wait,fail,inst
   // A canonical RAW preview can still be decoding after roll measurements
   // finish. Observe the complete lane, not an arbitrary 800ms prefix of it.
   await waitFor('folder canonical previews',`(() => {const tiles=[...document.querySelectorAll('.file-list-name[data-preview-state]')];return tiles.length===${count}&&tiles.every(tile=>tile.dataset.previewState==='ready')})()`,600000);
-  const result=await evaluate(`(()=>{const p=window.__folderProbe;p.stop();return {...p,timer:undefined,stop:undefined,totalMs:performance.now()-p.start,selected:document.querySelectorAll('.file-list-checkbox:checked').length,counts:p.reads.reduce((a,r)=>(a[r.name]=(a[r.name]||0)+1,a),{}),countsByRoute:p.reads.reduce((a,r)=>{const route=a[r.route]||={};route[r.name]=(route[r.name]||0)+1;return a},{})}})()`);
+  const result=await evaluate(`(()=>{const p=window.__folderProbe;p.stop();p.embedded=p.embedded.map(({worker,...job})=>job);return {...p,timer:undefined,stop:undefined,totalMs:performance.now()-p.start,selected:document.querySelectorAll('.file-list-checkbox:checked').length,counts:p.reads.reduce((a,r)=>(a[r.name]=(a[r.name]||0)+1,a),{}),countsByRoute:p.reads.reduce((a,r)=>{const route=a[r.route]||={};route[r.name]=(route[r.name]||0)+1;return a},{})}})()`);
   mkdirSync(join(root,'output','verification'),{recursive:true});
   writeFileSync(join(root,'output','verification','folder-import.json'),JSON.stringify(result,null,2));
   console.log('folder import:',JSON.stringify({...result,reads:result.reads.map(({stack,...read})=>read)}));
+  if(result.embedded?.length)console.log('folder embedded route:',JSON.stringify(result.embedded));
   assertFolderDecodeBudget(result, count, rawFixture, fail);
   console.log('ok: first photo has priority; automatic roll reuses samples without duplicate decodes or locking the editor');
   if (!rawFixture) {

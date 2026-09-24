@@ -170,9 +170,21 @@ for (const raw of [false, true]) {
     { id: 2, name: `folder-3.${extension}`, route: 'analysis', beforeReady: false },
     { id: 3, name: `folder-2.${extension}`, route: 'thumbnail', beforeReady: false },
   ];
+  // Embedded-preview jobs are their own route: tiles for every DNG (read
+  // before the editor is ready, by design) and the first photo's viewer frame.
+  const embedded = raw ? [1, 2, 3].map(n => ({ name: `folder-${n}.dng`, purpose: 'tile', bytesRead: 90_000, preview: 60_000, beforeReady: true }))
+    .concat({ name: 'folder-1.dng', purpose: 'viewer', bytesRead: 540_000, preview: 530_000, beforeReady: true }) : [];
   const result = { reads, decodes: reads.map(({ id, ...read }) => ({ ...read, readId: id, kind })),
-    thumbs: [{ beforeReady: false }], selected: 3, firstReady: 100, busyAfterReady: 0 };
+    thumbs: [{ beforeReady: false }], selected: 3, firstReady: 100, busyAfterReady: 0, embedded };
   assert.doesNotThrow(() => assertFolderDecodeBudget(result, 3, raw, fail));
+  if (raw) {
+    const over = (index, bytesRead) => ({ ...result, embedded: embedded.map((job, i) => i === index ? { ...job, bytesRead } : job) });
+    assert.throws(() => assertFolderDecodeBudget(over(0, 201 * 1024), 3, raw, fail), /tile read exceeds 200 KB/);
+    assert.throws(() => assertFolderDecodeBudget(over(3, 530_000 + 33 * 1024), 3, raw, fail), /viewer read exceeds/);
+    assert.throws(() => assertFolderDecodeBudget(over(1, null), 3, raw, fail), /never answered/);
+    assert.throws(() => assertFolderDecodeBudget({ ...result, embedded: [] }, 3, raw, fail), /queued no embedded tiles/);
+    assert.throws(() => assertFolderDecodeBudget({ ...result, embedded: [...embedded, { ...embedded[0], name: 'other.dng' }] }, 3, raw, fail), /unknown file/);
+  }
   const duplicate = { ...reads[1], id: 4 };
   assert.throws(() => assertFolderDecodeBudget({ ...result, reads: [...reads, duplicate],
     decodes: [...result.decodes, { ...duplicate, readId: 4, kind }] }, 3, raw, fail), /exactly once for analysis/);
@@ -181,4 +193,4 @@ for (const raw of [false, true]) {
   assert.throws(() => assertFolderDecodeBudget({ ...result, thumbs: [{ beforeReady: true }] }, 3, raw, fail), /competes/);
 }
 
-console.log('ok: thumbnail/automatic-roll ownership, latched cancellation, exact per-lane decode budgets');
+console.log('ok: thumbnail/automatic-roll ownership, latched cancellation, exact per-lane decode budgets, embedded route budget');
