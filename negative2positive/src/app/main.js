@@ -129,6 +129,7 @@ import { frameNeedsReview } from './reviewQueue.js';
     } from '../workers/workerBridge.js';
 
     const DEBUG_UI = new URLSearchParams(window.location.search).get('debug') === '1';
+    const WEBGL_DEBUG_ERRORS = new URLSearchParams(window.location.search).has('debugGL');
     // The single export path's adjustment/encode workers; a batch export
     // passes its own pool through `bridge` instead.
     const defaultExportWorkers = { workerApplyAdjustments, workerApplyAdjustments16, workerGainMap16, workerEncodePng16, workerEncodeTiff, isWorkerAvailable };
@@ -3007,6 +3008,10 @@ import { frameNeedsReview } from './reviewQueue.js';
     const glCanvas = document.getElementById('glCanvas');
     const canvasContainer = document.getElementById('canvasContainer');
     const canvasTransformWrapper = document.getElementById('canvasTransformWrapper');
+    // #canvasContainer's client size. A ResizeObserver keeps it current (see
+    // the Window Resize section), so fitting the canvas and sizing the display
+    // preview never force layout on the draw and result paths.
+    const canvasContainerSize = { width: 0, height: 0, valid: false, observed: false };
     const zoomIndicator = document.getElementById('zoomIndicator');
     const zoomControls = document.getElementById('zoomControls');
     const ZOOM_MIN = 1;
@@ -4075,10 +4080,30 @@ import { frameNeedsReview } from './reviewQueue.js';
       });
     }
 
+    // Reads live layout. Only the observer, the window resize handler and a
+    // first read call it; everything else reads getCanvasContainerSize().
+    function refreshCanvasContainerSize() {
+      const width = canvasContainer.clientWidth;
+      const height = canvasContainer.clientHeight;
+      const changed = !canvasContainerSize.valid
+        || width !== canvasContainerSize.width || height !== canvasContainerSize.height;
+      canvasContainerSize.width = width;
+      canvasContainerSize.height = height;
+      // Without an observer nothing would keep the cache current.
+      canvasContainerSize.valid = canvasContainerSize.observed;
+      return changed;
+    }
+
+    function getCanvasContainerSize() {
+      if (!canvasContainerSize.valid) refreshCanvasContainerSize();
+      return canvasContainerSize;
+    }
+
     function getDisplayPreviewSize(imageData, maxDimension = webglState.maxTextureSize || 8192) {
+      const container = getCanvasContainerSize();
       return displayPreviewSize(imageData.width, imageData.height, {
-        viewportWidth: canvasContainer.clientWidth - 20 || 1280,
-        viewportHeight: canvasContainer.clientHeight - 20 || 900,
+        viewportWidth: container.width - 20 || 1280,
+        viewportHeight: container.height - 20 || 900,
         dpr: window.devicePixelRatio || 1,
         zoom: state.zoomLevel,
         maxDimension
@@ -4546,7 +4571,10 @@ import { frameNeedsReview } from './reviewQueue.js';
         attribute vec2 a_pos;
         varying vec2 v_uv;
         void main() {
-          v_uv = (a_pos + 1.0) * 0.5;
+          // Rows are uploaded top-down as stored. Flipping here instead of with
+          // UNPACK_FLIP_Y_WEBGL spares the browser a flipped copy per upload;
+          // the framebuffer keeps its bottom-up orientation.
+          v_uv = vec2((a_pos.x + 1.0) * 0.5, (1.0 - a_pos.y) * 0.5);
           gl_Position = vec4(a_pos, 0.0, 1.0);
         }
       `;
@@ -4749,6 +4777,8 @@ import { frameNeedsReview } from './reviewQueue.js';
 
       // Textures
       webglState.sourceTex = gl.createTexture();
+      // A new texture has no storage yet: the first upload must allocate it.
+      webglState.sourceSize = { w: 0, h: 0 };
       gl.bindTexture(gl.TEXTURE_2D, webglState.sourceTex);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
@@ -4765,6 +4795,10 @@ import { frameNeedsReview } from './reviewQueue.js';
       // Bind samplers
       gl.uniform1i(webglState.locations.uImage, 0);
       gl.uniform1i(webglState.locations.uCurve, 1);
+
+      // Unpack state is per context and never changes after this.
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
 
       gl.disable(gl.DEPTH_TEST);
       gl.disable(gl.BLEND);
@@ -4788,19 +4822,14 @@ import { frameNeedsReview } from './reviewQueue.js';
       return !!webglState.gl && !webglState.disabledByError && state.currentStep >= 3 && !!state.processedImageData;
     }
 
-    function resizeWebGLCanvas() {
-      if (!webglState.gl) return;
-      // CSS の拡大率も含め、表示用テクスチャと同じ物理解像度で描く。
-      const cssW = parseFloat(glCanvas.style.width) || 0;
-      const cssH = parseFloat(glCanvas.style.height) || 0;
-      if (cssW <= 0 || cssH <= 0) return;
-
-      const source = state.conversionSourceImageData || state.processedImageData;
-      if (!source) return;
-      const { width: targetW, height: targetH } = getDisplayPreviewSize(source);
-
-      if (glCanvas.width !== targetW) glCanvas.width = targetW;
-      if (glCanvas.height !== targetH) glCanvas.height = targetH;
+    // The drawing buffer matches the texture it shows, not the zoomed
+    // viewport. A zoom gesture only moves the CSS transform; the buffer (whose
+    // resize clears it) changes only when a new texture is drawn after the
+    // display preview settles at the new size.
+    function resizeWebGLCanvas(width = webglState.sourceSize.w, height = webglState.sourceSize.h) {
+      if (!webglState.gl || !(width > 0) || !(height > 0)) return;
+      if (glCanvas.width !== width) glCanvas.width = width;
+      if (glCanvas.height !== height) glCanvas.height = height;
     }
 
     function getWebglSourceImageData() {
@@ -4833,21 +4862,41 @@ import { frameNeedsReview } from './reviewQueue.js';
       const gl = webglState.gl;
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, webglState.sourceTex);
-      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-      gl.texImage2D(
-        gl.TEXTURE_2D,
-        0,
-        gl.RGBA,
-        imageData.width,
-        imageData.height,
-        0,
-        gl.RGBA,
-        gl.UNSIGNED_BYTE,
-        imageData.data
-      );
-      webglState.sourceSize.w = imageData.width;
-      webglState.sourceSize.h = imageData.height;
+      if (webglState.sourceSize.w !== imageData.width || webglState.sourceSize.h !== imageData.height) {
+        // Allocate only when the size changes. This is the one place an
+        // out-of-memory can surface, so it keeps the only error check; a
+        // failure throws into disableWebGLByError and the CPU preview.
+        gl.texImage2D(
+          gl.TEXTURE_2D,
+          0,
+          gl.RGBA,
+          imageData.width,
+          imageData.height,
+          0,
+          gl.RGBA,
+          gl.UNSIGNED_BYTE,
+          imageData.data
+        );
+        const errCode = gl.getError();
+        if (errCode !== gl.NO_ERROR) {
+          webglState.sourceSize = { w: 0, h: 0 };
+          throw new Error(`WebGL texture allocation error code: ${errCode}`);
+        }
+        webglState.sourceSize.w = imageData.width;
+        webglState.sourceSize.h = imageData.height;
+      } else {
+        gl.texSubImage2D(
+          gl.TEXTURE_2D,
+          0,
+          0,
+          0,
+          imageData.width,
+          imageData.height,
+          gl.RGBA,
+          gl.UNSIGNED_BYTE,
+          imageData.data
+        );
+      }
       webglState.sourceDirty = false;
     }
 
@@ -4865,8 +4914,6 @@ import { frameNeedsReview } from './reviewQueue.js';
 
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_2D, webglState.curveTex);
-      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
       gl.texImage2D(
         gl.TEXTURE_2D,
         0,
@@ -4928,11 +4975,11 @@ import { frameNeedsReview } from './reviewQueue.js';
       try {
         const source = getWebglSourceImageData();
         if (!source) return false;
+        // Refits only when the texture, container, reference size or zoom
+        // changed since the last fit; otherwise it touches no layout.
         adjustCanvasDisplay(source.width, source.height);
-        resizeWebGLCanvas();
 
         const gl = webglState.gl;
-        gl.viewport(0, 0, glCanvas.width, glCanvas.height);
         gl.useProgram(webglState.program);
 
         // Uploads if needed
@@ -4942,6 +4989,8 @@ import { frameNeedsReview } from './reviewQueue.js';
         if (webglState.curveDirty) {
           webglUploadCurves();
         }
+        resizeWebGLCanvas(source.width, source.height);
+        gl.viewport(0, 0, glCanvas.width, glCanvas.height);
 
         // Bind geometry
         gl.bindBuffer(gl.ARRAY_BUFFER, webglState.quadBuffer);
@@ -4957,9 +5006,14 @@ import { frameNeedsReview } from './reviewQueue.js';
         webglSetUniforms();
 
         gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-        const errCode = gl.getError();
-        if (errCode !== gl.NO_ERROR) {
-          throw new Error(`WebGL draw error code: ${errCode}`);
+        // getError is a round trip to the GPU process that waits behind the
+        // upload just queued. Context loss has its own event, and allocation
+        // failures are checked in webglUploadSource; ?debugGL restores it.
+        if (WEBGL_DEBUG_ERRORS) {
+          const errCode = gl.getError();
+          if (errCode !== gl.NO_ERROR) {
+            throw new Error(`WebGL draw error code: ${errCode}`);
+          }
         }
         return true;
       } catch (err) {
@@ -6522,24 +6576,43 @@ import { frameNeedsReview } from './reviewQueue.js';
       return { width: refW, height: refH };
     }
 
+    // The inputs of the last fit. renderWebGL calls adjustCanvasDisplay on
+    // every draw, and the result path calls it with the 2D canvas size; with
+    // the container size cached, an unchanged fit costs a few comparisons and
+    // touches no layout.
+    const canvasDisplayFit = { w: 0, h: 0, containerW: 0, containerH: 0, zoom: 0, dpr: 0 };
+
+    function invalidateCanvasDisplayFit() {
+      canvasDisplayFit.w = 0;
+    }
+
     function adjustCanvasDisplay(w, h) {
-      const container = document.getElementById('canvasContainer');
-      const maxWidth = container.clientWidth - 20;
-      const maxHeight = container.clientHeight - 20;
+      const container = getCanvasContainerSize();
       // Never upscale past 100% — but for a preview-resolution stand-in,
       // "100%" means the full-resolution image it temporarily represents.
+      // Fit that image itself, so the box is the same whichever stand-in
+      // (GL texture, 2D canvas) asks, rather than differing by its rounding.
       const ref = getFullResDisplayReference(w, h);
-      const maxScale = ref ? Math.min(ref.width / w, ref.height / h) : 1;
-      const scale = Math.min(maxWidth / w, maxHeight / h, maxScale);
-      const cssW = (w * scale) + 'px';
-      const cssH = (h * scale) + 'px';
+      const fitW = ref ? ref.width : w;
+      const fitH = ref ? ref.height : h;
+      const dpr = window.devicePixelRatio || 1;
+      const fit = canvasDisplayFit;
+      if (fit.w === fitW && fit.h === fitH && fit.containerW === container.width && fit.containerH === container.height
+        && fit.zoom === state.zoomLevel && fit.dpr === dpr) return;
+      Object.assign(fit, { w: fitW, h: fitH, containerW: container.width, containerH: container.height, zoom: state.zoomLevel, dpr });
+      const maxWidth = container.width - 20;
+      const maxHeight = container.height - 20;
+      const scale = Math.min(maxWidth / fitW, maxHeight / fitH, 1);
+      const cssW = (fitW * scale) + 'px';
+      const cssH = (fitH * scale) + 'px';
       canvas.style.width = cssW;
       canvas.style.height = cssH;
       glCanvas.style.width = cssW;
       glCanvas.style.height = cssH;
       canvasTransformWrapper.style.width = cssW;
       canvasTransformWrapper.style.height = cssH;
-      if (isWebGLActive()) resizeWebGLCanvas();
+      // The GL drawing buffer follows the texture (resizeWebGLCanvas), so a
+      // fit never resizes, and never clears, it.
       if (state.zoomLevel > 1) {
         clampPan();
         applyZoomPanTransform();
@@ -6563,11 +6636,12 @@ import { frameNeedsReview } from './reviewQueue.js';
     }
 
     function getZoomGeometry(zoom = state.zoomLevel) {
+      const container = getCanvasContainerSize();
       return computeZoomGeometry({
         wrapperW: parseFloat(canvasTransformWrapper.style.width) || canvasTransformWrapper.offsetWidth || 0,
         wrapperH: parseFloat(canvasTransformWrapper.style.height) || canvasTransformWrapper.offsetHeight || 0,
-        containerW: canvasContainer.clientWidth,
-        containerH: canvasContainer.clientHeight,
+        containerW: container.width,
+        containerH: container.height,
         zoom
       });
     }
@@ -6617,7 +6691,10 @@ import { frameNeedsReview } from './reviewQueue.js';
 
       clampPan();
       applyZoomPanTransform();
-      schedulePreviewUpdate();
+      // Zoom changes no pixels until the display preview settles at the new
+      // size, so a tick is a compositor transform only. It still keeps a
+      // full render of a <=16 MP image from landing mid-gesture.
+      postponeFullResolutionRenderForInteraction();
       scheduleDisplayPreviewResize();
     }
 
@@ -7030,6 +7107,9 @@ import { frameNeedsReview } from './reviewQueue.js';
 
       redrawHistogramIfPossible();
       updateCanvasVisibility();
+      // The panels above just changed the container before the observer
+      // could report it.
+      refreshCanvasContainerSize();
       adjustCanvasDisplay(canvas.width, canvas.height);
       updateAutoFrameConfigUI();
       updateAutoFrameDiagnosticsUI();
@@ -12668,18 +12748,54 @@ import { frameNeedsReview } from './reviewQueue.js';
     // ===========================================
     // Window Resize
     // ===========================================
-    window.addEventListener('resize', () => {
+    // Fits the canvas to the container after it changed size. The GL drawing
+    // buffer follows the texture, so this never clears it; the draw only
+    // refits the CSS box to the texture, as every renderWebGL does.
+    function refitCanvasToContainer() {
       if (canvas.width > 0 && canvas.height > 0) {
         adjustCanvasDisplay(canvas.width, canvas.height);
-        // WebGL の描画バッファはサイズ変更で消えるため、その場で描き直す。
         if (isWebGLActive() && !state.beforeAfterActive && !state.cropping) renderWebGL();
       }
       if (state.cropping) updateCropOverlayFromDraft();
       scheduleDisplayPreviewResize();
+    }
+
+    window.addEventListener('resize', () => {
+      // The observer reports this size only after this handler in the same
+      // frame, so read live layout first rather than fit to the old size.
+      refreshCanvasContainerSize();
+      refitCanvasToContainer();
       const histogramResized = resizeHistogramCanvas();
       if (histogramResized) redrawHistogramIfPossible();
       if (curveCanvas.getBoundingClientRect().width > 0) renderCurve();
     });
+
+    // Container-only resizes (a panel, the film strip) fire no window resize.
+    if (typeof ResizeObserver === 'function') {
+      canvasContainerSize.observed = true;
+      canvasContainerSize.valid = false;
+      new ResizeObserver(() => {
+        // Layout is clean while observers run, so this read is free.
+        if (refreshCanvasContainerSize()) refitCanvasToContainer();
+      }).observe(canvasContainer);
+    }
+
+    // devicePixelRatio changes (moving the window to another display) resize
+    // the display preview. The query matches one ratio, so re-arm each time.
+    function watchDevicePixelRatio() {
+      if (typeof window.matchMedia !== 'function') return;
+      const query = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+      const onChange = () => {
+        if (query.removeEventListener) query.removeEventListener('change', onChange);
+        else query.removeListener?.(onChange);
+        watchDevicePixelRatio();
+        invalidateCanvasDisplayFit();
+        scheduleDisplayPreviewResize();
+      };
+      if (query.addEventListener) query.addEventListener('change', onChange);
+      else query.addListener?.(onChange);
+    }
+    watchDevicePixelRatio();
 
     let automaticRollImportRunning = false;
     let automaticRollAnalysisRunning = false;
