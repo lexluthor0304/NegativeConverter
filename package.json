@@ -16,6 +16,7 @@
     "test": "node scripts/run-tests.mjs",
     "test:smoke": "node scripts/smoke-test.mjs",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "test:hsl-sweep": "node scripts/hsl-parity-sweep.mjs",
     "tauri:dev": "tauri dev",
     "tauri:build": "npm run build:web && tauri build",
     "tauri:build:mas": "bash scripts/build-mas.sh",

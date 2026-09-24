@@ -1,3 +1,6 @@
+// FROZEN ORACLE — a copy of silvercore/engine/ImageProcessor.js at 1703835 (before #238), kept only as the
+// reference the #238 parity tests compare against. Do not edit or import from app
+// code; only the import paths were rewritten.
 /**
  * ImageProcessor.js - Canvas-based image processing pipeline
  *
@@ -7,7 +10,7 @@
  * the 16-bit domain so curve generators can index a 65536-entry LUT directly.
  */
 
-import { colorModels } from './Presets.js'
+import { colorModels } from '../../silvercore/engine/Presets.js'
 import { analysisPixelBounds } from '../../app/analysisRegion.js';
 
 const MAX_16 = 65535;
@@ -284,74 +287,10 @@ const hueWeightTableB = new Float32Array(HUE_TABLE_SIZE) // Blue center at 2/3
   }
 })()
 
-// The hue index applyHSLAdjustments computes for one pixel, with the loop's own
-// expressions (operand order included). Used only by the self-check below.
-function loopHueIndex(R, G, B, size) {
-  const invMax = 1 / MAX_16
-  const r = R * invMax, g = G * invMax, b = B * invMax
-  let max, min
-  if (r > g) {
-    max = r > b ? r : b
-    min = g < b ? g : b
-  } else {
-    max = g > b ? g : b
-    min = r < b ? r : b
-  }
-  const d = max - min
-  let h
-  if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6
-  else if (max === g) h = ((b - r) / d + 2) / 6
-  else h = ((r - g) / d + 4) / 6
-  return (h * size) | 0
-}
-
-/**
- * Whether a pixel whose channel c is the strict maximum can only be moved by band c.
- *
- * A strict-max pixel keeps its hue inside that channel's sector (red [0, 1/6) ∪
- * (5/6, 1), green (1/6, 1/2), blue (1/2, 5/6)), so the other two bands leave it alone
- * as long as each band's non-zero weights stay strictly inside its own sector. Two-
- * channel ties compute exactly h = 1/6, 1/2 or 5/6, the sector borders, where every
- * weight must be 0. applyHSLAdjustments skips pixels whose band is inactive only
- * while both facts hold, so a later change to the table size, the window width or a
- * band centre falls back to the unskipped loop instead of changing pixels.
- */
-export function checkHueBandSupport(tables = [hueWeightTableR, hueWeightTableG, hueWeightTableB], size = HUE_TABLE_SIZE) {
-  const [tR, tG, tB] = tables
-  for (let i = 0; i < size; i++) {
-    // Index i covers hues [i / size, (i + 1) / size): integer bounds, no rounding.
-    const inRed = (i + 1) * 6 <= size || i * 6 > 5 * size
-    const inGreen = i * 6 > size && (i + 1) * 2 <= size
-    const inBlue = i * 2 > size && (i + 1) * 6 <= 5 * size
-    if ((tR[i] !== 0 && !inRed) || (tG[i] !== 0 && !inGreen) || (tB[i] !== 0 && !inBlue)) return false
-  }
-  // R = G > B, G = B > R, R = B > G at a few magnitudes: (x − y) / d is exactly ±1.
-  for (const [hi, lo] of [[MAX_16, 0], [1, 0], [40000, 39999], [65535, 65534]]) {
-    for (const [R, G, B] of [[hi, hi, lo], [lo, hi, hi], [hi, lo, hi]]) {
-      const idx = loopHueIndex(R, G, B, size)
-      if (!(idx >= 0 && idx < size) || tR[idx] !== 0 || tG[idx] !== 0 || tB[idx] !== 0) return false
-    }
-  }
-  return true
-}
-
-export const HUE_BANDS_STRICT = checkHueBandSupport()
-let hueBandSkip = HUE_BANDS_STRICT
-
-// Tests force the unskipped loop to prove the pre-test changes no pixel.
-export function setHueBandSkipForTesting(enabled) {
-  hueBandSkip = Boolean(enabled) && HUE_BANDS_STRICT
-}
-
 /**
  * Apply HSL (Hue/Saturation) adjustments per color region.
  * Mimics Lightroom's HSL panel with Red/Green/Blue channels.
  * Uses pre-computed hue weight lookup tables (Phase 3).
- *
- * Pixels whose strict-maximum channel belongs to an inactive band, two-channel ties
- * and greys are skipped on their integer values before any float work: every weight
- * that could reach them is 0 (checkHueBandSupport), and a zero shift round-trips the
- * 16-bit values unchanged. The loop body after the pre-test is the original one.
  * @param {ImageData} imageData - Will be modified in place
  * @param {Object} hsl - { redHue, redSaturation, greenHue, greenSaturation, blueHue, blueSaturation }
  * @returns {ImageData}
@@ -371,20 +310,8 @@ export function applyHSLAdjustments(imageData, hsl) {
   const gSatFactor = greenSaturation / 100
   const bSatFactor = blueSaturation / 100
   const invMax = 1 / MAX_16
-  const rActive = rHueShift !== 0 || rSatFactor !== 0
-  const gActive = gHueShift !== 0 || gSatFactor !== 0
-  const bActive = bHueShift !== 0 || bSatFactor !== 0
-  const skip = hueBandSkip && !(rActive && gActive && bActive)
 
   for (let i = 0; i < data.length; i += 4) {
-    if (skip) {
-      const R = data[i], G = data[i + 1], B = data[i + 2]
-      const active = R > G && R > B ? rActive
-        : G > R && G > B ? gActive
-        : B > R && B > G ? bActive
-        : false // tie or grey: every band weight is 0 at indices 600 / 1800 / 3000
-      if (!active) continue
-    }
     const r = data[i] * invMax
     const g = data[i + 1] * invMax
     const b = data[i + 2] * invMax

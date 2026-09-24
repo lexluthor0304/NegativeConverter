@@ -37,6 +37,11 @@ jobs:
       - name: Unit tests
         run: npm test
 
+      # npm test checks a subset; the full lattice / tie-plane / random sweep
+      # of the HSL pre-test against the frozen engine takes a minute or two.
+      - name: HSL parity sweep
+        run: npm run test:hsl-sweep
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
