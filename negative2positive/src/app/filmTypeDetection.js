@@ -66,7 +66,17 @@ class PixelSet {
 // Pixel evidence is advisory: without a rebate/DX code, polarity is not
 // uniquely recoverable (a grayscale positive and negative are both gray).
 // Keep this bounded and independent of file names, camera metadata and format.
-export function detectFilmType(image, { fallback = 'positive', filmEdge = null } = {}) {
+// A 60 MP camera scan resolves film grain, which demosaicing turns into a few
+// percent of per-pixel false colour. Each sample is therefore the mean of the
+// opaque pixels in a small box: 1 px (unchanged) on previews and small scans,
+// 4 px at 6336 px, never more than 8 px unless a caller forces `blockSize`.
+export function detectionBlockSize(width, height, blockSize = null) {
+  const forced = Number(blockSize);
+  if (blockSize != null && Number.isFinite(forced)) return Math.max(1, Math.min(16, Math.round(forced)));
+  return Math.max(1, Math.min(8, Math.round(Math.min(width, height) / 1500)));
+}
+
+export function detectFilmType(image, { fallback = 'positive', filmEdge = null, blockSize = null } = {}) {
   if (filmEdge?.found && ['color', 'bw', 'positive'].includes(filmEdge.filmKind)
       && !(filmEdge.polarity === 'light' && filmEdge.filmKind !== 'positive')) {
     return { filmType: filmEdge.filmKind, confidence: 'high', reason: 'dx' };
@@ -76,25 +86,39 @@ export function detectFilmType(image, { fallback = 'positive', filmEdge = null }
   const { width, height, data } = source;
   const maximum = data instanceof Uint16Array ? 65535 : 255;
   const stride = Math.max(1, Math.ceil(Math.sqrt(width * height / 24000)));
+  const block = detectionBlockSize(width, height, blockSize), before = (block - 1) >> 1;
   // Integer planes (the only ones the app produces) hold no NaN, so their
-  // luma can be read by selection; anything else keeps plain sorts.
-  const integer = data instanceof Uint16Array || data instanceof Uint8ClampedArray || data instanceof Uint8Array;
+  // luma can be read by selection; anything else keeps plain sorts. A 1 px
+  // box is the sampled pixel itself, so its raw samples stay integers; a
+  // block mean is fractional and is kept divided.
+  const integer = block === 1
+    && (data instanceof Uint16Array || data instanceof Uint8ClampedArray || data instanceof Uint8Array);
   const samples = Math.ceil(width / stride) * Math.ceil(height / stride);
   const makeSet = (capacity) => new PixelSet(capacity, integer, maximum);
   const all = makeSet(samples), inner = makeSet(samples), edge = makeSet(256);
   const sides = [makeSet(64), makeSet(64), makeSet(64), makeSet(64)];
   for (let y = 0; y < height; y += stride) for (let x = 0; x < width; x += stride) {
-    const i = (y * width + x) * 4;
-    if (!data[i + 3]) continue;
-    const r0 = data[i], g0 = data[i + 1], b0 = data[i + 2];
-    const r = r0 / maximum, g = g0 / maximum, b = b0 / maximum;
+    // Box clamped to the image; a 1 px box is exactly the sampled pixel.
+    const x0 = Math.max(0, x - before), x1 = Math.min(width, x - before + block);
+    const y0 = Math.max(0, y - before), y1 = Math.min(height, y - before + block);
+    let sumR = 0, sumG = 0, sumB = 0, count = 0;
+    for (let yy = y0; yy < y1; yy++) {
+      for (let j = (yy * width + x0) * 4, end = (yy * width + x1) * 4; j < end; j += 4) {
+        if (!data[j + 3]) continue;
+        sumR += data[j]; sumG += data[j + 1]; sumB += data[j + 2]; count++;
+      }
+    }
+    if (!count) continue;
+    const scale = count * maximum;
+    const r = sumR / scale, g = sumG / scale, b = sumB / scale;
     const peak = Math.max(r, g, b), low = Math.min(r, g, b);
     if (peak < .02) continue;
     const luma = .2126 * r + .7152 * g + .0722 * b;
     const gray = peak - low < .035;
     const maskRed = r > g * 1.15 && r > b * 1.15;
     const orange = r > g * 1.18 && g > b * 1.18 && r - b > .16;
-    const cr = integer ? r0 : r, cg = integer ? g0 : g, cb = integer ? b0 : b;
+    // With a 1 px box the sums are the raw samples.
+    const cr = integer ? sumR : r, cg = integer ? sumG : g, cb = integer ? sumB : b;
     if (x < width * .015) sides[0].add(cr, cg, cb, luma, gray, maskRed, orange);
     if (x >= width * .985) sides[1].add(cr, cg, cb, luma, gray, maskRed, orange);
     if (y < height * .015) sides[2].add(cr, cg, cb, luma, gray, maskRed, orange);
@@ -151,8 +175,10 @@ export function detectFilmType(image, { fallback = 'positive', filmEdge = null }
       return { filmType: 'bw', confidence: 'medium', reason: 'clearRebate' };
     }
     // A borderless grayscale positive and negative cannot be distinguished
-    // reliably from colour statistics. Keep the uncertainty explicit.
-    return { filmType: fallback, confidence: 'low', reason: 'monochrome' };
+    // reliably from colour statistics. Film scans are far more common here
+    // than monochrome prints or digital images, so invert by default and keep
+    // the uncertainty explicit (low confidence: review flag and a prompt).
+    return { filmType: 'bw', confidence: 'low', reason: 'monochrome' };
   }
   if (orangeFraction > .35) return { filmType: fallback, confidence: 'low', reason: 'warmScene' };
   return { filmType: 'positive', confidence: 'medium', reason: 'noMask' };
