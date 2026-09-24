@@ -14,26 +14,60 @@
 // IFD parsing is no longer needed for the simple "find largest embedded
 // preview" task.
 
-const SOF_PARSER_SCAN_LIMIT = 65_536; // SOF is always near the JPEG header
+export const SOF_PARSER_SCAN_LIMIT = 65_536; // SOF is always near the JPEG header
 const MIN_PREVIEW_WIDTH = 1000;       // skip tiny thumbnails (320x240 etc.)
+const MIN_PREVIEW_HEIGHT = 300;
+const MAX_PREVIEW_SIDE = 20000;
+
+// EXIF Orientation from an APP1 "Exif\0\0" payload. Only IFD0 is read, and
+// every access is bounded by the bytes we actually hold: the segment may be
+// longer than the slice that was read.
+function readExifOrientation(bytes, start, end) {
+  if (end - start < 14) return 0;
+  if (bytes[start] !== 0x45 || bytes[start + 1] !== 0x78 || bytes[start + 2] !== 0x69
+    || bytes[start + 3] !== 0x66 || bytes[start + 4] !== 0 || bytes[start + 5] !== 0) return 0;
+  const tiff = start + 6;
+  const little = bytes[tiff] === 0x49 && bytes[tiff + 1] === 0x49;
+  if (!little && !(bytes[tiff] === 0x4D && bytes[tiff + 1] === 0x4D)) return 0;
+  const u16 = at => (little ? bytes[at] | (bytes[at + 1] << 8) : (bytes[at] << 8) | bytes[at + 1]);
+  const u32 = at => (little
+    ? (bytes[at] | (bytes[at + 1] << 8) | (bytes[at + 2] << 16) | (bytes[at + 3] << 24)) >>> 0
+    : ((bytes[at] << 24) | (bytes[at + 1] << 16) | (bytes[at + 2] << 8) | bytes[at + 3]) >>> 0);
+  if (u16(tiff + 2) !== 42) return 0;
+  const ifd = tiff + u32(tiff + 4);
+  if (ifd + 2 > end) return 0;
+  const count = u16(ifd);
+  for (let i = 0; i < count && i < 512; i++) {
+    const entry = ifd + 2 + i * 12;
+    if (entry + 12 > end) return 0;
+    if (u16(entry) === 0x0112 && u16(entry + 2) === 3) {
+      const value = u16(entry + 8);
+      return value >= 1 && value <= 8 ? value : 0;
+    }
+  }
+  return 0;
+}
 
 /**
- * Read width/height from a JPEG byte stream's SOF (Start Of Frame) marker.
+ * Parse a JPEG stream's header up to its frame (SOF) marker.
  *
- * @param {ArrayBuffer} buffer  full container buffer
- * @param {number} offset       byte offset of the JPEG within the container
- * @param {number} length       byte length of JPEG bytes available from offset
- * @returns {{w: number, h: number} | null}
+ * Shared by the whole-buffer NEF fallback scan and the random-access embedded
+ * preview locator (rawEmbeddedPreview.js), which differ only in the size floor.
+ *
+ * @param {Uint8Array} bytes  bytes starting at the JPEG's SOI (may be a prefix)
+ * @param {{ minWidth?: number, minHeight?: number }} [options]
+ * @returns {{ width: number, height: number, marker: number, components: number, orientation: number }
+ *   | { truncated: true } | null}
+ *   `truncated` means the prefix ended before the frame header: a longer read
+ *   may still succeed. null means the stream is not a browser-decodable
+ *   8-bit baseline/extended/progressive JPEG of an acceptable size.
  */
-export function readJpegDimensionsFromSOF(buffer, offset, length) {
-  if (!buffer || typeof offset !== 'number' || typeof length !== 'number') return null;
-  if (offset < 0 || length <= 4) return null;
-  const end = Math.min(offset + Math.min(length, SOF_PARSER_SCAN_LIMIT), buffer.byteLength);
-  if (end - offset < 4) return null;
-  const bytes = new Uint8Array(buffer, offset, end - offset);
-
+export function parseJpegFrameHeader(bytes, { minWidth = 1, minHeight = 1 } = {}) {
+  if (!bytes || bytes.length < 4) return bytes && bytes.length ? { truncated: true } : null;
   // Verify SOI (Start Of Image)
   if (bytes[0] !== 0xFF || bytes[1] !== 0xD8) return null;
+  const truncated = { truncated: true };
+  let orientation = 0;
 
   let p = 2;
   while (p + 1 < bytes.length) {
@@ -41,7 +75,7 @@ export function readJpegDimensionsFromSOF(buffer, offset, length) {
     // Skip marker padding bytes (0xFF fill before the actual marker code)
     let q = p + 1;
     while (q < bytes.length && bytes[q] === 0xFF) q++;
-    if (q >= bytes.length) return null;
+    if (q >= bytes.length) return truncated;
     const marker = bytes[q];
     p = q;
 
@@ -64,7 +98,7 @@ export function readJpegDimensionsFromSOF(buffer, offset, length) {
     if (isFrameMarker) {
       if (marker > 0xC2) return null;
       // Layout from marker byte: marker(1) + segLen(2) + precision(1) + height(2) + width(2) + numComponents(1)
-      if (p + 8 >= bytes.length) return null;
+      if (p + 8 >= bytes.length) return truncated;
       const segLen = (bytes[p + 1] << 8) | bytes[p + 2];
       const precision = bytes[p + 3];
       const height = (bytes[p + 4] << 8) | bytes[p + 5];
@@ -79,10 +113,10 @@ export function readJpegDimensionsFromSOF(buffer, offset, length) {
       // Allow some tolerance for different JPEG variants.
       const expectedSegLen = 8 + 3 * numComponents;
       if (segLen !== expectedSegLen && segLen !== expectedSegLen + 1) return null;
-      if (width < MIN_PREVIEW_WIDTH || height < 300) return null;
-      if (width > 20000 || height > 20000) return null;
+      if (width < minWidth || height < minHeight) return null;
+      if (width > MAX_PREVIEW_SIDE || height > MAX_PREVIEW_SIDE) return null;
 
-      return { w: width, h: height };
+      return { width, height, marker, components: numComponents, orientation };
     }
 
     // SOS = Start Of Scan = compressed image data. If we hit it before any
@@ -90,12 +124,36 @@ export function readJpegDimensionsFromSOF(buffer, offset, length) {
     if (marker === 0xDA) return null;
 
     // Otherwise: variable-length segment, skip it
-    if (p + 3 >= bytes.length) return null;
+    if (p + 3 >= bytes.length) return truncated;
     const segLen = (bytes[p + 1] << 8) | bytes[p + 2];
     if (segLen < 2) return null;
+    if (marker === 0xE1 && !orientation) {
+      orientation = readExifOrientation(bytes, p + 3, Math.min(bytes.length, p + 1 + segLen));
+    }
     p = p + 1 + segLen;
   }
-  return null;
+  return truncated;
+}
+
+/**
+ * Read width/height from a JPEG byte stream's SOF (Start Of Frame) marker.
+ * Keeps the HE NEF fallback's floor: previews narrower than 1000 px or
+ * shorter than 300 px are thumbnails, not usable decode sources.
+ *
+ * @param {ArrayBuffer} buffer  full container buffer
+ * @param {number} offset       byte offset of the JPEG within the container
+ * @param {number} length       byte length of JPEG bytes available from offset
+ * @returns {{w: number, h: number} | null}
+ */
+export function readJpegDimensionsFromSOF(buffer, offset, length) {
+  if (!buffer || typeof offset !== 'number' || typeof length !== 'number') return null;
+  if (offset < 0 || length <= 4) return null;
+  const end = Math.min(offset + Math.min(length, SOF_PARSER_SCAN_LIMIT), buffer.byteLength);
+  if (end - offset < 4) return null;
+  const header = parseJpegFrameHeader(new Uint8Array(buffer, offset, end - offset), {
+    minWidth: MIN_PREVIEW_WIDTH, minHeight: MIN_PREVIEW_HEIGHT
+  });
+  return header && !header.truncated ? { w: header.width, h: header.height } : null;
 }
 
 /**
