@@ -47,5 +47,7 @@ existing bit depth and resolution.
 - Real native app: import `L1009967.dng`, set C +1, cancel Save twice, then save.
   The photo and adjustment stay open; the PNG is 9536 × 6336. In the local check,
   idle footprint fell from 2439 MB to 1690 MB instead of growing to 8 GB.
-- Run the full Chrome smoke suite as well: repair preload, actual inference,
-  manual brush, CPU fallback, 16-bit preservation, and full-resolution export.
+- Run the full Chrome smoke suite as well: the repair model loading only on
+  intent (Retouch tab, dust removal, brush; never on photo import), actual
+  inference, manual brush, CPU fallback, 16-bit preservation, and
+  full-resolution export.

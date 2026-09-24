@@ -2444,7 +2444,7 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
         revision: 0,
         maskTag: null,       // names the mask's content for the dust worker's copy
         brushSize: 5,
-        ai: true,            // MI-GAN by default; loaded lazily when dust is repaired
+        ai: true,            // MI-GAN by default; loaded on intent (ensureAiRepairPreload)
       },
 
       // Export settings
@@ -6348,8 +6348,6 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
           state.dustRemoval.particleCount = 0;
           state.dustRemoval.cleanSource = null;
           goToStep(3);
-          // A session released while the window was hidden reloads on demand.
-          if (aiRepair.status === 'idle' && !aiRepair.released) void loadAiRepairModel(DEFAULT_MODEL_URL, { refresh: false });
           syncBatchUIState({ reason: 'processNegative' });
           revealBatchFileList('processNegative');
           updatePreview();
@@ -6859,6 +6857,8 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       pushUndo('dustToggle');
       state.dustRemoval.enabled = this.checked;
       updateDustControlsVisibility();
+      // The detection below waits for the model; start loading it now.
+      if (state.dustRemoval.enabled && state.dustRemoval.ai) ensureAiRepairPreload();
 
       if (state.dustRemoval.enabled && state.processedImageData) {
         // Re-run detection on the original converted image (before inpainting)
@@ -14030,6 +14030,7 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
             && fileItem.thumbnailKey === photoSettingsKey(fileItem)) adoptStudioThumbnailInputs(fileItem);
           else updateStudioThumbnail();
           if (state.fullResolutionPending) scheduleFullResolutionRender('photo-restored');
+          scheduleAiRepairPreloadForRecipe();
           return;
         }
 
@@ -15319,6 +15320,7 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
         }
         // The provisional render may have queued the recovery copy early.
         if (item?.isDirty) scheduleProjectRecovery();
+        scheduleAiRepairPreloadForRecipe();
       } finally {
         trace.end();
         if (item?.provisional === provisionalToken) {
@@ -16738,9 +16740,13 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       try { await release(); } catch (error) { console.warn('AI repair release failed:', error); }
       return true;
     }
+    // Every model run counts, and each one restarts the idle release (#236).
     async function countAiRepairRun(run) {
       aiRepairRunsInFlight += 1;
-      try { return await run(); } finally { aiRepairRunsInFlight -= 1; }
+      try { return await run(); } finally {
+        aiRepairRunsInFlight -= 1;
+        noteAiRepairUsed();
+      }
     }
     // What an implicit load asks for: the bundled model, or after an idle
     // release the released model on its provider.
@@ -16748,6 +16754,37 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       return aiRepair.released && aiRepair.sourceRef
         ? [aiRepair.sourceRef, { ...options, prefer: aiRepair.prefer || undefined }]
         : [DEFAULT_MODEL_URL, options];
+    }
+
+    // Idle release (#236): a warmed MI-GAN session holds 0.6-1.7 GB. After
+    // about 5 minutes without a run, with no run, brush repair, dust pass or
+    // long job (batch export, contact sheet) pending, the session and its
+    // worker are released the way a hidden window releases them, so the next
+    // load brings back the same model under the same `revision` and warm
+    // photo sessions with dust on stay cache hits.
+    const AI_REPAIR_IDLE_RELEASE_MS = 5 * 60 * 1000;
+    const AI_REPAIR_IDLE_RECHECK_MS = 30 * 1000;
+    let aiRepairIdleTimer = null;
+    let aiRepairLastUsed = 0;
+    function noteAiRepairUsed() {
+      aiRepairLastUsed = getPerfNow();
+      clearTimeout(aiRepairIdleTimer);
+      aiRepairIdleTimer = aiRepair.status === 'ready' ? setTimeout(releaseIdleAiRepair, AI_REPAIR_IDLE_RELEASE_MS) : null;
+    }
+    function canReleaseIdleAiRepair(now = getPerfNow()) {
+      return aiRepair.status === 'ready' && typeof aiRepair.release === 'function'
+        && !aiRepairRunsInFlight && !pendingBrushRepairs && !activeLongJobs
+        && !state.dustRemoval.processing && !dustDetectionTimer
+        && now - aiRepairLastUsed >= AI_REPAIR_IDLE_RELEASE_MS;
+    }
+    async function releaseIdleAiRepair() {
+      aiRepairIdleTimer = null;
+      if (aiRepair.status !== 'ready') return false;
+      if (!canReleaseIdleAiRepair()) {
+        aiRepairIdleTimer = setTimeout(releaseIdleAiRepair, AI_REPAIR_IDLE_RECHECK_MS);
+        return false;
+      }
+      return releaseAiRepairSession();
     }
 
     async function inpaintManualBrush(source, settings = state, base = state.loadedBaseImageData || state.originalImageData,
@@ -16850,7 +16887,16 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
         }
         event.preventDefault();
         event.stopImmediatePropagation();
-        if (aiRepair.status !== 'ready' || state.processedImageDataIsPreview || state.dustRemoval.processing) return;
+        if (aiRepair.status !== 'ready') {
+          // The brush waits for its model (the status line shows the load);
+          // say so instead of dropping the stroke silently.
+          ensureAiRepairPreload();
+          showToast(aiRepair.status === 'error'
+            ? getInterpolatedText('dustAiStatusError', { message: aiRepair.error }, `Model failed: ${aiRepair.error}. Load a MI-GAN Pipeline ONNX file instead.`)
+            : getLocalizedText('aiBrushModelLoading', 'The repair model is still loading. Paint again once it is ready.'), 3000);
+          return;
+        }
+        if (state.processedImageDataIsPreview || state.dustRemoval.processing) return;
         const source = state.processedImageData;
         const rect = surface.getBoundingClientRect();
         const point = pointerToRepairPoint(event, rect, source.width, source.height);
@@ -16887,9 +16933,13 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
         updateCanvasVisibility();
         updatePreview();
         syncDustWorkerPin();
+        updateAiRepairUI();
         await ensureFullResolutionReadyForExport();
         if (aiRepair.status !== 'ready') await loadAiRepairModel(...aiRepairLoadArgs());
-      } else if (aiBrushDrawing) finishAiBrush({ pointerId: aiBrushDrawing.pointerId }, true);
+      } else {
+        if (aiBrushDrawing) finishAiBrush({ pointerId: aiBrushDrawing.pointerId }, true);
+        updateAiRepairUI();
+      }
     });
     document.getElementById('aiBrushSize').addEventListener('input', event => {
       document.getElementById('aiBrushSizeValue').textContent = `${event.target.value}%`;
@@ -16917,6 +16967,9 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       const loadBtn = document.getElementById('dustAiLoadBtn');
       if (enabled) enabled.checked = Boolean(state.dustRemoval.ai);
       if (loadBtn) loadBtn.disabled = aiRepair.status === 'loading';
+      // A checked AI brush is disabled until its model is ready.
+      const brushWaiting = Boolean(document.getElementById('aiBrushEnabled')?.checked) && aiRepair.status !== 'ready';
+      document.getElementById('aiBrushSection')?.toggleAttribute('data-model-pending', brushWaiting);
       if (!status) return;
       const providerName = aiRepair.provider === 'webgpu' ? 'WebGPU' : 'WASM';
       let text;
@@ -16938,7 +16991,8 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
     const loadAiRepairModel = createAiModelLoader(performAiRepairModelLoad, DEFAULT_MODEL_URL);
 
     async function performAiRepairModelLoad(source, { prefer = defaultInferencePreference(), refresh = true } = {}) {
-      // Reloading a released model on its provider keeps its revision.
+      // Reloading a released model (hidden-window or idle release) on its
+      // provider keeps its revision.
       const reload = aiRepair.released && source === aiRepair.sourceRef && prefer === aiRepair.prefer;
       const previousProvider = aiRepair.provider;
       aiRepair.released = false;
@@ -16978,7 +17032,7 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
         aiRepair.status = 'ready';
         if (!reload || session.provider !== previousProvider) aiRepair.revision += 1;
         aiRepair.tiles = 0;
-        showToast(getInterpolatedText('dustAiLoaded', { provider: session.provider === 'webgpu' ? 'WebGPU' : 'WASM' }, `AI repair model loaded (${session.provider})`));
+        noteAiRepairUsed();
       } catch (error) {
         console.warn('AI repair model failed:', error);
         aiRepair.status = 'error';
@@ -17195,12 +17249,36 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       if (state.dustRemoval.ai && aiRepair.status === 'idle') void loadAiRepairModel(...aiRepairLoadArgs());
       else if (state.dustRemoval.enabled) scheduleDustDetection();
     });
-    document.getElementById('dustAiLoadBtn')?.addEventListener('click', () => { void loadAiRepairModel(DEFAULT_MODEL_URL); });
+    // Only a load the user asked for (the Load button or a picked model file)
+    // is announced; implicit loads report through the status line alone.
+    function loadAiRepairModelExplicitly(source) {
+      void loadAiRepairModel(source).then(() => {
+        if (aiRepair.status !== 'ready') return;
+        showToast(getInterpolatedText('dustAiLoaded', { provider: aiRepair.provider === 'webgpu' ? 'WebGPU' : 'WASM' }, `AI repair model loaded (${aiRepair.provider})`));
+      });
+    }
+    document.getElementById('dustAiLoadBtn')?.addEventListener('click', () => { loadAiRepairModelExplicitly(DEFAULT_MODEL_URL); });
     document.getElementById('dustAiModelInput')?.addEventListener('change', (event) => {
       const file = event.target.files && event.target.files[0];
-      if (file) void loadAiRepairModel(file);
+      if (file) loadAiRepairModelExplicitly(file);
       event.target.value = '';
     });
+
+    // MI-GAN loads on intent, never with a photo: dust removal is off by
+    // default and the model holds 0.6-1.7 GB once warmed. The intents are the
+    // Repair tab, dust removal turned on with AI, the AI brush, and a settled
+    // photo whose recipe has repair strokes. Every repair still loads on
+    // demand (inpaintManualBrush, inpaintForCommit), which covers export.
+    function ensureAiRepairPreload() {
+      if (aiRepair.status !== 'idle') return;
+      void loadAiRepairModel(...aiRepairLoadArgs({ refresh: false }));
+    }
+    function scheduleAiRepairPreloadForRecipe() {
+      if (!state.repairStrokes.length || aiRepair.status !== 'idle') return;
+      const run = () => ensureAiRepairPreload();
+      if (typeof requestIdleCallback === 'function') requestIdleCallback(run, { timeout: 2000 });
+      else setTimeout(run, 0);
+    }
     updateAiRepairUI();
 
     // ===========================================
@@ -19507,6 +19585,9 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
         getState: () => state,
         getLanguage: () => currentLang,
         isExportLocked: () => singleExportActive || isDesktopBatchExportLocked(),
+        // Opening the Repair tab is the usual intent to repair: load MI-GAN
+        // then, so the first stroke rarely waits for it.
+        onTabSelect: key => { if (key === 'repair') ensureAiRepairPreload(); },
         onResetAll: resetAllAdjustments,
         onRestart: restartPhotoProcessing,
         onNewSession: closePhotoSession,

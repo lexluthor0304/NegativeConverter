@@ -135,13 +135,20 @@ async function runAiRepairScenario({ send, evaluate, waitFor, wait, fail, instal
   const input = await send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector: '#fileInput' });
   await send('DOM.setFileInputFiles', { files: [fixture], nodeId: input.result.nodeId });
   await waitFor('sample converted', `${ready} && document.getElementById('studioFilename').textContent === 'negative-sample.jpg'`, 150_000);
-  await waitFor('model automatically loads after photo import', `/Model ready/.test(document.getElementById('dustAiStatus').textContent)`, 180_000);
+  // MI-GAN loads on intent (#236): importing a photo with dust removal off
+  // must leave it unloaded; opening the Repair tab loads it.
+  await wait(2000);
+  const afterImport = await evaluate(`document.getElementById('dustAiStatus').textContent`);
+  if (!/No model loaded/.test(afterImport)) fail('A photo import must not load the repair model: ' + afterImport);
+  await evaluate(`document.getElementById('studioTab-repair').click()`);
+  await waitFor('model loads when the Repair tab opens', `/Model ready/.test(document.getElementById('dustAiStatus').textContent)`, 180_000);
   await wait(600);
-  await evaluate(`document.getElementById('studioTab-repair').click(); document.getElementById('dustRemovalEnabled').click();`);
+  await evaluate(`document.getElementById('dustRemovalEnabled').click();`);
   await waitFor('dust detected with TELEA', `/Detected \\d+ dust/.test(document.getElementById('dustStatus').textContent)`, 60_000);
   const idle = await evaluate(`document.getElementById('dustAiStatus').textContent`);
   console.log('technical ai repair idle:', idle);
-  if (!/Model ready/.test(idle) || /last run/.test(idle)) fail('Model should preload without repairing when AI dust is off: ' + idle);
+  if (!/Model ready/.test(idle) || /last run/.test(idle)) fail('The Repair tab should load the model without repairing when AI dust is off: ' + idle);
+  if (await evaluate(`window.__aiToasts.some((t) => /AI repair model loaded/.test(t))`)) fail('An implicit model load must not toast');
 
   // Invalid local bytes exercise real runtime failure without depending on a 404.
   await evaluate(`(() => {

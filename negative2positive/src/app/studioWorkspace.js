@@ -211,7 +211,7 @@ export function createPhotoSortControl({ select, onSortFiles }) {
   };
 }
 
-export function mountStudioWorkspace({ getState, getLanguage, getText, isExportLocked, onStyle, onReset, onResetAll, onRestart, onNewSession, onSync, onSortFiles, onRetry, onConfirm, onExportBorder, onAutoCrop, onRestoreFrame, onConfirmAnalysis, onMergeShots, onLoupe, onSaveProject, onOpenProject, onRestoreProject, onExpiredMode, onColorCorrect }) {
+export function mountStudioWorkspace({ getState, getLanguage, getText, isExportLocked, onTabSelect = () => {}, onStyle, onReset, onResetAll, onRestart, onNewSession, onSync, onSortFiles, onRetry, onConfirm, onExportBorder, onAutoCrop, onRestoreFrame, onConfirmAnalysis, onMergeShots, onLoupe, onSaveProject, onOpenProject, onRestoreProject, onExpiredMode, onColorCorrect }) {
   const $ = id => document.getElementById(id);
   const t = key => (studioText[getLanguage()] || studioText.en)[key];
   const move = (id, target) => target.append($(id));
@@ -373,6 +373,7 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
     }
     panel.scrollTop = 0;
     requestAnimationFrame(resize);
+    onTabSelect(key);
   }
   tabs.addEventListener('keydown', event => {
     const keys = Object.keys(panes).filter(key => !$(`studioTab-${key}`).hidden);

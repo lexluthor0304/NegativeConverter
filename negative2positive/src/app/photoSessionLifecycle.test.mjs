@@ -214,9 +214,12 @@ for (const outcome of ['success', 'stale', 'abort']) {
     applyZoomPanTransform: noop, updateUndoRedoButtons: noop, updateStudioThumbnail: noop,
     updateFileListUI: noop, loadStudioThumbnails: noop,
     scheduleFullResolutionRender: reason => { assert.equal(reason, 'photo-restored'); scheduled++; },
+    scheduleAiRepairPreloadForRecipe: () => { preloadChecks++; },
   });
+  let preloadChecks = 0;
   vm.runInContext(functionSource('switchToFile'), c);
   await c.switchToFile(0);
+  assert.equal(preloadChecks, 1, 'a restored recipe with repair strokes may preload MI-GAN on idle');
   assert.equal(restored, 1);
   assert.equal(scheduled, 1, 'a pending full render is resumed after warm preview restoration');
   assert.equal(cancelledFrame, 19, 'the outgoing thumbnail frame cannot write into the incoming photo');
@@ -556,7 +559,7 @@ function aiFixture() {
     aiRepairReady: () => c.aiRepair.status === 'ready',
     localExposureGeometryFor: () => ({}), buildRepairMask: () => ({ mask: f.mask, bounds: null }),
     inpaintDustOffMainThread: async () => f.converted,
-    aiRepairRunsInFlight: 0,
+    noteAiRepairUsed: noop, aiRepairRunsInFlight: 0,
   });
   c.aiRepair = { ...c.aiRepair, source: '', sourceRef: null, prefer: '', released: false, error: '', percent: 0 };
   vm.runInContext(['performAiRepairModelLoad', 'inpaintForCommit', 'inpaintManualBrush',
