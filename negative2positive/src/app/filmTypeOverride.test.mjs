@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { applyFilmTypeOverride, sanitizeFilmTypeOverride } from './filmTypeOverride.js';
+import { applyAutomaticFilmType, applyFilmTypeOverride, sanitizeFilmTypeOverride } from './filmTypeOverride.js';
 import { buildRollProject, serializeRollProject, parseRollProject } from './rollProject.js';
 const original = { filmType: 'color', filmTypeSource: 'auto', filmTypeConfidence: 'high', rollFrame: { locked: true }, cropRegion: { left: 10, width: 90 }, coreExposure: 25, repairStrokes: [{ x: 5 }], wbAutoConfidence: .8, wbR: 1.2, wbG: 1, wbB: .8 };
 const next = applyFilmTypeOverride(original, { filmType: 'bw' });
@@ -16,4 +16,31 @@ assert.equal(sanitizeFilmTypeOverride({ filmType: 'invalid' }), null);
 assert.deepEqual(sanitizeFilmTypeOverride({ filmType: 'positive', positiveMode: 'edit', cropRegion: {} }), { filmType: 'positive', positiveMode: 'edit' });
 const project = buildRollProject({ files: [{ name: 'unopened.dng', size: 123, filmTypeOverride: { filmType: 'bw', positiveMode: 'correct' } }] });
 assert.deepEqual(parseRollProject(serializeRollProject(project)).files[0].filmTypeOverride, project.files[0].filmTypeOverride);
+// Automatic retype (#231): same invalidation, automatic provenance.
+const retyped = applyAutomaticFilmType({ ...original, filmType: 'positive', filmTypeReason: 'noMask' }, { filmType: 'bw', confidence: 'medium', reason: 'rollMonochrome' });
+assert.deepEqual([retyped.filmType, retyped.filmTypeSource, retyped.filmTypeConfidence, retyped.filmTypeReason], ['bw', 'auto', 'medium', 'rollMonochrome']);
+assert.equal(retyped.rollFrame, null);
+assert.equal(retyped.wbR, 1);
+assert.equal(retyped.coreExposure, 25);
+assert.equal(applyAutomaticFilmType({ ...original, grayPointSampled: true }, { filmType: 'bw', confidence: 'medium', reason: 'rollMonochrome' }).wbR, 1.2);
+const confirmed = applyAutomaticFilmType({ ...original, filmType: 'bw', filmTypeConfidence: 'low', filmTypeReason: 'monochrome' }, { filmType: 'bw', confidence: 'medium', reason: 'rollMonochrome' });
+assert.deepEqual(confirmed.rollFrame, original.rollFrame, 'a confirmation keeps analysis of the same type');
+assert.equal(confirmed.wbR, 1.2);
+assert.equal(confirmed.filmTypeConfidence, 'medium');
+// HEAD's override, kept as the reference for the refactor.
+function referenceOverride(settings, override) {
+  const choice = sanitizeFilmTypeOverride(override);
+  if (!choice) return settings;
+  const next = { ...settings, ...choice, filmTypeSource: 'manual', filmTypeConfidence: null, filmTypeReason: null, rollFrame: null };
+  if (next.wbAutoConfidence && !next.wbUserOverride && !next.grayPointSampled) {
+    next.wbR = next.wbG = next.wbB = 1;
+    next.wbAutoConfidence = null; next.wbSemanticApplied = false;
+  }
+  return next;
+}
+for (const settings of [original, { ...original, wbUserOverride: true }, { ...original, grayPointSampled: true }, { ...original, wbAutoConfidence: null }, { filmType: 'bw' }]) {
+  for (const choice of [{ filmType: 'bw' }, { filmType: 'positive', positiveMode: 'edit' }, { filmType: 'color' }, { filmType: 'nope' }, null]) {
+    assert.deepEqual(applyFilmTypeOverride(settings, choice), referenceOverride(settings, choice));
+  }
+}
 console.log('filmTypeOverride: isolated film selection, manual WB and unopened project persistence passed');

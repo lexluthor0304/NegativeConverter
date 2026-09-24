@@ -51,6 +51,18 @@ export function estimateLearnedDefaults(record, { shrinkage = 3 } = {}) {
   }
   return { n: safe.rolls.length, offsets, choices };
 }
+// Undo applyLearnedDefaults before the key changes (an automatic film-type
+// retype): learned keys return to the automatic recipe they were added to.
+export function withoutLearnedDefaults(settings, automatic) {
+  if (!settings?.learnedDefaults || !automatic) return settings;
+  const next = { ...settings };
+  delete next.learnedDefaults;
+  for (const key of [...LEARNED_NUMERIC_KEYS, ...LEARNED_CATEGORY_KEYS]) {
+    if (Object.hasOwn(automatic, key)) next[key] = automatic[key];
+    else delete next[key];
+  }
+  return next;
+}
 export function applyLearnedDefaults(settings, record) {
   const estimate = estimateLearnedDefaults(record);
   if (!estimate.n || settings.learnedDefaults) return settings;

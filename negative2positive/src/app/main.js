@@ -1,4 +1,5 @@
-import { applyFilmTypeOverride, sanitizeFilmTypeOverride } from './filmTypeOverride.js';
+import { applyAutomaticFilmType, applyFilmTypeOverride, sanitizeFilmTypeOverride } from './filmTypeOverride.js';
+import { decideRollFilmType, mergeRollDecision, ownFilmTypeVerdict, rollDecisionFrame, rollFilmTypeTarget, ROLL_MONOCHROME } from './rollFilmType.js';
 import { createPhotoSessionCache, backingBuffers } from './photoSessionCache.js';
 import { createAdjustedPhotoPreview, samplePhotoPreviewSource, adjustPhotoPreviewSample } from './photoPreview.js';
 import { exactSettingsKey } from './settingsKey.js';
@@ -7,7 +8,7 @@ import { analyzeSemanticPreview } from './semanticModel.js';
 import { isLargeImage } from './imageMemoryBudget.js';
 import { defaultInferencePreference } from './inferenceBackend.js';
 import { readDesktopImportFile } from './desktopImportReader.js';
-import { learnedDefaultsKey, learnedDelta, recordLearnedObservation, applyLearnedDefaults, LEARNED_NUMERIC_KEYS, LEARNED_CATEGORY_KEYS } from './learnedDefaults.js';
+import { learnedDefaultsKey, learnedDelta, recordLearnedObservation, applyLearnedDefaults, withoutLearnedDefaults, LEARNED_NUMERIC_KEYS, LEARNED_CATEGORY_KEYS } from './learnedDefaults.js';
 import { readLearnedDefaults, writeLearnedDefaults, resetLearnedDefaults } from './learnedDefaultsStore.js';
 import { exportNameStem } from './exportFileName.js';
 import { frameNeedsReview } from './reviewQueue.js';
@@ -8253,6 +8254,7 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       if (detectionStatus) {
         const automatic = state.filmTypeSource === 'auto' && state.filmTypeConfidence;
         const key = !automatic ? 'filmTypeManual' : state.filmTypeConfidence === 'low' ? (state.filmTypeReason === 'monochrome' ? 'filmTypeMonochrome' : 'filmTypeUncertain')
+          : state.filmTypeReason === ROLL_MONOCHROME.reason ? 'filmTypeRollMonochrome'
           : state.filmTypeConfidence === 'high' ? 'filmTypeDetected' : 'filmTypeSuggested';
         detectionStatus.dataset.i18n = key;
         detectionStatus.textContent = i18n[currentLang][key];
@@ -9274,7 +9276,7 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
     // `silent` runs without the blocking overlay (background roll analysis
     // must not cover the editor); `analyzeInWorker` picks a worker other than
     // the shared one so several frames can be detected at once.
-    async function detectFrameAndRotation(imageData, { silent = false, analyzeInWorker = analyzeFrameInWorker } = {}) {
+    async function detectFrameAndRotation(imageData, { silent = false, analyzeInWorker = analyzeFrameInWorker, filmType = state.filmType } = {}) {
       if (!imageData) return null;
       const overlay = getLoadingOverlay();
       const ownsOverlay = !silent && !overlay.isVisible;
@@ -9287,7 +9289,7 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       const options = {
         settings: {
           ...state.autoFrame,
-          filmType: state.filmType
+          filmType
         },
         maxSide: AUTO_FRAME_MAX_SIDE,
         formatRatios: AUTO_FRAME_FORMAT_RATIOS,
@@ -10172,7 +10174,7 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
               continue;
             }
 
-            const existing = item.settings ? cloneSettings(item.settings) : createDefaultSettings(imageData, item);
+            const existing = item.settings ? cloneSettings(item.settings) : settleImportFilmType(item, createDefaultSettings(imageData, item));
             const lowBehavior = state.autoFrame.lowConfidenceBehavior || 'suggest';
             const effectiveAngle = autoFrameEffectiveAngle(result.angle);
             const frame = result.rotatedImageData || imageData;
@@ -12987,7 +12989,10 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
         const edge = await analyzeImportFilmEdge(imageData, initialSettings, { applyDefaults: !savedSettings && state.importFilmTypeAuto });
         if (edge) initialSettings = edge.settings;
       }
-      if (!savedSettings) initialSettings = await learnedImportSettings(initialSettings, state.fileQueue.find(item => item.file === file));
+      if (!savedSettings) {
+        const queued = state.fileQueue.find(item => item.file === file);
+        initialSettings = await learnedImportSettings(settleImportFilmType(queued, initialSettings), queued);
+      }
       assertRepairCurrent(isCurrent);
       const settings = sanitizeSettings(initialSettings, {
         fallbackSettings: { ...state, cropRegion: null, autoFrameMeta: null, rotationAngle: 0, mirrored: false }
@@ -15049,12 +15054,14 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
           }
           trace.mark('filmEdge', { found: Boolean(settings.filmEdge?.found) });
         }
-        if (freshFile) { settings = await learnedImportSettings(settings, item); changed = true; }
+        if (freshFile) { settings = await learnedImportSettings(settleImportFilmType(item, settings), item); changed = true; }
         if (!isCurrentLoad(generation)) return;
         if (changed) restoreSettings(settings, { refreshDisplay: !quiet });
+        let filmTypeDeferred = false;
         if (filmEdgeToast) showToast(filmEdgeToast, 3200);
         else if (freshFile && settings.filmTypeConfidence === 'low') {
-          showToast(i18n[currentLang][settings.filmTypeReason === 'monochrome' ? 'filmTypeMonochrome' : 'filmTypeUncertain'], 6500);
+          filmTypeDeferred = deferImportFilmTypeToast(item, settings);
+          if (!filmTypeDeferred) showToast(i18n[currentLang][settings.filmTypeReason === 'monochrome' ? 'filmTypeMonochrome' : 'filmTypeUncertain'], 6500);
         }
         if (settings.filmEdge?.found) updateFileListUI();
         // The border-mode suggestion of Step 2 reads the new planes.
@@ -15064,7 +15071,11 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
         trace.mark('settings');
         await processNegative({ quiet });
         trace.mark('processNegative');
-        if (freshFile) { scheduleSemanticColour(item, generation); notifyImportReview([item]); }
+        if (freshFile) {
+          scheduleSemanticColour(item, generation);
+          // A deferred film-type prompt is not repeated as a review toast.
+          if (!filmTypeDeferred || reviewForItem(item).reasons.some(reason => reason !== 'reviewFilmType')) notifyImportReview([item]);
+        }
       } finally {
         trace.end();
         if (isCurrentLoad(generation)) {
@@ -15113,10 +15124,10 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
 
     // `onRotation` receives the worker's rotated frame of an applied result so
     // the caller can adopt it instead of rotating the base again (#244).
-    async function analyzeStudioImportFrame(source, settings, { allowCrop = true, silent = false, analyzeInWorker = analyzeFrameInWorker, onRotation = null } = {}) {
+    async function analyzeStudioImportFrame(source, settings, { allowCrop = true, silent = false, analyzeInWorker = analyzeFrameInWorker, onRotation = null, filmType = state.filmType } = {}) {
       if (!state.autoFrame.enabled || settings.cropRegion) return settings;
       let result;
-      try { result = await detectFrameAndRotation(source, { silent, analyzeInWorker }); }
+      try { result = await detectFrameAndRotation(source, { silent, analyzeInWorker, filmType }); }
       catch (error) { console.warn('Import frame detection failed; keeping the full image:', error); }
       if (result?.stageMs) recordPerfStages('autoFrameStages', result.stageMs, { method: result.diagnostics?.method });
       const reliable = canAutoApplyImportFrame(result, state.autoFrame);
@@ -18487,6 +18498,220 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       line.append(label, button); content.append(line); updateLearningUI();
     }
 
+    // Roll-level film type (#231). One record per import transaction of at
+    // least three frames (with automatic roll import on) keeps each frame's
+    // own verdict in import order; decideRollFilmType turns B&W majorities
+    // into segments. Retypes stay automatic (filmTypeSource 'auto'), never
+    // touch manual, overridden, saved or edited frames, and change only
+    // film-type fields, so roll-analysis samples remain valid.
+    const importFilmTypeRolls = new Map();
+    function importFilmTypeRoll(item) {
+      return item?.importId ? importFilmTypeRolls.get(item.importId) || null : null;
+    }
+    function importFilmTypeActive(record) {
+      return Boolean(record && !record.corrected && record.revision === automaticRollRevision && importFilmTypeRolls.get(record.id) === record);
+    }
+    function createImportFilmTypeRoll(items) {
+      const importId = items[0]?.importId;
+      if (!importId || !state.importFilmTypeAuto) return null;
+      for (const [id, record] of importFilmTypeRolls) {
+        if (!record.items.some(item => state.fileQueue.includes(item))) importFilmTypeRolls.delete(id);
+      }
+      let record = importFilmTypeRolls.get(importId);
+      if (!record) {
+        record = { id: importId, items: [], verdicts: new Map(), typed: new Map(), revision: automaticRollRevision, final: false,
+          corrected: false, toastShown: false, deferredToast: null, timer: null, flipping: false, rechecks: 0, rekeys: new Set() };
+        importFilmTypeRolls.set(importId, record);
+      }
+      record.revision = automaticRollRevision;
+      record.final = false;
+      for (const item of items) {
+        if (item.importId !== importId || record.items.includes(item)) continue;
+        record.items.push(item);
+        // Watch-folder frames are prepared before their batch is known.
+        const own = ownFilmTypeVerdict(item.settings);
+        if (own) record.verdicts.set(item, own);
+      }
+      return record;
+    }
+    function liveImportSettings(item) {
+      return item && item === getCurrentQueueItem() && state.originalImageData ? state : item?.settings || null;
+    }
+    function importFilmTypeLocked(item) {
+      const settings = liveImportSettings(item);
+      return Boolean(item.savedSettings || item.userEdited || sanitizeFilmTypeOverride(item.filmTypeOverride)
+        || (settings && settings.filmTypeSource !== 'auto'));
+    }
+    function refreshImportFilmTypeDecision(record) {
+      const { typed } = decideRollFilmType(record.items.map(item => {
+        const own = state.fileQueue.includes(item) ? record.verdicts.get(item) || null : null;
+        return rollDecisionFrame(item.id, own, { locked: importFilmTypeLocked(item), live: liveImportSettings(item) });
+      }));
+      const next = new Map();
+      for (const item of record.items) {
+        const entry = typed.get(item.id);
+        if (entry) next.set(item, { filmType: entry.filmType, confidence: entry.confidence, reason: entry.reason });
+      }
+      record.typed = mergeRollDecision(record.typed, next, { final: record.final });
+    }
+    function importFilmTypeTarget(record, item) {
+      if (!state.fileQueue.includes(item) || importFilmTypeLocked(item)) return null;
+      return rollFilmTypeTarget({ own: record.verdicts.get(item), live: liveImportSettings(item), typed: record.typed.get(item), final: record.final });
+    }
+    // Records a fresh recipe's own verdict, after DX and edge text, and
+    // returns it with the import's decision applied. Frames that get settings
+    // outside pass 1 (batch export, batch auto-frame, the thumbnail lane) take
+    // the same decision.
+    function settleImportFilmType(item, settings) {
+      const record = importFilmTypeRoll(item);
+      if (!record || !settings || !record.items.includes(item)) return settings;
+      const own = ownFilmTypeVerdict(settings);
+      if (own) record.verdicts.set(item, own);
+      if (record.corrected) return settings;
+      refreshImportFilmTypeDecision(record);
+      if (importFilmTypeActive(record)) scheduleImportFilmTypeUpdate(record);
+      const target = own && !own.manual && !importFilmTypeLocked(item) ? record.typed.get(item) : null;
+      return target ? applyAutomaticFilmType(settings, target) : settings;
+    }
+    function scheduleImportFilmTypeUpdate(record, delay = 0) {
+      if (!importFilmTypeActive(record) || record.timer !== null) return;
+      record.timer = setTimeout(() => {
+        record.timer = null;
+        if (!importFilmTypeActive(record)) return;
+        refreshImportFilmTypeDecision(record);
+        applyImportFilmTypeDecision(record);
+      }, delay);
+    }
+    function relearnImportSettings(settings, item) {
+      if (!item.automaticDefaults || item.savedSettings || item.userEdited || state.rollReference.applyLock) return settings;
+      return applyLearnedDefaults(settings, learnedRecords.get(learnedDefaultsKey(settings, state.rollMetadata)));
+    }
+    // Applied the way a film-type change is: automatic WB and analysis of the
+    // old type are reset, and learned defaults follow the new type's key.
+    function retypeImportItem(record, item, target) {
+      const before = automaticRollItemKey(item);
+      const base = applyAutomaticFilmType(withoutLearnedDefaults(item.settings, item.automaticDefaults), target);
+      if (item.automaticDefaults) item.automaticDefaults = applyAutomaticFilmType(item.automaticDefaults, target);
+      item.settings = relearnImportSettings(base, item);
+      for (const rekey of record.rekeys) rekey(item, before);
+    }
+    function applyImportFilmTypeDecision(record) {
+      let changed = false, loading = false;
+      for (const item of record.items) {
+        const target = importFilmTypeTarget(record, item);
+        if (!target) continue;
+        if (item === getCurrentQueueItem()) { void flipImportPhoto(record); continue; }
+        // A photo still being opened adopts the decision once it is current.
+        if (item === state.fileQueue[state.currentFileIndex] || item === state.photoSwitchTarget) { loading = true; continue; }
+        retypeImportItem(record, item, target);
+        changed = true;
+      }
+      if (changed) { record.rechecks = 0; updateFileListUI(); scheduleProjectRecovery(); }
+      if (loading && record.rechecks++ < 120) scheduleImportFilmTypeUpdate(record, 500);
+    }
+    // The open photo follows the decision only while untouched, from its
+    // loaded base: no decode and no undo entry. A newer load, a roll revision
+    // or an edit wins.
+    async function flipImportPhoto(record, { wait = false, isValid = () => true } = {}) {
+      if (record.flipping) return false;
+      const item = getCurrentQueueItem();
+      const generation = loadGeneration;
+      const current = () => isValid() && importFilmTypeActive(record) && isCurrentLoad(generation)
+        && item === getCurrentQueueItem() && Boolean(importFilmTypeTarget(record, item));
+      record.flipping = true;
+      try {
+        while (current() && (!studioBackgroundReady() || state.cropping)) {
+          if (!wait) { scheduleImportFilmTypeUpdate(record, 250); return false; }
+          await new Promise(resolve => setTimeout(resolve, 250));
+        }
+        if (!current()) return false;
+        persistCurrentFileSettings({ silent: true, force: true });
+        const target = importFilmTypeTarget(record, item);
+        if (!target || !item.settings) return false;
+        retypeImportItem(record, item, target);
+        restoreSettings(item.settings);
+        updateFileListUI();
+        await processNegative({ quiet: true });
+        return true;
+      } finally { record.flipping = false; }
+    }
+    // Pass 1 has read every frame: the decision becomes authoritative and is
+    // applied before roll grouping, so the shared analysis runs once in the
+    // settled mode from the samples pass 1 kept.
+    async function finalizeImportFilmType(record, isValid) {
+      if (!importFilmTypeActive(record)) return;
+      record.final = true;
+      refreshImportFilmTypeDecision(record);
+      applyImportFilmTypeDecision(record);
+      const current = getCurrentQueueItem();
+      if (current && record.items.includes(current) && importFilmTypeTarget(record, current)) {
+        await flipImportPhoto(record, { wait: true, isValid });
+      }
+      if (isValid() && importFilmTypeActive(record)) showImportFilmTypeToast(record);
+    }
+    // In a roll import the roll's toast replaces the per-frame monochrome
+    // prompt; it is shown later only when no B&W segment formed.
+    function deferImportFilmTypeToast(item, settings) {
+      const record = importFilmTypeRoll(item);
+      if (!importFilmTypeActive(record) || record.final || !record.items.includes(item) || settings.filmTypeReason !== 'monochrome') return false;
+      record.deferredToast = item;
+      return true;
+    }
+    function showImportFilmTypeToast(record) {
+      const typed = [...record.typed.keys()].filter(item => state.fileQueue.includes(item) && !importFilmTypeLocked(item));
+      if (!record.toastShown && typed.length) {
+        record.toastShown = true;
+        record.deferredToast = null;
+        showToast(getInterpolatedText('filmTypeRollMonochromeToast', { count: String(typed.length) }, `${typed.length} photos treated as B&W negatives.`), 12000, {
+          action: { id: 'rollPositives', label: getLocalizedText('filmTypeRollPositives', 'These are positives'), onClick: () => applyImportPositives(record) }
+        });
+        return;
+      }
+      const deferred = record.deferredToast;
+      record.deferredToast = null;
+      if (deferred && deferred === getCurrentQueueItem() && state.filmTypeSource === 'auto'
+        && state.filmTypeConfidence === 'low' && state.filmTypeReason === 'monochrome') {
+        showToast(i18n[currentLang].filmTypeMonochrome, 6500);
+      }
+    }
+    // "These are positives": the existing roll override, on exactly the frames
+    // the decision typed, as one undo step. A colour roll in the same import
+    // is left alone.
+    function applyImportPositives(record) {
+      if (record.corrected) return;
+      if (!state.originalImageData || !studioBackgroundReady() || state.cropping) {
+        if (state.fileQueue.some(item => record.items.includes(item))) setTimeout(() => applyImportPositives(record), 250);
+        return;
+      }
+      persistCurrentFileSettings({ silent: true, force: true });
+      const targets = record.items.filter(item => state.fileQueue.includes(item) && !sanitizeFilmTypeOverride(item.filmTypeOverride)
+        && (item.settings ? item.settings.filmTypeSource === 'auto' && item.settings.filmTypeReason === ROLL_MONOCHROME.reason : record.typed.has(item)));
+      if (!targets.length) return;
+      pushUndo('rollFilmType');
+      automaticRollRevision++;
+      record.corrected = true;
+      clearTimeout(record.timer); record.timer = null;
+      const choice = { filmType: 'positive', positiveMode: state.positiveMode };
+      const analysed = targets.some(item => item.settings?.rollFrame?.rollId && item.settings.rollFrame.rollId === state.rollAnalysis.id);
+      for (const item of targets) {
+        item.filmTypeOverride = { ...choice };
+        if (item.settings) item.settings = applyFilmTypeOverride(item.settings, choice);
+        item.thumbnailKey = null; item.thumbnailAttempted = false;
+        item.status = 'pending'; item.isDirty = false;
+      }
+      if (analysed) state.rollAnalysis = { equalize: Boolean(state.rollAnalysis.equalize) };
+      const current = getCurrentQueueItem();
+      if (current && targets.includes(current)) {
+        restoreSettings(current.settings);
+        invalidateSilverCoreCache();
+        if (usesSilverCoreConversion(state)) scheduleSilverSourceRefresh({ immediate: true });
+        else schedulePreviewUpdate();
+      }
+      updateFileListUI(); updateRollAnalysisUI();
+      scheduleProjectRecovery();
+      showToast(getInterpolatedText('filmTypeAppliedRoll', { count: String(targets.length) }, `Film type applied to ${targets.length} photos`));
+    }
+
     const AUTO_ROLL_KEY = 'nc_auto_roll_import_v1';
     function automaticRollItemKey(item) {
       // Navigation alone does not invalidate detached measurements. Unsaved
@@ -18500,9 +18725,11 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       if (safeStorageGet(AUTO_ROLL_KEY) === 'off') return;
       const pending = imported.filter(item => !item.savedSettings && (!item.settings || prepared));
       if (pending.length < 3) return;
+      const filmTypeRoll = createImportFilmTypeRoll(imported);
       const requestRevision = automaticRollRevision;
       const failed = new Set();
       const sampleKeys = new Map();
+      const pendingPuts = new Map();
       let storage = null;
       let timer = null;
       let finished = false;
@@ -18514,6 +18741,10 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
         marker.record(pending.indexOf(item));
         marker.setEdited(pending.flatMap((entry, index) => (entry.userEdited ? [index] : [])));
       };
+      // Auto-frame scores with the film type of the open photo. Keep the value
+      // pass 1 started with, so a roll decision that flips the open photo does
+      // not switch the density profile for the frames still to come.
+      let frameFilmType = null;
       const eligible = item => state.fileQueue.includes(item) && !item.savedSettings && !item.userEdited && !failed.has(item);
       const valid = () => requestRevision === automaticRollRevision && safeStorageGet(AUTO_ROLL_KEY) !== 'off'
         && !state.rollReference.applyLock && pending.some(eligible);
@@ -18528,13 +18759,25 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
           return storage ? storage.get(item) : null;
         },
         async put(item, sample) {
-          const key = automaticRollItemKey(item);
+          const put = { key: automaticRollItemKey(item) };
+          pendingPuts.set(item, put);
           storage ||= createAnalysisSampleStore();
           await storage.put(item, sample);
-          sampleKeys.set(item, key);
+          if (pendingPuts.get(item) === put) pendingPuts.delete(item);
+          sampleKeys.set(item, put.key);
         },
         async delete(item) { sampleKeys.delete(item); await storage?.delete(item); }
       };
+      // A roll film-type decision changes only film-type fields of a recipe.
+      // A sample depends on the base and geometry alone, so it stays valid
+      // and roll analysis does not decode the frame again (#231).
+      const rekeySample = (item, before) => {
+        const after = automaticRollItemKey(item);
+        if (sampleKeys.get(item) === before) sampleKeys.set(item, after);
+        const put = pendingPuts.get(item);
+        if (put?.key === before) put.key = after;
+      };
+      filmTypeRoll?.rekeys.add(rekeySample);
       const finish = async () => {
         finished = true;
         if (timer !== null) clearTimeout(timer);
@@ -18542,6 +18785,7 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
         marker?.finish();
         marker = null;
         if (safeMode) hiddenJobs.setSafeMode(false);
+        filmTypeRoll?.rekeys.delete(rekeySample);
         await storage?.clear();
       };
       const schedule = delay => {
@@ -18584,6 +18828,7 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
           // The requested foreground item already owns its decode even before
           // loadedFile catches up and getCurrentQueueItem becomes non-null.
           const toAnalyze = pending.filter(item => eligible(item) && !item.settings && item !== state.fileQueue[state.currentFileIndex]);
+          if (toAnalyze.length) frameFilmType ??= state.filmType;
           const lanes = hiddenJobs.safeMode ? 1 : await planBatchLanes(toAnalyze.map(item => item.file));
           const bytes = await hiddenJobBytesFor(toAnalyze.map(item => item.file));
           const analyzers = createAutoFrameWorkerPool({ size: lanes });
@@ -18602,12 +18847,12 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
                 if (!itemValid()) return null;
                 const image = await loadFileToImageData(item.file, { filmStats: true });
                 if (!itemValid()) { retry = true; return null; }
-                let settings = await analyzeStudioImportFrame(image, createDefaultSettings(image, item), { silent: true, analyzeInWorker: analyzers.analyze });
+                let settings = await analyzeStudioImportFrame(image, createDefaultSettings(image, item), { silent: true, analyzeInWorker: analyzers.analyze, filmType: frameFilmType ?? state.filmType });
                 if (!itemValid()) { retry = true; return null; }
                 const edge = await analyzeImportFilmEdge(image, settings, { applyDefaults: state.importFilmTypeAuto, readFilmEdge: analyzers.readFilmEdge });
                 if (!itemValid()) { retry = true; return null; }
                 if (edge) settings = edge.settings;
-                settings = await learnedImportSettings(settings, item);
+                settings = await learnedImportSettings(settleImportFilmType(item, settings), item);
                 if (!itemValid()) { retry = true; return null; }
                 return { settings, sample: buildRollAnalysisSample(image, settings), key };
               },
@@ -18620,6 +18865,8 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
                 // so a kill loses at most the frames still in flight (#241).
                 recordRollFrame(item);
                 scheduleProjectRecovery();
+                // Apply a decision that changed while this frame was measured.
+                scheduleImportFilmTypeUpdate(filmTypeRoll);
               },
               onEvent: (event) => {
                 if (event.type !== 'error' || !valid() || !eligible(event.job)
@@ -18634,6 +18881,12 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
           }
           if (!valid()) return;
           if (studioBackgroundReady()) persistCurrentFileSettings({ silent: true, force: true });
+          // Settle the film type before grouping (#231), once pass 1 has read
+          // every frame of the import.
+          if (filmTypeRoll && pending.filter(eligible).every(item => item.settings || filmTypeRoll.verdicts.has(item))) {
+            await finalizeImportFilmType(filmTypeRoll, valid);
+            if (!valid()) return;
+          }
           for (const group of groupAutomaticRollFrames(pending.filter(eligible), { referenceLocked: state.rollReference.applyLock })) {
             if (!valid()) return;
             const result = await runRollAnalysis({ items: group, automatic: true, samples });
@@ -18768,6 +19021,7 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
                   const edge = await analyzeImportFilmEdge(imageData, settings, { applyDefaults: !item.settings });
                   if (edge) settings = edge.settings;
                 }
+                if (!item.settings) settings = settleImportFilmType(item, settings);
                 if (!isValid()) return { status: 'stale' };
                 sample = buildRollAnalysisSample(imageData, settings);
                 await analysisSamples.put(item, sample);

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { learnedDefaultsKey, learnedDelta, recordLearnedObservation, estimateLearnedDefaults, applyLearnedDefaults, sanitizeLearnedRecord } from './learnedDefaults.js';
+import { learnedDefaultsKey, learnedDelta, recordLearnedObservation, estimateLearnedDefaults, applyLearnedDefaults, sanitizeLearnedRecord, withoutLearnedDefaults } from './learnedDefaults.js';
 const key = learnedDefaultsKey({ filmType: 'color', filmEdge: { filmName: 'Portra' } }, { lab: 'Lab A' });
 assert.notEqual(key, learnedDefaultsKey({ filmType: 'color', filmEdge: { filmName: 'Gold' } }, { lab: 'Lab A' }));
 assert.deepEqual(learnedDelta({ coreTemperature: 0, wbR: 1 }, { coreTemperature: 12, wbR: 1.4 }, ['coreTemperature', 'wbR']), { coreTemperature: 12 });
@@ -13,4 +13,12 @@ assert.equal(applyLearnedDefaults({ coreTemperature: 2 }, record).coreTemperatur
 assert.equal(sanitizeLearnedRecord({ ...record, version: 999 }), null);
 assert.equal(estimateLearnedDefaults({ ...record, rolls: record.rolls.slice(0, 2) }).choices.corePaper, undefined);
 assert.deepEqual(learnedDelta({ coreTemperature: 0 }, { coreTemperature: 0 }, ['coreTemperature']), {});
+// A retype re-applies learned defaults under the new key (#231).
+const automatic = { filmType: 'positive', coreTemperature: 2, coreExposure: 5, corePaper: 'none', cropRegion: { left: 1 } };
+const learned = applyLearnedDefaults(automatic, record);
+assert.equal(learned.corePaper, 'ra4');
+const restored = withoutLearnedDefaults({ ...learned, filmType: 'bw', cropRegion: { left: 2 } }, automatic);
+assert.deepEqual(restored, { ...automatic, filmType: 'bw', cropRegion: { left: 2 } }, 'only learned keys return to the automatic recipe');
+assert.equal(withoutLearnedDefaults(automatic, automatic), automatic, 'nothing learned, nothing to undo');
+assert.notEqual(learnedDefaultsKey({ filmType: 'bw' }), learnedDefaultsKey({ filmType: 'positive' }), 'film type is part of the key');
 console.log('learned defaults: stock/lab keys, shrinkage, majority, idempotence, whitelist passed');

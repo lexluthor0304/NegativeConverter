@@ -2216,6 +2216,15 @@ body.dodge-burn-active #glCanvas {
   box-shadow: 0 2px 8px rgba(0,0,0,0.3); white-space: nowrap;
 }
 .toast-message.toast-visible { opacity: 1; }
+.toast-message.toast-with-action {
+  pointer-events: auto; display: flex; align-items: center; gap: 12px;
+  white-space: normal; max-width: calc(100vw - 32px);
+}
+.toast-action {
+  flex-shrink: 0; background: none; border: 1px solid var(--accent); color: var(--accent);
+  font: inherit; padding: 3px 10px; cursor: pointer; white-space: nowrap;
+}
+.toast-action:hover { background: var(--accent); color: var(--bg-primary); }
 
 .footer-btn.primary {
   background: var(--accent);
