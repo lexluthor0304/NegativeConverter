@@ -2,34 +2,9 @@
 // https://developer.android.com/media/platform/hdr-image-format
 import { jpegApp1Xmp } from '../workers/exifWriter.js';
 import { buildTiff, bytesEntry, longEntry } from '../workers/tiffWriter.js';
-const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
-const linear = x => x <= 0.04045 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4;
-const luminance = (data, i, scale) => 0.2126 * linear(data[i] / scale) + 0.7152 * linear(data[i + 1] / scale) + 0.0722 * linear(data[i + 2] / scale);
-
-// The 16-bit plane uses the same sRGB transfer function as the SDR pixels.
-// A quantisation-only difference produces a near-identity map. Never invent
-// highlight headroom just because the source has 16-bit precision.
-export function computeGainMap(sdr, plane16, { step = 4 } = {}) {
-  const width = Math.ceil(sdr.width / step), height = Math.ceil(sdr.height / step);
-  if (!plane16 || plane16.width !== sdr.width || plane16.height !== sdr.height || plane16.data.length !== sdr.data.length) return null;
-  const gains = new Float32Array(width * height);
-  let max = 0;
-  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
-    let a = 0, b = 0, count = 0;
-    for (let yy = y * step; yy < Math.min((y + 1) * step, sdr.height); yy++) for (let xx = x * step; xx < Math.min((x + 1) * step, sdr.width); xx++) {
-      const i = (yy * sdr.width + xx) * 4;
-      a += luminance(sdr.data, i, 255); b += luminance(plane16.data, i, 65535); count++;
-    }
-    const gain = clamp(Math.log2((b / count + 1 / 64) / (a / count + 1 / 64)), 0, 3);
-    gains[y * width + x] = gain; max = Math.max(max, gain);
-  }
-  const gainMax = Math.max(max, 0.001);
-  const data = new Uint8ClampedArray(width * height * 4);
-  for (let i = 0; i < gains.length; i++) {
-    data[i * 4] = data[i * 4 + 1] = data[i * 4 + 2] = Math.round(gains[i] / gainMax * 255); data[i * 4 + 3] = 255;
-  }
-  return { width, height, data, gainMax, gainMin: 0 };
-}
+// computeGainMap lives with the export worker, which computes the map off the
+// main thread; the re-export keeps this module's imports working.
+export { computeGainMap } from '../workers/gainMap.js';
 
 const packet = body => `<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">${body}</rdf:RDF></x:xmpmeta>`;
 function description(attrs) { return `<rdf:Description rdf:about="" xmlns:hdrgm="http://ns.adobe.com/hdr-gain-map/1.0/" ${attrs}/>`; }
