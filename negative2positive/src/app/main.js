@@ -7874,9 +7874,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const presentation = studioWorkspace?.photoSwitchPresentation;
       if (!presentation || state.photoSwitchTarget !== item) return null;
       const retained = photoPreviews.peek(item);
-      if (retained?.key === photoSettingsKey(item) && presentation.showImageData(item, retained.image, 'cached')) return 'cached';
-      if (item.thumbnail && presentation.showUrl(item, item.thumbnail, 'thumbnail')) return 'thumbnail';
-      return null;
+      let shown = null;
+      if (retained?.key === photoSettingsKey(item) && presentation.showImageData(item, retained.image, 'cached')) shown = 'cached';
+      else if (item.thumbnail && presentation.showUrl(item, item.thumbnail, 'thumbnail')) shown = 'thumbnail';
+      // Perf marks let the #230 harness time provisional paints without hooks.
+      if (shown) performance.mark?.('nc:provisional-paint');
+      return shown;
     }
 
     function cancelProvisionalFrame() {
