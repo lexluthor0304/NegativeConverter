@@ -14,7 +14,16 @@ export function createAutoFrameWorkerClient({
     for (const entry of pending.values()) { clearTimeout(entry.timer); entry.reject(error); }
     pending.clear();
   }
-  const request = (image, options, type = 'analyze-frame') => new Promise((resolve, reject) => {
+  function armIdleTimer() {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => fail(new Error('Auto-frame worker idle')), idleTimeoutMs);
+    idleTimer.unref?.();
+  }
+  // `signal` lets a superseded photo activation drop its request: one that
+  // has not been posted never copies the planes, and a posted one settles at
+  // once and its late reply is ignored. (The worker itself keeps running.)
+  const request = (image, options, type = 'analyze-frame', { signal = null } = {}) => new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(new DOMException('Auto-frame request was superseded', 'AbortError')); return; }
     try {
       clearTimeout(idleTimer);
       if (!worker) {
@@ -23,7 +32,11 @@ export function createAutoFrameWorkerClient({
         worker.onmessageerror = () => fail(new Error('Auto-frame worker returned invalid data'));
         worker.onmessage = ({ data }) => {
           const entry = pending.get(data.id);
-          if (!entry) return;
+          if (!entry) {
+            // The reply to an aborted request: the worker is free again.
+            if (!pending.size) armIdleTimer();
+            return;
+          }
           clearTimeout(entry.timer);
           pending.delete(data.id);
           try {
@@ -36,10 +49,7 @@ export function createAutoFrameWorkerClient({
               result.rotatedImageData = rotated;
             }
             entry.resolve(result);
-            if (!pending.size) {
-              idleTimer = setTimeout(() => fail(new Error('Auto-frame worker idle')), idleTimeoutMs);
-              idleTimer.unref?.();
-            }
+            if (!pending.size) armIdleTimer();
           } catch (error) {
             entry.reject(error);
             fail(error);
@@ -48,7 +58,16 @@ export function createAutoFrameWorkerClient({
       }
       const id = ++sequence;
       const timer = setTimeout(() => fail(new Error('Auto-frame worker timed out')), timeoutMs);
-      pending.set(id, { resolve, reject, timer });
+      const onAbort = () => {
+        const entry = pending.get(id);
+        if (!entry) return;
+        clearTimeout(entry.timer);
+        pending.delete(id);
+        entry.reject(new DOMException('Auto-frame request was superseded', 'AbortError'));
+      };
+      const settle = fn => value => { signal?.removeEventListener('abort', onAbort); fn(value); };
+      pending.set(id, { resolve: settle(resolve), reject: settle(reject), timer });
+      signal?.addEventListener('abort', onAbort, { once: true });
       const rgba = image.data.slice();
       const image16 = type === 'analyze-frame' ? image.__image16?.data.slice() : undefined;
       const transfers = [rgba.buffer];
@@ -107,4 +126,4 @@ export function createAutoFrameWorkerPool({ size = 2, workerFactory } = {}) {
 }
 // Shares the auto-frame worker so the full-resolution image is posted to a
 // single worker instance; the film edge reader does not need OpenCV.
-export const readFilmEdgeInWorker = (image, options = {}) => analyzeFrameInWorker(image, options, 'read-film-edge');
+export const readFilmEdgeInWorker = (image, options = {}, requestOptions = {}) => analyzeFrameInWorker(image, options, 'read-film-edge', requestOptions);

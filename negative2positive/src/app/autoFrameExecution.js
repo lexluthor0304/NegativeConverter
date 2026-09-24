@@ -5,7 +5,11 @@ export async function detectFrameWithFallback(image, options, {
 }) {
   if (workerSupported) {
     try { return await analyzeInWorker(image, options); }
-    catch (error) { onWorkerError(error); }
+    catch (error) {
+      // A superseded request must not restart the search on the main thread.
+      if (error?.name === 'AbortError') throw error;
+      onWorkerError(error);
+    }
   }
   if (!await ensureOpenCvReady()) return null;
   return analyzeOnMainThread(image, options);

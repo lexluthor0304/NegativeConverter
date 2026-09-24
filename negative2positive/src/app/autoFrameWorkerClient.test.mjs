@@ -36,4 +36,33 @@ const timeout = createAutoFrameWorkerClient({ timeoutMs: 10, workerFactory: () =
 } });
 await assert.rejects(timeout(source, {}), /timed out/);
 assert.equal(timedWorker.terminated, true);
+
+// A superseded activation aborts its requests: before posting nothing is
+// copied or sent; once posted the promise settles at once, the late reply is
+// ignored, and the worker is only released by its idle timer.
+{
+  const posted = [];
+  let abortWorker;
+  const client = createAutoFrameWorkerClient({ idleTimeoutMs: 5, workerFactory: () => abortWorker = {
+    postMessage(message) { posted.push(message); }, terminate() { this.terminated = true; },
+  } });
+  const early = new AbortController();
+  early.abort();
+  await assert.rejects(client(source, {}, 'read-film-edge', { signal: early.signal }), { name: 'AbortError' });
+  assert.equal(posted.length, 0, 'an aborted request never copies or posts the planes');
+  const late = new AbortController();
+  const running = client(source, {}, 'analyze-frame', { signal: late.signal });
+  assert.equal(posted.length, 1);
+  late.abort();
+  await assert.rejects(running, { name: 'AbortError' });
+  assert.equal(abortWorker.terminated, undefined, 'the shared worker is not terminated for an abort');
+  abortWorker.onmessage({ data: { id: posted[0].id, result: { angle: 3 } } });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(abortWorker.terminated, true, 'the idle timer still releases the worker after the ignored reply');
+  const kept = new AbortController();
+  const answered = client(source, {}, 'analyze-frame', { signal: kept.signal });
+  posted.at(-1) && abortWorker.onmessage({ data: { id: posted.at(-1).id, result: { angle: 1 } } });
+  assert.deepEqual(await answered, { angle: 1 });
+  kept.abort();
+}
 console.log('autoFrameWorkerClient tests passed');
