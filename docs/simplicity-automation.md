@@ -54,7 +54,13 @@ baseline, so repeated exports do not compound the learned offset.
 PNG, JPEG and TIFF always embed the bundled sRGB ICC profile, including when
 no analogue metadata was entered. PNG removes conflicting sRGB/gAMA/cHRM
 chunks. JPEG includes an optional, default-on gain map with Adobe gain-map XMP,
-a secondary JPEG and MPF offsets. The SDR scan bytes are retained.
+a secondary JPEG and MPF offsets. The SDR scan bytes are retained. The map is
+computed in the export worker (`gainMap16`: the 16-bit adjustment pass and
+`workers/gainMap.js`) while the main thread encodes the SDR JPEG. The sRGB
+EOTF comes from exact Float64 tables over the 256 and 65536 integer codes,
+summed in the original order, so the map bytes and `GainMapMax` are the ones
+the per-sample `** 2.4` produced. A sprocket-frame export computes no map,
+since the framed image never carried one.
 
 **Current dynamic-range limit:** the conversion pipeline's 16-bit plane is
 bounded sRGB, not scene-linear HDR above reference white. The map records the

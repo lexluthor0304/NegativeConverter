@@ -53,6 +53,20 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
   cannot start. RAW demosaic remains in LibRaw's dedicated worker.
 - Batch exports can be cancelled: the loading overlay's Cancel button
   (browser) and a Cancel button in the header progress strip (desktop).
+- The adjustment stage runs in the export worker and its result is used: a
+  16-bit result is viewed as `Uint16Array` and its 8-bit mirror is built in
+  the worker (#240). Before, the bridge read the plane as bytes, `ImageData`
+  rejected the doubled length, and every lane redid the 16-bit pass on the
+  main thread, one after another.
+- The JPEG HDR gain map runs only when `renderBatchExportFile` asks for it
+  (`options.gainMap`: JPEG, gain map on, no sprocket frame); the contact
+  sheet and watch-folder imports never start one. The export worker runs
+  the map's 16-bit pass and the exact table map (`workerGainMap16`) while
+  the main thread encodes the SDR JPEG, and only the map (1/16 of the
+  pixels) comes back. The frame's conversion plane is transferred to the
+  worker without a copy (the map is its last reader); if the worker dies
+  holding it (`ExportInputLostError`), the frame is rendered once more with
+  a copied plane, so the file never depends on the failure.
 
 The automatic roll analysis after a multi-file import uses the same scheduler
 and lane planning, with one auto-frame worker per lane
@@ -118,6 +132,7 @@ is recorded in the current audit report.
 ```bash
 npm test            # includes batchExportScheduler, conversion pool, export pool, geometry chain
 npm run test:smoke  # batch export scenario (ZIP fallback to individual downloads), roll import
+npm run test:smoke -- --gain-map-only  # real-worker 16-bit result and gain map, gain-map requests per export intent
 node scripts/performance-io-benchmark.mjs /path/to/baseline
 ```
 

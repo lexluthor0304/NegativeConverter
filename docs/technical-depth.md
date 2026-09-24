@@ -21,7 +21,23 @@ exposes `applyPreparedAdjustmentsToBuffer16`, the export worker has an
 export asks for 16 bits and the conversion produced a plane
 (`applyAdjustmentsWithSettings(…, { bitDepth: 16 })`, for the open photo and
 for every batch file). PNG16 and TIFF16 then encode the adjusted plane
-directly. The 8-bit preview is unchanged, the `bitDepth8BitData` warning is
+directly.
+
+Until #240 the worker's 16-bit result never reached the export: the bridge
+wrapped it as bytes, `ImageData` rejected the doubled length, a silent catch
+returned null and the main thread ran the same pass again in one long task.
+The bridge now resolves a `bits: 16` result as a `Uint16Array` view, the
+worker builds the 8-bit mirror with the same `downconvertPlane16`, and the
+result is checked (type, 4·w·h samples, size) before use; a failure warns
+once per session and falls back. `{ planeOnly: true }` returns only the
+plane, for the gain map, and the main-thread fallback has the matching
+`applyPreparedAdjustmentsToPlane16`. The kept input plane is copied for the
+worker in 32 MiB slices, one per task. Tests: `workerBridge.test.mjs` (an
+`ImageData` stub that throws on the wrong length, as browsers do) and
+`exportWorkerParity.test.mjs` (the real worker handler behind the real
+bridge, through structured clone, bit-identical to the main-thread path for
+identity, separable, HSL with highlights/shadows, a look and expired rescue
+with the fog surface). The 8-bit preview is unchanged, the `bitDepth8BitData` warning is
 gone, and the dead `original16 / cropped16 / processed16` state fields with
 it.
 
