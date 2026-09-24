@@ -233,4 +233,79 @@ const fakeFile = name => Object.assign(new Blob(['x']), { name });
   assert.equal((await next).dataUrl, 'data:next');
   pool.clear();
 }
+
+// ---------------------------------------------------------------------------
+// The real worker module with a stand-in image stack: the capability probe,
+// the embedded-preview reply (located structure, bytes read, transfer) and
+// the HE NEF `jpeg` reply (both planes) go through the actual message code.
+// ---------------------------------------------------------------------------
+const renderUrl = new URL('./embeddedPreviewRender.js', import.meta.url).href;
+class StackWorker {
+  static decodes = 0;
+  constructor() {
+    this.worker = new NodeWorker(`
+      const { parentPort } = require('node:worker_threads');
+      globalThis.ImageData = class { constructor(data, width, height) { Object.assign(this, { data, width, height }); } };
+      const ready = import(${JSON.stringify(renderUrl)}).then(({ transformPixels }) => {
+        // Every JPEG decodes to an 8x6 orange negative ramp.
+        globalThis.createImageBitmap = async () => {
+          parentPort.postMessage({ decoded: true });
+          const data = new Uint8ClampedArray(8 * 6 * 4);
+          for (let i = 0; i < 48; i++) { const t = (i % 8) / 7; data.set([230 - 110 * t, 170 - 100 * t, 120 - 80 * t, 255], i * 4); }
+          return { width: 8, height: 6, data, close() {} };
+        };
+        globalThis.OffscreenCanvas = class {
+          constructor(width, height) { Object.assign(this, { width, height, pixels: new Uint8ClampedArray(width * height * 4) }); }
+          getContext() {
+            const canvas = this; let matrix = [1, 0, 0, 1, 0, 0];
+            return {
+              setTransform: (...m) => { matrix = m; },
+              drawImage: bitmap => canvas.pixels.set(transformPixels(bitmap.data, bitmap.width, bitmap.height,
+                { width: canvas.width, height: canvas.height, matrix }).data),
+              getImageData: (x, y, w, h) => new ImageData(canvas.pixels.slice(0, w * h * 4), w, h),
+              putImageData: image => canvas.pixels.set(image.data),
+            };
+          }
+          transferToImageBitmap() { return { width: this.width, height: this.height, bitmap: true }; }
+          async convertToBlob() { return new Blob([this.pixels.slice(0, 4)], { type: 'image/jpeg' }); }
+        };
+        globalThis.FileReaderSync = class { readAsDataURL(blob) { return 'data:image/jpeg;base64,' + blob.size; } };
+      });
+      // Node cannot transfer stand-in bitmaps; ArrayBuffers are transferred as in browsers.
+      globalThis.self = { postMessage: (message, transfers = []) => parentPort.postMessage(message, transfers.filter(t => t instanceof ArrayBuffer)) };
+      const loaded = ready.then(() => import(${JSON.stringify(workerUrl)}));
+      parentPort.on('message', async data => { await loaded; self.onmessage({ data }); });
+    `, { eval: true });
+    this.worker.on('message', data => { if (data?.decoded) { StackWorker.decodes++; return; } this.onmessage?.({ data }); });
+    this.worker.on('error', error => this.onerror?.(error));
+  }
+  postMessage(message, transfers) { this.worker.postMessage(message, transfers); }
+  terminate() { void this.worker.terminate(); }
+}
+{
+  const { buildDngWithPreviews } = await import('./rawEmbeddedPreview.fixtures.mjs');
+  const { bytes } = buildDngWithPreviews({ previews: [{ width: 160, height: 120 }, { width: 720, height: 480 }, { width: 2112, height: 1408 }] });
+  const file = new File([bytes], 'stack.dng');
+  const pool = createEmbeddedPreviewPool({ workerFactory: () => new StackWorker() });
+  const tile = await pool.request({ file, purpose: 'tile', output: 'dataUrl' });
+  assert.equal(pool.capability, true, 'the probe passes with a working decoder and OffscreenCanvas');
+  assert.equal(tile.preview.width, 720);
+  assert.ok(tile.dataUrl.startsWith('data:image/jpeg'), 'tiles come back as JPEG data URLs');
+  assert.ok(tile.located && tile.bytesRead > tile.preview.length, 'the first job locates and reports its reads');
+  const viewer = await pool.request({ file, purpose: 'viewer', output: 'bitmap', longSidePx: 2400 });
+  assert.equal(viewer.preview.width, 2112);
+  assert.equal(viewer.bytesRead, viewer.preview.length, 'the cached location is reused: only the preview is read');
+  assert.deepEqual([viewer.bitmap.width, viewer.bitmap.height], [8, 6]);
+  const none = await pool.request({ file: new File([new Uint8Array(64)], 'x.dng'), purpose: 'viewer', longSidePx: 2000 });
+  assert.equal(none.empty, true);
+  pool.clear();
+
+  const stash = { jpegBytes: new Uint8Array([0xFF, 0xD8, 0xFF, 0xD9]) };
+  const decoded = await decodeJpegInWorker(stash, { workerFactory: () => new StackWorker() });
+  assert.deepEqual([decoded.width, decoded.height], [8, 6]);
+  assert.equal(decoded.data.length, 8 * 6 * 4);
+  assert.deepEqual(Array.from(decoded.__image16.data.subarray(0, 4)), Array.from(decoded.data.subarray(0, 4), v => v * 257),
+    'the worker builds the same x257 mirror as fromImageData8');
+  assert.equal(stash.jpegBytes.byteLength, 0, 'with the capability the stashed bytes are transferred');
+}
 console.log('scanDecodeClient tests passed: real worker PNG/TIFF precision, transfer and lifecycle; jpeg capability handshake; preview pool');
