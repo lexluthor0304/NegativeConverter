@@ -7,6 +7,8 @@ import assert from 'node:assert/strict';
 
 import {
   applyPreparedAdjustmentsToBuffer,
+  applyPreparedAdjustmentsToBuffer16,
+  applyPreparedAdjustmentsToPlane16,
   areAdjustmentsIdentity,
   createAdjustmentLutScratch
 } from './adjustmentPipeline.js';
@@ -109,5 +111,27 @@ applyPreparedAdjustmentsToBuffer(source, { curves: identityCurves() }, output, {
 assert.equal(output.__image16, plane);
 applyPreparedAdjustmentsToBuffer(makeImageData(2, 1, 64), { curves: identityCurves() }, output, { lutScratch: scratch });
 assert.equal(output.__image16, null);
+
+// ------------------------------------------ 16-bit stage and its plane-only sibling
+
+{
+  const withPlane = makeImageData(2, 1, 64);
+  withPlane.__image16 = { width: 2, height: 1, data: new Uint16Array([0x1234, 1, 2, 65535, 0xABCD, 4, 5, 65535]) };
+  const settings = { curves: identityCurves(), exposure: 0.5, saturation: 12 };
+  const full = makeImageData(2, 1);
+  applyPreparedAdjustmentsToBuffer16(withPlane, settings, full);
+  const planeOnly = applyPreparedAdjustmentsToPlane16(withPlane, settings);
+  assert.deepEqual(Array.from(planeOnly.data), Array.from(full.__image16.data), 'the plane-only pass is the same plane');
+  assert.equal(planeOnly.width, 2);
+  assert.deepEqual(Array.from(full.data), Array.from(full.__image16.data, (v) => v >>> 8), 'the mirror is the high byte');
+  // No plane of the image's own size: the buffer variant runs the 8-bit stage
+  // and attaches nothing, and the plane-only sibling returns none.
+  assert.equal(applyPreparedAdjustmentsToPlane16(mismatched, settings), null);
+  assert.equal(applyPreparedAdjustmentsToPlane16(makeImageData(2, 1, 64), settings), null);
+  const eight = makeImageData(2, 1);
+  applyPreparedAdjustmentsToBuffer16(mismatched, settings, eight);
+  assert.ok(!eight.__image16);
+  assert.notEqual(eight.data[0], 64, 'the 8-bit stage ran');
+}
 
 console.log('adjustmentPipeline tests passed');

@@ -16,6 +16,7 @@
 
 import { selectExportSamples } from './imageEncoders.js';
 import { computeAdjustmentParams, isIdentityAdjustmentParams } from './pixelAdjustments.js';
+import { downconvertPlane16 } from './pixelAdjustments16.js';
 
 /** Base allowance for a request, plus a per-megapixel allowance on top. */
 export const WORKER_TIMEOUT_BASE_MS = 30_000;
@@ -45,6 +46,30 @@ export function isWorkerTimeoutError(err) {
 }
 
 /**
+ * A plane transferred to the worker did not come back (the worker crashed,
+ * timed out or was terminated). The caller no longer holds its pixels and
+ * has to render the frame again.
+ */
+export function isExportInputLostError(err) {
+  return Boolean(err) && err.name === 'ExportInputLostError';
+}
+
+// A silent main-thread fallback hid a broken worker result for weeks (#240):
+// say so once per request type and page session.
+const warnedFallbacks = new Set();
+
+function warnWorkerFallbackOnce(requestType, err) {
+  if (warnedFallbacks.has(requestType)) return;
+  warnedFallbacks.add(requestType);
+  console.warn(`Export worker ${requestType} failed, falling back to the main thread (reported once per session):`, err);
+}
+
+/** Test hook: forget which fallbacks have already been reported. */
+export function resetWorkerFallbackWarnings() {
+  warnedFallbacks.clear();
+}
+
+/**
  * Serialize settings for worker transfer.
  * Curves are copied as Uint8Array (structured clone handles them natively).
  */
@@ -67,6 +92,64 @@ function copyTypedArrayBuffer(view) {
 
 function copyImageDataBuffer(imageData) {
   return copyTypedArrayBuffer(imageData.data);
+}
+
+/** Bytes per task when a large plane is copied for the worker. */
+export const COPY_SLICE_BYTES = 32 << 20;
+
+// A message task rather than a timer: hidden pages throttle chained timers to
+// one per second or slower, and a batch export may run in a hidden window.
+function yieldToEventLoop() {
+  if (typeof MessageChannel !== 'function') return new Promise((resolve) => setTimeout(resolve, 0));
+  return new Promise((resolve) => {
+    const channel = new MessageChannel();
+    channel.port1.onmessage = () => {
+      channel.port1.close();
+      resolve();
+    };
+    channel.port2.postMessage(null);
+  });
+}
+
+/**
+ * Copy a typed array's bytes into a new ArrayBuffer, one `sliceBytes` slice
+ * per task, so copying a 480 MB plane does not block the main thread for one
+ * long task. The destination is allocated once; the abort signal is honoured
+ * between slices. The source must not be written while the copy runs
+ * (conversion planes and export frames are write-once).
+ * @returns {Promise<ArrayBuffer>}
+ */
+export async function copyTypedArrayInSlices(view, { sliceBytes = COPY_SLICE_BYTES, signal = null } = {}) {
+  if (signal && signal.aborted) throw makeError('Worker request aborted', 'AbortError');
+  const source = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+  const step = Math.max(1, Math.floor(sliceBytes) || COPY_SLICE_BYTES);
+  if (source.length <= step) return copyTypedArrayBuffer(view);
+  const target = new Uint8Array(source.length);
+  for (let offset = 0; offset < source.length; offset += step) {
+    if (offset > 0) {
+      await yieldToEventLoop();
+      if (signal && signal.aborted) throw makeError('Worker request aborted', 'AbortError');
+    }
+    target.set(source.subarray(offset, Math.min(source.length, offset + step)), offset);
+  }
+  return target.buffer;
+}
+
+// A plane can be handed over without a copy only when its view owns the whole
+// (non-shared) buffer; otherwise a transfer would detach unrelated views.
+function isWholeBufferView(view) {
+  return view.byteOffset === 0
+    && view.buffer instanceof ArrayBuffer
+    && view.byteLength === view.buffer.byteLength
+    && view.byteLength > 0;
+}
+
+function isRgbaPlaneOf(plane, width, height) {
+  return Boolean(plane)
+    && plane.data instanceof Uint16Array
+    && plane.width === width
+    && plane.height === height
+    && plane.data.length === width * height * 4;
 }
 
 /**
@@ -98,6 +181,28 @@ function defaultWorkerFactory() {
     new URL('./exportWorker.js', import.meta.url),
     { type: 'module' }
   );
+}
+
+// A 16-bit result is viewed, not converted: `new Uint16Array(buffer)` shares
+// the transferred buffer (offset 0, even length).
+function viewAdjustmentResult(msg) {
+  return {
+    data: msg.bits === 16 ? new Uint16Array(msg.data) : new Uint8ClampedArray(msg.data),
+    data8: msg.data8 ? new Uint8ClampedArray(msg.data8) : null,
+    bits: msg.bits === 16 ? 16 : 8,
+    width: msg.width,
+    height: msg.height
+  };
+}
+
+function viewGainMapResult(msg) {
+  return {
+    data: new Uint8ClampedArray(msg.data),
+    width: msg.width,
+    height: msg.height,
+    gainMax: msg.gainMax,
+    gainMin: msg.gainMin
+  };
 }
 
 /**
@@ -156,21 +261,32 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory 
         }
         break;
       case 'result':
+      case 'gainMapResult': {
         settleEntry(msg.id, entry);
-        entry.resolve({
-          data: new Uint8ClampedArray(msg.data),
-          width: msg.width,
-          height: msg.height
-        });
+        let result;
+        try {
+          result = msg.type === 'result' ? viewAdjustmentResult(msg) : viewGainMapResult(msg);
+        } catch (err) {
+          // A malformed buffer (e.g. an odd byte length for 16 bits) must fail
+          // the request, not strand it.
+          entry.reject(err);
+          break;
+        }
+        entry.resolve(result);
         break;
+      }
       case 'blobResult':
         settleEntry(msg.id, entry);
         entry.resolve(msg.blob);
         break;
-      case 'error':
+      case 'error': {
         settleEntry(msg.id, entry);
-        entry.reject(new Error(msg.message));
+        const err = new Error(msg.message);
+        // Input buffers a request transferred and the worker handed back.
+        if (msg.returned) err.returned = msg.returned;
+        entry.reject(err);
         break;
+      }
     }
   }
 
@@ -308,6 +424,7 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory 
     } catch (err) {
       if (isAbortError(err)) throw err;
       // Fallback to main thread
+      warnWorkerFallbackOnce('applyAdjustments', err);
       return null;
     }
   }
@@ -315,35 +432,127 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory 
   /**
    * Apply adjustments to the engine's 16-bit plane via Worker. Resolves to an
    * ImageData whose `data` holds the high bytes and whose `__image16` is the
-   * adjusted plane; null when there is no plane or the worker failed.
+   * adjusted plane; with `planeOnly`, to `{ width, height, __image16 }` with no
+   * 8-bit mirror. Null when there is no plane of the image's own size (the
+   * main-thread path then runs the 8-bit stage) or the worker failed.
+   * @param {function|{onProgress?:function,signal?:AbortSignal,timeoutMs?:number,planeOnly?:boolean}} [onProgressOrOptions]
    */
   async function workerApplyAdjustments16(imageData, settings, quality = 'full', onProgressOrOptions = null) {
     const plane = imageData && imageData.__image16;
-    if (!plane || !(plane.data instanceof Uint16Array)) return null;
+    if (!plane || !isRgbaPlaneOf(plane, imageData.width, imageData.height)) return null;
     const opts = normalizeRequestOptions(onProgressOrOptions);
-    const inputBuffer = copyTypedArrayBuffer(plane.data);
+    const planeOnly = Boolean(opts.planeOnly);
+    const { width, height } = plane;
+    const sampleCount = width * height * 4;
+    // Snapshot the settings before the copy yields to other tasks.
+    const serializedSettings = serializeSettings(settings);
+    // Must copy: the caller's fallback, and later frames, still read the plane.
+    const inputBuffer = await copyTypedArrayInSlices(plane.data, { signal: opts.signal });
     try {
       const result = await sendToWorker(
         {
           type: 'applyAdjustments16',
           inputBuffer,
-          width: plane.width,
-          height: plane.height,
-          settings: serializeSettings(settings),
-          quality
+          width,
+          height,
+          settings: serializedSettings,
+          quality,
+          planeOnly
         },
         [inputBuffer],
         opts.onProgress,
         requestOptionsFor(imageData, opts)
       );
-      const out16 = new Uint16Array(result.data);
-      const data8 = new Uint8ClampedArray(out16.length);
-      for (let i = 0; i < out16.length; i++) data8[i] = out16[i] >>> 8;
-      const output = new ImageData(data8, result.width, result.height);
-      output.__image16 = { width: result.width, height: result.height, data: out16 };
+      const out16 = result.data;
+      if (!(out16 instanceof Uint16Array) || out16.length !== sampleCount || result.width !== width || result.height !== height) {
+        throw new Error(`Unexpected 16-bit adjustment result (${out16 && out16.constructor && out16.constructor.name} of ${out16 && out16.length} for ${width}x${height})`);
+      }
+      const plane16 = { width, height, data: out16 };
+      if (planeOnly) return { width, height, __image16: plane16 };
+      const data8 = result.data8 || downconvertPlane16(out16, new Uint8ClampedArray(sampleCount));
+      if (data8.length !== sampleCount) {
+        throw new Error(`Unexpected 8-bit mirror length ${data8.length} for ${width}x${height}`);
+      }
+      const output = new ImageData(data8, width, height);
+      output.__image16 = plane16;
       return output;
     } catch (err) {
       if (isAbortError(err)) throw err;
+      warnWorkerFallbackOnce('applyAdjustments16', err);
+      return null;
+    }
+  }
+
+  /**
+   * The JPEG gain map for `sdr`, the SDR frame being encoded: the worker runs
+   * the 16-bit adjustment pass on `source.__image16` (the unadjusted plane)
+   * and the exact table map; the adjusted plane never comes back.
+   *
+   * The SDR bytes are always copied (the main thread still encodes them). The
+   * plane is copied too unless `transferPlane` is set, when the caller hands
+   * it over without a copy: on success its buffer stays detached; when the
+   * worker reports an error it hands the buffer back and it is re-attached to
+   * the plane object before resolving null.
+   *
+   * @param {ImageData} source - carries `__image16`, the unadjusted plane
+   * @param {ImageData} sdr - the 8-bit frame being encoded, same size
+   * @param {object} settings - buildAdjustmentSettings(...) output
+   * @param {{transferPlane?:boolean,signal?:AbortSignal,timeoutMs?:number,onProgress?:function}} [options]
+   * @returns {Promise<{width:number,height:number,data:Uint8ClampedArray,gainMax:number,gainMin:number}|null>}
+   *   null when the inputs do not qualify or the worker failed (the caller
+   *   falls back to the main thread). Rejects with an AbortError on
+   *   cancellation, and with an ExportInputLostError when a transferred plane
+   *   did not come back.
+   */
+  async function workerGainMap16(source, sdr, settings, options = {}) {
+    const opts = normalizeRequestOptions(options);
+    const plane = source && source.__image16;
+    if (!plane || !sdr || !isRgbaPlaneOf(plane, source.width, source.height)) return null;
+    const { width, height } = plane;
+    if (sdr.width !== width || sdr.height !== height || !sdr.data || sdr.data.length !== width * height * 4) return null;
+    const serializedSettings = serializeSettings(settings);
+    const sdrBuffer = await copyTypedArrayInSlices(sdr.data, { signal: opts.signal });
+    const transferring = Boolean(opts.transferPlane) && isWholeBufferView(plane.data);
+    const inputBuffer = transferring
+      ? plane.data.buffer
+      : await copyTypedArrayInSlices(plane.data, { signal: opts.signal });
+    try {
+      const map = await sendToWorker(
+        {
+          type: 'gainMap16',
+          inputBuffer,
+          sdrBuffer,
+          width,
+          height,
+          settings: serializedSettings,
+          quality: 'full'
+        },
+        [inputBuffer, sdrBuffer],
+        opts.onProgress,
+        requestOptionsFor(source, opts)
+      );
+      const mapWidth = Math.ceil(width / 4);
+      const mapHeight = Math.ceil(height / 4);
+      if (!(map.data instanceof Uint8ClampedArray) || map.width !== mapWidth || map.height !== mapHeight
+        || map.data.length !== mapWidth * mapHeight * 4 || !Number.isFinite(map.gainMax)) {
+        throw new Error(`Unexpected gain map result for ${width}x${height}`);
+      }
+      return map;
+    } catch (err) {
+      const returnedPlane = err && err.returned && err.returned.plane;
+      // Do not let a logged error keep the returned buffers alive.
+      if (err && err.returned) delete err.returned;
+      if (transferring && plane.data.byteLength === 0) {
+        if (returnedPlane instanceof ArrayBuffer && returnedPlane.byteLength === width * height * 8) {
+          plane.data = new Uint16Array(returnedPlane);
+        } else if (!isAbortError(err)) {
+          const lost = makeError(`The frame's 16-bit plane was lost with the export worker: ${err && err.message ? err.message : err}`, 'ExportInputLostError');
+          lost.cause = err;
+          throw lost;
+        }
+      }
+      if (isAbortError(err)) throw err;
+      warnWorkerFallbackOnce('gainMap16', err);
       return null;
     }
   }
@@ -440,6 +649,7 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory 
   return {
     workerApplyAdjustments,
     workerApplyAdjustments16,
+    workerGainMap16,
     workerEncodePng16,
     workerEncodeTiff,
     isWorkerAvailable,
@@ -464,6 +674,7 @@ export function createExportWorkerPool({ size = 2, workerFactory } = {}) {
     size: laneCount,
     workerApplyAdjustments: (...args) => pick().workerApplyAdjustments(...args),
     workerApplyAdjustments16: (...args) => pick().workerApplyAdjustments16(...args),
+    workerGainMap16: (...args) => pick().workerGainMap16(...args),
     workerEncodePng16: (...args) => pick().workerEncodePng16(...args),
     workerEncodeTiff: (...args) => pick().workerEncodeTiff(...args),
     isWorkerAvailable: () => lanes.every(lane => lane.isWorkerAvailable()),
@@ -478,6 +689,7 @@ const defaultBridge = createExportWorkerBridge();
 
 export const workerApplyAdjustments = defaultBridge.workerApplyAdjustments;
 export const workerApplyAdjustments16 = defaultBridge.workerApplyAdjustments16;
+export const workerGainMap16 = defaultBridge.workerGainMap16;
 export const workerEncodePng16 = defaultBridge.workerEncodePng16;
 export const workerEncodeTiff = defaultBridge.workerEncodeTiff;
 export const isWorkerAvailable = defaultBridge.isWorkerAvailable;

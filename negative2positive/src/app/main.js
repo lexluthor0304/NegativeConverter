@@ -64,8 +64,10 @@ import { frameNeedsReview } from './reviewQueue.js';
       stripLegacyToneSettingsForSilverCore,
       applyPreparedAdjustmentsToBuffer,
       applyPreparedAdjustmentsToBuffer16,
+      applyPreparedAdjustmentsToPlane16,
       areAdjustmentsIdentity
     } from './adjustmentPipeline.js';
+    import { requestExportGainMap } from './exportGainMap.js';
     import { buildLinearPositive, encodeLinearDngBlob } from './linearDng.js';
     import { inpaintWithModel, fetchModelBytes, inpaintBackends, DEFAULT_MODEL_URL } from './aiInpaint.js';
     import { createInpaintSessionInWorker } from './aiInpaintWorkerClient.js';
@@ -117,16 +119,18 @@ import { frameNeedsReview } from './reviewQueue.js';
     import {
       workerApplyAdjustments,
       workerApplyAdjustments16,
+      workerGainMap16,
       workerEncodePng16,
       workerEncodeTiff,
       isWorkerAvailable,
+      isExportInputLostError,
       createExportWorkerPool
     } from '../workers/workerBridge.js';
 
     const DEBUG_UI = new URLSearchParams(window.location.search).get('debug') === '1';
     // The single export path's adjustment/encode workers; a batch export
     // passes its own pool through `bridge` instead.
-    const defaultExportWorkers = { workerApplyAdjustments, workerApplyAdjustments16, workerEncodePng16, workerEncodeTiff, isWorkerAvailable };
+    const defaultExportWorkers = { workerApplyAdjustments, workerApplyAdjustments16, workerGainMap16, workerEncodePng16, workerEncodeTiff, isWorkerAvailable };
     // 暗室 UI に一本化。古い workspace パラメーターで別画面へ分岐しない。
     let studioAutoFrameRunning = false;
     let studioWorkspace = null;
@@ -10311,11 +10315,23 @@ import { frameNeedsReview } from './reviewQueue.js';
         ensureFullRender();
       }
       const imageData = await getCurrentExportImageData({ bitDepth: exportInfo?.bitDepth || 8 });
+      if (!imageData) throw new Error('No image available for export.');
       if (exportInfo?.format === 'jpeg' && safeStorageGet('nc_hdr_gain_map_v1') !== 'off' && state.processedImageData?.__image16) {
+        if (state.currentStep >= 3) {
+          // The sprocket frame is a new ImageData without the map, so a map
+          // computed for it was always dropped: do not compute one.
+          if (state.exportSprocketHolesEnabled) return imageData;
+          // Never mutate the display buffer: a wrapper shares its pixels, and
+          // only the wrapper carries the export's map.
+          const sdr = imageData === state.displayImageData
+            ? new ImageData(imageData.data, imageData.width, imageData.height)
+            : imageData;
+          sdr.__gainMap = startExportGainMap(state.processedImageData, sdr, state);
+          return sdr;
+        }
         const high = await getCurrentExportImageData({ bitDepth: 16 });
         if (high?.__image16) imageData.__image16 = high.__image16;
       }
-      if (!imageData) throw new Error('No image available for export.');
       return imageData;
     }
 
@@ -10694,21 +10710,32 @@ import { frameNeedsReview } from './reviewQueue.js';
 
     // `bitDepth` 16 runs the stage on the engine's 16-bit plane (when the
     // image carries one) so the export gets real 16-bit samples; 8 keeps the
-    // LUT stage the preview uses.
-    async function applyAdjustmentsWithSettings(imageData, settings, { bitDepth = 8, bridge = null } = {}) {
-      const adjustmentSettings = buildAdjustmentSettings(settings);
+    // LUT stage the preview uses. `planeOnly` (16 bits only) returns just
+    // `{ width, height, __image16 }` for callers that read only the plane.
+    async function applyAdjustmentsWithSettings(imageData, settings, options = {}) {
+      return applyPreparedAdjustmentsWithWorkers(imageData, buildAdjustmentSettings(settings), options);
+    }
+
+    async function applyPreparedAdjustmentsWithWorkers(imageData, adjustmentSettings, { bitDepth = 8, bridge = null, planeOnly = false } = {}) {
       const wants16 = bitDepth === 16 && Boolean(imageData.__image16 && imageData.__image16.data instanceof Uint16Array);
+      const planeOnlyPass = wants16 && planeOnly;
       const exportWorkers = bridge || defaultExportWorkers;
 
       // Try Worker for large images (>1MP)
       if (imageData.width * imageData.height > 1_000_000 && exportWorkers.isWorkerAvailable()) {
         const result = wants16
-          ? await exportWorkers.workerApplyAdjustments16(imageData, adjustmentSettings, 'full')
+          ? await exportWorkers.workerApplyAdjustments16(imageData, adjustmentSettings, 'full', { planeOnly: planeOnlyPass })
           : await exportWorkers.workerApplyAdjustments(imageData, adjustmentSettings, 'full');
         if (result) return result;
       }
 
       // Fallback to main thread
+      if (planeOnlyPass) {
+        // No 8-bit output and no downconvert. A plane of another size yields
+        // none, as the full pass attaches none then either.
+        const plane16 = applyPreparedAdjustmentsToPlane16(imageData, adjustmentSettings, { quality: 'full' });
+        return { width: imageData.width, height: imageData.height, __image16: plane16 };
+      }
       const output = new ImageData(new Uint8ClampedArray(imageData.data.length), imageData.width, imageData.height);
       if (wants16) {
         applyPreparedAdjustmentsToBuffer16(imageData, adjustmentSettings, output, { quality: 'full' });
@@ -10719,6 +10746,20 @@ import { frameNeedsReview } from './reviewQueue.js';
         });
       }
       return output;
+    }
+
+    // The JPEG gain map for `sdr`, started now and awaited by imageDataToBlob
+    // after the SDR encode. The export worker runs the 16-bit pass and the map;
+    // the fallback runs the plane-only pass and the same table map here.
+    function startExportGainMap(processed, sdr, settings, { bridge = null, transferPlane = false } = {}) {
+      return requestExportGainMap({
+        processed,
+        sdr,
+        adjustmentSettings: buildAdjustmentSettings(settings),
+        workers: bridge || defaultExportWorkers,
+        transferPlane,
+        adjustPlane16: (adjustmentSettings) => applyPreparedAdjustmentsWithWorkers(processed, adjustmentSettings, { bitDepth: 16, bridge, planeOnly: true })
+      });
     }
 
     function sanitizeCropRegionForImage(cropRegion, imageData) {
@@ -10853,9 +10894,13 @@ import { frameNeedsReview } from './reviewQueue.js';
         blob = await imageDataToCanvasBlob(imageData, 'image/jpeg', jpegQuality / 100);
         trace.end({ bytes: blob.size || 0, worker: false });
         blob = await attachMetadataToBlob(blob, 'jpeg', metadata);
-        if (safeStorageGet('nc_hdr_gain_map_v1') !== 'off' && imageData.__image16) {
+        // `__gainMap` is the map started before the SDR encode (null: no map);
+        // a caller that attaches only a plane still gets it computed here.
+        if (safeStorageGet('nc_hdr_gain_map_v1') !== 'off' && (imageData.__gainMap || imageData.__image16)) {
           const { computeGainMap, packGainMapJpeg } = await import('./gainMapJpeg.js');
-          const map = computeGainMap(imageData, imageData.__image16);
+          const map = imageData.__gainMap
+            ? await imageData.__gainMap
+            : computeGainMap(imageData, imageData.__image16);
           if (map) {
             const gain = await imageDataToCanvasBlob(new ImageData(map.data, map.width, map.height), 'image/jpeg', 0.85);
             blob = await packGainMapJpeg(blob, gain, map);
@@ -11135,9 +11180,16 @@ import { frameNeedsReview } from './reviewQueue.js';
       const adjusted = previewMax
         ? createAdjustedPhotoPreview(processed, buildAdjustmentSettings(settings), { maxSize: previewMax })
         : await applyAdjustmentsWithSettings(processed, settings, { bitDepth: options.bitDepth === 16 ? 16 : 8, bridge: options.bridge });
-      if (!previewMax && state.exportFormat === 'jpeg' && safeStorageGet('nc_hdr_gain_map_v1') !== 'off' && processed.__image16) {
-        const high = await applyAdjustmentsWithSettings(processed, settings, { bitDepth: 16, bridge: options.bridge });
-        if (high?.__image16) adjusted.__image16 = high.__image16;
+      // The JPEG gain map, only when the caller will encode one (a batch JPEG
+      // export without the sprocket frame). It runs beside the SDR encode.
+      if (!previewMax && options.gainMap && processed.__image16) {
+        // This call created `processed`, and the map is the last reader of
+        // its plane, so the worker may take the plane without a copy. An
+        // identity recipe shares that plane with `adjusted`: drop the alias
+        // first, or it would become a detached, empty view.
+        const transferPlane = options.transferGainMapPlane !== false;
+        if (transferPlane && adjusted.__image16 === processed.__image16) adjusted.__image16 = null;
+        adjusted.__gainMap = startExportGainMap(processed, adjusted, settings, { bridge: options.bridge, transferPlane });
       }
       trace.mark('adjustments', {
         pixels: getImageDataPixelCount(adjusted)
@@ -11229,29 +11281,46 @@ import { frameNeedsReview } from './reviewQueue.js';
     }
 
     // One frame: the per-file pipeline plus the sprocket border and encoder.
-    async function renderBatchExportFile(job, position, { exportInfo, workers, dustRemoval }) {
+    async function renderBatchExportFile(job, position, { exportInfo, workers, dustRemoval }, { transferGainMapPlane = true } = {}) {
       const { file, settings } = job;
       if (exportInfo.format === 'dng') {
         const { source, settings: usedSettings } = await processFileWithSettings(file, settings, { stage: 'source', convert: workers.convert });
         return renderLinearDngBlob(source, usedSettings, position);
       }
-      const adjusted = await processFileWithSettings(file, settings, {
-        bitDepth: exportInfo.bitDepth,
-        dustRemoval,
-        dustWorker: workers.dust,
-        convert: workers.convert,
-        bridge: workers.bridge
-      });
-      const outputImageData = await applySprocketFrameForExport(adjusted, exportInfo, settings, position);
-      return imageDataToBlob(
-        outputImageData,
-        exportInfo.format,
-        state.jpegQuality,
-        exportInfo.bitDepth,
-        null,
-        exportMetadataFor(settings, position),
-        { bridge: workers.bridge }
-      );
+      // The sprocket frame drops the map, so only a plain JPEG asks for one.
+      const gainMap = exportInfo.format === 'jpeg'
+        && safeStorageGet('nc_hdr_gain_map_v1') !== 'off'
+        && !state.exportSprocketHolesEnabled;
+      try {
+        const adjusted = await processFileWithSettings(file, settings, {
+          bitDepth: exportInfo.bitDepth,
+          dustRemoval,
+          dustWorker: workers.dust,
+          convert: workers.convert,
+          bridge: workers.bridge,
+          gainMap,
+          transferGainMapPlane
+        });
+        const outputImageData = await applySprocketFrameForExport(adjusted, exportInfo, settings, position);
+        return await imageDataToBlob(
+          outputImageData,
+          exportInfo.format,
+          state.jpegQuality,
+          exportInfo.bitDepth,
+          null,
+          exportMetadataFor(settings, position),
+          { bridge: workers.bridge }
+        );
+      } catch (err) {
+        // The worker died holding this frame's transferred plane. Render the
+        // frame once more with a copied plane so the file does not depend on
+        // the failure.
+        if (transferGainMapPlane && isExportInputLostError(err)) {
+          console.warn(`Gain-map plane lost for ${file.name}; rendering the frame again:`, err?.message || err);
+          return renderBatchExportFile(job, position, { exportInfo, workers, dustRemoval }, { transferGainMapPlane: false });
+        }
+        throw err;
+      }
     }
 
     // Runs `jobs` through the pipeline, keeps the file-list statuses current
