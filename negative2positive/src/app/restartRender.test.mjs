@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import { createCoreReprocessGates } from './coreReprocessDispatcher.js';
 
 // Exercise the actual browser lifecycle functions without loading a DOM,
 // OpenCV, or ONNX. Only their UI and expensive conversion dependencies are
@@ -41,6 +42,7 @@ function fixture({ repairs = true, locked = false } = {}) {
     fullUpdateTimer: null, coreReprocessTimer: null, step2AutoConvertTimer: null,
     webglState: { gl: null }, console,
     clearTimeout: timer => clearedTimers.push(timer),
+    coreReprocessGates: createCoreReprocessGates({ clearTimeout: timer => clearedTimers.push(timer) }),
     isDesktopBatchExportLocked: () => locked,
     clearUndoHistory: noop, pushUndo: noop, exitCropMode: noop, exitBeforeAfter: noop,
     resetZoomPan: noop, updateMirrorButtonState: noop,
@@ -68,7 +70,7 @@ function fixture({ repairs = true, locked = false } = {}) {
     },
   });
   vm.runInContext([
-    'clearFullResolutionRenderState', 'cancelPendingTimers', 'clearDustState',
+    'clearFullResolutionRenderState', 'clearCoreReprocessTimer', 'cancelPendingTimers', 'clearDustState',
     'coreReprocessBusy', 'whenCoreReprocessIdle', 'noteCoreReprocessSettled',
     'runCoreReprocess', 'flushScheduledCoreReprocess',
     'resetAllAdjustments', 'rerenderWithCoreControls', 'restartPhotoProcessing',

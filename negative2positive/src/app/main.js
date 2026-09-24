@@ -57,6 +57,7 @@ import { frameNeedsReview } from './reviewQueue.js';
     import { convertFrameInWorker, convertPreviewFrameInWorker, createConversionWorkerPool, CONVERSION_FAILED, WORKER_TIMEOUT } from './conversionWorkerClient.js';
     import { planBatchParallelism, runBatchPipeline } from './batchExportScheduler.js';
     import { displayPreviewSize, resizeDisplayPreview } from './displayPreview.js';
+    import { createCoreReprocessGates, previewDispatchAction, CORE_FULL_REPROCESS_DELAY_MS } from './coreReprocessDispatcher.js';
     import { invalidateSilverCoreCache, analyzeSilverCoreFrame } from '../pipeline/silverAdapter.js';
     import { canUseBrowserZipStreaming, ZipStoreWriter, createZipNameDeduper } from './zipStoreWriter.js';
     import {
@@ -2761,7 +2762,7 @@ import { frameNeedsReview } from './reviewQueue.js';
     function cancelPendingTimers() {
       dustDetectionRevision += 1;
       if (fullUpdateTimer) { clearTimeout(fullUpdateTimer); fullUpdateTimer = null; }
-      if (coreReprocessTimer) { clearTimeout(coreReprocessTimer); coreReprocessTimer = null; }
+      clearCoreReprocessTimer();
       coreReprocessScheduled = null;
       if (displayPreviewResizeTimer) { clearTimeout(displayPreviewResizeTimer); displayPreviewResizeTimer = null; }
       if (step2AutoConvertTimer) { clearTimeout(step2AutoConvertTimer); step2AutoConvertTimer = null; }
@@ -5341,9 +5342,15 @@ import { frameNeedsReview } from './reviewQueue.js';
       return await convertFrameOffMainThread(request);
     }
 
+    // The armed dispatch gate (see coreReprocessDispatcher.js): truthy while a
+    // request is held in coreReprocessScheduled, null otherwise.
     let coreReprocessTimer = null;
     let coreReprocessScheduled = null;
     let coreReprocessToken = 0;
+    const coreReprocessGates = createCoreReprocessGates({
+      timeline: document.timeline || null,
+      isHidden: () => document.hidden
+    });
     // Unlike slider tokens, a restart generation must never admit an older
     // preview, even when a newer preview is already queued for the same source.
     let coreReprocessGeneration = 0;
@@ -5454,6 +5461,8 @@ import { frameNeedsReview } from './reviewQueue.js';
       _coreReprocessActive += 1;
       return rerenderWithCoreControls(options)
         .catch((err) => {
+          // A failed frame must be retried when the slider is released.
+          coreSliderCommitRecord = null;
           console.error('Core reprocess failed:', err);
         })
         .finally(() => {
@@ -5714,26 +5723,62 @@ import { frameNeedsReview } from './reviewQueue.js';
       if (hasSeparateConversionPreview()) state.fullResolutionPending = true;
       const wasFull = coreReprocessScheduled?.full;
       coreReprocessScheduled = { full, token, sourceRef: state.conversionSourceImageData };
-      // 操作が続いても期限を延ばさず、最新入力を約 1 フレームごとに送る。
-      if (coreReprocessTimer && !full && !wasFull) return;
-      if (coreReprocessTimer) clearTimeout(coreReprocessTimer);
-      coreReprocessTimer = setTimeout(() => {
-        const scheduled = coreReprocessScheduled;
-        coreReprocessTimer = null;
-        coreReprocessScheduled = null;
-        if (scheduled) void runCoreReprocess(scheduled);
-      }, full ? 70 : 16);
+      if (full) {
+        // Settings that need a full-resolution pass still settle for 70 ms.
+        clearCoreReprocessTimer();
+        coreReprocessTimer = coreReprocessGates.armTimeout(fireCoreReprocessGate, CORE_FULL_REPROCESS_DELAY_MS);
+        return;
+      }
+      // A preview replaces a queued full request, as it always has.
+      if (wasFull) clearCoreReprocessTimer();
+      // 最新入力を 1 フレームに 1 回だけ送る。空いていれば同じタスクの終わりに、
+      // 同じフレームで送信済みなら次のフレームに、変換中なら finally が送る。
+      const action = previewDispatchAction({
+        laneBusy: Boolean(_coreReprocessPreviewInFlight),
+        gateArmed: Boolean(coreReprocessTimer),
+        postedThisFrame: coreReprocessGates.postedThisFrame()
+      });
+      if (action === 'queue') {
+        // rerenderWithCoreControls parks it in the newest-wins slot.
+        clearCoreReprocessTimer();
+        void runCoreReprocess(takeScheduledCoreReprocess());
+      } else if (action === 'task') {
+        coreReprocessTimer = coreReprocessGates.armTask(fireCoreReprocessGate);
+      } else if (action === 'frame') {
+        coreReprocessTimer = coreReprocessGates.armFrame(fireCoreReprocessGate);
+      }
     }
 
-    // Run whatever the debounce is still holding, then wait for the reprocess
-    // chain to drain. Used before export so the file on disk matches the screen.
+    function takeScheduledCoreReprocess() {
+      const scheduled = coreReprocessScheduled;
+      coreReprocessScheduled = null;
+      return scheduled;
+    }
+
+    function fireCoreReprocessGate() {
+      coreReprocessTimer = null;
+      const scheduled = takeScheduledCoreReprocess();
+      if (!scheduled) return;
+      if (!scheduled.full) coreReprocessGates.markPosted();
+      void runCoreReprocess(scheduled);
+    }
+
+    // Cancels whichever gate is armed: the full request's timeout, a frame
+    // gate (rAF plus its fallback timeout) or an end-of-task microtask.
+    function clearCoreReprocessTimer() {
+      if (!coreReprocessTimer) return;
+      coreReprocessGates.cancel(coreReprocessTimer);
+      coreReprocessTimer = null;
+    }
+
+    // Run whatever the dispatch gate is still holding, then wait for the
+    // reprocess chain to drain. Used before export so the file on disk matches
+    // the screen.
     async function flushScheduledCoreReprocess() {
       for (let guard = 0; guard < 8; guard++) {
         if (coreReprocessTimer) {
-          clearTimeout(coreReprocessTimer);
-          coreReprocessTimer = null;
-          const scheduled = coreReprocessScheduled;
-          coreReprocessScheduled = null;
+          clearCoreReprocessTimer();
+          const scheduled = takeScheduledCoreReprocess();
           if (scheduled) await runCoreReprocess(scheduled);
           continue;
         }
@@ -7776,16 +7821,23 @@ import { frameNeedsReview } from './reviewQueue.js';
         valueInput.value = format(value);
       };
 
+      // The value the input handler last asked for. A commit (`change`, or
+      // value-box Enter/blur) repeats it; asking again would queue a duplicate
+      // conversion of the frame already shown.
+      const binding = { id, stateKey, slider, valueInput, normalize, format, lastInputValue: null };
+      const handleInput = (value) => {
+        if (onInput) onInput(value);
+        else schedulePreviewUpdate();
+        binding.lastInputValue = value;
+      };
+
       const applyValue = (rawValue, commitFull = false) => {
         const value = normalize(rawValue);
+        const unchanged = commitFull && value === binding.lastInputValue && state[stateKey] === value;
         state[stateKey] = value;
         syncUI(value);
         markCurrentFileDirty();
-        if (onInput) {
-          onInput(value);
-        } else {
-          schedulePreviewUpdate();
-        }
+        if (!unchanged) handleInput(value);
         if (commitFull) {
           if (onCommit) onCommit(value);
           else scheduleFullUpdate();
@@ -7819,8 +7871,7 @@ import { frameNeedsReview } from './reviewQueue.js';
         state[stateKey] = value;
         slider.value = String(value);
         markCurrentFileDirty();
-        if (onInput) onInput(value);
-        else schedulePreviewUpdate();
+        handleInput(value);
       });
 
       const commitFromInput = () => {
@@ -7838,7 +7889,6 @@ import { frameNeedsReview } from './reviewQueue.js';
         }
       });
 
-      const binding = { id, stateKey, slider, valueInput, normalize, format };
       sliderBindings.push(binding);
       sliderBindingMap.set(id, binding);
       syncUI(normalize(state[stateKey]));
@@ -7851,6 +7901,9 @@ import { frameNeedsReview } from './reviewQueue.js';
       state[binding.stateKey] = value;
       binding.slider.value = String(value);
       binding.valueInput.value = binding.format(value);
+      // State set from outside the slider was not asked for by its input
+      // handler, so the next commit of this value must not be skipped.
+      binding.lastInputValue = null;
     }
 
     function syncAllSlidersFromState() {
@@ -7912,12 +7965,35 @@ import { frameNeedsReview } from './reviewQueue.js';
       ['wbR', 'wbG', 'wbB'].forEach(syncSliderFromState);
     }
 
-    const coreReprocessHandlers = {
-      // SilverCore の色調は画素に焼き込まれるため、ドラッグ中も変換する。
-      // The enlarger head mirrors the same values, so it follows every change.
-      onInput: () => { updateEnlargerUI(); scheduleCoreReprocess({ full: false }); },
-      onCommit: () => { updateEnlargerUI(); scheduleCoreReprocess({ full: false }); }
-    };
+    // The last frame a SilverCore slider asked for: which control, which value,
+    // and the token that request received. runCoreReprocess clears it when a
+    // frame fails, so the release retries.
+    let coreSliderCommitRecord = null;
+
+    function coreReprocessHandlersFor(stateKey) {
+      return {
+        // SilverCore の色調は画素に焼き込まれるため、ドラッグ中も変換する。
+        // The enlarger head mirrors the same values, so it follows every change.
+        onInput: (value) => {
+          updateEnlargerUI();
+          const before = coreReprocessToken;
+          scheduleCoreReprocess({ full: false });
+          coreSliderCommitRecord = coreReprocessToken !== before
+            ? { key: stateKey, value, token: coreReprocessToken }
+            : null;
+        },
+        onCommit: (value) => {
+          updateEnlargerUI();
+          // An unchanged token proves nothing else asked for a frame since
+          // this value's request. The conversion reads live state when it
+          // starts, so the queued, running or finished frame already shows it.
+          const record = coreSliderCommitRecord;
+          if (record && record.key === stateKey && record.value === value
+            && record.token === coreReprocessToken) return;
+          scheduleCoreReprocess({ full: false });
+        }
+      };
+    }
 
     function cacheBorderBufferValueForBorderMode(value) {
       if (!requiresFilmBase()) return;
@@ -7948,19 +8024,19 @@ import { frameNeedsReview } from './reviewQueue.js';
       });
     }
 
-    setupSlider('coreProfileStrength', 'coreProfileStrength', coreReprocessHandlers);
-    setupSlider('corePreSaturation', 'corePreSaturation', coreReprocessHandlers);
+    setupSlider('coreProfileStrength', 'coreProfileStrength', coreReprocessHandlersFor('coreProfileStrength'));
+    setupSlider('corePreSaturation', 'corePreSaturation', coreReprocessHandlersFor('corePreSaturation'));
     setupSlider('coreBorderBuffer', 'coreBorderBuffer', coreBorderBufferHandlers);
-    setupSlider('coreBrightness', 'coreBrightness', coreReprocessHandlers);
-    setupSlider('coreExposure', 'coreExposure', coreReprocessHandlers);
-    setupSlider('coreContrast', 'coreContrast', coreReprocessHandlers);
-    setupSlider('coreHighlights', 'coreHighlights', coreReprocessHandlers);
-    setupSlider('coreShadows', 'coreShadows', coreReprocessHandlers);
-    setupSlider('coreWhites', 'coreWhites', coreReprocessHandlers);
-    setupSlider('coreBlacks', 'coreBlacks', coreReprocessHandlers);
-    setupSlider('coreTemperature', 'coreTemperature', coreReprocessHandlers);
-    setupSlider('coreTint', 'coreTint', coreReprocessHandlers);
-    setupSlider('coreCyan', 'coreCyan', coreReprocessHandlers);
+    setupSlider('coreBrightness', 'coreBrightness', coreReprocessHandlersFor('coreBrightness'));
+    setupSlider('coreExposure', 'coreExposure', coreReprocessHandlersFor('coreExposure'));
+    setupSlider('coreContrast', 'coreContrast', coreReprocessHandlersFor('coreContrast'));
+    setupSlider('coreHighlights', 'coreHighlights', coreReprocessHandlersFor('coreHighlights'));
+    setupSlider('coreShadows', 'coreShadows', coreReprocessHandlersFor('coreShadows'));
+    setupSlider('coreWhites', 'coreWhites', coreReprocessHandlersFor('coreWhites'));
+    setupSlider('coreBlacks', 'coreBlacks', coreReprocessHandlersFor('coreBlacks'));
+    setupSlider('coreTemperature', 'coreTemperature', coreReprocessHandlersFor('coreTemperature'));
+    setupSlider('coreTint', 'coreTint', coreReprocessHandlersFor('coreTint'));
+    setupSlider('coreCyan', 'coreCyan', coreReprocessHandlersFor('coreCyan'));
     populatePaperOptions();
     setupSelect('corePaper', 'corePaper', {
       onChange: () => { updatePaperUI(); scheduleCoreReprocess({ full: false }); }
@@ -7968,10 +8044,10 @@ import { frameNeedsReview } from './reviewQueue.js';
     setupSelect('corePaperToning', 'corePaperToning', {
       onChange: () => scheduleCoreReprocess({ full: false })
     });
-    setupSlider('corePaperToningStrength', 'corePaperToningStrength', coreReprocessHandlers);
-    setupSlider('coreSaturation', 'coreSaturation', coreReprocessHandlers);
-    setupSlider('coreGlow', 'coreGlow', coreReprocessHandlers);
-    setupSlider('coreFade', 'coreFade', coreReprocessHandlers);
+    setupSlider('corePaperToningStrength', 'corePaperToningStrength', coreReprocessHandlersFor('corePaperToningStrength'));
+    setupSlider('coreSaturation', 'coreSaturation', coreReprocessHandlersFor('coreSaturation'));
+    setupSlider('coreGlow', 'coreGlow', coreReprocessHandlersFor('coreGlow'));
+    setupSlider('coreFade', 'coreFade', coreReprocessHandlersFor('coreFade'));
     setupSelect('coreColorModelStep2', 'coreColorModel', {
       onChange: handleCoreColorModelChange
     });
@@ -8259,10 +8335,7 @@ import { frameNeedsReview } from './reviewQueue.js';
         webglState.sourceDirty = true;
         webglState.sourceSize = { w: 0, h: 0 };
       }
-      if (coreReprocessTimer) {
-        clearTimeout(coreReprocessTimer);
-        coreReprocessTimer = null;
-      }
+      clearCoreReprocessTimer();
       if (step2AutoConvertTimer) {
         clearTimeout(step2AutoConvertTimer);
         step2AutoConvertTimer = null;
@@ -9992,10 +10065,7 @@ import { frameNeedsReview } from './reviewQueue.js';
         clearTimeout(fullUpdateTimer);
         fullUpdateTimer = null;
       }
-      if (coreReprocessTimer) {
-        clearTimeout(coreReprocessTimer);
-        coreReprocessTimer = null;
-      }
+      clearCoreReprocessTimer();
       if (step2AutoConvertTimer) {
         clearTimeout(step2AutoConvertTimer);
         step2AutoConvertTimer = null;

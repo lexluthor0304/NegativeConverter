@@ -362,7 +362,7 @@ for (const locked of [false, true]) {
   c.document.body.dataset = { studioBusy: 'true', photoSwitching: 'true' };
   f.state.photoSwitchTarget = f.item;
   f.state.photoSwitchPhase = 'loading';
-  vm.runInContext(functionSource('closePhotoSession'), c);
+  vm.runInContext(['clearCoreReprocessTimer', 'closePhotoSession'].map(functionSource).join('\n'), c);
   const oldGeneration = c.loadGeneration, oldToken = c.coreReprocessToken;
   c.closePhotoSession();
   if (locked) {
