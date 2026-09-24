@@ -8210,7 +8210,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           } else {
             updateLensCorrectionUI();
           }
+          // Under the opening veil the negative is not drawn, but the new
+          // photo still starts unzoomed, as displayNegative would leave it.
           if (!quiet && !openingItem) displayNegative(imageData);
+          else if (openingItem) { resetZoomPan(); updateSprocketControlsUI(); }
           showImageUI();
           if (openingItem && state.photoSwitchTarget === openingItem) state.photoSwitchPhase = 'preparing';
           goToStep(1);
