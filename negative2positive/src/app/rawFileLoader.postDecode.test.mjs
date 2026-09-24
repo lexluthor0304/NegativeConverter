@@ -164,12 +164,20 @@ function assertWorkersReleased(label) {
   for (const worker of scene.workers) assert.equal(worker.terminated, true, `${label}: ${worker.kind} worker terminated`);
 }
 
+// The eager preview scan (extractNefPreviewJpeg → findJpegSoiPositions) is the
+// only Uint8Array.indexOf caller on this path: count it to see whether it ran.
+let soiScans = 0;
+const nativeIndexOf = Uint8Array.prototype.indexOf;
+Uint8Array.prototype.indexOf = function (...args) { soiScans++; return nativeIndexOf.apply(this, args); };
+
 // --- success with the source Blob: exact planes, no preview work, stats primed --
 {
   reset({ result: cloneRawResult(fixture) });
   const spy = countingBlob(makeContainer());
   const container = makeContainer();
+  soiScans = 0;
   const imageData = await loadRawFile(container.buffer, 'frame.nef', { sourceBlob: spy.blob, filmStats: { borderBufferPct: 10 } });
+  assert.equal(soiScans, 0, 'a successful decode with a Blob never runs extractNefPreviewJpeg');
   assertPlanes(imageData, expected, 'worker path');
   assert.equal(spy.reads, 0, 'a successful decode never re-reads the file for its preview');
   assert.equal(bitmapInputs.length, 0);
@@ -195,7 +203,9 @@ function assertWorkersReleased(label) {
 // --- without a Blob the preview is still extracted eagerly; planes unchanged ----
 {
   reset({ result: cloneRawResult(fixture) });
+  soiScans = 0;
   assertPlanes(await loadRawFile(makeContainer().buffer, 'frame.nef'), expected, 'eager preview path');
+  assert.ok(soiScans > 0, 'without a Blob the container is scanned before LibRaw takes it');
 }
 
 // --- post-decode worker blocked: main thread, bit-identical -----------------------

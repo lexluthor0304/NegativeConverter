@@ -8,7 +8,8 @@ import {
   cachedDetectFilmType,
   primeFilmStats,
   forgetFilmStats,
-  hasCachedFilmBase
+  hasCachedFilmBase,
+  filmStatsCounters
 } from './filmStatsCache.js';
 
 function makeNegative(width, height, sixteen) {
@@ -81,6 +82,28 @@ for (const sixteen of [false, true]) {
   assert.notEqual(cachedAutoDetectFilmBase(image, 20).method, 'from-worker', 'another buffer computes afresh');
   const other = makeNegative(100, 80, true);
   assert.notEqual(cachedDetectFilmType(other).reason, 'from-worker', 'another ImageData never sees them');
+}
+
+// --- import defaults then the Step-2 suggestion: one detection, not two -------
+{
+  const image = makeNegative(200, 150, true);
+  const before = { ...filmStatsCounters };
+  cachedDetectFilmType(image);                 // createDefaultSettings: film type
+  cachedAutoDetectFilmBase(image, 10);         // createDefaultSettings: film base
+  cachedAutoDetectFilmBase(image, 10);         // suggestStep2Mode on the same uncropped plane
+  assert.equal(filmStatsCounters.filmBaseComputed - before.filmBaseComputed, 1);
+  assert.equal(filmStatsCounters.filmBaseHits - before.filmBaseHits, 1);
+  assert.equal(filmStatsCounters.filmTypeComputed - before.filmTypeComputed, 1);
+
+  // A RAW decode whose worker primed the statistics computes nothing here.
+  const primed = makeNegative(200, 150, true);
+  primeFilmStats(primed, { borderBufferPct: 10, filmBase: autoDetectFilmBase(primed, 10), filmType: detectFilmType(primed) });
+  const mark = { ...filmStatsCounters };
+  cachedDetectFilmType(primed);
+  cachedAutoDetectFilmBase(primed, 10);
+  cachedAutoDetectFilmBase(primed, 10);
+  assert.equal(filmStatsCounters.filmBaseComputed, mark.filmBaseComputed);
+  assert.equal(filmStatsCounters.filmTypeComputed, mark.filmTypeComputed);
 }
 
 // --- non-objects pass straight through -------------------------------------

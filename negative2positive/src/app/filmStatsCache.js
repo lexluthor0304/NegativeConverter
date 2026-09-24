@@ -17,6 +17,11 @@ import { detectFilmType } from './filmTypeDetection.js';
 
 const entries = new WeakMap();
 
+// Diagnostics for tests and the #230 harness: how often each statistic was
+// actually computed on this thread, and how often a cached (or worker-primed)
+// result was served instead.
+export const filmStatsCounters = { filmBaseComputed: 0, filmBaseHits: 0, filmTypeComputed: 0, filmTypeHits: 0 };
+
 function entryFor(imageData) {
   const image16 = imageData.__image16 || null;
   let entry = entries.get(imageData);
@@ -40,7 +45,10 @@ export function cachedAutoDetectFilmBase(imageData, borderBufferPct = 10) {
   const key = normalizeBorderBufferPct(borderBufferPct);
   const entry = entryFor(imageData);
   let result = entry.filmBase.get(key);
-  if (!result) {
+  if (result) {
+    filmStatsCounters.filmBaseHits++;
+  } else {
+    filmStatsCounters.filmBaseComputed++;
     result = autoDetectFilmBase(imageData, key);
     entry.filmBase.set(key, result);
   }
@@ -54,7 +62,12 @@ export function cachedAutoDetectFilmBase(imageData, borderBufferPct = 10) {
 export function cachedDetectFilmType(imageData) {
   if (!cacheable(imageData)) return detectFilmType(imageData);
   const entry = entryFor(imageData);
-  if (!entry.filmType) entry.filmType = detectFilmType(imageData);
+  if (entry.filmType) {
+    filmStatsCounters.filmTypeHits++;
+  } else {
+    filmStatsCounters.filmTypeComputed++;
+    entry.filmType = detectFilmType(imageData);
+  }
   return { ...entry.filmType };
 }
 
