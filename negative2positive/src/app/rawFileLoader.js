@@ -3,17 +3,14 @@ import { decodeTiffBuffer } from './tiffFileLoader.js';
 import { decodeScanInWorker } from './scanDecodeClient.js';
 export { tiffIfdToRgb16 } from './tiffFileLoader.js';
 
-import {
-  fromImageData8,
-  packRGBToImage16,
-  toImageData8
-} from '../silvercore/util/image16.js';
-import { looksLikeBayerSnow } from '../silvercore/util/garbledCheck.js';
-import { suppressSensorDefectsInWorker } from './sensorDefectsClient.js';
-import { tryNefJpegPreview, extractNefPreviewJpeg, decodeNefPreviewJpeg } from './nefJpegPreview.js';
+import { fromImageData8 } from '../silvercore/util/image16.js';
+import { startRawPostDecode } from './rawPostDecodeClient.js';
+import { primeFilmStats } from './filmStatsCache.js';
+import { tryNefJpegPreview, createEmbeddedPreviewSource, decodeNefPreviewJpeg } from './nefJpegPreview.js';
 import { sniffImageKind, loadStandardImage, loadPngImageData } from './imageFileLoaders.js';
 import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
 export { estimateRawDecodeBytes };
+export { rawResultToRgb16 } from './rawResultToRgb16.js';
 
 const RAW_SIZE_HEAVY = 100 * 1024 * 1024;
 // Only devices that actually report a small budget are gated, and only at a
@@ -151,69 +148,6 @@ function asDecodeMemoryError(err, width, height) {
 }
 
 /**
- * Normalise whatever `LibRaw.imageData()` returned into 16-bit samples.
- *
- * The shape depends on the requested `outputBps`: 8 gives a Uint8Array of
- * width*height*colors bytes, 16 gives a Uint16Array of the same sample count.
- * Reading an 8-bit result as little-endian byte pairs (the old fallback) fuses
- * neighbouring samples into nonsense and runs off the end of the buffer.
- *
- * @returns {{ rgb16: Uint16Array, channels: number }}
- */
-export function rawResultToRgb16(result) {
-  const width = result?.width | 0;
-  const height = result?.height | 0;
-  const data = result?.data;
-  const pixelCount = width * height;
-  if (pixelCount <= 0 || !data || typeof data.length !== 'number') {
-    const err = new Error('RAW decode returned no pixels');
-    err.code = 'RAW_DECODE_GARBLED';
-    throw err;
-  }
-
-  const bytesPerPixel = data.length / pixelCount;
-  let sixteenBit;
-  if (data instanceof Uint16Array) sixteenBit = true;
-  else if (result.bits === 16) sixteenBit = true;
-  else if (result.bits === 8) sixteenBit = false;
-  // 8-bit output is 1/3/4 bytes per pixel, 16-bit output 2/6/8 — no overlap.
-  else sixteenBit = bytesPerPixel === 2 || bytesPerPixel === 6 || bytesPerPixel === 8;
-
-  const totalSamples = data instanceof Uint16Array
-    ? data.length
-    : Math.floor(data.length / (sixteenBit ? 2 : 1));
-
-  let channels = Number.isInteger(result.colors) ? result.colors : 0;
-  if (channels * pixelCount !== totalSamples) channels = Math.round(totalSamples / pixelCount);
-  if ((channels !== 1 && channels !== 3 && channels !== 4) || channels * pixelCount > totalSamples) {
-    const err = new Error(`Unexpected RAW sample layout: ${data.length} values for ${width}x${height}`);
-    err.code = 'RAW_DECODE_GARBLED';
-    throw err;
-  }
-
-  const sampleCount = pixelCount * channels;
-  let rgb16;
-  if (data instanceof Uint16Array) {
-    rgb16 = data.length === sampleCount ? data : data.subarray(0, sampleCount);
-  } else if (sixteenBit) {
-    rgb16 = (data.byteOffset % 2 === 0 && data.buffer)
-      ? new Uint16Array(data.buffer, data.byteOffset, sampleCount)
-      : Uint16Array.from({ length: sampleCount }, (_, i) => data[i * 2] | (data[i * 2 + 1] << 8));
-  } else {
-    rgb16 = new Uint16Array(sampleCount);
-    for (let i = 0; i < sampleCount; i++) rgb16[i] = data[i] * 257;
-  }
-
-  // packRGBToImage16 wraps a 4-channel plane without copying; make sure that
-  // plane is ours and not a view into the (soon disposed) WASM heap.
-  if (channels === 4 && rgb16.buffer !== undefined && !(rgb16.buffer instanceof ArrayBuffer)) {
-    rgb16 = new Uint16Array(rgb16);
-  }
-
-  return { rgb16, channels };
-}
-
-/**
  * Decode a TIFF-family container through UTIF.
  *
  * Bit-depth contract: `__image16` is attached ONLY when the file genuinely
@@ -297,21 +231,18 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     throw new Error(`module worker not supported: ${err?.message || err}`);
   }
 
-  // LibRaw transfers the container ArrayBuffer to its worker on open(), which
-  // DETACHES `buffer` on this thread (byteLength drops to 0). Anything the
-  // fallback paths need must therefore be copied out first — extracting after
-  // open() silently finds nothing, which is exactly how the Zf/Z8/Z9
-  // high-efficiency fallback regressed. The copy is the JPEG tail only, and
-  // it is short-lived (function scope).
-  let stashedPreview = null;
-  try {
-    const extracted = extractNefPreviewJpeg(buffer);
-    if (extracted) {
-      const jpegCopy = new Uint8Array(extracted.jpegBytes.byteLength);
-      jpegCopy.set(extracted.jpegBytes);
-      stashedPreview = { jpegBytes: jpegCopy, width: extracted.width, height: extracted.height };
-    }
-  } catch {}
+  // Everything after LibRaw's result runs in a worker owned by this decode
+  // (rawPostDecodeClient.js). Spawn it now so its start-up overlaps the decode.
+  const postDecode = startRawPostDecode();
+
+  // The embedded preview the fallbacks decode. With the source File/Blob it is
+  // read lazily, only if a fallback needs it; without one it has to be copied
+  // out now, because LibRaw detaches `buffer` on open().
+  const previewSource = createEmbeddedPreviewSource(buffer, options.sourceBlob || null);
+
+  const filmStatsRequest = options.filmStats && typeof options.filmStats === 'object'
+    ? { borderBufferPct: options.filmStats.borderBufferPct }
+    : null;
 
   // LibRaw keeps a dedicated worker with a 256 MB+ shared WASM heap alive until
   // it is disposed. Leaking one per load pins hundreds of MB per frame, which
@@ -327,9 +258,12 @@ export async function loadRawFile(buffer, fileName, options = {}) {
   };
   const killWorker = disposeRaw;
 
+  const decodeEmbeddedPreview = async () => decodeNefPreviewJpeg(await previewSource.read());
+
   const handleTimeoutFallback = async () => {
     killWorker();
-    const previewImageData = await decodeNefPreviewJpeg(stashedPreview);
+    postDecode.terminate();
+    const previewImageData = await decodeEmbeddedPreview();
     if (previewImageData) {
       console.warn('[RAW] LibRaw could not decode this file — using embedded preview (8-bit precision).');
       previewImageData.__image16 = fromImageData8(previewImageData);
@@ -344,8 +278,9 @@ export async function loadRawFile(buffer, fileName, options = {}) {
   try {
     return await decodeWithLibRaw();
   } finally {
-    // Every exit — success, timeout fallback, error — releases the worker.
+    // Every exit — success, timeout fallback, error — releases both workers.
     disposeRaw();
+    postDecode.terminate();
   }
 
   async function decodeWithLibRaw() {
@@ -420,21 +355,37 @@ export async function loadRawFile(buffer, fileName, options = {}) {
       return await handleTimeoutFallback();
     }
     // imageData() has returned an owned copy. The demosaicer's WASM heap is
-    // no longer needed while we allocate the RGBA planes and repair defects.
+    // no longer needed while the planes are built and defects repaired.
     disposeRaw();
     const { width, height } = result;
 
-    let image16;
+    // Packing, the garbled check, the defect pass (unless the caller opted
+    // out), the 8-bit mirror and the requested film statistics all run in the
+    // post-decode worker. The result's buffer moves there; drop our reference
+    // so nothing here keeps the RGB16 plane alive.
+    let outcome;
     try {
-      const { rgb16, channels } = rawResultToRgb16(result);
-      image16 = packRGBToImage16(width, height, rgb16, channels);
+      const running = postDecode.run(result, {
+        suppressSensorDefects: options.suppressSensorDefects !== false,
+        filmStats: filmStatsRequest
+      });
+      result = null;
+      outcome = await running;
     } catch (err) {
+      if (err?.code === 'RAW_POST_DECODE_LOST') {
+        // The worker died after taking the pixels; recover the way a decode
+        // timeout does rather than failing the whole load.
+        console.warn('[RAW] post-decode worker lost the decode, falling back to embedded preview:', err?.message || err);
+        return await handleTimeoutFallback();
+      }
       throw asDecodeMemoryError(err, width, height);
+    } finally {
+      postDecode.terminate();
     }
 
-    if (looksLikeBayerSnow(image16)) {
+    if (outcome.garbled) {
       console.warn('[RAW] decoded output looks un-demosaiced; trying embedded JPEG preview fallback');
-      const previewImageData = await decodeNefPreviewJpeg(stashedPreview);
+      const previewImageData = await decodeEmbeddedPreview();
       if (previewImageData) {
         console.warn('[RAW] embedded preview decoded — precision is downgraded to 8-bit for this file.');
         previewImageData.__image16 = fromImageData8(previewImageData);
@@ -448,26 +399,20 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     // LibRaw does no hot/dead pixel mapping. A stuck photosite is harmless in a
     // normal photo but turns into a saturated single-colour dot once the
     // negative is inverted (dead red photosite → red dot in every shadow).
-    try {
-      const defects = options.suppressSensorDefects === false
-        ? { repaired: 0 }
-        : await suppressSensorDefectsInWorker(image16);
-      if (defects.repaired > 0) {
-        console.info(`[RAW] suppressed ${defects.repaired} isolated sensor defect(s) (R ${defects.perChannel[0]}, G ${defects.perChannel[1]}, B ${defects.perChannel[2]}; dead ${defects.dead}, hot ${defects.hot})`);
-      }
-    } catch (err) {
-      // Only reachable if the worker died after taking the pixels; recover the
-      // way a decode timeout does rather than failing the whole load.
-      console.warn('[RAW] sensor defect suppression lost the decode, falling back to embedded preview:', err?.message || err);
-      return await handleTimeoutFallback();
+    const defects = outcome.defects;
+    if (defects?.repaired > 0) {
+      console.info(`[RAW] suppressed ${defects.repaired} isolated sensor defect(s) (R ${defects.perChannel[0]}, G ${defects.perChannel[1]}, B ${defects.perChannel[2]}; dead ${defects.dead}, hot ${defects.hot})`);
     }
 
+    // Both planes arrive as the worker built them; wrap, do not copy.
+    let imageData;
     try {
-      const imageData = toImageData8(image16);
-      imageData.__image16 = image16;
-      return imageData;
+      imageData = new ImageData(outcome.rgba8, outcome.width, outcome.height);
     } catch (err) {
       throw asDecodeMemoryError(err, width, height);
     }
+    imageData.__image16 = { width: outcome.width, height: outcome.height, data: outcome.rgba16 };
+    if (outcome.filmStats) primeFilmStats(imageData, outcome.filmStats);
+    return imageData;
   }
 }

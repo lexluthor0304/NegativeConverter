@@ -66,9 +66,10 @@ and the page logs the resident breakdown (`[hidden-job] paused while hidden`).
 **Shedding.** On macOS WebKit, while a job runs when the window hides, before
 each hidden admission, when a hidden job ends, and at the end of the grace
 period when idle, the page drops the photo-session and preview caches,
-terminates the export-worker singleton when it has no request in flight and
-the idle sensor-defect worker, and releases the MI-GAN session unless the
-running job may use AI repair. MI-GAN keeps its `sourceRef` and reloads the
+terminates the export-worker singleton when it has no request in flight, and
+releases the MI-GAN session unless the running job may use AI repair. (The
+RAW post-decode worker, which runs the sensor-defect pass, lives only for its
+own decode since #232, so there is no idle one to terminate.) MI-GAN keeps its `sourceRef` and reloads the
 same model on the same provider on demand without bumping `aiRepair.revision`,
 so photo keys and thumbnails stay valid. An idle window that is only briefly
 hidden keeps its warm caches. Showing the window releases waiting items and

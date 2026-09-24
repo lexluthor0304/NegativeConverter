@@ -289,7 +289,7 @@ Remaining performance proposals below are not claims of completed work.
   _Suggested fix:_ Scale the soft offsets to the pixel domain in computeClipPoints (`softHigh * 257`, `softLow * 257`) and normalise overflow by PIXEL_MAX in softClipLayer (`whiteScale = (PIXEL_MAX - wc) / PIXEL_MAX; blackScale = bc / PIXEL_MAX`). Add a test that base_flat produces a measurably lif…
 
 - **medium/bug** — Coloured point lights on a colour negative (red/blue LEDs, distant signal lamps, coloured stars) match the 'dead photosite' signature and are erased from every RAW decode  
-  `negative2positive/src/silvercore/util/sensorDefects.js:131`  
+  `negative2positive/src/silvercore/util/sensorDefects.js:176`  
   The header assumes real content is neutral, but on C-41 a small red light source becomes a single-channel dip (cyan dye absorbs only red) and a blue light a blue-only dip; both are isolated 3x3 features after demosaic. The CORRELATED_FRACTION test (other channel must move >= 25 % of the defect's excess) does not fire because the other channels are genuinely unchanged, so the pixel is rewritten wit…  
   _Suggested fix:_ Only repair values that sit at a sensor rail (v <= absoluteThreshold for dead, v >= PIXEL_MAX - absoluteThreshold for hot) rather than any isolated outlier: a stuck photosite reads the black level or clips, an optical point light does not. Also expose the repair as a setting (def…
 
@@ -327,9 +327,9 @@ Remaining performance proposals below are not claims of completed work.
   _Suggested fix:_ Sample an 8x8 grid per tile with independent x and y strides (x = x0 + (i+0.5)*innerW/8, y = y0 + (j+0.5)*innerH/8), and add a test that asserts the visited columns cover the tile for a 6720x4480 and a 4096x4096 input.
 
 - **low/bug** — Outer two rows/columns are never scanned, so a dead photosite within 2 px of the frame edge still exports as a coloured dot  
-  `negative2positive/src/silvercore/util/sensorDefects.js:108`  
+  `negative2positive/src/silvercore/util/sensorDefects.js:122`  
   The main loop runs y from 2 to height-3 and x from 2 to width-3 because the Chebyshev-2 ring would fall outside the image. Defects in the 2-px border are skipped entirely. Probe: four dead red photosites placed at (1,1), (1,30), (W-2,30), (30,H-2) -> repaired=0. On a full-frame scan that is cropped afterwards this is usually invisible, but on a frame used edge-to-edge (sprocket export, borderless …  
-  _Suggested fix:_ Clamp/mirror ring coordinates at the border (readRing with clamped dx/dy) and scan from 0 to width-1/height-1, or run a reduced 3x3-ring variant on the two border rows/columns. Add a test with a defect at x=1.
+  _Suggested fix:_ Clamp/mirror ring coordinates at the border (ring reads with clamped dx/dy; the frozen parity reference in sensorDefects.reference.mjs must move with it) and scan from 0 to width-1/height-1, or run a reduced 3x3-ring variant on the two border rows/columns. Add a test with a defect at x=1.
 
 
 - **low/quality** — pipeline/legacyPositive.js is unreachable: settings.positiveEngine is never set to 'legacy'  
@@ -510,7 +510,7 @@ Remaining performance proposals below are not claims of completed work.
 
 - **low/quality** — Three hand-rolled worker bridges duplicate lifecycle code with different error semantics  
   `negative2positive/src/workers/workerBridge.js:10`  
-  conversionWorkerClient.js:7-35, sensorDefectsClient.js:14-63 and workerBridge.js:6-76 each own `let worker / requestId / pending Map / getWorker() / onmessage lookup / onerror reject-all + terminate`. Behaviour diverges: workerBridge returns null on any failure (125-128) and logs nothing; conversionWorkerClient rejects and logs; sensorDefectsClient adds a ping/timeout handshake (65-84) that the ot…  
+  conversionWorkerClient.js:7-35, rawPostDecodeClient.js (one disposable worker per RAW decode since #232; it replaced the shared sensorDefectsClient.js) and workerBridge.js:6-76 each own `let worker / requestId / pending Map / getWorker() / onmessage lookup / onerror reject-all + terminate`. Behaviour diverges: workerBridge returns null on any failure (125-128) and logs nothing; conversionWorkerClient rejects and logs; rawPostDecodeClient adds a ping/timeout handshake and stage-wise main-thread recovery that the ot…  
   _Suggested fix:_ Create `workers/createWorkerClient({ url, name, pingTimeoutMs })` returning `{ request(message, transfer, onProgress), terminate() }` with one implementation of the pending map, crash handling and optional ping; rebuild the three clients on top of it.
 
 - **low/security** — Direct-download macOS entitlements opt out of hardened-runtime protections (dyld env vars, unsigned executable memory, JIT) that the app does not need  

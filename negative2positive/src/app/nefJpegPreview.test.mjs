@@ -4,9 +4,17 @@
 // The detach test documents the failure mode behind the Zf/Z8/Z9 fallback
 // regression: LibRaw transfers the container ArrayBuffer to its worker, so
 // extraction attempted AFTER open() sees a zero-length buffer and finds
-// nothing. rawFileLoader must extract BEFORE handing the buffer to LibRaw.
+// nothing. rawFileLoader must extract BEFORE handing the buffer to LibRaw —
+// or, given the source Blob (#232), re-read the file only when a fallback
+// needs the preview.
 import assert from 'node:assert/strict';
-import { extractNefPreviewJpeg, readJpegDimensionsFromSOF, findJpegEndOffset } from './nefJpegPreview.js';
+import {
+  extractNefPreviewJpeg,
+  readJpegDimensionsFromSOF,
+  findJpegEndOffset,
+  findJpegSoiPositions,
+  createEmbeddedPreviewSource
+} from './nefJpegPreview.js';
 
 // Minimal well-formed JPEG header: SOI + APP0(JFIF) + SOF0 (1620x1080, 3 comp).
 function makeJpegHeader(width, height) {
@@ -158,5 +166,63 @@ function makeContainer() {
 
 assert.equal(findJpegEndOffset(new Uint8Array([1, 2, 3, 4]), 0), -1);
 assert.equal(findJpegEndOffset(null, 0), -1);
+
+// --- the indexOf SOI scan finds exactly what the per-byte loop found -----------
+{
+  const perByte = (u8) => {
+    const positions = [];
+    for (let i = 0; i < u8.length - 2; i++) {
+      if (u8[i] === 0xFF && u8[i + 1] === 0xD8 && u8[i + 2] === 0xFF) positions.push(i);
+    }
+    return positions;
+  };
+  let seed = 99;
+  const rnd = () => { seed = (seed * 1103515245 + 12345) >>> 0; return seed / 4294967296; };
+  for (let n = 0; n < 40; n++) {
+    const u8 = new Uint8Array(Math.floor(rnd() * 5000));
+    // Dense in 0xFF / 0xD8 so runs like FF FF D8 FF and patterns at the end occur.
+    for (let i = 0; i < u8.length; i++) { const r = rnd(); u8[i] = r < 0.4 ? 0xFF : r < 0.7 ? 0xD8 : Math.floor(rnd() * 256); }
+    assert.deepEqual(findJpegSoiPositions(u8), perByte(u8));
+  }
+  for (const tiny of [[], [0xFF], [0xFF, 0xD8], [0xFF, 0xD8, 0xFF], [0x00, 0xFF, 0xD8, 0xFF]]) {
+    assert.deepEqual(findJpegSoiPositions(Uint8Array.from(tiny)), perByte(Uint8Array.from(tiny)));
+  }
+  const { buffer, previewOffset } = makeContainer();
+  assert.ok(findJpegSoiPositions(new Uint8Array(buffer)).includes(previewOffset));
+}
+
+// --- embedded preview source: eager without a Blob, lazy (and once) with one ------
+{
+  const { buffer } = makeContainer();
+  const calls = [];
+  const extract = (ab) => { calls.push(ab.byteLength); return extractNefPreviewJpeg(ab); };
+
+  const eager = createEmbeddedPreviewSource(buffer, null, { extract });
+  assert.equal(eager.lazy, false);
+  assert.equal(calls.length, 1, 'no Blob: extracted before LibRaw can detach the buffer');
+  const detached = buffer.transfer ? buffer.transfer() : null; // what LibRaw's open() does
+  const eagerPreview = await eager.read();
+  assert.ok(eagerPreview && eagerPreview.width === 1620 && eagerPreview.height === 1080);
+  assert.notEqual(eagerPreview.jpegBytes.buffer, buffer, 'a standalone copy, not a view of the container');
+
+  const containerBytes = new Uint8Array(detached || makeContainer().buffer);
+  let reads = 0;
+  const blob = { arrayBuffer: async () => { reads++; return containerBytes.slice().buffer; } };
+  calls.length = 0;
+  const lazy = createEmbeddedPreviewSource(new ArrayBuffer(0), blob, { extract });
+  assert.equal(lazy.lazy, true);
+  assert.equal(calls.length, 0, 'with a Blob nothing is scanned up front');
+  assert.equal(reads, 0);
+  const [a, b] = await Promise.all([lazy.read(), lazy.read()]);
+  assert.equal(reads, 1, 'the file is re-read once');
+  assert.equal(calls.length, 1);
+  assert.equal(a, b);
+  assert.deepEqual(a.jpegBytes, eagerPreview.jpegBytes, 'same preview as the eager scan');
+
+  const failing = createEmbeddedPreviewSource(new ArrayBuffer(0), { arrayBuffer: () => Promise.reject(new Error('gone')) }, { extract });
+  assert.equal(await failing.read(), null, 'an unreadable file yields no preview, not a throw');
+  const none = createEmbeddedPreviewSource(new Uint8Array(4096).buffer, null);
+  assert.equal(await none.read(), null);
+}
 
 console.log('nefJpegPreview tests: all passed');

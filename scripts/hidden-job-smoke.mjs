@@ -190,7 +190,7 @@ export async function runHiddenJobSmoke({ send, evaluate, waitFor, wait, fail, i
     const shed = await evaluate(`(() => { window.__hjHidden.hide(); return window.__ncHiddenJobs.status(); })()`);
     console.log('hidden-job shed:', JSON.stringify({ before: { sessions: before.photoSessionBytes, previews: before.photoPreviewBytes, revision: before.aiRepairRevision }, after: shed }));
     if (shed.photoSessionBytes !== 0 || shed.photoPreviewBytes !== 0) fail('hiding during a job must clear the photo caches: ' + JSON.stringify(shed));
-    if (shed.sensorDefectsWorkerAlive || shed.aiRepairSession) fail('hiding during a job must release idle workers and MI-GAN: ' + JSON.stringify(shed));
+    if (shed.aiRepairSession) fail('hiding during a job must release MI-GAN: ' + JSON.stringify(shed));
     if (shed.aiRepairRevision !== before.aiRepairRevision) fail('shedding MI-GAN must keep aiRepair.revision');
     if (!shed.hidden || !shed.limited) fail('the forced WebKit limits did not apply: ' + JSON.stringify(shed));
     await waitFor('hidden desktop batch finished', `window.__hjDesktop.begins.length === 3 && !window.__hjDesktop.streams.size
@@ -198,7 +198,7 @@ export async function runHiddenJobSmoke({ send, evaluate, waitFor, wait, fail, i
     // The job's last release sheds its idle export worker; the thumbnail lane
     // may run one more gated item first.
     await waitFor('hidden window idle', `(() => { const s = window.__ncHiddenJobs.status();
-      return !s.inFlight && !s.waiting && !s.exportWorkerAlive && !s.sensorDefectsWorkerAlive && !s.aiRepairSession; })()`, 60_000);
+      return !s.inFlight && !s.waiting && !s.exportWorkerAlive && !s.aiRepairSession; })()`, 60_000);
     const batch = await evaluate(`({ begins: window.__hjDesktop.begins, files: Object.keys(window.__hjDesktop.files),
       overlaySeen: window.__hjHidden.overlaySeen, status: window.__ncHiddenJobs.status(),
       marker: localStorage.getItem('${MARKER_KEY}') })`);

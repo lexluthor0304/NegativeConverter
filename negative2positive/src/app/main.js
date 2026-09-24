@@ -15,7 +15,6 @@ import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
 import { createHiddenJobGate, hiddenJobLimitsApply, estimateHiddenJobBytes } from './hiddenJobGate.js';
 import { createJobMarker, readJobMarkers, clearJobMarker, matchJobFiles, planResumedExport, resumedJobMarker, jobNeedsSafeMode } from './jobMarker.js';
 import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
-import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './sensorDefectsClient.js';
     import { detectedImportSettings } from './filmTypeDetection.js';
     import { createAiModelLoader } from './aiModelLoading.js';
     import opencvScriptUrl from '@techstark/opencv-js/dist/opencv.js?url';
@@ -7476,7 +7475,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       photoSessions.clear();
       photoPreviews.clear();
       if (!exportWorkerPendingCount()) terminateExportWorker();
-      disposeIdleSensorDefectsWorker();
+      // RAW post-decode workers live only for their decode (#232): none idles.
       if (!hiddenJobUsesAiRepair()) void releaseAiRepairSession();
       hiddenJobs.recheck();
     }
@@ -7594,7 +7593,6 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         photoSessionBytes: photoSessions.bytes,
         photoPreviewBytes: photoPreviews.bytes,
         exportWorkerAlive: isExportWorkerAlive(),
-        sensorDefectsWorkerAlive: isSensorDefectsWorkerAlive(),
         aiRepairSession: aiRepair.status === 'ready' || aiRepair.status === 'loading',
         aiRepairStatus: aiRepair.status,
         aiRepairRevision: aiRepair.revision
@@ -7784,6 +7782,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       // being replaced.
       state._pendingFullResBuffer = null;
       state._pendingFullResFileName = null;
+      state._pendingFullResFile = null;
       // Correction maps are keyed by image dimensions, so the outgoing file's
       // entries can never be reused; they just hold Float32Array grids.
       lensMapCache.clear();
@@ -7809,6 +7808,10 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         } else if (isRawLikeFile) {
           const arrayBuffer = await file.arrayBuffer();
           const isHeavy = arrayBuffer.byteLength > 100 * 1024 * 1024 && !/\.tiff?$/.test(fileName);
+          // A photo without settings gets createDefaultSettings right after
+          // this load; let the decode's worker compute its film statistics.
+          const loadingItem = state.fileQueue.find(entry => entry.file === file);
+          const filmStats = loadingItem?.settings ? null : { borderBufferPct: defaultFilmBaseBuffer() };
 
           if (isHeavy) {
             // Two-stage loading: show fast half-size preview immediately,
@@ -7818,6 +7821,8 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
             // full-resolution decode scheduled below.
             overlay.updateProgress(20, lang.loadingProcessing);
             imageData = await loadRawImageDataPreview(arrayBuffer.slice(0), fileName, {
+              sourceBlob: file,
+              filmStats,
               onMetadata(meta) {
                 extractedRawMeta = meta;
               }
@@ -7828,10 +7833,13 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
             // Schedule full-res decode. Store buffer so it stays alive.
             state._pendingFullResBuffer = arrayBuffer;
             state._pendingFullResFileName = fileName;
+            state._pendingFullResFile = file;
             state.rawDecodePending = true;
           } else {
             overlay.updateProgress(30, lang.loadingProcessing);
             imageData = await loadRawImageData(arrayBuffer, fileName, {
+              sourceBlob: file,
+              filmStats,
               onMetadata(meta) {
                 extractedRawMeta = meta;
               }
@@ -7921,6 +7929,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
             } else {
               state._pendingFullResBuffer = null;
               state._pendingFullResFileName = null;
+              state._pendingFullResFile = null;
             }
           }
         }
@@ -7965,10 +7974,12 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     async function scheduleBackgroundFullResDecode(generation = loadGeneration) {
       const buf = state._pendingFullResBuffer;
       const name = state._pendingFullResFileName;
+      const sourceFile = state._pendingFullResFile;
       if (!buf || !name) return;
       if (!isCurrentLoad(generation)) return;
       state._pendingFullResBuffer = null;
       state._pendingFullResFileName = null;
+      state._pendingFullResFile = null;
 
       if (DEBUG_UI) {
         console.info('[RAW] starting background full-res decode for', name, (buf.byteLength / 1024 / 1024).toFixed(0) + 'MB');
@@ -7976,6 +7987,9 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
 
       try {
         const fullImageData = await loadRawImageData(buf, name, {
+          // Its embedded-preview fallback re-reads the file instead of
+          // scanning and copying the preview up front.
+          sourceBlob: sourceFile && sourceFile === state.loadedFile ? sourceFile : null,
           onMetadata(meta) {
             if (isCurrentLoad(generation) && meta && !state.rawMetadata) {
               state.rawMetadata = meta;
@@ -10065,7 +10079,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
           updateBatchProgress(i + 1, selectedItems.length, item.file.name);
 
           try {
-            const imageData = await loadFileToImageData(item.file);
+            const imageData = await loadFileToImageData(item.file, { filmStats: !item.settings });
             const result = await detectFrameAndRotation(imageData);
             if (!result || result.requiresReview) {
               failCount++;
@@ -11525,6 +11539,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       state.loadedFile = null;
       state._pendingFullResBuffer = null;
       state._pendingFullResFileName = null;
+      state._pendingFullResFile = null;
       state.loadedBaseImageData = null;
       state.originalImageData = null;
       state.croppedImageData = null;
@@ -12458,12 +12473,17 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       return run;
     }
 
-    async function loadFileToImageData(file) {
+    // `filmStats`: the caller will run createDefaultSettings on the result, so
+    // a RAW decode's worker computes the film statistics alongside the planes.
+    async function loadFileToImageData(file, { filmStats = false } = {}) {
       const fileName = file.name.toLowerCase();
       let image;
       if (isRawLikeFileName(fileName)) {
         const arrayBuffer = await file.arrayBuffer();
-        image = await loadRawImageData(arrayBuffer, fileName);
+        image = await loadRawImageData(arrayBuffer, fileName, {
+          sourceBlob: file,
+          filmStats: filmStats ? { borderBufferPct: defaultFilmBaseBuffer() } : null
+        });
       } else if (isPngFile(file)) {
         const arrayBuffer = await file.arrayBuffer();
         image = await loadPngImageData(arrayBuffer);
@@ -12703,7 +12723,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         bytes: file?.size || 0
       });
       // Load the image
-      const imageData = options.sourceImageData || await loadFileToImageData(file);
+      const imageData = options.sourceImageData || await loadFileToImageData(file, { filmStats: !savedSettings });
       assertRepairCurrent(isCurrent);
       options.onDecoded?.(imageData);
       trace.mark('load', {
@@ -13601,6 +13621,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         if (cached?.snapshot && cached.file === fileItem.file && cached.key === photoSettingsKey(fileItem)) {
           state._pendingFullResBuffer = null;
           state._pendingFullResFileName = null;
+          state._pendingFullResFile = null;
           state.loadedFile = fileItem.file;
           state.loadedBaseImageData = cached.base;
           state.rawMetadata = cached.rawMetadata;
@@ -18259,7 +18280,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
                 const itemValid = () => valid() && eligible(item) && !item.settings
                   && item !== state.fileQueue[state.currentFileIndex] && key === automaticRollItemKey(item);
                 if (!itemValid()) return null;
-                const image = await loadFileToImageData(item.file);
+                const image = await loadFileToImageData(item.file, { filmStats: true });
                 if (!itemValid()) { retry = true; return null; }
                 let settings = await analyzeStudioImportFrame(image, createDefaultSettings(image, item), { silent: true, analyzeInWorker: analyzers.analyze });
                 if (!itemValid()) { retry = true; return null; }
@@ -18420,7 +18441,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
               // A decode is one gated item of this job (#241).
               const release = reuse ? null : await hiddenJobs.admit({ bytes: await hiddenJobBytesFor([item.file]) });
               try {
-                const imageData = reuse ? state.loadedBaseImageData || state.originalImageData : await loadFileToImageData(item.file);
+                const imageData = reuse ? state.loadedBaseImageData || state.originalImageData : await loadFileToImageData(item.file, { filmStats: !item.settings });
                 if (!isValid()) return { status: 'stale' };
                 settings = item.settings ? cloneSettings(item.settings) : createDefaultSettings(imageData, item);
                 if (!settings.filmEdge?.checked) {

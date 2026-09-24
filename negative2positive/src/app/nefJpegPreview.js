@@ -100,16 +100,15 @@ export function readJpegDimensionsFromSOF(buffer, offset, length) {
 
 /**
  * Find every position in the buffer that begins with the canonical JPEG
- * "FF D8 FF" SOI-followed-by-marker pattern. Cheap O(n) scan, ~30 ms on a
- * 20 MB NEF.
+ * "FF D8 FF" SOI-followed-by-marker pattern. O(n), but the native indexOf
+ * skips from one 0xFF byte to the next instead of testing every byte in JS;
+ * it visits the same candidates in the same order.
  */
-function findJpegSoiPositions(u8) {
+export function findJpegSoiPositions(u8) {
   const positions = [];
   const limit = u8.length - 2;
-  for (let i = 0; i < limit; i++) {
-    if (u8[i] === 0xFF && u8[i + 1] === 0xD8 && u8[i + 2] === 0xFF) {
-      positions.push(i);
-    }
+  for (let i = u8.indexOf(0xFF); i !== -1 && i < limit; i = u8.indexOf(0xFF, i + 1)) {
+    if (u8[i + 1] === 0xD8 && u8[i + 2] === 0xFF) positions.push(i);
   }
   return positions;
 }
@@ -205,6 +204,59 @@ export function extractNefPreviewJpeg(arrayBuffer) {
 
   const jpegBytes = new Uint8Array(arrayBuffer, best.offset, length);
   return { jpegBytes, width: best.width, height: best.height };
+}
+
+function standaloneCopy(extracted) {
+  if (!extracted) return null;
+  const jpegBytes = new Uint8Array(extracted.jpegBytes.byteLength);
+  jpegBytes.set(extracted.jpegBytes);
+  return { jpegBytes, width: extracted.width, height: extracted.height };
+}
+
+/**
+ * The embedded preview a LibRaw decode falls back to (open or imageData
+ * timeout, empty result, garbled output, a post-decode worker that lost the
+ * pixels).
+ *
+ * LibRaw transfers the container ArrayBuffer to its worker on open(), which
+ * DETACHES it on this thread — extracting after open() silently finds nothing,
+ * which is exactly how the Zf/Z8/Z9 high-efficiency fallback once regressed.
+ *  - Without `sourceBlob` the preview is extracted and copied now, before the
+ *    buffer goes (a whole-container scan plus a 5–8 MB copy on every decode).
+ *  - With the source File/Blob nothing happens up front: only a fallback
+ *    re-reads the file and runs the same extractNefPreviewJpeg on the same
+ *    bytes, so it finds the same preview. A file that can no longer be read
+ *    (moved or deleted mid-decode) then fails like any other decode error.
+ *
+ * @param {ArrayBuffer} buffer the container, before it is handed to LibRaw
+ * @param {Blob | null} [sourceBlob] the File/Blob `buffer` was read from
+ * @param {{ extract?: Function }} [deps] injectable for tests
+ * @returns {{ lazy: boolean, read(): Promise<{ jpegBytes: Uint8Array, width: number, height: number } | null> }}
+ */
+export function createEmbeddedPreviewSource(buffer, sourceBlob = null, { extract = extractNefPreviewJpeg } = {}) {
+  const lazy = Boolean(sourceBlob) && typeof sourceBlob.arrayBuffer === 'function';
+  let stashed = null;
+  if (!lazy) {
+    try { stashed = standaloneCopy(extract(buffer)); } catch {}
+  }
+  let reading = null;
+  return {
+    lazy,
+    read() {
+      if (!lazy) return Promise.resolve(stashed);
+      if (!reading) {
+        reading = (async () => {
+          try {
+            return standaloneCopy(extract(await sourceBlob.arrayBuffer()));
+          } catch (err) {
+            console.warn('[RAW] could not re-read the file for its embedded preview:', err?.message || err);
+            return null;
+          }
+        })();
+      }
+      return reading;
+    }
+  };
 }
 
 /**

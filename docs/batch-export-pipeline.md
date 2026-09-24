@@ -122,6 +122,17 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
 - PNG16 and scanner TIFF decode run in disposable workers with transferred
   input/output planes. The existing decoder is the fallback when a worker
   cannot start. RAW demosaic remains in LibRaw's dedicated worker.
+- Everything after LibRaw's result (RGB16 → RGBA16 packing, the garbled
+  check, the sensor-defect pass, the 8-bit mirror) runs in a disposable
+  post-decode worker that each RAW decode owns (`rawPostDecodeClient.js`,
+  `rawPostDecode.js`, #232), spawned before `raw.open()` and terminated on
+  every exit. Lanes therefore never queue behind each other's defect pass,
+  and no lane decode adds main-thread packing or mirror work. Callers that
+  will build default settings (`loadFileToImageData(file, { filmStats: true })`,
+  used by `processFileWithSettings` without saved settings and by the roll
+  lanes) also get the film-type and film-base statistics from that worker;
+  `filmStatsCache.js` hands them to `createDefaultSettings`. The embedded
+  JPEG preview is read from the source File only when a fallback needs it.
 - Batch exports can be cancelled: the loading overlay's Cancel button
   (browser) and a Cancel button in the header progress strip (desktop).
 - The adjustment stage runs in the export worker and its result is used: a

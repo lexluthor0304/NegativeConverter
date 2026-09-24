@@ -6,6 +6,9 @@
 export const RAW_WASM_BASE_BYTES = 256 * 1024 * 1024;
 export const RAW_WASM_BYTES_PER_PIXEL = 8;
 // rgb16 (6 B/px) + the packed RGBA16 plane (8 B/px) + the 8-bit mirror (4 B/px).
+// Since #232 the post-decode worker frees rgb16 right after packing, so the
+// stage peaks at rgb16 + RGBA16 (14 B/px); the budget is left at the old sum
+// until #258 re-budgets the decode stages.
 export const RAW_JS_BYTES_PER_PIXEL = 18;
 
 /**
