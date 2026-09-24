@@ -20,11 +20,12 @@ function installPhotoSessionProbe() {
     revoke: URL.revokeObjectURL,
     picker: window.showSaveFilePicker,
     draw: WebGLRenderingContext.prototype.drawArrays,
+    allocate: WebGLRenderingContext.prototype.texImage2D,
   };
   const workers = new Map(), heldUrls = new Set();
   const probe = window.__photoSessionProbe = {
     requests: [], reads: [], bitmaps: [], exports: [], rawImages: [], inFlight: 0,
-    lastActivity: performance.now(), gpuFrames: 0, lastGpu: null,
+    lastActivity: performance.now(), gpuFrames: 0, lastGpu: null, texture: null,
     holdFile: null, heldFile: null, releaseFile: null, holdTimedOut: false, rejectFile: null,
   };
   let holdTimer;
@@ -84,6 +85,11 @@ function installPhotoSessionProbe() {
   };
   // Read a few patches immediately after the real draw, while WebGL's
   // non-preserved drawing buffer still exists. No product debug hook required.
+  // The preview texture's allocated size; the drawing buffer must follow it.
+  WebGLRenderingContext.prototype.texImage2D = function(...args) {
+    if (this.canvas.id === 'glCanvas' && args[3] > 256 && ArrayBuffer.isView(args[8])) probe.texture = [args[3], args[4]];
+    return original.allocate.apply(this, args);
+  };
   WebGLRenderingContext.prototype.drawArrays = function(...args) {
     const result = original.draw.apply(this, args);
     if (this.canvas.id === 'glCanvas') {
@@ -131,6 +137,27 @@ function installPhotoSessionProbe() {
     return { src: img.src, width: canvas.width, height: canvas.height,
       means: means.map(value => value / (pixels.length / 4)), chroma: chroma / (pixels.length / 4) };
   };
+  // Zoom is a compositor transform (#233): the steps draw nothing, and only a
+  // display preview of a new size, after the 100 ms settle, repaints.
+  probe.zoomIn = () => {
+    const gl = document.getElementById('glCanvas');
+    const start = { draws: probe.gpuFrames, backing: [gl.width, gl.height] };
+    document.getElementById('zoomInBtn').click(); document.getElementById('zoomInBtn').click();
+    return { ...start, drawsDuringSteps: probe.gpuFrames - start.draws, backingDuringSteps: [gl.width, gl.height] };
+  };
+  probe.zoomSettled = start => {
+    const gl = document.getElementById('glCanvas');
+    const backing = [gl.width, gl.height];
+    const resized = backing[0] !== start.backing[0] || backing[1] !== start.backing[1];
+    const draws = probe.gpuFrames - start.draws;
+    const ok = start.drawsDuringSteps === 0
+      && start.backingDuringSteps[0] === start.backing[0] && start.backingDuringSteps[1] === start.backing[1]
+      && (resized
+        ? draws >= 1 && probe.lastGpu?.width === backing[0] && probe.lastGpu?.height === backing[1]
+          && probe.texture?.[0] === backing[0] && probe.texture?.[1] === backing[1]
+        : draws === 0);
+    return { ok, resized, draws, backing, texture: probe.texture, gpu: probe.lastGpu, start };
+  };
   probe.snapshot = () => ({ requests: probe.requests.length, reads: probe.reads.length,
     bitmaps: probe.bitmaps.length, inFlight: probe.inFlight, gpu: probe.lastGpu, gpuFrames: probe.gpuFrames,
     backing: [document.getElementById('glCanvas').width, document.getElementById('glCanvas').height],
@@ -146,6 +173,7 @@ function installPhotoSessionProbe() {
     Worker.prototype.postMessage = original.post; Worker.prototype.terminate = original.terminate;
     File.prototype.arrayBuffer = original.read; window.createImageBitmap = original.bitmap;
     WebGLRenderingContext.prototype.drawArrays = original.draw;
+    WebGLRenderingContext.prototype.texImage2D = original.allocate;
     HTMLAnchorElement.prototype.click = original.click; URL.revokeObjectURL = original.revoke;
     window.showSaveFilePicker = original.picker;
     for (const [worker, record] of workers) worker.removeEventListener('message', record.receive);
@@ -272,13 +300,10 @@ export async function runPhotoSessionSmoke({ send, evaluate, waitFor, fail, inst
     'GPU light-table thumbnail ignored or misapplied cyan: ' + JSON.stringify({ before: thumbnailBefore.means, after: thumbnailEdited.means }));
     expect(edited16.depth === 16 && edited16.levels.every(count => count > 320),
       'session precision fixture is not genuine 16-bit: ' + JSON.stringify(edited16));
-    const beforeZoomDraws = await evaluate(`(() => {
-      const draws = window.__photoSessionProbe.gpuFrames;
-      document.getElementById('zoomInBtn').click(); document.getElementById('zoomInBtn').click();
-      return draws;
-    })()`);
-    await until('actual GPU repaint after zoom', `window.__photoSessionProbe.gpuFrames > ${beforeZoomDraws}`);
+    const zoomStart = await evaluate('window.__photoSessionProbe.zoomIn()');
     await idle();
+    const zoomSettled = await evaluate(`window.__photoSessionProbe.zoomSettled(${JSON.stringify(zoomStart)})`);
+    expect(zoomSettled.ok, 'zoom redrew during the gesture, or a new display size did not repaint at the texture size: ' + JSON.stringify(zoomSettled));
     // The app also has a 2.5-second idle full-render timer. Its public export
     // barrier drains scheduled/full work; a short quiet window alone cannot.
     const zoomed8 = await exportPixels(8);
@@ -550,15 +575,15 @@ export async function runPhotoSessionRawSmoke({ send, evaluate, waitFor, fail, i
     await send('DOM.setFileInputFiles', { files: paths, nodeId: input.result.nodeId });
     await until('first actual RAW imported', `${ready} && document.getElementById('studioFilename').textContent === ${JSON.stringify(files[0].name)}`);
     await settlePreview();
-    const draws = await evaluate(`(() => {
-      const count = window.__photoSessionProbe.gpuFrames;
-      document.getElementById('zoomInBtn').click(); document.getElementById('zoomInBtn').click();
-      return count;
-    })()`);
-    await until('actual RAW zoom repainted', `window.__photoSessionProbe.gpuFrames > ${draws}`);
+    const zoomStart = await evaluate('window.__photoSessionProbe.zoomIn()');
+    // A RAW frame is larger than the viewport, so the settled zoom gets a
+    // larger display preview and repaints once it arrives.
+    await until('actual RAW zoom repainted after settle', `window.__photoSessionProbe.gpuFrames > ${zoomStart.draws}`);
     // Observe normal preview/full-idle activity for longer than its 2.5-second
     // timer, without requesting an export or forcing full-resolution work.
     await settlePreview();
+    const rawZoom = await evaluate(`window.__photoSessionProbe.zoomSettled(${JSON.stringify(zoomStart)})`);
+    expect(rawZoom.ok, 'actual RAW zoom redrew during the gesture or repainted off the texture size: ' + JSON.stringify(rawZoom));
     const saved = await snapshot();
     expect(saved.gpuVisible && saved.gpu && saved.gpu.width === saved.backing[0]
       && saved.gpu.height === saved.backing[1] && saved.transform && saved.zoom !== '100%',
