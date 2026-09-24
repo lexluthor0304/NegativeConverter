@@ -76,6 +76,7 @@ npm test    # rawEmbeddedPreview, embeddedPreviewRender, scanDecodeClient,
             # nefJpegPreview.parity, provisionalPreview, thumbnailRank, ...
 PORT=5215 CDP_PORT=9239 npm run test:smoke -- --embedded-preview-only
 AUTOFRAME_RAW_DIR=/path/to/nefs npm run test:smoke -- --embedded-preview-only
+node scripts/check-embedded-previews.mjs /path/to/m11-roll --expect-m11
 ```
 
 The smoke builds synthetic `.dng` containers in the page (a UTIF-decodable RGB
@@ -83,6 +84,9 @@ IFD0 plus browser-encoded JPEG previews) and checks the capability, the read
 budget, worker/main-thread HE NEF plane hashes (also on the repo NEFs when a
 directory is given), the provisional import frame while the container read is
 held, embedded tiles at import, forward-only tile ranks and the cold-switch
-thumbnail → embedded → exact sequence. Timing targets (≤ 300 ms import,
+thumbnail → embedded → exact sequence. `check-embedded-previews.mjs` walks a
+real folder (header slices only) and, with `--expect-m11`, requires the
+2112 × 1408 viewer and 720 × 480 tile picks within the read budget on every
+file (`L1009967.dng`: tile path 100 KB, viewer path 560 KB). Timing targets (≤ 300 ms import,
 ≤ 200 ms p95 cold switch, tiles ≤ 3 s for 151 DNGs) belong to the #230
 benchmark on the real roll.
