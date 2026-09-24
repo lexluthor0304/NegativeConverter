@@ -4,7 +4,7 @@
 // cannot prove that. Part 1 runs the real bridge and worker module against the
 // main-thread path; part 2 checks through the Studio export that the gain-map
 // request follows the export's intent (sent for a plain JPEG, not for the
-// sprocket frame, which drops the map).
+// sprocket frame, which drops the map, nor for the contact sheet).
 import { join } from 'node:path';
 
 const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`;
@@ -133,8 +133,9 @@ export async function runExportGainMapSmoke({ send, evaluate, waitFor, wait, fai
     if (plain.gainMap16 !== 1 || plain.adjust16 !== 0) {
       fail('a plain JPEG must send exactly one gainMap16 request and no 16-bit adjustment: ' + JSON.stringify(plain));
     }
+    // A second export reuses the warm worker and must describe the same map.
     const again = await exportJpeg('repeat JPEG with gain map');
-    if (again.size !== plain.size || again.gainMapMax !== plain.gainMapMax) fail('repeated JPEG export differs: ' + JSON.stringify({ plain, again }));
+    if (again.gainMapMax !== plain.gainMapMax || again.gainMap16 !== 1) fail('repeated JPEG export differs: ' + JSON.stringify({ plain, again }));
 
     await setBorder(true);
     const framed = await exportJpeg('sprocket JPEG');
@@ -143,6 +144,22 @@ export async function runExportGainMapSmoke({ send, evaluate, waitFor, wait, fai
     if (framed.gainMap16 !== 0 || framed.adjust16 !== 0) {
       fail('the sprocket frame must not request a gain map or a 16-bit pass: ' + JSON.stringify(framed));
     }
+
+    // The contact sheet renders every frame through the batch pipeline but
+    // encodes no plane or map: no gain-map pass, whatever the export format.
+    await setBorder(false);
+    const sheet = await evaluate(`(async () => {
+      const p = window.__gainMapProbe; p.requests = []; const index = p.downloads.length;
+      document.getElementById('exportContactSheetBtn').click();
+      const started = performance.now();
+      while (p.downloads.length === index && performance.now() - started < 120000) await new Promise(r => setTimeout(r, 200));
+      const blob = await p.downloads[index];
+      return { type: blob?.type, gainMap16: p.requests.filter(t => t === 'gainMap16').length,
+        adjust16: p.requests.filter(t => t === 'applyAdjustments16').length };
+    })()`);
+    console.log('contact sheet with JPEG selected:', JSON.stringify(sheet));
+    if (!/png/.test(sheet.type || '')) fail('contact sheet was not exported: ' + JSON.stringify(sheet));
+    if (sheet.gainMap16 !== 0 || sheet.adjust16 !== 0) fail('the contact sheet started a gain-map pass: ' + JSON.stringify(sheet));
   } finally {
     await setBorder(false);
     await evaluate(`(() => { window.__gainMapProbe?.restore(); document.querySelector('.format-btn[data-format="png"]').click(); })()`);
