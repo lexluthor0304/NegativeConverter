@@ -73,7 +73,7 @@ function fixture({ repairs = true, locked = false } = {}) {
     'clearFullResolutionRenderState', 'clearCoreReprocessTimer', 'cancelPendingTimers', 'clearDustState',
     'coreReprocessBusy', 'whenCoreReprocessIdle', 'noteCoreReprocessSettled',
     'runCoreReprocess', 'flushScheduledCoreReprocess',
-    'resetAllAdjustments', 'rerenderWithCoreControls', 'restartPhotoProcessing',
+    'resetAllAdjustments', 'rerenderWithCoreControls', 'postPendingPreviewEarly', 'restartPhotoProcessing',
   ].map(functionSource).join('\n'), context);
   return { context, state, base, oldPixels, newPixels, applied, clearedTimers, resolveOld, rejectOld };
 }

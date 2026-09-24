@@ -161,7 +161,7 @@ function schedulerFixture({ repairs = false } = {}) {
   });
   vm.runInContext([
     'coreReprocessBusy', 'whenCoreReprocessIdle', 'noteCoreReprocessSettled', 'runCoreReprocess',
-    'rerenderWithCoreControls', 'hasSeparateConversionPreview',
+    'rerenderWithCoreControls', 'postPendingPreviewEarly', 'hasSeparateConversionPreview',
     'cancelScheduledFullResolutionRender', 'scheduleCoreReprocess', 'takeScheduledCoreReprocess',
     'fireCoreReprocessGate', 'clearCoreReprocessTimer', 'flushScheduledCoreReprocess',
   ].map(functionSource).join('\n'), context);
@@ -192,7 +192,7 @@ function schedulerFixture({ repairs = false } = {}) {
   assert.equal(f.context.coreReprocessBusy(), false);
 }
 
-for (const earlyPost of [false]) {
+for (const earlyPost of [false, true]) {
   // A busy lane queues newest-wins; exactly one follow-up carries the newest
   // token. It leaves from finally, or (5) before the finished frame is
   // applied when the display preview already has the right size.

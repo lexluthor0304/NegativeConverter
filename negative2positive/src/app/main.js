@@ -5479,6 +5479,10 @@ import { frameNeedsReview } from './reviewQueue.js';
     }
 
     let _coreReprocessFullInFlight = false;
+    // The running preview flight's own token object, or false. A follow-up
+    // posted early (postPendingPreviewEarly) takes the lane over while its
+    // predecessor still applies its result; that predecessor's finally then
+    // clears the flag only if it is still its own.
     let _coreReprocessPreviewInFlight = false;
     let _coreReprocessPending = null;
     // An export has to wait for the reprocess chain to drain, and
@@ -5492,7 +5496,7 @@ import { frameNeedsReview } from './reviewQueue.js';
 
     function coreReprocessBusy() {
       return _coreReprocessActive > 0 || _coreReprocessPending !== null
-        || _coreReprocessFullInFlight || _coreReprocessPreviewInFlight;
+        || _coreReprocessFullInFlight || Boolean(_coreReprocessPreviewInFlight);
     }
 
     function whenCoreReprocessIdle() {
@@ -5559,8 +5563,9 @@ import { frameNeedsReview } from './reviewQueue.js';
         _coreReprocessPending = { ...options, full, token, sourceRef, generation };
         return false;
       }
+      const previewFlight = full ? null : {};
       if (full) _coreReprocessFullInFlight = true;
-      else _coreReprocessPreviewInFlight = true;
+      else _coreReprocessPreviewInFlight = previewFlight;
 
       try {
         if (full) {
@@ -5598,6 +5603,9 @@ import { frameNeedsReview } from './reviewQueue.js';
           const superseded = token !== coreReprocessToken;
           const nextPreview = coreReprocessScheduled || _coreReprocessPending;
           if (superseded && (!nextPreview || nextPreview.full || nextPreview.token !== coreReprocessToken)) return false;
+          // Start the worker on the next frame before this one is applied and
+          // drawn, so it does not sit idle through the result handling.
+          postPendingPreviewEarly(previewFlight);
 
           if (hasSmallPreview || superseded) {
             // Preview source is smaller — update preview display path only
@@ -5614,7 +5622,7 @@ import { frameNeedsReview } from './reviewQueue.js';
         }
       } finally {
         if (full) _coreReprocessFullInFlight = false;
-        else _coreReprocessPreviewInFlight = false;
+        else if (_coreReprocessPreviewInFlight === previewFlight) _coreReprocessPreviewInFlight = false;
         // Re-dispatch the latest queued request. If it is still blocked
         // (e.g. a queued full render while a preview is running) it simply
         // re-queues itself and the next finally picks it up — but a queued
@@ -5634,6 +5642,33 @@ import { frameNeedsReview } from './reviewQueue.js';
         // also participate in the export barrier, without runCoreReprocess.
         noteCoreReprocessSettled();
       }
+    }
+
+    // Posts the queued preview from inside the finishing flight, before its
+    // result is applied. Only a non-full preview for the current generation and
+    // source whose display preview is already the right size qualifies: any
+    // other request needs main-thread work first, and a full one always waits
+    // for finally.
+    function postPendingPreviewEarly(flight) {
+      const pending = _coreReprocessPending;
+      if (!pending || pending.full || !flight || _coreReprocessPreviewInFlight !== flight) return false;
+      if (pending.generation !== coreReprocessGeneration) return false;
+      const source = state.conversionSourceImageData;
+      if (!source || (pending.sourceRef && pending.sourceRef !== source)) return false;
+      const target = getDisplayPreviewSize(source);
+      if (state.conversionPreviewImageData?.width !== target.width
+        || state.conversionPreviewImageData?.height !== target.height) return false;
+      // Claim the work before clearing the slot so coreReprocessBusy() never
+      // reads as idle, then hand the lane over: otherwise the in-flight guard
+      // sees this flight and queues the request again.
+      _coreReprocessActive += 1;
+      _coreReprocessPending = null;
+      _coreReprocessPreviewInFlight = false;
+      void runCoreReprocess(pending).finally(() => {
+        _coreReprocessActive -= 1;
+        noteCoreReprocessSettled();
+      });
+      return true;
     }
 
     function hasSeparateConversionPreview() {
