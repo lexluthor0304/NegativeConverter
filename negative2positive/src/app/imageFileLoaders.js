@@ -212,7 +212,9 @@ export async function loadStandardImage(file) {
     return loadPngImageData(await file.arrayBuffer());
   }
 
-  // Preferred path: createImageBitmap decodes off the main thread.
+  // Preferred path. Chromium decodes Blob-sourced ImageBitmaps off the main
+  // thread; WebKit (WKWebView, WebKitGTK) decodes them synchronously on the
+  // calling thread, so there this still blocks the page for the decode.
   if (typeof createImageBitmap === 'function') {
     try {
       const bitmap = await createImageBitmap(file);

@@ -9,7 +9,7 @@
 //
 // Everything found here is presentation-only: previews are camera renderings
 // of the negative, never a conversion, analysis or export source.
-import { parseJpegFrameHeader, SOF_PARSER_SCAN_LIMIT } from './nefJpegPreview.js';
+import { parseJpegFrameHeader, SOF_PARSER_SCAN_LIMIT } from './jpegHeader.js';
 
 export const TIFF_HEAD_BYTES = 16 * 1024;
 export const JPEG_HEAD_BYTES = 2 * 1024;

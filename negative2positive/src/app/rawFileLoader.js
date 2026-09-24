@@ -206,7 +206,7 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     const previewImageData = await tryNefJpegPreview(buffer);
     if (previewImageData) {
       console.warn('[RAW] embedded preview decoded — precision is downgraded to 8-bit for this file.');
-      previewImageData.__image16 = fromImageData8(previewImageData);
+      previewImageData.__image16 ||= fromImageData8(previewImageData);
       if (onMetadata) onMetadata(null);
       return previewImageData;
     }
@@ -266,7 +266,7 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     const previewImageData = await decodeEmbeddedPreview();
     if (previewImageData) {
       console.warn('[RAW] LibRaw could not decode this file — using embedded preview (8-bit precision).');
-      previewImageData.__image16 = fromImageData8(previewImageData);
+      previewImageData.__image16 ||= fromImageData8(previewImageData);
       if (onMetadata) onMetadata(null);
       return previewImageData;
     }
@@ -388,7 +388,7 @@ export async function loadRawFile(buffer, fileName, options = {}) {
       const previewImageData = await decodeEmbeddedPreview();
       if (previewImageData) {
         console.warn('[RAW] embedded preview decoded — precision is downgraded to 8-bit for this file.');
-        previewImageData.__image16 = fromImageData8(previewImageData);
+        previewImageData.__image16 ||= fromImageData8(previewImageData);
         return previewImageData;
       }
       const garbledErr = new Error('RAW decode produced garbled output and no usable embedded preview was found');

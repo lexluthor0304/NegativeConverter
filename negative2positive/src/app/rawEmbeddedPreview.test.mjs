@@ -8,84 +8,12 @@ import { fileURLToPath } from 'node:url';
 import {
   locateEmbeddedPreviews, pickForViewer, pickForTile, isTiffContainerRawName, TIFF_HEAD_BYTES
 } from './rawEmbeddedPreview.js';
-import { parseJpegFrameHeader, readJpegDimensionsFromSOF } from './nefJpegPreview.js';
+import { parseJpegFrameHeader } from './jpegHeader.js';
+import { readJpegDimensionsFromSOF } from './nefJpegPreview.js';
 
-// ---------------------------------------------------------------------------
-// Builders
-// ---------------------------------------------------------------------------
-
-function exifApp1(orientation, little = true) {
-  // "Exif\0\0" + TIFF header + IFD0 with one Orientation entry.
-  const tiff = new Uint8Array(8 + 2 + 12 + 4);
-  const dv = new DataView(tiff.buffer);
-  tiff[0] = tiff[1] = little ? 0x49 : 0x4D;
-  dv.setUint16(2, 42, little); dv.setUint32(4, 8, little);
-  dv.setUint16(8, 1, little);
-  dv.setUint16(10, 0x0112, little); dv.setUint16(12, 3, little); dv.setUint32(14, 1, little);
-  dv.setUint16(18, orientation, little);
-  const payload = [0x45, 0x78, 0x69, 0x66, 0, 0, ...tiff];
-  const length = payload.length + 2;
-  return [0xFF, 0xE1, length >> 8, length & 0xFF, ...payload];
-}
-
-function makeJpeg(width, height, { sof = 0xC0, precision = 8, orientation = 0, padding = 0, tail = 64 } = {}) {
-  const parts = [0xFF, 0xD8];
-  if (orientation) parts.push(...exifApp1(orientation));
-  if (padding) {
-    // An APP2 segment large enough to push the SOF past the first 2 KiB.
-    const length = padding + 2;
-    parts.push(0xFF, 0xE2, length >> 8, length & 0xFF, ...new Array(padding).fill(0x20));
-  }
-  parts.push(0xFF, sof, 0x00, 0x11, precision, height >> 8, height & 0xFF, width >> 8, width & 0xFF, 3,
-    1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1);
-  parts.push(0xFF, 0xDA, 0x00, 0x0C, 3, 1, 0, 2, 0x11, 3, 0x11, 0, 0x3F, 0);
-  for (let i = 0; i < tail; i++) parts.push(i & 0x7F);
-  parts.push(0xFF, 0xD9);
-  return Uint8Array.from(parts);
-}
-
-const SHORT = 3, LONG = 4, IFD = 13;
-
-// Build a TIFF container. `ifds` entries: { at, entries: [{ tag, type, values, at? }], next }.
-// Out-of-line values need an explicit `at`. Payloads are { at, bytes }.
-function buildTiff({ little = true, magic = 42, ifd0, size, ifds, payloads = [] }) {
-  const out = new Uint8Array(size);
-  const dv = new DataView(out.buffer);
-  out[0] = out[1] = little ? 0x49 : 0x4D;
-  dv.setUint16(2, magic, little);
-  dv.setUint32(4, ifd0, little);
-  for (const { at, bytes } of payloads) out.set(bytes, at);
-  for (const ifd of ifds) {
-    const entries = [...ifd.entries].sort((a, b) => a.tag - b.tag);
-    dv.setUint16(ifd.at, entries.length, little);
-    entries.forEach((entry, i) => {
-      const e = ifd.at + 2 + i * 12;
-      const values = Array.isArray(entry.values) ? entry.values : [entry.values];
-      const width = entry.type === SHORT ? 2 : 4;
-      dv.setUint16(e, entry.tag, little); dv.setUint16(e + 2, entry.type, little);
-      dv.setUint32(e + 4, values.length, little);
-      const inline = values.length * width <= 4;
-      const base = inline ? e + 8 : entry.at;
-      if (!inline) {
-        assert.ok(Number.isInteger(entry.at), `tag ${entry.tag} needs an out-of-line offset`);
-        dv.setUint32(e + 8, entry.at, little);
-      }
-      values.forEach((value, j) => {
-        if (width === 2) dv.setUint16(base + j * 2, value, little);
-        else dv.setUint32(base + j * 4, value, little);
-      });
-    });
-    dv.setUint32(ifd.at + 2 + entries.length * 12, ifd.next || 0, little);
-  }
-  return out;
-}
+import { makeJpeg, buildTiff, previewIfd, SHORT, LONG } from './rawEmbeddedPreview.fixtures.mjs';
 
 const blobOf = bytes => new Blob([bytes]);
-const previewIfd = (at, width, height, offset, length, extra = []) => ({ at, entries: [
-  { tag: 254, type: LONG, values: 1 }, { tag: 256, type: SHORT, values: width },
-  { tag: 257, type: SHORT, values: height }, { tag: 259, type: SHORT, values: 7 },
-  { tag: 262, type: SHORT, values: 6 }, { tag: 273, type: LONG, values: offset },
-  { tag: 279, type: LONG, values: length }, ...extra] });
 
 // The M11 roll layout: IFD0 at byte 12 is the Compression-7 CFA raw itself
 // (one lossless-JPEG strip that is most of the file); four baseline JPEG
