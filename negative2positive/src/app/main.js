@@ -4880,6 +4880,9 @@ import { frameNeedsReview } from './reviewQueue.js';
         const errCode = gl.getError();
         if (errCode !== gl.NO_ERROR) {
           webglState.sourceSize = { w: 0, h: 0 };
+          // A lost context reports itself here as well; its own events
+          // restore the renderer, so it must not disable WebGL for good.
+          if (errCode === gl.CONTEXT_LOST_WEBGL || gl.isContextLost()) return;
           throw new Error(`WebGL texture allocation error code: ${errCode}`);
         }
         webglState.sourceSize.w = imageData.width;
