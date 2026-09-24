@@ -40,7 +40,7 @@ export async function runEmbeddedPreviewSmoke({ send, evaluate, waitFor, wait, f
     };
     const files = [];
     for (let i = 1; i <= 3; i++) {
-      const width = 96, height = 64, rgb = new Uint8Array(width * height * 3);
+      const width = 240, height = 160, rgb = new Uint8Array(width * height * 3);
       for (let p = 0; p < width * height; p++) {
         const t = (p % width) / width;
         rgb[p * 3] = 230 - 110 * t; rgb[p * 3 + 1] = 172 - 100 * t; rgb[p * 3 + 2] = 124 - 84 * t;
@@ -192,6 +192,8 @@ export async function runEmbeddedPreviewSmoke({ send, evaluate, waitFor, wait, f
       exportDisabled: document.getElementById('exportBtn').disabled,
       historyInert: document.getElementById('studioHistory').inert,
       viewer: [Math.round(box.width), Math.round(box.height)],
+      // pickForViewer: the smallest preview reaching 0.8 x the device-pixel long side.
+      expectedWidth: Math.max(box.width, box.height) * devicePixelRatio * 0.8 <= 720 ? 720 : 1600,
       placeholder: getComputedStyle(document.getElementById('uploadPlaceholder')).display,
       readHeld: Boolean(window.__embeddedProbe.release) };
   })()`;
@@ -204,8 +206,8 @@ export async function runEmbeddedPreviewSmoke({ send, evaluate, waitFor, wait, f
   expect(importFrame.readHeld, 'provisional pixels must appear before the container read completes', importFrame);
   expect(!importFrame.overlay && importFrame.placeholder === 'none' && importFrame.viewer[0] > 300 && importFrame.viewer[1] > 200,
     'RAW import opens in the visible viewer, not under the full-screen overlay', importFrame);
-  expect(importFrame.surface[0] === 1600 && importFrame.surface[2] && importFrame.busy === 'true'
-    && importFrame.exportDisabled && importFrame.historyInert, 'the 1600 px preview is shown while editing and export stay locked', importFrame);
+  expect(importFrame.surface[0] === importFrame.expectedWidth && importFrame.surface[2] && importFrame.busy === 'true'
+    && importFrame.exportDisabled && importFrame.historyInert, 'the viewer-sized preview is shown while editing and export stay locked', importFrame);
   expect(importFrame.means && Math.max(...importFrame.means) > 40 && Math.abs(importFrame.means[0] - importFrame.means[2]) < 70,
     'the provisional frame is an inverted positive, not the orange negative', importFrame);
 
