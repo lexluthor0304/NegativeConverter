@@ -42,6 +42,7 @@ import { runExportGainMapSmoke } from './export-gain-map-smoke.mjs';
 import { runSilverCoreCacheSmoke } from './silvercore-cache-smoke.mjs';
 import { runGeometrySmoke } from './geometry-smoke.mjs';
 import { runPng16BandSmoke } from './png16-band-smoke.mjs';
+import { runRawPostDecodeSmoke, runRawParitySmoke } from './raw-post-decode-smoke.mjs';
 
 // UPNG is already a runtime dependency of the app; reuse it to decode screenshots.
 const UPNG = createRequire(import.meta.url)('upng-js');
@@ -298,6 +299,15 @@ await evaluate(`document.getElementById('studioImportAutoCrop').click()`);
 
 if (process.argv.includes('--performance-only')) {
   await runPerformanceUiSmoke({ evaluate, fail });
+  await runRawPostDecodeSmoke({ evaluate, fail });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
+
+// Opt-in: real RAW files, see scripts/raw-post-decode-smoke.mjs.
+if (process.argv.includes('--raw-parity-only')) {
+  await runRawPostDecodeSmoke({ evaluate, fail });
+  await runRawParitySmoke({ send, evaluate, waitFor, fail, port: PORT });
   if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
   console.log('SMOKE PASS'); process.exit(0);
 }
@@ -879,6 +889,7 @@ console.log('ok: failed decode preserves the previous image and active file');
 }
 
 await runPerformanceUiSmoke({ evaluate, fail });
+await runRawPostDecodeSmoke({ evaluate, fail });
 if (!process.argv.some(arg => arg.endsWith('-only'))) {
   await runSilverCoreCacheSmoke({ evaluate, fail });
   await runComparePreviewSmoke({ send, evaluate, waitFor, wait, fail, port: PORT });
