@@ -18613,7 +18613,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     function createRollAnalysisWorkers(plan, { warm = false } = {}) {
       const frames = createRollFramePool({ size: plan.framesInFlight });
       const slots = createDecodeSlots({ slots: plan.decodeSlots, budgetBytes: plan.slotBytes });
-      const analyzers = createAutoFrameWorkerPool({ size: plan.framesInFlight });
+      // Frames measured on the page: every frame of a roll of scans, only the
+      // odd fallback of a RAW roll (one analyzer then keeps the OpenCV realms
+      // at the frames in flight plus the foreground's).
+      const analyzers = createAutoFrameWorkerPool({ size: warm ? 1 : plan.framesInFlight });
       const releaseIdleHold = analyzeFrameInWorker.holdIdle();
       let disposed = false;
       // A roll of LibRaw files starts its workers (and OpenCV) ahead of the
