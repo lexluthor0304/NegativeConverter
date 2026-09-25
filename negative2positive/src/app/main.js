@@ -4737,6 +4737,18 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return displayTargetFor(level || source, target);
     }
 
+    // The conversion preview of a Tier B session (#249) at `tier`: a display
+    // target on its level. Null when the window needs the source's own
+    // pixels, which only a frame that is its own level can (k = 1: below the
+    // large-image size, so a debug threshold); the caller rebuilds the source.
+    function pendingConversionTarget(tier = 'normal') {
+      const pending = state.sourcePending;
+      const level = state.displayLevelImageData;
+      if (!pending || !level) return null;
+      const target = conversionTargetFor(pending, level, tier);
+      return target === pending ? null : target;
+    }
+
     // Points the conversion preview at the size the viewport needs now, unless
     // the current one still serves it (hysteresis). It converts nothing and
     // resamples nothing on the main thread: the preview worker resamples the
@@ -4748,7 +4760,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const level = state.displayLevelImageData;
       if (!source || !level) return false;
       const current = state.conversionPreviewImageData;
-      const next = conversionTargetFor(source, level, 'normal');
+      const next = state.conversionSourceImageData ? conversionTargetFor(source, level, 'normal') : pendingConversionTarget();
+      if (!next) {
+        requestSourceForDisplay();
+        return false;
+      }
       if (current === next) return false;
       if (current && current !== source && next !== source && !reducedDisplayImages.has(current)
         && current.__displayOf === level && displaySizeServes(current, next)) return false;
@@ -4949,8 +4965,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const current = state.conversionPreviewImageData;
       if (current && !reducedDisplayImages.has(current)) previewTierKept = { source, preview: current };
       const base = previewTierKept?.source === source ? previewTierKept.preview : null;
-      const reduced = conversionTargetFor(source, level, 'reduced');
-      if (reduced === current) return;
+      const reduced = state.conversionSourceImageData ? conversionTargetFor(source, level, 'reduced') : pendingConversionTarget('reduced');
+      if (!reduced || reduced === current) return;
       if (reduced !== source && reduced !== base) reducedDisplayImages.add(reduced);
       state.conversionPreviewImageData = reduced;
     }
@@ -4970,12 +4986,15 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // Session end: the settled frame comes from exactly the normal path, the
     // kept conversion preview and one normal-size tick with the final settings.
     function leavePreviewTier() {
-      const source = state.conversionSourceImageData;
+      // A Tier B session (#249) sizes by its pending source.
+      const source = conversionSourceSize();
       const kept = previewTierKept;
       previewTierKept = null;
       if (source && reducedDisplayImages.has(state.conversionPreviewImageData)) {
-        state.conversionPreviewImageData = kept?.source === source ? kept.preview
-          : conversionTargetFor(source, state.displayLevelImageData, 'normal');
+        const normal = kept?.source === source ? kept.preview
+          : state.conversionSourceImageData ? conversionTargetFor(source, state.displayLevelImageData, 'normal') : pendingConversionTarget();
+        if (normal) state.conversionPreviewImageData = normal;
+        else requestSourceForDisplay();
       }
       if (source && state.currentStep >= 3) {
         scheduleDisplayPreviewResize();
@@ -8322,9 +8341,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         // while it still matches the geometry, lens and analysis area;
         // otherwise the source is rebuilt first.
         let proxy = null;
+        let proxyTarget = null;
         if (!sourceData && state.sourcePending) {
           refreshCanvasContainerSize();
-          if (displayProxyMatches()) {
+          proxyTarget = displayProxyMatches() ? pendingConversionTarget() : null;
+          if (proxyTarget) {
             proxy = state.displayLevelImageData;
           } else {
             displaySessionDiagnostics.provisional++;
@@ -8358,7 +8379,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
             state.autoWbSample = null;
             if (!state.beforeAfterActive) releaseBeforeAfterCanvas();
             refreshCanvasContainerSize();
-            state.conversionPreviewImageData = conversionTargetFor(state.sourcePending, proxy, 'normal');
+            state.conversionPreviewImageData = pendingConversionTarget() || proxyTarget;
           } else {
             correctedSourceData = await applyLensCorrectionWithSettings(sourceData, state, { updateUi: true });
             if (!isCurrentConversion()) return;
@@ -10638,6 +10659,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (!entry.snapshot || !displaySessionEligible(item)) return null;
       const base = entry.baseDescriptor;
       const source = conversionSourceSize();
+      const level = state.displayLevelImageData;
+      // The window must be served by the level: never by the source's own
+      // pixels (a frame that is its own level, below the large-image size).
+      const target = conversionTargetFor(source, level, 'normal');
+      if (target === source) return null;
       const key = geometryKeyFor(base, { rotationAngle: state.rotationAngle, mirrored: state.mirrored, cropRegion: state.cropRegion });
       const frameSize = { width: key.frameWidth, height: key.frameHeight };
       const cropPlanes = state.croppedImageData || state.originalImageData;
@@ -10649,12 +10675,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // and the auto-WB sample is keyed by the level from now on.
       const refs0 = entry.snapshot.refs;
       const settledPreview = state.processedImageDataIsPreview && (!refs0 || refs0.cold || refs0.processedImageData === state.processedImageData);
-      const level = state.displayLevelImageData;
       const wbSample = autoWbSampleFor(autoWbSampleKey());
       const refs = {
         originalImageData: frame, croppedImageData: crop,
         processedImageData: settledPreview ? state.processedImageData : null,
-        conversionSourceImageData: null, conversionPreviewImageData: conversionTargetFor(source, level, 'normal'),
+        conversionSourceImageData: null, conversionPreviewImageData: target,
         displayLevelImageData: level, autoWbSample: wbSample ? { source: level, image: wbSample } : null,
         previewSourceImageData: settledPreview ? state.previewSourceImageData : null,
         histogramSourceImageData: settledPreview ? state.histogramSourceImageData : null,
@@ -11019,7 +11044,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         state.conversionSourceImageData = null;
         state.displayLevelImageData = entry.planes.level;
         state.autoWbSample = null;
-        state.conversionPreviewImageData = conversionTargetFor(entry.sourcePending, entry.planes.level, 'normal');
+        state.conversionPreviewImageData = pendingConversionTarget();
         state.previewSourceImageData = null;
         state.histogramSourceImageData = null;
         state.webglSourceImageData = null;
@@ -13835,7 +13860,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         live: () => ({
           base: Boolean(state.loadedBaseImageData), baseDescriptor: Boolean(state.baseDescriptor),
           source: Boolean(state.conversionSourceImageData), sourcePending: Boolean(state.sourcePending),
-          proxyMatches: displayProxyMatches(), preparing: Boolean(document.body.dataset.studioPreparing)
+          proxyMatches: displayProxyMatches(), preparing: Boolean(document.body.dataset.studioPreparing),
+          target: state.conversionPreviewImageData
+            ? { width: state.conversionPreviewImageData.width, height: state.conversionPreviewImageData.height,
+              onLevel: state.conversionPreviewImageData.__displayOf === state.displayLevelImageData }
+            : null
         }),
         tier: index => {
           const item = state.fileQueue[index];

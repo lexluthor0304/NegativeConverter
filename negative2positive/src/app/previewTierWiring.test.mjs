@@ -337,6 +337,46 @@ for (const largePreviewFrames of [true, false]) {
   assert.equal(f.context.displayIsReduced(), false);
 }
 
+// ---- #249: a Tier B session (source pending, the level kept) drags at the
+// reduced tier from its level and gets its normal display target back at
+// the end; a window that needs the source's own pixels rebuilds the source
+// instead of pointing the preview at the pending descriptor ----
+{
+  const f = fixture();
+  const normalPreview = f.state.conversionPreviewImageData;
+  f.state.sourcePending = { width: 3000, height: 2000, key: 'proxy key' };
+  f.state.conversionSourceImageData = null;
+  let requested = 0;
+  f.context.requestSourceForDisplay = () => { requested++; };
+  f.context.onPreviewTierChange('reduced');
+  for (const value of [10, 20]) await f.input(value);
+  for (const entry of f.conversions) {
+    assert.equal(entry.input.__displayOf, f.base, 'Tier B frames convert the level');
+    assert.ok(pixels(entry.input) <= PREVIEW_TIER_REDUCED_MAX_PIXELS, 'at the reduced size');
+  }
+  f.context.onPreviewTierChange('normal');
+  f.handlers.onCommit(20);
+  await f.answerAll();
+  f.runTimers();
+  await f.answerAll();
+  assert.equal(f.state.conversionPreviewImageData, normalPreview, 'the normal display target is back');
+  assert.equal(f.context.displayIsReduced(), false, 'nothing reduced is left on screen');
+  assert.equal(f.conversions.at(-1).input, normalPreview, 'and converted once at the normal size');
+  assert.equal(requested, 0, 'no source was needed');
+  // A frame that is its own level (a debug threshold) in a window that fits it.
+  const own = fixture({ width: 1500, height: 1000, largePreviewFrames: false });
+  own.state.sourcePending = { width: 1500, height: 1000, key: 'proxy key' };
+  own.state.conversionSourceImageData = null;
+  own.state.conversionPreviewImageData = displayTargetFor(own.base, { width: 1200, height: 800 });
+  const shown = own.state.conversionPreviewImageData;
+  let ownRequests = 0;
+  own.context.requestSourceForDisplay = () => { ownRequests++; };
+  assert.equal(own.context.pendingConversionTarget(), null, 'the window needs the source itself');
+  assert.equal(own.context.updateConversionTarget(), false);
+  assert.equal(own.state.conversionPreviewImageData, shown, 'the level stays on screen');
+  assert.equal(ownRequests, 1, 'while the source is rebuilt');
+}
+
 // ---- Undo history keeps the normal-tier conversion preview ----
 {
   const f = fixture();
