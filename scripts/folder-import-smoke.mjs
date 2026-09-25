@@ -181,21 +181,6 @@ export async function runFolderImportSmoke({send,evaluate,waitFor,wait,fail,inst
   if(result.embedded?.length)console.log('folder embedded route:',JSON.stringify(result.embedded));
   assertFolderDecodeBudget(result, count, rawFixture, fail);
   console.log('ok: first photo has priority; automatic roll reuses samples without duplicate decodes or locking the editor');
-  // Sync colours over unchanged geometry (#247 2d): every other tile renders
-  // again from its retained tile source, with no file read and no decode.
-  await evaluate(`(()=>{const el=document.getElementById('coreExposure');el.value='15';el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}))})()`);
-  await waitFor('exposure edited',`document.getElementById('coreExposureValue').value==='15'&&!document.body.dataset.studioBusy`,30000);
-  await wait(800);
-  await waitFor('sync enabled',`!document.getElementById('studioSync').disabled`,30000);
-  const tileSources=`[...document.querySelectorAll('.file-list-name')].map(tile=>tile.querySelector('.file-list-thumbnail')?.getAttribute('src')||'')`;
-  // The prefetch of the next photo (#243) is not a tile read.
-  const counted=`{reads:p.reads.filter(r=>r.route!=='prefetch').length,decodes:p.decodes.filter(d=>d.route!=='prefetch').length}`;
-  const synced=await evaluate(`(()=>{const p=window.__folderProbe;window.__syncTiles=${tileSources};window.__syncStart=performance.now();const before=${counted};document.getElementById('studioSync').click();return before})()`);
-  await waitFor('synced tiles ready',`(() => {const tiles=[...document.querySelectorAll('.file-list-name[data-preview-state]')];const now=${tileSources};return tiles.length===${count}&&tiles.every(tile=>tile.dataset.previewState==='ready')&&now.filter((src,i)=>src&&src!==window.__syncTiles[i]).length>=${count - 1}})()`,120000);
-  const afterSync=await evaluate(`(()=>{const p=window.__folderProbe;const out={...${counted},ms:Math.round(performance.now()-window.__syncStart)};p.stop();return out})()`);
-  console.log('folder sync colours:',JSON.stringify({before:synced,after:afterSync}));
-  if(afterSync.reads!==synced.reads||afterSync.decodes!==synced.decodes)fail('Sync colours re-read or re-decoded photos: '+JSON.stringify({synced,afterSync}));
-  console.log(`ok: Sync colours re-rendered ${count - 1} tiles from their tile sources in ${afterSync.ms} ms without reading or decoding a photo`);
   if (!rawFixture) {
     // Compare actual exported pixels with a fresh, uncached manual analysis.
     await evaluate(`(()=>{
@@ -218,5 +203,21 @@ export async function runFolderImportSmoke({send,evaluate,waitFor,wait,fail,inst
     if(cached!==uncached)fail('sample reuse changed exported PNG pixels: '+JSON.stringify({cached,uncached}));
     console.log('ok: cached and freshly decoded roll analysis export identical PNG pixels',cached);
   }
+  // After the export comparison, whose recipes the edit below would change.
+  // Sync colours over unchanged geometry (#247 2d): every other tile renders
+  // again from its retained tile source, with no file read and no decode.
+  await evaluate(`(()=>{const el=document.getElementById('coreExposure');el.value='15';el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}))})()`);
+  await waitFor('exposure edited',`document.getElementById('coreExposureValue').value==='15'&&!document.body.dataset.studioBusy`,30000);
+  await wait(800);
+  await waitFor('sync enabled',`!document.getElementById('studioSync').disabled`,30000);
+  const tileSources=`[...document.querySelectorAll('.file-list-name')].map(tile=>tile.querySelector('.file-list-thumbnail')?.getAttribute('src')||'')`;
+  // The prefetch of the next photo (#243) is not a tile read.
+  const counted=`{reads:p.reads.filter(r=>r.route!=='prefetch').length,decodes:p.decodes.filter(d=>d.route!=='prefetch').length}`;
+  const synced=await evaluate(`(()=>{const p=window.__folderProbe;window.__syncTiles=${tileSources};window.__syncStart=performance.now();const before=${counted};document.getElementById('studioSync').click();return before})()`);
+  await waitFor('synced tiles ready',`(() => {const tiles=[...document.querySelectorAll('.file-list-name[data-preview-state]')];const now=${tileSources};return tiles.length===${count}&&tiles.every(tile=>tile.dataset.previewState==='ready')&&now.filter((src,i)=>src&&src!==window.__syncTiles[i]).length>=${count - 1}})()`,120000);
+  const afterSync=await evaluate(`(()=>{const p=window.__folderProbe;const out={...${counted},ms:Math.round(performance.now()-window.__syncStart)};p.stop();return out})()`);
+  console.log('folder sync colours:',JSON.stringify({before:synced,after:afterSync}));
+  if(afterSync.reads!==synced.reads||afterSync.decodes!==synced.decodes)fail('Sync colours re-read or re-decoded photos: '+JSON.stringify({synced,afterSync}));
+  console.log(`ok: Sync colours re-rendered ${count - 1} tiles from their tile sources in ${afterSync.ms} ms without reading or decoding a photo`);
 
 }
