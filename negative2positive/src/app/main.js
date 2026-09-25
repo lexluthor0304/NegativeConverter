@@ -19007,7 +19007,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           return null;
         }
       }
-      const output = await convertAdjustedFrame({ imageData: frame, settings: recipe.router, adjust: recipe.adjust, options: LOUPE_CONVERSION_OPTIONS, lutScratch: adjustmentLutScratch });
+      const output = await convertAdjustedFrame({ imageData: frame, settings: recipe.router, adjust: recipe.adjust, options: { ...LOUPE_CONVERSION_OPTIONS }, lutScratch: adjustmentLutScratch });
       loupeDebugCounters.mainConversions++;
       return output ? { imageData: new ImageData(output.data, output.width, output.height), recipe: recipe.name } : null;
     }
