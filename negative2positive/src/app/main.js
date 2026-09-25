@@ -23016,6 +23016,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         window.__ncDebug = {
           counters: () => ({ ...uiDebugCounters, sync: studioWorkspace.debugCounters(), loupe: { ...loupeDebugCounters } }),
           sync: () => studioWorkspace.sync(),
+          // Drops the retained photo sessions, previews and prefetch slot, so
+          // the next switch is a cold one: the background lanes (#243) keep
+          // the photos they decoded warm.
+          forgetPhotoCaches: () => { photoSessions.clear(); photoPreviews.clear(); photoPrefetch.clear(); },
         };
       }
     }

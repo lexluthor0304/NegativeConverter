@@ -20,7 +20,8 @@ const READY = `document.body.classList.contains('studio-ready') && !document.bod
 
 export async function runEmbeddedPreviewSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port }) {
   const expect = (condition, message, detail) => { if (!condition) fail(message + (detail === undefined ? '' : ': ' + JSON.stringify(detail))); };
-  await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
+  // debugCounters=1 exposes window.__ncDebug.forgetPhotoCaches for the cold switch.
+  await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en&debugCounters=1` });
   await waitFor('embedded preview boot', `!!document.getElementById('autoRollOnImport') && !!document.getElementById('studioPhotoSwitchFeedback')`);
   await installDialogAutoAccept();
   await wait(1000);
@@ -241,7 +242,10 @@ export async function runEmbeddedPreviewSmoke({ send, evaluate, waitFor, wait, f
   expect(!backwards.length, 'a tile never moves back from analysis/processed to embedded', backwards);
 
   // --- Cold switch: thumbnail in the click's task, then the embedded frame --
+  // The roll's background lanes decoded every photo and keep their bases as
+  // sessions (#243), so the target is made cold first.
   const click = await evaluate(`(() => {
+    window.__ncDebug.forgetPhotoCaches();
     window.__embeddedProbe.holdName = 'embedded-3.dng';
     const button = [...document.querySelectorAll('#fileListItems .file-list-name')]
       .find(tile => tile.querySelector('.file-list-filename')?.textContent === 'embedded-3.dng');
