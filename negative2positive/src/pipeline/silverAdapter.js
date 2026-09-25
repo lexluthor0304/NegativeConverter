@@ -10,7 +10,7 @@ import {
 import { applyFilmBaseCompensationToBuffer } from './filmBaseCompensation.js';
 import { analyzeImage, analyzeGreyImage, greyChannelLevels, adjustSaturation } from '../silvercore/engine/ImageProcessor.js';
 import { normalizePaperId, normalizeToningId } from '../silvercore/engine/PaperProfiles.js';
-import { applyExposureStopsToGrey, hasExposureStops } from '../silvercore/util/localExposure.js';
+import { applyExposureStopsToGrey, applyExposureStopsToGreyRect, applyExposureStopsToImage16Rect, hasExposureStops, exposureStopsCover } from '../silvercore/util/localExposure.js';
 import {
   mixToGrey,
   allOpaque,
@@ -19,7 +19,7 @@ import {
   convertGreyFromSource,
   greyHistogramFromSource,
 } from '../silvercore/util/greyPlane.js';
-import { rasterizeExposureStops } from '../app/localExposure.js';
+import { rasterizeExposureStopsTiled, updateExposureStopsMap, exposureMapKey, exposureStopsBytes } from '../app/localExposure.js';
 import { applyFlatFieldToImage16 } from '../app/flatField.js';
 import { analysisPixelBounds } from '../app/analysisRegion.js';
 import { LARGE_IMAGE_PIXELS } from '../app/imageMemoryBudget.js';
@@ -92,9 +92,17 @@ function _bufferId(buffer) {
 
 // `region` (#248's detail layer): the buffer is the region of a frame of
 // frameWidth x frameHeight at originX/originY, and gets that region's stops.
-function localExposureStopsForSlot(slot, settings, width, height, region = null) {
+//
+// Interactive slots keep a dense map that follows the stroke list (#254 D1): a
+// new stroke is added into it and an undone last stroke written back, only
+// inside that stroke's box, and `slot.exposureChange` names the box so the
+// post-exposure level is updated there only. `transient` requests (full
+// resolution, exports) get a tiled map (#254 D5): 256 x 256 tiles only where
+// strokes reach. Both hold exactly the values of a full dense raster.
+function localExposureStopsForSlot(slot, settings, width, height, region = null, transient = false) {
   const exposure = settings?.localExposure;
   const geometry = settings?.localExposureGeometry;
+  slot.exposureChange = null;
   if (!geometry || !exposure?.strokes?.length) {
     slot.exposureMap = null;
     return null;
@@ -104,11 +112,19 @@ function localExposureStopsForSlot(slot, settings, width, height, region = null)
     : { ...geometry, width, height };
   // Settings snapshots are copied on each render: object identity alone cannot
   // identify an unchanged stroke. The exact content also catches undo and edits.
-  const key = JSON.stringify([exposure, workingGeometry]);
-  if (!slot.exposureMap || slot.exposureMap.key !== key) {
-    slot.exposureMap = { key, stops: rasterizeExposureStops(exposure, workingGeometry) };
+  if (transient) {
+    const key = exposureMapKey(exposure, workingGeometry);
+    if (!slot.exposureMap || slot.exposureMap.key !== key) {
+      slot.exposureMap = { key, tiled: true, stops: rasterizeExposureStopsTiled(exposure, workingGeometry) };
+      _stats.exposureMaps.tiled++;
+    }
+    return slot.exposureMap.stops;
   }
-  return slot.exposureMap.stops;
+  const previous = slot.exposureMap && !slot.exposureMap.tiled ? slot.exposureMap : null;
+  const { map, change } = updateExposureStopsMap(previous, exposure, workingGeometry, _stats.exposureMaps);
+  slot.exposureMap = map;
+  slot.exposureChange = change;
+  return map.stops;
 }
 
 function normalizeAnalysisOverride(value) {
@@ -306,6 +322,8 @@ function _createSlot() {
     referencePixels: {},
     promotedSource: null,
     exposureMap: null,
+    // What the last map update changed in place: { fromKey, rect } or null (#254).
+    exposureChange: null,
     // Pre-exposure level: { key, kind: 'rgba' | 'grey', plane, alpha }. `plane` is an
     // Image16 (rgba), a Uint16Array (grey) or null when the pristine plane or the
     // source itself is the prepared state.
@@ -316,7 +334,10 @@ function _createSlot() {
 }
 
 // Counters for the tests: how often the expensive per-pixel prefix stages ran.
-const _stats = { preprocess: 0, preparedBuilds: 0, exposedBuilds: 0 };
+// exposedUpdates: post-exposure levels updated inside a stroke's box only (#254);
+// exposureMaps: how the stops maps were made (full / extended / undone / tiled).
+const _stats = { preprocess: 0, preparedBuilds: 0, exposedBuilds: 0, exposedUpdates: 0,
+  exposureMaps: { full: 0, extended: 0, undone: 0, tiled: 0 } };
 
 function _levelBytes(level) {
   const plane = level && level.plane;
@@ -333,9 +354,12 @@ export function getSilverCoreCacheStats() {
     preparedKind: slot.prepared ? slot.prepared.kind : null,
     preparedBytes: _levelBytes(slot.prepared),
     exposedBytes: _levelBytes(slot.exposed),
+    exposureMapBytes: slot.exposureMap ? exposureStopsBytes(slot.exposureMap.stops) : 0,
+    exposureMapTiled: Boolean(slot.exposureMap?.tiled),
     levels: (_levelBytes(slot.prepared) ? 1 : 0) + (_levelBytes(slot.exposed) ? 1 : 0),
   });
-  return { ..._stats, preview: slotInfo(_cache.preview), full: slotInfo(_cache.full), scratch: slotInfo(_cache.scratch), roi: slotInfo(_cache.roi) };
+  return { ..._stats, exposureMaps: { ..._stats.exposureMaps },
+    preview: slotInfo(_cache.preview), full: slotInfo(_cache.full), scratch: slotInfo(_cache.scratch), roi: slotInfo(_cache.roi) };
 }
 
 // Tests exercise the large-image rule on small frames.
@@ -695,6 +719,22 @@ function _prepareRgba(ctx) {
   }
   const exposedKey = `${key}|${slot.exposureMap.key}`;
   if (slot.exposed && slot.exposed.key === exposedKey) return slot.exposed.plane;
+  // A stroke added or undone in place (#254 D1): the level changes inside its box only.
+  const change = slot.exposureChange;
+  if (change && slot.exposed && slot.exposed.key === `${key}|${change.fromKey}` && slot.exposed.plane.data.length === len) {
+    const post = slot.exposed.plane;
+    if (change.rect) {
+      const { x, y, width, height } = change.rect;
+      for (let row = y; row < y + height; row++) {
+        const from = (row * pre.width + x) * 4;
+        post.data.set(pre.data.subarray(from, from + width * 4), from);
+      }
+      applyExposureStopsToImage16Rect(post, stops, change.rect);
+    }
+    slot.exposed.key = exposedKey;
+    _stats.exposedUpdates++;
+    return post;
+  }
   // A stroke edit rebuilds only this level, from the pre-exposure level.
   const recycled = slot.exposed?.plane?.data || null;
   slot.exposed = null;
@@ -749,6 +789,21 @@ function _prepareGrey(ctx) {
   }
   const exposedKey = `${key}|${slot.exposureMap.key}`;
   if (slot.exposed && slot.exposed.key === exposedKey) return { grey: slot.exposed.plane, alpha: level.alpha };
+  const change = slot.exposureChange;
+  if (change && slot.exposed && slot.exposed.key === `${key}|${change.fromKey}` && slot.exposed.plane.length === n) {
+    const post = slot.exposed.plane;
+    if (change.rect) {
+      const { x, y, width, height } = change.rect;
+      for (let row = y; row < y + height; row++) {
+        const from = row * base.width + x;
+        post.set(level.grey.subarray(from, from + width), from);
+      }
+      applyExposureStopsToGreyRect(post, base.width, stops, change.rect);
+    }
+    slot.exposed.key = exposedKey;
+    _stats.exposedUpdates++;
+    return { grey: post, alpha: level.alpha };
+  }
   const recycled = slot.exposed?.plane || null;
   slot.exposed = null;
   const post = _recycledPlane(recycled, n);
@@ -782,7 +837,7 @@ function _transientGrey(ctx) {
   const n = base.width * base.height;
   const weights = bwMixWeights[params.bwMix] || bwMixWeights.standard;
   const preSatRamp = engine.preSaturationRamp(params);
-  const stops = params.localExposureStops && params.localExposureStops.length === n ? params.localExposureStops : null;
+  const stops = exposureStopsCover(params.localExposureStops, base.width, base.height) ? params.localExposureStops : null;
   if (!reference && needsFullProcess) {
     engine.analyzeGrey(() => {
       const bounds = analysisPixelBounds(base.width, base.height, params.analysisRegion, (params.borderBuffer ?? 10) / 100);
@@ -795,7 +850,7 @@ function _transientGrey(ctx) {
   const packed = packGreyTable(table, stops ? null : preSatRamp);
   const out16 = writable ? base.data : reuse || new Uint16Array(base.data.length);
   const out8 = new Uint8ClampedArray(base.data.length);
-  convertGreyFromSource(base.data, weights, stops ? preSatRamp : null, stops, packed, out16, out8);
+  convertGreyFromSource(base.data, weights, stops ? preSatRamp : null, stops, packed, out16, out8, undefined, base.width);
   const result = new ImageData(out8, base.width, base.height);
   result.__image16 = { width: base.width, height: base.height, data: out16 };
   return result;
@@ -856,7 +911,7 @@ async function runSilverCore(imageData, settings, mode, options) {
   // Dodge and burn: rasterise the strokes for this buffer's size. The engine
   // applies them after the analysis and before the curves; the analysis
   // sample (reference) is never dodged, like the base exposure in a darkroom.
-  params.localExposureStops = localExposureStopsForSlot(slot, settings, input16.width, input16.height, region);
+  params.localExposureStops = localExposureStopsForSlot(slot, settings, input16.width, input16.height, region, transient);
 
   // B&W: every stage after the mix depends on the grey value alone, so unless a
   // spatial stage is active the output comes from one grey plane and a grey → RGB table.
@@ -966,6 +1021,7 @@ export function releaseSlotBuffers(which = 'full') {
   slot.referencePixels = {};
   slot.promotedSource = null;
   slot.exposureMap = null;
+  slot.exposureChange = null;
   slot.prepared = null;
   slot.exposed = null;
 }

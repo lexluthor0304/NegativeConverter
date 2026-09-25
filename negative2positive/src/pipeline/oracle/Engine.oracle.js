@@ -14,7 +14,7 @@ import { colorModelToToneProfile, colorModels, toneProfiles, filmWBPresets } fro
 import { loadProfile, applyLut3D } from '../../silvercore/engine/EnhancedProfiles.js'
 import { applyUnsharpMask } from '../../silvercore/engine/Sharpening.js'
 import { buildPaperLuts, applyPaperLuts } from '../../silvercore/engine/PaperProfiles.js'
-import { applyExposureStopsToImage16 } from '../../silvercore/util/localExposure.js'
+import { applyExposureStopsToImage16 } from './localExposure.oracle.js'
 
 function isChannelDataOverride(value) {
   return Array.isArray(value) && value.length === 3 && value.every((channel) => channel

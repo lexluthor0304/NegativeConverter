@@ -11,7 +11,7 @@ import { colorModelToToneProfile, colorModels, toneProfiles, filmWBPresets } fro
 import { loadProfile, applyLut3D } from './EnhancedProfiles.js'
 import { applyUnsharpMask } from './Sharpening.js'
 import { buildPaperLuts, applyPaperLuts } from './PaperProfiles.js'
-import { applyExposureStopsToImage16 } from '../util/localExposure.js'
+import { applyExposureStopsToImage16, exposureStopsCover } from '../util/localExposure.js'
 
 // A 65536 × 1 RGBA16 grey ramp (R = G = B = v). Stages that only map a pixel's own
 // value can be evaluated once over it instead of over every pixel of a grey image.
@@ -241,7 +241,7 @@ export class Engine {
   // alpha ≠ 0, so when no stops sit between it and the curves it folds into the
   // curve LUT: one pass less, identical pixels.
   _positiveExposureAndLuts(imageData, luts, params) {
-    const fold = this._positiveFold(luts, params, imageData.width * imageData.height)
+    const fold = this._positiveFold(luts, params, imageData.width, imageData.height)
     if (fold) return this._applyLuts(imageData, luts, params, null, fold)
     this._applyPositiveAnalysis(imageData)
     this._applyLocalExposure(imageData, params)
@@ -258,14 +258,14 @@ export class Engine {
     return !analysis || (analysis.gain === 1 && analysis.wb.every(value => value === 1))
   }
 
-  _positiveFold(luts, params, pixelCount) {
+  _positiveFold(luts, params, width, height) {
     const analysis = this.positiveAnalysis
     if (this.positiveAnalysisIsIdentity() || analysis.gain !== 1) return null
     // A non-finite factor makes the per-pixel scale NaN, which zeroes all three
     // channels together: no per-channel table reproduces that.
     if (!analysis.wb.every(Number.isFinite)) return null
     const stops = params.localExposureStops
-    if (stops && stops.length === pixelCount) return null
+    if (stops && exposureStopsCover(stops, width, height)) return null
     const rounded = new Uint16Array(65536)
     const fold = []
     for (let c = 0; c < 3; c++) {
@@ -352,9 +352,11 @@ export class Engine {
     return { r, g, b }
   }
 
+  // The stops are a dense map or, for a full-resolution frame, a tiled one
+  // (#254): only its allocated tiles are visited.
   _applyLocalExposure(imageData, params) {
     const stops = params.localExposureStops
-    if (!stops || stops.length !== imageData.width * imageData.height) return
+    if (!exposureStopsCover(stops, imageData.width, imageData.height)) return
     applyExposureStopsToImage16(imageData, stops)
   }
 

@@ -35,7 +35,8 @@ frozen copy (see Verification).
 3. **Post-exposure level** (`slot.exposed`): the dodge-and-burn stops applied to a
    copy of the pre-exposure level; exists only while strokes exist. Key: the
    pre-exposure key plus the rasterised stroke map's key. A stroke edit rebuilds only
-   this level.
+   this level; a stroke added or undone in place (#254, `slot.exposureChange`)
+   updates it inside that stroke's box only.
 
 A tick that changes neither key (Brightness, Contrast, Temperature, Saturation, Paper,
 3D profile …) runs only the tail: `Engine.applyTail(src, dst, params)` builds the

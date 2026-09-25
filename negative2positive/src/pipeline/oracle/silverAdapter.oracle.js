@@ -13,7 +13,7 @@ import {
 import { applyFilmBaseCompensationToBuffer } from '../filmBaseCompensation.js';
 import { analyzeImage, adjustSaturation } from './ImageProcessor.oracle.js';
 import { normalizePaperId, normalizeToningId } from '../../silvercore/engine/PaperProfiles.js';
-import { rasterizeExposureStops } from '../../app/localExposure.js';
+import { rasterizeExposureStops } from './localExposure.oracle.js';
 import { applyFlatFieldToImage16 } from '../../app/flatField.js';
 
 // EnhancedProfiles.js owns the list of shipped 3D-LUT profiles and their .bin URLs;

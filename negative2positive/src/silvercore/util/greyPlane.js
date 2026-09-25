@@ -9,7 +9,7 @@
 // The hot loops are kept monomorphic (one loop per case, no per-pixel mode tests):
 // a generic loop with those tests measured two to four times slower in V8.
 
-import { exposeGreyValue } from './localExposure.js';
+import { exposeGreyValue, isTiledStops, exposureStopsCover } from './localExposure.js';
 import { LITTLE_ENDIAN } from './image16.js';
 
 export { LITTLE_ENDIAN };
@@ -114,8 +114,14 @@ function writeGreyChannels(grey, alphaData, packed, out16, out8) {
  * ramp composed into the table (packGreyTable's `through`) and null here: that case
  * runs the lean loop.
  */
-export function convertGreyFromSource(src, weights, preSatRamp, stops, packed, out16, out8, littleEndian = LITTLE_ENDIAN) {
+export function convertGreyFromSource(src, weights, preSatRamp, stops, packed, out16, out8, littleEndian = LITTLE_ENDIAN, width = 0) {
   const n = src.length >>> 2;
+  // A tiled map (#254) of the `width`-wide frame: the same per-pixel steps, with
+  // the stops of the tiles a row crosses (none outside them).
+  if (isTiledStops(stops) && width > 0 && exposureStopsCover(stops, width, n / width)) {
+    convertGreyTiled(src, weights, preSatRamp, stops, packed, out16, out8, littleEndian);
+    return;
+  }
   if (!littleEndian || preSatRamp || (stops && stops.length === n)) {
     convertGreyGeneral(src, weights, preSatRamp, stops && stops.length === n ? stops : null, packed, out16, out8, littleEndian);
     return;
@@ -134,21 +140,32 @@ export function convertGreyFromSource(src, weights, preSatRamp, stops, packed, o
   }
 }
 
+function greyOutputViews(out16, out8, n, littleEndian) {
+  return {
+    o16: littleEndian ? new Uint32Array(out16.buffer, out16.byteOffset, n * 2) : null,
+    o8: littleEndian ? new Uint32Array(out8.buffer, out8.byteOffset, n) : null,
+    b8: littleEndian ? null : new Uint8Array(out8.buffer, out8.byteOffset, n * 4),
+  };
+}
+
 // Every other case, per pixel: the ramp, the stops (only where non-zero) and the stores.
 function convertGreyGeneral(src, weights, preSatRamp, stops, packed, out16, out8, littleEndian) {
   const n = src.length >>> 2;
+  convertGreyRun(src, weights, preSatRamp, stops, 0, packed, out16, greyOutputViews(out16, out8, n, littleEndian), 0, n);
+}
+
+// convertGreyGeneral over the pixels [p0, p0 + count), with stops[q0...] (or none).
+function convertGreyRun(src, weights, preSatRamp, stops, q0, packed, out16, views, p0, count) {
   const wr = weights.r, wg = weights.g, wb = weights.b;
   const { r, g, b, lo, rgb8 } = packed;
-  const o16 = littleEndian ? new Uint32Array(out16.buffer, out16.byteOffset, n * 2) : null;
-  const o8 = littleEndian ? new Uint32Array(out8.buffer, out8.byteOffset, n) : null;
-  const b8 = littleEndian ? null : new Uint8Array(out8.buffer, out8.byteOffset, n * 4);
-  for (let p = 0; p < n; p++) {
+  const { o16, o8, b8 } = views;
+  for (let p = p0, q = q0, end = p0 + count; p < end; p++, q++) {
     const i = p << 2;
     let y = Math.round(src[i] * wr + src[i + 1] * wg + src[i + 2] * wb) & 0xFFFF;
     const a = src[i + 3];
     if (preSatRamp) y = preSatRamp[y];
     if (stops) {
-      const s = stops[p];
+      const s = stops[q];
       if (s !== 0) y = exposeGreyValue(y, s) & 0xFFFF;
     }
     if (o16) {
@@ -158,6 +175,22 @@ function convertGreyGeneral(src, weights, preSatRamp, stops, packed, out16, out8
     } else {
       out16[i] = r[y]; out16[i + 1] = g[y]; out16[i + 2] = b[y]; out16[i + 3] = a;
       b8[i] = r[y] >>> 8; b8[i + 1] = g[y] >>> 8; b8[i + 2] = b[y] >>> 8; b8[i + 3] = a >>> 8;
+    }
+  }
+}
+
+// convertGreyGeneral with a tiled map: each row in runs of one tile column.
+function convertGreyTiled(src, weights, preSatRamp, stops, packed, out16, out8, littleEndian) {
+  const { width, height, tileSize, columns, tiles } = stops;
+  const views = greyOutputViews(out16, out8, width * height, littleEndian);
+  for (let y = 0; y < height; y++) {
+    const row = Math.floor(y / tileSize);
+    const ty = y - row * tileSize;
+    for (let column = 0; column < columns; column++) {
+      const x0 = column * tileSize;
+      const count = Math.min(tileSize, width - x0);
+      const tile = tiles[row * columns + column];
+      convertGreyRun(src, weights, preSatRamp, tile, ty * tileSize, packed, out16, views, y * width + x0, count);
     }
   }
 }

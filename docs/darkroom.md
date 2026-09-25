@@ -76,6 +76,26 @@ the export worker, the exported pixels match the preview at any resolution.
 Interactive conversions keep the dodged plane per cache slot (the
 post-exposure level, `docs/silvercore-conversion-cache.md`): a slider tick
 reuses it, and a stroke edit rebuilds only that level.
+
+The maps are built incrementally and exactly (#254). An interactive slot's map
+remembers its strokes (`updateExposureStopsMap`): a new stroke is added into it
+inside its box, and an undone last stroke is written back from a snapshot of
+that box, so adding stroke 21 costs one stroke and the post-exposure level
+changes inside that box only. Every other change (geometry, preview size, an
+older stroke, a second undo) rasterises again. Full-resolution and export
+conversions use a tiled map (`rasterizeExposureStopsTiled`, 256 x 256 Float32
+tiles allocated only where a stroke reaches), which the engine and the fused
+B&W pass apply tile by tile. The raster itself skips pixels already at full
+coverage, rejects by squared distance before `Math.hypot` and, for a soft
+stroke of one pressure, evaluates the falloff only for the segments nearest
+each pixel (`nearestSegmentCoverageInto`; the comment states the error bound
+that makes it exact). `localExposure.incremental.test.mjs` checks all of it
+bitwise against the frozen raster in `pipeline/oracle/localExposure.oracle.js`
+on randomised stroke sets, and `silverAdapter.strokes.test.mjs` checks the
+adapter frames against the frozen adapter. Timings:
+`node scripts/bench-exposure-maps.mjs` (one default stroke at 2449 x 1628:
+105 → 26 ms; stroke 21 after 20: 26 ms instead of a 2 s full raster; undo
+0.3 ms; a stroke over 7 % of a 12 MP frame: 7 MB of tiles instead of 46 MB).
 Strokes are part of undo, of the per-file settings and of batch export; the
 overlay draws them on the 2D canvas (orange = burn, blue = dodge) while the
 brush is active.

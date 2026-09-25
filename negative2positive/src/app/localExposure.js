@@ -109,6 +109,208 @@ export function workingPointToBase(point, geometry) {
   return { x: bx / baseWidth, y: by / baseHeight };
 }
 
+// One stroke in working-frame pixels: its points, brush radius and hard core,
+// and its pixel bounding box clipped to the frame (and to `geometry.window`),
+// or null when that box is empty.
+export function prepareStrokeCoverage(stroke, geometry) {
+  const width = geometry.width; const height = geometry.height;
+  const clip = geometry.window || null;
+  const shortSide = Math.min(geometry.baseWidth, geometry.baseHeight);
+  const points = stroke.points.map((p) => ({ ...basePointToWorking(p, geometry), p: p.p ?? 1 }));
+  if (!points.length) return null;
+  const scale = points[0].scale / Math.min(geometry.cropRegion ? geometry.cropRegion.width : (geometry.rotatedWidth || geometry.baseWidth), geometry.cropRegion ? geometry.cropRegion.height : (geometry.rotatedHeight || geometry.baseHeight));
+  const radius = Math.max(1, stroke.size * shortSide * scale / 2);
+  const feather = clamp(stroke.feather ?? 0.5, 0, 1);
+  const hard = radius * (1 - feather);
+  // Coverage keeps the maximum falloff per stroke so overlapping segments
+  // of one stroke do not double up.
+  const maxR = radius * Math.max(...points.map((p) => p.p));
+  let bx0 = Math.max(0, Math.floor(Math.min(...points.map((p) => p.x)) - maxR));
+  let bx1 = Math.min(width - 1, Math.ceil(Math.max(...points.map((p) => p.x)) + maxR));
+  let by0 = Math.max(0, Math.floor(Math.min(...points.map((p) => p.y)) - maxR));
+  let by1 = Math.min(height - 1, Math.ceil(Math.max(...points.map((p) => p.y)) + maxR));
+  if (clip) {
+    bx0 = Math.max(bx0, clip.x); bx1 = Math.min(bx1, clip.x + clip.width - 1);
+    by0 = Math.max(by0, clip.y); by1 = Math.min(by1, clip.y + clip.height - 1);
+  }
+  if (bx1 < bx0 || by1 < by0) return null;
+  return { stroke, points, radius, hard, bx0, by0, bx1, by1 };
+}
+
+// Maximum falloff of the segment a-b (points with x, y, p) into `coverage`, a
+// buffer whose index is (y - oy) * stride + (x - ox), for the pixels of its box
+// inside [cx0, cx1] x [cy0, cy1]. The per-pixel arithmetic is the original
+// raster's (#254 D2, bitwise equal): pixels already at 1 are skipped (the
+// falloff never exceeds 1), a squared distance clearly at or beyond r skips
+// Math.hypot for pixels it would reject, and one clearly inside the hard core
+// is 1 without it. The guards are 1e-12 relative, far above the few-ulp errors
+// of the squared sum and of Math.hypot, so they only skip what the original
+// test decides the same way.
+export function segmentCoverageInto(coverage, ox, oy, stride, cx0, cy0, cx1, cy1, a, b, radius, hard) {
+  const r = radius * Math.max(a.p, b.p);
+  const x0 = Math.max(cx0, Math.floor(Math.min(a.x, b.x) - r)); const x1 = Math.min(cx1, Math.ceil(Math.max(a.x, b.x) + r));
+  const y0 = Math.max(cy0, Math.floor(Math.min(a.y, b.y) - r)); const y1 = Math.min(cy1, Math.ceil(Math.max(a.y, b.y) + r));
+  if (x1 < x0 || y1 < y0) return false;
+  const ax = a.x; const ay = a.y;
+  const dx = b.x - ax; const dy = b.y - ay;
+  const lengthSq = dx * dx + dy * dy;
+  const ph = hard * Math.max(a.p, b.p);
+  const w = Math.max(1e-6, r - ph);
+  const outside = r * r * (1 + 1e-12);
+  const inside = ph * ph * (1 - 1e-12);
+  for (let y = y0; y <= y1; y++) {
+    const py = y + 0.5;
+    // The second product of the projection's numerator, as the original computes it.
+    const rowTerm = (py - ay) * dy;
+    const row = (y - oy) * stride - ox;
+    for (let x = x0; x <= x1; x++) {
+      const idx = row + x;
+      const current = coverage[idx];
+      if (current === 1) continue;
+      const px = x + 0.5;
+      let t = lengthSq > 0 ? ((px - ax) * dx + rowTerm) / lengthSq : 0;
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      const ex = px - (ax + t * dx); const ey = py - (ay + t * dy);
+      const d2 = ex * ex + ey * ey;
+      if (d2 >= outside) continue;
+      if (d2 < inside) { coverage[idx] = 1; continue; }
+      const dist = Math.hypot(ex, ey);
+      if (dist >= r) continue;
+      const falloff = dist <= ph ? 1 : 0.5 + 0.5 * Math.cos(Math.PI * (dist - ph) / w);
+      if (falloff > current) coverage[idx] = falloff;
+    }
+  }
+  return true;
+}
+
+// The segments of a prepared stroke: consecutive points, or the point itself
+// for a one-point stroke (a disc).
+export function strokeSegments(points) {
+  return points.length === 1 ? [[points[0], points[0]]] : points.slice(1).map((p, i) => [points[i], p]);
+}
+
+// Every segment of a prepared stroke into `coverage` over the clip box.
+// `scratch` (a Float64Array of at least the clip box's size, optional) lets a
+// soft stroke of uniform pressure take the nearest-segment path.
+function strokeCoverageInto(prepared, coverage, ox, oy, stride, cx0, cy0, cx1, cy1, scratch = null) {
+  const { points, radius, hard } = prepared;
+  if (points.length === 1) {
+    segmentCoverageInto(coverage, ox, oy, stride, cx0, cy0, cx1, cy1, points[0], points[0], radius, hard);
+    return;
+  }
+  if (points.length > 2 && nearestSegmentApplies(prepared)) {
+    const width = cx1 - cx0 + 1; const height = cy1 - cy0 + 1;
+    if (width > 0 && height > 0) {
+      const best = scratch && scratch.length >= width * height ? scratch : new Float64Array(width * height);
+      nearestSegmentCoverageInto(prepared, coverage, ox, oy, stride, cx0, cy0, cx1, cy1, best);
+    }
+    return;
+  }
+  for (let i = 1; i < points.length; i++) {
+    segmentCoverageInto(coverage, ox, oy, stride, cx0, cy0, cx1, cy1, points[i - 1], points[i], radius, hard);
+  }
+}
+
+// The nearest-segment path (#254 D3, bitwise equal to segmentCoverageInto over
+// every segment). With one pressure for the whole stroke every segment has the
+// same r, core and feather width, so a pixel's coverage is the largest computed
+// falloff, which belongs to the segment nearest to it up to rounding. The falloff
+// is evaluated (Math.hypot and Math.cos, most of the raster's time) only for
+// segments whose squared distance is within 1e-6 of the pixel's nearest one; a
+// segment farther than that has a true falloff smaller by at least 1e-13 (the
+// cosine argument lies in [2e-3, pi - 2e-3] and moves by at least 4e-7 of
+// itself), far more than the ~2e-15 error of computing it, so it could never be
+// the maximum. Pixels whose nearest distance puts the argument within 2e-3 of 0
+// or pi, where the falloff is flat, evaluate every segment as before.
+function nearestSegmentApplies({ points, radius, hard }) {
+  if (!(hard < radius)) return false;
+  const p = points[0].p;
+  for (let i = 1; i < points.length; i++) if (points[i].p !== p) return false;
+  return true;
+}
+
+// Each segment's pixel box and projection terms, as segmentCoverageInto has them.
+function segmentLoop(a, b, r, cx0, cy0, cx1, cy1) {
+  const x0 = Math.max(cx0, Math.floor(Math.min(a.x, b.x) - r)); const x1 = Math.min(cx1, Math.ceil(Math.max(a.x, b.x) + r));
+  const y0 = Math.max(cy0, Math.floor(Math.min(a.y, b.y) - r)); const y1 = Math.min(cy1, Math.ceil(Math.max(a.y, b.y) + r));
+  if (x1 < x0 || y1 < y0) return null;
+  const dx = b.x - a.x; const dy = b.y - a.y;
+  return { x0, x1, y0, y1, ax: a.x, ay: a.y, dx, dy, lengthSq: dx * dx + dy * dy };
+}
+
+function nearestSegmentCoverageInto(prepared, coverage, ox, oy, stride, cx0, cy0, cx1, cy1, best) {
+  const { points, radius, hard } = prepared;
+  const pressure = points[0].p;
+  const r = radius * pressure;
+  const ph = hard * pressure;
+  const w = Math.max(1e-6, r - ph);
+  const outside = r * r * (1 + 1e-12);
+  const inside = ph * ph * (1 - 1e-12);
+  const bw = cx1 - cx0 + 1;
+  const count = bw * (cy1 - cy0 + 1);
+  best.fill(Infinity, 0, count);
+  const loops = [];
+  for (let i = 1; i < points.length; i++) {
+    const loop = segmentLoop(points[i - 1], points[i], r, cx0, cy0, cx1, cy1);
+    if (loop) loops.push(loop);
+  }
+  // Pass 1: each pixel's smallest squared distance (and the hard core).
+  for (const { x0, x1, y0, y1, ax, ay, dx, dy, lengthSq } of loops) {
+    for (let y = y0; y <= y1; y++) {
+      const py = y + 0.5;
+      const rowTerm = (py - ay) * dy;
+      const row = (y - oy) * stride - ox;
+      const scratchRow = (y - cy0) * bw - cx0;
+      for (let x = x0; x <= x1; x++) {
+        const idx = row + x;
+        if (coverage[idx] === 1) continue;
+        const px = x + 0.5;
+        let t = lengthSq > 0 ? ((px - ax) * dx + rowTerm) / lengthSq : 0;
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        const ex = px - (ax + t * dx); const ey = py - (ay + t * dy);
+        const d2 = ex * ex + ey * ey;
+        if (d2 < inside) { coverage[idx] = 1; continue; }
+        const k = scratchRow + x;
+        if (d2 < best[k]) best[k] = d2;
+      }
+    }
+  }
+  // The candidates' bound per pixel: -1 when every segment misses it, Infinity in
+  // the flat zones (every segment evaluated), else 1e-6 above its nearest.
+  for (let k = 0; k < count; k++) {
+    const d2 = best[k];
+    if (!(d2 < outside)) { best[k] = -1; continue; }
+    const argument = Math.PI * (Math.sqrt(d2) - ph) / w;
+    best[k] = argument < 2e-3 || argument > Math.PI - 2e-3 ? Infinity : d2 * (1 + 1e-6);
+  }
+  // Pass 2: the original per-segment test, for the candidates only.
+  for (const { x0, x1, y0, y1, ax, ay, dx, dy, lengthSq } of loops) {
+    for (let y = y0; y <= y1; y++) {
+      const py = y + 0.5;
+      const rowTerm = (py - ay) * dy;
+      const row = (y - oy) * stride - ox;
+      const scratchRow = (y - cy0) * bw - cx0;
+      for (let x = x0; x <= x1; x++) {
+        const idx = row + x;
+        const current = coverage[idx];
+        if (current === 1) continue;
+        const bound = best[scratchRow + x];
+        if (bound < 0) continue;
+        const px = x + 0.5;
+        let t = lengthSq > 0 ? ((px - ax) * dx + rowTerm) / lengthSq : 0;
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        const ex = px - (ax + t * dx); const ey = py - (ay + t * dy);
+        const d2 = ex * ex + ey * ey;
+        if (d2 >= outside || d2 > bound) continue;
+        const dist = Math.hypot(ex, ey);
+        if (dist >= r) continue;
+        const falloff = dist <= ph ? 1 : 0.5 + 0.5 * Math.cos(Math.PI * (dist - ph) / w);
+        if (falloff > current) coverage[idx] = falloff;
+      }
+    }
+  }
+}
+
 // Visits each stroke's coverage in the working frame: `visit(stroke, bx0,
 // by0, bw, bh, coverage)` receives the stroke's pixel bounding box and a
 // Float32 buffer over that box holding the maximum falloff (0..1) of its
@@ -119,58 +321,34 @@ export function workingPointToBase(point, geometry) {
 // boxes to a region (#248's detail layer): each pixel's coverage is its own
 // maximum over the segments, so the clipped values equal the frame's.
 export function forEachStrokeCoverage(localExposure, geometry, visit) {
-  const width = geometry.width; const height = geometry.height;
-  const clip = geometry.window || null;
   const strokes = localExposure?.strokes;
   if (!Array.isArray(strokes) || !strokes.length) return;
-  const shortSide = Math.min(geometry.baseWidth, geometry.baseHeight);
   for (const stroke of strokes) {
-    const points = stroke.points.map((p) => ({ ...basePointToWorking(p, geometry), p: p.p ?? 1 }));
-    if (!points.length) continue;
-    const scale = points[0].scale / Math.min(geometry.cropRegion ? geometry.cropRegion.width : (geometry.rotatedWidth || geometry.baseWidth), geometry.cropRegion ? geometry.cropRegion.height : (geometry.rotatedHeight || geometry.baseHeight));
-    const radius = Math.max(1, stroke.size * shortSide * scale / 2);
-    const feather = clamp(stroke.feather ?? 0.5, 0, 1);
-    const hard = radius * (1 - feather);
-    const segments = points.length === 1 ? [[points[0], points[0]]] : points.slice(1).map((p, i) => [points[i], p]);
-    // Coverage keeps the maximum falloff per stroke so overlapping segments
-    // of one stroke do not double up.
-    const maxR = radius * Math.max(...points.map((p) => p.p));
-    let bx0 = Math.max(0, Math.floor(Math.min(...points.map((p) => p.x)) - maxR));
-    let bx1 = Math.min(width - 1, Math.ceil(Math.max(...points.map((p) => p.x)) + maxR));
-    let by0 = Math.max(0, Math.floor(Math.min(...points.map((p) => p.y)) - maxR));
-    let by1 = Math.min(height - 1, Math.ceil(Math.max(...points.map((p) => p.y)) + maxR));
-    if (clip) {
-      bx0 = Math.max(bx0, clip.x); bx1 = Math.min(bx1, clip.x + clip.width - 1);
-      by0 = Math.max(by0, clip.y); by1 = Math.min(by1, clip.y + clip.height - 1);
-    }
-    if (bx1 < bx0 || by1 < by0) continue;
+    const prepared = prepareStrokeCoverage(stroke, geometry);
+    if (!prepared) continue;
+    const { bx0, by0, bx1, by1 } = prepared;
     const bw = bx1 - bx0 + 1;
     const bh = by1 - by0 + 1;
     const coverage = new Float32Array(bw * bh);
-    for (const [a, b] of segments) {
-      const r = radius * Math.max(a.p, b.p);
-      const x0 = Math.max(bx0, Math.floor(Math.min(a.x, b.x) - r)); const x1 = Math.min(bx1, Math.ceil(Math.max(a.x, b.x) + r));
-      const y0 = Math.max(by0, Math.floor(Math.min(a.y, b.y) - r)); const y1 = Math.min(by1, Math.ceil(Math.max(a.y, b.y) + r));
-      if (x1 < x0 || y1 < y0) continue;
-      const dx = b.x - a.x; const dy = b.y - a.y;
-      const lengthSq = dx * dx + dy * dy;
-      const ph = hard * Math.max(a.p, b.p);
-      for (let y = y0; y <= y1; y++) {
-        for (let x = x0; x <= x1; x++) {
-          const px = x + 0.5; const py = y + 0.5;
-          let t = lengthSq > 0 ? ((px - a.x) * dx + (py - a.y) * dy) / lengthSq : 0;
-          t = clamp(t, 0, 1);
-          const cx = a.x + t * dx; const cy = a.y + t * dy;
-          const dist = Math.hypot(px - cx, py - cy);
-          if (dist >= r) continue;
-          const falloff = dist <= ph ? 1 : 0.5 + 0.5 * Math.cos(Math.PI * (dist - ph) / Math.max(1e-6, r - ph));
-          const idx = (y - by0) * bw + (x - bx0);
-          if (falloff > coverage[idx]) coverage[idx] = falloff;
-        }
-      }
-    }
+    strokeCoverageInto(prepared, coverage, bx0, by0, bw, bx0, by0, bx1, by1);
     visit(stroke, bx0, by0, bw, bh, coverage);
   }
+}
+
+// Adds one stroke's coverage (a box of `bw` x `bh` at bx0, by0 in frame pixels)
+// times its stops into a dense map of the window, as the raster always has.
+function addCoverageToStops(stops, window, stroke, bx0, by0, bw, bh, coverage) {
+  const stride = window.width;
+  for (let y = by0; y < by0 + bh; y++) {
+    for (let x = bx0; x < bx0 + bw; x++) {
+      const c = coverage[(y - by0) * bw + (x - bx0)];
+      if (c > 0) stops[(y - window.y) * stride + (x - window.x)] += stroke.stops * c;
+    }
+  }
+}
+
+function geometryWindow(geometry) {
+  return geometry.window || { x: 0, y: 0, width: geometry.width, height: geometry.height };
 }
 
 // Rasterises strokes into a Float32Array of stops per pixel (0 = untouched).
@@ -178,18 +356,194 @@ export function forEachStrokeCoverage(localExposure, geometry, visit) {
 // `geometry.window` it covers that region of the frame only, with the frame's
 // values (#248's detail layer).
 export function rasterizeExposureStops(localExposure, geometry) {
-  const window = geometry.window || { x: 0, y: 0, width: geometry.width, height: geometry.height };
-  const stride = window.width;
+  const window = geometryWindow(geometry);
   const stops = new Float32Array(window.width * window.height);
   forEachStrokeCoverage(localExposure, geometry, (stroke, bx0, by0, bw, bh, coverage) => {
-    for (let y = by0; y < by0 + bh; y++) {
-      for (let x = bx0; x < bx0 + bw; x++) {
-        const c = coverage[(y - by0) * bw + (x - bx0)];
-        if (c > 0) stops[(y - window.y) * stride + (x - window.x)] += stroke.stops * c;
-      }
-    }
+    addCoverageToStops(stops, window, stroke, bx0, by0, bw, bh, coverage);
   });
   return stops;
 }
 
-export { applyExposureStopsToImage16, hasExposureStops } from '../silvercore/util/localExposure.js';
+// ---- Tiled full-resolution maps (#254 D5) ----
+
+export const STOPS_TILE_SIZE = 256;
+
+export function createTiledStops(width, height, tileSize = STOPS_TILE_SIZE) {
+  const columns = Math.ceil(width / tileSize);
+  const rows = Math.ceil(height / tileSize);
+  return { tiled: true, width, height, tileSize, columns, rows, tiles: new Array(columns * rows).fill(null) };
+}
+
+// Bytes a map keeps: the dense array, or the allocated tiles.
+export function exposureStopsBytes(stops) {
+  if (!stops) return 0;
+  if (stops.tiled) return stops.tiles.reduce((sum, tile) => sum + (tile ? tile.byteLength : 0), 0);
+  return stops.byteLength || 0;
+}
+
+// rasterizeExposureStops() as 256 x 256 tiles allocated only where a stroke's
+// coverage is above zero. Each stroke's coverage is computed one tile at a time
+// (a max over the segments reaching the tile, which are all the segments whose
+// box holds the pixel), and added in list order, so every pixel receives the
+// same additions in the same order as the dense raster: the values are
+// identical, and neither a frame-sized map nor a stroke-box-sized buffer exists.
+export function rasterizeExposureStopsTiled(localExposure, geometry, tileSize = STOPS_TILE_SIZE) {
+  const window = geometryWindow(geometry);
+  const map = createTiledStops(window.width, window.height, tileSize);
+  const strokes = localExposure?.strokes;
+  if (!Array.isArray(strokes) || !strokes.length) return map;
+  const coverage = new Float32Array(tileSize * tileSize);
+  const scratch = new Float64Array(tileSize * tileSize);
+  for (const stroke of strokes) {
+    const prepared = prepareStrokeCoverage(stroke, geometry);
+    if (!prepared) continue;
+    const segments = strokeSegments(prepared.points);
+    // Tile columns and rows of the window the stroke's box reaches.
+    const c0 = Math.floor((prepared.bx0 - window.x) / tileSize); const c1 = Math.floor((prepared.bx1 - window.x) / tileSize);
+    const r0 = Math.floor((prepared.by0 - window.y) / tileSize); const r1 = Math.floor((prepared.by1 - window.y) / tileSize);
+    for (let row = r0; row <= r1; row++) {
+      for (let column = c0; column <= c1; column++) {
+        // The tile in frame pixels, clipped to the stroke's box.
+        const tx = window.x + column * tileSize; const ty = window.y + row * tileSize;
+        const cx0 = Math.max(prepared.bx0, tx); const cx1 = Math.min(prepared.bx1, tx + tileSize - 1);
+        const cy0 = Math.max(prepared.by0, ty); const cy1 = Math.min(prepared.by1, ty + tileSize - 1);
+        if (cx1 < cx0 || cy1 < cy0) continue;
+        // Only segments whose box reaches this part of the tile.
+        let reaches = false;
+        for (const [a, b] of segments) {
+          const r = prepared.radius * Math.max(a.p, b.p);
+          if (Math.floor(Math.min(a.x, b.x) - r) <= cx1 && Math.ceil(Math.max(a.x, b.x) + r) >= cx0
+            && Math.floor(Math.min(a.y, b.y) - r) <= cy1 && Math.ceil(Math.max(a.y, b.y) + r) >= cy0) { reaches = true; break; }
+        }
+        if (!reaches) continue;
+        coverage.fill(0);
+        strokeCoverageInto(prepared, coverage, tx, ty, tileSize, cx0, cy0, cx1, cy1, scratch);
+        const index = row * map.columns + column;
+        let tile = map.tiles[index];
+        for (let y = cy0; y <= cy1; y++) {
+          const base = (y - ty) * tileSize - tx;
+          for (let x = cx0; x <= cx1; x++) {
+            const c = coverage[base + x];
+            if (c > 0) {
+              if (!tile) tile = map.tiles[index] = new Float32Array(tileSize * tileSize);
+              tile[base + x] += stroke.stops * c;
+            }
+          }
+        }
+      }
+    }
+  }
+  return map;
+}
+
+// ---- Incremental maps for a persistent slot (#254 D1) ----
+//
+// A dense map that remembers which strokes it holds. A new stroke list that
+// extends the held one adds only the new strokes, in order, into the same
+// array: the additions each pixel receives, and their order, are those of a
+// full raster, so the values are identical. Removing the last stroke writes
+// back the values its box held before it was added (one snapshot, of the last
+// stroke only). Any other change rasterises the map again.
+
+// By content, never by identity: settings are structured-cloned into workers,
+// and an edited stroke must never keep its old key.
+function strokeKey(stroke) {
+  return JSON.stringify(stroke);
+}
+
+// The identity of a stroke list on a working geometry: the geometry and each
+// stroke's content (settings are copied per render, so identity is not enough).
+export function exposureMapKey(localExposure, geometry) {
+  const strokes = localExposure?.strokes || [];
+  return `${JSON.stringify(geometry)}|${strokes.map(strokeKey).join('|')}`;
+}
+
+function isPrefix(shorter, longer) {
+  if (shorter.length > longer.length) return false;
+  for (let i = 0; i < shorter.length; i++) if (shorter[i] !== longer[i]) return false;
+  return true;
+}
+
+// Adds strokes[from..] into `map.stops`; the last one's box is saved first.
+// Returns the union of the boxes that received a stroke (window pixels) or null.
+function addStrokesToMap(map, strokes, geometry, from) {
+  const window = map.window;
+  let dirty = null;
+  for (let i = from; i < strokes.length; i++) {
+    const prepared = prepareStrokeCoverage(strokes[i], geometry);
+    if (!prepared) {
+      if (i === strokes.length - 1) map.undo = { index: i, rect: null, values: null };
+      continue;
+    }
+    const { bx0, by0, bx1, by1 } = prepared;
+    const bw = bx1 - bx0 + 1; const bh = by1 - by0 + 1;
+    const rect = { x: bx0 - window.x, y: by0 - window.y, width: bw, height: bh };
+    if (i === strokes.length - 1) map.undo = { index: i, rect, values: copyMapRect(map.stops, window.width, rect) };
+    const coverage = new Float32Array(bw * bh);
+    strokeCoverageInto(prepared, coverage, bx0, by0, bw, bx0, by0, bx1, by1);
+    addCoverageToStops(map.stops, window, strokes[i], bx0, by0, bw, bh, coverage);
+    dirty = unionRect(dirty, rect);
+  }
+  return dirty;
+}
+
+function copyMapRect(stops, stride, rect) {
+  const values = new Float32Array(rect.width * rect.height);
+  for (let y = 0; y < rect.height; y++) {
+    const from = (rect.y + y) * stride + rect.x;
+    values.set(stops.subarray(from, from + rect.width), y * rect.width);
+  }
+  return values;
+}
+
+export function unionRect(a, b) {
+  if (!a) return b ? { ...b } : null;
+  if (!b) return { ...a };
+  const x = Math.min(a.x, b.x); const y = Math.min(a.y, b.y);
+  return { x, y, width: Math.max(a.x + a.width, b.x + b.width) - x, height: Math.max(a.y + a.height, b.y + b.height) - y };
+}
+
+/**
+ * The dense map of `localExposure` for `geometry`, reusing `previous` (a map this
+ * function returned) where it can. Returns { map, key, change }: `key` identifies
+ * the strokes and geometry; `change` is { fromKey, rect } when `previous` was
+ * updated in place and only `rect` (window pixels) changed, else null. `stats`
+ * counts the path taken, for the tests.
+ */
+export function updateExposureStopsMap(previous, localExposure, geometry, stats = null) {
+  const window = geometryWindow(geometry);
+  const geometryKey = JSON.stringify(geometry);
+  const strokes = localExposure?.strokes || [];
+  const strokeKeys = strokes.map(strokeKey);
+  const key = `${geometryKey}|${strokeKeys.join('|')}`;
+  if (previous && previous.key === key) return { map: previous, key, change: null };
+  if (previous && previous.geometryKey === geometryKey && previous.stops.length === window.width * window.height) {
+    const fromKey = previous.key;
+    if (isPrefix(previous.strokeKeys, strokeKeys)) {
+      const rect = addStrokesToMap(previous, strokes, geometry, previous.strokeKeys.length);
+      previous.strokeKeys = strokeKeys;
+      previous.key = key;
+      if (stats) stats.extended = (stats.extended || 0) + 1;
+      return { map: previous, key, change: { fromKey, rect } };
+    }
+    const undo = previous.undo;
+    if (strokeKeys.length === previous.strokeKeys.length - 1 && undo && undo.index === strokeKeys.length
+      && isPrefix(strokeKeys, previous.strokeKeys)) {
+      const { rect, values } = undo;
+      if (rect) {
+        for (let y = 0; y < rect.height; y++) previous.stops.set(values.subarray(y * rect.width, (y + 1) * rect.width), (rect.y + y) * window.width + rect.x);
+      }
+      previous.strokeKeys = strokeKeys;
+      previous.key = key;
+      previous.undo = null;
+      if (stats) stats.undone = (stats.undone || 0) + 1;
+      return { map: previous, key, change: { fromKey, rect } };
+    }
+  }
+  const map = { key, geometryKey, strokeKeys, window, stops: new Float32Array(window.width * window.height), undo: null };
+  addStrokesToMap(map, strokes, geometry, 0);
+  if (stats) stats.full = (stats.full || 0) + 1;
+  return { map, key, change: null };
+}
+
+export { applyExposureStopsToImage16, hasExposureStops, isTiledStops, exposureStopsCover } from '../silvercore/util/localExposure.js';
