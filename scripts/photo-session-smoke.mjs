@@ -292,6 +292,69 @@ export async function runPhotoSessionSmoke({ send, evaluate, waitFor, fail, inst
     await until('CMY edit updates active thumbnail without switching', `document.querySelector('.file-list-name[data-index="0"]')?.dataset.previewState === 'ready' && document.querySelector('.file-list-name[data-index="0"] img')?.src !== ${JSON.stringify(thumbnailBefore.src)}`);
     const edited8 = await exportPixels(8), edited16 = await exportPixels(16);
     await idle();
+    // #234: a drag re-encodes no tile while it moves; the active tile settles
+    // once, about 250 ms after release. A zoom (and the display-preview
+    // refinement it starts) rebuilds nothing.
+    await evaluate(`window.__tileProbe = (() => {
+      const proto = HTMLCanvasElement.prototype, encode = proto.toDataURL;
+      const probe = { encodes: 0, tiles: [], restore: null };
+      proto.toDataURL = function (...args) { probe.encodes++; return encode.apply(this, args); };
+      const observer = new MutationObserver(records => {
+        for (const record of records) if (record.target.matches?.('img.file-list-thumbnail')) probe.tiles.push(performance.now());
+      });
+      observer.observe(document.querySelector('.file-list-name[data-index="0"]'), { subtree: true, attributes: true, attributeFilter: ['src'] });
+      probe.restore = () => { proto.toDataURL = encode; observer.disconnect(); };
+      return probe;
+    })()`);
+    const drag = await evaluate(`(async () => {
+      const probe = window.__tileProbe, input = document.getElementById('cyan');
+      const before = document.querySelector('.file-list-name[data-index="0"] img').getAttribute('src');
+      for (let i = 0; i < 90; i++) {
+        input.value = String(21 + i % 30);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        await new Promise(resolve => setTimeout(resolve, 16));
+      }
+      const during = { encodes: probe.encodes, tiles: probe.tiles.length };
+      const released = performance.now();
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      await new Promise(resolve => setTimeout(resolve, 600));
+      return { during, encodes: probe.encodes, tiles: probe.tiles.map(time => Math.round(time - released)),
+        changed: document.querySelector('.file-list-name[data-index="0"] img').getAttribute('src') !== before };
+    })()`);
+    expect(drag.during.encodes === 0 && drag.during.tiles === 0,
+      'active tile was re-encoded while the slider moved: ' + JSON.stringify(drag));
+    expect(drag.encodes === 1 && drag.tiles.length === 1 && drag.tiles[0] <= 500 && drag.changed,
+      'active tile did not settle exactly once within 500 ms of release: ' + JSON.stringify(drag));
+    await evaluate(`(() => {
+      const input = document.getElementById('cyan'); input.value = '20';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    await idle();
+    const zoomTile = await evaluate(`(() => {
+      const probe = window.__tileProbe;
+      probe.encodes = 0; probe.tiles.length = 0;
+      probe.src = document.querySelector('.file-list-name[data-index="0"] img').getAttribute('src');
+      document.getElementById('zoomInBtn').click();
+      probe.zoomed = performance.now();
+      return probe.src.length > 0;
+    })()`);
+    expect(zoomTile, 'active tile missing before the zoom check');
+    // Settled: any zoom redraw, the refinement conversion (if the display
+    // raster changes size) and the 250 ms tile timer after them are done;
+    // a full-resolution re-render comes seconds later and is not a zoom.
+    await until('zoom and display refinement settled', `performance.now() - window.__tileProbe.zoomed > 600
+      && window.__photoSessionProbe.inFlight === 0 && performance.now() - window.__photoSessionProbe.lastActivity > 450`, 15000);
+    const zoomed = await evaluate(`(() => {
+      const probe = window.__tileProbe;
+      const result = { encodes: probe.encodes, tiles: probe.tiles.length,
+        same: document.querySelector('.file-list-name[data-index="0"] img').getAttribute('src') === probe.src };
+      probe.restore(); delete window.__tileProbe;
+      return result;
+    })()`);
+    expect(zoomed.encodes === 0 && zoomed.tiles === 0 && zoomed.same,
+      'zoom rebuilt the active tile: ' + JSON.stringify(zoomed));
+    await idle();
     const thumbnailEdited = await evaluate('window.__photoSessionProbe.thumbnail(0)');
     expect(before8.sha256 !== edited8.sha256, 'CMY fixture did not change exported pixels');
     expect(thumbnailBefore.means[0] - thumbnailEdited.means[0] > 10

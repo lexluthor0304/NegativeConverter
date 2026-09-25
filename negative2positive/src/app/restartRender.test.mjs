@@ -51,6 +51,7 @@ function fixture({ repairs = true, locked = false } = {}) {
     invalidateSilverCoreCache: noop, resetFrontierGuideImageState: noop,
     displayNegative: noop, updateAutoFrameButtons: noop, markCurrentFileDirty: noop,
     updateFull: noop, updatePreview: noop, updateDustStatusUI: noop,
+    currentConvertedPreviewSource: () => state.processedImageData, carryStudioThumbnailSource: noop,
     disposeDustWorker: noop, getLocalizedText: (key, text) => text,
     noteCoreReprocessSettled: noop, resetDustForCleanSource: noop,
     scheduleDustDetection: noop, updateSlidersFromState: noop,

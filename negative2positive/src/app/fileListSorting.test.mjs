@@ -38,7 +38,8 @@ const context = vm.createContext({
   loadStudioThumbnails: noop, updateExportButtons: noop,
 });
 vm.runInContext('let fileOrderCache = null, fileSelectionAnchor = null, reviewFilter = false;\n'
-  + ['getFileListOrder', 'getSelectedFiles', 'setFileListSort', 'updateFileListUI'].map(functionSource).join('\n'), context);
+  + 'let fileListRefreshDeferrals = 0, fileListRefreshDeferred = false;\n'
+  + ['getFileListOrder', 'getSelectedFiles', 'setFileListSort', 'updateFileListUI', 'renderFileListUI'].map(functionSource).join('\n'), context);
 const order = () => [...context.getFileListOrder()];
 const selected = () => files.map((item, index) => item.selected ? index : -1).filter(index => index >= 0);
 assert.deepEqual(order(), [3, 0, 2, 1]);

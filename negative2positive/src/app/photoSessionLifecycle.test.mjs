@@ -42,6 +42,7 @@ function fixture() {
   };
   const photoSessions = createPhotoSessionCache({ maxBytes: 4096 });
   const photoPreviews = createPhotoSessionCache({ maxBytes: 4096 });
+  const postPaint = [];
   const elements = new Map();
   const element = id => {
     if (!elements.has(id)) elements.set(id, { style: {}, textContent: '' });
@@ -57,15 +58,20 @@ function fixture() {
     pendingBrushRepairs: 0, dustDrawing: false, undoStack: [], redoStack: [],
     coreReprocessGeneration: 3, coreReprocessToken: 4, dustDetectionRevision: 5,
     loadGeneration: 6, _coreReprocessPending: null,
-    studioThumbnailUpdateFrame: 0, cancelAnimationFrame: noop, exactSettingsKey,
+    studioThumbnailUpdateFrame: 0, cancelAnimationFrame: noop,
+    studioThumbnailUpdateTimer: 0, clearTimeout: noop,
+    exactSettingsKey, schedulePostPaintTask: task => postPaint.push(task),
+    fileListRefreshDeferrals: 0, fileListRefreshDeferred: false, queueMicrotask,
+    renderFileListUI: noop,
     coreReprocessBusy: () => false,
     captureSnapshot: () => ({ refs: {
       processedImageData: state.processedImageData,
       conversionSourceImageData: state.conversionSourceImageData,
     } }),
     currentConvertedPreviewSource: () => state.processedImageData,
-    buildAdjustmentSettings: () => ({}),
-    createAdjustedPhotoPreview: () => image(),
+    buildAdjustmentSettings: () => ({ curves: { r: new Uint8Array(256), g: new Uint8Array(256), b: new Uint8Array(256) } }),
+    samplePhotoPreviewSource: source => ({ width: source.width, height: source.height, data: source.data.slice() }),
+    adjustPhotoPreviewSample: sample => ({ ...sample, adjusted: true }),
     getDustSource: () => state.dustRemoval.cleanSource,
     dustBrushSource: converted, dustBrushToken: 4, dustBrushPoints: [{ x: 1, y: 1 }],
     dustBrushMode: 'direct', dustBrushTurn: Promise.resolve(),
@@ -79,8 +85,10 @@ function fixture() {
     assertRepairCurrent: valid => { if (!valid()) throw new DOMException('Superseded', 'AbortError'); },
   });
   vm.runInContext(['photoSettingsKey', 'rememberPhotoSession', 'invalidatePhotoActivation',
-    'isCurrentLoad', 'onDustBrushEnd'].map(functionSource).join('\n'), context);
-  return { context, state, item, photoSessions, photoPreviews, base, converted, mask, element };
+    'cancelStudioThumbnailUpdate', 'isCurrentLoad', 'onDustBrushEnd', 'deferFileListRefresh', 'updateFileListUI',
+    'refreshThumbnailStates'].map(functionSource).join('\n'), context);
+  const paint = () => { for (const task of postPaint.splice(0)) task(); };
+  return { context, state, item, photoSessions, photoPreviews, base, converted, mask, element, postPaint, paint };
 }
 
 for (const outcome of ['success', 'stale', 'abort']) {
@@ -115,7 +123,11 @@ for (const outcome of ['success', 'stale', 'abort']) {
   if (outcome === 'success') {
     c.rememberPhotoSession(item);
     assert.equal(photoSessions.peek(item).snapshot.refs.processedImageData, repaired);
+    assert.equal(photoPreviews.size, 0, 'the click task does not adjust the presentation proxy');
+    f.paint();
     assert.equal(photoPreviews.size, 1);
+    assert.equal(photoPreviews.peek(item).key, c.photoSettingsKey(item));
+    assert.equal(photoPreviews.peek(item).image.adjusted, true);
   }
 }
 
@@ -156,7 +168,7 @@ for (const outcome of ['success', 'stale', 'abort']) {
   c.rememberPhotoSession(f.item);
   Object.assign(f.state, { currentFileIndex: -1, loadedFile: new Blob(['other photo']),
     zoomLevel: .25, panX: -100, panY: 100 });
-  let restored = 0, scheduled = 0, cancelledFrame = 0;
+  let restored = 0, scheduled = 0, cancelledFrame = 0, clearedTimer = 0;
   const warmFeedback = [];
   Object.assign(c, {
     studioAutoFrameRunning: false, isDesktopBatchExportLocked: () => false,
@@ -165,6 +177,8 @@ for (const outcome of ['success', 'stale', 'abort']) {
     requestAnimationFrame: () => assert.fail('warm cache hit must not yield for loading feedback'),
     expiredAnalysisKey: null, lensMapCache: new Map(), invalidateSilverCoreCache: noop,
     studioThumbnailUpdateFrame: 19, cancelAnimationFrame: id => { cancelledFrame = id; },
+    studioThumbnailUpdateTimer: 23, clearTimeout: id => { clearedTimer = id; },
+    adoptStudioThumbnailInputs: noop,
     restoreSnapshot: (snapshot, options) => {
       restored++;
       assert.deepEqual([f.state.zoomLevel, f.state.panX, f.state.panY], [2.5, 13, -21],
@@ -182,7 +196,9 @@ for (const outcome of ['success', 'stale', 'abort']) {
   assert.equal(restored, 1);
   assert.equal(scheduled, 1, 'a pending full render is resumed after warm preview restoration');
   assert.equal(cancelledFrame, 19, 'the outgoing thumbnail frame cannot write into the incoming photo');
+  assert.equal(clearedTimer, 23, 'nor can its settle timer');
   assert.equal(c.studioThumbnailUpdateFrame, 0);
+  assert.equal(c.studioThumbnailUpdateTimer, 0);
   assert.equal(f.state.loadedFile, f.item.file);
   assert.equal(f.photoSessions.size, 0, 'the active photo owns its buffers instead of retaining a cache alias');
   assert.ok(warmFeedback.length > 0 && warmFeedback.every(target => target == null),
@@ -281,6 +297,86 @@ for (const supersedeBeforePaint of [false, true]) {
   assert.equal(c.document.body.dataset.photoSwitching, undefined);
 }
 
+// The 1200 px proxy is adjusted after paint with the settings of the click,
+// and is stored only for a photo that is still queued under the same key.
+for (const change of ['none', 'removed', 'rekeyed', 'curve edited in place']) {
+  const f = fixture(), c = f.context;
+  const curves = { r: new Uint8Array(256).fill(1), g: new Uint8Array(256).fill(2), b: new Uint8Array(256).fill(3) };
+  let adjusted = null;
+  c.buildAdjustmentSettings = () => ({ curves, vibrance: 4 });
+  c.adjustPhotoPreviewSample = (sample, adjustments) => { adjusted = adjustments; return { ...sample }; };
+  c.rememberPhotoSession(f.item);
+  assert.equal(f.postPaint.length, 1);
+  if (change === 'removed') f.state.fileQueue.splice(0, 1);
+  if (change === 'rekeyed') f.item.settings = { ...f.item.settings, cyan: 5 };
+  if (change === 'curve edited in place') curves.r[0] = 99;
+  f.paint();
+  const stored = change === 'none' || change === 'curve edited in place';
+  assert.equal(f.photoPreviews.size, stored ? 1 : 0, `${change}: proxy stored only for an unchanged queued photo`);
+  if (stored) {
+    assert.equal(f.photoPreviews.peek(f.item).key, c.photoSettingsKey(f.item));
+    assert.equal(adjusted.curves.r[0], 1, 'the proxy uses the curves of the click, not later in-place edits');
+    assert.notEqual(adjusted.curves.r, curves.r);
+    assert.equal(adjusted.vibrance, 4);
+  }
+}
+
+// One list refresh per click. Persisting the outgoing photo, restoring the
+// incoming one and its tile each ask for one; a warm switch refreshes in its
+// finally, a cold one before its feedback paints (then once more when done).
+for (const warm of [true, false]) {
+  const f = coldFixture(), c = f.context;
+  const renders = [], syncs = [];
+  let tiles = 0;
+  Object.assign(c, {
+    getCurrentQueueItem: () => f.state.fileQueue[f.state.currentFileIndex],
+    persistCurrentFileSettings: () => { c.updateFileListUI(); c.refreshThumbnailStates(); c.updateFileListUI(); },
+    rememberPhotoSession: () => { c.updateFileListUI(); },
+    updateFileListUI: undefined, renderFileListUI: () => renders.push({ target: f.state.photoSwitchTarget, syncs: syncs.length }),
+    studioWorkspace: { sync: () => syncs.push(renders.length) },
+    expiredAnalysisKey: null, lensMapCache: new Map(), invalidateSilverCoreCache: noop,
+    restoreSnapshot: () => { c.updateFileListUI(); c.refreshThumbnailStates(); },
+    applyZoomPanTransform: noop, updateUndoRedoButtons: noop, scheduleFullResolutionRender: noop,
+    updateStudioThumbnail: () => { tiles++; c.updateFileListUI(); }, adoptStudioThumbnailInputs: noop,
+  });
+  vm.runInContext(functionSource('updateFileListUI'), c);
+  if (warm) {
+    f.photoSessions.put(f.second, { file: f.second.file, base: f.base, key: c.photoSettingsKey(f.second),
+      snapshot: { refs: {} }, undo: [], redo: [], zoom: 1, panX: 0, panY: 0, previewOnly: false, fullResolutionPending: false });
+  }
+  const pending = c.switchToFile(1);
+  assert.equal(c.fileListRefreshDeferrals, 0, 'the deferral closes within the click task');
+  assert.equal(renders.length, 1, `${warm ? 'warm' : 'cold'} click refreshes the list once, synchronously`);
+  if (warm) {
+    await pending;
+    assert.equal(tiles, 1);
+    assert.equal(renders.length, 1);
+  } else {
+    assert.equal(renders[0].target, f.second, 'the cold refresh already carries the target');
+    assert.equal(renders[0].syncs, 0, 'and lands before studioWorkspace.sync() marks it');
+    assert.deepEqual(syncs, [1]);
+    f.frames.shift()(); await tick();
+    f.loads[0].resolve({ status: 'loaded' }); await tick();
+    f.preparations[0].resolve();
+    await pending;
+    assert.equal(renders.length, 2, 'plus the one refresh when the cold switch completes');
+  }
+}
+// A switch that throws before closing its deferral cannot leave the list frozen.
+{
+  const f = fixture(), c = f.context;
+  let renders = 0;
+  Object.assign(c, { renderFileListUI: () => { renders++; } });
+  const close = c.deferFileListRefresh();
+  c.updateFileListUI();
+  assert.equal(renders, 0);
+  await Promise.resolve();
+  assert.equal(c.fileListRefreshDeferrals, 0);
+  assert.equal(renders, 1, 'the end-of-task close flushes the pending refresh');
+  close();
+  assert.equal(renders, 1);
+}
+
 {
   const f = fixture(), c = f.context;
   const undo = { label: 'cyan' }, redo = { label: 'density' };
@@ -339,6 +435,7 @@ for (const supersedeBeforePaint of [false, true]) {
 for (const locked of [false, true]) {
   const f = fixture(), c = f.context;
   c.rememberPhotoSession(f.item);
+  f.paint();
   assert.ok(f.photoSessions.bytes > 0 && f.photoPreviews.bytes > 0);
   let pickerOpened = 0, emptyListRefreshes = 0;
   Object.assign(c, {

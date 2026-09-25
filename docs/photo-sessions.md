@@ -3,7 +3,8 @@
 Issues: [#220](https://github.com/lexluthor0304/NegativeConverter/issues/220),
 [#221](https://github.com/lexluthor0304/NegativeConverter/issues/221),
 [#223](https://github.com/lexluthor0304/NegativeConverter/issues/223),
-[#224](https://github.com/lexluthor0304/NegativeConverter/issues/224).
+[#224](https://github.com/lexluthor0304/NegativeConverter/issues/224),
+[#234](https://github.com/lexluthor0304/NegativeConverter/issues/234).
 
 ## Ownership and invalidation
 
@@ -25,7 +26,11 @@ not a total renderer-memory promise; the active editor, workers, native GPU
 resources and file storage are additional.
 
 Keys include the per-file recipe, film-type override, repair configuration,
-AI model revision and flat-field identity. A pending RAW upgrade, conversion,
+AI model revision and flat-field identity. `settingsKey.js` builds them
+exactly but cheaply: the JSON of those values with each `{ r, g, b }` curve
+LUT triple replaced by null, then a raw U+0000 and the LUT bytes. Two keys are
+equal only when the plain JSON would be; nothing is memoised, because curve
+LUTs change in place. A pending RAW upgrade, conversion,
 dust detection or brush refinement is not a settled session. Preview-only
 restoration keeps the full-resolution pending flag: export must still pass the
 existing full-resolution barrier. Presentation proxies never become export
@@ -56,9 +61,28 @@ does not decide whether a thumbnail includes white balance, CMY, curves or a
 look. Core tone controls are stripped from this final stage because the
 conversion already applied them.
 
-The active thumbnail refreshes on coalesced preview/full redraws. Other photos
-use a single background preview lane through `processFileWithSettings`, with
-bounded output size and stale-result guards. The previous tile stays visible
+The active thumbnail is not part of the frame loop. A preview redraw (slider,
+curve, brush, zoom step) re-arms a trailing timer, so the tile settles about
+250 ms after the last one; a full render updates it in the next frame. When
+the timer fires, the tile is rebuilt only if its inputs changed: the converted
+preview source it samples and an exact signature of the adjustment settings.
+Zoom, pan and resize change neither; the display-preview refinement after a
+zoom converts the same settings at another size and carries the tile over
+instead of rebuilding it. A full-resolution re-render that follows it on
+photos of 16 MP or less is a new source and rebuilds the tile once. During a
+drag the tile keeps its pre-drag colours until it settles.
+
+A photo switch persists the outgoing photo's tile synchronously (restamping
+only, when the settled tile already matches), adopts the incoming photo's
+current tile without rebuilding it, and refreshes the file list once: before
+the cold-switch feedback paints, or at the end of a warm switch. The 1200 px
+proxy for revisits after eviction is sampled in the click and adjusted after
+the next paint; it is stored only while the photo is still queued under the
+same key. Row refreshes compute one key per row and touch only their row when
+a single tile changes.
+
+Other photos use a single background preview lane through
+`processFileWithSettings`, with bounded output size and stale-result guards. The previous tile stays visible
 during invalidation, accompanied by a pending indicator; a failed preview is
 marked rather than retried indefinitely. This includes two-photo imports,
 which do not run automatic roll analysis.

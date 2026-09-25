@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createAdjustedPhotoPreview } from './photoPreview.js';
+import { createAdjustedPhotoPreview, samplePhotoPreviewSource, adjustPhotoPreviewSample } from './photoPreview.js';
 import {
   applyPreparedAdjustmentsToBuffer,
   stripLegacyToneSettingsForSilverCore
@@ -185,6 +185,21 @@ for (const maxSize of [0, -1, NaN, Infinity, 1.5]) {
 }
 for (const source of [null, { width: 0, height: 1, data: new Uint8Array(4) }, { width: 2, height: 2, data: new Uint8Array(4) }]) {
   assert.throws(() => createAdjustedPhotoPreview(source, settings()), TypeError);
+}
+
+// The deferred presentation proxy: sampling then adjusting separately gives
+// the same bytes, and the sample shares no memory with its source.
+{
+  const source = image(2458, 1626);
+  const prepared = settings({ vibrance: 35, cyan: -12, saturation: 10 });
+  const sample = samplePhotoPreviewSource(source, { maxSize: 1200 });
+  assert.notEqual(sample.data.buffer, source.data.buffer);
+  const split = adjustPhotoPreviewSample(sample, prepared);
+  const whole = createAdjustedPhotoPreview(source, prepared, { maxSize: 1200 });
+  assert.deepEqual([split.width, split.height], [whole.width, whole.height]);
+  assert.deepEqual(Buffer.from(split.data.buffer), Buffer.from(whole.data.buffer));
+  assert.throws(() => samplePhotoPreviewSource(image(1, 1), { maxSize: 0 }), RangeError);
+  assert.throws(() => samplePhotoPreviewSource(null), TypeError);
 }
 
 console.log('photoPreview tests passed');

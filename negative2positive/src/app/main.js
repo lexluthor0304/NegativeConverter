@@ -1,6 +1,6 @@
 import { applyFilmTypeOverride, sanitizeFilmTypeOverride } from './filmTypeOverride.js';
 import { createPhotoSessionCache } from './photoSessionCache.js';
-import { createAdjustedPhotoPreview } from './photoPreview.js';
+import { createAdjustedPhotoPreview, samplePhotoPreviewSource, adjustPhotoPreviewSample } from './photoPreview.js';
 import { exactSettingsKey } from './settingsKey.js';
 import { sanitizeSemanticMap } from './semanticAnchors.js';
 import { analyzeSemanticPreview } from './semanticModel.js';
@@ -4152,7 +4152,7 @@ import { frameNeedsReview } from './reviewQueue.js';
         const previous = state.conversionPreviewImageData;
         if (previous?.width === target.width && previous?.height === target.height) return;
         state.conversionPreviewImageData = resizeDisplayPreview(source, target);
-        scheduleCoreReprocess({ full: false });
+        scheduleCoreReprocess({ full: false, displayResize: true });
       }, 100);
     }
 
@@ -5046,6 +5046,14 @@ import { frameNeedsReview } from './reviewQueue.js';
     let previewAdjustedBuffer = null;
     let histogramAdjustedBuffer = null;
     let lastHistogramUpdateTime = 0;
+    // The active tile is a function of the converted preview source it was
+    // sampled from and the exact adjustment settings. Remember both per item,
+    // with the data URL made from them: zoom, pan and resize redraws change
+    // neither, so they rebuild nothing, and any other writer of the tile
+    // (roll-transaction undo) shows up as a different data URL.
+    const studioThumbnailInputs = new WeakMap();
+    const STUDIO_THUMBNAIL_SETTLE_MS = 250;
+    let studioThumbnailUpdateTimer = 0;
     let studioThumbnailUpdateFrame = 0;
 
     function renderHistogramForWebGL(force = false) {
@@ -5143,7 +5151,7 @@ import { frameNeedsReview } from './reviewQueue.js';
     function updateFull() {
       if (!state.processedImageData) return;
       if (state.beforeAfterActive || state.cropping) return;
-      scheduleStudioThumbnailUpdate();
+      scheduleStudioThumbnailUpdate({ settled: true });
       // Whether a 16-bit export keeps 16-bit samples depends on the Step-3
       // controls, so the export panel's warning has to follow them.
       updateExportUI();
@@ -5591,7 +5599,9 @@ import { frameNeedsReview } from './reviewQueue.js';
         ? (_coreReprocessFullInFlight || _coreReprocessPreviewInFlight)
         : _coreReprocessPreviewInFlight;
       if (blocked) {
-        _coreReprocessPending = { ...options, full, token, sourceRef, generation };
+        const displayResize = Boolean(options.displayResize)
+          && (!_coreReprocessPending || _coreReprocessPending.displayResize === true);
+        _coreReprocessPending = { ...options, full, token, sourceRef, generation, displayResize };
         return false;
       }
       const previewFlight = full ? null : {};
@@ -5641,14 +5651,17 @@ import { frameNeedsReview } from './reviewQueue.js';
           // drawn, so it does not sit idle through the result handling.
           postPendingPreviewEarly(previewFlight);
 
+          const replacedSource = options.displayResize ? currentConvertedPreviewSource() : null;
           if (hasSmallPreview || superseded) {
             // Preview source is smaller — update preview display path only
             applyPreviewProcessedImageToState(previewProcessed);
+            carryStudioThumbnailSource(replacedSource);
             updatePreview();
             scheduleFullUpdate();
           } else {
             // No downscaled preview (image already small) — treat as full
             applyProcessedImageToState(previewProcessed);
+            carryStudioThumbnailSource(replacedSource);
             updatePreview();
             // No need to schedule full update; we already processed at full resolution
           }
@@ -5953,7 +5966,11 @@ import { frameNeedsReview } from './reviewQueue.js';
       // for the new conversion instead of writing the previous one.
       if (hasSeparateConversionPreview()) state.fullResolutionPending = true;
       const wasFull = coreReprocessScheduled?.full;
-      coreReprocessScheduled = { full, token, sourceRef: state.conversionSourceImageData };
+      // A display-preview resize converts unchanged settings at another size
+      // (carryStudioThumbnailSource), but only while no other request merges in.
+      const displayResize = Boolean(options.displayResize)
+        && (!coreReprocessScheduled || coreReprocessScheduled.displayResize === true);
+      coreReprocessScheduled = { full, token, sourceRef: state.conversionSourceImageData, displayResize };
       if (full) {
         // Settings that need a full-resolution pass still settle for 70 ms.
         clearCoreReprocessTimer();
@@ -6950,17 +6967,34 @@ import { frameNeedsReview } from './reviewQueue.js';
         photoSessions.put(item, { file: entry.file, base: entry.base, rawMetadata: entry.rawMetadata });
       }
       if (settled) {
-        photoPreviews.put(item, {
-          key: entry.key,
-          image: createAdjustedPhotoPreview(currentConvertedPreviewSource(), buildAdjustmentSettings(state), { maxSize: 1200 })
+        // The 1200 px proxy only serves a cold revisit after eviction, so the
+        // click does not build it. Sample now (a few ms, and the deferred task
+        // then pins no full-resolution plane) and adjust after the next paint,
+        // with the settings of this moment (curve LUTs change in place).
+        const sample = samplePhotoPreviewSource(currentConvertedPreviewSource(), { maxSize: 1200 });
+        const adjustments = buildAdjustmentSettings(state);
+        const { r, g, b } = adjustments.curves;
+        adjustments.curves = { r: new Uint8Array(r), g: new Uint8Array(g), b: new Uint8Array(b) };
+        const key = entry.key;
+        schedulePostPaintTask(() => {
+          // A removed or re-keyed photo never gets a proxy of older settings.
+          if (!state.fileQueue.includes(item) || photoSettingsKey(item) !== key) return;
+          photoPreviews.put(item, { key, image: adjustPhotoPreviewSample(sample, adjustments) });
         });
       }
     }
 
+    // Runs after the next paint (rAF, then a task); a hidden page paints no
+    // frames, so a task alone. Behaves alike in Chromium and every WebView.
+    function schedulePostPaintTask(task) {
+      if (document.visibilityState === 'hidden') setTimeout(task, 0);
+      else requestAnimationFrame(() => setTimeout(task, 0));
+    }
+
     function invalidatePhotoActivation() {
       cancelPendingTimers();
-      if (studioThumbnailUpdateFrame) cancelAnimationFrame(studioThumbnailUpdateFrame);
-      studioThumbnailUpdateFrame = 0;
+      // The outgoing photo's tile update cannot write into the incoming one.
+      cancelStudioThumbnailUpdate();
       cancelScheduledFullResolutionRender();
       coreReprocessGeneration += 1;
       coreReprocessToken += 1;
@@ -12047,7 +12081,30 @@ import { frameNeedsReview } from './reviewQueue.js';
       const count = items.filter(item => reviewForItem(item).needs).length;
       if (count) showToast(getInterpolatedText('reviewExport', { count }, `${count} frames were flagged for review and will be exported as they are.`), 5000);
     }
+    // Inside the synchronous part of a photo switch the list is only marked
+    // dirty; the switch then refreshes it once (switchToFile). Nothing else
+    // defers it: callers rely on its synchronous side effects.
+    let fileListRefreshDeferrals = 0;
+    let fileListRefreshDeferred = false;
+    function deferFileListRefresh() {
+      fileListRefreshDeferrals += 1;
+      let open = true;
+      const close = ({ flush = true } = {}) => {
+        if (!open) return;
+        open = false;
+        fileListRefreshDeferrals -= 1;
+        if (flush && !fileListRefreshDeferrals && fileListRefreshDeferred) updateFileListUI();
+      };
+      // A deferral never outlives its task, even if the switch throws first.
+      queueMicrotask(close);
+      return close;
+    }
     function updateFileListUI() {
+      if (fileListRefreshDeferrals) { fileListRefreshDeferred = true; return; }
+      fileListRefreshDeferred = false;
+      renderFileListUI();
+    }
+    function renderFileListUI() {
       // Queue replacement/removal must also invalidate a delayed activation.
       if (state.photoSwitchTarget && !state.fileQueue.includes(state.photoSwitchTarget)) {
         ++loadGeneration;
@@ -12156,6 +12213,9 @@ import { frameNeedsReview } from './reviewQueue.js';
       const leavingItem = getCurrentQueueItem();
       const fileItem = state.fileQueue[index];
       const cached = photoSessions.take(fileItem);
+      // Leaving, restoring and the incoming tile would each refresh the whole
+      // list. Refresh it once: before the cold feedback paints, or in finally.
+      const flushFileList = deferFileListRefresh();
       if (leavingItem && leavingItem.file === state.loadedFile
         && (leavingItem.isDirty || leavingItem.settings || state.currentStep >= 3)) {
         persistCurrentFileSettings({ silent: true, force: true });
@@ -12194,13 +12254,17 @@ import { frameNeedsReview } from './reviewQueue.js';
           applyZoomPanTransform();
           updateUndoRedoButtons();
           updatePreview();
-          updateStudioThumbnail();
+          // Its tile already shows these pixels unless the settings moved on.
+          if (fileItem.thumbnail && fileItem.thumbnailKind === 'processed'
+            && fileItem.thumbnailKey === photoSettingsKey(fileItem)) adoptStudioThumbnailInputs(fileItem);
+          else updateStudioThumbnail();
           if (state.fullResolutionPending) scheduleFullResolutionRender('photo-restored');
           return;
         }
 
         state.photoSwitchTarget = fileItem;
         state.photoSwitchPhase = 'loading';
+        flushFileList();
         studioWorkspace?.sync();
         // Paint the target identity before decoder or cached-base preparation
         // can occupy the main thread. Hidden tabs need not await a paused rAF.
@@ -12256,6 +12320,8 @@ import { frameNeedsReview } from './reviewQueue.js';
         if (state.loadedFile !== fileItem.file && state.originalImageData) updatePreview();
         showToast(getLocalizedText('loadError', 'Error loading file'));
       } finally {
+        // The warm switch's refresh is the one below.
+        flushFileList({ flush: !isCurrentLoad(generation) });
         // An old completion must never clear the newest target's feedback.
         if (isCurrentLoad(generation)) {
           state.photoSwitchTarget = null;
@@ -13001,10 +13067,12 @@ import { frameNeedsReview } from './reviewQueue.js';
     let automaticRollAnalysisRunning = false;
     let automaticRollRevision = 0;
     let studioThumbnailsRunning = false;
-    function updateFileThumbnail(item) {
+    function fileListButtonFor(item) {
       const index = state.fileQueue.indexOf(item);
-      if (index < 0 || !item.thumbnail) return;
-      const button = document.querySelector(`#fileListItems .file-list-name[data-index="${index}"]`);
+      return index < 0 ? null : document.querySelector(`#fileListItems .file-list-name[data-index="${index}"]`);
+    }
+    function updateFileThumbnail(item) {
+      const button = item.thumbnail ? fileListButtonFor(item) : null;
       if (!button) return;
       let image = button.querySelector('.file-list-thumbnail');
       if (!image) {
@@ -13014,27 +13082,41 @@ import { frameNeedsReview } from './reviewQueue.js';
         else button.prepend(image);
       }
       if (image.getAttribute('src') !== item.thumbnail) image.src = item.thumbnail;
-      refreshThumbnailStates();
+      refreshThumbnailState(button, item);
+    }
+    function refreshThumbnailRow(item) {
+      const button = fileListButtonFor(item);
+      if (button) refreshThumbnailState(button, item);
+    }
+    // One row. The settings key is computed once for both stamps, and the DOM
+    // is written only where the state changed.
+    function refreshThumbnailState(button, item) {
+      const key = photoSettingsKey(item);
+      const ready = Boolean(item.thumbnail && item.thumbnailKind === 'processed' && item.thumbnailKey === key);
+      const failed = item.thumbnailErrorKey === key;
+      const previewState = ready ? 'ready' : failed ? 'error' : 'pending';
+      if (button.dataset.previewState !== previewState) button.dataset.previewState = previewState;
+      const switching = state.photoSwitchTarget === item && document.body.dataset.photoSwitching === 'true';
+      const busy = String(switching || (!ready && !failed));
+      if (button.getAttribute('aria-busy') !== busy) button.setAttribute('aria-busy', busy);
+      let status = button.querySelector('.file-list-preview-state');
+      if (!status) {
+        status = document.createElement('span');
+        status.className = 'file-list-preview-state';
+        button.append(status);
+      }
+      if (status.hidden !== ready) status.hidden = ready;
+      const text = failed ? '!' : '…';
+      if (status.textContent !== text) status.textContent = text;
+      const title = failed ? getLocalizedText('error', 'Error') : getLocalizedText('processingStatus', 'Processing');
+      if (status.title !== title) status.title = title;
     }
     function refreshThumbnailStates() {
+      // A photo switch refreshes the list once, when it flushes (switchToFile).
+      if (fileListRefreshDeferrals) { fileListRefreshDeferred = true; return; }
       for (const button of document.querySelectorAll('#fileListItems .file-list-name')) {
         const item = state.fileQueue[Number(button.dataset.index)];
-        if (!item) continue;
-        const ready = item.thumbnail && item.thumbnailKind === 'processed'
-          && item.thumbnailKey === photoSettingsKey(item);
-        const failed = item.thumbnailErrorKey === photoSettingsKey(item);
-        button.dataset.previewState = ready ? 'ready' : failed ? 'error' : 'pending';
-        const switching = state.photoSwitchTarget === item && document.body.dataset.photoSwitching === 'true';
-        button.setAttribute('aria-busy', String(switching || (!ready && !failed)));
-        let status = button.querySelector('.file-list-preview-state');
-        if (!status) {
-          status = document.createElement('span');
-          status.className = 'file-list-preview-state';
-          button.append(status);
-        }
-        status.hidden = Boolean(ready);
-        status.textContent = failed ? '!' : '…';
-        status.title = failed ? getLocalizedText('error', 'Error') : getLocalizedText('processingStatus', 'Processing');
+        if (item) refreshThumbnailState(button, item);
       }
     }
     function canReuseLoadedRollSource(item) {
@@ -13059,11 +13141,17 @@ import { frameNeedsReview } from './reviewQueue.js';
           if (!studioBackgroundReady() || automaticRollImportRunning) {
             await new Promise(resolve => setTimeout(resolve, 250)); continue;
           }
-          const item = state.fileQueue.find(entry => entry !== getCurrentQueueItem()
-            && (!entry.thumbnail || entry.thumbnailKind !== 'processed' || entry.thumbnailKey !== photoSettingsKey(entry))
-            && entry.thumbnailErrorKey !== photoSettingsKey(entry));
+          // One settings key per candidate, reused for the job it starts.
+          let key = null;
+          const item = state.fileQueue.find(entry => {
+            if (entry === getCurrentQueueItem()) return false;
+            const entryKey = photoSettingsKey(entry);
+            if (entry.thumbnailErrorKey === entryKey || (entry.thumbnail
+              && entry.thumbnailKind === 'processed' && entry.thumbnailKey === entryKey)) return false;
+            key = entryKey;
+            return true;
+          });
           if (!item) break;
-          const key = photoSettingsKey(item);
           const rollRevision = automaticRollRevision;
           let superseded = false;
           const valid = () => {
@@ -13100,7 +13188,7 @@ import { frameNeedsReview } from './reviewQueue.js';
             if (error?.name !== 'AbortError' && valid()) {
               item.thumbnailErrorKey = key;
               console.warn('Photo preview failed:', item.file.name, error);
-              refreshThumbnailStates();
+              refreshThumbnailRow(item);
             }
           }
           await new Promise(resolve => setTimeout(resolve, 30));
@@ -13109,24 +13197,69 @@ import { frameNeedsReview } from './reviewQueue.js';
     }
 
     // 標準暗室は既存の描画・履歴・書き出し経路を再利用する。
+    // Tiles stay JPEG data URLs: roll-transaction undo snapshots keep them.
+    // Encoding is synchronous, so one canvas serves every tile.
+    let thumbnailCanvas = null;
     function thumbnailDataUrl(source, maxSize = 144) {
-      const thumbnail = createStudioThumbnail(source, maxSize);
-      const thumbCanvas = document.createElement('canvas');
-      thumbCanvas.width = thumbnail.width;
-      thumbCanvas.height = thumbnail.height;
-      thumbCanvas.getContext('2d').putImageData(new ImageData(thumbnail.data, thumbnail.width, thumbnail.height), 0, 0);
-      return thumbCanvas.toDataURL('image/jpeg', 0.8);
+      // At scale 1 the sampler is an exact copy, so a source that already
+      // fits is encoded as it is.
+      const fits = source.width <= maxSize && source.height <= maxSize
+        && source.data instanceof Uint8ClampedArray && source.data.length === source.width * source.height * 4;
+      const thumbnail = fits ? source : createStudioThumbnail(source, maxSize);
+      thumbnailCanvas ||= document.createElement('canvas');
+      thumbnailCanvas.width = thumbnail.width;
+      thumbnailCanvas.height = thumbnail.height;
+      thumbnailCanvas.getContext('2d').putImageData(thumbnail instanceof ImageData ? thumbnail
+        : new ImageData(thumbnail.data, thumbnail.width, thumbnail.height), 0, 0);
+      return thumbnailCanvas.toDataURL('image/jpeg', 0.8);
     }
 
+    function studioThumbnailSignature(adjustments) {
+      return exactSettingsKey([adjustments], 1);
+    }
+
+    // Rebuilds the active tile only when its inputs changed; otherwise it only
+    // restamps the settings key (item.settings may have been persisted since).
     function updateStudioThumbnail() {
       const item = getCurrentQueueItem();
       const source = currentConvertedPreviewSource();
       if (!item || item.file !== state.loadedFile || !source) return;
-      item.thumbnail = thumbnailDataUrl(createAdjustedPhotoPreview(source, buildAdjustmentSettings(state)));
-      item.thumbnailKind = 'processed';
+      cancelStudioThumbnailUpdate();
+      const adjustments = buildAdjustmentSettings(state);
+      const signature = studioThumbnailSignature(adjustments);
+      const rendered = studioThumbnailInputs.get(item);
+      if (!rendered || rendered.source !== source || rendered.signature !== signature
+        || rendered.thumbnail !== item.thumbnail || item.thumbnailKind !== 'processed') {
+        item.thumbnail = thumbnailDataUrl(createAdjustedPhotoPreview(source, adjustments));
+        item.thumbnailKind = 'processed';
+        studioThumbnailInputs.set(item, { source, signature, thumbnail: item.thumbnail });
+      }
       item.thumbnailKey = photoSettingsKey(item);
       item.thumbnailErrorKey = null;
       updateFileThumbnail(item);
+    }
+
+    // The incoming photo of a warm switch restores the pixels its current
+    // tile was made from: adopt them as the tile's inputs instead of
+    // rebuilding it.
+    function adoptStudioThumbnailInputs(item) {
+      const source = currentConvertedPreviewSource();
+      if (!source || !item.thumbnail) return;
+      cancelStudioThumbnailUpdate();
+      studioThumbnailInputs.set(item, {
+        source, signature: studioThumbnailSignature(buildAdjustmentSettings(state)), thumbnail: item.thumbnail
+      });
+    }
+
+    // A display-preview resize converts the same settings at another size.
+    // When its result replaces the source a current tile was sampled from,
+    // the tile stays current.
+    function carryStudioThumbnailSource(previousSource) {
+      const item = getCurrentQueueItem();
+      const rendered = item && studioThumbnailInputs.get(item);
+      if (rendered && previousSource && rendered.source === previousSource) {
+        rendered.source = currentConvertedPreviewSource();
+      }
     }
 
     function currentConvertedPreviewSource() {
@@ -13134,13 +13267,26 @@ import { frameNeedsReview } from './reviewQueue.js';
         ? state.previewSourceImageData : state.processedImageData;
     }
 
-    function scheduleStudioThumbnailUpdate() {
-      if (studioThumbnailUpdateFrame) return;
+    // Nobody looks at the tile during a drag, and each rebuild re-encodes a
+    // JPEG: preview redraws settle it about 250 ms after the last one; a full
+    // render updates it in the next frame. Either replaces a pending update.
+    function scheduleStudioThumbnailUpdate({ settled = false } = {}) {
+      cancelStudioThumbnailUpdate();
       const generation = loadGeneration;
-      studioThumbnailUpdateFrame = requestAnimationFrame(() => {
+      const run = () => {
+        studioThumbnailUpdateTimer = 0;
         studioThumbnailUpdateFrame = 0;
         if (isCurrentLoad(generation)) updateStudioThumbnail();
-      });
+      };
+      if (settled) studioThumbnailUpdateFrame = requestAnimationFrame(run);
+      else studioThumbnailUpdateTimer = setTimeout(run, STUDIO_THUMBNAIL_SETTLE_MS);
+    }
+
+    function cancelStudioThumbnailUpdate() {
+      if (studioThumbnailUpdateTimer) clearTimeout(studioThumbnailUpdateTimer);
+      if (studioThumbnailUpdateFrame) cancelAnimationFrame(studioThumbnailUpdateFrame);
+      studioThumbnailUpdateTimer = 0;
+      studioThumbnailUpdateFrame = 0;
     }
 
     async function prepareStudioPhoto(generation, item = getCurrentQueueItem(), { quiet = false } = {}) {
