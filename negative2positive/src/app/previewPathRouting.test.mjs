@@ -135,6 +135,7 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
     },
     displayTargetFor, isDisplayTarget, displaySizeServes, displayLevelGeometry, noteDisplayFilter, displayLevelFactor,
     displayPreviewRebuild: null, FULL_UPDATE_SETTLE_MS: 400,
+    displayCounters: { mainResamples: 0, mainFullResamples: 0, prebuilt: 0, workerRebuilds: 0, bandedRebuilds: 0 },
     buildHistogramSourceImageData: image => ({ sampleOf: image }),
     initWebGLRenderer: () => true, isWebGLActive: () => true,
     // #242: new planes fit the CSS box only (`canvas:` drawn size < reference);
@@ -209,7 +210,7 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
     'repairedPreviewSourceFor', 'ensureRepairedPreview', 'buildRepairedPreview', 'applyExactPlaneKeepingView',
     'scheduleRepairedPreviewAfterInput', 'clearFullResolutionRenderState', 'ensureConversionPreviewForDisplay', 'noteTierImage',
     'previewRequestImage', 'convertRequestOnMain', 'installDisplayFor', 'installDisplayPreview', 'cancelDisplayPreviewRebuild',
-    'rebuildDisplayPreview', 'flushDisplayPreviewRebuild', 'updateConversionTarget', 'conversionTargetFor',
+    'rebuildDisplayPreview', 'flushDisplayPreviewRebuild', 'countMainResample', 'updateConversionTarget', 'conversionTargetFor',
   ].map(functionSource).join('\n'), context);
   // A result has the size the request converts at: its display target, or
   // the image it sent.

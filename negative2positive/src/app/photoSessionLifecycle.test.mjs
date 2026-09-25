@@ -108,6 +108,7 @@ function fixture() {
     applyDustResultToState: () => { state.processedImageData = state.dustRemoval.inpaintedImageData; },
     cancelPendingTimers: noop, cancelScheduledFullResolutionRender: noop, cancelGeometryJob: noop,
     hasPendingCropDetection: () => false, settlePendingCropDetection: async () => {},
+    dropDetailLayer: noop,
     geometryDiagnostics: { coldSessions: false },
     getLoadingOverlay: () => ({ hide: noop }), noteCoreReprocessSettled: noop,
     assertRepairCurrent: valid => { if (!valid()) throw new DOMException('Superseded', 'AbortError'); },

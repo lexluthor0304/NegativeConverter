@@ -85,7 +85,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     import {
       displayPreviewSize, resizeDisplayPreview, resizeDisplayPreviewInBands, updateDisplayPreviewRect, noteDisplayFilter,
       displayLevelFactor, displayLevelGeometry, buildDisplayLevelInBands, resampleDisplayLevel, displayTargetFor, isDisplayTarget,
-      displaySizeServes
+      displaySizeServes, displayFilterOf
     } from './displayPreview.js';
     import { settledDisplayRoute, step3FrameReference, upscaleReference, photoRectPercent } from './displayCanvas.js';
     import { createCoreReprocessGates, previewDispatchAction, CORE_FULL_REPROCESS_DELAY_MS } from './coreReprocessDispatcher.js';
@@ -3358,8 +3358,18 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // (WebKit), so every scaled draw and composite ran on the CPU.
     const ctx = canvas.getContext('2d');
     const glCanvas = document.getElementById('glCanvas');
-    // The detail layer's canvas (#248 part 5), over glCanvas in the wrapper.
+    // The detail layer's canvas (#248 part 5), over glCanvas in the wrapper,
+    // and its state (see the Detail layer section). Declared this early: zoom
+    // resets and fits reach it from anywhere.
     const glDetailCanvas = document.getElementById('glDetailCanvas');
+    const DETAIL_LAYER_ENABLED = new URLSearchParams(window.location.search).get('detailLayer') !== '0';
+    const detailLayer = {
+      renderer: null, failed: false, timer: null, request: null, shown: null, visible: false, warmed: null,
+      counters: { requests: 0, conversions: 0, crops: 0, shown: 0, dropped: 0, failures: 0, lastReadyMs: null }
+    };
+    // The settings token of the conversion frame on screen: a region is never
+    // drawn over a base of newer settings (read by the smoke tests).
+    let displayedFrameToken = 0;
     // Crop mode's own surface (#245): no willReadFrequently, so it stays on
     // the GPU and the draft angle is a transform of one drawImage.
     const cropCanvas = document.getElementById('cropCanvas');
@@ -3750,6 +3760,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         beforeAfterCanvas.getContext('2d').putImageData(referenceImageData, 0, 0);
         beforeAfterCanvasSource = referenceImageData;
       }
+      // The detail layer shows the adjusted image (#248), not the reference.
+      hideDetailLayer();
       placeBeforeAfterCanvas();
       beforeAfterCanvas.style.display = 'block';
       return true;
@@ -4629,6 +4641,20 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return true;
     }
 
+    // Where display previews come from (#248), read by the smoke tests through
+    // window.__ncDisplay: main-thread resamples (of full-resolution frames
+    // separately), prebuilt planes of full renders, and rebuilds off the input
+    // path.
+    const displayCounters = { mainResamples: 0, mainFullResamples: 0, prebuilt: 0, workerRebuilds: 0, bandedRebuilds: 0 };
+
+    function countMainResample(input, result) {
+      if (result === input) return result;
+      displayCounters.mainResamples += 1;
+      const source = state.conversionSourceImageData;
+      if (source && input.width === source.width && input.height === source.height) displayCounters.mainFullResamples += 1;
+      return result;
+    }
+
     // Marks a smaller copy made at the reduced tier. An image returned as it
     // is keeps whatever mark it already has.
     function noteTierImage(result, input) {
@@ -4641,7 +4667,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     function buildPreviewSourceImageData(imageData) {
       const target = getDisplayPreviewSize(imageData);
       if (displaySizeServes(imageData, target)) return imageData;
-      return noteTierImage(resizeDisplayPreview(imageData, target), imageData);
+      return noteTierImage(countMainResample(imageData, resizeDisplayPreview(imageData, target)), imageData);
     }
 
     function buildHistogramSourceImageData(imageData) {
@@ -4657,7 +4683,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     }
 
     function buildWebglSourceImageData(imageData, maxDim = webglState.maxTextureSize || 8192) {
-      return noteTierImage(resizeDisplayPreview(imageData, getDisplayPreviewSize(imageData, maxDim)), imageData);
+      return noteTierImage(countMainResample(imageData, resizeDisplayPreview(imageData, getDisplayPreviewSize(imageData, maxDim))), imageData);
     }
 
     // The display fields of `processed` from a display image made of it.
@@ -4687,7 +4713,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const job = { processed, target: { ...target }, revision: state.dustRemoval.revision };
       displayPreviewRebuild = job;
       const isCurrent = () => displayPreviewRebuild === job && state.processedImageData === processed;
-      const banded = () => resizeDisplayPreviewInBands(processed, target, { isCurrent });
+      const banded = () => {
+        displayCounters.bandedRebuilds += 1;
+        return resizeDisplayPreviewInBands(processed, target, { isCurrent });
+      };
+      if (!isLargeImage(processed)) displayCounters.workerRebuilds += 1;
       const build = isLargeImage(processed) ? banded()
         : convertPreviewFrameInWorker.resample(processed, target).then((preview) => {
           noteDisplayFilter(preview, { kind: 'area', k: displayLevelFactor(processed.width, processed.height) });
@@ -4719,7 +4749,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (!job) return;
       displayPreviewRebuild = null;
       if (state.processedImageData !== job.processed) return;
-      installDisplayPreview(job.processed, resizeDisplayPreview(job.processed, getDisplayPreviewSize(job.processed, undefined, 'normal')));
+      const preview = resizeDisplayPreview(job.processed, getDisplayPreviewSize(job.processed, undefined, 'normal'));
+      installDisplayPreview(job.processed, countMainResample(job.processed, preview));
     }
 
     let displayPreviewResizeTimer = null;
@@ -5904,12 +5935,6 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // and shown only while it holds the settings the base holds: during a drag
     // it hides, and the settle converts it again. WebGL2 only; ?detailLayer=0
     // turns it off.
-    const DETAIL_LAYER_ENABLED = new URLSearchParams(window.location.search).get('detailLayer') !== '0';
-    const detailLayer = {
-      renderer: null, failed: false, timer: null, request: null, shown: null, visible: false, warmed: null,
-      counters: { requests: 0, conversions: 0, crops: 0, shown: 0, dropped: 0, failures: 0, lastReadyMs: null }
-    };
-
     function detailLayerAllowed() {
       if (!DETAIL_LAYER_ENABLED || !glDetailCanvas || detailLayer.failed) return false;
       if (!webglState.webgl2 || !isWebGLActive() || state.beforeAfterActive || state.samplingMode || canPaintAiBrush()) return false;
@@ -5953,12 +5978,18 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     }
 
     // A full-resolution frame current for the settings, to crop from: it
-    // carries the repairs a region converted from the source would lack.
+    // carries the repairs a region converted from the source would lack. An
+    // exact frame whose repairs have not landed yet (detection, a brush) is not.
     function detailFullFrame() {
       const processed = state.processedImageData;
       const source = state.conversionSourceImageData;
-      return processed && source && !state.processedImageDataIsPreview && !state.fullResolutionPending
-        && processed.width === source.width && processed.height === source.height ? processed : null;
+      if (!processed || !source || state.processedImageDataIsPreview || state.fullResolutionPending
+        || processed.width !== source.width || processed.height !== source.height) return null;
+      if (hasFrameRepairs() && repairsNeedSettling({
+        repairs: true, mask: state.dustRemoval.mask, maskStale: dustMaskIsStale(),
+        detectionScheduled: Boolean(dustDetectionTimer), processing: Boolean(state.dustRemoval.processing), pendingBrushRepairs
+      })) return null;
+      return processed;
     }
 
     // What a region was made of: never drawn over a base of other settings, of
@@ -6179,6 +6210,27 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       dropDetailLayer();
     });
 
+    // Read by the smoke tests: the display level and target, and where the
+    // display preview on screen came from (#248).
+    window.__ncDisplay = {
+      state: () => {
+        const level = state.displayLevelImageData;
+        const preview = state.conversionPreviewImageData;
+        const shown = state.previewSourceImageData;
+        return {
+          level: level ? { width: level.width, height: level.height, k: displayLevelGeometry(level).k,
+            isSource: level === state.conversionSourceImageData } : null,
+          target: preview ? { width: preview.width, height: preview.height, displayTarget: isDisplayTarget(preview) } : null,
+          separate: hasSeparateConversionPreview(),
+          source: state.conversionSourceImageData ? { width: state.conversionSourceImageData.width, height: state.conversionSourceImageData.height } : null,
+          shown: shown ? { width: shown.width, height: shown.height, filter: displayFilterOf(shown).kind } : null,
+          full: Boolean(state.processedImageData && !state.processedImageDataIsPreview),
+          normalTarget: state.conversionSourceImageData ? getDisplayPreviewSize(state.conversionSourceImageData, undefined, 'normal') : null,
+          counters: { ...displayCounters }
+        };
+      }
+    };
+
     // Read by the smoke tests and the benchmark (#230 S4).
     window.__ncDetailLayer = {
       state: () => {
@@ -6194,7 +6246,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           sourcePxPerDevicePx: detailLayer.visible && shown
             ? shown.width / (shown.plan.width * fit * state.zoomLevel * dpr)
             : (webglState.sourceSize.w || 0) / Math.max(1e-9, (state.conversionSourceImageData?.width || 1) * fit * state.zoomLevel * dpr),
-          current: shown ? detailTagCurrent(shown.tag) : false
+          current: shown ? detailTagCurrent(shown.tag) : false,
+          roiToken: shown ? shown.tag.token : null, baseToken: displayedFrameToken
         };
       }
     };
@@ -6518,6 +6571,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         const histogram = prebuilt.__histogramSample || null;
         delete prebuilt.__histogramSample;
         noteDisplayFilter(prebuilt, { kind: 'area', k: displayLevelFactor(processed.width, processed.height) });
+        displayCounters.prebuilt += 1;
         installDisplayPreview(processed, prebuilt, histogram);
         const target = getDisplayPreviewSize(processed, undefined, 'normal');
         if (prebuilt.width !== target.width || prebuilt.height !== target.height) scheduleDisplayPreviewResize();
@@ -7480,6 +7534,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           if (token !== null && token !== coreReprocessToken) return false;
           if (sourceRef && state.conversionSourceImageData !== sourceRef) return false;
           gpuPreviewScheduler.exactApplied(token);
+          displayedFrameToken = token;
           if (repairedPreviewShown && repairedPreviewShown === state.previewSourceImageData
             && repairedPreviewMatches(repairedPreviewMasks)) {
             // The repaired preview stays on screen until detection repairs
@@ -7576,6 +7631,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
             }
           }
           if (previewProcessed.__retained16) retainCorePreviewPlane(previewProcessed);
+          displayedFrameToken = token;
           return true;
         }
       } finally {
@@ -9954,6 +10010,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       pendingImportRotation = null;
       cancelGeometryJob();
       resetPreviewTierForActivation();
+      // The detail layer shows the outgoing photo (#248).
+      dropDetailLayer();
       cancelPendingTimers();
       // The outgoing photo's tile update cannot write into the incoming one.
       cancelStudioThumbnailUpdate();
@@ -14455,6 +14513,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // Reset UI
       canvas.style.display = 'none';
       glCanvas.style.display = 'none';
+      dropDetailLayer();
       setUploadPlaceholderStatus('');
       document.getElementById('uploadPlaceholder').style.display = 'flex';
       document.getElementById('previewToolbar').style.display = 'none';

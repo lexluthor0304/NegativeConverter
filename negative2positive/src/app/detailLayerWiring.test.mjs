@@ -74,6 +74,8 @@ function fixture({ dpr = 2, container = { width: 600, height: 420 } } = {}) {
     coreReprocessGeneration: 1, coreReprocessToken: 10, coreReprocessTimer: null, coreReprocessScheduled: null,
     coreReprocessBusy: () => false, processNegativeInFlight: null, corePreviewCommit: null, displayPreviewRebuild: null,
     runWhenIdle: () => {}, buildRouterSettings: () => ({ filmType: 'color' }), detailRenderer: () => renderer,
+    // No repair pass owes anything unless a test says so.
+    repairsNeedSettling: () => false, dustMaskIsStale: () => false, dustDetectionTimer: null, pendingBrushRepairs: 0,
     previewRequestImage: image => ({ imageData: image.__displayOf, display: { target: { width: image.width, height: image.height }, geometry: displayLevelGeometry(image.__displayOf) } }),
     convertPreviewFrameInWorker: {
       roi: (request) => new Promise((resolve, reject) => roiCalls.push({ request, resolve, reject })),
@@ -208,6 +210,18 @@ function fixture({ dpr = 2, container = { width: 600, height: 420 } } = {}) {
   g.context.noteDetailViewChanged();
   await g.runTimers();
   assert.equal(g.roiCalls.length + g.context.detailLayer.counters.crops, 0, 'repairs pending: no region');
+  // An exact frame whose detection has not landed yet is not cropped either.
+  g.state.processedImageData = new ImageData(W, H);
+  g.state.processedImageDataIsPreview = false;
+  g.state.fullResolutionPending = false;
+  g.context.repairsNeedSettling = () => true;
+  g.context.noteDetailViewChanged();
+  await g.runTimers();
+  assert.equal(g.context.detailLayer.counters.crops, 0, 'no dusty exact frame under the repaired view');
+  g.context.repairsNeedSettling = () => false;
+  g.context.noteDetailViewChanged();
+  await g.runTimers();
+  assert.equal(g.context.detailLayer.counters.crops, 1, 'the repaired frame once repairs settled');
 }
 
 // The modes that draw something else hide the layer.

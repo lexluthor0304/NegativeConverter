@@ -142,8 +142,9 @@ function installPhotoSessionProbe() {
     return { src: img.src, width: canvas.width, height: canvas.height,
       means: means.map(value => value / (pixels.length / 4)), chroma: chroma / (pixels.length / 4) };
   };
-  // Zoom is a compositor transform (#233): the steps draw nothing, and only a
-  // display preview of a new size, after the 100 ms settle, repaints.
+  // Zoom is a compositor transform (#233): the steps draw nothing. The base
+  // display image does not follow zoom (#248); only a display preview of a new
+  // size (a layout change) repaints it, and the detail layer covers the zoom.
   probe.zoomIn = () => {
     const gl = document.getElementById('glCanvas');
     const start = { draws: probe.gpuFrames, backing: [gl.width, gl.height] };
@@ -664,9 +665,10 @@ export async function runPhotoSessionRawSmoke({ send, evaluate, waitFor, fail, i
     await until('first actual RAW imported', `${ready} && document.getElementById('studioFilename').textContent === ${JSON.stringify(files[0].name)}`);
     await settlePreview();
     const zoomStart = await evaluate('window.__photoSessionProbe.zoomIn()');
-    // A RAW frame is larger than the viewport, so the settled zoom gets a
-    // larger display preview and repaints once it arrives.
-    await until('actual RAW zoom repainted after settle', `window.__photoSessionProbe.gpuFrames > ${zoomStart.draws}`);
+    // A RAW frame is larger than the viewport. The base display image no
+    // longer follows zoom (#248): the settled zoom shows the detail layer's
+    // native region over it instead of repainting it.
+    await until('actual RAW zoom detail layer after settle', `window.__ncDetailLayer.state().visible && window.__ncDetailLayer.state().current`);
     // Observe normal preview/full-idle activity for longer than its 2.5-second
     // timer, without requesting an export or forcing full-resolution work.
     await settlePreview();

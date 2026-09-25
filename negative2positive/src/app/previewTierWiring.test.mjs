@@ -132,6 +132,7 @@ function fixture({ width = 3000, height = 2000, repairs = false, largePreviewFra
     displayPreviewSize, previewTierMaxPixels, capBackingSize,
     displayTargetFor, isDisplayTarget, displaySizeServes, noteDisplayFilter, displayLevelFactor, displayLevelGeometry,
     resizeDisplayPreviewInBands, displayPreviewRebuild: null,
+    displayCounters: { mainResamples: 0, mainFullResamples: 0, prebuilt: 0, workerRebuilds: 0, bandedRebuilds: 0 },
     // Records the resamples that made a new image.
     resizeDisplayPreview: (image, size) => {
       const result = resizeDisplayPreview(image, size);
@@ -175,7 +176,7 @@ function fixture({ width = 3000, height = 2000, repairs = false, largePreviewFra
     'redrawForPreviewTier', 'leavePreviewTier', 'restoreNormalTierDisplay', 'onPreviewTierChange',
     'onPreviewTierSessionEnd', 'resetPreviewTierForActivation', 'resizeWebGLCanvas',
     'installDisplayFor', 'installDisplayPreview', 'cancelDisplayPreviewRebuild', 'rebuildDisplayPreview',
-    'flushDisplayPreviewRebuild', 'updateConversionTarget', 'conversionTargetFor',
+    'flushDisplayPreviewRebuild', 'countMainResample', 'updateConversionTarget', 'conversionTargetFor',
     'coreReprocessBusy', 'whenCoreReprocessIdle', 'noteCoreReprocessSettled', 'runCoreReprocess',
     'rerenderWithCoreControls', 'postPendingPreviewEarly', 'hasSeparateConversionPreview',
     'cancelScheduledFullResolutionRender', 'scheduleCoreReprocess', 'takeScheduledCoreReprocess',

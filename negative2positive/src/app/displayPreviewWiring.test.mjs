@@ -86,11 +86,12 @@ function fixture({ sourceSize = { width: 1200, height: 800 }, container = { widt
     scheduleFullResolutionRender: () => log.push('repair-pass'),
     scheduleCoreReprocess: (options) => conversions.push(options),
     displayPreviewResizeTimer: null, displayPreviewRebuild: null,
+    displayCounters: { mainResamples: 0, mainFullResamples: 0, prebuilt: 0, workerRebuilds: 0, bandedRebuilds: 0 },
   });
   vm.runInContext([
     'getDisplayPreviewSize', 'conversionTargetFor', 'updateConversionTarget', 'noteTierImage', 'buildPreviewSourceImageData',
     'histogramSourceFor', 'installDisplayPreview', 'cancelDisplayPreviewRebuild', 'rebuildDisplayPreview',
-    'flushDisplayPreviewRebuild', 'scheduleDisplayPreviewResize', 'refreshDisplayPreviewForViewport', 'installDisplayFor',
+    'flushDisplayPreviewRebuild', 'countMainResample', 'scheduleDisplayPreviewResize', 'refreshDisplayPreviewForViewport', 'installDisplayFor',
     'applyProcessedImageToState', 'hasSeparateConversionPreview', 'ensureConversionPreviewForDisplay', 'previewRequestImage',
   ].map(functionSource).join('\n'), context);
   state.conversionPreviewImageData = context.conversionTargetFor(conversionSource, conversionSource, 'normal');
