@@ -40,13 +40,18 @@ for (const name of ['loadFile', 'prepareStudioPhoto', 'processNegative']) {
 assert.match(functionSource('loadFile'), /if \(!autoConvert && isCurrentLoad\(generation\)\) overlay\.hide\(\);/);
 
 const css = readFileSync(new URL('../styles/app.css', import.meta.url), 'utf8');
-const rule = selector => {
-  const start = css.indexOf(`${selector} {`);
+const studioCss = readFileSync(new URL('../styles/studio.css', import.meta.url), 'utf8');
+const rule = (selector, source = css) => {
+  const start = source.indexOf(`${selector} {`);
   assert.ok(start >= 0, `${selector} rule exists`);
-  return css.slice(start, css.indexOf('}', start));
+  return source.slice(start, source.indexOf('}', start));
 };
 assert.match(rule('.loading-overlay.visible'), /transition-delay:\s*150ms/, 'conversions under 150 ms never raise the overlay');
-assert.match(rule('.loading-overlay:not(.visible)'), /transition-duration:\s*var\(--loading-overlay-hide\)/);
-assert.match(rule('.loading-overlay:not(.visible)'), /--loading-overlay-hide:\s*90ms/);
-assert.equal(css.split('.loading-overlay:not(.visible)').length - 1, 1, 'keep one hidden-state overlay rule');
+// One hidden-state rule (studio.css, #261) sets the short fade and the
+// visibility step at its end, whatever order the two stylesheets load in.
+const hidden = rule('.loading-overlay:not(.visible)', studioCss);
+assert.match(hidden, /--loading-overlay-hide:\s*90ms/);
+assert.match(hidden, /transition-duration:\s*var\(--loading-overlay-hide, \.3s\), 0s/);
+assert.match(hidden, /transition-delay:\s*0s, var\(--loading-overlay-hide, \.3s\)/);
+assert.equal((css + studioCss).split('.loading-overlay:not(.visible) {').length - 1, 1, 'keep one hidden-state overlay rule');
 console.log('import dwells: no fixed waits, guarded overlay hides, CSS minimum display time');

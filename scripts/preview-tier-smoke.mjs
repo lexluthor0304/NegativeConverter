@@ -148,15 +148,22 @@ export async function runPreviewTierSmoke({ send, evaluate, waitFor, fail, insta
     await evaluate('window.__tierProbe.lastActivity = Math.max(window.__tierProbe.lastActivity, performance.now())');
     await until(description, `${ready} && window.__tierProbe.inFlight === 0 && performance.now() - window.__tierProbe.lastActivity > 3500`);
   };
-  const settledFrame = async () => evaluate(`(() => {
-    const probe = window.__tierProbe;
+  // A same-value adjustment input redraws the texture on screen, and that
+  // draw is hashed. (A window resize no longer draws at all unless the
+  // drawing buffer must change, #261.)
+  const settledFrame = async () => evaluate(`new Promise(resolve => {
+    const probe = window.__tierProbe, start = performance.now();
     probe.hashDraws = true; probe.lastHash = null;
-    window.dispatchEvent(new Event('resize'));
-    probe.hashDraws = false;
-    const gl = document.getElementById('glCanvas');
-    return { hash: probe.lastHash, backing: [gl.width, gl.height], texture: probe.texture,
-      visible: getComputedStyle(gl).display !== 'none' };
-  })()`);
+    document.getElementById('cyan').dispatchEvent(new Event('input', { bubbles: true }));
+    const check = () => {
+      if (!probe.lastHash && performance.now() - start < 3000) { requestAnimationFrame(check); return; }
+      probe.hashDraws = false;
+      const gl = document.getElementById('glCanvas');
+      resolve({ hash: probe.lastHash, backing: [gl.width, gl.height], texture: probe.texture,
+        visible: getComputedStyle(gl).display !== 'none' });
+    };
+    requestAnimationFrame(check);
+  })`);
   const tile = () => evaluate(`document.querySelector('.file-list-name[data-index="0"] img.file-list-thumbnail')?.getAttribute('src') || null`);
   const download = async (format, depth) => {
     const index = await evaluate('window.__tierProbe.downloads.length');

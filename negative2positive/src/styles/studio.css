@@ -20,13 +20,15 @@ body.studio {
   background: var(--bg-primary);
 }
 .loading-overlay.indeterminate .loading-film-fill { animation: studio-progress 1.4s ease-in-out infinite alternate; }
-/* The hidden overlay stays in the DOM. Leave rendering once the fade ends
-   (the visibility delay is the fade's duration, so both come from one value)
-   and pause its infinite animations: WebKit keeps waking the main thread for
-   steps() animations whatever their visibility. `paused` rather than `none`,
-   so nothing snaps mid-fade. These rules must follow the indeterminate
-   shorthand above, which resets animation-play-state. */
+/* The one hidden-state rule. The image is uncovered within one short fade
+   (#236), and the hidden overlay, which stays in the DOM, leaves rendering
+   once the fade ends (the visibility delay is the fade's duration, so both
+   come from one value) and pauses its infinite animations: WebKit keeps
+   waking the main thread for steps() animations whatever their visibility.
+   `paused` rather than `none`, so nothing snaps mid-fade. These rules must
+   follow the indeterminate shorthand above, which resets animation-play-state. */
 .loading-overlay:not(.visible) {
+  --loading-overlay-hide: 90ms;
   visibility: hidden;
   transition-property: opacity, visibility;
   transition-duration: var(--loading-overlay-hide, .3s), 0s;

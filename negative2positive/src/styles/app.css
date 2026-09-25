@@ -2869,11 +2869,8 @@ body.dodge-burn-active #glCanvas {
      input at once, and studioBusy/inert remain the real lock. */
   transition-delay: 150ms;
 }
-/* The one hidden-state rule: the image is uncovered within one short fade. */
-.loading-overlay:not(.visible) {
-  --loading-overlay-hide: 90ms;
-  transition-duration: var(--loading-overlay-hide);
-}
+/* The hidden-state rule lives in studio.css (fade length and leaving
+   rendering), so one rule decides it whatever the stylesheet order. */
 
 .loading-reel-wrap {
   width: 128px;

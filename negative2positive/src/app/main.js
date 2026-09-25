@@ -8652,7 +8652,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       document.body.dataset.studioBusy = 'true';
       // sync() also lays the viewer out ahead of the decode: the empty state
       // otherwise removes it (body.studio-opening, photo-switch-feedback.css).
+      // Flush in this turn: the provisional frame request below measures it.
       studioWorkspace.sync();
+      studioWorkspace.flush();
       presentRetainedPreview(item);
       requestProvisionalFrame(item);
     }

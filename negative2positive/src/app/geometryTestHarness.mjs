@@ -148,7 +148,7 @@ export function createHarness(base, { historyBudget = 768 * 1024 * 1024, session
     photoPreviews: createPhotoSessionCache({ maxBytes: 0 }),
     aiRepair: { revision: 1 },
     document: { body: { dataset: {} }, visibilityState: 'hidden' },
-    studioWorkspace: { sync() {} },
+    studioWorkspace: { sync() {}, flush() {} },
     canvasTransformWrapper: { style: { width: '400px', height: '300px', transform: '' }, offsetWidth: 400, offsetHeight: 300 },
     canvasContainer: { clientWidth: 620, clientHeight: 520, classList: { add() {}, remove() {} } },
     zoomIndicator: { style: {} },
