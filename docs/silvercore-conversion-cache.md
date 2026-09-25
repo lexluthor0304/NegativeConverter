@@ -130,12 +130,14 @@ Node, synthetic frames, M1 Pro (medians; the frozen adapter first):
 
 | case | before | after |
 |---|---|---|
-| colour tick 4 MP, `standard`, film base | 140 ms | 80 ms |
-| colour tick 4 MP, `frontier` | 120–126 ms | 99–100 ms |
-| positive tick 2.2 MP / 4 MP, gain 1 with WB | 27–29 / 48–49 ms | 9.4 / 16 ms |
-| B&W tick 2.2 MP / 4 MP, default | 17 / 29 ms | 7 / 10 ms |
-| B&W tick 2.2 MP, selenium + `frontier` profile at 80 | 74 ms | 7.8 ms |
-| B&W tick 2.2 MP with strokes | 40 ms | 6.8 ms |
+| colour tick 4 MP, `standard`, film base | 135–140 ms | 78–80 ms |
+| colour tick 4 MP, `frontier` | 117–126 ms | 88–100 ms |
+| colour tick 2.2 MP, with / without strokes | 82 / 62 ms | 34.5 / 34.3 ms |
+| positive tick 2.2 MP / 4 MP, gain 1 with WB | 27–29 / 48–49 ms | 9.1–9.4 / 15–16 ms |
+| positive tick 2.2 MP with strokes | 46 ms | 8.9 ms |
+| B&W tick 2.2 MP / 4 MP, default | 16–17 / 28–29 ms | 6.6–7 / 10 ms |
+| B&W tick 2.2 MP, selenium + `frontier` profile at 80 | 72–74 ms | 7.8 ms |
+| B&W tick 2.2 MP with strokes | 39–40 ms | 6.4–6.8 ms |
 | forced colour 12 MP | 424–559 ms | 269–338 ms |
 | forced positive 12 MP, gain 1 | 190–197 ms | 103–125 ms |
 | forced B&W 12 MP, no reference / reference | 122–147 / 87–122 ms | 84–89 / 52 ms |
