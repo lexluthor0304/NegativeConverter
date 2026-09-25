@@ -105,6 +105,7 @@ for (const outcome of ['success', 'error']) {
     getCurrentQueueItem: () => active, photoSettingsKey: entry => { keys++; return JSON.stringify(entry.settings); },
     photoSessions: { peek: () => null }, cloneSettings: structuredClone,
     createConversionWorkerPool: () => ({ dispose() {} }),
+    hiddenJobs: createHiddenJobGate({ isHidden: () => false }), hiddenJobBytesFor: async () => 0,
     processFileWithSettings: async () => {
       if (outcome === 'error') throw new Error('decoder failure');
       return { preview: 'fresh' };
@@ -126,6 +127,30 @@ for (const outcome of ['success', 'error']) {
   assert.equal(outcome === 'success' ? tileUpdates : rowRefreshes, 1);
   assert.equal(stale.thumbnailKey, outcome === 'success' ? JSON.stringify(stale.settings) : 'older');
   if (outcome === 'error') assert.equal(stale.thumbnailErrorKey, JSON.stringify(stale.settings));
+}
+
+// Hidden-job gate (#241): with the window hidden under the WebKit limits, the
+// preview waits while another job's item is in flight and starts once it is
+// released; it holds its own admission until the preview is done.
+{
+  const f = fixture();
+  const gate = createHiddenJobGate({ isHidden: () => true, limitsApply: () => true, setTimer: () => 0, clearTimer: () => {} });
+  f.c.hiddenJobs = gate;
+  const exportItem = await gate.admit({ bytes: 1 });
+  const pending = f.c.loadStudioThumbnails();
+  await f.timer();
+  assert.equal(f.jobs.length, 0, 'no preview decode while another item is in flight');
+  assert.equal(gate.waiting, 1);
+  exportItem();
+  await flush();
+  assert.equal(f.jobs.length, 1, 'the preview starts once the item is released');
+  assert.equal(gate.inFlight, 1, 'the preview holds its own admission');
+  f.jobs[0].options.onPreparedSettings({ owner: 'gated' });
+  f.jobs[0].resolve({ preview: 'gated-preview' });
+  await flush();
+  assert.equal(gate.inFlight, 0, 'released when the preview is done');
+  await f.timer(); await pending;
+  assert.deepEqual(f.published, ['gated-preview']);
 }
 
 // Probe regression: allow a separate final-recipe thumbnail, but still reject

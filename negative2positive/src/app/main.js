@@ -12169,6 +12169,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
           },
           onProgress: (event) => updateBatchOverlayProgress((event.done / total) * 95, batchProgressLabel(event.done, total))
         });
+        batchOverlayProgress = null;
 
         overlay.updateProgress(98, lang.loadingBatchZip);
         await zipWriter.close();
@@ -13535,9 +13536,10 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
           };
           let release = null;
           try {
-            // One gated item (#241); a lane that waited while hidden re-checks.
+            // One gated item (#241); a lane that waited while hidden re-checks,
+            // and still pauses below before it looks for the next item.
             release = await hiddenJobs.admit({ bytes: await hiddenJobBytesFor([item.file]) });
-            if (!valid()) continue;
+            if (!valid()) throw Object.assign(new Error('Preview superseded while waiting'), { name: 'AbortError' });
             workers ||= createConversionWorkerPool({ size: 1 });
             let prepared;
             const image = await processFileWithSettings(item.file, item.settings, {
@@ -15481,7 +15483,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         const target = Math.max(cell.width, cell.height) * 2;
         for (let i = 0; i < selected.length; i++) {
           const { item, index } = selected[i];
-          overlay.updateProgress((i / selected.length) * 80, lang.loadingBatchFile.replace('{current}', i + 1).replace('{total}', selected.length));
+          updateBatchOverlayProgress((i / selected.length) * 80, lang.loadingBatchFile.replace('{current}', i + 1).replace('{total}', selected.length));
           const settingsForFile = getSettingsForExport(index, item);
           const label = frameNumberFor(settingsForFile?.frameMetadata, i);
           try {
@@ -15503,6 +15505,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
           }
           await yieldForJob();
         }
+        batchOverlayProgress = null;
         const header = contactSheetHeader(state.rollMetadata, { fallbackTitle: getLocalizedText('contactSheetTitle', 'Contact sheet') });
         const pageCount = pagesFor(selected.length, layoutId);
         for (let pageIndex = 0; pageIndex < pageCount; pageIndex++) {
@@ -15526,6 +15529,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         overlay.updateProgress(100, lang.loadingComplete);
       } finally {
         activeLongJobs -= 1;
+        batchOverlayProgress = null;
         overlay.hide();
         for (const thumb of thumbs) thumb.image?.close?.();
       }
