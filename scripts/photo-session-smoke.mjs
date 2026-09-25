@@ -295,14 +295,20 @@ export async function runPhotoSessionSmoke({ send, evaluate, waitFor, fail, inst
     // #234: a drag re-encodes no tile while it moves; the active tile settles
     // once, about 250 ms after release. A zoom (and the display-preview
     // refinement it starts) rebuilds nothing.
+    // The first drag input marks the photo dirty again (the exports above
+    // saved it), which rebuilds its row with the same tile: watch the whole
+    // list and count changes of the active tile's src, not of one element.
     await evaluate(`window.__tileProbe = (() => {
       const proto = HTMLCanvasElement.prototype, encode = proto.toDataURL;
       const probe = { encodes: 0, tiles: [], restore: null };
       proto.toDataURL = function (...args) { probe.encodes++; return encode.apply(this, args); };
-      const observer = new MutationObserver(records => {
-        for (const record of records) if (record.target.matches?.('img.file-list-thumbnail')) probe.tiles.push(performance.now());
+      const tileSrc = () => document.querySelector('.file-list-name[data-index="0"] img.file-list-thumbnail')?.getAttribute('src') || null;
+      let lastSrc = tileSrc();
+      const observer = new MutationObserver(() => {
+        const src = tileSrc();
+        if (src !== lastSrc) { lastSrc = src; probe.tiles.push(performance.now()); }
       });
-      observer.observe(document.querySelector('.file-list-name[data-index="0"]'), { subtree: true, attributes: true, attributeFilter: ['src'] });
+      observer.observe(document.getElementById('fileListItems'), { subtree: true, childList: true, attributes: true, attributeFilter: ['src'] });
       probe.restore = () => { proto.toDataURL = encode; observer.disconnect(); };
       return probe;
     })()`);
