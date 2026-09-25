@@ -7309,6 +7309,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
             outputPixels: getImageDataPixelCount(correctedSourceData)
           });
           invalidateSilverCoreCache();
+          // A GPU frame of the previous source has nothing left to settle.
+          gpuPreviewScheduler.cancel();
           state.conversionSourceImageData = correctedSourceData;
           // A new photo usually arrives with a layout change (panels, the
           // loaded state) the observer has not reported yet; size its display
