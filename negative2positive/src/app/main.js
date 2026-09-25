@@ -109,8 +109,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     import { VERTEX_SHADER_100, STEP3_FRAGMENT_SHADER_100 } from '../render/previewShader.js';
     import { createGpuPreviewRenderer, webgl2PrecisionOk } from '../render/gpuPreviewRenderer.js';
     import { planDetailRegion, detailRegionServes, detailSlotSize, snapPanToDevicePixels, copyRegionRows, DETAIL_SETTLE_MS } from './detailLayer.js';
-    import { applyPreviewChain } from '../render/previewTables.js';
-    import { buildSelfTestCases } from '../render/gpuPreviewSelfTest.js';
+    import { applyPreviewChain, displayStageUniforms, regionFrame } from '../render/previewTables.js';
+    import { buildSelfTestCases, buildDisplayModesCases, displayParity } from '../render/gpuPreviewSelfTest.js';
+    import { createBorderUnderlay, photoViewport } from '../render/borderUnderlay.js';
+    import { computeAdjustmentParams } from '../workers/pixelAdjustments.js';
     import { createGpuPreviewScheduler } from './gpuPreviewScheduler.js';
     import { canUseBrowserZipStreaming, ZipStoreWriter, createZipNameDeduper } from './zipStoreWriter.js';
     import {
@@ -3445,9 +3447,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // and its state (see the Detail layer section). Declared this early: zoom
     // resets and fits reach it from anywhere.
     const glDetailCanvas = document.getElementById('glDetailCanvas');
+    // The dust tint and dodge-and-burn strokes over the photo (#253 C).
+    const displayOverlay = document.getElementById('displayOverlay');
+    const displayOverlayState = { key: null, frame: 0, placed: '' };
     const DETAIL_LAYER_ENABLED = new URLSearchParams(window.location.search).get('detailLayer') !== '0';
     const detailLayer = {
-      renderer: null, failed: false, timer: null, request: null, shown: null, visible: false, warmed: null,
+      renderer: null, failed: false, timer: null, request: null, shown: null, visible: false, warmed: null, modesPoll: 0,
       counters: { requests: 0, conversions: 0, crops: 0, shown: 0, dropped: 0, failures: 0, lastReadyMs: null }
     };
     // The settings token of the conversion frame on screen: a region is never
@@ -3496,7 +3501,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     const displayDebugCounters = {
       mainAdjustments: 0, mainAdjustMaxPixels: 0, mainAdjustOverPreviewCap: 0,
       exportFallbackAdjustments: 0, exportFallbackMaxPixels: 0,
-      settleRequests: 0, settleWorker: 0, settleSync: 0, settlePresented: 0
+      settleRequests: 0, settleWorker: 0, settleSync: 0, settlePresented: 0,
+      // #253: border backgrounds composed for the GL display, overlay repaints.
+      glBorderComposes: 0, overlayPaints: 0
     };
     const zoomIndicator = document.getElementById('zoomIndicator');
     const zoomControls = document.getElementById('zoomControls');
@@ -3847,7 +3854,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // Over the photo, not the film border drawn around it.
     function placeBeforeAfterCanvas() {
       const style = beforeAfterCanvas.style;
-      const photo = state.sprocketPreviewEnabled && canvas.style.display !== 'none' ? mainCanvasPhoto : null;
+      const photo = !state.sprocketPreviewEnabled ? null
+        : canvas.style.display !== 'none' ? mainCanvasPhoto
+          : glCanvas.style.display === 'block' ? glBorder.photo : null;
       const box = photo ? photoRectPercent(photo) : { left: '', top: '', width: '', height: '' };
       style.left = box.left;
       style.top = box.top;
@@ -4061,6 +4070,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
       if (state.currentStep >= 3 && state.processedImageData) {
         updatePreview();
+        // Overexposed sprockets on the GL display: the smear follows once (#253).
+        refreshGlBorderSmear();
         return;
       }
 
@@ -4084,6 +4095,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     function setSprocketPreviewEnabled(enabled, options = {}) {
       const nextEnabled = Boolean(enabled);
       state.sprocketPreviewEnabled = nextEnabled;
+      if (!nextEnabled) releaseGlBorder();
       updateSprocketControlsUI();
       updateCanvasVisibility();
 
@@ -4091,6 +4103,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (state.beforeAfterActive) exitBeforeAfter();
       if (state.currentStep >= 3 && state.processedImageData) {
         updatePreview();
+        refreshGlBorderSmear();
         return;
       }
 
@@ -4225,6 +4238,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       pendingSprocketPreviewFont = locale;
       void ensureSprocketFrameFonts(composeOptions).then(() => {
         sprocketPreviewFrameCache.key = null;
+        glBorder.generation++;
         refreshSprocketPreviewAfterSettingsChange();
       }).catch(error => {
         console.warn('Film-edge font could not be loaded:', error);
@@ -5556,6 +5570,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // below `renderer2` belong to the WebGL1 fallback program.
       webgl2: false,
       renderer2: null,
+      // The look and the expired-film rescue draw with the mode programs (#253)
+      // once they compiled and passed their self-test; false on WebGL1.
+      modesReady: false,
+      // The film-border background of the GL display (render/borderUnderlay.js).
+      borderUnderlay: null,
       program: null,
       quadBuffer: null,
       sourceTex: null,
@@ -5578,6 +5597,16 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     };
 
     const webglCurveRgba = new Uint8Array(256 * 4);
+    // The film border on the GL display (#253 D; see drawGlBorder).
+    const glBorder = {
+      // getSprocketFrameLayout of the frame on the GL canvas; null without the border.
+      photo: null,
+      // Bumped when the frame fonts load: the background is composed again.
+      generation: 0,
+      smear: null,
+      smearToken: 0,
+      smearFlight: 0
+    };
 
     setupPreviewTierSessions();
     void loadWebviewCompositing();
@@ -5627,6 +5656,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       webglState.gl = null;
       webglState.webgl2 = false;
       webglState.renderer2 = null;
+      webglState.modesReady = false;
+      webglState.borderUnderlay = null;
+      glBorder.photo = null;
       webglState.program = null;
       webglState.quadBuffer = null;
       webglState.sourceTex = null;
@@ -5637,6 +5669,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       webglState.sourceDirty = true;
       webglState.lastError = null;
       resetGpuPreview();
+      resetDisplayModes();
     }
 
     function attachWebGLContextHandlers() {
@@ -5784,15 +5817,20 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return true;
     }
 
+    // Whether the display needs the mode programs: a look, or a rescue with an
+    // analysis (#253).
+    function displayModesNeeded() {
+      return Boolean(state.look) || Boolean(state.expiredEnabled && state.expiredAnalysis);
+    }
+
+    // The film border, the dodge-and-burn tool and a shown dust mask are drawn
+    // around or over the GL canvas (#253), so only these keep the CPU display:
+    // cropping, WebGL off, no or a failed context, and a look or a rescue before
+    // the mode programs are ready.
     function isWebGLActive() {
       if (state.cropping) return false;
       if (state.coreUseWebGL === false) return false;
-      if (state.dustRemoval.enabled && state.dustRemoval.showMask) return false;
-      if (state.dodgeBurn && state.dodgeBurn.active) return false;
-      if (state.look) return false;
-      // The rescue curves live in the CPU adjustment stage, like the look.
-      if (state.expiredEnabled && state.expiredAnalysis) return false;
-      if (state.sprocketPreviewEnabled) return false;
+      if (!webglState.modesReady && displayModesNeeded()) return false;
       return !!webglState.gl && !webglState.disabledByError && state.currentStep >= 3 && !!state.processedImageData;
     }
 
@@ -5915,6 +5953,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // SilverCore bakes the legacy tone controls into the conversion
     // (usesSilverCoreConversion is true for every film type), so the display
     // shaders have no uniforms for them.
+    // With WebGL2 the values also carry the display modes' stages (#253).
     function webglStep3Values() {
       const vibrance = sanitizeNumeric(state.vibrance, state.vibrance ?? 0, -100, 100);
       const wbR = sanitizeNumeric(state.wbR, state.wbR ?? 1, 0.5, 2);
@@ -5923,7 +5962,41 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const cyan = sanitizeNumeric(state.cyan, state.cyan ?? 0, -100, 100);
       const magenta = sanitizeNumeric(state.magenta, state.magenta ?? 0, -100, 100);
       const yellow = sanitizeNumeric(state.yellow, state.yellow ?? 0, -100, 100);
-      return { wb: [wbR, wbG, wbB], vib: vibrance / 100, cmy: [cyan / 100, magenta / 100, yellow / 100] };
+      return {
+        wb: [wbR, wbG, wbB], vib: vibrance / 100, cmy: [cyan / 100, magenta / 100, yellow / 100],
+        stages: webglState.webgl2 && displayModesNeeded() ? currentDisplayStages() : null
+      };
+    }
+
+    // The look and the rescue of the recipe on screen as the mode programs read
+    // them (#253): computeAdjustmentParams's values, the ones the CPU display and
+    // exports use, rebuilt only when the look, the analysis, a rescue strength or
+    // hold-to-compare changed. A strength tick costs one buildExpiredRescueStages
+    // (256 tone entries, 64 bins); the mean grid and the look's curves carry over
+    // for the same analysis and look. Pixel positions come from u_frame, so the
+    // frame size given here only switches the spatial stage on.
+    const displayStageCache = { key: null, look: undefined, analysis: undefined, stages: null };
+
+    function currentDisplayStages() {
+      const rescueOn = Boolean(state.expiredEnabled && state.expiredAnalysis) && !expiredCompareHeld;
+      const look = state.look || null;
+      const analysis = rescueOn ? state.expiredAnalysis : null;
+      const key = [look, analysis, rescueOn, ...(rescueOn ? EXPIRED_RESCUE_KEYS.map(name => state[name]) : [])];
+      const cache = displayStageCache;
+      if (cache.key && cache.key.length === key.length && cache.key.every((value, i) => value === key[i])) return cache.stages;
+      const recipe = {
+        curves: state.curves,
+        look: sanitizeLookForSettings(look),
+        ...sanitizeExpiredRescueParams(state, state),
+        expiredEnabled: rescueOn,
+        expiredAnalysis: rescueOn ? sanitizeExpiredAnalysis(analysis) : null
+      };
+      const params = computeAdjustmentParams(recipe, { width: 1, height: 1 });
+      const stages = displayStageUniforms(params, {
+        previous: cache.stages, sameAnalysis: cache.analysis === analysis, sameLook: cache.look === look
+      });
+      Object.assign(cache, { key, look, analysis, stages });
+      return stages;
     }
 
     function webglSetUniforms() {
@@ -5935,8 +6008,99 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       gl.uniform3f(webglState.locations.uCmy, cmy[0], cmy[1], cmy[2]);
     }
 
+    // ===========================================
+    // Film border on the GL display (#253 D)
+    // ===========================================
+    // With the border preview on, the GL drawing buffer is the framed display
+    // size: pass 1 draws the border background, pass 2 the photo into its
+    // rectangle (gl.viewport), so the photo keeps the GPU path. The background is
+    // composeSprocketFrameBackground at display size, uploaded once per size,
+    // markings and fonts. With overexposed sprockets its smear samples the
+    // adjusted photo: a drag keeps the last background, and each settle
+    // recomposes it from an exact display-size frame adjusted in the export
+    // worker (a UI-only approximation that lags by one settle). Exports compose
+    // their own border (applySprocketFrameForExport), unchanged.
+
+    // The GL frame of a width x height photo: the photo, or the frame around it.
+    function glFrameSize(width, height) {
+      if (!state.sprocketPreviewEnabled) return { width, height, layout: null };
+      const layout = getSprocketFrameLayout(width, height, getSprocketFrameComposeOptions());
+      return { width: layout.frameWidth, height: layout.frameHeight, layout };
+    }
+
+    // The photo the smear samples: the last settled adjusted frame of this size,
+    // else the exact frame before Step 3, else none (a plain background).
+    function glBorderSmearSource(width, height) {
+      const smear = glBorder.smear;
+      if (smear && smear.width === width && smear.height === height) return smear;
+      const source = state.webglSourceImageData;
+      if (source && source.width === width && source.height === height) return source;
+      return null;
+    }
+
+    // Pass 1 of a bordered frame. Returns the photo's viewport in the drawing buffer.
+    function drawGlBorder(gl, width, height, layout) {
+      const composeOptions = getSprocketFrameComposeOptions();
+      prepareSprocketPreviewFont(composeOptions);
+      if (!webglState.borderUnderlay) webglState.borderUnderlay = createBorderUnderlay(gl);
+      const underlay = webglState.borderUnderlay;
+      const overexposed = Boolean(composeOptions.edgeMarkings?.overexposedSprockets);
+      const key = JSON.stringify([width, height, composeOptions.edgeMarkings, areSprocketFrameFontsReady(composeOptions),
+        glBorder.generation, overexposed ? glBorder.smearToken : 0]);
+      if (underlay.key() !== key) {
+        // Without the smear the background reads only the photo's size: any
+        // frame of that size serves, and a blank one only when none is at hand.
+        const photo = glBorderSmearSource(width, height) || new ImageData(width, height);
+        underlay.upload(composeSprocketFrameBackground(photo, composeOptions), key);
+        displayDebugCounters.glBorderComposes++;
+      }
+      underlay.draw(glCanvas.width, glCanvas.height);
+      glBorder.photo = layout;
+      return photoViewport(layout, glCanvas.width, glCanvas.height);
+    }
+
+    // After a settle with overexposed sprockets on the GL display: the exact
+    // adjusted display frame for the smear, from the export worker (#242's
+    // settle call); a newer request or a switch drops a late one.
+    function refreshGlBorderSmear() {
+      if (!state.sprocketPreviewEnabled || !getSprocketFrameComposeOptions().edgeMarkings?.overexposedSprockets) return;
+      const source = displaySourceImageData();
+      if (!source || !isWebGLActive()) return;
+      const flight = ++glBorder.smearFlight;
+      const prepared = buildDisplayAdjustmentSettings();
+      const land = (adjusted) => {
+        if (flight !== glBorder.smearFlight || !adjusted || source !== displaySourceImageData()) return;
+        glBorder.smear = adjusted;
+        glBorder.smearToken++;
+        if (isWebGLActive()) schedulePreviewUpdate();
+      };
+      if (settledDisplayRoute(source.width * source.height, defaultExportWorkers.isWorkerAvailable()) === 'sync') {
+        const adjusted = new ImageData(source.width, source.height);
+        noteMainThreadAdjustment(source);
+        applyPreparedAdjustmentsToBuffer(source, prepared, adjusted, { quality: 'full', lutScratch: adjustmentLutScratch });
+        land(adjusted);
+        return;
+      }
+      void defaultExportWorkers.workerApplyAdjustments(source, prepared, 'full').then(land, () => {});
+    }
+
+    // A frame without the border: whatever a bordered one left goes.
+    function dropGlBorder() {
+      if (glBorder.photo || glBorder.smear || webglState.borderUnderlay?.key()) releaseGlBorder();
+    }
+
+    // The border preview is off, or the photo changed: its GL background goes.
+    function releaseGlBorder() {
+      glBorder.photo = null;
+      glBorder.smear = null;
+      glBorder.smearFlight++;
+      webglState.borderUnderlay?.release();
+    }
+
     // WebGL2: applyProgram while SilverCore settings are ahead of the exact frame
-    // (#239), step3Program on the exact frame otherwise.
+    // (#239), step3Program on the exact frame otherwise. Both run the display
+    // modes when the recipe has them (#253), and draw into the photo's rectangle
+    // with the border shown.
     function renderWebGL2() {
       try {
         const renderer = webglState.renderer2;
@@ -5948,9 +6112,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
               renderer.uploadCurves(state.curves);
               webglState.curveDirty = false;
             }
-            adjustCanvasDisplay(frame.width, frame.height);
-            resizeWebGLCanvas(frame.width, frame.height);
-            if (renderer.drawApply(frame, step3, glCanvas.width, glCanvas.height)) {
+            const framed = glFrameSize(frame.width, frame.height);
+            adjustCanvasDisplay(framed.width, framed.height);
+            resizeWebGLCanvas(framed.width, framed.height);
+            const viewport = framed.layout ? drawGlBorder(renderer.gl, frame.width, frame.height, framed.layout) : null;
+            if (renderer.drawApply(frame, step3, glCanvas.width, glCanvas.height, { viewport })) {
+              if (!framed.layout) dropGlBorder();
               gpuPreview.lastDraw = 'apply';
               gpuPreview.lastFrame = frame;
               return true;
@@ -5959,9 +6126,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         }
         const source = getWebglSourceImageData();
         if (!source) return false;
+        const framed = glFrameSize(source.width, source.height);
         // Refits only when the texture, container, reference size or zoom
         // changed since the last fit; otherwise it touches no layout.
-        adjustCanvasDisplay(source.width, source.height);
+        adjustCanvasDisplay(framed.width, framed.height);
         const resized = webglState.sourceSize.w !== source.width || webglState.sourceSize.h !== source.height;
         if (webglState.sourceDirty || resized) {
           if (!renderer.uploadExact(source, resized)) {
@@ -5975,8 +6143,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           renderer.uploadCurves(state.curves);
           webglState.curveDirty = false;
         }
-        resizeWebGLCanvas(source.width, source.height);
-        renderer.drawStep3(step3, glCanvas.width, glCanvas.height);
+        resizeWebGLCanvas(framed.width, framed.height);
+        const viewport = framed.layout ? drawGlBorder(renderer.gl, source.width, source.height, framed.layout) : null;
+        if (!framed.layout) dropGlBorder();
+        // False only when the recipe needs the mode programs and they are gone.
+        if (!renderer.drawStep3(step3, glCanvas.width, glCanvas.height, { viewport })) return false;
         gpuPreview.lastDraw = 'step3';
         gpuPreview.lastFrame = null;
         if (WEBGL_DEBUG_ERRORS) {
@@ -6008,13 +6179,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       try {
         const source = getWebglSourceImageData();
         if (!source) return false;
+        const framed = glFrameSize(source.width, source.height);
         // Refits only when the texture, container, reference size or zoom
         // changed since the last fit; otherwise it touches no layout.
-        adjustCanvasDisplay(source.width, source.height);
+        adjustCanvasDisplay(framed.width, framed.height);
 
         const gl = webglState.gl;
-        gl.useProgram(webglState.program);
-
         // Uploads if needed
         if (webglState.sourceDirty || webglState.sourceSize.w !== source.width || webglState.sourceSize.h !== source.height) {
           webglUploadSource(source);
@@ -6022,8 +6192,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         if (webglState.curveDirty) {
           webglUploadCurves();
         }
-        resizeWebGLCanvas(source.width, source.height);
-        gl.viewport(0, 0, glCanvas.width, glCanvas.height);
+        resizeWebGLCanvas(framed.width, framed.height);
+        // The border underlay (#253) serves this context too.
+        const viewport = framed.layout ? drawGlBorder(gl, source.width, source.height, framed.layout) : null;
+        if (!framed.layout) dropGlBorder();
+        gl.useProgram(webglState.program);
+        if (viewport) gl.viewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+        else gl.viewport(0, 0, glCanvas.width, glCanvas.height);
 
         // Bind geometry
         gl.bindBuffer(gl.ARRAY_BUFFER, webglState.quadBuffer);
@@ -6062,6 +6237,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         glCanvas.style.display = 'none';
         canvas.style.display = 'none';
         hideDetailLayer();
+        releaseDisplayOverlay();
         return;
       }
       const showGL = isWebGLActive();
@@ -6188,19 +6364,43 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       glDetailCanvas.style.height = `${plan.height * fit}px`;
     }
 
-    // Draws the region with the Step-3 uniforms and curves the base just used.
+    // Draws the region with the Step-3 uniforms and curves the base just used,
+    // and the base's look and rescue (#253) at the region's place in the whole
+    // frame. The layer's own context compiles the mode programs when first
+    // needed; until they link the base shows alone.
     function drawDetailLayer() {
       const renderer = detailLayer.renderer;
       const shown = detailLayer.shown;
       if (!renderer || !shown) return false;
+      const values = webglStep3Values();
+      if (!detailModesReady(renderer, values)) {
+        hideDetailLayer();
+        return false;
+      }
+      const source = state.conversionSourceImageData;
       renderer.uploadCurves(state.curves);
-      renderer.drawStep3(webglStep3Values(), glDetailCanvas.width, glDetailCanvas.height);
+      renderer.drawStep3(values, glDetailCanvas.width, glDetailCanvas.height, {
+        frame: source ? regionFrame(shown.plan, shown.width, shown.height, source.width, source.height) : null
+      });
       positionDetailCanvas();
       if (!detailLayer.visible) {
         detailLayer.visible = true;
         glDetailCanvas.style.display = 'block';
       }
       return true;
+    }
+
+    function detailModesReady(renderer, values) {
+      if (!values.stages?.active) return true;
+      renderer.startModesCompile();
+      const status = renderer.modesStatus();
+      if (status === 'pending' && !detailLayer.modesPoll) {
+        detailLayer.modesPoll = requestAnimationFrame(() => {
+          detailLayer.modesPoll = 0;
+          if (detailLayer.shown && detailTagCurrent(detailLayer.shown.tag) && detailLayerAllowed()) drawDetailLayer();
+        });
+      }
+      return status === 'linked';
     }
 
     // After every base draw: keep a current region on screen (redrawn with the
@@ -6509,8 +6709,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         if (separatePreview && isLargeImage(state.conversionSourceImageData)) {
           // Current pixels above 16 MP keep the display preview. A CPU mode
           // still settles it with the exact colour model (#242), off this
-          // thread, unless a full-resolution render will land anyway.
-          if (!isWebGLActive() && !fullResolutionRenderTimer && !state.fullResolutionPromise) renderSettledDisplay();
+          // thread, unless a full-resolution render will land anyway. The GL
+          // display is current already: its histogram and the border smear
+          // settle here (#253), since updateFull does not run.
+          if (isWebGLActive()) {
+            renderHistogramForWebGL(true);
+            refreshGlBorderSmear();
+          } else if (!fullResolutionRenderTimer && !state.fullResolutionPromise) renderSettledDisplay();
           return;
         }
         updateFull();
@@ -6532,11 +6737,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
       // Prefer GPU rendering in Step 3 when available.
       if (state.currentStep >= 3 && initWebGLRenderer()) {
+        scheduleDisplayModesWarmup();
         updateCanvasVisibility();
         if (isWebGLActive() && renderWebGL()) {
           settleInterimGeometryDisplay();
           renderHistogramForWebGL(false);
           presentGlFrame();
+          syncDisplayOverlay();
           if (gpuPreview.lastDraw === 'step3') scheduleGpuPreviewWarmup();
           return;
         }
@@ -6575,8 +6782,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     function presentCpuFrame(adjusted, options = {}) {
       state.displayImageData = adjusted;
       renderAdjustedImageDataToMainCanvas(adjusted, step3FrameReference(state), options);
-      if (state.dustRemoval.showMask && state.dustRemoval.mask) renderDustMaskOverlay();
-      renderDodgeBurnOverlay();
+      // The tint and the strokes are on their own layer (#253).
+      syncDisplayOverlay();
     }
 
     function updatePreviewCpu() {
@@ -6599,11 +6806,14 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
       // Prefer GPU rendering in Step 3 when available.
       if (state.currentStep >= 3 && initWebGLRenderer()) {
+        scheduleDisplayModesWarmup();
         updateCanvasVisibility();
         if (isWebGLActive() && renderWebGL()) {
           settleInterimGeometryDisplay();
           renderHistogramForWebGL(true);
           presentGlFrame();
+          syncDisplayOverlay();
+          refreshGlBorderSmear();
           if (gpuPreview.lastDraw === 'step3') scheduleGpuPreviewWarmup();
           return;
         }
@@ -6675,13 +6885,84 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         canvases: {
           main: size(canvas), comparison: size(beforeAfterCanvas),
           dustTint: size(dustMaskOverlayCache.canvas), aiBrush: size(brushOverlay),
-          borderFrame: size(sprocketPreviewFrameCanvas)
+          borderFrame: size(sprocketPreviewFrameCanvas), gl: size(glCanvas),
+          overlay: displayOverlay && displayOverlay.style.display === 'block' ? size(displayOverlay) : null,
+          glBorder: webglState.borderUnderlay ? size(webglState.borderUnderlay.size()) : null
         },
+        overlayBox: displayOverlay ? ['left', 'top', 'width', 'height'].map(key => displayOverlay.style[key]) : null,
+        glPhoto: glBorder.photo ? { ...glBorder.photo } : null,
         comparison: {
           shown: Boolean(beforeAfterCanvas && beforeAfterCanvas.style.display === 'block'),
           cached: Boolean(beforeAfterCanvasSource),
           box: beforeAfterCanvas ? ['left', 'top', 'width', 'height'].map(key => beforeAfterCanvas.style[key]) : null
         }
+      };
+    }
+
+    // The GL display read back in the task that draws it (preserveDrawingBuffer
+    // is false), rows top-down; null when WebGL does not present (#253).
+    function readGlDisplay() {
+      if (!isWebGLActive() || !renderWebGL()) return null;
+      const gl = webglState.gl;
+      const width = gl.drawingBufferWidth, height = gl.drawingBufferHeight;
+      const pixels = new Uint8Array(width * height * 4);
+      gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+      const data = new Uint8ClampedArray(pixels.length);
+      for (let y = 0; y < height; y++) data.set(pixels.subarray((height - 1 - y) * width * 4, (height - y) * width * 4), y * width * 4);
+      return { width, height, data, photo: glBorder.photo ? { ...glBorder.photo } : null };
+    }
+
+    function cropRows(image, x, y, width, height) {
+      const out = new Uint8ClampedArray(width * height * 4);
+      for (let row = 0; row < height; row++) {
+        const start = ((y + row) * image.width + x) * 4;
+        out.set(image.data.subarray(start, start + width * 4), row * width * 4);
+      }
+      return out;
+    }
+
+    // The GL frame on screen against pixelAdjustments.js ('full') on the same
+    // display source, by the #253 parity budget; with the border, the photo's
+    // rectangle against the adjusted photo and the border against
+    // composeSprocketFrame at display size (outside the smear, identical).
+    function verifyGlDisplay() {
+      const frame = readGlDisplay();
+      const source = displaySourceImageData();
+      if (!frame || !source) return { error: 'no GL frame' };
+      const expected = new ImageData(source.width, source.height);
+      applyPreparedAdjustmentsToBuffer(source, buildDisplayAdjustmentSettings(), expected, { quality: 'full' });
+      const stages = webglStep3Values().stages;
+      const report = {
+        width: frame.width, height: frame.height, program: stages?.active ? 'modes' : 'plain', modesReady: webglState.modesReady,
+        stages: stages ? { rescue: stages.rescueOn, fog: stages.fogOn, local: stages.local, offsets: stages.offsetsOn, lookMatrix: stages.lookMatrixOn, lookCurves: stages.lookCurvesOn } : null
+      };
+      if (!frame.photo) {
+        if (frame.width !== source.width || frame.height !== source.height) return { ...report, error: 'size', source: [source.width, source.height] };
+        return { ...report, ...displayParity(expected.data, frame.data) };
+      }
+      const layout = frame.photo;
+      if (frame.width !== layout.frameWidth || frame.height !== layout.frameHeight) return { ...report, error: 'frame size', layout };
+      const photo = displayParity(expected.data, cropRows(frame, layout.x, layout.y, layout.width, layout.height));
+      const composeOptions = getSprocketFrameComposeOptions();
+      const framed = composeSprocketFrame(expected, composeOptions);
+      let borderPixels = 0, borderDiffering = 0, borderMax = 0;
+      if (framed.width === frame.width && framed.height === frame.height) {
+        for (let y = 0; y < frame.height; y++) {
+          for (let x = 0; x < frame.width; x++) {
+            if (x >= layout.x && x < layout.x + layout.width && y >= layout.y && y < layout.y + layout.height) continue;
+            const i = (y * frame.width + x) * 4;
+            let d = 0;
+            for (let c = 0; c < 3; c++) d = Math.max(d, Math.abs(frame.data[i + c] - framed.data[i + c]));
+            borderPixels++;
+            if (d) borderDiffering++;
+            if (d > borderMax) borderMax = d;
+          }
+        }
+      }
+      return {
+        ...report, ...photo, layout,
+        border: { pixels: borderPixels, differing: borderDiffering, max: borderMax, composed: [framed.width, framed.height],
+          smear: Boolean(composeOptions.edgeMarkings?.overexposedSprockets) }
       };
     }
 
@@ -6715,6 +6996,44 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         frame: describeDisplayFrame,
         imageHash: hashDisplayedImage,
         settledParity: verifySettledDisplay,
+        glParity: verifyGlDisplay,
+        glActive: () => isWebGLActive(),
+        // The frame on screen, whichever canvas shows it (a GL frame read back in
+        // its own draw task): { surface, width, height, data, photo }.
+        shownFrame: () => {
+          if (glCanvas.style.display === 'block') {
+            const frame = readGlDisplay();
+            if (frame) return { surface: 'gl', ...frame };
+          }
+          const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+          return { surface: 'cpu', width: canvas.width, height: canvas.height, data, photo: state.sprocketPreviewEnabled ? mainCanvasPhoto : null };
+        },
+        // The dodge-and-burn strokes in working-frame pixels and where the overlay
+        // and the photo lie on screen (#253 alignment checks).
+        overlayProbe: () => {
+          const image = state.processedImageData;
+          const geometry = dodgeBurnGeometry();
+          const rect = (el) => { const r = el.getBoundingClientRect(); return { left: r.left, top: r.top, width: r.width, height: r.height }; };
+          const surface = glCanvas.style.display === 'block' ? glCanvas : canvas;
+          const layout = !state.sprocketPreviewEnabled ? null : surface === glCanvas ? glBorder.photo : mainCanvasPhoto;
+          const box = rect(surface);
+          const photo = layout ? {
+            left: box.left + box.width * layout.x / layout.frameWidth, top: box.top + box.height * layout.y / layout.frameHeight,
+            width: box.width * layout.width / layout.frameWidth, height: box.height * layout.height / layout.frameHeight
+          } : box;
+          return {
+            working: image ? { width: image.width, height: image.height } : null,
+            strokes: geometry ? (state.localExposure?.strokes || []).map(stroke => stroke.points.map(p => basePointToWorking(p, geometry))) : [],
+            overlay: displayOverlay.style.display === 'block' ? rect(displayOverlay) : null,
+            overlayBacking: [displayOverlay.width, displayOverlay.height],
+            surface: surface === glCanvas ? 'gl' : 'cpu', surfaceRect: box, photo,
+            tint: dustMaskOverlayCache.canvas ? [dustMaskOverlayCache.width, dustMaskOverlayCache.height] : null
+          };
+        },
+        modes: () => ({
+          status: displayModes.status, reason: displayModes.reason, ready: webglState.modesReady,
+          selfTest: displayModes.selfTest, needed: displayModesNeeded()
+        }),
         counters: () => ({ ...displayDebugCounters }),
         resetCounters: () => { for (const key of Object.keys(displayDebugCounters)) displayDebugCounters[key] = 0; }
       });
@@ -7029,8 +7348,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       onAbandon: () => schedulePreviewUpdate()
     });
 
-    // Whether applyProgram may show the current settings: a ready WebGL2 renderer in a
-    // mode that draws the plain conversion (#253 owns the others).
+    // Whether applyProgram may show the current settings: a ready WebGL2 renderer and
+    // a display on the GPU. The look, the rescue, the border, the dodge tool and a
+    // shown mask draw here too (#253); frame repairs and the comparison keep the
+    // worker path.
     function gpuApplyUsable() {
       return gpuPreview.status === 'ready' && Boolean(webglState.renderer2)
         && gpuPreview.renderer === webglState.renderer2 && !webglState.disabledByError
@@ -7341,14 +7662,99 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         if (!result.ok) return failGpuPreview(`self-test ${JSON.stringify(result)}`);
         gpuPreview.status = 'ready';
       }
-      // Inputs only for a frame the GPU may draw: an excluded mode (crop, look,
-      // repairs, ...) asks again with its next exact frame once it ends.
+      // Inputs only for a frame the GPU may draw: an excluded mode (crop,
+      // repairs, a look or rescue before the mode programs are ready, ...) asks
+      // again with its next exact frame once it ends.
       if (gpuPreview.status !== 'ready' || !gpuApplyUsable()) return;
       const settings = buildRouterSettings(state);
       const params = trySilverCoreParams(resolveConversionMode(settings), settings);
       if (params) gpuProfileReady(params.enhancedProfile);
       requestGpuPrepare();
       requestGpuAnalyze();
+    }
+
+    // ===========================================
+    // Display modes on the GPU (#253)
+    // ===========================================
+    // The look and the expired-film rescue draw with the mode variants of both
+    // programs (render/previewShader.js). They compile at idle once a WebGL2
+    // context exists, then draw their fixtures (rescue with fog and local
+    // contrast, the look, both with vibrance) against pixelAdjustments.js in one
+    // readback. Until that passes, and for good if it fails, a session with a look
+    // or a rescue keeps the CPU display (webglState.modesReady); nothing else
+    // depends on it. ?gpuPreview=modes-fail fails the self-test.
+    const displayModes = { status: 'none', reason: null, renderer: null, cases: null, selfTest: null, queued: false };
+
+    function resetDisplayModes() {
+      displayModes.status = 'none';
+      displayModes.reason = null;
+      displayModes.renderer = null;
+      displayModes.cases = null;
+      webglState.modesReady = false;
+    }
+
+    function failDisplayModes(reason, status = 'failed') {
+      displayModes.status = status;
+      displayModes.reason = reason;
+      displayModes.cases = null;
+      webglState.modesReady = false;
+      console.info('GPU display of the look and the rescue is off:', reason);
+    }
+
+    function scheduleDisplayModesWarmup() {
+      if (displayModes.queued || !webglState.webgl2 || !webglState.renderer2 || webglState.disabledByError) return;
+      if (displayModes.status === 'ready' || displayModes.status === 'failed' || displayModes.status === 'unsupported') {
+        if (displayModes.renderer === webglState.renderer2) return;
+      }
+      displayModes.queued = true;
+      runWhenIdle(() => {
+        displayModes.queued = false;
+        warmUpDisplayModes();
+      });
+    }
+
+    function warmUpDisplayModes() {
+      const renderer = webglState.renderer2;
+      if (!renderer || webglState.disabledByError) return;
+      if (displayModes.renderer !== renderer) {
+        resetDisplayModes();
+        displayModes.renderer = renderer;
+      }
+      if (displayModes.status === 'none') {
+        if (!webgl2PrecisionOk(renderer.gl)) return failDisplayModes('highp precision', 'unsupported');
+        renderer.startModesCompile();
+        displayModes.status = 'compiling';
+      }
+      if (displayModes.status === 'compiling') {
+        const linked = renderer.modesStatus();
+        if (linked === 'pending') {
+          requestAnimationFrame(scheduleDisplayModesWarmup);
+          return;
+        }
+        if (linked !== 'linked') return failDisplayModes(`mode programs: ${renderer.modesError()}`);
+        displayModes.status = 'testing';
+        scheduleDisplayModesWarmup();
+        return;
+      }
+      if (displayModes.status === 'testing') {
+        // The CPU references in one idle slot, the draws and the readback in the next.
+        if (!displayModes.cases) {
+          displayModes.cases = buildDisplayModesCases();
+          scheduleDisplayModesWarmup();
+          return;
+        }
+        const result = renderer.modesSelfTest(displayModes.cases, { corrupt: GPU_PREVIEW_MODE === 'modes-fail' });
+        displayModes.cases = null;
+        displayModes.selfTest = result;
+        if (!result.ok) return failDisplayModes(`self-test ${JSON.stringify(result)}`);
+        displayModes.status = 'ready';
+        webglState.modesReady = true;
+        // A look or a rescue on screen moves to the GPU now.
+        if (displayModesNeeded() && state.currentStep >= 3 && state.processedImageData) {
+          updateCanvasVisibility();
+          schedulePreviewUpdate();
+        }
+      }
     }
 
     function canAutoConvertFromStep2() {
@@ -8868,18 +9274,17 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     }
 
     // The mask tint is cached as its own canvas: it only changes when the mask
-    // or the canvas size changes, so a brush drag composites a ready-made layer
+    // or the overlay size changes, so a brush drag composites a ready-made layer
     // instead of running a full-canvas getImageData, per-pixel JS loop and
     // putImageData on every pointer move.
     // The brush patches the mask in place, so the layer is keyed by the dust
-    // revision as well as the mask object (#259).
+    // revision as well as the mask object (#259). It is built at the display
+    // overlay's size (#253), never the image's.
     const dustMaskOverlayCache = { canvas: null, mask: null, revision: -1, width: 0, height: 0 };
 
-    function getDustMaskOverlayCanvas() {
+    function getDustMaskOverlayCanvas(w, h) {
       const mask = state.dustRemoval.mask;
       if (!mask || !state.processedImageData) return null;
-      const w = canvas.width;
-      const h = canvas.height;
       if (!w || !h) return null;
 
       if (
@@ -8935,8 +9340,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const cache = dustMaskOverlayCache;
       const mask = state.dustRemoval.mask;
       const image = state.processedImageData;
-      if (!cache.canvas || !mask || !image || cache.mask !== mask
-        || cache.revision !== revision - 1 || cache.width !== canvas.width || cache.height !== canvas.height) return;
+      if (!cache.canvas || !mask || !image || cache.mask !== mask || cache.revision !== revision - 1) return;
       const { width, height } = image;
       const w = cache.width, h = cache.height;
       const scaleX = width / w, scaleY = height / h;
@@ -8973,29 +9377,128 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       cache.revision = revision;
     }
 
-    function renderDustMaskOverlay() {
-      if (state.cropping) return;
-      if (!state.dustRemoval.showMask || !state.dustRemoval.mask || !state.processedImageData) return;
-      const layer = getDustMaskOverlayCanvas();
-      if (!layer) return;
-      ctx.drawImage(layer, 0, 0);
+    // ===========================================
+    // Display overlay (#253 C)
+    // ===========================================
+    // The dust-mask tint, the dodge-and-burn strokes (saved and live) and the
+    // dust brush's dots are drawn on their own transparent canvas in the
+    // transform wrapper, above whichever canvas shows the photo (#glCanvas and
+    // the detail layer, or #canvas), never into the photo's context. A repaint
+    // clears the layer instead of redrawing the photo underneath, so a shown
+    // mask or the dodge tool no longer takes the display off the GPU, and a
+    // tint can no longer be composited over the previous tint. The backing is
+    // the display photo's size, never the image's; with the film border it
+    // covers the photo's rectangle. Live strokes redraw once per animation
+    // frame (#254 makes them incremental and moves them to a screen overlay).
+
+    // The overlay's backing and CSS box for the photo on screen, or null when it
+    // has nothing to show.
+    function displayOverlayPlan() {
+      if (!displayOverlay || state.cropping || state.currentStep < 3 || !state.processedImageData) return null;
+      const tint = Boolean(state.dustRemoval.showMask && state.dustRemoval.mask);
+      const strokes = Boolean(state.dodgeBurn?.active && state.dodgeBurn.showOverlay && state.localExposure?.strokes?.length);
+      const live = Boolean((dodgeBurnDrawing && dodgeBurnPoints.length) || (dustDrawing && dustBrushPoints.length && state.dustRemoval.showMask));
+      if (!tint && !strokes && !live) return null;
+      const shown = displaySourceImageData();
+      if (!shown) return null;
+      const layout = state.sprocketPreviewEnabled ? getSprocketFrameLayout(shown.width, shown.height, getSprocketFrameComposeOptions()) : null;
+      return {
+        width: shown.width, height: shown.height, tint, strokes, live,
+        box: layout ? photoRectPercent(layout) : { left: '0px', top: '0px', width: '100%', height: '100%' }
+      };
     }
 
-    // Repaint the image under the overlay first. Without this the tint is
-    // composited on top of the previous tint, so a brush drag turned the whole
-    // mask solid red and toggling the mask twice doubled its opacity.
-    // The frame under the tint is the adjusted one on screen (#242): never the
-    // unadjusted positive, which flashed during a stroke. Without one yet, the
-    // next frame draws it; false says nothing was drawn now.
-    function repaintDustMaskOverlay() {
-      const display = state.displayImageData;
-      if (!display) {
-        if (state.processedImageData) schedulePreviewUpdate();
-        return false;
+    // What a repaint draws, so an unchanged overlay is left alone on every photo
+    // frame. Live strokes always repaint.
+    function displayOverlayKey(plan) {
+      if (!plan) return 'none';
+      const geometry = plan.strokes ? dodgeBurnGeometry() : null;
+      return [plan.width, plan.height, plan.box.left, plan.box.top, plan.box.width, plan.box.height,
+        plan.tint ? `${gpuObjectId(state.dustRemoval.mask)}:${state.dustRemoval.revision}` : '',
+        plan.strokes ? `${gpuObjectId(state.localExposure)}:${JSON.stringify(geometry)}` : ''].join('|');
+    }
+
+    function paintDisplayOverlay(plan = displayOverlayPlan()) {
+      // A live stroke leaves no key: the next sync repaints without it.
+      displayOverlayState.key = plan?.live ? null : displayOverlayKey(plan);
+      if (!plan) {
+        releaseDisplayOverlay(false);
+        return;
       }
-      renderAdjustedImageDataToMainCanvas(display, step3FrameReference(state));
-      renderDustMaskOverlay();
-      return true;
+      if (displayOverlay.width !== plan.width || displayOverlay.height !== plan.height) {
+        displayOverlay.width = plan.width;
+        displayOverlay.height = plan.height;
+      }
+      const placed = `${plan.box.left}|${plan.box.top}|${plan.box.width}|${plan.box.height}`;
+      if (displayOverlayState.placed !== placed) {
+        Object.assign(displayOverlay.style, plan.box);
+        displayOverlayState.placed = placed;
+      }
+      const context = displayOverlay.getContext('2d');
+      context.clearRect(0, 0, plan.width, plan.height);
+      if (plan.tint) {
+        const layer = getDustMaskOverlayCanvas(plan.width, plan.height);
+        if (layer) context.drawImage(layer, 0, 0);
+      }
+      if (plan.strokes) renderDodgeBurnOverlay(context, plan.width, plan.height);
+      if (dodgeBurnDrawing && dodgeBurnPoints.length) {
+        drawDodgeBurnPath(context, plan.width, plan.height, dodgeBurnPoints, state.dodgeBurn.mode === 'dodge' ? -1 : 1, true);
+      }
+      if (dustDrawing && dustBrushPoints.length && state.dustRemoval.showMask) drawDustBrushDots(context, plan.width, plan.height);
+      displayOverlay.style.display = 'block';
+      displayDebugCounters.overlayPaints++;
+    }
+
+    // After a photo frame or a change of what the overlay shows.
+    function syncDisplayOverlay() {
+      const plan = displayOverlayPlan();
+      if (!plan?.live && displayOverlayKey(plan) === displayOverlayState.key) return;
+      paintDisplayOverlay(plan);
+    }
+
+    // Live strokes: one repaint per animation frame.
+    function scheduleDisplayOverlayPaint() {
+      if (displayOverlayState.frame) return;
+      displayOverlayState.frame = requestAnimationFrame(() => {
+        displayOverlayState.frame = 0;
+        paintDisplayOverlay();
+      });
+    }
+
+    // Nothing to show, or the photo is gone: the backing goes too.
+    function releaseDisplayOverlay(resetKey = true) {
+      if (!displayOverlay) return;
+      if (displayOverlayState.frame) cancelAnimationFrame(displayOverlayState.frame);
+      displayOverlayState.frame = 0;
+      if (resetKey) displayOverlayState.key = null;
+      displayOverlay.style.display = 'none';
+      if (displayOverlay.width !== 1 || displayOverlay.height !== 1) {
+        displayOverlay.width = 1;
+        displayOverlay.height = 1;
+      }
+    }
+
+    function renderDustMaskOverlay() {
+      syncDisplayOverlay();
+    }
+
+    // The dots of the stroke in progress, in the brush mode's colour.
+    function drawDustBrushDots(context, width, height) {
+      const image = state.processedImageData;
+      if (!image) return;
+      const scaleX = width / image.width;
+      const scaleY = height / image.height;
+      const r = state.dustRemoval.brushSize * scaleX;
+      context.save();
+      context.globalAlpha = 0.4;
+      context.fillStyle = dustBrushMode === 'direct' ? '#ff0000'
+        : dustBrushMode === 'remove' ? '#0066ff' : '#ffff00';
+      for (const pt of dustBrushPoints) {
+        context.beginPath();
+        context.arc(pt.x * scaleX, pt.y * scaleY, r, 0, Math.PI * 2);
+        context.fill();
+      }
+      context.restore();
     }
 
     // ── Dust Removal UI Event Handlers ───────────────────────────────────────
@@ -9195,23 +9698,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const imgCoord = canvasToImageCoords(cx, cy);
       if (imgCoord) dustBrushPoints.push(imgCoord);
 
-      // Visual feedback: draw brush stroke on canvas
-      if (state.dustRemoval.showMask && repaintDustMaskOverlay()) {
-        // Draw brush points
-        const scaleX = canvas.width / (state.processedImageData?.width || 1);
-        const scaleY = canvas.height / (state.processedImageData?.height || 1);
-        const r = state.dustRemoval.brushSize * scaleX;
-        ctx.save();
-        ctx.globalAlpha = 0.4;
-        ctx.fillStyle = dustBrushMode === 'direct' ? '#ff0000'
-          : dustBrushMode === 'remove' ? '#0066ff' : '#ffff00';
-        for (const pt of dustBrushPoints) {
-          ctx.beginPath();
-          ctx.arc(pt.x * scaleX, pt.y * scaleY, r, 0, Math.PI * 2);
-          ctx.fill();
-        }
-        ctx.restore();
-      }
+      // Visual feedback on the display overlay, once per frame (#253).
+      if (state.dustRemoval.showMask) scheduleDisplayOverlayPaint();
     }
 
     let dustBrushTurn = Promise.resolve();
@@ -9363,6 +9851,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (dustBrushPoints.length === 0 || !state.processedImageData || !state.dustRemoval.mask) {
         dustBrushPoints = [];
         dustBrushSource = null;
+        paintDisplayOverlay();
         return;
       }
       const source = getDustSource();
@@ -9370,6 +9859,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         || coreReprocessToken !== dustBrushToken) {
         dustBrushPoints = [];
         dustBrushSource = null;
+        paintDisplayOverlay();
         return;
       }
       const points = dustBrushPoints;
@@ -14918,7 +15408,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         event.preventDefault();
         dustDrawing = false;
         dustBrushPoints = [];
-        if (state.dustRemoval.showMask) renderDustMaskOverlay();
+        paintDisplayOverlay();
         showToast(getLocalizedText('cancelledBrush', 'Brush cancelled'));
         return;
       }
@@ -16545,6 +17035,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       sprocketPreviewFrameCache.sourceRef = null;
       sprocketPreviewFrameCache.metrics = null;
       sprocketPreviewFrameCanvas.width = sprocketPreviewFrameCanvas.height = 1;
+      releaseGlBorder();
+      releaseDisplayOverlay();
       releaseBeforeAfterCanvas();
       resetZoomPan();
       zoomControls.style.display = 'none';
@@ -20614,9 +21106,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         scheduleCropDraftPreview({ preserveRect: true });
       } else if (isWebGLActive() && texture.w > 0 && texture.h > 0) {
         // The comparison is its own element over the GL canvas, which stays on
-        // screen under it (#242); it is redrawn once the comparison ends.
-        adjustCanvasDisplay(texture.w, texture.h);
-        if (!state.beforeAfterActive && (glCanvas.width !== texture.w || glCanvas.height !== texture.h)) renderWebGL();
+        // screen under it (#242); it is redrawn once the comparison ends. With
+        // the border the buffer is the frame around the texture (#253).
+        const framed = glFrameSize(texture.w, texture.h);
+        adjustCanvasDisplay(framed.width, framed.height);
+        if (!state.beforeAfterActive && (glCanvas.width !== framed.width || glCanvas.height !== framed.height)) renderWebGL();
       } else {
         refitMainCanvasBox();
       }
@@ -22503,7 +22997,6 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     let dodgeBurnDrawing = false;
     let dodgeBurnPointerId = null;
     let dodgeBurnPoints = [];
-    let dodgeBurnFrame = 0;
 
     function dodgeBurnGeometry() {
       const geometry = localExposureGeometryFor(state);
@@ -22557,7 +23050,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const points = dodgeBurnPoints;
       dodgeBurnPoints = [];
       const geometry = dodgeBurnGeometry();
-      if (!points.length || !geometry) { updatePreview(); return; }
+      if (!points.length || !geometry) { paintDisplayOverlay(); return; }
       const stroke = {
         stops: state.dodgeBurn.mode === 'dodge' ? -Math.abs(state.dodgeBurn.stops) : Math.abs(state.dodgeBurn.stops),
         size: state.dodgeBurn.size / 100,
@@ -22569,46 +23062,41 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       state.localExposure = sanitizeLocalExposureForSettings({ strokes });
       markCurrentFileDirty();
       updateDodgeBurnUI();
+      // The live path gives way to the saved stroke on the overlay.
+      paintDisplayOverlay();
       scheduleCoreReprocess({ full: false });
     }
 
+    // The stroke in progress on the display overlay (#253), once per frame; the
+    // photo underneath is not redrawn.
     function scheduleDodgeBurnLivePaint() {
-      if (dodgeBurnFrame) return;
-      dodgeBurnFrame = requestAnimationFrame(() => {
-        dodgeBurnFrame = 0;
-        // The adjusted frame on screen (#242); without one, the next frame.
-        const display = state.displayImageData;
-        if (!display) {
-          if (state.processedImageData) schedulePreviewUpdate();
-          return;
-        }
-        renderAdjustedImageDataToMainCanvas(display, step3FrameReference(state));
-        renderDodgeBurnOverlay();
-        drawDodgeBurnPath(dodgeBurnPoints.map((p) => ({ x: p.x, y: p.y, p: p.p })), state.dodgeBurn.mode === 'dodge' ? -1 : 1, true);
-      });
+      scheduleDisplayOverlayPaint();
     }
 
-    // Draws one stroke path (working-frame pixel points) on the main canvas.
-    function drawDodgeBurnPath(points, sign, live = false) {
-      if (!points.length || !state.processedImageData) return;
-      const ctx = canvas.getContext('2d');
-      const scaleX = canvas.width / state.processedImageData.width;
-      const scaleY = canvas.height / state.processedImageData.height;
-      const shortSide = Math.min(state.processedImageData.width, state.processedImageData.height);
-      const width = Math.max(2, state.dodgeBurn.size / 100 * shortSide * Math.min(scaleX, scaleY));
-      ctx.save();
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-      ctx.lineWidth = width;
-      ctx.strokeStyle = sign < 0 ? `rgba(120, 200, 255, ${live ? 0.45 : 0.3})` : `rgba(255, 170, 0, ${live ? 0.45 : 0.3})`;
-      ctx.beginPath();
-      points.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x * scaleX, p.y * scaleY); else ctx.lineTo(p.x * scaleX, p.y * scaleY); });
-      if (points.length === 1) ctx.lineTo(points[0].x * scaleX + 0.01, points[0].y * scaleY);
-      ctx.stroke();
-      ctx.restore();
+    // Draws one stroke path (working-frame pixel points) into a `width` x
+    // `height` overlay context over the photo. `size`: the brush size in percent
+    // of the short side (the tool's by default).
+    function drawDodgeBurnPath(context, width, height, points, sign, live = false, size = state.dodgeBurn.size) {
+      const image = state.processedImageData;
+      if (!points.length || !image) return;
+      const scaleX = width / image.width;
+      const scaleY = height / image.height;
+      const shortSide = Math.min(image.width, image.height);
+      const lineWidth = Math.max(2, size / 100 * shortSide * Math.min(scaleX, scaleY));
+      context.save();
+      context.lineCap = 'round';
+      context.lineJoin = 'round';
+      context.lineWidth = lineWidth;
+      context.strokeStyle = sign < 0 ? `rgba(120, 200, 255, ${live ? 0.45 : 0.3})` : `rgba(255, 170, 0, ${live ? 0.45 : 0.3})`;
+      context.beginPath();
+      points.forEach((p, i) => { if (i === 0) context.moveTo(p.x * scaleX, p.y * scaleY); else context.lineTo(p.x * scaleX, p.y * scaleY); });
+      if (points.length === 1) context.lineTo(points[0].x * scaleX + 0.01, points[0].y * scaleY);
+      context.stroke();
+      context.restore();
     }
 
-    function renderDodgeBurnOverlay() {
+    // The saved strokes, mapped from the base into the working frame.
+    function renderDodgeBurnOverlay(context, width, height) {
       if (!state.dodgeBurn?.active || !state.dodgeBurn.showOverlay) return;
       const strokes = state.localExposure?.strokes;
       if (!Array.isArray(strokes) || !strokes.length || !state.processedImageData) return;
@@ -22616,10 +23104,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (!geometry) return;
       for (const stroke of strokes) {
         const points = stroke.points.map((p) => basePointToWorking(p, geometry));
-        const saved = state.dodgeBurn.size;
-        state.dodgeBurn.size = stroke.size * 100;
-        drawDodgeBurnPath(points, stroke.stops < 0 ? -1 : 1);
-        state.dodgeBurn.size = saved;
+        drawDodgeBurnPath(context, width, height, points, stroke.stops < 0 ? -1 : 1, false, stroke.size * 100);
       }
     }
 
@@ -22656,7 +23141,6 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       state.dodgeBurn.active = Boolean(active);
       if (active) document.getElementById('aiBrushEnabled').checked = false;
       updateDodgeBurnUI();
-      // The overlay needs the 2D canvas; leaving the mode may hand the preview back to WebGL.
       updatePreview();
     }
 
@@ -22668,6 +23152,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       state.localExposure = kept.length ? { strokes: kept } : null;
       markCurrentFileDirty();
       updateDodgeBurnUI();
+      syncDisplayOverlay();
       scheduleCoreReprocess({ full: false });
     }
 
@@ -22687,7 +23172,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     document.getElementById('dodgeBurnEnabled')?.addEventListener('change', (event) => setDodgeBurnActive(event.target.checked));
     document.getElementById('dodgeBurnModeDodge')?.addEventListener('click', () => { state.dodgeBurn.mode = 'dodge'; updateDodgeBurnUI(); });
     document.getElementById('dodgeBurnModeBurn')?.addEventListener('click', () => { state.dodgeBurn.mode = 'burn'; updateDodgeBurnUI(); });
-    document.getElementById('dodgeBurnShowOverlay')?.addEventListener('change', (event) => { state.dodgeBurn.showOverlay = event.target.checked; updatePreview(); });
+    document.getElementById('dodgeBurnShowOverlay')?.addEventListener('change', (event) => { state.dodgeBurn.showOverlay = event.target.checked; syncDisplayOverlay(); });
     document.getElementById('dodgeBurnUndoStrokeBtn')?.addEventListener('click', () => removeDodgeBurnStrokes(1));
     document.getElementById('dodgeBurnClearBtn')?.addEventListener('click', () => removeDodgeBurnStrokes(Infinity));
     bindDodgeBurnNumber('dodgeBurnStops', 'stops', 1);
@@ -23121,7 +23606,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         compareBtn.classList.toggle('active', held);
         compareBtn.setAttribute('aria-pressed', held ? 'true' : 'false');
         schedulePreviewUpdate();
-        if (!held) scheduleFullUpdate();
+        // The settle redraws the histogram of what is shown, held or not (#253).
+        scheduleFullUpdate();
       };
       compareBtn?.addEventListener('pointerdown', (event) => {
         event.preventDefault();

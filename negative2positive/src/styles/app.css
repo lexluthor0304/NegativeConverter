@@ -632,6 +632,22 @@ body {
   z-index: 10;
 }
 
+/* The display overlay (#253): the dust-mask tint and the dodge-and-burn
+   strokes over the photo, whichever canvas shows it, following zoom and pan
+   with the wrapper. main.js sizes its backing to the display photo and places
+   it over the photo's rectangle when the film border is shown. Under the
+   comparison (z-index 10) and the AI-brush overlay (20). */
+.display-overlay {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  display: none;
+  pointer-events: none;
+  z-index: 5;
+}
+
 /* The detail layer (#248): native pixels of a zoomed view over the base image,
    at the region's rect in the wrapper's untransformed space. main.js sets the
    rect and shows it. */

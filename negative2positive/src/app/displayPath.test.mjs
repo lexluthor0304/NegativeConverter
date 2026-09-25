@@ -169,7 +169,7 @@ function settleFixture({ width = 1200, height = 900, worker = 'real', gl = false
     previewSourceImageData: shown, displayImageData: null,
     dustRemoval: { showMask: false, mask: null }
   };
-  const drawn = [], histograms = [], requests = [];
+  const drawn = [], histograms = [], requests = [], overlaySyncs = [];
   let glActive = gl;
   const real = createExportWorkerBridge({ workerFactory: () => new InProcessWorker() });
   const workers = {
@@ -193,7 +193,8 @@ function settleFixture({ width = 1200, height = 900, worker = 'real', gl = false
     buildAdjustmentSettings: () => ({ ...recipe }),
     applyPreparedAdjustmentsToBuffer, adjustmentLutScratch: createAdjustmentLutScratch(),
     renderAdjustedImageDataToMainCanvas: (imageData, reference, options) => drawn.push({ imageData, reference, options }),
-    renderDustMaskOverlay: noop, renderDodgeBurnOverlay: noop,
+    // #253: the tint and the strokes are on their own layer, synced per frame.
+    syncDisplayOverlay: () => overlaySyncs.push(drawn.length), scheduleDisplayModesWarmup: noop, refreshGlBorderSmear: noop,
     renderHistogram: imageData => histograms.push(imageData),
     isWebGLActive: () => glActive,
     // updateFull's own dependencies.
@@ -204,9 +205,9 @@ function settleFixture({ width = 1200, height = 900, worker = 'real', gl = false
   });
   vm.runInContext([...DISPLAY_SESSION_HELPERS, 'supersedeSettledDisplay', 'presentGlFrame', 'displaySourceImageData', 'presentCpuFrame',
     'buildDisplayAdjustmentSettings', 'noteMainThreadAdjustment', 'ensureImageDataBuffer', 'applyAdjustmentsToBuffer',
-    'updatePreviewCpu', 'updateFull', 'renderSettledDisplay', 'getCurrentHistogramSource', 'redrawHistogramIfPossible',
-    'repaintDustMaskOverlay'].map(functionSource).join('\n'), context);
-  return { context, state, shown, drawn, histograms, requests, counters: context.displayDebugCounters,
+    'updatePreviewCpu', 'updateFull', 'renderSettledDisplay', 'getCurrentHistogramSource', 'redrawHistogramIfPossible'
+  ].map(functionSource).join('\n'), context);
+  return { context, state, shown, drawn, overlaySyncs, histograms, requests, counters: context.displayDebugCounters,
     setGl: value => { glActive = value; }, dispose: () => real.terminateWorker() };
 }
 
@@ -301,19 +302,17 @@ for (const worker of ['none', 'failing']) {
 }
 
 {
-  // The preview frame: the handle is the display-size frame on screen, and
-  // the overlays repaint from it, never from the unadjusted positive.
+  // The preview frame: the handle is the display-size frame on screen; the
+  // overlays are synced on their own layer after it (#253), never drawn into
+  // the photo's canvas and never redrawn from the unadjusted positive.
   const f = settleFixture({ width: 64, height: 48 });
   f.context.updatePreviewCpu();
   const handle = f.state.displayImageData;
   assert.deepEqual([handle.width, handle.height], [64, 48]);
   assert.equal(f.drawn.at(-1).imageData, handle);
   assert.equal(f.drawn.at(-1).options.fastSprocketPreview, true);
-  assert.equal(f.context.repaintDustMaskOverlay(), true);
-  assert.equal(f.drawn.at(-1).imageData, handle, 'the dust overlay repaints the adjusted frame');
+  assert.deepEqual(f.overlaySyncs, [1], 'the overlay layer is synced after the frame, which alone went to #canvas');
   f.state.displayImageData = null;
-  assert.equal(f.context.repaintDustMaskOverlay(), false);
-  assert.equal(f.drawn.at(-1), 'scheduled', 'without a handle the next frame draws it');
   assert.equal(f.context.getCurrentHistogramSource(), null, 'never the unadjusted positive');
   f.context.redrawHistogramIfPossible();
   assert.equal(f.drawn.at(-1), 'scheduled');

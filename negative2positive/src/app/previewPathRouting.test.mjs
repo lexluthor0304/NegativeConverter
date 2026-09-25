@@ -151,6 +151,8 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
     mainCanvasFit: { width: 0, height: 0, reference: null },
     step3FrameReference, getSprocketFrameLayout, getSprocketFrameComposeOptions: () => ({}),
     updatePreview: () => log.push('paint'), updateFull: () => log.push('paint:full'),
+    renderHistogramForWebGL: (force) => log.push(`histogram:${force ? 'forced' : 'throttled'}`),
+    refreshGlBorderSmear: () => log.push('smear'),
     schedulePreviewUpdate: () => log.push('paint:scheduled'),
     carryStudioThumbnailSource: noop, displayResizeReplaces: () => null, displayResizeOrigin: () => null,
     waitForNextFrame: () => Promise.resolve(),
@@ -589,6 +591,9 @@ for (const large of [false, true]) {
   f.clock.run(400);
   await settle();
   assert.ok(!f.log.some(entry => entry.startsWith('render:')), 'no fullResolutionRender after a Step-3 commit');
+  // #253: above 16 MP the GL display settles its histogram (and a border's
+  // smear) here, since updateFull does not run.
+  if (large) assert.deepEqual(f.log.filter(entry => entry === 'histogram:forced' || entry === 'smear'), ['histogram:forced', 'smear']);
   assert.equal(f.clock.timers.size, 0);
   assert.equal(f.state.fullResolutionPending, false, 'current pixels stay current');
   assert.deepEqual(f.log.filter(entry => entry === 'paint:full'), large ? [] : ['paint:full'],

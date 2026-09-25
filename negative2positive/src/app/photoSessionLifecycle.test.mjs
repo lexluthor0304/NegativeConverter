@@ -660,6 +660,9 @@ for (const locked of [false, true]) {
     composeDisplaySprocketFrame: { clear: noop },
     sprocketPreviewFrameCache: { key: 'old', sourceRef: f.base, metrics: {} },
     sprocketPreviewFrameCanvas: { width: 100, height: 100 },
+    // #253: the GL border background and the display overlay go with the photo.
+    glBorderReleases: 0, releaseGlBorder: () => { c.glBorderReleases++; },
+    overlayReleases: 0, releaseDisplayOverlay: () => { c.overlayReleases++; },
     // The comparison canvas holds the last reference drawn into it (#242).
     beforeAfterCanvas: { width: 100, height: 80, style: { display: 'block' } }, beforeAfterCanvasSource: f.converted,
     zoomControls: { style: {} }, canvas: { style: {} }, glCanvas: { style: {} },
@@ -705,6 +708,8 @@ for (const locked of [false, true]) {
     assert.equal(f.state.photoSwitchPhase, null);
     assert.equal(c.sprocketPreviewFrameCache.sourceRef, null);
     assert.equal(c.sprocketPreviewFrameCanvas.width, 1);
+    assert.equal(c.glBorderReleases, 1, 'close releases the GL border background (#253)');
+    assert.equal(c.overlayReleases, 1, 'and the display overlay');
     assert.deepEqual([c.beforeAfterCanvas.width, c.beforeAfterCanvas.height], [1, 1], 'close releases the comparison canvas');
     assert.equal(c.beforeAfterCanvas.style.display, 'none');
     assert.equal(c.beforeAfterCanvasSource, null, 'and forgets its reference');

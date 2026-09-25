@@ -141,6 +141,15 @@ for (const [width, height] of [[64, 48], [96, 64], [211, 137]]) {
     }
   }
   assert.deepEqual([...packRescueOffsets(new Float32Array(192).map((_, i) => i)).subarray(0, 8)], [0, 1, 2, 0, 3, 4, 5, 0]);
+  // The new GPU textures stay far under 1 MB: the grid at its 128 x 128 cap, the
+  // colour table, the tone curve and the look's curve row.
+  const worstGrid = 128 * 128 * 4;
+  for (const c of cases) {
+    const s = c.stages;
+    const bytes = (s.mean ? s.mean.data.length * 4 : 0) + (s.offsets ? s.offsets.data.byteLength : 0)
+      + (s.tone ? s.tone.data.byteLength : 0) + (s.lookCurves ? s.lookCurves.data.byteLength : 0);
+    assert.ok(bytes <= worstGrid + 64 * 16 + 256 * 4 + 256 * 4 && bytes < 1024 * 1024, `${c.name}: ${bytes} B of stage textures`);
+  }
   const identity = packCurveRow(null);
   assert.deepEqual([...identity.subarray(4 * 200, 4 * 201)], [200, 200, 200, 255]);
   // Off: the plain programs draw.

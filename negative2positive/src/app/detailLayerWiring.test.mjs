@@ -5,6 +5,7 @@ import { planDetailRegion, detailRegionServes, detailSlotSize, snapPanToDevicePi
 import { displayTargetFor, displayLevelGeometry } from './displayPreview.js';
 import { computeZoomGeometry } from './zoomGeometry.js';
 import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
+import { regionFrame } from '../render/previewTables.js';
 
 // #248 part 5 in main.js (extracted with vm): when the detail layer asks for a
 // region, from what, how it is placed, and that a stale region is never drawn.
@@ -53,7 +54,9 @@ function fixture({ dpr = 2, container = { width: 600, height: 420 } } = {}) {
     gl: { getParameter: () => 8192, MAX_TEXTURE_SIZE: 1 },
     uploadExact: (image) => { uploads.push(image); return true; },
     uploadCurves: () => {},
-    drawStep3: (values, width, height) => draws.push({ width, height })
+    drawStep3: (values, width, height, options = {}) => { draws.push({ width, height, values, frame: options.frame || null }); return true; },
+    startModesCompile: () => { renderer.modesCompiles = (renderer.modesCompiles || 0) + 1; },
+    modesStatus: () => renderer.modes || 'linked'
   };
   const fit = Math.min((container.width - 20) / W, (container.height - 20) / H);
   const context = vm.createContext({
@@ -75,7 +78,8 @@ function fixture({ dpr = 2, container = { width: 600, height: 420 } } = {}) {
     hasSeparateConversionPreview: () => true, hasFrameRepairs: () => state.dustRemoval.enabled,
     getCanvasContainerSize: () => container,
     getZoomGeometry: () => computeZoomGeometry({ wrapperW: W * fit, wrapperH: H * fit, containerW: container.width, containerH: container.height, zoom: state.zoomLevel }),
-    interimGeometryCss: () => '', webglStep3Values: () => ({ wb: [1, 1, 1], vib: 0, cmy: [0, 0, 0] }),
+    interimGeometryCss: () => '', webglStep3Values: () => ({ wb: [1, 1, 1], vib: 0, cmy: [0, 0, 0], stages: state.stages || null }),
+    regionFrame, requestAnimationFrame: () => 1,
     gpuPreview: { lastDraw: 'step3' }, gpuPreviewScheduler: { isAhead: () => false },
     coreReprocessGeneration: 1, coreReprocessToken: 10, coreReprocessTimer: null, coreReprocessScheduled: null,
     coreReprocessBusy: () => false, processNegativeInFlight: null, corePreviewCommit: null, displayPreviewRebuild: null,
@@ -94,7 +98,7 @@ function fixture({ dpr = 2, container = { width: 600, height: 420 } } = {}) {
   vm.runInContext([
     ...DISPLAY_SESSION_HELPERS,
     'detailLayerAllowed', 'detailView', 'detailFullFrame', 'detailTag', 'detailTagCurrent', 'hideDetailLayer', 'dropDetailLayer',
-    'positionDetailCanvas', 'drawDetailLayer', 'syncDetailLayer', 'noteDetailViewChanged', 'scheduleDetailRequest',
+    'positionDetailCanvas', 'drawDetailLayer', 'detailModesReady', 'syncDetailLayer', 'noteDetailViewChanged', 'scheduleDetailRequest',
     'scheduleDetailWarmUp', 'requestDetailRegion', 'detailFromFrame', 'detailFromSource', 'showDetailRegion',
   ].map(functionSource).join('\n'), context);
   const runTimers = async () => {
@@ -191,6 +195,34 @@ function fixture({ dpr = 2, container = { width: 600, height: 420 } } = {}) {
   // A photo switch, rotate or crop (resetZoomPan) drops it.
   f.context.dropDetailLayer();
   assert.equal(f.context.detailLayer.shown, null);
+}
+
+// #253: with a look or a rescue on screen, the region is drawn with the mode
+// programs of its own context once they link, at its place in the whole frame
+// (u_frame), so the rescue's positions match the base's.
+{
+  const f = fixture();
+  f.state.stages = { active: true, rescueOn: 1 };
+  f.context.detailLayer.renderer.modes = 'pending';
+  f.zoomTo(1 / (f.fit * 2));
+  f.context.noteDetailViewChanged();
+  await f.runTimers();
+  const { request } = f.roiCalls[0];
+  f.roiCalls[0].resolve(new ImageData(request.region.outWidth, request.region.outHeight));
+  await settle();
+  assert.equal(f.draws.length, 0, 'nothing drawn before the mode programs link');
+  assert.equal(f.context.detailLayer.visible, false);
+  assert.ok(f.context.detailLayer.renderer.modesCompiles >= 1, 'the layer compiles its mode programs');
+  f.context.detailLayer.renderer.modes = 'linked';
+  f.context.syncDetailLayer(true);
+  assert.equal(f.context.detailLayer.visible, true);
+  const draw = f.draws.at(-1);
+  assert.equal(draw.values.stages, f.state.stages);
+  const region = f.context.detailLayer.shown.plan;
+  assert.deepEqual(draw.frame, regionFrame(region, request.region.outWidth, request.region.outHeight, W, H));
+  // The last texel's centre maps back into the region's source rect.
+  const u = draw.frame[0] + (request.region.outWidth - 0.5) * draw.frame[2];
+  assert.ok(Math.abs(u * W - (region.x + region.width - 0.5 * region.width / request.region.outWidth)) < 1e-6);
 }
 
 // The snap is a fixed point of planning: a pan whose snap plans a region one
