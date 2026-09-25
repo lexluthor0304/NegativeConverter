@@ -200,10 +200,11 @@ export function createDisplayProxySpill({
     meta(key) { return index.get(key)?.meta ?? null; },
     /**
      * Spills `image` (an ImageData with its __image16, the display proxy)
-     * and `sample` under `key`. The planes are posted as copies: the caller
-     * keeps them. Resolves whether the record is on disk.
+     * and `sample` under `key`. The planes are posted as copies (the caller
+     * keeps them), or moved with `transfer`. Resolves whether the record is
+     * on disk.
      */
-    put(key, { image, sample = null, proxyKey, meta = {} }) {
+    put(key, { image, sample = null, proxyKey, meta = {}, transfer = false }) {
       if (!enabled || !image) return Promise.resolve(false);
       return enqueue(async () => {
         if (!(await ready())) return false;
@@ -227,7 +228,9 @@ export function createDisplayProxySpill({
           target: recordStore ? 'record' : 'store'
         };
         try {
-          const reply = await port.request(message);
+          // A proxy the caller owns (a fill) moves to the worker; a cached one is copied.
+          const moved = transfer ? [image.data.buffer, image.__image16?.data?.buffer].filter(Boolean) : [];
+          const reply = await port.request(message, moved);
           if (recordStore) await recordStore.write(key, reply.record);
           index.set(key, { proxyKey, bytes: reply.bytes, meta });
           bytes += reply.bytes;

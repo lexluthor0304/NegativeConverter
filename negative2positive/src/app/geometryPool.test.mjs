@@ -6,10 +6,14 @@ import assert from 'node:assert/strict';
 import { Worker as NodeWorker } from 'node:worker_threads';
 
 globalThis.ImageData = class ImageData {
-  constructor(data, width, height) { this.data = data; this.width = width; this.height = height; }
+  constructor(data, width, height) {
+    if (typeof data === 'number') { this.width = data; this.height = width; this.data = new Uint8ClampedArray(data * width * 4); return; }
+    this.data = data; this.width = width; this.height = height;
+  }
 };
 const { planGeometry, renderGeometry } = await import('./imageGeometry.js');
 const { createGeometryPool, runGeometryBand, geometryBandCount, defaultGeometryPoolSize, yieldToEventLoop } = await import('./geometryPool.js');
+const { buildDisplayLevel, displayLevelGeometry } = await import('./displayPreview.js');
 
 function makeSource(width, height, seed = 1) {
   let s = seed;
@@ -185,6 +189,46 @@ for (const failure of [{ failOn: 1 }, { crashOn: 0 }, { throwOnPost: true }]) {
   assert.equal(await pool.render(source, planGeometry(source, {})), source);
 }
 
+// #249: a frame's display level (#248) rendered band by band, each band
+// sending back only its box-averaged level rows, equals buildDisplayLevel of
+// the whole output, byte for byte, on workers and on this thread, for 16-bit
+// and 8-bit sources; the geometry of the level is kept.
+{
+  const eight = makeSource(120, 80, 13);
+  delete eight.__image16;
+  const sameLevel = (actual, expected, label) => {
+    assert.deepEqual([actual.width, actual.height], [expected.width, expected.height], label);
+    assert.ok(bytes(actual.__image16.data).equals(bytes(expected.__image16.data)), `${label}: level`);
+    assert.deepEqual(displayLevelGeometry(actual), displayLevelGeometry(expected), `${label}: geometry`);
+  };
+  const identity = { rotationAngle: 0, mirrored: false, cropRegion: null };
+  for (const [label, image] of [['16-bit', source], ['8-bit', eight]]) {
+    for (const geometry of [...geometries, identity]) {
+      const plan = planGeometry(image, geometry);
+      if (!plan) continue; // an 8-bit source at a free angle rotates on a canvas
+      const whole = plan.identity ? image : renderGeometry(image, plan);
+      for (const k of [2, 3]) {
+        const expected = buildDisplayLevel(whole, k);
+        for (const levelRowsPerBand of [1, 5, 16]) {
+          const log = [];
+          const pool = createGeometryPool({ workerFactory: fakeWorkerFactory(log), workersSupported: true, size: 2 });
+          sameLevel(await pool.renderDisplayLevel(image, plan, { k, levelRowsPerBand }), expected, `${label} level ${JSON.stringify(geometry)} k ${k} bands ${levelRowsPerBand}`);
+          assert.ok(log.length > 0 && pool.counters.syncBands === 0, 'banded on workers');
+          pool.dispose();
+        }
+        const sync = createGeometryPool({ workersSupported: false, size: 2 });
+        sameLevel(await sync.renderDisplayLevel(image, plan, { k }), expected, `${label} level here ${JSON.stringify(geometry)} k ${k}`);
+      }
+    }
+  }
+  assert.ok(bytes(source.__image16.data).equals(base16), 'the base is never transferred or changed');
+  const stale = createGeometryPool({ workersSupported: false, size: 1 });
+  let calls = 0;
+  assert.equal(await stale.renderDisplayLevel(source, planGeometry(source, geometries[0]), { k: 2, levelRowsPerBand: 1, isCurrent: () => ++calls < 3 }), null,
+    'a superseded level stops');
+  assert.equal(await stale.renderDisplayLevel(source, planGeometry(source, geometries[0]), { k: 1 }), null, 'a k = 1 level is the output itself');
+}
+
 // Band counts: 4-6 for full-resolution outputs, fewer for small ones.
 assert.equal(geometryBandCount({ outWidth: 9000, outHeight: 6000 }, 6), 6);
 assert.equal(geometryBandCount({ outWidth: 9000, outHeight: 6000 }, 2), 4);
@@ -226,6 +270,9 @@ assert.equal(geometryBandCount({ outWidth: 4000, outHeight: 2000 }, 6), 6);
     assertSame(await pool.render(big, plan, { bands: 5 }), renderGeometry(big, plan), `threads ${JSON.stringify(geometry)}`);
     const only16 = await pool.render(big, plan, { bands: 3, planes: '16' });
     assert.ok(bytes(only16.__image16.data).equals(bytes(renderGeometry(big, plan).__image16.data)), `threads, 16-bit only ${JSON.stringify(geometry)}`);
+    // A display level on the same threads (#249).
+    const level = await pool.renderDisplayLevel(big, plan, { k: 2 });
+    assert.ok(bytes(level.__image16.data).equals(bytes(buildDisplayLevel(renderGeometry(big, plan), 2).__image16.data)), `thread level ${JSON.stringify(geometry)}`);
   }
   assert.equal(pool.counters.syncBands, 0, 'every band ran on a worker thread');
   pool.dispose();

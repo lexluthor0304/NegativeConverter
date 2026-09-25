@@ -40,6 +40,7 @@ export function displaySessionStubs(overrides = {}) {
     coldHistory: entries => entries.filter(entry => !entry.dustDelta).map(entry => ({ ...entry, refs: { cold: true } })),
     requestSourceForDisplay: () => {}, ensureSource: async () => true, ensureBase: async () => null,
     forgetDisplayProxies: () => {}, readSpilledDisplaySession: async () => null,
+    fillDisplayProxy: async () => false, prepareZoomOneProxy: () => {}, lastEditorViewport: null,
     ...overrides
   };
 }

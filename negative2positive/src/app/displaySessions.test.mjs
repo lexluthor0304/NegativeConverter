@@ -431,4 +431,72 @@ for (const tier of ['A', 'B']) {
   assert.equal(h.state.conversionPreviewImageData.__proxyOf, true, 'the proxy stayed the display preview only');
 }
 
+// ---- Fill parity: a proxy filled from a lane's or roll analysis' decode is
+// the display preview a cold open's processNegative builds (tilted,
+// mirrored, right-angle and plain crops), with getColorAnalysisSample's
+// sample; the first open finds its key. Lens-corrected frames are skipped ----
+{
+  const { displayPreviewSize } = await import('./displayPreview.js');
+  const { sampleAnalysisArea } = await import('./analysisRegion.js');
+  const geometries = [
+    { rotationAngle: 1.3, mirrored: false, cropRegion: { left: 9, top: 7, width: 96, height: 60 } },
+    { rotationAngle: -0.7, mirrored: true, cropRegion: { left: 5, top: 4, width: 100, height: 66 } },
+    { rotationAngle: 90, mirrored: false, cropRegion: { left: 3, top: 6, width: 70, height: 100 } },
+    { rotationAngle: 0, mirrored: true, cropRegion: { left: 10, top: 10, width: 90, height: 60 } },
+    { rotationAngle: 0, mirrored: false, cropRegion: { left: 12, top: 8, width: 88, height: 58 } }
+  ];
+  for (const geometry of geometries) {
+    const base = makeBase(120, 80, 21);
+    const h = createHarness(base, { sessionBudget: 1 << 30 }), c = h.context;
+    const records = new Map();
+    const backend = {
+      async put(key, value) { records.set(key, value); }, async get(key) { return records.get(key) || null; },
+      async delete(key) { records.delete(key); }, async clear() { records.clear(); }
+    };
+    h.target.displayProxySpill = createDisplayProxySpill({ port: createDisplayProxyPort({ core: createDisplayProxyWorkerCore({ backend }) }) });
+    h.target.largeImagePixels = 1000;
+    h.target.lastEditorViewport = { width: 60, height: 50 };
+    h.target.getCanvasContainerSize = () => ({ width: 60, height: 50 });
+    const item = { id: 7, file: { name: 'roll-07.dng' }, settings: { ...geometry, autoFrameMeta: { imageArea: AREA }, filmEdge: { checked: true } } };
+    h.state.fileQueue = [{ id: 1, file: { name: 'open.dng' } }, item];
+    h.state.currentFileIndex = 0;
+    assert.equal(await c.fillDisplayProxy(item, base, item.settings), true, `filled ${JSON.stringify(geometry)}`);
+    assert.equal(h.target.displaySessionDiagnostics.fills, 1);
+    const stored = await h.target.displayProxySpill.get(item.id);
+    // What processNegative builds on a cold open: resizeDisplayPreview of
+    // the (lens-free) conversion source at getDisplayPreviewSize.
+    const source = exportChain(base, geometry);
+    const target = displayPreviewSize(source.width, source.height, { viewportWidth: 40, viewportHeight: 30, dpr: 2, zoom: 1, maxPixels: 4_000_000, maxDimension: 8192 });
+    samePixels(stored.image, resizeDisplayPreview(source, target), `fill parity ${JSON.stringify(geometry)}`);
+    assert.deepEqual(stored.sample, { ...sampleAnalysisArea(base, AREA) }, 'the sample getColorAnalysisSample reads');
+    // The first open: the spilled entry installs, the recipe restores and the key matches.
+    h.state.loadedBaseImageData = null;
+    const entry = c.spilledDisplayEntry(item, stored);
+    Object.assign(h.state, { loadedFile: item.file, baseDescriptor: entry.baseDescriptor, sourcePending: entry.sourcePending,
+      originalImageData: entry.planes.frame, croppedImageData: entry.planes.crop, conversionPreviewImageData: entry.planes.proxy,
+      conversionSourceImageData: null, currentFileIndex: 1 });
+    h.target.getCurrentQueueItem = () => item;
+    h.state.autoFrame.lastDiagnostics = { imageArea: AREA };
+    c.restoreSettings(item.settings);
+    assert.equal(h.state.geometryPending, false, 'the recipe geometry is the proxy geometry');
+    assert.equal(c.displayProxyMatches(item), true, `the open finds the proxy ${JSON.stringify(geometry)}`);
+  }
+  // Lens correction and repairs are not filled; nor is an 8-bit fallback decode.
+  const base = makeBase(120, 80, 21);
+  const h = createHarness(base, { sessionBudget: 1 << 30 }), c = h.context;
+  h.target.displayProxySpill = createDisplayProxySpill({ port: createDisplayProxyPort({ core: createDisplayProxyWorkerCore({ backend: { async put() {}, async get() { return null; }, async delete() {}, async clear() {} } }) }) });
+  h.target.largeImagePixels = 1000;
+  h.target.lastEditorViewport = { width: 60, height: 50 };
+  const item = { id: 8, file: { name: 'x.dng' }, settings: { ...geometries[0], autoFrameMeta: { imageArea: AREA }, filmEdge: { checked: true } } };
+  h.state.fileQueue = [item];
+  h.target.lensCorrectionActive = () => true;
+  assert.equal(await c.fillDisplayProxy(item, base, item.settings), false, 'lens-corrected frames are skipped');
+  h.target.lensCorrectionActive = () => false;
+  assert.equal(await c.fillDisplayProxy(item, base, { ...item.settings, repairStrokes: [{}] }), false, 'repaired frames are skipped');
+  const eight = makeBase(120, 80, 21);
+  delete eight.__image16;
+  assert.equal(await c.fillDisplayProxy(item, eight, item.settings), false, 'an 8-bit RAW fallback is not reproducible');
+  assert.equal(await c.fillDisplayProxy(item, base, { ...item.settings, filmEdge: null }), false, 'undecided recipes are skipped');
+}
+
 console.log('displaySessions: Tier A, Tier B, demotion, spill, ensureBase/ensureSource, invalidation and the proxy invariant passed');

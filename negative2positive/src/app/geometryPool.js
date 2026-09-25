@@ -5,7 +5,7 @@
 // the base, which sessions, history and analysis samples share, is never
 // transferred or detached.
 import {
-  planGeometryBands, sliceGeometrySource, renderGeometryRows, wrapGeometryOutput
+  planGeometryBands, sliceGeometrySource, renderGeometryRows, wrapGeometryOutput, geometrySourceRect
 } from './imageGeometry.js';
 import { displayLevelFactor, displayLevelRows, adoptDisplayLevel } from './displayPreview.js';
 
@@ -68,7 +68,7 @@ function renderRows16(plan, src, data16, y0, y1) {
 // The worker side: one band of one plan, and with `levelFactor` > 1 its rows
 // of the display level (#248); with `planes16` (#256) its 16-bit rows only.
 export function runGeometryBand(message) {
-  const { id, plan, y0, y1, src, levelFactor = 1, planes16 = false } = message;
+  const { id, plan, y0, y1, src, levelFactor = 1, planes16 = false, levelOnly = false } = message;
   const length = (y1 - y0) * plan.outWidth * 4;
   if (planes16 && plan.has16) {
     const data16 = new Uint16Array(length);
@@ -78,6 +78,11 @@ export function runGeometryBand(message) {
   const data8 = new Uint8ClampedArray(length);
   const data16 = plan.has16 ? new Uint16Array(length) : null;
   renderGeometryRows(plan, src, { data8, data16 }, y0, y1);
+  // A display proxy band (#249) sends back its level rows only.
+  if (levelOnly) {
+    const level16 = bandLevelRows(plan, { y0, y1 }, { data8, data16 }, levelFactor);
+    return { payload: { id, level16 }, transfers: [level16.buffer] };
+  }
   const transfers = [data8.buffer];
   if (data16) transfers.push(data16.buffer);
   const payload = { id, data8, data16 };
@@ -215,7 +220,7 @@ export function createGeometryPool({
     return new Promise(resolve => waiters.push(resolve));
   }
 
-  function postBand(entry, plan, band, src, levelFactor = 1, planes16 = false) {
+  function postBand(entry, plan, band, src, levelFactor = 1, { planes16 = false, levelOnly = false } = {}) {
     return new Promise((resolve, reject) => {
       const id = ++sequence;
       const timer = setTimeout(() => fail(entry, new Error('Geometry worker timed out')), timeoutMs);
@@ -224,7 +229,10 @@ export function createGeometryPool({
       if (src.data8) transfers.push(src.data8.buffer);
       if (src.data16) transfers.push(src.data16.buffer);
       try {
-        entry.worker.postMessage({ type: 'geometry-band', id, plan, y0: band.y0, y1: band.y1, src, levelFactor, ...(planes16 ? { planes16: true } : {}) }, transfers);
+        entry.worker.postMessage({
+          type: 'geometry-band', id, plan, y0: band.y0, y1: band.y1, src, levelFactor,
+          ...(planes16 ? { planes16: true } : {}), ...(levelOnly ? { levelOnly: true } : {})
+        }, transfers);
       } catch (error) {
         fail(entry, error);
       }
@@ -282,7 +290,7 @@ export function createGeometryPool({
           // Copy the band's rows now; the base itself is never transferred.
           const slice = sliceGeometrySource(source, plan, band.rect);
           const key = ++token;
-          running.set(key, postBand(entry, plan, band, slice, k, planes16).then(
+          running.set(key, postBand(entry, plan, band, slice, k, { planes16 }).then(
             part => ({ key, band, part }),
             error => ({ key, band, error })
           ));
@@ -316,8 +324,74 @@ export function createGeometryPool({
     return output;
   }
 
+  /**
+   * The display level (#248) of the output of `plan` from `source`, without
+   * building that output (#249: display proxies of roll-analysed and lane
+   * frames): each band renders only whole k-row groups of the output and
+   * sends back their box-averaged level rows, the same arithmetic as
+   * buildDisplayLevel of the whole output. The base rows are copied per
+   * band, never transferred. Resolves the level (adopted with its source
+   * geometry), null once `isCurrent()` turned false, or null for k = 1
+   * (such a level is the output itself).
+   */
+  async function renderDisplayLevel(source, plan, { k = displayLevelFactor(plan.outWidth, plan.outHeight), isCurrent = () => true, levelRowsPerBand = 16, maxInFlight = null } = {}) {
+    if (!(k > 1)) return null;
+    const levelWidth = Math.floor(plan.outWidth / k);
+    const levelHeight = Math.floor(plan.outHeight / k);
+    const level16 = new Uint16Array(levelWidth * levelHeight * 4);
+    const step = Math.max(1, levelRowsPerBand) * k;
+    const queue = [];
+    for (let y0 = 0; y0 < levelHeight * k; y0 += step) {
+      const y1 = Math.min(levelHeight * k, y0 + step);
+      queue.push({ y0, y1, rect: geometrySourceRect(plan, y0, y1) });
+    }
+    const place = (band, rows) => level16.set(rows, (band.y0 / k) * levelWidth * 4);
+    const here = band => runGeometryBand({
+      id: 0, plan, y0: band.y0, y1: band.y1, levelFactor: k, levelOnly: true,
+      src: { x: 0, y: 0, width: plan.baseWidth, height: plan.baseHeight, data8: source.data, data16: plan.has16 ? source.__image16.data : null }
+    }).payload.level16;
+    const limit = Math.max(1, Math.min(poolSize, Number(maxInFlight) || Number(maxBandsInFlight) || poolSize));
+    const running = new Map();
+    let token = 0;
+    while (queue.length || running.size) {
+      if (!isCurrent()) return null;
+      if (queue.length && running.size < limit) {
+        const entry = await acquire();
+        if (!isCurrent()) {
+          if (entry) handOver(entry);
+          return null;
+        }
+        const band = queue.shift();
+        if (!entry) {
+          place(band, here(band));
+          counters.syncBands++;
+        } else {
+          const slice = sliceGeometrySource(source, plan, band.rect);
+          const key = ++token;
+          running.set(key, postBand(entry, plan, band, slice, k, { levelOnly: true }).then(
+            part => ({ key, band, part }),
+            error => ({ key, band, error })
+          ));
+          counters.workerBands++;
+        }
+        await yieldTask();
+        continue;
+      }
+      const settled = await Promise.race(running.values());
+      running.delete(settled.key);
+      if (!isCurrent()) return null;
+      place(settled.band, settled.error || !settled.part.level16 ? here(settled.band) : settled.part.level16);
+      if (settled.error) counters.syncBands++;
+      await yieldTask();
+    }
+    if (!isCurrent()) return null;
+    counters.levels = (counters.levels || 0) + 1;
+    return adoptDisplayLevel(level16, levelWidth, levelHeight, { sourceWidth: plan.outWidth, sourceHeight: plan.outHeight, k });
+  }
+
   return {
     render,
+    renderDisplayLevel,
     get size() { return poolSize; },
     get available() { return !broken; },
     counters,

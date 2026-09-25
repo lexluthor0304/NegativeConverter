@@ -101,7 +101,7 @@ const FUNCTIONS = [
   'ensureSource', 'prepareOriginalForTool', 'displayProxyMatches', 'requestSourceForDisplay',
   'selfCheckDisplayProxy', 'spillDisplaySession', 'displaySessionMeta', 'forgetDisplayProxies',
   'readSpilledDisplaySession', 'spilledDisplayEntry', 'activateDisplaySession', 'getColorAnalysisSample',
-  'hasSeparateConversionPreview'
+  'hasSeparateConversionPreview', 'fillDisplayProxy', 'prepareZoomOneProxy'
 ];
 
 // The Apply Crop click handler, as a named function.

@@ -2681,6 +2681,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       recipeChanged: 0, provisional: 0, baseDecodes: 0, sourceBuilds: 0, baseMismatches: 0, selfChecks: 0,
       selfCheckMismatches: 0, sampleMisses: 0, fills: 0, fillSkips: 0, force: null
     };
+    // The last viewport the editor sized a display preview for (#249).
+    let lastEditorViewport = null;
 
     function clearFullResolutionRenderState() {
       if (fullResolutionRenderTimer) {
@@ -4714,6 +4716,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // never resizes it. Native pixels at zoom come from the detail layer.
     function getDisplayPreviewSize(imageData, maxDimension = webglState.maxTextureSize || 8192, tier = previewTier) {
       const container = getCanvasContainerSize();
+      // The editor's viewport, for display proxies filled while the editor
+      // shows another photo (#249).
+      if (container.width > 20 && container.height > 20) lastEditorViewport = { width: container.width, height: container.height };
       return displayPreviewSize(imageData.width, imageData.height, {
         viewportWidth: container.width - 20 || 1280,
         viewportHeight: container.height - 20 || 900,
@@ -10372,6 +10377,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // an eviction demotes the entry to it (#249).
       const display = settled ? captureDisplaySession(item, entry) : null;
       if (display) entry.display = display;
+      if (display && entry.zoom !== 1) prepareZoomOneProxy(item, display, state.conversionSourceImageData);
       const force = displaySessionDiagnostics.force;
       // #244's smoke switch caches sessions without their planes.
       const coldOnly = geometryDiagnostics.coldSessions;
@@ -10734,12 +10740,15 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // stored: it always comes from the queue item. A proxy of another zoom
     // than 1 is not spilled (its zoom-1 plane would need the source).
     function spillDisplaySession(item, display) {
-      if (!display?.snapshot || !state.fileQueue.includes(item) || display.zoom !== 1) return false;
-      const image = display.snapshot.refs.conversionPreviewImageData;
+      if (!display?.snapshot || !state.fileQueue.includes(item)) return false;
+      // A photo left zoomed spills its zoom-1 proxy (prepareZoomOneProxy).
+      const zoomOne = display.zoom === 1 ? null : display.zoomOne;
+      if (display.zoom !== 1 && !zoomOne) return false;
+      const image = zoomOne ? zoomOne.proxy : display.snapshot.refs.conversionPreviewImageData;
       if (!image) return false;
       const meta = displaySessionMeta(display);
       displaySessionDiagnostics.spills++;
-      void displayProxySpill.put(item.id, { image, sample: display.sample, proxyKey: display.sourcePending.key, meta }).then(written => {
+      void displayProxySpill.put(item.id, { image, sample: display.sample, proxyKey: zoomOne ? zoomOne.key : display.sourcePending.key, meta }).then(written => {
         if (written) displaySessionDiagnostics.spillWrites++;
         else displaySessionDiagnostics.spillFailures++;
       });
@@ -10788,6 +10797,76 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         planes: { frame, crop, proxy: image }, sample,
         sourcePending: { width: meta.source.width, height: meta.source.height, key: displayProxySpill.proxyKey(item.id), area: meta.area }
       };
+    }
+
+    // ===========================================
+    // Display proxy fills (#249)
+    // ===========================================
+    // Roll analysis and the lanes decode frames the editor has not opened.
+    // While such a decode is in hand, the display proxy a cold open of the
+    // frame would convert is rendered from it in the geometry pool (only the
+    // crop-window rows the proxy reads, resampled with resizeDisplayPreview's
+    // own taps) and spilled with the frame's colour-analysis sample, so the
+    // first open converts it without a decode. Only for decided geometry
+    // (the frame and film-edge detections done), without lens correction or
+    // repairs, at the editor's last viewport at zoom 1. Resolves whether a
+    // proxy of that key is spilled.
+    async function fillDisplayProxy(item, base, settings, { isCurrent = () => true } = {}) {
+      const skip = () => { displaySessionDiagnostics.fillSkips++; return false; };
+      if (!displayProxySpill.enabled || !item || !base?.data || isReleasedPlane(base) || !state.fileQueue.includes(item)) return false;
+      if (!settings?.autoFrameMeta || !settings.filmEdge?.checked || lensCorrectionActive(settings)) return skip();
+      if (!usesSilverCoreConversion(settings) || state.dustRemoval.enabled || settings.repairStrokes?.length) return skip();
+      const route = decodeRouteOf(item.file, base);
+      if (route === 'raw-fallback' || !lastEditorViewport) return skip();
+      const key = geometryKeyFor(base, { rotationAngle: settings.rotationAngle, mirrored: settings.mirrored, cropRegion: settings.cropRegion });
+      // Step 2's border mode of a colour frame without a crop reads its pixels.
+      if (!key.crop && requiresFilmBase(settings)) return skip();
+      const source = key.crop ? { width: key.crop.width, height: key.crop.height } : { width: key.frameWidth, height: key.frameHeight };
+      if (!isLargeImage(source)) return skip();
+      const inputs = {
+        viewportWidth: lastEditorViewport.width - 20 || 1280, viewportHeight: lastEditorViewport.height - 20 || 900,
+        dpr: window.devicePixelRatio || 1, zoom: 1, maxPixels: previewTierMaxPixels('normal'), maxDimension: webglState.maxTextureSize || 8192
+      };
+      const target = { ...displayPreviewSize(source.width, source.height, inputs), ...inputs };
+      if (target.width >= source.width && target.height >= source.height) return skip();
+      const descriptor = { width: base.width, height: base.height, has16: Boolean(base.__image16?.data), route };
+      const area = analysisAreaOf(settings.autoFrameMeta);
+      const proxyKey = displayProxyKey({
+        id: item.id, route, base: descriptor, rotationAngle: key.angle, mirrored: key.mirrored, cropRegion: key.crop,
+        lens: null, area, target
+      });
+      if (displayProxySpill.proxyKey(item.id) === proxyKey) return true;
+      const plan = geometryPlanFor(base, key);
+      if (!plan) return skip();
+      const proxy = await geometryPool.renderDisplayProxy(base, plan, target, { isCurrent });
+      if (!proxy || !isCurrent() || !state.fileQueue.includes(item)) return false;
+      const sample = getColorAnalysisSample(settings, base);
+      const written = await displayProxySpill.put(item.id, {
+        image: proxy, sample, proxyKey, transfer: true,
+        meta: {
+          base: descriptor,
+          geometry: { angle: key.angle, mirrored: key.mirrored, crop: key.crop, frameWidth: key.frameWidth, frameHeight: key.frameHeight },
+          cropSize: key.crop ? { width: key.crop.width, height: key.crop.height } : null, source, area,
+          rawMetadata: null, filmEdge: settings.filmEdge || null
+        }
+      });
+      if (written) displaySessionDiagnostics.fills++;
+      return written;
+    }
+
+    // A photo left zoomed keeps its zoomed display planes in RAM; the spill
+    // needs the zoom-1 proxy, resized from the conversion source in the pool
+    // while the session still holds it.
+    function prepareZoomOneProxy(item, display, source) {
+      if (!source || isReleasedPlane(source)) return;
+      const target = displayProxyTarget(source, { zoom: 1, tier: 'normal' });
+      if (target.width >= source.width && target.height >= source.height) return;
+      const plan = planGeometry(source, {});
+      if (!plan) return;
+      const key = liveDisplayProxyKey(item, { target });
+      void geometryPool.renderDisplayProxy(source, plan, target, { isCurrent: () => state.fileQueue.includes(item) }).then(proxy => {
+        if (proxy) display.zoomOne = { proxy, key };
+      }).catch(error => console.warn('Zoom-1 display proxy failed:', error));
     }
 
     // Opens a photo from its display form under the veil (#249): a Tier A or
@@ -20837,6 +20916,16 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         if (analysis?.valid()) await attempt(analysis, () => analysis.run(decoded.base, step));
         if (tile?.valid()) await attempt(tile, () => tile.run(decoded.base, step));
         if (prefetch?.valid()) await attempt(prefetch, () => prefetch.run(decoded, step));
+        // A full decode of a frame with a decided recipe also fills the
+        // display proxy its first open converts (#249); a roll pass fills
+        // its own frames.
+        if (!analysis && !job.halfSize && decoded?.base && item.settings && item !== getCurrentQueueItem()
+          && item !== state.fileQueue[state.currentFileIndex]) {
+          await step();
+          await fillDisplayProxy(item, decoded.base, item.settings, {
+            isCurrent: () => !controller.signal.aborted && state.fileQueue.includes(item) && item !== getCurrentQueueItem()
+          }).catch(error => console.warn('Display proxy fill failed:', item.file?.name, error));
+        }
       } catch (error) {
         if (error?.name !== 'AbortError') console.warn('Background photo job failed:', item.file?.name, error);
       } finally {
@@ -25665,7 +25754,15 @@ import { canPublishThumbnail } from './thumbnailRank.js';
                     if (!itemValid()) return null;
                     await step();
                     if (!itemValid()) return null;
-                    return { settings, sample: buildRollSample(image, settings), key };
+                    const payload = { settings, sample: buildRollSample(image, settings), key };
+                    // While the decode is in hand, the display proxy the
+                    // frame's first open converts (#249): the commit never
+                    // changes its geometry.
+                    await step();
+                    if (!itemValid()) return null;
+                    await fillDisplayProxy(item, image, settings, { isCurrent: itemValid })
+                      .catch(error => console.warn('Display proxy fill failed:', item.file?.name, error));
+                    return payload;
                   }
                 };
               },
