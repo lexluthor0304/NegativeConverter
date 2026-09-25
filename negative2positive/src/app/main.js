@@ -12454,10 +12454,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       applyCropBtn.textContent = analysisOnly ? studioWorkspace.text('confirmAnalysis') : i18n[currentLang].applyCrop;
 
       setCropActionUi(true);
-      // A picture of the frame at display resolution is on its way when the
-      // stand-in opens.
-      if (state.cropDraft.view.standIn) ensureCropViewProxy();
       renderCropDraftPreview({ preserveRect: false, histogram: true });
+      // Opened on the stand-in: the display-resolution picture is built from
+      // the next task on, in slices, and swapped in when it lands.
+      if (state.cropDraft.view.standIn) void yieldTaskForJob().then(ensureCropViewProxy);
       showCropModeHint();
       if (analysisOnly) {
         document.getElementById('cropModeHintTitle').textContent = studioWorkspace.text('confirmAnalysis');
