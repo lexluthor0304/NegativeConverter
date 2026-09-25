@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import { createHiddenJobGate } from './hiddenJobGate.js';
 import { assertFolderDecodeBudget, classifyFolderReadStack } from '../../../scripts/folder-import-smoke.mjs';
 
 const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8');
@@ -38,6 +39,7 @@ function fixture() {
     refreshThumbnailRow: () => { throw new Error('a cancelled preview is not a preview error'); },
     refreshThumbnailStates: () => { throw new Error('a lane result refreshes its own row only'); },
     console: { warn: (...args) => warnings.push(args) },
+    hiddenJobs: createHiddenJobGate({ isHidden: () => false }), hiddenJobBytesFor: async () => 0,
   });
   vm.runInContext(thumbnailFunction, c);
   const timer = async () => { assert.ok(timers.length); timers.shift()(); await flush(); };

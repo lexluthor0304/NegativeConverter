@@ -656,7 +656,9 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory 
     cancelWorkerRequests,
     terminateWorker,
     /** Requests in flight on this bridge (for least-busy dispatch). */
-    get pendingCount() { return pending.size; }
+    get pendingCount() { return pending.size; },
+    /** Whether a Worker currently exists (never spawns one, unlike isWorkerAvailable). */
+    get workerAlive() { return worker !== null; }
   };
 }
 
@@ -695,3 +697,7 @@ export const workerEncodeTiff = defaultBridge.workerEncodeTiff;
 export const isWorkerAvailable = defaultBridge.isWorkerAvailable;
 export const cancelWorkerRequests = defaultBridge.cancelWorkerRequests;
 export const terminateWorker = defaultBridge.terminateWorker;
+// Hidden-window memory shedding (#241) terminates the singleton only between
+// requests; the next call respawns it lazily.
+export const exportWorkerPendingCount = () => defaultBridge.pendingCount;
+export const isExportWorkerAlive = () => defaultBridge.workerAlive;

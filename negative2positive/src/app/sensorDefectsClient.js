@@ -64,7 +64,7 @@ function request(message, transfer) {
   const id = ++requestId;
   message.id = id;
   return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject });
+    pending.set(id, { resolve, reject, type: message.type });
     try {
       w.postMessage(message, transfer || []);
     } catch (err) {
@@ -112,6 +112,28 @@ function ensureWorkerReady() {
     }
   })();
   return workerReady;
+}
+
+/** Whether the worker currently exists (a debug counter for #241). */
+export function isSensorDefectsWorkerAlive() {
+  return worker !== null;
+}
+
+/**
+ * Terminate the worker when no request is in flight, to free its heap while
+ * the window is hidden (#241). The next repair spawns a fresh one.
+ * @returns {boolean} whether a worker was terminated
+ */
+export function disposeIdleSensorDefectsWorker() {
+  if (!worker) return false;
+  // A ping that never answered stays pending; only a repair makes it busy.
+  for (const entry of pending.values()) if (entry.type !== 'ping') return false;
+  try { worker.terminate(); } catch {}
+  worker = null;
+  workerReady = null;
+  pingAttempts = 0;
+  rejectAll(new Error('Sensor defect worker released'));
+  return true;
 }
 
 /**

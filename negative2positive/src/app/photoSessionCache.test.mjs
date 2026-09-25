@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createPhotoSessionCache } from './photoSessionCache.js';
+import { createPhotoSessionCache, backingBuffers } from './photoSessionCache.js';
 
 const pixels = bytes => ({ data: new Uint8ClampedArray(bytes) });
 
@@ -130,6 +130,22 @@ if (typeof SharedArrayBuffer !== 'undefined') {
   assert.equal(cache.bytes, 16);
   cache.delete('a'); assert.equal(cache.bytes, 16);
   cache.clear(); assert.equal(cache.bytes, 0);
+}
+
+// Several graphs counted once (#241 resident bytes): a plane shared by the
+// open photo, its undo history and a cached session counts one time.
+{
+  const shared = pixels(64);
+  const own = pixels(32);
+  const cache = createPhotoSessionCache({ maxBytes: 1024 });
+  cache.put('a', { base: shared, other: pixels(8) });
+  const set = new Set();
+  backingBuffers([{ planes: [shared, own] }, [{ refs: { originalImageData: shared } }]], set);
+  for (const buffer of cache.buffers()) set.add(buffer);
+  let total = 0;
+  for (const buffer of set) total += buffer.byteLength;
+  assert.equal(total, 64 + 32 + 8);
+  assert.equal(backingBuffers(null).size, 0);
 }
 
 console.log('photoSessionCache: shared backing stores/history, LRU, ownership, replacement, limits and cleanup passed');

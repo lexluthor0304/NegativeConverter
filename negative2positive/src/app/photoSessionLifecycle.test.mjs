@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { createPhotoSessionCache } from './photoSessionCache.js';
 import { exactSettingsKey } from './settingsKey.js';
+import { createHiddenJobGate } from './hiddenJobGate.js';
 
 // Execute the actual lifecycle control flow. Only DOM/decoder/AI dependencies
 // are stubbed; deferred worker replies expose intermediate ownership states.
@@ -83,6 +84,7 @@ function fixture() {
     cancelPendingTimers: noop, cancelScheduledFullResolutionRender: noop,
     getLoadingOverlay: () => ({ hide: noop }), noteCoreReprocessSettled: noop,
     assertRepairCurrent: valid => { if (!valid()) throw new DOMException('Superseded', 'AbortError'); },
+    hiddenJobs: createHiddenJobGate({ isHidden: () => false }),
   });
   vm.runInContext(['photoSettingsKey', 'rememberPhotoSession', 'invalidatePhotoActivation',
     'cancelStudioThumbnailUpdate', 'isCurrentLoad', 'onDustBrushEnd', 'deferFileListRefresh', 'updateFileListUI',
@@ -501,10 +503,54 @@ function aiFixture() {
     aiRepairReady: () => c.aiRepair.status === 'ready',
     localExposureGeometryFor: () => ({}), buildRepairMask: () => ({ mask: f.mask, bounds: null }),
     inpaintDustOffMainThread: async () => f.converted,
+    aiRepairRunsInFlight: 0,
   });
-  vm.runInContext(['performAiRepairModelLoad', 'inpaintForCommit', 'inpaintManualBrush']
+  c.aiRepair = { ...c.aiRepair, source: '', sourceRef: null, prefer: '', released: false, error: '', percent: 0 };
+  vm.runInContext(['performAiRepairModelLoad', 'inpaintForCommit', 'inpaintManualBrush',
+    'releaseAiRepairSession', 'aiRepairLoadArgs', 'countAiRepairRun']
     .map(functionSource).join('\n'), c);
+  // `loadAiRepairModel` wraps performAiRepairModelLoad in a single-flight loader.
+  c.loadAiRepairModel = (...args) => c.performAiRepairModelLoad(...args);
   return f;
+}
+
+// Hidden-window shedding (#241): releasing the MI-GAN session keeps its
+// revision (photo keys and thumbnails stay valid); the next on-demand load
+// brings back the same model on the same provider, still under that revision.
+{
+  const f = aiFixture(), c = f.context;
+  let released = 0, loads = [];
+  c.fetchModelBytes = async (url) => { loads.push(url); return new Uint8Array(8); };
+  c.createInpaintSessionInWorker = async (bytes, { prefer }) => ({ run: async () => ({}), release: async () => { released++; }, provider: prefer });
+  await c.performAiRepairModelLoad('/picked-model.onnx', { refresh: false });
+  const key = c.photoSettingsKey(f.item);
+  const revision = c.aiRepair.revision;
+  c.aiRepairRunsInFlight = 1;
+  assert.equal(await c.releaseAiRepairSession(), false, 'a run in flight keeps the session');
+  c.aiRepairRunsInFlight = 0;
+  assert.equal(await c.releaseAiRepairSession(), true);
+  assert.equal(released, 1);
+  assert.equal(c.aiRepair.status, 'idle');
+  assert.equal(c.aiRepair.run, null);
+  assert.equal(c.aiRepair.revision, revision, 'release keeps the revision');
+  assert.equal(c.photoSettingsKey(f.item), key, 'release keeps every photo key');
+  assert.equal(JSON.stringify(c.aiRepairLoadArgs({ refresh: false })), JSON.stringify(['/picked-model.onnx', { refresh: false, prefer: 'wasm' }]),
+    'an on-demand load asks for the released model on its provider');
+  let calls = 0;
+  c.inpaintWithModel = async () => { calls++; return { imageData: f.converted, tiles: 1 }; };
+  f.state.dustRemoval.ai = true;
+  assert.equal(await c.inpaintForCommit(f.converted, f.mask), f.converted);
+  assert.equal(calls, 1, 'the commit path reloads the model on demand');
+  assert.deepEqual(loads, ['/picked-model.onnx', '/picked-model.onnx']);
+  assert.equal(c.aiRepair.status, 'ready');
+  assert.equal(c.aiRepair.revision, revision, 'a same-provider reload keeps the revision');
+  assert.equal(c.photoSettingsKey(f.item), key);
+  assert.equal(c.aiRepairRunsInFlight, 0);
+  assert.equal(await c.releaseAiRepairSession(), true);
+  // A reload that lands on another provider changes the pixels, so it bumps.
+  c.createInpaintSessionInWorker = async () => ({ run: async () => ({}), release: async () => {}, provider: 'webgpu' });
+  await c.loadAiRepairModel(...c.aiRepairLoadArgs({ refresh: false }));
+  assert.notEqual(c.aiRepair.revision, revision);
 }
 
 for (const succeed of [false, true]) {

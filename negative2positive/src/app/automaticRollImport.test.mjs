@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { runBatchPipeline } from './batchExportScheduler.js';
+import { createHiddenJobGate } from './hiddenJobGate.js';
 import { aggregateRollAnalysis, groupAutomaticRollFrames, sanitizeRollFrameForSettings } from './rollAnalysis.js';
 
 // Test the actual orchestration functions, not a second scheduler. Deferred
@@ -53,6 +54,7 @@ function fixture({ count = 4, prepared = false, realRoll = false } = {}) {
     },
     clearTimeout: id => timers.delete(id),
     yieldTaskForJob: () => new Promise(resolve => context.setTimeout(resolve, 0)),
+    hiddenJobs: createHiddenJobGate({ isHidden: () => false }), hiddenJobBytesFor: async () => 0,
     safeStorageGet: () => context.off ? 'off' : null,
     studioBackgroundReady: () => state.currentStep >= 3 && context.getCurrentQueueItem()?.file === state.loadedFile
       && !context.document.body.dataset.studioBusy && !context.processNegativeInFlight,

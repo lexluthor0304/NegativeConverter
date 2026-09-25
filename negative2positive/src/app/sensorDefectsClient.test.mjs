@@ -29,6 +29,7 @@ class FakeWorker {
     if (message.type === 'suppress') {
       // Real postMessage transfers the buffer away from the caller.
       const moved = message.buffer.transfer();
+      if (suppressBehaviour === 'hold') return;
       if (suppressBehaviour === 'error') {
         queueMicrotask(() => this.onmessage({
           data: { type: 'error', id: message.id, message: 'worker blew up', buffer: moved }
@@ -53,7 +54,7 @@ class FakeWorker {
 
 globalThis.Worker = FakeWorker;
 
-const { suppressSensorDefectsInWorker } = await import('./sensorDefectsClient.js');
+const { suppressSensorDefectsInWorker, disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } = await import('./sensorDefectsClient.js');
 
 function makeImage16(width, height) {
   const data = new Uint16Array(width * height * 4);
@@ -96,6 +97,27 @@ function makeImage16(width, height) {
   assert.equal(image.data.length, 8 * 8 * 4, 'pixels were restored from the error message');
   assert.equal(image.data[0], 1000, 'restored pixels are the ones we sent');
   assert.equal(typeof stats.repaired, 'number');
+}
+
+// --- hidden-window shedding (#241): only an idle worker is terminated ------
+{
+  posted.length = 0;
+  suppressBehaviour = 'result';
+  assert.equal(isSensorDefectsWorkerAlive(), true, 'the worker from the last repair is still alive');
+  assert.equal(disposeIdleSensorDefectsWorker(), true, 'an idle worker is terminated');
+  assert.equal(isSensorDefectsWorkerAlive(), false);
+  assert.equal(disposeIdleSensorDefectsWorker(), false, 'nothing left to terminate');
+  // The next repair spawns and pings a fresh worker.
+  const stats = await suppressSensorDefectsInWorker(makeImage16(8, 8));
+  assert.equal(stats.repaired, 42);
+  assert.deepEqual(posted, ['ping', 'suppress']);
+  // A repair in flight keeps its worker.
+  suppressBehaviour = 'hold';
+  const holding = suppressSensorDefectsInWorker(makeImage16(8, 8));
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(disposeIdleSensorDefectsWorker(), false, 'a busy worker is never terminated');
+  assert.equal(isSensorDefectsWorkerAlive(), true);
+  void holding;
 }
 
 console.log('sensorDefectsClient.test.mjs passed');

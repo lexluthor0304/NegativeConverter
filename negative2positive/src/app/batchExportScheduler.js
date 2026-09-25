@@ -70,9 +70,15 @@ export function planBatchParallelism({
  * @param {AbortSignal} [options.signal] stops scheduling new jobs; in-flight
  *   jobs still finish and are written so nothing already converted is lost
  * @param {(event: {type: string, job: TJob, index: number, error?: Error, done: number, total: number}) => void} [options.onEvent]
+ * @param {(context: {signal: AbortSignal|null, index: number}) => Promise<(() => void)|void>} [options.beforeStart]
+ *   admission (the hidden-job gate, #241): awaited by a lane before it claims
+ *   the next index, never after, so a lane waiting here holds no index that
+ *   later sinks wait for. `index` is only the next unclaimed one at the time
+ *   of the call. The returned release runs once the claimed job's payload has
+ *   been sunk; a rejection while `signal` is aborted counts as cancellation
  * @returns {Promise<{successCount: number, failCount: number, cancelled: boolean, results: Array<{job: TJob, index: number, ok: boolean, error?: Error}>}>}
  */
-export async function runBatchPipeline(jobs, { process, sink, maxParallel = 1, signal = null, onEvent = null } = {}) {
+export async function runBatchPipeline(jobs, { process, sink, maxParallel = 1, signal = null, onEvent = null, beforeStart = null } = {}) {
   if (typeof process !== 'function' || typeof sink !== 'function') {
     throw new TypeError('runBatchPipeline needs process() and sink()');
   }
@@ -147,9 +153,29 @@ export async function runBatchPipeline(jobs, { process, sink, maxParallel = 1, s
   const worker = async () => {
     while (nextToStart < total) {
       if (isCancelled()) { cancelled = true; return; }
+      let release = null;
+      if (beforeStart) {
+        try {
+          release = await beforeStart({ signal, index: nextToStart });
+        } catch (error) {
+          if (isCancelled()) { cancelled = true; return; }
+          throw error;
+        }
+        // Another lane may have taken the last index, or the batch was
+        // cancelled, while this one waited for admission.
+        if (isCancelled() || nextToStart >= total) {
+          if (typeof release === 'function') release();
+          if (isCancelled()) cancelled = true;
+          return;
+        }
+      }
       const index = nextToStart;
       nextToStart += 1;
-      await runOne(index);
+      try {
+        await runOne(index);
+      } finally {
+        if (typeof release === 'function') release();
+      }
     }
   };
 

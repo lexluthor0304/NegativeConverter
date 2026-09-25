@@ -12,14 +12,10 @@ import { looksLikeBayerSnow } from '../silvercore/util/garbledCheck.js';
 import { suppressSensorDefectsInWorker } from './sensorDefectsClient.js';
 import { tryNefJpegPreview, extractNefPreviewJpeg, decodeNefPreviewJpeg } from './nefJpegPreview.js';
 import { sniffImageKind, loadStandardImage, loadPngImageData } from './imageFileLoaders.js';
+import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
+export { estimateRawDecodeBytes };
 
 const RAW_SIZE_HEAVY = 100 * 1024 * 1024;
-// The LibRaw worker starts with a 256 MB WASM heap and grows while it holds the
-// packed sensor data plus the demosaiced output.
-const RAW_WASM_BASE_BYTES = 256 * 1024 * 1024;
-const RAW_WASM_BYTES_PER_PIXEL = 8;
-// rgb16 (6 B/px) + the packed RGBA16 plane (8 B/px) + the 8-bit mirror (4 B/px).
-const RAW_JS_BYTES_PER_PIXEL = 18;
 // Only devices that actually report a small budget are gated, and only at a
 // generous fraction of it — a false rejection is worse than a slow decode.
 const RAW_LOW_MEMORY_GB = 4;
@@ -113,18 +109,6 @@ function withTimeout(promise, ms, onTimeout) {
     promise.finally(() => clearTimeout(timer)),
     timeout,
   ]);
-}
-
-/**
- * Peak bytes a full-resolution RAW decode needs across the WASM heap and the
- * JS copies it produces. Pure, so it can be checked before anything is
- * allocated.
- */
-export function estimateRawDecodeBytes(width, height) {
-  const pixels = Math.max(0, Number(width) || 0) * Math.max(0, Number(height) || 0);
-  return RAW_WASM_BASE_BYTES
-    + pixels * RAW_WASM_BYTES_PER_PIXEL
-    + pixels * RAW_JS_BYTES_PER_PIXEL;
 }
 
 /**

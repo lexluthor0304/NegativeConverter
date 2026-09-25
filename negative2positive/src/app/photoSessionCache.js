@@ -3,8 +3,8 @@ const DEFAULT_MAX_BYTES = 128 * 1024 * 1024;
 // Session snapshots are object/array graphs containing image planes and undo
 // history. Walk containers, never the numeric properties of individual pixels.
 // ImageData.data is a native getter, not an enumerable own property.
-function backingBuffers(value) {
-  const buffers = new Set();
+// `buffers` lets a caller count several graphs once (#241 resident bytes).
+export function backingBuffers(value, buffers = new Set()) {
   const seen = new Set();
   const pending = [value];
   while (pending.length) {
@@ -120,6 +120,8 @@ export function createPhotoSessionCache({ maxBytes = DEFAULT_MAX_BYTES } = {}) {
       const retained = new Set(keys);
       for (const key of entries.keys()) if (!retained.has(key)) remove(key);
     },
+    /** The unique backing buffers retained, to count them with other graphs. */
+    buffers() { return owners.keys(); },
     get bytes() { return bytes; },
     get size() { return entries.size; },
   };

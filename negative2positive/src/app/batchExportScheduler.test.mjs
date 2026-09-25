@@ -206,6 +206,95 @@ for (const stalledStage of ['process', 'sink']) {
   assert.deepEqual(result, { successCount: 0, failCount: 0, cancelled: false, results: [] });
 }
 
+// ---- beforeStart admission (hidden-job gate, #241) ---------------------------
+{
+  const { createHiddenJobGate } = await import('./hiddenJobGate.js');
+
+  // Deadlock guard: 3 lanes behind a gate that admits one item at a time, a
+  // slow first sink. Admission happens before an index is claimed, so every
+  // job completes, in order, and never more than one is in flight.
+  let hidden = true;
+  const gate = createHiddenJobGate({ isHidden: () => hidden, limitsApply: () => true, setTimer: () => 0, clearTimer: () => {} });
+  const sunk = [];
+  const started = [];
+  let inFlight = 0;
+  let peak = 0;
+  const result = await runBatchPipeline([0, 1, 2, 3, 4, 5], {
+    maxParallel: 3,
+    beforeStart: ({ signal }) => gate.admit({ bytes: 1, signal }),
+    process: async (job) => {
+      inFlight += 1; peak = Math.max(peak, inFlight);
+      started.push(job);
+      await sleep(job === 0 ? 1 : 4);
+      inFlight -= 1;
+      return job;
+    },
+    sink: async (job) => { if (job === 0) await sleep(25); sunk.push(job); }
+  });
+  assert.deepEqual(sunk, [0, 1, 2, 3, 4, 5]);
+  assert.deepEqual(started, [0, 1, 2, 3, 4, 5]);
+  assert.equal(result.successCount, 6);
+  assert.equal(peak, 1, 'one item in flight while the gate holds the others');
+  assert.equal(gate.inFlight, 0, 'every admission is released after its sink');
+  assert.equal(gate.waiting, 0);
+
+  // A reservation lasts until the job's payload has been sunk, not just processed.
+  const events = [];
+  const releases = [];
+  await runBatchPipeline(['a', 'b'], {
+    maxParallel: 2,
+    beforeStart: async ({ index }) => { events.push(`admit@${index}`); return () => { events.push('release'); releases.push(1); }; },
+    process: async (job) => { events.push(`process:${job}`); return job; },
+    sink: async (job) => { await sleep(3); events.push(`sink:${job}`); }
+  });
+  assert.equal(releases.length, 2);
+  assert.ok(events.indexOf('sink:a') < events.indexOf('release'), 'released only after the sink');
+  assert.ok(events.indexOf('admit@0') < events.indexOf('process:a'), 'admitted before the job starts');
+
+  // Showing the window lets the waiting lanes start together again.
+  hidden = true;
+  const gate2 = createHiddenJobGate({ isHidden: () => hidden, limitsApply: () => true, setTimer: () => 0, clearTimer: () => {} });
+  let inFlight2 = 0; let peak2 = 0;
+  const run = runBatchPipeline([0, 1, 2, 3], {
+    maxParallel: 3,
+    beforeStart: ({ signal }) => gate2.admit({ signal }),
+    process: async (job) => {
+      inFlight2 += 1; peak2 = Math.max(peak2, inFlight2);
+      if (job === 0) { hidden = false; gate2.visibilityChanged(); }
+      await sleep(5);
+      inFlight2 -= 1;
+      return job;
+    },
+    sink: async () => {}
+  });
+  assert.equal((await run).successCount, 4);
+  assert.ok(peak2 >= 2, 'the lane plan is restored once visible');
+
+  // Cancelling while lanes wait at the gate stops them without claiming an index.
+  hidden = true;
+  const gate3 = createHiddenJobGate({ isHidden: () => hidden, limitsApply: () => true, setTimer: () => 0, clearTimer: () => {} });
+  const cancel = new AbortController();
+  const processed = [];
+  const cancelled = await runBatchPipeline([0, 1, 2, 3], {
+    maxParallel: 3,
+    signal: cancel.signal,
+    beforeStart: ({ signal }) => gate3.admit({ signal }),
+    process: async (job) => { processed.push(job); if (job === 0) cancel.abort(); await sleep(3); return job; },
+    sink: async () => {}
+  });
+  assert.equal(cancelled.cancelled, true);
+  assert.deepEqual(processed, [0], 'waiting lanes never claimed an index');
+  assert.equal(cancelled.successCount, 1, 'the running job still finishes and is written');
+  assert.equal(gate3.inFlight, 0);
+  assert.equal(gate3.waiting, 0);
+
+  // A non-abort admission failure is a programming error and surfaces.
+  await assert.rejects(runBatchPipeline([1], {
+    beforeStart: async () => { throw new Error('boom'); },
+    process: async () => 1, sink: async () => {}
+  }), /boom/);
+}
+
 // Missing callbacks are a programming error, reported up front.
 await assert.rejects(() => runBatchPipeline([1], { process: async () => {} }), TypeError);
 

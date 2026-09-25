@@ -1,5 +1,5 @@
 import { applyFilmTypeOverride, sanitizeFilmTypeOverride } from './filmTypeOverride.js';
-import { createPhotoSessionCache } from './photoSessionCache.js';
+import { createPhotoSessionCache, backingBuffers } from './photoSessionCache.js';
 import { createAdjustedPhotoPreview, samplePhotoPreviewSource, adjustPhotoPreviewSample } from './photoPreview.js';
 import { exactSettingsKey } from './settingsKey.js';
 import { sanitizeSemanticMap } from './semanticAnchors.js';
@@ -12,6 +12,9 @@ import { readLearnedDefaults, writeLearnedDefaults, resetLearnedDefaults } from 
 import { exportNameStem } from './exportFileName.js';
 import { frameNeedsReview } from './reviewQueue.js';
 import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
+import { createHiddenJobGate, hiddenJobLimitsApply, estimateHiddenJobBytes } from './hiddenJobGate.js';
+import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
+import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './sensorDefectsClient.js';
     import { detectedImportSettings } from './filmTypeDetection.js';
     import { createAiModelLoader } from './aiModelLoading.js';
     import opencvScriptUrl from '@techstark/opencv-js/dist/opencv.js?url';
@@ -130,7 +133,10 @@ import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
       workerEncodeTiff,
       isWorkerAvailable,
       isExportInputLostError,
-      createExportWorkerPool
+      createExportWorkerPool,
+      terminateWorker as terminateExportWorker,
+      exportWorkerPendingCount,
+      isExportWorkerAlive
     } from '../workers/workerBridge.js';
 
     const DEBUG_UI = new URLSearchParams(window.location.search).get('debug') === '1';
@@ -295,6 +301,17 @@ import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
       fileName: '',
       targetDirectory: ''
     };
+    // Every long job asks this gate before an item starts, so a hidden macOS
+    // window stays under WebKit's inactive memory limit (#241; the callbacks
+    // live under "Hidden-window jobs" below).
+    const hiddenJobs = createHiddenJobGate({
+      isHidden: () => document.visibilityState === 'hidden',
+      limitsApply: () => hiddenJobLimitsForced() || hiddenJobLimitsApply(),
+      residentBytes: () => hiddenResidentBytes(),
+      onChange: () => refreshHiddenJobStatus(),
+      onHiddenAdmit: () => shedHiddenJobMemory(),
+      onGraceExpired: () => shedHiddenJobMemory()
+    });
     const desktopUpdateState = {
       visible: false,
       currentVersion: '',
@@ -2479,7 +2496,7 @@ import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
         return;
       }
 
-      label.textContent = getInterpolatedText(
+      label.textContent = hiddenJobs.paused ? hiddenJobPausedText() : getInterpolatedText(
         'desktopBatchExportProgress',
         {
           current: desktopBatchExportState.current,
@@ -6106,7 +6123,8 @@ import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
           state.dustRemoval.particleCount = 0;
           state.dustRemoval.cleanSource = null;
           goToStep(3);
-          if (aiRepair.status === 'idle') void loadAiRepairModel(DEFAULT_MODEL_URL, { refresh: false });
+          // A session released while the window was hidden reloads on demand.
+          if (aiRepair.status === 'idle' && !aiRepair.released) void loadAiRepairModel(DEFAULT_MODEL_URL, { refresh: false });
           syncBatchUIState({ reason: 'processNegative' });
           revealBatchFileList('processNegative');
           updatePreview();
@@ -7012,7 +7030,137 @@ import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
         state.flatFields[item.settings?.flatFieldId]?.id || null], 2);
     }
 
+    // ===========================================
+    // Hidden-window jobs (#241)
+    // ===========================================
+    // Batch exports, roll analysis, the contact sheet and the thumbnail lane
+    // pass `hiddenJobs` (hiddenJobGate.js) before each full-resolution item.
+    // With the window hidden on macOS WebKit one item runs at a time and,
+    // after the grace period, only one that fits WebKit's inactive memory
+    // limit. What a hidden window does not need is shed first: the photo
+    // caches, idle workers and the MI-GAN session. The open photo is left
+    // alone, so the same photo and edits are on screen when it is shown again.
+    let activeLongJobs = 0;
+
+    // QA/measurement override: localStorage nc_hidden_job_limits_v1 = 'force'
+    // applies the macOS WebKit rules in any browser.
+    function hiddenJobLimitsForced() {
+      return safeStorageGet('nc_hidden_job_limits_v1') === 'force';
+    }
+
+    function hiddenJobRunning() {
+      return activeLongJobs > 0 || hiddenJobs.busy || studioThumbnailsRunning
+        || automaticRollImportRunning || automaticRollAnalysisRunning;
+    }
+
+    // Unique backing buffers of the open photo's planes (each with its
+    // __image16), the undo history and both photo caches.
+    function hiddenResidentBytes() {
+      const buffers = new Set();
+      backingBuffers([
+        state.loadedBaseImageData, state.originalImageData, state.croppedImageData, state.processedImageData,
+        state.conversionSourceImageData, state.conversionPreviewImageData, state.previewSourceImageData,
+        state.histogramSourceImageData, state.webglSourceImageData, state.displayImageData,
+        state.dustRemoval.mask, state.dustRemoval.inpaintedImageData, state.dustRemoval.cleanSource,
+        undoStack, redoStack
+      ], buffers);
+      for (const cache of [photoSessions, photoPreviews]) {
+        for (const buffer of cache.buffers()) buffers.add(buffer);
+      }
+      let bytes = 0;
+      for (const buffer of buffers) bytes += buffer.byteLength;
+      return bytes;
+    }
+
+    // One item of these files: the larger of the RAW decode peak and the lane
+    // peak, from header dimensions (the batch's largest frame).
+    async function hiddenJobBytesFor(files) {
+      let pixels = 0;
+      for (const file of files) pixels = Math.max(pixels, await imagePixelsForBatch(file));
+      return estimateHiddenJobBytes(pixels, estimateRawDecodeBytes(pixels, 1));
+    }
+
+    // Runs `work` as one gated item of a job that has no runBatchPipeline lane.
+    async function runHiddenJobItem(files, work, { signal = null } = {}) {
+      const release = await hiddenJobs.admit({ bytes: await hiddenJobBytesFor(files), signal });
+      try {
+        return await work();
+      } finally {
+        release();
+      }
+    }
+
+    function hiddenJobUsesAiRepair() {
+      if (!hiddenJobRunning()) return false;
+      return Boolean(state.dustRemoval.ai && state.dustRemoval.enabled)
+        || state.fileQueue.some(item => item.settings?.repairStrokes?.length);
+    }
+
+    // Terminating a worker frees its heap at once; dropped main-thread
+    // references go with the next GC, which WebKit's shrink-or-die pass runs
+    // before it re-measures. Workers and caches come back lazily on use.
+    function shedHiddenJobMemory() {
+      if (document.visibilityState !== 'hidden' || !hiddenJobs.status().limited) return;
+      photoSessions.clear();
+      photoPreviews.clear();
+      if (!exportWorkerPendingCount()) terminateExportWorker();
+      disposeIdleSensorDefectsWorker();
+      if (!hiddenJobUsesAiRepair()) void releaseAiRepairSession();
+      hiddenJobs.recheck();
+    }
+
+    function refreshHiddenJobStatus() {
+      updateDesktopBatchExportUI();
+      updateRollAnalysisUI();
+      if (batchOverlayProgress) {
+        getLoadingOverlay().updateProgress(batchOverlayProgress.percent,
+          hiddenJobs.paused ? hiddenJobPausedText() : batchOverlayProgress.label);
+      }
+    }
+
+    function hiddenJobPausedText() {
+      return getLocalizedText('hiddenJobPaused', 'Paused while the window is hidden');
+    }
+
+    // The browser batches' overlay progress, so a pause can replace its label.
+    let batchOverlayProgress = null;
+    function updateBatchOverlayProgress(percent, label) {
+      batchOverlayProgress = { percent, label };
+      getLoadingOverlay().updateProgress(percent, hiddenJobs.paused ? hiddenJobPausedText() : label);
+    }
+
+    document.addEventListener('visibilitychange', () => {
+      hiddenJobs.visibilityChanged();
+      if (document.visibilityState === 'hidden') {
+        // While a job runs, shed now; an idle window keeps its warm caches
+        // until the grace period ends, so a quick app switch stays warm.
+        if (hiddenJobRunning()) shedHiddenJobMemory();
+      } else {
+        // Waiting items were released above; the thumbnail lane restarts if
+        // it stopped. Caches refill on use and workers respawn lazily.
+        if (state.fileQueue.length) void loadStudioThumbnails();
+      }
+      refreshHiddenJobStatus();
+    });
+
+    // Debug counters for the acceptance runs (#241): what a hidden window holds.
+    window.__ncHiddenJobs = {
+      status: () => ({
+        ...hiddenJobs.status(),
+        activeLongJobs,
+        residentBytes: hiddenResidentBytes(),
+        photoSessionBytes: photoSessions.bytes,
+        photoPreviewBytes: photoPreviews.bytes,
+        exportWorkerAlive: isExportWorkerAlive(),
+        sensorDefectsWorkerAlive: isSensorDefectsWorkerAlive(),
+        aiRepairSession: aiRepair.status === 'ready' || aiRepair.status === 'loading',
+        aiRepairRevision: aiRepair.revision
+      })
+    };
+
     function rememberPhotoSession(item) {
+      // The crash-loop guard runs a resumed job with the caches off.
+      if (hiddenJobs.safeMode) return;
       if (!item || item.file !== state.loadedFile || !state.loadedBaseImageData || state.rawDecodePending) return;
       const settled = state.currentStep >= 3 && state.processedImageData && !processNegativeInFlight
         && !coreReprocessBusy() && !coreReprocessTimer && !state.dustRemoval.processing
@@ -11799,13 +11947,18 @@ import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
     // and releases the workers afterwards. `sink` writes one encoded frame and
     // throws to fail that frame; `signal` stops further frames from starting.
     async function runBatchExport(jobs, { exportInfo, sink, onProgress = null, signal = null, dustRemoval = null }) {
-      const lanes = await planBatchExportLanes(jobs);
+      // The crash-loop guard runs a resumed batch in one lane.
+      const lanes = hiddenJobs.safeMode ? 1 : await planBatchExportLanes(jobs);
+      const bytes = await hiddenJobBytesFor(jobs.map(job => job.file));
       const workers = createBatchExportWorkers(lanes);
       const trace = createPerfTrace('batchExport', { files: jobs.length, lanes });
+      activeLongJobs += 1;
       try {
         return await runBatchPipeline(jobs, {
           maxParallel: lanes,
           signal,
+          // Admission happens before a lane claims its next index (#241).
+          beforeStart: ({ signal: stop }) => hiddenJobs.admit({ bytes, signal: stop }),
           process: (job, index) => renderBatchExportFile(job, index, { exportInfo, workers, dustRemoval }),
           sink,
           onEvent: (event) => {
@@ -11826,6 +11979,7 @@ import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
           }
         });
       } finally {
+        activeLongJobs -= 1;
         workers.dispose();
         trace.end();
       }
@@ -11912,7 +12066,7 @@ import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
           exportInfo,
           signal: cancel.signal,
           sink: (job, blob) => zipWriter.addBlob(job.outputName, blob),
-          onProgress: (event) => overlay.updateProgress((event.done / total) * 95, batchProgressLabel(event.done, total))
+          onProgress: (event) => updateBatchOverlayProgress((event.done / total) * 95, batchProgressLabel(event.done, total))
         });
 
         overlay.updateProgress(98, lang.loadingBatchZip);
@@ -12099,7 +12253,7 @@ import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
             }
             void learnFromExport(job.item);
           },
-          onProgress: (event) => overlay.updateProgress((event.done / total) * 100, batchProgressLabel(event.done, total))
+          onProgress: (event) => updateBatchOverlayProgress((event.done / total) * 100, batchProgressLabel(event.done, total))
         });
       } finally {
         overlay.hide();
@@ -13150,6 +13304,7 @@ import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
 
     let automaticRollImportRunning = false;
     let automaticRollAnalysisRunning = false;
+    let manualRollAnalysisRunning = false;
     let automaticRollRevision = 0;
     let studioThumbnailsRunning = false;
     function fileListButtonFor(item) {
@@ -13250,7 +13405,11 @@ import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
               || Boolean(document.body.dataset.photoSwitching);
             return !superseded;
           };
+          let release = null;
           try {
+            // One gated item (#241); a lane that waited while hidden re-checks.
+            release = await hiddenJobs.admit({ bytes: await hiddenJobBytesFor([item.file]) });
+            if (!valid()) continue;
             workers ||= createConversionWorkerPool({ size: 1 });
             let prepared;
             const image = await processFileWithSettings(item.file, item.settings, {
@@ -13275,6 +13434,8 @@ import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
               console.warn('Photo preview failed:', item.file.name, error);
               refreshThumbnailRow(item);
             }
+          } finally {
+            release?.();
           }
           await new Promise(resolve => setTimeout(resolve, 30));
         }
@@ -14784,8 +14945,39 @@ import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
     // ===========================================
     // AI repair: learned inpainting on the commit and export paths
     // ===========================================
-    const aiRepair = { release: null, trim: null, status: 'idle', provider: '', run: null, source: '', sourceRef: null, error: '', percent: 0, tiles: 0, ms: 0, revision: 0 };
+    const aiRepair = { release: null, trim: null, status: 'idle', provider: '', run: null, source: '', sourceRef: null, prefer: '', released: false, error: '', percent: 0, tiles: 0, ms: 0, revision: 0 };
     let pendingBrushRepairs = 0;
+    let aiRepairRunsInFlight = 0;
+
+    // Hidden-window shedding (#241): a warmed MI-GAN session holds 0.6-0.8 GB
+    // of WASM heap in WKWebView. Release it while no run, brush repair or dust
+    // pass needs it. The next load brings back the same model (a picked file
+    // included) on the same provider under the same `revision`, so photo keys
+    // and thumbnails stay valid.
+    async function releaseAiRepairSession() {
+      if (aiRepair.status !== 'ready' || typeof aiRepair.release !== 'function'
+        || aiRepairRunsInFlight || pendingBrushRepairs || state.dustRemoval.processing) return false;
+      const release = aiRepair.release;
+      aiRepair.run = null;
+      aiRepair.trim = null;
+      aiRepair.release = null;
+      aiRepair.status = 'idle';
+      aiRepair.released = true;
+      updateAiRepairUI();
+      try { await release(); } catch (error) { console.warn('AI repair release failed:', error); }
+      return true;
+    }
+    async function countAiRepairRun(run) {
+      aiRepairRunsInFlight += 1;
+      try { return await run(); } finally { aiRepairRunsInFlight -= 1; }
+    }
+    // What an implicit load asks for: the bundled model, or after an idle
+    // release the released model on its provider.
+    function aiRepairLoadArgs(options = {}) {
+      return aiRepair.released && aiRepair.sourceRef
+        ? [aiRepair.sourceRef, { ...options, prefer: aiRepair.prefer || undefined }]
+        : [DEFAULT_MODEL_URL, options];
+    }
 
     async function inpaintManualBrush(source, settings = state, base = state.loadedBaseImageData || state.originalImageData,
       lensMapping = settings === state ? state.conversionSourceImageData?.__lensMapping : null, isCurrent = () => true,
@@ -14797,7 +14989,7 @@ import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
         await new Promise(resolve => setTimeout(resolve, 50));
         assertRepairCurrent(isCurrent);
       }
-      if (aiRepair.status !== 'ready') await loadAiRepairModel(DEFAULT_MODEL_URL, { refresh: false });
+      if (aiRepair.status !== 'ready') await loadAiRepairModel(...aiRepairLoadArgs({ refresh: false }));
       assertRepairCurrent(isCurrent);
       if (aiRepair.status !== 'ready') throw new Error(aiRepair.error || 'AI repair model is not ready');
       const geometry = { ...localExposureGeometryFor(settings, base), width: source.width, height: source.height };
@@ -14806,12 +14998,12 @@ import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
       const started = performance.now();
       let result;
       try {
-        result = await inpaintWithModel(source, mask, aiRepair.run, {
+        result = await countAiRepairRun(() => inpaintWithModel(source, mask, aiRepair.run, {
           shouldContinue: isCurrent, memoInsert, maskBounds: bounds || { x: 0, y: 0, width: 0, height: 0 },
           onProgress: (done, total) => {
             document.getElementById('dustAiStatus').textContent = getInterpolatedText('dustAiStatusRunning', { done, total });
           }
-        });
+        }));
       } catch (error) {
         if (error?.name === 'AbortError') throw error;
         assertRepairCurrent(isCurrent);
@@ -14924,7 +15116,7 @@ import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
         updateCanvasVisibility();
         updatePreview();
         await ensureFullResolutionReadyForExport();
-        if (aiRepair.status !== 'ready') await loadAiRepairModel(DEFAULT_MODEL_URL);
+        if (aiRepair.status !== 'ready') await loadAiRepairModel(...aiRepairLoadArgs());
       } else if (aiBrushDrawing) finishAiBrush({ pointerId: aiBrushDrawing.pointerId }, true);
     });
     document.getElementById('aiBrushSize').addEventListener('input', event => {
@@ -14974,7 +15166,11 @@ import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
     const loadAiRepairModel = createAiModelLoader(performAiRepairModelLoad, DEFAULT_MODEL_URL);
 
     async function performAiRepairModelLoad(source, { prefer = defaultInferencePreference(), refresh = true } = {}) {
-      aiRepair.revision += 1;
+      // Reloading a released model on its provider keeps its revision.
+      const reload = aiRepair.released && source === aiRepair.sourceRef && prefer === aiRepair.prefer;
+      const previousProvider = aiRepair.provider;
+      aiRepair.released = false;
+      if (!reload) aiRepair.revision += 1;
       aiRepair.status = 'loading';
       aiRepair.percent = 0;
       aiRepair.error = '';
@@ -15005,8 +15201,9 @@ import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
         aiRepair.provider = session.provider;
         aiRepair.source = label;
         aiRepair.sourceRef = source;
+        aiRepair.prefer = prefer;
         aiRepair.status = 'ready';
-        aiRepair.revision += 1;
+        if (!reload || session.provider !== previousProvider) aiRepair.revision += 1;
         aiRepair.tiles = 0;
         showToast(getInterpolatedText('dustAiLoaded', { provider: session.provider === 'webgpu' ? 'WebGPU' : 'WASM' }, `AI repair model loaded (${session.provider})`));
       } catch (error) {
@@ -15025,7 +15222,7 @@ import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
     // revision it ran with and, for MI-GAN, the blocks it wrote.
     async function inpaintForCommit(source, mask, isCurrent = () => true, worker = null, { memoInsert = true, report = null } = {}) {
       assertRepairCurrent(isCurrent);
-      if (state.dustRemoval.ai && aiRepair.status === 'idle') await loadAiRepairModel(DEFAULT_MODEL_URL, { refresh: false });
+      if (state.dustRemoval.ai && aiRepair.status === 'idle') await loadAiRepairModel(...aiRepairLoadArgs({ refresh: false }));
       while (state.dustRemoval.ai && aiRepair.status === 'loading') {
         await new Promise(resolve => setTimeout(resolve, 50));
         assertRepairCurrent(isCurrent);
@@ -15035,10 +15232,10 @@ import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
       if (!aiRepairReady()) return inpaintDustOffMainThread(source, mask, isCurrent, worker);
       const started = performance.now();
       try {
-        const { imageData, tiles, blocks } = await inpaintWithModel(source, mask, aiRepair.run, {
+        const { imageData, tiles, blocks } = await countAiRepairRun(() => inpaintWithModel(source, mask, aiRepair.run, {
           shouldContinue: isCurrent, memoInsert,
           onProgress: (done, total) => updateDustStatusUI(getInterpolatedText('dustAiStatusRunning', { done: String(done), total: String(total) }, `AI repair: tile ${done} / ${total}`))
-        });
+        }));
         if (report) report.blocks = blocks;
         aiRepair.tiles = tiles;
         aiRepair.ms = Math.round(performance.now() - started);
@@ -15093,7 +15290,7 @@ import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
     document.getElementById('dustAiEnabled')?.addEventListener('change', (event) => {
       state.dustRemoval.ai = Boolean(event.target.checked);
       updateAiRepairUI();
-      if (state.dustRemoval.ai && aiRepair.status === 'idle') void loadAiRepairModel(DEFAULT_MODEL_URL);
+      if (state.dustRemoval.ai && aiRepair.status === 'idle') void loadAiRepairModel(...aiRepairLoadArgs());
       else if (state.dustRemoval.enabled) scheduleDustDetection();
     });
     document.getElementById('dustAiLoadBtn')?.addEventListener('click', () => { void loadAiRepairModel(DEFAULT_MODEL_URL); });
@@ -15148,6 +15345,7 @@ import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
       const thumbs = [];
       const pages = [];
       await overlay.show({ title: lang.loadingExporting });
+      activeLongJobs += 1;
       try {
         persistCurrentFileSettings({ silent: true, force: true });
         const probe = layoutContactSheet({ pageId, layoutId, count: selected.length });
@@ -15159,14 +15357,17 @@ import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
           const settingsForFile = getSettingsForExport(index, item);
           const label = frameNumberFor(settingsForFile?.frameMetadata, i);
           try {
-            let adjusted = await processFileWithSettings(item.file, settingsForFile);
-            if (Math.max(adjusted.width, adjusted.height) > target) adjusted = downsampleImageDataForMaxDim(adjusted, target);
-            if (sprockets) {
-              const options = getSprocketFrameComposeOptions(settingsForFile, i);
-              await ensureSprocketFrameFonts(options);
-              adjusted = composeSprocketFrame(adjusted, options);
-            }
-            const bitmap = await createImageBitmap(adjusted);
+            // Each full-resolution frame is one gated item (#241).
+            const bitmap = await runHiddenJobItem([item.file], async () => {
+              let adjusted = await processFileWithSettings(item.file, settingsForFile);
+              if (Math.max(adjusted.width, adjusted.height) > target) adjusted = downsampleImageDataForMaxDim(adjusted, target);
+              if (sprockets) {
+                const options = getSprocketFrameComposeOptions(settingsForFile, i);
+                await ensureSprocketFrameFonts(options);
+                adjusted = composeSprocketFrame(adjusted, options);
+              }
+              return createImageBitmap(adjusted);
+            });
             thumbs.push({ image: bitmap, width: bitmap.width, height: bitmap.height, label });
           } catch (error) {
             console.warn('Contact sheet frame failed:', item.file.name, error);
@@ -15196,6 +15397,7 @@ import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
         }
         overlay.updateProgress(100, lang.loadingComplete);
       } finally {
+        activeLongJobs -= 1;
         overlay.hide();
         for (const thumb of thumbs) thumb.image?.close?.();
       }
@@ -16504,7 +16706,8 @@ import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
           // The requested foreground item already owns its decode even before
           // loadedFile catches up and getCurrentQueueItem becomes non-null.
           const toAnalyze = pending.filter(item => eligible(item) && !item.settings && item !== state.fileQueue[state.currentFileIndex]);
-          const lanes = await planBatchLanes(toAnalyze.map(item => item.file));
+          const lanes = hiddenJobs.safeMode ? 1 : await planBatchLanes(toAnalyze.map(item => item.file));
+          const bytes = await hiddenJobBytesFor(toAnalyze.map(item => item.file));
           const analyzers = createAutoFrameWorkerPool({ size: lanes });
           const stop = new AbortController();
           const trace = createPerfTrace('automaticRollImport', { files: toAnalyze.length, lanes });
@@ -16512,6 +16715,7 @@ import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
             await runBatchPipeline(toAnalyze, {
               maxParallel: lanes,
               signal: stop.signal,
+              beforeStart: ({ signal }) => hiddenJobs.admit({ bytes, signal }),
               process: async (item) => {
                 if (!valid()) { stop.abort(); return null; }
                 const key = automaticRollItemKey(item);
@@ -16580,11 +16784,14 @@ import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
       const roll = state.rollAnalysis || {};
       const hasRoll = Boolean(roll.id);
       group.style.display = state.originalImageData ? '' : 'none';
+      const rollPaused = hiddenJobs.paused && (automaticRollImportRunning || automaticRollAnalysisRunning || manualRollAnalysisRunning);
       const selectedCount = state.fileQueue.filter((item) => item.selected).length;
       analyzeBtn.disabled = selectedCount < 2 || Boolean(document.body.dataset.studioBusy) || state.cropping || isDesktopBatchExportLocked();
       clearBtn.disabled = !hasRoll;
       equalizeInput.checked = Boolean(roll.equalize);
-      if (!hasRoll) {
+      if (rollPaused) {
+        status.textContent = hiddenJobPausedText();
+      } else if (!hasRoll) {
         status.textContent = getLocalizedText('rollAnalysisNone', 'Not analysed yet. Select the frames of one roll and analyse them together.');
       } else {
         const parts = [getInterpolatedText('rollAnalysisSummary', { usable: String(roll.usable), count: String(roll.count) }, `${roll.usable}/${roll.count} frames share one film base and tone analysis`)];
@@ -16621,7 +16828,7 @@ import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
             && (!recipeKeys || recipeKeys.get(item) === automaticRollItemKey(item))))
         : isCurrentLoad(generation)) && selectedItems.every(item => state.fileQueue.includes(item));
       if (automatic) automaticRollAnalysisRunning = true;
-      else { studioAutoFrameRunning = true; document.body.dataset.studioBusy = 'true'; }
+      else { studioAutoFrameRunning = true; manualRollAnalysisRunning = true; document.body.dataset.studioBusy = 'true'; }
       studioWorkspace?.sync();
       const button = document.getElementById('analyzeRollBtn');
       const previousText = button ? button.textContent : '';
@@ -16636,12 +16843,20 @@ import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
         const cached = await analysisSamples.get(measurement.item);
         if (cached) return cached;
         // Storage-disabled/private-mode fallback stays bounded and lossless.
-        const image = measurement.item.file === state.loadedFile && !state.rawDecodePending && canReuseLoadedRollSource(measurement.item)
-          ? state.loadedBaseImageData || state.originalImageData : await loadFileToImageData(measurement.item.file);
-        assertRepairCurrent(isValid);
-        const sample = buildRollAnalysisSample(image, measurement.settings);
-        await analysisSamples.put(measurement.item, sample);
-        return sample;
+        if (measurement.item.file === state.loadedFile && !state.rawDecodePending && canReuseLoadedRollSource(measurement.item)) {
+          assertRepairCurrent(isValid);
+          const sample = buildRollAnalysisSample(state.loadedBaseImageData || state.originalImageData, measurement.settings);
+          await analysisSamples.put(measurement.item, sample);
+          return sample;
+        }
+        // A decode is one gated item of this job (#241).
+        return runHiddenJobItem([measurement.item.file], async () => {
+          const image = await loadFileToImageData(measurement.item.file);
+          assertRepairCurrent(isValid);
+          const sample = buildRollAnalysisSample(image, measurement.settings);
+          await analysisSamples.put(measurement.item, sample);
+          return sample;
+        });
       }
       let roll = null;
       try {
@@ -16660,17 +16875,23 @@ import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
             let settings;
             if (sample && item.settings) settings = cloneSettings(item.settings);
             else {
-              const imageData = item.file === state.loadedFile && !state.rawDecodePending && canReuseLoadedRollSource(item)
-                ? state.loadedBaseImageData || state.originalImageData : await loadFileToImageData(item.file);
-              if (!isValid()) return { status: 'stale' };
-              settings = item.settings ? cloneSettings(item.settings) : createDefaultSettings(imageData, item);
-              if (!settings.filmEdge?.checked) {
-                const edge = await analyzeImportFilmEdge(imageData, settings, { applyDefaults: !item.settings });
-                if (edge) settings = edge.settings;
+              const reuse = item.file === state.loadedFile && !state.rawDecodePending && canReuseLoadedRollSource(item);
+              // A decode is one gated item of this job (#241).
+              const release = reuse ? null : await hiddenJobs.admit({ bytes: await hiddenJobBytesFor([item.file]) });
+              try {
+                const imageData = reuse ? state.loadedBaseImageData || state.originalImageData : await loadFileToImageData(item.file);
+                if (!isValid()) return { status: 'stale' };
+                settings = item.settings ? cloneSettings(item.settings) : createDefaultSettings(imageData, item);
+                if (!settings.filmEdge?.checked) {
+                  const edge = await analyzeImportFilmEdge(imageData, settings, { applyDefaults: !item.settings });
+                  if (edge) settings = edge.settings;
+                }
+                if (!isValid()) return { status: 'stale' };
+                sample = buildRollAnalysisSample(imageData, settings);
+                await analysisSamples.put(item, sample);
+              } finally {
+                release?.();
               }
-              if (!isValid()) return { status: 'stale' };
-              sample = buildRollAnalysisSample(imageData, settings);
-              await analysisSamples.put(item, sample);
             }
             measurements.push({
               item,
@@ -16789,7 +17010,7 @@ import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
           button.textContent = previousText;
         }
         if (automatic) automaticRollAnalysisRunning = false;
-        else studioAutoFrameRunning = false;
+        else { studioAutoFrameRunning = false; manualRollAnalysisRunning = false; }
         if (!automatic && isCurrentLoad(generation)) delete document.body.dataset.studioBusy;
         studioWorkspace?.sync();
       }
