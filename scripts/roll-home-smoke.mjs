@@ -6,6 +6,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { parseTiff, TIFF_TAGS, EXIF_TAGS } from '../negative2positive/src/workers/tiffWriter.js';
 import { listPngChunks, listJpegSegments } from '../negative2positive/src/app/exportMetadata.js';
+import { layoutContactSheet } from '../negative2positive/src/app/contactSheet.js';
 
 const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`;
 
@@ -50,7 +51,9 @@ async function exportAs(evaluate, waitFor, format) {
 
 export async function runRollHomeSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, root }) {
   const fixture = join(root, 'negative2positive', 'test-fixtures', 'negative-strip-dx.png');
-  await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
+  // perf=1 records the processFileWithSettings stage marks the contact sheet
+  // check reads (User Timing only).
+  await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en&perf=1` });
   await waitFor('roll home workspace boot', `!!document.getElementById('studioImportAutoCrop') && (!!document.getElementById('fileInput') && !!document.getElementById('metaStock'))`);
   await installDialogAutoAccept();
   await installDownloadCapture(evaluate);
@@ -126,6 +129,10 @@ async function runProjectScenario({ send, evaluate, waitFor, wait, fail, install
   if (project.files[0]?.name !== 'negative-strip-dx.png' || project.roll?.metadata?.iso !== '400') fail('project content wrong: ' + text.slice(0, 300));
   if (project.files[0]?.settings?.frameMetadata?.frameNumber !== '31A') fail('project lacks the frame settings: ' + JSON.stringify(project.files[0]?.settings?.frameMetadata));
   if (!project.files[0]?.hash) fail('project entries carry no content hash');
+  // #247 part 5: the final tile travels with its render context.
+  if (!/^data:image\/jpeg;base64,/.test(project.files[0]?.thumbnail || '') || project.files[0]?.thumbnailContext?.renderVersion !== 1) {
+    fail('project lacks the frame tile: ' + JSON.stringify({ thumbnail: String(project.files[0]?.thumbnail).slice(0, 40), context: project.files[0]?.thumbnailContext }));
+  }
   const projectPath = join(mkdtempSync(join(tmpdir(), 'nc-project-')), saved.name);
   writeFileSync(projectPath, text);
 
@@ -208,10 +215,49 @@ async function runRecipeScenario({ evaluate, waitFor, wait, fail }) {
 
 const pngSize = (bytes) => ({ width: (bytes[16] << 24 | bytes[17] << 16 | bytes[18] << 8 | bytes[19]) >>> 0, height: (bytes[20] << 24 | bytes[21] << 16 | bytes[22] << 8 | bytes[23]) >>> 0 });
 
+// Contact-sheet work (#247 part 3): one conversion worker per sheet, ended
+// with it, and conversion and adjustments at the cell's size.
+async function watchContactSheetWork(evaluate) {
+  await evaluate(`(() => {
+    window.__sheetWorkers = [];
+    const Native = window.__nativeWorker || (window.__nativeWorker = window.Worker);
+    window.Worker = new Proxy(Native, { construct(target, args, newTarget) {
+      const worker = Reflect.construct(target, args, newTarget);
+      if (/conversionWorker/.test(String(args[0]))) {
+        const record = { terminated: false };
+        window.__sheetWorkers.push(record);
+        const terminate = worker.terminate.bind(worker);
+        worker.terminate = () => { record.terminated = true; terminate(); };
+      }
+      return worker;
+    } });
+    performance.clearMarks();
+  })()`);
+}
+
+async function checkContactSheetWork(evaluate, fail, { pageId, layoutId }) {
+  const cell = layoutContactSheet({ pageId, layoutId, count: 1 }).cells[0].frame;
+  const target = Math.max(cell.width, cell.height) * 2;
+  const work = await evaluate(`(() => {
+    window.Worker = window.__nativeWorker;
+    const marks = performance.getEntriesByType('mark').filter((m) => m.name.startsWith('nc:processFileWithSettings:'));
+    const stage = (name) => marks.filter((m) => m.name.endsWith(':' + name)).map((m) => m.detail?.pixels ?? null);
+    return { workers: window.__sheetWorkers, load: stage('load'), convert: stage('convert'), adjustments: stage('adjustments') };
+  })()`);
+  console.log('roll home contact sheet work:', JSON.stringify({ target, ...work }));
+  if (work.workers.length !== 1 || !work.workers[0].terminated) fail('a contact sheet must use exactly one conversion worker and end it: ' + JSON.stringify(work.workers));
+  if (!work.convert.length || !work.adjustments.length) fail('no contact-sheet conversion was traced: ' + JSON.stringify(work));
+  for (const pixels of [...work.convert, ...work.adjustments]) {
+    if (!(pixels > 0 && pixels <= target * target)) fail(`contact-sheet stage at ${pixels} px exceeds the ${target} px cell target`);
+  }
+  if (!(Math.max(...work.load) > Math.max(...work.convert))) fail('the contact-sheet frame was not reduced before conversion: ' + JSON.stringify(work));
+}
+
 // ---- 2. Contact sheet: one A4 page at 300 dpi with sprockets, then Letter. ----
 async function runContactSheetScenario({ evaluate, waitFor, wait, fail }) {
   const enabled = await evaluate(`!document.getElementById('exportContactSheetBtn').disabled`);
   if (!enabled) fail('contact sheet button should be enabled with a selected photo');
+  await watchContactSheetWork(evaluate);
   await evaluate(`(() => {
     document.getElementById('contactSheetLayout').value = '35mm';
     document.getElementById('contactSheetPage').value = 'a4';
@@ -227,10 +273,13 @@ async function runContactSheetScenario({ evaluate, waitFor, wait, fail }) {
   if (size.width !== 2480 || size.height !== 3508) fail('contact sheet is not A4 at 300 dpi: ' + JSON.stringify(size));
   const chunks = listPngChunks(sheet.bytes);
   if (!/AnalogExif:Film>[^<]*ULTRA MAX/i.test(new TextDecoder().decode(chunks.find((c) => c.type === 'iTXt')?.data || new Uint8Array()))) fail('contact sheet carries no roll XMP');
+  await checkContactSheetWork(evaluate, fail, { pageId: 'a4', layoutId: '35mm' });
+  await watchContactSheetWork(evaluate);
   await evaluate(`(() => { document.getElementById('contactSheetPage').value = 'letter'; document.getElementById('contactSheetSprockets').checked = false; document.getElementById('exportContactSheetBtn').click(); })()`);
   const letter = await takeDownload(evaluate, waitFor, 'letter contact sheet captured');
   const letterSize = pngSize(letter.bytes);
   if (letterSize.width !== 2550 || letterSize.height !== 3300) fail('Letter contact sheet has the wrong size: ' + JSON.stringify(letterSize));
+  await checkContactSheetWork(evaluate, fail, { pageId: 'letter', layoutId: '35mm' });
   await wait(300);
   console.log('ok: the contact sheet renders the selection at A4 and Letter 300 dpi with the roll header and XMP');
 }
