@@ -32,7 +32,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     import { writeDesktopBlob } from './desktopExportWriter.js';
     import { normalizeAngleDegrees, applyRotationToImageData, mirrorImageDataHorizontal, applyGeometryChainToImageData, rotatedDimensions, sanitizeCropRect, planGeometry, renderGeometry, geometryCounters } from './imageGeometry.js';
     import { createGeometryPool, yieldToEventLoop } from './geometryPool.js';
-    import { analyzeFrameInWorker, readFilmEdgeInWorker, createAutoFrameWorkerPool, warmUpAutoFrameWorker } from './autoFrameWorkerClient.js';
+    import { analyzeFrameInWorker, readFilmEdgeInWorker, createAutoFrameWorkerPool, warmUpAutoFrameWorker, runAnalysisInWorker } from './autoFrameWorkerClient.js';
     import { detectFrameWithFallback } from './autoFrameExecution.js';
     import { importConversionKey } from './importDetection.js';
     import { createAnalysisSampleStore } from './analysisSampleStore.js';
@@ -40,13 +40,14 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     import { AUTO_FRAME_FORMAT_RATIOS, AUTO_FRAME_DEFAULT_120_FORMATS, canAutoApplyImportFrame } from './autoFrameFormats.js';
     import { DEFAULT_CROP_RATIO_CHOICE, findCropRatioPreset, parseCropRatioChoice, serializeCropRatioChoice, fitRectToRatio, resizeRectWithRatio, drawRectWithRatio, preferredCropOrientation, flipOrientation } from './cropRatio.js';
     import { imageAreaFromDetection, resolveAnalysisRegion, analysisPixelBounds, imageAreaFromWorkingRect, sampleAnalysisArea } from './analysisRegion.js';
-    import { detectCropImageArea, workingPointsToBase, isSameAnalysisFrame } from './cropColorAnalysis.js';
+    import { buildCropDetectionInput, detectCropAreaInRegion, workingPointsToBase, isSameAnalysisFrame } from './cropColorAnalysis.js';
     import { pickStudioColors, mergeStudioColors, createStudioThumbnail } from './studioSettings.js';
     import {
       analyzeExpiredFilm, defaultExpiredRescueParams, sanitizeExpiredRescueParams, sanitizeExpiredAnalysis,
-      describeExpiredAnalysis, fitExpiredSpatial, buildExpiredSpatialStage, EXPIRED_RESCUE_DEFAULTS, EXPIRED_RESCUE_KEYS
+      describeExpiredAnalysis, EXPIRED_RESCUE_DEFAULTS, EXPIRED_RESCUE_KEYS
     } from '../pipeline/expiredRescue.js';
-    import { measureExpiredSpatialMaps } from './expiredRescueOpenCv.js';
+    import { sampleExpiredSpatialInputSliced, measureExpiredSpatialMapsFromSample, expiredAnalysisFromMaps } from './expiredRescueOpenCv.js';
+    import { createOpenCvTaskRunner, cropDetectionMessage, expiredSpatialMessage, alignmentMessage, alignAndWarp } from './openCvAnalysisTasks.js';
     import { readFilmEdge, sanitizeFilmEdgeForSettings, formatFilmEdgeFrames } from './filmEdgeReader.js';
     import { loadDxFilmTable, describeDxFilm, shortFilmName } from './dxFilmDatabase.js';
     import { groupAutomaticRollFrames, aggregateRollAnalysis, measureNegativeMean, sanitizeRollFrameForSettings, rollFrameExposureUnits } from './rollAnalysis.js';
@@ -56,7 +57,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     import { createRepairStamps, sameRepairStrokes, captureDustPass, dustPassMatches, restoreDustPass } from './repairReuse.js';
     import { paperProfiles, paperIdsForFilmKind, normalizePaperId, normalizeToningId } from '../silvercore/engine/PaperProfiles.js';
     import { buildFlatFieldMap, scoreBlankFrame } from './flatField.js';
-    import { estimateAlignment, warpImageData } from './imageAlignment.js';
+    import { alignmentSide, sampleAlignmentGray } from './imageAlignment.js';
     import { collectPairs, fitLook, sanitizeLookForSettings } from './labMatch.js';
     import { toImage16 } from './multiShot.js';
     import { createMultiShotMergeJob, createMultiShotProgress, multiShotFitsBudget } from './multiShotWorkerClient.js';
@@ -197,6 +198,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // 暗室 UI に一本化。古い workspace パラメーターで別画面へ分岐しない。
     let studioAutoFrameRunning = false;
     let studioWorkspace = null;
+    // Apply Crop's pending crop-area detection (#245; see startCropDetection).
+    // Declared before any init-time code can reach pushUndo or restoreSnapshot.
+    let cropDetection = null;
+    const cropDetectionStats = { started: 0, hits: 0, misses: 0, stale: 0, reconversions: 0, conversions: 0 };
     // Full-resolution renders run in a worker and no longer block interactive
     // preview reprocessing, so they can start soon after the user pauses; a
     // render made stale by further input is discarded and rescheduled.
@@ -213,6 +218,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // dump as if it identified the running build.
     const BUILD_ID = (typeof __BUILD_ID__ === 'string' && __BUILD_ID__) || 'dev';
     const ensureOpenCvReady = createOpenCvLoader([opencvScriptUrl]);
+    // Crop-area detection, the expired fog surface and lab match run their
+    // OpenCV half in the warm auto-frame worker; the page loads OpenCV only
+    // when that request fails (#245, openCvAnalysisTasks.js).
+    const runOpenCvTask = createOpenCvTaskRunner({ runInWorker: runAnalysisInWorker, ensureOpenCvReady });
     const AUTO_FRAME_MAX_SIDE = 1600;
     const AUTO_FRAME_SCORE_WEIGHTS = {
       area: 0.18,
@@ -2897,8 +2906,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       cancelPendingTimers();
       coreReprocessToken += 1;
       abortSupersededFullResolutionConversion();
-      // A pending geometry build belongs to the state being replaced.
+      // A pending geometry build belongs to the state being replaced, and so
+      // does a pending crop-area detection (undo, redo).
       cancelGeometryJob();
+      cancelCropDetection();
 
       // Restore Category A
       const s = snapshot.settings;
@@ -3153,7 +3164,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     function pushUndo(label) {
       noteManualEdit(label);
       commitUndoSnapshot(captureSnapshot(label));
-      if (['crop', 'rotation', 'mirror', 'autoFrame', 'restoreFullFrame'].includes(label)) state.semanticMap = null;
+      if (['crop', 'rotation', 'mirror', 'autoFrame', 'restoreFullFrame'].includes(label)) {
+        state.semanticMap = null;
+        // A new frame (or a second Apply) ends a pending crop-area detection.
+        cancelCropDetection();
+      }
     }
 
     // A dust-brush stroke: the entry holds the bytes it changed (see
@@ -7105,6 +7120,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     }
 
     async function ensureFullResolutionReadyForExport({ reason = 'export' } = {}) {
+      // A pending crop-area detection may still change the analysis area and
+      // white balance (a hit converts again).
+      await settlePendingCropDetection();
       // Export reads the planes of the current geometry.
       await whenGeometrySettled();
       // Crop/analysis confirmation also runs processNegative directly. Its
@@ -7309,6 +7327,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     async function processNegative({ quiet = false, automatic = true, provisional = false } = {}) {
       if (processNegativeInFlight) return processNegativeInFlight;
 
+      // A crop-area hit converts again only when a conversion read the miss
+      // outcome Apply installed (applyCropDetectionOutcome).
+      noteConversionStarted();
       const processingGeneration = coreReprocessGeneration;
       const promise = (async () => {
         const generation = loadGeneration;
@@ -9121,6 +9142,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // can supersede it; its busy lock belongs to the dropped tail.
       const supersedesTail = Boolean(document.body.dataset.studioDetecting);
       invalidatePhotoActivation();
+      cancelCropDetection();
       // Direct imports/drops supersede any pending quiet file-list activation.
       if (!quiet && (state.photoSwitchTarget || supersedesTail)) {
         cancelProvisionalFrame();
@@ -11178,7 +11200,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     // Exactly downsampleImageDataForMaxPixels(the whole working frame,
     // maxPixels), without building that frame when it is not kept.
-    function renderFrameSample(maxPixels, { base = state.loadedBaseImageData, rotationAngle = state.rotationAngle, mirrored = state.mirrored } = {}) {
+    // `with16: false` leaves the 16-bit plane out (same 8-bit bytes). With
+    // `fullFrame: false` it returns null instead of rotating a whole 8-bit
+    // frame on this thread (the only case the core cannot sample).
+    function renderFrameSample(maxPixels, { base = state.loadedBaseImageData, rotationAngle = state.rotationAngle, mirrored = state.mirrored, with16 = true, fullFrame = true } = {}) {
       const frame = state.originalImageData;
       // The installed working frame, when it has pixels and is this geometry,
       // is what HEAD sampled (for 8-bit sources it may be the Auto Frame
@@ -11187,16 +11212,17 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         && effectiveGeometryAngle(rotationAngle) === effectiveGeometryAngle(state.rotationAngle)
         && Boolean(mirrored) === Boolean(state.mirrored);
       if (frame && !isGeometryFrame(frame) && !frame.released && (current || !base)) {
-        return downsampleImageDataForMaxPixels(frame, maxPixels) || frame;
+        return downsampleImageDataForMaxPixels(frame, maxPixels, { with16 }) || frame;
       }
       const key = base ? geometryKeyFor(base, { rotationAngle, mirrored }) : null;
       if (!key) return null;
       const total = key.frameWidth * key.frameHeight;
       const step = total > maxPixels ? Math.ceil(Math.sqrt(total / maxPixels)) : 1;
       const plan = geometryPlanFor(base, key, { crop: null, step });
-      if (plan) return renderGeometry(base, plan);
+      if (plan) return renderGeometry(base, plan, { with16 });
+      if (!fullFrame) return null;
       const full = renderGeometryFrame(base, key);
-      return downsampleImageDataForMaxPixels(full, maxPixels) || full;
+      return downsampleImageDataForMaxPixels(full, maxPixels, { with16 }) || full;
     }
 
     // The whole working frame's pixels for the rare reader that needs them
@@ -12029,6 +12055,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       };
     }
 
+    // The draft's coordinate space: the rotated preview it is drawn on.
+    function getCropDraftSize(draft = state.cropDraft) {
+      const size = draft?.rotatedImageData;
+      return size ? { width: size.width, height: size.height } : null;
+    }
+
     function getCropDraftTotalAngle() {
       const draft = state.cropDraft;
       if (!draft) return 0;
@@ -12105,6 +12137,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // The draft shows the whole frame: a pending geometry build finishes
     // first. Otherwise the draft opens in the click's own task, as before.
     function beginCropMode(options = {}) {
+      // Apply's crop-area detection runs in the auto-frame worker.
+      void warmUpAutoFrameWorker();
       if (state.geometryPending) return whenGeometrySettled().then(() => openCropMode(options));
       openCropMode(options);
       return Promise.resolve();
@@ -12687,101 +12721,241 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       exitCropMode({ restore: true });
     });
 
+    // ===========================================
+    // Apply Crop's crop-area re-detection (#245)
+    // ===========================================
+    // When the applied frame no longer matches the stored image area, Apply
+    // looks for the image window inside the new crop again. The outcome
+    // feeds the conversion: a hit sets the analysis area and lets auto white
+    // balance run, a miss sets analysisNeedsReview, which skips it. On a roll
+    // where the detector misses (most M11 frames) that search held every
+    // Apply for ~1 s before the positive. Apply now converts at once with the
+    // miss outcome, which is the exact result when detection misses, while
+    // the OpenCV search runs in the auto-frame worker. A hit completes the
+    // diagnostics Apply installed and converts once more, as HEAD's single
+    // pass would have. The expired rescue measures once per source, whatever
+    // the area, so with the rescue on Apply still waits for the detection.
+    //
+    // Undo, redo, a new geometry edit or a second Apply, a new load and a
+    // photo switch end the pending detection. Everything that reads or copies
+    // the photo's settings for output awaits settlePendingCropDetection().
+    const CROP_DETECTION_TARGETS = Object.entries(AUTO_FRAME_FORMAT_RATIOS).map(([key, ratio]) => ({ key, ratio }));
+
+    function hasPendingCropDetection() {
+      return Boolean(cropDetection);
+    }
+
+    function noteConversionStarted() {
+      cropDetectionStats.conversions++;
+    }
+
+    function cancelCropDetection() {
+      const detection = cropDetection;
+      if (!detection) return;
+      cropDetection = null;
+      detection.finish();
+    }
+
+    function sameCropRect(a, b) {
+      if (!a || !b) return !a && !b;
+      return a.left === b.left && a.top === b.top && a.width === b.width && a.height === b.height;
+    }
+
+    // Current while it is the pending detection of this photo and the frame
+    // and diagnostics Apply installed are still in place.
+    function isCurrentCropDetection(detection) {
+      return cropDetection === detection && isCurrentLoad(detection.generation)
+        && state.autoFrame.lastDiagnostics === detection.meta
+        && effectiveGeometryAngle(state.rotationAngle) === effectiveGeometryAngle(detection.geometry.rotationAngle)
+        && Boolean(state.mirrored) === Boolean(detection.geometry.mirrored)
+        && sameCropRect(state.cropRegion, detection.geometry.cropRegion);
+    }
+
+    // Resolves once no crop-area detection is pending, a hit's conversion
+    // included.
+    async function settlePendingCropDetection() {
+      while (cropDetection) await cropDetection.settled;
+    }
+
+    // Starts the detection for the frame Apply has just set up (state holds
+    // its geometry). `meta` is the diagnostics object Apply installed with
+    // the miss outcome; a hit completes it in place.
+    function startCropDetection({ meta, base, frame, cropRegion, ready }) {
+      cancelCropDetection();
+      let resolveSettled;
+      const detection = {
+        meta, base,
+        geometry: { rotationAngle: state.rotationAngle, mirrored: state.mirrored, cropRegion: state.cropRegion ? { ...state.cropRegion } : null },
+        generation: loadGeneration,
+        conversions: cropDetectionStats.conversions,
+        settled: new Promise(resolve => { resolveSettled = resolve; })
+      };
+      detection.finish = () => {
+        if (cropDetection === detection) cropDetection = null;
+        resolveSettled();
+      };
+      cropDetection = detection;
+      cropDetectionStats.started++;
+      detection.outcome = detectCropArea(detection, frame, cropRegion, ready).catch(error => {
+        console.warn('Crop analysis detection failed; keeping the previous color reference:', error);
+        return null;
+      });
+      detection.done = detection.outcome
+        .then(points => applyCropDetectionOutcome(detection, points))
+        .catch(error => console.error('Crop analysis update failed:', error))
+        .finally(() => detection.finish());
+      return detection;
+    }
+
+    async function detectCropArea(detection, frame, cropRegion, ready) {
+      // The <=1 MP sample of the frame Apply installs, 8-bit only: built from
+      // the base by the geometry core, exact without waiting for the pool. An
+      // 8-bit frame at a non-right angle (the canvas rotation) is sampled
+      // once the pool has installed it.
+      let preview = renderFrameSample(1000000, { base: detection.base, ...detection.geometry, with16: false, fullFrame: false });
+      if (!preview) {
+        if (!(await ready) || !isCurrentCropDetection(detection)) return null;
+        preview = renderFrameSample(1000000, { with16: false });
+      }
+      if (!preview || !isCurrentCropDetection(detection)) return null;
+      return runOpenCvTask('detect-crop-area', {
+        build: () => buildCropDetectionInput(frame, cropRegion, { preview }),
+        toMessage: input => cropDetectionMessage(input, CROP_DETECTION_TARGETS),
+        fromWorker: result => result?.points || null,
+        onMainThread: input => detectCropAreaInRegion(input, CROP_DETECTION_TARGETS)
+      });
+    }
+
+    async function applyCropDetectionOutcome(detection, points) {
+      if (!isCurrentCropDetection(detection)) { cropDetectionStats.stale++; return; }
+      // A miss: the conversion Apply started already used the miss outcome.
+      if (!points) { cropDetectionStats.misses++; return; }
+      // The diagnostics change only between conversions: one still running
+      // read the miss outcome and finishes first.
+      while (processNegativeInFlight) {
+        await processNegativeInFlight;
+        if (!isCurrentCropDetection(detection)) { cropDetectionStats.stale++; return; }
+      }
+      cropDetectionStats.hits++;
+      const { meta } = detection;
+      meta.imageArea = workingPointsToBase(points, detection.geometry, detection.base);
+      meta.analysisNeedsReview = false;
+      meta.frameIncomplete = false;
+      meta.method = 'manual-image-window';
+      markCurrentFileDirty();
+      // A conversion that has not started yet reads the hit (one pass). One
+      // that ran with the miss outcome is redone in full: the analysis area,
+      // the colour sample and auto white balance all follow the image area.
+      if (state.currentStep >= 3 && cropDetectionStats.conversions > detection.conversions) {
+        cropDetectionStats.reconversions++;
+        await processNegative({ quiet: true });
+      }
+    }
+
     applyCropBtn.addEventListener('click', async () => {
       const draft = state.cropDraft;
       if (!draft || !draft.sourceImageData || studioAutoFrameRunning) return;
 
+      // What is applied is read now, so an input event during the paint
+      // below cannot change it.
       const angle = getCropDraftTotalAngle();
-      const previewRotatedImageData = draft.rotatedImageData;
-      if (!previewRotatedImageData) return;
-      // The draft is the current frame rotated by the draft angle (canvas D).
-      // The result is derived from the base by the total angle (#244), so the
-      // drawn rectangle is translated from D onto that frame F.
-      const draftFrame = rotatedDimensions(draft.sourceImageData.width, draft.sourceImageData.height, angle);
-      const nextGeometry = { rotationAngle: normalizeAngleDegrees((state.rotationAngle || 0) + storedRotationDelta(angle)), mirrored: state.mirrored };
-      const base = state.loadedBaseImageData || draft.sourceImageData;
-      const frame = geometryFrameSize(base, nextGeometry.rotationAngle);
-      const cropRegion = mapDraftRectToFrame(scaleCropRect(
-        draft.rect,
-        draftFrame.width / previewRotatedImageData.width,
-        draftFrame.height / previewRotatedImageData.height
-      ), draftFrame, frame);
-      if (!cropRegion) return;
-
+      const rect = draft.rect ? { ...draft.rect } : null;
+      const draftSize = getCropDraftSize(draft);
       const generation = loadGeneration;
-      let nextMeta = state.autoFrame.lastDiagnostics;
-      {
-        studioAutoFrameRunning = true;
-        document.body.dataset.studioBusy = 'true';
-        applyCropBtn.disabled = cancelCropBtn.disabled = true;
+      const overlay = getLoadingOverlay();
+      let busy = true;
+      let handedOver = false;
+      const releaseBusy = () => {
+        if (!busy) return;
+        busy = false;
+        studioAutoFrameRunning = false;
+        delete document.body.dataset.studioBusy;
+        applyCropBtn.disabled = cancelCropBtn.disabled = false;
         studioWorkspace?.sync();
-        try {
-          if (processNegativeInFlight) await processNegativeInFlight;
-          const overlay = getLoadingOverlay();
-          await overlay.show({ title: studioWorkspace.text('detectingFrame'), indeterminate: true });
-          await new Promise(resolve => requestAnimationFrame(resolve));
-          const selectedArea = imageAreaFromWorkingRect(cropRegion, nextGeometry, base);
-          nextMeta = structuredClone(state.autoFrame.lastDiagnostics || {});
-          // 不確かな再検出では前回の解析範囲・WB を維持する。
-          nextMeta.analysisArea ||= imageAreaFromWorkingRect(state.cropRegion || { left: 0, top: 0, width: state.originalImageData.width, height: state.originalImageData.height }, state, base);
-          if (draft.analysisOnly) {
-            nextMeta.imageArea = selectedArea;
-            nextMeta.analysisNeedsReview = false;
-            nextMeta.frameIncomplete = false;
-            nextMeta.method = 'manual-analysis-area';
-          } else if (!isSameAnalysisFrame(nextMeta.imageArea, selectedArea)) {
-            let points = null;
-            try {
-              if (await ensureOpenCvReady()) {
-                // The detector looks at a <=1 MP sample of the new frame; build
-                // exactly that sample instead of the whole rotated frame.
-                const preview = renderFrameSample(1000000, { base, ...nextGeometry });
-                points = detectCropImageArea(frame, cropRegion, Object.entries(AUTO_FRAME_FORMAT_RATIOS).map(([key, ratio]) => ({ key, ratio })), { preview });
-              }
-            } catch (error) { console.warn('Crop analysis detection failed; keeping the previous color reference:', error); }
-            if (points) {
-              nextMeta.imageArea = workingPointsToBase(points, nextGeometry, base);
-              nextMeta.analysisNeedsReview = false;
-              nextMeta.frameIncomplete = false;
-              nextMeta.method = 'manual-image-window';
-            } else nextMeta.analysisNeedsReview = true;
+      };
+      studioAutoFrameRunning = true;
+      document.body.dataset.studioBusy = 'true';
+      applyCropBtn.disabled = cancelCropBtn.disabled = true;
+      studioWorkspace?.sync();
+      try {
+        if (processNegativeInFlight) await processNegativeInFlight;
+        // Feedback first: the overlay is opaque in the next frame, and none of
+        // the work below starts before that frame is painted.
+        await overlay.show({ title: studioWorkspace.text('detectingFrame'), indeterminate: true, immediate: true });
+        await yieldToPaint();
+        if (!isCurrentLoad(generation) || state.cropDraft !== draft || !rect || !draftSize) return;
+
+        // The draft is the current frame rotated by the draft angle (canvas D).
+        // The result is derived from the base by the total angle (#244), so the
+        // drawn rectangle is translated from D onto that frame F.
+        const draftFrame = rotatedDimensions(draft.sourceImageData.width, draft.sourceImageData.height, angle);
+        const nextGeometry = { rotationAngle: normalizeAngleDegrees((state.rotationAngle || 0) + storedRotationDelta(angle)), mirrored: state.mirrored };
+        const base = state.loadedBaseImageData || draft.sourceImageData;
+        const frame = geometryFrameSize(base, nextGeometry.rotationAngle);
+        const cropRegion = mapDraftRectToFrame(scaleCropRect(
+          rect,
+          draftFrame.width / draftSize.width,
+          draftFrame.height / draftSize.height
+        ), draftFrame, frame);
+        if (!cropRegion) return;
+
+        const selectedArea = imageAreaFromWorkingRect(cropRegion, nextGeometry, base);
+        const nextMeta = structuredClone(state.autoFrame.lastDiagnostics || {});
+        // 不確かな再検出では前回の解析範囲・WB を維持する。
+        nextMeta.analysisArea ||= imageAreaFromWorkingRect(state.cropRegion || { left: 0, top: 0, width: state.originalImageData.width, height: state.originalImageData.height }, state, base);
+        let detect = false;
+        if (draft.analysisOnly) {
+          nextMeta.imageArea = selectedArea;
+          nextMeta.analysisNeedsReview = false;
+          nextMeta.frameIncomplete = false;
+          nextMeta.method = 'manual-analysis-area';
+        } else if (!isSameAnalysisFrame(nextMeta.imageArea, selectedArea)) {
+          // The miss outcome until the detection says otherwise.
+          nextMeta.analysisNeedsReview = true;
+          detect = true;
+        }
+        nextMeta.importAuto = true;
+
+        pushUndo('crop');
+        state.autoFrame.lastDiagnostics = nextMeta;
+        let ready = Promise.resolve(true);
+        if (!draft.analysisOnly) {
+          state.rotationAngle = nextGeometry.rotationAngle;
+          // Only the crop window is resampled, in the pool.
+          ready = applyGeometryFromBase({ cropRegion });
+        }
+        invalidateProcessedPipelineState();
+        resetZoomPan();
+        // With the crop in place this reads no pixels.
+        setStep2Mode(suggestStep2Mode());
+        markCurrentFileDirty();
+        exitCropMode({ restore: false });
+        const detection = detect ? startCropDetection({ meta: nextMeta, base, frame, cropRegion, ready }) : null;
+
+        await afterGeometry(ready, async isCurrent => {
+          // With the rescue on, the conversion waits for the detection, as
+          // before, but after the paint and off the main thread.
+          if (detection && state.expiredEnabled) {
+            await detection.settled;
+            if (!isCurrent()) return;
           }
-          nextMeta.importAuto = true;
-        } finally {
-          getLoadingOverlay().hide();
-          studioAutoFrameRunning = false;
-          delete document.body.dataset.studioBusy;
-          applyCropBtn.disabled = cancelCropBtn.disabled = false;
-          studioWorkspace?.sync();
-        }
-        if (!isCurrentLoad(generation) || state.cropDraft !== draft) return;
+          if (state.currentStep >= 3) {
+            // The conversion's own overlay takes over within this task.
+            handedOver = true;
+            releaseBusy();
+            overlay.hide();
+            await convertAfterGeometryEdit(isCurrent);
+          } else {
+            const sourceImageData = state.croppedImageData || state.originalImageData;
+            displayNegative(sourceImageData);
+            updateCanvasVisibility();
+            renderHistogram(sourceImageData);
+          }
+        });
+      } finally {
+        releaseBusy();
+        if (!handedOver) overlay.hide();
       }
-
-      pushUndo('crop');
-      state.autoFrame.lastDiagnostics = nextMeta;
-      let ready = Promise.resolve(true);
-      if (!draft.analysisOnly) {
-        state.rotationAngle = nextGeometry.rotationAngle;
-        // Only the crop window is resampled, in the pool.
-        ready = applyGeometryFromBase({ cropRegion });
-      }
-      invalidateProcessedPipelineState();
-      resetZoomPan();
-      // With the crop in place this reads no pixels.
-      setStep2Mode(suggestStep2Mode());
-      markCurrentFileDirty();
-      exitCropMode({ restore: false });
-
-      await afterGeometry(ready, async isCurrent => {
-        if (state.currentStep >= 3) {
-          await convertAfterGeometryEdit(isCurrent);
-        } else {
-          const sourceImageData = state.croppedImageData || state.originalImageData;
-          displayNegative(sourceImageData);
-          updateCanvasVisibility();
-          renderHistogram(sourceImageData);
-        }
-      });
     });
 
     // Convert button (skip to step 2)
@@ -12937,6 +13111,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     function closePhotoSession() {
       if (isDesktopBatchExportLocked()) return;
       ++loadGeneration;
+      cancelCropDetection();
       invalidatePhotoActivation();
       photoSessions.clear();
       photoPreviews.clear();
@@ -13504,6 +13679,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // background colour estimate must not replace the recipe mid-encode.
       manualEditRevision++;
       notifyReviewExport([currentItem].filter(Boolean));
+      // The settings are persisted below: a pending crop-area hit first.
+      await settlePendingCropDetection();
       // The linear DNG reads the geometry planes directly.
       await whenGeometrySettled();
       if (processNegativeInFlight) await processNegativeInFlight;
@@ -14889,6 +15066,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     }
 
     async function exportBatchAsZip() {
+      // The open photo's settings are read for its file.
+      await settlePendingCropDetection();
       notifyReviewExport();
       const selectedFiles = getSelectedFiles();
       if (selectedFiles.length < 1) return;
@@ -15081,6 +15260,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     }
 
     async function exportBatchIndividually() {
+      await settlePendingCropDetection();
       notifyReviewExport();
       if (isTauriDesktop()) {
         await exportBatchIndividuallyDesktop();
@@ -15263,6 +15443,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // photo being left is remembered only once it is back.
       if (corePreviewRetained || corePreviewCommit) {
         await settleCorePreviewPlane();
+        return switchToFile(index);
+      }
+      // The photo being left is persisted below with what a pending
+      // crop-area detection decides (a hit converts again): wait, do not
+      // cancel.
+      if (hasPendingCropDetection()) {
+        await settlePendingCropDetection();
         return switchToFile(index);
       }
       if (state.cropping) exitCropMode({ restore: false });
@@ -15794,11 +15981,14 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       saveCurrentFileSettings();
     });
 
-    document.getElementById('applyToSelectedBtn').addEventListener('click', () => {
+    // Both copy the open photo's settings: a pending crop-area hit first.
+    document.getElementById('applyToSelectedBtn').addEventListener('click', async () => {
+      await settlePendingCropDetection();
       applyCurrentSettingsToSelected();
     });
 
-    document.getElementById('setRollReferenceBtn').addEventListener('click', () => {
+    document.getElementById('setRollReferenceBtn').addEventListener('click', async () => {
+      await settlePendingCropDetection();
       setRollReferenceFromCurrent();
     });
 
@@ -17611,32 +17801,33 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     // OpenCV's part of the measurement: the fog surface and the local mean
     // across the frame, then the curves measured on the flattened frame.
-    function measureExpiredAnalysisWithSpatial(processed, settings, sourceImageData) {
+    // The area-averaged sample is taken here in slices of about 12 ms (a
+    // full-resolution 60 MP render takes ~0.2 s in one loop), the fog surface
+    // is measured in the auto-frame worker (#245), and analyzeExpiredFilm
+    // runs here. Resolves null when superseded (`isCurrent`) or when no
+    // surface fits.
+    async function measureExpiredAnalysisWithSpatial(processed, settings, sourceImageData, { pause = yieldToPaint, isCurrent = () => true } = {}) {
       const sample = expiredAnalysisSample(processed, settings, sourceImageData);
-      const maps = measureExpiredSpatialMaps(sample.image, { ...sample.options, placement: sample.placement });
-      const spatial = maps ? fitExpiredSpatial(maps) : null;
-      if (!spatial) return null;
-      // Local contrast does not move the histogram's floor; leave it out here.
-      const stage = buildExpiredSpatialStage({
-        ...sanitizeExpiredRescueParams(settings),
-        expiredEnabled: true,
-        expiredLocalContrast: 0,
-        expiredAnalysis: { spatial }
+      const options = { ...sample.options, placement: sample.placement };
+      const maps = await runOpenCvTask('expired-spatial-maps', {
+        build: () => sampleExpiredSpatialInputSliced(sample.image, options, { pause, isCurrent }),
+        toMessage: expiredSpatialMessage,
+        fromWorker: result => result?.maps || null,
+        onMainThread: measureExpiredSpatialMapsFromSample
       });
-      const analysis = analyzeExpiredFilm(sample.image, { ...sample.options, anchors: settings.semanticMap, placement: sample.placement, spatial: stage });
-      return analysis ? { ...analysis, spatial } : null;
+      if (!isCurrent()) return null;
+      return expiredAnalysisFromMaps(maps, sample, settings);
     }
 
-    // Batch exports measure a never-opened frame in one go: with OpenCV when
-    // it loads, the global measurement alone otherwise.
+    // Batch exports measure a never-opened frame in one go: with OpenCV (in
+    // the worker, or the page's when the worker fails), the global
+    // measurement alone when neither can run it.
     async function measureExpiredAnalysisForExport(processed, settings, sourceImageData) {
-      if (await ensureOpenCvReady()) {
-        try {
-          const analysis = measureExpiredAnalysisWithSpatial(processed, settings, sourceImageData);
-          if (analysis) return analysis;
-        } catch (error) {
-          console.warn('Expired film: OpenCV measurement failed', error);
-        }
+      try {
+        const analysis = await measureExpiredAnalysisWithSpatial(processed, settings, sourceImageData, { pause: yieldTaskForJob });
+        if (analysis) return analysis;
+      } catch (error) {
+        console.warn('Expired film: OpenCV measurement failed', error);
       }
       const sample = expiredAnalysisSample(processed, settings, sourceImageData);
       return analyzeExpiredFilm(sample.image, { ...sample.options, anchors: settings.semanticMap, placement: sample.placement });
@@ -17645,30 +17836,32 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     let expiredOpenCvState = 'idle';
 
     // Phase two of the interactive measurement. The global result is on
-    // screen immediately; OpenCV loads (once per session) and the frame is
-    // re-measured with its fog surface, replacing the analysis in place.
+    // screen immediately; the frame is then re-measured with its fog surface
+    // (sampled in slices here, measured in the auto-frame worker), replacing
+    // the analysis in place. A newer photo or conversion source ends it
+    // between slices.
     async function runExpiredSpatialAnalysis() {
       const key = expiredSourceKey();
       const generation = loadGeneration;
+      const current = state.processedImageData;
+      if (!current || !state.expiredEnabled || !state.expiredAnalysis) return false;
       if (expiredOpenCvState !== 'ready') {
         expiredOpenCvState = 'loading';
         updateExpiredRescueUI();
       }
-      const ready = await ensureOpenCvReady();
-      expiredOpenCvState = ready ? 'ready' : 'failed';
-      if (!ready) {
-        updateExpiredRescueUI();
-        return false;
-      }
-      const current = state.processedImageData;
-      if (!current || !isCurrentLoad(generation) || key !== expiredSourceKey() || !state.expiredEnabled || !state.expiredAnalysis) return false;
+      const isCurrent = () => isCurrentLoad(generation) && key === expiredSourceKey();
       try {
-        const analysis = measureExpiredAnalysisWithSpatial(
+        const analysis = await measureExpiredAnalysisWithSpatial(
           current,
           { ...state, autoFrameMeta: state.autoFrame.lastDiagnostics },
-          state.loadedBaseImageData || state.originalImageData
+          state.loadedBaseImageData || state.originalImageData,
+          { isCurrent }
         );
-        if (!analysis || key !== expiredSourceKey() || !isCurrentLoad(generation)) return false;
+        expiredOpenCvState = 'ready';
+        if (!analysis || !isCurrent() || !state.expiredEnabled || !state.expiredAnalysis) {
+          updateExpiredRescueUI();
+          return false;
+        }
         // Brightness and contrast that still hold the first phase's measured
         // values follow the new measurement; values the user moved stay.
         const previousAuto = defaultExpiredRescueParams(state.expiredAnalysis);
@@ -17682,7 +17875,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         scheduleFullUpdate();
         return true;
       } catch (error) {
-        console.warn('Expired film: OpenCV measurement failed', error);
+        if (/OpenCV is not available/.test(String(error?.message))) expiredOpenCvState = 'failed';
+        else console.warn('Expired film: OpenCV measurement failed', error);
         updateExpiredRescueUI();
         return false;
       }
@@ -18030,14 +18224,32 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           void appAlert(getLocalizedText('labMatchFailed', 'The reference image could not be read.'));
           return;
         }
-        let alignment = null;
-        if (await ensureOpenCvReady()) {
-          try { alignment = estimateAlignment(ours, reference, { maxSide: 1000 }); }
-          catch (error) { console.warn('Lab match alignment failed:', error); }
+        // ORB matching, RANSAC and the warp run in the auto-frame worker on
+        // two grey samples and a copy of the reference (#245).
+        let alignment = null; let warped = null;
+        try {
+          const side = alignmentSide(ours, reference, 1000);
+          const result = await runOpenCvTask('estimate-alignment', {
+            build: () => ({
+              reference: sampleAlignmentGray(ours, side),
+              moving: sampleAlignmentGray(reference, side),
+              warp: { image: reference, width: ours.width, height: ours.height }
+            }),
+            toMessage: input => alignmentMessage(input.reference, input.moving, { warp: input.warp }),
+            fromWorker: reply => ({
+              ...reply,
+              warped: reply.warped ? new ImageData(reply.warped.data, reply.warped.width, reply.warped.height) : null
+            }),
+            onMainThread: alignAndWarp
+          });
+          if (result.error) console.warn('Lab match alignment failed:', result.error);
+          alignment = result.alignment;
+          warped = result.warped;
+        } catch (error) {
+          if (!/OpenCV is not available/.test(String(error?.message))) throw error;
         }
         let pairs; let aligned = false;
         if (alignment) {
-          const warped = warpImageData(reference, alignment.homography, ours.width, ours.height);
           pairs = collectPairs(ours, warped, { step: 2 });
           aligned = pairs.count >= 400;
         }
@@ -18738,6 +18950,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // before drawing; TIFF when that is the export format, otherwise PNG.
     async function exportContactSheet() {
       if (isDesktopBatchExportLocked()) return;
+      await settlePendingCropDetection();
       const selected = getSelectedFiles();
       if (!selected.length) return;
       const layoutId = normalizeLayoutId(document.getElementById('contactSheetLayout')?.value);
@@ -18918,6 +19131,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     async function saveProject() {
       if (!state.fileQueue.length || isDesktopBatchExportLocked()) return;
+      await settlePendingCropDetection();
       for (const item of state.fileQueue) await queueItemHash(item);
       const project = buildCurrentProject({ persist: true });
       const blob = new Blob([serializeRollProject(project)], { type: 'application/json' });
@@ -21187,7 +21401,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           markCurrentFileDirty();
           scheduleCoreReprocess({ full: false });
         },
-        onSync: () => {
+        onSync: async () => {
+          // The colours copied include white balance: a pending crop-area
+          // hit first.
+          await settlePendingCropDetection();
           if (state.currentStep < 3 || isDesktopBatchExportLocked()) return;
           const colors = pickStudioColors(state);
           const targets = state.fileQueue.filter(item => item.selected && item.file !== state.loadedFile);
@@ -21241,6 +21458,17 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         onOpenProject: () => { const input = document.getElementById('projectInput'); if (input) { input.value = ''; input.click(); } },
         onRestoreProject: () => { restoreRecoveredProject(); }
       });
+      // The tools whose OpenCV half runs in the auto-frame worker (#245)
+      // start it when they come into reach, hiding its cold boot after the
+      // 30 s idle release: colour correct on hover or focus, the Expired tab
+      // and the lab-match drawer on opening (crop mode in beginCropMode).
+      const warmAnalysisWorker = () => { void warmUpAutoFrameWorker(); };
+      const colorCorrectButton = document.getElementById('studioColorCorrect');
+      colorCorrectButton?.addEventListener('pointerenter', warmAnalysisWorker);
+      colorCorrectButton?.addEventListener('focus', warmAnalysisWorker);
+      document.getElementById('studioTab-expired')?.addEventListener('click', warmAnalysisWorker);
+      const labMatchDrawer = document.getElementById('studioLabMatch');
+      labMatchDrawer?.addEventListener('toggle', () => { if (labMatchDrawer.open) warmAnalysisWorker(); });
       void offerProjectRecovery();
       void checkInterruptedJobs();
       updateWorkflowUI();

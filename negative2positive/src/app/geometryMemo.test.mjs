@@ -260,7 +260,7 @@ const plain = value => JSON.parse(JSON.stringify(value));
 {
   const { applyCropHandlerSource } = await import('./geometryTestHarness.mjs');
   const { imageAreaFromWorkingRect } = await import('./analysisRegion.js');
-  const { isSameAnalysisFrame, workingPointsToBase } = await import('./cropColorAnalysis.js');
+  const { isSameAnalysisFrame, workingPointsToBase, buildCropDetectionInput } = await import('./cropColorAnalysis.js');
   const vm = await import('node:vm');
   const base = makeBase(90, 64, 21);
   for (const scenario of ['straighten', 'plain', 'analysis', 'mirrored']) {
@@ -275,8 +275,10 @@ const plain = value => JSON.parse(JSON.stringify(value));
       requestAnimationFrame: callback => setTimeout(callback, 0),
       studioWorkspace: { sync() {}, text: key => key },
       imageAreaFromWorkingRect, isSameAnalysisFrame, workingPointsToBase,
-      ensureOpenCvReady: async () => true, AUTO_FRAME_FORMAT_RATIOS: {},
-      detectCropImageArea: (image, crop, targets, options) => { detections.push({ image, crop, options }); return null; },
+      // The detection's input is built on the page; the OpenCV half (the
+      // worker) misses.
+      buildCropDetectionInput: (image, crop, options) => { detections.push({ image, crop, options }); return buildCropDetectionInput(image, crop, options); },
+      runOpenCvTask: async (type, task) => { await task.build(); return null; },
       exitCropMode: () => { h.state.cropping = false; h.state.cropDraft = null; }
     });
     vm.runInContext(applyCropHandlerSource(), c);
@@ -307,10 +309,14 @@ const plain = value => JSON.parse(JSON.stringify(value));
     assert.deepEqual(plain(h.state.cropRegion), plain(expectedCrop), `${scenario}: rectangle mapped onto the base-derived frame`);
     samePixels(h.state.croppedImageData, exportChain(base, settingsFor(h.state)), `${scenario}: planes equal the export chain`);
     assert.ok(h.state.originalImageData.__geometryFrame, `${scenario}: the rotated frame is not kept`);
-    // The crop-area detector got exactly the <=1 MP sample of the new frame.
+    // The crop-area detector got exactly the <=1 MP sample of the new frame
+    // (8-bit only: it never read the 16-bit plane).
     assert.equal(detections.length, 1);
     assert.deepEqual([detections[0].image.width, detections[0].image.height], [frame.width, frame.height]);
-    samePixels(detections[0].options.preview, imageDataOps.downsampleImageDataForMaxPixels(exportChain(base, { rotationAngle: total, mirrored }), 1_000_000), `${scenario}: detection sample`);
+    const expectedSample = imageDataOps.downsampleImageDataForMaxPixels(exportChain(base, { rotationAngle: total, mirrored }), 1_000_000);
+    assert.deepEqual([detections[0].options.preview.width, detections[0].options.preview.height], [expectedSample.width, expectedSample.height]);
+    assert.ok(Buffer.from(detections[0].options.preview.data.buffer).equals(Buffer.from(expectedSample.data.buffer)), `${scenario}: detection sample`);
+    assert.equal(detections[0].options.preview.__image16, undefined, `${scenario}: no 16-bit plane in the sample`);
     assert.equal(h.target.geometryDiagnostics.frameSyncReads, 0);
   }
 }

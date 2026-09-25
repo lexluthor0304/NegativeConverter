@@ -50,7 +50,7 @@ function fixture({ repairs = true, locked = false, large = false } = {}) {
     corePreviewCommitWanted: false, corePreviewCommitTimer: null, corePreviewSettleWaiters: [],
     isDesktopBatchExportLocked: () => locked,
     clearUndoHistory: noop, pushUndo: noop, exitCropMode: noop, exitBeforeAfter: noop,
-    cancelGeometryJob: noop, whenGeometrySettled: async () => true,
+    cancelGeometryJob: noop, whenGeometrySettled: async () => true, noteConversionStarted: noop,
     resetZoomPan: noop, updateMirrorButtonState: noop,
     invalidateSilverCoreCache: noop, resetFrontierGuideImageState: noop,
     displayNegative: noop, updateAutoFrameButtons: noop, markCurrentFileDirty: noop,

@@ -92,6 +92,7 @@ function fixture() {
     getInterpolatedText: (key, values, fallback) => fallback,
     applyDustResultToState: () => { state.processedImageData = state.dustRemoval.inpaintedImageData; },
     cancelPendingTimers: noop, cancelScheduledFullResolutionRender: noop, cancelGeometryJob: noop,
+    hasPendingCropDetection: () => false, settlePendingCropDetection: async () => {},
     geometryDiagnostics: { coldSessions: false },
     getLoadingOverlay: () => ({ hide: noop }), noteCoreReprocessSettled: noop,
     assertRepairCurrent: valid => { if (!valid()) throw new DOMException('Superseded', 'AbortError'); },
@@ -552,7 +553,7 @@ for (const locked of [false, true]) {
   let pickerOpened = 0, emptyListRefreshes = 0;
   Object.assign(c, {
     isDesktopBatchExportLocked: () => locked,
-    clearDustState: noop, clearUndoHistory: noop, clearProjectRecovery: noop,
+    clearDustState: noop, clearUndoHistory: noop, clearProjectRecovery: noop, cancelCropDetection: noop,
     exitCropMode: noop, exitBeforeAfter: noop, resetZoomPan: noop,
     composeDisplaySprocketFrame: { clear: noop },
     sprocketPreviewFrameCache: { key: 'old', sourceRef: f.base, metrics: {} },
