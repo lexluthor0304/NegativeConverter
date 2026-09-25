@@ -89,6 +89,19 @@ impl ExportStreams {
     pub fn take(&self, id: &str) -> Result<PendingExport, String> {
         self.0.lock().map_err(|_| "export state unavailable")?.remove(id).ok_or("unknown export".into())
     }
+
+    /// Drops every pending export and its staging file. A page that reloads
+    /// (a WebContent kill, a crash, a navigation) never finishes the streams
+    /// the previous page began; left alone they would refuse a resumed write
+    /// of the same frame and, four of them, every export (#241).
+    pub fn clear(&self) -> usize {
+        let drained: Vec<PendingExport> = {
+            let mut streams = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            streams.drain().map(|(_, stream)| stream).collect()
+        };
+        // Staging files are deleted outside the lock.
+        drained.len()
+    }
 }
 
 #[cfg(test)]
@@ -145,6 +158,30 @@ mod tests {
         assert!(streams.begin(&dir.join("0.png"), 0).is_err());
         drop(streams);
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn clear_drops_orphaned_streams_and_their_staging_files() {
+        let dir = directory();
+        let streams = ExportStreams::default();
+        for round in 0..5 {
+            // A page that dies mid-write leaves four streams behind...
+            for i in 0..4 { streams.begin(&dir.join(format!("{i}.tiff")), 8).unwrap(); }
+            let ids: Vec<String> = streams.0.lock().unwrap().keys().cloned().collect();
+            for id in ids { streams.append(&id, b"half").unwrap(); }
+            assert!(streams.begin(&dir.join("extra.tiff"), 1).is_err(), "round {round}: four orphans refuse every export");
+            assert!(std::fs::read_dir(&dir).unwrap().count() == 4);
+            // ...and the reloaded page starts clean: no staging file, no refusal.
+            assert_eq!(streams.clear(), 4);
+            assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+            let id = streams.begin(&dir.join("0.tiff"), 3).unwrap();
+            streams.append(&id, b"new").unwrap();
+            streams.take(&id).unwrap().finish().unwrap();
+            assert_eq!(std::fs::read(dir.join("0.tiff")).unwrap(), b"new");
+            std::fs::remove_file(dir.join("0.tiff")).unwrap();
+        }
+        assert_eq!(streams.clear(), 0);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

@@ -7,6 +7,13 @@ use tauri::{Emitter, State};
 
 #[derive(Default)]
 pub struct ImportWatch { active: Mutex<Option<Active>> }
+impl ImportWatch {
+    /// Ends the active watch, if any. A reloaded page no longer listens for
+    /// its arrivals (#241).
+    pub fn stop(&self) {
+        *self.active.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+}
 struct Active { directory: PathBuf, stop: Arc<AtomicBool>, session: String }
 impl Drop for Active { fn drop(&mut self) { self.stop.store(true, Ordering::Relaxed); } }
 #[derive(Clone, Serialize)]
@@ -79,7 +86,7 @@ pub fn watch_import_folder(app: tauri::AppHandle, state: State<'_, ImportWatch>,
 }
 #[tauri::command]
 pub fn stop_watch_import_folder(state: State<'_, ImportWatch>) -> Result<(), String> {
-    *state.active.lock().map_err(|e| e.to_string())? = None; Ok(())
+    state.stop(); Ok(())
 }
 #[tauri::command]
 pub fn read_import_file(state: State<'_, ImportWatch>, path: String, session: String, offset: u64, expected_size: u64, modified: String) -> Result<tauri::ipc::Response, String> {
@@ -115,6 +122,12 @@ mod tests {
     use super::*;
     #[test] fn ignores_partial_and_hidden() { for p in [".scan.jpg", "scan.jpg.part", "scan.tmp", "~scan.png"] { assert!(!supported(Path::new(p))); } assert!(supported(Path::new("SCAN.HEIC"))); }
     #[test] fn waits_for_stable_size_and_mtime() { let a = (4, "1".into()); assert!(!stable(&a, &a, Duration::from_millis(999))); assert!(stable(&a, &a, Duration::from_secs(1))); assert!(!stable(&a, &(5, "1".into()), Duration::from_secs(2))); assert!(!stable(&a, &(4, "2".into()), Duration::from_secs(2))); }
+    #[test] fn stop_ends_the_active_watch() {
+        let watch = ImportWatch::default(); let stop = Arc::new(AtomicBool::new(false));
+        *watch.active.lock().unwrap() = Some(Active { directory: PathBuf::new(), session: "a".into(), stop: stop.clone() });
+        watch.stop(); assert!(stop.load(Ordering::Relaxed)); assert!(watch.active.lock().unwrap().is_none());
+        watch.stop();
+    }
     #[test] fn dropped_grant_stops_watch() { let stop = Arc::new(AtomicBool::new(false)); { let _active = Active { directory: PathBuf::new(), session: "a".into(), stop: stop.clone() }; } assert!(stop.load(Ordering::Relaxed)); }
     #[test] fn chunks_reject_changed_files_and_symlinks() {
         let dir = std::env::temp_dir().join(format!("nc-import-chunks-{}", std::process::id())); fs::create_dir_all(&dir).unwrap();

@@ -492,6 +492,78 @@ fn abort_export_write(streams: State<'_, ExportStreams>, id: String) {
     if let Ok(pending) = streams.take(&id) { drop(pending); }
 }
 
+/// Which of `paths` exist as files directly inside `directory`. Resuming an
+/// interrupted batch export skips the frames it recorded as written only when
+/// their file is still there (#241).
+fn existing_exports_in(directory: &Path, paths: &[String]) -> Vec<bool> {
+    let root = grant_key(directory);
+    paths
+        .iter()
+        .map(|path| {
+            let path = PathBuf::from(path);
+            path.parent().map(grant_key).as_deref() == Some(root.as_path()) && path.is_file()
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn exported_files_exist(
+    grants: State<'_, ExportGrants>,
+    directory: String,
+    paths: Vec<String>,
+) -> Result<Vec<bool>, String> {
+    let directory = PathBuf::from(directory.trim());
+    if !directory.is_dir() || !grants.allows_directory(&directory) {
+        return Err("export directory was not chosen in a folder dialog".into());
+    }
+    Ok(existing_exports_in(&directory, &paths))
+}
+
+/// A WebContent process that macOS terminated (memory limit, crash). The
+/// hook reloads the page; the page reads this once at boot to say why the
+/// job it finds interrupted stopped (#241).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebContentTermination {
+    /// Milliseconds since the Unix epoch.
+    at: u64,
+    /// Terminations since the app started.
+    count: u32,
+}
+
+#[derive(Default)]
+struct WebContentTerminations(Mutex<(u32, Option<WebContentTermination>)>);
+
+impl WebContentTerminations {
+    fn record(&self, at: u64) -> WebContentTermination {
+        let mut state = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.0 = state.0.saturating_add(1);
+        let record = WebContentTermination { at, count: state.0 };
+        state.1 = Some(record);
+        record
+    }
+
+    fn take(&self) -> Option<WebContentTermination> {
+        self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).1.take()
+    }
+}
+
+#[tauri::command]
+fn take_web_content_termination(state: State<'_, WebContentTerminations>) -> Option<WebContentTermination> {
+    state.take()
+}
+
+/// A page that starts loading owns no export stream and no folder watch: the
+/// previous page (killed, crashed or navigated away) can no longer finish or
+/// listen to them.
+fn reset_page_owned_state<R: tauri::Runtime, M: tauri::Manager<R>>(manager: &M) {
+    let cleared = manager.state::<ExportStreams>().clear();
+    if cleared > 0 {
+        eprintln!("[export] dropped {cleared} unfinished export stream(s) from the previous page");
+    }
+    manager.state::<ImportWatch>().stop();
+}
+
 #[cfg(any(target_os = "linux", test))]
 fn parse_bool_flag(value: &str) -> Option<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
@@ -966,7 +1038,29 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .manage(ExportGrants::default())
         .manage(ExportStreams::default())
-        .manage(ImportWatch::default());
+        .manage(ImportWatch::default())
+        .manage(WebContentTerminations::default())
+        .on_page_load(|webview, payload| {
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
+                reset_page_owned_state(webview);
+            }
+        });
+    // Registering the hook replaces Tauri's default handler, which only
+    // reloads; this one records the termination for the page and releases
+    // what the dead page owned before it reloads the webview itself.
+    #[cfg(target_os = "macos")]
+    let builder = builder.on_web_content_process_terminate(|webview| {
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis() as u64)
+            .unwrap_or(0);
+        let record = tauri::Manager::state::<WebContentTerminations>(webview).record(at);
+        eprintln!("[webview] WebContent process terminated ({} this run); reloading", record.count);
+        reset_page_owned_state(webview);
+        if let Err(err) = webview.reload() {
+            eprintln!("[webview] reload after termination failed: {err}");
+        }
+    });
     #[cfg(feature = "updater")]
     let builder = builder.plugin(tauri_plugin_process::init()).plugin({
         let mut updater = tauri_plugin_updater::Builder::new();
@@ -984,6 +1078,8 @@ pub fn run() {
             append_export_chunk,
             finish_export_write,
             abort_export_write,
+            exported_files_exist,
+            take_web_content_termination,
             save_export_file,
             pick_export_file_path,
             pick_export_directory,
@@ -1003,8 +1099,9 @@ mod tests {
         build_unique_export_path, decide_dmabuf_policy, describe_update_capability,
         looks_like_legacy_appimage_name, normalize_export_path, parse_bool_flag,
         sanitize_export_file_name, sanitize_external_url, updater_target_override,
-        write_export_bytes, AppImageVariant, DesktopUpdateCapability, DmabufDecision,
+        write_export_bytes, existing_exports_in, AppImageVariant, DesktopUpdateCapability, DmabufDecision,
         DmabufDisableReason, DmabufKeepReason, DmabufProbeKind, ExportGrants,
+        WebContentTermination, WebContentTerminations,
     };
     use std::path::PathBuf;
 
@@ -1301,6 +1398,46 @@ mod tests {
         let second = build_unique_export_path(&dir, "scan.png");
         assert_eq!(second, dir.join("scan_1.png"));
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn web_content_terminations_are_counted_and_taken_once() {
+        let log = WebContentTerminations::default();
+        assert_eq!(log.take(), None, "a clean start reports nothing");
+        assert_eq!(log.record(1_000), WebContentTermination { at: 1_000, count: 1 });
+        assert_eq!(log.record(2_000), WebContentTermination { at: 2_000, count: 2 });
+        assert_eq!(log.take(), Some(WebContentTermination { at: 2_000, count: 2 }), "the page reads the latest one");
+        assert_eq!(log.take(), None, "and only once");
+        assert_eq!(log.record(3_000).count, 3, "the count spans the whole app run");
+        let json = serde_json::to_string(&log.take().unwrap()).expect("serialises");
+        assert_eq!(json, r#"{"at":3000,"count":3}"#);
+    }
+
+    #[test]
+    fn existing_exports_are_checked_inside_the_folder_only() {
+        let dir = scratch_dir("resume-exists");
+        std::fs::write(dir.join("frame_01.tiff"), b"done").expect("seed file");
+        std::fs::create_dir(dir.join("nested")).expect("nested dir");
+        std::fs::write(dir.join("nested").join("frame_02.tiff"), b"x").expect("nested file");
+        let outside = std::env::temp_dir().join(format!("nc-resume-outside-{}.tiff", std::process::id()));
+        std::fs::write(&outside, b"x").expect("outside file");
+        let paths = [
+            dir.join("frame_01.tiff"),
+            dir.join("frame_03.tiff"),
+            dir.join("nested").join("frame_02.tiff"),
+            dir.join("..").join(dir.file_name().unwrap()).join("frame_01.tiff"),
+            outside.clone(),
+            dir.clone(),
+        ]
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+        assert_eq!(
+            existing_exports_in(&dir, &paths),
+            vec![true, false, false, true, false, false]
+        );
+        std::fs::remove_file(outside).ok();
         std::fs::remove_dir_all(&dir).ok();
     }
 
