@@ -24,11 +24,9 @@ import {
   inRanges, isGlyphSource, planUiFaces,
 } from './ui-font-glyphs.mjs';
 
-export const SOURCE_FONT_DIR = join(APP_ROOT, 'src/assets/fonts/fusion-pixel');
-export const OUTPUT_DIR = join(APP_ROOT, 'src/assets/fonts/ui');
 export const OUTPUT_CSS = 'ui-fonts.css';
-const sourceFontPath = source => join(SOURCE_FONT_DIR, `fusion-pixel-12px-proportional-${source}.otf.woff2`);
-const LATIN_FONT_PATH = join(SOURCE_FONT_DIR, 'nc-studio-latin.woff2');
+const sourceFontDir = root => join(root, 'src/assets/fonts/fusion-pixel');
+const sourceFontPath = (root, source) => join(sourceFontDir(root), `fusion-pixel-12px-proportional-${source}.otf.woff2`);
 const outputFontName = face => `fusion-pixel-${face.id}-ui.woff2`;
 
 // ---- minimal sfnt reading and writing (name and cmap tables only) ----
@@ -186,16 +184,16 @@ function describeUnexpected(unexpected) {
  * HarfBuzz work when neither the characters, the source faces nor this
  * generator changed since the last run.
  */
-export async function buildUiFonts({ root = APP_ROOT, outputDir = OUTPUT_DIR, log = () => {} } = {}) {
+export async function buildUiFonts({ root = APP_ROOT, outputDir = join(root, 'src/assets/fonts/ui'), log = () => {} } = {}) {
   const entries = collectUiText(root);
   const draft = planUiFaces(entries);
-  const sources = new Map(draft.faces.map(face => [face.id, readFileSync(sourceFontPath(face.source))]));
+  const sources = new Map(draft.faces.map(face => [face.id, readFileSync(sourceFontPath(root, face.source))]));
   const stamp = createHash('sha256')
     .update(readFileSync(fileURLToPath(import.meta.url)))
     .update(readFileSync(fileURLToPath(new URL('./ui-font-glyphs.mjs', import.meta.url))))
     .update(JSON.stringify(entries));
   for (const bytes of sources.values()) stamp.update(bytes);
-  const latinFont = readFileSync(LATIN_FONT_PATH);
+  const latinFont = readFileSync(join(sourceFontDir(root), 'nc-studio-latin.woff2'));
   stamp.update(latinFont);
   const digest = stamp.digest('hex');
   const stampPath = join(outputDir, '.stamp');
@@ -250,7 +248,8 @@ export async function buildUiFonts({ root = APP_ROOT, outputDir = OUTPUT_DIR, lo
 export function uiFontsPlugin() {
   let running = Promise.resolve();
   const run = logger => {
-    running = running.then(() => buildUiFonts({ log: message => logger?.info(`[ui-fonts] ${message}`) }));
+    // One run at a time; a failed run must not block the next one.
+    running = running.catch(() => {}).then(() => buildUiFonts({ log: message => logger?.info(`[ui-fonts] ${message}`) }));
     return running;
   };
   return {
