@@ -6,7 +6,7 @@ globalThis.ImageData = class {
 };
 class FakeWorker {
   messages = [];
-  postMessage(message) { this.messages.push(structuredClone(message)); }
+  postMessage(message, transfers = []) { this.messages.push(structuredClone(message)); this.lastTransfers = transfers; }
   terminate() { this.terminated = true; }
   complete(type = 'result') {
     const message = this.messages.at(-1);
@@ -341,4 +341,73 @@ console.log('conversionWorkerClient: 入力再利用・参照解除・再起動�
   worker().complete('error');
   await assert.rejects(pending, { code: CONVERSION_FAILED });
   console.log('conversionWorkerClient: prepare/analyze share the preview contract');
+}
+
+// #248: a display target sends the level once, then only the size; the
+// auto-WB sample, the prebuilt display preview and the display negative come
+// back as ImageData; the uncached resample and detail regions leave the cached
+// level alone.
+{
+  const previewWorkers = [];
+  const preview = createConversionWorkerClient({ cacheInput: true, workerFactory: () => { const w = new FakeWorker(); previewWorkers.push(w); return w; } });
+  const worker = () => previewWorkers[0];
+  const level = { width: 4, height: 2, __image16: { width: 4, height: 2, data: new Uint16Array(32).fill(9) } };
+  const geometry = { sourceWidth: 4, sourceHeight: 2, k: 1 };
+  const frame = (width) => ({ imageData: level, display: { target: { width, height: 1 }, geometry }, settings: {}, options: {},
+    wbSample: width === 2 ? { geometry } : null });
+  let pending = preview(frame(2));
+  let message = worker().messages.at(-1);
+  assert.equal(message.reuseSource, false);
+  assert.ok(message.image16 && !message.rgba, 'the level goes once as its 16-bit plane');
+  assert.deepEqual(message.display.target, { width: 2, height: 1 });
+  assert.deepEqual(message.wbSample, { geometry });
+  worker().onmessage({ data: { id: message.id, type: 'result', width: 2, height: 1, rgba: new Uint8ClampedArray(8).buffer,
+    wbSample: { width: 1, height: 1, rgba: new Uint8ClampedArray([1, 2, 3, 255]).buffer },
+    displayPreview: { width: 1, height: 1, rgba: new Uint8ClampedArray([4, 5, 6, 255]).buffer, image16: new Uint16Array([7, 8, 9, 65535]).buffer,
+      histogram: { width: 1, height: 1, rgba: new Uint8ClampedArray([4, 5, 6, 255]).buffer } } } });
+  const result = await pending;
+  assert.deepEqual([...result.__wbSample.data], [1, 2, 3, 255]);
+  assert.deepEqual([...result.__displayPreview.__image16.data], [7, 8, 9, 65535]);
+  assert.deepEqual([...result.__displayPreview.__histogramSample.data], [4, 5, 6, 255]);
+  // Another size: no pixels.
+  pending = preview(frame(3));
+  message = worker().messages.at(-1);
+  assert.equal(message.reuseSource, true);
+  assert.ok(!('image16' in message) && !('rgba' in message), 'a new display size sends no pixels');
+  worker().complete(); await pending;
+  // The display negative for the repaired preview.
+  pending = preview.displayNegative(frame(2));
+  message = worker().messages.at(-1);
+  assert.equal(message.type, 'displayNegative');
+  assert.equal(message.reuseSource, true);
+  worker().onmessage({ data: { id: message.id, type: 'displayNegative', width: 2, height: 1,
+    image16: new Uint16Array([1, 2, 3, 4, 5, 6, 7, 8]).buffer, rgba: new Uint8ClampedArray(8).fill(1).buffer } });
+  const negative = await pending;
+  assert.equal(negative.width, 2);
+  assert.deepEqual([...negative.__image16.data], [1, 2, 3, 4, 5, 6, 7, 8]);
+  // The uncached resample: no cache fields, the 16-bit plane only.
+  const full = new ImageData(new Uint8ClampedArray(16), 2, 2);
+  full.__image16 = { width: 2, height: 2, data: new Uint16Array(16).fill(3) };
+  pending = preview.resample(full, { width: 1, height: 1 });
+  message = worker().messages.at(-1);
+  assert.equal(message.type, 'resample');
+  assert.ok(!('cacheInput' in message) && !('reuseSource' in message) && message.image16 && !message.rgba);
+  worker().onmessage({ data: { id: message.id, type: 'resampled', width: 1, height: 1, rgba: new Uint8ClampedArray(4).buffer,
+    image16: new Uint16Array([3, 3, 3, 3]).buffer } });
+  assert.deepEqual([...(await pending).__image16.data], [3, 3, 3, 3]);
+  assert.equal(full.__image16.data.length, 16, 'the frame stays the caller\'s');
+  // A detail region transfers its rows and leaves the cache alone.
+  const rows = new Uint16Array(8).fill(5);
+  pending = preview.roi({ settings: {}, base: { levelWidth: 4, levelHeight: 2, display: null }, rows,
+    region: { x: 0, y: 0, width: 2, height: 1, outWidth: 2, outHeight: 1, slotWidth: 256, slotHeight: 256 } });
+  message = worker().messages.at(-1);
+  assert.equal(message.type, 'roi');
+  assert.ok(message.image16 && !('cacheInput' in message));
+  assert.ok(worker().lastTransfers.includes(rows.buffer), 'the rows are transferred');
+  worker().onmessage({ data: { id: message.id, type: 'roi', width: 2, height: 1, rgba: new Uint8ClampedArray(8).fill(2).buffer } });
+  assert.deepEqual([...(await pending).data], [2, 2, 2, 2, 2, 2, 2, 2]);
+  pending = preview(frame(3));
+  assert.equal(worker().messages.at(-1).reuseSource, true, 'the cached level survives the uncached requests');
+  worker().complete(); await pending;
+  console.log('conversionWorkerClient: display targets, WB sample, prebuilt previews, display negatives, resample and regions');
 }
