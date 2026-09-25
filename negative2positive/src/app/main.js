@@ -1,6 +1,7 @@
 import { applyFilmTypeOverride, sanitizeFilmTypeOverride } from './filmTypeOverride.js';
 import { createPhotoSessionCache } from './photoSessionCache.js';
 import { createAdjustedPhotoPreview } from './photoPreview.js';
+import { exactSettingsKey } from './settingsKey.js';
 import { sanitizeSemanticMap } from './semanticAnchors.js';
 import { analyzeSemanticPreview } from './semanticModel.js';
 import { isLargeImage } from './imageMemoryBudget.js';
@@ -6914,12 +6915,15 @@ import { frameNeedsReview } from './reviewQueue.js';
     });
     const photoPreviews = createPhotoSessionCache({ maxBytes: 48 * 1024 * 1024 });
 
+    // Exact, not memoised: equal only when the JSON of these values is equal
+    // (settingsKey.js), with the curve LUTs of settings and studioColors
+    // appended as bytes instead of index-keyed JSON objects.
     function photoSettingsKey(item) {
-      return JSON.stringify([item.settings, item.studioColors, item.filmTypeOverride,
+      return exactSettingsKey([item.settings, item.studioColors, item.filmTypeOverride,
         state.dustRemoval.enabled, state.dustRemoval.strength, state.dustRemoval.maxParticleSize,
         state.dustRemoval.ai,
         state.dustRemoval.enabled || item.settings?.repairStrokes?.length ? aiRepair.revision : null,
-        state.flatFields[item.settings?.flatFieldId]?.id || null]);
+        state.flatFields[item.settings?.flatFieldId]?.id || null], 2);
     }
 
     function rememberPhotoSession(item) {

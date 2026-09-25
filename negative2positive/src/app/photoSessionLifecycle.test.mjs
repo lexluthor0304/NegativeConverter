@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { createPhotoSessionCache } from './photoSessionCache.js';
+import { exactSettingsKey } from './settingsKey.js';
 
 // Execute the actual lifecycle control flow. Only DOM/decoder/AI dependencies
 // are stubbed; deferred worker replies expose intermediate ownership states.
@@ -56,7 +57,7 @@ function fixture() {
     pendingBrushRepairs: 0, dustDrawing: false, undoStack: [], redoStack: [],
     coreReprocessGeneration: 3, coreReprocessToken: 4, dustDetectionRevision: 5,
     loadGeneration: 6, _coreReprocessPending: null,
-    studioThumbnailUpdateFrame: 0, cancelAnimationFrame: noop,
+    studioThumbnailUpdateFrame: 0, cancelAnimationFrame: noop, exactSettingsKey,
     coreReprocessBusy: () => false,
     captureSnapshot: () => ({ refs: {
       processedImageData: state.processedImageData,
