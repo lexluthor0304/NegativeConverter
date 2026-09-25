@@ -50,8 +50,12 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
   thread for this step; only 8-bit sources at a non-right angle keep the
   canvas rotation there. Each lane's bands in flight come from
   `planGeometryBandsInFlight` (a transient band budget shared by the lanes).
-  A lane that ran the import frame detection adopts the auto-frame worker's
-  rotated frame instead of rotating again. See `docs/geometry-chain.md`.
+  The import frame detection returns the rotated frame's size only (#251),
+  so this is the file's one rotation. See `docs/geometry-chain.md`.
+- A file the batch decodes itself goes to the auto-frame worker for frame
+  detection and film edge in one request without a copy: the 8-bit buffer is
+  transferred and handed back, the 16-bit plane stays (`runImportDetections`
+  with `owned`, `docs/auto-frame-regression.md`).
 - The three sinks are thin adapters: streaming ZIP (browser), individual
   downloads (browser) and folder writes (desktop). The dead JSZip desktop ZIP
   path was removed. The desktop batch now also gets 16-bit output and the
@@ -196,9 +200,12 @@ the editor for minutes on a long roll. Its pass 1 no longer runs through
 `runBatchPipeline` (#243): the background photo lanes pull one frame at a time
 in display order around the open photo, wait for the foreground before each
 decode, and share each decode with the foreground and the tile and prefetch
-needs of that frame (`docs/photo-sessions.md`). The per-frame measurements and
-the group commit, built from `pending` in import order, are unchanged, and
-`runBatchPipeline`'s export sink order and cancellation are untouched.
+needs of that frame (`docs/photo-sessions.md`). Each lane sends frame
+detection and film edge to its worker in one request, sizes only (#251); the
+decode is shared, so its 8-bit plane goes as one copy rather than being
+transferred. The per-frame measurements and the group commit, built from
+`pending` in import order, are unchanged, and `runBatchPipeline`'s export sink
+order and cancellation are untouched.
 
 The exact 900px geometry-applied roll samples now live in
 `analysisSampleStore.js`, with a 128 MiB retained-RAM budget. Samples that do

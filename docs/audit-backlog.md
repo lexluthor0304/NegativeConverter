@@ -26,11 +26,6 @@ Remaining performance proposals below are not claims of completed work.
   Only getAutoFrameAspectTargets is tested. `inferAutoFrameConfidenceLevel` (:1311, the 0.72/0.55 classifier that round 1 found duplicated three times), `buildDensityAnalysis` (:276) and `scoreDensityRect` (:518) contain no OpenCV references between lines 276-560 and run in plain Node, yet have no tests. main.js:116-130 re-declares DEFAULT_FORMAT_RATIOS/DEFAULT_120_FORMATS/DEFAULT_SCORE_WEIGHTS verb…  
   _Suggested fix:_ Export DEFAULT_FORMAT_RATIOS/DEFAULT_120_FORMATS/DEFAULT_SCORE_WEIGHTS from the analyzer, import them in main.js and the test. Add tests: `inferAutoFrameConfidenceLevel` at 0.72/0.719/0.55/0.549 and with custom thresholds; `buildDensityAnalysis` on a synthetic dark frame inside a…
 
-- **low/research** — Profile the remaining full auto-frame detector after exact preprocessing reuse
-  `negative2positive/src/app/autoFrameAnalyzer.js` / `negative2positive/src/app/imageWindowLines.js`
-  Issue #216 now reuses identical per-detection zero-angle edge preprocessing and density candidates, and skips later line evidence once a candidate already fails. Its isolated repeated preprocessing fixture fell from 99.05 ms to 2.40 ms with equal candidate order. This does not eliminate the detector's necessary per-channel Hough searches or distinct rotated passes; the earlier 3–4 s fallback estimate is historical, not a measurement of current code.
-  _Next step:_ The five available RAW fixtures passed the regression checks recorded in `docs/performance-audit-2026-09-22.md`. Profile remaining stages before choosing additional lossless work. Coarser Hough/search thresholds previously changed detections and are not an accepted shortcut.
-
 ## Dust removal
 
 - **medium/bug** — Thin real content (power lines, antennas, masts, fence wire, thin branches against sky) is classified as a 'scratch' and inpainted: any line up to 60 % of the short side and <= max(3, maxSize/3) px thick is kept with no area cap  

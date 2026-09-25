@@ -121,7 +121,10 @@ export function recordImportMetrics(ctx, prefix, metrics) {
   // per-decode worker gets one 'process' request (pack, defects, mirror, stats).
   ctx.record(`${prefix}.stage.sensorDefectsMs`, stage(entry => entry.cls === 'suppress'));
   ctx.record(`${prefix}.stage.rawPostDecodeMs`, stage(entry => entry.cls === 'process'));
-  ctx.record(`${prefix}.stage.autoFrameMs`, stage(entry => entry.cls === 'analyze-frame'));
+  // Since #251 an import sends one 'analyze-import' request for frame
+  // detection and film edge; its time is autoFrameMs and filmEdgeMs stays
+  // empty. Older refs send 'analyze-frame' and 'read-film-edge'.
+  ctx.record(`${prefix}.stage.autoFrameMs`, stage(entry => entry.cls === 'analyze-frame' || entry.cls === 'analyze-import'));
   ctx.record(`${prefix}.stage.filmEdgeMs`, stage(entry => entry.cls === 'read-film-edge'));
   ctx.record(`${prefix}.stage.scanDecodeMs`, stage(entry => entry.cls === 'decode'));
   ctx.record(`${prefix}.stage.previewConvertMs`, stage(entry => entry.cls === 'convert'));
@@ -250,7 +253,7 @@ export async function clickElement(ctx, id, { reveal = false } = {}) {
 }
 
 export function sourceWidthEstimate(events, fallback) {
-  const frame = byKind(events, 'res').filter(res => res.cls === 'analyze-frame' && res.crop).pop();
+  const frame = byKind(events, 'res').filter(res => (res.cls === 'analyze-frame' || res.cls === 'analyze-import') && res.crop).pop();
   if (frame) return { width: frame.crop.w, method: 'auto-frame crop' };
   const raw = byKind(events, 'res').filter(res => (res.cls === 'libraw' || res.cls === 'decode') && res.w).pop();
   if (raw) return { width: raw.w, method: `${raw.cls} result` };

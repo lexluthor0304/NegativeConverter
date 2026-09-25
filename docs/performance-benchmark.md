@@ -138,6 +138,8 @@ timestamps:
 - Worker creation/termination and every request/result, classified by
   `type`/`fn`: `convert` (with film type and cache flags; the result's 8-bit
   pixels hashed like uploads), `suppress`, `analyze-frame`, `read-film-edge`,
+  `analyze-import` (#251: an import's frame detection and film edge in one
+  request; its time is `stage.autoFrameMs`),
   LibRaw `open`/`imageData`, scan decode, export encode, dust, semantic, AI.
 - `File` reads (`arrayBuffer`, `slice`, `stream`, `text`, `FileReader`), Tauri
   `invoke`, trusted input (capture phase, platform timestamps).

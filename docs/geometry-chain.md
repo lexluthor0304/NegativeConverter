@@ -61,9 +61,10 @@ In `main.js` the scalars change synchronously and the planes follow:
 - Rotate 90° and mirror turn or flip the current display with CSS at once
   (UI only; composed when edits follow each other); the first paint of the
   new planes removes it.
-- The import adopts the auto-frame worker's rotated frame when base and
-  angle match and the exact 16-bit kernel built it, so a tilted import
-  rotates once. Batch lanes do the same.
+- A tilted import rotates once, in the pool: the auto-frame worker returns
+  the rotated frame's size only (#251). Only the Auto Frame button still
+  gets the worker's rotated planes, and the build adopts them when base and
+  angle match (the exact 16-bit kernel, or any source for the button).
 - Rotate and Apply Crop derive the frame from the base by the total angle.
   Apply Crop translates the rectangle drawn on the draft canvas D onto that
   frame F by `((Fw - Dw) / 2, (Fh - Dh) / 2)`. This is the one flagged pixel

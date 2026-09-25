@@ -324,10 +324,12 @@
       } else if (data && data.width) {
         record.w = data.width; record.h = data.height;
       }
-      if (request.cls === 'analyze-frame' && data && data.result) {
-        var result = data.result;
-        record.crop = result.cropRegion ? { w: result.cropRegion.width, h: result.cropRegion.height } : null;
-        record.angle = result.angle;
+      // 'analyze-import' (#251): frame detection and film edge in one reply.
+      var frameResult = request.cls === 'analyze-frame' ? data && data.result
+        : request.cls === 'analyze-import' ? data && data.result && data.result.frame : null;
+      if (frameResult) {
+        record.crop = frameResult.cropRegion ? { w: frameResult.cropRegion.width, h: frameResult.cropRegion.height } : null;
+        record.angle = frameResult.angle;
       }
       push(record);
     } finally { selfMs += now() - t0; }
