@@ -39,6 +39,7 @@ import { runExpiredFilmSmoke } from './expired-film-smoke.mjs';
 import { runNativeFilmFontSmoke } from './native-film-font-smoke.mjs';
 import { runExportGainMapSmoke } from './export-gain-map-smoke.mjs';
 import { runSilverCoreCacheSmoke } from './silvercore-cache-smoke.mjs';
+import { runGeometrySmoke } from './geometry-smoke.mjs';
 
 // UPNG is already a runtime dependency of the app; reuse it to decode screenshots.
 const UPNG = createRequire(import.meta.url)('upng-js');
@@ -387,6 +388,11 @@ if (process.argv.includes('--hidden-job-only')) {
   if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
   console.log('SMOKE PASS');
   process.exit(0);
+}
+if (process.argv.includes('--geometry-only')) {
+  await runGeometrySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
 }
 if (process.argv.includes('--expired-only')) {
   await runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
@@ -841,6 +847,7 @@ if (!process.argv.some(arg => arg.endsWith('-only'))) await runRollFilmTypeSmoke
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runFolderImportSmoke({send,evaluate,waitFor,wait,fail,installDialogAutoAccept,port:PORT,root:ROOT});
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runPhotoSortSmoke({send,evaluate,waitFor,wait,fail,installDialogAutoAccept,port:PORT,root:ROOT});
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runHiddenJobSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+if (!process.argv.some(arg => arg.endsWith('-only'))) await runGeometrySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
 
 // ---- no uncaught page errors across both scenarios ----
 const realErrors = pageErrors.filter((e) => !/ResizeObserver loop/.test(e));
