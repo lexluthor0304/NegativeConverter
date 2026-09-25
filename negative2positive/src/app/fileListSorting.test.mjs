@@ -27,7 +27,7 @@ const context = vm.createContext({
   orderedFileIndices: (...args) => { sorts++; return orderedFileIndices(...args); },
   singleExportActive: false, isDesktopBatchExportLocked: () => locked,
   safeStorageSet: (key, value) => storage.set(key, value),
-  studioWorkspace: { sync: () => syncs++, markRowsChanged: noop },
+  studioWorkspace: { sync: () => syncs++, markRowsChanged: noop }, uiDebugCounters: { fileListRenders: 0 },
   photoSessions: { retainKeys: noop }, photoPreviews: { retainKeys: noop },
   document: { getElementById: id => ({ id }), body: { dataset: {} } },
   updateReviewFilter: noop, renderFileList: options => { ui = options; },

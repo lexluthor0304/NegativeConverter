@@ -83,13 +83,14 @@ export async function runStudioSyncSmoke({ send, evaluate, waitFor, wait, fail, 
   // which is queued at the end of the burst; flushes after it come from sync()
   // calls behind an await (reported as "later", not counted).
   const burst = action => evaluate(`(async () => {
-    const before = window.__ncDebug.counters().sync;
+    const start = window.__ncDebug.counters(), before = start.sync;
     ${action}
     await Promise.resolve();
-    const after = window.__ncDebug.counters().sync;
+    const end = window.__ncDebug.counters(), after = end.sync;
     const filename = document.getElementById('studioFilename').textContent;
     for (let i = 0; i < 10; i++) await Promise.resolve();
     return { syncs: after.syncs - before.syncs, flushes: after.flushes - before.flushes, rowWalks: after.rowWalks - before.rowWalks,
+      renders: end.fileListRenders - start.fileListRenders,
       later: window.__ncDebug.counters().sync.flushes - after.flushes, filename, switching: document.body.dataset.photoSwitching || null };
   })()`);
 
@@ -210,13 +211,13 @@ export async function runStudioSyncSmoke({ send, evaluate, waitFor, wait, fail, 
   // ---- Photo switches: one flush and one row reconcile in the click's turn ----
   await settle('edits idle');
   const cold = await burst(`document.querySelector('.file-list-name[data-index="1"]').click();`);
-  expect(cold.flushes === 1 && cold.rowWalks === 1 && cold.filename === 'sync-negative-textured.png',
+  expect(cold.flushes === 1 && cold.rowWalks === 1 && cold.renders <= 1 && cold.filename === 'sync-negative-textured.png',
     'a cold switch did not announce its target in one flush: ' + JSON.stringify(cold));
   await waitFor('second photo open', `${ready} && document.getElementById('studioFilename').textContent === 'sync-negative-textured.png'`, 150_000);
   await settle('second photo idle');
   const warm = await burst(`document.querySelector('.file-list-name[data-index="0"]').click();`);
-  expect(warm.flushes === 1 && warm.rowWalks === 1 && warm.filename === 'sync-negative-plain.png',
-    'a photo switch is not one flush: ' + JSON.stringify(warm));
+  expect(warm.flushes === 1 && warm.rowWalks === 1 && warm.renders === 1 && warm.filename === 'sync-negative-plain.png',
+    'a photo switch is not one flush, one file-list render and one row reconcile: ' + JSON.stringify(warm));
   console.log('ok: one flush per burst ' + JSON.stringify({ idleFlush, curveRelease, sliderRelease, undo, cold, warm, warmSwitch: warm.switching === null }));
   await waitFor('first photo back', `${ready} && document.getElementById('studioFilename').textContent === 'sync-negative-plain.png'`, 150_000);
   await expectLoadingOverlayIdle({ evaluate, waitFor, fail }, 'photo switches');

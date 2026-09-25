@@ -3229,7 +3229,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       }
     });
     // Call counts read by the smoke tests (?debugCounters=1, #261).
-    const uiDebugCounters = { adjustCanvasDisplay: 0, renderWebGL: 0, curveCanvasResizes: 0 };
+    const uiDebugCounters = { adjustCanvasDisplay: 0, renderWebGL: 0, curveCanvasResizes: 0, fileListRenders: 0 };
     const zoomIndicator = document.getElementById('zoomIndicator');
     const zoomControls = document.getElementById('zoomControls');
     const ZOOM_MIN = 1;
@@ -14407,6 +14407,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       renderFileListUI();
     }
     function renderFileListUI() {
+      uiDebugCounters.fileListRenders++;
       // Queue replacement/removal must also invalidate a delayed activation.
       if (state.photoSwitchTarget && !state.fileQueue.includes(state.photoSwitchTarget)) {
         ++loadGeneration;
