@@ -6,6 +6,7 @@ import {
   CORE_FULL_REPROCESS_DELAY_MS, CORE_FRAME_GATE_FALLBACK_MS
 } from './coreReprocessDispatcher.js';
 import { routeCoreConversion, keepsFullPlaneOnDowngrade } from './fullResolutionRouting.js';
+import { DISABLED_GPU_PREVIEW_SCHEDULER, createGpuPreviewScheduler, GPU_SETTLE_IDLE_MS } from './gpuPreviewScheduler.js';
 
 // Drives the real scheduler, reprocess and slider functions from main.js (as
 // restartRender.test.mjs does) against a fake clock: timeouts and animation
@@ -117,7 +118,7 @@ assert.equal(previewDispatchAction({ laneBusy: false, gateArmed: false, postedTh
 
 // ---- The real scheduler ----
 
-function schedulerFixture({ repairs = false, large = false } = {}) {
+function schedulerFixture({ repairs = false, large = false, gpu = null } = {}) {
   const clock = fakeClock();
   const base = { width: 400, height: 300, name: 'source' };
   const state = {
@@ -153,6 +154,7 @@ function schedulerFixture({ repairs = false, large = false } = {}) {
     buildPreviewSourceImageData: image => image,
     buildHistogramSourceImageData: image => ({ sampleOf: image }),
     webglState: { gl: null }, schedulePreviewUpdate: () => {},
+    gpuPreviewScheduler: DISABLED_GPU_PREVIEW_SCHEDULER, gpuPreviewCanTake: () => false,
     coreReprocessTimer: null, coreReprocessScheduled: null,
     coreReprocessToken: 0, coreReprocessGeneration: 0,
     _coreReprocessFullInFlight: false, _coreReprocessPreviewInFlight: false,
@@ -195,11 +197,24 @@ function schedulerFixture({ repairs = false, large = false } = {}) {
     'fireCoreReprocessGate', 'clearCoreReprocessTimer', 'flushScheduledCoreReprocess',
     'retainCorePreviewPlane', 'armCorePreviewCommitTimer', 'releaseCorePreviewRetained', 'requestCorePreviewCommit',
     'maybeCommitCorePreviewPlane', 'settleCorePreviewWaiters', 'settleCorePreviewPlane', 'histogramSourceFor',
-    'currentConvertedPreviewSource', 'displayResizeOrigin', 'displayResizeReplaces',
+    'currentConvertedPreviewSource', 'displayResizeOrigin', 'displayResizeReplaces', 'postGpuSettleFrame',
     'ensureConversionPreviewForDisplay',
     'routeCoreRequest', 'beginFullResolutionConversion', 'endFullResolutionConversion',
     'abortSupersededFullResolutionConversion',
   ].map(functionSource).join('\n'), context);
+  if (gpu) {
+    // #239: the real GPU scheduler; its draw is recorded instead of drawn.
+    context.gpuPreviewCanTake = () => gpu.enabled;
+    context.gpuPreviewScheduler = createGpuPreviewScheduler({
+      armFrame: fire => context.coreReprocessGates.armFrame(fire),
+      cancelFrame: handle => context.coreReprocessGates.cancel(handle),
+      setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
+      draw: () => { log.push(`gpu:${state.coreExposure}`); return gpu.drawable; },
+      postExact: token => context.postGpuSettleFrame(token),
+      onIdle: () => context.noteCoreReprocessSettled(),
+      onAbandon: () => log.push('abandon'),
+    });
+  }
   const request = (exposure, options = { full: false }) => {
     if (exposure !== undefined) state.coreExposure = exposure;
     context.scheduleCoreReprocess(options);
@@ -829,6 +844,146 @@ function sliderFixture(options) {
   f.conversions[0].resolve({ width: 400, height: 300 });
   await settle();
   assert.deepEqual(f.log.filter(entry => entry === 'dust'), ['dust'], 'exactly one dust detection follows');
+  assert.equal(f.context.coreReprocessBusy(), false);
+}
+
+// ---- #239: GPU frames between exact frames ----
+
+{
+  // A GPU drag converts nothing while it moves; the GPU frames reach no state; the
+  // exact frame of the newest value settles it 150 ms after the last input.
+  const gpu = { enabled: true, drawable: true };
+  const f = schedulerFixture({ gpu });
+  const shown = f.state.processedImageData;
+  for (const exposure of [10, 20, 30]) {
+    f.clock.nextFrame();
+    f.request(exposure);
+    f.request(exposure + 1);
+    f.clock.runFrame();
+  }
+  await settle();
+  assert.equal(f.conversions.length, 0, 'no conversion during the drag');
+  assert.deepEqual(f.log, ['gpu:11', 'gpu:21', 'gpu:31'], 'one draw per frame, the newest value');
+  assert.equal(f.state.processedImageData, shown, 'GPU frames never reach processedImageData');
+  assert.equal(f.context.coreReprocessBusy(), true, 'a GPU frame ahead of its exact frame is busy');
+  const settleTimer = [...f.clock.timers.values()].filter(timer => timer.delay === GPU_SETTLE_IDLE_MS);
+  assert.equal(settleTimer.length, 1, 'one settle timer');
+  settleTimer[0].callback();
+  await settle();
+  assert.equal(f.conversions.length, 1, 'the settle converts once');
+  assert.equal(f.conversions[0].exposure, 31);
+  assert.equal(f.conversions[0].token, f.context.coreReprocessToken, 'with the newest token');
+  f.conversions[0].resolve(f.result());
+  await settle();
+  assert.deepEqual(f.log.slice(-2), ['apply', 'draw'], 'the exact frame is applied as today');
+  assert.equal(f.context.coreReprocessBusy(), false);
+  assert.equal(f.context.gpuPreviewScheduler.isAhead(), false);
+}
+
+{
+  // An exact frame older than the GPU frame on screen is dropped; the export
+  // barrier settles at once and waits for the exact frame; a photo-session capture
+  // meanwhile stores no snapshot.
+  const gpu = { enabled: true, drawable: true };
+  const f = schedulerFixture({ gpu });
+  const stored = [];
+  const item = { file: 'file' };
+  Object.assign(f.state, { loadedFile: 'file', loadedBaseImageData: {}, rawDecodePending: false, previewSourceImageData: null });
+  Object.assign(f.context, {
+    processNegativeInFlight: null, dustDetectionTimer: null, pendingBrushRepairs: 0, dustDrawing: false,
+    undoStack: [], redoStack: [], photoSettingsKey: () => 'key', captureSnapshot: () => ({ refs: {} }),
+    photoSessions: { put: (key, entry) => { stored.push(entry); return true; } },
+    photoPreviews: { put: () => true }, currentConvertedPreviewSource: () => null,
+    buildAdjustmentSettings: () => ({ curves: { r: new Uint8Array(256), g: new Uint8Array(256), b: new Uint8Array(256) } }),
+    samplePhotoPreviewSource: () => ({}), adjustPhotoPreviewSample: () => ({}), schedulePostPaintTask: () => {},
+  });
+  vm.runInContext(functionSource('rememberPhotoSession'), f.context);
+  f.request(5);
+  f.clock.runFrame();
+  f.context.rememberPhotoSession(item);
+  assert.equal(stored.at(-1).snapshot, null, 'a GPU frame on screen is not a settled photo');
+  f.context.gpuPreviewScheduler.settleNow();
+  await settle();
+  assert.equal(f.conversions.length, 1);
+  f.clock.nextFrame();
+  f.request(6);
+  f.clock.runFrame();
+  f.conversions[0].resolve(f.result());
+  await settle();
+  assert.ok(!f.log.includes('apply'), 'the older exact frame never replaces the newer GPU frame');
+  assert.equal(f.context.coreReprocessBusy(), true);
+  let flushed = false;
+  const flush = f.context.flushScheduledCoreReprocess().then(() => { flushed = true; });
+  await settle();
+  assert.equal(f.conversions.length, 2, 'the export barrier settles the GPU frame at once');
+  assert.equal(f.conversions[1].exposure, 6);
+  assert.equal(flushed, false, 'and waits for its exact frame');
+  f.conversions[1].resolve(f.result());
+  await flush;
+  assert.ok(f.log.includes('apply'));
+  f.context.rememberPhotoSession(item);
+  assert.ok(stored.at(-1).snapshot, 'settled once the exact frame is on screen');
+}
+
+{
+  // A settle that cannot apply (a restart meanwhile) returns the display to its
+  // exact frame instead of leaving the barrier waiting; a draw that cannot happen
+  // settles right away; a non-GPU request takes the settle over.
+  const gpu = { enabled: true, drawable: true };
+  const f = schedulerFixture({ gpu });
+  f.request(7);
+  f.context.gpuPreviewScheduler.settleNow();
+  await settle();
+  f.context.coreReprocessGeneration += 1;
+  f.conversions[0].resolve(f.result());
+  await settle();
+  assert.ok(f.log.includes('abandon'));
+  assert.equal(f.context.coreReprocessBusy(), false);
+
+  gpu.drawable = false;
+  f.clock.nextFrame();
+  f.request(8);
+  f.clock.runFrame();
+  await settle();
+  assert.equal(f.conversions.length, 2, 'an impossible draw posts the exact frame');
+  f.conversions[1].resolve(f.result());
+  await settle();
+  assert.equal(f.context.coreReprocessBusy(), false);
+
+  gpu.drawable = true;
+  f.clock.nextFrame();
+  f.request(9);
+  f.clock.runFrame();
+  gpu.enabled = false;
+  f.request(10);
+  await Promise.resolve();
+  await settle();
+  assert.equal(f.conversions.length, 3, 'a request the GPU cannot take converts as today');
+  assert.ok(![...f.clock.timers.values()].some(timer => timer.delay === GPU_SETTLE_IDLE_MS), 'and cancels the GPU settle');
+  f.conversions[2].resolve(f.result());
+  await settle();
+  assert.equal(f.context.coreReprocessBusy(), false, 'its frame settles the GPU frame');
+}
+
+{
+  // Releasing the slider after a GPU drag converts the released value exactly once.
+  const gpu = { enabled: true, drawable: true };
+  const f = sliderFixture({ gpu });
+  await f.drag([10, 20, 30]);
+  f.clock.runFrame();
+  assert.equal(f.conversions.length, 0);
+  f.fire(f.slider, 'change');
+  await settle();
+  assert.equal(f.conversions.length, 1, 'the release settles the drag');
+  assert.equal(f.conversions[0].exposure, 30);
+  f.fire(f.slider, 'change');
+  await settle();
+  assert.equal(f.conversions.length, 1, 'a second release while it converts adds none');
+  f.conversions[0].resolve(f.result());
+  await settle();
+  f.fire(f.slider, 'change');
+  await settle();
+  assert.equal(f.conversions.length, 1, 'nor one after it landed');
   assert.equal(f.context.coreReprocessBusy(), false);
 }
 

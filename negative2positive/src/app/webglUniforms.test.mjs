@@ -3,33 +3,23 @@ import { mainFunctions, state } from '../../test-fixtures/mainSettingsHarness.mj
 
 // webglSetUniforms reads its seven scalars directly instead of sanitising the
 // whole settings object per draw. Every uniform value must stay identical to
-// the implementation at 1703835, kept below as the reference.
+// the implementation at 1703835, kept below as the reference. #239 dropped the
+// legacy tone uniforms (exposure, contrast, highlights, shadows, temperature,
+// tint, saturation), which SilverCore always held at identity: the display
+// shaders no longer have them, and the remaining three uniforms are unchanged.
 const calls = [];
 const recorder = new Proxy({}, { get: (_, name) => (...args) => calls.push([name, ...args]) });
-const locations = Object.fromEntries(['uWb', 'uExposure', 'uContrast', 'uHighlights', 'uShadows', 'uTemp', 'uTint',
-  'uSat', 'uVib', 'uCmy'].map(name => [name, name]));
+const locations = Object.fromEntries(['uWb', 'uVib', 'uCmy'].map(name => [name, name]));
 const webglState = { gl: recorder, locations };
-const app = mainFunctions(['getEffectiveFilmType', 'usesSilverCoreConversion', 'webglSetUniforms'], { webglState });
+const app = mainFunctions(['getEffectiveFilmType', 'usesSilverCoreConversion', 'webglStep3Values', 'webglSetUniforms'], { webglState });
 
 function referenceUniforms() {
   const gl = webglState.gl;
   const safe = app.sanitizeSettings(state, { fallbackSettings: state, includeCurvePoints: false, includeCurves: false });
   const useLegacyTone = !app.usesSilverCoreConversion(safe);
-  const legacyExposure = useLegacyTone ? safe.exposure : 0;
-  const legacyContrast = useLegacyTone ? safe.contrast : 0;
-  const legacyHighlights = useLegacyTone ? safe.highlights : 0;
-  const legacyShadows = useLegacyTone ? safe.shadows : 0;
-  const legacyTemperature = useLegacyTone ? safe.temperature : 0;
-  const legacyTint = useLegacyTone ? safe.tint : 0;
-  const legacySaturation = useLegacyTone ? safe.saturation : 0;
+  // Every film type is a SilverCore type, so the legacy uniforms were identity.
+  assert.equal(useLegacyTone, false);
   gl.uniform3f(locations.uWb, safe.wbR, safe.wbG, safe.wbB);
-  gl.uniform1f(locations.uExposure, legacyExposure);
-  gl.uniform1f(locations.uContrast, 1 + (legacyContrast / 100));
-  gl.uniform1f(locations.uHighlights, legacyHighlights / 100);
-  gl.uniform1f(locations.uShadows, legacyShadows / 100);
-  gl.uniform1f(locations.uTemp, legacyTemperature / 100);
-  gl.uniform1f(locations.uTint, legacyTint / 100);
-  gl.uniform1f(locations.uSat, 1 + (legacySaturation / 100));
   gl.uniform1f(locations.uVib, safe.vibrance / 100);
   gl.uniform3f(locations.uCmy, safe.cyan / 100, safe.magenta / 100, safe.yellow / 100);
 }

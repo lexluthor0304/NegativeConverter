@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { createCoreReprocessGates } from './coreReprocessDispatcher.js';
 import { routeCoreConversion, keepsFullPlaneOnDowngrade } from './fullResolutionRouting.js';
+import { DISABLED_GPU_PREVIEW_SCHEDULER } from './gpuPreviewScheduler.js';
 
 // Exercise the actual browser lifecycle functions without loading a DOM,
 // OpenCV, or ONNX. Only their UI and expensive conversion dependencies are
@@ -42,6 +43,7 @@ function fixture({ repairs = true, locked = false, large = false } = {}) {
     fullResolutionRenderTimer: null, displayPreviewResizeTimer: null,
     fullUpdateTimer: null, coreReprocessTimer: null, step2AutoConvertTimer: null,
     webglState: { gl: null }, console,
+    gpuPreviewScheduler: DISABLED_GPU_PREVIEW_SCHEDULER,
     clearTimeout: timer => clearedTimers.push(timer),
     coreReprocessGates: createCoreReprocessGates({ clearTimeout: timer => clearedTimers.push(timer) }),
     CORE_RETAIN_PREVIEW_PLANE: true, corePreviewRetained: null, corePreviewCommit: null,

@@ -78,7 +78,17 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     import { createCoreReprocessGates, previewDispatchAction, CORE_FULL_REPROCESS_DELAY_MS } from './coreReprocessDispatcher.js';
     import { createPreviewTierController, previewTierMaxPixels, capBackingSize, parsePreviewTierOverride } from './previewTier.js';
     import { describeWebglRenderer, startsReducedReason, formatRenderEnvironmentLine, formatPreviewSessionLine } from './renderEnvironment.js';
-    import { invalidateSilverCoreCache, analyzeSilverCoreFrame } from '../pipeline/silverAdapter.js';
+    import {
+      invalidateSilverCoreCache, analyzeSilverCoreFrame, trySilverCoreParams, silverCoreAnalysisKey, silverCorePreparedKey
+    } from '../pipeline/silverAdapter.js';
+    import { Engine } from '../silvercore/engine/Engine.js';
+    import { loadProfile } from '../silvercore/engine/EnhancedProfiles.js';
+    import { toImageData8 } from '../silvercore/util/image16.js';
+    import { VERTEX_SHADER_100, STEP3_FRAGMENT_SHADER_100 } from '../render/previewShader.js';
+    import { createGpuPreviewRenderer, webgl2PrecisionOk } from '../render/gpuPreviewRenderer.js';
+    import { applyPreviewChain } from '../render/previewTables.js';
+    import { buildSelfTestCases } from '../render/gpuPreviewSelfTest.js';
+    import { createGpuPreviewScheduler } from './gpuPreviewScheduler.js';
     import { canUseBrowserZipStreaming, ZipStoreWriter, createZipNameDeduper } from './zipStoreWriter.js';
     import {
       createAdjustmentLutScratch,
@@ -174,6 +184,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       debug: DEBUG_UI,
       userTiming: readPerfFlags(window.location.search).userTiming
     });
+    // The GPU preview of SilverCore controls (#239). `?gpuPreview=` webgl1 never asks
+    // for WebGL2 (the fallback context), off keeps WebGL2 for Step 3 only, force also
+    // runs on a software rasteriser (tests on CI), selftest-fail corrupts the idle
+    // self-test so the session stays on the worker path.
+    const GPU_PREVIEW_MODE = new URLSearchParams(window.location.search).get('gpuPreview') || 'auto';
     // The default export bridge, for the callers without an operation of their
     // own (contact sheet, multi-shot merge, watch folder). A single export
     // makes its own bridge and a batch export its own pool (#250); both pass
@@ -2868,6 +2883,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (fullUpdateTimer) { clearTimeout(fullUpdateTimer); fullUpdateTimer = null; }
       clearCoreReprocessTimer();
       coreReprocessScheduled = null;
+      // Whatever replaces the photo or its settings draws from its own exact frame.
+      gpuPreviewScheduler.cancel();
       releaseCorePreviewRetained();
       if (displayPreviewResizeTimer) { clearTimeout(displayPreviewResizeTimer); displayPreviewResizeTimer = null; }
       if (step2AutoConvertTimer) { clearTimeout(step2AutoConvertTimer); step2AutoConvertTimer = null; }
@@ -5105,6 +5122,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     const webglState = {
       gl: null,
+      // A WebGL2 context draws with render/gpuPreviewRenderer.js (#239); the fields
+      // below `renderer2` belong to the WebGL1 fallback program.
+      webgl2: false,
+      renderer2: null,
       program: null,
       quadBuffer: null,
       sourceTex: null,
@@ -5121,13 +5142,6 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         uImage: null,
         uCurve: null,
         uWb: null,
-        uExposure: null,
-        uContrast: null,
-        uHighlights: null,
-        uShadows: null,
-        uTemp: null,
-        uTint: null,
-        uSat: null,
         uVib: null,
         uCmy: null
       },
@@ -5180,6 +5194,43 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return program;
     }
 
+    // Everything a lost or restored context leaves behind: nothing. The next render
+    // creates the renderer again; a GPU frame on screen settles into its exact frame.
+    function resetWebGLState() {
+      webglState.gl = null;
+      webglState.webgl2 = false;
+      webglState.renderer2 = null;
+      webglState.program = null;
+      webglState.quadBuffer = null;
+      webglState.sourceTex = null;
+      webglState.curveTex = null;
+      webglState.sourceSize = { w: 0, h: 0 };
+      webglState.maxTextureSize = 0;
+      webglState.curveDirty = true;
+      webglState.sourceDirty = true;
+      webglState.lastError = null;
+      resetGpuPreview();
+    }
+
+    function attachWebGLContextHandlers() {
+      if (webglState.handlersAttached) return;
+      glCanvas.addEventListener('webglcontextlost', (e) => {
+        e.preventDefault();
+        // Mark renderer as unavailable; fall back to CPU.
+        resetWebGLState();
+        updateCanvasVisibility();
+        schedulePreviewUpdate();
+      }, false);
+
+      glCanvas.addEventListener('webglcontextrestored', () => {
+        // Resources are lost; re-init lazily on next render.
+        resetWebGLState();
+        schedulePreviewUpdate();
+      }, false);
+
+      webglState.handlersAttached = true;
+    }
+
     function initWebGLRenderer() {
       // The "WebGL Acceleration" checkbox was plumbed all the way to the engine
       // and read by nothing. Honour it here and in isWebGLActive: unchecking it
@@ -5188,163 +5239,61 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (webglState.disabledByError) return false;
       if (webglState.gl) return true;
 
+      const attributes = {
+        alpha: false,
+        depth: false,
+        stencil: false,
+        antialias: false,
+        preserveDrawingBuffer: false,
+        premultipliedAlpha: false
+      };
+      // A canvas keeps the first context type it was given, so WebGL2 is asked for
+      // first; WebGL1 remains the fallback where it does not exist.
       let gl = null;
-      try {
-        gl = glCanvas.getContext('webgl', {
-          alpha: false,
-          depth: false,
-          stencil: false,
-          antialias: false,
-          preserveDrawingBuffer: false,
-          premultipliedAlpha: false
-        });
-      } catch {
-        gl = null;
+      if (GPU_PREVIEW_MODE !== 'webgl1') {
+        try {
+          gl = glCanvas.getContext('webgl2', attributes);
+        } catch {
+          gl = null;
+        }
+      }
+      const webgl2 = Boolean(gl);
+      if (!gl) {
+        try {
+          gl = glCanvas.getContext('webgl', attributes);
+        } catch {
+          gl = null;
+        }
       }
 
       if (!gl) {
         if (!renderEnvironment.rendererKnown) noteWebglRenderer(null);
         return false;
       }
+      attachWebGLContextHandlers();
 
-      const vsSource = `
-        attribute vec2 a_pos;
-        varying vec2 v_uv;
-        void main() {
-          // Rows are uploaded top-down as stored. Flipping here instead of with
-          // UNPACK_FLIP_Y_WEBGL spares the browser a flipped copy per upload;
-          // the framebuffer keeps its bottom-up orientation.
-          v_uv = vec2((a_pos.x + 1.0) * 0.5, (1.0 - a_pos.y) * 0.5);
-          gl_Position = vec4(a_pos, 0.0, 1.0);
+      if (webgl2) {
+        if (gl.isContextLost()) return false;
+        try {
+          webglState.renderer2 = createGpuPreviewRenderer(gl);
+        } catch (err) {
+          // The canvas is a WebGL2 canvas now: the CPU display is the fallback.
+          disableWebGLByError(err);
+          return false;
         }
-      `;
-
-      const fsSource = `
-        #ifdef GL_FRAGMENT_PRECISION_HIGH
-        precision highp float;
-        #else
-        precision mediump float;
-        #endif
-        varying vec2 v_uv;
-        uniform sampler2D u_image;
-        uniform sampler2D u_curve;
-
-        uniform vec3 u_wb;
-        uniform float u_exposure;
-        uniform float u_contrast;
-        uniform float u_highlights;
-        uniform float u_shadows;
-        uniform float u_temp;
-        uniform float u_tint;
-        uniform float u_sat;
-        uniform float u_vib;
-        uniform vec3 u_cmy;
-
-        float hue2rgb(float p, float q, float t) {
-          if (t < 0.0) t += 1.0;
-          if (t > 1.0) t -= 1.0;
-          if (t < 1.0 / 6.0) return p + (q - p) * 6.0 * t;
-          if (t < 1.0 / 2.0) return q;
-          if (t < 2.0 / 3.0) return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
-          return p;
-        }
-
-        vec3 rgbToHsl(vec3 c) {
-          float r = c.r, g = c.g, b = c.b;
-          float maxc = max(r, max(g, b));
-          float minc = min(r, min(g, b));
-          float h = 0.0;
-          float s = 0.0;
-          float l = (maxc + minc) * 0.5;
-
-          if (maxc != minc) {
-            float d = maxc - minc;
-            s = l > 0.5 ? d / (2.0 - maxc - minc) : d / (maxc + minc);
-
-            if (maxc == r) {
-              h = (g - b) / d + (g < b ? 6.0 : 0.0);
-            } else if (maxc == g) {
-              h = (b - r) / d + 2.0;
-            } else {
-              h = (r - g) / d + 4.0;
-            }
-            h /= 6.0;
-          }
-
-          return vec3(h, s, l);
-        }
-
-        vec3 hslToRgb(float h, float s, float l) {
-          float r, g, b;
-          if (s == 0.0) {
-            r = g = b = l;
-          } else {
-            float q = l < 0.5 ? l * (1.0 + s) : l + s - l * s;
-            float p = 2.0 * l - q;
-            r = hue2rgb(p, q, h + 1.0 / 3.0);
-            g = hue2rgb(p, q, h);
-            b = hue2rgb(p, q, h - 1.0 / 3.0);
-          }
-          return vec3(r, g, b);
-        }
-
-        vec3 applyCurves(vec3 c) {
-          float rIdx = floor(c.r * 255.0 + 0.5);
-          float gIdx = floor(c.g * 255.0 + 0.5);
-          float bIdx = floor(c.b * 255.0 + 0.5);
-          vec4 cr = texture2D(u_curve, vec2((rIdx + 0.5) / 256.0, 0.5));
-          vec4 cg = texture2D(u_curve, vec2((gIdx + 0.5) / 256.0, 0.5));
-          vec4 cb = texture2D(u_curve, vec2((bIdx + 0.5) / 256.0, 0.5));
-          return vec3(cr.r, cg.g, cb.b);
-        }
-
-        void main() {
-          vec3 c = texture2D(u_image, v_uv).rgb;
-
-          float exposureMult = pow(2.0, u_exposure);
-          c *= u_wb * exposureMult;
-
-          c = (c - 0.5) * u_contrast + 0.5;
-
-          float luma = dot(c, vec3(0.299, 0.587, 0.114));
-          if (u_highlights != 0.0 && luma > 0.5) {
-            float mult = 1.0 + u_highlights * (luma - 0.5) * 2.0;
-            c *= mult;
-          }
-          if (u_shadows != 0.0 && luma < 0.5) {
-            float mult = 1.0 + u_shadows * (0.5 - luma) * 2.0;
-            c *= mult;
-          }
-
-          c.r *= (1.0 + u_temp * 0.3);
-          c.b *= (1.0 - u_temp * 0.3);
-          c.g *= (1.0 + u_tint * 0.3);
-          c = clamp(c, 0.0, 1.0);
-
-          if (u_sat != 1.0 || u_vib != 0.0) {
-            vec3 hsl = rgbToHsl(c);
-            float s = hsl.y * u_sat;
-            if (u_vib >= 0.0) {
-              s += (1.0 - s) * u_vib;
-            } else {
-              s *= (1.0 + u_vib);
-            }
-            hsl.y = clamp(s, 0.0, 1.0);
-            c = hslToRgb(hsl.x, hsl.y, hsl.z);
-          }
-
-          vec3 cmy = vec3(1.0) - c;
-          cmy = clamp(cmy + u_cmy, 0.0, 1.0);
-          c = vec3(1.0) - cmy;
-
-          c = applyCurves(c);
-
-          gl_FragColor = vec4(c, 1.0);
-        }
-      `;
+        webglState.gl = gl;
+        webglState.webgl2 = true;
+        webglState.maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE) || 0;
+        webglState.curveDirty = true;
+        webglState.sourceDirty = true;
+        webglState.sourceSize = { w: 0, h: 0 };
+        webglState.lastError = null;
+        noteWebglRenderer(gl);
+        return true;
+      }
 
       try {
-        webglState.program = createProgram(gl, vsSource, fsSource);
+        webglState.program = createProgram(gl, VERTEX_SHADER_100, STEP3_FRAGMENT_SHADER_100);
       } catch (err) {
         console.warn('WebGL shader init failed:', err);
         return false;
@@ -5352,42 +5301,6 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
       webglState.gl = gl;
       webglState.maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE) || 0;
-
-      if (!webglState.handlersAttached) {
-        glCanvas.addEventListener('webglcontextlost', (e) => {
-          e.preventDefault();
-          // Mark renderer as unavailable; fall back to CPU.
-          webglState.gl = null;
-          webglState.program = null;
-          webglState.quadBuffer = null;
-          webglState.sourceTex = null;
-          webglState.curveTex = null;
-          webglState.sourceSize = { w: 0, h: 0 };
-          webglState.maxTextureSize = 0;
-          webglState.curveDirty = true;
-          webglState.sourceDirty = true;
-          webglState.lastError = null;
-          updateCanvasVisibility();
-          schedulePreviewUpdate();
-        }, false);
-
-        glCanvas.addEventListener('webglcontextrestored', () => {
-          // Resources are lost; re-init lazily on next render.
-          webglState.gl = null;
-          webglState.program = null;
-          webglState.quadBuffer = null;
-          webglState.sourceTex = null;
-          webglState.curveTex = null;
-          webglState.sourceSize = { w: 0, h: 0 };
-          webglState.maxTextureSize = 0;
-          webglState.curveDirty = true;
-          webglState.sourceDirty = true;
-          webglState.lastError = null;
-          schedulePreviewUpdate();
-        }, false);
-
-        webglState.handlersAttached = true;
-      }
 
       // Full-screen quad
       webglState.quadBuffer = gl.createBuffer();
@@ -5405,13 +5318,6 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       webglState.locations.uImage = gl.getUniformLocation(webglState.program, 'u_image');
       webglState.locations.uCurve = gl.getUniformLocation(webglState.program, 'u_curve');
       webglState.locations.uWb = gl.getUniformLocation(webglState.program, 'u_wb');
-      webglState.locations.uExposure = gl.getUniformLocation(webglState.program, 'u_exposure');
-      webglState.locations.uContrast = gl.getUniformLocation(webglState.program, 'u_contrast');
-      webglState.locations.uHighlights = gl.getUniformLocation(webglState.program, 'u_highlights');
-      webglState.locations.uShadows = gl.getUniformLocation(webglState.program, 'u_shadows');
-      webglState.locations.uTemp = gl.getUniformLocation(webglState.program, 'u_temp');
-      webglState.locations.uTint = gl.getUniformLocation(webglState.program, 'u_tint');
-      webglState.locations.uSat = gl.getUniformLocation(webglState.program, 'u_sat');
       webglState.locations.uVib = gl.getUniformLocation(webglState.program, 'u_vib');
       webglState.locations.uCmy = gl.getUniformLocation(webglState.program, 'u_cmy');
 
@@ -5576,15 +5482,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       webglState.curveDirty = false;
     }
 
-    function webglSetUniforms() {
-      const gl = webglState.gl;
-      if (!gl) return;
-      // The shader reads seven scalars. Sanitise just those, with the same
-      // arguments sanitizeSettings(state, { fallbackSettings: state }) uses,
-      // instead of rebuilding every setting (and both stroke sets) per draw.
-      // SilverCore bakes the legacy tone controls into the conversion
-      // (usesSilverCoreConversion is true for every film type), so their
-      // uniforms stay at the identity values.
+    // Step 3's uniforms. The shaders read seven scalars: sanitise just those, with
+    // the same arguments sanitizeSettings(state, { fallbackSettings: state }) uses,
+    // instead of rebuilding every setting (and both stroke sets) per draw.
+    // SilverCore bakes the legacy tone controls into the conversion
+    // (usesSilverCoreConversion is true for every film type), so the display
+    // shaders have no uniforms for them.
+    function webglStep3Values() {
       const vibrance = sanitizeNumeric(state.vibrance, state.vibrance ?? 0, -100, 100);
       const wbR = sanitizeNumeric(state.wbR, state.wbR ?? 1, 0.5, 2);
       const wbG = sanitizeNumeric(state.wbG, state.wbG ?? 1, 0.5, 2);
@@ -5592,22 +5496,78 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const cyan = sanitizeNumeric(state.cyan, state.cyan ?? 0, -100, 100);
       const magenta = sanitizeNumeric(state.magenta, state.magenta ?? 0, -100, 100);
       const yellow = sanitizeNumeric(state.yellow, state.yellow ?? 0, -100, 100);
+      return { wb: [wbR, wbG, wbB], vib: vibrance / 100, cmy: [cyan / 100, magenta / 100, yellow / 100] };
+    }
 
-      gl.uniform3f(webglState.locations.uWb, wbR, wbG, wbB);
-      gl.uniform1f(webglState.locations.uExposure, 0);
-      gl.uniform1f(webglState.locations.uContrast, 1);
-      gl.uniform1f(webglState.locations.uHighlights, 0);
-      gl.uniform1f(webglState.locations.uShadows, 0);
-      gl.uniform1f(webglState.locations.uTemp, 0);
-      gl.uniform1f(webglState.locations.uTint, 0);
-      gl.uniform1f(webglState.locations.uSat, 1);
-      gl.uniform1f(webglState.locations.uVib, vibrance / 100);
-      gl.uniform3f(webglState.locations.uCmy, cyan / 100, magenta / 100, yellow / 100);
+    function webglSetUniforms() {
+      const gl = webglState.gl;
+      if (!gl) return;
+      const { wb, vib, cmy } = webglStep3Values();
+      gl.uniform3f(webglState.locations.uWb, wb[0], wb[1], wb[2]);
+      gl.uniform1f(webglState.locations.uVib, vib);
+      gl.uniform3f(webglState.locations.uCmy, cmy[0], cmy[1], cmy[2]);
+    }
+
+    // WebGL2: applyProgram while SilverCore settings are ahead of the exact frame
+    // (#239), step3Program on the exact frame otherwise.
+    function renderWebGL2() {
+      try {
+        const renderer = webglState.renderer2;
+        const step3 = webglStep3Values();
+        if (gpuPreviewScheduler.isAhead()) {
+          const frame = gpuPreviewFrame();
+          if (frame) {
+            if (webglState.curveDirty) {
+              renderer.uploadCurves(state.curves);
+              webglState.curveDirty = false;
+            }
+            adjustCanvasDisplay(frame.width, frame.height);
+            resizeWebGLCanvas(frame.width, frame.height);
+            if (renderer.drawApply(frame, step3, glCanvas.width, glCanvas.height)) {
+              gpuPreview.lastDraw = 'apply';
+              gpuPreview.lastFrame = frame;
+              return true;
+            }
+          }
+        }
+        const source = getWebglSourceImageData();
+        if (!source) return false;
+        // Refits only when the texture, container, reference size or zoom
+        // changed since the last fit; otherwise it touches no layout.
+        adjustCanvasDisplay(source.width, source.height);
+        const resized = webglState.sourceSize.w !== source.width || webglState.sourceSize.h !== source.height;
+        if (webglState.sourceDirty || resized) {
+          if (!renderer.uploadExact(source, resized)) {
+            webglState.sourceSize = { w: 0, h: 0 };
+            return false;
+          }
+          webglState.sourceSize = { w: source.width, h: source.height };
+          webglState.sourceDirty = false;
+        }
+        if (webglState.curveDirty) {
+          renderer.uploadCurves(state.curves);
+          webglState.curveDirty = false;
+        }
+        resizeWebGLCanvas(source.width, source.height);
+        renderer.drawStep3(step3, glCanvas.width, glCanvas.height);
+        gpuPreview.lastDraw = 'step3';
+        gpuPreview.lastFrame = null;
+        if (WEBGL_DEBUG_ERRORS) {
+          const gl = webglState.gl;
+          const errCode = gl.getError();
+          if (errCode !== gl.NO_ERROR) throw new Error(`WebGL draw error code: ${errCode}`);
+        }
+        return true;
+      } catch (err) {
+        disableWebGLByError(err);
+        return false;
+      }
     }
 
     function renderWebGL() {
       uiDebugCounters.renderWebGL++;
       if (state.cropping || !webglState.gl || webglState.disabledByError || !state.processedImageData) return false;
+      if (webglState.webgl2) return renderWebGL2();
 
       try {
         const source = getWebglSourceImageData();
@@ -5684,6 +5644,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     function renderHistogramForWebGL(force = false) {
       if (!state.processedImageData) return;
+      if (gpuPreview.lastDraw === 'apply' && gpuPreview.lastFrame) {
+        renderHistogramForGpu(gpuPreview.lastFrame, force);
+        return;
+      }
       const now = performance.now();
       if (!force && (now - lastHistogramUpdateTime) < HISTOGRAM_UPDATE_INTERVAL_MS) return;
 
@@ -5738,7 +5702,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     function updatePreview() {
       if (!state.processedImageData) return;
       if (state.beforeAfterActive || state.cropping) return;
-      scheduleStudioThumbnailUpdate();
+      // A GPU frame ahead of the exact one is display-only (#239): the active
+      // tile follows the exact frame that settles it.
+      if (!gpuPreviewScheduler.isAhead()) scheduleStudioThumbnailUpdate();
 
       // Prefer GPU rendering in Step 3 when available.
       if (state.currentStep >= 3 && initWebGLRenderer()) {
@@ -5748,6 +5714,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           renderHistogramForWebGL(false);
           state.displayImageData = null;
           state.lastRenderQuality = 'gl';
+          if (gpuPreview.lastDraw === 'step3') scheduleGpuPreviewWarmup();
           return;
         }
       }
@@ -5798,6 +5765,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           renderHistogramForWebGL(true);
           state.displayImageData = null;
           state.lastRenderQuality = 'gl';
+          if (gpuPreview.lastDraw === 'step3') scheduleGpuPreviewWarmup();
           return;
         }
       }
@@ -5823,95 +5791,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       renderDodgeBurnOverlay();
     }
 
-    function renderFullWebGL() {
-      if (!webglState.gl || !state.processedImageData) return false;
-      // WebGL only usable for legacy tone path (non-SilverCore)
-      if (usesSilverCoreConversion(state)) return false;
-      if (state.dustRemoval.enabled && state.dustRemoval.showMask) return false;
-      if (state.dodgeBurn && state.dodgeBurn.active) return false;
-
-      const source = state.processedImageData;
-      const gl = webglState.gl;
-      const maxTex = webglState.maxTextureSize || 0;
-      if (maxTex && (source.width > maxTex || source.height > maxTex)) return false;
-
-      try {
-        // Save original canvas size
-        const origW = glCanvas.width;
-        const origH = glCanvas.height;
-
-        // Resize to full resolution
-        glCanvas.width = source.width;
-        glCanvas.height = source.height;
-        gl.viewport(0, 0, source.width, source.height);
-        gl.useProgram(webglState.program);
-
-        // Upload full-res source
-        webglUploadSource(source);
-        webglUploadCurves();
-        webglSetUniforms();
-
-        // Bind geometry
-        gl.bindBuffer(gl.ARRAY_BUFFER, webglState.quadBuffer);
-        gl.enableVertexAttribArray(webglState.locations.aPos);
-        gl.vertexAttribPointer(webglState.locations.aPos, 2, gl.FLOAT, false, 0, 0);
-
-        // Bind textures
-        gl.activeTexture(gl.TEXTURE0);
-        gl.bindTexture(gl.TEXTURE_2D, webglState.sourceTex);
-        gl.activeTexture(gl.TEXTURE1);
-        gl.bindTexture(gl.TEXTURE_2D, webglState.curveTex);
-
-        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-        gl.finish();
-
-        // Read back pixels
-        const pixels = new Uint8Array(source.width * source.height * 4);
-        gl.readPixels(0, 0, source.width, source.height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
-
-        // WebGL readPixels returns Y-flipped data — flip it
-        const rowSize = source.width * 4;
-        const tempRow = new Uint8Array(rowSize);
-        for (let y = 0; y < (source.height >> 1); y++) {
-          const topOffset = y * rowSize;
-          const bottomOffset = (source.height - 1 - y) * rowSize;
-          tempRow.set(pixels.subarray(topOffset, topOffset + rowSize));
-          pixels.set(pixels.subarray(bottomOffset, bottomOffset + rowSize), topOffset);
-          pixels.set(tempRow, bottomOffset);
-        }
-
-        const imageData = new ImageData(new Uint8ClampedArray(pixels.buffer), source.width, source.height);
-
-        // Restore canvas size
-        glCanvas.width = origW;
-        glCanvas.height = origH;
-
-        // Mark source as dirty so next preview re-uploads the preview-sized texture
-        webglState.sourceDirty = true;
-
-        return imageData;
-      } catch (err) {
-        console.warn('WebGL full-res render failed, falling back to CPU:', err);
-        return false;
-      }
-    }
-
     function ensureFullRender() {
       if (!state.processedImageData) return;
-
-      // Try WebGL for 8-bit export (legacy tone path only)
-      if (!usesSilverCoreConversion(state) && webglState.gl && !webglState.disabledByError) {
-        const result = renderFullWebGL();
-        if (result && result instanceof ImageData) {
-          state.displayImageData = result;
-          renderAdjustedImageDataToMainCanvas(result, result);
-          renderHistogram(result);
-          state.lastRenderQuality = 'full';
-          return;
-        }
-      }
-
-      // Fallback to CPU
       updateFullCpu();
     }
 
@@ -6107,6 +5988,367 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     let step2AutoConvertToken = 0;
     let processNegativeInFlight = null;
 
+    // ===========================================
+    // GPU preview of SilverCore controls (#239)
+    // ===========================================
+    // While a SilverCore control moves, applyProgram draws the whole per-tick chain on
+    // the display-size negative the preview worker prepared (render/previewShader.js)
+    // instead of converting every tick in the worker. The exact worker frame settles
+    // it (gpuPreviewScheduler.js); GPU frames are display-only and never reach
+    // processedImageData, the photo-session cache, thumbnails or an export.
+    const gpuPreview = {
+      // 'none' → 'compiling' → 'testing' → 'ready', or 'failed' / 'unsupported'.
+      status: 'none',
+      reason: null,
+      renderer: null,
+      selfTest: null,
+      selfTestCases: null,
+      environment: null,
+      // Seeded from the worker's `analyze` reply; builds the per-tick tables.
+      engine: new Engine(1, 1),
+      seeded: null,
+      prepared: null,
+      prepareFlight: null,
+      analysis: null,
+      analyzeFlight: false,
+      analysisWanted: false,
+      analysisFailedKey: null,
+      profile: { name: 'none', lut: null, loading: null, failed: new Set() },
+      warmupQueued: false,
+      lastDraw: null,
+      lastFrame: null
+    };
+    const gpuObjectIds = new WeakMap();
+    let gpuNextObjectId = 1;
+    function gpuObjectId(object) {
+      if (!object) return 0;
+      let id = gpuObjectIds.get(object);
+      if (!id) {
+        id = gpuNextObjectId++;
+        gpuObjectIds.set(object, id);
+      }
+      return id;
+    }
+
+    const gpuPreviewScheduler = createGpuPreviewScheduler({
+      armFrame: fire => coreReprocessGates.armFrame(fire),
+      cancelFrame: handle => coreReprocessGates.cancel(handle),
+      setTimeout: (callback, delay) => setTimeout(callback, delay),
+      clearTimeout: id => clearTimeout(id),
+      draw: drawGpuPreviewNow,
+      postExact: postGpuSettleFrame,
+      onIdle: () => noteCoreReprocessSettled(),
+      onAbandon: () => schedulePreviewUpdate()
+    });
+
+    // Whether applyProgram may show the current settings: a ready WebGL2 renderer in a
+    // mode that draws the plain conversion (#253 owns the others).
+    function gpuApplyUsable() {
+      return gpuPreview.status === 'ready' && Boolean(webglState.renderer2)
+        && gpuPreview.renderer === webglState.renderer2 && !webglState.disabledByError
+        && isWebGLActive() && !state.beforeAfterActive && !hasFrameRepairs() && usesSilverCoreConversion(state);
+    }
+
+    // scheduleCoreReprocess's test: the prepared frame and an analysis of it are in
+    // place. The draw checks the rest (film base, strokes, mode, profile) and settles
+    // with the exact frame when it cannot draw.
+    function gpuPreviewCanTake() {
+      if (GPU_PREVIEW_MODE === 'off' || !gpuApplyUsable()) return false;
+      const preview = state.conversionPreviewImageData;
+      const { prepared, analysis } = gpuPreview;
+      return Boolean(preview && prepared && prepared.previewId === gpuObjectId(preview) && prepared.generation === coreReprocessGeneration
+        && analysis && analysis.previewId === prepared.previewId && analysis.generation === coreReprocessGeneration);
+    }
+
+    // The prepared texture's identity: the display preview, the generation, what the
+    // pristine plane is compensated with, and the dodge-and-burn strokes.
+    function gpuPreparedTag(settings, mode) {
+      const preview = state.conversionPreviewImageData;
+      const strokes = settings.localExposure
+        ? `${gpuObjectId(settings.localExposure)}:${JSON.stringify(settings.localExposureGeometry)}` : '';
+      return [gpuObjectId(preview), coreReprocessGeneration, preview === state.conversionSourceImageData ? 'source' : 'preview',
+        silverCorePreparedKey(settings, mode), strokes].join('|');
+    }
+
+    // Everything one applyProgram draw of the current settings needs, or null (and
+    // the missing input requested) when it cannot draw them yet.
+    function gpuPreviewFrame() {
+      if (!gpuApplyUsable()) return null;
+      const preview = state.conversionPreviewImageData;
+      if (!preview) return null;
+      const settings = buildRouterSettings(state);
+      const mode = resolveConversionMode(settings);
+      if (mode === 'positive' && settings.positiveEngine === 'legacy') return null;
+      const params = trySilverCoreParams(mode, settings);
+      if (!params) return null;
+      const prepared = gpuPreview.prepared;
+      if (!prepared || prepared.tag !== gpuPreparedTag(settings, mode)) {
+        requestGpuPrepare();
+        return null;
+      }
+      const key = silverCoreAnalysisKey(mode, params, settings, preview, getColorAnalysisSample(state));
+      const analysis = gpuPreview.analysis;
+      if (!analysis || analysis.key !== key) {
+        requestGpuAnalyze();
+        // Until the reply lands, an analysis input (pre-saturation, border buffer,
+        // B&W mix) draws with the previous analysis of the same frame and mode.
+        if (!analysis || analysis.mode !== mode || analysis.previewId !== gpuObjectId(preview)
+          || analysis.generation !== coreReprocessGeneration) return null;
+      }
+      if (!gpuProfileReady(params.enhancedProfile)) return null;
+      const engine = gpuPreview.engine;
+      if (gpuPreview.seeded !== analysis) {
+        engine.seedAnalysis(analysis.data);
+        gpuPreview.seeded = analysis;
+      }
+      const plan = engine.previewPlan(params, { grey: mode === 'bw' });
+      if (!plan.pointwise) return null;
+      return { mode, params, plan, engine, width: prepared.width, height: prepared.height };
+    }
+
+    // The scheduler's draw at the animation frame: false settles with the exact frame.
+    function drawGpuPreviewNow() {
+      if (!gpuApplyUsable() || state.cropping) return false;
+      updateCanvasVisibility();
+      if (!renderWebGL() || gpuPreview.lastDraw !== 'apply') return false;
+      renderHistogramForGpu(gpuPreview.lastFrame, false);
+      state.displayImageData = null;
+      state.lastRenderQuality = 'gl';
+      return true;
+    }
+
+    // The exact frame of the newest settings: today's interactive conversion.
+    function postGpuSettleFrame(token) {
+      void runCoreReprocess({ full: false, token, sourceRef: state.conversionSourceImageData, generation: coreReprocessGeneration });
+    }
+
+    // The histogram of a GPU frame: the CPU chain over point samples of the prepared
+    // plane (and of its stops) gives the exact frame's pixels at those points, then
+    // Step 3 as for the exact frame. Throttled like the exact frame's.
+    function renderHistogramForGpu(frame, force = false) {
+      const sample = gpuPreview.prepared?.histogram;
+      if (!frame || !sample) return;
+      const now = performance.now();
+      if (!force && (now - lastHistogramUpdateTime) < HISTOGRAM_UPDATE_INTERVAL_MS) return;
+      const work = { width: sample.width, height: sample.height, data: new Uint16Array(sample.data) };
+      applyPreviewChain(frame.engine, work, frame.params, frame.mode, sample.stops);
+      const converted = toImageData8(work);
+      histogramAdjustedBuffer = ensureImageDataBuffer(histogramAdjustedBuffer, converted.width, converted.height);
+      applyAdjustmentsToBuffer(converted, state, histogramAdjustedBuffer, 'preview');
+      renderHistogram(histogramAdjustedBuffer);
+      lastHistogramUpdateTime = now;
+    }
+
+    function gpuProfileReady(name) {
+      const engine = gpuPreview.engine;
+      if (!name || name === 'none') {
+        engine.enhancedLut = null;
+        return true;
+      }
+      const profile = gpuPreview.profile;
+      if (profile.name === name && profile.lut) {
+        engine.enhancedLut = profile.lut;
+        return true;
+      }
+      if (profile.loading !== name && !profile.failed.has(name)) {
+        // Fetch and bake off the input event; the next draw uses it.
+        profile.loading = name;
+        loadProfile(name).then((lut) => {
+          if (profile.loading === name) profile.loading = null;
+          profile.name = name;
+          profile.lut = lut;
+          gpuPreviewScheduler.redraw();
+        }, (err) => {
+          if (profile.loading === name) profile.loading = null;
+          // The worker then converts with no profile; the GPU stays out of it.
+          profile.failed.add(name);
+          console.warn('GPU preview profile failed to load:', err?.message || err);
+        });
+      }
+      return false;
+    }
+
+    // Asks the preview worker for the prepared negative of the frame on screen and
+    // uploads it once. Main keeps no copy: without film-base or flat-field
+    // compensation it uploads its own display preview (8-bit sources as RGBA8UI).
+    function requestGpuPrepare() {
+      const renderer = webglState.renderer2;
+      const preview = state.conversionPreviewImageData;
+      if (!renderer || gpuPreview.status !== 'ready' || !preview) return;
+      const settings = buildRouterSettings(state);
+      const mode = resolveConversionMode(settings);
+      const tag = gpuPreparedTag(settings, mode);
+      if (gpuPreview.prepared?.tag === tag || gpuPreview.prepareFlight?.tag === tag) return;
+      const generation = coreReprocessGeneration;
+      const flight = { tag };
+      gpuPreview.prepareFlight = flight;
+      convertPreviewFrameInWorker.prepare({
+        imageData: preview,
+        settings,
+        options: {
+          preview: preview !== state.conversionSourceImageData,
+          analysisImageData: getColorAnalysisSample(state),
+          histogramSamples: HISTOGRAM_MAX_SAMPLES
+        }
+      }).then((reply) => {
+        if (gpuPreview.prepareFlight !== flight) return;
+        gpuPreview.prepareFlight = null;
+        if (generation !== coreReprocessGeneration || state.conversionPreviewImageData !== preview
+          || webglState.renderer2 !== renderer || gpuPreview.status !== 'ready') return;
+        const source16 = preview.__image16?.data instanceof Uint16Array ? preview.__image16 : null;
+        const plane = reply.pristine
+          ? { width: reply.width, height: reply.height, data16: reply.pristine }
+          : source16 ? { width: preview.width, height: preview.height, data16: source16.data }
+            : { width: preview.width, height: preview.height, data8: preview.data };
+        try {
+          if (!renderer.uploadPrepared(plane) || !renderer.uploadStops(reply.stops, reply.width, reply.height)) return;
+        } catch (err) {
+          failGpuPreview(`prepared upload: ${err?.message || err}`);
+          return;
+        }
+        // Identities only: a stale display preview must not stay alive through this.
+        gpuPreview.prepared = { tag, previewId: gpuObjectId(preview), generation, width: reply.width, height: reply.height, histogram: reply.histogram };
+        scheduleGpuPreviewWarmup();
+      }).catch((err) => {
+        if (gpuPreview.prepareFlight === flight) gpuPreview.prepareFlight = null;
+        console.warn('GPU preview prepare failed:', err?.message || err);
+      });
+    }
+
+    // The worker's analysis for the current settings, newest wins: one request in
+    // flight, the latest state asked again when it lands.
+    function requestGpuAnalyze() {
+      if (gpuPreview.analyzeFlight) {
+        gpuPreview.analysisWanted = true;
+        return;
+      }
+      const preview = state.conversionPreviewImageData;
+      if (!preview || gpuPreview.status !== 'ready') return;
+      const settings = buildRouterSettings(state);
+      const mode = resolveConversionMode(settings);
+      const params = trySilverCoreParams(mode, settings);
+      if (!params) return;
+      const reference = getColorAnalysisSample(state);
+      const key = silverCoreAnalysisKey(mode, params, settings, preview, reference);
+      if (gpuPreview.analysis?.key === key || gpuPreview.analysisFailedKey === key) return;
+      const generation = coreReprocessGeneration;
+      gpuPreview.analyzeFlight = true;
+      gpuPreview.analysisWanted = false;
+      convertPreviewFrameInWorker.analyze({
+        imageData: preview,
+        settings,
+        options: { preview: preview !== state.conversionSourceImageData, analysisImageData: reference }
+      }, key).then((reply) => {
+        if (generation !== coreReprocessGeneration || state.conversionPreviewImageData !== preview) return;
+        gpuPreview.analysis = { key, mode, previewId: gpuObjectId(preview), generation, data: reply };
+        gpuPreviewScheduler.redraw();
+      }, (err) => {
+        gpuPreview.analysisFailedKey = key;
+        console.warn('GPU preview analysis failed:', err?.message || err);
+      }).finally(() => {
+        gpuPreview.analyzeFlight = false;
+        if (gpuPreview.analysisWanted) {
+          gpuPreview.analysisWanted = false;
+          requestGpuAnalyze();
+        }
+      });
+    }
+
+    function failGpuPreview(reason, status = 'failed') {
+      gpuPreview.status = status;
+      gpuPreview.reason = reason;
+      gpuPreview.prepared = null;
+      webglState.renderer2?.dropPrepared();
+      if (gpuPreviewScheduler.isAhead()) gpuPreviewScheduler.settleNow();
+      console.info('GPU preview of SilverCore controls is off:', reason);
+    }
+
+    // A lost or restored context: the textures are gone. A GPU frame on screen
+    // settles into its exact frame; the next warm-up starts from scratch.
+    function resetGpuPreview() {
+      if (gpuPreviewScheduler.isAhead()) gpuPreviewScheduler.settleNow();
+      gpuPreview.renderer = null;
+      gpuPreview.status = 'none';
+      gpuPreview.reason = null;
+      gpuPreview.prepared = null;
+      gpuPreview.prepareFlight = null;
+      gpuPreview.lastDraw = null;
+      gpuPreview.lastFrame = null;
+    }
+
+    function runWhenIdle(task) {
+      if (typeof requestIdleCallback === 'function') requestIdleCallback(task, { timeout: 500 });
+      else setTimeout(task, 50);
+    }
+
+    // Compile, self-test and upload off the interaction path, after an exact frame
+    // is on screen: then the prepared negative, the analysis and the preset's
+    // profile for it. Idempotent; each step runs in its own idle slot.
+    function scheduleGpuPreviewWarmup() {
+      if (GPU_PREVIEW_MODE === 'off' || gpuPreview.warmupQueued) return;
+      if (!webglState.webgl2 || !webglState.renderer2 || webglState.disabledByError) return;
+      if (state.currentStep < 3 || !state.conversionPreviewImageData) return;
+      if (gpuPreview.status === 'failed' || gpuPreview.status === 'unsupported') return;
+      // In place for this frame already (a Step-3 drag redraws every frame): a draw
+      // that finds something else stale asks for it itself.
+      if (gpuPreviewCanTake()) return;
+      gpuPreview.warmupQueued = true;
+      runWhenIdle(() => {
+        gpuPreview.warmupQueued = false;
+        warmUpGpuPreview();
+      });
+    }
+
+    function warmUpGpuPreview() {
+      const renderer = webglState.renderer2;
+      if (!renderer || webglState.disabledByError) return;
+      if (gpuPreview.renderer !== renderer) {
+        resetGpuPreview();
+        gpuPreview.renderer = renderer;
+      }
+      if (gpuPreview.status === 'none') {
+        const environment = describeWebglRenderer(renderer.gl);
+        gpuPreview.environment = environment;
+        if (!webgl2PrecisionOk(renderer.gl)) return failGpuPreview('highp precision', 'unsupported');
+        // A software rasteriser is slower than the worker (#263).
+        if (environment.software && GPU_PREVIEW_MODE !== 'force') {
+          return failGpuPreview(`software renderer ${environment.renderer}`, 'unsupported');
+        }
+        renderer.startApplyCompile();
+        gpuPreview.status = 'compiling';
+      }
+      if (gpuPreview.status === 'compiling') {
+        const linked = renderer.applyStatus();
+        if (linked === 'pending') {
+          requestAnimationFrame(scheduleGpuPreviewWarmup);
+          return;
+        }
+        if (linked !== 'linked') return failGpuPreview(`applyProgram: ${renderer.applyError()}`);
+        gpuPreview.status = 'testing';
+        scheduleGpuPreviewWarmup();
+        return;
+      }
+      if (gpuPreview.status === 'testing') {
+        // The CPU reference in one idle slot, the draws and the readback in the next.
+        if (!gpuPreview.selfTestCases) {
+          gpuPreview.selfTestCases = buildSelfTestCases();
+          scheduleGpuPreviewWarmup();
+          return;
+        }
+        const result = renderer.selfTest(gpuPreview.selfTestCases, { corrupt: GPU_PREVIEW_MODE === 'selftest-fail' });
+        gpuPreview.selfTestCases = null;
+        gpuPreview.selfTest = result;
+        if (!result.ok) return failGpuPreview(`self-test ${JSON.stringify(result)}`);
+        gpuPreview.status = 'ready';
+      }
+      if (gpuPreview.status !== 'ready') return;
+      const settings = buildRouterSettings(state);
+      const params = trySilverCoreParams(resolveConversionMode(settings), settings);
+      if (params) gpuProfileReady(params.enhancedProfile);
+      requestGpuPrepare();
+      requestGpuAnalyze();
+    }
+
     function canAutoConvertFromStep2() {
       if (state.currentStep < 2 || state.currentStep >= 3) return false;
       if (!usesSilverCoreConversion(state)) return false;
@@ -6205,10 +6447,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     let corePreviewCommitTimer = null;
     let corePreviewSettleWaiters = [];
 
+    // A GPU frame shown ahead of its exact frame, or an armed settle, counts as busy
+    // (#239): no barrier may treat the display as settled before the exact frame.
     function coreReprocessBusy() {
       return _coreReprocessActive > 0 || _coreReprocessPending !== null
         || _coreReprocessFullInFlight || Boolean(_coreReprocessPreviewInFlight)
-        || corePreviewRetained !== null || corePreviewCommit !== null;
+        || corePreviewRetained !== null || corePreviewCommit !== null
+        || gpuPreviewScheduler.busy();
     }
 
     function whenCoreReprocessIdle() {
@@ -6427,10 +6672,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const token = Number.isInteger(options.token) ? options.token : coreReprocessToken;
       const generation = options.generation ?? coreReprocessGeneration;
       const sourceRef = options.sourceRef || state.conversionSourceImageData;
-      if (generation !== coreReprocessGeneration) return false;
-      if (!usesSilverCoreConversion(state)) return false;
-      if (!state.conversionSourceImageData) return false;
-      if (sourceRef && state.conversionSourceImageData !== sourceRef) return false;
+      if (generation !== coreReprocessGeneration || !usesSilverCoreConversion(state) || !state.conversionSourceImageData
+        || (sourceRef && state.conversionSourceImageData !== sourceRef)) {
+        // A request that can no longer render cannot settle a GPU frame either.
+        gpuPreviewScheduler.flightEnded(token);
+        return false;
+      }
 
       // In-flight guard: serialize preview-vs-preview and full-vs-anything,
       // but let a preview reprocess run while a full-resolution render is
@@ -6476,6 +6723,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           if (generation !== coreReprocessGeneration) return false;
           if (token !== null && token !== coreReprocessToken) return false;
           if (sourceRef && state.conversionSourceImageData !== sourceRef) return false;
+          gpuPreviewScheduler.exactApplied(token);
           if (repairedPreviewShown && repairedPreviewShown === state.previewSourceImageData
             && repairedPreviewMatches(repairedPreviewMasks)) {
             // The repaired preview stays on screen until detection repairs
@@ -6515,10 +6763,14 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           // 古い設定のフレームを「書き出し可能な原寸」としては扱わない。
           const superseded = token !== coreReprocessToken;
           const nextPreview = coreReprocessScheduled || _coreReprocessPending;
-          if (superseded && (!nextPreview || routeCoreRequest(nextPreview).full || nextPreview.token !== coreReprocessToken)) return false;
+          // A GPU frame of newer settings is on screen: never step back to older ones.
+          if (superseded && (gpuPreviewScheduler.isAhead() || !nextPreview || routeCoreRequest(nextPreview).full
+            || nextPreview.token !== coreReprocessToken)) return false;
           // Start the worker on the next frame before this one is applied and
           // drawn, so it does not sit idle through the result handling.
           postPendingPreviewEarly(previewFlight);
+          // The exact frame of the newest settings: step3Program shows it from now on.
+          if (!superseded) gpuPreviewScheduler.exactApplied(token);
 
           const replacedSource = displayResizeReplaces(options);
           const repairs = hasFrameRepairs();
@@ -6586,6 +6838,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         // Direct callers (dust toggle, undo, reset and background promotion)
         // also participate in the export barrier, without runCoreReprocess.
         noteCoreReprocessSettled();
+        // A settle that did not apply leaves the display on its exact frame.
+        gpuPreviewScheduler.flightEnded(token);
       }
     }
 
@@ -6631,7 +6885,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       corePreviewCommitTimer = setTimeout(() => {
         corePreviewCommitTimer = null;
         if (!corePreviewRetained) return;
-        if (_coreReprocessPreviewInFlight || _coreReprocessPending || coreReprocessTimer) {
+        // A GPU drag ends in a new exact frame, which supersedes this plane: bringing
+        // it back meanwhile would move it across during the drag.
+        if (_coreReprocessPreviewInFlight || _coreReprocessPending || coreReprocessTimer || gpuPreviewScheduler.isAhead()) {
           armCorePreviewCommitTimer();
           return;
         }
@@ -6929,6 +7185,18 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // waiting for the debounce to fire, so an export issued in between waits
       // for the new conversion instead of writing the previous one.
       if (!displayOnly && hasSeparateConversionPreview()) state.fullResolutionPending = true;
+      // #239: the GPU draws the request at the next frame and its exact frame
+      // settles it later. A commit (a select, `commit`) settles at once.
+      if (!full && !displayResize && gpuPreviewCanTake()) {
+        // Requests still held for the worker would only convert superseded settings.
+        clearCoreReprocessTimer();
+        coreReprocessScheduled = null;
+        if (_coreReprocessPending && !_coreReprocessPending.full) _coreReprocessPending = null;
+        gpuPreviewScheduler.request(token, { settle: Boolean(options.commit) });
+        return;
+      }
+      // A conversion carries the newest settings now; it settles a GPU frame on screen.
+      gpuPreviewScheduler.handOver(token);
       const wasFull = coreReprocessScheduled?.full;
       coreReprocessScheduled = { full, token, sourceRef: state.conversionSourceImageData, displayResize, displayResizeFrom };
       if (full) {
@@ -6984,6 +7252,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // the screen.
     async function flushScheduledCoreReprocess() {
       for (let guard = 0; guard < 8; guard++) {
+        // A GPU frame on screen settles into its exact frame now.
+        gpuPreviewScheduler.settleNow();
         if (coreReprocessTimer) {
           clearCoreReprocessTimer();
           const scheduled = takeScheduledCoreReprocess();
@@ -10123,6 +10393,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           updateEnlargerUI();
           // Releasing the slider settles the drag: bring the plane back.
           requestCorePreviewCommit();
+          // A GPU frame shows this value (#239): its exact frame leaves now.
+          if (gpuPreviewScheduler.settleNow()) return;
           // An unchanged token proves nothing else asked for a frame since
           // this value's request. The conversion reads live state when it
           // starts, so the queued, running or finished frame already shows it.
@@ -10148,6 +10420,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       onCommit: (value) => {
         cacheBorderBufferValueForBorderMode(value);
         scheduleSilverSourceRefresh({ immediate: true });
+        gpuPreviewScheduler.settleNow();
       }
     };
 
@@ -10178,10 +10451,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     setupSlider('coreCyan', 'coreCyan', coreReprocessHandlersFor('coreCyan'));
     populatePaperOptions();
     setupSelect('corePaper', 'corePaper', {
-      onChange: () => { updatePaperUI(); scheduleCoreReprocess({ full: false }); }
+      onChange: () => { updatePaperUI(); scheduleCoreReprocess({ full: false, commit: true }); }
     });
     setupSelect('corePaperToning', 'corePaperToning', {
-      onChange: () => scheduleCoreReprocess({ full: false })
+      onChange: () => scheduleCoreReprocess({ full: false, commit: true })
     });
     setupSlider('corePaperToningStrength', 'corePaperToningStrength', coreReprocessHandlersFor('corePaperToningStrength'));
     setupSlider('coreSaturation', 'coreSaturation', coreReprocessHandlersFor('coreSaturation'));
