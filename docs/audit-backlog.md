@@ -449,10 +449,10 @@ Remaining performance proposals below are not claims of completed work.
 ## Other
 
 
-- **low/research** — Full-resolution conversion preserves an independent source by copying it into the worker
+- **low/research** — Interactive full-resolution conversion preserves an independent source by copying it into the worker
   `negative2positive/src/app/conversionWorkerClient.js:createConversionWorkerClient`
-  The preview client already caches source/analysis inputs, and #204 adds main-thread per-slot 8-bit promotion reuse. Full-resolution conversions still copy the required source plane because the caller continues using it; large one-off worker heaps are then released, while batch workers live only for their batch. This is an explicit ownership/memory tradeoff, not a claim that all current slider previews clone full scans.
-  _Next step:_ Measure repeated full-resolution workloads before changing residency or ownership. Any redesign must retain caller usability, bound resident worker heaps, avoid detached cache buffers and preserve cancellation/export behavior.
+  Batch export no longer copies: its lanes borrow the decoded base or take over a geometry output (`handoff`, #250) and release their caches after each frame. The interactive clients still clone: the preview client caches source/analysis inputs (#204 adds main-thread per-slot 8-bit promotion reuse), and the open photo's full-resolution conversion copies the source plane because the editor keeps using it; large one-off worker heaps are then released. This is an explicit ownership/memory tradeoff for the editor's planes, not a claim that all current slider previews clone full scans.
+  _Next step:_ Measure repeated interactive full-resolution workloads before changing residency or ownership (#256, #264). Any redesign must retain caller usability, bound resident worker heaps, avoid detached cache buffers and preserve cancellation/export behavior.
 
 
 - **low/a11y** — Focus ring removed on the JPEG quality slider and weakened on selects/number inputs; .recommended-action outline masks the focus ring  

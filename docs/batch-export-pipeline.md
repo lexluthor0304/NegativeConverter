@@ -34,12 +34,14 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
   window is hidden never blocks the in-order sink.
 - Each batch owns a pool of conversion workers
   (`createConversionWorkerPool`, kept alive across frames instead of
-  restarting per file) and, with more than one lane, a pool of export workers
-  (`createExportWorkerPool`) for the adjustment and 16-bit encode stages.
-  Both are released when the batch ends. The on-device AI repair session is
-  shared, so lanes take turns with it (`withAiRepairTurn`). Lanes look tiles
-  up in the session's tile memo but never insert (`memoInsert: false`), so a
-  roll export does not evict the open photo's tiles (#246).
+  restarting per file) and a pool of export workers (`createExportWorkerPool`,
+  one per lane, a single lane included) for the adjustment and encode stages.
+  Both are released when the batch ends, so a one-lane batch (every frame
+  over 40 MP) no longer leaves its export worker, and its dead planes, in
+  the module-level bridge (#250). The on-device AI repair session is shared,
+  so lanes take turns with it (`withAiRepairTurn`). Lanes look tiles up in
+  the session's tile memo but never insert (`memoInsert: false`), so a roll
+  export does not evict the open photo's tiles (#246).
 - The geometry chain (base → rotation → mirror → crop) runs in one pass that
   only builds the cropped window, for right angles and mirror-only geometry
   too, bit-identical to the step chain (`planGeometry` + `renderGeometryRows`
@@ -140,15 +142,46 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
   the worker (#240). Before, the bridge read the plane as bytes, `ImageData`
   rejected the doubled length, and every lane redid the 16-bit pass on the
   main thread, one after another.
-- The JPEG HDR gain map runs only when `renderBatchExportFile` asks for it
-  (`options.gainMap`: JPEG, gain map on, no sprocket frame); the contact
-  sheet and watch-folder imports never start one. The export worker runs
-  the map's 16-bit pass and the exact table map (`workerGainMap16`) while
-  the main thread encodes the SDR JPEG, and only the map (1/16 of the
-  pixels) comes back. The frame's conversion plane is transferred to the
-  worker without a copy (the map is its last reader); if the worker dies
-  holding it (`ExportInputLostError`), the frame is rendered once more with
-  a copied plane, so the file never depends on the failure.
+- Planes stay with the workers (#250). `renderBatchExportFile` asks
+  `processFileWithSettings` for the frame only up to `stage: 'processed'`
+  (after dust, brush, auto WB and expired rescue) and runs adjust, sprocket
+  frame and encode itself, so every plane of the frame belongs to it and
+  moves to the next worker without a copy:
+  - the 16-bit source goes to the conversion lane with a transfer list
+    (`handoff`): the decoded base is lent and comes back with the result
+    (it is read again for the analysis region, the brush mapping and
+    expired rescue); a geometry or lens output is handed over and the
+    adapter writes the result into it (`ownedSource`: no clone, the film
+    base and flat field pass in place). 8-bit sources keep the clone;
+  - every lane message sets `releaseAfter`, so the lane drops its pristine
+    plane, source, analysis inputs and promotion after each frame
+    (`releaseSlotBuffers`);
+  - a 16-bit TIFF without the sprocket frame is one `adjust16AndEncode`
+    request: only the Blob comes back. So is a 16-bit PNG when the batch has
+    no PNG16 band pool (three or more lanes); with a pool the adjusted plane
+    comes back by transfer and the pool encodes its bands (#257), the same
+    bytes as the fused request;
+  - otherwise the processed frame moves into the adjust stage (in place in
+    the worker) and the adjusted frame into the encoder. PNG8 and JPEG are
+    encoded in the export worker through `OffscreenCanvas` (`encodeImage`);
+    the JPEG gain map (JPEG, gain map on, no sprocket frame) travels in the
+    same request with the unadjusted plane, and only the map's JPEG comes
+    back. The contact sheet and watch-folder imports never start a map.
+  If a worker dies holding a plane (`ExportInputLostError`, or `INPUT_LOST`
+  from the conversion lane), the frame is rendered once more from decode
+  with copies, so the file never depends on the failure. The main-thread
+  conversion fallback never sees a detached source.
+- Nothing the frame allocated outlives it: the planes
+  `processFileWithSettings` created (decode, geometry, conversion, repairs),
+  the adjusted frame and the sprocket frame are stamped export-owned and
+  released once the file is encoded (`releaseOwnedPlanes` in
+  `app/planeRelease.js`: `transfer(0)` on WebKit, a throwaway worker on
+  Chromium), instead of stacking under the next frame's decode until the
+  next major GC. A plane that the editor, a photo session or history still
+  references is never transferred or released. Single export does the same
+  with a bridge of its own that it terminates when the export ends; the
+  contact sheet and the watch folder release their full-resolution planes
+  once the thumbnail exists.
 - Batch frames run frame detection silently (`processFileWithSettings`
   `silent: true`): a never-analysed frame gets no blocking overlay and no
   frame wait, so a hidden window keeps exporting. Each job writes a marker so
@@ -221,6 +254,7 @@ npm test            # includes batchExportScheduler, conversion pool, export poo
 npm run test:smoke  # batch export scenario (ZIP fallback to individual downloads), roll import
 npm run test:smoke -- --gain-map-only  # real-worker 16-bit result and gain map, gain-map requests per export intent
 npm run test:smoke -- --png16-only     # PNG16 band pool in real workers: same bytes for 1/2/6 workers, one worker and the main thread
+npm run test:smoke -- --export-ownership-only  # worker PNG8/JPEG parity, per-export workers, plane hand-off
 node scripts/performance-io-benchmark.mjs /path/to/baseline
 ```
 

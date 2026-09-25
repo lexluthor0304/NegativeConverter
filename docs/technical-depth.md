@@ -41,6 +41,23 @@ with the fog surface). The 8-bit preview is unchanged, the `bitDepth8BitData` wa
 gone, and the dead `original16 / cropped16 / processed16` state fields with
 it.
 
+Since #250 a 16-bit TIFF/PNG without the sprocket frame is one worker
+request (`adjust16AndEncode`): the worker adjusts the unadjusted plane in
+place and encodes it, and only the Blob comes back, so the adjusted plane
+never exists on the main thread and no 8-bit mirror is built. A 16-bit PNG
+that has a PNG16 band pool (#257: a single export, or a batch of one or two
+lanes) is the exception: the adjust request returns the adjusted plane by
+transfer and the pool encodes its bands in parallel, with the same bytes. Both
+adjustment handlers work in place (the kernels read a pixel's samples before
+writing it), and the worker's TIFF encoder compacts the owned plane RGBA16 →
+RGB16 in place and uses its first 6·w·h bytes as the strip, byte-identical on
+little-endian hosts; the main-thread fallback keeps the copying loop. With
+the sprocket frame the mirror is still built (`needs8`). Tests:
+`exportWorker.test.mjs` (in-place handlers against fresh-buffer references,
+fused bytes against adjust + encode, the owned strip and its endianness
+guard), `exportPlaneLifecycle.test.mjs` (the export functions of `main.js`
+against the real bridge and worker).
+
 Timing on a 24 MP frame (`scripts` benchmark, Node 26, Apple silicon):
 
 | chain | 8-bit | 16-bit |
