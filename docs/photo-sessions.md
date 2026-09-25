@@ -45,7 +45,11 @@ dust detection or brush refinement is not a settled session, nor is an open
 reduced preview-tier drag or a reduced frame still waiting for its normal-size
 tick (#263). Preview-only
 restoration keeps the full-resolution pending flag: export must still pass the
-existing full-resolution barrier. Presentation proxies never become export
+existing full-resolution barrier. Every snapshot records whether its plane is a
+display preview and whether it lags its settings (#237); a session that swaps
+its plane for the display preview updates both, and a plane that is not the
+size of the conversion source always restores as a preview. A restore paints
+the display planes the snapshot captured instead of resampling its plane. Presentation proxies never become export
 sources. Queue removal and closing the session release retained entries.
 
 Navigation invalidates older asynchronous activations. A late decode or
