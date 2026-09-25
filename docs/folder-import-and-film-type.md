@@ -15,8 +15,9 @@ or export source. The folder regression counts these jobs as their own
 ≤ its preview + 32 KB).
 
 Automatic roll preparation keeps the same geometry-applied, 900-pixel analysis
-samples for the subsequent roll analysis, each with the base's size and a
-16384-pixel 16-bit analysis reference taken while the frame is decoded. Frames
+samples for the subsequent roll analysis, each with the base's size, a
+16384-pixel 16-bit analysis reference and the frame's 288 px tile working
+image, taken while the frame is decoded. Frames
 a scheduled roll import owns get no lane render before it finishes, with or
 without a recipe: a thumbnail recipe set in the gap would leave the frame
 without a pass-1 sample, and any lane decode there would be a second decode of

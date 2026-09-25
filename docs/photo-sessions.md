@@ -349,10 +349,12 @@ fixture retained 2678/4610/4375 distinct RGB levels. All three final whole-roll
 B&W thumbnails had zero measured chroma, retained images during the pending
 phase, and the delayed cold-read race left the latest selection active.
 
-Roll tiles are canonical at the commit (#247): the roll renders each frame's
-tile from its 900 px sample through the lane's renderer, with the 16-bit
-analysis reference and base size pass 1 took while the decoded frame was in
-hand, on a size-1 conversion pool. A tile is `processed` when the frame has
+Roll tiles are canonical at the commit (#247): pass 1, while the decoded
+frame is in hand, keeps with its 900 px sample the base size, a 16-bit
+analysis reference and the lane's own reduced working image of the frame
+(the strided plan, so the tile samples the frame where a lane decode would),
+and the roll renders each tile from that through the lane's renderer on a
+size-1 conversion pool. A tile is `processed` when the frame has
 no active lens correction and its settings key at the commit equals the key
 it was rendered for; otherwise (lens correction, or a global dust, AI or
 flat-field change while the commit waited) it stays `analysis` and the lane
