@@ -144,6 +144,8 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
     getCurrentQueueItem: () => null, cancelGeometryJob: noop, whenGeometrySettled: noop,
     // No pending crop-area detection (#245).
     cancelCropDetection: noop, settlePendingCropDetection: async () => {},
+    // The background lanes' gate (#243).
+    backgroundGate: { bump: noop },
     noteDustReplaced: noop, syncDustWorkerPin: noop,
     // No GPU preview (#239): these frames take the worker path.
     gpuPreviewScheduler: DISABLED_GPU_PREVIEW_SCHEDULER, gpuPreviewCanTake: () => false, gpuPreview: { status: 'none' },
@@ -595,13 +597,17 @@ for (const large of [false, true]) {
   assert.notEqual(discarded, exact);
   f.context.clearFullResolutionRenderState();
   assert.equal(discarded.request.signal.aborted, true, 'a discarded pipeline aborts its exact render');
-  // Below 16 MP the shared client stays in use and nothing is aborted.
+  // Below 16 MP the shared client stays in use and a settings change aborts
+  // nothing: the request carries only the photo activation's signal (#243).
   const g = fixture({ large: false });
   g.state.fullResolutionPending = true;
   void g.context.startFullResolutionRender('export');
   await settle();
   assert.equal(count(g).shared, 1);
-  assert.equal(g.clients.shared[0].request.signal, null);
+  const sharedSignal = g.clients.shared[0].request.signal;
+  assert.equal(sharedSignal, g.context.fullResolutionRenderAbort.signal);
+  g.context.scheduleCoreReprocess({ full: false });
+  assert.equal(sharedSignal.aborted, false, 'a settings change does not abort it');
 }
 
 // ---- B, Phase 2: the repaired preview source ----

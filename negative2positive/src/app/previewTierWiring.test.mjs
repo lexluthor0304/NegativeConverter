@@ -148,6 +148,8 @@ function fixture({ width = 3000, height = 2000, repairs = false, largePreviewFra
     ensureAiBrushPlane: () => {},
     // No GPU preview (#239): the tier's frames take the worker path.
     gpuPreviewScheduler: DISABLED_GPU_PREVIEW_SCHEDULER, gpuPreviewCanTake: () => false, gpuPreview: { status: 'none' },
+    // The background lanes' gate (#243).
+    backgroundGate: { bump() {} },
     FULL_RESOLUTION_IDLE_DELAY_MS: 2500, scheduleFullResolutionRender: (reason) => { log.push(`full-render:${reason}`); return null; },
   });
   vm.runInContext([
