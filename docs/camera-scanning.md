@@ -155,6 +155,34 @@ image instead of an orange negative. The conversion uses the adapter's
 `scratch` cache slot, so the open photo's preview and export caches are
 untouched.
 
+How it runs (#261):
+
+- **Paced by the camera.** `video.requestVideoFrameCallback` drives it:
+  each presented camera frame converts at most once, one at a time; when a
+  conversion ends, the newest frame converts at once and the ones in
+  between are dropped. Without the API, or without a callback within
+  200 ms of a playable video, display frames thinned to the track's frame
+  rate (30 if unknown) drive it instead.
+- **Off the main thread.** The loupe has its own conversion worker
+  (created when it opens, released when it closes, so the editor's
+  preview worker keeps its cached source). The worker runs the router and
+  then the adjustment stage with prepared settings
+  (`pipeline/adjustedFrame.js`, shared with the main-thread fallback) and
+  returns the 8-bit frame; the frame's pixels are transferred, not copied.
+  The main thread only grabs (`drawImage` + `getImageData`) and paints.
+  If the worker cannot start, crashes or times out, the loupe converts on
+  the main thread for the rest of the session.
+- **Recipe built once.** Router settings and prepared adjustments are
+  built when needed and rebuilt when an edit bumps the edit revision (the
+  panel, the C/M/Y/D/N keys, undo/redo), when "hold to see before",
+  the photo, the step or the frame size changes, and at most once a
+  second otherwise. The automatic recipe's film type and base therefore
+  follow the camera once a second instead of every frame; auto levels
+  still follow every frame (the analysis stays inside the conversion).
+  The worker keeps the recipe until it changes.
+- **Show raw** neither grabs nor converts; the canvas keeps the last
+  converted frame, and switching back converts the newest one at once.
+
 Controls: camera selection, zoom and torch where the track offers them
 (`MediaStreamTrack.getCapabilities`), **Show raw** to see the feed itself,
 and **Capture to photos**, which takes a still (`ImageCapture.takePhoto`
@@ -172,5 +200,14 @@ close and on page hide.
   match against a warmer, cropped, downscaled copy of the preview, average
   merge of three noisy shifted shots (grain 7 → 4) plus an HDR bracket pair,
   and the loupe against Chrome's fake camera (launch flags
-  `--use-fake-device-for-media-stream --use-fake-ui-for-media-stream`).
+  `--use-fake-device-for-media-stream --use-fake-ui-for-media-stream`):
+  conversions in the loupe's worker, no more than the presented camera
+  frames, the automatic recipe at most once a second, Show raw idle, the
+  C key and Ctrl+Z reaching the loupe within two frames, and no loupe
+  worker or track left after closing it (`?debugCounters=1`).
+- `conversionWorker.test.mjs` — a 640×360 frame and recipe give
+  byte-identical RGBA in the worker and on the main thread (colour, B&W,
+  positive); `liveLoupe.test.mjs` runs the real loop from `main.js`
+  against a scripted camera (pacing, raw view, recipe rebuilds, worker
+  release and fallback).
 - Fixtures come from `node scripts/make-camera-fixtures.mjs`.

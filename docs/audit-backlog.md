@@ -246,11 +246,6 @@ Remaining performance proposals below are not claims of completed work.
   applyLensCorrectionWithSettings returns the uncorrected imageData on ensureLensfunClient failure or buildCorrectionMaps/apply exceptions and only surfaces the reason through setLensStatus when updateUi is true. The export/batch path calls it with `{ updateUi: false }` (line 9559), so an exported or batch-exported file can silently lack the distortion/TCA/vignetting correction the user enabled and …  
   _Suggested fix:_ Always console.warn the reason, and return `{ imageData, skipped: true, reason }` (or set a flag on the export result) so the export routine can show a toast / mark the item in the batch summary when lens correction was requested but not applied.
 
-- **low/ux** — Curve editor renders blank when first revealed because renderCurve sizes the canvas from a hidden element _(verified)_  
-  `negative2positive/src/app/main.js:3499`  
-  renderCurve sets curveCanvas.width/height from offsetWidth/offsetHeight. The canvas lives in additionalSection (display:none, content collapsed in index.html ~1180-1187) and renderCurve is only called from curve interactions, restoreSnapshot (2366), reset (8597) and restoreSettings (10321) - all of which can run while the section is hidden, producing a 0x0 canvas. Nothing calls renderCurve when th…  
-  _Suggested fix:_ Call renderCurve() from the section-header toggle for 'additional' and from setPanelMode('detail'), or attach a ResizeObserver to curveCanvas that calls renderCurve when its size becomes non-zero; skip resizing when offsetWidth === 0.
-
 - **low/ux** — Histogram does not follow core-control changes in WebGL mode until the full-res render lands _(verified)_  
   `negative2positive/src/app/main.js:4687`  
   applyPreviewProcessedImageToState refreshes previewSourceImageData and webglSourceImageData for the new preview conversion but not histogramSourceImageData. renderHistogramForWebGL prefers histogramSourceImageData, so while dragging core sliders/keypad the displayed image updates but the histogram keeps showing the previous conversion for at least ~1.8 s (1200 ms + 600 ms + render time) until the …  

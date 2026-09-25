@@ -89,9 +89,11 @@ Worker を起動できない環境では主スレッドへフォールバック�
   主スレッドの反転コピーをなくした（フレームバッファの向きは不変）。テクスチャは
   寸法が変わる時だけ `texImage2D` で確保してその直後に一度だけ `getError` を確認し、
   同寸は `texSubImage2D`。描画ごとの `getError` は削除（`?debugGL` で復活）。
-  `#canvasContainer` の寸法は ResizeObserver で保持し（ウィンドウの `resize` では
-  先に実測で更新）、`adjustCanvasDisplay` は入力（原寸基準の寸法・容器・ズーム・DPR）が
-  変わらなければ何もしない。DPR 変更は `matchMedia` で検出する。
+  `#canvasContainer` の寸法は ResizeObserver で保持し（ResizeObserver のない環境だけ
+  ウィンドウの `resize` で実測）、`adjustCanvasDisplay` は入力（原寸基準の寸法・容器・
+  ズーム・DPR）が変わらなければ何もしない。容器の寸法が変わっても描画バッファは
+  テクスチャに従うため、表示枠を合わせ直すだけで描き直さない（#261）。DPR 変更は
+  `matchMedia` で検出する。
 - **ズームは合成のみ。** ズームの各段は CSS 変換だけを変え、再描画しない。描画バッファは
   ズームではなく描画するテクスチャの寸法に従うため、100ms 後に表示用プレビューが
   新しい寸法で届いた時だけ変わり、同じタスクで描き直す。リサイズでバッファが消えて
