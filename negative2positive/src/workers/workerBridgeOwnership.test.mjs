@@ -496,6 +496,16 @@ async function withEventLoopAlive(fn) {
   bridge.terminateWorker();
   assert.equal(await hung, null);
 
+  // The memory ledger's resident (#258): the last request's planes while the
+  // worker lives, nothing once it is released.
+  script = () => ({ kind: 'blob' });
+  const plane = { width: 20, height: 10, data: new Uint8ClampedArray(800) };
+  await bridge.workerEncodeTiff(plane, 8);
+  assert.ok(bridge.hasWorker);
+  assert.equal(bridge.residentBytes, 800);
+  bridge.terminateWorker();
+  assert.equal(bridge.residentBytes, 0);
+
   // Bridges without the option never release on their own.
   workers = [];
   const plain = createExportWorkerBridge();

@@ -63,11 +63,15 @@ export function createPhotoSessionCache({ maxBytes = DEFAULT_MAX_BYTES } = {}) {
   const entries = new Map();
   const owners = new Map();
   let bytes = 0;
+  // The entry stored last (the photo the user just left, #258): pressure and
+  // idle trimming keep it, so the warm 1-back switch survives them.
+  let lastStoredKey;
 
   function remove(key) {
     const entry = entries.get(key);
     if (!entry) return null;
     entries.delete(key);
+    if (key === lastStoredKey) lastStoredKey = undefined;
     for (const buffer of entry.buffers) {
       const owner = owners.get(buffer);
       owner.count--;
@@ -103,6 +107,7 @@ export function createPhotoSessionCache({ maxBytes = DEFAULT_MAX_BYTES } = {}) {
         }
       }
       while (bytes > maxBytes) remove(entries.keys().next().value);
+      if (entries.has(key)) lastStoredKey = key;
       return true;
     },
     // Stores only if it fits next to everything retained, evicting nothing
@@ -136,14 +141,32 @@ export function createPhotoSessionCache({ maxBytes = DEFAULT_MAX_BYTES } = {}) {
       entries.clear();
       owners.clear();
       bytes = 0;
+      lastStoredKey = undefined;
     },
     retainKeys(keys) {
       const retained = new Set(keys);
       for (const key of entries.keys()) if (!retained.has(key)) remove(key);
     },
+    /**
+     * Evict least recently used entries until at most `targetBytes` are
+     * retained, never one of the keys in `keep` (#258). Returns the bytes
+     * this cache let go; a buffer another retained entry shares stays.
+     */
+    trim(targetBytes, { keep = [] } = {}) {
+      const target = Math.max(0, Number(targetBytes) || 0);
+      const kept = new Set(keep);
+      const before = bytes;
+      for (const key of [...entries.keys()]) {
+        if (bytes <= target) break;
+        if (!kept.has(key)) remove(key);
+      }
+      return before - bytes;
+    },
     /** The unique backing buffers retained, to count them with other graphs. */
     buffers() { return owners.keys(); },
     get bytes() { return bytes; },
     get size() { return entries.size; },
+    /** The key of the entry stored last, while it is still retained. */
+    get lastStoredKey() { return lastStoredKey; },
   };
 }

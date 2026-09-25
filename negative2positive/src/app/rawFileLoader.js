@@ -124,16 +124,18 @@ function withTimeout(promise, ms, onTimeout) {
 /**
  * Decide whether a decode of this size fits the device.
  *
- * Only `navigator.deviceMemory` is trusted (undefined on Safari/Firefox, 8 on
- * desktop Chrome), and only when it reports 4 GB or less — no UA or
- * pointer-coarse sniffing, so desktop behaviour is unchanged.
+ * `navigator.deviceMemory` (undefined on Safari/Firefox, up to 32 on desktop
+ * Chrome) or, when the host knows it, the real RAM (`ramBytes`, #258: the
+ * desktop app's own query) is trusted, and only when it is 4 GB or less —
+ * no UA or pointer-coarse sniffing, so larger machines are never refused.
  */
-export function checkRawDecodeBudget(width, height, deviceMemoryGb) {
+export function checkRawDecodeBudget(width, height, deviceMemoryGb, { ramBytes = null } = {}) {
   const estimatedBytes = estimateRawDecodeBytes(width, height);
-  if (!Number.isFinite(deviceMemoryGb) || deviceMemoryGb <= 0 || deviceMemoryGb > RAW_LOW_MEMORY_GB) {
+  const memoryGb = Number.isFinite(ramBytes) && ramBytes > 0 ? ramBytes / (1024 * 1024 * 1024) : deviceMemoryGb;
+  if (!Number.isFinite(memoryGb) || memoryGb <= 0 || memoryGb > RAW_LOW_MEMORY_GB) {
     return { ok: true, estimatedBytes, budgetBytes: Infinity };
   }
-  const budgetBytes = deviceMemoryGb * 1024 * 1024 * 1024 * RAW_MEMORY_BUDGET_RATIO;
+  const budgetBytes = memoryGb * 1024 * 1024 * 1024 * RAW_MEMORY_BUDGET_RATIO;
   return { ok: estimatedBytes <= budgetBytes, estimatedBytes, budgetBytes };
 }
 
@@ -180,18 +182,33 @@ async function loadTiffBuffer(buffer, signal = null) {
  * metadata or imageData call rejects at once) and terminates the post-decode
  * worker, and the load rejects with an AbortError. The stages after LibRaw
  * are skipped once the signal is aborted, and no fallback runs for it.
+ *
+ * `options.reserveDecode` (#258): the memory budget's gate. It is awaited
+ * before every branch decodes: with the LibRaw size (`width`, `height`,
+ * `estimatedBytes`) right after `raw.metadata()`, and without a size before a
+ * UTIF, embedded-preview or browser decode (the host then uses the header).
+ * A host whose reservation already covers the decode resolves at once.
+ * `options.ramBytes`: the machine's RAM when the host knows it, for the
+ * low-memory refusal.
  */
 export async function loadRawFile(buffer, fileName, options = {}) {
   const normalizedFileName = String(fileName || '').toLowerCase();
   const onMetadata = typeof options.onMetadata === 'function' ? options.onMetadata : null;
   const fastPreview = options.preview === true;
   const signal = options.signal || null;
+  const reserveDecode = typeof options.reserveDecode === 'function' ? options.reserveDecode : null;
+  const reserve = async (size = {}) => {
+    if (!reserveDecode) return;
+    await reserveDecode(size);
+    throwIfAborted(signal);
+  };
   throwIfAborted(signal);
 
   if (normalizedFileName.endsWith('.tif') || normalizedFileName.endsWith('.tiff')) {
     // A .tif name is not proof of a TIFF container: files renamed by scanning
     // software land here as JPEG or PNG and would only produce a UTIF error.
     const sniffed = sniffImageKind(buffer);
+    await reserve({ kind: 'scan' });
     if (sniffed && sniffed.kind !== 'tiff') {
       console.warn(`[TIFF] ${fileName} is actually ${sniffed.kind}; decoding it as such`);
       if (onMetadata) onMetadata(null);
@@ -214,6 +231,7 @@ export async function loadRawFile(buffer, fileName, options = {}) {
   if (normalizedFileName.endsWith('.dng')) {
     const textSnippet = new TextDecoder().decode(buffer.slice(0, 1000));
     if (textSnippet.includes('iPhone')) {
+      await reserve({ kind: 'scan' });
       try {
         // Preserve the original container for LibRaw if this is a CFA DNG
         // rather than a scanner-style TIFF that UTIF can actually render.
@@ -231,6 +249,7 @@ export async function loadRawFile(buffer, fileName, options = {}) {
   const isIIQ = normalizedFileName.endsWith('.iiq');
   if (isIIQ && bufBytes > RAW_SIZE_HEAVY) {
     console.info('[RAW] heavy IIQ detected, taking embedded preview shortcut');
+    await reserve({ kind: 'scan' });
     const previewImageData = await tryNefJpegPreview(buffer);
     throwIfAborted(signal);
     if (previewImageData) {
@@ -385,11 +404,16 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     const metaHeight = Number(rawMetadata?.height) || 0;
     if (metaWidth > 0 && metaHeight > 0) {
       const scale = useHalfSize ? 0.5 : 1;
-      const budget = checkRawDecodeBudget(metaWidth * scale, metaHeight * scale, readDeviceMemoryGb());
+      const budget = checkRawDecodeBudget(metaWidth * scale, metaHeight * scale, readDeviceMemoryGb(), { ramBytes: options.ramBytes ?? null });
       if (!budget.ok) {
         console.warn('[RAW] decode would exceed this device\'s memory budget', budget);
         throw deviceMemoryError(metaWidth, metaHeight, budget.estimatedBytes);
       }
+      // The renderer-wide budget (#258) with the real size, before the
+      // demosaic allocates anything.
+      await reserve({ kind: 'raw', width: metaWidth * scale, height: metaHeight * scale, estimatedBytes: budget.estimatedBytes });
+    } else {
+      await reserve({ kind: 'raw' });
     }
 
     let result;

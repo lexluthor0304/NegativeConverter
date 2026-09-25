@@ -311,6 +311,25 @@ function viewGainMapResult(msg) {
   };
 }
 
+// Bytes of the pixel planes a request posts: typed arrays and buffers at the
+// top level of the message or one object below it (an __image16 plane).
+function messagePlaneBytes(message) {
+  const seen = new Set();
+  let bytes = 0;
+  const add = (value) => {
+    const buffer = ArrayBuffer.isView(value) ? value.buffer : value instanceof ArrayBuffer ? value : null;
+    if (!buffer || seen.has(buffer)) return false;
+    seen.add(buffer);
+    bytes += buffer.byteLength;
+    return true;
+  };
+  for (const value of Object.values(message || {})) {
+    if (add(value) || !value || typeof value !== 'object') continue;
+    for (const inner of Object.values(value)) add(inner);
+  }
+  return bytes;
+}
+
 function isBlob(value) {
   return Boolean(value) && typeof value.size === 'number' && typeof value.arrayBuffer === 'function';
 }
@@ -329,6 +348,9 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory,
   const pending = new Map();
   let idleTimer = null;
   let largeSinceIdle = false;
+  // The planes of the last request stay in the worker's heap until it is
+  // terminated (the memory ledger's worker resident, #258).
+  let lastJobBytes = 0;
 
   function clearIdleRelease() {
     if (idleTimer !== null) clearTimeout(idleTimer);
@@ -374,6 +396,7 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory,
   function disposeWorker() {
     clearIdleRelease();
     largeSinceIdle = false;
+    lastJobBytes = 0;
     const dying = worker;
     worker = null;
     if (!dying) return;
@@ -480,6 +503,7 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory,
       }
       clearIdleRelease();
       if (idleReleaseMs > 0 && Number(options.pixels) > IDLE_RELEASE_MIN_PIXELS) largeSinceIdle = true;
+      lastJobBytes = messagePlaneBytes(message);
 
       const id = ++requestId;
       message.id = id;
@@ -992,7 +1016,9 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory,
     /** Whether a Worker currently exists (never spawns one, unlike isWorkerAvailable). */
     get workerAlive() { return worker !== null; },
     /** True while a worker instance exists (tests and idle checks). */
-    get hasWorker() { return worker !== null; }
+    get hasWorker() { return worker !== null; },
+    /** Plane bytes of the last request, while its worker lives (#258). */
+    get residentBytes() { return worker !== null ? lastJobBytes : 0; }
   };
 }
 
@@ -1153,5 +1179,6 @@ export const terminateWorker = defaultBridge.terminateWorker;
 // requests; the next call respawns it lazily.
 export const exportWorkerPendingCount = () => defaultBridge.pendingCount;
 export const isExportWorkerAlive = () => defaultBridge.workerAlive;
+export const exportWorkerResidentBytes = () => defaultBridge.residentBytes;
 /** The default bridge itself (tests, idle checks). */
 export const defaultExportBridge = defaultBridge;

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { parseImageDimensions, imagePixelsForBatch, rememberImageDimensions, UNKNOWN_IMAGE_PIXELS } from './imageDimensions.js';
+import { parseImageDimensions, imagePixelsForBatch, imagePixelsWithSiblings, rememberImageDimensions, UNKNOWN_IMAGE_PIXELS } from './imageDimensions.js';
 import { planBatchParallelism } from './batchExportScheduler.js';
 const png = new Uint8Array(24);
 const pv = new DataView(png.buffer);
@@ -26,6 +26,20 @@ const unknown = new File(['invalid'], 'unknown.heic');
 assert.equal(await imagePixelsForBatch(unknown), UNKNOWN_IMAGE_PIXELS);
 rememberImageDimensions(unknown, {width:4000,height:3000});
 assert.equal(await imagePixelsForBatch(unknown), 12_000_000);
+// #258: a header without a size borrows a decoded file's of the same
+// extension (one camera, one roll); another extension or none stays unknown.
+{
+  const decoded = new File(['x'], 'L1000617.RW2');
+  const next = new File(['y'], 'L1000618.rw2');
+  const other = new File(['z'], 'scan.orf');
+  assert.equal(await imagePixelsWithSiblings(next, [decoded, other]), UNKNOWN_IMAGE_PIXELS, 'nothing decoded yet');
+  rememberImageDimensions(decoded, { width: 9536, height: 6336 });
+  assert.equal(await imagePixelsWithSiblings(next, [decoded, other]), 9536 * 6336);
+  assert.equal(await imagePixelsWithSiblings(other, [decoded, next]), UNKNOWN_IMAGE_PIXELS);
+  // A size of its own always wins.
+  rememberImageDimensions(next, { width: 100, height: 50 });
+  assert.equal(await imagePixelsWithSiblings(next, [decoded]), 5000);
+}
 let bytesRead = 0;
 await imagePixelsForBatch({name:'large.png', slice(start,end) { bytesRead += end-start; return new Blob([png]); }});
 assert.equal(bytesRead, 256*1024);

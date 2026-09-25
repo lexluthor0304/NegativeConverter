@@ -31,25 +31,32 @@ async function readEdge(image, options) {
   return result;
 }
 
+// The OpenCV heap this worker holds, reported with every reply so the page's
+// memory ledger can count it (#258). 0 until OpenCV is loaded.
+function cvHeapBytes() {
+  try { return Number(globalThis.cv?.HEAPU8?.buffer?.byteLength) || 0; } catch { return 0; }
+}
+const postReply = (payload, transfers) => self.postMessage({ ...payload, heapBytes: cvHeapBytes() }, transfers);
+
 self.onmessage = async ({ data: message }) => {
   try {
     if (message.type === 'warm-up') {
       // Load and compile OpenCV while the first photo is still decoding, so
       // the first detection does not pay for it.
       await loadCv();
-      self.postMessage({ id: message.id, result: { ready: true } });
+      postReply({ id: message.id, result: { ready: true } });
       return;
     }
     if (message.type === 'read-film-edge') {
       const image = { width: message.width, height: message.height, data: message.rgba };
-      self.postMessage({ id: message.id, result: await readEdge(image, message.options) });
+      postReply({ id: message.id, result: await readEdge(image, message.options) });
       return;
     }
     if (message.type === 'analyze-import') {
       const { reply, transfers } = await runImportRequest(message, {
         loadCv, detect: detectFrameAndRotation, rotate: applyRotationToImageData, readEdge
       });
-      self.postMessage({ id: message.id, result: reply }, transfers);
+      postReply({ id: message.id, result: reply }, transfers);
       return;
     }
     if (isOpenCvAnalysisType(message.type)) {
@@ -61,10 +68,10 @@ self.onmessage = async ({ data: message }) => {
       try {
         output = runOpenCvAnalysisTask(message);
       } catch (error) {
-        self.postMessage({ id: message.id, error: String(error?.message || error), taskError: true });
+        postReply({ id: message.id, error: String(error?.message || error), taskError: true });
         return;
       }
-      self.postMessage({ id: message.id, result: output.result }, output.transfers);
+      postReply({ id: message.id, result: output.result }, output.transfers);
       return;
     }
     if (message.type !== 'analyze-frame') throw new Error(`Unknown auto-frame worker request: ${message.type}`);
@@ -75,8 +82,8 @@ self.onmessage = async ({ data: message }) => {
     const result = packFrameResult(detectFrameForRequest(image, message, message.options, {
       detect: detectFrameAndRotation, rotate: applyRotationToImageData
     }), transfers);
-    self.postMessage({ id: message.id, result }, transfers);
+    postReply({ id: message.id, result }, transfers);
   } catch (error) {
-    self.postMessage({ id: message.id, error: String(error?.message || error) });
+    postReply({ id: message.id, error: String(error?.message || error) });
   }
 };

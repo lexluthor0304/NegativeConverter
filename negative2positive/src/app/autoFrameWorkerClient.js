@@ -45,12 +45,15 @@ export function createAutoFrameWorkerClient({
   let worker = null, sequence = 0;
   let idleTimer = null;
   let abortReleases = 0;
+  // The OpenCV heap the worker last reported (#258's ledger); 0 without one.
+  let heapBytes = 0;
   const pending = new Map();
   function fail(error) {
     clearTimeout(idleTimer);
     if (worker) worker.onmessage = worker.onerror = worker.onmessageerror = null;
     worker?.terminate();
     worker = null;
+    heapBytes = 0;
     for (const entry of pending.values()) { clearTimeout(entry.timer); entry.reject(error); }
     pending.clear();
   }
@@ -76,6 +79,7 @@ export function createAutoFrameWorkerClient({
         worker.onerror = () => fail(new Error('Auto-frame worker crashed'));
         worker.onmessageerror = () => fail(new Error('Auto-frame worker returned invalid data'));
         worker.onmessage = ({ data }) => {
+          if (Number.isFinite(data?.heapBytes)) heapBytes = data.heapBytes;
           const entry = pending.get(data.id);
           if (!entry) {
             // The reply to an aborted request: the worker is free again.
@@ -114,6 +118,7 @@ export function createAutoFrameWorkerClient({
           worker.onmessage = worker.onerror = worker.onmessageerror = null;
           worker.terminate();
           worker = null;
+          heapBytes = 0;
           abortReleases += 1;
         }
         entry.reject(abortError());
@@ -214,6 +219,16 @@ export function createAutoFrameWorkerClient({
   // How many workers an abort terminated, and whether one is running now.
   Object.defineProperty(request, 'abortReleases', { get: () => abortReleases });
   Object.defineProperty(request, 'alive', { get: () => Boolean(worker) });
+  // The memory ledger's worker resident (#258): the OpenCV heap while a
+  // worker lives, whether it has work, and a release for the idle check
+  // (the next request starts a fresh worker).
+  Object.defineProperty(request, 'residentBytes', { get: () => (worker ? heapBytes : 0) });
+  Object.defineProperty(request, 'busy', { get: () => pending.size > 0 });
+  request.releaseIdle = () => {
+    if (!worker || pending.size) return false;
+    fail(new Error('Auto-frame worker released while idle'));
+    return true;
+  };
   return request;
 }
 

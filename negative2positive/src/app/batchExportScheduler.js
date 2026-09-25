@@ -15,17 +15,43 @@
  * job as failed without stopping the others.
  */
 
+import { budgetFor, LOW_MEMORY_RAM_BYTES } from './memoryBudget.js';
+
 // One in-flight frame keeps roughly 50 bytes per pixel alive across the RAW
 // decoder heap, the 16-bit source, the worker clone, the 16-bit and 8-bit
 // results and the encoder canvas (measured: four 18.5 MP DNG lanes peak at
-// ~3.7 GB of renderer RSS in Chrome). Budget the parallelism by pixels so a
+// ~3.7 GB of renderer RSS in Chrome). Lanes are planned in bytes (#258): a
 // roll of 18 MP camera scans runs four wide, 24 MP three wide, 36 MP two wide
-// and a 100 MP flatbed scan stays sequential; devices that report 4 GB or
-// less get a third of that.
-export const BATCH_PIXEL_BUDGET = 80_000_000;
-export const BATCH_PIXEL_BUDGET_LOW_MEMORY = 28_000_000;
+// and a 100 MP flatbed scan stays sequential within the historical 4.0 GB
+// (80 MP) lane budget; devices with 4 GiB or less get 1.4 GB (28 MP). When
+// the real RAM is known, half of the renderer-wide budget may be used
+// instead, which only ever raises the plan (32 GiB and more: 7.5 GB, two
+// 60 MP lanes). The runtime reservations (memoryBudget.js) admit fewer lanes
+// where the plan is optimistic: the planned count is only a ceiling.
+export const LANE_BYTES_PER_PIXEL = 50;
+export const LEGACY_LANE_BUDGET_BYTES = 80e6 * LANE_BYTES_PER_PIXEL;
+export const LEGACY_LOW_MEMORY_LANE_BUDGET_BYTES = 28e6 * LANE_BYTES_PER_PIXEL;
+export const BACKGROUND_SHARE = 0.5;
+// The pixel budgets these replace (for callers that still speak pixels).
+export const BATCH_PIXEL_BUDGET = LEGACY_LANE_BUDGET_BYTES / LANE_BYTES_PER_PIXEL;
+export const BATCH_PIXEL_BUDGET_LOW_MEMORY = LEGACY_LOW_MEMORY_LANE_BUDGET_BYTES / LANE_BYTES_PER_PIXEL;
 export const BATCH_MAX_PARALLEL = 4;
 export const BATCH_LOW_MEMORY_GB = 4;
+
+/**
+ * The bytes the lanes of one batch may plan with.
+ *
+ * @param {{deviceMemory?: number, ramBytes?: number|null}} [options]
+ */
+export function planLaneBudgetBytes({ deviceMemory, ramBytes = null } = {}) {
+  const ramKnown = Number.isFinite(ramBytes) && ramBytes > 0;
+  const lowMemory = (Number.isFinite(deviceMemory) && deviceMemory > 0 && deviceMemory <= BATCH_LOW_MEMORY_GB)
+    || (ramKnown && ramBytes <= LOW_MEMORY_RAM_BYTES);
+  // A device that reports 4 GB or less keeps the low-memory plan whatever
+  // else is known; otherwise real RAM can only raise the historical plan.
+  if (lowMemory) return LEGACY_LOW_MEMORY_LANE_BUDGET_BYTES;
+  return ramKnown ? Math.max(LEGACY_LANE_BUDGET_BYTES, BACKGROUND_SHARE * budgetFor({ ramBytes })) : LEGACY_LANE_BUDGET_BYTES;
+}
 
 /**
  * How many files may be processed at once.
@@ -33,6 +59,8 @@ export const BATCH_LOW_MEMORY_GB = 4;
  * @param {object} options
  * @param {number} [options.hardwareConcurrency] navigator.hardwareConcurrency
  * @param {number} [options.deviceMemory] navigator.deviceMemory (GB), when reported
+ * @param {number|null} [options.ramBytes] the machine's RAM when known (the
+ *   desktop command, or deviceMemory on the web; null when unknown)
  * @param {number} [options.pixelsPerFile] largest frame in the batch, in pixels
  * @param {number} [options.fileCount]
  * @returns {number} 1..BATCH_MAX_PARALLEL
@@ -40,6 +68,7 @@ export const BATCH_LOW_MEMORY_GB = 4;
 export function planBatchParallelism({
   hardwareConcurrency,
   deviceMemory,
+  ramBytes = null,
   pixelsPerFile,
   fileCount = Infinity,
   maxParallel = BATCH_MAX_PARALLEL
@@ -49,10 +78,9 @@ export function planBatchParallelism({
     : 4;
   // The main thread and the encoder need cores of their own.
   const byCores = Math.max(1, Math.min(maxParallel, cores - 2));
-  const lowMemory = Number.isFinite(deviceMemory) && deviceMemory > 0 && deviceMemory <= BATCH_LOW_MEMORY_GB;
-  const budget = lowMemory ? BATCH_PIXEL_BUDGET_LOW_MEMORY : BATCH_PIXEL_BUDGET;
-  const pixels = Number.isFinite(pixelsPerFile) && pixelsPerFile > 0 ? pixelsPerFile : budget;
-  const byMemory = Math.max(1, Math.floor(budget / pixels));
+  const laneBudget = planLaneBudgetBytes({ deviceMemory, ramBytes });
+  const pixels = Number.isFinite(pixelsPerFile) && pixelsPerFile > 0 ? pixelsPerFile : laneBudget / LANE_BYTES_PER_PIXEL;
+  const byMemory = Math.max(1, Math.floor(laneBudget / (LANE_BYTES_PER_PIXEL * pixels)));
   const byFiles = Number.isFinite(fileCount) && fileCount > 0 ? Math.floor(fileCount) : maxParallel;
   return Math.max(1, Math.min(byCores, byMemory, byFiles, maxParallel));
 }
@@ -60,8 +88,8 @@ export function planBatchParallelism({
 // A geometry band in flight (#244) holds a copy of its source rows and its
 // output rows: about 20 bytes per output pixel for a 16-bit frame. The lanes
 // share the geometry pool, so they share this transient budget too; WebKit's
-// content process has less headroom than Chrome. #258 owns the overall
-// memory ledger and may lower it.
+// content process has less headroom than Chrome. The memory budget (#258)
+// reserves each lane's frame; these bands are inside that reservation.
 export const GEOMETRY_BAND_BUDGET_BYTES = 768 * 1024 * 1024;
 export const GEOMETRY_BAND_BUDGET_BYTES_LOW_MEMORY = 256 * 1024 * 1024;
 export const GEOMETRY_BYTES_PER_BAND_PIXEL = 20;

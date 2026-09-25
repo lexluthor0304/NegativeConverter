@@ -127,4 +127,43 @@ assert.equal(timedWorker.terminated, true);
   const broken = createAutoFrameWorkerClient({ workerFactory: () => { throw new Error('Worker is not defined'); } });
   await assert.rejects(broken.run('expired-spatial-maps', {}, []), /not defined/);
 }
+// The memory ledger's worker resident (#258): the OpenCV heap the worker
+// reports with each reply, released by the idle check only when nothing is
+// pending; the next request starts a fresh worker.
+{
+  const spawned = [];
+  let reply = true;
+  const client = createAutoFrameWorkerClient({ workerFactory: () => {
+    const created = {
+      postMessage(message) {
+        if (!reply) return;
+        queueMicrotask(() => this.onmessage({ data: { id: message.id, result: { ok: true }, heapBytes: 48 * 1024 * 1024 } }));
+      },
+      terminate() { this.terminated = true; }
+    };
+    spawned.push(created);
+    return created;
+  } });
+  assert.equal(client.residentBytes, 0, 'no worker, nothing resident');
+  assert.equal(client.releaseIdle(), false);
+  await client.run('detect-crop-area', {}, []);
+  assert.equal(client.residentBytes, 48 * 1024 * 1024);
+  assert.equal(client.busy, false);
+  reply = false;
+  const hung = client.run('detect-crop-area', {}, []).catch(error => error);
+  assert.equal(client.busy, true);
+  assert.equal(client.releaseIdle(), false, 'a pending request keeps the worker');
+  assert.notEqual(spawned[0].terminated, true);
+  client.dispose();
+  assert.match((await hung).message, /released/);
+  reply = true;
+  await client.run('detect-crop-area', {}, []);
+  assert.equal(client.releaseIdle(), true);
+  assert.equal(spawned[1].terminated, true);
+  assert.equal(client.residentBytes, 0);
+  assert.equal(client.alive, false);
+  await client.run('detect-crop-area', {}, []);
+  assert.equal(spawned.length, 3, 'respawned lazily');
+  client.dispose();
+}
 console.log('autoFrameWorkerClient tests passed');

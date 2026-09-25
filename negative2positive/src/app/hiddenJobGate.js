@@ -24,9 +24,14 @@
  *
  * The WebKit figures below come from its source (MemoryPressureHandler.cpp,
  * PerformanceMonitor.cpp) and can change with a macOS release: re-check them,
- * and HIDDEN_GRACE_MS, for each one. #258 replaces this local estimate with
- * its renderer-wide budget.
+ * and HIDDEN_GRACE_MS, for each one. The resident bytes main.js supplies are
+ * the renderer-wide ledger (#258), and while the window is hidden the memory
+ * budget's ceiling drops to HIDDEN_BUDGET_BYTES as well.
  */
+
+import { LANE_BYTES_PER_PIXEL } from './batchExportScheduler.js';
+// One in-flight frame, per pixel (batchExportScheduler's measured figure).
+export { LANE_BYTES_PER_PIXEL };
 
 // WebKit: delayBeforeProcessMayBecomeInactive, restarted each time the page hides.
 export const WEBKIT_INACTIVE_DELAY_MS = 8 * 60 * 1000;
@@ -42,9 +47,6 @@ export const HIDDEN_GRACE_MS = 5 * 60 * 1000;
 // process (about 1 GB with one 60 MP photo open, estimate) must fit between
 // this and the 4 GiB kill limit.
 export const HIDDEN_BUDGET_BYTES = 3.3e9;
-// One in-flight frame, per pixel (batchExportScheduler's measured figure,
-// until #256 records its lane footprint).
-export const LANE_BYTES_PER_PIXEL = 50;
 
 /**
  * The hidden limits apply to WebKit on a Mac: the desktop app's WKWebView and

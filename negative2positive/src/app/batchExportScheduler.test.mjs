@@ -4,6 +4,11 @@ import assert from 'node:assert/strict';
 import {
   BATCH_MAX_PARALLEL,
   BATCH_PIXEL_BUDGET,
+  LANE_BYTES_PER_PIXEL,
+  LEGACY_LANE_BUDGET_BYTES,
+  LEGACY_LOW_MEMORY_LANE_BUDGET_BYTES,
+  BACKGROUND_SHARE,
+  planLaneBudgetBytes,
   planBatchParallelism,
   runBatchPipeline,
   planGeometryBandsInFlight,
@@ -11,6 +16,8 @@ import {
   GEOMETRY_BAND_BUDGET_BYTES,
   GEOMETRY_BYTES_PER_BAND_PIXEL
 } from './batchExportScheduler.js';
+
+import { createMemoryBudget, budgetFor, GIB } from './memoryBudget.js';
 
 const tick = () => new Promise(resolve => setTimeout(resolve, 0));
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -41,6 +48,80 @@ assert.equal(planBatchParallelism({ hardwareConcurrency: 8, deviceMemory: 8, pix
 // Missing everything still yields a sane value.
 assert.ok(planBatchParallelism() >= 1 && planBatchParallelism() <= BATCH_MAX_PARALLEL);
 assert.equal(planBatchParallelism({ hardwareConcurrency: 8, pixelsPerFile: BATCH_PIXEL_BUDGET + 1, fileCount: 5 }), 1);
+
+// ---- planBatchParallelism in bytes (#258) -------------------------------------
+
+// The planner before #258 (1703835), kept here as the reference: a fixed 80 MP
+// pixel budget, 28 MP when deviceMemory reports 4 GB or less.
+function planBatchParallelismHead({ hardwareConcurrency, deviceMemory, pixelsPerFile, fileCount = Infinity, maxParallel = 4 } = {}) {
+  const cores = Number.isFinite(hardwareConcurrency) && hardwareConcurrency > 0 ? Math.floor(hardwareConcurrency) : 4;
+  const byCores = Math.max(1, Math.min(maxParallel, cores - 2));
+  const lowMemory = Number.isFinite(deviceMemory) && deviceMemory > 0 && deviceMemory <= 4;
+  const budget = lowMemory ? 28_000_000 : 80_000_000;
+  const pixels = Number.isFinite(pixelsPerFile) && pixelsPerFile > 0 ? pixelsPerFile : budget;
+  const byMemory = Math.max(1, Math.floor(budget / pixels));
+  const byFiles = Number.isFinite(fileCount) && fileCount > 0 ? Math.floor(fileCount) : maxParallel;
+  return Math.max(1, Math.min(byCores, byMemory, byFiles, maxParallel));
+}
+
+assert.equal(LANE_BYTES_PER_PIXEL, 50);
+assert.equal(LEGACY_LANE_BUDGET_BYTES, 4.0e9, "today's 80 MP");
+assert.equal(LEGACY_LOW_MEMORY_LANE_BUDGET_BYTES, 1.4e9, "today's 28 MP");
+assert.equal(BACKGROUND_SHARE, 0.5);
+const M11 = 9536 * 6336; // 60.4 MP
+// 16 GiB with 60.4 MP frames: one lane; 32 GiB: two.
+assert.equal(planBatchParallelism({ hardwareConcurrency: 10, ramBytes: 16 * GIB, pixelsPerFile: M11, fileCount: 12 }), 1);
+assert.equal(planBatchParallelism({ hardwareConcurrency: 10, ramBytes: 32 * GIB, pixelsPerFile: M11, fileCount: 12 }), 2);
+assert.equal(planBatchParallelism({ hardwareConcurrency: 10, ramBytes: 64 * GIB, pixelsPerFile: M11, fileCount: 12 }), 2);
+assert.equal(planLaneBudgetBytes({ ramBytes: 32 * GIB }), 7 * GIB, 'half of the 14 GiB budget');
+// Cores, files and the ceiling still cap a large machine.
+assert.equal(planBatchParallelism({ hardwareConcurrency: 3, ramBytes: 64 * GIB, pixelsPerFile: M11, fileCount: 12 }), 1);
+assert.equal(planBatchParallelism({ hardwareConcurrency: 10, ramBytes: 64 * GIB, pixelsPerFile: M11, fileCount: 12, maxParallel: 1 }), 1);
+// 24 MP and 18.5 MP rolls keep 3 and 4 lanes on a 16 GiB machine.
+assert.equal(planBatchParallelism({ hardwareConcurrency: 10, ramBytes: 16 * GIB, pixelsPerFile: 24_000_000, fileCount: 36 }), 3);
+assert.equal(planBatchParallelism({ hardwareConcurrency: 10, ramBytes: 16 * GIB, pixelsPerFile: 18_500_000, fileCount: 36 }), 4);
+// budgetFor: 3.6 / 6 / 14 / 14 GiB, and 3.6 GiB for unknown web memory.
+const inGib = bytes => Math.round(bytes / GIB * 100) / 100;
+assert.deepEqual([8, 16, 32, 64].map(gib => inGib(budgetFor({ ramBytes: gib * GIB }))), [3.6, 6, 14, 14]);
+assert.equal(inGib(budgetFor({ ramBytes: null })), 3.6);
+
+// Sweep: unknown RAM, and any RAM above 4 GiB up to 16 GiB, plans exactly as
+// before; RAM of 4 GiB or less gives the deviceMemory <= 4 plan, also when
+// deviceMemory is undefined (WKWebView).
+{
+  const ramSweep = [null, 4.5 * GIB, 6 * GIB, 8 * GIB, 12 * GIB, 15.9 * GIB, 16 * GIB];
+  const lowRam = [1 * GIB, 2 * GIB, 3.5 * GIB, 4 * GIB];
+  let cases = 0;
+  for (let mp = 1; mp <= 150; mp += 0.5) {
+    const pixelsPerFile = Math.round(mp * 1e6);
+    for (let cores = 1; cores <= 16; cores++) {
+      for (const deviceMemory of [undefined, 2, 4, 8, 16]) {
+        for (const fileCount of [1, 3, 36]) {
+          const head = planBatchParallelismHead({ hardwareConcurrency: cores, deviceMemory, pixelsPerFile, fileCount });
+          for (const ramBytes of ramSweep) {
+            assert.equal(planBatchParallelism({ hardwareConcurrency: cores, deviceMemory, ramBytes, pixelsPerFile, fileCount }), head,
+              `mp=${mp} cores=${cores} deviceMemory=${deviceMemory} ram=${ramBytes}`);
+            cases++;
+          }
+          const lowHead = planBatchParallelismHead({ hardwareConcurrency: cores, deviceMemory: 4, pixelsPerFile, fileCount });
+          for (const ramBytes of lowRam) {
+            assert.equal(planBatchParallelism({ hardwareConcurrency: cores, deviceMemory: undefined, ramBytes, pixelsPerFile, fileCount }), lowHead,
+              `low RAM mp=${mp} cores=${cores} ram=${ramBytes}`);
+            cases++;
+          }
+        }
+      }
+    }
+  }
+  assert.ok(cases > 100_000);
+  // Larger machines only ever gain lanes.
+  for (let mp = 1; mp <= 150; mp += 1) {
+    for (const gib of [17, 24, 32, 64, 128]) {
+      const plan = planBatchParallelism({ hardwareConcurrency: 16, ramBytes: gib * GIB, pixelsPerFile: mp * 1e6, fileCount: 36 });
+      assert.ok(plan >= planBatchParallelismHead({ hardwareConcurrency: 16, pixelsPerFile: mp * 1e6, fileCount: 36 }));
+    }
+  }
+}
 
 // ---- runBatchPipeline ---------------------------------------------------------
 
@@ -208,6 +289,73 @@ for (const stalledStage of ['process', 'sink']) {
 {
   const result = await runBatchPipeline([], { process: async () => {}, sink: async () => {} });
   assert.deepEqual(result, { successCount: 0, failCount: 0, cancelled: false, results: [] });
+}
+
+// ---- beforeStart with memory reservations (#258): no deadlock ---------------
+// Three lanes, a budget that fits 1.5 items and a slow first sink: a lane
+// waiting for memory holds no index, so every job completes, in order.
+{
+  const budget = createMemoryBudget({ budgetBytes: 15, setTimer: (fn, ms) => setTimeout(fn, ms), clearTimer: id => clearTimeout(id) });
+  const jobs = Array.from({ length: 7 }, (_, i) => ({ id: i }));
+  const sunk = [];
+  let inFlight = 0;
+  let peak = 0;
+  let maxReserved = 0;
+  const result = await runBatchPipeline(jobs, {
+    maxParallel: 3,
+    beforeStart: async ({ signal }) => {
+      const handle = await budget.reserve(10, { priority: 'user', signal, label: 'lane' });
+      maxReserved = Math.max(maxReserved, budget.snapshot().user);
+      return () => handle.release();
+    },
+    process: async (job) => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await sleep(job.id === 1 ? 2 : 1);
+      inFlight -= 1;
+      return job.id;
+    },
+    sink: async (_job, payload, index) => {
+      if (index === 0) await sleep(25);
+      sunk.push(payload);
+    }
+  });
+  assert.equal(result.successCount, jobs.length);
+  assert.deepEqual(sunk, jobs.map(job => job.id), 'written in job order');
+  assert.equal(peak, 1, 'only one 10-byte item fits a 15-byte budget at a time');
+  assert.equal(maxReserved, 10);
+  assert.equal(budget.idle, true, 'every reservation was released after its sink');
+  budget.dispose();
+}
+
+// The same with a foreground reservation arriving mid-batch: the lanes wait
+// for it, then finish.
+{
+  const budget = createMemoryBudget({ budgetBytes: 100, setTimer: (fn, ms) => setTimeout(fn, ms), clearTimer: id => clearTimeout(id) });
+  const jobs = Array.from({ length: 6 }, (_, i) => ({ id: i }));
+  let foreground = null;
+  const grantsDuringForeground = [];
+  const result = await runBatchPipeline(jobs, {
+    maxParallel: 3,
+    beforeStart: async ({ signal }) => {
+      const handle = await budget.reserve(30, { priority: 'user', signal });
+      if (foreground && !foreground.released) grantsDuringForeground.push(handle);
+      return () => handle.release();
+    },
+    process: async (job) => {
+      if (job.id === 1 && !foreground) {
+        foreground = await budget.reserve(500, { priority: 'foreground', label: 'open photo' });
+        setTimeout(() => foreground.release(), 15);
+      }
+      await sleep(2);
+      return job.id;
+    },
+    sink: async () => {}
+  });
+  assert.equal(result.successCount, jobs.length);
+  assert.equal(grantsDuringForeground.length, 0, 'no lane is admitted while the foreground reservation is out');
+  assert.equal(budget.idle, true);
+  budget.dispose();
 }
 
 // ---- beforeStart admission (hidden-job gate, #241) ---------------------------

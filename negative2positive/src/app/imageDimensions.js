@@ -92,6 +92,30 @@ export async function imagePixelsForBatch(file) {
   return size ? size.width * size.height : UNKNOWN_IMAGE_PIXELS;
 }
 
+function extensionOf(name) {
+  const match = /\.([^./\\]+)$/.exec(String(name || '').toLowerCase());
+  return match ? match[1] : '';
+}
+
+/**
+ * Pixels to plan or reserve memory for (#258): the header's size; when the
+ * header has none, the size a full decode of another file with the same
+ * extension produced this session (one camera, one roll: #252's rule); else
+ * the conservative UNKNOWN_IMAGE_PIXELS.
+ */
+export async function imagePixelsWithSiblings(file, siblings = []) {
+  const pixels = await imagePixelsForBatch(file);
+  if (dimensions.has(file)) return pixels;
+  const extension = extensionOf(file?.name);
+  if (!extension) return pixels;
+  for (const other of siblings) {
+    if (!other || other === file || extensionOf(other.name) !== extension) continue;
+    const size = dimensions.get(other);
+    if (size) return size.width * size.height;
+  }
+  return pixels;
+}
+
 /**
  * The full size behind a half-size LibRaw decode: LibRaw halves each side
  * rounding up, and its metadata reports the oriented full size. Without a
