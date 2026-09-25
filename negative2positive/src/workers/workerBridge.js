@@ -8,22 +8,40 @@
  * the export overlay spinning forever.
  *
  * `createExportWorkerBridge()` builds an independent bridge with its own
- * Worker; the module-level functions are the default bridge that the single
- * export path uses. A batch export runs several bridges side by side
- * (`createExportWorkerPool`) so the adjustment and encode stages of different
- * frames do not queue behind each other. `createPng16BandPool` spreads the
- * row bands of one 16-bit PNG across several workers.
+ * Worker. A single export makes one for itself and terminates it when the
+ * export ends, and a batch export runs a pool of them (`createExportWorkerPool`)
+ * for the batch's lifetime (#250). The module-level functions are the default
+ * bridge for the remaining callers (contact sheet, multi-shot merge); it
+ * releases its worker a few seconds after a large request leaves it idle.
+ * `createPng16BandPool` spreads the row bands of one 16-bit PNG across
+ * several workers.
+ *
+ * Planes (#250): a request copies its input for the worker unless the caller
+ * sets `transferPlane` and the buffer is stamped export-owned and referenced by
+ * no live editor plane (app/planeRelease.js); then the buffer itself moves to
+ * the worker. Copies of large planes are spread over several tasks, except for
+ * the display buffer the editor rewrites in place, which is copied in one task
+ * so it cannot tear. When the worker fails before it wrote a transferred input
+ * it hands the buffer back and the bridge re-attaches it (the request then
+ * resolves null and the caller falls back); otherwise the request rejects with
+ * ExportInputLostError and the caller renders the frame again.
  */
 
 import { selectExportSamples, exportChannelCount } from './imageEncoders.js';
 import { planPng16Bands, assemblePng16Blob, combineBandAdlers } from './png16Bands.js';
 import { computeAdjustmentParams, isIdentityAdjustmentParams } from './pixelAdjustments.js';
 import { downconvertPlane16 } from './pixelAdjustments16.js';
+import { isLiveMutableBuffer, markOwnedPlanes, mayTransferBuffer } from '../app/planeRelease.js';
 
 /** Base allowance for a request, plus a per-megapixel allowance on top. */
 export const WORKER_TIMEOUT_BASE_MS = 30_000;
 export const WORKER_TIMEOUT_PER_MEGAPIXEL_MS = 1_000;
 export const WORKER_TIMEOUT_MAX_MS = 600_000;
+
+/** Requests above this many pixels arm the idle release of a bridge that has one. */
+export const IDLE_RELEASE_MIN_PIXELS = 16_000_000;
+/** Idle delay before the default bridge terminates its worker. */
+export const DEFAULT_BRIDGE_IDLE_RELEASE_MS = 4_000;
 
 export function computeWorkerTimeoutMs(pixelCount) {
   const megapixels = Math.max(0, Number(pixelCount) || 0) / 1_000_000;
@@ -49,11 +67,17 @@ export function isWorkerTimeoutError(err) {
 
 /**
  * A plane transferred to the worker did not come back (the worker crashed,
- * timed out or was terminated). The caller no longer holds its pixels and
- * has to render the frame again.
+ * timed out, was terminated, or failed after writing it). The caller no
+ * longer holds its pixels and has to render the frame again.
  */
 export function isExportInputLostError(err) {
   return Boolean(err) && err.name === 'ExportInputLostError';
+}
+
+function inputLostError(what, cause) {
+  const lost = makeError(`The frame's ${what} was lost with the export worker: ${cause && cause.message ? cause.message : cause}`, 'ExportInputLostError');
+  lost.cause = cause;
+  return lost;
 }
 
 // A silent main-thread fallback hid a broken worker result for weeks (#240):
@@ -69,6 +93,20 @@ function warnWorkerFallbackOnce(requestType, err) {
 /** Test hook: forget which fallbacks have already been reported. */
 export function resetWorkerFallbackWarnings() {
   warnedFallbacks.clear();
+}
+
+// Whether a worker can encode PNG8/JPEG (OffscreenCanvas.convertToBlob). It is
+// a property of the engine, not of one worker, so it is learnt once per page
+// and shared by every bridge: per-export bridges must not probe per frame.
+let encodeImageSupport = null;
+
+/** Test hook: forget what the worker said about OffscreenCanvas encoding. */
+export function resetEncodeImageSupport() {
+  encodeImageSupport = null;
+}
+
+export function encodeImageSupported() {
+  return encodeImageSupport;
 }
 
 /**
@@ -90,10 +128,6 @@ function serializeSettings(settings) {
 function copyTypedArrayBuffer(view) {
   const { buffer, byteOffset, byteLength } = view;
   return buffer.slice(byteOffset, byteOffset + byteLength);
-}
-
-function copyImageDataBuffer(imageData) {
-  return copyTypedArrayBuffer(imageData.data);
 }
 
 /** Bytes per task when a large plane is copied for the worker. */
@@ -154,14 +188,74 @@ function isRgbaPlaneOf(plane, width, height) {
     && plane.data.length === width * height * 4;
 }
 
+// A real ImageData's `data` is read-only: a buffer that comes back cannot be
+// put into it again. Only plain objects (16-bit planes, plane-only results)
+// can be re-attached in place.
+function isPlatformImageData(value) {
+  return typeof ImageData === 'function' && value instanceof ImageData;
+}
+
 /**
- * Pick the sample plane to encode from and copy it for transfer. Returns the
- * detached-on-transfer buffer plus the bit depth it holds, so the worker can
- * view it as the right typed array.
+ * The buffer a request sends for `view`: the buffer itself when the caller
+ * may give it away (`transfer`, a whole-buffer view of an export-owned plane
+ * nothing live references), a one-task copy of the display buffer the editor
+ * rewrites in place, and a sliced copy otherwise. Small inputs are copied
+ * synchronously, so a request still reaches the worker in the caller's task.
+ * @returns {{buffer: ArrayBuffer, transferred: boolean}|Promise<{buffer: ArrayBuffer, transferred: boolean}>}
  */
-function copyExportSamples(imageData, bitDepth) {
-  const { samples, sampleBits } = selectExportSamples(imageData, bitDepth);
-  return { buffer: copyTypedArrayBuffer(samples), sampleBits };
+function prepareInput(view, { transfer = false, signal = null } = {}) {
+  if (transfer && isWholeBufferView(view) && mayTransferBuffer(view.buffer)) {
+    return { buffer: view.buffer, transferred: true };
+  }
+  if (view.byteLength <= COPY_SLICE_BYTES || isLiveMutableBuffer(view.buffer)) {
+    if (signal && signal.aborted) throw makeError('Worker request aborted', 'AbortError');
+    return { buffer: copyTypedArrayBuffer(view), transferred: false };
+  }
+  return copyTypedArrayInSlices(view, { signal }).then((buffer) => ({ buffer, transferred: false }));
+}
+
+function isPromise(value) {
+  return Boolean(value) && typeof value.then === 'function';
+}
+
+// Error payloads carry the unwritten input buffers the worker handed back.
+function takeReturned(err) {
+  const returned = err && err.returned ? err.returned : null;
+  // Do not let a logged error keep the returned buffers alive.
+  if (err && err.returned) delete err.returned;
+  return returned || {};
+}
+
+/**
+ * After a failed request that transferred an input: re-attach the buffer the
+ * worker handed back, or report the input as lost. Cancellation stays a
+ * cancellation (the caller gave up on the frame).
+ */
+function reclaimInput(err, returned, { transferred, byteLength, reattach, what }) {
+  if (!transferred) return;
+  if (returned instanceof ArrayBuffer && returned.byteLength === byteLength) {
+    reattach(returned);
+    return;
+  }
+  if (isAbortError(err)) return;
+  throw inputLostError(what, err);
+}
+
+// 8-bit inputs of a real ImageData move only when the caller can take a
+// replacement frame back (`onRestore`), since the original cannot be refilled.
+function mayTransfer8(imageData, opts) {
+  return Boolean(opts.transferPlane) && (!isPlatformImageData(imageData) || typeof opts.onRestore === 'function');
+}
+
+function restore8(imageData, buffer, opts) {
+  if (!isPlatformImageData(imageData)) {
+    imageData.data = new Uint8ClampedArray(buffer);
+    return;
+  }
+  const frame = new ImageData(new Uint8ClampedArray(buffer), imageData.width, imageData.height);
+  for (const key of Object.keys(imageData)) frame[key] = imageData[key];
+  markOwnedPlanes(frame.data);
+  opts.onRestore(frame);
 }
 
 function normalizeRequestOptions(onProgressOrOptions) {
@@ -174,7 +268,8 @@ function requestOptionsFor(imageData, opts) {
     timeoutMs: Number.isFinite(opts.timeoutMs)
       ? opts.timeoutMs
       : computeWorkerTimeoutMs(imageData.width * imageData.height),
-    signal: opts.signal
+    signal: opts.signal,
+    pixels: imageData.width * imageData.height
   };
 }
 
@@ -207,14 +302,40 @@ function viewGainMapResult(msg) {
   };
 }
 
+function isBlob(value) {
+  return Boolean(value) && typeof value.size === 'number' && typeof value.arrayBuffer === 'function';
+}
+
 /**
  * One export Worker with its own request queue.
- * @param {{workerFactory?: () => Worker}} [options]
+ * @param {{workerFactory?: () => Worker, idleReleaseMs?: number}} [options]
+ *   `idleReleaseMs` > 0: once a request over IDLE_RELEASE_MIN_PIXELS has run
+ *   and nothing is pending, terminate the worker after that delay (any new
+ *   request cancels the timer), so its dead planes do not wait for the next
+ *   export.
  */
-export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory } = {}) {
+export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory, idleReleaseMs = 0 } = {}) {
   let worker = null;
   let requestId = 0;
   const pending = new Map();
+  let idleTimer = null;
+  let largeSinceIdle = false;
+
+  function clearIdleRelease() {
+    if (idleTimer !== null) clearTimeout(idleTimer);
+    idleTimer = null;
+  }
+
+  // The flag stays set until the worker is released: a small request after a
+  // large one must not leave the large one's dead planes in the worker.
+  function armIdleRelease() {
+    clearIdleRelease();
+    idleTimer = setTimeout(() => {
+      idleTimer = null;
+      if (pending.size === 0) disposeWorker();
+    }, idleReleaseMs);
+    if (typeof idleTimer === 'object' && idleTimer && typeof idleTimer.unref === 'function') idleTimer.unref();
+  }
 
   function settleEntry(id, entry) {
     pending.delete(id);
@@ -226,6 +347,7 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory 
       entry.detachAbort();
       entry.detachAbort = null;
     }
+    if (idleReleaseMs > 0 && largeSinceIdle && pending.size === 0 && worker) armIdleRelease();
   }
 
   function rejectAllPending(error) {
@@ -241,6 +363,8 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory 
    * crashed-but-alive Worker does not keep its heap until page unload.
    */
   function disposeWorker() {
+    clearIdleRelease();
+    largeSinceIdle = false;
     const dying = worker;
     worker = null;
     if (!dying) return;
@@ -285,9 +409,14 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory 
         settleEntry(msg.id, entry);
         entry.resolve({ blob: msg.blob, adler: msg.adler, length: msg.length });
         break;
+      case 'imageResult':
+        settleEntry(msg.id, entry);
+        entry.resolve({ blob: msg.blob, gain: msg.gain || null });
+        break;
       case 'error': {
         settleEntry(msg.id, entry);
         const err = new Error(msg.message);
+        if (msg.code) err.code = msg.code;
         // Input buffers a request transferred and the worker handed back.
         if (msg.returned) err.returned = msg.returned;
         entry.reject(err);
@@ -325,7 +454,7 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory 
    * @param {object} message
    * @param {Transferable[]} [transfers]
    * @param {function} [onProgress]
-   * @param {{timeoutMs?: number, signal?: AbortSignal}} [options]
+   * @param {{timeoutMs?: number, signal?: AbortSignal, pixels?: number}} [options]
    */
   function sendToWorker(message, transfers, onProgress, options = {}) {
     return new Promise((resolve, reject) => {
@@ -340,6 +469,8 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory 
         reject(new Error('Worker unavailable'));
         return;
       }
+      clearIdleRelease();
+      if (idleReleaseMs > 0 && Number(options.pixels) > IDLE_RELEASE_MIN_PIXELS) largeSinceIdle = true;
 
       const id = ++requestId;
       message.id = id;
@@ -382,35 +513,50 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory 
         w.postMessage(message, transfers || []);
       } catch (err) {
         // A synchronous postMessage failure (e.g. DataCloneError) must not leave
-        // the id in `pending` forever.
+        // the id in `pending` forever. Nothing was transferred.
         settleEntry(id, entry);
-        entry.reject(err instanceof Error ? err : new Error(String(err)));
+        const failure = err instanceof Error ? err : new Error(String(err));
+        failure.notPosted = true;
+        entry.reject(failure);
       }
     });
   }
 
+  // A postMessage that threw moved nothing: the input is still the caller's.
+  function reclaimUnlessNotPosted(err, returned, input) {
+    if (err && err.notPosted) return;
+    reclaimInput(err, returned, input);
+  }
+
   /**
-   * Apply adjustments to image data via Worker.
+   * Apply adjustments to image data via Worker. The worker adjusts its input
+   * in place and hands the same buffer back.
    * @param {ImageData} imageData
    * @param {object} settings - Sanitized settings with curves
    * @param {string} quality - 'preview' or 'full'
-   * @param {function|{onProgress?:function,signal?:AbortSignal,timeoutMs?:number}} [onProgressOrOptions]
+   * @param {function|{onProgress?:function,signal?:AbortSignal,timeoutMs?:number,transferPlane?:boolean,onRestore?:function}} [onProgressOrOptions]
+   *   `transferPlane`: hand `imageData.data` over without a copy (export-owned
+   *   planes only; a real ImageData also needs `onRestore(frame)`, which gets
+   *   a refilled copy of the frame when the worker hands the buffer back).
    * @returns {Promise<ImageData|null>} null when the worker failed and the caller
    *   should fall back to the main thread. Cancellation rejects instead, so a
    *   cancelled export does not silently redo the work on the main thread.
    */
   async function workerApplyAdjustments(imageData, settings, quality = 'full', onProgressOrOptions = null) {
     const opts = normalizeRequestOptions(onProgressOrOptions);
-    // Must copy: if worker fails, caller's fallback still needs the original buffer.
-    const inputBuffer = copyImageDataBuffer(imageData);
+    const { width, height } = imageData;
+    const byteLength = imageData.data.byteLength;
+    let input = prepareInput(imageData.data, { transfer: mayTransfer8(imageData, opts), signal: opts.signal });
+    if (isPromise(input)) input = await input;
+    const { buffer: inputBuffer, transferred } = input;
 
     try {
       const result = await sendToWorker(
         {
           type: 'applyAdjustments',
           inputBuffer,
-          width: imageData.width,
-          height: imageData.height,
+          width,
+          height,
           settings: serializeSettings(settings),
           quality
         },
@@ -419,6 +565,7 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory 
         requestOptionsFor(imageData, opts)
       );
       const output = new ImageData(result.data, result.width, result.height);
+      markOwnedPlanes(output.data);
       // The adjustment stage is 8-bit only. When it is a no-op the engine's
       // 16-bit plane is still an exact description of the result, so keep it
       // attached for the exporter; otherwise it must be dropped as stale.
@@ -428,6 +575,11 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory 
       }
       return output;
     } catch (err) {
+      const returned = takeReturned(err);
+      reclaimUnlessNotPosted(err, returned.input, {
+        transferred, byteLength, what: '8-bit frame',
+        reattach: (buffer) => restore8(imageData, buffer, opts)
+      });
       if (isAbortError(err)) throw err;
       // Fallback to main thread
       warnWorkerFallbackOnce('applyAdjustments', err);
@@ -441,7 +593,7 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory 
    * adjusted plane; with `planeOnly`, to `{ width, height, __image16 }` with no
    * 8-bit mirror. Null when there is no plane of the image's own size (the
    * main-thread path then runs the 8-bit stage) or the worker failed.
-   * @param {function|{onProgress?:function,signal?:AbortSignal,timeoutMs?:number,planeOnly?:boolean}} [onProgressOrOptions]
+   * @param {function|{onProgress?:function,signal?:AbortSignal,timeoutMs?:number,planeOnly?:boolean,transferPlane?:boolean}} [onProgressOrOptions]
    */
   async function workerApplyAdjustments16(imageData, settings, quality = 'full', onProgressOrOptions = null) {
     const plane = imageData && imageData.__image16;
@@ -452,8 +604,11 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory 
     const sampleCount = width * height * 4;
     // Snapshot the settings before the copy yields to other tasks.
     const serializedSettings = serializeSettings(settings);
-    // Must copy: the caller's fallback, and later frames, still read the plane.
-    const inputBuffer = await copyTypedArrayInSlices(plane.data, { signal: opts.signal });
+    // Copied unless the caller hands over an export-owned plane: the caller's
+    // fallback, and later frames, may still read it.
+    let input = prepareInput(plane.data, { transfer: opts.transferPlane, signal: opts.signal });
+    if (isPromise(input)) input = await input;
+    const { buffer: inputBuffer, transferred } = input;
     try {
       const result = await sendToWorker(
         {
@@ -474,6 +629,7 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory 
         throw new Error(`Unexpected 16-bit adjustment result (${out16 && out16.constructor && out16.constructor.name} of ${out16 && out16.length} for ${width}x${height})`);
       }
       const plane16 = { width, height, data: out16 };
+      markOwnedPlanes(out16);
       if (planeOnly) return { width, height, __image16: plane16 };
       const data8 = result.data8 || downconvertPlane16(out16, new Uint8ClampedArray(sampleCount));
       if (data8.length !== sampleCount) {
@@ -481,8 +637,14 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory 
       }
       const output = new ImageData(data8, width, height);
       output.__image16 = plane16;
+      markOwnedPlanes(output.data);
       return output;
     } catch (err) {
+      const returned = takeReturned(err);
+      reclaimUnlessNotPosted(err, returned.input, {
+        transferred, byteLength: sampleCount * 2, what: '16-bit plane',
+        reattach: (buffer) => { plane.data = new Uint16Array(buffer); }
+      });
       if (isAbortError(err)) throw err;
       warnWorkerFallbackOnce('applyAdjustments16', err);
       return null;
@@ -497,8 +659,8 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory 
    * The SDR bytes are always copied (the main thread still encodes them). The
    * plane is copied too unless `transferPlane` is set, when the caller hands
    * it over without a copy: on success its buffer stays detached; when the
-   * worker reports an error it hands the buffer back and it is re-attached to
-   * the plane object before resolving null.
+   * worker reports an error before the pass wrote it, it hands the buffer back
+   * and it is re-attached to the plane object before resolving null.
    *
    * @param {ImageData} source - carries `__image16`, the unadjusted plane
    * @param {ImageData} sdr - the 8-bit frame being encoded, same size
@@ -517,11 +679,12 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory 
     const { width, height } = plane;
     if (sdr.width !== width || sdr.height !== height || !sdr.data || sdr.data.length !== width * height * 4) return null;
     const serializedSettings = serializeSettings(settings);
-    const sdrBuffer = await copyTypedArrayInSlices(sdr.data, { signal: opts.signal });
-    const transferring = Boolean(opts.transferPlane) && isWholeBufferView(plane.data);
-    const inputBuffer = transferring
-      ? plane.data.buffer
-      : await copyTypedArrayInSlices(plane.data, { signal: opts.signal });
+    let sdrInput = prepareInput(sdr.data, { signal: opts.signal });
+    if (isPromise(sdrInput)) sdrInput = await sdrInput;
+    let input = prepareInput(plane.data, { transfer: opts.transferPlane, signal: opts.signal });
+    if (isPromise(input)) input = await input;
+    const sdrBuffer = sdrInput.buffer;
+    const { buffer: inputBuffer, transferred } = input;
     try {
       const map = await sendToWorker(
         {
@@ -545,20 +708,188 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory 
       }
       return map;
     } catch (err) {
-      const returnedPlane = err && err.returned && err.returned.plane;
-      // Do not let a logged error keep the returned buffers alive.
-      if (err && err.returned) delete err.returned;
-      if (transferring && plane.data.byteLength === 0) {
-        if (returnedPlane instanceof ArrayBuffer && returnedPlane.byteLength === width * height * 8) {
-          plane.data = new Uint16Array(returnedPlane);
-        } else if (!isAbortError(err)) {
-          const lost = makeError(`The frame's 16-bit plane was lost with the export worker: ${err && err.message ? err.message : err}`, 'ExportInputLostError');
-          lost.cause = err;
-          throw lost;
-        }
-      }
+      const returned = takeReturned(err);
+      reclaimUnlessNotPosted(err, returned.plane, {
+        transferred, byteLength: width * height * 8, what: '16-bit plane',
+        reattach: (buffer) => { plane.data = new Uint16Array(buffer); }
+      });
       if (isAbortError(err)) throw err;
       warnWorkerFallbackOnce('gainMap16', err);
+      return null;
+    }
+  }
+
+  /**
+   * One request per 16-bit file (#250 Part 2): the worker adjusts the
+   * unadjusted plane `source.__image16` in place and encodes it as TIFF or
+   * PNG. Only the Blob comes back (PNG metadata is attached at Blob level by
+   * the caller).
+   * @param {{__image16: object, width: number, height: number}} source
+   * @param {object} settings - buildAdjustmentSettings(...) output
+   * @param {{format: 'tiff'|'png', metadata?: object|null, level?: number, strategy?: number, bandBytes?: number, transferPlane?: boolean, signal?: AbortSignal, timeoutMs?: number, onProgress?: function}} options
+   * @returns {Promise<Blob|null>} null when there is no plane of the frame's
+   *   size or the worker failed before writing the plane (the caller runs
+   *   today's path). Rejects with an AbortError on cancellation and with an
+   *   ExportInputLostError when a transferred plane did not come back.
+   */
+  async function workerAdjust16AndEncode(source, settings, options = {}) {
+    const opts = normalizeRequestOptions(options);
+    const plane = source && source.__image16;
+    const format = opts.format;
+    if ((format !== 'tiff' && format !== 'png') || !plane || !isRgbaPlaneOf(plane, source.width, source.height)) return null;
+    const { width, height } = plane;
+    const serializedSettings = serializeSettings(settings);
+    let input = prepareInput(plane.data, { transfer: opts.transferPlane, signal: opts.signal });
+    if (isPromise(input)) input = await input;
+    const { buffer: inputBuffer, transferred } = input;
+    try {
+      const blob = await sendToWorker(
+        {
+          type: 'adjust16AndEncode',
+          inputBuffer,
+          width,
+          height,
+          settings: serializedSettings,
+          quality: 'full',
+          format,
+          metadata: format === 'tiff' ? (opts.metadata || null) : null,
+          // PNG compression (#257): the same band encoder and settings as the
+          // band pool and workerEncodePng16, so the bytes match.
+          level: opts.level,
+          strategy: opts.strategy,
+          bandBytes: opts.bandBytes
+        },
+        [inputBuffer],
+        opts.onProgress,
+        requestOptionsFor(source, opts)
+      );
+      if (!isBlob(blob)) throw new Error('Unexpected adjust16AndEncode result');
+      return blob;
+    } catch (err) {
+      const returned = takeReturned(err);
+      reclaimUnlessNotPosted(err, returned.input, {
+        transferred, byteLength: width * height * 8, what: '16-bit plane',
+        reattach: (buffer) => { plane.data = new Uint16Array(buffer); }
+      });
+      if (isAbortError(err)) throw err;
+      warnWorkerFallbackOnce('adjust16AndEncode', err);
+      return null;
+    }
+  }
+
+  /**
+   * PNG8 or JPEG through OffscreenCanvas in the worker (#250 Part 3), with the
+   * JPEG gain map in the same request.
+   * @param {ImageData} imageData - the 8-bit frame, opaque
+   * @param {object} options
+   * @param {string} options.mimeType - 'image/png' or 'image/jpeg'
+   * @param {number} [options.quality] - JPEG quality 0..1
+   * @param {{source?: object, plane16?: object, settings?: object|null, transferPlane?: boolean}|null} [options.gainMap]
+   *   `source.__image16` (unadjusted, with `settings`) or `plane16` (already
+   *   adjusted, `settings` null). A plane that does not match the frame
+   *   produces no map, as before.
+   * @param {boolean} [options.transferPlane] - hand the frame's pixels over
+   * @param {function} [options.onRestore] - receives a refilled frame when
+   *   transferred pixels come back (a real ImageData cannot be refilled)
+   * @returns {Promise<{blob: Blob, gain: {blob: Blob, gainMax: number, gainMin: number}|null}|null>}
+   *   null: encode on the main thread (no OffscreenCanvas encode, a non-opaque
+   *   frame, or a worker failure). Rejects with an AbortError on cancellation
+   *   and with an ExportInputLostError when a transferred input did not come back.
+   */
+  async function workerEncodeImage(imageData, options = {}) {
+    const opts = normalizeRequestOptions(options);
+    if (encodeImageSupport === false) return null;
+    const { width, height } = imageData || {};
+    if (!imageData || !(imageData.data instanceof Uint8ClampedArray) || !(width > 0) || !(height > 0)
+      || imageData.data.length !== width * height * 4) return null;
+    const mimeType = opts.mimeType === 'image/jpeg' ? 'image/jpeg' : 'image/png';
+    const gainRequest = mimeType === 'image/jpeg' && opts.gainMap ? opts.gainMap : null;
+    const gainPlane = gainRequest ? (gainRequest.source ? gainRequest.source.__image16 : gainRequest.plane16) : null;
+    const withGain = Boolean(gainPlane) && isRgbaPlaneOf(gainPlane, width, height);
+    const serializedGainSettings = withGain && gainRequest.settings ? serializeSettings(gainRequest.settings) : null;
+    const byteLength = imageData.data.byteLength;
+    let pixelsInput = prepareInput(imageData.data, { transfer: mayTransfer8(imageData, opts), signal: opts.signal });
+    if (isPromise(pixelsInput)) pixelsInput = await pixelsInput;
+    let planeInput = withGain ? prepareInput(gainPlane.data, { transfer: Boolean(gainRequest.transferPlane), signal: opts.signal }) : null;
+    if (isPromise(planeInput)) planeInput = await planeInput;
+    const transfers = [pixelsInput.buffer];
+    if (planeInput) transfers.push(planeInput.buffer);
+    try {
+      const result = await sendToWorker(
+        {
+          type: 'encodeImage',
+          pixelData: pixelsInput.buffer,
+          width,
+          height,
+          mimeType,
+          quality: mimeType === 'image/jpeg' && Number.isFinite(opts.quality) ? opts.quality : undefined,
+          gainMap: planeInput ? { plane: planeInput.buffer, settings: serializedGainSettings } : null
+        },
+        transfers,
+        opts.onProgress,
+        requestOptionsFor(imageData, opts)
+      );
+      if (!result || !isBlob(result.blob)) throw new Error('Unexpected encodeImage result');
+      encodeImageSupport = true;
+      return result;
+    } catch (err) {
+      const returned = takeReturned(err);
+      if (err && err.code === 'unsupported') encodeImageSupport = false;
+      reclaimUnlessNotPosted(err, returned.pixels, {
+        transferred: pixelsInput.transferred, byteLength, what: '8-bit frame',
+        reattach: (buffer) => restore8(imageData, buffer, opts)
+      });
+      if (planeInput) {
+        reclaimUnlessNotPosted(err, returned.plane, {
+          transferred: planeInput.transferred, byteLength: width * height * 8, what: '16-bit plane',
+          reattach: (buffer) => { gainPlane.data = new Uint16Array(buffer); }
+        });
+      }
+      if (isAbortError(err)) throw err;
+      if (err && (err.code === 'unsupported' || err.code === 'unsupported-alpha')) return null;
+      warnWorkerFallbackOnce('encodeImage', err);
+      return null;
+    }
+  }
+
+  /**
+   * Pick the sample plane to encode from and prepare it for the worker. The
+   * 16-bit plane is a plain object and can be refilled; an 8-bit frame only
+   * with `onRestore` (or when it is a plain object).
+   */
+  async function sendEncode(type, imageData, bitDepth, opts, extra) {
+    const { samples, sampleBits } = selectExportSamples(imageData, bitDepth);
+    const is16 = sampleBits === 16;
+    const plane = is16 ? imageData.__image16 : null;
+    const transfer = is16 ? Boolean(opts.transferPlane) : mayTransfer8(imageData, opts);
+    const byteLength = samples.byteLength;
+    let input = prepareInput(samples, { transfer, signal: opts.signal });
+    if (isPromise(input)) input = await input;
+    const { buffer, transferred } = input;
+    try {
+      return await sendToWorker(
+        {
+          type,
+          pixelData: buffer,
+          sourceBits: sampleBits,
+          width: imageData.width,
+          height: imageData.height,
+          ...extra
+        },
+        [buffer],
+        opts.onProgress,
+        requestOptionsFor(imageData, opts)
+      );
+    } catch (err) {
+      const returned = takeReturned(err);
+      reclaimUnlessNotPosted(err, returned.input, {
+        transferred, byteLength, what: is16 ? '16-bit plane' : '8-bit frame',
+        reattach: (returnedBuffer) => {
+          if (plane) plane.data = new Uint16Array(returnedBuffer);
+          else restore8(imageData, returnedBuffer, opts);
+        }
+      });
+      if (isAbortError(err)) throw err;
       return null;
     }
   }
@@ -567,34 +898,16 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory 
    * Encode 16-bit PNG via Worker: the whole frame, its bands one after another
    * (the same bytes as the band pool).
    * @param {ImageData} imageData
-   * @param {function|{onProgress?:function,signal?:AbortSignal,timeoutMs?:number,level?:number,strategy?:number}} [onProgressOrOptions]
+   * @param {function|{onProgress?:function,signal?:AbortSignal,timeoutMs?:number,level?:number,strategy?:number,bandBytes?:number,transferPlane?:boolean,onRestore?:function}} [onProgressOrOptions]
    * @returns {Promise<Blob|null>}
    */
   async function workerEncodePng16(imageData, onProgressOrOptions = null) {
     const opts = normalizeRequestOptions(onProgressOrOptions);
-    // Transfer a copy so worker success/failure never detaches the caller's ImageData.
-    const { buffer, sampleBits } = copyExportSamples(imageData, 16);
-
-    try {
-      return await sendToWorker(
-        {
-          type: 'encodePng16',
-          pixelData: buffer,
-          sourceBits: sampleBits,
-          width: imageData.width,
-          height: imageData.height,
-          level: opts.level,
-          strategy: opts.strategy,
-          bandBytes: opts.bandBytes
-        },
-        [buffer],
-        opts.onProgress,
-        requestOptionsFor(imageData, opts)
-      );
-    } catch (err) {
-      if (isAbortError(err)) throw err;
-      return null;
-    }
+    return sendEncode('encodePng16', imageData, 16, opts, {
+      level: opts.level,
+      strategy: opts.strategy,
+      bandBytes: opts.bandBytes
+    });
   }
 
   /**
@@ -616,34 +929,16 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory 
    * Encode TIFF via Worker.
    * @param {ImageData} imageData
    * @param {number} bitDepth
-   * @param {function|{onProgress?:function,signal?:AbortSignal,timeoutMs?:number}} [onProgressOrOptions]
+   * @param {function|{onProgress?:function,signal?:AbortSignal,timeoutMs?:number,transferPlane?:boolean,onRestore?:function}} [onProgressOrOptions]
    * @returns {Promise<Blob|null>}
    */
   async function workerEncodeTiff(imageData, bitDepth = 8, onProgressOrOptions = null, metadata = null) {
     const opts = normalizeRequestOptions(onProgressOrOptions);
-    // Transfer a copy so worker success/failure never detaches the caller's ImageData.
-    const { buffer, sampleBits } = copyExportSamples(imageData, bitDepth);
-
-    try {
-      return await sendToWorker(
-        {
-          type: 'encodeTiff',
-          pixelData: buffer,
-          sourceBits: sampleBits,
-          width: imageData.width,
-          height: imageData.height,
-          bitDepth,
-          // Analog metadata (EXIF fields + XMP packet) written into the IFD.
-          metadata: metadata || null
-        },
-        [buffer],
-        opts.onProgress,
-        requestOptionsFor(imageData, opts)
-      );
-    } catch (err) {
-      if (isAbortError(err)) throw err;
-      return null;
-    }
+    return sendEncode('encodeTiff', imageData, bitDepth, opts, {
+      bitDepth,
+      // Analog metadata (EXIF fields + XMP packet) written into the IFD.
+      metadata: metadata || null
+    });
   }
 
   /**
@@ -675,6 +970,8 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory 
     workerApplyAdjustments,
     workerApplyAdjustments16,
     workerGainMap16,
+    workerAdjust16AndEncode,
+    workerEncodeImage,
     workerEncodePng16,
     workerEncodePng16Band,
     workerEncodeTiff,
@@ -684,7 +981,9 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory 
     /** Requests in flight on this bridge (for least-busy dispatch). */
     get pendingCount() { return pending.size; },
     /** Whether a Worker currently exists (never spawns one, unlike isWorkerAvailable). */
-    get workerAlive() { return worker !== null; }
+    get workerAlive() { return worker !== null; },
+    /** True while a worker instance exists (tests and idle checks). */
+    get hasWorker() { return worker !== null; }
   };
 }
 
@@ -703,6 +1002,8 @@ export function createExportWorkerPool({ size = 2, workerFactory } = {}) {
     workerApplyAdjustments: (...args) => pick().workerApplyAdjustments(...args),
     workerApplyAdjustments16: (...args) => pick().workerApplyAdjustments16(...args),
     workerGainMap16: (...args) => pick().workerGainMap16(...args),
+    workerAdjust16AndEncode: (...args) => pick().workerAdjust16AndEncode(...args),
+    workerEncodeImage: (...args) => pick().workerEncodeImage(...args),
     workerEncodePng16: (...args) => pick().workerEncodePng16(...args),
     workerEncodeTiff: (...args) => pick().workerEncodeTiff(...args),
     isWorkerAvailable: () => lanes.every(lane => lane.isWorkerAvailable()),
@@ -827,11 +1128,13 @@ export function createPng16BandPool({ size = 1, workerFactory } = {}) {
   };
 }
 
-const defaultBridge = createExportWorkerBridge();
+const defaultBridge = createExportWorkerBridge({ idleReleaseMs: DEFAULT_BRIDGE_IDLE_RELEASE_MS });
 
 export const workerApplyAdjustments = defaultBridge.workerApplyAdjustments;
 export const workerApplyAdjustments16 = defaultBridge.workerApplyAdjustments16;
 export const workerGainMap16 = defaultBridge.workerGainMap16;
+export const workerAdjust16AndEncode = defaultBridge.workerAdjust16AndEncode;
+export const workerEncodeImage = defaultBridge.workerEncodeImage;
 export const workerEncodePng16 = defaultBridge.workerEncodePng16;
 export const workerEncodeTiff = defaultBridge.workerEncodeTiff;
 export const isWorkerAvailable = defaultBridge.isWorkerAvailable;
@@ -841,3 +1144,5 @@ export const terminateWorker = defaultBridge.terminateWorker;
 // requests; the next call respawns it lazily.
 export const exportWorkerPendingCount = () => defaultBridge.pendingCount;
 export const isExportWorkerAlive = () => defaultBridge.workerAlive;
+/** The default bridge itself (tests, idle checks). */
+export const defaultExportBridge = defaultBridge;

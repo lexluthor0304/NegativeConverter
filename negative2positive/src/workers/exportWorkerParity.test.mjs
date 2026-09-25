@@ -59,6 +59,7 @@ class InProcessWorker {
 const { createExportWorkerBridge } = await import('./workerBridge.js');
 const { requestExportGainMap } = await import('../app/exportGainMap.js');
 const { applyPreparedAdjustmentsToPlane16 } = await import('../app/adjustmentPipeline.js');
+const { markOwnedPlanes } = await import('../app/planeRelease.js');
 const bridge = createExportWorkerBridge({ workerFactory: () => new InProcessWorker() });
 
 // ------------------------------------------ frozen references (HEAD 1703835)
@@ -239,7 +240,7 @@ for (const [name, settings] of Object.entries(recipes)) {
   assert.deepEqual(replies, [{ type: 'gainMapResult', buffers: [expectedMap.data.length] }], `${name}: only the map comes back, never a 16-bit plane`);
 
   // Transfer mode gives the same map and consumes the plane.
-  const owned = makeProcessed();
+  const owned = markOwnedPlanes(makeProcessed());
   const transferred = await bridge.workerGainMap16(owned, sdr, settings, { transferPlane: true });
   sameSamples(transferred.data, expectedMap.data, `${name}: transferred map bytes`);
   assert.equal(owned.__image16.data.byteLength, 0, `${name}: the transferred plane is consumed`);
@@ -261,7 +262,7 @@ for (const [name, settings] of Object.entries(recipes)) {
 
 {
   // A worker error hands a transferred plane back intact.
-  const owned = makeProcessed();
+  const owned = markOwnedPlanes(makeProcessed());
   const before = owned.__image16.data.slice();
   const sdr = new ImageData(new Uint8ClampedArray(owned.data), W, H);
   // Settings the worker cannot use (no curves) make it throw after receipt.

@@ -100,6 +100,22 @@ export function encodePng16Blob(pixelData, width, height, zlib, options = {}) {
   return encodePng16BandsSerially(pixelData, width, height, exportChannelCount(pixelData), zlib, options);
 }
 
+/** True when this host stores a Uint16Array's samples low byte first. */
+export const HOST_LITTLE_ENDIAN = /* @__PURE__ */ (() => new Uint8Array(new Uint16Array([1]).buffer)[0] === 1)();
+
+// RGBA16 -> RGB16 in place, walking forward: pixel p's three samples move from
+// 4p..4p+2 to 3p..3p+2, and the write index never passes the read index. On a
+// little-endian host the first 6 bytes per pixel of the buffer are then the
+// TIFF strip byte for byte (low byte first, as the copying loop writes it).
+function compactRgba16ToRgbStrip(plane, pixelCount) {
+  for (let p = 0, read = 0, write = 0; p < pixelCount; p++, read += 4, write += 3) {
+    plane[write] = plane[read];
+    plane[write + 1] = plane[read + 1];
+    plane[write + 2] = plane[read + 2];
+  }
+  return new Uint8Array(plane.buffer, plane.byteOffset, pixelCount * 6);
+}
+
 /**
  * Channels a 16-bit PNG or TIFF of these samples carries: 3 for a 16-bit
  * plane (alpha is written opaque) or opaque 8-bit data, 4 when 8-bit data
@@ -127,9 +143,17 @@ export function exportChannelCount(pixels) {
  * @param {{exif?: object, xmp?: string}|null} [metadata] - analog metadata:
  *   descriptive EXIF fields go into IFD0 and an Exif sub-IFD, the XMP packet
  *   into tag 700.
+ * @param {{ownedPlane?: boolean, littleEndian?: boolean}} [options] -
+ *   `ownedPlane` (export worker only): the caller gives up `pixels`, so a
+ *   16-bit plane written at 16 bits is compacted RGBA -> RGB in place and a
+ *   byte view of it becomes the strip, instead of a second full-size buffer.
+ *   Only on little-endian hosts (every shipped target), where the view's bytes
+ *   are exactly the strip's; `littleEndian` overrides the detection for tests.
+ *   Never pass it where the plane belongs to someone else: the plane is
+ *   destroyed.
  * @returns {Blob}
  */
-export function encodeTiffBlob(pixels, width, height, bitDepth = 8, metadata = null) {
+export function encodeTiffBlob(pixels, width, height, bitDepth = 8, metadata = null, { ownedPlane = false, littleEndian = HOST_LITTLE_ENDIAN } = {}) {
   const channels = exportChannelCount(pixels);
   const wants16 = bitDepth === 16;
   const source16 = pixels instanceof Uint16Array;
@@ -138,17 +162,22 @@ export function encodeTiffBlob(pixels, width, height, bitDepth = 8, metadata = n
   const stripByteCount = sampleCount * bytesPerSample;
   // The strip is the only large buffer; the IFDs are a few hundred bytes and
   // the Blob concatenates the parts without copying the strip again.
-  const strip = new Uint8Array(stripByteCount);
-  let p = 0;
-  for (let i = 0; i < width * height * 4; i += 4) {
-    for (let channel = 0; channel < channels; channel++) {
-      const sample = pixels[i + channel];
-      if (wants16) {
-        const value = source16 ? sample : sample * 257;
-        strip[p++] = value & 0xFF;
-        strip[p++] = value >>> 8;
-      } else {
-        strip[p++] = source16 ? sample >>> 8 : sample;
+  let strip;
+  if (ownedPlane && littleEndian && wants16 && source16 && channels === 3 && pixels.length >= width * height * 4) {
+    strip = compactRgba16ToRgbStrip(pixels, width * height);
+  } else {
+    strip = new Uint8Array(stripByteCount);
+    let p = 0;
+    for (let i = 0; i < width * height * 4; i += 4) {
+      for (let channel = 0; channel < channels; channel++) {
+        const sample = pixels[i + channel];
+        if (wants16) {
+          const value = source16 ? sample : sample * 257;
+          strip[p++] = value & 0xFF;
+          strip[p++] = value >>> 8;
+        } else {
+          strip[p++] = source16 ? sample >>> 8 : sample;
+        }
       }
     }
   }

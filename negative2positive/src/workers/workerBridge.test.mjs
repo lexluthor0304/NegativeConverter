@@ -103,6 +103,7 @@ const {
   workerEncodePng16,
   workerEncodeTiff
 } = await import('./workerBridge.js');
+const { markOwnedPlanes, setLiveReferenceProbe } = await import('../app/planeRelease.js');
 
 function reset(nextScript = () => ({ kind: 'blob' })) {
   terminateWorker();
@@ -507,8 +508,9 @@ function assertAdjusted16(out, label) {
 
 // ---------------------------------------------------------- gain-map requests
 
+// Stamped export-owned (#250): only such planes may be transferred.
 function createGainMapInputs() {
-  const source = create16BitImage();
+  const source = markOwnedPlanes(create16BitImage());
   const sdr = new ImageData(Uint8ClampedArray.from({ length: W16 * H16 * 4 }, (_, i) => (i * 11) & 0xff), W16, H16);
   return { source, sdr, plane: source.__image16 };
 }
