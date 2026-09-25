@@ -116,6 +116,40 @@ function decodeDisplay(value) {
   return Math.pow(clamp01(value), 2.2);
 }
 
+// The part of a paper's LUTs that no strength changes: per input value the encoded
+// print value between paper black and white and, with toning, its shadow and
+// highlight weights (two Math.pow per entry, most of the build). A toning-strength
+// drag reuses it and only redoes the per-channel mix, with the same expressions on
+// the same values, so the LUTs are identical to a full build. The last two
+// (paper, toning) pairs are kept: 1.5 MB each.
+const paperBaseCache = [];
+
+function paperBase(paper, tone) {
+  const key = `${paper.id}|${tone ? tone.id : 'none'}`;
+  const hit = paperBaseCache.findIndex((entry) => entry.key === key);
+  if (hit >= 0) return paperBaseCache[hit];
+  const black = paperBlackLevel(paper, tone);
+  const base = new Float64Array(LUT_SIZE);
+  const shadowWeight = tone ? new Float64Array(LUT_SIZE) : null;
+  const highlightWeight = tone ? new Float64Array(LUT_SIZE) : null;
+  for (let i = 0; i < LUT_SIZE; i++) {
+    const x = i / (LUT_SIZE - 1);
+    const curve = paperCurve(paper, x);
+    // Place between paper black and paper white in linear light, then encode.
+    const linear = black + (1 - black) * decodeDisplay(curve);
+    const value = encodeDisplay(linear);
+    base[i] = value;
+    if (tone) {
+      shadowWeight[i] = 1 - smoothstep(value / 0.65);
+      highlightWeight[i] = smoothstep((value - 0.35) / 0.65);
+    }
+  }
+  const entry = { key, base, shadowWeight, highlightWeight };
+  paperBaseCache.unshift(entry);
+  paperBaseCache.length = Math.min(paperBaseCache.length, 2);
+  return entry;
+}
+
 // Builds three Uint16 LUTs (index = input 16-bit value, output 16-bit).
 // `strength` in [0, 1] blends against identity.
 export function buildPaperLuts(paperId, { toning = 'none', toningStrength = 1, strength = 1 } = {}) {
@@ -124,22 +158,19 @@ export function buildPaperLuts(paperId, { toning = 'none', toningStrength = 1, s
   const tone = paper.kind === 'bw' && paperTonings[toning] && toning !== 'none' ? paperTonings[toning] : null;
   const toneAmount = tone ? clamp01(toningStrength) : 0;
   const blend = clamp01(strength);
-  const black = paperBlackLevel(paper, tone);
   const white = paper.whiteTint || [1, 1, 1];
   const image = paper.imageTone || [1, 1, 1];
+  const { base: bases, shadowWeight: shadowWeights, highlightWeight: highlightWeights } = paperBase(paper, tone);
   const luts = [new Uint16Array(LUT_SIZE), new Uint16Array(LUT_SIZE), new Uint16Array(LUT_SIZE)];
   for (let i = 0; i < LUT_SIZE; i++) {
     const x = i / (LUT_SIZE - 1);
-    const curve = paperCurve(paper, x);
-    // Place between paper black and paper white in linear light, then encode.
-    const linear = black + (1 - black) * decodeDisplay(curve);
-    const base = encodeDisplay(linear);
+    const base = bases[i];
     for (let ch = 0; ch < 3; ch++) {
       // Paper white tints the highlights, the image tone tints the silver/dye.
       let tint = white[ch] * base + (image[ch] - 1) * (1 - base) * base;
       if (tone) {
-        const shadowWeight = 1 - smoothstep(base / 0.65);
-        const highlightWeight = smoothstep((base - 0.35) / 0.65);
+        const shadowWeight = shadowWeights[i];
+        const highlightWeight = highlightWeights[i];
         const shadow = 1 + (tone.shadowTint[ch] - 1) * shadowWeight * toneAmount;
         const highlight = 1 + (tone.highlightTint[ch] - 1) * highlightWeight * toneAmount;
         tint *= shadow * highlight;
