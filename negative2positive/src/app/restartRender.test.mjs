@@ -42,7 +42,7 @@ function fixture({ repairs = true, locked = false, large = false } = {}) {
     dustDetectionRevision: 1, dustDetectionTimer: null,
     fullResolutionRenderTimer: null, displayPreviewResizeTimer: null,
     fullUpdateTimer: null, coreReprocessTimer: null, step2AutoConvertTimer: null,
-    webglState: { gl: null }, console,
+    webglState: { gl: null }, console, backgroundGate: { bump() {} },
     gpuPreviewScheduler: DISABLED_GPU_PREVIEW_SCHEDULER, gpuPreview: { status: 'none' },
     clearTimeout: timer => clearedTimers.push(timer),
     coreReprocessGates: createCoreReprocessGates({ clearTimeout: timer => clearedTimers.push(timer) }),

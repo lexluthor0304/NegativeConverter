@@ -154,6 +154,10 @@ export function createHarness(base, { historyBudget = 768 * 1024 * 1024, session
     dustDetectionTimer: null, pendingBrushRepairs: 0, dustDrawing: false, fullUpdateTimer: null,
     photoSessions: createPhotoSessionCache({ maxBytes: sessionBudget }),
     photoPreviews: createPhotoSessionCache({ maxBytes: 0 }),
+    // #243: an empty prefetch slot, and each activation its own signal.
+    photoPrefetch: createPhotoSessionCache({ maxBytes: 0 }), prefetchedItem: null,
+    beginActivation: () => new AbortController().signal,
+    fullResolutionRenderAbort: null, rewarmAutoFrameWorker: false,
     aiRepair: { revision: 1 },
     document: { body: { dataset: {} }, visibilityState: 'hidden' },
     studioWorkspace: { sync() {}, flush() {} },

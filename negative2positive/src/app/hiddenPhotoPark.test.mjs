@@ -44,6 +44,7 @@ function fixture({ enabled = true, hidden = true } = {}) {
     coreReprocessBusy: () => false,
     persistCurrentFileSettings: () => { calls.push('persist'); item.settings = { rotationAngle: 1.5, mirrored: true, cropRegion: { left: 1 } }; item.isDirty = false; },
     invalidatePhotoActivation: () => { calls.push('invalidate'); c.parkedPhoto = null; },
+    supersedeActivation: () => {},
     isCurrentLoad: generation => generation === c.loadGeneration,
     loadFile: async (loaded, options) => {
       calls.push(['loadFile', loaded === file, options.decoded?.base === base, options.autoConvert, options.quiet]);

@@ -4,10 +4,14 @@ import {join} from 'node:path';
 // The dev-server smoke deliberately uses named caller frames, not elapsed-time
 // guesses: a canonical thumbnail can overlap the automatic analysis. Unknown
 // paths fail closed so a new decoder route cannot silently escape the budget.
+// Background lanes (#243) open their one decode per job through a function
+// named by the job's first need; a foreground activation that adopts a lane's
+// decode reads nothing itself.
 export function classifyFolderReadStack(stack = '') {
   const calls = name => new RegExp('\\bat (?:async )?' + name + ' \\(').test(stack);
-  if (calls('processFileWithSettings') && calls('loadStudioThumbnails')) return 'thumbnail';
-  if (calls('attempt') && (calls('runBatchPipeline') || calls('runRollAnalysis'))) return 'analysis';
+  if (calls('openTileDecode')) return 'thumbnail';
+  if (calls('openAnalysisDecode') || (calls('attempt') && calls('runRollAnalysis'))) return 'analysis';
+  if (calls('openPrefetchDecode')) return 'prefetch';
   if (calls('loadFile')) return 'foreground';
   return 'unknown';
 }
@@ -110,10 +114,14 @@ export function assertFolderDecodeBudget(result, count, rawFixture, fail) {
   if (result.thumbs.some(thumb => thumb.beforeReady) || result.reads.some(read => read.route !== 'foreground' && read.beforeReady)) {
     fail('folder background work competes with first photo');
   }
+  // Lane tiles and the prefetch of the next photo are separate, later decodes
+  // of a frame (#243 keeps them to one per job); the exactly-once rule is for
+  // the first photo's foreground load and roll analysis.
+  const laterRoutes = new Set(['thumbnail', 'prefetch']);
   for (const [index, name] of names.entries()) {
     const route = index === 0 ? 'foreground' : 'analysis';
-    const reads = result.reads.filter(read => read.name === name && read.route !== 'thumbnail');
-    const decodes = result.decodes.filter(decode => decode.name === name && decode.route !== 'thumbnail');
+    const reads = result.reads.filter(read => read.name === name && !laterRoutes.has(read.route));
+    const decodes = result.decodes.filter(decode => decode.name === name && !laterRoutes.has(decode.route));
     if (reads.length !== 1 || reads[0]?.route !== route) fail(`folder must read ${name} exactly once for ${route}; got ${reads.length}`);
     if (decodes.length !== 1 || decodes[0]?.route !== route || !(rawFixture ? ['raw'] : ['png', 'png-bitmap']).includes(decodes[0]?.kind)
       || decodes[0]?.readId !== reads[0]?.id) fail(`folder must decode ${name} exactly once for ${route}; got ${decodes.length}`);

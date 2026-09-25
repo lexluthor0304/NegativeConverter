@@ -161,6 +161,7 @@ function schedulerFixture({ repairs = false, large = false, gpu = null } = {}) {
     _coreReprocessPending: null, _coreReprocessActive: 0,
     _coreReprocessIdle: null, _resolveCoreReprocessIdle: null,
     coreSliderCommitRecord: null, fullResolutionRenderTimer: null,
+    backgroundGate: { bump() {} }, WORKER_ABORTED: 'WORKER_ABORTED',
     usesSilverCoreConversion: () => true,
     hasFrameRepairs: () => state.dustRemoval.enabled,
     // #237 routing: the 400x300 source stands in for a >16 MP frame when `large`.

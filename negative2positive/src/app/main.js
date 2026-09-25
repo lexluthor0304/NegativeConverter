@@ -14,6 +14,9 @@ import { exportNameStem } from './exportFileName.js';
 import { frameNeedsReview } from './reviewQueue.js';
 import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
 import { createHiddenJobGate, hiddenJobLimitsApply, estimateHiddenJobBytes } from './hiddenJobGate.js';
+import { createBackgroundGate, BACKGROUND_STEP_WAIT_CAP_MS } from './backgroundGate.js';
+import { createSharedDecodes } from './sharedDecodes.js';
+import { pickBackgroundJob, travelDirection, displayDistance } from './backgroundPhotoScheduler.js';
 import { createJobMarker, readJobMarkers, clearJobMarker, matchJobFiles, planResumedExport, resumedJobMarker, jobNeedsSafeMode } from './jobMarker.js';
 import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
 import { createEmbeddedPreviewPool } from './scanDecodeClient.js';
@@ -355,6 +358,23 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // A job that ends while hidden leaves nothing idle behind.
       onIdle: () => shedHiddenJobMemory()
     });
+    // Background photo work (#243; see "Background photo lanes" below). The
+    // gate says when it may start: not during a switch, a conversion, a
+    // full-resolution render or an export, and not within 400 ms of input.
+    // A throwing busy probe (state not initialised yet) counts as busy.
+    const backgroundGate = createBackgroundGate({ isBusy: () => foregroundBusyForBackground() });
+    // One decode per file for the background lanes and the foreground
+    // (sharedDecodes.js). Background decodes always use the options a
+    // foreground load would: full size, defects repaired, with rawMetadata.
+    const sharedDecodes = createSharedDecodes({ decode: (file, { signal }) => decodeForBackground(file, signal) });
+    // Running lane loops, the job of each frame in work, roll-analysis passes
+    // waiting for lanes, the direction of travel, visible tiles and the
+    // prefetched photo.
+    const backgroundLanes = { running: 0, active: new Map() };
+    const rollPassRequests = new Set();
+    const backgroundVisibleItems = new Set();
+    let backgroundDirection = 1;
+    let prefetchedItem = null;
     const desktopUpdateState = {
       visible: false,
       currentVersion: '',
@@ -6526,6 +6546,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       _coreReprocessIdle = null;
       _resolveCoreReprocessIdle = null;
       if (resolve) resolve();
+      // Background lanes wait for the foreground to settle (#243).
+      backgroundGate.bump();
     }
 
     function runCoreReprocess(options) {
@@ -6766,7 +6788,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           try {
             processed = await convertFromCurrentSource(state, {
               preview: false, includeAnalysisPreview: false,
-              signal: abort?.controller.signal || null, client: abort ? convertFullResolutionFrameInWorker : null
+              // #237's own worker above 16 MP; below it the shared worker,
+              // with the photo activation's signal (#243).
+              signal: abort?.controller.signal || options.signal || null, client: abort ? convertFullResolutionFrameInWorker : null
             });
           } catch (err) {
             // Superseded while converting: the same outcome as a stale token.
@@ -7047,6 +7071,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       );
     }
 
+    // The worker request of the full-resolution render in flight.
+    let fullResolutionRenderAbort = null;
+
     function startFullResolutionRender(reason = 'background') {
       if (!usesSilverCoreConversion(state)) return null;
       if (!hasSeparateConversionPreview()) return null;
@@ -7066,8 +7093,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       });
 
       let rendered = false;
+      // A newer photo activation aborts this render's worker request (#243).
+      const abort = typeof AbortController === 'function' ? new AbortController() : null;
+      fullResolutionRenderAbort = abort;
       const promise = waitForNextFrame()
-        .then(() => rerenderWithCoreControls({ full: true, exact: true, sourceRef, token, generation }))
+        .then(() => rerenderWithCoreControls({ full: true, exact: true, sourceRef, token, generation, signal: abort?.signal || null }))
         .then((didRender) => {
           rendered = didRender === true;
           trace.end({
@@ -7076,10 +7106,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           });
         })
         .finally(() => {
+          if (fullResolutionRenderAbort === abort) fullResolutionRenderAbort = null;
           // A reset may already own a new promise (and even the same source
           // object). The discarded render cannot change its readiness flags.
           if (state.fullResolutionPromise !== promise) return;
           state.fullResolutionPromise = null;
+          // Background lanes wait for the render (#243).
+          backgroundGate.bump();
           // A render that was queued behind another one has not produced
           // anything yet, so the work is still outstanding.
           state.fullResolutionPending = rendered ? Boolean(state.processedImageDataIsPreview) : true;
@@ -8569,17 +8602,46 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // The background detections of the photo being prepared. A newer
     // activation aborts both requests (invalidatePhotoActivation).
     let importDetectionAbort = null;
+    // Latest wins (#243): each photo activation (a switch, or any loadFile
+    // not started by one) owns an AbortController. The next activation aborts
+    // it, which disposes that load's LibRaw and post-decode workers, a scan
+    // decode worker or its heavy-file full-resolution decode. The generation
+    // checks (#218/#219) stay as the second line of defence.
+    let photoActivation = null;
+    let rewarmAutoFrameWorker = false;
+    function supersedeActivation() {
+      if (!photoActivation) return;
+      photoActivation.abort(new DOMException('Superseded photo activation', 'AbortError'));
+      photoActivation = null;
+    }
+    function beginActivation(file = null) {
+      supersedeActivation();
+      photoActivation = new AbortController();
+      // With the desktop session budget a lane's decode in flight finishes
+      // (up to 8 s of work that would have to be redone). Where memory is
+      // short, the activation takes its place.
+      if (lowMemoryPhotoDevice()) abortBackgroundDecodes({ except: file });
+      return photoActivation.signal;
+    }
     const quietLoadingOverlay = { show: async () => {}, updateProgress() {}, hide() {} };
+    // Unknown-memory touch devices and devices reporting <=4 GiB.
+    function lowMemoryPhotoDevice() {
+      return Boolean((navigator.deviceMemory && navigator.deviceMemory <= 4)
+        || (!navigator.deviceMemory && navigator.maxTouchPoints > 1));
+    }
+    // A 60 MP RAW base has both 8/16-bit planes (~692 MiB). Keep one
+    // inactive large-frame preview session on desktop, while unknown-memory
+    // touch devices and devices reporting <=4 GiB stay conservative.
+    const PHOTO_SESSION_BUDGET_BYTES = (lowMemoryPhotoDevice() ? 128 : 768) * 1024 * 1024;
     // Only inactive photos are retained here. Taking the destination before
     // storing the outgoing photo lets A -> B -> A fit a one-photo budget.
-    const photoSessions = createPhotoSessionCache({
-      // A 60 MP RAW base has both 8/16-bit planes (~692 MiB). Keep one
-      // inactive large-frame preview session on desktop, while unknown-memory
-      // touch devices and devices reporting <=4 GiB stay conservative.
-      maxBytes: ((navigator.deviceMemory && navigator.deviceMemory <= 4)
-        || (!navigator.deviceMemory && navigator.maxTouchPoints > 1) ? 128 : 768) * 1024 * 1024
-    });
+    const photoSessions = createPhotoSessionCache({ maxBytes: PHOTO_SESSION_BUDGET_BYTES });
     const photoPreviews = createPhotoSessionCache({ maxBytes: 48 * 1024 * 1024 });
+    // The prefetched next photo (#243): one base-only entry of its own, so an
+    // unvisited prefetch never evicts the photo the user just left (A/B/A).
+    // Desktop session budget only; off where memory is short (until #258
+    // owns the budget).
+    const photoPrefetch = createPhotoSessionCache({ maxBytes: lowMemoryPhotoDevice() ? 0 : PHOTO_SESSION_BUDGET_BYTES });
 
     // Every buffer the editor still references (#250): live `state.*` planes,
     // the display buffers, the dust planes, history snapshots and photo
@@ -8604,10 +8666,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       for (const snapshot of [...undoStack, ...redoStack]) {
         for (const value of Object.values(snapshot?.refs || {})) addPlanes(value);
       }
-      for (const cache of [photoSessions, photoPreviews]) {
+      for (const cache of [photoSessions, photoPreviews, photoPrefetch]) {
         const held = typeof cache.buffers === 'function' ? cache.buffers() : cache.buffers;
         for (const buffer of held || []) buffers.add(buffer);
       }
+      // A decode shared with a background lane (#243) is read-only for both.
+      for (const base of sharedDecodes.bases()) addPlanes(base);
       return buffers;
     }
     setLiveReferenceProbe(liveEditorBuffers);
@@ -8642,7 +8706,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     }
 
     function hiddenJobRunning() {
-      return activeLongJobs > 0 || hiddenJobs.busy || studioThumbnailsRunning || isDesktopBatchExportLocked()
+      return activeLongJobs > 0 || hiddenJobs.busy || backgroundLanesRunning() || isDesktopBatchExportLocked()
         || automaticRollImportRunning || automaticRollAnalysisRunning;
     }
 
@@ -8657,7 +8721,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         state.dustRemoval.mask, state.dustRemoval.inpaintedImageData, state.dustRemoval.cleanSource,
         undoStack, redoStack
       ], buffers);
-      for (const cache of [photoSessions, photoPreviews]) {
+      for (const cache of [photoSessions, photoPreviews, photoPrefetch]) {
         for (const buffer of cache.buffers()) buffers.add(buffer);
       }
       let bytes = 0;
@@ -8696,6 +8760,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (document.visibilityState !== 'hidden' || !hiddenJobs.status().limited) return;
       photoSessions.clear();
       photoPreviews.clear();
+      photoPrefetch.clear();
       if (!exportWorkerPendingCount()) terminateExportWorker();
       // RAW post-decode workers live only for their decode (#232): none idles.
       if (!hiddenJobUsesAiRepair()) void releaseAiRepairSession();
@@ -8732,7 +8797,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         // Waiting items were released above; the thumbnail lane restarts if
         // it stopped. Caches refill on use and workers respawn lazily.
         if (parkedPhoto) void unparkOpenPhoto().catch(error => console.warn('Rebuilding the parked photo failed:', error));
-        if (state.fileQueue.length) void loadStudioThumbnails();
+        if (state.fileQueue.length) kickBackgroundPhotoWork();
       }
       refreshHiddenJobStatus();
     });
@@ -8770,6 +8835,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         || dustDetectionTimer || pendingBrushRepairs || dustDrawing) return false;
       persistCurrentFileSettings({ silent: true, force: true });
       ++loadGeneration;
+      supersedeActivation();
       invalidatePhotoActivation();
       parkedPhoto = {
         item, file: item.file, base: state.loadedBaseImageData, rawMetadata: state.rawMetadata,
@@ -8818,6 +8884,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         residentBytes: hiddenResidentBytes(),
         photoSessionBytes: photoSessions.bytes,
         photoPreviewBytes: photoPreviews.bytes,
+        photoPrefetchBytes: photoPrefetch.bytes,
         exportWorkerAlive: isExportWorkerAlive(),
         aiRepairSession: aiRepair.status === 'ready' || aiRepair.status === 'loading',
         aiRepairStatus: aiRepair.status,
@@ -9132,12 +9199,20 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       clearRepairedPreview();
       _coreReprocessPending = null;
       processNegativeInFlight = null;
+      // Its worker request goes too (#243); the caller sees WORKER_ABORTED,
+      // never a crash, so the worker is not written off.
+      fullResolutionRenderAbort?.abort();
+      fullResolutionRenderAbort = null;
       state.fullResolutionPromise = null;
       state.dustRemoval.processing = false;
       state.rawDecodePending = false;
-      // The outgoing photo's background detections are dropped with it.
+      // The outgoing photo's background detections are dropped with it. A
+      // detection worker that owed nothing else is terminated with its plane
+      // copies; the next cold load warms a fresh one while it decodes.
+      const detectionReleases = analyzeFrameInWorker.abortReleases;
       importDetectionAbort?.abort(new DOMException('Superseded photo activation', 'AbortError'));
       importDetectionAbort = null;
+      if (analyzeFrameInWorker.abortReleases !== detectionReleases) rewarmAutoFrameWorker = true;
       delete document.body.dataset.studioDetecting;
       getLoadingOverlay().hide();
       noteCoreReprocessSettled();
@@ -9167,8 +9242,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       status.style.display = text ? '' : 'none';
     }
 
-    async function loadFile(file, { autoConvert = true, decoded = null, quiet = false } = {}) {
+    async function loadFile(file, { autoConvert = true, decoded = null, quiet = false, signal: activationSignal = null } = {}) {
       const generation = ++loadGeneration;
+      // A switch passes the activation it began; every other load is one.
+      const signal = activationSignal || beginActivation(file);
       // The canvas is uncovered during a photo's detection tail, so a drop
       // can supersede it; its busy lock belongs to the dropped tail.
       const supersedesTail = Boolean(document.body.dataset.studioDetecting);
@@ -9186,7 +9263,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // The frame detector needs OpenCV compiled in its worker; start that
       // now so it overlaps the decode instead of following it. The preview
       // conversion follows the decode directly, so its worker starts too.
-      if (autoConvert && state.autoFrame.enabled) void warmUpAutoFrameWorker();
+      if (state.autoFrame.enabled && (autoConvert || rewarmAutoFrameWorker)) {
+        rewarmAutoFrameWorker = false;
+        void warmUpAutoFrameWorker();
+      }
       void convertPreviewFrameInWorker.warmUp();
       // A crop draft holds the previous image; leaving crop mode armed lets
       // "Apply" replace the newly loaded file with the old one.
@@ -9224,11 +9304,27 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
         let imageData;
         let extractedRawMeta = decoded?.rawMetadata || null;
+        // A background lane decoding this file right now, or holding its
+        // finished decode (#243): adopt it instead of decoding again. Same
+        // decode options (full, defects on), with its rawMetadata. A heavy
+        // file skips its half-size stage for it.
+        const shared = !(decoded?.file === file && decoded.base) ? adoptSharedDecode(file, { signal }) : null;
 
         if (decoded?.file === file && decoded.base) {
           imageData = decoded.base;
+        } else if (shared) {
+          overlay.updateProgress(30, lang.loadingProcessing);
+          try {
+            const adopted = await shared.result;
+            imageData = adopted.base;
+            extractedRawMeta = adopted.rawMetadata || null;
+          } finally {
+            shared.release();
+          }
+          overlay.updateProgress(90, lang.loadingProcessing);
         } else if (isRawLikeFile) {
           const arrayBuffer = await file.arrayBuffer();
+          if (signal?.aborted || !isCurrentLoad(generation)) return { status: 'stale' };
           const isHeavy = arrayBuffer.byteLength > 100 * 1024 * 1024 && !/\.tiff?$/.test(fileName);
           // A photo without settings gets createDefaultSettings right after
           // this load; let the decode's worker compute its film statistics.
@@ -9245,6 +9341,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
             imageData = await loadRawImageDataPreview(arrayBuffer.slice(0), fileName, {
               sourceBlob: file,
               filmStats,
+              signal,
               onMetadata(meta) {
                 extractedRawMeta = meta;
               }
@@ -9262,6 +9359,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
             imageData = await loadRawImageData(arrayBuffer, fileName, {
               sourceBlob: file,
               filmStats,
+              signal,
               onMetadata(meta) {
                 extractedRawMeta = meta;
               }
@@ -9270,7 +9368,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           }
         } else if (isPngFile(file)) {
           const arrayBuffer = await file.arrayBuffer();
-          imageData = await loadPngImageData(arrayBuffer);
+          if (signal?.aborted || !isCurrentLoad(generation)) return { status: 'stale' };
+          imageData = await loadPngImageData(arrayBuffer, { signal });
         } else {
           imageData = await loadStandardImage(file);
         }
@@ -9352,7 +9451,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           // Schedule background full-resolution decode if we used fast preview
           if (state._pendingFullResBuffer) {
             if (isCurrentLoad(generation)) {
-              scheduleBackgroundFullResDecode(generation);
+              scheduleBackgroundFullResDecode(generation, signal);
             } else {
               state._pendingFullResBuffer = null;
               state._pendingFullResFileName = null;
@@ -9365,6 +9464,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         }
         return { status: isCurrentLoad(generation) ? 'loaded' : 'stale' };
       } catch (err) {
+        // A superseded activation (#243): no error, no marked item.
+        if (err?.name === 'AbortError' && (signal?.aborted || !isCurrentLoad(generation))) return { status: 'stale' };
         console.error('Error loading file:', err);
         // Only touch the overlay if this is still the current load; a newer one
         // may already own it.
@@ -9427,7 +9528,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       studioWorkspace?.sync();
     }
 
-    async function scheduleBackgroundFullResDecode(generation = loadGeneration) {
+    async function scheduleBackgroundFullResDecode(generation = loadGeneration, signal = null) {
       const buf = state._pendingFullResBuffer;
       const name = state._pendingFullResFileName;
       const sourceFile = state._pendingFullResFile;
@@ -9446,6 +9547,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           // Its embedded-preview fallback re-reads the file instead of
           // scanning and copying the preview up front.
           sourceBlob: sourceFile && sourceFile === state.loadedFile ? sourceFile : null,
+          // Leaving the photo stops this decode (#243).
+          signal,
           onMetadata(meta) {
             if (isCurrentLoad(generation) && meta && !state.rawMetadata) {
               state.rawMetadata = meta;
@@ -9503,6 +9606,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         });
         if (DEBUG_UI) console.info('[RAW] background full-res decode complete');
       } catch (err) {
+        if (err?.name === 'AbortError') return;
         console.warn('[RAW] background full-res decode failed, keeping preview', err.message);
         // Keep the preview — it's still usable.
       }
@@ -13337,6 +13441,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (isDesktopBatchExportLocked()) return;
       if (state.photoSwitchTarget) {
         ++loadGeneration;
+        supersedeActivation();
         state.photoSwitchTarget = null;
         state.photoSwitchPhase = null;
         delete document.body.dataset.photoSwitching;
@@ -13404,9 +13509,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (isDesktopBatchExportLocked()) return;
       ++loadGeneration;
       cancelCropDetection();
+      supersedeActivation();
       invalidatePhotoActivation();
       photoSessions.clear();
       photoPreviews.clear();
+      photoPrefetch.clear();
       state.photoSwitchTarget = null;
       state.photoSwitchPhase = null;
       delete document.body.dataset.photoSwitching;
@@ -14493,20 +14600,28 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     // `filmStats`: the caller will run createDefaultSettings on the result, so
     // a RAW decode's worker computes the film statistics alongside the planes.
-    async function loadFileToImageData(file, { filmStats = false } = {}) {
+    // `signal` (#243) aborts the decode (see loadRawFile); `onMetadata`
+    // receives a RAW file's lens/camera metadata as loadFile's does.
+    async function loadFileToImageData(file, { filmStats = false, signal = null, onMetadata = null } = {}) {
       const fileName = file.name.toLowerCase();
+      const aborted = () => signal?.reason?.name === 'AbortError' ? signal.reason : new DOMException('Decode was aborted', 'AbortError');
       let image;
       if (isRawLikeFileName(fileName)) {
         const arrayBuffer = await file.arrayBuffer();
+        if (signal?.aborted) throw aborted();
         image = await loadRawImageData(arrayBuffer, fileName, {
           sourceBlob: file,
-          filmStats: filmStats ? { borderBufferPct: defaultFilmBaseBuffer() } : null
+          filmStats: filmStats ? { borderBufferPct: defaultFilmBaseBuffer() } : null,
+          signal,
+          ...(onMetadata ? { onMetadata } : {})
         });
       } else if (isPngFile(file)) {
         const arrayBuffer = await file.arrayBuffer();
-        image = await loadPngImageData(arrayBuffer);
+        if (signal?.aborted) throw aborted();
+        image = await loadPngImageData(arrayBuffer, { signal });
       } else {
         image = await loadStandardImage(file);
+        if (signal?.aborted) throw aborted();
       }
       rememberImageDimensions(file, image);
       return image;
@@ -14809,14 +14924,21 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const studioColors = state.fileQueue.find(item => item.file === file)?.studioColors;
       let initialSettings = savedSettings || mergeStudioColors(createDefaultSettings(imageData, state.fileQueue.find(item => item.file === file)), studioColors || {});
       let importRotation = null;
+      // Background lanes (#243) pause before each main-thread-heavy step
+      // while the foreground is busy (`beforeHeavyStep`, capped), and bring
+      // their own frame analyzers so they never queue on the foreground's.
+      const analyzers = options.analyzers || null;
       if (!initialSettings.autoFrameMeta && !initialSettings.cropRegion && !expiredImportKeepsFullFrame(initialSettings)) {
+        if (options.beforeHeavyStep) { await options.beforeHeavyStep('autoFrame'); assertRepairCurrent(isCurrent); }
         initialSettings = await analyzeStudioImportFrame(imageData, initialSettings, {
-          allowCrop: !savedSettings, silent, onRotation: rotation => { importRotation = rotation; }
+          allowCrop: !savedSettings, silent, onRotation: rotation => { importRotation = rotation; },
+          ...(analyzers ? { analyzeInWorker: analyzers.analyze } : {})
         });
       }
       assertRepairCurrent(isCurrent);
       if (!initialSettings.filmEdge?.checked) {
-        const edge = await analyzeImportFilmEdge(imageData, initialSettings, { applyDefaults: !savedSettings && state.importFilmTypeAuto });
+        const edge = await analyzeImportFilmEdge(imageData, initialSettings, { applyDefaults: !savedSettings && state.importFilmTypeAuto,
+          ...(analyzers ? { readFilmEdge: analyzers.readFilmEdge } : {}) });
         if (edge) initialSettings = edge.settings;
       }
       if (!savedSettings) {
@@ -14845,6 +14967,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         && importRotation.image.height === rotatedDimensions(imageData.width, imageData.height, importRotation.angle).height
         ? importRotation.image : null;
       importRotation = null;
+      if (options.beforeHeavyStep) { await options.beforeHeavyStep('geometry'); assertRepairCurrent(isCurrent); }
       // In the geometry pool: batch lanes, the contact sheet and the thumbnail
       // lane no longer queue on the main thread for this step (#244).
       let workingData = own(await renderGeometryChain(
@@ -15638,6 +15761,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // Queue replacement/removal must also invalidate a delayed activation.
       if (state.photoSwitchTarget && !state.fileQueue.includes(state.photoSwitchTarget)) {
         ++loadGeneration;
+        supersedeActivation();
         invalidatePhotoActivation();
         state.photoSwitchTarget = null;
         state.photoSwitchPhase = null;
@@ -15646,6 +15770,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       }
       photoSessions.retainKeys(state.fileQueue);
       photoPreviews.retainKeys(state.fileQueue);
+      photoPrefetch.retainKeys(state.fileQueue);
       syncEmbeddedPreviewQueue();
       const container = document.getElementById('fileListItems');
       const countEl = document.getElementById('fileListCount');
@@ -15724,7 +15849,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       syncBatchUIState({ reason: 'updateFileListUI' });
       refreshThumbnailStates();
       if (tileVisibility) observeTileVisibility();
-      void loadStudioThumbnails();
+      observeBackgroundVisibility();
+      kickBackgroundPhotoWork();
     }
 
     async function switchToFile(index) {
@@ -15755,7 +15881,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // makes batch export skip its automatic film-base and gray-point passes.
       const leavingItem = getCurrentQueueItem();
       const fileItem = state.fileQueue[index];
-      const cached = photoSessions.take(fileItem);
+      // A visited photo's session, else the prefetched base of the next photo
+      // (#243): either way the decode is skipped.
+      const cached = photoSessions.take(fileItem) || photoPrefetch.take(fileItem);
+      if (prefetchedItem === fileItem) prefetchedItem = null;
       // Leaving, restoring and the incoming tile would each refresh the whole
       // list. Refresh it once: before the cold feedback paints, or in finally.
       const flushFileList = deferFileListRefresh();
@@ -15778,7 +15907,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       document.body.dataset.photoSwitching = 'true';
       document.body.dataset.studioBusy = 'true';
       let generation = ++loadGeneration;
+      const signal = beginActivation(fileItem.file);
       invalidatePhotoActivation();
+      notePhotoActivation(leavingItem, fileItem);
       try {
         // A settled cache hit is synchronous: do not paint a loading veil or
         // announce a new live-region message for an already available photo.
@@ -15846,9 +15977,17 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         // can occupy the main thread. Hidden tabs need not await a paused rAF.
         await yieldToPaint();
         if (!isCurrentLoad(generation) || state.fileQueue[index] !== fileItem) return;
+        // A cold target waits a short dwell before its file is read: a double
+        // click or a fast Arrow+Enter run supersedes it before the 79-95 MB
+        // read, the SOI scan and the worker spawn (#243). Nothing to save
+        // when the base is retained or a lane is decoding it already.
+        if (!(cached?.base && cached.file === fileItem.file) && !sharedDecodeInFlight(fileItem.file)) {
+          await activationDwell(signal);
+          if (signal?.aborted || !isCurrentLoad(generation) || state.fileQueue[index] !== fileItem) return;
+        }
 
         // Load the file
-        const loading = loadFile(fileItem.file, { autoConvert: false, decoded: cached, quiet: true });
+        const loading = loadFile(fileItem.file, { autoConvert: false, decoded: cached, quiet: true, signal });
         generation = loadGeneration;
         const result = await loading;
 
@@ -15900,7 +16039,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           delete document.body.dataset.studioBusy;
           updateFileListUI();
           studioWorkspace?.sync();
-          void loadStudioThumbnails();
+          kickBackgroundPhotoWork();
         }
       }
     }
@@ -16414,7 +16553,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       updateFileListUI();
       queueEmbeddedTiles(imported);
       updateExportButtons();
-      void loadStudioThumbnails();
+      kickBackgroundPhotoWork();
       scheduleProjectRecovery();
     }
 
@@ -16725,7 +16864,6 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // Frames a scheduled roll analysis will prepare. Their first photo skips
     // the semantic pass: the roll assigns (and locks) its recipe meanwhile.
     const automaticRollPendingItems = new Set();
-    let studioThumbnailsRunning = false;
     function fileListButtonFor(item) {
       const index = state.fileQueue.indexOf(item);
       return index < 0 ? null : document.querySelector(`#fileListItems .file-list-name[data-index="${index}"]`);
@@ -16793,87 +16931,537 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         && !document.body.dataset.studioBusy && !processNegativeInFlight
         && !isDesktopBatchExportLocked();
     }
-    async function loadStudioThumbnails() {
-      if (studioThumbnailsRunning || !state.fileQueue.length) return;
-      studioThumbnailsRunning = true;
-      let workers = null;
+    // ===========================================
+    // Background photo lanes (#243)
+    // ===========================================
+    // One pull-based scheduler runs every background decode: pass 1 of an
+    // automatic roll import, lane tiles (frames whose canonical tile still
+    // needs a decode) and the prefetch of the next photo. Each time a lane
+    // frees up it picks the next job (backgroundPhotoScheduler.js): the next
+    // photo in the direction of travel, the other neighbour, visible tiles,
+    // then display distance. A lane waits for backgroundGate.idle() before
+    // every pick and before its decode, one decode (sharedDecodes) serves
+    // every need of the frame, and no two jobs work on one file.
+    // runBatchPipeline stays with the exports, whose sink order matters.
+    const BACKGROUND_LANE_REST_MS = 30;
+    const BACKGROUND_LANE_POLL_MS = 250;
+    const ACTIVATION_DWELL_MS = 120;
+    let backgroundWorkers = null;
+    let backgroundVisibility = null;
+    // Prefetch previews already attempted for a recipe key (success or not).
+    const prefetchPreviewAttempts = new WeakMap();
+
+    // The foreground is switching, converting, rendering or exporting.
+    function foregroundBusyForBackground() {
+      return Boolean(document.body.dataset.photoSwitching || document.body.dataset.studioBusy)
+        || Boolean(processNegativeInFlight) || coreReprocessBusy() || Boolean(coreReprocessTimer)
+        || Boolean(state.fullResolutionPromise) || Boolean(fullResolutionRenderTimer)
+        || isDesktopBatchExportLocked() || singleExportActive;
+    }
+
+    // Input the gate waits 400 ms after: presses, wheel, keys and slider or
+    // field input. Hovering is not interaction; a drag (a pressed button or a
+    // touch contact) is. Busy datasets that clear re-check the waiters at once.
+    function installBackgroundInputTracking() {
+      const note = () => backgroundGate.noteInput();
+      const options = { capture: true, passive: true };
+      for (const type of ['pointerdown', 'pointerup', 'wheel', 'keydown', 'input']) document.addEventListener(type, note, options);
+      document.addEventListener('pointermove', event => { if (event.buttons) note(); }, options);
+      if (typeof MutationObserver === 'function') {
+        new MutationObserver(() => backgroundGate.bump()).observe(document.body, {
+          attributes: true, attributeFilter: ['data-studio-busy', 'data-photo-switching']
+        });
+      }
+    }
+    installBackgroundInputTracking();
+
+    function backgroundRest(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    // A cold switch target's dwell; ends early when the activation is superseded.
+    function activationDwell(signal) {
+      return new Promise(resolve => {
+        if (signal?.aborted) { resolve(); return; }
+        const done = () => { clearTimeout(timer); signal?.removeEventListener?.('abort', done); resolve(); };
+        const timer = setTimeout(done, ACTIVATION_DWELL_MS);
+        signal?.addEventListener?.('abort', done, { once: true });
+      });
+    }
+
+    function adoptSharedDecode(file, { signal = null } = {}) {
+      return sharedDecodes.adopt(file, { signal });
+    }
+
+    function sharedDecodeInFlight(file) {
+      return sharedDecodes.has(file);
+    }
+
+    // The same decode a foreground load would run (full size, defects
+    // repaired), with the RAW metadata an adopted or prefetched base needs
+    // for lens correction and EXIF.
+    async function decodeForBackground(file, signal) {
+      let rawMetadata = null;
+      const base = await loadFileToImageData(file, { filmStats: true, signal, onMetadata: meta => { rawMetadata = meta; } });
+      return { base, rawMetadata };
+    }
+
+    // Named by the job's first need: the folder-import smoke tells the
+    // routes apart by these frames of the read's stack.
+    function openAnalysisDecode(item, signal) {
+      return sharedDecodes.open(item.file, { signal });
+    }
+    function openTileDecode(item, signal) {
+      return sharedDecodes.open(item.file, { signal });
+    }
+    function openPrefetchDecode(item, signal) {
+      return sharedDecodes.open(item.file, { signal });
+    }
+
+    // Where memory is short, a foreground activation aborts the lanes'
+    // decodes in flight (except the one it may adopt).
+    function abortBackgroundDecodes({ except = null } = {}) {
+      for (const job of backgroundLanes.active.values()) {
+        if (job.decoding && job.item.file !== except) {
+          job.controller.abort(new DOMException('Foreground photo activation on a low-memory device', 'AbortError'));
+        }
+      }
+    }
+
+    function backgroundLanesRunning() {
+      return backgroundLanes.running > 0;
+    }
+
+    function kickBackgroundPhotoWork() {
+      if (!state.fileQueue.length) return;
+      backgroundGate.bump();
+      const wanted = backgroundLaneTarget();
+      while (backgroundLanes.running < wanted) {
+        backgroundLanes.running += 1;
+        void runBackgroundLane();
+      }
+    }
+
+    // One lane for tiles and prefetch; a roll pass brings its planned lanes.
+    function backgroundLaneTarget() {
+      if (hiddenJobs.safeMode) return 1;
+      let lanes = 1;
+      for (const request of rollPassRequests) lanes = Math.max(lanes, request.lanes || 1);
+      return lanes;
+    }
+
+    // Work that will appear or is only held back: a roll pass, a roll import
+    // still committing, or frames a scheduled roll import will prepare.
+    function backgroundWorkPending() {
+      return rollPassRequests.size > 0 || automaticRollImportRunning
+        || state.fileQueue.some(entry => !entry.settings && automaticRollPendingItems.has(entry) && entry !== getCurrentQueueItem());
+    }
+
+    async function runBackgroundLane() {
       try {
         // Let the import handler start the active photo first. Background work
         // must not demosaic a whole folder alongside the foreground RAW.
-        await new Promise(resolve => setTimeout(resolve, 250));
+        await backgroundRest(BACKGROUND_LANE_POLL_MS);
         while (state.fileQueue.length) {
-          if (!studioBackgroundReady() || automaticRollImportRunning) {
-            await new Promise(resolve => setTimeout(resolve, 250)); continue;
+          settleRollPassRequests();
+          if (backgroundLanes.running > backgroundLaneTarget()) return;
+          await backgroundGate.idle();
+          if (!studioBackgroundReady()) { await backgroundRest(BACKGROUND_LANE_POLL_MS); continue; }
+          const job = pickNextBackgroundJob();
+          if (!job) {
+            settleRollPassRequests();
+            if (!backgroundWorkPending()) return;
+            await backgroundRest(BACKGROUND_LANE_POLL_MS);
+            continue;
           }
-          // One settings key per candidate, reused for the job it starts.
-          let key = null;
-          let rollOwned = false;
-          const item = state.fileQueue.find(entry => {
-            if (entry === getCurrentQueueItem()) return false;
-            // A scheduled roll import prepares these frames' recipes and
-            // samples (and their analysis tiles). A thumbnail recipe set in
-            // the gap before it starts would leave its roll analysis without
-            // a pass-1 sample and decode the frame again, so they wait.
-            if (!entry.settings && automaticRollPendingItems.has(entry)) { rollOwned = true; return false; }
-            const entryKey = photoSettingsKey(entry);
-            if (entry.thumbnailErrorKey === entryKey || (entry.thumbnail
-              && entry.thumbnailKind === 'processed' && entry.thumbnailKey === entryKey)) return false;
-            key = entryKey;
-            return true;
-          });
-          if (!item) {
-            if (!rollOwned) break;
-            await new Promise(resolve => setTimeout(resolve, 250)); continue;
-          }
-          const rollRevision = automaticRollRevision;
-          let superseded = false;
-          const valid = () => {
-            // A thumbnail may start in the brief gap before roll analysis.
-            // Once that analysis takes over, its prepared recipe/sample owns
-            // the frame; a late thumbnail must not replace it and force a
-            // second analysis decode. Cancellation cannot revive after idle.
-            superseded ||= automaticRollImportRunning || studioAutoFrameRunning
-              || rollRevision !== automaticRollRevision || !state.fileQueue.includes(item)
-              || item === getCurrentQueueItem() || key !== photoSettingsKey(item)
-              || Boolean(document.body.dataset.photoSwitching);
-            return !superseded;
-          };
-          let release = null;
-          try {
-            // One gated item (#241); a lane that waited while hidden re-checks,
-            // and still pauses below before it looks for the next item.
-            release = await hiddenJobs.admit({ bytes: await hiddenJobBytesFor([item.file]) });
-            if (!valid()) throw Object.assign(new Error('Preview superseded while waiting'), { name: 'AbortError' });
-            workers ||= createConversionWorkerPool({ size: 1 });
-            let prepared;
-            const image = await processFileWithSettings(item.file, item.settings, {
-              previewMaxDimension: 288, updateItemSettings: false,
-              sourceImageData: photoSessions.peek(item)?.base,
-              isCurrent: valid, convert: request => workers(request),
-              onPreparedSettings: settings => { prepared = settings; }
-            });
-            if (!valid()) continue;
-            if (!item.settings && prepared) {
-              item.settings = cloneSettings(prepared);
-              item.automaticSettings = true;
-            }
-            item.thumbnail = thumbnailDataUrl(image);
-            item.thumbnailKind = 'processed';
-            item.thumbnailKey = photoSettingsKey(item);
-            item.thumbnailErrorKey = null;
-            updateFileThumbnail(item);
-          } catch (error) {
-            if (error?.name !== 'AbortError' && valid()) {
-              item.thumbnailErrorKey = key;
-              console.warn('Photo preview failed:', item.file.name, error);
-              refreshThumbnailRow(item);
-            }
-          } finally {
-            release?.();
-          }
-          await new Promise(resolve => setTimeout(resolve, 30));
+          await runBackgroundPhotoJob(job);
+          await backgroundRest(BACKGROUND_LANE_REST_MS);
         }
-      } finally { workers?.dispose(); studioThumbnailsRunning = false; }
+      } catch (error) {
+        // Never an unhandled rejection; the next kick starts a fresh lane.
+        console.warn('Background photo lane stopped:', error);
+      } finally {
+        backgroundLanes.running -= 1;
+        settleRollPassRequests();
+        if (!backgroundLanes.running) {
+          releaseBackgroundWorkers();
+          // No lane left to serve a roll pass (the queue emptied, or a lane
+          // failed): end it; its import retries what is left.
+          for (const request of [...rollPassRequests]) {
+            if (request.inFlight) continue;
+            rollPassRequests.delete(request);
+            request.resolve();
+          }
+        }
+      }
+    }
+
+    // The display order the strip and the light table show, with photos the
+    // review filter hides at the end (they still need their analysis).
+    function backgroundDisplayOrder() {
+      const order = getFileListOrder();
+      if (!reviewFilter) return order;
+      const shown = order.filter(index => reviewForItem(state.fileQueue[index]).needs);
+      const listed = new Set(shown);
+      return [...shown, ...order.filter(index => !listed.has(index))];
+    }
+
+    function pickNextBackgroundJob() {
+      const busyFiles = new Set();
+      for (const job of backgroundLanes.active.values()) busyFiles.add(job.item.file);
+      const visible = new Set();
+      for (const item of backgroundVisibleItems) {
+        const index = state.fileQueue.indexOf(item);
+        if (index >= 0) visible.add(index);
+      }
+      return pickBackgroundJob({
+        order: backgroundDisplayOrder(),
+        current: state.currentFileIndex,
+        direction: backgroundDirection,
+        visible,
+        needs: index => backgroundNeeds(state.fileQueue[index]),
+        hasSession: index => photoSessions.has(state.fileQueue[index]),
+        canPrefetch: index => canPrefetchPhoto(state.fileQueue[index]),
+        busy: index => busyFiles.has(state.fileQueue[index]?.file)
+      });
+    }
+
+    function backgroundNeeds(item) {
+      if (!item) return [];
+      for (const request of rollPassRequests) if (request.wants(item)) return ['analysis'];
+      return laneTileWanted(item) ? ['tile'] : [];
+    }
+
+    // A frame whose canonical tile needs a lane render (from a decode, or a
+    // retained base).
+    function laneTileWanted(item) {
+      if (automaticRollImportRunning || studioAutoFrameRunning) return false;
+      if (item === getCurrentQueueItem() || item === state.fileQueue[state.currentFileIndex]) return false;
+      // A scheduled roll import prepares these frames' recipes and samples
+      // (and their analysis tiles). A tile recipe set in the gap before it
+      // starts would leave its roll analysis without a pass-1 sample and
+      // decode the frame again, so they wait.
+      if (!item.settings && automaticRollPendingItems.has(item)) return false;
+      const key = photoSettingsKey(item);
+      return !(item.thumbnailErrorKey === key || (item.thumbnail && item.thumbnailKind === 'processed' && item.thumbnailKey === key));
+    }
+
+    // Until #258 owns the budget: the desktop session budget only.
+    function photoPrefetchEnabled() {
+      return !hiddenJobs.safeMode && !lowMemoryPhotoDevice();
+    }
+
+    function currentPhotoSettled() {
+      const current = getCurrentQueueItem();
+      return Boolean(current) && studioBackgroundReady() && !current.provisional
+        && !state.geometryPending && !state.rawDecodePending;
+    }
+
+    function canPrefetchPhoto(item) {
+      if (!item || !photoPrefetchEnabled() || !currentPhotoSettled() || item.provisional) return false;
+      if (photoSessions.has(item)) return false;
+      if (!photoPrefetch.has(item)) return true;
+      // The base is held; a preview that no longer matches the recipe is
+      // rebuilt from it, once per recipe.
+      if (!item.settings) return false;
+      const key = photoSettingsKey(item);
+      return prefetchPreviewAttempts.get(item) !== key && photoPreviews.peek(item)?.key !== key;
+    }
+
+    // The priority-1 prefetch target: the first photo past the current one in
+    // the direction of travel that has no retained session, or null.
+    function prefetchTargetItem() {
+      const order = backgroundDisplayOrder();
+      const k = order.indexOf(state.currentFileIndex);
+      if (k < 0) return null;
+      for (let position = k + backgroundDirection; position >= 0 && position < order.length; position += backgroundDirection) {
+        const item = state.fileQueue[order[position]];
+        if (!photoSessions.has(item)) return item;
+      }
+      return null;
+    }
+
+    function holdPrefetchedBase(item, { base, rawMetadata }) {
+      if (!photoPrefetchEnabled()) return false;
+      photoPrefetch.clear();
+      if (!photoPrefetch.put(item, { file: item.file, base, rawMetadata: rawMetadata || null })) return false;
+      prefetchedItem = item;
+      return true;
+    }
+
+    // The slot follows the user: once they are 2 or more photos from it, it goes.
+    function dropDistantPrefetch() {
+      if (!prefetchedItem || !photoPrefetch.has(prefetchedItem)) { prefetchedItem = null; return; }
+      const order = backgroundDisplayOrder();
+      if (displayDistance(order, state.fileQueue.indexOf(prefetchedItem), state.currentFileIndex) >= 2) {
+        photoPrefetch.clear();
+        prefetchedItem = null;
+      }
+    }
+
+    // Each activation re-prioritises the lanes: direction of travel, the
+    // prefetch slot, and any roll pass waiting on the photo just opened.
+    function notePhotoActivation(fromItem, toItem) {
+      backgroundDirection = travelDirection(backgroundDisplayOrder(), state.fileQueue.indexOf(fromItem),
+        state.fileQueue.indexOf(toItem), backgroundDirection);
+      dropDistantPrefetch();
+      settleRollPassRequests();
+      kickBackgroundPhotoWork();
+    }
+
+    // A finished lane base: a prefetch goes to the slot; otherwise a
+    // base-only session if it fits without evicting anything, else the slot
+    // when it is the next photo, else it is dropped.
+    function handOverBackgroundBase(item, decoded, { prefetch = false } = {}) {
+      if (!decoded?.base || hiddenJobs.safeMode || !state.fileQueue.includes(item)) return;
+      // The open photo holds its own reference (it may have adopted this decode).
+      if (item.file === state.loadedFile || item === state.fileQueue[state.currentFileIndex]) return;
+      if (photoSessions.has(item) || photoPrefetch.has(item)) return;
+      if (prefetch) { holdPrefetchedBase(item, decoded); return; }
+      if (photoSessions.putIfRoom(item, { file: item.file, base: decoded.base, rawMetadata: decoded.rawMetadata || null })) return;
+      if (item === prefetchTargetItem()) holdPrefetchedBase(item, decoded);
+    }
+
+    function backgroundConvert(request) {
+      backgroundWorkers ||= { convert: createConversionWorkerPool({ size: 1 }), analyzers: null };
+      return backgroundWorkers.convert(request);
+    }
+
+    // Tiles and prefetch detect frames on a worker of their own, never on the
+    // foreground's (#236 aborts and releases that one per activation).
+    function backgroundAnalyzers() {
+      backgroundWorkers ||= { convert: createConversionWorkerPool({ size: 1 }), analyzers: null };
+      backgroundWorkers.analyzers ||= createAutoFrameWorkerPool({ size: 1 });
+      return backgroundWorkers.analyzers;
+    }
+
+    function releaseBackgroundWorkers() {
+      if (!backgroundWorkers) return;
+      backgroundWorkers.convert.dispose();
+      backgroundWorkers.analyzers?.dispose();
+      backgroundWorkers = null;
+    }
+
+    // One job: one frame, one decode (or a retained base), every need of it.
+    async function runBackgroundPhotoJob({ index, needs }) {
+      const item = state.fileQueue[index];
+      if (!item) return;
+      const controller = new AbortController();
+      const job = { item, needs, controller, decoding: false };
+      backgroundLanes.active.set(item, job);
+      const analysis = needs.includes('analysis') ? beginRollPassFrame(item) : null;
+      const tile = needs.includes('tile') ? beginLaneTile(item) : null;
+      const prefetch = needs.includes('prefetch') ? beginPrefetch(item) : null;
+      const wanted = () => Boolean(analysis?.valid() || tile?.valid() || prefetch?.valid());
+      // Before each main-thread-heavy step: wait for the foreground, at most
+      // 2 s, so a paused job does not hold a decoded frame through a switch.
+      const step = () => backgroundGate.idle({ signal: controller.signal, maxWaitMs: BACKGROUND_STEP_WAIT_CAP_MS });
+      // A need that fails, or is superseded, does not stop the others.
+      const attempt = async (need, work) => {
+        try {
+          await work();
+        } catch (error) {
+          if (controller.signal.aborted) throw error;
+          if (error?.name !== 'AbortError') need.fail(error);
+        }
+      };
+      let release = null;
+      let lease = null;
+      let decoded = null;
+      try {
+        // One gated item (#241); a lane that waited while hidden re-checks.
+        release = await hiddenJobs.admit({ bytes: await hiddenJobBytesFor([item.file]), signal: controller.signal });
+        if (!wanted()) return;
+        // The base: a retained session or the prefetch slot, or one decode
+        // shared with any other consumer (the foreground may adopt it).
+        const retained = photoSessions.has(item) ? photoSessions.peek(item)
+          : photoPrefetch.has(item) ? photoPrefetch.peek(item) : null;
+        if (retained?.base && retained.file === item.file) {
+          decoded = { base: retained.base, rawMetadata: retained.rawMetadata || null, retained: true };
+        } else {
+          await backgroundGate.idle({ signal: controller.signal });
+          if (!wanted()) return;
+          job.decoding = true;
+          lease = analysis ? openAnalysisDecode(item, controller.signal)
+            : tile ? openTileDecode(item, controller.signal) : openPrefetchDecode(item, controller.signal);
+          try {
+            decoded = await lease.result;
+          } catch (error) {
+            if (!controller.signal.aborted && error?.name !== 'AbortError') {
+              for (const need of [analysis, tile, prefetch]) if (need?.valid()) need.fail(error);
+            }
+            return;
+          } finally {
+            job.decoding = false;
+          }
+        }
+        // A prefetched base is usable by a switch at once, before any render.
+        if (prefetch?.valid()) prefetch.hold(decoded);
+        if (analysis?.valid()) await attempt(analysis, () => analysis.run(decoded.base, step));
+        if (tile?.valid()) await attempt(tile, () => tile.run(decoded.base, step));
+        if (prefetch?.valid()) await attempt(prefetch, () => prefetch.run(decoded, step));
+      } catch (error) {
+        if (error?.name !== 'AbortError') console.warn('Background photo job failed:', item.file?.name, error);
+      } finally {
+        backgroundLanes.active.delete(item);
+        release?.();
+        if (lease) {
+          if (decoded && !decoded.retained) handOverBackgroundBase(item, decoded, { prefetch: Boolean(prefetch?.valid()) });
+          lease.release();
+        }
+        analysis?.done();
+      }
+    }
+
+    // A lane tile: the canonical recipe rendered at tile size.
+    function beginLaneTile(item) {
+      const key = photoSettingsKey(item);
+      const rollRevision = automaticRollRevision;
+      let superseded = false;
+      // A roll analysis that takes over owns the frame's recipe; a late tile
+      // must not replace it and force a second analysis decode. Cancellation
+      // cannot revive after idle. Opening the photo hands it to the
+      // foreground.
+      const valid = () => {
+        superseded ||= automaticRollImportRunning || studioAutoFrameRunning
+          || rollRevision !== automaticRollRevision || !state.fileQueue.includes(item)
+          || item === getCurrentQueueItem() || item === state.fileQueue[state.currentFileIndex]
+          || key !== photoSettingsKey(item);
+        return !superseded;
+      };
+      return {
+        valid,
+        async run(base, step) {
+          let prepared;
+          const image = await processFileWithSettings(item.file, item.settings, {
+            previewMaxDimension: 288, updateItemSettings: false, sourceImageData: base,
+            isCurrent: valid, convert: request => backgroundConvert(request),
+            analyzers: backgroundAnalyzers(), beforeHeavyStep: step,
+            onPreparedSettings: settings => { prepared = settings; }
+          });
+          if (!valid()) return;
+          // Before the tile encode.
+          await step();
+          if (!valid()) return;
+          if (!item.settings && prepared) {
+            item.settings = cloneSettings(prepared);
+            item.automaticSettings = true;
+          }
+          item.thumbnail = thumbnailDataUrl(image);
+          item.thumbnailKind = 'processed';
+          item.thumbnailKey = photoSettingsKey(item);
+          item.thumbnailErrorKey = null;
+          updateFileThumbnail(item);
+        },
+        fail(error) {
+          if (!valid()) return;
+          item.thumbnailErrorKey = key;
+          console.warn('Photo preview failed:', item.file.name, error);
+          refreshThumbnailRow(item);
+        }
+      };
+    }
+
+    // The next photo: its base in the prefetch slot, and a 1200 px preview of
+    // its recipe for the switch veil. The lane's own workers render it,
+    // never the foreground's.
+    function beginPrefetch(item) {
+      const valid = () => photoPrefetchEnabled() && state.fileQueue.includes(item)
+        && item !== getCurrentQueueItem() && item !== state.fileQueue[state.currentFileIndex]
+        && !photoSessions.has(item) && item === prefetchTargetItem();
+      const hold = decoded => photoPrefetch.has(item) || holdPrefetchedBase(item, decoded);
+      return {
+        valid,
+        hold,
+        async run(decoded, step) {
+          if (!hold(decoded)) return;
+          if (!item.settings) return;
+          const key = photoSettingsKey(item);
+          prefetchPreviewAttempts.set(item, key);
+          if (photoPreviews.peek(item)?.key === key) return;
+          const current = () => valid() && key === photoSettingsKey(item);
+          await step();
+          if (!current()) return;
+          const image = await processFileWithSettings(item.file, item.settings, {
+            previewMaxDimension: 1200, updateItemSettings: false, sourceImageData: decoded.base,
+            isCurrent: current, convert: request => backgroundConvert(request),
+            analyzers: backgroundAnalyzers(), beforeHeavyStep: step
+          });
+          if (current()) photoPreviews.put(item, { key, image });
+        },
+        fail(error) {
+          console.warn('Photo prefetch failed:', item.file?.name, error);
+        }
+      };
+    }
+
+    // Roll analysis pass 1 through the lanes. Resolves once every frame of
+    // `items` is analysed, failed or no longer wanted (and no job of it runs).
+    // `begin(item)` returns `{ valid(), analyze(image, step) }`; the payload
+    // goes to `sink(item, payload)`, errors to `onError(item, error)`.
+    function runRollAnalysisPass(items, { lanes = 1, valid, wants, begin, sink, onError }) {
+      return new Promise(resolve => {
+        const request = { items: new Set(items), lanes, inFlight: 0, valid, resolve };
+        request.wants = item => request.items.has(item) && valid() && wants(item);
+        request.begin = item => {
+          const frame = begin(item);
+          request.inFlight += 1;
+          let finished = false;
+          return {
+            valid: () => frame.valid(),
+            async run(base, step) {
+              const payload = await frame.analyze(base, step);
+              if (payload) await sink(item, payload);
+            },
+            fail(error) { onError(item, error); },
+            done() {
+              if (finished) return;
+              finished = true;
+              request.inFlight -= 1;
+              settleRollPassRequests();
+            }
+          };
+        };
+        rollPassRequests.add(request);
+        settleRollPassRequests();
+        kickBackgroundPhotoWork();
+      });
+    }
+
+    function beginRollPassFrame(item) {
+      for (const request of rollPassRequests) if (request.wants(item)) return request.begin(item);
+      return null;
+    }
+
+    function settleRollPassRequests() {
+      for (const request of [...rollPassRequests]) {
+        if (request.inFlight) continue;
+        if (request.valid() && [...request.items].some(item => request.wants(item))) continue;
+        rollPassRequests.delete(request);
+        request.resolve();
+      }
+    }
+
+    // Visible strip / light-table tiles, one row (or one strip tile) beyond
+    // the scrolled area.
+    function observeBackgroundVisibility() {
+      if (typeof IntersectionObserver !== 'function') return;
+      const root = document.getElementById('fileListItems');
+      if (!root) return;
+      if (!backgroundVisibility || backgroundVisibility.root !== root) {
+        backgroundVisibility?.disconnect();
+        backgroundVisibleItems.clear();
+        backgroundVisibility = new IntersectionObserver(entries => {
+          for (const entry of entries) {
+            const item = state.fileQueue[Number(entry.target.dataset.index)];
+            if (!item) continue;
+            if (entry.isIntersecting) backgroundVisibleItems.add(item);
+            else backgroundVisibleItems.delete(item);
+          }
+        }, { root, rootMargin: '132px' });
+      }
+      for (const button of root.querySelectorAll('.file-list-name')) backgroundVisibility.observe(button);
+      for (const item of backgroundVisibleItems) if (!state.fileQueue.includes(item)) backgroundVisibleItems.delete(item);
     }
 
     // 標準暗室は既存の描画・履歴・書き出し経路を再利用する。
@@ -19657,6 +20245,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (safe) {
         photoSessions.clear();
         photoPreviews.clear();
+        photoPrefetch.clear();
         hiddenJobs.setSafeMode(true);
       }
       try {
@@ -21249,39 +21838,48 @@ import { canPublishThumbnail } from './thumbnailRank.js';
             && !await samples.get(current)) {
             await samples.put(current, buildRollAnalysisSample(state.loadedBaseImageData || state.originalImageData, current.settings));
           }
-          // Frames are decoded and measured a few at a time (same lane planning
-          // as the batch export), each lane with its own frame analyzer, and
-          // never behind the blocking overlay: the editor stays usable.
+          // Frames are decoded and measured by the background lanes (#243):
+          // one job per frame in display order from the open photo (its
+          // neighbours first), lanes planned as for the batch export, each
+          // with its own frame analyzer, never behind the blocking overlay and
+          // never while the foreground is busy or the user is giving input.
           // The requested foreground item already owns its decode even before
-          // loadedFile catches up and getCurrentQueueItem becomes non-null.
+          // loadedFile catches up and getCurrentQueueItem becomes non-null; a
+          // frame the user opens while a lane decodes it is adopted by the
+          // foreground and analysed there.
           const toAnalyze = pending.filter(item => eligible(item) && !item.settings && item !== state.fileQueue[state.currentFileIndex]);
           if (toAnalyze.length) frameFilmType ??= state.filmType;
           const lanes = hiddenJobs.safeMode ? 1 : await planBatchLanes(toAnalyze.map(item => item.file));
-          const bytes = await hiddenJobBytesFor(toAnalyze.map(item => item.file));
           const analyzers = createAutoFrameWorkerPool({ size: lanes });
-          const stop = new AbortController();
           const trace = createPerfTrace('automaticRollImport', { files: toAnalyze.length, lanes });
           try {
-            await runBatchPipeline(toAnalyze, {
-              maxParallel: lanes,
-              signal: stop.signal,
-              beforeStart: ({ signal }) => hiddenJobs.admit({ bytes, signal }),
-              process: async (item) => {
-                if (!valid()) { stop.abort(); return null; }
+            await runRollAnalysisPass(toAnalyze, {
+              lanes,
+              valid,
+              wants: item => eligible(item) && !item.settings && item !== state.fileQueue[state.currentFileIndex],
+              begin: (item) => {
                 const key = automaticRollItemKey(item);
                 const itemValid = () => valid() && eligible(item) && !item.settings
                   && item !== state.fileQueue[state.currentFileIndex] && key === automaticRollItemKey(item);
-                if (!itemValid()) return null;
-                const image = await loadFileToImageData(item.file, { filmStats: true });
-                if (!itemValid()) { retry = true; return null; }
-                let settings = await analyzeStudioImportFrame(image, createDefaultSettings(image, item), { silent: true, analyzeInWorker: analyzers.analyze, filmType: frameFilmType ?? state.filmType });
-                if (!itemValid()) { retry = true; return null; }
-                const edge = await analyzeImportFilmEdge(image, settings, { applyDefaults: state.importFilmTypeAuto, readFilmEdge: analyzers.readFilmEdge });
-                if (!itemValid()) { retry = true; return null; }
-                if (edge) settings = edge.settings;
-                settings = await learnedImportSettings(settleImportFilmType(item, settings), item);
-                if (!itemValid()) { retry = true; return null; }
-                return { settings, sample: buildRollAnalysisSample(image, settings), key };
+                return {
+                  valid: itemValid,
+                  // `step` waits for the foreground before each main-thread-heavy step (capped).
+                  async analyze(image, step) {
+                    if (!itemValid()) return null;
+                    await step();
+                    if (!itemValid()) return null;
+                    let settings = await analyzeStudioImportFrame(image, createDefaultSettings(image, item), { silent: true, analyzeInWorker: analyzers.analyze, filmType: frameFilmType ?? state.filmType });
+                    if (!itemValid()) return null;
+                    const edge = await analyzeImportFilmEdge(image, settings, { applyDefaults: state.importFilmTypeAuto, readFilmEdge: analyzers.readFilmEdge });
+                    if (!itemValid()) return null;
+                    if (edge) settings = edge.settings;
+                    settings = await learnedImportSettings(settleImportFilmType(item, settings), item);
+                    if (!itemValid()) return null;
+                    await step();
+                    if (!itemValid()) return null;
+                    return { settings, sample: buildRollAnalysisSample(image, settings), key };
+                  }
+                };
               },
               sink: async (item, payload) => {
                 if (!payload || !valid() || !eligible(item) || item.settings || item === state.fileQueue[state.currentFileIndex]
@@ -21299,11 +21897,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
                 renderFrameAnalysisThumbnail(item, payload,
                   () => valid() && eligible(item) && item.settings === payload.settings);
               },
-              onEvent: (event) => {
-                if (event.type !== 'error' || !valid() || !eligible(event.job)
-                  || event.job.settings || event.job === state.fileQueue[state.currentFileIndex]) return;
-                failed.add(event.job);
-                event.job.status = 'error'; event.job.error = event.error?.message || String(event.error);
+              onError: (item, error) => {
+                if (!valid() || !eligible(item) || item.settings || item === state.fileQueue[state.currentFileIndex]) return;
+                failed.add(item);
+                item.status = 'error'; item.error = error?.message || String(error);
               }
             });
           } finally {

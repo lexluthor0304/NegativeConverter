@@ -53,7 +53,7 @@ function fixture() {
   const context = vm.createContext({
     state, photoSessions, photoPreviews, console: { warn: noop, error: noop },
     document: { body: { dataset: {} }, getElementById: element },
-    File: globalThis.File, performance, Uint8Array, structuredClone, DOMException,
+    File: globalThis.File, performance, Uint8Array, structuredClone, DOMException, AbortController,
     aiRepair: { revision: 2, status: 'ready', provider: 'wasm', run: noop, release: noop },
     processNegativeInFlight: null, coreReprocessTimer: null, dustDetectionTimer: null,
     corePreviewRetained: null, corePreviewCommit: null,
@@ -62,6 +62,12 @@ function fixture() {
     dustDrawing: false, undoStack: [], redoStack: [],
     coreReprocessGeneration: 3, coreReprocessToken: 4, dustDetectionRevision: 5,
     loadGeneration: 6, _coreReprocessPending: null, importDetectionAbort: null,
+    fullResolutionRenderAbort: null, analyzeFrameInWorker: { abortReleases: 0 }, rewarmAutoFrameWorker: false,
+    // #243: the prefetch slot, latest-wins activations and the background lanes.
+    photoPrefetch: createPhotoSessionCache({ maxBytes: 4096 }), prefetchedItem: null,
+    beginActivation: () => { context.activations.push(new AbortController()); return context.activations.at(-1).signal; },
+    activations: [], notePhotoActivation: noop, activationDwell: async () => { context.dwells++; }, dwells: 0,
+    sharedDecodeInFlight: () => false, kickBackgroundPhotoWork: noop, supersedeActivation: noop,
     studioThumbnailUpdateFrame: 0, cancelAnimationFrame: noop,
     studioThumbnailUpdateTimer: 0, clearTimeout: noop,
     exactSettingsKey, schedulePostPaintTask: task => postPaint.push(task),
@@ -269,7 +275,7 @@ function coldFixture({ presented = null } = {}) {
       assert.equal(options.quiet, true);
       const generation = ++c.loadGeneration;
       const gate = deferred();
-      loads.push({ ...gate, file });
+      loads.push({ ...gate, file, options });
       return gate.promise.then(result => {
         if (c.isCurrentLoad(generation) && result.status === 'loaded') f.state.loadedFile = file;
         return result;
@@ -353,6 +359,80 @@ for (const outcome of ['success', 'load-error', 'prepare-error']) {
     assert.equal(f.state.currentFileIndex, 0);
     assert.equal(f.state.loadedFile, f.item.file);
     assert.equal(redraws, 0, 'presentation images live on the veil: a failed target has nothing to restore');
+  }
+}
+
+// #243: latest wins. Each switch begins an activation (aborting the previous
+// one), a cold target waits a short dwell before its file is read, and the
+// load runs under the activation's signal.
+{
+  const f = coldFixture(), c = f.context;
+  c.photoActivation = null;
+  c.lowMemoryPhotoDevice = () => false;
+  vm.runInContext(['supersedeActivation', 'beginActivation'].map(functionSource).join('\n'), c);
+  const first = c.switchToFile(1);
+  const firstSignal = c.photoActivation.signal;
+  f.frames.shift()(); await tick();
+  assert.equal(c.dwells, 1, 'a cold target waits the dwell');
+  assert.equal(f.loads.length, 1);
+  assert.equal(f.loads[0].options.signal, firstSignal, 'the load runs under the activation');
+  // A second click supersedes the first while it decodes.
+  const second = c.switchToFile(2);
+  assert.equal(firstSignal.aborted, true, 'the superseded activation is aborted at once');
+  assert.equal(firstSignal.reason.name, 'AbortError');
+  assert.equal(c.photoActivation.signal.aborted, false);
+  f.loads[0].resolve({ status: 'stale' });
+  await first;
+  assert.equal(f.second.status, undefined, 'a superseded target is never marked');
+  f.frames.shift()(); await tick();
+  assert.equal(f.loads[1].file, f.third.file);
+  f.loads[1].resolve({ status: 'loaded' }); await tick();
+  f.preparations[0].resolve(); await second;
+  assert.equal(c.dwells, 2);
+}
+{
+  // Aborted during the dwell: the file is never read.
+  const f = coldFixture(), c = f.context;
+  c.photoActivation = null;
+  c.lowMemoryPhotoDevice = () => false;
+  vm.runInContext(['supersedeActivation', 'beginActivation'].map(functionSource).join('\n'), c);
+  let release;
+  c.activationDwell = () => new Promise(resolve => { release = resolve; });
+  const first = c.switchToFile(1);
+  f.frames.shift()(); await tick();
+  const second = c.switchToFile(2);
+  release(); await first;
+  assert.equal(f.loads.length, 0, 'a double click never reads the first target');
+  f.frames.shift()(); await tick();
+  release(); await tick();
+  assert.equal(f.loads.length, 1);
+  assert.equal(f.loads[0].file, f.third.file);
+  f.loads[0].resolve({ status: 'loaded' }); await tick();
+  f.preparations[0].resolve(); await second;
+}
+{
+  // No dwell for a retained base, a lane decode in flight, or a prefetched
+  // base; the prefetched base is taken from its slot and skips the decode.
+  for (const kind of ['session', 'shared', 'prefetch']) {
+    const f = coldFixture(), c = f.context;
+    const base = image();
+    if (kind === 'session') f.photoSessions.put(f.second, { file: f.second.file, base, rawMetadata: null });
+    if (kind === 'shared') c.sharedDecodeInFlight = file => file === f.second.file;
+    if (kind === 'prefetch') {
+      c.photoPrefetch.put(f.second, { file: f.second.file, base, rawMetadata: { lensModel: 'x' } });
+      c.prefetchedItem = f.second;
+    }
+    const pending = c.switchToFile(1);
+    f.frames.shift()(); await tick();
+    assert.equal(c.dwells, 0, `${kind}: no dwell`);
+    if (kind !== 'shared') assert.equal(f.loads[0].options.decoded?.base, base, `${kind}: the decode is skipped`);
+    if (kind === 'prefetch') {
+      assert.equal(c.photoPrefetch.size, 0, 'taken from the slot');
+      assert.equal(c.prefetchedItem, null);
+      assert.deepEqual({ ...f.loads[0].options.decoded.rawMetadata }, { lensModel: 'x' }, 'with its rawMetadata');
+    }
+    f.loads[0].resolve({ status: 'loaded' }); await tick();
+    f.preparations[0].resolve(); await pending;
   }
 }
 

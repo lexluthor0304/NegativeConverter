@@ -28,14 +28,14 @@ const context = vm.createContext({
   singleExportActive: false, isDesktopBatchExportLocked: () => locked,
   safeStorageSet: (key, value) => storage.set(key, value),
   studioWorkspace: { sync: () => syncs++, markRowsChanged: noop }, uiDebugCounters: { fileListRenders: 0 },
-  photoSessions: { retainKeys: noop }, photoPreviews: { retainKeys: noop },
+  photoSessions: { retainKeys: noop }, photoPreviews: { retainKeys: noop }, photoPrefetch: { retainKeys: noop },
   document: { getElementById: id => ({ id }), body: { dataset: {} } },
   updateReviewFilter: noop, renderFileList: options => { ui = options; },
   reviewForItem: item => ({ needs: item.needs }),
   getLocalizedText: (_key, fallback) => fallback, getInterpolatedText: (_key, _values, fallback) => fallback,
   currentLang: 'en', i18n: { en: {} },
   updateAutoFrameButtons: noop, syncBatchUIState: noop, refreshThumbnailStates: noop,
-  loadStudioThumbnails: noop, updateExportButtons: noop,
+  kickBackgroundPhotoWork: noop, observeBackgroundVisibility: noop, supersedeActivation: noop, updateExportButtons: noop,
   syncEmbeddedPreviewQueue: noop, tileVisibility: null, observeTileVisibility: noop,
 });
 vm.runInContext('let fileOrderCache = null, fileSelectionAnchor = null, reviewFilter = false;\n'

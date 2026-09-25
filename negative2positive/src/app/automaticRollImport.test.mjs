@@ -9,6 +9,10 @@ import { decideRollFilmType, mergeRollDecision, ownFilmTypeVerdict, rollDecision
 import { applyAutomaticFilmType, applyFilmTypeOverride, sanitizeFilmTypeOverride } from './filmTypeOverride.js';
 import { applyLearnedDefaults, learnedDefaultsKey, withoutLearnedDefaults } from './learnedDefaults.js';
 import { canPublishThumbnail } from './thumbnailRank.js';
+import { createSharedDecodes } from './sharedDecodes.js';
+import { pickBackgroundJob, travelDirection, displayDistance } from './backgroundPhotoScheduler.js';
+import { createPhotoSessionCache } from './photoSessionCache.js';
+import { SCHEDULER_FUNCTIONS } from './backgroundLanesHarness.mjs';
 
 // Test the actual orchestration functions, not a second scheduler. Deferred
 // decoders/analysis replies make navigation and recipe races deterministic.
@@ -24,7 +28,8 @@ const deferred = () => {
   const promise = new Promise(done => { resolve = done; });
   return { promise, resolve };
 };
-const flush = async () => { for (let i = 0; i < 15; i++) await new Promise(setImmediate); };
+// Pass 1 runs in the background lanes (#243), which yield a macrotask between jobs.
+const flush = async () => { for (let i = 0; i < 80; i++) await new Promise(setImmediate); };
 const recipe = id => ({ filmType: 'color', filmBase: { r: 210, g: 140, b: 90, method: 'auto' }, filmEdge: { checked: true }, id });
 const channels = [0, 1, 2].map(() => ({ whitePointOrigin: 50000, blackPointOrigin: 500, meanPoint: 0.5 }));
 
@@ -164,10 +169,25 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
       return gate.promise;
     }, { dispose: () => { frameWorkersDisposed++; } }),
     scheduleTileFlush: item => flushed.push(item.id),
+    // The background lanes (#243): an always idle gate, no photo caches or
+    // prefetch, the display order is the queue order, no lane tiles.
+    DOMException, backgroundGate: { idle: async () => true, bump: noop, noteInput: noop },
+    photoSessions: createPhotoSessionCache({ maxBytes: 0 }), photoPreviews: createPhotoSessionCache({ maxBytes: 0 }),
+    photoPrefetch: createPhotoSessionCache({ maxBytes: 0 }), lowMemoryPhotoDevice: () => true,
+    backgroundLanes: { running: 0, active: new Map() }, rollPassRequests: new Set(), backgroundVisibleItems: new Set(),
+    backgroundDirection: 1, prefetchedItem: null, backgroundWorkers: null, prefetchPreviewAttempts: new WeakMap(),
+    BACKGROUND_LANE_REST_MS: 30, BACKGROUND_LANE_POLL_MS: 250, ACTIVATION_DWELL_MS: 120, BACKGROUND_STEP_WAIT_CAP_MS: 2000,
+    pickBackgroundJob, travelDirection, displayDistance,
+    getFileListOrder: () => state.fileQueue.map((_, index) => index), reviewFilter: false, reviewForItem: () => ({ needs: false }),
   });
+  context.sharedDecodes = createSharedDecodes({ decode: (file, { signal }) => context.decodeForBackground(file, signal) });
   vm.runInContext(['getCurrentQueueItem', 'automaticRollItemKey', 'scheduleAutomaticRollImport', ...FILM_TYPE_FUNCTIONS,
-    'renderFrameAnalysisThumbnail', 'releaseFrameThumbnailWorkers', ...(realRoll ? ['runRollAnalysis'] : [])]
+    'renderFrameAnalysisThumbnail', 'releaseFrameThumbnailWorkers', ...(realRoll ? ['runRollAnalysis'] : []),
+    ...SCHEDULER_FUNCTIONS.filter(name => name !== 'backgroundRest')]
     .map(functionSource).join('\n'), context);
+  // Lanes rest a macrotask, not a timer; tiles are not part of these tests.
+  context.backgroundRest = () => new Promise(resolve => setImmediate(resolve));
+  context.laneTileWanted = () => false;
   const fire = async (ms) => {
     const entry = [...timers].find(([, timer]) => ms === undefined || timer.ms === ms);
     assert.ok(entry, `scheduled timer ${ms ?? 'any'} exists`);
@@ -216,7 +236,8 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
 }
 
 // Navigation during decode no longer throws away other detached measurements.
-// The newly foreground photo owns its own recipe; unvisited neighbours finish.
+// The newly foreground photo owns its own recipe (it adopts the lane's decode,
+// #243); unvisited neighbours wait while the foreground is busy, then finish.
 {
   const f = fixture();
   const held = deferred();
@@ -228,23 +249,24 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
   assert.equal(f.context.getCurrentQueueItem(), null, 'requested photo is not loaded yet');
   held.resolve({ id: 1, width: 10, height: 10 });
   await flush();
-  assert.ok(f.items[2].settings && f.items[3].settings, 'unrelated frames are prepared despite navigation');
   assert.equal(f.items[1].settings, null, 'background never overwrites a foreground preparation');
-  assert.equal(f.context.automaticRollImportRunning, false, 'waiting does not lock thumbnail work');
-  assert.equal(f.timers.size, 1, 'one bounded resume timer');
-  // The job marker (#241) survives the deferred attempt with every analysed frame.
+  assert.ok(!f.items[2].settings && !f.items[3].settings, 'no background decode starts while the foreground is busy');
+  assert.deepEqual(f.decoded, [], 'nothing else was decoded meanwhile');
+  assert.equal(f.context.automaticRollImportRunning, true, 'pass 1 waits for the foreground instead of retrying');
+  // The job marker (#241) is written when the analysis starts.
   const running = f.marker();
   assert.equal(running?.kind, 'roll-analysis');
   assert.equal(running.files.length, 4);
-  assert.deepEqual(running.written.map(([index]) => index).sort(), [2, 3], 'both analysed frames are recorded');
-  assert.ok(f.context.recoveryWrites >= 2, 'each analysed frame schedules the recovery copy');
+  // The foreground settles with its own recipe; the lanes finish the rest.
   f.navigate(1);
   f.items[1].settings = recipe(1);
-  await f.fire(750);
+  await flush();
+  assert.ok(f.items[2].settings && f.items[3].settings, 'unrelated frames are prepared after the switch');
+  assert.ok(f.context.recoveryWrites >= 2, 'each analysed frame schedules the recovery copy');
   assert.equal(f.groups.length, 1);
   assert.equal(f.groups[0].length, 4);
-  assert.deepEqual(f.decoded, [2, 3], 'already prepared frames are not decoded on resume');
-  assert.equal(f.timers.size, 0);
+  assert.deepEqual(f.decoded, [2, 3], 'one decode per background frame; the opened frame\'s went to the foreground');
+  assert.equal(f.timers.size, 0, 'no resume timer');
   assert.ok(f.stores.every(store => store.cleared), 'sample storage is disposed after completion');
   assert.equal(f.marker(), null, 'the marker is deleted when the analysis ends');
 }
@@ -494,6 +516,37 @@ for (const change of ['recipe', 'edit', 'dirty', 'remove', 'cancel', 'off']) {
   await flush();
   assert.equal(f.items[2].thumbnail, undefined, 'a changed recipe drops its per-frame tile');
   assert.equal(f.items[1].thumbnailKind, 'analysis');
+}
+
+// #243: pass 1 now runs in display order around the open photo instead of
+// import order. With no navigation or edits, every frame's final recipe and
+// sample are the same in any order (the roll's film-type decision is
+// recomputed once pass 1 has read every frame).
+for (const verdicts of [['noMask', 'mono', 'mono', 'mono', 'mono'], ['mono', 'mono', 'mono', 'mono', 'noMask', 'noMask', 'warm', 'noMask'],
+  ['mono', 'orange', 'noMask', 'orange', 'mono', 'mono']]) {
+  const outcomes = [];
+  for (const order of ['import', 'reverse', 'shuffled']) {
+    const f = fixture({ verdicts, realRoll: true });
+    const n = f.items.length;
+    const display = order === 'import' ? [...Array(n).keys()]
+      : order === 'reverse' ? [...Array(n).keys()].reverse()
+        : [...Array(n).keys()].sort((a, b) => ((a * 7 + 3) % n) - ((b * 7 + 3) % n));
+    f.context.getFileListOrder = () => display;
+    f.context.scheduleAutomaticRollImport(f.items);
+    f.prepareForeground(0);
+    await f.fire(1200);
+    assert.equal(f.timers.size, 0, `${order}: the import finished`);
+    // The roll id is a fresh time-based id per analysis.
+    const recipes = JSON.stringify(f.items.map(item => item.settings)).replace(/"rollId":"[^"]*"/g, '"rollId":"*"');
+    outcomes.push({ order, decoded: [...f.decoded].sort(), settings: recipes,
+      samples: [...f.samplesBuilt].sort().join(','), groups: JSON.stringify(f.groups) });
+  }
+  for (const outcome of outcomes.slice(1)) {
+    assert.deepEqual(outcome.decoded, outcomes[0].decoded, `${outcome.order}: one decode per background frame`);
+    assert.equal(outcome.settings, outcomes[0].settings, `${outcome.order}: identical recipes (${verdicts.join(' ')})`);
+    assert.equal(outcome.samples, outcomes[0].samples, `${outcome.order}: identical samples`);
+    assert.equal(outcome.groups, outcomes[0].groups, `${outcome.order}: identical roll groups`);
+  }
 }
 
 console.log('automaticRollImport tests passed');
