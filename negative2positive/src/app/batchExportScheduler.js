@@ -633,7 +633,8 @@ export async function runBatchPipeline(jobs, {
     };
     let entry;
     try {
-      const taken = stage ? stage.take(index) : null;
+      let taken = stage ? stage.take(index) : null;
+      const wasPrepared = Boolean(taken);
       let prepared;
       if (taken) {
         prepared = await taken;
@@ -642,7 +643,12 @@ export async function runBatchPipeline(jobs, {
         decodingHere = true;
         selfDecoding += 1;
       }
-      const payload = await process(job, index, prepared, { decoded: noteBase, prepared: Boolean(taken) });
+      taken = null;
+      const running = process(job, index, prepared, { decoded: noteBase, prepared: wasPrepared });
+      // The frame is process()'s now: this suspended frame must not keep it
+      // alive once process() releases it early (#256 Part 1).
+      prepared = undefined;
+      const payload = await running;
       entry = { ok: true, payload };
     } catch (error) {
       entry = { ok: false, error };

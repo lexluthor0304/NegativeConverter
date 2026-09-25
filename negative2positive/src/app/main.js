@@ -17591,15 +17591,23 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     async function renderBatchExportFile(job, position, context, { transferPlanes = true } = {}) {
       const { exportInfo, workers, dustRemoval } = context;
       const { file, settings } = job;
-      const prepared = context.prepared || null;
-      context.prepared = null;
       const stages = {
         onBaseReady: context.onBaseReady || null,
-        learningBarrier: context.learningBarrier || null,
-        ...(prepared ? { sourceImageData: prepared, sourceOwned: true } : {})
+        learningBarrier: context.learningBarrier || null
+      };
+      // The base decoded ahead goes into the options object only, which
+      // processFileWithSettings empties once it owns the base: no local of
+      // this suspended frame keeps it alive after its early release.
+      const handOver = (options) => {
+        if (context.prepared) {
+          options.sourceImageData = context.prepared;
+          options.sourceOwned = true;
+          context.prepared = null;
+        }
+        return options;
       };
       if (exportInfo.format === 'dng') {
-        const { source, settings: usedSettings } = await processFileWithSettings(file, settings, { stage: 'source', convert: workers.convert, geometryBands: workers.geometryBands, silent: true, memoryClaim: coveredMemoryClaim(), ...stages });
+        const { source, settings: usedSettings } = await processFileWithSettings(file, settings, handOver({ stage: 'source', convert: workers.convert, geometryBands: workers.geometryBands, silent: true, memoryClaim: coveredMemoryClaim(), ...stages }));
         return renderLinearDngBlobInSlices(source, usedSettings, position);
       }
       const sprocket = state.exportSprocketHolesEnabled;
@@ -17611,7 +17619,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         // plane.
         const residentFormat = exportInfo.format === 'tiff' || exportInfo.format === 'png'
           || (exportInfo.format === 'jpeg' && (sprocket || safeStorageGet('nc_hdr_gain_map_v1') === 'off'));
-        const { processed, settings: used } = await processFileWithSettings(file, settings, {
+        const { processed, settings: used } = await processFileWithSettings(file, settings, handOver({
           stage: 'processed',
           silent: true,
           // The lane's reservation covers the decode (runBatchExport).
@@ -17625,7 +17633,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           releaseEarly: true,
           bandResident: transferPlanes && Boolean(workers.bandPool) && residentFormat,
           ...stages
-        });
+        }));
         const adjustmentSettings = buildAdjustmentSettings(used);
         const wants16 = exportInfo.bitDepth === 16;
         if (processed.__bands) {

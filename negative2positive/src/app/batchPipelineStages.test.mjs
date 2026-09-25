@@ -284,6 +284,46 @@ for (const readyBeforeCancel of [false, true]) {
   assert.equal(stage.size, 0);
 }
 
+// A prepared frame is process()'s alone: once process() lets it go (the early
+// release, #256 Part 1), neither the pipeline nor the prepare stage keeps it.
+{
+  const v8 = await import('node:v8');
+  const vm = await import('node:vm');
+  v8.setFlagsFromString('--expose-gc');
+  const gc = vm.runInNewContext('gc');
+  const collected = new Set();
+  const registry = new FinalizationRegistry((name) => collected.add(name));
+  const seen = [];
+  const result = await runBatchPipeline([0, 1, 2], {
+    maxParallel: 1,
+    prepareDepth: 1,
+    prepare: async (job) => {
+      const base = { job, pixels: new Uint16Array(1 << 16) };
+      registry.register(base, `base-${job}`);
+      return base;
+    },
+    process: async (job, _index, prepared, context) => {
+      if (!prepared) {
+        context.decoded();
+        await sleep(5);
+        return job;
+      }
+      const holder = { prepared };
+      prepared = null;
+      holder.prepared = null; // released early
+      for (let i = 0; i < 4; i++) {
+        gc();
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      seen.push(collected.has(`base-${job}`));
+      return job;
+    },
+    sink: async () => {}
+  });
+  assert.equal(result.successCount, 3);
+  assert.deepEqual(seen, [true, true], 'the prepared base is unreachable once process() lets it go');
+}
+
 // ---- Part 4: decode and post-decode sub-stages -------------------------------------
 
 // With depth 2 the next frame's decoder starts once the previous prepared
