@@ -55,17 +55,45 @@ export function backingBuffers(value, buffers = new Set()) {
  * opaque native resources. Do not use it to own canvases/ImageBitmaps; eviction
  * drops references only and never detaches buffers or closes shared resources.
  * A zero budget disables storage, including entries without pixel buffers.
+ *
+ * `onEvict(key, value)` (#249) is called for each entry a put pushed out of
+ * the budget, once that put is complete, oldest first; never for take,
+ * delete, clear or retainKeys. The callback may store a smaller form of the
+ * entry again (`putIfRoom(key, value, { oldest: true })`, which never
+ * displaces a more recent entry) or keep it elsewhere.
  */
-export function createPhotoSessionCache({ maxBytes = DEFAULT_MAX_BYTES } = {}) {
+export function createPhotoSessionCache({ maxBytes = DEFAULT_MAX_BYTES, onEvict = null } = {}) {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
     throw new RangeError('Photo-session maxBytes must be a non-negative safe integer');
   }
-  const entries = new Map();
+  let entries = new Map();
   const owners = new Map();
   let bytes = 0;
   // The entry stored last (the photo the user just left, #258): pressure and
   // idle trimming keep it, so the warm 1-back switch survives them.
   let lastStoredKey;
+
+  function register(key, value, buffers, { oldest = false } = {}) {
+    if (oldest) entries = new Map([[key, { value, buffers }], ...entries]);
+    else entries.set(key, { value, buffers });
+    for (const buffer of buffers) {
+      const owner = owners.get(buffer);
+      if (owner) owner.count++;
+      else {
+        const size = buffer.byteLength;
+        owners.set(buffer, { count: 1, bytes: size });
+        bytes += size;
+      }
+    }
+  }
+
+  // Evicted entries are handed to onEvict after the put that evicted them.
+  function notifyEvicted(evicted) {
+    if (!onEvict) return;
+    for (const [key, value] of evicted) {
+      try { onEvict(key, value); } catch (error) { console.warn('Photo-session eviction handler failed:', error); }
+    }
+  }
 
   function remove(key) {
     const entry = entries.get(key);
@@ -96,35 +124,38 @@ export function createPhotoSessionCache({ maxBytes = DEFAULT_MAX_BYTES } = {}) {
 
       // Register the new owner before eviction: removing the old LRU entry
       // must not release a backing store shared with this newly cached value.
-      entries.set(key, { value, buffers });
-      for (const buffer of buffers) {
-        const owner = owners.get(buffer);
-        if (owner) owner.count++;
-        else {
-          const size = buffer.byteLength;
-          owners.set(buffer, { count: 1, bytes: size });
-          bytes += size;
-        }
+      register(key, value, buffers);
+      const evicted = [];
+      while (bytes > maxBytes) {
+        const oldest = entries.keys().next().value;
+        const entry = remove(oldest);
+        if (entry) evicted.push([oldest, entry.value]);
       }
-      while (bytes > maxBytes) remove(entries.keys().next().value);
       if (entries.has(key)) lastStoredKey = key;
+      notifyEvicted(evicted);
       return true;
     },
     // Stores only if it fits next to everything retained, evicting nothing
     // (#243: a background lane's finished base never displaces a photo the
-    // user visited). Buffers this cache already holds count once.
-    putIfRoom(key, value) {
+    // user visited). Buffers this cache already holds count once. `oldest`
+    // (#249) files it as the least recently used entry: a demoted session
+    // is evicted before any photo visited after it.
+    putIfRoom(key, value, { oldest = false } = {}) {
       if (maxBytes === 0) return false;
       const previous = entries.get(key);
       const releasing = new Set();
       if (previous) for (const buffer of previous.buffers) if (owners.get(buffer).count === 1) releasing.add(buffer);
       let total = bytes;
       for (const buffer of releasing) total -= owners.get(buffer).bytes;
-      for (const buffer of backingBuffers(value)) {
+      const buffers = backingBuffers(value);
+      for (const buffer of buffers) {
         if (!owners.has(buffer) || releasing.has(buffer)) total += buffer.byteLength;
       }
       if (total > maxBytes) return false;
-      return this.put(key, value);
+      if (!oldest) return this.put(key, value);
+      remove(key);
+      register(key, value, buffers, { oldest: true });
+      return true;
     },
     take(key) { return remove(key)?.value ?? null; },
     peek(key) {
@@ -134,6 +165,10 @@ export function createPhotoSessionCache({ maxBytes = DEFAULT_MAX_BYTES } = {}) {
       entries.set(key, entry);
       return entry.value;
     },
+    /** The retained value without marking it recently used (#249). */
+    get(key) { return entries.get(key)?.value ?? null; },
+    /** Keys from least to most recently used. */
+    keys() { return [...entries.keys()]; },
     /** Whether `key` is retained, without marking it recently used. */
     has(key) { return entries.has(key); },
     delete(key) { return remove(key) !== null; },

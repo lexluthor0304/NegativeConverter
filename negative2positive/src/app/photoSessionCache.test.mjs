@@ -178,4 +178,48 @@ if (typeof SharedArrayBuffer !== 'undefined') {
   assert.equal(order.has('new'), true);
 }
 
+// #249: an entry a put pushed out is handed to onEvict after the put, oldest
+// first. A demoted form filed as the oldest entry never displaces a photo
+// visited after it; one that does not fit next to them is refused.
+{
+  const evicted = [];
+  let cache;
+  cache = createPhotoSessionCache({
+    maxBytes: 100,
+    onEvict: (key, value) => {
+      evicted.push(key);
+      if (value.small && !key.endsWith("'")) cache.putIfRoom(key + "'", { small: value.small }, { oldest: true });
+    }
+  });
+  cache.put('a', { base: new Uint8Array(40), small: new Uint8Array(10) });
+  cache.put('b', { base: new Uint8Array(40), small: new Uint8Array(5) });
+  assert.deepEqual(evicted, [], 'nothing evicted yet');
+  cache.put('c', { base: new Uint8Array(40) });
+  assert.deepEqual(evicted, ['a'], 'the oldest entry went, after the put');
+  assert.deepEqual(cache.keys(), ["a'", 'b', 'c'], 'its demoted form is the least recently used entry');
+  assert.equal(cache.bytes, 95, 'b and c keep their bytes; the demoted entry holds only its small plane');
+  cache.put('d', { base: new Uint8Array(40) });
+  assert.deepEqual(evicted, ['a', "a'", 'b'], 'the demoted entry goes before b');
+  assert.equal(cache.has('c'), true);
+  assert.equal(cache.has("b'"), true, 'b demoted into the room left');
+  assert.equal(cache.get('c') !== null, true, 'get does not touch the order');
+  assert.deepEqual(cache.keys(), ["b'", 'c', 'd']);
+  evicted.length = 0;
+  cache.take('c'); cache.delete('d'); cache.retainKeys([]);
+  assert.deepEqual(evicted, [], 'take, delete and retainKeys are not evictions');
+  // A demoted form that does not fit is refused, not stored over newer entries.
+  const strict = createPhotoSessionCache({ maxBytes: 50, onEvict: (key) => {
+    assert.equal(strict.putIfRoom(key + "'", { plane: new Uint8Array(20) }, { oldest: true }), false);
+  } });
+  strict.put('x', { plane: new Uint8Array(30) });
+  strict.put('y', { plane: new Uint8Array(40) });
+  assert.deepEqual(strict.keys(), ['y']);
+  // A throwing handler does not break the put.
+  const quiet = console.warn; console.warn = () => {};
+  const throwing = createPhotoSessionCache({ maxBytes: 10, onEvict: () => { throw new Error('boom'); } });
+  throwing.put('p', { plane: new Uint8Array(10) });
+  assert.equal(throwing.put('q', { plane: new Uint8Array(10) }), true);
+  console.warn = quiet;
+}
+
 console.log('photoSessionCache: shared backing stores/history, LRU, ownership, replacement, limits and cleanup passed');
