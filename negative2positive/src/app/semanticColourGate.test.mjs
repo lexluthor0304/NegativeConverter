@@ -25,6 +25,7 @@ function run({ filmType = 'color', positiveMode = 'correct', expiredEnabled = fa
   if (wbSample) state.autoWbSample = { source: wbSample === 'stale' ? {} : state.conversionSourceImageData, image: { width: 16, height: 16 } };
   const context = vm.createContext({
     state, console, manualEditRevision: 0, studioAutoFrameRunning: false, automaticRollImportRunning: false,
+    semanticColourInFlight: 0,
     automaticRollPendingItems: new Set(rollPending ? [item] : []),
     isCurrentLoad: () => true, getCurrentQueueItem: () => item,
     downsampleImageDataForMaxDim: image => { downsamples.push(image); return image; },

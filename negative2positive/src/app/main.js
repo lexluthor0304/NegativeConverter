@@ -10888,7 +10888,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // Leaving the photo aborts stage 2 with the activation (#243).
     const TWO_STAGE_MIN_MP_KEY = 'nc_two_stage_min_mp';
     const twoStageDiagnostics = { plans: [], stage1: [], stage2: [], swaps: 0, failures: 0, retries: 0, abandoned: 0, leftEarly: 0 };
-    // ?debug=1 only: the next N full decodes fail (smoke: export after a failure).
+    // ?debug=1 only (smoke): hold full decodes before they read the file, and
+    // fail the next N of them.
+    let fullDecodeHold = null;
     let failNextFullDecodes = 0;
 
     function twoStageMinPixelsSetting() {
@@ -10960,6 +10962,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const entry = noteTwoStageEvent(twoStageDiagnostics.stage2, { file: record.file.name, mode: record.mode, ms: null, failed: false });
       const attempt = (async () => {
         const signal = record.abort.signal;
+        if (DEBUG_UI && fullDecodeHold) await fullDecodeHold.promise;
+        if (signal.aborted) throw signal.reason;
         if (DEBUG_UI && failNextFullDecodes > 0) {
           failNextFullDecodes--;
           await new Promise(resolve => setTimeout(resolve, 50));
@@ -11388,10 +11392,23 @@ import { canPublishThumbnail } from './thumbnailRank.js';
             scale: state.loadedBaseImageData.__decodeScale || 1
           } : null,
           settings: state.originalImageData ? extractCurrentSettings() : null,
-          liveCrop: state.cropRegion ? { ...state.cropRegion } : null
+          liveCrop: state.cropRegion ? { ...state.cropRegion } : null,
+          semanticPending: semanticColourInFlight > 0
         }),
         exact: () => ensureFullDecode({ reason: 'debug' }),
-        ...(DEBUG_UI ? { failNextFullDecodes: (count = 1) => { failNextFullDecodes = Math.max(0, count | 0); } } : {})
+        ...(DEBUG_UI ? {
+          failNextFullDecodes: (count = 1) => { failNextFullDecodes = Math.max(0, count | 0); },
+          holdFullDecodes: () => {
+            if (fullDecodeHold) return;
+            let release;
+            fullDecodeHold = { promise: new Promise(resolve => { release = resolve; }), release: () => release() };
+          },
+          releaseFullDecodes: () => {
+            const hold = fullDecodeHold;
+            fullDecodeHold = null;
+            hold?.release();
+          }
+        } : {})
       };
     }
 
@@ -20123,6 +20140,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return edits ? overlayWindowEdits(settings, edits) : settings;
     }
 
+    // Semantic colour passes queued or running (debug status for the smokes'
+    // settled recipes, #255).
+    let semanticColourInFlight = 0;
     function scheduleSemanticColour(item, generation) {
       // Only colour film (or any film under rescue) can use the map: the same
       // test the result is dropped by below, taken before the downsample and
@@ -20141,6 +20161,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const valid = () => isCurrentLoad(generation) && item === getCurrentQueueItem() && revision === manualEditRevision && !state.cropping && !studioAutoFrameRunning && !automaticRollImportRunning && !state.rollFrame?.locked && !state.wbUserOverride && !state.grayPointSampled && !state.rollReference.applyLock && !item.savedSettings;
       // Whole converted preview coordinates are used for both WB and rescue.
       const preview = downsampleImageDataForMaxDim(sampleSource, 512);
+      semanticColourInFlight++;
       setTimeout(async () => {
         try {
           if (!valid()) return;
@@ -20164,6 +20185,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           markCurrentFileDirty(); persistCurrentFileSettings({ force: true, silent: true });
           schedulePreviewUpdate();
         } catch (error) { console.warn('Semantic colour skipped:', error); }
+        finally { semanticColourInFlight--; }
       }, 0);
     }
 

@@ -73,7 +73,7 @@ function fixture({ search = '?twoStageMinMp=40&twoStageMode=sequential', settled
     fullResolutionRenderAbort: null, parkedPhoto: null, pendingImportRotation: null,
     coreReprocessGeneration: 0, coreReprocessToken: 0, _coreReprocessPending: null, processNegativeInFlight: null,
     coreReprocessTimer: null, dustDrawing: false, aiBrushDrawing: null, undoStack: [], redoStack: [],
-    cropModeWaiters: [], failNextFullDecodes: 0, DEBUG_UI: false, TWO_STAGE_MIN_MP_KEY: 'nc_two_stage_min_mp',
+    cropModeWaiters: [], failNextFullDecodes: 0, fullDecodeHold: null, DEBUG_UI: false, TWO_STAGE_MIN_MP_KEY: 'nc_two_stage_min_mp',
     dustAiRefresh: { rects: [], timer: null },
     twoStageDiagnostics: { plans: [], stage1: [], stage2: [], swaps: 0, failures: 0, retries: 0, abandoned: 0, leftEarly: 0 },
     AbortController, DOMException, Promise, Map, Set, JSON, Boolean, Object, Error, URLSearchParams, structuredClone, performance,
