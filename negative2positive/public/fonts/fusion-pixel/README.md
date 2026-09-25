@@ -9,8 +9,28 @@
 - ライセンス: OFL.txt、および LICENSES/ 内の構成フォントのライセンス。
 
 原字体を改変せず、簡体字・繁体字・日本語・韓国語優先の四種類を同梱する。
-各ファイルはラテン文字も含む。言語に必要なファイルのみブラウザーが読み込む。
+WOFF2 本体は `negative2positive/src/assets/fonts/fusion-pixel/` に置き、Vite が
+内容ハッシュ付きの `/assets/*-[hash].woff2`（immutable キャッシュ）として配信する。
+このディレクトリにはライセンスと本 README のみを残す。
 外部 CDN は使わず、Web・デスクトップの両方でローカル配信する。
+
+UI の表示にはビルド時に生成する言語別サブセットを使う（#262）。
+`scripts/build-ui-fonts.mjs` が dev / build の開始時に UI の文字列
+（i18n.js、studioText、index.html、src/app・src/ui の文字列リテラル、CSS の
+`content`）を `scripts/ui-font-glyphs.mjs` で集め、HarfBuzz（`subset-font`）で
+各言語の原字体から切り出す。レイアウト機能とヒンティングは保持し、ファミリー名を
+変更して `src/assets/fonts/ui/`（git 管理外）へ WOFF2 と `@font-face` を書き出す。
+
+- `Fusion Pixel SC UI`: zh_hans 原字体から。`NC Studio Latin` にない文字を担当（既定・zh）。
+- `Fusion Pixel JP UI`: ja 原字体から。ラテン文字も含む（JP は U+00B7 と曲引用符の字形が SC と異なる）。
+
+原字体はサブセットの後ろのフォールバックとして残る。サブセット外の文字（CJK の
+ファイル名など）は原字体のダウンロードになるだけで、字形は変わらない。
+U+2212（−）と U+2260（≠）はどの原字体にもないため、従来どおり monospace で表示する。
+原字体の `unicode-range` はグリフのない U+2200–U+230B を除外し、これらの文字のために
+原字体を取得しない。`uiFontCoverage.test.mjs` が、UI の文字がすべて原字体にあるか
+フォールバック一覧にあること、どの `unicode-range` もフォールバック文字を含まないことを検査する。
+ja・ko・zh-Hant の字体指定は SC を後ろに持たない（同じ cmap なので字形を補えない）。
 
 Film Edge Pixel の CJK 端文字にもこの原字体を使用する。12px の原生グリッドで
 字形を読み、従来の露光マスクで合成する。プレビューはロード完了後に再描画し、
@@ -23,3 +43,8 @@ arrows の約 10 KB のサブセット `nc-studio-latin.woff2` を追加した�
 派生字体の名前は `NC Studio Latin` に変更し、元の字形と OFL ライセンスを保持する。
 再生成: fonttools[woff] 4.60.1 を用意し、`python3 scripts/subset-studio-font.py`。
 言語切替リンクはシステム字体を使い、その数文字のために CJK 全体を取得しない。
+
+2026-09-25: `NC Studio Latin` に Studio が描く幾何図形 5 字（▶ ▸ ▼ ▾ ●）を追加し、
+グリフのない U+2212 を範囲から外した。英語 UI は写真を開いても CJK 原字体を取得しない。
+UI サブセットの派生字体も同じく OFL に従い、原字形・メトリクス・カーニングを保持する
+（OFL.txt は Reserved Font Name を宣言していないため、名前に "Fusion Pixel" を残す）。

@@ -4,6 +4,8 @@ node_modules/
 # 构建输出
 dist/
 build/
+# UI 字体子集：scripts/build-ui-fonts.mjs 在 dev/build 启动时生成
+negative2positive/src/assets/fonts/ui/
 
 # 日志文件
 npm-debug.log*

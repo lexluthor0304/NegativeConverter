@@ -1,3 +1,6 @@
+/* Per-locale UI subsets (Fusion Pixel SC UI / JP UI), generated at dev and
+   build start by scripts/build-ui-fonts.mjs from the UI's own strings. */
+@import '../assets/fonts/ui/ui-fonts.css';
 /* Latin glyphs share the original design without downloading the full CJK font.
    It also carries the five Geometric Shapes the Studio draws (▶ ▸ ▼ ▾ ●). */
 @font-face {
@@ -43,8 +46,11 @@
   font-display: swap;
   unicode-range: U+0-21FF, U+230C-10FFFF;
 }
+/* The UI subsets come first; the full faces stay behind them, so a character
+   outside a subset (such as a CJK file name) costs a download, never a wrong
+   glyph. */
 body.studio {
-  --font-pixel: 'NC Studio Latin', 'Fusion Pixel SC', monospace;
+  --font-pixel: 'NC Studio Latin', 'Fusion Pixel SC UI', 'Fusion Pixel SC', monospace;
   --font-body: var(--font-pixel);
   --font-display: var(--font-pixel);
   --font-mono: var(--font-pixel);
@@ -55,7 +61,7 @@ body.studio {
 }
 /* The faces share one cmap, so an SC fallback behind them could never supply
    a glyph; it would only add a download. */
-html:lang(ja) body.studio, body.studio :lang(ja) { --font-pixel: 'Fusion Pixel JP', monospace; }
+html:lang(ja) body.studio, body.studio :lang(ja) { --font-pixel: 'Fusion Pixel JP UI', 'Fusion Pixel JP', monospace; }
 html:lang(ko) body.studio, body.studio :lang(ko) { --font-pixel: 'Fusion Pixel KR', monospace; }
 html:lang(zh-Hant) body.studio, body.studio :lang(zh-Hant) { --font-pixel: 'Fusion Pixel TC', monospace; }
 body.studio :is(button, input, select, textarea, summary, code, pre) { font-family: var(--font-pixel); font-synthesis: none; }

@@ -2,6 +2,7 @@ import { defineConfig } from 'vite';
 import { realpathSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { uiFontsPlugin } from '../scripts/build-ui-fonts.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -15,6 +16,9 @@ export default defineConfig({
   define: {
     __BUILD_ID__: JSON.stringify(buildId),
   },
+  // Per-locale UI font subsets, cut from the Fusion Pixel faces at dev and
+  // build start (scripts/build-ui-fonts.mjs, #262).
+  plugins: [uiFontsPlugin()],
   server: {
     host: '127.0.0.1',
     port: 4173,

@@ -104,7 +104,7 @@ src-tauri/                      # Tauri desktop packaging
 - **UPNG.js** (npm: `upng-js`) for 16-bit PNG support
 - **UTIF.js** (npm: `utif`) for TIFF/DNG parsing (iPhone ProRaw)
 - **OpenCV.js** (npm: `@techstark/opencv-js`) for automatic border detection / auto crop / auto rotation
-- **Fonts**: Fusion Pixel 12px proportional を `public/fonts/fusion-pixel/` にライセンスとともに同梱。英字・CJK 対応、CDN 不要、Tauri オフライン対応。
+- **Fonts**: Fusion Pixel 12px proportional の WOFF2 を `src/assets/fonts/fusion-pixel/`（ハッシュ付き `/assets` で配信）、ライセンスを `public/fonts/fusion-pixel/` に同梱。UI は `scripts/build-ui-fonts.mjs`（Vite プラグイン、`subset-font`）が dev/build 開始時に生成する言語別サブセット（git 管理外の `src/assets/fonts/ui/`）で表示し、原字体はその後ろのフォールバック。英字・CJK 対応、CDN 不要、Tauri オフライン対応。
 
 ### UI Theme
 Studio が唯一の画面。旧 `workspace=classic` パラメーターも同じ画面を開く。
