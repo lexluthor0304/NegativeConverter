@@ -2871,6 +2871,13 @@ body.dodge-burn-active #glCanvas {
 }
 /* The hidden-state rule lives in studio.css (fade length and leaving
    rendering), so one rule decides it whatever the stylesheet order. */
+/* show({ immediate: true }): opaque in the first painted frame, for work that
+   blocks the main thread right after it (WebKit runs Studio's steps() fade on
+   the main thread, so it would stay at opacity 0). hide() drops the class, so
+   the fade-out is unchanged. */
+.loading-overlay.visible.loading-overlay-immediate {
+  transition: none;
+}
 
 .loading-reel-wrap {
   width: 128px;

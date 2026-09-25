@@ -99,11 +99,16 @@ export class LoadingOverlay {
    * @param {boolean} [options.cancelable] - Whether to show cancel button
    * @param {function} [options.onCancel] - Cancel callback
    * @param {string} [options.cancelText] - Cancel button label
+   * @param {boolean} [options.immediate] - Skip the fade-in: the first frame
+   *   painted after this call shows the overlay fully opaque. For work that
+   *   blocks the main thread right after the paint, where a fade (Studio's
+   *   steps() timing, which WebKit cannot run off the main thread) would
+   *   still be at opacity 0. Cleared by hide(), so the fade-out still runs.
    */
   async show(options = {}) {
     this._createDOM();
 
-    const { title = '', cancelable = false, onCancel = null, cancelText = 'Cancel' } = options;
+    const { title = '', cancelable = false, onCancel = null, cancelText = 'Cancel', immediate = false } = options;
 
     this._percent = 0;
     this._progressText.textContent = '0%';
@@ -118,6 +123,7 @@ export class LoadingOverlay {
     this._cancelBtn.style.display = cancelable ? 'inline-block' : 'none';
 
     this._visible = true;
+    if (immediate) this._overlay.classList.add('loading-overlay-immediate');
     this._overlay.classList.add('visible');
     this._overlay.classList.remove('indeterminate');
     this._announce(title);
@@ -139,13 +145,13 @@ export class LoadingOverlay {
 
   /**
    * Hide the loading overlay. Its animations pause and it leaves rendering
-   * once the fade ends (studio.css); the classes stay as they are so the
-   * fade itself does not jump.
+   * once the fade ends (studio.css); apart from the immediate class, the
+   * classes stay as they are so the fade itself does not jump.
    */
   hide() {
     this._visible = false;
     this._overlay?.setAttribute('aria-busy', 'false');
-    this._overlay?.classList.remove('visible');
+    this._overlay?.classList.remove('visible', 'loading-overlay-immediate');
     this._announce('');
   }
 
