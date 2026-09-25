@@ -359,7 +359,7 @@ function canvasFixture({ sprocket = false, step = 3 } = {}) {
     adjustCanvasDisplay: (w, h, reference) => fits.push({ w, h,
       reference: reference === undefined ? 'state' : reference && { width: reference.width, height: reference.height } }),
   });
-  vm.runInContext(['setMainCanvasBox', 'setMainCanvasDimensions', 'refitMainCanvasBox', 'sprocketFrameSize',
+  vm.runInContext(['setMainCanvasBox', 'setMainCanvasDimensions', 'refitMainCanvasBox', 'sprocketFrameSize', 'sprocketFrameReference',
     'displaySourceImageData', 'fitStep3CanvasBox', 'getSprocketPreviewFrameCacheKey', 'ensureSprocketPreviewFrameBackground',
     'renderFastSprocketPreview', 'renderAdjustedImageDataToMainCanvas', 'placeBeforeAfterCanvas',
     'showBeforeAfterReference', 'releaseBeforeAfterCanvas'].map(functionSource).join('\n'), context);
@@ -409,9 +409,12 @@ for (const [width, height] of [[1500, 1000], [1000, 1500]]) {
   const shown = image(width, height);
   f.context.renderAdjustedImageDataToMainCanvas(shown, reference);
   const layout = getSprocketFrameLayout(width, height, { edgeMarkings: {} });
-  const fullLayout = getSprocketFrameLayout(reference.width, reference.height, { edgeMarkings: {} });
   assert.deepEqual([f.canvas.width, f.canvas.height], [layout.frameWidth, layout.frameHeight], `${width}x${height}: display-size frame`);
-  assert.deepEqual(f.fits.at(-1).reference, { width: fullLayout.frameWidth, height: fullLayout.frameHeight });
+  // The box: the drawn frame scaled to the full photo, so it keeps the drawn
+  // frame's aspect (no letterbox) whatever the border's minimum widths do.
+  const boxed = f.fits.at(-1).reference;
+  assert.ok(Math.abs(boxed.width / boxed.height - layout.frameWidth / layout.frameHeight) < 1e-9, 'the drawn frame\'s aspect');
+  assert.ok(Math.abs(boxed.width - layout.frameWidth * reference.width / width) < 1e-9);
   assert.deepEqual({ ...f.context.mainCanvasPhoto }, layout);
   assert.ok(f.calls.every(call => call[1] !== 'draw' || call.length === 5), 'no scaled draw');
   if (width > height) {

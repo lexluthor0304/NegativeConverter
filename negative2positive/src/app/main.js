@@ -3993,6 +3993,18 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return { width: layout.frameWidth, height: layout.frameHeight };
     }
 
+    // What the bordered frame of a display-size photo stands for: that frame
+    // scaled by reference / photo. Its aspect is the drawn frame's, so the
+    // photo fills its CSS box exactly (the border's minimum widths would
+    // otherwise letterbox it), and a comparison or a pointer maps by ratio.
+    function sprocketFrameReference(imageData, reference, composeOptions = getSprocketFrameComposeOptions()) {
+      const frame = sprocketFrameSize(imageData.width, imageData.height, composeOptions);
+      return {
+        width: frame.width * reference.width / imageData.width,
+        height: frame.height * reference.height / imageData.height
+      };
+    }
+
     // The CSS box of the Step-3 frame, which the GL canvas shares. The 2D
     // backing is sized only when a frame is presented, so a settle still in
     // the worker never exposes a cleared canvas.
@@ -4002,7 +4014,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (!shown || !reference || state.cropping) return;
       if (state.sprocketPreviewEnabled) {
         const framed = sprocketFrameSize(shown.width, shown.height);
-        setMainCanvasBox(framed.width, framed.height, sprocketFrameSize(reference.width, reference.height));
+        setMainCanvasBox(framed.width, framed.height, sprocketFrameReference(shown, reference));
         return;
       }
       setMainCanvasBox(shown.width, shown.height, reference);
@@ -4085,7 +4097,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (state.sprocketPreviewEnabled && !state.cropping) {
         const composeOptions = getSprocketFrameComposeOptions();
         prepareSprocketPreviewFont(composeOptions);
-        const framedReference = reference ? sprocketFrameSize(reference.width, reference.height, composeOptions) : null;
+        const framedReference = reference ? sprocketFrameReference(imageData, reference, composeOptions) : null;
         if (options.fastSprocketPreview && renderFastSprocketPreview(imageData, reference, framedReference, composeOptions)) {
           return;
         }

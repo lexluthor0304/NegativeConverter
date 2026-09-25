@@ -169,7 +169,7 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
   });
   vm.runInContext([
     'applyProcessedImageToState', 'applyPreviewProcessedImageToState',
-    'fitStep3CanvasBox', 'setMainCanvasBox', 'displaySourceImageData', 'sprocketFrameSize',
+    'fitStep3CanvasBox', 'setMainCanvasBox', 'displaySourceImageData', 'sprocketFrameSize', 'sprocketFrameReference',
     'applyRestoredImageToState', 'histogramSourceFor', 'buildPreviewSourceImageData',
     'convertFrameOffMainThread', 'convertFromCurrentSource',
     'routeCoreRequest', 'beginFullResolutionConversion', 'endFullResolutionConversion',
