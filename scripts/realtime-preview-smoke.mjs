@@ -60,7 +60,8 @@ export async function runRealtimePreviewSmoke({ send, evaluate, wait, fail }) {
         if (record) record.pending.set(message.id, { commit: true });
       }
       if (message?.type === 'convert') {
-        const request = { cache: !!message.cacheInput, reuse: !!message.reuseSource, exposure: message.settings.exposure, time: performance.now() };
+        const request = { cache: !!message.cacheInput, reuse: !!message.reuseSource, exposure: message.settings.exposure,
+          width: message.width, height: message.height, time: performance.now() };
         probe.requests.push(request);
         // cacheInput is the dedicated interactive-preview worker contract.
         // Background light-table/full conversions use separate, uncached lanes.
@@ -220,10 +221,22 @@ async function runTrustedDragCheck({ send, evaluate, wait, fail }) {
       const post = posts.find(item => item.time >= input.time && item.exposure === input.value);
       return post ? Math.round((post.time - input.time) * 10) / 10 : null;
     });
+    // #263: a drag in the reduced preview tier converts at <= 1 MP and then
+    // once more, at the normal size, when it ends (at pointerup, before or
+    // after the change event). Hardware hosts never reduce.
+    const dragPosts = posts.filter(post => inputs.length && post.time >= inputs[0].time);
+    const largest = Math.max(0, ...dragPosts.map(post => post.width * post.height));
+    const reducedPosts = dragPosts.filter(post => post.width * post.height < largest);
+    const lastReduced = reducedPosts.at(-1);
+    const settleTicks = lastReduced ? dragPosts.filter(post => post.time > lastReduced.time) : [];
     return {
       inputs: inputs.length, idleInputs: idle.length, sameTask: sameTask.length, latency,
       posts: posts.filter(post => inputs.length && post.time >= inputs[0].time && (!release || post.time <= release.time)).length,
       afterRelease: release ? posts.filter(post => post.time > release.time).length : null,
+      tierSession: document.documentElement.dataset.previewTierLastSession || null,
+      reducedPosts: reducedPosts.length,
+      maxReducedPixels: Math.max(0, ...reducedPosts.map(post => post.width * post.height)),
+      settleTicks: settleTicks.map(post => ({ pixels: post.width * post.height, exposure: post.exposure })),
       retainedFrames: probe.results.filter(item => item.retained).length,
       committedPlanes: probe.committed.filter(item => item.plane).length,
       released: !!release, slider: Number(document.getElementById('coreExposure').value)
@@ -234,7 +247,16 @@ async function runTrustedDragCheck({ send, evaluate, wait, fail }) {
   if (drag.idleInputs < 3 || drag.sameTask < 0.8 * drag.idleInputs) {
     fail('idle-lane inputs were not posted in their own task (< 3 ms): ' + JSON.stringify(drag));
   }
-  if (drag.afterRelease !== 0) fail('releasing the slider requested the shown frame again: ' + JSON.stringify(drag));
+  if (drag.reducedPosts === 0) {
+    if (drag.afterRelease !== 0) fail('releasing the slider requested the shown frame again: ' + JSON.stringify(drag));
+  } else {
+    // Reduced frames only in a reduced session, never above 1 MP, and exactly
+    // one normal-size conversion of the final value after them.
+    if (drag.tierSession !== 'reduced' || drag.maxReducedPixels > 1_000_000) fail('smaller preview frames outside a reduced preview-tier session: ' + JSON.stringify(drag));
+    if (drag.settleTicks.length !== 1 || drag.settleTicks[0].exposure !== drag.slider || drag.afterRelease > 1) {
+      fail('a reduced drag did not settle with exactly one normal-size conversion: ' + JSON.stringify(drag));
+    }
+  }
   if (drag.retainedFrames > 0 && drag.committedPlanes === 0) fail('the dragged frame never got its 16-bit plane back: ' + JSON.stringify(drag));
-  console.log('ok: trusted drag posts idle-lane frames in the input task and none on release ' + JSON.stringify(drag));
+  console.log('ok: trusted drag posts idle-lane frames in the input task and none on release (one normal-size settle after a reduced tier) ' + JSON.stringify(drag));
 }
