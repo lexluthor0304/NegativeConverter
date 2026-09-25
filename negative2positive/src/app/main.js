@@ -9293,6 +9293,15 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       return frame;
     }
 
+    // The band budget of one batch lane also bounds an interactive build's
+    // transient band copies (WebKit's content process has less headroom).
+    function interactiveGeometryBands(plan) {
+      return planGeometryBandsInFlight({
+        lanes: 1, pixelsPerFile: plan.outWidth * plan.outHeight, poolSize: geometryPool.size,
+        deviceMemory: typeof navigator !== 'undefined' ? navigator.deviceMemory : undefined
+      });
+    }
+
     // Planes for `key`: the crop window (or the frame when there is no crop)
     // from the pool, and a frame descriptor beside a crop.
     async function buildGeometryPlanes(base, key, adopted, isCurrent) {
@@ -9315,7 +9324,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         const frame = renderGeometryFrame(base, key);
         return { frame, cropped: key.crop ? cropImageDataRegion(frame, key.crop) : null };
       }
-      const output = plan.identity ? source : await geometryPool.render(source, plan, { isCurrent });
+      const output = plan.identity ? source : await geometryPool.render(source, plan, { isCurrent, maxInFlight: interactiveGeometryBands(plan) });
       if (!output || !isCurrent()) return null;
       if (!key.crop) return { frame: output, cropped: null };
       return { frame: createGeometryFrame(base, key), cropped: output };
@@ -9493,7 +9502,9 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       const plan = geometryPlanFor(base, key, { crop: null });
       if (!plan) return renderGeometryFrame(base, key);
       const generation = loadGeneration;
-      return geometryPool.render(base, plan, { isCurrent: () => isCurrentLoad(generation) && state.originalImageData === frame });
+      return geometryPool.render(base, plan, {
+        isCurrent: () => isCurrentLoad(generation) && state.originalImageData === frame, maxInFlight: interactiveGeometryBands(plan)
+      });
     }
 
     // While a rotate or mirror builds, the current display is turned or
@@ -12096,7 +12107,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       const plan = planGeometry(source, geometry, { sanitizeCrop: (crop, frame) => sanitizeCropRegionForImage(crop, frame) });
       if (!plan) return applyGeometryChainToImageData(source, geometry, exportGeometrySteps);
       if (plan.identity) return source;
-      const output = await geometryPool.render(source, plan, { isCurrent, maxInFlight });
+      const output = await geometryPool.render(source, plan, { isCurrent, maxInFlight: maxInFlight || interactiveGeometryBands(plan) });
       assertRepairCurrent(isCurrent);
       return output;
     }

@@ -33,9 +33,13 @@ the unmirrored base and `cropRegion` on the rotated (and mirrored) frame.
 bounding box of its corner pixels' source positions, padded by two pixels
 for bilinear plans; the main thread copies it row by row (bilinear bands post
 the 16-bit plane only) and yields between band slices and assembly steps.
-The base is never transferred. A stale job stops posting bands; any worker
-failure, or no `Worker`, renders the remaining bands on the main thread with
-the same core, one band per task.
+The base is never transferred. Bands in flight are capped by the band budget
+of `planGeometryBandsInFlight` (batchExportScheduler.js: about 20 bytes per
+output pixel of a band, 768 MiB shared by the lanes, a third of that on
+devices reporting 4 GB or less); interactive builds use the budget of one
+lane. A stale job stops posting bands; any worker failure, or no `Worker`,
+renders the remaining bands on the main thread with the same core, at most
+1 MP per task.
 
 In `main.js` the scalars change synchronously and the planes follow:
 

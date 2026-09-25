@@ -14,6 +14,7 @@ const geometry = await import('./imageGeometry.js');
 const imageDataOps = await import('./imageDataOps.js');
 const { createGeometryPool, yieldToEventLoop } = await import('./geometryPool.js');
 const { backingBuffers, createPhotoSessionCache } = await import('./photoSessionCache.js');
+const { planGeometryBandsInFlight } = await import('./batchExportScheduler.js');
 
 export { geometry, imageDataOps, backingBuffers, createPhotoSessionCache };
 
@@ -81,7 +82,8 @@ const FUNCTIONS = [
   'restoreColdSnapshotPixels', 'liveHistoryRoots', 'hotGeometrySnapshot', 'historyExclusiveBytes',
   'pruneHistoryForMemory', 'commitUndoSnapshot', 'pushUndo', 'performUndo', 'performRedo',
   'rememberPhotoSession', 'releaseOutgoingPhotoPlanes', 'photoSettingsKey', 'switchToFile',
-  'reactivateReleasedPhoto', 'invalidatePhotoActivation', 'getCropDraftTotalAngle', 'scaleCropRect'
+  'reactivateReleasedPhoto', 'invalidatePhotoActivation', 'getCropDraftTotalAngle', 'scaleCropRect',
+  'interactiveGeometryBands'
 ];
 
 // The Apply Crop click handler, as a named function.
@@ -122,7 +124,7 @@ export function createHarness(base, { historyBudget = 768 * 1024 * 1024, session
     mirrorImageDataHorizontal: geometry.mirrorImageDataHorizontal,
     cropImageDataRegion: imageDataOps.cropImageDataRegion,
     downsampleImageDataForMaxPixels: imageDataOps.downsampleImageDataForMaxPixels,
-    backingBuffers,
+    backingBuffers, planGeometryBandsInFlight,
     geometryMemo: new WeakMap(), geometryBaseIds: new WeakMap(), nextGeometryBaseId: 1,
     pendingImportRotation: null, geometryToken: 0, geometryJob: null, geometryBusyOwner: null,
     interimGeometry: null, loadGeneration: 1, DEBUG_UI: false, manualEditRevision: 0,
