@@ -5,7 +5,7 @@
  * preview and answers with plain data (autoFrameHelperTask.js). OpenCV is
  * the page's compiled module.
  */
-import { acceptOpenCvMessage, loadOpenCv } from './opencvWorkerRuntime.js';
+import { acceptOpenCvMessage, loadOpenCv, openCvRealmStats } from './opencvWorkerRuntime.js';
 import { applyRotationToImageData } from '../app/imageGeometry.js';
 import { createAutoFrameHelperTask } from './autoFrameHelperTask.js';
 
@@ -21,6 +21,7 @@ self.onmessage = ({ data }) => {
     return;
   }
   if (data?.type === 'warm-up') {
-    loadOpenCv().then(() => self.postMessage({ type: 'warmed' }), error => self.postMessage({ type: 'warm-failed', error: String(error?.message || error) }));
+    // Its time to cv.Mat from this script's first statement (#252 acceptance).
+    loadOpenCv().then(() => self.postMessage({ type: 'warmed', opencv: openCvRealmStats() }), error => self.postMessage({ type: 'warm-failed', error: String(error?.message || error) }));
   }
 };

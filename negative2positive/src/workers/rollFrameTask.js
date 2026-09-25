@@ -46,7 +46,7 @@ function planesOf(frame, transfers) {
  * @returns {{ handle(message, reply): Promise<void>, readonly held: number|null }}
  */
 export function createRollFrameTask({
-  loadCv, detect, rotate, readEdge,
+  loadCv, detect, rotate, readEdge, realmStats = () => null,
   yieldTask = () => new Promise(resolve => setTimeout(resolve, 0)),
   makeImage = (data, width, height) => new ImageData(data, width, height)
 }) {
@@ -174,7 +174,7 @@ export function createRollFrameTask({
       switch (msg?.type) {
         case 'ping': send({ type: 'pong', id: msg.id }, []); return;
         case 'warm-up':
-          try { await loadCv(); send({ type: 'ready', id: msg.id }, []); }
+          try { await loadCv(); send({ type: 'ready', id: msg.id, opencv: realmStats() }, []); }
           catch (error) { send({ type: 'error', id: msg.id, stage: 'warm-up', message: String(error?.message || error) }, []); }
           return;
         case 'process': await process(msg, send); return;

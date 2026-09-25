@@ -309,7 +309,7 @@ export function createRollFramePool({
       for (const slot of [...slots]) {
         if (slot.warmed) continue;
         slot.warmed = true;
-        send(slot, { type: 'warm-up', id: nextId++ }).catch(() => {});
+        send(slot, { type: 'warm-up', id: nextId++ }).then((reply) => { slot.opencv = reply?.opencv || null; }, () => {});
       }
       return started.length;
     },
@@ -324,6 +324,9 @@ export function createRollFramePool({
       idle.length = 0;
     },
     get created() { return created; },
+    // Each warmed worker's OpenCV realm: shared module or own compile, and
+    // its time to cv.Mat (#252 acceptance; read by the harness).
+    get realms() { return [...slots].map(slot => slot.opencv || null); },
     get alive() { return slots.size; },
     get size() { return keep; }
   };

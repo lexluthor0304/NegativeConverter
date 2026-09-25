@@ -5,7 +5,7 @@
  * run on this worker's own planes (rollFrameTask.js), so the 60 MP planes
  * never travel back to the page. OpenCV is the page's compiled module.
  */
-import { acceptOpenCvMessage, loadOpenCv } from './opencvWorkerRuntime.js';
+import { acceptOpenCvMessage, loadOpenCv, openCvRealmStats } from './opencvWorkerRuntime.js';
 import { detectFrameAndRotation } from '../app/autoFrameAnalyzer.js';
 import { applyRotationToImageData } from '../app/imageGeometry.js';
 import { createFilmEdgeReader } from './filmEdgeRead.js';
@@ -15,7 +15,8 @@ const task = createRollFrameTask({
   loadCv: loadOpenCv,
   detect: detectFrameAndRotation,
   rotate: applyRotationToImageData,
-  readEdge: createFilmEdgeReader(loadOpenCv)
+  readEdge: createFilmEdgeReader(loadOpenCv),
+  realmStats: openCvRealmStats
 });
 
 self.onmessage = ({ data }) => {
