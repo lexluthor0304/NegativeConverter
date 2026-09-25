@@ -92,7 +92,8 @@ export async function runPng16BandSmoke({ send, evaluate, waitFor, wait, fail, i
         const pool = createPng16BandPool({ size: 3 });
         const controller = new AbortController();
         const pending = pool.encode(big, { signal: controller.signal, bandBytes: 1 << 20 });
-        while (bandPosts < 3) await new Promise(r => setTimeout(r, 5));
+        const waitStart = performance.now();
+        while (bandPosts < 3 && performance.now() - waitStart < 30000) await new Promise(r => setTimeout(r, 5));
         const postsAtCancel = bandPosts;
         const started = performance.now();
         controller.abort();
