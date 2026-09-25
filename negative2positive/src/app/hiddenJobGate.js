@@ -87,6 +87,8 @@ function abortError() {
  * @param {() => void} [options.onHiddenAdmit] before each admission under the
  *   hidden limits (shed idle workers between frames)
  * @param {() => void} [options.onGraceExpired] hidden for graceMs
+ * @param {() => void} [options.onIdle] the last admitted item was released and
+ *   nothing waits (a job ended)
  */
 export function createHiddenJobGate({
   isHidden,
@@ -99,7 +101,8 @@ export function createHiddenJobGate({
   clearTimer = (id) => clearTimeout(id),
   onChange = () => {},
   onHiddenAdmit = () => {},
-  onGraceExpired = () => {}
+  onGraceExpired = () => {},
+  onIdle = () => {}
 } = {}) {
   if (typeof isHidden !== 'function') throw new TypeError('createHiddenJobGate needs isHidden()');
   const waiters = [];
@@ -136,6 +139,7 @@ export function createHiddenJobGate({
       released = true;
       inFlight -= 1;
       pump();
+      if (!inFlight && !waiters.length) onIdle();
     };
   }
 

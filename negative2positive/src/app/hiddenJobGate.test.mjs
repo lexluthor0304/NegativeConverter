@@ -9,7 +9,7 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
 const GB = 1e9;
 
 function harness({ limits = true, resident = 0, hidden = false } = {}) {
-  const env = { hidden, limits, resident, time: 0, timers: new Map(), nextTimer: 0, changes: [], hiddenAdmits: 0, graceExpired: 0 };
+  const env = { hidden, limits, resident, time: 0, timers: new Map(), nextTimer: 0, changes: [], hiddenAdmits: 0, graceExpired: 0, idle: 0 };
   env.gate = createHiddenJobGate({
     isHidden: () => env.hidden,
     limitsApply: () => env.limits,
@@ -19,7 +19,8 @@ function harness({ limits = true, resident = 0, hidden = false } = {}) {
     clearTimer: id => env.timers.delete(id),
     onChange: status => env.changes.push(status.paused),
     onHiddenAdmit: () => { env.hiddenAdmits += 1; },
-    onGraceExpired: () => { env.graceExpired += 1; }
+    onGraceExpired: () => { env.graceExpired += 1; },
+    onIdle: () => { env.idle += 1; }
   });
   env.hide = () => { env.hidden = true; env.gate.visibilityChanged(); };
   env.show = () => { env.hidden = false; env.gate.visibilityChanged(); };
@@ -92,7 +93,9 @@ assert.equal(estimateHiddenJobBytes(NaN, NaN), 0);
   first();
   await tick();
   assert.equal(second.settled, true, 'the next item starts when the running one is released');
+  assert.equal(env.idle, 0, 'not idle while the next item runs');
   second.value();
+  assert.equal(env.idle, 1, 'idle once the last item is released and nothing waits');
 }
 
 // After the grace period: admit only when resident + bytes fit; otherwise

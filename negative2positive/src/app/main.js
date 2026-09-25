@@ -311,7 +311,9 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       residentBytes: () => hiddenResidentBytes(),
       onChange: () => refreshHiddenJobStatus(),
       onHiddenAdmit: () => shedHiddenJobMemory(),
-      onGraceExpired: () => shedHiddenJobMemory()
+      onGraceExpired: () => shedHiddenJobMemory(),
+      // A job that ends while hidden leaves nothing idle behind.
+      onIdle: () => shedHiddenJobMemory()
     });
     const desktopUpdateState = {
       visible: false,
@@ -7050,7 +7052,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     }
 
     function hiddenJobRunning() {
-      return activeLongJobs > 0 || hiddenJobs.busy || studioThumbnailsRunning
+      return activeLongJobs > 0 || hiddenJobs.busy || studioThumbnailsRunning || isDesktopBatchExportLocked()
         || automaticRollImportRunning || automaticRollAnalysisRunning;
     }
 
@@ -7155,6 +7157,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         exportWorkerAlive: isExportWorkerAlive(),
         sensorDefectsWorkerAlive: isSensorDefectsWorkerAlive(),
         aiRepairSession: aiRepair.status === 'ready' || aiRepair.status === 'loading',
+        aiRepairStatus: aiRepair.status,
         aiRepairRevision: aiRepair.revision
       })
     };
