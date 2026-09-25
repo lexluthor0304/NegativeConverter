@@ -322,7 +322,7 @@ try {
 
   const s4 = await run('s4', ['--dpr', '2']);
   expectKeys(s4, ['s4.dpr2.fitTo2x.transformAppliedMs', 's4.dpr2.fitTo2x.textureRefinedAtMs', 's4.dpr2.fitTo2x.backingOverNeeded', 's4.dpr2.fitTo2x.nativeDetailMs',
-    's4.dpr2.to2_5x.transformAppliedMs', 's4.dpr2.to7_6x.zoom', 's4.dpr2.wheel.transformAppliedMs', 's4.dpr2.pan.transformFramesPerSecond', 's4.dpr2.pan.moveToFrameP95Ms']);
+    's4.dpr2.to2_5x.transformAppliedMs', 's4.dpr2.to7_6x.zoom', 's4.dpr2.fitTo100.nativeDetailMs', 's4.dpr2.fitTo100.longTaskCount', 's4.dpr2.wheel.transformAppliedMs', 's4.dpr2.pan.transformFramesPerSecond', 's4.dpr2.pan.moveToFrameP95Ms']);
   assert.equal(s4.metrics['s4.dpr2.fitTo2x.transformAppliedMs'], 11);
   assert.equal(s4.metrics['s4.dpr2.fitTo2x.textureRefinedAtMs'], 476);
   assert.equal(s4.metrics['s4.dpr2.wheel.transformAppliedMs'], 0.4);

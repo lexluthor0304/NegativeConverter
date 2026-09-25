@@ -230,7 +230,7 @@ export async function safariScenario(id, { wd, origin, fixture, roll, record, no
     const snap = await wd.execute('return globalThis.__ncPerf.snapshot()');
     const zoom = zoomStepMetrics(events, { inputT: dbl?.t ?? before, until: (dbl?.t ?? before) + 3000, sourceWidth: fixture.width || Infinity, displayedCssWidth: snap.glCanvas?.rect?.width, dpr });
     for (const [key, value] of Object.entries(zoom)) record(`s4.dpr${dpr}.fitTo2x.${key}`, value);
-    await wd.execute(`document.getElementById('zoomResetBtn')?.click(); return true;`);
+    await wd.execute(`if (document.getElementById('canvasContainer')?.classList.contains('zoom-pan-active')) document.getElementById('zoomResetBtn')?.click(); return true;`);
     await sleep(800);
     try {
       before = await wd.execute('return performance.now()');
@@ -244,7 +244,7 @@ export async function safariScenario(id, { wd, origin, fixture, roll, record, no
     } catch (error) {
       note(`Safari wheel actions unavailable: ${error.message}`);
     }
-    await wd.execute(`document.getElementById('zoomResetBtn')?.click(); return true;`);
+    await wd.execute(`if (document.getElementById('canvasContainer')?.classList.contains('zoom-pan-active')) document.getElementById('zoomResetBtn')?.click(); return true;`);
     await sleep(800);
     await wd.click(cx, cy, { count: 2 });
     await sleep(1500);

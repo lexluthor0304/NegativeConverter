@@ -1,7 +1,7 @@
 // S4 zoom and pan: double-click fit→2×; #zoomInBtn to 2.5×, 3.9× and 7.6×;
-// 24 wheel notches at 60 Hz; a 2 s pan at 2×. Backing ÷ needed is the GL
-// texture width ÷ min(source width, on-screen CSS width × DPR); 1.0 is one
-// source pixel per device pixel.
+// fit→true 100 % with the 1:1 button (#248); 24 wheel notches at 60 Hz; a 2 s
+// pan at 2×. Backing ÷ needed is the GL texture width ÷ min(source width,
+// on-screen CSS width × DPR); 1.0 is one source pixel per device pixel.
 import { byKind, zoomStepMetrics, panMetrics, GL_CANVAS } from '../lib/metrics.mjs';
 import { median } from '../lib/stats.mjs';
 import { bootApp, importPhotos, recordMemory, sleep, pageNow, sourceWidthEstimate, round } from './common.mjs';
@@ -44,8 +44,12 @@ async function center(ctx) {
   return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2, rect };
 }
 
+// The 1:1 button toggles fit ↔ actual pixels (#248): clicking it resets only
+// a zoomed view.
+export const FIT_ZOOM_SCRIPT = `(() => { if (document.getElementById('canvasContainer')?.classList.contains('zoom-pan-active')) document.getElementById('zoomResetBtn')?.click(); return true; })()`;
+
 async function resetZoom(ctx) {
-  await ctx.session.evaluate(`document.getElementById('zoomResetBtn')?.click(); true`);
+  await ctx.session.evaluate(FIT_ZOOM_SCRIPT);
   await sleep(800);
   await ctx.session.waitForReady({ timeoutMs: 120_000 });
 }
@@ -87,6 +91,18 @@ export default {
       }
       const zoomWindow = await session.endWindow();
       ctx.record(`${prefix}.zoom.longTaskCount`, byKind(session.events, 'lt').filter(task => task.s >= zoomWindow.start && task.s <= zoomWindow.end).length);
+
+      // True 100 %: the 1:1 button from fit.
+      await resetZoom(ctx);
+      await session.beginWindow(`${prefix}-actual`);
+      const actualBefore = await pageNow(ctx);
+      const oneToOne = await session.rect('#zoomResetBtn');
+      await session.click(oneToOne.x + oneToOne.width / 2, oneToOne.y + oneToOne.height / 2);
+      await session.drain();
+      const actualInput = byKind(session.events, 'input').filter(event => event.t >= actualBefore && event.type === 'click' && event.id === 'zoomResetBtn').at(-1);
+      await stepMetrics(ctx, `${prefix}.fitTo100`, actualInput?.t ?? actualBefore, source);
+      const actualWindow = await session.endWindow();
+      ctx.record(`${prefix}.fitTo100.longTaskCount`, byKind(session.events, 'lt').filter(task => task.s >= actualWindow.start && task.s <= actualWindow.end).length);
 
       // Wheel: 24 notches at 60 Hz; transform applied per notch.
       await resetZoom(ctx);

@@ -619,11 +619,12 @@ for (const warm of [true, false]) {
   Object.assign(c, {
     isEditableTarget: () => false, canvasContainer: { getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 80 }) },
     ZOOM_BUTTON_FACTOR: 1.2, zoomAtPoint: () => { zoomCalls++; }, resetZoomPan: () => { zoomCalls++; },
+    resetUserZoom: () => { zoomCalls++; }, toggleActualPixels: () => { zoomCalls++; },
   });
   const zoomStart = source.indexOf('    // Keyboard zoom shortcuts');
   const zoomEnd = source.indexOf('    // Undo/Redo keyboard shortcuts', zoomStart);
   vm.runInContext(source.slice(zoomStart, zoomEnd), c);
-  for (const key of ['+', '-', '0']) zoomKeydown({ key, preventDefault: noop });
+  for (const key of ['+', '-', '0', '1']) zoomKeydown({ key, preventDefault: noop });
   assert.equal(zoomCalls, 0, 'global zoom keys cannot change the cached outgoing view');
 
   delete c.document.body.dataset.photoSwitching;
@@ -633,8 +634,8 @@ for (const warm of [true, false]) {
   c.nudgeConsoleChannel('density', 1);
   assert.equal(f.state.coreExposure, 30);
   assert.equal(consoleCommits, 1);
-  for (const key of ['+', '-', '0']) zoomKeydown({ key, preventDefault: noop });
-  assert.equal(zoomCalls, 3, 'ordinary keyboard zoom resumes without a sticky lock');
+  for (const key of ['+', '-', '0', '1']) zoomKeydown({ key, preventDefault: noop });
+  assert.equal(zoomCalls, 4, 'ordinary keyboard zoom (and 1:1) resumes without a sticky lock');
 }
 
 for (const locked of [false, true]) {

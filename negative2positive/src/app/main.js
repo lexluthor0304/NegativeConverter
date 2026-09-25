@@ -3390,7 +3390,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     const zoomIndicator = document.getElementById('zoomIndicator');
     const zoomControls = document.getElementById('zoomControls');
     const ZOOM_MIN = 1;
-    const ZOOM_MAX = 8;
+    // Zoom is relative to fit. 8x fit, or 200 % of the image's own pixels when
+    // that is further (zoomMax, #248).
+    const ZOOM_MAX_FIT = 8;
     const ZOOM_BUTTON_FACTOR = 1.25;
     const ZOOM_DOUBLE_CLICK_FACTOR = 2;
     const ZOOM_WHEEL_SENSITIVITY = 0.0024;
@@ -4609,10 +4611,16 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     }
 
     let displayPreviewResizeTimer = null;
+    // The settle hook of every viewport change. It records the conversion
+    // source it was asked for and does nothing once that has been replaced: a
+    // new source (photo switch, rotate, crop) builds its own display preview,
+    // and the old one must not be resampled on the main thread meanwhile.
     function scheduleDisplayPreviewResize() {
       if (displayPreviewResizeTimer) clearTimeout(displayPreviewResizeTimer);
+      const source = state.conversionSourceImageData;
       displayPreviewResizeTimer = setTimeout(() => {
         displayPreviewResizeTimer = null;
+        if (state.conversionSourceImageData !== source) return;
         refreshDisplayPreviewForViewport();
       }, 100);
     }
@@ -8682,7 +8690,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // every draw, and the result path calls it with the 2D canvas size; with
     // the container size cached, an unchanged fit costs a few comparisons and
     // touches no layout.
-    const canvasDisplayFit = { w: 0, h: 0, containerW: 0, containerH: 0, zoom: 0, dpr: 0 };
+    const canvasDisplayFit = { w: 0, h: 0, containerW: 0, containerH: 0, zoom: 0, dpr: 0, scale: 0 };
 
     function invalidateCanvasDisplayFit() {
       canvasDisplayFit.w = 0;
@@ -8709,6 +8717,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const maxWidth = container.width - 20;
       const maxHeight = container.height - 20;
       const scale = Math.min(maxWidth / fitW, maxHeight / fitH, 1);
+      // CSS pixels per image pixel at zoom 1: what "100 %" is measured from.
+      fit.scale = scale > 0 && Number.isFinite(scale) ? scale : 0;
       const cssW = (fitW * scale) + 'px';
       const cssH = (fitH * scale) + 'px';
       canvas.style.width = cssW;
@@ -8730,11 +8740,34 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // ===========================================
     // Zoom / Pan
     // ===========================================
+    // The zoom at which one image pixel covers one device pixel (#248):
+    // max(1, 1 / (fit x DPR)), where fit is the CSS width at zoom 1 over the
+    // image's own width (the full-resolution reference while a smaller
+    // stand-in is shown).
+    function actualPixelsZoom() {
+      const fit = canvasDisplayFit.scale;
+      const dpr = window.devicePixelRatio || 1;
+      if (!(fit > 0)) return ZOOM_MIN;
+      return Math.max(ZOOM_MIN, 1 / (fit * dpr));
+    }
+
+    // 200 % of the image's pixels is reachable at any DPR and window size.
+    function zoomMax() {
+      return Math.max(ZOOM_MAX_FIT, 2 * actualPixelsZoom());
+    }
+
+    // Image-relative: "100 %" is one image pixel per device pixel.
+    function zoomIndicatorText(z = state.zoomLevel) {
+      const fit = canvasDisplayFit.scale;
+      const percent = fit > 0 ? z * fit * (window.devicePixelRatio || 1) * 100 : z * 100;
+      return Math.round(percent) + '%';
+    }
+
     function applyZoomPanTransform() {
       const z = state.zoomLevel;
       canvasTransformWrapper.style.transform = `matrix(${z}, 0, 0, ${z}, ${state.panX}, ${state.panY}) ${interimGeometryCss()}`.trim();
       if (z > 1) {
-        zoomIndicator.textContent = Math.round(z * 100) + '%';
+        zoomIndicator.textContent = zoomIndicatorText(z);
         zoomIndicator.style.display = 'block';
         canvasContainer.classList.add('zoom-pan-active');
       } else {
@@ -8777,9 +8810,36 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       canvasContainer.classList.remove('zoom-pan-active', 'zoom-panning');
     }
 
+    // The user's own return to fit (the 1:1 button, key 0, double-click). A
+    // zoom-out changes the display size just as a zoom-in does, so the resize
+    // settles now instead of in the next slider tick. resetZoomPan alone also
+    // runs on photo switch, rotate, mirror and crop, whose new source builds
+    // its own display preview.
+    function resetUserZoom() {
+      const wasZoomed = state.zoomLevel > ZOOM_MIN;
+      resetZoomPan();
+      if (wasZoomed) scheduleDisplayPreviewResize();
+    }
+
+    // "1:1": fit -> actual pixels, centred on the view; any zoom -> fit.
+    function toggleActualPixels(clientX = null, clientY = null) {
+      if (state.zoomLevel > ZOOM_MIN) {
+        resetUserZoom();
+        return;
+      }
+      const target = actualPixelsZoom();
+      if (target <= ZOOM_MIN + 0.01) return;
+      if (clientX === null || clientY === null) {
+        const containerRect = canvasContainer.getBoundingClientRect();
+        clientX = containerRect.left + containerRect.width / 2;
+        clientY = containerRect.top + containerRect.height / 2;
+      }
+      zoomAtPoint(target, clientX, clientY);
+    }
+
     function zoomAtPoint(newZoom, clientX, clientY) {
       const oldZoom = state.zoomLevel;
-      newZoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, newZoom));
+      newZoom = Math.max(ZOOM_MIN, Math.min(zoomMax(), newZoom));
       if (newZoom <= ZOOM_MIN + 0.01) newZoom = ZOOM_MIN;
       if (newZoom === oldZoom) return;
 
@@ -12174,7 +12234,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         zoomAtPoint(state.zoomLevel / ZOOM_BUTTON_FACTOR, cx, cy);
       } else if (key === '0') {
         event.preventDefault();
-        resetZoomPan();
+        resetUserZoom();
+      } else if (key === '1') {
+        event.preventDefault();
+        toggleActualPixels();
       }
     });
 
@@ -12262,7 +12325,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     });
 
     document.getElementById('zoomResetBtn').addEventListener('click', () => {
-      resetZoomPan();
+      toggleActualPixels();
     });
 
     // ===========================================
@@ -13385,7 +13448,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     canvasContainer.addEventListener('dblclick', (e) => {
       if (state.cropping || state.samplingMode || canPaintAiBrush() || state.dustRemoval.showMask) return;
       if (state.zoomLevel > 1) {
-        resetZoomPan();
+        resetUserZoom();
       } else {
         zoomAtPoint(ZOOM_DOUBLE_CLICK_FACTOR, e.clientX, e.clientY);
       }
