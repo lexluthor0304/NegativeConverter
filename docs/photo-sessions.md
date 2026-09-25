@@ -41,7 +41,9 @@ exactly but cheaply: the JSON of those values with each `{ r, g, b }` curve
 LUT triple replaced by null, then a raw U+0000 and the LUT bytes. Two keys are
 equal only when the plain JSON would be; nothing is memoised, because curve
 LUTs change in place. A pending RAW upgrade, conversion,
-dust detection or brush refinement is not a settled session. Preview-only
+dust detection or brush refinement is not a settled session, nor is an open
+reduced preview-tier drag or a reduced frame still waiting for its normal-size
+tick (#263). Preview-only
 restoration keeps the full-resolution pending flag: export must still pass the
 existing full-resolution barrier. Presentation proxies never become export
 sources. Queue removal and closing the session release retained entries.

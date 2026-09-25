@@ -118,3 +118,73 @@ Worker を起動できない環境では主スレッドへフォールバック�
 枠プレビュー）、リサイズ・DPR 変更・コンテキスト喪失と復帰を確認する。
 実機のフレームレート・遅延は #230 の計測基盤で別途測る。
 
+
+## 2026-09-25 更新: 操作中だけ表示解像度を下げる段階（#263）
+
+表示用画像は表示領域・DPR・ズームだけで決まり（最大 400 万画素）、1 フレームの
+描画費用を見ていなかった。Linux の旧 AppImage（`WEBKIT_DISABLE_DMABUF_RENDERER=1`）
+のように WebKitGTK がページをソフトウェアで合成する環境では、描画のたびに WebGL
+キャンバスを CPU へ読み戻して合成するため、ドラッグ中は最大 4 MP を毎フレーム払う。
+
+- **段階（`app/previewTier.js`）。** `previewTier` は `'normal'` と `'reduced'`。
+  `'reduced'` はスライダーまたはトーンカーブのドラッグ（セッション）の中だけで、
+  `getDisplayPreviewSize` の上限を 100 万画素にする。SilverCore の変換用プレビュー、
+  各結果から作る表示用・WebGL 用の画像がこれに従い、`resizeWebGLCanvas` は描画
+  バッファ（#233 以降はテクスチャの寸法）をこの上限で抑える。確定した表示は常に
+  通常の段階から来る。
+- **セッション。** 操作パネル内の `input[type=range]` への `pointerdown`（捕捉段階、
+  拡大機ヘッドのように単独で配線された range も含む）で始まり、最初の
+  `pointerup`・`pointercancel`（window の捕捉段階）または `change`（パネルの捕捉段階、
+  スライダー自身の `change` より前）で終わる。カーブは `mousedown`/`pointerdown` から
+  `mouseup`・`mouseleave`・`pointerup`・`pointercancel` まで。ズームは #233 以降
+  合成だけなので対象外、パンも再描画しないので対象外。入力が 1 秒ない
+  セッションは自動で終わる（終了イベントの取りこぼし対策）。
+- **フレーム計測。** セッション中は rAF を一つ回す（非表示時は数えない）。最初の間隔は
+  捨て、10 間隔以上の直近 30 間隔の中央値が 24ms かつ待機時の rAF 間隔の 1.3 倍を
+  超えたら、そのセッションの終わりまで `'reduced'`。待機時の間隔は読み込み後と表示
+  状態の変化ごとに測る（30Hz に制限された rAF を遅いと誤認しない）。M1 Pro では
+  カーブが 60fps、SilverCore スライダーも主スレッドは空いているため発動しない。
+- **最初から下げる場合。** `app/renderEnvironment.js` の `startsReduced` が真
+  （Rust が報告した実効環境変数で DMABUF 無効・合成無効、または WebGL の
+  レンダラー名が llvmpipe・softpipe・SwiftShader・Microsoft Basic Render Driver 等）
+  なら全セッションが `'reduced'` で始まる。レンダラー名が伏せられている・空の時は
+  ハードウェア扱い。それ以外の環境でも 2 セッション続けて下がったら以降は下げて始め、
+  10 回目ごとに通常で測り直す。
+- **入る時。** その場で `renderWebGL()`（寸法変更と描画を同じタスクで行い、消えた
+  フレームを見せない）。SilverCore は次の tick で 1 MP の変換用プレビューを、原寸の
+  元画像ではなく現在の通常段階のプレビューから作り、通常のものは保持する。遅い
+  環境と分かっている場合は、確定後の空き時間に 1 MP 版を先に作っておく。
+- **出る時。** `'normal'` に戻し、保持したプレビューの寸法が今も合えば戻して
+  `scheduleDisplayPreviewResize()` と `renderWebGL()`。縮小して変換したフレームが
+  表示中なら、最終設定で通常寸法の tick を一回だけ要求する（寸法が一致して
+  `scheduleDisplayPreviewResize` が何もしない時も。60 MP では原寸描画が走らず、
+  縮小テクスチャが残り続けるため）。この tick は live な設定を変換するので、
+  スライダー自身の確定（#233 の重複排除）は追加の変換をしない。修復が有効で
+  原寸フレームしかない時は、表示用の縮小コピーを作り直すだけで変換しない。
+- **確定状態の保護。** 縮小段階で作った表示画像はすべて記録する。
+  `rememberPhotoSession` はセッション中・縮小フレームの表示中を未確定とし、
+  `captureSnapshot` は保持した通常段階の `conversionPreviewImageData` を保存する。
+  写真の切り替えはセッションを閉じるが、古い写真を再変換しない。フィルムストリップの
+  タイルは通常寸法の tick を待ってから作る。
+- **診断。** `?debug=1` のウィジェットにレンダラー・合成の判断・WebKitGTK の版・
+  開始段階と、直前のセッションの段階・発動理由・p50/p95・描画バッファの寸法を出す。
+  デスクトップでは最初の WebGL コンテキストの後に同じ内容を `log_webview_diagnostics`
+  で端末ログ（`[webview]`）へ一行送り、`NEGATIVE_CONVERTER_FRAME_LOG=1` なら
+  セッションごとの要約も送る。`<html data-preview-tier>` と
+  `data-preview-tier-last-session` に現在と直前の段階を出す。
+- **テスト用フック。** `?previewTier=reduced` は全セッションを縮小で始め、
+  `?previewTier=normal` は常に通常のまま。
+
+1 MP の上限と 24ms は Linux 実機で調整する定数。DPR 1・画面合わせの 1920×1080 窓では
+表示が約 0.9 MP なので、この段階は何も減らさない（必要なら 0.5 MP を先に試す）。
+M1 Pro で 16bit の 1809×1202 から 1224×816 を作る時間は約 33ms（Node、中央値）。
+
+検証: `previewTier.test.mjs`（寸法・統計・発動条件・監視・記憶と再測定）、
+`renderEnvironment.test.mjs`（レンダラー名の分類、`startsReduced`）、
+`previewTierWiring.test.mjs`（main.js の実関数で、縮小中は 1 MP 以下、終了後の確定表示が
+通常経路とバイト単位で一致、確定一回で変換は一回、履歴は通常段階、写真切り替えで
+古い写真を変換しない、通常段階の寸法は従来と同一）。Chrome smoke の
+`preview-tier-smoke.mjs` は強制フックで同じドラッグを両段階で行い、縮小中の描画と
+変換が 1 MP 以下、指を離した後に通常寸法の変換が原寸描画より先に一回、確定した
+WebGL フレームの全画素ハッシュ・タイル・PNG8・TIFF16 が一致、離した直後の取り消し・
+写真切り替えで縮小表示が残らないことを確認する。Linux 実機のフレーム間隔は未計測。
