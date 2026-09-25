@@ -46,6 +46,7 @@ import { runPng16BandSmoke } from './png16-band-smoke.mjs';
 import { runRawPostDecodeSmoke, runRawParitySmoke } from './raw-post-decode-smoke.mjs';
 import { runExportOwnershipSmoke } from './export-ownership-smoke.mjs';
 import { runFirstPhotoSmoke } from './first-photo-smoke.mjs';
+import { runImportParitySmoke } from './import-parity-smoke.mjs';
 
 // UPNG is already a runtime dependency of the app; reuse it to decode screenshots.
 const UPNG = createRequire(import.meta.url)('upng-js');
@@ -413,6 +414,14 @@ if (process.argv.includes('--gain-map-only')) {
 }
 if (process.argv.includes('--hidden-job-only')) {
   await runHiddenJobSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS');
+  process.exit(0);
+}
+// Opt-in: local RAW files against a baseline recorded from a reference build
+// (see import-parity-smoke.mjs). Never part of the default run.
+if (process.argv.includes('--import-parity-only')) {
+  await runImportParitySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
   if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
   console.log('SMOKE PASS');
   process.exit(0);
