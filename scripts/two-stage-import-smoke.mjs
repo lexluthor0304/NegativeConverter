@@ -46,6 +46,15 @@ const CAPTURE = `(() => {
   new MutationObserver(() => {
     if (window.__twoStageBusyWatch && document.body.dataset.studioBusy) window.__twoStageBusy.push(performance.now());
   }).observe(document.body, { attributes: true, attributeFilter: ['data-studio-busy'] });
+  // Toasts come and go; keep every text shown.
+  window.__twoStageToasts = [];
+  new MutationObserver(records => {
+    for (const record of records) for (const node of record.addedNodes) {
+      if (node.nodeType !== 1) continue;
+      const toasts = node.classList?.contains('toast-message') ? [node] : [...node.querySelectorAll?.('.toast-message') || []];
+      for (const toast of toasts) window.__twoStageToasts.push(toast.textContent);
+    }
+  }).observe(document.body, { childList: true, subtree: true });
 })()`;
 
 // The recipe fields #255 must keep equal to one full decode's.
@@ -202,7 +211,7 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
     await evaluate('window.__ncTwoStage.failNextFullDecodes(1)');
     await importFiles([files[0]]);
     await waitFor('stage 2 failed', `${ready} && ${status}.fullDecode === 'failed'`, 300_000);
-    const failed = await evaluate(`({ status: ${status}, toasts: [...document.querySelectorAll('.toast-message')].map(t => t.textContent) })`);
+    const failed = await evaluate(`({ status: ${status}, toasts: window.__twoStageToasts.slice() })`);
     if (!failed.status.pending || !failed.status.provisional) fail('a failed stage 2 must leave the photo provisional: ' + JSON.stringify(failed.status));
     if (!failed.toasts.some(text => /Full resolution could not be loaded/.test(text))) fail('no failure toast: ' + JSON.stringify(failed.toasts));
     same('the export after a failed stage 2', await exportSingle(16, 'export after failure'), reference.png16);

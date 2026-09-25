@@ -10910,6 +10910,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     function noteTwoStagePlan(file, plan) {
       twoStageDiagnostics.plans.push({ file: file.name, ...plan });
       if (twoStageDiagnostics.plans.length > 64) twoStageDiagnostics.plans.shift();
+      // A perf mark (?perf=1) per RAW open: which files take two stages.
+      createPerfTrace('rawDecodePlan', { file: file.name, width: plan.width || 0, height: plan.height || 0 }).end({ stages: plan.stages });
       if (DEBUG_UI) console.info('[RAW] decode plan', file.name, plan);
     }
 
@@ -11325,7 +11327,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         await whenGeometrySettled();
         if (!current()) return;
         if (step >= 3) {
+          const revision = manualEditRevision;
           await processNegative({ quiet: true });
+          if (!current()) return;
+          // An edit that landed while the full base converted: its slider
+          // render had no source (the stand-in's went with the swap).
+          if (revision !== manualEditRevision && usesSilverCoreConversion(state)) scheduleCoreReprocess({ full: false });
         } else {
           const sourceData = state.croppedImageData || state.originalImageData;
           if (sourceData) { displayNegative(sourceData); updateCanvasVisibility(); }
