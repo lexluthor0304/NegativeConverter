@@ -23,8 +23,13 @@ the unmirrored base and `cropRegion` on the rotated (and mirrored) frame.
   whole output by construction. Only 8-bit sources at a non-right angle keep
   the 2D-canvas rotation on the main thread.
 - Strided plans (`step`) reproduce the chain followed by the step
-  downsampler exactly; readers that downsample anyway (the crop draft,
-  Apply Crop's crop-area detection) get their sample without the frame.
+  downsampler exactly; readers that downsample anyway (the crop view's
+  stand-in, Apply Crop's crop-area detection) get their sample without the
+  frame. `renderGeometry(..., { with16: false })` leaves the 16-bit plane out
+  of such a sample (the kernels render it band by band into a scratch
+  buffer), with the same 8-bit bytes. Crop mode itself draws a display proxy
+  of the base turned by canvas transforms (#245,
+  `docs/crop-apply-and-analysis-worker.md`).
 
 ## Pool and ordering
 

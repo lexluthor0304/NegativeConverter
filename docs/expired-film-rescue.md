@@ -45,19 +45,26 @@ would have to be a separate, opt-in tool.
 
 The correction has a global part (per-channel curves) and a spatial part
 (what varies across the frame). The spatial part is measured with OpenCV.js
-on the main thread — the same lazily loaded build the auto frame, dust
-removal and lab match use — and stored as a few numbers, so it is applied
-everywhere without OpenCV: in the export worker, the 16-bit export and batch
-exports.
+in the auto-frame worker, which already loads the build (#245; the page
+loads its own copy only when the worker request fails), and stored as a few
+numbers, so it is applied everywhere without OpenCV: in the export worker,
+the 16-bit export and batch exports.
 
-`negative2positive/src/app/expiredRescueOpenCv.js` (needs `globalThis.cv`):
+`negative2positive/src/app/expiredRescueOpenCv.js`:
 
-- `measureExpiredSpatialMaps(image, { region, borderBuffer, placement })`
-  area-averages the analysis region to ~160 px, and per channel runs
-  `cv.erode` with an elliptical kernel 22 % of the width (the local dark
-  floor), a light `cv.GaussianBlur`, and `cv.resize` (INTER_AREA) to a 32-wide
-  grid; the luminance goes through a 5 % blur to the same grid for the local
-  mean. Every Mat is released.
+- `sampleExpiredSpatialInput(image, { region, borderBuffer, placement })`
+  (page, no OpenCV) area-averages the analysis region to ~160 px; its sliced
+  variant sums the rows in ~12 ms slices with the same arithmetic, so the
+  sample is identical, and stops when the photo or conversion source
+  changes. Only this sample (~0.14 MB) goes to the worker.
+- `measureExpiredSpatialMapsFromSample(sample)` (worker, needs
+  `globalThis.cv`) runs, per channel, `cv.erode` with an elliptical kernel
+  22 % of the width (the local dark floor), a light `cv.GaussianBlur`, and
+  `cv.resize` (INTER_AREA) to a 32-wide grid; the luminance goes through a
+  5 % blur to the same grid for the local mean. Every Mat is released.
+  `measureExpiredSpatialMaps` is the two in one call.
+- `expiredAnalysisFromMaps(maps, sample, settings)` fits the surface and
+  re-measures the curves on the flattened sample, on the page.
 
 `negative2positive/src/pipeline/expiredRescue.js` is a pure module with no
 DOM and no OpenCV:
@@ -100,13 +107,14 @@ batch exports all render the same result. The chain receives the frame size
 (`computeAdjustmentParams(settings, { width, height })`) for the pixel
 positions; without it the spatial stage is left out. A never-opened frame in
 a batch export is measured from its own positive before the adjustment
-stage, with OpenCV when it loads.
+stage, with OpenCV (in the worker) when it can run.
 
 Interactively the measurement runs in two phases: the global curves show at
-once, then OpenCV (loaded once per session) measures the fog surface and the
-curves are re-measured on the flattened frame and swapped in. The diagnosis
-shows "OpenCV is loading…", then the measured unevenness; if OpenCV cannot
-load, the global rescue stays and the two spatial sliders are disabled.
+once, then the worker measures the fog surface and the curves are
+re-measured on the flattened frame and swapped in. The diagnosis shows
+"OpenCV is loading…" until then, then the measured unevenness; if OpenCV
+cannot run in the worker or the page, the global rescue stays and the two
+spatial sliders are disabled. See `docs/crop-apply-and-analysis-worker.md`.
 
 ## Settings
 
