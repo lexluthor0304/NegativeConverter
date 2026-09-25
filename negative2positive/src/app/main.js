@@ -10541,9 +10541,18 @@ import { frameNeedsReview } from './reviewQueue.js';
       });
     }
 
+    // Fallback for sanitizing one photo's own settings. Geometry belongs to
+    // that photo: a null crop means "not cropped", never "whatever the photo
+    // on screen is cropped to". Falling back to `state` stamped the open
+    // photo's crop onto every never-cropped frame a batch export, thumbnail or
+    // roll pass cloned.
+    function perPhotoSettingsFallback() {
+      return { ...state, cropRegion: null, autoFrameMeta: null, rotationAngle: 0, mirrored: false };
+    }
+
     function cloneSettings(settings) {
       if (!settings) return null;
-      const safe = sanitizeSettings(settings, { fallbackSettings: state });
+      const safe = sanitizeSettings(settings, { fallbackSettings: perPhotoSettingsFallback() });
       return deepCopySanitizedSettings(safe);
     }
 
@@ -14609,13 +14618,9 @@ import { frameNeedsReview } from './reviewQueue.js';
     }
 
     // Project settings come from disk: geometry that is null must stay null
-    // rather than inherit the open photo's crop (see processFileWithSettings).
+    // rather than inherit the open photo's crop (see perPhotoSettingsFallback).
     function sanitizeProjectSettings(settings) {
-      if (!settings) return null;
-      const safe = sanitizeSettings(settings, {
-        fallbackSettings: { ...state, cropRegion: null, autoFrameMeta: null, rotationAngle: 0, mirrored: false }
-      });
-      return deepCopySanitizedSettings(safe);
+      return cloneSettings(settings);
     }
 
     // The roll as a project object. Without `persist` the open photo's live
