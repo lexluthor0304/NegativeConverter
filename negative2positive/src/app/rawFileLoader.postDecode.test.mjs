@@ -334,5 +334,38 @@ await expectPreviewFallback('garbled output', { result: makeRawResult({ width: 6
   await assert.rejects(loadRawFile(makeContainer(false).buffer, 'frame.nef', { halfSize: true, onLibRawReleased: () => released.push(true) }));
   assert.equal(released.length, 1);
 }
+// --- decode-ahead sub-stages (#256 Part 4): the hook runs after LibRaw is
+// disposed and before the post-decode pass, which waits for it --------------
+{
+  reset({ result: cloneRawResult(fixture) });
+  const seen = [];
+  let letPass;
+  const gate = new Promise((resolve) => { letPass = resolve; });
+  const loading = loadRawFile(makeContainer().buffer, 'frame.nef', {
+    sourceBlob: countingBlob(makeContainer()).blob,
+    onStage: (name) => {
+      const libraw = scene.workers.find((w) => w.kind === 'libraw');
+      const post = scene.workers.find((w) => w.kind === 'post');
+      seen.push({ name, librawTerminated: libraw.terminated, processPosted: post.received.includes('process') });
+      return gate;
+    }
+  });
+  for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(seen, [{ name: 'postDecode', librawTerminated: true, processPosted: false }]);
+  letPass();
+  assertPlanes(await loading, expected, 'post-decode after the stage hook');
+  assertWorkersReleased('stage hook');
+  // Aborted while waiting for the post-decode slot: nothing is posted.
+  reset({ result: cloneRawResult(fixture) });
+  const controller = new AbortController();
+  const aborted = loadRawFile(makeContainer().buffer, 'frame.nef', {
+    sourceBlob: countingBlob(makeContainer()).blob,
+    signal: controller.signal,
+    onStage: () => new Promise((resolve) => setTimeout(() => { controller.abort(); resolve(); }, 1))
+  });
+  await assert.rejects(aborted, (err) => err.name === 'AbortError');
+  assert.equal(scene.workers.find((w) => w.kind === 'post').received.includes('process'), false);
+  assertWorkersReleased('aborted at the stage hook');
+}
 
 console.log('rawFileLoader.postDecode.test.mjs passed');

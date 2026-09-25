@@ -17,6 +17,12 @@
  * have no `scheduler.postTask`. A hidden window is not busy here; admission
  * while hidden is hiddenJobGate's (#241).
  *
+ * `idle({ foregroundOnly: true })` waits on the foreground conditions only
+ * (`isForegroundBusy`: input, a photo switch, a foreground decode or
+ * conversion), not on the whole `isBusy()`. A batch export's decode-ahead
+ * uses it (#256): during a desktop batch the batch itself holds the export
+ * lock that `isBusy()` includes, so a full `idle()` would never be reached.
+ *
  * Pure: the clock and timers are injected.
  */
 
@@ -32,6 +38,8 @@ function abortError(signal) {
 /**
  * @param {object} [options]
  * @param {() => boolean} [options.isBusy] the foreground is switching, converting or exporting
+ * @param {() => boolean} [options.isForegroundBusy] the foreground is switching, decoding or
+ *   converting (without the export lock); defaults to `isBusy`
  * @param {() => number} [options.now] milliseconds, monotonic
  * @param {(fn: Function, ms: number) => any} [options.setTimer]
  * @param {(handle: any) => void} [options.clearTimer]
@@ -40,6 +48,7 @@ function abortError(signal) {
  */
 export function createBackgroundGate({
   isBusy = () => false,
+  isForegroundBusy = isBusy,
   now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now()),
   setTimer = (fn, ms) => setTimeout(fn, ms),
   clearTimer = (handle) => clearTimeout(handle),
@@ -52,11 +61,11 @@ export function createBackgroundGate({
   const waiters = new Set();
 
   // 0 when idle, otherwise how long until it is worth looking again.
-  function blockedFor() {
+  function blockedFor(foregroundOnly = false) {
     const since = now() - lastInput;
     if (since < quietMs) return quietMs - since;
     let busy = false;
-    try { busy = Boolean(isBusy()); } catch { busy = true; }
+    try { busy = Boolean(foregroundOnly ? isForegroundBusy() : isBusy()); } catch { busy = true; }
     return busy ? pollMs : 0;
   }
 
@@ -80,13 +89,18 @@ export function createBackgroundGate({
 
   function check() {
     if (!waiters.size) return;
-    const wait = blockedFor();
+    const waits = new Map();
+    const waitFor = (foregroundOnly) => {
+      if (!waits.has(foregroundOnly)) waits.set(foregroundOnly, blockedFor(foregroundOnly));
+      return waits.get(foregroundOnly);
+    };
     const t = now();
-    let next = wait;
+    let next = Infinity;
     for (const waiter of [...waiters]) {
+      const wait = waitFor(waiter.foregroundOnly);
       if (wait === 0) settle(waiter, true);
       else if (waiter.deadline <= t) settle(waiter, false);
-      else next = Math.min(next, waiter.deadline - t);
+      else next = Math.min(next, wait, waiter.deadline - t);
     }
     if (waiters.size) arm(next);
   }
@@ -95,12 +109,13 @@ export function createBackgroundGate({
     /**
      * Resolves true once idle, or false when `maxWaitMs` passed first (the
      * caller proceeds anyway). Rejects with an AbortError on `signal`.
+     * `foregroundOnly` waits for input quiet and `isForegroundBusy()` only.
      */
-    idle({ signal = null, maxWaitMs = Infinity } = {}) {
+    idle({ signal = null, maxWaitMs = Infinity, foregroundOnly = false } = {}) {
       if (signal?.aborted) return Promise.reject(abortError(signal));
-      if (blockedFor() === 0) return Promise.resolve(true);
+      if (blockedFor(foregroundOnly) === 0) return Promise.resolve(true);
       return new Promise((resolve, reject) => {
-        const waiter = { resolve, signal, deadline: now() + Math.max(0, maxWaitMs) };
+        const waiter = { resolve, signal, foregroundOnly: Boolean(foregroundOnly), deadline: now() + Math.max(0, maxWaitMs) };
         waiter.onAbort = () => {
           if (!waiters.delete(waiter)) return;
           reject(abortError(signal));
@@ -121,7 +136,9 @@ export function createBackgroundGate({
       if (timer !== null) { clearTimer(timer); timer = null; timerAt = Infinity; }
       check();
     },
-    isIdle: () => blockedFor() === 0,
+    isIdle: ({ foregroundOnly = false } = {}) => blockedFor(foregroundOnly) === 0,
+    /** Input was noted within the quiet period (Part 5's band count, #256). */
+    inputRecently: () => now() - lastInput < quietMs,
     get lastInputAt() { return lastInput; },
     get waiting() { return waiters.size; }
   };

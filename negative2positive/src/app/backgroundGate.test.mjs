@@ -136,4 +136,41 @@ const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve();
   assert.equal(gate.isIdle(), false);
 }
 
+// Foreground-only waits (#256 decode-ahead): the batch's own export lock
+// (in isBusy) never holds them; input, a switch or a foreground conversion
+// (isForegroundBusy) does, and the cap still lets them go.
+{
+  const clock = fakeClock();
+  let foregroundBusy = false;
+  const gate = createBackgroundGate({
+    isBusy: () => true, isForegroundBusy: () => foregroundBusy,
+    now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer
+  });
+  assert.equal(await gate.idle({ foregroundOnly: true }), true, 'the export lock alone never holds it');
+  assert.equal(gate.isIdle(), false);
+  assert.equal(gate.isIdle({ foregroundOnly: true }), true);
+  const full = track(gate.idle());
+  gate.noteInput();
+  assert.equal(gate.inputRecently(), true);
+  const afterInput = track(gate.idle({ foregroundOnly: true, maxWaitMs: 2000 }));
+  await clock.advance(BACKGROUND_INPUT_QUIET_MS - 1);
+  assert.equal(afterInput.settled, false, 'no decode within 400 ms of input');
+  await clock.advance(1);
+  assert.equal(afterInput.value, true);
+  assert.equal(gate.inputRecently(), false);
+  assert.equal(full.settled, false, 'a full idle() still waits for the lock');
+  foregroundBusy = true;
+  const capped = track(gate.idle({ foregroundOnly: true, maxWaitMs: 2000 }));
+  await clock.advance(1999);
+  assert.equal(capped.settled, false);
+  await clock.advance(1);
+  assert.equal(capped.value, false, 'the 2 s cap forces it');
+  foregroundBusy = false;
+  const released = track(gate.idle({ foregroundOnly: true }));
+  gate.bump();
+  await flush();
+  assert.equal(released.value, true);
+  assert.equal(full.settled, false);
+}
+
 console.log('backgroundGate tests passed');

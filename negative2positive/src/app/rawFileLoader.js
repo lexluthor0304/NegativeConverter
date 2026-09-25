@@ -208,10 +208,15 @@ async function loadTiffBuffer(buffer, signal = null) {
  * its WASM heap are gone (after imageData(), on a fallback, an error or an
  * abort): the two-stage import starts its full decode there on devices that
  * cannot hold two LibRaw heaps at once.
+ *
+ * `options.onStage('postDecode')` (#256): called once LibRaw's result is in
+ * and its worker disposed, before the post-decode pass; the pass waits for
+ * the promise it returns. Batch decode-ahead frees its decode slot there.
  */
 export async function loadRawFile(buffer, fileName, options = {}) {
   const normalizedFileName = String(fileName || '').toLowerCase();
   const onMetadata = typeof options.onMetadata === 'function' ? options.onMetadata : null;
+  const onStage = typeof options.onStage === 'function' ? options.onStage : null;
   const fastPreview = options.preview === true;
   const signal = options.signal || null;
   const reserveDecode = typeof options.reserveDecode === 'function' ? options.reserveDecode : null;
@@ -456,6 +461,13 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     const { width, height } = result;
     // Before packing and the defect pass: a superseded decode never posts them.
     throwIfAborted(signal);
+    // Decode-ahead's sub-stages (#256 Part 4): LibRaw is done, so the next
+    // frame's decoder may start; the hook resolves when this frame may run
+    // its post-decode pass.
+    if (onStage) {
+      await onStage('postDecode');
+      throwIfAborted(signal);
+    }
 
     // Packing, the garbled check, the defect pass (unless the caller opted
     // out), the 8-bit mirror and the requested film statistics all run in the
