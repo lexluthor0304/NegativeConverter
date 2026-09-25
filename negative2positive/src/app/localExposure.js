@@ -122,14 +122,16 @@ export function workingPointToBase(point, geometry) {
   return { x: bx / baseWidth, y: by / baseHeight };
 }
 
-// Rasterises strokes into a Float32Array of stops per pixel (0 = untouched).
-// Brush size is a fraction of the base short side; feather widens the soft
-// edge. Overlapping strokes add up, so a second pass burns twice.
-export function rasterizeExposureStops(localExposure, geometry) {
+// Visits each stroke's coverage in the working frame: `visit(stroke, bx0,
+// by0, bw, bh, coverage)` receives the stroke's pixel bounding box and a
+// Float32 buffer over that box holding the maximum falloff (0..1) of its
+// segments. Brush size is a fraction of the base short side; feather widens
+// the soft edge. Only the stroke's box is allocated, so a full-resolution
+// export or repair mask never needs a frame-sized buffer per stroke.
+export function forEachStrokeCoverage(localExposure, geometry, visit) {
   const width = geometry.width; const height = geometry.height;
-  const stops = new Float32Array(width * height);
   const strokes = localExposure?.strokes;
-  if (!Array.isArray(strokes) || !strokes.length) return stops;
+  if (!Array.isArray(strokes) || !strokes.length) return;
   const shortSide = Math.min(geometry.baseWidth, geometry.baseHeight);
   for (const stroke of strokes) {
     const points = stroke.points.map((p) => ({ ...basePointToWorking(p, geometry), p: p.p ?? 1 }));
@@ -139,10 +141,8 @@ export function rasterizeExposureStops(localExposure, geometry) {
     const feather = clamp(stroke.feather ?? 0.5, 0, 1);
     const hard = radius * (1 - feather);
     const segments = points.length === 1 ? [[points[0], points[0]]] : points.slice(1).map((p, i) => [points[i], p]);
-    // Coverage accumulates the maximum falloff per stroke so overlapping
-    // segments of one stroke do not double up, then the stroke adds once. The
-    // buffer only spans the stroke's bounding box (a full-resolution export
-    // must not allocate a frame-sized buffer per stroke).
+    // Coverage keeps the maximum falloff per stroke so overlapping segments
+    // of one stroke do not double up.
     const maxR = radius * Math.max(...points.map((p) => p.p));
     const bx0 = Math.max(0, Math.floor(Math.min(...points.map((p) => p.x)) - maxR));
     const bx1 = Math.min(width - 1, Math.ceil(Math.max(...points.map((p) => p.x)) + maxR));
@@ -150,7 +150,8 @@ export function rasterizeExposureStops(localExposure, geometry) {
     const by1 = Math.min(height - 1, Math.ceil(Math.max(...points.map((p) => p.y)) + maxR));
     if (bx1 < bx0 || by1 < by0) continue;
     const bw = bx1 - bx0 + 1;
-    const coverage = new Float32Array(bw * (by1 - by0 + 1));
+    const bh = by1 - by0 + 1;
+    const coverage = new Float32Array(bw * bh);
     for (const [a, b] of segments) {
       const r = radius * Math.max(a.p, b.p);
       const x0 = Math.max(bx0, Math.floor(Math.min(a.x, b.x) - r)); const x1 = Math.min(bx1, Math.ceil(Math.max(a.x, b.x) + r));
@@ -173,13 +174,23 @@ export function rasterizeExposureStops(localExposure, geometry) {
         }
       }
     }
-    for (let y = by0; y <= by1; y++) {
-      for (let x = bx0; x <= bx1; x++) {
+    visit(stroke, bx0, by0, bw, bh, coverage);
+  }
+}
+
+// Rasterises strokes into a Float32Array of stops per pixel (0 = untouched).
+// Overlapping strokes add up, so a second pass burns twice.
+export function rasterizeExposureStops(localExposure, geometry) {
+  const width = geometry.width; const height = geometry.height;
+  const stops = new Float32Array(width * height);
+  forEachStrokeCoverage(localExposure, geometry, (stroke, bx0, by0, bw, bh, coverage) => {
+    for (let y = by0; y < by0 + bh; y++) {
+      for (let x = bx0; x < bx0 + bw; x++) {
         const c = coverage[(y - by0) * bw + (x - bx0)];
         if (c > 0) stops[y * width + x] += stroke.stops * c;
       }
     }
-  }
+  });
   return stops;
 }
 
