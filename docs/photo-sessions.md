@@ -47,10 +47,14 @@ on use (`docs/hidden-window-jobs.md`).
 ### Display-resolution sessions (#249)
 
 Above 16 MP without repairs, a photo's settled view is the preview
-conversion of its display preview (`conversionPreviewImageData`, the
-conversion source resized for the viewport) with the base's colour-analysis
-sample. A photo is left in the largest of these forms that fits the budget
-(one shared 768 MiB, unchanged):
+conversion of a display target (`conversionPreviewImageData`) on its retained
+display level (#248: `displayLevelImageData`, a k × k box average of the
+conversion source, 16-bit only: 3178 × 2112 for a 9536 × 6336 frame) with the
+base's colour-analysis sample. That level is the photo's **display proxy**:
+the preview worker
+resamples it for any window size, DPR or preview tier, so it needs no source
+while the view is at display resolution. A photo is left in the largest of
+these forms that fits the budget (one shared 768 MiB, unchanged):
 
 1. **full**: base, planes and history;
 2. **Tier A**: the conversion source and the display planes, without the
@@ -61,10 +65,12 @@ sample. A photo is left in the largest of these forms that fits the budget
    fit do the entries that pin display planes of their own go cold too. A
    cropped 60 MP frame is about 637 MiB this way, so it fits;
 3. **cold** (#244): the base, the recipe and scalar history;
-4. **Tier B**: only the display proxy, the processed preview, the histogram
-   source and the colour-analysis sample, with the base and source sizes,
-   `rawMetadata`, the film-edge record, zoom and pan, history as scalars
-   (60-92 MiB at the 4 MP cap);
+4. **Tier B**: only the display level, the processed preview, the histogram
+   source, the auto-WB sample and the colour-analysis sample, with the base
+   and source sizes, `rawMetadata`, the film-edge record, zoom and pan,
+   history as scalars (about 100-140 MiB at 60 MP: the level alone is 54 MB
+   of RGBA16, more than the issue's 15-26 MB estimate for a viewport-sized
+   proxy, but it serves every window and needs no copy);
 5. the base alone.
 
 Tier B is exact only for a frame whose view is display-resolution (a source
@@ -81,8 +87,12 @@ A session restored without its base keeps `state.baseDescriptor` (the base's
 size, 16-bit plane and decode route, registered under the base's geometry id)
 and stand-ins `{ width, height, released }` for the planes it dropped; a Tier B
 session keeps `state.sourcePending` (the source's size and the proxy's key)
-too. Readers of the base's size use `baseSizeSource()`; the colour-analysis
-sample stays cached on the descriptor.
+too. Readers of the base's size use `baseSizeSource()`, readers of the
+source's size `conversionSourceSize()`; the colour-analysis sample stays
+cached on the descriptor, and the auto-WB sample is keyed by the level until
+the source is back (`autoWbSampleKey()`). The proxy's key is the base
+(size, depth, decode route), the geometry, lens correction and the analysis
+area; no viewport, since the level serves any window.
 
 - **Return.** A Tier A or in-RAM Tier B entry whose recipe key matches restores
   in the click's task like a warm switch: no veil, no read, no decode, the same
@@ -92,25 +102,31 @@ sample stays cached on the descriptor.
   whose settled frame was a full-resolution plane: under the veil, the kept
   planes are installed, the item's recipe restored over them and the photo
   prepared as a cold open would be (`prepareStudioPhoto`), without a decode.
-- **The preview half.** `processNegative` converts the display proxy directly
-  while its key matches the live geometry, lens, analysis area and viewport
-  (`displayProxyMatches`), with the automatic measurements a cold open runs;
+- **The preview half.** `processNegative` converts the level directly while
+  its key matches the live geometry, lens and analysis area
+  (`displayProxyMatches`), with the automatic measurements a cold open runs
+  (the auto-WB sample comes from the level, as for any photo since #248);
   otherwise it rebuilds the source first. Slider ticks, Undo/Redo of scalar
-  steps and display-only refreshes convert the proxy too.
+  steps, reduced preview-tier drags and window resizes convert the level at
+  the new display target too (`pendingConversionTarget`). A frame that is its
+  own level (k = 1, only below the large-image size with a debug threshold)
+  whose window needs the source's own pixels rebuilds the source instead.
 - **Barriers.** `ensureBase()` decodes the original through the normal loader
   (joining a lane's decode, #243), checks its size, depth and route against
   the descriptor and installs it under the same geometry id, so the kept planes
   stay valid; a decode that differs purges the photo's proxies and reopens it
   cold. `ensureSource()` adds the geometry chain from the base (pool) and lens
-  correction, keeps the proxy as the display preview and then checks it: the
-  proxy must equal `resizeDisplayPreview` of the new source (sliced resample,
-  hash compare); a mismatch purges the stored copies and converts again. A
+  correction, keeps the level as the display level and then checks it: the
+  level must equal the new source's own level (the pool's prebuilt one, or
+  `buildDisplayLevelInBands`; hash compare); a mismatch purges the stored
+  copies, installs the new level and converts again. A
   geometry edit (rotate, mirror, a settings refresh with new geometry, Undo of
   a cold geometry entry) runs as a geometry job that first awaits the base;
   crop mode, Auto Frame, film-base sampling and detection, the flat field,
   Reprocess from original, Compare, every export and full-resolution render
-  (dust, the AI brush) and a zoom or window size beyond the proxy await
-  `ensureSource()`. Meanwhile the editor is locked and the frame notice reads
+  (dust, the AI brush) and native-pixel detail regions at zoom (#248's detail
+  layer; regions drawn from the level need nothing) await `ensureSource()`.
+  Meanwhile the editor is locked and the frame notice reads
   "Preparing original…" (`body[data-studio-preparing]`). A settings-only
   refresh with the same geometry keeps the crop.
 - **Invariant.** A proxy is display-only: it is never assigned to
@@ -121,25 +137,27 @@ sample stays cached on the descriptor.
 **The spill.** Tier B entries that no longer fit, and proxies the fills make,
 go to a per-tab private IndexedDB database (the analysis samples' lock
 protocol, `createPrivateIndexedDbBackend`), written from the display-proxy
-worker (`workers/displayProxyWorker.js`), which packs the 16-bit proxy as RGB16
-when its alpha is uniformly opaque (RGBA16 otherwise; the 8-bit plane is
-rebuilt with `Math.round(v / 257)`, or stored when it is not derived) with the
-sample and a checksum (`displayProxy.js`). The main thread keeps an index, so
+worker (`workers/displayProxyWorker.js`), which packs the 16-bit level as
+RGB16 when its alpha is uniformly opaque (RGBA16 otherwise; about 40 MB at
+60 MP) with its source geometry, the sample and a checksum (`displayProxy.js`;
+a plane with an 8-bit copy, a frame that is its own level, has it rebuilt with
+`Math.round(v / 257)`, or stored when it is not derived). The main thread
+keeps an index, so
 `has` answers at once. The spill leaves 2 GiB free (`navigator.storage.estimate`
 on the web) and uses at most a quarter of what is free, up to 4 GiB. It is
 emptied when a photo leaves the queue, when the list is cleared and when the
 session closes. A spilled hit shows the retained 1200 px copy on the veil and
-converts the proxy (about 0.15-0.35 s at 60 MP, estimated). A photo left
-zoomed keeps its zoomed planes in RAM and prepares its zoom-1 proxy in the
-pool for the spill.
+converts the level (about 0.15-0.35 s at 60 MP, estimated), at whatever
+window and zoom the editor has.
 
 **Fills.** While roll analysis (`analyze` of the roll pass) or a lane job
-holds a frame's full decode, `fillDisplayProxy` renders the proxy a first open
+holds a frame's full decode, `fillDisplayProxy` renders the level a first open
 would convert: in the geometry pool, band by band, each band rendering only
-the crop-window rows its proxy rows read and resampling them with
-`resizeDisplayPreview`'s own taps (`renderDisplayProxy`, bit-identical to the
-whole resize), at the editor's last viewport at zoom 1. Frames with lens
-correction, repairs, an undecided recipe or an 8-bit RAW fallback are skipped.
+the crop-window rows of k × 16 level rows and box-averaging them with
+`buildDisplayLevel`'s own sums (`renderDisplayLevel`, bit-identical to the
+whole level of the export chain's crop). Frames with lens correction, repairs,
+an undecided recipe, an 8-bit RAW fallback or no level smaller than
+themselves (k = 1) are skipped.
 
 **The store** (across restarts and project reopens). The same records, keyed by
 the file's content (size, date, SHA-256 of the first MiB plus the size, SHA-256

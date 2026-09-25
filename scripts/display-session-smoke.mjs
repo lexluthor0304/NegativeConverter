@@ -1,6 +1,7 @@
 // Display-resolution photo sessions (#249) in the real Studio, on small
 // fixtures made "large" (?largeImagePixels) in a small window, so each
-// photo's settled view is the preview conversion of its display proxy:
+// photo's settled view is the preview conversion of its display proxy (its
+// display level, #248; these fixtures are their own level, k = 1):
 //  - Tier A (the conversion source without the base): A -> B -> A restores
 //    with no file read, no decode and no veil, the same GPU pixels, the same
 //    undo depth, and a 16-bit export byte-identical to the one before;
@@ -10,7 +11,8 @@
 //    original first (ensureSource) and matches the export before leaving;
 //  - the spill: a photo written to the per-tab spill opens without a read or
 //    decode and shows the same GPU pixels;
-//  - another window size misses the proxy and takes the exact path.
+//  - another window size is served by the proxy: no read, no decode, a
+//    display target of the new size on the same level.
 // Tiers are forced through window.__ncDisplaySessions.force: the budget
 // logic itself is covered by the Node tests (displaySessions.test.mjs).
 import { installPhotoSessionProbe, decodePng, bootPhotoSession } from './photo-session-smoke.mjs';
@@ -175,18 +177,21 @@ export async function runDisplaySessionSmoke({ send, evaluate, waitFor, fail, in
     expect((await snapshot()).gpu?.hash === gpuS?.hash, 'the spilled proxy converted to other pixels');
     console.log('ok: a spilled photo opens without a read or decode, with the same pixels');
 
-    // ---- Another window size misses the proxy ----
+    // ---- Another window size is served by the proxy (#248's level) ----
+    const shownBefore = (await live()).target;
     await open(1, B);
     await evaluate('window.__ncDisplaySessions.settled()');
-    await send('Emulation.setDeviceMetricsOverride', { width: 1100, height: 760, deviceScaleFactor: 1, mobile: false });
+    // Smaller, so the new target stays below the source on any layout.
+    await send('Emulation.setDeviceMetricsOverride', { width: 820, height: 600, deviceScaleFactor: 1, mobile: false });
     const beforeM = await counts(A);
     const provisional = (await diagnostics()).provisional;
     await open(0, A);
-    const missed = await diagnostics();
-    expect(missed.provisional > provisional || (await counts(A)).reads > beforeM.reads, 'a window-size change did not take the exact path');
-    const exact = await live();
-    expect(!exact.sourcePending, 'the exact view did not land: ' + JSON.stringify(exact));
-    console.log('ok: a window-size change takes the exact path');
+    const resized = await live();
+    expect((await diagnostics()).provisional === provisional, 'a window-size change missed the proxy');
+    expect((await counts(A)).reads === beforeM.reads && (await counts(A)).decodes === beforeM.decodes, 'a window-size change read or decoded the original');
+    expect(resized.sourcePending && resized.proxyMatches && resized.target?.onLevel, 'the level did not serve the new window: ' + JSON.stringify(resized));
+    expect(resized.target.width < shownBefore.width, 'the display target did not follow the window: ' + JSON.stringify({ shownBefore, resized }));
+    console.log('ok: a window-size change is served by the display level, without a read or decode');
     await evaluate(`window.__ncDisplaySessions.force(null)`);
   } catch (error) {
     failure = error;
