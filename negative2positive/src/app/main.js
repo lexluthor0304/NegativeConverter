@@ -13522,6 +13522,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       ++loadGeneration;
       cancelCropDetection();
       supersedeActivation();
+      // Nothing needs the lanes' decodes of a closed session.
+      abortBackgroundDecodes();
       invalidatePhotoActivation();
       photoSessions.clear();
       photoPreviews.clear();

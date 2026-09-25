@@ -68,6 +68,7 @@ function fixture() {
     beginActivation: () => { context.activations.push(new AbortController()); return context.activations.at(-1).signal; },
     activations: [], notePhotoActivation: noop, activationDwell: async () => { context.dwells++; }, dwells: 0,
     sharedDecodeInFlight: () => false, kickBackgroundPhotoWork: noop, supersedeActivation: noop,
+    abortBackgroundDecodes: () => { context.backgroundAborts++; }, backgroundAborts: 0,
     studioThumbnailUpdateFrame: 0, cancelAnimationFrame: noop,
     studioThumbnailUpdateTimer: 0, clearTimeout: noop,
     exactSettingsKey, schedulePostPaintTask: task => postPaint.push(task),
@@ -667,6 +668,8 @@ for (const locked of [false, true]) {
     assert.equal(f.photoSessions.bytes, 0, 'close releases inactive snapshots without a later file-list refresh');
     assert.equal(f.photoPreviews.bytes, 0, 'close releases presentation previews even when picker is cancelled');
     assert.equal(f.photoSessions.size + f.photoPreviews.size, 0);
+    assert.equal(c.photoPrefetch.size, 0, 'and the prefetch slot');
+    assert.equal(c.backgroundAborts, 1, 'the lanes\' decodes of the closed session stop');
     assert.equal(f.state.loadedFile, null);
     assert.equal(f.state.loadedBaseImageData, null);
     assert.equal(f.state._pendingFullResBuffer, null);
