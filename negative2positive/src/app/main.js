@@ -11860,6 +11860,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     function invalidateProcessedPipelineState() {
       state.processedImageData = null;
       state.displayImageData = null;
+      // The detail layer shows pixels of the pipeline being discarded (#248).
+      dropDetailLayer();
       clearFullResolutionRenderState();
       invalidateSilverCoreCache();
       state.conversionSourceImageData = null;
