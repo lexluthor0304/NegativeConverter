@@ -4,6 +4,7 @@ import vm from 'node:vm';
 import { createPhotoSessionCache } from './photoSessionCache.js';
 import { exactSettingsKey } from './settingsKey.js';
 import { createHiddenJobGate } from './hiddenJobGate.js';
+import { applyStrokePatch } from './dustStrokeHistory.js';
 
 // Execute the actual lifecycle control flow. Only DOM/decoder/AI dependencies
 // are stubbed; deferred worker replies expose intermediate ownership states.
@@ -76,7 +77,12 @@ function fixture() {
     getDustSource: () => state.dustRemoval.cleanSource,
     dustBrushSource: converted, dustBrushToken: 4, dustBrushPoints: [{ x: 1, y: 1 }],
     dustBrushMode: 'direct', dustBrushTurn: Promise.resolve(),
-    pushUndo: noop, createBrushMask: () => new Uint8Array(16),
+    pushUndo: noop, pushUndoDelta: (label, delta) => { context.deltas.push(delta); }, deltas: [],
+    applyStrokePatch, showDustParticleCount: noop, refreshDustDisplay: noop, queueDustAiRefresh: noop,
+    dustMaskTagSequence: 0, dustAiRefresh: { rects: [] }, unpinDustWorker: noop, dustPrivateClone: null,
+    repairStamps: { forget: noop }, forgetDustMaskInfo: noop,
+    setTimeout: callback => queueMicrotask(callback),
+    ImageData: class { constructor(data, width, height) { Object.assign(this, { data, width, height }); } },
     updateDustStatusUI: noop, updatePreview: noop, aiRepairReady: () => false,
     getLocalizedText: (key, fallback) => fallback,
     getInterpolatedText: (key, values, fallback) => fallback,
@@ -88,8 +94,10 @@ function fixture() {
     hiddenJobs: createHiddenJobGate({ isHidden: () => false }),
   });
   vm.runInContext(['photoSettingsKey', 'rememberPhotoSession', 'invalidatePhotoActivation',
-    'cancelStudioThumbnailUpdate', 'isCurrentLoad', 'onDustBrushEnd', 'deferFileListRefresh', 'updateFileListUI',
-    'refreshThumbnailStates'].map(functionSource).join('\n'), context);
+    'cancelStudioThumbnailUpdate', 'isCurrentLoad', 'deferFileListRefresh', 'updateFileListUI',
+    'refreshThumbnailStates', 'nextDustMaskTag', 'needsDustPrivateBuffer', 'installDustPrivateBuffer',
+    'ensureDustPrivateBuffer', 'prepareDustPrivateBuffer', 'strokeDustOffMainThread',
+    'commitDustStroke', 'onDustBrushEnd'].map(functionSource).join('\n'), context);
   const paint = () => { for (const task of postPaint.splice(0)) task(); };
   return { context, state, item, photoSessions, photoPreviews, base, converted, mask, element, postPaint, paint };
 }
@@ -103,7 +111,11 @@ for (const outcome of ['success', 'stale', 'abort']) {
   assert.equal(photoPreviews.size, 0);
   c.dustBrushTurn = previous.promise;
   let started = 0;
-  c.refineDustMaskInWorker = () => { started++; return refinement.promise; };
+  c.strokeDustInWorker = (target, stroke) => {
+    started++;
+    assert.deepEqual(stroke.points, [{ x: 1, y: 1 }], 'only the stroke itself travels to the worker');
+    return refinement.promise;
+  };
   const pending = c.onDustBrushEnd({});
   assert.equal(c.pendingBrushRepairs, 1, 'the legacy turn is counted before awaiting its predecessor');
   c.rememberPhotoSession(item);
@@ -115,17 +127,25 @@ for (const outcome of ['success', 'stale', 'abort']) {
   assert.equal(photoSessions.peek(item).snapshot, null, 'worker refinement must not be mistaken for settled output');
   assert.equal(photoPreviews.size, 0);
   if (outcome === 'stale') c.invalidatePhotoActivation();
-  const repaired = image(), newMask = new Uint8Array(16).fill(255);
+  // The worker's patch covers the rect the stroke touched (here the frame).
+  const rect = { x: 0, y: 0, width: 4, height: 4 };
+  const patch = { rect, rgba8: new Uint8ClampedArray(64).fill(9), rgba16: new Uint16Array(64).fill(2313),
+    maskRect: rect, maskBytes: new Uint8Array(16).fill(255), particleCount: 2, countBefore: 1 };
   if (outcome === 'abort') refinement.reject(new DOMException('Worker disposed', 'AbortError'));
-  else refinement.resolve({ imageData: repaired, mask: newMask, particleCount: 2 });
+  else refinement.resolve(patch);
   await pending;
   assert.equal(c.pendingBrushRepairs, 0, 'success, stale-result and rejection paths all release the pending count');
   await c.dustBrushTurn;
-  assert.equal(state.dustRemoval.mask, outcome === 'success' ? newMask : f.mask);
-  assert.equal(state.processedImageData, outcome === 'success' ? repaired : f.converted);
+  assert.equal(state.dustRemoval.mask, f.mask, 'the mask is patched in place, never replaced');
+  assert.deepEqual([...f.mask], Array(16).fill(outcome === 'success' ? 255 : 0));
+  assert.notEqual(state.processedImageData, f.converted, 'patches go into a private copy, never the clean source');
+  assert.deepEqual([...f.converted.data], Array(64).fill(0), 'the clean source is never patched');
+  assert.deepEqual([...state.processedImageData.data], Array(64).fill(outcome === 'success' ? 9 : 0));
+  assert.equal(c.deltas.length, outcome === 'success' ? 1 : 0, 'only a landed stroke enters history');
   if (outcome === 'success') {
+    assert.equal(state.dustRemoval.particleCount, 2);
     c.rememberPhotoSession(item);
-    assert.equal(photoSessions.peek(item).snapshot.refs.processedImageData, repaired);
+    assert.equal(photoSessions.peek(item).snapshot.refs.processedImageData, state.processedImageData);
     assert.equal(photoPreviews.size, 0, 'the click task does not adjust the presentation proxy');
     f.paint();
     assert.equal(photoPreviews.size, 1);

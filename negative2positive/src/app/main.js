@@ -66,7 +66,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     import { convertFrameWithRouter, resolveConversionMode } from '../pipeline/conversionRouter.js';
     import { convertFrameInWorker, convertPreviewFrameInWorker, createConversionWorkerPool, CONVERSION_FAILED, WORKER_TIMEOUT } from './conversionWorkerClient.js';
     import { planBatchParallelism, runBatchPipeline, planGeometryBandsInFlight } from './batchExportScheduler.js';
-    import { displayPreviewSize, resizeDisplayPreview } from './displayPreview.js';
+    import { displayPreviewSize, resizeDisplayPreview, updateDisplayPreviewRect } from './displayPreview.js';
     import { createCoreReprocessGates, previewDispatchAction, CORE_FULL_REPROCESS_DELAY_MS } from './coreReprocessDispatcher.js';
     import { invalidateSilverCoreCache, analyzeSilverCoreFrame } from '../pipeline/silverAdapter.js';
     import { canUseBrowserZipStreaming, ZipStoreWriter, createZipNameDeduper } from './zipStoreWriter.js';
@@ -80,7 +80,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     } from './adjustmentPipeline.js';
     import { requestExportGainMap } from './exportGainMap.js';
     import { buildLinearPositive, encodeLinearDngBlob } from './linearDng.js';
-    import { inpaintWithModel, fetchModelBytes, inpaintBackends, DEFAULT_MODEL_URL } from './aiInpaint.js';
+    import { inpaintWithModel, fetchModelBytes, inpaintBackends, DEFAULT_MODEL_URL, TILE as AI_TILE, CONTEXT as AI_CONTEXT } from './aiInpaint.js';
     import { createInpaintSessionInWorker } from './aiInpaintWorkerClient.js';
     import {
       downsampleImageDataForMaxPixels,
@@ -103,7 +103,11 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     import { normalizeFileListSort, orderedFileIndices, selectionRangeIndices } from './fileListOrder.js';
     import { createSprocketFrameCache } from './sprocketFrameCache.js';
     import { imagePixelsForBatch, rememberImageDimensions } from './imageDimensions.js';
-    import { createDustWorkerClient, detectDustInWorker, inpaintDustInWorker, refineDustMaskInWorker, disposeDustWorker, dustMaskInfo } from './dustWorkerClient.js';
+    import {
+      createDustWorkerClient, detectDustInWorker, inpaintDustInWorker, strokeDustInWorker, followDustMaskInWorker,
+      pinDustWorker, unpinDustWorker, disposeDustWorker, dustMaskInfo, forgetDustMaskInfo
+    } from './dustWorkerClient.js';
+    import { applyStrokePatch, applyDustDelta, amendDustDelta, copyImageRect, pasteImageRect } from './dustStrokeHistory.js';
     import { loadLocalLensfunAssets } from './lensfunLoader.js';
     import { createOpenCvLoader } from './opencvLoader.js';
     import {
@@ -122,10 +126,8 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     } from './imageFileLoaders.js';
     import { Histogram } from '../silvercore/ui/Histogram.js';
     import { loadFilmPresets } from '../silvercore/engine/filmPresetsLoader.js';
-    import {
-      detectDust, updateDustStrength, inpaintMasked,
-      refineMaskIntelligent, refineMaskDirect, refineMaskRemove
-    } from '../silvercore/engine/DustRemoval.js';
+    import { detectDust, updateDustStrength, inpaintMasked } from '../silvercore/engine/DustRemoval.js';
+    import { applyDustStroke } from '../silvercore/engine/DustBrush.js';
     import { getLoadingOverlay } from '../ui/LoadingOverlay.js';
     import {
       workerApplyAdjustments,
@@ -2447,6 +2449,10 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         particleCount: 0,
         _state: null,        // Internal state for updateDustStrength
         inpaintedImageData: null, // ImageData after inpainting
+        // Bumped whenever the mask or the repaired image changes, including
+        // in-place brush patches; staleness checks compare it, not identity.
+        revision: 0,
+        maskTag: null,       // names the mask's content for the dust worker's copy
         brushSize: 5,
         ai: true,            // MI-GAN by default; loaded lazily when dust is repaired
       },
@@ -2467,6 +2473,12 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     };
     stateReady = true;
     updateGrayPointGuideUI();
+
+    // Dust brush bookkeeping (#259). Tags name mask contents for the dust
+    // worker's copy; the refresh queue holds brush rects whose learned repair
+    // (MI-GAN) has not been redone since TELEA patched them.
+    let dustMaskTagSequence = 0;
+    const dustAiRefresh = { rects: [], timer: null };
 
     let fullResolutionRenderTimer = null;
 
@@ -2820,6 +2832,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       }
       // Dust refs
       refs.dustMask = state.dustRemoval.mask;
+      refs.dustMaskTag = state.dustRemoval.maskTag;
       refs.dustInpaintedImageData = state.dustRemoval.inpaintedImageData;
       refs.dustCleanSource = state.dustRemoval.cleanSource || null;
       refs.dustState = state.dustRemoval._state;
@@ -2910,9 +2923,12 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         state[key] = r[key];
       }
       state.dustRemoval.mask = r.dustMask;
+      state.dustRemoval.maskTag = r.dustMask ? (r.dustMaskTag ?? nextDustMaskTag()) : null;
       state.dustRemoval.inpaintedImageData = r.dustInpaintedImageData;
       state.dustRemoval.cleanSource = r.dustCleanSource;
       state.dustRemoval._state = r.dustState;
+      noteDustReplaced();
+      // After the revision moves: a carried stamp names the restored state.
       if (!reprocess) carryRestoredRepairStamp();
 
       // Sync UI
@@ -2940,6 +2956,8 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         }
       }
       goToStep(s.currentStep);
+      // A reprocessing restore re-detects dust and pins again when that lands.
+      if (!reprocess || !state.dustRemoval.enabled || !state.dustRemoval.showMask) syncDustWorkerPin();
     }
 
     // A cold history entry keeps its scalars only: rotationAngle, mirrored and
@@ -2958,9 +2976,11 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         state.croppedImageData = null;
       }
       state.dustRemoval.mask = null;
+      state.dustRemoval.maskTag = null;
       state.dustRemoval.inpaintedImageData = null;
       state.dustRemoval.cleanSource = null;
       state.dustRemoval._state = null;
+      noteDustReplaced();
       updateFilmModeUI();
       updateSlidersFromState();
       renderCurve();
@@ -3013,7 +3033,9 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     function historyExclusiveBytes(spared = null) {
       const owned = backingBuffers([liveHistoryRoots(), spared?.refs || null]);
       let bytes = 0;
-      for (const buffer of backingBuffers([...undoStack, ...redoStack].map(snapshot => snapshot.refs))) {
+      // A dust-stroke entry (#259) holds its changed bytes and the objects it
+      // patches; live state usually owns the latter.
+      for (const buffer of backingBuffers([...undoStack, ...redoStack].map(entry => entry.dustDelta || entry.refs))) {
         if (!owned.has(buffer)) bytes += buffer.byteLength;
       }
       return bytes;
@@ -3025,10 +3047,21 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       const order = [...undoStack, ...redoStack.slice().reverse()];
       for (const snapshot of order) {
         if (historyExclusiveBytes(hot) <= HISTORY_MEMORY_BUDGET_BYTES) return;
-        if (snapshot === hot || snapshot.refs.cold) continue;
+        if (snapshot === hot || snapshot.dustDelta || snapshot.refs.cold) continue;
         // Only references are dropped; buffers are never detached, so the
         // session cache and live state keep theirs.
         snapshot.refs = { cold: true };
+      }
+      // A dust-stroke entry (#259) patches the objects it holds and cannot go
+      // cold. One that still pins objects live state has let go of is dropped
+      // with everything older on its stack, so undo and redo stay LIFO.
+      for (const stack of [undoStack, redoStack]) {
+        for (let i = 0; i < stack.length; i++) {
+          if (historyExclusiveBytes(hot) <= HISTORY_MEMORY_BUDGET_BYTES) return;
+          if (!stack[i].dustDelta) continue;
+          stack.splice(0, i + 1);
+          i = -1;
+        }
       }
     }
 
@@ -3040,17 +3073,27 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       updateUndoRedoButtons();
     }
 
-    function pushUndo(label) {
-      if (!['rollAnalysis', 'semanticColor'].includes(label)) {
-        manualEditRevision++;
-        const item = getCurrentQueueItem();
-        if (item) {
-          item.userEdited = true;
-          if ([...LEARNED_NUMERIC_KEYS, ...LEARNED_CATEGORY_KEYS].includes(label)) (item.touchedKeys ||= new Set()).add(label);
-        }
+    function noteManualEdit(label) {
+      if (['rollAnalysis', 'semanticColor'].includes(label)) return;
+      manualEditRevision++;
+      const item = getCurrentQueueItem();
+      if (item) {
+        item.userEdited = true;
+        if ([...LEARNED_NUMERIC_KEYS, ...LEARNED_CATEGORY_KEYS].includes(label)) (item.touchedKeys ||= new Set()).add(label);
       }
+    }
+
+    function pushUndo(label) {
+      noteManualEdit(label);
       commitUndoSnapshot(captureSnapshot(label));
       if (['crop', 'rotation', 'mirror', 'autoFrame', 'restoreFullFrame'].includes(label)) state.semanticMap = null;
+    }
+
+    // A dust-brush stroke: the entry holds the bytes it changed (see
+    // dustStrokeHistory.js), with pushUndo's side effects.
+    function pushUndoDelta(label, dustDelta) {
+      noteManualEdit(label);
+      commitUndoSnapshot({ label, dustDelta });
     }
 
     function performUndo() {
@@ -3062,10 +3105,17 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       manualEditRevision++;
       if (getCurrentQueueItem()) getCurrentQueueItem().userEdited = true;
       const snapshot = undoStack.pop();
-      // Carry the action's own label across so the redo toast names the
-      // action rather than the literal word "undo".
-      redoStack.push(captureSnapshot(snapshot.label));
-      const restoring = restoreSnapshot(snapshot);
+      let restoring = null;
+      if (snapshot.dustDelta) {
+        // In place, without a conversion or a new detection (#259).
+        restoreDustDelta(snapshot.dustDelta, 'undo');
+        redoStack.push(snapshot);
+      } else {
+        // Carry the action's own label across so the redo toast names the
+        // action rather than the literal word "undo".
+        redoStack.push(captureSnapshot(snapshot.label));
+        restoring = restoreSnapshot(snapshot);
+      }
       const actionName = getUndoLabel(snapshot.label);
       const tmpl = getLocalizedText('undone', 'Undone: {action}');
       showToast(tmpl.replace('{action}', actionName));
@@ -3082,10 +3132,12 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       manualEditRevision++;
       if (getCurrentQueueItem()) getCurrentQueueItem().userEdited = true;
       const snapshot = redoStack.pop();
-      undoStack.push(captureSnapshot(snapshot.label));
+      undoStack.push(snapshot.dustDelta ? snapshot : captureSnapshot(snapshot.label));
       if (undoStack.length > MAX_UNDO) undoStack.shift();
       pruneHistoryForMemory();
-      const restoring = restoreSnapshot(snapshot);
+      let restoring = null;
+      if (snapshot.dustDelta) restoreDustDelta(snapshot.dustDelta, 'redo');
+      else restoring = restoreSnapshot(snapshot);
       const actionName = getUndoLabel(snapshot.label);
       const tmpl = getLocalizedText('redone', 'Redone: {action}');
       showToast(tmpl.replace('{action}', actionName));
@@ -5698,6 +5750,8 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       state.dustRemoval.cleanSource = source || null;
       state.dustRemoval._state = null;
       state.dustRemoval.mask = null;
+      state.dustRemoval.maskTag = null;
+      noteDustReplaced();
       state.dustRemoval.inpaintedImageData = null;
       state.dustRemoval.particleCount = 0;
     }
@@ -6231,6 +6285,8 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
           dustPassCache = null;
           state.dustRemoval._state = null;
           state.dustRemoval.mask = null;
+          state.dustRemoval.maskTag = null;
+          noteDustReplaced();
           state.dustRemoval.inpaintedImageData = null;
           state.dustRemoval.particleCount = 0;
           state.dustRemoval.cleanSource = null;
@@ -6301,7 +6357,8 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     function currentRepairRecipe() {
       const dustEnabled = Boolean(state.dustRemoval.enabled);
       return { source: getDustSource(), token: coreReprocessToken, dustEnabled,
-        dustMask: dustEnabled ? state.dustRemoval.mask : null, strokes: state.repairStrokes,
+        dustMask: dustEnabled ? state.dustRemoval.mask : null,
+        dustRevision: dustEnabled ? state.dustRemoval.revision : null, strokes: state.repairStrokes,
         lensMapping: state.conversionSourceImageData?.__lensMapping || null,
         revision: aiRepair.revision, dustUsedAi: aiRepairReady() };
     }
@@ -6319,7 +6376,10 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       const restored = state.dustRemoval.inpaintedImageData;
       const recipe = repairStamps.recipeOf(restored);
       if (recipe && sameRepairStrokes(recipe.strokes, state.repairStrokes)) {
-        repairStamps.stamp(restored, { ...recipe, token: coreReprocessToken, strokes: state.repairStrokes });
+        // A stroke patches the repaired image in place and forgets its stamp
+        // (#259), so a result that still has one holds the stamped pixels.
+        repairStamps.stamp(restored, { ...recipe, token: coreReprocessToken, strokes: state.repairStrokes,
+          dustRevision: recipe.dustEnabled ? state.dustRemoval.revision : null });
       }
     }
 
@@ -6328,8 +6388,9 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     // come back (a fresh detection after an AI-brush stroke), the blocks the
     // last pass changed are written onto a copy of the source instead. A mask
     // from the page's OpenCV fallback carries no hash and always runs.
-    async function commitDustPass(source, mask, isCurrent = () => true) {
-      const info = dustMaskInfo(mask);
+    // `info` is the summary of the mask's content; the export passes that of
+    // the live mask while the pass reads a copy of it.
+    async function commitDustPass(source, mask, isCurrent = () => true, info = dustMaskInfo(mask)) {
       const deciding = state.dustRemoval.ai && (aiRepair.status === 'idle' || aiRepair.status === 'loading');
       const key = { source, maskHash: info?.hash, usedAi: aiRepairReady(), revision: aiRepair.revision };
       if (info && !deciding && dustPassMatches(dustPassCache, key)) {
@@ -6343,6 +6404,83 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
           revision: report.revision, blocks: report.usedAi ? report.blocks : info.blocks });
       }
       return { imageData, usedAi: report.usedAi };
+    }
+
+    function nextDustMaskTag() {
+      dustMaskTagSequence += 1;
+      return dustMaskTagSequence;
+    }
+
+    // The mask or the repaired image was replaced outside the brush: pending
+    // strokes, learned-repair refreshes and the tint layer are now stale.
+    function noteDustReplaced() {
+      state.dustRemoval.revision += 1;
+      dustAiRefresh.rects.length = 0;
+    }
+
+    // Brush patches go into the repaired image in place. When there is none
+    // yet (no dust found, no repair strokes), the clean source stands in for
+    // it and must not be patched, so it is cloned once per photo, off the
+    // stroke path: when the pin starts, 32 MB per task. The pixels are the
+    // same, so the display sources stay valid.
+    let dustPrivateClone = null;
+    function needsDustPrivateBuffer() {
+      const dust = state.dustRemoval;
+      return Boolean(dust.cleanSource && (!dust.inpaintedImageData || dust.inpaintedImageData === dust.cleanSource));
+    }
+    function installDustPrivateBuffer(copy) {
+      const dust = state.dustRemoval;
+      if (state.processedImageData === dust.cleanSource) state.processedImageData = copy;
+      dust.inpaintedImageData = copy;
+      return copy;
+    }
+    function ensureDustPrivateBuffer() {
+      if (!needsDustPrivateBuffer()) return state.dustRemoval.inpaintedImageData;
+      const clean = state.dustRemoval.cleanSource;
+      const copy = new ImageData(new Uint8ClampedArray(clean.data), clean.width, clean.height);
+      if (clean.__image16) copy.__image16 = { width: clean.width, height: clean.height, data: new Uint16Array(clean.__image16.data) };
+      return installDustPrivateBuffer(copy);
+    }
+    function prepareDustPrivateBuffer() {
+      if (!needsDustPrivateBuffer()) return Promise.resolve();
+      const clean = state.dustRemoval.cleanSource;
+      if (dustPrivateClone?.source === clean) return dustPrivateClone.promise;
+      const promise = (async () => {
+        const data = new Uint8ClampedArray(clean.data.length);
+        const plane = clean.__image16 ? new Uint16Array(clean.__image16.data.length) : null;
+        for (const [target, from] of [[data, clean.data], [plane, clean.__image16?.data]]) {
+          if (!target) continue;
+          const step = (32 * 1024 * 1024) / target.BYTES_PER_ELEMENT;
+          for (let offset = 0; offset < target.length; offset += step) {
+            target.set(from.subarray(offset, offset + step), offset);
+            await new Promise(resolve => setTimeout(resolve, 0));
+            if (state.dustRemoval.cleanSource !== clean || !needsDustPrivateBuffer()) return;
+          }
+        }
+        const copy = new ImageData(data, clean.width, clean.height);
+        if (plane) copy.__image16 = { width: clean.width, height: clean.height, data: plane };
+        installDustPrivateBuffer(copy);
+      })();
+      dustPrivateClone = { source: clean, promise };
+      promise.finally(() => { if (dustPrivateClone?.promise === promise) dustPrivateClone = null; }).catch(() => {});
+      return promise;
+    }
+
+    // While the dust brush can paint (dust on, Show mask on, a settled full-
+    // resolution frame), the dust worker stays pinned with the clean source,
+    // its 16-bit plane and the mask, so a stroke only sends its points.
+    function syncDustWorkerPin() {
+      const dust = state.dustRemoval;
+      if (!dust.enabled || !dust.showMask || state.currentStep < 3) {
+        unpinDustWorker();
+        return;
+      }
+      const source = dust.cleanSource;
+      if (!source || !dust.mask || dust.processing || state.processedImageDataIsPreview) return;
+      if (source.width * source.height !== dust.mask.length) return;
+      void prepareDustPrivateBuffer();
+      if (dust.maskTag == null) dust.maskTag = nextDustMaskTag();
+      pinDustWorker(source, { mask: dust.mask, tag: dust.maskTag }).catch(() => {});
     }
 
     // The UI value means px at full resolution; when detection runs on a
@@ -6444,14 +6582,20 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         const prevState = state.dustRemoval._state;
         const maxParticleSize = dustMaxParticleSizeFor(source);
         const dustEnabled = Boolean(state.dustRemoval.enabled);
+        // The worker keeps the mask it returns under this tag for the brush.
+        const maskTag = nextDustMaskTag();
         const { mask, particleCount, _state } = !dustEnabled
           ? { mask: new Uint8Array(source.width * source.height), particleCount: 0, _state: null }
-          : await detectDustOffMainThread(source, { strength: state.dustRemoval.strength, maxParticleSize }, prevState, isCurrent);
+          : await detectDustOffMainThread(source, { strength: state.dustRemoval.strength, maxParticleSize, maskTag }, prevState, isCurrent);
         if (!isCurrent() || source !== getDustSource()) return;
         state.dustRemoval.mask = mask;
+        state.dustRemoval.maskTag = maskTag;
         state.dustRemoval.particleCount = particleCount;
         state.dustRemoval._state = _state;
+        noteDustReplaced();
+        const maskRevision = state.dustRemoval.revision;
 
+        let committed = null;
         if (particleCount > 0 || strokes.length) {
           const lensMapping = sourceRef?.__lensMapping || null;
           const modelRevision = aiRepair.revision;
@@ -6460,13 +6604,20 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
             state.loadedBaseImageData || state.originalImageData, lensMapping, isCurrent);
           if (!isCurrent() || source !== getDustSource()) return;
           state.dustRemoval.inpaintedImageData = inpainted;
-          stampRepairResult(inpainted, { source, token, dustEnabled, dustMask: dustEnabled ? mask : null, strokes,
-            lensMapping, revision: modelRevision, dustUsedAi: dust ? dust.usedAi : null });
+          committed = { source, token, dustEnabled, dustMask: dustEnabled ? mask : null, strokes,
+            lensMapping, revision: modelRevision, dustUsedAi: dust ? dust.usedAi : null };
           const tmpl = getLocalizedText('dustStatusDone', 'Detected {count} dust particles');
           updateDustStatusUI(tmpl.replace('{count}', String(particleCount)));
         } else {
           state.dustRemoval.inpaintedImageData = null;
           updateDustStatusUI(getLocalizedText('dustStatusNone', 'No dust detected'));
+        }
+        noteDustReplaced();
+        // Stamped under the revision this commit ends at, unless a brush
+        // stroke moved the mask while the passes ran (#259).
+        if (committed && state.dustRemoval.revision === maskRevision + 1) {
+          stampRepairResult(state.dustRemoval.inpaintedImageData, { ...committed,
+            dustRevision: committed.dustEnabled ? state.dustRemoval.revision : null });
         }
         cancelFullUpdate();
         applyDustResultToState();
@@ -6475,10 +6626,15 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         if (!isCurrent()) return;
         console.error('Dust detection failed:', err);
         state.dustRemoval.mask = null;
+        state.dustRemoval.maskTag = null;
         state.dustRemoval.inpaintedImageData = null;
+        noteDustReplaced();
         updateDustStatusUI('Error: ' + (err.message || err));
       } finally {
-        if (isCurrentLoad(activation)) state.dustRemoval.processing = false;
+        if (isCurrentLoad(activation)) {
+          state.dustRemoval.processing = false;
+          if (isCurrent()) syncDustWorkerPin();
+        }
       }
     }
 
@@ -6501,10 +6657,13 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     function clearDustState() {
       dustDetectionRevision += 1;
       dustPassCache = null;
+      unpinDustWorker();
       disposeDustWorker();
       if (dustDetectionTimer) clearTimeout(dustDetectionTimer);
       dustDetectionTimer = null;
       state.dustRemoval.mask = null;
+      state.dustRemoval.maskTag = null;
+      noteDustReplaced();
       state.dustRemoval.inpaintedImageData = null;
       state.dustRemoval.particleCount = 0;
       state.dustRemoval._state = null;
@@ -6516,7 +6675,9 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     // or the canvas size changes, so a brush drag composites a ready-made layer
     // instead of running a full-canvas getImageData, per-pixel JS loop and
     // putImageData on every pointer move.
-    const dustMaskOverlayCache = { canvas: null, mask: null, width: 0, height: 0 };
+    // The brush patches the mask in place, so the layer is keyed by the dust
+    // revision as well as the mask object (#259).
+    const dustMaskOverlayCache = { canvas: null, mask: null, revision: -1, width: 0, height: 0 };
 
     function getDustMaskOverlayCanvas() {
       const mask = state.dustRemoval.mask;
@@ -6528,6 +6689,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       if (
         dustMaskOverlayCache.canvas
         && dustMaskOverlayCache.mask === mask
+        && dustMaskOverlayCache.revision === state.dustRemoval.revision
         && dustMaskOverlayCache.width === w
         && dustMaskOverlayCache.height === h
       ) {
@@ -6564,9 +6726,55 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
 
       dustMaskOverlayCache.canvas = layer;
       dustMaskOverlayCache.mask = mask;
+      dustMaskOverlayCache.revision = state.dustRemoval.revision;
       dustMaskOverlayCache.width = w;
       dustMaskOverlayCache.height = h;
       return layer;
+    }
+
+    // After a brush patch at `revision`, redraws only the tint cells whose
+    // nearest mask sample lies in `rect` (image pixels), with the same rule
+    // as the full layer. A layer that was not current is rebuilt on demand.
+    function updateDustTintRect(rect, revision) {
+      const cache = dustMaskOverlayCache;
+      const mask = state.dustRemoval.mask;
+      const image = state.processedImageData;
+      if (!cache.canvas || !mask || !image || cache.mask !== mask
+        || cache.revision !== revision - 1 || cache.width !== canvas.width || cache.height !== canvas.height) return;
+      const { width, height } = image;
+      const w = cache.width, h = cache.height;
+      const scaleX = width / w, scaleY = height / h;
+      const span = (start, end, scale, count, limit) => {
+        let first = -1, last = -1;
+        for (let i = Math.max(0, Math.floor((start - 1) / scale)); i < count; i++) {
+          const m = Math.min(limit - 1, Math.round(i * scale));
+          if (m >= end) break;
+          if (m < start) continue;
+          if (first < 0) first = i;
+          last = i;
+        }
+        return first < 0 ? null : [first, last + 1];
+      };
+      const columns = span(rect.x, rect.x + rect.width, scaleX, w, width);
+      const rows = span(rect.y, rect.y + rect.height, scaleY, h, height);
+      if (columns && rows) {
+        const layerCtx = cache.canvas.getContext('2d', { willReadFrequently: false });
+        if (!layerCtx) return;
+        const tw = columns[1] - columns[0], th = rows[1] - rows[0];
+        const tint = layerCtx.createImageData(tw, th);
+        for (let cy = rows[0]; cy < rows[1]; cy++) {
+          const rowOffset = Math.min(height - 1, Math.round(cy * scaleY)) * width;
+          for (let cx = columns[0]; cx < columns[1]; cx++) {
+            if (mask[rowOffset + Math.min(width - 1, Math.round(cx * scaleX))] > 0) {
+              const idx = ((cy - rows[0]) * tw + (cx - columns[0])) * 4;
+              tint.data[idx] = 255;
+              tint.data[idx + 3] = 128;
+            }
+          }
+        }
+        layerCtx.putImageData(tint, columns[0], rows[0]);
+      }
+      cache.revision = revision;
     }
 
     function renderDustMaskOverlay() {
@@ -6607,6 +6815,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         updateCanvasVisibility();
         void rerenderWithCoreControls({ full: true });
       }
+      syncDustWorkerPin();
     });
 
     let dustStrengthPreSnapshot = null;
@@ -6689,6 +6898,8 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       } else {
         updatePreview();           // restore normal render path (may switch back to WebGL)
       }
+      // The brush paints only while the mask is shown: keep the worker ready.
+      syncDustWorkerPin();
     });
 
     document.getElementById('dustBrushSize')?.addEventListener('input', function () {
@@ -6730,47 +6941,6 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         x: Math.round(canvasX * scaleX),
         y: Math.round(canvasY * scaleY)
       };
-    }
-
-    function createBrushMask(points, brushRadius, width, height) {
-      const mask = new Uint8Array(width * height);
-      const r = brushRadius;
-
-      for (const pt of points) {
-        const cx = pt.x, cy = pt.y;
-        for (let dy = -r; dy <= r; dy++) {
-          for (let dx = -r; dx <= r; dx++) {
-            if (dx * dx + dy * dy > r * r) continue;
-            const nx = cx + dx, ny = cy + dy;
-            if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-              mask[ny * width + nx] = 255;
-            }
-          }
-        }
-      }
-
-      // Also fill lines between consecutive points
-      for (let i = 1; i < points.length; i++) {
-        const p0 = points[i - 1], p1 = points[i];
-        const dist = Math.sqrt((p1.x - p0.x) ** 2 + (p1.y - p0.y) ** 2);
-        const steps = Math.max(1, Math.ceil(dist));
-        for (let s = 0; s <= steps; s++) {
-          const t = s / steps;
-          const ix = Math.round(p0.x + (p1.x - p0.x) * t);
-          const iy = Math.round(p0.y + (p1.y - p0.y) * t);
-          for (let dy = -r; dy <= r; dy++) {
-            for (let dx = -r; dx <= r; dx++) {
-              if (dx * dx + dy * dy > r * r) continue;
-              const nx = ix + dx, ny = iy + dy;
-              if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-                mask[ny * width + nx] = 255;
-              }
-            }
-          }
-        }
-      }
-
-      return mask;
     }
 
     let dustBrushPoints = [];
@@ -6838,6 +7008,144 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     }
 
     let dustBrushTurn = Promise.resolve();
+
+    // A stroke goes to the dust worker as its points; the worker refines its
+    // copy of the mask around them and returns a patch sized to the rect it
+    // touched (#259). A lost worker is re-seeded by the client; without one,
+    // the same regional code runs here.
+    async function strokeDustOffMainThread(source, stroke, isCurrent) {
+      let failure;
+      try { return await strokeDustInWorker(source, stroke); } catch (error) { failure = error; }
+      assertRepairCurrent(isCurrent);
+      if (failure?.name === 'AbortError') throw failure;
+      if (failure?.staleMask) {
+        // The worker holds another mask (a race with undo, or a new worker).
+        try { return await strokeDustInWorker(source, { ...stroke, forceMask: true }); } catch (error) { failure = error; }
+        assertRepairCurrent(isCurrent);
+        if (failure?.name === 'AbortError') throw failure;
+      }
+      if (failure?.dustWorkerReported && !failure.staleMask) throw failure;
+      console.warn('Dust worker unavailable; brushing on the page:', failure);
+      if (!(await ensureOpenCvReady())) throw new Error('OpenCV is not available');
+      assertRepairCurrent(isCurrent);
+      return applyDustStroke({ source, mask: state.dustRemoval.mask.slice(), particleCount: null }, stroke);
+    }
+
+    // Uploads one rect of the WebGL source texture. The texture is uploaded
+    // with UNPACK_FLIP_Y_WEBGL, so rows count from the bottom.
+    function webglUploadSourceRect(imageData, rect) {
+      if (!webglState.gl || webglState.sourceDirty) return;
+      if (webglState.sourceSize.w !== imageData.width || webglState.sourceSize.h !== imageData.height) {
+        webglState.sourceDirty = true;
+        return;
+      }
+      const gl = webglState.gl;
+      const rows = new Uint8Array(rect.width * rect.height * 4);
+      for (let y = 0; y < rect.height; y++) {
+        const start = ((rect.y + y) * imageData.width + rect.x) * 4;
+        rows.set(imageData.data.subarray(start, start + rect.width * 4), y * rect.width * 4);
+      }
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, webglState.sourceTex);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, rect.x, imageData.height - rect.y - rect.height,
+        rect.width, rect.height, gl.RGBA, gl.UNSIGNED_BYTE, rows);
+    }
+
+    let dustHistogramTimer = null;
+    function scheduleDustHistogramRefresh() {
+      if (dustHistogramTimer) clearTimeout(dustHistogramTimer);
+      dustHistogramTimer = setTimeout(() => {
+        dustHistogramTimer = null;
+        const image = state.processedImageData;
+        if (!image) return;
+        state.histogramSourceImageData = buildHistogramSourceImageData(state.previewSourceImageData || image);
+        if (isWebGLActive()) renderHistogramForWebGL(true);
+      }, 250);
+    }
+
+    // After in-place patches of the repaired image inside `rects`, updates
+    // what the display derives from it (preview source, WebGL texture, tint,
+    // histogram on idle) for those rects only, then repaints. A repaired
+    // image that is not the one on screen is shown the ordinary way.
+    function refreshDustDisplay(target, rects, maskRect, revision) {
+      if (state.processedImageData !== target || state.processedImageDataIsPreview) {
+        applyProcessedImageToState(target);
+        updatePreview();
+        return;
+      }
+      // A pending full render means the preview shows newer settings than
+      // the repaired image; it is rebuilt from the new frame when that lands.
+      const preview = state.fullResolutionPending ? null : state.previewSourceImageData;
+      if (preview) {
+        for (const rect of rects) {
+          const dirty = updateDisplayPreviewRect(target, preview, rect);
+          if (dirty && state.webglSourceImageData === preview) webglUploadSourceRect(preview, dirty);
+        }
+      }
+      state.displayImageData = null;
+      if (maskRect) updateDustTintRect(maskRect, revision);
+      scheduleDustHistogramRefresh();
+      updatePreview();
+    }
+
+    function showDustParticleCount() {
+      updateDustStatusUI(getLocalizedText('dustStatusDone', 'Detected {count} dust particles')
+        .replace('{count}', String(state.dustRemoval.particleCount)));
+    }
+
+    function commitDustStroke(patch, stroke) {
+      const dust = state.dustRemoval;
+      const target = dust.inpaintedImageData;
+      // Patched in place: neither the committed repair's stamp (#246) nor
+      // the mask's content summary describes them any more.
+      repairStamps.forget(target);
+      forgetDustMaskInfo(dust.mask);
+      const delta = applyStrokePatch(target, dust.mask, patch, {
+        cleanSource: dust.cleanSource, countBefore: dust.particleCount,
+        tagBefore: stroke.baseTag, tagAfter: stroke.tag,
+        aiCleanBefore: !dustAiRefresh.rects.length,
+      });
+      dust.particleCount = patch.particleCount;
+      dust.maskTag = stroke.tag;
+      dust.revision += 1;
+      pushUndoDelta('dustBrushStroke', delta);
+      showDustParticleCount();
+      refreshDustDisplay(target, [patch.rect], patch.maskRect, dust.revision);
+      // TELEA now stands in over any MI-GAN pixels inside the rect.
+      if (aiRepairReady() || state.repairStrokes.length) queueDustAiRefresh([patch.rect]);
+    }
+
+    // Undo/redo of a stroke: the bytes go back into the objects the stroke
+    // patched, which become current again. No conversion, no new detection,
+    // and earlier brush refinements stay.
+    function restoreDustDelta(delta, direction) {
+      dustDetectionRevision += 1;
+      if (dustDetectionTimer) { clearTimeout(dustDetectionTimer); dustDetectionTimer = null; }
+      const dust = state.dustRemoval;
+      repairStamps.forget(delta.target);
+      forgetDustMaskInfo(delta.mask);
+      const restored = applyDustDelta(delta, direction);
+      const displayed = state.processedImageData === restored.target && dust.mask === restored.mask;
+      dust.cleanSource = restored.cleanSource;
+      dust.inpaintedImageData = restored.target;
+      dust.mask = restored.mask;
+      dust.particleCount = restored.particleCount;
+      dust.maskTag = restored.maskTag;
+      dust.revision += 1;
+      if (displayed) refreshDustDisplay(restored.target, restored.rects, delta.maskRect, dust.revision);
+      else {
+        applyProcessedImageToState(restored.target);
+        updatePreview();
+      }
+      showDustParticleCount();
+      followDustMaskInWorker(restored.cleanSource, restored.worker).catch(() => {});
+      if (restored.aiClean) dustAiRefresh.rects.length = 0;
+      else if (aiRepairReady() || state.repairStrokes.length) queueDustAiRefresh(restored.rects);
+      syncDustWorkerPin();
+    }
+
     async function onDustBrushEnd(e) {
       if (!dustDrawing) return;
       dustDrawing = false;
@@ -6869,51 +7177,19 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       pendingBrushRepairs += 1;
       try {
         await previousTurn;
+        // Normally ready since the pin started; a stroke never clones itself.
+        await prepareDustPrivateBuffer();
         if (!isCurrent() || !state.dustRemoval.mask) return;
-        pushUndo('dustBrushStroke');
-        const { width, height } = source;
-        const brushMask = createBrushMask(points, brushSize, width, height);
-        let result;
-        try { result = await refineDustMaskInWorker(source, state.dustRemoval.mask, brushMask, mode); }
-        catch (error) {
-          assertRepairCurrent(isCurrent);
-          if (error?.name === 'AbortError') throw error;
-          if (!(await ensureOpenCvReady())) throw new Error('OpenCV is not available');
-          assertRepairCurrent(isCurrent);
-          const mask = mode === 'intelligent' ? refineMaskIntelligent(source, state.dustRemoval.mask, brushMask)
-            : mode === 'direct' ? refineMaskDirect(state.dustRemoval.mask, brushMask)
-              : refineMaskRemove(state.dustRemoval.mask, brushMask);
-          result = { mask, imageData: inpaintMasked(source, mask, 3), particleCount: state.dustRemoval.particleCount };
-          let maskMat, contours, hierarchy;
-          try {
-            const c = window.cv;
-            maskMat = new c.Mat(height, width, c.CV_8UC1); maskMat.data.set(mask);
-            contours = new c.MatVector(); hierarchy = new c.Mat();
-            c.findContours(maskMat, contours, hierarchy, c.RETR_EXTERNAL, c.CHAIN_APPROX_SIMPLE);
-            result.particleCount = contours.size();
-          } finally {
-            maskMat?.delete(); contours?.delete(); hierarchy?.delete();
-          }
-        }
-        if (!isCurrent()) return;
-        const newMask = result.mask;
-        state.dustRemoval.mask = newMask;
-        state.dustRemoval.inpaintedImageData = result.imageData;
-        state.dustRemoval.particleCount = result.particleCount;
-
-        const tmpl = getLocalizedText('dustStatusDone', 'Detected {count} dust particles');
-        updateDustStatusUI(tmpl.replace('{count}', String(state.dustRemoval.particleCount)));
-
-        applyDustResultToState();
-        updatePreview();
-        if (aiRepairReady() || state.repairStrokes.length) void repairBrushWithAi(source, newMask, coreReprocessToken).catch((error) => {
-          if (error?.name === 'AbortError') return;
-          console.warn('Brush repair failed:', error);
-          showToast(error?.message || String(error), 'error');
-        });
-        if (state.dustRemoval.showMask) {
-          requestAnimationFrame(() => renderDustMaskOverlay());
-        }
+        const dust = state.dustRemoval;
+        ensureDustPrivateBuffer();
+        if (dust.maskTag == null) dust.maskTag = nextDustMaskTag();
+        const dustRevision = dust.revision;
+        const stroke = { baseTag: dust.maskTag, tag: nextDustMaskTag(), mask: dust.mask,
+          points, brushRadius: brushSize, mode, radius: 3 };
+        const isStrokeCurrent = () => isCurrent() && dust.revision === dustRevision;
+        const patch = await strokeDustOffMainThread(source, stroke, isStrokeCurrent);
+        if (!isStrokeCurrent() || !patch) return;
+        commitDustStroke(patch, stroke);
       } catch (err) {
         if (!isCurrent() || err?.name === 'AbortError') return;
         console.error('Dust brush failed:', err);
@@ -7363,7 +7639,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       const settled = state.currentStep >= 3 && state.processedImageData && !processNegativeInFlight
         && !state.geometryPending
         && !coreReprocessBusy() && !coreReprocessTimer && !state.dustRemoval.processing
-        && !dustDetectionTimer && !pendingBrushRepairs && !dustDrawing;
+        && !dustDetectionTimer && !pendingBrushRepairs && !dustDrawing && !dustAiRefresh.rects.length;
       const entry = {
         file: item.file, base: state.loadedBaseImageData, rawMetadata: state.rawMetadata,
         key: photoSettingsKey(item), snapshot: settled ? captureSnapshot('photoSession') : null,
@@ -7384,8 +7660,11 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         // scalars and the base. Opening the photo again rebuilds the planes
         // from the base in the pool behind the adjusted preview kept below.
         const cold = snapshot => ({ ...snapshot, refs: { cold: true } });
+        // Dust-stroke entries (#259) only patch the planes they hold; a cold
+        // history rebuilds and re-detects instead.
+        const coldHistory = entries => entries.filter(entry => !entry.dustDelta).map(cold);
         stored = photoSessions.put(item, {
-          ...entry, snapshot: cold(entry.snapshot), undo: entry.undo.map(cold), redo: entry.redo.map(cold),
+          ...entry, snapshot: cold(entry.snapshot), undo: coldHistory(entry.undo), redo: coldHistory(entry.redo),
           previewOnly: false, fullResolutionPending: false
         });
       }
@@ -7425,6 +7704,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         state[key] = null;
       }
       state.dustRemoval.mask = null;
+      state.dustRemoval.maskTag = null;
       state.dustRemoval.inpaintedImageData = null;
       state.dustRemoval.cleanSource = null;
       state.dustRemoval._state = null;
@@ -7459,6 +7739,10 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       cancelPendingTimers();
       // The outgoing photo's tile update cannot write into the incoming one.
       cancelStudioThumbnailUpdate();
+      // The pin belongs to the outgoing photo; the next one pins on its own.
+      unpinDustWorker();
+      if (dustAiRefresh.timer) { clearTimeout(dustAiRefresh.timer); dustAiRefresh.timer = null; }
+      dustAiRefresh.rects.length = 0;
       cancelScheduledFullResolutionRender();
       coreReprocessGeneration += 1;
       coreReprocessToken += 1;
@@ -9174,7 +9458,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         width: planes?.width || 0, height: planes?.height || 0,
         hash8: !isGeometryFrame(planes) && planes?.data ? hash(planes.data) : null,
         hash16: !isGeometryFrame(planes) && planes?.__image16?.data ? hash(planes.__image16.data) : null,
-        frameSized, uniqueBytes, undoDepth: undoStack.length, coldEntries: undoStack.filter(entry => entry.refs.cold).length
+        frameSized, uniqueBytes, undoDepth: undoStack.length, coldEntries: undoStack.filter(entry => entry.refs?.cold).length
       };
       if (chain && base) {
         const expected = applyGeometryChainToImageData(base, {
@@ -11602,26 +11886,35 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       } else if (needsRepair) {
         const source = getDustSource();
         const dustEnabled = Boolean(state.dustRemoval.enabled);
-        const mask = state.dustRemoval.mask;
+        // Brush strokes patch the mask in place, so the pass reads a copy
+        // and the revision tells whether the mask moved meanwhile (#259).
+        const liveMask = state.dustRemoval.mask;
+        const mask = liveMask ? liveMask.slice() : null;
+        const dustRevision = state.dustRemoval.revision;
         const strokes = state.repairStrokes;
         const token = coreReprocessToken;
         const lensMapping = state.conversionSourceImageData?.__lensMapping || null;
         const modelRevision = aiRepair.revision;
-        const dust = dustEnabled && mask ? await commitDustPass(source, mask) : null;
+        const dust = dustEnabled && mask ? await commitDustPass(source, mask, () => true, dustMaskInfo(liveMask)) : null;
         const repaired = await inpaintManualBrush(dust ? dust.imageData : source);
         // Manual-only background repair creates a fresh, unused zero dust
         // mask. Its identity does not change the export recipe. Actual dust
         // mode/mask changes and photo/stroke changes still invalidate it.
         if (token !== coreReprocessToken || source !== getDustSource() || strokes !== state.repairStrokes
           || dustEnabled !== Boolean(state.dustRemoval.enabled)
-          || (dustEnabled && mask !== state.dustRemoval.mask)) {
+          || (dustEnabled && dustRevision !== state.dustRemoval.revision)) {
           throw new Error('Photo changed during AI repair. Please export again.');
         }
+        // A from-scratch result: nothing left for the brush refresh to redo.
+        // It replaces the repaired image outside history; stroke entries keep
+        // patching the image they recorded.
         state.dustRemoval.inpaintedImageData = repaired;
         if (repaired !== source) {
-          stampRepairResult(repaired, { source, token, dustEnabled, dustMask: dustEnabled ? mask : null, strokes,
+          stampRepairResult(repaired, { source, token, dustEnabled, dustMask: dustEnabled ? liveMask : null,
+            dustRevision: dustEnabled ? dustRevision : null, strokes,
             lensMapping, revision: modelRevision, dustUsedAi: dust ? dust.usedAi : null });
         }
+        dustAiRefresh.rects.length = 0;
         applyDustResultToState();
       }
       // ensureFullRender exists to leave a full-resolution CPU buffer in
@@ -15900,6 +16193,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         updateDustControlsVisibility();
         updateCanvasVisibility();
         updatePreview();
+        syncDustWorkerPin();
         await ensureFullResolutionReadyForExport();
         if (aiRepair.status !== 'ready') await loadAiRepairModel(...aiRepairLoadArgs());
       } else if (aiBrushDrawing) finishAiBrush({ pointerId: aiBrushDrawing.pointerId }, true);
@@ -16045,31 +16339,160 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       }
     }
 
-    async function repairBrushWithAi(source, mask, token) {
-      pendingBrushRepairs += 1;
-      try {
+    // ── Learned repair after a dust-brush stroke (#259) ──────────────────────
+    // A stroke's TELEA patch also overwrote MI-GAN pixels of other dust and of
+    // repair strokes inside its rect. Once it is visible, only the tiles that
+    // cover such rects are inferred again, over a window of the repaired image
+    // itself, and only the rects are written back. The result lands if the
+    // dust state did not change meanwhile and then amends the stroke's history
+    // entry; otherwise its rects stay queued for the next refresh, so no TELEA
+    // stand-in is left behind. Preview only: export runs the from-scratch pass.
+    function queueDustAiRefresh(rects) {
+      for (const rect of rects) dustAiRefresh.rects.push({ ...rect });
+      if (dustAiRefresh.timer) clearTimeout(dustAiRefresh.timer);
+      // Coalesce quick strokes, as the whole-mask pass did.
+      dustAiRefresh.timer = setTimeout(() => {
+        dustAiRefresh.timer = null;
+        void runDustAiRefresh().catch((error) => {
+          if (error?.name === 'AbortError') return;
+          console.warn('Brush repair failed:', error);
+          showToast(error?.message || String(error), 'error');
+        });
+      }, 200);
+    }
+
+    // Rects whose context windows overlap are refreshed together.
+    function mergeDustRefreshRects(rects) {
+      const merged = rects.map(rect => ({ ...rect }));
+      const near = (a, b) => a.x - AI_CONTEXT < b.x + b.width && b.x - AI_CONTEXT < a.x + a.width
+        && a.y - AI_CONTEXT < b.y + b.height && b.y - AI_CONTEXT < a.y + a.height;
+      for (let changed = true; changed;) {
+        changed = false;
+        for (let i = 0; i < merged.length && !changed; i++) {
+          for (let j = i + 1; j < merged.length; j++) {
+            const a = merged[i], b = merged[j];
+            if (!near(a, b)) continue;
+            const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y);
+            merged[i] = { x, y, width: Math.max(a.x + a.width, b.x + b.width) - x, height: Math.max(a.y + a.height, b.y + b.height) - y };
+            merged.splice(j, 1);
+            changed = true;
+            break;
+          }
+        }
+      }
+      return merged;
+    }
+
+    // The window the model sees: the rect with its context, at least one tile.
+    function dustAiWindow(rect, width, height) {
+      const axis = (start, length, limit) => {
+        const size = Math.min(limit, Math.max(AI_TILE, length + 2 * AI_CONTEXT));
+        const from = Math.max(0, Math.min(limit - size, Math.round(start + length / 2 - size / 2)));
+        return [from, size];
+      };
+      const [x, w] = axis(rect.x, rect.width, width);
+      const [y, h] = axis(rect.y, rect.height, height);
+      return { x, y, width: w, height: h };
+    }
+
+    function cropDustImage(image, rect) {
+      const { rgba8, rgba16 } = copyImageRect(image, rect);
+      const crop = new ImageData(rgba8, rect.width, rect.height);
+      if (rgba16) crop.__image16 = { width: rect.width, height: rect.height, data: rgba16 };
+      return crop;
+    }
+
+    // `mask` restricted to `inside` (frame pixels), cut to `win`; null when empty.
+    function cropDustMask(mask, width, win, inside) {
+      const out = new Uint8Array(win.width * win.height);
+      let any = false;
+      const x0 = Math.max(win.x, inside.x), x1 = Math.min(win.x + win.width, inside.x + inside.width);
+      for (let y = Math.max(win.y, inside.y); y < Math.min(win.y + win.height, inside.y + inside.height); y++) {
+        for (let x = x0; x < x1; x++) {
+          if (!mask[y * width + x]) continue;
+          out[(y - win.y) * win.width + (x - win.x)] = 255;
+          any = true;
+        }
+      }
+      return any ? out : null;
+    }
+
+    let dustRefreshRepairMask = { strokes: null, source: null, mask: null };
+    function repairStrokeMaskFor(target) {
       const strokes = state.repairStrokes;
-      const isCurrent = () => state.dustRemoval.enabled && (state.dustRemoval.ai || strokes.length)
-        && state.repairStrokes === strokes
-        && getDustSource() === source && state.dustRemoval.mask === mask
-        && coreReprocessToken === token;
-      // Coalesce quick brush strokes and discard work after switching photos or undo.
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      if (!isCurrent()) return;
-      const modelRevision = aiRepair.revision;
-      const dust = await commitDustPass(source, mask, isCurrent);
-      const lensMapping = state.conversionSourceImageData?.__lensMapping || null;
-      const result = await inpaintManualBrush(dust.imageData, state,
-        state.loadedBaseImageData || state.originalImageData, lensMapping, isCurrent);
-      if (!isCurrent()) return;
-      state.dustRemoval.inpaintedImageData = result;
-      stampRepairResult(result, { source, token, dustEnabled: true, dustMask: mask, strokes, lensMapping,
-        revision: modelRevision, dustUsedAi: dust.usedAi });
-      applyDustResultToState();
-      updatePreview();
-      updateDustStatusUI(getLocalizedText('dustStatusDone', 'Detected {count} dust particles')
-        .replace('{count}', String(state.dustRemoval.particleCount)));
-      } finally { pendingBrushRepairs -= 1; }
+      const source = state.dustRemoval.cleanSource;
+      if (dustRefreshRepairMask.strokes !== strokes || dustRefreshRepairMask.source !== source) {
+        const base = state.loadedBaseImageData || state.originalImageData;
+        const geometry = { ...localExposureGeometryFor(state, base), width: target.width, height: target.height };
+        dustRefreshRepairMask = { strokes, source,
+          mask: buildRepairMask(strokes, geometry, state.conversionSourceImageData?.__lensMapping).mask };
+      }
+      return dustRefreshRepairMask.mask;
+    }
+
+    async function runDustAiRefresh() {
+      const dust = state.dustRemoval;
+      const target = dust.inpaintedImageData;
+      const queued = dustAiRefresh.rects.slice();
+      if (!queued.length || !target || !dust.cleanSource) return;
+      const strokes = state.repairStrokes;
+      const useDust = Boolean(aiRepairReady() && dust.enabled && dust.mask);
+      if (!useDust && !strokes.length) {
+        // TELEA is the repair when no model is on.
+        dustAiRefresh.rects.length = 0;
+        return;
+      }
+      if (strokes.length && aiRepair.status !== 'ready') return;
+      const revision = dust.revision, token = coreReprocessToken, mask = dust.mask;
+      const isCurrent = () => dust.revision === revision && dust.inpaintedImageData === target
+        && coreReprocessToken === token && state.repairStrokes === strokes;
+      pendingBrushRepairs += 1;
+      const started = performance.now();
+      try {
+        const repair = strokes.length ? repairStrokeMaskFor(target) : null;
+        const results = [];
+        let tiles = 0;
+        for (const rect of mergeDustRefreshRects(queued)) {
+          const win = dustAiWindow(rect, target.width, target.height);
+          let image = cropDustImage(target, win);
+          for (const layer of [useDust ? mask : null, repair]) {
+            const layerMask = layer && cropDustMask(layer, target.width, win, rect);
+            if (!layerMask) continue;
+            const pass = await inpaintWithModel(image, layerMask, aiRepair.run, { shouldContinue: isCurrent });
+            image = pass.imageData;
+            tiles += pass.tiles;
+          }
+          results.push({ rect, win, image });
+        }
+        if (!isCurrent()) return;
+        const top = undoStack.at(-1)?.dustDelta;
+        const entry = top?.target === target ? top : null;
+        for (const { rect, win, image } of results) {
+          const local = { x: rect.x - win.x, y: rect.y - win.y, width: rect.width, height: rect.height };
+          const { rgba8, rgba16 } = copyImageRect(image, local);
+          const write = () => pasteImageRect(target, rect, rgba8, rgba16);
+          if (entry) amendDustDelta(entry, rect, write);
+          else write();
+        }
+        dustAiRefresh.rects = dustAiRefresh.rects.filter(rect => !queued.some(done => done.x === rect.x
+          && done.y === rect.y && done.width === rect.width && done.height === rect.height));
+        if (entry && !dustAiRefresh.rects.length) entry.aiCleanAfter = true;
+        aiRepair.tiles = tiles;
+        aiRepair.ms = Math.round(performance.now() - started);
+        updateAiRepairUI();
+        refreshDustDisplay(target, results.map(result => result.rect), null, dust.revision);
+      } catch (error) {
+        if (error?.name === 'AbortError' || !isCurrent()) return;
+        // A WebGPU session that fails mid-run is rebuilt on WASM once.
+        if (aiRepair.provider === 'webgpu' && aiRepair.sourceRef) {
+          await loadAiRepairModel(aiRepair.sourceRef, { prefer: 'wasm', refresh: false });
+          if (aiRepair.status === 'ready' && isCurrent()) queueDustAiRefresh([]);
+          return;
+        }
+        throw error;
+      } finally {
+        pendingBrushRepairs -= 1;
+      }
     }
 
     document.getElementById('dustAiEnabled')?.addEventListener('change', (event) => {

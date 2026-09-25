@@ -129,6 +129,8 @@ export function createHarness(base, { historyBudget = 768 * 1024 * 1024, session
     // Integration-branch state the photo-switch path reads (#233, #234): no
     // preview-worker plane held, and one file-list refresh per switch.
     corePreviewRetained: null, corePreviewCommit: null, deferFileListRefresh: () => () => {},
+    // No learned-repair refresh of dust-brush rects is pending (#259).
+    dustAiRefresh: { rects: [], timer: null },
     geometryMemo: new WeakMap(), geometryBaseIds: new WeakMap(), nextGeometryBaseId: 1,
     pendingImportRotation: null, geometryToken: 0, geometryJob: null, geometryBusyOwner: null,
     interimGeometry: null, loadGeneration: 1, DEBUG_UI: false, manualEditRevision: 0,

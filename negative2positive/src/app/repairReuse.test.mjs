@@ -8,22 +8,26 @@ globalThis.ImageData ||= class { constructor(data, width, height) { Object.assig
 
 // Recipes compare identities; an empty dust mask accepts either inpainter.
 {
-  const recipe = { source: {}, token: 1, dustEnabled: true, dustMask: new Uint8Array(1), strokes: [],
+  const recipe = { source: {}, token: 1, dustEnabled: true, dustMask: new Uint8Array(1), dustRevision: 6, strokes: [],
     lensMapping: null, revision: 3, dustUsedAi: true };
   assert.ok(repairRecipesMatch(recipe, { ...recipe }));
   for (const [key, value] of [['source', {}], ['token', 2], ['strokes', []], ['lensMapping', {}],
-    ['revision', 4], ['dustEnabled', false], ['dustMask', new Uint8Array(1)], ['dustUsedAi', false]]) {
+    ['revision', 4], ['dustEnabled', false], ['dustMask', new Uint8Array(1)], ['dustRevision', 7], ['dustUsedAi', false]]) {
     assert.equal(repairRecipesMatch(recipe, { ...recipe, [key]: value }), false, key);
   }
   assert.ok(repairRecipesMatch({ ...recipe, dustUsedAi: null }, { ...recipe, dustUsedAi: false }));
-  const off = { ...recipe, dustEnabled: false, dustMask: null };
-  assert.ok(repairRecipesMatch(off, { ...off, dustMask: new Uint8Array(1), dustUsedAi: false }), 'dust off ignores the unused mask');
+  const off = { ...recipe, dustEnabled: false, dustMask: null, dustRevision: null };
+  assert.ok(repairRecipesMatch(off, { ...off, dustMask: new Uint8Array(1), dustRevision: 9, dustUsedAi: false }), 'dust off ignores the unused mask');
   const stamps = createRepairStamps();
   const result = {};
   assert.equal(stamps.matches(result, recipe), false, 'an unstamped result never matches');
   stamps.stamp(result, recipe);
   assert.equal(stamps.recipeOf(result), recipe);
   assert.ok(stamps.matches(result, { ...recipe }));
+  // A result patched in place by a dust-brush stroke (#259) loses its stamp.
+  stamps.forget(result);
+  assert.equal(stamps.recipeOf(result), null);
+  assert.equal(stamps.matches(result, { ...recipe }), false);
 }
 
 // Stroke lists compare by what they select.

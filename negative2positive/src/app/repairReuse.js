@@ -11,9 +11,10 @@ export const DUST_PASS_CACHE_BYTES = 128 * 1024 * 1024;
 const weakRef = (value) => (typeof WeakRef === 'function' ? new WeakRef(value) : { deref: () => value });
 
 /**
- * A repair recipe: { source, token, dustEnabled, dustMask, strokes,
- * lensMapping, revision, dustUsedAi }. Fields hold the identities of objects
- * the state already retains, never copies. `dustUsedAi` is which inpainter
+ * A repair recipe: { source, token, dustEnabled, dustMask, dustRevision,
+ * strokes, lensMapping, revision, dustUsedAi }. Fields hold the identities of
+ * objects the state already retains, never copies; `dustRevision` is the dust
+ * state's revision, since brush strokes patch the mask in place (#259). `dustUsedAi` is which inpainter
  * repaired the dust (true = MI-GAN), or null when the dust mask was empty and
  * either would have left the source unchanged. The stroke pass always uses
  * MI-GAN; `revision` is the model revision both passes ran with.
@@ -24,7 +25,7 @@ export function repairRecipesMatch(stamped, current) {
     || stamped.strokes !== current.strokes || stamped.lensMapping !== current.lensMapping
     || stamped.revision !== current.revision || stamped.dustEnabled !== current.dustEnabled) return false;
   if (!current.dustEnabled) return true;
-  return stamped.dustMask === current.dustMask
+  return stamped.dustMask === current.dustMask && stamped.dustRevision === current.dustRevision
     && (stamped.dustUsedAi === null || stamped.dustUsedAi === current.dustUsedAi);
 }
 
@@ -33,6 +34,8 @@ export function createRepairStamps() {
   const recipes = new WeakMap();
   return {
     stamp(result, recipe) { if (result && recipe) recipes.set(result, recipe); },
+    /** A result patched in place (a dust-brush stroke, #259) no longer matches its recipe. */
+    forget(result) { if (result) recipes.delete(result); },
     recipeOf: (result) => (result && recipes.get(result)) || null,
     matches: (result, current) => repairRecipesMatch(result && recipes.get(result), current)
   };

@@ -451,7 +451,7 @@ for (const earlyPost of [false, true]) {
     currentConvertedPreviewSource: () => null,
     buildAdjustmentSettings: () => ({ curves: { r: new Uint8Array(256), g: new Uint8Array(256), b: new Uint8Array(256) } }),
     samplePhotoPreviewSource: () => ({}), adjustPhotoPreviewSample: () => ({}), schedulePostPaintTask: () => {},
-    hiddenJobs: { safeMode: false }, geometryDiagnostics: { coldSessions: false },
+    hiddenJobs: { safeMode: false }, geometryDiagnostics: { coldSessions: false }, dustAiRefresh: { rects: [] },
   });
   vm.runInContext(functionSource('rememberPhotoSession'), f.context);
   f.request(1);

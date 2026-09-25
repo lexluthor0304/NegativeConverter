@@ -507,7 +507,7 @@ await evaluate(`(() => {
   const workerSources = new WeakMap();
   const postDust = Worker.prototype.postMessage;
   Worker.prototype.postMessage = function (message, ...args) {
-    if (['detect', 'inpaint', 'refine'].includes(message?.type) &&
+    if (['detect', 'inpaint', 'stroke'].includes(message?.type) &&
         typeof message.reuseSource === 'boolean') {
       let record = workerSources.get(this);
       if (!record) {
@@ -559,16 +559,41 @@ if (clearedSource.hash !== dustSource.hash) fail('clear mask re-detected dust on
 await waitForDustSettled('cleared dust repair committed');
 
 // 直接ブラシが変換Workerを呼び直さずに修復することを確認する。
+// #259: the pinned worker already holds both planes and the mask, so a stroke
+// posts only its points; undo/redo patch in place without conversion or detection.
 await evaluate(`(() => {
   window.__brushConversions = 0;
+  window.__brushDetections = 0;
   window.__dustSources = [];
   window.__dustStatusUpdates = 0;
+  window.__dustMessages = [];
+  const size = value => {
+    if (!value || typeof value !== 'object') return 0;
+    if (ArrayBuffer.isView(value)) return value.byteLength;
+    return Object.values(value).reduce((sum, item) => sum + size(item), 0);
+  };
   const post = Worker.prototype.postMessage;
   Worker.prototype.postMessage = function (message, ...args) {
     if (message?.type === 'convert') window.__brushConversions++;
+    if (message?.type === 'detect') window.__brushDetections++;
+    if (['stroke', 'maskDelta', 'plane'].includes(message?.type)) {
+      window.__dustMessages.push({ type: message.type, kind: message.kind, bytes: size(message),
+        baseTag: message.baseTag, tag: message.tag, image16: Boolean(message.image16), mask: Boolean(message.mask) });
+    }
     return post.call(this, message, ...args);
   };
   document.getElementById('dustShowMask').click();
+})()`);
+await waitFor('dust worker pinned with its planes', `(async () => {
+  const { dustWorker } = await import('/src/app/dustWorkerClient.js');
+  return dustWorker.pinned && dustWorker.maskTag !== null;
+})()`, 30_000);
+await wait(500);
+const dustCount = text => /No dust/.test(text) ? 0 : Number(/(\d+)/.exec(text)?.[1]);
+const statusBeforeStroke = dustCount(await evaluate(`document.getElementById('dustStatus').textContent`));
+await evaluate(`(() => {
+  window.__dustMessages = [];
+  window.__dustStatusUpdates = 0;
   const canvas = document.getElementById('canvas');
   const rect = canvas.getBoundingClientRect();
   const options = { bubbles: true, clientX: rect.x + rect.width / 2,
@@ -576,15 +601,41 @@ await evaluate(`(() => {
   canvas.dispatchEvent(new MouseEvent('mousedown', options));
   document.dispatchEvent(new MouseEvent('mouseup', options));
 })()`);
-await waitFor('dust brush inpaint', `window.__dustSources.some(source => source.type === 'refine')`, 30_000);
+await waitFor('dust brush stroke', `window.__dustSources.some(source => source.type === 'stroke')`, 30_000);
 await waitForDustSettled('dust brush repair committed', { freshStatus: true });
 if (await evaluate(`window.__brushConversions !== 0`)) fail('dust brush reconverted the full image');
 if (await evaluate(`document.getElementById('dustStatus').textContent.startsWith('Error:')`)) {
   fail('dust brush reported an error');
 }
-console.log(`ok: dust detection ${dustSource.width}x${dustSource.height}, clean-source reset, brush without reconversion`);
+const strokeMessages = await evaluate(`window.__dustMessages.filter(message => message.type === 'stroke')`);
+if (strokeMessages.length !== 1 || strokeMessages[0].bytes > 1024 * 1024 || strokeMessages[0].image16 || strokeMessages[0].mask) {
+  fail('a pinned dust stroke must post only its points: ' + JSON.stringify(strokeMessages));
+}
+const statusAfterStroke = dustCount(await evaluate(`document.getElementById('dustStatus').textContent`));
+// Undo and redo of a stroke apply its bytes in place: no conversion, no new detection.
+await evaluate(`window.__dustMessages = []; window.__brushDetections = 0; document.getElementById('undoBtn').click()`);
+await wait(1500);
+const undoState = await evaluate(`({ conversions: window.__brushConversions, detections: window.__brushDetections,
+  status: document.getElementById('dustStatus').textContent, messages: window.__dustMessages })`);
+if (undoState.conversions !== 0 || undoState.detections !== 0) fail('undoing a dust stroke re-converted or re-detected: ' + JSON.stringify(undoState));
+if (dustCount(undoState.status) !== statusBeforeStroke) fail(`undo did not restore the particle count: ${undoState.status} vs ${statusBeforeStroke}`);
+const followed = undoState.messages.find(message => message.type === 'maskDelta');
+if (!followed || followed.baseTag !== strokeMessages[0].tag || followed.tag !== strokeMessages[0].baseTag) {
+  fail('the worker did not follow the undone mask: ' + JSON.stringify(undoState.messages));
+}
+await evaluate(`window.__dustMessages = []; document.getElementById('redoBtn').click()`);
+await wait(1500);
+const redoState = await evaluate(`({ conversions: window.__brushConversions, detections: window.__brushDetections,
+  status: document.getElementById('dustStatus').textContent, messages: window.__dustMessages })`);
+if (redoState.conversions !== 0 || redoState.detections !== 0 || dustCount(redoState.status) !== statusAfterStroke) {
+  fail('redoing a dust stroke re-converted, re-detected or lost its count: ' + JSON.stringify(redoState));
+}
+console.log(`ok: dust detection ${dustSource.width}x${dustSource.height}, clean-source reset, pinned regional brush (${strokeMessages[0].bytes} B stroke), in-place undo/redo`);
 // 後続の色調検証ではマスクの色を重ねない。
 await evaluate(`window.__dustStatusObserver.disconnect(); document.getElementById('dustShowMask').click()`);
+if (await evaluate(`import('/src/app/dustWorkerClient.js').then(({ dustWorker }) => dustWorker.pinned)`)) {
+  fail('hiding the dust mask must release the dust worker pin');
+}
 if (process.argv.includes('--dust-delay-inpaint')) {
   const delayed = await evaluate(`window.__dustDelayedInpaintResponses`);
   if (delayed < 2) fail(`dust delay injection missed detection repairs: ${delayed}`);

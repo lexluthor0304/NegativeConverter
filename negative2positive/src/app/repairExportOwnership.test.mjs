@@ -29,20 +29,26 @@ function fixture({ enabled = false, mask = null } = {}) {
     currentStep: 3, lastRenderQuality: 'full',
     repairStrokes: [{ size: .02, points: [{ x: .5, y: .5 }] }],
     dustRemoval: { enabled, mask, cleanSource: clean, inpaintedImageData: null,
-      processing: false, strength: 3, particleCount: 0, _state: null },
+      processing: false, strength: 3, particleCount: 0, _state: null, revision: 0, maskTag: null },
   };
   const commits = [], manualCalls = [], observers = [], timers = new Map(), backgroundRuns = [];
   let timerId = 0;
   const c = vm.createContext({
     state, coreReprocessToken: 7, dustDetectionRevision: 11, loadGeneration: 3,
-    dustDetectionTimer: null, Uint8Array,
+    dustDetectionTimer: null, Uint8Array, dustMaskTagSequence: 0, dustAiRefresh: { rects: [] },
+    syncDustWorkerPin: noop,
     aiRepair: { status: 'ready', revision: 5 }, repairStamps: createRepairStamps(), dustPassCache: null,
     dustMaskInfo: () => null, captureDustPass, dustPassMatches, restoreDustPass,
     assertRepairCurrent(isCurrent) { if (!isCurrent()) throw new DOMException('Repair superseded', 'AbortError'); },
     console: { error: (...args) => assert.fail(`Unexpected background error: ${args.join(' ')}`) },
     ensureFullResolutionReadyForExport: async () => {},
     aiRepairReady: () => true,
-    inpaintForCommit: async input => input,
+    inpaintForCommit: async (input, passMask) => {
+      // Brushes patch the mask in place: the pass must read its own copy.
+      if (state.dustRemoval.mask) assert.notEqual(passMask, state.dustRemoval.mask);
+      if (passMask) assert.deepEqual(passMask, state.dustRemoval.mask);
+      return input;
+    },
     inpaintManualBrush(input, ...args) {
       const gate = deferred(), call = { ...gate, input, args };
       manualCalls.push(call);
@@ -65,7 +71,7 @@ function fixture({ enabled = false, mask = null } = {}) {
     },
     clearTimeout(id) { timers.delete(id); },
   });
-  vm.runInContext(['getDustSource', 'hasFrameRepairs', 'isCurrentLoad',
+  vm.runInContext(['getDustSource', 'nextDustMaskTag', 'noteDustReplaced', 'hasFrameRepairs', 'isCurrentLoad',
     'currentRepairRecipe', 'stampRepairResult', 'commitDustPass',
     'applyDustResultToState', 'runDustDetection', 'scheduleDustDetection',
     'renderCurrentImageDataForExport'].map(functionSource).join('\n'), c);
@@ -126,7 +132,10 @@ const mutations = [
   ['source', false, f => { f.state.dustRemoval.cleanSource = image(); }],
   ['conversion token', false, f => { f.c.coreReprocessToken++; }],
   ['manual strokes', false, f => { f.state.repairStrokes = [...f.state.repairStrokes]; }],
-  ['enabled dust mask', true, f => { f.state.dustRemoval.mask = new Uint8Array(16); }],
+  // Masks change through noteDustReplaced or an in-place brush patch; both
+  // advance the dust revision, which export compares instead of identity (#259).
+  ['enabled dust mask', true, f => { f.state.dustRemoval.mask = new Uint8Array(16); f.c.noteDustReplaced(); }],
+  ['brush patch in place', true, f => { f.state.dustRemoval.mask[3] = 255; f.state.dustRemoval.revision++; }],
   ['enable automatic dust', false, f => { f.state.dustRemoval.enabled = true; }],
   ['disable automatic dust', true, f => { f.state.dustRemoval.enabled = false; }],
 ];

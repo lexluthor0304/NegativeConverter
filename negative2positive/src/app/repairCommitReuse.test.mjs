@@ -45,7 +45,7 @@ function fixture() {
     processedImageData: clean, processedImageDataIsPreview: false, currentStep: 3, lastRenderQuality: 'full',
     repairStrokes: [{ size: 0.02, points: [{ x: 0.5, y: 0.5, p: 1 }] }],
     dustRemoval: { enabled: true, ai: true, mask: null, cleanSource: clean, inpaintedImageData: null,
-      processing: false, strength: 3, particleCount: 0, _state: null },
+      processing: false, strength: 3, particleCount: 0, _state: null, maskTag: null, revision: 0 },
   };
   const detectedMask = (content = dustContent, hash = 'dust-a') => {
     const mask = new Uint8Array(content);
@@ -54,6 +54,7 @@ function fixture() {
   };
   const c = vm.createContext({
     state, coreReprocessToken: 7, dustDetectionRevision: 11, loadGeneration: 3, dustPassCache: null,
+    dustMaskTagSequence: 0, dustAiRefresh: { rects: [], timer: null }, syncDustWorkerPin() {},
     Uint8Array, DOMException, console,
     aiRepair: { status: 'ready', revision: 4, run() {} },
     repairStamps: createRepairStamps(), sameRepairStrokes, captureDustPass, dustPassMatches, restoreDustPass,
@@ -93,10 +94,10 @@ function fixture() {
     setTimeout() { throw new Error('no timers in these tests'); },
     clearTimeout() {},
   });
-  vm.runInContext(['getDustSource', 'hasFrameRepairs', 'isCurrentLoad', 'currentRepairRecipe',
+  vm.runInContext(['getDustSource', 'nextDustMaskTag', 'noteDustReplaced', 'hasFrameRepairs', 'isCurrentLoad', 'currentRepairRecipe',
     'stampRepairResult', 'carryRestoredRepairStamp', 'commitDustPass', 'aiRepairReady',
     'applyDustResultToState', 'runDustDetection', 'renderCurrentImageDataForExport'].map(functionSource).join('\n'), c);
-  return { c, state, clean, lens, calls, detectedMask, bumpNextStrokePass: () => { bumpDuringStrokes = true; },
+  return { c, state, clean, lens, calls, detectedMask, infos, bumpNextStrokePass: () => { bumpDuringStrokes = true; },
     exportImage: () => c.renderCurrentImageDataForExport({ format: 'png', bitDepth: 8 }) };
 }
 const counts = (f) => ({ dust: f.calls.dust, strokes: f.calls.strokes });
@@ -164,6 +165,16 @@ const negatives = [
   ['changed stroke list', (f) => { f.state.repairStrokes = [...f.state.repairStrokes]; }, { dust: 0, strokes: 1 }],
   ['lens toggle', (f) => { f.state.conversionSourceImageData = { __lensMapping: null }; }, { dust: 0, strokes: 1 }],
   ['model reload', (f) => { f.c.aiRepair.revision += 2; }, { dust: 1, strokes: 1 }],
+  // A dust-brush stroke patches the repaired image and the mask in place
+  // (#259): it forgets both summaries and moves the dust revision.
+  ['dust brush stroke', (f) => {
+    const { mask, inpaintedImageData } = f.state.dustRemoval;
+    mask[20 * W + 30] = 255;
+    f.infos.delete(mask);
+    f.c.repairStamps.forget(inpaintedImageData);
+    f.state.dustRemoval.revision++;
+  }, { dust: 1, strokes: 1 }],
+  ['dust revision alone', (f) => { f.state.dustRemoval.revision++; }, { dust: 0, strokes: 1 }],
   ['TELEA stand-in', (f) => {
     const standIn = copy(f.clean);
     f.state.dustRemoval.inpaintedImageData = standIn; f.state.processedImageData = standIn;

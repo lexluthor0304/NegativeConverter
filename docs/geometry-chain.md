@@ -81,7 +81,10 @@ In `main.js` the scalars change synchronously and the planes follow:
   most recent geometry entry stays hot so undoing it is a reference swap. A
   cold entry, or one captured while a build was pending, restores its exact
   scalars and rebuilds its planes from the base in the pool, then converts
-  without new automatic measurements.
+  without new automatic measurements. Dust-brush stroke entries (#259,
+  `docs/dust-removal.md`) patch the objects they hold and cannot go cold;
+  only when history is still over budget after that is the oldest one
+  dropped, with everything older on its stack.
 - Photo sessions: see `docs/photo-sessions.md` (cold session entries,
   releasing the outgoing photo on a switch).
 
