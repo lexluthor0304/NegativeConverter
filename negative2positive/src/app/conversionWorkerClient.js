@@ -1057,9 +1057,21 @@ export function createConversionBandPool({
     }
   }
 
+  // What the started workers still hold: [{ jobs, bands, bytes }] (tests).
+  async function inspect() {
+    const replies = [];
+    for (let i = 0; i < entries.length; i++) {
+      if (!entries[i]) continue;
+      const { jobs, bands, bytes } = await post(i, { type: 'inspect' });
+      replies.push({ jobs, bands, bytes });
+    }
+    return replies;
+  }
+
   return {
     convert,
     adjust,
+    inspect,
     get size() { return poolSize; },
     get available() { return !broken && !disposed; },
     get shared() { return Boolean(shared); },

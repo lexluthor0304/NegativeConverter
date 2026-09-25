@@ -146,6 +146,10 @@ for (const shared of [false, true]) {
     assert.equal(sha(planes.data16), sha(reference.out16), `${name}: Step 3 on sliced planes, 16-bit`);
     assert.equal(sha(planes.data8), sha(reference.out8), `${name}: Step 3 on sliced planes, 8-bit`);
   }
+  // Between frames the workers hold no band and no job.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const held = await pool.inspect();
+  assert.ok(held.length > 0 && held.every((worker) => worker.jobs === 0 && worker.bands === 0 && worker.bytes === 0), JSON.stringify(held));
   if (shared) assert.ok(pool.stats.sharedFrames > 0);
   assert.ok(pool.workers <= 3, 'never more workers than the pool');
   assert.equal(pool.stats.workersStarted, 3, 'the workers stay warm across frames');

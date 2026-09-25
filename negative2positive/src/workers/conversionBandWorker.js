@@ -185,6 +185,20 @@ async function handle(message) {
     case 'release':
       jobs.delete(job);
       return { reply: { id, released: true } };
+    case 'inspect': {
+      // What this worker still holds (tests, diagnostics): between frames,
+      // nothing.
+      let bands = 0;
+      let bytes = 0;
+      for (const state of jobs.values()) {
+        for (const band of state.bands.values()) {
+          bands += 1;
+          if (!band.shared && band.data) bytes += band.data.byteLength;
+          if (band.data8 && !band.shared8) bytes += band.data8.byteLength;
+        }
+      }
+      return { reply: { id, jobs: jobs.size, bands, bytes } };
+    }
     default:
       throw new Error(`Unknown message type: ${type}`);
   }
