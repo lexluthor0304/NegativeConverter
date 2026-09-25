@@ -124,7 +124,7 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
       return { ...image, __baseSize: { width: image.width, height: image.height }, __analysisReference: null };
     },
     planBatchLanes: async () => 1,
-    createAutoFrameWorkerPool: () => ({ analyze: noop, readFilmEdge: noop, dispose: noop }),
+    createAutoFrameWorkerPool: () => ({ analyze: noop, analyzeImport: noop, dispose: noop }),
     createPerfTrace: () => ({ end: noop }), runBatchPipeline,
     loadFileToImageData: async file => { const id = Number(file.name.split('.')[0]); decoded.push(id); return pixels(id); },
     createDefaultSettings: (_image, item) => make(item.id),

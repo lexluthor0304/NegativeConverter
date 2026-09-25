@@ -258,7 +258,6 @@ export function createAutoFrameWorkerPool({ size = 2, workerFactory } = {}) {
   return {
     size: laneCount,
     analyze,
-    readFilmEdge: (image, readOptions = {}) => analyze(image, readOptions, 'read-film-edge'),
     // Frame and film edge of one frame on one lane's worker, one buffer.
     analyzeImport: (image, importOptions) => onLane(client => client.analyzeImport(image, importOptions)),
     dispose() {
@@ -269,7 +268,3 @@ export function createAutoFrameWorkerPool({ size = 2, workerFactory } = {}) {
     }
   };
 }
-// Shares the auto-frame worker so the full-resolution image is posted to a
-// single worker instance; the film edge reader does not need OpenCV.
-export const readFilmEdgeInWorker = (image, options = {}, requestOptions = {}) => analyzeFrameInWorker(image, options, 'read-film-edge', requestOptions);
-export const analyzeImportInWorker = (image, options) => analyzeFrameInWorker.analyzeImport(image, options);
