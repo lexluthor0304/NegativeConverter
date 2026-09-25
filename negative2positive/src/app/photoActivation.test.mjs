@@ -76,7 +76,7 @@ function fixture() {
   }));
   target.sharedDecodes = createSharedDecodes({ decode: () => deferred().promise });
   vm.runInContext(['supersedeActivation', 'beginActivation', 'invalidatePhotoActivation', 'isCurrentLoad', 'loadFile',
-    'adoptSharedDecode', 'convertFrameOffMainThread'].map(functionSource).join('\n'), context);
+    'adoptSharedDecode', 'convertFrameOffMainThread', 'convertRequestOnMain'].map(functionSource).join('\n'), context);
   const file = name => ({ name, arrayBuffer: async () => { reads.push(name); return new ArrayBuffer(8); } });
   return { context, target, state, errors, toasts, rawLoads, reads, warmUps, file };
 }

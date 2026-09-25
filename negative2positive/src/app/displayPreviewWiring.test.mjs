@@ -50,7 +50,7 @@ function fixture({ sourceSize = { width: 1200, height: 800 }, container = { widt
     processedImageData: null, processedImageDataIsPreview: true, fullResolutionPending: true,
     previewSourceImageData: null, histogramSourceImageData: null, webglSourceImageData: null, displayImageData: null,
     currentStep: 3, cropping: false, beforeAfterActive: false, zoomLevel: 1, sprocketPreviewEnabled: false,
-    lastRenderQuality: 'gl', fullResolutionPromise: null, repairStrokes: [],
+    fullResolutionPromise: null, repairStrokes: [],
     dustRemoval: { enabled: false, processing: false, revision: 1 },
   };
   const context = vm.createContext({
@@ -79,7 +79,9 @@ function fixture({ sourceSize = { width: 1200, height: 800 }, container = { widt
     },
     buildHistogramSourceImageData: input => ({ sampleOf: input }),
     releaseCorePreviewRetained: () => {}, initWebGLRenderer: () => true, isWebGLActive: () => true,
-    setMainCanvasDimensions: () => {}, getSprocketFrameMetrics: () => null,
+    // #242: new planes fit the CSS box; a CPU mode settles the new display
+    // preview with the exact colour model.
+    fitStep3CanvasBox: () => {}, scheduleFullUpdate: () => log.push('settle'),
     schedulePreviewUpdate: () => log.push('redraw'), scheduleGpuPreviewWarmup: () => log.push('gpu-warmup'),
     gpuApplyUsable: () => false, GPU_PREVIEW_MODE: 'auto', hasFrameRepairs: () => false,
     repairedPreviewShown: null, dustDetectionTimer: null, fullResolutionRenderTimer: null,
@@ -196,6 +198,18 @@ function fixture({ sourceSize = { width: 1200, height: 800 }, container = { widt
   const expected = filterDisplayImage(other, g.context.getDisplayPreviewSize(other));
   assert.deepEqual(g.state.previewSourceImageData.__image16.data, expected.__image16.data, 'at the current size, with the display filter');
   assert.ok(g.log.includes('redraw'));
+  assert.ok(!g.log.includes('settle'), 'WebGL draws the new preview as it is');
+
+  // A CPU mode draws #canvas from the display preview (#242): the rebuilt one
+  // is drawn and then settled with the exact colour model.
+  const h = fixture();
+  h.context.isWebGLActive = () => false;
+  const cpu = image(1200, 800, 9);
+  cpu.__displayPreview = filterDisplayImage(cpu, { width: 400, height: 267 });
+  h.context.applyProcessedImageToState(cpu);
+  h.runTimers();
+  await settle();
+  assert.deepEqual(h.log.filter(entry => entry === 'redraw' || entry === 'settle'), ['redraw', 'settle']);
 }
 
 // ---- Part 4: above 16 MP a viewport change resamples in row bands on main ----

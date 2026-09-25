@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { computeZoomGeometry, clampPanValues } from './zoomGeometry.js';
+import { step3FrameReference, upscaleReference } from './displayCanvas.js';
 
 // #248 part 1: a true 1:1 in the app itself. The fit, zoom and settle-hook
 // functions of main.js (extracted with vm) against stand-in elements.
@@ -35,7 +36,7 @@ function fixture({ source: size = { width: 9536, height: 6336 }, container = { w
   const wrapper = element();
   const context = vm.createContext({
     state, window: { devicePixelRatio: dpr }, Math, Number, parseFloat,
-    canvas: element(), glCanvas: element(), canvasTransformWrapper: wrapper, zoomIndicator: element(),
+    canvas: element(), glCanvas: element(), cropCanvas: element(), canvasTransformWrapper: wrapper, zoomIndicator: element(),
     canvasContainer: {
       ...element(),
       getBoundingClientRect: () => ({ left: 0, top: 0, width: container.width, height: container.height })
@@ -43,6 +44,8 @@ function fixture({ source: size = { width: 9536, height: 6336 }, container = { w
     uiDebugCounters: { adjustCanvasDisplay: 0 },
     getCanvasContainerSize: () => container,
     getSprocketFrameMetrics: () => null, getSprocketFrameComposeOptions: () => ({}),
+    // The Step-3 box reference of #242.
+    step3FrameReference, upscaleReference,
     computeZoomGeometry, clampPanValues, interimGeometryCss: () => '',
     postponeFullResolutionRenderForInteraction: () => {},
     // The detail layer (#248 part 5) follows zoom and pan on its own.
