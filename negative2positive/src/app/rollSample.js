@@ -30,19 +30,26 @@ export function tileAnalysisReference(settings, base) {
  * itself (a small frame without geometry) is wrapped, so the base gains no
  * fields. `tileMax` is the tile preview's long side.
  */
-export function buildRollSample(base, settings, { tileMax, sanitizeCrop = sanitizeCropRect }) {
-  const built = buildRollAnalysisSample(base, settings);
+export function buildRollSample(base, settings, { tileMax, sanitizeCrop = sanitizeCropRect, fullSize = null }) {
+  // A half-size analysis decode (#252 part 6, off by default): the recipe's
+  // geometry refers to the full frame, whose size the decode reports.
+  const full = fullSize && (fullSize.width !== base.width || fullSize.height !== base.height) ? fullSize : null;
+  const built = full
+    ? buildReducedGeometrySample(base, settings, { maxDim: ROLL_SAMPLE_MAX_DIM, fullWidth: full.width })
+    : buildRollAnalysisSample(base, settings);
   const sample = built !== base ? built
     : { width: base.width, height: base.height, data: base.data, ...(base.__image16 ? { __image16: base.__image16 } : {}) };
-  sample.__baseSize = { width: base.width, height: base.height };
+  sample.__baseSize = full ? { width: full.width, height: full.height } : { width: base.width, height: base.height };
   sample.__analysisReference = tileAnalysisReference(settings, base);
   const geometry = {
     rotationAngle: Number.isFinite(settings.rotationAngle) ? settings.rotationAngle : 0,
     mirrored: Boolean(settings.mirrored),
     cropRegion: settings.cropRegion || null
   };
-  const frame = reducedTileGeometry(base, geometry, tileMax, { sanitizeCrop });
-  const working = renderReducedGeometry(base, geometry, { step: frame.step });
+  const frame = reducedTileGeometry(full || base, geometry, tileMax, { sanitizeCrop });
+  const working = full
+    ? renderReducedGeometry(base, geometry, { step: frame.step, fullWidth: full.width, fullHeight: full.height })
+    : renderReducedGeometry(base, geometry, { step: frame.step });
   sample.__tileWorking = working !== base ? working
     : { width: base.width, height: base.height, data: base.data, ...(base.__image16 ? { __image16: base.__image16 } : {}) };
   return sample;

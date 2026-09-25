@@ -385,6 +385,10 @@ await expectPreviewFallback('garbled output', { result: makeRawResult({ width: 6
   assert.deepEqual(runs[0].options, { suppressSensorDefects: true, filmStats: { borderBufferPct: 10 } });
   assert.equal(scene.workers.some((w) => w.kind === 'post'), false, 'no per-decode worker for a lane decode');
   assertWorkersReleased('held');
+  // A flagged half-size analysis decode (#252 part 6) reports the full size.
+  reset({ result: cloneRawResult(fixture) });
+  const halfHeld = await loadRawFile(makeContainer().buffer, 'frame.nef', { postDecode: holding, halfSize: true, outputBps: 16, suppressSensorDefects: false });
+  assert.deepEqual(halfHeld.fullSize, { width: 128, height: 96 });
 
   // Planes the lane's worker hands back are wrapped exactly as the loader's own.
   reset({ result: cloneRawResult(fixture) });

@@ -30,7 +30,8 @@
  * adopts it, `planes.wanted` turns true (and `planes.onWanted` callbacks
  * run) so the decode can return the planes early, and the foreground's lease
  * resolves only once the base is on the page. A held frame nobody adopted is
- * released with the entry.
+ * released with the entry. `adoptable: false` keeps the foreground away from
+ * a decode it cannot use.
  *
  * Pure: no DOM, no workers.
  */
@@ -142,10 +143,10 @@ export function createSharedDecodes({ decode }) {
     return lease;
   }
 
-  function start(file, context, decodeFile = decode) {
+  function start(file, context, decodeFile = decode, adoptable = true) {
     const entry = {
       file, controller: new AbortController(), leases: new Set(), settled: false, value: null, error: null,
-      planesWanted: false, planeListeners: new Set(), taking: null
+      planesWanted: false, planeListeners: new Set(), taking: null, adoptable
     };
     entries.set(file, entry);
     const planes = {
@@ -182,14 +183,16 @@ export function createSharedDecodes({ decode }) {
      * else the shared one), or joins the one running. `context` reaches the
      * decode (its memory claim, #258).
      */
-    open(file, { signal = null, context = null, decode: decodeFile = null } = {}) {
-      const entry = entries.get(file) || start(file, context, decodeFile || decode);
+    open(file, { signal = null, context = null, decode: decodeFile = null, adoptable = true } = {}) {
+      const entry = entries.get(file) || start(file, context, decodeFile || decode, adoptable);
       return createLease(entry, signal, 'lane');
     },
     /** The foreground's lease on a decode a lane started, or null. */
     adopt(file, { signal = null } = {}) {
       const entry = entries.get(file);
-      if (!entry || entry.error) return null;
+      // A decode the foreground cannot use (a flagged half-size analysis
+      // decode, #252 part 6) is never adopted.
+      if (!entry || entry.error || !entry.adoptable) return null;
       // A finished decode whose frame is neither on the page nor held is gone.
       if (entry.settled && !entry.value?.base && !entry.value?.held) return null;
       wantPlanes(entry);

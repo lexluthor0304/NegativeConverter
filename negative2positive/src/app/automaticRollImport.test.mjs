@@ -16,7 +16,7 @@ import { createPhotoSessionCache } from './photoSessionCache.js';
 import { SCHEDULER_FUNCTIONS } from './backgroundLanesHarness.mjs';
 import { createRollSampleCache } from './rollSampleCache.js';
 import { reducedTileGeometry, tileGeometryKey } from './reducedGeometry.js';
-import { sanitizeCropRect } from './imageGeometry.js';
+import { sanitizeCropRect, rotatedDimensions } from './imageGeometry.js';
 import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
 import { createDecodeSlots } from './batchExportScheduler.js';
 import { primeFilmStats } from './filmStatsCache.js';
@@ -145,7 +145,8 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
     rollFrameDecodable: file => /\.(dng|nef)$/i.test(file.name),
     autoFrameAnalyzerOptions: ({ filmType, rotatedOutput }) => ({ settings: { enabled: true, filmType, lastDiagnostics: null }, rotatedOutput }),
     defaultFilmBaseBuffer: () => 10,
-    rememberImageDimensions: noop,
+    rememberImageDimensions: noop, rotatedDimensions,
+    buildRollSampleOf: (image, settings, options) => ({ ...image, halfSample: true, fullSize: options.fullSize, __baseSize: options.fullSize, __analysisReference: null }),
     createPerfTrace: () => ({ end: noop }), runBatchPipeline,
     loadFileToImageData: async file => { const id = Number(file.name.split('.')[0]); decoded.push(id); return pixels(id); },
     createDefaultSettings: (_image, item) => make(item.id),
@@ -227,7 +228,8 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
     },
   });
   context.sharedDecodes = createSharedDecodes({ decode: (file, { signal }) => context.decodeForBackground(file, signal) });
-  vm.runInContext([...DISPLAY_SESSION_HELPERS, 'getCurrentQueueItem', 'automaticRollItemKey', 'scheduleAutomaticRollImport', 'createRollAnalysisWorkers', 'decodeRollFrame', ...FILM_TYPE_FUNCTIONS,
+  vm.runInContext([...DISPLAY_SESSION_HELPERS, 'getCurrentQueueItem', 'automaticRollItemKey', 'scheduleAutomaticRollImport', 'createRollAnalysisWorkers', 'decodeRollFrame',
+    'rollAnalysisHalfSize', 'scaleHalfSizeCrop', ...FILM_TYPE_FUNCTIONS,
     'renderFrameAnalysisThumbnail', 'releaseFrameThumbnailWorkers', 'renderSampleTile', 'publishSampleTile', 'renderRollSampleTiles',
     ...(realRoll ? ['runRollAnalysis'] : []),
     ...SCHEDULER_FUNCTIONS.filter(name => name !== 'backgroundRest'), ...MEMORY_FUNCTIONS]
@@ -899,6 +901,49 @@ function workerRoll(f, { analysisFor = () => ({}), dng = true } = {}) {
   assert.equal(f.items[2].status, undefined, 'not marked failed');
   assert.ok(f.items.every(item => item.settings));
   assert.equal(f.decoded.filter(id => id === 2).length, 2, 'decoded again');
+}
+
+{
+  // #252 part 6, flagged off by default: half-size analysis decodes. Off, no
+  // decode asks for half size; on, the worker's crop maps x2 onto the full
+  // frame, the sample is built for the full size, and the decode is never
+  // adoptable by the foreground.
+  const off = fixture();
+  const offCalls = [];
+  workerRoll(off);
+  const offLoad = off.context.loadFileToImageData;
+  off.context.loadFileToImageData = async (file, options) => { offCalls.push(Boolean(options?.halfSize)); return offLoad(file, options); };
+  off.context.scheduleAutomaticRollImport(off.items);
+  await off.fire(1200);
+  assert.deepEqual(offCalls, [false, false, false], 'full-size decodes by default');
+
+  const f = fixture();
+  f.context.safeStorageGet = key => (key === 'nc_roll_analysis_half_v1' ? 'on' : null);
+  const { heldFrames } = workerRoll(f, { analysisFor: () => ({ detection: { angle: 0, cropRegion: { left: 1, top: 2, width: 5, height: 4 } } }) });
+  const load = f.context.loadFileToImageData;
+  const halfCalls = [];
+  f.context.loadFileToImageData = async (file, options) => {
+    halfCalls.push(Boolean(options?.halfSize));
+    const out = await load(file, options);
+    return out?.held ? { ...out, fullSize: { width: 20, height: 20 } } : out;
+  };
+  const detections = [];
+  const analyze = f.context.analyzeStudioImportFrame;
+  f.context.analyzeStudioImportFrame = async (image, settings, options) => {
+    detections.push({ size: [image.width, image.height], crop: options.detection?.result?.cropRegion });
+    return analyze(image, settings, options);
+  };
+  const opened = [];
+  const open = f.context.sharedDecodes.open;
+  f.context.sharedDecodes.open = (file, options = {}) => { opened.push(options.adoptable); return open(file, options); };
+  f.context.scheduleAutomaticRollImport(f.items);
+  await f.fire(1200);
+  assert.deepEqual(halfCalls, [true, true, true]);
+  assert.deepEqual(opened, [false, false, false], 'never adoptable');
+  assert.ok(detections.every(entry => entry.size.join() === '20,20' && JSON.stringify(entry.crop) === JSON.stringify({ left: 2, top: 4, width: 10, height: 8 })),
+    'merged on the full frame with the crop scaled x2: ' + JSON.stringify(detections));
+  assert.ok(heldFrames.every(held => held.samples[0].options.fullSize.width === 20), 'samples built for the full size');
+  assert.ok(f.items.every(item => item.settings));
 }
 
 console.log('automaticRollImport tests passed');

@@ -143,7 +143,7 @@ export function createRollFrameTask({
     const transfers = new Set();
     let packed;
     try {
-      packed = packRollSample(buildRollSample(image, msg.settings || {}, { tileMax: msg.tileMax }), transfers);
+      packed = packRollSample(buildRollSample(image, msg.settings || {}, { tileMax: msg.tileMax, fullSize: msg.fullSize || null }), transfers);
     } catch (error) {
       // The page builds it from the planes, with the same function.
       const planeTransfers = new Set();

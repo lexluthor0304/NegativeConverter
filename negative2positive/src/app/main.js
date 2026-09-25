@@ -18599,6 +18599,30 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return typeof Worker === 'function' && typeof OffscreenCanvas === 'function';
     }
 
+    // #252 part 6, a quality trade-off, off by default: roll analysis decodes
+    // RAWs at half size (LibRaw halfSize, 2.0 s instead of 5.1 s at 60 MP).
+    // It changes the automatic film base (up to 23 levels in the reviewers'
+    // check) and the 900 px sample grid, and through the roll median, the
+    // outliers and channelData the exported pixels. Hidden setting, for the
+    // recorded 151-frame comparison the issue requires before it may ship:
+    // localStorage nc_roll_analysis_half_v1 = 'on'.
+    function rollAnalysisHalfSize() {
+      return safeStorageGet('nc_roll_analysis_half_v1') === 'on';
+    }
+
+    // A crop the detector found on a half-size decode, on the full frame
+    // rotated by `angle` (x2, kept inside that frame).
+    function scaleHalfSizeCrop(cropRegion, fullSize, angle) {
+      const frame = Math.abs(angle) >= 0.001 ? rotatedDimensions(fullSize.width, fullSize.height, angle) : fullSize;
+      const left = Math.min(frame.width - 1, Math.max(0, Math.round(cropRegion.left * 2)));
+      const top = Math.min(frame.height - 1, Math.max(0, Math.round(cropRegion.top * 2)));
+      return {
+        left, top,
+        width: Math.max(1, Math.min(frame.width - left, Math.round(cropRegion.width * 2))),
+        height: Math.max(1, Math.min(frame.height - top, Math.round(cropRegion.height * 2)))
+      };
+    }
+
     // Files LibRaw decodes (TIFF scans take the UTIF path and stay on the page).
     function rollFrameDecodable(file) {
       const name = String(file?.name || '').toLowerCase();
@@ -20895,20 +20919,31 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // have room for them as for any lane base (#243), or a fallback finished
     // the decode here (`analysis` null: the frame is measured on the page, as
     // before). The file is read in this same call chain, before any await.
+    //
+    // `options.half` (#252 part 6, off by default, a quality trade-off): a
+    // half-size decode for the analysis; the result's `fullSize` is the frame
+    // the recipe refers to. Its planes are never handed to the foreground,
+    // the prefetch or the photo sessions.
     function decodeRollFrame(file, { signal, context = null, planes = null, wantsBase = false, frames, slots, options, optionsKey }) {
+      const half = options.half === true;
       const adapter = frames.frame({
         options: { frame: options.frame, filmTypeChoice: options.filmTypeChoice, filmEdge: options.filmEdge },
-        returnPlanes: ({ width, height }) => wantsBase || Boolean(planes?.wanted) || photoSessions.hasRoomFor(width * height * 12)
+        returnPlanes: ({ width, height }) => !half && (wantsBase || Boolean(planes?.wanted) || photoSessions.hasRoomFor(width * height * 12))
       });
-      planes?.onWanted(() => adapter.wantPlanes());
+      if (!half) planes?.onWanted(() => adapter.wantPlanes());
       let rawMetadata = null;
       // The lane's memory claim (#258) covers this decode.
       return loadFileToImageData(file, {
         filmStats: true, signal, onMetadata: meta => { rawMetadata = meta; }, postDecode: adapter, decodeSlot: slots,
-        claim: context?.claim || null, priority: 'background'
+        claim: context?.claim || null, priority: 'background',
+        ...(half ? { halfSize: true } : {})
       }).then((image) => {
-        if (image?.held) return { base: null, held: adapter.held, analysis: adapter.analysis, optionsKey, rawMetadata };
+        if (image?.held) {
+          return { base: null, held: adapter.held, analysis: adapter.analysis, optionsKey, rawMetadata, fullSize: image.fullSize || null, half };
+        }
         adapter.done();
+        // A half-size frame (a fallback finished it here) is measured, never adopted.
+        if (half) return { base: null, analysisImage: image, analysis: adapter.analysis, optionsKey, rawMetadata, fullSize: image?.__fullSize || null, half };
         return { base: image, analysis: adapter.analysis, optionsKey, rawMetadata };
       }, (error) => {
         adapter.done();
@@ -20921,8 +20956,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // bring its own decode (the lane's roll-frame worker, #252); it reads
     // the file in this same call chain. The lane's memory claim (#258)
     // reaches either decode as its context.
-    function openAnalysisDecode(item, signal, claim = null, decode = null) {
-      return sharedDecodes.open(item.file, decode ? { signal, context: { claim }, decode } : { signal, context: { claim } });
+    function openAnalysisDecode(item, signal, claim = null, decode = null, adoptable = true) {
+      return sharedDecodes.open(item.file, decode ? { signal, context: { claim }, decode, adoptable } : { signal, context: { claim } });
     }
     function openTileDecode(item, signal, claim = null) {
       return sharedDecodes.open(item.file, { signal, context: { claim } });
@@ -21258,7 +21293,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           const rollDecode = analysis?.decode
             ? (file, context) => analysis.decode(file, { ...context, wantsBase: Boolean(prefetch) })
             : null;
-          lease = analysis ? openAnalysisDecode(item, controller.signal, memoryClaim, rollDecode)
+          lease = analysis ? openAnalysisDecode(item, controller.signal, memoryClaim, rollDecode, analysis.adoptable !== false)
             : job.halfSize ? openHalfSizeTileDecode(item, controller.signal, memoryClaim)
               : tile ? openTileDecode(item, controller.signal, memoryClaim) : openPrefetchDecode(item, controller.signal, memoryClaim);
           try {
@@ -21412,7 +21447,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // shared-decode entry (#252: into the lane's roll-frame worker);
     // `onRequest(request)` receives the request, whose `lanes` a re-plan may
     // raise while the pass runs.
-    function runRollAnalysisPass(items, { lanes = 1, valid, wants, begin, sink, onError, decode = null, onRequest = null }) {
+    function runRollAnalysisPass(items, { lanes = 1, valid, wants, begin, sink, onError, decode = null, adoptable = null, onRequest = null }) {
       return new Promise(resolve => {
         const request = { items: new Set(items), lanes, inFlight: 0, valid, resolve };
         request.wants = item => request.items.has(item) && valid() && wants(item);
@@ -21423,6 +21458,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           return {
             valid: () => frame.valid(),
             decode: decode ? (file, context) => decode(item, file, context) : null,
+            adoptable: adoptable ? adoptable(item) : true,
             async run(base, step, decoded = null) {
               const payload = await frame.analyze(base, step, decoded);
               if (payload) await sink(item, payload);
@@ -26174,7 +26210,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
               frame: state.autoFrame.enabled ? autoFrameAnalyzerOptions({ filmType: frameFilmType ?? state.filmType, rotatedOutput: 'none' }) : null,
               filmTypeChoice: automatic ? { automatic: true } : { automatic: false, filmType: choice?.filmType || state.filmType },
               filmEdge: true,
-              borderBufferPct: defaultFilmBaseBuffer()
+              borderBufferPct: defaultFilmBaseBuffer(),
+              ...(rollAnalysisHalfSize() ? { half: true } : {})
             };
           };
           const rollFrameOptionsKey = options => JSON.stringify({ ...options, frame: options.frame ? { ...options.frame, settings: { ...options.frame.settings, lastDiagnostics: null } } : null });
@@ -26188,6 +26225,49 @@ import { canPublishThumbnail } from './thumbnailRank.js';
               .catch(error => console.warn('Display proxy fill failed:', item.file?.name, error));
             return true;
           };
+          // The flagged half-size analysis (#252 part 6): the worker measured a
+          // half-size decode (or the page did, after a fallback); detection
+          // and edge results are mapped onto the full frame (crop x2) and
+          // merged with today's functions on a full-size frame descriptor.
+          const analyzeHalfSizeRollFrame = async (item, decoded, { filmType, itemValid, key }) => {
+            const full = decoded.fullSize;
+            const worker = decoded.analysis;
+            if (!full || rollFrameOptionsKey(rollFrameOptions(item)) !== decoded.optionsKey) return null;
+            let detection = worker?.complete && !worker.detectionError ? worker.detection : null;
+            let read = worker?.complete && !worker.edgeError ? { result: worker.edge } : null;
+            let filmStats = worker?.filmStats || null;
+            const pageImage = decoded.analysisImage || null;
+            if (!worker && pageImage) {
+              filmStats = { borderBufferPct: defaultFilmBaseBuffer(), filmType: cachedDetectFilmType(pageImage), filmBase: autoDetectFilmBase(pageImage, defaultFilmBaseBuffer()) };
+              const analysed = await runImportDetections(pageImage, {
+                frame: state.autoFrame.enabled, filmEdge: true, owned: false, analyzer: rollWorkers?.analyzers || analyzeFrameInWorker,
+                silent: true, filmType, frameFilmType: filmStats.filmType?.filmType ?? null
+              });
+              detection = analysed.detection?.result ?? null;
+              read = analysed.read;
+            }
+            if (!filmStats) return null;
+            const frame = { width: full.width, height: full.height, data: null };
+            primeFilmStats(frame, filmStats);
+            const defaults = createDefaultSettings(frame, item);
+            if (!itemValid()) return null;
+            const scaled = detection?.cropRegion ? { ...detection, cropRegion: scaleHalfSizeCrop(detection.cropRegion, full, detection.angle || 0) } : detection;
+            let settings = await analyzeStudioImportFrame(frame, defaults, { silent: true, filmType, detection: { result: scaled } });
+            const edge = await mergeImportFilmEdge(frame, settings, read, { applyDefaults: state.importFilmTypeAuto });
+            if (!itemValid()) return null;
+            if (edge) settings = edge.settings;
+            settings = await learnedImportSettings(settleImportFilmType(item, settings), item);
+            if (!itemValid()) return null;
+            let sample;
+            if (decoded.held) {
+              try { sample = (await decoded.held.sample(rollSampleSettings(settings), { tileMax: STUDIO_TILE_PREVIEW_MAX, fullSize: full })).sample; }
+              catch { return null; }
+            } else {
+              sample = buildRollSampleOf(pageImage, settings, { tileMax: STUDIO_TILE_PREVIEW_MAX, sanitizeCrop: sanitizeCropRegionForImage, fullSize: full });
+            }
+            if (!sample || !itemValid()) return null;
+            return { settings, sample, key };
+          };
           const trace = createPerfTrace('automaticRollImport', {
             files: toAnalyze.length, lanes, framesInFlight: plan.framesInFlight, decodeSlots: plan.decodeSlots
           });
@@ -26196,6 +26276,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
               lanes,
               valid,
               onRequest: (request) => { passRequest = request; },
+              // A flagged half-size decode is never handed to the foreground.
+              adoptable: item => !(rollFrameOptions(item).half && rollFrameWorkerUsable() && rollFrameDecodable(item.file)),
               wants: item => eligible(item) && !item.settings && item !== state.fileQueue[state.currentFileIndex],
               // A RAW decodes into the lane's roll-frame worker, unless its
               // worker analysis already failed twice (then the page, as before).
@@ -26218,6 +26300,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
                     try {
                       if (!itemValid()) return null;
                       const filmType = frameFilmType ?? state.filmType;
+                      // Half-size analysis (#252 part 6, flagged): measured
+                      // from the smaller planes, mapped onto the full frame.
+                      if (decoded?.half) return await analyzeHalfSizeRollFrame(item, decoded, { filmType, itemValid, key });
                       if (worker) {
                         // Measured in the lane's worker (#252): merge its results
                         // with today's functions, in today's order.

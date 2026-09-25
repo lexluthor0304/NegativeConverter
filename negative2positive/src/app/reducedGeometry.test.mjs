@@ -133,6 +133,22 @@ for (const [width, height] of [[1980, 1320], [1320, 1980], [640, 427]]) {
   }
 }
 
+// #252 part 6 (flagged): a roll sample from a half-size decode, for the full
+// frame its recipe refers to; with the base's own size it is the usual sample.
+{
+  const half = makeBase(990, 660, 91);
+  const full = { width: 1980, height: 1320 };
+  const settings = { rotationAngle: 0.6, mirrored: true, cropRegion: { left: 40, top: 20, width: 1800, height: 1200 },
+    autoFrameMeta: { imageArea: [{ x: 0.1, y: 0.1 }, { x: 0.9, y: 0.1 }, { x: 0.9, y: 0.9 }, { x: 0.1, y: 0.9 }] } };
+  const sample = rollSample.buildRollSample(half, settings, { tileMax: 288, fullSize: full });
+  assertSame(sample, buildReducedGeometrySample(half, settings, { maxDim: 900, fullWidth: full.width }), 'half-size sample');
+  assert.deepEqual(sample.__baseSize, full);
+  const frame = reducedTileGeometry(full, settings, 288, { sanitizeCrop: sanitizeCropRect });
+  assertSame(sample.__tileWorking, renderReducedGeometry(half, settings, { step: frame.step, fullWidth: full.width, fullHeight: full.height }), 'half-size tile');
+  assertSame(rollSample.buildRollSample(half, settings, { tileMax: 288, fullSize: { width: 990, height: 660 } }),
+    rollSample.buildRollSample(half, settings, { tileMax: 288 }), 'a full size equal to the base changes nothing');
+}
+
 // The export chain's crop step, as main.js's exportGeometrySteps.
 const exportSteps = {
   rotate: applyRotationToImageData,

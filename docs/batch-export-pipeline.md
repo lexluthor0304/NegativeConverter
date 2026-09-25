@@ -392,6 +392,18 @@ Roll analysis has its own lane plan and its own per-frame worker (#252):
   live, the shared auto-frame worker keeps OpenCV loaded through idle
   periods (`holdIdle`), so a cold switch to a frame the roll has not reached
   starts no new realm.
+- **Half-size analysis (off by default, a quality trade-off).**
+  `localStorage.nc_roll_analysis_half_v1 = 'on'` decodes a roll's RAWs at half
+  size for the analysis (LibRaw `halfSize`, about 2.0 s instead of 5.1 s at
+  60 MP), maps the worker's crop x2 onto the full frame and builds the roll
+  sample for the full size; such a decode is never adopted by the
+  foreground, prefetched or retained. It changes the automatic film base (up
+  to 23 levels in the reviewers' check) and the 900 px sample grid, and
+  through the roll median, the outliers and `channelData` the exported
+  pixels, permanently. It may be offered only with a recorded comparison on
+  the 151-frame M11 roll (roll base delta, outlier-set diff, `channelData`
+  delta, per-frame crop and angle diffs against a stated tolerance), which
+  has not been made.
 
 The exact 900px geometry-applied roll samples now live in
 `analysisSampleStore.js`, with a 128 MiB retained-RAM budget. Samples that do

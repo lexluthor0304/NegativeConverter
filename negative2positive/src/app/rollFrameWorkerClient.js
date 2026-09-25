@@ -256,11 +256,11 @@ export function createRollFramePool({
       const handle = {
         width, height, settled: false,
         /** The roll sample of `settings` (rollSampleSettings), built in the worker; the frame is dropped there. */
-        async sample(settings, { tileMax, returnPlanes: withPlanes = false } = {}) {
+        async sample(settings, { tileMax, returnPlanes: withPlanes = false, fullSize = null } = {}) {
           if (handle.settled) throw new Error('The roll frame was already released');
           handle.settled = true;
           let reply;
-          try { reply = await send(slot, { type: 'sample', id: frameId, settings, tileMax, returnPlanes: withPlanes }); }
+          try { reply = await send(slot, { type: 'sample', id: frameId, settings, tileMax, returnPlanes: withPlanes, fullSize }); }
           finally { adapter.done(); }
           if (reply.type === 'sample') {
             const sample = restoreRollSample(reply.sample, makeImage ? { toImageData: makeImage } : undefined);
