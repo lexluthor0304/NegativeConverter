@@ -166,7 +166,7 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
     'whenBrushRepairsSettled', 'noteBrushRepairSettled', 'getDustSource', 'cancelPendingTimers',
     'trimHistorySnapshot', 'rememberRepairMasks', 'clearRepairedPreview', 'repairedPreviewMatches',
     'repairedPreviewSourceFor', 'ensureRepairedPreview', 'buildRepairedPreview', 'applyExactPlaneKeepingView',
-    'scheduleRepairedPreviewAfterInput',
+    'scheduleRepairedPreviewAfterInput', 'clearFullResolutionRenderState',
   ].map(functionSource).join('\n'), context);
   const reply = (kind, index = -1) => {
     const entry = clients[kind].at(index);
@@ -570,6 +570,18 @@ for (const large of [false, true]) {
   assert.equal(f.context.conversionWorkerBroken, false, 'an aborted worker is not a broken one');
   assert.equal(count(f).mainThread, 0, 'no main-thread fallback');
   assert.equal(f.state.fullResolutionPending, true);
+  // Discarding the pipeline (a new photo, a crop) aborts the render too.
+  await Promise.resolve();
+  await settle();
+  f.reply('preview');
+  await settle();
+  f.state.fullResolutionPending = true;
+  void f.context.startFullResolutionRender('export');
+  await settle();
+  const discarded = f.clients.exact.at(-1);
+  assert.notEqual(discarded, exact);
+  f.context.clearFullResolutionRenderState();
+  assert.equal(discarded.request.signal.aborted, true, 'a discarded pipeline aborts its exact render');
   // Below 16 MP the shared client stays in use and nothing is aborted.
   const g = fixture({ large: false });
   g.state.fullResolutionPending = true;

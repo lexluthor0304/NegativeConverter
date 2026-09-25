@@ -68,6 +68,7 @@ function fixture({ repairs = true, locked = false, large = false } = {}) {
     fullResolutionConversionAbort: null, WORKER_ABORTED: 'WORKER_ABORTED',
     FULL_RESOLUTION_IDLE_DELAY_MS: 2500, scheduleFullResolutionRender: noop, ensureAiBrushPlane: noop,
     repairedPreviewShown: null, repairedPreviewMasks: null, repairedPreviewSourceFor: () => null, ensureRepairedPreview: noop,
+    clearRepairedPreview: noop, previewRepairWorker: { dispose: noop },
     getDisplayPreviewSize: () => ({ width: 2, height: 2 }),
     previewTier: 'normal', previewTierKept: null, previewTierPrebuilt: null, reducedDisplayImages: new WeakSet(),
     resizeDisplayPreview: (image, size) => ({ ...size, data: image.data }),

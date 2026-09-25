@@ -2480,6 +2480,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     const dustAiRefresh = { rects: [], timer: null };
 
     let fullResolutionRenderTimer = null;
+    // The exact render above 16 MP in flight: { controller, token, generation }
+    // (see beginFullResolutionConversion).
+    let fullResolutionConversionAbort = null;
 
     // Geometry chain state (#244), declared before any code can run a
     // geometry path; the functions live in the geometry chain section.
@@ -2511,6 +2514,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (fullResolutionRenderTimer) {
         clearTimeout(fullResolutionRenderTimer);
         fullResolutionRenderTimer = null;
+      }
+      // A render for the discarded pipeline could only be thrown away.
+      if (fullResolutionConversionAbort) {
+        const entry = fullResolutionConversionAbort;
+        fullResolutionConversionAbort = null;
+        entry.controller.abort();
       }
       state.processedImageDataIsPreview = false;
       state.fullResolutionPending = false;
@@ -6265,7 +6274,6 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // An exact render above 16 MP runs on a worker of its own and is abandoned
     // as soon as the settings or the photo move on, instead of converting the
     // whole frame for a result that is thrown away.
-    let fullResolutionConversionAbort = null;
     function beginFullResolutionConversion(options, token, generation) {
       if (options.exact !== true || !isLargeImage(state.conversionSourceImageData)) return null;
       if (typeof AbortController !== 'function') return null;
@@ -12561,6 +12569,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       coreReprocessGeneration += 1;
       coreReprocessToken += 1;
       abortSupersededFullResolutionConversion();
+      clearRepairedPreview();
       cancelPendingTimers();
       _coreReprocessPending = null;
       processNegativeInFlight = null;
