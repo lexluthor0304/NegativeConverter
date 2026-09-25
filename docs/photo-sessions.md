@@ -50,7 +50,11 @@ existing full-resolution barrier. Every snapshot records whether its plane is a
 display preview and whether it lags its settings (#237); a session that swaps
 its plane for the display preview updates both, and a plane that is not the
 size of the conversion source always restores as a preview. A restore paints
-the display planes the snapshot captured instead of resampling its plane. Presentation proxies never become export
+the display planes the snapshot captured instead of resampling its plane. Since
+#248 a snapshot also carries the retained display level (54 MB at 60 MP, the
+source itself up to ~16 MP) and the auto-WB sample; the conversion preview is a
+size on that level, and the preview worker gets the level back with the next
+request. Presentation proxies never become export
 sources. Queue removal and closing the session release retained entries.
 
 Navigation invalidates older asynchronous activations. A late decode or
@@ -324,7 +328,8 @@ The targeted browser regression measures actual decode/conversion worker
 messages and original-file reads during warm A/B/A navigation. It compares
 settled GPU dimensions and sampled patch hashes, zoom, and exact decoded 8/16-bit PNG export
 pixels. Zoom steps are a compositor transform: they must not draw, and only a
-display preview of a new size repaints, at its texture's size. It also checks active CMY thumbnail changes, identical unopened
+display preview of a new size repaints, at its texture's size (since #248 zoom
+does not change the display size; the detail layer covers it). It also checks active CMY thumbnail changes, identical unopened
 negative previews, whole-roll black-and-white pending-to-ready transitions,
 and a delayed cold-file read losing to a newer selection. Cold navigation
 also checks synchronous target feedback, accessible visible loading state,
