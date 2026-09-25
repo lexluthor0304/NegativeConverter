@@ -151,6 +151,20 @@ const thirdBackend = createIndexedDbSampleBackend(indexedDB, locks);
 await thirdBackend.put('third', samples[2]);
 assert.ok(deleted.includes(firstName), 'crash leftovers reclaimed by next spill session');
 assert.deepEqual(await secondBackend.get('second'), samples[1], 'live sibling survives crash cleanup');
+// A roll sample carries its canonical tile's context (#247): the base size and
+// a small 16-bit analysis reference survive a spill; other fields do not.
+{
+  const withTile = { ...sample(5), __baseSize: { width: 9504, height: 6320 },
+    __analysisReference: { width: 2, height: 1, data: Uint16Array.from([1, 2, 3, 65535, 4, 5, 6, 0]) }, stray: 'dropped' };
+  await thirdBackend.put('tile', withTile);
+  const back = await thirdBackend.get('tile');
+  const { stray, ...expected } = withTile;
+  assert.deepEqual(back, expected);
+  assert.ok(back.__analysisReference.data instanceof Uint16Array);
+  const bounded = createAnalysisSampleStore({ maxBytes: 1000, backend: null });
+  await bounded.put('tile', withTile);
+  assert.equal(bounded.bytes, 60 + 120 + 16, 'the reference counts against the RAM budget');
+}
 await secondBackend.clear(); await thirdBackend.clear();
 assert.equal(heldLocks.size, 0, 'normal clear releases all live ownership locks');
 assert.deepEqual([...databases.keys()], [legacy], 'normal sessions leave no spill databases');

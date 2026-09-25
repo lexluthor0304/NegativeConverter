@@ -4,7 +4,8 @@
 import assert from 'node:assert/strict';
 import {
   PROJECT_VERSION, buildRollProject, serializeRollProject, parseRollProject, migrateRollProject,
-  matchProjectFiles, hashFileForProject, projectFileName, isProjectFileName
+  matchProjectFiles, hashFileForProject, projectFileName, isProjectFileName,
+  THUMB_RENDER_VERSION, isProjectThumbnail, projectThumbnailContext, restorableProjectThumbnail
 } from './rollProject.js';
 
 const settingsA = { coreExposure: 12, curves: { r: Uint8Array.from({ length: 256 }, (_, i) => i), g: null, b: null }, frameMetadata: { frameNumber: '3', notes: '' }, localExposure: { strokes: [{ x: 0.2, y: 0.3, r: 0.1, stops: 0.5 }] } };
@@ -88,6 +89,54 @@ const files = [
   assert.equal(projectFileName({}), 'roll.ncroll.json');
   assert.equal(isProjectFileName('Roll-12.ncroll.json'), true);
   assert.equal(isProjectFileName('photo.json'), false);
+}
+
+// Light-table tiles in the project (#247 part 5): JPEG data URLs with the
+// context they were rendered under; the version stays 1, older files and
+// readers do without them.
+{
+  const jpeg = n => 'data:image/jpeg;base64,' + Buffer.alloc(n, 7).toString('base64');
+  const context = projectThumbnailContext({ dust: [false, 3, 40, false], flatFieldId: null, autoWhiteBalance: false });
+  assert.equal(context.renderVersion, THUMB_RENDER_VERSION);
+  const project = buildRollProject({ files: [
+    { name: 'a.nef', size: 1, settings: settingsA, thumbnail: jpeg(4000), thumbnailContext: context },
+    { name: 'b.nef', size: 2, settings: settingsA },
+    { name: 'c.nef', size: 3, thumbnail: 'https://example.com/tile.jpg', thumbnailContext: context },
+    { name: 'd.nef', size: 4, thumbnail: 'data:image/svg+xml;base64,PHN2Zz4=', thumbnailContext: context },
+    { name: 'e.nef', size: 5, thumbnail: jpeg(20000), thumbnailContext: context },
+    { name: 'f.nef', size: 6, thumbnail: jpeg(100) }
+  ] });
+  assert.equal(project.version, 1);
+  assert.deepEqual(project.files.map(entry => Boolean(entry.thumbnail)), [true, false, false, false, false, false],
+    'only a tile-sized JPEG data URL with its context is written');
+  const back = parseRollProject(serializeRollProject(project));
+  assert.equal(back.files[0].thumbnail, jpeg(4000));
+  assert.deepEqual(back.files[0].thumbnailContext, context);
+  // Restored only under the same render version, dust, flat field and white balance.
+  assert.equal(restorableProjectThumbnail(back.files[0], context), jpeg(4000));
+  assert.equal(restorableProjectThumbnail(back.files[1], context), null, 'no tile saved');
+  for (const current of [
+    { ...context, renderVersion: THUMB_RENDER_VERSION + 1 },
+    { ...context, dust: [true, 3, 40, false] },
+    { ...context, dust: [false, 4, 40, false] },
+    { ...context, flatFieldId: 'ff-1' },
+    { ...context, autoWhiteBalance: true }
+  ]) assert.equal(restorableProjectThumbnail(back.files[0], current), null, JSON.stringify(current));
+  const older = { ...back.files[0], thumbnailContext: { ...context, renderVersion: THUMB_RENDER_VERSION - 1 } };
+  assert.equal(restorableProjectThumbnail(older, context), null, 'saved by another render version');
+  assert.equal(restorableProjectThumbnail({ ...back.files[0], thumbnail: 'https://example.com/x.jpg' }, context), null);
+  // A project written before #247 parses and restores nothing.
+  const legacy = parseRollProject(JSON.stringify({ kind: 'neoanaloglab-roll', version: 1, files: [{ name: 'a.nef', size: 1, settings: {} }] }));
+  assert.equal(restorableProjectThumbnail(legacy.files[0], context), null);
+  assert.equal(isProjectThumbnail(jpeg(4000)), true);
+  assert.equal(isProjectThumbnail(jpeg(4000) + '"'), false);
+  // A 116-frame roll of 7 KB tiles grows the file by less than 1 MB.
+  const frames = Array.from({ length: 116 }, (_, i) => ({ name: `f${i}.dng`, size: i, settings: settingsA }));
+  const plain = serializeRollProject(buildRollProject({ files: frames })).length;
+  const withTiles = serializeRollProject(buildRollProject({ files: frames.map(frame => ({ ...frame,
+    thumbnail: jpeg(5200), thumbnailContext: context })) })).length;
+  assert.ok(jpeg(5200).length <= 7 * 1024);
+  assert.ok(withTiles - plain < 1_000_000, `116 tiles add ${withTiles - plain} bytes`);
 }
 
 console.log('rollProject.test.mjs passed');

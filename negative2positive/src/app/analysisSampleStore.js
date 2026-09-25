@@ -6,24 +6,25 @@ export const ANALYSIS_SAMPLE_DATABASE_PREFIX = 'negativeconverter-analysis-sampl
 const lockName = name => `negativeconverter-analysis-database:${name}`;
 
 function sampleBytes(sample) {
-  const buffers = new Set([sample?.data?.buffer, sample?.__image16?.data?.buffer]);
+  const buffers = new Set([sample?.data?.buffer, sample?.__image16?.data?.buffer, sample?.__analysisReference?.data?.buffer]);
   let bytes = 0;
   for (const buffer of buffers) if (buffer) bytes += buffer.byteLength;
   return bytes;
 }
 
 // ImageData's custom __image16 property is not preserved by native structured
-// cloning. Store an explicit plain container to retain the attached precision.
+// cloning. Store an explicit plain container to retain the attached precision,
+// and what the sample's canonical tile needs (#247): the base's size and the
+// small analysis reference taken from it.
 function serializableSample(sample) {
+  const plane = value => ({ width: value.width, height: value.height, data: value.data });
   return {
     width: sample.width,
     height: sample.height,
     data: sample.data,
-    ...(sample.__image16 ? { __image16: {
-      width: sample.__image16.width,
-      height: sample.__image16.height,
-      data: sample.__image16.data,
-    } } : {}),
+    ...(sample.__image16 ? { __image16: plane(sample.__image16) } : {}),
+    ...(sample.__baseSize ? { __baseSize: { width: sample.__baseSize.width, height: sample.__baseSize.height } } : {}),
+    ...(sample.__analysisReference ? { __analysisReference: plane(sample.__analysisReference) } : {}),
   };
 }
 

@@ -1,5 +1,7 @@
 // Keep the exact, geometry-applied samples from import analysis, not full RAW
 // frames. The byte cap also bounds memory when a folder contains many rolls.
+// The light-table lane keeps trickled watch-folder frames' samples here until
+// a roll import takes them (#247).
 export function createRollSampleCache(maxBytes = 128 * 1024 * 1024) {
   const entries = new Map();
   let bytes = 0;
@@ -19,6 +21,10 @@ export function createRollSampleCache(maxBytes = 128 * 1024 * 1024) {
     },
     take,
     clear() { entries.clear(); bytes = 0; },
+    retainKeys(keys) {
+      const retained = new Set(keys);
+      for (const key of [...entries.keys()]) if (!retained.has(key)) take(key);
+    },
     get bytes() { return bytes; }
   };
 }

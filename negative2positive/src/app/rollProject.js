@@ -8,6 +8,12 @@ export const PROJECT_VERSION = 1;
 export const PROJECT_KIND = 'neoanaloglab-roll';
 export const PROJECT_EXTENSION = '.ncroll.json';
 export const HASH_HEAD_BYTES = 1024 * 1024;
+// Bump whenever conversion, adjustment or light-table tile rendering changes:
+// tiles saved under another version are rendered again on reopen (#247).
+export const THUMB_RENDER_VERSION = 1;
+// A 144 px JPEG tile is 3-7 KB as a data URL; anything else is not one.
+const PROJECT_THUMBNAIL_MAX_CHARS = 16 * 1024;
+const PROJECT_THUMBNAIL_PATTERN = /^data:image\/jpeg;base64,[A-Za-z0-9+/]+={0,2}$/;
 
 const RECOVERY_DB = 'nc_project_recovery';
 const RECOVERY_STORE = 'rolls';
@@ -40,8 +46,47 @@ function jsonReplacer(_key, value) {
 }
 
 /**
+ * A light-table tile as a project may carry it: a JPEG data URL of a tile's
+ * size. Anything else (another scheme, a remote URL, an oversized string)
+ * is refused, so a project file never makes the page load a URL.
+ */
+export function isProjectThumbnail(value) {
+  return typeof value === 'string' && value.length <= PROJECT_THUMBNAIL_MAX_CHARS && PROJECT_THUMBNAIL_PATTERN.test(value);
+}
+
+/**
+ * What a saved tile was rendered under besides its recipe (#247): the render
+ * version, the global dust settings, the flat field the frame used, and
+ * whether the automatic gray point was applied to it.
+ */
+export function projectThumbnailContext({ dust = [], flatFieldId = null, autoWhiteBalance = false } = {}) {
+  return {
+    renderVersion: THUMB_RENDER_VERSION,
+    dust: Array.from(dust),
+    flatFieldId: flatFieldId || null,
+    autoWhiteBalance: Boolean(autoWhiteBalance)
+  };
+}
+
+/**
+ * The saved tile of a project entry when it was rendered under `current`
+ * (projectThumbnailContext of the reopened frame), otherwise null. Projects
+ * saved without tiles, by another render version or under other dust,
+ * flat-field or white-balance conditions restore none.
+ */
+export function restorableProjectThumbnail(entry, current) {
+  const saved = entry?.thumbnailContext;
+  if (!isProjectThumbnail(entry?.thumbnail) || !saved || typeof saved !== 'object' || !current) return null;
+  if (saved.renderVersion !== THUMB_RENDER_VERSION || current.renderVersion !== THUMB_RENDER_VERSION) return null;
+  if (JSON.stringify(saved.dust) !== JSON.stringify(current.dust)) return null;
+  if ((saved.flatFieldId || null) !== (current.flatFieldId || null)) return null;
+  if (Boolean(saved.autoWhiteBalance) !== Boolean(current.autoWhiteBalance)) return null;
+  return entry.thumbnail;
+}
+
+/**
  * @param {object} input
- * @param {Array<{name:string,size:number,lastModified?:number,path?:string,hash?:string,settings?:object,studioColors?:object,selected?:boolean}>} input.files in roll order
+ * @param {Array<{name:string,size:number,lastModified?:number,path?:string,hash?:string,settings?:object,studioColors?:object,selected?:boolean,thumbnail?:string,thumbnailContext?:object}>} input.files in roll order
  */
 export function buildRollProject({ files = [], rollMetadata = {}, rollReference = null, rollAnalysis = null, lensCorrection = null, app = 'NeoAnalogLab Negative Converter', appVersion = '' } = {}) {
   return {
@@ -66,7 +111,10 @@ export function buildRollProject({ files = [], rollMetadata = {}, rollReference 
       selected: entry.selected !== false,
       settings: entry.settings || null,
       studioColors: entry.studioColors || null,
-      filmTypeOverride: entry.filmTypeOverride || null
+      filmTypeOverride: entry.filmTypeOverride || null,
+      // Optional (#247): older readers ignore both, so the version stays 1.
+      ...(isProjectThumbnail(entry.thumbnail) && entry.thumbnailContext
+        ? { thumbnail: entry.thumbnail, thumbnailContext: entry.thumbnailContext } : {})
     }))
   };
 }

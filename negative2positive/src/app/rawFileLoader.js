@@ -9,6 +9,7 @@ import { primeFilmStats } from './filmStatsCache.js';
 import { tryNefJpegPreview, createEmbeddedPreviewSource, decodeNefPreviewJpeg } from './nefJpegPreview.js';
 import { sniffImageKind, loadStandardImage, loadPngImageData } from './imageFileLoaders.js';
 import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
+import { halfDecodeFullSize } from './imageDimensions.js';
 export { estimateRawDecodeBytes };
 export { rawResultToRgb16 } from './rawResultToRgb16.js';
 
@@ -241,9 +242,12 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     console.warn('[RAW] heavy IIQ has no usable embedded preview, falling through to LibRaw');
   }
 
-  // Fast preview: use half-size for ~4x speedup on large files
-  const useHalfSize = fastPreview && bufBytes > RAW_SIZE_HEAVY;
-  const use8Bit = fastPreview;
+  // Fast preview: use half-size for ~4x speedup on large files. A caller can
+  // state both explicitly instead: `halfSize: true, outputBps: 16` is the
+  // light-table tile decode (#247), independent of the 8-bit preview flag.
+  const explicitHalfSize = typeof options.halfSize === 'boolean';
+  const useHalfSize = explicitHalfSize ? options.halfSize : fastPreview && bufBytes > RAW_SIZE_HEAVY;
+  const use8Bit = options.outputBps === 8 || options.outputBps === 16 ? options.outputBps === 8 : fastPreview;
 
   const openTimeoutMs = fastPreview
     ? Math.min(bufBytes > RAW_SIZE_HUGE ? RAW_OPEN_TIMEOUT_MS_HUGE : RAW_OPEN_TIMEOUT_MS, 15_000)
@@ -468,6 +472,8 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     }
     imageData.__image16 = { width: outcome.width, height: outcome.height, data: outcome.rgba16 };
     if (outcome.filmStats) primeFilmStats(imageData, outcome.filmStats);
+    // The size the recipe's crop, strokes and analysis area refer to.
+    if (explicitHalfSize && useHalfSize) imageData.__fullSize = halfDecodeFullSize(outcome.width, outcome.height, metaWidth, metaHeight);
     return imageData;
   }
 }

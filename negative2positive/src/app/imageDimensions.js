@@ -74,6 +74,12 @@ export function rememberImageDimensions(file, image) {
   if (file && size) dimensions.set(file, size);
 }
 
+// The size a full decode of `file` produced this session, or null.
+export function knownImageDimensions(file) {
+  const size = file ? dimensions.get(file) : null;
+  return size ? { width: size.width, height: size.height } : null;
+}
+
 export async function imagePixelsForBatch(file) {
   let size = dimensions.get(file);
   if (!size) {
@@ -84,4 +90,18 @@ export async function imagePixelsForBatch(file) {
     } catch { /* Unsupported/truncated headers use a conservative memory budget. */ }
   }
   return size ? size.width * size.height : UNKNOWN_IMAGE_PIXELS;
+}
+
+/**
+ * The full size behind a half-size LibRaw decode: LibRaw halves each side
+ * rounding up, and its metadata reports the oriented full size. Without a
+ * matching report the size is twice the decode's (within one pixel).
+ */
+export function halfDecodeFullSize(width, height, metaWidth = 0, metaHeight = 0) {
+  const halves = (w, h) => Math.abs(width - Math.ceil(w / 2)) <= 1 && Math.abs(height - Math.ceil(h / 2)) <= 1;
+  if (metaWidth > 0 && metaHeight > 0) {
+    if (halves(metaWidth, metaHeight)) return { width: metaWidth, height: metaHeight };
+    if (halves(metaHeight, metaWidth)) return { width: metaHeight, height: metaWidth };
+  }
+  return { width: width * 2, height: height * 2 };
 }

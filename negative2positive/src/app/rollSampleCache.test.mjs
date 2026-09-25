@@ -8,5 +8,6 @@ assert.equal(cache.take('a'),a);assert.equal(cache.bytes,32);assert.equal(a.__im
 cache.put('a',a);cache.put('c',{data:new Uint8ClampedArray(24)});
 assert.equal(cache.take('b'),null);assert.equal(cache.bytes,40);
 cache.put('large',{data:new Uint8ClampedArray(100)});assert.equal(cache.bytes,40);
+cache.retainKeys(['c']);assert.equal(cache.bytes,24);assert.equal(cache.take('a'),null);
 cache.clear();assert.equal(cache.bytes,0);assert.equal(cache.take('a'),null);
 console.log('roll sample cache: exact 16-bit samples, consumption, eviction and byte cap passed');
