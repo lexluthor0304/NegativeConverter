@@ -82,7 +82,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     import { convertFrameInWorker, convertPreviewFrameInWorker, convertFullResolutionFrameInWorker, createConversionWorkerClient, createConversionWorkerPool, CONVERSION_FAILED, WORKER_CRASHED, WORKER_TIMEOUT, WORKER_UNAVAILABLE, WORKER_ABORTED, isConversionInputLost } from './conversionWorkerClient.js';
     import { routeCoreConversion, keepsFullPlaneOnDowngrade, fullResolutionIsStale, restoredFrameFlags, viewportRefreshBranch, repairsNeedSettling } from './fullResolutionRouting.js';
     import { poolRepairMask } from './repairedPreview.js';
-    import { planBatchParallelism, planPng16BandWorkers, runBatchPipeline, planGeometryBandsInFlight, LANE_BYTES_PER_PIXEL } from './batchExportScheduler.js';
+    import {
+      planBatchParallelism, planPng16BandWorkers, runBatchPipeline, planGeometryBandsInFlight, LANE_BYTES_PER_PIXEL,
+      createLearningBarrier, planDecodeAhead, EXPORT_MAX_UNWRITTEN_BYTES
+    } from './batchExportScheduler.js';
     import {
       displayPreviewSize, resizeDisplayPreview, resizeDisplayPreviewInBands, updateDisplayPreviewRect, noteDisplayFilter,
       displayLevelFactor, displayLevelGeometry, buildDisplayLevelInBands, resampleDisplayLevel, displayTargetFor, isDisplayTarget,
@@ -193,7 +196,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       markOwnedPlanes,
       planeBuffersOf,
       releaseOwnedPlanes,
-      setLiveReferenceProbe
+      setLiveReferenceProbe,
+      sharesPlaneBuffers
     } from './planeRelease.js';
     import { registerEvictablePlane, evictPlane } from './evictablePlanes.js';
 
@@ -398,8 +402,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // Background photo work (#243; see "Background photo lanes" below). The
     // gate says when it may start: not during a switch, a conversion, a
     // full-resolution render or an export, and not within 400 ms of input.
-    // A throwing busy probe (state not initialised yet) counts as busy.
-    const backgroundGate = createBackgroundGate({ isBusy: () => foregroundBusyForBackground() });
+    // A throwing busy probe (state not initialised yet) counts as busy. A
+    // batch export's decode-ahead waits on the foreground conditions only
+    // (#256): the batch holds the export lock itself.
+    const backgroundGate = createBackgroundGate({
+      isBusy: () => foregroundBusyForBackground(),
+      isForegroundBusy: () => foregroundInteractionBusy()
+    });
     // One decode per file for the background lanes and the foreground
     // (sharedDecodes.js). Background decodes always use the options a
     // foreground load would: full size, defects repaired, with rawMetadata.
@@ -16520,6 +16529,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // a RAW decode's worker computes the film statistics alongside the planes.
     // `signal` (#243) aborts the decode (see loadRawFile); `onMetadata`
     // receives a RAW file's lens/camera metadata as loadFile's does.
+    // `onStage` (#256 Part 4): a RAW decode reports 'postDecode' once LibRaw
+    // is done (see loadRawFile).
     // `halfSize` (#247 1b, light-table tiles of frames with a recipe only): a
     // half-size 16-bit LibRaw decode without the sensor-defect pass, which
     // single-photosite defects do not need at tile size and which binned data
@@ -16531,7 +16542,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // it keeps until it drops the frame, or a lane's that already covers the
     // decode); without one the decode takes its own `priority` claim, which
     // covers the decode only.
-    async function loadFileToImageData(file, { filmStats = false, signal = null, onMetadata = null, halfSize = false, claim = null, priority = 'user', label = '' } = {}) {
+    async function loadFileToImageData(file, { filmStats = false, signal = null, onMetadata = null, halfSize = false, onStage = null, claim = null, priority = 'user', label = '' } = {}) {
       const fileName = file.name.toLowerCase();
       const aborted = () => signal?.reason?.name === 'AbortError' ? signal.reason : new DOMException('Decode was aborted', 'AbortError');
       const ownClaim = claim ? null : createFrameClaim(file, { priority, signal, label: label || `decode ${file.name}` });
@@ -16548,6 +16559,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
             reserveDecode: size => memoryClaim.atDecode(size),
             ramBytes: memoryRuntime.ramBytes,
             ...(onMetadata ? { onMetadata } : {}),
+            ...(onStage ? { onStage } : {}),
             ...(halfSize ? { halfSize: true, outputBps: 16, suppressSensorDefects: false } : {})
           });
           if (halfSize) {
@@ -16967,6 +16979,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // inputs, thresholds and geometry are the same either way.
       const silent = options.silent ?? Boolean(previewMax);
       const ownedPlanes = Array.isArray(options.ownedPlanes) ? options.ownedPlanes : null;
+      // `releaseEarly` (batch export, #256 Part 1.1): the planes this call
+      // made before the conversion are released as soon as it resolves.
+      const earlyPlanes = options.releaseEarly ? [] : null;
       // A plane this call allocated: stamped, and exposed to the caller.
       const own = (plane, input = null) => {
         if (!plane || plane === input) return plane;
@@ -16976,6 +16991,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         }
         markOwnedPlanes(plane);
         ownedPlanes?.push(plane);
+        earlyPlanes?.push(plane);
         return plane;
       };
       const trace = createPerfTrace('processFileWithSettings', {
@@ -16990,10 +17006,22 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // The caller's memory claim (#258): a lane's covers the decode, a
       // frame job's is held until it drops the frame.
       const claim = options.memoryClaim ? { claim: options.memoryClaim } : {};
+      // A base decoded ahead for this call (`sourceOwned`, #256 decode-ahead)
+      // belongs to it like one it decodes itself. Any other base passed in (a
+      // lane's shared decode, a session) is only read.
+      const baseOwned = !options.sourceImageData || Boolean(options.sourceOwned);
       let imageData = options.sourceImageData || own(await loadFileToImageData(file, { filmStats: !savedSettings, halfSize, ...claim }));
+      if (options.sourceImageData && options.sourceOwned) {
+        own(imageData);
+        // Handed over: without the caller's handle, releasing the base below
+        // leaves it unreachable.
+        options.sourceImageData = null;
+      }
       let baseSize = previewMax && imageData.__fullSize ? imageData.__fullSize : imageData;
       assertRepairCurrent(isCurrent);
       options.onDecoded?.(imageData);
+      // The base exists: a batch lets the next frame start decoding (#256).
+      options.onBaseReady?.();
       trace.mark('load', {
         pixels: getImageDataPixelCount(imageData)
       });
@@ -17025,7 +17053,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         // call made itself, which nothing else has seen, goes there without
         // a copy and comes back as a new ImageData over the same buffer. A
         // base passed in (a lane's shared decode, #243) is copied.
-        const owned = !options.sourceImageData && !options.onDecoded;
+        const owned = baseOwned && !options.onDecoded;
         const analysed = await runImportDetections(imageData, {
           frame: detectFrame, filmEdge: readEdge, owned, silent, frameFilmType: initialSettings.filmType,
           reload: owned ? () => loadFileToImageData(file, { filmStats: !savedSettings, halfSize, ...claim }) : null,
@@ -17048,6 +17076,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         }
       }
       if (!savedSettings) {
+        // A batch keeps a one-lane batch's order of learned defaults (#256):
+        // the records are read once every earlier frame that learns from its
+        // export has been written.
+        if (options.learningBarrier) await options.learningBarrier();
         const queued = state.fileQueue.find(item => item.file === file);
         initialSettings = withPendingEdits(pendingItem, await learnedImportSettings(settleImportFilmType(queued, initialSettings), queued));
       }
@@ -17124,9 +17156,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // expired rescue); 'derived' (a geometry or lens output) is not, only
       // its dimensions and `__lensMapping` are. A batch export's convert may
       // lend the one and hand over the other; every other convert ignores it.
-      const baseBuffers = planeBuffersOf(imageData);
-      const sourceRole = workingData !== imageData && !planeBuffersOf(workingData).some((buffer) => baseBuffers.includes(buffer))
-        ? 'derived' : 'base';
+      const sourceRole = workingData !== imageData && !sharesPlaneBuffers(workingData, imageData) ? 'derived' : 'base';
 
       // Every preview-size render goes through the one tile renderer (#247
       // 2a). A reduced render's working image is also what a later recipe
@@ -17165,16 +17195,58 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         return adjusted;
       }
 
-      let processed = own(await convert({
-        imageData: workingData,
+      const conversion = {
         settings: buildRouterSettings(settings, imageData),
-        options: { preview: reducedPreview, forceFullProcess: true, analysisImageData: getColorAnalysisSample(settings, imageData) },
-        sourceRole
-      }), workingData);
+        options: { preview: reducedPreview, forceFullProcess: true, analysisImageData: getColorAnalysisSample(settings, imageData) }
+      };
+      let converted;
+      try {
+        converted = await convert({ imageData: workingData, ...conversion, sourceRole });
+      } catch (err) {
+        // The lane (or band pool) lost the geometry or lens output it was
+        // handed (#250, #256). The decoded base is still here (#256 Part
+        // 1.2): rebuild the working plane from it with the same chain and
+        // convert that the way a failed lane falls back, instead of decoding
+        // the file again. A lost base is the caller's to re-render.
+        if (sourceRole !== 'derived' || reducedGeometry || reducedPreview || reducedTile || !isConversionInputLost(err)) throw err;
+        console.warn(`The conversion lost the working plane of ${file?.name || 'a frame'}; rebuilding it from the decoded base:`, err?.message || err);
+        let rebuilt = own(await renderGeometryChain(imageData, geometry, { isCurrent, maxInFlight: options.geometryBands }), imageData);
+        rebuilt = own(await applyLensCorrectionWithSettings(rebuilt, settings, { updateUi: false }), rebuilt);
+        assertRepairCurrent(isCurrent);
+        workingData = rebuilt;
+        rebuilt = null;
+        const fallback = typeof options.convertFallback === 'function' ? options.convertFallback : convertFrameWithRouter;
+        converted = await fallback({ imageData: workingData, ...conversion });
+      }
+      const beforeConversion = earlyPlanes ? earlyPlanes.splice(0) : null;
+      let processed = own(converted, workingData);
+      converted = null;
       assertRepairCurrent(isCurrent);
       trace.mark('convert', {
         pixels: getImageDataPixelCount(processed)
       });
+      if (earlyPlanes) {
+        // Converted: from here on the base and the working plane are read for
+        // their size (and the lens mapping) only (#256 Part 1.1). Release the
+        // ones this call owns now instead of after the encode, so the next
+        // frame's decode fits beside this frame's later stages. A base that
+        // was passed in without `sourceOwned` is never among them.
+        const lensMapping = workingData.__lensMapping || null;
+        const early = beforeConversion.filter((plane) => !sharesPlaneBuffers(plane, processed));
+        imageData = { width: imageData.width, height: imageData.height };
+        baseSize = imageData;
+        workingData = { width: workingData.width, height: workingData.height, __lensMapping: lensMapping };
+        if (ownedPlanes) {
+          for (const plane of early) {
+            const at = ownedPlanes.indexOf(plane);
+            if (at >= 0) ownedPlanes.splice(at, 1);
+          }
+        }
+        releaseOwnedPlanes(...early);
+        // Suspended frames keep their registers: empty the lists as well.
+        early.length = 0;
+        beforeConversion.length = 0;
+      }
 
       // Apply dust removal if enabled (full resolution for export). A contact
       // sheet leaves it out (a flagged proof-sheet approximation, #247).
@@ -17354,10 +17426,26 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // 16-bit TIFF/PNG goes through one fused request. Whatever is left is
     // released once the file is encoded. If a worker dies holding a plane, the
     // frame is rendered once more, from decode, with copies.
-    async function renderBatchExportFile(job, position, { exportInfo, workers, dustRemoval }, { transferPlanes = true } = {}) {
+    //
+    // Stages (#256): a base decoded ahead (`context.prepared`) is handed over
+    // once, so a second render decodes the file again; `onBaseReady` lets the
+    // next frame's decode start once this one has its base; the learning
+    // barrier keeps the learned defaults in a one-lane batch's order. The
+    // base and the working plane are released as soon as the frame is
+    // converted (`releaseEarly`), and an 8-bit output drops the unadjusted
+    // 16-bit plane before the adjustment stage.
+    async function renderBatchExportFile(job, position, context, { transferPlanes = true } = {}) {
+      const { exportInfo, workers, dustRemoval } = context;
       const { file, settings } = job;
+      const prepared = context.prepared || null;
+      context.prepared = null;
+      const stages = {
+        onBaseReady: context.onBaseReady || null,
+        learningBarrier: context.learningBarrier || null,
+        ...(prepared ? { sourceImageData: prepared, sourceOwned: true } : {})
+      };
       if (exportInfo.format === 'dng') {
-        const { source, settings: usedSettings } = await processFileWithSettings(file, settings, { stage: 'source', convert: workers.convert, geometryBands: workers.geometryBands, silent: true, memoryClaim: coveredMemoryClaim() });
+        const { source, settings: usedSettings } = await processFileWithSettings(file, settings, { stage: 'source', convert: workers.convert, geometryBands: workers.geometryBands, silent: true, memoryClaim: coveredMemoryClaim(), ...stages });
         return renderLinearDngBlobInSlices(source, usedSettings, position);
       }
       const sprocket = state.exportSprocketHolesEnabled;
@@ -17372,8 +17460,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           dustRemoval,
           dustWorker: workers.dust,
           convert: (transferPlanes && workers.convertHandoff) || workers.convert,
+          convertFallback: workers.convertFallback || null,
           geometryBands: workers.geometryBands,
-          ownedPlanes
+          ownedPlanes,
+          releaseEarly: true,
+          ...stages
         });
         const adjustmentSettings = buildAdjustmentSettings(used);
         const wants16 = exportInfo.bitDepth === 16;
@@ -17392,6 +17483,17 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           && safeStorageGet('nc_hdr_gain_map_v1') !== 'off'
           && !sprocket
           && Boolean(processed.__image16);
+        // An 8-bit output reads no 16-bit pixel from here on: the 8-bit
+        // adjustment works on `processed.data`, and 8-bit encoders ignore the
+        // plane (#256 Part 1.3; the expired measurement has run by now).
+        // Drop it before the adjustment and encode instead of after them.
+        if (!wants16 && !gainMap && processed.__image16
+          && (exportInfo.format === 'png' || exportInfo.format === 'tiff' || exportInfo.format === 'jpeg')) {
+          const plane = processed.__image16;
+          processed.__image16 = null;
+          releaseOwnedPlanes(plane);
+          batchPipelineDiagnostics.droppedPlanes16 += 1;
+        }
         // The adjust stage may take its input unless the gain map still needs
         // the unadjusted plane (the 8-bit pass only takes `processed.data`).
         const adjusted = await applyPreparedAdjustmentsWithWorkers(processed, adjustmentSettings, {
@@ -17425,7 +17527,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         // failure.
         if (transferPlanes && (isExportInputLostError(err) || isConversionInputLost(err))) {
           console.warn(`A plane of ${file.name} was lost with its worker; rendering the frame again:`, err?.message || err);
-          return await renderBatchExportFile(job, position, { exportInfo, workers, dustRemoval }, { transferPlanes: false });
+          return await renderBatchExportFile(job, position, context, { transferPlanes: false });
         }
         throw err;
       } finally {
@@ -17434,10 +17536,97 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       }
     }
 
+    // `nc_batch_pipeline_v1` (support and benchmarks, no UI): 'serial' runs
+    // a batch as before #256 (a lane held until its own write, no
+    // decode-ahead, no conversion band pool): the parity oracle for the
+    // default on the same build. 'substages' also starts the next frame's
+    // decoder while the previous one is in its post-decode pass (#256 Part 4,
+    // off until the #230 harness shows the decode stage still bounds a batch).
+    function batchPipelineMode() {
+      const mode = safeStorageGet('nc_batch_pipeline_v1');
+      return mode === 'serial' || mode === 'substages' ? mode : 'default';
+    }
+
+    // What the batch stages did, for the acceptance runs and the smoke test
+    // (window.__ncBatchPipeline).
+    const batchPipelineDiagnostics = {
+      batches: 0, lastMode: null, lastLanes: 0, droppedPlanes16: 0, rebuilds: 0,
+      decodeAhead: { admitted: 0, refused: { ceiling: 0, 'low-memory': 0, hidden: 0, format: 0 }, lastEstimate: 0 },
+      last: null
+    };
+    if (typeof window !== 'undefined') window.__ncBatchPipeline = { diagnostics: batchPipelineDiagnostics };
+
+    // Decode-ahead for a batch export (#256 Part 3): while a lane processes
+    // frame N, frame N+1 is decoded (one decoder at a time, one frame ahead;
+    // two sub-stages in 'substages' mode), admitted by estimated bytes. RAW
+    // and PNG decodes run off this thread; other formats decode in their lane
+    // as before. The prepared base is the same decode the lane would make.
+    function batchDecodeAhead(mode, { pixelsPerFile }) {
+      if (mode === 'serial') return null;
+      const decodesOffThread = (file) => isRawLikeFileName(String(file?.name || '').toLowerCase()) || isPngFile(file);
+      const subStages = mode === 'substages';
+      const pixels = new Map();
+      const pixelsOf = async (file) => {
+        if (!pixels.has(file)) pixels.set(file, await imagePixelsForBatch(file));
+        return pixels.get(file);
+      };
+      return {
+        prepareDepth: subStages ? 2 : 1,
+        admitPrepare: async ({ job, prepared, unwrittenBytes, processing }) => {
+          if (!decodesOffThread(job.file)) {
+            batchPipelineDiagnostics.decodeAhead.refused.format += 1;
+            return false;
+          }
+          const decodingPixels = [];
+          const waitingPixels = [];
+          for (const entry of prepared) (entry.stage === 'ready' ? waitingPixels : decodingPixels).push(await pixelsOf(entry.job.file));
+          const hidden = hiddenJobs.status();
+          const plan = planDecodeAhead({
+            candidatePixels: await pixelsOf(job.file),
+            decodingPixels,
+            waitingPixels,
+            processingPixels: Array.from({ length: processing }, () => pixelsPerFile),
+            unwrittenBytes,
+            residentBytes: hiddenResidentBytes(),
+            deviceMemory: navigator.deviceMemory,
+            hiddenLimited: hidden.safeMode || (hidden.hidden && hidden.limited)
+          });
+          batchPipelineDiagnostics.decodeAhead.lastEstimate = plan.bytes;
+          if (plan.admit) batchPipelineDiagnostics.decodeAhead.admitted += 1;
+          else batchPipelineDiagnostics.decodeAhead.refused[plan.reason] += 1;
+          return plan.admit;
+        },
+        prepare: async (job, { signal, stage }) => {
+          // Editing goes first on the desktop, where the editor stays live
+          // during a batch: wait for input quiet and for a photo switch or a
+          // foreground decode or conversion to end, at most 2 s. The batch's
+          // own export lock never holds it (foregroundOnly).
+          if (isTauriDesktop()) await backgroundGate.idle({ signal, maxWaitMs: BACKGROUND_STEP_WAIT_CAP_MS, foregroundOnly: true });
+          const base = await loadFileToImageData(job.file, { filmStats: !job.settings, signal, ...(subStages ? { onStage: stage } : {}) });
+          return markOwnedPlanes(base);
+        },
+        // A frame decoded ahead of a cancelled batch is never processed.
+        disposePrepared: (base) => releaseOwnedPlanes(base)
+      };
+    }
+
+    // Frames whose export records what the user changed (learnFromExport).
+    function mayLearnFromExport(item) {
+      return Boolean(item && !item.savedSettings && !state.rollReference.applyLock && item.touchedKeys?.size);
+    }
+
     // Runs `jobs` through the pipeline, keeps the file-list statuses current
     // and releases the workers afterwards. `sink` writes one encoded frame and
-    // throws to fail that frame; `signal` stops further frames from starting.
-    async function runBatchExport(jobs, { exportInfo, sink, onProgress = null, signal = null, dustRemoval = null }) {
+    // throws to fail that frame; it may return `{ learned }`, the promise of
+    // its learnFromExport write (`learnsInSink`), which later never-analysed
+    // frames wait for. `signal` stops further frames from starting.
+    //
+    // Stages (#256): a lane goes on to the next frame as soon as its encoded
+    // payload fits the unwritten-bytes cap (the payload waits for its turn at
+    // the in-order sink), and the next frame is decoded ahead while a lane
+    // processes the current one. `nc_batch_pipeline_v1 = serial` turns both
+    // off.
+    async function runBatchExport(jobs, { exportInfo, sink, onProgress = null, signal = null, dustRemoval = null, learnsInSink = false }) {
       const { lanes: plannedLanes, pixelsPerFile } = await planBatchExportLanes(jobs);
       // The crash-loop guard runs a resumed batch in one lane.
       const lanes = hiddenJobs.safeMode ? 1 : plannedLanes;
@@ -17445,21 +17634,42 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // Each lane reserves the lane constant over the batch's largest frame
       // (#258): the index is not claimed yet when it asks.
       const laneBytes = laneReservationBytes({ pixels: pixelsPerFile });
-      const workers = createBatchExportWorkers(lanes, { pixelsPerFile, exportInfo });
-      const trace = createPerfTrace('batchExport', { files: jobs.length, lanes });
+      const mode = batchPipelineMode();
+      const workers = createBatchExportWorkers(lanes, { pixelsPerFile, exportInfo, mode });
+      const trace = createPerfTrace('batchExport', { files: jobs.length, lanes, mode });
+      const learning = createLearningBarrier(jobs.length, (index) => learnsInSink && mayLearnFromExport(jobs[index].item));
+      const decodeAhead = batchDecodeAhead(mode, { pixelsPerFile });
+      const stats = {};
+      batchPipelineDiagnostics.batches += 1;
+      batchPipelineDiagnostics.lastMode = mode;
+      batchPipelineDiagnostics.lastLanes = lanes;
       activeLongJobs += 1;
       try {
         return await runBatchPipeline(jobs, {
           maxParallel: lanes,
           signal,
+          stats,
+          ...(mode === 'serial' ? {} : { maxUnwrittenBytes: EXPORT_MAX_UNWRITTEN_BYTES, payloadBytes: (blob) => Number(blob?.size) || 0 }),
+          ...(decodeAhead || {}),
           // Admission happens before a lane claims its next index (#241):
           // the hidden-job gate, then the memory budget; both are released
           // once the claimed frame's sink has run.
           beforeStart: ({ signal: stop }) => admitJobItem({
             hiddenBytes: bytes, memoryBytes: laneBytes, priority: 'user', label: 'export lane', signal: stop
           }),
-          process: (job, index) => renderBatchExportFile(job, job.markerIndex ?? index, { exportInfo, workers, dustRemoval }),
-          sink,
+          process: (job, index, prepared, context) => renderBatchExportFile(job, job.markerIndex ?? index, {
+            exportInfo, workers, dustRemoval, prepared: prepared || null,
+            onBaseReady: context?.decoded || null,
+            learningBarrier: () => learning.before(index)
+          }),
+          sink: async (job, blob, index) => {
+            let outcome = null;
+            try {
+              outcome = await sink(job, blob, index);
+            } finally {
+              learning.settle(index, outcome?.learned || null);
+            }
+          },
           onEvent: (event) => {
             const { item } = event.job;
             if (event.type === 'start') {
@@ -17472,6 +17682,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
               console.error(`Error processing ${item.file.name}:`, event.error);
               item.status = 'error';
               item.error = event.error && event.error.message ? event.error.message : String(event.error || 'Unknown error');
+              learning.settle(event.index);
             }
             updateFileListUI();
             if (onProgress) onProgress(event);
@@ -17480,7 +17691,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       } finally {
         activeLongJobs -= 1;
         workers.dispose();
-        trace.end();
+        batchPipelineDiagnostics.last = { mode, lanes, ...stats };
+        trace.end({ peakUnwrittenBytes: stats.peakUnwrittenBytes || 0, earlyReleases: stats.earlyReleases || 0,
+          decodedAhead: stats.prepare?.taken || 0 });
       }
     }
 
@@ -17726,6 +17939,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           exportInfo,
           dustRemoval,
           signal: cancel.signal,
+          learnsInSink: true,
           sink: async (job, blob) => {
             const saved = await writeBlobToDesktopDirectory(blob, targetDirectory, job.outputName, exportInfo.mimeType);
             // Recorded only once the native write returned (after its rename
@@ -17733,7 +17947,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
             // copy then carries the recipe this frame was exported with.
             marker.record(job.markerIndex, saved.path || '');
             scheduleProjectRecovery();
-            void learnFromExport(job.item);
+            // Later never-analysed frames wait for this write (#256).
+            return { learned: learnFromExport(job.item) };
           },
           onProgress: (event) => setDesktopBatchExportState({
             active: true,
@@ -17778,6 +17993,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         result = await runBatchExport(jobs, {
           exportInfo,
           signal: cancel.signal,
+          learnsInSink: true,
           sink: async (job, blob) => {
             const saved = await saveBlob(blob, job.outputName, exportInfo.mimeType);
             if (!saved.saved) {
@@ -17786,7 +18002,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
             }
             marker.record(job.markerIndex);
             scheduleProjectRecovery();
-            void learnFromExport(job.item);
+            // Later never-analysed frames wait for this write (#256).
+            return { learned: learnFromExport(job.item) };
           },
           onProgress: (event) => updateBatchOverlayProgress((event.done / total) * 100, batchProgressLabel(event.done, total))
         });
@@ -19164,13 +19381,18 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     // The foreground is switching, converting, rendering or exporting.
     function foregroundBusyForBackground() {
-      // A two-stage import's full decode and settle run first (#255); a
-      // failed one does not hold the lanes.
+      return foregroundInteractionBusy() || isDesktopBatchExportLocked() || singleExportActive;
+    }
+
+    // The same without the export locks: a photo switch, a foreground decode
+    // (a two-stage import's full decode and settle, #255) or a conversion
+    // (#256: what a batch's decode-ahead yields to).
+    function foregroundInteractionBusy() {
+      // A failed full decode does not hold anything.
       if (state.provisional && state.fullDecode?.status !== 'failed') return true;
       return Boolean(document.body.dataset.photoSwitching || document.body.dataset.studioBusy)
         || Boolean(processNegativeInFlight) || coreReprocessBusy() || Boolean(coreReprocessTimer)
-        || Boolean(state.fullResolutionPromise) || Boolean(fullResolutionRenderTimer)
-        || isDesktopBatchExportLocked() || singleExportActive;
+        || Boolean(state.fullResolutionPromise) || Boolean(fullResolutionRenderTimer);
     }
 
     // Input the gate waits 400 ms after: presses, wheel, keys and slider or

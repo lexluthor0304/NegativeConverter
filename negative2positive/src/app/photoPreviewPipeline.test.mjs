@@ -4,7 +4,7 @@ import vm from 'node:vm';
 import { downsampleImageDataForMaxDim } from './imageDataOps.js';
 import { createAdjustedPhotoPreview } from './photoPreview.js';
 import { applyPreparedAdjustmentsToBuffer, applyPreparedAdjustmentsToBuffer16 } from './adjustmentPipeline.js';
-import { markOwnedPlanes, planeBuffersOf } from './planeRelease.js';
+import { markOwnedPlanes, planeBuffersOf, sharesPlaneBuffers } from './planeRelease.js';
 import { reducedTileGeometry, renderReducedGeometry, tileGeometryKey } from './reducedGeometry.js';
 import { sanitizeCropRect, normalizeAngleDegrees, rotatedDimensions } from './imageGeometry.js';
 
@@ -104,7 +104,7 @@ function fixture({ lens = false, brush = false, dust = false, width = 600, heigh
     usesSilverCoreConversion: () => false,
     sanitizePresetType: type => type,
     safeStorageGet: () => 'off',
-    markOwnedPlanes, planeBuffersOf
+    markOwnedPlanes, planeBuffersOf, sharesPlaneBuffers
   });
   vm.runInContext(runtime, context);
   return { context, calls, image, corrected, mapping, settings, file };

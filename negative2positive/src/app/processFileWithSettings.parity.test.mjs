@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import vm from 'node:vm';
+import v8 from 'node:v8';
 
 globalThis.ImageData = class ImageData {
   constructor(data, width, height) { this.data = data; this.width = width; this.height = height; }
@@ -17,7 +18,7 @@ globalThis.ImageData = class ImageData {
 const { applyGeometryChainToImageData, applyRotationToImageData, mirrorImageDataHorizontal, sanitizeCropRect, normalizeAngleDegrees, rotatedDimensions } = await import('./imageGeometry.js');
 const { cropImageDataRegion, downsampleImageDataForMaxDim } = await import('./imageDataOps.js');
 const { applyPreparedAdjustmentsToBuffer, applyPreparedAdjustmentsToBuffer16 } = await import('./adjustmentPipeline.js');
-const { markOwnedPlanes, planeBuffersOf } = await import('./planeRelease.js');
+const { markOwnedPlanes, planeBuffersOf, sharesPlaneBuffers, releaseOwnedPlanes, configurePlaneRelease } = await import('./planeRelease.js');
 const { reducedTileGeometry, renderReducedGeometry, tileGeometryKey } = await import('./reducedGeometry.js');
 const { HEAD_PROCESS_FILE_WITH_SETTINGS } = await import('./processFileWithSettings.reference.mjs');
 
@@ -174,7 +175,9 @@ function run(fn, { base, saved, options, dust, automatic }) {
     reducedTileGeometry, renderReducedGeometry, tileGeometryKey,
     sampleAnalysisArea: () => null, TILE_ANALYSIS_REFERENCE_PIXELS: 16384,
     createAdjustedPhotoPreview: () => { throw new Error('no preview on the export branch'); },
-    markOwnedPlanes, planeBuffersOf
+    markOwnedPlanes, planeBuffersOf, sharesPlaneBuffers, releaseOwnedPlanes,
+    isConversionInputLost: (err) => Boolean(err) && err.code === 'INPUT_LOST',
+    convertFrameWithRouter: async () => { throw new Error('no main-thread conversion here'); }
   });
   // #251's in-place analysis-region sample, real in both runs.
   vm.runInContext(`${functionSource('analysisRegionSample')}\n${fn}`, context);
@@ -220,3 +223,124 @@ for (const [label, saved] of [...Object.entries(recipes), ['no recipe', null]]) 
   }
 }
 console.log(`processFileWithSettings parity: ${cases} export-branch cases match HEAD (calls, pixels, settings)`);
+
+// #256: a batch export's options change no stage call, no pixel and no
+// setting: `releaseEarly` (the base and the working plane are released once
+// the conversion resolves), a base decoded ahead (`sourceOwned`: no load of
+// its own), the learning barrier and the base-ready signal. A conversion
+// that lost a derived working plane is rebuilt from the retained base with
+// the same geometry and converted by the fallback: the same pixels.
+configurePlaneRelease({ engine: 'none' });
+let batchCases = 0;
+for (const [label, saved] of [...Object.entries(recipes), ['no recipe', null]]) {
+  for (const prepared of [false, true]) for (const lose of [false, true]) for (const dust of [false, true]) for (const automatic of [false, true]) {
+    const seed = 900 + batchCases;
+    const headOptions = { stage: 'processed', dustWorker: 'w', geometryBands: 2 };
+    const head = run(HEAD_PROCESS_FILE_WITH_SETTINGS, { base: makeBase(64, 40, seed), saved, options: headOptions, dust, automatic });
+    const nowBase = makeBase(64, 40, seed);
+    const now = run(current, { base: nowBase, saved, options: headOptions, dust, automatic });
+    const ownedPlanes = [];
+    let barrierCalls = 0;
+    let baseReady = 0;
+    let lost = 0;
+    let fallbacks = 0;
+    const convertAsBefore = now.context.convertFrameOffMainThread;
+    if (lose) {
+      now.context.convertFrameOffMainThread = async (request) => {
+        if (request.sourceRole === 'derived' && !lost) {
+          lost += 1;
+          request.imageData.__image16.data = new Uint16Array(0);
+          const err = new Error('lane crashed after the transfer');
+          err.code = 'INPUT_LOST';
+          throw err;
+        }
+        return convertAsBefore(request);
+      };
+    }
+    const label2 = `${label} batch prepared=${prepared} lose=${lose} dust=${dust} auto=${automatic}`;
+    const a = await head.context.processFileWithSettings(head.file, saved ? structuredClone(saved) : null, { ...headOptions });
+    const b = await now.context.processFileWithSettings(now.file, saved ? structuredClone(saved) : null, {
+      ...headOptions, releaseEarly: true, ownedPlanes,
+      learningBarrier: async () => { barrierCalls += 1; },
+      onBaseReady: () => { baseReady += 1; },
+      convertFallback: async (request) => { fallbacks += 1; return convertAsBefore(request); },
+      ...(prepared ? { sourceImageData: nowBase, sourceOwned: true } : {})
+    });
+    assert.equal(describe(b.processed), describe(a.processed), `${label2}: pixels`);
+    assert.equal(JSON.stringify(b.settings), JSON.stringify(a.settings), `${label2}: settings`);
+    assert.deepEqual(JSON.stringify(now.item.settings), JSON.stringify(head.item.settings), `${label2}: recipe write`);
+    const expected = prepared ? head.log.filter(line => !line.startsWith('load:')) : head.log;
+    if (lost) {
+      // The rebuild repeats the geometry and lens calls of the first pass.
+      const convertAt = expected.findIndex(line => line.startsWith('convert:'));
+      const rebuild = expected.filter(line => line.startsWith('geometry:') || line.startsWith('lens:'));
+      const redone = [...expected.slice(0, convertAt), ...rebuild,
+        ...expected.slice(convertAt).map(line => line.startsWith('convert:') ? line.replace(/,"role":"derived"\}$/, '}') : line)];
+      assert.deepEqual(now.log, redone, `${label2}: rebuilt from the base`);
+      assert.equal(fallbacks, 1);
+    } else {
+      assert.deepEqual(now.log, expected, `${label2}: stage calls and arguments`);
+      assert.equal(fallbacks, 0);
+    }
+    assert.equal(barrierCalls, saved ? 0 : 1, `${label2}: the barrier guards the learned defaults`);
+    assert.equal(baseReady, 1);
+    // Released before the stages after the conversion: neither the base nor
+    // a geometry output stays in the frame's owned planes.
+    assert.ok(!ownedPlanes.some(plane => sharesPlaneBuffers(plane, nowBase)), `${label2}: base released`);
+    assert.ok(ownedPlanes.includes(b.processed) || !ownedPlanes.length, `${label2}: later planes stay the caller's`);
+    batchCases++;
+  }
+}
+console.log(`processFileWithSettings batch options: ${batchCases} cases match HEAD`);
+
+// #256 acceptance: once the conversion has resolved, the frame's decoded base
+// and its working planes (geometry and lens outputs) hold no memory, before
+// dust removal, repairs, auto WB and the encode run. The probe runs in the
+// dust stage, which follows the conversion.
+// - Released the WebKit way (transfer(0)), every one of their buffers is
+//   detached: the backing stores are gone whatever still points at them.
+// - Only dropped (an engine without transfer), the base is unreachable
+//   (a FinalizationRegistry probe after full collections, --expose-gc through
+//   v8 flags). A suspended async frame keeps dead temporaries in its
+//   registers, so JS objects that went through a call argument may outlive
+//   their use there; the lists that held the planes are emptied explicitly.
+{
+  v8.setFlagsFromString('--expose-gc');
+  const gc = vm.runInNewContext('gc');
+  for (const engine of ['webkit', 'none']) {
+    configurePlaneRelease({ engine });
+    const collected = new Set();
+    const registry = new FinalizationRegistry((name) => collected.add(name));
+    const buffers = [];
+    const probe = run(current, { base: null, saved: recipes.geometry, options: {}, dust: true, automatic: false });
+    const watch = (name, image) => {
+      if (engine === 'none') registry.register(image, name);
+      else buffers.push([name, image.data.buffer], [`${name}16`, image.__image16.data.buffer]);
+      return image;
+    };
+    const geometryStage = probe.context.renderGeometryChain;
+    probe.context.renderGeometryChain = async (...args) => watch('geometry', await geometryStage(...args));
+    const lensStage = probe.context.applyLensCorrectionWithSettings;
+    probe.context.applyLensCorrectionWithSettings = async (...args) => watch('lens', await lensStage(...args));
+    const dustStage = probe.context.detectDustOffMainThread;
+    let atDust = null;
+    probe.context.detectDustOffMainThread = async (...args) => {
+      for (let i = 0; i < 4; i++) {
+        gc();
+        await new Promise(resolve => setImmediate(resolve));
+      }
+      atDust = engine === 'none'
+        ? [...collected].sort()
+        : buffers.filter(([, buffer]) => !buffer.detached).map(([name]) => name);
+      return dustStage(...args);
+    };
+    const result = await probe.context.processFileWithSettings(probe.file, structuredClone(recipes.geometry), {
+      stage: 'processed', releaseEarly: true, ownedPlanes: [], sourceImageData: watch('base', makeBase(64, 40, 4242)), sourceOwned: true
+    });
+    assert.ok(result.processed);
+    if (engine === 'none') assert.ok(atDust.includes('base'), `unreachable after the conversion: ${atDust}`);
+    else assert.deepEqual(atDust, [], 'every buffer of the base and the working planes is released after the conversion');
+  }
+  configurePlaneRelease({ engine: 'none' });
+  console.log('processFileWithSettings releaseEarly: the base and working planes are released after the conversion');
+}

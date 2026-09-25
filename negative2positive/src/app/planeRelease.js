@@ -49,6 +49,13 @@ export function planeBuffersOf(item) {
   return buffers;
 }
 
+/** True when two items share a plane buffer (see planeBuffersOf). */
+export function sharesPlaneBuffers(a, b) {
+  if (!a || !b) return false;
+  const buffers = planeBuffersOf(b);
+  return planeBuffersOf(a).some((buffer) => buffers.includes(buffer));
+}
+
 /** Stamp the planes of each item as export-owned. Returns the first item. */
 export function markOwnedPlanes(...items) {
   for (const item of items) {

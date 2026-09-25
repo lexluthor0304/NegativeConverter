@@ -17,7 +17,7 @@ const { downsampleImageDataForMaxDim } = await import('./imageDataOps.js');
 const { applyGeometryChainToImageData, applyRotationToImageData, mirrorImageDataHorizontal, sanitizeCropRect, normalizeAngleDegrees, rotatedDimensions } = await import('./imageGeometry.js');
 const { cropImageDataRegion } = await import('./imageDataOps.js');
 const { applyPreparedAdjustmentsToBuffer } = await import('./adjustmentPipeline.js');
-const { markOwnedPlanes, planeBuffersOf } = await import('./planeRelease.js');
+const { markOwnedPlanes, planeBuffersOf, sharesPlaneBuffers } = await import('./planeRelease.js');
 const { sampleAnalysisArea } = await import('./analysisRegion.js');
 const { convertColorWithSilverCore, convertBwWithSilverCore } = await import('../pipeline/silverAdapter.js');
 const { reducedTileGeometry, renderReducedGeometry, tileGeometryKey } = await import('./reducedGeometry.js');
@@ -95,7 +95,7 @@ function run(image, recipe, convertWith, { dust = false } = {}) {
       adjusted.push(output);
       return output;
     },
-    usesSilverCoreConversion: () => false, sanitizePresetType: type => type, markOwnedPlanes, planeBuffersOf
+    usesSilverCoreConversion: () => false, sanitizePresetType: type => type, markOwnedPlanes, planeBuffersOf, sharesPlaneBuffers
   });
   vm.runInContext(runtime, context);
   const convert = async request => {

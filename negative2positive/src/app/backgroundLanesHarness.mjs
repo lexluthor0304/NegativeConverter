@@ -26,7 +26,7 @@ export function functionSource(name) {
 }
 
 export const SCHEDULER_FUNCTIONS = [
-  'foregroundBusyForBackground', 'backgroundRest', 'decodeForBackground',
+  'foregroundBusyForBackground', 'foregroundInteractionBusy', 'backgroundRest', 'decodeForBackground',
   'openAnalysisDecode', 'openTileDecode', 'openPrefetchDecode', 'openHalfSizeTileDecode', 'abortHalfSizeTileDecode',
   'abortBackgroundDecodes', 'backgroundLanesRunning',
   'kickBackgroundPhotoWork', 'backgroundLaneTarget', 'backgroundWorkPending', 'runBackgroundLane',

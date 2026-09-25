@@ -12,7 +12,8 @@ const {
   mayTransferBuffer,
   planeBuffersOf,
   releaseOwnedPlanes,
-  setLiveReferenceProbe
+  setLiveReferenceProbe,
+  sharesPlaneBuffers
 } = await import('./planeRelease.js');
 
 function frame(width = 4, height = 3, { plane16 = true } = {}) {
@@ -52,6 +53,11 @@ class FakeSink {
   assert.deepEqual(planeBuffersOf({ width: 1, height: 1, __image16: image.__image16 }), [plane]);
   const shared = { width: 4, height: 3, data: image.data, __image16: image.__image16 };
   assert.equal(planeBuffersOf(shared).length, 2);
+  assert.equal(sharesPlaneBuffers(shared, image), true);
+  assert.equal(sharesPlaneBuffers({ width: 4, height: 3, __image16: image.__image16 }, image), true, 'one shared buffer is enough');
+  assert.equal(sharesPlaneBuffers(frame(), image), false);
+  assert.equal(sharesPlaneBuffers({ width: 4, height: 3 }, image), false, 'a size stub shares nothing');
+  assert.equal(sharesPlaneBuffers(null, image), false);
 }
 
 {

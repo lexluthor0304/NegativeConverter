@@ -81,7 +81,7 @@ const { requestExportGainMap, gainMapInputsMatch } = await import('./exportGainM
 const adjustment = await import('./adjustmentPipeline.js');
 const encoders = await import('./exportImageEncoders.js');
 const { computeGainMap } = await import('./gainMapJpeg.js');
-const { runBatchPipeline } = await import('./batchExportScheduler.js');
+const { runBatchPipeline, createLearningBarrier, planDecodeAhead, EXPORT_MAX_UNWRITTEN_BYTES } = await import('./batchExportScheduler.js');
 const { downconvertPlane16 } = await import('../workers/pixelAdjustments16.js');
 
 configurePlaneRelease({ engine: 'webkit' });
@@ -99,7 +99,7 @@ const runtime = [
   'prepareCurrentImageForExport', 'renderCurrentImageDataForExport', 'encodeFused16', 'renderAndEncodeCurrentImage',
   'exportSingle', 'applyAdjustmentsWithSettings', 'applyPreparedAdjustmentsWithWorkers', 'startExportGainMap',
   'imageDataToBlob', 'png16EncodeSettings', 'makeExportCancelledError', 'createBatchExportWorkers',
-  'renderBatchExportFile', 'runBatchExport', ...MEMORY_FUNCTIONS
+  'renderBatchExportFile', 'runBatchExport', 'batchPipelineMode', 'batchDecodeAhead', 'mayLearnFromExport', ...MEMORY_FUNCTIONS
 ].map(functionSource).join('\n')
   // vm scripts have no dynamic import: hand the module over directly.
   .replaceAll("await import('./gainMapJpeg.js')", 'await importGainMapJpeg()');
@@ -182,7 +182,7 @@ function createContext({ gainMap = 'on' } = {}) {
     createOperationPng16Pool: (lanes = 1) => (png16PoolFactory ? png16PoolFactory(lanes) : null),
     planGeometryBandsInFlight: () => 2,
     geometryPool: { size: 1 },
-    hiddenJobs: { safeMode: false, admit: async () => () => {} },
+    hiddenJobs: { safeMode: false, admit: async () => () => {}, status: () => ({ hidden: false, limited: false, safeMode: false }) },
     ...memoryGlobals(),
     hiddenJobBytesFor: async () => 0,
     activeLongJobs: 0,
@@ -248,7 +248,14 @@ function createContext({ gainMap = 'on' } = {}) {
     createConversionWorkerPool: () => { const convert = async () => assert.fail('no conversion in this fixture'); convert.dispose = () => {}; return convert; },
     convertFrameWithRouter: async () => assert.fail('no main-thread conversion in this fixture'),
     planBatchExportLanes: async () => ({ lanes: 1, pixelsPerFile: W * H }),
-    runBatchPipeline,
+    runBatchPipeline, createLearningBarrier, planDecodeAhead, EXPORT_MAX_UNWRITTEN_BYTES,
+    // #256 stages: decode-ahead only for RAW names here, never admitted by
+    // default (the fixture decodes nothing); tests below switch it on.
+    batchPipelineDiagnostics: { batches: 0, droppedPlanes16: 0, decodeAhead: { admitted: 0, refused: { ceiling: 0, 'low-memory': 0, hidden: 0, format: 0 } } },
+    isRawLikeFileName: (name) => /\.(dng|nef)$/.test(name), isPngFile: () => false,
+    imagePixelsForBatch: async () => W * H, hiddenResidentBytes: () => 0,
+    backgroundGate: { idle: async () => true }, BACKGROUND_STEP_WAIT_CAP_MS: 2000,
+    loadFileToImageData: async () => assert.fail('no decode in this fixture'),
     updateFileListUI: () => {},
     renderLinearDngBlob: () => assert.fail('no DNG here'),
     getSprocketFrameComposeOptions: () => ({}),
@@ -445,7 +452,12 @@ for (const [format, bitDepth] of [['jpeg', 8], ['png', 8], ['tiff', 16], ['png',
   assert.equal(pools[0].disposed, 1, `${label}: disposed when the batch ends`);
   assert.deepEqual(f.moduleBridgeUse, [], `${label}: never the module-level bridge`);
   const [frame] = frames;
-  assert.equal(frame.__image16.data.byteLength, 0, `${label}: the frame's plane moved to the worker`);
+  if (format === 'png' && bitDepth === 8) {
+    // An 8-bit output drops the unadjusted plane before the adjustment (#256).
+    assert.equal(frame.__image16, null, `${label}: the 16-bit plane is dropped`);
+  } else {
+    assert.equal(frame.__image16.data.byteLength, 0, `${label}: the frame's plane moved to the worker`);
+  }
   assert.ok(released.length >= 1 && released.at(-1).includes(frame), `${label}: the frame's planes are released`);
   const bytes = await stubBlobText(written[0]);
   const settings = jobs[0].settings.recipe;
@@ -550,6 +562,82 @@ for (const [format, bitDepth] of [['jpeg', 8], ['png', 8], ['tiff', 16], ['png',
   } finally {
     png16PoolFactory = null;
   }
+}
+
+{
+  // #256 stages in runBatchExport: frames after the first are decoded ahead
+  // (one at a time, one frame ahead) and handed over as the frame's owned
+  // base; a lane goes on while its payload waits for the write; a
+  // never-analysed frame reads the learned defaults only after an earlier
+  // learning frame's write. 'serial' turns the stages off.
+  const run = async (mode) => {
+    const { f, exportInfo } = batchContext({ format: 'png', bitDepth: 8 });
+    const log = [];
+    const decoded = [];
+    f.context.safeStorageGet = (key) => (key === 'nc_batch_pipeline_v1' ? mode : null);
+    f.context.state.rollReference = { applyLock: false };
+    f.context.loadFileToImageData = async (file, options) => {
+      assert.ok(options.signal instanceof AbortSignal, 'a prepared decode can be aborted');
+      assert.equal(options.filmStats, !fileSettings.get(file.name), 'the options the lane would decode with');
+      log.push(`decode-ahead:${file.name}`);
+      const base = makeProcessed(5);
+      decoded.push(base);
+      return base;
+    };
+    const fileSettings = new Map();
+    let learnedAt = null;
+    f.context.processFileWithSettings = async (file, settings, options) => {
+      if (options.sourceImageData) {
+        assert.equal(options.sourceOwned, true);
+        assert.ok(decoded.includes(options.sourceImageData));
+        log.push(`process:${file.name}:prepared`);
+      } else {
+        log.push(`process:${file.name}:self`);
+        options.onBaseReady?.();
+      }
+      if (!settings) {
+        await options.learningBarrier();
+        log.push(`learned-read:${file.name}:${learnedAt === null ? 'before' : 'after'}`);
+      }
+      const processed = markOwnedPlanes(makeProcessed(3));
+      options.ownedPlanes.push(processed);
+      return { processed, settings: settings || { recipe: recipe() } };
+    };
+    const names = ['a.dng', 'b.dng', 'c.dng', 'd.dng'];
+    const jobs = names.map((name, i) => {
+      const item = { file: { name }, touchedKeys: new Set(i === 0 ? ['exposure'] : []) };
+      const settings = i === 2 ? null : { recipe: recipe() };
+      fileSettings.set(name, settings);
+      return { item, file: item.file, settings, outputName: name };
+    });
+    const written = [];
+    const result = await f.context.runBatchExport(jobs, {
+      exportInfo,
+      learnsInSink: true,
+      sink: async (job, blob) => {
+        written.push(job.file.name);
+        log.push(`written:${job.file.name}`);
+        const learned = job.item.touchedKeys.size
+          ? new Promise((resolve) => setTimeout(() => { learnedAt = log.length; log.push(`learned:${job.file.name}`); resolve(); }, 5))
+          : Promise.resolve();
+        return { learned };
+      }
+    });
+    assert.equal(result.successCount, 4);
+    assert.deepEqual(written, names, 'written in order');
+    return { log, diagnostics: f.context.batchPipelineDiagnostics };
+  };
+  const staged = await run(null);
+  assert.deepEqual(staged.log.filter((line) => line.startsWith('process:')),
+    ['process:a.dng:self', 'process:b.dng:prepared', 'process:c.dng:prepared', 'process:d.dng:prepared']);
+  assert.ok(staged.log.indexOf('decode-ahead:b.dng') < staged.log.indexOf('process:b.dng:prepared'));
+  assert.ok(staged.log.indexOf('learned:a.dng') < staged.log.indexOf('learned-read:c.dng:after'), staged.log.join());
+  assert.equal(staged.diagnostics.decodeAhead.admitted, 3);
+  assert.equal(staged.diagnostics.last.prepare.taken, 3);
+  const serial = await run('serial');
+  assert.deepEqual(serial.log.filter((line) => line.startsWith('decode-ahead')), [], 'serial: no decode-ahead');
+  assert.equal(serial.diagnostics.last.earlyReleases, 0, 'serial: lanes held until their write');
+  assert.ok(serial.log.includes('learned-read:c.dng:after'));
 }
 
 setLiveReferenceProbe(null);
