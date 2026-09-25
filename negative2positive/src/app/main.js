@@ -12123,7 +12123,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     }
 
     function asImageData(image) {
-      return image instanceof ImageData ? image : new ImageData(image.data, image.width, image.height);
+      if (image instanceof ImageData) return image;
+      const { data } = image;
+      const bytes = data instanceof Uint8ClampedArray ? data : new Uint8ClampedArray(data.buffer, data.byteOffset, data.length);
+      return new ImageData(bytes, image.width, image.height);
     }
 
     async function imageSurface(imageData) {
