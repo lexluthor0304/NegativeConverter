@@ -34,7 +34,9 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
   restarting per file) and, with more than one lane, a pool of export workers
   (`createExportWorkerPool`) for the adjustment and 16-bit encode stages.
   Both are released when the batch ends. The on-device AI repair session is
-  shared, so lanes take turns with it (`withAiRepairTurn`).
+  shared, so lanes take turns with it (`withAiRepairTurn`). Lanes look tiles
+  up in the session's tile memo but never insert (`memoInsert: false`), so a
+  roll export does not evict the open photo's tiles (#246).
 - The geometry chain (base → rotation → mirror → crop) runs in one pass that
   only resamples the cropped window for 16-bit sources at non-right angles
   (`applyGeometryChainToImageData`, bit-identical to the step chain); every

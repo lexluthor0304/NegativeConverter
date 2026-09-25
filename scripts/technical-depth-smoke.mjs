@@ -233,6 +233,15 @@ async function runAiRepairScenario({ send, evaluate, waitFor, wait, fail, instal
       const { imageData: result } = await ai.inpaintWithModel(source, mask, session.run, { feather: 0 });
       const ms = Math.round(performance.now() - started);
       clearInterval(heartbeatTimer);
+      // The worker's tile memo (#246): the same tile again is a hit with the
+      // same pixels; a lookup-only run (batch lanes) stores nothing.
+      const again = await ai.inpaintWithModel(source, mask, session.run, { feather: 0 });
+      const memo = await session.trim(Infinity);
+      const memoSame = again.imageData.data.every((value, i) => value === result.data[i])
+        && again.imageData.__image16.data.every((value, i) => value === result.__image16.data[i]);
+      const laneMask = new Uint8Array(width * width); laneMask.fill(255, 3 * width + 3, 3 * width + 9);
+      await ai.inpaintWithModel(source, laneMask, session.run, { feather: 0, memoInsert: false });
+      const afterLane = await session.trim(Infinity);
       let changed = 0; let outsideChanges = 0;
       for (let i = 0; i < mask.length; i++) for (let c = 0; c < 3; c++) {
         if (mask[i]) changed += result.data[i * 4 + c] !== source.data[i * 4 + c] ? 1 : 0;
@@ -247,10 +256,12 @@ async function runAiRepairScenario({ send, evaluate, waitFor, wait, fail, instal
           && result.__image16.data.every((value, i) => value === baseline.imageData.__image16.data[i]);
       } finally { await direct.release(); }
       return { provider: session.provider, ms, changed, outsideChanges, equalsDirect,
-        heartbeatTicks, maxHeartbeatGapMs: Math.round(maxHeartbeatGapMs) };
+        heartbeatTicks, maxHeartbeatGapMs: Math.round(maxHeartbeatGapMs),
+        memoHits: memo.hits, memoEntries: memo.entries, memoSame, laneEntries: afterLane.entries };
     } finally { clearInterval(heartbeatTimer); await session.release(); }
   })()`);
   if (cpu.provider !== 'wasm' || !cpu.changed || cpu.outsideChanges || !cpu.equalsDirect || (cpu.ms > 50 && !cpu.heartbeatTicks)) fail('MI-GAN CPU worker/compositing regression: ' + JSON.stringify(cpu));
+  if (cpu.memoHits < 1 || cpu.memoEntries !== 1 || !cpu.memoSame || cpu.laneEntries !== 1) fail('MI-GAN tile memo regression: ' + JSON.stringify(cpu));
   console.log('ok: real MI-GAN CPU worker matches direct pixels and keeps UI responsive:', JSON.stringify(cpu));
 
   await runManualBrushSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, root });
@@ -283,6 +294,25 @@ async function runManualBrushSmoke({ send, evaluate, waitFor, wait, fail, instal
     return { width: png.width, height: png.height, data: new Uint8Array(UPNG.toRGBA8(png)[0]) };
   };
   const before = await exportPixels();
+  // A settled repair is exported as it is on screen (#246): no MI-GAN tile
+  // runs between the export click and the download.
+  const exportWithoutRepair = async (label) => {
+    await evaluate(`(() => {
+      const seen = window.__exportInference = { tiles: 0, texts: [] };
+      seen.observer = new MutationObserver(records => {
+        for (const record of records) for (const node of record.addedNodes) {
+          if (/AI repair: tile/.test(node.textContent)) { seen.tiles++; seen.texts.push(node.textContent); }
+        }
+      });
+      for (const id of ['dustAiStatus', 'dustStatus']) seen.observer.observe(document.getElementById(id), { childList: true });
+    })()`);
+    const pixels = await exportPixels();
+    const seen = await evaluate(`(() => { const seen = window.__exportInference; seen.observer.disconnect();
+      delete window.__exportInference; return { tiles: seen.tiles, texts: seen.texts.slice(0, 5) }; })()`);
+    if (seen.tiles) fail(`${label}: export re-ran MI-GAN on a settled repair: ` + JSON.stringify(seen));
+    console.log(`ok: ${label} exported without inference`);
+    return pixels;
+  };
   await evaluate(`document.getElementById('zoomInBtn').click(); document.getElementById('zoomInBtn').click(); document.getElementById('zoomInBtn').click()`);
   await wait(500);
   await evaluate(`document.getElementById('aiBrushEnabled').click()`);
@@ -373,7 +403,7 @@ async function runManualBrushSmoke({ send, evaluate, waitFor, wait, fail, instal
   try {
     await evaluate(`document.getElementById('redoBtn').click()`);
     await awaitBrushCycle('redo background repair completed before export');
-    const redone = await exportPixels();
+    const redone = await exportWithoutRepair('redo repair');
     if (!redone.data.some((v, i) => v !== before.data[i])) fail('Redo lost manual repair');
     await awaitBrushCycle('manual brush ready after redo export');
     await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 2 });
@@ -395,7 +425,7 @@ async function runManualBrushSmoke({ send, evaluate, waitFor, wait, fail, instal
     console.log('manual brush touch admitted:', JSON.stringify({ startAlpha: touchStart.alpha, moveAlpha: touchMove.alpha }));
     await send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
     await awaitBrushCycle('touch background repair completed before export');
-    const touched = await exportPixels();
+    const touched = await exportWithoutRepair('touch repair');
     if (!touched.data.some((v, i) => v !== redone.data[i])) fail('Touch brush did not repair the photo');
     const afterTouchTransform = await evaluate(`document.getElementById('canvasTransformWrapper').style.transform`);
     if (afterTouchTransform !== touchTransform) fail('Touch brush panned the photo: ' + JSON.stringify({ before: touchTransform, after: afterTouchTransform }));
