@@ -41,7 +41,8 @@ import { frameNeedsReview } from './reviewQueue.js';
     import { groupAutomaticRollFrames, aggregateRollAnalysis, measureNegativeMean, sanitizeRollFrameForSettings, rollFrameExposureUnits } from './rollAnalysis.js';
     import { filtrationFromSliders, slidersFromFiltration, stopsFromExposureUnits, exposureUnitsFromStops, contrastForGradeValue, gradeValueForContrast, gradeLabelForValue, TEST_STRIP_AXES, formatAxisValue, testStripValues } from './enlarger.js';
     import { sanitizeLocalExposureForSettings, workingPointToBase, basePointToWorking, rotatedDimensions } from './localExposure.js';
-    import { sanitizeRepairStrokes, repairMask, pointerToRepairPoint, lensSourcePoint } from './repairBrush.js';
+    import { sanitizeRepairStrokes, buildRepairMask, pointerToRepairPoint, lensSourcePoint } from './repairBrush.js';
+    import { createRepairStamps, sameRepairStrokes, captureDustPass, dustPassMatches, restoreDustPass } from './repairReuse.js';
     import { paperProfiles, paperIdsForFilmKind, normalizePaperId, normalizeToningId } from '../silvercore/engine/PaperProfiles.js';
     import { buildFlatFieldMap, scoreBlankFrame } from './flatField.js';
     import { estimateAlignment, warpImageData } from './imageAlignment.js';
@@ -94,7 +95,7 @@ import { frameNeedsReview } from './reviewQueue.js';
     import { normalizeFileListSort, orderedFileIndices, selectionRangeIndices } from './fileListOrder.js';
     import { createSprocketFrameCache } from './sprocketFrameCache.js';
     import { imagePixelsForBatch, rememberImageDimensions } from './imageDimensions.js';
-    import { createDustWorkerClient, detectDustInWorker, inpaintDustInWorker, refineDustMaskInWorker, disposeDustWorker } from './dustWorkerClient.js';
+    import { createDustWorkerClient, detectDustInWorker, inpaintDustInWorker, refineDustMaskInWorker, disposeDustWorker, dustMaskInfo } from './dustWorkerClient.js';
     import { loadLocalLensfunAssets } from './lensfunLoader.js';
     import { createOpenCvLoader } from './opencvLoader.js';
     import {
@@ -2845,6 +2846,7 @@ import { frameNeedsReview } from './reviewQueue.js';
       state.dustRemoval.inpaintedImageData = r.dustInpaintedImageData;
       state.dustRemoval.cleanSource = r.dustCleanSource;
       state.dustRemoval._state = r.dustState;
+      if (!reprocess) carryRestoredRepairStamp();
 
       // Sync UI
       updateFilmModeUI();
@@ -5570,6 +5572,7 @@ import { frameNeedsReview } from './reviewQueue.js';
 
     function resetDustForCleanSource(source) {
       dustDetectionRevision += 1;
+      dustPassCache = null;
       state.dustRemoval.cleanSource = source || null;
       state.dustRemoval._state = null;
       state.dustRemoval.mask = null;
@@ -6089,6 +6092,7 @@ import { frameNeedsReview } from './reviewQueue.js';
           maybeAutoWhiteBalance(processed);
           maybeAnalyzeExpiredRescue(processed);
           // Reset dust removal state for new conversion
+          dustPassCache = null;
           state.dustRemoval._state = null;
           state.dustRemoval.mask = null;
           state.dustRemoval.inpaintedImageData = null;
@@ -6147,9 +6151,61 @@ import { frameNeedsReview } from './reviewQueue.js';
     let dustDetectionRevision = 0;
     let dustDrawing = false;
     let dustBrushMode = 'intelligent';
+    // The last dust pass as the blocks it changed (repairReuse.js), and the
+    // recipes of committed repairs that export can reuse (#246).
+    let dustPassCache = null;
+    const repairStamps = createRepairStamps();
 
     function getDustSource() {
       return state.dustRemoval.cleanSource || state.processedImageData;
+    }
+
+    // The repair the current state asks for, in the terms of a stamped recipe.
+    function currentRepairRecipe() {
+      const dustEnabled = Boolean(state.dustRemoval.enabled);
+      return { source: getDustSource(), token: coreReprocessToken, dustEnabled,
+        dustMask: dustEnabled ? state.dustRemoval.mask : null, strokes: state.repairStrokes,
+        lensMapping: state.conversionSourceImageData?.__lensMapping || null,
+        revision: aiRepair.revision, dustUsedAi: aiRepairReady() };
+    }
+
+    // Stamps a committed repair unless the model changed while it ran (a
+    // WebGPU -> WASM reload mid-pass bumps the revision).
+    function stampRepairResult(result, recipe) {
+      if (result && aiRepair.revision === recipe.revision) repairStamps.stamp(result, recipe);
+    }
+
+    // A settled photo session brings back the repair objects themselves. The
+    // stamped recipe still holds under the restore's token when the restored
+    // strokes select the same pixels, so export can reuse the result.
+    function carryRestoredRepairStamp() {
+      const restored = state.dustRemoval.inpaintedImageData;
+      const recipe = repairStamps.recipeOf(restored);
+      if (recipe && sameRepairStrokes(recipe.strokes, state.repairStrokes)) {
+        repairStamps.stamp(restored, { ...recipe, token: coreReprocessToken, strokes: state.repairStrokes });
+      }
+    }
+
+    // The dust half of a commit, MI-GAN or TELEA over the whole dust mask. When
+    // the same clean source, dust-mask content, inpainter and model revision
+    // come back (a fresh detection after an AI-brush stroke), the blocks the
+    // last pass changed are written onto a copy of the source instead. A mask
+    // from the page's OpenCV fallback carries no hash and always runs.
+    async function commitDustPass(source, mask, isCurrent = () => true) {
+      const info = dustMaskInfo(mask);
+      const deciding = state.dustRemoval.ai && (aiRepair.status === 'idle' || aiRepair.status === 'loading');
+      const key = { source, maskHash: info?.hash, usedAi: aiRepairReady(), revision: aiRepair.revision };
+      if (info && !deciding && dustPassMatches(dustPassCache, key)) {
+        const imageData = await restoreDustPass(dustPassCache, source, { check: () => assertRepairCurrent(isCurrent) });
+        if (imageData) return { imageData, usedAi: key.usedAi };
+      }
+      const report = {};
+      const imageData = await inpaintForCommit(source, mask, isCurrent, null, { report });
+      if (info && isCurrent() && report.revision === aiRepair.revision) {
+        dustPassCache = captureDustPass(imageData, { source, maskHash: info.hash, usedAi: report.usedAi,
+          revision: report.revision, blocks: report.usedAi ? report.blocks : info.blocks });
+      }
+      return { imageData, usedAi: report.usedAi };
     }
 
     // The UI value means px at full resolution; when detection runs on a
@@ -6248,7 +6304,8 @@ import { frameNeedsReview } from './reviewQueue.js';
 
         const prevState = state.dustRemoval._state;
         const maxParticleSize = dustMaxParticleSizeFor(source);
-        const { mask, particleCount, _state } = !state.dustRemoval.enabled
+        const dustEnabled = Boolean(state.dustRemoval.enabled);
+        const { mask, particleCount, _state } = !dustEnabled
           ? { mask: new Uint8Array(source.width * source.height), particleCount: 0, _state: null }
           : await detectDustOffMainThread(source, { strength: state.dustRemoval.strength, maxParticleSize }, prevState, isCurrent);
         if (!isCurrent() || source !== getDustSource()) return;
@@ -6257,11 +6314,15 @@ import { frameNeedsReview } from './reviewQueue.js';
         state.dustRemoval._state = _state;
 
         if (particleCount > 0 || strokes.length) {
-          const dustImage = particleCount > 0 ? await inpaintForCommit(source, mask, isCurrent) : source;
-          const inpainted = await inpaintManualBrush(dustImage, state, state.loadedBaseImageData || state.originalImageData,
-            state.conversionSourceImageData?.__lensMapping, isCurrent);
+          const lensMapping = sourceRef?.__lensMapping || null;
+          const modelRevision = aiRepair.revision;
+          const dust = particleCount > 0 ? await commitDustPass(source, mask, isCurrent) : null;
+          const inpainted = await inpaintManualBrush(dust ? dust.imageData : source, state,
+            state.loadedBaseImageData || state.originalImageData, lensMapping, isCurrent);
           if (!isCurrent() || source !== getDustSource()) return;
           state.dustRemoval.inpaintedImageData = inpainted;
+          stampRepairResult(inpainted, { source, token, dustEnabled, dustMask: dustEnabled ? mask : null, strokes,
+            lensMapping, revision: modelRevision, dustUsedAi: dust ? dust.usedAi : null });
           const tmpl = getLocalizedText('dustStatusDone', 'Detected {count} dust particles');
           updateDustStatusUI(tmpl.replace('{count}', String(particleCount)));
         } else {
@@ -6300,6 +6361,7 @@ import { frameNeedsReview } from './reviewQueue.js';
 
     function clearDustState() {
       dustDetectionRevision += 1;
+      dustPassCache = null;
       disposeDustWorker();
       if (dustDetectionTimer) clearTimeout(dustDetectionTimer);
       dustDetectionTimer = null;
@@ -10656,14 +10718,21 @@ import { frameNeedsReview } from './reviewQueue.js';
     async function renderCurrentImageDataForExport(exportInfo = null) {
       await ensureFullResolutionReadyForExport();
       // A quick export after a stroke must use MI-GAN, not its temporary preview.
-      if ((aiRepairReady() && state.dustRemoval.enabled && state.dustRemoval.mask) || state.repairStrokes.length) {
+      // A committed repair stamped with the current recipe is that result
+      // already; only a TELEA stand-in or an outdated result is repaired again.
+      const needsRepair = (aiRepairReady() && state.dustRemoval.enabled && state.dustRemoval.mask) || state.repairStrokes.length;
+      if (needsRepair && repairStamps.matches(state.dustRemoval.inpaintedImageData, currentRepairRecipe())) {
+        if (state.processedImageData !== state.dustRemoval.inpaintedImageData) applyDustResultToState();
+      } else if (needsRepair) {
         const source = getDustSource();
         const dustEnabled = Boolean(state.dustRemoval.enabled);
         const mask = state.dustRemoval.mask;
         const strokes = state.repairStrokes;
         const token = coreReprocessToken;
-        const dustImage = dustEnabled && mask ? await inpaintForCommit(source, mask) : source;
-        const repaired = await inpaintManualBrush(dustImage);
+        const lensMapping = state.conversionSourceImageData?.__lensMapping || null;
+        const modelRevision = aiRepair.revision;
+        const dust = dustEnabled && mask ? await commitDustPass(source, mask) : null;
+        const repaired = await inpaintManualBrush(dust ? dust.imageData : source);
         // Manual-only background repair creates a fresh, unused zero dust
         // mask. Its identity does not change the export recipe. Actual dust
         // mode/mask changes and photo/stroke changes still invalidate it.
@@ -10673,6 +10742,10 @@ import { frameNeedsReview } from './reviewQueue.js';
           throw new Error('Photo changed during AI repair. Please export again.');
         }
         state.dustRemoval.inpaintedImageData = repaired;
+        if (repaired !== source) {
+          stampRepairResult(repaired, { source, token, dustEnabled, dustMask: dustEnabled ? mask : null, strokes,
+            lensMapping, revision: modelRevision, dustUsedAi: dust ? dust.usedAi : null });
+        }
         applyDustResultToState();
       }
       // ensureFullRender exists to leave a full-resolution CPU buffer in
@@ -11510,7 +11583,9 @@ import { frameNeedsReview } from './reviewQueue.js';
         }
         const { mask, particleCount } = await detectDustOffMainThread(processed, { strength, maxParticleSize }, null, isCurrent, options.dustWorker);
         const dustSource = processed;
-        if (particleCount > 0) processed = await withAiRepairTurn(() => inpaintForCommit(dustSource, mask, isCurrent, options.dustWorker));
+        // Batch lanes and thumbnails reuse the open photo's tiles but never
+        // evict them (lookups only).
+        if (particleCount > 0) processed = await withAiRepairTurn(() => inpaintForCommit(dustSource, mask, isCurrent, options.dustWorker, { memoInsert: false }));
         trace.mark('dustRemoval', {
           pixels: getImageDataPixelCount(processed)
         });
@@ -11518,7 +11593,7 @@ import { frameNeedsReview } from './reviewQueue.js';
 
       if (settings.repairStrokes?.length) {
         const brushSource = processed;
-        processed = await withAiRepairTurn(() => inpaintManualBrush(brushSource, settings, imageData, workingData.__lensMapping, isCurrent));
+        processed = await withAiRepairTurn(() => inpaintManualBrush(brushSource, settings, imageData, workingData.__lensMapping, isCurrent, { memoInsert: false }));
       }
 
       // Never-viewed batch files carry default settings — give them the same
@@ -14682,11 +14757,12 @@ import { frameNeedsReview } from './reviewQueue.js';
     // ===========================================
     // AI repair: learned inpainting on the commit and export paths
     // ===========================================
-    const aiRepair = { release: null, status: 'idle', provider: '', run: null, source: '', sourceRef: null, error: '', percent: 0, tiles: 0, ms: 0, revision: 0 };
+    const aiRepair = { release: null, trim: null, status: 'idle', provider: '', run: null, source: '', sourceRef: null, error: '', percent: 0, tiles: 0, ms: 0, revision: 0 };
     let pendingBrushRepairs = 0;
 
     async function inpaintManualBrush(source, settings = state, base = state.loadedBaseImageData || state.originalImageData,
-      lensMapping = settings === state ? state.conversionSourceImageData?.__lensMapping : null, isCurrent = () => true) {
+      lensMapping = settings === state ? state.conversionSourceImageData?.__lensMapping : null, isCurrent = () => true,
+      { memoInsert = true } = {}) {
       assertRepairCurrent(isCurrent);
       const strokes = settings.repairStrokes || [];
       if (!strokes.length) return source;
@@ -14698,19 +14774,23 @@ import { frameNeedsReview } from './reviewQueue.js';
       assertRepairCurrent(isCurrent);
       if (aiRepair.status !== 'ready') throw new Error(aiRepair.error || 'AI repair model is not ready');
       const geometry = { ...localExposureGeometryFor(settings, base), width: source.width, height: source.height };
-      const mask = repairMask(strokes, geometry, lensMapping);
+      // Built inside the strokes' bounds; the bounds also limit the box scan.
+      const { mask, bounds } = buildRepairMask(strokes, geometry, lensMapping);
       const started = performance.now();
       let result;
       try {
-        result = await inpaintWithModel(source, mask, aiRepair.run, { shouldContinue: isCurrent, onProgress: (done, total) => {
-          document.getElementById('dustAiStatus').textContent = getInterpolatedText('dustAiStatusRunning', { done, total });
-        } });
+        result = await inpaintWithModel(source, mask, aiRepair.run, {
+          shouldContinue: isCurrent, memoInsert, maskBounds: bounds || { x: 0, y: 0, width: 0, height: 0 },
+          onProgress: (done, total) => {
+            document.getElementById('dustAiStatus').textContent = getInterpolatedText('dustAiStatusRunning', { done, total });
+          }
+        });
       } catch (error) {
         if (error?.name === 'AbortError') throw error;
         assertRepairCurrent(isCurrent);
         if (aiRepair.provider === 'webgpu') {
           await loadAiRepairModel(aiRepair.sourceRef || DEFAULT_MODEL_URL, { prefer: 'wasm', refresh: false });
-          if (aiRepair.status === 'ready') return inpaintManualBrush(source, settings, base, lensMapping, isCurrent);
+          if (aiRepair.status === 'ready') return inpaintManualBrush(source, settings, base, lensMapping, isCurrent, { memoInsert });
         }
         aiRepair.status = 'error';
         aiRepair.error = error?.message || String(error);
@@ -14874,6 +14954,7 @@ import { frameNeedsReview } from './reviewQueue.js';
       updateAiRepairUI();
       try {
         aiRepair.run = null;
+        aiRepair.trim = null;
         await aiRepair.release?.();
         aiRepair.release = null;
         let bytes; let label;
@@ -14892,6 +14973,8 @@ import { frameNeedsReview } from './reviewQueue.js';
         const session = await createInpaintSessionInWorker(bytes, { prefer });
         aiRepair.run = session.run;
         aiRepair.release = session.release;
+        // Shrinks the session's tile memo (#258); resolves to its size.
+        aiRepair.trim = session.trim || null;
         aiRepair.provider = session.provider;
         aiRepair.source = label;
         aiRepair.sourceRef = source;
@@ -14911,7 +14994,9 @@ import { frameNeedsReview } from './reviewQueue.js';
 
     // The commit-path inpaint: the learned model when it is on and ready,
     // TELEA otherwise (and always for brush strokes, which stay interactive).
-    async function inpaintForCommit(source, mask, isCurrent = () => true, worker = null) {
+    // `report`, when given, learns which inpainter ran (`usedAi`), the model
+    // revision it ran with and, for MI-GAN, the blocks it wrote.
+    async function inpaintForCommit(source, mask, isCurrent = () => true, worker = null, { memoInsert = true, report = null } = {}) {
       assertRepairCurrent(isCurrent);
       if (state.dustRemoval.ai && aiRepair.status === 'idle') await loadAiRepairModel(DEFAULT_MODEL_URL, { refresh: false });
       while (state.dustRemoval.ai && aiRepair.status === 'loading') {
@@ -14919,13 +15004,15 @@ import { frameNeedsReview } from './reviewQueue.js';
         assertRepairCurrent(isCurrent);
       }
       assertRepairCurrent(isCurrent);
+      if (report) Object.assign(report, { usedAi: aiRepairReady(), revision: aiRepair.revision, blocks: null });
       if (!aiRepairReady()) return inpaintDustOffMainThread(source, mask, isCurrent, worker);
       const started = performance.now();
       try {
-        const { imageData, tiles } = await inpaintWithModel(source, mask, aiRepair.run, {
-          shouldContinue: isCurrent,
+        const { imageData, tiles, blocks } = await inpaintWithModel(source, mask, aiRepair.run, {
+          shouldContinue: isCurrent, memoInsert,
           onProgress: (done, total) => updateDustStatusUI(getInterpolatedText('dustAiStatusRunning', { done: String(done), total: String(total) }, `AI repair: tile ${done} / ${total}`))
         });
+        if (report) report.blocks = blocks;
         aiRepair.tiles = tiles;
         aiRepair.ms = Math.round(performance.now() - started);
         updateAiRepairUI();
@@ -14938,7 +15025,7 @@ import { frameNeedsReview } from './reviewQueue.js';
         // when that fails too does TELEA take over.
         if (aiRepair.provider === 'webgpu' && aiRepair.sourceRef) {
           await loadAiRepairModel(aiRepair.sourceRef, { prefer: 'wasm', refresh: false });
-          if (aiRepairReady()) return inpaintForCommit(source, mask, isCurrent, worker);
+          if (aiRepairReady()) return inpaintForCommit(source, mask, isCurrent, worker, { memoInsert, report });
         }
         aiRepair.status = 'error';
         aiRepair.revision += 1;
@@ -14960,10 +15047,15 @@ import { frameNeedsReview } from './reviewQueue.js';
       // Coalesce quick brush strokes and discard work after switching photos or undo.
       await new Promise((resolve) => setTimeout(resolve, 200));
       if (!isCurrent()) return;
-      const result = await inpaintManualBrush(await inpaintForCommit(source, mask, isCurrent), state,
-        state.loadedBaseImageData || state.originalImageData, state.conversionSourceImageData?.__lensMapping, isCurrent);
+      const modelRevision = aiRepair.revision;
+      const dust = await commitDustPass(source, mask, isCurrent);
+      const lensMapping = state.conversionSourceImageData?.__lensMapping || null;
+      const result = await inpaintManualBrush(dust.imageData, state,
+        state.loadedBaseImageData || state.originalImageData, lensMapping, isCurrent);
       if (!isCurrent()) return;
       state.dustRemoval.inpaintedImageData = result;
+      stampRepairResult(result, { source, token, dustEnabled: true, dustMask: mask, strokes, lensMapping,
+        revision: modelRevision, dustUsedAi: dust.usedAi });
       applyDustResultToState();
       updatePreview();
       updateDustStatusUI(getLocalizedText('dustStatusDone', 'Detected {count} dust particles')

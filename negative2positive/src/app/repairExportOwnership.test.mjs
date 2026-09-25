@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import { createRepairStamps, captureDustPass, dustPassMatches, restoreDustPass } from './repairReuse.js';
 
 // Execute real export/detection ownership, with deferred inference and a
 // manually advanced debounce. No wall-clock sleeps or duplicated guards.
@@ -35,6 +36,9 @@ function fixture({ enabled = false, mask = null } = {}) {
   const c = vm.createContext({
     state, coreReprocessToken: 7, dustDetectionRevision: 11, loadGeneration: 3,
     dustDetectionTimer: null, Uint8Array,
+    aiRepair: { status: 'ready', revision: 5 }, repairStamps: createRepairStamps(), dustPassCache: null,
+    dustMaskInfo: () => null, captureDustPass, dustPassMatches, restoreDustPass,
+    assertRepairCurrent(isCurrent) { if (!isCurrent()) throw new DOMException('Repair superseded', 'AbortError'); },
     console: { error: (...args) => assert.fail(`Unexpected background error: ${args.join(' ')}`) },
     ensureFullResolutionReadyForExport: async () => {},
     aiRepairReady: () => true,
@@ -62,6 +66,7 @@ function fixture({ enabled = false, mask = null } = {}) {
     clearTimeout(id) { timers.delete(id); },
   });
   vm.runInContext(['getDustSource', 'hasFrameRepairs', 'isCurrentLoad',
+    'currentRepairRecipe', 'stampRepairResult', 'commitDustPass',
     'applyDustResultToState', 'runDustDetection', 'scheduleDustDetection',
     'renderCurrentImageDataForExport'].map(functionSource).join('\n'), c);
   const actualRunDustDetection = c.runDustDetection;

@@ -496,7 +496,7 @@ function aiFixture() {
     hasFrameRepairs: () => true, scheduleDustDetection: noop,
     DEFAULT_MODEL_URL: '/local-model.onnx',
     aiRepairReady: () => c.aiRepair.status === 'ready',
-    localExposureGeometryFor: () => ({}), repairMask: () => f.mask,
+    localExposureGeometryFor: () => ({}), buildRepairMask: () => ({ mask: f.mask, bounds: null }),
     inpaintDustOffMainThread: async () => f.converted,
   });
   vm.runInContext(['performAiRepairModelLoad', 'inpaintForCommit', 'inpaintManualBrush']
