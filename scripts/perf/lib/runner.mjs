@@ -245,8 +245,8 @@ async function fixtureConditions(groups) {
   return [...seen.values()];
 }
 
-function recordBaselines(results) {
-  const budgets = JSON.parse(readFileSync(BUDGETS_PATH, 'utf8'));
+function recordBaselines(results, budgetsPath = BUDGETS_PATH) {
+  const budgets = JSON.parse(readFileSync(budgetsPath, 'utf8'));
   const date = new Date().toISOString().slice(0, 10);
   let added = 0;
   for (const run of results.runs) {
@@ -264,11 +264,20 @@ function recordBaselines(results) {
       }
     }
   }
-  writeFileSync(BUDGETS_PATH, JSON.stringify(budgets, null, 2) + '\n');
-  log(`recorded ${added} baselines in ${BUDGETS_PATH}`);
+  writeFileSync(budgetsPath, JSON.stringify(budgets, null, 2) + '\n');
+  log(`recorded ${added} baselines in ${budgetsPath}`);
 }
 
-export async function main(argv = process.argv.slice(2)) {
+/**
+ * `deps` replaces the browser, build and machine-facing steps in the
+ * harness's own tests (runner.test.mjs); real runs use the defaults.
+ */
+export async function main(argv = process.argv.slice(2), deps = {}) {
+  const d = {
+    prepareRef, prepareFixtures, probeGpu, runRepetition, findChrome, suspiciousRequests, waitForQuietMachine, readPressureLevel,
+    freeDiskBytes, budgetsPath: BUDGETS_PATH,
+    ...Object.fromEntries(Object.entries(deps).filter(([, value]) => value !== undefined))
+  };
   let args;
   try {
     args = parseArgs(argv);
@@ -287,16 +296,16 @@ export async function main(argv = process.argv.slice(2)) {
   }
 
   const repo = await repoRootOf(HARNESS_ROOT);
-  const outBase = resolve(repo, 'output', 'perf');
+  const outBase = d.outBase || resolve(repo, 'output', 'perf');
   mkdirSync(outBase, { recursive: true });
-  const pressure = await readPressureLevel();
-  const preflight = evaluatePreflight({ pressure, freeDisk: freeDiskBytes(outBase) });
+  const pressure = await d.readPressureLevel();
+  const preflight = evaluatePreflight({ pressure, freeDisk: d.freeDiskBytes(outBase) });
   if (!preflight.ok && !args.force) {
     console.error(`Refusing to start: ${preflight.problems.join('; ')}. Free memory/disk or pass --force.`);
     lock.release();
     return 4;
   }
-  const quiet = await waitForQuietMachine({ log });
+  const quiet = await d.waitForQuietMachine({ log });
   if (quiet.noisy) log(`load average ${quiet.load.toFixed(1)} stayed above ${quiet.limit}; results are labelled noisy`);
 
   if (args.browser !== 'chrome') {
@@ -307,7 +316,7 @@ export async function main(argv = process.argv.slice(2)) {
     }
   }
 
-  const chromeBin = findChrome();
+  const chromeBin = d.findChrome();
   if (!chromeBin) { console.error('Chrome not found (set CHROME_BIN).'); lock.release(); return 5; }
   const headSha = (await git(repo, ['rev-parse', 'HEAD'])).slice(0, 12);
   const outDir = resolve(args.out || join(outBase, `${utcStamp()}-${headSha}`));
@@ -334,12 +343,12 @@ export async function main(argv = process.argv.slice(2)) {
       ? [{ label: 'base', ref: args.compare[0] }, { label: 'head', ref: args.compare[1] }]
       : [{ label: 'run', ref: args.ref, headWorktree: args.headWorktree }];
     for (let i = 0; i < refSpecs.length; i++) {
-      refs.push(await prepareRef({ ...refSpecs[i], repo, tmpRoot, port: args.port + i, cdpPort: args.cdpPort + i }));
+      refs.push(await d.prepareRef({ ...refSpecs[i], repo, tmpRoot, port: args.port + i, cdpPort: args.cdpPort + i }));
     }
     const scenarios = selectScenarios(args.scenarios, { injectHang: args.injectHang });
-    const groups = await prepareFixtures({ args, scenarios, repo, chromeBin });
+    const groups = await d.prepareFixtures({ args, scenarios, repo, chromeBin });
     const collector = { groups, gpu: null, chromeVersion: null, fixtureInfo: await fixtureConditions(groups) };
-    await probeGpu({ ref: refs[0], args, chromeBin, collector });
+    await d.probeGpu({ ref: refs[0], args, chromeBin, collector });
     const ceilingBytes = memoryCeilingBytes();
     for (const ref of refs) results.runs.push({ label: ref.label, ref: ref.ref, sha: ref.sha, dirty: ref.dirty, scenarios: {} });
 
@@ -358,19 +367,19 @@ export async function main(argv = process.argv.slice(2)) {
         for (let rep = 0; rep < reps; rep++) {
           for (const ref of refs) {
             log(`${scenario.id} ${fixtureName} ${ref.label} rep ${rep + 1}/${reps}`);
-            repsByRef.get(ref.label).push(await runRepetition({ scenario, fixture, group: scenario.fixtureGroup, ref, rep, args, profiled: false, outDir, chromeBin, ceilingBytes, swapAtStart: swapStart, collector }));
+            repsByRef.get(ref.label).push(await d.runRepetition({ scenario, fixture, group: scenario.fixtureGroup, ref, rep, args, profiled: false, outDir, chromeBin, ceilingBytes, swapAtStart: swapStart, collector }));
           }
         }
         if (args.profile && !scenario.singleRep) {
           for (const ref of refs) {
             log(`${scenario.id} ${fixtureName} ${ref.label} profiled repetition`);
-            repsByRef.get(ref.label).push(await runRepetition({ scenario, fixture, group: scenario.fixtureGroup, ref, rep: reps, args, profiled: true, outDir, chromeBin, ceilingBytes, swapAtStart: swapStart, collector }));
+            repsByRef.get(ref.label).push(await d.runRepetition({ scenario, fixture, group: scenario.fixtureGroup, ref, rep: reps, args, profiled: true, outDir, chromeBin, ceilingBytes, swapAtStart: swapStart, collector }));
           }
         }
         for (const extra of scenario.extraReps || []) {
           for (const ref of refs) {
             log(`${scenario.id} ${fixtureName} ${ref.label} ${extra.label} repetition`);
-            repsByRef.get(ref.label).push(await runRepetition({ scenario, fixture, group: scenario.fixtureGroup, ref, rep: -1, args, profiled: false, extra, outDir, chromeBin, ceilingBytes, swapAtStart: swapStart, collector }));
+            repsByRef.get(ref.label).push(await d.runRepetition({ scenario, fixture, group: scenario.fixtureGroup, ref, rep: -1, args, profiled: false, extra, outDir, chromeBin, ceilingBytes, swapAtStart: swapStart, collector }));
           }
         }
         for (const run of results.runs) {
@@ -398,7 +407,7 @@ export async function main(argv = process.argv.slice(2)) {
 
     // Production assertion: no dev-server request may have reached the preview.
     for (const ref of refs) {
-      const suspicious = await suspiciousRequests(ref.origin);
+      const suspicious = await d.suspiciousRequests(ref.origin);
       const run = results.runs.find(entry => entry.label === ref.label);
       run.production = suspicious.length === 0;
       if (suspicious.length) {
@@ -411,7 +420,7 @@ export async function main(argv = process.argv.slice(2)) {
     if (args.mode === 'compare' || args.mode === 'against') {
       const before = args.mode === 'compare' ? results.runs[0] : pickSavedRun(JSON.parse(readFileSync(resolve(args.against), 'utf8')));
       const after = args.mode === 'compare' ? results.runs[1] : results.runs[0];
-      const budgets = JSON.parse(readFileSync(BUDGETS_PATH, 'utf8'));
+      const budgets = JSON.parse(readFileSync(d.budgetsPath, 'utf8'));
       const compare = compareRuns({ budgets, before: collectRunSummaries(before), after: collectRunSummaries(after), allowPixelChange: args.allowPixelChange });
       compare.baseLabel = args.mode === 'compare' ? args.compare[0] : `${before.sha?.slice(0, 7)} (saved)`;
       compare.headLabel = args.mode === 'compare' ? args.compare[1] : after.sha?.slice(0, 7);
@@ -422,7 +431,7 @@ export async function main(argv = process.argv.slice(2)) {
     results.finishedAt = new Date().toISOString();
     const swapEnd = (await readSwapUsage()).used;
     writeOutputs(outDir, results, refs, { args, collector, loadStart, swapStart, swapEnd, power, noisy: quiet.noisy });
-    if (args.recordBaselines) recordBaselines(results);
+    if (args.recordBaselines) recordBaselines(results, d.budgetsPath);
     log(`results: ${join(outDir, 'results.json')}\nreport:  ${join(outDir, 'report.md')}`);
   } catch (error) {
     console.error(error.stack || error.message);
