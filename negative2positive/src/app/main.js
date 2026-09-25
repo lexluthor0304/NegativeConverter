@@ -10923,8 +10923,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       });
       const outcome = frame ? await withDetectionOverlay(silent, run) : await run();
       // The frame came back over the same bytes: its cached film statistics
-      // stay valid.
-      if (owned && outcome.image && outcome.image !== source) carryFilmStats(source, outcome.image);
+      // stay valid. (A new decode after a lost frame has its own.)
+      if (owned && outcome.image && outcome.image !== source && !outcome.reloaded) carryFilmStats(source, outcome.image);
       return outcome;
     }
 

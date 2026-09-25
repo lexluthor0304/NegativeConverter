@@ -26,9 +26,9 @@ export async function detectFrameWithFallback(image, options, {
  * it again before anything reads it, so a detached buffer is never
  * analysed.
  *
- * Resolves { image, detection, read }:
+ * Resolves { image, reloaded, detection, read }:
  * - image: the frame to use from now on (the rebuilt or reloaded one when
- *   owned, else the input);
+ *   owned, else the input); `reloaded` when it is a new decode;
  * - detection: undefined when not asked, else { result } or { error } (the
  *   main-thread analysis threw, or the frame could not be reloaded);
  * - read: undefined when not asked, else { result } or null when the reader
@@ -51,12 +51,14 @@ export async function runImportAnalyses(image, { frame = null, filmEdge = false,
   // Whatever the main thread still has to read needs intact planes.
   const needsMainThread = (frame && (!inWorker.frame || outcome.frameError)) || (filmEdge && (!inWorker.edge || outcome.filmEdgeError));
   let reloadError = null;
+  let reloaded = false;
   if (outcome?.imageLost && needsMainThread) {
     try { current = reload ? await reload() : null; }
     catch (error) { current = null; reloadError = error; }
     if (!current) reloadError ||= new Error('The frame was lost with the worker and could not be decoded again');
+    reloaded = Boolean(current);
   }
-  const result = { image: current };
+  const result = { image: current, reloaded };
   if (frame) {
     if (inWorker.frame && !outcome.frameError) result.detection = { result: outcome.frame };
     else {

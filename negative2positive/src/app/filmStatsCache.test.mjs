@@ -9,7 +9,8 @@ import {
   primeFilmStats,
   forgetFilmStats,
   hasCachedFilmBase,
-  filmStatsCounters
+  filmStatsCounters,
+  carryFilmStats
 } from './filmStatsCache.js';
 
 function makeNegative(width, height, sixteen) {
@@ -104,6 +105,30 @@ for (const sixteen of [false, true]) {
   cachedAutoDetectFilmBase(primed, 10);
   assert.equal(filmStatsCounters.filmBaseComputed, mark.filmBaseComputed);
   assert.equal(filmStatsCounters.filmTypeComputed, mark.filmTypeComputed);
+}
+
+// --- a frame handed to a worker and back keeps its statistics (#251) -------
+{
+  const original = makeNegative(200, 150, true);
+  const expectedType = cachedDetectFilmType(original);
+  const expectedBase = cachedAutoDetectFilmBase(original, 10);
+  // The same bytes in a new ImageData, with the same 16-bit plane.
+  const back = { width: original.width, height: original.height, data: original.data.slice(), __image16: original.__image16 };
+  carryFilmStats(original, back);
+  const mark = { ...filmStatsCounters };
+  assert.deepEqual(cachedDetectFilmType(back), expectedType);
+  assert.deepEqual(cachedAutoDetectFilmBase(back, 10), expectedBase);
+  assert.equal(filmStatsCounters.filmTypeComputed, mark.filmTypeComputed, 'no recomputation after the hand-over');
+  assert.equal(filmStatsCounters.filmBaseComputed, mark.filmBaseComputed);
+  assert.equal(hasCachedFilmBase(back, 10), true);
+  // Nothing moves from a frame whose entry no longer matches its planes.
+  const stale = makeNegative(20, 15, false);
+  cachedAutoDetectFilmBase(stale, 10);
+  assert.equal(hasCachedFilmBase(stale, 10), true);
+  stale.__image16 = { width: 20, height: 15, data: new Uint16Array(20 * 15 * 4) };
+  const target = { width: 20, height: 15, data: stale.data.slice() };
+  carryFilmStats(stale, target);
+  assert.equal(hasCachedFilmBase(target, 10), false);
 }
 
 // --- non-objects pass straight through -------------------------------------

@@ -188,6 +188,7 @@ for (const degrees of [2.5, 0]) {
   assert.equal(source.data.byteLength, 0, 'the crashed worker kept the transferred plane');
   assert.deepEqual(analysed, [reloaded]);
   assert.equal(outcome.image, reloaded);
+  assert.equal(outcome.reloaded, true);
   assert.ok(outcome.detection.result.cropRegion);
   assert.equal(outcome.read.result.found, true);
 }
