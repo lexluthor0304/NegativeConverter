@@ -115,10 +115,10 @@ Remaining performance proposals below are not claims of completed work.
   The same ~45 scalar setting keys are listed by hand in: the `state` literal (1858-2044, 92 keys), SNAPSHOT_SCALAR_KEYS for undo (2259-2271), sanitizeSettings (3251-3358; 54 `source.x` reads with per-key clamps), createDefaultSettings for batch items (9471-9531) and restoreSettings (10199-10326, one `state.x = safe.x` line per key), plus a sixth partial list in undoLabelMap (2190-2251, in three lan…  
   _Suggested fix:_ Introduce `app/settingsSchema.js` exporting a table `{ key: { default, min, max, kind: 'number'|'enum'|'bool', undoLabelKey, snapshot: true } }`. Derive `createDefaultSettings`, the scalar part of `sanitizeSettings`, SNAPSHOT_SCALAR_KEYS and the scalar assignments in `restoreSett…
 
-- **medium/quality** — Step-3 adjustment math is maintained three times: GLSL shader in main.js, CPU path in pixelAdjustments.js, and (partially) in ImageProcessor.js _(verified)_  
-  `negative2positive/src/app/main.js:3900`  
-  The preview shader (main.js:3900-3947 hue2rgb/rgbToHsl/hslToRgb; 3956-3999 exposure→contrast→highlights/shadows→temp/tint→HSL sat/vibrance→CMY→curves) is a hand transliteration of workers/pixelAdjustments.js (hue2rgb 6-13; per-pixel stages 127-237). ImageProcessor.js carries a third hue2rgb (373-380) and a third RGB↔HSL round-trip (309-364). Verified drift today: the CPU *preview* quality path (pi…  
-  _Suggested fix:_ (1) Export hue2rgb/rgbToHsl/hslToRgb once from a `colorMath.js` and import it in both pixelAdjustments.js and ImageProcessor.js. (2) Move the fragment shader into `render/adjustmentShader.glsl.js` next to a small table of stage constants (TEMP_TINT_GAIN=0.3, LUMA coefficients, co…
+- **low/quality** — Step-3 adjustment math is maintained twice on the CPU: pixelAdjustments.js and (partially) ImageProcessor.js _(updated by #239)_  
+  `negative2positive/src/workers/pixelAdjustments.js:16`  
+  #239 moved the display shaders into `render/previewShader.js`: with WebGL2 one GLSL Step-3 function (shared by applyProgram and step3Program) is the only display implementation, its constants come from the JS stage modules, and the WebGL1 fallback lost the legacy tone uniforms. What remains is the CPU side: pixelAdjustments.js (hue2rgb and the per-pixel Step-3 stages, used by exports and the CPU display) and ImageProcessor.js, which carries another hue2rgb and RGB↔HSL round-trip for the HSL colour model.  
+  _Suggested fix:_ Export hue2rgb/rgbToHsl/hslToRgb once from a `colorMath.js` and import it in both pixelAdjustments.js and ImageProcessor.js (bit-identical, checked against the current functions).
 
 - **medium/ux** — Film-base / gray-point sampling has no touch flow: a tap samples immediately and the loupe is positioned under the finger  
   `negative2positive/src/app/main.js:6497`  
@@ -231,10 +231,10 @@ Remaining performance proposals below are not claims of completed work.
   The three 16-bit mirror fields are declared at 1877-1879 with a comment saying they are 'dormant' until a later stage; the codebase has since moved to attaching `__image16` directly on ImageData (silverAdapter.js:23-33, 264-266). The fields are still assigned at 5657-5659 and 5738 but no code reads them, so they only pin a second reference to the largest buffer in the app.  
   _Suggested fix:_ Delete the three fields, the comment block at 1873-1876, and the four assignments.
 
-- **low/quality** — Legacy non-SilverCore WebGL export/readback path is unreachable dead code _(verified)_  
-  `negative2positive/src/app/main.js:4437`  
-  PRESET_TYPES is ['color','bw','positive'] and sanitizePresetType coerces anything else to 'color', so usesSilverCoreConversion() always returns true. Consequently renderFullWebGL (4437-4507, including a full-res gl.readPixels + Y-flip + canvas resize to image size), the WebGL branch of ensureFullRender (4513-4522), the `useLegacyTone` branch of webglSetUniforms (4222-4238), buildRouterSettings's `…  
-  _Suggested fix:_ Remove renderFullWebGL and the legacy branches, or reduce usesSilverCoreConversion to `return true` with a comment and delete the dead callers; keep webglSetUniforms passing zeros for the legacy uniforms.
+- **low/quality** — usesSilverCoreConversion() is always true, so its callers keep dead non-SilverCore branches _(updated by #239)_  
+  `negative2positive/src/app/main.js:3988`  
+  PRESET_TYPES is ['color','bw','positive'] and sanitizePresetType coerces anything else to 'color', so usesSilverCoreConversion() always returns true. #239 deleted renderFullWebGL, the WebGL branch of ensureFullRender and the legacy tone uniforms with the `useLegacyTone` branch of webglSetUniforms. The `usesSilverCoreConversion()` guards and buildRouterSettings's non-SilverCore branch remain.  
+  _Suggested fix:_ Reduce usesSilverCoreConversion to `return true` with a comment and delete the dead branches of its callers.
 
 - **low/quality** — File-type dispatch (RAW / PNG / standard) and the 100 MiB 'heavy RAW' threshold are duplicated between loadFile and loadFileToImageData  
   `negative2positive/src/app/main.js:9388`  
@@ -296,11 +296,6 @@ Remaining performance proposals below are not claims of completed work.
   _Next step:_ Only colour ticks still run the full multi-pass tail (LUT, HSL on active-band pixels, 3D profile, saturation, paper, 8-bit). Profile a concrete enabled-stage combination and preserve intermediate clamping/rounding, profile strength and bit-exact reference output before accepting any further fused implementation.
 
 
-- **medium/quality** — silvercore WebGLRenderer.js (369 lines) is dead code shipped in the worker bundle — Engine.initWebGL is never called — and, with other unreachable engine exports, hides latent bugs (256-entry LUT upload, null matrices, log(1) division)  
-  `negative2positive/src/silvercore/engine/WebGLRenderer.js:134`  
-  Engine.js:28-35 defines initWebGL(canvas) and Engine.js:10 imports WebGLRenderer, but grep shows no call to `initWebGL(` or `.glRenderer` outside Engine.js (main.js has its own unrelated initWebGLRenderer); `this.glRenderer` stays null forever and Engine.js:92-94 even documents 'WebGL path is currently disabled'. The module is nevertheless pulled into the conversionWorker bundle (conversionWorker.…  
-  _Suggested fix:_ Delete WebGLRenderer.js, the import at Engine.js:10, initWebGL() and every `this.glRenderer` branch (Engine.js:20,28-35,44,48). If a GPU path for SilverCore is planned, keep it in git history rather than shipping it in the worker bundle; if the GL renderer is ever revived, resize…
-
 - **low/bug** — Auto curve-resolution thresholds (30/70/128) are 8-bit widths compared against 16-bit widths, so 'auto' always yields 9 points  
   `negative2positive/src/silvercore/engine/CurveEngine.js:125`  
   getCurveResolution receives minWidth = min(blacks - whites) where both are bin*257 values, so any non-degenerate range is ≥ 257 and the `<= 30`, `<= 70`, `< 128` branches never fire. The adaptive behaviour advertised by the UI labels ('Auto (30)', 'Smooth (70)', 'Precise (128)') is dead; narrow-range (thin) negatives that used to get 3–7 points for smoothness now always get 9.  
@@ -344,7 +339,7 @@ Remaining performance proposals below are not claims of completed work.
 
 - **low/quality** — 65535 is redefined under seven local names although image16.js already exports IMAGE16_MAX  
   `negative2positive/src/silvercore/engine/CurveEngine.js:14`  
-  CurveEngine.js:14 PIXEL_MAX, sensorDefects.js:43 PIXEL_MAX, Sharpening.js:142 PIXEL_MAX, EnhancedProfiles.js:102 PIXEL_MAX, ImageProcessor.js:12 MAX_16, filmBaseCompensation.js:1 PIXEL_MAX_16, filmBaseDetection.js:3 UINT16_MAX — plus bare literals at garbledCheck.js:32, pngFileLoader.js:34, EnhancedProfiles.js:65 and WebGLRenderer.js:286-288 — while silvercore/util/image16.js:6 exports `IMAGE16_MA…  
+  CurveEngine.js:14 PIXEL_MAX, sensorDefects.js:43 PIXEL_MAX, Sharpening.js:142 PIXEL_MAX, EnhancedProfiles.js:102 PIXEL_MAX, ImageProcessor.js:12 MAX_16, filmBaseCompensation.js:1 PIXEL_MAX_16, filmBaseDetection.js:3 UINT16_MAX — plus bare literals at garbledCheck.js:32, pngFileLoader.js:34 and EnhancedProfiles.js:65 — while silvercore/util/image16.js:6 exports `IMAGE16_MA…  
   _Suggested fix:_ Import IMAGE16_MAX from util/image16.js in the seven modules and delete the local constants. Export `LUMA_R/G/B` (or a `luma(r,g,b)` helper) from a shared colorMath.js and reference it from the JS sites; keep the GLSL literal but add a comment pointing at the constant.
 
 - **low/quality** — ImageProcessor.boxBlur (97 lines) and negateImage are exported but never called  

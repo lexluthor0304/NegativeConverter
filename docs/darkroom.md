@@ -92,7 +92,10 @@ limits (black = 10^−(Dmax − Dmin) of white: 0.6 % for a glossy Dmax 2.25,
 2.8 % for a matte 1.65) and a base tint; toning tints shadows and highlights
 separately. The stage runs as three 16-bit LUTs after the tone curves,
 3D profile and saturation and before sharpening (`Engine._applyLuts`), cached
-per paper / toning / strength. The parameters are approximations drawn from
+per paper / toning / strength. The strength-independent part of a build (the
+encoded print value and the toning weights, two `Math.pow` per entry) is kept
+for the last two paper / toning pairs, so a toning-strength drag rebuilds the
+LUTs in about 1 ms instead of 5–6 ms with identical values (#239). The parameters are approximations drawn from
 published data sheets and give each paper its recognisable character, not a
 colorimetric match.
 

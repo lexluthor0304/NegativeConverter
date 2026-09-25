@@ -139,7 +139,11 @@ instead of rebuilding it. The request records what the tile was sampled from
 before it marks the full-resolution pixels pending, and the tile is carried
 only if no other result was applied in between. A full-resolution re-render that follows it on
 photos of 16 MP or less is a new source and rebuilds the tile once. During a
-drag the tile keeps its pre-drag colours until it settles.
+drag the tile keeps its pre-drag colours until it settles. A SilverCore drag drawn
+by the WebGL2 preview (#239, `docs/gpu-preview.md`) schedules no tile update at all:
+its frames are display-only, and while one is on screen ahead of its exact frame the
+reprocess chain reads as busy, so a switch stores no snapshot of it. The tile and the
+session follow the exact frame that settles the drag.
 
 A photo switch persists the outgoing photo's tile synchronously (restamping
 only, when the settled tile already matches), adopts the incoming photo's

@@ -112,6 +112,28 @@ The curve pass (`applyLUT`, `applyLUTInto`) and `toImageData8` work on little-en
 32-bit words (two loads and two stores per pixel, four 8-bit samples per store) and
 fall back to per-sample loops elsewhere.
 
+## GPU preview inputs (#239)
+
+The WebGL2 preview (`docs/gpu-preview.md`) draws slider ticks from a prepared negative
+and an analysis the preview worker computes in this same slot:
+
+- `prepareSilverCorePreview` returns a copy of the pristine plane (null without film
+  base or flat field, when main's own display preview is that plane), the stops of
+  `localExposureStopsForSlot`, and point samples of both at the positions
+  `downsampleImageDataForMaxPixels` takes, for the histogram.
+- `analyzeSilverCorePreview` runs the analysis exactly as `runSilverCore` would (on
+  the reference sample, or through `_prepareRgba` / `_prepareGrey` without the stops)
+  and records `slot.analysis`, so the settle frame that follows reuses it like the next
+  tick of a drag.
+- `silverCoreAnalysisKey` is `_analysisStateFor` as a string, for main to tell when to
+  ask again; `silverCorePreparedKey` names the film base and flat field;
+  `trySilverCoreParams` is `buildSilverCoreParams` without waiting once the preset
+  table has loaded.
+
+`silverAdapter.preview.test.mjs` checks that the frames after them stay identical to
+the 1703835 adapter and that the CPU apply chain over the prepared plane reproduces
+them bit for bit.
+
 ## Verification
 
 - `ImageProcessor.hsl.test.mjs`: the pre-test against the frozen HSL for the 256³
