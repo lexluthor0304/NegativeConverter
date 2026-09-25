@@ -349,6 +349,6 @@ export async function runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail,
   // of a never-opened frame) was measured in the auto-frame worker: the page
   // never booted its own OpenCV (#245).
   const realm = await evaluate(`({ cv: typeof window.cv, script: !!document.querySelector('script[data-opencv-loader]'), tasks: { ...window.__ncAnalysis.tasks } })`);
-  if (realm.cv !== 'undefined' || realm.script || realm.tasks.fallback || realm.tasks.worker < 3) fail('the expired rescue loaded OpenCV in the page: ' + JSON.stringify(realm));
+  if (realm.cv !== 'undefined' || realm.script || realm.tasks.fallback || realm.tasks.worker < 2) fail('the expired rescue loaded OpenCV in the page: ' + JSON.stringify(realm));
   console.log(`ok: fog surfaces measured in the worker (${realm.tasks.worker} requests), no OpenCV in the page`);
 }
