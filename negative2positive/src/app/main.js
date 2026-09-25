@@ -7146,7 +7146,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       } else {
         // Waiting items were released above; the thumbnail lane restarts if
         // it stopped. Caches refill on use and workers respawn lazily.
-        if (parkedPhoto) void unparkOpenPhoto();
+        if (parkedPhoto) void unparkOpenPhoto().catch(error => console.warn('Rebuilding the parked photo failed:', error));
         if (state.fileQueue.length) void loadStudioThumbnails();
       }
       refreshHiddenJobStatus();
