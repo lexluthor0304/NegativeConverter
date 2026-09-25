@@ -117,7 +117,7 @@ export function createLaneFixture({ count = 5, order = null, current = 0, prefet
     lowMemoryPhotoDevice: () => !prefetch,
     hiddenJobs: createHiddenJobGate({ isHidden: () => false }), hiddenJobBytesFor: async () => 0,
     backgroundLanes: { running: 0, active: new Map() }, rollPassRequests: new Set(), backgroundVisibleItems: new Set(),
-    backgroundDirection: 1, prefetchedItem: null, backgroundWorkers: null, prefetchPreviewAttempts: new WeakMap(),
+    backgroundDirection: 1, prefetchedItem: null, backgroundWorkers: null, prefetchPreviewAttempts: new WeakMap(), prefetchRefused: new WeakSet(),
     BACKGROUND_LANE_REST_MS: 30, BACKGROUND_LANE_POLL_MS: 250, ACTIVATION_DWELL_MS: 120, BACKGROUND_STEP_WAIT_CAP_MS,
     pickBackgroundJob, travelDirection, displayDistance,
     loadFileToImageData: (file, options = {}) => {

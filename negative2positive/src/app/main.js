@@ -16948,8 +16948,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     const ACTIVATION_DWELL_MS = 120;
     let backgroundWorkers = null;
     let backgroundVisibility = null;
-    // Prefetch previews already attempted for a recipe key (success or not).
+    // Prefetch previews already attempted for a recipe key (success or not),
+    // and photos whose prefetch failed or whose base does not fit the slot:
+    // neither is retried in a loop.
     const prefetchPreviewAttempts = new WeakMap();
+    const prefetchRefused = new WeakSet();
 
     // The foreground is switching, converting, rendering or exporting.
     function foregroundBusyForBackground() {
@@ -17159,7 +17162,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     function canPrefetchPhoto(item) {
       if (!item || !photoPrefetchEnabled() || !currentPhotoSettled() || item.provisional) return false;
-      if (photoSessions.has(item)) return false;
+      if (photoSessions.has(item) || prefetchRefused.has(item)) return false;
       if (!photoPrefetch.has(item)) return true;
       // The base is held; a preview that no longer matches the recipe is
       // rebuilt from it, once per recipe.
@@ -17184,7 +17187,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     function holdPrefetchedBase(item, { base, rawMetadata }) {
       if (!photoPrefetchEnabled()) return false;
       photoPrefetch.clear();
-      if (!photoPrefetch.put(item, { file: item.file, base, rawMetadata: rawMetadata || null })) return false;
+      if (!photoPrefetch.put(item, { file: item.file, base, rawMetadata: rawMetadata || null })) {
+        prefetchRefused.add(item);
+        return false;
+      }
       prefetchedItem = item;
       return true;
     }
@@ -17390,6 +17396,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           if (current()) photoPreviews.put(item, { key, image });
         },
         fail(error) {
+          prefetchRefused.add(item);
           console.warn('Photo prefetch failed:', item.file?.name, error);
         }
       };

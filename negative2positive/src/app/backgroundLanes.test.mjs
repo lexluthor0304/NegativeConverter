@@ -262,4 +262,25 @@ import { createLaneFixture, flush } from './backgroundLanesHarness.mjs';
   assert.equal(f.context.photoPrefetch.has(f.items[2]), false, 'no room in the sessions and not the next photo: dropped');
 }
 
+// --- a prefetch that fails or does not fit the slot is not retried in a loop -------------
+{
+  const f = createLaneFixture({ count: 3, current: 0, prefetch: true, tilesDone: true });
+  f.context.photoPrefetch = (await import('./photoSessionCache.js')).createPhotoSessionCache({ maxBytes: 16 });
+  f.context.kickBackgroundPhotoWork();
+  await f.clock.advance(250);
+  assert.deepEqual(f.started(), ['1.dng']);
+  await f.finishDecode(1); // 64 bytes: larger than the slot
+  assert.equal(f.context.photoPrefetch.has(f.items[1]), false);
+  await f.clock.advance(2000);
+  assert.equal(f.decodes.length, 1, 'a base that does not fit is not decoded again');
+  const g = createLaneFixture({ count: 3, current: 0, prefetch: true, tilesDone: true });
+  g.context.kickBackgroundPhotoWork();
+  await g.clock.advance(250);
+  g.decodes[0].reject(new Error('unreadable'));
+  await flush();
+  await g.clock.advance(2000);
+  assert.equal(g.decodes.length, 1, 'a failed prefetch is not retried');
+  assert.equal(g.warnings.length, 1);
+}
+
 console.log('backgroundLanes tests passed');
