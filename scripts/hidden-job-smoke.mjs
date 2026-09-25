@@ -33,6 +33,8 @@ function installDesktopStub() {
     p.calls.push(command);
     if (command === 'pick_export_directory') return '/virtual/Scans';
     if (command === 'take_web_content_termination') return null;
+    // A new import stops any folder watch first.
+    if (command === 'stop_watch_import_folder') return null;
     if (command === 'begin_export_write') {
       if (!args.directory || !args.suggestedName) throw new Error('unexpected export destination');
       p.begins.push(args.suggestedName);

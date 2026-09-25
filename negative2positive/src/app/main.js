@@ -15763,7 +15763,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       state.currentFileIndex = -1;
       if (state.fileQueue.length) await switchToFile(0);
       scheduleProjectRecovery();
-      void offerInterruptedJobResume({ rollFrames });
+      void offerInterruptedJobResume({ rollFrames }).catch(error => notifyExportError(error));
     }
 
     // ===========================================
