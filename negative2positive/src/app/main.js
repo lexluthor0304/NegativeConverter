@@ -6144,7 +6144,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         return;
       }
       const view = detailView();
-      const plan = planDetailRegion(view);
+      let plan = planDetailRegion(view);
       if (!plan) {
         hideDetailLayer();
         return;
@@ -6160,13 +6160,29 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const pending = detailLayer.request;
       if (pending && detailTagCurrent(pending.tag) && detailRegionServes(pending.plan, plan)) return;
       // At rest the region's corner sits on a whole device pixel, so 100 %
-      // maps one to one without bilinear softening.
-      const snapX = snapPanToDevicePixels(state.panX, view.baseX, state.zoomLevel, plan.x * view.fit, view.dpr);
-      const snapY = snapPanToDevicePixels(state.panY, view.baseY, state.zoomLevel, plan.y * view.fit, view.dpr);
-      if (state.zoomLevel > 1 && (snapX !== state.panX || snapY !== state.panY)) {
-        state.panX = snapX;
-        state.panY = snapY;
-        canvasTransformWrapper.style.transform = `matrix(${state.zoomLevel}, 0, 0, ${state.zoomLevel}, ${state.panX}, ${state.panY}) ${interimGeometryCss()}`.trim();
+      // maps one to one without bilinear softening. The snapped pan can plan a
+      // region one source pixel further along; plan and snap again until the
+      // region stays, so the same view (a photo's saved zoom, restored on its
+      // return) plans the same region and keeps its pan.
+      if (state.zoomLevel > 1) {
+        let { panX, panY } = state;
+        for (let pass = 0; pass < 4; pass++) {
+          const snapX = snapPanToDevicePixels(panX, view.baseX, state.zoomLevel, plan.x * view.fit, view.dpr);
+          const snapY = snapPanToDevicePixels(panY, view.baseY, state.zoomLevel, plan.y * view.fit, view.dpr);
+          if (snapX === panX && snapY === panY) break;
+          panX = snapX;
+          panY = snapY;
+          const next = planDetailRegion({ ...view, panX, panY });
+          if (!next) break;
+          const moved = next.x !== plan.x || next.y !== plan.y;
+          plan = next;
+          if (!moved) break;
+        }
+        if (panX !== state.panX || panY !== state.panY) {
+          state.panX = panX;
+          state.panY = panY;
+          canvasTransformWrapper.style.transform = `matrix(${state.zoomLevel}, 0, 0, ${state.zoomLevel}, ${state.panX}, ${state.panY}) ${interimGeometryCss()}`.trim();
+        }
       }
       const tag = detailTag(full);
       const job = { tag, plan, started: performance.now() };

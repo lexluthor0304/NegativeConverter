@@ -189,6 +189,44 @@ function fixture({ dpr = 2, container = { width: 600, height: 420 } } = {}) {
   assert.equal(f.context.detailLayer.shown, null);
 }
 
+// The snap is a fixed point of planning: a pan whose snap plans a region one
+// source pixel further along is planned and snapped again, so the same view
+// restored later (a photo's saved zoom on its return) keeps its pan.
+{
+  const f = fixture({ dpr: 1 });
+  f.state.processedImageData = new ImageData(W, H);
+  f.state.processedImageDataIsPreview = false;
+  f.state.fullResolutionPending = false;
+  f.zoomTo(1.953125 / (f.fit * 1.76));
+  const start = { panX: f.state.panX, panY: f.state.panY };
+  // A pan whose snap for its own region plans another one.
+  let crossing = null;
+  for (let step = 0; step < 400 && !crossing; step++) {
+    const panY = start.panY - step * 0.37;
+    const view = { ...f.context.detailView(), panY };
+    const plan = planDetailRegion(view);
+    const snapped = snapPanToDevicePixels(panY, view.baseY, f.state.zoomLevel, plan.y * view.fit, 1);
+    if (planDetailRegion({ ...view, panY: snapped }).y !== plan.y) crossing = panY;
+  }
+  assert.ok(crossing !== null, 'a pan whose snap crosses a source row');
+  f.state.panY = crossing;
+  f.context.noteDetailViewChanged();
+  await f.runTimers();
+  assert.equal(f.context.detailLayer.counters.crops, 1);
+  const settled = { panX: f.state.panX, panY: f.state.panY, region: { ...f.context.detailLayer.shown.plan } };
+  const view = f.context.detailView();
+  assert.deepEqual([planDetailRegion(view).x, planDetailRegion(view).y], [settled.region.x, settled.region.y],
+    'the region shown is the one the settled pan plans');
+  // Leave and come back to the same view: nothing moves.
+  f.context.dropDetailLayer();
+  f.wrapper.style.transform = 'restored';
+  f.context.noteDetailViewChanged();
+  await f.runTimers();
+  assert.equal(f.context.detailLayer.counters.crops, 2);
+  assert.deepEqual({ panX: f.state.panX, panY: f.state.panY }, { panX: settled.panX, panY: settled.panY }, 'the restored pan stays put');
+  assert.equal(f.wrapper.style.transform, 'restored', 'the second request writes no transform');
+}
+
 // A warm photo switch converts nothing, so the preview worker may still keep
 // the other photo's level: the base's analysis request puts it back first.
 {
