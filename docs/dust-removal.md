@@ -121,7 +121,9 @@ the count, all transferred. `DustBrush.test.mjs` checks 200+ random strokes
 
 ## Known limits
 
-- The page does not yet paint strokes at display size: with Show mask on, the
-  view uses the CPU path and a full-size `#canvas` (#242, #253).
+- With Show mask on, the view uses the CPU path: `#canvas` and the tint layer
+  are display-size (#242), but a stroke still repaints the display frame under
+  the tint on every move (#254 gives it its own layer; #253 moves these modes
+  to the GPU).
 - Batch export still re-detects dust per file and ignores brush edits
   (`audit-backlog.md`).

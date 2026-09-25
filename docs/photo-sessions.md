@@ -142,7 +142,8 @@ never passed to frame, film-edge, roll, dust or semantic analysis or to export.
 
 `photoPreview.js` downsamples an already converted source and applies the
 shared final-adjustment pipeline once. It does not read `displayImageData`,
-which is intentionally absent when the editor uses WebGL. Thus GPU/CPU choice
+the display-size frame on screen in CPU modes, which is absent when the
+editor uses WebGL. Thus GPU/CPU choice
 does not decide whether a thumbnail includes white balance, CMY, curves or a
 look. Core tone controls are stripped from this final stage because the
 conversion already applied them.

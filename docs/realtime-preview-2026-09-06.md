@@ -248,8 +248,9 @@ WebGL フレームの全画素ハッシュ・タイル・PNG8・TIFF16 が一致
   更新せず（`displayOnly`）、何も古くしない。
 - **Step 3 の確定は何も無効化しない。** `scheduleFullUpdate` は
   `fullResolutionIsStale` が真の時だけ原寸変換を予約する。画素が現在のものなら
-  16 MP 以下は `updateFull()`、16 MP 超は表示をそのままにする。書き出しの前提は
-  変換元と寸法の違う面も古いものとして扱う。
+  16 MP 以下は `updateFull()`、16 MP 超は表示をそのままにする（CPU 表示の時は
+  表示サイズで確定描画する、#242）。書き出しの前提は変換元と寸法の違う面も古い
+  ものとして扱う。
 
 書き出しの画素は変えていない: 古い画素の書き出しは従来どおり `exact` の原寸変換を
 通り、現在の原寸面を再利用する書き出しは同じ入力の同じ変換結果を使う。
@@ -304,3 +305,52 @@ flush・写真セッションの扱いを確認する。Chrome では `gpu-previ
 画面外の自己テストと GPU/CPU 一致、`step3Program` と旧 WebGL1 の一致、アプリ内の
 GPU フレームと確定フレームの一致、表示専用であること、離した直後の書き出し、
 各フォールバックを確認する。フレームレートと遅延は #230 の計測基盤で測る。
+
+## 2026-09-25 更新: CPU 表示は表示サイズで確定し、書き出しは Worker だけで調整する（#242）
+
+期限切れフィルム救済・ルック・枠プレビュー・覆い焼き・除塵マスク表示・WebGL オフの
+六つの表示では Step 3 を JavaScript で `#canvas` に描く。これまでは確定時に
+`updateFullCpu` が処理済みの原寸画像全体に Step 3 をかけ（60 MP で 0.23〜6 秒）、
+8bit の書き出しがそのバッファを再利用していた。`#canvas` も画像の原寸に合わせて
+確保され、原寸化の後はドラッグのたびに 4 MP 以下のプレビューを 60 MP のソフトウェア
+描画へ拡大していた。
+
+- **確定描画は表示サイズ。** `updateFull` の CPU 側は `renderSettledDisplay()`。
+  表示用プレビュー（4 MP 以下）に書き出しと同じ色の計算（`quality: 'full'`、正確な
+  HSL）をかける。1 MP を超える時は書き出し用 Worker で計算し、届くまでプレビュー
+  品質のフレームを表示したままにする。新しいフレーム・切り抜き・比較表示・WebGL
+  表示はトークンを進め、遅れて届いた結果を捨てる。Worker がない時と 1 MP 以下は
+  主スレッドで計算する。16 MP 超の CPU 表示も、Step 3 の確定後にこの確定描画を行う。
+- **書き出しは常に Worker。** `getCurrentExportImageData` は Step 3 で必ず
+  `applyAdjustmentsWithSettings` を通る（Worker がない時だけ主スレッド）。
+  `updateFullCpu`・`ensureFullRender`・`isDisplayImageDataFullResolution`・
+  `state.lastRenderQuality` は削除した。意図した変更は一つ: 期限切れフィルムの
+  「押している間だけ補正前」を押したままの 8bit 書き出しも救済を含む（#229 に記載）。
+- **表示中のフレーム。** `state.displayImageData` は CPU 表示で画面にある調整済みの
+  表示サイズのフレーム（WebGL 表示中は null）。除塵マスクの重ね描き・覆い焼きの
+  ライブ描画・Step 3 のヒストグラムはこれを読み、無ければ次のフレームを描く。
+  未調整の正像を描くことはない。
+- **`#canvas` は描くバッファの大きさ。** 裏のバッファは描くフレーム（枠付きなら枠の
+  寸法）と同じで、`putImageData` で 1:1 に描く。CSS の枠は、そのフレームが表す原寸の
+  画像（枠付きなら原寸の枠、縦位置も考慮）に合わせる。新しい面を入れる時は CSS の枠
+  だけを合わせ、裏のバッファはフレームを描く時に確保する。WebGL 表示中は隠れた
+  `#canvas` を 1×1 にする。ウィンドウのサイズ変更と `showImageUI` は最後の枠の寸法を
+  使う。AI ブラシの重ね描きは画面に出ている表示用キャンバスの大きさに合わせる。
+  `willReadFrequently` は付けない（Chrome と WebKit で拡大・合成が GPU になる）。
+- **比較表示は専用の要素。** `canvasTransformWrapper` 内の `#beforeAfterCanvas` に
+  表示サイズの変換元（`conversionPreviewImageData`）を一度だけ描き、同じ写真の次の
+  押下は表示の切り替えだけ。枠プレビュー中は写真の範囲に置く。Step 1–2 では何も
+  描かない。新しい変換元・写真の切り替え・セッション終了で 1×1 に戻す。
+- **読み込みの描画は一回。** 変換の前の `restoreSettings` は `refreshDisplay: false`
+  で、原寸のネガを描くのは `loadFile` の一回だけ。変換が何も返さない時・失敗した時は
+  切り抜き済みのネガを描く。
+
+検証: `exportWorkerParity8.test.mjs` が Worker の `applyAdjustments` と 1703835 の
+主スレッドの Step 3 をバイト単位で比べる（恒等・LUT・ルック・自然な彩度/彩度・
+霧の面付きの救済、チャンク境界をまたぐ寸法）。`displayPath.test.mjs` は main.js の
+実関数で、確定描画が表示用プレビューの `quality: 'full'` と一致すること、捨てる条件、
+フォールバック、重ね描きの参照、`#canvas` と CSS の枠、比較表示の要素と解放を確かめる。
+Chrome では `compare-preview-smoke.mjs`（DPR 2、8.6 MP）が読み込みの描画回数、
+確定描画の一致と Worker 経由、`#canvas` と比較表示の寸法、比較の押下ごとの書き込み、
+写真の切り替えと終了での解放を確認し、`smoke-test.mjs` が除塵マスク表示の寸法を
+確認する。時間と記憶量は #230 の計測で測る。
