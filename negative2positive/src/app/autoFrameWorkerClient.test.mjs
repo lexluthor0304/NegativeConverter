@@ -196,4 +196,55 @@ assert.equal(timedWorker.terminated, true);
   await new Promise(resolve => setTimeout(resolve, 20));
   assert.equal(spawned[0].terminated, true, 'the last release re-arms the idle release');
 }
+// #252 part 4: the shared worker's two detection helpers. Started next to a
+// running worker, each gets a port and a warm-up, the worker gets the other
+// ends; they go after helperIdleMs without requests, with the worker, or
+// when one fails (the worker is told, and detects serially).
+{
+  const spawned = [], helpers = [];
+  const make = kind => () => {
+    const created = { kind, messages: [], postMessage(message, transfer) { this.messages.push({ message, transfer }); }, terminate() { this.terminated = true; } };
+    (kind === 'a' ? spawned : helpers).push(created);
+    return created;
+  };
+  const client = createAutoFrameWorkerClient({ idleTimeoutMs: 1000, helperIdleMs: 15, workerFactory: make('a'), helperFactory: make('h') });
+  assert.equal(client.warmHelpers(), false, 'no worker yet: nothing to connect to');
+  const warming = client(source, {}, 'warm-up');
+  assert.equal(client.warmHelpers(), true);
+  assert.equal(helpers.length, 2);
+  assert.equal(client.warmHelpers(), true, 'a connected set is reused');
+  assert.equal(helpers.length, 2);
+  const handed = spawned[0].messages.find(entry => entry.message.type === 'helpers');
+  assert.equal(handed.message.ports.length, 2);
+  assert.deepEqual(handed.transfer, handed.message.ports, 'the ports are transferred');
+  for (const helper of helpers) {
+    assert.deepEqual(helper.messages.map(entry => entry.message.type), ['port', 'warm-up']);
+    assert.deepEqual(helper.messages[0].transfer, [helper.messages[0].message.port]);
+  }
+  // A helper's request for the compiled OpenCV module is answered.
+  helpers[0].onmessage({ data: { type: 'opencv-module-request' } });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(helpers[0].messages.at(-1).message.type, 'opencv-module');
+  spawned[0].onmessage({ data: { id: spawned[0].messages[0].message.id, result: { ready: true } } });
+  await warming;
+  await new Promise(resolve => setTimeout(resolve, 40));
+  assert.ok(helpers.every(helper => helper.terminated), 'released after the idle period');
+  assert.deepEqual(spawned[0].messages.at(-1).message, { type: 'helpers', ports: [] }, 'the worker detects serially again');
+  assert.equal(client.helpersAlive, false);
+  // A failing helper releases both.
+  assert.equal(client.warmHelpers(), true);
+  helpers[2].onerror({ message: 'boom', preventDefault() {} });
+  assert.ok(helpers[2].terminated && helpers[3].terminated);
+  assert.equal(client.helpersAlive, false);
+  // They go with the worker.
+  assert.equal(client.warmHelpers(), true);
+  client.dispose();
+  assert.ok(helpers[4].terminated && helpers[5].terminated);
+  assert.equal(client.helperStarts, 3);
+  // Without a factory there are none.
+  const plain = createAutoFrameWorkerClient({ workerFactory: make('a') });
+  void plain(source, {}, 'warm-up').catch(() => {});
+  assert.equal(plain.warmHelpers(), false);
+  plain.dispose();
+}
 console.log('autoFrameWorkerClient tests passed');

@@ -32,7 +32,7 @@ function normalizeAngleDegrees(angle) {
   return normalized;
 }
 
-function sanitizeCropRegionForImage(cropRegion, imageData) {
+export function sanitizeCropRegionForImage(cropRegion, imageData) {
   if (!cropRegion || !imageData) return null;
   const imageWidth = Number(imageData.width);
   const imageHeight = Number(imageData.height);
@@ -1381,26 +1381,14 @@ function createStageClock() {
 }
 
 /**
- * Detects the frame window and its straightening angle on a preview of
- * `imageData`, and maps the crop onto the full frame rotated by that angle.
- *
- * The result always carries `rotatedWidth`/`rotatedHeight`, the size of
- * that rotated frame (#251). Its pixels are built only when asked for:
- * - `rotatedOutput: 'full'` (default) returns them as `rotatedImageData`;
- *   'none' returns sizes only.
- * - `rotatedIsSource: true` says the frame is `imageData` itself (angle 0,
- *   or a result that needs review), so a worker need not send it back.
- * - Pixels are otherwise read only by the rare full-resolution fallback
- *   below. `deferFullResolution: true` (a worker that holds only the 8-bit
- *   plane of a 16-bit frame) returns `{ needsFullResolution: true }`
- *   instead of rotating that plane, so the caller can retry with both.
- * - `frameFilmType`: the frame's own film type, which may send the line
- *   search to the grey plane only (settings.neutralLineSearch, see
- *   planLineSearch). `settings.filmType` keeps choosing the scoring profile.
- * - `settings.deterministicPreview` builds the preview and its fallback
- *   rotations in JS (autoFramePreview.js) instead of a 2D canvas.
+ * The state of one detection (#252 part 4), shared by the serial detector
+ * below and the parallel one (workers/autoFrameParallel.js), which run the
+ * same stage functions in the same order and differ only in where each
+ * independent stage runs: the preview, the window search (contour variants,
+ * line channel units, tail), the fallback (preview candidates and line
+ * angles, one pass per angle) and the full-resolution finish.
  */
-export function detectFrameAndRotation(imageData, options = {}) {
+export function beginFrameDetection(imageData, options = {}) {
   if (!imageData || !(globalThis.cv && globalThis.cv.Mat)) return null;
   const context = getAnalyzerContext(options);
   if (!context.rotateImageData) return null;
@@ -1412,7 +1400,6 @@ export function detectFrameAndRotation(imageData, options = {}) {
     if (result) result.stageMs = clock.stages;
     return result;
   };
-  const needsFullResolution = () => withStages({ needsFullResolution: true });
   // The full frame rotated by `angle`: its size always, its pixels on demand.
   const fullFrame = (angle) => {
     const turned = Math.abs(angle) >= 0.001;
@@ -1434,40 +1421,63 @@ export function detectFrameAndRotation(imageData, options = {}) {
       }
     };
   };
-  const frameOutput = (frame) => ({
-    rotatedWidth: frame.width,
-    rotatedHeight: frame.height,
-    rotatedIsSource: frame.isSource,
-    ...(rotatedOutput === 'full' ? { rotatedImageData: frame.pixels() } : {})
-  });
-
   const previewData = deterministicPreview
     ? areaResizeToMaxSide(imageData, context.maxSide)
     : resizeImageDataToMaxSide(imageData, context.maxSide);
   context.reusablePreview = previewData;
   clock.mark('preview');
-  // The line search's planes, decided once per frame and only if the
-  // search runs (a contour window makes it unnecessary).
+  // The line search's planes, decided once per frame. Recorded only if the
+  // search runs (a contour window makes it unnecessary); the parallel
+  // detector reads the plan earlier to hand out channel units.
   let linePlan = null;
-  const planLines = () => (linePlan ||= planLineSearch(previewData, {
+  let lineSearchRan = false;
+  const linePlanOf = () => (linePlan ||= planLineSearch(previewData, {
     enabled: context.settings.neutralLineSearch === true,
     filmType: options.frameFilmType ?? null
   }));
-  const window = detectImageWindow(previewData, getAutoFrameAspectTargets(context), { lineChannels: () => planLines().channels });
-  const lineSearchRecord = () => (linePlan ? linePlan.record : { channels: null, reason: 'not-run', chromaP95: null });
-  clock.mark('window');
+  return {
+    imageData,
+    context,
+    clock,
+    previewData,
+    targets: getAutoFrameAspectTargets(context),
+    rotatedOutput,
+    deterministicPreview,
+    withStages,
+    needsFullResolution: () => withStages({ needsFullResolution: true }),
+    fullFrame,
+    frameOutput: (frame) => ({
+      rotatedWidth: frame.width,
+      rotatedHeight: frame.height,
+      rotatedIsSource: frame.isSource,
+      ...(rotatedOutput === 'full' ? { rotatedImageData: frame.pixels() } : {})
+    }),
+    linePlanOf,
+    planLines() { lineSearchRan = true; return linePlanOf(); },
+    lineSearchRecord: () => (lineSearchRan ? linePlan.record : { channels: null, reason: 'not-run', chromaP95: null })
+  };
+}
+
+/**
+ * The window search's verdict: a result to return (a frame that needs
+ * review, or a window whose crop maps onto the full frame), or undefined
+ * when the fallback must run (no window, or a window whose projected crop
+ * is null).
+ */
+export function settleFromWindow(detection, window) {
+  const { clock, previewData, imageData, rotatedOutput, context, withStages, fullFrame, frameOutput } = detection;
   // 撮影範囲外の辺は比率で補完しない。密度テンプレートにもフォールバックせず、
   // 自動・一括処理のいずれも元画像を保持して手動確認へ回す。
   if (window?.incomplete || window?.requiresReview) return withStages({
     angle: 0, cropRegion: null, confidence: 0, confidenceLevel: 'low',
     detectedFormat: 'unknown', requiresReview: true, ...frameOutput(fullFrame(0)),
-    diagnostics: { method: window.ambiguous ? 'opencv-ambiguous-window' : 'opencv-incomplete-window', incomplete: Boolean(window.incomplete), lineSearch: lineSearchRecord() }
+    diagnostics: { method: window.ambiguous ? 'opencv-ambiguous-window' : 'opencv-incomplete-window', incomplete: Boolean(window.incomplete), lineSearch: detection.lineSearchRecord() }
   });
   if (window) {
     const angle = Number(window.angle.toFixed(2));
     const frame = fullFrame(angle);
     if (rotatedOutput === 'full') {
-      if (frame.needsDeferral) return needsFullResolution();
+      if (frame.needsDeferral) return detection.needsFullResolution();
       frame.pixels();
     }
     // Only the rotated frame's size is read here.
@@ -1477,28 +1487,57 @@ export function detectFrameAndRotation(imageData, options = {}) {
       angle, cropRegion, confidence: window.confidence,
       confidenceLevel: inferAutoFrameConfidenceLevel(window.confidence, context.settings),
       detectedFormat: window.detectedFormat, ...frameOutput(frame),
-      diagnostics: { method: window.method || 'opencv-image-window', scoreBreakdown: window.evidence, lineSearch: lineSearchRecord() }
+      diagnostics: { method: window.method || 'opencv-image-window', scoreBreakdown: window.evidence, lineSearch: detection.lineSearchRecord() }
     });
   }
-  const previewCandidates = detectFrameCandidatesWithCv(previewData, context, { minAreaRatio: 0.04 });
-  clock.mark('previewCandidates');
-  const lineAngleCandidates = buildLineOrientationRotationCandidates(previewData);
-  clock.mark('lineAngles');
-  if (!previewCandidates.length && !lineAngleCandidates.length) return withStages(null);
+  return undefined;
+}
 
-  const angleCandidates = mergeAngleCandidates(
-    buildRotationCandidates(previewCandidates),
-    lineAngleCandidates
-  );
+/**
+ * The fallback's first stage on the preview: the straightening angles to
+ * try (in the order they are merged) and the score of the best preview
+ * candidate, or `angleCandidates: null` when there is nothing to try.
+ * Plain data; a helper worker computes it on the same preview bytes.
+ */
+export function fallbackPreviewStage(previewData, context, clock = null) {
+  const previewCandidates = detectFrameCandidatesWithCv(previewData, context, { minAreaRatio: 0.04 });
+  clock?.mark('previewCandidates');
+  const lineAngleCandidates = buildLineOrientationRotationCandidates(previewData);
+  clock?.mark('lineAngles');
+  if (!previewCandidates.length && !lineAngleCandidates.length) return { angleCandidates: null, baseScore: 0.5 };
+  return {
+    angleCandidates: mergeAngleCandidates(buildRotationCandidates(previewCandidates), lineAngleCandidates),
+    baseScore: previewCandidates[0] ? previewCandidates[0].score : 0.5
+  };
+}
+
+/**
+ * One angle of the fallback: the axis-aligned crop of the preview turned by
+ * `angle` (plain data, or null). Independent of every other angle.
+ */
+export function anglePassStage(previewData, context, angle, deterministicPreview) {
+  const rotatedPreview = Math.abs(angle) < 0.001 ? previewData
+    : (deterministicPreview ? rotatePreviewImageData(previewData, angle) : context.rotateImageData(previewData, angle));
+  const cropPreview = detectAxisAlignedCropRegion(rotatedPreview, context.settings.marginRatio, context);
+  return cropPreview
+    ? { angle, cropPreview, rotatedPreviewWidth: rotatedPreview.width, rotatedPreviewHeight: rotatedPreview.height }
+    : null;
+}
+
+/**
+ * The fallback's merge and the full-resolution finish. `passes[i]` is the
+ * pass of `fallback.angleCandidates[i]`; the winner is chosen in angle
+ * order with the 0.001 tie-break toward the smaller angle.
+ */
+export function finishFromFallback(detection, fallback, passes) {
+  const { clock, previewData, rotatedOutput, context, withStages, fullFrame, frameOutput } = detection;
+  if (!fallback.angleCandidates) return withStages(null);
+  clock.stages.angleCount = fallback.angleCandidates.length;
   let bestPreview = null;
-  clock.stages.angleCount = angleCandidates.length;
-  for (const angle of angleCandidates) {
-    const rotatedPreview = Math.abs(angle) < 0.001 ? previewData
-      : (deterministicPreview ? rotatePreviewImageData(previewData, angle) : context.rotateImageData(previewData, angle));
-    const cropPreview = detectAxisAlignedCropRegion(rotatedPreview, context.settings.marginRatio, context);
-    clock.mark('anglePasses');
-    if (!cropPreview) continue;
-    const baseScore = previewCandidates[0] ? previewCandidates[0].score : 0.5;
+  for (const pass of passes) {
+    if (!pass) continue;
+    const { angle, cropPreview } = pass;
+    const baseScore = fallback.baseScore;
     const anglePenalty = computeAutoFrameAnglePenalty(angle);
     const validationAspect = cropPreview.validation ? cropPreview.validation.aspectScore : 0.6;
     const score = clampBetween(
@@ -1518,8 +1557,8 @@ export function detectFrameAndRotation(imageData, options = {}) {
         score,
         cropPreview,
         anglePenalty,
-        rotatedPreviewWidth: rotatedPreview.width,
-        rotatedPreviewHeight: rotatedPreview.height
+        rotatedPreviewWidth: pass.rotatedPreviewWidth,
+        rotatedPreviewHeight: pass.rotatedPreviewHeight
       };
     }
   }
@@ -1528,7 +1567,7 @@ export function detectFrameAndRotation(imageData, options = {}) {
   const normalizedAngle = Math.abs(bestPreview.angle) < 0.15 ? 0 : Number(bestPreview.angle.toFixed(2));
   const rotatedFull = fullFrame(normalizedAngle);
   if (rotatedOutput === 'full') {
-    if (rotatedFull.needsDeferral) return needsFullResolution();
+    if (rotatedFull.needsDeferral) return detection.needsFullResolution();
     rotatedFull.pixels();
   }
   clock.mark('rotateFull');
@@ -1561,7 +1600,7 @@ export function detectFrameAndRotation(imageData, options = {}) {
   } else {
     // The only full-resolution pixel read: a crop that passed on the preview
     // but not once scaled.
-    if (rotatedFull.needsDeferral) return needsFullResolution();
+    if (rotatedFull.needsDeferral) return detection.needsFullResolution();
     cropFull = detectAxisAlignedCropRegion(rotatedFull.pixels(), context.settings.marginRatio, context);
   }
   clock.mark('fullFallback');
@@ -1619,7 +1658,48 @@ export function detectFrameAndRotation(imageData, options = {}) {
       anglePenalty: Number(fullAnglePenalty.toFixed(3)),
       cropValidation: cropFull.validation || null,
       edgeContacts,
-      lineSearch: lineSearchRecord()
+      lineSearch: detection.lineSearchRecord()
     }
   });
+}
+
+/**
+ * Detects the frame window and its straightening angle on a preview of
+ * `imageData`, and maps the crop onto the full frame rotated by that angle.
+ *
+ * The result always carries `rotatedWidth`/`rotatedHeight`, the size of
+ * that rotated frame (#251). Its pixels are built only when asked for:
+ * - `rotatedOutput: 'full'` (default) returns them as `rotatedImageData`;
+ *   'none' returns sizes only.
+ * - `rotatedIsSource: true` says the frame is `imageData` itself (angle 0,
+ *   or a result that needs review), so a worker need not send it back.
+ * - Pixels are otherwise read only by the rare full-resolution fallback
+ *   below. `deferFullResolution: true` (a worker that holds only the 8-bit
+ *   plane of a 16-bit frame) returns `{ needsFullResolution: true }`
+ *   instead of rotating that plane, so the caller can retry with both.
+ * - `frameFilmType`: the frame's own film type, which may send the line
+ *   search to the grey plane only (settings.neutralLineSearch, see
+ *   planLineSearch). `settings.filmType` keeps choosing the scoring profile.
+ * - `settings.deterministicPreview` builds the preview and its fallback
+ *   rotations in JS (autoFramePreview.js) instead of a 2D canvas.
+ *
+ * The serial composition of the stages above: the reference the parallel
+ * detector (#252) must equal.
+ */
+export function detectFrameAndRotation(imageData, options = {}) {
+  const detection = beginFrameDetection(imageData, options);
+  if (!detection) return null;
+  const { previewData, context, clock } = detection;
+  const window = detectImageWindow(previewData, detection.targets, { lineChannels: () => detection.planLines().channels });
+  clock.mark('window');
+  const settled = settleFromWindow(detection, window);
+  if (settled !== undefined) return settled;
+  const fallback = fallbackPreviewStage(previewData, context, clock);
+  if (!fallback.angleCandidates) return detection.withStages(null);
+  const passes = [];
+  for (const angle of fallback.angleCandidates) {
+    passes.push(anglePassStage(previewData, context, angle, detection.deterministicPreview));
+    clock.mark('anglePasses');
+  }
+  return finishFromFallback(detection, fallback, passes);
 }

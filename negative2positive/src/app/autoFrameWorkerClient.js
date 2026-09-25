@@ -39,10 +39,22 @@ export function rebuildTransferredImage(previous, rgba, image16 = null) {
   return rebuilt;
 }
 
+/**
+ * `helperFactory` (#252 part 4, the shared foreground worker only): creates
+ * one detection helper worker. `warmHelpers()` starts two and hands the
+ * worker a MessagePort to each, so its frame detections spread their
+ * independent stages over three workers (workers/autoFrameParallel.js).
+ * Helpers see only the 1600 px preview, are released `helperIdleMs` after
+ * the worker's last request, with the worker, or by `releaseHelpers()`
+ * (memory pressure); one that fails to start or errors releases both, and
+ * the worker then detects serially, with the same result.
+ */
 export function createAutoFrameWorkerClient({
   workerFactory = () => new Worker(new URL('../workers/autoFrameWorker.js', import.meta.url), { type: 'module' }),
   timeoutMs = 120000,
   idleTimeoutMs = 30000,
+  helperFactory = null,
+  helperIdleMs = 30000,
 } = {}) {
   let worker = null, sequence = 0;
   let idleTimer = null;
@@ -50,9 +62,31 @@ export function createAutoFrameWorkerClient({
   let abortReleases = 0;
   // The OpenCV heap the worker last reported (#258's ledger); 0 without one.
   let heapBytes = 0;
+  let helperSet = null; // { workers, timer }
+  let helperStarts = 0;
   const pending = new Map();
+  function releaseHelpers({ tellWorker = true } = {}) {
+    if (!helperSet) return;
+    const released = helperSet;
+    helperSet = null;
+    clearTimeout(released.timer);
+    for (const helper of released.workers) {
+      helper.onmessage = helper.onerror = helper.onmessageerror = null;
+      try { helper.terminate(); } catch {}
+    }
+    if (tellWorker && worker) {
+      try { worker.postMessage({ type: 'helpers', ports: [] }); } catch {}
+    }
+  }
+  function armHelperIdleTimer() {
+    if (!helperSet) return;
+    clearTimeout(helperSet.timer);
+    helperSet.timer = setTimeout(() => releaseHelpers(), helperIdleMs);
+    helperSet.timer.unref?.();
+  }
   function fail(error) {
     clearTimeout(idleTimer);
+    releaseHelpers({ tellWorker: false });
     if (worker) worker.onmessage = worker.onerror = worker.onmessageerror = null;
     worker?.terminate();
     worker = null;
@@ -62,6 +96,7 @@ export function createAutoFrameWorkerClient({
   }
   function armIdleTimer() {
     clearTimeout(idleTimer);
+    armHelperIdleTimer();
     // A roll analysis still has frames to measure (#252): keep the realm.
     if (idleHolds > 0) return;
     idleTimer = setTimeout(() => fail(new Error('Auto-frame worker idle')), idleTimeoutMs);
@@ -79,6 +114,7 @@ export function createAutoFrameWorkerClient({
     if (signal?.aborted) { reject(abortError()); return; }
     try {
       clearTimeout(idleTimer);
+      if (helperSet) clearTimeout(helperSet.timer);
       if (!worker) {
         worker = workerFactory();
         worker.onerror = () => fail(new Error('Auto-frame worker crashed'));
@@ -123,6 +159,7 @@ export function createAutoFrameWorkerClient({
         pending.delete(id);
         if (!pending.size && worker) {
           clearTimeout(idleTimer);
+          releaseHelpers({ tellWorker: false });
           worker.onmessage = worker.onerror = worker.onmessageerror = null;
           worker.terminate();
           worker = null;
@@ -224,6 +261,54 @@ export function createAutoFrameWorkerClient({
   // they are transferred as they are, without a copy.
   request.run = (type, payload, transfers = []) => post({ ...payload, type }, transfers);
   request.dispose = () => fail(new Error('Auto-frame worker released'));
+  // Two detection helpers connected to the running worker (see above).
+  // Nothing happens without a helperFactory, a running worker or
+  // MessageChannel; a set already connected only has its idle timer reset.
+  request.warmHelpers = () => {
+    if (!helperFactory || !worker || typeof MessageChannel !== 'function') return false;
+    if (helperSet) { armHelperIdleTimer(); return true; }
+    const workers = [];
+    try {
+      for (let i = 0; i < 2; i++) workers.push(helperFactory());
+    } catch (error) {
+      for (const helper of workers) { try { helper.terminate(); } catch {} }
+      console.warn('Detection helpers unavailable, detecting serially:', error?.message || error);
+      return false;
+    }
+    helperSet = { workers, timer: null };
+    helperStarts += 1;
+    const set = helperSet;
+    const failed = (event) => {
+      try { event?.preventDefault?.(); } catch {}
+      if (helperSet === set) {
+        console.warn('Detection helper failed, detecting serially:', event?.message || event?.type || 'error');
+        releaseHelpers();
+      }
+    };
+    const ports = [];
+    try {
+      for (const helper of workers) {
+        // The helper asks for the session's compiled OpenCV module (part 5).
+        helper.onmessage = ({ data }) => { answerOpenCvWorker(helper, data); };
+        helper.onerror = failed;
+        helper.onmessageerror = failed;
+        const channel = new MessageChannel();
+        helper.postMessage({ type: 'port', port: channel.port2 }, [channel.port2]);
+        helper.postMessage({ type: 'warm-up' });
+        ports.push(channel.port1);
+      }
+      worker.postMessage({ type: 'helpers', ports }, ports);
+    } catch (error) {
+      console.warn('Detection helpers could not be connected, detecting serially:', error?.message || error);
+      releaseHelpers();
+      return false;
+    }
+    armHelperIdleTimer();
+    return true;
+  };
+  request.releaseHelpers = () => releaseHelpers();
+  Object.defineProperty(request, 'helpersAlive', { get: () => Boolean(helperSet) });
+  Object.defineProperty(request, 'helperStarts', { get: () => helperStarts });
   // While any hold is taken, an idle worker is not released after
   // idleTimeoutMs (#252: a roll analysis with frames left keeps OpenCV warm
   // for a cold switch). The returned function ends this hold; the last one
@@ -255,7 +340,9 @@ export function createAutoFrameWorkerClient({
   return request;
 }
 
-export const analyzeFrameInWorker = createAutoFrameWorkerClient();
+export const analyzeFrameInWorker = createAutoFrameWorkerClient({
+  helperFactory: () => new Worker(new URL('../workers/autoFrameHelperWorker.js', import.meta.url), { type: 'module' })
+});
 
 // The page's OpenCV analyses on the shared foreground worker (never a roll
 // lane): see openCvAnalysisTasks.js.
@@ -263,10 +350,15 @@ export const runAnalysisInWorker = (type, payload, transfers) => analyzeFrameInW
 
 // Starts the shared worker and loads OpenCV ahead of the first detection.
 // Safe to call repeatedly; failures are ignored (the detection will load it).
-export function warmUpAutoFrameWorker() {
+// `helpers` also starts its two detection helpers (#252 part 4): for a
+// detection that is about to run (a first import, a cold open of a frame
+// without auto-frame results, the Auto Frame button).
+export function warmUpAutoFrameWorker({ helpers = false } = {}) {
   if (typeof Worker !== 'function' || typeof OffscreenCanvas !== 'function') return Promise.resolve(false);
   const pixel = { width: 1, height: 1, data: new Uint8ClampedArray(4) };
-  return analyzeFrameInWorker(pixel, {}, 'warm-up').then(() => true, () => false);
+  const warming = analyzeFrameInWorker(pixel, {}, 'warm-up').then(() => true, () => false);
+  if (helpers) analyzeFrameInWorker.warmHelpers();
+  return warming;
 }
 
 /**

@@ -9838,6 +9838,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       thumbnailSources.clear();
       watchRollSamples.clear();
       if (!exportWorkerPendingCount()) terminateExportWorker();
+      // The detection helpers' OpenCV realms (#252) start again on demand.
+      analyzeFrameInWorker.releaseHelpers();
       // RAW post-decode workers live only for their decode (#232): none idles.
       if (!hiddenJobUsesAiRepair()) void releaseAiRepairSession();
       hiddenJobs.recheck();
@@ -11538,9 +11540,14 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // The frame detector needs OpenCV compiled in its worker; start that
       // now so it overlaps the decode instead of following it. The preview
       // conversion follows the decode directly, so its worker starts too.
-      if (state.autoFrame.enabled && (autoConvert || rewarmAutoFrameWorker)) {
+      // A photo whose frame is still to be detected (a first import, a cold
+      // open of a frame without auto-frame results) also starts the two
+      // detection helpers (#252).
+      const queued = state.fileQueue.find(entry => entry.file === file);
+      const detectsFrame = Boolean(state.autoFrame.enabled && queued && !queued.settings?.autoFrameMeta);
+      if (state.autoFrame.enabled && (autoConvert || rewarmAutoFrameWorker || detectsFrame)) {
         rewarmAutoFrameWorker = false;
-        void warmUpAutoFrameWorker();
+        void warmUpAutoFrameWorker({ helpers: detectsFrame && detectionHelpersEnabled() });
       }
       void convertPreviewFrameInWorker.warmUp();
       // A crop draft holds the previous image; leaving crop mode armed lets
@@ -13554,6 +13561,14 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return 'low';
     }
 
+    // Foreground detections on three workers (#252 part 4): the shared
+    // auto-frame worker and two helpers. Off with nc_autoframe_helpers_v1 =
+    // 'off' (support), and on machines with fewer than four cores.
+    function detectionHelpersEnabled() {
+      const cores = Number(navigator.hardwareConcurrency);
+      return safeStorageGet('nc_autoframe_helpers_v1') !== 'off' && !(cores > 0 && cores < 4);
+    }
+
     // The analyzer options of a detection. `filmType` chooses the density
     // scoring profile (the import passes its snapshot's, the roll its
     // decision); `frameFilmType` is the frame's own type, which may send the
@@ -13615,6 +13630,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       autoFrame = state.autoFrame, filmType = state.filmType, frameFilmType = state.filmType, signal = null
     } = {}) {
       if (!imageData) return null;
+      // The shared worker spreads the detection over its helpers (#252).
+      if (analyzeInWorker === analyzeFrameInWorker && detectionHelpersEnabled()) void warmUpAutoFrameWorker({ helpers: true });
       return withDetectionOverlay(silent, async () => {
         const options = autoFrameAnalyzerOptions({ autoFrame, filmType, frameFilmType });
         let mainThread = false;

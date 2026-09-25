@@ -56,7 +56,8 @@ function fixture() {
     isRawLikeFileName: name => /\.(dng|nef)$/.test(name), isTiffContainerRawName: () => false,
     isPngFile: () => false, lowMemoryPhotoDevice: () => false,
     analyzeFrameInWorker: { abortReleases: 0 },
-    warmUpAutoFrameWorker: () => { warmUps.push(true); return Promise.resolve(true); },
+    warmUpAutoFrameWorker: (options = {}) => { warmUps.push(options); return Promise.resolve(true); },
+    detectionHelpersEnabled: () => true,
     convertPreviewFrameInWorker: { warmUp: () => Promise.resolve(true) },
     defaultFilmBaseBuffer: () => 10,
     loadRawImageData: (buffer, name, options) => {
@@ -171,6 +172,15 @@ function fixture() {
   assert.equal(f.target.rewarmAutoFrameWorker, false);
   void f.context.loadFile(f.file('b.dng'), { autoConvert: false, quiet: true });
   assert.equal(f.warmUps.length, 1, 'only once');
+  // #252: a cold open of a queued frame whose frame is still to be detected
+  // starts the detection helpers too; a frame with auto-frame results does not.
+  const detect = f.file('c.dng'), framed = f.file('d.dng');
+  f.state.fileQueue.push({ file: detect, settings: null }, { file: framed, settings: { autoFrameMeta: { appliedMode: 'crop' } } });
+  void f.context.loadFile(detect, { autoConvert: false, quiet: true });
+  assert.equal(f.warmUps.at(-1).helpers, true);
+  const before = f.warmUps.length;
+  void f.context.loadFile(framed, { autoConvert: false, quiet: true });
+  assert.equal(f.warmUps.length, before, 'no warm-up for a frame already detected');
 }
 
 // WORKER_ABORTED: rethrown, never counted against the worker, never rerun on the main thread.

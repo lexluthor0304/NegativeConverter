@@ -262,107 +262,158 @@ function samePlane(a, b) {
   return true;
 }
 
+// One plane of the search into `gray` (grey for -1, else that RGBA channel).
+function readPlane(cv, src, split, channel, gray) {
+  if (channel < 0) cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+  else { const plane = split.get(channel); try { plane.copyTo(gray); } finally { plane.delete(); } }
+}
+
+/**
+ * The planes of `channels` (in order) that are byte-identical to an earlier
+ * one: they would give the same segments, which select() drops as
+ * duplicates. Byte equality is an equivalence, so "equal to an earlier
+ * plane" is "equal to an earlier searched plane". Every realm that holds the
+ * same preview bytes decides the same (#252: parallel channel units).
+ */
+export function duplicateLinePlanes(src, channels = LINE_SEARCH_CHANNELS) {
+  const cv = globalThis.cv;
+  const skip = new Set();
+  const gray = new cv.Mat(), split = new cv.MatVector();
+  const seen = [];
+  try {
+    if (channels.some(channel => channel >= 0)) cv.split(src, split);
+    for (let index = 0; index < channels.length; index++) {
+      readPlane(cv, src, split, channels[index], gray);
+      const bytes = gray.data;
+      if (seen.some(plane => samePlane(plane, bytes))) { skip.add(channels[index]); continue; }
+      // The last plane is never compared against.
+      if (index + 1 < channels.length) seen.push(bytes.slice());
+    }
+  } finally { gray.delete(); split.delete(); }
+  return skip;
+}
+
+/**
+ * One channel unit of the line search (#252 part 4): blur, Canny, the two
+ * restricted Hough passes and the segment walk on one plane. Returns the
+ * scored lines in walk order, `{ channel, horizontal, vertical }`; the
+ * search's tail (lineQuadsFromUnits) concatenates units in channel order.
+ */
+export function lineChannelUnit(image, src, channel) {
+  const cv = globalThis.cv;
+  const gray = new cv.Mat(), smooth = new cv.Mat(), edges = new cv.Mat(), split = new cv.MatVector();
+  const horizontal = [], vertical = [];
+  const minDim = Math.min(image.width, image.height);
+  try {
+    if (channel >= 0) cv.split(src, split);
+    readPlane(cv, src, split, channel, gray);
+    cv.GaussianBlur(gray, smooth, new cv.Size(3, 3), 0);
+    cv.Canny(smooth, edges, 10, 30);
+    const segments = axisLineSegments(cv, edges, image.width, image.height, {
+      threshold: Math.max(30, Math.round(minDim * .047)),
+      minLength: Math.max(30, minDim * .14),
+      maxGap: Math.max(5, minDim * .023)
+    });
+    for (const { p, q } of segments) {
+      const dx = q.x - p.x, dy = q.y - p.y;
+      const isHorizontal = Math.abs(dx) > Math.abs(dy);
+      const m = isHorizontal ? dy / dx : dx / dy;
+      if (!Number.isFinite(m) || Math.abs(m) > .27) continue;
+      const evidence = lineEvidence(image, p, q);
+      if (!evidence) continue;
+      const b = isHorizontal ? p.y - m * p.x : p.x - m * p.y;
+      const position = b + m * (isHorizontal ? image.width : image.height) / 2;
+      const length = Math.hypot(dx, dy);
+      (isHorizontal ? horizontal : vertical).push({ m, b, position, length, p, q, score: evidence + Math.min(length / minDim, 1) * .2 });
+    }
+  } finally {
+    gray.delete(); smooth.delete(); edges.delete(); split.delete();
+  }
+  return { channel, horizontal, vertical };
+}
+
+/**
+ * The search's tail over channel units given in channel order: selection
+ * (a stable sort, so the order of the units is part of the result), pairs,
+ * quads, the orthogonal scans between parallel pairs and the open-frame
+ * check. Pure JS on the preview's 8-bit plane.
+ */
+export function lineQuadsFromUnits(image, units, debug = null) {
+  const minDim = Math.min(image.width, image.height);
+  const horizontal = [], vertical = [];
+  for (const unit of units) {
+    for (const line of unit.horizontal) horizontal.push(line);
+    for (const line of unit.vertical) vertical.push(line);
+  }
+  const select = items => {
+    const selected = [];
+    for (const line of items.sort((a, b) => b.score - a.score)) {
+      if (selected.some(other => Math.abs(other.position - line.position) < Math.max(4, minDim * .006) && Math.abs(other.m - line.m) < .02)) continue;
+      selected.push(line);
+      if (selected.length >= 18) break;
+    }
+    return selected.sort((a, b) => a.position - b.position);
+  };
+  const pairs = items => {
+    const result = [];
+    for (let i = 0; i < items.length; i++) for (let j = i + 1; j < items.length; j++) {
+      const a = items[i], b = items[j];
+      if (b.position - a.position < minDim * .23 || Math.abs(Math.atan(a.m) - Math.atan(b.m)) > .04) continue;
+      result.push([a, b]);
+    }
+    return result;
+  };
+  const hSel = select(horizontal), vSel = select(vertical);
+  if (debug) {
+    debug.horizontal = hSel; debug.vertical = vSel; debug.rawH = horizontal.length; debug.rawV = vertical.length;
+    debug.channels = units.map(unit => unit.channel);
+  }
+  const hPairs = pairs(hSel), vPairs = pairs(vSel);
+  const quads = [];
+  for (const [top, bottom] of hPairs) for (const [left, right] of vPairs) {
+    if (Math.abs(Math.atan(top.m) + Math.atan(left.m)) > .045) continue;
+    quads.push([intersect(top, left), intersect(top, right), intersect(bottom, right), intersect(bottom, left)]);
+  }
+  // 穴・低コントラスト・模様の接続で線分が短くなる場合、観測済みの平行二辺
+  // の間で直交辺を走査する。幅は規格から推測せず、全長の画素支持を必要とする。
+  // 全ての平行二辺を走査する。上位 12 組に限ると、穴や隣接コマの縁が多い
+  // 画像では画格の二辺が走査されず、片側の辺が弱い画格を取り逃がす。
+  const scanPairs = (parallelPairs, horizontalPair) => {
+    const limit = horizontalPair ? image.width : image.height;
+    for (const [a, b] of [...parallelPairs].sort((p, q) => q[0].score + q[1].score - p[0].score - p[1].score)) {
+      const m = -(a.m + b.m) / 2, found = [];
+      for (let position = 4; position < limit - 4; position += Math.max(1, Math.round(minDim / 600))) {
+        const line = { m, b: position - m * (a.position + b.position) / 2, position };
+        const p = horizontalPair ? intersect(a, line) : intersect(line, a);
+        const q = horizontalPair ? intersect(b, line) : intersect(line, b);
+        const score = lineEvidence(image, p, q);
+        if (score) found.push({ ...line, p, q, length: Math.hypot(p.x - q.x, p.y - q.y), score });
+      }
+      for (const [c, d] of pairs(select(found))) {
+        const [top, bottom, left, right] = horizontalPair ? [a, b, c, d] : [c, d, a, b];
+        quads.push([intersect(top, left), intersect(top, right), intersect(bottom, right), intersect(bottom, left)]);
+      }
+    }
+  };
+  scanPairs(hPairs, true);
+  scanPairs(vPairs, false);
+  const incomplete = vPairs.some(([a, b]) => isOpenPair(image, a, b, true))
+    || hPairs.some(([a, b]) => isOpenPair(image, a, b, false));
+  return { quads, incomplete };
+}
+
 /**
  * `channels` limits the planes searched (default: grey, R, G, B). A plane
  * byte-identical to one already searched is skipped: it would give the same
  * segments, which select() drops as duplicates, so the quads do not change
  * (a greyscale scan searches once instead of four times). `debug.channels`
- * lists the planes actually searched.
+ * lists the planes actually searched. The serial composition of the stage
+ * functions the parallel detector (#252) spreads over workers.
  */
 export function findWindowLineQuads(image, src, debug = null, { channels: searchChannels = LINE_SEARCH_CHANNELS } = {}) {
   const cv = globalThis.cv;
   if (!cv?.HoughLines || !cv?.split) return { quads: [], incomplete: false };
-  const gray = new cv.Mat(), smooth = new cv.Mat(), edges = new cv.Mat();
-  const channels = new cv.MatVector(), horizontal = [], vertical = [];
-  const minDim = Math.min(image.width, image.height);
-  const searched = [], searchedChannels = [];
-  try {
-    if (searchChannels.some(channel => channel >= 0)) cv.split(src, channels);
-    for (let index = 0; index < searchChannels.length; index++) {
-      const channel = searchChannels[index];
-      if (channel < 0) cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-      else { const plane = channels.get(channel); try { plane.copyTo(gray); } finally { plane.delete(); } }
-      const bytes = gray.data;
-      if (searched.some(plane => samePlane(plane, bytes))) continue;
-      // The last plane is never compared against.
-      if (index + 1 < searchChannels.length) searched.push(bytes.slice());
-      searchedChannels.push(channel);
-      cv.GaussianBlur(gray, smooth, new cv.Size(3, 3), 0);
-      cv.Canny(smooth, edges, 10, 30);
-      const segments = axisLineSegments(cv, edges, image.width, image.height, {
-        threshold: Math.max(30, Math.round(minDim * .047)),
-        minLength: Math.max(30, minDim * .14),
-        maxGap: Math.max(5, minDim * .023)
-      });
-      for (const { p, q } of segments) {
-        const dx = q.x - p.x, dy = q.y - p.y;
-        const isHorizontal = Math.abs(dx) > Math.abs(dy);
-        const m = isHorizontal ? dy / dx : dx / dy;
-        if (!Number.isFinite(m) || Math.abs(m) > .27) continue;
-        const evidence = lineEvidence(image, p, q);
-        if (!evidence) continue;
-        const b = isHorizontal ? p.y - m * p.x : p.x - m * p.y;
-        const position = b + m * (isHorizontal ? image.width : image.height) / 2;
-        const length = Math.hypot(dx, dy);
-        (isHorizontal ? horizontal : vertical).push({ m, b, position, length, p, q, score: evidence + Math.min(length / minDim, 1) * .2 });
-      }
-    }
-    const select = items => {
-      const selected = [];
-      for (const line of items.sort((a, b) => b.score - a.score)) {
-        if (selected.some(other => Math.abs(other.position - line.position) < Math.max(4, minDim * .006) && Math.abs(other.m - line.m) < .02)) continue;
-        selected.push(line);
-        if (selected.length >= 18) break;
-      }
-      return selected.sort((a, b) => a.position - b.position);
-    };
-    const pairs = items => {
-      const result = [];
-      for (let i = 0; i < items.length; i++) for (let j = i + 1; j < items.length; j++) {
-        const a = items[i], b = items[j];
-        if (b.position - a.position < minDim * .23 || Math.abs(Math.atan(a.m) - Math.atan(b.m)) > .04) continue;
-        result.push([a, b]);
-      }
-      return result;
-    };
-    const hSel = select(horizontal), vSel = select(vertical);
-    if (debug) {
-      debug.horizontal = hSel; debug.vertical = vSel; debug.rawH = horizontal.length; debug.rawV = vertical.length;
-      debug.channels = searchedChannels;
-    }
-    const hPairs = pairs(hSel), vPairs = pairs(vSel);
-    const quads = [];
-    for (const [top, bottom] of hPairs) for (const [left, right] of vPairs) {
-      if (Math.abs(Math.atan(top.m) + Math.atan(left.m)) > .045) continue;
-      quads.push([intersect(top, left), intersect(top, right), intersect(bottom, right), intersect(bottom, left)]);
-    }
-    // 穴・低コントラスト・模様の接続で線分が短くなる場合、観測済みの平行二辺
-    // の間で直交辺を走査する。幅は規格から推測せず、全長の画素支持を必要とする。
-    // 全ての平行二辺を走査する。上位 12 組に限ると、穴や隣接コマの縁が多い
-    // 画像では画格の二辺が走査されず、片側の辺が弱い画格を取り逃がす。
-    const scanPairs = (parallelPairs, horizontalPair) => {
-      const limit = horizontalPair ? image.width : image.height;
-      for (const [a, b] of [...parallelPairs].sort((p, q) => q[0].score + q[1].score - p[0].score - p[1].score)) {
-        const m = -(a.m + b.m) / 2, found = [];
-        for (let position = 4; position < limit - 4; position += Math.max(1, Math.round(minDim / 600))) {
-          const line = { m, b: position - m * (a.position + b.position) / 2, position };
-          const p = horizontalPair ? intersect(a, line) : intersect(line, a);
-          const q = horizontalPair ? intersect(b, line) : intersect(line, b);
-          const score = lineEvidence(image, p, q);
-          if (score) found.push({ ...line, p, q, length: Math.hypot(p.x - q.x, p.y - q.y), score });
-        }
-        for (const [c, d] of pairs(select(found))) {
-          const [top, bottom, left, right] = horizontalPair ? [a, b, c, d] : [c, d, a, b];
-          quads.push([intersect(top, left), intersect(top, right), intersect(bottom, right), intersect(bottom, left)]);
-        }
-      }
-    };
-    scanPairs(hPairs, true);
-    scanPairs(vPairs, false);
-    const incomplete = vPairs.some(([a, b]) => isOpenPair(image, a, b, true))
-      || hPairs.some(([a, b]) => isOpenPair(image, a, b, false));
-    return { quads, incomplete };
-  } finally {
-    gray.delete(); smooth.delete(); edges.delete(); channels.delete();
-  }
+  const skip = duplicateLinePlanes(src, searchChannels);
+  const units = searchChannels.filter(channel => !skip.has(channel)).map(channel => lineChannelUnit(image, src, channel));
+  return lineQuadsFromUnits(image, units, debug);
 }

@@ -41,7 +41,8 @@ export async function runImportRequest(message, { loadCv, detect, rotate, readEd
   if (message.frame) {
     try {
       await loadCv();
-      reply.frame = packFrameResult(detectFrameForRequest(image, message, message.frame, { detect, rotate }), transfers);
+      // `detect` may resolve later (the parallel detector, #252).
+      reply.frame = packFrameResult(await detectFrameForRequest(image, message, message.frame, { detect, rotate }), transfers);
     } catch (error) { reply.frameError = String(error?.message || error); }
   }
   if (message.filmEdge) {
