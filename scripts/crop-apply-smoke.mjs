@@ -42,7 +42,9 @@ export async function runCropApplySmoke({ send, evaluate, waitFor, wait, fail, i
   if (imported.cv !== 'undefined' || imported.script) fail('the page loaded OpenCV during import: ' + JSON.stringify(imported));
 
   // ---- The crop view ----
+  const containerSize = `(() => { const c = document.getElementById('canvasContainer'); return { width: c.clientWidth, height: c.clientHeight }; })()`;
   const developBox = await evaluate(`(() => { const r = document.getElementById('canvasTransformWrapper').getBoundingClientRect(); return { width: r.width, height: r.height }; })()`);
+  const developContainer = await evaluate(containerSize);
   const histogramsBefore = await evaluate(`window.__ncAnalysis.cropView.histograms`);
   await evaluate(`document.getElementById('studioTab-composition').click(); document.getElementById('cropBtn').click()`);
   await waitFor('crop mode', `document.getElementById('canvasContainer').classList.contains('crop-mode')`, 30_000);
@@ -57,7 +59,20 @@ export async function runCropApplySmoke({ send, evaluate, waitFor, wait, fail, i
       draft: window.__ncAnalysis.draftView(), histograms: window.__ncAnalysis.cropView.histograms, renderMs: window.__ncAnalysis.cropView.lastRenderMs };
   })()`);
   if (!view.shown || !view.mainHidden || !view.glHidden) fail('crop mode is not on its own canvas: ' + JSON.stringify(view));
-  if (Math.abs(view.box.width - developBox.width) > 1 || Math.abs(view.box.height - developBox.height) > 1) fail('the crop view is not fitted like the develop view: ' + JSON.stringify({ view, developBox }));
+  // The crop toolbar can change the container's size by a few pixels. Both
+  // views are fitted by the same rule, the full-size frame into the container
+  // less 20 px and never above 100 % (adjustCanvasDisplay), each in the
+  // container it has.
+  const cropContainer = await evaluate(containerSize);
+  const fitted = (frame, container) => {
+    const scale = Math.min((container.width - 20) / frame.width, (container.height - 20) / frame.height, 1);
+    return { width: frame.width * scale, height: frame.height * scale };
+  };
+  const expectCrop = fitted(view.draft.frame, cropContainer), expectDevelop = fitted(view.draft.frame, developContainer);
+  if (Math.abs(view.box.width - expectCrop.width) > 1 || Math.abs(view.box.height - expectCrop.height) > 1
+    || Math.abs(developBox.width - expectDevelop.width) > 1 || Math.abs(developBox.height - expectDevelop.height) > 1) {
+    fail('the crop view is not fitted like the develop view: ' + JSON.stringify({ view, developBox, cropContainer, developContainer }));
+  }
   const wanted = Math.min(Math.round(view.box.width * view.dpr), view.draft.frame.width);
   if (view.pixels[0] < wanted - 2) fail('the crop canvas is below display resolution: ' + JSON.stringify({ view, wanted }));
   if (view.histograms - histogramsBefore !== 1) fail('the crop histogram was not drawn once on entry: ' + JSON.stringify(view));
@@ -79,7 +94,10 @@ export async function runCropApplySmoke({ send, evaluate, waitFor, wait, fail, i
   console.log(`ok: crop view ${view.pixels.join('x')} px in a ${Math.round(view.box.width)}x${Math.round(view.box.height)} box (develop view's), proxy swapped in, a 90-degree turn redraws in ${turned.renderMs.toFixed(1)} ms without a histogram or pixel rotation`);
 
   // ---- Apply: paint first ----
-  const corner = await evaluate(`(() => { const r = document.getElementById('cropOverlay').getBoundingClientRect(); return { x: r.x + 2, y: r.y + 2, toX: r.x + r.width * 0.12, toY: r.y + r.height * 0.1 }; })()`);
+  // The new frame straddles the image window's corner: a crop inside or
+  // around the window the import already stored is the same analysis frame,
+  // which Apply keeps without a detection.
+  const corner = await evaluate(`(() => { const r = document.getElementById('cropOverlay').getBoundingClientRect(); return { x: r.x + 2, y: r.y + 2, toX: r.x + r.width * 0.6, toY: r.y + r.height * 0.6 }; })()`);
   await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: corner.x, y: corner.y, button: 'left', clickCount: 1 });
   await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: corner.toX, y: corner.toY, button: 'left', buttons: 1 });
   await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: corner.toX, y: corner.toY, button: 'left', clickCount: 1 });
