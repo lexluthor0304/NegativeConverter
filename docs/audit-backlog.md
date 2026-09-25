@@ -226,10 +226,10 @@ Remaining performance proposals below are not claims of completed work.
   PRESET_TYPES is ['color','bw','positive'] and sanitizePresetType coerces anything else to 'color', so usesSilverCoreConversion() always returns true. #239 deleted renderFullWebGL, the WebGL branch of ensureFullRender and the legacy tone uniforms with the `useLegacyTone` branch of webglSetUniforms; #242 deleted ensureFullRender and updateFullCpu. The `usesSilverCoreConversion()` guards and buildRouterSettings's non-SilverCore branch remain.  
   _Suggested fix:_ Reduce usesSilverCoreConversion to `return true` with a comment and delete the dead branches of its callers.
 
-- **low/quality** — File-type dispatch (RAW / PNG / standard) and the 100 MiB 'heavy RAW' threshold are duplicated between loadFile and loadFileToImageData  
-  `negative2positive/src/app/main.js:9388`  
-  main.js:5600-5637 (loadFile) and 9388-9400 (loadFileToImageData, used by batch/auto-frame) both implement `isRawLikeFileName → loadRawImageData; file.type==='image/png' → loadPngImageData; else loadStandardImage`. loadFile additionally checks `arrayBuffer.byteLength > 100 * 1024 * 1024` at 5603 to choose the two-stage preview path — the same constant rawFileLoader.js:19 defines as RAW_SIZE_HEAVY. …  
-  _Suggested fix:_ Move `loadFileToImageData(file, { preview, onMetadata })` into app/imageFileLoaders.js (it already owns isRawLikeFileName and the three loaders), export RAW_SIZE_HEAVY from rawFileLoader.js, and have loadFile call the shared function with the extra options.
+- **low/quality** — File-type dispatch (RAW / PNG / standard) is duplicated between loadFile and loadFileToImageData  
+  `negative2positive/src/app/main.js` (`loadFile`, `loadFileToImageData`)  
+  Both implement `isRawLikeFileName → loadRawImageData; isPngFile → loadPngImageData; else loadStandardImage`. The duplicated 100 MiB 'heavy RAW' threshold is gone (#255): `RAW_SIZE_HEAVY` lives only in imageDimensions.js, and loadFile asks `rawDecodePlan` whether a RAW takes the two-stage path.  
+  _Suggested fix:_ Move `loadFileToImageData(file, { onMetadata, signal, halfSize })` into app/imageFileLoaders.js (it already owns isRawLikeFileName and the three loaders) and have loadFile call it for its single-stage decodes.
 
 - **low/ux** — Export path silently drops lens correction when the runtime fails, with no user-visible warning _(verified)_  
   `negative2positive/src/app/main.js:1287`  

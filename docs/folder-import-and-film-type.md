@@ -27,8 +27,9 @@ sample for frames no group took (positives, mixed stocks, groups of fewer than
 three). With default recipes the light table is complete when the import ends,
 after exactly one read and one decode per photo. The cache counts both 8-bit
 and 16-bit planes and is capped at 128 MiB. Evicted samples can be decoded
-again. A current RAW larger than 100 MiB is not reused because it may still be
-a temporary preview. Colour conversion and roll-analysis mathematics are
+again. The current photo's base is not reused while it is a two-stage import's
+half-size stand-in (`rawDecodePending`, `__decodeScale`; see
+two-stage-raw-import.md): roll analysis waits for its full decode. Colour conversion and roll-analysis mathematics are
 unchanged.
 
 Automatic analysis does not lock the editor. Changes to the active file, manual

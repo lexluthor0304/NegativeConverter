@@ -245,7 +245,10 @@ memory #259/#260, UI flush counters #261).
     (9536×6336), `synthetic-60mp-bw.tif`: 16-bit RGB negatives.
   - `synthetic-24mp-cfa.dng`, `synthetic-60mp-cfa.dng`: RGGB CFA DNGs with
     12-bit packed samples (86.4 MiB of samples at 60 MP), so they stay under the
-    100 MiB heavy-RAW threshold and take the M11's full-decode route. IFD0 comes
+    100 MiB heavy-RAW threshold and take the M11's full-decode route while the
+    two-stage flag is off (its default). With `?twoStageMinMp=40` (#255) the
+    60 MP DNG and the M11 files take the two-stage route instead
+    (two-stage-raw-import.md); compare runs with the same flag. IFD0 comes
     from the app's `buildTiffParts`; three JPEG previews at the M11's sizes
     (full size, 2112×1408, 720×480) hang off SubIFDs. The previews are encoded by
     the harness's Chrome (the repo has no JPEG encoder), so the files are stable

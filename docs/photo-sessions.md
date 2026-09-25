@@ -105,6 +105,13 @@ provisional one only the detection descriptions are applied, otherwise the
 photo is rendered once more. A provisional photo is never persisted, cached
 as a session snapshot or read by roll analysis: leaving it mid-tail keeps its
 decoded base only, and its settings stay as they were.
+
+A large RAW may open from a half-size stand-in while its exact decode runs
+behind it (two-stage-raw-import.md, #255). Until that decode is installed and
+converted the photo is provisional in the same sense and longer: no session
+snapshot or base is kept of the stand-in, nothing is persisted, and leaving
+keeps only what the user changed (a photo without a recipe carries those
+edits as `pendingEdits`).
 Global history, color-console and zoom shortcuts cannot change the outgoing
 photo while another target is loading; the history controls are locked too.
 
@@ -269,8 +276,8 @@ hides come last. No job starts on a file another lane is working on.
   job's decode serves every need of its frame (analysis, tile, prefetch), and
   a retained session or prefetched base is used instead of a decode. When the
   user opens a frame a lane is decoding, or still holds while it analyses it,
-  `loadFile` adopts that decode instead of reading the file again (a heavy
-  file skips its half-size stage); the lane's analysis of the now-current frame
+  `loadFile` adopts that decode instead of reading the file again (a
+  two-stage file skips its stand-in); the lane's analysis of the now-current frame
   stops and the foreground analyses it, as before. Leases are reference
   counted: a superseded adopter detaches without cancelling the lane's decode,
   and the entry lives until the owning job releases the base.

@@ -55,13 +55,18 @@ In `main.js` the scalars change synchronously and the planes follow:
 - `applyGeometryFromBase` keys the requested geometry (base identity, angle,
   mirror, crop sanitised against the frame). The installed output carries
   the key it was built for (a `WeakMap` on the object), so a settings-only
-  `restoreSettings` makes no kernel call, and undo, a new file or a heavy-RAW
-  upgrade invalidate it by installing other objects.
+  `restoreSettings` makes no kernel call, and undo, a new file or a two-stage
+  import's swap to its full decode invalidate it by installing other objects.
+  While a half-size stand-in is loaded (two-stage-raw-import.md) the live
+  crop is in its units; settings and history carry the exact
+  full-resolution crop, and the swap installs that one.
 - A miss starts one job (`state.geometryPending`, `state.geometryReady`).
   `processNegative`, export, crop-mode entry, Step 2's border suggestion and
   the frame readers await `whenGeometrySettled()`; film-base sampling ignores
   clicks while a build is pending. A newer edit, undo/redo or a switch
-  supersedes the job. The job holds `studioBusy` unless someone else does.
+  supersedes the job. The job holds `studioBusy` unless someone else does,
+  except the swap to a two-stage import's full decode (`holdBusy: false`),
+  which never locks editing.
 - Rotate 90° and mirror turn or flip the current display with CSS at once
   (UI only; composed when edits follow each other); the first paint of the
   new planes removes it.

@@ -1,0 +1,232 @@
+# Two-stage RAW imports (#255)
+
+A 60 MP RAW takes about 5 s to decode fully in LibRaw (WASM), plus the
+defect pass. A half-size 16-bit decode of the same file takes about 2 s. The
+two-stage import shows an editable half-size stand-in first and installs the
+exact full decode behind it. Exports and every other exact consumer only
+ever see the full decode.
+
+## The plan
+
+`rawDecodePlan(file, { buffer, minPixels })` (`imageDimensions.js`) decides
+from the TIFF/DNG header, not from the compressed size:
+
+| file | stages |
+|---|---|
+| CFA mosaic (PhotometricInterpretation 32803) of at least `minPixels` | 2 |
+| CFA below `minPixels` | 1 |
+| LinearRaw (34892): LibRaw cannot shrink demosaiced data | 1 |
+| `.tif`/`.tiff`, iPhone DNGs (routed to UTIF), non-RAW files | 1 |
+| header unreadable (CR3, RAF, a truncated file, ...) | 2 above `RAW_SIZE_HEAVY` (100 MiB), else 1 |
+
+`loadFile` passes the whole file it has read, so an IFD0 stored at the end of
+the file (`L1009967.dng`) is found. Header-only callers read 256 KiB and follow
+IFD offsets past it with aligned 64 KiB `slice()` reads (at most 128).
+`parseImageDimensions` returns the matched IFD's `photometric`; its IFD walk
+is one generator driven by a buffer or by a File, and finds exactly the sizes
+the 1703835 parser found (`imageDimensions.plan.test.mjs`). `RAW_SIZE_HEAVY`
+exists only in `imageDimensions.js`; `rawFileLoader.js` imports it for the
+heavy-IIQ shortcut.
+
+### The flag
+
+`twoStageMinMp` (URL `?twoStageMinMp=N`, else localStorage
+`nc_two_stage_min_mp`, else `TWO_STAGE_MIN_MP_DEFAULT` in
+`provisionalPhoto.js`) sets `minPixels`. The default is **off** until the
+parity criteria below pass on real 60 MP files; then it becomes 40
+(`TWO_STAGE_MIN_MP_TARGET`). Off keeps today's gate for every file: two
+stages above 100 MiB. Everything else here (stage-1 options, crop units,
+held-back analyses, barriers, lifecycle) applies to whatever goes two-stage,
+so files over 100 MiB are exact today whatever the flag. Before #255, such a
+file could export its half-size stand-in, clamp and double its crop, and lose
+stage 2 to crop mode or a failure.
+
+## Stage 1 and stage 2
+
+- **Stage 1**: `loadRawFile(buffer, name, { preview: true, halfSize: true,
+  outputBps: 16, suppressSensorDefects: false })`, on the file's own buffer,
+  through the #232 post-decode worker. 16-bit output costs the same as 8-bit.
+  The defect pass is skipped because it is slower on binned data, and stage 2
+  runs it. `loadRawFile` no longer derives half size or 8-bit output from the
+  byte size or `preview`; the caller states them (`preview` only shortens the
+  timeouts). The result carries `__decodeScale` 0.5 and `__fullSize` (LibRaw's
+  metadata size, else twice its own). A result LibRaw did not halve (LinearRaw)
+  carries neither. It is logged and still provisional, since it had no defect
+  pass.
+- **Stage 2**: a full decode (`loadRawImageData`) of a second
+  `file.arrayBuffer()`. Nothing is copied on the main thread and no buffer is
+  pinned in state. It starts with stage 1 in a second LibRaw worker when
+  `navigator.deviceMemory >= 8 && hardwareConcurrency >= 6` (Chromium only).
+  Everywhere else (WKWebView on the macOS desktop, WebKitGTK, Safari, smaller
+  devices) it starts when stage 1's LibRaw worker is gone
+  (`onLibRawReleased`), before stage 1's post-decode work and analyses.
+  `?twoStageMode=sequential|concurrent` forces either. If stage 1 fails, the
+  full decode becomes the load.
+- A lane's decode of the same file (#243 `sharedDecodes`) is adopted instead
+  of both stages.
+
+`state.fullDecode` is the record (`waiting` → `running` → `decoded` →
+`swapped` → `installed`, or `failed` / `abandoned`). `state.rawDecodePending`
+is true from the stand-in until the swap. `state.provisional` holds the
+window: the geometry mapping, the provisional pass's inputs and its settled
+settings.
+
+## The provisional window
+
+### Crop units
+
+Live state works in the stand-in's units: `state.cropRegion` is relative to
+its post-mirror frame, so every live pixel path (display, crop mode, analysis
+regions, brushes) is unchanged. Every settings object is in full-resolution
+units. `createExactGeometry` (`provisionalPhoto.js`) does the conversion at
+that boundary:
+
+- `restoreSettings` projects the saved crop onto the stand-in's rotated frame
+  (by the ratio of the two rotated frame sizes, rounded outward). It records
+  the saved crop as exact and never writes the projection back.
+- `extractCurrentSettings` emits the exact crop while the live geometry is
+  that projection. After a user edit (a crop, rotation or mirror in the
+  window) the live crop is converted once, at 2 px granularity, and becomes
+  the new exact crop.
+- Undo entries carry the exact state (`provisionalGeometry`). A restore in
+  the window brings it back.
+- The swap installs the exact crop on the full frame: no clamp, no ×2, no
+  drift. A converted edit is converted again against the real full size,
+  because `__fullSize` may be an estimate.
+
+Repair strokes and dodge-and-burn paths are stored in normalised base
+coordinates, so they need no conversion.
+
+### Analyses
+
+`prepareStudioPhoto` runs on the stand-in as today (createDefaultSettings,
+auto-frame and film edge on the stand-in, learned defaults, the provisional
+conversion and its automatic WB). Its side effects are held back:
+
+- nothing is persisted (`persistCurrentFileSettings` refuses);
+- no `automaticDefaults` (`provisionalLearnedSettings`);
+- no vote into the roll's film-type decision (`settleImportFilmType` with
+  `record: false`);
+- no roll date from the edge text (`mergeImportFilmEdge` with
+  `rollDate: false`);
+- no semantic colour.
+
+Toasts are shown as usual and are not repeated. The pass records its inputs
+(`defaultSettingsInputs`, the snapshot, the detection decisions, the auto-frame
+settings, `userEdited`) and, when it ends, the settled settings the window's
+edits are measured against.
+
+`settleProvisionalPhoto` then works off-state. It computes the settings
+today's single decode would have given on the full decode: the pixel-derived
+fields of createDefaultSettings with the recorded inputs, the same
+detections (the full decode goes to the worker without a copy, `owned`), and
+the same film-edge, roll film-type and learned-default steps (these vote,
+learn and set the roll date). It waits until the swap cannot cut into an
+interaction: the pass is over, no crop draft is open, no conversion,
+geometry build or crop-area detection is running, and input has been quiet
+for 400 ms, unless an exact consumer is waiting. It then swaps in one task:
+
+1. The user's window edits (`windowEdits`, the diff between the pass's settled
+   settings and now) go over the new automatic settings. Geometry, film type
+   and curves count as groups. White balance counts only once a gray point
+   was sampled or the gains were set by hand; conversions re-estimate it
+   otherwise. `expiredAnalysis`, `learnedDefaults` and `filmEdge` always come
+   from the full decode.
+2. The history is rebased: every entry's crop goes to full units, entries go
+   cold (#244: rebuilt from the full base on restore), and dust-stroke
+   entries (they patch stand-in planes) go with everything older.
+3. The full base is installed (`rawDecodePending` false). The stand-in's
+   renders are dropped, and `restoreSettings(..., { holdBusy: false })`
+   rebuilds the geometry in the #244 pool without `studioBusy`.
+
+One `processNegative` of the full base follows, with today's automatic
+measurements. Then the record is `installed` and semantic colour is scheduled.
+The settle never raises the overlay, sets `studioBusy` or shows a toast.
+
+### Barriers
+
+`ensureFullDecode()` resolves true once the photo on screen is its installed,
+converted full decode, and false if the photo was left. It never hands out
+the stand-in:
+
+| consumer | behaviour |
+|---|---|
+| single export (DNG included), `ensureFullResolutionReadyForExport` (dust detection, AI brush plane) | waits behind the export overlay |
+| Export All, ZIP export, contact sheet, settings sync, roll reference, Save settings | wait before reading the current photo's recipe |
+| AI brush, dust brush, "Use as flat field" | wait with "Preparing full resolution…" |
+| roll analysis, lanes, prefetch | `studioBackgroundReady` / `foregroundBusyForBackground` wait |
+| photo sessions, roll samples | refuse the stand-in (`rememberPhotoSession`, `rememberPhotoBase`, `canReuseLoadedRollSource`) |
+
+Once an exact consumer is waiting, the swap no longer waits for input to go
+quiet.
+
+### Failure, abort, leaving
+
+- **Failure**: a toast ("Full resolution could not be loaded; export will
+  retry"). The status becomes `failed` and the photo stays provisional. The
+  next exact consumer decodes again in the foreground, and a second failure
+  fails that consumer. It never falls back to the stand-in.
+- **Abort**: the record's controller follows the activation (#243). A switch
+  disposes stage 2's LibRaw and post-decode workers in the same task
+  (`abandonFullDecode`).
+- **Leaving before the photo is exact**: the saved recipe stays as it was,
+  plus the user's window edits. A photo without a recipe keeps only those
+  edits as `item.pendingEdits`. Switch-back (`prepareStudioPhoto`), batch
+  export (`processFileWithSettings`), roll analysis, Auto Frame Selected and
+  the flat field compute the automatic fields as for a fresh file. They apply
+  the user's geometry before the detections and the other edits on top.
+  `photoSettingsKey` includes the edits of a photo without a recipe.
+
+## Flagged approximations (display only, never exported)
+
+- The stand-in comes from 2×2-binned data, with no AHD and no defect repair.
+  It is softer past 50 % zoom, may show single hot pixels, and edges differ
+  slightly in colour.
+- Automatic values can move at the swap: the auto-frame crop and angle by a
+  few pixels, and the film base and WB slightly. The settled view is exact.
+
+## Tests
+
+- `imageDimensions.plan.test.mjs`: the plan on synthetic headers (CFA ≥ / <
+  40 MP, LinearRaw, iPhone, `.tif`, unreadable above and below 100 MiB, the
+  flag off, IFD0 past 256 KiB), parity of the IFD walk with the 1703835
+  parser, and the repo-root RAW fixtures when present.
+- `provisionalPhoto.test.mjs`: crop projection and the exact round trip
+  (rotated, mirrored, clamped-looking, the issue's {400, 300, 8700, 5800}),
+  convert-once edits, and the window-edit merge.
+- `twoStageImport.test.mjs`: the real main.js functions (loadFile routing and
+  stage options, sequential and concurrent start, abort on switch, the
+  barrier with retry and failure, the settle with its history rebase, and
+  leaving early).
+- `restartRender.test.mjs`: the provisional pass holds its side effects back.
+- `rawFileLoader.postDecode.test.mjs`: explicit half-size options,
+  `__decodeScale`, and the `onLibRawReleased` timing.
+- Smoke (`scripts/two-stage-import-smoke.mjs`, `--two-stage-only`): generated
+  1600×1066 CFA DNGs with `?twoStageMinMp=1`. It checks the stand-in,
+  installation without `studioBusy`, and recipe and PNG 8/16 hashes equal to
+  a single decode. It also covers an export during stage 2, crop mode during
+  stage 2, a failed stage 2, and leaving before stage 2 followed by Export
+  All.
+
+## Verification on real files (not in the repository)
+
+- Parity: `TWO_STAGE_PARITY_FILES=/raw/L1000617.DNG:/raw/L1009967.dng
+  node scripts/smoke-test.mjs --two-stage-only`. Each file is decoded once
+  with the flag off and then with `?twoStageMinMp=40`, and the settled recipe
+  and PNG 8/16 hashes are compared. Run one 60 MP file at a time.
+- Latency and memory: the #230 benchmark (S1 import on `L1000617.DNG`, S7 cold
+  switches over `L1000617…628.DNG`), with and without `?twoStageMinMp=40`, in
+  concurrent and in forced sequential mode (`&twoStageMode=sequential`). Take
+  `window.__ncTwoStage.diagnostics` (plans, stage-1 sizes, stage-2 times and
+  mode, swaps) and the `twoStageSettle` perf trace (`?perf=1`).
+- The flag's default moves to 40 only after both pass.
+
+## Not done here
+
+- **Part 7** (unpack once in the LibRaw-Wasm fork, `imageData({ halfSize })`
+  after one `unpack()`) belongs to the local, gitignored `LibRaw-Wasm/` fork.
+  The app ships npm `libraw-wasm`. It would save about 1.2 s of shared unpack
+  per two-stage open. First check that `half_size` toggles cleanly between
+  `dcraw_process()` calls for DNG.
+- Zoom detail levels beyond the stand-in (#248) and the concurrent-start
+  budget (#258) take over when those land.
