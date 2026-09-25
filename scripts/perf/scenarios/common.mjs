@@ -7,7 +7,10 @@ import {
 } from '../lib/metrics.mjs';
 import { round } from '../lib/stats.mjs';
 
-export const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+// NC_PERF_TIME_SCALE=0 is for the harness's own tests (simulated sessions);
+// real runs always wait the full time.
+const TIME_SCALE = Number.isFinite(Number(process.env.NC_PERF_TIME_SCALE)) && process.env.NC_PERF_TIME_SCALE !== undefined ? Number(process.env.NC_PERF_TIME_SCALE) : 1;
+export const sleep = ms => new Promise(resolve => setTimeout(resolve, ms * TIME_SCALE));
 export const THUMB_PX = 16;
 
 export function appUrl(ctx, extra = '') {

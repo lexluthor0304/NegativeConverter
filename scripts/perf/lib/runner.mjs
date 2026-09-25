@@ -41,11 +41,11 @@ function utcStamp() {
 }
 
 /** A scenario repetition in a fresh Chrome. */
-async function runRepetition({ scenario, fixture, group, ref, rep, args, profiled, extra, outDir, chromeBin, ceilingBytes, swapAtStart, collector }) {
+async function runRepetition({ scenario, fixture, group, ref, rep, args, profiled, extra, outDir, chromeBin, ceilingBytes, swapAtStart, collector, sessionFactory = options => ChromeSession.open(options) }) {
   const label = `${ref.label}-${scenario.id}-${fixture ? fixture.name : group}-${extra?.label || (profiled ? 'profiled' : `r${rep + 1}`)}`.replace(/[^\w.-]+/g, '_');
   const mapper = createSourceMapper({ distDir: ref.dist, origin: ref.origin });
   const probe = args.probe || scenario.expectHang || Boolean(extra);
-  const openSession = () => ChromeSession.open({
+  const openSession = () => sessionFactory({
     chromeBin, cdpPort: ref.cdpPort, probe, headful: args.headful, dpr: args.dprs.includes(2) ? 2 : args.dprs[0],
     log, mapper, outDir, label, ceilingBytes, swapAtStart, guardDiskPath: outDir,
     keepExportChunks: Boolean(extra?.keepExportChunks), watchdogWithoutProbe: true
@@ -476,4 +476,4 @@ async function probeGpu({ ref, args, chromeBin, collector }) {
   }
 }
 
-export { fixtureConditions, labelThreads, summarizeGroup, pickSavedRun, prepareRef, writeOutputs };
+export { fixtureConditions, labelThreads, summarizeGroup, pickSavedRun, prepareRef, writeOutputs, runRepetition };

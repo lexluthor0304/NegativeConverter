@@ -103,14 +103,15 @@ export default {
       ctx.record(`${prefix}.wheel.zoom`, round(zoomOf(transforms.at(-1)?.v), 2));
       ctx.record(`${prefix}.wheel.mainBusyPct`, wheelWindow.mainBusyPct);
 
-      // Pan: 2 s at 2×.
+      // Pan: 2 s at 2× (the container is measured again after the resets).
       await resetZoom(ctx);
-      await session.dblclick(point.x, point.y);
+      const panPoint = await center(ctx);
+      await session.dblclick(panPoint.x, panPoint.y);
       await sleep(1500);
       await session.drain();
       const panStart = await pageNow(ctx);
       await session.beginWindow(`${prefix}-pan`);
-      await session.drag({ from: { x: point.x - 120, y: point.y }, to: { x: point.x + 120, y: point.y + 40 }, steps: 120 });
+      await session.drag({ from: { x: panPoint.x - 120, y: panPoint.y }, to: { x: panPoint.x + 120, y: panPoint.y + 40 }, steps: 120 });
       await sleep(500);
       const panWindow = await session.endWindow();
       const moves = byKind(session.events, 'input').filter(event => event.type === 'mousemove' && event.b && event.t >= panStart);
