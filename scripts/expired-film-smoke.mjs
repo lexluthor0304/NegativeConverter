@@ -204,6 +204,8 @@ export async function runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail,
     if (result.error || !(result.mean <= 1 && result.p999 <= 3)) fail(`GL rescue parity (${label}): ${JSON.stringify(result)}`);
     return result;
   };
+  const touched = ['expiredLevels', 'expiredCrossover', 'expiredUnevenFog', 'expiredLocalContrast', 'cyan'];
+  const original = await evaluate(`Object.fromEntries(${JSON.stringify(touched)}.map(id => [id, document.getElementById(id).value]))`);
   const withFog = await glParity('offsets + fog');
   if (withFog.program !== 'modes' || !withFog.stages?.rescue || !withFog.stages.fog) fail('the rescue did not draw with the mode program and the fog surface: ' + JSON.stringify(withFog));
   await evaluate(`(() => { const s = document.getElementById('expiredLocalContrast'); s.value = '30'; s.dispatchEvent(new Event('input', { bubbles: true })); s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
@@ -246,7 +248,13 @@ export async function runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail,
   await evaluate(`document.getElementById('expiredCompareBtn').dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1 }))`);
   await wait(700);
   if (heldParity.stages?.rescue) fail('hold-to-compare kept the rescue on screen: ' + JSON.stringify(heldParity));
-  await evaluate(`(() => { const s = document.getElementById('expiredLocalContrast'); s.value = '0'; s.dispatchEvent(new Event('input', { bubbles: true })); s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+  // The rest of the scenario compares against the measured strengths.
+  await evaluate(`(() => {
+    for (const [id, value] of Object.entries(${JSON.stringify(original)})) {
+      const s = document.getElementById(id); s.value = value;
+      s.dispatchEvent(new Event('input', { bubbles: true })); s.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  })()`);
   await wait(800);
   console.log('ok: the rescue draws on the GPU within the parity budget ' + JSON.stringify({ fog: [withFog.mean, withFog.p999], local: [withLocal.mean, withLocal.p999], held: [heldParity.mean, heldParity.p999], drags: dragged.out }));
 

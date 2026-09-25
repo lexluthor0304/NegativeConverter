@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { getSprocketFrameLayout } from './sprocketFrame.js';
-import { photoRectPercent } from './displayCanvas.js';
+import { photoRectPercent, step3FrameReference } from './displayCanvas.js';
 import { photoViewport } from '../render/borderUnderlay.js';
 
 // #253 in main.js (extracted with vm): the GL gate keeps only cropping, WebGL
@@ -67,14 +67,15 @@ class TestImageData {
 {
   const composeCalls = [];
   const underlayState = { key: null, draws: [] };
-  const state = { sprocketPreviewEnabled: true, webglSourceImageData: new TestImageData(900, 600) };
+  const state = { sprocketPreviewEnabled: true, webglSourceImageData: new TestImageData(900, 600),
+    processedImageData: { width: 3600, height: 2400 }, processedImageDataIsPreview: false };
   const edge = { overexposedSprockets: false, text: 'KODAK' };
   const context = vm.createContext({
     state, ImageData: TestImageData, JSON, glCanvas: { width: 0, height: 0 },
     glBorder: { photo: null, generation: 0, smear: null, smearToken: 0, smearFlight: 0 },
     webglState: { borderUnderlay: null },
     displayDebugCounters: { glBorderComposes: 0 },
-    getSprocketFrameLayout, photoViewport,
+    getSprocketFrameLayout, photoViewport, step3FrameReference,
     getSprocketFrameComposeOptions: () => ({ edgeMarkings: { ...edge } }),
     prepareSprocketPreviewFont: () => {}, areSprocketFrameFontsReady: () => true,
     composeSprocketFrameBackground: (photo, options) => {
@@ -89,10 +90,14 @@ class TestImageData {
       release: () => { underlayState.key = null; }
     }),
   });
-  vm.runInContext(['glFrameSize', 'glBorderSmearSource', 'drawGlBorder', 'dropGlBorder', 'releaseGlBorder'].map(functionSource).join('\n'), context);
+  vm.runInContext(['sprocketFrameSize', 'sprocketFrameReference', 'glFrameSize', 'glBorderSmearSource', 'drawGlBorder', 'dropGlBorder',
+    'releaseGlBorder'].map(functionSource).join('\n'), context);
   const framed = context.glFrameSize(900, 600);
   const layout = getSprocketFrameLayout(900, 600, { edgeMarkings: edge });
   assert.deepEqual([framed.width, framed.height], [layout.frameWidth, layout.frameHeight], 'the buffer is the framed display size');
+  // The CSS box fits the drawn frame scaled by full / display, as fitStep3CanvasBox
+  // fits the 2D display: the same aspect as the buffer, so no letterbox.
+  assert.deepEqual([framed.reference.width, framed.reference.height], [layout.frameWidth * 4, layout.frameHeight * 4]);
   Object.assign(context.glCanvas, { width: framed.width, height: framed.height });
   const viewport = context.drawGlBorder({}, 900, 600, framed.layout);
   assert.deepEqual(viewport, photoViewport(layout, framed.width, framed.height), 'pass 2 draws into the photo rectangle');

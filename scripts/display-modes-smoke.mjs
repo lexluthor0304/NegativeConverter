@@ -151,7 +151,9 @@ export async function runDisplayModesSmoke({ send, evaluate, waitFor, fail, inst
   const settle = async (label, ms = 1200) => { await until(label, ready, 120_000); await sleep(ms); };
   const open = async (query, files) => {
     const origin = await evaluate('performance.timeOrigin');
-    await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en&previewTier=normal${query}` });
+    // The normal tier (the GL frame is the display source's size) and no detail
+    // layer (a region landing between two screenshots would read as overlay).
+    await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en&previewTier=normal&detailLayer=0${query}` });
     await until('fresh display-modes workspace', `performance.timeOrigin !== ${origin} && document.readyState === 'complete' && !!document.getElementById('studioImportAutoCrop')`);
     await installDialogAutoAccept();
     await evaluate(`(${installModesProbe.toString()})()`);

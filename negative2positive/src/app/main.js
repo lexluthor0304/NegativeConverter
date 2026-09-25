@@ -6024,10 +6024,19 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // their own border (applySprocketFrameForExport), unchanged.
 
     // The GL frame of a width x height photo: the photo, or the frame around it.
+    // `reference` is what the CSS box fits: undefined derives it from state (the
+    // full-resolution frame); with the border it is the drawn frame scaled by
+    // full / display, as the 2D display fits it (#242), so the box keeps the
+    // drawn frame's aspect and the photo rectangle is the same on both canvases.
     function glFrameSize(width, height) {
-      if (!state.sprocketPreviewEnabled) return { width, height, layout: null };
-      const layout = getSprocketFrameLayout(width, height, getSprocketFrameComposeOptions());
-      return { width: layout.frameWidth, height: layout.frameHeight, layout };
+      if (!state.sprocketPreviewEnabled) return { width, height, layout: null, reference: undefined };
+      const composeOptions = getSprocketFrameComposeOptions();
+      const layout = getSprocketFrameLayout(width, height, composeOptions);
+      const full = step3FrameReference(state);
+      return {
+        width: layout.frameWidth, height: layout.frameHeight, layout,
+        reference: full ? sprocketFrameReference({ width, height }, full, composeOptions) : null
+      };
     }
 
     // The photo the smear samples: the last settled adjusted frame of this size,
@@ -6115,7 +6124,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
               webglState.curveDirty = false;
             }
             const framed = glFrameSize(frame.width, frame.height);
-            adjustCanvasDisplay(framed.width, framed.height);
+            adjustCanvasDisplay(framed.width, framed.height, framed.reference);
             resizeWebGLCanvas(framed.width, framed.height);
             const viewport = framed.layout ? drawGlBorder(renderer.gl, frame.width, frame.height, framed.layout) : null;
             if (renderer.drawApply(frame, step3, glCanvas.width, glCanvas.height, { viewport })) {
@@ -6131,7 +6140,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         const framed = glFrameSize(source.width, source.height);
         // Refits only when the texture, container, reference size or zoom
         // changed since the last fit; otherwise it touches no layout.
-        adjustCanvasDisplay(framed.width, framed.height);
+        adjustCanvasDisplay(framed.width, framed.height, framed.reference);
         const resized = webglState.sourceSize.w !== source.width || webglState.sourceSize.h !== source.height;
         if (webglState.sourceDirty || resized) {
           if (!renderer.uploadExact(source, resized)) {
@@ -6184,7 +6193,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         const framed = glFrameSize(source.width, source.height);
         // Refits only when the texture, container, reference size or zoom
         // changed since the last fit; otherwise it touches no layout.
-        adjustCanvasDisplay(framed.width, framed.height);
+        adjustCanvasDisplay(framed.width, framed.height, framed.reference);
 
         const gl = webglState.gl;
         // Uploads if needed
@@ -21111,7 +21120,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         // screen under it (#242); it is redrawn once the comparison ends. With
         // the border the buffer is the frame around the texture (#253).
         const framed = glFrameSize(texture.w, texture.h);
-        adjustCanvasDisplay(framed.width, framed.height);
+        adjustCanvasDisplay(framed.width, framed.height, framed.reference);
         if (!state.beforeAfterActive && (glCanvas.width !== framed.width || glCanvas.height !== framed.height)) renderWebGL();
       } else {
         refitMainCanvasBox();
