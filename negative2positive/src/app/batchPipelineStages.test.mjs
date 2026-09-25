@@ -253,6 +253,23 @@ for (const readyBeforeCancel of [false, true]) {
   }
 }
 
+// A batch that fails outright (an admission error) releases a frame that was
+// decoded ahead and never taken.
+{
+  const disposed = [];
+  let admissions = 0;
+  await assert.rejects(runBatchPipeline([0, 1, 2], {
+    maxParallel: 1,
+    prepareDepth: 1,
+    beforeStart: async () => { admissions += 1; if (admissions === 2) { await sleep(10); throw new Error('gate broke'); } },
+    prepare: async (job) => ({ base: job }),
+    disposePrepared: (value) => disposed.push(value),
+    process: async (job, _index, prepared, context) => { if (!prepared) context.decoded(); await sleep(3); return job; },
+    sink: async () => {}
+  }), /gate broke/);
+  assert.deepEqual(disposed, [{ base: 1 }]);
+}
+
 // A failed prepare fails only its own frame, with the prepare's error.
 {
   const errors = [];

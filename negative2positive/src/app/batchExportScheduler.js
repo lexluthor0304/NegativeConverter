@@ -728,7 +728,9 @@ export async function runBatchPipeline(jobs, {
     await drainPromise;
   } finally {
     if (stage) {
-      if (isCancelled()) stage.cancel();
+      // Nothing is left to prepare: a frame no lane took (a cancelled or
+      // failed batch) is aborted or released.
+      stage.cancel();
       await stage.settled();
     }
     if (stats && typeof stats === 'object') {
