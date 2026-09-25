@@ -1,10 +1,12 @@
-export function downsampleImageDataByStep(imageData, step) {
+// `with16: false` leaves the 16-bit plane out (readers of the 8-bit sample
+// only, such as the crop-area detection); the 8-bit bytes are the same.
+export function downsampleImageDataByStep(imageData, step, { with16 = true } = {}) {
   const { width, height, data } = imageData;
   const outW = Math.max(1, Math.floor(width / step));
   const outH = Math.max(1, Math.floor(height / step));
   const out = new ImageData(new Uint8ClampedArray(outW * outH * 4), outW, outH);
   const outData = out.data;
-  const source16 = imageData.__image16;
+  const source16 = with16 ? imageData.__image16 : null;
   const canDownsample16 = source16
     && source16.data instanceof Uint16Array
     && source16.width === width
@@ -41,11 +43,11 @@ export function downsampleImageDataByStep(imageData, step) {
   return out;
 }
 
-export function downsampleImageDataForMaxPixels(imageData, maxPixels) {
+export function downsampleImageDataForMaxPixels(imageData, maxPixels, options = {}) {
   if (!imageData) return null;
   const totalPixels = imageData.width * imageData.height;
   if (totalPixels <= maxPixels) return imageData;
-  return downsampleImageDataByStep(imageData, Math.ceil(Math.sqrt(totalPixels / maxPixels)));
+  return downsampleImageDataByStep(imageData, Math.ceil(Math.sqrt(totalPixels / maxPixels)), options);
 }
 
 export function downsampleImageDataForMaxDim(imageData, maxDim) {

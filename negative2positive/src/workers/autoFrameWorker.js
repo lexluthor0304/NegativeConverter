@@ -3,6 +3,7 @@ import opencvScriptUrl from '@techstark/opencv-js/dist/opencv.js?url';
 import { detectFrameAndRotation } from '../app/autoFrameAnalyzer.js';
 import { applyRotationToImageData } from '../app/imageGeometry.js';
 import { readFilmEdge, rectifyLaneBand } from '../app/filmEdgeReader.js';
+import { isOpenCvAnalysisType, runOpenCvAnalysisTask } from '../app/openCvAnalysisTasks.js';
 
 let ready;
 async function loadCv() {
@@ -39,6 +40,22 @@ self.onmessage = async ({ data: message }) => {
       self.postMessage({ id: message.id, result });
       return;
     }
+    if (isOpenCvAnalysisType(message.type)) {
+      // The page's OpenCV analyses (#245): inputs built on the page, the
+      // OpenCV half here. An error from the analysis itself is its result
+      // (`taskError`); only a failed load makes the page fall back.
+      await loadCv();
+      let output;
+      try {
+        output = runOpenCvAnalysisTask(message);
+      } catch (error) {
+        self.postMessage({ id: message.id, error: String(error?.message || error), taskError: true });
+        return;
+      }
+      self.postMessage({ id: message.id, result: output.result }, output.transfers);
+      return;
+    }
+    if (message.type !== 'analyze-frame') throw new Error(`Unknown auto-frame worker request: ${message.type}`);
     await loadCv();
     const image = new ImageData(message.rgba, message.width, message.height);
     if (message.image16) image.__image16 = { width: image.width, height: image.height, data: message.image16 };

@@ -465,15 +465,36 @@ export function renderGeometryRows(plan, src, out, y0 = 0, y1 = plan.outHeight) 
   else renderIndexRows(plan, src, out, y0, y1);
 }
 
-// Builds the whole output of `plan` on this thread.
-export function renderGeometry(source, plan) {
+// Rows per band when the 16-bit output is rendered into a scratch buffer and
+// dropped (renderGeometry's `with16: false`).
+const SCRATCH16_ROWS = 64;
+
+// Builds the whole output of `plan` on this thread. `with16: false` returns
+// the 8-bit view only: the kernels still compute the 16-bit samples (the
+// 8-bit bytes derive from them), band by band into one reused scratch buffer,
+// so the 8-bit bytes are the same and no 16-bit plane is allocated.
+export function renderGeometry(source, plan, { with16 = true } = {}) {
   if (plan.identity) return source;
   const out8 = new Uint8ClampedArray(plan.outWidth * plan.outHeight * 4);
-  const out16 = plan.has16 ? new Uint16Array(out8.length) : null;
-  renderGeometryRows(plan, {
+  const src = {
     x: 0, y: 0, width: plan.baseWidth, height: plan.baseHeight,
     data8: source.data, data16: plan.has16 ? source.__image16.data : null
-  }, { data8: out8, data16: out16 }, 0, plan.outHeight);
+  };
+  if (plan.has16 && !with16) {
+    const rowLength = plan.outWidth * 4;
+    const scratch = new Uint16Array(Math.min(plan.outHeight, SCRATCH16_ROWS) * rowLength);
+    for (let y0 = 0; y0 < plan.outHeight; y0 += SCRATCH16_ROWS) {
+      const y1 = Math.min(plan.outHeight, y0 + SCRATCH16_ROWS);
+      renderGeometryRows(plan, src, { data8: out8.subarray(y0 * rowLength, y1 * rowLength), data16: scratch }, y0, y1);
+    }
+    if (plan.step === 1) {
+      if (plan.rotates) geometryCounters.rotations++;
+      else geometryCounters.copies++;
+    }
+    return new ImageData(out8, plan.outWidth, plan.outHeight);
+  }
+  const out16 = plan.has16 ? new Uint16Array(out8.length) : null;
+  renderGeometryRows(plan, src, { data8: out8, data16: out16 }, 0, plan.outHeight);
   if (plan.step === 1) {
     if (plan.rotates) geometryCounters.rotations++;
     else geometryCounters.copies++;

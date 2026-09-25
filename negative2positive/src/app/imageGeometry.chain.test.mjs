@@ -219,4 +219,30 @@ assert.ok(cases >= 240);
   }
 }
 
+// The crop-area detection's strided sample of the frame Apply installs
+// (#245's sampleRotatedGrid): for the angles the issue lists it equals the
+// step downsampler run on the full rotation, and `with16: false` keeps the
+// 8-bit bytes while dropping the 16-bit plane (rendered band by band into a
+// scratch buffer, so bands wider than the scratch are covered too).
+{
+  const source = makeSource(157, 103, { seed: 11 });
+  for (const angle of [0.7, -2.3, 13, 91.5, 90, -90, 180]) {
+    for (const mirrored of [false, true]) {
+      for (const step of [2, 3]) {
+        const geometry = { rotationAngle: angle, mirrored, cropRegion: null };
+        const expected = downsampleImageDataByStep(headStepChain(source, geometry), step);
+        const plan = planGeometry(source, geometry, { step });
+        assertSame(renderGeometry(source, plan), expected, `sample ${angle} step ${step}`);
+        const eight = renderGeometry(source, plan, { with16: false });
+        assert.equal(eight.__image16, undefined, `sample ${angle}: no 16-bit plane`);
+        assertSame(eight, downsampleImageDataByStep(expected, 1, { with16: false }), `sample ${angle} step ${step} 8-bit only`);
+      }
+    }
+  }
+  const tall = makeSource(37, 300, { seed: 12 });
+  const plan = planGeometry(tall, { rotationAngle: 3.1 }, { step: 1 });
+  assert.ok(plan.outHeight > 64 * 4, 'several scratch bands');
+  assert.ok(bytesOf(renderGeometry(tall, plan, { with16: false }).data).equals(bytesOf(renderGeometry(tall, plan).data)), 'banded 8-bit rows');
+}
+
 console.log(`imageGeometry chain tests passed (${cases} chain cases x 6 band counts)`);

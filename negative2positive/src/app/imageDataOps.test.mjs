@@ -65,4 +65,10 @@ assert.deepEqual(Array.from(cropped.data.slice(0, 12)), [1, 1, 2, 255, 2, 1, 3, 
 assert.ok(cropped.__image16);
 assert.deepEqual(Array.from(cropped.__image16.data.slice(0, 8)), [257, 257, 514, 65535, 514, 257, 771, 65535]);
 
+// `with16: false` (the crop-area detection's sample): the same 8-bit bytes,
+// no 16-bit plane.
+const eightOnly = downsampleImageDataForMaxPixels(source, 6, { with16: false });
+assert.deepEqual(Array.from(eightOnly.data), Array.from(byPixels.data));
+assert.equal(eightOnly.__image16, undefined);
+
 console.log('imageDataOps.test.mjs passed');

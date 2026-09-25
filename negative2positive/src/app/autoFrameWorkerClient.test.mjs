@@ -65,4 +65,41 @@ assert.equal(timedWorker.terminated, true);
   assert.deepEqual(await answered, { angle: 1 });
   kept.abort();
 }
+// #245's analysis requests: the page's buffers are transferred as they are
+// (no copy), an analysis error rejects that request only and keeps the warm
+// worker, and a crash still rejects and releases it.
+{
+  let posted = null, created = 0, analysisWorker = null;
+  const run = createAutoFrameWorkerClient({ workerFactory: () => {
+    created++;
+    return analysisWorker = {
+      terminate() { this.terminated = true; },
+      postMessage(message, transfers) {
+        posted = { message, transfers };
+        queueMicrotask(() => this.onmessage({ data: message.region.data[0] === 9
+          ? { id: message.id, error: 'cv exception', taskError: true }
+          : { id: message.id, result: { points: null } } }));
+      },
+    };
+  } });
+  const region = { width: 1, height: 1, data: new Uint8ClampedArray([1, 2, 3, 255]) };
+  const result = await run.run('detect-crop-area', { region, left: 0 }, [region.data.buffer]);
+  assert.deepEqual(result, { points: null });
+  assert.equal(posted.message.type, 'detect-crop-area');
+  assert.equal(posted.message.region.data.buffer, region.data.buffer, 'transferred, not copied');
+  assert.deepEqual(posted.transfers, [region.data.buffer]);
+  const failing = { width: 1, height: 1, data: new Uint8ClampedArray([9, 0, 0, 255]) };
+  const error = await run.run('detect-crop-area', { region: failing }, []).then(() => null, e => e);
+  assert.match(error.message, /cv exception/);
+  assert.equal(error.workerReported, true);
+  assert.notEqual(analysisWorker.terminated, true, 'an analysis error keeps the worker');
+  await run.run('detect-crop-area', { region }, []);
+  assert.equal(created, 1);
+  analysisWorker.postMessage = () => queueMicrotask(() => analysisWorker.onerror());
+  const crash = await run.run('detect-crop-area', { region }, []).then(() => null, e => e);
+  assert.match(crash.message, /crashed/);
+  assert.notEqual(crash.workerReported, true, 'a crash lets the page fall back');
+  const broken = createAutoFrameWorkerClient({ workerFactory: () => { throw new Error('Worker is not defined'); } });
+  await assert.rejects(broken.run('expired-spatial-maps', {}, []), /not defined/);
+}
 console.log('autoFrameWorkerClient tests passed');

@@ -34,19 +34,40 @@ export function isSameAnalysisFrame(area, cropArea) {
     && Math.abs((a.t + a.b - b.t - b.b) / 2) < (a.b - a.t) * .45;
 }
 
-// `preview`, when given, must be downsampleImageDataForMaxPixels(image,
-// 1000000); `image` then only supplies the frame's size (#244).
-export function detectCropImageArea(image, crop, targets, { preview: sample = null } = {}) {
-  const preview = sample || downsampleImageDataForMaxPixels(image, 1000000);
+// Apply Crop's crop-area detection runs in two halves (#245): the input is
+// built on the page, which holds the pixels, and the OpenCV search runs in
+// the auto-frame worker (openCvAnalysisTasks.js), or on the page only when the
+// worker is unavailable. detectCropImageArea is the two in one call.
+
+/**
+ * The page's half: the <=1 MP point sample of the frame, the region around
+ * the crop (12 % beyond each edge) and the crop's place in it. `preview`,
+ * when given, must be downsampleImageDataForMaxPixels(image, 1000000) (its
+ * 8-bit bytes; the 16-bit plane is not read); `image` then only supplies the
+ * frame's size (#244). The region is a fresh 8-bit buffer, so it can be
+ * transferred to the worker.
+ */
+export function buildCropDetectionInput(image, crop, { preview: sample = null } = {}) {
+  const preview = sample || downsampleImageDataForMaxPixels(image, 1000000, { with16: false });
   const sx = preview.width / image.width, sy = preview.height / image.height;
   // 裁切の少し外側も見る。端をきっちり切った場合でも四辺を検出できる。
   const left = Math.max(0, Math.floor((crop.left - crop.width * .12) * sx));
   const top = Math.max(0, Math.floor((crop.top - crop.height * .12) * sy));
   const right = Math.min(preview.width, Math.ceil((crop.left + crop.width * 1.12) * sx));
   const bottom = Math.min(preview.height, Math.ceil((crop.top + crop.height * 1.12) * sy));
-  const region = cropImageDataRegion(preview, { left, top, width: right - left, height: bottom - top });
-  const normalized = normalizeDetectionImage(region);
+  const width = right - left, height = bottom - top;
+  const region = cropImageDataRegion({ width: preview.width, height: preview.height, data: preview.data }, { left, top, width, height });
   const expected = { left: crop.left * sx - left, top: crop.top * sy - top, width: crop.width * sx, height: crop.height * sy };
+  return { region, left, top, sx, sy, expected, crop: { left: crop.left, top: crop.top, width: crop.width, height: crop.height } };
+}
+
+/**
+ * The OpenCV half: normalise, two window searches, the targeted edge search,
+ * corner order, the same-frame check and the 0.98 shrink. Returns the four
+ * corners in frame pixels, or null. Requires `globalThis.cv`.
+ */
+export function detectCropAreaInRegion({ region, left, top, sx, sy, expected, crop }, targets) {
+  const normalized = normalizeDetectionImage(region);
   const window = detectImageWindow(normalized, targets, { targeted: true }) || detectImageWindow(region, targets, { targeted: true }) || detectTargetedEdges(normalized, expected, targets);
   if (!window) return null;
   // approxPolyDP の始点・巻き方向に依存しない四隅の順序。
@@ -58,6 +79,11 @@ export function detectCropImageArea(image, crop, targets, { preview: sample = nu
   // 輪郭そのものは解析に含めず、薄い境界や端文字のにじみを除外する。
   const center = points.reduce((c, p) => ({ x: c.x + p.x / 4, y: c.y + p.y / 4 }), { x: 0, y: 0 });
   return points.map(p => ({ x: center.x + (p.x - center.x) * .98, y: center.y + (p.y - center.y) * .98 }));
+}
+
+// Both halves on this thread.
+export function detectCropImageArea(image, crop, targets, options = {}) {
+  return detectCropAreaInRegion(buildCropDetectionInput(image, crop, options), targets);
 }
 
 // 模様が輪郭につながって閉じた contour にならない場合は、指定枠の四辺付近で

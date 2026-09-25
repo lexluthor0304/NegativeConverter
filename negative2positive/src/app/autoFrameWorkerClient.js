@@ -19,11 +19,11 @@ export function createAutoFrameWorkerClient({
     idleTimer = setTimeout(() => fail(new Error('Auto-frame worker idle')), idleTimeoutMs);
     idleTimer.unref?.();
   }
-  // `signal` lets a superseded photo activation drop its request: one that
-  // has not been posted never copies the planes, and a posted one settles at
-  // once and its late reply is ignored. (The worker itself keeps running.)
-  const request = (image, options, type = 'analyze-frame', { signal = null } = {}) => new Promise((resolve, reject) => {
-    if (signal?.aborted) { reject(new DOMException('Auto-frame request was superseded', 'AbortError')); return; }
+  // Posts one request on the shared worker, started on demand; the reply
+  // settles `resolve`/`reject`. `signal` lets a superseded photo activation
+  // drop its request: a posted one settles at once and its late reply is
+  // ignored. (The worker itself keeps running.)
+  const send = (message, transfers, resolve, reject, signal = null) => {
     try {
       clearTimeout(idleTimer);
       if (!worker) {
@@ -39,6 +39,14 @@ export function createAutoFrameWorkerClient({
           }
           clearTimeout(entry.timer);
           pending.delete(data.id);
+          if (data.taskError) {
+            // The analysis itself failed; the worker is fine and stays.
+            const error = new Error(data.error);
+            error.workerReported = true;
+            entry.reject(error);
+            if (!pending.size) armIdleTimer();
+            return;
+          }
           try {
             if (data.error) throw new Error(data.error);
             const result = data.result;
@@ -68,18 +76,35 @@ export function createAutoFrameWorkerClient({
       const settle = fn => value => { signal?.removeEventListener('abort', onAbort); fn(value); };
       pending.set(id, { resolve: settle(resolve), reject: settle(reject), timer });
       signal?.addEventListener('abort', onAbort, { once: true });
-      const rgba = image.data.slice();
-      const image16 = type === 'analyze-frame' ? image.__image16?.data.slice() : undefined;
-      const transfers = [rgba.buffer];
-      if (image16) transfers.push(image16.buffer);
-      worker.postMessage({ type, id, width: image.width, height: image.height, rgba, image16, options }, transfers);
+      worker.postMessage({ ...message, id }, transfers);
     } catch (error) { fail(error); reject(error); }
+  };
+  // A superseded request that has not been posted never copies the planes.
+  const request = (image, options, type = 'analyze-frame', { signal = null } = {}) => new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(new DOMException('Auto-frame request was superseded', 'AbortError')); return; }
+    let rgba, image16;
+    try {
+      rgba = image.data.slice();
+      image16 = type === 'analyze-frame' ? image.__image16?.data.slice() : undefined;
+    } catch (error) { reject(error); return; }
+    const transfers = [rgba.buffer];
+    if (image16) transfers.push(image16.buffer);
+    send({ type, width: image.width, height: image.height, rgba, image16, options }, transfers, resolve, reject, signal);
+  });
+  // A request whose buffers the page built for it (#245's analysis types):
+  // they are transferred as they are, without a copy.
+  request.run = (type, payload, transfers = []) => new Promise((resolve, reject) => {
+    send({ ...payload, type }, transfers, resolve, reject);
   });
   request.dispose = () => fail(new Error('Auto-frame worker released'));
   return request;
 }
 
 export const analyzeFrameInWorker = createAutoFrameWorkerClient();
+
+// The page's OpenCV analyses on the shared foreground worker (never a roll
+// lane): see openCvAnalysisTasks.js.
+export const runAnalysisInWorker = (type, payload, transfers) => analyzeFrameInWorker.run(type, payload, transfers);
 
 // Starts the shared worker and loads OpenCV ahead of the first detection.
 // Safe to call repeatedly; failures are ignored (the detection will load it).
