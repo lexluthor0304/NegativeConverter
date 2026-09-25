@@ -18,8 +18,6 @@
  * decoded ahead of the lanes (the prepare stage), the frames the lanes
  * process, and encoded payloads waiting for their write (the byte cap).
  */
-import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
-
 import { budgetFor, LOW_MEMORY_RAM_BYTES } from './memoryBudget.js';
 import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
 

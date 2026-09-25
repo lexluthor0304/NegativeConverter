@@ -165,5 +165,93 @@ const meta = { lensModel: 'Summilux', cameraModel: 'M11' };
   await lane.result;
 }
 
+// #252: a roll lane's own decode keeps the frame in its worker ({ held }).
+function heldFrame(planes = { ...base, id: 'planes' }) {
+  const held = {
+    takes: 0, releases: 0,
+    async takePlanes() { held.takes++; return planes; },
+    release() { held.releases++; }
+  };
+  return held;
+}
+{
+  // The lane's decode function is used; a foreground that adopts in flight
+  // flags the planes as wanted and resolves with the base once they are back.
+  const { shared, decodes } = harness();
+  const calls = [];
+  let settleOwn;
+  const lane = shared.open(fileA, {
+    decode(file, { signal, planes }) {
+      calls.push({ file, signal, planes });
+      return new Promise(resolve => { settleOwn = resolve; });
+    }
+  });
+  assert.equal(decodes.length, 0, 'the lane\'s decode, not the shared one');
+  assert.equal(calls[0].planes.wanted, false);
+  let notified = 0;
+  calls[0].planes.onWanted(() => notified++);
+  const foreground = shared.adopt(fileA);
+  assert.ok(foreground);
+  assert.equal(calls[0].planes.wanted, true);
+  assert.equal(notified, 1);
+  calls[0].planes.onWanted(() => notified++);
+  assert.equal(notified, 2, 'a late listener runs at once');
+  const held = heldFrame();
+  settleOwn({ base: null, held, rawMetadata: meta });
+  const adopted = await foreground.result;
+  assert.equal(adopted.base.id, 'planes', 'the foreground gets the planes');
+  assert.equal(adopted.rawMetadata, meta);
+  assert.equal(held.takes, 1);
+  const own = await lane.result;
+  assert.ok(own, 'the lane gets its value');
+  foreground.release(); lane.release();
+  assert.equal(held.releases, 0, 'planes taken are never released in the worker');
+  assert.equal(shared.size, 0);
+}
+{
+  // Adopted after the frame was held: its planes are fetched once.
+  const { shared } = harness();
+  const held = heldFrame();
+  const lane = shared.open(fileA, { decode: async () => ({ base: null, held, rawMetadata: null }) });
+  await lane.result;
+  const one = shared.adopt(fileA);
+  const two = shared.adopt(fileA);
+  const [a, b] = await Promise.all([one.result, two.result]);
+  assert.equal(a.base, b.base);
+  assert.equal(held.takes, 1);
+  one.release(); two.release(); lane.release();
+}
+{
+  // Nobody adopts: the held frame is dropped in the worker with the entry;
+  // a frame neither on the page nor held cannot be adopted.
+  const { shared } = harness();
+  const held = heldFrame();
+  const lane = shared.open(fileA, { decode: async () => ({ base: null, held, rawMetadata: null }) });
+  await lane.result;
+  lane.release();
+  assert.equal(held.releases, 1);
+  assert.equal(shared.has(fileA), false);
+  const gone = shared.open(fileB, { decode: async () => ({ base: null, held: null, rawMetadata: null }) });
+  await gone.result;
+  assert.equal(shared.adopt(fileB), null);
+  gone.release();
+}
+{
+  // Planes a lost worker cannot hand back: the adopter gets a decode of the
+  // file with the shared options instead.
+  const { shared, decodes } = harness();
+  const held = { async takePlanes() { throw new Error('worker lost'); }, release() {} };
+  const lane = shared.open(fileA, { decode: async () => ({ base: null, held, rawMetadata: null }) });
+  await lane.result;
+  const foreground = shared.adopt(fileA);
+  await flush();
+  assert.equal(decodes.length, 1, 'decoded again');
+  decodes[0].resolve({ base, rawMetadata: meta });
+  const adopted = await foreground.result;
+  assert.equal(adopted.base, base);
+  foreground.release(); lane.release();
+  assert.equal(shared.size, 0);
+}
+
 await flush();
 console.log('sharedDecodes tests passed');

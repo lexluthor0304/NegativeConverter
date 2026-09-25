@@ -46,6 +46,7 @@ export function createAutoFrameWorkerClient({
 } = {}) {
   let worker = null, sequence = 0;
   let idleTimer = null;
+  let idleHolds = 0;
   let abortReleases = 0;
   // The OpenCV heap the worker last reported (#258's ledger); 0 without one.
   let heapBytes = 0;
@@ -61,6 +62,8 @@ export function createAutoFrameWorkerClient({
   }
   function armIdleTimer() {
     clearTimeout(idleTimer);
+    // A roll analysis still has frames to measure (#252): keep the realm.
+    if (idleHolds > 0) return;
     idleTimer = setTimeout(() => fail(new Error('Auto-frame worker idle')), idleTimeoutMs);
     idleTimer.unref?.();
   }
@@ -221,6 +224,21 @@ export function createAutoFrameWorkerClient({
   // they are transferred as they are, without a copy.
   request.run = (type, payload, transfers = []) => post({ ...payload, type }, transfers);
   request.dispose = () => fail(new Error('Auto-frame worker released'));
+  // While any hold is taken, an idle worker is not released after
+  // idleTimeoutMs (#252: a roll analysis with frames left keeps OpenCV warm
+  // for a cold switch). The returned function ends this hold; the last one
+  // re-arms the idle release of an idle worker.
+  request.holdIdle = () => {
+    idleHolds += 1;
+    clearTimeout(idleTimer);
+    let held = true;
+    return () => {
+      if (!held) return;
+      held = false;
+      idleHolds -= 1;
+      if (!idleHolds && worker && !pending.size) armIdleTimer();
+    };
+  };
   // How many workers an abort terminated, and whether one is running now.
   Object.defineProperty(request, 'abortReleases', { get: () => abortReleases });
   Object.defineProperty(request, 'alive', { get: () => Boolean(worker) });

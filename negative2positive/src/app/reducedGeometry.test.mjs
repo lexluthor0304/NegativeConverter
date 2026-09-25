@@ -76,8 +76,11 @@ function functionSource(name) {
 }
 const { sampleAnalysisArea } = await import('./analysisRegion.js');
 const { TILE_ANALYSIS_REFERENCE_PIXELS } = await import('./thumbnailSources.js');
+// main.js delegates to rollSample.js, which the roll-frame worker shares (#252).
+const rollSample = await import('./rollSample.js');
 const app = vm.createContext({ buildReducedGeometrySample, sampleAnalysisArea, TILE_ANALYSIS_REFERENCE_PIXELS, reducedTileGeometry,
-  renderReducedGeometry, sanitizeCropRegionForImage: sanitizeCropRect, STUDIO_TILE_PREVIEW_MAX: 288 });
+  renderReducedGeometry, sanitizeCropRegionForImage: sanitizeCropRect, STUDIO_TILE_PREVIEW_MAX: 288,
+  buildRollAnalysisSampleOf: rollSample.buildRollAnalysisSample, buildRollSampleOf: rollSample.buildRollSample });
 vm.runInContext(['buildRollAnalysisSample', 'buildRollSample', 'tileAnalysisReference'].map(functionSource).join('\n'), app);
 
 const recipes = [

@@ -212,6 +212,15 @@ async function loadTiffBuffer(buffer, signal = null) {
  * `options.onStage('postDecode')` (#256): called once LibRaw's result is in
  * and its worker disposed, before the post-decode pass; the pass waits for
  * the promise it returns. Batch decode-ahead frees its decode slot there.
+ *
+ * Roll analysis (#252):
+ * - `options.decodeSlot` ({ acquire({ bytes, signal }) -> release }): once
+ *   LibRaw reports the frame's real size, the demosaic waits for a slot
+ *   reserving its decode bytes, and gives it back as soon as it returns;
+ * - `options.postDecode`: the lane's roll-frame worker instead of a
+ *   per-decode one (same run/terminate interface). When it keeps the planes
+ *   (`held`), the result is `{ held: true, width, height }` instead of an
+ *   ImageData: the analysis and the sample run in that worker.
  */
 export async function loadRawFile(buffer, fileName, options = {}) {
   const normalizedFileName = String(fileName || '').toLowerCase();
@@ -305,7 +314,15 @@ export async function loadRawFile(buffer, fileName, options = {}) {
 
   // Everything after LibRaw's result runs in a worker owned by this decode
   // (rawPostDecodeClient.js). Spawn it now so its start-up overlaps the decode.
-  const postDecode = startRawPostDecode();
+  // A roll lane brings its own long-lived worker (#252).
+  const postDecode = options.postDecode || startRawPostDecode();
+  const decodeSlot = options.decodeSlot || null;
+  let releaseSlot = null;
+  const giveSlotBack = () => {
+    const release = releaseSlot;
+    releaseSlot = null;
+    release?.();
+  };
 
   // The embedded preview the fallbacks decode. With the source File/Blob it is
   // read lazily, only if a fallback needs it; without one it has to be copied
@@ -367,6 +384,7 @@ export async function loadRawFile(buffer, fileName, options = {}) {
   } finally {
     // Every exit — success, timeout fallback, error, abort — releases both workers.
     signal?.removeEventListener?.('abort', abortDecode);
+    giveSlotBack();
     disposeRaw();
     postDecode.terminate();
   }
@@ -439,6 +457,16 @@ export async function loadRawFile(buffer, fileName, options = {}) {
       await reserve({ kind: 'raw' });
     }
 
+    // One demosaic per decode slot (#252): reserved with the real size, so a
+    // larger frame waits here instead of overcommitting. Unknown size
+    // reserves as much as possible: it runs when no other slot is held.
+    if (decodeSlot) {
+      const scale = useHalfSize ? 0.5 : 1;
+      const bytes = metaWidth > 0 && metaHeight > 0 ? estimateRawDecodeBytes(metaWidth * scale, metaHeight * scale) : Number.MAX_SAFE_INTEGER;
+      releaseSlot = await decodeSlot.acquire({ bytes, signal });
+      throwIfAborted(signal);
+    }
+
     let result;
     try {
       result = await withTimeout(raw.imageData(), decodeTimeoutMs, killWorker);
@@ -456,8 +484,10 @@ export async function loadRawFile(buffer, fileName, options = {}) {
       return await handleTimeoutFallback();
     }
     // imageData() has returned an owned copy. The demosaicer's WASM heap is
-    // no longer needed while the planes are built and defects repaired.
+    // no longer needed while the planes are built and defects repaired, and
+    // the next frame's demosaic may start.
     disposeRaw();
+    giveSlotBack();
     const { width, height } = result;
     // Before packing and the defect pass: a superseded decode never posts them.
     throwIfAborted(signal);
@@ -495,6 +525,9 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     }
     // After the defect pass and the 8-bit mirror (both in the worker).
     throwIfAborted(signal);
+
+    // A roll lane's worker keeps the planes and analyses them there (#252).
+    if (outcome.held) return { held: true, width: outcome.width, height: outcome.height };
 
     if (outcome.garbled) {
       console.warn('[RAW] decoded output looks un-demosaiced; trying embedded JPEG preview fallback');

@@ -157,6 +157,10 @@ export function createPhotoSessionCache({ maxBytes = DEFAULT_MAX_BYTES, onEvict 
       register(key, value, buffers, { oldest: true });
       return true;
     },
+    /** Whether `extraBytes` more would fit next to everything retained, evicting nothing. */
+    hasRoomFor(extraBytes) {
+      return maxBytes > 0 && bytes + Math.max(0, Number(extraBytes) || 0) <= maxBytes;
+    },
     take(key) { return remove(key)?.value ?? null; },
     peek(key) {
       const entry = entries.get(key);

@@ -1,28 +1,15 @@
-import { readTextInBands, borderTextBands } from '../app/filmEdgeText.js';
 import { acceptOpenCvMessage, loadOpenCv, openCvRealmStats } from './opencvWorkerRuntime.js';
 import { detectFrameAndRotation } from '../app/autoFrameAnalyzer.js';
 import { applyRotationToImageData } from '../app/imageGeometry.js';
-import { readFilmEdge, rectifyLaneBand } from '../app/filmEdgeReader.js';
+import { createFilmEdgeReader } from './filmEdgeRead.js';
 import { isOpenCvAnalysisType, runOpenCvAnalysisTask } from '../app/openCvAnalysisTasks.js';
 import { detectFrameForRequest, packFrameResult, runImportRequest } from './autoFrameImportTask.js';
 
 // The page's compiled OpenCV module, instantiated here (#252 part 5).
 const loadCv = loadOpenCv;
 
-// Perforation lanes and the DX edge barcode need no OpenCV; the result is
-// plain data (no ImageData), so it clones without transfers.
-async function readEdge(image, options) {
-  const result = readFilmEdge(image, options || {});
-  try {
-    await loadCv();
-    const textBands = result.geometry
-      ? result.geometry.lanes.map(lane => rectifyLaneBand(image, result.geometry, lane, { columnStepMm: 0.04, rowStepMm: 0.04 }))
-      : borderTextBands(image);
-    const text = readTextInBands(textBands, { cv: globalThis.cv });
-    if (text) { result.text = text; result.found = true; }
-  } catch (error) { console.warn('Film edge text unavailable:', error.message); }
-  return result;
-}
+// Perforation lanes and the DX edge barcode need no OpenCV; the edge text does.
+const readEdge = createFilmEdgeReader(loadCv);
 
 // The OpenCV heap this worker holds, reported with every reply so the page's
 // memory ledger can count it (#258). 0 until OpenCV is loaded.

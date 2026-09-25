@@ -18,10 +18,19 @@
  *
  * The decoded base is shared read-only: nothing may mutate or transfer it
  * while a lease holds it (the host lists `bases()` among the buffers an export
- * never transfers). `decode(file, { signal, context })` must resolve
+ * never transfers). `decode(file, { signal, context, planes })` must resolve
  * `{ base, rawMetadata }` from the same options every consumer would use;
  * `context` is what the lease that started the decode passed to `open()`
  * (its memory claim, #258).
+ *
+ * A roll-analysis decode (#252) may keep its planes in its lane's worker: it
+ * resolves `{ base: null, held, rawMetadata }`, where `held.takePlanes()`
+ * brings the base to the page and `held.release()` drops it there. A lane
+ * opens such a decode with its own `decode` function. When the foreground
+ * adopts it, `planes.wanted` turns true (and `planes.onWanted` callbacks
+ * run) so the decode can return the planes early, and the foreground's lease
+ * resolves only once the base is on the page. A held frame nobody adopted is
+ * released with the entry.
  *
  * Pure: no DOM, no workers.
  */
@@ -44,6 +53,32 @@ export function createSharedDecodes({ decode }) {
     if (entries.get(entry.file) === entry) entries.delete(entry.file);
   }
 
+  function wantPlanes(entry) {
+    if (entry.planesWanted) return;
+    entry.planesWanted = true;
+    for (const listener of [...entry.planeListeners]) {
+      try { listener(); } catch {}
+    }
+    entry.planeListeners.clear();
+  }
+
+  // A held frame's base, fetched once for every lease that needs it. A worker
+  // that lost the frame is answered with a decode of the file (the shared
+  // decode function, today's options), so an adopter never fails for it.
+  function takeHeldBase(entry) {
+    const held = entry.value?.held;
+    if (!held) return Promise.resolve(entry.value);
+    entry.taking ||= Promise.resolve().then(() => held.takePlanes()).then((base) => {
+      if (!base) throw new Error('The held frame came back empty');
+      entry.value = { ...entry.value, base, held: null };
+      return entry.value;
+    }).catch(() => Promise.resolve(decode(entry.file, { signal: entry.controller.signal })).then((value) => {
+      entry.value = { ...value, held: null };
+      return entry.value;
+    }));
+    return entry.taking;
+  }
+
   // A lease finished (released, aborted or failed): stop the decode nobody
   // waits for, and forget an entry nobody holds.
   function reconsider(entry) {
@@ -52,6 +87,8 @@ export function createSharedDecodes({ decode }) {
     if (!entry.settled && !entry.controller.signal.aborted) {
       entry.controller.abort(new DOMException('Shared decode was released', 'AbortError'));
     }
+    // Nobody took the held planes: drop them in the worker.
+    if (entry.settled && entry.value?.held && !entry.taking) entry.value.held.release?.();
   }
 
   function createLease(entry, signal, role) {
@@ -77,6 +114,16 @@ export function createSharedDecodes({ decode }) {
         return;
       }
       lease.state = 'holding';
+      // The foreground needs the base itself, not a frame held in a worker.
+      if (role === 'foreground' && !entry.value?.base && entry.value?.held) {
+        takeHeldBase(entry).then(resolveResult, (error) => {
+          lease.state = 'done';
+          entry.leases.delete(lease);
+          rejectResult(error);
+          reconsider(entry);
+        });
+        return;
+      }
       resolveResult(entry.value);
     };
     lease.release = () => {
@@ -95,12 +142,22 @@ export function createSharedDecodes({ decode }) {
     return lease;
   }
 
-  function start(file, context) {
-    const entry = { file, controller: new AbortController(), leases: new Set(), settled: false, value: null, error: null };
+  function start(file, context, decodeFile = decode) {
+    const entry = {
+      file, controller: new AbortController(), leases: new Set(), settled: false, value: null, error: null,
+      planesWanted: false, planeListeners: new Set(), taking: null
+    };
     entries.set(file, entry);
+    const planes = {
+      get wanted() { return entry.planesWanted; },
+      onWanted(listener) {
+        if (entry.planesWanted) { listener(); return; }
+        entry.planeListeners.add(listener);
+      }
+    };
     let running;
     try {
-      running = Promise.resolve(decode(file, { signal: entry.controller.signal, context }));
+      running = Promise.resolve(decodeFile(file, { signal: entry.controller.signal, context, planes }));
     } catch (error) {
       running = Promise.reject(error);
     }
@@ -120,15 +177,22 @@ export function createSharedDecodes({ decode }) {
   }
 
   return {
-    /** A background job's lease: starts the decode, or joins the one running. */
-    open(file, { signal = null, context = null } = {}) {
-      const entry = entries.get(file) || start(file, context);
+    /**
+     * A background job's lease: starts the decode (with `decode` when given,
+     * else the shared one), or joins the one running. `context` reaches the
+     * decode (its memory claim, #258).
+     */
+    open(file, { signal = null, context = null, decode: decodeFile = null } = {}) {
+      const entry = entries.get(file) || start(file, context, decodeFile || decode);
       return createLease(entry, signal, 'lane');
     },
     /** The foreground's lease on a decode a lane started, or null. */
     adopt(file, { signal = null } = {}) {
       const entry = entries.get(file);
       if (!entry || entry.error) return null;
+      // A finished decode whose frame is neither on the page nor held is gone.
+      if (entry.settled && !entry.value?.base && !entry.value?.held) return null;
+      wantPlanes(entry);
       return createLease(entry, signal, 'foreground');
     },
     has: (file) => entries.has(file),

@@ -43,7 +43,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     import { detectFrameWithFallback, runImportAnalyses } from './autoFrameExecution.js';
     import { importConversionKey } from './importDetection.js';
     import { createAnalysisSampleStore } from './analysisSampleStore.js';
-    import { buildReducedGeometrySample, reducedTileGeometry, renderReducedGeometry, tileGeometryKey } from './reducedGeometry.js';
+    import { reducedTileGeometry, renderReducedGeometry, tileGeometryKey } from './reducedGeometry.js';
     import { createThumbnailSourceCache, TILE_ANALYSIS_REFERENCE_PIXELS } from './thumbnailSources.js';
     import { createRollSampleCache } from './rollSampleCache.js';
     import { mountStudioWorkspace } from './studioWorkspace.js';
@@ -89,7 +89,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     import { poolRepairMask } from './repairedPreview.js';
     import {
       planBatchParallelism, planPng16BandWorkers, runBatchPipeline, planGeometryBandsInFlight, LANE_BYTES_PER_PIXEL,
-      createLearningBarrier, planDecodeAhead, EXPORT_MAX_UNWRITTEN_BYTES
+      createLearningBarrier, planDecodeAhead, EXPORT_MAX_UNWRITTEN_BYTES, planRollAnalysis, createDecodeSlots, ROLL_ANALYSIS_MIN_RAM_BYTES
     } from './batchExportScheduler.js';
     import {
       displayPreviewSize, resizeDisplayPreview, resizeDisplayPreviewInBands, updateDisplayPreviewRect, noteDisplayFilter,
@@ -146,11 +146,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     import { renderFileList } from './fileListView.js';
     import { normalizeFileListSort, orderedFileIndices, selectionRangeIndices } from './fileListOrder.js';
     import { createSprocketFrameCache } from './sprocketFrameCache.js';
-    import { imagePixelsForBatch, imagePixelsWithSiblings, rememberImageDimensions, knownImageDimensions, rawDecodePlan } from './imageDimensions.js';
+    import { imagePixelsForBatch, imagePixelsWithSiblings, importPixelsForRoll, rememberImageDimensions, knownImageDimensions, rawDecodePlan } from './imageDimensions.js';
     import {
       TWO_STAGE_MIN_MP_DEFAULT, twoStageMinPixels, stageTwoStartMode, createExactGeometry, windowEdits, overlayWindowEdits,
       geometryEdits, hasWindowEdits
     } from './provisionalPhoto.js';
+    import { buildRollAnalysisSample as buildRollAnalysisSampleOf, buildRollSample as buildRollSampleOf, rollSampleSettings } from './rollSample.js';
     import {
       createDustWorkerClient, detectDustInWorker, inpaintDustInWorker, strokeDustInWorker, followDustMaskInWorker,
       pinDustWorker, unpinDustWorker, disposeDustWorker, dustMaskInfo, forgetDustMaskInfo
@@ -162,7 +163,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       sampleFilmBase as sampleFilmBaseRobust,
       sanitizeFilmBaseForSettings
     } from './filmBaseDetection.js';
-    import { cachedAutoDetectFilmBase, cachedDetectFilmType, carryFilmStats } from './filmStatsCache.js';
+    import { cachedAutoDetectFilmBase, cachedDetectFilmType, carryFilmStats, primeFilmStats } from './filmStatsCache.js';
+    import { createRollFramePool } from './rollFrameWorkerClient.js';
     import { estimateAutoWhiteBalance } from './autoWhiteBalance.js';
     import {
       isRawLikeFileName,
@@ -11661,6 +11663,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
                 extractedRawMeta = meta;
               }
             });
+            // The foreground's decoded size seeds roll-analysis planning for
+            // header-less RAWs of the same import (#252).
+            rememberImageDimensions(file, imageData);
             overlay.updateProgress(90, lang.loadingProcessing);
           }
         } else if (isPngFile(file)) {
@@ -11963,6 +11968,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           memoryClaim.release();
         }
         if (!image) throw new Error('The full decode returned no pixels');
+        // Its decoded size seeds roll-analysis planning for header-less RAWs
+        // of the same import (#252).
+        rememberImageDimensions(record.file, image);
         return image;
       })();
       record.attempt = attempt;
@@ -17676,7 +17684,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // it keeps until it drops the frame, or a lane's that already covers the
     // decode); without one the decode takes its own `priority` claim, which
     // covers the decode only.
-    async function loadFileToImageData(file, { filmStats = false, signal = null, onMetadata = null, halfSize = false, onStage = null, claim = null, priority = 'user', label = '' } = {}) {
+    // `postDecode`/`decodeSlot` (#252): a roll lane's frame worker and the
+    // decode slots its lanes share (see loadRawFile). With a frame worker that
+    // keeps the planes, a RAW resolves `{ held: true, width, height }`.
+    async function loadFileToImageData(file, {
+      filmStats = false, signal = null, onMetadata = null, halfSize = false, onStage = null, claim = null, priority = 'user', label = '',
+      postDecode = null, decodeSlot = null
+    } = {}) {
       const fileName = file.name.toLowerCase();
       const aborted = () => signal?.reason?.name === 'AbortError' ? signal.reason : new DOMException('Decode was aborted', 'AbortError');
       const ownClaim = claim ? null : createFrameClaim(file, { priority, signal, label: label || `decode ${file.name}` });
@@ -17694,7 +17708,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
             ramBytes: memoryRuntime.ramBytes,
             ...(onMetadata ? { onMetadata } : {}),
             ...(onStage ? { onStage } : {}),
-            ...(halfSize ? { halfSize: true, outputBps: 16, suppressSensorDefects: false } : {})
+            ...(halfSize ? { halfSize: true, outputBps: 16, suppressSensorDefects: false } : {}),
+            ...(postDecode ? { postDecode } : {}),
+            ...(decodeSlot ? { decodeSlot } : {})
           });
           if (halfSize) {
             // A full decode earlier in the session knows the size exactly.
@@ -18510,6 +18526,96 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     async function planBatchLanes(files) {
       return (await planBatchLaneBudget(files)).lanes;
+    }
+
+    // The machine's RAM (#252 part 1): the desktop app's get_memory_info
+    // (every WebView), else navigator.deviceMemory (Chrome 147+ reports up to
+    // 32 GB), else unknown. `nc_memory_ram_gib_v1` overrides it for
+    // benchmarks and the two-lane parity run, as #258 reads it.
+    let machineRamRead = null;
+    function machineRamBytes() {
+      const override = Number.parseFloat(safeStorageGet('nc_memory_ram_gib_v1') || '');
+      if (Number.isFinite(override) && override > 0) return Promise.resolve(override * 1024 ** 3);
+      machineRamRead ||= (async () => {
+        if (isTauriDesktop()) {
+          try {
+            const info = await window.__TAURI__.core.invoke('get_memory_info');
+            if (Number.isFinite(info?.totalBytes) && info.totalBytes > 0) return info.totalBytes;
+          } catch (error) { console.warn('get_memory_info unavailable:', error); }
+        }
+        const gb = Number(navigator.deviceMemory);
+        return Number.isFinite(gb) && gb > 0 ? gb * 1024 ** 3 : NaN;
+      })();
+      return machineRamRead;
+    }
+
+    // Roll analysis lanes (#252 part 1): `framesInFlight` lanes sharing
+    // `decodeSlots` decoders. Without a known RAM above 8 GiB it is exactly
+    // the export planner's lanes for these files; above, the analysis
+    // footprint within a quarter of the RAM, never below those lanes. A
+    // header-less RAW takes the size of a decoded file of the same import
+    // and extension (`siblings`), not the unknown-size worst case.
+    async function planRollAnalysisLanes(files, siblings = files) {
+      const ramBytes = await machineRamBytes();
+      if (!(ramBytes > ROLL_ANALYSIS_MIN_RAM_BYTES)) {
+        // Today's lanes, each with a decoder of its own: the slots do not
+        // limit them.
+        const lanes = await planBatchLanes(files);
+        return { decodeSlots: lanes, framesInFlight: lanes, slotBytes: Infinity };
+      }
+      const pinned = Number.parseInt(safeStorageGet('nc_batch_lanes_v1') || '', 10);
+      const plan = planRollAnalysis({
+        pixels: await importPixelsForRoll(files, { siblings }),
+        ramBytes,
+        hardwareConcurrency: navigator.hardwareConcurrency,
+        deviceMemory: navigator.deviceMemory,
+        fileCount: files.length,
+        maxParallel: Number.isInteger(pinned) && pinned >= 1 && pinned <= 4 ? pinned : 4
+      });
+      // A frame larger than planned waits at its decode checkpoint.
+      return { ...plan, slotBytes: plan.decodeSlots * plan.decodeBytes };
+    }
+
+    // The roll-frame worker path needs workers with OffscreenCanvas (the
+    // detector's preview), as the auto-frame worker does.
+    function rollFrameWorkerUsable() {
+      return typeof Worker === 'function' && typeof OffscreenCanvas === 'function';
+    }
+
+    // Files LibRaw decodes (TIFF scans take the UTIF path and stay on the page).
+    function rollFrameDecodable(file) {
+      const name = String(file?.name || '').toLowerCase();
+      return isRawLikeFileName(name) && !/\.tiff?$/.test(name);
+    }
+
+    // The workers of one automatic roll analysis (#252): created once per
+    // roll, re-planned per attempt, disposed when the roll ends. While they
+    // live, the shared auto-frame worker keeps its OpenCV realm through idle
+    // periods, so a cold switch to a frame the roll has not reached finds it
+    // warm.
+    function createRollAnalysisWorkers(plan, { warm = false } = {}) {
+      const frames = createRollFramePool({ size: plan.framesInFlight });
+      const slots = createDecodeSlots({ slots: plan.decodeSlots, budgetBytes: plan.slotBytes });
+      const analyzers = createAutoFrameWorkerPool({ size: plan.framesInFlight });
+      const releaseIdleHold = analyzeFrameInWorker.holdIdle();
+      let disposed = false;
+      // A roll of LibRaw files starts its workers (and OpenCV) ahead of the
+      // first frame; a roll of scans never uses them.
+      if (warm && rollFrameWorkerUsable()) frames.warm(plan.framesInFlight);
+      return {
+        frames, slots, analyzers,
+        configure(next) {
+          frames.resize(next.framesInFlight);
+          slots.configure({ slots: next.decodeSlots, budgetBytes: next.slotBytes });
+        },
+        dispose() {
+          if (disposed) return;
+          disposed = true;
+          frames.dispose();
+          analyzers.dispose();
+          releaseIdleHold();
+        }
+      };
     }
 
     function planBatchExportLanes(jobs) {
@@ -20759,10 +20865,44 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return { base, rawMetadata };
     }
 
+    // A roll-analysis frame (#252 part 2): decoded into the lane's roll-frame
+    // worker, which runs the post-decode steps, the frame detection and the
+    // film-edge read on its own planes and keeps them for the roll sample.
+    // Resolves `{ base: null, held, analysis, optionsKey, rawMetadata }`, or
+    // `{ base, analysis, ... }` when the planes came to the page: the
+    // foreground adopted the frame (`planes.wanted`, the analysis is then
+    // incomplete), a prefetch needs them (`wantsBase`), the photo sessions
+    // have room for them as for any lane base (#243), or a fallback finished
+    // the decode here (`analysis` null: the frame is measured on the page, as
+    // before). The file is read in this same call chain, before any await.
+    function decodeRollFrame(file, { signal, context = null, planes = null, wantsBase = false, frames, slots, options, optionsKey }) {
+      const adapter = frames.frame({
+        options: { frame: options.frame, filmTypeChoice: options.filmTypeChoice, filmEdge: options.filmEdge },
+        returnPlanes: ({ width, height }) => wantsBase || Boolean(planes?.wanted) || photoSessions.hasRoomFor(width * height * 12)
+      });
+      planes?.onWanted(() => adapter.wantPlanes());
+      let rawMetadata = null;
+      // The lane's memory claim (#258) covers this decode.
+      return loadFileToImageData(file, {
+        filmStats: true, signal, onMetadata: meta => { rawMetadata = meta; }, postDecode: adapter, decodeSlot: slots,
+        claim: context?.claim || null, priority: 'background'
+      }).then((image) => {
+        if (image?.held) return { base: null, held: adapter.held, analysis: adapter.analysis, optionsKey, rawMetadata };
+        adapter.done();
+        return { base: image, analysis: adapter.analysis, optionsKey, rawMetadata };
+      }, (error) => {
+        adapter.done();
+        throw error;
+      });
+    }
+
     // Named by the job's first need: the folder-import smoke tells the
-    // routes apart by these frames of the read's stack.
-    function openAnalysisDecode(item, signal, claim = null) {
-      return sharedDecodes.open(item.file, { signal, context: { claim } });
+    // routes apart by these frames of the read's stack. A roll pass may
+    // bring its own decode (the lane's roll-frame worker, #252); it reads
+    // the file in this same call chain. The lane's memory claim (#258)
+    // reaches either decode as its context.
+    function openAnalysisDecode(item, signal, claim = null, decode = null) {
+      return sharedDecodes.open(item.file, decode ? { signal, context: { claim }, decode } : { signal, context: { claim } });
     }
     function openTileDecode(item, signal, claim = null) {
       return sharedDecodes.open(item.file, { signal, context: { claim } });
@@ -21093,7 +21233,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           }
           job.decoding = true;
           job.halfSize = Boolean(tile?.halfSize && !analysis && !prefetch);
-          lease = analysis ? openAnalysisDecode(item, controller.signal, memoryClaim)
+          // A roll frame decodes into its lane's worker (#252); a prefetch
+          // also needs the base on the page.
+          const rollDecode = analysis?.decode
+            ? (file, context) => analysis.decode(file, { ...context, wantsBase: Boolean(prefetch) })
+            : null;
+          lease = analysis ? openAnalysisDecode(item, controller.signal, memoryClaim, rollDecode)
             : job.halfSize ? openHalfSizeTileDecode(item, controller.signal, memoryClaim)
               : tile ? openTileDecode(item, controller.signal, memoryClaim) : openPrefetchDecode(item, controller.signal, memoryClaim);
           try {
@@ -21108,10 +21253,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           }
         }
         // A prefetched base is usable by a switch at once, before any render.
-        if (prefetch?.valid()) prefetch.hold(decoded);
-        if (analysis?.valid()) await attempt(analysis, () => analysis.run(decoded.base, step));
-        if (tile?.valid()) await attempt(tile, () => tile.run(decoded.base, step));
-        if (prefetch?.valid()) await attempt(prefetch, () => prefetch.run(decoded, step));
+        // (A roll frame held in its worker has no base on the page.)
+        if (prefetch?.valid() && decoded.base) prefetch.hold(decoded);
+        if (analysis?.valid()) await attempt(analysis, () => analysis.run(decoded.base, step, decoded));
+        if (tile?.valid() && decoded.base) await attempt(tile, () => tile.run(decoded.base, step));
+        if (prefetch?.valid() && decoded.base) await attempt(prefetch, () => prefetch.run(decoded, step));
         // A full decode of a frame with a decided recipe also fills the
         // display proxy its first open converts (#249); a roll pass fills
         // its own frames.
@@ -21240,9 +21386,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     // Roll analysis pass 1 through the lanes. Resolves once every frame of
     // `items` is analysed, failed or no longer wanted (and no job of it runs).
-    // `begin(item)` returns `{ valid(), analyze(image, step) }`; the payload
-    // goes to `sink(item, payload)`, errors to `onError(item, error)`.
-    function runRollAnalysisPass(items, { lanes = 1, valid, wants, begin, sink, onError }) {
+    // `begin(item)` returns `{ valid(), analyze(image, step, decoded) }`; the
+    // payload goes to `sink(item, payload)`, errors to `onError(item, error)`.
+    // `decode(item, file, context)`, when given, is the frame's decode for the
+    // shared-decode entry (#252: into the lane's roll-frame worker);
+    // `onRequest(request)` receives the request, whose `lanes` a re-plan may
+    // raise while the pass runs.
+    function runRollAnalysisPass(items, { lanes = 1, valid, wants, begin, sink, onError, decode = null, onRequest = null }) {
       return new Promise(resolve => {
         const request = { items: new Set(items), lanes, inFlight: 0, valid, resolve };
         request.wants = item => request.items.has(item) && valid() && wants(item);
@@ -21252,8 +21402,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           let finished = false;
           return {
             valid: () => frame.valid(),
-            async run(base, step) {
-              const payload = await frame.analyze(base, step);
+            decode: decode ? (file, context) => decode(item, file, context) : null,
+            async run(base, step, decoded = null) {
+              const payload = await frame.analyze(base, step, decoded);
               if (payload) await sink(item, payload);
             },
             fail(error) { onError(item, error); },
@@ -21266,6 +21417,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           };
         };
         rollPassRequests.add(request);
+        onRequest?.(request);
         settleRollPassRequests();
         kickBackgroundPhotoWork();
       });
@@ -22496,34 +22648,16 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     // Downsampled, geometry-applied negative used for the roll measurements.
     // Its pixels feed recipes and so exports: they must not change (#247).
+    // The builders live in rollSample.js, shared with the roll-frame worker
+    // that builds the samples of its own decodes (#252).
     function buildRollAnalysisSample(imageData, settings) {
-      return buildReducedGeometrySample(imageData, settings, { maxDim: 900 });
+      return buildRollAnalysisSampleOf(imageData, settings);
     }
 
-    // The roll sample plus what its canonical tile needs (#247 2b), taken while
-    // the decoded base is in hand: the base's size, a small 16-bit analysis
-    // reference of the image area and the tile's working image, which is the
-    // lane's own reduced image of this geometry (the core's strided plan reads
-    // only its pixels, a few milliseconds even at 60 MP), so a roll tile
-    // samples the frame where the lane's tile does. A sample that is the base
-    // itself (a small frame without geometry) is wrapped, so the base gains no
-    // fields.
+    // The roll sample plus what its canonical tile needs (#247 2b); see
+    // rollSample.js.
     function buildRollSample(base, settings) {
-      const built = buildRollAnalysisSample(base, settings);
-      const sample = built !== base ? built
-        : { width: base.width, height: base.height, data: base.data, ...(base.__image16 ? { __image16: base.__image16 } : {}) };
-      sample.__baseSize = { width: base.width, height: base.height };
-      sample.__analysisReference = tileAnalysisReference(settings, base);
-      const geometry = {
-        rotationAngle: Number.isFinite(settings.rotationAngle) ? settings.rotationAngle : 0,
-        mirrored: Boolean(settings.mirrored),
-        cropRegion: settings.cropRegion || null
-      };
-      const frame = reducedTileGeometry(base, geometry, STUDIO_TILE_PREVIEW_MAX, { sanitizeCrop: sanitizeCropRegionForImage });
-      const working = renderReducedGeometry(base, geometry, { step: frame.step });
-      sample.__tileWorking = working !== base ? working
-        : { width: base.width, height: base.height, data: base.data, ...(base.__image16 ? { __image16: base.__image16 } : {}) };
-      return sample;
+      return buildRollSampleOf(base, settings, { tileMax: STUDIO_TILE_PREVIEW_MAX, sanitizeCrop: sanitizeCropRegionForImage });
     }
 
     // ===========================================
@@ -25907,12 +26041,22 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         if (put?.key === before) put.key = after;
       };
       filmTypeRoll?.rekeys.add(rekeySample);
+      // The roll's workers (#252): a roll-frame worker per frame in flight,
+      // the frame analyzers of frames analysed on the page, and the decode
+      // slots the lanes share. Created by the first attempt and held across
+      // retries until finish(), so a retry starts no new OpenCV realm.
+      let rollWorkers = null;
+      // Frames whose worker analysis failed: once more in the worker, then
+      // on the page as before (#252).
+      const workerFailures = new Map();
       const finish = async () => {
         const release = !finished;
         if (release) for (const item of pending) automaticRollPendingItems.delete(item);
         finished = true;
         if (timer !== null) clearTimeout(timer);
         timer = null;
+        rollWorkers?.dispose();
+        rollWorkers = null;
         marker?.finish();
         marker = null;
         if (safeMode) hiddenJobs.setSafeMode(false);
@@ -25976,14 +26120,72 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           // foreground and analysed there.
           const toAnalyze = pending.filter(item => eligible(item) && !item.settings && item !== state.fileQueue[state.currentFileIndex]);
           if (toAnalyze.length) frameFilmType ??= state.filmType;
-          const lanes = hiddenJobs.safeMode ? 1 : await planBatchLanes(toAnalyze.map(item => item.file));
-          const analyzers = createAutoFrameWorkerPool({ size: lanes });
-          const trace = createPerfTrace('automaticRollImport', { files: toAnalyze.length, lanes });
+          // Lanes planned for analysis (#252 part 1): frames in flight sharing
+          // decode slots, exactly the export planner's lanes without a known
+          // RAM above 8 GiB.
+          const plan = hiddenJobs.safeMode ? { decodeSlots: 1, framesInFlight: 1, slotBytes: Infinity }
+            : await planRollAnalysisLanes(toAnalyze.map(item => item.file), pending.map(item => item.file));
+          rollWorkers ||= createRollAnalysisWorkers(plan, { warm: toAnalyze.some(item => rollFrameDecodable(item.file)) });
+          rollWorkers.configure(plan);
+          const { frames, slots, analyzers } = rollWorkers;
+          const lanes = plan.framesInFlight;
+          let passRequest = null;
+          let replanned = false;
+          // A header-less RAW planned as the largest possible frame: once a
+          // frame of the import has decoded, plan again from its size.
+          const replan = async () => {
+            if (replanned || hiddenJobs.safeMode) return;
+            replanned = true;
+            const next = await planRollAnalysisLanes(toAnalyze.map(item => item.file), pending.map(item => item.file));
+            if (!rollWorkers || finished || next.framesInFlight <= (passRequest?.lanes || lanes)) return;
+            rollWorkers.configure(next);
+            if (passRequest) passRequest.lanes = next.framesInFlight;
+            trace.mark('replanned', { framesInFlight: next.framesInFlight, decodeSlots: next.decodeSlots });
+            kickBackgroundPhotoWork();
+          };
+          // What the lane's worker analyses a frame with: the options pass 1
+          // would read after the decode, taken when the frame's job starts
+          // (#252). A frame whose options changed before its merge is
+          // measured again.
+          const rollFrameOptions = (item) => {
+            const choice = sanitizeFilmTypeOverride(item?.filmTypeOverride);
+            const automatic = !choice && state.importFilmTypeAuto;
+            return {
+              frame: state.autoFrame.enabled ? autoFrameAnalyzerOptions({ filmType: frameFilmType ?? state.filmType, rotatedOutput: 'none' }) : null,
+              filmTypeChoice: automatic ? { automatic: true } : { automatic: false, filmType: choice?.filmType || state.filmType },
+              filmEdge: true,
+              borderBufferPct: defaultFilmBaseBuffer()
+            };
+          };
+          const rollFrameOptionsKey = options => JSON.stringify({ ...options, frame: options.frame ? { ...options.frame, settings: { ...options.frame.settings, lastDiagnostics: null } } : null });
+          // A frame's display proxy (#249), filled while its planes are on the
+          // page: the commit never changes its geometry. False once the frame
+          // is no longer wanted.
+          const fillRollFrameProxy = async (item, image, settings, step, itemValid) => {
+            await step();
+            if (!itemValid()) return false;
+            await fillDisplayProxy(item, image, settings, { isCurrent: itemValid })
+              .catch(error => console.warn('Display proxy fill failed:', item.file?.name, error));
+            return true;
+          };
+          const trace = createPerfTrace('automaticRollImport', {
+            files: toAnalyze.length, lanes, framesInFlight: plan.framesInFlight, decodeSlots: plan.decodeSlots
+          });
           try {
             await runRollAnalysisPass(toAnalyze, {
               lanes,
               valid,
+              onRequest: (request) => { passRequest = request; },
               wants: item => eligible(item) && !item.settings && item !== state.fileQueue[state.currentFileIndex],
+              // A RAW decodes into the lane's roll-frame worker, unless its
+              // worker analysis already failed twice (then the page, as before).
+              decode: (item, file, context) => {
+                if (!rollFrameWorkerUsable() || (workerFailures.get(item) || 0) >= 2 || !rollFrameDecodable(file)) {
+                  return decodeForBackground(file, context.signal);
+                }
+                const options = rollFrameOptions(item);
+                return decodeRollFrame(file, { ...context, frames, slots, options, optionsKey: rollFrameOptionsKey(options) });
+              },
               begin: (item) => {
                 const key = automaticRollItemKey(item);
                 const itemValid = () => valid() && eligible(item) && !item.settings
@@ -25991,38 +26193,78 @@ import { canPublishThumbnail } from './thumbnailRank.js';
                 return {
                   valid: itemValid,
                   // `step` waits for the foreground before each main-thread-heavy step (capped).
-                  async analyze(image, step) {
-                    if (!itemValid()) return null;
-                    await step();
-                    if (!itemValid()) return null;
-                    const defaults = createDefaultSettings(image, item);
-                    const filmType = frameFilmType ?? state.filmType;
-                    // Frame and film edge in one request on the lane's own
-                    // analyzer, sizes only (#251). The lane's base is shared
-                    // (the foreground may adopt it, #243), so its 8-bit plane
-                    // goes as one copy, never transferred.
-                    const analysed = await runImportDetections(image, {
-                      frame: state.autoFrame.enabled, filmEdge: !defaults.filmEdge?.checked, owned: false,
-                      analyzer: analyzers, silent: true, filmType, frameFilmType: defaults.filmType
-                    });
-                    if (!itemValid()) return null;
-                    let settings = await analyzeStudioImportFrame(image, defaults, { silent: true, filmType, detection: analysed.detection });
-                    const edge = await mergeImportFilmEdge(image, settings, analysed.read, { applyDefaults: state.importFilmTypeAuto });
-                    if (!itemValid()) return null;
-                    if (edge) settings = edge.settings;
-                    settings = await learnedImportSettings(settleImportFilmType(item, settings), item);
-                    if (!itemValid()) return null;
-                    await step();
-                    if (!itemValid()) return null;
-                    const payload = { settings, sample: buildRollSample(image, settings), key };
-                    // While the decode is in hand, the display proxy the
-                    // frame's first open converts (#249): the commit never
-                    // changes its geometry.
-                    await step();
-                    if (!itemValid()) return null;
-                    await fillDisplayProxy(item, image, settings, { isCurrent: itemValid })
-                      .catch(error => console.warn('Display proxy fill failed:', item.file?.name, error));
-                    return payload;
+                  async analyze(image, step, decoded) {
+                    const worker = decoded?.analysis || null;
+                    try {
+                      if (!itemValid()) return null;
+                      const filmType = frameFilmType ?? state.filmType;
+                      if (worker) {
+                        // Measured in the lane's worker (#252): merge its results
+                        // with today's functions, in today's order.
+                        if (!worker.complete) return null;
+                        if (worker.detectionError || worker.edgeError) {
+                          workerFailures.set(item, (workerFailures.get(item) || 0) + 1);
+                          console.warn('Roll frame analysis failed in its worker; measuring it again:', item.file?.name, worker.detectionError || worker.edgeError);
+                          return null;
+                        }
+                        if (rollFrameOptionsKey(rollFrameOptions(item)) !== decoded.optionsKey || !worker.filmStats) return null;
+                        const frame = image || { width: decoded.held.width, height: decoded.held.height, data: null };
+                        if (!image) primeFilmStats(frame, worker.filmStats);
+                        const defaults = createDefaultSettings(frame, item);
+                        if (defaults.filmType !== worker.frameFilmType) return null;
+                        if (!itemValid()) return null;
+                        let settings = await analyzeStudioImportFrame(frame, defaults, { silent: true, filmType, detection: { result: worker.detection } });
+                        const edge = await mergeImportFilmEdge(frame, settings, { result: worker.edge }, { applyDefaults: state.importFilmTypeAuto });
+                        if (!itemValid()) return null;
+                        if (edge) settings = edge.settings;
+                        settings = await learnedImportSettings(settleImportFilmType(item, settings), item);
+                        if (!itemValid()) return null;
+                        let sample = null;
+                        if (image) {
+                          // The planes came back (a prefetch, or room in the photo sessions).
+                          await step();
+                          if (!itemValid()) return null;
+                          sample = buildRollSample(image, settings);
+                        } else {
+                          const built = await decoded.held.sample(rollSampleSettings(settings), { tileMax: STUDIO_TILE_PREVIEW_MAX });
+                          sample = built.sample || buildRollSample(built.base, settings);
+                        }
+                        if (!itemValid()) return null;
+                        // While the planes are on the page, the display proxy
+                        // the frame's first open converts (#249).
+                        if (image && !(await fillRollFrameProxy(item, image, settings, step, itemValid))) return null;
+                        return { settings, sample, key };
+                      }
+                      await step();
+                      if (!itemValid()) return null;
+                      const defaults = createDefaultSettings(image, item);
+                      // Frame and film edge in one request on the roll's own
+                      // analyzer, sizes only (#251). The lane's base is shared
+                      // (the foreground may adopt it, #243), so its 8-bit plane
+                      // goes as one copy, never transferred.
+                      const analysed = await runImportDetections(image, {
+                        frame: state.autoFrame.enabled, filmEdge: !defaults.filmEdge?.checked, owned: false,
+                        analyzer: analyzers, silent: true, filmType, frameFilmType: defaults.filmType
+                      });
+                      if (!itemValid()) return null;
+                      let settings = await analyzeStudioImportFrame(image, defaults, { silent: true, filmType, detection: analysed.detection });
+                      const edge = await mergeImportFilmEdge(image, settings, analysed.read, { applyDefaults: state.importFilmTypeAuto });
+                      if (!itemValid()) return null;
+                      if (edge) settings = edge.settings;
+                      settings = await learnedImportSettings(settleImportFilmType(item, settings), item);
+                      if (!itemValid()) return null;
+                      await step();
+                      if (!itemValid()) return null;
+                      const payload = { settings, sample: buildRollSample(image, settings), key };
+                      // While the decode is in hand, the display proxy the
+                      // frame's first open converts (#249).
+                      if (!(await fillRollFrameProxy(item, image, settings, step, itemValid))) return null;
+                      return payload;
+                    } finally {
+                      // A frame left in its worker (stale, failed or superseded) is dropped there.
+                      decoded?.held?.release();
+                      if (decoded?.base || decoded?.held) void replan().catch(error => console.warn('Roll analysis re-plan failed:', error));
+                    }
                   }
                 };
               },
@@ -26030,6 +26272,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
                 if (!payload || !valid() || !eligible(item) || item.settings || item === state.fileQueue[state.currentFileIndex]
                   || payload.key !== automaticRollItemKey(item)) return;
                 item.settings = payload.settings; item.automaticSettings = true;
+                workerFailures.delete(item);
                 await samples.put(item, payload.sample);
                 // Each frame's recipe reaches the recovery copy within 2.5 s,
                 // so a kill loses at most the frames still in flight (#241).
@@ -26050,7 +26293,6 @@ import { canPublishThumbnail } from './thumbnailRank.js';
               }
             });
           } finally {
-            analyzers.dispose();
             trace.end();
           }
           if (!valid()) return;

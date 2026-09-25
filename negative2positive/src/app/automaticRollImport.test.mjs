@@ -18,6 +18,9 @@ import { createRollSampleCache } from './rollSampleCache.js';
 import { reducedTileGeometry, tileGeometryKey } from './reducedGeometry.js';
 import { sanitizeCropRect } from './imageGeometry.js';
 import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
+import { createDecodeSlots } from './batchExportScheduler.js';
+import { primeFilmStats } from './filmStatsCache.js';
+import { rollSampleSettings } from './rollSample.js';
 
 // Test the actual orchestration functions, not a second scheduler. Deferred
 // decoders/analysis replies make navigation and recipe races deterministic.
@@ -75,6 +78,7 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
   const frameRenders = [], flushed = [];
   const tileSources = new Map(), laneStarts = [], tileRenders = [];
   let frameWorkersDisposed = 0;
+  const analyzerPools = { created: 0, disposed: 0 }, rollPools = [], idleHolds = [];
   let timerId = 0;
   const noop = () => {};
   const context = vm.createContext({
@@ -129,7 +133,19 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
       return { ...image, __baseSize: { width: image.width, height: image.height }, __analysisReference: null };
     },
     planBatchLanes: async () => 1,
-    createAutoFrameWorkerPool: () => ({ analyze: noop, analyzeImport: noop, dispose: noop }),
+    createAutoFrameWorkerPool: () => { analyzerPools.created++; return { analyze: noop, analyzeImport: noop, dispose: () => { analyzerPools.disposed++; } }; },
+    // #252: roll-analysis lanes, the roll's workers and the lane decode.
+    planRollAnalysisLanes: async files => ({ ...(context.rollPlan || {}), decodeSlots: context.rollPlan?.decodeSlots || 1,
+      framesInFlight: context.rollPlan?.framesInFlight || await context.planBatchLanes(files), slotBytes: Infinity }),
+    createDecodeSlots, primeFilmStats, rollSampleSettings, STUDIO_TILE_PREVIEW_MAX: 288,
+    createRollFramePool: config => { const pool = context.rollFramePoolFactory(config); rollPools.push(pool); return pool; },
+    rollFramePoolFactory: () => ({ frame: () => null, warm: noop, resize: noop, dispose() { this.disposed = true; } }),
+    analyzeFrameInWorker: { holdIdle: () => { idleHolds.push(true); return () => idleHolds.push(false); } },
+    rollFrameWorkerUsable: () => false,
+    rollFrameDecodable: file => /\.(dng|nef)$/i.test(file.name),
+    autoFrameAnalyzerOptions: ({ filmType, rotatedOutput }) => ({ settings: { enabled: true, filmType, lastDiagnostics: null }, rotatedOutput }),
+    defaultFilmBaseBuffer: () => 10,
+    rememberImageDimensions: noop,
     createPerfTrace: () => ({ end: noop }), runBatchPipeline,
     loadFileToImageData: async file => { const id = Number(file.name.split('.')[0]); decoded.push(id); return pixels(id); },
     createDefaultSettings: (_image, item) => make(item.id),
@@ -211,7 +227,7 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
     },
   });
   context.sharedDecodes = createSharedDecodes({ decode: (file, { signal }) => context.decodeForBackground(file, signal) });
-  vm.runInContext([...DISPLAY_SESSION_HELPERS, 'getCurrentQueueItem', 'automaticRollItemKey', 'scheduleAutomaticRollImport', ...FILM_TYPE_FUNCTIONS,
+  vm.runInContext([...DISPLAY_SESSION_HELPERS, 'getCurrentQueueItem', 'automaticRollItemKey', 'scheduleAutomaticRollImport', 'createRollAnalysisWorkers', 'decodeRollFrame', ...FILM_TYPE_FUNCTIONS,
     'renderFrameAnalysisThumbnail', 'releaseFrameThumbnailWorkers', 'renderSampleTile', 'publishSampleTile', 'renderRollSampleTiles',
     ...(realRoll ? ['runRollAnalysis'] : []),
     ...SCHEDULER_FUNCTIONS.filter(name => name !== 'backgroundRest'), ...MEMORY_FUNCTIONS]
@@ -246,7 +262,7 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
     for (const key of ['filmType', 'filmTypeSource', 'filmTypeConfidence', 'filmTypeReason']) state[key] = settings[key];
   };
   return { context, state, items, timers, decoded, analyzed, groups, stores, restored, renders, undos, toasts, frameTypes, samplesBuilt, importRequests, fire, navigate, make, prepareForeground, marker,
-    frameRenders, flushed, frameWorkersDisposed: () => frameWorkersDisposed, tileSources, laneStarts, tileRenders };
+    frameRenders, flushed, frameWorkersDisposed: () => frameWorkersDisposed, tileSources, laneStarts, tileRenders, analyzerPools, rollPools, idleHolds };
 }
 
 // Exactly two imported photos must leave the thumbnail queue independent.
@@ -695,6 +711,171 @@ for (const verdicts of [['noMask', 'mono', 'mono', 'mono', 'mono'], ['mono', 'mo
   assert.equal(f.context.automaticRollPendingItems.has(f.items[2]), false, 'released while the import still runs');
   assert.equal(f.context.automaticRollPendingItems.has(f.items[3]), true);
   held.resolve(); await flush();
+}
+
+// #252: RAW frames decode into their lane's roll-frame worker, which keeps
+// the planes, detects the frame and reads the edge; the page merges its
+// results with today's functions and the worker builds the sample.
+function workerRoll(f, { analysisFor = () => ({}), dng = true } = {}) {
+  f.context.rollFrameWorkerUsable = () => true;
+  if (dng) for (const item of f.items) item.file.name = `${item.id}.dng`;
+  const adapters = [];
+  const pool = {
+    disposed: false, warmed: 0,
+    frame({ options, returnPlanes }) {
+      const adapter = { options, returnPlanes, analysis: null, held: null, doneCalls: 0, done() { adapter.doneCalls++; } };
+      adapters.push(adapter);
+      return adapter;
+    },
+    warm() { pool.warmed++; }, resize(n) { pool.size = n; }, dispose() { pool.disposed = true; }
+  };
+  f.context.rollFramePoolFactory = () => pool;
+  const pageReads = [];
+  const heldFrames = [];
+  f.context.loadFileToImageData = async (file, { postDecode = null } = {}) => {
+    const id = Number(file.name.split('.')[0]);
+    f.decoded.push(id);
+    if (!postDecode) { pageReads.push(id); return { width: 10, height: 10, id }; }
+    const extra = analysisFor(id, postDecode.options) || {};
+    postDecode.analysis = {
+      complete: true, frameFilmType: f.make(id).filmType, detection: null, detectionError: null, edge: null, edgeError: null,
+      filmStats: { borderBufferPct: 10, filmType: { filmType: f.make(id).filmType }, filmBase: { r: 1, g: 2, b: 3 } }, ...extra
+    };
+    const held = {
+      id, width: 10, height: 10, samples: [], released: false,
+      async sample(settings, options) {
+        held.samples.push({ settings, options });
+        return { sample: { id, width: 10, height: 10, fromWorker: true, __baseSize: { width: 10, height: 10 }, __analysisReference: null } };
+      },
+      release() { held.released = true; }
+    };
+    heldFrames.push(held);
+    postDecode.held = held;
+    return { held: true, width: 10, height: 10 };
+  };
+  return { pool, adapters, pageReads, heldFrames };
+}
+
+{
+  // The worker path gives every frame the recipe the page path gives it.
+  const page = fixture();
+  page.state.filmType = 'color';
+  for (const item of page.items) item.file.name = `${item.id}.dng`;
+  page.context.scheduleAutomaticRollImport(page.items);
+  await page.fire(1200);
+  const f = fixture();
+  const detections = [];
+  const analyze = f.context.analyzeStudioImportFrame;
+  f.context.analyzeStudioImportFrame = async (image, settings, options) => {
+    detections.push({ size: [image.width, image.height], detection: options.detection, filmType: options.filmType });
+    return analyze(image, settings, options);
+  };
+  f.state.filmType = 'color';
+  const { pool, adapters, pageReads, heldFrames } = workerRoll(f);
+  f.context.scheduleAutomaticRollImport(f.items);
+  await f.fire(1200);
+  assert.equal(JSON.stringify(f.items.map(item => item.settings)), JSON.stringify(page.items.map(item => item.settings)), 'same recipes');
+  assert.deepEqual(f.decoded, [1, 2, 3], 'one decode per background frame');
+  assert.deepEqual(pageReads, [], 'no frame fell back to the page');
+  assert.equal(f.importRequests.length, 0, 'no detection request on the page');
+  assert.deepEqual(f.samplesBuilt, [0], 'only the open photo\'s sample is built on the page');
+  assert.ok(heldFrames.every(held => held.samples.length === 1 && held.samples[0].options.tileMax === 288), 'the worker built each sample');
+  assert.deepEqual(heldFrames[0].samples[0].settings, rollSampleSettings(f.items[1].settings), 'from the recipe\'s geometry');
+  assert.ok(detections.every(entry => entry.size.join() === '10,10' && entry.detection.result === null && entry.filmType === 'color'));
+  assert.ok(adapters.every(adapter => adapter.options.frame.settings.filmType === 'color' && adapter.options.filmEdge === true
+    && adapter.options.filmTypeChoice.automatic === true), 'options snapshotted when each job started');
+  assert.equal(f.rollPools.length, 1, 'one roll-frame pool per roll');
+  assert.equal(pool.warmed, 1, 'its workers are started ahead of the first frame');
+  assert.equal(pool.disposed, true, 'and released when the roll ends');
+  assert.deepEqual(f.idleHolds, [true, false], 'the shared auto-frame worker stays warm while the roll runs');
+}
+
+{
+  // Two frames in flight: the next frame decodes while the first is measured.
+  const f = fixture({ count: 5 });
+  f.context.rollPlan = { framesInFlight: 2, decodeSlots: 1 };
+  const decodes = new Map();
+  f.context.loadFileToImageData = file => {
+    const id = Number(file.name.split('.')[0]);
+    f.decoded.push(id);
+    const gate = deferred();
+    decodes.set(id, gate);
+    return gate.promise.then(() => ({ width: 10, height: 10, id }));
+  };
+  f.context.scheduleAutomaticRollImport(f.items);
+  await f.fire(1200);
+  assert.equal(f.decoded.length, 2, 'two frames in flight');
+  assert.equal(f.context.backgroundLanes.running, 2);
+  for (let round = 0; round < 3 && f.decoded.length < 4; round++) {
+    for (const [id, gate] of [...decodes]) { decodes.delete(id); gate.resolve(); }
+    await flush();
+  }
+  for (const [, gate] of decodes) gate.resolve();
+  await flush();
+  assert.deepEqual([...f.decoded].sort(), [1, 2, 3, 4]);
+  assert.ok(f.items.every(item => item.settings), 'every frame measured');
+  assert.equal(f.groups.length, 1);
+}
+
+{
+  // A retry attempt reuses the roll's workers; the roll releases them once.
+  const f = fixture();
+  workerRoll(f);
+  let commits = 0;
+  const commit = f.context.runRollAnalysis;
+  f.context.runRollAnalysis = async options => (commits++ === 0 ? { status: 'deferred' } : commit(options));
+  f.context.scheduleAutomaticRollImport(f.items);
+  await f.fire(1200);
+  assert.equal(f.timers.size, 1, 'a deferred commit schedules a retry');
+  await f.fire(750);
+  assert.equal(f.groups.length, 1);
+  assert.equal(f.rollPools.length, 1, 'one roll-frame pool across attempts');
+  assert.deepEqual([f.analyzerPools.created, f.analyzerPools.disposed], [1, 1], 'one analyzer pool across attempts');
+  assert.equal(f.rollPools[0].disposed, true);
+  assert.deepEqual(f.idleHolds, [true, false]);
+}
+
+{
+  // A frame whose worker analysis fails is measured again in the worker, and
+  // after a second failure on the page, as before; PNG frames stay on the page.
+  const f = fixture({ count: 5 });
+  let failures = 0;
+  const { pageReads, heldFrames } = workerRoll(f, {
+    analysisFor: id => (id === 2 && failures++ < 2 ? { detectionError: 'OpenCV aborted' } : {})
+  });
+  f.items[4].file.name = '4.png';
+  const warn = console.warn; console.warn = () => {};
+  try {
+    f.context.scheduleAutomaticRollImport(f.items);
+    await f.fire(1200);
+  } finally { console.warn = warn; }
+  assert.equal(failures, 2);
+  assert.deepEqual(f.decoded.filter(id => id === 2).length, 3, 'twice in the worker, then once on the page');
+  assert.deepEqual(pageReads.sort(), [2, 4], 'the failed frame and the PNG are measured on the page');
+  assert.ok(f.items.every(item => item.settings), 'every frame ends with its recipe');
+  assert.ok(heldFrames.filter(held => held.id === 2).every(held => held.released && !held.samples.length), 'failed frames are dropped in the worker');
+  assert.equal(f.importRequests.length, 2, 'the page path detects frames 2 and 4');
+}
+
+{
+  // Options that changed between a frame's decode and its merge (a detector
+  // setting here) make the frame measure again, with the new options.
+  const f = fixture();
+  let changed = false;
+  const { adapters, heldFrames } = workerRoll(f, {
+    analysisFor: () => {
+      if (!changed) { changed = true; f.state.autoFrame = { ...f.state.autoFrame, marginRatio: 0.05 }; }
+      return {};
+    }
+  });
+  f.context.autoFrameAnalyzerOptions = ({ filmType, rotatedOutput }) => ({ settings: { ...f.state.autoFrame, filmType, lastDiagnostics: Math.random() }, rotatedOutput });
+  f.context.scheduleAutomaticRollImport(f.items);
+  await f.fire(1200);
+  assert.equal(heldFrames[0].released, true, 'the stale frame is dropped');
+  assert.equal(heldFrames[0].samples.length, 0);
+  assert.equal(f.decoded.filter(id => id === heldFrames[0].id).length, 2, 'and decoded again');
+  assert.equal(adapters.at(-1).options.frame.settings.marginRatio, 0.05);
+  assert.ok(f.items.every(item => item.settings));
 }
 
 console.log('automaticRollImport tests passed');

@@ -166,4 +166,34 @@ assert.equal(timedWorker.terminated, true);
   assert.equal(spawned.length, 3, 'respawned lazily');
   client.dispose();
 }
+// #252: while a roll analysis holds it, the worker outlives its idle timeout
+// (a cold switch finds OpenCV warm); the last release re-arms the timer. The
+// worker's request for the shared OpenCV module is answered, not taken for a
+// reply.
+{
+  const spawned = [];
+  const posted = [];
+  const client = createAutoFrameWorkerClient({ idleTimeoutMs: 5, workerFactory: () => {
+    const created = { postMessage(message) { posted.push(message); }, terminate() { this.terminated = true; } };
+    spawned.push(created);
+    return created;
+  } });
+  const releaseA = client.holdIdle();
+  const releaseB = client.holdIdle();
+  const answered = client(source, {}, 'read-film-edge');
+  spawned[0].onmessage({ data: { type: 'opencv-module-request' } });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(posted.at(-1), { type: 'opencv-module', opencvModule: null }, 'the module request is answered');
+  spawned[0].onmessage({ data: { id: posted[0].id, result: { found: false } } });
+  assert.deepEqual(await answered, { found: false });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(spawned[0].terminated, undefined, 'held: not released when idle');
+  releaseA();
+  releaseA();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(spawned[0].terminated, undefined, 'another hold remains');
+  releaseB();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(spawned[0].terminated, true, 'the last release re-arms the idle release');
+}
 console.log('autoFrameWorkerClient tests passed');

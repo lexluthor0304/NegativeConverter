@@ -367,5 +367,67 @@ await expectPreviewFallback('garbled output', { result: makeRawResult({ width: 6
   assert.equal(scene.workers.find((w) => w.kind === 'post').received.includes('process'), false);
   assertWorkersReleased('aborted at the stage hook');
 }
+// --- #252: a roll lane's decode slot and its own frame worker --------------------
+{
+  const { runRawPostDecode } = await import('./rawPostDecode.js');
+  const { createDecodeSlots } = await import('./batchExportScheduler.js');
+  const { estimateRawDecodeBytes } = await import('./rawDecodeEstimate.js');
+  const libraw = () => scene.workers.find((w) => w.kind === 'libraw');
+  // The lane's worker keeps the planes: a sizes-only result, no per-decode worker.
+  reset({ result: cloneRawResult(fixture) });
+  const runs = [];
+  const holding = {
+    async run(result, options) { runs.push({ width: result.width, options }); return { garbled: false, held: true, width: result.width, height: result.height }; },
+    terminate() {}
+  };
+  const held = await loadRawFile(makeContainer().buffer, 'frame.nef', { postDecode: holding, filmStats: { borderBufferPct: 10 } });
+  assert.deepEqual(held, { held: true, width: 64, height: 48 });
+  assert.deepEqual(runs[0].options, { suppressSensorDefects: true, filmStats: { borderBufferPct: 10 } });
+  assert.equal(scene.workers.some((w) => w.kind === 'post'), false, 'no per-decode worker for a lane decode');
+  assertWorkersReleased('held');
+
+  // Planes the lane's worker hands back are wrapped exactly as the loader's own.
+  reset({ result: cloneRawResult(fixture) });
+  const local = { run: async (result, options) => runRawPostDecode(result, options), terminate() {} };
+  assertPlanes(await loadRawFile(makeContainer().buffer, 'frame.nef', { postDecode: local }), expected, 'lane worker planes');
+
+  // The demosaic waits for a slot reserving the real decode bytes, and gives
+  // it back before the post-decode steps.
+  reset({ result: cloneRawResult(fixture) });
+  const slots = createDecodeSlots({ slots: 1, budgetBytes: Infinity });
+  const other = await slots.acquire({ bytes: 1 });
+  const order = [];
+  const tracked = {
+    acquire(request) { order.push(['acquire', request.bytes]); return slots.acquire(request).then(release => () => { order.push(['release']); release(); }); }
+  };
+  const watching = { run: async (result, options) => { order.push(['post', slots.held]); return runRawPostDecode(result, options); }, terminate() {} };
+  const decoding = loadRawFile(makeContainer().buffer, 'frame.nef', { postDecode: watching, decodeSlot: tracked });
+  for (let i = 0; i < 50; i++) await Promise.resolve();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(order, [['acquire', estimateRawDecodeBytes(64, 48)]], 'reserved with the size LibRaw reported');
+  assert.deepEqual(libraw().received, ['open', 'metadata'], 'no demosaic while another frame holds the slot');
+  other();
+  assertPlanes(await decoding, expected, 'slotted decode');
+  assert.deepEqual(order.map(entry => entry[0]), ['acquire', 'release', 'post']);
+  assert.equal(order[2][1], 0, 'the slot is free while the post-decode steps run');
+  assert.deepEqual(libraw().received, ['open', 'metadata', 'imageData']);
+
+  // An abort while waiting for the slot: no demosaic, workers released, the
+  // waiter leaves the queue.
+  reset({ result: cloneRawResult(fixture) });
+  const busy = await slots.acquire({ bytes: 1 });
+  const controller = new AbortController();
+  const waiting = loadRawFile(makeContainer().buffer, 'frame.nef', { decodeSlot: slots, signal: controller.signal });
+  for (let i = 0; i < 50; i++) await Promise.resolve();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(slots.waiting, 1);
+  controller.abort(new DOMException('superseded', 'AbortError'));
+  await assert.rejects(waiting, (err) => err.name === 'AbortError');
+  assert.equal(slots.waiting, 0);
+  assert.equal(libraw().received.includes('imageData'), false);
+  assertWorkersReleased('aborted at the slot');
+  busy();
+  assert.equal(slots.held, 0);
+}
 
 console.log('rawFileLoader.postDecode.test.mjs passed');
