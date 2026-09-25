@@ -53,6 +53,7 @@ import { runSilverCoreCacheSmoke } from './silvercore-cache-smoke.mjs';
 import { runGeometrySmoke } from './geometry-smoke.mjs';
 import { runPng16BandSmoke } from './png16-band-smoke.mjs';
 import { runRawPostDecodeSmoke, runRawParitySmoke } from './raw-post-decode-smoke.mjs';
+import { runRollFrameSmoke } from './roll-frame-smoke.mjs';
 import { runExportOwnershipSmoke } from './export-ownership-smoke.mjs';
 import { runBatchPipelineSmoke } from './batch-pipeline-smoke.mjs';
 import { runFirstPhotoSmoke } from './first-photo-smoke.mjs';
@@ -332,6 +333,13 @@ await evaluate(`document.getElementById('studioImportAutoCrop').click()`);
 if (process.argv.includes('--performance-only')) {
   await runPerformanceUiSmoke({ evaluate, fail });
   await runRawPostDecodeSmoke({ evaluate, fail });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
+
+// #252: OpenCV's shared module, the roll-frame worker and the parallel detector.
+if (process.argv.includes('--roll-frame-only')) {
+  await runRollFrameSmoke({ evaluate, fail });
   if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
   console.log('SMOKE PASS'); process.exit(0);
 }
@@ -1055,6 +1063,7 @@ console.log('ok: failed decode preserves the previous image and active file');
 
 await runPerformanceUiSmoke({ evaluate, fail });
 await runRawPostDecodeSmoke({ evaluate, fail });
+await runRollFrameSmoke({ evaluate, fail });
 if (!process.argv.some(arg => arg.endsWith('-only'))) {
   await runSilverCoreCacheSmoke({ evaluate, fail });
   await runComparePreviewSmoke({ send, evaluate, waitFor, wait, fail, port: PORT });

@@ -423,7 +423,13 @@ hides come last. No job starts on a file another lane is working on.
   two-stage file skips its stand-in); the lane's analysis of the now-current frame
   stops and the foreground analyses it, as before. Leases are reference
   counted: a superseded adopter detaches without cancelling the lane's decode,
-  and the entry lives until the owning job releases the base.
+  and the entry lives until the owning job releases the base. A roll-analysis
+  lane decodes a RAW into its roll-frame worker (#252), which keeps the planes
+  (`{ base: null, held }`): adopting such a frame asks the worker for its
+  planes (between its steps while it still measures, or at once when it holds
+  the finished frame), and a worker that lost them is answered with a fresh
+  decode of the file; a held frame nobody adopts is dropped in the worker
+  with the entry.
 - **In-flight decodes.** With the desktop session budget, a cold activation
   lets a lane's decode finish (it would have to be redone); on low-memory
   devices the activation aborts the lanes' decodes, except the target's own.

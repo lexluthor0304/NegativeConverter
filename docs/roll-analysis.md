@@ -13,7 +13,10 @@ carries a per-frame exposure offset, and flags frames that do not belong.
 
 1. **Pass 1, measure.** Each selected file is decoded once. Its rebate is read
    if that has not happened yet (`runImportDetections`: a fresh decode goes
-   to the auto-frame worker without a copy, #251), a 900 px sample with
+   to the auto-frame worker without a copy, #251; the automatic roll import's
+   pass 1 decodes RAWs into a roll-frame worker per frame in flight that
+   measures and samples them on its own planes, #252, see
+   `docs/batch-export-pipeline.md`), a 900 px sample with
    the file's rotation, mirror and crop applied is kept, and the frame's film
    base and mean negative luminance are recorded.
 2. **Roll base and outliers.** `aggregateRollAnalysis` (`src/app/rollAnalysis.js`)

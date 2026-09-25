@@ -325,20 +325,73 @@ stage busy share, the `convert` mark per 60 MP frame with bands, Step-3
 band time, per-lane peak and WebContent `phys_footprint`, and the per-frame
 copy time and lane retention before and after.
 
-The automatic roll analysis after a multi-file import uses the same lane
-planning, with one auto-frame worker per lane (`createAutoFrameWorkerPool`),
-and runs frame detection silently: it used to show the blocking "Detecting the
-image area and tilt…" overlay for every file in the background pass, covering
-the editor for minutes on a long roll. Its pass 1 no longer runs through
-`runBatchPipeline` (#243): the background photo lanes pull one frame at a time
-in display order around the open photo, wait for the foreground before each
-decode, and share each decode with the foreground and the tile and prefetch
-needs of that frame (`docs/photo-sessions.md`). Each lane sends frame
-detection and film edge to its worker in one request, sizes only (#251); the
-decode is shared, so its 8-bit plane goes as one copy rather than being
-transferred. The per-frame measurements and the group commit, built from
-`pending` in import order, are unchanged, and `runBatchPipeline`'s export sink
-order and cancellation are untouched.
+The automatic roll analysis after a multi-file import runs frame detection
+silently: it used to show the blocking "Detecting the image area and tilt…"
+overlay for every file in the background pass, covering the editor for
+minutes on a long roll. Its pass 1 no longer runs through `runBatchPipeline`
+(#243): the background photo lanes pull one frame at a time in display order
+around the open photo, wait for the foreground before each decode, and share
+each decode with the foreground and the tile and prefetch needs of that frame
+(`docs/photo-sessions.md`). A frame measured on the page sends frame
+detection and film edge to its lane's auto-frame worker in one request, sizes
+only (#251); the decode is shared, so its 8-bit plane goes as one copy rather
+than being transferred. The per-frame measurements and the group commit,
+built from `pending` in import order, are unchanged, and
+`runBatchPipeline`'s export sink order and cancellation are untouched.
+
+Roll analysis has its own lane plan and its own per-frame worker (#252):
+
+- **Plan.** `planRollAnalysis` (`batchExportScheduler.js`) plans
+  `framesInFlight` lanes sharing `decodeSlots` decoders from the analysis
+  footprint, not the export lane's 50 B/px: a decode slot holds the RAW
+  decode estimate (1.84 GB at 60.4 MP), a frame in analysis 14 B/px plus one
+  OpenCV realm (about 1.0 GB). The planned bytes stay within a quarter of the
+  machine's RAM and the slots leave two cores free; 16 GB at 60 MP gives 1
+  decoder and 2 frames in flight, 32 GB gives 2 and 4. The RAM comes from the
+  desktop `get_memory_info` command (every WebView) or
+  `navigator.deviceMemory` (`nc_memory_ram_gib_v1` overrides it); without a
+  known RAM above 8 GiB the plan is exactly the export planner's lanes, and
+  it is never below them. `nc_batch_lanes_v1` stays the ceiling. A RAW whose
+  header yields no size takes the decoded size of a same-extension file of
+  the import (the foreground photo records its size too), and pass 1 plans
+  again after its first frame.
+- **Decode slots.** `createDecodeSlots` is the semaphore the lanes share. A
+  lane opens the file and LibRaw's metadata while another demosaics, then
+  reserves its frame's real decode bytes (`loadRawFile`'s `decodeSlot`) and
+  gives the slot back as soon as `imageData()` returns; a frame larger than
+  planned waits there instead of overcommitting. With one slot no two
+  background demosaics overlap, and frame N is measured while frame N+1
+  decodes. (Export decode-ahead, #256, admits its prepared decodes
+  separately: `planDecodeAhead` and the prepare stage's one decoder.)
+- **Roll-frame worker.** One `workers/rollFrameWorker.js` per frame in
+  flight, created once per roll and held across retry attempts
+  (`createRollAnalysisWorkers`, disposed when the roll ends). LibRaw's result
+  is transferred there (`loadRawFile`'s `postDecode`), and the #232
+  post-decode steps, the frame detection on both planes (sizes only, the
+  full-resolution fallback in place) and the film-edge read run on the
+  worker's planes. The page merges the plain results with today's functions
+  in today's order (`createDefaultSettings` on a pixel-less frame primed with
+  the worker's statistics, `analyzeStudioImportFrame`,
+  `mergeImportFilmEdge`, learned settings); then the worker builds the roll
+  sample (`rollSample.js`, the page's own builder) and drops the frame. No
+  plane of the frame travels back to the page and no main-thread loop runs
+  over it.
+- **Fallbacks per frame.** Scans and TIFFs, the pre-LibRaw branches (the
+  heavy IIQ preview, UTIF DNGs), garbled output, a lost worker and a worker
+  that does not answer keep today's path (garbled and lost go through the
+  lazy embedded preview). A frame whose worker detection or film-edge read
+  fails is measured once more in the worker, then on the page, as before. The
+  detector options, the film-type choice and the border buffer are
+  snapshotted when a frame's job starts; a frame whose options changed before
+  its merge is measured again.
+- **Sharing.** A foreground that opens a frame a lane holds adopts it: the
+  planes come back from the worker between its steps (`sharedDecodes`' held
+  values), or the file is decoded again if the worker lost them. A prefetch,
+  or a base the photo sessions have room for, takes the planes back with the
+  analysis, as lane bases were handed over before. While a roll's workers
+  live, the shared auto-frame worker keeps OpenCV loaded through idle
+  periods (`holdIdle`), so a cold switch to a frame the roll has not reached
+  starts no new realm.
 
 The exact 900px geometry-applied roll samples now live in
 `analysisSampleStore.js`, with a 128 MiB retained-RAM budget. Samples that do
@@ -388,16 +441,22 @@ In that historical run the dominant work was RAW decode (LibRaw, ~2.7 s per 18.5
 single-threaded WASM, one worker per lane), and in the auto-frame fallback
 the per-angle candidate passes (`detectAxisAlignedCropRegion`, ~0.5 s each,
 3–4 angles) plus the window search itself (~2.3 s for 8 restricted Hough
-calls). Both could run across helper workers for the first photo; the
-background lanes already saturate the cores. See `docs/auto-frame-regression.md`
-before touching the detector. The 2026-09-22 audit additionally tracks exact
+calls). The belief then that the background lanes saturate the cores did not
+hold at 60 MP: the 2026-09-23 audit measured 1.04 of 8 cores busy during a
+60 MP roll analysis (one lane, every stage in sequence), which the plan,
+the decode slots and the roll-frame workers above address (#252). The
+foreground detector now spreads its channel units and angle passes over the
+shared worker and two helpers (#252 part 4); roll lanes do not use helpers.
+See `docs/auto-frame-regression.md` before touching the detector. The 2026-09-22 audit additionally tracks exact
 per-detection preprocessing reuse in GitHub issue #216; its validation status
 is recorded in the current audit report.
 
 ## Verification
 
 ```bash
-npm test            # includes batchExportScheduler, conversion pool, export pool, geometry chain
+npm test            # includes batchExportScheduler, conversion pool, export pool, geometry chain,
+                    # planRollAnalysis, rollFrameTask (worker steps vs the lane sequence)
+npm run test:smoke -- --roll-frame-only  # OpenCV shared module, roll-frame worker and parallel detector in Chrome
 npm run test:smoke  # batch export scenario (ZIP fallback to individual downloads), roll import
 npm run test:smoke -- --gain-map-only  # real-worker 16-bit result and gain map, gain-map requests per export intent
 npm run test:smoke -- --png16-only     # PNG16 band pool in real workers: same bytes for 1/2/6 workers, one worker and the main thread

@@ -43,6 +43,16 @@ Node（M1 Pro、1 プロセス、5 回の中央値）、sips の 1600 px プレ�
 
 検出結果（角度・裁切・信頼度・方式・要確認・診断）はすべて HEAD と同一。rotateFull は 60 MP では 1.5–2.4 s → 約 0 ms。M11 の 60 MP フレームでの計測は未実施（この環境では 60 MP のデコードを行えない）。手順: `DEBUG_UI` で M11 DNG を 5 枚以上取り込み、`autoFrameStages` の中央値を記録し、`AUTOFRAME_RAW_DIR` のスモークと合わせてこの表に追記する。
 
+## 3 ワーカーでの前景検出と OpenCV の共有（#252）
+
+- 検出器は平の段階関数に分割した: `beginFrameDetection`（プレビュー）、`contourWindowCandidates`（輪郭 3 種）、`lineChannelUnit`（1 平面の Blur・Canny・限定 Hough 2 回・線分走査）、`lineQuadsFromUnits` / `windowFromCandidates`（窓探索の後段）、`settleFromWindow`、`fallbackPreviewStage`（プレビュー候補と線の角度）、`anglePassStage`（角度ごとの裁切）、`finishFromFallback`（角度順の統合と全解像度の仕上げ）。直列の `detectFrameAndRotation` はこれを従来の順に並べたもので、統合 HEAD の検出器と合成画像 264 件で deep-equal を確認済み（一回限りの比較、ノート参照）。同じバイト列の平面を飛ばす判定（`duplicateLinePlanes`）は「以前のいずれかの平面と一致」で、同値関係なので従来の「探索済み平面と一致」と同じ結果になる。
+- 共有の自動取景ワーカー（A）は、ページが渡す MessagePort で 2 つのヘルパー（B、C）とつながる（入れ子ワーカーは使わない）。A がプレビューを 1 回作ってバイト列を送り（別のコンテキストでのキャンバス縮小は一致しない可能性がある）、C は回退経路を投機的に始め（プレビュー段、偶数番目の角度）、B は G・B 平面の線分ユニット、A は輪郭と灰・R 平面を担当する。統合は直列と同一: ユニットはチャンネル順に連結してから安定ソートの `select()`、線分経路は輪郭窓がないときだけ、角度は角度順で 0.001 の同点処理。窓で確定したらヘルパーを取り消して結果を捨てる。ヘルパーが返さない段（失敗・無応答 20 秒・終了）は A が同じ関数で計算するので、結果はヘルパーに依存しない。
+- `stageMs.helpers` が true のとき、`stageMs.units`（チャンネルごとの実行場所 `a`/`b` と ms）、`stageMs.passes`（角度番号・場所・ms）、`stageMs.fallbackMs` を記録する。前景検出の段階別時間はこれで見る。
+- ヘルパーは初回取り込み、自動取景結果のないコマのコールド切り替え、「自動取景」ボタンで起動し、A の最後の要求から 30 秒、A の終了、メモリ圧迫（`shedHiddenJobMemory`）、いずれかの失敗で解放する（A は直列に戻る）。ロール解析のレーンは使わない。キルスイッチ: `localStorage.nc_autoframe_helpers_v1 = 'off'`。4 コア未満では使わない。
+- 検証: `workers/autoFrameParallel.test.mjs`（実 OpenCV、実 MessageChannel。輪郭窓・線分窓・不完全・曖昧・窓なし・複数角度の回退・全解像度の仕上げ、ヘルパーの起動失敗・段の失敗・無応答）と、スモークの `--roll-frame-only`（Chrome で共有ワーカー + ヘルパー対ヘルパーなし）。
+- OpenCV はビルド時にパッケージを分割する（`scripts/opencv-assets.mjs`）: 埋め込みの 12 MB wasm を `opencv-<hash>.wasm` に、約 128 KB のグルーを `opencv-glue-<hash>.js` に。ページが 1 回だけコンパイルした `WebAssembly.Module` を各 OpenCV ワーカー（自動取景、ヘルパー、ロールフレーム、除塵、多重露光）が要求してインスタンス化する。モジュールを受け取れないワーカーは自分でコンパイルする。バイト列はパッケージと同一（`opencvAssets.test.mjs` が SHA-256 と計算結果を照合）なので、Hough・輪郭・OCR・除塵マスク・TELEA の結果は変わらない。
+- ロール解析の各フレームは専用のロールフレームワーカー（`workers/rollFrameWorker.js`）で検出する。両プレーンを持つので、全解像度の再検出はそのワーカーの画素でその場で行い、`needsFullResolution` の再試行は起きない。ロールのレーンの検出はヘルパーを使わない直列のまま。
+
 ## 通常の回帰
 
 ```sh
