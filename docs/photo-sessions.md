@@ -23,7 +23,10 @@ Oversized sessions retain only their
 decoded base if it fits. A separate 48 MiB cache holds small adjusted previews
 for revisits after full-session eviction. These are retained-buffer limits,
 not a total renderer-memory promise; the active editor, workers, native GPU
-resources and file storage are additional.
+resources and file storage are additional. While a job runs in a hidden
+macOS window, or once an idle window has been hidden for five minutes, both
+caches are emptied to stay under WebKit's inactive memory limit; they refill
+on use (`docs/hidden-window-jobs.md`).
 
 Keys include the per-file recipe, film-type override, repair configuration,
 AI model revision and flat-field identity. `settingsKey.js` builds them

@@ -22,6 +22,13 @@ WASM binary on WebKit, for both MI-GAN and semantic analysis. Other browsers
 retain the WebGPU runtime and CPU fallback. Each realm loads only one runtime,
 so provider registrations cannot overwrite each other. No model is sent off-device.
 
+A WebContent kill is now recorded by the native
+`on_web_content_process_terminate` hook before it reloads the page, unfinished
+export streams and their `.part` files are dropped when a page starts loading,
+and an interrupted batch export or roll analysis is named at boot and resumed
+from its job marker (`docs/hidden-window-jobs.md`). The window also runs with
+background throttling disabled, so a hidden export is no longer suspended.
+
 Large images also defer automatic full-resolution conversion until export or
 repair needs it. The RAW decoder and large conversion-worker caches are released
 as soon as their owned results are available. Preview and export keep their

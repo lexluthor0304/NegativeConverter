@@ -28,7 +28,10 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
   the same lane budget: a lane is released only after its own sink finishes.
   A slow first file therefore cannot cause the rest of a roll's encoded
   outputs to accumulate. An `AbortSignal` stops further files; in-flight ones
-  finish and are written.
+  finish and are written. An optional `beforeStart` hook (the hidden-window
+  gate, `docs/hidden-window-jobs.md`) is awaited before a lane claims its next
+  index and released after that index's sink, so a lane held back while the
+  window is hidden never blocks the in-order sink.
 - Each batch owns a pool of conversion workers
   (`createConversionWorkerPool`, kept alive across frames instead of
   restarting per file) and, with more than one lane, a pool of export workers
@@ -69,6 +72,11 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
   worker without a copy (the map is its last reader); if the worker dies
   holding it (`ExportInputLostError`), the frame is rendered once more with
   a copied plane, so the file never depends on the failure.
+- Batch frames run frame detection silently (`processFileWithSettings`
+  `silent: true`): a never-analysed frame gets no blocking overlay and no
+  frame wait, so a hidden window keeps exporting. Each job writes a marker so
+  a killed export can be named at boot and resumed under the same names; see
+  `docs/hidden-window-jobs.md`.
 
 The automatic roll analysis after a multi-file import uses the same scheduler
 and lane planning, with one auto-frame worker per lane
