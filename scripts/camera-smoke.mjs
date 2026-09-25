@@ -372,7 +372,8 @@ async function runMultiShotScenario({ send, evaluate, waitFor, wait, fail, insta
 // list and opens when the loupe closes.
 async function runLoupeScenario({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port }) {
   const previousDocument = await evaluate('performance.timeOrigin');
-  await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
+  // debugCounters: the loupe's grab/conversion/recipe counts (#261).
+  await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en&debugCounters=1` });
   // The previous multi-shot page exposes the same controls. Do not install the
   // permission probe in that document while navigation is still committing.
   await waitFor('loupe workspace boot', `performance.timeOrigin !== ${previousDocument} && document.readyState === 'complete' && !!document.getElementById('studioImportAutoCrop') && (!!document.getElementById('studioLoupe') && !!document.getElementById('loupeOverlay'))`);
@@ -414,8 +415,61 @@ async function runLoupeScenario({ send, evaluate, waitFor, wait, fail, installDi
   if (cameraError) fail('fake camera acquisition failed: ' + cameraError);
   await evaluate(`document.getElementById('loupeCloseBtn').click(); window.__finishLoupePermission(); window.__restoreLoupeCamera();`);
   await waitFor('late camera stream released after close', `window.__delayedLoupeStream.getTracks().every(track => track.readyState === 'ended') && document.getElementById('loupeVideo').srcObject === null`, 10_000);
+  // The loupe's own conversion workers (created from its conversion path);
+  // each must be gone once the loupe closes.
+  await evaluate(`(() => {
+    const NativeWorker = window.Worker;
+    const probe = window.__loupeWorkers = { workers: [] };
+    window.Worker = class extends NativeWorker {
+      constructor(url, options) {
+        super(url, options);
+        if (/conversionWorker/.test(String(url)) && /convertLoupeFrame/.test(new Error().stack || '')) probe.workers.push(this);
+      }
+      terminate() { this.__terminated = true; return super.terminate(); }
+    };
+    probe.alive = () => probe.workers.filter(worker => !worker.__terminated).length;
+    probe.restore = () => { window.Worker = NativeWorker; };
+  })()`);
   await evaluate(`document.getElementById('studioLoupe').click()`);
   await waitFor('loupe converting frames', `Number(document.getElementById('loupeOverlay').dataset.frames) >= 5`, 30_000);
+  // Paced by the camera, converted in the loupe's worker: no more conversions
+  // than presented camera frames, none of them twice, and the automatic
+  // recipe re-detected at most once a second.
+  const pacing = await evaluate(`new Promise(resolve => {
+    const video = document.getElementById('loupeVideo');
+    const start = window.__ncDebug.counters().loupe, startTime = performance.now();
+    let presented = 0;
+    const count = () => { presented++; if (performance.now() - startTime < 2000) video.requestVideoFrameCallback(count); };
+    if (typeof video.requestVideoFrameCallback === 'function') video.requestVideoFrameCallback(count);
+    setTimeout(() => {
+      const end = window.__ncDebug.counters().loupe;
+      resolve({ pacing: end.pacing, presented, conversions: end.conversions - start.conversions,
+        worker: end.workerConversions - start.workerConversions, main: end.mainConversions - start.mainConversions,
+        defaults: end.defaultSettings - start.defaultSettings, repeated: end.repeatedFrames, workers: window.__loupeWorkers.workers.length });
+    }, 2000);
+  })`);
+  console.log('camera loupe pacing:', JSON.stringify(pacing));
+  if (!(pacing.conversions >= 2 && pacing.worker === pacing.conversions && pacing.main === 0 && pacing.workers === 1))
+    fail('the loupe should convert in its own worker: ' + JSON.stringify(pacing));
+  if (!(pacing.repeated === 0 && pacing.defaults <= 3 && (pacing.pacing !== 'video-frame' || pacing.conversions <= pacing.presented + 1)))
+    fail('the loupe converted more often than the camera presented frames, or rebuilt its automatic recipe per frame: ' + JSON.stringify(pacing));
+  // Show raw: no grab, no conversion, the frame counter stops; back to the
+  // converted view resumes at once.
+  const raw = await evaluate(`(async () => {
+    const overlay = document.getElementById('loupeOverlay'), toggle = document.getElementById('loupeRaw');
+    toggle.checked = true; toggle.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(resolve => setTimeout(resolve, 300));
+    const before = { frames: overlay.dataset.frames, ...window.__ncDebug.counters().loupe };
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    const after = { frames: overlay.dataset.frames, ...window.__ncDebug.counters().loupe };
+    toggle.checked = false; toggle.dispatchEvent(new Event('change', { bubbles: true }));
+    const resumedAt = performance.now();
+    while (overlay.dataset.frames === after.frames && performance.now() - resumedAt < 2000) await new Promise(resolve => setTimeout(resolve, 10));
+    return { stopped: before.frames === after.frames && before.grabs === after.grabs && before.conversions === after.conversions,
+      resumedMs: Math.round(performance.now() - resumedAt), resumed: overlay.dataset.frames !== after.frames, view: overlay.dataset.view };
+  })()`);
+  console.log('camera loupe raw view:', JSON.stringify(raw));
+  if (!raw.stopped || !raw.resumed || raw.view !== 'converted') fail('Show raw must stop grabbing and converting, and the converted view must resume: ' + JSON.stringify(raw));
   const status = await evaluate(`document.getElementById('loupeStatus').textContent`);
   console.log('camera loupe:', status);
   if (!/Live · \d+×\d+ · recipe: automatic/.test(status)) fail('loupe status wrong: ' + status);
@@ -444,8 +498,44 @@ async function runLoupeScenario({ send, evaluate, waitFor, wait, fail, installDi
   if (!(compare.width > 0 && compare.correlation < -0.1)) fail('the loupe should show an inverted conversion of the camera frame: ' + JSON.stringify(compare));
   await evaluate(`document.getElementById('loupeCaptureBtn').click()`);
   await waitFor('loupe capture queued', `(window.__cameraToasts || []).some((t) => /^Captured loupe-/.test(t)) && document.querySelectorAll('.file-list-checkbox').length === 1`, 30_000);
-  await evaluate(`document.getElementById('loupeCloseBtn').click()`);
+  const stream = await evaluate(`(() => {
+    window.__loupeStream = document.getElementById('loupeVideo').srcObject;
+    document.getElementById('loupeCloseBtn').click();
+    return { alive: window.__loupeWorkers.alive(), tracks: window.__loupeStream.getTracks().map(track => track.readyState) };
+  })()`);
+  if (stream.alive !== 0 || !stream.tracks.every(state => state === 'ended')) fail('the closed loupe left a worker or a camera track running: ' + JSON.stringify(stream));
   const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`;
   await waitFor('capture opened', `document.getElementById('loupeOverlay').hidden && document.getElementById('loupeVideo').srcObject === null && ${ready} && /^loupe-/.test(document.getElementById('studioFilename').textContent)`, 150_000);
   console.log('ok: the live loupe converts the camera feed through the automatic recipe, keeps converting, captures a frame into the photo list and opens it on close');
+
+  // Over a converted photo the loupe follows the photo's edits: the C console
+  // key and Cmd/Ctrl+Z each rebuild its recipe within two camera frames.
+  await evaluate(`(() => { window.__loupeWorkers.workers = []; document.getElementById('studioLoupe').click(); })()`);
+  await waitFor('loupe over the converted photo', `Number(document.getElementById('loupeOverlay').dataset.frames) >= 3 && /recipe: loupe-/.test(document.getElementById('loupeStatus').textContent)`, 30_000);
+  const edits = [];
+  for (const [label, init] of [['C', { key: 'c' }], ['undo', { key: 'z', ctrlKey: true }]]) {
+    edits.push(await evaluate(`new Promise(resolve => {
+      const overlay = document.getElementById('loupeOverlay');
+      const frames = Number(overlay.dataset.frames), recipes = Number(overlay.dataset.recipes);
+      const watch = new MutationObserver(() => {
+        if (Number(overlay.dataset.recipes) === recipes) return;
+        watch.disconnect(); clearTimeout(timer);
+        resolve({ label: '${label}', framesUntilRebuild: Number(overlay.dataset.frames) - frames });
+      });
+      const timer = setTimeout(() => { watch.disconnect(); resolve({ label: '${label}', framesUntilRebuild: null }); }, 3000);
+      watch.observe(overlay, { attributes: true, attributeFilter: ['data-recipes'] });
+      document.getElementById('loupeCloseBtn').dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, ...${JSON.stringify(init)} }));
+    })`));
+  }
+  console.log('camera loupe edits:', JSON.stringify(edits));
+  if (!edits.every(edit => edit.framesUntilRebuild !== null && edit.framesUntilRebuild <= 2)) fail('the loupe did not follow the photo\'s edits within two frames: ' + JSON.stringify(edits));
+  const closed = await evaluate(`(() => {
+    const tracks = document.getElementById('loupeVideo').srcObject.getTracks();
+    document.getElementById('loupeCloseBtn').click();
+    const result = { alive: window.__loupeWorkers.alive(), workers: window.__loupeWorkers.workers.length, tracks: tracks.map(track => track.readyState) };
+    window.__loupeWorkers.restore();
+    return result;
+  })()`);
+  if (closed.alive !== 0 || closed.workers !== 1 || !closed.tracks.every(state => state === 'ended')) fail('the loupe over a photo left a worker or track running: ' + JSON.stringify(closed));
+  console.log('ok: the loupe converts off the main thread, paced by the camera, idles in the raw view, follows edits and releases its worker and tracks on close');
 }

@@ -69,7 +69,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     import { layoutContactSheet, pagesFor, renderContactSheetPage, contactSheetHeader, normalizeLayoutId, normalizePageId } from './contactSheet.js';
 
     import { convertFrameWithRouter, resolveConversionMode } from '../pipeline/conversionRouter.js';
-    import { convertFrameInWorker, convertPreviewFrameInWorker, createConversionWorkerPool, CONVERSION_FAILED, WORKER_TIMEOUT, isConversionInputLost } from './conversionWorkerClient.js';
+    import { convertAdjustedFrame } from '../pipeline/adjustedFrame.js';
+    import { convertFrameInWorker, convertPreviewFrameInWorker, createConversionWorkerClient, createConversionWorkerPool, CONVERSION_FAILED, WORKER_CRASHED, WORKER_TIMEOUT, WORKER_UNAVAILABLE, isConversionInputLost } from './conversionWorkerClient.js';
     import { planBatchParallelism, planPng16BandWorkers, runBatchPipeline, planGeometryBandsInFlight } from './batchExportScheduler.js';
     import { displayPreviewSize, resizeDisplayPreview, updateDisplayPreviewRect } from './displayPreview.js';
     import { createCoreReprocessGates, previewDispatchAction, CORE_FULL_REPROCESS_DELAY_MS } from './coreReprocessDispatcher.js';
@@ -18884,7 +18885,20 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // Live loupe (camera scanning)
     // ===========================================
     const LOUPE_PREVIEW_SIDE = 640;
-    const liveLoupe = { stream: null, track: null, running: false, capturing: false, frames: 0, view: 'converted', surface: null, generation: 0 };
+    // A recipe older than this is rebuilt: the automatic one follows the camera
+    // once a second, and a photo's catches any change that bypassed the edit
+    // revision it is keyed on.
+    const LOUPE_RECIPE_REFRESH_MS = 1000;
+    // Without a video-frame callback this soon after the video can play, pace
+    // by display frames at the camera's rate instead.
+    const LOUPE_FRAME_CALLBACK_WAIT_MS = 200;
+    const LOUPE_CONVERSION_OPTIONS = { preview: true, scratch: true, includeAnalysisPreview: false };
+    const liveLoupe = { stream: null, track: null, running: false, capturing: false, frames: 0, view: 'converted', surface: null, generation: 0, recipe: null, convert: null, wake: null };
+    // Read by the camera smoke (?debugCounters=1).
+    const loupeDebugCounters = { grabs: 0, conversions: 0, workerConversions: 0, mainConversions: 0, recipes: 0, defaultSettings: 0, repeatedFrames: 0, pacing: '' };
+    // An infrastructure failure of the loupe worker moves the loupe to the
+    // main thread for the rest of the session.
+    let loupeWorkerFailed = false;
 
     function loupeElement(id) {
       return document.getElementById(id);
@@ -18902,9 +18916,14 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     function stopLoupeStream() {
       liveLoupe.generation++;
       liveLoupe.running = false;
+      liveLoupe.wake = null;
+      liveLoupe.recipe = null;
       if (liveLoupe.stream) for (const track of liveLoupe.stream.getTracks()) track.stop();
       liveLoupe.stream = null;
       liveLoupe.track = null;
+      // No loupe worker outlives the loupe.
+      liveLoupe.convert?.dispose();
+      liveLoupe.convert = null;
       const video = loupeElement('loupeVideo');
       if (video) video.srcObject = null;
       const capture = loupeElement('loupeCaptureBtn');
@@ -18914,15 +18933,38 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // The conversion the loupe looks through: the current photo's recipe when
     // one is converted (film base, preset, colour controls and look, without
     // its geometry, strokes, flat field or roll lock), otherwise the automatic
-    // defaults for the camera frame itself.
+    // defaults for the camera frame itself. Built once and reused until
+    // something it depends on changes: an edit bumps manualEditRevision (the
+    // panel, the shortcuts, undo/redo), "hold to see before", another photo,
+    // the step or the frame size; or until it is a second old.
     function loupeRecipe(frame) {
-      if (state.currentStep >= 3 && state.originalImageData) {
-        return {
-          settings: { ...state, cropRegion: null, rotationAngle: 0, mirrored: false, autoFrameMeta: null, localExposure: null, flatFieldId: null, rollFrame: null, filmEdge: null },
-          name: state.loadedFile?.name || ''
-        };
+      const photo = Boolean(state.currentStep >= 3 && state.originalImageData);
+      const key = photo
+        ? [manualEditRevision, expiredCompareHeld, state.loadedFile, state.currentStep, frame.width, frame.height]
+        : [frame.width, frame.height];
+      const now = performance.now();
+      const cached = liveLoupe.recipe;
+      if (cached && cached.photo === photo && now - cached.builtAt < LOUPE_RECIPE_REFRESH_MS
+        && cached.key.every((value, index) => value === key[index])) return cached;
+      let settings;
+      if (photo) {
+        settings = { ...state, cropRegion: null, rotationAngle: 0, mirrored: false, autoFrameMeta: null, localExposure: null, flatFieldId: null, rollFrame: null, filmEdge: null };
+      } else {
+        settings = createDefaultSettings(frame);
+        loupeDebugCounters.defaultSettings++;
       }
-      return { settings: createDefaultSettings(frame), name: getLocalizedText('loupeRecipeAuto', 'automatic') };
+      const adjust = buildAdjustmentSettings(settings);
+      // "Hold to see before" on the expired-film panel, as on the main view.
+      if (expiredCompareHeld && adjust.expiredEnabled) adjust.expiredEnabled = false;
+      loupeDebugCounters.recipes++;
+      liveLoupe.recipe = {
+        photo, key, builtAt: now,
+        name: photo ? state.loadedFile?.name || '' : getLocalizedText('loupeRecipeAuto', 'automatic'),
+        router: buildRouterSettings(settings, frame),
+        adjust
+      };
+      loupeElement('loupeOverlay')?.setAttribute('data-recipes', String(loupeDebugCounters.recipes));
+      return liveLoupe.recipe;
     }
 
     function grabLoupeFrame(video, maxSide) {
@@ -18937,56 +18979,139 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       }
       const ctx = surface.getContext('2d', { willReadFrequently: true });
       ctx.drawImage(video, 0, 0, width, height);
+      loupeDebugCounters.grabs++;
       return ctx.getImageData(0, 0, width, height);
     }
 
+    // Converts in the loupe's own worker (not the editor's preview worker,
+    // whose cached source and analysis it would evict). The frame's pixels are
+    // handed over, not copied. convertAdjustedFrame is the same code on either
+    // side, so the fallback shows the same pixels.
     async function convertLoupeFrame(frame) {
       const recipe = loupeRecipe(frame);
-      const converted = await convertFrameWithRouter({
-        imageData: frame,
-        settings: buildRouterSettings(recipe.settings, frame),
-        options: { preview: true, scratch: true, includeAnalysisPreview: false }
-      });
-      if (!converted) return null;
-      const output = new ImageData(converted.width, converted.height);
-      applyAdjustmentsToBuffer(converted, recipe.settings, output, 'preview');
-      return { imageData: output, recipe: recipe.name };
+      const client = liveLoupe.convert;
+      if (client && !loupeWorkerFailed) {
+        try {
+          const imageData = await client({ imageData: frame, settings: recipe.router, adjust: recipe.adjust, recipe, options: LOUPE_CONVERSION_OPTIONS, transfer: true });
+          loupeDebugCounters.workerConversions++;
+          return { imageData, recipe: recipe.name };
+        } catch (error) {
+          // A worker released by closing the loupe, or a conversion that would
+          // fail on the main thread too, is not a worker failure.
+          if (liveLoupe.convert !== client || ![WORKER_UNAVAILABLE, WORKER_CRASHED, WORKER_TIMEOUT].includes(error?.code)) throw error;
+          console.warn('Loupe worker failed; converting on the main thread from now on:', error);
+          loupeWorkerFailed = true;
+          client.dispose();
+          liveLoupe.convert = null;
+          // This frame went to the worker; the next one converts here.
+          return null;
+        }
+      }
+      const output = await convertAdjustedFrame({ imageData: frame, settings: recipe.router, adjust: recipe.adjust, options: LOUPE_CONVERSION_OPTIONS, lutScratch: adjustmentLutScratch });
+      loupeDebugCounters.mainConversions++;
+      return output ? { imageData: new ImageData(output.data, output.width, output.height), recipe: recipe.name } : null;
     }
 
-    async function loupeLoop() {
+    // Paced by the camera, not the display: each presented camera frame is
+    // converted at most once, one conversion at a time. Frames that arrive
+    // while one converts are dropped, and the newest is converted when it
+    // finishes. The raw view neither grabs nor converts.
+    function startLoupeFrames() {
       const video = loupeElement('loupeVideo');
       const canvas = loupeElement('liveLoupeCanvas');
       const overlay = loupeElement('loupeOverlay');
       const stream = liveLoupe.stream;
-      while (liveLoupe.running && liveLoupe.stream === stream) {
-        if (video.readyState >= 2 && video.videoWidth > 0) {
-          try {
-            const frame = grabLoupeFrame(video, LOUPE_PREVIEW_SIDE);
-            const result = await convertLoupeFrame(frame);
-            if (!liveLoupe.running || liveLoupe.stream !== stream) break;
-            if (result) {
-              if (canvas.width !== result.imageData.width || canvas.height !== result.imageData.height) {
-                canvas.width = result.imageData.width;
-                canvas.height = result.imageData.height;
-              }
-              canvas.getContext('2d').putImageData(result.imageData, 0, 0);
-              liveLoupe.frames++;
-              overlay.dataset.frames = String(liveLoupe.frames);
-              if (liveLoupe.frames === 1 || liveLoupe.frames % 15 === 0) {
-                setLoupeStatus(getInterpolatedText('loupeLive', {
-                  width: String(video.videoWidth),
-                  height: String(video.videoHeight),
-                  recipe: result.recipe
-                }, `Live · ${video.videoWidth}×${video.videoHeight} · recipe: ${result.recipe}`));
-              }
-            }
-          } catch (error) {
-            console.warn('Loupe frame failed:', error);
-            await new Promise((resolve) => setTimeout(resolve, 300));
-          }
+      const alive = () => liveLoupe.running && liveLoupe.stream === stream;
+      let presented = 0;
+      let converted = 0;
+      const seen = new Set();
+      let inFlight = false;
+      let pacing = '';
+
+      const convertNewest = async () => {
+        if (!alive() || inFlight || liveLoupe.view === 'raw' || presented === converted) return;
+        if (!(video.readyState >= 2 && video.videoWidth > 0)) return;
+        inFlight = true;
+        converted = presented;
+        if (pacing === 'video-frame') {
+          if (seen.has(converted)) loupeDebugCounters.repeatedFrames++;
+          seen.add(converted);
+          if (seen.size > 256) seen.clear();
         }
-        await new Promise((resolve) => requestAnimationFrame(resolve));
+        try {
+          const frame = grabLoupeFrame(video, LOUPE_PREVIEW_SIDE);
+          const result = await convertLoupeFrame(frame);
+          if (!alive()) return;
+          if (result) {
+            if (canvas.width !== result.imageData.width || canvas.height !== result.imageData.height) {
+              canvas.width = result.imageData.width;
+              canvas.height = result.imageData.height;
+            }
+            canvas.getContext('2d').putImageData(result.imageData, 0, 0);
+            liveLoupe.frames++;
+            loupeDebugCounters.conversions++;
+            overlay.dataset.frames = String(liveLoupe.frames);
+            if (liveLoupe.frames === 1 || liveLoupe.frames % 15 === 0) {
+              setLoupeStatus(getInterpolatedText('loupeLive', {
+                width: String(video.videoWidth),
+                height: String(video.videoHeight),
+                recipe: result.recipe
+              }, `Live · ${video.videoWidth}×${video.videoHeight} · recipe: ${result.recipe}`));
+            }
+          }
+        } catch (error) {
+          if (!alive()) return;
+          console.warn('Loupe frame failed:', error);
+          await new Promise((resolve) => setTimeout(resolve, 300));
+        } finally {
+          inFlight = false;
+        }
+        convertNewest();
+      };
+      // Leaving the raw view converts the newest frame at once.
+      liveLoupe.wake = () => { if (alive()) convertNewest(); };
+
+      // Fallback: display frames, thinned to the camera's frame rate.
+      const paceByDisplay = () => {
+        if (!alive() || pacing === 'display') return;
+        pacing = loupeDebugCounters.pacing = 'display';
+        let rate = 30;
+        try { rate = Number(liveLoupe.track?.getSettings?.().frameRate) || 30; } catch { rate = 30; }
+        const interval = 1000 / Math.max(1, rate);
+        let last = -Infinity;
+        const tick = (now) => {
+          if (!alive()) return;
+          requestAnimationFrame(tick);
+          // A little slack so a 30 fps camera takes every second 60 Hz frame.
+          if (now - last < interval - 2) return;
+          last = now;
+          presented++;
+          convertNewest();
+        };
+        requestAnimationFrame(tick);
+      };
+
+      if (typeof video.requestVideoFrameCallback !== 'function') {
+        paceByDisplay();
+        return;
       }
+      pacing = loupeDebugCounters.pacing = 'video-frame';
+      let callbacks = 0;
+      const onVideoFrame = (now, metadata) => {
+        if (!alive() || pacing !== 'video-frame') return;
+        video.requestVideoFrameCallback(onVideoFrame);
+        presented = Number.isFinite(metadata?.presentedFrames) ? metadata.presentedFrames : presented + 1;
+        callbacks++;
+        convertNewest();
+      };
+      video.requestVideoFrameCallback(onVideoFrame);
+      // Some engines send no callbacks for a video kept at opacity 0 (the
+      // converted view): give them LOUPE_FRAME_CALLBACK_WAIT_MS once it plays.
+      const armWatchdog = () => setTimeout(() => {
+        if (alive() && pacing === 'video-frame' && callbacks === 0) paceByDisplay();
+      }, LOUPE_FRAME_CALLBACK_WAIT_MS);
+      if (video.readyState >= 2) armWatchdog();
+      else video.addEventListener('loadeddata', armWatchdog, { once: true });
     }
 
     async function populateLoupeCameras() {
@@ -19088,9 +19213,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (!isCurrent()) return;
       configureLoupeTrackControls();
       liveLoupe.running = true;
+      // The loupe's own conversion worker, started with its first frame and
+      // released by stopLoupeStream.
+      if (!loupeWorkerFailed) liveLoupe.convert = createConversionWorkerClient();
       loupeElement('loupeCaptureBtn').disabled = false;
       loupeElement('loupeCloseBtn')?.focus();
-      void loupeLoop();
+      startLoupeFrames();
     }
 
     function closeLoupe() {
@@ -19154,6 +19282,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       liveLoupe.view = event.target.checked ? 'raw' : 'converted';
       const overlay = loupeElement('loupeOverlay');
       if (overlay) overlay.dataset.view = liveLoupe.view;
+      if (liveLoupe.view === 'converted') liveLoupe.wake?.();
     });
     loupeElement('loupeOverlay')?.addEventListener('keydown', (event) => {
       if (event.key === 'Escape') {
@@ -20342,4 +20471,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       void checkInterruptedJobs();
       updateWorkflowUI();
       studioWorkspace.sync();
+      // ?debugCounters=1 exposes the Studio flush and DOM-write counters and
+      // the layout and loupe call counts to the smoke tests (#261).
+      if (new URLSearchParams(window.location.search).get('debugCounters') === '1') {
+        window.__ncDebug = {
+          counters: () => ({ ...uiDebugCounters, sync: studioWorkspace.debugCounters(), loupe: { ...loupeDebugCounters } }),
+          sync: () => studioWorkspace.sync(),
+        };
+      }
     }

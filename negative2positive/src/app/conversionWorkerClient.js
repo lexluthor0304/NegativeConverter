@@ -56,6 +56,7 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
   let lastSource = null;
   let lastAnalysis = null;
   let lastLocalExposure = null;
+  let lastRecipe = null;
   let releaseWhenIdle = false;
   function getWorker() {
     if (worker) return worker;
@@ -63,6 +64,7 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
     lastSource = null;
     lastAnalysis = null;
     lastLocalExposure = null;
+    lastRecipe = null;
     const currentWorker = worker;
     worker.onmessage = (e) => {
       const msg = e.data;
@@ -82,7 +84,7 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
       if (releaseWhenIdle && !pending.size && worker === currentWorker) {
         currentWorker.terminate();
         worker = null;
-        lastSource = lastAnalysis = lastLocalExposure = null;
+        lastSource = lastAnalysis = lastLocalExposure = lastRecipe = null;
         releaseWhenIdle = false;
       }
     };
@@ -111,8 +113,14 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
    * always cloned: `ImageData.data` cannot be re-attached. If a moved source
    * does not come back, the request rejects with INPUT_LOST. `releaseAfter`
    * drops the lane's cached planes once the frame is converted.
+   *
+   * With `adjust` (prepared Step-3 adjustment settings) the worker also runs
+   * the adjustment stage and returns the adjusted 8-bit ImageData only. A
+   * `recipe` object keeps `settings` and `adjust` in the worker while the
+   * same recipe is passed again. `transfer` hands the frame's 8-bit pixels to
+   * the worker instead of copying them; the caller must not read them afterwards.
    */
-  async function convert({ imageData, settings, options = {}, handoff = null, releaseAfter = false }) {
+  async function convert({ imageData, settings, options = {}, handoff = null, releaseAfter = false, adjust = null, recipe = null, transfer = false }) {
 
     let w;
     try {
@@ -132,6 +140,13 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
       settings,
       options: { ...options }
     };
+    if (recipe && recipe === lastRecipe) {
+      message.reuseRecipe = true;
+      delete message.settings;
+    } else {
+      if (recipe) message.cacheRecipe = true;
+      if (adjust) message.adjust = adjust;
+    }
 
     const analysis = options.analysisImageData || null;
     if (cacheInput) {
@@ -173,10 +188,11 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
       }
     }
     if (releaseAfter) message.releaseAfter = true;
-    // Without a hand-off there is no transfer list: the caller keeps using its
-    // source buffers, so they are structured-cloned. That copy blocks the
-    // poster briefly but frees the main thread from the seconds-long
-    // conversion itself.
+    // Without a hand-off or `transfer` there is no transfer list: the caller
+    // keeps using its source buffers, so they are structured-cloned. That copy
+    // blocks the poster briefly but frees the main thread from the
+    // seconds-long conversion itself.
+    if (transfer && message.rgba) transfers.push(message.rgba);
     const expectedSourceBytes = moving ? src16.data.byteLength : 0;
 
     const timeoutMs = conversionTimeoutMs(imageData.width * imageData.height);
@@ -203,6 +219,7 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
         pending.set(id, { resolve: settle(resolve), reject: settle(reject) });
         try {
           w.postMessage(message, transfers);
+          if (recipe) lastRecipe = recipe;
           if (cacheInput) {
             lastSource = imageData;
             lastAnalysis = analysis;
@@ -319,7 +336,7 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
   convert.dispose = () => {
     const dying = worker;
     worker = null;
-    lastSource = lastAnalysis = lastLocalExposure = null;
+    lastSource = lastAnalysis = lastLocalExposure = lastRecipe = null;
     releaseWhenIdle = false;
     for (const [id, entry] of pending) {
       pending.delete(id);

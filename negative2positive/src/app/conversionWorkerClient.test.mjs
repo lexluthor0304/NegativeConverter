@@ -199,3 +199,61 @@ console.log('conversionWorkerClient: 入力再利用・参照解除・再起動�
   }
   console.log('conversionWorkerClient: preview lane posts unchanged dodge-and-burn strokes once per worker');
 }
+
+// ---- live loupe (#261): its recipe is posted once per worker, frames are
+// handed over rather than copied, and dispose() releases the worker ----
+{
+  class TransferWorker extends FakeWorker {
+    postMessage(message, transfer = []) {
+      this.transfers.push(transfer.length);
+      this.messages.push(structuredClone(message, { transfer }));
+    }
+    transfers = [];
+  }
+  const loupeWorkers = [];
+  const loupe = createConversionWorkerClient({ workerFactory: () => { const w = new TransferWorker(); loupeWorkers.push(w); return w; } });
+  const router = { filmType: 'color', exposure: 3 };
+  const adjust = { cyan: 4, curves: { r: new Uint8Array(256), g: new Uint8Array(256), b: new Uint8Array(256) } };
+  const frame = () => new ImageData(new Uint8ClampedArray([10, 20, 30, 255, 40, 50, 60, 255]), 2, 1);
+  const send = async (recipe, { crash = false } = {}) => {
+    const image = frame();
+    const pending = loupe({ imageData: image, settings: router, adjust, recipe, options: { preview: true }, transfer: true });
+    const worker = loupeWorkers.at(-1), message = worker.messages.at(-1);
+    if (crash) { worker.onerror(new Error('crash')); await assert.rejects(pending, { code: WORKER_CRASHED }); }
+    else { worker.complete(); await pending; }
+    return { message, image, worker };
+  };
+  const recipeA = { name: 'A' }, recipeB = { name: 'B' };
+  let { message, image, worker } = await send(recipeA);
+  assert.equal(message.cacheRecipe, true);
+  assert.deepEqual(message.settings, router);
+  assert.deepEqual(message.adjust.curves.r, adjust.curves.r);
+  assert.equal(message.adjust.cyan, 4);
+  assert.equal(worker.transfers.at(-1), 1, 'the frame is transferred');
+  assert.equal(image.data.byteLength, 0, 'and detached from the caller');
+  ({ message } = await send(recipeA));
+  assert.equal(message.reuseRecipe, true, 'an unchanged recipe stays in the worker');
+  assert.ok(!('settings' in message) && !('adjust' in message) && !message.cacheRecipe);
+  ({ message } = await send(recipeB));
+  assert.equal(message.cacheRecipe, true, 'a rebuilt recipe is posted');
+  assert.equal(message.reuseRecipe, undefined);
+  await send(recipeB, { crash: true });
+  ({ message } = await send(recipeB));
+  assert.equal(loupeWorkers.length, 2);
+  assert.equal(message.cacheRecipe, true, 'a new worker receives the recipe again');
+  const held = loupe({ imageData: frame(), settings: router, adjust, recipe: recipeB, options: {}, transfer: true });
+  loupe.dispose();
+  await assert.rejects(held, { code: WORKER_CRASHED });
+  assert.equal(loupeWorkers[1].terminated, true, 'dispose terminates the loupe worker');
+  // Without a recipe every request carries its settings and adjustments.
+  const plain = createConversionWorkerClient({ workerFactory: () => { const w = new TransferWorker(); loupeWorkers.push(w); return w; } });
+  const copy = frame();
+  const request = plain({ imageData: copy, settings: router, adjust, options: {} });
+  const plainMessage = loupeWorkers.at(-1).messages.at(-1);
+  assert.ok(!plainMessage.cacheRecipe && !plainMessage.reuseRecipe);
+  assert.equal(plainMessage.adjust.cyan, 4);
+  assert.equal(loupeWorkers.at(-1).transfers.at(-1), 0, 'without transfer the frame is copied');
+  assert.equal(copy.data.byteLength, 8);
+  loupeWorkers.at(-1).complete(); await request;
+  console.log('conversionWorkerClient: loupe recipe posted once per worker, frames transferred, dispose releases the worker');
+}

@@ -10,6 +10,8 @@
  */
 import { convertFrameWithRouter } from '../pipeline/conversionRouter.js';
 import { releaseSlotBuffers } from '../pipeline/silverAdapter.js';
+import { convertAdjustedFrame } from '../pipeline/adjustedFrame.js';
+import { createAdjustmentLutScratch } from '../app/adjustmentPipeline.js';
 import { fromImageData8 } from '../silvercore/util/image16.js';
 import { downsampleImageDataForMaxPixels } from '../app/imageDataOps.js';
 
@@ -22,6 +24,10 @@ let cachedAnalysis = null;
 let retained = null;
 const DEFAULT_HISTOGRAM_SAMPLES = 24_576;
 let cachedLocalExposure = null;
+// The live loupe's recipe (router settings and prepared adjustments), posted
+// once per recipe rather than with every camera frame (#261).
+let cachedRecipe = null;
+const adjustmentLutScratch = createAdjustmentLutScratch();
 
 function slotNameFor(options) {
   if (options && options.scratch) return 'scratch';
@@ -29,10 +35,17 @@ function slotNameFor(options) {
 }
 
 async function convert(msg) {
-  const { id, width, height, rgba, image16, settings, options } = msg;
+  const { id, width, height, rgba, image16, options } = msg;
+  let { settings } = msg;
+  let adjust = msg.adjust || null;
   // A lent source goes back whatever happens; nothing here writes it.
   const lent = Boolean(msg.returnSource) && image16 instanceof ArrayBuffer && !(options && options.ownedSource);
   try {
+    if (msg.cacheRecipe) cachedRecipe = { settings, adjust };
+    if (msg.reuseRecipe) {
+      if (!cachedRecipe) throw new Error('Missing loupe recipe');
+      ({ settings, adjust } = cachedRecipe);
+    }
     // Unchanged dodge-and-burn strokes are not posted again. Track every
     // message, even one that fails below, as the client does.
     if (msg.cacheInput && !msg.reuseLocalExposure) cachedLocalExposure = settings?.localExposure || null;
@@ -73,6 +86,14 @@ async function convert(msg) {
     // its output into that plane; any other request just lets it go.
     const reuse = retained;
     retained = null;
+    // With prepared adjustments (the live loupe) the reply is the adjusted
+    // 8-bit frame only, exactly as the main thread would make it.
+    if (adjust) {
+      const frame = await convertAdjustedFrame({ imageData, settings, adjust, options: conversionOptions, lutScratch: adjustmentLutScratch });
+      if (!frame) throw new Error('Conversion returned no frame');
+      self.postMessage({ type: 'result', id, width: frame.width, height: frame.height, rgba: frame.data.buffer }, [frame.data.buffer]);
+      return;
+    }
     if (msg.retain16 && reuse) conversionOptions.workBuffer16 = reuse.image16.data;
     const result = await convertFrameWithRouter({ imageData, settings, options: conversionOptions });
 
