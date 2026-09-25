@@ -5926,10 +5926,17 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       updatePreviewCpu();
     }
 
-    // WebGL presents: no CPU frame is on screen, and none may land.
+    // WebGL presents: no CPU frame is on screen, and none may land. The hidden
+    // #canvas lets its backing go (the last 2D frame, which after an import is
+    // the full-resolution negative); the next CPU frame sizes it again (#242).
     function presentGlFrame() {
       state.displayImageData = null;
       supersedeSettledDisplay();
+      if (canvas.width !== 1 || canvas.height !== 1) {
+        canvas.width = 1;
+        canvas.height = 1;
+        mainCanvasPhoto = null;
+      }
     }
 
     function supersedeSettledDisplay() {

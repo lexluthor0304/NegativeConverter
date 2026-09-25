@@ -175,6 +175,7 @@ function settleFixture({ width = 1200, height = 900, worker = 'real', gl = false
   };
   const context = vm.createContext({
     state, ImageData: TestImageData, Uint8ClampedArray, console,
+    canvas: { width: 1809, height: 1202 }, mainCanvasPhoto: null,
     settledDisplayToken: 0, settledAdjustedBuffer: null, previewAdjustedBuffer: null, expiredCompareHeld: false,
     displayDebugCounters: { mainAdjustments: 0, mainAdjustMaxPixels: 0, mainAdjustOverPreviewCap: 0,
       exportFallbackAdjustments: 0, exportFallbackMaxPixels: 0, settleRequests: 0, settleWorker: 0, settleSync: 0, settlePresented: 0 },
@@ -252,6 +253,7 @@ for (const supersede of ['newer frame', 'new source', 'crop', 'comparison', 'GL'
   await settle(); await settle();
   assert.equal(f.state.displayImageData, null);
   assert.equal(f.drawn.length, 0);
+  assert.deepEqual([f.context.canvas.width, f.context.canvas.height], [1, 1], 'the hidden #canvas lets its backing go');
   f.dispose();
 }
 
