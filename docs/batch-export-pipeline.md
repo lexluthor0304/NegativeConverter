@@ -155,3 +155,6 @@ The historical benchmark harness that produced the Leica numbers above lives out
 repo (headless Chrome + CDP, `?debug=1` for `[perf]` traces); it imports N
 files through `#fileInput`, waits for every file's settings badge, then
 clicks Export All and records per-stage timings, long tasks and RSS.
+End-to-end roll and export measurements now come from the checked-in
+`npm run bench:interactive` (S6 roll import, S9 export, memory in every
+scenario; `docs/performance-benchmark.md`).

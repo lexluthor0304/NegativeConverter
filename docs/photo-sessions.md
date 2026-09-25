@@ -137,7 +137,9 @@ mobile sizing, short landscapes and collapsed/reopened layouts. Synthetic fixtur
 are used; private user photographs are not published.
 
 Browser tests must run against frozen runtime files so Vite hot reload cannot
-invalidate the measurements. The generated visual artifact is
+invalidate the measurements. Timed switch measurements (warm, cold, 2-back,
+rapid presses) come from `npm run bench:interactive` S7, which serves a
+production build from its own worktree (`docs/performance-benchmark.md`). The generated visual artifact is
 `output/playwright/photo-session-lighttable.png` and
 `output/playwright/photo-switch-loading.png` (not committed), along with
 the light-table desktop/mobile captures.

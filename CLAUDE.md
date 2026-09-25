@@ -28,7 +28,8 @@ Build web assets:
 npm run build:web
 ```
 
-Run tests (standalone Node assert scripts, colocated as `*.test.mjs`, plus
+Run tests (standalone Node assert scripts, colocated as `*.test.mjs` under
+`negative2positive/` and `scripts/perf/`, plus
 repo-wide consistency checks: SEO heads and FAQ structured data over the static
 pages, pinned dependency versions, and the two Vercel header configs):
 ```bash
@@ -49,6 +50,15 @@ npm run test:smoke
 
 CI (`.github/workflows/desktop-ci.yml`) runs all three on every pull request
 before the four-platform Tauri build.
+
+Interactive performance benchmark against the Lightroom-grade budgets of #229
+(production build in its own worktree, trusted input, `scripts/perf/budgets.json`;
+local or nightly on a real Mac, one heavy run at a time — see
+`docs/performance-benchmark.md`). Child PRs of #229 attach its compare table:
+```bash
+npm run bench:interactive -- --quick
+npm run bench:interactive -- --compare <baseRef> HEAD --scenarios s2,s4
+```
 
 When several agents or worktrees edit `negative2positive/` at once, the smoke
 test cannot be trusted: the Vite dev server hot-reloads mid-run and it fails on
@@ -83,6 +93,7 @@ negative2positive/
 │   ├── ui/                     # UI components (loading overlay)
 │   └── workers/                # Export worker + full-res conversion worker + bridges
 scripts/                        # run-tests.mjs, sync-web-dist.mjs, LUT derivation
+scripts/perf/                   # bench:interactive harness, probe, budgets.json, fixtures
 src-tauri/                      # Tauri desktop packaging
 ```
 

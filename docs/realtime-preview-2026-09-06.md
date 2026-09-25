@@ -31,6 +31,8 @@ Chrome smoke に `realtime-preview-smoke.mjs` を追加。
 実画像を読み込み、DPR 1 / 2 で `input` を約 16ms ごとに 60 回発火させ、
 `change` 前のテクスチャ画素の変化、実描画回数、表示解像度維持、最新入力への収束、
 Worker 入力の再利用を検証する。フレームレートの保証や全端末のベンチマークではない。
+フレームレートと input→draw の計測は `npm run bench:interactive` の S2/S3（信頼された入力、
+60 Hz、本番ビルド）で行う（`docs/performance-benchmark.md`）。
 
 失敗ファイルへの切替テストは、指紋を採る前に原寸の画布が揃うまで待つ。
 通常の非同期原寸化をファイル切替による画像破損と誤認しないための変更であり、

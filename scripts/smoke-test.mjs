@@ -2,6 +2,7 @@ import { runRollFilmTypeSmoke } from './roll-film-type-smoke.mjs';
 import { runFolderImportSmoke } from './folder-import-smoke.mjs';
 import { runSimplicitySmoke } from './simplicity-smoke.mjs';
 import { runHiddenJobSmoke } from './hidden-job-smoke.mjs';
+import { runPerfHarnessSmoke } from './perf-harness-smoke.mjs';
 // End-to-end smoke test: drives the real app in headless Chrome via CDP.
 //
 //   node scripts/smoke-test.mjs
@@ -393,6 +394,12 @@ if (process.argv.includes('--geometry-only')) {
   await runGeometrySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
   if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
   console.log('SMOKE PASS'); process.exit(0);
+}
+if (process.argv.includes('--perf-harness-only')) {
+  await runPerfHarnessSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS (perf harness)');
+  process.exit(0);
 }
 if (process.argv.includes('--expired-only')) {
   await runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
@@ -899,6 +906,7 @@ if (!process.argv.some(arg => arg.endsWith('-only'))) await runFolderImportSmoke
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runPhotoSortSmoke({send,evaluate,waitFor,wait,fail,installDialogAutoAccept,port:PORT,root:ROOT});
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runHiddenJobSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runGeometrySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+if (!process.argv.some(arg => arg.endsWith('-only'))) await runPerfHarnessSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
 
 // ---- no uncaught page errors across both scenarios ----
 const realErrors = pageErrors.filter((e) => !/ResizeObserver loop/.test(e));
