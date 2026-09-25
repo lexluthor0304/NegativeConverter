@@ -1,6 +1,6 @@
 # Batch export and roll analysis pipeline
 
-## Current architecture (updated 2026-09-22)
+## Current architecture (updated 2026-09-25)
 
 Batch export used to run one file at a time: decode → geometry → convert →
 adjust → encode → write, each stage awaited before the next file started. The
@@ -56,8 +56,69 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
   analog metadata, which only the browser paths had before.
 - ZIP computes CRC while writing each payload once, then writes a standard
   ZIP32/ZIP64 data descriptor. CRC/write work uses bounded chunks and yields
-  periodically so input and progress tasks can run. Opaque PNG16/TIFF files
-  store RGB; real transparency remains RGBA. PNG16 uses lossless Sub filtering.
+  periodically so input and progress tasks can run. The CRC is slice-by-8
+  (`workers/crc32.js`, eight bytes per step, identical values; shared with
+  the PNG chunk CRCs). Opaque PNG16/TIFF files store RGB; real transparency
+  remains RGBA. PNG16 uses lossless Sub filtering.
+- PNG16 is encoded in row bands (#257, `workers/png16Bands.js`). The rows
+  are split into bands of about 16 MiB of filtered bytes (whole rows; 22
+  bands at 60 MP, 9 at 24 MP). The layout depends only on width, height and
+  channel count, so the file is byte-identical whoever encodes the bands.
+  Each band is Sub-filtered in 4 MiB steps into a raw `pako.Deflate` stream
+  (level 6) with a running Adler-32 and ends with a sync flush (the last
+  band finishes the stream); it becomes its own IDAT chunk, built as a Blob
+  in the worker. Band 0 carries the zlib header, and a last 4-byte IDAT
+  holds the Adler-32, folded from the bands with `adler32Combine`. Decoded
+  samples are those of the old one-shot encoder; the compressed bytes and
+  size differ slightly (a few bytes per band), so a PNG16 parity check
+  compares decoded samples, not file hashes.
+  - `createPng16BandPool` (`workerBridge.js`) runs the bands on export
+    workers: one pool per export operation (a single export or a batch),
+    disposed when it ends. Bands wait in one ordered queue and are sliced
+    from the frame only when a worker takes them, so at most W band copies
+    exist. Each band has a timeout from its own pixel count, counted from
+    dispatch. A failed or timed-out band, or a cancel, terminates every
+    worker still busy with that frame.
+  - W (`planPng16BandWorkers`): cores − 2 for a single export or a
+    one-lane batch, 4 for two lanes. With three or more lanes there is no
+    pool: the lane's export worker encodes the bands one after another
+    (`workerEncodePng16`), which gives the same bytes.
+  - Fallbacks: pool → one export worker → the main thread
+    (`exportImageEncoders.js`), all with the same bytes.
+  - `localStorage nc_png16_rle_v1 = on` switches to the run-length strategy
+    (lossless, about 4 % larger, several times faster). It has no UI and is
+    off by default; it is for measuring WKWebView if level 6 misses its
+    budget there.
+- The linear DNG kernel is two table lookups per sample (#257): a Float32
+  table per channel of the linear value for each 16-bit code (exactly the
+  value the old per-pixel Float32 buffer held), the gain percentile from the
+  same strided samples, and a Uint16 output table. On a little-endian host
+  the strip is a view of the output, not a copy. A single export builds it
+  synchronously behind the overlay. A batch builds it with
+  `buildLinearPositiveAsync`: one task per channel percentile, then the
+  output pass in slices of about 16 ms with a MessageChannel task in
+  between, because the desktop batch keeps the editor live. The final
+  `new Blob` still copies the strip in one call; its duration is in the
+  `linearDngBatch` perf trace (`blobMs`, `?debug=1`). If it exceeds 50 ms in
+  the macOS app, the batch build should move into the lane's export worker,
+  which can take the batch-owned source plane by transfer.
+- Desktop writes (`desktopExportWriter.js`) send 8 MiB chunks
+  (`EXPORT_CHUNK_BYTES`, equal to `CHUNK_LIMIT` in `export_stream.rs`; a
+  test reads the Rust constant). Exactly one `append_export_chunk` is in
+  flight while the next Blob slice is read. The native stream stays strictly
+  sequential and checks the total in `finish`. Each stream has its own lock,
+  so the stream map is not held during a disk write. `onProgress` reports
+  written bytes, and a signal aborts after the in-flight append: the staging
+  file is removed and any existing target is kept. A single desktop export
+  keeps its overlay up with "Saving… x / y MB" until `finish_export_write`
+  resolves, then toasts the saved file name. Its Cancel button appears once
+  the encode starts. The desktop batch sink still awaits each write while
+  its lane is held (#256 overlaps the write with the next frame).
+- Hot-folder reads use 8 MiB chunks (`IMPORT_CHUNK_BYTES` = the Rust
+  `IMPORT_CHUNK_LIMIT`, pinned by a test). `read_import_file` is an async
+  command whose read runs on the blocking pool, not on the native main
+  thread, and it still checks scope, symlinks and the fingerprint on every
+  chunk.
 - PNG16 and scanner TIFF decode run in disposable workers with transferred
   input/output planes. The existing decoder is the fallback when a worker
   cannot start. RAW demosaic remains in LibRaw's dedicated worker.
@@ -148,6 +209,7 @@ is recorded in the current audit report.
 npm test            # includes batchExportScheduler, conversion pool, export pool, geometry chain
 npm run test:smoke  # batch export scenario (ZIP fallback to individual downloads), roll import
 npm run test:smoke -- --gain-map-only  # real-worker 16-bit result and gain map, gain-map requests per export intent
+npm run test:smoke -- --png16-only     # PNG16 band pool in real workers: same bytes for 1/2/6 workers, one worker and the main thread
 node scripts/performance-io-benchmark.mjs /path/to/baseline
 ```
 

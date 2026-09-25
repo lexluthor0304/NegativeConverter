@@ -39,7 +39,11 @@ existing bit depth and resolution.
 - `scripts/export-cancel-smoke.mjs`: real click handler, native IPC substituted;
   repeated PNG/JPEG/TIFF/DNG cancellation, duplicate clicks, picker failure,
   retry and confirmed write. Cancellation preserves preview pixels and settings
-  with no worker, encoder or write activity.
+  with no worker, encoder or write activity. Since #257 it also holds one
+  `append_export_chunk` open: the overlay must show "Saving… x / y MB" and
+  Cancel until `finish_export_write`, close without a dwell, and toast the
+  saved file name. Cancel during the write must call `abort_export_write`
+  and never `finish_export_write`.
 - Real native app: import `L1009967.dng`, set C +1, cancel Save twice, then save.
   The photo and adjustment stay open; the PNG is 9536 × 6336. In the local check,
   idle footprint fell from 2439 MB to 1690 MB instead of growing to 8 GB.
