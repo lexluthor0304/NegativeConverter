@@ -15,7 +15,7 @@ export async function runRealtimePreviewSmoke({ send, evaluate, wait, fail }) {
     };
     const probe = window.__previewProbe = {
       uploads: [], draws: 0, requests: [], results: [], allocations: 0, getErrors: 0,
-      inputs: [], changes: [], pendingPreview: 0
+      inputs: [], changes: [], pendingPreview: 0, commits: [], committed: []
     };
     // Same-size frames are uploaded with texSubImage2D (#233): width is
     // argument 4 and the pixels argument 8 there.
@@ -54,6 +54,11 @@ export async function runRealtimePreviewSmoke({ send, evaluate, wait, fail }) {
     document.addEventListener('input', onInput, true);
     document.addEventListener('change', onChange, true);
     Worker.prototype.postMessage = function (message, ...args) {
+      if (message?.type === 'commit') {
+        probe.commits.push({ time: performance.now() });
+        const record = workers.get(this);
+        if (record) record.pending.set(message.id, { commit: true });
+      }
       if (message?.type === 'convert') {
         const request = { cache: !!message.cacheInput, reuse: !!message.reuseSource, exposure: message.settings.exposure, time: performance.now() };
         probe.requests.push(request);
@@ -67,10 +72,18 @@ export async function runRealtimePreviewSmoke({ send, evaluate, wait, fail }) {
               const reply = event.data, request = record.pending.get(reply?.id);
               if (!request) return;
               record.pending.delete(reply.id);
+              if (request.commit) {
+                probe.committed.push({ plane: !!reply.image16, time: performance.now() });
+                return;
+              }
               probe.pendingPreview = Math.max(0, probe.pendingPreview - 1);
+              // #233: a frame whose display preview is not the source keeps its
+              // 16-bit plane in the worker and sends a histogram sample instead.
               if (reply.type === 'result' && reply.rgba) probe.results.push({
                 exposure: request.exposure, width: reply.width, height: reply.height,
-                hash: pixelHash(new Uint8Array(reply.rgba)), time: performance.now()
+                hash: pixelHash(new Uint8Array(reply.rgba)), time: performance.now(),
+                retained: !!reply.retained16, plane: !!reply.image16,
+                histogramPixels: reply.histogram ? reply.histogram.width * reply.histogram.height : null
               });
             };
             this.addEventListener('message', record.receive);
@@ -97,7 +110,7 @@ export async function runRealtimePreviewSmoke({ send, evaluate, wait, fail }) {
       const slider = document.getElementById('coreExposure');
       const probe = window.__previewProbe;
       probe.uploads = []; probe.draws = 0; probe.requests = []; probe.results = [];
-      probe.allocations = 0; probe.getErrors = 0;
+      probe.allocations = 0; probe.getErrors = 0; probe.commits = []; probe.committed = [];
       const start = performance.now();
       for (let i = 0; i < 60; i++) {
         slider.value = String(-90 + i * 3);
@@ -112,7 +125,13 @@ export async function runRealtimePreviewSmoke({ send, evaluate, wait, fail }) {
           && upload.width === result.width && upload.height === result.height;
       };
       while (!converged() && performance.now() - end < 8000) await new Promise(resolve => setTimeout(resolve, 25));
+      // A retained plane comes back about 150 ms after the last frame.
+      const retainedDrag = probe.results.some(item => item.retained);
+      while (retainedDrag && !probe.committed.some(item => item.plane) && performance.now() - end < 8000) {
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
       const canvas = document.getElementById('glCanvas');
+      const sourceSize = window.__studioSourceSize || null;
       return { dpr: devicePixelRatio, width: canvas.width, height: canvas.height,
         uploads: during.length, changes: new Set(during.map(item => item.hash)).size,
         firstFrameMs: during.length ? during[0].time - start : null,
@@ -121,11 +140,23 @@ export async function runRealtimePreviewSmoke({ send, evaluate, wait, fail }) {
         draws: probe.draws, requests: probe.requests, latestResult: probe.results.at(-1),
         latestUpload: probe.uploads.at(-1), converged: converged(),
         allocations: probe.allocations, getErrors: probe.getErrors,
+        retention: { sourceSize, frames: probe.results.length, retained: probe.results.filter(item => item.retained).length,
+          withPlane: probe.results.filter(item => item.plane).length,
+          largestSample: Math.max(0, ...probe.results.map(item => item.histogramPixels || 0)),
+          commits: probe.commits.length, committedPlanes: probe.committed.filter(item => item.plane).length },
         slider: Number(slider.value), duration: end - start };
     })()`);
     if (result.uploads < 3 || result.changes < 3 || result.draws < 3) fail('continuous preview did not update before release: ' + JSON.stringify(result));
     // getError is a GPU round trip: only a size-changing allocation may check it.
     if (result.getErrors > result.allocations) fail('WebGL draw path still calls getError per frame: ' + JSON.stringify({ getErrors: result.getErrors, allocations: result.allocations, draws: result.draws }));
+    // A display preview smaller than the source keeps each frame's 16-bit plane
+    // in the worker; a preview that is the source always carries its plane.
+    const retention = result.retention;
+    const separatePreview = retention.sourceSize && result.width < retention.sourceSize[0] - 2;
+    if (separatePreview && (retention.retained === 0 || retention.largestSample > 24576 || retention.committedPlanes === 0)) {
+      fail('interactive frames did not keep their 16-bit plane in the worker until committed: ' + JSON.stringify(retention));
+    }
+    if (!separatePreview && retention.retained > 0) fail('a preview that is the source must carry its 16-bit plane: ' + JSON.stringify(retention));
     if (result.minimumWidth < result.width - 2 || result.minimumHeight < result.height - 2) fail('interactive preview lost display resolution: ' + JSON.stringify(result));
     const interactive = result.requests.filter(request => request.cache);
     if (!interactive.some(request => request.reuse) || interactive.at(-1)?.exposure !== 87
@@ -155,7 +186,7 @@ async function runTrustedDragCheck({ send, evaluate, wait, fail }) {
     slider.scrollIntoView({ block: 'center' });
     const rect = slider.getBoundingClientRect();
     const probe = window.__previewProbe;
-    probe.inputs = []; probe.changes = []; probe.requests = [];
+    probe.inputs = []; probe.changes = []; probe.requests = []; probe.results = []; probe.commits = []; probe.committed = [];
     return { x: rect.x, y: rect.y + rect.height / 2, width: rect.width,
       min: Number(slider.min), max: Number(slider.max), value: Number(slider.value) };
   })()`);
@@ -193,6 +224,8 @@ async function runTrustedDragCheck({ send, evaluate, wait, fail }) {
       inputs: inputs.length, idleInputs: idle.length, sameTask: sameTask.length, latency,
       posts: posts.filter(post => inputs.length && post.time >= inputs[0].time && (!release || post.time <= release.time)).length,
       afterRelease: release ? posts.filter(post => post.time > release.time).length : null,
+      retainedFrames: probe.results.filter(item => item.retained).length,
+      committedPlanes: probe.committed.filter(item => item.plane).length,
       released: !!release, slider: Number(document.getElementById('coreExposure').value)
     };
   })()`);
@@ -202,5 +235,6 @@ async function runTrustedDragCheck({ send, evaluate, wait, fail }) {
     fail('idle-lane inputs were not posted in their own task (< 3 ms): ' + JSON.stringify(drag));
   }
   if (drag.afterRelease !== 0) fail('releasing the slider requested the shown frame again: ' + JSON.stringify(drag));
+  if (drag.retainedFrames > 0 && drag.committedPlanes === 0) fail('the dragged frame never got its 16-bit plane back: ' + JSON.stringify(drag));
   console.log('ok: trusted drag posts idle-lane frames in the input task and none on release ' + JSON.stringify(drag));
 }
