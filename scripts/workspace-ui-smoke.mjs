@@ -133,7 +133,8 @@ async function runRenderedUiFontSmoke({ send, evaluate, waitFor, fail, port, roo
     await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     await document.fonts.ready;`;
   try {
-    for (const lang of ['en', 'zh', 'ja']) {
+    // zh last: the page is left in the language the scenario used to end with.
+    for (const lang of ['en', 'ja', 'zh']) {
       await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=${lang}` });
       await waitFor('studio ' + lang, `!!document.getElementById('studioBasic') && document.documentElement.lang === ${JSON.stringify(lang)}`);
       const { requests: cold, faces: coldFaces } = await evaluate(`(async () => { ${settle} return { requests: ${fontRequests}, faces: ${usedFaces} }; })()`);
