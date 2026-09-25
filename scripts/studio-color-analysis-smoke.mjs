@@ -53,10 +53,12 @@ export async function runStudioColorAnalysisSmoke({ send, evaluate, waitFor, wai
   await evaluate(`document.getElementById('applyCropBtn').click()`);
   await waitFor('color crop completed', `!document.body.dataset.studioBusy && !document.getElementById('canvasContainer').classList.contains('crop-mode')`,120000);
   await wait(600);
-  // The crop-area detection ran in the auto-frame worker (#245): the export
-  // below waits for it, and the page never booted its own OpenCV.
+  // The crop is the image window the import detection already stored, so
+  // Apply keeps that analysis area and starts no crop-area detection (#245;
+  // crop-apply-smoke covers the detection in the worker), and the page never
+  // boots its own OpenCV.
   const detection = await evaluate(`window.__ncAnalysis.settle().then(() => ({ ...window.__ncAnalysis.detection, tasks: { ...window.__ncAnalysis.tasks }, cv: typeof window.cv, script: !!document.querySelector('script[data-opencv-loader]') }))`);
-  if (detection.started < 1 || detection.hits + detection.misses < 1 || detection.tasks.fallback || detection.cv !== 'undefined' || detection.script) fail('crop-area detection did not run in the worker: ' + JSON.stringify(detection));
+  if (detection.started !== 0 || detection.tasks.fallback || detection.cv !== 'undefined' || detection.script) fail('a crop of the stored image window ran a crop-area detection or loaded OpenCV on the page: ' + JSON.stringify(detection));
   const cropped = await exportImage();
   const afterWB = await evaluate(`['wbR','wbG','wbB'].map(id=>document.getElementById(id).value)`);
   if (JSON.stringify(beforeWB) !== JSON.stringify(afterWB)) fail('output cropping changed automatic WB');
