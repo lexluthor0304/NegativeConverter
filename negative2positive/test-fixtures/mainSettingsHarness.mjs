@@ -49,6 +49,8 @@ const deps = {
   EXPIRED_RESCUE_DEFAULTS, sanitizeFrameMetadata, computeSpline, sanitizeFilmBaseForSettings, sanitizeFilmTypeOverride,
   detectedImportSettings: () => ({ filmType: 'color', positiveMode: 'correct', filmTypeSource: 'manual' }),
   autoDetectFilmBase: () => ({ r: 205, g: 141, b: 92 }),
+  cachedDetectFilmType: () => null,
+  createPerfTrace: () => ({ mark() {}, end() {} }),
   clampBetween: (v, min, max) => Math.min(max, Math.max(min, v))
 };
 export function mainFunctions(names, extraDeps = {}) {
@@ -58,7 +60,8 @@ export function mainFunctions(names, extraDeps = {}) {
     ...['sanitizePresetType', 'inferFilmTypeFromLegacyPreset', 'sanitizeCoreEnhancedProfile', 'sanitizeCoreColorModel',
       'createDefaultLensCorrectionSettings', 'sanitizeLensSelection', 'sanitizeLensCorrection', 'makeLinearCurveLut',
       'makeLinearCurvePoints', 'sanitizeNumeric', 'sanitizeFilmBase', 'sanitizeCurvePointChannel',
-      'buildCurveLutFromPoints', 'sanitizeCurveLut', 'sanitizeSettings', 'createDefaultSettings', 'photoSettingsKey',
+      'buildCurveLutFromPoints', 'sanitizeCurveLut', 'sanitizeSettings', 'defaultFilmBaseBuffer', 'getImageDataPixelCount',
+      'createDefaultSettings', 'photoSettingsKey',
       ...names].map(functionSource)
   ].join('\n');
   const exported = ['sanitizeSettings', 'createDefaultSettings', 'photoSettingsKey', 'sanitizeNumeric', ...names];
