@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   repairRecipesMatch, createRepairStamps, sameRepairStrokes, captureDustPass, dustPassMatches, restoreDustPass
 } from './repairReuse.js';
+import { sanitizeRepairStrokes } from './repairBrush.js';
 
 globalThis.ImageData ||= class { constructor(data, width, height) { Object.assign(this, { data, width, height }); } };
 
@@ -34,6 +35,9 @@ globalThis.ImageData ||= class { constructor(data, width, height) { Object.assig
   assert.equal(sameRepairStrokes(strokes, [{ ...strokes[0], points: strokes[0].points.slice(1) }]), false);
   assert.equal(sameRepairStrokes(strokes, [...strokes, ...strokes]), false);
   assert.equal(sameRepairStrokes(strokes, null), false);
+  // A photo session restores strokes through sanitizeRepairStrokes again.
+  const drawn = sanitizeRepairStrokes([{ size: 0.0213456, points: Array.from({ length: 900 }, (_, i) => ({ x: i / 899 + 1e-7, y: 0.3333333, p: 0.4567 })) }]);
+  assert.ok(sameRepairStrokes(drawn, sanitizeRepairStrokes(structuredClone(drawn))), 'sanitising is idempotent');
 }
 
 // Dust-pass blocks: capture, match and restore, 8 and 16 bits, edge blocks.
