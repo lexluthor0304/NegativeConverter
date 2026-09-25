@@ -25,6 +25,10 @@ export function isConversionInputLost(err) {
   return Boolean(err) && err.code === INPUT_LOST;
 }
 
+// The caller gave up on the request (its settings moved on). Not a failure:
+// callers must neither retire the worker nor retry on the main thread.
+export const WORKER_ABORTED = 'WORKER_ABORTED';
+
 // A worker that never answers used to leave the caller's promise pending for
 // the rest of the session, so the loading overlay and any export waiting on it
 // hung forever. Scale the deadline with the frame size, matching workerBridge.
@@ -120,7 +124,8 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
    * same recipe is passed again. `transfer` hands the frame's 8-bit pixels to
    * the worker instead of copying them; the caller must not read them afterwards.
    */
-  async function convert({ imageData, settings, options = {}, handoff = null, releaseAfter = false, adjust = null, recipe = null, transfer = false }) {
+  async function convert({ imageData, settings, options = {}, handoff = null, releaseAfter = false, adjust = null, recipe = null, transfer = false, signal = null }) {
+    if (signal?.aborted) throw workerError('Conversion was aborted', WORKER_ABORTED);
 
     let w;
     try {
@@ -215,8 +220,28 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
           }
           reject(workerError(`Conversion worker timed out after ${Math.round(timeoutMs / 1000)}s`, WORKER_TIMEOUT));
         }, timeoutMs);
-        const settle = (fn) => (value) => { clearTimeout(timer); fn(value); };
+        const onAbort = () => {
+          if (!pending.has(id)) return;
+          pending.delete(id);
+          clearTimeout(timer);
+          // A worker busy with nothing else is stopped (above 16 MP it is
+          // single-use anyway); one that still owes other callers finishes this
+          // conversion and its reply is dropped.
+          if (worker === w && !pending.size) {
+            try { w.terminate(); } catch { /* already gone */ }
+            worker = null;
+            lastSource = lastAnalysis = lastLocalExposure = lastRecipe = null;
+            releaseWhenIdle = false;
+          }
+          reject(workerError('Conversion was aborted', WORKER_ABORTED));
+        };
+        const settle = (fn) => (value) => {
+          clearTimeout(timer);
+          signal?.removeEventListener?.('abort', onAbort);
+          fn(value);
+        };
         pending.set(id, { resolve: settle(resolve), reject: settle(reject) });
+        signal?.addEventListener?.('abort', onAbort, { once: true });
         try {
           w.postMessage(message, transfers);
           if (recipe) lastRecipe = recipe;
@@ -387,4 +412,7 @@ export function createConversionWorkerPool({ size = 2, workerFactory } = {}) {
 }
 
 export const convertFrameInWorker = createConversionWorkerClient();
+// The exact renders startFullResolutionRender asks for above 16 MP: a client
+// of their own, so aborting a superseded one never fails another caller.
+export const convertFullResolutionFrameInWorker = createConversionWorkerClient();
 export const convertPreviewFrameInWorker = createConversionWorkerClient({ cacheInput: true });

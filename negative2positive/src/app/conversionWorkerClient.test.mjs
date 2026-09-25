@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createConversionWorkerClient, WORKER_CRASHED, WORKER_UNAVAILABLE, CONVERSION_FAILED } from './conversionWorkerClient.js';
+import { createConversionWorkerClient, WORKER_CRASHED, WORKER_UNAVAILABLE, CONVERSION_FAILED, WORKER_ABORTED } from './conversionWorkerClient.js';
 import { isLargeImage } from './imageMemoryBudget.js';
 globalThis.ImageData = class {
   constructor(data, width, height) { Object.assign(this, { data, width, height }); }
@@ -256,4 +256,41 @@ console.log('conversionWorkerClient: 入力再利用・参照解除・再起動�
   assert.equal(copy.data.byteLength, 8);
   loupeWorkers.at(-1).complete(); await request;
   console.log('conversionWorkerClient: loupe recipe posted once per worker, frames transferred, dispose releases the worker');
+}
+
+{
+  // #237: an exact render that is superseded aborts. The worker it had to
+  // itself stops; the caller sees WORKER_ABORTED, never a crash.
+  const exact = [];
+  const lane = createConversionWorkerClient({ workerFactory: () => { const w = new FakeWorker(); exact.push(w); return w; } });
+  const large = new ImageData(new Uint8ClampedArray(4), 9536, 6336);
+  let controller = new AbortController();
+  let pending = lane({ imageData: large, settings: {}, options: {}, signal: controller.signal });
+  assert.ok(!('signal' in exact[0].messages[0]), 'the signal is not posted');
+  controller.abort();
+  await assert.rejects(pending, { code: WORKER_ABORTED });
+  assert.equal(exact[0].terminated, true, 'the idle worker stops at once');
+  // The next request starts a fresh worker; a late reply of the old one is dropped.
+  controller = new AbortController();
+  pending = lane({ imageData: large, settings: {}, options: {}, signal: controller.signal });
+  assert.equal(exact.length, 2);
+  exact[1].complete();
+  await pending;
+  controller.abort();
+  // Already aborted: nothing is posted.
+  await assert.rejects(lane({ imageData: large, settings: {}, options: {}, signal: controller.signal }), { code: WORKER_ABORTED });
+  assert.equal(exact.length, 2);
+  // A worker that still owes another caller finishes; only this request is dropped.
+  const shared = [];
+  const sharedLane = createConversionWorkerClient({ workerFactory: () => { const w = new FakeWorker(); shared.push(w); return w; } });
+  const other = sharedLane({ imageData: input, settings: {}, options: {} });
+  const abortable = new AbortController();
+  const dropped = sharedLane({ imageData: input, settings: {}, options: {}, signal: abortable.signal });
+  abortable.abort();
+  await assert.rejects(dropped, { code: WORKER_ABORTED });
+  assert.ok(!shared[0].terminated);
+  const firstId = shared[0].messages[0].id;
+  shared[0].onmessage({ data: { id: firstId, type: 'result', width: 1, height: 1, rgba: new Uint8ClampedArray(4).buffer } });
+  await other;
+  console.log('conversionWorkerClient: superseded exact renders abort with WORKER_ABORTED and stop an idle worker');
 }
