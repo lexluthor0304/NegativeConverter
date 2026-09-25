@@ -1,7 +1,8 @@
 // Camera-scanning smoke: a blank light-pad frame becomes the roll's flat
 // field and flattens a negative shot on the same pad; a lab scan is matched;
-// several shots of one frame merge into a quieter 16-bit file; the live loupe
-// converts Chrome's fake camera and captures a frame.
+// several shots of one frame merge into a quieter 16-bit file in a disposable
+// worker (a forced out-of-memory failure alerts, Cancel releases at once);
+// the live loupe converts Chrome's fake camera and captures a frame.
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 
@@ -222,6 +223,41 @@ async function runMultiShotScenario({ send, evaluate, waitFor, wait, fail, insta
       for (const record of records) for (const node of record.addedNodes) if (node.nodeType === 1) window.__cameraToasts.push(node.textContent);
     }).observe(document.getElementById('toastContainer'), { childList: true });
   })()`);
+  // #260: the merge runs in its own worker. Record each merge worker and its
+  // termination, the page's OpenCV state when it ends, the stage labels, app
+  // dialogs and unhandled rejections; a test hook injects a fault into the
+  // worker's start message.
+  await evaluate(`(() => {
+    const probe = window.__multiShot = { workers: [], labels: [], dialogs: [], rejections: [], fault: null };
+    const heap = () => { if (!window.cv?.Mat) return null; const m = new cv.Mat(1, 1, cv.CV_8UC1); const bytes = m.data.buffer.byteLength; m.delete(); return bytes; };
+    probe.heap = heap;
+    const Original = window.Worker;
+    window.Worker = class extends Original {
+      constructor(url, options) {
+        super(url, options);
+        if (!/multiShotWorker/.test(String(url))) return;
+        const record = { terminated: false, cvBefore: typeof window.cv, heapBefore: heap() };
+        probe.workers.push(record);
+        const terminate = this.terminate.bind(this);
+        this.terminate = () => {
+          if (!record.terminated) Object.assign(record, { terminated: true, cvAfter: typeof window.cv, heapAfter: heap() });
+          terminate();
+        };
+        const post = this.postMessage.bind(this);
+        this.postMessage = (message, transfer) => post(message?.type === 'start' && probe.fault ? { ...message, fault: probe.fault } : message, transfer);
+      }
+    };
+    new MutationObserver((records) => {
+      for (const record of records) for (const node of record.addedNodes) probe.labels.push(node.textContent);
+    }).observe(document.getElementById('batchProgressText'), { childList: true });
+    new MutationObserver((records) => {
+      for (const record of records) for (const node of record.addedNodes) {
+        const text = node.nodeType === 1 && node.querySelector('[data-app-dialog-message]');
+        if (text) probe.dialogs.push(text.textContent);
+      }
+    }).observe(document.body, { childList: true });
+    window.addEventListener('unhandledrejection', (event) => probe.rejections.push(String(event.reason?.stack || event.reason)));
+  })()`);
   const doc = await send('DOM.getDocument');
   const input = await send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector: '#fileInput' });
   // All four shots go in at once (the add-files picker is a transient input
@@ -277,6 +313,14 @@ async function runMultiShotScenario({ send, evaluate, waitFor, wait, fail, insta
   const merged = await grain();
   console.log('camera multi-shot grain:', JSON.stringify({ single, merged }));
   if (!(merged < single * 0.8)) fail(`averaging three shots did not reduce grain: ${single} -> ${merged}`);
+  const averageRun = await evaluate(`JSON.stringify({ workers: window.__multiShot.workers, labels: window.__multiShot.labels })`).then(JSON.parse);
+  console.log('camera multi-shot worker:', JSON.stringify(averageRun.workers), 'labels:', JSON.stringify([...new Set(averageRun.labels)]));
+  if (averageRun.workers.length !== 1 || !averageRun.workers[0].terminated) fail('the average merge should run in one worker, terminated afterwards: ' + JSON.stringify(averageRun.workers));
+  const pageOpenCvUnchanged = (w) => w.cvAfter === w.cvBefore && w.heapAfter === w.heapBefore;
+  if (!pageOpenCvUnchanged(averageRun.workers[0])) fail('the merge changed the page OpenCV state: ' + JSON.stringify(averageRun.workers[0]));
+  for (const label of [/^Decoding \d \/ 3$/, /^Aligning \d \/ 3$/, /^Merging \d+ %$/, /^Encoding…$/]) {
+    if (!averageRun.labels.some((text) => label.test(text))) fail(`progress label ${label} never shown: ${JSON.stringify(averageRun.labels)}`);
+  }
 
   await select([0, 3]);
   if (await evaluate(`document.getElementById('studioMergeHdr').disabled`)) fail('HDR merge should be enabled for the bracket pair');
@@ -284,7 +328,43 @@ async function runMultiShotScenario({ send, evaluate, waitFor, wait, fail, insta
   await waitFor('hdr merge finished', `${ready} && /^merged-hdr-/.test(document.getElementById('studioFilename').textContent)`, 180_000);
   const hdrToast = await evaluate(`(window.__cameraToasts || []).filter((t) => /Merged \\d+ shots/.test(t)).pop() || ''`);
   if (!/^Merged 2 shots into merged-hdr-/.test(hdrToast)) fail('hdr merge toast wrong: ' + hdrToast);
-  console.log('ok: three shifted noisy shots align and average into a quieter 16-bit merge; a bracket pair merges as HDR and opens as the selected file');
+  const hdrWorker = await evaluate(`JSON.stringify(window.__multiShot.workers[1] || null)`).then(JSON.parse);
+  if (!hdrWorker?.terminated || !pageOpenCvUnchanged(hdrWorker)) fail('the hdr merge worker was not terminated cleanly: ' + JSON.stringify(hdrWorker));
+
+  // A forced OpenCV allocation failure in the warp (the 60 MP failure mode)
+  // shows the memory alert, releases the UI and terminates the worker.
+  const queued = await evaluate(`document.querySelectorAll('.file-list-checkbox').length`);
+  await select([0, 1, 2]);
+  await evaluate(`window.__multiShot.fault = 'warp-memory'; document.getElementById('studioMergeAverage').click()`);
+  await waitFor('memory failure alert', `window.__multiShot.dialogs.some((t) => /too large to merge/.test(t)) && ${ready} && document.getElementById('batchProgressOverlay').style.display === 'none'`, 60_000);
+  const failedRun = await evaluate(`JSON.stringify({ worker: window.__multiShot.workers[2] || null, count: document.querySelectorAll('.file-list-checkbox').length, cancelHidden: document.getElementById('batchProgressCancel').hidden })`).then(JSON.parse);
+  if (!failedRun.worker?.terminated) fail('the failed merge left its worker running');
+  if (failedRun.count !== queued) fail('a failed merge must not add a file');
+  if (!failedRun.cancelHidden) fail('the Cancel button stayed visible after the failure');
+
+  // Cancel: the modal, the busy state and the worker go at once, and nothing
+  // is added later.
+  const dialogsBeforeCancel = await evaluate(`window.__multiShot.dialogs.length`);
+  await evaluate(`window.__multiShot.fault = null; document.getElementById('studioMergeAverage').click()`);
+  await waitFor('merge worker started', `window.__multiShot.workers.length === 4 && !document.getElementById('batchProgressCancel').hidden`, 30_000);
+  const cancelled = await evaluate(`(() => {
+    const started = performance.now();
+    document.getElementById('batchProgressCancel').click();
+    return {
+      ms: performance.now() - started,
+      overlayHidden: document.getElementById('batchProgressOverlay').style.display === 'none',
+      busy: !!document.body.dataset.studioBusy,
+      terminated: window.__multiShot.workers[3].terminated
+    };
+  })()`);
+  console.log('camera multi-shot cancel:', JSON.stringify(cancelled));
+  if (!(cancelled.ms < 200) || !cancelled.overlayHidden || cancelled.busy || !cancelled.terminated) fail('Cancel did not release the merge at once: ' + JSON.stringify(cancelled));
+  await wait(3000);
+  const afterCancel = await evaluate(`JSON.stringify({ count: document.querySelectorAll('.file-list-checkbox').length, dialogs: window.__multiShot.dialogs, rejections: window.__multiShot.rejections })`).then(JSON.parse);
+  if (afterCancel.count !== queued) fail('a cancelled merge added a file');
+  if (afterCancel.dialogs.length !== dialogsBeforeCancel) fail('Cancel must not raise an alert: ' + JSON.stringify(afterCancel.dialogs));
+  if (afterCancel.rejections.length) fail('unhandled rejections during the merges: ' + JSON.stringify(afterCancel.rejections));
+  console.log('ok: three shifted noisy shots align and average into a quieter 16-bit merge; a bracket pair merges as HDR and opens as the selected file; both run in a terminated worker without touching the page OpenCV; a forced memory failure alerts and Cancel releases at once');
 }
 
 // Live loupe: Chrome's fake camera (launch flags in smoke-test.mjs) is
