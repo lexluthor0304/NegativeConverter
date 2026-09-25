@@ -1,18 +1,23 @@
-/* Latin glyphs share the original design without downloading the full CJK font. */
+/* Latin glyphs share the original design without downloading the full CJK font.
+   It also carries the five Geometric Shapes the Studio draws (▶ ▸ ▼ ▾ ●). */
 @font-face {
   font-family: 'NC Studio Latin';
   src: url('/fonts/fusion-pixel/nc-studio-latin.woff2') format('woff2');
   font-style: normal;
   font-weight: 400;
   font-display: swap;
-  unicode-range: U+0020-024F, U+2000-206F, U+2190-21FF, U+2212;
+  unicode-range: U+0020-024F, U+2000-206F, U+2190-21FF, U+25B6, U+25B8, U+25BC, U+25BE, U+25CF;
 }
+/* The four locale faces share one cmap with no glyph in U+2200–U+230B
+   (nativePixelFontCoverage.js). Leaving that span out sends − and ≠ straight to
+   monospace, where they rendered anyway, instead of downloading a whole face. */
 @font-face {
   font-family: 'Fusion Pixel SC';
   src: url('/fonts/fusion-pixel/fusion-pixel-12px-proportional-zh_hans.otf.woff2') format('woff2');
   font-style: normal;
   font-weight: 400;
   font-display: swap;
+  unicode-range: U+0-21FF, U+230C-10FFFF;
 }
 @font-face {
   font-family: 'Fusion Pixel TC';
@@ -20,6 +25,7 @@
   font-style: normal;
   font-weight: 400;
   font-display: swap;
+  unicode-range: U+0-21FF, U+230C-10FFFF;
 }
 @font-face {
   font-family: 'Fusion Pixel JP';
@@ -27,6 +33,7 @@
   font-style: normal;
   font-weight: 400;
   font-display: swap;
+  unicode-range: U+0-21FF, U+230C-10FFFF;
 }
 @font-face {
   font-family: 'Fusion Pixel KR';
@@ -34,6 +41,7 @@
   font-style: normal;
   font-weight: 400;
   font-display: swap;
+  unicode-range: U+0-21FF, U+230C-10FFFF;
 }
 body.studio {
   --font-pixel: 'NC Studio Latin', 'Fusion Pixel SC', monospace;
@@ -45,9 +53,11 @@ body.studio {
   line-height: 1.6;
   font-synthesis: none;
 }
-html:lang(ja) body.studio, body.studio :lang(ja) { --font-pixel: 'Fusion Pixel JP', 'Fusion Pixel SC', monospace; }
-html:lang(ko) body.studio, body.studio :lang(ko) { --font-pixel: 'Fusion Pixel KR', 'Fusion Pixel SC', monospace; }
-html:lang(zh-Hant) body.studio, body.studio :lang(zh-Hant) { --font-pixel: 'Fusion Pixel TC', 'Fusion Pixel SC', monospace; }
+/* The faces share one cmap, so an SC fallback behind them could never supply
+   a glyph; it would only add a download. */
+html:lang(ja) body.studio, body.studio :lang(ja) { --font-pixel: 'Fusion Pixel JP', monospace; }
+html:lang(ko) body.studio, body.studio :lang(ko) { --font-pixel: 'Fusion Pixel KR', monospace; }
+html:lang(zh-Hant) body.studio, body.studio :lang(zh-Hant) { --font-pixel: 'Fusion Pixel TC', monospace; }
 body.studio :is(button, input, select, textarea, summary, code, pre) { font-family: var(--font-pixel); font-synthesis: none; }
 body.studio :is(.zoom-indicator, .loupe-info, .autoframe-diagnostics, .film-base-values, .debug-widget, .loading-phase-text) {
   font-family: var(--font-pixel);
