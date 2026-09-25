@@ -4,6 +4,7 @@ import vm from 'node:vm';
 import { downsampleImageDataForMaxDim } from './imageDataOps.js';
 import { createAdjustedPhotoPreview } from './photoPreview.js';
 import { applyPreparedAdjustmentsToBuffer, applyPreparedAdjustmentsToBuffer16 } from './adjustmentPipeline.js';
+import { markOwnedPlanes, planeBuffersOf } from './planeRelease.js';
 
 // Execute the real orchestration with actual downsampling/final adjustments.
 // Only expensive conversion, Lensfun and AI operations are substituted. Their
@@ -80,7 +81,8 @@ function fixture({ lens = false, brush = false, dust = false, width = 600, heigh
       (options.bitDepth === 16 ? applyPreparedAdjustmentsToBuffer16 : applyPreparedAdjustmentsToBuffer)(source, settings, output);
       return output;
     },
-    safeStorageGet: () => 'off'
+    safeStorageGet: () => 'off',
+    markOwnedPlanes, planeBuffersOf
   });
   vm.runInContext(runtime, context);
   return { context, calls, image, corrected, mapping, settings, file };

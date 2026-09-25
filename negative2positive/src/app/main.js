@@ -63,7 +63,7 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
     import { layoutContactSheet, pagesFor, renderContactSheetPage, contactSheetHeader, normalizeLayoutId, normalizePageId } from './contactSheet.js';
 
     import { convertFrameWithRouter, resolveConversionMode } from '../pipeline/conversionRouter.js';
-    import { convertFrameInWorker, convertPreviewFrameInWorker, createConversionWorkerPool, CONVERSION_FAILED, WORKER_TIMEOUT } from './conversionWorkerClient.js';
+    import { convertFrameInWorker, convertPreviewFrameInWorker, createConversionWorkerPool, CONVERSION_FAILED, WORKER_TIMEOUT, isConversionInputLost } from './conversionWorkerClient.js';
     import { planBatchParallelism, planPng16BandWorkers, runBatchPipeline, planGeometryBandsInFlight } from './batchExportScheduler.js';
     import { displayPreviewSize, resizeDisplayPreview, updateDisplayPreviewRect } from './displayPreview.js';
     import { createCoreReprocessGates, previewDispatchAction, CORE_FULL_REPROCESS_DELAY_MS } from './coreReprocessDispatcher.js';
@@ -77,7 +77,7 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       applyPreparedAdjustmentsToPlane16,
       areAdjustmentsIdentity
     } from './adjustmentPipeline.js';
-    import { requestExportGainMap } from './exportGainMap.js';
+    import { gainMapInputsMatch, requestExportGainMap } from './exportGainMap.js';
     import { buildLinearPositive, buildLinearPositiveAsync, encodeLinearDngBlob } from './linearDng.js';
     import { inpaintWithModel, fetchModelBytes, inpaintBackends, DEFAULT_MODEL_URL, TILE as AI_TILE, CONTEXT as AI_CONTEXT } from './aiInpaint.js';
     import { createInpaintSessionInWorker } from './aiInpaintWorkerClient.js';
@@ -133,17 +133,28 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       workerApplyAdjustments,
       workerApplyAdjustments16,
       workerGainMap16,
+      workerAdjust16AndEncode,
+      workerEncodeImage,
       workerEncodePng16,
       workerEncodeTiff,
       isWorkerAvailable,
       isExportInputLostError,
       isAbortError,
+      createExportWorkerBridge,
       createExportWorkerPool,
       createPng16BandPool,
       terminateWorker as terminateExportWorker,
       exportWorkerPendingCount,
       isExportWorkerAlive
     } from '../workers/workerBridge.js';
+    import {
+      markOwnedPlanes,
+      markLiveMutableBuffer,
+      planeBuffersOf,
+      releaseOwnedPlanes,
+      setLiveReferenceProbe
+    } from './planeRelease.js';
+    import { registerEvictablePlane } from './evictablePlanes.js';
 
     const DEBUG_UI = new URLSearchParams(window.location.search).get('debug') === '1';
     const WEBGL_DEBUG_ERRORS = new URLSearchParams(window.location.search).has('debugGL');
@@ -152,9 +163,11 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       debug: DEBUG_UI,
       userTiming: readPerfFlags(window.location.search).userTiming
     });
-    // The single export path's adjustment/encode workers; a batch export
-    // passes its own pool through `bridge` instead.
-    const defaultExportWorkers = { workerApplyAdjustments, workerApplyAdjustments16, workerGainMap16, workerEncodePng16, workerEncodeTiff, isWorkerAvailable };
+    // The default export bridge, for the callers without an operation of their
+    // own (contact sheet, multi-shot merge, watch folder). A single export
+    // makes its own bridge and a batch export its own pool (#250); both pass
+    // it through `bridge`.
+    const defaultExportWorkers = { workerApplyAdjustments, workerApplyAdjustments16, workerGainMap16, workerAdjust16AndEncode, workerEncodeImage, workerEncodePng16, workerEncodeTiff, isWorkerAvailable };
     // 暗室 UI に一本化。古い workspace パラメーターで別画面へ分岐しない。
     let studioAutoFrameRunning = false;
     let studioWorkspace = null;
@@ -5286,6 +5299,8 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
 
       const source = state.previewSourceImageData || state.processedImageData;
       previewAdjustedBuffer = ensureImageDataBuffer(previewAdjustedBuffer, source.width, source.height);
+      // Rewritten in place on every render: an export copies it in one task.
+      markLiveMutableBuffer(previewAdjustedBuffer);
       applyAdjustmentsToBuffer(source, state, previewAdjustedBuffer, 'preview');
 
       if (source !== state.processedImageData) {
@@ -5334,6 +5349,8 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
 
       const source = state.processedImageData;
       fullAdjustedBuffer = ensureImageDataBuffer(fullAdjustedBuffer, source.width, source.height);
+      // Rewritten in place on every full render: an export copies it in one task.
+      markLiveMutableBuffer(fullAdjustedBuffer);
       applyAdjustmentsToBuffer(source, state, fullAdjustedBuffer, 'full');
       state.displayImageData = fullAdjustedBuffer;
       renderAdjustedImageDataToMainCanvas(fullAdjustedBuffer, source);
@@ -6118,6 +6135,44 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
         state.fullResolutionPending = false;
       }
     }
+
+    // The full-resolution `processedImageData` an export (or a repair) leaves
+    // resident, about 725 MB at 60 MP, is the one active-editor plane that may
+    // be given back (#250): demoted to the preview plane, as right after the
+    // photo opened, the next export or repair converts it again. When to do
+    // it is the memory budget's policy (#258); this refuses while anything
+    // needs the full plane. History snapshots that still reference it keep
+    // it alive.
+    function canDemoteFullResolutionPlane() {
+      return Boolean(state.processedImageData && !state.processedImageDataIsPreview
+        && state.previewSourceImageData && state.previewSourceImageData !== state.processedImageData
+        && state.currentStep >= 3 && usesSilverCoreConversion(state) && hasSeparateConversionPreview()
+        && !state.fullResolutionPromise && !processNegativeInFlight && !singleExportActive
+        && !coreReprocessBusy() && !coreReprocessTimer && !state.dustRemoval.processing
+        && !hasFrameRepairs() && !state.cropping && !state.beforeAfterActive);
+    }
+
+    function fullResolutionPlaneBytes() {
+      if (!state.processedImageData || state.processedImageDataIsPreview) return 0;
+      return planeBuffersOf(state.processedImageData).reduce((sum, buffer) => sum + buffer.byteLength, 0);
+    }
+
+    function demoteFullResolutionPlane() {
+      if (!canDemoteFullResolutionPlane()) return 0;
+      const bytes = fullResolutionPlaneBytes();
+      applyProcessedImageToState(state.previewSourceImageData, { previewOnly: true });
+      state.fullResolutionPending = true;
+      // The CPU display buffer was the full plane's rendering.
+      fullAdjustedBuffer = null;
+      updatePreview();
+      return bytes;
+    }
+
+    registerEvictablePlane('processedImageData', {
+      bytes: fullResolutionPlaneBytes,
+      canEvict: canDemoteFullResolutionPlane,
+      evict: demoteFullResolutionPlane
+    });
 
     function scheduleCoreReprocess(options = {}) {
       const full = Boolean(options.full);
@@ -7389,6 +7444,37 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
         || (!navigator.deviceMemory && navigator.maxTouchPoints > 1) ? 128 : 768) * 1024 * 1024
     });
     const photoPreviews = createPhotoSessionCache({ maxBytes: 48 * 1024 * 1024 });
+
+    // Every buffer the editor still references (#250): live `state.*` planes,
+    // the display buffers, the dust planes, history snapshots and photo
+    // sessions. An export never transfers or releases one of these, whatever
+    // stamp it carries. Compared by buffer: an export wrapper shares
+    // `state.displayImageData.data`, an identity recipe shares the processed plane.
+    function liveEditorBuffers() {
+      const buffers = new Set();
+      const addPlanes = (value) => {
+        if (!value || typeof value !== 'object') return;
+        if (value instanceof ArrayBuffer) { buffers.add(value); return; }
+        if (ArrayBuffer.isView(value)) { if (value.buffer instanceof ArrayBuffer) buffers.add(value.buffer); return; }
+        const hasPlane = ArrayBuffer.isView(value.data) || (value.__image16 && ArrayBuffer.isView(value.__image16.data));
+        if (!hasPlane) return;
+        for (const buffer of planeBuffersOf(value)) buffers.add(buffer);
+        if (value.__analysisPreview) for (const buffer of planeBuffersOf(value.__analysisPreview)) buffers.add(buffer);
+      };
+      for (const value of Object.values(state)) addPlanes(value);
+      for (const value of Object.values(state.dustRemoval || {})) addPlanes(value);
+      addPlanes(fullAdjustedBuffer);
+      addPlanes(previewAdjustedBuffer);
+      for (const snapshot of [...undoStack, ...redoStack]) {
+        for (const value of Object.values(snapshot?.refs || {})) addPlanes(value);
+      }
+      for (const cache of [photoSessions, photoPreviews]) {
+        const held = typeof cache.buffers === 'function' ? cache.buffers() : cache.buffers;
+        for (const buffer of held || []) buffers.add(buffer);
+      }
+      return buffers;
+    }
+    setLiveReferenceProbe(liveEditorBuffers);
 
     // Exact, not memoised: equal only when the JSON of these values is equal
     // (settingsKey.js), with the curve LUTs of settings and studioColors
@@ -11845,21 +11931,24 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       if (!state.exportSprocketHolesEnabled) return imageData;
       const options = getSprocketFrameComposeOptions(settings, position);
       await ensureSprocketFrameFonts(options);
-      return composeSprocketFrame(imageData, options);
+      // A fresh frame this export owns (#250).
+      return markOwnedPlanes(composeSprocketFrame(imageData, options));
     }
 
-    async function getCurrentExportImageData({ bitDepth = 8 } = {}) {
+    // `planeOnly` (#250): a 16-bit TIFF/PNG without the sprocket frame reads
+    // only the adjusted plane, so no 8-bit mirror is built for it.
+    async function getCurrentExportImageData({ bitDepth = 8, bridge = null, planeOnly = false } = {}) {
       await ensureFullResolutionReadyForExport();
       // A 16-bit export re-runs the adjustment stage on the engine's 16-bit
       // plane instead of reusing the 8-bit display buffer.
       if (bitDepth === 16 && state.currentStep >= 3 && state.processedImageData?.__image16) {
-        return await applyAdjustmentsWithSettings(state.processedImageData, state, { bitDepth: 16 });
+        return await applyAdjustmentsWithSettings(state.processedImageData, state, { bitDepth: 16, bridge, planeOnly });
       }
       if (state.currentStep >= 3 && isDisplayImageDataFullResolution()) {
         return state.displayImageData;
       }
       if (state.processedImageData && state.currentStep >= 3) {
-        return await applyAdjustmentsWithSettings(state.processedImageData, state);
+        return await applyAdjustmentsWithSettings(state.processedImageData, state, { bridge });
       }
       if (state.sprocketPreviewEnabled || state.exportSprocketHolesEnabled) {
         const sourceData = state.croppedImageData || state.originalImageData;
@@ -11872,7 +11961,8 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       return null;
     }
 
-    async function renderCurrentImageDataForExport(exportInfo = null) {
+    // The prepare step of a single export: full resolution plus AI/dust repair.
+    async function prepareCurrentImageForExport() {
       await ensureFullResolutionReadyForExport();
       // A quick export after a stroke must use MI-GAN, not its temporary preview.
       // A committed repair stamped with the current recipe is that result
@@ -11914,6 +12004,11 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
         dustAiRefresh.rects.length = 0;
         applyDustResultToState();
       }
+    }
+
+    // The adjust step. `prepared` skips the prepare step a caller already ran.
+    async function renderCurrentImageDataForExport(exportInfo = null, { bridge = null, planeOnly = false, prepared = false } = {}) {
+      if (!prepared) await prepareCurrentImageForExport();
       // ensureFullRender exists to leave a full-resolution CPU buffer in
       // state.displayImageData, which getCurrentExportImageData then reuses.
       // Skip it when there is nothing to reuse or it is already current: with
@@ -11928,7 +12023,7 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       if (!displayAlreadyCurrent && !previewIsGpu) {
         ensureFullRender();
       }
-      const imageData = await getCurrentExportImageData({ bitDepth: exportInfo?.bitDepth || 8 });
+      const imageData = await getCurrentExportImageData({ bitDepth: exportInfo?.bitDepth || 8, bridge, planeOnly });
       if (!imageData) throw new Error('No image available for export.');
       if (exportInfo?.format === 'jpeg' && safeStorageGet('nc_hdr_gain_map_v1') !== 'off' && state.processedImageData?.__image16) {
         if (state.currentStep >= 3) {
@@ -11940,13 +12035,72 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
           const sdr = imageData === state.displayImageData
             ? new ImageData(imageData.data, imageData.width, imageData.height)
             : imageData;
-          sdr.__gainMap = startExportGainMap(state.processedImageData, sdr, state);
+          // The unadjusted plane and the recipe, captured now; imageDataToBlob
+          // sends them with the SDR encode (#250). The plane is the editor's:
+          // it is copied, never transferred.
+          sdr.__gainMapSource = { processed: state.processedImageData, adjustmentSettings: buildAdjustmentSettings(state), transferPlane: false };
           return sdr;
         }
-        const high = await getCurrentExportImageData({ bitDepth: 16 });
+        const high = await getCurrentExportImageData({ bitDepth: 16, bridge });
         if (high?.__image16) imageData.__image16 = high.__image16;
       }
       return imageData;
+    }
+
+    // A 16-bit TIFF/PNG without the sprocket frame (#250): one worker request
+    // adjusts the unadjusted plane and encodes it, so the adjusted plane never
+    // exists on this thread. PNG metadata is attached here, at Blob level, as
+    // imageDataToBlob does. Null: the caller runs the adjust + encode path.
+    async function encodeFused16(source, adjustmentSettings, exportInfo, { bridge = null, metadata = null, onProgress = null, signal = null, transferPlane = false } = {}) {
+      const exportWorkers = bridge || defaultExportWorkers;
+      if (exportInfo.bitDepth !== 16 || (exportInfo.format !== 'tiff' && exportInfo.format !== 'png')) return null;
+      if (!source?.__image16 || typeof exportWorkers.workerAdjust16AndEncode !== 'function' || !exportWorkers.isWorkerAvailable()) return null;
+      const trace = createPerfTrace('imageDataToBlob', {
+        format: exportInfo.format,
+        bitDepth: exportInfo.bitDepth,
+        pixels: getImageDataPixelCount(source),
+        fused: true
+      });
+      const blob = await exportWorkers.workerAdjust16AndEncode(source, adjustmentSettings, {
+        format: exportInfo.format,
+        metadata: exportInfo.format === 'tiff' ? metadata : null,
+        // PNG16: the band encoder's settings, so the file matches the other paths.
+        ...(exportInfo.format === 'png' ? png16EncodeSettings() : {}),
+        transferPlane,
+        onProgress,
+        signal
+      });
+      if (!blob) return null;
+      trace.end({ bytes: blob.size || 0, worker: true });
+      return exportInfo.format === 'png' ? attachMetadataToBlob(blob, 'png', metadata) : blob;
+    }
+
+    // Render and encode the open photo with `bridge`. `transferPlanes` lets
+    // the worker take the planes this export allocated (never an editor
+    // plane); `ownedPlanes` collects them for release when the export ends.
+    // `png16Pool` (#257): a PNG16 is encoded by the band pool from the
+    // adjusted plane instead of the fused request; `signal` cancels the
+    // worker requests from the encode on.
+    async function renderAndEncodeCurrentImage(exportInfo, { bridge, png16Pool = null, signal = null, metadata = null, onProgress = null, onEncoding = null, transferPlanes = true, ownedPlanes = [] }) {
+      const planeOnly = exportInfo.bitDepth === 16 && (exportInfo.format === 'tiff' || exportInfo.format === 'png')
+        && !state.exportSprocketHolesEnabled;
+      const fused = planeOnly && (exportInfo.format === 'tiff' || !png16Pool);
+      if (fused) {
+        await prepareCurrentImageForExport();
+        // getCurrentExportImageData's 16-bit trigger: the editor's plane is
+        // sent as a sliced copy (it belongs to the editor).
+        if (state.currentStep >= 3 && state.processedImageData?.__image16) {
+          onEncoding?.();
+          const blob = await encodeFused16(state.processedImageData, buildAdjustmentSettings(state), exportInfo, { bridge, metadata, onProgress, signal });
+          if (blob) return blob;
+        }
+      }
+      const imageData = await renderCurrentImageDataForExport(exportInfo, { bridge, planeOnly, prepared: fused });
+      ownedPlanes.push(imageData);
+      const outputImageData = await applySprocketFrameForExport(imageData, exportInfo);
+      if (outputImageData !== imageData) ownedPlanes.push(outputImageData);
+      onEncoding?.();
+      return imageDataToBlob(outputImageData, exportInfo.format, state.jpegQuality, exportInfo.bitDepth, onProgress, metadata, { bridge, png16Pool, signal, transferPlane: transferPlanes });
     }
 
     function notifyExportError(err) {
@@ -11988,6 +12142,14 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       let result;
 
       await overlay.show({ title: lang.loadingExporting });
+      // This export's own worker, terminated when the export ends (#250): its
+      // dead planes go with it instead of waiting for the next export. Every
+      // request is awaited before the `finally`, so terminating there rejects
+      // nothing on the normal path.
+      const bridge = createExportWorkerBridge();
+      // Its PNG16 band pool (#257), for the same lifetime.
+      const png16Pool = exportInfo.format === 'png' && exportInfo.bitDepth === 16 ? createOperationPng16Pool(1) : null;
+      const ownedPlanes = [];
       try {
         overlay.updateProgress(5, lang.loadingAdjusting);
 
@@ -11995,23 +12157,34 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
           persistCurrentFileSettings({ silent: true, force: true });
           overlay.updateProgress(40, lang.loadingEncoding);
           blob = renderLinearDngBlob(state.conversionSourceImageData || state.croppedImageData || state.originalImageData, state, Math.max(0, state.currentFileIndex));
-        } else if (state.currentStep >= 3 && state.processedImageData) {
-          persistCurrentFileSettings({ silent: true, force: true });
-          const imageData = await renderCurrentImageDataForExport(exportInfo);
-          const outputImageData = await applySprocketFrameForExport(imageData, exportInfo);
-          overlay.updateProgress(60, lang.loadingEncoding);
-          allowCancel();
-          blob = await imageDataToBlob(outputImageData, exportInfo.format, state.jpegQuality, exportInfo.bitDepth, (pct) => {
-            overlay.updateProgress(60 + pct * 0.35, lang.loadingEncoding);
-          }, exportMetadataFor(state, Math.max(0, state.currentFileIndex)), { signal: cancel.signal });
         } else {
-          overlay.updateProgress(50, lang.loadingEncoding);
-          const imageData = await renderCurrentImageDataForExport(exportInfo);
-          const outputImageData = await applySprocketFrameForExport(imageData, exportInfo);
-          allowCancel();
-          blob = await imageDataToBlob(outputImageData, exportInfo.format, state.jpegQuality, exportInfo.bitDepth, (pct) => {
-            overlay.updateProgress(50 + pct * 0.45, lang.loadingEncoding);
-          }, null, { signal: cancel.signal });
+          const full = state.currentStep >= 3 && state.processedImageData;
+          if (full) persistCurrentFileSettings({ silent: true, force: true });
+          else overlay.updateProgress(50, lang.loadingEncoding);
+          const start = full ? 60 : 50;
+          const span = full ? 0.35 : 0.45;
+          const render = (transferPlanes) => renderAndEncodeCurrentImage(exportInfo, {
+            bridge,
+            png16Pool,
+            signal: cancel.signal,
+            transferPlanes,
+            ownedPlanes,
+            metadata: full ? exportMetadataFor(state, Math.max(0, state.currentFileIndex)) : null,
+            onEncoding: () => {
+              if (full) overlay.updateProgress(60, lang.loadingEncoding);
+              allowCancel();
+            },
+            onProgress: (pct) => overlay.updateProgress(start + pct * span, lang.loadingEncoding)
+          });
+          try {
+            blob = await render(true);
+          } catch (err) {
+            // The worker died holding a plane this export made. The editor's
+            // planes were only ever copied, so the frame renders again.
+            if (!isExportInputLostError(err) || cancel.signal.aborted) throw err;
+            console.warn('Export plane lost with the export worker; rendering the frame again:', err?.message || err);
+            blob = await render(false);
+          }
         }
         if (cancel.signal.aborted) throw makeExportCancelledError();
 
@@ -12039,6 +12212,9 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
         throw err;
       } finally {
         overlay.setCancelable(false);
+        bridge.terminateWorker();
+        if (png16Pool) png16Pool.dispose();
+        releaseOwnedPlanes(...ownedPlanes);
         overlay.hide();
       }
 
@@ -12380,35 +12556,43 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
     // image carries one) so the export gets real 16-bit samples; 8 keeps the
     // LUT stage the preview uses. `planeOnly` (16 bits only) returns just
     // `{ width, height, __image16 }` for callers that read only the plane.
+    // `transferPlane` (#250) lets the worker take the input plane when this
+    // export owns it and nothing reads it again; it may then reject with
+    // ExportInputLostError.
     async function applyAdjustmentsWithSettings(imageData, settings, options = {}) {
       return applyPreparedAdjustmentsWithWorkers(imageData, buildAdjustmentSettings(settings), options);
     }
 
-    async function applyPreparedAdjustmentsWithWorkers(imageData, adjustmentSettings, { bitDepth = 8, bridge = null, planeOnly = false } = {}) {
+    async function applyPreparedAdjustmentsWithWorkers(imageData, adjustmentSettings, { bitDepth = 8, bridge = null, planeOnly = false, transferPlane = false } = {}) {
       const wants16 = bitDepth === 16 && Boolean(imageData.__image16 && imageData.__image16.data instanceof Uint16Array);
       const planeOnlyPass = wants16 && planeOnly;
       const exportWorkers = bridge || defaultExportWorkers;
+      // A transferred 8-bit frame that comes back is a new ImageData.
+      let source = imageData;
 
       // Try Worker for large images (>1MP)
       if (imageData.width * imageData.height > 1_000_000 && exportWorkers.isWorkerAvailable()) {
         const result = wants16
-          ? await exportWorkers.workerApplyAdjustments16(imageData, adjustmentSettings, 'full', { planeOnly: planeOnlyPass })
-          : await exportWorkers.workerApplyAdjustments(imageData, adjustmentSettings, 'full');
+          ? await exportWorkers.workerApplyAdjustments16(imageData, adjustmentSettings, 'full', { planeOnly: planeOnlyPass, transferPlane })
+          : await exportWorkers.workerApplyAdjustments(imageData, adjustmentSettings, 'full', { transferPlane, onRestore: (frame) => { source = frame; } });
         if (result) return result;
       }
 
-      // Fallback to main thread
+      // Fallback to main thread. The outputs are fresh: this export owns them.
       if (planeOnlyPass) {
         // No 8-bit output and no downconvert. A plane of another size yields
         // none, as the full pass attaches none then either.
-        const plane16 = applyPreparedAdjustmentsToPlane16(imageData, adjustmentSettings, { quality: 'full' });
-        return { width: imageData.width, height: imageData.height, __image16: plane16 };
+        const plane16 = applyPreparedAdjustmentsToPlane16(source, adjustmentSettings, { quality: 'full' });
+        if (plane16) markOwnedPlanes(plane16.data);
+        return { width: source.width, height: source.height, __image16: plane16 };
       }
-      const output = new ImageData(new Uint8ClampedArray(imageData.data.length), imageData.width, imageData.height);
+      const output = new ImageData(new Uint8ClampedArray(source.data.length), source.width, source.height);
+      markOwnedPlanes(output.data);
       if (wants16) {
-        applyPreparedAdjustmentsToBuffer16(imageData, adjustmentSettings, output, { quality: 'full' });
+        applyPreparedAdjustmentsToBuffer16(source, adjustmentSettings, output, { quality: 'full' });
+        if (output.__image16) markOwnedPlanes(output.__image16.data);
       } else {
-        applyPreparedAdjustmentsToBuffer(imageData, adjustmentSettings, output, {
+        applyPreparedAdjustmentsToBuffer(source, adjustmentSettings, output, {
           quality: 'full',
           lutScratch: adjustmentLutScratch
         });
@@ -12416,17 +12600,19 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       return output;
     }
 
-    // The JPEG gain map for `sdr`, started now and awaited by imageDataToBlob
-    // after the SDR encode. The export worker runs the 16-bit pass and the map;
-    // the fallback runs the plane-only pass and the same table map here.
-    function startExportGainMap(processed, sdr, settings, { bridge = null, transferPlane = false } = {}) {
+    // The JPEG gain map for `sdr` on its own request: the canvas fallback of
+    // imageDataToBlob starts it just before the main-thread SDR encode, so the
+    // map still overlaps that encode. The export worker runs the 16-bit pass
+    // and the map; without it the plane-only pass and the same table map run
+    // here. `adjustmentSettings` is the recipe captured at the adjust stage.
+    function startExportGainMap(processed, sdr, adjustmentSettings, { bridge = null, transferPlane = false } = {}) {
       return requestExportGainMap({
         processed,
         sdr,
-        adjustmentSettings: buildAdjustmentSettings(settings),
+        adjustmentSettings,
         workers: bridge || defaultExportWorkers,
         transferPlane,
-        adjustPlane16: (adjustmentSettings) => applyPreparedAdjustmentsWithWorkers(processed, adjustmentSettings, { bitDepth: 16, bridge, planeOnly: true })
+        adjustPlane16: (prepared) => applyPreparedAdjustmentsWithWorkers(processed, prepared, { bitDepth: 16, bridge, planeOnly: true })
       });
     }
 
@@ -12509,7 +12695,10 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       return size > 0 && typeof Worker === 'function' ? createPng16BandPool({ size }) : null;
     }
 
-    async function imageDataToBlob(imageData, format = null, quality = null, bitDepth = null, onProgress = null, metadata = null, { bridge = null, png16Pool = null, signal = null } = {}) {
+    // `transferPlane` (#250): the worker may take the frame's planes when this
+    // export owns them (the bridge checks the stamp and refuses editor
+    // planes); the call may then reject with ExportInputLostError.
+    async function imageDataToBlob(imageData, format = null, quality = null, bitDepth = null, onProgress = null, metadata = null, { bridge = null, png16Pool = null, signal = null, transferPlane = false } = {}) {
       const exportInfo = getExportInfo(format || state.exportFormat, bitDepth ?? state.exportBitDepth);
       const jpegQuality = quality !== null ? quality : state.jpegQuality;
       const exportWorkers = bridge || defaultExportWorkers;
@@ -12519,36 +12708,40 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
         pixels: getImageDataPixelCount(imageData)
       });
       let blob = null;
+      // A transferred 8-bit frame that the worker hands back is a new ImageData.
+      let frame = imageData;
+      const onRestore = (restored) => { frame = restored; };
 
       if (exportInfo.format === 'tiff') {
         // Try Worker first for TIFF encoding
         if (exportWorkers.isWorkerAvailable()) {
-          blob = await exportWorkers.workerEncodeTiff(imageData, exportInfo.bitDepth, { onProgress, signal }, metadata);
+          blob = await exportWorkers.workerEncodeTiff(frame, exportInfo.bitDepth, { onProgress, signal, transferPlane, onRestore }, metadata);
           if (blob) {
             trace.end({ bytes: blob.size || 0, worker: true });
             return blob;
           }
         }
         const { encodeTiffBlob } = await getExportImageEncoders();
-        blob = encodeTiffBlob(imageData, exportInfo.bitDepth, metadata);
+        blob = encodeTiffBlob(frame, exportInfo.bitDepth, metadata);
         trace.end({ bytes: blob.size || 0, worker: false });
         return blob;
       }
       if (exportInfo.format === 'png' && exportInfo.bitDepth === 16) {
         // The row bands go to the band pool; if it cannot run them, one
         // export worker encodes them in turn, then the main thread. All three
-        // write the same bytes.
+        // write the same bytes. The pool copies its bands; the single worker
+        // may take the frame's plane (#250).
         const settings = png16EncodeSettings();
         const ownPool = !png16Pool && !bridge ? createOperationPng16Pool(1) : null;
         const pool = png16Pool || ownPool;
         let bands = 0;
         try {
           if (pool) {
-            blob = await pool.encode(imageData, { ...settings, onProgress, signal });
+            blob = await pool.encode(frame, { ...settings, onProgress, signal });
             if (blob) bands = pool.size;
           }
           if (!blob && exportWorkers.isWorkerAvailable()) {
-            blob = await exportWorkers.workerEncodePng16(imageData, { ...settings, onProgress, signal });
+            blob = await exportWorkers.workerEncodePng16(frame, { ...settings, onProgress, signal, transferPlane, onRestore });
             if (blob) bands = 1;
           }
         } finally {
@@ -12559,32 +12752,57 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
           return attachMetadataToBlob(blob, 'png', metadata);
         }
         const { encodePng16Blob } = await getExportImageEncoders();
-        blob = encodePng16Blob(imageData, settings);
+        blob = encodePng16Blob(frame, settings);
         trace.end({ bytes: blob.size || 0, worker: false });
         return attachMetadataToBlob(blob, 'png', metadata);
       }
 
-      if (exportInfo.format === 'jpeg') {
-        blob = await imageDataToCanvasBlob(imageData, 'image/jpeg', jpegQuality / 100);
-        trace.end({ bytes: blob.size || 0, worker: false });
-        blob = await attachMetadataToBlob(blob, 'jpeg', metadata);
-        // `__gainMap` is the map started before the SDR encode (null: no map);
-        // a caller that attaches only a plane still gets it computed here.
-        if (safeStorageGet('nc_hdr_gain_map_v1') !== 'off' && (imageData.__gainMap || imageData.__image16)) {
-          const { computeGainMap, packGainMapJpeg } = await import('./gainMapJpeg.js');
-          const map = imageData.__gainMap
-            ? await imageData.__gainMap
-            : computeGainMap(imageData, imageData.__image16);
-          if (map) {
-            const gain = await imageDataToCanvasBlob(new ImageData(map.data, map.width, map.height), 'image/jpeg', 0.85);
-            blob = await packGainMapJpeg(blob, gain, map);
+      // PNG8 and JPEG (#250): OffscreenCanvas in the export worker, with the
+      // JPEG gain map in the same request; the main thread keeps only the
+      // Blob-level work (metadata, gain-map container).
+      const jpeg = exportInfo.format === 'jpeg';
+      const mimeType = jpeg ? 'image/jpeg' : 'image/png';
+      const canvasQuality = jpeg ? jpegQuality / 100 : undefined;
+      const wantsGainMap = jpeg && safeStorageGet('nc_hdr_gain_map_v1') !== 'off';
+      // `__gainMapSource`: the unadjusted plane and the recipe captured at the
+      // adjust stage (a map only when they match the frame, as before). A
+      // caller that attaches only an adjusted plane gets its map from it.
+      const gainSource = wantsGainMap ? frame.__gainMapSource || null : null;
+      const gainRequest = gainSource
+        ? (gainMapInputsMatch(gainSource.processed, frame)
+          ? { source: gainSource.processed, settings: gainSource.adjustmentSettings, transferPlane: Boolean(gainSource.transferPlane) }
+          : null)
+        : (wantsGainMap && frame.__image16 ? { plane16: frame.__image16, settings: null } : null);
+      if (exportWorkers.isWorkerAvailable() && typeof exportWorkers.workerEncodeImage === 'function') {
+        const encoded = await exportWorkers.workerEncodeImage(frame, { mimeType, quality: canvasQuality, gainMap: gainRequest, transferPlane, onRestore, onProgress, signal });
+        if (encoded) {
+          trace.end({ bytes: encoded.blob.size || 0, worker: true });
+          blob = await attachMetadataToBlob(encoded.blob, jpeg ? 'jpeg' : 'png', metadata);
+          if (jpeg && encoded.gain) {
+            const { packGainMapJpeg } = await import('./gainMapJpeg.js');
+            blob = await packGainMapJpeg(blob, encoded.gain.blob, encoded.gain);
           }
+          return blob;
         }
-        return blob;
       }
-      blob = await imageDataToCanvasBlob(imageData, 'image/png');
+
+      // Main-thread canvas encode. The gain map's own worker pass starts first
+      // so it still overlaps the canvas encode.
+      const pendingMap = gainRequest && gainRequest.source
+        ? startExportGainMap(gainRequest.source, frame, gainRequest.settings, { bridge, transferPlane: gainRequest.transferPlane })
+        : null;
+      blob = await imageDataToCanvasBlob(frame, mimeType, canvasQuality);
       trace.end({ bytes: blob.size || 0, worker: false });
-      return attachMetadataToBlob(blob, 'png', metadata);
+      blob = await attachMetadataToBlob(blob, jpeg ? 'jpeg' : 'png', metadata);
+      if (gainRequest) {
+        const { computeGainMap, packGainMapJpeg } = await import('./gainMapJpeg.js');
+        const map = pendingMap ? await pendingMap : computeGainMap(frame, gainRequest.plane16);
+        if (map) {
+          const gain = await imageDataToCanvasBlob(new ImageData(map.data, map.width, map.height), 'image/jpeg', 0.85);
+          blob = await packGainMapJpeg(blob, gain, map);
+        }
+      }
+      return blob;
     }
 
     // Analog metadata for one exported frame: the roll fields plus this file's
@@ -12710,7 +12928,15 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       };
     }
 
-    // Process a file with its own settings or auto-detect
+    // Process a file with its own settings or auto-detect.
+    //
+    // Planes (#250): this function is shared with the thumbnail lane (which
+    // borrows a photo session's base), the contact sheet and the watch folder,
+    // so it never transfers or frees a plane itself. It stamps the planes it
+    // allocates as export-owned and, when the caller passes
+    // `options.ownedPlanes` (an array), pushes them there for the caller to
+    // release after its last use. `stage: 'processed'` stops before the
+    // adjustment stage and returns `{ processed, settings }`.
     async function processFileWithSettings(file, savedSettings, options = {}) {
       const isCurrent = options.isCurrent || (() => true);
       const previewMax = Math.max(0, Number(options.previewMaxDimension) || 0);
@@ -12718,12 +12944,24 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       // frame wait: they must keep going in a hidden window (#241). Detection
       // inputs, thresholds and geometry are the same either way.
       const silent = options.silent ?? Boolean(previewMax);
+      const ownedPlanes = Array.isArray(options.ownedPlanes) ? options.ownedPlanes : null;
+      // A plane this call allocated: stamped, and exposed to the caller.
+      const own = (plane, input = null) => {
+        if (!plane || plane === input) return plane;
+        if (input) {
+          const inputBuffers = planeBuffersOf(input);
+          if (planeBuffersOf(plane).some((buffer) => inputBuffers.includes(buffer))) return plane;
+        }
+        markOwnedPlanes(plane);
+        ownedPlanes?.push(plane);
+        return plane;
+      };
       const trace = createPerfTrace('processFileWithSettings', {
         file: file?.name || '',
         bytes: file?.size || 0
       });
       // Load the image
-      const imageData = options.sourceImageData || await loadFileToImageData(file, { filmStats: !savedSettings });
+      const imageData = options.sourceImageData || own(await loadFileToImageData(file, { filmStats: !savedSettings }));
       assertRepairCurrent(isCurrent);
       options.onDecoded?.(imageData);
       trace.mark('load', {
@@ -12774,11 +13012,11 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       importRotation = null;
       // In the geometry pool: batch lanes, the contact sheet and the thumbnail
       // lane no longer queue on the main thread for this step (#244).
-      let workingData = await renderGeometryChain(
+      let workingData = own(await renderGeometryChain(
         adoptedRotation || imageData, adoptedRotation ? { ...geometry, rotationAngle: 0 } : geometry,
         { isCurrent, maxInFlight: options.geometryBands }
-      );
-      workingData = await applyLensCorrectionWithSettings(workingData, settings, { updateUi: false });
+      ), imageData);
+      workingData = own(await applyLensCorrectionWithSettings(workingData, settings, { updateUi: false }), workingData);
       assertRepairCurrent(isCurrent);
       const fullWorkingShortSide = Math.min(workingData.width, workingData.height);
       // Lensfun's repair mapping is expressed in native working pixels.
@@ -12810,11 +13048,20 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       // same-size scans is levelled against its neighbour.
       // A batch export brings its own pooled workers (options.convert).
       const convert = typeof options.convert === 'function' ? options.convert : convertFrameOffMainThread;
-      let processed = await convert({
+      // `sourceRole` states what happens to the working plane afterwards
+      // (#250): 'base' is read again below (analysis region, brush mapping,
+      // expired rescue); 'derived' (a geometry or lens output) is not, only
+      // its dimensions and `__lensMapping` are. A batch export's convert may
+      // lend the one and hand over the other; every other convert ignores it.
+      const baseBuffers = planeBuffersOf(imageData);
+      const sourceRole = workingData !== imageData && !planeBuffersOf(workingData).some((buffer) => baseBuffers.includes(buffer))
+        ? 'derived' : 'base';
+      let processed = own(await convert({
         imageData: workingData,
         settings: buildRouterSettings(settings, imageData),
-        options: { preview: reducedPreview, forceFullProcess: true, analysisImageData: getColorAnalysisSample(settings, imageData) }
-      });
+        options: { preview: reducedPreview, forceFullProcess: true, analysisImageData: getColorAnalysisSample(settings, imageData) },
+        sourceRole
+      }), workingData);
       assertRepairCurrent(isCurrent);
       trace.mark('convert', {
         pixels: getImageDataPixelCount(processed)
@@ -12835,7 +13082,7 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
         const dustSource = processed;
         // Batch lanes and thumbnails reuse the open photo's tiles but never
         // evict them (lookups only).
-        if (particleCount > 0) processed = await withAiRepairTurn(() => inpaintForCommit(dustSource, mask, isCurrent, options.dustWorker, { memoInsert: false }));
+        if (particleCount > 0) processed = own(await withAiRepairTurn(() => inpaintForCommit(dustSource, mask, isCurrent, options.dustWorker, { memoInsert: false })), dustSource);
         trace.mark('dustRemoval', {
           pixels: getImageDataPixelCount(processed)
         });
@@ -12843,7 +13090,7 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
 
       if (settings.repairStrokes?.length) {
         const brushSource = processed;
-        processed = await withAiRepairTurn(() => inpaintManualBrush(brushSource, settings, imageData, workingData.__lensMapping, isCurrent, { memoInsert: false }));
+        processed = own(await withAiRepairTurn(() => inpaintManualBrush(brushSource, settings, imageData, workingData.__lensMapping, isCurrent, { memoInsert: false })), brushSource);
       }
 
       // Never-viewed batch files carry default settings — give them the same
@@ -12884,22 +13131,25 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
         trace.mark('expiredRescue', { analysed: Boolean(analysis), spatial: Boolean(analysis?.spatial) });
       }
 
+      // A batch export adjusts, composes and encodes the frame itself (#250),
+      // so it can hand its planes to the worker without a copy.
+      if (options.stage === 'processed') {
+        assertRepairCurrent(isCurrent);
+        trace.end({ outputPixels: getImageDataPixelCount(processed) });
+        options.onPreparedSettings?.(settings);
+        if (!savedSettings && options.updateItemSettings !== false) {
+          const item = state.fileQueue.find(item => item.file === file);
+          if (item) item.settings = cloneSettings(settings);
+        }
+        return { processed, settings };
+      }
+
       // Apply adjustments (at 16 bits when the export asks for it)
       assertRepairCurrent(isCurrent);
       const adjusted = previewMax
         ? createAdjustedPhotoPreview(processed, buildAdjustmentSettings(settings), { maxSize: previewMax })
         : await applyAdjustmentsWithSettings(processed, settings, { bitDepth: options.bitDepth === 16 ? 16 : 8, bridge: options.bridge });
-      // The JPEG gain map, only when the caller will encode one (a batch JPEG
-      // export without the sprocket frame). It runs beside the SDR encode.
-      if (!previewMax && options.gainMap && processed.__image16) {
-        // This call created `processed`, and the map is the last reader of
-        // its plane, so the worker may take the plane without a copy. An
-        // identity recipe shares that plane with `adjusted`: drop the alias
-        // first, or it would become a detached, empty view.
-        const transferPlane = options.transferGainMapPlane !== false;
-        if (transferPlane && adjusted.__image16 === processed.__image16) adjusted.__image16 = null;
-        adjusted.__gainMap = startExportGainMap(processed, adjusted, settings, { bridge: options.bridge, transferPlane });
-      }
+      if (!previewMax) ownedPlanes?.push(adjusted);
       trace.mark('adjustments', {
         pixels: getImageDataPixelCount(adjusted)
       });
@@ -12966,9 +13216,17 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
     }
 
     // Workers one batch shares and releases when it ends: `lanes` conversion
-    // workers kept alive across frames (no per-file restart), with more than
-    // one lane as many export workers for the adjustment/encode stages, and
-    // for a 16-bit PNG batch of one or two lanes the PNG16 band pool.
+    // workers kept alive across frames (no per-file restart), as many export
+    // workers for the adjustment/encode stages, and for a 16-bit PNG batch of
+    // one or two lanes the PNG16 band pool. One lane is an export pool of one
+    // too, so its worker ends with the batch instead of living on in the
+    // module-level bridge (#250).
+    //
+    // `convertHandoff` also hands the frame's 16-bit source to the lane
+    // (#250): the base is lent and comes back, a geometry/lens output is
+    // given up. Both release the lane's cached planes after each frame. A
+    // source lost with its lane is never converted on the main thread: the
+    // frame is rendered again from decode.
     function createBatchExportWorkers(lanes, { pixelsPerFile = 0, exportInfo = null } = {}) {
       const dust = createDustWorkerClient();
       // The lanes share the geometry pool; each keeps few enough bands in
@@ -12979,20 +13237,25 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
       const pool = !conversionWorkerBroken && usesSilverCoreConversion(state)
         ? createConversionWorkerPool({ size: lanes })
         : null;
-      const bridge = lanes > 1 ? createExportWorkerPool({ size: lanes }) : null;
+      const bridge = createExportWorkerPool({ size: lanes });
       const png16Pool = exportInfo && exportInfo.format === 'png' && exportInfo.bitDepth === 16
         ? createOperationPng16Pool(lanes)
         : null;
+      const convertWith = (handoff) => async (request) => {
+        const laneRequest = { ...request, releaseAfter: true };
+        if (handoff) laneRequest.handoff = request.sourceRole === 'derived' ? 'consume' : 'lend';
+        try {
+          return await pool(laneRequest);
+        } catch (err) {
+          if (isConversionInputLost(err)) throw err;
+          // Same policy as convertFrameOffMainThread: the frame still exports.
+          console.warn('Batch conversion worker failed, converting on the main thread:', err?.message || err);
+          return convertFrameWithRouter(request);
+        }
+      };
       return {
-        convert: pool ? async (request) => {
-          try {
-            return await pool(request);
-          } catch (err) {
-            // Same policy as convertFrameOffMainThread: the frame still exports.
-            console.warn('Batch conversion worker failed, converting on the main thread:', err?.message || err);
-            return convertFrameWithRouter(request);
-          }
-        } : null,
+        convert: pool ? convertWith(false) : null,
+        convertHandoff: pool ? convertWith(true) : null,
         bridge,
         png16Pool,
         dust,
@@ -13000,54 +13263,96 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
         dispose() {
           dust.dispose();
           if (pool) pool.dispose();
-          if (bridge) bridge.dispose();
+          bridge.dispose();
           if (png16Pool) png16Pool.dispose();
         }
       };
     }
 
     // One frame: the per-file pipeline plus the sprocket border and encoder.
-    async function renderBatchExportFile(job, position, { exportInfo, workers, dustRemoval }, { transferGainMapPlane = true } = {}) {
+    //
+    // Planes (#250): every plane of the frame belongs to this call, so each
+    // stage hands its input to the worker without a copy (`transferPlanes`):
+    // the source to the conversion lane, the processed frame to the adjust
+    // stage, the adjusted frame and the gain map's plane to the encoder, and a
+    // 16-bit TIFF/PNG goes through one fused request. Whatever is left is
+    // released once the file is encoded. If a worker dies holding a plane, the
+    // frame is rendered once more, from decode, with copies.
+    async function renderBatchExportFile(job, position, { exportInfo, workers, dustRemoval }, { transferPlanes = true } = {}) {
       const { file, settings } = job;
       if (exportInfo.format === 'dng') {
         const { source, settings: usedSettings } = await processFileWithSettings(file, settings, { stage: 'source', convert: workers.convert, geometryBands: workers.geometryBands, silent: true });
         return renderLinearDngBlobInSlices(source, usedSettings, position);
       }
-      // The sprocket frame drops the map, so only a plain JPEG asks for one.
-      const gainMap = exportInfo.format === 'jpeg'
-        && safeStorageGet('nc_hdr_gain_map_v1') !== 'off'
-        && !state.exportSprocketHolesEnabled;
+      const sprocket = state.exportSprocketHolesEnabled;
+      const metadata = exportMetadataFor(settings, position);
+      const ownedPlanes = [];
       try {
-        const adjusted = await processFileWithSettings(file, settings, {
+        const { processed, settings: used } = await processFileWithSettings(file, settings, {
+          stage: 'processed',
           silent: true,
-          bitDepth: exportInfo.bitDepth,
           dustRemoval,
           dustWorker: workers.dust,
-          convert: workers.convert,
-          bridge: workers.bridge,
+          convert: (transferPlanes && workers.convertHandoff) || workers.convert,
           geometryBands: workers.geometryBands,
-          gainMap,
-          transferGainMapPlane
+          ownedPlanes
         });
+        const adjustmentSettings = buildAdjustmentSettings(used);
+        const wants16 = exportInfo.bitDepth === 16;
+
+        // 16-bit TIFF/PNG without the sprocket frame: adjust and encode in one
+        // worker request; the adjusted plane never comes to this thread. A
+        // PNG16 band pool (#257) encodes in parallel instead: the adjusted
+        // plane comes back by transfer and the pool takes its bands.
+        if (wants16 && !sprocket && (exportInfo.format === 'tiff' || !workers.png16Pool)) {
+          const blob = await encodeFused16(processed, adjustmentSettings, exportInfo, { bridge: workers.bridge, metadata, transferPlane: transferPlanes });
+          if (blob) return blob;
+        }
+
+        // The sprocket frame drops the map, so only a plain JPEG asks for one.
+        const gainMap = exportInfo.format === 'jpeg'
+          && safeStorageGet('nc_hdr_gain_map_v1') !== 'off'
+          && !sprocket
+          && Boolean(processed.__image16);
+        // The adjust stage may take its input unless the gain map still needs
+        // the unadjusted plane (the 8-bit pass only takes `processed.data`).
+        const adjusted = await applyPreparedAdjustmentsWithWorkers(processed, adjustmentSettings, {
+          bitDepth: wants16 ? 16 : 8,
+          bridge: workers.bridge,
+          planeOnly: wants16 && !sprocket,
+          transferPlane: transferPlanes
+        });
+        ownedPlanes.push(adjusted);
+        if (gainMap) {
+          // The map reads the unadjusted plane. An identity recipe shares that
+          // plane with `adjusted`: drop the alias, so the transfer list never
+          // names a buffer twice and the frame never encodes a detached view.
+          if (adjusted.__image16 === processed.__image16) adjusted.__image16 = null;
+          adjusted.__gainMapSource = { processed, adjustmentSettings, transferPlane: transferPlanes };
+        }
         const outputImageData = await applySprocketFrameForExport(adjusted, exportInfo, settings, position);
+        if (outputImageData !== adjusted) ownedPlanes.push(outputImageData);
         return await imageDataToBlob(
           outputImageData,
           exportInfo.format,
           state.jpegQuality,
           exportInfo.bitDepth,
           null,
-          exportMetadataFor(settings, position),
-          { bridge: workers.bridge, png16Pool: workers.png16Pool }
+          metadata,
+          { bridge: workers.bridge, png16Pool: workers.png16Pool, transferPlane: transferPlanes }
         );
       } catch (err) {
-        // The worker died holding this frame's transferred plane. Render the
-        // frame once more with a copied plane so the file does not depend on
-        // the failure.
-        if (transferGainMapPlane && isExportInputLostError(err)) {
-          console.warn(`Gain-map plane lost for ${file.name}; rendering the frame again:`, err?.message || err);
-          return renderBatchExportFile(job, position, { exportInfo, workers, dustRemoval }, { transferGainMapPlane: false });
+        // A worker died holding one of this frame's planes. Render the frame
+        // once more with copied planes so the file does not depend on the
+        // failure.
+        if (transferPlanes && (isExportInputLostError(err) || isConversionInputLost(err))) {
+          console.warn(`A plane of ${file.name} was lost with its worker; rendering the frame again:`, err?.message || err);
+          return await renderBatchExportFile(job, position, { exportInfo, workers, dustRemoval }, { transferPlanes: false });
         }
         throw err;
+      } finally {
+        // Encoders own their inputs by now (canvas toBlob snapshots at the call).
+        releaseOwnedPlanes(...ownedPlanes);
       }
     }
 
@@ -16680,15 +16985,22 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
           updateBatchOverlayProgress((i / selected.length) * 80, lang.loadingBatchFile.replace('{current}', i + 1).replace('{total}', selected.length));
           const settingsForFile = getSettingsForExport(index, item);
           const label = frameNumberFor(settingsForFile?.frameMetadata, i);
+          // The frame's full-resolution planes live only until its bitmap
+          // exists (#250): released then, not at the next major GC.
+          const ownedPlanes = [];
           try {
             // Each full-resolution frame is one gated item (#241).
             const bitmap = await runHiddenJobItem([item.file], async () => {
-              let adjusted = await processFileWithSettings(item.file, settingsForFile);
-              if (Math.max(adjusted.width, adjusted.height) > target) adjusted = downsampleImageDataForMaxDim(adjusted, target);
+              let adjusted = await processFileWithSettings(item.file, settingsForFile, { ownedPlanes });
+              if (Math.max(adjusted.width, adjusted.height) > target) {
+                adjusted = markOwnedPlanes(downsampleImageDataForMaxDim(adjusted, target));
+                ownedPlanes.push(adjusted);
+              }
               if (sprockets) {
                 const options = getSprocketFrameComposeOptions(settingsForFile, i);
                 await ensureSprocketFrameFonts(options);
-                adjusted = composeSprocketFrame(adjusted, options);
+                adjusted = markOwnedPlanes(composeSprocketFrame(adjusted, options));
+                ownedPlanes.push(adjusted);
               }
               return createImageBitmap(adjusted);
             });
@@ -16696,6 +17008,8 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
           } catch (error) {
             console.warn('Contact sheet frame failed:', item.file.name, error);
             thumbs.push({ image: null, width: 1, height: 1, label });
+          } finally {
+            releaseOwnedPlanes(...ownedPlanes);
           }
           await yieldForJob();
         }
@@ -18095,9 +18409,15 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
               item.importId = `watch:${payload.session}`;
               if (!state.originalImageData) await switchToFile(state.fileQueue.indexOf(item));
               else {
-                const image = await processFileWithSettings(file, null, { bitDepth: 8 });
-                if (epoch !== hotFolderEpoch || !state.fileQueue.includes(item)) return;
-                item.thumbnail = thumbnailDataUrl(image); item.status = 'done'; updateFileListUI();
+                // The full-resolution planes serve only the thumbnail (#250).
+                const ownedPlanes = [];
+                try {
+                  const image = await processFileWithSettings(file, null, { bitDepth: 8, ownedPlanes });
+                  if (epoch !== hotFolderEpoch || !state.fileQueue.includes(item)) return;
+                  item.thumbnail = thumbnailDataUrl(image); item.status = 'done'; updateFileListUI();
+                } finally {
+                  releaseOwnedPlanes(...ownedPlanes);
+                }
               }
               showToast(getInterpolatedText('watchFolderArrival', { name: file.name }, `Imported ${file.name}`));
               hotFolderFiles.push(item); clearTimeout(hotFolderQuiet);

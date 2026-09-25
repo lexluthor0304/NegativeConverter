@@ -74,7 +74,7 @@ function fixture({ enabled = false, mask = null } = {}) {
   vm.runInContext(['getDustSource', 'nextDustMaskTag', 'noteDustReplaced', 'hasFrameRepairs', 'isCurrentLoad',
     'currentRepairRecipe', 'stampRepairResult', 'commitDustPass',
     'applyDustResultToState', 'runDustDetection', 'scheduleDustDetection',
-    'renderCurrentImageDataForExport'].map(functionSource).join('\n'), c);
+    'prepareCurrentImageForExport', 'renderCurrentImageDataForExport'].map(functionSource).join('\n'), c);
   const actualRunDustDetection = c.runDustDetection;
   c.runDustDetection = () => {
     const pending = actualRunDustDetection(); backgroundRuns.push(pending); return pending;

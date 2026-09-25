@@ -220,7 +220,7 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
         // A lent source that came back with the error is intact again; one
         // that did not (a crash, a timeout, a consumed source) is gone.
         if (lent && err && err.returnedSource instanceof ArrayBuffer && err.returnedSource.byteLength === expectedSourceBytes) {
-          src16.data = new Uint16Array(err.returnedSource);
+          src16.data = markOwnedPlanes(new Uint16Array(err.returnedSource));
         } else if (src16.data.byteLength === 0) {
           const lost = workerError(`The frame's source was lost with the conversion worker: ${err?.message || err}`, INPUT_LOST);
           lost.cause = err;
@@ -233,7 +233,7 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
 
     if (lent) {
       if (result.source16 instanceof ArrayBuffer && result.source16.byteLength === expectedSourceBytes) {
-        src16.data = new Uint16Array(result.source16);
+        src16.data = markOwnedPlanes(new Uint16Array(result.source16));
       } else {
         throw workerError('Conversion worker did not return the lent source', INPUT_LOST);
       }

@@ -228,7 +228,8 @@ function takeReturned(err) {
 
 /**
  * After a failed request that transferred an input: re-attach the buffer the
- * worker handed back, or report the input as lost. Cancellation stays a
+ * worker handed back (stamped again: only an owned plane was transferred),
+ * or report the input as lost. Cancellation stays a
  * cancellation (the caller gave up on the frame).
  */
 function reclaimInput(err, returned, { transferred, byteLength, reattach, what }) {
@@ -248,8 +249,9 @@ function mayTransfer8(imageData, opts) {
 }
 
 function restore8(imageData, buffer, opts) {
+  // It was stamped to be transferred; the returned buffer is a new object.
   if (!isPlatformImageData(imageData)) {
-    imageData.data = new Uint8ClampedArray(buffer);
+    imageData.data = markOwnedPlanes(new Uint8ClampedArray(buffer));
     return;
   }
   const frame = new ImageData(new Uint8ClampedArray(buffer), imageData.width, imageData.height);
@@ -643,7 +645,7 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory,
       const returned = takeReturned(err);
       reclaimUnlessNotPosted(err, returned.input, {
         transferred, byteLength: sampleCount * 2, what: '16-bit plane',
-        reattach: (buffer) => { plane.data = new Uint16Array(buffer); }
+        reattach: (buffer) => { plane.data = markOwnedPlanes(new Uint16Array(buffer)); }
       });
       if (isAbortError(err)) throw err;
       warnWorkerFallbackOnce('applyAdjustments16', err);
@@ -711,7 +713,7 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory,
       const returned = takeReturned(err);
       reclaimUnlessNotPosted(err, returned.plane, {
         transferred, byteLength: width * height * 8, what: '16-bit plane',
-        reattach: (buffer) => { plane.data = new Uint16Array(buffer); }
+        reattach: (buffer) => { plane.data = markOwnedPlanes(new Uint16Array(buffer)); }
       });
       if (isAbortError(err)) throw err;
       warnWorkerFallbackOnce('gainMap16', err);
@@ -769,7 +771,7 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory,
       const returned = takeReturned(err);
       reclaimUnlessNotPosted(err, returned.input, {
         transferred, byteLength: width * height * 8, what: '16-bit plane',
-        reattach: (buffer) => { plane.data = new Uint16Array(buffer); }
+        reattach: (buffer) => { plane.data = markOwnedPlanes(new Uint16Array(buffer)); }
       });
       if (isAbortError(err)) throw err;
       warnWorkerFallbackOnce('adjust16AndEncode', err);
@@ -842,7 +844,7 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory,
       if (planeInput) {
         reclaimUnlessNotPosted(err, returned.plane, {
           transferred: planeInput.transferred, byteLength: width * height * 8, what: '16-bit plane',
-          reattach: (buffer) => { gainPlane.data = new Uint16Array(buffer); }
+          reattach: (buffer) => { gainPlane.data = markOwnedPlanes(new Uint16Array(buffer)); }
         });
       }
       if (isAbortError(err)) throw err;
@@ -885,7 +887,7 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory,
       reclaimUnlessNotPosted(err, returned.input, {
         transferred, byteLength, what: is16 ? '16-bit plane' : '8-bit frame',
         reattach: (returnedBuffer) => {
-          if (plane) plane.data = new Uint16Array(returnedBuffer);
+          if (plane) plane.data = markOwnedPlanes(new Uint16Array(returnedBuffer));
           else restore8(imageData, returnedBuffer, opts);
         }
       });
