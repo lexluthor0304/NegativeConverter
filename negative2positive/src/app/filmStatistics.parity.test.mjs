@@ -118,6 +118,13 @@ for (const [name, factory] of Object.entries(SCENES)) {
       const want = detectFilmTypeReference(image);
       assert.deepEqual(detectFilmType(image), want, `detectFilmType ${name} ${w}x${h} ${sixteen ? 16 : 8}-bit`);
       if (w * h < 20000) assert.deepEqual(detectFilmType(image, { fallback: 'bw' }), detectFilmTypeReference(image, { fallback: 'bw' }));
+      // Block means (#231; 60 MP scans get 4 px boxes): fractional samples
+      // take the non-integer columns, still the same order statistics.
+      for (const blockSize of [2, 3]) {
+        assert.deepEqual(detectFilmType(image, { blockSize }), detectFilmTypeReference(image, { blockSize }),
+          `detectFilmType ${name} ${w}x${h} ${sixteen ? 16 : 8}-bit block ${blockSize}`);
+        checks++;
+      }
       reasons.add(want.reason);
       checks += 2;
     }

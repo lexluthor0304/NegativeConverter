@@ -356,11 +356,20 @@ function sanitizeFilmBaseForSettings(input, fallback = null) {
   return result;
 }
 
-// ---- filmTypeDetection.js @ 1703835 ----
+// ---- filmTypeDetection.js @ 1703835, plus #231 ----
+// #231 (deliberate): each stride sample is the mean of the opaque pixels in a
+// small box (1 px on previews and small scans, as before), and a monochrome
+// frame without rebate evidence is typed a B&W negative at low confidence.
+function detectionBlockSizeReference(width, height, blockSize = null) {
+  const forced = Number(blockSize);
+  if (blockSize != null && Number.isFinite(forced)) return Math.max(1, Math.min(16, Math.round(forced)));
+  return Math.max(1, Math.min(8, Math.round(Math.min(width, height) / 1500)));
+}
+
 // Pixel evidence is advisory: without a rebate/DX code, polarity is not
 // uniquely recoverable (a grayscale positive and negative are both gray).
 // Keep this bounded and independent of file names, camera metadata and format.
-export function detectFilmTypeReference(image, { fallback = 'positive', filmEdge = null } = {}) {
+export function detectFilmTypeReference(image, { fallback = 'positive', filmEdge = null, blockSize = null } = {}) {
   if (filmEdge?.found && ['color', 'bw', 'positive'].includes(filmEdge.filmKind)
       && !(filmEdge.polarity === 'light' && filmEdge.filmKind !== 'positive')) {
     return { filmType: filmEdge.filmKind, confidence: 'high', reason: 'dx' };
@@ -370,11 +379,21 @@ export function detectFilmTypeReference(image, { fallback = 'positive', filmEdge
   const { width, height, data } = source;
   const maximum = data instanceof Uint16Array ? 65535 : 255;
   const stride = Math.max(1, Math.ceil(Math.sqrt(width * height / 24000)));
+  const block = detectionBlockSizeReference(width, height, blockSize), before = (block - 1) >> 1;
   const all = [], inner = [], edge = [], sides = [[], [], [], []];
   for (let y = 0; y < height; y += stride) for (let x = 0; x < width; x += stride) {
-    const i = (y * width + x) * 4;
-    if (!data[i + 3]) continue;
-    const r = data[i] / maximum, g = data[i + 1] / maximum, b = data[i + 2] / maximum;
+    const x0 = Math.max(0, x - before), x1 = Math.min(width, x - before + block);
+    const y0 = Math.max(0, y - before), y1 = Math.min(height, y - before + block);
+    let sumR = 0, sumG = 0, sumB = 0, count = 0;
+    for (let yy = y0; yy < y1; yy++) {
+      for (let j = (yy * width + x0) * 4, end = (yy * width + x1) * 4; j < end; j += 4) {
+        if (!data[j + 3]) continue;
+        sumR += data[j]; sumG += data[j + 1]; sumB += data[j + 2]; count++;
+      }
+    }
+    if (!count) continue;
+    const scale = count * maximum;
+    const r = sumR / scale, g = sumG / scale, b = sumB / scale;
     const peak = Math.max(r, g, b), low = Math.min(r, g, b);
     if (peak < .02) continue;
     const pixel = { r, g, b, luma: .2126 * r + .7152 * g + .0722 * b,
@@ -436,8 +455,8 @@ export function detectFilmTypeReference(image, { fallback = 'positive', filmEdge
       return { filmType: 'bw', confidence: 'medium', reason: 'clearRebate' };
     }
     // A borderless grayscale positive and negative cannot be distinguished
-    // reliably from colour statistics. Keep the uncertainty explicit.
-    return { filmType: fallback, confidence: 'low', reason: 'monochrome' };
+    // reliably from colour statistics; film scans are the common case (#231).
+    return { filmType: 'bw', confidence: 'low', reason: 'monochrome' };
   }
   if (orangeFraction > .35) return { filmType: fallback, confidence: 'low', reason: 'warmScene' };
   return { filmType: 'positive', confidence: 'medium', reason: 'noMask' };
