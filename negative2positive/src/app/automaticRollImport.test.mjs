@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { runBatchPipeline } from './batchExportScheduler.js';
 import { createHiddenJobGate } from './hiddenJobGate.js';
+import { createJobMarker, readJobMarker, JOB_MARKER_KEYS } from './jobMarker.js';
 import { aggregateRollAnalysis, groupAutomaticRollFrames, sanitizeRollFrameForSettings } from './rollAnalysis.js';
 
 // Test the actual orchestration functions, not a second scheduler. Deferred
@@ -36,6 +37,8 @@ function fixture({ count = 4, prepared = false, realRoll = false } = {}) {
     importFilmTypeAuto: true, cropping: false
   };
   const timers = new Map(), decoded = [], analyzed = [], groups = [], stores = [], restored = [], renders = [], undos = [];
+  const markerMap = new Map();
+  const markerStorage = { get: key => markerMap.get(key) ?? null, set: (key, value) => markerMap.set(key, value), remove: key => markerMap.delete(key) };
   let timerId = 0;
   const noop = () => {};
   const context = vm.createContext({
@@ -55,6 +58,7 @@ function fixture({ count = 4, prepared = false, realRoll = false } = {}) {
     clearTimeout: id => timers.delete(id),
     yieldTaskForJob: () => new Promise(resolve => context.setTimeout(resolve, 0)),
     hiddenJobs: createHiddenJobGate({ isHidden: () => false }), hiddenJobBytesFor: async () => 0,
+    createJobMarker, jobMarkerStorage: markerStorage, recoveryWrites: 0,
     safeStorageGet: () => context.off ? 'off' : null,
     studioBackgroundReady: () => state.currentStep >= 3 && context.getCurrentQueueItem()?.file === state.loadedFile
       && !context.document.body.dataset.studioBusy && !context.processNegativeInFlight,
@@ -89,7 +93,7 @@ function fixture({ count = 4, prepared = false, realRoll = false } = {}) {
     analyzeImportFilmEdge: async (_image, settings) => ({ settings }),
     learnedImportSettings: async settings => settings,
     groupAutomaticRollFrames, aggregateRollAnalysis, sanitizeRollFrameForSettings,
-    notifyImportReview: noop, updateFileListUI: noop, scheduleProjectRecovery: noop,
+    notifyImportReview: noop, updateFileListUI: noop, scheduleProjectRecovery: () => { context.recoveryWrites++; },
     runRollAnalysis: async ({ items: group }) => {
       if (!context.studioBackgroundReady()) return { status: 'deferred' };
       groups.push(group.map(item => item.id));
@@ -137,7 +141,8 @@ function fixture({ count = 4, prepared = false, realRoll = false } = {}) {
       delete context.document.body.dataset.studioBusy;
     }
   };
-  return { context, state, items, timers, decoded, analyzed, groups, stores, restored, renders, undos, fire, navigate };
+  const marker = () => readJobMarker(markerStorage, { key: JOB_MARKER_KEYS.roll });
+  return { context, state, items, timers, decoded, analyzed, groups, stores, restored, renders, undos, fire, navigate, marker };
 }
 
 // Exactly two imported photos must leave the thumbnail queue independent.
@@ -165,6 +170,12 @@ function fixture({ count = 4, prepared = false, realRoll = false } = {}) {
   assert.equal(f.items[1].settings, null, 'background never overwrites a foreground preparation');
   assert.equal(f.context.automaticRollImportRunning, false, 'waiting does not lock thumbnail work');
   assert.equal(f.timers.size, 1, 'one bounded resume timer');
+  // The job marker (#241) survives the deferred attempt with every analysed frame.
+  const running = f.marker();
+  assert.equal(running?.kind, 'roll-analysis');
+  assert.equal(running.files.length, 4);
+  assert.deepEqual(running.written.map(([index]) => index).sort(), [2, 3], 'both analysed frames are recorded');
+  assert.ok(f.context.recoveryWrites >= 2, 'each analysed frame schedules the recovery copy');
   f.navigate(1);
   f.items[1].settings = recipe(1);
   await f.fire(750);
@@ -173,6 +184,7 @@ function fixture({ count = 4, prepared = false, realRoll = false } = {}) {
   assert.deepEqual(f.decoded, [2, 3], 'already prepared frames are not decoded on resume');
   assert.equal(f.timers.size, 0);
   assert.ok(f.stores.every(store => store.cleared), 'sample storage is disposed after completion');
+  assert.equal(f.marker(), null, 'the marker is deleted when the analysis ends');
 }
 
 // A manual edit / removed item is excluded, not retried forever or overwritten.

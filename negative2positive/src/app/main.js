@@ -13,6 +13,7 @@ import { exportNameStem } from './exportFileName.js';
 import { frameNeedsReview } from './reviewQueue.js';
 import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
 import { createHiddenJobGate, hiddenJobLimitsApply, estimateHiddenJobBytes } from './hiddenJobGate.js';
+import { createJobMarker, readJobMarkers, clearJobMarker, matchJobFiles, planResumedExport, resumedJobMarker, jobNeedsSafeMode } from './jobMarker.js';
 import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
 import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './sensorDefectsClient.js';
     import { detectedImportSettings } from './filmTypeDetection.js';
@@ -7158,6 +7159,17 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       })
     };
 
+    // Smoke tests (?debug=1): make a queued frame look never analysed.
+    if (DEBUG_UI) {
+      window.__ncHiddenJobs.forgetFrameSettings = (index) => {
+        const item = state.fileQueue[index];
+        if (!item || index === state.currentFileIndex) return false;
+        item.settings = null;
+        item.automaticSettings = false;
+        return true;
+      };
+    }
+
     function rememberPhotoSession(item) {
       // The crash-loop guard runs a resumed job with the caches off.
       if (hiddenJobs.safeMode) return;
@@ -11959,7 +11971,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
           signal,
           // Admission happens before a lane claims its next index (#241).
           beforeStart: ({ signal: stop }) => hiddenJobs.admit({ bytes, signal: stop }),
-          process: (job, index) => renderBatchExportFile(job, index, { exportInfo, workers, dustRemoval }),
+          process: (job, index) => renderBatchExportFile(job, job.markerIndex ?? index, { exportInfo, workers, dustRemoval }),
           sink,
           onEvent: (event) => {
             const { item } = event.job;
@@ -12007,7 +12019,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       );
     }
 
-    async function exportBatchAsZipBrowser(selectedFiles, zipFileName) {
+    async function exportBatchAsZipBrowser(selectedFiles, zipFileName, { markerAttempt = 0 } = {}) {
       if (!canUseBrowserZipStreaming(window)) {
         showToast(
           getLocalizedText(
@@ -12056,6 +12068,9 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       const overlay = getLoadingOverlay();
       const cancel = new AbortController();
       let zipWriter = null;
+      // A partial archive has no central directory: after a kill the marker
+      // only names the job and offers to start it again.
+      const marker = beginExportJobMarker('export-zip', jobs, { destination: streamTarget.fileName || zipFileName, exportInfo, attempt: markerAttempt });
 
       resetBatchExportStatuses(jobs);
       await showBatchExportOverlay(() => cancel.abort());
@@ -12065,7 +12080,11 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         const result = await runBatchExport(jobs, {
           exportInfo,
           signal: cancel.signal,
-          sink: (job, blob) => zipWriter.addBlob(job.outputName, blob),
+          sink: async (job, blob) => {
+            await zipWriter.addBlob(job.outputName, blob);
+            marker.record(job.markerIndex);
+            scheduleProjectRecovery();
+          },
           onProgress: (event) => updateBatchOverlayProgress((event.done / total) * 95, batchProgressLabel(event.done, total))
         });
 
@@ -12094,7 +12113,9 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         }
         throw err;
       } finally {
+        batchOverlayProgress = null;
         overlay.hide();
+        marker.finish();
       }
     }
 
@@ -12110,9 +12131,12 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       // same frame number in two folders); without this the second write
       // silently replaces the first.
       const claimName = createZipNameDeduper();
-      return selectedFiles.map(({ item, index }) => ({
+      return selectedFiles.map(({ item, index }, position) => ({
         item,
         index,
+        // The job's place in the original list: its frame position for the
+        // sprocket border and metadata, and its index in the job marker.
+        markerIndex: position,
         file: item.file,
         outputName: claimName(buildActiveExportFileName(
           item.file.name,
@@ -12177,13 +12201,20 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
 
       const exportInfo = getExportInfo();
       const jobs = createBatchExportJobs(selectedFiles, exportInfo);
-      const total = jobs.length;
       // Snapshot: toggling dust removal mid-batch must not change later frames.
       const dustRemoval = {
         enabled: Boolean(state.dustRemoval.enabled),
         strength: state.dustRemoval.strength,
         maxParticleSize: state.dustRemoval.maxParticleSize
       };
+      const marker = beginExportJobMarker('export-folder', jobs, { destination: targetDirectory, exportInfo, dustRemoval });
+      await runDesktopFolderExport(jobs, { targetDirectory, exportInfo, dustRemoval, marker });
+    }
+
+    // `jobs` may be the unwritten rest of an interrupted export (#241): each
+    // job keeps its original position, name and marker index.
+    async function runDesktopFolderExport(jobs, { targetDirectory, exportInfo, dustRemoval, marker }) {
+      const total = jobs.length;
       const cancel = new AbortController();
       desktopBatchCancelController = cancel;
 
@@ -12205,7 +12236,12 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
           dustRemoval,
           signal: cancel.signal,
           sink: async (job, blob) => {
-            await writeBlobToDesktopDirectory(blob, targetDirectory, job.outputName, exportInfo.mimeType);
+            const saved = await writeBlobToDesktopDirectory(blob, targetDirectory, job.outputName, exportInfo.mimeType);
+            // Recorded only once the native write returned (after its rename
+            // or copy and sync), so a recorded file is complete. The recovery
+            // copy then carries the recipe this frame was exported with.
+            marker.record(job.markerIndex, saved.path || '');
+            scheduleProjectRecovery();
             void learnFromExport(job.item);
           },
           onProgress: (event) => setDesktopBatchExportState({
@@ -12220,6 +12256,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       } finally {
         desktopBatchCancelController = null;
         resetDesktopBatchExportState();
+        marker.finish();
       }
 
       if (result.cancelled) notifyBatchCancelled();
@@ -12233,6 +12270,11 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
 
       const exportInfo = getExportInfo();
       const jobs = createBatchExportJobs(selectedFiles, exportInfo);
+      const marker = beginExportJobMarker('export-downloads', jobs, { exportInfo });
+      await runBrowserDownloadsExport(jobs, { exportInfo, marker });
+    }
+
+    async function runBrowserDownloadsExport(jobs, { exportInfo, marker }) {
       const total = jobs.length;
       const overlay = getLoadingOverlay();
       const cancel = new AbortController();
@@ -12251,12 +12293,16 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
               cancel.abort();
               throw new Error('Save cancelled');
             }
+            marker.record(job.markerIndex);
+            scheduleProjectRecovery();
             void learnFromExport(job.item);
           },
           onProgress: (event) => updateBatchOverlayProgress((event.done / total) * 100, batchProgressLabel(event.done, total))
         });
       } finally {
+        batchOverlayProgress = null;
         overlay.hide();
+        marker.finish();
       }
 
       if (result.cancelled) {
@@ -15592,6 +15638,8 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       }
       ordered.sort((a, b) => a.order - b.order);
       const restored = ordered.map((o) => o.item);
+      // An interrupted roll analysis resumes over its frames (#241).
+      const rollFrames = interruptedRollFrames(restored);
       state.fileQueue = [...restored, ...result.extra.map((file) => byFile.get(file)).filter(Boolean)];
       state.rollMetadata = sanitizeRollMetadata(project.roll?.metadata);
       const reference = project.roll?.reference;
@@ -15629,6 +15677,198 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       state.currentFileIndex = -1;
       if (state.fileQueue.length) await switchToFile(0);
       scheduleProjectRecovery();
+      void offerInterruptedJobResume({ rollFrames });
+    }
+
+    // ===========================================
+    // Interrupted jobs: marker, boot message, resume (#241)
+    // ===========================================
+    // A long job keeps a small marker in localStorage while it runs. A marker
+    // still there at boot means the page died mid-job: a WebKit memory kill,
+    // a renderer crash, a discarded tab. The page names the job, routes to the
+    // recovery copy (the originals must be added again: no queue item keeps a
+    // path) and, once the roll is restored, resumes it.
+    const jobMarkerStorage = {
+      get: key => safeStorageGet(key),
+      set: (key, value) => { localStorage.setItem(key, value); },
+      remove: key => { localStorage.removeItem(key); }
+    };
+    // Markers found at boot, until their job is resumed or dismissed.
+    let interruptedJobs = [];
+
+    function beginExportJobMarker(kind, jobs, { destination = '', exportInfo = null, dustRemoval = null, attempt = 0 } = {}) {
+      const marker = createJobMarker(jobMarkerStorage);
+      marker.begin({
+        kind, destination, exportInfo, attempt,
+        options: { jpegQuality: state.jpegQuality, sprocket: Boolean(state.exportSprocketHolesEnabled), dustRemoval },
+        // `auto`: the frame's recipe came from automatic analysis, so its
+        // export bakes the automatic gray point (processFileWithSettings).
+        files: jobs.map(job => ({ name: job.file.name, size: job.file.size, lastModified: job.file.lastModified || 0,
+          output: job.outputName, auto: Boolean(job.item.automaticSettings) }))
+      });
+      return marker;
+    }
+
+    function describeInterruptedJob(marker) {
+      const values = { total: String(marker.files.length), done: String(marker.written.length) };
+      if (marker.kind === 'export-folder') {
+        const folder = summarizePathForUi(marker.destination) || marker.destination;
+        return getInterpolatedText('interruptedExportFolder', { ...values, folder }, `Export of ${values.total} photos to ${folder} stopped after ${values.done}.`);
+      }
+      if (marker.kind === 'export-zip') return getInterpolatedText('interruptedExportZip', values, `ZIP export of ${values.total} photos stopped after ${values.done}. A partial ZIP cannot be resumed.`);
+      if (marker.kind === 'roll-analysis') return getInterpolatedText('interruptedRollAnalysis', values, `Roll analysis of ${values.total} photos stopped after ${values.done}.`);
+      return getInterpolatedText('interruptedExportDownloads', values, `Export of ${values.total} photos stopped after ${values.done}.`);
+    }
+
+    // Once at boot: name the jobs that stopped, and say when macOS stopped
+    // the app's web process (the Rust hook recorded it before reloading).
+    async function checkInterruptedJobs() {
+      const markers = readJobMarkers(jobMarkerStorage);
+      let termination = null;
+      if (isTauriDesktop()) {
+        try { termination = await window.__TAURI__.core.invoke('take_web_content_termination'); } catch { termination = null; }
+      }
+      const webProcess = getLocalizedText('interruptedWebProcess', "macOS stopped the app's web process.");
+      if (!markers.length) {
+        if (termination) showToast(webProcess, 6000);
+        return;
+      }
+      interruptedJobs = markers;
+      const parts = markers.map(describeInterruptedJob);
+      if (termination) parts.push(webProcess);
+      if (markers.some(jobNeedsSafeMode)) {
+        parts.push(getLocalizedText('interruptedJobSafeMode', 'It stopped again after resuming, so the next attempt runs one photo at a time with the photo caches off.'));
+      }
+      parts.push(getLocalizedText('interruptedJobNext', 'Add the original photos again, then restore the roll under Batch tools to continue.'));
+      void appAlert(parts.join(' '));
+    }
+
+    // Frames of an interrupted roll analysis go back to automatic analysis
+    // unless the user had edited them: those keep their saved recipe.
+    function interruptedRollFrames(restored) {
+      const marker = interruptedJobs.find(entry => entry.kind === 'roll-analysis');
+      if (!marker) return [];
+      const edited = new Set(marker.edited);
+      const frames = [];
+      matchJobFiles(marker, restored).forEach((item, index) => {
+        if (!item || edited.has(index)) return;
+        item.savedSettings = false;
+        if (item.settings) item.automaticSettings = true;
+        frames.push(item);
+      });
+      return frames;
+    }
+
+    // A job that already stopped again after a resume runs with the hidden
+    // limits on even while visible: one lane, caches off.
+    async function runResumedJob(marker, run) {
+      const safe = jobNeedsSafeMode(marker);
+      if (safe) {
+        photoSessions.clear();
+        photoPreviews.clear();
+        hiddenJobs.setSafeMode(true);
+      }
+      try {
+        return await run();
+      } finally {
+        if (safe) hiddenJobs.setSafeMode(false);
+      }
+    }
+
+    async function offerInterruptedJobResume({ rollFrames = [] } = {}) {
+      for (const marker of [...interruptedJobs]) {
+        const matched = matchJobFiles(marker, state.fileQueue);
+        if (!matched.some(Boolean)) continue;
+        interruptedJobs = interruptedJobs.filter(entry => entry !== marker);
+        if (marker.kind === 'roll-analysis') {
+          if (!rollFrames.length) { clearJobMarker(jobMarkerStorage, marker); continue; }
+          showToast(getInterpolatedText('resumeRollAnalysis', { count: String(rollFrames.length) }, `Resuming the roll analysis of ${rollFrames.length} photos.`), 4000);
+          // The resumed analysis writes its own marker, one attempt later;
+          // an analysis the re-import scheduled for the same frames stops.
+          automaticRollRevision++;
+          scheduleAutomaticRollImport(rollFrames, { prepared: true, resumeAttempt: marker.attempt + 1, safeMode: jobNeedsSafeMode(marker) });
+          continue;
+        }
+        if (isDesktopBatchExportLocked() || singleExportActive) continue;
+        const missing = matched.filter(item => !item).length;
+        const missingNote = missing ? ' ' + getInterpolatedText('resumeExportMissing', { count: String(missing) }, `${missing} of its originals are missing and are left out.`) : '';
+        if (marker.kind === 'export-zip') {
+          const question = getInterpolatedText('resumeZipConfirm', { total: String(marker.files.length) }, `The ZIP export of ${marker.files.length} photos was interrupted and cannot be resumed. Export the ZIP again?`);
+          if (!await appConfirm(question + missingNote)) { clearJobMarker(jobMarkerStorage, marker); continue; }
+          clearJobMarker(jobMarkerStorage, marker);
+          const selected = matched.filter(Boolean).map(item => ({ item, index: state.fileQueue.indexOf(item) }));
+          restoreInterruptedExportOptions(marker);
+          await runResumedJob(marker, () => exportBatchAsZipBrowser(selected, marker.destination || 'converted_negatives.zip', { markerAttempt: marker.attempt + 1 }));
+          continue;
+        }
+        await resumeInterruptedExport(marker, { missingNote });
+      }
+    }
+
+    // The export options the interrupted job used; they are not persisted.
+    function restoreInterruptedExportOptions(marker) {
+      const quality = Number(marker.options?.jpegQuality);
+      if (Number.isFinite(quality) && quality >= 1 && quality <= 100) {
+        state.jpegQuality = quality;
+        const slider = document.getElementById('exportQualitySlider');
+        if (slider) slider.value = String(quality);
+        const value = document.getElementById('exportQualityValue');
+        if (value) value.textContent = quality + '%';
+      }
+      if (typeof marker.options?.sprocket === 'boolean') setExportSprocketMode(marker.options.sprocket);
+    }
+
+    // Per-file exports: the full original job list (same order, names and
+    // positions), minus the frames recorded as written whose file exists.
+    async function resumeInterruptedExport(marker, { missingNote = '' } = {}) {
+      const desktop = marker.kind === 'export-folder';
+      if (desktop && !isTauriDesktop()) { clearJobMarker(jobMarkerStorage, marker); return; }
+      let targetDirectory = desktop ? marker.destination : '';
+      let exists = null;
+      if (desktop) {
+        const check = async (directory) => {
+          const answers = await window.__TAURI__.core.invoke('exported_files_exist', { directory, paths: marker.written.map(([, path]) => path) });
+          const present = new Set(marker.written.filter((_, i) => answers[i] === true).map(([index]) => index));
+          return async (index) => present.has(index);
+        };
+        try {
+          exists = await check(targetDirectory);
+        } catch {
+          // A full app restart drops the folder grant: the folder is picked again.
+          showToast(getLocalizedText('resumeExportFolderAgain', 'Choose the export folder again to resume.'), 4000);
+          targetDirectory = await pickDesktopExportDirectory();
+          if (!targetDirectory) { clearJobMarker(jobMarkerStorage, marker); return; }
+          try { exists = await check(targetDirectory); } catch { exists = async () => false; }
+        }
+      }
+      const plan = await planResumedExport(marker, state.fileQueue, { exists });
+      if (!plan.jobs.length) { clearJobMarker(jobMarkerStorage, marker); return; }
+      const folder = summarizePathForUi(targetDirectory) || targetDirectory;
+      const question = desktop
+        ? getInterpolatedText('resumeExportConfirm', { total: String(marker.files.length), folder, skipped: String(plan.skipped.length) }, `Resume the export of ${marker.files.length} photos to ${folder}? ${plan.skipped.length} already written are skipped, and the rest keep their names.`)
+        : getInterpolatedText('resumeExportDownloadsConfirm', { total: String(marker.files.length), skipped: String(plan.skipped.length) }, `Resume the export of ${marker.files.length} photos? ${plan.skipped.length} already downloaded are skipped.`);
+      if (!await appConfirm(question + missingNote)) { clearJobMarker(jobMarkerStorage, marker); return; }
+      restoreInterruptedExportOptions(marker);
+      const exportInfo = marker.exportInfo || getExportInfo();
+      const jobs = plan.jobs.map(({ markerIndex, item, outputName }) => {
+        const index = state.fileQueue.indexOf(item);
+        // The recovery copy keeps recipes, not how they were made: an
+        // automatic recipe exports with the automatic gray point, as before.
+        if (marker.files[markerIndex].auto) item.automaticSettings = true;
+        const settings = getSettingsForExport(index, item);
+        return {
+          item, index, markerIndex, file: item.file,
+          outputName: outputName || buildActiveExportFileName(item.file.name, exportInfo, settings),
+          settings: cloneSettings(settings)
+        };
+      });
+      // The resumed run keeps the records of what it skips, one attempt later.
+      const resumed = createJobMarker(jobMarkerStorage);
+      resumed.begin({ ...resumedJobMarker(marker, { keep: plan.skipped }), destination: desktop ? targetDirectory : marker.destination });
+      const dustRemoval = marker.options?.dustRemoval || null;
+      await runResumedJob(marker, () => (desktop
+        ? runDesktopFolderExport(jobs, { targetDirectory, exportInfo, dustRemoval, marker: resumed })
+        : runBrowserDownloadsExport(jobs, { exportInfo, marker: resumed })));
     }
 
     document.getElementById('projectInput')?.addEventListener('change', (e) => {
@@ -16638,7 +16878,8 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         item.file === state.loadedFile && item.isDirty ? extractCurrentSettings() : null]);
     }
 
-    function scheduleAutomaticRollImport(imported, { prepared = false } = {}) {
+    // `resumeAttempt` and `safeMode` resume an interrupted analysis (#241).
+    function scheduleAutomaticRollImport(imported, { prepared = false, resumeAttempt = 0, safeMode = false } = {}) {
       if (safeStorageGet(AUTO_ROLL_KEY) === 'off') return;
       const pending = imported.filter(item => !item.savedSettings && (!item.settings || prepared));
       if (pending.length < 3) return;
@@ -16648,6 +16889,14 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       let storage = null;
       let timer = null;
       let finished = false;
+      // The job marker: written when the first attempt starts, updated as
+      // frames are analysed, deleted when the analysis ends.
+      let marker = null;
+      const recordRollFrame = (item) => {
+        if (!marker) return;
+        marker.record(pending.indexOf(item));
+        marker.setEdited(pending.flatMap((entry, index) => (entry.userEdited ? [index] : [])));
+      };
       const eligible = item => state.fileQueue.includes(item) && !item.savedSettings && !item.userEdited && !failed.has(item);
       const valid = () => requestRevision === automaticRollRevision && safeStorageGet(AUTO_ROLL_KEY) !== 'off'
         && !state.rollReference.applyLock && pending.some(eligible);
@@ -16673,6 +16922,9 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         finished = true;
         if (timer !== null) clearTimeout(timer);
         timer = null;
+        marker?.finish();
+        marker = null;
+        if (safeMode) hiddenJobs.setSafeMode(false);
         await storage?.clear();
       };
       const schedule = delay => {
@@ -16693,6 +16945,15 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         }
         automaticRollImportRunning = true;
         let retry = false;
+        if (!marker) {
+          if (safeMode) hiddenJobs.setSafeMode(true);
+          marker = createJobMarker(jobMarkerStorage);
+          marker.begin({
+            kind: 'roll-analysis', attempt: resumeAttempt,
+            files: pending.map(item => ({ name: item.file.name, size: item.file.size, lastModified: item.file.lastModified || 0 })),
+            written: pending.flatMap((item, index) => (item.settings ? [[index, '']] : []))
+          });
+        }
         try {
           persistCurrentFileSettings({ silent: true, force: true });
           const current = getCurrentQueueItem();
@@ -16738,6 +16999,10 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
                   || payload.key !== automaticRollItemKey(item)) return;
                 item.settings = payload.settings; item.automaticSettings = true;
                 await samples.put(item, payload.sample);
+                // Each frame's recipe reaches the recovery copy within 2.5 s,
+                // so a kill loses at most the frames still in flight (#241).
+                recordRollFrame(item);
+                scheduleProjectRecovery();
               },
               onEvent: (event) => {
                 if (event.type !== 'error' || !valid() || !eligible(event.job)
@@ -17152,6 +17417,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         onRestoreProject: () => { restoreRecoveredProject(); }
       });
       void offerProjectRecovery();
+      void checkInterruptedJobs();
       updateWorkflowUI();
       studioWorkspace.sync();
     }
