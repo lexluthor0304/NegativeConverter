@@ -27,7 +27,10 @@ the unmirrored base and `cropRegion` on the rotated (and mirrored) frame.
   stand-in, Apply Crop's crop-area detection) get their sample without the
   frame. `renderGeometry(..., { with16: false })` leaves the 16-bit plane out
   of such a sample (the kernels render it band by band into a scratch
-  buffer), with the same 8-bit bytes. Crop mode itself draws a display proxy
+  buffer), with the same 8-bit bytes. The other way round, a batch frame
+  without lens correction asks the pool for `planes: '16'` (#256): the
+  16-bit plane alone, `{ width, height, __image16 }`, with the kernels'
+  8-bit bytes written into a few rows of scratch. Crop mode itself draws a display proxy
   of the base turned by canvas transforms (#245,
   `docs/crop-apply-and-analysis-worker.md`).
 

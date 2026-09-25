@@ -33,15 +33,20 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
 - `runBatchPipeline` keeps `lanes` files in flight and hands the encoded
   results to the sink strictly in the original order, so ZIP entries, folder
   writes and downloads keep the roll's sequence. A failed file marks only
-  itself. Processing files plus completed, unwritten payloads count toward
-  the same lane budget: a lane is released only after its own sink finishes.
-  A slow first file therefore cannot cause the rest of a roll's encoded
-  outputs to accumulate. An `AbortSignal` stops further files; in-flight ones
-  finish and are written. An optional `beforeStart` hook (the hidden-window
-  gate, `docs/hidden-window-jobs.md`, then the memory budget's lane
-  reservation, `docs/memory-budget.md`) is awaited before a lane claims its
-  next index and released after that index's sink, so a lane held back while
-  the window is hidden or memory is short never blocks the in-order sink.
+  itself. A lane whose encoded payload fits the unwritten-bytes cap goes on
+  to the next file while the payload waits for its turn at the sink; a
+  payload that does not fit holds its lane until its own sink finishes, as
+  every payload did before #256. A slow first file therefore still cannot
+  cause the rest of a roll's encoded outputs to accumulate: unwritten
+  payload bytes never exceed the cap, and past it the lanes stop. An
+  `AbortSignal` stops further files; in-flight ones finish and are written.
+  An optional `beforeStart` hook (the hidden-window gate,
+  `docs/hidden-window-jobs.md`, then the memory budget's lane reservation,
+  `docs/memory-budget.md`) is awaited before a lane claims its next index
+  and released after that index's sink, so a lane held back while the window
+  is hidden or memory is short never blocks the in-order sink. The stages a
+  frame goes through (decode ahead, process, wait for the write) are
+  budgeted apart; see "Stages of a frame" below.
 - Each batch owns a pool of conversion workers
   (`createConversionWorkerPool`, kept alive across frames instead of
   restarting per file) and a pool of export workers (`createExportWorkerPool`,
@@ -128,8 +133,9 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
   file is removed and any existing target is kept. A single desktop export
   keeps its overlay up with "Saving… x / y MB" until `finish_export_write`
   resolves, then toasts the saved file name. Its Cancel button appears once
-  the encode starts. The desktop batch sink still awaits each write while
-  its lane is held (#256 overlaps the write with the next frame).
+  the encode starts. The desktop batch sink writes each file while the lane
+  already processes the next frame, when the payload fits the byte cap
+  (#256).
 - Hot-folder reads use 8 MiB chunks (`IMPORT_CHUNK_BYTES` = the Rust
   `IMPORT_CHUNK_LIMIT`, pinned by a test). `read_import_file` is an async
   command whose read runs on the blocking pool, not on the native main
@@ -201,6 +207,118 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
   frame wait, so a hidden window keeps exporting. Each job writes a marker so
   a killed export can be named at boot and resumed under the same names; see
   `docs/hidden-window-jobs.md`.
+
+## Stages of a frame (#256)
+
+At 60 MP a batch used to run one frame at a time on about one core: the
+80 M-pixel budget gives such frames one lane, and a lane held its frame from
+decode to the end of the write. The stages now overlap, each with its own
+budget, and the idle cores convert in bands. `nc_batch_pipeline_v1 = serial`
+(support and benchmarks, no UI) turns all of it off on the same build: the
+parity oracle for the comparisons below.
+
+Budgets, in estimated bytes (`batchExportScheduler.js`):
+
+| stage | estimate | where |
+| --- | --- | --- |
+| decoding (LibRaw heap, packing, post-decode) | 256 MB + 26 B/px, ~1.8 GB at 60 MP | `estimateRawDecodeBytes` |
+| decoded, waiting for its lane | 12 B/px, ~0.72 GB | `DECODED_BASE_BYTES_PER_PIXEL` |
+| one processing lane | 25 B/px, ~1.5 GB (code accounting) | `PROCESSING_SLOT_BYTES_PER_PIXEL` |
+| encoded, waiting for its write | the payload's size, at most 512 MiB in all | `EXPORT_MAX_UNWRITTEN_BYTES` |
+| the editor (open photo, sessions, previews) | resident bytes | `hiddenResidentBytes()` |
+
+The lane plan (`planBatchParallelism`) is unchanged: frames of 45 MP and
+more keep one processing lane, and the other cores go to decode-ahead and
+the band pool. The processing figure is code accounting until the #230
+harness measures the per-lane peak; the decode-ahead ceiling (6.5 GB) is a
+placeholder until #258 supplies the renderer-wide budget.
+
+- **Smaller lane** (Part 1). `processFileWithSettings` with `releaseEarly`
+  (batch only) releases the decoded base and the geometry/lens outputs it
+  owns as soon as the conversion resolves, not after the encode: later
+  steps read their sizes and the lens mapping only. A base decoded ahead
+  arrives with `sourceOwned` and counts as the call's own. A frame without
+  lens correction gets only the 16-bit plane of its geometry output
+  (`planes: '16'`); an 8-bit output drops the unadjusted 16-bit plane before
+  the adjustment. If the conversion lane loses a handed-over geometry
+  output, the output is rebuilt from the retained base with the same chain
+  and converted by the lane's single worker, instead of decoding again.
+  Code accounting at 60 MP (81 % crop, PNG8): ~3.0-3.5 GB per lane at
+  1703835, ~2.0 GB with #250, ~1.2-1.5 GB now.
+- **Byte cap** (Part 2). A lane is released as soon as its payload fits
+  `EXPORT_MAX_UNWRITTEN_BYTES` (one 60 MP TIFF16 is ~362 MB, a JPEG ~7 MB),
+  so the desktop write or the ZIP CRC of frame N overlaps frame N+1.
+  Learned defaults keep a one-lane batch's order: the folder and download
+  sinks hand over their `learnFromExport` promise, and a never-analysed
+  frame awaits every earlier learning frame's write (`createLearningBarrier`)
+  before it reads the learned records. The ZIP learns after it is closed.
+- **Decode-ahead** (Part 3). While a lane processes frame N, frame N+1 is
+  decoded (`createPrepareStage`, exported for roll analysis and the contact
+  sheet): at most one frame ahead, one decoder at a time, started only once
+  every lane's frame has its base. Each frame is admitted by
+  `planDecodeAhead` (the table above against the ceiling; off at
+  `deviceMemory` <= 4, while the hidden-window gate limits jobs, and in
+  safe mode; WebKit reports no `deviceMemory`, so the estimate decides
+  there). RAW and PNG files only, whose decodes run off the main thread.
+  The prepared base is `loadFileToImageData` with the options the lane
+  would use, so it is the same decode. On the desktop a prepare waits for
+  the background gate's foreground conditions only (input in the last
+  400 ms, a photo switch, a foreground decode or conversion), at most 2 s;
+  the batch's own export lock never holds it. Cancelling aborts every frame
+  no lane has taken (its LibRaw worker goes with the abort) and releases
+  those already decoded; they are never processed or written. A failed
+  prepare fails only its own file.
+- **Decoder sub-stages** (Part 4, off). With `nc_batch_pipeline_v1 =
+  substages` a prepare reports `postDecode` once LibRaw is done
+  (`loadRawFile`'s `onStage`), which frees the decode slot for the next
+  frame while this one runs its post-decode pass; each sub-stage holds one
+  frame. It is to be switched on only if the #230 harness shows the decode
+  stage still bounds a batch after #232.
+- **Band pool** (Part 5). `createConversionBandPool`
+  (`conversionWorkerClient.js`, `workers/conversionBandWorker.js`,
+  `pipeline/silverBands.js`) converts a frame in K row bands on
+  min(6, cores − 2) workers, K = cores − 2 − decodes in flight, between 2 and
+  6, and 2 while the desktop user gives input. Worker 0 plans the job
+  (parameters, the loaded 3D profile, the reference sample's analysis) and
+  builds the tables once from the bands' merged analysis (256-bin
+  histograms, or the positive analysis's strided sample in frame order);
+  the bands apply the engine's per-pixel tail with their own rows of the
+  flat field and the stop map, and exchange unsharpened edge rows before
+  sharpening, clamped at the frame's edges. Step 3 runs on bands with the
+  frame's size and each band's start row (`createBandedExportBridge` wraps
+  the export bridge: the 16-bit and 8-bit passes, the fused TIFF/PNG16
+  request, the JPEG gain map's pass). Users: one-lane batches of frames over
+  4 MP, and single exports (the export-time conversion of a frame over
+  16 MP, and Step 3 of frames over 4 MP). The main thread slices and
+  assembles in steps of about 8 ms. A batch frame whose later steps read no
+  pixels (no dust, no repair, no pending expired measurement, auto WB from
+  the analysis preview or none) keeps its converted bands in the pool and
+  its Step 3 runs there: the processed frame is never assembled on the main
+  thread. A single export keeps them too without dust or repairs; the plane
+  that becomes `state.processedImageData` comes back as a copy. With
+  cross-origin isolation (#264) the bands share one plane instead of being
+  sliced. A pool that fails falls back to the lane or the single worker
+  with the same pixels and is not used again; a released geometry output
+  is rebuilt from the base; lost resident bands re-render the frame. The
+  pool is released at batch end and after each single export.
+  `window.__ncBatchPipeline.diagnostics` reports what the stages did.
+
+Parity: `pipeline/silverBands.parity.test.mjs` (band counts 1-7 against the
+whole frame by SHA-256, every mode, references, flat field, strokes,
+overrides, profiles, paper, sharpening radii, Step 3 with the expired
+spatial map), `app/conversionBandPool.test.mjs` (the real worker in
+worker_threads), `app/exportPlaneLifecycle.test.mjs` (banded single exports,
+resident and assembled batch frames and a crashing band worker against the
+serial path by bytes), `app/processFileWithSettings.parity.test.mjs`
+(`releaseEarly`, `sourceOwned`, the rebuild, and the release probe), and
+`npm run test:smoke -- --batch-pipeline-only` (Export All serial against
+staged, byte for byte, in Chrome).
+
+Measurements still to record here (with the #230 S9 method, 12 × 60 MP M11
+DNGs, another 60 MP photo open): per-file time for TIFF16 and JPEG, decode
+stage busy share, the `convert` mark per 60 MP frame with bands, Step-3
+band time, per-lane peak and WebContent `phys_footprint`, and the per-frame
+copy time and lane retention before and after.
 
 The automatic roll analysis after a multi-file import uses the same lane
 planning, with one auto-frame worker per lane (`createAutoFrameWorkerPool`),
@@ -279,6 +397,7 @@ npm run test:smoke  # batch export scenario (ZIP fallback to individual download
 npm run test:smoke -- --gain-map-only  # real-worker 16-bit result and gain map, gain-map requests per export intent
 npm run test:smoke -- --png16-only     # PNG16 band pool in real workers: same bytes for 1/2/6 workers, one worker and the main thread
 npm run test:smoke -- --export-ownership-only  # worker PNG8/JPEG parity, per-export workers, plane hand-off
+npm run test:smoke -- --batch-pipeline-only    # Export All serial vs staged (byte cap, decode-ahead, band pool), banded single export
 node scripts/performance-io-benchmark.mjs /path/to/baseline
 ```
 

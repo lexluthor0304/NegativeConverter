@@ -270,6 +270,9 @@ hides come last. No job starts on a file another lane is working on.
   detection, geometry, the tile encode), so a paused job does not hold a
   decoded frame through a foreground decode. A hidden window is not busy here;
   hidden admission is `hiddenJobGate.js` (#241), which every job also passes.
+  `idle({ foregroundOnly: true })` waits on input, a switch and foreground
+  decodes and conversions only, not on the export locks: a desktop batch's
+  decode-ahead uses it, capped at 2 s (#256, `docs/batch-export-pipeline.md`).
 - **One decode.** Background decodes go through `sharedDecodes.js`: the
   foreground's options (full size, defects repaired) with the RAW metadata,
   so an adopted base carries lens and EXIF data exactly like a cold open. A
