@@ -81,8 +81,17 @@ const FUNCTIONS = [
   'restoreColdSnapshotPixels', 'liveHistoryRoots', 'hotGeometrySnapshot', 'historyExclusiveBytes',
   'pruneHistoryForMemory', 'commitUndoSnapshot', 'pushUndo', 'performUndo', 'performRedo',
   'rememberPhotoSession', 'releaseOutgoingPhotoPlanes', 'photoSettingsKey', 'switchToFile',
-  'reactivateReleasedPhoto', 'invalidatePhotoActivation'
+  'reactivateReleasedPhoto', 'invalidatePhotoActivation', 'getCropDraftTotalAngle', 'scaleCropRect'
 ];
+
+// The Apply Crop click handler, as a named function.
+export function applyCropHandlerSource() {
+  const marker = "    applyCropBtn.addEventListener('click', async () => {";
+  const start = source.indexOf(marker);
+  assert.ok(start >= 0, 'Apply Crop handler exists');
+  const end = source.indexOf('\n    });', start);
+  return 'var applyCropHandler = ' + source.slice(start + marker.length - 'async () => {'.length, end) + '\n    };';
+}
 
 export function createHarness(base, { historyBudget = 768 * 1024 * 1024, sessionBudget = 768 * 1024 * 1024, workers = null } = {}) {
   const displayed = [];

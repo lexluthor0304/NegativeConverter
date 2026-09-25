@@ -256,4 +256,63 @@ const plain = value => JSON.parse(JSON.stringify(value));
   samePixels(c.renderFrameSample(700), imageDataOps.downsampleImageDataForMaxPixels(full, 700), 'sample of the installed frame');
 }
 
+// ---- Apply Crop builds only the crop window, from the base ----
+{
+  const { applyCropHandlerSource } = await import('./geometryTestHarness.mjs');
+  const { imageAreaFromWorkingRect } = await import('./analysisRegion.js');
+  const { isSameAnalysisFrame, workingPointsToBase } = await import('./cropColorAnalysis.js');
+  const vm = await import('node:vm');
+  const base = makeBase(90, 64, 21);
+  for (const scenario of ['straighten', 'plain', 'analysis', 'mirrored']) {
+    const h = createHarness(base), c = h.context;
+    const mirrored = scenario === 'mirrored';
+    c.restoreSettings({ rotationAngle: 1.3, mirrored, cropRegion: { left: 6, top: 5, width: 70, height: 45 } });
+    await h.state.geometryReady;
+    const detections = [];
+    Object.assign(h.target, {
+      applyCropBtn: { disabled: false }, cancelCropBtn: { disabled: false },
+      getLoadingOverlay: () => ({ show: async () => {}, hide() {} }),
+      requestAnimationFrame: callback => setTimeout(callback, 0),
+      studioWorkspace: { sync() {}, text: key => key },
+      imageAreaFromWorkingRect, isSameAnalysisFrame, workingPointsToBase,
+      ensureOpenCvReady: async () => true, AUTO_FRAME_FORMAT_RATIOS: {},
+      detectCropImageArea: (image, crop, targets, options) => { detections.push({ image, crop, options }); return null; },
+      exitCropMode: () => { h.state.cropping = false; h.state.cropDraft = null; }
+    });
+    vm.runInContext(applyCropHandlerSource(), c);
+    const draftAngle = scenario === 'plain' || scenario === 'analysis' ? 0 : -0.5;
+    const frameBefore = h.state.originalImageData;
+    const preview = c.renderFrameSample(700_000);
+    const rotatedPreview = draftAngle ? geometry.applyRotationToImageData(preview, draftAngle) : preview;
+    const rect = { left: 11.3, top: 7.8, width: 52.4, height: 37.1 };
+    h.state.cropping = true;
+    h.state.cropDraft = {
+      sourceImageData: frameBefore, previewSourceImageData: preview, rotatedImageData: rotatedPreview,
+      rect, rotationBase: 0, straightenAngle: draftAngle, analysisOnly: scenario === 'analysis'
+    };
+    const cropBefore = { ...h.state.cropRegion };
+    await c.applyCropHandler();
+    await settle();
+    if (scenario === 'analysis') {
+      assert.equal(h.state.rotationAngle, 1.3, 'analysis only: geometry unchanged');
+      assert.deepEqual(plain(h.state.cropRegion), plain(cropBefore));
+      assert.equal(detections.length, 0);
+      continue;
+    }
+    const total = geometry.normalizeAngleDegrees(1.3 + (mirrored ? 0.5 : -0.5) * (draftAngle ? 1 : 0));
+    assert.equal(h.state.rotationAngle, total);
+    const draftFrame = geometry.rotatedDimensions(frameBefore.width, frameBefore.height, draftAngle);
+    const frame = geometry.rotatedDimensions(90, 64, total);
+    const expectedCrop = c.mapDraftRectToFrame(c.scaleCropRect(rect, draftFrame.width / rotatedPreview.width, draftFrame.height / rotatedPreview.height), draftFrame, frame);
+    assert.deepEqual(plain(h.state.cropRegion), plain(expectedCrop), `${scenario}: rectangle mapped onto the base-derived frame`);
+    samePixels(h.state.croppedImageData, exportChain(base, settingsFor(h.state)), `${scenario}: planes equal the export chain`);
+    assert.ok(h.state.originalImageData.__geometryFrame, `${scenario}: the rotated frame is not kept`);
+    // The crop-area detector got exactly the <=1 MP sample of the new frame.
+    assert.equal(detections.length, 1);
+    assert.deepEqual([detections[0].image.width, detections[0].image.height], [frame.width, frame.height]);
+    samePixels(detections[0].options.preview, imageDataOps.downsampleImageDataForMaxPixels(exportChain(base, { rotationAngle: total, mirrored }), 1_000_000), `${scenario}: detection sample`);
+    assert.equal(h.target.geometryDiagnostics.frameSyncReads, 0);
+  }
+}
+
 console.log('geometry memo tests passed');

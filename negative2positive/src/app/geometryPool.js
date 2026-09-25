@@ -10,6 +10,8 @@ import {
 
 // Below this many output pixels a band is not worth a worker round trip.
 const MIN_BAND_PIXELS = 1_000_000;
+// Without workers each band is one main-thread task: keep them short.
+const SYNC_BAND_PIXELS = 1_000_000;
 
 export function defaultGeometryPoolSize(hardwareConcurrency = globalThis.navigator?.hardwareConcurrency) {
   const cores = Number(hardwareConcurrency) || 4;
@@ -195,7 +197,10 @@ export function createGeometryPool({
    */
   async function render(source, plan, { isCurrent = () => true, bands: bandCount = null, maxInFlight = null } = {}) {
     if (plan.identity) return source;
-    const bands = planGeometryBands(plan, bandCount || geometryBandCount(plan, poolSize));
+    const requested = bandCount || geometryBandCount(plan, poolSize);
+    const bands = planGeometryBands(plan, broken
+      ? Math.max(requested, Math.ceil((plan.outWidth * plan.outHeight) / SYNC_BAND_PIXELS))
+      : requested);
     const out8 = new Uint8ClampedArray(plan.outWidth * plan.outHeight * 4);
     const out16 = plan.has16 ? new Uint16Array(out8.length) : null;
     const rowWords = plan.outWidth * 4;

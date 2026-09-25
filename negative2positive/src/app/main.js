@@ -5491,6 +5491,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     async function convertFromCurrentSource(settings = state, { preview = false, interactive = false, includeAnalysisPreview = true, retain16 = false } = {}) {
       const fullSource = state.conversionSourceImageData || state.croppedImageData || state.originalImageData;
       if (!fullSource) return null;
+      if (!state.conversionSourceImageData) noteGeometryPixelRead('convertFromCurrentSource');
       const source = (preview && state.conversionPreviewImageData) ? state.conversionPreviewImageData : fullSource;
       const request = {
         imageData: source,
@@ -7930,6 +7931,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       if (!requiresFilmBase()) return;
       const sourceData = state.croppedImageData || state.originalImageData;
       if (!sourceData) return;
+      noteGeometryPixelRead('autoDetectBase');
       pushUndo('autoDetectBase');
       state.filmBase = autoDetectFilmBase(sourceData, state.coreBorderBuffer);
       state.filmBaseSet = true;
@@ -7955,6 +7957,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         if (!usedReference) {
           // Auto detect if not set
           const sourceData = state.croppedImageData || state.originalImageData;
+          noteGeometryPixelRead('applyConvert');
           state.filmBase = autoDetectFilmBase(sourceData, state.coreBorderBuffer);
           state.filmBaseSet = true;
           updateFilmBasePreview();
@@ -11551,6 +11554,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       }
       if (state.sprocketPreviewEnabled || state.exportSprocketHolesEnabled) {
         const sourceData = state.croppedImageData || state.originalImageData;
+        noteGeometryPixelRead('currentExportImageData');
         if (sourceData) return sourceData;
       }
       if (canvas.width > 0 && canvas.height > 0) {
