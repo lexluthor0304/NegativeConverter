@@ -35,9 +35,12 @@ function hatWeight(value) {
 // the merged output.
 export const LIN = new Float64Array(65536);
 export const HAT = new Float64Array(65536);
+// The weight as the merge stores it (a float).
+const HAT32 = new Float32Array(65536);
 for (let v = 0; v < 65536; v++) {
   LIN[v] = toLinear(v);
   HAT[v] = hatWeight(v / 65535) + 1e-4;
+  HAT32[v] = HAT[v];
 }
 
 // Exposure of `frame` relative to `reference` (frame ≈ reference * ratio) from
@@ -119,67 +122,85 @@ export function mergeRows(frames, rect, y0, y1, out, { mode = 'average', scale =
   const outWidth = rect.width;
   const planes = frames.map((f) => f.image16.data);
   const divisors = frames.map((f) => f.ratio || 1);
-  // Float32 scratch as before: each value and weight is rounded to float
-  // exactly where the per-pixel arrays rounded it.
-  const values = new Float32Array(n);
-  const weights = new Float32Array(n);
-  const present = new Float64Array(n);
   const hdr = mode === 'hdr';
   const rejectOutlier = mode === 'average';
+  // Per-channel values, rounded to float where the old per-pixel Float32
+  // scratch rounded them: channel ch of frame i is values[ch * n + i].
+  const values = new Float32Array(3 * n);
+  const alive = new Uint8Array(n);
+  const present = new Float64Array(n);
   for (let y = y0; y < y1; y++) {
     let o = ((y + rect.top) * width + rect.left) * 4;
     let d = y * outWidth * 4;
     for (let x = 0; x < outWidth; x++, o += 4, d += 4) {
-      for (let ch = 0; ch < 3; ch++) {
-        let count = 0;
-        if (hdr) {
-          for (let i = 0; i < n; i++) {
-            const data = planes[i];
-            if (data[o + 3] === 0) { weights[i] = 0; values[i] = 0; continue; }
-            const v = data[o + ch];
-            values[i] = LIN[v] / divisors[i];
-            weights[i] = HAT[v];
-            count++;
-          }
-        } else {
-          for (let i = 0; i < n; i++) {
-            const data = planes[i];
-            if (data[o + 3] === 0) { weights[i] = 0; values[i] = 0; continue; }
-            values[i] = LIN[data[o + ch]] / divisors[i];
-            weights[i] = 1;
-            count++;
-          }
+      let count = 0;
+      if (hdr) {
+        // Each channel accumulates over the covered frames in frame order;
+        // an uncovered frame's weight is 0 and adds exactly nothing.
+        let s0 = 0; let s1 = 0; let s2 = 0; let w0 = 0; let w1 = 0; let w2 = 0;
+        for (let i = 0; i < n; i++) {
+          const data = planes[i];
+          if (data[o + 3] === 0) continue;
+          const divisor = divisors[i];
+          const v0 = data[o]; const v1 = data[o + 1]; const v2 = data[o + 2];
+          const a0 = HAT32[v0]; const a1 = HAT32[v1]; const a2 = HAT32[v2];
+          s0 += Math.fround(LIN[v0] / divisor) * a0; w0 += a0;
+          s1 += Math.fround(LIN[v1] / divisor) * a1; w1 += a1;
+          s2 += Math.fround(LIN[v2] / divisor) * a2; w2 += a2;
+          count++;
         }
+        out[d] = count && w0 > 0 ? encode((s0 / w0) * scale) : 0;
+        out[d + 1] = count && w1 > 0 ? encode((s1 / w1) * scale) : 0;
+        out[d + 2] = count && w2 > 0 ? encode((s2 / w2) * scale) : 0;
+        out[d + 3] = opaque || count ? 65535 : 0;
+        continue;
+      }
+      for (let i = 0; i < n; i++) {
+        const data = planes[i];
+        if (data[o + 3] === 0) { alive[i] = 0; continue; }
+        alive[i] = 1;
+        const divisor = divisors[i];
+        values[i] = LIN[data[o]] / divisor;
+        values[n + i] = LIN[data[o + 1]] / divisor;
+        values[2 * n + i] = LIN[data[o + 2]] / divisor;
+        count++;
+      }
+      // Alpha: covered by at least one frame.
+      out[d + 3] = opaque || count ? 65535 : 0;
+      for (let ch = 0, base = 0; ch < 3; ch++, base += n) {
         if (!count) { out[d + ch] = 0; continue; }
+        let rejected = -1;
         if (rejectOutlier && count >= 3) {
           // Reject the one sample farthest from the median when it is far off
           // (dust or a speck that moved between shots). Insertion sort of the
           // few present values: the same order as sorting them numerically.
           let m = 0;
           for (let i = 0; i < n; i++) {
-            if (!(weights[i] > 0)) continue;
-            const v = values[i];
+            if (!alive[i]) continue;
+            const v = values[base + i];
             let j = m++;
             while (j > 0 && present[j - 1] > v) { present[j] = present[j - 1]; j--; }
             present[j] = v;
           }
           const median = present[m >> 1];
-          let worst = -1; let worstDiff = 0;
+          let worstDiff = 0;
           for (let i = 0; i < n; i++) {
-            if (weights[i] === 0) continue;
-            const diff = Math.abs(values[i] - median);
-            if (diff > worstDiff) { worstDiff = diff; worst = i; }
+            if (!alive[i]) continue;
+            const diff = Math.abs(values[base + i] - median);
+            if (diff > worstDiff) { worstDiff = diff; rejected = i; }
           }
-          if (worst >= 0 && worstDiff > 0.25 * Math.max(median, 0.02)) weights[worst] = 0;
+          if (!(worstDiff > 0.25 * Math.max(median, 0.02))) rejected = -1;
         }
-        let sum = 0; let wsum = 0;
-        for (let i = 0; i < n; i++) { sum += values[i] * weights[i]; wsum += weights[i]; }
-        out[d + ch] = wsum > 0 ? encode((sum / wsum) * scale) : 0;
+        // Equal weights: the kept values summed in frame order (a dropped or
+        // uncovered sample's weight 0 adds exactly nothing).
+        let sum = 0; let kept = 0;
+        for (let i = 0; i < n; i++) {
+          if (!alive[i] || i === rejected) continue;
+          sum += values[base + i];
+          kept++;
+        }
+        out[d + ch] = kept > 0 ? encode((sum / kept) * scale) : 0;
       }
-      // Alpha: covered by at least one frame.
-      let covered = false;
-      for (let i = 0; i < n; i++) if (planes[i][o + 3] !== 0) { covered = true; break; }
-      out[d + 3] = opaque || covered ? 65535 : 0;
     }
   }
 }

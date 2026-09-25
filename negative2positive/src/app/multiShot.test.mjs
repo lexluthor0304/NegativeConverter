@@ -223,6 +223,19 @@ for (const count of [2, 3, 4, 5]) {
   }
 }
 
+// Outlier ties: with a negative ratio one frame's values mirror another's,
+// so two samples sit at the same distance from the median; the first one in
+// frame order is rejected, as before.
+{
+  const flat = (value) => ({ width: 4, height: 1, data: Uint16Array.from({ length: 16 }, (_, i) => (i % 4 === 3 ? 65535 : value)) });
+  for (const v of [30000, 45000, 65535]) {
+    const frames = [{ image16: flat(v), ratio: -1 }, { image16: flat(0), ratio: 1 }, { image16: flat(v), ratio: 1 }];
+    const merged = mergeFrames(frames, { mode: 'average' });
+    sameSamples(merged, head.mergeFrames(frames, { mode: 'average' }), `tie at ${v}`);
+    assert.ok(merged.data[0] > 0, 'the negative (first) sample of the tie is the one dropped');
+  }
+}
+
 // Ratio early returns: fewer than 50 usable samples, and a size mismatch.
 {
   const dark = { width: 20, height: 10, data: new Uint16Array(20 * 10 * 4).fill(65535) };
