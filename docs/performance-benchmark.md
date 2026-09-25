@@ -247,7 +247,11 @@ memory #259/#260, UI flush counters #261).
     the harness's Chrome (the repo has no JPEG encoder), so the files are stable
     per Chrome version; `fixtures.json` records the encoder. No "iPhone" string
     in the first 1000 bytes. Decode time is not comparable with the M11's: use
-    them for before/after only.
+    them for before/after only. A 1200×800 file was checked with LibRaw 0.22.1
+    (rawpy) and Apple's RAW decoder: the raw values match the scene exactly,
+    the pattern is RGGB with white level 4095, the demosaiced image has no Bayer
+    snow, and LibRaw lists the SubIFD previews as thumbnails. The smoke suite
+    decodes one through the app's LibRaw.
   - `synthetic-roll-01…12.dng`: a 60 MP roll with different seeds (about 1.1 GB).
   - Generation checks free disk first (it must stay above 20 GB).
 - **Real**: `NC_PERF_RAW_DIR` (+ `NC_PERF_RAW_FILES`) and `NC_PERF_ROLL_DIR`,
