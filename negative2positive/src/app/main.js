@@ -15333,6 +15333,9 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
           delete document.body.dataset.studioDetecting;
           delete document.body.dataset.studioBusy;
           updateAutoFrameButtons();
+          // The tail's final settings refresh the compare button while
+          // studioDetecting still disables it; re-read it now the tail is over.
+          updateBeforeAfterButtonState();
           updateExpiredRescueUI();
           studioWorkspace?.sync();
         }

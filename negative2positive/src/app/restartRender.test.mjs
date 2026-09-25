@@ -323,6 +323,7 @@ function prepareFixture({ itemSettings = null, detectFrame = true, learned = 0 }
   const armed = [];
   const marks = [];
   const overlay = { hides: 0, shows: 0, show: async () => { overlay.shows++; }, updateProgress() {}, hide() { overlay.hides++; } };
+  const compareButton = { detecting: null };
   const noop = () => {};
   const context = vm.createContext({
     state, console, structuredClone, DOMException, AbortController, JSON, Promise,
@@ -342,6 +343,8 @@ function prepareFixture({ itemSettings = null, detectFrame = true, learned = 0 }
     getImageDataPixelCount: image => (image ? image.width * image.height : 0),
     getLoadingOverlay: () => overlay, quietLoadingOverlay: { show: async () => {}, updateProgress: noop, hide: noop },
     studioWorkspace: { sync: noop }, updateAutoFrameButtons: noop, updateExpiredRescueUI: noop,
+    // Records whether the compare button was last evaluated during the tail.
+    updateBeforeAfterButtonState: () => { compareButton.detecting = Boolean(context.document.body.dataset.studioDetecting); },
     createDefaultSettings: () => structuredClone(defaults), mergeStudioColors: settings => settings,
     restoreSettings: settings => {
       log.push({ restore: settings.id });
@@ -410,7 +413,7 @@ function prepareFixture({ itemSettings = null, detectFrame = true, learned = 0 }
     conversions[index].reply.resolve({ width: 8, height: 6, id: `converted:${conversions[index].settings.id}` });
     await settle();
   };
-  return { context, state, item, log, conversions, frames, edges, armed, marks, overlay, answer };
+  return { context, state, item, log, conversions, frames, edges, armed, marks, overlay, compareButton, answer };
 }
 
 const unapplied = settings => ({ ...settings, autoFrameMeta: { appliedMode: 'none', method: 'density-template', confidence: 0.68, importAuto: true, imageArea: null } });
@@ -463,6 +466,7 @@ for (const timing of ['before', 'during', 'after']) {
   assert.equal(f.item.isDirty, true, 'the provisional automatic WB stands as the final one');
   assert.equal(f.context.document.body.dataset.studioBusy, undefined);
   assert.equal(f.context.document.body.dataset.studioDetecting, undefined);
+  assert.equal(f.compareButton.detecting, false, 'the compare button is re-read after the tail, not left disabled by it');
   assert.ok(f.marks.indexOf('autoFrame') > 0 && f.marks.indexOf('provisionalSettings') < f.marks.indexOf('autoFrame'),
     'the provisional conversion starts before the autoFrame mark');
   assert.ok(f.marks.indexOf('provisionalSettings') < f.marks.indexOf('settings'));
