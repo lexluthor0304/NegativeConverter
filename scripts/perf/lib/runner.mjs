@@ -124,6 +124,10 @@ async function runRepetition({ scenario, fixture, group, ref, rep, args, profile
       try {
         await session.drain();
         result.appMemory = await session.evaluate('globalThis.__ncPerf.snapshot().memory');
+        // The memory budget's ledger and grant log (#258, ?perf=1), to set
+        // next to the measured footprint.
+        result.memoryBudget = await session.evaluate(`globalThis.__ncMemory
+          ? { snapshot: globalThis.__ncMemory.snapshot(), log: globalThis.__ncMemory.log() } : null`);
         await session.evaluate('globalThis.__ncPerf.clearUserTiming(); true');
       } catch {}
     }

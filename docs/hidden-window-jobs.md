@@ -52,13 +52,19 @@ The reason is WebKit's memory policy on a 16 GB Mac: 8 GiB (7 + 1 per page)
 while active, 4 GiB (3 + 1) once the process has been hidden for 8 minutes,
 polled every 30 s, then killed. The constants live in `hiddenJobGate.js`;
 re-check them for each macOS release (set the grace to 0 once WebKit's
-UI-process `MemoryFootprintMonitor` ships). #258 replaces the local estimate:
+UI-process `MemoryFootprintMonitor` ships). The figures:
 
 - an item: `max(estimateRawDecodeBytes, pixels × 50 B)` of the batch's largest
   frame (header dimensions; `rawDecodeEstimate.js` keeps the RAW figure
   importable without LibRaw);
-- resident: unique backing buffers of the open photo's planes, the undo
-  history and the photo caches, the prefetch slot included (`backingBuffers` from `photoSessionCache.js`).
+- resident: the renderer-wide memory ledger (#258, `docs/memory-budget.md`):
+  the open photo's planes, history, the photo caches, the prefetch slot and
+  other bounded stores, frames a job keeps and long-lived worker residents,
+  each buffer counted once.
+
+While hidden on these hosts the memory budget's ceiling also drops to
+`HIDDEN_BUDGET_BYTES`, and every item passes this gate before it reserves its
+bytes in the budget (never the other way round).
 
 While the gate holds an item back, the header export strip, the roll-analysis
 status and the browser batch overlay read "Paused while the window is hidden",

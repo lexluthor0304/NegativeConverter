@@ -11,16 +11,25 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
 (`processFileWithSettings`) for several files at once through
 `batchExportScheduler.js`:
 
-- `planBatchParallelism` chooses the lane count from cores, reported memory
-  and the largest decoded image dimensions: 18 MP frames run four wide,
-  24 MP three wide, 36 MP two wide, ≥45 MP sequential; devices reporting
-  ≤4 GB get about a third of the pixel budget. `imageDimensions.js` reuses
-  known decoded dimensions or reads at most 256 KiB of PNG/JPEG/TIFF-family
-  headers per file. RAW preview IFD dimensions are not accepted as sensor
-  dimensions. Unknown formats/sizes use a conservative 150 MP estimate.
-  Compressed file size is no longer a memory estimate. `localStorage
-  nc_batch_lanes_v1` (1–4) supplies a lane ceiling for support and benchmarking;
-  core and memory limits still apply.
+- `planBatchParallelism` chooses the lane count from cores, memory and the
+  largest decoded image dimensions, in bytes (#258): each lane costs 50 B/px
+  (`LANE_BYTES_PER_PIXEL`) against a 4.0 GB lane budget (the historical
+  80 MP): 18 MP frames run four wide, 24 MP three wide, 36 MP two wide,
+  ≥45 MP sequential; devices with ≤4 GiB (reported `deviceMemory`, or the
+  desktop app's real RAM) get 1.4 GB. When the RAM is known, half of the
+  renderer-wide budget may be used instead, which only ever raises the plan:
+  unknown RAM and RAM up to 16 GiB plan exactly as before, 32 GiB and more
+  plan two 60 MP lanes. The plan is a ceiling: each lane reserves its bytes in
+  the memory budget before it claims an index and waits while a photo is being
+  opened or the budget is full (`docs/memory-budget.md`). `imageDimensions.js`
+  reuses known decoded dimensions or reads at most 256 KiB of
+  PNG/JPEG/TIFF-family headers per file. RAW preview IFD dimensions are not
+  accepted as sensor dimensions. A header without dimensions borrows those of
+  a decoded file with the same extension; otherwise unknown formats/sizes use
+  a conservative 150 MP estimate. Compressed file size is no longer a memory
+  estimate. `localStorage nc_batch_lanes_v1` (1–4) supplies a lane ceiling for
+  support and benchmarking, and `nc_memory_ram_gib_v1` the RAM (the forced
+  2-lane parity run uses 32); core and memory limits still apply.
 - `runBatchPipeline` keeps `lanes` files in flight and hands the encoded
   results to the sink strictly in the original order, so ZIP entries, folder
   writes and downloads keep the roll's sequence. A failed file marks only
@@ -29,9 +38,10 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
   A slow first file therefore cannot cause the rest of a roll's encoded
   outputs to accumulate. An `AbortSignal` stops further files; in-flight ones
   finish and are written. An optional `beforeStart` hook (the hidden-window
-  gate, `docs/hidden-window-jobs.md`) is awaited before a lane claims its next
-  index and released after that index's sink, so a lane held back while the
-  window is hidden never blocks the in-order sink.
+  gate, `docs/hidden-window-jobs.md`, then the memory budget's lane
+  reservation, `docs/memory-budget.md`) is awaited before a lane claims its
+  next index and released after that index's sink, so a lane held back while
+  the window is hidden or memory is short never blocks the in-order sink.
 - Each batch owns a pool of conversion workers
   (`createConversionWorkerPool`, kept alive across frames instead of
   restarting per file) and a pool of export workers (`createExportWorkerPool`,
@@ -219,7 +229,8 @@ and then retaining the full sample set outside the cache's budget.
 
 The cap applies to retained samples, not total renderer memory: active decode
 lanes, currently consumed samples and IndexedDB implementation buffers are
-additional. When IndexedDB is unavailable or its quota is exhausted, memory
+additional. The renderer-wide memory budget (#258) counts the stores in use in
+its ledger and reserves the decodes separately (`docs/memory-budget.md`). When IndexedDB is unavailable or its quota is exhausted, memory
 stays bounded and missing samples can be rebuilt from their original files;
 this fallback trades extra decode time for correctness. Abrupt process
 termination may prevent deletion of a temporary database.

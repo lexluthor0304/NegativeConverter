@@ -47,6 +47,22 @@ existing bit depth and resolution.
 - Real native app: import `L1009967.dng`, set C +1, cancel Save twice, then save.
   The photo and adjustment stay open; the PNG is 9536 × 6336. In the local check,
   idle footprint fell from 2439 MB to 1690 MB instead of growing to 8 GB.
+- Idle footprint and WebKit's Strict policy (#258, `docs/memory-budget.md`):
+  in the direct build on macOS 26.x or 27.0, stream
+  `/usr/bin/log stream --predicate 'subsystem == "com.apple.WebKit" AND category == "MemoryPressure"'`
+  and keep the lines of the app's WebContent pid (on 27.0 they appear under the
+  app's own process as `WebContent[<pid>] Current memory footprint: N MB`).
+  Import `L1009967.dng`, let it settle and stay idle for 2 minutes; every
+  `Current memory footprint` line should read below 1400 MB with no `-> Strict`
+  line; repeat after one 16-bit TIFF single export and after a finished
+  12-frame roll analysis with one photo open.
+
+  | state (WebContent, MiB) | before #258 | after #258 |
+  |---|---|---|
+  | one 60 MP DNG open, one C +1 edit, one PNG save, idle | 1690 (before #236) | not measured yet |
+  | idle after one 16-bit TIFF export | not measured | not measured yet |
+  | idle after a 12-frame roll analysis | not measured | not measured yet |
+  | A → B → A, rotate, crop, 5 slider edits, idle 5 min | not measured | not measured yet |
 - Run the full Chrome smoke suite as well: the repair model loading only on
   intent (Retouch tab, dust removal, brush; never on photo import), actual
   inference, manual brush, CPU fallback, 16-bit preservation, and
