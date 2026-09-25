@@ -86,6 +86,17 @@ assert.equal(partialResult.cropRegion, null);
 assert.equal(partialResult.detectedFormat, 'unknown');
 assert.equal(canAutoApplyImportFrame(partialResult, { highConfidence: 0 }), false);
 assert.equal(partialResult.rotatedImageData, partial);
+// Review results are the source frame itself: sizes and a flag, and (#251)
+// no pixels at all when only sizes are asked for.
+assert.equal(partialResult.rotatedIsSource, true);
+assert.deepEqual([partialResult.rotatedWidth, partialResult.rotatedHeight], [partial.width, partial.height]);
+const partialSizes = detectFrameAndRotation(partial, {
+  maxSide: 800, settings: { highConfidence: 0 }, rotatedOutput: 'none',
+  rotateImageData: () => assert.fail('不完全な画格を勝手に回転しない')
+});
+assert.equal(partialSizes.rotatedImageData, undefined);
+assert.equal(partialSizes.rotatedIsSource, true);
+assert.equal(partialSizes.requiresReview, true);
 
 // 空白・二コマ同等の候補・規格不一致を高信頼で採用しない。
 assert.equal(detectImageWindow(make(480, 320, () => base), targets), null);

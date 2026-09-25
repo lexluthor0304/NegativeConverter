@@ -2,6 +2,8 @@ import { resizeImageDataToMaxSide } from './imageDataOps.js';
 import { AUTO_FRAME_FORMAT_RATIOS as DEFAULT_FORMAT_RATIOS, AUTO_FRAME_DEFAULT_120_FORMATS as DEFAULT_120_FORMATS } from './autoFrameFormats.js';
 import { detectImageWindow, projectWindowCrop } from './imageWindowDetector.js';
 import { houghLineCount } from './opencvLines.js';
+import { rotatedDimensions } from './imageGeometry.js';
+import { areaResizeToMaxSide, rotatePreviewImageData, planLineSearch } from './autoFramePreview.js';
 
 const DEFAULT_SCORE_WEIGHTS = {
   area: 0.18,
@@ -1378,38 +1380,100 @@ function createStageClock() {
   };
 }
 
+/**
+ * Detects the frame window and its straightening angle on a preview of
+ * `imageData`, and maps the crop onto the full frame rotated by that angle.
+ *
+ * The result always carries `rotatedWidth`/`rotatedHeight`, the size of
+ * that rotated frame (#251). Its pixels are built only when asked for:
+ * - `rotatedOutput: 'full'` (default) returns them as `rotatedImageData`;
+ *   'none' returns sizes only.
+ * - `rotatedIsSource: true` says the frame is `imageData` itself (angle 0,
+ *   or a result that needs review), so a worker need not send it back.
+ * - Pixels are otherwise read only by the rare full-resolution fallback
+ *   below. `deferFullResolution: true` (a worker that holds only the 8-bit
+ *   plane of a 16-bit frame) returns `{ needsFullResolution: true }`
+ *   instead of rotating that plane, so the caller can retry with both.
+ * - `frameFilmType`: the frame's own film type, which may send the line
+ *   search to the grey plane only (settings.neutralLineSearch, see
+ *   planLineSearch). `settings.filmType` keeps choosing the scoring profile.
+ * - `settings.deterministicPreview` builds the preview and its fallback
+ *   rotations in JS (autoFramePreview.js) instead of a 2D canvas.
+ */
 export function detectFrameAndRotation(imageData, options = {}) {
   if (!imageData || !(globalThis.cv && globalThis.cv.Mat)) return null;
   const context = getAnalyzerContext(options);
   if (!context.rotateImageData) return null;
+  const rotatedOutput = options.rotatedOutput === 'none' ? 'none' : 'full';
+  const deferFullResolution = options.deferFullResolution === true;
+  const deterministicPreview = context.settings.deterministicPreview === true;
   const clock = createStageClock();
   const withStages = (result) => {
     if (result) result.stageMs = clock.stages;
     return result;
   };
+  const needsFullResolution = () => withStages({ needsFullResolution: true });
+  // The full frame rotated by `angle`: its size always, its pixels on demand.
+  const fullFrame = (angle) => {
+    const turned = Math.abs(angle) >= 0.001;
+    const size = turned ? rotatedDimensions(imageData.width, imageData.height, angle)
+      : { width: imageData.width, height: imageData.height };
+    let pixels = turned ? null : imageData;
+    return {
+      width: size.width,
+      height: size.height,
+      isSource: !turned,
+      needsDeferral: turned && deferFullResolution,
+      pixels() {
+        if (!pixels) {
+          pixels = context.rotateImageData(imageData, angle);
+          this.width = pixels.width;
+          this.height = pixels.height;
+        }
+        return pixels;
+      }
+    };
+  };
+  const frameOutput = (frame) => ({
+    rotatedWidth: frame.width,
+    rotatedHeight: frame.height,
+    rotatedIsSource: frame.isSource,
+    ...(rotatedOutput === 'full' ? { rotatedImageData: frame.pixels() } : {})
+  });
 
-  const previewData = resizeImageDataToMaxSide(imageData, context.maxSide);
+  const previewData = deterministicPreview
+    ? areaResizeToMaxSide(imageData, context.maxSide)
+    : resizeImageDataToMaxSide(imageData, context.maxSide);
   context.reusablePreview = previewData;
   clock.mark('preview');
-  const window = detectImageWindow(previewData, getAutoFrameAspectTargets(context));
+  const lineSearch = planLineSearch(previewData, {
+    enabled: context.settings.neutralLineSearch === true,
+    filmType: options.frameFilmType ?? null
+  });
+  const window = detectImageWindow(previewData, getAutoFrameAspectTargets(context), { lineChannels: lineSearch.channels });
   clock.mark('window');
   // 撮影範囲外の辺は比率で補完しない。密度テンプレートにもフォールバックせず、
   // 自動・一括処理のいずれも元画像を保持して手動確認へ回す。
   if (window?.incomplete || window?.requiresReview) return withStages({
     angle: 0, cropRegion: null, confidence: 0, confidenceLevel: 'low',
-    detectedFormat: 'unknown', requiresReview: true, rotatedImageData: imageData,
-    diagnostics: { method: window.ambiguous ? 'opencv-ambiguous-window' : 'opencv-incomplete-window', incomplete: Boolean(window.incomplete) }
+    detectedFormat: 'unknown', requiresReview: true, ...frameOutput(fullFrame(0)),
+    diagnostics: { method: window.ambiguous ? 'opencv-ambiguous-window' : 'opencv-incomplete-window', incomplete: Boolean(window.incomplete), lineSearch: lineSearch.record }
   });
   if (window) {
     const angle = Number(window.angle.toFixed(2));
-    const rotated = angle ? context.rotateImageData(imageData, angle) : imageData;
-    const cropRegion = projectWindowCrop({ ...window, angle }, previewData, imageData, rotated);
+    const frame = fullFrame(angle);
+    if (rotatedOutput === 'full') {
+      if (frame.needsDeferral) return needsFullResolution();
+      frame.pixels();
+    }
+    // Only the rotated frame's size is read here.
+    const cropRegion = projectWindowCrop({ ...window, angle }, previewData, imageData, frame);
     clock.mark('rotateFull');
     if (cropRegion) return withStages({
       angle, cropRegion, confidence: window.confidence,
       confidenceLevel: inferAutoFrameConfidenceLevel(window.confidence, context.settings),
-      detectedFormat: window.detectedFormat, rotatedImageData: rotated,
-      diagnostics: { method: window.method || 'opencv-image-window', scoreBreakdown: window.evidence }
+      detectedFormat: window.detectedFormat, ...frameOutput(frame),
+      diagnostics: { method: window.method || 'opencv-image-window', scoreBreakdown: window.evidence, lineSearch: lineSearch.record }
     });
   }
   const previewCandidates = detectFrameCandidatesWithCv(previewData, context, { minAreaRatio: 0.04 });
@@ -1425,7 +1489,8 @@ export function detectFrameAndRotation(imageData, options = {}) {
   let bestPreview = null;
   clock.stages.angleCount = angleCandidates.length;
   for (const angle of angleCandidates) {
-    const rotatedPreview = Math.abs(angle) < 0.001 ? previewData : context.rotateImageData(previewData, angle);
+    const rotatedPreview = Math.abs(angle) < 0.001 ? previewData
+      : (deterministicPreview ? rotatePreviewImageData(previewData, angle) : context.rotateImageData(previewData, angle));
     const cropPreview = detectAxisAlignedCropRegion(rotatedPreview, context.settings.marginRatio, context);
     clock.mark('anglePasses');
     if (!cropPreview) continue;
@@ -1457,36 +1522,48 @@ export function detectFrameAndRotation(imageData, options = {}) {
 
   if (!bestPreview) return withStages(null);
   const normalizedAngle = Math.abs(bestPreview.angle) < 0.15 ? 0 : Number(bestPreview.angle.toFixed(2));
-  const rotatedFull = Math.abs(normalizedAngle) < 0.001 ? imageData : context.rotateImageData(imageData, normalizedAngle);
+  const rotatedFull = fullFrame(normalizedAngle);
+  if (rotatedOutput === 'full') {
+    if (rotatedFull.needsDeferral) return needsFullResolution();
+    rotatedFull.pixels();
+  }
   clock.mark('rotateFull');
+  // Sizes only, until the fallback below reads pixels.
+  const fullSize = { width: rotatedFull.width, height: rotatedFull.height };
   const scaledCropRegion = scaleCropRegion(
     bestPreview.cropPreview.cropRegion,
     bestPreview.rotatedPreviewWidth,
     bestPreview.rotatedPreviewHeight,
-    rotatedFull,
+    fullSize,
     context
   );
   const scaledValidation = evaluateAutoFrameCropRegion(
     scaledCropRegion,
-    rotatedFull,
+    fullSize,
     bestPreview.cropPreview.candidate ? bestPreview.cropPreview.candidate.detectedFormat : 'unknown',
     bestPreview.cropPreview.candidate,
     context
   );
   clock.mark('fullValidation');
-  const cropFull = scaledCropRegion && scaledValidation.isValid
-    ? {
+  let cropFull;
+  if (scaledCropRegion && scaledValidation.isValid) {
+    cropFull = {
       cropRegion: scaledCropRegion,
       confidence: bestPreview.cropPreview.confidence,
       confidenceCap: bestPreview.cropPreview.confidenceCap,
       candidate: bestPreview.cropPreview.candidate,
       validation: scaledValidation
-    }
-    : detectAxisAlignedCropRegion(rotatedFull, context.settings.marginRatio, context);
+    };
+  } else {
+    // The only full-resolution pixel read: a crop that passed on the preview
+    // but not once scaled.
+    if (rotatedFull.needsDeferral) return needsFullResolution();
+    cropFull = detectAxisAlignedCropRegion(rotatedFull.pixels(), context.settings.marginRatio, context);
+  }
   clock.mark('fullFallback');
   if (!cropFull || !cropFull.validation || !cropFull.validation.isValid) return withStages(null);
   const edgeContacts = Math.max(
-    countCropEdgeContacts(cropFull.cropRegion, rotatedFull),
+    countCropEdgeContacts(cropFull.cropRegion, fullSize),
     Number(cropFull.edgeContacts) || 0
   );
   if (edgeContacts >= 2) return withStages(null);
@@ -1530,14 +1607,15 @@ export function detectFrameAndRotation(imageData, options = {}) {
     confidence,
     confidenceLevel,
     detectedFormat,
-    rotatedImageData: rotatedFull,
+    ...frameOutput(rotatedFull),
     diagnostics: {
       method: cropFull.candidate ? cropFull.candidate.method : 'unknown',
       scoreBreakdown: cropFull.candidate ? cropFull.candidate.scoreBreakdown : null,
       frameMode: inferredFrameMode,
       anglePenalty: Number(fullAnglePenalty.toFixed(3)),
       cropValidation: cropFull.validation || null,
-      edgeContacts
+      edgeContacts,
+      lineSearch: lineSearch.record
     }
   });
 }
