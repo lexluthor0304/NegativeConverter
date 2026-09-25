@@ -101,11 +101,25 @@ DOM and no OpenCV:
 
 The spatial stage, the colour table and the tone curve are the first stages
 of the Step-3 adjustment chain in `workers/pixelAdjustments.js` and
-`workers/pixelAdjustments16.js`, ahead of the WB gains, so the preview (CPU
-path, like the lab-match look), the export worker, the 16-bit export and
-batch exports all render the same result. The chain receives the frame size
+`workers/pixelAdjustments16.js`, ahead of the WB gains, so the export
+worker, the 16-bit export, batch exports and the settled CPU display all
+render the same result. The chain receives the frame size
 (`computeAdjustmentParams(settings, { width, height })`) for the pixel
-positions; without it the spatial stage is left out. A never-opened frame in
+positions; without it the spatial stage is left out.
+
+The on-screen preview runs the same stages in the preview shader (#253,
+`render/previewShader.js`, the mode variants of both programs; see
+`docs/gpu-preview.md`), with the values `computeAdjustmentParams` gives the
+CPU: the fog coefficients and limits as uniforms, the mean grid, the colour
+table and the tone curve as float textures holding the module's float32
+values, positions normalised to the display frame from the texel index. A
+strength tick rebuilds only the stages (`buildExpiredRescueStages`) and
+uploads 2 KB; the grid uploads once per analysis. Hold-to-compare turns the
+stages off on screen and in the histogram. Exports and the settled CPU
+display stay on `pixelAdjustments.js` / `pixelAdjustments16.js`; the shader
+is display-only and checked against them (mean ≤ 1 level, p99.9 ≤ 3). Until
+its idle self-test has passed (and for good where it fails, or on WebGL1)
+a rescued photo keeps the CPU display. A never-opened frame in
 a batch export is measured from its own positive before the adjustment
 stage, with OpenCV (in the worker) when it can run.
 

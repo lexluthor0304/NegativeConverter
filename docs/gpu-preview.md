@@ -15,10 +15,11 @@ pixels. A GPU frame is display-only.
 
 | module | role |
 |---|---|
-| `render/previewShader.js` | GLSL ES 3.00 `applyProgram` and `step3Program` (one shared Step-3 function), the GLSL ES 1.00 fallback; constants from the JS stage modules |
-| `render/previewTables.js` | 256 × 256 table packing, hue weights and the exposure LUT in rows of 64 texels, the per-tick uniforms, the CPU apply chain |
-| `render/gpuPreviewRenderer.js` | WebGL2 programs and textures, the parallel compile, the precision gate, the self-test |
-| `render/gpuPreviewSelfTest.js` | 64 × 64 fixtures and parity cases with the engine's 8-bit reference |
+| `render/previewShader.js` | GLSL ES 3.00 `applyProgram` and `step3Program` (one shared Step-3 function) and their display-mode variants (#253), the GLSL ES 1.00 fallback; constants from the JS stage modules |
+| `render/previewTables.js` | 256 × 256 table packing, hue weights and the exposure LUT in rows of 64 texels, the per-tick uniforms, the CPU apply chain, the display-mode stages (`displayStageUniforms`) |
+| `render/gpuPreviewRenderer.js` | WebGL2 programs and textures, the parallel compile, the precision gate, the self-tests |
+| `render/gpuPreviewSelfTest.js` | 64 × 64 fixtures and parity cases with the engine's 8-bit reference; the display-mode fixtures and budget |
+| `render/borderUnderlay.js` | the film-border background as pass 1 of a bordered GL frame (#253) |
 | `app/gpuPreviewScheduler.js` | when a GPU frame draws and when its exact frame settles it |
 | `app/renderEnvironment.js` | `describeWebglRenderer` (#263) for the software-rasteriser gate |
 | `pipeline/silverAdapter.js` | `prepareSilverCorePreview`, `analyzeSilverCorePreview`, `silverCoreAnalysisKey`, `silverCorePreparedKey`, `trySilverCoreParams` |
@@ -134,13 +135,66 @@ The paper LUT build caches its strength-independent part per paper and toning
   exact frame's pixels at those points, all stages being pointwise), then Step 3, at
   the same 260 ms throttle.
 
+## Display modes (#253)
+
+The lab-match look, the expired-film rescue, the film-border preview, the
+dodge-and-burn tool and a shown dust mask used to switch the GL display off and run
+Step 3 per pixel on the main thread (171–403 ms per frame for a rescue with its fog
+surface at 2.2–4 MP, in Node). They now stay on the GPU.
+
+- **Stages.** The mode variants of both programs (`STEP3_MODES_FRAGMENT_SHADER`,
+  `APPLY_MODES_FRAGMENT_SHADER`) run, in `pixelAdjustments.js`'s order and in its
+  0..255 domain on the integer input: the rescue (R1 fog surfaces: 18 coefficients,
+  offset, limit, scale; R2 local contrast against the ≤ 128 × 128 mean grid, an R32F
+  texture interpolated by hand with `meanAt`'s weights and edge rule; R3 the 64-bin
+  colour offsets, RGBA32F; R4 the 256-entry tone curve, R32F), then Step 3, then the
+  look (L1 the matrix, uploaded row-major with `transpose = true`, and offset; L2 its
+  curves in row 1 of the 256 × 2 Step-3 curve texture). Every stage has an enable
+  uniform mirroring the CPU's flags, and C/M/Y reads an integer where the CPU's
+  per-pixel loop stores one. The textures hold the float32 values `expiredRescue.js`
+  stores; the luma weights and the bin count are exported from it.
+- **Positions.** `uv = u_frame.xy + (p + 0.5) · u_frame.zw` from the texel index `p`,
+  never `gl_FragCoord`: the border draws the photo in a sub-viewport, and the detail
+  layer (#248) passes its region of the whole frame (`regionFrame`), so the fog and the
+  mean grid stay normalised to the frame the CPU normalises them to.
+- **Values.** `currentDisplayStages()` builds them with `computeAdjustmentParams` from
+  the display recipe (the look, the rescue strengths and analysis, hold-to-compare),
+  only when one of those changed. A strength tick is one `buildExpiredRescueStages`
+  and 2 KB of uploads; the grid uploads once per analysis and the look's curves once
+  per look. The textures stay under 70 KB.
+- **Readiness.** The variants compile at idle once a WebGL2 context exists and draw
+  their fixtures (rescue with offsets, fog and local contrast; the look with a
+  non-symmetric matrix and curves; rescue + look + vibrance; hold-to-compare) against
+  `pixelAdjustments.js` ('full') in one readback: mean ≤ 1 level and p99.9 ≤ 3.
+  `webglState.modesReady` is false until then, for good if they fail, and on WebGL1;
+  while it is false only a look or a rescue keeps the CPU display. `?gpuPreview=modes-fail`
+  fails the self-test.
+- **Border.** With the border preview the drawing buffer is the framed display size
+  (`getSprocketFrameLayout`, portrait included): pass 1 draws
+  `composeSprocketFrameBackground` at display size (uploaded once per size, markings
+  and fonts), pass 2 the photo into its rectangle. With overexposed sprockets the smear
+  keeps the last background during a drag and is recomposed after each settle from an
+  exact display-size frame adjusted in the export worker (a UI-only approximation that
+  lags by one settle). The WebGL1 fallback draws the same underlay.
+- **Overlays.** The dust tint, the saved and live dodge strokes and the dust brush's
+  dots are drawn on `#displayOverlay`, a transparent canvas in the transform wrapper
+  above the photo, backed at the display photo's size and placed over the photo's
+  rectangle with the border. A repaint clears it; the photo is never redrawn for an
+  overlay, and both display paths use it. Pointer mapping is unchanged (in border mode
+  it still divides by the whole framed box, as on the CPU path; #254 maps the brushes
+  through the photo rectangle).
+- **Histogram.** Unchanged: the GL path's sample (≤ 24,576 px) goes through the same
+  look, rescue and hold-to-compare rules, every 260 ms and at each settle, including
+  above 16 MP where `updateFull` does not run.
+
 ## Scope and fallback
 
-Excluded, with today's per-tick worker frames: crop, a look, expired rescue, the border
-preview, the active dodge-and-burn tool, a shown dust mask (`isWebGLActive`), frame
-repairs (`hasFrameRepairs()`), before/after, WebGL off. Failures fall back to WebGL1
-Step 3 or the CPU display. A lost context drops to the worker path; on restore the
-programs are compiled, tested and fed again.
+Excluded, with today's per-tick worker frames: crop, a look or rescue before the mode
+programs are ready (`isWebGLActive`), frame repairs (`hasFrameRepairs()`, so dust-mask
+core drags keep the worker path), before/after, WebGL off. The border preview, the
+dodge-and-burn tool and a shown dust mask draw applyProgram frames like a default
+session. Failures fall back to WebGL1 Step 3 or the CPU display. A lost context drops
+to the worker path; on restore the programs are compiled, tested and fed again.
 
 Not done: the optional row-band split of the fallback `convert` across workers (the
 fallback keeps one worker; #256 splits export conversions).
@@ -155,4 +209,10 @@ fallback keeps one worker; #256 splits export conversions).
   parity sweep, step3Program vs the 1703835 WebGL1 shader, in-app GPU frames vs their
   exact frames, display-only and export-after-release checks, every fallback), plus the
   WebGL2-aware `realtime-preview`, `webgl-preview` and `photo-session` probes.
+- #253: `render/displayModes.test.mjs` (the fp32 model of the mode stages against
+  `pixelAdjustments.js` on every parity recipe, the orientation fixture, the stage
+  cache), `--display-modes-only` (offscreen mode parity, a look in the app, the border
+  underlay against `composeSprocketFrame`, overlay alignment at 100 % and about 400 %,
+  GL vs CPU pointer mapping, the failed self-test) and `--expired-only` (the rescue on
+  `#glCanvas` within the budget, drags, hold-to-compare).
 - Frame rates, latency, heap growth and WebKit behaviour need the #230 harness.
