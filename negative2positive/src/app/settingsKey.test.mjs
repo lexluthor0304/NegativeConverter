@@ -1,63 +1,11 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { exactSettingsKey } from './settingsKey.js';
 import { deepCopySanitizedSettings } from './settingsSnapshot.js';
 import { pickStudioColors } from './studioSettings.js';
-import { normalizeAngleDegrees } from './imageGeometry.js';
-import { sanitizeSemanticMap } from './semanticAnchors.js';
-import { sanitizeFilmEdgeForSettings } from './filmEdgeReader.js';
-import { sanitizeRollFrameForSettings } from './rollAnalysis.js';
-import { normalizePaperId, normalizeToningId } from '../silvercore/engine/PaperProfiles.js';
-import { sanitizeLocalExposureForSettings } from './localExposure.js';
-import { sanitizeRepairStrokes } from './repairBrush.js';
-import { sanitizeLookForSettings } from './labMatch.js';
-import { sanitizeExpiredRescueParams, sanitizeExpiredAnalysis, EXPIRED_RESCUE_DEFAULTS } from '../pipeline/expiredRescue.js';
-import { sanitizeFrameMetadata } from './analogMetadata.js';
-import { computeSpline } from './curveMath.js';
-import { sanitizeFilmBaseForSettings } from './filmBaseDetection.js';
-import { sanitizeFilmTypeOverride } from './filmTypeOverride.js';
+import { mainFunctions, state, aiRepair } from '../../test-fixtures/mainSettingsHarness.mjs';
 
-// Run the real sanitizeSettings, createDefaultSettings and photoSettingsKey
-// from main.js in this realm (the key's fast path checks Object.prototype).
-const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8');
-function functionSource(name) {
-  const start = new RegExp(`^    (?:async )?function ${name}\\(`, 'm').exec(source)?.index;
-  assert.notEqual(start, undefined, `${name} exists in main.js`);
-  const end = source.indexOf('\n    }', start);
-  return source.slice(start, end + '\n    }'.length);
-}
-function constSource(name) {
-  const match = new RegExp(`^    const ${name} = .*;$`, 'm').exec(source);
-  assert.ok(match, `${name} is a one-line constant in main.js`);
-  return match[0];
-}
-const state = {
-  filmType: 'color', positiveMode: 'correct', importFilmTypeAuto: false, coreBorderBuffer: 10,
-  coreBorderBufferBorderValue: 10, lensCorrection: null, expiredSession: false, flatFieldId: null,
-  autoFrame: { lastDiagnostics: null }, filmEdge: null, rollFrame: null, localExposure: null, look: null,
-  expiredAnalysis: null, frameMetadata: null, flatFields: {},
-  dustRemoval: { enabled: false, strength: 3, maxParticleSize: 40, ai: false },
-  curvePoints: { r: [{ x: 0, y: 0 }, { x: 255, y: 255 }], g: [{ x: 0, y: 0 }, { x: 255, y: 255 }], b: [{ x: 0, y: 0 }, { x: 255, y: 255 }] },
-  curves: { r: null, g: null, b: null }
-};
-const aiRepair = { revision: 3 };
-const deps = {
-  state, aiRepair, exactSettingsKey, normalizeAngleDegrees, sanitizeSemanticMap, sanitizeFilmEdgeForSettings,
-  sanitizeRollFrameForSettings, normalizePaperId, normalizeToningId, sanitizeLocalExposureForSettings,
-  sanitizeRepairStrokes, sanitizeLookForSettings, sanitizeExpiredRescueParams, sanitizeExpiredAnalysis,
-  EXPIRED_RESCUE_DEFAULTS, sanitizeFrameMetadata, computeSpline, sanitizeFilmBaseForSettings, sanitizeFilmTypeOverride,
-  detectedImportSettings: () => ({ filmType: 'color', positiveMode: 'correct', filmTypeSource: 'manual' }),
-  autoDetectFilmBase: () => ({ r: 205, g: 141, b: 92 }),
-  clampBetween: (v, min, max) => Math.min(max, Math.max(min, v))
-};
-const code = [
-  ...['PRESET_TYPES', 'CORE_ENHANCED_PROFILE_OPTIONS', 'CORE_COLOR_MODEL_OPTIONS', 'CORE_COLOR_MODEL_MIGRATION_MAP'].map(constSource),
-  ...['sanitizePresetType', 'inferFilmTypeFromLegacyPreset', 'sanitizeCoreEnhancedProfile', 'sanitizeCoreColorModel',
-    'createDefaultLensCorrectionSettings', 'sanitizeLensSelection', 'sanitizeLensCorrection', 'makeLinearCurveLut',
-    'makeLinearCurvePoints', 'sanitizeNumeric', 'sanitizeFilmBase', 'sanitizeCurvePointChannel',
-    'buildCurveLutFromPoints', 'sanitizeCurveLut', 'sanitizeSettings', 'createDefaultSettings', 'photoSettingsKey'].map(functionSource)
-].join('\n');
-const app = new Function(...Object.keys(deps), `${code}\nreturn { sanitizeSettings, createDefaultSettings, photoSettingsKey };`)(...Object.values(deps));
+// The real sanitizeSettings, createDefaultSettings and photoSettingsKey from main.js.
+const app = mainFunctions([]);
 
 // The key as it was at 1703835.
 const oldKey = item => JSON.stringify([item.settings, item.studioColors, item.filmTypeOverride,
