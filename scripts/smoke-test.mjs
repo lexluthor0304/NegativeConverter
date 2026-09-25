@@ -41,6 +41,7 @@ import { runWebglPreviewSmoke } from './webgl-preview-smoke.mjs';
 import { runPreviewTierSmoke } from './preview-tier-smoke.mjs';
 import { runPreviewPathSmoke } from './preview-path-smoke.mjs';
 import { runGpuPreviewSmoke } from './gpu-preview-smoke.mjs';
+import { runDisplayModesSmoke } from './display-modes-smoke.mjs';
 import { runZoomDetailSmoke } from './zoom-detail-smoke.mjs';
 import { runDarkroomSmoke } from './darkroom-smoke.mjs';
 import { runCameraSmoke } from './camera-smoke.mjs';
@@ -419,6 +420,12 @@ if (process.argv.includes('--gpu-preview-only')) {
   console.log('SMOKE PASS'); process.exit(0);
 }
 
+if (process.argv.includes('--display-modes-only')) {
+  await runDisplayModesSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
+
 if (process.argv.includes('--zoom-detail-only')) {
   await runZoomDetailSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
   if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
@@ -771,7 +778,8 @@ const statusBeforeStroke = dustCount(await evaluate(`document.getElementById('du
 await evaluate(`(() => {
   window.__dustMessages = [];
   window.__dustStatusUpdates = 0;
-  const canvas = document.getElementById('canvas');
+  // A shown mask keeps the GL display (#253): paint on the canvas on screen.
+  const canvas = document.getElementById(document.getElementById('glCanvas').style.display === 'block' ? 'glCanvas' : 'canvas');
   const rect = canvas.getBoundingClientRect();
   const options = { bubbles: true, clientX: rect.x + rect.width / 2,
     clientY: rect.y + rect.height / 2, button: 0, altKey: true };
@@ -807,12 +815,15 @@ const redoState = await evaluate(`({ conversions: window.__brushConversions, det
 if (redoState.conversions !== 0 || redoState.detections !== 0 || dustCount(redoState.status) !== statusAfterStroke) {
   fail('redoing a dust stroke re-converted, re-detected or lost its count: ' + JSON.stringify(redoState));
 }
-// #242: the dust-mask view (a CPU mode) of a repaired, full-resolution frame
-// is drawn at display size: #canvas, the tint layer and the frame under it.
+// #242/#253: the dust-mask view of a repaired, full-resolution frame is drawn
+// at display size: the tint on its own overlay layer over the photo, which
+// stays on the GL display (or #canvas without WebGL).
 const dustDisplay = await evaluate(`window.__ncDisplay.frame()`);
 const displaySize = JSON.stringify(dustDisplay.display);
-if (dustDisplay.surface !== 'cpu' || JSON.stringify(dustDisplay.canvases.main) !== displaySize
-  || JSON.stringify(dustDisplay.handle) !== displaySize
+const dustFrameOk = dustDisplay.surface === 'gl'
+  ? JSON.stringify(dustDisplay.canvases.gl) === displaySize && dustDisplay.canvases.main.join('x') === '1x1'
+  : JSON.stringify(dustDisplay.canvases.main) === displaySize && JSON.stringify(dustDisplay.handle) === displaySize;
+if (!dustFrameOk || JSON.stringify(dustDisplay.canvases.overlay) !== displaySize
   || (dustDisplay.canvases.dustTint && JSON.stringify(dustDisplay.canvases.dustTint) !== displaySize)
   || dustDisplay.display[0] * dustDisplay.display[1] > 4_000_000) {
   fail('the dust-mask view is not drawn at display size: ' + JSON.stringify(dustDisplay));
@@ -1076,6 +1087,7 @@ if (!process.argv.some(arg => arg.endsWith('-only'))) {
   await runStudioSyncSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
   await runPreviewPathSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
   await runGpuPreviewSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
+  await runDisplayModesSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
   await runZoomDetailSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
 }
 if (!process.argv.includes('--auto-crop-only') && !process.argv.includes('--color-analysis-only') && !process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) await runStudioSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, fixtures: [FIXTURE, FIXTURE2], root: ROOT });

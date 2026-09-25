@@ -391,9 +391,12 @@ export async function runWebglPreviewSmoke({ send, evaluate, waitFor, fail, inst
     if (button.getAttribute('aria-pressed') !== 'true') button.click();
     return button.getAttribute('aria-pressed') === 'true';
   })()`);
-  expect(border, 'border preview (a CPU display mode) could not be enabled');
+  expect(border, 'border preview could not be enabled');
   await quiet('border preview idle');
-  await zoomCheck('CPU (border preview)');
+  // #253: the border is a GL underlay; the photo stays on the GPU.
+  expect(await evaluate(`window.__ncDisplay.frame().surface === 'gl' && !!window.__ncDisplay.frame().glPhoto`),
+    'the border preview left the GPU display: ' + JSON.stringify(await evaluate('window.__ncDisplay.frame()')));
+  await zoomCheck('GPU (border preview)');
   await resetZoom('border preview');
   await evaluate(`(() => {
     const button = document.getElementById('sprocketPreviewBtn');

@@ -16,7 +16,8 @@ export async function runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail,
     mkdirSync(join(root, 'output', 'playwright'), { recursive: true });
     writeFileSync(join(root, 'output', 'playwright', name), Buffer.from(shot.result.data, 'base64'));
   };
-  await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
+  // The normal preview tier, so the GL frame is the display source's size (#253).
+  await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en&previewTier=normal` });
   await waitFor('expired boot', `!!document.getElementById('studioImportAutoCrop') && !!document.getElementById('uploadExpiredBtn')`);
   await installDialogAutoAccept();
   await wait(500);
@@ -101,6 +102,9 @@ export async function runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail,
   await waitFor('aged positive imported', `${ready} && document.querySelectorAll('.file-list-item').length === 2`, 150000);
   // The global measurement shows at once; OpenCV's fog map follows once it has loaded.
   await waitFor('OpenCV fog map', `[...document.querySelectorAll('#expiredDiagnosis li')].some(li => /^Uneven fog:/.test(li.textContent))`, 120000);
+  // #253: once the mode programs passed their self-test, the rescued preview
+  // is drawn by the preview shader on #glCanvas.
+  await waitFor('rescued preview on the GPU', `window.__ncDisplay.modes().ready && window.__ncDisplay.glActive() && document.getElementById('glCanvas').style.display === 'block'`, 60000);
   await wait(1500);
 
   const document_disabled = state => state.spatialDisabled;
@@ -113,7 +117,7 @@ export async function runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail,
     lines: [...document.querySelectorAll('#expiredDiagnosis li')].map(li => li.textContent),
     type: document.querySelector('.film-type-btn.active').dataset.type,
     sliders: Object.fromEntries(['expiredLevels', 'expiredNeutralize', 'expiredCrossover', 'expiredBrightness', 'expiredContrast'].map(id => [id, document.getElementById(id).value])),
-    canvasShown: document.getElementById('canvas').style.display !== 'none',
+    glShown: document.getElementById('glCanvas').style.display === 'block',
     controlsHidden: document.getElementById('expiredControls').hidden
   }))()`;
   const first = await evaluate(panel);
@@ -125,7 +129,7 @@ export async function runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail,
   const unevenMatch = unevenLine.match(/differs by (\d+)%/);
   if (!unevenMatch || Number(unevenMatch[1]) < 4) fail(`OpenCV did not read the left-edge fog: ${JSON.stringify(first.lines)}`);
   if (document_disabled(first)) fail('spatial sliders should be live once OpenCV measured');
-  if (!first.canvasShown) fail('the rescued preview must render on the CPU canvas');
+  if (!first.glShown) fail('the rescued preview must render on #glCanvas: ' + JSON.stringify(await evaluate('window.__ncDisplay.modes()')));
   await capture('expired-positive.png');
   console.log(`ok: expired entry, tab and diagnosis (${first.lines.join(' | ')})`);
 
@@ -178,7 +182,7 @@ export async function runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail,
     return { errShown: errShown / n, errAged: errAged / n, mean: sum / n, cast: cast.map(v => Math.round(v / (n / 3) * 10) / 10), tilt, tiltAged, canvas: rect.id, width: shown.width, height: shown.height };
   };
   const rescued = await measure();
-  if (rescued.canvas !== 'canvas') fail(`the rescued preview must render on the CPU canvas (${rescued.canvas})`);
+  if (rescued.canvas !== 'glCanvas') fail(`the rescued preview must render on #glCanvas (${rescued.canvas})`);
   if (!(rescued.errShown < rescued.errAged * 0.6)) fail(`rescue did not bring the aged positive back: ${JSON.stringify(rescued)}`);
   if (!(rescued.tiltAged > 8) || !(Math.abs(rescued.tilt) < rescued.tiltAged * 0.5)) fail(`OpenCV fog surface did not flatten the left-edge fog: ${JSON.stringify({ tilt: rescued.tilt, tiltAged: rescued.tiltAged })}`);
   console.log(`ok: aged positive error ${rescued.errAged.toFixed(1)} -> ${rescued.errShown.toFixed(1)} levels; left-right tilt ${rescued.tiltAged.toFixed(1)} -> ${rescued.tilt.toFixed(1)}`);
@@ -190,6 +194,61 @@ export async function runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail,
   await evaluate(`(() => { const s = document.getElementById('expiredUnevenFog'); s.value = '100'; s.dispatchEvent(new Event('input', { bubbles: true })); s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
   await wait(800);
   console.log('ok: uneven-fog strength drives the OpenCV surface');
+
+  // #253: the GL frame against pixelAdjustments.js ('full') on the same display
+  // source (mean <= 1 level, p99.9 <= 3), with the fog surface, with local
+  // contrast 30, and held to compare; drags of the rescue strengths and C/M/Y
+  // stay on the GPU with no main-thread Step-3 pass beyond the histogram sample.
+  const glParity = async (label) => {
+    const result = await evaluate('window.__ncDisplay.glParity()');
+    if (result.error || !(result.mean <= 1 && result.p999 <= 3)) fail(`GL rescue parity (${label}): ${JSON.stringify(result)}`);
+    return result;
+  };
+  const withFog = await glParity('offsets + fog');
+  if (withFog.program !== 'modes' || !withFog.stages?.rescue || !withFog.stages.fog) fail('the rescue did not draw with the mode program and the fog surface: ' + JSON.stringify(withFog));
+  await evaluate(`(() => { const s = document.getElementById('expiredLocalContrast'); s.value = '30'; s.dispatchEvent(new Event('input', { bubbles: true })); s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+  await wait(800);
+  const withLocal = await glParity('local contrast 30');
+  if (!(withLocal.stages?.local > 0)) fail('local contrast did not reach the shader: ' + JSON.stringify(withLocal));
+  const dragged = await evaluate(`(async () => {
+    window.__ncDisplay.resetCounters();
+    const protos = [WebGLRenderingContext.prototype, window.WebGL2RenderingContext?.prototype].filter(Boolean);
+    let draws = 0;
+    const originals = protos.map(proto => ({ proto, draw: proto.drawArrays }));
+    for (const { proto, draw } of originals) proto.drawArrays = function (...args) { if (this.canvas?.id === 'glCanvas') draws++; return draw.apply(this, args); };
+    const out = {};
+    try {
+      for (const [id, values] of [['expiredLevels', [90, 80, 70, 60, 70, 80]], ['expiredCrossover', [80, 60, 40, 60, 80, 100]],
+        ['expiredUnevenFog', [80, 60, 40, 60, 80, 100]], ['cyan', [4, 8, 12, 8, 4, 0]]]) {
+        const el = document.getElementById(id), start = draws, histogramBefore = window.__ncDisplay.counters().mainAdjustments;
+        for (const value of values) {
+          el.value = String(value);
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 4)));
+        }
+        out[id] = { draws: draws - start, glShown: document.getElementById('glCanvas').style.display === 'block',
+          mainPasses: window.__ncDisplay.counters().mainAdjustments - histogramBefore };
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    } finally {
+      for (const { proto, draw } of originals) proto.drawArrays = draw;
+    }
+    return { out, counters: window.__ncDisplay.counters() };
+  })()`);
+  for (const [id, entry] of Object.entries(dragged.out)) {
+    if (!entry.glShown || entry.draws < 6) fail(`${id} drag did not draw every value change on the GPU: ${JSON.stringify(dragged)}`);
+  }
+  if (dragged.counters.mainAdjustMaxPixels > 24_576) fail('a rescue drag ran a Step-3 pass beyond the histogram sample on the main thread: ' + JSON.stringify(dragged));
+  await wait(800);
+  await evaluate(`document.getElementById('expiredCompareBtn').dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1 }))`);
+  await wait(700);
+  const heldParity = await glParity('hold to compare');
+  await evaluate(`document.getElementById('expiredCompareBtn').dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1 }))`);
+  await wait(700);
+  if (heldParity.stages?.rescue) fail('hold-to-compare kept the rescue on screen: ' + JSON.stringify(heldParity));
+  await evaluate(`(() => { const s = document.getElementById('expiredLocalContrast'); s.value = '0'; s.dispatchEvent(new Event('input', { bubbles: true })); s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+  await wait(800);
+  console.log('ok: the rescue draws on the GPU within the parity budget ' + JSON.stringify({ fog: [withFog.mean, withFog.p999], local: [withLocal.mean, withLocal.p999], held: [heldParity.mean, heldParity.p999], drags: dragged.out }));
 
   // Hold to see before: the screen shows the unrescued positive while held.
   await evaluate(`document.getElementById('expiredCompareBtn').dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1 }))`);
@@ -286,7 +345,7 @@ export async function runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail,
   if (!second.enabled || second.state !== 'analysed' || !/^Source: Color, converted/.test(second.lines[0])) fail(`negative diagnosis: ${JSON.stringify(second)}`);
   await capture('expired-negative.png');
   const negativeShown = await measure();
-  if (negativeShown.canvas !== 'canvas' || !(Math.max(...negativeShown.cast) - Math.min(...negativeShown.cast) < 14)) fail(`rescued negative preview carries a cast: ${JSON.stringify(negativeShown)}`);
+  if (negativeShown.canvas !== 'glCanvas' || !(Math.max(...negativeShown.cast) - Math.min(...negativeShown.cast) < 14)) fail(`rescued negative preview carries a cast: ${JSON.stringify(negativeShown)}`);
   console.log(`ok: expired negative converted then rescued (channel spread ${(Math.max(...negativeShown.cast) - Math.min(...negativeShown.cast)).toFixed(1)})`);
 
   // The menu entry leaves the flow: the tab goes away and the photo is no longer rescued.

@@ -10,8 +10,9 @@
 //    it, read back in the draw's own task; a GPU drag converts nothing, encodes no
 //    tile and leaves the tile alone until the exact frame; an export started right
 //    after release writes the released value; context loss and restore.
-// 3. Fallbacks: WebGL1 forced, a failed self-test, WebGL off, the border preview,
-//    the active dodge-and-burn tool and frame repairs keep today's worker frames.
+// 3. Fallbacks: WebGL1 forced, a failed self-test, WebGL off and frame repairs
+//    keep today's worker frames; the border preview and the active dodge-and-burn
+//    tool keep the GPU frames (#253).
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 
@@ -603,6 +604,17 @@ export async function runGpuPreviewSmoke({ send, evaluate, waitFor, fail, instal
   await evaluate(`document.querySelector('.film-type-btn[data-type="color"]').click()`);
   await quiet('colour converted', 2500);
 
+  // #253: the border preview (a GL underlay) and the dodge-and-burn tool (an
+  // overlay layer) keep applyProgram frames.
+  const gpuModeDrag = async (label) => {
+    expect(await gpuDrawing(label), `${label}: applyProgram did not draw`);
+    const result = await drag('coreExposure', [5, 10, 15, 20, 25, 30]);
+    expect(result.applyDraws >= 3 && result.converts === 0, `${label}: expected GPU frames, not worker frames: ` + JSON.stringify(result));
+    await quiet(`${label} settled`);
+    await setControl('coreExposure', 0, { commit: true });
+    await quiet(`${label} reset`);
+    return result;
+  };
   // Fallback modes keep per-tick worker frames and draw no applyProgram.
   const workerDrag = async (label) => {
     const result = await drag('coreExposure', [5, 10, 15, 20, 25, 30]);
@@ -620,13 +632,13 @@ export async function runGpuPreviewSmoke({ send, evaluate, waitFor, fail, instal
   })()`);
   expect(border, 'border preview could not be enabled');
   await quiet('border preview on');
-  await workerDrag('border preview');
+  await gpuModeDrag('border preview');
   await evaluate(`document.getElementById('sprocketPreviewBtn').click()`);
   await quiet('border preview off');
   await evaluate(`(() => { document.getElementById('studioTab-repair')?.click(); const d = document.getElementById('studioDodgeBurn'); if (d) d.open = true;
     const el = document.getElementById('dodgeBurnEnabled'); el.checked = true; el.dispatchEvent(new Event('change', { bubbles: true })); })()`);
   await until('dodge and burn active', `document.body.classList.contains('dodge-burn-active')`, 5_000);
-  await workerDrag('dodge-and-burn tool');
+  await gpuModeDrag('dodge-and-burn tool');
   await evaluate(`(() => { const el = document.getElementById('dodgeBurnEnabled'); el.checked = false; el.dispatchEvent(new Event('change', { bubbles: true }));
     document.getElementById('studioTab-edit').click(); })()`);
   await quiet('dodge and burn off');
@@ -651,7 +663,7 @@ export async function runGpuPreviewSmoke({ send, evaluate, waitFor, fail, instal
   await quiet('context restored', 2500);
   expect(await gpuDrawing('restored context'), 'the GPU path did not return after the context was restored');
   const restored = await parity('restored exposure 50', 'coreExposure', 50);
-  console.log('ok: border preview, dodge-and-burn tool, WebGL off and a lost context use worker frames; restore returns to the GPU ' + JSON.stringify(restored));
+  console.log('ok: border preview and dodge-and-burn tool keep GPU frames; WebGL off and a lost context use worker frames; restore returns to the GPU ' + JSON.stringify(restored));
 
   // Frame repairs (dust removal) convert at full resolution, never on the GPU.
   await setControl('coreExposure', 0, { commit: true });

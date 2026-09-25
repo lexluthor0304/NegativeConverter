@@ -101,24 +101,26 @@ export async function runStudioSmoke({ send, evaluate, waitFor, wait, fail, inst
   };
   await clickVisible('studioTab-border');
   await clickVisible('sprocketPreviewBtn');
-  await waitFor('film border preview', `document.getElementById('sprocketPreviewBtn').getAttribute('aria-pressed') === 'true' && getComputedStyle(document.getElementById('canvas')).display !== 'none'`);
+  // #253: the border is drawn around the photo on whichever canvas shows it
+  // (the GL display draws it as an underlay).
+  await waitFor('film border preview', `document.getElementById('sprocketPreviewBtn').getAttribute('aria-pressed') === 'true' && !!window.__ncDisplay.shownFrame().photo`);
   await clickVisible('sprocketTextEnabledInput');
   await clickVisible('sprocketFrameNumberEnabledInput');
   await clickVisible('sprocketDxEnabledInput');
   await wait(1000);
-  // #canvas holds the display-size photo in its border (#242): the band is
-  // what the canvas adds around the displayed photo.
+  // The frame on screen holds the display-size photo in its border (#242,
+  // #253): the band is what the frame adds around the displayed photo.
   const borderPreview = await evaluate(`(() => {
-    const canvas = document.getElementById('canvas');
-    const data = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+    const frame = window.__ncDisplay.shownFrame();
+    const data = frame.data;
     let holes = 0, markings = 0;
     const shown = window.__ncDisplay.frame().display;
-    const band = Math.floor((canvas.height - shown[1]) / 2);
-    for (let i = 0; i < canvas.width * band * 4; i += 4) {
+    const band = Math.floor((frame.height - shown[1]) / 2);
+    for (let i = 0; i < frame.width * band * 4; i += 4) {
       if (data[i] > 240 && data[i + 1] > 240 && data[i + 2] > 240) holes++;
       if (data[i] > 100 && data[i] > data[i + 1] * 1.2 && data[i + 1] > data[i + 2] * 1.5) markings++;
     }
-    return { width: canvas.width, height: canvas.height, source: shown, holes, markings };
+    return { surface: frame.surface, width: frame.width, height: frame.height, source: shown, holes, markings };
   })()`);
   if (borderPreview.height <= borderPreview.source[1] || borderPreview.width < borderPreview.source[0] || borderPreview.holes < 100 || borderPreview.markings < 50) fail('film border was not composited: ' + JSON.stringify(borderPreview));
   await assertPreviewVisible();
