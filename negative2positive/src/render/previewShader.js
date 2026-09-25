@@ -15,11 +15,21 @@
 // stage modules so the copies cannot drift apart silently; the parity tests
 // (previewShader.test.mjs, the in-browser self-test and gpu-preview-smoke) guard the
 // arithmetic itself.
+//
+// The display modes (#253): the expired-film rescue (fog surfaces, local contrast,
+// the luminance-indexed colour offsets, the shared tone curve) before Step 3 and the
+// lab-match look (matrix, curves) after it, as pixelAdjustments.js orders them. They
+// live in a second variant of each program (STEP3_MODES_FRAGMENT_SHADER,
+// APPLY_MODES_FRAGMENT_SHADER), compiled and self-tested at idle, so a driver that
+// miscompiles them costs only these modes (webglState.modesReady), never the plain
+// display. Their values come from computeAdjustmentParams (displayStageUniforms in
+// previewTables.js); display-only, like every GPU frame.
 
 import { HUE_TABLE_SIZE, LUMA_R, LUMA_G, LUMA_B } from '../silvercore/engine/ImageProcessor.js';
 import { LINEAR_STEPS } from '../silvercore/util/localExposure.js';
 import { LUT_SIZE as PROFILE_LUT_SIZE } from '../silvercore/engine/EnhancedProfiles.js';
 import { IMAGE16_MAX } from '../silvercore/util/image16.js';
+import { OFFSET_BINS, RESCUE_LUMA } from '../pipeline/expiredRescue.js';
 
 // 65536-entry tables (tone curves, paper, the B&W grey table, the pre-saturation
 // ramp) are 256 × 256 textures: entry v is texel (v & 255, v >> 8).
@@ -29,6 +39,14 @@ export const TABLE_TEXTURE_SIZE = 256;
 // only 2048).
 export const PACKED_ROW_TEXELS = 64;
 export const STEP3_CURVE_SIZE = 256;
+// Rows of the Step-3 curve texture (RGBA8, 256 wide): the RGB curves, then the
+// look's curves (#253), identity while no look has any.
+export const STEP3_CURVE_ROWS = 2;
+// The rescue's shared tone curve (256 floats) and colour table (OFFSET_BINS bins).
+export const RESCUE_TONE_SIZE = 256;
+export const RESCUE_OFFSET_BINS = OFFSET_BINS;
+// sanitizeExpiredSpatial caps the local-mean grid at 128 × 128.
+export const RESCUE_MEAN_MAX = 128;
 
 // Texture units. Every sampler has its own unit, so no unit is ever read through two
 // sampler types, and every unit always holds a texture of its sampler's kind.
@@ -43,11 +61,15 @@ export const UNITS = Object.freeze({
   linearLut: 7,
   preSatRamp: 8,
   satRamp: 9,
+  rescueMean: 10, // R32F local-mean grid, values × 255
+  rescueOffsets: 11, // RGBA32F, one texel per luminance bin
+  rescueTone: 12, // R32F, the 256-entry tone curve
 });
 
 export const GLSL_CONSTANTS = Object.freeze({
   HUE_TABLE_SIZE, LUMA_R, LUMA_G, LUMA_B, LINEAR_STEPS, PROFILE_LUT_SIZE, IMAGE16_MAX,
-  TABLE_TEXTURE_SIZE, PACKED_ROW_TEXELS, STEP3_CURVE_SIZE,
+  TABLE_TEXTURE_SIZE, PACKED_ROW_TEXELS, STEP3_CURVE_SIZE, STEP3_CURVE_ROWS, RESCUE_TONE_SIZE,
+  RESCUE_OFFSET_BINS, RESCUE_LUMA,
 });
 
 // A JS number as a GLSL float literal.
@@ -152,7 +174,8 @@ vec3 applyCurves(vec3 c) {
               texelFetch(u_curve, ivec2(index.b, 0), 0).b);
 }
 
-vec3 applyStep3(vec3 c) {
+// WB gains and vibrance.
+vec3 step3Colour(vec3 c) {
   c *= u_wb;
   c = clamp(c, 0.0, 1.0);
   if (u_vib != 0.0) {
@@ -166,27 +189,167 @@ vec3 applyStep3(vec3 c) {
     hsl.y = clamp(s, 0.0, 1.0);
     c = hslToRgb(hsl.x, hsl.y, hsl.z);
   }
+  return c;
+}
+
+// C/M/Y and the curves.
+vec3 step3Finish(vec3 c) {
   vec3 cmy = vec3(1.0) - c;
   cmy = clamp(cmy + u_cmy, 0.0, 1.0);
   c = vec3(1.0) - cmy;
   return applyCurves(c);
 }
+
+vec3 applyStep3(vec3 c) {
+  return step3Finish(step3Colour(c));
+}
 `;
 
-export const STEP3_FRAGMENT_SHADER = `#version 300 es
+// The display modes (#253), in the 0..255 domain of pixelAdjustments.js on the
+// integer input, handed back as 0..1: the rescue before Step 3 (R1 fog surfaces, R2
+// local contrast, R3 colour offsets, R4 tone curve; expiredRescue.js) and the look
+// after it (L1 matrix, L2 curves). A pixel's frame position is its texel index, never
+// gl_FragCoord (the border preview draws the photo in a sub-viewport): uv =
+// u_frame.xy + (p + 0.5) * u_frame.zw, which the detail layer (#248) sets to its
+// region of the whole frame. The mean grid is interpolated by hand with meanAt's
+// weights and edge rule, not by LINEAR filtering.
+const RESCUE_LUMA_GLSL = `vec3(${RESCUE_LUMA.map(f).join(', ')})`;
+const DISPLAY_MODES_DECLARATIONS = `
+const vec3 RESCUE_LUMA = ${RESCUE_LUMA_GLSL};
+uniform vec4 u_frame;
+uniform int u_rescueOn;
+uniform int u_fogOn;
+uniform float u_fog[18];
+uniform vec3 u_fogOffset;
+uniform float u_fogScale;
+uniform float u_fogLimit;
+uniform vec4 u_fraction;
+uniform float u_local;
+uniform sampler2D u_rescueMean;
+uniform int u_offsetsOn;
+uniform sampler2D u_rescueOffsets;
+uniform sampler2D u_rescueTone;
+uniform int u_lookMatrixOn;
+uniform mat3 u_lookMatrix;
+uniform vec3 u_lookOffset;
+uniform int u_lookCurvesOn;
+uniform int u_roundBeforeCmy;
+`;
+
+const DISPLAY_MODES_FUNCTIONS = `
+// meanAt: bilinear over the grid, the far neighbour clamped to the last cell.
+float rescueMeanAt(vec2 uv) {
+  ivec2 grid = textureSize(u_rescueMean, 0);
+  vec2 g = clamp((uv - u_fraction.xy) / u_fraction.zw, 0.0, 1.0) * vec2(grid - 1);
+  ivec2 i0 = ivec2(g);
+  ivec2 i1 = min(i0 + 1, grid - 1);
+  vec2 fr = g - vec2(i0);
+  float top = texelFetch(u_rescueMean, i0, 0).r * (1.0 - fr.x) + texelFetch(u_rescueMean, ivec2(i1.x, i0.y), 0).r * fr.x;
+  float bottom = texelFetch(u_rescueMean, ivec2(i0.x, i1.y), 0).r * (1.0 - fr.x) + texelFetch(u_rescueMean, i1, 0).r * fr.x;
+  return top * (1.0 - fr.y) + bottom * fr.y;
+}
+
+// lerpCurve over the ${RESCUE_TONE_SIZE}-entry tone curve.
+float rescueToneAt(float x) {
+  if (x <= 0.0) return texelFetch(u_rescueTone, ivec2(0, 0), 0).r;
+  if (x >= ${f(RESCUE_TONE_SIZE - 1)}) return texelFetch(u_rescueTone, ivec2(${RESCUE_TONE_SIZE - 1}, 0), 0).r;
+  int i = int(x);
+  float fr = x - float(i);
+  float a = texelFetch(u_rescueTone, ivec2(i, 0), 0).r;
+  float b = texelFetch(u_rescueTone, ivec2(i + 1, 0), 0).r;
+  return a + (b - a) * fr;
+}
+
+// applyExpiredSpatial, then applyExpiredTone. px in 0..255.
+vec3 rescueStage(vec3 px, vec2 uv) {
+  uv = clamp(uv, u_fraction.xy, u_fraction.xy + u_fraction.zw);
+  float fogLum = 0.0;
+  if (u_fogOn != 0) {
+    for (int ch = 0; ch < 3; ch++) {
+      int k = ch * 6;
+      float q = u_fog[k] + u_fog[k + 1] * uv.x + u_fog[k + 2] * uv.y + u_fog[k + 3] * uv.x * uv.x
+        + u_fog[k + 4] * uv.y * uv.y + u_fog[k + 5] * uv.x * uv.y;
+      float fog = clamp(q - u_fogOffset[ch], 0.0, u_fogLimit) * u_fogScale;
+      if (fog > 0.0) px[ch] = max((px[ch] - fog) / (1.0 - fog / 255.0), 0.0);
+      fogLum += fog * RESCUE_LUMA[ch];
+    }
+  }
+  if (u_local > 0.0) {
+    float m = rescueMeanAt(uv);
+    if (fogLum > 0.0) m = max((m - fogLum) / (1.0 - fogLum / 255.0), 0.0);
+    px = clamp(px + (dot(px, RESCUE_LUMA) - m) * u_local, 0.0, 255.0);
+  }
+  if (u_offsetsOn != 0) {
+    float pos = clamp(dot(px, RESCUE_LUMA) / 255.0, 0.0, 1.0) * ${f(RESCUE_OFFSET_BINS - 1)};
+    int i0 = int(pos);
+    int i1 = min(i0 + 1, ${RESCUE_OFFSET_BINS - 1});
+    float fr = pos - float(i0);
+    px = clamp(px + texelFetch(u_rescueOffsets, ivec2(i0, 0), 0).rgb * (1.0 - fr)
+      + texelFetch(u_rescueOffsets, ivec2(i1, 0), 0).rgb * fr, 0.0, 255.0);
+  }
+  return vec3(rescueToneAt(px.r), rescueToneAt(px.g), rescueToneAt(px.b));
+}
+
+// The look on the curve output (integers 0..255): matrix with offset, clamp, then
+// the curves at (v + 0.5) | 0 from row 1 of the curve texture.
+vec3 lookStage(vec3 c) {
+  vec3 v = floor(c * 255.0 + 0.5);
+  if (u_lookMatrixOn != 0) v = clamp(u_lookMatrix * v + u_lookOffset, 0.0, 255.0);
+  if (u_lookCurvesOn == 0) return v / 255.0;
+  ivec3 index = clamp(ivec3(floor(v + 0.5)), ivec3(0), ivec3(${STEP3_CURVE_SIZE - 1}));
+  return vec3(texelFetch(u_curve, ivec2(index.r, 1), 0).r,
+              texelFetch(u_curve, ivec2(index.g, 1), 0).g,
+              texelFetch(u_curve, ivec2(index.b, 1), 0).b);
+}
+
+vec3 displayStep3(vec3 c, ivec2 p) {
+  if (u_rescueOn != 0) {
+    vec2 uv = u_frame.xy + (vec2(p) + 0.5) * u_frame.zw;
+    c = rescueStage(floor(c * 255.0 + 0.5), uv) / 255.0;
+  }
+  c = step3Colour(c);
+  // pixelAdjustments.js's per-pixel loop stores an integer before C/M/Y.
+  if (u_roundBeforeCmy != 0) c = floor(c * 255.0 + 0.5) / 255.0;
+  c = step3Finish(c);
+  if (u_lookMatrixOn != 0 || u_lookCurvesOn != 0) c = lookStage(c);
+  return c;
+}
+`;
+
+// Without the modes, displayStep3 is Step 3 itself.
+const DISPLAY_PLAIN_FUNCTIONS = `
+vec3 displayStep3(vec3 c, ivec2 p) {
+  return applyStep3(c);
+}
+`;
+
+function displayParts(modes) {
+  return modes
+    ? { declarations: DISPLAY_MODES_DECLARATIONS, functions: DISPLAY_MODES_FUNCTIONS }
+    : { declarations: '', functions: DISPLAY_PLAIN_FUNCTIONS };
+}
+
+function step3FragmentShader(modes) {
+  const display = displayParts(modes);
+  return `#version 300 es
 ${PRECISION_300}
 in vec2 v_uv;
 out vec4 outColor;
 uniform sampler2D u_image;
-${STEP3_DECLARATIONS}
+${STEP3_DECLARATIONS}${display.declarations}
 ${HUE2RGB}
-${STEP3_FUNCTIONS}
+${STEP3_FUNCTIONS}${display.functions}
 ${TEXEL_OF_FRAGMENT}
 void main() {
-  vec3 c = texelFetch(u_image, texelOfFragment(textureSize(u_image, 0)), 0).rgb;
-  outColor = vec4(applyStep3(c), 1.0);
+  ivec2 p = texelOfFragment(textureSize(u_image, 0));
+  vec3 c = texelFetch(u_image, p, 0).rgb;
+  outColor = vec4(displayStep3(c, p), 1.0);
 }
 `;
+}
+
+export const STEP3_FRAGMENT_SHADER = step3FragmentShader(false);
+export const STEP3_MODES_FRAGMENT_SHADER = step3FragmentShader(true);
 
 // The SilverCore stages, each with the CPU's quantisation (see the table in #239):
 // 1 B&W mix (Math.round, & 0xFFFF), 2 pre-saturation (clamp, truncating store; exact
@@ -196,7 +359,9 @@ void main() {
 // 7 3D profile ((v + 0.5) | 0 with clamp), 8 saturation (as 2), 9 paper,
 // 10 >> 8. B&W runs 1, 2 (as the engine's pre-saturation ramp), 4 and then one fetch
 // from the #238 grey → RGB table, which is stages 5–9 evaluated by the CPU engine.
-export const APPLY_FRAGMENT_SHADER = `#version 300 es
+function applyFragmentShader(modes) {
+  const display = displayParts(modes);
+  return `#version 300 es
 ${PRECISION_300}
 in vec2 v_uv;
 out vec4 outColor;
@@ -232,9 +397,9 @@ uniform float u_sat;
 uniform usampler2D u_satRamp;
 uniform int u_paperOn;
 uniform usampler2D u_paperLut;
-${STEP3_DECLARATIONS}
+${STEP3_DECLARATIONS}${display.declarations}
 ${HUE2RGB}
-${STEP3_FUNCTIONS}
+${STEP3_FUNCTIONS}${display.functions}
 ${TEXEL_OF_FRAGMENT}
 
 ivec2 tableTexel(uint v) {
@@ -375,9 +540,13 @@ void main() {
     if (u_satOn != 0) c = saturate16(c, u_sat, u_satRamp);
     if (u_paperOn != 0) c = lookup3(u_paperLut, c);
   }
-  outColor = vec4(applyStep3(vec3(c >> 8u) / 255.0), 1.0);
+  outColor = vec4(displayStep3(vec3(c >> 8u) / 255.0, p), 1.0);
 }
 `;
+}
+
+export const APPLY_FRAGMENT_SHADER = applyFragmentShader(false);
+export const APPLY_MODES_FRAGMENT_SHADER = applyFragmentShader(true);
 
 // ---- WebGL1 fallback (GLSL ES 1.00): Step 3 on the exact 8-bit frame ----
 

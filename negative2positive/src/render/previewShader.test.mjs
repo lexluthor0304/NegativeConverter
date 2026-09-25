@@ -30,7 +30,10 @@ const { LINEAR_LUT } = await import('../silvercore/util/localExposure.js');
 
 // ---- 1. GLSL ----
 {
-  const { APPLY_FRAGMENT_SHADER, STEP3_FRAGMENT_SHADER, VERTEX_SHADER_300, STEP3_FRAGMENT_SHADER_100, UNITS, glslFloat } = shader;
+  const {
+    APPLY_FRAGMENT_SHADER, STEP3_FRAGMENT_SHADER, VERTEX_SHADER_300, STEP3_FRAGMENT_SHADER_100, UNITS, glslFloat,
+    STEP3_MODES_FRAGMENT_SHADER, APPLY_MODES_FRAGMENT_SHADER,
+  } = shader;
   assert.equal(glslFloat(3600), '3600.0');
   assert.equal(glslFloat(0.299), '0.299');
   assert.throws(() => glslFloat(NaN));
@@ -38,7 +41,7 @@ const { LINEAR_LUT } = await import('../silvercore/util/localExposure.js');
     assert.ok(APPLY_FRAGMENT_SHADER.includes(constant), `apply shader carries ${constant}`);
   }
   assert.equal(new Set(Object.values(UNITS)).size, Object.keys(UNITS).length, 'every sampler has its own unit');
-  for (const source of [APPLY_FRAGMENT_SHADER, STEP3_FRAGMENT_SHADER]) {
+  for (const source of [APPLY_FRAGMENT_SHADER, STEP3_FRAGMENT_SHADER, APPLY_MODES_FRAGMENT_SHADER, STEP3_MODES_FRAGMENT_SHADER]) {
     assert.ok(source.startsWith('#version 300 es'));
     assert.ok(source.includes('vec3 applyStep3(vec3 c)'), 'one shared Step-3 function');
     assert.ok(!/u_exposure|u_contrast|u_highlights|u_shadows|u_temp\b|u_tint|u_sat\b.*1\.0/.test(source.replace('uniform float u_sat;', '')),
@@ -46,13 +49,26 @@ const { LINEAR_LUT } = await import('../silvercore/util/localExposure.js');
     assert.ok(source.includes('texelFetch'), 'texels are fetched, never filtered');
   }
   assert.ok(!/u_exposure|u_contrast|u_temp/.test(STEP3_FRAGMENT_SHADER_100), 'the WebGL1 fallback lost them too');
+  // #253: the display modes live only in the mode variants, with the rescue's own
+  // constants (expiredRescue.js) and the texture-index frame position.
+  for (const source of [APPLY_FRAGMENT_SHADER, STEP3_FRAGMENT_SHADER]) {
+    assert.ok(!/u_rescueOn|u_lookMatrix|rescueStage/.test(source), 'the plain programs carry no mode stage');
+  }
+  for (const source of [APPLY_MODES_FRAGMENT_SHADER, STEP3_MODES_FRAGMENT_SHADER]) {
+    for (const text of ['const vec3 RESCUE_LUMA = vec3(0.2126, 0.7152, 0.0722)', '* 63.0', 'min(i0 + 1, 63)',
+      'u_frame.xy + (vec2(p) + 0.5) * u_frame.zw', 'u_lookMatrix * v', 'ivec2(index.r, 1)', 'vec3 displayStep3(vec3 c, ivec2 p)']) {
+      assert.ok(source.includes(text), `mode program carries ${text}`);
+    }
+    assert.ok(!/gl_FragCoord/.test(source), 'positions never come from gl_FragCoord (the border draws in a sub-viewport)');
+  }
 
   let glslc = null;
   try { execFileSync('glslc', ['--version'], { stdio: 'pipe' }); glslc = 'glslc'; } catch { /* not installed */ }
   if (glslc) {
     const dir = mkdtempSync(join(tmpdir(), 'nc-glsl-'));
     try {
-      for (const [name, source, stage] of [['vertex', VERTEX_SHADER_300, 'vert'], ['step3', STEP3_FRAGMENT_SHADER, 'frag'], ['apply', APPLY_FRAGMENT_SHADER, 'frag']]) {
+      for (const [name, source, stage] of [['vertex', VERTEX_SHADER_300, 'vert'], ['step3', STEP3_FRAGMENT_SHADER, 'frag'], ['apply', APPLY_FRAGMENT_SHADER, 'frag'],
+        ['step3-modes', STEP3_MODES_FRAGMENT_SHADER, 'frag'], ['apply-modes', APPLY_MODES_FRAGMENT_SHADER, 'frag']]) {
         const file = join(dir, `${name}.${stage}`);
         writeFileSync(file, source.replace('#version 300 es', '#version 310 es'));
         try {

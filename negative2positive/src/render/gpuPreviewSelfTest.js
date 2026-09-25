@@ -9,7 +9,10 @@
 import { Engine } from '../silvercore/engine/Engine.js';
 import { resolveSilverCoreParams, toGrayscaleInPlace } from '../pipeline/silverAdapter.js';
 import { toRGBA8 } from '../silvercore/util/image16.js';
-import { applyPreviewChain } from './previewTables.js';
+import { applyPreviewChain, displayStageUniforms } from './previewTables.js';
+import { computeAdjustmentParams } from '../workers/pixelAdjustments.js';
+import { applyPreparedAdjustmentsToBuffer } from '../app/adjustmentPipeline.js';
+import { analyzeExpiredFilm, buildExpiredSpatialStage, fitExpiredSpatial } from '../pipeline/expiredRescue.js';
 
 export const SELF_TEST_SIZE = 64;
 export const SELF_TEST_MAX_DIFF = 1;
@@ -235,4 +238,211 @@ export function compareSelfTest(cases, pixels, width, height) {
   });
   const maxDiff = Math.max(0, ...results.map((result) => result.maxDiff));
   return { ok: maxDiff <= SELF_TEST_MAX_DIFF, maxDiff, cases: results };
+}
+
+// ---- display modes (#253) ----
+// The rescue and the look against pixelAdjustments.js at the exact colour model
+// ('full'). The GPU runs them in fp32 where the CPU keeps float64 intermediates and
+// rounds before C/M/Y and at the curve indices, so the budget is the issue's parity
+// budget, not the exactness of the SilverCore stages.
+export const DISPLAY_PARITY_MEAN = 1;
+export const DISPLAY_PARITY_P999 = 3;
+
+/**
+ * Mean absolute channel difference, its 99.9th percentile and maximum between two
+ * RGBA8 buffers of the same layout, and whether they meet the display budget.
+ */
+export function displayParity(expected, got) {
+  const counts = new Uint32Array(256);
+  let sum = 0, n = 0, max = 0;
+  for (let i = 0; i < expected.length; i += 4) {
+    for (let c = 0; c < 3; c++) {
+      const d = Math.abs(expected[i + c] - got[i + c]);
+      counts[d]++;
+      sum += d;
+      n++;
+      if (d > max) max = d;
+    }
+  }
+  let acc = 0, p999 = 0;
+  for (let d = 0; d < 256; d++) {
+    acc += counts[d];
+    if (acc >= n * 0.999) { p999 = d; break; }
+  }
+  const mean = n ? sum / n : 0;
+  return { mean, p999, max, ok: mean <= DISPLAY_PARITY_MEAN && p999 <= DISPLAY_PARITY_P999 };
+}
+
+/**
+ * An aged positive (RGBA8): a scene of gradients and colour patches with fog,
+ * per-layer range loss and gamma, green shadows and magenta highlights, plus an
+ * uneven fog strongest at the top-left corner, fading faster along u than along v,
+ * so a flipped v or u changes the result (the orientation fixture). A black dot in
+ * every 8 × 8 cell puts each cell's floor on the fog itself.
+ */
+export function agedPositiveFixture(width = 96, height = 64) {
+  const data = new Uint8ClampedArray(width * height * 4);
+  const fog = [0.3, 0.36, 0.42], top = [0.86, 0.76, 0.9], gamma = [0.85, 1.05, 0.95];
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const u = (x + 0.5) / width, v = (y + 0.5) / height;
+      // The scene: a diagonal ramp, a soft vertical band and six colour patches.
+      let scene = [0.15 + 0.7 * u * (0.6 + 0.4 * v), 0.1 + 0.8 * v * (0.5 + 0.5 * u), 0.2 + 0.5 * Math.abs(Math.sin(3 * u + 2 * v))];
+      const patch = (Math.floor(u * 6) + 6 * Math.floor(v * 2)) % 6;
+      if (u > 0.55 && v > 0.45 && ((x >> 3) + (y >> 3)) % 2 === 0) {
+        scene = [[0.8, 0.2, 0.15], [0.2, 0.7, 0.25], [0.15, 0.25, 0.8], [0.85, 0.8, 0.2], [0.5, 0.5, 0.5], [0.9, 0.9, 0.88]][patch];
+      }
+      if ((x & 7) === 3 && (y & 7) === 3) scene = [0, 0, 0];
+      const edge = 0.12 * (1 - u) * (1 - 0.7 * v); // strongest top-left
+      const i = (y * width + x) * 4;
+      for (let c = 0; c < 3; c++) {
+        const s = Math.max(0, Math.min(1, scene[c]));
+        let value = fog[c] + edge + (top[c] - fog[c] - edge) * Math.pow(s, gamma[c]);
+        if (c === 1 && s < 0.4) { const t = s / 0.4; value += 0.06 * 4 * t * (1 - t); }
+        if (c !== 1 && s > 0.6) { const t = (s - 0.6) / 0.4; value += 0.05 * 4 * t * (1 - t); }
+        data[i + c] = Math.round(Math.max(0, Math.min(1, value)) * 255);
+      }
+      data[i + 3] = 255;
+    }
+  }
+  return { width, height, data };
+}
+
+// OpenCV's maps, stood in for by cell minima (the fog floor) and cell means (the
+// local mean), then fitted and measured the way expiredAnalysisFromMaps does.
+export function expiredAnalysisOf(image, cell = 8) {
+  const gw = Math.max(2, Math.floor(image.width / cell)), gh = Math.max(2, Math.floor(image.height / cell));
+  const low = [0, 1, 2].map(() => new Float32Array(gw * gh).fill(1));
+  const mean = new Float32Array(gw * gh);
+  const counts = new Uint32Array(gw * gh);
+  for (let y = 0; y < image.height; y++) {
+    for (let x = 0; x < image.width; x++) {
+      const g = Math.min(gh - 1, Math.floor(y * gh / image.height)) * gw + Math.min(gw - 1, Math.floor(x * gw / image.width));
+      const i = (y * image.width + x) * 4;
+      for (let c = 0; c < 3; c++) low[c][g] = Math.min(low[c][g], image.data[i + c] / 255);
+      mean[g] += (0.2126 * image.data[i] + 0.7152 * image.data[i + 1] + 0.0722 * image.data[i + 2]) / 255;
+      counts[g]++;
+    }
+  }
+  for (let g = 0; g < mean.length; g++) mean[g] /= Math.max(1, counts[g]);
+  const spatial = fitExpiredSpatial({ gridWidth: gw, gridHeight: gh, low, mean, fraction: { left: 0, top: 0, width: 1, height: 1 } });
+  const stage = buildExpiredSpatialStage({ expiredEnabled: true, expiredLocalContrast: 0, expiredAnalysis: { spatial } });
+  const analysis = analyzeExpiredFilm(image, { spatial: stage });
+  return analysis ? { ...analysis, spatial } : null;
+}
+
+// A look with cross-talk that is far from symmetric (a transposed matrix fails) and
+// curves that are not identity.
+export function syntheticLook({ matrix = true, curves = true } = {}) {
+  const look = {
+    matrix: matrix ? [0.92, 0.14, -0.03, 0.05, 0.86, 0.12, -0.08, 0.21, 0.95] : [1, 0, 0, 0, 1, 0, 0, 0, 1],
+    offset: matrix ? [6, -4, 9] : [0, 0, 0],
+    curves: null,
+  };
+  if (curves) {
+    const r = new Uint8Array(256), g = new Uint8Array(256), b = new Uint8Array(256);
+    for (let v = 0; v < 256; v++) {
+      r[v] = Math.round(255 * Math.pow(v / 255, 0.85));
+      g[v] = Math.round(255 * (v / 255 + 0.06 * Math.sin(Math.PI * v / 255)));
+      b[v] = Math.round(255 * Math.pow(v / 255, 1.15));
+    }
+    look.curves = { r, g, b };
+  }
+  return look;
+}
+
+function identityCurves() {
+  const ramp = new Uint8Array(256);
+  for (let v = 0; v < 256; v++) ramp[v] = v;
+  return { r: ramp, g: ramp.slice(), b: ramp.slice() };
+}
+
+function toneCurves() {
+  const r = new Uint8Array(256), g = new Uint8Array(256), b = new Uint8Array(256);
+  for (let v = 0; v < 256; v++) {
+    r[v] = Math.round(255 * Math.pow(v / 255, 0.95));
+    g[v] = v;
+    b[v] = Math.round(255 * Math.pow(v / 255, 1.08));
+  }
+  return { r, g, b };
+}
+
+/**
+ * The display-mode recipes of the parity checks (#253 F): rescue with offsets only,
+ * with the fog surface, with local contrast 30 and 100, the look (matrix and curves,
+ * curves only), rescue + look + vibrance with WB, C/M/Y and curves, and hold-to-compare
+ * (the rescue dropped as buildDisplayAdjustmentSettings drops it). The orientation
+ * fixture is the fog cases themselves: the aged frame's uneven fog is strongest at
+ * the top-left.
+ */
+export function displayModesSpecs(analysis) {
+  const rescue = (extra = {}) => ({
+    expiredEnabled: true, expiredAnalysis: analysis, expiredLevels: 100, expiredNeutralize: 100, expiredCrossover: 100,
+    expiredBrightness: 20, expiredContrast: 30, expiredUnevenFog: 0, expiredLocalContrast: 0, ...extra,
+  });
+  const plain = { wbR: 1, wbG: 1, wbB: 1, vibrance: 0, cyan: 0, magenta: 0, yellow: 0 };
+  return [
+    { name: 'offsets', settings: { ...plain, ...rescue() } },
+    { name: 'offsets + fog', settings: { ...plain, ...rescue({ expiredUnevenFog: 100 }) } },
+    { name: 'offsets + fog + local 30', settings: { ...plain, ...rescue({ expiredUnevenFog: 100, expiredLocalContrast: 30 }) } },
+    { name: 'offsets + fog + local 100', settings: { ...plain, ...rescue({ expiredUnevenFog: 100, expiredLocalContrast: 100 }) } },
+    { name: 'look matrix + curves', settings: { ...plain, look: syntheticLook() } },
+    { name: 'look curves', settings: { ...plain, look: syntheticLook({ matrix: false }) } },
+    { name: 'rescue + look + vibrance', curves: 'tone', settings: {
+      wbR: 1.06, wbG: 0.97, wbB: 0.92, vibrance: 35, cyan: 6, magenta: -4, yellow: 3,
+      look: syntheticLook(), ...rescue({ expiredUnevenFog: 70, expiredLocalContrast: 30, expiredCrossover: 60 }),
+    } },
+    { name: 'hold to compare', compare: true, settings: { ...plain, look: syntheticLook(), ...rescue({ expiredUnevenFog: 100 }) } },
+  ];
+}
+
+// Step 3's uniforms from a recipe, as main.js's webglStep3Values computes them.
+export function step3ValuesOf(settings, curves) {
+  return {
+    wb: [settings.wbR ?? 1, settings.wbG ?? 1, settings.wbB ?? 1],
+    vib: (settings.vibrance || 0) / 100,
+    cmy: [(settings.cyan || 0) / 100, (settings.magenta || 0) / 100, (settings.yellow || 0) / 100],
+    curves,
+  };
+}
+
+/**
+ * One display-mode case on `image` (RGBA8): the recipe as the display builds it
+ * (hold-to-compare drops the rescue), computeAdjustmentParams on the frame's size,
+ * the shader's stages, Step 3's uniforms and the CPU's 'full' reference bytes.
+ */
+export function buildDisplayModesCase({ name, image, settings, curves = 'identity', compare = false }) {
+  const recipe = { ...settings, curves: curves === 'tone' ? toneCurves() : identityCurves() };
+  const display = compare ? { ...recipe, expiredEnabled: false } : recipe;
+  const params = computeAdjustmentParams(display, { width: image.width, height: image.height });
+  const expected = new Uint8ClampedArray(image.width * image.height * 4);
+  applyPreparedAdjustmentsToBuffer(image, display, { width: image.width, height: image.height, data: expected }, { quality: 'full' });
+  return {
+    name, width: image.width, height: image.height, image, recipe: display, params,
+    stages: displayStageUniforms(params), step3: step3ValuesOf(display, display.curves), expected,
+  };
+}
+
+/** Every display-mode case on the aged fixture (self-test and parity smoke). */
+export function buildDisplayModesCases(width = 64, height = 48) {
+  const image = agedPositiveFixture(width, height);
+  const analysis = expiredAnalysisOf(image);
+  return displayModesSpecs(analysis).map((spec) => buildDisplayModesCase({ ...spec, image }));
+}
+
+/**
+ * Compares a readback (bottom-up rows) holding the display cases side by side (case k
+ * at columns [k * w, k * w + w)) with their CPU bytes, by the display budget.
+ */
+export function compareDisplayModes(cases, pixels, width, height) {
+  const w = cases[0].width, h = cases[0].height;
+  const results = cases.map((testCase, k) => {
+    const got = new Uint8ClampedArray(w * h * 4);
+    for (let y = 0; y < h; y++) {
+      const row = height - 1 - y;
+      got.set(pixels.subarray((row * width + k * w) * 4, (row * width + k * w + w) * 4), y * w * 4);
+    }
+    return { name: testCase.name, ...displayParity(testCase.expected, got) };
+  });
+  return { ok: results.every((result) => result.ok), cases: results };
 }

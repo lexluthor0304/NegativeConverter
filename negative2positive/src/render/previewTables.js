@@ -5,7 +5,7 @@ import { hueWeightTables, HUE_TABLE_SIZE, HUE_BANDS_STRICT } from '../silvercore
 import { LINEAR_LUT, LINEAR_STEPS, applyExposureStopsToImage16 } from '../silvercore/util/localExposure.js';
 import { bwMixWeights } from '../silvercore/engine/Presets.js';
 import { toGrayscaleInPlace } from '../pipeline/silverAdapter.js';
-import { TABLE_TEXTURE_SIZE, PACKED_ROW_TEXELS } from './previewShader.js';
+import { TABLE_TEXTURE_SIZE, PACKED_ROW_TEXELS, RESCUE_OFFSET_BINS, STEP3_CURVE_SIZE } from './previewShader.js';
 
 export const TABLE_ENTRIES = TABLE_TEXTURE_SIZE * TABLE_TEXTURE_SIZE;
 
@@ -103,3 +103,97 @@ export function applyPreviewChain(engine, image16, params, mode, stops = null) {
   if (stops && stops.length === image16.width * image16.height) applyExposureStopsToImage16(image16, stops);
   return engine._applyLuts(image16, engine.lastLuts, params);
 }
+
+// ---- display modes (#253) ----
+
+const NO_FOG = new Float32Array(18);
+
+// The rescue's colour table (RESCUE_OFFSET_BINS × 3 signed floats, 0..255 domain) as
+// RGBA32F texels, one per bin: the same float32 values expiredRescue.js stores.
+export function packRescueOffsets(table) {
+  const data = new Float32Array(RESCUE_OFFSET_BINS * 4);
+  for (let i = 0; i < RESCUE_OFFSET_BINS; i++) {
+    data[i * 4] = table[i * 3];
+    data[i * 4 + 1] = table[i * 3 + 1];
+    data[i * 4 + 2] = table[i * 3 + 2];
+  }
+  return data;
+}
+
+// The look's three 256-entry curves as one row of the RGBA8 Step-3 curve texture.
+export function packCurveRow(curves, out = null) {
+  const data = out && out.length === STEP3_CURVE_SIZE * 4 ? out : new Uint8Array(STEP3_CURVE_SIZE * 4);
+  for (let i = 0; i < STEP3_CURVE_SIZE; i++) {
+    data[i * 4] = curves ? curves.r[i] : i;
+    data[i * 4 + 1] = curves ? curves.g[i] : i;
+    data[i * 4 + 2] = curves ? curves.b[i] : i;
+    data[i * 4 + 3] = 255;
+  }
+  return data;
+}
+
+/**
+ * The display-mode stages of one recipe as the shader reads them, straight from
+ * computeAdjustmentParams (`params`): no second derivation of the rescue or the
+ * look. Every stage has an enable flag mirroring the CPU's (`rescueStages`,
+ * `rescueSpatial.fog`, `local > 0`, `offsets`, `doLookMatrix`, `lookR`). A renderer
+ * uploads each texture's data only when its identity changed: the colour table and
+ * tone curve are new per strength tick (1 KB each), while the mean grid and the
+ * look's curves are carried over from `previous` for the same analysis
+ * (`sameAnalysis`) and the same look (`sameLook`). `active` is false when no mode
+ * stage runs, and the plain programs draw.
+ */
+export function displayStageUniforms(params, { previous = null, sameAnalysis = false, sameLook = false } = {}) {
+  const stages = params && params.doRescue ? params.rescueStages : null;
+  const spatial = stages ? params.rescueSpatial : null;
+  const lookMatrixOn = Boolean(params?.doLook && params.doLookMatrix);
+  const lookCurvesOn = Boolean(params?.doLook && params.lookR);
+  const fraction = spatial ? spatial.fraction : null;
+  let mean = spatial && spatial.local > 0 && spatial.mean
+    ? { width: spatial.gridWidth, height: spatial.gridHeight, data: spatial.mean }
+    : null;
+  if (mean && sameAnalysis && previous?.mean && previous.mean.width === mean.width && previous.mean.height === mean.height) {
+    mean = previous.mean;
+  }
+  let lookCurves = lookCurvesOn ? { data: packCurveRow({ r: params.lookR, g: params.lookG, b: params.lookB }) } : null;
+  if (lookCurves && sameLook && previous?.lookCurves) lookCurves = previous.lookCurves;
+  return {
+    active: Boolean(stages) || lookMatrixOn || lookCurvesOn,
+    rescueOn: stages ? 1 : 0,
+    fogOn: spatial && spatial.fog ? 1 : 0,
+    fog: spatial && spatial.fog ? spatial.fog : NO_FOG,
+    fogOffset: spatial ? [spatial.fogOffset[0], spatial.fogOffset[1], spatial.fogOffset[2]] : [0, 0, 0],
+    fogScale: spatial ? spatial.fogScale : 0,
+    fogLimit: spatial ? spatial.fogLimit : 0,
+    fraction: fraction ? [fraction.left, fraction.top, fraction.width, fraction.height] : [0, 0, 1, 1],
+    local: mean ? spatial.local : 0,
+    mean,
+    offsetsOn: stages && stages.offsets ? 1 : 0,
+    offsets: stages && stages.offsets ? { data: packRescueOffsets(stages.offsets) } : null,
+    tone: stages ? { data: stages.tone } : null,
+    lookMatrixOn: lookMatrixOn ? 1 : 0,
+    // Row-major, as pixelAdjustments.js reads it; uploaded with transpose = true.
+    lookMatrix: lookMatrixOn ? Array.from(params.lookMatrix).slice(0, 9) : [1, 0, 0, 0, 1, 0, 0, 0, 1],
+    lookOffset: lookMatrixOn ? Array.from(params.lookOffset).slice(0, 3) : [0, 0, 0],
+    lookCurvesOn: lookCurvesOn ? 1 : 0,
+    lookCurves,
+    // The CPU's per-pixel loop (a look matrix, a spatial or per-pixel rescue, or
+    // vibrance) stores the pixel as an integer before C/M/Y; its LUT path does not.
+    roundBeforeCmy: params && (params.doHsl || params.doHighlights || params.doShadows || params.doLookMatrix
+      || params.doRescueSpatial || params.doRescuePixel) ? 1 : 0,
+  };
+}
+
+// u_frame for a draw of a width × height texture that is the whole frame.
+export function wholeFrame(width, height) {
+  return [0, 0, 1 / Math.max(1, width), 1 / Math.max(1, height)];
+}
+
+// u_frame for a region (x, y, w, h in `frameWidth` × `frameHeight` pixels) drawn from
+// a texture of width × height texels, so the rescue's positions stay normalised to
+// the whole frame (#248's detail layer).
+export function regionFrame(region, width, height, frameWidth, frameHeight) {
+  return [region.x / frameWidth, region.y / frameHeight,
+    region.width / (Math.max(1, width) * frameWidth), region.height / (Math.max(1, height) * frameHeight)];
+}
+

@@ -4,11 +4,11 @@
 // module owns the GL objects. See previewShader.js for the stages.
 
 import {
-  VERTEX_SHADER_300, STEP3_FRAGMENT_SHADER, APPLY_FRAGMENT_SHADER,
-  UNITS, TABLE_TEXTURE_SIZE, STEP3_CURVE_SIZE,
+  VERTEX_SHADER_300, STEP3_FRAGMENT_SHADER, APPLY_FRAGMENT_SHADER, STEP3_MODES_FRAGMENT_SHADER, APPLY_MODES_FRAGMENT_SHADER,
+  UNITS, TABLE_TEXTURE_SIZE, STEP3_CURVE_SIZE, STEP3_CURVE_ROWS, RESCUE_TONE_SIZE, RESCUE_OFFSET_BINS,
 } from './previewShader.js';
-import { packTableTexture, packHueWeights, packLinearLut, applyUniforms, TABLE_ENTRIES } from './previewTables.js';
-import { SELF_TEST_SIZE, compareSelfTest } from './gpuPreviewSelfTest.js';
+import { packTableTexture, packHueWeights, packLinearLut, applyUniforms, packCurveRow, wholeFrame, TABLE_ENTRIES } from './previewTables.js';
+import { SELF_TEST_SIZE, compareSelfTest, compareDisplayModes } from './gpuPreviewSelfTest.js';
 
 const QUAD = new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]);
 
@@ -55,6 +55,12 @@ const APPLY_UNIFORMS = [
   'u_posWb', 'u_stopsOn', 'u_stops', 'u_linearLut', 'u_toneLut', 'u_hslOn', 'u_hueSkip', 'u_bandActive', 'u_hueShift',
   'u_satFactor', 'u_hueWeights', 'u_lut3dOn', 'u_lut3dStr', 'u_lut3dInvStr', 'u_lut3d', 'u_satOn', 'u_sat', 'u_satRamp',
   'u_paperOn', 'u_paperLut', 'u_curve', 'u_wb', 'u_vib', 'u_cmy',
+];
+// The display modes' uniforms (#253), in both mode variants.
+const MODE_UNIFORMS = [
+  'u_frame', 'u_rescueOn', 'u_fogOn', 'u_fog', 'u_fogOffset', 'u_fogScale', 'u_fogLimit', 'u_fraction', 'u_local',
+  'u_rescueMean', 'u_offsetsOn', 'u_rescueOffsets', 'u_rescueTone', 'u_lookMatrixOn', 'u_lookMatrix', 'u_lookOffset',
+  'u_lookCurvesOn', 'u_roundBeforeCmy',
 ];
 
 export function createGpuPreviewRenderer(gl) {
@@ -116,8 +122,10 @@ export function createGpuPreviewRenderer(gl) {
   gl.deleteShader(step3Linked.fs);
 
   const exact = { handle: texture(), width: 0, height: 0 };
-  const curve = { handle: texture(), allocated: false };
+  // Row 0: the RGB curves; row 1: the look's curves (#253), identity without a look.
+  const curve = { handle: texture(), allocated: false, look: null };
   const curveBytes = new Uint8Array(STEP3_CURVE_SIZE * 4);
+  const identityRow = packCurveRow(null);
 
   // Inputs the apply program reads: a live set, and a scratch set for the self-test.
   function createInputs() {
@@ -261,14 +269,17 @@ export function createGpuPreviewRenderer(gl) {
     gl.uniform3f(loc.u_cmy, cmy[0], cmy[1], cmy[2]);
   }
 
-  function drawApplyWith(inputs, frame, step3Values, curveHandle, viewport) {
+  function drawApplyWith(inputs, frame, step3Values, curveHandle, viewport, curveState = curve, frameUv = null) {
     const s = ensureStatics();
-    const loc = apply.loc;
+    const stages = step3Values.stages;
+    const program = wantsModes(stages) ? modes.apply : apply;
+    const loc = program.loc;
     const u = applyUniforms({
       mode: frame.mode, params: frame.params, plan: frame.plan, positive: frame.engine.positiveAnalysis,
       hasStops: Boolean(inputs.stops), prepared8: Boolean(inputs.prepared?.eight),
     });
-    gl.useProgram(apply.program);
+    if (program !== apply) uploadStages(stages, curveHandle, curveState);
+    gl.useProgram(program.program);
     bind(UNITS.image, inputs.prepared ? inputs.prepared.handle : s.noPrepared);
     bind(UNITS.curve, curveHandle);
     bind(UNITS.toneLut, inputs.toneLut);
@@ -309,33 +320,121 @@ export function createGpuPreviewRenderer(gl) {
     gl.uniform1f(loc.u_sat, u.sat);
     gl.uniform1i(loc.u_paperOn, u.paperOn);
     setStep3Uniforms(loc, step3Values);
+    if (program !== apply) {
+      const size = inputs.prepared || { width: 1, height: 1 };
+      setModeUniforms(loc, stages, frameUv || wholeFrame(size.width, size.height));
+    }
     useQuad(loc);
     gl.viewport(viewport[0], viewport[1], viewport[2], viewport[3]);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
 
-  function drawStep3With(imageHandle, curveHandle, step3Values, viewport) {
-    const loc = step3.loc;
-    gl.useProgram(step3.program);
+  // `size`: the image texture's size, for the rescue's frame positions unless
+  // `frameUv` (a region of a larger frame) is given.
+  function drawStep3With(imageHandle, curveHandle, step3Values, viewport, size, curveState = curve, frameUv = null) {
+    const stages = step3Values.stages;
+    const program = wantsModes(stages) ? modes.step3 : step3;
+    const loc = program.loc;
+    if (program !== step3) uploadStages(stages, curveHandle, curveState);
+    gl.useProgram(program.program);
     bind(UNITS.image, imageHandle);
     bind(UNITS.curve, curveHandle);
     gl.uniform1i(loc.u_image, UNITS.image);
     setStep3Uniforms(loc, step3Values);
+    if (program !== step3) setModeUniforms(loc, stages, frameUv || wholeFrame(size.width, size.height));
     useQuad(loc);
     gl.viewport(viewport[0], viewport[1], viewport[2], viewport[3]);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
 
   function uploadCurveInto(handle, curves, allocated) {
-    for (let i = 0; i < STEP3_CURVE_SIZE; i++) {
-      curveBytes[i * 4] = curves.r[i];
-      curveBytes[i * 4 + 1] = curves.g[i];
-      curveBytes[i * 4 + 2] = curves.b[i];
-      curveBytes[i * 4 + 3] = 255;
-    }
+    packCurveRow(curves, curveBytes);
     bind(UNITS.curve, handle);
-    if (!allocated) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, STEP3_CURVE_SIZE, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, curveBytes);
-    else gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, STEP3_CURVE_SIZE, 1, gl.RGBA, gl.UNSIGNED_BYTE, curveBytes);
+    if (!allocated) {
+      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, STEP3_CURVE_SIZE, STEP3_CURVE_ROWS);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 1, STEP3_CURVE_SIZE, 1, gl.RGBA, gl.UNSIGNED_BYTE, identityRow);
+    }
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, STEP3_CURVE_SIZE, 1, gl.RGBA, gl.UNSIGNED_BYTE, curveBytes);
+  }
+
+  // Row 1 of a curve texture: the look's curves, or identity.
+  function uploadLookRowInto(handle, row) {
+    bind(UNITS.curve, handle);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 1, STEP3_CURVE_SIZE, 1, gl.RGBA, gl.UNSIGNED_BYTE, row || identityRow);
+  }
+
+  // ---- display modes (#253): two more program variants and their textures ----
+  let modes = null; // { step3: linked, apply: linked, status, error }
+  const stageTextures = {
+    mean: texture(), meanKey: null,
+    offsets: texture(), offsetsKey: null,
+    tone: texture(), toneKey: null,
+  };
+  gl.bindTexture(gl.TEXTURE_2D, stageTextures.mean);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, 1, 1, 0, gl.RED, gl.FLOAT, new Float32Array(1));
+  gl.bindTexture(gl.TEXTURE_2D, stageTextures.offsets);
+  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, RESCUE_OFFSET_BINS, 1);
+  gl.bindTexture(gl.TEXTURE_2D, stageTextures.tone);
+  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R32F, RESCUE_TONE_SIZE, 1);
+
+  // Uploads what `stages` (displayStageUniforms) holds that this context lacks: the
+  // mean grid per analysis, the colour table and tone curve per strength tick (1 KB
+  // each), the look's curves per look. Keyed by the data's identity.
+  function uploadStages(stages, curveHandle, curveState) {
+    if (stages.mean && stageTextures.meanKey !== stages.mean) {
+      bind(UNITS.rescueMean, stageTextures.mean);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, stages.mean.width, stages.mean.height, 0, gl.RED, gl.FLOAT, stages.mean.data);
+      stageTextures.meanKey = stages.mean;
+    }
+    if (stages.offsets && stageTextures.offsetsKey !== stages.offsets) {
+      bind(UNITS.rescueOffsets, stageTextures.offsets);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, RESCUE_OFFSET_BINS, 1, gl.RGBA, gl.FLOAT, stages.offsets.data);
+      stageTextures.offsetsKey = stages.offsets;
+    }
+    if (stages.tone && stageTextures.toneKey !== stages.tone) {
+      bind(UNITS.rescueTone, stageTextures.tone);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, RESCUE_TONE_SIZE, 1, gl.RED, gl.FLOAT, stages.tone.data);
+      stageTextures.toneKey = stages.tone;
+    }
+    const look = stages.lookCurves || null;
+    if (curveState.allocated !== false && curveState.look !== look) {
+      uploadLookRowInto(curveHandle, look ? look.data : null);
+      curveState.look = look;
+    }
+  }
+
+  function setModeUniforms(loc, stages, frame) {
+    bind(UNITS.rescueMean, stageTextures.mean);
+    bind(UNITS.rescueOffsets, stageTextures.offsets);
+    bind(UNITS.rescueTone, stageTextures.tone);
+    gl.uniform1i(loc.u_rescueMean, UNITS.rescueMean);
+    gl.uniform1i(loc.u_rescueOffsets, UNITS.rescueOffsets);
+    gl.uniform1i(loc.u_rescueTone, UNITS.rescueTone);
+    gl.uniform4f(loc.u_frame, frame[0], frame[1], frame[2], frame[3]);
+    gl.uniform1i(loc.u_rescueOn, stages.rescueOn);
+    gl.uniform1i(loc.u_fogOn, stages.fogOn);
+    gl.uniform1fv(loc.u_fog, stages.fog);
+    gl.uniform3f(loc.u_fogOffset, stages.fogOffset[0], stages.fogOffset[1], stages.fogOffset[2]);
+    gl.uniform1f(loc.u_fogScale, stages.fogScale);
+    gl.uniform1f(loc.u_fogLimit, stages.fogLimit);
+    gl.uniform4f(loc.u_fraction, stages.fraction[0], stages.fraction[1], stages.fraction[2], stages.fraction[3]);
+    gl.uniform1f(loc.u_local, stages.mean ? stages.local : 0);
+    gl.uniform1i(loc.u_offsetsOn, stages.offsets ? stages.offsetsOn : 0);
+    gl.uniform1i(loc.u_lookMatrixOn, stages.lookMatrixOn);
+    // Row-major as pixelAdjustments.js reads it: WebGL2 transposes on upload.
+    gl.uniformMatrix3fv(loc.u_lookMatrix, true, stages.lookMatrix);
+    gl.uniform3f(loc.u_lookOffset, stages.lookOffset[0], stages.lookOffset[1], stages.lookOffset[2]);
+    gl.uniform1i(loc.u_lookCurvesOn, stages.lookCurves ? stages.lookCurvesOn : 0);
+    gl.uniform1i(loc.u_roundBeforeCmy, stages.roundBeforeCmy);
+  }
+
+  function modesLinked() {
+    return modes?.status === 'linked';
+  }
+
+  // Whether a draw of `stages` needs the mode variant.
+  function wantsModes(stages) {
+    return Boolean(stages && stages.active);
   }
 
   const renderer = {
@@ -370,12 +469,21 @@ export function createGpuPreviewRenderer(gl) {
     },
 
     uploadCurves(curves) {
+      // A new texture's look row starts as identity.
+      if (!curve.allocated) curve.look = null;
       uploadCurveInto(curve.handle, curves, curve.allocated);
       curve.allocated = true;
     },
 
-    drawStep3(step3Values, width, height) {
-      drawStep3With(exact.handle, curve.handle, step3Values, [0, 0, width, height]);
+    // Draws the exact frame. `options.viewport` places it in the drawing buffer (the
+    // photo rectangle of the border preview, #253), `options.frame` is u_frame for a
+    // region of a larger frame. False when `step3Values.stages` needs the mode
+    // programs and they are not linked: nothing was drawn.
+    drawStep3(step3Values, width, height, options = {}) {
+      if (wantsModes(step3Values.stages) && !modesLinked()) return false;
+      drawStep3With(exact.handle, curve.handle, step3Values, options.viewport || [0, 0, width, height],
+        exact, curve, options.frame || null);
+      return true;
     },
 
     // ---- applyProgram: compiled at idle ----
@@ -432,11 +540,95 @@ export function createGpuPreviewRenderer(gl) {
 
     // Draws one tick: `frame` is { mode, params, plan, engine } (Engine.previewPlan on
     // the engine seeded with the worker's analysis).
-    drawApply(frame, step3Values, width, height) {
+    drawApply(frame, step3Values, width, height, options = {}) {
       if (!live?.prepared || apply?.status !== 'linked') return false;
+      if (wantsModes(step3Values.stages) && !modesLinked()) return false;
       uploadFrameTables(live, frame);
-      drawApplyWith(live, frame, step3Values, curve.handle, [0, 0, width, height]);
+      drawApplyWith(live, frame, step3Values, curve.handle, options.viewport || [0, 0, width, height]);
       return true;
+    },
+
+    // ---- display modes (#253): compiled at idle, beside applyProgram ----
+    startModesCompile() {
+      if (modes) return;
+      modes = {
+        step3: { ...linkNow(gl, VERTEX_SHADER_300, STEP3_MODES_FRAGMENT_SHADER), loc: null },
+        apply: { ...linkNow(gl, VERTEX_SHADER_300, APPLY_MODES_FRAGMENT_SHADER), loc: null },
+        status: 'pending', error: null,
+      };
+    },
+
+    // 'none' | 'pending' | 'linked' | 'failed', polled like applyStatus.
+    modesStatus() {
+      if (!modes) return 'none';
+      if (modes.status !== 'pending') return modes.status;
+      for (const linked of [modes.step3, modes.apply]) {
+        if (parallel && !gl.getProgramParameter(linked.program, parallel.COMPLETION_STATUS_KHR)) return 'pending';
+      }
+      const error = linkError(gl, modes.step3) || linkError(gl, modes.apply);
+      for (const linked of [modes.step3, modes.apply]) {
+        gl.deleteShader(linked.vs);
+        gl.deleteShader(linked.fs);
+      }
+      if (error) {
+        modes.status = 'failed';
+        modes.error = error;
+        return modes.status;
+      }
+      modes.step3.loc = locations(gl, modes.step3.program, [...STEP3_UNIFORMS, ...MODE_UNIFORMS]);
+      modes.apply.loc = locations(gl, modes.apply.program, [...APPLY_UNIFORMS, ...MODE_UNIFORMS]);
+      modes.status = 'linked';
+      return modes.status;
+    },
+
+    modesError() {
+      return modes?.error || null;
+    },
+
+    /**
+     * The display modes' self-test: the cases of buildDisplayModesCases (rescue with
+     * fog and local contrast, the look, both with vibrance) drawn with the Step-3
+     * mode program side by side into an offscreen framebuffer, read back once and
+     * compared with pixelAdjustments.js by the display budget. Scratch textures
+     * only; the stage textures are uploaded again by the next live draw.
+     */
+    modesSelfTest(cases, { corrupt = false } = {}) {
+      if (!modesLinked()) return { ok: false, reason: 'not linked' };
+      const n = cases[0].width, m = cases[0].height;
+      const width = n * cases.length;
+      const target = texture();
+      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, width, m);
+      const framebuffer = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, target, 0);
+      const image = texture();
+      const curveScratch = texture();
+      const curveState = { look: null };
+      try {
+        if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) return { ok: false, reason: 'framebuffer' };
+        uploadCurveInto(curveScratch, cases[0].step3.curves, false);
+        cases.forEach((testCase, k) => {
+          uploadCurveInto(curveScratch, testCase.step3.curves, true);
+          bind(UNITS.image, image);
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, n, m, 0, gl.RGBA, gl.UNSIGNED_BYTE,
+            new Uint8Array(testCase.image.data.buffer, testCase.image.data.byteOffset, testCase.image.data.length));
+          const values = { ...testCase.step3, stages: testCase.stages.active ? testCase.stages : { ...testCase.stages, active: true } };
+          drawStep3With(image, curveScratch, values, [k * n, 0, n, m], { width: n, height: m }, curveState);
+        });
+        const pixels = new Uint8Array(width * m * 4);
+        gl.readPixels(0, 0, width, m, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+        if (corrupt) for (let i = 0; i < pixels.length; i += 4) pixels[i] ^= 0x10;
+        return compareDisplayModes(cases, pixels, width, m);
+      } finally {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        gl.deleteFramebuffer(framebuffer);
+        gl.deleteTexture(target);
+        gl.deleteTexture(image);
+        gl.deleteTexture(curveScratch);
+        // The live curve texture's look row is untouched; the stage textures are
+        // keyed by identity and upload again on the next live draw.
+        stageTextures.meanKey = stageTextures.offsetsKey = stageTextures.toneKey = null;
+      }
     },
 
     /**
@@ -470,11 +662,11 @@ export function createGpuPreviewRenderer(gl) {
           uploadStopsInto(scratch, testCase.stops, n, m);
           const frame = { mode: testCase.mode, params: testCase.params, plan: testCase.plan, engine: testCase.engine };
           uploadFrameTables(scratch, frame);
-          drawApplyWith(scratch, frame, identity, identityCurve, [k * n, 0, n, m]);
+          drawApplyWith(scratch, frame, identity, identityCurve, [k * n, 0, n, m], { look: null });
         });
         bind(UNITS.image, exactScratch);
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, n, m, 0, gl.RGBA, gl.UNSIGNED_BYTE, cases[0].expected);
-        drawStep3With(exactScratch, identityCurve, identity, [cases.length * n, 0, n, m]);
+        drawStep3With(exactScratch, identityCurve, identity, [cases.length * n, 0, n, m], { width: n, height: m });
         const pixels = new Uint8Array(width * m * 4);
         gl.readPixels(0, 0, width, m, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
         if (corrupt) pixels[0] ^= 0x10;
