@@ -15,6 +15,7 @@ const imageDataOps = await import('./imageDataOps.js');
 const { createGeometryPool, yieldToEventLoop } = await import('./geometryPool.js');
 const { backingBuffers, createPhotoSessionCache } = await import('./photoSessionCache.js');
 const { planGeometryBandsInFlight } = await import('./batchExportScheduler.js');
+const { exactSettingsKey } = await import('./settingsKey.js');
 
 export { geometry, imageDataOps, backingBuffers, createPhotoSessionCache };
 
@@ -124,7 +125,10 @@ export function createHarness(base, { historyBudget = 768 * 1024 * 1024, session
     mirrorImageDataHorizontal: geometry.mirrorImageDataHorizontal,
     cropImageDataRegion: imageDataOps.cropImageDataRegion,
     downsampleImageDataForMaxPixels: imageDataOps.downsampleImageDataForMaxPixels,
-    backingBuffers, planGeometryBandsInFlight,
+    backingBuffers, planGeometryBandsInFlight, exactSettingsKey,
+    // Integration-branch state the photo-switch path reads (#233, #234): no
+    // preview-worker plane held, and one file-list refresh per switch.
+    corePreviewRetained: null, corePreviewCommit: null, deferFileListRefresh: () => () => {},
     geometryMemo: new WeakMap(), geometryBaseIds: new WeakMap(), nextGeometryBaseId: 1,
     pendingImportRotation: null, geometryToken: 0, geometryJob: null, geometryBusyOwner: null,
     interimGeometry: null, loadGeneration: 1, DEBUG_UI: false, manualEditRevision: 0,
@@ -160,7 +164,8 @@ export function createHarness(base, { historyBudget = 768 * 1024 * 1024, session
     }),
     EXPIRED_RESCUE_KEYS: [], sanitizePresetType: value => value, getLoadingOverlay: () => ({ hide() {} }),
     getLocalizedText: (key, fallback) => fallback, getUndoLabel: label => label,
-    getCurrentQueueItem: () => null, currentConvertedPreviewSource: () => null, buildAdjustmentSettings: () => ({}),
+    getCurrentQueueItem: () => null, currentConvertedPreviewSource: () => null,
+    buildAdjustmentSettings: () => ({ curves: { r: new Uint8Array(256), g: new Uint8Array(256), b: new Uint8Array(256) } }),
     coreReprocessBusy: () => false, sanitizeRepairStrokes: strokes => strokes || [], sanitizeFrameMetadata: value => value || {},
     createSprocketEdgeSettings: value => value || {}, clearFullResolutionRenderState: () => {},
     geometryCounters: geometry.geometryCounters,
