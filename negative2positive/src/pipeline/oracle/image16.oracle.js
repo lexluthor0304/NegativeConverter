@@ -1,19 +1,12 @@
+// FROZEN ORACLE — a copy of silvercore/util/image16.js at 1703835 (before #238), kept only as the
+// reference the #238 parity tests compare against. Do not edit or import from app
+// code; only the import paths were rewritten.
 // 16-bit RGBA image container.
 // Shape mirrors the browser's ImageData: { width, height, data } — but
 // `data` is a Uint16Array in [0, 65535] instead of Uint8ClampedArray in [0, 255].
 // Always RGBA, always non-premultiplied.
 
 export const IMAGE16_MAX = 65535;
-
-// Byte order of typed-array views. Packed 32-bit loops below and in the engine assume
-// little-endian words (every shipping platform); elsewhere they fall back to plain
-// per-sample loops.
-export const LITTLE_ENDIAN = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
-
-// Whether a typed array can be viewed as whole 32-bit words.
-export function wordAligned(array) {
-  return array.byteOffset % 4 === 0 && array.byteLength % 4 === 0;
-}
 
 export function createImage16(width, height) {
   return {
@@ -49,24 +42,11 @@ export function fromImageData8(imageData) {
 // which is the inverse of ×257 in the round-trip sense — fromImageData8 then
 // toImageData8 is lossless for any 8-bit input).
 // Always sets alpha to 255 unless the source already has full-range alpha.
-// The values are already 0–255, so the clamped stores would do no useful work: the
-// bytes are written through plain views, four samples per 32-bit word where the
-// platform is little-endian (the high byte of each 16-bit sample, in order).
 export function toImageData8(image16) {
   const { width, height, data: src } = image16;
   const dst = new Uint8ClampedArray(width * height * 4);
-  if (LITTLE_ENDIAN && wordAligned(src) && src.length === dst.length) {
-    const s32 = new Uint32Array(src.buffer, src.byteOffset, src.length >>> 1);
-    const d32 = new Uint32Array(dst.buffer, 0, dst.length >>> 2);
-    for (let i = 0, j = 0; i < d32.length; i++, j += 2) {
-      const lo = s32[j], hi = s32[j + 1];
-      d32[i] = ((lo >>> 8) & 0xFF) | ((lo >>> 16) & 0xFF00) | ((hi << 8) & 0xFF0000) | (hi & 0xFF000000);
-    }
-  } else {
-    const out = new Uint8Array(dst.buffer);
-    for (let i = 0; i < src.length; i++) {
-      out[i] = src[i] >>> 8;
-    }
+  for (let i = 0; i < src.length; i++) {
+    dst[i] = src[i] >>> 8;
   }
   return new ImageData(dst, width, height);
 }

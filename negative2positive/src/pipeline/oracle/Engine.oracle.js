@@ -1,40 +1,20 @@
+// FROZEN ORACLE — a copy of silvercore/engine/Engine.js at 1703835 (before #238), kept only as the
+// reference the #238 parity tests compare against. Do not edit or import from app
+// code; only the import paths were rewritten and the dead initWebGL() dropped.
 /**
  * Engine.js - Main processing orchestrator
  * Coordinates image analysis, curve generation, and LUT application.
  */
 
-import { analyzePositive, applyPositiveAnalysis, identityPositiveChannels } from './PositiveProcessing.js'
-import { analyzeImage, applyLUT, applyLUTInto, applyFoldedLUT, adjustSaturation, applyHSLAdjustments } from './ImageProcessor.js'
-import { generateCurves } from './CurveEngine.js'
-import { computeAutoColor } from './WhiteBalance.js'
-import { colorModelToToneProfile, colorModels, toneProfiles, filmWBPresets } from './Presets.js'
-import { WebGLRenderer } from './WebGLRenderer.js'
-import { loadProfile, applyLut3D } from './EnhancedProfiles.js'
-import { applyUnsharpMask } from './Sharpening.js'
-import { buildPaperLuts, applyPaperLuts } from './PaperProfiles.js'
-import { applyExposureStopsToImage16 } from '../util/localExposure.js'
-
-// A 65536 × 1 RGBA16 grey ramp (R = G = B = v). Stages that only map a pixel's own
-// value can be evaluated once over it instead of over every pixel of a grey image.
-let greyRamp = null
-function freshGreyRamp() {
-  if (!greyRamp) {
-    greyRamp = new Uint16Array(65536 * 4)
-    for (let v = 0; v < 65536; v++) {
-      greyRamp[v * 4] = greyRamp[v * 4 + 1] = greyRamp[v * 4 + 2] = v
-      greyRamp[v * 4 + 3] = 65535
-    }
-  }
-  return { width: 65536, height: 1, data: new Uint16Array(greyRamp) }
-}
-
-let preSaturationRampCache = null
-
-// Whether every stage after the curves maps a pixel from its own value alone.
-// Sharpening reads neighbours; any future spatial stage belongs here too.
-function tailIsPointwise(settings) {
-  return !(settings && settings.sharpenAmount > 0)
-}
+import { analyzePositive, applyPositiveAnalysis, identityPositiveChannels } from '../../silvercore/engine/PositiveProcessing.js'
+import { analyzeImage, applyLUT, adjustSaturation, applyHSLAdjustments } from './ImageProcessor.oracle.js'
+import { generateCurves } from '../../silvercore/engine/CurveEngine.js'
+import { computeAutoColor } from '../../silvercore/engine/WhiteBalance.js'
+import { colorModelToToneProfile, colorModels, toneProfiles, filmWBPresets } from '../../silvercore/engine/Presets.js'
+import { loadProfile, applyLut3D } from '../../silvercore/engine/EnhancedProfiles.js'
+import { applyUnsharpMask } from '../../silvercore/engine/Sharpening.js'
+import { buildPaperLuts, applyPaperLuts } from '../../silvercore/engine/PaperProfiles.js'
+import { applyExposureStopsToImage16 } from '../../silvercore/util/localExposure.js'
 
 function isChannelDataOverride(value) {
   return Array.isArray(value) && value.length === 3 && value.every((channel) => channel
@@ -52,18 +32,6 @@ export class Engine {
     this.glRenderer = null
     this.lastLuts = null
     this.enhancedLut = null
-  }
-
-  /**
-   * Initialize WebGL renderer (call after canvas is ready).
-   */
-  initWebGL(canvas) {
-    try {
-      this.glRenderer = new WebGLRenderer(canvas)
-      if (!this.glRenderer.available) this.glRenderer = null
-    } catch {
-      this.glRenderer = null
-    }
   }
 
   /**
@@ -100,8 +68,11 @@ export class Engine {
     // 4b. Dodge and burn: local exposure on the negative, after the histogram
     //     analysis (the base exposure is decided before dodging) and before
     //     the curves, like light held back or added under the enlarger.
+    applyPositiveAnalysis(imageData, this.positiveAnalysis)
+    this._applyLocalExposure(imageData, params)
+
     // 5. Apply LUTs + 3D LUT + HSL + saturation (all CPU 16-bit for precision).
-    return this._positiveExposureAndLuts(imageData, luts, params)
+    return this._applyLuts(imageData, luts, params)
   }
 
   // 撮影窓の統計だけを更新する。WB 用の正像標本が不要な調色では描画しない。
@@ -139,7 +110,9 @@ export class Engine {
     const luts = generateCurves(this.channelData, settings)
     this.lastLuts = luts
 
-    return this._positiveExposureAndLuts(imageData, luts, params)
+    applyPositiveAnalysis(imageData, this.positiveAnalysis)
+    this._applyLocalExposure(imageData, params)
+    return this._applyLuts(imageData, luts, params)
   }
 
   // 同一設定で標本と出力画像を連続処理するときだけ使う。曲線を二重生成しない。
@@ -147,136 +120,9 @@ export class Engine {
   applyCurrentCurves(imageData, params) {
     if (!this.lastLuts) return this.reprocess(imageData, params)
     this._applyPreSaturation(imageData, params)
-    return this._positiveExposureAndLuts(imageData, this.lastLuts, params)
-  }
-
-  /**
-   * The curves and everything after them, on a prepared plane: `src` already holds
-   * the pre-saturation, the positive gain/WB and the dodge-and-burn stops. The first
-   * pass reads `src` and writes `dst` (alpha copied), the rest run on `dst`, so the
-   * cached plane is never modified. Same settings/LUT bookkeeping as reprocess().
-   */
-  applyTail(src, dst, params) {
-    const settings = this.buildSettings(params)
-    this.lastSettings = settings
-    const luts = generateCurves(this.channelData, settings)
-    this.lastLuts = luts
-    return this._applyLuts(src, luts, params, dst)
-  }
-
-  // applyCurrentCurves() for a prepared plane: reuses the analysis sample's LUTs.
-  applyCurrentTail(src, dst, params) {
-    if (!this.lastLuts) return this.applyTail(src, dst, params)
-    return this._applyLuts(src, this.lastLuts, params, dst)
-  }
-
-  // The positive gain/WB, the stops and the curves, in the engine's order. With gain
-  // exactly 1 the positive stage is Math.round(v * wb[c]) per channel on pixels with
-  // alpha ≠ 0, so when no stops sit between it and the curves it folds into the
-  // curve LUT: one pass less, identical pixels.
-  _positiveExposureAndLuts(imageData, luts, params) {
-    const fold = this._positiveFold(luts, params, imageData.width * imageData.height)
-    if (fold) return this._applyLuts(imageData, luts, params, null, fold)
-    this._applyPositiveAnalysis(imageData)
-    this._applyLocalExposure(imageData, params)
-    return this._applyLuts(imageData, luts, params)
-  }
-
-  _applyPositiveAnalysis(imageData) {
     applyPositiveAnalysis(imageData, this.positiveAnalysis)
-  }
-
-  // Whether the positive stage has any effect (applyPositiveAnalysis's own test).
-  positiveAnalysisIsIdentity() {
-    const analysis = this.positiveAnalysis
-    return !analysis || (analysis.gain === 1 && analysis.wb.every(value => value === 1))
-  }
-
-  _positiveFold(luts, params, pixelCount) {
-    const analysis = this.positiveAnalysis
-    if (this.positiveAnalysisIsIdentity() || analysis.gain !== 1) return null
-    // A non-finite factor makes the per-pixel scale NaN, which zeroes all three
-    // channels together: no per-channel table reproduces that.
-    if (!analysis.wb.every(Number.isFinite)) return null
-    const stops = params.localExposureStops
-    if (stops && stops.length === pixelCount) return null
-    const rounded = new Uint16Array(65536)
-    const fold = []
-    for (let c = 0; c < 3; c++) {
-      const w = analysis.wb[c]
-      // Stored through a Uint16Array exactly as applyPositiveAnalysis stores it.
-      for (let v = 0; v < 65536; v++) rounded[v] = Math.round(v * w)
-      const lut = c === 0 ? luts.r : c === 1 ? luts.g : luts.b
-      const folded = new Uint16Array(65536)
-      for (let v = 0; v < 65536; v++) folded[v] = lut[rounded[v]]
-      fold.push(folded)
-    }
-    return fold
-  }
-
-  // A 65536-entry table S with S[v] = pre-saturation of the grey pixel (v, v, v),
-  // computed by the unchanged adjustSaturation (its truncation drift included), or
-  // null at 100. On grey input the stage is a function of the grey value alone.
-  preSaturationRamp(params) {
-    const preSaturation = params.preSaturation ?? 100
-    if (preSaturation === 100) return null
-    if (!preSaturationRampCache || preSaturationRampCache.amount !== preSaturation) {
-      const ramp = freshGreyRamp()
-      adjustSaturation(ramp, preSaturation)
-      const table = new Uint16Array(65536)
-      for (let v = 0; v < 65536; v++) table[v] = ramp.data[v * 4]
-      preSaturationRampCache = { amount: preSaturation, table }
-    }
-    return preSaturationRampCache.table
-  }
-
-  // B&W analysis from a grey plane: analyze() without the pixel stages, which the
-  // caller has already baked into the plane. `measure` returns the channel levels of
-  // the pre-saturated grey values and is not called when an override is set.
-  analyzeGrey(measure, params) {
-    this.positiveAnalysis = null
-    this.channelData = isChannelDataOverride(params.analysisOverride)
-      ? params.analysisOverride.map((channel) => ({ ...channel }))
-      : measure()
-    this.autoColor = computeAutoColor(this.channelData)
-    this.lastLuts = null
-  }
-
-  greyTableAvailable(params) {
-    return tailIsPointwise(this.buildSettings(params))
-  }
-
-  /**
-   * Everything reprocess() does after the stops, evaluated once per grey level: the
-   * unchanged _applyLuts over the 65536-entry grey ramp. Returns the RGB result per
-   * grey value (16-bit, and packed for 32-bit stores), or null when a stage is not
-   * pointwise; the caller then runs the generic RGBA path.
-   */
-  buildGreyTable(params) {
-    const settings = this.buildSettings(params)
-    if (!tailIsPointwise(settings)) return null
-    this.lastSettings = settings
-    const luts = generateCurves(this.channelData, settings)
-    this.lastLuts = luts
-    return this._greyTable(luts, params)
-  }
-
-  // buildGreyTable() with the analysis sample's LUTs, as applyCurrentCurves().
-  buildCurrentGreyTable(params) {
-    if (!this.lastLuts) return this.buildGreyTable(params)
-    if (!tailIsPointwise(this.lastSettings)) return null
-    return this._greyTable(this.lastLuts, params)
-  }
-
-  _greyTable(luts, params) {
-    const ramp = this._applyLuts(freshGreyRamp(), luts, params).data
-    const r = new Uint16Array(65536), g = new Uint16Array(65536), b = new Uint16Array(65536)
-    for (let v = 0; v < 65536; v++) {
-      r[v] = ramp[v * 4]
-      g[v] = ramp[v * 4 + 1]
-      b[v] = ramp[v * 4 + 2]
-    }
-    return { r, g, b }
+    this._applyLocalExposure(imageData, params)
+    return this._applyLuts(imageData, this.lastLuts, params)
   }
 
   _applyLocalExposure(imageData, params) {
@@ -319,20 +165,14 @@ export class Engine {
    * WebGL path is currently disabled in the 16-bit pipeline (shaders + LUT textures
    * are 8-bit; preserving full precision requires GPU upgrade work that is out of
    * scope for this stage).
-   * With `dst`, the first pass reads `src` and writes `dst`; with `fold` (see
-   * _positiveFold) it maps pixels with alpha ≠ 0 through the folded tables.
    */
-  _applyLuts(src, luts, params, dst = null, fold = null) {
+  _applyLuts(imageData, luts, params) {
+    void params
     const lutStrength = this.enhancedLut ? (params.profileStrength ?? 100) : 0
     const saturation = params.saturation ?? 100
     const hslAdj = this.lastSettings ? this.lastSettings.hslAdjustments : null
 
-    // The first pass may read a cached plane and write the caller's buffer; every
-    // later pass runs in place on the result.
-    const imageData = dst || src
-    if (fold) applyFoldedLUT(src, imageData, fold, luts)
-    else if (dst) applyLUTInto(src, dst, luts.r, luts.g, luts.b)
-    else applyLUT(imageData, luts.r, luts.g, luts.b)
+    applyLUT(imageData, luts.r, luts.g, luts.b)
     applyHSLAdjustments(imageData, hslAdj)
     if (this.enhancedLut && lutStrength > 0) {
       applyLut3D(imageData, this.enhancedLut, lutStrength)

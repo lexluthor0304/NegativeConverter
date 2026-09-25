@@ -43,8 +43,10 @@ const localSettings = {
   localExposureGeometry: { baseWidth: 80, baseHeight: 60, rotatedWidth: 80, rotatedHeight: 60, rotationAngle: 0, mirrored: false },
 };
 const maps = [];
-const applyLocal = Engine.prototype._applyLocalExposure;
-Engine.prototype._applyLocalExposure = function (input, params) { maps.push(params.localExposureStops); return applyLocal.call(this, input, params); };
+// Every conversion builds its settings from the params that carry the stops (the
+// stops themselves are applied only when the exposed plane is rebuilt).
+const buildSettings = Engine.prototype.buildSettings;
+Engine.prototype.buildSettings = function (params) { maps.push(params.localExposureStops); return buildSettings.call(this, params); };
 try {
   invalidateSilverCoreCache();
   await convertColorWithSilverCore(image, localSettings, { preview: true });
@@ -65,5 +67,5 @@ try {
   }
   await convertColorWithSilverCore(image, { ...localSettings, localExposure: null }, { preview: true });
   assert.equal(maps.at(-1), null, 'clearing strokes releases map');
-} finally { Engine.prototype._applyLocalExposure = applyLocal; }
+} finally { Engine.prototype.buildSettings = buildSettings; }
 console.log('performanceCache: 8-bit promotion, exact output, stroke reuse, invalidation and ownership passed');

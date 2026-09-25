@@ -283,12 +283,13 @@ function makeNegative(w, h) {
 
   await engineOf(callerSettings({ borderBuffer: 10 }), { preview: true, forceFullProcess: true });
 
-  // A pure LUT change must NOT re-analyse.
+  // A pure LUT change must NOT re-analyse. (Interactive requests analyse through
+  // analyze() while they build the prepared plane; process() serves forced ones.)
   let analyzeCalls = 0;
-  const origProcess = Engine.prototype.process;
-  Engine.prototype.process = function patched(imageData, params) {
+  const origAnalyze = Engine.prototype.analyze;
+  Engine.prototype.analyze = function patched(imageData, params) {
     analyzeCalls += 1;
-    return origProcess.call(this, imageData, params);
+    return origAnalyze.call(this, imageData, params);
   };
   try {
     await engineOf(callerSettings({ borderBuffer: 10, contrast: 25 }), { preview: true });
@@ -306,7 +307,7 @@ function makeNegative(w, h) {
     await engineOf(callerSettings({ borderBuffer: 0, contrast: 30, colorModel: 'frontier', preSaturation: 140 }), { preview: true });
     assert.equal(analyzeCalls, 3, 'an unrelated slider must still reuse the histogram');
   } finally {
-    Engine.prototype.process = origProcess;
+    Engine.prototype.analyze = origAnalyze;
   }
 }
 

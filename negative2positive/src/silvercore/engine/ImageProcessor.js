@@ -9,6 +9,7 @@
 
 import { colorModels } from './Presets.js'
 import { analysisPixelBounds } from '../../app/analysisRegion.js';
+import { LITTLE_ENDIAN, wordAligned } from '../util/image16.js';
 
 const MAX_16 = 65535;
 const HIST_BINS = 256;
@@ -65,6 +66,43 @@ export function analyzeImage(imageData, params) {
     computeChannelLevels(gHist, totalPixels, blackThreshold, whiteThreshold, 'ToneCurvePV2012Green', imageType),
     computeChannelLevels(bHist, totalPixels, blackThreshold, whiteThreshold, 'ToneCurvePV2012Blue', imageType),
   ];
+}
+
+/**
+ * analyzeImage() for a grey image held as one value per pixel. R, G and B of the RGBA
+ * grey image are equal, so their three histograms are one: the same crop, the same
+ * transparent-pixel rule, the same levels. `alpha` is the RGBA16 plane whose alpha
+ * belongs to these pixels, or null when every pixel is opaque.
+ *
+ * @param {Uint16Array} grey - width × height grey values
+ * @returns {Object[]} what analyzeImage returns for the RGBA grey image
+ */
+export function analyzeGreyImage(grey, width, height, params, alpha = null) {
+  const borderPct = (params.borderBuffer ?? 10) / 100;
+  const bounds = analysisPixelBounds(width, height, params.analysisRegion, borderPct);
+  const cropX = bounds.left, cropY = bounds.top, cropW = bounds.width, cropH = bounds.height;
+  const hist = new Uint32Array(HIST_BINS);
+  const skipTransparent = Boolean(params.excludeTransparent && alpha);
+  let totalPixels = 0;
+  for (let y = cropY; y < cropY + cropH; y++) {
+    for (let x = cropX; x < cropX + cropW; x++) {
+      const p = y * width + x;
+      if (skipTransparent && alpha[p * 4 + 3] === 0) continue;
+      hist[grey[p] >>> 8]++;
+      totalPixels++;
+    }
+  }
+  return greyChannelLevels(hist, totalPixels, params);
+}
+
+// The three channel levels of a grey image from its single histogram.
+export function greyChannelLevels(hist, totalPixels, params) {
+  const model = colorModels[params.colorModel] || colorModels.basic;
+  const blackThreshold = model.blackThreshold ?? 0.002;
+  const whiteThreshold = model.whiteThreshold ?? 0.002;
+  const imageType = params.imageType || 'negative';
+  return ['Red', 'Green', 'Blue'].map((channel) => computeChannelLevels(
+    hist, totalPixels, blackThreshold, whiteThreshold, `ToneCurvePV2012${channel}`, imageType));
 }
 
 /**
@@ -135,6 +173,10 @@ function computeChannelLevels(hist, totalPixels, blackThreshold, whiteThreshold,
  */
 export function applyLUT(imageData, rLUT, gLUT, bLUT) {
   const { data } = imageData;
+  if (LITTLE_ENDIAN && wordAligned(data)) {
+    applyLUTWords(data, data, rLUT, gLUT, bLUT);
+    return imageData;
+  }
   for (let i = 0; i < data.length; i += 4) {
     data[i] = rLUT[data[i]];
     data[i + 1] = gLUT[data[i + 1]];
@@ -142,6 +184,62 @@ export function applyLUT(imageData, rLUT, gLUT, bLUT) {
     // Alpha unchanged
   }
   return imageData;
+}
+
+/**
+ * applyLUT() from `src` into `dst` (same size), copying alpha: a copy and the LUT
+ * pass in one loop, leaving `src` untouched.
+ */
+export function applyLUTInto(src, dst, rLUT, gLUT, bLUT) {
+  const s = src.data, d = dst.data;
+  if (LITTLE_ENDIAN && wordAligned(s) && wordAligned(d)) {
+    applyLUTWords(s, d, rLUT, gLUT, bLUT);
+    return dst;
+  }
+  for (let i = 0; i < s.length; i += 4) {
+    d[i] = rLUT[s[i]];
+    d[i + 1] = gLUT[s[i + 1]];
+    d[i + 2] = bLUT[s[i + 2]];
+    d[i + 3] = s[i + 3];
+  }
+  return dst;
+}
+
+// The LUT pass on little-endian 32-bit words: each pixel is (R | G << 16, B | A << 16).
+// Two loads and two stores per pixel instead of four each; `s` and `d` may alias.
+function applyLUTWords(s, d, rLUT, gLUT, bLUT) {
+  const s32 = new Uint32Array(s.buffer, s.byteOffset, s.length >>> 1);
+  const d32 = new Uint32Array(d.buffer, d.byteOffset, d.length >>> 1);
+  for (let j = 0; j < s32.length; j += 2) {
+    const rg = s32[j], ba = s32[j + 1];
+    d32[j] = rLUT[rg & 0xFFFF] | (gLUT[rg >>> 16] << 16);
+    d32[j + 1] = bLUT[ba & 0xFFFF] | (ba & 0xFFFF0000);
+  }
+}
+
+/**
+ * The curve pass with a stage folded in for opaque pixels: pixels with alpha ≠ 0 go
+ * through `fold` ([r, g, b] tables), pixels with alpha 0 through the plain LUTs.
+ * `src` and `dst` may be the same image.
+ */
+export function applyFoldedLUT(src, dst, fold, luts) {
+  const s = src.data, d = dst.data;
+  const [fr, fg, fb] = fold;
+  const { r, g, b } = luts;
+  for (let i = 0; i < s.length; i += 4) {
+    const a = s[i + 3];
+    if (a) {
+      d[i] = fr[s[i]];
+      d[i + 1] = fg[s[i + 1]];
+      d[i + 2] = fb[s[i + 2]];
+    } else {
+      d[i] = r[s[i]];
+      d[i + 1] = g[s[i + 1]];
+      d[i + 2] = b[s[i + 2]];
+    }
+    d[i + 3] = a;
+  }
+  return dst;
 }
 
 /**

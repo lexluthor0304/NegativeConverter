@@ -28,6 +28,29 @@ export function applyExposureStopsToImage16(image16, stops) {
   return image16;
 }
 
+// applyExposureStopsToImage16() for a grey plane (one value per pixel). The RGBA
+// version maps each channel through the same arithmetic, so on a grey pixel all
+// three channels come out equal to this value.
+export function exposeGreyValue(v, s) {
+  const max = 65535;
+  const gain = Math.pow(2, s);
+  const idx = (v / max) * LINEAR_STEPS;
+  const i0 = Math.floor(idx); const f = idx - i0;
+  const linear = LINEAR_LUT[i0] * (1 - f) + LINEAR_LUT[Math.min(LINEAR_STEPS, i0 + 1)] * f;
+  const out = Math.pow(Math.min(1, linear * gain), 1 / 2.2);
+  return Math.round(out * max);
+}
+
+export function applyExposureStopsToGrey(grey, stops) {
+  if (!grey || !stops || stops.length !== grey.length) return grey;
+  for (let p = 0; p < grey.length; p++) {
+    const s = stops[p];
+    if (s === 0) continue;
+    grey[p] = exposeGreyValue(grey[p], s);
+  }
+  return grey;
+}
+
 export function hasExposureStops(stops) {
   if (!stops) return false;
   for (let i = 0; i < stops.length; i++) if (stops[i] !== 0) return true;

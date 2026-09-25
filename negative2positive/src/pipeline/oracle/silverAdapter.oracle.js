@@ -1,28 +1,20 @@
-import { Engine } from '../silvercore/engine/Engine.js';
-import { loadFilmPresets } from '../silvercore/engine/filmPresetsLoader.js';
-import { bwMixWeights, toneProfiles } from '../silvercore/engine/Presets.js';
-import { PROFILES as ENHANCED_PROFILE_NAMES } from '../silvercore/engine/EnhancedProfiles.js';
+// FROZEN ORACLE — a copy of pipeline/silverAdapter.js at 1703835 (before #238), kept only as the
+// reference the #238 parity tests compare against. Do not edit or import from app
+// code; only the import paths were rewritten.
+import { Engine } from './Engine.oracle.js';
+import { loadFilmPresets } from '../../silvercore/engine/filmPresetsLoader.js';
+import { bwMixWeights, toneProfiles } from '../../silvercore/engine/Presets.js';
+import { PROFILES as ENHANCED_PROFILE_NAMES } from '../../silvercore/engine/EnhancedProfiles.js';
 import {
   fromImageData8,
   toImageData8,
   cloneImage16,
-} from '../silvercore/util/image16.js';
-import { applyFilmBaseCompensationToBuffer } from './filmBaseCompensation.js';
-import { analyzeImage, analyzeGreyImage, greyChannelLevels, adjustSaturation } from '../silvercore/engine/ImageProcessor.js';
-import { normalizePaperId, normalizeToningId } from '../silvercore/engine/PaperProfiles.js';
-import { applyExposureStopsToGrey } from '../silvercore/util/localExposure.js';
-import {
-  mixToGrey,
-  allOpaque,
-  packGreyTable,
-  writeGreyOutput,
-  convertGreyFromSource,
-  greyHistogramFromSource,
-} from '../silvercore/util/greyPlane.js';
-import { rasterizeExposureStops } from '../app/localExposure.js';
-import { applyFlatFieldToImage16 } from '../app/flatField.js';
-import { analysisPixelBounds } from '../app/analysisRegion.js';
-import { LARGE_IMAGE_PIXELS } from '../app/imageMemoryBudget.js';
+} from './image16.oracle.js';
+import { applyFilmBaseCompensationToBuffer } from '../filmBaseCompensation.js';
+import { analyzeImage, adjustSaturation } from './ImageProcessor.oracle.js';
+import { normalizePaperId, normalizeToningId } from '../../silvercore/engine/PaperProfiles.js';
+import { rasterizeExposureStops } from '../../app/localExposure.js';
+import { applyFlatFieldToImage16 } from '../../app/flatField.js';
 
 // EnhancedProfiles.js owns the list of shipped 3D-LUT profiles and their .bin URLs;
 // deriving the whitelist from it keeps the two in step. A hand-copied list here is
@@ -54,40 +46,20 @@ function toImage16(input) {
 
 // Plain JPEG/PNG previews have no attached plane. Keep their promotion with the
 // engine slot so unchanged inputs retain both the analysis and film-base cache.
-// forceFullProcess also supports callers that explicitly refresh pixels in place:
-// such requests (and large images) promote for this request only, and the fresh
-// plane is ours, so it serves as the work plane instead of being copied again.
-function toImage16ForSlot(slot, input, transient = false) {
+// forceFullProcess also supports callers that explicitly refresh pixels in place.
+function toImage16ForSlot(slot, input, force = false) {
   if (input.data instanceof Uint16Array || input.__image16?.data instanceof Uint16Array) {
     slot.promotedSource = null;
-    return { image: toImage16(input), owned: false };
-  }
-  if (transient) {
-    slot.promotedSource = null;
-    return { image: fromImageData8(input), owned: true };
+    return toImage16(input);
   }
   const cached = slot.promotedSource;
-  if (cached && cached.source === input.data
+  if (!force && cached && cached.source === input.data
       && cached.image.width === input.width && cached.image.height === input.height) {
-    return { image: cached.image, owned: false };
+    return cached.image;
   }
   const image = fromImageData8(input);
   slot.promotedSource = { source: input.data, image };
-  return { image, owned: false };
-}
-
-// Identity of a pixel buffer for the cache keys, without holding the buffer: a key
-// that kept the array itself would pin a received 60 MP source in a retained worker.
-const _bufferIds = new WeakMap();
-let _nextBufferId = 1;
-function _bufferId(buffer) {
-  if (!buffer) return 0;
-  let id = _bufferIds.get(buffer);
-  if (!id) {
-    id = _nextBufferId++;
-    _bufferIds.set(buffer, id);
-  }
-  return id;
+  return image;
 }
 
 function localExposureStopsForSlot(slot, settings, width, height) {
@@ -262,11 +234,9 @@ function toGrayscaleInPlace(image16, mixPreset) {
 // Dual cache for preview (small) and full (large) resolution engines.
 //
 // The cache holds the engine, the loaded 3D profile, the film-base-compensated
-// `pristineBuffer`, the prepared prefix planes (see _prepareRgba / _prepareGrey) and a
-// description of the inputs the current histogram analysis was computed from. It
-// deliberately does NOT hold the buffer handed back to the caller — see
-// _takeWorkBuffer. Requests with forceFullProcess and images over LARGE_IMAGE_PIXELS
-// keep no plane at all (_transientWorkBuffer).
+// `pristineBuffer` and a description of the inputs the current histogram analysis was
+// computed from. It deliberately does NOT hold the buffer handed back to the caller —
+// see _takeWorkBuffer.
 function _createSlot() {
   return {
     engine: null,
@@ -280,42 +250,7 @@ function _createSlot() {
     referencePixels: {},
     promotedSource: null,
     exposureMap: null,
-    // Pre-exposure level: { key, kind: 'rgba' | 'grey', plane, alpha }. `plane` is an
-    // Image16 (rgba), a Uint16Array (grey) or null when the pristine plane or the
-    // source itself is the prepared state.
-    prepared: null,
-    // Post-exposure level, only while dodge-and-burn stops exist: { key, plane }.
-    exposed: null,
   };
-}
-
-// Counters for the tests: how often the expensive per-pixel prefix stages ran.
-const _stats = { preprocess: 0, preparedBuilds: 0, exposedBuilds: 0 };
-
-function _levelBytes(level) {
-  const plane = level && level.plane;
-  if (!plane) return 0;
-  return (plane.data || plane).byteLength;
-}
-
-// What each slot holds and how often the prefix stages ran; for tests and debugging.
-export function getSilverCoreCacheStats() {
-  const slotInfo = (slot) => ({
-    pristineBytes: slot.pristineBuffer ? slot.pristineBuffer.byteLength : 0,
-    lastSourceRef: Boolean(slot.lastSourceRef),
-    promotedSource: Boolean(slot.promotedSource),
-    preparedKind: slot.prepared ? slot.prepared.kind : null,
-    preparedBytes: _levelBytes(slot.prepared),
-    exposedBytes: _levelBytes(slot.exposed),
-    levels: (_levelBytes(slot.prepared) ? 1 : 0) + (_levelBytes(slot.exposed) ? 1 : 0),
-  });
-  return { ..._stats, preview: slotInfo(_cache.preview), full: slotInfo(_cache.full), scratch: slotInfo(_cache.scratch) };
-}
-
-// Tests exercise the large-image rule on small frames.
-let _largeImagePixels = LARGE_IMAGE_PIXELS;
-export function setLargeImagePixelsForTesting(pixels = LARGE_IMAGE_PIXELS) {
-  _largeImagePixels = pixels;
 }
 
 const _cache = {
@@ -355,7 +290,6 @@ function flatFieldKeyOf(settings) {
 // Preprocessing that is baked into the cached pristine buffer: the flat field
 // (light-pad falloff) first, then the film base compensation.
 function _preprocessBuffer(data, width, height, preprocess) {
-  _stats.preprocess++;
   if (preprocess.flatField && preprocess.flatFieldGeometry) {
     applyFlatFieldToImage16({ width, height, data }, preprocess.flatField, {
       ...preprocess.flatFieldGeometry,
@@ -398,35 +332,26 @@ async function _ensureProfile(slot, engine, profileName) {
 
 // Hand the engine a buffer that it may scribble on and that the CALLER then owns.
 //
-// Contract: the Image16 returned by a conversion — the `__image16` attached to the
-// result — is never referenced by the cache again. An old version kept it as
+// Contract: the Image16 returned here — and therefore the `__image16` attached to the
+// result — is never referenced by the cache again. The previous version kept it as
 // `slot.inputBuffer` and overwrote it on the next conversion, so every ImageData the
 // adapter had ever returned for a slot aliased a single plane: undo snapshots, the
 // dust-removal clean source, `state.processedImageData` and the gray-point sampler all
 // silently mutated to whatever the newest render produced, and the conversion worker's
 // transfer of `result.__image16.data.buffer` detached the cache out from under itself.
-// Interactive conversions now write their output into a fresh buffer in the first
-// curve pass (Engine.applyTail) and transient ones use their own work plane; this
-// copy of the pristine plane serves the analysis sample.
 //
-// `pristineBuffer` caches the part that is actually expensive — the film-base
-// per-pixel gain pass — and is rebuilt only when the source buffer or the gains
-// change. With no film-base compensation there is nothing to precompute, so the cache
-// is dropped and the copy comes straight from the source.
+// This costs no extra copy: the per-call `pristine -> work` copy simply writes into a
+// fresh allocation instead of a recycled one. `pristineBuffer` still caches the part
+// that is actually expensive — the film-base per-pixel gain pass — and is rebuilt only
+// when the source buffer or the gains change. With no film-base compensation there is
+// nothing to precompute, so the cache is dropped and the copy comes straight from the
+// source (one buffer less resident on full-resolution scans).
 function _takeWorkBuffer(slot, image16, filmBaseCompensation) {
-  return cloneImage16(_pristineFor(slot, image16, filmBaseCompensation));
-}
-
-// The film-base-compensated (and flat-fielded) source for interactive requests,
-// cached per slot while the source and the gains stay the same. Read-only: every
-// consumer copies from it or reads it into a fresh buffer. Without compensation the
-// source itself is the pristine state.
-function _pristineFor(slot, image16, filmBaseCompensation) {
   if (!filmBaseCompensation) {
     slot.pristineBuffer = null;
     slot.lastSourceRef = null;
     slot.lastFilmBaseGains = null;
-    return image16;
+    return cloneImage16(image16);
   }
 
   const len = image16.data.length;
@@ -447,34 +372,11 @@ function _pristineFor(slot, image16, filmBaseCompensation) {
     };
   }
 
-  return { width: image16.width, height: image16.height, data: slot.pristineBuffer };
-}
-
-function _dropSlotPlanes(slot) {
-  slot.pristineBuffer = null;
-  slot.lastSourceRef = null;
-  slot.lastFilmBaseGains = null;
-  slot.prepared = null;
-  slot.exposed = null;
-}
-
-// forceFullProcess requests (settle, export, frame repair and batch-lane renders) and
-// images over LARGE_IMAGE_PIXELS. A worker receives a fresh copy of the source with
-// every such request, so a cached pristine plane was rebuilt on every call and never
-// read again, while a retained batch lane held it (480 MB at 60 MP) between frames.
-// Instead the one work plane is preprocessed in place and the slot keeps nothing.
-// The same buffer length takes the same film-base path, so the pixels are identical.
-function _transientWorkBuffer(slot, image16, owned, filmBaseCompensation) {
-  _dropSlotPlanes(slot);
-  const work = owned ? image16 : cloneImage16(image16);
-  if (filmBaseCompensation) _preprocessBuffer(work.data, work.width, work.height, filmBaseCompensation);
-  return work;
-}
-
-// A plane for a prepared level: the previous level's memory when the size matches
-// (it is never handed out, so reusing it is safe), else a new one.
-function _recycledPlane(previous, length) {
-  return previous && previous.length === length ? previous : new Uint16Array(length);
+  return {
+    width: image16.width,
+    height: image16.height,
+    data: new Uint16Array(slot.pristineBuffer),
+  };
 }
 
 // Everything the histogram analysis depends on. analyzeImage() reads borderBuffer (the
@@ -486,7 +388,7 @@ function _analysisStateFor(params, filmBaseCompensation, sourceRef, mode, refere
   const base = filmBaseCompensation ? filmBaseCompensation.base : null;
   const options = filmBaseCompensation ? filmBaseCompensation.options : null;
   return {
-    sourceId: _bufferId(sourceRef),
+    sourceRef,
     referenceSize: reference ? `${reference.width}x${reference.height}` : null,
     borderBuffer: params.borderBuffer,
     analysisRegionKey: JSON.stringify(params.analysisRegion || null),
@@ -504,7 +406,7 @@ function _analysisStateFor(params, filmBaseCompensation, sourceRef, mode, refere
 
 function _analysisChanged(previous, next) {
   if (!previous) return true;
-  return previous.sourceId !== next.sourceId
+  return previous.sourceRef !== next.sourceRef
     || previous.referenceSize !== next.referenceSize
     || previous.borderBuffer !== next.borderBuffer
     || previous.analysisRegionKey !== next.analysisRegionKey
@@ -529,192 +431,6 @@ function _needsFullProcess(slot, options, analysisState) {
   return _analysisChanged(slot.analysis, analysisState);
 }
 
-// The pre-exposure key: every input of the prepared prefix. The analysis state covers
-// the parameters, the film base / flat field and the analysed buffer (the reference
-// sample when there is one), so the input's own identity, the mode, the derived
-// positive analysis and the plane's representation are added.
-function _preparedKey(analysisState, input16, mode, engine, kind) {
-  return JSON.stringify([analysisState, _bufferId(input16.data), mode, engine.positiveAnalysis || null, kind]);
-}
-
-function _toResult(processed16) {
-  const result = toImageData8(processed16);
-  result.__image16 = processed16;
-  return result;
-}
-
-// Interactive RGBA path (colour, positive, and B&W when the grey table is unavailable).
-//
-// The prefix — B&W mix → pre-saturation → positive gain/WB → dodge-and-burn stops —
-// depends on nothing a Brightness, Contrast, Temperature, Saturation or Paper tick
-// changes, so it is kept per slot as up to two levels over the pristine plane: the
-// pre-exposure level (a plane of its own only when one of its stages is active) and
-// the post-exposure level (only while stops exist). A tick that changes neither key
-// reads the cached level straight into the fresh output buffer (Engine.applyTail).
-function _prepareRgba(ctx) {
-  const { slot, engine, params, mode, input16, filmBaseCompensation, reference, needsFullProcess, analysisState } = ctx;
-  const base = _pristineFor(slot, input16, filmBaseCompensation);
-  const len = base.data.length;
-  const copyOfBase = (recycled) => {
-    const plane = { width: base.width, height: base.height, data: _recycledPlane(recycled, len) };
-    plane.data.set(base.data);
-    if (mode === 'bw') toGrayscaleInPlace(plane, params.bwMix);
-    return plane;
-  };
-  const preSaturationActive = (params.preSaturation ?? 100) !== 100;
-
-  let pre;
-  let key;
-  if (!reference && needsFullProcess) {
-    // The analysis changed: build the level in process() order. analyze() applies the
-    // pre-saturation in place and derives the statistics and the positive analysis.
-    const recycled = slot.prepared?.plane?.data || null;
-    slot.prepared = null;
-    slot.exposed = null;
-    pre = mode === 'bw' || preSaturationActive ? copyOfBase(recycled) : base;
-    engine.analyze(pre, params);
-    if (!engine.positiveAnalysisIsIdentity()) {
-      if (pre === base) pre = copyOfBase(recycled);
-      engine._applyPositiveAnalysis(pre);
-    }
-    key = _preparedKey(analysisState, input16, mode, engine, 'rgba');
-    slot.prepared = { key, kind: 'rgba', plane: pre === base ? null : pre, alpha: null };
-    _stats.preparedBuilds++;
-  } else {
-    key = _preparedKey(analysisState, input16, mode, engine, 'rgba');
-    if (slot.prepared && slot.prepared.key === key) {
-      pre = slot.prepared.plane || base;
-    } else {
-      // Analysed from the reference sample, or a new source / mode with the same
-      // analysis: the stages as reprocess() runs them (pre-saturation is applied here
-      // because no analyze() ran on this buffer).
-      const recycled = slot.prepared?.plane?.data || null;
-      slot.prepared = null;
-      slot.exposed = null;
-      pre = base;
-      if (mode === 'bw' || preSaturationActive || !engine.positiveAnalysisIsIdentity()) {
-        pre = copyOfBase(recycled);
-        engine._applyPreSaturation(pre, params);
-        engine._applyPositiveAnalysis(pre);
-      }
-      slot.prepared = { key, kind: 'rgba', plane: pre === base ? null : pre, alpha: null };
-      _stats.preparedBuilds++;
-    }
-  }
-
-  const stops = params.localExposureStops;
-  if (!(stops && stops.length === len / 4)) {
-    slot.exposed = null;
-    return pre;
-  }
-  const exposedKey = `${key}|${slot.exposureMap.key}`;
-  if (slot.exposed && slot.exposed.key === exposedKey) return slot.exposed.plane;
-  // A stroke edit rebuilds only this level, from the pre-exposure level.
-  const recycled = slot.exposed?.plane?.data || null;
-  slot.exposed = null;
-  const post = { width: pre.width, height: pre.height, data: _recycledPlane(recycled, len) };
-  post.data.set(pre.data);
-  engine._applyLocalExposure(post, params);
-  slot.exposed = { key: exposedKey, plane: post };
-  _stats.exposedBuilds++;
-  return post;
-}
-
-// Interactive B&W path: the same two levels as single-channel grey planes (2 B/px),
-// the mix and the pre-saturation ramp baked in, and the output written through one
-// grey → RGB table.
-function _prepareGrey(ctx) {
-  const { slot, engine, params, mode, input16, filmBaseCompensation, reference, needsFullProcess, analysisState } = ctx;
-  const base = _pristineFor(slot, input16, filmBaseCompensation);
-  const n = base.width * base.height;
-  const weights = bwMixWeights[params.bwMix] || bwMixWeights.standard;
-  const build = () => {
-    const recycled = slot.prepared?.kind === 'grey' ? slot.prepared.plane : null;
-    slot.prepared = null;
-    slot.exposed = null;
-    const grey = mixToGrey(base.data, weights, engine.preSaturationRamp(params), _recycledPlane(recycled, n));
-    // Alpha passes through every stage untouched: keep a flag, or the plane it lives in.
-    return { grey, alpha: allOpaque(base.data) ? null : base.data };
-  };
-
-  let level;
-  let key;
-  if (!reference && needsFullProcess) {
-    level = build();
-    engine.analyzeGrey(() => analyzeGreyImage(level.grey, base.width, base.height, params, level.alpha), params);
-    key = _preparedKey(analysisState, input16, mode, engine, 'grey');
-    slot.prepared = { key, kind: 'grey', plane: level.grey, alpha: level.alpha };
-    _stats.preparedBuilds++;
-  } else {
-    key = _preparedKey(analysisState, input16, mode, engine, 'grey');
-    if (slot.prepared && slot.prepared.key === key) {
-      level = { grey: slot.prepared.plane, alpha: slot.prepared.alpha };
-    } else {
-      level = build();
-      slot.prepared = { key, kind: 'grey', plane: level.grey, alpha: level.alpha };
-      _stats.preparedBuilds++;
-    }
-  }
-
-  const stops = params.localExposureStops;
-  if (!(stops && stops.length === n)) {
-    slot.exposed = null;
-    return level;
-  }
-  const exposedKey = `${key}|${slot.exposureMap.key}`;
-  if (slot.exposed && slot.exposed.key === exposedKey) return { grey: slot.exposed.plane, alpha: level.alpha };
-  const recycled = slot.exposed?.plane || null;
-  slot.exposed = null;
-  const post = _recycledPlane(recycled, n);
-  post.set(level.grey);
-  applyExposureStopsToGrey(post, stops);
-  slot.exposed = { key: exposedKey, plane: post };
-  _stats.exposedBuilds++;
-  return { grey: post, alpha: level.alpha };
-}
-
-function _greyResult(width, height, write) {
-  const out16 = new Uint16Array(width * height * 4);
-  const out8 = new Uint8ClampedArray(width * height * 4);
-  write(out16, out8);
-  const result = new ImageData(out8, width, height);
-  result.__image16 = { width, height, data: out16 };
-  return result;
-}
-
-// forceFullProcess B&W: no plane is kept. The source is read by one fused pass (mix →
-// pre-saturation → stops → table). Without a reference sample the histogram comes
-// first, from the same mix computed on the fly over the analysis crop: at 12 MP that
-// measured as fast as a transient grey plane (81–89 vs 76–104 ms) without its 2 B/px.
-function _transientGrey(ctx) {
-  const { slot, engine, params, input16, owned, filmBaseCompensation, reference, needsFullProcess, analysisPreview } = ctx;
-  // A flat field needs its own plane; the promoted 8-bit plane is ours already. Both
-  // then take the output in place, so the peak matches the in-place RGBA path.
-  _dropSlotPlanes(slot);
-  const base = filmBaseCompensation ? _transientWorkBuffer(slot, input16, owned, filmBaseCompensation) : input16;
-  const writable = Boolean(filmBaseCompensation) || owned;
-  const n = base.width * base.height;
-  const weights = bwMixWeights[params.bwMix] || bwMixWeights.standard;
-  const preSatRamp = engine.preSaturationRamp(params);
-  const stops = params.localExposureStops && params.localExposureStops.length === n ? params.localExposureStops : null;
-  if (!reference && needsFullProcess) {
-    engine.analyzeGrey(() => {
-      const bounds = analysisPixelBounds(base.width, base.height, params.analysisRegion, (params.borderBuffer ?? 10) / 100);
-      const { hist, total } = greyHistogramFromSource(base.data, base.width, bounds, weights, preSatRamp, Boolean(params.excludeTransparent));
-      return greyChannelLevels(hist, total, params);
-    }, params);
-  }
-  const table = analysisPreview ? engine.buildCurrentGreyTable(params) : engine.buildGreyTable(params);
-  // Without stops the pre-saturation ramp composes into the table.
-  const packed = packGreyTable(table, stops ? null : preSatRamp);
-  const out16 = writable ? base.data : new Uint16Array(base.data.length);
-  const out8 = new Uint8ClampedArray(base.data.length);
-  convertGreyFromSource(base.data, weights, stops ? preSatRamp : null, stops, packed, out16, out8);
-  const result = new ImageData(out8, base.width, base.height);
-  result.__image16 = { width: base.width, height: base.height, data: out16 };
-  return result;
-}
-
 async function runSilverCore(imageData, settings, mode, options) {
   const slot = _slotFor(options);
   const params = await buildSilverCoreParams(mode, settings);
@@ -723,11 +439,7 @@ async function runSilverCore(imageData, settings, mode, options) {
   // directly so the upcast is zero-copy in the common case.
   const sourceShape = imageData.__image16?.data instanceof Uint16Array ? imageData.__image16 : imageData;
   const engine = _getOrCreateEngine(slot, sourceShape.width, sourceShape.height);
-  // Interactive requests keep the pristine and prepared planes in every slot; the
-  // others keep none (see _transientWorkBuffer).
-  const transient = Boolean(options?.forceFullProcess)
-    || sourceShape.width * sourceShape.height > _largeImagePixels;
-  const { image: input16, owned } = toImage16ForSlot(slot, imageData, transient);
+  const input16 = toImage16ForSlot(slot, imageData, options?.forceFullProcess);
 
   // Profile loading (skip if unchanged)
   const profileName = params.enhancedProfile;
@@ -766,23 +478,27 @@ async function runSilverCore(imageData, settings, mode, options) {
   const analysisState = _analysisStateFor(analysisParams, filmBaseCompensation, reference ? reference.data : input16.data, mode, reference);
   const needsFullProcess = _needsFullProcess(slot, options, analysisState);
 
+  // Fresh working buffer, owned by the caller once we return it.
+  const input = _takeWorkBuffer(slot, input16, filmBaseCompensation);
+
   // Dodge and burn: rasterise the strokes for this buffer's size. The engine
   // applies them after the analysis and before the curves; the analysis
   // sample (reference) is never dodged, like the base exposure in a darkroom.
-  params.localExposureStops = localExposureStopsForSlot(slot, settings, input16.width, input16.height);
+  params.localExposureStops = localExposureStopsForSlot(slot, settings, input.width, input.height);
 
-  // B&W: every stage after the mix depends on the grey value alone, so unless a
-  // spatial stage is active the output comes from one grey plane and a grey → RGB table.
-  const greyPath = mode === 'bw' && engine.greyTableAvailable(params);
+  // B&W: mix down to a neutral negative BEFORE the engine runs. Doing it afterwards
+  // (the old toGrayscaleInPlace on the result) discarded the shadow/highlight/mid
+  // toning every one of the 18 B&W presets is built around, so sepia, selenium,
+  // cyanotype and the rest all rendered identically neutral. Mixing on the way in also
+  // puts the channel-filter presets ('red', 'orange', ...) before the histogram
+  // analysis and the per-channel curves, where a taking filter belongs.
+  if (mode === 'bw') toGrayscaleInPlace(input, params.bwMix);
 
   // 解析用の撮影窓は出力範囲とは独立。プレビュー・書き出しとも同じ標本で LUT を作る。
-  // The sample keeps the RGBA path in every mode.
   let analysisPreview = null;
   const needsAnalysisPreview = options?.includeAnalysisPreview !== false;
   if (reference && (needsFullProcess || needsAnalysisPreview)) {
-    const sample = transient
-      ? _transientWorkBuffer({}, reference, false, filmBaseCompensation)
-      : _takeWorkBuffer(slot.referencePixels, reference, filmBaseCompensation);
+    const sample = _takeWorkBuffer(slot.referencePixels, reference, filmBaseCompensation);
     if (mode === 'bw') toGrayscaleInPlace(sample, params.bwMix);
     if (needsAnalysisPreview) {
       analysisPreview = toImageData8(needsFullProcess
@@ -792,44 +508,23 @@ async function runSilverCore(imageData, settings, mode, options) {
       engine.analyze(sample, analysisParams);
     }
   }
-
-  const ctx = { slot, engine, params, mode, input16, owned, filmBaseCompensation, reference, needsFullProcess, analysisState, analysisPreview };
-  let result;
-  if (transient && greyPath) {
-    result = _transientGrey(ctx);
-  } else if (transient) {
-    // B&W: mix down to a neutral negative BEFORE the engine runs. Doing it afterwards
-    // (the old toGrayscaleInPlace on the result) discarded the shadow/highlight/mid
-    // toning every one of the 18 B&W presets is built around, so sepia, selenium,
-    // cyanotype and the rest all rendered identically neutral. Mixing on the way in also
-    // puts the channel-filter presets ('red', 'orange', ...) before the histogram
-    // analysis and the per-channel curves, where a taking filter belongs.
-    const input = _transientWorkBuffer(slot, input16, owned, filmBaseCompensation);
-    if (mode === 'bw') toGrayscaleInPlace(input, params.bwMix);
-    // Hand the caller an ImageData (the contract the rest of the app still uses) but
-    // leave the 16-bit handle attached so downstream stages (histogram, export) can
-    // read the full-precision result without re-deriving from 8-bit. The attached plane
-    // belongs to the caller: nothing here writes to it again.
-    result = _toResult(analysisPreview
-      ? engine.applyCurrentCurves(input, params)
-      : !reference && needsFullProcess
-      ? engine.process(input, params)
-      : engine.reprocess(input, params));
-  } else if (greyPath) {
-    const level = _prepareGrey(ctx);
-    const table = packGreyTable(analysisPreview ? engine.buildCurrentGreyTable(params) : engine.buildGreyTable(params));
-    result = _greyResult(input16.width, input16.height, (out16, out8) => writeGreyOutput(level.grey, level.alpha, table, out16, out8));
-  } else {
-    const src = _prepareRgba(ctx);
-    // The first tail pass reads the cached level and writes the caller's buffer.
-    const dst = { width: src.width, height: src.height, data: new Uint16Array(src.data.length) };
-    result = _toResult(analysisPreview ? engine.applyCurrentTail(src, dst, params) : engine.applyTail(src, dst, params));
-  }
+  const processed16 = analysisPreview
+    ? engine.applyCurrentCurves(input, params)
+    : !reference && needsFullProcess
+    ? engine.process(input, params)
+    : engine.reprocess(input, params);
 
   if (needsFullProcess) slot.analysis = analysisState;
+
+  // Hand the caller an ImageData (the contract the rest of the app still uses) but
+  // leave the 16-bit handle attached so downstream stages (histogram, export) can
+  // read the full-precision result without re-deriving from 8-bit. The attached plane
+  // belongs to the caller: nothing here writes to it again.
+  const result = toImageData8(processed16);
+  result.__image16 = processed16;
   if (analysisPreview) result.__analysisPreview = analysisPreview;
   // 参照の種類・寸法・画素バッファ・解析設定をキーにし、通常画像と混同しない。
-  if (!reference || transient) slot.referencePixels = {};
+  if (!reference) slot.referencePixels = {};
   return result;
 }
 
