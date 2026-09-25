@@ -15,7 +15,8 @@
         "title": "Negative Converter",
         "width": 1280,
         "height": 850,
-        "dragDropEnabled": false
+        "dragDropEnabled": false,
+        "backgroundThrottling": "disabled"
       }
     ],
     "security": {

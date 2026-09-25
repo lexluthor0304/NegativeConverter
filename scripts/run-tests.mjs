@@ -29,6 +29,7 @@ tests.push(join(scriptsDir, 'check-pinned-versions.mjs'));
 tests.push(join(scriptsDir, 'check-vercel-config.mjs'));
 tests.push(join(scriptsDir, 'check-appstore-screenshots.mjs'));
 tests.push(join(scriptsDir, 'check-updater-manifest.mjs'));
+tests.push(join(scriptsDir, 'check-tauri-config.mjs'));
 
 // A test that leaves an open handle would otherwise hang the whole suite.
 const TIMEOUT_MS = 120_000;

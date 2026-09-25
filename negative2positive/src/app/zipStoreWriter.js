@@ -1,3 +1,5 @@
+import { yieldTaskForJob } from './yieldToPaint.js';
+
 const ZIP_MAX_U16 = 0xFFFF;
 const ZIP_MAX_U32 = 0xFFFFFFFF;
 const ZIP_VERSION_NEEDED = 20;
@@ -345,8 +347,11 @@ export class ZipStoreWriter {
       await this.writeChunk(chunk);
       // An immediately-ready Blob reader and sink only yield microtasks. Give
       // input/paint/cancel handlers a real task boundary during long exports.
+      // A hidden tab clamps setTimeout to 1 s or more, which would pace the
+      // CRC pass at one 12 ms slice per second (#241): yield through a
+      // MessageChannel task there instead.
       if (performance.now() >= yieldAt) {
-        await new Promise(resolve => setTimeout(resolve, 0));
+        await yieldTaskForJob();
         yieldAt = performance.now() + 12;
       }
     }

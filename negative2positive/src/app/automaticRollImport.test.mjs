@@ -52,6 +52,7 @@ function fixture({ count = 4, prepared = false, realRoll = false } = {}) {
       return id;
     },
     clearTimeout: id => timers.delete(id),
+    yieldTaskForJob: () => new Promise(resolve => context.setTimeout(resolve, 0)),
     safeStorageGet: () => context.off ? 'off' : null,
     studioBackgroundReady: () => state.currentStep >= 3 && context.getCurrentQueueItem()?.file === state.loadedFile
       && !context.document.body.dataset.studioBusy && !context.processNegativeInFlight,

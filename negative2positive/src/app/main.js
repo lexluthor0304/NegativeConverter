@@ -11,6 +11,7 @@ import { learnedDefaultsKey, learnedDelta, recordLearnedObservation, applyLearne
 import { readLearnedDefaults, writeLearnedDefaults, resetLearnedDefaults } from './learnedDefaultsStore.js';
 import { exportNameStem } from './exportFileName.js';
 import { frameNeedsReview } from './reviewQueue.js';
+import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
     import { detectedImportSettings } from './filmTypeDetection.js';
     import { createAiModelLoader } from './aiModelLoading.js';
     import opencvScriptUrl from '@techstark/opencv-js/dist/opencv.js?url';
@@ -8521,7 +8522,8 @@ import { frameNeedsReview } from './reviewQueue.js';
       const ownsOverlay = !silent && !overlay.isVisible;
       if (ownsOverlay) {
         await overlay.show({ title: studioWorkspace.text('detectingFrame'), indeterminate: true });
-        await new Promise(resolve => requestAnimationFrame(resolve));
+        // Paint the overlay while visible; a hidden window never fires rAF.
+        await yieldForJob();
       }
       try {
       const options = {
@@ -11494,6 +11496,10 @@ import { frameNeedsReview } from './reviewQueue.js';
     async function processFileWithSettings(file, savedSettings, options = {}) {
       const isCurrent = options.isCurrent || (() => true);
       const previewMax = Math.max(0, Number(options.previewMaxDimension) || 0);
+      // Batch jobs run without the blocking "Detecting frame" overlay and its
+      // frame wait: they must keep going in a hidden window (#241). Detection
+      // inputs, thresholds and geometry are the same either way.
+      const silent = options.silent ?? Boolean(previewMax);
       const trace = createPerfTrace('processFileWithSettings', {
         file: file?.name || '',
         bytes: file?.size || 0
@@ -11514,7 +11520,7 @@ import { frameNeedsReview } from './reviewQueue.js';
       // every other frame in the roll.
       const studioColors = state.fileQueue.find(item => item.file === file)?.studioColors;
       let initialSettings = savedSettings || mergeStudioColors(createDefaultSettings(imageData, state.fileQueue.find(item => item.file === file)), studioColors || {});
-      if (!initialSettings.autoFrameMeta && !initialSettings.cropRegion && !expiredImportKeepsFullFrame(initialSettings)) initialSettings = await analyzeStudioImportFrame(imageData, initialSettings, { allowCrop: !savedSettings, silent: Boolean(previewMax) });
+      if (!initialSettings.autoFrameMeta && !initialSettings.cropRegion && !expiredImportKeepsFullFrame(initialSettings)) initialSettings = await analyzeStudioImportFrame(imageData, initialSettings, { allowCrop: !savedSettings, silent });
       assertRepairCurrent(isCurrent);
       if (!initialSettings.filmEdge?.checked) {
         const edge = await analyzeImportFilmEdge(imageData, initialSettings, { applyDefaults: !savedSettings && state.importFilmTypeAuto });
@@ -11749,7 +11755,7 @@ import { frameNeedsReview } from './reviewQueue.js';
     async function renderBatchExportFile(job, position, { exportInfo, workers, dustRemoval }, { transferGainMapPlane = true } = {}) {
       const { file, settings } = job;
       if (exportInfo.format === 'dng') {
-        const { source, settings: usedSettings } = await processFileWithSettings(file, settings, { stage: 'source', convert: workers.convert });
+        const { source, settings: usedSettings } = await processFileWithSettings(file, settings, { stage: 'source', convert: workers.convert, silent: true });
         return renderLinearDngBlob(source, usedSettings, position);
       }
       // The sprocket frame drops the map, so only a plain JPEG asks for one.
@@ -11758,6 +11764,7 @@ import { frameNeedsReview } from './reviewQueue.js';
         && !state.exportSprocketHolesEnabled;
       try {
         const adjusted = await processFileWithSettings(file, settings, {
+          silent: true,
           bitDepth: exportInfo.bitDepth,
           dustRemoval,
           dustWorker: workers.dust,
@@ -12035,7 +12042,7 @@ import { frameNeedsReview } from './reviewQueue.js';
         fileName: '',
         targetDirectory
       });
-      await waitForNextFrame();
+      await yieldForJob();
 
       let result;
       try {
@@ -12349,10 +12356,7 @@ import { frameNeedsReview } from './reviewQueue.js';
         studioWorkspace?.sync();
         // Paint the target identity before decoder or cached-base preparation
         // can occupy the main thread. Hidden tabs need not await a paused rAF.
-        await new Promise(resolve => {
-          if (document.visibilityState === 'hidden') setTimeout(resolve, 0);
-          else requestAnimationFrame(() => setTimeout(resolve, 0));
-        });
+        await yieldToPaint();
         if (!isCurrentLoad(generation) || state.fileQueue[index] !== fileItem) return;
 
         const preview = photoPreviews.peek(fileItem);
@@ -15168,7 +15172,7 @@ import { frameNeedsReview } from './reviewQueue.js';
             console.warn('Contact sheet frame failed:', item.file.name, error);
             thumbs.push({ image: null, width: 1, height: 1, label });
           }
-          await waitForNextFrame();
+          await yieldForJob();
         }
         const header = contactSheetHeader(state.rollMetadata, { fallbackTitle: getLocalizedText('contactSheetTitle', 'Contact sheet') });
         const pageCount = pagesFor(selected.length, layoutId);
@@ -15188,7 +15192,7 @@ import { frameNeedsReview } from './reviewQueue.js';
           const imageData = ctx.getImageData(0, 0, surface.width, surface.height);
           const blob = await imageDataToBlob(imageData, exportInfo.format, null, 8, null, buildExportMetadata({ roll: state.rollMetadata, frame: {}, index: -1 }));
           pages.push({ blob, name: contactSheetFileName(pageIndex, pageCount, exportInfo) });
-          await waitForNextFrame();
+          await yieldForJob();
         }
         overlay.updateProgress(100, lang.loadingComplete);
       } finally {
@@ -16677,7 +16681,8 @@ import { frameNeedsReview } from './reviewQueue.js';
           } catch (error) {
             console.error('Roll analysis failed for', item.file.name, error);
           }
-          await new Promise((resolve) => setTimeout(resolve, 0));
+          // Hidden windows clamp setTimeout to 1 s or more (#241).
+          await yieldTaskForJob();
         }
         if (!isValid()) return { status: 'stale' };
         if (!measurements.length) return { status: 'skipped' };

@@ -175,6 +175,7 @@ for (const outcome of ['success', 'stale', 'abort']) {
     singleExportActive: false, getCurrentQueueItem: () => null,
     studioWorkspace: { sync: () => warmFeedback.push(f.state.photoSwitchTarget) },
     requestAnimationFrame: () => assert.fail('warm cache hit must not yield for loading feedback'),
+    yieldToPaint: () => assert.fail('warm cache hit must not yield for loading feedback'),
     expiredAnalysisKey: null, lensMapCache: new Map(), invalidateSilverCoreCache: noop,
     studioThumbnailUpdateFrame: 19, cancelAnimationFrame: id => { cancelledFrame = id; },
     studioThumbnailUpdateTimer: 23, clearTimeout: id => { clearedTimer = id; },
@@ -217,6 +218,8 @@ function coldFixture() {
     singleExportActive: false, getCurrentQueueItem: () => null,
     studioWorkspace: { sync: () => feedback.push({ target: f.state.photoSwitchTarget, phase: f.state.photoSwitchPhase }) },
     requestAnimationFrame: callback => frames.push(callback), setTimeout: callback => callback(),
+    // The shared paint-then-continue helper (yieldToPaint.js), visible branch.
+    yieldToPaint: () => new Promise(resolve => c.requestAnimationFrame(() => c.setTimeout(resolve, 0))),
     resetZoomPan: noop, updateFileListUI: noop, loadStudioThumbnails: noop,
     showToast: noop,
     loadFile: (file, options) => {
