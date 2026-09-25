@@ -5975,7 +5975,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // (256 tone entries, 64 bins); the mean grid and the look's curves carry over
     // for the same analysis and look. Pixel positions come from u_frame, so the
     // frame size given here only switches the spatial stage on.
-    const displayStageCache = { key: null, look: undefined, analysis: undefined, stages: null };
+    const displayStageCache = { key: null, look: undefined, analysis: undefined, stages: null, safeLook: null, safeAnalysis: null };
 
     function currentDisplayStages() {
       const rescueOn = Boolean(state.expiredEnabled && state.expiredAnalysis) && !expiredCompareHeld;
@@ -5984,18 +5984,20 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const key = [look, analysis, rescueOn, ...(rescueOn ? EXPIRED_RESCUE_KEYS.map(name => state[name]) : [])];
       const cache = displayStageCache;
       if (cache.key && cache.key.length === key.length && cache.key.every((value, i) => value === key[i])) return cache.stages;
+      const sameLook = cache.look === look, sameAnalysis = cache.analysis === analysis;
+      // As sanitizeSettings copies them for the display recipe; once per object.
+      const safeLook = sameLook ? cache.safeLook : sanitizeLookForSettings(look);
+      const safeAnalysis = sameAnalysis ? cache.safeAnalysis : (analysis ? sanitizeExpiredAnalysis(analysis) : null);
       const recipe = {
         curves: state.curves,
-        look: sanitizeLookForSettings(look),
+        look: safeLook,
         ...sanitizeExpiredRescueParams(state, state),
         expiredEnabled: rescueOn,
-        expiredAnalysis: rescueOn ? sanitizeExpiredAnalysis(analysis) : null
+        expiredAnalysis: safeAnalysis
       };
       const params = computeAdjustmentParams(recipe, { width: 1, height: 1 });
-      const stages = displayStageUniforms(params, {
-        previous: cache.stages, sameAnalysis: cache.analysis === analysis, sameLook: cache.look === look
-      });
-      Object.assign(cache, { key, look, analysis, stages });
+      const stages = displayStageUniforms(params, { previous: cache.stages, sameAnalysis, sameLook });
+      Object.assign(cache, { key, look, analysis, stages, safeLook, safeAnalysis });
       return stages;
     }
 
@@ -6392,7 +6394,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     function detailModesReady(renderer, values) {
       if (!values.stages?.active) return true;
-      renderer.startModesCompile();
+      renderer.startModesCompile({ apply: false });
       const status = renderer.modesStatus();
       if (status === 'pending' && !detailLayer.modesPoll) {
         detailLayer.modesPoll = requestAnimationFrame(() => {

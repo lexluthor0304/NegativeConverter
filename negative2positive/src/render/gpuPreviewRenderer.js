@@ -542,18 +542,20 @@ export function createGpuPreviewRenderer(gl) {
     // the engine seeded with the worker's analysis).
     drawApply(frame, step3Values, width, height, options = {}) {
       if (!live?.prepared || apply?.status !== 'linked') return false;
-      if (wantsModes(step3Values.stages) && !modesLinked()) return false;
+      if (wantsModes(step3Values.stages) && !(modesLinked() && modes.apply)) return false;
       uploadFrameTables(live, frame);
       drawApplyWith(live, frame, step3Values, curve.handle, options.viewport || [0, 0, width, height]);
       return true;
     },
 
     // ---- display modes (#253): compiled at idle, beside applyProgram ----
-    startModesCompile() {
+    // `apply: false` compiles only the Step-3 variant (the detail layer's
+    // context never draws applyProgram).
+    startModesCompile({ apply = true } = {}) {
       if (modes) return;
       modes = {
         step3: { ...linkNow(gl, VERTEX_SHADER_300, STEP3_MODES_FRAGMENT_SHADER), loc: null },
-        apply: { ...linkNow(gl, VERTEX_SHADER_300, APPLY_MODES_FRAGMENT_SHADER), loc: null },
+        apply: apply ? { ...linkNow(gl, VERTEX_SHADER_300, APPLY_MODES_FRAGMENT_SHADER), loc: null } : null,
         status: 'pending', error: null,
       };
     },
@@ -562,11 +564,12 @@ export function createGpuPreviewRenderer(gl) {
     modesStatus() {
       if (!modes) return 'none';
       if (modes.status !== 'pending') return modes.status;
-      for (const linked of [modes.step3, modes.apply]) {
+      const programs = [modes.step3, modes.apply].filter(Boolean);
+      for (const linked of programs) {
         if (parallel && !gl.getProgramParameter(linked.program, parallel.COMPLETION_STATUS_KHR)) return 'pending';
       }
-      const error = linkError(gl, modes.step3) || linkError(gl, modes.apply);
-      for (const linked of [modes.step3, modes.apply]) {
+      const error = programs.map((linked) => linkError(gl, linked)).find(Boolean) || null;
+      for (const linked of programs) {
         gl.deleteShader(linked.vs);
         gl.deleteShader(linked.fs);
       }
@@ -576,7 +579,7 @@ export function createGpuPreviewRenderer(gl) {
         return modes.status;
       }
       modes.step3.loc = locations(gl, modes.step3.program, [...STEP3_UNIFORMS, ...MODE_UNIFORMS]);
-      modes.apply.loc = locations(gl, modes.apply.program, [...APPLY_UNIFORMS, ...MODE_UNIFORMS]);
+      if (modes.apply) modes.apply.loc = locations(gl, modes.apply.program, [...APPLY_UNIFORMS, ...MODE_UNIFORMS]);
       modes.status = 'linked';
       return modes.status;
     },
