@@ -15,7 +15,11 @@ or export source. The folder regression counts these jobs as their own
 ≤ its preview + 32 KB).
 
 Automatic roll preparation keeps the same geometry-applied, 900-pixel analysis
-samples for the subsequent roll analysis. The cache counts both 8-bit and 16-bit
+samples for the subsequent roll analysis. Frames a scheduled roll import will
+prepare get no converted thumbnail before it runs: a thumbnail recipe set in
+that gap would leave the frame without a pass-1 sample and roll analysis would
+decode it again. The thumbnail lane waits for them and renders them from the
+roll recipe afterwards. The cache counts both 8-bit and 16-bit
 planes and is capped at 128 MiB. Evicted samples can be decoded again. A current
 RAW larger than 100 MiB is not reused because it may still be a temporary preview.
 Colour conversion and roll-analysis mathematics are unchanged.
