@@ -14878,6 +14878,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // an unused OpenCV worker ends on its own 30 s idle timer.
     const IMPORT_WARM_UP_INTERVAL_MS = 30_000;
     let importWarmUpAt = -Infinity;
+    // The monotonic clock of the import warm-up and the MI-GAN idle release
+    // (#236); the trace helpers that also had one live in perfTrace.js (#230).
+    function getPerfNow() {
+      return performance.now();
+    }
     function warmImportPipeline() {
       const now = getPerfNow();
       if (now - importWarmUpAt < IMPORT_WARM_UP_INTERVAL_MS) return;
