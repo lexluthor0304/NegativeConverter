@@ -2,7 +2,8 @@ import { applyAutomaticFilmType, applyFilmTypeOverride, sanitizeFilmTypeOverride
 import { decideRollFilmType, mergeRollDecision, ownFilmTypeVerdict, rollDecisionFrame, rollFilmTypeTarget, ROLL_MONOCHROME } from './rollFilmType.js';
 import { createPhotoSessionCache, backingBuffers } from './photoSessionCache.js';
 import { displayProxyKey, displayPlaneHash } from './displayProxy.js';
-import { createDisplayProxySpill, createDisplayProxyPort } from './displayProxyStore.js';
+import { createDisplayProxySpill, createDisplayProxyPort, createDisplayProxyStore, createPortRecords, namedRecords, displayProxyFileKey, sha256Hex, DISPLAY_PROXY_STORE_DEFAULT_LIMIT_BYTES } from './displayProxyStore.js';
+import { createDesktopProxyRecords } from './displayProxyDesktop.js';
 import { createAdjustedPhotoPreview, samplePhotoPreviewSource, adjustPhotoPreviewSample } from './photoPreview.js';
 import { exactSettingsKey } from './settingsKey.js';
 import { sanitizeSemanticMap } from './semanticAnchors.js';
@@ -10378,6 +10379,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const display = settled ? captureDisplaySession(item, entry) : null;
       if (display) entry.display = display;
       if (display && entry.zoom !== 1) prepareZoomOneProxy(item, display, state.conversionSourceImageData);
+      // The persistent store keeps the display proxy of an exact route across
+      // restarts (part 3), after the next paint (the planes are copied).
+      if (display && entry.zoom === 1 && displayProxyStore) {
+        const proxy = { image: display.snapshot.refs.conversionPreviewImageData, sample: display.sample,
+          proxyKey: display.sourcePending.key, meta: displaySessionMeta(display) };
+        schedulePostPaintTask(() => { void persistDisplayProxy(item, proxy); });
+      }
       const force = displaySessionDiagnostics.force;
       // #244's smoke switch caches sessions without their planes.
       const coldOnly = geometryDiagnostics.coldSessions;
@@ -10430,7 +10438,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         schedulePostPaintTask(() => {
           // A removed or re-keyed photo never gets a proxy of older settings.
           if (!state.fileQueue.includes(item) || photoSettingsKey(item) !== key) return;
-          photoPreviews.put(item, { key, image: adjustPhotoPreviewSample(sample, adjustments) });
+          const image = adjustPhotoPreviewSample(sample, adjustments);
+          photoPreviews.put(item, { key, image });
+          void persistPresentationPreview(item, key, image);
         });
       }
       return stored;
@@ -10586,7 +10596,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (!item || !base || !source) return null;
       const key = geometryKeyFor(base, { rotationAngle: state.rotationAngle, mirrored: state.mirrored, cropRegion: state.cropRegion });
       return displayProxyKey({
-        id: item.id, route: base.route, base, rotationAngle: key.angle, mirrored: key.mirrored, cropRegion: key.crop,
+        id: null, route: base.route, base, rotationAngle: key.angle, mirrored: key.mirrored, cropRegion: key.crop,
         lens: lensSignature(state), area: analysisAreaOf(state.autoFrame.lastDiagnostics),
         target: target || displayProxyTarget(source)
       });
@@ -10721,19 +10731,137 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       spillDisplaySession(item, display);
     }
 
-    // The display-proxy spill (#249). The worker starts on the first write.
-    // Until the desktop store takes it (part 3), the desktop app keeps no
-    // spill, so no pixels reach WebKit's origin storage there.
-    const displayProxySpill = createDisplayProxySpill({
-      port: createDisplayProxyPort({
-        workerFactory: typeof Worker === 'function' && !isTauriDesktop()
-          ? () => new Worker(new URL('../workers/displayProxyWorker.js', import.meta.url), { type: 'module' }) : null
-      }),
-      availableBytes: async () => {
-        const estimate = await navigator.storage?.estimate?.();
-        return estimate && Number.isFinite(estimate.quota) ? estimate.quota - (estimate.usage || 0) : null;
-      }
+    // The display-proxy spill and store (#249). One worker packs, checks and
+    // unpacks every record (it starts on the first request). The desktop
+    // app keeps the records in its cache directory through the Rust store,
+    // so no pixels reach WebKit's origin storage; the web keeps the spill in
+    // a per-tab IndexedDB database and the store in the origin-private file
+    // system.
+    const displayProxyPort = createDisplayProxyPort({
+      workerFactory: typeof Worker === 'function'
+        ? () => new Worker(new URL('../workers/displayProxyWorker.js', import.meta.url), { type: 'module' }) : null
     });
+    const desktopProxyInvoke = isTauriDesktop() ? (...args) => window.__TAURI__.core.invoke(...args) : null;
+    // Free space the caches may count on: the volume's on the desktop, the
+    // origin's quota left on the web.
+    async function displayProxyFreeBytes() {
+      if (desktopProxyInvoke) return (await createDesktopProxyRecords(desktopProxyInvoke, 'store').space()).freeBytes;
+      const estimate = await navigator.storage?.estimate?.();
+      return estimate && Number.isFinite(estimate.quota) ? estimate.quota - (estimate.usage || 0) : null;
+    }
+    const displayProxySpill = createDisplayProxySpill({
+      port: displayProxyPort,
+      recordStore: desktopProxyInvoke ? namedRecords(createDesktopProxyRecords(desktopProxyInvoke, 'spill')) : null,
+      availableBytes: displayProxyFreeBytes
+    });
+    // Across restarts and project reopens (part 3): keyed by the file's
+    // content and the build's decoder and code hashes. Off where the build
+    // did not stamp them (tests) or the setting is Off.
+    const DISPLAY_PROXY_HASHES = (typeof __NC_DISPLAY_PROXY_HASHES__ === 'object' && __NC_DISPLAY_PROXY_HASHES__) || null;
+    const DISPLAY_CACHE_LIMIT_KEY = 'nc_display_cache_limit_v1';
+    function displayCacheLimitBytes() {
+      const stored = Number(safeStorageGet(DISPLAY_CACHE_LIMIT_KEY));
+      return Number.isFinite(stored) && stored >= 0 ? stored : DISPLAY_PROXY_STORE_DEFAULT_LIMIT_BYTES;
+    }
+    const displayProxyStore = DISPLAY_PROXY_HASHES ? createDisplayProxyStore({
+      port: displayProxyPort,
+      records: desktopProxyInvoke ? createDesktopProxyRecords(desktopProxyInvoke, 'store') : createPortRecords(displayProxyPort),
+      availableBytes: displayProxyFreeBytes, limitBytes: displayCacheLimitBytes, encodeInWorker: !desktopProxyInvoke
+    }) : null;
+    // One content hash per file (8-10 ms, the first MiB and the last 64 KiB).
+    const displayProxyFileKeys = new WeakMap();
+    function displayProxyFileKeyFor(file) {
+      if (!displayProxyStore || !file) return Promise.resolve(null);
+      let key = displayProxyFileKeys.get(file);
+      if (!key) {
+        key = displayProxyFileKey(file, { hashHead: hashFileForProject, decoderHash: DISPLAY_PROXY_HASHES.decoder, codeHash: DISPLAY_PROXY_HASHES.code })
+          .catch(() => null);
+        displayProxyFileKeys.set(file, key);
+      }
+      return key;
+    }
+
+    // Keeps a proxy in the persistent store: exact decode routes only, never
+    // a recipe (the item's recipe converts it). Resolves whether it is there.
+    async function persistDisplayProxy(item, { image, sample, proxyKey, meta }) {
+      if (!displayProxyStore || !item?.file || !image || !proxyKey || meta?.base?.route === 'raw-fallback') return false;
+      const fileKey = await displayProxyFileKeyFor(item.file);
+      if (!fileKey || !state.fileQueue.includes(item)) return false;
+      return displayProxyStore.put(fileKey, proxyKey, { file: item.file, image, sample, meta });
+    }
+
+    // #235's presentation previews in the store (P06 slice 3): the 1200 px
+    // adjusted copy of a settled photo, encoded as JPEG and keyed by the
+    // file's content and a digest of its recipe, so the veil shows the
+    // photo's own look at once after a restart. Presentation only: never a
+    // source, never converted.
+    async function encodePresentationJpeg(image) {
+      if (typeof OffscreenCanvas !== 'function' || !image?.data) return null;
+      const canvas = new OffscreenCanvas(image.width, image.height);
+      canvas.getContext('2d').putImageData(image instanceof ImageData ? image : new ImageData(image.data, image.width, image.height), 0, 0);
+      const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.85 });
+      return new Uint8Array(await blob.arrayBuffer());
+    }
+
+    async function persistPresentationPreview(item, key, image) {
+      if (!displayProxyStore || !item?.file) return false;
+      try {
+        const [fileKey, digest, bytes] = await Promise.all([displayProxyFileKeyFor(item.file), sha256Hex(key), encodePresentationJpeg(image)]);
+        if (!fileKey || !bytes || !state.fileQueue.includes(item) || photoSettingsKey(item) !== key) return false;
+        return displayProxyStore.putBytes(fileKey, digest, bytes, { file: item.file });
+      } catch (error) {
+        console.warn('Presentation preview not stored:', error?.message || error);
+        return false;
+      }
+    }
+
+    // Shown on the switch veil, while this photo is still the target.
+    async function presentStoredPreview(item) {
+      const presentation = studioWorkspace?.photoSwitchPresentation;
+      if (!displayProxyStore || !presentation) return;
+      const [fileKey, digest] = await Promise.all([displayProxyFileKeyFor(item.file), sha256Hex(photoSettingsKey(item))]);
+      const bytes = fileKey ? await displayProxyStore.readBytes(fileKey, digest) : null;
+      if (state.photoSwitchTarget !== item || document.body.dataset.photoSwitching !== 'true') return;
+      // Another recipe since: the camera JPEG stands in, as without a copy.
+      if (!bytes) { requestProvisionalFrame(item); return; }
+      const url = URL.createObjectURL(new Blob([bytes], { type: 'image/jpeg' }));
+      if (presentation.showUrl(item, url, 'cached')) performance.mark?.('nc:provisional-paint');
+      setTimeout(() => URL.revokeObjectURL(url), 30_000);
+    }
+
+    // The proxy key a cold open of `item` would convert now, for a stored
+    // entry of these base sizes: the recipe's geometry and analysis area and
+    // the live viewport at zoom 1 (as fillDisplayProxy keys it).
+    function expectedStoredProxyKey(item, meta) {
+      const settings = item?.settings;
+      if (!settings?.autoFrameMeta || !meta?.base || lensCorrectionActive(settings)) return null;
+      const descriptor = { width: meta.base.width, height: meta.base.height, has16: meta.base.has16, route: meta.base.route };
+      const key = geometryKeyFor(descriptor, { rotationAngle: settings.rotationAngle, mirrored: settings.mirrored, cropRegion: settings.cropRegion });
+      const source = key.crop ? { width: key.crop.width, height: key.crop.height } : { width: key.frameWidth, height: key.frameHeight };
+      return displayProxyKey({
+        id: null, route: descriptor.route, base: descriptor, rotationAngle: key.angle, mirrored: key.mirrored, cropRegion: key.crop,
+        lens: null, area: analysisAreaOf(settings.autoFrameMeta), target: displayProxyTarget(source, { zoom: 1, tier: 'normal' })
+      });
+    }
+
+    // The stored proxy of `item` a cold open would convert now, as an entry
+    // the activation installs: a file of the same size and date is hashed
+    // (the first MiB and the last 64 KiB, about 9 ms) and its entries
+    // compared by key; the record's checksum and full key are verified.
+    async function readStoredDisplaySession(item) {
+      if (!displayProxyStore || !item?.settings?.autoFrameMeta || !item.settings.filmEdge?.checked) return null;
+      await displayProxyStore.load();
+      if (!displayProxyStore.hasCandidate(item.file)) return null;
+      const fileKey = await displayProxyFileKeyFor(item.file);
+      if (!fileKey) return null;
+      const entries = await displayProxyStore.find(fileKey);
+      const wanted = entries.find(entry => entry.proxyKey === expectedStoredProxyKey(item, entry.meta));
+      if (!wanted) return null;
+      const stored = await displayProxyStore.read(wanted.name);
+      if (!stored) return null;
+      displaySessionDiagnostics.storeHits++;
+      return spilledDisplayEntry(item, stored, { proxyKey: wanted.proxyKey, stored: true });
+    }
 
     // Spills a Tier B entry: its display proxy, colour-analysis sample and
     // what installs it again (sizes, geometry, keys). The recipe is not
@@ -10775,6 +10903,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const cached = photoSessions.get(item);
       if (cached && !cached.base && (cached.tier === 'A' || cached.tier === 'B')) photoSessions.delete(item);
       void displayProxySpill.delete(item.id);
+      if (displayProxyStore) void displayProxyFileKeyFor(item.file).then(fileKey => fileKey && displayProxyStore.forget(fileKey));
     }
 
     // The spilled Tier B entry of `item` when it still fits the item's
@@ -10786,16 +10915,16 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return spilledDisplayEntry(item, stored);
     }
 
-    function spilledDisplayEntry(item, { image, sample, meta }) {
+    function spilledDisplayEntry(item, { image, sample, meta }, { proxyKey = displayProxySpill.proxyKey(item.id), stored = false } = {}) {
       const base = { width: meta.base.width, height: meta.base.height, has16: meta.base.has16, route: meta.base.route, released: true };
       geometryBaseIds.set(base, nextGeometryBaseId++);
       const key = geometryKeyFor(base, { rotationAngle: meta.geometry.angle, mirrored: meta.geometry.mirrored, cropRegion: meta.geometry.crop });
       const { frame, crop } = displayStandIns(key, { width: key.frameWidth, height: key.frameHeight }, meta.cropSize || { width: 0, height: 0 });
       if (sample && meta.area) colorAnalysisSamples.set(base, { key: meta.area, sample });
       return {
-        tier: 'B', spilled: true, file: item.file, base: null, baseDescriptor: base, rawMetadata: meta.rawMetadata, filmEdge: meta.filmEdge,
+        tier: 'B', spilled: true, stored, file: item.file, base: null, baseDescriptor: base, rawMetadata: meta.rawMetadata, filmEdge: meta.filmEdge,
         planes: { frame, crop, proxy: image }, sample,
-        sourcePending: { width: meta.source.width, height: meta.source.height, key: displayProxySpill.proxyKey(item.id), area: meta.area }
+        sourcePending: { width: meta.source.width, height: meta.source.height, key: proxyKey, area: meta.area }
       };
     }
 
@@ -10813,7 +10942,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // proxy of that key is spilled.
     async function fillDisplayProxy(item, base, settings, { isCurrent = () => true } = {}) {
       const skip = () => { displaySessionDiagnostics.fillSkips++; return false; };
-      if (!displayProxySpill.enabled || !item || !base?.data || isReleasedPlane(base) || !state.fileQueue.includes(item)) return false;
+      if (!(displayProxySpill.enabled || displayProxyStore) || !item || !base?.data || isReleasedPlane(base) || !state.fileQueue.includes(item)) return false;
       if (!settings?.autoFrameMeta || !settings.filmEdge?.checked || lensCorrectionActive(settings)) return skip();
       if (!usesSilverCoreConversion(settings) || state.dustRemoval.enabled || settings.repairStrokes?.length) return skip();
       const route = decodeRouteOf(item.file, base);
@@ -10832,7 +10961,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const descriptor = { width: base.width, height: base.height, has16: Boolean(base.__image16?.data), route };
       const area = analysisAreaOf(settings.autoFrameMeta);
       const proxyKey = displayProxyKey({
-        id: item.id, route, base: descriptor, rotationAngle: key.angle, mirrored: key.mirrored, cropRegion: key.crop,
+        id: null, route, base: descriptor, rotationAngle: key.angle, mirrored: key.mirrored, cropRegion: key.crop,
         lens: null, area, target
       });
       if (displayProxySpill.proxyKey(item.id) === proxyKey) return true;
@@ -10841,15 +10970,16 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const proxy = await geometryPool.renderDisplayProxy(base, plan, target, { isCurrent });
       if (!proxy || !isCurrent() || !state.fileQueue.includes(item)) return false;
       const sample = getColorAnalysisSample(settings, base);
-      const written = await displayProxySpill.put(item.id, {
-        image: proxy, sample, proxyKey, transfer: true,
-        meta: {
-          base: descriptor,
-          geometry: { angle: key.angle, mirrored: key.mirrored, crop: key.crop, frameWidth: key.frameWidth, frameHeight: key.frameHeight },
-          cropSize: key.crop ? { width: key.crop.width, height: key.crop.height } : null, source, area,
-          rawMetadata: null, filmEdge: settings.filmEdge || null
-        }
-      });
+      const meta = {
+        base: descriptor,
+        geometry: { angle: key.angle, mirrored: key.mirrored, crop: key.crop, frameWidth: key.frameWidth, frameHeight: key.frameHeight },
+        cropSize: key.crop ? { width: key.crop.width, height: key.crop.height } : null, source, area,
+        rawMetadata: null, filmEdge: settings.filmEdge || null
+      };
+      // The persistent store keeps it across restarts (part 3); the session
+      // spill takes it when the store is off or full.
+      let written = await persistDisplayProxy(item, { image: proxy, sample, proxyKey, meta });
+      if (!written && isCurrent()) written = await displayProxySpill.put(item.id, { image: proxy, sample, proxyKey, transfer: true, meta });
       if (written) displaySessionDiagnostics.fills++;
       return written;
     }
@@ -10878,7 +11008,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // (ensureBase) behind the veil; the conversion reads the kept source, or
     // the proxy while it still matches (processNegative).
     async function activateDisplaySession(fileItem, entry, generation) {
-      displaySessionDiagnostics[entry.spilled ? 'spillHits' : 'recipeChanged']++;
+      if (!entry.stored) displaySessionDiagnostics[entry.spilled ? 'spillHits' : 'recipeChanged']++;
       state.loadedFile = fileItem.file;
       state.loadedBaseImageData = null;
       state.baseDescriptor = entry.baseDescriptor;
@@ -19428,7 +19558,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         const presented = presentRetainedPreview(fileItem);
         const displayEntry = displayForm ? cached : null;
         const spilled = !cached?.base && !displayEntry && displayProxySpill.has(fileItem.id);
-        if (presented !== 'cached' && !(cached?.base && cached.file === fileItem.file) && !displayEntry && !spilled) requestProvisionalFrame(fileItem);
+        // The converted preview an earlier session kept (#235 slice 3, #249).
+        const storedPreview = presented !== 'cached' && Boolean(displayProxyStore?.hasCandidate(fileItem.file, { kind: 'presentation' }));
+        if (storedPreview) void presentStoredPreview(fileItem);
+        if (presented !== 'cached' && !storedPreview && !(cached?.base && cached.file === fileItem.file) && !displayEntry && !spilled) requestProvisionalFrame(fileItem);
         // Paint the target identity before decoder or cached-base preparation
         // can occupy the main thread. Hidden tabs need not await a paused rAF.
         await yieldToPaint();
@@ -19436,8 +19569,14 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         // A display-resolution session whose recipe changed while it was
         // away, or one read back from the spill (#249): its planes are
         // installed and converted under the item's recipe, without a decode.
-        const display = displayEntry || (spilled ? await readSpilledDisplaySession(fileItem) : null);
+        let display = displayEntry || (spilled ? await readSpilledDisplaySession(fileItem) : null);
         if (!isCurrentLoad(generation) || state.fileQueue[index] !== fileItem) return;
+        // Else the persistent store (a frame opened or analysed before, in
+        // this session or an earlier one).
+        if (!display && !(cached?.base && cached.file === fileItem.file)) {
+          display = await readStoredDisplaySession(fileItem).catch(() => null);
+          if (!isCurrentLoad(generation) || state.fileQueue[index] !== fileItem) return;
+        }
         if (display) {
           await activateDisplaySession(fileItem, display, generation);
           return;
@@ -21030,7 +21169,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
             isCurrent: current, convert: request => backgroundConvert(request),
             analyzers: backgroundAnalyzers(), beforeHeavyStep: step
           });
-          if (current()) photoPreviews.put(item, { key, image });
+          if (current()) {
+            photoPreviews.put(item, { key, image });
+            void persistPresentationPreview(item, key, image);
+          }
         },
         fail(error) {
           prefetchRefused.add(item);
@@ -25186,6 +25328,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     document.getElementById('flatFieldEnabled')?.addEventListener('change', (event) => setFlatFieldForCurrent(event.target.checked));
 
     queueMicrotask(mountLearningUI);
+    queueMicrotask(mountDisplayCacheUI);
+    // The store's index, so a switch can tell a stored photo at once (#249).
+    queueMicrotask(() => { void displayProxyStore?.load(); });
     queueMicrotask(mountHotFolderUI);
     let hotFolder = null, hotFolderUnlisten = null, hotFolderEpoch = 0, hotFolderFiles = [], hotFolderQuiet;
     let hotFolderImports = Promise.resolve();
@@ -25354,6 +25499,64 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         await resetLearnedDefaults(); learnedRecords.clear(); updateLearningUI();
       });
       line.append(label, button); content.append(line); updateLearningUI();
+    }
+
+    // The photo cache (#249): the display proxies kept across restarts, its
+    // size and limit, and Clear cache. Local to this device.
+    const DISPLAY_CACHE_LIMITS = [0, 1, 2, 5, 10].map(gib => gib * 1024 ** 3);
+    function formatCacheBytes(bytes) {
+      const gib = bytes / 1024 ** 3;
+      if (gib >= 1) return `${gib.toFixed(gib >= 10 ? 0 : 1)} GB`;
+      return `${Math.round(bytes / 1024 ** 2)} MB`;
+    }
+    async function updateDisplayCacheUI() {
+      const line = document.getElementById('displayCacheCount');
+      if (!line) return;
+      if (!displayProxyStore) {
+        line.textContent = getLocalizedText('displayCacheUnavailable', 'Photo cache: not available here');
+        return;
+      }
+      const budget = await displayProxyStore.budget().catch(() => 0);
+      const size = formatCacheBytes(displayProxyStore.bytes);
+      line.textContent = budget
+        ? getInterpolatedText('displayCacheSize', { size, limit: formatCacheBytes(budget) }, `Photo cache: ${size} of ${formatCacheBytes(budget)}`)
+        : getInterpolatedText('displayCacheOff', { size }, `Photo cache: off (${size})`);
+    }
+    function mountDisplayCacheUI() {
+      const content = document.querySelector('#studioMenu .studio-menu-content');
+      if (!content || document.getElementById('displayCacheLine')) return;
+      const line = document.createElement('div'); line.id = 'displayCacheLine';
+      const label = document.createElement('span'); label.id = 'displayCacheCount';
+      const select = document.createElement('select'); select.id = 'displayCacheLimit';
+      select.dataset.i18nAriaLabel = 'displayCacheLimit';
+      select.setAttribute('aria-label', getLocalizedText('displayCacheLimit', 'Photo cache limit'));
+      const limit = displayCacheLimitBytes();
+      for (const bytes of new Set([...DISPLAY_CACHE_LIMITS, limit])) {
+        const option = document.createElement('option');
+        option.value = String(bytes);
+        if (bytes) option.textContent = formatCacheBytes(bytes);
+        else { option.dataset.i18n = 'displayCacheLimitOff'; option.textContent = getLocalizedText('displayCacheLimitOff', 'Off'); }
+        select.append(option);
+      }
+      select.value = String(limit);
+      select.disabled = !displayProxyStore;
+      select.addEventListener('change', () => {
+        safeStorageSet(DISPLAY_CACHE_LIMIT_KEY, select.value);
+        void displayProxyStore?.trim().then(updateDisplayCacheUI);
+      });
+      const button = document.createElement('button'); button.type = 'button'; button.id = 'clearDisplayCache';
+      button.dataset.i18n = 'displayCacheClear'; button.textContent = getLocalizedText('displayCacheClear', 'Clear cache');
+      button.disabled = !displayProxyStore;
+      button.addEventListener('click', async () => {
+        if (!await appConfirm(getLocalizedText('displayCacheClearConfirm', 'Delete the photo previews kept on this device? Photos open from their originals again.'))) return;
+        await displayProxyStore?.clear();
+        await displayProxySpill.clear();
+        updateDisplayCacheUI();
+        showToast(getLocalizedText('displayCacheCleared', 'Photo cache cleared'));
+      });
+      line.append(label, select, button); content.append(line);
+      document.getElementById('studioMenu')?.addEventListener('toggle', event => { if (event.target.open) void updateDisplayCacheUI(); });
+      void updateDisplayCacheUI();
     }
 
     // Roll-level film type (#231). One record per import transaction of at

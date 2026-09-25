@@ -16,7 +16,7 @@ globalThis.ImageData = class ImageData {
 };
 const { createHarness, makeBase, samePixels, exportChain, settle, createPhotoSessionCache, backingBuffers } = await import('./geometryTestHarness.mjs');
 const { resizeDisplayPreview } = await import('./displayPreview.js');
-const { createDisplayProxySpill, createDisplayProxyPort, createDisplayProxyWorkerCore } = await import('./displayProxyStore.js');
+const { createDisplayProxySpill, createDisplayProxyPort, createDisplayProxyWorkerCore, createDisplayProxyStore, displayProxyFileKey, sha256Hex } = await import('./displayProxyStore.js');
 const { decodeDisplayProxyRecord } = await import('./displayProxy.js');
 
 const settingsFor = state => ({ rotationAngle: state.rotationAngle, mirrored: state.mirrored, cropRegion: state.cropRegion ? { ...state.cropRegion } : null });
@@ -497,6 +497,75 @@ for (const tier of ['A', 'B']) {
   delete eight.__image16;
   assert.equal(await c.fillDisplayProxy(item, eight, item.settings), false, 'an 8-bit RAW fallback is not reproducible');
   assert.equal(await c.fillDisplayProxy(item, base, { ...item.settings, filmEdge: null }), false, 'undecided recipes are skipped');
+}
+
+// ---- Persistence: a frame filled (or left) in one session opens from the
+// store in the next, keyed by its content, with no decode ----
+{
+  const records = new Map();
+  const memoryRecords = {
+    async write(name, record) { records.set(name, new Uint8Array(record instanceof ArrayBuffer ? record : record.buffer).slice()); },
+    async read(name) { return records.has(name) ? records.get(name).slice().buffer : null; },
+    async delete(name) { records.delete(name); }, async clear() { records.clear(); },
+    async list() { return [...records].map(([name, bytes]) => ({ name, bytes: bytes.byteLength, modifiedMs: 0 })); }
+  };
+  const geometry = { rotationAngle: 1.3, mirrored: false, cropRegion: { left: 9, top: 7, width: 96, height: 60 } };
+  const bytes = new Uint8Array(300_000).map((_, i) => (i * 7) & 255);
+  const makeFile = () => Object.assign(new Blob([bytes]), { name: 'roll-07.dng', lastModified: 1234 });
+  const session = (file) => {
+    const base = makeBase(120, 80, 21);
+    const h = createHarness(base, { sessionBudget: 1 << 30 }), c = h.context;
+    Object.assign(h.target, {
+      largeImagePixels: 1000, lastEditorViewport: { width: 60, height: 50 }, getCanvasContainerSize: () => ({ width: 60, height: 50 }),
+      hashFileForProject: async blob => sha256Hex(new Uint8Array(await blob.slice(0, 1 << 20).arrayBuffer())), displayProxyFileKey, sha256Hex,
+      displayProxyStore: createDisplayProxyStore({
+        port: createDisplayProxyPort({ core: createDisplayProxyWorkerCore({ backend: null }) }), records: memoryRecords,
+        availableBytes: async () => 64 * 1024 ** 3
+      })
+    });
+    const item = { id: 'roll-07::1', file, settings: { ...geometry, autoFrameMeta: { imageArea: AREA }, filmEdge: { checked: true } } };
+    return { h, c, base, item };
+  };
+  // Session 1: roll analysis fills the frame while it is not open.
+  {
+    const { h, c, base, item } = session(makeFile());
+    h.state.fileQueue = [{ id: 'open', file: { name: 'open.dng' } }, item];
+    h.state.currentFileIndex = 0;
+    assert.equal(await c.fillDisplayProxy(item, base, item.settings), true);
+    await h.target.displayProxyStore.settled();
+    assert.equal(h.target.displaySessionDiagnostics.fills, 1);
+    assert.equal(h.target.displayProxySpill.has(item.id), false, 'the store took it: no second copy in the spill');
+  }
+  // Session 2 (a restart or a project reopen): new queue items, same file.
+  {
+    const { h, c, base, item } = session(makeFile());
+    const other = { id: 'b', file: { name: 'b.dng' }, settings: null };
+    h.state.loadedFile = other.file;
+    wireSwitching(h, [other, item]);
+    let prepared = 0;
+    h.target.prepareStudioPhoto = async () => { prepared++; };
+    await c.switchToFile(1);
+    assert.equal(prepared, 1);
+    assert.equal(h.target.displaySessionDiagnostics.storeHits, 1, 'opened from the store');
+    assert.equal(h.target.baseDecodes, undefined, 'no decode');
+    const source = exportChain(base, geometry);
+    const { displayPreviewSize } = await import('./displayPreview.js');
+    const target = displayPreviewSize(source.width, source.height, { viewportWidth: 40, viewportHeight: 30, dpr: 2, zoom: 1, maxPixels: 4_000_000, maxDimension: 8192 });
+    samePixels(h.state.conversionPreviewImageData, resizeDisplayPreview(source, target), 'the stored proxy is the cold open\'s display preview');
+    h.state.autoFrame.lastDiagnostics = { imageArea: AREA };
+    assert.equal(c.displayProxyMatches(item), true, 'processNegative converts it');
+    // Another window size is another key: the store answers nothing and the
+    // photo opens from its original.
+    const again = session(makeFile());
+    again.h.target.getCanvasContainerSize = () => ({ width: 90, height: 70 });
+    again.h.state.loadedFile = other.file;
+    wireSwitching(again.h, [other, again.item]);
+    await again.c.switchToFile(1);
+    assert.equal(again.h.target.displaySessionDiagnostics.storeHits, 0, 'a target mismatch misses');
+    // A changed file (another date) is not a candidate.
+    const changed = session(Object.assign(new Blob([bytes]), { name: 'roll-07.dng', lastModified: 9999 }));
+    assert.equal(await changed.c.readStoredDisplaySession(changed.item), null);
+  }
 }
 
 console.log('displaySessions: Tier A, Tier B, demotion, spill, ensureBase/ensureSource, invalidation and the proxy invariant passed');

@@ -41,6 +41,9 @@ export function displaySessionStubs(overrides = {}) {
     requestSourceForDisplay: () => {}, ensureSource: async () => true, ensureBase: async () => null,
     forgetDisplayProxies: () => {}, readSpilledDisplaySession: async () => null,
     fillDisplayProxy: async () => false, prepareZoomOneProxy: () => {}, lastEditorViewport: null,
+    // Part 3: no persistent store.
+    displayProxyStore: null, persistDisplayProxy: async () => false, readStoredDisplaySession: async () => null,
+    persistPresentationPreview: async () => false, presentStoredPreview: async () => {},
     ...overrides
   };
 }

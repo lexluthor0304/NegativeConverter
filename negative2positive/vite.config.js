@@ -3,6 +3,7 @@ import { realpathSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { uiFontsPlugin } from '../scripts/build-ui-fonts.mjs';
+import { displayProxyBuildHashes } from '../scripts/display-proxy-hashes.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -15,6 +16,9 @@ export default defineConfig({
   base: './',
   define: {
     __BUILD_ID__: JSON.stringify(buildId),
+    // Stored display proxies (#249) miss when the decoder or the code that
+    // shapes their pixels changes.
+    __NC_DISPLAY_PROXY_HASHES__: JSON.stringify(displayProxyBuildHashes(__dirname)),
   },
   // Per-locale UI font subsets, cut from the Fusion Pixel faces at dev and
   // build start (scripts/build-ui-fonts.mjs, #262).

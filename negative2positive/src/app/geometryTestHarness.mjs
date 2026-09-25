@@ -101,7 +101,9 @@ const FUNCTIONS = [
   'ensureSource', 'prepareOriginalForTool', 'displayProxyMatches', 'requestSourceForDisplay',
   'selfCheckDisplayProxy', 'spillDisplaySession', 'displaySessionMeta', 'forgetDisplayProxies',
   'readSpilledDisplaySession', 'spilledDisplayEntry', 'activateDisplaySession', 'getColorAnalysisSample',
-  'hasSeparateConversionPreview', 'fillDisplayProxy', 'prepareZoomOneProxy'
+  'hasSeparateConversionPreview', 'fillDisplayProxy', 'prepareZoomOneProxy', 'readStoredDisplaySession',
+  'expectedStoredProxyKey', 'persistDisplayProxy', 'displayProxyFileKeyFor', 'persistPresentationPreview',
+  'presentStoredPreview', 'encodePresentationJpeg'
 ];
 
 // The Apply Crop click handler, as a named function.
@@ -203,6 +205,8 @@ export function createHarness(base, { historyBudget = 768 * 1024 * 1024, session
     // a spill; decodes come from `target.decodeBase` (a lane's shared decode).
     ensureSourcePromise: null, preparingOriginal: 0, displaySourceRequest: null,
     displaySessionDiagnostics: displaySessionDiagnosticsStub(), displayProxySpill: emptyDisplayProxySpill(),
+    // No persistent store unless a test gives one (part 3).
+    displayProxyStore: null, displayProxyFileKeys: new WeakMap(), DISPLAY_PROXY_HASHES: { decoder: 'wasm', code: 'code' },
     colorAnalysisSamples: new WeakMap(), displayProxyKey: displayProxy.displayProxyKey,
     displayPlaneHash: displayProxy.displayPlaneHash, checksum32: displayProxy.checksum32,
     displayPreviewSize: displayPreview.displayPreviewSize, resizeDisplayPreview: displayPreview.resizeDisplayPreview,

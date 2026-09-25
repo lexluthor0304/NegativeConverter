@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 use tauri::State;
+mod display_proxy_store;
 mod export_stream;
 mod import_folder;
 mod memory_info;
@@ -1251,7 +1252,23 @@ pub fn run() {
         updater.build()
     });
     builder
+        // Display proxies (#249): the cache directory is prepared once, and an
+        // earlier run's spill removed.
+        .setup(|app| {
+            if let Ok(root) = display_proxy_store::root_for(app.handle()) {
+                if let Err(err) = display_proxy_store::prepare_root(&root) {
+                    eprintln!("[display-proxies] cache directory unavailable: {err}");
+                }
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
+            display_proxy_store::display_proxy_write,
+            display_proxy_store::display_proxy_read,
+            display_proxy_store::display_proxy_list,
+            display_proxy_store::display_proxy_delete,
+            display_proxy_store::display_proxy_clear,
+            display_proxy_store::display_proxy_space,
             watch_import_folder,
             stop_watch_import_folder,
             read_import_file,
