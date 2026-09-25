@@ -299,11 +299,11 @@ console.log(`processFileWithSettings batch options: ${batchCases} cases match HE
 // dust stage, which follows the conversion.
 // - Released the WebKit way (transfer(0)), every one of their buffers is
 //   detached: the backing stores are gone whatever still points at them.
-// - Only dropped (an engine without transfer), the base is unreachable
-//   (a FinalizationRegistry probe after full collections, --expose-gc through
-//   v8 flags). A suspended async frame keeps dead temporaries in its
-//   registers, so JS objects that went through a call argument may outlive
-//   their use there; the lists that held the planes are emptied explicitly.
+// - Only dropped (an engine without transfer), the base, the geometry output
+//   and the lens output are unreachable (a FinalizationRegistry probe after
+//   full collections, --expose-gc through v8 flags). A suspended async frame
+//   keeps its registers, so the lists that held the planes are emptied and
+//   walked in callbacks, never in a loop variable of the frame.
 {
   v8.setFlagsFromString('--expose-gc');
   const gc = vm.runInNewContext('gc');
@@ -338,7 +338,7 @@ console.log(`processFileWithSettings batch options: ${batchCases} cases match HE
       stage: 'processed', releaseEarly: true, ownedPlanes: [], sourceImageData: watch('base', makeBase(64, 40, 4242)), sourceOwned: true
     });
     assert.ok(result.processed);
-    if (engine === 'none') assert.ok(atDust.includes('base'), `unreachable after the conversion: ${atDust}`);
+    if (engine === 'none') assert.deepEqual(atDust, ['base', 'geometry', 'lens'], 'unreachable after the conversion');
     else assert.deepEqual(atDust, [], 'every buffer of the base and the working planes is released after the conversion');
   }
   configurePlaneRelease({ engine: 'none' });

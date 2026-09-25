@@ -17336,14 +17336,15 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         imageData = { width: imageData.width, height: imageData.height };
         baseSize = imageData;
         workingData = { width: workingData.width, height: workingData.height, __lensMapping: lensMapping };
+        // A suspended async frame keeps its registers, loop variables
+        // included: walk the list in a callback and empty it afterwards.
         if (ownedPlanes) {
-          for (const plane of early) {
+          early.forEach((plane) => {
             const at = ownedPlanes.indexOf(plane);
             if (at >= 0) ownedPlanes.splice(at, 1);
-          }
+          });
         }
         releaseOwnedPlanes(...early);
-        // Suspended frames keep their registers: empty the lists as well.
         early.length = 0;
         beforeConversion.length = 0;
       }
