@@ -105,6 +105,22 @@ export function createPhotoSessionCache({ maxBytes = DEFAULT_MAX_BYTES } = {}) {
       while (bytes > maxBytes) remove(entries.keys().next().value);
       return true;
     },
+    // Stores only if it fits next to everything retained, evicting nothing
+    // (#243: a background lane's finished base never displaces a photo the
+    // user visited). Buffers this cache already holds count once.
+    putIfRoom(key, value) {
+      if (maxBytes === 0) return false;
+      const previous = entries.get(key);
+      const releasing = new Set();
+      if (previous) for (const buffer of previous.buffers) if (owners.get(buffer).count === 1) releasing.add(buffer);
+      let total = bytes;
+      for (const buffer of releasing) total -= owners.get(buffer).bytes;
+      for (const buffer of backingBuffers(value)) {
+        if (!owners.has(buffer) || releasing.has(buffer)) total += buffer.byteLength;
+      }
+      if (total > maxBytes) return false;
+      return this.put(key, value);
+    },
     take(key) { return remove(key)?.value ?? null; },
     peek(key) {
       const entry = entries.get(key);
@@ -113,6 +129,8 @@ export function createPhotoSessionCache({ maxBytes = DEFAULT_MAX_BYTES } = {}) {
       entries.set(key, entry);
       return entry.value;
     },
+    /** Whether `key` is retained, without marking it recently used. */
+    has(key) { return entries.has(key); },
     delete(key) { return remove(key) !== null; },
     clear() {
       entries.clear();

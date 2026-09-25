@@ -148,4 +148,34 @@ if (typeof SharedArrayBuffer !== 'undefined') {
   assert.equal(backingBuffers(null).size, 0);
 }
 
+// putIfRoom (#243): a lane's finished base is kept only beside what is
+// retained, never by evicting a visited photo's session.
+{
+  const cache = createPhotoSessionCache({ maxBytes: 100 });
+  const visited = { base: new Uint8Array(60) };
+  assert.equal(cache.put('visited', visited), true);
+  assert.equal(cache.putIfRoom('lane', { base: new Uint8Array(50) }), false, 'would need an eviction');
+  assert.equal(cache.peek('visited'), visited, 'the visited session stays');
+  assert.equal(cache.bytes, 60);
+  const small = { base: new Uint8Array(40) };
+  assert.equal(cache.putIfRoom('lane', small), true, 'fits exactly');
+  assert.equal(cache.bytes, 100);
+  // A buffer already retained counts once.
+  assert.equal(cache.putIfRoom('alias', { base: visited.base }), true);
+  assert.equal(cache.bytes, 100);
+  // Replacing an entry counts only what the replacement adds.
+  assert.equal(cache.putIfRoom('lane', { base: new Uint8Array(40) }), true, 'the old 40 bytes are released first');
+  assert.equal(cache.putIfRoom('lane', { base: new Uint8Array(41) }), false);
+  assert.ok(cache.peek('lane'), 'a refused replacement keeps the previous entry');
+  assert.equal(createPhotoSessionCache({ maxBytes: 0 }).putIfRoom('x', {}), false);
+  // has() does not touch the LRU order: 'visited' stays the oldest entry.
+  const order = createPhotoSessionCache({ maxBytes: 100 });
+  order.put('old', { base: new Uint8Array(50) });
+  order.put('new', { base: new Uint8Array(50) });
+  assert.equal(order.has('old'), true);
+  order.put('third', { base: new Uint8Array(50) });
+  assert.equal(order.has('old'), false, 'has() left it least recently used');
+  assert.equal(order.has('new'), true);
+}
+
 console.log('photoSessionCache: shared backing stores/history, LRU, ownership, replacement, limits and cleanup passed');
