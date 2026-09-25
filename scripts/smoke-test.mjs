@@ -727,8 +727,19 @@ if (Math.abs(meanAfter - meanBefore) < 8) {
 
 // ---- 5. curve editor: drag the midtones up, preview must brighten/change ----
 // 調色タブの曲線を開く。旧パネルモードには依存しない。
-await evaluate(`document.getElementById('studioTab-edit').click(); document.getElementById('studioCurves').open = true; window.dispatchEvent(new Event('resize'));`);
+// No resize event: the curve's ResizeObserver draws it when the drawer first
+// gives it a size (#261).
+await evaluate(`document.getElementById('studioTab-edit').click(); document.getElementById('studioCurves').open = true;`);
 await wait(300);
+const curveRevealed = await evaluate(`(() => {
+  const curve = document.getElementById('curveCanvas');
+  return { width: curve.width, height: curve.height, cssWidth: curve.offsetWidth, cssHeight: curve.offsetHeight,
+    alpha: curve.width ? curve.getContext('2d').getImageData(curve.width >> 1, curve.height >> 1, 1, 1).data[3] : 0 };
+})()`);
+if (!(curveRevealed.cssWidth > 0 && curveRevealed.width === curveRevealed.cssWidth * 2
+  && curveRevealed.height === curveRevealed.cssHeight * 2 && curveRevealed.alpha === 255)) {
+  fail('curve editor is blank when its drawer is first opened: ' + JSON.stringify(curveRevealed));
+}
 await evaluate(`(() => {
   const content = document.getElementById('additionalSectionContent');
   if (content.classList.contains('collapsed')) {

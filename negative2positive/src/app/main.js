@@ -3227,6 +3227,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         return { width: surface.width, height: surface.height };
       }
     });
+    // Call counts read by the smoke tests (?debugCounters=1, #261).
+    const uiDebugCounters = { adjustCanvasDisplay: 0, renderWebGL: 0, curveCanvasResizes: 0 };
     const zoomIndicator = document.getElementById('zoomIndicator');
     const zoomControls = document.getElementById('zoomControls');
     const ZOOM_MIN = 1;
@@ -3339,16 +3341,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       state.batchMode = state.batchSessionActive;
       showBatchUI(state.batchSessionActive, options.reason || 'syncBatchUIState');
 
-      const saveSettingsBtn = document.getElementById('saveSettingsBtn');
-      const applyToSelectedBtn = document.getElementById('applyToSelectedBtn');
-      const showBatchStep3Actions = state.batchSessionActive && state.currentStep >= 3;
-      if (saveSettingsBtn) {
-        saveSettingsBtn.style.display = showBatchStep3Actions ? 'inline-flex' : 'none';
-      }
-      if (applyToSelectedBtn) {
-        applyToSelectedBtn.style.display = showBatchStep3Actions ? 'inline-flex' : 'none';
-      }
-
+      // Studio's sync owns the display of saveSettingsBtn/applyToSelectedBtn.
       updateCurrentFileLabel();
       updateRollReferenceUI();
       updateAutoFrameButtons();
@@ -4648,12 +4641,28 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // Histogram (Lightroom-style)
     // ===========================================
 
+    // The histogram canvas is as wide as its container's border box minus the
+    // horizontal padding. With a ResizeObserver (see the Window Resize section)
+    // the width arrives from the observer; draws never measure layout.
+    const histogramLayout = { observed: false, width: 0, paddingX: null };
+
+    function histogramPaddingX() {
+      if (histogramLayout.paddingX === null) {
+        const styles = window.getComputedStyle(histogramContainer);
+        histogramLayout.paddingX = parseFloat(styles.paddingLeft || '0') + parseFloat(styles.paddingRight || '0');
+      }
+      return histogramLayout.paddingX;
+    }
+
     function resizeHistogramCanvas() {
       if (!histogramContainer || !histogramCanvas) return false;
-      const rect = histogramContainer.getBoundingClientRect();
-      const styles = window.getComputedStyle(histogramContainer);
-      const paddingX = parseFloat(styles.paddingLeft || '0') + parseFloat(styles.paddingRight || '0');
-      const displayWidth = Math.max(1, Math.round(rect.width - paddingX));
+      let displayWidth = histogramLayout.width;
+      if (!histogramLayout.observed) {
+        const rect = histogramContainer.getBoundingClientRect();
+        const styles = window.getComputedStyle(histogramContainer);
+        const paddingX = parseFloat(styles.paddingLeft || '0') + parseFloat(styles.paddingRight || '0');
+        displayWidth = Math.max(1, Math.round(rect.width - paddingX));
+      }
       let resized = false;
       if (displayWidth > 0 && histogramCanvas.width !== displayWidth) {
         histogramCanvas.width = displayWidth;
@@ -4704,9 +4713,29 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (webglState.gl) webglState.curveDirty = true;
     }
 
+    // The curve canvas's CSS size, kept by the layout observer (Window Resize
+    // section). Draws read it instead of layout, and reallocate the backing
+    // store only when it changed.
+    const curveLayout = { observed: false, width: 0, height: 0 };
+    // The canvas's client rect for the rest of a drag; dropped on resize and
+    // on any scroll.
+    let curveDragRect = null;
+
     function renderCurve() {
-      const cw = curveCanvas.width = curveCanvas.offsetWidth * 2;
-      const ch = curveCanvas.height = curveCanvas.offsetHeight * 2;
+      const width = curveLayout.observed ? curveLayout.width : curveCanvas.offsetWidth;
+      const height = curveLayout.observed ? curveLayout.height : curveCanvas.offsetHeight;
+      // Hidden (closed drawer, other tab): nothing to draw. The observer draws
+      // it when it is revealed.
+      if (curveLayout.observed && !(width > 0 && height > 0)) return;
+      const cw = width * 2;
+      const ch = height * 2;
+      if (curveCanvas.width !== cw || curveCanvas.height !== ch) {
+        curveCanvas.width = cw;
+        curveCanvas.height = ch;
+        uiDebugCounters.curveCanvasResizes++;
+      } else {
+        curveCtx.clearRect(0, 0, cw, ch);
+      }
 
       curveCtx.fillStyle = '#111';
       curveCtx.fillRect(0, 0, cw, ch);
@@ -4806,7 +4835,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     // Get canvas position from mouse event
     function getCurvePosition(e) {
-      const rect = curveCanvas.getBoundingClientRect();
+      const rect = curveDragRect || curveCanvas.getBoundingClientRect();
       const scaleX = curveCanvas.width / rect.width;
       const scaleY = curveCanvas.height / rect.height;
       const canvasX = (e.clientX - rect.left) * scaleX;
@@ -4834,6 +4863,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     curveCanvas.addEventListener('mousedown', (e) => {
       beginPreviewTierSession('curve');
       curvePreUndoSnapshot = captureSnapshot('curveEdit');
+      curveDragRect = curveCanvas.getBoundingClientRect();
       const pos = getCurvePosition(e);
       const nearPoint = findNearPoint(pos.canvasX, pos.canvasY);
 
@@ -4872,6 +4902,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     curveCanvas.addEventListener('mouseup', () => {
       endPreviewTierSession('mouseup', 'curve');
+      curveDragRect = null;
       if (draggingPoint !== null) {
         if (curvePreUndoSnapshot) {
           commitUndoSnapshot(curvePreUndoSnapshot);
@@ -4885,6 +4916,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     curveCanvas.addEventListener('mouseleave', () => {
       endPreviewTierSession('mouseleave', 'curve');
+      curveDragRect = null;
       if (draggingPoint !== null) {
         if (curvePreUndoSnapshot) {
           commitUndoSnapshot(curvePreUndoSnapshot);
@@ -4921,6 +4953,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       e.preventDefault();
       beginPreviewTierSession('curve');
       curvePreUndoSnapshot = captureSnapshot('curveEdit');
+      curveDragRect = curveCanvas.getBoundingClientRect();
 
       const pos = getCurvePosition(e);
       const nearPoint = findNearPoint(pos.canvasX, pos.canvasY);
@@ -4955,6 +4988,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     function finishCurvePointerDrag(pointerId) {
       if (activeCurvePointerId !== pointerId) return;
       endPreviewTierSession('pointerup', 'curve');
+      curveDragRect = null;
       if (draggingPoint !== null) {
         if (curvePreUndoSnapshot) {
           commitUndoSnapshot(curvePreUndoSnapshot);
@@ -5489,6 +5523,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     }
 
     function renderWebGL() {
+      uiDebugCounters.renderWebGL++;
       if (state.cropping || !webglState.gl || webglState.disabledByError || !state.processedImageData) return false;
 
       try {
@@ -7649,6 +7684,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     }
 
     function adjustCanvasDisplay(w, h) {
+      uiDebugCounters.adjustCanvasDisplay++;
       const container = getCanvasContainerSize();
       // Never upscale past 100% — but for a preview-resolution stand-in,
       // "100%" means the full-resolution image it temporarily represents.
@@ -12921,26 +12957,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         btn.classList.toggle('active', depth === state.exportBitDepth);
       });
 
-      // Update export button text
-      const exportBtn = document.getElementById('exportBtn');
-      const exportKey = isJpeg ? 'exportJpeg' : (format === 'tiff' ? 'exportTiff' : isDng ? 'exportDng' : 'exportPng');
-      exportBtn.textContent = i18n[currentLang][exportKey];
-      exportBtn.setAttribute('data-i18n', exportKey);
-
-      const exportSprocketBtn = document.getElementById('exportSprocketBtn');
-      if (exportSprocketBtn) {
-        const sprocketKey = isJpeg ? 'exportSprocketJpeg' : (format === 'tiff' ? 'exportSprocketTiff' : isDng ? 'exportSprocketDng' : 'exportSprocketPng');
-        exportSprocketBtn.disabled = isDng || isDesktopBatchExportLocked();
-        exportSprocketBtn.textContent = i18n[currentLang][sprocketKey];
-        exportSprocketBtn.setAttribute('data-i18n', sprocketKey);
-      }
-
-      // Update export current button text
-      const exportSingleBtn = document.getElementById('exportSingleBtn');
-      const exportSingleKey = isJpeg ? 'exportCurrentJpeg' : (format === 'tiff' ? 'exportCurrentTiff' : isDng ? 'exportCurrentDng' : 'exportCurrent');
-      exportSingleBtn.textContent = i18n[currentLang][exportSingleKey];
-      exportSingleBtn.setAttribute('data-i18n', exportSingleKey);
-
+      // Studio's sync owns the labels of exportBtn, exportSprocketBtn and
+      // exportSingleBtn, and the disabled state of the first two.
       const bitDepthButtons = document.querySelectorAll('.bitdepth-btn');
       bitDepthButtons.forEach((btn) => {
         const depth = parseInt(btn.dataset.bitdepth, 10) === 16 ? 16 : 8;
@@ -14470,6 +14488,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         }
       });
 
+      // Rows may have been recreated or re-marked: the next Studio flush
+      // reconciles the photo-switch feedback on them.
+      studioWorkspace?.markRowsChanged();
       updateAutoFrameButtons();
       syncBatchUIState({ reason: 'updateFileListUI' });
       refreshThumbnailStates();
@@ -14576,7 +14597,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         state.photoSwitchTarget = fileItem;
         state.photoSwitchPhase = 'loading';
         flushFileList();
+        // Announce the target in this turn: the click's own caller reads it
+        // before any microtask runs.
         studioWorkspace?.sync();
+        studioWorkspace?.flush();
         // The veil shows the target's own pixels in this same task when the
         // app holds any. An exact 1200 px copy needs no camera JPEG, and a
         // retained decoded base reaches the exact positive in ~0.3 s.
@@ -14854,13 +14878,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     function updateExportButtons() {
       const selectedCount = state.fileQueue.filter(f => f.selected).length;
       const exportLocked = singleExportActive || isDesktopBatchExportLocked();
-      const exportBtn = document.getElementById('exportBtn');
-      const exportSprocketBtn = document.getElementById('exportSprocketBtn');
+      // exportBtn and exportSprocketBtn are disabled by Studio's sync, from the
+      // same lock.
       const exportSingleBtn = document.getElementById('exportSingleBtn');
       const exportZipBtn = document.getElementById('exportZipBtn');
       const exportAllBtn = document.getElementById('exportAllBtn');
-      if (exportBtn) exportBtn.disabled = exportLocked;
-      if (exportSprocketBtn) exportSprocketBtn.disabled = exportLocked;
       if (exportSingleBtn) exportSingleBtn.disabled = exportLocked;
       if (exportZipBtn) exportZipBtn.disabled = selectedCount < 1 || exportLocked;
       if (exportAllBtn) exportAllBtn.disabled = selectedCount < 1 || exportLocked;
@@ -15362,40 +15384,81 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // ===========================================
     // Window Resize
     // ===========================================
-    // Fits the canvas to the container after it changed size. The GL drawing
-    // buffer follows the texture, so this never clears it; the draw only
-    // refits the CSS box to the texture, as every renderWebGL does.
+    // Fits the canvas to the container after it changed size, once. The GL
+    // drawing buffer follows the texture on screen, not the container, so a
+    // new container size neither resizes nor clears it: refit the CSS box to
+    // that texture, and draw only if the buffer does not match it (the draw
+    // then resizes and fills it in one go). The display preview follows at
+    // the new size once the resize settles.
     function refitCanvasToContainer() {
-      if (canvas.width > 0 && canvas.height > 0) {
+      const texture = webglState.sourceSize;
+      if (isWebGLActive() && !state.beforeAfterActive && !state.cropping && texture.w > 0 && texture.h > 0) {
+        adjustCanvasDisplay(texture.w, texture.h);
+        if (glCanvas.width !== texture.w || glCanvas.height !== texture.h) renderWebGL();
+      } else if (canvas.width > 0 && canvas.height > 0) {
         adjustCanvasDisplay(canvas.width, canvas.height);
-        if (isWebGLActive() && !state.beforeAfterActive && !state.cropping) renderWebGL();
       }
       if (state.cropping) updateCropOverlayFromDraft();
       scheduleDisplayPreviewResize();
     }
 
-    window.addEventListener('resize', () => {
-      // The observer reports this size only after this handler in the same
-      // frame, so read live layout first rather than fit to the old size.
-      refreshCanvasContainerSize();
-      refitCanvasToContainer();
-      const histogramResized = resizeHistogramCanvas();
-      if (histogramResized) redrawHistogramIfPossible();
-      if (curveCanvas.getBoundingClientRect().width > 0) renderCurve();
-    });
+    // One observer for everything whose size the page draws to: the viewer,
+    // the histogram and the curve. Panels, drawers, tabs and the film strip
+    // change layout without any event; the observer reports only real size
+    // changes. Layout is clean when it runs, so each callback reads every size
+    // first and writes afterwards.
+    function onLayoutResize(entries) {
+      let container = false;
+      let histogramWidth = null;
+      let curve = false;
+      for (const entry of entries) {
+        if (entry.target === canvasContainer) container = true;
+        else if (entry.target === histogramContainer) {
+          const box = entry.borderBoxSize?.[0];
+          histogramWidth = box ? box.inlineSize : entry.target.getBoundingClientRect().width;
+        } else if (entry.target === curveCanvas) curve = true;
+      }
+      if (container) refreshCanvasContainerSize();
+      if (histogramWidth !== null) {
+        // Hidden (another tab): keep the last width rather than shrink to 1.
+        if (histogramWidth > 0) histogramLayout.width = Math.max(1, Math.round(histogramWidth - histogramPaddingX()));
+        else histogramWidth = null;
+      }
+      if (curve) {
+        curveLayout.width = curveCanvas.offsetWidth;
+        curveLayout.height = curveCanvas.offsetHeight;
+        curveDragRect = null;
+      }
+      if (container) refitCanvasToContainer();
+      if (histogramWidth !== null && resizeHistogramCanvas()) redrawHistogramIfPossible();
+      if (curve && curveLayout.width > 0 && curveLayout.height > 0) renderCurve();
+    }
 
-    // Container-only resizes (a panel, the film strip) fire no window resize.
     if (typeof ResizeObserver === 'function') {
       canvasContainerSize.observed = true;
       canvasContainerSize.valid = false;
-      new ResizeObserver(() => {
-        // Layout is clean while observers run, so this read is free. The
-        // observer reports only real size changes; refit even when a live
-        // read elsewhere has already brought the cache up to date.
+      const layoutObserver = new ResizeObserver(onLayoutResize);
+      layoutObserver.observe(canvasContainer);
+      if (histogramContainer && histogramCanvas) {
+        histogramLayout.observed = true;
+        layoutObserver.observe(histogramContainer, { box: 'border-box' });
+      }
+      // Until its first report the curve counts as hidden; the report comes
+      // with the first layout that gives it a size.
+      curveLayout.observed = true;
+      layoutObserver.observe(curveCanvas, { box: 'border-box' });
+    } else {
+      // Without observers a window resize is the only signal left.
+      window.addEventListener('resize', () => {
         refreshCanvasContainerSize();
         refitCanvasToContainer();
-      }).observe(canvasContainer);
+        const histogramResized = resizeHistogramCanvas();
+        if (histogramResized) redrawHistogramIfPossible();
+        if (curveCanvas.getBoundingClientRect().width > 0) renderCurve();
+      });
     }
+    // A drag keeps the curve's client rect only while nothing scrolls.
+    document.addEventListener('scroll', () => { curveDragRect = null; }, { capture: true, passive: true });
 
     // devicePixelRatio changes (moving the window to another display) resize
     // the display preview. The query matches one ratio, so re-arm each time.

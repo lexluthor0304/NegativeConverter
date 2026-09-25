@@ -319,11 +319,18 @@ export async function runWebglPreviewSmoke({ send, evaluate, waitFor, fail, inst
   expect(settled.backing[0] === settled.texture?.[0] && settled.backing[1] === settled.texture?.[1]
     && settled.last?.width === settled.backing[0] && marked(settled.last) && settled.undrawn === 0,
   'settled GPU zoom does not show its texture upright: ' + JSON.stringify(settled));
-  const fresh = await evaluate(`(() => {
-    const probe = window.__webglProbe, draws = probe.draws;
-    window.dispatchEvent(new Event('resize'));
-    return { redrawn: probe.draws > draws, last: probe.last };
-  })()`);
+  // A same-value adjustment input redraws the texture on screen. (A resize no
+  // longer draws at all unless the drawing buffer must change, #261.)
+  const fresh = await evaluate(`new Promise(resolve => {
+    const probe = window.__webglProbe, draws = probe.draws, start = performance.now();
+    document.getElementById('cyan').dispatchEvent(new Event('input', { bubbles: true }));
+    const check = () => {
+      if (probe.draws > draws) resolve({ redrawn: true, last: probe.last });
+      else if (performance.now() - start > 3000) resolve({ redrawn: false, last: probe.last });
+      else requestAnimationFrame(check);
+    };
+    requestAnimationFrame(check);
+  })`);
   expect(fresh.redrawn && JSON.stringify(fresh.last) === JSON.stringify(settled.last),
     'settled GPU zoom differs from a fresh render at the same zoom: ' + JSON.stringify({ settled: settled.last, fresh }));
   await resetZoom('GPU');

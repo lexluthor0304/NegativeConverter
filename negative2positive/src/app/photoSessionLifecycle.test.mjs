@@ -198,7 +198,8 @@ for (const outcome of ['success', 'stale', 'abort']) {
   Object.assign(c, {
     studioAutoFrameRunning: false, isDesktopBatchExportLocked: () => false,
     singleExportActive: false, getCurrentQueueItem: () => null,
-    studioWorkspace: { sync: () => warmFeedback.push(f.state.photoSwitchTarget) },
+    studioWorkspace: { sync: () => warmFeedback.push(f.state.photoSwitchTarget),
+      flush: () => assert.fail('a warm cache hit leaves its syncs to one coalesced flush') },
     requestAnimationFrame: () => assert.fail('warm cache hit must not yield for loading feedback'),
     yieldToPaint: () => assert.fail('warm cache hit must not yield for loading feedback'),
     expiredAnalysisKey: null, lensMapCache: new Map(), invalidateSilverCoreCache: noop,
@@ -239,7 +240,7 @@ for (const outcome of ['success', 'stale', 'abort']) {
 
 function coldFixture({ presented = null } = {}) {
   const f = fixture(), c = f.context;
-  const frames = [], loads = [], preparations = [], feedback = [], presentations = [], provisional = [];
+  const frames = [], loads = [], preparations = [], feedback = [], presentations = [], provisional = [], flushes = [];
   const second = { file: new File(['second'], 'second.png'), settings: null };
   const third = { file: new File(['third'], 'third.png'), settings: null };
   f.state.fileQueue.push(second, third);
@@ -247,7 +248,8 @@ function coldFixture({ presented = null } = {}) {
   Object.assign(c, {
     studioAutoFrameRunning: false, isDesktopBatchExportLocked: () => false,
     singleExportActive: false, getCurrentQueueItem: () => null,
-    studioWorkspace: { sync: () => feedback.push({ target: f.state.photoSwitchTarget, phase: f.state.photoSwitchPhase }) },
+    studioWorkspace: { sync: () => feedback.push({ target: f.state.photoSwitchTarget, phase: f.state.photoSwitchPhase }),
+      flush: () => flushes.push({ target: f.state.photoSwitchTarget, syncs: feedback.length }) },
     requestAnimationFrame: callback => frames.push(callback), setTimeout: callback => callback(),
     // The shared paint-then-continue helper (yieldToPaint.js), visible branch.
     yieldToPaint: () => new Promise(resolve => c.requestAnimationFrame(() => c.setTimeout(resolve, 0))),
@@ -278,7 +280,7 @@ function coldFixture({ presented = null } = {}) {
     },
   });
   vm.runInContext(functionSource('switchToFile'), c);
-  return { ...f, second, third, frames, loads, preparations, feedback, presentations, provisional };
+  return { ...f, second, third, frames, loads, preparations, feedback, presentations, provisional, flushes };
 }
 // #236: a photo left during its detection tail holds provisional settings.
 // It is neither persisted nor snapshotted: its settings stay null (roll
@@ -319,6 +321,8 @@ for (const outcome of ['success', 'load-error', 'prepare-error']) {
   assert.equal(f.state.photoSwitchTarget, f.second, 'target feedback is set synchronously on click');
   assert.equal(f.state.photoSwitchPhase, 'loading');
   assert.equal(f.feedback.at(-1).target, f.second);
+  assert.deepEqual(f.flushes, [{ target: f.second, syncs: f.feedback.length }],
+    'the cold announcement is flushed in the click turn, right after its sync');
   assert.equal(f.loads.length, 0, 'decoding cannot begin before the feedback paint');
   assert.equal(f.frames.length, 1);
   assert.deepEqual(f.presentations.map(p => [p.item, p.target, p.frames]), [[f.second, f.second, 0]],
@@ -437,7 +441,7 @@ for (const warm of [true, false]) {
     persistCurrentFileSettings: () => { c.updateFileListUI(); c.refreshThumbnailStates(); c.updateFileListUI(); },
     rememberPhotoSession: () => { c.updateFileListUI(); },
     updateFileListUI: undefined, renderFileListUI: () => renders.push({ target: f.state.photoSwitchTarget, syncs: syncs.length }),
-    studioWorkspace: { sync: () => syncs.push(renders.length) },
+    studioWorkspace: { sync: () => syncs.push(renders.length), flush: noop },
     expiredAnalysisKey: null, lensMapCache: new Map(), invalidateSilverCoreCache: noop,
     restoreSnapshot: () => { c.updateFileListUI(); c.refreshThumbnailStates(); },
     applyZoomPanTransform: noop, updateUndoRedoButtons: noop, scheduleFullResolutionRender: noop,

@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 // ブラウザー用 CSS import だけを除き、翻訳データを同じモジュールから検証する。
 const source = readFileSync(new URL('./studioWorkspace.js', import.meta.url), 'utf8');
 const moduleSource = source.replace(/from '(\.\/(?:panelRelevance|fileListOrder)\.js)'/g, (_, relative) => `from '${new URL(relative, import.meta.url).href}'`).replace(/import '\.\.\/styles\/[^']+\.css';/g, '');
-const { studioText, syncPhotoSwitchFeedback, createPhotoSortControl, createPhotoSwitchPresentation } = await import('data:text/javascript;base64,' + Buffer.from(moduleSource).toString('base64'));
+const { studioText, syncPhotoSwitchFeedback, createPhotoSortControl, createPhotoSwitchPresentation, createCoalescedFlush, createDiffedWriter } = await import('data:text/javascript;base64,' + Buffer.from(moduleSource).toString('base64'));
 const keys = Object.keys(studioText.en).sort();
 for (const [lang, messages] of Object.entries(studioText)) {
   assert.deepEqual(Object.keys(messages).sort(), keys, lang);
@@ -224,3 +224,128 @@ assert.match(source, /const navigable = body\.dataset\.photoSwitching === 'true'
 assert.match(source, /panel\.inert = busy;/);
 assert.match(source, /t\(detecting === 'frame' \? 'detectingFrame' :/, 'the frame notice reports the running detection');
 console.log('studioWorkspace: shared localized sort select, callback ownership and navigation locks passed');
+
+// #261: every sync() in one synchronous burst is one flush at the next
+// microtask checkpoint, before the next task; flush() runs it in the same turn.
+{
+  let runs = 0;
+  const scheduler = createCoalescedFlush(() => { runs++; });
+  for (let i = 0; i < 10; i++) scheduler.sync();
+  assert.equal(runs, 0, 'the calling turn writes nothing');
+  await Promise.resolve();
+  assert.equal(runs, 1, 'ten syncs in one burst flush once');
+  assert.deepEqual(scheduler.counters, { syncs: 10, flushes: 1 });
+  scheduler.sync();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(runs, 2, 'a pending flush runs before the next task');
+  scheduler.sync(); scheduler.sync();
+  scheduler.flush();
+  assert.equal(runs, 3, 'flush() writes in the same turn');
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(runs, 3, 'and the queued microtask then has nothing left to do');
+  scheduler.flush();
+  assert.equal(runs, 3, 'flush() without a pending sync is a no-op');
+  await (async () => { scheduler.sync(); await null; scheduler.sync(); })();
+  await Promise.resolve();
+  assert.equal(runs, 5, 'syncs on either side of an await flush once each');
+  // A caller that starts busy work, syncs, then awaits: the flush lands before
+  // the continuation, which was queued later.
+  const order = [];
+  const busy = createCoalescedFlush(() => order.push('flush'));
+  await (async () => { busy.sync(); await null; order.push('continuation'); })();
+  assert.deepEqual(order, ['flush', 'continuation']);
+  // A flush that throws does not wedge the scheduler.
+  let fail = true;
+  const fragile = createCoalescedFlush(() => { if (fail) throw new Error('flush failed'); order.push('recovered'); });
+  fragile.sync();
+  assert.throws(() => fragile.flush(), /flush failed/);
+  fail = false;
+  fragile.sync(); fragile.flush();
+  assert.equal(order.at(-1), 'recovered');
+}
+console.log('studioWorkspace: coalesced sync flushes once per burst, before the next task, and on demand');
+
+// #261: the flush writes only what differs from the live DOM.
+{
+  const fake = () => {
+    const attributes = new Map();
+    const classes = new Set();
+    return {
+      textContent: '', title: '', disabled: false, hidden: false, inert: false, checked: false,
+      style: { display: '' }, dataset: {},
+      getAttribute: name => attributes.has(name) ? attributes.get(name) : null,
+      setAttribute: (name, value) => attributes.set(name, String(value)),
+      removeAttribute: name => attributes.delete(name),
+      classList: { contains: name => classes.has(name), toggle: (name, on) => { if (on) classes.add(name); else classes.delete(name); } },
+    };
+  };
+  const { set, counters } = createDiffedWriter();
+  const el = fake();
+  const apply = () => [
+    set(el, 'textContent', 'Export'), set(el, 'title', 'Hint'), set(el, 'disabled', 1), set(el, 'hidden', undefined),
+    set(el, 'inert', true), set(el, 'checked', false), set(el, 'style.display', 'inline-flex'),
+    set(el, '@aria-pressed', true), set(el, '@aria-current', null), set(el, '.active', 'yes'),
+    set(el, 'dataset.status', ''), set(el, 'dataset.photoSwitchTarget', undefined), set(null, 'hidden', true),
+  ];
+  assert.deepEqual(apply(), [true, true, true, false, true, false, true, true, false, true, true, false, false]);
+  assert.equal(counters.writes, 8);
+  assert.equal(el.disabled, true, 'boolean properties are written as booleans');
+  assert.equal(el.getAttribute('aria-pressed'), 'true');
+  assert.equal(el.dataset.status, '');
+  assert.ok(apply().every(written => !written), 'an unchanged flush writes nothing');
+  assert.equal(counters.writes, 8);
+  el.textContent = 'changed behind the flush';
+  el.classList.toggle('active', false);
+  set(el, '@aria-current', 'true');
+  assert.equal(apply().filter(Boolean).length, 3, 'live values, not remembered writes, decide');
+  assert.equal(el.textContent, 'Export');
+  assert.equal(el.getAttribute('aria-current'), null);
+
+  // The feedback renderer through the diffed writer: a repeat makes no writes,
+  // and rows: false leaves the rows alone.
+  const writer = createDiffedWriter();
+  const nodes = new Map(['studioPhotoSwitchFeedback', 'studioPhotoSwitchMessage', 'studioPhotoSwitchHint', 'canvasContainer'].map(id => [id, fake()]));
+  const rows = [0, 1].map(index => {
+    const button = fake();
+    button.dataset = { index: String(index), previewState: 'ready' };
+    const item = fake();
+    button.closest = () => item;
+    button.querySelector = () => null;
+    button.append = () => assert.fail('only a switch target gets a badge');
+    return button;
+  });
+  let walks = 0;
+  const doc = { body: { dataset: {} }, getElementById: id => nodes.get(id), querySelectorAll: () => { walks++; return rows; } };
+  const feedbackState = { currentFileIndex: 1, fileQueue: [{ file: { name: 'a.png' } }, { file: { name: 'b.png' } }] };
+  const render = (rowsFlag = true) => syncPhotoSwitchFeedback({ state: feedbackState, document: doc, text: key => studioText.en[key], rows: rowsFlag, set: writer.set });
+  render();
+  assert.equal(rows[1].closest().classList.contains('active'), true);
+  assert.equal(rows[1].getAttribute('aria-current'), 'true');
+  const written = writer.counters.writes;
+  render();
+  assert.equal(writer.counters.writes, written, 'an unchanged reconcile makes no DOM writes');
+  feedbackState.currentFileIndex = 0;
+  render(false);
+  assert.equal(walks, 2, 'rows: false does not query the rows');
+  assert.equal(rows[1].getAttribute('aria-current'), 'true', 'nor touch them');
+  render();
+  assert.equal(rows[0].getAttribute('aria-current'), 'true');
+  assert.equal(rows[1].getAttribute('aria-current'), null);
+}
+console.log('studioWorkspace: diffed writes compare with the live DOM and skip unchanged filmstrip rows');
+
+// #261: Studio fires no synthetic window resize (ResizeObservers in main.js
+// follow the viewer, histogram and curve), and one flush owns these fields.
+assert.doesNotMatch(source, /new Event\('resize'\)/);
+assert.doesNotMatch(mainSource, /new Event\('resize'\)/);
+assert.match(source, /for \(const id of \['exportBtn', 'exportSprocketBtn', 'exportSingleBtn'\]\) \$\(id\)\?\.removeAttribute\('data-i18n'\)/);
+const functionBody = name => {
+  const start = mainSource.indexOf(`function ${name}(`);
+  assert.ok(start >= 0, name);
+  return mainSource.slice(start, mainSource.indexOf('\n    }\n', start));
+};
+assert.doesNotMatch(functionBody('syncBatchUIState'), /getElementById\('(saveSettingsBtn|applyToSelectedBtn)'\)/, 'sync owns their display');
+assert.doesNotMatch(functionBody('updateExportUI'), /getElementById\('export(Btn|SprocketBtn|SingleBtn)'\)/, 'sync owns the export labels');
+assert.doesNotMatch(functionBody('updateExportButtons'), /(exportBtn|exportSprocketBtn)\.disabled =|getElementById\('export(Btn|SprocketBtn)'\)/, 'sync owns their disabled state');
+assert.match(functionBody('updateExportButtons'), /exportSingleBtn\.disabled = exportLocked/, 'sync does not own exportSingleBtn.disabled');
+console.log('studioWorkspace: no synthetic resize, and single writers for the export labels and batch buttons');

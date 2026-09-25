@@ -238,34 +238,135 @@ export function createPhotoSwitchPresentation(feedback, { label = () => '' } = {
   return presentation;
 }
 
+// Elements the Studio flush writes (or reads), looked up once at mount.
+const STUDIO_SYNC_IDS = [
+  'studioBatchActions', 'uploadPlaceholder', 'studioSampleHint', 'studioTab-expired', 'studioExpiredMode',
+  'studioColorCorrect', 'studioColorCorrectStatus', 'studioImportAutoCrop', 'studioAutoCrop', 'studioRestoreFrame',
+  'studioConfirmAnalysis', 'studioAnalysisStatus', 'studioFrameNotice', 'studioColorControls', 'studioHistory',
+  'studioExport', 'studioStatus', 'studioFilename', 'studioSelection', 'studioSync', 'exportZipBtn', 'exportSingleBtn',
+  'exportAllBtn', 'studioUndo', 'studioRedo', 'undoBtn', 'redoBtn', 'studioRetry', 'studioApplyLens', 'studioResetAll',
+  'studioRestart', 'exportSprocketBtn', 'studioExportBorder', 'studioClearQueue', 'studioSaveProject',
+  'studioOpenProject', 'studioRestoreProject', 'studioMergeAverage', 'studioMergeHdr', 'studioNewSession', 'studioAdd',
+  'studioLoupe', 'saveSettingsBtn', 'applyToSelectedBtn', 'exportBtn', 'filmSettingsSection',
+  'studioPhotoSwitchFeedback', 'studioPhotoSwitchMessage', 'studioPhotoSwitchHint', 'canvasContainer',
+];
+// Shown once a photo is converted, hidden before.
+const STUDIO_STEP3_SECTIONS = ['toneSection', 'colorSection', 'cmySection', 'additionalSection', 'consoleSection',
+  'aiBrushSection', 'dustRemovalSection', 'advancedSection', 'enlargerSection', 'testStripSection', 'paperSection',
+  'dodgeBurnSection', 'flatFieldSection', 'labMatchSection', 'metadataSection', 'recipeSection', 'expiredSection'];
+
+// One DOM write for the Studio flush. Keys: a property ('textContent',
+// 'disabled', 'hidden', 'inert', 'checked', 'title'), '@attr' (null removes
+// it), '.class' (toggled by truthiness), 'style.prop' or 'dataset.key'
+// (undefined deletes it).
+function writeValue(el, key, value) {
+  if (key[0] === '@') {
+    if (value == null) el.removeAttribute(key.slice(1));
+    else el.setAttribute(key.slice(1), value);
+  } else if (key[0] === '.') el.classList.toggle(key.slice(1), Boolean(value));
+  else if (key.startsWith('style.')) el.style[key.slice(6)] = value;
+  else if (key.startsWith('dataset.')) {
+    if (value === undefined) delete el.dataset[key.slice(8)];
+    else el.dataset[key.slice(8)] = value;
+  } else el[key] = value;
+}
+
+const writeDirectly = (el, key, value) => { if (el) writeValue(el, key, value); };
+const BOOLEAN_PROPERTIES = new Set(['disabled', 'hidden', 'inert', 'checked']);
+
+// The same writes, made only where the live DOM differs. It compares with the
+// element itself rather than a remembered last write, because legacy code
+// still changes some of these nodes behind the flush's back. None of these
+// reads forces layout.
+export function createDiffedWriter() {
+  const counters = { writes: 0 };
+  function set(el, key, value) {
+    if (!el) return false;
+    let current;
+    let next = value;
+    if (key[0] === '@') {
+      current = el.getAttribute(key.slice(1));
+      next = value == null ? null : String(value);
+    } else if (key[0] === '.') {
+      current = el.classList.contains(key.slice(1));
+      next = Boolean(value);
+    } else if (key.startsWith('style.')) current = el.style[key.slice(6)];
+    else if (key.startsWith('dataset.')) {
+      current = el.dataset[key.slice(8)];
+      next = value === undefined ? undefined : String(value);
+    } else {
+      current = el[key];
+      if (key === 'textContent' || key === 'title') next = String(value ?? '');
+      else if (BOOLEAN_PROPERTIES.has(key)) next = Boolean(value);
+    }
+    if (current === next) return false;
+    writeValue(el, key, next);
+    counters.writes++;
+    return true;
+  }
+  return { set, counters };
+}
+
+// sync() marks the chrome stale; every call in one synchronous burst becomes a
+// single run at the next microtask checkpoint. That checkpoint comes before
+// the next task, so inert and disabled still apply before a queued click; a
+// requestAnimationFrame flush would not. flush() runs a pending one now, for
+// callers that read the result in the same turn.
+export function createCoalescedFlush(run, { schedule = queueMicrotask } = {}) {
+  const counters = { syncs: 0, flushes: 0 };
+  let dirty = false;
+  let queued = false;
+  const flushNow = () => {
+    dirty = false;
+    counters.flushes++;
+    run();
+  };
+  return {
+    counters,
+    sync() {
+      counters.syncs++;
+      dirty = true;
+      if (queued) return;
+      queued = true;
+      schedule(() => {
+        queued = false;
+        if (dirty) flushNow();
+      });
+    },
+    flush() {
+      if (dirty) flushNow();
+    },
+  };
+}
+
 // Keep switching feedback separate from background thumbnail work: a tile can
 // have its canonical preview ready while its full editor source is still loading.
-export function syncPhotoSwitchFeedback({ state, document, text, presentation = null }) {
+// The Studio flush passes its diffed writer, and `rows: false` when neither the
+// target, the current photo, the rendered rows nor the language changed.
+export function syncPhotoSwitchFeedback({ state, document, text, rows = true, set = writeDirectly, presentation = null }) {
   const item = document.body.dataset.photoSwitching === 'true'
     && state.fileQueue.includes(state.photoSwitchTarget) ? state.photoSwitchTarget : null;
   const message = item ? text(state.photoSwitchPhase === 'preparing' ? 'preparingPhoto' : 'openingPhoto')
     .replace('{name}', item.file.name) : '';
-  const feedback = document.getElementById('studioPhotoSwitchFeedback');
-  feedback.hidden = !item;
+  set(document.getElementById('studioPhotoSwitchFeedback'), 'hidden', !item);
   // A presentation belongs to exactly one target and ends with the veil.
   if (presentation && presentation.target !== item) presentation.clear();
   else presentation?.relabel();
-  document.getElementById('studioPhotoSwitchMessage').textContent = message;
-  document.getElementById('studioPhotoSwitchHint').textContent = item ? text('photoSwitchHint') : '';
-  document.getElementById('canvasContainer').setAttribute('aria-busy', String(Boolean(item)));
+  set(document.getElementById('studioPhotoSwitchMessage'), 'textContent', message);
+  set(document.getElementById('studioPhotoSwitchHint'), 'textContent', item ? text('photoSwitchHint') : '');
+  set(document.getElementById('canvasContainer'), '@aria-busy', String(Boolean(item)));
+  if (!rows) return item ? { item, message } : null;
   for (const button of document.querySelectorAll('#fileListItems .file-list-name')) {
     const target = Boolean(item && state.fileQueue[Number(button.dataset.index)] === item);
-    if (target) button.dataset.photoSwitchTarget = 'true';
-    else delete button.dataset.photoSwitchTarget;
+    set(button, 'dataset.photoSwitchTarget', target ? 'true' : undefined);
     // The list renderer memoizes its last active index. Immediate feedback
     // changes the DOM between list renders, so also reconcile on cleanup:
     // returning to the outgoing photo may otherwise be a memoized no-op.
     const active = item ? target : Number(button.dataset.index) === state.currentFileIndex;
-    button.closest('.file-list-item')?.classList.toggle('active', active);
-    if (active) button.setAttribute('aria-current', 'true');
-    else button.removeAttribute('aria-current');
+    set(button.closest('.file-list-item'), '.active', active);
+    set(button, '@aria-current', active ? 'true' : null);
     const previewPending = button.dataset.previewState === 'pending';
-    button.setAttribute('aria-busy', String(target || previewPending));
+    set(button, '@aria-busy', String(target || previewPending));
     let badge = button.querySelector('.file-list-switch-state');
     if (target && !badge) {
       badge = document.createElement('span');
@@ -273,8 +374,8 @@ export function syncPhotoSwitchFeedback({ state, document, text, presentation = 
       button.append(badge);
     }
     if (badge) {
-      badge.hidden = !target;
-      badge.textContent = target ? text('photoSwitchTile') : '';
+      set(badge, 'hidden', !target);
+      set(badge, 'textContent', target ? text('photoSwitchTile') : '');
     }
   }
   return item ? { item, message } : null;
@@ -289,9 +390,14 @@ export function createPhotoSortControl({ select, onSortFiles }) {
     if (!select.disabled) onSortFiles?.(normalizeFileListSort(select.value));
   });
   return {
+    // Writes only what differs; returns the number of writes.
     sync({ state, busy, photoSwitching, exportLocked }) {
-      select.value = normalizeFileListSort(state.fileListSort);
-      select.disabled = !state.fileQueue.length || Boolean(state.cropping || exportLocked || (busy && !photoSwitching));
+      let writes = 0;
+      const value = normalizeFileListSort(state.fileListSort);
+      if (select.value !== value) { select.value = value; writes++; }
+      const disabled = !state.fileQueue.length || Boolean(state.cropping || exportLocked || (busy && !photoSwitching));
+      if (select.disabled !== disabled) { select.disabled = disabled; writes++; }
+      return writes;
     },
   };
 }
@@ -301,6 +407,10 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
   const t = key => (studioText[getLanguage()] || studioText.en)[key];
   const move = (id, target) => target.append($(id));
   const body = document.body;
+  // Every Studio chrome write goes through this, so a flush with nothing to
+  // change touches no DOM.
+  const writer = createDiffedWriter();
+  const set = writer.set;
   body.classList.add('studio');
   const header = $('studioHeader');
   header.className = 'studio-header';
@@ -341,9 +451,16 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
     try { localStorage.setItem('nc_advanced_panels_v1', advancedPanels ? 'on' : 'off'); } catch {}
     applyPanelRelevance(getState());
   });
+  const advancedLabel = advancedButton.querySelector('span');
+  const relevanceNodes = new Map();
+  const relevanceNode = id => {
+    if (!relevanceNodes.get(id)) relevanceNodes.set(id, $(id));
+    return relevanceNodes.get(id);
+  };
+  let consoleJumps = [];
   function applyPanelRelevance(state) {
-    advancedButton.setAttribute('aria-pressed', String(advancedPanels));
-    advancedButton.querySelector('span').textContent = getText?.('advancedPanels') || 'Advanced';
+    set(advancedButton, '@aria-pressed', String(advancedPanels));
+    set(advancedLabel, 'textContent', getText?.('advancedPanels') || 'Advanced');
     const visible = panelRelevance({
       filmType: state.filmType, positiveMode: state.positiveMode,
       expiredEnabled: state.expiredEnabled || state.expiredSession,
@@ -354,10 +471,10 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
       studioLabMatch: Boolean(state.look), paperSection: state.corePaper && state.corePaper !== 'none',
       enlargerSection: state.controlParadigm === 'enlarger',
       studioDodgeBurn: Boolean(state.localExposure?.strokes?.length),
-      studioTestStrip: Boolean($('testStripTiles')?.children.length),
+      studioTestStrip: Boolean(relevanceNode('testStripTiles')?.children.length),
     } });
-    for (const [id, show] of Object.entries(visible)) if ($(id)) $(id).hidden = !show;
-    document.querySelectorAll('[data-jump="consoleSection"]').forEach(button => { button.hidden = !visible.consoleSection; });
+    for (const [id, show] of Object.entries(visible)) set(relevanceNode(id), 'hidden', !show);
+    for (const button of consoleJumps) set(button, 'hidden', !visible.consoleSection);
   }
   const exportSettings = document.createElement('details');
   exportSettings.id = 'studioExportSettings';
@@ -445,8 +562,8 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
     const target = $(button.dataset.jump);
     if (target.tagName === 'DETAILS') target.open = true;
     target.scrollIntoView({ block: 'start' });
-    resize();
   }));
+  consoleJumps = [...quickColor.querySelectorAll('[data-jump="consoleSection"]')];
   panes.edit.append(quickColor);
   let activeTab = 'edit';
   function selectTab(key) {
@@ -457,7 +574,6 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
       $(`studioTab-${name}`).tabIndex = name === key ? 0 : -1;
     }
     panel.scrollTop = 0;
-    requestAnimationFrame(resize);
     onTabSelect(key);
   }
   tabs.addEventListener('keydown', event => {
@@ -671,33 +787,36 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
   $('studioNewSession').addEventListener('click', async () => {
     if (!getState().originalImageData || await onConfirm(t('newConfirm'))) onNewSession();
   });
+  const togglePanel = $('studioTogglePanel');
+  const toggleStrip = $('studioToggleStrip');
+  const toggleLightTable = $('studioToggleLightTable');
+  // Layout changes need no event: main.js observes the elements whose size
+  // matters (viewer, histogram, curve).
   const syncLayout = () => {
     const panelHidden = body.classList.contains('studio-panel-hidden');
     const stripHidden = body.classList.contains('studio-strip-hidden');
-    panel.hidden = panelHidden;
-    $('studioTogglePanel').textContent = t(panelHidden ? 'showPanel' : 'hidePanel');
-    $('studioTogglePanel').setAttribute('aria-expanded', String(!panelHidden));
-    $('studioToggleStrip').setAttribute('aria-expanded', String(!stripHidden));
-    $('studioToggleStrip').title = t(stripHidden ? 'showStrip' : 'hideStrip');
+    set(panel, 'hidden', panelHidden);
+    set(togglePanel, 'textContent', t(panelHidden ? 'showPanel' : 'hidePanel'));
+    set(togglePanel, '@aria-expanded', String(!panelHidden));
+    set(toggleStrip, '@aria-expanded', String(!stripHidden));
+    set(toggleStrip, 'title', t(stripHidden ? 'showStrip' : 'hideStrip'));
     const lightTable = body.classList.contains('studio-lighttable');
-    $('studioToggleLightTable').setAttribute('aria-pressed', String(lightTable));
-    $('studioToggleLightTable').dataset.studio = lightTable ? 'stripView' : 'lightTable';
-    $('studioToggleLightTable').textContent = t(lightTable ? 'stripView' : 'lightTable');
-    $('studioToggleLightTable').title = t('lightTableHint');
+    set(toggleLightTable, '@aria-pressed', String(lightTable));
+    set(toggleLightTable, 'dataset.studio', lightTable ? 'stripView' : 'lightTable');
+    set(toggleLightTable, 'textContent', t(lightTable ? 'stripView' : 'lightTable'));
+    set(toggleLightTable, 'title', t('lightTableHint'));
   };
   // The light table is the film strip grown into a grid: turning it on also
   // brings a hidden strip back.
-  $('studioToggleLightTable').addEventListener('click', () => {
+  toggleLightTable.addEventListener('click', () => {
     const on = body.classList.toggle('studio-lighttable');
     if (on) body.classList.remove('studio-strip-hidden');
     syncLayout();
-    requestAnimationFrame(resize);
   });
-  for (const [id, className] of [['studioTogglePanel', 'studio-panel-hidden'], ['studioToggleStrip', 'studio-strip-hidden']]) {
-    $(id).addEventListener('click', () => {
+  for (const [button, className] of [[togglePanel, 'studio-panel-hidden'], [toggleStrip, 'studio-strip-hidden']]) {
+    button.addEventListener('click', () => {
       body.classList.toggle(className);
       syncLayout();
-      requestAnimationFrame(resize);
     });
   }
 
@@ -720,133 +839,185 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
     if (!$('studioMenu').contains(event.target)) $('studioMenu').open = false;
     if (!$('studioBatchMenu').contains(event.target)) $('studioBatchMenu').open = false;
   });
-  const resize = () => window.dispatchEvent(new Event('resize'));
-  document.querySelectorAll('.studio-drawer').forEach(drawer => drawer.addEventListener('toggle', resize));
   selectTab('edit');
   // 新 UI へ部品を配置したら、受け渡し用の空コンテナーを破棄する。
   $('studioHeaderSource')?.remove();
   $('studioExportSource')?.remove();
-  let observedReady;
+  // The flush owns these labels. Their markup data-i18n would make
+  // setLanguage write them as well.
+  for (const id of ['exportBtn', 'exportSprocketBtn', 'exportSingleBtn']) $(id)?.removeAttribute('data-i18n');
+
+  // Everything the flush writes, resolved once: Studio moves these elements
+  // into place at mount and never recreates them.
+  const node = Object.fromEntries(STUDIO_SYNC_IDS.map(id => [id, $(id)]));
+  const sectionNodes = STUDIO_STEP3_SECTIONS.map(id => $(id));
+  const panelBlocks = ['autoFrameSettingsSection', 'sprocketSettingsSection'].map(id => $(id));
+  const proxies = [...document.querySelectorAll('[data-studio-proxy]')].map(button => [button, $(button.dataset.studioProxy)]);
+  const lookButtons = [...basic.querySelectorAll('[data-model]')];
+  const uploadText = node.uploadPlaceholder.querySelector('.upload-text');
+  // syncPhotoSwitchFeedback's view of the document, with the cached lookups.
+  const feedbackDocument = {
+    body,
+    getElementById: id => node[id] || $(id),
+    querySelectorAll: selector => document.querySelectorAll(selector),
+    createElement: tag => document.createElement(tag),
+  };
+  const privacyTitle = node.uploadPlaceholder.querySelector('[data-i18n="privacyBannerTitle"]');
+  // [data-studio] nodes are created at mount only; collect them again when the
+  // language changes, which is when setLanguage may have rewritten the markup.
+  let studioNodes = [];
+  let studioNodesLanguage = null;
+  // Filmstrip rows are reconciled only when the switch target, the current
+  // photo, the rendered rows (markRowsChanged) or the language changed.
+  let rowsVersion = 0;
+  let rowsKey = [];
+  let rowWalks = 0;
+  let lastFlushWrites = 0;
+
+  function flushNow() {
+    const state = getState();
+    const language = getLanguage();
+    if (language !== studioNodesLanguage) {
+      studioNodes = [...document.querySelectorAll('[data-studio]')];
+      studioNodesLanguage = language;
+    }
+    const loaded = Boolean(state.originalImageData);
+    const ready = loaded && state.currentStep >= 3 && Boolean(state.processedImageData);
+    // The desktop hot-folder controls are created after mount.
+    const watcher = node.studioWatchControls || (node.studioWatchControls = $('studioWatchControls'));
+    const watchParent = loaded ? node.studioBatchActions : node.uploadPlaceholder;
+    if (watcher && watcher.parentElement !== watchParent) { watchParent.append(watcher); writer.counters.writes++; }
+    set(body, '.studio-loaded', loaded);
+    set(body, '.studio-ready', ready);
+    // The sampling hint names the kind of sample; the loop below writes it.
+    set(node.studioSampleHint, 'dataset.studio', state.samplingMode === 'filmBase' ? 'baseSampleHint' : 'sampleHint');
+    for (const element of studioNodes) set(element, 'textContent', t(element.dataset.studio));
+    const expiredFlow = Boolean(state.expiredSession || state.expiredEnabled);
+    set(body, '.studio-expired', expiredFlow);
+    set(node['studioTab-expired'], 'hidden', !expiredFlow);
+    if (!expiredFlow && activeTab === 'expired') selectTab('edit');
+    set(node.studioExpiredMode, 'textContent', t(state.expiredSession ? 'expiredModeOff' : 'expiredModeOn'));
+    set(node.studioExpiredMode, '@aria-pressed', String(Boolean(state.expiredSession)));
+    const photoSwitching = body.dataset.photoSwitching === 'true';
+    const target = photoSwitching && state.fileQueue.includes(state.photoSwitchTarget) ? state.photoSwitchTarget : null;
+    const nextRowsKey = [target, state.currentFileIndex, rowsVersion, language];
+    const rows = nextRowsKey.some((value, index) => value !== rowsKey[index]);
+    rowsKey = nextRowsKey;
+    if (rows) rowWalks++;
+    const switching = syncPhotoSwitchFeedback({ state, document: feedbackDocument, text: t, rows, set, presentation: photoSwitchPresentation });
+    // A RAW import opens through the veil before anything is decoded: lay
+    // the viewer and filmstrip out instead of the empty state.
+    set(body, '.studio-opening', !loaded && Boolean(switching));
+    const busy = body.dataset.studioBusy === 'true' || Boolean(switching);
+    const locked = busy || state.cropping || isExportLocked();
+    set(node.studioColorCorrect, 'disabled', !ready || locked);
+    set(node.studioColorCorrectStatus, 'hidden', !ready || !state.expiredEnabled || !state.expiredAnalysis);
+    for (const id of ['studioImportAutoCrop', 'studioAutoCrop']) set(node[id], 'checked', Boolean(state.autoFrame.onImport));
+    set(node.studioRestoreFrame, 'disabled', !loaded || locked || !(state.cropRegion || state.rotationAngle || state.mirrored));
+    const frameMeta = state.autoFrame.lastDiagnostics;
+    // The provisional positive is shown while the frame detection finishes.
+    const detecting = body.dataset.studioDetecting;
+    set(node.studioConfirmAnalysis, 'disabled', !loaded || locked || state.cropping || busy);
+    set(node.studioAnalysisStatus, 'textContent', t(frameMeta?.analysisNeedsReview ? 'analysisReview' : 'analysisHint'));
+    set(node.studioFrameNotice, 'hidden', Boolean(switching) || !ready || (detecting !== 'frame' && !frameMeta?.importAuto) || Boolean(state.samplingMode));
+    set(node.studioFrameNotice, 'textContent', t(detecting === 'frame' ? 'detectingFrame' : frameMeta?.analysisNeedsReview ? 'analysisReview' : frameMeta?.appliedMode === 'crop' ? 'frameApplied' : frameMeta?.frameIncomplete ? 'frameIncomplete' : frameMeta?.imageArea ? 'frameAnalysis' : 'frameReview'));
+    set(node.studioFrameNotice, 'dataset.status', detecting === 'frame' ? 'detecting' : frameMeta?.appliedMode || '');
+    set(node.studioFrameNotice, 'disabled', Boolean(state.cropping || busy));
+    set(panel, 'inert', busy);
+    // Photo activation locks editing, not navigation: rapid browsing must
+    // be able to supersede a slow decode, or the detection tail of a photo
+    // already on screen, without touching the old photo.
+    const navigable = body.dataset.photoSwitching === 'true' || Boolean(detecting);
+    set(strip, 'inert', busy && !navigable);
+    writer.counters.writes += photoSort.sync({ state, busy, photoSwitching: navigable, exportLocked: isExportLocked() });
+    set(tabs, '@aria-label', t('tabs'));
+    set(quickColor, '@aria-label', t('quickColor'));
+    syncLayout();
+    set(node.studioColorControls, 'disabled', Boolean(!ready || busy || state.cropping));
+    set(node.studioHistory, 'hidden', !loaded);
+    set(node.studioHistory, 'inert', busy);
+    set(node.studioExport, 'hidden', !loaded);
+    // Only the viewer-local live region announces a pending activation, so
+    // assistive technology does not read two competing progress messages.
+    set(node.studioStatus, '@aria-live', switching ? 'off' : 'polite');
+    set(node.studioStatus, 'textContent', state.samplingMode
+      ? t(state.samplingMode === 'filmBase' ? 'baseSampleHint' : 'sampleHint')
+      : switching?.message || t(busy ? 'processing' : ready ? 'ready' : loaded ? 'failed' : 'empty'));
+    set(node.studioFilename, 'textContent', switching?.item.file.name || state.loadedFile?.name || '');
+    set(node.studioSampleHint, 'hidden', !state.samplingMode);
+    const count = state.fileQueue.filter(item => item.selected).length;
+    const otherSelected = state.fileQueue.some(item => item.selected && item.file !== state.loadedFile);
+    set(node.studioSelection, 'textContent', t('selected').replace('{count}', count));
+    set(node.studioSync, 'disabled', Boolean(!ready || busy || state.cropping || isExportLocked() || !otherSelected));
+    set(node.studioSync, 'title', t('syncHint'));
+    set(node.exportZipBtn, 'textContent', t('exportSelected').replace('{count}', count));
+    set(node.exportSingleBtn, 'textContent', t(state.exportFormat === 'dng' ? 'exportCurrentDng' : 'exportCurrent'));
+    set(node.exportAllBtn, 'textContent', t('exportIndividualSelected').replace('{count}', count));
+    set(node.studioSelection, 'title', t('selectionHint'));
+    set(node.studioUndo, 'disabled', busy || node.undoBtn.disabled);
+    set(node.studioRedo, 'disabled', busy || node.redoBtn.disabled);
+    set(node.studioRetry, 'disabled', Boolean(!loaded || busy || state.cropping));
+    set(node.studioApplyLens, 'disabled', Boolean(!loaded || locked));
+    set(node.studioResetAll, 'disabled', Boolean(!ready || locked));
+    set(node.studioRestart, 'disabled', Boolean(!loaded || locked));
+    set(node.exportSprocketBtn, 'disabled', Boolean(!ready || locked || state.exportFormat === 'dng'));
+    set(node.studioExportBorder, 'checked', Boolean(state.exportSprocketHolesEnabled));
+    set(node.studioExportBorder, 'disabled', Boolean(!ready || locked));
+    set(node.studioClearQueue, 'disabled', Boolean(locked || !state.fileQueue.length));
+    set(node.studioSaveProject, 'disabled', Boolean(locked || !state.fileQueue.length));
+    set(node.studioOpenProject, 'disabled', Boolean(locked));
+    set(node.studioRestoreProject, 'hidden', !state.projectRecoveryAvailable);
+    const mergeable = !locked && count >= 2 && count <= 5;
+    set(node.studioMergeAverage, 'disabled', !mergeable);
+    set(node.studioMergeHdr, 'disabled', !mergeable);
+    set(node.studioNewSession, 'disabled', Boolean(locked));
+    set(node.studioAdd, 'disabled', Boolean(locked));
+    set(node.studioLoupe, 'disabled', Boolean(locked));
+    set(node.studioLoupe, 'title', t('loupeHint'));
+    set(togglePanel, 'disabled', Boolean(state.cropping));
+    set(toggleStrip, 'disabled', Boolean(state.cropping));
+    set(toggleLightTable, 'disabled', Boolean(state.cropping));
+    // Sole writer of these two buttons' display in Studio.
+    set(node.saveSettingsBtn, 'style.display', 'inline-flex');
+    set(node.applyToSelectedBtn, 'style.display', 'inline-flex');
+    set(node.saveSettingsBtn, 'disabled', Boolean(!ready || locked));
+    set(node.applyToSelectedBtn, 'disabled', Boolean(!ready || locked || !otherSelected));
+    for (const [button, source] of proxies) set(button, 'disabled', Boolean(!loaded || locked || source.disabled));
+    // Sole writer of the export button's label and disabled state in Studio.
+    set(node.exportBtn, 'disabled', Boolean(!ready || busy || state.cropping || isExportLocked()));
+    set(node.exportBtn, 'textContent', t('export'));
+    set(uploadText, '@hidden', '');
+    set(privacyTitle, 'textContent', t('importHint'));
+    for (const button of lookButtons) set(button, '@aria-pressed', String(state.coreColorModel === button.dataset.model));
+    if (loaded) {
+      set(panel, 'style.display', 'flex');
+      set(node.filmSettingsSection, 'style.display', 'block');
+      for (const section of panelBlocks) set(section, 'style.display', 'block');
+      for (const section of sectionNodes) set(section, 'style.display', ready ? 'block' : 'none');
+    }
+    applyPanelRelevance(state);
+  }
+
+  const scheduler = createCoalescedFlush(() => {
+    const before = writer.counters.writes;
+    try {
+      flushNow();
+    } finally {
+      lastFlushWrites = writer.counters.writes - before;
+    }
+  });
+
   return {
     text: t,
     selectTab,
     photoSwitchPresentation,
-    sync() {
-      const state = getState();
-      const loaded = Boolean(state.originalImageData);
-      const ready = loaded && state.currentStep >= 3 && Boolean(state.processedImageData);
-      const watcher = $('studioWatchControls');
-      const watchParent = loaded ? $('studioBatchActions') : $('uploadPlaceholder');
-      if (watcher && watcher.parentElement !== watchParent) watchParent.append(watcher);
-      body.classList.toggle('studio-loaded', loaded);
-      body.classList.toggle('studio-ready', ready);
-      document.querySelectorAll('[data-studio]').forEach(el => { el.textContent = t(el.dataset.studio); });
-      const expiredFlow = Boolean(state.expiredSession || state.expiredEnabled);
-      body.classList.toggle('studio-expired', expiredFlow);
-      $('studioTab-expired').hidden = !expiredFlow;
-      if (!expiredFlow && activeTab === 'expired') selectTab('edit');
-      $('studioExpiredMode').textContent = t(state.expiredSession ? 'expiredModeOff' : 'expiredModeOn');
-      $('studioExpiredMode').setAttribute('aria-pressed', String(Boolean(state.expiredSession)));
-      const switching = syncPhotoSwitchFeedback({ state, document, text: t, presentation: photoSwitchPresentation });
-      // A RAW import opens through the veil before anything is decoded: lay
-      // the viewer and filmstrip out instead of the empty state.
-      body.classList.toggle('studio-opening', !loaded && Boolean(switching));
-      const busy = body.dataset.studioBusy === 'true' || Boolean(switching);
-      const locked = busy || state.cropping || isExportLocked();
-      $('studioColorCorrect').disabled = !ready || locked;
-      $('studioColorCorrectStatus').hidden = !ready || !state.expiredEnabled || !state.expiredAnalysis;
-      for (const id of ['studioImportAutoCrop', 'studioAutoCrop']) $(id).checked = Boolean(state.autoFrame.onImport);
-      $('studioRestoreFrame').disabled = !loaded || locked || !(state.cropRegion || state.rotationAngle || state.mirrored);
-      const frameMeta = state.autoFrame.lastDiagnostics;
-      // The provisional positive is shown while the frame detection finishes.
-      const detecting = body.dataset.studioDetecting;
-      $('studioConfirmAnalysis').disabled = !loaded || locked || state.cropping || busy;
-      $('studioAnalysisStatus').textContent = t(frameMeta?.analysisNeedsReview ? 'analysisReview' : 'analysisHint');
-      $('studioFrameNotice').hidden = Boolean(switching) || !ready || (detecting !== 'frame' && !frameMeta?.importAuto) || state.samplingMode;
-      $('studioFrameNotice').textContent = t(detecting === 'frame' ? 'detectingFrame' : frameMeta?.analysisNeedsReview ? 'analysisReview' : frameMeta?.appliedMode === 'crop' ? 'frameApplied' : frameMeta?.frameIncomplete ? 'frameIncomplete' : frameMeta?.imageArea ? 'frameAnalysis' : 'frameReview');
-      $('studioFrameNotice').dataset.status = detecting === 'frame' ? 'detecting' : frameMeta?.appliedMode || '';
-      $('studioFrameNotice').disabled = state.cropping || busy;
-      panel.inert = busy;
-      // Photo activation locks editing, not navigation: rapid browsing must
-      // be able to supersede a slow decode, or the detection tail of a photo
-      // already on screen, without touching the old photo.
-      const navigable = body.dataset.photoSwitching === 'true' || Boolean(detecting);
-      strip.inert = busy && !navigable;
-      photoSort.sync({ state, busy, photoSwitching: navigable, exportLocked: isExportLocked() });
-      tabs.setAttribute('aria-label', t('tabs'));
-      quickColor.setAttribute('aria-label', t('quickColor'));
-      syncLayout();
-      $('studioColorControls').disabled = !ready || busy || state.cropping;
-      $('studioHistory').hidden = !loaded;
-      $('studioHistory').inert = busy;
-      $('studioExport').hidden = !loaded;
-      // Only the viewer-local live region announces a pending activation, so
-      // assistive technology does not read two competing progress messages.
-      $('studioStatus').setAttribute('aria-live', switching ? 'off' : 'polite');
-      $('studioStatus').textContent = switching?.message || t(busy ? 'processing' : ready ? 'ready' : loaded ? 'failed' : 'empty');
-      $('studioFilename').textContent = switching?.item.file.name || state.loadedFile?.name || '';
-      $('studioSampleHint').hidden = !state.samplingMode;
-      $('studioSampleHint').textContent = t(state.samplingMode === 'filmBase' ? 'baseSampleHint' : 'sampleHint');
-      if (state.samplingMode) $('studioStatus').textContent = $('studioSampleHint').textContent;
-      const count = state.fileQueue.filter(item => item.selected).length;
-      $('studioSelection').textContent = t('selected').replace('{count}', count);
-      $('studioSync').disabled = !ready || busy || state.cropping || isExportLocked() || !state.fileQueue.some(item => item.selected && item.file !== state.loadedFile);
-      $('studioSync').title = t('syncHint');
-      $('exportZipBtn').textContent = t('exportSelected').replace('{count}', count);
-      $('exportSingleBtn').textContent = t(state.exportFormat === 'dng' ? 'exportCurrentDng' : 'exportCurrent');
-      $('exportAllBtn').textContent = t('exportIndividualSelected').replace('{count}', count);
-      $('studioSelection').title = t('selectionHint');
-      $('studioUndo').disabled = busy || $('undoBtn').disabled;
-      $('studioRedo').disabled = busy || $('redoBtn').disabled;
-      $('studioRetry').disabled = !loaded || busy || state.cropping;
-      $('studioApplyLens').disabled = !loaded || locked;
-      $('studioResetAll').disabled = !ready || locked;
-      $('studioRestart').disabled = !loaded || locked;
-      $('exportSprocketBtn').disabled = !ready || locked || state.exportFormat === 'dng';
-      $('studioExportBorder').checked = Boolean(state.exportSprocketHolesEnabled);
-      $('studioExportBorder').disabled = !ready || locked;
-      $('studioClearQueue').disabled = locked || !state.fileQueue.length;
-      $('studioSaveProject').disabled = locked || !state.fileQueue.length;
-      $('studioOpenProject').disabled = locked;
-      $('studioRestoreProject').hidden = !state.projectRecoveryAvailable;
-      const mergeable = !locked && count >= 2 && count <= 5;
-      $('studioMergeAverage').disabled = !mergeable;
-      $('studioMergeHdr').disabled = !mergeable;
-      $('studioNewSession').disabled = locked;
-      $('studioAdd').disabled = locked;
-      $('studioLoupe').disabled = locked;
-      $('studioLoupe').title = t('loupeHint');
-      $('studioTogglePanel').disabled = state.cropping;
-      $('studioToggleStrip').disabled = state.cropping;
-      $('studioToggleLightTable').disabled = state.cropping;
-      $('saveSettingsBtn').style.display = 'inline-flex';
-      $('applyToSelectedBtn').style.display = 'inline-flex';
-      $('saveSettingsBtn').disabled = !ready || locked;
-      $('applyToSelectedBtn').disabled = !ready || locked || !state.fileQueue.some(item => item.selected && item.file !== state.loadedFile);
-      document.querySelectorAll('[data-studio-proxy]').forEach(button => {
-        button.disabled = !loaded || locked || $(button.dataset.studioProxy).disabled;
-      });
-      $('exportBtn').disabled = !ready || busy || state.cropping || isExportLocked();
-      $('exportBtn').textContent = t('export');
-      $('uploadPlaceholder').querySelector('.upload-text')?.setAttribute('hidden', '');
-      const privacy = $('uploadPlaceholder').querySelector('[data-i18n="privacyBannerTitle"]');
-      if (privacy) privacy.textContent = t('importHint');
-      basic.querySelectorAll('[data-model]').forEach(button => {
-        button.setAttribute('aria-pressed', String(state.coreColorModel === button.dataset.model));
-      });
-      if (loaded) {
-        panel.style.display = 'flex';
-        $('filmSettingsSection').style.display = 'block';
-        ['autoFrameSettingsSection', 'sprocketSettingsSection'].forEach(id => { $(id).style.display = 'block'; });
-        ['toneSection', 'colorSection', 'cmySection', 'additionalSection', 'consoleSection', 'aiBrushSection', 'dustRemovalSection', 'advancedSection', 'enlargerSection', 'testStripSection', 'paperSection', 'dodgeBurnSection', 'flatFieldSection', 'labMatchSection', 'metadataSection', 'recipeSection', 'expiredSection'].forEach(id => {
-          $(id).style.display = ready ? 'block' : 'none';
-        });
-      }
-      applyPanelRelevance(state);
-      if (ready !== observedReady) {
-        observedReady = ready;
-        requestAnimationFrame(resize);
-      }
-    }
+    sync: scheduler.sync,
+    // Only the cold-switch announcement needs its writes in the same turn.
+    flush: scheduler.flush,
+    // The file list rendered: its rows may have been recreated or re-marked.
+    markRowsChanged() {
+      rowsVersion++;
+    },
+    debugCounters: () => ({ ...scheduler.counters, writes: writer.counters.writes, lastFlushWrites, rowWalks }),
   };
 }
