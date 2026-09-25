@@ -41,6 +41,7 @@ import { runNativeFilmFontSmoke } from './native-film-font-smoke.mjs';
 import { runExportGainMapSmoke } from './export-gain-map-smoke.mjs';
 import { runSilverCoreCacheSmoke } from './silvercore-cache-smoke.mjs';
 import { runGeometrySmoke } from './geometry-smoke.mjs';
+import { runPng16BandSmoke } from './png16-band-smoke.mjs';
 
 // UPNG is already a runtime dependency of the app; reuse it to decode screenshots.
 const UPNG = createRequire(import.meta.url)('upng-js');
@@ -386,6 +387,12 @@ if (process.argv.includes('--gain-map-only')) {
 }
 if (process.argv.includes('--hidden-job-only')) {
   await runHiddenJobSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS');
+  process.exit(0);
+}
+if (process.argv.includes('--png16-only')) {
+  await runPng16BandSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
   if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
   console.log('SMOKE PASS');
   process.exit(0);
@@ -898,6 +905,7 @@ if (!process.argv.some(arg => arg.endsWith('-only'))) await runPositiveImportSmo
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runNativeFilmFontSmoke({ send, evaluate, waitFor, wait, fail, port: PORT, root: ROOT });
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runExportGainMapSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+if (!process.argv.some(arg => arg.endsWith('-only'))) await runPng16BandSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
 
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runSimplicitySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
 

@@ -35,9 +35,18 @@ export async function runExportCancelSmoke({ evaluate, waitFor, fail }) {
         probe.name = args.suggestedName;
         return new Promise((resolve, reject) => { probe.resolve = resolve; probe.reject = reject; });
       }
-      if (command === 'begin_export_write') { probe.destination = args.path; probe.expectedBytes = args.expectedBytes; return 'test-export'; }
-      if (command === 'append_export_chunk') { probe.bytes += args.byteLength; return; }
+      if (command === 'begin_export_write') { probe.destination = args.path; probe.expectedBytes = args.expectedBytes; probe.bytes = 0; return 'test-export'; }
+      if (command === 'append_export_chunk') {
+        probe.bytes += args.byteLength;
+        // #257: hold one append so the test can look at the overlay mid-write.
+        if (probe.holdAppend) {
+          probe.holdAppend = false;
+          await new Promise((resolve) => { probe.appendPending = true; probe.releaseAppend = () => { probe.appendPending = false; resolve(); }; });
+        }
+        return;
+      }
       if (command === 'finish_export_write') return { saved: true, path: probe.destination };
+      if (command === 'abort_export_write') return;
       throw new Error('Unexpected desktop command: ' + command);
     } } };
   })()`);
@@ -80,6 +89,47 @@ export async function runExportCancelSmoke({ evaluate, waitFor, fail }) {
       fail('save after cancellation failed: ' + JSON.stringify(saved));
     }
     console.log('ok: desktop cancellation skips rendering/encoding/writes, preserves photo and adjustments, and allows retry/save');
+
+    // #257: the overlay stays up through the native write with byte progress
+    // and a Cancel button; "Complete!" and a toast naming the file come only
+    // after finish_export_write, with no fixed dwell.
+    const overlayState = `(() => { const o = document.querySelector('.loading-overlay'); const cancel = o && o.querySelector('.loading-cancel-btn'); return {
+      visible: Boolean(o && o.classList.contains('visible')), phase: o ? o.querySelector('.loading-phase-text').textContent : '',
+      cancel: Boolean(cancel && getComputedStyle(cancel).display !== 'none'), calls: window.__exportCancelProbe.calls.slice(),
+      toast: [...document.querySelectorAll('.toast-message')].map((t) => t.textContent) }; })()`;
+    // Earlier toasts (the cancelled pickers above) must not satisfy the checks below.
+    const clearToasts = `document.querySelectorAll('.toast-message').forEach((t) => t.remove())`;
+    await evaluate(clearToasts);
+    await evaluate(`(() => { const p = window.__exportCancelProbe; p.calls = []; p.holdAppend = true;
+      document.getElementById('exportSingleBtn').click(); p.resolve('/chosen/saved-frame.png'); })()`);
+    await waitFor('desktop write in progress', `window.__exportCancelProbe.appendPending === true`, 120_000);
+    const writing = await evaluate(overlayState);
+    if (!writing.visible || !/Saving/.test(writing.phase) || !/MB/.test(writing.phase) || !writing.cancel || writing.calls.includes('finish_export_write') || /Complete/.test(writing.phase)) {
+      fail('the overlay must show byte progress and Cancel until the file is written: ' + JSON.stringify(writing));
+    }
+    const releasedAt = Date.now();
+    await evaluate(`window.__exportCancelProbe.releaseAppend()`);
+    await waitFor('saved export releases controls', `!document.getElementById('exportSingleBtn').disabled && window.__exportCancelProbe.calls.includes('finish_export_write')`, 120_000);
+    const savedState = await evaluate(overlayState);
+    if (savedState.visible || !savedState.toast.some((t) => t.includes('saved-frame.png'))) {
+      fail('after the write the overlay must close and a toast name the file: ' + JSON.stringify(savedState));
+    }
+    if (Date.now() - releasedAt > 5000) fail('the overlay lingered after the write finished');
+
+    // Cancel while saving: the in-flight append finishes, the write is
+    // aborted (staging file removed natively), finish is never called.
+    await evaluate(`(() => { const p = window.__exportCancelProbe; p.calls = []; p.holdAppend = true;
+      document.getElementById('exportSingleBtn').click(); p.resolve('/chosen/cancelled-frame.png'); })()`);
+    await waitFor('desktop write to cancel', `window.__exportCancelProbe.appendPending === true`, 120_000);
+    await evaluate(clearToasts);
+    await evaluate(`document.querySelector('.loading-overlay .loading-cancel-btn').click(); window.__exportCancelProbe.releaseAppend();`);
+    await waitFor('cancelled write releases controls', `!document.getElementById('exportSingleBtn').disabled`, 120_000);
+    const cancelledWrite = await evaluate(overlayState);
+    if (!cancelledWrite.calls.includes('abort_export_write') || cancelledWrite.calls.includes('finish_export_write') || cancelledWrite.visible
+      || !cancelledWrite.toast.some((t) => /cancelled/i.test(t))) {
+      fail('Cancel while saving must abort the native write: ' + JSON.stringify(cancelledWrite));
+    }
+    console.log('ok: desktop export keeps the overlay through the write, toasts the file, and Cancel aborts the write');
   } finally {
     await evaluate(`(() => { const p = window.__exportCancelProbe;
       Worker.prototype.postMessage = p.postMessage; HTMLCanvasElement.prototype.toBlob = p.toBlob;
