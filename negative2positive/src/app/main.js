@@ -3447,6 +3447,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // on the same photo only show it again.
     const beforeAfterCanvas = document.getElementById('beforeAfterCanvas');
     let beforeAfterCanvasSource = null;
+    // The display negative made for a display target (#248), with the preview
+    // or source it stands for: { key, image }.
+    let beforeAfterBuiltReference = null;
     // Where the photo lies in the film-border frame #canvas shows, in canvas
     // pixels (getSprocketFrameLayout's shape); null without the border.
     let mainCanvasPhoto = null;
@@ -3724,14 +3727,32 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return Boolean(state.croppedImageData || state.originalImageData);
     }
 
-    // The Step-3 "before": the display-size conversion preview (<= 4 MP), built
-    // once from the source if it is ever missing. Never the full-resolution
-    // source itself.
+    // The Step-3 "before": the display-size conversion preview (<= 4 MP). A
+    // display target (#248) holds no pixels here, so its negative is resampled
+    // from the level once, on the first press, and kept for the photo's later
+    // presses; a missing preview is built once from the source. Never the
+    // full-resolution source itself.
     function getBeforeAfterReferenceImageData() {
-      if (!state.conversionPreviewImageData && state.conversionSourceImageData) {
-        state.conversionPreviewImageData = buildPreviewSourceImageData(state.conversionSourceImageData);
+      const preview = state.conversionPreviewImageData;
+      if (preview && !isDisplayTarget(preview)) return preview;
+      const key = preview || state.conversionSourceImageData;
+      if (!key) return null;
+      if (beforeAfterBuiltReference?.key !== key) {
+        beforeAfterBuiltReference = { key, image: preview ? displayNegativeOfTarget(preview) : buildPreviewSourceImageData(key) };
       }
-      return state.conversionPreviewImageData || null;
+      return beforeAfterBuiltReference.image;
+    }
+
+    // The 8-bit display negative of a display target, as the preview worker
+    // resamples it from the level.
+    function displayNegativeOfTarget(target) {
+      const level = target.__displayOf;
+      const plane = resampleDisplayLevel(level, displayLevelGeometry(level), target);
+      if (!(plane.data instanceof Uint16Array)) return new ImageData(plane.data, plane.width, plane.height);
+      const image = new ImageData(plane.width, plane.height);
+      const out = image.data;
+      for (let i = 0; i < out.length; i++) out[i] = Math.round(plane.data[i] / 257);
+      return image;
     }
 
     function canActivateBeforeAfter() {
@@ -3770,6 +3791,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // A new source, a photo switch or a closed session: the reference goes.
     function releaseBeforeAfterCanvas() {
       beforeAfterCanvasSource = null;
+      beforeAfterBuiltReference = null;
       if (!beforeAfterCanvas) return;
       beforeAfterCanvas.style.display = 'none';
       beforeAfterCanvas.width = 1;
@@ -5915,6 +5937,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (state.cropping) {
         glCanvas.style.display = 'none';
         canvas.style.display = 'none';
+        hideDetailLayer();
         return;
       }
       const showGL = isWebGLActive();

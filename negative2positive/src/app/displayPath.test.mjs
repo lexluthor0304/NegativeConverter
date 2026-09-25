@@ -92,6 +92,9 @@ for (const failure of ['null', 'throw']) {
     applyLensCorrectionWithSettings: async imageData => imageData, invalidateSilverCoreCache: noop,
     gpuPreviewScheduler: { cancel: noop }, releaseBeforeAfterCanvas: noop, refreshCanvasContainerSize: noop,
     noteConversionStarted: noop, scheduleCropViewProxy: noop,
+    // #248: the display level of the new source (the source itself at this size).
+    displayLevelFactor: () => 1, displayLevelGeometry: () => ({ k: 1 }), buildDisplayLevelInBands: async imageData => imageData,
+    conversionTargetFor: source => source,
     buildPreviewSourceImageData: imageData => imageData, usesSilverCoreConversion: () => true,
     hasSeparateConversionPreview: () => false,
     convertFromCurrentSource: async () => { if (failure === 'throw') throw new Error('decoder'); return null; },
@@ -347,7 +350,8 @@ function canvasFixture({ sprocket = false, step = 3 } = {}) {
   const context = vm.createContext({
     state, canvas, ctx: canvas.ctx, glCanvas, sprocketPreviewFrameCanvas: frameCanvas, sprocketPreviewFrameCtx: frameCanvas.ctx,
     sprocketPreviewFrameCache: { key: '', sourceRef: null, metrics: null },
-    beforeAfterCanvas: comparison, beforeAfterCanvasSource: null, mainCanvasPhoto: null,
+    beforeAfterCanvas: comparison, beforeAfterCanvasSource: null, beforeAfterBuiltReference: null, mainCanvasPhoto: null,
+    hideDetailLayer: noop,
     mainCanvasFit: { width: 0, height: 0, reference: null },
     composeDisplaySprocketFrame: (imageData, options) => composeSprocketFrame(imageData, options),
     composeSprocketFrameBackground: (imageData, options) => {
@@ -451,6 +455,47 @@ for (const [width, height] of [[1500, 1000], [1000, 1500]]) {
   f.context.renderAdjustedImageDataToMainCanvas(image(1500, 1000), f.full);
   f.context.showBeforeAfterReference(image(1500, 1000));
   assert.deepEqual([f.comparison.style.left, f.comparison.style.top, f.comparison.style.width, f.comparison.style.height], ['', '', '', '']);
+}
+
+{
+  // #248: the conversion preview is a display target without pixels. The
+  // comparison's reference is its display negative, resampled from the level
+  // once (as the preview worker does, 16-bit rounded to 8) and kept, so the
+  // next press on the photo writes nothing; a release drops it.
+  const { displayTargetFor, isDisplayTarget, resampleDisplayLevel, displayLevelGeometry, buildDisplayLevel } = await import('./displayPreview.js');
+  const source = ramp(1203, 803);
+  const level = buildDisplayLevel(source, 3);
+  const target = displayTargetFor(level, { width: 301, height: 201 });
+  const state = { conversionPreviewImageData: target, conversionSourceImageData: source };
+  const built = [];
+  // ImageData's (width, height) form too, as the page has it.
+  class PageImageData extends TestImageData {
+    constructor(...args) { super(...(typeof args[0] === 'number' ? [new Uint8ClampedArray(args[0] * args[1] * 4), ...args] : args)); }
+  }
+  const context = vm.createContext({
+    state, ImageData: PageImageData, Uint16Array, Math, beforeAfterBuiltReference: null, beforeAfterCanvasSource: null,
+    beforeAfterCanvas: null, isDisplayTarget, resampleDisplayLevel, displayLevelGeometry,
+    buildPreviewSourceImageData: imageData => { built.push(imageData); return image(4, 4); },
+  });
+  vm.runInContext(['getBeforeAfterReferenceImageData', 'displayNegativeOfTarget', 'releaseBeforeAfterCanvas'].map(functionSource).join('\n'), context);
+  const reference = context.getBeforeAfterReferenceImageData();
+  assert.ok(reference instanceof TestImageData, 'an 8-bit ImageData to put');
+  assert.deepEqual([reference.width, reference.height], [301, 201]);
+  const plane = resampleDisplayLevel(level, displayLevelGeometry(level), target);
+  assert.deepEqual(reference.data, Uint8ClampedArray.from(plane.data, value => Math.round(value / 257)), 'the worker\'s display negative');
+  assert.equal(context.getBeforeAfterReferenceImageData(), reference, 'kept for the next press');
+  context.releaseBeforeAfterCanvas();
+  assert.notEqual(context.getBeforeAfterReferenceImageData(), reference, 'released with the comparison');
+  // A preview with pixels (the source itself at display size) is the reference.
+  const small = image(8, 6);
+  state.conversionPreviewImageData = small;
+  assert.equal(context.getBeforeAfterReferenceImageData(), small);
+  // No preview: built once from the source, never the source itself.
+  state.conversionPreviewImageData = null;
+  const fallback = context.getBeforeAfterReferenceImageData();
+  assert.equal(context.getBeforeAfterReferenceImageData(), fallback);
+  assert.deepEqual(built, [source]);
+  assert.equal(state.conversionPreviewImageData, null, 'the conversion preview is left alone');
 }
 
 console.log('displayPath: Steps 1-2 export without a readback, failed conversions show the framed negative, the settled CPU display is exact, display-size and off this thread, #canvas holds the drawn buffer, and the comparison is a cached element over the photo passed');
