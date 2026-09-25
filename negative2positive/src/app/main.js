@@ -129,6 +129,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     import { detectDust, updateDustStrength, inpaintMasked } from '../silvercore/engine/DustRemoval.js';
     import { applyDustStroke } from '../silvercore/engine/DustBrush.js';
     import { getLoadingOverlay } from '../ui/LoadingOverlay.js';
+    import { createPerfTraceFactory, readPerfFlags } from './perfTrace.js';
     import {
       workerApplyAdjustments,
       workerApplyAdjustments16,
@@ -145,49 +146,22 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
 
     const DEBUG_UI = new URLSearchParams(window.location.search).get('debug') === '1';
     const WEBGL_DEBUG_ERRORS = new URLSearchParams(window.location.search).has('debugGL');
+    // ?perf=1 (benchmark harness) also records every trace as User Timing.
+    const { createPerfTrace, recordStages: recordPerfStages } = createPerfTraceFactory({
+      debug: DEBUG_UI,
+      userTiming: readPerfFlags(window.location.search).userTiming
+    });
     // The single export path's adjustment/encode workers; a batch export
     // passes its own pool through `bridge` instead.
     const defaultExportWorkers = { workerApplyAdjustments, workerApplyAdjustments16, workerGainMap16, workerEncodePng16, workerEncodeTiff, isWorkerAvailable };
     // 暗室 UI に一本化。古い workspace パラメーターで別画面へ分岐しない。
     let studioAutoFrameRunning = false;
     let studioWorkspace = null;
-    const PERF_LOG_THRESHOLD_MS = 120;
     // Full-resolution renders run in a worker and no longer block interactive
     // preview reprocessing, so they can start soon after the user pauses; a
     // render made stale by further input is discarded and rescheduled.
     const FULL_RESOLUTION_IDLE_DELAY_MS = 2500;
     const FULL_RESOLUTION_INTERACTIVE_DELAY_MS = 600; // after a slider commit / stale retry
-
-    function getPerfNow() {
-      return (typeof performance !== 'undefined' && typeof performance.now === 'function')
-        ? performance.now()
-        : Date.now();
-    }
-
-    function createPerfTrace(label, details = {}) {
-      const startedAt = getPerfNow();
-      let lastAt = startedAt;
-      const stages = [];
-
-      return {
-        mark(stage, extra = {}) {
-          const now = getPerfNow();
-          stages.push({
-            stage,
-            ms: Math.round((now - lastAt) * 10) / 10,
-            totalMs: Math.round((now - startedAt) * 10) / 10,
-            ...extra
-          });
-          lastAt = now;
-        },
-        end(extra = {}) {
-          const totalMs = Math.round((getPerfNow() - startedAt) * 10) / 10;
-          if (DEBUG_UI && totalMs >= PERF_LOG_THRESHOLD_MS) {
-            console.info('[perf]', label, { totalMs, ...details, ...extra, stages });
-          }
-        }
-      };
-    }
 
     function getImageDataPixelCount(imageData) {
       return imageData ? imageData.width * imageData.height : 0;
@@ -14720,7 +14694,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       let result;
       try { result = await detectFrameAndRotation(source, { silent, analyzeInWorker }); }
       catch (error) { console.warn('Import frame detection failed; keeping the full image:', error); }
-      if (DEBUG_UI && result?.stageMs) console.info('[perf]', 'autoFrameStages', { method: result.diagnostics?.method, ...result.stageMs });
+      if (result?.stageMs) recordPerfStages('autoFrameStages', result.stageMs, { method: result.diagnostics?.method });
       const reliable = canAutoApplyImportFrame(result, state.autoFrame);
       const apply = reliable && state.autoFrame.onImport && allowCrop;
       const meta = {
