@@ -1,5 +1,6 @@
-// Runs every *.test.mjs under negative2positive/src and negative2positive/api
-// with plain node. Test files are standalone assert scripts.
+// Runs every *.test.mjs under negative2positive/src, negative2positive/api and
+// scripts/perf (the benchmark harness; no browser) with plain node. Test files
+// are standalone assert scripts.
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,6 +10,7 @@ const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const roots = [
   join(repoRoot, 'negative2positive', 'src'),
   join(repoRoot, 'negative2positive', 'api'),
+  join(repoRoot, 'scripts', 'perf'),
 ].filter(existsSync);
 
 const tests = [];

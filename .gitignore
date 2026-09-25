@@ -50,6 +50,8 @@ __pycache__/
 # 其他可能的构建工具产物
 out/
 coverage/
+# Benchmark results, traces and synthetic fixtures (npm run bench:interactive)
+/output/
 
 # 备份文件
 *.bak
