@@ -63,11 +63,18 @@ export default {
     const wallS = (Date.now() - wallBefore) / 1000;
     ctx.record('s6.roll.settingsAllMs', settingsT === null ? null : round(settingsT - metrics.changeT));
     ctx.record('s6.roll.thumbnailsAllMs', thumbnailsT === null ? null : round(thumbnailsT - metrics.changeT));
-    ctx.record('s6.roll.processCoresUsed', wallS > 0 ? round((cpuAfter - cpuBefore) / wallS, 2) : null);
+    // Σ process CPU ÷ wall; the profiled repetition adds Σ thread busy ÷ wall from its trace.
+    ctx.record('s6.roll.coresUsed', wallS > 0 ? round((cpuAfter - cpuBefore) / wallS, 2) : null);
     await session.drain();
     ctx.record('s6.roll.librawDecodes', byKind(session.events, 'req').filter(req => req.cls === 'libraw' && req.fn === 'open').length);
     ctx.record('s6.roll.librawWorkers', new Set(byKind(session.events, 'req').filter(req => req.cls === 'libraw').map(req => req.wid)).size);
     ctx.record('s6.roll.thumbnailReencodes', byKind(session.events, 'enc').length);
+    // When each tile got its first thumbnail (the per-tile table of the roll report).
+    const firstThumb = {};
+    for (const event of byKind(session.events, 'mut')) {
+      if (event.what === 'thumb' && event.idx !== null && firstThumb[event.idx] === undefined) firstThumb[event.idx] = round(event.t - metrics.changeT);
+    }
+    ctx.raw['s6.firstThumbnailMsByTile'] = firstThumb;
     await sleep(3000);
     await dragSlider(ctx, 'coreExposure', 's6.dragAfter.coreExposure');
     await dragSlider(ctx, 'cyan', 's6.dragAfter.cyan');

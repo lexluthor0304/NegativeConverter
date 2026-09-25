@@ -111,6 +111,14 @@ export function recordImportMetrics(ctx, prefix, metrics) {
   ctx.record(`${prefix}.control.readyByPollMs`, metrics.readyByPollMs);
   ctx.record(`${prefix}.control.mainBusyPct`, metrics.window?.mainBusyPct);
   ctx.record(`${prefix}.control.scriptMs`, metrics.window?.scriptMs);
+  // Stage columns of the 2026-09-23 S1 table: the first request of each kind.
+  const stage = (predicate) => metrics.stages.find(predicate)?.ms ?? null;
+  ctx.record(`${prefix}.stage.librawDecodeMs`, stage(entry => entry.cls === 'libraw' && entry.fn === 'imageData'));
+  ctx.record(`${prefix}.stage.sensorDefectsMs`, stage(entry => entry.cls === 'suppress'));
+  ctx.record(`${prefix}.stage.autoFrameMs`, stage(entry => entry.cls === 'analyze-frame'));
+  ctx.record(`${prefix}.stage.filmEdgeMs`, stage(entry => entry.cls === 'read-film-edge'));
+  ctx.record(`${prefix}.stage.scanDecodeMs`, stage(entry => entry.cls === 'decode'));
+  ctx.record(`${prefix}.stage.previewConvertMs`, stage(entry => entry.cls === 'convert'));
   ctx.raw[`${prefix}.stages`] = metrics.stages;
   ctx.raw[`${prefix}.measures`] = metrics.measures;
 }
@@ -176,8 +184,11 @@ export async function dragSlider(ctx, id, prefix, { cpu = false, observeMs = 300
   const lastInput = values.at(-1)?.t ?? release.t;
   const tasks = longTasks(ctx, firstInput, lastInput + 500);
   const gaps = rafGapSummary(window.frames);
+  const texture = byKind(events, 'gl.upload').filter(upload => upload.c === GL_CANVAS && upload.w * upload.h > 65536 && upload.t >= press.t && upload.t <= release.t).pop();
   const out = {
     ...metrics,
+    previewWidth: texture?.w ?? null,
+    previewHeight: texture?.h ?? null,
     eventTimingP95Ms: eventTimingP95(events, { start: press.t, end: release.t + 500, inputCount: metrics.inputs }),
     mainBusyPct: window.mainBusyPct,
     longTaskCount: tasks.n,

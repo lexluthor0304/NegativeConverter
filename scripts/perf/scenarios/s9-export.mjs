@@ -93,6 +93,7 @@ async function runExport(ctx, prefix, spec, { buttonId, files = 1, verify, probe
     inputsAccepted: cyan ? accepted : null,
     memoryBeforeMB: memoryBefore,
     memoryPeakMB: memory?.rendererPeakMB ?? null,
+    gpuPeakMB: memory?.gpuPeakMB ?? null,
     memoryAfter10sMB: memory?.rendererAfterMB ?? null
   };
   for (const [key, value] of Object.entries(out)) if (value !== null) ctx.record(`${prefix}.${key}`, value);

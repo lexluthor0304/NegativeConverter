@@ -49,6 +49,16 @@ export default {
     ctx.record('s8.open.firstFrameMs', frames[0] ?? null);
     ctx.record('s8.open.thirdFrameMs', frames[2] ?? null);
     ctx.record('s8.open.longTaskCount', longTasks(ctx, openStart, openWindow.end).n);
+    // Event Timing reports only events of 16 ms or more; absent means faster.
+    const clickEntry = byKind(session.events, 'et').find(entry => entry.n === 'click' && entry.s >= clickT - 50);
+    if (clickEntry) ctx.record('s8.open.clickHandlerMs', round(clickEntry.pe - clickEntry.ps));
+    ctx.raw['s8.grid'] = await session.evaluate(`(() => {
+      const items = document.getElementById('fileListItems');
+      const tile = items.querySelector('.file-list-item');
+      const r = tile ? tile.getBoundingClientRect() : null;
+      return { columns: getComputedStyle(items).gridTemplateColumns.split(' ').filter(Boolean).length, tile: r && [Math.round(r.width), Math.round(r.height)],
+        scrollHeight: items.scrollHeight, clientHeight: items.clientHeight };
+    })()`);
     const finalT = await waitForPageTime(ctx, 'every tile final', ALL_FINAL);
     ctx.record('s8.allTilesFinalMs', finalT === null ? null : round(Math.max(0, finalT - clickT)));
     ctx.record('s8.allTilesFinalSinceImportMs', finalT === null ? null : round(finalT - metrics.changeT));

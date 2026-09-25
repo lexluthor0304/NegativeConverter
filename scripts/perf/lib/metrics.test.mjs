@@ -70,13 +70,16 @@ const sortT = events => events.sort((a, b) => a.t - b.t);
     { k: 'res', t: 40, cls: 'convert', wid: 1, id: 1, rt: 10, hash: 'aa', cache: true },
     { k: 'c2d', t: 45, c: 'canvas', fn: 'putImageData', w: 900, h: 600, hash: 'aa' },
     { k: 'c2d', t: 46, c: 'canvas', fn: 'putImageData', w: 900, h: 600, hash: 'aa' },
-    { k: 'c2d', t: 60, c: 'canvas', fn: 'drawImage', w: 900, h: 600, sig: 'x' }
+    { k: 'c2d', t: 60, c: 'canvas', fn: 'drawImage', w: 900, h: 600, sig: 'x' },
+    { k: 'c2d', t: 70, c: 'canvas', fn: 'drawImage', w: 900, h: 600, sig: 'y', src: 'aa' }
   ]);
   const pics = pictures(events, 'canvas');
-  assert.equal(pics.length, 2);
+  assert.equal(pics.length, 3);
   assert.equal(pics[0].positive, true);
   assert.equal(pics[0].causeT, 10);
   assert.equal(pics[1].positive, false);
+  assert.equal(pics[2].positive, true, 'a result drawn through a scratch canvas is a positive');
+  assert.equal(pics[2].causeT, 10);
 }
 
 // ---- settled: in-flight requests keep the page busy ----

@@ -239,9 +239,13 @@
           var name = canvasName(this.canvas);
           count('c2d.drawImage');
           if (this.canvas && (this.canvas.id || w * h > 65536)) {
-            var token = canvasContent.get(source) || ('s' + objectId(source) + ':' + (++seq));
+            // `src` carries the source's pixel hash (from putImageData), so a
+            // conversion result drawn through a scratch canvas still counts
+            // as a positive on the CPU display path.
+            var known = canvasContent.get(source);
+            var token = known || ('s' + objectId(source) + ':' + (++seq));
             canvasContent.set(this.canvas, stringHash(token + ':' + w + 'x' + h));
-            push({ k: 'c2d', t: t0, fn: 'drawImage', c: name, w: Math.round(w), h: Math.round(h), sig: canvasContent.get(this.canvas) });
+            push({ k: 'c2d', t: t0, fn: 'drawImage', c: name, w: Math.round(w), h: Math.round(h), sig: canvasContent.get(this.canvas), src: known || null });
           }
         } finally { selfMs += now() - t0; }
         return result;

@@ -47,6 +47,7 @@ export default {
     await session.beginWindow('s5-enter');
     const enterT = await clickElement(ctx, 'cropBtn');
     const enter = await afterAction(ctx, 's5.enterCrop', enterT, { observeMs: 1500 });
+    if (enter) ctx.record('s5.enterCrop.firstDrawMs', round(enter.t - enterT));
     ctx.record('s5.enterCrop.previewPx', enter?.w ? `${enter.w}×${enter.h}` : null);
     ctx.record('s5.enterCrop.showsPositive', enter ? String(enter.positive) : null);
     await session.endWindow();

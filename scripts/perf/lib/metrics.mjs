@@ -51,7 +51,7 @@ export function pictures(events, canvasId = GL_CANVAS) {
       const sig = event.hash ?? event.sig ?? `${event.fn}:${event.t}`;
       if (sig === lastSig) continue;
       lastSig = sig;
-      const res = event.hash !== undefined ? results.get(event.hash) : null;
+      const res = results.get(event.hash ?? event.src) || null;
       out.push({ t: event.t, causeT: res ? res.rt : event.t, positive: Boolean(res), w: event.w, h: event.h, res: res || null, kind: event.fn });
     }
     return out;
