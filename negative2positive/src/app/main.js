@@ -375,6 +375,18 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     const backgroundVisibleItems = new Set();
     let backgroundDirection = 1;
     let prefetchedItem = null;
+    const BACKGROUND_LANE_REST_MS = 30;
+    const BACKGROUND_LANE_POLL_MS = 250;
+    const ACTIVATION_DWELL_MS = 120;
+    // The lanes' own conversion and frame-detection workers, and the
+    // IntersectionObserver of the visible tiles.
+    let backgroundWorkers = null;
+    let backgroundVisibility = null;
+    // Prefetch previews already attempted for a recipe key (success or not),
+    // and photos whose prefetch failed or whose base does not fit the slot:
+    // neither is retried in a loop.
+    const prefetchPreviewAttempts = new WeakMap();
+    const prefetchRefused = new WeakSet();
     const desktopUpdateState = {
       visible: false,
       currentVersion: '',
@@ -16943,16 +16955,6 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // every pick and before its decode, one decode (sharedDecodes) serves
     // every need of the frame, and no two jobs work on one file.
     // runBatchPipeline stays with the exports, whose sink order matters.
-    const BACKGROUND_LANE_REST_MS = 30;
-    const BACKGROUND_LANE_POLL_MS = 250;
-    const ACTIVATION_DWELL_MS = 120;
-    let backgroundWorkers = null;
-    let backgroundVisibility = null;
-    // Prefetch previews already attempted for a recipe key (success or not),
-    // and photos whose prefetch failed or whose base does not fit the slot:
-    // neither is retried in a loop.
-    const prefetchPreviewAttempts = new WeakMap();
-    const prefetchRefused = new WeakSet();
 
     // The foreground is switching, converting, rendering or exporting.
     function foregroundBusyForBackground() {
