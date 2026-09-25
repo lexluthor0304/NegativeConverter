@@ -15175,15 +15175,24 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           }
           // One settings key per candidate, reused for the job it starts.
           let key = null;
+          let rollOwned = false;
           const item = state.fileQueue.find(entry => {
             if (entry === getCurrentQueueItem()) return false;
+            // A scheduled roll import prepares these frames' recipes and
+            // samples (and their analysis tiles). A thumbnail recipe set in
+            // the gap before it starts would leave its roll analysis without
+            // a pass-1 sample and decode the frame again, so they wait.
+            if (!entry.settings && automaticRollPendingItems.has(entry)) { rollOwned = true; return false; }
             const entryKey = photoSettingsKey(entry);
             if (entry.thumbnailErrorKey === entryKey || (entry.thumbnail
               && entry.thumbnailKind === 'processed' && entry.thumbnailKey === entryKey)) return false;
             key = entryKey;
             return true;
           });
-          if (!item) break;
+          if (!item) {
+            if (!rollOwned) break;
+            await new Promise(resolve => setTimeout(resolve, 250)); continue;
+          }
           const rollRevision = automaticRollRevision;
           let superseded = false;
           const valid = () => {

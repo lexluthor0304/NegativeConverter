@@ -24,7 +24,7 @@ function fixture() {
   let disposed = 0;
   const c = vm.createContext({
     state: { fileQueue: [active, item] }, studioThumbnailsRunning: false,
-    automaticRollImportRunning: false, studioAutoFrameRunning: false, automaticRollRevision: 1,
+    automaticRollImportRunning: false, studioAutoFrameRunning: false, automaticRollRevision: 1, automaticRollPendingItems: new Set(),
     document: { body: { dataset: {} } },
     setTimeout: fn => timers.push(fn), studioBackgroundReady: () => true,
     getCurrentQueueItem: () => active, photoSettingsKey: entry => JSON.stringify(entry.settings),
@@ -86,6 +86,41 @@ for (const handoff of ['automatic', 'manual', 'revision']) for (const lateResult
   assert.equal(f.c.studioThumbnailsRunning, false);
 }
 
+// A scheduled roll import owns its frames before it starts (#236 made the
+// first photo ready early enough for the lane to win the gap): no thumbnail
+// recipe for them, so its roll analysis keeps every pass-1 sample (#231).
+// Frames it prepares with a recipe, and frames outside it, are not held back.
+{
+  const f = fixture();
+  f.c.automaticRollPendingItems.add(f.item);
+  const pending = f.c.loadStudioThumbnails();
+  await f.timer();
+  await f.timer();
+  assert.equal(f.jobs.length, 0, 'no thumbnail recipe for a frame a scheduled roll import will prepare');
+  assert.equal(f.c.studioThumbnailsRunning, true, 'the lane waits instead of ending');
+  // The roll import prepared the frame and finished.
+  f.item.settings = { owner: 'roll' };
+  f.c.automaticRollPendingItems.delete(f.item);
+  await f.timer();
+  assert.equal(f.jobs.length, 1, 'then its thumbnail renders from the roll recipe');
+  assert.deepEqual(f.jobs[0].settings, { owner: 'roll' });
+  f.jobs[0].resolve({ preview: 'roll-preview' });
+  await flush(); await f.timer(); await pending;
+  assert.deepEqual(f.item.settings, { owner: 'roll' }, 'the roll recipe stays');
+  assert.deepEqual(f.published, ['roll-preview']);
+}
+{
+  const f = fixture();
+  f.item.settings = { owner: 'prepared' };
+  f.c.automaticRollPendingItems.add(f.item);
+  const pending = f.c.loadStudioThumbnails();
+  await f.timer();
+  assert.equal(f.jobs.length, 1, 'a pending frame that already has its recipe still gets a thumbnail');
+  f.jobs[0].resolve({ preview: 'prepared-preview' });
+  await flush(); await f.timer(); await pending;
+  assert.deepEqual(f.published, ['prepared-preview']);
+}
+
 // Bookkeeping per background thumbnail is O(rows) only in the candidate scan,
 // which computes one settings key per entry; results touch their own row.
 for (const outcome of ['success', 'error']) {
@@ -99,7 +134,7 @@ for (const outcome of ['success', 'error']) {
   const timers = [];
   const c = vm.createContext({
     state: { fileQueue: queue }, studioThumbnailsRunning: false,
-    automaticRollImportRunning: false, studioAutoFrameRunning: false, automaticRollRevision: 1,
+    automaticRollImportRunning: false, studioAutoFrameRunning: false, automaticRollRevision: 1, automaticRollPendingItems: new Set(),
     document: { body: { dataset: {} } },
     setTimeout: fn => timers.push(fn), studioBackgroundReady: () => true,
     getCurrentQueueItem: () => active, photoSettingsKey: entry => { keys++; return JSON.stringify(entry.settings); },
