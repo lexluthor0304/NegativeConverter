@@ -7303,6 +7303,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     function invalidatePhotoActivation() {
       // A newer activation supersedes a photo parked while hidden (#241).
       parkedPhoto = null;
+      pendingImportRotation = null;
       cancelPendingTimers();
       // The outgoing photo's tile update cannot write into the incoming one.
       cancelStudioThumbnailUpdate();
@@ -7585,25 +7586,16 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         state.loadedBaseImageData = fullImageData;
         state.rawDecodePending = false;
         state.originalImageData = fullImageData;
-
-        if (Math.abs(state.rotationAngle) > 0.001) {
-          state.originalImageData = applyRotationToImageData(state.originalImageData, state.rotationAngle);
-        }
-        if (state.mirrored) {
-          state.originalImageData = mirrorImageDataHorizontal(state.originalImageData);
-        }
-
-        if (previewCropRegion) {
-          applyCropRegionToLoadedImage({
+        state.croppedImageData = null;
+        // A new base: the chain is rebuilt from it (the memo cannot match).
+        applyGeometryFromBase({
+          cropRegion: previewCropRegion ? {
             left: previewCropRegion.left * scaleX,
             top: previewCropRegion.top * scaleY,
             width: previewCropRegion.width * scaleX,
             height: previewCropRegion.height * scaleY
-          });
-        } else {
-          state.cropRegion = null;
-          state.croppedImageData = null;
-        }
+          } : null
+        });
 
         clearFullResolutionRenderState();
         invalidateSilverCoreCache();
@@ -8824,15 +8816,12 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       };
     }
 
-    function computeAutoFrameRotatedImage(result, effectiveAngle, baseImageData) {
-      // The detector's pre-rotated frame is only valid when no 180° flip is added.
-      if (!state.autoFrame.rotate180Default && result.rotatedImageData) {
-        return result.rotatedImageData;
-      }
-      const base = baseImageData || state.originalImageData;
-      return Math.abs(effectiveAngle) < 0.001
-        ? base
-        : applyRotationToImageData(base, effectiveAngle);
+    // The detector's pre-rotated frame is only valid when no 180° flip is
+    // added. The Auto Frame button has always installed it as is.
+    function offerAutoFrameRotation(result, effectiveAngle, base) {
+      pendingImportRotation = !state.autoFrame.rotate180Default && result?.rotatedImageData && base
+        ? { base, angle: effectiveGeometryAngle(effectiveAngle), image: result.rotatedImageData, anySource: true }
+        : null;
     }
 
     // `baseImageData` is the frame the detector analysed. It is only adopted as
@@ -8848,13 +8837,12 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       state.rotationAngle = effectiveAngle;
       state.mirrored = false; // the detector ran on the unmirrored base
       updateMirrorButtonState();
-      state.croppedImageData = null;
-      state.cropRegion = null;
-      state.originalImageData = computeAutoFrameRotatedImage(result, effectiveAngle, base);
+      offerAutoFrameRotation(result, effectiveAngle, base);
+      const frame = geometryFrameSize(base, effectiveAngle);
       const cropRegion = state.autoFrame.rotate180Default
-        ? rotate180CropRegion(result.cropRegion, state.originalImageData.width, state.originalImageData.height)
+        ? rotate180CropRegion(result.cropRegion, frame.width, frame.height)
         : result.cropRegion;
-      applyCropRegionToLoadedImage(cropRegion, { refreshDisplay: true });
+      applyGeometryFromBase({ cropRegion, refreshDisplay: true });
       state.autoFrame.lastDiagnostics = {
         ...state.autoFrame.lastDiagnostics,
         ...(canAutoApplyImportFrame(result, state.autoFrame) ? { imageArea: imageAreaFromDetection(result, base), analysisNeedsReview: false } : {}),
@@ -8878,10 +8866,8 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       state.rotationAngle = effectiveAngle;
       state.mirrored = false; // the detector ran on the unmirrored base
       updateMirrorButtonState();
-      state.cropRegion = null;
-      state.croppedImageData = null;
-      state.originalImageData = computeAutoFrameRotatedImage(result, effectiveAngle, base);
-      displayNegative(state.originalImageData);
+      offerAutoFrameRotation(result, effectiveAngle, base);
+      applyGeometryFromBase({ cropRegion: null, refreshDisplay: true });
       state.autoFrame.lastDiagnostics = {
         ...state.autoFrame.lastDiagnostics,
         confidence: result.confidence,
@@ -8958,6 +8944,149 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       }
     }
 
+    // ===========================================
+    // Geometry chain: base -> rotation -> mirror -> crop (#244)
+    // ===========================================
+    // Every frame is derived from the decoded base by the total angle, so the
+    // live planes always equal what restoreSettings and batch export build.
+    // The installed output (the crop, or the frame when there is no crop)
+    // carries the key it was built for. A refresh that leaves the geometry
+    // unchanged then makes no kernel call. The key lives on the object, never
+    // in a free variable: undo, a new file, a heavy-RAW upgrade or any other
+    // install replaces that object and so invalidates the memo by itself.
+    const geometryMemo = new WeakMap();
+    const geometryBaseIds = new WeakMap();
+    let nextGeometryBaseId = 1;
+    // The import's auto-frame worker already rotated a copy of the base by the
+    // angle it detected. restoreSettings adopts that frame (side channel, not
+    // part of the settings) instead of rotating the base a second time.
+    let pendingImportRotation = null;
+
+    function geometryBaseId(base) {
+      let id = geometryBaseIds.get(base);
+      if (!id) {
+        id = nextGeometryBaseId++;
+        geometryBaseIds.set(base, id);
+      }
+      return id;
+    }
+
+    // restoreSettings has always ignored angles within 0.001° of zero.
+    function effectiveGeometryAngle(angle) {
+      const normalized = normalizeAngleDegrees(Number(angle) || 0);
+      return Math.abs(normalized) > 0.001 ? normalized : 0;
+    }
+
+    function geometryFrameSize(base, angle) {
+      if (!base) return null;
+      return rotatedDimensions(base.width, base.height, effectiveGeometryAngle(angle));
+    }
+
+    function geometryKeyFor(base, { rotationAngle = 0, mirrored = false, cropRegion = null } = {}) {
+      if (!base) return null;
+      const angle = effectiveGeometryAngle(rotationAngle);
+      const frame = rotatedDimensions(base.width, base.height, angle);
+      return {
+        baseId: geometryBaseId(base), angle, mirrored: Boolean(mirrored),
+        frameWidth: frame.width, frameHeight: frame.height,
+        crop: sanitizeCropRect(cropRegion, frame)
+      };
+    }
+
+    function sameGeometryKey(a, b) {
+      if (!a || !b || a.baseId !== b.baseId || a.angle !== b.angle || a.mirrored !== b.mirrored) return false;
+      if (!a.crop || !b.crop) return !a.crop && !b.crop;
+      return a.crop.left === b.crop.left && a.crop.top === b.crop.top
+        && a.crop.width === b.crop.width && a.crop.height === b.crop.height;
+    }
+
+    function installedGeometryKey() {
+      const installed = state.croppedImageData || state.originalImageData;
+      return installed ? geometryMemo.get(installed) || null : null;
+    }
+
+    function hasExactPlane16(image) {
+      const plane = image?.__image16;
+      return Boolean(plane && plane.data instanceof Uint16Array && plane.width === image.width
+        && plane.height === image.height && plane.data.length === image.data?.length);
+    }
+
+    // A frame rotated elsewhere is adopted only when it is the one this thread
+    // would build: the same base, the same angle, and the exact 16-bit kernel
+    // (a worker's OffscreenCanvas may rasterise an 8-bit source differently).
+    // `anySource` keeps the Auto Frame button's installation of the worker
+    // frame for 8-bit sources; that frame is then not memoised.
+    function takeAdoptedRotation(base, angle) {
+      const adopted = pendingImportRotation;
+      pendingImportRotation = null;
+      if (!adopted || !angle || adopted.base !== base || adopted.angle !== angle) return null;
+      const image = adopted.image;
+      const frame = rotatedDimensions(base.width, base.height, angle);
+      if (!image || image.width !== frame.width || image.height !== frame.height) return null;
+      const exact = hasExactPlane16(base) && hasExactPlane16(image);
+      if (!exact && !adopted.anySource) return null;
+      return { image, exact };
+    }
+
+    // The installed full frame when it was built for `key`'s rotation and mirror.
+    function installedFramePlanes(key) {
+      const installed = installedGeometryKey();
+      if (!installed || !key || installed.baseId !== key.baseId || installed.angle !== key.angle
+        || installed.mirrored !== key.mirrored || !state.originalImageData) return null;
+      return { frame: state.originalImageData, cropped: null };
+    }
+
+    function buildGeometryPlanes(base, key, adopted = null) {
+      let frame = base;
+      if (key.angle) frame = adopted?.image || applyRotationToImageData(base, key.angle);
+      if (key.mirrored) frame = mirrorImageDataHorizontal(frame);
+      return { frame, cropped: key.crop ? cropImageDataRegion(frame, key.crop) : null };
+    }
+
+    function installGeometryPlanes(key, planes, { memo = true } = {}) {
+      state.originalImageData = planes.frame;
+      state.croppedImageData = planes.cropped;
+      state.cropRegion = key.crop ? { ...key.crop } : null;
+      if (memo) geometryMemo.set(planes.cropped || planes.frame, key);
+    }
+
+    // Builds (or keeps) the planes for state.rotationAngle / state.mirrored and
+    // `cropRegion`, which is sanitised against the frame. Returns whether a
+    // crop is in effect.
+    function applyGeometryFromBase({ cropRegion = state.cropRegion, refreshDisplay = false } = {}) {
+      const base = state.loadedBaseImageData || state.originalImageData;
+      if (!base) {
+        pendingImportRotation = null;
+        state.cropRegion = null;
+        state.croppedImageData = null;
+        return false;
+      }
+      const key = geometryKeyFor(base, { rotationAngle: state.rotationAngle, mirrored: state.mirrored, cropRegion });
+      if (sameGeometryKey(key, installedGeometryKey())) {
+        pendingImportRotation = null;
+        state.cropRegion = key.crop ? { ...key.crop } : null;
+      } else {
+        const adopted = takeAdoptedRotation(base, key.angle);
+        installGeometryPlanes(key, buildGeometryPlanes(base, key, adopted), { memo: !adopted || adopted.exact });
+      }
+      if (refreshDisplay) displayNegative(state.croppedImageData || state.originalImageData);
+      return Boolean(key.crop);
+    }
+
+    // Apply Crop draws on the current frame rotated once more by the draft
+    // angle (canvas D). The frame derived from the base by the total angle (F)
+    // shows the same picture about the same centre on a canvas of its own
+    // size, so the drawn rectangle maps to F by a pure translation.
+    function mapDraftRectToFrame(rect, draftFrame, frame) {
+      if (!rect || !draftFrame || !frame) return null;
+      return sanitizeCropRegionForImage({
+        left: rect.left + (frame.width - draftFrame.width) / 2,
+        top: rect.top + (frame.height - draftFrame.height) / 2,
+        width: rect.width,
+        height: rect.height
+      }, frame);
+    }
+
     // rotationAngle is measured on the unmirrored base, and the geometry chain
     // is base -> rotate -> mirror -> crop. Mirroring reverses the sense of a
     // rotation (R(f) after M equals M after R(-f)), so an angle the user applies
@@ -8977,39 +9106,25 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       if (state.cropping && rotateCropDraftBy(normalizedAngle)) return;
 
       pushUndo('rotation');
-      const sourceOriginal = state.originalImageData;
+      // The new frame is the base rotated once by the total angle (#244), not
+      // the current frame rotated again: restore and batch export build it
+      // that way, so single export now matches them.
+      const base = state.loadedBaseImageData || state.originalImageData;
+      const sourceFrame = { width: state.originalImageData.width, height: state.originalImageData.height };
       const sourceCrop = state.cropRegion ? { ...state.cropRegion } : null;
-      const shouldPreserveCrop = Boolean(sourceCrop);
-
-      const rotatedData = applyRotationToImageData(sourceOriginal, normalizedAngle);
-      if (!rotatedData) return;
-
-      state.originalImageData = rotatedData;
-
-      if (shouldPreserveCrop) {
-        const mappedCrop = mapCropRegionAfterRotation(
-          sourceCrop,
-          sourceOriginal.width,
-          sourceOriginal.height,
-          rotatedData.width,
-          rotatedData.height,
-          normalizedAngle
-        );
-        state.cropRegion = mappedCrop;
-        state.croppedImageData = mappedCrop ? cropImageData(state.originalImageData, mappedCrop) : null;
-      } else {
-        state.croppedImageData = null;
-        state.cropRegion = null;
-      }
-
       state.rotationAngle = normalizeAngleDegrees((state.rotationAngle || 0) + storedRotationDelta(normalizedAngle));
+      const frame = geometryFrameSize(base, state.rotationAngle);
+      const mappedCrop = sourceCrop ? mapCropRegionAfterRotation(
+        sourceCrop, sourceFrame.width, sourceFrame.height, frame.width, frame.height, normalizedAngle
+      ) : null;
+      applyGeometryFromBase({ cropRegion: mappedCrop });
       invalidateProcessedPipelineState();
       resetZoomPan();
 
       if (state.currentStep >= 3) {
         void processNegative();
       } else {
-        displayNegative(state.croppedImageData || rotatedData);
+        displayNegative(state.croppedImageData || state.originalImageData);
         updateCanvasVisibility();
       }
       setStep2Mode(suggestStep2Mode());
@@ -9028,17 +9143,8 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     }
 
     function rebuildGeometryFromBase() {
-      const base = state.loadedBaseImageData || state.originalImageData;
-      if (!base) return;
-      let working = base;
-      if (Math.abs(state.rotationAngle) > 0.001) {
-        working = applyRotationToImageData(working, state.rotationAngle);
-      }
-      if (state.mirrored) {
-        working = mirrorImageDataHorizontal(working);
-      }
-      state.originalImageData = working;
-      applyCropRegionToLoadedImage(state.cropRegion);
+      if (!(state.loadedBaseImageData || state.originalImageData)) return;
+      applyGeometryFromBase();
     }
 
     function applyMirror() {
@@ -10372,20 +10478,26 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
 
       const angle = getCropDraftTotalAngle();
       const previewRotatedImageData = draft.rotatedImageData;
-      const rotatedImageData = Math.abs(angle) < 0.001
-        ? draft.sourceImageData
-        : applyRotationToImageData(draft.sourceImageData, angle);
-      if (!rotatedImageData || !previewRotatedImageData) return;
-
-      const cropRegion = sanitizeCropRegionForImage(scaleCropRect(
+      if (!previewRotatedImageData) return;
+      // The draft is the current frame rotated by the draft angle (canvas D).
+      // The result is derived from the base by the total angle (#244), so the
+      // drawn rectangle is translated from D onto that frame F.
+      const draftFrame = rotatedDimensions(draft.sourceImageData.width, draft.sourceImageData.height, angle);
+      const nextGeometry = { rotationAngle: normalizeAngleDegrees((state.rotationAngle || 0) + storedRotationDelta(angle)), mirrored: state.mirrored };
+      const base = state.loadedBaseImageData || draft.sourceImageData;
+      const frame = geometryFrameSize(base, nextGeometry.rotationAngle);
+      const cropRegion = mapDraftRectToFrame(scaleCropRect(
         draft.rect,
-        rotatedImageData.width / previewRotatedImageData.width,
-        rotatedImageData.height / previewRotatedImageData.height
-      ), rotatedImageData);
+        draftFrame.width / previewRotatedImageData.width,
+        draftFrame.height / previewRotatedImageData.height
+      ), draftFrame, frame);
       if (!cropRegion) return;
+      const nextKey = geometryKeyFor(base, { ...nextGeometry, cropRegion });
+      // Without a straighten the frame is the one already installed.
+      let framePlanes = installedFramePlanes(nextKey);
+      const buildFrame = () => (framePlanes ||= buildGeometryPlanes(base, { ...nextKey, crop: null }));
 
       const generation = loadGeneration;
-      const nextGeometry = { rotationAngle: normalizeAngleDegrees((state.rotationAngle || 0) + storedRotationDelta(angle)), mirrored: state.mirrored };
       let nextMeta = state.autoFrame.lastDiagnostics;
       {
         studioAutoFrameRunning = true;
@@ -10397,7 +10509,6 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
           const overlay = getLoadingOverlay();
           await overlay.show({ title: studioWorkspace.text('detectingFrame'), indeterminate: true });
           await new Promise(resolve => requestAnimationFrame(resolve));
-          const base = state.loadedBaseImageData || draft.sourceImageData;
           const selectedArea = imageAreaFromWorkingRect(cropRegion, nextGeometry, base);
           nextMeta = structuredClone(state.autoFrame.lastDiagnostics || {});
           // 不確かな再検出では前回の解析範囲・WB を維持する。
@@ -10410,7 +10521,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
           } else if (!isSameAnalysisFrame(nextMeta.imageArea, selectedArea)) {
             let points = null;
             try {
-              if (await ensureOpenCvReady()) points = detectCropImageArea(rotatedImageData, cropRegion, Object.entries(AUTO_FRAME_FORMAT_RATIOS).map(([key, ratio]) => ({ key, ratio })));
+              if (await ensureOpenCvReady()) points = detectCropImageArea(buildFrame().frame, cropRegion, Object.entries(AUTO_FRAME_FORMAT_RATIOS).map(([key, ratio]) => ({ key, ratio })));
             } catch (error) { console.warn('Crop analysis detection failed; keeping the previous color reference:', error); }
             if (points) {
               nextMeta.imageArea = workingPointsToBase(points, nextGeometry, base);
@@ -10433,10 +10544,9 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       pushUndo('crop');
       state.autoFrame.lastDiagnostics = nextMeta;
       if (!draft.analysisOnly) {
-        state.originalImageData = rotatedImageData;
         state.rotationAngle = nextGeometry.rotationAngle;
-        state.cropRegion = cropRegion;
-        state.croppedImageData = cropImageData(rotatedImageData, cropRegion);
+        const planes = buildFrame();
+        installGeometryPlanes(nextKey, { frame: planes.frame, cropped: cropImageDataRegion(planes.frame, nextKey.crop) });
       }
       invalidateProcessedPipelineState();
       resetZoomPan();
@@ -11473,24 +11583,6 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       return sanitizeCropRect(cropRegion, imageData);
     }
 
-    function applyCropRegionToLoadedImage(cropRegion, options = {}) {
-      const { refreshDisplay = false } = options;
-      if (!state.originalImageData) {
-        state.cropRegion = null;
-        state.croppedImageData = null;
-        return false;
-      }
-
-      const sanitized = sanitizeCropRegionForImage(cropRegion, state.originalImageData);
-      state.cropRegion = sanitized;
-      state.croppedImageData = sanitized ? cropImageData(state.originalImageData, sanitized) : null;
-
-      if (refreshDisplay) {
-        displayNegative(state.croppedImageData || state.originalImageData);
-      }
-      return Boolean(sanitized);
-    }
-
     function cropImageData(imageData, cropRegion) {
       const sanitized = sanitizeCropRegionForImage(cropRegion, imageData);
       if (!sanitized) return imageData;
@@ -11739,7 +11831,12 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       // every other frame in the roll.
       const studioColors = state.fileQueue.find(item => item.file === file)?.studioColors;
       let initialSettings = savedSettings || mergeStudioColors(createDefaultSettings(imageData, state.fileQueue.find(item => item.file === file)), studioColors || {});
-      if (!initialSettings.autoFrameMeta && !initialSettings.cropRegion && !expiredImportKeepsFullFrame(initialSettings)) initialSettings = await analyzeStudioImportFrame(imageData, initialSettings, { allowCrop: !savedSettings, silent });
+      let importRotation = null;
+      if (!initialSettings.autoFrameMeta && !initialSettings.cropRegion && !expiredImportKeepsFullFrame(initialSettings)) {
+        initialSettings = await analyzeStudioImportFrame(imageData, initialSettings, {
+          allowCrop: !savedSettings, silent, onRotation: rotation => { importRotation = rotation; }
+        });
+      }
       assertRepairCurrent(isCurrent);
       if (!initialSettings.filmEdge?.checked) {
         const edge = await analyzeImportFilmEdge(imageData, initialSettings, { applyDefaults: !savedSettings && state.importFilmTypeAuto });
@@ -11754,11 +11851,23 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       // Geometry chain (base -> rotation -> mirror -> crop). One pass that
       // only resamples the cropped window: rotating a whole 24 MP scan to keep
       // a 5 MP frame of it was the largest main-thread block per file.
-      let workingData = applyGeometryChainToImageData(imageData, {
+      const geometry = {
         rotationAngle: Number.isFinite(settings.rotationAngle) ? settings.rotationAngle : 0,
         mirrored: Boolean(settings.mirrored),
         cropRegion: settings.cropRegion || null
-      }, exportGeometrySteps);
+      };
+      // The auto-frame worker already rotated this decode by the same angle
+      // with the same exact kernel: mirror and crop that frame instead (#244).
+      const adoptedRotation = importRotation && importRotation.base === imageData && importRotation.angle
+        && importRotation.angle === normalizeAngleDegrees(geometry.rotationAngle)
+        && hasExactPlane16(imageData) && hasExactPlane16(importRotation.image)
+        && importRotation.image.width === rotatedDimensions(imageData.width, imageData.height, importRotation.angle).width
+        && importRotation.image.height === rotatedDimensions(imageData.width, imageData.height, importRotation.angle).height
+        ? importRotation.image : null;
+      importRotation = null;
+      let workingData = adoptedRotation
+        ? applyGeometryChainToImageData(adoptedRotation, { ...geometry, rotationAngle: 0 }, exportGeometrySteps)
+        : applyGeometryChainToImageData(imageData, geometry, exportGeometrySteps);
       workingData = await applyLensCorrectionWithSettings(workingData, settings, { updateUi: false });
       assertRepairCurrent(isCurrent);
       const fullWorkingShortSide = Math.min(workingData.width, workingData.height);
@@ -12695,20 +12804,9 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       state.mirrored = Boolean(safe.mirrored);
       updateMirrorButtonState();
 
-      if (state.loadedBaseImageData) {
-        state.originalImageData = state.loadedBaseImageData;
-      }
-
-      if (state.originalImageData && Math.abs(state.rotationAngle) > 0.001) {
-        state.originalImageData = applyRotationToImageData(state.originalImageData, state.rotationAngle);
-      }
-
-      if (state.originalImageData && state.mirrored) {
-        state.originalImageData = mirrorImageDataHorizontal(state.originalImageData);
-      }
-
-      // Restore crop region after rotation and mirroring
-      applyCropRegionToLoadedImage(safe.cropRegion, { refreshDisplay });
+      // Rotation, mirror and crop from the base; kept as is when the
+      // installed planes were already built for this geometry.
+      applyGeometryFromBase({ cropRegion: safe.cropRegion, refreshDisplay });
       if (state.originalImageData) {
         safe.rotationAngle = state.rotationAngle;
         safe.cropRegion = state.cropRegion ? { ...state.cropRegion } : null;
@@ -13679,7 +13777,10 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         let changed = false;
         let filmEdgeToast = null;
         if (!item?.settings?.autoFrameMeta && !state.cropRegion && state.autoFrame.enabled && !expiredImportKeepsFullFrame(settings)) {
-          settings = await analyzeStudioImportFrame(source, settings, { allowCrop: freshFile });
+          settings = await analyzeStudioImportFrame(source, settings, {
+            allowCrop: freshFile,
+            onRotation: rotation => { if (isCurrentLoad(generation)) pendingImportRotation = rotation; }
+          });
           if (!isCurrentLoad(generation)) return;
           changed = true;
           trace.mark('autoFrame', { applied: settings.autoFrameMeta?.appliedMode || 'none' });
@@ -13754,7 +13855,9 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       }, 0);
     }
 
-    async function analyzeStudioImportFrame(source, settings, { allowCrop = true, silent = false, analyzeInWorker = analyzeFrameInWorker } = {}) {
+    // `onRotation` receives the worker's rotated frame of an applied result so
+    // the caller can adopt it instead of rotating the base again (#244).
+    async function analyzeStudioImportFrame(source, settings, { allowCrop = true, silent = false, analyzeInWorker = analyzeFrameInWorker, onRotation = null } = {}) {
       if (!state.autoFrame.enabled || settings.cropRegion) return settings;
       let result;
       try { result = await detectFrameAndRotation(source, { silent, analyzeInWorker }); }
@@ -13777,6 +13880,9 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       // Only the rotated frame's size is needed here: the one pixel build of
       // this geometry is restoreSettings' (#244), not a second rotation.
       const rotated = rotatedDimensions(source.width, source.height, angle);
+      if (onRotation && !state.autoFrame.rotate180Default && result.rotatedImageData) {
+        onRotation({ base: source, angle: effectiveGeometryAngle(angle), image: result.rotatedImageData });
+      }
       const cropRegion = state.autoFrame.rotate180Default
         ? rotate180CropRegion(result.cropRegion, rotated.width, rotated.height) : result.cropRegion;
       return { ...settings, rotationAngle: angle, mirrored: false, cropRegion, autoFrameMeta: meta };
