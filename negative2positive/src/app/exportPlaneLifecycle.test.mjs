@@ -74,6 +74,13 @@ class InProcessWorker {
   terminate() { this.terminated = true; }
 }
 let crashNext = null;
+// #256: the band pool a test installs (none by default).
+let bandPoolSize = 0;
+let bandMinPixels = 4_000_000;
+let bandPoolFactory = () => assert.fail('no band pool in this fixture');
+const { createBandedExportBridge } = await import('./bandedExportBridge.js');
+const { bandThreadFactory } = await import('./bandWorkerThreads.mjs');
+const { bandsSupported } = await import('../pipeline/silverBands.js');
 
 const bridgeModule = await import('../workers/workerBridge.js');
 const { markOwnedPlanes, planeBuffersOf, releaseOwnedPlanes, setLiveReferenceProbe, configurePlaneRelease } = await import('./planeRelease.js');
@@ -99,7 +106,8 @@ const runtime = [
   'prepareCurrentImageForExport', 'renderCurrentImageDataForExport', 'encodeFused16', 'renderAndEncodeCurrentImage',
   'exportSingle', 'applyAdjustmentsWithSettings', 'applyPreparedAdjustmentsWithWorkers', 'startExportGainMap',
   'imageDataToBlob', 'png16EncodeSettings', 'makeExportCancelledError', 'createBatchExportWorkers',
-  'renderBatchExportFile', 'runBatchExport', 'batchPipelineMode', 'batchDecodeAhead', 'mayLearnFromExport', ...MEMORY_FUNCTIONS
+  'renderBatchExportFile', 'runBatchExport', 'batchPipelineMode', 'batchDecodeAhead', 'mayLearnFromExport',
+  'encodeResidentFrame', 'createExportBands', 'convertForExportInBands', ...MEMORY_FUNCTIONS
 ].map(functionSource).join('\n')
   // vm scripts have no dynamic import: hand the module over directly.
   .replaceAll("await import('./gainMapJpeg.js')", 'await importGainMapJpeg()');
@@ -251,7 +259,18 @@ function createContext({ gainMap = 'on' } = {}) {
     runBatchPipeline, createLearningBarrier, planDecodeAhead, EXPORT_MAX_UNWRITTEN_BYTES,
     // #256 stages: decode-ahead only for RAW names here, never admitted by
     // default (the fixture decodes nothing); tests below switch it on.
-    batchPipelineDiagnostics: { batches: 0, droppedPlanes16: 0, decodeAhead: { admitted: 0, refused: { ceiling: 0, 'low-memory': 0, hidden: 0, format: 0 } } },
+    batchPipelineDiagnostics: { batches: 0, droppedPlanes16: 0, residentFrames: 0, bandBridge: {}, bands: null, singleExport: null,
+      decodeAhead: { admitted: 0, refused: { ceiling: 0, 'low-memory': 0, hidden: 0, format: 0 } } },
+    // #256 band pool: none in this fixture (a 1 MP frame, and no pool size),
+    // unless a test below sets one.
+    exportBands: null,
+    Worker: function Worker() { throw new Error('band workers come from the pool factory'); },
+    planBandPoolSize: () => bandPoolSize, planBandCount: () => 2, BAND_POOL_MIN_PIXELS: bandMinPixels,
+    createConversionBandPool: (options) => bandPoolFactory(options),
+    createBandedExportBridge: (...args) => createBandedExportBridge(...args),
+    bandsSupported: (...args) => bandsSupported(...args),
+    WORKER_ABORTED: 'WORKER_ABORTED',
+    convertFullResolutionFrameInWorker: async () => assert.fail('no full-resolution render in this fixture'),
     isRawLikeFileName: (name) => /\.(dng|nef)$/.test(name), isPngFile: () => false,
     imagePixelsForBatch: async () => W * H, hiddenResidentBytes: () => 0,
     backgroundGate: { idle: async () => true }, BACKGROUND_STEP_WAIT_CAP_MS: 2000,
@@ -357,6 +376,72 @@ for (const [format, bitDepth] of [['tiff', 16], ['png', 16], ['png', 8], ['jpeg'
   }
   // No export plane on live state.
   assert.equal(f.state.displayImageData, null);
+}
+
+// ============================================= single export on the band pool
+// #256 Part 5: the export's Step 3 runs in row bands on the conversion band
+// pool (real band workers in worker_threads) and the per-export bridge only
+// encodes; the bytes are those of the one-worker path, the editor's plane is
+// only ever copied, and the pool ends with the export.
+{
+  const { createConversionBandPool } = await import('./conversionWorkerClient.js');
+  const bandThreads = [];
+  const pools = [];
+  bandPoolSize = 3;
+  bandMinPixels = 0;
+  bandPoolFactory = (options) => {
+    const pool = createConversionBandPool({ ...options, shared: false, workerFactory: bandThreadFactory({ threads: bandThreads }) });
+    pools.push(pool);
+    return pool;
+  };
+  try {
+    for (const [format, bitDepth] of [['tiff', 16], ['png', 16], ['png', 8], ['jpeg', 8], ['tiff', 8]]) {
+      const f = createContext();
+      f.state.exportFormat = format;
+      f.state.exportBitDepth = bitDepth;
+      const label = `banded ${format}${bitDepth}`;
+      const plane = f.state.processedImageData.__image16;
+      const planeBefore = plane.data.slice();
+      workerPosts.length = 0;
+      saved.length = 0;
+      const result = await f.context.exportSingle();
+      assert.equal(result.saved, true, label);
+      assert.equal(pools.length, 1, `${label}: one band pool for the export`);
+      assert.ok(pools[0].stats.adjusts >= 1, `${label}: Step 3 ran on the bands`);
+      assert.equal(pools[0].available, false, `${label}: the pool ends with the export`);
+      assert.ok(same(plane.data, planeBefore) && plane.data.length === W * H * 4, `${label}: the editor's plane is only copied`);
+      const types = workerPosts.map((p) => p.type);
+      assert.ok(!types.some((type) => type.startsWith('applyAdjustments') || type === 'adjust16AndEncode'), `${label}: the export worker only encodes (${types})`);
+      const bytes = await stubBlobText(saved[0]);
+      const settings = f.state.recipe;
+      if (bitDepth === 16) {
+        const expectedPlane = referencePlane16(f.state.processedImageData, settings);
+        const expected = new Uint8Array(await (format === 'tiff'
+          ? encoders.encodeTiffBlob({ width: W, height: H, __image16: expectedPlane }, 16, { exif: { Make: 'Test' }, xmp: null })
+          : encoders.encodePng16Blob({ width: W, height: H, __image16: expectedPlane })).arrayBuffer());
+        assert.ok(same(bytes, expected), `${label}: banded bytes == one-worker bytes`);
+      } else if (format === 'tiff') {
+        const expected = new Uint8Array(await encoders.encodeTiffBlob(referenceAdjusted8(f.state.processedImageData, settings), 8, { exif: { Make: 'Test' }, xmp: null }).arrayBuffer());
+        assert.ok(same(bytes, expected), `${label}: bytes`);
+      } else {
+        const sdr = referenceAdjusted8(f.state.processedImageData, settings);
+        const mime = format === 'jpeg' ? 'image/jpeg' : 'image/png';
+        const head = `${mime}|${format === 'jpeg' ? '0.92' : 'undefined'}|`;
+        assert.ok(same(bytes.subarray(head.length, head.length + sdr.data.length), sdr.data), `${label}: SDR pixels`);
+        if (format === 'jpeg') {
+          const map = computeGainMap(sdr, referencePlane16(f.state.processedImageData, settings));
+          const tail = new Uint8Array(await new Blob(['|GAIN|', `image/jpeg|0.85|`, map.data, `|${map.gainMax}|${map.gainMin}`]).arrayBuffer());
+          assert.ok(same(bytes.subarray(head.length + sdr.data.length), tail), `${label}: gain map from the banded 16-bit pass`);
+        }
+      }
+      pools.length = 0;
+    }
+  } finally {
+    bandPoolSize = 0;
+    bandMinPixels = 4_000_000;
+    bandPoolFactory = () => assert.fail('no band pool in this fixture');
+    await Promise.all(bandThreads.map((thread) => thread.terminate()));
+  }
 }
 
 {
@@ -638,6 +723,142 @@ for (const [format, bitDepth] of [['jpeg', 8], ['png', 8], ['tiff', 16], ['png',
   assert.deepEqual(serial.log.filter((line) => line.startsWith('decode-ahead')), [], 'serial: no decode-ahead');
   assert.equal(serial.diagnostics.last.earlyReleases, 0, 'serial: lanes held until their write');
   assert.ok(serial.log.includes('learned-read:c.dng:after'));
+}
+
+{
+  // #256 Part 5 in a one-lane batch: frames convert in row bands; a frame
+  // whose later steps need no pixels keeps its bands in the pool and runs
+  // Step 3 there (the processed frame is never assembled on this thread); a
+  // JPEG with its gain map converts in bands and adjusts through the banded
+  // bridge. Every file is byte-identical to the serial run (the lane alone).
+  // A band worker that crashes hands the frame to the lane with the same
+  // bytes, and the pool is not used again.
+  const { createConversionBandPool } = await import('./conversionWorkerClient.js');
+  const { convertFrameWithRouter } = await import('../pipeline/conversionRouter.js');
+  const bandThreads = [];
+  const created = [];
+  let crashOn = null;
+  bandPoolSize = 3;
+  bandMinPixels = 0;
+  bandPoolFactory = (options) => {
+    const pool = createConversionBandPool({ ...options, shared: false, onError: () => {}, workerFactory: bandThreadFactory({ threads: bandThreads, crashOn }) });
+    created.push(pool);
+    return pool;
+  };
+  const negativeSettings = { filmType: 'color', colorModel: 'standard', filmBase: { r: 210, g: 140, b: 90 } };
+  const run = async ({ format, bitDepth, mode, gainMap = 'off', frames = 1, role = 'derived' }) => {
+    const f = createContext({ gainMap });
+    f.context.safeStorageGet = (key) => (key === 'nc_batch_pipeline_v1' ? mode : key === 'nc_hdr_gain_map_v1' ? gainMap : null);
+    f.context.createConversionWorkerPool = () => {
+      const lane = async (request) => markOwnedPlanes(await convertFrameWithRouter({ imageData: request.imageData, settings: request.settings, options: request.options }));
+      lane.dispose = () => {};
+      return lane;
+    };
+    const kinds = [];
+    f.context.processFileWithSettings = async (file, settings, options) => {
+      const source = markOwnedPlanes(makeProcessed(7));
+      options.ownedPlanes.push(source);
+      const processed = await options.convert({
+        imageData: source, settings: negativeSettings, options: { forceFullProcess: true }, sourceRole: role,
+        ...(options.bandResident ? { resident: true } : {})
+      });
+      kinds.push(processed.__bands ? 'resident' : processed.data ? 'assembled' : 'other');
+      if (role === 'derived' && mode !== 'serial' && created.length) assert.equal(source.__image16.data.byteLength, 0, 'the geometry output was released once sliced');
+      options.ownedPlanes.push(processed);
+      return { processed, settings };
+    };
+    const exportInfo = f.context.getExportInfo(format, bitDepth);
+    const jobs = Array.from({ length: frames }, (_, i) => ({ item: { file: { name: `f${i}.dng` } }, file: { name: `f${i}.dng` }, settings: { recipe: recipe() }, outputName: `f${i}` }));
+    const written = [];
+    const result = await f.context.runBatchExport(jobs, { exportInfo, sink: async (job, blob) => { written.push(await stubBlobText(blob)); } });
+    assert.equal(result.successCount, frames);
+    return { written, kinds, diagnostics: f.context.batchPipelineDiagnostics };
+  };
+  try {
+    for (const [format, bitDepth, gainMap, expectKind] of [
+      ['tiff', 16, 'off', 'resident'], ['png', 8, 'off', 'resident'], ['jpeg', 8, 'off', 'resident'], ['jpeg', 8, 'on', 'assembled']
+    ]) {
+      const label = `batch bands ${format}${bitDepth}${gainMap === 'on' ? ' + gain map' : ''}`;
+      created.length = 0;
+      const serial = await run({ format, bitDepth, mode: 'serial', gainMap });
+      assert.equal(created.length, 0, `${label}: serial runs without the band pool`);
+      const banded = await run({ format, bitDepth, mode: null, gainMap });
+      assert.equal(created.length, 1, `${label}: one band pool for the batch`);
+      assert.equal(created[0].available, false, `${label}: released at batch end`);
+      assert.ok(created[0].stats.frames >= 1, `${label}: the frame converted in bands`);
+      assert.deepEqual(banded.kinds, [expectKind], label);
+      if (expectKind === 'resident') assert.equal(banded.diagnostics.residentFrames, 1, `${label}: Step 3 on the resident bands`);
+      assert.ok(same(banded.written[0], serial.written[0]), `${label}: bytes == serial`);
+    }
+    // A band worker crash: the lane converts the frame, and the pool is not
+    // used for the next one. The base (not released) was only lent.
+    created.length = 0;
+    const serial = await run({ format: 'png', bitDepth: 8, mode: 'serial', frames: 2, role: 'base' });
+    crashOn = (message) => message.type === 'apply';
+    const warn = console.warn;
+    console.warn = () => {};
+    let crashed;
+    try {
+      crashed = await run({ format: 'png', bitDepth: 8, mode: null, frames: 2, role: 'base' });
+    } finally {
+      console.warn = warn;
+      crashOn = null;
+    }
+    assert.equal(created[0].stats.failures, 1);
+    assert.deepEqual(crashed.kinds, ['assembled', 'assembled'], 'the lane converted both frames');
+    assert.ok(same(crashed.written[0], serial.written[0]) && same(crashed.written[1], serial.written[1]), 'the same bytes after the crash');
+  } finally {
+    bandPoolSize = 0;
+    bandMinPixels = 4_000_000;
+    bandPoolFactory = () => assert.fail('no band pool in this fixture');
+    await Promise.all(bandThreads.map((thread) => thread.terminate()));
+  }
+}
+
+{
+  // #256 Part 5, single export: the export-time full-resolution render of a
+  // large frame converts in bands (the editor's source is copied, never
+  // released) and, without dust or repairs, leaves the bands in the pool; the
+  // export's Step 3 then runs on them. The plane equals the one worker's
+  // conversion, the adjusted plane the one worker's Step 3.
+  const { createConversionBandPool } = await import('./conversionWorkerClient.js');
+  const { convertFrameWithRouter } = await import('../pipeline/conversionRouter.js');
+  const bandThreads = [];
+  bandPoolSize = 3;
+  bandMinPixels = 0;
+  bandPoolFactory = (options) => createConversionBandPool({ ...options, shared: false, workerFactory: bandThreadFactory({ threads: bandThreads }) });
+  try {
+    const f = createContext();
+    const source = makeProcessed(9);
+    const sourceBefore = source.__image16.data.slice();
+    const request = { imageData: source, settings: { filmType: 'bw', preSaturation: 120 }, options: { forceFullProcess: true, includeAnalysisPreview: false } };
+    const expected = await convertFrameWithRouter({ imageData: makeProcessed(9), settings: request.settings, options: request.options });
+    vm.runInContext('exportBands = createExportBands();', f.context);
+    const bands = f.context.exportBands;
+    const processed = await f.context.convertForExportInBands({ ...request, signal: null });
+    assert.ok(same(processed.__image16.data, expected.__image16.data) && same(processed.data, expected.data), 'the banded render == one worker');
+    assert.ok(same(source.__image16.data, sourceBefore), 'the editor source was copied, not released');
+    assert.equal(bands.pool.stats.resident, 1, 'the bands stayed in the pool');
+    const bridge = bridgeModule.createExportWorkerBridge({ workerFactory: () => new InProcessWorker() });
+    const stats = {};
+    const banded = createBandedExportBridge(bridge, bands.pool, { resident: bands.resident, stats, minPixels: 0 });
+    const settings = recipe();
+    const adjusted = await banded.workerApplyAdjustments16(processed, settings, 'full', { planeOnly: true });
+    assert.equal(stats.residentAdjusts, 1, 'Step 3 ran on the resident bands');
+    assert.ok(same(adjusted.__image16.data, referencePlane16(processed, settings).data), 'resident Step 3 == one worker');
+    // Consumed: a second pass slices the plane again, with the same result.
+    const again = await banded.workerApplyAdjustments16(processed, settings, 'full', { planeOnly: true });
+    assert.equal(stats.bandAdjusts, 1);
+    assert.ok(same(again.__image16.data, adjusted.__image16.data));
+    bridge.terminateWorker();
+    bands.dispose();
+    assert.equal(bands.pool.available, false);
+  } finally {
+    bandPoolSize = 0;
+    bandMinPixels = 4_000_000;
+    bandPoolFactory = () => assert.fail('no band pool in this fixture');
+    await Promise.all(bandThreads.map((thread) => thread.terminate()));
+  }
 }
 
 setLiveReferenceProbe(null);

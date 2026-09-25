@@ -79,7 +79,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     import { convertFrameWithRouter, resolveConversionMode } from '../pipeline/conversionRouter.js';
     import { convertAdjustedFrame } from '../pipeline/adjustedFrame.js';
-    import { convertFrameInWorker, convertPreviewFrameInWorker, convertFullResolutionFrameInWorker, createConversionWorkerClient, createConversionWorkerPool, CONVERSION_FAILED, WORKER_CRASHED, WORKER_TIMEOUT, WORKER_UNAVAILABLE, WORKER_ABORTED, isConversionInputLost } from './conversionWorkerClient.js';
+    import { convertFrameInWorker, convertPreviewFrameInWorker, convertFullResolutionFrameInWorker, createConversionWorkerClient, createConversionWorkerPool, CONVERSION_FAILED, WORKER_CRASHED, WORKER_TIMEOUT, WORKER_UNAVAILABLE, WORKER_ABORTED, isConversionInputLost, createConversionBandPool, planBandPoolSize, planBandCount, BAND_POOL_MIN_PIXELS } from './conversionWorkerClient.js';
+    import { createBandedExportBridge } from './bandedExportBridge.js';
+    import { bandsSupported } from '../pipeline/silverBands.js';
     import { routeCoreConversion, keepsFullPlaneOnDowngrade, fullResolutionIsStale, restoredFrameFlags, viewportRefreshBranch, repairsNeedSettling } from './fullResolutionRouting.js';
     import { poolRepairMask } from './repairedPreview.js';
     import {
@@ -7627,7 +7629,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
               preview: false, includeAnalysisPreview: false,
               // #237's own worker above 16 MP; below it the shared worker,
               // with the photo activation's signal (#243).
-              signal: abort?.controller.signal || options.signal || null, client: abort ? convertFullResolutionFrameInWorker : null
+              signal: abort?.controller.signal || options.signal || null,
+              // During a single export, on the band pool (#256 Part 5).
+              client: abort ? (exportBands ? convertForExportInBands : convertFullResolutionFrameInWorker) : null
             });
           } catch (err) {
             // Superseded while converting: the same outcome as a stale token.
@@ -15949,6 +15953,69 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return imageDataToBlob(outputImageData, exportInfo.format, state.jpegQuality, exportInfo.bitDepth, onProgress, metadata, { bridge, png16Pool, signal, transferPlane: transferPlanes });
     }
 
+    // The export-time full-resolution conversion of a frame over 16 MP, and
+    // the export's Step 3, run on the conversion band pool (#256 Part 5): set
+    // by exportSingle for the length of one export, released with it. The
+    // editor's source is sliced by copy, never transferred. Without dust or
+    // repair strokes the converted bands stay in the pool (the plane that
+    // becomes state.processedImageData comes back as a copy), and the
+    // export's Step 3 runs on them: one conversion, no second slicing.
+    let exportBands = null;
+
+    function createExportBands() {
+      const size = planBandPoolSize(navigator.hardwareConcurrency);
+      if (batchPipelineMode() === 'serial' || size < 2 || typeof Worker !== 'function') return null;
+      const pool = createConversionBandPool({ size });
+      const residentPlanes = new WeakMap();
+      const handles = new Set();
+      const stats = {};
+      return {
+        pool,
+        stats,
+        count: () => planBandCount({
+          hardwareConcurrency: navigator.hardwareConcurrency,
+          inputRecently: isTauriDesktop() && backgroundGate.inputRecently(),
+          poolSize: size
+        }),
+        keepResident: () => !state.dustRemoval.enabled && !state.repairStrokes.length,
+        resident: (data) => (data && data.buffer ? residentPlanes.get(data.buffer) || null : null),
+        remember(processed, handle) {
+          handles.add(handle);
+          for (const buffer of planeBuffersOf(processed)) residentPlanes.set(buffer, handle);
+        },
+        dispose() {
+          for (const handle of handles) handle.release();
+          handles.clear();
+          batchPipelineDiagnostics.singleExport = { ...pool.stats, ...stats, size: pool.size };
+          pool.dispose();
+        }
+      };
+    }
+
+    // convertFullResolutionFrameInWorker's contract, on the export's bands. A
+    // pool that cannot convert the frame hands it to that single worker.
+    async function convertForExportInBands(request) {
+      const bands = exportBands;
+      const pixels = request.imageData ? request.imageData.width * request.imageData.height : 0;
+      if (bands && bands.pool.available && pixels >= BAND_POOL_MIN_PIXELS && bandsSupported(request)) {
+        try {
+          const converted = await bands.pool.convert(
+            { imageData: request.imageData, settings: request.settings, options: request.options },
+            { bands: bands.count(), signal: request.signal || null, keepResident: bands.keepResident() }
+          );
+          if (!converted.__bands) return converted;
+          const processed = await converted.__bands.fetch({ keep: true, signal: request.signal || null });
+          if (converted.__analysisPreview) processed.__analysisPreview = converted.__analysisPreview;
+          bands.remember(processed, converted.__bands);
+          return processed;
+        } catch (err) {
+          if (err?.code === WORKER_ABORTED) throw err;
+          console.warn('Band conversion failed, converting in one worker:', err?.message || err);
+        }
+      }
+      return convertFullResolutionFrameInWorker(request);
+    }
+
     function notifyExportError(err) {
       console.error('Export failed:', err);
       const message = err && err.message ? err.message : String(err || 'Unknown error');
@@ -16002,9 +16069,17 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // dead planes go with it instead of waiting for the next export. Every
       // request is awaited before the `finally`, so terminating there rejects
       // nothing on the normal path.
-      const bridge = createExportWorkerBridge();
+      const workerBridge = createExportWorkerBridge();
       // Its PNG16 band pool (#257), for the same lifetime.
       const png16Pool = exportInfo.format === 'png' && exportInfo.bitDepth === 16 ? createOperationPng16Pool(1) : null;
+      // And its conversion band pool (#256): the full-resolution conversion
+      // and Step 3 in row bands; the bridge's own worker encodes.
+      exportBands = exportInfo.format === 'dng' ? null : createExportBands();
+      const bridge = exportBands
+        ? createBandedExportBridge(workerBridge, exportBands.pool, {
+          bands: exportBands.count, resident: exportBands.resident, stats: exportBands.stats, minPixels: BAND_POOL_MIN_PIXELS
+        })
+        : workerBridge;
       const ownedPlanes = [];
       try {
         overlay.updateProgress(5, lang.loadingAdjusting);
@@ -16068,8 +16143,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         throw err;
       } finally {
         overlay.setCancelable(false);
-        bridge.terminateWorker();
+        workerBridge.terminateWorker();
         if (png16Pool) png16Pool.dispose();
+        if (exportBands) {
+          exportBands.dispose();
+          exportBands = null;
+        }
         releaseOwnedPlanes(...ownedPlanes);
         overlay.hide();
       }
@@ -17199,9 +17278,21 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         settings: buildRouterSettings(settings, imageData),
         options: { preview: reducedPreview, forceFullProcess: true, analysisImageData: getColorAnalysisSample(settings, imageData) }
       };
+      // `bandResident` (batch export, #256 Part 5): a frame whose steps after
+      // the conversion read no pixels (no dust or repair, no expired
+      // measurement, an auto white balance from the analysis preview or
+      // none) may keep its converted bands in the band pool; the caller then
+      // runs Step 3 there. Any convert may ignore it.
+      const dustEnabled = !tileMax && Boolean((options.dustRemoval || state.dustRemoval)?.enabled);
+      const automaticWb = Boolean(!savedSettings || state.fileQueue.find(item => item.file === file)?.automaticSettings)
+        && frameWantsAutoWhiteBalance(settings);
+      const resident = Boolean(options.bandResident) && !dustEnabled && !settings.repairStrokes?.length
+        && !(settings.expiredEnabled && !settings.expiredAnalysis)
+        && (!automaticWb || Boolean(settings.autoFrameMeta?.analysisNeedsReview)
+          || (!settings.semanticMap && Boolean(conversion.options.analysisImageData)));
       let converted;
       try {
-        converted = await convert({ imageData: workingData, ...conversion, sourceRole });
+        converted = await convert({ imageData: workingData, ...conversion, sourceRole, ...(resident ? { resident: true } : {}) });
       } catch (err) {
         // The lane (or band pool) lost the geometry or lens output it was
         // handed (#250, #256). The decoded base is still here (#256 Part
@@ -17375,7 +17466,17 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // given up. Both release the lane's cached planes after each frame. A
     // source lost with its lane is never converted on the main thread: the
     // frame is rendered again from decode.
-    function createBatchExportWorkers(lanes, { pixelsPerFile = 0, exportInfo = null } = {}) {
+    //
+    // A one-lane batch of frames over 4 MP (every frame from 45 MP up) also
+    // gets the conversion band pool (#256 Part 5): its frames convert in row
+    // bands on the cores the lane leaves idle, and so does their Step 3 (the
+    // export bridge is wrapped). A geometry output is released once it has
+    // been sliced; the base stays until the conversion resolves. A frame
+    // whose later steps need no pixels keeps its converted bands in the pool
+    // (`resident`), and its Step 3 runs there. If the pool fails, the lane's
+    // single worker converts the frame (`convertFallback`), with the same
+    // pixels, and later frames skip the pool.
+    function createBatchExportWorkers(lanes, { pixelsPerFile = 0, exportInfo = null, mode = 'default', decodesInFlight = () => 0 } = {}) {
       const dust = createDustWorkerClient();
       // The lanes share the geometry pool; each keeps few enough bands in
       // flight that their transient copies stay within the band budget.
@@ -17401,10 +17502,45 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           return convertFrameWithRouter(request);
         }
       };
+      const bandPoolSize = planBandPoolSize(navigator.hardwareConcurrency);
+      const bandPool = pool && mode !== 'serial' && lanes === 1 && bandPoolSize >= 2 && pixelsPerFile >= BAND_POOL_MIN_PIXELS
+        && typeof Worker === 'function'
+        ? createConversionBandPool({ size: bandPoolSize })
+        : null;
+      // Bands per frame (#256): cores − 2 − decodes in flight, 2 while the
+      // user gives input to the desktop editor.
+      const bandCount = () => planBandCount({
+        hardwareConcurrency: navigator.hardwareConcurrency,
+        activeDecodes: decodesInFlight(),
+        inputRecently: isTauriDesktop() && backgroundGate.inputRecently(),
+        poolSize: bandPool ? bandPool.size : 1
+      });
+      const convertInBands = bandPool ? async (request) => {
+        const pixels = request.imageData ? request.imageData.width * request.imageData.height : 0;
+        if (bandPool.available && pixels >= BAND_POOL_MIN_PIXELS && bandsSupported(request)) {
+          try {
+            return await bandPool.convert(request, {
+              bands: bandCount(),
+              releaseSource: request.sourceRole === 'derived',
+              keepResident: Boolean(request.resident)
+            });
+          } catch (err) {
+            // A released geometry output: processFileWithSettings rebuilds it
+            // from the base and converts it with `convertFallback`.
+            if (isConversionInputLost(err)) throw err;
+            console.warn('Band conversion failed, converting in the lane:', err?.message || err);
+          }
+        }
+        return convertWith(true)(request);
+      } : null;
       return {
         convert: pool ? convertWith(false) : null,
-        convertHandoff: pool ? convertWith(true) : null,
-        bridge,
+        convertHandoff: convertInBands || (pool ? convertWith(true) : null),
+        convertFallback: pool ? convertWith(false) : null,
+        bridge: bandPool
+          ? createBandedExportBridge(bridge, bandPool, { bands: bandCount, stats: batchPipelineDiagnostics.bandBridge, minPixels: BAND_POOL_MIN_PIXELS })
+          : bridge,
+        bandPool,
         png16Pool,
         dust,
         geometryBands,
@@ -17413,6 +17549,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           if (pool) pool.dispose();
           bridge.dispose();
           if (png16Pool) png16Pool.dispose();
+          if (bandPool) {
+            batchPipelineDiagnostics.bands = { ...bandPool.stats, size: bandPool.size, shared: bandPool.shared };
+            bandPool.dispose();
+          }
         }
       };
     }
@@ -17452,6 +17592,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const metadata = exportMetadataFor(settings, position);
       const ownedPlanes = [];
       try {
+        // Formats whose Step 3 and encode can run from resident bands (#256):
+        // every one but a JPEG with its gain map, which reads the unadjusted
+        // plane.
+        const residentFormat = exportInfo.format === 'tiff' || exportInfo.format === 'png'
+          || (exportInfo.format === 'jpeg' && (sprocket || safeStorageGet('nc_hdr_gain_map_v1') === 'off'));
         const { processed, settings: used } = await processFileWithSettings(file, settings, {
           stage: 'processed',
           silent: true,
@@ -17464,10 +17609,14 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           geometryBands: workers.geometryBands,
           ownedPlanes,
           releaseEarly: true,
+          bandResident: transferPlanes && Boolean(workers.bandPool) && residentFormat,
           ...stages
         });
         const adjustmentSettings = buildAdjustmentSettings(used);
         const wants16 = exportInfo.bitDepth === 16;
+        if (processed.__bands) {
+          return await encodeResidentFrame(processed, adjustmentSettings, { exportInfo, workers, metadata, sprocket, settings, position, ownedPlanes });
+        }
 
         // 16-bit TIFF/PNG without the sprocket frame: adjust and encode in one
         // worker request; the adjusted plane never comes to this thread. A
@@ -17550,7 +17699,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // What the batch stages did, for the acceptance runs and the smoke test
     // (window.__ncBatchPipeline).
     const batchPipelineDiagnostics = {
-      batches: 0, lastMode: null, lastLanes: 0, droppedPlanes16: 0, rebuilds: 0,
+      batches: 0, lastMode: null, lastLanes: 0, droppedPlanes16: 0, rebuilds: 0, residentFrames: 0,
+      bandBridge: {}, bands: null, singleExport: null,
       decodeAhead: { admitted: 0, refused: { ceiling: 0, 'low-memory': 0, hidden: 0, format: 0 }, lastEstimate: 0 },
       last: null
     };
@@ -17565,12 +17715,15 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (mode === 'serial') return null;
       const decodesOffThread = (file) => isRawLikeFileName(String(file?.name || '').toLowerCase()) || isPngFile(file);
       const subStages = mode === 'substages';
+      let running = 0;
       const pixels = new Map();
       const pixelsOf = async (file) => {
         if (!pixels.has(file)) pixels.set(file, await imagePixelsForBatch(file));
         return pixels.get(file);
       };
       return {
+        // Decodes in flight, which the band pool leaves a core each (#256).
+        running: () => running,
         prepareDepth: subStages ? 2 : 1,
         admitPrepare: async ({ job, prepared, unwrittenBytes, processing }) => {
           if (!decodesOffThread(job.file)) {
@@ -17602,8 +17755,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           // foreground decode or conversion to end, at most 2 s. The batch's
           // own export lock never holds it (foregroundOnly).
           if (isTauriDesktop()) await backgroundGate.idle({ signal, maxWaitMs: BACKGROUND_STEP_WAIT_CAP_MS, foregroundOnly: true });
-          const base = await loadFileToImageData(job.file, { filmStats: !job.settings, signal, ...(subStages ? { onStage: stage } : {}) });
-          return markOwnedPlanes(base);
+          running += 1;
+          try {
+            const base = await loadFileToImageData(job.file, { filmStats: !job.settings, signal, ...(subStages ? { onStage: stage } : {}) });
+            return markOwnedPlanes(base);
+          } finally {
+            running -= 1;
+          }
         },
         // A frame decoded ahead of a cancelled batch is never processed.
         disposePrepared: (base) => releaseOwnedPlanes(base)
@@ -17613,6 +17771,38 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // Frames whose export records what the user changed (learnFromExport).
     function mayLearnFromExport(item) {
       return Boolean(item && !item.savedSettings && !state.rollReference.applyLock && item.touchedKeys?.size);
+    }
+
+    // Step 3 and the encode of a batch frame whose converted bands stayed in
+    // the band pool (#256 Part 5): the adjustment runs there on the bands,
+    // with the frame's size and each band's start row, and only the adjusted
+    // planes come back; the processed frame is never assembled here. The same
+    // planes, sprocket frame and encoder as the other path, so the same bytes.
+    // The bands are released whatever happens; if a band worker died, the
+    // frame is rendered again (INPUT_LOST).
+    async function encodeResidentFrame(frame, adjustmentSettings, { exportInfo, workers, metadata, sprocket, settings, position, ownedPlanes }) {
+      const { width, height } = frame;
+      const bands = frame.__bands;
+      batchPipelineDiagnostics.residentFrames += 1;
+      try {
+        let adjusted;
+        if (exportInfo.bitDepth === 16) {
+          const { data16, data8 } = await bands.adjust(adjustmentSettings, { bits16: true, mirror8: sprocket });
+          const plane = { width, height, data: markOwnedPlanes(data16) };
+          adjusted = sprocket ? new ImageData(markOwnedPlanes(data8), width, height) : { width, height };
+          adjusted.__image16 = plane;
+        } else {
+          const { data8 } = await bands.adjust(adjustmentSettings, { bits8: true });
+          adjusted = new ImageData(markOwnedPlanes(data8), width, height);
+        }
+        ownedPlanes.push(adjusted);
+        const output = await applySprocketFrameForExport(adjusted, exportInfo, settings, position);
+        if (output !== adjusted) ownedPlanes.push(output);
+        return await imageDataToBlob(output, exportInfo.format, state.jpegQuality, exportInfo.bitDepth, null, metadata,
+          { bridge: workers.bridge, png16Pool: workers.png16Pool, transferPlane: true });
+      } finally {
+        bands.release();
+      }
     }
 
     // Runs `jobs` through the pipeline, keeps the file-list statuses current
@@ -17635,10 +17825,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // (#258): the index is not claimed yet when it asks.
       const laneBytes = laneReservationBytes({ pixels: pixelsPerFile });
       const mode = batchPipelineMode();
-      const workers = createBatchExportWorkers(lanes, { pixelsPerFile, exportInfo, mode });
+      const decodeAhead = batchDecodeAhead(mode, { pixelsPerFile });
+      const workers = createBatchExportWorkers(lanes, { pixelsPerFile, exportInfo, mode, decodesInFlight: () => decodeAhead?.running() || 0 });
       const trace = createPerfTrace('batchExport', { files: jobs.length, lanes, mode });
       const learning = createLearningBarrier(jobs.length, (index) => learnsInSink && mayLearnFromExport(jobs[index].item));
-      const decodeAhead = batchDecodeAhead(mode, { pixelsPerFile });
       const stats = {};
       batchPipelineDiagnostics.batches += 1;
       batchPipelineDiagnostics.lastMode = mode;
@@ -17650,7 +17840,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           signal,
           stats,
           ...(mode === 'serial' ? {} : { maxUnwrittenBytes: EXPORT_MAX_UNWRITTEN_BYTES, payloadBytes: (blob) => Number(blob?.size) || 0 }),
-          ...(decodeAhead || {}),
+          ...(decodeAhead ? {
+            prepare: decodeAhead.prepare, prepareDepth: decodeAhead.prepareDepth,
+            admitPrepare: decodeAhead.admitPrepare, disposePrepared: decodeAhead.disposePrepared
+          } : {}),
           // Admission happens before a lane claims its next index (#241):
           // the hidden-job gate, then the memory budget; both are released
           // once the claimed frame's sink has run.

@@ -74,7 +74,7 @@ export function isExportInputLostError(err) {
   return Boolean(err) && err.name === 'ExportInputLostError';
 }
 
-function inputLostError(what, cause) {
+export function inputLostError(what, cause) {
   const lost = makeError(`The frame's ${what} was lost with the export worker: ${cause && cause.message ? cause.message : cause}`, 'ExportInputLostError');
   lost.cause = cause;
   return lost;

@@ -9,8 +9,8 @@
 // thread's copy steps on a 12 MP plane.
 // Run with: node negative2positive/src/app/conversionBandPool.test.mjs
 import assert from 'node:assert/strict';
-import { Worker as NodeWorker } from 'node:worker_threads';
 import { sha } from '../pipeline/oracle/adapterParity.mjs';
+import { bandThreadFactory } from './bandWorkerThreads.mjs';
 
 const { createConversionBandPool, planBandPoolSize, planBandCount, copyInSteps, sharedBandPlanesAvailable,
   isConversionInputLost, WORKER_ABORTED, WORKER_CRASHED } = await import('./conversionWorkerClient.js');
@@ -38,44 +38,8 @@ assert.equal(sharedBandPlanesAvailable({ crossOriginIsolated: false, SharedArray
 assert.equal(sharedBandPlanesAvailable({ crossOriginIsolated: true, SharedArrayBuffer }), true);
 
 // ---- workers ---------------------------------------------------------------------
-const workerUrl = new URL('../workers/conversionBandWorker.js', import.meta.url).href;
-const shim = `
-  const { parentPort } = require('node:worker_threads');
-  const { readFile } = require('node:fs/promises');
-  globalThis.ImageData = class ImageData { constructor(d, w, h) { this.data = d; this.width = w; this.height = h; } };
-  const nodeFetch = globalThis.fetch;
-  globalThis.fetch = async (url, ...rest) => {
-    const href = String(url);
-    if (!href.startsWith('file:')) return nodeFetch(url, ...rest);
-    const buf = await readFile(new URL(href));
-    return { ok: true, arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) };
-  };
-  globalThis.self = { postMessage: (message, transfers) => parentPort.postMessage(message, transfers) };
-  const early = [];
-  let loaded = false;
-  parentPort.on('message', data => loaded ? self.onmessage?.({ data }) : early.push(data));
-  import(${JSON.stringify(workerUrl)}).then(() => { loaded = true; for (const data of early) self.onmessage?.({ data }); });
-`;
 const threads = [];
-function threadFactory({ crashOn = null } = {}) {
-  return () => {
-    const thread = new NodeWorker(shim, { eval: true });
-    threads.push(thread);
-    const worker = {
-      postMessage: (message, transfers) => {
-        if (crashOn && crashOn(message)) {
-          setImmediate(() => worker.onerror?.(new Error('band worker crashed')));
-          return;
-        }
-        thread.postMessage(message, transfers);
-      },
-      terminate: () => thread.terminate()
-    };
-    thread.on('message', data => worker.onmessage?.({ data }));
-    thread.on('error', error => worker.onerror?.(error));
-    return worker;
-  };
-}
+const threadFactory = (options = {}) => bandThreadFactory({ ...options, threads });
 
 // ---- frames ----------------------------------------------------------------------
 function negative(seed, w, h) {

@@ -120,6 +120,8 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
     // The three conversion clients and the main-thread fallback.
     convertPreviewFrameInWorker: previewClient, convertFrameInWorker: client('shared'),
     convertFullResolutionFrameInWorker: client('exact'), convertFrameWithRouter: client('mainThread'),
+    // #256: the band pool only exists during a single export.
+    exportBands: null,
     buildRouterSettings: () => ({}), getColorAnalysisSample: () => null,
     usesSilverCoreConversion: () => true,
     hasFrameRepairs: () => Boolean(state.dustRemoval.enabled || state.repairStrokes.length),
