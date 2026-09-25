@@ -8759,7 +8759,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         state.dustRemoval.mask, state.dustRemoval.inpaintedImageData, state.dustRemoval.cleanSource,
         undoStack, redoStack
       ], buffers);
-      for (const cache of [photoSessions, photoPreviews, photoPrefetch, thumbnailSources]) {
+      for (const cache of [photoSessions, photoPreviews, photoPrefetch, thumbnailSources, watchRollSamples]) {
         for (const buffer of cache.buffers()) buffers.add(buffer);
       }
       let bytes = 0;
