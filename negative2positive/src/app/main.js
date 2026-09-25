@@ -4428,7 +4428,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (branch === 'resample') {
         // The full-resolution pixels are current: resample the display fields
         // from them. The conversion preview resizes itself when a conversion
-        // next needs it.
+        // next needs it. While detection repairs an exact frame behind the
+        // repaired preview, its result is built at the current size anyway.
+        if (repairedPreviewShown && repairedPreviewShown === state.previewSourceImageData
+          && (state.dustRemoval.processing || dustDetectionTimer)) return;
         const target = getDisplayPreviewSize(processed);
         const shown = state.previewSourceImageData;
         if (shown?.width === target.width && shown?.height === target.height) return;
