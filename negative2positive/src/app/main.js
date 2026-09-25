@@ -17545,7 +17545,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return {
         convert: pool ? convertWith(false) : null,
         convertHandoff: convertInBands || (pool ? convertWith(true) : null),
-        convertFallback: pool ? convertWith(false) : null,
+        // After a lost working plane was rebuilt from the base (#256 Part 1.2).
+        convertFallback: pool ? (request) => {
+          batchPipelineDiagnostics.rebuilds += 1;
+          return convertWith(false)(request);
+        } : null,
         bridge: bandPool
           ? createBandedExportBridge(bridge, bandPool, { bands: bandCount, stats: batchPipelineDiagnostics.bandBridge, minPixels: BAND_POOL_MIN_PIXELS })
           : bridge,
