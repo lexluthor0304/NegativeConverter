@@ -2470,6 +2470,32 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
 
     let fullResolutionRenderTimer = null;
 
+    // Geometry chain state (#244), declared before any code can run a
+    // geometry path; the functions live in the geometry chain section.
+    const geometryMemo = new WeakMap();
+    const geometryBaseIds = new WeakMap();
+    let nextGeometryBaseId = 1;
+    // The import's auto-frame worker already rotated a copy of the base by the
+    // angle it detected. restoreSettings adopts that frame (side channel, not
+    // part of the settings) instead of rotating the base a second time.
+    let pendingImportRotation = null;
+    const geometryPool = createGeometryPool();
+    let geometryToken = 0;
+    let geometryJob = null;
+    let geometryBusyOwner = null;
+    let interimGeometry = null;
+    // Debug counters for tests and the smoke run: reads of plane pixels while
+    // a build was pending (must stay 0), synchronous full-frame fallbacks,
+    // full-resolution rotations adopted from or built by the auto-frame
+    // worker, and full-resolution rotations built on the main thread. The
+    // pool counts its own jobs (window.__ncGeometry.pool).
+    const geometryDiagnostics = {
+      pendingReads: 0, frameSyncReads: 0, adoptedRotations: 0, workerRotations: 0, mainRotations: 0, coldRestores: 0,
+      // Smoke-run switch: cache photo sessions without their planes, as a
+      // 60 MP session that does not fit the budget is.
+      coldSessions: false
+    };
+
     function clearFullResolutionRenderState() {
       if (fullResolutionRenderTimer) {
         clearTimeout(fullResolutionRenderTimer);
@@ -9105,29 +9131,6 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     // whole frame's pixels ask for them asynchronously. Scalars
     // (rotationAngle, mirrored, cropRegion) change synchronously; a reader of
     // the planes awaits whenGeometrySettled() first.
-    const geometryMemo = new WeakMap();
-    const geometryBaseIds = new WeakMap();
-    let nextGeometryBaseId = 1;
-    // The import's auto-frame worker already rotated a copy of the base by the
-    // angle it detected. restoreSettings adopts that frame (side channel, not
-    // part of the settings) instead of rotating the base a second time.
-    let pendingImportRotation = null;
-    const geometryPool = createGeometryPool();
-    let geometryToken = 0;
-    let geometryJob = null;
-    let geometryBusyOwner = null;
-    let interimGeometry = null;
-    // Debug counters for tests and the smoke run: reads of plane pixels while
-    // a build was pending (must stay 0), synchronous full-frame fallbacks,
-    // full-resolution rotations adopted from or built by the auto-frame
-    // worker, and full-resolution rotations built on the main thread. The
-    // pool counts its own jobs (window.__ncGeometry.pool).
-    const geometryDiagnostics = {
-      pendingReads: 0, frameSyncReads: 0, adoptedRotations: 0, workerRotations: 0, mainRotations: 0, coldRestores: 0,
-      // Smoke-run switch: cache photo sessions without their planes, as a
-      // 60 MP session that does not fit the budget is.
-      coldSessions: false
-    };
     if (typeof window !== 'undefined') {
       window.__ncGeometry = {
         diagnostics: geometryDiagnostics, main: geometryCounters, pool: geometryPool.counters,
