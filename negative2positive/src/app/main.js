@@ -79,7 +79,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       areAdjustmentsIdentity
     } from './adjustmentPipeline.js';
     import { requestExportGainMap } from './exportGainMap.js';
-    import { buildLinearPositive, encodeLinearDngBlob } from './linearDng.js';
+    import { buildLinearPositive, buildLinearPositiveAsync, encodeLinearDngBlob } from './linearDng.js';
     import { inpaintWithModel, fetchModelBytes, inpaintBackends, DEFAULT_MODEL_URL, TILE as AI_TILE, CONTEXT as AI_CONTEXT } from './aiInpaint.js';
     import { createInpaintSessionInWorker } from './aiInpaintWorkerClient.js';
     import {
@@ -12893,7 +12893,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       const { file, settings } = job;
       if (exportInfo.format === 'dng') {
         const { source, settings: usedSettings } = await processFileWithSettings(file, settings, { stage: 'source', convert: workers.convert, geometryBands: workers.geometryBands, silent: true });
-        return renderLinearDngBlob(source, usedSettings, position);
+        return renderLinearDngBlobInSlices(source, usedSettings, position);
       }
       // The sprocket frame drops the map, so only a plain JPEG asks for one.
       const gainMap = exportInfo.format === 'jpeg'
@@ -16487,13 +16487,37 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     // ===========================================
     // `source` is the geometry-applied negative (16-bit plane when the file
     // carries one); the film base and film type come from `settings`.
-    function renderLinearDngBlob(source, settings, position) {
+    function linearDngInputs(source, settings) {
       if (!source) throw new Error('No image available for export.');
       const plane = source.__image16 && source.__image16.data instanceof Uint16Array ? source.__image16 : toImage16(source);
       const positive = sanitizePresetType(settings.filmType || 'color') === 'positive';
       const filmBase = requiresFilmBase(settings) && settings.filmBase ? settings.filmBase : null;
+      return { plane, filmBase, positive };
+    }
+
+    // Single export: synchronous behind the overlay (about 0.3 s at 60 MP),
+    // since it reads live editor state that must not change mid-build.
+    function renderLinearDngBlob(source, settings, position) {
+      const { plane, filmBase, positive } = linearDngInputs(source, settings);
       const linear = buildLinearPositive(plane, filmBase, { positive });
       return encodeLinearDngBlob(linear, { metadata: exportMetadataFor(settings, position) });
+    }
+
+    // Batch: the desktop batch keeps the editor live, so the build runs in
+    // slices of about 16 ms with a task in between. It reads only the job's
+    // own decoded source and settings. `new Blob` still copies the strip in
+    // one call; its duration is traced (`blobMs`, ?debug=1) because moving
+    // the batch build into the lane's export worker is the next step if it
+    // exceeds 50 ms in the macOS app (#257).
+    async function renderLinearDngBlobInSlices(source, settings, position) {
+      const { plane, filmBase, positive } = linearDngInputs(source, settings);
+      const trace = createPerfTrace('linearDngBatch', { pixels: plane.width * plane.height });
+      const linear = await buildLinearPositiveAsync(plane, filmBase, { positive });
+      trace.mark('build');
+      const blobStart = getPerfNow();
+      const blob = encodeLinearDngBlob(linear, { metadata: exportMetadataFor(settings, position) });
+      trace.end({ bytes: blob.size, blobMs: Math.round((getPerfNow() - blobStart) * 10) / 10 });
+      return blob;
     }
 
     // ===========================================
