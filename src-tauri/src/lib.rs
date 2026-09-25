@@ -348,6 +348,95 @@ fn get_desktop_update_capability() -> DesktopUpdateCapability {
     )
 }
 
+/// The WebKit variables that decide how the Linux web process composites.
+/// Users can set them on any Linux install, so the page gets their effective
+/// values even when no AppImage policy ran.
+const WEBVIEW_COMPOSITING_ENV: [&str; 3] = [
+    "WEBKIT_DISABLE_DMABUF_RENDERER",
+    "WEBKIT_DMABUF_RENDERER_FORCE_SHM",
+    "WEBKIT_DISABLE_COMPOSITING_MODE",
+];
+
+/// What the shell decided about webview compositing. Before this the decision
+/// only reached stderr; the page uses it to start slider drags at a lower
+/// preview resolution when the web process paints in software, and shows it
+/// next to the WebGL renderer in its diagnostics.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct WebviewCompositing {
+    /// "linux" | "macos" | "windows"
+    os: &'static str,
+    /// "standard" | "legacy" when an AppImage policy ran.
+    appimage: Option<&'static str>,
+    /// The policy's decision, e.g. "kept:probe-supported" or "disabled:legacy-default".
+    dmabuf: Option<String>,
+    /// WEBVIEW_COMPOSITING_ENV as the web process inherits them (Linux only).
+    env: Vec<(&'static str, Option<String>)>,
+    /// The WebKitGTK version on Linux, filled in when the page asks.
+    webkitgtk: Option<String>,
+    /// NEGATIVE_CONVERTER_FRAME_LOG: log each slider session's frame times.
+    frame_log: bool,
+}
+
+fn describe_webview_compositing(
+    os: &'static str,
+    appimage: Option<&'static str>,
+    dmabuf: Option<&'static str>,
+    read_env: impl Fn(&str) -> Option<String>,
+) -> WebviewCompositing {
+    let env = if os == "linux" {
+        WEBVIEW_COMPOSITING_ENV
+            .iter()
+            .map(|&name| (name, read_env(name)))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    WebviewCompositing {
+        os,
+        appimage,
+        dmabuf: dmabuf.map(str::to_string),
+        env,
+        webkitgtk: None,
+        frame_log: read_env("NEGATIVE_CONVERTER_FRAME_LOG")
+            .as_deref()
+            .and_then(parse_bool_flag)
+            .unwrap_or(false),
+    }
+}
+
+#[tauri::command]
+fn get_webview_compositing(compositing: State<'_, WebviewCompositing>) -> WebviewCompositing {
+    let mut value = compositing.inner().clone();
+    if value.os == "linux" {
+        value.webkitgtk = tauri::webview_version().ok();
+    }
+    value
+}
+
+const MAX_DIAGNOSTICS_LINE_CHARS: usize = 600;
+
+/// One line from the page, safe to print: no control characters (so it cannot
+/// forge further log lines) and bounded in length.
+fn sanitize_diagnostics_line(line: &str) -> String {
+    let cleaned: String = line
+        .chars()
+        .take(MAX_DIAGNOSTICS_LINE_CHARS)
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    cleaned.trim().to_string()
+}
+
+/// Puts the page's GL facts and frame-time summaries in the same terminal log
+/// as the `[linux-compat]` lines, where the README's troubleshooting looks.
+#[tauri::command]
+fn log_webview_diagnostics(line: String) {
+    let line = sanitize_diagnostics_line(&line);
+    if !line.is_empty() {
+        eprintln!("[webview] {line}");
+    }
+}
+
 #[tauri::command]
 fn pick_export_file_path(grants: State<'_, ExportGrants>, suggested_name: String) -> Option<String> {
     let path = rfd::FileDialog::new()
@@ -564,7 +653,6 @@ fn reset_page_owned_state<R: tauri::Runtime, M: tauri::Manager<R>>(manager: &M) 
     manager.state::<ImportWatch>().stop();
 }
 
-#[cfg(any(target_os = "linux", test))]
 fn parse_bool_flag(value: &str) -> Option<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Some(true),
@@ -698,32 +786,75 @@ enum DmabufDisableReason {
 
 #[cfg(any(target_os = "linux", test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DmabufShmReason {
+    LegacyDefault,
+    OverrideShm,
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DmabufDecision {
     Keep(DmabufKeepReason),
     Disable(DmabufDisableReason),
+    /// Keeps accelerated compositing but hands frames to the UI process
+    /// through shared memory instead of DMA-BUF.
+    ShmOnly(DmabufShmReason),
 }
+
+/// `NEGATIVE_CONVERTER_DMABUF`: on/off (and the usual boolean spellings), or
+/// `shm` for the shared-memory transport.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DmabufOverride {
+    On,
+    Off,
+    Shm,
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_dmabuf_override(value: &str) -> Option<DmabufOverride> {
+    if value.trim().eq_ignore_ascii_case("shm") {
+        return Some(DmabufOverride::Shm);
+    }
+    parse_bool_flag(value).map(|on| if on { DmabufOverride::On } else { DmabufOverride::Off })
+}
+
+/// Whether the legacy AppImage defaults to `WEBKIT_DMABUF_RENDERER_FORCE_SHM=1`
+/// (accelerated compositing, frames copied through shared memory) instead of
+/// `WEBKIT_DISABLE_DMABUF_RENDERER=1` (software compositing). The old default
+/// was chosen for startup stability, so this stays off until the startup
+/// matrix of #263 part 3 (Ubuntu 22.04 and Debian 12; Intel, AMD, NVIDIA
+/// proprietary; X11 and Wayland) passes. `NEGATIVE_CONVERTER_DMABUF=shm`
+/// runs that matrix on a release build.
+#[cfg(any(target_os = "linux", test))]
+const LEGACY_APPIMAGE_SHM_DEFAULT: bool = false;
 
 #[cfg(any(target_os = "linux", test))]
 fn decide_dmabuf_policy(
     variant: AppImageVariant,
-    user_set_webkit_disable: bool,
-    override_value: Option<bool>,
+    user_set_webkit_dmabuf: bool,
+    override_value: Option<DmabufOverride>,
     probe_kind: Option<DmabufProbeKind>,
+    legacy_shm_default: bool,
 ) -> DmabufDecision {
-    if user_set_webkit_disable {
+    if user_set_webkit_dmabuf {
         return DmabufDecision::Keep(DmabufKeepReason::UserPreset);
     }
 
     if let Some(override_value) = override_value {
-        return if override_value {
-            DmabufDecision::Keep(DmabufKeepReason::OverrideEnabled)
-        } else {
-            DmabufDecision::Disable(DmabufDisableReason::OverrideDisabled)
+        return match override_value {
+            DmabufOverride::On => DmabufDecision::Keep(DmabufKeepReason::OverrideEnabled),
+            DmabufOverride::Off => DmabufDecision::Disable(DmabufDisableReason::OverrideDisabled),
+            DmabufOverride::Shm => DmabufDecision::ShmOnly(DmabufShmReason::OverrideShm),
         };
     }
 
     if variant == AppImageVariant::LegacyCompat {
-        return DmabufDecision::Disable(DmabufDisableReason::LegacyDefault);
+        return if legacy_shm_default {
+            DmabufDecision::ShmOnly(DmabufShmReason::LegacyDefault)
+        } else {
+            DmabufDecision::Disable(DmabufDisableReason::LegacyDefault)
+        };
     }
 
     match probe_kind.unwrap_or(DmabufProbeKind::Unavailable) {
@@ -733,6 +864,23 @@ fn decide_dmabuf_policy(
             DmabufDecision::Disable(DmabufDisableReason::PermissionDenied)
         }
         DmabufProbeKind::Unavailable => DmabufDecision::Disable(DmabufDisableReason::ProbeUnavailable),
+    }
+}
+
+/// The decision as the page and the diagnostics log report it.
+#[cfg(any(target_os = "linux", test))]
+fn dmabuf_decision_label(decision: DmabufDecision) -> &'static str {
+    match decision {
+        DmabufDecision::Keep(DmabufKeepReason::UserPreset) => "kept:user-preset",
+        DmabufDecision::Keep(DmabufKeepReason::OverrideEnabled) => "kept:override-enabled",
+        DmabufDecision::Keep(DmabufKeepReason::ProbeSupported) => "kept:probe-supported",
+        DmabufDecision::Disable(DmabufDisableReason::OverrideDisabled) => "disabled:override-disabled",
+        DmabufDecision::Disable(DmabufDisableReason::LegacyDefault) => "disabled:legacy-default",
+        DmabufDecision::Disable(DmabufDisableReason::NoRenderNode) => "disabled:no-render-node",
+        DmabufDecision::Disable(DmabufDisableReason::PermissionDenied) => "disabled:permission-denied",
+        DmabufDecision::Disable(DmabufDisableReason::ProbeUnavailable) => "disabled:probe-unavailable",
+        DmabufDecision::ShmOnly(DmabufShmReason::LegacyDefault) => "shm:legacy-default",
+        DmabufDecision::ShmOnly(DmabufShmReason::OverrideShm) => "shm:override",
     }
 }
 
@@ -822,19 +970,27 @@ fn disable_dmabuf_renderer(reason: &str) {
 }
 
 #[cfg(target_os = "linux")]
-fn apply_appimage_dmabuf_policy(variant: AppImageVariant) {
-    let user_set_webkit_disable = std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_some();
+fn force_shm_transport(reason: &str) {
+    set_env_if_absent("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1");
+    eprintln!("[linux-compat] Using the shared-memory DMABUF renderer transport: {reason}");
+}
+
+#[cfg(target_os = "linux")]
+fn apply_appimage_dmabuf_policy(variant: AppImageVariant) -> DmabufDecision {
+    // A user who set either transport variable has chosen; leave both alone.
+    let user_set_webkit_dmabuf = std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_some()
+        || std::env::var_os("WEBKIT_DMABUF_RENDERER_FORCE_SHM").is_some();
     let dmabuf_override_raw = std::env::var("NEGATIVE_CONVERTER_DMABUF").ok();
-    let dmabuf_override = dmabuf_override_raw.as_deref().and_then(parse_bool_flag);
+    let dmabuf_override = dmabuf_override_raw.as_deref().and_then(parse_dmabuf_override);
 
     if dmabuf_override_raw.is_some() && dmabuf_override.is_none() {
         eprintln!(
-            "[linux-compat] Ignoring NEGATIVE_CONVERTER_DMABUF={}; expected on/off/true/false/1/0.",
+            "[linux-compat] Ignoring NEGATIVE_CONVERTER_DMABUF={}; expected on/off/shm/true/false/1/0.",
             dmabuf_override_raw.as_deref().unwrap_or_default()
         );
     }
 
-    let probe_result = if !user_set_webkit_disable
+    let probe_result = if !user_set_webkit_dmabuf
         && dmabuf_override.is_none()
         && variant == AppImageVariant::Standard
     {
@@ -845,22 +1001,23 @@ fn apply_appimage_dmabuf_policy(variant: AppImageVariant) {
 
     let decision = decide_dmabuf_policy(
         variant,
-        user_set_webkit_disable,
+        user_set_webkit_dmabuf,
         dmabuf_override,
         probe_result.as_ref().map(dmabuf_probe_kind),
+        LEGACY_APPIMAGE_SHM_DEFAULT,
     );
 
     match decision {
         DmabufDecision::Keep(DmabufKeepReason::UserPreset) => {
             eprintln!(
-                "[linux-compat] WEBKIT_DISABLE_DMABUF_RENDERER already set by user; keeping existing value."
+                "[linux-compat] WEBKIT_DISABLE_DMABUF_RENDERER or WEBKIT_DMABUF_RENDERER_FORCE_SHM already set by user; keeping existing values."
             );
         }
         DmabufDecision::Keep(DmabufKeepReason::OverrideEnabled) => {
             eprintln!("[linux-compat] Keeping DMABUF enabled by NEGATIVE_CONVERTER_DMABUF override.");
         }
         DmabufDecision::Keep(DmabufKeepReason::ProbeSupported) => {
-            if let Some(DmabufProbeResult::Supported(path)) = probe_result {
+            if let Some(DmabufProbeResult::Supported(path)) = &probe_result {
                 eprintln!(
                     "[linux-compat] DMABUF render node is accessible ({path}); keeping DMABUF enabled."
                 );
@@ -880,7 +1037,7 @@ fn apply_appimage_dmabuf_policy(variant: AppImageVariant) {
             disable_dmabuf_renderer("no /dev/dri/renderD* node found.");
         }
         DmabufDecision::Disable(DmabufDisableReason::PermissionDenied) => {
-            if let Some(DmabufProbeResult::PermissionDenied(paths)) = probe_result {
+            if let Some(DmabufProbeResult::PermissionDenied(paths)) = &probe_result {
                 disable_dmabuf_renderer(&format!(
                     "permission denied opening render node(s): {}",
                     paths.join(", ")
@@ -890,19 +1047,30 @@ fn apply_appimage_dmabuf_policy(variant: AppImageVariant) {
             }
         }
         DmabufDecision::Disable(DmabufDisableReason::ProbeUnavailable) => {
-            if let Some(DmabufProbeResult::Unavailable(reason)) = probe_result {
+            if let Some(DmabufProbeResult::Unavailable(reason)) = &probe_result {
                 disable_dmabuf_renderer(&format!("render node probe failed: {reason}"));
             } else {
                 disable_dmabuf_renderer("render node probe failed.");
             }
         }
+        DmabufDecision::ShmOnly(DmabufShmReason::LegacyDefault) => {
+            force_shm_transport("legacy compatibility AppImage default.");
+        }
+        DmabufDecision::ShmOnly(DmabufShmReason::OverrideShm) => {
+            force_shm_transport("forced by NEGATIVE_CONVERTER_DMABUF=shm.");
+        }
     }
+    decision
 }
 
+/// Applies the AppImage guards and reports what the webview will run with.
+/// The environment is read after the policy ran, so it is what the web
+/// process inherits.
 #[cfg(target_os = "linux")]
-fn apply_linux_appimage_compat_env() {
+fn apply_linux_appimage_compat_env() -> WebviewCompositing {
+    let read_env = |name: &str| std::env::var(name).ok();
     if std::env::var_os("APPIMAGE").is_none() {
-        return;
+        return describe_webview_compositing("linux", None, None, read_env);
     }
 
     let variant = detect_appimage_variant();
@@ -911,11 +1079,19 @@ fn apply_linux_appimage_compat_env() {
         appimage_variant_label(variant)
     );
     apply_appimage_gio_guards();
-    apply_appimage_dmabuf_policy(variant);
+    let decision = apply_appimage_dmabuf_policy(variant);
+    describe_webview_compositing(
+        "linux",
+        Some(appimage_variant_label(variant)),
+        Some(dmabuf_decision_label(decision)),
+        read_env,
+    )
 }
 
 #[cfg(not(target_os = "linux"))]
-fn apply_linux_appimage_compat_env() {}
+fn apply_linux_appimage_compat_env() -> WebviewCompositing {
+    describe_webview_compositing(std::env::consts::OS, None, None, |name| std::env::var(name).ok())
+}
 
 const MAX_EXTERNAL_URL_LEN: usize = 2048;
 
@@ -1034,8 +1210,9 @@ fn open_external_url(url: String) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    apply_linux_appimage_compat_env();
+    let webview_compositing = apply_linux_appimage_compat_env();
     let builder = tauri::Builder::default()
+        .manage(webview_compositing)
         .manage(ExportGrants::default())
         .manage(ExportStreams::default())
         .manage(ImportWatch::default())
@@ -1087,6 +1264,8 @@ pub fn run() {
             write_export_file_to_directory,
             get_app_version,
             get_desktop_update_capability,
+            get_webview_compositing,
+            log_webview_diagnostics,
             open_external_url
         ])
         .run(tauri::generate_context!())
@@ -1097,11 +1276,13 @@ pub fn run() {
 mod tests {
     use super::{
         build_unique_export_path, decide_dmabuf_policy, describe_update_capability,
-        looks_like_legacy_appimage_name, normalize_export_path, parse_bool_flag,
+        describe_webview_compositing, dmabuf_decision_label, looks_like_legacy_appimage_name,
+        normalize_export_path, parse_bool_flag, parse_dmabuf_override, sanitize_diagnostics_line,
         sanitize_export_file_name, sanitize_external_url, updater_target_override,
         write_export_bytes, existing_exports_in, AppImageVariant, DesktopUpdateCapability, DmabufDecision,
-        DmabufDisableReason, DmabufKeepReason, DmabufProbeKind, ExportGrants,
-        WebContentTermination, WebContentTerminations,
+        DmabufDisableReason, DmabufKeepReason, DmabufOverride, DmabufProbeKind,
+        DmabufShmReason, ExportGrants, WebContentTermination, WebContentTerminations,
+        LEGACY_APPIMAGE_SHM_DEFAULT, MAX_DIAGNOSTICS_LINE_CHARS,
     };
     use std::path::PathBuf;
 
@@ -1230,8 +1411,9 @@ mod tests {
         let decision = decide_dmabuf_policy(
             AppImageVariant::LegacyCompat,
             true,
-            Some(false),
+            Some(DmabufOverride::Off),
             Some(DmabufProbeKind::PermissionDenied),
+            true,
         );
         assert_eq!(decision, DmabufDecision::Keep(DmabufKeepReason::UserPreset));
     }
@@ -1241,8 +1423,9 @@ mod tests {
         let decision = decide_dmabuf_policy(
             AppImageVariant::LegacyCompat,
             false,
-            Some(true),
+            Some(DmabufOverride::On),
             Some(DmabufProbeKind::PermissionDenied),
+            false,
         );
         assert_eq!(
             decision,
@@ -1252,7 +1435,16 @@ mod tests {
 
     #[test]
     fn dmabuf_policy_disables_legacy_by_default() {
-        let decision = decide_dmabuf_policy(AppImageVariant::LegacyCompat, false, None, None);
+        let decision = decide_dmabuf_policy(
+            AppImageVariant::LegacyCompat,
+            false,
+            None,
+            None,
+            LEGACY_APPIMAGE_SHM_DEFAULT,
+        );
+        // Until the startup matrix of #263 part 3 passes, the legacy build
+        // keeps software compositing.
+        assert!(!LEGACY_APPIMAGE_SHM_DEFAULT);
         assert_eq!(
             decision,
             DmabufDecision::Disable(DmabufDisableReason::LegacyDefault)
@@ -1266,6 +1458,7 @@ mod tests {
             false,
             None,
             Some(DmabufProbeKind::Supported),
+            false,
         );
         assert_eq!(supported, DmabufDecision::Keep(DmabufKeepReason::ProbeSupported));
 
@@ -1274,6 +1467,7 @@ mod tests {
             false,
             None,
             Some(DmabufProbeKind::NoRenderNode),
+            false,
         );
         assert_eq!(
             no_render,
@@ -1285,10 +1479,205 @@ mod tests {
             false,
             None,
             Some(DmabufProbeKind::PermissionDenied),
+            false,
         );
         assert_eq!(
             denied,
             DmabufDecision::Disable(DmabufDisableReason::PermissionDenied)
+        );
+    }
+
+    #[test]
+    fn dmabuf_override_parses_shm_and_booleans() {
+        assert_eq!(parse_dmabuf_override("shm"), Some(DmabufOverride::Shm));
+        assert_eq!(parse_dmabuf_override(" SHM "), Some(DmabufOverride::Shm));
+        assert_eq!(parse_dmabuf_override("on"), Some(DmabufOverride::On));
+        assert_eq!(parse_dmabuf_override("1"), Some(DmabufOverride::On));
+        assert_eq!(parse_dmabuf_override("off"), Some(DmabufOverride::Off));
+        assert_eq!(parse_dmabuf_override("false"), Some(DmabufOverride::Off));
+        assert_eq!(parse_dmabuf_override("maybe"), None);
+    }
+
+    #[test]
+    fn dmabuf_policy_shm_default_keeps_acceleration_for_legacy_only() {
+        let legacy = decide_dmabuf_policy(AppImageVariant::LegacyCompat, false, None, None, true);
+        assert_eq!(legacy, DmabufDecision::ShmOnly(DmabufShmReason::LegacyDefault));
+
+        // Hosts without a usable GPU keep the non-accelerated painter.
+        for (kind, reason) in [
+            (DmabufProbeKind::NoRenderNode, DmabufDisableReason::NoRenderNode),
+            (DmabufProbeKind::PermissionDenied, DmabufDisableReason::PermissionDenied),
+            (DmabufProbeKind::Unavailable, DmabufDisableReason::ProbeUnavailable),
+        ] {
+            let decision =
+                decide_dmabuf_policy(AppImageVariant::Standard, false, None, Some(kind), true);
+            assert_eq!(decision, DmabufDecision::Disable(reason));
+        }
+        let supported = decide_dmabuf_policy(
+            AppImageVariant::Standard,
+            false,
+            None,
+            Some(DmabufProbeKind::Supported),
+            true,
+        );
+        assert_eq!(supported, DmabufDecision::Keep(DmabufKeepReason::ProbeSupported));
+    }
+
+    #[test]
+    fn dmabuf_overrides_win_over_the_shm_default() {
+        let off = decide_dmabuf_policy(
+            AppImageVariant::LegacyCompat,
+            false,
+            Some(DmabufOverride::Off),
+            None,
+            true,
+        );
+        assert_eq!(off, DmabufDecision::Disable(DmabufDisableReason::OverrideDisabled));
+        let on = decide_dmabuf_policy(
+            AppImageVariant::LegacyCompat,
+            false,
+            Some(DmabufOverride::On),
+            None,
+            true,
+        );
+        assert_eq!(on, DmabufDecision::Keep(DmabufKeepReason::OverrideEnabled));
+        // `shm` opts into the shared-memory transport while the default is off,
+        // on either variant.
+        for variant in [AppImageVariant::LegacyCompat, AppImageVariant::Standard] {
+            let shm = decide_dmabuf_policy(
+                variant,
+                false,
+                Some(DmabufOverride::Shm),
+                Some(DmabufProbeKind::NoRenderNode),
+                false,
+            );
+            assert_eq!(shm, DmabufDecision::ShmOnly(DmabufShmReason::OverrideShm));
+        }
+        // A user who set a WebKit transport variable has chosen.
+        let preset = decide_dmabuf_policy(
+            AppImageVariant::LegacyCompat,
+            true,
+            Some(DmabufOverride::Shm),
+            None,
+            true,
+        );
+        assert_eq!(preset, DmabufDecision::Keep(DmabufKeepReason::UserPreset));
+    }
+
+    #[test]
+    fn dmabuf_decision_labels_are_the_page_contract() {
+        let cases = [
+            (DmabufDecision::Keep(DmabufKeepReason::UserPreset), "kept:user-preset"),
+            (DmabufDecision::Keep(DmabufKeepReason::OverrideEnabled), "kept:override-enabled"),
+            (DmabufDecision::Keep(DmabufKeepReason::ProbeSupported), "kept:probe-supported"),
+            (DmabufDecision::Disable(DmabufDisableReason::OverrideDisabled), "disabled:override-disabled"),
+            (DmabufDecision::Disable(DmabufDisableReason::LegacyDefault), "disabled:legacy-default"),
+            (DmabufDecision::Disable(DmabufDisableReason::NoRenderNode), "disabled:no-render-node"),
+            (DmabufDecision::Disable(DmabufDisableReason::PermissionDenied), "disabled:permission-denied"),
+            (DmabufDecision::Disable(DmabufDisableReason::ProbeUnavailable), "disabled:probe-unavailable"),
+            (DmabufDecision::ShmOnly(DmabufShmReason::LegacyDefault), "shm:legacy-default"),
+            (DmabufDecision::ShmOnly(DmabufShmReason::OverrideShm), "shm:override"),
+        ];
+        for (decision, label) in cases {
+            assert_eq!(dmabuf_decision_label(decision), label);
+        }
+    }
+
+    fn fake_env(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        move |name: &str| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.to_string())
+        }
+    }
+
+    #[test]
+    fn webview_compositing_reports_the_legacy_decision_and_effective_env() {
+        let legacy = describe_webview_compositing(
+            "linux",
+            Some("legacy"),
+            Some("disabled:legacy-default"),
+            fake_env(&[
+                ("WEBKIT_DISABLE_DMABUF_RENDERER", "1"),
+                ("NEGATIVE_CONVERTER_FRAME_LOG", "1"),
+            ]),
+        );
+        assert_eq!(legacy.os, "linux");
+        assert_eq!(legacy.appimage, Some("legacy"));
+        assert_eq!(legacy.dmabuf.as_deref(), Some("disabled:legacy-default"));
+        assert_eq!(
+            legacy.env,
+            vec![
+                ("WEBKIT_DISABLE_DMABUF_RENDERER", Some("1".to_string())),
+                ("WEBKIT_DMABUF_RENDERER_FORCE_SHM", None),
+                ("WEBKIT_DISABLE_COMPOSITING_MODE", None),
+            ]
+        );
+        assert!(legacy.frame_log);
+        assert_eq!(legacy.webkitgtk, None, "filled in by the command");
+
+        let value = serde_json::to_value(&legacy).expect("serialise");
+        assert_eq!(value["appimage"], "legacy");
+        assert_eq!(value["dmabuf"], "disabled:legacy-default");
+        assert_eq!(value["frameLog"], true);
+        assert_eq!(value["webkitgtk"], serde_json::Value::Null);
+        assert_eq!(value["env"][0][0], "WEBKIT_DISABLE_DMABUF_RENDERER");
+        assert_eq!(value["env"][0][1], "1");
+        assert_eq!(value["env"][1][1], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn webview_compositing_fills_env_on_linux_without_an_appimage() {
+        // .deb and .rpm installs run no policy, but users can set the variables.
+        let deb = describe_webview_compositing(
+            "linux",
+            None,
+            None,
+            fake_env(&[("WEBKIT_DISABLE_COMPOSITING_MODE", "1")]),
+        );
+        assert_eq!(deb.appimage, None);
+        assert_eq!(deb.dmabuf, None);
+        assert_eq!(deb.env[2], ("WEBKIT_DISABLE_COMPOSITING_MODE", Some("1".to_string())));
+        assert!(!deb.frame_log);
+    }
+
+    #[test]
+    fn webview_compositing_is_empty_on_macos_and_windows() {
+        for os in ["macos", "windows"] {
+            let value = describe_webview_compositing(
+                os,
+                None,
+                None,
+                fake_env(&[("WEBKIT_DISABLE_DMABUF_RENDERER", "1")]),
+            );
+            assert_eq!(value.os, os);
+            assert_eq!(value.appimage, None);
+            assert_eq!(value.dmabuf, None);
+            assert!(value.env.is_empty());
+            let json = serde_json::to_value(&value).expect("serialise");
+            assert_eq!(json["appimage"], serde_json::Value::Null);
+            assert_eq!(json["frameLog"], false);
+        }
+    }
+
+    #[test]
+    fn diagnostics_lines_are_bounded_and_single_line() {
+        assert_eq!(
+            sanitize_diagnostics_line("renderer=llvmpipe\n[linux-compat] forged\r\x1b[2J"),
+            "renderer=llvmpipe [linux-compat] forged  [2J"
+        );
+        assert_eq!(sanitize_diagnostics_line("  \t\n "), "");
+        let long = "x".repeat(MAX_DIAGNOSTICS_LINE_CHARS * 2);
+        assert_eq!(
+            sanitize_diagnostics_line(&long).chars().count(),
+            MAX_DIAGNOSTICS_LINE_CHARS
+        );
+        // Multi-byte text is cut on character boundaries.
+        let wide = "é".repeat(MAX_DIAGNOSTICS_LINE_CHARS + 5);
+        assert_eq!(
+            sanitize_diagnostics_line(&wide).chars().count(),
+            MAX_DIAGNOSTICS_LINE_CHARS
         );
     }
 

@@ -171,6 +171,21 @@ Go to **System Settings → Privacy & Security**, scroll down and click **Open A
 - Optional override for DMABUF behavior:
   - force enable: `NEGATIVE_CONVERTER_DMABUF=on ./Negative\ Converter*.AppImage`
   - force disable: `NEGATIVE_CONVERTER_DMABUF=off ./Negative\ Converter*.AppImage`
+  - shared-memory transport: `NEGATIVE_CONVERTER_DMABUF=shm ./Negative\ Converter*.AppImage`
+    sets `WEBKIT_DMABUF_RENDERER_FORCE_SHM=1`. WebKit keeps accelerated compositing and copies each
+    frame through shared memory, instead of painting the whole page in software as `off` does.
+    It is not yet the legacy default: that needs the startup matrix below.
+  - a `WEBKIT_DISABLE_DMABUF_RENDERER` or `WEBKIT_DMABUF_RENDERER_FORCE_SHM` you set yourself always wins.
+- The terminal log shows the decision (`[linux-compat]` lines) and, once a photo is open, one `[webview]`
+  line with the WebGL renderer, the decision, the WebKitGTK version and the starting preview tier.
+  Include both in bug reports about sluggish sliders.
+- When the webview composites in software (the legacy default, `off`, no render node) or WebGL is a
+  software rasteriser (llvmpipe, SwiftShader), slider and curve drags preview at up to 1 MP and the
+  full display resolution returns on release. Other hosts drop to that tier only when frames run slow.
+  `NEGATIVE_CONVERTER_FRAME_LOG=1` logs every drag's frame intervals and canvas size as `[webview]` lines.
+- Startup matrix for making `shm` the legacy default (Ubuntu 22.04 and Debian 12; Intel, AMD, NVIDIA
+  proprietary; X11 and Wayland; each must start without a blank window or crash and create a WebGL
+  context): not run yet.
 - If startup still fails on older distros, use the compatibility AppImage (`*_legacy-glibc235.AppImage`).
 
 ### Release (GitHub Actions)
