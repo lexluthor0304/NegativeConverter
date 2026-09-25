@@ -3,6 +3,9 @@
 // pan at 2×. Backing ÷ needed is the GL texture width ÷ min(source width,
 // on-screen CSS width × DPR); 1.0 is one source pixel per device pixel.
 import { byKind, zoomStepMetrics, panMetrics, GL_CANVAS } from '../lib/metrics.mjs';
+
+// The detail layer's canvas (#248 part 5).
+const DETAIL_CANVAS = 'glDetailCanvas';
 import { median } from '../lib/stats.mjs';
 import { bootApp, importPhotos, recordMemory, sleep, pageNow, sourceWidthEstimate, round } from './common.mjs';
 
@@ -32,8 +35,17 @@ async function stepMetrics(ctx, prefix, inputT, source) {
   const needed = Math.min(source.width, displayedCssWidth * session.dpr);
   const native = byKind(session.events, 'gl.upload')
     .find(upload => upload.c === GL_CANVAS && upload.t >= inputT && upload.t <= inputT + OBSERVE_MS && upload.w / needed >= 0.999);
-  metrics.nativeDetailMs = native ? round(native.t - inputT) : OBSERVE_MS;
-  metrics.nativeDetailReached = Boolean(native);
+  // Since #248 native detail comes from the detail layer's own canvas: the
+  // first region upload after the input, and the density it shows at the end.
+  const detailUpload = byKind(session.events, 'gl.upload')
+    .find(upload => upload.c === DETAIL_CANVAS && upload.t >= inputT && upload.t <= inputT + OBSERVE_MS && upload.w * upload.h > 65536);
+  const detail = snapshot.detail || null;
+  metrics.detailReadyMs = detailUpload ? round(detailUpload.t - inputT) : null;
+  metrics.detailVisible = Boolean(detail?.visible);
+  metrics.sourcePxPerDevicePx = detail ? round(detail.sourcePxPerDevicePx, 2) : null;
+  const reached = native || (detailUpload && detail?.visible && detail.sourcePxPerDevicePx >= 0.95 ? detailUpload : null);
+  metrics.nativeDetailMs = reached ? round(reached.t - inputT) : OBSERVE_MS;
+  metrics.nativeDetailReached = Boolean(reached);
   metrics.zoom = round(zoomOf(snapshot.transform), 2);
   for (const [key, value] of Object.entries(metrics)) ctx.record(`${prefix}.${key}`, value);
   return metrics;

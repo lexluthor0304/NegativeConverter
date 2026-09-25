@@ -100,6 +100,7 @@ class FakeSession {
       t: this.t, dpr: this.dpr, ready: true, busy: false, filename: this.current ? basename(this.current) : '', filmType: 'color', filmTypeStatus: 'Colour negative',
       glCanvas: { width: 1809, height: 1202, display: 'block', rect: { width: 904 * this.zoom, height: 601 * this.zoom } },
       transform: `matrix(${this.zoom}, 0, 0, ${this.zoom}, 0, 0)`, files: this.files.length, badges: this.files.length, thumbnails: this.files.length,
+      detail: this.zoom > 5 ? { visible: true, sourcePxPerDevicePx: 1, current: true } : { visible: false, sourcePxPerDevicePx: 0.26 },
       transferBytes: 1024 * 900, decodedBytes: 1024 * 4000, memory: null
     };
   }
@@ -116,6 +117,8 @@ class FakeSession {
     if (expression.includes("document.querySelectorAll('.file-list-settings-badge').length <")) return false;
     if (expression.includes('aria-current')) return '0';
     if (expression.includes('__ncPerf.selfMs()')) return this.selfMs;
+    // S4's reset: the 1:1 toggle returns a zoomed view to fit (#248).
+    if (expression.includes('zoom-pan-active')) { this.zoom = 1; return true; }
     const format = /\.format-btn\[data-format="(\w+)"\]'\)\.click\(\)/.exec(expression);
     if (format) { this.format = format[1]; return true; }
     const depth = /\.bitdepth-btn\[data-bitdepth="(\d+)"\]'\)\.click\(\)/.exec(expression);
@@ -202,6 +205,12 @@ class FakeSession {
     const t = this.step(10);
     this.emit({ k: 'input', type: 'click', id, t, tr: true });
     if (id === 'zoomInBtn') { this.zoom *= 1.25; this.emit({ k: 'mut', t: this.step(12), what: 'transform', v: `matrix(${this.zoom}, 0, 0, ${this.zoom}, 0, 0)` }); }
+    if (id === 'zoomResetBtn') {
+      // "1:1" (#248): fit -> true 100 %, then the detail layer's region lands.
+      this.zoom = this.zoom > 1 ? 1 : 5.3;
+      this.emit({ k: 'mut', t: this.step(12), what: 'transform', v: `matrix(${this.zoom}, 0, 0, ${this.zoom}, 0, 0)` });
+      if (this.zoom > 1) this.emit({ k: 'gl.upload', t: t + 190, c: 'glDetailCanvas', w: 2476, h: 1656, hash: `detail${t}` });
+    }
     if (id === 'cropBtn') this.emit({ k: 'c2d', t: this.step(30), c: 'canvas', fn: 'putImageData', w: 953, h: 633, hash: `crop${t}` });
     if (id === 'applyCropBtn' || id === 'rotateRightBtn' || id === 'mirrorBtn') {
       this.emit({ k: 'lt', t: t + 1, s: t + 1, d: 2000 });
@@ -325,6 +334,9 @@ try {
     's4.dpr2.to2_5x.transformAppliedMs', 's4.dpr2.to7_6x.zoom', 's4.dpr2.fitTo100.nativeDetailMs', 's4.dpr2.fitTo100.longTaskCount', 's4.dpr2.wheel.transformAppliedMs', 's4.dpr2.pan.transformFramesPerSecond', 's4.dpr2.pan.moveToFrameP95Ms']);
   assert.equal(s4.metrics['s4.dpr2.fitTo2x.transformAppliedMs'], 11);
   assert.equal(s4.metrics['s4.dpr2.fitTo2x.textureRefinedAtMs'], 476);
+  assert.equal(s4.metrics['s4.dpr2.fitTo100.detailReadyMs'], 190, 'true 100 %: the detail region lands');
+  assert.equal(s4.metrics['s4.dpr2.fitTo100.nativeDetailReached'], true);
+  assert.equal(s4.metrics['s4.dpr2.fitTo100.sourcePxPerDevicePx'], 1);
   assert.equal(s4.metrics['s4.dpr2.wheel.transformAppliedMs'], 0.4);
   assert.equal(s4.metrics['s4.dpr2.pan.moveToFrameP50Ms'], 8);
 

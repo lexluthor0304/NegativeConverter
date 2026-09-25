@@ -856,7 +856,9 @@
       previewPending: document.querySelectorAll('[data-preview-state="pending"]').length,
       transferBytes: resources.reduce(function (sum, entry) { return sum + (entry.transferSize || 0); }, navigation ? navigation.transferSize || 0 : 0),
       decodedBytes: resources.reduce(function (sum, entry) { return sum + (entry.decodedBodySize || 0); }, navigation ? navigation.decodedBodySize || 0 : 0),
-      memory: global.__ncMemory && typeof global.__ncMemory.snapshot === 'function' ? global.__ncMemory.snapshot() : null
+      memory: global.__ncMemory && typeof global.__ncMemory.snapshot === 'function' ? global.__ncMemory.snapshot() : null,
+      // The zoom detail layer (#248): whether it covers the view and at what density.
+      detail: global.__ncDetailLayer && typeof global.__ncDetailLayer.state === 'function' ? global.__ncDetailLayer.state() : null
     };
   }
 
