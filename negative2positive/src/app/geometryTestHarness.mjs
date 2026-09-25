@@ -93,7 +93,7 @@ export function applyCropHandlerSource() {
   return 'var applyCropHandler = ' + source.slice(start + marker.length - 'async () => {'.length, end) + '\n    };';
 }
 
-export function createHarness(base, { historyBudget = 768 * 1024 * 1024, sessionBudget = 768 * 1024 * 1024, workers = null } = {}) {
+export function createHarness(base, { historyBudget = 768 * 1024 * 1024, sessionBudget = 768 * 1024 * 1024, workers = null, realProcessNegative = false } = {}) {
   const displayed = [];
   const conversions = [];
   const state = {
@@ -173,7 +173,25 @@ export function createHarness(base, { historyBudget = 768 * 1024 * 1024, session
     }
   }));
   vm.runInContext(['SNAPSHOT_SCALAR_KEYS', 'SNAPSHOT_REF_KEYS', 'GEOMETRY_UNDO_LABELS'].map(constSource).join('\n'), context);
-  vm.runInContext(FUNCTIONS.map(functionSource).join('\n'), context);
+  if (realProcessNegative) {
+    delete target.processNegative;
+    Object.assign(target, {
+      i18n: { en: {} }, currentLang: 'en',
+      quietLoadingOverlay: { show: async () => {}, updateProgress() {}, hide() {} },
+      getLoadingOverlay: () => ({ show: async () => {}, updateProgress() {}, hide() {} }),
+      createPerfTrace: () => ({ mark() {}, end() {} }),
+      applyLensCorrectionWithSettings: async source => source,
+      buildPreviewSourceImageData: source => source,
+      usesSilverCoreConversion: () => false, hasSeparateConversionPreview: () => false, hasFrameRepairs: () => false,
+      convertFromCurrentSource: async () => { conversions.push({ source: state.conversionSourceImageData }); return state.conversionSourceImageData; },
+      applyProcessedImageToState: processed => { state.processedImageData = processed; },
+      maybeAutoWhiteBalance: () => { target.autoMeasurements++; },
+      maybeAnalyzeExpiredRescue: () => {},
+      goToStep: step => { state.currentStep = step; },
+      aiRepair: { status: 'ready', revision: 1 }, autoMeasurements: 0
+    });
+  }
+  vm.runInContext([...FUNCTIONS, ...(realProcessNegative ? ['processNegative'] : [])].map(functionSource).join('\n'), context);
   const jobs = () => pool.counters.jobs;
   return { context, state, pool, displayed, conversions, target, jobs };
 }

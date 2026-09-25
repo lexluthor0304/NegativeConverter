@@ -6156,9 +6156,9 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       const processingGeneration = coreReprocessGeneration;
       const promise = (async () => {
         const generation = loadGeneration;
-        // Convert the planes of the current geometry, never the previous one.
-        await whenGeometrySettled();
-        if (!isCurrentLoad(generation)) return;
+        // Convert the planes of the current geometry, never the previous one;
+        // a build superseded while this waited is converted by its successor.
+        if (!(await whenGeometrySettled()) || !isCurrentLoad(generation)) return;
         const sourceData = state.croppedImageData || state.originalImageData;
         if (!sourceData) return;
         const isCurrentConversion = () => isCurrentLoad(generation)
@@ -9362,8 +9362,12 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       if (!keepInterim) clearInterimGeometryDisplay();
     }
 
+    // Resolves false when a build the caller waited for was superseded (a
+    // newer edit, an undo) or failed: its own follow-up owns the conversion.
     async function whenGeometrySettled() {
-      while (geometryJob) await geometryJob.done;
+      let installed = true;
+      while (geometryJob) installed = (await geometryJob.done) && installed;
+      return installed;
     }
 
     // A read of the working planes while a build is pending sees the previous
