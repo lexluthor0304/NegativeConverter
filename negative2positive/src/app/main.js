@@ -29,7 +29,7 @@ import { renderEmbeddedPreview, createDocumentPreviewEnv } from './embeddedPrevi
 import { canPublishThumbnail } from './thumbnailRank.js';
     import { detectedImportSettings } from './filmTypeDetection.js';
     import { createAiModelLoader } from './aiModelLoading.js';
-    import opencvScriptUrl from '@techstark/opencv-js/dist/opencv.js?url';
+    import { opencvGlueUrl, installPageOpenCvHook } from './opencvModule.js';
     import { i18n } from './i18n.js';
     import { interpolateText, summarizePathForUi } from './textUtils.js';
     import { computeSpline, buildCurveLut, getCurvePresetPoints, insertCurvePoint, moveCurvePoint, findNearPointIndex } from './curveMath.js';
@@ -253,7 +253,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // been stale for months and was shown in the debug badge and the diagnostics
     // dump as if it identified the running build.
     const BUILD_ID = (typeof __BUILD_ID__ === 'string' && __BUILD_ID__) || 'dev';
-    const ensureOpenCvReady = createOpenCvLoader([opencvScriptUrl]);
+    // The page's realm instantiates the session's compiled OpenCV module
+    // through the glue's hook (#252 part 5), as the OpenCV workers do.
+    const ensureOpenCvReady = createOpenCvLoader([opencvGlueUrl], { beforeScript: () => installPageOpenCvHook(window) });
     // Crop-area detection, the expired fog surface and lab match run their
     // OpenCV half in the warm auto-frame worker; the page loads OpenCV only
     // when that request fails (#245, openCvAnalysisTasks.js).

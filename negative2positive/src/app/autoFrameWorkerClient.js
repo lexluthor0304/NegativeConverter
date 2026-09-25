@@ -1,3 +1,5 @@
+import { answerOpenCvWorker } from './opencvRuntime.js';
+
 const abortError = () => new DOMException('Auto-frame request was superseded', 'AbortError');
 
 function isDetached(buffer) {
@@ -78,7 +80,10 @@ export function createAutoFrameWorkerClient({
         worker = workerFactory();
         worker.onerror = () => fail(new Error('Auto-frame worker crashed'));
         worker.onmessageerror = () => fail(new Error('Auto-frame worker returned invalid data'));
+        const started = worker;
         worker.onmessage = ({ data }) => {
+          // The worker asks for the session's compiled OpenCV module (#252).
+          if (answerOpenCvWorker(started, data)) return;
           if (Number.isFinite(data?.heapBytes)) heapBytes = data.heapBytes;
           const entry = pending.get(data.id);
           if (!entry) {

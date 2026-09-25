@@ -7,6 +7,7 @@
 // page never loads OpenCV for a merge.
 import { alignmentSide, sampleAlignmentGray } from './imageAlignment.js';
 import { MultiShotError, describeMultiShotError } from './multiShotErrors.js';
+import { answerOpenCvWorker } from './opencvRuntime.js';
 
 // Longest side of the grey proxies ORB matches on.
 export const MULTI_SHOT_ALIGN_SIDE = 1200;
@@ -141,7 +142,10 @@ export function createMultiShotMergeJob({
     return new Promise((resolve) => {
       helloTimer = setTimeout(() => resolve(false), helloTimeoutMs);
       const settle = (ok) => { clearTimeout(helloTimer); helloTimer = null; resolve(ok); };
-      current.onmessage = ({ data }) => { if (data?.type === 'hello') settle(true); };
+      current.onmessage = ({ data }) => {
+        if (answerOpenCvWorker(current, data)) return;
+        if (data?.type === 'hello') settle(true);
+      };
       current.onerror = (event) => { event?.preventDefault?.(); settle(false); };
       current.onmessageerror = () => settle(false);
     });
@@ -159,7 +163,8 @@ export function createMultiShotMergeJob({
       const ok = await Promise.race([waitForHello(current), failed.catch(() => false)]);
       if (failure) throw failure;
       if (ok) {
-        current.onmessage = ({ data }) => { if (worker === current) receive(data); };
+        // The worker asks for the session's compiled OpenCV module (#252).
+        current.onmessage = ({ data }) => { if (worker === current && !answerOpenCvWorker(current, data)) receive(data); };
         current.onerror = (event) => {
           event?.preventDefault?.();
           if (worker === current) fail(new MultiShotError('memory', 'The merge worker stopped unexpectedly'));

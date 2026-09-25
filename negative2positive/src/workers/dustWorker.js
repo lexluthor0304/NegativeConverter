@@ -1,17 +1,11 @@
-import opencvScriptUrl from '@techstark/opencv-js/dist/opencv.js?url';
+import { acceptOpenCvMessage, loadOpenCv } from './opencvWorkerRuntime.js';
 import { createDustWorkerProcessor } from './dustWorkerProcessor.js';
 
-let ready;
-function loadCv() {
-  if (!ready) ready = (async () => {
-    await import(/* @vite-ignore */ opencvScriptUrl);
-    globalThis.cv = await globalThis.cv;
-    if (!globalThis.cv?.Mat) throw new Error('OpenCV dust worker initialization failed');
-  })();
-  return ready;
-}
+// The page's compiled OpenCV module, instantiated here (#252 part 5).
+const loadCv = loadOpenCv;
 const process = createDustWorkerProcessor({ loadCv });
 self.onmessage = async ({ data }) => {
+  if (acceptOpenCvMessage(data)) return;
   try {
     const { payload, transfers } = await process(data);
     self.postMessage(payload, transfers);

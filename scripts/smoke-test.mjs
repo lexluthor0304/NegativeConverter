@@ -592,11 +592,16 @@ await evaluate(`(() => {
   Worker.prototype.postMessage = function (message, ...args) {
     if (message.type === 'analyze-frame') {
       window.__frameInput = structuredClone(message);
-      this.addEventListener('message', event => {
+      // The reply to this request, not the worker's request for the shared
+      // OpenCV module (#252) that may come first.
+      const onReply = event => {
+        if (event.data?.id !== message.id) return;
+        this.removeEventListener('message', onReply);
         window.__frameResult = event.data;
         window.__frameDone = true;
         clearInterval(timer);
-      }, { once: true });
+      };
+      this.addEventListener('message', onReply);
     }
     return original.call(this, message, ...args);
   };

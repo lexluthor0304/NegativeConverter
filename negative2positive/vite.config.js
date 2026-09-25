@@ -4,6 +4,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { uiFontsPlugin } from '../scripts/build-ui-fonts.mjs';
 import { displayProxyBuildHashes } from '../scripts/display-proxy-hashes.mjs';
+import { opencvAssetsPlugin } from '../scripts/opencv-assets.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -22,7 +23,9 @@ export default defineConfig({
   },
   // Per-locale UI font subsets, cut from the Fusion Pixel faces at dev and
   // build start (scripts/build-ui-fonts.mjs, #262).
-  plugins: [uiFontsPlugin()],
+  // OpenCV as one compiled-once wasm file plus a small glue (#252 part 5),
+  // for the page and for the worker bundles that import it.
+  plugins: [uiFontsPlugin(), opencvAssetsPlugin()],
   server: {
     host: '127.0.0.1',
     port: 4173,
@@ -47,6 +50,7 @@ export default defineConfig({
   // dynamic import — the default iife worker format cannot code-split.
   worker: {
     format: 'es',
+    plugins: () => [opencvAssetsPlugin()],
   },
   build: {
     outDir: 'dist',

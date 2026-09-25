@@ -1,20 +1,13 @@
 import { readTextInBands, borderTextBands } from '../app/filmEdgeText.js';
-import opencvScriptUrl from '@techstark/opencv-js/dist/opencv.js?url';
+import { acceptOpenCvMessage, loadOpenCv, openCvRealmStats } from './opencvWorkerRuntime.js';
 import { detectFrameAndRotation } from '../app/autoFrameAnalyzer.js';
 import { applyRotationToImageData } from '../app/imageGeometry.js';
 import { readFilmEdge, rectifyLaneBand } from '../app/filmEdgeReader.js';
 import { isOpenCvAnalysisType, runOpenCvAnalysisTask } from '../app/openCvAnalysisTasks.js';
 import { detectFrameForRequest, packFrameResult, runImportRequest } from './autoFrameImportTask.js';
 
-let ready;
-async function loadCv() {
-  if (!ready) ready = (async () => {
-    await import(/* @vite-ignore */ opencvScriptUrl);
-    globalThis.cv = await globalThis.cv;
-    if (!globalThis.cv?.Mat) throw new Error('OpenCV worker initialization failed');
-  })();
-  return ready;
-}
+// The page's compiled OpenCV module, instantiated here (#252 part 5).
+const loadCv = loadOpenCv;
 
 // Perforation lanes and the DX edge barcode need no OpenCV; the result is
 // plain data (no ImageData), so it clones without transfers.
@@ -39,12 +32,13 @@ function cvHeapBytes() {
 const postReply = (payload, transfers) => self.postMessage({ ...payload, heapBytes: cvHeapBytes() }, transfers);
 
 self.onmessage = async ({ data: message }) => {
+  if (acceptOpenCvMessage(message)) return;
   try {
     if (message.type === 'warm-up') {
-      // Load and compile OpenCV while the first photo is still decoding, so
-      // the first detection does not pay for it.
+      // Instantiate OpenCV while the first photo is still decoding, so the
+      // first detection does not pay for it.
       await loadCv();
-      postReply({ id: message.id, result: { ready: true } });
+      postReply({ id: message.id, result: { ready: true, opencv: openCvRealmStats() } });
       return;
     }
     if (message.type === 'read-film-edge') {

@@ -1,3 +1,5 @@
+import { answerOpenCvWorker } from './opencvRuntime.js';
+
 // Content hash and occupied blocks of each mask the worker returned, keyed by
 // the mask object. A mask made on the page (the OpenCV fallback) has none.
 const maskInfos = new WeakMap();
@@ -64,6 +66,8 @@ export function createDustWorkerClient({
     current.onmessageerror = () => { if (worker === current) release(new Error('Invalid dust worker message')); };
     current.onmessage = ({ data }) => {
       if (worker !== current) return;
+      // The worker asks for the session's compiled OpenCV module (#252).
+      if (answerOpenCvWorker(current, data)) return;
       const entry = pending.get(data.id);
       if (!entry) return;
       pending.delete(data.id);
