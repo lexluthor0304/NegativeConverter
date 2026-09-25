@@ -33,6 +33,13 @@ function lostError(message) {
   return err;
 }
 
+// A superseded decode (#243) never finishes on this thread: whatever the
+// worker did not do is simply not done.
+function abortError(signal) {
+  const reason = signal?.reason;
+  return reason?.name === 'AbortError' ? reason : new DOMException('RAW post-decode was aborted', 'AbortError');
+}
+
 /**
  * @param {{ readyTimeoutMs?: number }} [config]
  * @returns {{ run(result: object, options?: object): Promise<object>, terminate(): void, readonly usesWorker: boolean }}
@@ -111,7 +118,7 @@ export function startRawPostDecode({ readyTimeoutMs = READY_TIMEOUT_MS } = {}) {
     }
   }
 
-  function settle(reply, shape, options) {
+  function settle(reply, shape, options, signal) {
     if (reply.type === 'result') {
       ranInWorker = true;
       if (reply.garbled) return { garbled: true };
@@ -125,6 +132,7 @@ export function startRawPostDecode({ readyTimeoutMs = READY_TIMEOUT_MS } = {}) {
         filmStats: reply.filmStats || null
       };
     }
+    if (signal?.aborted) throw abortError(signal);
     console.warn('[RAW] post-decode worker failed, finishing on the main thread:', reply.message);
     if (reply.input) {
       return runRawPostDecode({ ...shape, data: viewFromDescription(reply.input) }, options);
@@ -142,11 +150,15 @@ export function startRawPostDecode({ readyTimeoutMs = READY_TIMEOUT_MS } = {}) {
   /**
    * Run steps 1–6 of rawPostDecode.js on LibRaw's `result`.
    * `options`: `{ suppressSensorDefects?: boolean, filmStats?: { borderBufferPct } | null }`.
+   * `signal` (#243): an aborted decode never runs a step on this thread; the
+   * owner terminates the worker to stop the steps running there.
    */
-  async function run(result, options = {}) {
+  async function run(result, options = {}, { signal = null } = {}) {
     ranInWorker = false;
+    if (signal?.aborted) throw abortError(signal);
     const data = result?.data;
     if (!isTransferableRawData(data) || !(await workerReady())) {
+      if (signal?.aborted) throw abortError(signal);
       return runRawPostDecode(result, options);
     }
     const shape = { width: result.width, height: result.height, bits: result.bits, colors: result.colors };
@@ -164,6 +176,7 @@ export function startRawPostDecode({ readyTimeoutMs = READY_TIMEOUT_MS } = {}) {
         }
       });
     } catch (err) {
+      if (signal?.aborted) throw abortError(signal);
       if (input.buffer.byteLength > 0) {
         // postMessage refused the transfer (or the worker died before it
         // happened): the pixels are still ours.
@@ -171,7 +184,7 @@ export function startRawPostDecode({ readyTimeoutMs = READY_TIMEOUT_MS } = {}) {
       }
       throw err?.code === 'RAW_POST_DECODE_LOST' ? err : lostError(err?.message || String(err));
     }
-    return settle(reply, shape, options);
+    return settle(reply, shape, options, signal);
   }
 
   function terminate() {

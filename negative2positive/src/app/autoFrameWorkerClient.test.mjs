@@ -38,32 +38,57 @@ await assert.rejects(timeout(source, {}), /timed out/);
 assert.equal(timedWorker.terminated, true);
 
 // A superseded activation aborts its requests: before posting nothing is
-// copied or sent; once posted the promise settles at once, the late reply is
-// ignored, and the worker is only released by its idle timer.
+// copied or sent; once posted the promise settles at once. A worker that owes
+// nobody else is terminated (#243) so its plane copies go with it; one that
+// still owes another request keeps running and the late reply is ignored.
 {
   const posted = [];
-  let abortWorker;
-  const client = createAutoFrameWorkerClient({ idleTimeoutMs: 5, workerFactory: () => abortWorker = {
-    postMessage(message) { posted.push(message); }, terminate() { this.terminated = true; },
+  const spawned = [];
+  const client = createAutoFrameWorkerClient({ idleTimeoutMs: 5, workerFactory: () => {
+    const created = { postMessage(message) { posted.push({ message, worker: created }); }, terminate() { this.terminated = true; } };
+    spawned.push(created);
+    return created;
   } });
   const early = new AbortController();
   early.abort();
   await assert.rejects(client(source, {}, 'read-film-edge', { signal: early.signal }), { name: 'AbortError' });
   assert.equal(posted.length, 0, 'an aborted request never copies or posts the planes');
-  const late = new AbortController();
-  const running = client(source, {}, 'analyze-frame', { signal: late.signal });
+  assert.equal(client.abortReleases, 0);
+
+  // The only pending request: the worker is terminated in the abort task.
+  const only = new AbortController();
+  const running = client(source, {}, 'analyze-frame', { signal: only.signal });
   assert.equal(posted.length, 1);
-  late.abort();
+  assert.equal(client.alive, true);
+  only.abort();
+  assert.equal(spawned[0].terminated, true, 'a worker owing nobody else is terminated at once');
+  assert.equal(client.alive, false);
+  assert.equal(client.abortReleases, 1);
   await assert.rejects(running, { name: 'AbortError' });
-  assert.equal(abortWorker.terminated, undefined, 'the shared worker is not terminated for an abort');
-  abortWorker.onmessage({ data: { id: posted[0].id, result: { angle: 3 } } });
+  // A late reply of the terminated worker reaches nobody.
+  spawned[0].onmessage?.({ data: { id: posted[0].message.id, result: { angle: 3 } } });
+
+  // Another request is pending: this one is dropped, the worker keeps running.
+  const other = client(source, {}, 'read-film-edge');
+  const dropped = new AbortController();
+  const superseded = client(source, {}, 'analyze-frame', { signal: dropped.signal });
+  assert.equal(spawned.length, 2, 'the next request started a fresh worker');
+  dropped.abort();
+  await assert.rejects(superseded, { name: 'AbortError' });
+  assert.equal(spawned[1].terminated, undefined, 'a worker that still owes a request keeps running');
+  assert.equal(client.abortReleases, 1);
+  spawned[1].onmessage({ data: { id: posted[2].message.id, result: { angle: 7 } } });
+  spawned[1].onmessage({ data: { id: posted[1].message.id, result: { angle: 2 } } });
+  assert.deepEqual(await other, { angle: 2 });
   await new Promise(resolve => setTimeout(resolve, 20));
-  assert.equal(abortWorker.terminated, true, 'the idle timer still releases the worker after the ignored reply');
+  assert.equal(spawned[1].terminated, true, 'the idle timer still releases it after the ignored reply');
+
   const kept = new AbortController();
   const answered = client(source, {}, 'analyze-frame', { signal: kept.signal });
-  posted.at(-1) && abortWorker.onmessage({ data: { id: posted.at(-1).id, result: { angle: 1 } } });
+  posted.at(-1).worker.onmessage({ data: { id: posted.at(-1).message.id, result: { angle: 1 } } });
   assert.deepEqual(await answered, { angle: 1 });
   kept.abort();
+  assert.equal(client.abortReleases, 1, 'an abort after the answer releases nothing');
 }
 // #245's analysis requests: the page's buffers are transferred as they are
 // (no copy), an analysis error rejects that request only and keeps the warm

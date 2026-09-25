@@ -308,4 +308,49 @@ class StackWorker {
     'the worker builds the same x257 mirror as fromImageData8');
   assert.equal(stash.jpegBytes.byteLength, 0, 'with the capability the stashed bytes are transferred');
 }
+// Abort (#243): before dispatch the input stays with the caller; after it the
+// disposable worker is terminated. Both reject with an AbortError, never null
+// (null would start the main-thread decoder).
+{
+  const already = new AbortController();
+  already.abort();
+  const kept = new ArrayBuffer(16);
+  let spawned = 0;
+  await assert.rejects(decodeScanInWorker(kept, 'png', { workerFactory: () => { spawned++; return {}; }, signal: already.signal }),
+    error => error.name === 'AbortError');
+  assert.equal(spawned, 0, 'an aborted request never spawns a worker');
+  assert.equal(kept.byteLength, 16);
+
+  // Aborted while the worker starts: nothing was posted.
+  const early = new AbortController();
+  let worker, stops = 0;
+  const posted = [];
+  const input = new ArrayBuffer(16);
+  const pending = decodeScanInWorker(input, 'tiff', {
+    workerFactory: () => (worker = { postMessage: (message) => posted.push(message), terminate() { stops++; } }),
+    signal: early.signal
+  });
+  early.abort(new DOMException('Superseded photo activation', 'AbortError'));
+  await assert.rejects(pending, error => error.name === 'AbortError' && /Superseded/.test(error.message));
+  assert.equal(stops, 1, 'the idle worker is terminated');
+  assert.equal(posted.length, 0, 'no dispatch after an abort');
+  assert.equal(input.byteLength, 16, 'the input is still the caller\'s');
+  worker.onmessage?.({ data: { ready: true } });
+  assert.equal(posted.length, 0, 'a late ready message dispatches nothing');
+
+  // Aborted after dispatch: the worker is terminated at once.
+  const late = new AbortController();
+  let lateStops = 0, lateWorker;
+  const moved = new ArrayBuffer(32);
+  const running = decodeScanInWorker(moved, 'png', {
+    workerFactory: () => (lateWorker = { postMessage(message, transfers) { structuredClone(message, { transfer: transfers }); }, terminate() { lateStops++; } }),
+    signal: late.signal
+  });
+  lateWorker.onmessage({ data: { ready: true } });
+  assert.equal(moved.byteLength, 0, 'dispatched');
+  late.abort();
+  await assert.rejects(running, error => error.name === 'AbortError');
+  assert.equal(lateStops, 1, 'the decoding worker is terminated');
+}
+
 console.log('scanDecodeClient tests passed: real worker PNG/TIFF precision, transfer and lifecycle; jpeg capability handshake; preview pool');

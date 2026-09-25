@@ -3,27 +3,40 @@ function createScanDecodeWorker() {
 }
 const defaultWorkerFactory = typeof Worker === 'function' ? createScanDecodeWorker : null;
 
+function abortError(signal) {
+  const reason = signal?.reason;
+  return reason?.name === 'AbortError' ? reason : new DOMException('Scan decode was aborted', 'AbortError');
+}
+
 // Each scan decode owns its worker, so inflate/UTIF heaps are released as soon
 // as the transferred pixel planes arrive. There is no full-resolution clone.
+// `signal` (#243): an abort before the input is dispatched keeps it with the
+// caller; after that the worker is terminated. Either way the call rejects
+// with an AbortError (never null, which would start a main-thread decode).
 export async function decodeScanInWorker(buffer, format, {
   workerFactory = defaultWorkerFactory,
-  timeoutMs = 120000
+  timeoutMs = 120000,
+  signal = null
 } = {}) {
+  if (signal?.aborted) throw abortError(signal);
   if (!workerFactory) return null;
   let worker;
   try { worker = workerFactory(); } catch { return null; }
   return new Promise((resolve, reject) => {
     let finished = false;
     let dispatched = false;
+    const onAbort = () => finish(abortError(signal));
     const finish = (error, result) => {
       if (finished) return;
       finished = true;
       clearTimeout(timer);
+      signal?.removeEventListener?.('abort', onAbort);
       worker.terminate();
       worker.onmessage = worker.onerror = worker.onmessageerror = null;
       if (error) reject(error); else resolve(result);
     };
     const timer = setTimeout(() => finish(new Error('Scan decode timed out')), timeoutMs);
+    signal?.addEventListener?.('abort', onAbort, { once: true });
     worker.onerror = () => {
       // Module workers can fail asynchronously during startup (CSP, browser
       // support, unavailable chunk). Keep input ownership until ready so the

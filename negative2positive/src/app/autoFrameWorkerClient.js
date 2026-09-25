@@ -5,6 +5,7 @@ export function createAutoFrameWorkerClient({
 } = {}) {
   let worker = null, sequence = 0;
   let idleTimer = null;
+  let abortReleases = 0;
   const pending = new Map();
   function fail(error) {
     clearTimeout(idleTimer);
@@ -22,7 +23,10 @@ export function createAutoFrameWorkerClient({
   // Posts one request on the shared worker, started on demand; the reply
   // settles `resolve`/`reject`. `signal` lets a superseded photo activation
   // drop its request: a posted one settles at once and its late reply is
-  // ignored. (The worker itself keeps running.)
+  // ignored. A worker that owes nobody else is terminated (#243): it holds
+  // the request's full-frame copies (about 724 MB at 60 MP) until it would
+  // have finished. The next request starts a fresh one; the caller may warm
+  // it up while the next photo decodes.
   const send = (message, transfers, resolve, reject, signal = null) => {
     try {
       clearTimeout(idleTimer);
@@ -71,6 +75,13 @@ export function createAutoFrameWorkerClient({
         if (!entry) return;
         clearTimeout(entry.timer);
         pending.delete(id);
+        if (!pending.size && worker) {
+          clearTimeout(idleTimer);
+          worker.onmessage = worker.onerror = worker.onmessageerror = null;
+          worker.terminate();
+          worker = null;
+          abortReleases += 1;
+        }
         entry.reject(new DOMException('Auto-frame request was superseded', 'AbortError'));
       };
       const settle = fn => value => { signal?.removeEventListener('abort', onAbort); fn(value); };
@@ -97,6 +108,9 @@ export function createAutoFrameWorkerClient({
     send({ ...payload, type }, transfers, resolve, reject);
   });
   request.dispose = () => fail(new Error('Auto-frame worker released'));
+  // How many workers an abort terminated, and whether one is running now.
+  Object.defineProperty(request, 'abortReleases', { get: () => abortReleases });
+  Object.defineProperty(request, 'alive', { get: () => Boolean(worker) });
   return request;
 }
 

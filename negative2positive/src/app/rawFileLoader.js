@@ -92,6 +92,18 @@ function extractRawLensMetadata(metadata) {
   };
 }
 
+// A superseded load (#243) rejects with an AbortError, never with a decode
+// error: the caller drops it silently, and no fallback may turn it into an
+// 8-bit embedded preview.
+function abortError(signal) {
+  const reason = signal?.reason;
+  return reason?.name === 'AbortError' ? reason : new DOMException('RAW decode was aborted', 'AbortError');
+}
+
+function throwIfAborted(signal) {
+  if (signal?.aborted) throw abortError(signal);
+}
+
 function withTimeout(promise, ms, onTimeout) {
   let timer;
   const timeout = new Promise((_, reject) => {
@@ -155,14 +167,25 @@ function asDecodeMemoryError(err, width, height) {
  * no 16-bit mirror, so nothing downstream can mistake ×257 padding for real
  * precision (silverAdapter promotes on demand for those).
  */
-async function loadTiffBuffer(buffer) {
-  return await decodeScanInWorker(buffer, 'tiff') || decodeTiffBuffer(buffer);
+async function loadTiffBuffer(buffer, signal = null) {
+  const decoded = await decodeScanInWorker(buffer, 'tiff', { signal });
+  if (decoded) return decoded;
+  throwIfAborted(signal);
+  return decodeTiffBuffer(buffer);
 }
 
+/**
+ * `options.signal` (#243): aborting it disposes the LibRaw worker (an open,
+ * metadata or imageData call rejects at once) and terminates the post-decode
+ * worker, and the load rejects with an AbortError. The stages after LibRaw
+ * are skipped once the signal is aborted, and no fallback runs for it.
+ */
 export async function loadRawFile(buffer, fileName, options = {}) {
   const normalizedFileName = String(fileName || '').toLowerCase();
   const onMetadata = typeof options.onMetadata === 'function' ? options.onMetadata : null;
   const fastPreview = options.preview === true;
+  const signal = options.signal || null;
+  throwIfAborted(signal);
 
   if (normalizedFileName.endsWith('.tif') || normalizedFileName.endsWith('.tiff')) {
     // A .tif name is not proof of a TIFF container: files renamed by scanning
@@ -171,14 +194,17 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     if (sniffed && sniffed.kind !== 'tiff') {
       console.warn(`[TIFF] ${fileName} is actually ${sniffed.kind}; decoding it as such`);
       if (onMetadata) onMetadata(null);
-      if (sniffed.kind === 'png') return await loadPngImageData(buffer);
-      return await loadStandardImage(new Blob([buffer]));
+      if (sniffed.kind === 'png') return await loadPngImageData(buffer, { signal });
+      const image = await loadStandardImage(new Blob([buffer]));
+      throwIfAborted(signal);
+      return image;
     }
     try {
-      const imageData = await loadTiffBuffer(buffer);
+      const imageData = await loadTiffBuffer(buffer, signal);
       if (onMetadata) onMetadata(null);
       return imageData;
     } catch (err) {
+      if (signal?.aborted) throw abortError(signal);
       console.error('UTIF.js failed for TIFF:', err);
       throw err;
     }
@@ -190,10 +216,11 @@ export async function loadRawFile(buffer, fileName, options = {}) {
       try {
         // Preserve the original container for LibRaw if this is a CFA DNG
         // rather than a scanner-style TIFF that UTIF can actually render.
-        const imageData = await loadTiffBuffer(buffer.slice(0));
+        const imageData = await loadTiffBuffer(buffer.slice(0), signal);
         if (onMetadata) onMetadata(null);
         return imageData;
       } catch (err) {
+        if (signal?.aborted) throw abortError(signal);
         console.error('UTIF.js failed:', err);
       }
     }
@@ -204,6 +231,7 @@ export async function loadRawFile(buffer, fileName, options = {}) {
   if (isIIQ && bufBytes > RAW_SIZE_HEAVY) {
     console.info('[RAW] heavy IIQ detected, taking embedded preview shortcut');
     const previewImageData = await tryNefJpegPreview(buffer);
+    throwIfAborted(signal);
     if (previewImageData) {
       console.warn('[RAW] embedded preview decoded — precision is downgraded to 8-bit for this file.');
       previewImageData.__image16 ||= fromImageData8(previewImageData);
@@ -257,10 +285,20 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     } catch {}
   };
   const killWorker = disposeRaw;
+  // Abort: both workers (and LibRaw's heap) go within this task. A pending
+  // open/metadata/imageData rejects with "LibRaw disposed", a pending
+  // post-decode run with RAW_POST_DECODE_LOST; both are reported as aborts.
+  const abortDecode = () => {
+    disposeRaw();
+    postDecode.terminate();
+  };
+  signal?.addEventListener?.('abort', abortDecode, { once: true });
 
   const decodeEmbeddedPreview = async () => decodeNefPreviewJpeg(await previewSource.read());
 
   const handleTimeoutFallback = async () => {
+    // Every caller checks the signal first; this is the last line.
+    throwIfAborted(signal);
     killWorker();
     postDecode.terminate();
     const previewImageData = await decodeEmbeddedPreview();
@@ -277,13 +315,19 @@ export async function loadRawFile(buffer, fileName, options = {}) {
 
   try {
     return await decodeWithLibRaw();
+  } catch (err) {
+    if (signal?.aborted) throw abortError(signal);
+    throw err;
   } finally {
-    // Every exit — success, timeout fallback, error — releases both workers.
+    // Every exit — success, timeout fallback, error, abort — releases both workers.
+    signal?.removeEventListener?.('abort', abortDecode);
     disposeRaw();
     postDecode.terminate();
   }
 
   async function decodeWithLibRaw() {
+    // After the embedded-preview stash (the eager scan without a Blob).
+    throwIfAborted(signal);
     try {
       const libRawInput = new Uint8Array(buffer);
       await withTimeout(
@@ -300,12 +344,15 @@ export async function loadRawFile(buffer, fileName, options = {}) {
         killWorker,
       );
     } catch (err) {
+      throwIfAborted(signal);
       if (err?.code === 'RAW_DECODE_TIMEOUT') {
         console.warn('[RAW] raw.open timed out');
         return await handleTimeoutFallback();
       }
       throw err;
     }
+    // metadata() rejections are swallowed below, so check here.
+    throwIfAborted(signal);
 
     let rawMetadata = null;
     try {
@@ -313,6 +360,7 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     } catch (err) {
       rawMetadata = null;
     }
+    throwIfAborted(signal);
     if (rawMetadata) {
       console.info('[RAW]', {
         make: rawMetadata.make,
@@ -344,12 +392,14 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     try {
       result = await withTimeout(raw.imageData(), decodeTimeoutMs, killWorker);
     } catch (err) {
+      throwIfAborted(signal);
       if (err?.code === 'RAW_DECODE_TIMEOUT') {
         console.warn('[RAW] raw.imageData timed out');
         return await handleTimeoutFallback();
       }
       throw err;
     }
+    throwIfAborted(signal);
     if (!result || !result.data) {
       console.error('[RAW] imageData returned empty result', result);
       return await handleTimeoutFallback();
@@ -358,6 +408,8 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     // no longer needed while the planes are built and defects repaired.
     disposeRaw();
     const { width, height } = result;
+    // Before packing and the defect pass: a superseded decode never posts them.
+    throwIfAborted(signal);
 
     // Packing, the garbled check, the defect pass (unless the caller opted
     // out), the 8-bit mirror and the requested film statistics all run in the
@@ -368,10 +420,11 @@ export async function loadRawFile(buffer, fileName, options = {}) {
       const running = postDecode.run(result, {
         suppressSensorDefects: options.suppressSensorDefects !== false,
         filmStats: filmStatsRequest
-      });
+      }, { signal });
       result = null;
       outcome = await running;
     } catch (err) {
+      throwIfAborted(signal);
       if (err?.code === 'RAW_POST_DECODE_LOST') {
         // The worker died after taking the pixels; recover the way a decode
         // timeout does rather than failing the whole load.
@@ -382,6 +435,8 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     } finally {
       postDecode.terminate();
     }
+    // After the defect pass and the 8-bit mirror (both in the worker).
+    throwIfAborted(signal);
 
     if (outcome.garbled) {
       console.warn('[RAW] decoded output looks un-demosaiced; trying embedded JPEG preview fallback');

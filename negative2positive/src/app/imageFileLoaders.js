@@ -140,22 +140,29 @@ export async function loadRawImageDataPreview(buffer, fileName, options) {
  * 1/2/4-bit, interlaced, tRNS — is handed to the browser decoder, which is
  * off-thread, handles every colour type correctly and costs ~1/5 the memory.
  */
-export async function loadPngImageData(buffer) {
+export async function loadPngImageData(buffer, { signal = null } = {}) {
+  const aborted = () => signal?.reason?.name === 'AbortError' ? signal.reason
+    : new DOMException('PNG decode was aborted', 'AbortError');
+  if (signal?.aborted) throw aborted();
   const header = sniffImageKind(buffer);
   const sixteenBit = header?.kind === 'png' && header.depth === 16;
 
   if (!sixteenBit && typeof createImageBitmap === 'function' && typeof Blob === 'function') {
     try {
-      return await loadStandardImage(new Blob([buffer], { type: 'image/png' }));
+      const image = await loadStandardImage(new Blob([buffer], { type: 'image/png' }));
+      if (signal?.aborted) throw aborted();
+      return image;
     } catch (err) {
+      if (signal?.aborted) throw aborted();
       if (err?.code === 'IMAGE_TOO_LARGE') throw err;
       // Fall through: UPNG also handles palette/low-bit-depth correctly.
     }
   }
 
   const { decodeScanInWorker } = await import('./scanDecodeClient.js');
-  const decoded = await decodeScanInWorker(buffer, 'png');
+  const decoded = await decodeScanInWorker(buffer, 'png', { signal });
   if (decoded) return decoded;
+  if (signal?.aborted) throw aborted();
   const { loadPngFile } = await import('./pngFileLoader.js');
   return loadPngFile(buffer);
 }
