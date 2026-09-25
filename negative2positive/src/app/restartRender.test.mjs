@@ -356,7 +356,7 @@ function prepareFixture({ itemSettings = null, detectFrame = true, learned = 0 }
     createPerfTrace: () => ({ mark: stage => marks.push(stage), end: noop }),
     getImageDataPixelCount: image => (image ? image.width * image.height : 0),
     getLoadingOverlay: () => overlay, quietLoadingOverlay: { show: async () => {}, updateProgress: noop, hide: noop },
-    studioWorkspace: { sync: noop }, updateAutoFrameButtons: noop, updateExpiredRescueUI: noop,
+    studioWorkspace: { sync: noop, flush: noop }, updateAutoFrameButtons: noop, updateExpiredRescueUI: noop,
     // Records whether the compare button was last evaluated during the tail.
     updateBeforeAfterButtonState: () => { compareButton.detecting = Boolean(context.document.body.dataset.studioDetecting); },
     createDefaultSettings: () => structuredClone(defaults), mergeStudioColors: settings => settings,

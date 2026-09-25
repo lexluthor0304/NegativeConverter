@@ -16528,7 +16528,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       state.photoSwitchPhase = null;
       delete document.body.dataset.photoSwitching;
       document.body.dataset.studioDetecting = detectingFrame ? 'frame' : 'edge';
+      // In this turn, like the cold-switch announcement: the strip is
+      // navigable from the moment the tail starts.
       studioWorkspace?.sync();
+      studioWorkspace?.flush();
     }
 
     // A provisional processNegative leaves the idle full-resolution render and
