@@ -302,13 +302,8 @@ Remaining performance proposals below are not claims of completed work.
 
 - **low/research** — Evaluate exact pass fusion only where enabled stages and rounding semantics permit it
   `negative2positive/src/silvercore/engine/Engine.js:_applyLuts`
-  The old blanket nine-pass accounting is stale: optional saturation/profile/paper/sharpening stages are conditional, B&W preparation occurs elsewhere, and #202 replaced full-frame sharpening scratch with row buffers. Cross-channel color operations and spatial neighborhoods still require real computation. No additional fusion is implemented by this audit.
-  _Next step:_ Profile a concrete enabled-stage combination and preserve intermediate clamping/rounding, profile strength and bit-exact reference output before accepting a fused implementation.
-
-- **low/research** — Exact HSL model transforms still cost a per-pixel color conversion
-  `negative2positive/src/silvercore/engine/ImageProcessor.js:applyHSLAdjustments`
-  The basic/frontier/noritsu model adjustment requires cross-channel RGB/HSL arithmetic when enabled. Baking that transform into a coarse 33³/65³ trilinear LUT would approximate its output, so the historical suggestion is not an accepted lossless fix. Existing enhanced profiles already use prepared 3D tables.
-  _Next step:_ Consider only measured implementations that preserve the current 16-bit transform, or make a separately reviewed quality/speed mode explicit; this audit does not silently replace exact HSL with interpolation.
+  The old blanket nine-pass accounting is stale: optional saturation/profile/paper/sharpening stages are conditional, B&W preparation occurs elsewhere, and #202 replaced full-frame sharpening scratch with row buffers. Cross-channel color operations and spatial neighborhoods still require real computation. #238 measured a monolithic fused copy + LUT + HSL + 8-bit kernel slower than the multi-pass chain with the HSL pre-test (99–107 vs 79–92 ms at 4 MP, 1.83 vs 1.58 s at 60 MP) and did not adopt it. The exact fusions adopted instead are the prepared prefix planes (mix, pre-saturation, positive gain/WB and dodge-and-burn cached per slot, the first curve pass reading the cached plane into the output), the positive gain-1 fold into the curve LUT for forced conversions, and the B&W grey plane with one grey → RGB table (`docs/silvercore-conversion-cache.md`).
+  _Next step:_ Only colour ticks still run the full multi-pass tail (LUT, HSL on active-band pixels, 3D profile, saturation, paper, 8-bit). Profile a concrete enabled-stage combination and preserve intermediate clamping/rounding, profile strength and bit-exact reference output before accepting any further fused implementation.
 
 
 - **medium/quality** — silvercore WebGLRenderer.js (369 lines) is dead code shipped in the worker bundle — Engine.initWebGL is never called — and, with other unreachable engine exports, hides latent bugs (256-entry LUT upload, null matrices, log(1) division)  

@@ -73,6 +73,9 @@ linear light after the histogram analysis and before the tone curves
 (`Engine._applyLocalExposure`), where the enlarger's light would have been
 held back or added. Because the same settings drive the preview worker and
 the export worker, the exported pixels match the preview at any resolution.
+Interactive conversions keep the dodged plane per cache slot (the
+post-exposure level, `docs/silvercore-conversion-cache.md`): a slider tick
+reuses it, and a stroke edit rebuilds only that level.
 Strokes are part of undo, of the per-file settings and of batch export; the
 overlay draws them on the 2D canvas (orange = burn, blue = dodge) while the
 brush is active.

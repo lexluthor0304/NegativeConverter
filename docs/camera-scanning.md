@@ -24,7 +24,10 @@ except for the brightest spot. The map lives in a session registry
 the roll the way the film base is. `silverAdapter.js` applies it in
 `_preprocessBuffer` before the film base compensation, in every cache slot
 (preview, full, scratch) and in the analysis buffer, so the histogram
-analysis sees the flattened frame too. The gain is looked up through the
+analysis sees the flattened frame too. Interactive requests keep the result
+as the slot's pristine plane; `forceFullProcess` requests (settle, export,
+frame repair) and frames over 16 MP apply it in place on their one work
+plane and keep nothing (`docs/silvercore-conversion-cache.md`). The gain is looked up through the
 frame geometry (`workingPointToBase`), so rotation and crop keep the map on
 the right pixels. `stats.cornerFalloff` and `stats.castSpread` describe the
 pad; the status line shows the falloff and how many photos use the map.
