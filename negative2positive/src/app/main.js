@@ -16592,7 +16592,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     // Batch: the desktop batch keeps the editor live, so the build runs in
     // slices of about 16 ms with a task in between. It reads only the job's
     // own decoded source and settings. `new Blob` still copies the strip in
-    // one call; its duration is traced (`blobMs`, ?debug=1) because moving
+    // one call; its duration is traced (`blobMs`, ?debug=1 or ?perf=1) because moving
     // the batch build into the lane's export worker is the next step if it
     // exceeds 50 ms in the macOS app (#257).
     async function renderLinearDngBlobInSlices(source, settings, position) {
@@ -16600,9 +16600,9 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       const trace = createPerfTrace('linearDngBatch', { pixels: plane.width * plane.height });
       const linear = await buildLinearPositiveAsync(plane, filmBase, { positive });
       trace.mark('build');
-      const blobStart = getPerfNow();
+      const blobStart = performance.now();
       const blob = encodeLinearDngBlob(linear, { metadata: exportMetadataFor(settings, position) });
-      trace.end({ bytes: blob.size, blobMs: Math.round((getPerfNow() - blobStart) * 10) / 10 });
+      trace.end({ bytes: blob.size, blobMs: Math.round((performance.now() - blobStart) * 10) / 10 });
       return blob;
     }
 
