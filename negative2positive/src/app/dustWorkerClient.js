@@ -36,7 +36,9 @@ export function createDustWorkerClient({
       pending.delete(data.id);
       clearTimeout(entry.timer);
       if (data.error) {
-        entry.reject(new Error(data.error));
+        // Reported by the worker's own code (an OpenCV error), not a lost worker.
+        const error = Object.assign(new Error(data.error), { dustWorkerReported: true });
+        entry.reject(error);
         release(new Error(data.error));
         return;
       }

@@ -6397,7 +6397,9 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       try { return await (worker?.inpaint || inpaintDustInWorker)(source, mask, 3); }
       catch (error) {
         assertRepairCurrent(isCurrent);
-        if (error?.name === 'AbortError') throw error;
+        // The worker ran TELEA and OpenCV failed: that is the result, not a
+        // reason to repeat it here. Only a lost worker falls back.
+        if (error?.name === 'AbortError' || error?.dustWorkerReported) throw error;
         console.warn('Dust worker unavailable; using TELEA fallback:', error);
         if (!(await ensureOpenCvReady())) throw new Error('OpenCV is not available');
         assertRepairCurrent(isCurrent);
