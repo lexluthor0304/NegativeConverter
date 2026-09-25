@@ -87,6 +87,29 @@ for (const geometry of geometries) {
     }
   }
 }
+// `planes: '16'` (#256): the 16-bit plane only, the same samples, no 8-bit
+// plane, on workers and on this thread (a broken pool).
+for (const geometry of geometries) {
+  const plan = planGeometry(source, geometry);
+  const expected = renderGeometry(source, plan);
+  for (const broken of [false, true]) {
+    const pool = createGeometryPool({ workerFactory: fakeWorkerFactory([]), workersSupported: !broken, size: 2, idleTimeoutMs: 5 });
+    const actual = await pool.render(source, plan, { bands: 3, planes: '16' });
+    assert.equal(actual.data, undefined, `${JSON.stringify(geometry)}: no 8-bit plane`);
+    assert.deepEqual([actual.width, actual.height], [expected.width, expected.height]);
+    assert.ok(bytes(actual.__image16.data).equals(bytes(expected.__image16.data)), `${JSON.stringify(geometry)} broken=${broken}: 16-bit`);
+    pool.dispose();
+  }
+}
+{
+  // An 8-bit source has no 16-bit plane to keep: both planes as before.
+  const eight = new ImageData(new Uint8ClampedArray(source.data), 120, 80);
+  const plan = planGeometry(eight, geometries[2]);
+  const pool = createGeometryPool({ workerFactory: fakeWorkerFactory([]), workersSupported: true, size: 2, idleTimeoutMs: 5 });
+  const actual = await pool.render(eight, plan, { bands: 2, planes: '16' });
+  assert.ok(bytes(actual.data).equals(bytes(renderGeometry(eight, plan).data)));
+  pool.dispose();
+}
 assert.ok(bytes(source.__image16.data).equals(base16) && bytes(source.data).equals(base8), 'the base is copied, never transferred');
 assert.equal(source.__image16.data.length, 120 * 80 * 4);
 
@@ -201,6 +224,8 @@ assert.equal(geometryBandCount({ outWidth: 4000, outHeight: 2000 }, 6), 6);
     { rotationAngle: -90, mirrored: false, cropRegion: null }]) {
     const plan = planGeometry(big, geometry);
     assertSame(await pool.render(big, plan, { bands: 5 }), renderGeometry(big, plan), `threads ${JSON.stringify(geometry)}`);
+    const only16 = await pool.render(big, plan, { bands: 3, planes: '16' });
+    assert.ok(bytes(only16.__image16.data).equals(bytes(renderGeometry(big, plan).__image16.data)), `threads, 16-bit only ${JSON.stringify(geometry)}`);
   }
   assert.equal(pool.counters.syncBands, 0, 'every band ran on a worker thread');
   pool.dispose();

@@ -48,11 +48,33 @@ function bandLevelRows(plan, band, part, k) {
   return displayLevelRows(image, k, Math.floor(plan.outWidth / k));
 }
 
+// Rows [y0, y1) of the 16-bit output only (#256: a batch frame whose later
+// stages read the 16-bit plane alone). The kernels still write their 8-bit
+// bytes, into a few rows of scratch, so the 16-bit samples are those of the
+// full render; no frame-sized 8-bit plane is allocated.
+const SCRATCH8_ROWS = 32;
+function renderRows16(plan, src, data16, y0, y1) {
+  const rowLength = plan.outWidth * 4;
+  const scratch8 = new Uint8ClampedArray(Math.max(1, Math.min(y1 - y0, SCRATCH8_ROWS)) * rowLength);
+  for (let a = y0; a < y1; a += SCRATCH8_ROWS) {
+    const b = Math.min(y1, a + SCRATCH8_ROWS);
+    renderGeometryRows(plan, src, {
+      data8: scratch8.subarray(0, (b - a) * rowLength),
+      data16: data16.subarray((a - y0) * rowLength, (b - y0) * rowLength)
+    }, a, b);
+  }
+}
+
 // The worker side: one band of one plan, and with `levelFactor` > 1 its rows
-// of the display level (#248).
+// of the display level (#248); with `planes16` (#256) its 16-bit rows only.
 export function runGeometryBand(message) {
-  const { id, plan, y0, y1, src, levelFactor = 1 } = message;
+  const { id, plan, y0, y1, src, levelFactor = 1, planes16 = false } = message;
   const length = (y1 - y0) * plan.outWidth * 4;
+  if (planes16 && plan.has16) {
+    const data16 = new Uint16Array(length);
+    renderRows16(plan, src, data16, y0, y1);
+    return { payload: { id, data8: null, data16 }, transfers: [data16.buffer] };
+  }
   const data8 = new Uint8ClampedArray(length);
   const data16 = plan.has16 ? new Uint16Array(length) : null;
   renderGeometryRows(plan, src, { data8, data16 }, y0, y1);
@@ -66,14 +88,20 @@ export function runGeometryBand(message) {
   return { payload, transfers };
 }
 
-function renderBandHere(source, plan, band) {
+function renderBandHere(source, plan, band, planes16 = false) {
   const length = (band.y1 - band.y0) * plan.outWidth * 4;
-  const data8 = new Uint8ClampedArray(length);
-  const data16 = plan.has16 ? new Uint16Array(length) : null;
-  renderGeometryRows(plan, {
+  const src = {
     x: 0, y: 0, width: plan.baseWidth, height: plan.baseHeight,
     data8: source.data, data16: plan.has16 ? source.__image16.data : null
-  }, { data8, data16 }, band.y0, band.y1);
+  };
+  if (planes16 && plan.has16) {
+    const data16 = new Uint16Array(length);
+    renderRows16(plan, src, data16, band.y0, band.y1);
+    return { data8: null, data16 };
+  }
+  const data8 = new Uint8ClampedArray(length);
+  const data16 = plan.has16 ? new Uint16Array(length) : null;
+  renderGeometryRows(plan, src, { data8, data16 }, band.y0, band.y1);
   return { data8, data16 };
 }
 
@@ -187,7 +215,7 @@ export function createGeometryPool({
     return new Promise(resolve => waiters.push(resolve));
   }
 
-  function postBand(entry, plan, band, src, levelFactor = 1) {
+  function postBand(entry, plan, band, src, levelFactor = 1, planes16 = false) {
     return new Promise((resolve, reject) => {
       const id = ++sequence;
       const timer = setTimeout(() => fail(entry, new Error('Geometry worker timed out')), timeoutMs);
@@ -196,7 +224,7 @@ export function createGeometryPool({
       if (src.data8) transfers.push(src.data8.buffer);
       if (src.data16) transfers.push(src.data16.buffer);
       try {
-        entry.worker.postMessage({ type: 'geometry-band', id, plan, y0: band.y0, y1: band.y1, src, levelFactor }, transfers);
+        entry.worker.postMessage({ type: 'geometry-band', id, plan, y0: band.y0, y1: band.y1, src, levelFactor, ...(planes16 ? { planes16: true } : {}) }, transfers);
       } catch (error) {
         fail(entry, error);
       }
@@ -210,23 +238,27 @@ export function createGeometryPool({
    * core (one band per task, yielding between them) when workers are
    * unavailable or fail. `level` (#248: true for the frame's own factor, or a
    * factor) also builds the display level of the output with the bands, as
-   * `__displayLevel`; the bands then start on multiples of its k.
+   * `__displayLevel`; the bands then start on multiples of its k. `planes:
+   * '16'` (#256, a 16-bit source) builds the 16-bit plane only, without a
+   * display level, and resolves `{ width, height, __image16 }`.
    */
-  async function render(source, plan, { isCurrent = () => true, bands: bandCount = null, maxInFlight = null, level = false } = {}) {
+  async function render(source, plan, { isCurrent = () => true, bands: bandCount = null, maxInFlight = null, level = false, planes = null } = {}) {
     if (plan.identity) return source;
-    const k = level === true ? displayLevelFactor(plan.outWidth, plan.outHeight) : Math.max(1, Math.floor(Number(level) || 1));
+    const planes16 = planes === '16' && plan.has16;
+    const k = planes16 ? 1 : (level === true ? displayLevelFactor(plan.outWidth, plan.outHeight) : Math.max(1, Math.floor(Number(level) || 1)));
     const requested = bandCount || geometryBandCount(plan, poolSize);
     const bands = planGeometryBands(plan, broken
       ? Math.max(requested, Math.ceil((plan.outWidth * plan.outHeight) / SYNC_BAND_PIXELS))
       : requested, k);
-    const out8 = new Uint8ClampedArray(plan.outWidth * plan.outHeight * 4);
-    const out16 = plan.has16 ? new Uint16Array(out8.length) : null;
+    const length = plan.outWidth * plan.outHeight * 4;
+    const out8 = planes16 ? null : new Uint8ClampedArray(length);
+    const out16 = plan.has16 ? new Uint16Array(length) : null;
     const rowWords = plan.outWidth * 4;
     const levelWidth = Math.floor(plan.outWidth / k);
     const levelHeight = Math.floor(plan.outHeight / k);
     const level16 = k > 1 ? new Uint16Array(levelWidth * levelHeight * 4) : null;
     const place = (band, part) => {
-      out8.set(part.data8, band.y0 * rowWords);
+      if (out8) out8.set(part.data8, band.y0 * rowWords);
       if (out16) out16.set(part.data16, band.y0 * rowWords);
       if (level16) level16.set(part.level16 || bandLevelRows(plan, band, part, k), (band.y0 / k) * levelWidth * 4);
     };
@@ -244,13 +276,13 @@ export function createGeometryPool({
         }
         const band = queue.shift();
         if (!entry) {
-          place(band, renderBandHere(source, plan, band));
+          place(band, renderBandHere(source, plan, band, planes16));
           counters.syncBands++;
         } else {
           // Copy the band's rows now; the base itself is never transferred.
           const slice = sliceGeometrySource(source, plan, band.rect);
           const key = ++token;
-          running.set(key, postBand(entry, plan, band, slice, k).then(
+          running.set(key, postBand(entry, plan, band, slice, k, planes16).then(
             part => ({ key, band, part }),
             error => ({ key, band, error })
           ));
@@ -263,7 +295,7 @@ export function createGeometryPool({
       running.delete(settled.key);
       if (!isCurrent()) return null;
       if (settled.error) {
-        place(settled.band, renderBandHere(source, plan, settled.band));
+        place(settled.band, renderBandHere(source, plan, settled.band, planes16));
         counters.syncBands++;
       } else {
         place(settled.band, settled.part);
@@ -276,6 +308,7 @@ export function createGeometryPool({
       if (plan.rotates) counters.rotations++;
       else counters.copies++;
     }
+    if (planes16) return { width: plan.outWidth, height: plan.outHeight, __image16: { width: plan.outWidth, height: plan.outHeight, data: out16 } };
     const output = wrapGeometryOutput(plan, out8, out16);
     if (level16) {
       output.__displayLevel = adoptDisplayLevel(level16, levelWidth, levelHeight, { sourceWidth: plan.outWidth, sourceHeight: plan.outHeight, k });

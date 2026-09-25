@@ -16574,11 +16574,14 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // The export geometry chain in the pool, bit-identical to
     // applyGeometryChainToImageData. 8-bit sources at a non-right angle keep
     // the canvas rotation on this thread.
-    async function renderGeometryChain(source, geometry, { isCurrent = () => true, maxInFlight = null } = {}) {
+    // `planes: '16'` (#256): a caller that reads only the 16-bit plane of the
+    // output gets `{ width, height, __image16 }` from the pool, without the
+    // 8-bit plane; the other paths ignore it.
+    async function renderGeometryChain(source, geometry, { isCurrent = () => true, maxInFlight = null, planes = null } = {}) {
       const plan = planGeometry(source, geometry, { sanitizeCrop: (crop, frame) => sanitizeCropRegionForImage(crop, frame) });
       if (!plan) return applyGeometryChainToImageData(source, geometry, exportGeometrySteps);
       if (plan.identity) return source;
-      const output = await geometryPool.render(source, plan, { isCurrent, maxInFlight: maxInFlight || interactiveGeometryBands(plan) });
+      const output = await geometryPool.render(source, plan, { isCurrent, maxInFlight: maxInFlight || interactiveGeometryBands(plan), planes });
       assertRepairCurrent(isCurrent);
       return output;
     }
@@ -17191,8 +17194,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         // In the geometry pool: batch lanes, the contact sheet and the thumbnail
         // lane no longer queue on the main thread for this step (#244). The
         // auto-frame worker sends no rotated frame back (#251), so this is the
-        // file's one rotation.
-        workingData = own(await renderGeometryChain(imageData, geometry, { isCurrent, maxInFlight: options.geometryBands }), imageData);
+        // file's one rotation. A batch frame without lens correction reads
+        // only the 16-bit plane of it (the conversion; #256 Part 1.4).
+        const planes = options.releaseEarly && !previewMax && !tileMax && options.stage !== 'source'
+          && !lensCorrectionActive(settings) ? '16' : null;
+        workingData = own(await renderGeometryChain(imageData, geometry, { isCurrent, maxInFlight: options.geometryBands, planes }), imageData);
         workingData = own(await applyLensCorrectionWithSettings(workingData, settings, { updateUi: false }), workingData);
         assertRepairCurrent(isCurrent);
         fullWorkingShortSide = Math.min(workingData.width, workingData.height);
@@ -17301,7 +17307,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         // the file again. A lost base is the caller's to re-render.
         if (sourceRole !== 'derived' || reducedGeometry || reducedPreview || reducedTile || !isConversionInputLost(err)) throw err;
         console.warn(`The conversion lost the working plane of ${file?.name || 'a frame'}; rebuilding it from the decoded base:`, err?.message || err);
-        let rebuilt = own(await renderGeometryChain(imageData, geometry, { isCurrent, maxInFlight: options.geometryBands }), imageData);
+        let rebuilt = own(await renderGeometryChain(imageData, geometry, {
+          isCurrent, maxInFlight: options.geometryBands,
+          planes: options.releaseEarly && !lensCorrectionActive(settings) ? '16' : null
+        }), imageData);
         rebuilt = own(await applyLensCorrectionWithSettings(rebuilt, settings, { updateUi: false }), rebuilt);
         assertRepairCurrent(isCurrent);
         workingData = rebuilt;
