@@ -6022,12 +6022,17 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       hideDetailLayer();
     }
 
-    // The canvas at the region's pre-transform CSS rect in the wrapper.
+    // The canvas at the region's pre-transform CSS rect in the wrapper. Pans
+    // and base redraws call this often; the rect only changes with the region
+    // or the fit.
     function positionDetailCanvas() {
       const shown = detailLayer.shown;
       const fit = canvasDisplayFit.scale;
       if (!shown || !(fit > 0)) return;
       const { plan } = shown;
+      const key = `${plan.x}|${plan.y}|${plan.width}|${plan.height}|${fit}`;
+      if (detailLayer.placed === key) return;
+      detailLayer.placed = key;
       glDetailCanvas.style.left = `${plan.x * fit}px`;
       glDetailCanvas.style.top = `${plan.y * fit}px`;
       glDetailCanvas.style.width = `${plan.width * fit}px`;
@@ -6215,6 +6220,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       event.preventDefault();
       detailLayer.renderer = null;
       dropDetailLayer();
+    });
+    glDetailCanvas?.addEventListener('webglcontextrestored', () => {
+      detailLayer.renderer = null;
+      detailLayer.failed = false;
     });
 
     // Read by the smoke tests: the display level and target, and where the
