@@ -10378,9 +10378,15 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       studioWorkspace?.sync();
     }
 
-    async function beginCropMode({ analysisOnly = false } = {}) {
-      // The draft shows the whole frame: wait for a pending geometry build.
-      await whenGeometrySettled();
+    // The draft shows the whole frame: a pending geometry build finishes
+    // first. Otherwise the draft opens in the click's own task, as before.
+    function beginCropMode(options = {}) {
+      if (state.geometryPending) return whenGeometrySettled().then(() => openCropMode(options));
+      openCropMode(options);
+      return Promise.resolve();
+    }
+
+    function openCropMode({ analysisOnly = false } = {}) {
       const sourceImageData = state.originalImageData;
       if (!sourceImageData || state.cropping) return;
 
