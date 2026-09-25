@@ -186,6 +186,7 @@ export function createHiddenJobGate({
       waiting: waiters.length,
       paused,
       safeMode,
+      heldBytes: waiters.length ? waiters[0].bytes : 0,
       hiddenForMs: hiddenSince === null ? 0 : now() - hiddenSince
     };
   }

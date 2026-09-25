@@ -59,6 +59,7 @@ function fixture({ count = 4, prepared = false, realRoll = false } = {}) {
     yieldTaskForJob: () => new Promise(resolve => context.setTimeout(resolve, 0)),
     hiddenJobs: createHiddenJobGate({ isHidden: () => false }), hiddenJobBytesFor: async () => 0,
     createJobMarker, jobMarkerStorage: markerStorage, recoveryWrites: 0,
+    parkedPhoto: null,
     safeStorageGet: () => context.off ? 'off' : null,
     studioBackgroundReady: () => state.currentStep >= 3 && context.getCurrentQueueItem()?.file === state.loadedFile
       && !context.document.body.dataset.studioBusy && !context.processNegativeInFlight,

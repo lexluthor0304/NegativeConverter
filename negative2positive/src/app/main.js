@@ -302,6 +302,8 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       fileName: '',
       targetDirectory: ''
     };
+    // The open photo while it is parked in a hidden window (#241 part 2e).
+    let parkedPhoto = null;
     // Every long job asks this gate before an item starts, so a hidden macOS
     // window stays under WebKit's inactive memory limit (#241; the callbacks
     // live under "Hidden-window jobs" below).
@@ -309,7 +311,10 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       isHidden: () => document.visibilityState === 'hidden',
       limitsApply: () => hiddenJobLimitsForced() || hiddenJobLimitsApply(),
       residentBytes: () => hiddenResidentBytes(),
-      onChange: () => refreshHiddenJobStatus(),
+      onChange: () => {
+        refreshHiddenJobStatus();
+        if (hiddenJobs.paused) onHiddenJobPaused();
+      },
       onHiddenAdmit: () => shedHiddenJobMemory(),
       onGraceExpired: () => shedHiddenJobMemory(),
       // A job that ends while hidden leaves nothing idle behind.
@@ -7141,10 +7146,80 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       } else {
         // Waiting items were released above; the thumbnail lane restarts if
         // it stopped. Caches refill on use and workers respawn lazily.
+        if (parkedPhoto) void unparkOpenPhoto();
         if (state.fileQueue.length) void loadStudioThumbnails();
       }
       refreshHiddenJobStatus();
     });
+
+    // An item is held back because the hidden estimate does not fit. Log the
+    // breakdown for the acceptance runs, which decide whether parking the
+    // open photo (below) is needed.
+    function onHiddenJobPaused() {
+      const status = hiddenJobs.status();
+      console.info('[hidden-job] paused while hidden', {
+        residentBytes: hiddenResidentBytes(), heldBytes: status.heldBytes,
+        photoSessionBytes: photoSessions.bytes, photoPreviewBytes: photoPreviews.bytes,
+        undoSnapshots: undoStack.length + redoStack.length, hiddenForMs: status.hiddenForMs
+      });
+      if (parkOpenPhotoForHiddenJob()) queueMicrotask(() => hiddenJobs.recheck());
+    }
+
+    // Part 2e, opt-in until the footprint is measured (localStorage
+    // nc_hidden_park_v1 = 'on'): while an item is held back, park the open
+    // photo: persist its recipe, keep only the decoded base (and the undo
+    // history, which is never dropped) and drop the derived planes. Showing
+    // the window rebuilds them from the base through the cold photo-switch
+    // path (base -> rotation -> mirror -> crop, then conversion) without a
+    // re-decode.
+    function hiddenParkEnabled() {
+      return safeStorageGet('nc_hidden_park_v1') === 'on';
+    }
+
+    function parkOpenPhotoForHiddenJob() {
+      if (parkedPhoto || !hiddenParkEnabled() || document.visibilityState !== 'hidden') return false;
+      const item = getCurrentQueueItem();
+      if (!item || item.file !== state.loadedFile || !state.loadedBaseImageData || state.rawDecodePending
+        || state.currentStep < 3 || state.cropping || document.body.dataset.studioBusy || document.body.dataset.photoSwitching
+        || processNegativeInFlight || coreReprocessBusy() || coreReprocessTimer || state.dustRemoval.processing
+        || dustDetectionTimer || pendingBrushRepairs || dustDrawing) return false;
+      persistCurrentFileSettings({ silent: true, force: true });
+      ++loadGeneration;
+      invalidatePhotoActivation();
+      parkedPhoto = {
+        item, file: item.file, base: state.loadedBaseImageData, rawMetadata: state.rawMetadata,
+        undo: undoStack.slice(), redo: redoStack.slice(), isDirty: item.isDirty
+      };
+      for (const key of SNAPSHOT_REF_KEYS) state[key] = null;
+      state.displayImageData = null;
+      state.dustRemoval.mask = null;
+      state.dustRemoval.inpaintedImageData = null;
+      state.dustRemoval.cleanSource = null;
+      state.dustRemoval._state = null;
+      return true;
+    }
+
+    async function unparkOpenPhoto() {
+      const parked = parkedPhoto;
+      parkedPhoto = null;
+      const item = parked?.item;
+      if (!item || state.fileQueue[state.currentFileIndex] !== item || state.loadedFile !== parked.file) return;
+      const loading = loadFile(parked.file, { autoConvert: false, decoded: parked, quiet: true });
+      const generation = loadGeneration;
+      const result = await loading;
+      if (!isCurrentLoad(generation) || result?.status !== 'loaded') return;
+      resetZoomPan();
+      if (item.settings) restoreSettings(item.settings, { refreshDisplay: false });
+      await prepareStudioPhoto(generation, item, { quiet: true });
+      if (!isCurrentLoad(generation)) return;
+      undoStack.splice(0, undoStack.length, ...parked.undo);
+      redoStack.splice(0, redoStack.length, ...parked.redo);
+      item.isDirty = parked.isDirty;
+      updateUndoRedoButtons();
+      updateFileListUI();
+      updateRollAnalysisUI();
+      studioWorkspace?.sync();
+    }
 
     // Debug counters for the acceptance runs (#241): what a hidden window holds.
     window.__ncHiddenJobs = {
@@ -7162,8 +7237,10 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       })
     };
 
-    // Smoke tests (?debug=1): make a queued frame look never analysed.
+    // Smoke tests (?debug=1): make a queued frame look never analysed, and
+    // park the open photo without waiting for a held-back item.
     if (DEBUG_UI) {
+      window.__ncHiddenJobs.parkOpenPhoto = () => parkOpenPhotoForHiddenJob();
       window.__ncHiddenJobs.forgetFrameSettings = (index) => {
         const item = state.fileQueue[index];
         if (!item || index === state.currentFileIndex) return false;
@@ -7224,6 +7301,8 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     }
 
     function invalidatePhotoActivation() {
+      // A newer activation supersedes a photo parked while hidden (#241).
+      parkedPhoto = null;
       cancelPendingTimers();
       // The outgoing photo's tile update cannot write into the incoming one.
       cancelStudioThumbnailUpdate();
@@ -17284,8 +17363,9 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       }
       if (!isValid()) return { status: 'stale' };
       const currentItem = getCurrentQueueItem();
+      // A photo parked while hidden picks the roll recipe up when it is rebuilt.
       const updateCurrent = currentItem?.settings && measurements.some((m) => m.item === currentItem)
-        && (!automatic || studioBackgroundReady());
+        && (!automatic || studioBackgroundReady()) && !parkedPhoto;
       if (updateCurrent) restoreSettings(currentItem.settings);
       updateRollAnalysisUI();
       updateFileListUI();
