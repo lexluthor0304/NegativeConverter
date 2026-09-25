@@ -360,8 +360,8 @@ function prepareFixture({ itemSettings = null, detectFrame = true, learned = 0 }
     // Records whether the compare button was last evaluated during the tail.
     updateBeforeAfterButtonState: () => { compareButton.detecting = Boolean(context.document.body.dataset.studioDetecting); },
     createDefaultSettings: () => structuredClone(defaults), mergeStudioColors: settings => settings,
-    restoreSettings: settings => {
-      log.push({ restore: settings.id });
+    restoreSettings: (settings, options = {}) => {
+      log.push({ restore: settings.id, paintsNegative: options.refreshDisplay !== false });
       state.live = structuredClone(settings);
       state.cropRegion = settings.cropRegion;
       state.croppedImageData = settings.cropRegion ? { width: 20, height: 10, id: `crop:${settings.id}` } : null;
@@ -523,6 +523,8 @@ for (const timing of ['during', 'after']) {
   assert.equal(f.item.isDirty, false, 'the provisional WB dirty flag is undone before the re-render');
   assert.deepEqual(f.log.filter(entry => entry.restore).map(entry => entry.restore), ['defaults', 'defaults', 'defaults+edge+learned'],
     'fresh defaults, then the provisional settings, then the final settings');
+  assert.ok(f.log.filter(entry => entry.restore).every(entry => !entry.paintsNegative),
+    'a non-quiet import paints the negative once, in loadFile, not before each conversion (#242)');
   assert.equal(f.log.filter(entry => entry.meta).length, 0);
   assert.ok(!f.log.includes('semantic'), 'semantic pass waits for the re-render');
   await f.answer(1);

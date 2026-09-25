@@ -3335,7 +3335,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // Canvas & Context
     // ===========================================
     const canvas = document.getElementById('canvas');
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    // No willReadFrequently: nothing reads #canvas back, and the hint keeps
+    // the 2D context in software (Chrome) or off the accelerated buffer
+    // (WebKit), so every scaled draw and composite ran on the CPU.
+    const ctx = canvas.getContext('2d');
     const glCanvas = document.getElementById('glCanvas');
     // Crop mode's own surface (#245): no willReadFrequently, so it stays on
     // the GPU and the draft angle is a transform of one drawImage.
@@ -3412,7 +3415,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // pixels (getSprocketFrameLayout's shape); null without the border.
     let mainCanvasPhoto = null;
     const sprocketScratchCanvas = document.createElement('canvas');
-    const sprocketScratchCtx = sprocketScratchCanvas.getContext('2d', { willReadFrequently: true });
+    const sprocketScratchCtx = sprocketScratchCanvas.getContext('2d');
     const sprocketPreviewFrameCanvas = document.createElement('canvas');
     const sprocketPreviewFrameCtx = sprocketPreviewFrameCanvas.getContext('2d');
     const sprocketPreviewFrameCache = {
@@ -7457,6 +7460,15 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // detections may still replace (prepareStudioPhoto): it arms neither the
     // idle full-resolution render nor the dust pass, which
     // armSettledConversion starts later.
+    // An import paints the negative once, in loadFile, and converts without
+    // painting the framed one first (#242). A conversion that yields nothing
+    // for a frame without a positive shows that framed negative instead.
+    function showNegativeAfterFailedConversion() {
+      if (state.processedImageData) return;
+      const sourceData = state.croppedImageData || state.originalImageData;
+      if (sourceData) displayNegative(sourceData);
+    }
+
     async function processNegative({ quiet = false, automatic = true, provisional = false } = {}) {
       if (processNegativeInFlight) return processNegativeInFlight;
 
@@ -7505,7 +7517,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           overlay.updateProgress(hasPreviewSource ? 35 : 40, lang.loadingConverting);
 
           const processed = await convertFromCurrentSource(state, { preview: hasPreviewSource });
-          if (!processed || !isCurrentConversion()) return;
+          if (!isCurrentConversion()) return;
+          if (!processed) {
+            showNegativeAfterFailedConversion();
+            return;
+          }
           trace.mark(hasPreviewSource ? 'previewConversion' : 'fullConversion', {
             outputPixels: getImageDataPixelCount(processed)
           });
@@ -7550,6 +7566,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           }
         } catch (err) {
           if (!isCurrentConversion()) return;
+          showNegativeAfterFailedConversion();
           // Every caller fires this with `void`, so without a catch here a
           // failed conversion became an unhandled rejection: the overlay
           // vanished and the user was left on the previous image with no
@@ -10445,7 +10462,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         item.status = 'pending'; item.isDirty = false;
       }
       state.rollAnalysis = { equalize: Boolean(state.rollAnalysis.equalize) };
-      restoreSettings(getCurrentQueueItem().settings);
+      // In Step 3 the reprocess below paints the positive: no negative first.
+      restoreSettings(getCurrentQueueItem().settings, { refreshDisplay: state.currentStep < 3 });
       invalidateSilverCoreCache();
       updateFileListUI(); updateRollAnalysisUI();
       scheduleSilverSourceRefresh({ immediate: true });
@@ -14070,15 +14088,14 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (state.processedImageData && state.currentStep >= 3) {
         return await applyAdjustmentsWithSettings(state.processedImageData, state, { bridge });
       }
-      if (state.sprocketPreviewEnabled || state.exportSprocketHolesEnabled) {
-        const sourceData = state.croppedImageData || state.originalImageData;
-        noteGeometryPixelRead('currentExportImageData');
-        if (sourceData) return sourceData;
-      }
-      if (canvas.width > 0 && canvas.height > 0) {
-        return ctx.getImageData(0, 0, canvas.width, canvas.height);
-      }
-      return null;
+      const sourceData = state.croppedImageData || state.originalImageData;
+      if (!sourceData) return null;
+      noteGeometryPixelRead('currentExportImageData');
+      if (state.sprocketPreviewEnabled || state.exportSprocketHolesEnabled) return sourceData;
+      // Steps 1-2 export the negative displayNegative painted, as the #canvas
+      // readback did: its 8-bit pixels only, never its 16-bit plane. The
+      // wrapper shares them; nothing written on it reaches the editor's plane.
+      return new ImageData(sourceData.data, sourceData.width, sourceData.height);
     }
 
     // The prepare step of a single export: full resolution plus AI/dust repair.
@@ -14635,7 +14652,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
       const currentItem = getCurrentQueueItem();
       if (currentItem && currentItem.selected && currentItem.settings) {
-        restoreSettings(currentItem.settings);
+        restoreSettings(currentItem.settings, { refreshDisplay: state.currentStep < 3 });
         if (state.currentStep >= 3 && state.originalImageData) {
           void processNegative();
         }
@@ -18119,8 +18136,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         if (isCurrentLoad(generation)) overlay.hide();
         return;
       }
+      // Every restore below is followed by processNegative, which paints the
+      // positive: loadFile's paint is the one negative write of an import.
       if (!item?.settings) {
-        restoreSettings(mergeStudioColors(createDefaultSettings(state.originalImageData, item), item?.studioColors || {}), { refreshDisplay: !quiet });
+        restoreSettings(mergeStudioColors(createDefaultSettings(state.originalImageData, item), item?.studioColors || {}), { refreshDisplay: false });
       }
       document.body.dataset.studioBusy = 'true';
       studioWorkspace?.sync();
@@ -18205,7 +18224,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         } else {
           if (freshFile) settings = await learnedImportSettings(settleImportFilmType(item, settings), item);
           if (!isCurrentLoad(generation)) return;
-          if (freshFile) restoreSettings(settings, { refreshDisplay: !quiet });
+          if (freshFile) restoreSettings(settings, { refreshDisplay: false });
           await whenGeometrySettled();
           if (!isCurrentLoad(generation)) return;
           goToStep(2);
@@ -22172,7 +22191,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         const target = importFilmTypeTarget(record, item);
         if (!target || !item.settings) return false;
         retypeImportItem(record, item, target);
-        restoreSettings(item.settings);
+        restoreSettings(item.settings, { refreshDisplay: false });
         updateFileListUI();
         await processNegative({ quiet: true });
         return true;
@@ -22245,7 +22264,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (analysed) state.rollAnalysis = { equalize: Boolean(state.rollAnalysis.equalize) };
       const current = getCurrentQueueItem();
       if (current && targets.includes(current)) {
-        restoreSettings(current.settings);
+        restoreSettings(current.settings, { refreshDisplay: state.currentStep < 3 });
         invalidateSilverCoreCache();
         if (usesSilverCoreConversion(state)) scheduleSilverSourceRefresh({ immediate: true });
         else schedulePreviewUpdate();
@@ -22896,7 +22915,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // A photo parked while hidden picks the roll recipe up when it is rebuilt.
       const updateCurrent = currentItem?.settings && measurements.some((m) => m.item === currentItem)
         && (!automatic || studioBackgroundReady()) && !parkedPhoto;
-      if (updateCurrent) restoreSettings(currentItem.settings);
+      // processNegative below paints the positive.
+      if (updateCurrent) restoreSettings(currentItem.settings, { refreshDisplay: false });
       updateRollAnalysisUI();
       updateFileListUI();
       if (roll) {
