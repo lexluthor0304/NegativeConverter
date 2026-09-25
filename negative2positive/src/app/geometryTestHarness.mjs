@@ -207,6 +207,8 @@ export function createHarness(base, { historyBudget = 768 * 1024 * 1024, session
       createPerfTrace: () => ({ mark() {}, end() {} }),
       applyLensCorrectionWithSettings: async source => source,
       buildPreviewSourceImageData: source => source,
+      // #248: small frames are their own display level and conversion preview.
+      buildDisplayLevelInBands: async source => source, displayLevelFactor: () => 1, conversionTargetFor: source => source,
       usesSilverCoreConversion: () => false, hasSeparateConversionPreview: () => false, hasFrameRepairs: () => false,
       convertFromCurrentSource: async () => { conversions.push({ source: state.conversionSourceImageData }); return state.conversionSourceImageData; },
       applyProcessedImageToState: processed => { state.processedImageData = processed; },

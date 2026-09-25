@@ -232,6 +232,8 @@ for (const failConversion of [false, true]) {
     applyLensCorrectionWithSettings: async image => image,
     buildPreviewSourceImageData: image => image, refreshCanvasContainerSize: () => false,
     hasSeparateConversionPreview: () => false,
+    // #248: a small frame is its own level and conversion preview.
+    buildDisplayLevelInBands: async image => image, displayLevelFactor: () => 1, conversionTargetFor: image => image,
     maybeAutoWhiteBalance: noop, maybeAnalyzeExpiredRescue: noop,
     syncBatchUIState: noop, revealBatchFileList: noop,
     updateStudioThumbnail: noop, scheduleFullUpdate: noop,
@@ -407,6 +409,9 @@ function prepareFixture({ itemSettings = null, detectFrame = true, learned = 0 }
     applyLensCorrectionWithSettings: async image => image,
     invalidateSilverCoreCache: noop,
     buildPreviewSourceImageData: image => ({ width: 8, height: 6, preview: image.id }),
+    // #248: the level and the display target of the new source.
+    buildDisplayLevelInBands: async image => image, displayLevelFactor: () => 1,
+    conversionTargetFor: image => ({ width: 8, height: 6, preview: image.id }),
     usesSilverCoreConversion: () => true,
     hasSeparateConversionPreview: () => Boolean(state.conversionSourceImageData && state.conversionPreviewImageData
       && state.conversionPreviewImageData !== state.conversionSourceImageData),

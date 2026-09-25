@@ -75,7 +75,8 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
       const entry = pending.get(msg.id);
       if (!entry) return;
       pending.delete(msg.id);
-      if (msg.type === 'result' || msg.type === 'committed' || msg.type === 'ready' || msg.type === 'prepared' || msg.type === 'analyzed') entry.resolve(msg);
+      if (msg.type === 'result' || msg.type === 'committed' || msg.type === 'ready' || msg.type === 'prepared' || msg.type === 'analyzed'
+        || msg.type === 'displayNegative' || msg.type === 'resampled' || msg.type === 'roi') entry.resolve(msg);
       else {
         const err = workerError(msg.message || 'Conversion worker error', CONVERSION_FAILED);
         // A lent source the worker hands back with its error.
@@ -125,8 +126,13 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
    * `recipe` object keeps `settings` and `adjust` in the worker while the
    * same recipe is passed again. `transfer` hands the frame's 8-bit pixels to
    * the worker instead of copying them; the caller must not read them afterwards.
+   *
+   * `display` ({ target, geometry }, #248) makes `imageData` a display level: the
+   * worker keeps it as the cached source and converts its resample to `target`,
+   * so a new display size sends no pixels. `wbSample` asks for the auto-WB
+   * sample of the frame as well.
    */
-  async function request(type, { imageData, settings, options = {}, handoff = null, releaseAfter = false, adjust = null, recipe = null, transfer = false, signal = null }, extra = null) {
+  async function request(type, { imageData, settings, options = {}, handoff = null, releaseAfter = false, adjust = null, recipe = null, transfer = false, signal = null, display = null, wbSample = null }, extra = null) {
     if (signal?.aborted) throw workerError('Conversion was aborted', WORKER_ABORTED);
 
     let w;
@@ -148,6 +154,8 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
       options: { ...options },
       ...extra
     };
+    if (display) message.display = display;
+    if (wbSample) message.wbSample = wbSample;
     if (recipe && recipe === lastRecipe) {
       message.reuseRecipe = true;
       delete message.settings;
@@ -318,6 +326,25 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
       if (sample.image16) histogram.__image16 = { width: sample.width, height: sample.height, data: new Uint16Array(sample.image16) };
       out.__histogramSample = histogram;
     }
+    // The display preview a full-resolution render brings along (#248 part 4)
+    // and the histogram sample of it.
+    if (result.displayPreview) {
+      const built = result.displayPreview;
+      const preview = new ImageData(new Uint8ClampedArray(built.rgba), built.width, built.height);
+      if (built.image16) preview.__image16 = { width: built.width, height: built.height, data: new Uint16Array(built.image16) };
+      if (built.histogram) {
+        const sample = built.histogram;
+        const histogram = new ImageData(new Uint8ClampedArray(sample.rgba), sample.width, sample.height);
+        if (sample.image16) histogram.__image16 = { width: sample.width, height: sample.height, data: new Uint16Array(sample.image16) };
+        preview.__histogramSample = histogram;
+      }
+      out.__displayPreview = preview;
+    }
+    // The viewport-independent auto-WB sample (#248 part 3), a converted positive.
+    if (result.wbSample) {
+      const sample = result.wbSample;
+      out.__wbSample = new ImageData(new Uint8ClampedArray(sample.rgba), sample.width, sample.height);
+    }
     // A fresh allocation: an export may hand it on or release it (#250).
     markOwnedPlanes(out);
     return out;
@@ -348,6 +375,72 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
   convert.analyze = async (frame, key = null) => {
     const { result } = await request('analyze', frame, { key });
     return { key: result.key, channelData: result.channelData, autoColor: result.autoColor, positiveAnalysis: result.positiveAnalysis };
+  };
+
+  // A copy of the display negative of a display target (#248), from the
+  // cached level: an ImageData with its __image16.
+  convert.displayNegative = async (frame) => {
+    const { result } = await request('displayNegative', frame);
+    const image = new ImageData(new Uint8ClampedArray(result.rgba), result.width, result.height);
+    image.__image16 = { width: result.width, height: result.height, data: new Uint16Array(result.image16) };
+    return image;
+  };
+
+  // Posts a request that leaves the cached source, analysis and strokes alone
+  // (#248: the display resample of a full-resolution frame, the detail layer's
+  // regions). Resolves with the worker's reply.
+  function postUncached(type, body, transfers, pixelCount, signal = null) {
+    if (signal?.aborted) return Promise.reject(workerError('Conversion was aborted', WORKER_ABORTED));
+    let w;
+    try {
+      w = getWorker();
+    } catch (err) {
+      return Promise.reject(workerError(`Conversion worker could not start: ${err?.message || err}`, WORKER_UNAVAILABLE));
+    }
+    const id = ++requestId;
+    const timeoutMs = conversionTimeoutMs(pixelCount);
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        reject(workerError(`Conversion worker timed out after ${Math.round(timeoutMs / 1000)}s`, WORKER_TIMEOUT));
+      }, timeoutMs);
+      const onAbort = () => {
+        if (!pending.has(id)) return;
+        pending.delete(id);
+        clearTimeout(timer);
+        reject(workerError('Conversion was aborted', WORKER_ABORTED));
+      };
+      const settle = (fn) => (value) => {
+        clearTimeout(timer);
+        signal?.removeEventListener?.('abort', onAbort);
+        fn(value);
+      };
+      pending.set(id, { resolve: settle(resolve), reject: settle(reject) });
+      signal?.addEventListener?.('abort', onAbort, { once: true });
+      try {
+        w.postMessage({ type, id, ...body }, transfers);
+      } catch (err) {
+        clearTimeout(timer);
+        pending.delete(id);
+        reject(workerError(`Conversion worker postMessage failed: ${err?.message || err}`, WORKER_UNAVAILABLE));
+      }
+    });
+  }
+  convert.postUncached = postUncached;
+
+  // The display preview of a full-resolution frame at `target` with the
+  // display filter (#248 part 4), made in the worker and not kept there. Only
+  // the 16-bit plane crosses when there is one (a clone, never a transfer: the
+  // frame stays the caller's). Resolves to an ImageData (with __image16).
+  convert.resample = async (image, target, { signal = null } = {}) => {
+    const plane = image.__image16?.data instanceof Uint16Array ? image.__image16.data : null;
+    const body = { width: image.width, height: image.height, target: { width: target.width, height: target.height } };
+    if (plane) body.image16 = plane.byteOffset === 0 && plane.buffer.byteLength === plane.byteLength ? plane.buffer : plane.slice().buffer;
+    else body.rgba = image.data.byteOffset === 0 && image.data.buffer.byteLength === image.data.byteLength ? image.data.buffer : image.data.slice().buffer;
+    const reply = await postUncached('resample', body, [], image.width * image.height, signal);
+    const out = new ImageData(new Uint8ClampedArray(reply.rgba), reply.width, reply.height);
+    if (reply.image16) out.__image16 = { width: reply.width, height: reply.height, data: new Uint16Array(reply.image16) };
+    return out;
   };
 
   // Brings back the 16-bit plane a retaining conversion left in the worker.

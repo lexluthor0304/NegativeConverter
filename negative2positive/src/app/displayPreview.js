@@ -209,7 +209,7 @@ function levelShape(image, k) {
 // Level rows [ly0, ly1) and columns [lx0, lx1) of `image` into `out` (whose
 // width is `outWidth`, starting at column lx0 and row ly0 of the level).
 function boxLevelRows(image, k, lx0, lx1, ly0, ly1, out, outWidth) {
-  const source16 = image.__image16?.data;
+  const source16 = plane16(image);
   const source = source16 || image.data;
   const scale = source16 ? 1 : 257;
   const area = k * k;
@@ -376,8 +376,14 @@ function resampleTaps(src, blockWidth, offX, offY, colTaps, rowTaps, tx0, ty0, o
   }
 }
 
+// The 16-bit samples of an ImageData with __image16, or of an Image16
+// ({ width, height, data: Uint16Array }); null for 8-bit images.
+function plane16(image) {
+  return image.__image16?.data || (image.data instanceof Uint16Array ? image.data : null);
+}
+
 function levelPlane(level) {
-  return level.__image16?.data || level.data;
+  return plane16(level) || level.data;
 }
 
 /**
@@ -408,7 +414,7 @@ export function filterDisplayImage(image, target, { k = displayLevelFactor(image
   const geometry = { sourceWidth: image.width, sourceHeight: image.height, k };
   const output = new ImageData(target.width, target.height);
   const src = levelPlane(level);
-  const wide = Boolean(image.__image16?.data);
+  const wide = Boolean(plane16(image));
   const mode = displayResampleMode(geometry, target);
   const cols = axisTaps(mode, target.width, image.width, k, level.width, 0, target.width);
   const rows = axisTaps(mode, target.height, image.height, k, level.height, 0, target.height);
@@ -494,6 +500,42 @@ function updateFilteredRect(image, preview, rect, k) {
     resampleTaps(block, blockWidth, offX, offY, cols, rowTaps, columns[0], rows[0], preview.data, null, preview.width);
   }
   return { x: columns[0], y: rows[0], width: columns[1] - columns[0], height: rows[1] - rows[0] };
+}
+
+// ---------------------------------------------------------------------------
+// Display targets (#248 part 3): the conversion preview is not a resampled
+// image on the main thread any more, but a size and the level the preview
+// worker resamples it from. One object per (level, size), so identity checks
+// (the GPU preview's tags, history, the worker's caches) stay stable.
+// ---------------------------------------------------------------------------
+
+const displayTargets = new WeakMap();
+
+export function displayTargetFor(level, { width, height }) {
+  let byLevel = displayTargets.get(level);
+  if (!byLevel) displayTargets.set(level, (byLevel = new Map()));
+  const key = `${width}x${height}`;
+  let target = byLevel.get(key);
+  if (!target) byLevel.set(key, (target = { width, height, __displayOf: level }));
+  return target;
+}
+
+export function isDisplayTarget(image) {
+  return Boolean(image && image.__displayOf);
+}
+
+// Hysteresis (#248 part 2): a display image of `current` size keeps serving a
+// new `target` while it is at most 15 % larger or about 5 % smaller in both
+// dimensions. A larger one only costs conversion time; a smaller one softens
+// the settled view. Estimates to tune.
+export const DISPLAY_SIZE_MAX_LARGER = 1.15;
+export const DISPLAY_SIZE_MAX_SMALLER = 0.95;
+
+export function displaySizeServes(current, target) {
+  if (!current || !target) return false;
+  if (current.width === target.width && current.height === target.height) return true;
+  return current.width <= target.width * DISPLAY_SIZE_MAX_LARGER && current.height <= target.height * DISPLAY_SIZE_MAX_LARGER
+    && current.width >= target.width * DISPLAY_SIZE_MAX_SMALLER && current.height >= target.height * DISPLAY_SIZE_MAX_SMALLER;
 }
 
 // ---------------------------------------------------------------------------

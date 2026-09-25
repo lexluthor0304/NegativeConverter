@@ -315,8 +315,9 @@ function schedulerFixture({ repairs = false, large = false, gpu = null } = {}) {
 
 for (const earlyPost of [false, true]) {
   // A busy lane queues newest-wins; exactly one follow-up carries the newest
-  // token. It leaves from finally, or (5) before the finished frame is
-  // applied when the display preview already has the right size.
+  // token. It leaves (5) before the finished frame is applied. A resize while
+  // the frame converts no longer holds it back: nothing is resampled in the
+  // input path (#248 part 2), the settle hook moves the display target later.
   const f = schedulerFixture();
   f.request(0);
   await Promise.resolve();
@@ -328,16 +329,16 @@ for (const earlyPost of [false, true]) {
   }
   assert.equal(f.conversions.length, 1);
   assert.equal(f.context._coreReprocessPending.token, f.context.coreReprocessToken, 'the newest request wins the slot');
-  // A resize while the frame converts makes the next request resample first.
+  // A resize while the frame converts.
   if (!earlyPost) f.setTarget({ width: 300, height: 225 });
+  const previewBefore = f.state.conversionPreviewImageData;
   f.conversions[0].resolve(f.result());
   await settle();
   assert.equal(f.conversions.length, 2, 'exactly one follow-up post');
   assert.equal(f.conversions[1].exposure, 30);
   assert.equal(f.conversions[1].token, f.context.coreReprocessToken);
-  assert.deepEqual(f.log, earlyPost
-    ? ['post:0', 'post:30', 'apply', 'draw']
-    : ['post:0', 'apply', 'draw', 'post:30']);
+  assert.deepEqual(f.log, ['post:0', 'post:30', 'apply', 'draw']);
+  assert.equal(f.state.conversionPreviewImageData, previewBefore, 'the tick converts the existing display preview');
   assert.ok(f.conversions[1].busy && f.busyAtApply.every(Boolean), 'coreReprocessBusy() never reads false across the handoff');
   assert.equal(f.context.coreReprocessBusy(), true, 'the older finally leaves the newer flight in flight');
   assert.ok(f.context._coreReprocessPreviewInFlight);
@@ -669,7 +670,8 @@ for (const earlyPost of [false, true]) {
   Object.assign(f.state, { sprocketEdge: null, lensCorrection: null, filmEdge: null, learnedDefaults: null,
     localExposure: null, look: null, expiredAnalysis: null, frameMetadata: null, autoFrame: { lastDiagnostics: null } });
   Object.assign(f.context, { SNAPSHOT_SCALAR_KEYS: ['coreExposure'], SNAPSHOT_REF_KEYS: ['processedImageData'],
-    structuredClone, createSprocketEdgeSettings: () => null, sanitizeFrameMetadata: () => null });
+    structuredClone, createSprocketEdgeSettings: () => null, sanitizeFrameMetadata: () => null,
+    flushDisplayPreviewRebuild: () => {} });
   vm.runInContext(functionSource('captureSnapshot'), f.context);
   const snapshot = f.context.captureSnapshot('coreExposure');
   assert.equal(f.commits.length, 1, 'taking a snapshot commits the plane');

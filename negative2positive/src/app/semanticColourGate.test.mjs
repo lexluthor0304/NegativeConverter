@@ -12,7 +12,7 @@ function functionSource(name) {
   return source.slice(match.index, end + 6);
 }
 
-function run({ filmType = 'color', positiveMode = 'correct', expiredEnabled = false, rollPending = false } = {}) {
+function run({ filmType = 'color', positiveMode = 'correct', expiredEnabled = false, rollPending = false, wbSample = null } = {}) {
   const item = { id: 1 };
   const downsamples = [];
   const analyses = [];
@@ -20,8 +20,9 @@ function run({ filmType = 'color', positiveMode = 'correct', expiredEnabled = fa
   const state = {
     filmType, positiveMode, expiredEnabled, wbUserOverride: false, grayPointSampled: false,
     rollReference: { applyLock: false }, filmBase: { method: 'auto' },
-    processedImageData: { width: 8, height: 8 }
+    processedImageData: { width: 8, height: 8 }, conversionSourceImageData: { width: 80, height: 80 }, autoWbSample: null
   };
+  if (wbSample) state.autoWbSample = { source: wbSample === 'stale' ? {} : state.conversionSourceImageData, image: { width: 16, height: 16 } };
   const context = vm.createContext({
     state, console, manualEditRevision: 0, studioAutoFrameRunning: false, automaticRollImportRunning: false,
     automaticRollPendingItems: new Set(rollPending ? [item] : []),
@@ -31,9 +32,9 @@ function run({ filmType = 'color', positiveMode = 'correct', expiredEnabled = fa
     sanitizeSemanticMap: map => map,
     setTimeout: fn => timers.push(fn),
   });
-  vm.runInContext(functionSource('scheduleSemanticColour'), context);
+  vm.runInContext(['autoWbSampleFor', 'scheduleSemanticColour'].map(functionSource).join('\n'), context);
   context.scheduleSemanticColour(item, 1);
-  return { item, downsamples, analyses, timers };
+  return { item, downsamples, analyses, timers, state };
 }
 
 for (const [label, options] of [
@@ -56,4 +57,12 @@ for (const [label, options] of [
   assert.equal(result.timers.length, 1, `${label}: the model pass is scheduled`);
   assert.equal(result.item.semanticAttempted, true);
 }
-console.log('semantic colour gate: no worker for B&W, positive or roll-pending frames; colour and rescue keep it');
+// #248: the anchors are estimated on the viewport-independent auto-WB sample
+// of this source, and on the frame on screen only without one.
+{
+  const withSample = run({ wbSample: 'current' });
+  assert.equal(withSample.downsamples[0], withSample.state.autoWbSample.image, 'the auto-WB sample feeds the model');
+  const stale = run({ wbSample: 'stale' });
+  assert.equal(stale.downsamples[0], stale.state.processedImageData, 'a sample of another source is not used');
+}
+console.log('semantic colour gate: no worker for B&W, positive or roll-pending frames; colour and rescue keep it; the WB sample feeds it');

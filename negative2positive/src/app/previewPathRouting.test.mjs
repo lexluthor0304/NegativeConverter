@@ -11,6 +11,7 @@ import { poolRepairMask } from './repairedPreview.js';
 import { DISABLED_GPU_PREVIEW_SCHEDULER } from './gpuPreviewScheduler.js';
 import { step3FrameReference } from './displayCanvas.js';
 import { getSprocketFrameLayout } from './sprocketFrame.js';
+import { displayTargetFor, isDisplayTarget, displaySizeServes, displayLevelGeometry, noteDisplayFilter, displayLevelFactor } from './displayPreview.js';
 
 // #237 in the app itself: the real routing, restore, viewport, Step-3 and
 // export-barrier functions of main.js (extracted with vm, as
@@ -58,7 +59,10 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
   const shown = { ...target, name: 'shown preview' };
   const state = {
     conversionSourceImageData: conversionSource,
-    conversionPreviewImageData: separatePreview ? { ...target, name: 'conversion preview' } : conversionSource,
+    // #248: the conversion preview is a display target on the level (the
+    // source itself stands in for its level here).
+    conversionPreviewImageData: separatePreview ? displayTargetFor(conversionSource, target) : conversionSource,
+    displayLevelImageData: conversionSource,
     processedImageData: fullPlane, processedImageDataIsPreview: false, fullResolutionPending: false,
     previewSourceImageData: shown, histogramSourceImageData: { sampleOf: shown }, webglSourceImageData: shown,
     displayImageData: null, currentStep: 3, cropping: false, beforeAfterActive: false, zoomLevel: 1,
@@ -75,6 +79,15 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
   const client = (kind) => (request) => new Promise((resolve, reject) => {
     clients[kind].push({ request, resolve, reject });
     log.push(`convert:${kind}`);
+  });
+  const displayNegatives = [];
+  const previewClient = Object.assign(client('preview'), {
+    // #248: the preview worker's copy of a display target's negative.
+    displayNegative: (frame) => {
+      displayNegatives.push(frame);
+      return Promise.resolve({ ...frame.display.target, name: 'display negative' });
+    },
+    resample: (image, size) => { resampled.push(image); return Promise.resolve({ ...size, name: `worker-resampled ${image.name}` }); },
   });
   const resampled = [];
   const previewRepairs = [];
@@ -103,7 +116,7 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
     fullResolutionConversionAbort: null, conversionWorkerBroken: false, conversionWorkerTimeouts: 0,
     webglState: { gl: {}, sourceDirty: false, curveDirty: false },
     // The three conversion clients and the main-thread fallback.
-    convertPreviewFrameInWorker: client('preview'), convertFrameInWorker: client('shared'),
+    convertPreviewFrameInWorker: previewClient, convertFrameInWorker: client('shared'),
     convertFullResolutionFrameInWorker: client('exact'), convertFrameWithRouter: client('mainThread'),
     buildRouterSettings: () => ({}), getColorAnalysisSample: () => null,
     usesSilverCoreConversion: () => true,
@@ -115,6 +128,13 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
       resampled.push(image);
       return { ...size, name: `resampled ${image.name}` };
     },
+    // #248: display previews of full frames are rebuilt off the input path.
+    resizeDisplayPreviewInBands: async (image, size) => {
+      resampled.push(image);
+      return { ...size, name: `banded ${image.name}` };
+    },
+    displayTargetFor, isDisplayTarget, displaySizeServes, displayLevelGeometry, noteDisplayFilter, displayLevelFactor,
+    displayPreviewRebuild: null, FULL_UPDATE_SETTLE_MS: 400,
     buildHistogramSourceImageData: image => ({ sampleOf: image }),
     initWebGLRenderer: () => true, isWebGLActive: () => true,
     // #242: new planes fit the CSS box only (`canvas:` drawn size < reference);
@@ -188,13 +208,18 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
     'trimHistorySnapshot', 'rememberRepairMasks', 'clearRepairedPreview', 'repairedPreviewMatches',
     'repairedPreviewSourceFor', 'ensureRepairedPreview', 'buildRepairedPreview', 'applyExactPlaneKeepingView',
     'scheduleRepairedPreviewAfterInput', 'clearFullResolutionRenderState', 'ensureConversionPreviewForDisplay', 'noteTierImage',
+    'previewRequestImage', 'convertRequestOnMain', 'installDisplayFor', 'installDisplayPreview', 'cancelDisplayPreviewRebuild',
+    'rebuildDisplayPreview', 'flushDisplayPreviewRebuild', 'updateConversionTarget', 'conversionTargetFor',
   ].map(functionSource).join('\n'), context);
+  // A result has the size the request converts at: its display target, or
+  // the image it sent.
   const reply = (kind, index = -1) => {
     const entry = clients[kind].at(index);
-    const { imageData } = entry.request;
-    entry.resolve({ width: imageData.width, height: imageData.height, name: `${kind} result` });
+    const { imageData, display } = entry.request;
+    const size = display ? display.target : imageData;
+    entry.resolve({ width: size.width, height: size.height, name: `${kind} result` });
   };
-  return { context, state, clock, log, clients, reply, resampled, fullPlane, shown, conversionSource, previewRepairs,
+  return { context, state, clock, log, clients, reply, resampled, fullPlane, shown, conversionSource, previewRepairs, displayNegatives,
     setTarget: size => { displayTarget = size; }, nextFrame: () => { timeline.currentTime += 1000 / 60; } };
 }
 const count = (f) => Object.fromEntries(Object.entries(f.clients).map(([kind, list]) => [kind, list.length]));
@@ -470,17 +495,19 @@ function snapshotFixture(options) {
 
 {
   // Branch 1 in a CPU mode (#242): #canvas holds the display preview, not the
-  // full frame, so a new size is drawn, then settled with the exact colour
-  // model; above 16 MP that settle is the display-size one.
+  // full frame, so a new size is drawn once it is rebuilt (#248), then settled
+  // with the exact colour model; above 16 MP that settle is the display-size one.
   const f = fixture();
   f.context.isWebGLActive = () => false;
   f.context.renderSettledDisplay = () => f.log.push('paint:settled');
   f.log.length = 0;
   f.setTarget({ width: 2452, height: 1630 });
   f.context.refreshDisplayPreviewForViewport();
+  assert.deepEqual(f.log.filter(entry => entry.startsWith('paint')), [], 'nothing drawn before the rebuild lands');
+  await settle();
   assert.equal(f.state.previewSourceImageData.width, 2452);
   assert.deepEqual(f.log.filter(entry => entry.startsWith('paint')), ['paint:scheduled']);
-  f.clock.run(1200);
+  f.clock.run(f.context.FULL_UPDATE_SETTLE_MS);
   await settle();
   assert.deepEqual(f.log.filter(entry => entry.startsWith('paint')), ['paint:scheduled', 'paint:settled']);
   assert.deepEqual(count(f), { preview: 0, shared: 0, exact: 0, mainThread: 0 }, 'no conversion');
@@ -515,7 +542,9 @@ function snapshotFixture(options) {
   await Promise.resolve();
   await settle();
   assert.deepEqual(count(f), { preview: 1, shared: 0, exact: 0, mainThread: 0 });
-  assert.equal(f.clients.preview[0].request.imageData.width, 2452);
+  // #248: the level goes (the worker's cached source), with the new size.
+  assert.equal(f.clients.preview[0].request.imageData, f.conversionSource);
+  assert.equal(f.clients.preview[0].request.display.target.width, 2452);
   f.reply('preview');
   await settle();
   assert.equal(f.state.previewSourceImageData.width, 2452);
@@ -538,7 +567,7 @@ for (const armed of [false, true]) {
   f.context.renderSettledDisplay = () => f.log.push('paint:settled');
   if (armed) f.context.fullResolutionRenderTimer = 99;
   f.context.scheduleFullUpdate();
-  f.clock.run(1200);
+  f.clock.run(f.context.FULL_UPDATE_SETTLE_MS);
   await settle();
   assert.deepEqual(f.log.filter(entry => entry.startsWith('paint')), armed ? [] : ['paint:settled'],
     armed ? 'the armed render settles it' : 'settled at display size, off this thread');
@@ -548,7 +577,7 @@ for (const armed of [false, true]) {
 for (const large of [false, true]) {
   const f = fixture({ large });
   f.context.scheduleFullUpdate();
-  f.clock.run(1200);
+  f.clock.run(400);
   await settle();
   assert.ok(!f.log.some(entry => entry.startsWith('render:')), 'no fullResolutionRender after a Step-3 commit');
   assert.equal(f.clock.timers.size, 0);
@@ -667,7 +696,11 @@ for (const large of [false, true]) {
   await settle();
   assert.equal(f.previewRepairs.length, 1);
   const { image: base, mask: pooled, radius } = f.previewRepairs[0];
-  assert.equal(base, f.state.conversionPreviewImageData, 'the display preview source is filled');
+  // #248: main holds no display negative; the preview worker sends its copy.
+  assert.equal(f.displayNegatives.length, 1);
+  assert.equal(f.displayNegatives[0].imageData, f.conversionSource);
+  assert.deepEqual({ ...f.displayNegatives[0].display.target }, { width: 400, height: 300 });
+  assert.equal(base.name, 'display negative', 'the display preview source is filled');
   assert.equal(radius, 3);
   const expected = new Uint8Array(400 * 300);
   poolRepairMask(dustMask, 800, 600, expected, 400, 300);
@@ -706,15 +739,19 @@ for (const large of [false, true]) {
   assert.equal(f.clients.preview.at(-1).request.imageData, repaired);
   f.reply('preview');
   await settle();
-  // A display preview of another size is filled only once input pauses.
+  // A display preview of another size (the settle hook moved the target,
+  // #248) is filled only once input pauses.
   f.setTarget({ width: 500, height: 375 });
+  const target = f.context.conversionTargetFor(f.conversionSource, f.conversionSource, 'normal');
+  f.state.conversionPreviewImageData = target;
   const builds = f.previewRepairs.length;
   for (let tick = 0; tick < 3; tick++) {
     f.nextFrame();
     f.context.scheduleCoreReprocess({ full: false });
     await Promise.resolve();
     await settle();
-    assert.equal(f.clients.preview.at(-1).request.imageData, f.state.conversionPreviewImageData, 'the resized source is not filled yet');
+    const { request } = f.clients.preview.at(-1);
+    assert.ok(request.imageData === f.conversionSource && request.display.target.width === 500, 'the resized source is not filled yet');
     f.reply('preview');
     await settle();
   }
@@ -724,7 +761,8 @@ for (const large of [false, true]) {
   f.clock.run(0);
   await settle();
   assert.equal(f.previewRepairs.length, builds + 1, 'filled once input paused');
-  assert.equal(f.previewRepairs.at(-1).image, f.state.conversionPreviewImageData);
+  assert.deepEqual({ ...f.displayNegatives.at(-1).display.target }, { width: 500, height: 375 });
+  assert.equal(f.previewRepairs.at(-1).image.width, 500);
   f.previewRepairs.at(-1).resolve({ width: 500, height: 375, name: 'repaired at the new size' });
   await settle();
   f.nextFrame();
@@ -740,7 +778,8 @@ for (const large of [false, true]) {
   f.context.scheduleCoreReprocess({ full: false });
   await Promise.resolve();
   await settle();
-  assert.equal(f.clients.preview.at(-1).request.imageData, f.state.conversionPreviewImageData);
+  assert.equal(f.clients.preview.at(-1).request.imageData, f.conversionSource);
+  assert.equal(f.clients.preview.at(-1).request.display.target.width, 500);
   f.reply('preview');
   await settle();
   assert.equal(f.context.repairedPreviewShown, null);

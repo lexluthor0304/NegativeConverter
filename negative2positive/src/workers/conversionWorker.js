@@ -14,6 +14,7 @@ import { convertAdjustedFrame } from '../pipeline/adjustedFrame.js';
 import { createAdjustmentLutScratch } from '../app/adjustmentPipeline.js';
 import { fromImageData8 } from '../silvercore/util/image16.js';
 import { downsampleImageDataForMaxPixels } from '../app/imageDataOps.js';
+import { resampleDisplayLevel, filterDisplayImage, buildDisplayLevel, displayLevelFactor } from '../app/displayPreview.js';
 
 let cachedSource = null;
 let cachedAnalysis = null;
@@ -28,6 +29,37 @@ let cachedLocalExposure = null;
 // once per recipe rather than with every camera frame (#261).
 let cachedRecipe = null;
 const adjustmentLutScratch = createAdjustmentLutScratch();
+// Display negatives resampled from the cached level (#248 part 3), newest
+// first: at most one per preview tier. The adapter's preview slot keys its
+// planes by buffer identity, so a size keeps converting from the same plane.
+let displayNegatives = [];
+const MAX_DISPLAY_NEGATIVES = 2;
+// The auto-WB sample: the level reduced to this long side (#248 part 3).
+const WB_SAMPLE_LONG_SIDE = 1024;
+
+function planeOf(image) {
+  if (image.data instanceof Uint16Array) return image;
+  if (image.__image16 && image.__image16.data instanceof Uint16Array) return image.__image16;
+  return fromImageData8(image);
+}
+
+// The display negative of `display.target` resampled from `level` with the
+// source's geometry (bilinear up to 2x over the level, area average above).
+// A target the level already fits is the level itself.
+function displayNegativeFor(level, display) {
+  const { target, geometry } = display;
+  if (geometry.k === 1 && target.width >= level.width && target.height >= level.height) return level;
+  const index = displayNegatives.findIndex(entry => entry.level === level && entry.width === target.width && entry.height === target.height);
+  if (index >= 0) {
+    const [entry] = displayNegatives.splice(index, 1);
+    displayNegatives.unshift(entry);
+    return entry.image;
+  }
+  const image = resampleDisplayLevel(planeOf(level), geometry, target);
+  displayNegatives = [{ level, width: target.width, height: target.height, image },
+    ...displayNegatives.filter(entry => entry.level === level)].slice(0, MAX_DISPLAY_NEGATIVES);
+  return image;
+}
 
 function slotNameFor(options) {
   if (options && options.scratch) return 'scratch';
@@ -70,12 +102,66 @@ function resolveRequest(msg, settings = msg.settings) {
   const conversionOptions = { ...options };
   delete conversionOptions.retain16;
   delete conversionOptions.histogramSamples;
+  delete conversionOptions.displayTarget;
   if (msg.cacheInput) {
+    // Resampled negatives of another level are dropped with it.
+    if (cachedSource !== imageData) displayNegatives = displayNegatives.filter(entry => entry.level === imageData);
     cachedSource = imageData;
     if (!msg.reuseAnalysis) cachedAnalysis = options.analysisImageData || null;
     conversionOptions.analysisImageData = cachedAnalysis;
   }
-  return { imageData, settings, conversionOptions };
+  // `imageData` is the level; the request converts the display negative.
+  const level = imageData;
+  if (msg.display) imageData = displayNegativeFor(level, msg.display);
+  return { imageData, settings, conversionOptions, level };
+}
+
+// The auto-WB sample (#248 part 3): the level reduced to a long side of 1024
+// px and converted with the frame's settings in the scratch slot. It depends
+// on the source and the settings only, never on the viewport. `spec.fromSource`
+// (the full-resolution client) builds the level from the frame itself.
+async function convertWbSample(level, spec, settings, conversionOptions) {
+  const geometry = spec.geometry;
+  let base = level;
+  if (spec.fromSource) {
+    const k = displayLevelFactor(level.width, level.height);
+    base = k > 1 ? buildDisplayLevel(level, k) : level;
+    geometry.k = k;
+  }
+  const scale = Math.min(1, WB_SAMPLE_LONG_SIDE / Math.max(geometry.sourceWidth, geometry.sourceHeight));
+  const target = { width: Math.max(1, Math.floor(geometry.sourceWidth * scale)), height: Math.max(1, Math.floor(geometry.sourceHeight * scale)) };
+  const plane = planeOf(base);
+  const negative = geometry.k === 1 && target.width >= plane.width && target.height >= plane.height
+    ? plane : resampleDisplayLevel(plane, geometry, target);
+  const options = { ...conversionOptions, preview: false, scratch: true, forceFullProcess: true, includeAnalysisPreview: false };
+  delete options.workBuffer16;
+  delete options.ownedSource;
+  const sample = await convertFrameWithRouter({ imageData: negative, settings, options });
+  return { width: sample.width, height: sample.height, rgba: sample.data.buffer };
+}
+
+// The display preview of a full-resolution result (#248 part 4), built here with
+// the display filter so main only uploads it: both planes, and the histogram
+// sample main would take of it. Null when the result already fits.
+function displayPreviewPayload(result, target, histogramSamples) {
+  const preview = filterDisplayImage(result, target);
+  if (preview === result) return null;
+  const transfers = [preview.data.buffer];
+  const payload = { width: preview.width, height: preview.height, rgba: preview.data.buffer };
+  if (preview.__image16) {
+    payload.image16 = preview.__image16.data.buffer;
+    transfers.push(payload.image16);
+  }
+  const sample = downsampleImageDataForMaxPixels(preview, Number(histogramSamples) || DEFAULT_HISTOGRAM_SAMPLES);
+  if (sample !== preview) {
+    payload.histogram = { width: sample.width, height: sample.height, rgba: sample.data.buffer };
+    transfers.push(sample.data.buffer);
+    if (sample.__image16?.data instanceof Uint16Array) {
+      payload.histogram.image16 = sample.__image16.data.buffer;
+      transfers.push(payload.histogram.image16);
+    }
+  }
+  return { payload, transfers };
 }
 
 async function convert(msg) {
@@ -91,8 +177,9 @@ async function convert(msg) {
       ({ settings, adjust } = cachedRecipe);
     }
     const resolved = resolveRequest(msg, settings);
-    const { imageData, conversionOptions } = resolved;
+    const { imageData, conversionOptions, level } = resolved;
     settings = resolved.settings;
+    const displayTarget = options && options.displayTarget;
     // A newer frame supersedes the retained one. A retaining request writes
     // its output into that plane; any other request just lets it go.
     const reuse = retained;
@@ -140,6 +227,24 @@ async function convert(msg) {
       payload.image16 = plane.data.buffer;
       transfers.push(payload.image16);
     }
+    if (displayTarget && !msg.retain16) {
+      const built = displayPreviewPayload(result, displayTarget, options.histogramSamples);
+      if (built) {
+        payload.displayPreview = built.payload;
+        transfers.push(...built.transfers);
+      }
+    }
+    if (msg.wbSample) {
+      try {
+        const sample = await convertWbSample(msg.wbSample.fromSource ? imageData : level, { ...msg.wbSample, geometry: { ...msg.wbSample.geometry } },
+          settings, conversionOptions);
+        payload.wbSample = sample;
+        transfers.push(sample.rgba);
+      } catch (err) {
+        // The frame stands; auto WB then reads its display preview.
+        console.warn('Auto-WB sample failed:', err?.message || err);
+      }
+    }
     if (lent && !transfers.includes(image16)) {
       payload.source16 = image16;
       transfers.push(image16);
@@ -170,9 +275,12 @@ async function prepare(msg) {
     const prepared = prepareSilverCorePreview(imageData, settings, resolveConversionMode(settings),
       { ...conversionOptions, histogramSamples: options?.histogramSamples });
     const { histogram } = prepared;
+    // Main holds no display negative of a display target (#248): send the
+    // resampled one when it is the prepared plane itself.
+    const pristine = prepared.pristine || (msg.display ? new Uint16Array(planeOf(imageData).data) : null);
     const payload = {
       type: 'prepared', id, width: prepared.width, height: prepared.height,
-      pristine: prepared.pristine ? prepared.pristine.buffer : null,
+      pristine: pristine ? pristine.buffer : null,
       stops: prepared.stops ? prepared.stops.buffer : null,
       histogram: { width: histogram.width, height: histogram.height, image16: histogram.data.buffer,
         stops: histogram.stops ? histogram.stops.buffer : null },
@@ -191,6 +299,44 @@ async function analyze(msg) {
     const { imageData, settings, conversionOptions } = resolveRequest(msg);
     const analysis = await analyzeSilverCorePreview(imageData, settings, resolveConversionMode(settings), conversionOptions);
     self.postMessage({ type: 'analyzed', id, key: msg.key ?? null, ...analysis });
+  } catch (err) {
+    self.postMessage({ type: 'error', id, message: err?.message || String(err) });
+  }
+}
+
+// A copy of the display negative of a display target (#248 part 3), for main's
+// repaired preview: main keeps no display negative of its own.
+function displayNegative(msg) {
+  const { id } = msg;
+  try {
+    const { imageData } = resolveRequest(msg);
+    const plane = planeOf(imageData);
+    const copy = new Uint16Array(plane.data);
+    // The 8-bit plane as resizeDisplayPreview makes it from 16 bits.
+    const rgba = new Uint8ClampedArray(copy.length);
+    for (let i = 0; i < copy.length; i++) rgba[i] = Math.round(copy[i] / 257);
+    self.postMessage({ type: 'displayNegative', id, width: plane.width, height: plane.height, image16: copy.buffer, rgba: rgba.buffer },
+      [copy.buffer, rgba.buffer]);
+  } catch (err) {
+    self.postMessage({ type: 'error', id, message: err?.message || String(err) });
+  }
+}
+
+// The display preview of a full-resolution frame at a new display size
+// (#248 part 4). Nothing of it is kept: the cached source stays the level.
+function resample(msg) {
+  const { id, width, height, rgba, image16, target } = msg;
+  try {
+    const image = { width, height, data: rgba ? new Uint8ClampedArray(rgba) : null };
+    if (image16) image.__image16 = { width, height, data: new Uint16Array(image16) };
+    const preview = filterDisplayImage(image, target);
+    const payload = { type: 'resampled', id, width: preview.width, height: preview.height, rgba: preview.data.buffer };
+    const transfers = [preview.data.buffer];
+    if (preview.__image16 && image16) {
+      payload.image16 = preview.__image16.data.buffer;
+      transfers.push(payload.image16);
+    }
+    self.postMessage(payload, transfers);
   } catch (err) {
     self.postMessage({ type: 'error', id, message: err?.message || String(err) });
   }
@@ -218,6 +364,8 @@ async function handleMessage(msg) {
   if (msg.type === 'commit') return commit(msg);
   if (msg.type === 'prepare') return prepare(msg);
   if (msg.type === 'analyze') return analyze(msg);
+  if (msg.type === 'displayNegative') return displayNegative(msg);
+  if (msg.type === 'resample') return resample(msg);
   self.postMessage({ type: 'error', id: msg.id, message: `Unknown message type: ${msg.type}` });
 }
 

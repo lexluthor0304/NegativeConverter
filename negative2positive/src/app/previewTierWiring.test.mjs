@@ -2,7 +2,10 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { createCoreReprocessGates, previewDispatchAction, CORE_FULL_REPROCESS_DELAY_MS } from './coreReprocessDispatcher.js';
-import { displayPreviewSize, resizeDisplayPreview } from './displayPreview.js';
+import {
+  displayPreviewSize, resizeDisplayPreview, resizeDisplayPreviewInBands, displayTargetFor, isDisplayTarget, displaySizeServes,
+  noteDisplayFilter, displayLevelFactor, displayLevelGeometry, resampleDisplayLevel
+} from './displayPreview.js';
 import { previewTierMaxPixels, capBackingSize, PREVIEW_TIER_REDUCED_MAX_PIXELS } from './previewTier.js';
 import { routeCoreConversion, keepsFullPlaneOnDowngrade, viewportRefreshBranch } from './fullResolutionRouting.js';
 import { isLargeImage } from './imageMemoryBudget.js';
@@ -11,7 +14,9 @@ import { DISABLED_GPU_PREVIEW_SCHEDULER } from './gpuPreviewScheduler.js';
 // Drives the real preview-tier wiring of main.js (#263) together with the real
 // scheduler, reprocess and state-application functions, on synthetic images:
 // a reduced session must show <= 1 MP frames, and its end must settle on
-// exactly the frame the normal path produces.
+// exactly the frame the normal path produces. Since #248 the conversion
+// preview is a display target on the source's level, which the preview worker
+// resamples: the stand-in conversion does that with the real resample.
 globalThis.ImageData = class {
   constructor(dataOrWidth, width, height) {
     if (typeof dataOrWidth === 'number') {
@@ -46,9 +51,18 @@ function patternImage(width, height) {
   return image;
 }
 
+// The pixels a conversion of `image` reads: a display target is resampled from
+// its level, as the preview worker does.
+function pixelsOf(image) {
+  if (!isDisplayTarget(image)) return image;
+  const level = image.__displayOf;
+  return resampleDisplayLevel(level, displayLevelGeometry(level), image);
+}
+
 // A stand-in conversion: deterministic in its input pixels and the settings,
 // like the real one.
 function convertPixels(input, exposure) {
+  input = pixelsOf(input);
   const out = new ImageData(input.width, input.height);
   for (let i = 0; i < input.data.length; i++) out.data[i] = (input.data[i] + exposure * 3) & 255;
   return out;
@@ -58,6 +72,7 @@ const CONTAINER = { width: 1120, height: 640, valid: true };
 const DPR = 2;
 
 function fixture({ width = 3000, height = 2000, repairs = false, largePreviewFrames = true } = {}) {
+  const container = { ...CONTAINER };
   let nextId = 1;
   const timers = new Map();
   const frames = new Map();
@@ -74,7 +89,7 @@ function fixture({ width = 3000, height = 2000, repairs = false, largePreviewFra
   const nextFrame = () => { timeline.currentTime += 1000 / 60; };
   const base = patternImage(width, height);
   const state = {
-    conversionSourceImageData: base, conversionPreviewImageData: null,
+    conversionSourceImageData: base, conversionPreviewImageData: null, displayLevelImageData: base,
     processedImageData: null, processedImageDataIsPreview: largePreviewFrames,
     previewSourceImageData: null, histogramSourceImageData: null, webglSourceImageData: null,
     currentStep: 3, coreExposure: 0, repairStrokes: [], fullResolutionPending: false, zoomLevel: 1,
@@ -109,12 +124,14 @@ function fixture({ width = 3000, height = 2000, repairs = false, largePreviewFra
     _coreReprocessIdle: null, _resolveCoreReprocessIdle: null,
     coreSliderCommitRecord: null, fullResolutionRenderTimer: null, displayPreviewResizeTimer: null,
     // The tier state main.js declares next to canvasContainerSize.
-    previewTier: 'normal', previewTierKept: null, previewTierPrebuilt: null, previewTierPrebuildHandle: null,
+    previewTier: 'normal', previewTierKept: null,
     reducedDisplayImages: new WeakSet(), previewTierQuietEnd: false,
     renderEnvironment: { compositing: null }, previewTierController: controllerStub,
     webglState: { gl: {}, maxTextureSize: 8192, sourceDirty: false, curveDirty: false }, glCanvas,
-    getCanvasContainerSize: () => CONTAINER,
+    getCanvasContainerSize: () => container,
     displayPreviewSize, previewTierMaxPixels, capBackingSize,
+    displayTargetFor, isDisplayTarget, displaySizeServes, noteDisplayFilter, displayLevelFactor, displayLevelGeometry,
+    resizeDisplayPreviewInBands, displayPreviewRebuild: null,
     // Records the resamples that made a new image.
     resizeDisplayPreview: (image, size) => {
       const result = resizeDisplayPreview(image, size);
@@ -156,8 +173,9 @@ function fixture({ width = 3000, height = 2000, repairs = false, largePreviewFra
     'getDisplayPreviewSize', 'noteTierImage', 'buildPreviewSourceImageData', 'buildWebglSourceImageData',
     'histogramSourceFor', 'scheduleDisplayPreviewResize', 'ensureConversionPreviewForDisplay', 'displayIsReduced',
     'redrawForPreviewTier', 'leavePreviewTier', 'restoreNormalTierDisplay', 'onPreviewTierChange',
-    'onPreviewTierSessionEnd', 'resetPreviewTierForActivation', 'cancelPreviewTierPrebuild',
-    'schedulePreviewTierPrebuild', 'resizeWebGLCanvas',
+    'onPreviewTierSessionEnd', 'resetPreviewTierForActivation', 'resizeWebGLCanvas',
+    'installDisplayFor', 'installDisplayPreview', 'cancelDisplayPreviewRebuild', 'rebuildDisplayPreview',
+    'flushDisplayPreviewRebuild', 'updateConversionTarget', 'conversionTargetFor',
     'coreReprocessBusy', 'whenCoreReprocessIdle', 'noteCoreReprocessSettled', 'runCoreReprocess',
     'rerenderWithCoreControls', 'postPendingPreviewEarly', 'hasSeparateConversionPreview',
     'cancelScheduledFullResolutionRender', 'scheduleCoreReprocess', 'takeScheduledCoreReprocess',
@@ -170,10 +188,10 @@ function fixture({ width = 3000, height = 2000, repairs = false, largePreviewFra
     'endFullResolutionConversion', 'abortSupersededFullResolutionConversion',
   ].map(functionSource).join('\n'), context);
 
-  // processNegative's first conversion: the normal display preview and its frame.
+  // processNegative's first conversion: the normal display target and its frame.
   const normalTarget = displayPreviewSize(width, height, {
     viewportWidth: CONTAINER.width - 20, viewportHeight: CONTAINER.height - 20, dpr: DPR, zoom: 1, maxDimension: 8192 });
-  state.conversionPreviewImageData = resizeDisplayPreview(base, normalTarget);
+  state.conversionPreviewImageData = context.conversionTargetFor(base, base, 'normal');
   const first = convertPixels(state.conversionPreviewImageData, 0);
   if (largePreviewFrames && state.conversionPreviewImageData !== base) context.applyProcessedImageToState(first, { previewOnly: true });
   else context.applyProcessedImageToState(convertPixels(base, 0));
@@ -198,7 +216,7 @@ function fixture({ width = 3000, height = 2000, repairs = false, largePreviewFra
     }
   };
   return { context, state, base, conversions, resizes, log, glCanvas, controllerStub, idleCallbacks,
-    normalTarget, handlers, input, answerAll, runTimers, nextFrame, timers };
+    normalTarget, handlers, input, answerAll, runTimers, nextFrame, timers, container };
 }
 
 const bytesEqual = (a, b) => a.width === b.width && a.height === b.height && Buffer.compare(Buffer.from(a.data), Buffer.from(b.data)) === 0;
@@ -207,10 +225,11 @@ const pixels = image => image.width * image.height;
 // ---- Parity: outside a reduced session nothing is sized differently ----
 {
   const f = fixture();
-  // The code the tier replaced, kept here as the reference.
+  // The code the tier replaced, kept here as the reference. Zoom no longer
+  // resizes the base display image (#248 part 5).
   const referenceSize = (image, maxDimension = 8192) => displayPreviewSize(image.width, image.height, {
     viewportWidth: CONTAINER.width - 20 || 1280, viewportHeight: CONTAINER.height - 20 || 900,
-    dpr: DPR, zoom: f.state.zoomLevel, maxDimension });
+    dpr: DPR, zoom: 1, maxDimension });
   for (const zoom of [1, 1.5, 3, 8]) {
     f.state.zoomLevel = zoom;
     for (const [w, h] of [[3000, 2000], [9504, 6336], [1200, 800], [640, 4000]]) {
@@ -219,24 +238,18 @@ const pixels = image => image.width * image.height;
       assert.deepEqual(f.context.getDisplayPreviewSize(image, 2048), referenceSize(image, 2048));
     }
   }
-  f.state.zoomLevel = 1;
-  // The old inline check in rerenderWithCoreControls against its replacement.
-  const reference = (state) => {
-    const target = referenceSize(state.conversionSourceImageData);
-    if (state.conversionPreviewImageData?.width !== target.width || state.conversionPreviewImageData?.height !== target.height) {
-      state.conversionPreviewImageData = resizeDisplayPreview(state.conversionSourceImageData, target);
-    }
-  };
+  // At the normal tier a tick changes nothing (#248 part 2): the same display
+  // target at any zoom, and nothing resampled on the main thread. The pixels
+  // the worker converts for it equal HEAD's resample of the source (k = 1,
+  // a reduction of at most 2x).
   for (const zoom of [1, 2.5]) {
     f.state.zoomLevel = zoom;
-    const expected = { ...f.state };
-    reference(expected);
-    f.context.ensureConversionPreviewForDisplay();
-    assert.ok(bytesEqual(f.state.conversionPreviewImageData, expected.conversionPreviewImageData), `same conversion preview @${zoom}`);
     const kept = f.state.conversionPreviewImageData;
     f.context.ensureConversionPreviewForDisplay();
-    assert.equal(f.state.conversionPreviewImageData, kept, 'a preview of the right size is kept as the same object');
+    assert.equal(f.state.conversionPreviewImageData, kept, `the display target is kept @${zoom}`);
+    assert.ok(bytesEqual(pixelsOf(kept), resizeDisplayPreview(f.base, referenceSize(f.base))), `same conversion pixels @${zoom}`);
   }
+  assert.equal(f.resizes.length, 0, 'no main-thread resample in a tick');
   f.state.zoomLevel = 1;
   const frame = convertPixels(f.base, 5);
   assert.ok(bytesEqual(f.context.buildPreviewSourceImageData(frame), resizeDisplayPreview(frame, referenceSize(frame))));
@@ -293,10 +306,10 @@ for (const largePreviewFrames of [true, false]) {
   }
   assert.ok(tier.during.reducedShown, `${label}: a reduced frame is on screen during the drag`);
   assert.equal(tier.during.kept, tier.normalPreview, `${label}: the normal-tier preview is kept`);
-  if (largePreviewFrames) {
-    assert.equal(tier.during.resizes[0].from, tier.normalPreview, 'the reduced preview is resampled from the normal one, not the source');
-  }
-  assert.equal(tier.during.resizes.length, 1, `${label}: the reduced preview is built once per session`);
+  // #248: the reduced display target is resampled by the preview worker,
+  // never on the main thread.
+  assert.equal(tier.during.resizes.length, 0, `${label}: no main-thread resample for the reduced tier`);
+  if (largePreviewFrames) assert.equal(tier.during.snapshots[0].preview.__displayOf, t.base, 'from the level');
   assert.equal(t.conversions.length, 4, `${label}: the session end converts once more at the normal size, and the commit adds nothing`);
   assert.equal(t.conversions[3].input, tier.normalPreview, `${label}: from the kept normal-tier object`);
   assert.equal(t.conversions[3].exposure, 30);
@@ -381,52 +394,21 @@ for (const largePreviewFrames of [true, false]) {
 {
   const f = fixture();
   f.context.onPreviewTierChange('reduced');
-  f.state.zoomLevel = 2;
+  // A panel closes during the session: the viewport grows.
+  f.container.width = 1500;
+  f.container.height = 900;
   f.context.scheduleDisplayPreviewResize();
   const before = f.conversions.length;
   f.runTimers();
   await f.answerAll();
   assert.equal(f.conversions.length, before, 'no display resize inside a reduced session');
   f.context.onPreviewTierChange('normal');
-  // The kept preview no longer fits the new zoom: the settle builds one.
+  // The kept target no longer fits the new viewport: the settle moves it.
   f.runTimers();
   await f.answerAll();
-  const expected = displayPreviewSize(3000, 2000, { viewportWidth: 1100, viewportHeight: 620, dpr: DPR, zoom: 2, maxDimension: 8192 });
+  const expected = displayPreviewSize(3000, 2000, { viewportWidth: 1480, viewportHeight: 880, dpr: DPR, zoom: 1, maxDimension: 8192 });
   assert.equal(f.state.conversionPreviewImageData.width, expected.width);
   assert.equal(f.context.displayIsReduced(), false);
-}
-
-// ---- Known-slow hosts pre-build the reduced preview when idle ----
-{
-  const f = fixture();
-  const normalPreview = f.state.conversionPreviewImageData;
-  f.controllerStub.nextStartTier = 'reduced';
-  f.context.schedulePreviewTierPrebuild();
-  f.context.schedulePreviewTierPrebuild();
-  assert.equal(f.idleCallbacks.length, 1, 'one pending pre-build');
-  f.idleCallbacks[0]();
-  const prebuilt = f.context.previewTierPrebuilt;
-  assert.equal(prebuilt?.base, normalPreview);
-  assert.ok(pixels(prebuilt.image) <= PREVIEW_TIER_REDUCED_MAX_PIXELS);
-  const resizes = f.resizes.length;
-  f.context.onPreviewTierChange('reduced');
-  await f.input(5);
-  assert.equal(f.resizes.length, resizes, 'the first reduced tick resamples nothing');
-  assert.equal(f.conversions.at(-1).input, prebuilt.image);
-  assert.equal(f.context.previewTierPrebuilt, null);
-  // Hosts that start normal build nothing ahead.
-  const g = fixture();
-  g.context.schedulePreviewTierPrebuild();
-  assert.equal(g.idleCallbacks.length, 0);
-  // A frame landing outside a session schedules it (the settle after load).
-  const h = fixture();
-  h.controllerStub.nextStartTier = 'reduced';
-  h.context.applyPreviewProcessedImageToState(convertPixels(h.state.conversionPreviewImageData, 1));
-  assert.equal(h.idleCallbacks.length, 1, 'a settled frame schedules the idle pre-build');
-  h.controllerStub.active = true;
-  h.context.previewTierPrebuildHandle = null;
-  h.context.applyPreviewProcessedImageToState(convertPixels(h.state.conversionPreviewImageData, 2));
-  assert.equal(h.idleCallbacks.length, 1, 'frames inside a session do not');
 }
 
 // ---- Session end diagnostics ----

@@ -82,7 +82,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     import { routeCoreConversion, keepsFullPlaneOnDowngrade, fullResolutionIsStale, restoredFrameFlags, viewportRefreshBranch, repairsNeedSettling } from './fullResolutionRouting.js';
     import { poolRepairMask } from './repairedPreview.js';
     import { planBatchParallelism, planPng16BandWorkers, runBatchPipeline, planGeometryBandsInFlight } from './batchExportScheduler.js';
-    import { displayPreviewSize, resizeDisplayPreview, updateDisplayPreviewRect } from './displayPreview.js';
+    import {
+      displayPreviewSize, resizeDisplayPreview, resizeDisplayPreviewInBands, updateDisplayPreviewRect, noteDisplayFilter,
+      displayLevelFactor, displayLevelGeometry, buildDisplayLevelInBands, resampleDisplayLevel, displayTargetFor, isDisplayTarget,
+      displaySizeServes
+    } from './displayPreview.js';
     import { settledDisplayRoute, step3FrameReference, upscaleReference, photoRectPercent } from './displayCanvas.js';
     import { createCoreReprocessGates, previewDispatchAction, CORE_FULL_REPROCESS_DELAY_MS } from './coreReprocessDispatcher.js';
     import { createPreviewTierController, previewTierMaxPixels, capBackingSize, parsePreviewTierOverride } from './previewTier.js';
@@ -214,7 +218,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // preview reprocessing, so they can start soon after the user pauses; a
     // render made stale by further input is discarded and rescheduled.
     const FULL_RESOLUTION_IDLE_DELAY_MS = 2500;
-    const FULL_RESOLUTION_INTERACTIVE_DELAY_MS = 600; // after a slider commit / stale retry
+    // After a slider commit / stale retry. With scheduleFullUpdate's settle
+    // (FULL_UPDATE_SETTLE_MS) about 700 ms from release to a <=16 MP settle
+    // render (#248: 1800 ms before its display preview came from the worker).
+    // Not lower: renders at or below 16 MP cannot be aborted, so stop-and-go
+    // edits would queue wasted conversions.
+    const FULL_RESOLUTION_INTERACTIVE_DELAY_MS = 300;
+    const FULL_UPDATE_SETTLE_MS = 400;
 
     function getImageDataPixelCount(imageData) {
       return imageData ? imageData.width * imageData.height : 0;
@@ -2319,7 +2329,14 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       processedImageData: null,     // After negative conversion
       displayImageData: null,       // After all adjustments
       conversionSourceImageData: null, // Lens-corrected source used for core conversion rerender
-      conversionPreviewImageData: null, // Downscaled conversionSourceImageData for preview-resolution SilverCore
+      conversionPreviewImageData: null, // Display target of preview-resolution SilverCore: its size and level (#248), or the source itself
+      // The retained display level of conversionSourceImageData (#248): a k x k
+      // box average never smaller than the 4 MP cap (the source itself when k is
+      // 1). The preview worker keeps it and resamples each display target from it.
+      displayLevelImageData: null,
+      // The auto-WB sample of the conversion source (#248), a converted positive
+      // independent of the viewport: { source, image }.
+      autoWbSample: null,
       previewSourceImageData: null, // Downscaled source for preview renders
       histogramSourceImageData: null, // Further downscaled source for histogram updates
       webglSourceImageData: null,   // Downscaled source for WebGL preview renders
@@ -2872,7 +2889,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // Category B: heavy image data (stored by reference)
     const SNAPSHOT_REF_KEYS = [
       'originalImageData', 'croppedImageData', 'processedImageData',
-      'conversionSourceImageData', 'conversionPreviewImageData', 'previewSourceImageData',
+      'conversionSourceImageData', 'conversionPreviewImageData', 'displayLevelImageData', 'autoWbSample', 'previewSourceImageData',
       'histogramSourceImageData', 'webglSourceImageData',
     ];
 
@@ -2880,6 +2897,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // The snapshot keeps the frame on screen; its 16-bit plane attaches to
       // that same object when the commit lands.
       requestCorePreviewCommit();
+      // ...and the display preview of that frame, not of the one before it.
+      flushDisplayPreviewRebuild();
       const settings = {};
       for (const key of SNAPSHOT_SCALAR_KEYS) {
         settings[key] = state[key];
@@ -3356,10 +3375,6 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // The normal-tier conversion preview a reduced one was built from, put
     // back when the session ends: { source, preview }.
     let previewTierKept = null;
-    // A reduced conversion preview built ahead of the next session on hosts
-    // known to be slow: { base, image }.
-    let previewTierPrebuilt = null;
-    let previewTierPrebuildHandle = null;
     // Every display image made at the reduced tier. While one is on screen the
     // view is not settled, and the session end converts once more at the
     // normal size.
@@ -4571,16 +4586,44 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return canvasContainerSize;
     }
 
+    // The base display image is fit x DPR, capped per tier (#248 part 5): zoom
+    // never resizes it. Native pixels at zoom come from the detail layer.
     function getDisplayPreviewSize(imageData, maxDimension = webglState.maxTextureSize || 8192, tier = previewTier) {
       const container = getCanvasContainerSize();
       return displayPreviewSize(imageData.width, imageData.height, {
         viewportWidth: container.width - 20 || 1280,
         viewportHeight: container.height - 20 || 900,
         dpr: window.devicePixelRatio || 1,
-        zoom: state.zoomLevel,
+        zoom: 1,
         maxPixels: previewTierMaxPixels(tier),
         maxDimension
       });
+    }
+
+    // The conversion preview for `tier` (#248 part 3): the source itself when it
+    // fits the display, else the display target of that size on the level. One
+    // object per size, so an unchanged size keeps its identity.
+    function conversionTargetFor(source, level, tier = previewTier) {
+      const target = getDisplayPreviewSize(source, undefined, tier);
+      if (target.width >= source.width && target.height >= source.height) return source;
+      return displayTargetFor(level || source, target);
+    }
+
+    // Points the conversion preview at the size the viewport needs now, unless
+    // the current one still serves it (hysteresis). It converts nothing and
+    // resamples nothing on the main thread: the preview worker resamples the
+    // level when a conversion asks for the new size. Returns whether it changed.
+    function updateConversionTarget() {
+      const source = state.conversionSourceImageData;
+      const level = state.displayLevelImageData;
+      if (!source || !level) return false;
+      const current = state.conversionPreviewImageData;
+      const next = conversionTargetFor(source, level, 'normal');
+      if (current === next) return false;
+      if (current && current !== source && next !== source && !reducedDisplayImages.has(current)
+        && current.__displayOf === level && displaySizeServes(current, next)) return false;
+      state.conversionPreviewImageData = next;
+      return true;
     }
 
     // Marks a smaller copy made at the reduced tier. An image returned as it
@@ -4590,8 +4633,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return result;
     }
 
+    // A frame within the hysteresis band of the display size (#248), such as a
+    // preview tick converted just before a resize settled, is shown as it is.
     function buildPreviewSourceImageData(imageData) {
-      return noteTierImage(resizeDisplayPreview(imageData, getDisplayPreviewSize(imageData)), imageData);
+      const target = getDisplayPreviewSize(imageData);
+      if (displaySizeServes(imageData, target)) return imageData;
+      return noteTierImage(resizeDisplayPreview(imageData, target), imageData);
     }
 
     function buildHistogramSourceImageData(imageData) {
@@ -4610,6 +4657,68 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return noteTierImage(resizeDisplayPreview(imageData, getDisplayPreviewSize(imageData, maxDim)), imageData);
     }
 
+    // The display fields of `processed` from a display image made of it.
+    function installDisplayPreview(processed, preview, histogram = null) {
+      state.previewSourceImageData = preview;
+      state.histogramSourceImageData = histogram || histogramSourceFor(processed);
+      state.webglSourceImageData = preview;
+      if (webglState.gl) webglState.sourceDirty = true;
+    }
+
+    // A display preview being rebuilt off the input path (#248 part 4): the
+    // old one stays on screen until it lands. { processed, target, revision }.
+    let displayPreviewRebuild = null;
+
+    function cancelDisplayPreviewRebuild() {
+      displayPreviewRebuild = null;
+    }
+
+    // Rebuilds the display preview of the full-resolution `processed` at
+    // `target`. At most 16 MP the preview worker resamples it with the display
+    // filter and keeps nothing; above, the exact kernel runs here in row bands
+    // of about 12 ms. A brush patch of `processed` meanwhile starts it over.
+    function rebuildDisplayPreview(processed, target) {
+      const pending = displayPreviewRebuild;
+      if (pending && pending.processed === processed && pending.target.width === target.width
+        && pending.target.height === target.height && pending.revision === state.dustRemoval.revision) return;
+      const job = { processed, target: { ...target }, revision: state.dustRemoval.revision };
+      displayPreviewRebuild = job;
+      const isCurrent = () => displayPreviewRebuild === job && state.processedImageData === processed;
+      const banded = () => resizeDisplayPreviewInBands(processed, target, { isCurrent });
+      const build = isLargeImage(processed) ? banded()
+        : convertPreviewFrameInWorker.resample(processed, target).then((preview) => {
+          noteDisplayFilter(preview, { kind: 'area', k: displayLevelFactor(processed.width, processed.height) });
+          return preview;
+        }, () => (isCurrent() ? banded() : null));
+      build.then((preview) => {
+        if (!preview || !isCurrent()) return;
+        displayPreviewRebuild = null;
+        if (job.revision !== state.dustRemoval.revision) {
+          // Patched in place while it was built: the patched rows may be missing.
+          rebuildDisplayPreview(processed, getDisplayPreviewSize(processed, undefined, 'normal'));
+          return;
+        }
+        installDisplayPreview(processed, preview);
+        // The display preview changed: draw it, and in a CPU mode settle it
+        // again with the exact colour model (#242).
+        schedulePreviewUpdate();
+        if (!isWebGLActive()) scheduleFullUpdate();
+      }).catch((err) => {
+        if (displayPreviewRebuild === job) displayPreviewRebuild = null;
+        console.warn('Display preview rebuild failed:', err?.message || err);
+      });
+    }
+
+    // Finishes a pending rebuild at once: history and photo sessions capture the
+    // display preview with its frame, so it must be the frame's own.
+    function flushDisplayPreviewRebuild() {
+      const job = displayPreviewRebuild;
+      if (!job) return;
+      displayPreviewRebuild = null;
+      if (state.processedImageData !== job.processed) return;
+      installDisplayPreview(job.processed, resizeDisplayPreview(job.processed, getDisplayPreviewSize(job.processed, undefined, 'normal')));
+    }
+
     let displayPreviewResizeTimer = null;
     // The settle hook of every viewport change. It records the conversion
     // source it was asked for and does nothing once that has been replaced: a
@@ -4625,50 +4734,36 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       }, 100);
     }
 
-    // A zoom, window resize or DPR change needs display planes of another
-    // size, never new conversion inputs (#237). It supersedes nothing: no
-    // token bump, so detection, brush repairs and an export's AI step carry on,
-    // and the mask and inpainted pixels stay as they are.
+    // A window resize or DPR change needs display planes of another size, never
+    // new conversion inputs (#237). It supersedes nothing: no token bump, so
+    // detection, brush repairs and an export's AI step carry on, and the mask
+    // and inpainted pixels stay as they are. Nothing is resampled on the main
+    // thread in the input path (#248): the display target changes at once (it
+    // holds no pixels), and a display preview within the hysteresis band is kept.
     function refreshDisplayPreviewForViewport() {
       const source = state.conversionSourceImageData;
       if (!source || state.currentStep < 3 || state.cropping || state.beforeAfterActive) return;
       // A reduced preview-tier session (#263) sizes its own preview; its end
       // calls this again.
       if (previewTier === 'reduced') return;
+      const targetChanged = updateConversionTarget();
       const processed = state.processedImageData;
       const branch = viewportRefreshBranch({
         processedImageData: processed, processedImageDataIsPreview: state.processedImageDataIsPreview,
         fullResolutionPending: state.fullResolutionPending, repairs: hasFrameRepairs()
       });
       if (branch === 'resample') {
-        // The full-resolution pixels are current: resample the display fields
-        // from them. The conversion preview resizes itself when a conversion
-        // next needs it. While detection repairs an exact frame behind the
-        // repaired preview, its result is built at the current size anyway.
+        // The full-resolution pixels are current: rebuild the display fields
+        // from them, off the input path. While detection repairs an exact frame
+        // behind the repaired preview, its result is built at the current size
+        // anyway.
         if (repairedPreviewShown && repairedPreviewShown === state.previewSourceImageData
           && (state.dustRemoval.processing || dustDetectionTimer)) return;
         const target = getDisplayPreviewSize(processed);
-        const shown = state.previewSourceImageData;
-        if (shown?.width === target.width && shown?.height === target.height) return;
-        state.previewSourceImageData = resizeDisplayPreview(processed, target);
-        state.histogramSourceImageData = buildHistogramSourceImageData(state.previewSourceImageData);
-        state.webglSourceImageData = state.previewSourceImageData;
-        if (webglState.gl) webglState.sourceDirty = true;
+        if (!displaySizeServes(state.previewSourceImageData, target)) rebuildDisplayPreview(processed, target);
         // The GPU preview (#239) draws SilverCore drags from the conversion
-        // preview: bring it to the new size too, so a drag is not drawn at the
-        // old one, and prepare it again at idle. It converts nothing.
-        if (GPU_PREVIEW_MODE !== 'off' && gpuApplyUsable()) {
-          const previewTarget = getDisplayPreviewSize(source);
-          const preview = state.conversionPreviewImageData;
-          if (preview && (preview.width !== previewTarget.width || preview.height !== previewTarget.height)) {
-            state.conversionPreviewImageData = resizeDisplayPreview(source, previewTarget);
-            scheduleGpuPreviewWarmup();
-          }
-        }
-        // The display preview changed size: draw it, and in a CPU mode settle
-        // it again with the exact colour model (#242).
-        schedulePreviewUpdate();
-        if (!isWebGLActive()) scheduleFullUpdate();
+        // preview: it prepares the new size at idle. It converts nothing.
+        if (targetChanged && GPU_PREVIEW_MODE !== 'off' && gpuApplyUsable()) scheduleGpuPreviewWarmup();
         return;
       }
       if (branch === 'repair-pass') {
@@ -4678,43 +4773,27 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         return;
       }
       // A preview-only frame: convert the display preview again at the new size.
-      const target = getDisplayPreviewSize(source);
-      const previous = state.conversionPreviewImageData;
-      if (previous?.width === target.width && previous?.height === target.height) return;
-      state.conversionPreviewImageData = resizeDisplayPreview(source, target);
-      scheduleCoreReprocess({ full: false, displayOnly: true });
+      if (targetChanged) scheduleCoreReprocess({ full: false, displayOnly: true });
     }
 
     // ===========================================
     // Interactive preview tier (#263)
     // ===========================================
 
-    // Sizes the SilverCore conversion preview for the current tier before a
-    // preview tick. The reduced one is resampled from the normal-tier preview
-    // (small and cache-friendly) rather than from the full-resolution source,
-    // and the normal one is kept for the session end.
+    // Points the conversion preview at the reduced tier's display target before
+    // a preview tick, and keeps the normal-tier one for the session end. Nothing
+    // is resampled on the main thread (#248): the preview worker resamples the
+    // level at the new size. At the normal tier nothing happens here; a viewport
+    // change reaches the size through the settle hook, after the interaction.
     function ensureConversionPreviewForDisplay() {
       const source = state.conversionSourceImageData;
-      const target = getDisplayPreviewSize(source);
+      const level = state.displayLevelImageData;
+      if (!source || !level || previewTier !== 'reduced') return;
       const current = state.conversionPreviewImageData;
-      if (current?.width === target.width && current?.height === target.height) return;
-      if (previewTier !== 'reduced') {
-        state.conversionPreviewImageData = resizeDisplayPreview(source, target);
-        return;
-      }
       if (current && !reducedDisplayImages.has(current)) previewTierKept = { source, preview: current };
       const base = previewTierKept?.source === source ? previewTierKept.preview : null;
-      const prebuilt = previewTierPrebuilt;
-      previewTierPrebuilt = null;
-      let reduced;
-      if (prebuilt && base && prebuilt.base === base
-        && prebuilt.image.width === target.width && prebuilt.image.height === target.height) {
-        reduced = prebuilt.image;
-      } else if (base && base.width >= target.width && base.height >= target.height) {
-        reduced = resizeDisplayPreview(base, target);
-      } else {
-        reduced = resizeDisplayPreview(source, target);
-      }
+      const reduced = conversionTargetFor(source, level, 'reduced');
+      if (reduced === current) return;
       if (reduced !== source && reduced !== base) reducedDisplayImages.add(reduced);
       state.conversionPreviewImageData = reduced;
     }
@@ -4737,18 +4816,15 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const source = state.conversionSourceImageData;
       const kept = previewTierKept;
       previewTierKept = null;
-      if (source && kept?.source === source && reducedDisplayImages.has(state.conversionPreviewImageData)) {
-        const target = getDisplayPreviewSize(source);
-        if (kept.preview.width === target.width && kept.preview.height === target.height) {
-          state.conversionPreviewImageData = kept.preview;
-        }
+      if (source && reducedDisplayImages.has(state.conversionPreviewImageData)) {
+        state.conversionPreviewImageData = kept?.source === source ? kept.preview
+          : conversionTargetFor(source, state.displayLevelImageData, 'normal');
       }
       if (source && state.currentStep >= 3) {
         scheduleDisplayPreviewResize();
         if (displayIsReduced()) restoreNormalTierDisplay();
       }
       redrawForPreviewTier();
-      schedulePreviewTierPrebuild();
     }
 
     function restoreNormalTierDisplay() {
@@ -4769,12 +4845,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         return;
       }
       // Only resampled copies of a current full-resolution frame (one that
-      // landed during the session, such as an exact repair pass): rebuild
-      // them instead of converting again.
-      state.previewSourceImageData = buildPreviewSourceImageData(processed);
-      state.histogramSourceImageData = histogramSourceFor(processed);
-      state.webglSourceImageData = state.previewSourceImageData;
-      if (webglState.gl) webglState.sourceDirty = true;
+      // landed during the session without its own display preview): rebuild
+      // them off the input path instead of converting again.
+      rebuildDisplayPreview(processed, getDisplayPreviewSize(processed));
     }
 
     function onPreviewTierChange(tier) {
@@ -4811,8 +4884,6 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // A photo switch closes the session without converting the old photo again.
     function resetPreviewTierForActivation() {
       previewTierKept = null;
-      previewTierPrebuilt = null;
-      cancelPreviewTierPrebuild();
       if (!previewTierController.active) return;
       previewTierQuietEnd = true;
       try {
@@ -4820,35 +4891,6 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       } finally {
         previewTierQuietEnd = false;
       }
-    }
-
-    function cancelPreviewTierPrebuild() {
-      if (!previewTierPrebuildHandle) return;
-      if (previewTierPrebuildHandle.idle && typeof cancelIdleCallback === 'function') cancelIdleCallback(previewTierPrebuildHandle.id);
-      else clearTimeout(previewTierPrebuildHandle.id);
-      previewTierPrebuildHandle = null;
-    }
-
-    // On hosts where sessions start reduced, the first reduced tick would
-    // resample the preview inside the input event (about 12 MB of planes).
-    // Do it when idle after each settle instead.
-    function schedulePreviewTierPrebuild() {
-      if (previewTierPrebuildHandle || previewTierController.nextStart().tier !== 'reduced') return;
-      const run = () => {
-        previewTierPrebuildHandle = null;
-        if (previewTier !== 'normal' || previewTierController.active || state.currentStep < 3 || state.cropping) return;
-        const source = state.conversionSourceImageData;
-        const base = state.conversionPreviewImageData;
-        if (!source || !base || reducedDisplayImages.has(base) || previewTierPrebuilt?.base === base) return;
-        const target = getDisplayPreviewSize(source, undefined, 'reduced');
-        if (base.width <= target.width && base.height <= target.height) return;
-        const image = resizeDisplayPreview(base, target);
-        reducedDisplayImages.add(image);
-        previewTierPrebuilt = { base, image };
-      };
-      previewTierPrebuildHandle = typeof requestIdleCallback === 'function'
-        ? { idle: true, id: requestIdleCallback(run, { timeout: 2000 }) }
-        : { idle: false, id: setTimeout(run, 300) };
     }
 
     // Slider sessions: every range drag in the controls panel, including
@@ -4912,7 +4954,6 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         renderEnvironment.reported = true;
         logWebviewDiagnostics(renderEnvironmentLine());
       }
-      schedulePreviewTierPrebuild();
       updateDebugWidget();
     }
 
@@ -5914,7 +5955,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           return;
         }
         updateFull();
-      }, 1200);
+      }, FULL_UPDATE_SETTLE_MS);
     }
 
     function cancelFullUpdate() {
@@ -6119,9 +6160,14 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       };
     }
 
+    // `deferDisplay`: a whole-frame result of the same size as the frame on
+    // screen (a repair pass, a cleared mask). Its display preview is rebuilt in
+    // row bands or in the preview worker while the current one stays up
+    // (#248 part 4), instead of a whole-frame resample in this task.
     function applyProcessedImageToState(processed, options = {}) {
       if (!processed) return;
       const previewOnly = Boolean(options.previewOnly);
+      const previous = state.processedImageData;
       releaseCorePreviewRetained(processed);
       state.processedImageData = processed;
       state.processedImageDataIsPreview = previewOnly;
@@ -6129,18 +6175,43 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         state.fullResolutionPending = false;
       }
       state.displayImageData = null;
-      state.previewSourceImageData = buildPreviewSourceImageData(processed);
-      state.histogramSourceImageData = histogramSourceFor(processed);
-      state.webglSourceImageData = state.previewSourceImageData;
+      installDisplayFor(processed, previous, options);
       if (initWebGLRenderer()) {
         webglState.sourceDirty = true;
         webglState.curveDirty = true;
       }
-      // A settled frame: slow hosts get the next session's reduced preview ready.
-      if (!previewTierController.active) schedulePreviewTierPrebuild();
       // 非同期変換は結果を保存してよいが、切り抜き草稿の画布を変更しない。
       // The CSS box follows at once; the 2D backing, when a frame is drawn.
       fitStep3CanvasBox();
+    }
+
+    // The display fields of a frame just applied. A full-resolution render
+    // brings its display preview along (#248 part 4): it only needs uploading.
+    // It was made for the display size at request time; one the viewport has
+    // left since is shown until the settle hook replaces it. Display-size frames
+    // are resized here, which for them is at most a small copy.
+    function installDisplayFor(processed, previous, { deferDisplay = false } = {}) {
+      cancelDisplayPreviewRebuild();
+      const prebuilt = processed.__displayPreview || null;
+      if (prebuilt) {
+        delete processed.__displayPreview;
+        const histogram = prebuilt.__histogramSample || null;
+        delete prebuilt.__histogramSample;
+        noteDisplayFilter(prebuilt, { kind: 'area', k: displayLevelFactor(processed.width, processed.height) });
+        installDisplayPreview(processed, prebuilt, histogram);
+        const target = getDisplayPreviewSize(processed, undefined, 'normal');
+        if (prebuilt.width !== target.width || prebuilt.height !== target.height) scheduleDisplayPreviewResize();
+        return;
+      }
+      const shown = state.previewSourceImageData;
+      const target = getDisplayPreviewSize(processed);
+      if (deferDisplay && shown && previous
+        && previous.width === processed.width && previous.height === processed.height
+        && (target.width < processed.width || target.height < processed.height) && displaySizeServes(shown, target)) {
+        rebuildDisplayPreview(processed, target);
+        return;
+      }
+      installDisplayPreview(processed, buildPreviewSourceImageData(processed));
     }
 
     // Undo, Redo and a photo-session restore put back the display planes the
@@ -6180,10 +6251,14 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (state.grayPointSampled || state.wbUserOverride || state.wbSemanticApplied) return;
       if (state.autoFrame.lastDiagnostics?.analysisNeedsReview) return;
       const reference = processed?.__analysisPreview;
-      const source = reference || state.previewSourceImageData || state.processedImageData;
+      // The viewport-independent sample of this source (#248): the display
+      // preview it replaces followed the window size, DPR and zoom.
+      const wbSample = autoWbSampleFor(state.conversionSourceImageData);
+      const positive = wbSample || state.previewSourceImageData || state.processedImageData;
+      const source = reference || positive;
       if (!source) return;
       const roi = resolveAnalysisRegion({ ...state, autoFrameMeta: state.autoFrame.lastDiagnostics }, state.loadedBaseImageData || state.originalImageData);
-      const estimate = state.semanticMap ? estimateAutoWhiteBalance(processed, { anchors: state.semanticMap })
+      const estimate = state.semanticMap ? estimateAutoWhiteBalance(wbSample || processed, { anchors: state.semanticMap })
         : estimateAutoWhiteBalance(source, reference ? {} : analysisRegionSample(source, roi));
       if (estimate.confidence === 'low') {
         // Only clear a previous auto estimate; user-owned gains stay put.
@@ -6207,14 +6282,20 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       markCurrentFileDirty();
     }
 
+    // The auto-WB sample of `source` (#248 part 3), or null.
+    function autoWbSampleFor(source) {
+      const sample = state.autoWbSample;
+      return sample && source && sample.source === source ? sample.image : null;
+    }
+
     // Full-resolution conversions run in a worker so a 90+ MP scan does not
     // freeze the UI for seconds. Interactive previews have a separate worker.
     let conversionWorkerBroken = false;
     let conversionWorkerTimeouts = 0;
-    async function convertFrameOffMainThread({ imageData, settings, options, signal = null, client = null }) {
+    async function convertFrameOffMainThread({ imageData, settings, options, signal = null, client = null, wbSample = null }) {
       if (!conversionWorkerBroken && usesSilverCoreConversion(state)) {
         try {
-          return await (client || convertFrameInWorker)({ imageData, settings, options, signal });
+          return await (client || convertFrameInWorker)({ imageData, settings, options, signal, wbSample });
         } catch (err) {
           // A superseded request was abandoned on purpose: the worker is fine,
           // and nobody wants its pixels on the main thread either.
@@ -6241,35 +6322,70 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           }
         }
       }
-      return convertFrameWithRouter({ imageData, settings, options });
+      return convertRequestOnMain({ imageData, settings, options });
     }
 
-    async function convertFromCurrentSource(settings = state, { preview = false, interactive = false, includeAnalysisPreview = true, retain16 = false, signal = null, client = null, previewSource = null } = {}) {
+    // The pixels of a preview request (#248 part 3): a display target sends its
+    // level (the worker's cached source) and the size; any other image is sent
+    // as it is.
+    function previewRequestImage(image) {
+      if (!isDisplayTarget(image)) return { imageData: image, display: null };
+      const level = image.__displayOf;
+      return { imageData: level, display: { target: { width: image.width, height: image.height }, geometry: displayLevelGeometry(level) } };
+    }
+
+    // The main-thread fallback of a worker request: the display resample (and
+    // no auto-WB sample) happens here.
+    function convertRequestOnMain({ imageData, settings, options, display = null }) {
+      const image = display ? resampleDisplayLevel(imageData, display.geometry, display.target) : imageData;
+      const mainOptions = { ...options };
+      delete mainOptions.displayTarget;
+      return convertFrameWithRouter({ imageData: image, settings, options: mainOptions });
+    }
+
+    // `wbSample` (processNegative's first frame): the worker also converts the
+    // viewport-independent auto-WB sample of the source (#248 part 3).
+    async function convertFromCurrentSource(settings = state, { preview = false, interactive = false, includeAnalysisPreview = true, retain16 = false, signal = null, client = null, previewSource = null, wbSample = false } = {}) {
       const fullSource = state.conversionSourceImageData || state.croppedImageData || state.originalImageData;
       if (!fullSource) return null;
       if (!state.conversionSourceImageData) noteGeometryPixelRead('convertFromCurrentSource');
       // previewSource: the display preview source with its repairs filled
       // (Phase 2 of #237), for interactive preview frames only.
-      const source = (preview && state.conversionPreviewImageData) ? (previewSource || state.conversionPreviewImageData) : fullSource;
+      const previewImage = preview ? state.conversionPreviewImageData : null;
+      const { imageData: source, display } = previewImage && !previewSource ? previewRequestImage(previewImage)
+        : { imageData: (previewImage && previewSource) || previewImage || fullSource, display: null };
+      const fullRender = !preview && !interactive;
       const request = {
         imageData: source,
+        display,
         settings: buildRouterSettings(settings),
         options: {
           preview,
           includeAnalysisPreview,
           analysisImageData: getColorAnalysisSample(settings),
-          forceFullProcess: !preview && !interactive,
+          forceFullProcess: fullRender,
           // The preview worker keeps this frame's 16-bit plane until it is
           // committed, and sends the histogram sample built from it instead.
-          ...(retain16 ? { retain16: true, histogramSamples: HISTOGRAM_MAX_SAMPLES } : {})
+          ...(retain16 ? { retain16: true, histogramSamples: HISTOGRAM_MAX_SAMPLES } : {}),
+          // A full-resolution render brings its display preview (#248 part 4),
+          // made for the normal tier's display size at request time.
+          ...(fullRender && state.conversionSourceImageData ? {
+            displayTarget: getDisplayPreviewSize(fullSource, undefined, 'normal'), histogramSamples: HISTOGRAM_MAX_SAMPLES
+          } : {})
         }
       };
+      if (wbSample && state.conversionSourceImageData) {
+        const level = state.displayLevelImageData || fullSource;
+        request.wbSample = preview && display
+          ? { geometry: displayLevelGeometry(level) }
+          : { fromSource: true, geometry: { sourceWidth: fullSource.width, sourceHeight: fullSource.height, k: 1 } };
+      }
       if (preview || interactive) {
         try {
           return await convertPreviewFrameInWorker(request);
         } catch (err) {
           console.warn('Preview worker failed, retrying on main thread:', err?.message || err);
-          return await convertFrameWithRouter(request);
+          return await convertRequestOnMain(request);
         }
       }
       return await convertFrameOffMainThread({ ...request, signal, client });
@@ -6359,13 +6475,16 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (GPU_PREVIEW_MODE === 'off' || !gpuApplyUsable()) return false;
       const preview = state.conversionPreviewImageData;
       const { prepared, analysis } = gpuPreview;
-      // As the worker path checks on every tick, a display preview that no
-      // longer has the display's size (a DPR or viewport change no event
-      // reported) is not drawn from: the worker tick resizes it, and it is
-      // prepared again. Measured at the normal tier (#263).
+      // A display preview that no longer serves the display's size (outside
+      // the hysteresis band, #248; a DPR or viewport change no event reported)
+      // is not drawn from: the settle hook moves the target, and it is prepared
+      // again. Measured at the normal tier (#263).
       if (preview) {
         const target = getDisplayPreviewSize(state.conversionSourceImageData, undefined, 'normal');
-        if (preview.width !== target.width || preview.height !== target.height) return false;
+        if (!displaySizeServes(preview, target)) {
+          if (previewTier === 'normal') scheduleDisplayPreviewResize();
+          return false;
+        }
       }
       return Boolean(preview && prepared && prepared.previewId === gpuObjectId(preview) && prepared.generation === coreReprocessGeneration
         && analysis && analysis.previewId === prepared.previewId && analysis.generation === coreReprocessGeneration);
@@ -6479,8 +6598,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     }
 
     // Asks the preview worker for the prepared negative of the frame on screen and
-    // uploads it once. Main keeps no copy: without film-base or flat-field
-    // compensation it uploads its own display preview (8-bit sources as RGBA8UI).
+    // uploads it once. Main keeps no copy: for a display target (#248) the worker
+    // sends its resampled negative when no film-base or flat-field compensation
+    // makes another one; a source shown whole uploads its own planes (8-bit
+    // sources as RGBA8UI).
     function requestGpuPrepare() {
       const renderer = webglState.renderer2;
       const preview = state.conversionPreviewImageData;
@@ -6493,7 +6614,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const flight = { tag };
       gpuPreview.prepareFlight = flight;
       convertPreviewFrameInWorker.prepare({
-        imageData: preview,
+        ...previewRequestImage(preview),
         settings,
         options: {
           preview: preview !== state.conversionSourceImageData,
@@ -6545,7 +6666,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       gpuPreview.analyzeFlight = true;
       gpuPreview.analysisWanted = false;
       convertPreviewFrameInWorker.analyze({
-        imageData: preview,
+        ...previewRequestImage(preview),
         settings,
         options: { preview: preview !== state.conversionSourceImageData, analysisImageData: reference }
       }, key).then((reply) => {
@@ -6716,14 +6837,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // previous conversion.
       state.fullResolutionPending = true;
       releaseCorePreviewRetained(processed);
-      state.previewSourceImageData = buildPreviewSourceImageData(processed);
-      state.histogramSourceImageData = histogramSourceFor(processed);
-      state.webglSourceImageData = state.previewSourceImageData;
+      cancelDisplayPreviewRebuild();
+      installDisplayPreview(processed, buildPreviewSourceImageData(processed));
       if (initWebGLRenderer()) {
         webglState.sourceDirty = true;
         webglState.curveDirty = true;
       }
-      if (!previewTierController.active) schedulePreviewTierPrebuild();
       fitStep3CanvasBox();
     }
 
@@ -6952,7 +7071,16 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         const { mask, bounds } = buildRepairMask(masks.strokes, geometry, masks.conversionSource.__lensMapping || null);
         if (bounds) any = poolRepairMask(mask, masks.width, masks.height, pooled, base.width, base.height, bounds) || any;
       }
-      const image = any ? await previewRepairWorker.inpaint(base, pooled, 3) : null;
+      // Main holds no display negative of a display target (#248): the preview
+      // worker sends a copy of the one it converts.
+      let pixels = base;
+      if (any && isDisplayTarget(base)) {
+        // The conversion's own settings and sample, so the worker keeps its caches.
+        pixels = await convertPreviewFrameInWorker.displayNegative({ ...previewRequestImage(base), settings: buildRouterSettings(state),
+          options: { preview: true, analysisImageData: getColorAnalysisSample(state) } });
+        if (repairedPreviewBuild !== build) return;
+      }
+      const image = any ? await previewRepairWorker.inpaint(pixels, pooled, 3) : null;
       if (repairedPreviewBuild !== build) return;
       repairedPreviewBuild = null;
       // Nothing to fill is an entry too, so no tick builds it again.
@@ -7047,19 +7175,20 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           }
           return true;
         } else {
-          // DPR の変更は CSS resize を発火しない場合もあるため、入力時にも確認。
-          // The preview tier (#263) may also have changed since the last tick.
+          // The preview tier (#263) may have changed since the last tick. Only
+          // the display target changes here: no resample in the input path
+          // (#248). A viewport or DPR change reaches the size through the
+          // settle hook after the interaction (ResizeObserver, DPR listener).
           const previewBefore = state.conversionPreviewImageData;
           ensureConversionPreviewForDisplay();
-          // A resized display preview at the normal tier: the GPU preview (#239)
-          // prepares it now, ahead of this conversion, rather than at idle.
+          // Back at the normal tier's target: the GPU preview (#239) prepares
+          // it now, ahead of this conversion, rather than at idle.
           if (state.conversionPreviewImageData !== previewBefore && previewTier === 'normal' && gpuPreview.status === 'ready') {
             requestGpuPrepare();
             requestGpuAnalyze();
           }
           // Check if preview source is actually smaller than full source
-          const hasSmallPreview = state.conversionPreviewImageData
-            && state.conversionPreviewImageData !== state.conversionSourceImageData;
+          const hasSmallPreview = hasSeparateConversionPreview();
           const reducedInput = hasSmallPreview && reducedDisplayImages.has(state.conversionPreviewImageData);
 
           // Preview-resolution path: run SilverCore on small image. Its 16-bit
@@ -7160,18 +7289,15 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     // Posts the queued preview from inside the finishing flight, before its
     // result is applied. Only a non-full preview for the current generation and
-    // source whose display preview is already the right size qualifies: any
-    // other request needs main-thread work first, and a full one always waits
-    // for finally.
+    // source qualifies; a full one always waits for finally.
     function postPendingPreviewEarly(flight) {
       const pending = _coreReprocessPending;
       if (!pending || !flight || _coreReprocessPreviewInFlight !== flight || routeCoreRequest(pending).full) return false;
       if (pending.generation !== coreReprocessGeneration) return false;
       const source = state.conversionSourceImageData;
       if (!source || (pending.sourceRef && pending.sourceRef !== source)) return false;
-      const target = getDisplayPreviewSize(source);
-      if (state.conversionPreviewImageData?.width !== target.width
-        || state.conversionPreviewImageData?.height !== target.height) return false;
+      // A tier change is the only main-thread step before a post, and it only
+      // swaps display targets (#248): nothing needs the finally first.
       // Claim the work before clearing the slot so coreReprocessBusy() never
       // reads as idle, then hand the lane over: otherwise the in-flight guard
       // sees this flight and queues the request again.
@@ -7291,12 +7417,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return settled;
     }
 
+    // Decided by size, not identity (#248): the display target of a source of
+    // at most ~16 MP resamples the source itself (its level), and is still a
+    // display-size conversion.
     function hasSeparateConversionPreview() {
-      return Boolean(
-        state.conversionSourceImageData
-        && state.conversionPreviewImageData
-        && state.conversionPreviewImageData !== state.conversionSourceImageData
-      );
+      const source = state.conversionSourceImageData;
+      const preview = state.conversionPreviewImageData;
+      return Boolean(source && preview && (preview.width < source.width || preview.height < source.height));
     }
 
     // The worker request of the full-resolution render in flight.
@@ -7645,25 +7772,39 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           trace.mark('lensCorrection', {
             outputPixels: getImageDataPixelCount(correctedSourceData)
           });
+          // The retained display level of this source (#248 part 3), built in
+          // row bands of about 12 ms before anything points at the new source.
+          const level = await buildDisplayLevelInBands(correctedSourceData,
+            displayLevelFactor(correctedSourceData.width, correctedSourceData.height), { isCurrent: isCurrentConversion });
+          if (!level || !isCurrentConversion()) return;
+          trace.mark('displayLevel', { outputPixels: getImageDataPixelCount(level) });
           invalidateSilverCoreCache();
           // A GPU frame of the previous source has nothing left to settle.
           gpuPreviewScheduler.cancel();
           state.conversionSourceImageData = correctedSourceData;
+          state.displayLevelImageData = level;
+          state.autoWbSample = null;
           // The comparison's reference was the previous source's.
           if (!state.beforeAfterActive) releaseBeforeAfterCanvas();
           // A new photo usually arrives with a layout change (panels, the
           // loaded state) the observer has not reported yet; size its display
           // preview from live layout once rather than convert it twice.
           refreshCanvasContainerSize();
-          state.conversionPreviewImageData = buildPreviewSourceImageData(correctedSourceData);
+          state.conversionPreviewImageData = conversionTargetFor(correctedSourceData, level, 'normal');
           const hasPreviewSource = usesSilverCoreConversion(state) && hasSeparateConversionPreview();
           overlay.updateProgress(hasPreviewSource ? 35 : 40, lang.loadingConverting);
 
-          const processed = await convertFromCurrentSource(state, { preview: hasPreviewSource });
+          // With the first frame the worker converts the viewport-independent
+          // auto-WB sample (#248 part 3).
+          const processed = await convertFromCurrentSource(state, { preview: hasPreviewSource, wbSample: automatic });
           if (!isCurrentConversion()) return;
           if (!processed) {
             showNegativeAfterFailedConversion();
             return;
+          }
+          if (processed.__wbSample) {
+            state.autoWbSample = { source: correctedSourceData, image: processed.__wbSample };
+            delete processed.__wbSample;
           }
           trace.mark(hasPreviewSource ? 'previewConversion' : 'fullConversion', {
             outputPixels: getImageDataPixelCount(processed)
@@ -8052,7 +8193,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         updateDustStatusUI('Error: ' + (err.message || err));
         // A repaired preview kept on screen for this pass shows what is not there.
         if (repairedPreviewShown && repairedPreviewShown === state.previewSourceImageData && state.processedImageData) {
-          applyProcessedImageToState(state.processedImageData);
+          applyProcessedImageToState(state.processedImageData, { deferDisplay: true });
           updateFull();
         }
       } finally {
@@ -8067,7 +8208,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (!hasFrameRepairs()) return;
       const nextImage = state.dustRemoval.inpaintedImageData || state.dustRemoval.cleanSource;
       if (!nextImage) return;
-      applyProcessedImageToState(nextImage, { previewOnly: state.processedImageDataIsPreview });
+      // A whole-frame result: its display preview follows in row bands (#248).
+      applyProcessedImageToState(nextImage, { previewOnly: state.processedImageDataIsPreview, deferDisplay: true });
     }
 
     function scheduleDustDetection() {
@@ -8357,7 +8499,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (!state.dustRemoval.enabled) return;
       const source = getDustSource();
       if (source) {
-        applyProcessedImageToState(source, { previewOnly: state.processedImageDataIsPreview });
+        applyProcessedImageToState(source, { previewOnly: state.processedImageDataIsPreview, deferDisplay: true });
       }
       clearDustState();
       state.dustRemoval.cleanSource = source;
@@ -8510,7 +8652,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // image that is not the one on screen is shown the ordinary way.
     function refreshDustDisplay(target, rects, maskRect, revision) {
       if (state.processedImageData !== target || state.processedImageDataIsPreview) {
-        applyProcessedImageToState(target);
+        applyProcessedImageToState(target, { deferDisplay: true });
         updatePreview();
         return;
       }
@@ -8575,7 +8717,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       dust.revision += 1;
       if (displayed) refreshDustDisplay(restored.target, restored.rects, delta.maskRect, dust.revision);
       else {
-        applyProcessedImageToState(restored.target);
+        applyProcessedImageToState(restored.target, { deferDisplay: true });
         updatePreview();
       }
       showDustParticleCount();
@@ -9013,7 +9155,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const buffers = new Set();
       backingBuffers([
         state.loadedBaseImageData, state.originalImageData, state.croppedImageData, state.processedImageData,
-        state.conversionSourceImageData, state.conversionPreviewImageData, state.previewSourceImageData,
+        state.conversionSourceImageData, state.conversionPreviewImageData, state.displayLevelImageData, state.previewSourceImageData,
         state.histogramSourceImageData, state.webglSourceImageData, state.displayImageData,
         state.dustRemoval.mask, state.dustRemoval.inpaintedImageData, state.dustRemoval.cleanSource,
         undoStack, redoStack
@@ -9285,7 +9427,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const frame = state.originalImageData;
       state.originalImageData = frame ? { width: frame.width, height: frame.height, released: true } : null;
       for (const key of ['croppedImageData', 'processedImageData', 'displayImageData', 'conversionSourceImageData',
-        'conversionPreviewImageData', 'previewSourceImageData', 'histogramSourceImageData', 'webglSourceImageData']) {
+        'conversionPreviewImageData', 'displayLevelImageData', 'autoWbSample', 'previewSourceImageData', 'histogramSourceImageData',
+        'webglSourceImageData']) {
         state[key] = null;
       }
       state.dustRemoval.mask = null;
@@ -9695,6 +9838,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           invalidateSilverCoreCache();
           state.conversionSourceImageData = null;
           state.conversionPreviewImageData = null;
+          state.displayLevelImageData = null;
+          state.autoWbSample = null;
           state.previewSourceImageData = null;
           state.histogramSourceImageData = null;
           state.webglSourceImageData = null;
@@ -9889,6 +10034,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         invalidateSilverCoreCache();
         state.conversionSourceImageData = null;
         state.conversionPreviewImageData = null;
+        state.displayLevelImageData = null;
+        state.autoWbSample = null;
 
         await afterGeometry(ready, async isCurrent => {
           if (state.currentStep >= 3) {
@@ -11316,6 +11463,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       invalidateSilverCoreCache();
       state.conversionSourceImageData = null;
       state.conversionPreviewImageData = null;
+      state.displayLevelImageData = null;
+      state.autoWbSample = null;
       state.previewSourceImageData = null;
       state.histogramSourceImageData = null;
       state.webglSourceImageData = null;
@@ -13856,6 +14005,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         invalidateSilverCoreCache();
         state.conversionSourceImageData = null;
         state.conversionPreviewImageData = null;
+        state.displayLevelImageData = null;
+        state.autoWbSample = null;
         state.previewSourceImageData = null;
         state.histogramSourceImageData = null;
         state.webglSourceImageData = null;
@@ -13931,6 +14082,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       invalidateSilverCoreCache();
       state.conversionSourceImageData = null;
       state.conversionPreviewImageData = null;
+      state.displayLevelImageData = null;
+      state.autoWbSample = null;
       state.previewSourceImageData = null;
       state.histogramSourceImageData = null;
       state.webglSourceImageData = null;
@@ -18455,10 +18608,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       item.semanticAttempted = true;
       const source = state.processedImageData;
       if (!source) return;
+      // The anchors are estimated on the auto-WB sample, which does not follow
+      // the viewport (#248), whenever it belongs to this source.
+      const sampleSource = autoWbSampleFor(state.conversionSourceImageData) || source;
       const revision = manualEditRevision;
       const valid = () => isCurrentLoad(generation) && item === getCurrentQueueItem() && revision === manualEditRevision && !state.cropping && !studioAutoFrameRunning && !automaticRollImportRunning && !state.rollFrame?.locked && !state.wbUserOverride && !state.grayPointSampled && !state.rollReference.applyLock && !item.savedSettings;
       // Whole converted preview coordinates are used for both WB and rescue.
-      const preview = downsampleImageDataForMaxDim(source, 512);
+      const preview = downsampleImageDataForMaxDim(sampleSource, 512);
       setTimeout(async () => {
         try {
           if (!valid()) return;
@@ -18858,11 +19014,23 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (input) input.value = String(step);
     }
 
+    // The test strip's input: the level reduced to `maxSide` with the display
+    // filter, as an Image16.
+    function testStripSample(level, maxSide) {
+      const geometry = displayLevelGeometry(level);
+      const scale = Math.min(1, maxSide / Math.max(geometry.sourceWidth, geometry.sourceHeight));
+      const target = { width: Math.max(1, Math.floor(geometry.sourceWidth * scale)), height: Math.max(1, Math.floor(geometry.sourceHeight * scale)) };
+      if (geometry.k === 1 && target.width >= level.width && target.height >= level.height) return level;
+      return resampleDisplayLevel(level, geometry, target);
+    }
+
     async function renderTestStrip() {
       const tiles = document.getElementById('testStripTiles');
       const button = document.getElementById('testStripRenderBtn');
       if (!tiles || testStrip.rendering) return;
-      const source = state.conversionPreviewImageData || state.conversionSourceImageData;
+      // Its own reduction of the display level (#248): main holds no display
+      // negative, and the 60 MP source is never read for a 360 px strip.
+      const source = state.displayLevelImageData || state.conversionSourceImageData;
       if (state.currentStep < 3 || !source || !usesSilverCoreConversion(state)) {
         tiles.replaceChildren(Object.assign(document.createElement('span'), { className: 'test-strip-empty', textContent: getLocalizedText('testStripEmpty', 'Convert a photo first.') }));
         return;
@@ -18873,7 +19041,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const area = document.getElementById('testStripArea')?.value || 'full';
       const centre = Number(state[axis.key]) || 0;
       const values = testStripValues(axis, centre, step, count);
-      const small = downsampleImageDataForMaxDim(source, 360);
+      const small = testStripSample(source, 360);
       const base = state.loadedBaseImageData || state.originalImageData;
       testStrip.rendering = true;
       testStrip.axisKey = axis.key;
@@ -20091,7 +20259,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       state.repairStrokes = [];
       markCurrentFileDirty();
       const source = getDustSource();
-      if (source) applyProcessedImageToState(source, { previewOnly: state.processedImageDataIsPreview });
+      if (source) applyProcessedImageToState(source, { previewOnly: state.processedImageDataIsPreview, deferDisplay: true });
       clearDustState();
       state.dustRemoval.cleanSource = state.dustRemoval.enabled ? source : null;
       if (state.dustRemoval.enabled) scheduleDustDetection();
