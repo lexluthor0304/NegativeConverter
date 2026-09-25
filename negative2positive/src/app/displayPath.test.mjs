@@ -4,6 +4,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
 
 const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8');
 function functionSource(name) {
@@ -35,6 +36,8 @@ function image(width, height, fill = 0) {
     sprocketPreviewEnabled: false, exportSprocketHolesEnabled: false };
   const reads = [];
   const context = vm.createContext({
+    // #249: no photo here takes a display form.
+    ...displaySessionStubs(),
     state, ImageData: TestImageData,
     ensureFullResolutionReadyForExport: async () => {}, ensureRepairsReadyForExport: async () => {},
     applyAdjustmentsWithSettings: () => assert.fail('Steps 1-2 run no adjustment'),
@@ -83,6 +86,8 @@ for (const failure of ['null', 'throw']) {
   const painted = [];
   const alerts = [];
   const context = vm.createContext({
+    // #249: no photo here takes a display form.
+    ...displaySessionStubs(),
     state, console: { error: noop }, loadGeneration: 1, coreReprocessGeneration: 0, processNegativeInFlight: null,
     whenGeometrySettled: async () => true, isCurrentLoad: generation => generation === 1,
     createPerfTrace: () => ({ mark: noop, end: noop }), getImageDataPixelCount: () => 16,
@@ -102,7 +107,7 @@ for (const failure of ['null', 'throw']) {
     displayNegative: imageData => painted.push(imageData),
     appAlert: message => { alerts.push(message); }, getLocalizedText: (key, fallback) => fallback,
   });
-  vm.runInContext(['showNegativeAfterFailedConversion', 'processNegative'].map(functionSource).join('\n'), context);
+  vm.runInContext([...DISPLAY_SESSION_HELPERS, 'showNegativeAfterFailedConversion', 'processNegative'].map(functionSource).join('\n'), context);
   await context.processNegative({ quiet: true });
   await settle();
   assert.deepEqual(painted, [negative], `${failure}: the framed negative is painted once`);
@@ -177,6 +182,8 @@ function settleFixture({ width = 1200, height = 900, worker = 'real', gl = false
     }
   };
   const context = vm.createContext({
+    // #249: no photo here takes a display form.
+    ...displaySessionStubs(),
     state, ImageData: TestImageData, Uint8ClampedArray, console,
     canvas: { width: 1809, height: 1202 }, mainCanvasPhoto: null,
     settledDisplayToken: 0, settledAdjustedBuffer: null, previewAdjustedBuffer: null, expiredCompareHeld: false,
@@ -195,7 +202,7 @@ function settleFixture({ width = 1200, height = 900, worker = 'real', gl = false
     renderHistogramForWebGL: noop, gpuPreview: { lastDraw: 'step3' }, scheduleGpuPreviewWarmup: noop,
     schedulePreviewUpdate: () => drawn.push('scheduled'),
   });
-  vm.runInContext(['supersedeSettledDisplay', 'presentGlFrame', 'displaySourceImageData', 'presentCpuFrame',
+  vm.runInContext([...DISPLAY_SESSION_HELPERS, 'supersedeSettledDisplay', 'presentGlFrame', 'displaySourceImageData', 'presentCpuFrame',
     'buildDisplayAdjustmentSettings', 'noteMainThreadAdjustment', 'ensureImageDataBuffer', 'applyAdjustmentsToBuffer',
     'updatePreviewCpu', 'updateFull', 'renderSettledDisplay', 'getCurrentHistogramSource', 'redrawHistogramIfPossible',
     'repaintDustMaskOverlay'].map(functionSource).join('\n'), context);
@@ -348,6 +355,8 @@ function canvasFixture({ sprocket = false, step = 3 } = {}) {
   const state = { currentStep: step, cropping: false, sprocketPreviewEnabled: sprocket, processedImageData: full,
     processedImageDataIsPreview: false, conversionSourceImageData: full, previewSourceImageData: image(1500, 1000) };
   const context = vm.createContext({
+    // #249: no photo here takes a display form.
+    ...displaySessionStubs(),
     state, canvas, ctx: canvas.ctx, glCanvas, sprocketPreviewFrameCanvas: frameCanvas, sprocketPreviewFrameCtx: frameCanvas.ctx,
     sprocketPreviewFrameCache: { key: '', sourceRef: null, metrics: null },
     beforeAfterCanvas: comparison, beforeAfterCanvasSource: null, beforeAfterBuiltReference: null, mainCanvasPhoto: null,
@@ -364,7 +373,7 @@ function canvasFixture({ sprocket = false, step = 3 } = {}) {
     adjustCanvasDisplay: (w, h, reference) => fits.push({ w, h,
       reference: reference === undefined ? 'state' : reference && { width: reference.width, height: reference.height } }),
   });
-  vm.runInContext(['setMainCanvasBox', 'setMainCanvasDimensions', 'refitMainCanvasBox', 'sprocketFrameSize', 'sprocketFrameReference',
+  vm.runInContext([...DISPLAY_SESSION_HELPERS, 'setMainCanvasBox', 'setMainCanvasDimensions', 'refitMainCanvasBox', 'sprocketFrameSize', 'sprocketFrameReference',
     'displaySourceImageData', 'fitStep3CanvasBox', 'getSprocketPreviewFrameCacheKey', 'ensureSprocketPreviewFrameBackground',
     'renderFastSprocketPreview', 'renderAdjustedImageDataToMainCanvas', 'placeBeforeAfterCanvas',
     'showBeforeAfterReference', 'releaseBeforeAfterCanvas'].map(functionSource).join('\n'), context);
@@ -473,11 +482,13 @@ for (const [width, height] of [[1500, 1000], [1000, 1500]]) {
     constructor(...args) { super(...(typeof args[0] === 'number' ? [new Uint8ClampedArray(args[0] * args[1] * 4), ...args] : args)); }
   }
   const context = vm.createContext({
+    // #249: no photo here takes a display form.
+    ...displaySessionStubs(),
     state, ImageData: PageImageData, Uint16Array, Math, beforeAfterBuiltReference: null, beforeAfterCanvasSource: null,
     beforeAfterCanvas: null, isDisplayTarget, resampleDisplayLevel, displayLevelGeometry,
     buildPreviewSourceImageData: imageData => { built.push(imageData); return image(4, 4); },
   });
-  vm.runInContext(['getBeforeAfterReferenceImageData', 'displayNegativeOfTarget', 'releaseBeforeAfterCanvas'].map(functionSource).join('\n'), context);
+  vm.runInContext([...DISPLAY_SESSION_HELPERS, 'getBeforeAfterReferenceImageData', 'displayNegativeOfTarget', 'releaseBeforeAfterCanvas'].map(functionSource).join('\n'), context);
   const reference = context.getBeforeAfterReferenceImageData();
   assert.ok(reference instanceof TestImageData, 'an 8-bit ImageData to put');
   assert.deepEqual([reference.width, reference.height], [301, 201]);

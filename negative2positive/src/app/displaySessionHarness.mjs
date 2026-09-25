@@ -6,7 +6,7 @@
 // Helpers every reader of the base, the source or the working planes calls.
 export const DISPLAY_SESSION_HELPERS = [
   'baseSizeSource', 'conversionSourceSize', 'releasedPlane', 'isReleasedPlane', 'workingPlanes', 'sessionGeometryKey',
-  'reviveFrameDescriptor'
+  'reviveFrameDescriptor', 'autoWbSampleKey'
 ];
 
 export function displaySessionDiagnosticsStub() {
@@ -40,7 +40,7 @@ export function displaySessionStubs(overrides = {}) {
     coldHistory: entries => entries.filter(entry => !entry.dustDelta).map(entry => ({ ...entry, refs: { cold: true } })),
     requestSourceForDisplay: () => {}, ensureSource: async () => true, ensureBase: async () => null,
     forgetDisplayProxies: () => {}, readSpilledDisplaySession: async () => null,
-    fillDisplayProxy: async () => false, prepareZoomOneProxy: () => {}, lastEditorViewport: null,
+    fillDisplayProxy: async () => false,
     // Part 3: no persistent store.
     displayProxyStore: null, persistDisplayProxy: async () => false, readStoredDisplaySession: async () => null,
     persistPresentationPreview: async () => false, presentStoredPreview: async () => {},

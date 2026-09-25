@@ -15,7 +15,7 @@ globalThis.ImageData = class ImageData {
   }
 };
 const { createHarness, makeBase, samePixels, exportChain, settle, createPhotoSessionCache, backingBuffers } = await import('./geometryTestHarness.mjs');
-const { resizeDisplayPreview } = await import('./displayPreview.js');
+const { buildDisplayLevel, displayLevelGeometry, isDisplayTarget, displayPreviewSize } = await import('./displayPreview.js');
 const { createDisplayProxySpill, createDisplayProxyPort, createDisplayProxyWorkerCore, createDisplayProxyStore, displayProxyFileKey, sha256Hex } = await import('./displayProxyStore.js');
 const { decodeDisplayProxyRecord } = await import('./displayProxy.js');
 
@@ -24,10 +24,21 @@ const CROP = { left: 10, top: 8, width: 60, height: 40 };
 const AREA = [{ x: 0.2, y: 0.2 }, { x: 0.8, y: 0.2 }, { x: 0.8, y: 0.8 }, { x: 0.2, y: 0.8 }];
 const bytesOf = images => [...backingBuffers(images)].reduce((sum, buffer) => sum + buffer.byteLength, 0);
 
+// The display level (#248) is the display proxy: 16-bit only, with its
+// source geometry.
+function sameLevel(actual, expected, label) {
+  assert.ok(actual && expected, `${label}: levels exist`);
+  assert.deepEqual([actual.width, actual.height], [expected.width, expected.height], `${label}: size`);
+  assert.ok(Buffer.from(actual.__image16.data.buffer, actual.__image16.data.byteOffset, actual.__image16.data.byteLength)
+    .equals(Buffer.from(expected.__image16.data.buffer, expected.__image16.data.byteOffset, expected.__image16.data.byteLength)), `${label}: 16-bit`);
+  assert.deepEqual({ ...displayLevelGeometry(actual) }, { ...displayLevelGeometry(expected) }, `${label}: geometry`);
+}
+
 // A photo converted as a large frame: its crop is the conversion source, a
-// 30x20 display proxy, and the preview conversion of that proxy on screen.
+// 30x20 display level (k = 2) the proxy, a display target on it the
+// conversion preview, and the preview conversion on screen.
 async function convertedPhoto({ sessionBudget, base = makeBase(96, 64, 5), largeImagePixels = 1000, name = 'a.dng', id = 1, filmEdge = true } = {}) {
-  const h = createHarness(base, { sessionBudget, realProcessNegative: true }), c = h.context;
+  const h = createHarness(base, { sessionBudget, realProcessNegative: true, displayLevels: true }), c = h.context;
   h.target.largeImagePixels = largeImagePixels;
   h.target.usesSilverCoreConversion = () => true;
   h.target.photoSessions = createPhotoSessionCache({ maxBytes: sessionBudget, onEvict: (item, value) => c.demoteDisplaySession(item, value) });
@@ -35,20 +46,21 @@ async function convertedPhoto({ sessionBudget, base = makeBase(96, 64, 5), large
   c.restoreSettings({ rotationAngle: 1.3, mirrored: false, cropRegion: CROP });
   await h.state.geometryReady;
   const crop = h.state.croppedImageData;
-  const proxy = resizeDisplayPreview(crop, { width: 30, height: 20 });
+  const proxy = buildDisplayLevel(crop, 2);
   const processed = makeBase(30, 20, 9);
+  // The viewport a display target of 30 x 20 serves (getDisplayPreviewSize's inputs).
+  h.target.getCanvasContainerSize = () => ({ width: 50, height: 40 });
+  h.target.previewTierMaxPixels = () => 600;
   Object.assign(h.state, {
-    currentStep: 3, conversionSourceImageData: crop, conversionPreviewImageData: proxy, processedImageData: processed,
+    currentStep: 3, conversionSourceImageData: crop, displayLevelImageData: proxy,
+    conversionPreviewImageData: c.conversionTargetFor(crop, proxy, 'normal'), processedImageData: processed,
     previewSourceImageData: processed, histogramSourceImageData: processed, webglSourceImageData: processed,
     processedImageDataIsPreview: true, fullResolutionPending: true
   });
   // The sample the conversion read, cached for the base as getColorAnalysisSample does.
   const sample = c.getColorAnalysisSample(h.state);
   assert.ok(sample?.data, 'the colour-analysis sample of the image area');
-  // The viewport the proxy was built for (getDisplayPreviewSize's inputs).
-  h.target.getDisplayPreviewSize = image => h.target.displayPreviewSize(image.width, image.height, { viewportWidth: 30, viewportHeight: 20 });
-  h.target.getCanvasContainerSize = () => ({ width: 50, height: 40 });
-  h.target.previewTierMaxPixels = () => 600;
+  assert.ok(isDisplayTarget(h.state.conversionPreviewImageData), 'a display target on the level');
   const item = { id, file: { name }, settings: { ...settingsFor(h.state), autoFrameMeta: { imageArea: AREA }, filmEdge: filmEdge ? { checked: true } : null } };
   h.state.loadedFile = item.file;
   return { h, c, base, crop, proxy, processed, sample, item };
@@ -161,7 +173,7 @@ for (const tier of ['A', 'B']) {
   item.settings = { ...item.settings, exposure: 12 };
   const converted = [];
   h.target.convertFromCurrentSource = async (settings, options) => {
-    converted.push(options.preview ? h.state.conversionPreviewImageData : h.state.conversionSourceImageData);
+    converted.push(options.preview ? h.state.conversionPreviewImageData.__displayOf || h.state.conversionPreviewImageData : h.state.conversionSourceImageData);
     return makeBase(30, 20, 13);
   };
   let feedback = null;
@@ -180,7 +192,7 @@ for (const tier of ['A', 'B']) {
     assert.equal(h.state.croppedImageData, crop);
     assert.equal(converted.length, 1);
   } else {
-    assert.equal(converted.at(-1), proxy, 'the proxy converted');
+    assert.equal(converted.at(-1), proxy, 'the level converted');
     assert.equal(h.state.conversionSourceImageData, null);
   }
   assert.equal(h.target.document.body.dataset.photoSwitching, undefined);
@@ -228,7 +240,8 @@ for (const tier of ['A', 'B']) {
   assert.equal(entry.tier, 'B', 'neither the full session nor Tier A fits');
   for (const key of ['originalImageData', 'croppedImageData']) assert.equal(entry.snapshot.refs[key].released, true, `${key} is a stand-in`);
   assert.equal(entry.snapshot.refs.conversionSourceImageData, null, 'no source');
-  assert.equal(entry.snapshot.refs.conversionPreviewImageData, proxy, 'the display proxy');
+  assert.equal(entry.snapshot.refs.displayLevelImageData, proxy, 'the display level is the proxy');
+  assert.ok(isDisplayTarget(entry.snapshot.refs.conversionPreviewImageData), 'with a display target on it');
   assert.equal(entry.sample, sample, 'the colour-analysis sample');
   assert.ok(entry.undo.every(snapshot => snapshot.refs.cold));
   assert.ok(h.target.photoSessions.bytes <= budget);
@@ -236,7 +249,8 @@ for (const tier of ['A', 'B']) {
   await c.switchToFile(0);
   assert.equal(h.state.processedImageData, processed, 'the settled preview in the same task');
   assert.equal(h.state.conversionSourceImageData, null);
-  assert.equal(h.state.conversionPreviewImageData, proxy);
+  assert.equal(h.state.displayLevelImageData, proxy);
+  assert.equal(h.state.conversionPreviewImageData.__displayOf, proxy);
   assert.equal(h.state.sourcePending.width, crop.width);
   assert.equal(h.target.baseDecodes, undefined, 'no decode');
   assert.equal(h.target.document.body.dataset.photoSwitching, undefined, 'an in-RAM Tier B hit shows no veil');
@@ -247,12 +261,13 @@ for (const tier of ['A', 'B']) {
   // The preview half converts the proxy (no decode) while it matches.
   const converted = [];
   h.target.convertFromCurrentSource = async (settings, options) => {
-    converted.push({ image: options.preview ? h.state.conversionPreviewImageData : h.state.conversionSourceImageData, options });
+    converted.push({ image: options.preview ? h.state.conversionPreviewImageData.__displayOf : h.state.conversionSourceImageData, options });
     return makeBase(30, 20, 11);
   };
   assert.equal(c.displayProxyMatches(item), true);
   await c.processNegative({ quiet: true });
-  assert.equal(converted.at(-1).image, proxy, 'the preview conversion reads the proxy');
+  assert.equal(converted.at(-1).image, proxy, 'the preview conversion reads the level');
+  assert.equal(converted.at(-1).options.wbSample, true, 'with the viewport-independent WB sample of the level');
   assert.equal(converted.at(-1).options.preview, true);
   assert.equal(h.target.autoMeasurements, 1, 'automatic measurements run as on a cold open');
   assert.equal(h.target.baseDecodes, undefined);
@@ -266,7 +281,7 @@ for (const tier of ['A', 'B']) {
   assert.equal(h.state.sourcePending, null);
   assert.equal(h.state.baseDescriptor, null);
   samePixels(h.state.conversionSourceImageData, crop, 'the rebuilt source equals the one left behind');
-  assert.equal(h.state.conversionPreviewImageData, proxy, 'the proxy stays the display preview');
+  assert.equal(h.state.displayLevelImageData, proxy, 'the proxy stays the display level');
   for (let i = 0; i < 40 && !h.target.displaySessionDiagnostics.selfChecks; i++) await settle();
   assert.equal(h.target.displaySessionDiagnostics.selfChecks, 1);
   assert.equal(h.target.displaySessionDiagnostics.selfCheckMismatches, 0);
@@ -284,7 +299,7 @@ for (const tier of ['A', 'B']) {
   assert.ok(h.state.sourcePending);
   const converted = [];
   h.target.convertFromCurrentSource = async (settings, options) => {
-    converted.push(options.preview ? h.state.conversionPreviewImageData : h.state.conversionSourceImageData);
+    converted.push(options.preview ? h.state.conversionPreviewImageData.__displayOf : h.state.conversionSourceImageData);
     return makeBase(30, 20, 17);
   };
   h.state.exposure = 3;
@@ -294,9 +309,9 @@ for (const tier of ['A', 'B']) {
   await c.performUndo();
   await settle();
   assert.equal(h.state.exposure, 3, 'the scalars come back');
-  assert.equal(converted.at(-1), proxy, 'the proxy converts again');
+  assert.equal(converted.at(-1), proxy, 'the level converts again');
   assert.equal(h.target.baseDecodes, undefined, 'without waiting for the source');
-  assert.equal(h.state.conversionPreviewImageData, proxy, 'the proxy stays the display preview');
+  assert.equal(h.state.displayLevelImageData, proxy, 'the level stays');
   // A geometry step waits for the original, then builds exactly.
   h.target.decodeBase = () => base;
   c.pushUndo('rotation');
@@ -309,19 +324,31 @@ for (const tier of ['A', 'B']) {
   samePixels(h.state.croppedImageData, crop, 'undoing the rotation rebuilds the planes left behind');
 }
 
-// ---- A viewport change is a key miss: the conversion waits for the source ----
+// ---- Another window size needs no source: the level serves any display
+// target; another analysis area is a key miss and rebuilds the source ----
 {
   const probe = await convertedPhoto({ sessionBudget: 1 << 30 });
   const budget = bytesOf([probe.proxy, probe.processed, probe.sample]) + 64;
-  const { h, c, base, crop, item } = await convertedPhoto({ sessionBudget: budget });
+  const { h, c, base, crop, proxy, item } = await convertedPhoto({ sessionBudget: budget });
   wireSwitching(h, [item, { id: 2, file: { name: 'b.dng' }, settings: null }]);
   await c.switchToFile(1);
   await c.switchToFile(0);
-  assert.equal(h.state.sourcePending !== null, true);
-  h.target.getCanvasContainerSize = () => ({ width: 90, height: 60 });
-  assert.equal(c.displayProxyMatches(item), false, 'another window size misses');
+  assert.ok(h.state.sourcePending);
+  const converted = [];
+  h.target.convertFromCurrentSource = async (settings, options) => {
+    converted.push(options.preview ? h.state.conversionPreviewImageData : h.state.conversionSourceImageData);
+    return makeBase(30, 20, 11);
+  };
+  // A smaller window: 12 x 8 CSS pixels at DPR 2 fits 24 x 16.
+  h.target.getCanvasContainerSize = () => ({ width: 32, height: 28 });
+  assert.equal(c.displayProxyMatches(item), true, 'a window size is not a key part');
+  await c.processNegative({ quiet: true });
+  assert.equal(h.target.baseDecodes, undefined, 'no decode');
+  assert.equal(converted.at(-1).__displayOf, proxy, 'the level converts at the new target');
+  assert.deepEqual([converted.at(-1).width, converted.at(-1).height], [24, 16], 'a target of the new size');
+  h.state.autoFrame.lastDiagnostics = { imageArea: [{ x: 0.1, y: 0.1 }, { x: 0.9, y: 0.1 }, { x: 0.9, y: 0.9 }, { x: 0.1, y: 0.9 }] };
+  assert.equal(c.displayProxyMatches(item), false, 'another analysis area misses');
   h.target.decodeBase = () => base;
-  h.target.convertFromCurrentSource = async () => makeBase(30, 20, 11);
   await c.processNegative({ quiet: true });
   assert.equal(h.target.displaySessionDiagnostics.provisional, 1);
   assert.equal(h.target.baseDecodes, 1, 'the exact path decoded');
@@ -369,7 +396,7 @@ for (const tier of ['A', 'B']) {
   assert.equal(h.target.displayProxySpill.has(item.id), true);
   const stored = decodeDisplayProxyRecord(records.values().next().value);
   assert.equal(stored.plane.channels, 3, 'stored as RGB16');
-  assert.equal(stored.plane.data8, undefined, 'without the 8-bit plane');
+  assert.equal(stored.plane.only16, true, 'a 16-bit level, without an 8-bit plane');
   assert.deepEqual(stored.sample, { ...sample }, 'with the sample');
 
   let prepared = 0;
@@ -378,9 +405,10 @@ for (const tier of ['A', 'B']) {
   assert.equal(prepared, 1, 'prepared as a cold open would be');
   assert.equal(h.target.displaySessionDiagnostics.spillHits, 1);
   assert.equal(h.target.baseDecodes, undefined, 'no decode');
-  const restored = h.state.conversionPreviewImageData;
+  const restored = h.state.displayLevelImageData;
   assert.notEqual(restored, proxy);
-  samePixels(restored, proxy, 'the spilled proxy is byte-identical, 8-bit plane included');
+  sameLevel(restored, proxy, 'the spilled level is byte-identical, with its geometry');
+  assert.equal(h.state.conversionPreviewImageData.__displayOf, restored, 'the conversion preview is a target on it');
   assert.equal(h.state.croppedImageData.released, true);
   assert.equal(h.state.sourcePending.key, h.target.displayProxySpill.proxyKey(item.id));
   assert.deepEqual(c.getColorAnalysisSample(h.state), sample, 'with its sample');
@@ -434,13 +462,16 @@ for (const tier of ['A', 'B']) {
   const budget = bytesOf([probe.proxy, probe.processed, probe.sample]) + 64;
   const { h, c, base, proxy, item } = await convertedPhoto({ sessionBudget: budget });
   h.target.displayProxySpill = createDisplayProxySpill({ port: createDisplayProxyPort({ core: createDisplayProxyWorkerCore({ backend }) }) });
-  const proxies = new WeakSet([proxy]);
+  // A level's 16-bit plane is what marks it: the spill's read is adopted
+  // into a fresh level object around the same pixels.
+  const proxies = new WeakSet([proxy.__image16.data]);
+  const isProxy = image => Boolean(image?.__image16 && proxies.has(image.__image16.data));
   for (const key of ['loadedBaseImageData', 'originalImageData', 'croppedImageData', 'conversionSourceImageData']) {
     let value = h.state[key];
     Object.defineProperty(h.state, key, {
       get: () => value,
       set: next => {
-        assert.ok(!proxies.has(next) && !(next && next.__proxyOf), `a display proxy was assigned to ${key}`);
+        assert.ok(!isProxy(next), `a display proxy was assigned to ${key}`);
         value = next;
       }
     });
@@ -449,7 +480,7 @@ for (const tier of ['A', 'B']) {
   const read = h.target.displayProxySpill.get.bind(h.target.displayProxySpill);
   h.target.displayProxySpill.get = async (...args) => {
     const stored = await read(...args);
-    if (stored) { proxies.add(stored.image); stored.image.__proxyOf = true; }
+    if (stored) proxies.add(stored.image.__image16.data);
     return stored;
   };
   wireSwitching(h, [item, { id: 2, file: { name: 'b.dng' }, settings: null }]);
@@ -465,15 +496,14 @@ for (const tier of ['A', 'B']) {
   h.target.decodeBase = () => base;
   await c.ensureSource();
   await settle();
-  assert.equal(h.state.conversionPreviewImageData.__proxyOf, true, 'the proxy stayed the display preview only');
+  assert.ok(isProxy(h.state.displayLevelImageData), 'the proxy stayed the display level only');
 }
 
 // ---- Fill parity: a proxy filled from a lane's or roll analysis' decode is
-// the display preview a cold open's processNegative builds (tilted,
-// mirrored, right-angle and plain crops), with getColorAnalysisSample's
-// sample; the first open finds its key. Lens-corrected frames are skipped ----
+// the display level a cold open's processNegative builds (tilted, mirrored,
+// right-angle and plain crops), with getColorAnalysisSample's sample; the
+// first open finds its key. Lens-corrected frames are skipped ----
 {
-  const { displayPreviewSize } = await import('./displayPreview.js');
   const { sampleAnalysisArea } = await import('./analysisRegion.js');
   const geometries = [
     { rotationAngle: 1.3, mirrored: false, cropRegion: { left: 9, top: 7, width: 96, height: 60 } },
@@ -492,25 +522,25 @@ for (const tier of ['A', 'B']) {
     };
     h.target.displayProxySpill = createDisplayProxySpill({ port: createDisplayProxyPort({ core: createDisplayProxyWorkerCore({ backend }) }) });
     h.target.largeImagePixels = 1000;
-    h.target.lastEditorViewport = { width: 60, height: 50 };
-    h.target.getCanvasContainerSize = () => ({ width: 60, height: 50 });
+    // These small frames stand in for large ones: a level of k = 2.
+    h.target.displayLevelFactor = () => 2;
     const item = { id: 7, file: { name: 'roll-07.dng' }, settings: { ...geometry, autoFrameMeta: { imageArea: AREA }, filmEdge: { checked: true } } };
     h.state.fileQueue = [{ id: 1, file: { name: 'open.dng' } }, item];
     h.state.currentFileIndex = 0;
     assert.equal(await c.fillDisplayProxy(item, base, item.settings), true, `filled ${JSON.stringify(geometry)}`);
     assert.equal(h.target.displaySessionDiagnostics.fills, 1);
     const stored = await h.target.displayProxySpill.get(item.id);
-    // What processNegative builds on a cold open: resizeDisplayPreview of
-    // the (lens-free) conversion source at getDisplayPreviewSize.
+    // What processNegative builds on a cold open: the display level of the
+    // (lens-free) conversion source, whatever the window.
     const source = exportChain(base, geometry);
-    const target = displayPreviewSize(source.width, source.height, { viewportWidth: 40, viewportHeight: 30, dpr: 2, zoom: 1, maxPixels: 4_000_000, maxDimension: 8192 });
-    samePixels(stored.image, resizeDisplayPreview(source, target), `fill parity ${JSON.stringify(geometry)}`);
+    const expected = buildDisplayLevel(source, 2);
+    const entry = c.spilledDisplayEntry(item, stored);
+    sameLevel(entry.planes.level, expected, `fill parity ${JSON.stringify(geometry)}`);
     assert.deepEqual(stored.sample, { ...sampleAnalysisArea(base, AREA) }, 'the sample getColorAnalysisSample reads');
     // The first open: the spilled entry installs, the recipe restores and the key matches.
     h.state.loadedBaseImageData = null;
-    const entry = c.spilledDisplayEntry(item, stored);
     Object.assign(h.state, { loadedFile: item.file, baseDescriptor: entry.baseDescriptor, sourcePending: entry.sourcePending,
-      originalImageData: entry.planes.frame, croppedImageData: entry.planes.crop, conversionPreviewImageData: entry.planes.proxy,
+      originalImageData: entry.planes.frame, croppedImageData: entry.planes.crop, displayLevelImageData: entry.planes.level,
       conversionSourceImageData: null, currentFileIndex: 1 });
     h.target.getCurrentQueueItem = () => item;
     h.state.autoFrame.lastDiagnostics = { imageArea: AREA };
@@ -523,7 +553,7 @@ for (const tier of ['A', 'B']) {
   const h = createHarness(base, { sessionBudget: 1 << 30 }), c = h.context;
   h.target.displayProxySpill = createDisplayProxySpill({ port: createDisplayProxyPort({ core: createDisplayProxyWorkerCore({ backend: { async put() {}, async get() { return null; }, async delete() {}, async clear() {} } }) }) });
   h.target.largeImagePixels = 1000;
-  h.target.lastEditorViewport = { width: 60, height: 50 };
+  h.target.displayLevelFactor = () => 2;
   const item = { id: 8, file: { name: 'x.dng' }, settings: { ...geometries[0], autoFrameMeta: { imageArea: AREA }, filmEdge: { checked: true } } };
   h.state.fileQueue = [item];
   h.target.lensCorrectionActive = () => true;
@@ -534,6 +564,16 @@ for (const tier of ['A', 'B']) {
   delete eight.__image16;
   assert.equal(await c.fillDisplayProxy(item, eight, item.settings), false, 'an 8-bit RAW fallback is not reproducible');
   assert.equal(await c.fillDisplayProxy(item, base, { ...item.settings, filmEdge: null }), false, 'undecided recipes are skipped');
+  h.target.displayLevelFactor = () => 1;
+  assert.equal(await c.fillDisplayProxy(item, base, item.settings), false, 'a frame that is its own level needs no proxy');
+  // A spilled frame that is its own level (k = 1, a debug threshold) comes back as its plane.
+  const plane = makeBase(40, 30, 3);
+  const own = c.spilledDisplayEntry(item, { image: plane, sample: null, meta: {
+    base: { width: 120, height: 80, has16: true, route: 'libraw16' },
+    geometry: { angle: 0, mirrored: false, crop: null, frameWidth: 120, frameHeight: 80 }, cropSize: null,
+    source: { width: 40, height: 30 }, area: null, level: { sourceWidth: 40, sourceHeight: 30, k: 1 }, rawMetadata: null, filmEdge: null
+  } }, { proxyKey: 'own' });
+  assert.equal(own.planes.level, plane, 'a k = 1 level is the plane itself');
 }
 
 // ---- Persistence: a frame filled (or left) in one session opens from the
@@ -553,7 +593,7 @@ for (const tier of ['A', 'B']) {
     const base = makeBase(120, 80, 21);
     const h = createHarness(base, { sessionBudget: 1 << 30 }), c = h.context;
     Object.assign(h.target, {
-      largeImagePixels: 1000, lastEditorViewport: { width: 60, height: 50 }, getCanvasContainerSize: () => ({ width: 60, height: 50 }),
+      largeImagePixels: 1000, displayLevelFactor: () => 2,
       hashFileForProject: async blob => sha256Hex(new Uint8Array(await blob.slice(0, 1 << 20).arrayBuffer())), displayProxyFileKey, sha256Hex,
       displayProxyStore: createDisplayProxyStore({
         port: createDisplayProxyPort({ core: createDisplayProxyWorkerCore({ backend: null }) }), records: memoryRecords,
@@ -586,19 +626,24 @@ for (const tier of ['A', 'B']) {
     assert.equal(h.target.displaySessionDiagnostics.storeHits, 1, 'opened from the store');
     assert.equal(h.target.baseDecodes, undefined, 'no decode');
     const source = exportChain(base, geometry);
-    const { displayPreviewSize } = await import('./displayPreview.js');
-    const target = displayPreviewSize(source.width, source.height, { viewportWidth: 40, viewportHeight: 30, dpr: 2, zoom: 1, maxPixels: 4_000_000, maxDimension: 8192 });
-    samePixels(h.state.conversionPreviewImageData, resizeDisplayPreview(source, target), 'the stored proxy is the cold open\'s display preview');
+    sameLevel(h.state.displayLevelImageData, buildDisplayLevel(source, 2), 'the stored proxy is the cold open\'s display level');
     h.state.autoFrame.lastDiagnostics = { imageArea: AREA };
     assert.equal(c.displayProxyMatches(item), true, 'processNegative converts it');
-    // Another window size is another key: the store answers nothing and the
-    // photo opens from its original.
+    // A window size is not part of the key: another window opens it too.
     const again = session(makeFile());
     again.h.target.getCanvasContainerSize = () => ({ width: 90, height: 70 });
     again.h.state.loadedFile = other.file;
     wireSwitching(again.h, [other, again.item]);
+    again.h.target.prepareStudioPhoto = async () => {};
     await again.c.switchToFile(1);
-    assert.equal(again.h.target.displaySessionDiagnostics.storeHits, 0, 'a target mismatch misses');
+    assert.equal(again.h.target.displaySessionDiagnostics.storeHits, 1, 'another window hits');
+    // Another recipe geometry is another key: the photo opens from its original.
+    const moved = session(makeFile());
+    moved.item.settings = { ...moved.item.settings, cropRegion: { left: 10, top: 7, width: 96, height: 60 } };
+    moved.h.state.loadedFile = other.file;
+    wireSwitching(moved.h, [other, moved.item]);
+    await moved.c.switchToFile(1);
+    assert.equal(moved.h.target.displaySessionDiagnostics.storeHits, 0, 'a geometry mismatch misses');
     // A changed file (another date) is not a candidate.
     const changed = session(Object.assign(new Blob([bytes]), { name: 'roll-07.dng', lastModified: 9999 }));
     assert.equal(await changed.c.readStoredDisplaySession(changed.item), null);

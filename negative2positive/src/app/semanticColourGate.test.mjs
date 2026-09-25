@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
 
 // scheduleSemanticColour must decide before the 512 px downsample and the
 // model worker whether its answer could be used at all (#236 part 5).
@@ -24,6 +25,8 @@ function run({ filmType = 'color', positiveMode = 'correct', expiredEnabled = fa
   };
   if (wbSample) state.autoWbSample = { source: wbSample === 'stale' ? {} : state.conversionSourceImageData, image: { width: 16, height: 16 } };
   const context = vm.createContext({
+    // #249: no photo here takes a display form.
+    ...displaySessionStubs(),
     state, console, manualEditRevision: 0, studioAutoFrameRunning: false, automaticRollImportRunning: false,
     semanticColourInFlight: 0,
     automaticRollPendingItems: new Set(rollPending ? [item] : []),
@@ -33,7 +36,7 @@ function run({ filmType = 'color', positiveMode = 'correct', expiredEnabled = fa
     sanitizeSemanticMap: map => map,
     setTimeout: fn => timers.push(fn),
   });
-  vm.runInContext(['autoWbSampleFor', 'scheduleSemanticColour'].map(functionSource).join('\n'), context);
+  vm.runInContext([...DISPLAY_SESSION_HELPERS, 'autoWbSampleFor', 'scheduleSemanticColour'].map(functionSource).join('\n'), context);
   context.scheduleSemanticColour(item, 1);
   return { item, downsamples, analyses, timers, state };
 }

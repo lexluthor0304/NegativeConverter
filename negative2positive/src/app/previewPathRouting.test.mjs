@@ -798,12 +798,14 @@ for (const large of [false, true]) {
   assert.equal(f.context.repairedPreviewSourceFor(f.state.conversionPreviewImageData), null);
 }
 
-// ---- #249: a Tier B session converts previews from its display proxy while
-// its source is pending; a full conversion and the export barrier wait for
-// ensureSource() ----
+// ---- #249: a Tier B session converts previews from its display proxy (the
+// display level, #248) while its source is pending; a full conversion and
+// the export barrier wait for ensureSource() ----
 {
   const f = fixture();
-  const proxy = f.state.conversionPreviewImageData;
+  const proxy = f.state.displayLevelImageData;
+  const target = f.state.conversionPreviewImageData;
+  assert.equal(target.__displayOf, proxy);
   f.state.conversionSourceImageData = null;
   f.state.sourcePending = { ...LARGE, key: 'proxy key' };
   f.state.processedImageData = f.shown;
@@ -816,7 +818,9 @@ for (const large of [false, true]) {
   await Promise.resolve();
   await settle();
   assert.deepEqual(count(f), { preview: 1, shared: 0, exact: 0, mainThread: 0 });
-  assert.equal(f.clients.preview[0].request.imageData, proxy, 'the proxy is converted');
+  assert.equal(f.clients.preview[0].request.imageData, proxy, 'the level is converted');
+  assert.deepEqual([f.clients.preview[0].request.display.target.width, f.clients.preview[0].request.display.target.height],
+    [target.width, target.height], 'at the display target');
   f.reply('preview');
   await settle();
   assert.equal(f.state.processedImageData.name, 'preview result', 'and shown');

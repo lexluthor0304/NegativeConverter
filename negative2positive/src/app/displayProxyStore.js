@@ -83,11 +83,12 @@ export function createDisplayProxyWorkerCore({ backend = null, records = null } 
           }
           const image = unpackDisplayPlane(decoded.plane, null);
           const data16 = image.__image16?.data || null;
-          const transfer = [image.data.buffer];
+          // A display level (#248) has no 8-bit plane.
+          const transfer = image.data ? [image.data.buffer] : [];
           if (data16) transfer.push(data16.buffer);
           if (decoded.sample?.data) transfer.push(decoded.sample.data.buffer);
           return {
-            reply: { image: { width: image.width, height: image.height, data8: image.data, data16 }, sample: decoded.sample, meta: decoded.meta, key: decoded.key },
+            reply: { image: { width: image.width, height: image.height, data8: image.data || null, data16 }, sample: decoded.sample, meta: decoded.meta, key: decoded.key },
             transfer
           };
         }
@@ -104,6 +105,15 @@ export function createDisplayProxyWorkerCore({ backend = null, records = null } 
       }
     }
   };
+}
+
+// The image a worker reply carries: an ImageData with its 16-bit plane, or a
+// 16-bit-only display level { width, height, __image16 } (#248).
+function imageOfReply({ width, height, data8, data16 }, ImageDataCtor) {
+  if (!data8) return { width, height, __image16: { width, height, data: data16 } };
+  const image = typeof ImageDataCtor === 'function' ? new ImageDataCtor(data8, width, height) : { width, height, data: data8 };
+  if (data16) image.__image16 = { width, height, data: data16 };
+  return image;
 }
 
 // A request/response port to a worker running the core, or the core itself
@@ -254,7 +264,7 @@ export function createDisplayProxySpill({
         };
         try {
           // A proxy the caller owns (a fill) moves to the worker; a cached one is copied.
-          const moved = transfer ? [image.data.buffer, image.__image16?.data?.buffer].filter(Boolean) : [];
+          const moved = transfer ? [image.data?.buffer, image.__image16?.data?.buffer].filter(Boolean) : [];
           const reply = await port.request(message, moved);
           if (recordStore) await recordStore.write(key, reply.record);
           index.set(key, { proxyKey, bytes: reply.bytes, meta });
@@ -297,9 +307,7 @@ export function createDisplayProxySpill({
           index.delete(key);
           index.set(key, entry);
           stats.reads++;
-          const { width, height, data8, data16 } = reply.image;
-          const image = typeof ImageDataCtor === 'function' ? new ImageDataCtor(data8, width, height) : { width, height, data: data8 };
-          if (data16) image.__image16 = { width, height, data: data16 };
+          const image = imageOfReply(reply.image, ImageDataCtor);
           return { image, sample: reply.sample || null, meta: reply.meta || entry.meta };
         } catch (error) {
           stats.failures++;
@@ -762,9 +770,7 @@ export function createDisplayProxyStore({
           entry.lastUsed = now();
           indexDirty = true;
           stats.reads++;
-          const { width, height, data8, data16 } = reply.image;
-          const image = typeof ImageDataCtor === 'function' ? new ImageDataCtor(data8, width, height) : { width, height, data: data8 };
-          if (data16) image.__image16 = { width, height, data: data16 };
+          const image = imageOfReply(reply.image, ImageDataCtor);
           return { image, sample: reply.sample || null, meta: reply.meta || entry.meta, proxyKey: entry.proxyKey };
         } catch (error) {
           stats.failures++;

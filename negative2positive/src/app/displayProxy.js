@@ -70,7 +70,9 @@ export function packDisplayPlane(image) {
   if (plane instanceof Uint16Array && plane.length === width * height * 4) {
     const opaque = opaqueAlpha(plane, 65535);
     const packed = { width, height, bits: 16, channels: opaque ? 3 : 4, data: opaque ? dropAlpha(plane, Uint16Array) : new Uint16Array(plane) };
-    if (!derivesEightBit(image)) packed.data8 = new Uint8Array(image.data.buffer.slice(image.data.byteOffset, image.data.byteOffset + image.data.byteLength));
+    // A display level (#248) is a 16-bit plane only.
+    if (!image.data) packed.only16 = true;
+    else if (!derivesEightBit(image)) packed.data8 = new Uint8Array(image.data.buffer.slice(image.data.byteOffset, image.data.byteOffset + image.data.byteLength));
     return packed;
   }
   const data = image.data;
@@ -86,10 +88,20 @@ function createImage(ImageDataCtor, width, height) {
   return { width, height, data: new Uint8ClampedArray(width * height * 4) };
 }
 
-/** The ImageData packDisplayPlane was given, byte for byte. */
+function expand16(data, channels, pixels) {
+  const plane = new Uint16Array(pixels * 4);
+  if (channels === 4) { plane.set(data); return plane; }
+  for (let p = 0, i = 0, o = 0; p < pixels; p++, i += 3, o += 4) {
+    plane[o] = data[i]; plane[o + 1] = data[i + 1]; plane[o + 2] = data[i + 2]; plane[o + 3] = 65535;
+  }
+  return plane;
+}
+
+/** The ImageData packDisplayPlane was given, byte for byte (a 16-bit-only level as { width, height, __image16 }). */
 export function unpackDisplayPlane(packed, ImageDataCtor = globalThis.ImageData) {
   const { width, height, bits, channels, data } = packed;
   const pixels = width * height;
+  if (bits === 16 && packed.only16) return { width, height, __image16: { width, height, data: expand16(data, channels, pixels) } };
   const image = createImage(ImageDataCtor, width, height);
   const out8 = image.data;
   if (bits === 16) {
@@ -169,7 +181,7 @@ export function encodeDisplayProxyRecord({ key, meta = {}, plane, sample = null 
   if (sample?.data) add('sample', sample.data);
   const header = new TextEncoder().encode(JSON.stringify({
     key, meta,
-    plane: { width: plane.width, height: plane.height, bits: plane.bits, channels: plane.channels },
+    plane: { width: plane.width, height: plane.height, bits: plane.bits, channels: plane.channels, ...(plane.only16 ? { only16: true } : {}) },
     sample: sample?.data ? { width: sample.width, height: sample.height } : null,
     sections: layout
   }));

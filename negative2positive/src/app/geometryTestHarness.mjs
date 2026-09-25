@@ -96,12 +96,12 @@ const FUNCTIONS = [
   'applyCropDetectionOutcome',
   // Display-resolution sessions (#249).
   ...DISPLAY_SESSION_HELPERS, 'applyGeometryWithoutBase', 'decodeRouteOf', 'describeBase', 'analysisAreaOf',
-  'displayProxyTarget', 'liveDisplayProxyKey', 'displaySessionEligible', 'coldHistory', 'displayStandIns',
+  'liveDisplayProxyKey', 'conversionTargetFor', 'autoWbSampleFor', 'displaySessionEligible', 'coldHistory', 'displayStandIns',
   'captureDisplaySession', 'tierASession', 'demoteDisplaySession', 'holdPreparingOriginal', 'ensureBase',
   'ensureSource', 'prepareOriginalForTool', 'displayProxyMatches', 'requestSourceForDisplay',
   'selfCheckDisplayProxy', 'spillDisplaySession', 'displaySessionMeta', 'forgetDisplayProxies',
   'readSpilledDisplaySession', 'spilledDisplayEntry', 'activateDisplaySession', 'getColorAnalysisSample',
-  'hasSeparateConversionPreview', 'fillDisplayProxy', 'prepareZoomOneProxy', 'readStoredDisplaySession',
+  'hasSeparateConversionPreview', 'fillDisplayProxy', 'readStoredDisplaySession',
   'expectedStoredProxyKey', 'persistDisplayProxy', 'displayProxyFileKeyFor', 'persistPresentationPreview',
   'presentStoredPreview', 'encodePresentationJpeg'
 ];
@@ -115,7 +115,7 @@ export function applyCropHandlerSource() {
   return 'var applyCropHandler = ' + source.slice(start + marker.length - 'async () => {'.length, end) + '\n    };';
 }
 
-export function createHarness(base, { historyBudget = 768 * 1024 * 1024, sessionBudget = 768 * 1024 * 1024, workers = null, realProcessNegative = false } = {}) {
+export function createHarness(base, { historyBudget = 768 * 1024 * 1024, sessionBudget = 768 * 1024 * 1024, workers = null, realProcessNegative = false, displayLevels = false } = {}) {
   const displayed = [];
   const conversions = [];
   const state = {
@@ -188,9 +188,10 @@ export function createHarness(base, { historyBudget = 768 * 1024 * 1024, session
       state.currentStep = 3;
     },
     invalidateProcessedPipelineState: () => {
-      for (const key of ['processedImageData', 'displayImageData', 'conversionSourceImageData', 'previewSourceImageData', 'histogramSourceImageData', 'webglSourceImageData']) state[key] = null;
-      // A Tier B session keeps its display proxy (#249), as main.js does.
-      if (!state.sourcePending) state.conversionPreviewImageData = null;
+      for (const key of ['processedImageData', 'displayImageData', 'conversionSourceImageData', 'conversionPreviewImageData',
+        'previewSourceImageData', 'histogramSourceImageData', 'webglSourceImageData', 'autoWbSample']) state[key] = null;
+      // A Tier B session keeps its display level (#249), as main.js does.
+      if (!state.sourcePending) state.displayLevelImageData = null;
     },
     sanitizeSettings: settings => ({
       filmBase: {}, lensCorrection: { enabled: false, params: {}, modes: {} },
@@ -212,8 +213,20 @@ export function createHarness(base, { historyBudget = 768 * 1024 * 1024, session
     colorAnalysisSamples: new WeakMap(), displayProxyKey: displayProxy.displayProxyKey,
     displayPlaneHash: displayProxy.displayPlaneHash, checksum32: displayProxy.checksum32,
     displayPreviewSize: displayPreview.displayPreviewSize, resizeDisplayPreview: displayPreview.resizeDisplayPreview,
-    resizeDisplayPreviewInSlices: displayPreview.resizeDisplayPreviewInSlices,
+    // The display level (#248): the proxy of a display session.
+    displayLevelGeometry: displayPreview.displayLevelGeometry, adoptDisplayLevel: displayPreview.adoptDisplayLevel,
+    displayLevelFactor: displayPreview.displayLevelFactor, displayTargetFor: displayPreview.displayTargetFor,
+    buildDisplayLevelInBands: displayPreview.buildDisplayLevelInBands, buildDisplayLevel: displayPreview.buildDisplayLevel,
+    isDisplayTarget: displayPreview.isDisplayTarget, displaySizeServes: displayPreview.displaySizeServes,
     previewTier: 'normal', previewTierMaxPixels: () => 4_000_000, webglState: {},
+    // main.js's getDisplayPreviewSize over the fixture's container.
+    getDisplayPreviewSize: (image, maxDimension = 8192, tier = target.previewTier) => {
+      const container = target.getCanvasContainerSize();
+      return displayPreview.displayPreviewSize(image.width, image.height, {
+        viewportWidth: container.width - 20 || 1280, viewportHeight: container.height - 20 || 900,
+        dpr: target.window.devicePixelRatio || 1, zoom: 1, maxPixels: target.previewTierMaxPixels(tier), maxDimension
+      });
+    },
     getCanvasContainerSize: () => ({ width: 1280, height: 920 }), window: { devicePixelRatio: 2 },
     lensCorrectionActive: () => false, isRawLikeFileName: name => /\.(dng|nef|cr2|arw|rw2)$/.test(name),
     usesSilverCoreConversion: () => true, hasFrameRepairs: () => false, isAiBrushEnabled: () => false,
@@ -262,7 +275,19 @@ export function createHarness(base, { historyBudget = 768 * 1024 * 1024, session
       aiRepair: { status: 'ready', revision: 1 }, autoMeasurements: 0
     });
   }
+  // The #248 stubs above make small frames their own level and preview; the
+  // display-session tests (#249) keep the real levels and targets instead.
+  const levelStubs = realProcessNegative && !displayLevels
+    ? { conversionTargetFor: target.conversionTargetFor, hasSeparateConversionPreview: target.hasSeparateConversionPreview } : null;
+  if (realProcessNegative && displayLevels) {
+    Object.assign(target, {
+      buildDisplayLevelInBands: displayPreview.buildDisplayLevelInBands, displayLevelFactor: displayPreview.displayLevelFactor,
+      getDisplayPreviewSize: target.getDisplayPreviewSize,
+      releaseBeforeAfterCanvas: () => {}, refreshCanvasContainerSize: () => {}
+    });
+  }
   vm.runInContext([...FUNCTIONS, ...(realProcessNegative ? ['processNegative'] : [])].map(functionSource).join('\n'), context);
+  if (levelStubs) Object.assign(target, levelStubs);
   const jobs = () => pool.counters.jobs;
   return { context, state, pool, displayed, conversions, target, jobs };
 }

@@ -4,6 +4,7 @@ import vm from 'node:vm';
 import { planDetailRegion, detailRegionServes, detailSlotSize, snapPanToDevicePixels, copyRegionRows, DETAIL_SETTLE_MS } from './detailLayer.js';
 import { displayTargetFor, displayLevelGeometry } from './displayPreview.js';
 import { computeZoomGeometry } from './zoomGeometry.js';
+import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
 
 // #248 part 5 in main.js (extracted with vm): when the detail layer asks for a
 // region, from what, how it is placed, and that a stale region is never drawn.
@@ -56,6 +57,8 @@ function fixture({ dpr = 2, container = { width: 600, height: 420 } } = {}) {
   };
   const fit = Math.min((container.width - 20) / W, (container.height - 20) / H);
   const context = vm.createContext({
+    // #249: no photo here takes a display form.
+    ...displaySessionStubs(),
     state, window: { devicePixelRatio: dpr, location: { search: '' } }, console, performance,
     // The typed arrays of this realm, which the fixture's planes are made in.
     Uint16Array, Uint8ClampedArray, ImageData,
@@ -89,6 +92,7 @@ function fixture({ dpr = 2, container = { width: 600, height: 420 } } = {}) {
     },
   });
   vm.runInContext([
+    ...DISPLAY_SESSION_HELPERS,
     'detailLayerAllowed', 'detailView', 'detailFullFrame', 'detailTag', 'detailTagCurrent', 'hideDetailLayer', 'dropDetailLayer',
     'positionDetailCanvas', 'drawDetailLayer', 'syncDetailLayer', 'noteDetailViewChanged', 'scheduleDetailRequest',
     'scheduleDetailWarmUp', 'requestDetailRegion', 'detailFromFrame', 'detailFromSource', 'showDetailRegion',

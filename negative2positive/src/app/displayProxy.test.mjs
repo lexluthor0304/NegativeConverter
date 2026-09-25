@@ -135,4 +135,26 @@ const same = (a, b, label) => {
   assert.equal(displayPlaneHash(preview), checksum32(new Uint8Array(preview.__image16.data.buffer)));
 }
 
-console.log('displayProxy: exact plane rebuild, records, checksum and key invalidation passed');
+// A display level (#248) is a 16-bit plane only: it packs as RGB16 when
+// opaque (RGBA16 else) and comes back as { width, height, __image16 },
+// byte for byte, through a record too.
+{
+  const { buildDisplayLevel } = await import('./displayPreview.js');
+  for (const alpha of [65535, 40000]) {
+    const level = buildDisplayLevel(source16(40, 30, { seed: 11, alpha }), 2);
+    assert.equal(level.data, undefined, 'a level has no 8-bit plane');
+    const packed = packDisplayPlane(level);
+    assert.equal(packed.only16, true);
+    assert.equal(packed.data8, undefined);
+    assert.equal(packed.channels, alpha === 65535 ? 3 : 4);
+    const record = decodeDisplayProxyRecord(encodeDisplayProxyRecord({ key: 'level', plane: packed }));
+    for (const plane of [packed, record.plane]) {
+      const back = unpackDisplayPlane(plane);
+      assert.equal(back.data, undefined, 'still 16-bit only');
+      assert.deepEqual([back.width, back.height], [level.width, level.height]);
+      assert.ok(Buffer.from(back.__image16.data.buffer).equals(Buffer.from(level.__image16.data.buffer)), `level alpha ${alpha}: 16-bit exact`);
+    }
+  }
+}
+
+console.log('displayProxy: exact plane rebuild, 16-bit levels, records, checksum and key invalidation passed');

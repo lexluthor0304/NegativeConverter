@@ -94,7 +94,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     import {
       displayPreviewSize, resizeDisplayPreview, resizeDisplayPreviewInBands, updateDisplayPreviewRect, noteDisplayFilter,
       displayLevelFactor, displayLevelGeometry, buildDisplayLevelInBands, resampleDisplayLevel, displayTargetFor, isDisplayTarget,
-      displaySizeServes, displayFilterOf
+      displaySizeServes, displayFilterOf, adoptDisplayLevel
     } from './displayPreview.js';
     import { settledDisplayRoute, step3FrameReference, upscaleReference, photoRectPercent } from './displayCanvas.js';
     import { createCoreReprocessGates, previewDispatchAction, CORE_FULL_REPROCESS_DELAY_MS } from './coreReprocessDispatcher.js';
@@ -2682,8 +2682,6 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       recipeChanged: 0, provisional: 0, baseDecodes: 0, sourceBuilds: 0, baseMismatches: 0, selfChecks: 0,
       selfCheckMismatches: 0, sampleMisses: 0, fills: 0, fillSkips: 0, force: null
     };
-    // The last viewport the editor sized a display preview for (#249).
-    let lastEditorViewport = null;
 
     function clearFullResolutionRenderState() {
       if (fullResolutionRenderTimer) {
@@ -4720,9 +4718,6 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // never resizes it. Native pixels at zoom come from the detail layer.
     function getDisplayPreviewSize(imageData, maxDimension = webglState.maxTextureSize || 8192, tier = previewTier) {
       const container = getCanvasContainerSize();
-      // The editor's viewport, for display proxies filled while the editor
-      // shows another photo (#249).
-      if (container.width > 20 && container.height > 20) lastEditorViewport = { width: container.width, height: container.height };
       return displayPreviewSize(imageData.width, imageData.height, {
         viewportWidth: container.width - 20 || 1280,
         viewportHeight: container.height - 20 || 900,
@@ -4747,7 +4742,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // resamples nothing on the main thread: the preview worker resamples the
     // level when a conversion asks for the new size. Returns whether it changed.
     function updateConversionTarget() {
-      const source = state.conversionSourceImageData;
+      // A Tier B session (#249) sizes by its pending source: its level serves
+      // any window, so a new size needs no source.
+      const source = conversionSourceSize();
       const level = state.displayLevelImageData;
       if (!source || !level) return false;
       const current = state.conversionPreviewImageData;
@@ -4896,11 +4893,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const source = state.conversionSourceImageData;
       if (!source && state.sourcePending && state.currentStep >= 3 && !state.cropping && !state.beforeAfterActive
         && previewTier !== 'reduced') {
-        // A Tier B session (#249): a display preview of another size needs
-        // the source; the proxy stays on screen until it is rebuilt.
-        const target = getDisplayPreviewSize(state.sourcePending);
-        const shown = state.conversionPreviewImageData;
-        if (shown?.width !== target.width || shown?.height !== target.height) requestSourceForDisplay();
+        // A Tier B session (#249): the preview worker resamples its display
+        // level for the new size, as for any photo; no source is needed.
+        if (updateConversionTarget()) scheduleCoreReprocess({ full: false, displayOnly: true });
         return;
       }
       if (!source || state.currentStep < 3 || state.cropping || state.beforeAfterActive) return;
@@ -6068,7 +6063,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (!DETAIL_LAYER_ENABLED || !glDetailCanvas || detailLayer.failed) return false;
       if (!webglState.webgl2 || !isWebGLActive() || state.beforeAfterActive || state.samplingMode || canPaintAiBrush()) return false;
       if (state.geometryPending || previewTier !== 'normal' || state.currentStep < 3 || state.sprocketPreviewEnabled) return false;
-      if (!usesSilverCoreConversion(state) || !state.conversionSourceImageData || !state.displayLevelImageData) return false;
+      // A Tier B session (#249) draws regions from its level; native ones
+      // rebuild its source first (detailFromSource).
+      if (!usesSilverCoreConversion(state) || !conversionSourceSize() || !state.displayLevelImageData) return false;
       if (state.filmType === 'positive' && state.positiveEngine === 'legacy') return false;
       return hasSeparateConversionPreview();
     }
@@ -6093,7 +6090,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     // The view the region is planned from, in the conversion source's pixels.
     function detailView() {
-      const source = state.conversionSourceImageData;
+      const source = conversionSourceSize();
       const container = getCanvasContainerSize();
       const geometry = getZoomGeometry();
       return {
@@ -6124,12 +6121,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // What a region was made of: never drawn over a base of other settings, of
     // another source or of another restart generation (#219).
     function detailTag(full) {
-      return { source: state.conversionSourceImageData, generation: coreReprocessGeneration, token: coreReprocessToken,
+      return { source: conversionSourceSize(), generation: coreReprocessGeneration, token: coreReprocessToken,
         full, dustRevision: state.dustRemoval.revision };
     }
 
     function detailTagCurrent(tag) {
-      if (!tag || tag.source !== state.conversionSourceImageData || tag.generation !== coreReprocessGeneration
+      if (!tag || tag.source !== conversionSourceSize() || tag.generation !== coreReprocessGeneration
         || tag.token !== coreReprocessToken) return false;
       if (tag.full) return tag.full === detailFullFrame() && tag.dustRevision === state.dustRemoval.revision;
       return !hasFrameRepairs();
@@ -6321,8 +6318,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // A region converted by the preview worker from native rows of the
     // conversion source (or from its cached level), with the base's analysis.
     async function detailFromSource(plan) {
+      // Native rows of a Tier B session (#249) wait for its source.
+      if (!plan.fromLevel && !state.conversionSourceImageData) {
+        requestSourceForDisplay();
+        return null;
+      }
       detailLayer.counters.conversions += 1;
-      const source = state.conversionSourceImageData;
+      const source = conversionSourceSize();
       const base = previewRequestImage(state.conversionPreviewImageData);
       const container = getCanvasContainerSize();
       const slot = detailSlotSize(container.width, container.height, window.devicePixelRatio || 1);
@@ -6789,7 +6791,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const reference = processed?.__analysisPreview;
       // The viewport-independent sample of this source (#248): the display
       // preview it replaces followed the window size, DPR and zoom.
-      const wbSample = autoWbSampleFor(state.conversionSourceImageData);
+      const wbSample = autoWbSampleFor(autoWbSampleKey());
       const positive = wbSample || state.previewSourceImageData || state.processedImageData;
       const source = reference || positive;
       if (!source) return;
@@ -6816,6 +6818,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       updateWBSliders();
       updateGrayPointGuideUI();
       markCurrentFileDirty();
+    }
+
+    // What the auto-WB sample is keyed by: the conversion source, or the
+    // display level of a Tier B session whose source is pending (#249).
+    function autoWbSampleKey() {
+      return state.conversionSourceImageData || (state.sourcePending ? state.displayLevelImageData : null);
     }
 
     // The auto-WB sample of `source` (#248 part 3), or null.
@@ -6912,7 +6920,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           } : {})
         }
       };
-      if (wbSample && state.conversionSourceImageData) {
+      if (wbSample && (state.conversionSourceImageData || (state.sourcePending && display))) {
         const level = state.displayLevelImageData || fullSource;
         request.wbSample = preview && display
           ? { geometry: displayLevelGeometry(level) }
@@ -10382,11 +10390,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // an eviction demotes the entry to it (#249).
       const display = settled ? captureDisplaySession(item, entry) : null;
       if (display) entry.display = display;
-      if (display && entry.zoom !== 1) prepareZoomOneProxy(item, display, state.conversionSourceImageData);
       // The persistent store keeps the display proxy of an exact route across
       // restarts (part 3), after the next paint (the planes are copied).
-      if (display && entry.zoom === 1 && displayProxyStore) {
-        const proxy = { image: display.snapshot.refs.conversionPreviewImageData, sample: display.sample,
+      if (display && displayProxyStore) {
+        const proxy = { image: display.snapshot.refs.displayLevelImageData, sample: display.sample,
           proxyKey: display.sourcePending.key, meta: displaySessionMeta(display) };
         schedulePostPaintTask(() => { void persistDisplayProxy(item, proxy); });
       }
@@ -10580,29 +10587,18 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return area ? JSON.stringify(area) : null;
     }
 
-    // The display preview's target for a conversion source of this size, with
-    // the inputs getDisplayPreviewSize reads (live viewport, DPR, zoom, tier
-    // and texture limit). Exactly its arithmetic.
-    function displayProxyTarget(source, { zoom = state.zoomLevel, tier = previewTier } = {}) {
-      const container = getCanvasContainerSize();
-      const inputs = {
-        viewportWidth: container.width - 20 || 1280, viewportHeight: container.height - 20 || 900,
-        dpr: window.devicePixelRatio || 1, zoom, maxPixels: previewTierMaxPixels(tier),
-        maxDimension: webglState.maxTextureSize || 8192
-      };
-      return { ...displayPreviewSize(source.width, source.height, inputs), ...inputs };
-    }
-
-    // The key of the display proxy the live photo's settled view converts.
-    function liveDisplayProxyKey(item = getCurrentQueueItem(), { target = null } = {}) {
+    // The key of the display proxy the live photo's settled view converts:
+    // its display level (#248), which follows the base, the geometry, lens
+    // correction and the analysis area, and no viewport (the preview worker
+    // resamples it for any window).
+    function liveDisplayProxyKey(item = getCurrentQueueItem()) {
       const base = state.loadedBaseImageData ? describeBase(state.loadedBaseImageData) : state.baseDescriptor;
       const source = conversionSourceSize();
       if (!item || !base || !source) return null;
       const key = geometryKeyFor(base, { rotationAngle: state.rotationAngle, mirrored: state.mirrored, cropRegion: state.cropRegion });
       return displayProxyKey({
         id: null, route: base.route, base, rotationAngle: key.angle, mirrored: key.mirrored, cropRegion: key.crop,
-        lens: lensSignature(state), area: analysisAreaOf(state.autoFrame.lastDiagnostics),
-        target: target || displayProxyTarget(source)
+        lens: lensSignature(state), area: analysisAreaOf(state.autoFrame.lastDiagnostics)
       });
     }
 
@@ -10616,8 +10612,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const source = conversionSourceSize();
       const settings = item?.settings;
       return Boolean(source && isLargeImage(source) && !hasFrameRepairs() && !isAiBrushEnabled()
-        && usesSilverCoreConversion(state) && state.conversionPreviewImageData
-        && state.conversionPreviewImageData !== state.conversionSourceImageData
+        && usesSilverCoreConversion(state) && state.displayLevelImageData && hasSeparateConversionPreview()
         && settings?.autoFrameMeta && settings.filmEdge?.checked
         && (state.cropRegion || !requiresFilmBase()));
     }
@@ -10649,13 +10644,18 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const { frame, crop } = displayStandIns(key, frameSize, cropPlanes);
       // The processed preview is exactly the preview conversion only while
       // it is one; a full-resolution plane (after an export) is converted
-      // again from the proxy on return.
+      // again from the proxy on return. The display level (#248) is the
+      // proxy; the conversion preview is a display target on it (no pixels),
+      // and the auto-WB sample is keyed by the level from now on.
       const refs0 = entry.snapshot.refs;
       const settledPreview = state.processedImageDataIsPreview && (!refs0 || refs0.cold || refs0.processedImageData === state.processedImageData);
+      const level = state.displayLevelImageData;
+      const wbSample = autoWbSampleFor(autoWbSampleKey());
       const refs = {
         originalImageData: frame, croppedImageData: crop,
         processedImageData: settledPreview ? state.processedImageData : null,
-        conversionSourceImageData: null, conversionPreviewImageData: state.conversionPreviewImageData,
+        conversionSourceImageData: null, conversionPreviewImageData: conversionTargetFor(source, level, 'normal'),
+        displayLevelImageData: level, autoWbSample: wbSample ? { source: level, image: wbSample } : null,
         previewSourceImageData: settledPreview ? state.previewSourceImageData : null,
         histogramSourceImageData: settledPreview ? state.histogramSourceImageData : null,
         webglSourceImageData: settledPreview ? state.webglSourceImageData : null,
@@ -10835,17 +10835,16 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     }
 
     // The proxy key a cold open of `item` would convert now, for a stored
-    // entry of these base sizes: the recipe's geometry and analysis area and
-    // the live viewport at zoom 1 (as fillDisplayProxy keys it).
+    // entry of these base sizes: the recipe's geometry and analysis area (as
+    // fillDisplayProxy keys it).
     function expectedStoredProxyKey(item, meta) {
       const settings = item?.settings;
       if (!settings?.autoFrameMeta || !meta?.base || lensCorrectionActive(settings)) return null;
       const descriptor = { width: meta.base.width, height: meta.base.height, has16: meta.base.has16, route: meta.base.route };
       const key = geometryKeyFor(descriptor, { rotationAngle: settings.rotationAngle, mirrored: settings.mirrored, cropRegion: settings.cropRegion });
-      const source = key.crop ? { width: key.crop.width, height: key.crop.height } : { width: key.frameWidth, height: key.frameHeight };
       return displayProxyKey({
         id: null, route: descriptor.route, base: descriptor, rotationAngle: key.angle, mirrored: key.mirrored, cropRegion: key.crop,
-        lens: null, area: analysisAreaOf(settings.autoFrameMeta), target: displayProxyTarget(source, { zoom: 1, tier: 'normal' })
+        lens: null, area: analysisAreaOf(settings.autoFrameMeta)
       });
     }
 
@@ -10868,20 +10867,16 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return spilledDisplayEntry(item, stored, { proxyKey: wanted.proxyKey, stored: true });
     }
 
-    // Spills a Tier B entry: its display proxy, colour-analysis sample and
-    // what installs it again (sizes, geometry, keys). The recipe is not
-    // stored: it always comes from the queue item. A proxy of another zoom
-    // than 1 is not spilled (its zoom-1 plane would need the source).
+    // Spills a Tier B entry: its display proxy (the display level, #248),
+    // colour-analysis sample and what installs it again (sizes, geometry,
+    // keys). The recipe is not stored: it always comes from the queue item.
     function spillDisplaySession(item, display) {
       if (!display?.snapshot || !state.fileQueue.includes(item)) return false;
-      // A photo left zoomed spills its zoom-1 proxy (prepareZoomOneProxy).
-      const zoomOne = display.zoom === 1 ? null : display.zoomOne;
-      if (display.zoom !== 1 && !zoomOne) return false;
-      const image = zoomOne ? zoomOne.proxy : display.snapshot.refs.conversionPreviewImageData;
+      const image = display.snapshot.refs.displayLevelImageData;
       if (!image) return false;
       const meta = displaySessionMeta(display);
       displaySessionDiagnostics.spills++;
-      void displayProxySpill.put(item.id, { image, sample: display.sample, proxyKey: zoomOne ? zoomOne.key : display.sourcePending.key, meta }).then(written => {
+      void displayProxySpill.put(item.id, { image, sample: display.sample, proxyKey: display.sourcePending.key, meta }).then(written => {
         if (written) displaySessionDiagnostics.spillWrites++;
         else displaySessionDiagnostics.spillFailures++;
       });
@@ -10896,7 +10891,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         base: { width: base.width, height: base.height, has16: base.has16, route: base.route },
         geometry: { angle: key.angle, mirrored: key.mirrored, crop: key.crop, frameWidth: key.frameWidth, frameHeight: key.frameHeight },
         cropSize: display.cropSize, source: { width: display.sourcePending.width, height: display.sourcePending.height },
-        area: display.sourcePending.area,
+        area: display.sourcePending.area, level: displayLevelGeometry(display.snapshot.refs.displayLevelImageData),
         rawMetadata: display.rawMetadata || null, filmEdge: display.filmEdge || null
       };
     }
@@ -10926,9 +10921,14 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const key = geometryKeyFor(base, { rotationAngle: meta.geometry.angle, mirrored: meta.geometry.mirrored, cropRegion: meta.geometry.crop });
       const { frame, crop } = displayStandIns(key, { width: key.frameWidth, height: key.frameHeight }, meta.cropSize || { width: 0, height: 0 });
       if (sample && meta.area) colorAnalysisSamples.set(base, { key: meta.area, sample });
+      // The level again, with its source geometry (#248). A frame that is
+      // its own level (k = 1, only below the large-image size unless a debug
+      // threshold lowers it) comes back as the plane itself.
+      const level = meta.level?.k > 1 && image.__image16?.data
+        ? adoptDisplayLevel(image.__image16.data, image.width, image.height, meta.level) : image;
       return {
         tier: 'B', spilled: true, stored, file: item.file, base: null, baseDescriptor: base, rawMetadata: meta.rawMetadata, filmEdge: meta.filmEdge,
-        planes: { frame, crop, proxy: image }, sample,
+        planes: { frame, crop, level }, sample,
         sourcePending: { width: meta.source.width, height: meta.source.height, key: proxyKey, area: meta.area }
       };
     }
@@ -10938,70 +10938,50 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // ===========================================
     // Roll analysis and the lanes decode frames the editor has not opened.
     // While such a decode is in hand, the display proxy a cold open of the
-    // frame would convert is rendered from it in the geometry pool (only the
-    // crop-window rows the proxy reads, resampled with resizeDisplayPreview's
-    // own taps) and spilled with the frame's colour-analysis sample, so the
-    // first open converts it without a decode. Only for decided geometry
-    // (the frame and film-edge detections done), without lens correction or
-    // repairs, at the editor's last viewport at zoom 1. Resolves whether a
-    // proxy of that key is spilled.
+    // frame would convert, its display level (#248), is rendered from it in
+    // the geometry pool (only the crop window's rows, each band box-averaged
+    // with buildDisplayLevel's own sums) and stored or spilled with the
+    // frame's colour-analysis sample, so the first open converts it without
+    // a decode, at any window size. Only for decided geometry (the frame and
+    // film-edge detections done), without lens correction or repairs, and
+    // for a frame whose level is smaller than it (k > 1). Resolves whether a
+    // proxy of that key is kept.
     async function fillDisplayProxy(item, base, settings, { isCurrent = () => true } = {}) {
       const skip = () => { displaySessionDiagnostics.fillSkips++; return false; };
       if (!(displayProxySpill.enabled || displayProxyStore) || !item || !base?.data || isReleasedPlane(base) || !state.fileQueue.includes(item)) return false;
       if (!settings?.autoFrameMeta || !settings.filmEdge?.checked || lensCorrectionActive(settings)) return skip();
       if (!usesSilverCoreConversion(settings) || state.dustRemoval.enabled || settings.repairStrokes?.length) return skip();
       const route = decodeRouteOf(item.file, base);
-      if (route === 'raw-fallback' || !lastEditorViewport) return skip();
+      if (route === 'raw-fallback') return skip();
       const key = geometryKeyFor(base, { rotationAngle: settings.rotationAngle, mirrored: settings.mirrored, cropRegion: settings.cropRegion });
       // Step 2's border mode of a colour frame without a crop reads its pixels.
       if (!key.crop && requiresFilmBase(settings)) return skip();
       const source = key.crop ? { width: key.crop.width, height: key.crop.height } : { width: key.frameWidth, height: key.frameHeight };
-      if (!isLargeImage(source)) return skip();
-      const inputs = {
-        viewportWidth: lastEditorViewport.width - 20 || 1280, viewportHeight: lastEditorViewport.height - 20 || 900,
-        dpr: window.devicePixelRatio || 1, zoom: 1, maxPixels: previewTierMaxPixels('normal'), maxDimension: webglState.maxTextureSize || 8192
-      };
-      const target = { ...displayPreviewSize(source.width, source.height, inputs), ...inputs };
-      if (target.width >= source.width && target.height >= source.height) return skip();
+      const k = displayLevelFactor(source.width, source.height);
+      if (!isLargeImage(source) || k <= 1) return skip();
       const descriptor = { width: base.width, height: base.height, has16: Boolean(base.__image16?.data), route };
       const area = analysisAreaOf(settings.autoFrameMeta);
       const proxyKey = displayProxyKey({
-        id: null, route, base: descriptor, rotationAngle: key.angle, mirrored: key.mirrored, cropRegion: key.crop,
-        lens: null, area, target
+        id: null, route, base: descriptor, rotationAngle: key.angle, mirrored: key.mirrored, cropRegion: key.crop, lens: null, area
       });
       if (displayProxySpill.proxyKey(item.id) === proxyKey) return true;
       const plan = geometryPlanFor(base, key);
       if (!plan) return skip();
-      const proxy = await geometryPool.renderDisplayProxy(base, plan, target, { isCurrent });
-      if (!proxy || !isCurrent() || !state.fileQueue.includes(item)) return false;
+      const level = await geometryPool.renderDisplayLevel(base, plan, { k, isCurrent });
+      if (!level || !isCurrent() || !state.fileQueue.includes(item)) return false;
       const sample = getColorAnalysisSample(settings, base);
       const meta = {
         base: descriptor,
         geometry: { angle: key.angle, mirrored: key.mirrored, crop: key.crop, frameWidth: key.frameWidth, frameHeight: key.frameHeight },
-        cropSize: key.crop ? { width: key.crop.width, height: key.crop.height } : null, source, area,
+        cropSize: key.crop ? { width: key.crop.width, height: key.crop.height } : null, source, area, level: displayLevelGeometry(level),
         rawMetadata: null, filmEdge: settings.filmEdge || null
       };
       // The persistent store keeps it across restarts (part 3); the session
       // spill takes it when the store is off or full.
-      let written = await persistDisplayProxy(item, { image: proxy, sample, proxyKey, meta });
-      if (!written && isCurrent()) written = await displayProxySpill.put(item.id, { image: proxy, sample, proxyKey, transfer: true, meta });
+      let written = await persistDisplayProxy(item, { image: level, sample, proxyKey, meta });
+      if (!written && isCurrent()) written = await displayProxySpill.put(item.id, { image: level, sample, proxyKey, transfer: true, meta });
       if (written) displaySessionDiagnostics.fills++;
       return written;
-    }
-
-    // A photo left zoomed keeps its zoomed display planes in RAM; the spill
-    // needs the zoom-1 proxy, resized from the conversion source in the pool
-    // while the session still holds it.
-    function prepareZoomOneProxy(item, display, source) {
-      if (!source || isReleasedPlane(source)) return;
-      const target = displayProxyTarget(source, { zoom: 1, tier: 'normal' });
-      if (target.width >= source.width && target.height >= source.height) return;
-      const plan = planGeometry(source, {});
-      if (!plan) return;
-      const key = liveDisplayProxyKey(item, { target });
-      void geometryPool.renderDisplayProxy(source, plan, target, { isCurrent: () => state.fileQueue.includes(item) }).then(proxy => {
-        if (proxy) display.zoomOne = { proxy, key };
-      }).catch(error => console.warn('Zoom-1 display proxy failed:', error));
     }
 
     // Opens a photo from its display form under the veil (#249): a Tier A or
@@ -11031,13 +11011,15 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         undoStack.splice(0, undoStack.length, ...entry.undo);
         redoStack.splice(0, redoStack.length, ...entry.redo);
       } else {
-        // A spilled proxy: stand-ins for every plane, the proxy as the display preview.
+        // A spilled proxy: stand-ins for every plane, the level for the display.
         clearFullResolutionRenderState();
         state.originalImageData = entry.planes.frame;
         state.croppedImageData = entry.planes.crop;
         state.processedImageData = null;
         state.conversionSourceImageData = null;
-        state.conversionPreviewImageData = entry.planes.proxy;
+        state.displayLevelImageData = entry.planes.level;
+        state.autoWbSample = null;
+        state.conversionPreviewImageData = conversionTargetFor(entry.sourcePending, entry.planes.level, 'normal');
         state.previewSourceImageData = null;
         state.histogramSourceImageData = null;
         state.webglSourceImageData = null;
@@ -11171,6 +11153,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         }
         state.conversionSourceImageData = corrected;
         state.sourcePending = null;
+        // The level stays the display level; its WB sample now keys by the source.
+        if (state.autoWbSample && state.autoWbSample.source === state.displayLevelImageData) {
+          state.autoWbSample = { ...state.autoWbSample, source: corrected };
+        }
         displaySessionDiagnostics.sourceBuilds++;
         void selfCheckDisplayProxy(pending, corrected, generation);
         return true;
@@ -11211,21 +11197,23 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // geometry, lens, analysis area and viewport would build.
     function displayProxyMatches(item = getCurrentQueueItem()) {
       const pending = state.sourcePending;
-      if (!pending || !state.conversionPreviewImageData) return false;
+      if (!pending || !state.displayLevelImageData) return false;
       if (pending.area !== analysisAreaOf(state.autoFrame.lastDiagnostics)) return false;
       return pending.key === liveDisplayProxyKey(item);
     }
 
-    // The zoom, a window resize or a DPR change asked a Tier B session for a
-    // display preview of another size: the proxy stays on screen (resized by
-    // the canvas) while the source is rebuilt, then the refresh runs again.
+    // A zoom asked a Tier B session for native pixels its level does not have
+    // (the detail layer, #248): the source is rebuilt, then the region is
+    // asked for again. A window or DPR change needs none (the level serves).
     let displaySourceRequest = null;
     function requestSourceForDisplay() {
       if (displaySourceRequest) return;
       const generation = loadGeneration;
       displaySourceRequest = ensureSource().then(ready => {
         displaySourceRequest = null;
-        if (ready && isCurrentLoad(generation) && !state.sourcePending) refreshDisplayPreviewForViewport();
+        if (!ready || !isCurrentLoad(generation) || state.sourcePending) return;
+        refreshDisplayPreviewForViewport();
+        scheduleDetailRequest(0);
       });
     }
 
@@ -21691,7 +21679,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (!source) return;
       // The anchors are estimated on the auto-WB sample, which does not follow
       // the viewport (#248), whenever it belongs to this source.
-      const sampleSource = autoWbSampleFor(state.conversionSourceImageData) || source;
+      const sampleSource = autoWbSampleFor(autoWbSampleKey()) || source;
       const revision = manualEditRevision;
       const valid = () => isCurrentLoad(generation) && item === getCurrentQueueItem() && revision === manualEditRevision && !state.cropping && !studioAutoFrameRunning && !automaticRollImportRunning && !state.rollFrame?.locked && !state.wbUserOverride && !state.grayPointSampled && !state.rollReference.applyLock && !item.savedSettings;
       // Whole converted preview coordinates are used for both WB and rescue.
