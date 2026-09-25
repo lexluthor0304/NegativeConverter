@@ -91,6 +91,7 @@ for (const failure of ['null', 'throw']) {
     i18n: { en: {} }, currentLang: 'en',
     applyLensCorrectionWithSettings: async imageData => imageData, invalidateSilverCoreCache: noop,
     gpuPreviewScheduler: { cancel: noop }, releaseBeforeAfterCanvas: noop, refreshCanvasContainerSize: noop,
+    noteConversionStarted: noop, scheduleCropViewProxy: noop,
     buildPreviewSourceImageData: imageData => imageData, usesSilverCoreConversion: () => true,
     hasSeparateConversionPreview: () => false,
     convertFromCurrentSource: async () => { if (failure === 'throw') throw new Error('decoder'); return null; },
