@@ -184,10 +184,12 @@ const dab = ({ x, y }) => ({ size: 0.02, points: [{ x: (x + 17) / W, y: (y + 11)
   assert.equal(session.memoStats().capBytes, MAIN_REALM_TILE_MEMO_BYTES, 'a page-realm session gets the smaller cap');
   const verified = runnerFor(ort, modelSession(), { memo: createTileMemo({ verify: true }) });
   const plain = runnerFor(ort, modelSession());
-  const strokes = [];
+  let strokes = [];
   let dustImages = null;
   for (let n = 1; n <= 11; n++) {
-    strokes.push(dab(slots[3 + n]));
+    // A new array per edit, as main.js writes them: sanitizeRepairStrokes
+    // caches its result by the input array (#234).
+    strokes = [...strokes, dab(slots[3 + n])];
     const selection = buildRepairMask(sanitizeRepairStrokes(strokes), geometry);
     const before = inferences;
     const memoDust = await inpaintWithModel(source, dustMask, session.run);
