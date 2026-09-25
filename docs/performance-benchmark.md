@@ -497,7 +497,13 @@ second CLI process with another `$TMPDIR`), guards and parsers, the
 `proc_pid_rusage` helper against the test process, the probe against stand-in
 browser objects, metric definitions, source maps and trace analysis, the hang
 watchdog and dump collection, worktree creation and removal, the preview
-plugin routes, fixture structure and memory, export verification. The smoke
+plugin routes, fixture structure and memory, export verification. Two
+simulation tests run the scenario code itself: `scenarios.test.mjs` drives
+S1–S9, H and the hang self-test through the runner's repetition code against
+a scripted Chrome session, and `webkit.test.mjs` drives Safari's S1, S2, S4
+and S7 against a scripted WebDriver session (`NC_PERF_TIME_SCALE=0` skips
+their waits; real runs never set it). `runner.test.mjs` covers the
+orchestration (interleaving, compare exit codes, baselines, cleanup). The smoke
 suite (`npm run test:smoke`, or `--perf-harness-only`) checks the probe and the
 `?perf=1` hook in the real app and decodes a small synthetic CFA DNG through
 LibRaw.
