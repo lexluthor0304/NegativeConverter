@@ -61,6 +61,7 @@ export async function runFirstPhotoSmoke({ send, evaluate, waitFor, wait, fail, 
   const fixtures = join(root, 'negative2positive', 'test-fixtures');
   const files = ['negative-sample.jpg', 'negative-sample-2.jpg', 'negative-plain.png'].map(name => join(fixtures, name));
   const script = await send('Page.addScriptToEvaluateOnNewDocument', { source: PROBE });
+  let autoRollBefore;
   try {
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
     await waitFor('first photo boot', `!!window.__firstPhotoProbe && !!document.getElementById('studioImportAutoCrop') && /No model loaded/.test(document.getElementById('dustAiStatus')?.textContent)`);
@@ -134,6 +135,14 @@ export async function runFirstPhotoSmoke({ send, evaluate, waitFor, wait, fail, 
     await waitFor('roll boot', `!!window.__firstPhotoProbe && !!document.getElementById('studioImportAutoCrop')`);
     await installDialogAutoAccept();
     await wait(300);
+    // Earlier scenarios switch the saved roll-import setting off; this step
+    // needs the scheduled roll analysis, so switch it on and restore it after.
+    autoRollBefore = await evaluate(`(() => {
+      const key = 'nc_auto_roll_import_v1', before = localStorage.getItem(key);
+      localStorage.setItem(key, 'on');
+      document.getElementById('autoRollOnImport').checked = true;
+      return before;
+    })()`);
     await evaluate(probeReset);
     await importFiles(files);
     await waitFor('roll first photo settled', `${ready} && !!document.getElementById('studioFilename').textContent`, 150_000);
@@ -145,6 +154,12 @@ export async function runFirstPhotoSmoke({ send, evaluate, waitFor, wait, fail, 
     if (probe.workers.some(url => /aiInpaintWorker/.test(url))) fail('a roll import must not start the MI-GAN worker');
     console.log('ok: a three-photo import creates no semantic or MI-GAN worker');
   } finally {
+    if (autoRollBefore !== undefined) {
+      await evaluate(`(() => {
+        const key = 'nc_auto_roll_import_v1', before = ${JSON.stringify(autoRollBefore ?? null)};
+        if (before === null) localStorage.removeItem(key); else localStorage.setItem(key, before);
+      })()`).catch(() => {});
+    }
     await send('Page.removeScriptToEvaluateOnNewDocument', { identifier: script.result.identifier });
   }
 }
