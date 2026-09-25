@@ -68,7 +68,9 @@ the timer fires, the tile is rebuilt only if its inputs changed: the converted
 preview source it samples and an exact signature of the adjustment settings.
 Zoom, pan and resize change neither; the display-preview refinement after a
 zoom converts the same settings at another size and carries the tile over
-instead of rebuilding it. A full-resolution re-render that follows it on
+instead of rebuilding it. The request records what the tile was sampled from
+before it marks the full-resolution pixels pending, and the tile is carried
+only if no other result was applied in between. A full-resolution re-render that follows it on
 photos of 16 MP or less is a new source and rebuilds the tile once. During a
 drag the tile keeps its pre-drag colours until it settles.
 

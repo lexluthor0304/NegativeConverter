@@ -131,6 +131,7 @@ function schedulerFixture({ repairs = false } = {}) {
   const conversions = [];
   const commits = [];
   const busyAtApply = [];
+  const carried = [];
   const applied = processed => {
     context.releaseCorePreviewRetained(processed);
     busyAtApply.push(context.coreReprocessBusy());
@@ -176,8 +177,7 @@ function schedulerFixture({ repairs = false } = {}) {
     resetDustForCleanSource: () => {},
     scheduleDustDetection: () => log.push('dust'),
     // #234: a display-preview resize hands the replaced source to the tile.
-    currentConvertedPreviewSource: () => state.processedImageData,
-    carryStudioThumbnailSource: previous => { if (previous) log.push('carry'); },
+    carryStudioThumbnailSource: previous => { if (previous) { log.push('carry'); carried.push(previous); } },
   });
   vm.runInContext([
     'coreReprocessBusy', 'whenCoreReprocessIdle', 'noteCoreReprocessSettled', 'runCoreReprocess',
@@ -186,6 +186,7 @@ function schedulerFixture({ repairs = false } = {}) {
     'fireCoreReprocessGate', 'clearCoreReprocessTimer', 'flushScheduledCoreReprocess',
     'retainCorePreviewPlane', 'armCorePreviewCommitTimer', 'releaseCorePreviewRetained', 'requestCorePreviewCommit',
     'maybeCommitCorePreviewPlane', 'settleCorePreviewWaiters', 'settleCorePreviewPlane', 'histogramSourceFor',
+    'currentConvertedPreviewSource', 'displayResizeOrigin', 'displayResizeReplaces',
   ].map(functionSource).join('\n'), context);
   const request = (exposure, options = { full: false }) => {
     if (exposure !== undefined) state.coreExposure = exposure;
@@ -193,7 +194,7 @@ function schedulerFixture({ repairs = false } = {}) {
   };
   const result = () => ({ width: 200, height: 150 });
   const retainedResult = () => ({ width: 200, height: 150, __retained16: true, __histogramSample: { sample: true } });
-  return { context, state, clock, log, conversions, commits, busyAtApply, request, result, retainedResult,
+  return { context, state, clock, log, conversions, commits, busyAtApply, carried, request, result, retainedResult,
     setTarget: size => { displayTarget = size; } };
 }
 
@@ -247,6 +248,40 @@ function schedulerFixture({ repairs = false } = {}) {
   f.conversions[3].resolve(f.result());
   await settle();
   assert.ok(!f.log.includes('carry'));
+  assert.equal(f.context.coreReprocessBusy(), false);
+}
+
+{
+  // The resize request itself marks the full-resolution pixels pending, which
+  // turns currentConvertedPreviewSource() from them to the preview raster: the
+  // tile sampled the full-resolution pixels, and those are what it carries.
+  const f = schedulerFixture();
+  const full = { width: 400, height: 300, name: 'full' };
+  const preview = { width: 200, height: 150, name: 'shown preview' };
+  Object.assign(f.state, { processedImageData: full, processedImageDataIsPreview: false, previewSourceImageData: preview });
+  f.request(undefined, { full: false, displayResize: true });
+  assert.equal(f.state.fullResolutionPending, true);
+  assert.equal(f.context.currentConvertedPreviewSource(), preview);
+  await Promise.resolve();
+  f.conversions[0].resolve(f.result());
+  await settle();
+  assert.deepEqual(f.carried, [full], 'the tile carries what it was sampled from');
+
+  // Another result applied between the request and the resize result may carry
+  // other settings: the tile is rebuilt instead.
+  f.log.length = 0;
+  f.carried.length = 0;
+  f.context.applyPreviewProcessedImageToState = processed => { f.state.previewSourceImageData = processed; f.log.push('apply'); };
+  f.clock.nextFrame();
+  f.request(5);
+  await Promise.resolve();
+  f.request(undefined, { full: false, displayResize: true });
+  assert.equal(f.context._coreReprocessPending.displayResize, true);
+  f.conversions[1].resolve(f.result());
+  await settle();
+  f.conversions[2].resolve(f.result());
+  await settle();
+  assert.deepEqual(f.carried, [], 'nothing is carried across another applied result');
   assert.equal(f.context.coreReprocessBusy(), false);
 }
 

@@ -5604,7 +5604,9 @@ import { frameNeedsReview } from './reviewQueue.js';
       if (blocked) {
         const displayResize = Boolean(options.displayResize)
           && (!_coreReprocessPending || _coreReprocessPending.displayResize === true);
-        _coreReprocessPending = { ...options, full, token, sourceRef, generation, displayResize };
+        const displayResizeFrom = displayResize
+          ? _coreReprocessPending?.displayResizeFrom || options.displayResizeFrom || null : null;
+        _coreReprocessPending = { ...options, full, token, sourceRef, generation, displayResize, displayResizeFrom };
         return false;
       }
       const previewFlight = full ? null : {};
@@ -5654,7 +5656,7 @@ import { frameNeedsReview } from './reviewQueue.js';
           // drawn, so it does not sit idle through the result handling.
           postPendingPreviewEarly(previewFlight);
 
-          const replacedSource = options.displayResize ? currentConvertedPreviewSource() : null;
+          const replacedSource = displayResizeReplaces(options);
           if (hasSmallPreview || superseded) {
             // Preview source is smaller — update preview display path only
             applyPreviewProcessedImageToState(previewProcessed);
@@ -5963,17 +5965,19 @@ import { frameNeedsReview } from './reviewQueue.js';
 
       const token = ++coreReprocessToken;
       cancelScheduledFullResolutionRender();
+      // A display-preview resize converts unchanged settings at another size
+      // (carryStudioThumbnailSource), but only while no other request merges in.
+      const displayResize = Boolean(options.displayResize)
+        && (!coreReprocessScheduled || coreReprocessScheduled.displayResize === true);
+      const displayResizeFrom = displayResize
+        ? coreReprocessScheduled?.displayResizeFrom || displayResizeOrigin() : null;
       // The controls moved, so processedImageData no longer matches the UI even
       // while it is still full resolution. Mark it stale here rather than
       // waiting for the debounce to fire, so an export issued in between waits
       // for the new conversion instead of writing the previous one.
       if (hasSeparateConversionPreview()) state.fullResolutionPending = true;
       const wasFull = coreReprocessScheduled?.full;
-      // A display-preview resize converts unchanged settings at another size
-      // (carryStudioThumbnailSource), but only while no other request merges in.
-      const displayResize = Boolean(options.displayResize)
-        && (!coreReprocessScheduled || coreReprocessScheduled.displayResize === true);
-      coreReprocessScheduled = { full, token, sourceRef: state.conversionSourceImageData, displayResize };
+      coreReprocessScheduled = { full, token, sourceRef: state.conversionSourceImageData, displayResize, displayResizeFrom };
       if (full) {
         // Settings that need a full-resolution pass still settle for 70 ms.
         clearCoreReprocessTimer();
@@ -13340,6 +13344,23 @@ import { frameNeedsReview } from './reviewQueue.js';
     function currentConvertedPreviewSource() {
       return state.fullResolutionPending && state.previewSourceImageData
         ? state.previewSourceImageData : state.processedImageData;
+    }
+
+    // What a display-preview resize replaces, read when it is requested: the
+    // request itself marks the full-resolution pixels pending, which turns
+    // currentConvertedPreviewSource() from them to the preview raster.
+    function displayResizeOrigin() {
+      return { tile: currentConvertedPreviewSource(), preview: state.previewSourceImageData,
+        processed: state.processedImageData };
+    }
+
+    // The raster a resize result replaces for the tile, or null when another
+    // result was applied since the resize was requested (it may carry other
+    // settings, so the tile is rebuilt).
+    function displayResizeReplaces(options) {
+      const from = options.displayResize ? options.displayResizeFrom : null;
+      if (!from || from.preview !== state.previewSourceImageData || from.processed !== state.processedImageData) return null;
+      return from.tile;
     }
 
     // Nobody looks at the tile during a drag, and each rebuild re-encodes a
