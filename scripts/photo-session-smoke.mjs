@@ -6,6 +6,7 @@ import { mkdir, stat, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { basename, dirname, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { expectLoadingOverlayIdle } from './loading-overlay-idle.mjs';
 
 const UPNG = createRequire(import.meta.url)('upng-js');
 const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`;
@@ -544,7 +545,17 @@ export async function runPhotoSessionSmoke({ send, evaluate, waitFor, fail, inst
     expect(await evaluate(feedbackCleared), 'stale cold completion restored a superseded indicator');
 
     // A successful first open must clear feedback only after the new positive
-    // is ready, not merely after decoding the source container.
+    // is ready, not merely after decoding the source container. Its frame
+    // detection (auto-frame is on) shows the overlay's indeterminate strip.
+    expect(await evaluate(`document.getElementById('autoFrameEnabledInput')?.checked !== false`), 'auto-frame must be on for the overlay check');
+    await evaluate(`(() => {
+      window.__overlayShows = [];
+      window.__overlayWatch = new MutationObserver(() => {
+        const overlay = document.querySelector('.loading-overlay.visible');
+        if (overlay) window.__overlayShows.push(overlay.classList.contains('indeterminate'));
+      });
+      window.__overlayWatch.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['class'] });
+    })()`);
     await evaluate(`window.__startColdPhoto('session-cold-success.png', 4)`);
     await until('successful cold switch read held', `!!window.__photoSessionProbe.releaseFile`, 10000);
     const successPending = await evaluate(feedbackMeasure);
@@ -555,6 +566,11 @@ export async function runPhotoSessionSmoke({ send, evaluate, waitFor, fail, inst
       && document.getElementById('studioFilename').textContent === 'session-cold-success.png'
       && document.querySelector('.file-list-name[aria-current="true"]')?.dataset.index === '4'`, 120000);
     await idle();
+    // #261: whatever the last show was (the indeterminate strip here), the
+    // hidden overlay runs no animation once the switch settles.
+    const overlayShows = await evaluate(`(() => { window.__overlayWatch.disconnect(); return window.__overlayShows; })()`);
+    await expectLoadingOverlayIdle({ evaluate, waitFor, fail: message => { throw new Error(message); } }, 'cold switch');
+    console.log('cold switch overlay idle:', JSON.stringify({ shows: overlayShows.length, indeterminate: overlayShows.includes(true) }));
 
     // Exercise the real loadFile error path after visible pending feedback;
     // the deliberate read failure must not leave controls/veil stuck.

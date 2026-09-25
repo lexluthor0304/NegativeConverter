@@ -4,6 +4,7 @@ import { runSimplicitySmoke } from './simplicity-smoke.mjs';
 import { runHiddenJobSmoke } from './hidden-job-smoke.mjs';
 import { runPerfHarnessSmoke } from './perf-harness-smoke.mjs';
 import { runEmbeddedPreviewSmoke } from './embedded-preview-smoke.mjs';
+import { expectLoadingOverlayIdle } from './loading-overlay-idle.mjs';
 // End-to-end smoke test: drives the real app in headless Chrome via CDP.
 //
 //   node scripts/smoke-test.mjs
@@ -548,6 +549,7 @@ const fullSize = await evaluate(`({ width: window.__frameResult.result.cropRegio
 await evaluate(`document.getElementById('studioTab-conversion').click(); document.getElementById('studioRetry').click()`);
 await wait(400);
 await waitFor('reconversion overlay closed', `!document.querySelector('.loading-overlay.visible')`,150000);
+await expectLoadingOverlayIdle({ evaluate, waitFor, fail }, 'reconversion');
 const step3Expr = `document.getElementById('statusBadge').classList.contains('step3')`;
 await waitFor('converted status', step3Expr, 150_000);
 console.log('ok: reconversion finished in the current workspace');

@@ -29,6 +29,7 @@ export class LoadingOverlay {
     this._progressText = null;
     this._phaseText = null;
     this._cancelBtn = null;
+    this._status = null;
   }
 
   _createDOM() {
@@ -36,12 +37,19 @@ export class LoadingOverlay {
 
     this._overlay = document.createElement('div');
     this._overlay.className = 'loading-overlay';
-    // Announced as a busy status region rather than a dialog: it takes no
-    // input beyond the optional Cancel button, so trapping focus in it would
-    // strand the user when it hides itself.
-    this._overlay.setAttribute('role', 'status');
-    this._overlay.setAttribute('aria-live', 'polite');
+    // Not a dialog: it takes no input beyond the optional Cancel button, so
+    // trapping focus in it would strand the user when it hides itself.
     this._overlay.setAttribute('aria-busy', 'true');
+
+    // The phase is announced from a visually hidden status region outside the
+    // overlay. The hidden overlay is visibility: hidden (studio.css), which
+    // takes it out of the accessibility tree, and a live region that appears
+    // together with its text is not reliably announced.
+    this._status = document.createElement('div');
+    this._status.className = 'sr-only loading-status';
+    this._status.setAttribute('role', 'status');
+    this._status.setAttribute('aria-live', 'polite');
+    document.body.appendChild(this._status);
 
     const reelWrap = document.createElement('div');
     reelWrap.className = 'loading-reel-wrap';
@@ -112,6 +120,7 @@ export class LoadingOverlay {
     this._visible = true;
     this._overlay.classList.add('visible');
     this._overlay.classList.remove('indeterminate');
+    this._announce(title);
     if (options.indeterminate) this.updateIndeterminate(title);
   }
 
@@ -128,11 +137,21 @@ export class LoadingOverlay {
     this._cancelBtn.style.display = cancelable ? 'inline-block' : 'none';
   }
 
-  /** Hide the loading overlay. */
+  /**
+   * Hide the loading overlay. Its animations pause and it leaves rendering
+   * once the fade ends (studio.css); the classes stay as they are so the
+   * fade itself does not jump.
+   */
   hide() {
     this._visible = false;
     this._overlay?.setAttribute('aria-busy', 'false');
     this._overlay?.classList.remove('visible');
+    this._announce('');
+  }
+
+  _announce(text) {
+    const value = text || '';
+    if (this._status && this._status.textContent !== value) this._status.textContent = value;
   }
 
   /**
@@ -149,6 +168,7 @@ export class LoadingOverlay {
     if (phaseText !== undefined) {
       this._phaseText.textContent = phaseText;
       if (this._strip) this._strip.setAttribute('aria-label', phaseText || 'Processing');
+      this._announce(phaseText);
     }
   }
 
@@ -160,6 +180,7 @@ export class LoadingOverlay {
     this._progressText.textContent = '';
     this._phaseText.textContent = phaseText || '';
     this._fill.style.width = '35%';
+    if (this._visible) this._announce(phaseText);
   }
 
   /** Remove the overlay from the DOM. */
@@ -172,6 +193,8 @@ export class LoadingOverlay {
     if (this._overlay && this._overlay.parentNode) {
       this._overlay.parentNode.removeChild(this._overlay);
     }
+    this._status?.remove();
+    this._status = null;
     this._overlay = null;
     this._strip = null;
     this._fill = null;
