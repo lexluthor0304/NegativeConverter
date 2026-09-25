@@ -343,11 +343,21 @@ async function _ensureProfile(slot, engine, profileName) {
 // when the source buffer or the gains change. With no film-base compensation there is
 // nothing to precompute, so the cache is dropped and the copy comes straight from the
 // source (one buffer less resident on full-resolution scans).
-function _takeWorkBuffer(slot, image16, filmBaseCompensation) {
+//
+// `reuse` is a plane the caller hands back for this copy (the preview worker's own
+// previous result, which nothing else references). It is overwritten in full before
+// the engine runs, so the output is identical to a fresh allocation.
+function _takeWorkBuffer(slot, image16, filmBaseCompensation, reuse = null) {
+  const target = reuse instanceof Uint16Array && reuse.length === image16.data.length
+    && reuse.buffer !== image16.data.buffer && reuse !== slot.pristineBuffer ? reuse : null;
   if (!filmBaseCompensation) {
     slot.pristineBuffer = null;
     slot.lastSourceRef = null;
     slot.lastFilmBaseGains = null;
+    if (target) {
+      target.set(image16.data);
+      return { width: image16.width, height: image16.height, data: target };
+    }
     return cloneImage16(image16);
   }
 
@@ -369,10 +379,11 @@ function _takeWorkBuffer(slot, image16, filmBaseCompensation) {
     };
   }
 
+  if (target) target.set(slot.pristineBuffer);
   return {
     width: image16.width,
     height: image16.height,
-    data: new Uint16Array(slot.pristineBuffer),
+    data: target || new Uint16Array(slot.pristineBuffer),
   };
 }
 
@@ -476,7 +487,7 @@ async function runSilverCore(imageData, settings, mode, options) {
   const needsFullProcess = _needsFullProcess(slot, options, analysisState);
 
   // Fresh working buffer, owned by the caller once we return it.
-  const input = _takeWorkBuffer(slot, input16, filmBaseCompensation);
+  const input = _takeWorkBuffer(slot, input16, filmBaseCompensation, options?.workBuffer16);
 
   // Dodge and burn: rasterise the strokes for this buffer's size. The engine
   // applies them after the analysis and before the curves; the analysis

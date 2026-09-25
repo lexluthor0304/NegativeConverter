@@ -74,7 +74,48 @@ largeWorkers[1].complete(); await largeResult;
 const smallResult = largeClient(request);
 largeWorkers[2].complete(); await smallResult;
 assert.equal(largeWorkers[2].terminated, undefined, 'small conversions retain the reusable worker');
-console.log('conversionWorkerClient: 入力再利用・参照解除・再起動・独立キュー・部分配列を検証');
+{
+  // #233: a retaining preview keeps its 16-bit plane in the worker until the
+  // caller commits that exact result.
+  const retainWorkers = [];
+  const retainClient = createConversionWorkerClient({ cacheInput: true, workerFactory: () => { const w = new FakeWorker(); retainWorkers.push(w); return w; } });
+  const w0 = () => retainWorkers[0];
+  const reply = (data) => w0().onmessage({ data });
+  let pendingResult = retainClient({ ...request, options: { retain16: true, histogramSamples: 4 } });
+  const posted = w0().messages.at(-1);
+  assert.equal(posted.retain16, true);
+  reply({ id: posted.id, type: 'result', width: 1, height: 1, rgba: new Uint8ClampedArray([1, 2, 3, 255]).buffer, retained16: true,
+    histogram: { width: 1, height: 1, rgba: new Uint8ClampedArray([4, 5, 6, 255]).buffer, image16: new Uint16Array([1028, 1285, 1542, 65535]).buffer } });
+  const retainedFrame = await pendingResult;
+  assert.equal(retainedFrame.__retained16, true);
+  assert.equal(retainedFrame.__image16, undefined);
+  assert.deepEqual([...retainedFrame.__histogramSample.__image16.data], [1028, 1285, 1542, 65535]);
+  const committing = retainClient.commit(retainedFrame);
+  const commitMessage = w0().messages.at(-1);
+  assert.deepEqual([commitMessage.type, commitMessage.resultId], ['commit', posted.id]);
+  reply({ id: commitMessage.id, type: 'committed', resultId: posted.id, image16: new Uint16Array([7, 8, 9, 65535]).buffer });
+  assert.deepEqual([...await committing], [7, 8, 9, 65535]);
+  assert.equal(await retainClient.commit(retainedFrame), null, 'a plane is committed once');
+  assert.equal(w0().messages.at(-1).type, 'commit', 'no second commit is posted');
+  assert.equal(await retainClient.commit({ width: 1, height: 1 }), null, 'an ordinary result has nothing to commit');
+
+  pendingResult = retainClient({ ...request, options: { retain16: true } });
+  const second = w0().messages.at(-1);
+  reply({ id: second.id, type: 'result', width: 1, height: 1, rgba: new Uint8ClampedArray(4).buffer, retained16: true });
+  const lostFrame = await pendingResult;
+  const gone = retainClient.commit(lostFrame);
+  const goneMessage = w0().messages.at(-1);
+  reply({ id: goneMessage.id, type: 'committed', resultId: second.id, image16: null });
+  assert.equal(await gone, null, 'a reused plane commits as null');
+
+  pendingResult = retainClient({ ...request, options: { retain16: true } });
+  const third = w0().messages.at(-1);
+  reply({ id: third.id, type: 'result', width: 1, height: 1, rgba: new Uint8ClampedArray(4).buffer, retained16: true });
+  const orphan = await pendingResult;
+  w0().onerror(new Error('test crash'));
+  assert.equal(await retainClient.commit(orphan), null, 'a crashed worker took the plane with it');
+}
+console.log('conversionWorkerClient: 入力再利用・参照解除・再起動・独立キュー・部分配列・16bit 保持と確定を検証');
 
 // ---- pool: least-busy dispatch, retained workers, dispose ----
 {

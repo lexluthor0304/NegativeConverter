@@ -41,6 +41,9 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
   let worker = null;
   let requestId = 0;
   const pending = new Map();
+  // Results whose 16-bit plane stayed in the worker (#233), keyed by the
+  // ImageData handed to the caller: { id, worker }.
+  const retainedPlanes = new WeakMap();
   let lastSource = null;
   let lastAnalysis = null;
   let releaseWhenIdle = false;
@@ -55,7 +58,7 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
       const entry = pending.get(msg.id);
       if (!entry) return;
       pending.delete(msg.id);
-      if (msg.type === 'result') entry.resolve(msg);
+      if (msg.type === 'result' || msg.type === 'committed') entry.resolve(msg);
       else entry.reject(workerError(msg.message || 'Conversion worker error', CONVERSION_FAILED));
       // The result buffers have transferred to the caller. Release the large
       // source/pristine planes and the worker heap instead of pinning them in
@@ -108,6 +111,8 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
     const analysis = options.analysisImageData || null;
     if (cacheInput) {
       message.cacheInput = true;
+      // Keep the 16-bit plane in the worker until commit() asks for it.
+      if (options.retain16) message.retain16 = true;
       message.reuseSource = lastSource === imageData;
       message.reuseAnalysis = lastAnalysis === analysis;
       if (message.reuseAnalysis) delete message.options.analysisImageData;
@@ -179,8 +184,47 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
       const sample = result.analysisPreview;
       out.__analysisPreview = new ImageData(new Uint8ClampedArray(sample.rgba), sample.width, sample.height);
     }
+    if (result.retained16) {
+      out.__retained16 = true;
+      retainedPlanes.set(out, { id, worker: w });
+    }
+    if (result.histogram) {
+      const sample = result.histogram;
+      const histogram = new ImageData(new Uint8ClampedArray(sample.rgba), sample.width, sample.height);
+      if (sample.image16) histogram.__image16 = { width: sample.width, height: sample.height, data: new Uint16Array(sample.image16) };
+      out.__histogramSample = histogram;
+    }
     return out;
   }
+
+  // Brings back the 16-bit plane a retaining conversion left in the worker.
+  // Resolves to the Uint16Array, or null when the plane is gone: a newer
+  // request reused it, or the worker holding it was replaced.
+  convert.commit = async (image) => {
+    const handle = retainedPlanes.get(image);
+    if (!handle) return null;
+    retainedPlanes.delete(image);
+    const w = worker;
+    if (!w || handle.worker !== w) return null;
+    const id = ++requestId;
+    const timeoutMs = conversionTimeoutMs(image.width * image.height);
+    const reply = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        reject(workerError(`Conversion worker commit timed out after ${Math.round(timeoutMs / 1000)}s`, WORKER_TIMEOUT));
+      }, timeoutMs);
+      const settle = (fn) => (value) => { clearTimeout(timer); fn(value); };
+      pending.set(id, { resolve: settle(resolve), reject: settle(reject) });
+      try {
+        w.postMessage({ type: 'commit', id, resultId: handle.id });
+      } catch (err) {
+        clearTimeout(timer);
+        pending.delete(id);
+        reject(workerError(`Conversion worker postMessage failed: ${err?.message || err}`, WORKER_UNAVAILABLE));
+      }
+    });
+    return reply.image16 ? new Uint16Array(reply.image16) : null;
+  };
 
   // Terminate the worker and fail whatever it still owed. The next convert()
   // call starts a fresh worker, so this is safe to call at the end of a batch.
