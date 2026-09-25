@@ -55,6 +55,8 @@ export function lensSourcePoint(point, mapping) {
 export function buildRepairMask(strokes, geometry, lensMapping = null) {
   const { width, height } = geometry;
   const mask = new Uint8Array(width * height);
+  // With a lens map, also note which blocks hold a selected pixel.
+  const blocks = lensMapping ? createBlockGrid(width, height) : null;
   let minX = width, minY = height, maxX = -1, maxY = -1;
   forEachStrokeCoverage({ strokes: strokes.map(stroke => ({
     ...stroke, stops: 1, feather: 0
@@ -73,11 +75,58 @@ export function buildRepairMask(strokes, geometry, lensMapping = null) {
       if (bx0 + last > maxX) maxX = bx0 + last;
       if (y < minY) minY = y;
       if (y > maxY) maxY = y;
+      blocks?.mark(bx0 + first, bx0 + last, y);
     }
   });
   const bounds = maxX < 0 ? null : { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 };
   if (!lensMapping) return { mask, bounds };
-  return remapRepairMask(mask, bounds, width, height, lensMapping);
+  return remapRepairMask(mask, bounds, blocks, width, height, lensMapping);
+}
+
+// Coarse occupancy of the selection in BLOCK px squares, with a summed-area
+// table so that "does this rectangle hold a selected pixel?" is four reads.
+// Marking may over-cover (a whole row run), never under-cover.
+const BLOCK = 16;
+function createBlockGrid(width, height) {
+  const columns = Math.ceil(width / BLOCK), rows = Math.ceil(height / BLOCK);
+  const occupied = new Uint8Array(columns * rows);
+  const rowMarked = new Uint8Array(rows);
+  let sums = null, rowSums = null;
+  return {
+    mark(x0, x1, y) {
+      const by = (y / BLOCK) | 0, row = by * columns;
+      rowMarked[by] = 1;
+      for (let bx = (x0 / BLOCK) | 0, end = (x1 / BLOCK) | 0; bx <= end; bx++) occupied[row + bx] = 1;
+    },
+    // Whether any selected pixel can lie in rows [top, bottom].
+    anyRows(top, bottom) {
+      if (!rowSums) {
+        rowSums = new Int32Array(rows + 1);
+        for (let r = 0; r < rows; r++) rowSums[r + 1] = rowSums[r] + rowMarked[r];
+      }
+      const r0 = Math.max(0, Math.floor(top / BLOCK)), r1 = Math.min(rows - 1, Math.floor(bottom / BLOCK));
+      return r0 <= r1 && rowSums[r1 + 1] - rowSums[r0] > 0;
+    },
+    // Whether any selected pixel can lie in [left, right] x [top, bottom].
+    any(left, right, top, bottom) {
+      if (!sums) {
+        sums = new Int32Array((columns + 1) * (rows + 1));
+        for (let r = 0; r < rows; r++) {
+          let line = 0;
+          for (let c = 0; c < columns; c++) {
+            line += occupied[r * columns + c];
+            sums[(r + 1) * (columns + 1) + c + 1] = sums[r * (columns + 1) + c + 1] + line;
+          }
+        }
+      }
+      const c0 = Math.max(0, Math.floor(left / BLOCK)), c1 = Math.min(columns - 1, Math.floor(right / BLOCK));
+      const r0 = Math.max(0, Math.floor(top / BLOCK)), r1 = Math.min(rows - 1, Math.floor(bottom / BLOCK));
+      if (!(c0 <= c1 && r0 <= r1)) return false;
+      const stride = columns + 1;
+      return sums[(r1 + 1) * stride + c1 + 1] - sums[r0 * stride + c1 + 1]
+        - sums[(r1 + 1) * stride + c0] + sums[r0 * stride + c0] > 0;
+    }
+  };
 }
 
 // The selection is painted in uncorrected source pixels; lens correction moves
@@ -85,10 +134,11 @@ export function buildRepairMask(strokes, geometry, lensMapping = null) {
 // sampling the map for every frame pixel, look at it one Lensfun grid cell at a
 // time: a cell's bilinear samples stay inside the hull of its four corners, and
 // rounding moves them by at most half a pixel, so a cell whose padded hull
-// misses the selection cannot read a selected pixel and stays empty. Surviving
+// misses the selection (its rectangle, then the occupied 16 px blocks) cannot
+// read a selected pixel and stays empty. Surviving
 // cells sample exactly as lensSourcePoint does, with the same clamps and the
 // same expression order, so the result is the per-pixel remap byte for byte.
-function remapRepairMask(mask, bounds, width, height, { maps, includeTca }) {
+function remapRepairMask(mask, bounds, blocks, width, height, { maps, includeTca }) {
   const corrected = new Uint8Array(width * height);
   if (!bounds) return { mask: corrected, bounds: null };
   const useTca = includeTca && maps.tca;
@@ -118,6 +168,19 @@ function remapRepairMask(mask, bounds, width, height, { maps, includeTca }) {
     if (ys < 0) continue;
     const ye = rows.end[cy];
     const y0 = cy, y1 = Math.min(y0 + 1, gridHeight - 1);
+    // Every cell of this row has its corners on grid rows y0 and y1: when their
+    // source rows miss the selection, so does the whole row of cells. NaN
+    // nodes are left out; a cell touching one samples NaN and stays empty.
+    let rowLo = Infinity, rowHi = -Infinity;
+    for (let i = y0 * gridWidth * channels + offset + 1, j = y1 * gridWidth * channels + offset + 1,
+      end = i + gridWidth * channels; i < end; i += channels, j += channels) {
+      const a = grid[i], b = grid[j];
+      if (a < rowLo) rowLo = a;
+      if (a > rowHi) rowHi = a;
+      if (b < rowLo) rowLo = b;
+      if (b > rowHi) rowHi = b;
+    }
+    if (!(rowHi + 1 >= top && rowLo - 1 <= bottom) || !blocks.anyRows(rowLo - 1, rowHi + 1)) continue;
     for (let cx = 0; cx < gridWidth; cx++) {
       const xs = columns.start[cx];
       if (xs < 0) continue;
@@ -130,6 +193,7 @@ function remapRepairMask(mask, bounds, width, height, { maps, includeTca }) {
       const loY = Math.min(a00y, a10y, a01y, a11y), hiY = Math.max(a00y, a10y, a01y, a11y);
       // NaN corners fail every comparison, as their samples fail the frame test.
       if (!(hiX + 1 >= left && loX - 1 <= right && hiY + 1 >= top && loY - 1 <= bottom)) continue;
+      if (!blocks.any(loX - 1, hiX + 1, loY - 1, hiY + 1)) continue;
       const xe = columns.end[cx];
       for (let y = ys; y < ye; y++) {
         const gy = rows.g[y];
