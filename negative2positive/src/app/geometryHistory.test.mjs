@@ -61,6 +61,13 @@ const crop = (left, top) => ({ left, top, width: 40, height: 26 });
   assert.equal(h.state.rotationAngle, 180);
   assert.ok(h.jobs() - jobsBefore <= 1, 'the superseded build does not complete');
   samePixels(h.state.croppedImageData, exportChain(base, settingsFor(h.state)), 'the latest edit wins');
+  // The crop maps from the pending frame, exactly as two settled turns do.
+  const k2 = createHarness(base);
+  k2.context.restoreSettings({ rotationAngle: 0, mirrored: false, cropRegion: crop(4, 3) });
+  await k2.state.geometryReady;
+  await k2.context.applyRotation(90);
+  await k2.context.applyRotation(90);
+  assert.deepEqual({ ...h.state.cropRegion }, { ...k2.state.cropRegion }, 'quick turns map the crop like settled turns');
   assert.equal(h.target.canvasTransformWrapper.style.transform, 'matrix(1, 0, 0, 1, 0, 0)');
   // A mirror after a turn composes too: rotate(t) then mirror = mirror then rotate(-t).
   const k = createHarness(base);
@@ -71,6 +78,12 @@ const crop = (left, top) => ({ left, top, width: 40, height: 26 });
   assert.match(k.target.canvasTransformWrapper.style.transform, /rotate\(-90deg\).*scaleX\(-1\)/);
   await Promise.all([turned, flipped]);
   samePixels(k.state.croppedImageData, exportChain(base, settingsFor(k.state)), 'rotate then mirror');
+  const k3 = createHarness(base);
+  k3.context.restoreSettings({ rotationAngle: 0, mirrored: false, cropRegion: crop(4, 3) });
+  await k3.state.geometryReady;
+  await k3.context.applyRotation(90);
+  await k3.context.applyMirror();
+  assert.deepEqual({ ...k.state.cropRegion }, { ...k3.state.cropRegion }, 'a mirror during a pending turn flips across the new frame');
 }
 
 // A snapshot taken while a build is pending keeps its scalars only.

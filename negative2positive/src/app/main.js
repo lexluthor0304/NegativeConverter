@@ -9587,7 +9587,9 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       // the current frame rotated again: restore and batch export build it
       // that way, so single export now matches them.
       const base = state.loadedBaseImageData || state.originalImageData;
-      const sourceFrame = { width: state.originalImageData.width, height: state.originalImageData.height };
+      // The scalars, not the installed planes (which lag behind a pending
+      // build), say which frame the crop is on.
+      const sourceFrame = geometryFrameSize(base, state.rotationAngle);
       const sourceCrop = state.cropRegion ? { ...state.cropRegion } : null;
       state.rotationAngle = normalizeAngleDegrees((state.rotationAngle || 0) + storedRotationDelta(normalizedAngle));
       const frame = geometryFrameSize(base, state.rotationAngle);
@@ -9643,7 +9645,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       // The crop box was drawn on the pre-mirror view, so flip it to keep the
       // framed area over the same part of the picture.
       if (state.cropRegion) {
-        const frameWidth = state.originalImageData.width;
+        const frameWidth = geometryFrameSize(state.loadedBaseImageData || state.originalImageData, state.rotationAngle).width;
         state.cropRegion = {
           ...state.cropRegion,
           left: frameWidth - (state.cropRegion.left + state.cropRegion.width)
