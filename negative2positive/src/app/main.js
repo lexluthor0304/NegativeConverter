@@ -10390,7 +10390,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // #244's smoke switch caches sessions without their planes.
       const coldOnly = geometryDiagnostics.coldSessions;
       let stored = Boolean(base) && !force && !coldOnly && !state.sourcePending && photoSessions.put(item, entry);
-      if (!stored && !coldOnly && force !== 'B' && !state.sourcePending && entry.snapshot) {
+      if (!stored && !coldOnly && force !== 'B' && force !== 'spill' && !state.sourcePending && entry.snapshot) {
         // Tier A: the conversion source and display planes, without the base
         // and the rotated frame. History that pins its own display planes
         // goes cold only when that is what keeps it in the budget.
@@ -10416,7 +10416,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       }
       if (!stored && display) {
         // Tier B: the display planes only; spilled when even they do not fit.
-        stored = photoSessions.put(item, display);
+        stored = force !== 'spill' && photoSessions.put(item, display);
         if (stored) displaySessionDiagnostics.tierB++;
         else stored = spillDisplaySession(item, display);
       }
@@ -13826,6 +13826,30 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           if (installed) geometryMemo.delete(installed);
           return applyGeometryFromBase();
         }
+      };
+    }
+
+    // The display-resolution sessions (#249) for the smoke run: counters, the
+    // tier the photo on screen and the cached ones are in, and a switch that
+    // forces a tier ('A', 'B' or 'spill') on small fixtures.
+    if (typeof window !== 'undefined') {
+      window.__ncDisplaySessions = {
+        diagnostics: displaySessionDiagnostics,
+        force: tier => { displaySessionDiagnostics.force = tier || null; },
+        live: () => ({
+          base: Boolean(state.loadedBaseImageData), baseDescriptor: Boolean(state.baseDescriptor),
+          source: Boolean(state.conversionSourceImageData), sourcePending: Boolean(state.sourcePending),
+          proxyMatches: displayProxyMatches(), preparing: Boolean(document.body.dataset.studioPreparing)
+        }),
+        tier: index => {
+          const item = state.fileQueue[index];
+          const entry = item ? photoSessions.get(item) : null;
+          return entry ? (entry.tier || (entry.snapshot ? (entry.snapshot.refs?.cold ? 'cold' : 'full') : 'base')) : (item && displayProxySpill.has(item.id) ? 'spill' : null);
+        },
+        bytes: () => ({ sessions: photoSessions.bytes, budget: PHOTO_SESSION_BUDGET_BYTES }),
+        spill: () => displayProxySpill.stats,
+        store: () => displayProxyStore?.stats || null,
+        settled: () => Promise.all([displayProxySpill.settled(), displayProxyStore?.settled()])
       };
     }
 

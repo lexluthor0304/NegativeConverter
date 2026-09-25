@@ -5,7 +5,8 @@ Issues: [#220](https://github.com/lexluthor0304/NegativeConverter/issues/220),
 [#223](https://github.com/lexluthor0304/NegativeConverter/issues/223),
 [#224](https://github.com/lexluthor0304/NegativeConverter/issues/224),
 [#234](https://github.com/lexluthor0304/NegativeConverter/issues/234),
-[#243](https://github.com/lexluthor0304/NegativeConverter/issues/243).
+[#243](https://github.com/lexluthor0304/NegativeConverter/issues/243),
+[#249](https://github.com/lexluthor0304/NegativeConverter/issues/249).
 
 ## Ownership and invalidation
 
@@ -20,11 +21,13 @@ planes and buffers shared with history. Its limit is 768 MiB, or 128 MiB on
 devices reporting at most 4 GiB of memory and unknown-memory touch devices.
 The desktop budget fits a 60 MP RAW base with its 8/16-bit planes and small
 editing previews; 512 MiB did not fit the measured 9536 × 6336 fixture.
-A session too large with its planes keeps its recipe, its history as
-scalars (cold entries) and its decoded base (#244); reopening it shows the
-adjusted preview at once while the geometry pool rebuilds the crop window
-from the base, then converts without new automatic measurements. Only when
-even that does not fit is the decoded base kept alone.
+A session too large with its planes is kept without its base when that fits
+(Tier A, #249, below); otherwise it keeps its recipe, its history as scalars
+(cold entries) and its decoded base (#244): reopening it shows the adjusted
+preview at once while the geometry pool rebuilds the crop window from the
+base, then converts without new automatic measurements. A large frame's
+display planes alone come next (Tier B), and only when none of these fits is
+the decoded base kept alone.
 Once the outgoing session is cached, a cold switch releases the outgoing
 photo's planes and undo/redo pins before decoding the target, so they are not
 reachable during the decode. A failed decode takes the outgoing session back
@@ -40,6 +43,123 @@ storage are not counted. While a job runs in a hidden
 macOS window, or once an idle window has been hidden for five minutes, these
 caches and the prefetch slot (#243) are emptied to stay under WebKit's inactive memory limit; they refill
 on use (`docs/hidden-window-jobs.md`).
+
+### Display-resolution sessions (#249)
+
+Above 16 MP without repairs, a photo's settled view is the preview
+conversion of its display preview (`conversionPreviewImageData`, the
+conversion source resized for the viewport) with the base's colour-analysis
+sample. A photo is left in the largest of these forms that fits the budget
+(one shared 768 MiB, unchanged):
+
+1. **full**: base, planes and history;
+2. **Tier A**: the conversion source and the display planes, without the
+   base and the whole rotated frame beside a crop (a size-only stand-in takes
+   its place, in history too). A full-resolution positive of a large frame
+   without repairs returns to its display preview. History entries that still
+   pin a dropped plane keep their scalars (cold, #244); only if that does not
+   fit do the entries that pin display planes of their own go cold too. A
+   cropped 60 MP frame is about 637 MiB this way, so it fits;
+3. **cold** (#244): the base, the recipe and scalar history;
+4. **Tier B**: only the display proxy, the processed preview, the histogram
+   source and the colour-analysis sample, with the base and source sizes,
+   `rawMetadata`, the film-edge record, zoom and pan, history as scalars
+   (60-92 MiB at the 4 MP cap);
+5. the base alone.
+
+Tier B is exact only for a frame whose view is display-resolution (a source
+over 16 MP, no dust removal, repair strokes or AI brush, a separate display
+preview) and whose recipe needs no detection on reopening (the item's
+settings carry `autoFrameMeta` and a read film edge); a colour frame without a
+crop reads its border pixels for Step 2's mode, so it takes the exact path.
+Every form of such a photo carries its Tier B form: an eviction
+(`createPhotoSessionCache`'s `onEvict`) demotes the entry to it, filed as the
+oldest entry so it never displaces a photo visited later, and a Tier B entry
+that does not fit spills (below).
+
+A session restored without its base keeps `state.baseDescriptor` (the base's
+size, 16-bit plane and decode route, registered under the base's geometry id)
+and stand-ins `{ width, height, released }` for the planes it dropped; a Tier B
+session keeps `state.sourcePending` (the source's size and the proxy's key)
+too. Readers of the base's size use `baseSizeSource()`; the colour-analysis
+sample stays cached on the descriptor.
+
+- **Return.** A Tier A or in-RAM Tier B entry whose recipe key matches restores
+  in the click's task like a warm switch: no veil, no read, no decode, the same
+  planes and history. Zoom on a Tier A photo works as before (the source is
+  kept).
+- **Recipe changed while away** (a roll commit, Sync colours) or a Tier B entry
+  whose settled frame was a full-resolution plane: under the veil, the kept
+  planes are installed, the item's recipe restored over them and the photo
+  prepared as a cold open would be (`prepareStudioPhoto`), without a decode.
+- **The preview half.** `processNegative` converts the display proxy directly
+  while its key matches the live geometry, lens, analysis area and viewport
+  (`displayProxyMatches`), with the automatic measurements a cold open runs;
+  otherwise it rebuilds the source first. Slider ticks, Undo/Redo of scalar
+  steps and display-only refreshes convert the proxy too.
+- **Barriers.** `ensureBase()` decodes the original through the normal loader
+  (joining a lane's decode, #243), checks its size, depth and route against
+  the descriptor and installs it under the same geometry id, so the kept planes
+  stay valid; a decode that differs purges the photo's proxies and reopens it
+  cold. `ensureSource()` adds the geometry chain from the base (pool) and lens
+  correction, keeps the proxy as the display preview and then checks it: the
+  proxy must equal `resizeDisplayPreview` of the new source (sliced resample,
+  hash compare); a mismatch purges the stored copies and converts again. A
+  geometry edit (rotate, mirror, a settings refresh with new geometry, Undo of
+  a cold geometry entry) runs as a geometry job that first awaits the base;
+  crop mode, Auto Frame, film-base sampling and detection, the flat field,
+  Reprocess from original, Compare, every export and full-resolution render
+  (dust, the AI brush) and a zoom or window size beyond the proxy await
+  `ensureSource()`. Meanwhile the editor is locked and the frame notice reads
+  "Preparing original…" (`body[data-studio-preparing]`). A settings-only
+  refresh with the same geometry keeps the crop.
+- **Invariant.** A proxy is display-only: it is never assigned to
+  `loadedBaseImageData`, `originalImageData`, `croppedImageData` or
+  `conversionSourceImageData`, and exports always wait for the real source
+  (`displaySessions.test.mjs` asserts it on a guarded state).
+
+**The spill.** Tier B entries that no longer fit, and proxies the fills make,
+go to a per-tab private IndexedDB database (the analysis samples' lock
+protocol, `createPrivateIndexedDbBackend`), written from the display-proxy
+worker (`workers/displayProxyWorker.js`), which packs the 16-bit proxy as RGB16
+when its alpha is uniformly opaque (RGBA16 otherwise; the 8-bit plane is
+rebuilt with `Math.round(v / 257)`, or stored when it is not derived) with the
+sample and a checksum (`displayProxy.js`). The main thread keeps an index, so
+`has` answers at once. The spill leaves 2 GiB free (`navigator.storage.estimate`
+on the web) and uses at most a quarter of what is free, up to 4 GiB. It is
+emptied when a photo leaves the queue, when the list is cleared and when the
+session closes. A spilled hit shows the retained 1200 px copy on the veil and
+converts the proxy (about 0.15-0.35 s at 60 MP, estimated). A photo left
+zoomed keeps its zoomed planes in RAM and prepares its zoom-1 proxy in the
+pool for the spill.
+
+**Fills.** While roll analysis (`analyze` of the roll pass) or a lane job
+holds a frame's full decode, `fillDisplayProxy` renders the proxy a first open
+would convert: in the geometry pool, band by band, each band rendering only
+the crop-window rows its proxy rows read and resampling them with
+`resizeDisplayPreview`'s own taps (`renderDisplayProxy`, bit-identical to the
+whole resize), at the editor's last viewport at zoom 1. Frames with lens
+correction, repairs, an undecided recipe or an 8-bit RAW fallback are skipped.
+
+**The store** (across restarts and project reopens). The same records, keyed by
+the file's content (size, date, SHA-256 of the first MiB plus the size, SHA-256
+of the last 64 KiB, hashed only when size and date match an index entry), the
+build's LibRaw and code hashes (`scripts/display-proxy-hashes.mjs`, stamped by
+`vite.config.js`) and the proxy's key. Only reproducible decode routes are
+stored, never a recipe; a record carries its full key and checksum, verified
+on read. The desktop app keeps records in `app_cache_dir()/display-proxies`
+through `src-tauri/src/display_proxy_store.rs` (chunked atomic writes and
+reads, the volume's free space, `CACHEDIR.TAG` and Time Machine's exclusion;
+the spill of an earlier run is removed at start), so no pixels reach WebKit's
+origin storage; the web keeps them in the origin-private file system from the
+worker (IndexedDB where sync access handles are missing). The budget is
+`min(setting, 25 % of the free space above 10 GiB)`, off below the floor,
+least recently used out first; the Studio menu shows the size, a limit
+(Off, 1-10 GB, default 2 GB) and **Clear cache**. The store also keeps #235's
+1200 px presentation previews as JPEG, keyed by content and a recipe digest,
+which the switch veil shows at once after a restart; they are presentation
+only. The veil shows a stored or spilled hit's presentation copy until the
+exact view lands.
 
 Keys include the per-file recipe, film-type override, repair configuration,
 AI model revision and flat-field identity. `settingsKey.js` builds them
@@ -334,6 +454,7 @@ npm test
 PORT=5214 CDP_PORT=9238 npm run test:smoke -- --photo-session-only
 PORT=5214 CDP_PORT=9238 npm run test:smoke -- --photo-activation-only
 PORT=5214 CDP_PORT=9238 npm run test:smoke -- --light-table-only
+PORT=5214 CDP_PORT=9238 npm run test:smoke -- --display-session-only
 PHOTO_SESSION_RAW_FILES='["/absolute/a.dng","/absolute/b.nef"]' npm run test:smoke -- --photo-session-raw-only
 npm run test:smoke
 npm run build:web
@@ -397,5 +518,6 @@ The optional real-file regression also passed with a 76 MB DNG decoded to
 72/94/87 ms with zero new file reads, LibRaw calls or conversion requests;
 the DNG GPU sample hash and zoom matched before/after. The NEF decoder used
 its existing embedded-preview fallback in this run, so this is not evidence
-of full-precision NEF decoding. No export was forced in the large-file cache
-test; exact export precision is covered separately by the 16-bit PNG test.
+of full-precision NEF decoding. That run forced no export; since #249 the
+RAW regression keeps import auto-frame on and ends with a 16-bit export
+before and after an A/B/A switch, which must be byte-identical.

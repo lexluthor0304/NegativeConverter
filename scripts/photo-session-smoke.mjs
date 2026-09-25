@@ -11,7 +11,7 @@ import { expectLoadingOverlayIdle } from './loading-overlay-idle.mjs';
 const UPNG = createRequire(import.meta.url)('upng-js');
 const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`;
 
-function installPhotoSessionProbe() {
+export function installPhotoSessionProbe() {
   const original = {
     post: Worker.prototype.postMessage,
     terminate: Worker.prototype.terminate,
@@ -186,7 +186,7 @@ function installPhotoSessionProbe() {
   };
 }
 
-function decodePng(dataUrl) {
+export function decodePng(dataUrl) {
   const bytes = Buffer.from(dataUrl.split(',')[1], 'base64');
   const png = UPNG.decode(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
   // UPNG.toRGBA8 intentionally discards the low byte. Compare raw unfiltered
@@ -203,9 +203,9 @@ function decodePng(dataUrl) {
     sha256: createHash('sha256').update(pixels).digest('hex'), levels: levels.map(values => values.size) };
 }
 
-async function bootPhotoSession({ send, evaluate, until, installDialogAutoAccept, port }) {
+export async function bootPhotoSession({ send, evaluate, until, installDialogAutoAccept, port, query = '', keepAutoCrop = false }) {
     const origin = await evaluate('performance.timeOrigin');
-    await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
+    await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en${query}` });
     await until('fresh photo-session workspace', `performance.timeOrigin !== ${origin} && document.readyState === 'complete' && !!document.getElementById('applyFilmTypeToRollBtn')`);
     await installDialogAutoAccept();
     await evaluate(`(${installPhotoSessionProbe.toString()})()`);
@@ -226,7 +226,7 @@ async function bootPhotoSession({ send, evaluate, until, installDialogAutoAccept
     })()`);
     await until('confirmed learned-default reset completed', `window.__photoSessionLearnedReset && document.getElementById('learnedDefaultsCount').textContent.trim() === 'Learned defaults: 0 stocks'`);
     await evaluate(`(() => {
-      for (const id of ['studioImportAutoCrop', 'importFilmTypeAuto', 'autoRollOnImport']) {
+      for (const id of ${JSON.stringify(keepAutoCrop ? ['importFilmTypeAuto', 'autoRollOnImport'] : ['studioImportAutoCrop', 'importFilmTypeAuto', 'autoRollOnImport'])}) {
         const input = document.getElementById(id); if (input?.checked) input.click();
       }
       document.querySelector('.film-type-btn[data-type="color"]').click();
@@ -651,7 +651,9 @@ export async function runPhotoSessionRawSmoke({ send, evaluate, waitFor, fail, i
       expect(/\.(dng|nef|arw|cr2|cr3|crw|raf|rw2|pef|orf|raw|iiq)$/i.test(path), 'RAW fixture extension is not supported: ' + basename(path));
       return { name: basename(path), bytes: metadata.size };
     }));
-    await bootPhotoSession({ send, evaluate, until, installDialogAutoAccept, port });
+    // Auto-frame stays on (#249): a confident frame is rotated and cropped at
+    // import, which is what makes a 60 MP session too large to keep whole.
+    await bootPhotoSession({ send, evaluate, until, installDialogAutoAccept, port, keepAutoCrop: true });
     await evaluate(`(() => {
       for (const id of ['dustRemovalEnabled', 'dustAiEnabled']) {
         const input = document.getElementById(id); if (input.checked) input.click();
@@ -701,10 +703,32 @@ export async function runPhotoSessionRawSmoke({ send, evaluate, waitFor, fail, i
       conversionInputs: window.__photoSessionProbe.requests.filter(request => request.kind === 'convert').map(({ width, height, preview }) => ({ width, height, preview })),
       rawCalls: window.__photoSessionProbe.requests.filter(request => request.kind === 'raw').map(request => request.fn),
       exports: window.__photoSessionProbe.exports.length })`);
-    expect(evidence.exports === 0, 'actual RAW cache test must not force an export/full-resolution render');
+    expect(evidence.exports === 0, 'the warm checks above ran before any export/full-resolution render');
+    // Export parity across a switch (#249): a 16-bit export of A, then B, then
+    // A again (a Tier A or display session at 60 MP), exports the same bytes.
+    const geometry = await evaluate('window.__ncGeometry.inspect()');
+    if (!geometry.cropRegion && !geometry.rotationAngle) console.warn('actual RAW A was not auto-framed; the export check covers an unrotated, uncropped frame');
+    const exportPixels = async depth => {
+      const index = await evaluate('window.__photoSessionProbe.exports.length');
+      await evaluate(`(() => {
+        document.querySelector('.format-btn[data-format="png"]').click();
+        document.querySelector('.bitdepth-btn[data-bitdepth="${depth}"]').click();
+        document.getElementById('exportSingleBtn').click();
+      })()`);
+      await until(`${depth}-bit actual RAW PNG captured`, `!!window.__photoSessionProbe.exports[${index}]?.data && !document.getElementById('exportBtn').disabled`);
+      return decodePng(await evaluate(`window.__photoSessionProbe.exports[${index}].data`));
+    };
+    const exportBefore = await exportPixels(16);
+    await open(1, files[1].name);
+    const leftAs = await evaluate('window.__ncDisplaySessions.tier(0)');
+    await open(0, files[0].name);
+    const exportAfter = await exportPixels(16);
+    expect(exportAfter.sha256 === exportBefore.sha256 && exportAfter.width === exportBefore.width,
+      'actual RAW export after A/B/A differs: ' + JSON.stringify({ leftAs, exportBefore, exportAfter }));
     console.log('actual RAW warm photo sessions:', JSON.stringify({ files, coldBActivationMs,
-      observedWarmActivationMs: [firstWarmActivationMs, ...repeatWarmActivationMs], saved, restored, repeated, ...evidence }));
-    console.log('ok: actual RAW warm A/B/A preserves exact GPU preview and zoom with zero new file reads, RAW decode or conversion; no forced export');
+      observedWarmActivationMs: [firstWarmActivationMs, ...repeatWarmActivationMs], saved, restored, repeated, ...evidence,
+      geometry: { rotationAngle: geometry.rotationAngle, cropRegion: geometry.cropRegion }, leftAs, exportSha256: exportAfter.sha256 }));
+    console.log('ok: actual RAW warm A/B/A preserves exact GPU preview and zoom with zero new file reads, RAW decode or conversion; the 16-bit export is unchanged across a switch');
   } catch (error) {
     failure = error;
     try {

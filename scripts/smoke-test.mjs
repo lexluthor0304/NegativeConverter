@@ -5,6 +5,7 @@ import { runHiddenJobSmoke } from './hidden-job-smoke.mjs';
 import { runMemoryBudgetSmoke } from './memory-budget-smoke.mjs';
 import { runPerfHarnessSmoke } from './perf-harness-smoke.mjs';
 import { runEmbeddedPreviewSmoke } from './embedded-preview-smoke.mjs';
+import { runDisplaySessionSmoke } from './display-session-smoke.mjs';
 import { expectLoadingOverlayIdle } from './loading-overlay-idle.mjs';
 // End-to-end smoke test: drives the real app in headless Chrome via CDP.
 //
@@ -370,6 +371,12 @@ if (process.argv.includes('--restart-only')) {
 
 if (process.argv.includes('--photo-session-only')) {
   await runPhotoSessionSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
+
+if (process.argv.includes('--display-session-only')) {
+  await runDisplaySessionSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
   if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
   console.log('SMOKE PASS'); process.exit(0);
 }
@@ -1048,6 +1055,7 @@ if (!process.argv.some(arg => arg.endsWith('-only'))) {
   await runComparePreviewSmoke({ send, evaluate, waitFor, wait, fail, port: PORT });
   await runRestartRenderSmoke({ send, evaluate, waitFor, fail, port: PORT });
   await runPhotoSessionSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
+  await runDisplaySessionSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
   await runPhotoActivationSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
   await runWebglPreviewSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
   await runPreviewTierSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
