@@ -97,7 +97,8 @@ const runtime = [
   'getEffectiveExportBitDepth', 'getExportInfo', 'applySprocketFrameForExport', 'getCurrentExportImageData',
   'prepareCurrentImageForExport', 'renderCurrentImageDataForExport', 'encodeFused16', 'renderAndEncodeCurrentImage',
   'exportSingle', 'applyAdjustmentsWithSettings', 'applyPreparedAdjustmentsWithWorkers', 'startExportGainMap',
-  'imageDataToBlob', 'createBatchExportWorkers', 'renderBatchExportFile', 'runBatchExport'
+  'imageDataToBlob', 'png16EncodeSettings', 'makeExportCancelledError', 'createBatchExportWorkers',
+  'renderBatchExportFile', 'runBatchExport'
 ].map(functionSource).join('\n')
   // vm scripts have no dynamic import: hand the module over directly.
   .replaceAll("await import('./gainMapJpeg.js')", 'await importGainMapJpeg()');
@@ -167,7 +168,20 @@ function createContext({ gainMap = 'on' } = {}) {
     buildActiveExportFileName: () => 'frame.out',
     isTauriDesktop: () => false,
     notifyReviewExport: () => {},
-    getLoadingOverlay: () => ({ show: async () => {}, updateProgress: () => {}, hide: () => {} }),
+    getLoadingOverlay: () => ({ show: async () => {}, updateProgress: () => {}, setCancelable: () => {}, hide: () => {} }),
+    // The integration branch's export path (#241 hidden jobs, #244 geometry,
+    // #257 PNG16 band pool, single-export Cancel).
+    AbortController,
+    whenGeometrySettled: async () => {},
+    getLocalizedText: (key, fallback) => fallback,
+    isAbortError: bridgeModule.isAbortError,
+    createOperationPng16Pool: (lanes = 1) => (png16PoolFactory ? png16PoolFactory(lanes) : null),
+    planGeometryBandsInFlight: () => 2,
+    geometryPool: { size: 1 },
+    hiddenJobs: { safeMode: false, admit: async () => () => {} },
+    hiddenJobBytesFor: async () => 0,
+    activeLongJobs: 0,
+    navigator: { deviceMemory: 8, hardwareConcurrency: 8 },
     persistCurrentFileSettings: () => {},
     exportMetadataFor: () => ({ exif: { Make: 'Test' }, xmp: null }),
     saveBlob: async (blob) => { saved.push(blob); return { saved: true }; },
@@ -230,7 +244,7 @@ function createContext({ gainMap = 'on' } = {}) {
     usesSilverCoreConversion: () => true,
     createConversionWorkerPool: () => { const convert = async () => assert.fail('no conversion in this fixture'); convert.dispose = () => {}; return convert; },
     convertFrameWithRouter: async () => assert.fail('no main-thread conversion in this fixture'),
-    planBatchExportLanes: async () => 1,
+    planBatchExportLanes: async () => ({ lanes: 1, pixelsPerFile: W * H }),
     runBatchPipeline,
     updateFileListUI: () => {},
     renderLinearDngBlob: () => assert.fail('no DNG here'),
@@ -243,6 +257,10 @@ function createContext({ gainMap = 'on' } = {}) {
   state.recipe = recipe();
   return { context, state, processed, moduleBridgeUse };
 }
+// The PNG16 band pool of an export operation; null: no pool (a batch of
+// three or more lanes, or no Worker), so a PNG16 takes the fused request.
+let png16PoolFactory = null;
+const png16Pools = [];
 const traces = [];
 const fullFrameAllocations = [];
 const attached = [];
@@ -471,6 +489,54 @@ for (const [format, bitDepth] of [['jpeg', 8], ['png', 8], ['tiff', 16], ['png',
     assert.ok(!post.transfers.some((buffer) => secondBuffers.includes(buffer)), 'the second render copied its planes');
   }
   assert.ok(same(lost.bytes, clean.bytes), 'identical output after the re-render');
+}
+
+{
+  // With a PNG16 band pool (#257: a single export, or a batch of one or two
+  // lanes) a 16-bit PNG is not fused: the adjusted plane comes back by
+  // transfer and the pool encodes its bands, with the fused request's bytes.
+  png16PoolFactory = () => {
+    const pool = bridgeModule.createPng16BandPool({ size: 1, workerFactory: () => new InProcessWorker() });
+    const record = { disposed: 0 };
+    png16Pools.push(record);
+    return { size: pool.size, encode: pool.encode, dispose: () => { record.disposed++; pool.dispose(); } };
+  };
+  try {
+    const expectedBytes = async (processed, settings) => new Uint8Array(await encoders.encodePng16Blob(
+      { width: W, height: H, __image16: referencePlane16(processed, settings) }).arrayBuffer());
+    const bandedOnly = (types, label) => {
+      assert.equal(types[0], 'applyAdjustments16', `${label}: the adjust request first`);
+      assert.ok(types.length > 1 && types.slice(1).every((type) => type === 'encodePng16Band'), `${label}: then only band requests (${types})`);
+    };
+
+    const f = createContext();
+    f.state.exportFormat = 'png';
+    f.state.exportBitDepth = 16;
+    workerPosts.length = 0;
+    saved.length = 0;
+    png16Pools.length = 0;
+    await f.context.exportSingle();
+    bandedOnly(workerPosts.map((p) => p.type), 'single PNG16 with a pool');
+    assert.equal(png16Pools.length, 1, 'single PNG16: one band pool');
+    assert.equal(png16Pools[0].disposed, 1, 'single PNG16: the pool ends with the export');
+    assert.equal(bridges.at(-1).terminated, 1);
+    assert.ok(same(await stubBlobText(saved[0]), await expectedBytes(f.state.processedImageData, f.state.recipe)), 'single PNG16: banded bytes == fused bytes');
+
+    const { f: b, frames, exportInfo, jobs } = batchContext({ format: 'png', bitDepth: 16 });
+    workerPosts.length = 0;
+    png16Pools.length = 0;
+    const written = [];
+    const result = await b.context.runBatchExport(jobs, { exportInfo, sink: async (job, blob) => { written.push(blob); } });
+    assert.equal(result.successCount, 1);
+    bandedOnly(workerPosts.map((p) => p.type), 'batch PNG16 with a pool');
+    assert.ok(workerPosts[0].transfers.includes(frames[0].__image16.data.buffer), 'batch PNG16: the adjust request transfers the frame\'s plane');
+    assert.equal(frames[0].__image16.data.byteLength, 0, 'batch PNG16: the frame\'s plane moved into the adjust stage');
+    assert.equal(png16Pools.length, 1, 'batch PNG16: one band pool');
+    assert.equal(png16Pools[0].disposed, 1, 'batch PNG16: the pool ends with the batch');
+    assert.ok(same(await stubBlobText(written[0]), await expectedBytes(makeProcessed(3), jobs[0].settings.recipe)), 'batch PNG16: banded bytes == fused bytes');
+  } finally {
+    png16PoolFactory = null;
+  }
 }
 
 setLiveReferenceProbe(null);

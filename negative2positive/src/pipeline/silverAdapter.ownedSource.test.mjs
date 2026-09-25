@@ -102,16 +102,26 @@ for (const [label, settings] of cases) {
 }
 
 {
-  // A cloned (lent) conversion with film-base compensation builds a pristine
-  // plane and pins the source; releaseSlotBuffers drops both.
+  // Since #238 a forceFullProcess (lent) conversion keeps no pristine plane
+  // and no source reference at all. An interactive conversion with film-base
+  // compensation still builds them (and its prepared prefix);
+  // releaseSlotBuffers drops every one.
   invalidateSilverCoreCache();
   const lent = source16();
   await convertFrameWithRouter({ imageData: lent, settings: cases[0][1], options: { forceFullProcess: true } });
-  const slot = inspectSlotBuffers('full');
-  assert.ok(slot.pristineBuffer && slot.lastSourceRef === lent.data, 'the cloned path keeps its pristine plane');
-  releaseSlotBuffers('full');
-  assert.equal(inspectSlotBuffers('full').pristineBuffer, null);
+  assert.equal(inspectSlotBuffers('full').pristineBuffer, null, 'a transient conversion keeps no pristine plane');
   assert.equal(inspectSlotBuffers('full').lastSourceRef, null);
+
+  invalidateSilverCoreCache();
+  const interactive = source16();
+  await convertFrameWithRouter({ imageData: interactive, settings: cases[0][1], options: {} });
+  const slot = inspectSlotBuffers('full');
+  assert.ok(slot.pristineBuffer && slot.lastSourceRef === interactive.data, 'the interactive path keeps its pristine plane');
+  releaseSlotBuffers('full');
+  const released = inspectSlotBuffers('full');
+  for (const field of ['pristineBuffer', 'lastSourceRef', 'prepared', 'exposed']) {
+    assert.equal(released[field], null, `interactive slot: ${field} released`);
+  }
 }
 
 {

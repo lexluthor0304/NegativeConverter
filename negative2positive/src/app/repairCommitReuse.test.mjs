@@ -96,7 +96,7 @@ function fixture() {
   });
   vm.runInContext(['getDustSource', 'nextDustMaskTag', 'noteDustReplaced', 'hasFrameRepairs', 'isCurrentLoad', 'currentRepairRecipe',
     'stampRepairResult', 'carryRestoredRepairStamp', 'commitDustPass', 'aiRepairReady',
-    'applyDustResultToState', 'runDustDetection', 'renderCurrentImageDataForExport'].map(functionSource).join('\n'), c);
+    'applyDustResultToState', 'runDustDetection', 'prepareCurrentImageForExport', 'renderCurrentImageDataForExport'].map(functionSource).join('\n'), c);
   return { c, state, clean, lens, calls, detectedMask, infos, bumpNextStrokePass: () => { bumpDuringStrokes = true; },
     exportImage: () => c.renderCurrentImageDataForExport({ format: 'png', bitDepth: 8 }) };
 }

@@ -921,6 +921,8 @@ export function inspectSlotBuffers(which = 'full') {
     referencePixels: slot.referencePixels,
     promotedSource: slot.promotedSource,
     exposureMap: slot.exposureMap,
+    prepared: slot.prepared,
+    exposed: slot.exposed,
   } : null;
 }
 
