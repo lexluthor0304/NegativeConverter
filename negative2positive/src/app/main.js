@@ -6181,10 +6181,17 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         outWidth: plan.outWidth, outHeight: plan.outHeight, fromLevel: plan.fromLevel, levelFactor: plan.levelFactor,
         slotWidth: slot.width, slotHeight: slot.height
       };
+      const settings = buildRouterSettings(state);
+      const analysisImageData = getColorAnalysisSample(state);
+      // The worker may keep another photo's level (a warm photo switch converts
+      // nothing): the base's analysis request puts this one back first.
+      if (!convertPreviewFrameInWorker.holds(base.imageData, analysisImageData)) {
+        await convertPreviewFrameInWorker.analyze({ ...base, settings, options: { preview: true, analysisImageData } });
+      }
       const rows = plan.fromLevel ? null
         : copyRegionRows(source.__image16?.data instanceof Uint16Array ? source.__image16.data : source.data, source.width, plan);
       return convertPreviewFrameInWorker.roi({
-        settings: buildRouterSettings(state), region, rows,
+        settings, region, rows,
         base: { levelWidth: base.imageData.width, levelHeight: base.imageData.height, display: base.display }
       });
     }

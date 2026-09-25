@@ -406,6 +406,8 @@ console.log('conversionWorkerClient: 入力再利用・参照解除・再起動�
   assert.ok(worker().lastTransfers.includes(rows.buffer), 'the rows are transferred');
   worker().onmessage({ data: { id: message.id, type: 'roi', width: 2, height: 1, rgba: new Uint8ClampedArray(8).fill(2).buffer } });
   assert.deepEqual([...(await pending).data], [2, 2, 2, 2, 2, 2, 2, 2]);
+  assert.equal(preview.holds(level), true, 'the worker keeps the level');
+  assert.equal(preview.holds(full), false);
   pending = preview(frame(3));
   assert.equal(worker().messages.at(-1).reuseSource, true, 'the cached level survives the uncached requests');
   worker().complete(); await pending;

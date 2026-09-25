@@ -377,6 +377,10 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
     return { key: result.key, channelData: result.channelData, autoColor: result.autoColor, positiveAnalysis: result.positiveAnalysis };
   };
 
+  // Whether the worker keeps `imageData` and `analysis` as its cached source
+  // and sample (#248: a detail region reuses the cached level).
+  convert.holds = (imageData, analysis = null) => Boolean(worker) && lastSource === imageData && lastAnalysis === (analysis || null);
+
   // A copy of the display negative of a display target (#248), from the
   // cached level: an ImageData with its __image16.
   convert.displayNegative = async (frame) => {

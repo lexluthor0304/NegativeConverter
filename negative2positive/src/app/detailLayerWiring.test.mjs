@@ -39,6 +39,9 @@ function fixture({ dpr = 2, container = { width: 600, height: 420 } } = {}) {
     dustRemoval: { enabled: false, revision: 3 }, repairStrokes: []
   };
   const roiCalls = [];
+  const analyses = [];
+  // The preview worker keeps this photo's level unless a test says otherwise.
+  const heldLevel = { image: conversionSource };
   const resamples = [];
   const draws = [];
   const uploads = [];
@@ -77,7 +80,10 @@ function fixture({ dpr = 2, container = { width: 600, height: 420 } } = {}) {
     // No repair pass owes anything unless a test says so.
     repairsNeedSettling: () => false, dustMaskIsStale: () => false, dustDetectionTimer: null, pendingBrushRepairs: 0,
     previewRequestImage: image => ({ imageData: image.__displayOf, display: { target: { width: image.width, height: image.height }, geometry: displayLevelGeometry(image.__displayOf) } }),
+    getColorAnalysisSample: () => null,
     convertPreviewFrameInWorker: {
+      holds: (image) => image === heldLevel.image,
+      analyze: async (frame) => { analyses.push(frame); heldLevel.image = frame.imageData; return {}; },
       roi: (request) => new Promise((resolve, reject) => roiCalls.push({ request, resolve, reject })),
       resample: async (image, target) => { resamples.push({ image, target }); return new ImageData(target.width, target.height); },
     },
@@ -104,7 +110,8 @@ function fixture({ dpr = 2, container = { width: 600, height: 420 } } = {}) {
     state.panX = cx - next.baseX - contentX * zoom;
     state.panY = cy - next.baseY - contentY * zoom;
   };
-  return { context, state, roiCalls, resamples, draws, uploads, glDetailCanvas, wrapper, timers, runTimers, zoomTo, fit, conversionSource, base, container };
+  return { context, state, roiCalls, resamples, draws, uploads, glDetailCanvas, wrapper, timers, runTimers, zoomTo, fit, conversionSource, base, container,
+    analyses, heldLevel };
 }
 
 // At fit the base is sharp enough: no region, nothing asked.
@@ -180,6 +187,25 @@ function fixture({ dpr = 2, container = { width: 600, height: 420 } } = {}) {
   // A photo switch, rotate or crop (resetZoomPan) drops it.
   f.context.dropDetailLayer();
   assert.equal(f.context.detailLayer.shown, null);
+}
+
+// A warm photo switch converts nothing, so the preview worker may still keep
+// the other photo's level: the base's analysis request puts it back first.
+{
+  const f = fixture();
+  f.heldLevel.image = { width: 10, height: 10 };
+  f.zoomTo(1 / (f.fit * 2));
+  f.context.noteDetailViewChanged();
+  await f.runTimers();
+  assert.equal(f.analyses.length, 1, 'the level is sent again through the base analysis');
+  assert.equal(f.analyses[0].imageData, f.conversionSource);
+  assert.equal(f.roiCalls.length, 1);
+  f.roiCalls[0].resolve(new ImageData(f.roiCalls[0].request.region.outWidth, f.roiCalls[0].request.region.outHeight));
+  await settle();
+  f.context.dropDetailLayer();
+  f.context.noteDetailViewChanged();
+  await f.runTimers();
+  assert.equal(f.analyses.length, 1, 'not while the worker keeps it');
 }
 
 // A current full-resolution frame (after a settle, an export or a repair
