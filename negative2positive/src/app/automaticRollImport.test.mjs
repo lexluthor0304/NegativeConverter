@@ -878,4 +878,27 @@ function workerRoll(f, { analysisFor = () => ({}), dng = true } = {}) {
   assert.ok(f.items.every(item => item.settings));
 }
 
+{
+  // A worker that goes with its frame before the sample: the frame is
+  // measured again, not marked failed.
+  const f = fixture();
+  let lost = 0;
+  const { heldFrames } = workerRoll(f);
+  const load = f.context.loadFileToImageData;
+  f.context.loadFileToImageData = async (file, options) => {
+    const out = await load(file, options);
+    const held = heldFrames.at(-1);
+    if (options?.postDecode && held?.id === 2 && lost++ === 0) held.sample = async () => { throw new Error('Roll-frame worker crashed'); };
+    return out;
+  };
+  const warn = console.warn; console.warn = () => {};
+  try {
+    f.context.scheduleAutomaticRollImport(f.items);
+    await f.fire(1200);
+  } finally { console.warn = warn; }
+  assert.equal(f.items[2].status, undefined, 'not marked failed');
+  assert.ok(f.items.every(item => item.settings));
+  assert.equal(f.decoded.filter(id => id === 2).length, 2, 'decoded again');
+}
+
 console.log('automaticRollImport tests passed');

@@ -26246,7 +26246,14 @@ import { canPublishThumbnail } from './thumbnailRank.js';
                           if (!itemValid()) return null;
                           sample = buildRollSample(image, settings);
                         } else {
-                          const built = await decoded.held.sample(rollSampleSettings(settings), { tileMax: STUDIO_TILE_PREVIEW_MAX });
+                          let built;
+                          try { built = await decoded.held.sample(rollSampleSettings(settings), { tileMax: STUDIO_TILE_PREVIEW_MAX }); }
+                          catch (error) {
+                            // The worker went with the frame: measure it again.
+                            workerFailures.set(item, (workerFailures.get(item) || 0) + 1);
+                            console.warn('Roll frame sample failed in its worker; measuring it again:', item.file?.name, error);
+                            return null;
+                          }
                           sample = built.sample || buildRollSample(built.base, settings);
                         }
                         if (!itemValid()) return null;
