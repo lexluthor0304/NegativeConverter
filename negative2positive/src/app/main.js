@@ -18128,16 +18128,30 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     }
 
     let expiredOpenCvState = 'idle';
+    // The measurement in flight, so a second request for the same source and
+    // positive (a conversion finishing while one runs) joins it.
+    let expiredSpatialRun = null;
 
     // Phase two of the interactive measurement. The global result is on
     // screen immediately; the frame is then re-measured with its fog surface
     // (sampled in slices here, measured in the auto-frame worker), replacing
     // the analysis in place. A newer photo or conversion source ends it
     // between slices.
-    async function runExpiredSpatialAnalysis() {
+    function runExpiredSpatialAnalysis() {
       const key = expiredSourceKey();
-      const generation = loadGeneration;
       const current = state.processedImageData;
+      if (expiredSpatialRun && expiredSpatialRun.key === key && expiredSpatialRun.image === current
+        && expiredSpatialRun.generation === loadGeneration) return expiredSpatialRun.promise;
+      const run = { key, image: current, generation: loadGeneration };
+      run.promise = measureExpiredSpatialAnalysis(key, current).finally(() => {
+        if (expiredSpatialRun === run) expiredSpatialRun = null;
+      });
+      expiredSpatialRun = run;
+      return run.promise;
+    }
+
+    async function measureExpiredSpatialAnalysis(key, current) {
+      const generation = loadGeneration;
       if (!current || !state.expiredEnabled || !state.expiredAnalysis) return false;
       if (expiredOpenCvState !== 'ready') {
         expiredOpenCvState = 'loading';
