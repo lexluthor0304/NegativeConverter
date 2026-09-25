@@ -91,7 +91,10 @@ function installTierProbe() {
     if (record) { probe.inFlight -= record.pending.size; record.pending.clear(); note('terminate'); }
     return original.terminate.apply(this, args);
   };
-  const onPointer = event => note(event.type);
+  // Stamped when the event was created: the app's own capture listener,
+  // registered before this one, ends the session and posts its settle tick
+  // in the same dispatch.
+  const onPointer = event => note(event.type, { time: event.timeStamp });
   window.addEventListener('pointerdown', onPointer, true);
   window.addEventListener('pointerup', onPointer, true);
   // Long tasks are logged, not asserted: timings belong to #230's harness.
