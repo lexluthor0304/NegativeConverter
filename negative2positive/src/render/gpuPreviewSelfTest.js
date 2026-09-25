@@ -137,50 +137,91 @@ function clonePlane(image) {
 }
 
 /**
- * The self-test cases with their CPU reference: for each, the Image16 fixture, the
- * stops, the resolved params, a seeded engine and its plan (what the renderer
- * uploads), and `expected`, the 8-bit RGBA the CPU engine produces.
+ * One case for the renderer's comparison (self-test or smoke parity): `image`
+ * (Image16, the prepared negative) converted with `settings` in `mode` by the CPU
+ * engine, analysed as the adapter analyses it. Returns the image, the stops, the
+ * resolved params, the seeded engine and its plan (what the renderer uploads), and
+ * `expected`, the engine's 8-bit RGBA. `filmPresets` resolves a named preset.
+ */
+export function buildPreviewCase({ name, mode, settings, image, stops = null, profile = null, positive = null, filmPresets = null }) {
+  const params = resolveSilverCoreParams(mode, settings, filmPresets);
+  const engine = new Engine(image.width, image.height);
+  engine.enhancedLut = profile;
+  // B&W frames arrive mixed down, and analyze() applies the pre-saturation itself.
+  const sample = clonePlane(image);
+  if (mode === 'bw') toGrayscaleInPlace(sample, params.bwMix);
+  engine.analyze(sample, params);
+  if (positive) engine.positiveAnalysis = { gain: positive.gain, wb: [...positive.wb] };
+  const plan = engine.previewPlan(params, { grey: mode === 'bw' });
+  const output = applyPreviewChain(engine, clonePlane(image), params, mode, stops);
+  return {
+    name, mode, width: image.width, height: image.height,
+    prepared: image, stops, params, engine, plan,
+    profile: engine.enhancedLut, positive: engine.positiveAnalysis,
+    expected: toRGBA8(output).data,
+  };
+}
+
+/**
+ * The self-test cases: the 64 × 64 fixture through the three cases above, with a
+ * synthetic profile (no fetch).
  */
 export function buildSelfTestCases() {
   const fixture = selfTestFixture();
   const stops = selfTestStops();
   const profile = syntheticProfile();
-  return CASES.map((spec) => {
-    const params = resolveSilverCoreParams(spec.mode, spec.settings, null);
-    const engine = new Engine(SELF_TEST_SIZE, SELF_TEST_SIZE);
-    engine.enhancedLut = spec.profile ? profile : null;
-    // The analysis as the adapter makes it: B&W frames arrive mixed down, and
-    // analyze() applies the pre-saturation itself.
-    const sample = clonePlane(fixture);
-    if (spec.mode === 'bw') toGrayscaleInPlace(sample, params.bwMix);
-    engine.analyze(sample, params);
-    if (spec.positive) engine.positiveAnalysis = { gain: spec.positive.gain, wb: [...spec.positive.wb] };
-    const plan = engine.previewPlan(params, { grey: spec.mode === 'bw' });
-    const caseStops = spec.stops ? stops : null;
-    const output = applyPreviewChain(engine, clonePlane(fixture), params, spec.mode, caseStops);
-    return {
-      name: spec.name, mode: spec.mode, width: SELF_TEST_SIZE, height: SELF_TEST_SIZE,
-      prepared: fixture, stops: caseStops, params, engine, plan,
-      profile: engine.enhancedLut, positive: engine.positiveAnalysis,
-      expected: toRGBA8(output).data,
-    };
-  });
+  return CASES.map((spec) => buildPreviewCase({
+    name: spec.name, mode: spec.mode, settings: spec.settings, image: fixture,
+    stops: spec.stops ? stops : null, profile: spec.profile ? profile : null, positive: spec.positive || null,
+  }));
+}
+
+// A parity frame for the GPU checks: the top half from the edge-case fixture, the
+// bottom half film-like densities (a slide for 'positive').
+export function parityFrame(kind, width = 96, height = 64) {
+  const data = new Uint16Array(width * height * 4);
+  const fixture = selfTestFixture(11);
+  const half = height >> 1;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      if (y < half) {
+        const f = (((y * 2) % SELF_TEST_SIZE) * SELF_TEST_SIZE + (x % SELF_TEST_SIZE)) * 4;
+        data.set(fixture.data.subarray(f, f + 4), i);
+      } else {
+        const t = (x / width + (y - half) / half) / 2;
+        const film = kind === 'positive' ? [0.2 + 0.7 * t, 0.15 + 0.7 * t * t, 0.1 + 0.8 * t] : [0.75 - 0.4 * t, 0.5 - 0.3 * t, 0.35 - 0.2 * t];
+        data.set([...film.map((v) => Math.round((v + 0.03 * Math.sin(x * 0.7 + y)) * 65535)), 65535], i);
+      }
+    }
+  }
+  return { width, height, data };
+}
+
+// Dodge-and-burn stops over the right half of a parity frame.
+export function parityStops(width = 96, height = 64) {
+  const stops = new Float32Array(width * height);
+  for (let p = 0; p < width * height; p++) if ((p % width) > width / 2) stops[p] = Math.sin(p * 0.37) * 1.8;
+  return stops;
 }
 
 /**
  * Compares a readback (bottom-up rows, as readPixels returns them) of `width` ×
- * `height` pixels whose case k occupies columns [k * 64, k * 64 + 64) against the
- * cases' expected bytes. Returns { ok, maxDiff, worst } per case and overall.
+ * `height` pixels, in which case k occupies columns [k * w, k * w + w) for cases of
+ * w × h pixels (all the same size), with the cases' expected bytes. Returns per case
+ * and overall the largest channel difference and the pixels that differ at all.
  */
-export function compareSelfTest(cases, pixels, width, height = SELF_TEST_SIZE) {
-  const n = SELF_TEST_SIZE;
+export function compareSelfTest(cases, pixels, width, height) {
+  const w = cases[0].width || SELF_TEST_SIZE;
+  const h = cases[0].height || SELF_TEST_SIZE;
+  const rows = height ?? h;
   const results = cases.map((testCase, k) => {
     let maxDiff = 0, worst = null, differing = 0;
-    for (let y = 0; y < n; y++) {
-      const row = height - 1 - y; // the fixture's top row is drawn at the top
-      for (let x = 0; x < n; x++) {
-        const got = (row * width + k * n + x) * 4;
-        const want = (y * n + x) * 4;
+    for (let y = 0; y < h; y++) {
+      const row = rows - 1 - y; // the image's top row is drawn at the top
+      for (let x = 0; x < w; x++) {
+        const got = (row * width + k * w + x) * 4;
+        const want = (y * w + x) * 4;
         let pixelDiff = 0;
         for (let c = 0; c < 3; c++) {
           const diff = Math.abs(pixels[got + c] - testCase.expected[want + c]);
@@ -190,7 +231,7 @@ export function compareSelfTest(cases, pixels, width, height = SELF_TEST_SIZE) {
         if (pixelDiff > maxDiff) { maxDiff = pixelDiff; worst = { x, y }; }
       }
     }
-    return { name: testCase.name, maxDiff, worst, differing };
+    return { name: testCase.name, maxDiff, worst, differing, identical: 1 - differing / (w * h) };
   });
   const maxDiff = Math.max(0, ...results.map((result) => result.maxDiff));
   return { ok: maxDiff <= SELF_TEST_MAX_DIFF, maxDiff, cases: results };

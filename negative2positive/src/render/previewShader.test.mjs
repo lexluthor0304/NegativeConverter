@@ -23,7 +23,7 @@ const { bwMixWeights } = await import('../silvercore/engine/Presets.js');
 const { paperTonings } = await import('../silvercore/engine/PaperProfiles.js');
 const { toRGBA8 } = await import('../silvercore/util/image16.js');
 const { applyPreviewChain, applyUniforms, packTableTexture, packHueWeights, packLinearLut } = await import('./previewTables.js');
-const { buildSelfTestCases, compareSelfTest, selfTestFixture } = await import('./gpuPreviewSelfTest.js');
+const { buildSelfTestCases, compareSelfTest, parityFrame, parityStops } = await import('./gpuPreviewSelfTest.js');
 const { modelApplyProgram, compare8 } = await import('../../test-fixtures/previewShaderModel.mjs');
 const { hueWeightTables } = await import('../silvercore/engine/ImageProcessor.js');
 const { LINEAR_LUT } = await import('../silvercore/util/localExposure.js');
@@ -94,29 +94,8 @@ const { LINEAR_LUT } = await import('../silvercore/util/localExposure.js');
 
 // ---- 2. Arithmetic: the model against the engine ----
 const W = 96, H = 64;
-function frame(kind) {
-  const data = new Uint16Array(W * H * 4);
-  const fixture = selfTestFixture(11);
-  for (let y = 0; y < H; y++) {
-    for (let x = 0; x < W; x++) {
-      const i = (y * W + x) * 4;
-      if (y < 32) {
-        // Half the frame from the edge-case fixture, half film-like densities.
-        data.set(fixture.data.subarray(((y * 2) * 64 + (x % 64)) * 4, ((y * 2) * 64 + (x % 64)) * 4 + 4), i);
-      } else {
-        const t = (x / W + (y - 32) / 32) / 2;
-        const film = kind === 'positive' ? [0.2 + 0.7 * t, 0.15 + 0.7 * t * t, 0.1 + 0.8 * t] : [0.75 - 0.4 * t, 0.5 - 0.3 * t, 0.35 - 0.2 * t];
-        data.set([...film.map((v) => Math.round((v + 0.03 * Math.sin(x * 0.7 + y)) * 65535)), 65535], i);
-      }
-    }
-  }
-  return { width: W, height: H, data };
-}
-function stopsMap() {
-  const stops = new Float32Array(W * H);
-  for (let p = 0; p < W * H; p++) if ((p % W) > W / 2) stops[p] = Math.sin(p * 0.37) * 1.8;
-  return stops;
-}
+const frame = (kind) => parityFrame(kind, W, H);
+const stopsMap = () => parityStops(W, H);
 
 let cases = 0;
 const worst = { maxDiff: 0, identical: 1, name: '' };

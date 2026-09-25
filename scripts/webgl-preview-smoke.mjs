@@ -4,13 +4,16 @@
 // gesture must stay a compositor transform until the display preview settles
 // (GPU and CPU display modes); and window resize, DPR change and WebGL context
 // loss/restore must redraw without leaving a resized, undrawn (black) canvas.
+// #239: the same checks hold for the WebGL2 context, where applyProgram frames of a
+// SilverCore drag must be upright too.
 const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`;
 
 function installWebglProbe() {
-  const glProto = WebGLRenderingContext.prototype;
+  // WebGL2 (#239) and the WebGL1 fallback have separate prototypes.
+  const glProtos = [WebGLRenderingContext.prototype, window.WebGL2RenderingContext?.prototype].filter(Boolean)
+    .map(proto => ({ proto, draw: proto.drawArrays, getError: proto.getError, allocate: proto.texImage2D,
+      update: proto.texSubImage2D, storage: proto.texStorage2D }));
   const original = {
-    draw: glProto.drawArrays, getError: glProto.getError,
-    allocate: glProto.texImage2D, update: glProto.texSubImage2D,
     put: CanvasRenderingContext2D.prototype.putImageData,
     drawImage: CanvasRenderingContext2D.prototype.drawImage,
     toDataURL: HTMLCanvasElement.prototype.toDataURL,
@@ -19,7 +22,7 @@ function installWebglProbe() {
   };
   const workers = new Map();
   const probe = window.__webglProbe = {
-    events: [], draws: 0, getErrors: 0, allocations: 0, updates: 0, cpuDraws: 0, thumbnails: 0,
+    events: [], draws: 0, applyDraws: 0, lastApply: null, getErrors: 0, allocations: 0, updates: 0, cpuDraws: 0, thumbnails: 0,
     inFlight: 0, lastActivity: performance.now(), last: null, texture: null, resizes: 0, undrawnResizes: 0,
   };
   const note = (type, detail = {}) => {
@@ -59,34 +62,56 @@ function installWebglProbe() {
     }
     return out;
   };
-  glProto.drawArrays = function(...args) {
-    const result = original.draw.apply(this, args);
-    if (onPreviewCanvas(this)) {
-      probe.draws++;
-      probe.last = glPatches(this);
-      note('draw', { width: probe.last.width, height: probe.last.height });
+  const isApply = new WeakMap();
+  // The exact 8-bit frame; the GPU preview's integer textures are not frames.
+  const exactFrame = (gl, args) => args[6] === gl.RGBA && args[7] === gl.UNSIGNED_BYTE;
+  for (const gl of glProtos) {
+    gl.proto.drawArrays = function(...args) {
+      const result = gl.draw.apply(this, args);
+      // The GPU preview's self-test draws into its own framebuffer.
+      if (onPreviewCanvas(this) && this.getParameter(this.FRAMEBUFFER_BINDING) === null) {
+        probe.draws++;
+        probe.last = glPatches(this);
+        const program = this.getParameter(this.CURRENT_PROGRAM);
+        let apply = program ? isApply.get(program) : false;
+        if (program && apply === undefined) {
+          apply = this.getUniformLocation(program, 'u_prepared') !== null;
+          isApply.set(program, apply);
+        }
+        if (apply) { probe.applyDraws++; probe.lastApply = probe.last; }
+        note('draw', { width: probe.last.width, height: probe.last.height, apply });
+      }
+      return result;
+    };
+    gl.proto.getError = function(...args) {
+      if (onPreviewCanvas(this)) { probe.getErrors++; note('getError'); }
+      return gl.getError.apply(this, args);
+    };
+    gl.proto.texImage2D = function(...args) {
+      if (onPreviewCanvas(this) && args[3] > 256 && ArrayBuffer.isView(args[8])) {
+        probe.allocations++;
+        if (exactFrame(this, args)) probe.texture = [args[3], args[4]];
+        note('upload', { allocate: true, width: args[3], height: args[4] });
+      }
+      return gl.allocate.apply(this, args);
+    };
+    gl.proto.texSubImage2D = function(...args) {
+      if (onPreviewCanvas(this) && args[4] > 256 && ArrayBuffer.isView(args[8])) {
+        if (exactFrame(this, args)) probe.updates++;
+        note('upload', { allocate: false, width: args[4], height: args[5] });
+      }
+      return gl.update.apply(this, args);
+    };
+    if (gl.storage) {
+      gl.proto.texStorage2D = function(...args) {
+        if (onPreviewCanvas(this) && args[3] > 256) {
+          probe.allocations++;
+          note('upload', { allocate: true, width: args[3], height: args[4] });
+        }
+        return gl.storage.apply(this, args);
+      };
     }
-    return result;
-  };
-  glProto.getError = function(...args) {
-    if (onPreviewCanvas(this)) { probe.getErrors++; note('getError'); }
-    return original.getError.apply(this, args);
-  };
-  glProto.texImage2D = function(...args) {
-    if (onPreviewCanvas(this) && args[3] > 256 && ArrayBuffer.isView(args[8])) {
-      probe.allocations++;
-      probe.texture = [args[3], args[4]];
-      note('upload', { allocate: true, width: args[3], height: args[4] });
-    }
-    return original.allocate.apply(this, args);
-  };
-  glProto.texSubImage2D = function(...args) {
-    if (onPreviewCanvas(this) && args[4] > 256 && ArrayBuffer.isView(args[8])) {
-      probe.updates++;
-      note('upload', { allocate: false, width: args[4], height: args[5] });
-    }
-    return original.update.apply(this, args);
-  };
+  }
   CanvasRenderingContext2D.prototype.putImageData = function(...args) {
     if (this.canvas?.id === 'canvas') { probe.cpuDraws++; note('cpu'); }
     return original.put.apply(this, args);
@@ -165,7 +190,10 @@ function installWebglProbe() {
       busy: busy.map(event => event.type), resizeWithoutTexture: resizeWithoutTexture.length };
   };
   probe.restore = () => {
-    Object.assign(glProto, { drawArrays: original.draw, getError: original.getError, texImage2D: original.allocate, texSubImage2D: original.update });
+    for (const gl of glProtos) {
+      Object.assign(gl.proto, { drawArrays: gl.draw, getError: gl.getError, texImage2D: gl.allocate, texSubImage2D: gl.update });
+      if (gl.storage) gl.proto.texStorage2D = gl.storage;
+    }
     CanvasRenderingContext2D.prototype.putImageData = original.put;
     CanvasRenderingContext2D.prototype.drawImage = original.drawImage;
     HTMLCanvasElement.prototype.toDataURL = original.toDataURL;
@@ -309,6 +337,12 @@ export async function runWebglPreviewSmoke({ send, evaluate, waitFor, fail, inst
   console.log('ok: steady-state draws check getError only on allocation ' + JSON.stringify({
     draws: steady.draws - steadyBefore.draws, updates: steady.updates - steadyBefore.updates,
     allocations, getErrors: steady.getErrors - steadyBefore.getErrors }));
+  // #239: where the SilverCore drag was drawn by applyProgram, its frames are upright too.
+  const applied = await evaluate(`({ draws: window.__webglProbe.applyDraws, last: window.__webglProbe.lastApply })`);
+  if (applied.draws > 0) {
+    expect(marked(applied.last), 'applyProgram frame is not upright (marked corner not top-left): ' + JSON.stringify(applied));
+    console.log('ok: applyProgram frames upright ' + JSON.stringify(applied));
+  }
 
   // ---- Zoom: compositor transform in GPU and CPU display modes ----
   await zoomCheck('GPU');
@@ -388,7 +422,8 @@ export async function runWebglPreviewSmoke({ send, evaluate, waitFor, fail, inst
 
   // ---- Context loss falls back to the CPU preview; restore recovers ----
   const cpuDrawsBeforeLoss = await evaluate(`(() => {
-    const context = document.getElementById('glCanvas').getContext('webgl');
+    const canvas = document.getElementById('glCanvas');
+    const context = canvas.getContext('webgl2') || canvas.getContext('webgl');
     window.__webglLoseContext = context.getExtension('WEBGL_lose_context');
     const draws = window.__webglProbe.cpuDraws;
     window.__webglLoseContext.loseContext();

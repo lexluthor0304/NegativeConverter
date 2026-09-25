@@ -20,9 +20,10 @@ function installPhotoSessionProbe() {
     click: HTMLAnchorElement.prototype.click,
     revoke: URL.revokeObjectURL,
     picker: window.showSaveFilePicker,
-    draw: WebGLRenderingContext.prototype.drawArrays,
-    allocate: WebGLRenderingContext.prototype.texImage2D,
   };
+  // WebGL2 (#239) and the WebGL1 fallback have separate prototypes.
+  const glProtos = [WebGLRenderingContext.prototype, window.WebGL2RenderingContext?.prototype].filter(Boolean)
+    .map(proto => ({ proto, draw: proto.drawArrays, allocate: proto.texImage2D }));
   const workers = new Map(), heldUrls = new Set();
   const probe = window.__photoSessionProbe = {
     requests: [], reads: [], bitmaps: [], exports: [], rawImages: [], inFlight: 0,
@@ -87,13 +88,16 @@ function installPhotoSessionProbe() {
   // Read a few patches immediately after the real draw, while WebGL's
   // non-preserved drawing buffer still exists. No product debug hook required.
   // The preview texture's allocated size; the drawing buffer must follow it.
-  WebGLRenderingContext.prototype.texImage2D = function(...args) {
-    if (this.canvas.id === 'glCanvas' && args[3] > 256 && ArrayBuffer.isView(args[8])) probe.texture = [args[3], args[4]];
-    return original.allocate.apply(this, args);
+  for (const gl of glProtos) gl.proto.texImage2D = function(...args) {
+    // The exact 8-bit frame's texture (the GPU preview's integer ones are not frames).
+    if (this.canvas.id === 'glCanvas' && args[3] > 256 && ArrayBuffer.isView(args[8])
+      && args[6] === this.RGBA && args[7] === this.UNSIGNED_BYTE) probe.texture = [args[3], args[4]];
+    return gl.allocate.apply(this, args);
   };
-  WebGLRenderingContext.prototype.drawArrays = function(...args) {
-    const result = original.draw.apply(this, args);
-    if (this.canvas.id === 'glCanvas') {
+  for (const gl of glProtos) gl.proto.drawArrays = function(...args) {
+    const result = gl.draw.apply(this, args);
+    // The GPU preview's self-test draws into its own framebuffer.
+    if (this.canvas.id === 'glCanvas' && this.getParameter(this.FRAMEBUFFER_BINDING) === null) {
       const width = this.drawingBufferWidth, height = this.drawingBufferHeight;
       const pixels = new Uint8Array(8 * 8 * 4);
       let hash = 2166136261;
@@ -173,8 +177,7 @@ function installPhotoSessionProbe() {
     probe.releaseFile?.(); clearTimeout(holdTimer);
     Worker.prototype.postMessage = original.post; Worker.prototype.terminate = original.terminate;
     File.prototype.arrayBuffer = original.read; window.createImageBitmap = original.bitmap;
-    WebGLRenderingContext.prototype.drawArrays = original.draw;
-    WebGLRenderingContext.prototype.texImage2D = original.allocate;
+    for (const gl of glProtos) Object.assign(gl.proto, { drawArrays: gl.draw, texImage2D: gl.allocate });
     HTMLAnchorElement.prototype.click = original.click; URL.revokeObjectURL = original.revoke;
     window.showSaveFilePicker = original.picker;
     for (const [worker, record] of workers) worker.removeEventListener('message', record.receive);

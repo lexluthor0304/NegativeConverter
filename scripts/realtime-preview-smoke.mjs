@@ -1,11 +1,10 @@
 // 解像度だけでなく、change（指を離す）前に実際の描画が更新されることを検証。
 export async function runRealtimePreviewSmoke({ send, evaluate, wait, fail }) {
   await evaluate(`(() => {
-    const proto = WebGLRenderingContext.prototype;
-    const upload = proto.texImage2D;
-    const subUpload = proto.texSubImage2D;
-    const getError = proto.getError;
-    const draw = proto.drawArrays;
+    // WebGL2 (#239) and the WebGL1 fallback have separate prototypes.
+    const protos = [WebGLRenderingContext.prototype, window.WebGL2RenderingContext?.prototype].filter(Boolean);
+    const originals = protos.map(proto => ({ proto, upload: proto.texImage2D, subUpload: proto.texSubImage2D,
+      storage: proto.texStorage2D, getError: proto.getError, draw: proto.drawArrays }));
     const post = Worker.prototype.postMessage;
     const workers = new Map();
     const pixelHash = pixels => {
@@ -14,34 +13,67 @@ export async function runRealtimePreviewSmoke({ send, evaluate, wait, fail }) {
       return hash;
     };
     const probe = window.__previewProbe = {
-      uploads: [], draws: 0, requests: [], results: [], allocations: 0, getErrors: 0,
+      uploads: [], draws: 0, applyDraws: [], requests: [], results: [], allocations: 0, getErrors: 0,
       inputs: [], changes: [], pendingPreview: 0, commits: [], committed: []
     };
-    // Same-size frames are uploaded with texSubImage2D (#233): width is
-    // argument 4 and the pixels argument 8 there.
-    proto.texImage2D = function (...args) {
-      const pixels = args[8];
-      if (this.canvas.id === 'glCanvas' && args[3] > 256 && ArrayBuffer.isView(pixels)) {
-        probe.allocations++;
-        probe.uploads.push({ width: args[3], height: args[4], hash: pixelHash(pixels), time: performance.now(), allocate: true });
+    // Only the exact 8-bit frame is an "upload": the GPU preview's integer
+    // textures (prepared negative, tables) are not frames on screen.
+    const exactFrame = (gl, args) => args[6] === gl.RGBA && args[7] === gl.UNSIGNED_BYTE;
+    const isApply = new WeakMap();
+    for (const original of originals) {
+      const proto = original.proto;
+      // Same-size frames are uploaded with texSubImage2D (#233): width is
+      // argument 4 and the pixels argument 8 there.
+      proto.texImage2D = function (...args) {
+        const pixels = args[8];
+        if (this.canvas.id === 'glCanvas' && args[3] > 256 && ArrayBuffer.isView(pixels)) {
+          probe.allocations++;
+          if (exactFrame(this, args)) probe.uploads.push({ width: args[3], height: args[4], hash: pixelHash(pixels), time: performance.now(), allocate: true });
+        }
+        return original.upload.apply(this, args);
+      };
+      proto.texSubImage2D = function (...args) {
+        const pixels = args[8];
+        if (this.canvas.id === 'glCanvas' && args[4] > 256 && ArrayBuffer.isView(pixels) && exactFrame(this, args)) {
+          probe.uploads.push({ width: args[4], height: args[5], hash: pixelHash(pixels), time: performance.now(), allocate: false });
+        }
+        return original.subUpload.apply(this, args);
+      };
+      if (original.storage) {
+        proto.texStorage2D = function (...args) {
+          if (this.canvas.id === 'glCanvas' && args[3] > 256) probe.allocations++;
+          return original.storage.apply(this, args);
+        };
       }
-      return upload.apply(this, args);
-    };
-    proto.texSubImage2D = function (...args) {
-      const pixels = args[8];
-      if (this.canvas.id === 'glCanvas' && args[4] > 256 && ArrayBuffer.isView(pixels)) {
-        probe.uploads.push({ width: args[4], height: args[5], hash: pixelHash(pixels), time: performance.now(), allocate: false });
-      }
-      return subUpload.apply(this, args);
-    };
-    proto.getError = function (...args) {
-      if (this.canvas.id === 'glCanvas') probe.getErrors++;
-      return getError.apply(this, args);
-    };
-    proto.drawArrays = function (...args) {
-      if (this.canvas.id === 'glCanvas') probe.draws++;
-      return draw.apply(this, args);
-    };
+      proto.getError = function (...args) {
+        if (this.canvas.id === 'glCanvas') probe.getErrors++;
+        return original.getError.apply(this, args);
+      };
+      proto.drawArrays = function (...args) {
+        const result = original.draw.apply(this, args);
+        // The GPU preview's self-test draws into its own framebuffer.
+        if (this.canvas.id === 'glCanvas' && this.getParameter(this.FRAMEBUFFER_BINDING) === null) {
+          probe.draws++;
+          const program = this.getParameter(this.CURRENT_PROGRAM);
+          let apply = program ? isApply.get(program) : false;
+          if (program && apply === undefined) {
+            apply = this.getUniformLocation(program, 'u_prepared') !== null;
+            isApply.set(program, apply);
+          }
+          // An applyProgram frame (#239): hash a few patches in the draw's own task.
+          if (apply) {
+            const width = this.drawingBufferWidth, height = this.drawingBufferHeight, patch = new Uint8Array(8 * 8 * 4);
+            let hash = 2166136261;
+            for (const [fx, fy] of [[.2, .2], [.5, .5], [.8, .8], [.3, .7], [.7, .3]]) {
+              this.readPixels(Math.floor(width * fx), Math.floor(height * fy), 8, 8, this.RGBA, this.UNSIGNED_BYTE, patch);
+              for (const value of patch) hash = Math.imul(hash ^ value, 16777619);
+            }
+            probe.applyDraws.push({ time: performance.now(), hash: hash >>> 0, width, height });
+          }
+        }
+        return result;
+      };
+    }
     // Capture runs before the slider's own listener: this is when the app
     // starts processing the input.
     const onInput = event => {
@@ -97,8 +129,12 @@ export async function runRealtimePreviewSmoke({ send, evaluate, wait, fail }) {
       return post.call(this, message, ...args);
     };
     window.__restorePreviewProbe = () => {
-      proto.texImage2D = upload; proto.texSubImage2D = subUpload; proto.getError = getError;
-      proto.drawArrays = draw; Worker.prototype.postMessage = post;
+      for (const original of originals) {
+        Object.assign(original.proto, { texImage2D: original.upload, texSubImage2D: original.subUpload,
+          getError: original.getError, drawArrays: original.draw });
+        if (original.storage) original.proto.texStorage2D = original.storage;
+      }
+      Worker.prototype.postMessage = post;
       document.removeEventListener('input', onInput, true);
       document.removeEventListener('change', onChange, true);
       for (const [worker, record] of workers) worker.removeEventListener('message', record.receive);
@@ -110,7 +146,7 @@ export async function runRealtimePreviewSmoke({ send, evaluate, wait, fail }) {
     const result = await evaluate(`(async () => {
       const slider = document.getElementById('coreExposure');
       const probe = window.__previewProbe;
-      probe.uploads = []; probe.draws = 0; probe.requests = []; probe.results = [];
+      probe.uploads = []; probe.draws = 0; probe.requests = []; probe.results = []; probe.applyDraws = [];
       probe.allocations = 0; probe.getErrors = 0; probe.commits = []; probe.committed = [];
       const start = performance.now();
       for (let i = 0; i < 60; i++) {
@@ -120,6 +156,10 @@ export async function runRealtimePreviewSmoke({ send, evaluate, wait, fail }) {
       }
       const end = performance.now();
       const during = probe.uploads.filter(item => item.time <= end);
+      // #239: with the GPU preview the drag draws applyProgram frames and converts
+      // only the settle frame; without it every tick uploads a converted frame.
+      const applied = probe.applyDraws.filter(item => item.time <= end);
+      const requestsDuring = probe.requests.filter(request => request.cache && request.time <= end).length;
       const converged = () => {
         const result = probe.results.at(-1), upload = probe.uploads.at(-1);
         return result?.exposure === 87 && upload?.hash === result.hash
@@ -135,6 +175,8 @@ export async function runRealtimePreviewSmoke({ send, evaluate, wait, fail }) {
       const sourceSize = window.__studioSourceSize || null;
       return { dpr: devicePixelRatio, width: canvas.width, height: canvas.height,
         uploads: during.length, changes: new Set(during.map(item => item.hash)).size,
+        applyDraws: applied.length, applyChanges: new Set(applied.map(item => item.hash)).size, requestsDuring,
+        minimumApplyWidth: Math.min(...applied.map(item => item.width)),
         firstFrameMs: during.length ? during[0].time - start : null,
         minimumWidth: Math.min(...during.map(item => item.width)),
         minimumHeight: Math.min(...during.map(item => item.height)),
@@ -147,7 +189,15 @@ export async function runRealtimePreviewSmoke({ send, evaluate, wait, fail }) {
           commits: probe.commits.length, committedPlanes: probe.committed.filter(item => item.plane).length },
         slider: Number(slider.value), duration: end - start };
     })()`);
-    if (result.uploads < 3 || result.changes < 3 || result.draws < 3) fail('continuous preview did not update before release: ' + JSON.stringify(result));
+    const gpu = result.applyDraws > 0;
+    if (gpu) {
+      if (result.applyDraws < 3 || result.applyChanges < 3) fail('GPU preview did not update before release: ' + JSON.stringify(result));
+      // The first ticks may convert while the GPU inputs are still being prepared.
+      if (result.requestsDuring > 2) fail('a GPU drag still converted per tick: ' + JSON.stringify(result));
+      if (result.minimumApplyWidth < result.width - 2) fail('GPU preview frames lost display resolution: ' + JSON.stringify(result));
+    } else if (result.uploads < 3 || result.changes < 3 || result.draws < 3) {
+      fail('continuous preview did not update before release: ' + JSON.stringify(result));
+    }
     // getError is a GPU round trip: only a size-changing allocation may check it.
     if (result.getErrors > result.allocations) fail('WebGL draw path still calls getError per frame: ' + JSON.stringify({ getErrors: result.getErrors, allocations: result.allocations, draws: result.draws }));
     // A display preview smaller than the source keeps each frame's 16-bit plane
@@ -162,7 +212,7 @@ export async function runRealtimePreviewSmoke({ send, evaluate, wait, fail }) {
     const interactive = result.requests.filter(request => request.cache);
     if (!interactive.some(request => request.reuse) || interactive.at(-1)?.exposure !== 87
       || result.slider !== 87 || !result.converged) fail('preview worker did not reuse source / converge to latest displayed pixels: ' + JSON.stringify(result));
-    console.log('ok: continuous sharp preview ' + JSON.stringify({ ...result, requests: result.requests.length }));
+    console.log(`ok: continuous sharp preview (${gpu ? 'GPU frames' : 'worker frames'}) ` + JSON.stringify({ ...result, requests: result.requests.length }));
   }
   await runTrustedDragCheck({ send, evaluate, wait, fail });
   await evaluate(`(() => {
@@ -188,6 +238,7 @@ async function runTrustedDragCheck({ send, evaluate, wait, fail }) {
     const rect = slider.getBoundingClientRect();
     const probe = window.__previewProbe;
     probe.inputs = []; probe.changes = []; probe.requests = []; probe.results = []; probe.commits = []; probe.committed = [];
+    probe.applyDraws = [];
     return { x: rect.x, y: rect.y + rect.height / 2, width: rect.width,
       min: Number(slider.min), max: Number(slider.max), value: Number(slider.value) };
   })()`);
@@ -229,8 +280,15 @@ async function runTrustedDragCheck({ send, evaluate, wait, fail }) {
     const reducedPosts = dragPosts.filter(post => post.width * post.height < largest);
     const lastReduced = reducedPosts.at(-1);
     const settleTicks = lastReduced ? dragPosts.filter(post => post.time > lastReduced.time) : [];
+    // #239: an input the GPU draws shows at the next animation frame.
+    const drawn = probe.applyDraws.filter(draw => inputs.length && draw.time >= inputs[0].time && (!release || draw.time <= release.time));
+    const drawLatency = inputs.map(input => {
+      const draw = drawn.find(item => item.time >= input.time);
+      return draw ? Math.round((draw.time - input.time) * 10) / 10 : null;
+    });
     return {
       inputs: inputs.length, idleInputs: idle.length, sameTask: sameTask.length, latency,
+      applyDraws: drawn.length, drawLatency,
       posts: posts.filter(post => inputs.length && post.time >= inputs[0].time && (!release || post.time <= release.time)).length,
       afterRelease: release ? posts.filter(post => post.time > release.time).length : null,
       tierSession: document.documentElement.dataset.previewTierLastSession || null,
@@ -243,9 +301,19 @@ async function runTrustedDragCheck({ send, evaluate, wait, fail }) {
     };
   })()`);
   if (drag.inputs < 5 || !drag.released) fail('trusted slider drag did not drive the slider: ' + JSON.stringify(drag));
-  if (drag.posts < 0.8 * drag.inputs) fail('trusted drag requested fewer frames than value changes: ' + JSON.stringify(drag));
-  if (drag.idleInputs < 3 || drag.sameTask < 0.8 * drag.idleInputs) {
-    fail('idle-lane inputs were not posted in their own task (< 3 ms): ' + JSON.stringify(drag));
+  if (drag.applyDraws > 0) {
+    // GPU preview: every value change drawn within a frame, no conversion per tick
+    // (the pause before release settles once).
+    if (drag.applyDraws < 0.8 * drag.inputs) fail('trusted GPU drag drew fewer frames than value changes: ' + JSON.stringify(drag));
+    if (drag.drawLatency.filter(value => value !== null && value < 50).length < 0.8 * drag.inputs) {
+      fail('GPU frames did not follow their inputs within a frame: ' + JSON.stringify(drag));
+    }
+    if (drag.posts > 2) fail('a trusted GPU drag converted per tick: ' + JSON.stringify(drag));
+  } else {
+    if (drag.posts < 0.8 * drag.inputs) fail('trusted drag requested fewer frames than value changes: ' + JSON.stringify(drag));
+    if (drag.idleInputs < 3 || drag.sameTask < 0.8 * drag.idleInputs) {
+      fail('idle-lane inputs were not posted in their own task (< 3 ms): ' + JSON.stringify(drag));
+    }
   }
   if (drag.reducedPosts === 0) {
     if (drag.afterRelease !== 0) fail('releasing the slider requested the shown frame again: ' + JSON.stringify(drag));
@@ -258,5 +326,5 @@ async function runTrustedDragCheck({ send, evaluate, wait, fail }) {
     }
   }
   if (drag.retainedFrames > 0 && drag.committedPlanes === 0) fail('the dragged frame never got its 16-bit plane back: ' + JSON.stringify(drag));
-  console.log('ok: trusted drag posts idle-lane frames in the input task and none on release (one normal-size settle after a reduced tier) ' + JSON.stringify(drag));
+  console.log(`ok: trusted drag ${drag.applyDraws > 0 ? 'draws every input on the GPU' : 'posts idle-lane frames in the input task'} and converts none on release (one normal-size settle after a reduced tier) ` + JSON.stringify(drag));
 }

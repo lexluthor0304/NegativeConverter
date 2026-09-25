@@ -89,9 +89,11 @@ export function createGpuPreviewRenderer(gl) {
   }
 
   // Allocation is the one place an out-of-memory can surface, so it keeps the only
-  // error check. A lost context reports itself here as well; its own events restore
-  // the renderer, so it is not an error.
-  function checkAllocation(what) {
+  // error check, for frame-sized textures only (a getError is a GPU round trip). A
+  // lost context reports itself here as well; its own events restore the renderer,
+  // so it is not an error.
+  function checkAllocation(what, width, height) {
+    if (width * height <= TABLE_TEXTURE_SIZE * TABLE_TEXTURE_SIZE) return !gl.isContextLost();
     const code = gl.getError();
     if (code === gl.NO_ERROR) return true;
     if (code === gl.CONTEXT_LOST_WEBGL || gl.isContextLost()) return false;
@@ -173,7 +175,7 @@ export function createGpuPreviewRenderer(gl) {
       const handle = texture();
       gl.texStorage2D(gl.TEXTURE_2D, 1, eight ? gl.RGBA8UI : gl.RGBA16UI, width, height);
       inputs.prepared = { handle, width, height, eight };
-      if (!checkAllocation('prepared negative')) return false;
+      if (!checkAllocation('prepared negative', width, height)) return false;
     }
     bind(UNITS.image, inputs.prepared.handle);
     const pixels = eight ? new Uint8Array(data8.buffer, data8.byteOffset, data8.length) : data16;
@@ -193,7 +195,7 @@ export function createGpuPreviewRenderer(gl) {
       const handle = texture();
       gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R32F, width, height);
       inputs.stops = { handle, width, height };
-      if (!checkAllocation('stops')) return false;
+      if (!checkAllocation('stops', width, height)) return false;
     }
     bind(UNITS.stops, inputs.stops.handle);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RED, gl.FLOAT, stops);
@@ -348,7 +350,7 @@ export function createGpuPreviewRenderer(gl) {
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, imageData.width, imageData.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, imageData.data);
         exact.width = imageData.width;
         exact.height = imageData.height;
-        if (!checkAllocation('texture')) {
+        if (!checkAllocation('texture', imageData.width, imageData.height)) {
           exact.width = exact.height = 0;
           return false;
         }
@@ -437,10 +439,11 @@ export function createGpuPreviewRenderer(gl) {
     selfTest(cases, { corrupt = false } = {}) {
       if (apply?.status !== 'linked') return { ok: false, reason: 'not linked' };
       ensureStatics();
-      const n = SELF_TEST_SIZE;
+      const n = cases[0].width || SELF_TEST_SIZE;
+      const m = cases[0].height || SELF_TEST_SIZE;
       const width = n * (cases.length + 1);
       const target = texture();
-      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, width, n);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, width, m);
       const framebuffer = gl.createFramebuffer();
       gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
       gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, target, 0);
@@ -454,20 +457,20 @@ export function createGpuPreviewRenderer(gl) {
         uploadCurveInto(identityCurve, { r: ramp, g: ramp, b: ramp }, false);
         const identity = { wb: [1, 1, 1], vib: 0, cmy: [0, 0, 0] };
         cases.forEach((testCase, k) => {
-          uploadPreparedInto(scratch, { width: n, height: n, data16: testCase.prepared.data });
-          uploadStopsInto(scratch, testCase.stops, n, n);
+          uploadPreparedInto(scratch, { width: n, height: m, data16: testCase.prepared.data });
+          uploadStopsInto(scratch, testCase.stops, n, m);
           const frame = { mode: testCase.mode, params: testCase.params, plan: testCase.plan, engine: testCase.engine };
           uploadFrameTables(scratch, frame);
-          drawApplyWith(scratch, frame, identity, identityCurve, [k * n, 0, n, n]);
+          drawApplyWith(scratch, frame, identity, identityCurve, [k * n, 0, n, m]);
         });
         bind(UNITS.image, exactScratch);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, n, n, 0, gl.RGBA, gl.UNSIGNED_BYTE, cases[0].expected);
-        drawStep3With(exactScratch, identityCurve, identity, [cases.length * n, 0, n, n]);
-        const pixels = new Uint8Array(width * n * 4);
-        gl.readPixels(0, 0, width, n, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, n, m, 0, gl.RGBA, gl.UNSIGNED_BYTE, cases[0].expected);
+        drawStep3With(exactScratch, identityCurve, identity, [cases.length * n, 0, n, m]);
+        const pixels = new Uint8Array(width * m * 4);
+        gl.readPixels(0, 0, width, m, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
         if (corrupt) pixels[0] ^= 0x10;
-        const step3Case = { name: 'step3', expected: cases[0].expected };
-        return compareSelfTest([...cases, step3Case], pixels, width, n);
+        const step3Case = { name: 'step3', width: n, height: m, expected: cases[0].expected };
+        return compareSelfTest([...cases, step3Case], pixels, width, m);
       } finally {
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
         gl.deleteFramebuffer(framebuffer);
