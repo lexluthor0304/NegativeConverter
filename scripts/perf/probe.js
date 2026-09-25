@@ -701,6 +701,129 @@
     } catch (e) { return false; }
   }
 
+  // ---- self-driven scenarios (the Tauri webview has no WebDriver on macOS) ----
+  // Range sliders only react to value changes, so the drive sets `value` and
+  // dispatches `input` on a rAF schedule. Results are labelled synthetic input
+  // and compared only with the same mode. Raw events go to the harness, which
+  // computes the metrics with the same definitions as the Chrome mode.
+  function sleepMs(ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); }
+  function nextFrame() { return new Promise(function (resolve) { requestAnimationFrame(resolve); }); }
+  function studioReady() {
+    var body = document.body;
+    return !!(body && body.classList.contains('studio-ready') && !body.dataset.studioBusy && !document.querySelector('.loading-overlay.visible'));
+  }
+  function waitUntil(test, timeoutMs) {
+    var started = now();
+    return new Promise(function (resolve, reject) {
+      (function poll() {
+        var ok = false;
+        try { ok = test(); } catch (e) { ok = false; }
+        if (ok) return resolve(now());
+        if (now() - started > timeoutMs) return reject(new Error('self-drive timeout'));
+        setTimeout(poll, 100);
+      })();
+    });
+  }
+  function revealControl(id) {
+    var element = document.getElementById(id);
+    if (!element) return Promise.resolve(false);
+    var pane = element.closest('.studio-pane');
+    if (pane && pane.hidden) { var tab = document.getElementById('studioTab-' + pane.id.replace('studioPane-', '')); if (tab) tab.click(); }
+    for (var details = element.closest('details'); details; details = details.parentElement && details.parentElement.closest('details')) details.open = true;
+    element.scrollIntoView({ block: 'center' });
+    return nextFrame().then(nextFrame).then(function () { return true; });
+  }
+  function driveSlider(id) {
+    var element = document.getElementById(id);
+    var min = Number(element.min || 0), max = Number(element.max || 100), initial = element.value;
+    var fraction = (Number(initial) - min) / Math.max(1e-9, max - min);
+    var direction = fraction <= 0.5 ? 1 : -1;
+    var part = { name: 'drag:' + id, id: id, initial: initial };
+    return revealControl(id).then(function () { return sleepMs(500); }).then(function () {
+      drain();
+      beginWindow('drag:' + id);
+      part.start = now();
+      var i = 0;
+      return new Promise(function (resolve) {
+        (function step() {
+          if (i >= 180) return resolve();
+          i++;
+          element.value = String(min + (fraction + direction * 0.4 * i / 180) * (max - min));
+          element.dispatchEvent(new Event('input', { bubbles: true }));
+          requestAnimationFrame(step);
+        })();
+      });
+    }).then(function () {
+      part.release = now();
+      element.dispatchEvent(new Event('change', { bubbles: true }));
+      return sleepMs(500);
+    }).then(function () {
+      part.window = endWindow();
+      return sleepMs(2500);
+    }).then(function () {
+      part.events = drain().events;
+      element.value = initial;
+      element.dispatchEvent(new Event('input', { bubbles: true }));
+      element.dispatchEvent(new Event('change', { bubbles: true }));
+      return sleepMs(1500);
+    }).then(function () { return waitUntil(studioReady, 120000); }).then(function () { return part; });
+  }
+  function driveSwitch(index, cls, target) {
+    var part = { name: 'switch:' + cls, cls: cls, index: index, target: target };
+    var button = document.querySelector('.file-list-name[data-index="' + index + '"]');
+    if (!button) return Promise.resolve(Object.assign(part, { error: 'no tile ' + index }));
+    drain();
+    beginWindow('switch:' + cls);
+    part.keyT = now();
+    button.click();
+    return waitUntil(function () {
+      return studioReady() && (document.getElementById('studioFilename') || {}).textContent === target;
+    }, 600000).then(function () { return sleepMs(1500); }).then(function () {
+      part.window = endWindow();
+      part.events = drain().events;
+      return part;
+    });
+  }
+  function selfDrive(spec) {
+    var report = { scenario: spec.scenario, synthetic: true, engine: navigator.userAgent, dpr: global.devicePixelRatio, parts: [], startedAt: now() };
+    return waitUntil(function () { return document.getElementById('studioImportAutoCrop') && document.body.classList.contains('studio'); }, 120000)
+      .then(function () { return sleepMs(1500); })
+      .then(function () {
+        report.bootMs = now();
+        drain();
+        beginWindow('import');
+        var part = { name: 'import', before: now() };
+        report.parts.push(part);
+        return importFixtures(spec.fixtures).then(function () { return waitUntil(studioReady, 600000); })
+          .then(function () { return sleepMs(3000); })
+          .then(function () { part.window = endWindow(); part.events = drain().events; });
+      })
+      .then(function () {
+        if (spec.scenario !== 's2') return null;
+        var chain = Promise.resolve();
+        (spec.sliders || []).forEach(function (id) {
+          chain = chain.then(function () { return driveSlider(id); }).then(function (part) { report.parts.push(part); });
+        });
+        return chain;
+      })
+      .then(function () {
+        if (spec.scenario !== 's7') return null;
+        var names = spec.fixtures;
+        var count = names.length;
+        var chain = driveSwitch(1, 'coldUnanalysed', names[1]).then(function (part) { report.parts.push(part); return driveSwitch(0, 'warm1Back', names[0]); })
+          .then(function (part) { report.parts.push(part); return waitUntil(function () { return document.querySelectorAll('.file-list-settings-badge').length >= count; }, 3600000); });
+        if (count > 2) chain = chain.then(function () { return driveSwitch(2, 'coldAnalysed', names[2]); }).then(function (part) { report.parts.push(part); return driveSwitch(0, 'warm1Back', names[0]); }).then(function (part) { report.parts.push(part); });
+        return chain;
+      })
+      .catch(function (error) { report.error = String(error && error.message || error); })
+      .then(function () {
+        report.snapshot = snapshot();
+        report.counters = Object.assign({}, counters);
+        report.selfMs = selfMs;
+        return fetch(spec.results || '/__perf/results', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(report) });
+      });
+  }
+
   function snapshot() {
     var body = document.body;
     var gl = document.getElementById('glCanvas');
@@ -754,6 +877,26 @@
     exports: { install: installExportCapture, list: exportList, upload: uploadExport, jpegSha256: decodedJpegSha256, clear: clearExports },
     importFixtures: importFixtures,
     startMainWatch: startMainWatch,
+    selfDrive: selfDrive,
     hash: sparseHash
   };
+
+  // WebKit modes: the preview server injects this script with ?mode=webkit.
+  // `scenario` in the page URL starts a self-driven run (Tauri); the main
+  // thread watch reports silences to the harness in both WebKit modes.
+  var params = (function () { try { return new URLSearchParams(location.search); } catch (e) { return null; } })();
+  var scriptSrc = document.currentScript && document.currentScript.src || '';
+  if (/[?&]mode=webkit/.test(scriptSrc) && params) {
+    startMainWatch(location.origin + '/__perf/heartbeat', 2000);
+    if (params.get('perf') === '1' && params.get('scenario')) {
+      var spec = {
+        scenario: params.get('scenario'),
+        fixtures: (params.get('fixtures') || '').split(',').filter(Boolean),
+        sliders: (params.get('sliders') || 'coreExposure,coreContrast,coreTemperature,wbR,cyan').split(',').filter(Boolean),
+        results: location.origin + '/__perf/results'
+      };
+      var start = function () { selfDrive(spec); };
+      if (document.readyState === 'complete') setTimeout(start, 0); else global.addEventListener('load', start);
+    }
+  }
 })(typeof globalThis !== 'undefined' ? globalThis : this);

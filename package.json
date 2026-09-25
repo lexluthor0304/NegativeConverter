@@ -15,6 +15,7 @@
     "preview:web": "vite preview --config negative2positive/vite.config.js",
     "test": "node scripts/run-tests.mjs",
     "test:smoke": "node scripts/smoke-test.mjs",
+    "bench:interactive": "node scripts/perf/bench-interactive.mjs",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
     "test:hsl-sweep": "node scripts/hsl-parity-sweep.mjs",
     "tauri:dev": "tauri dev",

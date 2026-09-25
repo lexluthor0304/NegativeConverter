@@ -27,7 +27,10 @@ assert.equal(parseArgs(['--against', 'output/perf/x/results.json'], {}).mode, 'a
 assert.equal(parseArgs(['--head', '../wt-233'], {}).headWorktree, '../wt-233');
 assert.equal(parseArgs(['--reps=5', '--film-type=bw'], {}).reps, 5);
 assert.equal(parseArgs(['--film-type', 'positive'], {}).filmType, 'positive');
-assert.equal(parseArgs(['--no-probe', '--inject-hang'], {}).probe, false);
+assert.equal(parseArgs(['--no-probe', '--scenarios', 's1,s2'], {}).probe, false);
+assert.throws(() => parseArgs(['--no-probe'], {}), UsageError, 'control runs are limited to s1 and s2');
+assert.equal(parseArgs(['--inject-hang'], {}).injectHang, true);
+assert.equal(parseArgs(['--record-baselines'], {}).recordBaselines, true);
 assert.equal(parseArgs([], { NC_PERF_PORT: '6000' }).port, 6000);
 
 for (const bad of [['--compare', 'a'], ['--scenarios', 's10'], ['--fixtures', 'x'], ['--reps', '0'], ['--dpr', '3'],

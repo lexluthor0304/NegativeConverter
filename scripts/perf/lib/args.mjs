@@ -9,7 +9,7 @@ const VALUE_FLAGS = new Set([
 ]);
 const BOOLEAN_FLAGS = new Set([
   '--quick', '--no-profile', '--no-probe', '--headful', '--allow-software-gl', '--inject-hang',
-  '--force', '--allow-pixel-change', '--keep-worktree', '--help', '--no-build-cache', '--verbose'
+  '--force', '--allow-pixel-change', '--keep-worktree', '--help', '--verbose', '--record-baselines'
 ]);
 
 export class UsageError extends Error {
@@ -71,6 +71,9 @@ export function parseArgs(argv, env = process.env) {
   if (browser !== 'chrome' && dprs.includes(1) && flags.dpr) throw new UsageError('DPR 1 is Chrome-only; WebKit runs at the display DPR');
   const rollSize = flags['roll-size'] === undefined ? 12 : Number(flags['roll-size']);
   if (!Number.isInteger(rollSize) || rollSize < 2) throw new UsageError('--roll-size must be an integer >= 2');
+  if (flags['no-probe'] && scenarios.some(id => !['s1', 's2'].includes(id))) {
+    throw new UsageError('--no-probe control runs cover s1 and s2 (their probe-free control.* metrics); pass --scenarios s1,s2');
+  }
   if (flags.compare && flags.against) throw new UsageError('use either --compare or --against');
   if (flags.compare && flags.head) throw new UsageError('--head selects the ref of a single run; with --compare pass refs');
 
@@ -101,6 +104,7 @@ export function parseArgs(argv, env = process.env) {
     force: Boolean(flags.force),
     allowPixelChange: Boolean(flags['allow-pixel-change']),
     keepWorktree: Boolean(flags['keep-worktree']),
+    recordBaselines: Boolean(flags['record-baselines']),
     verbose: Boolean(flags.verbose),
     out: flags.out || null,
     label: flags.label || null,
@@ -130,6 +134,8 @@ export const USAGE = `Usage: npm run bench:interactive -- [options]
   --allow-software-gl     run (and label) on SwiftShader / software GL
   --inject-hang           prepend a hang self-test (60 s busy loop) to prove the watchdog
   --allow-pixel-change    do not fail --compare on export pixel differences
+  --record-baselines      write this run's medians into scripts/perf/budgets.json
+  --keep-worktree         keep the temporary worktree and build (debugging)
   --force                 skip the memory-pressure and free-disk pre-flight
   --port N --cdp-port N   preview and CDP ports (defaults 5297 / 9324)
   --out DIR               output directory (default output/perf/<UTC>-<sha>/)

@@ -97,9 +97,9 @@ export function pictures(events, canvasId = GL_CANVAS) {
  * - `mode: 'value'`: `input` events on `targetId` (range sliders).
  * - `mode: 'pointer'`: pointer moves with a button down on `targetId` (curve).
  */
-export function dragInputs(events, { targetId, mode = 'value', start = -Infinity, end = Infinity, initialValue } = {}) {
+export function dragInputs(events, { targetId, mode = 'value', start = -Infinity, end = Infinity, initialValue, allowUntrusted = false } = {}) {
   const inputs = byKind(events, 'input');
-  const moves = inputs.filter(event => (event.type === 'mousemove' || event.type === 'pointermove') && event.tr !== false);
+  const moves = inputs.filter(event => (event.type === 'mousemove' || event.type === 'pointermove') && (allowUntrusted || event.tr !== false));
   const out = [];
   if (mode === 'pointer') {
     let last = null;
@@ -116,7 +116,7 @@ export function dragInputs(events, { targetId, mode = 'value', start = -Infinity
   let moveCursor = 0;
   for (const event of inputs) {
     if (event.type !== 'input' || event.id !== targetId || event.t < start || event.t > end) continue;
-    if (event.tr === false) continue;
+    if (event.tr === false && !allowUntrusted) continue;
     const value = String(event.v);
     if (value === previous) continue;
     previous = value;
@@ -204,10 +204,10 @@ export function timerGapSummary(tickTimes, thresholdMs = 50) {
  * post-release observation.
  */
 export function dragMetrics(events, {
-  targetId, mode = 'value', canvasId = GL_CANVAS, window, initialValue, frameTimes = []
+  targetId, mode = 'value', canvasId = GL_CANVAS, window, initialValue, frameTimes = [], allowUntrusted = false
 } = {}) {
   const { start, release, end } = window;
-  const inputs = dragInputs(events, { targetId, mode, start: start - 1, end: release, initialValue });
+  const inputs = dragInputs(events, { targetId, mode, start: start - 1, end: release, initialValue, allowUntrusted });
   const pics = pictures(events, canvasId).filter(pic => pic.t >= start && pic.t <= end);
   const durationS = Math.max(1e-3, (release - start) / 1000);
   const toFrame = frameIndexer(frameTimes, start);
