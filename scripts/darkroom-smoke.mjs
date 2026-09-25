@@ -163,7 +163,12 @@ export async function runDarkroomSmoke({ send, evaluate, waitFor, wait, fail, in
   await wait(500);
   const region = { x: 0.3, y: 0.3, w: 0.4, h: 0.4 };
   const untouched = await canvasLuminance(region);
-  const rect = await evaluate(`(() => { const r = document.getElementById('canvas').getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; })()`);
+  // The dodge tool keeps the GL display (#253): paint on the canvas on screen.
+  const rect = await evaluate(`(() => {
+    const gl = document.getElementById('glCanvas');
+    const el = gl && getComputedStyle(gl).display !== 'none' ? gl : document.getElementById('canvas');
+    const r = el.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height };
+  })()`);
   const mouse = (type, x, y) => send('Input.dispatchMouseEvent', { type, x, y, button: 'left', clickCount: type === 'mousePressed' ? 1 : 0, buttons: type === 'mouseReleased' ? 0 : 1 });
   const y = rect.y + rect.height * 0.5;
   await mouse('mousePressed', rect.x + rect.width * 0.35, y);

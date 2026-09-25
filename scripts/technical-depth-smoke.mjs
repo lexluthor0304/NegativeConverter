@@ -191,7 +191,8 @@ async function runAiRepairScenario({ send, evaluate, waitFor, wait, fail, instal
     window.__aiBrushRuns = 0;
     new MutationObserver(() => { window.__aiBrushRuns++; }).observe(document.getElementById('dustAiStatus'), { childList: true });
     if (!document.getElementById('dustShowMask').checked) document.getElementById('dustShowMask').click();
-    const canvas = document.getElementById('canvas');
+    // A shown mask keeps the GL display (#253): paint on the canvas on screen.
+    const canvas = document.getElementById(document.getElementById('glCanvas').style.display === 'block' ? 'glCanvas' : 'canvas');
     const rect = canvas.getBoundingClientRect();
     const options = { bubbles: true, clientX: rect.x + rect.width / 2,
       clientY: rect.y + rect.height / 2, button: 0, altKey: true };
