@@ -2605,6 +2605,8 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       cancelledFallback,
       savedPathKey,
       savedPathFallback,
+      savedFileKey,
+      savedFileFallback,
       browserSuccessKey,
       browserSuccessFallback,
       toastDurationMs = 3500
@@ -2614,7 +2616,10 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         return false;
       }
 
-      if (result.path && savedPathKey) {
+      if (result.path && savedFileKey) {
+        const name = String(result.path).split(/[\\/]/).pop() || String(result.path);
+        showToast(getInterpolatedText(savedFileKey, { name }, savedFileFallback), toastDurationMs);
+      } else if (result.path && savedPathKey) {
         void appAlert(getInterpolatedText(savedPathKey, { path: result.path }, savedPathFallback));
       } else if (browserSuccessKey) {
         showToast(getLocalizedText(browserSuccessKey, browserSuccessFallback), toastDurationMs);
@@ -11684,13 +11689,13 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       return typeof path === 'string' && path ? path : null;
     }
 
-    async function writeBlobToDesktopPath(blob, targetPath, mimeType = 'application/octet-stream') {
+    async function writeBlobToDesktopPath(blob, targetPath, mimeType = 'application/octet-stream', { onProgress = null, signal = null } = {}) {
       if (!isTauriDesktop()) {
         throw new Error('Desktop path writes require the Tauri runtime.');
       }
 
       const normalizedBlob = normalizeExportBlob(blob, mimeType);
-      const result = await writeDesktopBlob(normalizedBlob, { path: targetPath }, window.__TAURI__.core.invoke);
+      const result = await writeDesktopBlob(normalizedBlob, { path: targetPath }, window.__TAURI__.core.invoke, { onProgress, signal });
       return normalizeSaveResult(result);
     }
 
@@ -11954,7 +11959,15 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       if (processNegativeInFlight) await processNegativeInFlight;
       const lang = i18n[currentLang];
       const overlay = getLoadingOverlay();
+      // Cancel is offered from the encode on: it stops the PNG16 band
+      // workers or the export worker, and on the desktop the write.
+      const cancel = new AbortController();
+      const allowCancel = () => overlay.setCancelable(true, {
+        onCancel: () => cancel.abort(),
+        cancelText: getLocalizedText('loadingCancel', 'Cancel')
+      });
       let blob;
+      let result;
 
       await overlay.show({ title: lang.loadingExporting });
       try {
@@ -11969,29 +11982,61 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
           const imageData = await renderCurrentImageDataForExport(exportInfo);
           const outputImageData = await applySprocketFrameForExport(imageData, exportInfo);
           overlay.updateProgress(60, lang.loadingEncoding);
+          allowCancel();
           blob = await imageDataToBlob(outputImageData, exportInfo.format, state.jpegQuality, exportInfo.bitDepth, (pct) => {
             overlay.updateProgress(60 + pct * 0.35, lang.loadingEncoding);
-          }, exportMetadataFor(state, Math.max(0, state.currentFileIndex)));
+          }, exportMetadataFor(state, Math.max(0, state.currentFileIndex)), { signal: cancel.signal });
         } else {
           overlay.updateProgress(50, lang.loadingEncoding);
           const imageData = await renderCurrentImageDataForExport(exportInfo);
           const outputImageData = await applySprocketFrameForExport(imageData, exportInfo);
+          allowCancel();
           blob = await imageDataToBlob(outputImageData, exportInfo.format, state.jpegQuality, exportInfo.bitDepth, (pct) => {
             overlay.updateProgress(50 + pct * 0.45, lang.loadingEncoding);
-          });
+          }, null, { signal: cancel.signal });
         }
+        if (cancel.signal.aborted) throw makeExportCancelledError();
 
+        if (desktop) {
+          // The overlay stays up until the file exists: byte progress while
+          // the Blob streams to the native writer, "Complete!" only after
+          // finish_export_write. Cancel aborts the write; the staging file
+          // goes and the previous target stays.
+          allowCancel();
+          const savingLabel = (written, total) => getInterpolatedText('loadingSaving', {
+            written: formatExportMegabytes(written),
+            total: formatExportMegabytes(total)
+          }, 'Saving… {written} / {total} MB');
+          overlay.updateProgress(0, savingLabel(0, blob.size));
+          result = await writeBlobToDesktopPath(blob, targetPath, exportInfo.mimeType, {
+            signal: cancel.signal,
+            onProgress: (written, total) => overlay.updateProgress(total > 0 ? (written / total) * 100 : 100, savingLabel(written, total))
+          });
+        } else {
+          result = await saveBlob(blob, fileName, exportInfo.mimeType);
+        }
         overlay.updateProgress(100, lang.loadingComplete);
-        await new Promise(r => setTimeout(r, 300));
+      } catch (err) {
+        if (cancel.signal.aborted && isAbortError(err)) return { saved: false, path: null };
+        throw err;
       } finally {
+        overlay.setCancelable(false);
         overlay.hide();
       }
 
-      const result = desktop
-        ? await writeBlobToDesktopPath(blob, targetPath, exportInfo.mimeType)
-        : await saveBlob(blob, fileName, exportInfo.mimeType);
       if (result?.saved) await learnFromExport(currentItem);
       return result;
+    }
+
+    function makeExportCancelledError() {
+      const err = new Error('Export cancelled');
+      err.name = 'AbortError';
+      return err;
+    }
+
+    function formatExportMegabytes(bytes) {
+      const megabytes = bytes / (1024 * 1024);
+      return megabytes >= 100 ? String(Math.round(megabytes)) : megabytes.toFixed(1);
     }
 
     document.getElementById('exportSingleBtn').addEventListener('click', async () => {
@@ -12002,7 +12047,10 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         const result = await exportSingle();
         handleSaveResult(result, {
           cancelledKey: 'exportSaveCancelled',
-          cancelledFallback: 'Save cancelled. No file was written.'
+          cancelledFallback: 'Save cancelled. No file was written.',
+          // Desktop: the write has finished, so name the file it made.
+          savedFileKey: 'exportSavedFile',
+          savedFileFallback: 'Saved {name}'
         });
       } catch (err) {
         notifyExportError(err);

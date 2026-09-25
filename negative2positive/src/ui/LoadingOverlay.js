@@ -115,6 +115,19 @@ export class LoadingOverlay {
     if (options.indeterminate) this.updateIndeterminate(title);
   }
 
+  /**
+   * Show or hide the Cancel button while the overlay is up (an export
+   * becomes cancellable once its encode or write starts).
+   * @param {boolean} cancelable
+   * @param {{onCancel?: function, cancelText?: string}} [options]
+   */
+  setCancelable(cancelable, { onCancel = null, cancelText } = {}) {
+    this._createDOM();
+    this._cancelCallback = cancelable ? onCancel : null;
+    if (cancelText !== undefined) this._cancelBtn.textContent = cancelText;
+    this._cancelBtn.style.display = cancelable ? 'inline-block' : 'none';
+  }
+
   /** Hide the loading overlay. */
   hide() {
     this._visible = false;
