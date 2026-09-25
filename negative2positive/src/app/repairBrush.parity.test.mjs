@@ -219,6 +219,22 @@ assert.ok(selected > 0, 'the fixtures select pixels');
   }
 }
 
+// The repair mask allocates no frame-sized float plane (240 MB at 60 MP).
+{
+  const geometry = geometryFor(640, 480, 3.7, true, true, 1);
+  const lens = lensFor(geometry.width, geometry.height, { step: 8, k: 0.05, tca: true });
+  const Native = globalThis.Float32Array;
+  let largest = 0;
+  globalThis.Float32Array = class extends Native {
+    constructor(...args) { super(...args); largest = Math.max(largest, this.length); }
+  };
+  try {
+    buildRepairMask(strokes, geometry);
+    buildRepairMask(strokes, geometry, lens);
+  } finally { globalThis.Float32Array = Native; }
+  assert.ok(largest > 0 && largest < geometry.width * geometry.height / 4, `largest Float32Array ${largest} elements`);
+}
+
 // Dodge and burn keeps its bitwise output after the coverage helper split.
 {
   const geometry = geometryFor(260, 190, 3.7, true, true, 0.8);
