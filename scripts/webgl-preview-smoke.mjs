@@ -184,8 +184,14 @@ export async function runWebglPreviewSmoke({ send, evaluate, waitFor, fail, inst
     expect(await waitFor(description, expression, timeout, { soft: true }), `timeout waiting for ${description}`);
   };
   // Longer than the 2.5 s idle full-resolution timer, so a background render
-  // cannot land inside a measured window.
-  const quiet = description => until(description, `${ready} && window.__webglProbe.inFlight === 0 && performance.now() - window.__webglProbe.lastActivity > 3500`);
+  // cannot land inside a measured window. Every call follows an action whose
+  // work may only start after a timer (a full request's 70 ms, a display
+  // resize's 100 ms), so the call itself counts as activity: otherwise a quiet
+  // page before the action lets it return before that work has begun.
+  const quiet = async description => {
+    await evaluate('window.__webglProbe.lastActivity = Math.max(window.__webglProbe.lastActivity, performance.now())');
+    await until(description, `${ready} && window.__webglProbe.inFlight === 0 && performance.now() - window.__webglProbe.lastActivity > 3500`);
+  };
   const marked = patches => {
     if (!patches) return false;
     const others = [patches.tr, patches.bl, patches.br];
