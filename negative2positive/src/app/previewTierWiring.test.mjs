@@ -392,6 +392,15 @@ for (const largePreviewFrames of [true, false]) {
   const g = fixture();
   g.context.schedulePreviewTierPrebuild();
   assert.equal(g.idleCallbacks.length, 0);
+  // A frame landing outside a session schedules it (the settle after load).
+  const h = fixture();
+  h.controllerStub.nextStartTier = 'reduced';
+  h.context.applyPreviewProcessedImageToState(convertPixels(h.state.conversionPreviewImageData, 1));
+  assert.equal(h.idleCallbacks.length, 1, 'a settled frame schedules the idle pre-build');
+  h.controllerStub.active = true;
+  h.context.previewTierPrebuildHandle = null;
+  h.context.applyPreviewProcessedImageToState(convertPixels(h.state.conversionPreviewImageData, 2));
+  assert.equal(h.idleCallbacks.length, 1, 'frames inside a session do not');
 }
 
 // ---- Session end diagnostics ----

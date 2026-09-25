@@ -5818,6 +5818,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         webglState.sourceDirty = true;
         webglState.curveDirty = true;
       }
+      // A settled frame: slow hosts get the next session's reduced preview ready.
+      if (!previewTierController.active) schedulePreviewTierPrebuild();
       // 非同期変換は結果を保存してよいが、切り抜き草稿の画布を変更しない。
       if (state.cropping) return;
       if (state.sprocketPreviewEnabled) {
@@ -6011,6 +6013,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         webglState.sourceDirty = true;
         webglState.curveDirty = true;
       }
+      if (!previewTierController.active) schedulePreviewTierPrebuild();
       const fullW = state.processedImageData ? state.processedImageData.width : processed.width;
       const fullH = state.processedImageData ? state.processedImageData.height : processed.height;
       if (!state.cropping) setMainCanvasDimensions(fullW, fullH);
