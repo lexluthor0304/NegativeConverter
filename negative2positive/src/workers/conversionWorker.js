@@ -1,8 +1,15 @@
 /**
  * Conversion Worker — runs the full SilverCore negative->positive conversion
  * off the main thread. Preview and full-resolution clients use separate workers.
+ *
+ * Batch frames (#250) may hand their 16-bit source over instead of cloning it:
+ * `returnSource` (lent: the adapter never writes it, and it goes back with the
+ * result or the error) or `options.ownedSource` (consumed: the adapter writes
+ * the result into it). `releaseAfter` drops the slot's cached planes once the
+ * result is posted, so a lane holds no source or pristine plane between frames.
  */
 import { convertFrameWithRouter } from '../pipeline/conversionRouter.js';
+import { releaseSlotBuffers } from '../pipeline/silverAdapter.js';
 import { fromImageData8 } from '../silvercore/util/image16.js';
 import { downsampleImageDataForMaxPixels } from '../app/imageDataOps.js';
 
@@ -16,8 +23,15 @@ let retained = null;
 const DEFAULT_HISTOGRAM_SAMPLES = 24_576;
 let cachedLocalExposure = null;
 
+function slotNameFor(options) {
+  if (options && options.scratch) return 'scratch';
+  return options && options.preview ? 'preview' : 'full';
+}
+
 async function convert(msg) {
   const { id, width, height, rgba, image16, settings, options } = msg;
+  // A lent source goes back whatever happens; nothing here writes it.
+  const lent = Boolean(msg.returnSource) && image16 instanceof ArrayBuffer && !(options && options.ownedSource);
   try {
     // Unchanged dodge-and-burn strokes are not posted again. Track every
     // message, even one that fails below, as the client does.
@@ -94,9 +108,24 @@ async function convert(msg) {
       payload.image16 = plane.data.buffer;
       transfers.push(payload.image16);
     }
+    if (lent && !transfers.includes(image16)) {
+      payload.source16 = image16;
+      transfers.push(image16);
+    }
     self.postMessage(payload, transfers);
   } catch (err) {
-    self.postMessage({ type: 'error', id, message: err?.message || String(err) });
+    const message = err?.message || String(err);
+    if (lent && image16.byteLength > 0) {
+      try {
+        self.postMessage({ type: 'error', id, message, returned: { source16: image16 } }, [image16]);
+      } catch {
+        self.postMessage({ type: 'error', id, message });
+      }
+    } else {
+      self.postMessage({ type: 'error', id, message });
+    }
+  } finally {
+    if (msg.releaseAfter) releaseSlotBuffers(slotNameFor(options));
   }
 }
 

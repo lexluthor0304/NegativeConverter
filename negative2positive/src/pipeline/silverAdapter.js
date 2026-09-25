@@ -746,7 +746,14 @@ async function runSilverCore(imageData, settings, mode, options) {
   // others keep none (see _transientWorkBuffer).
   const transient = Boolean(options?.forceFullProcess)
     || sourceShape.width * sourceShape.height > _largeImagePixels;
-  const { image: input16, owned } = toImage16ForSlot(slot, imageData, transient);
+  const { image: input16, owned: promoted } = toImage16ForSlot(slot, imageData, transient);
+  // `ownedSource` (#250): the caller gave the source up (a batch frame's geometry
+  // output, transferred to the conversion worker and never read again), so the
+  // transient path uses it as the work plane and writes the result into it: the
+  // film base / flat field pass runs in place, the same values as a copy because
+  // such requests always re-analyse (forceFullProcess). Only honoured for a
+  // genuine 16-bit plane; a promoted 8-bit plane is ours already.
+  const owned = promoted || (transient && Boolean(options?.ownedSource) && Boolean(options?.forceFullProcess));
 
   // Profile loading (skip if unchanged)
   const profileName = params.enhancedProfile;
@@ -877,6 +884,44 @@ export async function analyzeSilverCoreFrame(imageData, settings = {}, mode = 'c
   if (mode === 'bw') toGrayscaleInPlace(input, params.bwMix);
   if (params.preSaturation !== 100) adjustSaturation(input, params.preSaturation);
   return analyzeImage(input, params);
+}
+
+/**
+ * Drop the planes a slot keeps between conversions (#250): the film-base
+ * pristine buffer, the source and reference it was built from, the analysis
+ * inputs, the 8-bit promotion and the dodge-and-burn map. The engine and its
+ * loaded profile stay, so the next frame of a batch does not rebuild them. A
+ * batch lane calls this after each frame, so it holds no source or pristine
+ * plane between frames.
+ * @param {'full'|'preview'|'scratch'} [which]
+ */
+export function releaseSlotBuffers(which = 'full') {
+  const slot = _cache[which];
+  if (!slot) return;
+  slot.pristineBuffer = null;
+  slot.lastSourceRef = null;
+  slot.lastFilmBaseGains = null;
+  slot.analysis = null;
+  slot.referencePixels = {};
+  slot.promotedSource = null;
+  slot.exposureMap = null;
+  slot.prepared = null;
+  slot.exposed = null;
+}
+
+/** Test hook: the retained fields of a slot. */
+export function inspectSlotBuffers(which = 'full') {
+  const slot = _cache[which];
+  return slot ? {
+    engine: slot.engine,
+    profile: slot.profile,
+    pristineBuffer: slot.pristineBuffer,
+    lastSourceRef: slot.lastSourceRef,
+    analysis: slot.analysis,
+    referencePixels: slot.referencePixels,
+    promotedSource: slot.promotedSource,
+    exposureMap: slot.exposureMap,
+  } : null;
 }
 
 export function invalidateSilverCoreCache() {

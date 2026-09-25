@@ -1,4 +1,5 @@
 import { isLargeImage } from './imageMemoryBudget.js';
+import { markOwnedPlanes, mayTransferBuffer } from './planeRelease.js';
 
 /**
  * Promise bridge to the conversion worker. Callers should fall back to the
@@ -15,6 +16,14 @@ export const WORKER_UNAVAILABLE = 'WORKER_UNAVAILABLE';
 export const WORKER_CRASHED = 'WORKER_CRASHED';
 export const CONVERSION_FAILED = 'CONVERSION_FAILED';
 export const WORKER_TIMEOUT = 'WORKER_TIMEOUT';
+// A source handed to the worker (#250) did not come back: the caller no
+// longer holds its pixels and must decode the frame again. Never a reason to
+// convert on the main thread, which would read a detached plane.
+export const INPUT_LOST = 'INPUT_LOST';
+
+export function isConversionInputLost(err) {
+  return Boolean(err) && err.code === INPUT_LOST;
+}
 
 // A worker that never answers used to leave the caller's promise pending for
 // the rest of the session, so the loading overlay and any export waiting on it
@@ -61,7 +70,12 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
       if (!entry) return;
       pending.delete(msg.id);
       if (msg.type === 'result' || msg.type === 'committed') entry.resolve(msg);
-      else entry.reject(workerError(msg.message || 'Conversion worker error', CONVERSION_FAILED));
+      else {
+        const err = workerError(msg.message || 'Conversion worker error', CONVERSION_FAILED);
+        // A lent source the worker hands back with its error.
+        if (msg.returned && msg.returned.source16 instanceof ArrayBuffer) err.returnedSource = msg.returned.source16;
+        entry.reject(err);
+      }
       // The result buffers have transferred to the caller. Release the large
       // source/pristine planes and the worker heap instead of pinning them in
       // the adapter cache until the next photo or application restart.
@@ -88,8 +102,17 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
   /**
    * Run convertFrameWithRouter in the worker.
    * Returns an ImageData with __image16 attached (same contract as the router).
+   *
+   * `handoff` (#250, batch export only) moves a genuine 16-bit source to the
+   * worker instead of cloning it, when its buffer is export-owned and nothing
+   * live references it: 'lend' gets it back with the result (the caller reads
+   * the base again after the conversion) and 'consume' lets the adapter write
+   * the result into it (the caller never reads it again). 8-bit sources are
+   * always cloned: `ImageData.data` cannot be re-attached. If a moved source
+   * does not come back, the request rejects with INPUT_LOST. `releaseAfter`
+   * drops the lane's cached planes once the frame is converted.
    */
-  async function convert({ imageData, settings, options = {} }) {
+  async function convert({ imageData, settings, options = {}, handoff = null, releaseAfter = false }) {
 
     let w;
     try {
@@ -131,51 +154,90 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
     const src16 = imageData.__image16;
     const exactBuffer = (data) => data.byteOffset === 0 && data.byteLength === data.buffer.byteLength
       ? data.buffer : data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+    const transfers = [];
+    const moving = !cacheInput && (handoff === 'lend' || handoff === 'consume')
+      && src16 && src16.data instanceof Uint16Array
+      && src16.data.byteOffset === 0 && src16.data.byteLength === src16.data.buffer.byteLength
+      && mayTransferBuffer(src16.data.buffer);
+    const lent = moving && handoff === 'lend';
     if (!message.reuseSource) {
       if (src16 && src16.data instanceof Uint16Array) {
         message.image16 = exactBuffer(src16.data);
+        if (moving) {
+          transfers.push(message.image16);
+          if (lent) message.returnSource = true;
+          else message.options.ownedSource = true;
+        }
       } else {
         message.rgba = exactBuffer(imageData.data);
       }
     }
-    // No transfer list: the caller keeps using its source buffers, so they are
-    // structured-cloned. That copy blocks the poster briefly but frees the main
-    // thread from the seconds-long conversion itself.
+    if (releaseAfter) message.releaseAfter = true;
+    // Without a hand-off there is no transfer list: the caller keeps using its
+    // source buffers, so they are structured-cloned. That copy blocks the
+    // poster briefly but frees the main thread from the seconds-long
+    // conversion itself.
+    const expectedSourceBytes = moving ? src16.data.byteLength : 0;
 
     const timeoutMs = conversionTimeoutMs(imageData.width * imageData.height);
-    const result = await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        pending.delete(id);
-        // Drop this worker so the next call gets a fresh one, but only if it is
-        // still the current one: an earlier failure may already have replaced it,
-        // and terminating that would kill a healthy worker.
-        if (worker === w) {
-          try { w.terminate(); } catch { /* already gone */ }
-          worker = null;
-          // Everything else queued on this worker will never answer either.
-          for (const [otherId, entry] of pending) {
-            pending.delete(otherId);
-            entry.reject(workerError('Conversion worker was terminated after a timeout', WORKER_TIMEOUT));
+    let result;
+    try {
+      result = await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pending.delete(id);
+          // Drop this worker so the next call gets a fresh one, but only if it is
+          // still the current one: an earlier failure may already have replaced it,
+          // and terminating that would kill a healthy worker.
+          if (worker === w) {
+            try { w.terminate(); } catch { /* already gone */ }
+            worker = null;
+            // Everything else queued on this worker will never answer either.
+            for (const [otherId, entry] of pending) {
+              pending.delete(otherId);
+              entry.reject(workerError('Conversion worker was terminated after a timeout', WORKER_TIMEOUT));
+            }
           }
+          reject(workerError(`Conversion worker timed out after ${Math.round(timeoutMs / 1000)}s`, WORKER_TIMEOUT));
+        }, timeoutMs);
+        const settle = (fn) => (value) => { clearTimeout(timer); fn(value); };
+        pending.set(id, { resolve: settle(resolve), reject: settle(reject) });
+        try {
+          w.postMessage(message, transfers);
+          if (cacheInput) {
+            lastSource = imageData;
+            lastAnalysis = analysis;
+            lastLocalExposure = settings?.localExposure || null;
+          }
+        } catch (err) {
+          // A structured-clone failure means this worker can never take our data.
+          clearTimeout(timer);
+          pending.delete(id);
+          reject(workerError(`Conversion worker postMessage failed: ${err?.message || err}`, WORKER_UNAVAILABLE));
         }
-        reject(workerError(`Conversion worker timed out after ${Math.round(timeoutMs / 1000)}s`, WORKER_TIMEOUT));
-      }, timeoutMs);
-      const settle = (fn) => (value) => { clearTimeout(timer); fn(value); };
-      pending.set(id, { resolve: settle(resolve), reject: settle(reject) });
-      try {
-        w.postMessage(message);
-        if (cacheInput) {
-          lastSource = imageData;
-          lastAnalysis = analysis;
-          lastLocalExposure = settings?.localExposure || null;
+      });
+    } catch (err) {
+      if (moving) {
+        // A lent source that came back with the error is intact again; one
+        // that did not (a crash, a timeout, a consumed source) is gone.
+        if (lent && err && err.returnedSource instanceof ArrayBuffer && err.returnedSource.byteLength === expectedSourceBytes) {
+          src16.data = new Uint16Array(err.returnedSource);
+        } else if (src16.data.byteLength === 0) {
+          const lost = workerError(`The frame's source was lost with the conversion worker: ${err?.message || err}`, INPUT_LOST);
+          lost.cause = err;
+          throw lost;
         }
-      } catch (err) {
-        // A structured-clone failure means this worker can never take our data.
-        clearTimeout(timer);
-        pending.delete(id);
-        reject(workerError(`Conversion worker postMessage failed: ${err?.message || err}`, WORKER_UNAVAILABLE));
       }
-    });
+      if (err && err.returnedSource) delete err.returnedSource;
+      throw err;
+    }
+
+    if (lent) {
+      if (result.source16 instanceof ArrayBuffer && result.source16.byteLength === expectedSourceBytes) {
+        src16.data = new Uint16Array(result.source16);
+      } else {
+        throw workerError('Conversion worker did not return the lent source', INPUT_LOST);
+      }
+    }
 
     const out = new ImageData(
       new Uint8ClampedArray(result.rgba),
@@ -203,6 +265,8 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
       if (sample.image16) histogram.__image16 = { width: sample.width, height: sample.height, data: new Uint16Array(sample.image16) };
       out.__histogramSample = histogram;
     }
+    // A fresh allocation: an export may hand it on or release it (#250).
+    markOwnedPlanes(out);
     return out;
   }
 
