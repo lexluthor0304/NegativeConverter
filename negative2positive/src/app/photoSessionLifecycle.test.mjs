@@ -65,6 +65,8 @@ function fixture() {
     corePreviewRetained: null, corePreviewCommit: null,
     pendingBrushRepairs: 0, brushRepairWaiters: [], dustMaskSources: new WeakMap(), fullResolutionConversionAbort: null,
     rememberRepairMasks: noop, clearRepairedPreview: noop,
+    // A photo switch releases the comparison canvas (#242).
+    comparisonReleases: 0, releaseBeforeAfterCanvas: () => { context.comparisonReleases++; },
     dustDrawing: false, undoStack: [], redoStack: [],
     coreReprocessGeneration: 3, coreReprocessToken: 4, dustDetectionRevision: 5,
     loadGeneration: 6, _coreReprocessPending: null, importDetectionAbort: null,
@@ -244,6 +246,7 @@ for (const outcome of ['success', 'stale', 'abort']) {
   await c.switchToFile(0);
   assert.equal(preloadChecks, 1, 'a restored recipe with repair strokes may preload MI-GAN on idle');
   assert.equal(restored, 1);
+  assert.equal(c.comparisonReleases, 1, 'the switch releases the comparison canvas');
   assert.equal(scheduled, 1, 'a pending full render is resumed after warm preview restoration');
   assert.equal(cancelledFrame, 19, 'the outgoing thumbnail frame cannot write into the incoming photo');
   assert.equal(clearedTimer, 23, 'nor can its settle timer');
@@ -592,7 +595,7 @@ for (const warm of [true, false]) {
     CONSOLE_CHANNELS: { density: { stateKey: 'coreExposure', step: 10 }, cyan: { stateKey: 'cyan', step: 5 } },
     CONSOLE_MAX_STEPS: 8,
     commitConsoleChannel: () => { consoleCommits++; }, updateConsoleReadouts: noop,
-    getBeforeAfterReferenceImageData: () => f.converted,
+    hasBeforeAfterReference: () => Boolean(f.converted),
   });
   f.state.coreExposure = 20;
   f.state.cyan = 10;
@@ -648,7 +651,8 @@ for (const locked of [false, true]) {
     sprocketPreviewFrameCache: { key: 'old', sourceRef: f.base, metrics: {} },
     sprocketPreviewFrameCanvas: { width: 100, height: 100 },
     sprocketScratchCanvas: { width: 100, height: 100 },
-    beforeAfterScratchCanvas: { width: 100, height: 100 },
+    // The comparison canvas holds the last reference drawn into it (#242).
+    beforeAfterCanvas: { width: 100, height: 80, style: { display: 'block' } }, beforeAfterCanvasSource: f.converted,
     zoomControls: { style: {} }, canvas: { style: {} }, glCanvas: { style: {} },
     updateMirrorButtonState: noop, clearFullResolutionRenderState: noop,
     invalidateSilverCoreCache: noop, stopHotFolder: noop,
@@ -664,7 +668,7 @@ for (const locked of [false, true]) {
   c.document.body.dataset = { studioBusy: 'true', photoSwitching: 'true' };
   f.state.photoSwitchTarget = f.item;
   f.state.photoSwitchPhase = 'loading';
-  vm.runInContext(['clearCoreReprocessTimer', 'releaseCorePreviewRetained', 'closePhotoSession'].map(functionSource).join('\n'), c);
+  vm.runInContext(['clearCoreReprocessTimer', 'releaseCorePreviewRetained', 'releaseBeforeAfterCanvas', 'closePhotoSession'].map(functionSource).join('\n'), c);
   const oldGeneration = c.loadGeneration, oldToken = c.coreReprocessToken;
   c.closePhotoSession();
   if (locked) {
@@ -691,6 +695,9 @@ for (const locked of [false, true]) {
     assert.equal(f.state.photoSwitchPhase, null);
     assert.equal(c.sprocketPreviewFrameCache.sourceRef, null);
     assert.equal(c.sprocketPreviewFrameCanvas.width, 1);
+    assert.deepEqual([c.beforeAfterCanvas.width, c.beforeAfterCanvas.height], [1, 1], 'close releases the comparison canvas');
+    assert.equal(c.beforeAfterCanvas.style.display, 'none');
+    assert.equal(c.beforeAfterCanvasSource, null, 'and forgets its reference');
     assert.equal(pickerOpened, 1);
     assert.equal(emptyListRefreshes, 1, 'close releases memoized file-list rows even if the picker is cancelled');
   }

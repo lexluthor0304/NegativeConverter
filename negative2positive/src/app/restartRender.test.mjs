@@ -49,7 +49,7 @@ function fixture({ repairs = true, locked = false, large = false } = {}) {
     CORE_RETAIN_PREVIEW_PLANE: true, corePreviewRetained: null, corePreviewCommit: null,
     corePreviewCommitWanted: false, corePreviewCommitTimer: null, corePreviewSettleWaiters: [],
     isDesktopBatchExportLocked: () => locked,
-    clearUndoHistory: noop, pushUndo: noop, exitCropMode: noop, exitBeforeAfter: noop,
+    clearUndoHistory: noop, pushUndo: noop, exitCropMode: noop, exitBeforeAfter: noop, releaseBeforeAfterCanvas: noop,
     cancelGeometryJob: noop, whenGeometrySettled: async () => true, noteConversionStarted: noop, scheduleCropViewProxy: noop,
     resetZoomPan: noop, updateMirrorButtonState: noop,
     invalidateSilverCoreCache: noop, resetFrontierGuideImageState: noop,
@@ -425,6 +425,8 @@ function prepareFixture({ itemSettings = null, detectFrame = true, learned = 0 }
     refreshCanvasContainerSize: () => false, noteDustReplaced: noop,
     // No GPU preview frame is ahead of its exact frame (#239).
     gpuPreviewScheduler: DISABLED_GPU_PREVIEW_SCHEDULER,
+    // A new source releases the comparison canvas (#242).
+    releaseBeforeAfterCanvas: noop,
   });
   vm.runInContext([
     'prepareStudioPhoto', 'startImportDetection', 'buildFinalImportSettings', 'revealProvisionalPhoto',

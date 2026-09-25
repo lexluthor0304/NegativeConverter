@@ -620,6 +620,18 @@ body {
   object-fit: contain;
 }
 
+/* The "before" of the comparison: a display-size copy of the negative laid
+   over the image. It follows zoom and pan with the wrapper and never resizes
+   #canvas; main.js places it over the photo when the film border is shown. */
+.before-after-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 10;
+}
+
 .canvas-transform-wrapper {
   display: flex;
   align-items: center;

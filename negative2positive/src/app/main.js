@@ -83,6 +83,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     import { poolRepairMask } from './repairedPreview.js';
     import { planBatchParallelism, planPng16BandWorkers, runBatchPipeline, planGeometryBandsInFlight } from './batchExportScheduler.js';
     import { displayPreviewSize, resizeDisplayPreview, updateDisplayPreviewRect } from './displayPreview.js';
+    import { photoRectPercent } from './displayCanvas.js';
     import { createCoreReprocessGates, previewDispatchAction, CORE_FULL_REPROCESS_DELAY_MS } from './coreReprocessDispatcher.js';
     import { createPreviewTierController, previewTierMaxPixels, capBackingSize, parsePreviewTierOverride } from './previewTier.js';
     import { describeWebglRenderer, startsReducedReason, formatRenderEnvironmentLine, formatPreviewSessionLine } from './renderEnvironment.js';
@@ -125,6 +126,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       areSprocketFrameFontsReady,
       ensureSprocketFrameFonts,
       getSprocketFrameMetrics,
+      getSprocketFrameLayout,
       normalizeSprocketEdgeMarkings
     } from './sprocketFrame.js';
     import { renderFileList } from './fileListView.js';
@@ -3400,8 +3402,15 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     const loupeSrcCanvas = document.createElement('canvas');
     const loupeSrcCtx = loupeSrcCanvas.getContext('2d', { willReadFrequently: true });
-    const beforeAfterScratchCanvas = document.createElement('canvas');
-    const beforeAfterScratchCtx = beforeAfterScratchCanvas.getContext('2d', { willReadFrequently: true });
+    // The "before" of the comparison (#242): its own element over the image,
+    // so it follows zoom and pan, never resizes #canvas and never enters the
+    // pointer mapping. It keeps the last reference put into it; later presses
+    // on the same photo only show it again.
+    const beforeAfterCanvas = document.getElementById('beforeAfterCanvas');
+    let beforeAfterCanvasSource = null;
+    // Where the photo lies in the film-border frame #canvas shows, in canvas
+    // pixels (getSprocketFrameLayout's shape); null without the border.
+    let mainCanvasPhoto = null;
     const sprocketScratchCanvas = document.createElement('canvas');
     const sprocketScratchCtx = sprocketScratchCanvas.getContext('2d', { willReadFrequently: true });
     const sprocketPreviewFrameCanvas = document.createElement('canvas');
@@ -3671,48 +3680,70 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       updateCanvasVisibility();
     }
 
+    // Steps 1-2 compare with the negative already on screen; Step 3 with the
+    // conversion source at display size.
+    function hasBeforeAfterReference() {
+      if (state.currentStep >= 3) return Boolean(state.conversionPreviewImageData || state.conversionSourceImageData);
+      return Boolean(state.croppedImageData || state.originalImageData);
+    }
+
+    // The Step-3 "before": the display-size conversion preview (<= 4 MP), built
+    // once from the source if it is ever missing. Never the full-resolution
+    // source itself.
     function getBeforeAfterReferenceImageData() {
-      if (state.currentStep >= 3) {
-        return state.conversionSourceImageData || state.croppedImageData || state.originalImageData || null;
+      if (!state.conversionPreviewImageData && state.conversionSourceImageData) {
+        state.conversionPreviewImageData = buildPreviewSourceImageData(state.conversionSourceImageData);
       }
-      return state.croppedImageData || state.originalImageData || null;
+      return state.conversionPreviewImageData || null;
     }
 
     function canActivateBeforeAfter() {
       if (document.body.dataset.photoSwitching === 'true' || document.body.dataset.studioDetecting
         || state.cropping || state.samplingMode) return false;
-      return Boolean(getBeforeAfterReferenceImageData());
+      return hasBeforeAfterReference();
     }
 
-    function renderBeforeAfterReference(referenceImageData) {
-      if (!referenceImageData) return false;
+    // Over the photo, not the film border drawn around it.
+    function placeBeforeAfterCanvas() {
+      const style = beforeAfterCanvas.style;
+      const photo = state.sprocketPreviewEnabled && canvas.style.display !== 'none' ? mainCanvasPhoto : null;
+      const box = photo ? photoRectPercent(photo) : { left: '', top: '', width: '', height: '' };
+      style.left = box.left;
+      style.top = box.top;
+      style.width = box.width;
+      style.height = box.height;
+    }
 
-      if (isWebGLActive()) {
-        glCanvas.style.display = 'none';
-        canvas.style.display = 'block';
+    // One put per reference; the same photo's next press is a style flip.
+    function showBeforeAfterReference(referenceImageData) {
+      if (!beforeAfterCanvas || !referenceImageData) return false;
+      if (beforeAfterCanvasSource !== referenceImageData) {
+        beforeAfterCanvas.width = referenceImageData.width;
+        beforeAfterCanvas.height = referenceImageData.height;
+        beforeAfterCanvas.getContext('2d').putImageData(referenceImageData, 0, 0);
+        beforeAfterCanvasSource = referenceImageData;
       }
-
-      if (canvas.width === referenceImageData.width && canvas.height === referenceImageData.height) {
-        ctx.putImageData(referenceImageData, 0, 0);
-      } else {
-        beforeAfterScratchCanvas.width = referenceImageData.width;
-        beforeAfterScratchCanvas.height = referenceImageData.height;
-        beforeAfterScratchCtx.putImageData(referenceImageData, 0, 0);
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.imageSmoothingEnabled = true;
-        ctx.drawImage(beforeAfterScratchCanvas, 0, 0, canvas.width, canvas.height);
-      }
-
-      renderHistogram(referenceImageData);
+      placeBeforeAfterCanvas();
+      beforeAfterCanvas.style.display = 'block';
       return true;
+    }
+
+    // A new source, a photo switch or a closed session: the reference goes.
+    function releaseBeforeAfterCanvas() {
+      beforeAfterCanvasSource = null;
+      if (!beforeAfterCanvas) return;
+      beforeAfterCanvas.style.display = 'none';
+      beforeAfterCanvas.width = 1;
+      beforeAfterCanvas.height = 1;
     }
 
     function enterBeforeAfter(source = 'button') {
       if (state.beforeAfterActive) return;
       if (!canActivateBeforeAfter()) return;
 
-      const referenceImageData = getBeforeAfterReferenceImageData();
-      if (!referenceImageData) return;
+      // Steps 1-2: the negative is already on screen, nothing to draw.
+      const referenceImageData = state.currentStep >= 3 ? getBeforeAfterReferenceImageData() : null;
+      if (state.currentStep >= 3 && !referenceImageData) return;
 
       state.beforeAfterActive = true;
       state.beforeAfterSource = source;
@@ -3721,7 +3752,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         beforeAfterBtn.setAttribute('aria-pressed', 'true');
       }
       updateSprocketControlsUI();
-      renderBeforeAfterReference(referenceImageData);
+      if (showBeforeAfterReference(referenceImageData)) renderHistogram(referenceImageData);
     }
 
     function exitBeforeAfter() {
@@ -3729,6 +3760,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
       state.beforeAfterActive = false;
       state.beforeAfterSource = null;
+      const shown = Boolean(beforeAfterCanvas && beforeAfterCanvas.style.display !== 'none');
+      if (beforeAfterCanvas) beforeAfterCanvas.style.display = 'none';
       if (beforeAfterBtn) {
         beforeAfterBtn.classList.remove('active');
         beforeAfterBtn.setAttribute('aria-pressed', 'false');
@@ -3736,19 +3769,17 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       updateSprocketControlsUI();
 
       if (state.currentStep >= 3 && state.processedImageData) {
-        // A previous full-size buffer may predate a recent preview adjustment,
-        // including edits made while comparison suppressed normal redraws.
+        // Edits made while the comparison was shown were not drawn.
         updatePreview();
         if (isWebGLActive()) renderHistogramForWebGL(true);
-        else renderHistogram(previewAdjustedBuffer || state.processedImageData);
+        else if (state.displayImageData || previewAdjustedBuffer) renderHistogram(state.displayImageData || previewAdjustedBuffer);
         return;
       }
 
+      // The canvas under the comparison was never drawn over; only the
+      // histogram showed the reference.
       const sourceData = state.croppedImageData || state.originalImageData;
-      if (sourceData) {
-        displayNegative(sourceData);
-        renderHistogram(sourceData);
-      }
+      if (shown && sourceData) renderHistogram(sourceData);
     }
 
     function toggleBeforeAfter(source = 'button') {
@@ -3996,12 +4027,17 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
       const scaleX = targetMetrics.outputWidth / frameMetrics.outputWidth;
       const scaleY = targetMetrics.outputHeight / frameMetrics.outputHeight;
+      mainCanvasPhoto = {
+        frameWidth: targetMetrics.outputWidth, frameHeight: targetMetrics.outputHeight,
+        x: frameMetrics.sideMargin * scaleX, y: frameMetrics.bandHeight * scaleY,
+        width: frameMetrics.sourceWidth * scaleX, height: frameMetrics.sourceHeight * scaleY
+      };
       ctx.drawImage(
         sprocketScratchCanvas,
-        frameMetrics.sideMargin * scaleX,
-        frameMetrics.bandHeight * scaleY,
-        frameMetrics.sourceWidth * scaleX,
-        frameMetrics.sourceHeight * scaleY
+        mainCanvasPhoto.x,
+        mainCanvasPhoto.y,
+        mainCanvasPhoto.width,
+        mainCanvasPhoto.height
       );
       return true;
     }
@@ -4031,11 +4067,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           return;
         }
         const framed = composeDisplaySprocketFrame(imageData, composeOptions);
+        mainCanvasPhoto = getSprocketFrameLayout(imageData.width, imageData.height, composeOptions);
         setMainCanvasDimensions(framed.width, framed.height);
         drawImageDataToMainCanvas(framed, framed.width, framed.height);
         return;
       }
 
+      mainCanvasPhoto = null;
       setMainCanvasDimensions(fullSizeReference.width, fullSizeReference.height);
       drawImageDataToMainCanvas(imageData, fullSizeReference.width, fullSizeReference.height);
       settleInterimGeometryDisplay();
@@ -7456,6 +7494,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           // A GPU frame of the previous source has nothing left to settle.
           gpuPreviewScheduler.cancel();
           state.conversionSourceImageData = correctedSourceData;
+          // The comparison's reference was the previous source's.
+          if (!state.beforeAfterActive) releaseBeforeAfterCanvas();
           // A new photo usually arrives with a layout change (panels, the
           // loaded state) the observer has not reported yet; size its display
           // preview from live layout once rather than convert it twice.
@@ -13660,9 +13700,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       sprocketPreviewFrameCache.key = '';
       sprocketPreviewFrameCache.sourceRef = null;
       sprocketPreviewFrameCache.metrics = null;
-      for (const scratch of [sprocketPreviewFrameCanvas, sprocketScratchCanvas, beforeAfterScratchCanvas]) {
+      for (const scratch of [sprocketPreviewFrameCanvas, sprocketScratchCanvas]) {
         scratch.width = scratch.height = 1;
       }
+      releaseBeforeAfterCanvas();
       resetZoomPan();
       zoomControls.style.display = 'none';
       // Reset all state
@@ -16175,6 +16216,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       }
       if (state.cropping) exitCropMode({ restore: false });
       if (state.beforeAfterActive) exitBeforeAfter();
+      releaseBeforeAfterCanvas();
       state.samplingMode = null;
       cancelProvisionalFrame();
 
