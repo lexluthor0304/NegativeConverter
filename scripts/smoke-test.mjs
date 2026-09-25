@@ -2,6 +2,7 @@ import { runRollFilmTypeSmoke } from './roll-film-type-smoke.mjs';
 import { runFolderImportSmoke } from './folder-import-smoke.mjs';
 import { runSimplicitySmoke } from './simplicity-smoke.mjs';
 import { runHiddenJobSmoke } from './hidden-job-smoke.mjs';
+import { runMemoryBudgetSmoke } from './memory-budget-smoke.mjs';
 import { runPerfHarnessSmoke } from './perf-harness-smoke.mjs';
 import { runEmbeddedPreviewSmoke } from './embedded-preview-smoke.mjs';
 import { expectLoadingOverlayIdle } from './loading-overlay-idle.mjs';
@@ -460,6 +461,12 @@ if (process.argv.includes('--gain-map-only')) {
 }
 if (process.argv.includes('--hidden-job-only')) {
   await runHiddenJobSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS');
+  process.exit(0);
+}
+if (process.argv.includes('--memory-budget-only')) {
+  await runMemoryBudgetSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
   if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
   console.log('SMOKE PASS');
   process.exit(0);
@@ -1045,6 +1052,7 @@ if (!process.argv.some(arg => arg.endsWith('-only'))) await runRollFilmTypeSmoke
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runFolderImportSmoke({send,evaluate,waitFor,wait,fail,installDialogAutoAccept,port:PORT,root:ROOT});
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runPhotoSortSmoke({send,evaluate,waitFor,wait,fail,installDialogAutoAccept,port:PORT,root:ROOT});
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runHiddenJobSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+if (!process.argv.some(arg => arg.endsWith('-only'))) await runMemoryBudgetSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runGeometrySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runAutoFrameImportSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runPerfHarnessSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
