@@ -41,7 +41,7 @@ raw CDP over Node's `WebSocket`, `node:module` `SourceMap`, W3C WebDriver over
 | option | meaning |
 |---|---|
 | `--scenarios s1,s2,…` | subset of `s1`–`s9`, `h`; M (memory) is sampled in every scenario |
-| `--quick` | S1, S2 at DPR 2, S4, S7 (warm and cold only); one fixture; 3 repetitions |
+| `--quick` | S1, S2 at DPR 2, S4, S7 (warm and cold only, on a 4-frame roll unless `--roll-size`); one fixture; 3 repetitions without the profiled one |
 | `--fixtures synthetic\|real` | synthetic (default) or the `NC_PERF_*` directories |
 | `--fixture NAME` | only this single-file fixture |
 | `--film-type auto\|positive\|bw\|color` | pin the film type before import (unchecks "auto" and presses the film-type button) so runs compare like for like across #231 |

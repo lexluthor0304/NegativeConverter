@@ -16,6 +16,9 @@ assert.equal(defaults.cdpPort, 9324);
 const quick = parseArgs(['--quick'], {});
 assert.deepEqual(quick.scenarios, QUICK_SCENARIOS);
 assert.deepEqual(quick.dprs, [2]);
+assert.equal(quick.rollSize, 4, 'a short roll keeps --quick within its time budget');
+assert.equal(quick.profile, false);
+assert.equal(parseArgs(['--quick', '--roll-size', '12'], {}).rollSize, 12);
 
 const compare = parseArgs(['--compare', '1703835', 'HEAD', '--scenarios', 's2,s4,m', '--fixtures', 'real'], {});
 assert.equal(compare.mode, 'compare');

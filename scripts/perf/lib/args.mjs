@@ -69,7 +69,9 @@ export function parseArgs(argv, env = process.env) {
   const dprs = flags.dpr ? list(flags.dpr).map(Number) : (quick ? [2] : [1, 2]);
   if (dprs.some(dpr => ![1, 2].includes(dpr))) throw new UsageError('--dpr accepts 1 and/or 2');
   if (browser !== 'chrome' && dprs.includes(1) && flags.dpr) throw new UsageError('DPR 1 is Chrome-only; WebKit runs at the display DPR');
-  const rollSize = flags['roll-size'] === undefined ? 12 : Number(flags['roll-size']);
+  // --quick keeps S7's warm and cold switches on a 4-frame roll (its plan
+  // needs 3) so the roll analysis it waits for stays short.
+  const rollSize = flags['roll-size'] === undefined ? (quick ? 4 : 12) : Number(flags['roll-size']);
   if (!Number.isInteger(rollSize) || rollSize < 2) throw new UsageError('--roll-size must be an integer >= 2');
   if (flags['no-probe'] && scenarios.some(id => !['s1', 's2'].includes(id))) {
     throw new UsageError('--no-probe control runs cover s1 and s2 (their probe-free control.* metrics); pass --scenarios s1,s2');
@@ -96,7 +98,7 @@ export function parseArgs(argv, env = process.env) {
     reps,
     dprs,
     rollSize,
-    profile: !flags['no-profile'],
+    profile: !flags['no-profile'] && !quick,
     probe: !flags['no-probe'],
     headful: Boolean(flags.headful),
     allowSoftwareGl: Boolean(flags['allow-software-gl']),
@@ -116,7 +118,7 @@ export function parseArgs(argv, env = process.env) {
 export const USAGE = `Usage: npm run bench:interactive -- [options]
 
   --scenarios s1,s2,…     subset of ${ALL_SCENARIOS.join(', ')} (M memory is always sampled)
-  --quick                 S1, S2 at DPR 2, S4, S7; one fixture; 3 repetitions
+  --quick                 S1, S2 at DPR 2, S4, S7 (warm and cold on a 4-frame roll); one fixture; 3 repetitions, no profiled one
   --fixtures synthetic|real   synthetic (default) or NC_PERF_RAW_DIR / NC_PERF_ROLL_DIR
   --fixture NAME          only this fixture (a synthetic name or a real basename)
   --film-type auto|positive|bw|color   pin the film type after import
