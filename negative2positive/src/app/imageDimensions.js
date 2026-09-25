@@ -200,9 +200,15 @@ export async function rawDecodePlan(file, { buffer = null, minPixels = 40e6 } = 
   return { stages: cfa && dims.width * dims.height >= minPixels ? 2 : 1, ...dims };
 }
 
+// Files whose size comes from a decode (not from their header).
+const decodedFiles = new WeakSet();
+
 export function rememberImageDimensions(file, image) {
   const size = valid(image?.width, image?.height);
-  if (file && size) dimensions.set(file, size);
+  if (file && size) {
+    dimensions.set(file, size);
+    decodedFiles.add(file);
+  }
 }
 
 // The size a full decode of `file` produced this session, or null.
@@ -211,15 +217,24 @@ export function knownImageDimensions(file) {
   return size ? { width: size.width, height: size.height } : null;
 }
 
-export async function imagePixelsForBatch(file) {
+// Files whose header yields no size; they are not read again.
+const headerless = new WeakSet();
+
+async function headerDimensions(file) {
   let size = dimensions.get(file);
-  if (!size) {
+  if (!size && !headerless.has(file)) {
     try {
       const raw = isRawLikeFileName(file.name) && !/\.tiff?$/i.test(file.name || '');
       size = parseImageDimensions(await file.slice(0, HEADER_BYTES).arrayBuffer(), { raw });
       if (size) dimensions.set(file, size);
+      else headerless.add(file);
     } catch { /* Unsupported/truncated headers use a conservative memory budget. */ }
   }
+  return size || null;
+}
+
+export async function imagePixelsForBatch(file) {
+  const size = await headerDimensions(file);
   return size ? size.width * size.height : UNKNOWN_IMAGE_PIXELS;
 }
 
@@ -245,6 +260,35 @@ export async function imagePixelsWithSiblings(file, siblings = []) {
     if (size) return size.width * size.height;
   }
   return pixels;
+}
+
+/**
+ * The largest frame of `files`, for roll-analysis planning (#252). A RAW
+ * whose header yields no size (no CFA or LinearRaw IFD) would count as
+ * UNKNOWN_IMAGE_PIXELS and hold the whole roll at one lane; once another
+ * file of the same import (`siblings`, which may include the photo the
+ * foreground decoded) and extension has been decoded, it takes that file's
+ * decoded size instead (the largest such size). The lane's decode
+ * slot still reserves each frame's real size before its demosaic, so a
+ * larger frame waits there instead of overcommitting.
+ */
+export async function importPixelsForRoll(files, { siblings = files } = {}) {
+  const decodedByExtension = new Map();
+  for (const file of siblings) {
+    const known = dimensions.get(file);
+    if (!known || !decodedFiles.has(file)) continue;
+    const ext = extensionOf(file?.name);
+    const pixels = known.width * known.height;
+    if (ext && pixels > (decodedByExtension.get(ext) || 0)) decodedByExtension.set(ext, pixels);
+  }
+  let largest = 0;
+  for (const file of files) {
+    const size = await headerDimensions(file);
+    const pixels = size ? size.width * size.height
+      : decodedByExtension.get(extensionOf(file?.name)) || UNKNOWN_IMAGE_PIXELS;
+    largest = Math.max(largest, pixels);
+  }
+  return largest;
 }
 
 /**

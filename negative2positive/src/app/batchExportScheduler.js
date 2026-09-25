@@ -18,6 +18,7 @@
  * decoded ahead of the lanes (the prepare stage), the frames the lanes
  * process, and encoded payloads waiting for their write (the byte cap).
  */
+import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
 
 import { budgetFor, LOW_MEMORY_RAM_BYTES } from './memoryBudget.js';
 import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
@@ -99,6 +100,171 @@ export function planBatchParallelism({
   const byMemory = Math.max(1, Math.floor(laneBudget / (LANE_BYTES_PER_PIXEL * pixels)));
   const byFiles = Number.isFinite(fileCount) && fileCount > 0 ? Math.floor(fileCount) : maxParallel;
   return Math.max(1, Math.min(byCores, byMemory, byFiles, maxParallel));
+}
+
+// Roll analysis (#252 part 1) has its own footprint, smaller than an export
+// lane's 50 B/px: a lane decodes (the RAW decode estimate, about 1.84 GB at
+// 60.4 MP, which already counts the decoding frame's JS planes), releases the
+// decoder, and analyses the frame in its roll-frame worker (the RGB16 and
+// RGBA16 planes before the RGB16 is dropped, 14 B/px, plus one OpenCV realm,
+// about 1.0 GB at 60.4 MP). Lanes share `decodeSlots` decoders, so while one
+// frame is analysed the next one decodes. The sum is deliberately high: the
+// decode estimate and the analysis frame count the same planes once each.
+export const ROLL_FRAME_BYTES_PER_PIXEL = 14;
+export const ROLL_OPENCV_REALM_BYTES = 150 * 1024 * 1024;
+// A quarter of the machine's RAM, and only where the RAM is known and above
+// 8 GiB; everywhere else the plan is exactly the export planner's.
+export const ROLL_ANALYSIS_RAM_SHARE = 0.25;
+export const ROLL_ANALYSIS_MIN_RAM_BYTES = 8 * 1024 ** 3;
+
+/**
+ * What one decode slot and one frame in analysis are planned to hold, for a
+ * frame of `pixels` (rawDecodeEstimate.js's estimate for the slot).
+ */
+export function rollAnalysisFootprint(pixels) {
+  const px = Math.max(0, Number(pixels) || 0);
+  return {
+    decodeBytes: estimateRawDecodeBytes(px, 1),
+    frameBytes: px * ROLL_FRAME_BYTES_PER_PIXEL + ROLL_OPENCV_REALM_BYTES
+  };
+}
+
+/**
+ * How roll analysis runs: `framesInFlight` lanes share `decodeSlots`
+ * decoders.
+ *
+ * Never below today: both values are at least planBatchParallelism's lanes
+ * for the same files (computed with the same `hardwareConcurrency`,
+ * `deviceMemory`, `pixels`, `fileCount` and `maxParallel`, which stays the
+ * `nc_batch_lanes_v1` ceiling), and with unknown RAM or RAM of 8 GiB or less
+ * the plan is exactly those lanes, each with its own decoder. Above that,
+ * the plan with the most throughput whose planned bytes
+ * (decodeSlots x decode + framesInFlight x frame) fit a quarter of the RAM
+ * and whose slots (decoders plus frames) leave two cores free: a frame spends
+ * about as long in analysis as in its decode, so throughput is taken as
+ * min(decodeSlots, framesInFlight / 2); ties take fewer bytes. On 16 GiB at
+ * 60 MP that is 1 decoder and 2 frames in flight; two decoders need 32 GiB.
+ *
+ * @param {object} options
+ * @param {number} [options.pixels] largest frame of the roll
+ * @param {number} [options.ramBytes] the machine's RAM, when known
+ * @param {number} [options.hardwareConcurrency]
+ * @param {number} [options.deviceMemory] navigator.deviceMemory, for today's plan
+ * @param {number} [options.fileCount]
+ * @param {number} [options.maxParallel]
+ * @returns {{ decodeSlots: number, framesInFlight: number, budgetBytes: number|null, decodeBytes: number, frameBytes: number }}
+ */
+export function planRollAnalysis({
+  pixels,
+  ramBytes,
+  hardwareConcurrency,
+  deviceMemory,
+  fileCount = Infinity,
+  maxParallel = BATCH_MAX_PARALLEL
+} = {}) {
+  const lanes = planBatchParallelism({ hardwareConcurrency, deviceMemory, pixelsPerFile: pixels, fileCount, maxParallel });
+  const { decodeBytes, frameBytes } = rollAnalysisFootprint(pixels);
+  const today = { decodeSlots: lanes, framesInFlight: lanes, budgetBytes: null, decodeBytes, frameBytes };
+  if (!(Number.isFinite(ramBytes) && ramBytes > ROLL_ANALYSIS_MIN_RAM_BYTES) || !(Number.isFinite(pixels) && pixels > 0)) return today;
+  const budgetBytes = ramBytes * ROLL_ANALYSIS_RAM_SHARE;
+  const cores = Number.isFinite(hardwareConcurrency) && hardwareConcurrency > 0 ? Math.floor(hardwareConcurrency) : 4;
+  const ceiling = Math.max(1, Math.min(
+    Math.floor(maxParallel) || 1,
+    Number.isFinite(fileCount) && fileCount > 0 ? Math.floor(fileCount) : Infinity
+  ));
+  let best = { ...today, budgetBytes };
+  let bestScore = Math.min(lanes, lanes / 2);
+  let bestBytes = Infinity;
+  for (let decodeSlots = lanes; decodeSlots <= ceiling; decodeSlots++) {
+    for (let framesInFlight = decodeSlots; framesInFlight <= ceiling; framesInFlight++) {
+      const bytes = decodeSlots * decodeBytes + framesInFlight * frameBytes;
+      if (bytes > budgetBytes || decodeSlots + framesInFlight > cores - 2) continue;
+      const score = Math.min(decodeSlots, framesInFlight / 2);
+      if (score > bestScore || (score === bestScore && bytes < bestBytes)) {
+        best = { decodeSlots, framesInFlight, budgetBytes, decodeBytes, frameBytes };
+        bestScore = score;
+        bestBytes = bytes;
+      }
+    }
+  }
+  return best;
+}
+
+function slotAbortError(signal) {
+  const reason = signal?.reason;
+  if (reason?.name === 'AbortError') return reason;
+  if (typeof DOMException === 'function') return new DOMException('Decode slot wait was aborted', 'AbortError');
+  return Object.assign(new Error('Decode slot wait was aborted'), { name: 'AbortError' });
+}
+
+/**
+ * The decode slots roll-analysis lanes share (#252 part 3). A lane acquires
+ * one once LibRaw has reported the frame's real size (after metadata, before
+ * the demosaic) with that frame's decode bytes, and releases it as soon as
+ * the demosaic returns. A slot is granted while fewer than `slots` are held
+ * and the held bytes plus the new ones fit `budgetBytes`, or when none is
+ * held (progress). Waiters are served in order, so a larger frame waits at
+ * the checkpoint instead of overcommitting, and nothing overtakes it.
+ * `configure()` changes both limits (the plan is recomputed once the first
+ * frame's real size is known).
+ */
+export function createDecodeSlots({ slots = 1, budgetBytes = Infinity } = {}) {
+  let limit = Math.max(1, Math.floor(slots) || 1);
+  let budget = Number.isFinite(budgetBytes) && budgetBytes > 0 ? budgetBytes : Infinity;
+  let held = 0;
+  let heldBytes = 0;
+  let peak = 0;
+  const waiters = [];
+  const fits = bytes => held === 0 || (held < limit && heldBytes + bytes <= budget);
+  function grant(bytes) {
+    held += 1;
+    heldBytes += bytes;
+    peak = Math.max(peak, held);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      held -= 1;
+      heldBytes -= bytes;
+      pump();
+    };
+  }
+  function pump() {
+    while (waiters.length && fits(waiters[0].bytes)) {
+      const waiter = waiters.shift();
+      waiter.signal?.removeEventListener?.('abort', waiter.onAbort);
+      waiter.resolve(grant(waiter.bytes));
+    }
+  }
+  return {
+    acquire({ bytes = 0, signal = null } = {}) {
+      const need = Math.max(0, Number(bytes) || 0);
+      if (signal?.aborted) return Promise.reject(slotAbortError(signal));
+      if (!waiters.length && fits(need)) return Promise.resolve(grant(need));
+      return new Promise((resolve, reject) => {
+        const waiter = { bytes: need, signal, resolve };
+        waiter.onAbort = () => {
+          const index = waiters.indexOf(waiter);
+          if (index < 0) return;
+          waiters.splice(index, 1);
+          reject(slotAbortError(signal));
+          pump();
+        };
+        signal?.addEventListener?.('abort', waiter.onAbort, { once: true });
+        waiters.push(waiter);
+      });
+    },
+    configure({ slots: nextSlots = limit, budgetBytes: nextBudget = budget } = {}) {
+      limit = Math.max(1, Math.floor(nextSlots) || 1);
+      budget = Number.isFinite(nextBudget) && nextBudget > 0 ? nextBudget : Infinity;
+      pump();
+    },
+    get held() { return held; },
+    get heldBytes() { return heldBytes; },
+    get waiting() { return waiters.length; },
+    get peak() { return peak; },
+    get slots() { return limit; }
+  };
 }
 
 // A geometry band in flight (#244) holds a copy of its source rows and its
