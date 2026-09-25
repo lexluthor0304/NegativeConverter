@@ -43,6 +43,7 @@ import { runSilverCoreCacheSmoke } from './silvercore-cache-smoke.mjs';
 import { runGeometrySmoke } from './geometry-smoke.mjs';
 import { runPng16BandSmoke } from './png16-band-smoke.mjs';
 import { runRawPostDecodeSmoke, runRawParitySmoke } from './raw-post-decode-smoke.mjs';
+import { runExportOwnershipSmoke } from './export-ownership-smoke.mjs';
 
 // UPNG is already a runtime dependency of the app; reuse it to decode screenshots.
 const UPNG = createRequire(import.meta.url)('upng-js');
@@ -389,6 +390,12 @@ if (process.argv.includes('--folder-only')) {
   await runFolderImportSmoke({send,evaluate,waitFor,wait,fail,installDialogAutoAccept,port:PORT,root:ROOT});
   if(pageErrors.filter(e=>!/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
   console.log('SMOKE PASS');process.exit(0);
+}
+if (process.argv.includes('--export-ownership-only')) {
+  await runExportOwnershipSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS');
+  process.exit(0);
 }
 if (process.argv.includes('--gain-map-only')) {
   await runExportGainMapSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
@@ -918,6 +925,7 @@ if (!process.argv.some(arg => arg.endsWith('-only'))) await runExpiredFilmSmoke(
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runNativeFilmFontSmoke({ send, evaluate, waitFor, wait, fail, port: PORT, root: ROOT });
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runExportGainMapSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runPng16BandSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+if (!process.argv.some(arg => arg.endsWith('-only'))) await runExportOwnershipSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
 
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runSimplicitySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
 

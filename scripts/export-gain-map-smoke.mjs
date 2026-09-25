@@ -4,7 +4,8 @@
 // cannot prove that. Part 1 runs the real bridge and worker module against the
 // main-thread path; part 2 checks through the Studio export that the gain-map
 // request follows the export's intent (sent for a plain JPEG, not for the
-// sprocket frame, which drops the map, nor for the contact sheet).
+// sprocket frame, which drops the map, nor for the contact sheet). Since #250
+// the map travels in the JPEG's own `encodeImage` request.
 import { join } from 'node:path';
 
 const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`;
@@ -18,6 +19,7 @@ export async function runExportGainMapSmoke({ send, evaluate, waitFor, wait, fai
   // ---- 1. real Worker, real ImageData, real structured clone ----
   const worker = await evaluate(`(async () => {
     const { createExportWorkerBridge } = await import('/src/workers/workerBridge.js');
+    const { markOwnedPlanes } = await import('/src/app/planeRelease.js');
     const { applyPreparedAdjustmentsToBuffer16 } = await import('/src/app/adjustmentPipeline.js');
     const { computeGainMap } = await import('/src/app/gainMapJpeg.js');
     const W = 173, H = 97; // not multiples of 4: partial map blocks
@@ -50,7 +52,8 @@ export async function runExportGainMapSmoke({ send, evaluate, waitFor, wait, fai
       const sdr = new ImageData(Uint8ClampedArray.from(reference.data, (v, i) => i % 4 === 3 ? 255 : Math.max(0, v - (i % 3))), W, H);
       const expected = computeGainMap(sdr, reference.__image16);
       const map = await bridge.workerGainMap16(processed, sdr, settings);
-      const owned = makeProcessed();
+      // Only an export-owned plane may be transferred (#250).
+      const owned = markOwnedPlanes(makeProcessed());
       const transferred = await bridge.workerGainMap16(owned, sdr, settings, { transferPlane: true });
       return {
         adjusted: adjusted instanceof ImageData,
@@ -88,7 +91,9 @@ export async function runExportGainMapSmoke({ send, evaluate, waitFor, wait, fai
     window.showSaveFilePicker = undefined;
     const post = Worker.prototype.postMessage;
     Worker.prototype.postMessage = function (message, ...rest) {
-      if (message && typeof message.type === 'string') probe.requests.push(message.type);
+      if (message && typeof message.type === 'string') {
+        probe.requests.push(message.type === 'encodeImage' && message.gainMap ? 'encodeImage+gainMap' : message.type);
+      }
       return post.call(this, message, ...rest);
     };
     const click = HTMLAnchorElement.prototype.click;
@@ -121,6 +126,8 @@ export async function runExportGainMapSmoke({ send, evaluate, waitFor, wait, fai
         mpf: segments.some(s => s.marker === 0xE2 && new TextDecoder().decode(s.data.subarray(0, 4)) === 'MPF\\0'),
         gainMapMax: /hdrgm:GainMapMax="([^"]+)"/.exec(text)?.[1] || null,
         gainMap16: p.requests.filter(t => t === 'gainMap16').length,
+        encodeWithMap: p.requests.filter(t => t === 'encodeImage+gainMap').length,
+        encodeWithoutMap: p.requests.filter(t => t === 'encodeImage').length,
         adjust16: p.requests.filter(t => t === 'applyAdjustments16').length
       };
     })()`);
@@ -130,19 +137,19 @@ export async function runExportGainMapSmoke({ send, evaluate, waitFor, wait, fai
     const plain = await exportJpeg('plain JPEG with gain map');
     console.log('plain JPEG export:', JSON.stringify(plain));
     if (!plain.mpf || !plain.gainMapMax) fail('JPEG export lost its gain map: ' + JSON.stringify(plain));
-    if (plain.gainMap16 !== 1 || plain.adjust16 !== 0) {
-      fail('a plain JPEG must send exactly one gainMap16 request and no 16-bit adjustment: ' + JSON.stringify(plain));
+    if (plain.encodeWithMap !== 1 || plain.gainMap16 !== 0 || plain.adjust16 !== 0) {
+      fail('a plain JPEG must send its map in exactly one encodeImage request, with no separate gain-map pass or 16-bit adjustment: ' + JSON.stringify(plain));
     }
-    // A second export reuses the warm worker and must describe the same map.
+    // A second export (a fresh per-export worker) must describe the same map.
     const again = await exportJpeg('repeat JPEG with gain map');
-    if (again.gainMapMax !== plain.gainMapMax || again.gainMap16 !== 1) fail('repeated JPEG export differs: ' + JSON.stringify({ plain, again }));
+    if (again.gainMapMax !== plain.gainMapMax || again.encodeWithMap !== 1) fail('repeated JPEG export differs: ' + JSON.stringify({ plain, again }));
 
     await setBorder(true);
     const framed = await exportJpeg('sprocket JPEG');
     console.log('sprocket JPEG export:', JSON.stringify(framed));
     if (framed.mpf || framed.gainMapMax) fail('the sprocket frame never carried a gain map: ' + JSON.stringify(framed));
-    if (framed.gainMap16 !== 0 || framed.adjust16 !== 0) {
-      fail('the sprocket frame must not request a gain map or a 16-bit pass: ' + JSON.stringify(framed));
+    if (framed.gainMap16 !== 0 || framed.encodeWithMap !== 0 || framed.adjust16 !== 0 || framed.encodeWithoutMap !== 1) {
+      fail('the sprocket frame must be encoded without a gain map or a 16-bit pass: ' + JSON.stringify(framed));
     }
 
     // The contact sheet renders every frame through the batch pipeline but
@@ -155,11 +162,12 @@ export async function runExportGainMapSmoke({ send, evaluate, waitFor, wait, fai
       while (p.downloads.length === index && performance.now() - started < 120000) await new Promise(r => setTimeout(r, 200));
       const blob = await p.downloads[index];
       return { type: blob?.type, gainMap16: p.requests.filter(t => t === 'gainMap16').length,
+        encodeWithMap: p.requests.filter(t => t === 'encodeImage+gainMap').length,
         adjust16: p.requests.filter(t => t === 'applyAdjustments16').length };
     })()`);
     console.log('contact sheet with JPEG selected:', JSON.stringify(sheet));
     if (!/png/.test(sheet.type || '')) fail('contact sheet was not exported: ' + JSON.stringify(sheet));
-    if (sheet.gainMap16 !== 0 || sheet.adjust16 !== 0) fail('the contact sheet started a gain-map pass: ' + JSON.stringify(sheet));
+    if (sheet.gainMap16 !== 0 || sheet.encodeWithMap !== 0 || sheet.adjust16 !== 0) fail('the contact sheet started a gain-map pass: ' + JSON.stringify(sheet));
   } finally {
     await setBorder(false);
     await evaluate(`(() => { window.__gainMapProbe?.restore(); document.querySelector('.format-btn[data-format="png"]').click(); })()`);
