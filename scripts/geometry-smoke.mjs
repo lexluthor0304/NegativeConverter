@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { createRequire } from 'node:module';
 
 export async function runGeometrySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, root }) {
+  const second = join(root, 'negative2positive', 'test-fixtures', 'negative-sample.jpg');
   const pako = createRequire(join(root, 'package.json'))('pako');
   const { encodePng16Blob } = await import(join(root, 'negative2positive', 'src', 'workers', 'imageEncoders.js'));
   // Orange rebate around a dark, textured frame turned by 4 degrees. The
@@ -107,20 +108,53 @@ export async function runGeometrySmoke({ send, evaluate, waitFor, wait, fail, in
     await evaluate(`document.getElementById('cancelCropBtn').click()`);
     await waitFor('crop mode closed', `!document.getElementById('canvasContainer').classList.contains('crop-mode') && ${ready}`, 60_000);
 
-    // The synchronous fallback builds the same planes.
+    // The synchronous fallback builds the same planes: rebuild the current
+    // geometry without workers and compare, then edit through the fallback.
+    const pooled = await evaluate(`window.__ncGeometry.inspect()`);
     await evaluate(`window.__ncGeometry.disableWorkers()`);
     const syncBefore = await evaluate(counters);
+    await evaluate(`window.__ncGeometry.rebuild()`);
+    await waitFor('rebuild without workers', ready, 120_000);
+    const rebuilt = await evaluate(`window.__ncGeometry.inspect()`);
+    if (rebuilt.hash16 !== pooled.hash16 || rebuilt.hash8 !== pooled.hash8) fail('the synchronous fallback built different planes: ' + JSON.stringify({ rebuilt, pooled }));
     await evaluate(`document.getElementById('rotateLeftBtn').click()`);
     await waitFor('rotate left without workers', ready, 120_000);
-    await evaluate(`document.getElementById('rotateRightBtn').click()`);
-    await waitFor('rotate right without workers', ready, 120_000);
     const sync = await evaluate(`window.__ncGeometry.inspect({ chain: true })`);
     const syncAfter = await evaluate(counters);
-    if (sync.hash16 !== rotated.hash16 || sync.hash8 !== rotated.hash8 || sync.hash16 !== sync.chainHash16) fail('the synchronous fallback built different planes: ' + JSON.stringify({ sync, rotated }));
+    if (sync.hash16 !== sync.chainHash16 || sync.hash8 !== sync.chainHash8) fail('a rotate through the fallback differs from the export chain: ' + JSON.stringify(sync));
     if (syncAfter.syncBands <= syncBefore.syncBands || syncAfter.workerBands !== syncBefore.workerBands) fail('workers were not disabled: ' + JSON.stringify({ syncBefore, syncAfter }));
     const final = await evaluate(counters);
     if (final.pendingReads || final.frameSyncReads) fail('geometry planes were read while a build was pending or built synchronously: ' + JSON.stringify(final));
     console.log('ok: without workers the same core builds identical planes; no plane was read while a build was pending');
+
+    // A session kept without its planes (as a 60 MP session that does not
+    // fit the cache is) rebuilds them from its base when reopened.
+    await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
+    await waitFor('geometry workspace reboot', `!!document.getElementById('studioImportAutoCrop') && !!window.__ncGeometry`);
+    await installDialogAutoAccept();
+    await wait(300);
+    await evaluate(`window.__ncGeometry.diagnostics.coldSessions = true`);
+    const doc2 = await send('DOM.getDocument');
+    const input2 = await send('DOM.querySelector', { nodeId: doc2.result.root.nodeId, selector: '#fileInput' });
+    await send('DOM.setFileInputFiles', { files: [fixture, second], nodeId: input2.result.nodeId });
+    const readyFor = name => `${ready} && document.getElementById('studioFilename').textContent === ${JSON.stringify(name)}`;
+    await waitFor('tilted photo of two', readyFor('geometry-tilted-16.png'), 120_000);
+    await wait(800);
+    const first = await evaluate(`window.__ncGeometry.inspect()`);
+    const indexOf = name => `[...document.querySelectorAll('.file-list-name')].find(el => el.textContent.includes(${JSON.stringify(name)}))?.dataset.index`;
+    await evaluate(`document.querySelector('.file-list-name[data-index="' + ${indexOf('negative-sample')} + '"]').click()`);
+    await waitFor('second photo', readyFor('negative-sample.jpg'), 120_000);
+    const coldBefore = await evaluate(`window.__ncGeometry.diagnostics.coldRestores`);
+    await evaluate(`document.querySelector('.file-list-name[data-index="' + ${indexOf('geometry-tilted')} + '"]').click()`);
+    await waitFor('tilted photo reopened', readyFor('geometry-tilted-16.png'), 120_000);
+    const reopened = await evaluate(`window.__ncGeometry.inspect({ chain: true })`);
+    const coldAfter = await evaluate(`window.__ncGeometry.diagnostics.coldRestores`);
+    if (coldAfter !== coldBefore + 1) fail('the tilted photo did not reopen from a session kept without its planes: ' + JSON.stringify({ coldBefore, coldAfter }));
+    if (reopened.hash16 !== first.hash16 || reopened.hash16 !== reopened.chainHash16 || reopened.rotationAngle !== first.rotationAngle
+      || JSON.stringify(reopened.cropRegion) !== JSON.stringify(first.cropRegion)) {
+      fail('a cold session rebuilt different planes: ' + JSON.stringify({ first, reopened }));
+    }
+    console.log('ok: a session kept without its planes reopens with the exact planes rebuilt from its base');
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

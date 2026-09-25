@@ -2921,6 +2921,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     // pool while the current frame stays on screen, then converted without
     // new automatic measurements. It never falls back to the negative.
     function restoreColdSnapshotPixels(s) {
+      geometryDiagnostics.coldRestores++;
       invalidateProcessedPipelineState();
       const base = state.loadedBaseImageData;
       const installed = installedGeometryKey();
@@ -7348,7 +7349,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         entry.snapshot.refs.processedImageData = state.previewSourceImageData;
         entry.previewOnly = true;
       }
-      let stored = photoSessions.put(item, entry);
+      let stored = !geometryDiagnostics.coldSessions && photoSessions.put(item, entry);
       if (!stored && entry.snapshot) {
         // Too large with its planes (#244): keep the recipe, the history as
         // scalars and the base. Opening the photo again rebuilds the planes
@@ -9118,13 +9119,24 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     // full-resolution rotations adopted from or built by the auto-frame
     // worker, and full-resolution rotations built on the main thread. The
     // pool counts its own jobs (window.__ncGeometry.pool).
-    const geometryDiagnostics = { pendingReads: 0, frameSyncReads: 0, adoptedRotations: 0, workerRotations: 0, mainRotations: 0 };
+    const geometryDiagnostics = {
+      pendingReads: 0, frameSyncReads: 0, adoptedRotations: 0, workerRotations: 0, mainRotations: 0, coldRestores: 0,
+      // Smoke-run switch: cache photo sessions without their planes, as a
+      // 60 MP session that does not fit the budget is.
+      coldSessions: false
+    };
     if (typeof window !== 'undefined') {
       window.__ncGeometry = {
         diagnostics: geometryDiagnostics, main: geometryCounters, pool: geometryPool.counters,
         disableWorkers: () => geometryPool.disableWorkers(),
         pending: () => Boolean(state.geometryPending),
-        inspect: inspectGeometryState
+        inspect: inspectGeometryState,
+        // Builds the current geometry again (the memo is dropped for it).
+        rebuild: () => {
+          const installed = state.croppedImageData || state.originalImageData;
+          if (installed) geometryMemo.delete(installed);
+          return applyGeometryFromBase();
+        }
       };
     }
 

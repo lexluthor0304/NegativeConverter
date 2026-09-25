@@ -211,4 +211,46 @@ const crop = (left, top) => ({ left, top, width: 40, height: 26 });
   assert.equal(planes.length, 0, 'only the base stays reachable from state');
 }
 
+// ---- 3b in a real switch: a failed decode reactivates the released photo ----
+for (const coldSessions of [false, true]) {
+  const baseA = makeBase(60, 44, 12);
+  const h = createHarness(baseA), c = h.context;
+  const itemA = { file: { name: 'a.png' }, settings: null, isDirty: true };
+  const itemB = { file: { name: 'b.png' }, settings: null };
+  Object.assign(h.state, { fileQueue: [itemA, itemB], currentFileIndex: 0, loadedFile: itemA.file });
+  const recipe = { rotationAngle: 2.5, mirrored: false, cropRegion: crop(4, 4) };
+  c.restoreSettings(recipe);
+  await h.state.geometryReady;
+  h.state.currentStep = 3;
+  h.state.processedImageData = h.state.croppedImageData;
+  const planesA = h.state.croppedImageData;
+  h.target.geometryDiagnostics.coldSessions = coldSessions;
+  h.target.getCurrentQueueItem = () => h.state.fileQueue[h.state.currentFileIndex];
+  h.target.persistCurrentFileSettings = () => { const item = h.state.fileQueue[h.state.currentFileIndex]; item.settings = settingsFor(h.state); };
+  let releasedDuringDecode = null;
+  h.target.loadFile = async file => {
+    // The outgoing planes and history are not reachable while B decodes.
+    releasedDuringDecode = { cropped: h.state.croppedImageData, processed: h.state.processedImageData, frame: h.state.originalImageData };
+    return file === itemB.file ? { status: 'error', message: 'decode failed' } : { status: 'loaded' };
+  };
+  await c.switchToFile(1);
+  await settle();
+  await h.state.geometryReady;
+  await settle();
+  assert.equal(releasedDuringDecode.cropped, null, `released before the decode (cold sessions ${coldSessions})`);
+  assert.equal(releasedDuringDecode.processed, null);
+  assert.equal(releasedDuringDecode.frame.released, true);
+  assert.equal(itemB.status, 'error');
+  assert.equal(h.state.loadedFile, itemA.file, 'the outgoing photo is active again');
+  assert.equal(h.state.currentFileIndex, 0);
+  if (coldSessions) {
+    samePixels(h.state.croppedImageData, exportChain(baseA, recipe), 'reactivated from a cold session');
+    assert.equal(h.target.geometryDiagnostics.coldRestores, 1);
+  } else {
+    assert.equal(h.state.croppedImageData, planesA, 'reactivated from the warm session');
+  }
+  assert.equal(h.target.document.body.dataset.photoSwitching, undefined);
+  assert.equal(h.target.document.body.dataset.studioBusy, undefined);
+}
+
 console.log('geometry history tests passed');

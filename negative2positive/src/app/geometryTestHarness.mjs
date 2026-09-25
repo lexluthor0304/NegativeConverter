@@ -80,7 +80,8 @@ const FUNCTIONS = [
   'isCurrentLoad', 'applyZoomPanTransform', 'resetZoomPan', 'captureSnapshot', 'restoreSnapshot',
   'restoreColdSnapshotPixels', 'liveHistoryRoots', 'hotGeometrySnapshot', 'historyExclusiveBytes',
   'pruneHistoryForMemory', 'commitUndoSnapshot', 'pushUndo', 'performUndo', 'performRedo',
-  'rememberPhotoSession', 'releaseOutgoingPhotoPlanes', 'photoSettingsKey'
+  'rememberPhotoSession', 'releaseOutgoingPhotoPlanes', 'photoSettingsKey', 'switchToFile',
+  'reactivateReleasedPhoto', 'invalidatePhotoActivation'
 ];
 
 export function createHarness(base, { historyBudget = 768 * 1024 * 1024, sessionBudget = 768 * 1024 * 1024, workers = null } = {}) {
@@ -116,14 +117,16 @@ export function createHarness(base, { historyBudget = 768 * 1024 * 1024, session
     geometryMemo: new WeakMap(), geometryBaseIds: new WeakMap(), nextGeometryBaseId: 1,
     pendingImportRotation: null, geometryToken: 0, geometryJob: null, geometryBusyOwner: null,
     interimGeometry: null, loadGeneration: 1, DEBUG_UI: false, manualEditRevision: 0,
-    geometryDiagnostics: { pendingReads: 0, frameSyncReads: 0, adoptedRotations: 0, workerRotations: 0, mainRotations: 0 },
+    geometryDiagnostics: { pendingReads: 0, frameSyncReads: 0, adoptedRotations: 0, workerRotations: 0, mainRotations: 0, coldRestores: 0, coldSessions: false },
     undoStack: [], redoStack: [], MAX_UNDO: 30, HISTORY_MEMORY_BUDGET_BYTES: historyBudget,
     processNegativeInFlight: null, coreReprocessTimer: null, coreReprocessToken: 0, coreReprocessGeneration: 0,
+    studioAutoFrameRunning: false, singleExportActive: false, studioThumbnailUpdateFrame: 0, expiredAnalysisKey: null,
+    lensMapCache: new Map(), canvas: { style: {} }, glCanvas: { style: {} },
     dustDetectionTimer: null, pendingBrushRepairs: 0, dustDrawing: false, fullUpdateTimer: null,
     photoSessions: createPhotoSessionCache({ maxBytes: sessionBudget }),
     photoPreviews: createPhotoSessionCache({ maxBytes: 0 }),
     aiRepair: { revision: 1 },
-    document: { body: { dataset: {} } },
+    document: { body: { dataset: {} }, visibilityState: 'hidden' },
     studioWorkspace: { sync() {} },
     canvasTransformWrapper: { style: { width: '400px', height: '300px', transform: '' }, offsetWidth: 400, offsetHeight: 300 },
     canvasContainer: { clientWidth: 620, clientHeight: 520, classList: { add() {}, remove() {} } },
