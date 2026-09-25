@@ -1,10 +1,10 @@
 // Geometry chain off the main thread (#244), on a synthetic 16-bit scan whose
-// frame is tilted: the import rotates it once (the auto-frame worker's frame
-// is adopted), rotate/mirror show the new framing at once and build their
-// planes in the pool, the planes equal the export chain built from the base,
-// undo of the latest geometry edit is a reference swap, crop mode never
-// builds the whole rotated frame, and the synchronous fallback (workers
-// disabled) produces the same planes.
+// frame is tilted: the import rotates it once (in the pool; the auto-frame
+// worker sends sizes only since #251), rotate/mirror show the new framing at
+// once and build their planes in the pool, the planes equal the export chain
+// built from the base, undo of the latest geometry edit is a reference swap,
+// crop mode never builds the whole rotated frame, and the synchronous
+// fallback (workers disabled) produces the same planes.
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -59,12 +59,13 @@ export async function runGeometrySmoke({ send, evaluate, waitFor, wait, fail, in
     const status = await evaluate(`document.getElementById('studioFrameNotice').dataset.status`);
     if (status !== 'crop' || Math.abs(Math.abs(importState.rotationAngle) - 4) > 0.5) fail('the tilted 16-bit fixture was not straightened and cropped on import: ' + JSON.stringify({ status, importState }));
     const rotations = (imported.workerRotations - before.workerRotations) + (imported.poolRotations - before.poolRotations) + (imported.mainRotations - before.mainRotations);
-    if (rotations !== 1 || imported.mainRotations !== before.mainRotations || imported.adoptedRotations - before.adoptedRotations !== 1) {
-      fail('a tilted import must rotate exactly once, not on the main thread: ' + JSON.stringify({ before, imported }));
+    if (rotations !== 1 || imported.mainRotations !== before.mainRotations || imported.poolRotations - before.poolRotations !== 1
+      || imported.workerRotations !== before.workerRotations || imported.adoptedRotations !== before.adoptedRotations) {
+      fail('a tilted import must rotate exactly once, in the pool, with no worker frame: ' + JSON.stringify({ before, imported }));
     }
     if (!importState.descriptor || importState.frameSized !== 0) fail('the rotated frame stayed reachable beside the crop: ' + JSON.stringify(importState));
     if (importState.hash16 !== importState.chainHash16 || importState.hash8 !== importState.chainHash8) fail('import planes differ from the export chain: ' + JSON.stringify(importState));
-    console.log(`ok: tilted 16-bit import rotated once (worker frame adopted), planes equal the export chain, no rotated frame kept`);
+    console.log(`ok: tilted 16-bit import rotated once (in the pool, no worker frame), planes equal the export chain, no rotated frame kept`);
 
     // Rotate 90: the new framing is on screen in the click's own task.
     await evaluate(`document.getElementById('studioTab-composition').click()`);
