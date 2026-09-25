@@ -4084,8 +4084,9 @@ import { frameNeedsReview } from './reviewQueue.js';
       });
     }
 
-    // Reads live layout. Only the observer, the window resize handler and a
-    // first read call it; everything else reads getCanvasContainerSize().
+    // Reads live layout. The observer, the window resize handler, a first
+    // read and the few places that just changed the layout themselves call
+    // it; everything else reads getCanvasContainerSize().
     function refreshCanvasContainerSize() {
       const width = canvasContainer.clientWidth;
       const height = canvasContainer.clientHeight;
@@ -6058,6 +6059,10 @@ import { frameNeedsReview } from './reviewQueue.js';
           });
           invalidateSilverCoreCache();
           state.conversionSourceImageData = correctedSourceData;
+          // A new photo usually arrives with a layout change (panels, the
+          // loaded state) the observer has not reported yet; size its display
+          // preview from live layout once rather than convert it twice.
+          refreshCanvasContainerSize();
           state.conversionPreviewImageData = buildPreviewSourceImageData(correctedSourceData);
           const hasPreviewSource = usesSilverCoreConversion(state) && hasSeparateConversionPreview();
           overlay.updateProgress(hasPreviewSource ? 35 : 40, lang.loadingConverting);
@@ -12969,8 +12974,11 @@ import { frameNeedsReview } from './reviewQueue.js';
       canvasContainerSize.observed = true;
       canvasContainerSize.valid = false;
       new ResizeObserver(() => {
-        // Layout is clean while observers run, so this read is free.
-        if (refreshCanvasContainerSize()) refitCanvasToContainer();
+        // Layout is clean while observers run, so this read is free. The
+        // observer reports only real size changes; refit even when a live
+        // read elsewhere has already brought the cache up to date.
+        refreshCanvasContainerSize();
+        refitCanvasToContainer();
       }).observe(canvasContainer);
     }
 

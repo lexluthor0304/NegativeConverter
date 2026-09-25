@@ -212,7 +212,7 @@ for (const failConversion of [false, true]) {
       hide: () => overlayHides.push(context.coreReprocessGeneration) }),
     i18n: { en: {} }, currentLang: 'en', aiRepair: { status: 'ready' },
     applyLensCorrectionWithSettings: async image => image,
-    buildPreviewSourceImageData: image => image,
+    buildPreviewSourceImageData: image => image, refreshCanvasContainerSize: () => false,
     hasSeparateConversionPreview: () => false,
     maybeAutoWhiteBalance: noop, maybeAnalyzeExpiredRescue: noop,
     syncBatchUIState: noop, revealBatchFileList: noop,
