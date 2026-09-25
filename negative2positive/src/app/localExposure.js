@@ -115,8 +115,12 @@ export function workingPointToBase(point, geometry) {
 // segments. Brush size is a fraction of the base short side; feather widens
 // the soft edge. Only the stroke's box is allocated, so a full-resolution
 // export or repair mask never needs a frame-sized buffer per stroke.
+// `geometry.window` ({ x, y, width, height } in working-frame pixels) clips the
+// boxes to a region (#248's detail layer): each pixel's coverage is its own
+// maximum over the segments, so the clipped values equal the frame's.
 export function forEachStrokeCoverage(localExposure, geometry, visit) {
   const width = geometry.width; const height = geometry.height;
+  const clip = geometry.window || null;
   const strokes = localExposure?.strokes;
   if (!Array.isArray(strokes) || !strokes.length) return;
   const shortSide = Math.min(geometry.baseWidth, geometry.baseHeight);
@@ -131,10 +135,14 @@ export function forEachStrokeCoverage(localExposure, geometry, visit) {
     // Coverage keeps the maximum falloff per stroke so overlapping segments
     // of one stroke do not double up.
     const maxR = radius * Math.max(...points.map((p) => p.p));
-    const bx0 = Math.max(0, Math.floor(Math.min(...points.map((p) => p.x)) - maxR));
-    const bx1 = Math.min(width - 1, Math.ceil(Math.max(...points.map((p) => p.x)) + maxR));
-    const by0 = Math.max(0, Math.floor(Math.min(...points.map((p) => p.y)) - maxR));
-    const by1 = Math.min(height - 1, Math.ceil(Math.max(...points.map((p) => p.y)) + maxR));
+    let bx0 = Math.max(0, Math.floor(Math.min(...points.map((p) => p.x)) - maxR));
+    let bx1 = Math.min(width - 1, Math.ceil(Math.max(...points.map((p) => p.x)) + maxR));
+    let by0 = Math.max(0, Math.floor(Math.min(...points.map((p) => p.y)) - maxR));
+    let by1 = Math.min(height - 1, Math.ceil(Math.max(...points.map((p) => p.y)) + maxR));
+    if (clip) {
+      bx0 = Math.max(bx0, clip.x); bx1 = Math.min(bx1, clip.x + clip.width - 1);
+      by0 = Math.max(by0, clip.y); by1 = Math.min(by1, clip.y + clip.height - 1);
+    }
     if (bx1 < bx0 || by1 < by0) continue;
     const bw = bx1 - bx0 + 1;
     const bh = by1 - by0 + 1;
@@ -166,15 +174,18 @@ export function forEachStrokeCoverage(localExposure, geometry, visit) {
 }
 
 // Rasterises strokes into a Float32Array of stops per pixel (0 = untouched).
-// Overlapping strokes add up, so a second pass burns twice.
+// Overlapping strokes add up, so a second pass burns twice. With
+// `geometry.window` it covers that region of the frame only, with the frame's
+// values (#248's detail layer).
 export function rasterizeExposureStops(localExposure, geometry) {
-  const width = geometry.width; const height = geometry.height;
-  const stops = new Float32Array(width * height);
+  const window = geometry.window || { x: 0, y: 0, width: geometry.width, height: geometry.height };
+  const stride = window.width;
+  const stops = new Float32Array(window.width * window.height);
   forEachStrokeCoverage(localExposure, geometry, (stroke, bx0, by0, bw, bh, coverage) => {
     for (let y = by0; y < by0 + bh; y++) {
       for (let x = bx0; x < bx0 + bw; x++) {
         const c = coverage[(y - by0) * bw + (x - bx0)];
-        if (c > 0) stops[y * width + x] += stroke.stops * c;
+        if (c > 0) stops[(y - window.y) * stride + (x - window.x)] += stroke.stops * c;
       }
     }
   });

@@ -99,6 +99,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     import { toImageData8 } from '../silvercore/util/image16.js';
     import { VERTEX_SHADER_100, STEP3_FRAGMENT_SHADER_100 } from '../render/previewShader.js';
     import { createGpuPreviewRenderer, webgl2PrecisionOk } from '../render/gpuPreviewRenderer.js';
+    import { planDetailRegion, detailRegionServes, detailSlotSize, snapPanToDevicePixels, copyRegionRows, DETAIL_SETTLE_MS } from './detailLayer.js';
     import { applyPreviewChain } from '../render/previewTables.js';
     import { buildSelfTestCases } from '../render/gpuPreviewSelfTest.js';
     import { createGpuPreviewScheduler } from './gpuPreviewScheduler.js';
@@ -3357,6 +3358,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // (WebKit), so every scaled draw and composite ran on the CPU.
     const ctx = canvas.getContext('2d');
     const glCanvas = document.getElementById('glCanvas');
+    // The detail layer's canvas (#248 part 5), over glCanvas in the wrapper.
+    const glDetailCanvas = document.getElementById('glDetailCanvas');
     // Crop mode's own surface (#245): no willReadFrequently, so it stays on
     // the GPU and the draft angle is a transform of one drawImage.
     const cropCanvas = document.getElementById('cropCanvas');
@@ -5813,8 +5816,17 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     function renderWebGL() {
       uiDebugCounters.renderWebGL++;
-      if (state.cropping || !webglState.gl || webglState.disabledByError || !state.processedImageData) return false;
-      if (webglState.webgl2) return renderWebGL2();
+      if (state.cropping || !webglState.gl || webglState.disabledByError || !state.processedImageData) {
+        hideDetailLayer();
+        return false;
+      }
+      if (webglState.webgl2) {
+        const drawn = renderWebGL2();
+        // The detail layer follows the base it covers (#248 part 5).
+        syncDetailLayer(drawn);
+        return drawn;
+      }
+      hideDetailLayer();
 
       try {
         const source = getWebglSourceImageData();
@@ -5877,7 +5889,315 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const showGL = isWebGLActive();
       glCanvas.style.display = showGL ? 'block' : 'none';
       canvas.style.display = showGL ? 'none' : 'block';
+      if (!showGL) hideDetailLayer();
     }
+
+    // ===========================================
+    // Detail layer (#248 part 5)
+    // ===========================================
+    // The base display image is fit x DPR, capped at 4 MP, whatever the zoom.
+    // When one of its texels spans more than 1.25 device pixels, a second canvas
+    // over it shows the visible region (plus a margin) at up to one source pixel
+    // per device pixel: cropped from a current full-resolution frame, or
+    // converted by the preview worker from native (or level) pixels with the
+    // base's analysis. It is drawn with the same Step-3 program and uniforms,
+    // and shown only while it holds the settings the base holds: during a drag
+    // it hides, and the settle converts it again. WebGL2 only; ?detailLayer=0
+    // turns it off.
+    const DETAIL_LAYER_ENABLED = new URLSearchParams(window.location.search).get('detailLayer') !== '0';
+    const detailLayer = {
+      renderer: null, failed: false, timer: null, request: null, shown: null, visible: false, warmed: null,
+      counters: { requests: 0, conversions: 0, crops: 0, shown: 0, dropped: 0, failures: 0, lastReadyMs: null }
+    };
+
+    function detailLayerAllowed() {
+      if (!DETAIL_LAYER_ENABLED || !glDetailCanvas || detailLayer.failed) return false;
+      if (!webglState.webgl2 || !isWebGLActive() || state.beforeAfterActive || state.samplingMode || canPaintAiBrush()) return false;
+      if (state.geometryPending || previewTier !== 'normal' || state.currentStep < 3 || state.sprocketPreviewEnabled) return false;
+      if (!usesSilverCoreConversion(state) || !state.conversionSourceImageData || !state.displayLevelImageData) return false;
+      if (state.filmType === 'positive' && state.positiveEngine === 'legacy') return false;
+      return hasSeparateConversionPreview();
+    }
+
+    function detailRenderer() {
+      if (detailLayer.renderer || detailLayer.failed) return detailLayer.renderer;
+      try {
+        const gl = glDetailCanvas.getContext('webgl2', {
+          alpha: false, depth: false, stencil: false, antialias: false, preserveDrawingBuffer: false, premultipliedAlpha: false
+        });
+        if (!gl) {
+          detailLayer.failed = true;
+          return null;
+        }
+        detailLayer.renderer = createGpuPreviewRenderer(gl);
+      } catch (err) {
+        detailLayer.failed = true;
+        console.info('Detail layer is off:', err?.message || err);
+      }
+      return detailLayer.renderer;
+    }
+
+    // The view the region is planned from, in the conversion source's pixels.
+    function detailView() {
+      const source = state.conversionSourceImageData;
+      const container = getCanvasContainerSize();
+      const geometry = getZoomGeometry();
+      return {
+        sourceWidth: source.width, sourceHeight: source.height,
+        baseWidth: webglState.sourceSize.w || state.webglSourceImageData?.width || 0,
+        fit: canvasDisplayFit.scale, zoom: state.zoomLevel, dpr: window.devicePixelRatio || 1,
+        panX: state.panX, panY: state.panY, baseX: geometry.baseX, baseY: geometry.baseY,
+        containerWidth: container.width, containerHeight: container.height,
+        levelFactor: displayLevelGeometry(state.displayLevelImageData).k
+      };
+    }
+
+    // A full-resolution frame current for the settings, to crop from: it
+    // carries the repairs a region converted from the source would lack.
+    function detailFullFrame() {
+      const processed = state.processedImageData;
+      const source = state.conversionSourceImageData;
+      return processed && source && !state.processedImageDataIsPreview && !state.fullResolutionPending
+        && processed.width === source.width && processed.height === source.height ? processed : null;
+    }
+
+    // What a region was made of: never drawn over a base of other settings, of
+    // another source or of another restart generation (#219).
+    function detailTag(full) {
+      return { source: state.conversionSourceImageData, generation: coreReprocessGeneration, token: coreReprocessToken,
+        full, dustRevision: state.dustRemoval.revision };
+    }
+
+    function detailTagCurrent(tag) {
+      if (!tag || tag.source !== state.conversionSourceImageData || tag.generation !== coreReprocessGeneration
+        || tag.token !== coreReprocessToken) return false;
+      if (tag.full) return tag.full === detailFullFrame() && tag.dustRevision === state.dustRemoval.revision;
+      return !hasFrameRepairs();
+    }
+
+    function hideDetailLayer() {
+      if (!detailLayer.visible || !glDetailCanvas) return;
+      detailLayer.visible = false;
+      glDetailCanvas.style.display = 'none';
+    }
+
+    // A photo switch, rotate, mirror or crop: the region belongs to the old view.
+    function dropDetailLayer() {
+      if (detailLayer.timer) clearTimeout(detailLayer.timer);
+      detailLayer.timer = null;
+      detailLayer.request = null;
+      if (detailLayer.shown) detailLayer.counters.dropped += 1;
+      detailLayer.shown = null;
+      hideDetailLayer();
+    }
+
+    // The canvas at the region's pre-transform CSS rect in the wrapper.
+    function positionDetailCanvas() {
+      const shown = detailLayer.shown;
+      const fit = canvasDisplayFit.scale;
+      if (!shown || !(fit > 0)) return;
+      const { plan } = shown;
+      glDetailCanvas.style.left = `${plan.x * fit}px`;
+      glDetailCanvas.style.top = `${plan.y * fit}px`;
+      glDetailCanvas.style.width = `${plan.width * fit}px`;
+      glDetailCanvas.style.height = `${plan.height * fit}px`;
+    }
+
+    // Draws the region with the Step-3 uniforms and curves the base just used.
+    function drawDetailLayer() {
+      const renderer = detailLayer.renderer;
+      const shown = detailLayer.shown;
+      if (!renderer || !shown) return false;
+      renderer.uploadCurves(state.curves);
+      renderer.drawStep3(webglStep3Values(), glDetailCanvas.width, glDetailCanvas.height);
+      positionDetailCanvas();
+      if (!detailLayer.visible) {
+        detailLayer.visible = true;
+        glDetailCanvas.style.display = 'block';
+      }
+      return true;
+    }
+
+    // After every base draw: keep a current region on screen (redrawn with the
+    // new uniforms), hide a stale one, and ask for the region the view needs.
+    // A GPU frame ahead of its exact frame (#239) always hides it.
+    function syncDetailLayer(baseDrawn = true) {
+      if (!baseDrawn || !detailLayerAllowed() || gpuPreview.lastDraw === 'apply') {
+        hideDetailLayer();
+        return;
+      }
+      const shown = detailLayer.shown;
+      if (shown && detailTagCurrent(shown.tag)) drawDetailLayer();
+      else hideDetailLayer();
+      const plan = planDetailRegion(detailView());
+      if (!plan) {
+        hideDetailLayer();
+        scheduleDetailWarmUp();
+        return;
+      }
+      if (shown && detailTagCurrent(shown.tag) && detailRegionServes(shown.plan, plan)) return;
+      scheduleDetailRequest(0);
+    }
+
+    // Zoom, pan and fit changes: the transform moves the region with the base
+    // at once; a new region is planned once the view settles.
+    function noteDetailViewChanged() {
+      if (!detailLayer.shown && !detailLayerAllowed()) return;
+      positionDetailCanvas();
+      scheduleDetailRequest(DETAIL_SETTLE_MS);
+    }
+
+    function scheduleDetailRequest(delay) {
+      if (detailLayer.timer) clearTimeout(detailLayer.timer);
+      detailLayer.timer = setTimeout(() => {
+        detailLayer.timer = null;
+        void requestDetailRegion();
+      }, delay);
+    }
+
+    // The roi slot's engine is set up at idle: its first conversion costs more.
+    function scheduleDetailWarmUp() {
+      const container = getCanvasContainerSize();
+      const slot = detailSlotSize(container.width, container.height, window.devicePixelRatio || 1);
+      const key = `${slot.width}x${slot.height}`;
+      if (detailLayer.warmed === key) return;
+      detailLayer.warmed = key;
+      runWhenIdle(() => {
+        if (!detailLayerAllowed()) {
+          detailLayer.warmed = null;
+          return;
+        }
+        convertPreviewFrameInWorker.roi({ settings: buildRouterSettings(state), region: { slotWidth: slot.width, slotHeight: slot.height }, warm: true })
+          .catch(() => { detailLayer.warmed = null; });
+      });
+    }
+
+    async function requestDetailRegion() {
+      if (!detailLayerAllowed() || gpuPreview.lastDraw === 'apply') {
+        hideDetailLayer();
+        return;
+      }
+      // The base settles first: its conversion carries the settings the
+      // region is made for, and the preview worker keeps its analysis.
+      if (coreReprocessBusy() || coreReprocessTimer || coreReprocessScheduled || gpuPreviewScheduler.isAhead()
+        || processNegativeInFlight || corePreviewCommit || displayPreviewRebuild) {
+        scheduleDetailRequest(DETAIL_SETTLE_MS);
+        return;
+      }
+      const view = detailView();
+      const plan = planDetailRegion(view);
+      if (!plan) {
+        hideDetailLayer();
+        return;
+      }
+      const full = detailFullFrame();
+      if (!full && hasFrameRepairs()) {
+        // A region from the source would bring the dust back.
+        hideDetailLayer();
+        return;
+      }
+      const shown = detailLayer.shown;
+      if (shown && detailTagCurrent(shown.tag) && detailRegionServes(shown.plan, plan)) return;
+      const pending = detailLayer.request;
+      if (pending && detailTagCurrent(pending.tag) && detailRegionServes(pending.plan, plan)) return;
+      // At rest the region's corner sits on a whole device pixel, so 100 %
+      // maps one to one without bilinear softening.
+      const snapX = snapPanToDevicePixels(state.panX, view.baseX, state.zoomLevel, plan.x * view.fit, view.dpr);
+      const snapY = snapPanToDevicePixels(state.panY, view.baseY, state.zoomLevel, plan.y * view.fit, view.dpr);
+      if (state.zoomLevel > 1 && (snapX !== state.panX || snapY !== state.panY)) {
+        state.panX = snapX;
+        state.panY = snapY;
+        canvasTransformWrapper.style.transform = `matrix(${state.zoomLevel}, 0, 0, ${state.zoomLevel}, ${state.panX}, ${state.panY}) ${interimGeometryCss()}`.trim();
+      }
+      const tag = detailTag(full);
+      const job = { tag, plan, started: performance.now() };
+      detailLayer.request = job;
+      detailLayer.counters.requests += 1;
+      try {
+        const image = full ? await detailFromFrame(full, plan) : await detailFromSource(plan);
+        if (detailLayer.request !== job) return;
+        detailLayer.request = null;
+        if (!image || !detailTagCurrent(tag) || !detailLayerAllowed()) return;
+        showDetailRegion(image, plan, tag);
+        detailLayer.counters.lastReadyMs = Math.round(performance.now() - job.started);
+      } catch (err) {
+        if (detailLayer.request === job) detailLayer.request = null;
+        detailLayer.counters.failures += 1;
+        if (err?.code !== WORKER_ABORTED) console.warn('Detail layer region failed:', err?.message || err);
+      }
+    }
+
+    // A region of a current full-resolution frame: its 8-bit pixels, reduced
+    // in the preview worker below full density.
+    async function detailFromFrame(frame, plan) {
+      detailLayer.counters.crops += 1;
+      const rows = copyRegionRows(frame.data, frame.width, plan);
+      const region = new ImageData(new Uint8ClampedArray(rows.buffer), plan.width, plan.height);
+      if (plan.outWidth === plan.width && plan.outHeight === plan.height) return region;
+      return convertPreviewFrameInWorker.resample(region, { width: plan.outWidth, height: plan.outHeight }, { transfer: true });
+    }
+
+    // A region converted by the preview worker from native rows of the
+    // conversion source (or from its cached level), with the base's analysis.
+    async function detailFromSource(plan) {
+      detailLayer.counters.conversions += 1;
+      const source = state.conversionSourceImageData;
+      const base = previewRequestImage(state.conversionPreviewImageData);
+      const container = getCanvasContainerSize();
+      const slot = detailSlotSize(container.width, container.height, window.devicePixelRatio || 1);
+      const region = {
+        x: plan.x, y: plan.y, width: plan.width, height: plan.height, frameWidth: source.width, frameHeight: source.height,
+        outWidth: plan.outWidth, outHeight: plan.outHeight, fromLevel: plan.fromLevel, levelFactor: plan.levelFactor,
+        slotWidth: slot.width, slotHeight: slot.height
+      };
+      const rows = plan.fromLevel ? null
+        : copyRegionRows(source.__image16?.data instanceof Uint16Array ? source.__image16.data : source.data, source.width, plan);
+      return convertPreviewFrameInWorker.roi({
+        settings: buildRouterSettings(state), region, rows,
+        base: { levelWidth: base.imageData.width, levelHeight: base.imageData.height, display: base.display }
+      });
+    }
+
+    function showDetailRegion(image, plan, tag) {
+      const renderer = detailRenderer();
+      if (!renderer) return;
+      const maxTexture = renderer.gl.getParameter(renderer.gl.MAX_TEXTURE_SIZE) || 8192;
+      if (image.width > maxTexture || image.height > maxTexture) return;
+      if (!renderer.uploadExact(image, true)) return;
+      if (glDetailCanvas.width !== image.width) glDetailCanvas.width = image.width;
+      if (glDetailCanvas.height !== image.height) glDetailCanvas.height = image.height;
+      detailLayer.shown = { plan, tag, width: image.width, height: image.height };
+      detailLayer.counters.shown += 1;
+      drawDetailLayer();
+    }
+
+    // A lost context: the region is gone with its texture; the next region
+    // makes a new renderer.
+    glDetailCanvas?.addEventListener('webglcontextlost', (event) => {
+      event.preventDefault();
+      detailLayer.renderer = null;
+      dropDetailLayer();
+    });
+
+    // Read by the smoke tests and the benchmark (#230 S4).
+    window.__ncDetailLayer = {
+      state: () => {
+        const shown = detailLayer.shown;
+        const fit = canvasDisplayFit.scale;
+        const dpr = window.devicePixelRatio || 1;
+        return {
+          enabled: DETAIL_LAYER_ENABLED, visible: detailLayer.visible, allowed: detailLayerAllowed(),
+          pending: Boolean(detailLayer.request || detailLayer.timer), counters: { ...detailLayer.counters },
+          region: shown ? { ...shown.plan, visible: undefined } : null,
+          // Source pixels per device pixel on screen: the layer's own density
+          // while it covers the view, the base's otherwise.
+          sourcePxPerDevicePx: detailLayer.visible && shown
+            ? shown.width / (shown.plan.width * fit * state.zoomLevel * dpr)
+            : (webglState.sourceSize.w || 0) / Math.max(1e-9, (state.conversionSourceImageData?.width || 1) * fit * state.zoomLevel * dpr),
+          current: shown ? detailTagCurrent(shown.tag) : false
+        };
+      }
+    };
 
     let updateScheduled = false;
     let fullUpdateTimer = null;
@@ -8876,6 +9196,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (state.zoomLevel > 1) {
         clampPan();
         applyZoomPanTransform();
+      } else {
+        // A new fit moves the detail layer's pre-transform rect (#248).
+        noteDetailViewChanged();
       }
     }
 
@@ -8916,6 +9239,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         zoomIndicator.style.display = 'none';
         canvasContainer.classList.remove('zoom-pan-active');
       }
+      // The detail layer moves with the transform; its region follows the settle.
+      noteDetailViewChanged();
     }
 
     function getZoomGeometry(zoom = state.zoomLevel) {
@@ -8947,6 +9272,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       state.panX = 0;
       state.panY = 0;
       state.isPanning = false;
+      // Also a photo switch, rotate, mirror or crop: the region is of the old view.
+      dropDetailLayer();
       canvasTransformWrapper.style.transform = interimGeometryCss();
       zoomIndicator.style.display = 'none';
       canvasContainer.classList.remove('zoom-pan-active', 'zoom-panning');

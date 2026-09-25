@@ -242,19 +242,28 @@ export function sampleFlatFieldGain(map, u, v, channel) {
 export function applyFlatFieldToImage16(image16, map, geometry) {
   if (!image16 || !map || !geometry) return image16;
   const { width, height, data } = image16;
-  if (geometry.width !== width || geometry.height !== height) return image16;
+  // `geometry.window` ({ x, y }): `image16` is a region of the frame at that
+  // origin (#248's detail layer), and each pixel gets the frame's own gain,
+  // with the frame's arithmetic (the same per-row start and accumulation).
+  const window = geometry.window || null;
+  if (!window && (geometry.width !== width || geometry.height !== height)) return image16;
+  const frameWidth = geometry.width;
+  const originX = window ? window.x : 0;
+  const originY = window ? window.y : 0;
   const max = 65535;
   const steps = 4096;
   const toLinear = new Float32Array(steps + 1);
   for (let i = 0; i <= steps; i++) toLinear[i] = Math.pow(i / steps, 2.2);
   const encode = (linear) => Math.pow(Math.min(1, Math.max(0, linear)), 1 / 2.2);
   for (let y = 0; y < height; y++) {
+    const fy = originY + y;
     // The mapping is affine, so one row needs two evaluations.
-    const start = workingPointToBase({ x: 0.5, y: y + 0.5 }, geometry);
-    const end = workingPointToBase({ x: width - 0.5, y: y + 0.5 }, geometry);
-    const du = width > 1 ? (end.x - start.x) / (width - 1) : 0;
-    const dv = width > 1 ? (end.y - start.y) / (width - 1) : 0;
+    const start = workingPointToBase({ x: 0.5, y: fy + 0.5 }, geometry);
+    const end = workingPointToBase({ x: frameWidth - 0.5, y: fy + 0.5 }, geometry);
+    const du = frameWidth > 1 ? (end.x - start.x) / (frameWidth - 1) : 0;
+    const dv = frameWidth > 1 ? (end.y - start.y) / (frameWidth - 1) : 0;
     let u = start.x; let v = start.y;
+    for (let x = 0; x < originX; x++) { u += du; v += dv; }
     for (let x = 0; x < width; x++, u += du, v += dv) {
       const o = (y * width + x) * 4;
       for (let ch = 0; ch < 3; ch++) {

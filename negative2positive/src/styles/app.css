@@ -632,6 +632,17 @@ body {
   z-index: 10;
 }
 
+/* The detail layer (#248): native pixels of a zoomed view over the base image,
+   at the region's rect in the wrapper's untransformed space. main.js sets the
+   rect and shows it. */
+#glDetailCanvas {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: none;
+  pointer-events: none;
+}
+
 .canvas-transform-wrapper {
   display: flex;
   align-items: center;

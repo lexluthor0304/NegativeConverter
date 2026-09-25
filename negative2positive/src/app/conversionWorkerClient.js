@@ -432,15 +432,33 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
   // display filter (#248 part 4), made in the worker and not kept there. Only
   // the 16-bit plane crosses when there is one (a clone, never a transfer: the
   // frame stays the caller's). Resolves to an ImageData (with __image16).
-  convert.resample = async (image, target, { signal = null } = {}) => {
+  // `transfer` moves the pixels instead (the caller's own copy of a region).
+  convert.resample = async (image, target, { signal = null, transfer = false } = {}) => {
     const plane = image.__image16?.data instanceof Uint16Array ? image.__image16.data : null;
     const body = { width: image.width, height: image.height, target: { width: target.width, height: target.height } };
     if (plane) body.image16 = plane.byteOffset === 0 && plane.buffer.byteLength === plane.byteLength ? plane.buffer : plane.slice().buffer;
     else body.rgba = image.data.byteOffset === 0 && image.data.buffer.byteLength === image.data.byteLength ? image.data.buffer : image.data.slice().buffer;
-    const reply = await postUncached('resample', body, [], image.width * image.height, signal);
+    const reply = await postUncached('resample', body, transfer ? [body.image16 || body.rgba] : [], image.width * image.height, signal);
     const out = new ImageData(new Uint8ClampedArray(reply.rgba), reply.width, reply.height);
     if (reply.image16) out.__image16 = { width: reply.width, height: reply.height, data: new Uint16Array(reply.image16) };
     return out;
+  };
+
+  // A detail region (#248 part 5), converted from `rows` (the region's native
+  // 16- or 8-bit pixels, transferred) or from the cached level, with the base's
+  // analysis. `warm` only sets up the roi slot. Resolves to the region's 8-bit
+  // ImageData (null for `warm`).
+  convert.roi = async ({ settings, base = null, region, rows = null, warm = false, signal = null }) => {
+    const body = { settings, base, region, warm };
+    const transfers = [];
+    if (rows) {
+      if (rows instanceof Uint16Array) body.image16 = rows.buffer;
+      else body.rgba = rows.buffer;
+      transfers.push(rows.buffer);
+    }
+    const reply = await postUncached('roi', body, transfers, region.slotWidth * region.slotHeight, signal);
+    if (reply.warm) return null;
+    return new ImageData(new Uint8ClampedArray(reply.rgba), reply.width, reply.height);
   };
 
   // Brings back the 16-bit plane a retaining conversion left in the worker.

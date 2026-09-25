@@ -342,6 +342,99 @@ function resample(msg) {
   }
 }
 
+// Rows [y, y + height) and columns [x, x + width) of an RGBA16 plane.
+function cropPlane(plane, rect) {
+  const data = new Uint16Array(rect.width * rect.height * 4);
+  for (let row = 0; row < rect.height; row++) {
+    const from = ((rect.y + row) * plane.width + rect.x) * 4;
+    data.set(plane.data.subarray(from, from + rect.width * 4), row * rect.width * 4);
+  }
+  return { width: rect.width, height: rect.height, data };
+}
+
+// `plane` at the top-left of a width x height plane, its last column and row
+// repeated into the rest.
+function padPlane(plane, width, height) {
+  if (plane.width === width && plane.height === height) return plane;
+  const data = new Uint16Array(width * height * 4);
+  for (let y = 0; y < height; y++) {
+    const sy = Math.min(plane.height - 1, y);
+    const row = plane.data.subarray(sy * plane.width * 4, (sy + 1) * plane.width * 4);
+    data.set(row, y * width * 4);
+    const last = row.subarray((plane.width - 1) * 4);
+    for (let x = plane.width; x < width; x++) data.set(last, (y * width + x) * 4);
+  }
+  return { width, height, data };
+}
+
+// A detail region (#248 part 5): source pixels of a region of the conversion
+// source (or of the cached level, when it holds enough detail), converted in
+// the fixed roi slot with the base display image's analysis and with the
+// stops and flat field of its place in the frame, so it meets the base without
+// a seam. It leaves the cached source, analysis and strokes alone.
+async function roi(msg) {
+  const { id, settings, region, base } = msg;
+  try {
+    const mode = resolveConversionMode(settings);
+    if (msg.warm) {
+      // A first conversion costs engine set-up and compilation: done at idle.
+      const blank = { width: region.slotWidth, height: region.slotHeight, data: new Uint16Array(region.slotWidth * region.slotHeight * 4) };
+      await convertFrameWithRouter({ imageData: blank, settings, options: { region: { originX: 0, originY: 0, frameWidth: blank.width, frameHeight: blank.height },
+        forceFullProcess: true, includeAnalysisPreview: false } });
+      self.postMessage({ type: 'roi', id, warm: true, width: 0, height: 0 });
+      return;
+    }
+    const level = cachedSource;
+    if (!level || level.width !== base.levelWidth || level.height !== base.levelHeight) throw new Error('Missing preview source');
+    // The analysis the base's next frame of these settings uses (the preview
+    // slot keeps it, as the GPU preview's `analyze` does).
+    const baseNegative = base.display ? displayNegativeFor(level, base.display) : level;
+    const analysis = await analyzeSilverCorePreview(baseNegative, settings, mode, { preview: true, analysisImageData: cachedAnalysis });
+    const out = { width: region.outWidth, height: region.outHeight };
+    let plane;
+    if (region.fromLevel) {
+      const k = region.levelFactor;
+      const block = cropPlane(planeOf(level), { x: region.x / k, y: region.y / k, width: region.width / k, height: region.height / k });
+      plane = resampleDisplayLevel(block, { sourceWidth: region.width, sourceHeight: region.height, k }, out);
+    } else {
+      const rows = msg.image16
+        ? { width: region.width, height: region.height, data: new Uint16Array(msg.image16) }
+        : fromImageData8({ width: region.width, height: region.height, data: new Uint8ClampedArray(msg.rgba) });
+      if (out.width === rows.width && out.height === rows.height) plane = rows;
+      else {
+        // Below full density the native rows are box-decimated first.
+        const k = Math.max(1, Math.floor(Math.min(rows.width / out.width, rows.height / out.height)));
+        const box = k > 1 ? buildDisplayLevel({ width: rows.width, height: rows.height, data: rows.data }, k).__image16 : rows;
+        plane = resampleDisplayLevel(box, { sourceWidth: rows.width, sourceHeight: rows.height, k }, out);
+      }
+    }
+    const density = out.width / region.width;
+    const padded = padPlane(plane, Math.max(region.slotWidth, out.width), Math.max(region.slotHeight, out.height));
+    const result = await convertFrameWithRouter({
+      imageData: padded,
+      settings,
+      options: {
+        region: density === 1
+          ? { originX: region.x, originY: region.y, frameWidth: region.frameWidth, frameHeight: region.frameHeight }
+          : { originX: Math.round(region.x * density), originY: Math.round(region.y * density),
+            frameWidth: Math.round(region.frameWidth * density), frameHeight: Math.round(region.frameHeight * density) },
+        forceFullProcess: true,
+        includeAnalysisPreview: false,
+        sharedAnalysis: { channelData: analysis.channelData, positiveAnalysis: analysis.positiveAnalysis }
+      }
+    });
+    const rgba = new Uint8ClampedArray(out.width * out.height * 4);
+    for (let row = 0; row < out.height; row++) {
+      rgba.set(result.data.subarray(row * padded.width * 4, (row * padded.width + out.width) * 4), row * out.width * 4);
+    }
+    self.postMessage({ type: 'roi', id, width: out.width, height: out.height, rgba: rgba.buffer }, [rgba.buffer]);
+  } catch (err) {
+    self.postMessage({ type: 'error', id, message: err?.message || String(err) });
+  } finally {
+    releaseSlotBuffers('roi');
+  }
+}
+
 // Hands the retained plane of request `resultId` to main, or null when a
 // newer request has taken it over (main then converts that frame again).
 function commit(msg) {
@@ -366,6 +459,7 @@ async function handleMessage(msg) {
   if (msg.type === 'analyze') return analyze(msg);
   if (msg.type === 'displayNegative') return displayNegative(msg);
   if (msg.type === 'resample') return resample(msg);
+  if (msg.type === 'roi') return roi(msg);
   self.postMessage({ type: 'error', id: msg.id, message: `Unknown message type: ${msg.type}` });
 }
 

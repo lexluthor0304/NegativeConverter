@@ -90,14 +90,18 @@ function _bufferId(buffer) {
   return id;
 }
 
-function localExposureStopsForSlot(slot, settings, width, height) {
+// `region` (#248's detail layer): the buffer is the region of a frame of
+// frameWidth x frameHeight at originX/originY, and gets that region's stops.
+function localExposureStopsForSlot(slot, settings, width, height, region = null) {
   const exposure = settings?.localExposure;
   const geometry = settings?.localExposureGeometry;
   if (!geometry || !exposure?.strokes?.length) {
     slot.exposureMap = null;
     return null;
   }
-  const workingGeometry = { ...geometry, width, height };
+  const workingGeometry = region
+    ? { ...geometry, width: region.frameWidth, height: region.frameHeight, window: { x: region.originX, y: region.originY, width, height } }
+    : { ...geometry, width, height };
   // Settings snapshots are copied on each render: object identity alone cannot
   // identify an unchanged stroke. The exact content also catches undo and edits.
   const key = JSON.stringify([exposure, workingGeometry]);
@@ -331,7 +335,7 @@ export function getSilverCoreCacheStats() {
     exposedBytes: _levelBytes(slot.exposed),
     levels: (_levelBytes(slot.prepared) ? 1 : 0) + (_levelBytes(slot.exposed) ? 1 : 0),
   });
-  return { ..._stats, preview: slotInfo(_cache.preview), full: slotInfo(_cache.full), scratch: slotInfo(_cache.scratch) };
+  return { ..._stats, preview: slotInfo(_cache.preview), full: slotInfo(_cache.full), scratch: slotInfo(_cache.scratch), roi: slotInfo(_cache.roi) };
 }
 
 // Tests exercise the large-image rule on small frames.
@@ -345,6 +349,9 @@ const _cache = {
   full: _createSlot(),
   // Test strips and other side renders: never disturbs the preview or export cache.
   scratch: _createSlot(),
+  // The detail layer's regions (#248): one fixed size, so panning never
+  // rebuilds the engine; regions are transient and keep no plane.
+  roi: _createSlot(),
 };
 
 function filmBaseCompensationEqual(a, b) {
@@ -411,15 +418,15 @@ function filmBaseKeyOf(filmBaseCompensation) {
 }
 
 // Preprocessing that is baked into the cached pristine buffer: the flat field
-// (light-pad falloff) first, then the film base compensation.
+// (light-pad falloff) first, then the film base compensation. A detail region
+// (#248, `preprocess.region`) gets the flat field of its place in the frame.
 function _preprocessBuffer(data, width, height, preprocess) {
   _stats.preprocess++;
   if (preprocess.flatField && preprocess.flatFieldGeometry) {
-    applyFlatFieldToImage16({ width, height, data }, preprocess.flatField, {
-      ...preprocess.flatFieldGeometry,
-      width,
-      height,
-    });
+    const region = preprocess.region || null;
+    applyFlatFieldToImage16({ width, height, data }, preprocess.flatField, region
+      ? { ...preprocess.flatFieldGeometry, width: region.frameWidth, height: region.frameHeight, window: { x: region.originX, y: region.originY } }
+      : { ...preprocess.flatFieldGeometry, width, height });
   }
   if (preprocess.base) {
     applyFilmBaseCompensationToBuffer(data, preprocess.base, preprocess.options);
@@ -428,6 +435,7 @@ function _preprocessBuffer(data, width, height, preprocess) {
 
 function _slotFor(options) {
   if (options && options.scratch) return _cache.scratch;
+  if (options && options.region) return _cache.roi;
   return (options && options.preview) ? _cache.preview : _cache.full;
 }
 
@@ -571,6 +579,7 @@ function _analysisStateFor(params, filmBaseCompensation, sourceRef, mode, refere
     preSaturation: params.preSaturation,
     bwMix: mode === 'bw' ? params.bwMix : null,
     analysisOverrideKey: params.analysisOverride ? JSON.stringify(params.analysisOverride) : '',
+    positiveOverrideKey: params.positiveAnalysisOverride ? JSON.stringify(params.positiveAnalysisOverride) : '',
     filmBaseKey: filmBaseKeyOf(filmBaseCompensation),
   };
 }
@@ -587,6 +596,7 @@ function _analysisChanged(previous, next) {
     || previous.preSaturation !== next.preSaturation
     || previous.bwMix !== next.bwMix
     || previous.analysisOverrideKey !== next.analysisOverrideKey
+    || previous.positiveOverrideKey !== next.positiveOverrideKey
     || previous.filmBaseKey !== next.filmBaseKey;
 }
 
@@ -800,6 +810,14 @@ function _validReference(candidate) {
 async function runSilverCore(imageData, settings, mode, options) {
   const slot = _slotFor(options);
   const params = await buildSilverCoreParams(mode, settings);
+  // A detail region (#248) is converted with its base's analysis, taken as it
+  // is (the override normalisation would round what the base computed).
+  const shared = options?.sharedAnalysis;
+  if (shared) {
+    params.analysisOverride = shared.channelData.map((channel) => ({ ...channel }));
+    params.positiveAnalysisOverride = shared.positiveAnalysis
+      ? { gain: shared.positiveAnalysis.gain, wb: [...shared.positiveAnalysis.wb] } : null;
+  }
 
   // Promote whatever the caller hands us into Image16. Loaders attach __image16
   // directly so the upcast is zero-copy in the common case.
@@ -826,7 +844,9 @@ async function runSilverCore(imageData, settings, mode, options) {
     params.profileStrength = 0;
   }
 
-  const filmBaseCompensation = filmBaseCompensationFor(settings, mode);
+  const region = options?.region || null;
+  const baseCompensation = filmBaseCompensationFor(settings, mode);
+  const filmBaseCompensation = region && baseCompensation ? { ...baseCompensation, region } : baseCompensation;
 
   const reference = _validReference(options?.analysisImageData);
   const analysisParams = reference ? { ...params, analysisRegion: null, excludeTransparent: true } : params;
@@ -836,7 +856,7 @@ async function runSilverCore(imageData, settings, mode, options) {
   // Dodge and burn: rasterise the strokes for this buffer's size. The engine
   // applies them after the analysis and before the curves; the analysis
   // sample (reference) is never dodged, like the base exposure in a darkroom.
-  params.localExposureStops = localExposureStopsForSlot(slot, settings, input16.width, input16.height);
+  params.localExposureStops = localExposureStopsForSlot(slot, settings, input16.width, input16.height, region);
 
   // B&W: every stage after the mix depends on the grey value alone, so unless a
   // spatial stage is active the output comes from one grey plane and a grey → RGB table.
@@ -1087,7 +1107,7 @@ export async function analyzeSilverCorePreview(imageData, settings = {}, mode = 
 }
 
 export function invalidateSilverCoreCache() {
-  for (const slot of [_cache.preview, _cache.full, _cache.scratch]) {
+  for (const slot of [_cache.preview, _cache.full, _cache.scratch, _cache.roi]) {
     Object.assign(slot, _createSlot());
   }
 }

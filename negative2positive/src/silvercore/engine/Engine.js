@@ -178,7 +178,10 @@ export class Engine {
     // 1. Analyze the negative (histogram-based black/white/mean points). A roll
     //    analysis hands in shared channelData instead so every frame of the roll
     //    gets the same curves; this frame's own histogram is then not consulted.
-    this.positiveAnalysis = params.imageType === 'positive' ? analyzePositive(imageData, params) : null
+    // A detail region (#248) takes its base's positive analysis as it is.
+    this.positiveAnalysis = params.imageType !== 'positive' ? null : params.positiveAnalysisOverride
+      ? { gain: params.positiveAnalysisOverride.gain, wb: [...params.positiveAnalysisOverride.wb] }
+      : analyzePositive(imageData, params)
     this.channelData = params.imageType === 'positive' ? identityPositiveChannels() : isChannelDataOverride(params.analysisOverride)
       ? params.analysisOverride.map((channel) => ({ ...channel }))
       : analyzeImage(imageData, params)

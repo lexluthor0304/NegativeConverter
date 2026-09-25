@@ -45,6 +45,8 @@ function fixture({ source: size = { width: 9536, height: 6336 }, container = { w
     getSprocketFrameMetrics: () => null, getSprocketFrameComposeOptions: () => ({}),
     computeZoomGeometry, clampPanValues, interimGeometryCss: () => '',
     postponeFullResolutionRenderForInteraction: () => {},
+    // The detail layer (#248 part 5) follows zoom and pan on its own.
+    noteDetailViewChanged: () => {}, dropDetailLayer: () => {},
     refreshDisplayPreviewForViewport: () => refreshed.push(state.conversionSourceImageData),
     setTimeout: (callback, delay) => { const id = nextTimer++; timers.set(id, { callback, delay }); return id; },
     clearTimeout: id => timers.delete(id),
