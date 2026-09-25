@@ -60,7 +60,7 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
     processedImageData: fullPlane, processedImageDataIsPreview: false, fullResolutionPending: false,
     previewSourceImageData: shown, histogramSourceImageData: { sampleOf: shown }, webglSourceImageData: shown,
     displayImageData: null, currentStep: 3, cropping: false, beforeAfterActive: false, zoomLevel: 1,
-    sprocketPreviewEnabled: false, lastRenderQuality: 'gl', fullResolutionPromise: null,
+    sprocketPreviewEnabled: false, fullResolutionPromise: null,
     repairStrokes: Array.from({ length: strokes }, () => ({ size: 0.02, points: [{ x: 0.5, y: 0.5 }] })),
     dustRemoval: {
       enabled: repairs, processing: false, mask: repairs || strokes ? new Uint8Array(4) : null,
@@ -163,7 +163,7 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
     },
   });
   vm.runInContext([
-    'isDisplayImageDataFullResolution', 'applyProcessedImageToState', 'applyPreviewProcessedImageToState',
+    'applyProcessedImageToState', 'applyPreviewProcessedImageToState',
     'applyRestoredImageToState', 'histogramSourceFor', 'buildPreviewSourceImageData',
     'convertFrameOffMainThread', 'convertFromCurrentSource',
     'routeCoreRequest', 'beginFullResolutionConversion', 'endFullResolutionConversion',
@@ -462,6 +462,24 @@ function snapshotFixture(options) {
 }
 
 {
+  // Branch 1 in a CPU mode (#242): #canvas holds the display preview, not the
+  // full frame, so a new size is drawn, then settled with the exact colour
+  // model; above 16 MP that settle is the display-size one.
+  const f = fixture();
+  f.context.isWebGLActive = () => false;
+  f.context.renderSettledDisplay = () => f.log.push('paint:settled');
+  f.log.length = 0;
+  f.setTarget({ width: 2452, height: 1630 });
+  f.context.refreshDisplayPreviewForViewport();
+  assert.equal(f.state.previewSourceImageData.width, 2452);
+  assert.deepEqual(f.log.filter(entry => entry.startsWith('paint')), ['paint:scheduled']);
+  f.clock.run(1200);
+  await settle();
+  assert.deepEqual(f.log.filter(entry => entry.startsWith('paint')), ['paint:scheduled', 'paint:settled']);
+  assert.deepEqual(count(f), { preview: 0, shared: 0, exact: 0, mainThread: 0 }, 'no conversion');
+}
+
+{
   // Branch 2: a repair pass is pending (or detection is running): the zoom
   // leaves it alone and restarts nothing.
   const f = fixture({ repairs: true });
@@ -503,6 +521,22 @@ function snapshotFixture(options) {
 }
 
 // ---- D: Step-3 commits invalidate nothing ----
+
+for (const armed of [false, true]) {
+  // #242 A.5: a CPU mode above 16 MP settles its display preview with the
+  // exact colour model after a commit, unless a full-resolution render is
+  // armed and will land (and settle) anyway. GL modes draw nothing more.
+  const f = fixture({ large: true });
+  f.context.isWebGLActive = () => false;
+  f.context.renderSettledDisplay = () => f.log.push('paint:settled');
+  if (armed) f.context.fullResolutionRenderTimer = 99;
+  f.context.scheduleFullUpdate();
+  f.clock.run(1200);
+  await settle();
+  assert.deepEqual(f.log.filter(entry => entry.startsWith('paint')), armed ? [] : ['paint:settled'],
+    armed ? 'the armed render settles it' : 'settled at display size, off this thread');
+  assert.ok(!f.log.some(entry => entry.startsWith('render:')), 'no full-resolution render for a Step-3 commit');
+}
 
 for (const large of [false, true]) {
   const f = fixture({ large });

@@ -646,7 +646,7 @@ for (const locked of [false, true]) {
   Object.assign(c, {
     isDesktopBatchExportLocked: () => locked,
     clearDustState: noop, clearUndoHistory: noop, clearProjectRecovery: noop, cancelCropDetection: noop,
-    exitCropMode: noop, exitBeforeAfter: noop, resetZoomPan: noop,
+    exitCropMode: noop, exitBeforeAfter: noop, resetZoomPan: noop, supersedeSettledDisplay: noop,
     composeDisplaySprocketFrame: { clear: noop },
     sprocketPreviewFrameCache: { key: 'old', sourceRef: f.base, metrics: {} },
     sprocketPreviewFrameCanvas: { width: 100, height: 100 },

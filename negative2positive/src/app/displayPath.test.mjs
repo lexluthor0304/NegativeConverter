@@ -106,4 +106,208 @@ for (const failure of ['null', 'throw']) {
   assert.equal(alerts.length, failure === 'throw' ? 1 : 0);
 }
 
-console.log('displayPath: Steps 1-2 export without a readback and failed conversions show the framed negative passed');
+// ---- A: the settled CPU display, at display size, off this thread ----
+// The real export worker behind the real bridge, in-process: every message
+// crosses a structured clone both ways.
+let activeWorker = null;
+globalThis.self = {
+  onmessage: null,
+  postMessage(message, transfers = []) {
+    const cloned = structuredClone(message, { transfer: transfers });
+    const target = activeWorker;
+    queueMicrotask(() => target && target.onmessage && target.onmessage({ data: cloned }));
+  }
+};
+globalThis.ImageData = TestImageData;
+await import('../workers/exportWorker.js');
+class InProcessWorker {
+  constructor() { this.onmessage = null; activeWorker = this; }
+  postMessage(message, transfers = []) {
+    const received = structuredClone(message, { transfer: transfers });
+    queueMicrotask(() => self.onmessage({ data: received }));
+  }
+  terminate() { if (activeWorker === this) activeWorker = null; }
+}
+const { createExportWorkerBridge } = await import('../workers/workerBridge.js');
+const { applyPreparedAdjustmentsToBuffer, createAdjustmentLutScratch } = await import('./adjustmentPipeline.js');
+const { settledDisplayRoute } = await import('./displayCanvas.js');
+const { previewTierMaxPixels } = await import('./previewTier.js');
+
+const linear = () => Uint8Array.from({ length: 256 }, (_, v) => v);
+// Vibrance and saturation: the one step where 'full' and 'preview' differ.
+const recipe = { curves: { r: linear(), g: linear(), b: linear() }, exposure: 0, contrast: 0, highlights: 0, shadows: 0,
+  temperature: 0, tint: 0, saturation: 12, vibrance: 30, cyan: 3, magenta: 0, yellow: -2, wbR: 1.06, wbG: 1, wbB: 0.95,
+  look: null, expiredEnabled: false, expiredAnalysis: null };
+function ramp(width, height) {
+  const imageData = image(width, height);
+  for (let i = 0; i < width * height; i++) {
+    imageData.data[i * 4] = (i * 5) & 255; imageData.data[i * 4 + 1] = (i * 3 + 40) & 255;
+    imageData.data[i * 4 + 2] = (i * 11 + 90) & 255; imageData.data[i * 4 + 3] = 255;
+  }
+  return imageData;
+}
+function expectedFull(source) {
+  const out = image(source.width, source.height);
+  applyPreparedAdjustmentsToBuffer(source, recipe, out, { quality: 'full' });
+  return out;
+}
+const sameData = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+
+function settleFixture({ width = 1200, height = 900, worker = 'real', gl = false } = {}) {
+  const shown = ramp(width, height);
+  const state = {
+    currentStep: 3, cropping: false, beforeAfterActive: false,
+    processedImageData: { width: width * 4, height: height * 4, name: 'full plane' },
+    previewSourceImageData: shown, displayImageData: null,
+    dustRemoval: { showMask: false, mask: null }
+  };
+  const drawn = [], histograms = [], requests = [];
+  let glActive = gl;
+  const real = createExportWorkerBridge({ workerFactory: () => new InProcessWorker() });
+  const workers = {
+    isWorkerAvailable: () => worker !== 'none',
+    workerApplyAdjustments: (source, prepared, quality, ...rest) => {
+      requests.push({ source, prepared, quality });
+      if (worker === 'failing') return Promise.resolve(null);
+      if (worker === 'cancelled') return Promise.reject(Object.assign(new Error('cancelled'), { name: 'AbortError' }));
+      return real.workerApplyAdjustments(source, prepared, quality, ...rest);
+    }
+  };
+  const context = vm.createContext({
+    state, ImageData: TestImageData, Uint8ClampedArray, console,
+    settledDisplayToken: 0, settledAdjustedBuffer: null, previewAdjustedBuffer: null, expiredCompareHeld: false,
+    displayDebugCounters: { mainAdjustments: 0, mainAdjustMaxPixels: 0, mainAdjustOverPreviewCap: 0,
+      exportFallbackAdjustments: 0, exportFallbackMaxPixels: 0, settleRequests: 0, settleWorker: 0, settleSync: 0, settlePresented: 0 },
+    defaultExportWorkers: workers, settledDisplayRoute, previewTierMaxPixels,
+    buildAdjustmentSettings: () => ({ ...recipe }),
+    applyPreparedAdjustmentsToBuffer, adjustmentLutScratch: createAdjustmentLutScratch(),
+    renderAdjustedImageDataToMainCanvas: (imageData, reference, options) => drawn.push({ imageData, reference, options }),
+    renderDustMaskOverlay: noop, renderDodgeBurnOverlay: noop,
+    renderHistogram: imageData => histograms.push(imageData),
+    isWebGLActive: () => glActive,
+    // updateFull's own dependencies.
+    scheduleStudioThumbnailUpdate: noop, updateExportUI: noop, initWebGLRenderer: () => true,
+    updateCanvasVisibility: noop, renderWebGL: () => true, settleInterimGeometryDisplay: noop,
+    renderHistogramForWebGL: noop, gpuPreview: { lastDraw: 'step3' }, scheduleGpuPreviewWarmup: noop,
+    schedulePreviewUpdate: () => drawn.push('scheduled'),
+  });
+  vm.runInContext(['supersedeSettledDisplay', 'presentGlFrame', 'displaySourceImageData', 'presentCpuFrame',
+    'buildDisplayAdjustmentSettings', 'noteMainThreadAdjustment', 'ensureImageDataBuffer', 'applyAdjustmentsToBuffer',
+    'updatePreviewCpu', 'updateFull', 'renderSettledDisplay', 'getCurrentHistogramSource', 'redrawHistogramIfPossible',
+    'repaintDustMaskOverlay'].map(functionSource).join('\n'), context);
+  return { context, state, shown, drawn, histograms, requests, counters: context.displayDebugCounters,
+    setGl: value => { glActive = value; }, dispose: () => real.terminateWorker() };
+}
+
+{
+  // Above 1 MP: one worker request at quality 'full' on the display preview;
+  // nothing is drawn until it lands; then the handle, the canvas and the
+  // histogram all show exactly the main-thread 'full' pass of that preview.
+  const f = settleFixture();
+  f.context.updateFull();
+  assert.equal(f.requests.length, 1);
+  assert.equal(f.requests[0].source, f.shown, 'the display preview, never the full-resolution plane');
+  assert.equal(f.requests[0].quality, 'full', 'the exact colour model of exports');
+  assert.deepEqual(f.drawn, [], 'the preview-quality frame stays until the result lands');
+  await settle(); await settle();
+  assert.equal(f.drawn.length, 1);
+  const shown = f.state.displayImageData;
+  assert.equal(f.drawn[0].imageData, shown, 'the handle is what was drawn');
+  assert.equal(f.histograms.at(-1), shown, 'and what the histogram shows');
+  assert.ok(sameData(shown.data, expectedFull(f.shown).data), 'displayImageData == applyPreparedAdjustmentsToBuffer(preview, full)');
+  const preview = image(f.shown.width, f.shown.height);
+  applyPreparedAdjustmentsToBuffer(f.shown, recipe, preview, { quality: 'preview' });
+  assert.ok(!sameData(preview.data, shown.data), 'the fixture tells full from preview quality');
+  assert.deepEqual({ ...f.counters }, { mainAdjustments: 0, mainAdjustMaxPixels: 0, mainAdjustOverPreviewCap: 0,
+    exportFallbackAdjustments: 0, exportFallbackMaxPixels: 0, settleRequests: 1, settleWorker: 1, settleSync: 0, settlePresented: 1 },
+  'no Step-3 pass on this thread');
+  assert.equal(f.context.getCurrentHistogramSource(), shown);
+  f.dispose();
+}
+
+for (const supersede of ['newer frame', 'new source', 'crop', 'comparison', 'GL', 'Step 2']) {
+  // A result that lands after a newer frame or a mode that owns the canvas is dropped.
+  const f = settleFixture();
+  f.context.updateFull();
+  if (supersede === 'newer frame') f.context.updatePreviewCpu();
+  if (supersede === 'new source') f.state.previewSourceImageData = ramp(1200, 900);
+  if (supersede === 'crop') f.state.cropping = true;
+  if (supersede === 'comparison') f.state.beforeAfterActive = true;
+  if (supersede === 'GL') f.setGl(true);
+  if (supersede === 'Step 2') f.state.currentStep = 2;
+  const drawnBefore = f.drawn.length;
+  await settle(); await settle();
+  assert.equal(f.drawn.length, drawnBefore, `${supersede}: the late result is not drawn`);
+  assert.equal(f.counters.settlePresented, 0);
+  f.dispose();
+}
+
+{
+  // A GL frame supersedes a pending settle and clears the handle.
+  const f = settleFixture();
+  f.context.updateFull();
+  f.setGl(true);
+  f.context.updateFull();
+  await settle(); await settle();
+  assert.equal(f.state.displayImageData, null);
+  assert.equal(f.drawn.length, 0);
+  f.dispose();
+}
+
+for (const worker of ['none', 'failing']) {
+  // Without a worker, or when it fails, the display-size pass runs here.
+  const f = settleFixture({ worker });
+  f.context.updateFull();
+  await settle(); await settle();
+  assert.equal(f.drawn.length, 1, `${worker}: drawn`);
+  assert.ok(sameData(f.state.displayImageData.data, expectedFull(f.shown).data), `${worker}: the same exact pass`);
+  assert.equal(f.counters.settleSync, 1);
+  assert.equal(f.counters.mainAdjustMaxPixels, 1200 * 900, `${worker}: never more than the display preview here`);
+  assert.equal(f.counters.mainAdjustOverPreviewCap, 0);
+  f.dispose();
+}
+
+{
+  // A cancelled worker (hidden-window shedding) leaves the frame on screen.
+  const f = settleFixture({ worker: 'cancelled' });
+  f.context.updateFull();
+  await settle(); await settle();
+  assert.equal(f.drawn.length, 0);
+  assert.equal(f.counters.settleSync, 0, 'no main-thread pass after a cancellation');
+  f.dispose();
+}
+
+{
+  // At or below 1 MP the pass is short: it runs in the caller's task.
+  const f = settleFixture({ width: 1000, height: 1000 });
+  f.context.updateFull();
+  assert.equal(f.requests.length, 0);
+  assert.equal(f.drawn.length, 1);
+  assert.ok(sameData(f.state.displayImageData.data, expectedFull(f.shown).data));
+  f.dispose();
+}
+
+{
+  // The preview frame: the handle is the display-size frame on screen, and
+  // the overlays repaint from it, never from the unadjusted positive.
+  const f = settleFixture({ width: 64, height: 48 });
+  f.context.updatePreviewCpu();
+  const handle = f.state.displayImageData;
+  assert.deepEqual([handle.width, handle.height], [64, 48]);
+  assert.equal(f.drawn.at(-1).imageData, handle);
+  assert.equal(f.drawn.at(-1).options.fastSprocketPreview, true);
+  assert.equal(f.context.repaintDustMaskOverlay(), true);
+  assert.equal(f.drawn.at(-1).imageData, handle, 'the dust overlay repaints the adjusted frame');
+  f.state.displayImageData = null;
+  assert.equal(f.context.repaintDustMaskOverlay(), false);
+  assert.equal(f.drawn.at(-1), 'scheduled', 'without a handle the next frame draws it');
+  assert.equal(f.context.getCurrentHistogramSource(), null, 'never the unadjusted positive');
+  f.context.redrawHistogramIfPossible();
+  assert.equal(f.drawn.at(-1), 'scheduled');
+  f.state.currentStep = 2;
+  f.state.croppedImageData = image(4, 4);
+  assert.equal(f.context.getCurrentHistogramSource(), f.state.croppedImageData, 'Steps 1-2: the negative');
+  f.dispose();
+}
+
+console.log('displayPath: Steps 1-2 export without a readback, failed conversions show the framed negative, and the settled CPU display is exact, display-size and off this thread passed');

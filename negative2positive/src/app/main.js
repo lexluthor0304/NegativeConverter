@@ -83,7 +83,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     import { poolRepairMask } from './repairedPreview.js';
     import { planBatchParallelism, planPng16BandWorkers, runBatchPipeline, planGeometryBandsInFlight } from './batchExportScheduler.js';
     import { displayPreviewSize, resizeDisplayPreview, updateDisplayPreviewRect } from './displayPreview.js';
-    import { photoRectPercent } from './displayCanvas.js';
+    import { settledDisplayRoute, step3FrameReference, photoRectPercent } from './displayCanvas.js';
     import { createCoreReprocessGates, previewDispatchAction, CORE_FULL_REPROCESS_DELAY_MS } from './coreReprocessDispatcher.js';
     import { createPreviewTierController, previewTierMaxPixels, capBackingSize, parsePreviewTierOverride } from './previewTier.js';
     import { describeWebglRenderer, startsReducedReason, formatRenderEnvironmentLine, formatPreviewSessionLine } from './renderEnvironment.js';
@@ -180,7 +180,6 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     } from '../workers/workerBridge.js';
     import {
       markOwnedPlanes,
-      markLiveMutableBuffer,
       planeBuffersOf,
       releaseOwnedPlanes,
       setLiveReferenceProbe
@@ -2557,7 +2556,6 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       sprocketEdge: createSprocketEdgeSettings(),
 
       // Render state
-      lastRenderQuality: 'full', // 'full' | 'preview' | 'gl'
       processedImageDataIsPreview: false,
       fullResolutionPending: false,
       fullResolutionPromise: null
@@ -3381,6 +3379,14 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     });
     // Call counts read by the smoke tests (?debugCounters=1, #261).
     const uiDebugCounters = { adjustCanvasDisplay: 0, renderWebGL: 0, curveCanvasResizes: 0, fileListRenders: 0 };
+    // Step-3 passes on this thread and the settled display frames (#242):
+    // read by the smoke tests through window.__ncDisplay. Only the export's
+    // no-worker fallback may adjust more than a display preview here.
+    const displayDebugCounters = {
+      mainAdjustments: 0, mainAdjustMaxPixels: 0, mainAdjustOverPreviewCap: 0,
+      exportFallbackAdjustments: 0, exportFallbackMaxPixels: 0,
+      settleRequests: 0, settleWorker: 0, settleSync: 0, settlePresented: 0
+    };
     const zoomIndicator = document.getElementById('zoomIndicator');
     const zoomControls = document.getElementById('zoomControls');
     const ZOOM_MIN = 1;
@@ -3750,6 +3756,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
       state.beforeAfterActive = true;
       state.beforeAfterSource = source;
+      supersedeSettledDisplay();
       if (beforeAfterBtn) {
         beforeAfterBtn.classList.add('active');
         beforeAfterBtn.setAttribute('aria-pressed', 'true');
@@ -3775,7 +3782,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         // Edits made while the comparison was shown were not drawn.
         updatePreview();
         if (isWebGLActive()) renderHistogramForWebGL(true);
-        else if (state.displayImageData || previewAdjustedBuffer) renderHistogram(state.displayImageData || previewAdjustedBuffer);
+        else if (state.displayImageData) renderHistogram(state.displayImageData);
         return;
       }
 
@@ -4485,11 +4492,32 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       });
     }
 
-    function applyAdjustmentsToBuffer(imageData, settings, output, quality = 'full') {
+    // The recipe of what is drawn. "Hold to see before" on the expired-film
+    // panel affects the screen only: exports build theirs with
+    // buildAdjustmentSettings (applyAdjustmentsWithSettings), and none of them
+    // reads a display buffer (#242).
+    function buildDisplayAdjustmentSettings(settings = state) {
       const prepared = buildAdjustmentSettings(settings);
-      // "Hold to see before" on the expired-film panel affects the screen only;
-      // exports go through applyAdjustmentsWithSettings.
       if (expiredCompareHeld && prepared.expiredEnabled) prepared.expiredEnabled = false;
+      return prepared;
+    }
+
+    function noteMainThreadAdjustment(imageData, { exportFallback = false } = {}) {
+      const pixels = imageData.width * imageData.height;
+      const counters = displayDebugCounters;
+      if (exportFallback) {
+        counters.exportFallbackAdjustments++;
+        counters.exportFallbackMaxPixels = Math.max(counters.exportFallbackMaxPixels, pixels);
+        return;
+      }
+      counters.mainAdjustments++;
+      counters.mainAdjustMaxPixels = Math.max(counters.mainAdjustMaxPixels, pixels);
+      if (pixels > previewTierMaxPixels('normal')) counters.mainAdjustOverPreviewCap++;
+    }
+
+    function applyAdjustmentsToBuffer(imageData, settings, output, quality = 'full') {
+      const prepared = buildDisplayAdjustmentSettings(settings);
+      noteMainThreadAdjustment(imageData);
       applyPreparedAdjustmentsToBuffer(imageData, prepared, output, {
         quality,
         lutScratch: adjustmentLutScratch
@@ -4604,9 +4632,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
             scheduleGpuPreviewWarmup();
           }
         }
-        // A CPU canvas already holding the full-resolution frame needs no
-        // redraw: the zoom only scales it.
-        if (isWebGLActive() || state.lastRenderQuality !== 'full') schedulePreviewUpdate();
+        // The display preview changed size: draw it, and in a CPU mode settle
+        // it again with the exact colour model (#242).
+        schedulePreviewUpdate();
+        if (!isWebGLActive()) scheduleFullUpdate();
         return;
       }
       if (branch === 'repair-pass') {
@@ -4922,18 +4951,23 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       histogram.draw(imageData);
     }
 
+    // Step 3: the adjusted frame on screen in CPU modes, never the unadjusted
+    // positive; null while WebGL presents or before a CPU frame is drawn.
+    // Steps 1-2: the negative.
     function getCurrentHistogramSource() {
-      return state.displayImageData
-        || state.processedImageData
-        || state.croppedImageData
-        || state.originalImageData
-        || null;
+      if (state.currentStep >= 3 && state.processedImageData) return state.displayImageData || null;
+      return state.croppedImageData || state.originalImageData || null;
     }
 
     function redrawHistogramIfPossible() {
       const source = getCurrentHistogramSource();
-      if (!source) return;
-      renderHistogram(source);
+      if (source) {
+        renderHistogram(source);
+        return;
+      }
+      if (state.currentStep < 3 || !state.processedImageData || state.beforeAfterActive) return;
+      if (isWebGLActive()) renderHistogramForWebGL(true);
+      else schedulePreviewUpdate();
     }
 
     // ===========================================
@@ -5774,8 +5808,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     let updateScheduled = false;
     let fullUpdateTimer = null;
 
-    let fullAdjustedBuffer = null;
     let previewAdjustedBuffer = null;
+    // The settled display frame adjusted on this thread (at most 1 MP, or a
+    // display preview without the export worker).
+    let settledAdjustedBuffer = null;
+    // Bumped by every newer frame: a settled frame asked for before it is
+    // dropped when it lands.
+    let settledDisplayToken = 0;
     let histogramAdjustedBuffer = null;
     let lastHistogramUpdateTime = 0;
     // The active tile is a function of the converted preview source it was
@@ -5834,9 +5873,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           updateFull();
           return;
         }
-        // Current pixels above 16 MP keep the display preview: no
-        // full-resolution Step-3 pass on the main thread.
-        if (separatePreview && isLargeImage(state.conversionSourceImageData)) return;
+        if (separatePreview && isLargeImage(state.conversionSourceImageData)) {
+          // Current pixels above 16 MP keep the display preview. A CPU mode
+          // still settles it with the exact colour model (#242), off this
+          // thread, unless a full-resolution render will land anyway.
+          if (!isWebGLActive() && !fullResolutionRenderTimer && !state.fullResolutionPromise) renderSettledDisplay();
+          return;
+        }
         updateFull();
       }, 1200);
     }
@@ -5860,8 +5903,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         if (isWebGLActive() && renderWebGL()) {
           settleInterimGeometryDisplay();
           renderHistogramForWebGL(false);
-          state.displayImageData = null;
-          state.lastRenderQuality = 'gl';
+          presentGlFrame();
           if (gpuPreview.lastDraw === 'step3') scheduleGpuPreviewWarmup();
           return;
         }
@@ -5871,30 +5913,40 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       updatePreviewCpu();
     }
 
-    function updatePreviewCpu() {
-      if (!state.processedImageData || state.cropping) return;
+    // WebGL presents: no CPU frame is on screen, and none may land.
+    function presentGlFrame() {
+      state.displayImageData = null;
+      supersedeSettledDisplay();
+    }
 
-      const source = state.previewSourceImageData || state.processedImageData;
-      previewAdjustedBuffer = ensureImageDataBuffer(previewAdjustedBuffer, source.width, source.height);
-      // Rewritten in place on every render: an export copies it in one task.
-      markLiveMutableBuffer(previewAdjustedBuffer);
-      applyAdjustmentsToBuffer(source, state, previewAdjustedBuffer, 'preview');
+    function supersedeSettledDisplay() {
+      settledDisplayToken++;
+    }
 
-      if (source !== state.processedImageData) {
-        renderAdjustedImageDataToMainCanvas(previewAdjustedBuffer, state.processedImageData, {
-          fastSprocketPreview: true
-        });
-        state.lastRenderQuality = 'preview';
-      } else {
-        renderAdjustedImageDataToMainCanvas(previewAdjustedBuffer, source, {
-          fastSprocketPreview: true
-        });
-        state.displayImageData = previewAdjustedBuffer;
-        state.lastRenderQuality = 'full';
-      }
-      // Histogram updates are deferred to full renders for responsiveness.
+    // What the CPU display adjusts: the display preview (at most the
+    // preview cap), or the processed frame when it is that small itself.
+    function displaySourceImageData() {
+      return state.previewSourceImageData || state.processedImageData;
+    }
+
+    // The adjusted display-size frame on screen in CPU modes (#242): the one
+    // handle the dust overlay, the dodge paint and the histogram read. Null
+    // while WebGL presents; no export reads it.
+    function presentCpuFrame(adjusted, options = {}) {
+      state.displayImageData = adjusted;
+      renderAdjustedImageDataToMainCanvas(adjusted, state.processedImageData, options);
       if (state.dustRemoval.showMask && state.dustRemoval.mask) renderDustMaskOverlay();
       renderDodgeBurnOverlay();
+    }
+
+    function updatePreviewCpu() {
+      if (!state.processedImageData || state.cropping) return;
+      supersedeSettledDisplay();
+      const source = displaySourceImageData();
+      previewAdjustedBuffer = ensureImageDataBuffer(previewAdjustedBuffer, source.width, source.height);
+      applyAdjustmentsToBuffer(source, state, previewAdjustedBuffer, 'preview');
+      // Histogram updates are deferred to settled frames for responsiveness.
+      presentCpuFrame(previewAdjustedBuffer, { fastSprocketPreview: true });
     }
 
     function updateFull() {
@@ -5911,47 +5963,107 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         if (isWebGLActive() && renderWebGL()) {
           settleInterimGeometryDisplay();
           renderHistogramForWebGL(true);
-          state.displayImageData = null;
-          state.lastRenderQuality = 'gl';
+          presentGlFrame();
           if (gpuPreview.lastDraw === 'step3') scheduleGpuPreviewWarmup();
           return;
         }
       }
 
       updateCanvasVisibility();
-      updateFullCpu();
+      renderSettledDisplay();
     }
 
-    function updateFullCpu() {
-      if (!state.processedImageData || state.cropping) return;
-
-      const source = state.processedImageData;
-      fullAdjustedBuffer = ensureImageDataBuffer(fullAdjustedBuffer, source.width, source.height);
-      // Rewritten in place on every full render: an export copies it in one task.
-      markLiveMutableBuffer(fullAdjustedBuffer);
-      applyAdjustmentsToBuffer(source, state, fullAdjustedBuffer, 'full');
-      state.displayImageData = fullAdjustedBuffer;
-      renderAdjustedImageDataToMainCanvas(fullAdjustedBuffer, source);
-      renderHistogram(fullAdjustedBuffer);
-
-      state.lastRenderQuality = 'full';
-      if (state.dustRemoval.showMask && state.dustRemoval.mask) renderDustMaskOverlay();
-      renderDodgeBurnOverlay();
+    // The settled CPU display (#242): Step 3 with the exact colour model of
+    // exports (quality 'full': the exact HSL, not the preview approximation)
+    // over the display preview, never over the full-resolution frame. Above
+    // 1 MP the pass runs in the export worker; the preview-quality frame stays
+    // on screen until it lands. A newer frame, the crop draft, the comparison
+    // or a GL mode discards a result that lands late. Exports compute their
+    // own pixels in the worker and never read this one.
+    function renderSettledDisplay() {
+      const source = displaySourceImageData();
+      if (!source || state.cropping || state.beforeAfterActive) return;
+      const token = ++settledDisplayToken;
+      displayDebugCounters.settleRequests++;
+      const prepared = buildDisplayAdjustmentSettings();
+      const current = () => token === settledDisplayToken && source === displaySourceImageData();
+      const present = (adjusted) => {
+        if (!current() || state.cropping || state.beforeAfterActive || state.currentStep < 3 || isWebGLActive()) return;
+        displayDebugCounters.settlePresented++;
+        presentCpuFrame(adjusted);
+        renderHistogram(adjusted);
+      };
+      const runSync = () => {
+        if (!current()) return;
+        displayDebugCounters.settleSync++;
+        settledAdjustedBuffer = ensureImageDataBuffer(settledAdjustedBuffer, source.width, source.height);
+        noteMainThreadAdjustment(source);
+        applyPreparedAdjustmentsToBuffer(source, prepared, settledAdjustedBuffer, {
+          quality: 'full',
+          lutScratch: adjustmentLutScratch
+        });
+        present(settledAdjustedBuffer);
+      };
+      if (settledDisplayRoute(source.width * source.height, defaultExportWorkers.isWorkerAvailable()) === 'sync') {
+        runSync();
+        return;
+      }
+      displayDebugCounters.settleWorker++;
+      void defaultExportWorkers.workerApplyAdjustments(source, prepared, 'full')
+        .then((adjusted) => {
+          if (adjusted) present(adjusted);
+          else runSync();
+        })
+        // Cancelled with the worker (hidden-window shedding): the
+        // preview-quality frame stays.
+        .catch(() => {});
     }
 
-    function ensureFullRender() {
-      if (!state.processedImageData) return;
-      updateFullCpu();
+    // For the smoke runs (#242). #canvas holds a display-size frame, and none
+    // while WebGL presents, so its backing no longer tells the image's size:
+    // frame() does. settledParity() recomputes the settled frame here and
+    // compares it with the one on screen.
+    function describeDisplayFrame() {
+      const step3 = Boolean(state.currentStep >= 3 && state.processedImageData);
+      const image = step3 ? step3FrameReference(state) : (state.croppedImageData || state.originalImageData);
+      const shown = step3 ? displaySourceImageData() : null;
+      const size = (value) => (value ? [value.width, value.height] : null);
+      return {
+        width: image?.width || 0, height: image?.height || 0,
+        exact: step3 && !state.processedImageDataIsPreview && !state.fullResolutionPending,
+        display: size(shown), handle: size(state.displayImageData),
+        surface: glCanvas.style.display === 'block' ? 'gl' : 'cpu',
+        canvases: {
+          main: size(canvas), comparison: size(beforeAfterCanvas),
+          dustTint: size(dustMaskOverlayCache.canvas), aiBrush: size(brushOverlay),
+          borderFrame: size(sprocketPreviewFrameCanvas), borderScratch: size(sprocketScratchCanvas)
+        },
+        comparison: {
+          shown: Boolean(beforeAfterCanvas && beforeAfterCanvas.style.display === 'block'),
+          cached: Boolean(beforeAfterCanvasSource),
+          box: beforeAfterCanvas ? ['left', 'top', 'width', 'height'].map(key => beforeAfterCanvas.style[key]) : null
+        }
+      };
     }
 
-    function isDisplayImageDataFullResolution() {
-      return Boolean(
-        state.displayImageData
-        && state.processedImageData
-        && !state.processedImageDataIsPreview
-        && state.displayImageData.width === state.processedImageData.width
-        && state.displayImageData.height === state.processedImageData.height
-      );
+    function verifySettledDisplay() {
+      const source = displaySourceImageData();
+      const shown = state.displayImageData;
+      if (!source || !shown) return { equal: false, reason: 'no CPU frame on screen' };
+      const expected = new ImageData(source.width, source.height);
+      applyPreparedAdjustmentsToBuffer(source, buildDisplayAdjustmentSettings(), expected, { quality: 'full' });
+      let equal = shown.width === expected.width && shown.height === expected.height;
+      for (let i = 0; equal && i < expected.data.length; i++) equal = shown.data[i] === expected.data[i];
+      return { equal, width: shown.width, height: shown.height };
+    }
+
+    if (typeof window !== 'undefined') {
+      window.__ncDisplay = {
+        frame: describeDisplayFrame,
+        settledParity: verifySettledDisplay,
+        counters: () => ({ ...displayDebugCounters }),
+        resetCounters: () => { for (const key of Object.keys(displayDebugCounters)) displayDebugCounters[key] = 0; }
+      };
     }
 
     function applyProcessedImageToState(processed, options = {}) {
@@ -6269,8 +6381,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       updateCanvasVisibility();
       if (!renderWebGL() || gpuPreview.lastDraw !== 'apply') return false;
       renderHistogramForGpu(gpuPreview.lastFrame, false);
-      state.displayImageData = null;
-      state.lastRenderQuality = 'gl';
+      presentGlFrame();
       return true;
     }
 
@@ -7321,8 +7432,6 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const bytes = fullResolutionPlaneBytes();
       applyProcessedImageToState(state.previewSourceImageData, { previewOnly: true });
       state.fullResolutionPending = true;
-      // The CPU display buffer was the full plane's rendering.
-      fullAdjustedBuffer = null;
       updatePreview();
       return bytes;
     }
@@ -8072,11 +8181,18 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // Repaint the image under the overlay first. Without this the tint is
     // composited on top of the previous tint, so a brush drag turned the whole
     // mask solid red and toggling the mask twice doubled its opacity.
+    // The frame under the tint is the adjusted one on screen (#242): never the
+    // unadjusted positive, which flashed during a stroke. Without one yet, the
+    // next frame draws it; false says nothing was drawn now.
     function repaintDustMaskOverlay() {
-      const display = state.displayImageData || state.processedImageData;
-      if (!display) return;
-      renderAdjustedImageDataToMainCanvas(display, display);
+      const display = state.displayImageData;
+      if (!display) {
+        if (state.processedImageData) schedulePreviewUpdate();
+        return false;
+      }
+      renderAdjustedImageDataToMainCanvas(display, state.processedImageData);
       renderDustMaskOverlay();
+      return true;
     }
 
     // ── Dust Removal UI Event Handlers ───────────────────────────────────────
@@ -8275,8 +8391,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (imgCoord) dustBrushPoints.push(imgCoord);
 
       // Visual feedback: draw brush stroke on canvas
-      if (state.dustRemoval.showMask) {
-        repaintDustMaskOverlay();
+      if (state.dustRemoval.showMask && repaintDustMaskOverlay()) {
         // Draw brush points
         const scaleX = canvas.width / (state.processedImageData?.width || 1);
         const scaleY = canvas.height / (state.processedImageData?.height || 1);
@@ -8754,8 +8869,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // Every buffer the editor still references (#250): live `state.*` planes,
     // the display buffers, the dust planes, history snapshots and photo
     // sessions. An export never transfers or releases one of these, whatever
-    // stamp it carries. Compared by buffer: an export wrapper shares
-    // `state.displayImageData.data`, an identity recipe shares the processed plane.
+    // stamp it carries. Compared by buffer: an identity recipe shares the
+    // processed plane.
     function liveEditorBuffers() {
       const buffers = new Set();
       const addPlanes = (value) => {
@@ -8769,8 +8884,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       };
       for (const value of Object.values(state)) addPlanes(value);
       for (const value of Object.values(state.dustRemoval || {})) addPlanes(value);
-      addPlanes(fullAdjustedBuffer);
       addPlanes(previewAdjustedBuffer);
+      addPlanes(settledAdjustedBuffer);
       for (const snapshot of [...undoStack, ...redoStack]) {
         for (const value of Object.values(snapshot?.refs || {})) addPlanes(value);
       }
@@ -9509,7 +9624,6 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           state.previewSourceImageData = null;
           state.histogramSourceImageData = null;
           state.webglSourceImageData = null;
-          state.lastRenderQuality = 'full';
           state.filmBaseSet = false;
           state.grayPointSampled = false;
           state.wbAutoConfidence = null; state.wbSemanticApplied = false;
@@ -11131,7 +11245,6 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       state.previewSourceImageData = null;
       state.histogramSourceImageData = null;
       state.webglSourceImageData = null;
-      state.lastRenderQuality = 'full';
       if (webglState.gl) {
         webglState.sourceDirty = true;
         webglState.sourceSize = { w: 0, h: 0 };
@@ -12718,6 +12831,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
       resetZoomPan();
       state.cropping = true;
+      // A settled frame landing now would draw over the crop draft.
+      supersedeSettledDisplay();
       state.croppingActive = false;
       state.cropStart = null;
       activeCropPointerId = null;
@@ -13673,8 +13788,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         state.wbUserOverride = false;
         state.sprocketPreviewEnabled = false;
         resetFrontierGuideImageState();
-        state.lastRenderQuality = 'full';
-        if (webglState.gl) {
+          if (webglState.gl) {
           webglState.sourceDirty = true;
           webglState.sourceSize = { w: 0, h: 0 };
         }
@@ -13752,7 +13866,6 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       state.sprocketPreviewEnabled = false;
       state.rawMetadata = null;
       state.currentStep = 1;
-      state.lastRenderQuality = 'full';
       void stopHotFolder();
       state.fileQueue = [];
       state.currentFileIndex = 0;
@@ -13766,8 +13879,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       state.expiredAnalysis = null;
       expiredAnalysisKey = null;
       expiredTabPending = false;
-      fullAdjustedBuffer = null;
       previewAdjustedBuffer = null;
+      settledAdjustedBuffer = null;
+      supersedeSettledDisplay();
       if (webglState.gl) {
         webglState.sourceDirty = true;
         webglState.sourceSize = { w: 0, h: 0 };
@@ -14077,13 +14191,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     async function getCurrentExportImageData({ bitDepth = 8, bridge = null, planeOnly = false } = {}) {
       await ensureFullResolutionReadyForExport();
       await ensureRepairsReadyForExport();
-      // A 16-bit export re-runs the adjustment stage on the engine's 16-bit
-      // plane instead of reusing the 8-bit display buffer.
+      // Step 3 always adjusts the processed frame in the export worker (the
+      // main thread only without one), on the engine's 16-bit plane for a
+      // 16-bit export. No display buffer is ever an export's pixels (#242).
       if (bitDepth === 16 && state.currentStep >= 3 && state.processedImageData?.__image16) {
         return await applyAdjustmentsWithSettings(state.processedImageData, state, { bitDepth: 16, bridge, planeOnly });
-      }
-      if (state.currentStep >= 3 && isDisplayImageDataFullResolution()) {
-        return state.displayImageData;
       }
       if (state.processedImageData && state.currentStep >= 3) {
         return await applyAdjustmentsWithSettings(state.processedImageData, state, { bridge });
@@ -14147,20 +14259,6 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // The adjust step. `prepared` skips the prepare step a caller already ran.
     async function renderCurrentImageDataForExport(exportInfo = null, { bridge = null, planeOnly = false, prepared = false } = {}) {
       if (!prepared) await prepareCurrentImageForExport();
-      // ensureFullRender exists to leave a full-resolution CPU buffer in
-      // state.displayImageData, which getCurrentExportImageData then reuses.
-      // Skip it when there is nothing to reuse or it is already current: with
-      // the GPU preview active there is no CPU display buffer at all, so this
-      // was a full-resolution adjustment pass on the main thread — a second or
-      // more of frozen UI the moment the user clicks Export — purely to
-      // populate one. getCurrentExportImageData produces the same pixels
-      // through the export worker instead.
-      const displayAlreadyCurrent = state.lastRenderQuality === 'full'
-        && isDisplayImageDataFullResolution();
-      const previewIsGpu = state.lastRenderQuality === 'gl' && isWebGLActive();
-      if (!displayAlreadyCurrent && !previewIsGpu) {
-        ensureFullRender();
-      }
       const imageData = await getCurrentExportImageData({ bitDepth: exportInfo?.bitDepth || 8, bridge, planeOnly });
       if (!imageData) throw new Error('No image available for export.');
       if (exportInfo?.format === 'jpeg' && safeStorageGet('nc_hdr_gain_map_v1') !== 'off' && state.processedImageData?.__image16) {
@@ -14168,16 +14266,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           // The sprocket frame is a new ImageData without the map, so a map
           // computed for it was always dropped: do not compute one.
           if (state.exportSprocketHolesEnabled) return imageData;
-          // Never mutate the display buffer: a wrapper shares its pixels, and
-          // only the wrapper carries the export's map.
-          const sdr = imageData === state.displayImageData
-            ? new ImageData(imageData.data, imageData.width, imageData.height)
-            : imageData;
           // The unadjusted plane and the recipe, captured now; imageDataToBlob
           // sends them with the SDR encode (#250). The plane is the editor's:
-          // it is copied, never transferred.
-          sdr.__gainMapSource = { processed: state.processedImageData, adjustmentSettings: buildAdjustmentSettings(state), transferPlane: false };
-          return sdr;
+          // it is copied, never transferred. The SDR frame is this export's
+          // own: no display buffer is an export frame (#242).
+          imageData.__gainMapSource = { processed: state.processedImageData, adjustmentSettings: buildAdjustmentSettings(state), transferPlane: false };
+          return imageData;
         }
         const high = await getCurrentExportImageData({ bitDepth: 16, bridge });
         if (high?.__image16) imageData.__image16 = high.__image16;
@@ -14704,6 +14798,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       }
 
       // Fallback to main thread. The outputs are fresh: this export owns them.
+      // Above 1 MP this is the one full-resolution Step-3 pass allowed here,
+      // without a working export worker (#242).
+      noteMainThreadAdjustment(source, { exportFallback: source.width * source.height > 1_000_000 });
       if (planeOnlyPass) {
         // No 8-bit output and no downconvert. A plane of another size yields
         // none, as the full pass attaches none then either.
@@ -18905,9 +19002,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (dodgeBurnFrame) return;
       dodgeBurnFrame = requestAnimationFrame(() => {
         dodgeBurnFrame = 0;
-        const display = state.displayImageData || state.processedImageData;
-        if (!display) return;
-        renderAdjustedImageDataToMainCanvas(display, display);
+        // The adjusted frame on screen (#242); without one, the next frame.
+        const display = state.displayImageData;
+        if (!display) {
+          if (state.processedImageData) schedulePreviewUpdate();
+          return;
+        }
+        renderAdjustedImageDataToMainCanvas(display, state.processedImageData);
         renderDodgeBurnOverlay();
         drawDodgeBurnPath(dodgeBurnPoints.map((p) => ({ x: p.x, y: p.y, p: p.p })), state.dodgeBurn.mode === 'dodge' ? -1 : 1, true);
       });

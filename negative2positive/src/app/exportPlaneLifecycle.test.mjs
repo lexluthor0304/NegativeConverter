@@ -140,7 +140,7 @@ function createContext({ gainMap = 'on' } = {}) {
   const state = {
     currentStep: 3, processedImageData: processed, processedImageDataIsPreview: false, displayImageData: null,
     exportSprocketHolesEnabled: false, jpegQuality: 92, exportFormat: 'png', exportBitDepth: 8,
-    currentFileIndex: 0, fileQueue: [], lastRenderQuality: 'gl', dustRemoval: { enabled: false }, repairStrokes: [],
+    currentFileIndex: 0, fileQueue: [], dustRemoval: { enabled: false }, repairStrokes: [],
     conversionSourceImageData: null
   };
   // The editor's planes: never transferred, never released.
@@ -189,9 +189,7 @@ function createContext({ gainMap = 'on' } = {}) {
     learnFromExport: async () => {},
     ensureFullResolutionReadyForExport: async () => {}, ensureRepairsReadyForExport: async () => {},
     aiRepairReady: () => false,
-    isDisplayImageDataFullResolution: () => Boolean(state.displayImageData && state.displayImageData.width === W),
     isWebGLActive: () => true,
-    ensureFullRender: () => {},
     safeStorageGet: (key) => (key === 'nc_hdr_gain_map_v1' ? gainMap : null),
     buildAdjustmentSettings: (settings) => (settings === state ? state.recipe : settings.recipe),
     createPerfTrace: () => ({ mark() {}, end(extra) { traces.push(extra); } }),
@@ -351,23 +349,33 @@ for (const [format, bitDepth] of [['tiff', 16], ['png', 16], ['png', 8], ['jpeg'
 }
 
 {
-  // The CPU display path: the export reads the display buffer; it is copied
-  // (never transferred) and gets no export plane attached.
+  // The CPU display path (#242): the frame on screen (display-size, or drawn
+  // without the rescue while "hold to see before" is held) is never an
+  // export's pixels. Every format adjusts the processed frame in the export's
+  // own worker; the display frame is neither read, transferred nor written.
   for (const [format, bitDepth] of [['jpeg', 8], ['png', 8], ['tiff', 16]]) {
     const f = createContext();
+    f.context.isWebGLActive = () => false;
     f.state.exportFormat = format;
     f.state.exportBitDepth = bitDepth;
-    const display = referenceAdjusted8(f.state.processedImageData, f.state.recipe);
+    const display = new TestImageData(new Uint8ClampedArray(W * H * 4).fill(7), W, H);
     f.state.displayImageData = display;
-    f.state.lastRenderQuality = 'full';
     const displayBytes = display.data.slice();
     workerPosts.length = 0;
+    saved.length = 0;
     await f.context.exportSingle();
-    for (const post of workerPosts) assert.ok(!post.transfers.includes(display.data.buffer), 'a copy of the display buffer, never the buffer');
-    assert.equal(display.data.length, W * H * 4, `${format}${bitDepth}: the display buffer is never transferred`);
-    assert.ok(same(display.data, displayBytes));
+    assert.equal(workerPosts[0].type, bitDepth === 16 ? 'adjust16AndEncode' : 'applyAdjustments', `${format}${bitDepth}: adjusted in the worker`);
+    for (const post of workerPosts) assert.ok(!post.transfers.includes(display.data.buffer), 'the display buffer never moves');
+    assert.ok(same(display.data, displayBytes), 'the display frame is untouched');
     for (const key of ['__image16', '__gainMap', '__gainMapSource']) {
       assert.equal(display[key], undefined, `${format}${bitDepth}: state.displayImageData carries no ${key}`);
+    }
+    if (bitDepth === 8) {
+      const bytes = await stubBlobText(saved[0]);
+      const sdr = referenceAdjusted8(f.state.processedImageData, f.state.recipe);
+      const head = format === 'jpeg' ? 'image/jpeg|0.92|' : 'image/png|undefined|';
+      assert.ok(same(bytes.subarray(head.length, head.length + sdr.data.length), sdr.data),
+        `${format}${bitDepth}: the exported pixels are the worker's adjustment, not the display frame`);
     }
     assert.equal(bridges.at(-1).terminated, 1);
   }

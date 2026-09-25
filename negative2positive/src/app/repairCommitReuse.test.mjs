@@ -43,7 +43,7 @@ function fixture() {
   let bumpDuringStrokes = false;
   const state = {
     originalImageData: clean, loadedBaseImageData: clean, conversionSourceImageData: { __lensMapping: lens },
-    processedImageData: clean, processedImageDataIsPreview: false, currentStep: 3, lastRenderQuality: 'full',
+    processedImageData: clean, processedImageDataIsPreview: false, currentStep: 3,
     repairStrokes: [{ size: 0.02, points: [{ x: 0.5, y: 0.5, p: 1 }] }],
     dustRemoval: { enabled: true, ai: true, mask: null, cleanSource: clean, inpaintedImageData: null,
       processing: false, strength: 3, particleCount: 0, _state: null, maskTag: null, revision: 0 },
@@ -92,9 +92,7 @@ function fixture() {
     updateDustStatusUI() {}, cancelFullUpdate() {}, updatePreview() {},
     getLocalizedText: (key, fallback) => fallback,
     applyProcessedImageToState(next) { state.processedImageData = next; },
-    isDisplayImageDataFullResolution: () => true,
     isWebGLActive: () => false,
-    ensureFullRender() {},
     getCurrentExportImageData: async () => state.processedImageData,
     setTimeout() { throw new Error('no timers in these tests'); },
     clearTimeout() {},

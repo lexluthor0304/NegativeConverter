@@ -26,12 +26,12 @@ function fixture({ enabled = false, mask = null } = {}) {
   const state = {
     originalImageData: image(), conversionSourceImageData: image(),
     processedImageData: clean, processedImageDataIsPreview: false,
-    currentStep: 3, lastRenderQuality: 'full',
+    currentStep: 3,
     repairStrokes: [{ size: .02, points: [{ x: .5, y: .5 }] }],
     dustRemoval: { enabled, mask, cleanSource: clean, inpaintedImageData: null,
       processing: false, strength: 3, particleCount: 0, _state: null, revision: 0, maskTag: null },
   };
-  const commits = [], manualCalls = [], observers = [], timers = new Map(), backgroundRuns = [];
+  const commits = [], manualCalls = [], observers = [], timers = new Map(), backgroundRuns = [], exportReads = [];
   let timerId = 0;
   const c = vm.createContext({
     state, coreReprocessToken: 7, dustDetectionRevision: 11, loadGeneration: 3,
@@ -65,10 +65,10 @@ function fixture({ enabled = false, mask = null } = {}) {
     updateDustStatusUI: noop, cancelFullUpdate: noop, updatePreview: noop,
     getLocalizedText: (key, fallback) => fallback,
     applyProcessedImageToState(next) { commits.push(next); state.processedImageData = next; },
-    isDisplayImageDataFullResolution: () => true,
     isWebGLActive: () => false,
-    ensureFullRender: () => assert.fail('Fixture already has a full-resolution display'),
-    getCurrentExportImageData: async () => state.processedImageData,
+    // Export always adjusts through getCurrentExportImageData (the export
+    // worker); no display buffer is rendered or reused for it (#242).
+    getCurrentExportImageData: async (options) => { exportReads.push(options); return state.processedImageData; },
     setTimeout(callback, delay) {
       assert.equal(delay, 300, 'Use the real detection debounce');
       timers.set(++timerId, callback); return timerId;
@@ -98,7 +98,7 @@ function fixture({ enabled = false, mask = null } = {}) {
     timers.delete(id); callback();
     return { call: await started, completion: backgroundRuns.at(-1) };
   };
-  return { c, state, clean, repaired, commits, manualCalls, timers, startExport, startScheduledDetection };
+  return { c, state, clean, repaired, commits, manualCalls, timers, exportReads, startExport, startScheduledDetection };
 }
 
 // A manual brush schedules detection even with automatic dust removal off.
@@ -121,6 +121,7 @@ for (const mask of [null, new Uint8Array(16)]) {
     const outcome = await exporting.completion;
     assert.ifError(outcome.error);
     assert.equal(outcome.value, f.repaired, 'Export commits the completed repair, not its temporary preview');
+    assert.deepEqual(f.exportReads.map(options => options.bitDepth), [8], 'the export pixels come from getCurrentExportImageData');
     if (!finishBackgroundFirst) {
       background.call.resolve(f.repaired); await background.completion;
     }
