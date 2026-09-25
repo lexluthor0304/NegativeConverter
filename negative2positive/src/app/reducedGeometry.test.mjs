@@ -76,8 +76,9 @@ function functionSource(name) {
 }
 const { sampleAnalysisArea } = await import('./analysisRegion.js');
 const { TILE_ANALYSIS_REFERENCE_PIXELS } = await import('./thumbnailSources.js');
-const app = vm.createContext({ buildReducedGeometrySample, sampleAnalysisArea, TILE_ANALYSIS_REFERENCE_PIXELS });
-vm.runInContext(['buildRollAnalysisSample', 'buildRollSample'].map(functionSource).join('\n'), app);
+const app = vm.createContext({ buildReducedGeometrySample, sampleAnalysisArea, TILE_ANALYSIS_REFERENCE_PIXELS, reducedTileGeometry,
+  renderReducedGeometry, sanitizeCropRegionForImage: sanitizeCropRect, STUDIO_TILE_PREVIEW_MAX: 288 });
+vm.runInContext(['buildRollAnalysisSample', 'buildRollSample', 'tileAnalysisReference'].map(functionSource).join('\n'), app);
 
 const recipes = [
   {},
@@ -102,20 +103,29 @@ for (const [width, height] of [[1980, 1320], [1320, 1980], [640, 427]]) {
 }
 
 // A roll sample keeps its pixels and carries its tile context (#247 2b): the
-// base size and a 16-bit analysis reference of at most 16384 pixels. A sample
-// that is the base itself is wrapped: the base gains no fields.
+// base size, a 16-bit analysis reference of at most 16384 pixels and the
+// lane's own reduced working image of the frame. A sample that is the base
+// itself is wrapped: the base gains no fields.
 {
   const area = [{ x: 0.1, y: 0.1 }, { x: 0.9, y: 0.1 }, { x: 0.9, y: 0.9 }, { x: 0.1, y: 0.9 }];
-  for (const [width, height] of [[1980, 1320], [640, 427]]) {
+  for (const [width, height] of [[1980, 1320], [640, 427], [200, 150]]) {
     const base = makeBase(width, height, 77);
-    const settings = { autoFrameMeta: { imageArea: area } };
-    const sample = app.buildRollSample(base, settings);
-    assertSame(sample, headBuildRollAnalysisSample(base, settings), `sample pixels ${width}x${height}`);
-    assert.deepEqual([sample.__baseSize.width, sample.__baseSize.height], [width, height]);
-    const reference = sample.__analysisReference;
-    assert.ok(reference.data instanceof Uint16Array && reference.width * reference.height <= 16384);
-    assert.deepEqual(reference.data, sampleAnalysisArea(base, area, 16384).data);
-    assert.equal(base.__baseSize, undefined, 'the base is never annotated');
+    for (const geometry of [{}, { rotationAngle: 0.6, mirrored: true, cropRegion: { left: 20, top: 10, width: width - 60, height: height - 40 } }]) {
+      const settings = { autoFrameMeta: { imageArea: area }, ...geometry };
+      const sample = app.buildRollSample(base, settings);
+      assertSame(sample, headBuildRollAnalysisSample(base, settings), `sample pixels ${width}x${height}`);
+      assert.deepEqual([sample.__baseSize.width, sample.__baseSize.height], [width, height]);
+      const reference = sample.__analysisReference;
+      assert.ok(reference.data instanceof Uint16Array && reference.width * reference.height <= 16384);
+      assert.deepEqual(reference.data, sampleAnalysisArea(base, area, 16384).data);
+      const full = applyGeometryChainToImageData(base, { rotationAngle: geometry.rotationAngle || 0, mirrored: Boolean(geometry.mirrored), cropRegion: geometry.cropRegion || null }, {
+        rotate: applyRotationToImageData, mirror: mirrorImageDataHorizontal,
+        crop: (image, cropRegion, bounds = image) => { const rect = sanitizeCropRect(cropRegion, bounds); if (!image) return rect; return rect ? cropImageDataRegion(image, rect) : image; }
+      });
+      assertSame(sample.__tileWorking, downsampleImageDataForMaxDim(full, 288), `tile working image ${width}x${height} is the lane's`);
+      assert.equal(base.__baseSize, undefined, 'the base is never annotated');
+      assert.equal(base.__tileWorking, undefined);
+    }
     assert.equal(app.buildRollSample(base, {}).__analysisReference, null, 'no area, no reference');
   }
 }

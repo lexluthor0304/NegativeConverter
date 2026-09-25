@@ -18914,16 +18914,28 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     }
 
     // The roll sample plus what its canonical tile needs (#247 2b), taken while
-    // the decoded base is in hand: the base's size and a small 16-bit analysis
-    // reference of the image area. A sample that is the base itself (a small
-    // frame without geometry) is wrapped, so the base gains no fields.
+    // the decoded base is in hand: the base's size, a small 16-bit analysis
+    // reference of the image area and the tile's working image, which is the
+    // lane's own reduced image of this geometry (the core's strided plan reads
+    // only its pixels, a few milliseconds even at 60 MP), so a roll tile
+    // samples the frame where the lane's tile does. A sample that is the base
+    // itself (a small frame without geometry) is wrapped, so the base gains no
+    // fields.
     function buildRollSample(base, settings) {
       const built = buildRollAnalysisSample(base, settings);
       const sample = built !== base ? built
         : { width: base.width, height: base.height, data: base.data, ...(base.__image16 ? { __image16: base.__image16 } : {}) };
-      const area = settings.autoFrameMeta?.imageArea || settings.autoFrameMeta?.analysisArea;
       sample.__baseSize = { width: base.width, height: base.height };
-      sample.__analysisReference = area ? sampleAnalysisArea(base, area, TILE_ANALYSIS_REFERENCE_PIXELS) : null;
+      sample.__analysisReference = tileAnalysisReference(settings, base);
+      const geometry = {
+        rotationAngle: Number.isFinite(settings.rotationAngle) ? settings.rotationAngle : 0,
+        mirrored: Boolean(settings.mirrored),
+        cropRegion: settings.cropRegion || null
+      };
+      const frame = reducedTileGeometry(base, geometry, STUDIO_TILE_PREVIEW_MAX, { sanitizeCrop: sanitizeCropRegionForImage });
+      const working = renderReducedGeometry(base, geometry, { step: frame.step });
+      sample.__tileWorking = working !== base ? working
+        : { width: base.width, height: base.height, data: base.data, ...(base.__image16 ? { __image16: base.__image16 } : {}) };
       return sample;
     }
 
@@ -22393,7 +22405,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const renderKey = photoSettingsKey({ ...item, settings: recipe });
       const baseSize = { width: sample.__baseSize.width, height: sample.__baseSize.height };
       const reference = sample.__analysisReference || null;
-      const working = downsampleImageDataForMaxDim(sample, STUDIO_TILE_PREVIEW_MAX);
+      const working = sample.__tileWorking || downsampleImageDataForMaxDim(sample, STUDIO_TILE_PREVIEW_MAX);
       const frame = reducedTileGeometry(baseSize, {
         rotationAngle: Number.isFinite(settings.rotationAngle) ? settings.rotationAngle : 0,
         mirrored: Boolean(settings.mirrored),

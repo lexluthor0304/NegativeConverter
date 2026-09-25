@@ -155,7 +155,9 @@ assert.deepEqual(await secondBackend.get('second'), samples[1], 'live sibling su
 // a small 16-bit analysis reference survive a spill; other fields do not.
 {
   const withTile = { ...sample(5), __baseSize: { width: 9504, height: 6320 },
-    __analysisReference: { width: 2, height: 1, data: Uint16Array.from([1, 2, 3, 65535, 4, 5, 6, 0]) }, stray: 'dropped' };
+    __analysisReference: { width: 2, height: 1, data: Uint16Array.from([1, 2, 3, 65535, 4, 5, 6, 0]) },
+    __tileWorking: { width: 1, height: 1, data: Uint8ClampedArray.from([1, 2, 3, 255]), __image16: { width: 1, height: 1, data: Uint16Array.from([9, 8, 7, 65535]) } },
+    stray: 'dropped' };
   await thirdBackend.put('tile', withTile);
   const back = await thirdBackend.get('tile');
   const { stray, ...expected } = withTile;
@@ -163,7 +165,7 @@ assert.deepEqual(await secondBackend.get('second'), samples[1], 'live sibling su
   assert.ok(back.__analysisReference.data instanceof Uint16Array);
   const bounded = createAnalysisSampleStore({ maxBytes: 1000, backend: null });
   await bounded.put('tile', withTile);
-  assert.equal(bounded.bytes, 60 + 120 + 16, 'the reference counts against the RAM budget');
+  assert.equal(bounded.bytes, 60 + 120 + 16 + 4 + 8, 'the reference and tile working image count against the RAM budget');
 }
 await secondBackend.clear(); await thirdBackend.clear();
 assert.equal(heldLocks.size, 0, 'normal clear releases all live ownership locks');
