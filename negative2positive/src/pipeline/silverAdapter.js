@@ -647,6 +647,9 @@ function _prepareRgba(ctx) {
     pre = mode === 'bw' || preSaturationActive ? copyOfBase(recycled) : base;
     engine.analyze(pre, params);
     if (!engine.positiveAnalysisIsIdentity()) {
+      // The GPU preview's `analyze` (#239) stops at the analysis: the frame that
+      // follows builds this level itself, as it does for a new source.
+      if (ctx.analysisOnly) return null;
       if (pre === base) pre = copyOfBase(recycled);
       engine._applyPositiveAnalysis(pre);
     }
@@ -1067,7 +1070,8 @@ export async function analyzeSilverCorePreview(imageData, settings = {}, mode = 
       if (mode === 'bw') toGrayscaleInPlace(sample, params.bwMix);
       engine.analyze(sample, analysisParams);
     } else {
-      const ctx = { slot, engine, params, mode, input16, owned: false, filmBaseCompensation, reference, needsFullProcess, analysisState, analysisPreview: null };
+      const ctx = { slot, engine, params, mode, input16, owned: false, filmBaseCompensation, reference, needsFullProcess,
+        analysisState, analysisPreview: null, analysisOnly: true };
       if (mode === 'bw' && engine.greyTableAvailable(params)) _prepareGrey(ctx);
       else _prepareRgba(ctx);
     }
