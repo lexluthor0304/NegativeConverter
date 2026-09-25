@@ -174,7 +174,12 @@ export function createRollFramePool({
         if (signal?.aborted) throw abortError(signal);
         const data = result?.data;
         const postOptions = { suppressSensorDefects: loaderOptions.suppressSensorDefects, filmStats: loaderOptions.filmStats || null };
-        if (!slot || !isTransferableRawData(data) || !(await ready(slot))) {
+        if (slot && isTransferableRawData(data) && !(await ready(slot))) {
+          // A worker that does not answer is not asked again.
+          kill(slot, lostError('Roll-frame worker did not answer'));
+          slot = null;
+        }
+        if (!slot || !isTransferableRawData(data)) {
           if (signal?.aborted) throw abortError(signal);
           return runRawPostDecode(result, postOptions);
         }
