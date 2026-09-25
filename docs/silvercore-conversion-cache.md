@@ -44,6 +44,14 @@ fresh output buffer (alpha copied in the same loop). The cached planes are never
 handed to the caller. `forceFullProcess`, `invalidateSilverCoreCache()` and a slot size
 change drop every level.
 
+The output buffer is fresh unless the caller hands one back as `options.workBuffer16`:
+the preview worker passes the 16-bit plane of the dragged frame it retained (#233), so
+a drag allocates no output plane after the first frame. The tail, the B&W grey-table
+write and the transient work plane all take it; every one of them writes it in full,
+so the pixels equal a fresh allocation. `_reusableOutput` refuses a plane of another
+size or one that shares memory with the source, the analysis sample or a level the
+slot keeps.
+
 Memory per slot: none for a colour negative at defaults without strokes; one RGBA
 level (8 B/px, 17.6 MB at 2.2 MP) when a prefix stage is active, two only while
 strokes exist; B&W levels are grey planes at 2 B/px.

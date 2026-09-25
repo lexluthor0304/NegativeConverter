@@ -464,9 +464,15 @@ function _dropSlotPlanes(slot) {
 // read again, while a retained batch lane held it (480 MB at 60 MP) between frames.
 // Instead the one work plane is preprocessed in place and the slot keeps nothing.
 // The same buffer length takes the same film-base path, so the pixels are identical.
-function _transientWorkBuffer(slot, image16, owned, filmBaseCompensation) {
+function _transientWorkBuffer(slot, image16, owned, filmBaseCompensation, reuse = null) {
   _dropSlotPlanes(slot);
-  const work = owned ? image16 : cloneImage16(image16);
+  let work = image16;
+  if (!owned && reuse) {
+    reuse.set(image16.data);
+    work = { width: image16.width, height: image16.height, data: reuse };
+  } else if (!owned) {
+    work = cloneImage16(image16);
+  }
   if (filmBaseCompensation) _preprocessBuffer(work.data, work.width, work.height, filmBaseCompensation);
   return work;
 }
@@ -475,6 +481,19 @@ function _transientWorkBuffer(slot, image16, owned, filmBaseCompensation) {
 // (it is never handed out, so reusing it is safe), else a new one.
 function _recycledPlane(previous, length) {
   return previous && previous.length === length ? previous : new Uint16Array(length);
+}
+
+// `options.workBuffer16` is a plane the caller hands back for the output: the preview
+// worker's own previous result, which nothing else references (#233). Every path
+// writes it in full before returning it, so the output is identical to a fresh
+// allocation. It is refused when its size differs or it shares memory with the source,
+// the analysis sample or a plane the slot keeps.
+function _reusableOutput(slot, reuse, length, input16, reference) {
+  if (!(reuse instanceof Uint16Array) || reuse.length !== length) return null;
+  const dataOf = (plane) => (plane instanceof Uint16Array ? plane : plane?.data) || null;
+  const kept = [input16.data, reference?.data, slot.pristineBuffer, dataOf(slot.prepared?.plane), slot.prepared?.alpha,
+    dataOf(slot.exposed?.plane), slot.referencePixels?.pristineBuffer];
+  return kept.some((data) => data && data.buffer === reuse.buffer) ? null : reuse;
 }
 
 // Everything the histogram analysis depends on. analyzeImage() reads borderBuffer (the
@@ -673,8 +692,8 @@ function _prepareGrey(ctx) {
   return { grey: post, alpha: level.alpha };
 }
 
-function _greyResult(width, height, write) {
-  const out16 = new Uint16Array(width * height * 4);
+function _greyResult(width, height, write, reuse = null) {
+  const out16 = reuse || new Uint16Array(width * height * 4);
   const out8 = new Uint8ClampedArray(width * height * 4);
   write(out16, out8);
   const result = new ImageData(out8, width, height);
@@ -687,11 +706,11 @@ function _greyResult(width, height, write) {
 // first, from the same mix computed on the fly over the analysis crop: at 12 MP that
 // measured as fast as a transient grey plane (81–89 vs 76–104 ms) without its 2 B/px.
 function _transientGrey(ctx) {
-  const { slot, engine, params, input16, owned, filmBaseCompensation, reference, needsFullProcess, analysisPreview } = ctx;
+  const { slot, engine, params, input16, owned, filmBaseCompensation, reference, needsFullProcess, analysisPreview, reuse } = ctx;
   // A flat field needs its own plane; the promoted 8-bit plane is ours already. Both
   // then take the output in place, so the peak matches the in-place RGBA path.
   _dropSlotPlanes(slot);
-  const base = filmBaseCompensation ? _transientWorkBuffer(slot, input16, owned, filmBaseCompensation) : input16;
+  const base = filmBaseCompensation ? _transientWorkBuffer(slot, input16, owned, filmBaseCompensation, reuse) : input16;
   const writable = Boolean(filmBaseCompensation) || owned;
   const n = base.width * base.height;
   const weights = bwMixWeights[params.bwMix] || bwMixWeights.standard;
@@ -707,7 +726,7 @@ function _transientGrey(ctx) {
   const table = analysisPreview ? engine.buildCurrentGreyTable(params) : engine.buildGreyTable(params);
   // Without stops the pre-saturation ramp composes into the table.
   const packed = packGreyTable(table, stops ? null : preSatRamp);
-  const out16 = writable ? base.data : new Uint16Array(base.data.length);
+  const out16 = writable ? base.data : reuse || new Uint16Array(base.data.length);
   const out8 = new Uint8ClampedArray(base.data.length);
   convertGreyFromSource(base.data, weights, stops ? preSatRamp : null, stops, packed, out16, out8);
   const result = new ImageData(out8, base.width, base.height);
@@ -794,9 +813,11 @@ async function runSilverCore(imageData, settings, mode, options) {
   }
 
   const ctx = { slot, engine, params, mode, input16, owned, filmBaseCompensation, reference, needsFullProcess, analysisState, analysisPreview };
+  const planeLength = input16.width * input16.height * 4;
   let result;
   if (transient && greyPath) {
-    result = _transientGrey(ctx);
+    // The transient paths drop the slot's planes first: only the source and the sample can alias.
+    result = _transientGrey({ ...ctx, reuse: _reusableOutput({}, options?.workBuffer16, planeLength, input16, reference) });
   } else if (transient) {
     // B&W: mix down to a neutral negative BEFORE the engine runs. Doing it afterwards
     // (the old toGrayscaleInPlace on the result) discarded the shadow/highlight/mid
@@ -804,7 +825,8 @@ async function runSilverCore(imageData, settings, mode, options) {
     // cyanotype and the rest all rendered identically neutral. Mixing on the way in also
     // puts the channel-filter presets ('red', 'orange', ...) before the histogram
     // analysis and the per-channel curves, where a taking filter belongs.
-    const input = _transientWorkBuffer(slot, input16, owned, filmBaseCompensation);
+    const input = _transientWorkBuffer(slot, input16, owned, filmBaseCompensation,
+      _reusableOutput({}, options?.workBuffer16, planeLength, input16, reference));
     if (mode === 'bw') toGrayscaleInPlace(input, params.bwMix);
     // Hand the caller an ImageData (the contract the rest of the app still uses) but
     // leave the 16-bit handle attached so downstream stages (histogram, export) can
@@ -818,11 +840,13 @@ async function runSilverCore(imageData, settings, mode, options) {
   } else if (greyPath) {
     const level = _prepareGrey(ctx);
     const table = packGreyTable(analysisPreview ? engine.buildCurrentGreyTable(params) : engine.buildGreyTable(params));
-    result = _greyResult(input16.width, input16.height, (out16, out8) => writeGreyOutput(level.grey, level.alpha, table, out16, out8));
+    result = _greyResult(input16.width, input16.height, (out16, out8) => writeGreyOutput(level.grey, level.alpha, table, out16, out8),
+      _reusableOutput(slot, options?.workBuffer16, planeLength, input16, reference));
   } else {
     const src = _prepareRgba(ctx);
     // The first tail pass reads the cached level and writes the caller's buffer.
-    const dst = { width: src.width, height: src.height, data: new Uint16Array(src.data.length) };
+    const reuse = _reusableOutput(slot, options?.workBuffer16, src.data.length, input16, reference);
+    const dst = { width: src.width, height: src.height, data: reuse || new Uint16Array(src.data.length) };
     result = _toResult(analysisPreview ? engine.applyCurrentTail(src, dst, params) : engine.applyTail(src, dst, params));
   }
 
