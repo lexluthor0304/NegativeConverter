@@ -44,7 +44,11 @@ output pixel of a band, 768 MiB shared by the lanes, a third of that on
 devices reporting 4 GB or less); interactive builds use the budget of one
 lane. A stale job stops posting bands; any worker failure, or no `Worker`,
 renders the remaining bands on the main thread with the same core, at most
-1 MP per task.
+1 MP per task. Interactive builds also ask for the output's display level
+(#248, `render(..., { level: true })`): the bands then start on multiples of
+its k, and each band returns its level rows, so the working frame arrives with
+the k × k box level the preview worker resamples display images from. Batch
+export asks for none.
 
 In `main.js` the scalars change synchronously and the planes follow:
 
