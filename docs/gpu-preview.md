@@ -81,7 +81,7 @@ acceptance extremes, both with strict fp32 and with wider intermediates.
 
 | message | when | returns |
 |---|---|---|
-| `prepare` | a new display preview, film base, flat field or strokes (at idle after an exact frame, or when a draw finds its texture stale) | the pristine plane (film base / flat field) or nothing, the stops, and point samples of both (≤ 24,576 px) for the histogram |
+| `prepare` | a new display preview, film base, flat field or strokes (at idle after an exact frame, or when a draw finds its texture stale) | the pristine plane (film base / flat field) or nothing, the stops, and point samples of both (≤ 24,576 px) for the histogram; for a display target (#248) without compensation, a copy of the display negative the worker resampled from the level, since main holds none |
 | `analyze` | the analysis key changed (source, reference sample, border buffer, colour model, pre-saturation, B&W mix, override, film base) | `channelData`, `autoColor`, `positiveAnalysis` |
 | `convert` | the settle frame, every excluded mode, and whenever the GPU cannot draw | today's exact conversion, unchanged |
 
@@ -89,12 +89,15 @@ Both run in the slot the next exact frame uses, so that frame reuses the pristin
 plane and the analysis exactly as the next tick of a drag does, and its pixels are
 unchanged (`silverAdapter.preview.test.mjs` checks them against the 1703835 adapter).
 The prepared texture is tagged with the display preview, the generation, the film-base
-/ flat-field key and the strokes; any rebuild (geometry, zoom settle, photo switch,
-restart) invalidates it. Main keeps no copy after the upload; on context loss the
-next warm-up prepares again. A zoom, window or DPR settle on current full-resolution
-pixels (#237) converts nothing; while the GPU preview is in use it still resizes the
-display preview it draws from and prepares that at idle, so a drag after it is not
-drawn at the old size.
+/ flat-field key and the strokes; any rebuild (geometry, window or DPR settle, photo
+switch, restart) invalidates it. Main keeps no copy after the upload; on context loss
+the next warm-up prepares again. A window or DPR settle on current full-resolution
+pixels (#237) converts nothing; it moves the display target (#248: a size on the
+retained level, no pixels on main) and the GPU preview prepares that at idle, so a
+drag after it is not drawn at the old size. A target within the hysteresis band
+(at most 15 % larger or about 5 % smaller) keeps serving. Zoom no longer changes the
+display size (#248); native pixels at zoom come from the detail layer, which hides
+while a GPU frame is ahead of its exact frame.
 
 Pre-saturation, border-buffer (and B&W mix) drags ask for an `analyze` per tick,
 newest wins, and draw with the previous analysis until it lands.
