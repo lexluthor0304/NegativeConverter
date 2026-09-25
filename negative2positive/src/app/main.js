@@ -83,7 +83,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     import { poolRepairMask } from './repairedPreview.js';
     import { planBatchParallelism, planPng16BandWorkers, runBatchPipeline, planGeometryBandsInFlight } from './batchExportScheduler.js';
     import { displayPreviewSize, resizeDisplayPreview, updateDisplayPreviewRect } from './displayPreview.js';
-    import { settledDisplayRoute, step3FrameReference, photoRectPercent } from './displayCanvas.js';
+    import { settledDisplayRoute, step3FrameReference, upscaleReference, photoRectPercent } from './displayCanvas.js';
     import { createCoreReprocessGates, previewDispatchAction, CORE_FULL_REPROCESS_DELAY_MS } from './coreReprocessDispatcher.js';
     import { createPreviewTierController, previewTierMaxPixels, capBackingSize, parsePreviewTierOverride } from './previewTier.js';
     import { describeWebglRenderer, startsReducedReason, formatRenderEnvironmentLine, formatPreviewSessionLine } from './renderEnvironment.js';
@@ -3420,8 +3420,6 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // Where the photo lies in the film-border frame #canvas shows, in canvas
     // pixels (getSprocketFrameLayout's shape); null without the border.
     let mainCanvasPhoto = null;
-    const sprocketScratchCanvas = document.createElement('canvas');
-    const sprocketScratchCtx = sprocketScratchCanvas.getContext('2d');
     const sprocketPreviewFrameCanvas = document.createElement('canvas');
     const sprocketPreviewFrameCtx = sprocketPreviewFrameCanvas.getContext('2d');
     const sprocketPreviewFrameCache = {
@@ -3960,44 +3958,72 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       }
     }
 
-    function setMainCanvasDimensions(width, height) {
+    // #canvas holds exactly the buffer that is drawn (#242): at most the
+    // display preview, plus the film-border margins, never the whole image.
+    // Its CSS box is fitted to `reference`, the full-resolution frame the
+    // buffer stands for; null fits the buffer's own size. The last fit is
+    // kept for refits (showImageUI, a new container size), because the
+    // backing no longer tells the image's shape, and none while WebGL
+    // presents. Only sizes are kept, never an image.
+    const mainCanvasFit = { width: 0, height: 0, reference: null };
+
+    function setMainCanvasBox(width, height, reference = null) {
+      mainCanvasFit.width = Math.max(1, Math.round(width));
+      mainCanvasFit.height = Math.max(1, Math.round(height));
+      mainCanvasFit.reference = reference ? { width: reference.width, height: reference.height } : null;
+      adjustCanvasDisplay(mainCanvasFit.width, mainCanvasFit.height, mainCanvasFit.reference);
+    }
+
+    function setMainCanvasDimensions(width, height, reference = null) {
       const nextWidth = Math.max(1, Math.round(width));
       const nextHeight = Math.max(1, Math.round(height));
       if (canvas.width !== nextWidth) canvas.width = nextWidth;
       if (canvas.height !== nextHeight) canvas.height = nextHeight;
-      adjustCanvasDisplay(nextWidth, nextHeight);
+      setMainCanvasBox(nextWidth, nextHeight, reference);
     }
 
-    function drawImageDataToMainCanvas(imageData, targetWidth, targetHeight) {
-      if (imageData.width === targetWidth && imageData.height === targetHeight) {
-        ctx.putImageData(imageData, 0, 0);
+    function refitMainCanvasBox() {
+      if (!mainCanvasFit.width) return;
+      adjustCanvasDisplay(mainCanvasFit.width, mainCanvasFit.height, mainCanvasFit.reference);
+    }
+
+    // The film-border frame of a width x height photo, portrait included.
+    function sprocketFrameSize(width, height, composeOptions = getSprocketFrameComposeOptions()) {
+      const layout = getSprocketFrameLayout(width, height, composeOptions);
+      return { width: layout.frameWidth, height: layout.frameHeight };
+    }
+
+    // The CSS box of the Step-3 frame, which the GL canvas shares. The 2D
+    // backing is sized only when a frame is presented, so a settle still in
+    // the worker never exposes a cleared canvas.
+    function fitStep3CanvasBox() {
+      const shown = displaySourceImageData();
+      const reference = step3FrameReference(state);
+      if (!shown || !reference || state.cropping) return;
+      if (state.sprocketPreviewEnabled) {
+        const framed = sprocketFrameSize(shown.width, shown.height);
+        setMainCanvasBox(framed.width, framed.height, sprocketFrameSize(reference.width, reference.height));
         return;
       }
-
-      if (sprocketScratchCanvas.width !== imageData.width) sprocketScratchCanvas.width = imageData.width;
-      if (sprocketScratchCanvas.height !== imageData.height) sprocketScratchCanvas.height = imageData.height;
-      sprocketScratchCtx.putImageData(imageData, 0, 0);
-      ctx.clearRect(0, 0, targetWidth, targetHeight);
-      ctx.imageSmoothingEnabled = true;
-      ctx.drawImage(sprocketScratchCanvas, 0, 0, targetWidth, targetHeight);
+      setMainCanvasBox(shown.width, shown.height, reference);
     }
 
-    function getSprocketPreviewFrameCacheKey(imageData, fullSizeReference, composeOptions) {
+    function getSprocketPreviewFrameCacheKey(imageData, composeOptions) {
       return JSON.stringify({
         sourceWidth: imageData.width,
         sourceHeight: imageData.height,
-        targetWidth: fullSizeReference.width,
-        targetHeight: fullSizeReference.height,
         edgeMarkings: composeOptions.edgeMarkings
       });
     }
 
-    function ensureSprocketPreviewFrameBackground(imageData, fullSizeReference, composeOptions) {
+    // The film border around a display-size photo, composed once per size,
+    // markings and photo (`reference`: the overexposed-sprocket smear samples it).
+    function ensureSprocketPreviewFrameBackground(imageData, reference, composeOptions) {
       if (!sprocketPreviewFrameCtx) return null;
-      const key = getSprocketPreviewFrameCacheKey(imageData, fullSizeReference, composeOptions);
+      const key = getSprocketPreviewFrameCacheKey(imageData, composeOptions);
       if (
         sprocketPreviewFrameCache.key === key
-        && sprocketPreviewFrameCache.sourceRef === fullSizeReference
+        && sprocketPreviewFrameCache.sourceRef === reference
         && sprocketPreviewFrameCache.metrics
         && sprocketPreviewFrameCanvas.width > 0
         && sprocketPreviewFrameCanvas.height > 0
@@ -4012,43 +4038,26 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       sprocketPreviewFrameCtx.putImageData(background, 0, 0);
 
       sprocketPreviewFrameCache.key = key;
-      sprocketPreviewFrameCache.sourceRef = fullSizeReference;
+      sprocketPreviewFrameCache.sourceRef = reference;
       sprocketPreviewFrameCache.metrics = getSprocketFrameMetrics(imageData.width, imageData.height, composeOptions);
       return sprocketPreviewFrameCache;
     }
 
-    function renderFastSprocketPreview(imageData, fullSizeReference, composeOptions) {
+    // A drag frame with the border: the cached border drawn 1:1 and the photo
+    // put inside it, at display metrics.
+    function renderFastSprocketPreview(imageData, reference, framedReference, composeOptions) {
       // Portrait images go through the full compose path (composeSprocketFrame
       // handles pre/post rotation internally).
       if (imageData.height > imageData.width) return false;
 
-      const targetMetrics = getSprocketFrameMetrics(fullSizeReference.width, fullSizeReference.height, composeOptions);
-      const frameCache = ensureSprocketPreviewFrameBackground(imageData, fullSizeReference, composeOptions);
+      const frameCache = ensureSprocketPreviewFrameBackground(imageData, reference, composeOptions);
       if (!frameCache) return false;
-      const frameMetrics = frameCache.metrics;
-      setMainCanvasDimensions(targetMetrics.outputWidth, targetMetrics.outputHeight);
+      const metrics = frameCache.metrics;
+      setMainCanvasDimensions(metrics.outputWidth, metrics.outputHeight, framedReference);
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.imageSmoothingEnabled = true;
-      ctx.drawImage(sprocketPreviewFrameCanvas, 0, 0, canvas.width, canvas.height);
-
-      if (sprocketScratchCanvas.width !== imageData.width) sprocketScratchCanvas.width = imageData.width;
-      if (sprocketScratchCanvas.height !== imageData.height) sprocketScratchCanvas.height = imageData.height;
-      sprocketScratchCtx.putImageData(imageData, 0, 0);
-
-      const scaleX = targetMetrics.outputWidth / frameMetrics.outputWidth;
-      const scaleY = targetMetrics.outputHeight / frameMetrics.outputHeight;
-      mainCanvasPhoto = {
-        frameWidth: targetMetrics.outputWidth, frameHeight: targetMetrics.outputHeight,
-        x: frameMetrics.sideMargin * scaleX, y: frameMetrics.bandHeight * scaleY,
-        width: frameMetrics.sourceWidth * scaleX, height: frameMetrics.sourceHeight * scaleY
-      };
-      ctx.drawImage(
-        sprocketScratchCanvas,
-        mainCanvasPhoto.x,
-        mainCanvasPhoto.y,
-        mainCanvasPhoto.width,
-        mainCanvasPhoto.height
-      );
+      ctx.drawImage(sprocketPreviewFrameCanvas, 0, 0);
+      ctx.putImageData(imageData, metrics.sideMargin, metrics.bandHeight);
+      mainCanvasPhoto = getSprocketFrameLayout(imageData.width, imageData.height, composeOptions);
       return true;
     }
 
@@ -4069,23 +4078,27 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       });
     }
 
-    function renderAdjustedImageDataToMainCanvas(imageData, fullSizeReference = imageData, options = {}) {
+    // Draws `imageData` 1:1: the backing takes its size (with the border, the
+    // border's), and the CSS box fits `reference`, the full-resolution frame
+    // it stands for. No upscale into a full-size backing (#242).
+    function renderAdjustedImageDataToMainCanvas(imageData, reference = imageData, options = {}) {
       if (state.sprocketPreviewEnabled && !state.cropping) {
         const composeOptions = getSprocketFrameComposeOptions();
         prepareSprocketPreviewFont(composeOptions);
-        if (options.fastSprocketPreview && renderFastSprocketPreview(imageData, fullSizeReference, composeOptions)) {
+        const framedReference = reference ? sprocketFrameSize(reference.width, reference.height, composeOptions) : null;
+        if (options.fastSprocketPreview && renderFastSprocketPreview(imageData, reference, framedReference, composeOptions)) {
           return;
         }
         const framed = composeDisplaySprocketFrame(imageData, composeOptions);
         mainCanvasPhoto = getSprocketFrameLayout(imageData.width, imageData.height, composeOptions);
-        setMainCanvasDimensions(framed.width, framed.height);
-        drawImageDataToMainCanvas(framed, framed.width, framed.height);
+        setMainCanvasDimensions(framed.width, framed.height, framedReference);
+        ctx.putImageData(framed, 0, 0);
         return;
       }
 
       mainCanvasPhoto = null;
-      setMainCanvasDimensions(fullSizeReference.width, fullSizeReference.height);
-      drawImageDataToMainCanvas(imageData, fullSizeReference.width, fullSizeReference.height);
+      setMainCanvasDimensions(imageData.width, imageData.height, reference);
+      ctx.putImageData(imageData, 0, 0);
       settleInterimGeometryDisplay();
     }
 
@@ -5934,7 +5947,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // while WebGL presents; no export reads it.
     function presentCpuFrame(adjusted, options = {}) {
       state.displayImageData = adjusted;
-      renderAdjustedImageDataToMainCanvas(adjusted, state.processedImageData, options);
+      renderAdjustedImageDataToMainCanvas(adjusted, step3FrameReference(state), options);
       if (state.dustRemoval.showMask && state.dustRemoval.mask) renderDustMaskOverlay();
       renderDodgeBurnOverlay();
     }
@@ -6009,14 +6022,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         return;
       }
       displayDebugCounters.settleWorker++;
-      void defaultExportWorkers.workerApplyAdjustments(source, prepared, 'full')
-        .then((adjusted) => {
-          if (adjusted) present(adjusted);
-          else runSync();
-        })
+      void defaultExportWorkers.workerApplyAdjustments(source, prepared, 'full').then((adjusted) => {
+        if (adjusted) present(adjusted);
+        else runSync();
+      }, () => {
         // Cancelled with the worker (hidden-window shedding): the
         // preview-quality frame stays.
-        .catch(() => {});
+      });
     }
 
     // For the smoke runs (#242). #canvas holds a display-size frame, and none
@@ -6036,7 +6048,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         canvases: {
           main: size(canvas), comparison: size(beforeAfterCanvas),
           dustTint: size(dustMaskOverlayCache.canvas), aiBrush: size(brushOverlay),
-          borderFrame: size(sprocketPreviewFrameCanvas), borderScratch: size(sprocketScratchCanvas)
+          borderFrame: size(sprocketPreviewFrameCanvas)
         },
         comparison: {
           shown: Boolean(beforeAfterCanvas && beforeAfterCanvas.style.display === 'block'),
@@ -6086,13 +6098,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // A settled frame: slow hosts get the next session's reduced preview ready.
       if (!previewTierController.active) schedulePreviewTierPrebuild();
       // 非同期変換は結果を保存してよいが、切り抜き草稿の画布を変更しない。
-      if (state.cropping) return;
-      if (state.sprocketPreviewEnabled) {
-        const frameMetrics = getSprocketFrameMetrics(processed.width, processed.height);
-        setMainCanvasDimensions(frameMetrics.outputWidth, frameMetrics.outputHeight);
-      } else {
-        setMainCanvasDimensions(processed.width, processed.height);
-      }
+      // The CSS box follows at once; the 2D backing, when a frame is drawn.
+      fitStep3CanvasBox();
     }
 
     // Undo, Redo and a photo-session restore put back the display planes the
@@ -6113,13 +6120,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         webglState.sourceDirty = true;
         webglState.curveDirty = true;
       }
-      if (state.cropping) return;
-      if (state.sprocketPreviewEnabled) {
-        const frameMetrics = getSprocketFrameMetrics(processed.width, processed.height);
-        setMainCanvasDimensions(frameMetrics.outputWidth, frameMetrics.outputHeight);
-      } else {
-        setMainCanvasDimensions(processed.width, processed.height);
-      }
+      fitStep3CanvasBox();
     }
 
     // Automatic gray point: estimate WB gains from the freshly converted
@@ -6682,9 +6683,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         webglState.curveDirty = true;
       }
       if (!previewTierController.active) schedulePreviewTierPrebuild();
-      const fullW = state.processedImageData ? state.processedImageData.width : processed.width;
-      const fullH = state.processedImageData ? state.processedImageData.height : processed.height;
-      if (!state.cropping) setMainCanvasDimensions(fullW, fullH);
+      fitStep3CanvasBox();
     }
 
     let _coreReprocessFullInFlight = false;
@@ -6926,13 +6925,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       state.processedImageDataIsPreview = false;
       state.fullResolutionPending = false;
       state.displayImageData = null;
-      if (state.cropping) return;
-      if (state.sprocketPreviewEnabled) {
-        const frameMetrics = getSprocketFrameMetrics(processed.width, processed.height);
-        setMainCanvasDimensions(frameMetrics.outputWidth, frameMetrics.outputHeight);
-      } else {
-        setMainCanvasDimensions(processed.width, processed.height);
-      }
+      fitStep3CanvasBox();
     }
 
     // Resolves true only when it actually rendered. Callers use that to decide
@@ -8190,7 +8183,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         if (state.processedImageData) schedulePreviewUpdate();
         return false;
       }
-      renderAdjustedImageDataToMainCanvas(display, state.processedImageData);
+      renderAdjustedImageDataToMainCanvas(display, step3FrameReference(state));
       renderDustMaskOverlay();
       return true;
     }
@@ -8645,26 +8638,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         return { width: turned.width, height: turned.height };
       }
       if (state.currentStep < 3) return null;
-      const full = (state.processedImageData && !state.processedImageDataIsPreview)
-        ? state.processedImageData
-        : state.conversionSourceImageData;
+      const full = step3FrameReference(state);
       if (!full || !(full.width > 0) || !(full.height > 0)) return null;
-      let refW = full.width;
-      let refH = full.height;
-      if (state.sprocketPreviewEnabled) {
-        // Frame metrics expect landscape input; composeSprocketFrame rotates
-        // portrait images before framing and back afterwards, so mirror that.
-        const portrait = refH > refW;
-        const metrics = portrait
-          ? getSprocketFrameMetrics(refH, refW, getSprocketFrameComposeOptions())
-          : getSprocketFrameMetrics(refW, refH, getSprocketFrameComposeOptions());
-        if (metrics && metrics.outputWidth > 0 && metrics.outputHeight > 0) {
-          refW = portrait ? metrics.outputHeight : metrics.outputWidth;
-          refH = portrait ? metrics.outputWidth : metrics.outputHeight;
-        }
-      }
-      if (refW <= w || refH <= h) return null;
-      return { width: refW, height: refH };
+      // Portrait- and marking-aware, as composeSprocketFrame frames it.
+      const reference = state.sprocketPreviewEnabled ? sprocketFrameSize(full.width, full.height) : full;
+      return upscaleReference(reference, w, h);
     }
 
     // The inputs of the last fit. renderWebGL calls adjustCanvasDisplay on
@@ -8677,14 +8655,17 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       canvasDisplayFit.w = 0;
     }
 
-    function adjustCanvasDisplay(w, h) {
+    // `reference`: the full-resolution frame a w x h buffer stands for, as the
+    // 2D drawer names it (null: the buffer's own size). Omitted, it is derived
+    // from state, as for the GL texture.
+    function adjustCanvasDisplay(w, h, reference) {
       uiDebugCounters.adjustCanvasDisplay++;
       const container = getCanvasContainerSize();
       // Never upscale past 100% — but for a preview-resolution stand-in,
       // "100%" means the full-resolution image it temporarily represents.
       // Fit that image itself, so the box is the same whichever stand-in
       // (GL texture, 2D canvas) asks, rather than differing by its rounding.
-      const ref = getFullResDisplayReference(w, h);
+      const ref = reference === undefined ? getFullResDisplayReference(w, h) : upscaleReference(reference, w, h);
       const fitW = ref ? ref.width : w;
       const fitH = ref ? ref.height : h;
       const dpr = window.devicePixelRatio || 1;
@@ -9851,7 +9832,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // The panels above just changed the container before the observer
       // could report it.
       refreshCanvasContainerSize();
-      adjustCanvasDisplay(canvas.width, canvas.height);
+      refitMainCanvasBox();
       updateAutoFrameConfigUI();
       updateAutoFrameDiagnosticsUI();
       updateLensCorrectionUI();
@@ -12946,8 +12927,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     function restoreDisplayAfterCropDraft() {
       const sourceImageData = state.croppedImageData || state.originalImageData;
       if (state.currentStep >= 3 && state.processedImageData) {
-        // GPU 表示は CSS サイズだけを更新する。草稿用 2D 画布の寸法も戻す。
-        setMainCanvasDimensions(state.processedImageData.width, state.processedImageData.height);
+        // GPU 表示は CSS サイズだけを更新する。2D の画布は次の描画で表示サイズになる。
+        fitStep3CanvasBox();
         updateCanvasVisibility();
         updatePreview();
         scheduleFullUpdate();
@@ -13832,9 +13813,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       sprocketPreviewFrameCache.key = '';
       sprocketPreviewFrameCache.sourceRef = null;
       sprocketPreviewFrameCache.metrics = null;
-      for (const scratch of [sprocketPreviewFrameCanvas, sprocketScratchCanvas]) {
-        scratch.width = scratch.height = 1;
-      }
+      sprocketPreviewFrameCanvas.width = sprocketPreviewFrameCanvas.height = 1;
       releaseBeforeAfterCanvas();
       resetZoomPan();
       zoomControls.style.display = 'none';
@@ -17235,11 +17214,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (state.cropping) {
         // The crop canvas follows the display: resized and redrawn next frame.
         scheduleCropDraftPreview({ preserveRect: true });
-      } else if (isWebGLActive() && !state.beforeAfterActive && texture.w > 0 && texture.h > 0) {
+      } else if (isWebGLActive() && texture.w > 0 && texture.h > 0) {
+        // The comparison is its own element over the GL canvas, which stays on
+        // screen under it (#242); it is redrawn once the comparison ends.
         adjustCanvasDisplay(texture.w, texture.h);
-        if (glCanvas.width !== texture.w || glCanvas.height !== texture.h) renderWebGL();
-      } else if (canvas.width > 0 && canvas.height > 0) {
-        adjustCanvasDisplay(canvas.width, canvas.height);
+        if (!state.beforeAfterActive && (glCanvas.width !== texture.w || glCanvas.height !== texture.h)) renderWebGL();
+      } else {
+        refitMainCanvasBox();
       }
       scheduleDisplayPreviewResize();
     }
@@ -19008,7 +18989,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           if (state.processedImageData) schedulePreviewUpdate();
           return;
         }
-        renderAdjustedImageDataToMainCanvas(display, state.processedImageData);
+        renderAdjustedImageDataToMainCanvas(display, step3FrameReference(state));
         renderDodgeBurnOverlay();
         drawDodgeBurnPath(dodgeBurnPoints.map((p) => ({ x: p.x, y: p.y, p: p.p })), state.dodgeBurn.mode === 'dodge' ? -1 : 1, true);
       });
@@ -19905,14 +19886,17 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     document.getElementById('canvasTransformWrapper').append(brushOverlay);
 
     function paintAiBrushOverlay() {
-      brushOverlay.width = canvas.width;
-      brushOverlay.height = canvas.height;
+      // The size of the display canvas on screen: the GL one in GL mode,
+      // #canvas otherwise (each holds a display-size frame, #242).
+      const surface = glCanvas.style.display === 'block' ? glCanvas : canvas;
+      brushOverlay.width = surface.width;
+      brushOverlay.height = surface.height;
       if (!aiBrushDrawing) return;
       const ctx = brushOverlay.getContext('2d');
       const { geometry, points, size } = aiBrushDrawing;
       const cropShort = Math.min(geometry.cropRegion?.width || geometry.rotatedWidth, geometry.cropRegion?.height || geometry.rotatedHeight);
       const radius = size * Math.min(geometry.baseWidth, geometry.baseHeight) * Math.min(geometry.width, geometry.height) / cropShort / 2;
-      ctx.scale(canvas.width / geometry.width, canvas.height / geometry.height);
+      ctx.scale(brushOverlay.width / geometry.width, brushOverlay.height / geometry.height);
       ctx.lineWidth = radius * 2;
       ctx.lineCap = ctx.lineJoin = 'round';
       ctx.strokeStyle = ctx.fillStyle = 'rgba(244, 180, 105, 0.55)';

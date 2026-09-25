@@ -132,7 +132,7 @@ function fixture({ width = 3000, height = 2000, repairs = false, largePreviewFra
     }),
     initWebGLRenderer: () => true, isWebGLActive: () => true,
     renderWebGL: () => { log.push(`gl:${context.previewTier}`); return true; },
-    setMainCanvasDimensions: () => {}, getSprocketFrameMetrics: () => null,
+    fitStep3CanvasBox: () => {},
     updatePreview: () => log.push('draw'), updateFull: () => log.push('draw'),
     schedulePreviewUpdate: () => log.push('schedule-draw'),
     scheduleFullUpdate: () => {}, resetDustForCleanSource: () => {}, scheduleDustDetection: () => {},

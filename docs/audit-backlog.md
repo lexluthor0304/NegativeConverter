@@ -165,11 +165,6 @@ Remaining performance proposals below are not claims of completed work.
   sanitizeNumeric(value, NaN, ...) returns 0 (not NaN) when both value and fallback are non-finite (3153-3158), so the `if (!Number.isFinite(x) || !Number.isFinite(y)) return;` check at 3173 never triggers. A malformed point in a saved/pasted settings object (e.g. {x:'abc', y:null}) is coerced to {x:0,y:0}; after sort/dedupe it overwrites the y of the genuine x=0 point (3187: `last.y = point.y`), fo…  
   _Suggested fix:_ Check `Number.isFinite(Number(point.x)) && Number.isFinite(Number(point.y))` before calling sanitizeNumeric (or give sanitizeNumeric an explicit 'return NaN on failure' mode).
 
-- **low/bug** — applyProcessedImageToState sizes the sprocket-frame canvas without edge-marking options or the portrait swap used elsewhere _(verified)_  
-  `negative2positive/src/app/main.js:4556`  
-  When sprocket preview is on, applyProcessedImageToState calls getSprocketFrameMetrics(processed.width, processed.height) with no options and no portrait handling, whereas getFullResDisplayReference (5442-5460) passes getSprocketFrameComposeOptions() and swaps width/height for portrait images, and composeSprocketFrame pre-rotates portrait input. Because bandMin depends on whether markings are visib…  
-  _Suggested fix:_ Factor the portrait-aware, options-aware computation out of getFullResDisplayReference into `getSprocketOutputSize(w, h)` and use it in applyProcessedImageToState.
-
 - **low/bug** — handleFilmPresetChange (and the auto-frame click handlers) are fire-and-forget with no rejection handling, and applyFilmPresetSettingsToState mutates state before awaiting the preset chunk  
   `negative2positive/src/app/main.js:6842`  
   applyFilmPresetSettingsToState sets state.coreFilmPreset synchronously (line 445-446) and only then awaits loadFilmPresets() (a dynamic import). handleFilmPresetChange chains .then() with no .catch(), so if the chunk fails to load (offline, stale deploy hash) the promise rejects, the `.then` never runs, the rejection is unhandled, and the select shows the new preset while the image is never refres…  
@@ -226,9 +221,9 @@ Remaining performance proposals below are not claims of completed work.
   The three 16-bit mirror fields are declared at 1877-1879 with a comment saying they are 'dormant' until a later stage; the codebase has since moved to attaching `__image16` directly on ImageData (silverAdapter.js:23-33, 264-266). The fields are still assigned at 5657-5659 and 5738 but no code reads them, so they only pin a second reference to the largest buffer in the app.  
   _Suggested fix:_ Delete the three fields, the comment block at 1873-1876, and the four assignments.
 
-- **low/quality** — usesSilverCoreConversion() is always true, so its callers keep dead non-SilverCore branches _(updated by #239)_  
+- **low/quality** — usesSilverCoreConversion() is always true, so its callers keep dead non-SilverCore branches _(updated by #239 and #242)_  
   `negative2positive/src/app/main.js:3988`  
-  PRESET_TYPES is ['color','bw','positive'] and sanitizePresetType coerces anything else to 'color', so usesSilverCoreConversion() always returns true. #239 deleted renderFullWebGL, the WebGL branch of ensureFullRender and the legacy tone uniforms with the `useLegacyTone` branch of webglSetUniforms. The `usesSilverCoreConversion()` guards and buildRouterSettings's non-SilverCore branch remain.  
+  PRESET_TYPES is ['color','bw','positive'] and sanitizePresetType coerces anything else to 'color', so usesSilverCoreConversion() always returns true. #239 deleted renderFullWebGL, the WebGL branch of ensureFullRender and the legacy tone uniforms with the `useLegacyTone` branch of webglSetUniforms; #242 deleted ensureFullRender and updateFullCpu. The `usesSilverCoreConversion()` guards and buildRouterSettings's non-SilverCore branch remain.  
   _Suggested fix:_ Reduce usesSilverCoreConversion to `return true` with a comment and delete the dead branches of its callers.
 
 - **low/quality** — File-type dispatch (RAW / PNG / standard) and the 100 MiB 'heavy RAW' threshold are duplicated between loadFile and loadFileToImageData  

@@ -9,6 +9,8 @@ import {
 import { isLargeImage } from './imageMemoryBudget.js';
 import { poolRepairMask } from './repairedPreview.js';
 import { DISABLED_GPU_PREVIEW_SCHEDULER } from './gpuPreviewScheduler.js';
+import { step3FrameReference } from './displayCanvas.js';
+import { getSprocketFrameLayout } from './sprocketFrame.js';
 
 // #237 in the app itself: the real routing, restore, viewport, Step-3 and
 // export-barrier functions of main.js (extracted with vm, as
@@ -115,8 +117,11 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
     },
     buildHistogramSourceImageData: image => ({ sampleOf: image }),
     initWebGLRenderer: () => true, isWebGLActive: () => true,
-    setMainCanvasDimensions: (width, height) => log.push(`canvas:${width}x${height}`),
-    getSprocketFrameMetrics: (width, height) => ({ outputWidth: width, outputHeight: height }),
+    // #242: new planes fit the CSS box only (`canvas:` drawn size < reference);
+    // no backing is sized before a frame is presented.
+    adjustCanvasDisplay: (width, height, reference) => log.push(`canvas:${width}x${height}<${reference ? `${reference.width}x${reference.height}` : 'own'}`),
+    mainCanvasFit: { width: 0, height: 0, reference: null },
+    step3FrameReference, getSprocketFrameLayout, getSprocketFrameComposeOptions: () => ({}),
     updatePreview: () => log.push('paint'), updateFull: () => log.push('paint:full'),
     schedulePreviewUpdate: () => log.push('paint:scheduled'),
     carryStudioThumbnailSource: noop, displayResizeReplaces: () => null, displayResizeOrigin: () => null,
@@ -164,6 +169,7 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
   });
   vm.runInContext([
     'applyProcessedImageToState', 'applyPreviewProcessedImageToState',
+    'fitStep3CanvasBox', 'setMainCanvasBox', 'displaySourceImageData', 'sprocketFrameSize',
     'applyRestoredImageToState', 'histogramSourceFor', 'buildPreviewSourceImageData',
     'convertFrameOffMainThread', 'convertFromCurrentSource',
     'routeCoreRequest', 'beginFullResolutionConversion', 'endFullResolutionConversion',
@@ -361,6 +367,7 @@ function snapshotFixture(options) {
   assert.equal(f.state.previewSourceImageData, f.shown, 'the captured display plane is back');
   assert.equal(f.context.webglState.sourceDirty, true);
   assert.equal(f.log.indexOf('paint'), f.log.findIndex(entry => entry.startsWith('canvas:')) + 1, 'painted right after the canvas is sized');
+  assert.ok(f.log.includes('canvas:1809x1202<9536x6336'), 'the box: the display plane fitted to the full frame');
   assert.ok(f.log.indexOf('paint') < f.log.indexOf('convert:preview'), 'painted before the conversion starts');
   assert.deepEqual(f.resampled, [], 'no main-thread resample');
   await settle();
