@@ -180,8 +180,8 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
   next major GC. A plane that the editor, a photo session or history still
   references is never transferred or released. Single export does the same
   with a bridge of its own that it terminates when the export ends; the
-  contact sheet and the watch folder release their full-resolution planes
-  once the thumbnail exists.
+  contact sheet releases a frame's full-resolution planes once its cell
+  exists (the watch folder no longer renders arrivals, #247).
 - Batch frames run frame detection silently (`processFileWithSettings`
   `silent: true`): a never-analysed frame gets no blocking overlay and no
   frame wait, so a hidden window keeps exporting. Each job writes a marker so

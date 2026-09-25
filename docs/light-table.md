@@ -24,10 +24,16 @@ detected stocks and roll outliers are visible at a glance.
   frame. These tiles are provisional camera renderings: they stay
   `data-preview-state="pending"`. During automatic roll import each measured
   frame then gets a converted `analysis` tile from its 900 px sample, rendered
-  in a conversion worker without delaying the next decode; the roll commit and
-  the canonical lane (the background photo lanes, #243, final recipe) replace them, and a
-  tile never moves back from `processed` or `analysis` to `embedded`
-  (`data-thumbnail-kind` on each tile). CR3, RAF and other non-TIFF containers
+  in a conversion worker without delaying the next decode. Final tiles come
+  from data already in memory (#247): the roll commit renders each analysed
+  frame's `processed` tile from its sample, frames no roll group took get
+  theirs from their samples before the import ends, and recipe changes over
+  unchanged geometry re-render from retained tile sources
+  (`docs/photo-sessions.md`). The canonical lane (the background photo lanes,
+  #243) decodes only what is left: unanalysed frames, lens-corrected frames,
+  changed geometry, evicted sources. A tile never moves back from `processed`
+  or `analysis` to `embedded` (`data-thumbnail-kind` on each tile). A reopened
+  roll project restores the tiles it saved. CR3, RAF and other non-TIFF containers
   keep their numbered tile until a converted preview exists. Where workers
   cannot decode images (macOS 10.15 WebKit, older WebKitGTK) tiles decode on the
   main thread, one per animation frame.

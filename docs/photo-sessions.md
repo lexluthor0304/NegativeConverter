@@ -179,6 +179,55 @@ during invalidation, accompanied by a pending indicator; a failed preview is
 marked rather than retried indefinitely. This includes two-photo imports,
 which do not run automatic roll analysis.
 
+The lanes render a tile without a new decode whenever they can (#247):
+
+- **Tile sources.** `thumbnailSources.js` keeps, per queue item, the
+  geometry-applied working image (long side at most 288 px) a canonical tile
+  was converted from, a 16-bit analysis reference of at most 16384 pixels and
+  the geometry both belong to (`tileGeometryKey`: rotation, mirror, crop, base
+  size, analysis area). Roll commits, ungrouped roll frames and every lane
+  decode fill it. When a recipe changes and the geometry does not (Sync
+  colours, Apply to selected without crop, the dust toggle, an AI-repair
+  revision, a film-type change), the lane re-renders the tile from it in
+  milliseconds, with no decode and no hidden-job admission (when the tile is
+  the job's only need). Entries are
+  stored compactly (RGB samples and a one-bit opacity mask for 16-bit planes),
+  at most 0.6 MB each and 100 MB in total (about 0.43 MB per 3:2 frame with
+  its reference), least recently used out first; a moved geometry, active
+  lens correction or an evicted entry falls back to a decode, which refills it.
+- **Reduced geometry.** A lane render without active lens correction (enabled
+  with a selected lens, `lensCorrectionActive`, the same test as
+  `applyLensCorrectionWithSettings`) never builds the full-resolution frame.
+  The post-geometry size comes from the base size (`reducedTileGeometry`), and
+  the working image is taken at the step the preview downsample used to apply
+  after the chain: on a full-size 16-bit base the geometry core's strided plan
+  builds exactly that image and reads only its pixels (about 2 ms on 12 MP
+  with a 0.75° straighten and an 85 % crop, instead of seconds of full-frame
+  resampling); an 8-bit source at a non-right angle is decimated first and
+  the small image rotated. The router settings, analysis region, strokes and
+  dust size still read the full base size, and the colour analysis reference
+  still comes from the full base.
+- **Half-size decodes.** A RAW frame with a settled recipe (frame detection
+  and the film-edge read done) and no tile source is decoded at half size in
+  16 bits without the sensor-defect pass (`halfSize`, `outputBps: 16`,
+  `suppressSensorDefects: false`). The decode reports the full size its recipe
+  refers to and is never remembered as the file's size (batch lane planning
+  reads that). When the tile is the job's only need, this decode is the
+  job's own (`openHalfSizeTileDecode`): never shared through
+  `sharedDecodes`, adopted, retained or prefetched, and opening that photo
+  aborts it so the file is never decoded twice at once. Frames without a
+  recipe, and jobs that also analyse or prefetch the frame, take the full
+  shared decode.
+- **One renderer.** `renderPreviewFromWorkingImage` converts, removes dust at
+  the scaled particle size, repairs strokes, bakes the automatic gray point
+  and the expired-film measurement, and adjusts at preview quality, for the
+  lane, roll-sample tiles and tile-source re-renders alike. It never writes
+  `item.settings`.
+
+Frames with active lens correction keep the native path: full-resolution
+geometry and lens correction, then the reduction (or none at all for a
+lens-mapped repair).
+
 ### Background photo lanes (#243)
 
 One pull-based scheduler in `main.js` runs every background decode: pass 1 of
@@ -248,11 +297,15 @@ reveals the complete tile, including its border, rather than its inset button.
 If roll analysis takes ownership while a thumbnail is in flight, that
 thumbnail stays invalid even after analysis becomes idle. It cannot publish
 prepared settings or errors over the analysis result; a fresh preview job
-refreshes the tile. The folder regression tracks foreground, analysis,
+refreshes the tile. A scheduled, unfinished automatic roll import owns its
+frames, with or without a recipe: the lanes skip them until the import gives
+a frame its tile or fails on it, and the import's end releases the rest and
+restarts the lanes. The folder regression tracks foreground, analysis,
 thumbnail and prefetch reads separately (the lanes open their decode through
-`openAnalysisDecode`, `openTileDecode` or `openPrefetchDecode`), and requires
-exactly one foreground/analysis decode per photo while allowing the separate
-final-recipe preview lane.
+`openAnalysisDecode`, `openTileDecode`, `openHalfSizeTileDecode` or
+`openPrefetchDecode`) and requires exactly one read and one decode per photo
+for default recipes, thumbnail routes included; the prefetch of the next
+photo is a separate, later decode and is not counted.
 
 ## Verification
 
@@ -296,13 +349,20 @@ fixture retained 2678/4610/4375 distinct RGB levels. All three final whole-roll
 B&W thumbnails had zero measured chroma, retained images during the pending
 phase, and the delayed cold-read race left the latest selection active.
 
-The roll analyzer's quick thumbnails are provisional: they omit stages such
-as lens correction and repair, so the canonical preview lane replaces them
-before marking them ready. Tiles rank `embedded` < `analysis` < `processed`
-(`thumbnailRank.js`): import-time embedded tiles and per-frame analysis tiles
-only fill empty or `embedded` tiles, so a tile never moves back, and neither
-kind carries a `thumbnailKey` or counts as ready. This can require another decode for an uncached
-RAW; correctness is not traded for a misleading cache hit.
+Roll tiles are canonical at the commit (#247): the roll renders each frame's
+tile from its 900 px sample through the lane's renderer, with the 16-bit
+analysis reference and base size pass 1 took while the decoded frame was in
+hand, on a size-1 conversion pool. A tile is `processed` when the frame has
+no active lens correction and its settings key at the commit equals the key
+it was rendered for; otherwise (lens correction, or a global dust, AI or
+flat-field change while the commit waited) it stays `analysis` and the lane
+renders it again, from its tile source when it has one. Frames no group took
+(positives, mixed stocks, groups of fewer than three) get their canonical
+tile from the retained sample before the import finishes. Tiles rank
+`embedded` < `analysis` < `processed` (`thumbnailRank.js`): import-time
+embedded tiles and per-frame analysis tiles only fill empty or `embedded`
+tiles, so a tile never moves back, and neither kind carries a `thumbnailKey`
+or counts as ready.
 
 Lens-corrected photographs with saved repair strokes keep native coordinates
 through repair before the thumbnail is reduced. Other small previews scale

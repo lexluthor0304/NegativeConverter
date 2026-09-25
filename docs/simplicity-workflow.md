@@ -37,9 +37,18 @@ The desktop empty workspace, then the batch bar after import, offers “Watch a 
 files too” checkbox (off by default). Choose the directory using the native
 picker. The active entry shows the directory name and Stop. New matching files
 must have unchanged size and modification time for at least a second; hidden,
-temporary, symlink and nested files are excluded. Files are read through a
-session grant in checked 1 MiB chunks, converted and added to the photo strip.
-Quiet batches of at least three new frames enter automatic roll analysis.
+temporary, symlink and nested files are excluded. A file whose name and size
+are already queued is not read again. Files are read through a session grant
+in checked chunks and take the normal import path (#247): arrivals within a
+second of each other are queued in one batch, and nothing is converted on
+arrival. The light-table lane prepares each frame's recipe and final tile from
+one silent background decode, with no blocking overlay, exactly as for a
+frame imported with the picker; a batch of three or more (a burst, or “Import
+existing files too”) starts the automatic roll import at once, one decode per
+file. Captures that trickle in are counted across the session: 2.5 s after
+the last one, three or more frames no roll analysis has covered form a roll
+(roll analysis then decodes them once more for its samples). The review toast
+counts watch-folder frames that have a recipe.
 
 Stop or a new session revokes the grant. The watch never persists across app
 launches. There is no web menu entry. Grant/stability/chunk tests run with

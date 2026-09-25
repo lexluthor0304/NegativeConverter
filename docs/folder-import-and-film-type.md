@@ -15,14 +15,20 @@ or export source. The folder regression counts these jobs as their own
 ≤ its preview + 32 KB).
 
 Automatic roll preparation keeps the same geometry-applied, 900-pixel analysis
-samples for the subsequent roll analysis. Frames a scheduled roll import will
-prepare get no converted thumbnail before it runs: a thumbnail recipe set in
-that gap would leave the frame without a pass-1 sample and roll analysis would
-decode it again. The thumbnail lane waits for them and renders them from the
-roll recipe afterwards. The cache counts both 8-bit and 16-bit
-planes and is capped at 128 MiB. Evicted samples can be decoded again. A current
-RAW larger than 100 MiB is not reused because it may still be a temporary preview.
-Colour conversion and roll-analysis mathematics are unchanged.
+samples for the subsequent roll analysis, each with the base's size and a
+16384-pixel 16-bit analysis reference taken while the frame is decoded. Frames
+a scheduled roll import owns get no lane render before it finishes, with or
+without a recipe: a thumbnail recipe set in the gap would leave the frame
+without a pass-1 sample, and any lane decode there would be a second decode of
+the same file. The import gives them their final tiles from those samples
+instead: the roll commit for grouped frames, and a render from the retained
+sample for frames no group took (positives, mixed stocks, groups of fewer than
+three). With default recipes the light table is complete when the import ends,
+after exactly one read and one decode per photo. The cache counts both 8-bit
+and 16-bit planes and is capped at 128 MiB. Evicted samples can be decoded
+again. A current RAW larger than 100 MiB is not reused because it may still be
+a temporary preview. Colour conversion and roll-analysis mathematics are
+unchanged.
 
 Automatic analysis does not lock the editor. Changes to the active file, manual
 edits, cropping, or an explicit film-type choice invalidate pending background
