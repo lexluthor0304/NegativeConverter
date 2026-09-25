@@ -23,8 +23,12 @@ export async function runStudioColorAnalysisSmoke({ send, evaluate, waitFor, wai
       const n=(x*17+y*23)%80; ctx.fillStyle='rgb('+(40+n)+','+(20+n/2)+','+(12+n/3)+')'; ctx.fillRect(x,y,4,4);
     }
     const blob = await new Promise(r=>c.toBlob(r)); const dt=new DataTransfer();
-    dt.items.add(new File([blob], 'color-reference.png', {type:'image/png'}));
-    dt.items.add(new File([blob], 'color-reference-2.png', {type:'image/png'}));
+    // The strip sorts newest first. One shared timestamp keeps import order,
+    // so the batch below always exports color-reference.png first; separate
+    // Date.now() stamps reverse it whenever a millisecond passes between them.
+    const lastModified = Date.now();
+    dt.items.add(new File([blob], 'color-reference.png', {type:'image/png', lastModified}));
+    dt.items.add(new File([blob], 'color-reference-2.png', {type:'image/png', lastModified}));
     document.getElementById('fileInput').files=dt.files; document.getElementById('fileInput').dispatchEvent(new Event('change',{bubbles:true}));
   })()`);
   await waitFor('color analysis ready', `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`, 120000);
