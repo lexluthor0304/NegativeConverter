@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { runnerFor } from './aiInpaint.js';
 
 // Catch model replacement, missing packaged assets and incompatible IO changes.
-const bytes = readFileSync(new URL('../../public/models/migan_pipeline_v2.onnx', import.meta.url));
+const bytes = readFileSync(new URL('../assets/models/migan_pipeline_v2.onnx', import.meta.url));
 assert.equal(createHash('sha256').update(bytes).digest('hex'),
   '6f1f3530a1a2324b19752018ce756088b07973cda8d7d890034ace5c8a48c40b');
 

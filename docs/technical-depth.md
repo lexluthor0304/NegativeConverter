@@ -83,8 +83,11 @@ app's neutral rendering is still to be recorded once a licence is at hand.
 
 2026-09-06: 標準モデルを LaMa から **MI-GAN Places2 Pipeline v2** に変更。
 Studio の Retouch → Dust cleanup → **AI repair · MI-GAN** で有効化する。
-モデルは `public/models/migan_pipeline_v2.onnx`（約 27 MiB）に同梱し、
-Web / Tauri のビルドに含める。初回読み込み後は IndexedDB にキャッシュする。
+モデルは `src/assets/models/migan_pipeline_v2.onnx`（約 27 MiB）に同梱し、
+Web / Tauri のビルドに含める。Vite が内容ハッシュ付きの `/assets` URL で配信するため、
+モデルを差し替えると URL と IndexedDB のキーも変わる。初回読み込み後は IndexedDB
+（`modelCache.js`、semantic モデルと共用）にキャッシュし、新しいキーの書き込みに
+成功した時点で旧キー（ハッシュ化前の `models/migan_pipeline_v2.onnx` を含む）を削除する。
 外部ホストのモデル配信や写真のアップロードは不要。
 
 ### 入出力と処理経路
@@ -148,7 +151,7 @@ Web / Tauri のビルドに含める。初回読み込み後は IndexedDB にキ
 ### モデルの出典と検証
 
 モデルの固定リビジョン・SHA-256・ライセンスは
-`negative2positive/public/models/README.md` に記録。
+`negative2positive/public/models/README.md` に記録（ONNX 本体は `src/assets/models/`）。
 `aiInpaint.migan.test.mjs` でバンドルのハッシュ、マスクの向き、RGB 配置、
 暗部の正規化、空マスク、エラー時の解放を検証する。
 `technical-depth-smoke.mjs` は壊れたモデルからの復帰、標準モデルの読み込み、

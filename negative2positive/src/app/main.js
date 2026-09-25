@@ -16242,7 +16242,8 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
               updateAiRepairUI();
             }
           });
-          label = String(source).split('/').pop();
+          // The bundled model's URL carries Vite's content hash; show its plain name.
+          label = String(source).split('/').pop().replace(/-[\w-]{8}(\.onnx)$/, '$1');
         }
         const session = await createInpaintSessionInWorker(bytes, { prefer });
         aiRepair.run = session.run;

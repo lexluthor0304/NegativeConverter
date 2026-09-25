@@ -1,6 +1,8 @@
 import { loadInferenceRuntime } from './inferenceRuntime.js';
 import { defaultInferencePreference } from './inferenceBackend.js';
 import { murmurHash3x86_128 } from './contentHash.js';
+import { fetchModelBytes as fetchCachedModelBytes } from './modelCache.js';
+export { readCachedModel, writeCachedModel } from './modelCache.js';
 // On-device AI inpainting for dust and scratches: a learned inpainter (the
 // MI-GAN Places2 pipeline, MIT) run by onnxruntime-web on WebGPU where the
 // browser has it and on WASM otherwise, over 512-px tiles restricted to the
@@ -14,7 +16,10 @@ import { murmurHash3x86_128 } from './contentHash.js';
 // asset next to the lazy chunk), so the runtime works offline in the desktop
 // build and needs no CDN entry in the CSP.
 // Bundled with web and desktop builds; no third-party request is required.
-export const DEFAULT_MODEL_URL = `${import.meta.env?.BASE_URL || '/'}models/migan_pipeline_v2.onnx`;
+// A literal new URL() so Vite fingerprints it into immutable /assets: a
+// replaced model gets a new URL, and with it a new IndexedDB key.
+export const DEFAULT_MODEL_URL = new URL('../assets/models/migan_pipeline_v2.onnx', import.meta.url).href;
+const DEFAULT_MODEL_FAMILY = 'migan_pipeline_v2';
 export const MODEL_LICENCE = 'MI-GAN (Picsart AI Research), MIT; see models/MI-GAN-LICENSE.txt';
 export const TILE = 512;
 export const CONTEXT = 64;
@@ -26,9 +31,6 @@ export const TILE_MEMO_BYTES = 192 * 1024 * 1024;
 export const MAIN_REALM_TILE_MEMO_BYTES = 48 * 1024 * 1024;
 // Frame copies are split so that no task holds the page for long.
 export const CLONE_CHUNK_BYTES = 8 * 1024 * 1024;
-
-const MODEL_DB = 'nc_ai_models';
-const MODEL_STORE = 'models';
 
 // ---- tiling maths ----
 
@@ -358,71 +360,13 @@ export function inpaintBackends() {
 
 export const loadOrt = loadInferenceRuntime;
 
-function openModelDb() {
-  return new Promise((resolve, reject) => {
-    if (typeof indexedDB === 'undefined') { resolve(null); return; }
-    const request = indexedDB.open(MODEL_DB, 1);
-    request.onupgradeneeded = () => { request.result.createObjectStore(MODEL_STORE); };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-}
-
-function requestToPromise(request) {
-  return new Promise((resolve, reject) => {
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-}
-
-export async function readCachedModel(key) {
-  const db = await openModelDb();
-  if (!db) return null;
-  try {
-    const record = await requestToPromise(db.transaction(MODEL_STORE, 'readonly').objectStore(MODEL_STORE).get(key));
-    return record && record.bytes instanceof ArrayBuffer ? record.bytes : null;
-  } finally { db.close(); }
-}
-
-export async function writeCachedModel(key, bytes) {
-  const db = await openModelDb();
-  if (!db) return false;
-  try {
-    await requestToPromise(db.transaction(MODEL_STORE, 'readwrite').objectStore(MODEL_STORE).put({ bytes, savedAt: Date.now() }, key));
-    return true;
-  } catch (error) {
-    console.warn('AI model cache write failed:', error);
-    return false;
-  } finally { db.close(); }
-}
-
-/** Downloads the model once (IndexedDB afterwards), reporting bytes received. */
-export async function fetchModelBytes(url, { onProgress = null } = {}) {
-  const cached = await readCachedModel(url).catch(() => null);
-  if (cached) return cached;
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`model download failed (${response.status})`);
-  const total = Number(response.headers.get('content-length')) || 0;
-  const reader = response.body?.getReader();
-  if (!reader) {
-    const bytes = await response.arrayBuffer();
-    await writeCachedModel(url, bytes).catch(() => false);
-    return bytes;
-  }
-  const chunks = [];
-  let received = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    received += value.length;
-    if (onProgress) onProgress(received, total);
-  }
-  const bytes = new Uint8Array(received);
-  let offset = 0;
-  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
-  await writeCachedModel(url, bytes.buffer).catch(() => false);
-  return bytes.buffer;
+/**
+ * Downloads the model once (IndexedDB afterwards; see modelCache.js). Writing
+ * the bundled model deletes its older keys, including the unversioned
+ * models/migan_pipeline_v2.onnx key of builds before the URL was hashed.
+ */
+export function fetchModelBytes(url, { onProgress = null } = {}) {
+  return fetchCachedModelBytes(url, { onProgress, family: url === DEFAULT_MODEL_URL ? DEFAULT_MODEL_FAMILY : null });
 }
 
 /**
