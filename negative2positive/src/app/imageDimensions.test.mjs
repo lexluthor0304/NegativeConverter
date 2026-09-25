@@ -16,10 +16,11 @@ for (const little of [true, false]) {
   [[256,12000],[257,8000],[262,32803]].forEach(([tag,value],i) => {
     const at = 10 + i * 12; v.setUint16(at,tag,little); v.setUint16(at+2,4,little); v.setUint32(at+4,1,little); v.setUint32(at+8,value,little);
   });
-  assert.deepEqual(parseImageDimensions(tiff, {raw:true}), {width:12000,height:8000});
+  // The matched IFD's PhotometricInterpretation comes with the size (#255).
+  assert.deepEqual(parseImageDimensions(tiff, {raw:true}), {width:12000,height:8000,photometric:32803});
   v.setUint32(42,2,little);
   assert.equal(parseImageDimensions(tiff, {raw:true}), null, 'RAW embedded preview is not sensor dimensions');
-  assert.deepEqual(parseImageDimensions(tiff), {width:12000,height:8000});
+  assert.deepEqual(parseImageDimensions(tiff), {width:12000,height:8000,photometric:2});
 }
 for (let n = 0; n < 24; n++) assert.equal(parseImageDimensions(png.buffer.slice(0,n)), null);
 const unknown = new File(['invalid'], 'unknown.heic');

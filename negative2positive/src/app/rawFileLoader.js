@@ -9,11 +9,10 @@ import { primeFilmStats } from './filmStatsCache.js';
 import { tryNefJpegPreview, createEmbeddedPreviewSource, decodeNefPreviewJpeg } from './nefJpegPreview.js';
 import { sniffImageKind, loadStandardImage, loadPngImageData } from './imageFileLoaders.js';
 import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
-import { halfDecodeFullSize } from './imageDimensions.js';
+import { halfDecodeFullSize, RAW_SIZE_HEAVY, isIPhoneDngHeader } from './imageDimensions.js';
 export { estimateRawDecodeBytes };
 export { rawResultToRgb16 } from './rawResultToRgb16.js';
 
-const RAW_SIZE_HEAVY = 100 * 1024 * 1024;
 // Only devices that actually report a small budget are gated, and only at a
 // generous fraction of it — a false rejection is worse than a slow decode.
 const RAW_LOW_MEMORY_GB = 4;
@@ -105,6 +104,14 @@ function throwIfAborted(signal) {
   if (signal?.aborted) throw abortError(signal);
 }
 
+// The decode came back at the size LibRaw's metadata reports (either way
+// round), i.e. `half_size` was not applied.
+function matchesFullSize(width, height, metaWidth, metaHeight) {
+  if (!(metaWidth > 0 && metaHeight > 0)) return false;
+  const near = (w, h) => Math.abs(width - w) <= 1 && Math.abs(height - h) <= 1;
+  return near(metaWidth, metaHeight) || near(metaHeight, metaWidth);
+}
+
 function withTimeout(promise, ms, onTimeout) {
   let timer;
   const timeout = new Promise((_, reject) => {
@@ -190,6 +197,17 @@ async function loadTiffBuffer(buffer, signal = null) {
  * A host whose reservation already covers the decode resolves at once.
  * `options.ramBytes`: the machine's RAM when the host knows it, for the
  * low-memory refusal.
+ *
+ * The caller states the decode (#255): `halfSize: true` asks LibRaw for a
+ * half-size (2x2-binned) image and `outputBps: 8` for 8-bit output; the
+ * defaults are full size and 16 bits whatever the file's size. `preview:
+ * true` only shortens the timeouts of a stand-in decode. A half-size result
+ * carries `__decodeScale` 0.5 and `__fullSize`; one LibRaw returned at full
+ * size anyway (LinearRaw DNGs cannot be shrunk) carries neither.
+ * `onLibRawReleased()` is called once, when this decode's LibRaw worker and
+ * its WASM heap are gone (after imageData(), on a fallback, an error or an
+ * abort): the two-stage import starts its full decode there on devices that
+ * cannot hold two LibRaw heaps at once.
  */
 export async function loadRawFile(buffer, fileName, options = {}) {
   const normalizedFileName = String(fileName || '').toLowerCase();
@@ -229,8 +247,7 @@ export async function loadRawFile(buffer, fileName, options = {}) {
   }
 
   if (normalizedFileName.endsWith('.dng')) {
-    const textSnippet = new TextDecoder().decode(buffer.slice(0, 1000));
-    if (textSnippet.includes('iPhone')) {
+    if (isIPhoneDngHeader(buffer)) {
       await reserve({ kind: 'scan' });
       try {
         // Preserve the original container for LibRaw if this is a CFA DNG
@@ -261,12 +278,11 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     console.warn('[RAW] heavy IIQ has no usable embedded preview, falling through to LibRaw');
   }
 
-  // Fast preview: use half-size for ~4x speedup on large files. A caller can
-  // state both explicitly instead: `halfSize: true, outputBps: 16` is the
-  // light-table tile decode (#247), independent of the 8-bit preview flag.
-  const explicitHalfSize = typeof options.halfSize === 'boolean';
-  const useHalfSize = explicitHalfSize ? options.halfSize : fastPreview && bufBytes > RAW_SIZE_HEAVY;
-  const use8Bit = options.outputBps === 8 || options.outputBps === 16 ? options.outputBps === 8 : fastPreview;
+  // Half size is about 2.5x faster than a full AHD decode; 16-bit output
+  // costs the same as 8-bit. `halfSize: true, outputBps: 16` is both the
+  // light-table tile decode (#247) and the two-stage import's stand-in (#255).
+  const useHalfSize = options.halfSize === true;
+  const use8Bit = options.outputBps === 8;
 
   const openTimeoutMs = fastPreview
     ? Math.min(bufBytes > RAW_SIZE_HUGE ? RAW_OPEN_TIMEOUT_MS_HUGE : RAW_OPEN_TIMEOUT_MS, 15_000)
@@ -299,6 +315,7 @@ export async function loadRawFile(buffer, fileName, options = {}) {
   // it is disposed. Leaking one per load pins hundreds of MB per frame, which
   // a batch export of a whole roll turns into gigabytes.
   let rawDisposed = false;
+  const onLibRawReleased = typeof options.onLibRawReleased === 'function' ? options.onLibRawReleased : null;
   const disposeRaw = () => {
     if (rawDisposed) return;
     rawDisposed = true;
@@ -306,6 +323,7 @@ export async function loadRawFile(buffer, fileName, options = {}) {
       if (typeof raw.dispose === 'function') raw.dispose();
       else raw.worker?.terminate?.();
     } catch {}
+    try { onLibRawReleased?.(); } catch (err) { console.warn('[RAW] onLibRawReleased failed:', err); }
   };
   const killWorker = disposeRaw;
   // Abort: both workers (and LibRaw's heap) go within this task. A pending
@@ -496,8 +514,13 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     }
     imageData.__image16 = { width: outcome.width, height: outcome.height, data: outcome.rgba16 };
     if (outcome.filmStats) primeFilmStats(imageData, outcome.filmStats);
-    // The size the recipe's crop, strokes and analysis area refer to.
-    if (explicitHalfSize && useHalfSize) imageData.__fullSize = halfDecodeFullSize(outcome.width, outcome.height, metaWidth, metaHeight);
+    // The size the recipe's crop, strokes and analysis area refer to. LibRaw
+    // shrinks only mosaic data: a result at the metadata's full size was not
+    // halved (the two-stage import logs that and still decodes stage 2).
+    if (useHalfSize && !matchesFullSize(outcome.width, outcome.height, metaWidth, metaHeight)) {
+      imageData.__fullSize = halfDecodeFullSize(outcome.width, outcome.height, metaWidth, metaHeight);
+      imageData.__decodeScale = 0.5;
+    }
     return imageData;
   }
 }

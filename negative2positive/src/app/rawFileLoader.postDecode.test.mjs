@@ -72,6 +72,9 @@ function countingBlob(bytes) {
 // --- fake workers ------------------------------------------------------------
 const scene = {
   open: 'ok',              // 'ok' | 'hang'
+  openOptions: null,       // the options LibRaw's open() received
+  metaWidth: 64,           // what metadata() reports
+  metaHeight: 48,
   result: null,            // what imageData() returns (a fresh clone per decode)
   postDecode: 'real',      // 'real' | 'crash' | 'blocked'
   workers: [],
@@ -100,8 +103,8 @@ class FakeWorker {
     this.received.push(moved.fn || moved.type);
     if (this.kind === 'libraw') {
       const { id, fn } = moved;
-      if (fn === 'open') { if (scene.open === 'ok') this.reply({ id }); return; }
-      if (fn === 'metadata') { this.reply({ id, out: { make: 'Fake', model: 'Sensor', width: 64, height: 48 } }); return; }
+      if (fn === 'open') { scene.openOptions = moved.args?.[1] || null; if (scene.open === 'ok') this.reply({ id }); return; }
+      if (fn === 'metadata') { this.reply({ id, out: { make: 'Fake', model: 'Sensor', width: scene.metaWidth, height: scene.metaHeight } }); return; }
       if (fn === 'imageData') {
         const out = scene.result;
         this.reply({ id, out }, out?.data ? [out.data.buffer] : []);
@@ -138,6 +141,9 @@ function headPlanes(result, { suppress = true } = {}) {
 function reset(overrides = {}) {
   scene.open = 'ok';
   scene.result = null;
+  scene.openOptions = null;
+  scene.metaWidth = 64;
+  scene.metaHeight = 48;
   scene.postDecode = 'real';
   scene.workers.length = 0;
   bitmapInputs.length = 0;
@@ -274,6 +280,59 @@ await expectPreviewFallback('garbled output', { result: makeRawResult({ width: 6
   reset({ result: {} });
   const unreadable = { arrayBuffer: () => Promise.reject(new Error('NotFoundError')) };
   await assert.rejects(loadRawFile(makeContainer().buffer, 'frame.nef', { sourceBlob: unreadable }), (err) => err.code === 'RAW_DECODE_TIMEOUT');
+}
+
+// --- the caller states the decode (#255) ------------------------------------------
+{
+  // `preview: true` alone no longer means half size or 8 bits.
+  reset({ result: cloneRawResult(fixture) });
+  const imageData = await loadRawFile(makeContainer().buffer, 'frame.nef', { preview: true, sourceBlob: countingBlob(makeContainer()).blob });
+  assert.equal(scene.openOptions.halfSize, false);
+  assert.equal(scene.openOptions.outputBps, 16);
+  assert.equal(imageData.__decodeScale, undefined);
+  assert.equal(imageData.__fullSize, undefined);
+}
+{
+  // The two-stage stand-in: half size, 16 bits, no defect pass, tagged with
+  // its scale and the full size from LibRaw's metadata. onLibRawReleased
+  // fires once, when the LibRaw worker is gone and before the planes are built.
+  const half = makeRawResult({ width: 32, height: 24, seed: 21, channels: 3, bits: 16 });
+  reset({ result: cloneRawResult(half) });
+  const released = [];
+  const imageData = await loadRawFile(makeContainer().buffer, 'frame.dng', {
+    preview: true, halfSize: true, outputBps: 16, suppressSensorDefects: false,
+    sourceBlob: countingBlob(makeContainer()).blob,
+    onLibRawReleased: () => released.push({
+      libraw: scene.workers.find((w) => w.kind === 'libraw')?.terminated,
+      processed: scene.workers.find((w) => w.kind === 'post')?.received.includes('process')
+    })
+  });
+  assert.equal(scene.openOptions.halfSize, true);
+  assert.equal(scene.openOptions.outputBps, 16);
+  assert.deepEqual(released, [{ libraw: true, processed: false }]);
+  assert.equal(imageData.width, 32);
+  assert.equal(imageData.__decodeScale, 0.5);
+  assert.deepEqual(imageData.__fullSize, { width: 64, height: 48 });
+  assert.deepEqual(imageData.__image16.data, headPlanes(cloneRawResult(half), { suppress: false }).rgba16, 'no defect pass');
+}
+{
+  // LibRaw returned the full size anyway (a LinearRaw DNG): not a stand-in scale.
+  reset({ result: cloneRawResult(fixture) });
+  const released = [];
+  const imageData = await loadRawFile(makeContainer().buffer, 'frame.dng', {
+    halfSize: true, outputBps: 16, suppressSensorDefects: false, onLibRawReleased: () => released.push(true)
+  });
+  assert.equal(imageData.width, 64);
+  assert.equal(imageData.__decodeScale, undefined);
+  assert.equal(imageData.__fullSize, undefined);
+  assert.equal(released.length, 1);
+}
+{
+  // A failed decode still reports the release (sequential stage 2 starts there).
+  reset({ result: {} });
+  const released = [];
+  await assert.rejects(loadRawFile(makeContainer(false).buffer, 'frame.nef', { halfSize: true, onLibRawReleased: () => released.push(true) }));
+  assert.equal(released.length, 1);
 }
 
 console.log('rawFileLoader.postDecode.test.mjs passed');

@@ -36,7 +36,7 @@ export async function runStudioRawAutoFrameSmoke({ send, evaluate, waitFor, fail
       const {resizeImageDataToMaxSide} = await import('/src/app/imageDataOps.js');
       const {canAutoApplyImportFrame} = await import('/src/app/autoFrameFormats.js');
       const file = document.getElementById('rawRegressionInput').files[0];
-      let raw = await loadRawFile(await file.arrayBuffer(), file.name, {preview:true});
+      let raw = await loadRawFile(await file.arrayBuffer(), file.name, {preview:true, outputBps:8});
       const start = performance.now();
       // The import request (#251): this decode is handed to the worker and
       // back, and only the rotated frame's size is returned. The line-search
