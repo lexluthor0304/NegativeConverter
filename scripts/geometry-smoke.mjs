@@ -84,7 +84,13 @@ export async function runGeometrySmoke({ send, evaluate, waitFor, wait, fail, in
     if (rotated.hash16 !== rotated.chainHash16 || rotated.hash8 !== rotated.chainHash8) fail('rotated planes differ from the export chain: ' + JSON.stringify(rotated));
     if (afterRotate.poolRotations - beforeRotate.poolRotations !== 1 || afterRotate.mainRotations !== beforeRotate.mainRotations) fail('rotate 90 did not build its planes in the pool: ' + JSON.stringify({ beforeRotate, afterRotate }));
     // The crop box maps through the turn with floor/ceil, so a side may grow by a pixel.
-    if (Math.abs(sizeAfter[0] - sizeBefore[1]) > 2 || Math.abs(sizeAfter[1] - sizeBefore[0]) > 2) fail('rotate 90 did not swap the displayed frame: ' + JSON.stringify({ sizeBefore, sizeAfter }));
+    if (Math.abs(rotated.width - importState.height) > 2 || Math.abs(rotated.height - importState.width) > 2) {
+      fail('rotate 90 did not swap the frame: ' + JSON.stringify({ before: [importState.width, importState.height], after: [rotated.width, rotated.height] }));
+    }
+    // #canvas holds the display preview, sized to the view, so only its
+    // aspect ratio has to turn with the frame.
+    const aspect = ([w, h]) => w / h;
+    if (Math.abs(aspect(sizeAfter) * aspect(sizeBefore) - 1) > 0.02) fail('rotate 90 did not swap the displayed frame: ' + JSON.stringify({ sizeBefore, sizeAfter }));
     if (/rotate/.test(await evaluate(`document.getElementById('canvasTransformWrapper').style.transform`))) fail('the interim turn outlived the new paint');
 
     // Mirror: flipped at once, exact planes from the pool.
