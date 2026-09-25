@@ -154,7 +154,9 @@ timestamps:
   `window.__ncMemory?.snapshot()` once #258 adds it.
 
 It never calls `readPixels`, `getError` or `getImageData` itself (GPU or raster
-sync points): "visible" is decided from upload hashes. Its own time is
+sync points): "visible" is decided from upload hashes. The one exception is
+S9's verification repetition, which decodes a JPEG export on an
+`OffscreenCanvas` after the measured window to hash its pixels. Its own time is
 reported per window as `probeSelfMs`/`probeSelfPct` (budget: ≤ 1 % of
 main-thread task time in S2; `probe.selfPctMax` in every S2 summary).
 `scripts/perf/probe-worker.js` adds worker-side start/reply timestamps through
