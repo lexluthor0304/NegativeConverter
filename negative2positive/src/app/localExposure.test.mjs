@@ -98,4 +98,95 @@ import {
   assert.equal(sanitizeLocalExposureForSettings(null), null);
 }
 
+// #248: rasterizeExposureStops gained a window for the detail layer. Without
+// one it must equal the implementation before it (b8f4cc2, kept here), and a
+// window must equal the same region of the whole frame's raster.
+{
+  const clamp = (value, min, max) => (value < min ? min : value > max ? max : value);
+  function headForEachStrokeCoverage(localExposure, geometry, visit) {
+    const width = geometry.width; const height = geometry.height;
+    const strokes = localExposure?.strokes;
+    if (!Array.isArray(strokes) || !strokes.length) return;
+    const shortSide = Math.min(geometry.baseWidth, geometry.baseHeight);
+    for (const stroke of strokes) {
+      const points = stroke.points.map((p) => ({ ...basePointToWorking(p, geometry), p: p.p ?? 1 }));
+      if (!points.length) continue;
+      const scale = points[0].scale / Math.min(geometry.cropRegion ? geometry.cropRegion.width : (geometry.rotatedWidth || geometry.baseWidth), geometry.cropRegion ? geometry.cropRegion.height : (geometry.rotatedHeight || geometry.baseHeight));
+      const radius = Math.max(1, stroke.size * shortSide * scale / 2);
+      const feather = clamp(stroke.feather ?? 0.5, 0, 1);
+      const hard = radius * (1 - feather);
+      const segments = points.length === 1 ? [[points[0], points[0]]] : points.slice(1).map((p, i) => [points[i], p]);
+      // Coverage keeps the maximum falloff per stroke so overlapping segments
+      // of one stroke do not double up.
+      const maxR = radius * Math.max(...points.map((p) => p.p));
+      const bx0 = Math.max(0, Math.floor(Math.min(...points.map((p) => p.x)) - maxR));
+      const bx1 = Math.min(width - 1, Math.ceil(Math.max(...points.map((p) => p.x)) + maxR));
+      const by0 = Math.max(0, Math.floor(Math.min(...points.map((p) => p.y)) - maxR));
+      const by1 = Math.min(height - 1, Math.ceil(Math.max(...points.map((p) => p.y)) + maxR));
+      if (bx1 < bx0 || by1 < by0) continue;
+      const bw = bx1 - bx0 + 1;
+      const bh = by1 - by0 + 1;
+      const coverage = new Float32Array(bw * bh);
+      for (const [a, b] of segments) {
+        const r = radius * Math.max(a.p, b.p);
+        const x0 = Math.max(bx0, Math.floor(Math.min(a.x, b.x) - r)); const x1 = Math.min(bx1, Math.ceil(Math.max(a.x, b.x) + r));
+        const y0 = Math.max(by0, Math.floor(Math.min(a.y, b.y) - r)); const y1 = Math.min(by1, Math.ceil(Math.max(a.y, b.y) + r));
+        if (x1 < x0 || y1 < y0) continue;
+        const dx = b.x - a.x; const dy = b.y - a.y;
+        const lengthSq = dx * dx + dy * dy;
+        const ph = hard * Math.max(a.p, b.p);
+        for (let y = y0; y <= y1; y++) {
+          for (let x = x0; x <= x1; x++) {
+            const px = x + 0.5; const py = y + 0.5;
+            let t = lengthSq > 0 ? ((px - a.x) * dx + (py - a.y) * dy) / lengthSq : 0;
+            t = clamp(t, 0, 1);
+            const cx = a.x + t * dx; const cy = a.y + t * dy;
+            const dist = Math.hypot(px - cx, py - cy);
+            if (dist >= r) continue;
+            const falloff = dist <= ph ? 1 : 0.5 + 0.5 * Math.cos(Math.PI * (dist - ph) / Math.max(1e-6, r - ph));
+            const idx = (y - by0) * bw + (x - bx0);
+            if (falloff > coverage[idx]) coverage[idx] = falloff;
+          }
+        }
+      }
+      visit(stroke, bx0, by0, bw, bh, coverage);
+    }
+  }
+
+  // Rasterises strokes into a Float32Array of stops per pixel (0 = untouched).
+  // Overlapping strokes add up, so a second pass burns twice.
+  function headRasterizeExposureStops(localExposure, geometry) {
+    const width = geometry.width; const height = geometry.height;
+    const stops = new Float32Array(width * height);
+    headForEachStrokeCoverage(localExposure, geometry, (stroke, bx0, by0, bw, bh, coverage) => {
+      for (let y = by0; y < by0 + bh; y++) {
+        for (let x = bx0; x < bx0 + bw; x++) {
+          const c = coverage[(y - by0) * bw + (x - bx0)];
+          if (c > 0) stops[y * width + x] += stroke.stops * c;
+        }
+      }
+    });
+    return stops;
+  }
+
+  const strokes = { strokes: [
+    { stops: 1.3, size: 0.25, feather: 0.5, points: [{ x: 0.2, y: 0.3, p: 1 }, { x: 0.7, y: 0.6, p: 0.6 }] },
+    { stops: -0.9, size: 0.12, feather: 0.1, points: [{ x: 0.5, y: 0.5, p: 1 }] },
+    { stops: 0.4, size: 0.4, feather: 0.9, points: [{ x: 0.9, y: 0.1, p: 0.8 }, { x: 0.95, y: 0.2, p: 1 }, { x: 0.6, y: 0.9, p: 0.3 }] }
+  ] };
+  for (const geometry of [
+    { baseWidth: 120, baseHeight: 80, rotationAngle: 0, mirrored: false, rotatedWidth: 120, rotatedHeight: 80, cropRegion: null, width: 120, height: 80 },
+    { baseWidth: 120, baseHeight: 80, rotationAngle: 7, mirrored: true, rotatedWidth: 129, rotatedHeight: 94, cropRegion: { left: 10, top: 6, width: 100, height: 70 }, width: 50, height: 35 },
+  ]) {
+    const full = rasterizeExposureStops(strokes, geometry);
+    assert.deepEqual(full, headRasterizeExposureStops(strokes, geometry), 'no window: identical to the implementation before #248');
+    for (const window of [{ x: 7, y: 5, width: 30, height: 20 }, { x: geometry.width - 12, y: geometry.height - 9, width: 12, height: 9 }]) {
+      const region = rasterizeExposureStops(strokes, { ...geometry, window });
+      for (let y = 0; y < window.height; y++) for (let x = 0; x < window.width; x++) {
+        assert.equal(region[y * window.width + x], full[(window.y + y) * geometry.width + window.x + x], 'a window equals the frame raster');
+      }
+    }
+  }
+}
+
 console.log('localExposure.test.mjs passed');
