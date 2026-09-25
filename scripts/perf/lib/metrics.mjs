@@ -37,12 +37,28 @@ export function conversionResultIndex(events) {
   return index;
 }
 
+export const SOURCE_TEXTURE_MIN_PX = 65536;
+
 /**
- * New pictures on one canvas, each with its cause time and whether it shows
- * a conversion result (a positive).
+ * New pictures on one canvas. Each carries its cause time, the conversion
+ * result it shows (`res`), when its content arrived (`contentT`) and whether
+ * it shows new positive content (`positive`):
+ * - #glCanvas only ever shows converted positives (negatives are drawn to the
+ *   2D canvas), so a draw after a new source-texture upload is a positive.
+ *   Its result is the one whose pixels hash like the upload, else (when the
+ *   app resized the result for display) the newest result before the upload.
+ *   A uniform-only redraw is a picture but not new content.
+ * - #canvas (CPU display path, negatives, crop view): a put/draw whose pixels
+ *   hash like a conversion result is a positive.
  */
 export function pictures(events, canvasId = GL_CANVAS) {
   const results = conversionResultIndex(events);
+  const ordered = byKind(events, 'res').filter(res => res.cls === 'convert' && !res.err).sort((x, y) => x.t - y.t);
+  const newestResultBefore = time => {
+    let found = null;
+    for (const res of ordered) { if (res.t <= time) found = res; else break; }
+    return found;
+  };
   const out = [];
   if (canvasId === CPU_CANVAS) {
     let lastSig = null;
@@ -52,7 +68,7 @@ export function pictures(events, canvasId = GL_CANVAS) {
       if (sig === lastSig) continue;
       lastSig = sig;
       const res = results.get(event.hash ?? event.src) || null;
-      out.push({ t: event.t, causeT: res ? res.rt : event.t, positive: Boolean(res), w: event.w, h: event.h, res: res || null, kind: event.fn });
+      out.push({ t: event.t, causeT: res ? res.rt : event.t, contentT: event.t, positive: Boolean(res), res, w: event.w, h: event.h, kind: event.fn });
     }
     return out;
   }
@@ -72,21 +88,28 @@ export function pictures(events, canvasId = GL_CANVAS) {
     lastDrawT = event.t;
     if (sig !== undefined && sig === lastSig) continue;
     lastSig = sig;
-    let causeT = null;
+    const source = since.filter(upload => upload.w * upload.h >= SOURCE_TEXTURE_MIN_PX).pop() || null;
     let res = null;
     for (const upload of since) {
       const match = results.get(upload.hash);
       if (match && (!res || match.rt > res.rt)) res = match;
     }
+    let matchedBy = res ? 'hash' : null;
+    if (!res && source) {
+      res = newestResultBefore(source.t);
+      matchedBy = res ? 'order' : null;
+    }
+    let causeT;
     if (res) causeT = res.rt;
     else {
       const candidates = since.map(upload => upload.t);
       if (Number.isFinite(event.ut) && event.ut > prevDrawT) candidates.push(event.ut);
       causeT = candidates.length ? Math.max(...candidates) : event.t;
     }
-    const photo = since.filter(upload => upload.w * upload.h > 4096);
-    const size = photo.length ? photo[photo.length - 1] : null;
-    out.push({ t: event.t, causeT, positive: Boolean(res), res, uploads: since, w: size?.w ?? null, h: size?.h ?? null, kind: 'draw' });
+    out.push({
+      t: event.t, causeT, contentT: source ? source.t : null, positive: Boolean(source) || matchedBy === 'hash', res, matchedBy,
+      uploads: since, w: source?.w ?? null, h: source?.h ?? null, kind: 'draw'
+    });
   }
   return out;
 }
@@ -331,8 +354,9 @@ export function settledAt(events, from, { quietMs = 2500, until = Infinity } = {
 /** S1 import timeline, all values relative to the file input `change`. */
 export function importMetrics(events, { changeT, canvasIds = [GL_CANVAS, CPU_CANVAS], until = Infinity }) {
   const after = events.filter(event => event.t >= changeT);
+  // New content only: a GL draw of a freshly uploaded source texture, or a 2D put/draw.
   const pics = canvasIds.flatMap(id => pictures(after, id))
-    .filter(pic => pic.t >= changeT && (pic.w === null || pic.w * pic.h > 65536 || pic.kind !== 'draw'))
+    .filter(pic => pic.t >= changeT && pic.contentT !== null && pic.contentT >= changeT)
     .sort((a, b) => a.t - b.t);
   const first = pics[0] || null;
   let firstVisible = null;
@@ -377,10 +401,13 @@ export function switchMetrics(events, { keyT, target, displaySize = null, until 
   const after = events.filter(event => event.t >= keyT && event.t <= until);
   const names = byKind(events, 'mut').filter(event => event.what === 'filename');
   const shownAt = names.find(event => event.t >= keyT && event.v === target)?.t ?? null;
-  const pics = [GL_CANVAS, CPU_CANVAS].flatMap(id => pictures(events, id)).filter(pic => pic.t >= keyT && pic.t <= until).sort((a, b) => a.t - b.t);
+  // New content that arrived after the keypress, drawn once the target is named.
+  const pics = [GL_CANVAS, CPU_CANVAS].flatMap(id => pictures(events, id))
+    .filter(pic => pic.t >= keyT && pic.t <= until && pic.contentT !== null && pic.contentT >= keyT)
+    .sort((a, b) => a.t - b.t);
   const firstPixels = shownAt === null ? null : pics.find(pic => pic.t >= shownAt) || null;
   const displayOk = pic => !displaySize || !pic.w || (pic.w >= displaySize.w * 0.95 && pic.h >= displaySize.h * 0.95);
-  const firstPositive = pics.find(pic => pic.positive && pic.res && pic.res.rt >= keyT && displayOk(pic) && (shownAt === null || pic.t >= shownAt)) || null;
+  const firstPositive = pics.find(pic => pic.positive && displayOk(pic) && (shownAt === null || pic.t >= shownAt)) || null;
   let ready = null;
   if (shownAt !== null) {
     for (const event of byKind(events, 'vis')) {

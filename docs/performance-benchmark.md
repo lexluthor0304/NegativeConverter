@@ -181,8 +181,12 @@ Metric keys are `s<N>.<subject>.<metric>`; summaries are keyed
 
 - **Picture**: a draw on the display canvas whose state signature differs from
   the previous draw's, or a 2D put/draw with new pixels on the CPU display
-  canvas. A picture is a **positive** when one of its texture uploads hashes
-  like a conversion result.
+  canvas. `#glCanvas` only ever shows converted positives (negatives go to the
+  2D canvas), so a GL draw after a new source-texture upload is a **positive**;
+  it is tied to the conversion result whose pixels hash like the upload, or,
+  when the app resized the result for display, to the newest result before the
+  upload. On the 2D canvas a put/draw is a positive when its pixels hash like a
+  conversion result. A uniform-only GL redraw is a picture but not new content.
 - **Input→draw** is draw-anchored: picture time minus the time of the newest
   input it reflects. A picture reflects the newest value-changing input at or
   before its cause: the request time of the conversion whose result it shows,

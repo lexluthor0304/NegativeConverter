@@ -15,7 +15,7 @@ async function afterAction(ctx, prefix, inputT, { needPositive = false, observeM
   while (Date.now() < deadline) {
     await sleep(250);
     await session.drain();
-    picture = allPictures(session.events).find(pic => pic.t >= inputT && (!needPositive || pic.positive)) || null;
+    picture = allPictures(session.events).find(pic => pic.t >= inputT && (!needPositive || (pic.positive && pic.contentT >= inputT))) || null;
     if (picture) break;
   }
   await sleep(Math.max(0, observeMs - 250));

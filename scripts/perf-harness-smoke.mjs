@@ -26,8 +26,10 @@ export async function runPerfHarnessSmoke({ send, evaluate, waitFor, wait, fail,
     await send('DOM.setFileInputFiles', { files, nodeId: input.result.nodeId });
   };
   const boot = async query => {
+    // The previous page may satisfy the boot condition too: wait for a new document.
+    const previous = await evaluate('performance.timeOrigin');
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en${query}` });
-    await waitFor('perf smoke boot', `!!document.getElementById('studioImportAutoCrop') && !!globalThis.__ncPerf`);
+    await waitFor('perf smoke boot', `performance.timeOrigin !== ${previous} && document.readyState === 'complete' && !!document.getElementById('studioImportAutoCrop') && !!globalThis.__ncPerf`);
     await installDialogAutoAccept();
     await wait(1500);
   };
@@ -43,14 +45,19 @@ export async function runPerfHarnessSmoke({ send, evaluate, waitFor, wait, fail,
     const kinds = events.reduce((acc, event) => { acc[event.k] = (acc[event.k] || 0) + 1; return acc; }, {});
     const change = events.find(event => event.k === 'input' && event.type === 'change' && event.id === 'fileInput');
     const convertResults = conversionResultIndex(events);
-    const pics = pictures(events, 'glCanvas');
+    // The WebGL display is the norm; without WebGL the CPU canvas shows the photo.
+    const pics = [...pictures(events, 'glCanvas'), ...pictures(events, 'canvas')];
+    const webgl = await evaluate(`getComputedStyle(document.getElementById('glCanvas')).display !== 'none'`);
     const measures = events.filter(event => event.k === 'um' && /^nc:/.test(event.n)).map(event => event.n);
-    const summary = { kinds, convertResults: convertResults.size, pictures: pics.length, positives: pics.filter(pic => pic.positive).length, measures: [...new Set(measures)], counters: drained.counters };
+    const positives = pics.filter(pic => pic.positive && pic.res);
+    const summary = { kinds, convertResults: convertResults.size, pictures: pics.length, positives: positives.length,
+      matchedByHash: positives.filter(pic => pic.matchedBy === 'hash' || pic.res && pic.kind !== 'draw').length, measures: [...new Set(measures)], counters: drained.counters };
     console.log('perf harness smoke (probe):', JSON.stringify(summary));
     if (!change) fail('probe did not record the file input change: ' + JSON.stringify(summary));
-    if (!kinds['gl.upload'] || !kinds['gl.draw']) fail('probe recorded no WebGL uploads/draws: ' + JSON.stringify(summary));
+    if (webgl && (!kinds['gl.upload'] || !kinds['gl.draw'])) fail('probe recorded no WebGL uploads/draws: ' + JSON.stringify(summary));
+    if (!webgl && !kinds.c2d) fail('probe recorded no 2D canvas drawing: ' + JSON.stringify(summary));
     if (!convertResults.size) fail('probe recorded no hashed conversion results: ' + JSON.stringify(summary));
-    if (!pics.some(pic => pic.positive)) fail('no displayed upload matched a conversion result (positive not recognised): ' + JSON.stringify(summary));
+    if (!positives.length) fail('no displayed picture was tied to a conversion result (positive not recognised): ' + JSON.stringify(summary));
     if (!measures.includes('nc:prepareStudioPhoto') && !measures.includes('nc:processNegative')) fail('?perf=1 produced no perf-trace measures: ' + JSON.stringify(summary));
     if (!drained.counters['worker.new']) fail('probe saw no workers: ' + JSON.stringify(summary));
     const window = await evaluate(`(async () => { globalThis.__ncPerf.beginWindow('smoke'); await new Promise(r => setTimeout(r, 300)); return globalThis.__ncPerf.endWindow(); })()`);

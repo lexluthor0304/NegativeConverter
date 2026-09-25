@@ -82,6 +82,23 @@ const sortT = events => events.sort((a, b) => a.t - b.t);
   assert.equal(pics[2].causeT, 10);
 }
 
+// ---- GL positives: resized results match by order; uniform redraws are not new content ----
+{
+  const events = sortT([
+    { k: 'req', t: 10, cls: 'convert', wid: 1, id: 1 },
+    { k: 'res', t: 40, cls: 'convert', wid: 1, id: 1, rt: 10, hash: 'full-size' },
+    { k: 'gl.upload', t: 45, c: 'glCanvas', w: 1809, h: 1202, hash: 'resized-for-display' },
+    { k: 'gl.draw', t: 46, c: 'glCanvas', sig: 'a' },
+    { k: 'gl.draw', t: 60, c: 'glCanvas', sig: 'b', ut: 55 },
+    { k: 'gl.upload', t: 70, c: 'glCanvas', w: 256, h: 1, hash: 'lut' },
+    { k: 'gl.draw', t: 71, c: 'glCanvas', sig: 'c' }
+  ]);
+  const pics = pictures(events, 'glCanvas');
+  assert.deepEqual(pics.map(pic => [pic.positive, pic.matchedBy, pic.causeT, pic.contentT]), [
+    [true, 'order', 10, 45], [false, null, 55, null], [false, null, 70, null]
+  ]);
+}
+
 // ---- settled: in-flight requests keep the page busy ----
 {
   const events = sortT([
@@ -155,6 +172,26 @@ const sortT = events => events.sort((a, b) => a.t - b.t);
   assert.equal(m.readyMs, 9490);
   assert.equal(m.librawDecodes, 1);
   assert.equal(m.staleResultsAfterShown, 1, 'a result requested before the switch arriving after it counts as stale');
+}
+
+// ---- S7 warm switch: cached pixels, no new conversion ----
+{
+  const events = sortT([
+    { k: 'req', t: 100, cls: 'convert', wid: 1, id: 1 },
+    { k: 'res', t: 120, cls: 'convert', wid: 1, id: 1, rt: 100, hash: 'old' },
+    { k: 'gl.upload', t: 121, c: 'glCanvas', w: 1809, h: 1202, hash: 'old' },
+    { k: 'gl.draw', t: 122, c: 'glCanvas', sig: 'o' },
+    { k: 'input', type: 'keydown', t: 1000, key: 'Enter' },
+    { k: 'gl.draw', t: 1005, c: 'glCanvas', sig: 'o2', ut: 1003 },
+    { k: 'mut', t: 1010, what: 'filename', v: 'B.DNG' },
+    { k: 'gl.upload', t: 1070, c: 'glCanvas', w: 1809, h: 1202, hash: 'cached-b' },
+    { k: 'gl.draw', t: 1077, c: 'glCanvas', sig: 'b' },
+    { k: 'vis', t: 1100, ov: false, ready: true, busy: false }
+  ]);
+  const m = switchMetrics(events, { keyT: 1000, target: 'B.DNG', displaySize: { w: 1809, h: 1202 }, until: 3000 });
+  assert.equal(m.firstPixelsMs, 77, 'a redraw of the old texture is not the target');
+  assert.equal(m.firstDisplayPositiveMs, 77, 'restored pixels count without a new conversion');
+  assert.equal(m.librawDecodes, 0);
 }
 
 // ---- S4 zoom step and pan ----
