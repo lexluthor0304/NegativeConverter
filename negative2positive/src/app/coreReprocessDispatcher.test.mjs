@@ -162,6 +162,8 @@ function schedulerFixture({ repairs = false } = {}) {
     hasFrameRepairs: () => state.dustRemoval.enabled,
     getDisplayPreviewSize: () => ({ ...displayTarget }),
     resizeDisplayPreview: (image, size) => ({ ...size, name: 'resized' }),
+    // #263: outside a reduced preview-tier session the preview is sized as before.
+    previewTier: 'normal', previewTierKept: null, previewTierPrebuilt: null, reducedDisplayImages: new WeakSet(),
     convertFromCurrentSource: (settings, options) => new Promise((resolve, reject) => {
       // The request reads live state when it starts, as the real one does.
       const entry = { exposure: state.coreExposure, token: context.coreReprocessToken,
@@ -187,6 +189,7 @@ function schedulerFixture({ repairs = false } = {}) {
     'retainCorePreviewPlane', 'armCorePreviewCommitTimer', 'releaseCorePreviewRetained', 'requestCorePreviewCommit',
     'maybeCommitCorePreviewPlane', 'settleCorePreviewWaiters', 'settleCorePreviewPlane', 'histogramSourceFor',
     'currentConvertedPreviewSource', 'displayResizeOrigin', 'displayResizeReplaces',
+    'ensureConversionPreviewForDisplay',
   ].map(functionSource).join('\n'), context);
   const request = (exposure, options = { full: false }) => {
     if (exposure !== undefined) state.coreExposure = exposure;
@@ -453,7 +456,7 @@ for (const earlyPost of [false, true]) {
     samplePhotoPreviewSource: () => ({}), adjustPhotoPreviewSample: () => ({}), schedulePostPaintTask: () => {},
     hiddenJobs: { safeMode: false }, geometryDiagnostics: { coldSessions: false }, dustAiRefresh: { rects: [] },
   });
-  vm.runInContext(functionSource('rememberPhotoSession'), f.context);
+  vm.runInContext(['rememberPhotoSession', 'displayIsReduced'].map(functionSource).join('\n'), f.context);
   f.request(1);
   f.context.rememberPhotoSession(item);
   assert.equal(stored.at(-1).snapshot, null, 'a request held to the end of the task is unsettled');

@@ -73,6 +73,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     import { planBatchParallelism, planPng16BandWorkers, runBatchPipeline, planGeometryBandsInFlight } from './batchExportScheduler.js';
     import { displayPreviewSize, resizeDisplayPreview, updateDisplayPreviewRect } from './displayPreview.js';
     import { createCoreReprocessGates, previewDispatchAction, CORE_FULL_REPROCESS_DELAY_MS } from './coreReprocessDispatcher.js';
+    import { createPreviewTierController, previewTierMaxPixels, capBackingSize, parsePreviewTierOverride } from './previewTier.js';
+    import { describeWebglRenderer, startsReducedReason, formatRenderEnvironmentLine, formatPreviewSessionLine } from './renderEnvironment.js';
     import { invalidateSilverCoreCache, analyzeSilverCoreFrame } from '../pipeline/silverAdapter.js';
     import { canUseBrowserZipStreaming, ZipStoreWriter, createZipNameDeduper } from './zipStoreWriter.js';
     import {
@@ -2829,6 +2831,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       for (const key of SNAPSHOT_REF_KEYS) {
         refs[key] = state[key];
       }
+      // A reduced preview-tier session (#263) swaps the conversion preview on
+      // screen only; history keeps the normal-tier object.
+      if (previewTierKept && previewTierKept.source === state.conversionSourceImageData
+        && reducedDisplayImages.has(refs.conversionPreviewImageData)) {
+        refs.conversionPreviewImageData = previewTierKept.preview;
+      }
       // Dust refs
       refs.dustMask = state.dustRemoval.mask;
       refs.dustMaskTag = state.dustRemoval.maskTag;
@@ -3190,6 +3198,35 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // the Window Resize section), so fitting the canvas and sizing the display
     // preview never force layout on the draw and result paths.
     const canvasContainerSize = { width: 0, height: 0, valid: false, observed: false };
+    // Interactive preview tier (#263, previewTier.js): 'reduced' only inside a
+    // slider or curve session, where the display preview, the WebGL texture
+    // sources and the drawing buffer are capped at about 1 MP. Every settled
+    // view comes from the normal tier.
+    let previewTier = 'normal';
+    // The normal-tier conversion preview a reduced one was built from, put
+    // back when the session ends: { source, preview }.
+    let previewTierKept = null;
+    // A reduced conversion preview built ahead of the next session on hosts
+    // known to be slow: { base, image }.
+    let previewTierPrebuilt = null;
+    let previewTierPrebuildHandle = null;
+    // Every display image made at the reduced tier. While one is on screen the
+    // view is not settled, and the session end converts once more at the
+    // normal size.
+    const reducedDisplayImages = new WeakSet();
+    // Set while a photo switch closes a session: no work for the old photo.
+    let previewTierQuietEnd = false;
+    const renderEnvironment = { compositing: null, compositingLoaded: false, renderer: null, rendererKnown: false, reported: false };
+    const previewTierController = createPreviewTierController({
+      force: parsePreviewTierOverride(window.location.search),
+      isHidden: () => document.hidden,
+      onChange: (tier) => onPreviewTierChange(tier),
+      onSessionEnd: (summary) => onPreviewTierSessionEnd(summary),
+      measureBacking: () => {
+        const surface = glCanvas.style.display === 'block' ? glCanvas : canvas;
+        return { width: surface.width, height: surface.height };
+      }
+    });
     const zoomIndicator = document.getElementById('zoomIndicator');
     const zoomControls = document.getElementById('zoomControls');
     const ZOOM_MIN = 1;
@@ -3265,7 +3302,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         `batchSessionActive=${state.batchSessionActive} batchMode=${state.batchMode}\n` +
         `fileList display=${fileListDisplay} h=${fileListH}\n` +
         `fileList last=${debugUI.lastFileListVisible} reason=${debugUI.lastFileListReason}\n` +
-        `fileList setCalls=${debugUI.fileListSetCalls}`;
+        `fileList setCalls=${debugUI.fileListSetCalls}\n` +
+        `${renderEnvironmentLine()}\n` +
+        `tier=${previewTier} last ${formatPreviewSessionLine(previewTierController.lastSummary)}`;
     }
 
     function setFileListVisible(visible, reason) {
@@ -4296,19 +4335,27 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return canvasContainerSize;
     }
 
-    function getDisplayPreviewSize(imageData, maxDimension = webglState.maxTextureSize || 8192) {
+    function getDisplayPreviewSize(imageData, maxDimension = webglState.maxTextureSize || 8192, tier = previewTier) {
       const container = getCanvasContainerSize();
       return displayPreviewSize(imageData.width, imageData.height, {
         viewportWidth: container.width - 20 || 1280,
         viewportHeight: container.height - 20 || 900,
         dpr: window.devicePixelRatio || 1,
         zoom: state.zoomLevel,
+        maxPixels: previewTierMaxPixels(tier),
         maxDimension
       });
     }
 
+    // Marks a smaller copy made at the reduced tier. An image returned as it
+    // is keeps whatever mark it already has.
+    function noteTierImage(result, input) {
+      if (previewTier === 'reduced' && result !== input) reducedDisplayImages.add(result);
+      return result;
+    }
+
     function buildPreviewSourceImageData(imageData) {
-      return resizeDisplayPreview(imageData, getDisplayPreviewSize(imageData));
+      return noteTierImage(resizeDisplayPreview(imageData, getDisplayPreviewSize(imageData)), imageData);
     }
 
     function buildHistogramSourceImageData(imageData) {
@@ -4324,7 +4371,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     }
 
     function buildWebglSourceImageData(imageData, maxDim = webglState.maxTextureSize || 8192) {
-      return resizeDisplayPreview(imageData, getDisplayPreviewSize(imageData, maxDim));
+      return noteTierImage(resizeDisplayPreview(imageData, getDisplayPreviewSize(imageData, maxDim)), imageData);
     }
 
     let displayPreviewResizeTimer = null;
@@ -4334,12 +4381,266 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         displayPreviewResizeTimer = null;
         const source = state.conversionSourceImageData;
         if (!source || state.currentStep < 3 || state.cropping || state.beforeAfterActive) return;
+        // A reduced session sizes its own preview; its end calls this again.
+        if (previewTier === 'reduced') return;
         const target = getDisplayPreviewSize(source);
         const previous = state.conversionPreviewImageData;
         if (previous?.width === target.width && previous?.height === target.height) return;
         state.conversionPreviewImageData = resizeDisplayPreview(source, target);
         scheduleCoreReprocess({ full: false, displayResize: true });
       }, 100);
+    }
+
+    // ===========================================
+    // Interactive preview tier (#263)
+    // ===========================================
+
+    // Sizes the SilverCore conversion preview for the current tier before a
+    // preview tick. The reduced one is resampled from the normal-tier preview
+    // (small and cache-friendly) rather than from the full-resolution source,
+    // and the normal one is kept for the session end.
+    function ensureConversionPreviewForDisplay() {
+      const source = state.conversionSourceImageData;
+      const target = getDisplayPreviewSize(source);
+      const current = state.conversionPreviewImageData;
+      if (current?.width === target.width && current?.height === target.height) return;
+      if (previewTier !== 'reduced') {
+        state.conversionPreviewImageData = resizeDisplayPreview(source, target);
+        return;
+      }
+      if (current && !reducedDisplayImages.has(current)) previewTierKept = { source, preview: current };
+      const base = previewTierKept?.source === source ? previewTierKept.preview : null;
+      const prebuilt = previewTierPrebuilt;
+      previewTierPrebuilt = null;
+      let reduced;
+      if (prebuilt && base && prebuilt.base === base
+        && prebuilt.image.width === target.width && prebuilt.image.height === target.height) {
+        reduced = prebuilt.image;
+      } else if (base && base.width >= target.width && base.height >= target.height) {
+        reduced = resizeDisplayPreview(base, target);
+      } else {
+        reduced = resizeDisplayPreview(source, target);
+      }
+      if (reduced !== source && reduced !== base) reducedDisplayImages.add(reduced);
+      state.conversionPreviewImageData = reduced;
+    }
+
+    function displayIsReduced() {
+      return [state.processedImageData, state.previewSourceImageData, state.webglSourceImageData, state.conversionPreviewImageData]
+        .some(image => image && reducedDisplayImages.has(image));
+    }
+
+    // Resizes the drawing buffer and draws in the same task, so no cleared
+    // frame shows. The SilverCore preview follows on its next tick.
+    function redrawForPreviewTier() {
+      if (!state.processedImageData || state.cropping || state.beforeAfterActive || state.currentStep < 3) return;
+      if (isWebGLActive()) renderWebGL();
+    }
+
+    // Session end: the settled frame comes from exactly the normal path, the
+    // kept conversion preview and one normal-size tick with the final settings.
+    function leavePreviewTier() {
+      const source = state.conversionSourceImageData;
+      const kept = previewTierKept;
+      previewTierKept = null;
+      if (source && kept?.source === source && reducedDisplayImages.has(state.conversionPreviewImageData)) {
+        const target = getDisplayPreviewSize(source);
+        if (kept.preview.width === target.width && kept.preview.height === target.height) {
+          state.conversionPreviewImageData = kept.preview;
+        }
+      }
+      if (source && state.currentStep >= 3) {
+        scheduleDisplayPreviewResize();
+        if (displayIsReduced()) restoreNormalTierDisplay();
+      }
+      redrawForPreviewTier();
+      schedulePreviewTierPrebuild();
+    }
+
+    function restoreNormalTierDisplay() {
+      const processed = state.processedImageData;
+      if (!processed || reducedDisplayImages.has(processed) || state.fullResolutionPending) {
+        // A frame converted at the reduced size is on screen: convert the
+        // final settings once at the normal size, whether or not the display
+        // resize finds a new size. A restored preview of matching size would
+        // otherwise leave the reduced texture up, and on a large image no
+        // full-resolution render ever replaces it.
+        const before = coreReprocessToken;
+        scheduleCoreReprocess({ full: false });
+        // This tick converts the live settings, so the released slider's
+        // commit of the value it last asked for still needs nothing new.
+        if (coreSliderCommitRecord?.token === before && coreReprocessToken !== before) {
+          coreSliderCommitRecord.token = coreReprocessToken;
+        }
+        return;
+      }
+      // Only resampled copies of a full-resolution frame (one that landed
+      // during the session, as every frame does with repairs on): rebuild
+      // them instead of converting again.
+      state.previewSourceImageData = buildPreviewSourceImageData(processed);
+      state.histogramSourceImageData = histogramSourceFor(processed);
+      state.webglSourceImageData = state.previewSourceImageData;
+      if (webglState.gl) webglState.sourceDirty = true;
+    }
+
+    function onPreviewTierChange(tier) {
+      previewTier = tier;
+      document.documentElement.dataset.previewTier = tier;
+      if (tier === 'reduced') redrawForPreviewTier();
+      else if (!previewTierQuietEnd) leavePreviewTier();
+      updateDebugWidget();
+    }
+
+    function onPreviewTierSessionEnd(summary) {
+      document.documentElement.dataset.previewTierLastSession = summary.reduced ? 'reduced' : 'normal';
+      if (renderEnvironment.compositing?.frameLog) logWebviewDiagnostics(formatPreviewSessionLine(summary));
+      updateDebugWidget();
+    }
+
+    function beginPreviewTierSession(kind) {
+      if (!state.processedImageData || state.currentStep < 3 || state.cropping) return;
+      previewTierController.begin(kind);
+    }
+
+    // Input keeps a session alive; after the watchdog closed one mid-drag,
+    // the next input of the same drag opens a new one.
+    function touchPreviewTierSession(kind) {
+      if (previewTierController.active) previewTierController.touch();
+      else beginPreviewTierSession(kind);
+    }
+
+    function endPreviewTierSession(reason, kind = null) {
+      previewTierController.end(reason, kind);
+    }
+
+    // A photo switch closes the session without converting the old photo again.
+    function resetPreviewTierForActivation() {
+      previewTierKept = null;
+      previewTierPrebuilt = null;
+      cancelPreviewTierPrebuild();
+      if (!previewTierController.active) return;
+      previewTierQuietEnd = true;
+      try {
+        previewTierController.end('activation');
+      } finally {
+        previewTierQuietEnd = false;
+      }
+    }
+
+    function cancelPreviewTierPrebuild() {
+      if (!previewTierPrebuildHandle) return;
+      if (previewTierPrebuildHandle.idle && typeof cancelIdleCallback === 'function') cancelIdleCallback(previewTierPrebuildHandle.id);
+      else clearTimeout(previewTierPrebuildHandle.id);
+      previewTierPrebuildHandle = null;
+    }
+
+    // On hosts where sessions start reduced, the first reduced tick would
+    // resample the preview inside the input event (about 12 MB of planes).
+    // Do it when idle after each settle instead.
+    function schedulePreviewTierPrebuild() {
+      if (previewTierPrebuildHandle || previewTierController.nextStart().tier !== 'reduced') return;
+      const run = () => {
+        previewTierPrebuildHandle = null;
+        if (previewTier !== 'normal' || previewTierController.active || state.currentStep < 3 || state.cropping) return;
+        const source = state.conversionSourceImageData;
+        const base = state.conversionPreviewImageData;
+        if (!source || !base || reducedDisplayImages.has(base) || previewTierPrebuilt?.base === base) return;
+        const target = getDisplayPreviewSize(source, undefined, 'reduced');
+        if (base.width <= target.width && base.height <= target.height) return;
+        const image = resizeDisplayPreview(base, target);
+        reducedDisplayImages.add(image);
+        previewTierPrebuilt = { base, image };
+      };
+      previewTierPrebuildHandle = typeof requestIdleCallback === 'function'
+        ? { idle: true, id: requestIdleCallback(run, { timeout: 2000 }) }
+        : { idle: false, id: setTimeout(run, 300) };
+    }
+
+    // Slider sessions: every range drag in the controls panel, including
+    // ranges wired on their own (the enlarger head). The end runs in the
+    // capture phase, before the slider's own change handler, so the commit's
+    // conversion already runs at the normal size.
+    function setupPreviewTierSessions() {
+      const panel = document.getElementById('controlsPanel');
+      if (!panel) return;
+      let rangePointer = false;
+      const isRange = target => target instanceof HTMLInputElement && target.type === 'range';
+      panel.addEventListener('pointerdown', (event) => {
+        if (!isRange(event.target) || event.button > 0) return;
+        rangePointer = true;
+        beginPreviewTierSession('slider');
+      }, { capture: true });
+      panel.addEventListener('input', (event) => {
+        if (isRange(event.target) && rangePointer) touchPreviewTierSession('slider');
+      }, { capture: true });
+      panel.addEventListener('change', (event) => {
+        if (!isRange(event.target)) return;
+        rangePointer = false;
+        endPreviewTierSession('change', 'slider');
+      }, { capture: true });
+      const release = (event) => {
+        if (!rangePointer) return;
+        rangePointer = false;
+        endPreviewTierSession(event.type, 'slider');
+      };
+      window.addEventListener('pointerup', release, { capture: true });
+      window.addEventListener('pointercancel', release, { capture: true });
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) return;
+        previewTierController.resetFrameClock();
+        previewTierController.measureIdleInterval();
+      });
+      const measureIdle = () => previewTierController.measureIdleInterval();
+      if (typeof requestIdleCallback === 'function') requestIdleCallback(measureIdle, { timeout: 3000 });
+      else setTimeout(measureIdle, 1000);
+    }
+
+    // ---- What the page runs on: WebGL renderer and webview compositing ----
+
+    function logWebviewDiagnostics(line) {
+      if (!isTauriDesktop()) return;
+      Promise.resolve(window.__TAURI__.core.invoke('log_webview_diagnostics', { line })).catch(() => {});
+    }
+
+    function renderEnvironmentLine() {
+      const start = previewTierController.nextStart();
+      return formatRenderEnvironmentLine({
+        renderer: renderEnvironment.renderer, compositing: renderEnvironment.compositing,
+        startTier: start.tier, startReason: start.reason
+      });
+    }
+
+    function applyRenderEnvironment() {
+      previewTierController.setEnvironment(startsReducedReason(renderEnvironment));
+      // One line in the terminal log once both halves are known.
+      if (!renderEnvironment.reported && renderEnvironment.rendererKnown && renderEnvironment.compositingLoaded) {
+        renderEnvironment.reported = true;
+        logWebviewDiagnostics(renderEnvironmentLine());
+      }
+      schedulePreviewTierPrebuild();
+      updateDebugWidget();
+    }
+
+    // After the first WebGL context (or the failure to create one). A masked
+    // or empty renderer string counts as hardware.
+    function noteWebglRenderer(gl) {
+      renderEnvironment.renderer = gl ? describeWebglRenderer(gl) : null;
+      renderEnvironment.rendererKnown = true;
+      webglState.renderer = renderEnvironment.renderer;
+      applyRenderEnvironment();
+    }
+
+    async function loadWebviewCompositing() {
+      if (isTauriDesktop()) {
+        try {
+          const compositing = await window.__TAURI__.core.invoke('get_webview_compositing');
+          renderEnvironment.compositing = compositing && typeof compositing === 'object' ? compositing : null;
+        } catch (err) {
+          console.info('Webview compositing unavailable:', err);
+        }
+      }
+      renderEnvironment.compositingLoaded = true;
+      applyRenderEnvironment();
     }
 
     // ===========================================
@@ -4530,6 +4831,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     let curvePreUndoSnapshot = null;
 
     curveCanvas.addEventListener('mousedown', (e) => {
+      beginPreviewTierSession('curve');
       curvePreUndoSnapshot = captureSnapshot('curveEdit');
       const pos = getCurvePosition(e);
       const nearPoint = findNearPoint(pos.canvasX, pos.canvasY);
@@ -4550,6 +4852,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const pos = getCurvePosition(e);
 
       if (draggingPoint !== null) {
+        touchPreviewTierSession('curve');
         moveCurvePoint(state.curvePoints[currentCurveChannel], draggingPoint, pos.x, pos.y);
         updateCurveFromPoints(currentCurveChannel);
         renderCurve();
@@ -4567,6 +4870,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     });
 
     curveCanvas.addEventListener('mouseup', () => {
+      endPreviewTierSession('mouseup', 'curve');
       if (draggingPoint !== null) {
         if (curvePreUndoSnapshot) {
           commitUndoSnapshot(curvePreUndoSnapshot);
@@ -4579,6 +4883,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     });
 
     curveCanvas.addEventListener('mouseleave', () => {
+      endPreviewTierSession('mouseleave', 'curve');
       if (draggingPoint !== null) {
         if (curvePreUndoSnapshot) {
           commitUndoSnapshot(curvePreUndoSnapshot);
@@ -4613,6 +4918,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     curveCanvas.addEventListener('pointerdown', (e) => {
       if (e.pointerType === 'mouse') return;
       e.preventDefault();
+      beginPreviewTierSession('curve');
       curvePreUndoSnapshot = captureSnapshot('curveEdit');
 
       const pos = getCurvePosition(e);
@@ -4635,6 +4941,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (e.pointerType === 'mouse') return;
       if (activeCurvePointerId !== e.pointerId || draggingPoint === null) return;
       e.preventDefault();
+      touchPreviewTierSession('curve');
 
       const pos = getCurvePosition(e);
       moveCurvePoint(state.curvePoints[currentCurveChannel], draggingPoint, pos.x, pos.y);
@@ -4646,6 +4953,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     function finishCurvePointerDrag(pointerId) {
       if (activeCurvePointerId !== pointerId) return;
+      endPreviewTierSession('pointerup', 'curve');
       if (draggingPoint !== null) {
         if (curvePreUndoSnapshot) {
           commitUndoSnapshot(curvePreUndoSnapshot);
@@ -4704,10 +5012,16 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         uSat: null,
         uVib: null,
         uCmy: null
-      }
+      },
+      // describeWebglRenderer() of the current context (#263); #239 and #253
+      // keep their shaders off software rasterisers.
+      renderer: null
     };
 
     const webglCurveRgba = new Uint8Array(256 * 4);
+
+    setupPreviewTierSessions();
+    void loadWebviewCompositing();
 
     function disableWebGLByError(err) {
       const message = err && err.message ? err.message : String(err);
@@ -4770,7 +5084,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         gl = null;
       }
 
-      if (!gl) return false;
+      if (!gl) {
+        if (!renderEnvironment.rendererKnown) noteWebglRenderer(null);
+        return false;
+      }
 
       const vsSource = `
         attribute vec2 a_pos;
@@ -5011,6 +5328,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       webglState.curveDirty = true;
       webglState.sourceDirty = true;
       webglState.lastError = null;
+      noteWebglRenderer(gl);
 
       return true;
     }
@@ -5033,6 +5351,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // display preview settles at the new size.
     function resizeWebGLCanvas(width = webglState.sourceSize.w, height = webglState.sourceSize.h) {
       if (!webglState.gl || !(width > 0) || !(height > 0)) return;
+      // A reduced session (#263) caps the buffer below the texture; the
+      // shader samples the texture, so the draw only gets smaller.
+      if (previewTier === 'reduced') ({ width, height } = capBackingSize(width, height, previewTierMaxPixels('reduced')));
       if (glCanvas.width !== width) glCanvas.width = width;
       if (glCanvas.height !== height) glCanvas.height = height;
     }
@@ -5823,14 +6144,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           return true;
         } else {
           // DPR の変更は CSS resize を発火しない場合もあるため、入力時にも確認。
-          const target = getDisplayPreviewSize(state.conversionSourceImageData);
-          if (state.conversionPreviewImageData?.width !== target.width
-            || state.conversionPreviewImageData?.height !== target.height) {
-            state.conversionPreviewImageData = resizeDisplayPreview(state.conversionSourceImageData, target);
-          }
+          // The preview tier (#263) may also have changed since the last tick.
+          ensureConversionPreviewForDisplay();
           // Check if preview source is actually smaller than full source
           const hasSmallPreview = state.conversionPreviewImageData
             && state.conversionPreviewImageData !== state.conversionSourceImageData;
+          const reducedInput = hasSmallPreview && reducedDisplayImages.has(state.conversionPreviewImageData);
 
           // Preview-resolution path: run SilverCore on small image. Its 16-bit
           // plane may stay in the worker until committed; never when the
@@ -5838,6 +6157,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           const retain16 = CORE_RETAIN_PREVIEW_PLANE && Boolean(hasSmallPreview) && options.retain16 !== false;
           const previewProcessed = await convertFromCurrentSource(state, { preview: hasSmallPreview, interactive: true, includeAnalysisPreview: false, retain16 });
           if (!previewProcessed) return false;
+          if (reducedInput) reducedDisplayImages.add(previewProcessed);
           if (generation !== coreReprocessGeneration) return false;
           if (state.conversionSourceImageData !== sourceRef) return false;
           // 連続入力中も完了したフレームを表示する。別画像の結果は破棄し、
@@ -7738,10 +8058,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (hiddenJobs.safeMode) return;
       if (item?.provisional) return rememberPhotoBase(item);
       if (!item || item.file !== state.loadedFile || !state.loadedBaseImageData || state.rawDecodePending) return;
+      // A reduced preview-tier frame (#263) is never a settled view, nor is
+      // one still waiting for its normal-size tick.
       const settled = state.currentStep >= 3 && state.processedImageData && !processNegativeInFlight
         && !state.geometryPending
         && !coreReprocessBusy() && !coreReprocessTimer && !state.dustRemoval.processing
-        && !dustDetectionTimer && !pendingBrushRepairs && !dustDrawing && !dustAiRefresh.rects.length;
+        && !dustDetectionTimer && !pendingBrushRepairs && !dustDrawing && !dustAiRefresh.rects.length
+        && previewTier === 'normal' && !displayIsReduced();
       const entry = {
         file: item.file, base: state.loadedBaseImageData, rawMetadata: state.rawMetadata,
         key: photoSettingsKey(item), snapshot: settled ? captureSnapshot('photoSession') : null,
@@ -8000,6 +8323,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       parkedPhoto = null;
       pendingImportRotation = null;
       cancelGeometryJob();
+      resetPreviewTierForActivation();
       cancelPendingTimers();
       // The outgoing photo's tile update cannot write into the incoming one.
       cancelStudioThumbnailUpdate();
@@ -15272,6 +15596,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const item = getCurrentQueueItem();
       const source = currentConvertedPreviewSource();
       if (!item || item.file !== state.loadedFile || !source) return;
+      // After a reduced preview-tier session (#263) the tile waits for the
+      // normal-size tick, which schedules it again when it lands.
+      if (previewTier === 'normal' && reducedDisplayImages.has(source) && (coreReprocessTimer || coreReprocessBusy())) return;
       cancelStudioThumbnailUpdate();
       const adjustments = buildAdjustmentSettings(state);
       const signature = studioThumbnailSignature(adjustments);

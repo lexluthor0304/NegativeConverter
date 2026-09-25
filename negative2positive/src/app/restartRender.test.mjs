@@ -62,6 +62,8 @@ function fixture({ repairs = true, locked = false } = {}) {
     usesSilverCoreConversion: () => true,
     hasFrameRepairs: () => state.dustRemoval.enabled || state.repairStrokes.length > 0,
     getDisplayPreviewSize: () => ({ width: 2, height: 2 }),
+    previewTier: 'normal', previewTierKept: null, previewTierPrebuilt: null, reducedDisplayImages: new WeakSet(),
+    resizeDisplayPreview: (image, size) => ({ ...size, data: image.data }),
     convertFromCurrentSource: () => oldConversion,
     applyProcessedImageToState: pixels => { applied.push(pixels.exposure); state.processedImageData = pixels; },
     goToStep: step => { state.currentStep = step; },
@@ -81,7 +83,7 @@ function fixture({ repairs = true, locked = false } = {}) {
     'runCoreReprocess', 'flushScheduledCoreReprocess',
     'resetAllAdjustments', 'rerenderWithCoreControls', 'postPendingPreviewEarly', 'restartPhotoProcessing',
     'retainCorePreviewPlane', 'armCorePreviewCommitTimer', 'releaseCorePreviewRetained', 'requestCorePreviewCommit',
-    'maybeCommitCorePreviewPlane', 'settleCorePreviewWaiters',
+    'maybeCommitCorePreviewPlane', 'settleCorePreviewWaiters', 'ensureConversionPreviewForDisplay',
   ].map(functionSource).join('\n'), context);
   return { context, state, base, oldPixels, newPixels, applied, clearedTimers, resolveOld, rejectOld };
 }

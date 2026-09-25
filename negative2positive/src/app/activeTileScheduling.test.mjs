@@ -34,6 +34,7 @@ function fixture() {
     state, loadGeneration: 1, exactSettingsKey, ImageData: TestImageData, Uint8ClampedArray, Uint8Array,
     studioThumbnailInputs: new WeakMap(), STUDIO_THUMBNAIL_SETTLE_MS: 250,
     studioThumbnailUpdateTimer: 0, studioThumbnailUpdateFrame: 0, thumbnailCanvas: null,
+    previewTier: 'normal', reducedDisplayImages: new WeakSet(), coreReprocessTimer: null, coreReprocessBusy: () => false,
     setTimeout: (fn, ms) => { const id = nextHandle++; timers.set(id, { fn, ms }); return id; },
     clearTimeout: id => timers.delete(id),
     requestAnimationFrame: fn => { const id = nextHandle++; frames.set(id, fn); return id; },

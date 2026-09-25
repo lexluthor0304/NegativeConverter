@@ -66,6 +66,8 @@ function fixture() {
     fileListRefreshDeferrals: 0, fileListRefreshDeferred: false, queueMicrotask,
     renderFileListUI: noop,
     coreReprocessBusy: () => false,
+    // #263: no reduced preview-tier session is open.
+    previewTier: 'normal', displayIsReduced: () => false, resetPreviewTierForActivation: noop,
     captureSnapshot: () => ({ refs: {
       processedImageData: state.processedImageData,
       conversionSourceImageData: state.conversionSourceImageData,
