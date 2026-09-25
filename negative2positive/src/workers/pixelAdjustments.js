@@ -93,7 +93,7 @@ export function applyAdjustmentsToPixels(inputData, outputData, pixelCount, para
     cmyRShift, cmyGShift, cmyBShift, doCMY,
     curveR, curveG, curveB,
     doLook, doLookMatrix, lookMatrix, lookOffset, lookR, lookG, lookB,
-    rescueR, rescueG, rescueB, doRescueSpatial, rescueSpatial, doRescuePixel, rescueStages, frameWidth, frameHeight
+    rescueR, rescueG, rescueB, doRescueSpatial, rescueSpatial, doRescuePixel, rescueStages, frameWidth, frameHeight, frameStartRow
   } = params;
 
   const lumaScale = 2 / 255;
@@ -153,7 +153,8 @@ export function applyAdjustmentsToPixels(inputData, outputData, pixelCount, para
   const spatialHeight = doRescueSpatial && frameHeight > 0 ? frameHeight : 1;
   const rescuePx = doRescueSpatial || doRescuePixel ? new Float32Array(3) : null;
   let px = 0;
-  let py = 0;
+  // A row band (#256) starts at its frame row.
+  let py = frameStartRow || 0;
   for (let i = 0; i < totalBytes; i += 4) {
     let r;
     let g;
@@ -365,7 +366,9 @@ export function isIdentityAdjustmentParams(params) {
  * Compute adjustment parameters from settings object.
  * This extracts pure numeric computations that don't depend on DOM state.
  * `frame` ({ width, height }) is needed only by the position-dependent
- * expired-film stage; without it that stage is left out.
+ * expired-film stage; without it that stage is left out. `frame.startRow`
+ * (#256): the pixels are a row band of that frame starting at this row, so
+ * the stage places them at their frame rows.
  */
 export function computeAdjustmentParams(settings, frame = null) {
   const exposureMult = Math.pow(2, settings.exposure || 0);
@@ -418,6 +421,7 @@ export function computeAdjustmentParams(settings, frame = null) {
   const frameHeight = frame && Number.isFinite(frame.height) ? frame.height | 0 : 0;
   const rescueSpatial = rescueStages && frameWidth > 0 && frameHeight > 0 ? buildExpiredSpatialStage(settings) : null;
   const doRescueSpatial = Boolean(rescueSpatial);
+  const frameStartRow = frame && Number.isFinite(frame.startRow) ? Math.max(0, frame.startRow | 0) : 0;
 
   return {
     rMult, gMult, bMult,
@@ -444,6 +448,7 @@ export function computeAdjustmentParams(settings, frame = null) {
     doRescuePixel,
     rescueStages,
     frameWidth,
-    frameHeight
+    frameHeight,
+    frameStartRow
   };
 }

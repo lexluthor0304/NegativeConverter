@@ -27,25 +27,52 @@ const BIN_TO_16 = 257;
  * @returns {Object[]} per-channel { whitePointOrigin, blackPointOrigin, meanPoint } in [0, 65535]
  */
 export function analyzeImage(imageData, params) {
-  const { data, width, height } = imageData;
+  const { width, height } = imageData;
+  const bounds = analysisBoundsFor(width, height, params);
+  const histograms = createAnalysisHistograms();
+  accumulateAnalysisHistograms(imageData, bounds, params, histograms);
+  return channelLevelsFromHistograms(histograms, params);
+}
+
+/**
+ * The analysis crop of a width × height frame: the analysis region, or the centre
+ * crop that excludes the film border.
+ */
+export function analysisBoundsFor(width, height, params) {
   // `?? 10`, not `|| 10`: Border Buffer 0 means "analyse the whole frame" (the slider
   // and the adapter both allow it) and must not silently fall back to the 10% inset.
   const borderPct = (params.borderBuffer ?? 10) / 100;
+  return analysisPixelBounds(width, height, params.analysisRegion, borderPct);
+}
 
-  // Crop region (center crop excluding film border)
-  const bounds = analysisPixelBounds(width, height, params.analysisRegion, borderPct);
-  const cropX = bounds.left, cropY = bounds.top, cropW = bounds.width, cropH = bounds.height;
+/** Empty per-channel 256-bin histograms and their pixel count. */
+export function createAnalysisHistograms() {
+  return { r: new Uint32Array(HIST_BINS), g: new Uint32Array(HIST_BINS), b: new Uint32Array(HIST_BINS), total: 0 };
+}
 
+/**
+ * Adds the pixels of `imageData` inside `bounds` to `histograms`. `imageData` may be
+ * a row band of the frame: `rowOffset` is the frame row of its first row, and only
+ * the rows of `bounds` that fall in the band are read (#256). Integer counts, so the
+ * bands of a frame add up to the frame's histograms exactly.
+ */
+export function accumulateAnalysisHistograms(imageData, bounds, params, histograms, rowOffset = 0) {
+  const { data, width } = imageData;
+  const rows = imageData.height;
+  const cropX = bounds.left, cropW = bounds.width;
+  const yStart = Math.max(bounds.top, rowOffset);
+  const yEnd = Math.min(bounds.top + bounds.height, rowOffset + rows);
   // Build per-channel 256-bin histograms from cropped region (>>8 indexing keeps cost
   // identical to the 8-bit version while operating on 16-bit pixels).
-  const rHist = new Uint32Array(HIST_BINS);
-  const gHist = new Uint32Array(HIST_BINS);
-  const bHist = new Uint32Array(HIST_BINS);
+  const rHist = histograms.r;
+  const gHist = histograms.g;
+  const bHist = histograms.b;
   let totalPixels = 0;
 
-  for (let y = cropY; y < cropY + cropH; y++) {
+  for (let y = yStart; y < yEnd; y++) {
+    const row = (y - rowOffset) * width;
     for (let x = cropX; x < cropX + cropW; x++) {
-      const i = (y * width + x) * 4;
+      const i = (row + x) * 4;
       // 解析標本の回転外側は黒い被写体ではない。
       if (params.excludeTransparent && data[i + 3] === 0) continue;
       rHist[data[i] >>> 8]++;
@@ -54,7 +81,13 @@ export function analyzeImage(imageData, params) {
       totalPixels++;
     }
   }
+  histograms.total += totalPixels;
+  return histograms;
+}
 
+/** analyzeImage()'s channel levels from its (possibly merged) histograms. */
+export function channelLevelsFromHistograms(histograms, params) {
+  const totalPixels = histograms.total;
   // Thresholds per color model
   const model = colorModels[params.colorModel] || colorModels.basic;
   const blackThreshold = model.blackThreshold ?? 0.002;
@@ -62,9 +95,9 @@ export function analyzeImage(imageData, params) {
 
   const imageType = params.imageType || 'negative';
   return [
-    computeChannelLevels(rHist, totalPixels, blackThreshold, whiteThreshold, 'ToneCurvePV2012Red', imageType),
-    computeChannelLevels(gHist, totalPixels, blackThreshold, whiteThreshold, 'ToneCurvePV2012Green', imageType),
-    computeChannelLevels(bHist, totalPixels, blackThreshold, whiteThreshold, 'ToneCurvePV2012Blue', imageType),
+    computeChannelLevels(histograms.r, totalPixels, blackThreshold, whiteThreshold, 'ToneCurvePV2012Red', imageType),
+    computeChannelLevels(histograms.g, totalPixels, blackThreshold, whiteThreshold, 'ToneCurvePV2012Green', imageType),
+    computeChannelLevels(histograms.b, totalPixels, blackThreshold, whiteThreshold, 'ToneCurvePV2012Blue', imageType),
   ];
 }
 

@@ -1106,6 +1106,41 @@ export async function analyzeSilverCorePreview(imageData, settings = {}, mode = 
   };
 }
 
+// ---- Conversion bands (#256) ----
+//
+// The band pool (silverBands.js) runs the transient forceFullProcess path of
+// runSilverCore on row bands of one frame in several workers. These give it
+// the adapter's own rules, so the bands cannot drift from the whole-frame path.
+
+/** The film-base / flat-field preprocessing of a conversion (filmBaseCompensationFor). */
+export function silverCorePreprocessFor(settings = {}, mode = 'color') {
+  return filmBaseCompensationFor(settings, mode);
+}
+
+/** Applies that preprocessing to a plane in place (the pristine plane's pass). */
+export function preprocessSilverCorePlane(data, width, height, preprocess) {
+  _preprocessBuffer(data, width, height, preprocess);
+}
+
+/** The analysis sample of a request when it is a usable Image16, else null. */
+export function silverCoreAnalysisReference(candidate) {
+  return _validReference(candidate);
+}
+
+/**
+ * Loads `params.enhancedProfile` into `engine` as runSilverCore does, with the
+ * same fallback: a profile that fails to load converts as 'none' at strength 0.
+ */
+export async function loadSilverCoreProfile(engine, params) {
+  const slot = { profile: null };
+  const profileName = params.enhancedProfile;
+  await _ensureProfile(slot, engine, profileName);
+  if (slot.profile === 'none' && profileName !== 'none') {
+    params.enhancedProfile = 'none';
+    params.profileStrength = 0;
+  }
+}
+
 export function invalidateSilverCoreCache() {
   for (const slot of [_cache.preview, _cache.full, _cache.scratch, _cache.roi]) {
     Object.assign(slot, _createSlot());
