@@ -71,6 +71,7 @@ export function createMultiShotMergeJob({
   let unacknowledged = 0;
   let merging = false;
   let idleTimer = null;
+  let helloTimer = null;
   const abort = new AbortController();
   let rejectFailed;
   const failed = new Promise((_, reject) => { rejectFailed = reject; });
@@ -81,7 +82,8 @@ export function createMultiShotMergeJob({
 
   function stopWorker() {
     clearTimeout(idleTimer);
-    idleTimer = null;
+    clearTimeout(helloTimer);
+    idleTimer = helloTimer = null;
     const dying = worker;
     worker = null;
     if (dying) {
@@ -137,8 +139,8 @@ export function createMultiShotMergeJob({
 
   function waitForHello(current) {
     return new Promise((resolve) => {
-      const timer = setTimeout(() => resolve(false), helloTimeoutMs);
-      const settle = (ok) => { clearTimeout(timer); resolve(ok); };
+      helloTimer = setTimeout(() => resolve(false), helloTimeoutMs);
+      const settle = (ok) => { clearTimeout(helloTimer); helloTimer = null; resolve(ok); };
       current.onmessage = ({ data }) => { if (data?.type === 'hello') settle(true); };
       current.onerror = (event) => { event?.preventDefault?.(); settle(false); };
       current.onmessageerror = () => settle(false);
