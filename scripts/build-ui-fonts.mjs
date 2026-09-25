@@ -20,13 +20,15 @@ import { fileURLToPath } from 'node:url';
 import fontverter from 'fontverter';
 import subsetFont from 'subset-font';
 import {
-  APP_ROOT, FALLBACK_CODE_POINTS, collectUiText, formatCodePoint, formatUnicodeRange, isGlyphSource, planUiFaces,
+  APP_ROOT, FALLBACK_CODE_POINTS, LATIN_SUBSET_RANGES, UI_FACES, collectUiText, formatCodePoint, formatUnicodeRange,
+  inRanges, isGlyphSource, planUiFaces,
 } from './ui-font-glyphs.mjs';
 
 export const SOURCE_FONT_DIR = join(APP_ROOT, 'src/assets/fonts/fusion-pixel');
 export const OUTPUT_DIR = join(APP_ROOT, 'src/assets/fonts/ui');
 export const OUTPUT_CSS = 'ui-fonts.css';
 const sourceFontPath = source => join(SOURCE_FONT_DIR, `fusion-pixel-12px-proportional-${source}.otf.woff2`);
+const LATIN_FONT_PATH = join(SOURCE_FONT_DIR, 'nc-studio-latin.woff2');
 const outputFontName = face => `fusion-pixel-${face.id}-ui.woff2`;
 
 // ---- minimal sfnt reading and writing (name and cmap tables only) ----
@@ -191,8 +193,10 @@ export async function buildUiFonts({ root = APP_ROOT, outputDir = OUTPUT_DIR, lo
   const stamp = createHash('sha256')
     .update(readFileSync(fileURLToPath(import.meta.url)))
     .update(readFileSync(fileURLToPath(new URL('./ui-font-glyphs.mjs', import.meta.url))))
-    .update(JSON.stringify(draft.faces.map(face => [face.id, face.codePoints])));
+    .update(JSON.stringify(entries));
   for (const bytes of sources.values()) stamp.update(bytes);
+  const latinFont = readFileSync(LATIN_FONT_PATH);
+  stamp.update(latinFont);
   const digest = stamp.digest('hex');
   const stampPath = join(outputDir, '.stamp');
   const cssPath = join(outputDir, OUTPUT_CSS);
@@ -209,9 +213,13 @@ export async function buildUiFonts({ root = APP_ROOT, outputDir = OUTPUT_DIR, lo
     subsets.set(face.id, sfnt);
     cmaps.set(face.id, readCmap(sfnt));
   }
-  // A UI character the source face lacks is allowed only on the explicit
-  // fallback list, which the full faces' unicode-range also leaves out.
-  const plan = planUiFaces(entries, (code, id) => cmaps.get(id).has(code));
+  // A UI character the face drawing it lacks is allowed only on the explicit
+  // fallback list, which the full faces' unicode-range also leaves out. In the
+  // SC stack, Latin-range characters are drawn by the committed NC Studio Latin.
+  const latinCmap = readCmap(new Uint8Array(await fontverter.convert(latinFont, 'sfnt')));
+  const leavesLatin = new Set(UI_FACES.filter(face => !face.includeLatin).map(face => face.id));
+  const plan = planUiFaces(entries, (code, id) => (leavesLatin.has(id) && inRanges(LATIN_SUBSET_RANGES, code)
+    ? latinCmap : cmaps.get(id)).has(code));
   if (plan.unexpected.length) {
     throw new Error(`UI characters missing from the Fusion Pixel faces: ${describeUnexpected(plan.unexpected)}. `
       + `Use a character the faces have, or add it to FALLBACK_CODE_POINTS in scripts/ui-font-glyphs.mjs `

@@ -242,9 +242,11 @@ export function codePointsOf(text) {
 }
 
 /**
- * What each UI face covers. `hasGlyph(code, faceId)` answers from that face's
- * source cmap; the default assumes every glyph exists, which is how the build
- * asks HarfBuzz for a draft before reading back what the face really has.
+ * What each UI face covers. `hasGlyph(code, faceId)` answers whether the face
+ * that draws `code` in that stack has it (NC Studio Latin for Latin-range code
+ * points in the SC stack); the default assumes every glyph exists, which is
+ * how the build asks HarfBuzz for a draft before reading back what the faces
+ * really have.
  *
  * Per face: `required` are the UI code points it must draw, `codePoints` what
  * it will contain (required plus JP's Latin fill, both limited to the face),
@@ -260,12 +262,13 @@ export function planUiFaces(entries, hasGlyph = () => true) {
     for (const entry of entries) {
       if (entry.locale !== 'common' && !face.locales.includes(entry.locale)) continue;
       for (const code of codePointsOf(entry.text)) {
-        if (!face.includeLatin && inRanges(LATIN_SUBSET_RANGES, code)) continue;
         if (!hasGlyph(code, face.id)) {
           if (!missing.has(code)) missing.set(code, new Set());
           missing.get(code).add(`${entry.source}${entry.locale === 'common' ? '' : ` (${entry.locale})`}`);
           continue;
         }
+        // NC Studio Latin draws these in front of the SC stack.
+        if (!face.includeLatin && inRanges(LATIN_SUBSET_RANGES, code)) continue;
         required.add(code);
         codes.add(code);
       }
