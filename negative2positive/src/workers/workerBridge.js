@@ -11,10 +11,12 @@
  * Worker; the module-level functions are the default bridge that the single
  * export path uses. A batch export runs several bridges side by side
  * (`createExportWorkerPool`) so the adjustment and encode stages of different
- * frames do not queue behind each other.
+ * frames do not queue behind each other. `createPng16BandPool` spreads the
+ * row bands of one 16-bit PNG across several workers.
  */
 
-import { selectExportSamples } from './imageEncoders.js';
+import { selectExportSamples, exportChannelCount } from './imageEncoders.js';
+import { planPng16Bands, assemblePng16Blob, combineBandAdlers } from './png16Bands.js';
 import { computeAdjustmentParams, isIdentityAdjustmentParams } from './pixelAdjustments.js';
 import { downconvertPlane16 } from './pixelAdjustments16.js';
 
@@ -278,6 +280,10 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory 
       case 'blobResult':
         settleEntry(msg.id, entry);
         entry.resolve(msg.blob);
+        break;
+      case 'bandResult':
+        settleEntry(msg.id, entry);
+        entry.resolve({ blob: msg.blob, adler: msg.adler, length: msg.length });
         break;
       case 'error': {
         settleEntry(msg.id, entry);
@@ -558,9 +564,10 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory 
   }
 
   /**
-   * Encode 16-bit PNG via Worker.
+   * Encode 16-bit PNG via Worker: the whole frame, its bands one after another
+   * (the same bytes as the band pool).
    * @param {ImageData} imageData
-   * @param {function|{onProgress?:function,signal?:AbortSignal,timeoutMs?:number}} [onProgressOrOptions]
+   * @param {function|{onProgress?:function,signal?:AbortSignal,timeoutMs?:number,level?:number,strategy?:number}} [onProgressOrOptions]
    * @returns {Promise<Blob|null>}
    */
   async function workerEncodePng16(imageData, onProgressOrOptions = null) {
@@ -575,7 +582,10 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory 
           pixelData: buffer,
           sourceBits: sampleBits,
           width: imageData.width,
-          height: imageData.height
+          height: imageData.height,
+          level: opts.level,
+          strategy: opts.strategy,
+          bandBytes: opts.bandBytes
         },
         [buffer],
         opts.onProgress,
@@ -585,6 +595,21 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory 
       if (isAbortError(err)) throw err;
       return null;
     }
+  }
+
+  /**
+   * One row band of a 16-bit PNG (see createPng16BandPool). `request.pixelData`
+   * is the band's own RGBA buffer and is transferred. Rejects on any failure;
+   * the pool decides what to do.
+   * @returns {Promise<{blob: Blob, adler: number, length: number}>}
+   */
+  function workerEncodePng16Band(request, options = {}) {
+    return sendToWorker(
+      { type: 'encodePng16Band', ...request },
+      [request.pixelData],
+      null,
+      { timeoutMs: options.timeoutMs, signal: options.signal }
+    );
   }
 
   /**
@@ -651,6 +676,7 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory 
     workerApplyAdjustments16,
     workerGainMap16,
     workerEncodePng16,
+    workerEncodePng16Band,
     workerEncodeTiff,
     isWorkerAvailable,
     cancelWorkerRequests,
@@ -684,6 +710,120 @@ export function createExportWorkerPool({ size = 2, workerFactory } = {}) {
     terminateWorker: () => lanes.forEach(lane => lane.terminateWorker()),
     dispose: () => lanes.forEach(lane => lane.terminateWorker()),
     get pendingCount() { return lanes.reduce((sum, lane) => sum + lane.pendingCount, 0); }
+  };
+}
+
+/**
+ * The PNG16 band pool (#257): `size` export workers encode the row bands of
+ * 16-bit PNGs in parallel. One pool serves one export operation (a single
+ * export or a batch) and is disposed when it ends.
+ *
+ * Bands wait in one ordered queue and are sliced from the frame only when a
+ * worker takes them, so at most `size` band copies exist at a time. Each band
+ * request has its own timeout from its own pixel count, counted from
+ * dispatch. A failed or timed-out band, or an abort, stops the frame's other
+ * bands, which terminates every worker still busy with it. The layout is
+ * fixed per frame size, so the file is the same with any `size`, with one
+ * export worker (`workerEncodePng16`) and on the main thread.
+ *
+ * @param {{size?: number, workerFactory?: () => Worker}} [options]
+ */
+export function createPng16BandPool({ size = 1, workerFactory } = {}) {
+  const count = Math.max(1, Math.floor(size) || 1);
+  const options = workerFactory ? { workerFactory } : {};
+  const slots = Array.from({ length: count }, () => createExportWorkerBridge(options));
+  const idle = [...slots];
+  const queue = [];
+  let disposed = false;
+  const disposedError = () => makeError('PNG16 band pool disposed', 'AbortError');
+
+  function pump() {
+    while (!disposed && idle.length > 0 && queue.length > 0) {
+      const slot = idle.shift();
+      const task = queue.shift();
+      task.run(slot).then(task.resolve, task.reject).finally(() => {
+        if (disposed) return;
+        idle.push(slot);
+        pump();
+      });
+    }
+  }
+
+  function schedule(run) {
+    if (disposed) return Promise.reject(disposedError());
+    return new Promise((resolve, reject) => {
+      queue.push({ run, resolve, reject });
+      pump();
+    });
+  }
+
+  /**
+   * @param {ImageData} imageData - `__image16` is encoded when it fits, else the 8-bit data
+   * @param {{onProgress?:function, signal?:AbortSignal, level?:number, strategy?:number, bandBytes?:number}} [encodeOptions]
+   * @returns {Promise<Blob|null>} null when a worker failed (the caller falls
+   *   back to one export worker, then to the main thread). Rejects with an
+   *   AbortError on cancellation.
+   */
+  async function encode(imageData, { onProgress = null, signal = null, level, strategy, bandBytes } = {}) {
+    if (signal && signal.aborted) throw makeError('Worker request aborted', 'AbortError');
+    if (disposed) throw disposedError();
+    const { samples, sampleBits } = selectExportSamples(imageData, 16);
+    const { width, height } = imageData;
+    const channels = exportChannelCount(samples);
+    const { bands, filteredRowBytes } = planPng16Bands(width, height, channels, { bandBytes });
+    const frame = new AbortController();
+    const forwardAbort = () => frame.abort();
+    if (signal) signal.addEventListener('abort', forwardAbort, { once: true });
+    let finished = 0;
+    try {
+      const results = await Promise.all(bands.map((band) => schedule(async (slot) => {
+        if (frame.signal.aborted) throw makeError('Worker request aborted', 'AbortError');
+        const from = band.y * width * 4;
+        const pixelData = copyTypedArrayBuffer(samples.subarray(from, from + band.rows * width * 4));
+        const result = await slot.workerEncodePng16Band({
+          pixelData,
+          sourceBits: sampleBits,
+          width,
+          rows: band.rows,
+          channels,
+          index: band.index,
+          isLast: band.index === bands.length - 1,
+          level,
+          strategy
+        }, { signal: frame.signal, timeoutMs: computeWorkerTimeoutMs(width * band.rows) });
+        if (!result || !(result.blob instanceof Blob) || result.length !== band.rows * filteredRowBytes
+          || !Number.isInteger(result.adler) || result.adler < 0 || result.adler > 0xFFFFFFFF) {
+          throw new Error(`Unexpected PNG16 band result for band ${band.index} of ${width}x${height}`);
+        }
+        finished += 1;
+        if (onProgress) onProgress(Math.round((finished / bands.length) * 100), 'encoding');
+        return result;
+      })));
+      return assemblePng16Blob({ width, height, channels, idats: results.map((result) => result.blob), adler: combineBandAdlers(results) });
+    } catch (err) {
+      frame.abort();
+      if (signal && signal.aborted) throw makeError('Worker request aborted', 'AbortError');
+      if (disposed) throw disposedError();
+      warnWorkerFallbackOnce('encodePng16Band', err);
+      return null;
+    } finally {
+      if (signal) signal.removeEventListener('abort', forwardAbort);
+    }
+  }
+
+  /** Terminate every band worker; queued bands reject. */
+  function dispose() {
+    if (disposed) return;
+    disposed = true;
+    for (const task of queue.splice(0)) task.reject(disposedError());
+    for (const slot of slots) slot.terminateWorker();
+  }
+
+  return {
+    size: count,
+    encode,
+    dispose,
+    get disposed() { return disposed; }
   };
 }
 

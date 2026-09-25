@@ -88,6 +88,27 @@ export function planGeometryBandsInFlight({ lanes = 1, pixelsPerFile, poolSize =
 }
 
 /**
+ * How many workers the PNG16 band pool of one export operation gets (#257).
+ * A single export or a one-lane batch has the cores to itself, minus the
+ * main thread and one for the rest of the page; two lanes get two band
+ * workers each; with three or more lanes every core is already busy with a
+ * frame, so there is no pool and each lane's export worker encodes its bands
+ * one after another (the same bytes).
+ *
+ * @param {{lanes?: number, hardwareConcurrency?: number}} [options]
+ * @returns {number} 0 means no pool
+ */
+export function planPng16BandWorkers({ lanes = 1, hardwareConcurrency } = {}) {
+  const laneCount = Number.isFinite(lanes) && lanes >= 1 ? Math.floor(lanes) : 1;
+  if (laneCount >= 3) return 0;
+  if (laneCount === 2) return 4;
+  const cores = Number.isFinite(hardwareConcurrency) && hardwareConcurrency > 0
+    ? Math.floor(hardwareConcurrency)
+    : 4;
+  return Math.max(1, cores - 2);
+}
+
+/**
  * Run `jobs` through `process` with bounded parallelism and hand each result
  * to `sink` in job order.
  *

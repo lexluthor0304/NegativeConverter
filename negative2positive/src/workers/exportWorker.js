@@ -7,6 +7,7 @@ import * as pako from 'pako';
 import { applyAdjustmentsToPixels, computeAdjustmentParams } from './pixelAdjustments.js';
 import { applyAdjustmentsToPixels16, downconvertPlane16 } from './pixelAdjustments16.js';
 import { encodePng16Blob, encodeTiffBlob } from './imageEncoders.js';
+import { encodePng16Band } from './png16Bands.js';
 import { computeGainMap } from './gainMap.js';
 
 const adjustmentLutScratch = {
@@ -35,6 +36,9 @@ self.onmessage = function (e) {
         break;
       case 'encodePng16':
         handleEncodePng16(msg);
+        break;
+      case 'encodePng16Band':
+        handleEncodePng16Band(msg);
         break;
       case 'encodeTiff':
         handleEncodeTiff(msg);
@@ -145,16 +149,29 @@ function viewSamples(buffer, sourceBits) {
   return sourceBits === 16 ? new Uint16Array(buffer) : new Uint8ClampedArray(buffer);
 }
 
+// The whole frame in this worker, band after band: a batch lane without a
+// band pool, or the fallback when the pool cannot start. Same bytes as the pool.
 function handleEncodePng16(msg) {
-  const { id, pixelData, width, height, sourceBits } = msg;
+  const { id, pixelData, width, height, sourceBits, level, strategy, bandBytes } = msg;
   const data = viewSamples(pixelData, sourceBits);
 
   self.postMessage({ type: 'progress', id, phase: 'encoding', percent: 10 });
 
-  const blob = encodePng16Blob(data, width, height, pako.deflate);
+  const blob = encodePng16Blob(data, width, height, pako, { level, strategy, bandBytes });
 
   self.postMessage({ type: 'progress', id, phase: 'encoding', percent: 100 });
   self.postMessage({ type: 'blobResult', id, blob });
+}
+
+// One band of the PNG16 band pool: its RGBA rows in, its IDAT chunk out as a
+// Blob built here, so the compressed bytes leave this heap at once and the
+// main thread only assembles Blob references.
+function handleEncodePng16Band(msg) {
+  const { id, pixelData, width, rows, channels, sourceBits, index, isLast, level, strategy } = msg;
+  const band = encodePng16Band({
+    samples: viewSamples(pixelData, sourceBits), width, rows, channels, index, isLast, level, strategy
+  }, pako);
+  self.postMessage({ type: 'bandResult', id, blob: new Blob(band.parts), adler: band.adler, length: band.length });
 }
 
 function handleEncodeTiff(msg) {

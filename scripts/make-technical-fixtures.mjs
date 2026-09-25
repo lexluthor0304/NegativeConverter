@@ -32,5 +32,5 @@ for (let y = 0; y < H; y++) {
 }
 // The app's own 16-bit PNG encoder writes genuine 16-bit samples.
 const out = join(here, '..', 'negative2positive', 'test-fixtures', 'negative-gradient-16.png');
-writeFileSync(out, Buffer.from(await encodePng16Blob(rgba, W, H, pako.deflate).arrayBuffer()));
+writeFileSync(out, Buffer.from(await encodePng16Blob(rgba, W, H, pako).arrayBuffer()));
 console.log(`wrote ${out}`);

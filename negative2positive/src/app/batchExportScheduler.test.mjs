@@ -7,6 +7,7 @@ import {
   planBatchParallelism,
   runBatchPipeline,
   planGeometryBandsInFlight,
+  planPng16BandWorkers,
   GEOMETRY_BAND_BUDGET_BYTES,
   GEOMETRY_BYTES_PER_BAND_PIXEL
 } from './batchExportScheduler.js';
@@ -313,6 +314,17 @@ assert.equal(planGeometryBandsInFlight({ lanes: 4, pixelsPerFile: 6_000_000, poo
 assert.ok(planGeometryBandsInFlight({ lanes: 1, pixelsPerFile: 60_000_000, poolSize: 6, deviceMemory: 4 })
   < planGeometryBandsInFlight({ lanes: 1, pixelsPerFile: 60_000_000, poolSize: 6 }));
 assert.equal(planGeometryBandsInFlight({ lanes: 8, pixelsPerFile: 200_000_000, poolSize: 2 }), 1, 'never below one band');
+
+// ---- planPng16BandWorkers ---------------------------------------------------
+// A single export and one lane: every core but two. Two lanes: two each.
+// Three or more: no pool (the lane's export worker encodes its bands).
+assert.equal(planPng16BandWorkers({ lanes: 1, hardwareConcurrency: 8 }), 6);
+assert.equal(planPng16BandWorkers({ hardwareConcurrency: 10 }), 8);
+assert.equal(planPng16BandWorkers({ lanes: 1, hardwareConcurrency: 2 }), 1);
+assert.equal(planPng16BandWorkers({ lanes: 1 }), 2, 'unknown core count: assume 4');
+assert.equal(planPng16BandWorkers({ lanes: 2, hardwareConcurrency: 8 }), 4);
+assert.equal(planPng16BandWorkers({ lanes: 3, hardwareConcurrency: 8 }), 0);
+assert.equal(planPng16BandWorkers({ lanes: 4, hardwareConcurrency: 16 }), 0);
 
 // Missing callbacks are a programming error, reported up front.
 await assert.rejects(() => runBatchPipeline([1], { process: async () => {} }), TypeError);

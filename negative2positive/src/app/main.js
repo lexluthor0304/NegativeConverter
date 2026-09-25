@@ -65,7 +65,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
 
     import { convertFrameWithRouter, resolveConversionMode } from '../pipeline/conversionRouter.js';
     import { convertFrameInWorker, convertPreviewFrameInWorker, createConversionWorkerPool, CONVERSION_FAILED, WORKER_TIMEOUT } from './conversionWorkerClient.js';
-    import { planBatchParallelism, runBatchPipeline, planGeometryBandsInFlight } from './batchExportScheduler.js';
+    import { planBatchParallelism, planPng16BandWorkers, runBatchPipeline, planGeometryBandsInFlight } from './batchExportScheduler.js';
     import { displayPreviewSize, resizeDisplayPreview, updateDisplayPreviewRect } from './displayPreview.js';
     import { createCoreReprocessGates, previewDispatchAction, CORE_FULL_REPROCESS_DELAY_MS } from './coreReprocessDispatcher.js';
     import { invalidateSilverCoreCache, analyzeSilverCoreFrame } from '../pipeline/silverAdapter.js';
@@ -138,7 +138,9 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       workerEncodeTiff,
       isWorkerAvailable,
       isExportInputLostError,
+      isAbortError,
       createExportWorkerPool,
+      createPng16BandPool,
       terminateWorker as terminateExportWorker,
       exportWorkerPendingCount,
       isExportWorkerAlive
@@ -12421,7 +12423,22 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       return image;
     }
 
-    async function imageDataToBlob(imageData, format = null, quality = null, bitDepth = null, onProgress = null, metadata = null, { bridge = null } = {}) {
+    // PNG16 compression settings. Level 6 and the default strategy always;
+    // `nc_png16_rle_v1 = on` (support/benchmarks only, no UI) switches to the
+    // run-length strategy: still lossless, about +4 % size, much faster.
+    function png16EncodeSettings() {
+      return safeStorageGet('nc_png16_rle_v1') === 'on' ? { level: 6, strategy: 3 } : { level: 6, strategy: 0 };
+    }
+
+    // One PNG16 band pool per export operation. A batch creates its own (or
+    // none with three or more lanes); every other export gets one for the
+    // encode and releases it right after.
+    function createOperationPng16Pool(lanes = 1) {
+      const size = planPng16BandWorkers({ lanes, hardwareConcurrency: navigator.hardwareConcurrency });
+      return size > 0 && typeof Worker === 'function' ? createPng16BandPool({ size }) : null;
+    }
+
+    async function imageDataToBlob(imageData, format = null, quality = null, bitDepth = null, onProgress = null, metadata = null, { bridge = null, png16Pool = null, signal = null } = {}) {
       const exportInfo = getExportInfo(format || state.exportFormat, bitDepth ?? state.exportBitDepth);
       const jpegQuality = quality !== null ? quality : state.jpegQuality;
       const exportWorkers = bridge || defaultExportWorkers;
@@ -12447,16 +12464,31 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         return blob;
       }
       if (exportInfo.format === 'png' && exportInfo.bitDepth === 16) {
-        // Try Worker first for 16-bit PNG encoding
-        if (exportWorkers.isWorkerAvailable()) {
-          blob = await exportWorkers.workerEncodePng16(imageData, onProgress);
-          if (blob) {
-            trace.end({ bytes: blob.size || 0, worker: true });
-            return attachMetadataToBlob(blob, 'png', metadata);
+        // The row bands go to the band pool; if it cannot run them, one
+        // export worker encodes them in turn, then the main thread. All three
+        // write the same bytes.
+        const settings = png16EncodeSettings();
+        const ownPool = !png16Pool && !bridge ? createOperationPng16Pool(1) : null;
+        const pool = png16Pool || ownPool;
+        let bands = 0;
+        try {
+          if (pool) {
+            blob = await pool.encode(imageData, { ...settings, onProgress, signal });
+            if (blob) bands = pool.size;
           }
+          if (!blob && exportWorkers.isWorkerAvailable()) {
+            blob = await exportWorkers.workerEncodePng16(imageData, { ...settings, onProgress, signal });
+            if (blob) bands = 1;
+          }
+        } finally {
+          if (ownPool) ownPool.dispose();
+        }
+        if (blob) {
+          trace.end({ bytes: blob.size || 0, worker: true, bandWorkers: bands });
+          return attachMetadataToBlob(blob, 'png', metadata);
         }
         const { encodePng16Blob } = await getExportImageEncoders();
-        blob = encodePng16Blob(imageData);
+        blob = encodePng16Blob(imageData, settings);
         trace.end({ bytes: blob.size || 0, worker: false });
         return attachMetadataToBlob(blob, 'png', metadata);
       }
@@ -12854,9 +12886,10 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     }
 
     // Workers one batch shares and releases when it ends: `lanes` conversion
-    // workers kept alive across frames (no per-file restart) and, with more
-    // than one lane, as many export workers for the adjustment/encode stages.
-    function createBatchExportWorkers(lanes, { pixelsPerFile = 0 } = {}) {
+    // workers kept alive across frames (no per-file restart), with more than
+    // one lane as many export workers for the adjustment/encode stages, and
+    // for a 16-bit PNG batch of one or two lanes the PNG16 band pool.
+    function createBatchExportWorkers(lanes, { pixelsPerFile = 0, exportInfo = null } = {}) {
       const dust = createDustWorkerClient();
       // The lanes share the geometry pool; each keeps few enough bands in
       // flight that their transient copies stay within the band budget.
@@ -12867,6 +12900,9 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         ? createConversionWorkerPool({ size: lanes })
         : null;
       const bridge = lanes > 1 ? createExportWorkerPool({ size: lanes }) : null;
+      const png16Pool = exportInfo && exportInfo.format === 'png' && exportInfo.bitDepth === 16
+        ? createOperationPng16Pool(lanes)
+        : null;
       return {
         convert: pool ? async (request) => {
           try {
@@ -12878,12 +12914,14 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
           }
         } : null,
         bridge,
+        png16Pool,
         dust,
         geometryBands,
         dispose() {
           dust.dispose();
           if (pool) pool.dispose();
           if (bridge) bridge.dispose();
+          if (png16Pool) png16Pool.dispose();
         }
       };
     }
@@ -12919,7 +12957,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
           exportInfo.bitDepth,
           null,
           exportMetadataFor(settings, position),
-          { bridge: workers.bridge }
+          { bridge: workers.bridge, png16Pool: workers.png16Pool }
         );
       } catch (err) {
         // The worker died holding this frame's transferred plane. Render the
@@ -12941,7 +12979,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       // The crash-loop guard runs a resumed batch in one lane.
       const lanes = hiddenJobs.safeMode ? 1 : plannedLanes;
       const bytes = await hiddenJobBytesFor(jobs.map(job => job.file));
-      const workers = createBatchExportWorkers(lanes, { pixelsPerFile });
+      const workers = createBatchExportWorkers(lanes, { pixelsPerFile, exportInfo });
       const trace = createPerfTrace('batchExport', { files: jobs.length, lanes });
       activeLongJobs += 1;
       try {

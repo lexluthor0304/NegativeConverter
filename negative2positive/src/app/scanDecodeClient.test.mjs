@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { Worker as NodeWorker } from 'node:worker_threads';
-import { deflate } from 'pako';
+import * as pako from 'pako';
 import { decodeScanInWorker } from './scanDecodeClient.js';
 import { encodePng16Blob, encodeTiffBlob } from '../workers/imageEncoders.js';
 
@@ -27,7 +27,7 @@ class RealWorker {
 
 const pixels = new Uint16Array([0x1234, 0x0001, 0xFEDC, 65535, 0xACBD, 0x8001, 0x0002, 65535]);
 for (const format of ['png', 'tiff']) {
-  const blob = format === 'png' ? encodePng16Blob(pixels, 2, 1, deflate) : encodeTiffBlob(pixels, 2, 1, 16);
+  const blob = format === 'png' ? encodePng16Blob(pixels, 2, 1, pako) : encodeTiffBlob(pixels, 2, 1, 16);
   const buffer = await blob.arrayBuffer();
   const pending = decodeScanInWorker(buffer, format, { workerFactory: () => new RealWorker() });
   const result = await pending;

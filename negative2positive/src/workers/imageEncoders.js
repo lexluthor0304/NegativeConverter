@@ -9,55 +9,19 @@ import { SRGB_PROFILE } from '../app/srgbProfile.js';
 
 import { buildTiffParts, shortEntry, longEntry, bytesEntry, TIFF_TAGS } from './tiffWriter.js';
 import { exifIfd0Entries, exifSubIfdEntries } from './exifWriter.js';
+import { crc32 } from './crc32.js';
+import { encodePng16BandsSerially, pngChunk } from './png16Bands.js';
 
 /** Largest value a 16-bit sample can hold. */
 export const SAMPLE16_MAX = 65535;
 
-// Annotated pure so bundlers can tree-shake the encoders out of chunks that
-// only import selectExportSamples (the main bundle imports it via workerBridge).
-const pngCrcTable = /* @__PURE__ */ (() => {
-  const table = new Uint32Array(256);
-  for (let n = 0; n < 256; n++) {
-    let c = n;
-    for (let k = 0; k < 8; k++) {
-      c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
-    }
-    table[n] = c >>> 0;
-  }
-  return table;
-})();
-
-function updatePngCrc(bytes, crc) {
-  for (let i = 0; i < bytes.length; i++) {
-    crc = pngCrcTable[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8);
-  }
-  return crc;
-}
-
 export function crc32OfBytes(bytes) {
-  return (updatePngCrc(bytes, 0xFFFFFFFF) ^ 0xFFFFFFFF) >>> 0;
+  return crc32(bytes);
 }
 
-function pngChunkParts(type, data) {
-  const header = new Uint8Array(8);
-  new DataView(header.buffer).setUint32(0, data.length, false);
-  for (let i = 0; i < 4; i++) header[i + 4] = type.charCodeAt(i);
-  const crc = updatePngCrc(data, updatePngCrc(header.subarray(4), 0xFFFFFFFF));
-  const trailer = new Uint8Array(4);
-  new DataView(trailer.buffer).setUint32(0, (crc ^ 0xFFFFFFFF) >>> 0, false);
-  return [header, data, trailer];
-}
-
+/** One PNG chunk (length, type, data, CRC-32 over type and data) as bytes. */
 export function createPngChunk(type, data) {
-  const dataBytes = data instanceof Uint8Array ? data : new Uint8Array(data);
-  const chunk = new Uint8Array(12 + dataBytes.length);
-  const view = new DataView(chunk.buffer);
-  view.setUint32(0, dataBytes.length, false);
-  for (let i = 0; i < 4; i++) chunk[4 + i] = type.charCodeAt(i);
-  chunk.set(dataBytes, 8);
-  const crc = crc32OfBytes(chunk.subarray(4, 8 + dataBytes.length));
-  view.setUint32(8 + dataBytes.length, crc, false);
-  return chunk;
+  return pngChunk(type, data instanceof Uint8Array ? data : new Uint8Array(data));
 }
 
 /** Signature plus IHDR: the metadata chunks are inserted right after it. */
@@ -117,6 +81,10 @@ export function selectExportSamples(imageData, bitDepth = 8) {
 /**
  * Encode a 16-bit PNG (RGB for opaque images, RGBA for real transparency).
  *
+ * The rows are Sub-filtered and deflated in fixed bands (png16Bands.js), one
+ * after another on this thread; the band pool runs the same bands across
+ * workers and produces the same bytes.
+ *
  * @param {Uint16Array|Uint8ClampedArray|Uint8Array} pixelData - RGBA samples.
  *   A `Uint16Array` carries genuine 16-bit samples and is written verbatim.
  *   An 8-bit array is the documented fallback: every byte is replicated
@@ -124,49 +92,20 @@ export function selectExportSamples(imageData, bitDepth = 8) {
  *   no real precision.
  * @param {number} width
  * @param {number} height
- * @param {function} deflate - pako.deflate or equivalent
+ * @param {{Deflate: Function}} zlib - pako (its streaming `Deflate` is used)
+ * @param {{level?: number, strategy?: number}} [options]
  * @returns {Blob}
  */
-export function encodePng16Blob(pixelData, width, height, deflate) {
-  const is16 = pixelData instanceof Uint16Array;
-  const channels = exportChannelCount(pixelData);
-  const rowBytes = width * channels * 2;
-  const raw = new Uint8Array((rowBytes + 1) * height);
-  let rawIndex = 0;
-  for (let y = 0; y < height; y++) {
-    raw[rawIndex++] = 1; // Sub: subtract the byte in the previous pixel.
-    for (let x = 0; x < width; x++) {
-      const source = (y * width + x) * 4;
-      for (let c = 0; c < channels; c++) {
-        const u16 = is16 ? pixelData[source + c] : pixelData[source + c] * 257;
-        const left = x === 0 ? 0 : is16 ? pixelData[source + c - 4] : pixelData[source + c - 4] * 257;
-        raw[rawIndex++] = (u16 >>> 8) - (left >>> 8);
-        raw[rawIndex++] = (u16 & 0xFF) - (left & 0xFF);
-      }
-    }
-  }
-
-  const compressed = deflate(raw, { level: 6 });
-  const signature = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
-  const ihdr = new Uint8Array(13);
-  const ihdrView = new DataView(ihdr.buffer);
-  ihdrView.setUint32(0, width, false);
-  ihdrView.setUint32(4, height, false);
-  ihdr[8] = 16; // bit depth
-  ihdr[9] = channels === 3 ? 2 : 6;
-  ihdr[10] = 0; // compression
-  ihdr[11] = 0; // filter
-  ihdr[12] = 0; // interlace
-
-  const ihdrChunk = createPngChunk('IHDR', ihdr);
-  const iendChunk = createPngChunk('IEND', new Uint8Array(0));
-
-  // Blob accepts an array of parts — concatenating into one buffer first would
-  // duplicate the whole file (hundreds of MB for a large scan) for nothing.
-  return new Blob([signature, ihdrChunk, ...pngChunkParts('IDAT', compressed), iendChunk], { type: 'image/png' });
+export function encodePng16Blob(pixelData, width, height, zlib, options = {}) {
+  return encodePng16BandsSerially(pixelData, width, height, exportChannelCount(pixelData), zlib, options);
 }
 
-function exportChannelCount(pixels) {
+/**
+ * Channels a 16-bit PNG or TIFF of these samples carries: 3 for a 16-bit
+ * plane (alpha is written opaque) or opaque 8-bit data, 4 when 8-bit data
+ * has real transparency. Decided once for the whole frame.
+ */
+export function exportChannelCount(pixels) {
   // The existing 16-bit export contract makes alpha opaque. Eight-bit
   // callers may supply transparency, which must continue to round-trip.
   if (pixels instanceof Uint16Array) return 3;

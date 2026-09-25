@@ -4,7 +4,7 @@
 import { Worker as NodeWorker } from 'node:worker_threads';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { deflate } from 'pako';
+import { deflate, Deflate } from 'pako';
 import { loadPngFile } from '../negative2positive/src/app/pngFileLoader.js';
 import { decodeTiffBuffer } from '../negative2positive/src/app/tiffFileLoader.js';
 import { decodeScanInWorker } from '../negative2positive/src/app/scanDecodeClient.js';
@@ -15,6 +15,9 @@ const revisions = process.argv[2]
   ? [['before', pathToFileURL(resolve(process.argv[2]) + '/')], ['after', current]]
   : [['after', current]];
 const report = value => console.log(JSON.stringify(value));
+// The PNG16 encoder took pako.deflate before #257 and takes pako (its
+// streaming Deflate) since; this argument works for both revisions.
+const zlib = Object.assign((data, options) => deflate(data, options), { Deflate });
 const workerUrl = new URL('../negative2positive/src/workers/scanDecodeWorker.js', import.meta.url).href;
 class BrowserWorker {
   constructor() {
@@ -72,7 +75,7 @@ for (const [revision, root] of revisions) {
       pixels[i] = i % 4 === 3 ? 65535 : fixture === 'ramp' ? (i * 37) & 65535 : seed >>> 16;
     }
     let start = performance.now();
-    const png = encoders.encodePng16Blob(pixels, width, height, deflate);
+    const png = encoders.encodePng16Blob(pixels, width, height, zlib);
     const pngMs = Math.round(performance.now() - start);
     start = performance.now();
     const tiff = encoders.encodeTiffBlob(pixels, width, height, 16);
@@ -85,7 +88,7 @@ const encoders = await import(new URL('negative2positive/src/workers/imageEncode
 const width = 4000, height = 3000;
 const pixels = Uint16Array.from({ length: width * height * 4 }, (_, i) => (i * 37) & 65535);
 for (const format of ['png', 'tiff']) {
-  const blob = format === 'png' ? encoders.encodePng16Blob(pixels, width, height, deflate) : encoders.encodeTiffBlob(pixels, width, height, 16);
+  const blob = format === 'png' ? encoders.encodePng16Blob(pixels, width, height, zlib) : encoders.encodeTiffBlob(pixels, width, height, 16);
   for (const revision of ['before', 'after']) {
     const buffer = await blob.arrayBuffer();
     let ticks = 0, maxGap = 0;
