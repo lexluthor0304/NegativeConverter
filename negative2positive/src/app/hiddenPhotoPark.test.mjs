@@ -58,7 +58,10 @@ function fixture({ enabled = true, hidden = true } = {}) {
       calls.push(['prepare', generation === c.loadGeneration, prepared === item, options.quiet]);
       state.processedImageData = plane('rebuilt');
     },
-    updateUndoRedoButtons: () => calls.push('buttons'), updateFileListUI: () => {}, updateRollAnalysisUI: () => {}, studioWorkspace: { sync: () => {} }
+    updateUndoRedoButtons: () => calls.push('buttons'), updateFileListUI: () => {}, updateRollAnalysisUI: () => {}, studioWorkspace: { sync: () => {} },
+    // #239: the GPU preview's prepared copy of the photo.
+    gpuPreview: { prepared: { tag: 'open photo' } },
+    webglState: { renderer2: { dropPrepared: () => calls.push('dropPrepared') } }
   });
   vm.runInContext(['hiddenParkEnabled', 'parkOpenPhotoForHiddenJob', 'unparkOpenPhoto'].map(functionSource).join('\n'), c);
   return { c, state, item, base, file, calls, undoStack, redoStack };
@@ -94,6 +97,8 @@ function fixture({ enabled = true, hidden = true } = {}) {
     assert.equal(f.state[key], null, `${key} is dropped`);
   }
   assert.equal(f.state.dustRemoval.inpaintedImageData, null);
+  assert.equal(f.c.gpuPreview.prepared, null, 'the GPU preview drops its copy');
+  assert.ok(f.calls.includes('dropPrepared'), 'and its texture');
   assert.equal(f.state.loadedBaseImageData, f.base, 'the decoded base stays');
   assert.equal(f.undoStack.length, 1, 'the undo history is never dropped');
   assert.equal(f.c.parkOpenPhotoForHiddenJob(), false, 'parked once');

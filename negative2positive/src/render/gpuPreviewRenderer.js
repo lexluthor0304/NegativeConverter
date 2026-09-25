@@ -360,6 +360,15 @@ export function createGpuPreviewRenderer(gl) {
       return true;
     },
 
+    // One rect of the exact frame (a dust-brush patch, #259), rows top-down as the
+    // frame is stored. False when the texture does not hold a frame of that size.
+    uploadExactRect(rect, rows) {
+      if (!exact.width || rect.x + rect.width > exact.width || rect.y + rect.height > exact.height) return false;
+      bind(UNITS.image, exact.handle);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, rect.x, rect.y, rect.width, rect.height, gl.RGBA, gl.UNSIGNED_BYTE, rows);
+      return true;
+    },
+
     uploadCurves(curves) {
       uploadCurveInto(curve.handle, curves, curve.allocated);
       curve.allocated = true;

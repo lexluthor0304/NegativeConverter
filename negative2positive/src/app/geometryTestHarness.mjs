@@ -4,6 +4,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import { DISABLED_GPU_PREVIEW_SCHEDULER } from './gpuPreviewScheduler.js';
 
 if (!globalThis.ImageData) {
   globalThis.ImageData = class ImageData {
@@ -135,6 +136,8 @@ export function createHarness(base, { historyBudget = 768 * 1024 * 1024, session
     dustAiRefresh: { rects: [], timer: null },
     // #263: no reduced preview-tier session is open.
     previewTier: 'normal', previewTierKept: null, reducedDisplayImages: new WeakSet(), displayIsReduced: () => false,
+    // No GPU preview frame is ahead of its exact frame (#239).
+    gpuPreviewScheduler: DISABLED_GPU_PREVIEW_SCHEDULER,
     geometryMemo: new WeakMap(), geometryBaseIds: new WeakMap(), nextGeometryBaseId: 1,
     pendingImportRotation: null, geometryToken: 0, geometryJob: null, geometryBusyOwner: null,
     interimGeometry: null, loadGeneration: 1, DEBUG_UI: false, manualEditRevision: 0,

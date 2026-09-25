@@ -6341,7 +6341,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         if (!result.ok) return failGpuPreview(`self-test ${JSON.stringify(result)}`);
         gpuPreview.status = 'ready';
       }
-      if (gpuPreview.status !== 'ready') return;
+      // Inputs only for a frame the GPU may draw: an excluded mode (crop, look,
+      // repairs, ...) asks again with its next exact frame once it ends.
+      if (gpuPreview.status !== 'ready' || !gpuApplyUsable()) return;
       const settings = buildRouterSettings(state);
       const params = trySilverCoreParams(resolveConversionMode(settings), settings);
       if (params) gpuProfileReady(params.enhancedProfile);
@@ -8130,6 +8132,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         const start = ((rect.y + y) * imageData.width + rect.x) * 4;
         rows.set(imageData.data.subarray(start, start + rect.width * 4), y * rect.width * 4);
       }
+      // WebGL2 (#239): the exact frame's texture belongs to the renderer.
+      if (webglState.webgl2) {
+        if (!webglState.renderer2.uploadExactRect(rect, rows)) webglState.sourceDirty = true;
+        return;
+      }
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, webglState.sourceTex);
       gl.texSubImage2D(gl.TEXTURE_2D, 0, rect.x, rect.y, rect.width, rect.height, gl.RGBA, gl.UNSIGNED_BYTE, rows);
@@ -8696,6 +8703,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       state.dustRemoval.inpaintedImageData = null;
       state.dustRemoval.cleanSource = null;
       state.dustRemoval._state = null;
+      // The GPU preview's copy of the photo (#239) goes too; it is prepared again
+      // with the next exact frame.
+      gpuPreview.prepared = null;
+      webglState.renderer2?.dropPrepared();
       return true;
     }
 
