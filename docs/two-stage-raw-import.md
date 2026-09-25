@@ -62,6 +62,11 @@ stage 2 to crop mode or a failure.
   (`onLibRawReleased`), before stage 1's post-decode work and analyses.
   `?twoStageMode=sequential|concurrent` forces either. If stage 1 fails, the
   full decode becomes the load.
+- **Memory** (#258): stage 1 takes the activation's foreground reservation at
+  the loader gate with its half-size decode peak. Stage 2 takes a foreground
+  reservation of its own there with the full size, released when its decode
+  returns. Foreground requests never wait, so the budget does not choose
+  between the concurrent and the sequential start.
 - A lane's decode of the same file (#243 `sharedDecodes`) is adopted instead
   of both stages.
 
@@ -228,5 +233,5 @@ quiet.
   The app ships npm `libraw-wasm`. It would save about 1.2 s of shared unpack
   per two-stage open. First check that `half_size` toggles cleanly between
   `dcraw_process()` calls for DNG.
-- Zoom detail levels beyond the stand-in (#248) and the concurrent-start
-  budget (#258) take over when those land.
+- Zoom detail levels beyond the stand-in (#248). The concurrent start still
+  follows `stageTwoStartMode`, not the memory budget (#258).

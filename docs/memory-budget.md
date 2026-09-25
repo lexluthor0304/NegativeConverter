@@ -81,7 +81,7 @@ memory is really gone.
 | site | priority | bytes | held |
 |---|---|---|---|
 | `loadFile` and the cold path of `switchToFile` | foreground | the decode's peak (`estimateRawDecodeBytes` with LibRaw's size, taken at the loader gate after `metadata()`); 12 B/px from the header for PNG/JPEG/TIFF | until the photo has settled (no switch, conversion or geometry build, not provisional, two polls 250 ms apart) or a newer activation supersedes it |
-| deferred full-resolution decode of a heavy RAW | foreground | same | until the decode returns |
+| stage 2 of a two-stage RAW import (the full decode behind the stand-in, #255) | foreground | same | until the decode returns |
 | Export All lanes (`runBatchExport`) | user | 50 B/px (`LANE_BYTES_PER_PIXEL`) × the batch's largest frame | from `beforeStart` (after the hidden-job gate, before the lane claims an index) until that index's sink ran |
 | background lanes: roll analysis (pass 1) | background | 50 B/px of the frame | from before the decode until the job ends |
 | background lanes: tiles, including Sync colour re-renders, and the prefetch | background | decode peak + 12 B/px; nothing when the base is a retained session or the prefetch slot | until the tile is written or the base handed over |

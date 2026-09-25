@@ -27,6 +27,7 @@ import {
 } from './provisionalPhoto.js';
 import { rotatedDimensions, sanitizeCropRect, normalizeAngleDegrees } from './imageGeometry.js';
 import { mergeStudioColors } from './studioSettings.js';
+import { MEMORY_FUNCTIONS, memoryGlobals } from './memoryHarness.mjs';
 
 const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8');
 function functionSource(name) {
@@ -69,6 +70,10 @@ function fixture({ search = '?twoStageMinMp=40&twoStageMode=sequential', settled
     rollReference: { applyLock: false }, rollMetadata: {}
   };
   const target = {
+    // The memory budget (#258), real; the fakes below win over its helpers.
+    ...memoryGlobals(),
+    getPerfNow: () => performance.now(),
+    backgroundRest: ms => new Promise(resolve => setTimeout(resolve, ms)),
     state, loadGeneration: 0, photoActivation: null, rewarmAutoFrameWorker: false, importDetectionAbort: null,
     fullResolutionRenderAbort: null, parkedPhoto: null, pendingImportRotation: null,
     coreReprocessGeneration: 0, coreReprocessToken: 0, _coreReprocessPending: null, processNegativeInFlight: null,
@@ -179,7 +184,7 @@ function fixture({ search = '?twoStageMinMp=40&twoStageMode=sequential', settled
     'settledImportSettings', 'rebaseProvisionalHistory', 'installFullDecode', 'settleProvisionalPhoto',
     'leaveProvisionalPhoto', 'withPendingEdits', 'pendingGeometryEdits', 'extractCurrentSettings', 'restoreSettings',
     'persistCurrentFileSettings', 'canReuseLoadedRollSource', 'studioBackgroundReady', 'rememberPhotoBase',
-    'buildFinalImportSettings', 'getCurrentQueueItem'
+    'buildFinalImportSettings', 'getCurrentQueueItem', ...MEMORY_FUNCTIONS
   ].map(functionSource).join('\n'), context);
   target.photoSessions = { put: () => { log.push(['session']); return true; } };
   target.hiddenJobs = { safeMode: false };
@@ -208,6 +213,9 @@ function fixture({ search = '?twoStageMinMp=40&twoStageMode=sequential', settled
   assert.equal(f.reads.length, 2, 'stage 2 reads the file again (nothing copied or pinned)');
   assert.equal(f.stage2.length, 1);
   assert.equal(f.stage2[0].options.halfSize, undefined, 'stage 2 is a full decode');
+  // Stage 2 reserves a foreground claim of its own at the loader gate (#258).
+  await f.stage2[0].options.reserveDecode({ kind: 'raw', width: FULL.width, height: FULL.height, estimatedBytes: 2e9 });
+  assert.equal(f.target.memoryBudget.snapshot().foreground, 2e9, 'stage 2 holds a foreground reservation');
   f.stage1[0].resolve(image(HALF, { __decodeScale: 0.5, __fullSize: { ...FULL } }));
   assert.equal((await loading).status, 'loaded');
   assert.equal(f.state.rawDecodePending, true);
@@ -222,6 +230,8 @@ function fixture({ search = '?twoStageMinMp=40&twoStageMode=sequential', settled
   f.context.beginActivation(null);
   f.context.invalidatePhotoActivation();
   assert.equal(stage2Signal.aborted, true, 'stage 2 is aborted by the next activation');
+  await flush();
+  assert.equal(f.target.memoryBudget.snapshot().foreground, 0, 'and its reservation goes with it');
   assert.equal(f.state.rawDecodePending, false);
   assert.equal(f.state.fullDecode, null);
   assert.equal(f.target.twoStageDiagnostics.abandoned, 1);

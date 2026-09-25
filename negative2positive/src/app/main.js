@@ -9842,8 +9842,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // parity run. Who reserves:
     // - the photo being opened (foreground): at the loader gate with the
     //   decode's real size, held until the activation settles or a newer one
-    //   supersedes it; the deferred full-resolution decode of a heavy RAW
-    //   until it returns;
+    //   supersedes it; the full decode behind a two-stage import's stand-in
+    //   (#255) until it returns;
     // - user jobs: each Export All lane (the lane constant over the batch's
     //   largest frame, from admission until its sink ran), Auto Frame
     //   Selected, multi-shot merge, blank-frame search, a manual Analyze
@@ -11211,7 +11211,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       let settings = snapshot;
       if (start.detectFrame || start.readEdge) {
         const signal = record.abort.signal;
-        const reload = async () => loadRawImageData(await record.file.arrayBuffer(), record.fileName, { sourceBlob: record.file, signal });
+        // A decode again reserves like stage 2 (#258).
+        const reload = () => loadFileToImageData(record.file, { signal, priority: 'foreground', label: `full-resolution ${record.fileName}` });
         const analysed = await runImportDetections(image, {
           frame: start.detectFrame, filmEdge: start.readEdge, owned: true, reload, silent: true,
           autoFrame: start.autoFrame, filmType: snapshot.filmType, frameFilmType: snapshot.filmType, signal
