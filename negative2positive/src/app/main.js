@@ -3020,8 +3020,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
       // Category B: references. While geometry is being rebuilt the planes
       // still belong to the previous geometry, so the snapshot keeps only its
-      // scalars and a restore rebuilds the pixels from them (#244).
-      if (state.geometryPending) return { label, settings, refs: { cold: true } };
+      // scalars and a restore rebuilds the pixels from them (#244). A Tier B
+      // session holds no planes to refer to (#249): a restore converts its
+      // display proxy again, or rebuilds from the base when the geometry
+      // differs.
+      if (state.geometryPending || state.sourcePending) return { label, settings, refs: { cold: true } };
       const refs = {};
       for (const key of SNAPSHOT_REF_KEYS) {
         refs[key] = state[key];
@@ -9614,7 +9617,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     function displayNegative(imageData) {
       // A size-only stand-in (#244, #249) has no pixels to draw.
-      if (!imageData || imageData.released || isGeometryFrame(imageData)) return;
+      if (!imageData || imageData.released) return;
       resetZoomPan();
       renderAdjustedImageDataToMainCanvas(imageData, imageData);
       updateSprocketControlsUI();
@@ -10646,7 +10649,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // The processed preview is exactly the preview conversion only while
       // it is one; a full-resolution plane (after an export) is converted
       // again from the proxy on return.
-      const settledPreview = state.processedImageDataIsPreview && entry.snapshot.refs?.processedImageData === state.processedImageData;
+      const refs0 = entry.snapshot.refs;
+      const settledPreview = state.processedImageDataIsPreview && (!refs0 || refs0.cold || refs0.processedImageData === state.processedImageData);
       const refs = {
         originalImageData: frame, croppedImageData: crop,
         processedImageData: settledPreview ? state.processedImageData : null,
@@ -13780,7 +13784,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       invalidateSilverCoreCache();
       state.conversionSourceImageData = null;
       state.conversionPreviewImageData = null;
-      state.displayLevelImageData = null;
+      // A Tier B session's display level is its only conversion input (#249):
+      // it stays, and processNegative converts it only while its key still
+      // matches the geometry.
+      if (!state.sourcePending) state.displayLevelImageData = null;
       state.autoWbSample = null;
       state.previewSourceImageData = null;
       state.histogramSourceImageData = null;

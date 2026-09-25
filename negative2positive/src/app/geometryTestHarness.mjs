@@ -188,7 +188,9 @@ export function createHarness(base, { historyBudget = 768 * 1024 * 1024, session
       state.currentStep = 3;
     },
     invalidateProcessedPipelineState: () => {
-      for (const key of ['processedImageData', 'displayImageData', 'conversionSourceImageData', 'conversionPreviewImageData', 'previewSourceImageData', 'histogramSourceImageData', 'webglSourceImageData']) state[key] = null;
+      for (const key of ['processedImageData', 'displayImageData', 'conversionSourceImageData', 'previewSourceImageData', 'histogramSourceImageData', 'webglSourceImageData']) state[key] = null;
+      // A Tier B session keeps its display proxy (#249), as main.js does.
+      if (!state.sourcePending) state.conversionPreviewImageData = null;
     },
     sanitizeSettings: settings => ({
       filmBase: {}, lensCorrection: { enabled: false, params: {}, modes: {} },

@@ -272,6 +272,43 @@ for (const tier of ['A', 'B']) {
   assert.equal(h.target.displaySessionDiagnostics.selfCheckMismatches, 0);
 }
 
+// ---- Undo on a Tier B photo: a slider step converts the proxy again, with
+// no decode; a geometry step waits for the original ----
+{
+  const probe = await convertedPhoto({ sessionBudget: 1 << 30 });
+  const budget = bytesOf([probe.proxy, probe.processed, probe.sample]) + 64;
+  const { h, c, base, crop, proxy, item } = await convertedPhoto({ sessionBudget: budget });
+  wireSwitching(h, [item, { id: 2, file: { name: 'b.dng' }, settings: null }]);
+  await c.switchToFile(1);
+  await c.switchToFile(0);
+  assert.ok(h.state.sourcePending);
+  const converted = [];
+  h.target.convertFromCurrentSource = async (settings, options) => {
+    converted.push(options.preview ? h.state.conversionPreviewImageData : h.state.conversionSourceImageData);
+    return makeBase(30, 20, 17);
+  };
+  h.state.exposure = 3;
+  c.pushUndo('exposure');
+  assert.equal(h.target.undoStack.at(-1).refs.cold, true, 'a Tier B session has no planes to refer to');
+  h.state.exposure = 7;
+  await c.performUndo();
+  await settle();
+  assert.equal(h.state.exposure, 3, 'the scalars come back');
+  assert.equal(converted.at(-1), proxy, 'the proxy converts again');
+  assert.equal(h.target.baseDecodes, undefined, 'without waiting for the source');
+  assert.equal(h.state.conversionPreviewImageData, proxy, 'the proxy stays the display preview');
+  // A geometry step waits for the original, then builds exactly.
+  h.target.decodeBase = () => base;
+  c.pushUndo('rotation');
+  const rotating = c.applyRotation(90);
+  await rotating;
+  await settle();
+  await c.performUndo();
+  await settle();
+  assert.equal(h.target.baseDecodes, 1);
+  samePixels(h.state.croppedImageData, crop, 'undoing the rotation rebuilds the planes left behind');
+}
+
 // ---- A viewport change is a key miss: the conversion waits for the source ----
 {
   const probe = await convertedPhoto({ sessionBudget: 1 << 30 });
