@@ -129,11 +129,28 @@ function schedulerFixture({ repairs = false } = {}) {
   let displayTarget = { width: 200, height: 150 };
   const log = [];
   const conversions = [];
+  const commits = [];
   const busyAtApply = [];
+  const applied = processed => {
+    context.releaseCorePreviewRetained(processed);
+    busyAtApply.push(context.coreReprocessBusy());
+    log.push('apply');
+  };
   const context = vm.createContext({
     state, console: { error: () => {}, warn: () => {} },
+    setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
     coreReprocessGates: createCoreReprocessGates(clock),
     previewDispatchAction, CORE_FULL_REPROCESS_DELAY_MS,
+    CORE_RETAIN_PREVIEW_PLANE: true, CORE_PREVIEW_COMMIT_IDLE_MS: 150,
+    corePreviewRetained: null, corePreviewCommit: null, corePreviewCommitWanted: false,
+    corePreviewCommitTimer: null, corePreviewSettleWaiters: [],
+    convertPreviewFrameInWorker: { commit: image => new Promise((resolve, reject) => {
+      commits.push({ image, resolve, reject });
+      log.push('commit');
+    }) },
+    buildPreviewSourceImageData: image => image,
+    buildHistogramSourceImageData: image => ({ sampleOf: image }),
+    webglState: { gl: null }, schedulePreviewUpdate: () => {},
     coreReprocessTimer: null, coreReprocessScheduled: null,
     coreReprocessToken: 0, coreReprocessGeneration: 0,
     _coreReprocessFullInFlight: false, _coreReprocessPreviewInFlight: false,
@@ -147,12 +164,12 @@ function schedulerFixture({ repairs = false } = {}) {
     convertFromCurrentSource: (settings, options) => new Promise((resolve, reject) => {
       // The request reads live state when it starts, as the real one does.
       const entry = { exposure: state.coreExposure, token: context.coreReprocessToken,
-        full: !options.interactive, busy: context.coreReprocessBusy(), resolve, reject };
+        full: !options.interactive, retain16: Boolean(options.retain16), busy: context.coreReprocessBusy(), resolve, reject };
       conversions.push(entry);
       log.push(`${entry.full ? 'full' : 'post'}:${entry.exposure}`);
     }),
-    applyPreviewProcessedImageToState: () => { busyAtApply.push(context.coreReprocessBusy()); log.push('apply'); },
-    applyProcessedImageToState: () => { busyAtApply.push(context.coreReprocessBusy()); log.push('apply'); },
+    applyPreviewProcessedImageToState: applied,
+    applyProcessedImageToState: applied,
     updatePreview: () => log.push('draw'),
     updateFull: () => log.push('draw'),
     scheduleFullUpdate: () => {},
@@ -164,13 +181,16 @@ function schedulerFixture({ repairs = false } = {}) {
     'rerenderWithCoreControls', 'postPendingPreviewEarly', 'hasSeparateConversionPreview',
     'cancelScheduledFullResolutionRender', 'scheduleCoreReprocess', 'takeScheduledCoreReprocess',
     'fireCoreReprocessGate', 'clearCoreReprocessTimer', 'flushScheduledCoreReprocess',
+    'retainCorePreviewPlane', 'armCorePreviewCommitTimer', 'releaseCorePreviewRetained', 'requestCorePreviewCommit',
+    'maybeCommitCorePreviewPlane', 'settleCorePreviewWaiters', 'settleCorePreviewPlane', 'histogramSourceFor',
   ].map(functionSource).join('\n'), context);
   const request = (exposure, options = { full: false }) => {
     if (exposure !== undefined) state.coreExposure = exposure;
     context.scheduleCoreReprocess(options);
   };
   const result = () => ({ width: 200, height: 150 });
-  return { context, state, clock, log, conversions, busyAtApply, request, result,
+  const retainedResult = () => ({ width: 200, height: 150, __retained16: true, __histogramSample: { sample: true } });
+  return { context, state, clock, log, conversions, commits, busyAtApply, request, result, retainedResult,
     setTarget: size => { displayTarget = size; } };
 }
 
@@ -375,6 +395,218 @@ for (const earlyPost of [false, true]) {
   assert.ok(stored.at(-1).snapshot, 'settled once the frame is drawn');
 }
 
+// ---- (6) The 16-bit plane of a dragged frame stays in the worker until committed ----
+
+{
+  // A retained frame keeps the reprocess chain busy until its plane is back.
+  const f = schedulerFixture();
+  f.request(1);
+  await Promise.resolve();
+  assert.equal(f.conversions[0].retain16, true, 'a separate display preview may keep its plane in the worker');
+  const frame = f.retainedResult();
+  f.conversions[0].resolve(frame);
+  await settle();
+  assert.equal(f.context.corePreviewRetained?.processed, frame);
+  assert.equal(f.context.coreReprocessBusy(), true, 'busy until the plane is committed');
+  assert.equal(f.commits.length, 0, 'nothing is committed while the drag may continue');
+  f.context.requestCorePreviewCommit();
+  assert.equal(f.commits.length, 1);
+  assert.equal(f.commits[0].image, frame);
+  assert.equal(f.context.coreReprocessBusy(), true, 'still busy while the commit is in flight');
+  const plane = new Uint16Array(200 * 150 * 4);
+  f.commits[0].resolve(plane);
+  await settle();
+  assert.equal(frame.__image16.data, plane, 'the plane attaches to the frame on screen');
+  assert.equal(frame.__retained16, undefined);
+  assert.equal(f.context.coreReprocessBusy(), false);
+  assert.equal(f.context.corePreviewRetained, null);
+}
+
+{
+  // A commit never overtakes a request already posted to the worker (which
+  // reuses the plane); it goes to the frame that request produces.
+  const f = schedulerFixture();
+  f.request(1);
+  await Promise.resolve();
+  const first = f.retainedResult();
+  f.conversions[0].resolve(first);
+  await settle();
+  f.clock.nextFrame();
+  f.request(2);
+  await Promise.resolve();
+  assert.equal(f.conversions.length, 2);
+  f.context.requestCorePreviewCommit();
+  assert.equal(f.commits.length, 0, 'no commit while a request is in the worker');
+  const second = f.retainedResult();
+  f.conversions[1].resolve(second);
+  await settle();
+  assert.equal(f.commits.length, 1);
+  assert.equal(f.commits[0].image, second, 'the frame on screen is committed once the lane drains');
+  f.commits[0].resolve(new Uint16Array(4));
+  await settle();
+  assert.equal(f.context.coreReprocessBusy(), false);
+}
+
+{
+  // About 150 ms without a new frame settles the drag, unless one is queued.
+  const f = schedulerFixture();
+  f.request(1);
+  await Promise.resolve();
+  f.conversions[0].resolve(f.retainedResult());
+  await settle();
+  const idle = [...f.clock.timers.values()].find(timer => timer.delay === 150);
+  assert.ok(idle, 'an idle commit timer is armed');
+  f.clock.nextFrame();
+  f.request(2);
+  f.clock.runTimers();
+  assert.equal(f.commits.length, 0, 'a newer request postpones the idle commit');
+  assert.ok([...f.clock.timers.values()].some(timer => timer.delay === 150), 'and the wait starts over');
+  await Promise.resolve();
+  f.conversions[1].resolve(f.retainedResult());
+  await settle();
+  f.clock.runTimers();
+  assert.equal(f.commits.length, 1, 'the idle commit follows the last frame');
+  f.commits[0].resolve(new Uint16Array(4));
+  await settle();
+  assert.equal(f.context.coreReprocessBusy(), false);
+}
+
+{
+  // A plane that is gone (reused, or the worker restarted) is recovered by
+  // converting the frame on screen again, this time with its plane.
+  const f = schedulerFixture();
+  f.request(1);
+  await Promise.resolve();
+  f.conversions[0].resolve(f.retainedResult());
+  await settle();
+  f.context.requestCorePreviewCommit();
+  f.commits[0].resolve(null);
+  await settle();
+  assert.equal(f.conversions.length, 2);
+  assert.equal(f.conversions[1].retain16, false, 'the recovery conversion transfers its plane');
+  assert.equal(f.context.coreReprocessBusy(), true, 'never idle between the lost plane and its replacement');
+  f.conversions[1].resolve(f.result());
+  await settle();
+  assert.equal(f.context.coreReprocessBusy(), false);
+}
+
+{
+  // The export barrier and a photo switch force the commit.
+  const f = schedulerFixture();
+  f.request(1);
+  await Promise.resolve();
+  f.conversions[0].resolve(f.retainedResult());
+  await settle();
+  let flushed = false;
+  const flush = f.context.flushScheduledCoreReprocess().then(() => { flushed = true; });
+  await settle();
+  assert.equal(f.commits.length, 1, 'the export barrier commits the plane');
+  assert.equal(flushed, false);
+  f.commits[0].resolve(new Uint16Array(4));
+  await flush;
+
+  f.clock.nextFrame();
+  f.request(2);
+  await Promise.resolve();
+  f.conversions[1].resolve(f.retainedResult());
+  await settle();
+  let settledPlane = false;
+  const settling = f.context.settleCorePreviewPlane().then(() => { settledPlane = true; });
+  assert.equal(f.commits.length, 2);
+  await settle();
+  assert.equal(settledPlane, false);
+  f.commits[1].resolve(new Uint16Array(4));
+  await settling;
+  assert.equal(f.context.coreReprocessBusy(), false);
+}
+
+{
+  // A photo switch waits for the plane before the photo being left is
+  // remembered, then starts over.
+  const f = schedulerFixture();
+  f.request(1);
+  await Promise.resolve();
+  f.conversions[0].resolve(f.retainedResult());
+  await settle();
+  const leaving = { file: 'a' }, target = { file: 'b' };
+  Object.assign(f.state, { fileQueue: [leaving, target], currentFileIndex: 0, loadedFile: 'a' });
+  let exitedCrop = 0;
+  Object.assign(f.context, { studioAutoFrameRunning: false, singleExportActive: false,
+    isDesktopBatchExportLocked: () => false, exitCropMode: () => { exitedCrop++; } });
+  f.state.cropping = true;
+  vm.runInContext(functionSource('switchToFile'), f.context);
+  let switched = false;
+  const switching = f.context.switchToFile(1).then(() => { switched = true; });
+  await settle();
+  assert.equal(f.commits.length, 1, 'the switch commits the plane first');
+  assert.equal(exitedCrop, 0, 'and touches nothing before it is back');
+  assert.equal(switched, false);
+  // Settle the test here: the restarted switch finds the photo already open.
+  f.state.currentFileIndex = 1; f.state.loadedFile = 'b';
+  f.commits[0].resolve(new Uint16Array(4));
+  await switching;
+  assert.equal(f.context.coreReprocessBusy(), false);
+}
+
+{
+  // A snapshot of the frame on screen asks for its plane; the plane lands on
+  // the very object the snapshot holds.
+  const f = schedulerFixture();
+  f.request(1);
+  await Promise.resolve();
+  const frame = f.retainedResult();
+  f.conversions[0].resolve(frame);
+  await settle();
+  Object.assign(f.state, {
+    processedImageData: frame, semanticMap: null, rollFrame: null, filmBase: null, cropRegion: null,
+    curves: { r: null, g: null, b: null }, curvePoints: { r: [], g: [], b: [] },
+    dustRemoval: { ...f.state.dustRemoval, mask: null, inpaintedImageData: null, cleanSource: null, _state: null },
+  });
+  Object.assign(f.state, { sprocketEdge: null, lensCorrection: null, filmEdge: null, learnedDefaults: null,
+    localExposure: null, look: null, expiredAnalysis: null, frameMetadata: null, autoFrame: { lastDiagnostics: null } });
+  Object.assign(f.context, { SNAPSHOT_SCALAR_KEYS: ['coreExposure'], SNAPSHOT_REF_KEYS: ['processedImageData'],
+    structuredClone, createSprocketEdgeSettings: () => null, sanitizeFrameMetadata: () => null });
+  vm.runInContext(functionSource('captureSnapshot'), f.context);
+  const snapshot = f.context.captureSnapshot('coreExposure');
+  assert.equal(f.commits.length, 1, 'taking a snapshot commits the plane');
+  const plane = new Uint16Array(4);
+  f.commits[0].resolve(plane);
+  await settle();
+  assert.equal(snapshot.refs.processedImageData.__image16.data, plane);
+}
+
+{
+  // Frames where the preview is the source keep their plane; a frame on
+  // screen that is replaced by another releases the retained one.
+  const f = schedulerFixture();
+  f.state.conversionPreviewImageData = f.state.conversionSourceImageData;
+  f.setTarget({ width: 400, height: 300 });
+  f.request(1);
+  await Promise.resolve();
+  assert.equal(f.conversions[0].retain16, false, 'the plane that feeds the 16-bit export always travels');
+  f.conversions[0].resolve({ width: 400, height: 300 });
+  await settle();
+
+  const g = schedulerFixture();
+  g.request(1);
+  await Promise.resolve();
+  g.conversions[0].resolve(g.retainedResult());
+  await settle();
+  void g.context.rerenderWithCoreControls({ full: true });
+  await Promise.resolve();
+  g.conversions[1].resolve({ width: 400, height: 300 });
+  await settle();
+  assert.equal(g.context.corePreviewRetained, null, 'a full-resolution frame on screen supersedes the retained one');
+  assert.equal(g.context.coreReprocessBusy(), false);
+  assert.equal(g.commits.length, 0);
+
+  g.state.previewSourceImageData = { width: 1 };
+  const frame = g.retainedResult();
+  assert.deepEqual(g.context.histogramSourceFor(frame), { sampleOf: g.state.previewSourceImageData }, 'a resampled display source builds its own sample');
+  g.state.previewSourceImageData = frame;
+  assert.equal(g.context.histogramSourceFor(frame), frame.__histogramSample, 'the worker sample stands in for the plane');
+}
+
 // ---- One conversion per slider commit ----
 
 function sliderFixture(options) {
@@ -489,4 +721,4 @@ function sliderFixture(options) {
   assert.equal(f.context.coreReprocessBusy(), false);
 }
 
-console.log('coreReprocessDispatcher: same-task idle posts, newest-wins busy lane, one post per frame, early handoff, gate cancel/flush/settle and one conversion per commit passed');
+console.log('coreReprocessDispatcher: same-task idle posts, newest-wins busy lane, one post per frame, early handoff, gate cancel/flush/settle, retained 16-bit planes committed on release/idle/export/switch/snapshot and one conversion per commit passed');

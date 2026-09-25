@@ -43,6 +43,8 @@ function fixture({ repairs = true, locked = false } = {}) {
     webglState: { gl: null }, console,
     clearTimeout: timer => clearedTimers.push(timer),
     coreReprocessGates: createCoreReprocessGates({ clearTimeout: timer => clearedTimers.push(timer) }),
+    CORE_RETAIN_PREVIEW_PLANE: true, corePreviewRetained: null, corePreviewCommit: null,
+    corePreviewCommitWanted: false, corePreviewCommitTimer: null, corePreviewSettleWaiters: [],
     isDesktopBatchExportLocked: () => locked,
     clearUndoHistory: noop, pushUndo: noop, exitCropMode: noop, exitBeforeAfter: noop,
     resetZoomPan: noop, updateMirrorButtonState: noop,
@@ -74,6 +76,8 @@ function fixture({ repairs = true, locked = false } = {}) {
     'coreReprocessBusy', 'whenCoreReprocessIdle', 'noteCoreReprocessSettled',
     'runCoreReprocess', 'flushScheduledCoreReprocess',
     'resetAllAdjustments', 'rerenderWithCoreControls', 'postPendingPreviewEarly', 'restartPhotoProcessing',
+    'retainCorePreviewPlane', 'armCorePreviewCommitTimer', 'releaseCorePreviewRetained', 'requestCorePreviewCommit',
+    'maybeCommitCorePreviewPlane', 'settleCorePreviewWaiters',
   ].map(functionSource).join('\n'), context);
   return { context, state, base, oldPixels, newPixels, applied, clearedTimers, resolveOld, rejectOld };
 }

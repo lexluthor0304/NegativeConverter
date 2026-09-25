@@ -52,6 +52,7 @@ function fixture() {
     File: globalThis.File, performance, Uint8Array, structuredClone, DOMException,
     aiRepair: { revision: 2, status: 'ready', provider: 'wasm', run: noop, release: noop },
     processNegativeInFlight: null, coreReprocessTimer: null, dustDetectionTimer: null,
+    corePreviewRetained: null, corePreviewCommit: null,
     pendingBrushRepairs: 0, dustDrawing: false, undoStack: [], redoStack: [],
     coreReprocessGeneration: 3, coreReprocessToken: 4, dustDetectionRevision: 5,
     loadGeneration: 6, _coreReprocessPending: null,
@@ -362,7 +363,7 @@ for (const locked of [false, true]) {
   c.document.body.dataset = { studioBusy: 'true', photoSwitching: 'true' };
   f.state.photoSwitchTarget = f.item;
   f.state.photoSwitchPhase = 'loading';
-  vm.runInContext(['clearCoreReprocessTimer', 'closePhotoSession'].map(functionSource).join('\n'), c);
+  vm.runInContext(['clearCoreReprocessTimer', 'releaseCorePreviewRetained', 'closePhotoSession'].map(functionSource).join('\n'), c);
   const oldGeneration = c.loadGeneration, oldToken = c.coreReprocessToken;
   c.closePhotoSession();
   if (locked) {

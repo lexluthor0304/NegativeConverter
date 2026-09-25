@@ -2699,6 +2699,9 @@ import { frameNeedsReview } from './reviewQueue.js';
     ];
 
     function captureSnapshot(label) {
+      // The snapshot keeps the frame on screen; its 16-bit plane attaches to
+      // that same object when the commit lands.
+      requestCorePreviewCommit();
       const settings = {};
       for (const key of SNAPSHOT_SCALAR_KEYS) {
         settings[key] = state[key];
@@ -2765,6 +2768,7 @@ import { frameNeedsReview } from './reviewQueue.js';
       if (fullUpdateTimer) { clearTimeout(fullUpdateTimer); fullUpdateTimer = null; }
       clearCoreReprocessTimer();
       coreReprocessScheduled = null;
+      releaseCorePreviewRetained();
       if (displayPreviewResizeTimer) { clearTimeout(displayPreviewResizeTimer); displayPreviewResizeTimer = null; }
       if (step2AutoConvertTimer) { clearTimeout(step2AutoConvertTimer); step2AutoConvertTimer = null; }
       if (dustDetectionTimer) { clearTimeout(dustDetectionTimer); dustDetectionTimer = null; }
@@ -4118,6 +4122,14 @@ import { frameNeedsReview } from './reviewQueue.js';
       return downsampleImageDataForMaxPixels(imageData, HISTOGRAM_MAX_SAMPLES);
     }
 
+    // A retained preview frame arrives without its 16-bit plane but with the
+    // worker's downsample of that plane, which is what this would compute.
+    function histogramSourceFor(processed) {
+      const source = state.previewSourceImageData || processed;
+      if (processed.__histogramSample && source === processed) return processed.__histogramSample;
+      return buildHistogramSourceImageData(source);
+    }
+
     function buildWebglSourceImageData(imageData, maxDim = webglState.maxTextureSize || 8192) {
       return resizeDisplayPreview(imageData, getDisplayPreviewSize(imageData, maxDim));
     }
@@ -5275,6 +5287,7 @@ import { frameNeedsReview } from './reviewQueue.js';
     function applyProcessedImageToState(processed, options = {}) {
       if (!processed) return;
       const previewOnly = Boolean(options.previewOnly);
+      releaseCorePreviewRetained(processed);
       state.processedImageData = processed;
       state.processedImageDataIsPreview = previewOnly;
       if (!previewOnly) {
@@ -5282,7 +5295,7 @@ import { frameNeedsReview } from './reviewQueue.js';
       }
       state.displayImageData = null;
       state.previewSourceImageData = buildPreviewSourceImageData(processed);
-      state.histogramSourceImageData = buildHistogramSourceImageData(state.previewSourceImageData || processed);
+      state.histogramSourceImageData = histogramSourceFor(processed);
       state.webglSourceImageData = state.previewSourceImageData;
       if (initWebGLRenderer()) {
         webglState.sourceDirty = true;
@@ -5374,7 +5387,7 @@ import { frameNeedsReview } from './reviewQueue.js';
       return convertFrameWithRouter({ imageData, settings, options });
     }
 
-    async function convertFromCurrentSource(settings = state, { preview = false, interactive = false, includeAnalysisPreview = true } = {}) {
+    async function convertFromCurrentSource(settings = state, { preview = false, interactive = false, includeAnalysisPreview = true, retain16 = false } = {}) {
       const fullSource = state.conversionSourceImageData || state.croppedImageData || state.originalImageData;
       if (!fullSource) return null;
       const source = (preview && state.conversionPreviewImageData) ? state.conversionPreviewImageData : fullSource;
@@ -5385,7 +5398,10 @@ import { frameNeedsReview } from './reviewQueue.js';
           preview,
           includeAnalysisPreview,
           analysisImageData: getColorAnalysisSample(settings),
-          forceFullProcess: !preview && !interactive
+          forceFullProcess: !preview && !interactive,
+          // The preview worker keeps this frame's 16-bit plane until it is
+          // committed, and sends the histogram sample built from it instead.
+          ...(retain16 ? { retain16: true, histogramSamples: HISTOGRAM_MAX_SAMPLES } : {})
         }
       };
       if (preview || interactive) {
@@ -5469,8 +5485,9 @@ import { frameNeedsReview } from './reviewQueue.js';
       // check in ensureFullResolutionReadyForExport and silently writes the
       // previous conversion.
       state.fullResolutionPending = true;
+      releaseCorePreviewRetained(processed);
       state.previewSourceImageData = buildPreviewSourceImageData(processed);
-      state.histogramSourceImageData = buildHistogramSourceImageData(state.previewSourceImageData);
+      state.histogramSourceImageData = histogramSourceFor(processed);
       state.webglSourceImageData = state.previewSourceImageData;
       if (initWebGLRenderer()) {
         webglState.sourceDirty = true;
@@ -5496,10 +5513,25 @@ import { frameNeedsReview } from './reviewQueue.js';
     let _coreReprocessActive = 0;
     let _coreReprocessIdle = null;
     let _resolveCoreReprocessIdle = null;
+    // While a slider drags a frame with a separate display preview, the preview
+    // worker keeps each frame's 16-bit plane (the next frame writes into it)
+    // and sends the 8-bit plane and a histogram sample only. The frame on
+    // screen is `corePreviewRetained` until its plane is committed back: on
+    // release, after CORE_PREVIEW_COMMIT_IDLE_MS without a new frame, and
+    // before an export, a photo switch or a snapshot reads it. `?retain16=0`
+    // turns this off.
+    const CORE_RETAIN_PREVIEW_PLANE = new URLSearchParams(window.location.search).get('retain16') !== '0';
+    const CORE_PREVIEW_COMMIT_IDLE_MS = 150;
+    let corePreviewRetained = null;
+    let corePreviewCommit = null;
+    let corePreviewCommitWanted = false;
+    let corePreviewCommitTimer = null;
+    let corePreviewSettleWaiters = [];
 
     function coreReprocessBusy() {
       return _coreReprocessActive > 0 || _coreReprocessPending !== null
-        || _coreReprocessFullInFlight || Boolean(_coreReprocessPreviewInFlight);
+        || _coreReprocessFullInFlight || Boolean(_coreReprocessPreviewInFlight)
+        || corePreviewRetained !== null || corePreviewCommit !== null;
     }
 
     function whenCoreReprocessIdle() {
@@ -5596,8 +5628,11 @@ import { frameNeedsReview } from './reviewQueue.js';
           const hasSmallPreview = state.conversionPreviewImageData
             && state.conversionPreviewImageData !== state.conversionSourceImageData;
 
-          // Preview-resolution path: run SilverCore on small image
-          const previewProcessed = await convertFromCurrentSource(state, { preview: hasSmallPreview, interactive: true, includeAnalysisPreview: false });
+          // Preview-resolution path: run SilverCore on small image. Its 16-bit
+          // plane may stay in the worker until committed; never when the
+          // preview is the source, whose plane feeds the 16-bit export.
+          const retain16 = CORE_RETAIN_PREVIEW_PLANE && Boolean(hasSmallPreview) && options.retain16 !== false;
+          const previewProcessed = await convertFromCurrentSource(state, { preview: hasSmallPreview, interactive: true, includeAnalysisPreview: false, retain16 });
           if (!previewProcessed) return false;
           if (generation !== coreReprocessGeneration) return false;
           if (state.conversionSourceImageData !== sourceRef) return false;
@@ -5621,11 +5656,15 @@ import { frameNeedsReview } from './reviewQueue.js';
             updatePreview();
             // No need to schedule full update; we already processed at full resolution
           }
+          if (previewProcessed.__retained16) retainCorePreviewPlane(previewProcessed);
           return true;
         }
       } finally {
         if (full) _coreReprocessFullInFlight = false;
         else if (_coreReprocessPreviewInFlight === previewFlight) _coreReprocessPreviewInFlight = false;
+        // A commit waits for the preview lane: a request already posted would
+        // write into the plane before the commit reached the worker.
+        if (!full) maybeCommitCorePreviewPlane();
         // Re-dispatch the latest queued request. If it is still blocked
         // (e.g. a queued full render while a preview is running) it simply
         // re-queues itself and the next finally picks it up — but a queued
@@ -5672,6 +5711,110 @@ import { frameNeedsReview } from './reviewQueue.js';
         noteCoreReprocessSettled();
       });
       return true;
+    }
+
+    // The frame just applied keeps its 16-bit plane in the preview worker.
+    function retainCorePreviewPlane(processed) {
+      corePreviewRetained = { processed, derived: state.previewSourceImageData };
+      armCorePreviewCommitTimer();
+      maybeCommitCorePreviewPlane();
+    }
+
+    // Commits once no new frame has been asked for in a while. While one is
+    // still coming the wait starts over, so a request that ends without a
+    // frame cannot leave the plane (and the export barrier) waiting.
+    function armCorePreviewCommitTimer() {
+      if (corePreviewCommitTimer) clearTimeout(corePreviewCommitTimer);
+      corePreviewCommitTimer = setTimeout(() => {
+        corePreviewCommitTimer = null;
+        if (!corePreviewRetained) return;
+        if (_coreReprocessPreviewInFlight || _coreReprocessPending || coreReprocessTimer) {
+          armCorePreviewCommitTimer();
+          return;
+        }
+        requestCorePreviewCommit();
+      }, CORE_PREVIEW_COMMIT_IDLE_MS);
+    }
+
+    // Any other frame on screen carries its own plane; the retained one is
+    // superseded (the worker reuses or drops it). A commit already in flight
+    // still delivers to the frame it was asked for, which a snapshot may hold.
+    function releaseCorePreviewRetained(next = null) {
+      if (!corePreviewRetained || corePreviewRetained.processed === next) return;
+      corePreviewRetained = null;
+      if (corePreviewCommitTimer) {
+        clearTimeout(corePreviewCommitTimer);
+        corePreviewCommitTimer = null;
+      }
+      // A retained frame replacing this one inherits the wish to commit, and
+      // whoever waits for the plane waits for that frame's instead.
+      if (next?.__retained16) return;
+      corePreviewCommitWanted = false;
+      settleCorePreviewWaiters();
+      noteCoreReprocessSettled();
+    }
+
+    function requestCorePreviewCommit() {
+      if (!corePreviewRetained) return;
+      corePreviewCommitWanted = true;
+      maybeCommitCorePreviewPlane();
+    }
+
+    function maybeCommitCorePreviewPlane() {
+      const retained = corePreviewRetained;
+      if (!retained || !corePreviewCommitWanted || corePreviewCommit) return;
+      if (_coreReprocessPreviewInFlight) return;
+      corePreviewCommitWanted = false;
+      if (corePreviewCommitTimer) {
+        clearTimeout(corePreviewCommitTimer);
+        corePreviewCommitTimer = null;
+      }
+      const commit = convertPreviewFrameInWorker.commit(retained.processed)
+        .catch((err) => {
+          console.warn('Preview plane commit failed:', err?.message || err);
+          return null;
+        })
+        .then((plane) => {
+          const processed = retained.processed;
+          if (plane) {
+            processed.__image16 = { width: processed.width, height: processed.height, data: plane };
+            delete processed.__retained16;
+            // A display preview resampled from this frame was built from 8 bits.
+            if (retained.derived !== processed && state.previewSourceImageData === retained.derived) {
+              state.previewSourceImageData = buildPreviewSourceImageData(processed);
+              state.histogramSourceImageData = histogramSourceFor(processed);
+              state.webglSourceImageData = state.previewSourceImageData;
+              if (webglState.gl) webglState.sourceDirty = true;
+              schedulePreviewUpdate();
+            }
+          } else if (corePreviewRetained === retained) {
+            // The plane is gone (a newer request reused it, or the worker
+            // restarted): convert the frame on screen again, plane included.
+            void runCoreReprocess({ full: false, retain16: false });
+          }
+        })
+        .finally(() => {
+          if (corePreviewCommit === commit) corePreviewCommit = null;
+          if (corePreviewRetained === retained) corePreviewRetained = null;
+          settleCorePreviewWaiters();
+          noteCoreReprocessSettled();
+        });
+      corePreviewCommit = commit;
+    }
+
+    function settleCorePreviewWaiters() {
+      if (corePreviewRetained || corePreviewCommit) return;
+      const waiters = corePreviewSettleWaiters;
+      corePreviewSettleWaiters = [];
+      for (const resolve of waiters) resolve();
+    }
+
+    // Resolves once no frame on screen still has its plane in the worker.
+    function settleCorePreviewPlane() {
+      if (!corePreviewRetained && !corePreviewCommit) return Promise.resolve();
+      const settled = new Promise(resolve => corePreviewSettleWaiters.push(resolve));
+      requestCorePreviewCommit();
+      return settled;
     }
 
     function hasSeparateConversionPreview() {
@@ -5874,6 +6017,9 @@ import { frameNeedsReview } from './reviewQueue.js';
           if (scheduled) await runCoreReprocess(scheduled);
           continue;
         }
+        // A frame whose plane is still in the preview worker settles only
+        // once it is committed.
+        requestCorePreviewCommit();
         const idle = whenCoreReprocessIdle();
         if (idle) {
           await idle;
@@ -8102,6 +8248,8 @@ import { frameNeedsReview } from './reviewQueue.js';
         },
         onCommit: (value) => {
           updateEnlargerUI();
+          // Releasing the slider settles the drag: bring the plane back.
+          requestCorePreviewCommit();
           // An unchanged token proves nothing else asked for a frame since
           // this value's request. The conversion reads live state when it
           // starts, so the queued, running or finished frame already shows it.
@@ -8454,6 +8602,7 @@ import { frameNeedsReview } from './reviewQueue.js';
         webglState.sourceSize = { w: 0, h: 0 };
       }
       clearCoreReprocessTimer();
+      releaseCorePreviewRetained();
       if (step2AutoConvertTimer) {
         clearTimeout(step2AutoConvertTimer);
         step2AutoConvertTimer = null;
@@ -10184,6 +10333,7 @@ import { frameNeedsReview } from './reviewQueue.js';
         fullUpdateTimer = null;
       }
       clearCoreReprocessTimer();
+      releaseCorePreviewRetained();
       if (step2AutoConvertTimer) {
         clearTimeout(step2AutoConvertTimer);
         step2AutoConvertTimer = null;
@@ -11986,6 +12136,12 @@ import { frameNeedsReview } from './reviewQueue.js';
       if (studioAutoFrameRunning || isDesktopBatchExportLocked() || singleExportActive) return;
       if (index < 0 || index >= state.fileQueue.length) return;
       if (index === state.currentFileIndex && state.fileQueue[index].file === state.loadedFile) return;
+      // A dragged frame's 16-bit plane may still be in the preview worker. The
+      // photo being left is remembered only once it is back.
+      if (corePreviewRetained || corePreviewCommit) {
+        await settleCorePreviewPlane();
+        return switchToFile(index);
+      }
       if (state.cropping) exitCropMode({ restore: false });
       if (state.beforeAfterActive) exitBeforeAfter();
       state.samplingMode = null;
