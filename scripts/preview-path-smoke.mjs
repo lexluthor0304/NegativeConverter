@@ -9,11 +9,12 @@ const UPNG = createRequire(import.meta.url)('upng-js');
 // large-image rules run on a small fixture; a second pass without it checks
 // the 16 MP-or-less routing. Every assertion counts real worker messages:
 // preview conversions (the cacheInput client), full-resolution conversions
-// of the source size, and dust-worker detect/inpaint/refine requests.
+// (any other conversion larger than a light-table tile), and dust-worker
+// detect/inpaint/refine requests.
 const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`;
 const SOURCE = { width: 1800, height: 1200 };
 
-function installPreviewPathProbe(source) {
+function installPreviewPathProbe() {
   const original = {
     post: Worker.prototype.postMessage, terminate: Worker.prototype.terminate,
     draw: WebGLRenderingContext.prototype.drawArrays, click: HTMLAnchorElement.prototype.click,
@@ -44,11 +45,9 @@ function installPreviewPathProbe(source) {
   Worker.prototype.postMessage = function(message, ...args) {
     if (message?.type === 'convert') {
       track(this, message.id);
-      const full = !message.cacheInput;
-      // Full-resolution means the size of the conversion source; light-table
-      // lanes convert bounded previews of other photos.
-      const sourceSized = message.width === source.width && message.height === source.height;
-      note(full ? (sourceSized ? 'full' : 'lane') : 'preview', { width: message.width, height: message.height });
+      // Light-table lanes convert tiles of at most 288 px of other photos.
+      const tile = message.width * message.height <= 300 * 300;
+      note(message.cacheInput ? 'preview' : (tile ? 'lane' : 'full'), { width: message.width, height: message.height });
     } else if (['detect', 'inpaint', 'refine'].includes(message?.type) && typeof message.reuseSource === 'boolean') {
       track(this, message.id);
       note(`dust:${message.type}`);
@@ -137,8 +136,11 @@ export async function runPreviewPathSmoke({ send, evaluate, waitFor, fail, insta
     return decodePng(await evaluate(`window.__previewPathProbe.exports[${index}].data`));
   };
   const same = (a, b) => a.width === b.width && a.height === b.height && a.depth === b.depth && a.sha256 === b.sha256;
+  // pointerdown takes the undo snapshot, as a real drag does.
   const setSlider = (id, value) => evaluate(`(() => {
-    const input = document.getElementById(${JSON.stringify(id)}); input.value = ${JSON.stringify(String(value))};
+    const input = document.getElementById(${JSON.stringify(id)});
+    input.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+    input.value = ${JSON.stringify(String(value))};
     input.dispatchEvent(new Event('input', { bubbles: true }));
     input.dispatchEvent(new Event('change', { bubbles: true }));
   })()`);
@@ -166,7 +168,7 @@ export async function runPreviewPathSmoke({ send, evaluate, waitFor, fail, insta
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/${query}` });
     await until('fresh preview-path workspace', `performance.timeOrigin !== ${origin} && document.readyState === 'complete' && !!document.getElementById('studioImportAutoCrop')`);
     await installDialogAutoAccept();
-    await evaluate(`(${installPreviewPathProbe.toString()})(${JSON.stringify(SOURCE)})`);
+    await evaluate(`(${installPreviewPathProbe.toString()})()`);
     await evaluate(`(async () => {
       for (const id of ['studioImportAutoCrop', 'importFilmTypeAuto', 'autoRollOnImport']) {
         const input = document.getElementById(id); if (input?.checked) input.click();
@@ -251,8 +253,10 @@ export async function runPreviewPathSmoke({ send, evaluate, waitFor, fail, insta
     mark = await now();
     const first = await exportPng(8, 'first export');
     const firstExport = await counts(mark);
-    expect(firstExport.full === 1 && first.width === SOURCE.width && first.height === SOURCE.height,
-      'the first export did not render the original exactly once: ' + JSON.stringify({ firstExport, first }));
+    const rendered = await evaluate(`window.__previewPathProbe.events.filter(event => event.type === 'full').at(-1)`);
+    expect(firstExport.full === 1 && rendered && first.width === rendered.width && first.height === rendered.height
+      && first.width * first.height > 1_000_000,
+    'the first export did not render the original exactly once: ' + JSON.stringify({ firstExport, rendered, first }));
 
     // Step-3 edits after an export invalidate nothing; a zoom neither.
     mark = await now();

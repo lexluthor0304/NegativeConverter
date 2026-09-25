@@ -134,6 +134,7 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
     },
     localExposureGeometryFor: () => ({}),
     repairedPreviewMasks: null, repairedPreview: null, repairedPreviewBuild: null, repairedPreviewShown: null,
+    repairedPreviewTimer: null, REPAIRED_PREVIEW_IDLE_MS: 300,
     runDustDetectionPass: () => {
       log.push('detect');
       state.dustRemoval.processing = true;
@@ -165,6 +166,7 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
     'whenBrushRepairsSettled', 'noteBrushRepairSettled', 'getDustSource', 'cancelPendingTimers',
     'trimHistorySnapshot', 'rememberRepairMasks', 'clearRepairedPreview', 'repairedPreviewMatches',
     'repairedPreviewSourceFor', 'ensureRepairedPreview', 'buildRepairedPreview', 'applyExactPlaneKeepingView',
+    'scheduleRepairedPreviewAfterInput',
   ].map(functionSource).join('\n'), context);
   const reply = (kind, index = -1) => {
     const entry = clients[kind].at(index);
@@ -630,6 +632,34 @@ for (const large of [false, true]) {
   await Promise.resolve();
   await settle();
   assert.equal(f.clients.preview.at(-1).request.imageData, repaired);
+  f.reply('preview');
+  await settle();
+  // A display preview of another size is filled only once input pauses.
+  f.setTarget({ width: 500, height: 375 });
+  const builds = f.previewRepairs.length;
+  for (let tick = 0; tick < 3; tick++) {
+    f.nextFrame();
+    f.context.scheduleCoreReprocess({ full: false });
+    await Promise.resolve();
+    await settle();
+    assert.equal(f.clients.preview.at(-1).request.imageData, f.state.conversionPreviewImageData, 'the resized source is not filled yet');
+    f.reply('preview');
+    await settle();
+  }
+  assert.equal(f.previewRepairs.length, builds, 'no dust request while input continues');
+  assert.ok(f.clock.delays().includes(300));
+  f.clock.run(300);
+  f.clock.run(0);
+  await settle();
+  assert.equal(f.previewRepairs.length, builds + 1, 'filled once input paused');
+  assert.equal(f.previewRepairs.at(-1).image, f.state.conversionPreviewImageData);
+  f.previewRepairs.at(-1).resolve({ width: 500, height: 375, name: 'repaired at the new size' });
+  await settle();
+  f.nextFrame();
+  f.context.scheduleCoreReprocess({ full: false });
+  await Promise.resolve();
+  await settle();
+  assert.equal(f.clients.preview.at(-1).request.imageData.name, 'repaired at the new size');
   f.reply('preview');
   await settle();
   // New strokes: the remembered masks no longer match, the plain source is used.

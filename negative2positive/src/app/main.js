@@ -6307,6 +6307,18 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     let repairedPreviewBuild = null;
     // The display preview frame that was converted from a repaired source.
     let repairedPreviewShown = null;
+    // A display preview of a new size is filled once input pauses: no dust
+    // request starts while input continues.
+    const REPAIRED_PREVIEW_IDLE_MS = 300;
+    let repairedPreviewTimer = null;
+
+    function scheduleRepairedPreviewAfterInput() {
+      if (repairedPreviewTimer) clearTimeout(repairedPreviewTimer);
+      repairedPreviewTimer = setTimeout(() => {
+        repairedPreviewTimer = null;
+        ensureRepairedPreview();
+      }, REPAIRED_PREVIEW_IDLE_MS);
+    }
 
     function rememberRepairMasks(source) {
       const conversionSource = state.conversionSourceImageData;
@@ -6325,6 +6337,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       repairedPreview = null;
       repairedPreviewBuild = null;
       repairedPreviewShown = null;
+      if (repairedPreviewTimer) clearTimeout(repairedPreviewTimer);
+      repairedPreviewTimer = null;
     }
 
     function repairedPreviewMatches(masks) {
@@ -6451,7 +6465,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           if (generation !== coreReprocessGeneration) return false;
           if (token !== null && token !== coreReprocessToken) return false;
           if (sourceRef && state.conversionSourceImageData !== sourceRef) return false;
-          if (hasFrameRepairs() && repairedPreviewShown && repairedPreviewShown === state.previewSourceImageData) {
+          if (repairedPreviewShown && repairedPreviewShown === state.previewSourceImageData
+            && repairedPreviewMatches(repairedPreviewMasks)) {
             // The repaired preview stays on screen until detection repairs
             // this exact frame: no dusty full frame in between.
             applyExactPlaneKeepingView(processed);
@@ -6478,7 +6493,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           // preview is the source, whose plane feeds the 16-bit export.
           const retain16 = CORE_RETAIN_PREVIEW_PLANE && Boolean(hasSmallPreview) && options.retain16 !== false;
           const repairedSource = hasSmallPreview ? repairedPreviewSourceFor(state.conversionPreviewImageData) : null;
-          if (hasSmallPreview && !repairedSource) ensureRepairedPreview();
+          if (hasSmallPreview && !repairedSource && repairedPreviewMasks) scheduleRepairedPreviewAfterInput();
           const previewProcessed = await convertFromCurrentSource(state, { preview: hasSmallPreview, interactive: true, includeAnalysisPreview: false, retain16,
             previewSource: repairedSource });
           if (!previewProcessed) return false;
