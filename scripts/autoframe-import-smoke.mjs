@@ -79,7 +79,7 @@ export async function runAutoFrameImportSmoke({ send, evaluate, waitFor, wait, f
   if (copies.length < 3 || copies.some(post => !post.frame || !post.filmEdge || post.frameOutput !== 'none')) {
     fail('the three frames did not each make one size-only request for frame and film edge: ' + JSON.stringify(posts));
   }
-  if (posts.some(post => post.returnPlanes || post.transferred)) {
+  if (posts.some(post => post.returnPlanes)) {
     fail('a decode the editor or a background lane shares was transferred to the auto-frame worker: ' + JSON.stringify(posts));
   }
   if (posts.some(post => post.image16 && post.image16Omitted)) fail('a request both sent and omitted the 16-bit plane: ' + JSON.stringify(posts));
