@@ -124,7 +124,7 @@ export function createMultiShotWorkerProcessor({
     post({ type: 'progress', stage: 'encode' });
     await yieldTurn();
     // The export worker's 16-bit PNG call; the page adds the iCCP chunk.
-    const blob = encodePng16Blob(out, rect.width, rect.height, pako.deflate);
+    const blob = encodePng16Blob(out, rect.width, rect.height, pako);
     post({ type: 'result', blob, width: rect.width, height: rect.height, used, skipped });
   }
 

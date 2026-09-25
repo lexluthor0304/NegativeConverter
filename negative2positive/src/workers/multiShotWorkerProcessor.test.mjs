@@ -52,7 +52,8 @@ function clone(image) {
   return copy;
 }
 
-// The main-thread merge at 1703835, encoded as the export worker did.
+// The main-thread merge at 1703835, encoded as the export worker does now
+// (row bands since #257: the same samples, other compressed bytes).
 function headMerge(images, mode) {
   let reference = null;
   const frames = [];
@@ -71,7 +72,7 @@ function headMerge(images, mode) {
   }
   if (frames.length < 2) return { blob: null, used: frames.length };
   const merged = head.mergeFrames(frames, { mode, region: head.coverageRect(frames), opaque: true });
-  return { blob: encodePng16Blob(merged.data, merged.width, merged.height, pako.deflate), used: frames.length };
+  return { blob: encodePng16Blob(merged.data, merged.width, merged.height, pako), used: frames.length };
 }
 
 // A Worker stand-in: messages cross with structured clone and transfer (so

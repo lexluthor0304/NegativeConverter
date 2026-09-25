@@ -35,7 +35,7 @@ export async function runGeometrySmoke({ send, evaluate, waitFor, wait, fail, in
   }
   const directory = mkdtempSync(join(tmpdir(), 'nc-geometry-'));
   const fixture = join(directory, 'geometry-tilted-16.png');
-  writeFileSync(fixture, Buffer.from(await encodePng16Blob(rgba, W, H, pako.deflate).arrayBuffer()));
+  writeFileSync(fixture, Buffer.from(await encodePng16Blob(rgba, W, H, pako).arrayBuffer()));
 
   try {
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
