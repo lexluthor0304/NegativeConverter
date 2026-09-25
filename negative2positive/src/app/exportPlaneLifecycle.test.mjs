@@ -186,7 +186,7 @@ function createContext({ gainMap = 'on' } = {}) {
     exportMetadataFor: () => ({ exif: { Make: 'Test' }, xmp: null }),
     saveBlob: async (blob) => { saved.push(blob); return { saved: true }; },
     learnFromExport: async () => {},
-    ensureFullResolutionReadyForExport: async () => {},
+    ensureFullResolutionReadyForExport: async () => {}, ensureRepairsReadyForExport: async () => {},
     aiRepairReady: () => false,
     isDisplayImageDataFullResolution: () => Boolean(state.displayImageData && state.displayImageData.width === W),
     isWebGLActive: () => true,

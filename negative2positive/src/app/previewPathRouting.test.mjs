@@ -135,6 +135,13 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
     localExposureGeometryFor: () => ({}),
     repairedPreviewMasks: null, repairedPreview: null, repairedPreviewBuild: null, repairedPreviewShown: null,
     repairedPreviewTimer: null, REPAIRED_PREVIEW_IDLE_MS: 300,
+    // #263: outside a reduced preview-tier session the preview is sized as before.
+    previewTier: 'normal', previewTierKept: null, previewTierPrebuilt: null, reducedDisplayImages: new WeakSet(),
+    previewTierController: { active: false }, schedulePreviewTierPrebuild: noop,
+    // Integration-branch state these functions read: no provisional import
+    // (#236), no pending geometry build (#244) and the dust bookkeeping of #259.
+    getCurrentQueueItem: () => null, cancelGeometryJob: noop, whenGeometrySettled: noop,
+    noteDustReplaced: noop, syncDustWorkerPin: noop,
     runDustDetectionPass: () => {
       log.push('detect');
       state.dustRemoval.processing = true;
@@ -166,7 +173,7 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
     'whenBrushRepairsSettled', 'noteBrushRepairSettled', 'getDustSource', 'cancelPendingTimers',
     'trimHistorySnapshot', 'rememberRepairMasks', 'clearRepairedPreview', 'repairedPreviewMatches',
     'repairedPreviewSourceFor', 'ensureRepairedPreview', 'buildRepairedPreview', 'applyExactPlaneKeepingView',
-    'scheduleRepairedPreviewAfterInput', 'clearFullResolutionRenderState',
+    'scheduleRepairedPreviewAfterInput', 'clearFullResolutionRenderState', 'ensureConversionPreviewForDisplay', 'noteTierImage',
   ].map(functionSource).join('\n'), context);
   const reply = (kind, index = -1) => {
     const entry = clients[kind].at(index);

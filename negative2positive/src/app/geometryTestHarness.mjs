@@ -81,7 +81,7 @@ const FUNCTIONS = [
   'mapCropRegionAfterRotation', 'sanitizeCropRegionForImage', 'restoreSettings', 'offerAutoFrameRotation',
   'isCurrentLoad', 'applyZoomPanTransform', 'resetZoomPan', 'captureSnapshot', 'restoreSnapshot',
   'restoreColdSnapshotPixels', 'liveHistoryRoots', 'hotGeometrySnapshot', 'historyExclusiveBytes',
-  'pruneHistoryForMemory', 'commitUndoSnapshot', 'pushUndo', 'performUndo', 'performRedo',
+  'pruneHistoryForMemory', 'trimHistorySnapshot', 'commitUndoSnapshot', 'pushUndo', 'performUndo', 'performRedo',
   'rememberPhotoSession', 'releaseOutgoingPhotoPlanes', 'photoSettingsKey', 'switchToFile',
   'reactivateReleasedPhoto', 'invalidatePhotoActivation', 'getCropDraftTotalAngle', 'scaleCropRect',
   'interactiveGeometryBands'

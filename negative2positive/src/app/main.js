@@ -4550,8 +4550,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         }
         return;
       }
-      // Only resampled copies of a full-resolution frame (one that landed
-      // during the session, as every frame does with repairs on): rebuild
+      // Only resampled copies of a current full-resolution frame (one that
+      // landed during the session, such as an exact repair pass): rebuild
       // them instead of converting again.
       state.previewSourceImageData = buildPreviewSourceImageData(processed);
       state.histogramSourceImageData = histogramSourceFor(processed);

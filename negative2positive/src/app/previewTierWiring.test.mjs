@@ -4,6 +4,8 @@ import vm from 'node:vm';
 import { createCoreReprocessGates, previewDispatchAction, CORE_FULL_REPROCESS_DELAY_MS } from './coreReprocessDispatcher.js';
 import { displayPreviewSize, resizeDisplayPreview } from './displayPreview.js';
 import { previewTierMaxPixels, capBackingSize, PREVIEW_TIER_REDUCED_MAX_PIXELS } from './previewTier.js';
+import { routeCoreConversion, keepsFullPlaneOnDowngrade, viewportRefreshBranch } from './fullResolutionRouting.js';
+import { isLargeImage } from './imageMemoryBudget.js';
 
 // Drives the real preview-tier wiring of main.js (#263) together with the real
 // scheduler, reprocess and state-application functions, on synthetic images:
@@ -136,6 +138,14 @@ function fixture({ width = 3000, height = 2000, repairs = false, largePreviewFra
     carryStudioThumbnailSource: () => {}, updateDebugWidget: () => {},
     logWebviewDiagnostics: line => log.push(`log:${line}`), formatPreviewSessionLine: () => 'session',
     updateEnlargerUI: () => {},
+    // #237: the one routing rule and the viewport refresh run for real; these
+    // synthetic frames are below 16 MP, so the routing is unchanged. No exact
+    // render, repaired preview or AI brush is involved.
+    routeCoreConversion, keepsFullPlaneOnDowngrade, viewportRefreshBranch, isLargeImage,
+    fullResolutionConversionAbort: null, dustDetectionTimer: null, repairedPreviewShown: null, repairedPreviewMasks: null,
+    isAiBrushEnabled: () => false, repairedPreviewSourceFor: () => null, ensureRepairedPreview: () => {},
+    ensureAiBrushPlane: () => {},
+    FULL_RESOLUTION_IDLE_DELAY_MS: 2500, scheduleFullResolutionRender: (reason) => { log.push(`full-render:${reason}`); return null; },
   });
   vm.runInContext([
     'getDisplayPreviewSize', 'noteTierImage', 'buildPreviewSourceImageData', 'buildWebglSourceImageData',
@@ -151,6 +161,8 @@ function fixture({ width = 3000, height = 2000, repairs = false, largePreviewFra
     'maybeCommitCorePreviewPlane', 'settleCorePreviewWaiters', 'settleCorePreviewPlane',
     'currentConvertedPreviewSource', 'displayResizeOrigin', 'displayResizeReplaces',
     'applyProcessedImageToState', 'applyPreviewProcessedImageToState', 'coreReprocessHandlersFor',
+    'refreshDisplayPreviewForViewport', 'routeCoreRequest', 'beginFullResolutionConversion',
+    'endFullResolutionConversion', 'abortSupersededFullResolutionConversion',
   ].map(functionSource).join('\n'), context);
 
   // processNegative's first conversion: the normal display preview and its frame.
@@ -335,18 +347,27 @@ for (const largePreviewFrames of [true, false]) {
   assert.equal(f.context.displayIsReduced(), true, 'a reduced frame on screen stays unsettled for the session cache');
 }
 
-// ---- Full-resolution frames during a session (repairs on): no conversion at the end ----
+// ---- Repairs on: the session converts the reduced preview, and the
+// full-resolution plane with its repairs waits for the idle pass (#237) ----
 {
   const f = fixture({ repairs: true, largePreviewFrames: false });
+  const plane = f.state.processedImageData;
+  const normalPreview = f.state.conversionPreviewImageData;
   f.context.onPreviewTierChange('reduced');
   await f.input(8);
-  assert.equal(f.conversions.at(-1).full, true, 'repairs convert at full resolution');
+  const tick = f.conversions.at(-1);
+  assert.equal(tick.full, false, 'an input with repairs on converts the display preview');
+  assert.ok(pixels(tick.input) <= PREVIEW_TIER_REDUCED_MAX_PIXELS, 'at the reduced size');
+  assert.equal(f.state.processedImageData, plane, 'the full-resolution plane stays for its repairs');
   assert.ok(pixels(f.state.previewSourceImageData) <= PREVIEW_TIER_REDUCED_MAX_PIXELS, 'its display copy is reduced');
+  assert.ok(f.log.includes('full-render:repair-idle'), 'the idle repair pass is armed');
   const count = f.conversions.length;
   f.context.onPreviewTierChange('normal');
+  f.runTimers(); // the queued tick's frame gate and the display-preview settle
   await f.answerAll();
-  assert.equal(f.conversions.length, count, 'the display copy is rebuilt, not converted again');
-  assert.ok(bytesEqual(f.state.previewSourceImageData, resizeDisplayPreview(f.state.processedImageData, f.normalTarget)));
+  assert.equal(f.conversions.length, count + 1, 'the session end converts once at the normal size');
+  assert.equal(f.conversions.at(-1).input, normalPreview, 'from the kept normal-tier preview');
+  assert.equal(f.state.processedImageData, plane);
   assert.equal(f.state.webglSourceImageData, f.state.previewSourceImageData);
   assert.equal(f.context.displayIsReduced(), false);
 }

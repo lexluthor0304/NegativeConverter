@@ -48,7 +48,7 @@ function setup() {
   const timers = [];
   const displayed = [];
   const context = vm.createContext({
-    state, undoStack: [], coreReprocessToken: 3, pendingBrushRepairs: 0, dustAiRefresh: { rects: [], timer: null },
+    state, undoStack: [], coreReprocessToken: 3, pendingBrushRepairs: 0, brushRepairWaiters: [], dustAiRefresh: { rects: [], timer: null },
     aiRepair: { status: 'ready', run: async (image, tileMask, size) => {
       runs++;
       // A stand-in model: paints 30 over the masked pixels.
@@ -66,7 +66,7 @@ function setup() {
     clearTimeout: () => {},
   });
   vm.runInContext(['queueDustAiRefresh', 'mergeDustRefreshRects', 'dustAiWindow', 'cropDustImage',
-    'cropDustMask', 'repairStrokeMaskFor', 'runDustAiRefresh'].map(functionSource).join('\n')
+    'cropDustMask', 'repairStrokeMaskFor', 'runDustAiRefresh', 'noteBrushRepairSettled'].map(functionSource).join('\n')
     + '\nlet dustRefreshRepairMask = { strokes: null, source: null, mask: null };', context);
   return { context, state, timers, displayed, runs: () => runs };
 }
