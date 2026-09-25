@@ -48,7 +48,7 @@ function fixture({ lens = false, brush = false, dust = false, width = 600, heigh
     loadFileToImageData: async () => { calls.decoded++; return image; },
     assertRepairCurrent: isCurrent => { if (!isCurrent()) throw Object.assign(new Error('stale'), { name: 'AbortError' }); },
     sanitizeSettings: settings => structuredClone(settings),
-    applyGeometryChainToImageData: () => image, exportGeometrySteps: {},
+    renderGeometryChain: async () => image,
     applyLensCorrectionWithSettings: async () => corrected,
     downsampleImageDataForMaxDim: (source, max) => {
       calls.downsample.push([source.width, source.height, max]);

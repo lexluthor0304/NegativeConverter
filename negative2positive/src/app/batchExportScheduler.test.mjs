@@ -5,7 +5,10 @@ import {
   BATCH_MAX_PARALLEL,
   BATCH_PIXEL_BUDGET,
   planBatchParallelism,
-  runBatchPipeline
+  runBatchPipeline,
+  planGeometryBandsInFlight,
+  GEOMETRY_BAND_BUDGET_BYTES,
+  GEOMETRY_BYTES_PER_BAND_PIXEL
 } from './batchExportScheduler.js';
 
 const tick = () => new Promise(resolve => setTimeout(resolve, 0));
@@ -294,6 +297,22 @@ for (const stalledStage of ['process', 'sink']) {
     process: async () => 1, sink: async () => {}
   }), /boom/);
 }
+
+// ---- planGeometryBandsInFlight (#244) ------------------------------------------
+
+// One 60 MP lane may keep every band in flight; the lanes share the budget.
+const bandBytes60 = 60_000_000 / 6 * GEOMETRY_BYTES_PER_BAND_PIXEL;
+assert.equal(planGeometryBandsInFlight({ lanes: 1, pixelsPerFile: 60_000_000, poolSize: 6 }), Math.min(6, Math.floor(GEOMETRY_BAND_BUDGET_BYTES / bandBytes60)));
+assert.ok(planGeometryBandsInFlight({ lanes: 3, pixelsPerFile: 60_000_000, poolSize: 6 }) <= planGeometryBandsInFlight({ lanes: 1, pixelsPerFile: 60_000_000, poolSize: 6 }));
+for (const lanes of [1, 2, 3, 4]) {
+  const perLane = planGeometryBandsInFlight({ lanes, pixelsPerFile: 60_000_000, poolSize: 6 });
+  assert.ok(perLane >= 1 && (perLane === 1 || perLane * lanes * bandBytes60 <= GEOMETRY_BAND_BUDGET_BYTES), `lanes ${lanes}`);
+}
+// Small frames are bounded by the pool; low-memory devices get fewer bands.
+assert.equal(planGeometryBandsInFlight({ lanes: 4, pixelsPerFile: 6_000_000, poolSize: 6 }), 6);
+assert.ok(planGeometryBandsInFlight({ lanes: 1, pixelsPerFile: 60_000_000, poolSize: 6, deviceMemory: 4 })
+  < planGeometryBandsInFlight({ lanes: 1, pixelsPerFile: 60_000_000, poolSize: 6 }));
+assert.equal(planGeometryBandsInFlight({ lanes: 8, pixelsPerFile: 200_000_000, poolSize: 2 }), 1, 'never below one band');
 
 // Missing callbacks are a programming error, reported up front.
 await assert.rejects(() => runBatchPipeline([1], { process: async () => {} }), TypeError);

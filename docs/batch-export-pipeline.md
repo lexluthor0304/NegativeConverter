@@ -41,10 +41,15 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
   up in the session's tile memo but never insert (`memoInsert: false`), so a
   roll export does not evict the open photo's tiles (#246).
 - The geometry chain (base → rotation → mirror → crop) runs in one pass that
-  only resamples the cropped window for 16-bit sources at non-right angles
-  (`applyGeometryChainToImageData`, bit-identical to the step chain); every
-  other case still runs the step chain so the result matches the interactive
-  path exactly.
+  only builds the cropped window, for right angles and mirror-only geometry
+  too, bit-identical to the step chain (`planGeometry` + `renderGeometryRows`
+  in `imageGeometry.js`). It runs in the shared geometry worker pool
+  (`geometryPool.js`, 4–6 row bands), so lanes no longer queue on the main
+  thread for this step; only 8-bit sources at a non-right angle keep the
+  canvas rotation there. Each lane's bands in flight come from
+  `planGeometryBandsInFlight` (a transient band budget shared by the lanes).
+  A lane that ran the import frame detection adopts the auto-frame worker's
+  rotated frame instead of rotating again. See `docs/geometry-chain.md`.
 - The three sinks are thin adapters: streaming ZIP (browser), individual
   downloads (browser) and folder writes (desktop). The dead JSZip desktop ZIP
   path was removed. The desktop batch now also gets 16-bit output and the

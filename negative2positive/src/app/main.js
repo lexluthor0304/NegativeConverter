@@ -26,7 +26,8 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     import { computeZoomGeometry, clampPanValues } from './zoomGeometry.js';
     import { showToast } from '../ui/toast.js';
     import { writeDesktopBlob } from './desktopExportWriter.js';
-    import { normalizeAngleDegrees, applyRotationToImageData, mirrorImageDataHorizontal, applyGeometryChainToImageData, rotatedDimensions, sanitizeCropRect } from './imageGeometry.js';
+    import { normalizeAngleDegrees, applyRotationToImageData, mirrorImageDataHorizontal, applyGeometryChainToImageData, rotatedDimensions, sanitizeCropRect, planGeometry, renderGeometry, geometryCounters } from './imageGeometry.js';
+    import { createGeometryPool, yieldToEventLoop } from './geometryPool.js';
     import { analyzeFrameInWorker, readFilmEdgeInWorker, createAutoFrameWorkerPool, warmUpAutoFrameWorker } from './autoFrameWorkerClient.js';
     import { detectFrameWithFallback } from './autoFrameExecution.js';
     import { createAnalysisSampleStore } from './analysisSampleStore.js';
@@ -64,7 +65,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
 
     import { convertFrameWithRouter, resolveConversionMode } from '../pipeline/conversionRouter.js';
     import { convertFrameInWorker, convertPreviewFrameInWorker, createConversionWorkerPool, CONVERSION_FAILED, WORKER_TIMEOUT } from './conversionWorkerClient.js';
-    import { planBatchParallelism, runBatchPipeline } from './batchExportScheduler.js';
+    import { planBatchParallelism, runBatchPipeline, planGeometryBandsInFlight } from './batchExportScheduler.js';
     import { displayPreviewSize, resizeDisplayPreview } from './displayPreview.js';
     import { createCoreReprocessGates, previewDispatchAction, CORE_FULL_REPROCESS_DELAY_MS } from './coreReprocessDispatcher.js';
     import { invalidateSilverCoreCache, analyzeSilverCoreFrame } from '../pipeline/silverAdapter.js';
@@ -2231,7 +2232,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
 
       // Image data
       loadedBaseImageData: null,    // File-loaded baseline (never transformed)
-      originalImageData: null,      // Current working base image (may include rotation)
+      originalImageData: null,      // Working frame (rotation, mirror); a size-only descriptor beside a crop (#244)
       croppedImageData: null,       // After cropping (still negative)
       processedImageData: null,     // After negative conversion
       displayImageData: null,       // After all adjustments
@@ -2240,6 +2241,10 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       previewSourceImageData: null, // Downscaled source for preview renders
       histogramSourceImageData: null, // Further downscaled source for histogram updates
       webglSourceImageData: null,   // Downscaled source for WebGL preview renders
+      // A geometry build is running in the pool (#244): the planes above still
+      // hold the previous geometry until geometryReady resolves.
+      geometryPending: false,
+      geometryReady: Promise.resolve(true),
 
       // 16-bit pipeline (Stage 2+) — full-precision counterparts to the 8-bit fields above.
       // Shape: { width, height, data: Uint16Array }, RGBA, range [0, 65535].
@@ -2779,7 +2784,10 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       settings.frameMetadata = sanitizeFrameMetadata(state.frameMetadata);
       settings.autoFrameMeta = state.autoFrame.lastDiagnostics ? structuredClone(state.autoFrame.lastDiagnostics) : null;
 
-      // Category B: references
+      // Category B: references. While geometry is being rebuilt the planes
+      // still belong to the previous geometry, so the snapshot keeps only its
+      // scalars and a restore rebuilds the pixels from them (#244).
+      if (state.geometryPending) return { label, settings, refs: { cold: true } };
       const refs = {};
       for (const key of SNAPSHOT_REF_KEYS) {
         refs[key] = state[key];
@@ -2804,9 +2812,13 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       if (dustDetectionTimer) { clearTimeout(dustDetectionTimer); dustDetectionTimer = null; }
     }
 
+    // Returns a promise when the snapshot kept no pixels (a cold entry, #244):
+    // it resolves once the planes are rebuilt and converted.
     function restoreSnapshot(snapshot, { reprocess = true, previewOnly = false } = {}) {
       cancelPendingTimers();
       coreReprocessToken += 1;
+      // A pending geometry build belongs to the state being replaced.
+      cancelGeometryJob();
 
       // Restore Category A
       const s = snapshot.settings;
@@ -2867,6 +2879,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
 
       // Restore Category B refs
       const r = snapshot.refs;
+      if (r.cold) return restoreColdSnapshotPixels(s);
       for (const key of SNAPSHOT_REF_KEYS) {
         state[key] = r[key];
       }
@@ -2903,44 +2916,92 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       goToStep(s.currentStep);
     }
 
+    // A cold history entry keeps its scalars only: rotationAngle, mirrored and
+    // cropRegion are exact, so its planes are rebuilt from the base in the
+    // pool while the current frame stays on screen, then converted without
+    // new automatic measurements. It never falls back to the negative.
+    function restoreColdSnapshotPixels(s) {
+      invalidateProcessedPipelineState();
+      const base = state.loadedBaseImageData;
+      const installed = installedGeometryKey();
+      if (base && (!installed || installed.baseId !== geometryBaseId(base))) {
+        // Another photo's planes (a session restore) must not stand in for
+        // this one's while they are rebuilt.
+        state.originalImageData = createGeometryFrame(base, geometryKeyFor(base, { rotationAngle: state.rotationAngle, mirrored: state.mirrored }));
+        state.croppedImageData = null;
+      }
+      state.dustRemoval.mask = null;
+      state.dustRemoval.inpaintedImageData = null;
+      state.dustRemoval.cleanSource = null;
+      state.dustRemoval._state = null;
+      updateFilmModeUI();
+      updateSlidersFromState();
+      renderCurve();
+      updateDustControlsVisibility();
+      updateSprocketControlsUI();
+      const step = s.currentStep;
+      const ready = applyGeometryFromBase({ cropRegion: state.cropRegion });
+      return afterGeometry(ready, async isCurrent => {
+        if (step >= 3) {
+          await convertAfterGeometryEdit(isCurrent, { quiet: true, automatic: false });
+        } else {
+          const sourceData = state.croppedImageData || state.originalImageData;
+          if (sourceData) {
+            displayNegative(sourceData);
+            updateCanvasVisibility();
+          }
+          goToStep(step);
+        }
+      });
+    }
+
     // Snapshots hold references to up to eight full-resolution buffers each.
     // Slider moves share them, but every rotate/crop/dust operation makes new
-    // ones, so a handful of transforms on a large scan can pin gigabytes in the
-    // history alone. Cap the history by retained bytes rather than by count,
-    // keeping a few steps of undo no matter how big the frames are.
+    // ones, so a handful of transforms on a large scan can pin gigabytes.
+    // History budgets only the bytes it holds exclusively: buffers live state
+    // holds anyway do not count (#244). Over budget, the oldest entries lose
+    // their pixel references and become cold instead of being dropped; a cold
+    // entry restores its exact scalars and rebuilds its pixels from the base.
+    // The most recent geometry entry stays hot, so undoing the last geometry
+    // edit remains an instant reference swap.
     const HISTORY_MEMORY_BUDGET_BYTES = 768 * 1024 * 1024;
-    const MIN_UNDO_DEPTH = 3;
+    const GEOMETRY_UNDO_LABELS = new Set(['crop', 'rotation', 'mirror', 'autoFrame', 'restoreFullFrame']);
 
-    function collectSnapshotBuffers(snapshot, seen) {
+    function liveHistoryRoots() {
+      return [
+        ...SNAPSHOT_REF_KEYS.map(key => state[key]), state.loadedBaseImageData, state.displayImageData,
+        state.dustRemoval.mask, state.dustRemoval.inpaintedImageData, state.dustRemoval.cleanSource, state.dustRemoval._state
+      ];
+    }
+
+    function hotGeometrySnapshot() {
+      for (let i = undoStack.length - 1; i >= 0; i--) {
+        if (GEOMETRY_UNDO_LABELS.has(undoStack[i].label)) return undoStack[i].refs.cold ? null : undoStack[i];
+      }
+      return null;
+    }
+
+    // Bytes reachable only through history, once per ArrayBuffer. `spared`
+    // entries count as owned elsewhere (the hot geometry snapshot).
+    function historyExclusiveBytes(spared = null) {
+      const owned = backingBuffers([liveHistoryRoots(), spared?.refs || null]);
       let bytes = 0;
-      const refs = snapshot && snapshot.refs ? snapshot.refs : null;
-      if (!refs) return bytes;
-      for (const value of Object.values(refs)) {
-        if (!value || typeof value !== 'object' || seen.has(value)) continue;
-        seen.add(value);
-        if (value.data && typeof value.data.byteLength === 'number') {
-          bytes += value.data.byteLength;
-        }
-        const plane16 = value.__image16;
-        if (plane16 && plane16.data && !seen.has(plane16)) {
-          seen.add(plane16);
-          bytes += plane16.data.byteLength;
-        }
+      for (const buffer of backingBuffers([...undoStack, ...redoStack].map(snapshot => snapshot.refs))) {
+        if (!owned.has(buffer)) bytes += buffer.byteLength;
       }
       return bytes;
     }
 
-    function historyRetainedBytes() {
-      const seen = new Set();
-      let bytes = 0;
-      for (const snapshot of undoStack) bytes += collectSnapshotBuffers(snapshot, seen);
-      for (const snapshot of redoStack) bytes += collectSnapshotBuffers(snapshot, seen);
-      return bytes;
-    }
-
     function pruneHistoryForMemory() {
-      while (undoStack.length > MIN_UNDO_DEPTH && historyRetainedBytes() > HISTORY_MEMORY_BUDGET_BYTES) {
-        undoStack.shift();
+      const hot = hotGeometrySnapshot();
+      // Oldest first: the bottom of the undo stack, then the far end of redo.
+      const order = [...undoStack, ...redoStack.slice().reverse()];
+      for (const snapshot of order) {
+        if (historyExclusiveBytes(hot) <= HISTORY_MEMORY_BUDGET_BYTES) return;
+        if (snapshot === hot || snapshot.refs.cold) continue;
+        // Only references are dropped; buffers are never detached, so the
+        // session cache and live state keep theirs.
+        snapshot.refs = { cold: true };
       }
     }
 
@@ -2977,11 +3038,12 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       // Carry the action's own label across so the redo toast names the
       // action rather than the literal word "undo".
       redoStack.push(captureSnapshot(snapshot.label));
-      restoreSnapshot(snapshot);
+      const restoring = restoreSnapshot(snapshot);
       const actionName = getUndoLabel(snapshot.label);
       const tmpl = getLocalizedText('undone', 'Undone: {action}');
       showToast(tmpl.replace('{action}', actionName));
       updateUndoRedoButtons();
+      return restoring;
     }
 
     function performRedo() {
@@ -2996,11 +3058,12 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       undoStack.push(captureSnapshot(snapshot.label));
       if (undoStack.length > MAX_UNDO) undoStack.shift();
       pruneHistoryForMemory();
-      restoreSnapshot(snapshot);
+      const restoring = restoreSnapshot(snapshot);
       const actionName = getUndoLabel(snapshot.label);
       const tmpl = getLocalizedText('redone', 'Redone: {action}');
       showToast(tmpl.replace('{action}', actionName));
       updateUndoRedoButtons();
+      return restoring;
     }
 
     function clearUndoHistory() {
@@ -3717,6 +3780,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
 
       setMainCanvasDimensions(fullSizeReference.width, fullSizeReference.height);
       drawImageDataToMainCanvas(imageData, fullSizeReference.width, fullSizeReference.height);
+      settleInterimGeometryDisplay();
     }
 
     function isEditableTarget(target) {
@@ -5143,6 +5207,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       if (state.currentStep >= 3 && initWebGLRenderer()) {
         updateCanvasVisibility();
         if (isWebGLActive() && renderWebGL()) {
+          settleInterimGeometryDisplay();
           renderHistogramForWebGL(false);
           state.displayImageData = null;
           state.lastRenderQuality = 'gl';
@@ -5190,6 +5255,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       if (state.currentStep >= 3 && initWebGLRenderer()) {
         updateCanvasVisibility();
         if (isWebGLActive() && renderWebGL()) {
+          settleInterimGeometryDisplay();
           renderHistogramForWebGL(true);
           state.displayImageData = null;
           state.lastRenderQuality = 'gl';
@@ -5955,6 +6021,8 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     }
 
     async function ensureFullResolutionReadyForExport() {
+      // Export reads the planes of the current geometry.
+      await whenGeometrySettled();
       // Crop/analysis confirmation also runs processNegative directly. Its
       // preview may be temporarily cleared even though no debounced render is
       // pending, so export must settle that conversion before choosing pixels.
@@ -6077,14 +6145,20 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       }
     }
 
-    async function processNegative({ quiet = false } = {}) {
+    // `automatic: false` keeps the automatic measurements (white balance,
+    // expired analysis) the settings already hold, for rebuilding pixels of a
+    // restored snapshot.
+    async function processNegative({ quiet = false, automatic = true } = {}) {
       if (processNegativeInFlight) return processNegativeInFlight;
 
       const processingGeneration = coreReprocessGeneration;
       const promise = (async () => {
+        const generation = loadGeneration;
+        // Convert the planes of the current geometry, never the previous one.
+        await whenGeometrySettled();
+        if (!isCurrentLoad(generation)) return;
         const sourceData = state.croppedImageData || state.originalImageData;
         if (!sourceData) return;
-        const generation = loadGeneration;
         const isCurrentConversion = () => isCurrentLoad(generation)
           && processingGeneration === coreReprocessGeneration
           && sourceData === (state.croppedImageData || state.originalImageData);
@@ -6121,8 +6195,10 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
           });
           overlay.updateProgress(hasPreviewSource ? 78 : 85, lang.loadingProcessing);
           applyProcessedImageToState(processed, { previewOnly: hasPreviewSource });
-          maybeAutoWhiteBalance(processed);
-          maybeAnalyzeExpiredRescue(processed);
+          if (automatic) {
+            maybeAutoWhiteBalance(processed);
+            maybeAnalyzeExpiredRescue(processed);
+          }
           // Reset dust removal state for new conversion
           dustPassCache = null;
           state.dustRemoval._state = null;
@@ -6920,7 +6996,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     // ===========================================
     function applyZoomPanTransform() {
       const z = state.zoomLevel;
-      canvasTransformWrapper.style.transform = `matrix(${z}, 0, 0, ${z}, ${state.panX}, ${state.panY})`;
+      canvasTransformWrapper.style.transform = `matrix(${z}, 0, 0, ${z}, ${state.panX}, ${state.panY}) ${interimGeometryCss()}`.trim();
       if (z > 1) {
         zoomIndicator.textContent = Math.round(z * 100) + '%';
         zoomIndicator.style.display = 'block';
@@ -6960,7 +7036,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       state.panX = 0;
       state.panY = 0;
       state.isPanning = false;
-      canvasTransformWrapper.style.transform = '';
+      canvasTransformWrapper.style.transform = interimGeometryCss();
       zoomIndicator.style.display = 'none';
       canvasContainer.classList.remove('zoom-pan-active', 'zoom-panning');
     }
@@ -7255,6 +7331,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       if (hiddenJobs.safeMode) return;
       if (!item || item.file !== state.loadedFile || !state.loadedBaseImageData || state.rawDecodePending) return;
       const settled = state.currentStep >= 3 && state.processedImageData && !processNegativeInFlight
+        && !state.geometryPending
         && !coreReprocessBusy() && !coreReprocessTimer && !state.dustRemoval.processing
         && !dustDetectionTimer && !pendingBrushRepairs && !dustDrawing;
       const entry = {
@@ -7271,9 +7348,20 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         entry.snapshot.refs.processedImageData = state.previewSourceImageData;
         entry.previewOnly = true;
       }
-      if (!photoSessions.put(item, entry)) {
+      let stored = photoSessions.put(item, entry);
+      if (!stored && entry.snapshot) {
+        // Too large with its planes (#244): keep the recipe, the history as
+        // scalars and the base. Opening the photo again rebuilds the planes
+        // from the base in the pool behind the adjusted preview kept below.
+        const cold = snapshot => ({ ...snapshot, refs: { cold: true } });
+        stored = photoSessions.put(item, {
+          ...entry, snapshot: cold(entry.snapshot), undo: entry.undo.map(cold), redo: entry.redo.map(cold),
+          previewOnly: false, fullResolutionPending: false
+        });
+      }
+      if (!stored) {
         // Huge geometry/history must not prevent reuse of a base that fits.
-        photoSessions.put(item, { file: entry.file, base: entry.base, rawMetadata: entry.rawMetadata });
+        stored = photoSessions.put(item, { file: entry.file, base: entry.base, rawMetadata: entry.rawMetadata });
       }
       if (settled) {
         // The 1200 px proxy only serves a cold revisit after eviction, so the
@@ -7291,6 +7379,39 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
           photoPreviews.put(item, { key, image: adjustPhotoPreviewSample(sample, adjustments) });
         });
       }
+      return stored;
+    }
+
+    // Drops the outgoing photo's planes and history pins once its session is
+    // in the cache (#244), so they are not reachable during the next decode.
+    // A size-only stand-in keeps the workspace laid out as loaded; the canvas
+    // keeps showing the last paint under the loading surface.
+    function releaseOutgoingPhotoPlanes() {
+      cancelGeometryJob();
+      const frame = state.originalImageData;
+      state.originalImageData = frame ? { width: frame.width, height: frame.height, released: true } : null;
+      for (const key of ['croppedImageData', 'processedImageData', 'displayImageData', 'conversionSourceImageData',
+        'conversionPreviewImageData', 'previewSourceImageData', 'histogramSourceImageData', 'webglSourceImageData']) {
+        state[key] = null;
+      }
+      state.dustRemoval.mask = null;
+      state.dustRemoval.inpaintedImageData = null;
+      state.dustRemoval.cleanSource = null;
+      state.dustRemoval._state = null;
+      clearFullResolutionRenderState();
+      undoStack.length = 0;
+      redoStack.length = 0;
+    }
+
+    // A failed switch after the outgoing planes were released: take the
+    // outgoing session back from the cache through the normal warm or
+    // base-only activation.
+    function reactivateReleasedPhoto(item) {
+      const index = state.fileQueue.indexOf(item);
+      if (index < 0) return false;
+      state.loadedFile = null;
+      void switchToFile(index);
+      return true;
     }
 
     // Runs after the next paint (rAF, then a task); a hidden page paints no
@@ -7304,6 +7425,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       // A newer activation supersedes a photo parked while hidden (#241).
       parkedPhoto = null;
       pendingImportRotation = null;
+      cancelGeometryJob();
       cancelPendingTimers();
       // The outgoing photo's tile update cannot write into the incoming one.
       cancelStudioThumbnailUpdate();
@@ -7585,10 +7707,9 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
 
         state.loadedBaseImageData = fullImageData;
         state.rawDecodePending = false;
-        state.originalImageData = fullImageData;
-        state.croppedImageData = null;
         // A new base: the chain is rebuilt from it (the memo cannot match).
-        applyGeometryFromBase({
+        // The preview's planes stay installed until the full ones land.
+        const ready = applyGeometryFromBase({
           cropRegion: previewCropRegion ? {
             left: previewCropRegion.left * scaleX,
             top: previewCropRegion.top * scaleY,
@@ -7602,16 +7723,18 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         state.conversionSourceImageData = null;
         state.conversionPreviewImageData = null;
 
-        if (state.currentStep >= 3) {
-          // Already converted against the preview: redo the conversion at full
-          // resolution rather than painting the raw negative over the result.
-          void processNegative().catch((err) => {
-            console.error('Re-conversion after full-res decode failed:', err);
-          });
-        } else {
-          displayNegative(state.croppedImageData || state.originalImageData);
-          updateCanvasVisibility();
-        }
+        await afterGeometry(ready, async isCurrent => {
+          if (state.currentStep >= 3) {
+            // Already converted against the preview: redo the conversion at full
+            // resolution rather than painting the raw negative over the result.
+            await convertAfterGeometryEdit(isCurrent).catch((err) => {
+              console.error('Re-conversion after full-res decode failed:', err);
+            });
+          } else {
+            displayNegative(state.croppedImageData || state.originalImageData);
+            updateCanvasVisibility();
+          }
+        });
         if (DEBUG_UI) console.info('[RAW] background full-res decode complete');
       } catch (err) {
         console.warn('[RAW] background full-res decode failed, keeping preview', err.message);
@@ -7655,6 +7778,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
 
       const sourceData = state.croppedImageData || state.originalImageData;
       if (!sourceData) return 'border';
+      noteGeometryPixelRead('suggestStep2Mode');
       const suggestionBuffer = state.step2Mode === 'noBorder'
         ? state.coreBorderBufferBorderValue
         : state.coreBorderBuffer;
@@ -8158,7 +8282,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       let sourceData = null;
       const showAdjusted = state.samplingMode === 'whiteBalance';
       if (state.samplingMode === 'filmBase') {
-        sourceData = state.croppedImageData || state.originalImageData;
+        sourceData = state.geometryPending ? null : state.croppedImageData || state.originalImageData;
       } else if (state.samplingMode === 'whiteBalance') {
         sourceData = state.processedImageData;
       }
@@ -8239,6 +8363,8 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       if (relX < 0 || relX > 1 || relY < 0 || relY > 1) return;
 
       if (state.samplingMode === 'filmBase') {
+        // The planes on screen are being rebuilt: no sample of the old ones.
+        if (state.geometryPending) return;
         const sourceData = state.croppedImageData || state.originalImageData;
         if (!sourceData) return;
 
@@ -8770,18 +8896,31 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         default120Formats: AUTO_FRAME_DEFAULT_120_FORMATS,
         scoreWeights: AUTO_FRAME_SCORE_WEIGHTS
       };
-      return await detectFrameWithFallback(imageData, options, {
+      let mainThread = false;
+      const result = await detectFrameWithFallback(imageData, options, {
         workerSupported: typeof Worker === 'function' && typeof OffscreenCanvas === 'function',
         analyzeInWorker,
         ensureOpenCvReady,
         onWorkerError: err => console.warn('Auto-frame worker unavailable, using fallback:', err),
         analyzeOnMainThread: async (source, config) => {
+          mainThread = true;
           const { detectFrameAndRotation: analyzeFrameAndRotation } = await getAutoFrameAnalyzer();
           return analyzeFrameAndRotation(source, {
-            ...config, rotateImageData: applyRotationToImageData, sanitizeCropRegion: sanitizeCropRegionForImage
+            ...config,
+            rotateImageData: (image, angle) => {
+              if (image === source) geometryDiagnostics.mainRotations++;
+              return applyRotationToImageData(image, angle);
+            },
+            sanitizeCropRegion: sanitizeCropRegionForImage
           });
         }
       });
+      // The debug count of full-resolution rotations (#244): the worker
+      // returns its rotated frame for every non-zero angle it applies.
+      if (!mainThread && result?.rotatedImageData && result.rotatedImageData.width !== imageData.width) {
+        geometryDiagnostics.workerRotations++;
+      }
+      return result;
       } finally {
         if (ownsOverlay) overlay.hide();
       }
@@ -8829,7 +8968,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     // up front left originalImageData as the unrotated base whenever the user
     // declined the prompt, while rotationAngle, cropRegion and the canvas still
     // described the rotated frame.
-    function applyAutoFrameResult(result, baseImageData) {
+    async function applyAutoFrameResult(result, baseImageData) {
       const base = baseImageData || state.originalImageData;
       if (!result || result.requiresReview || !result.cropRegion || !base) return false;
 
@@ -8842,7 +8981,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       const cropRegion = state.autoFrame.rotate180Default
         ? rotate180CropRegion(result.cropRegion, frame.width, frame.height)
         : result.cropRegion;
-      applyGeometryFromBase({ cropRegion, refreshDisplay: true });
+      const ready = applyGeometryFromBase({ cropRegion, refreshDisplay: true });
       state.autoFrame.lastDiagnostics = {
         ...state.autoFrame.lastDiagnostics,
         ...(canAutoApplyImportFrame(result, state.autoFrame) ? { imageArea: imageAreaFromDetection(result, base), analysisNeedsReview: false } : {}),
@@ -8855,11 +8994,12 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         lowConfidenceApplied: (result.confidenceLevel || inferConfidenceLevel(result.confidence || 0)) === 'low'
       };
       updateAutoFrameDiagnosticsUI();
-      setStep2Mode(suggestStep2Mode());
+      // The border-mode suggestion reads the new planes.
+      await afterGeometry(ready, () => setStep2Mode(suggestStep2Mode()));
       return true;
     }
 
-    function applyAutoFrameRotationOnly(result, baseImageData) {
+    async function applyAutoFrameRotationOnly(result, baseImageData) {
       const base = baseImageData || state.originalImageData;
       if (!result || !base) return false;
       const effectiveAngle = autoFrameEffectiveAngle(result.angle);
@@ -8867,7 +9007,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       state.mirrored = false; // the detector ran on the unmirrored base
       updateMirrorButtonState();
       offerAutoFrameRotation(result, effectiveAngle, base);
-      applyGeometryFromBase({ cropRegion: null, refreshDisplay: true });
+      const ready = applyGeometryFromBase({ cropRegion: null, refreshDisplay: true });
       state.autoFrame.lastDiagnostics = {
         ...state.autoFrame.lastDiagnostics,
         confidence: result.confidence,
@@ -8879,7 +9019,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         lowConfidenceApplied: false
       };
       updateAutoFrameDiagnosticsUI();
-      setStep2Mode(suggestStep2Mode());
+      await afterGeometry(ready, () => setStep2Mode(suggestStep2Mode()));
       return true;
     }
 
@@ -8954,6 +9094,13 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     // unchanged then makes no kernel call. The key lives on the object, never
     // in a free variable: undo, a new file, a heavy-RAW upgrade or any other
     // install replaces that object and so invalidates the memo by itself.
+    //
+    // Pixels are built off the main thread by the geometry pool, in row bands
+    // of the crop window only. With a crop, state.originalImageData is a
+    // frame descriptor (size and recipe, no pixels); readers that need the
+    // whole frame's pixels ask for them asynchronously. Scalars
+    // (rotationAngle, mirrored, cropRegion) change synchronously; a reader of
+    // the planes awaits whenGeometrySettled() first.
     const geometryMemo = new WeakMap();
     const geometryBaseIds = new WeakMap();
     let nextGeometryBaseId = 1;
@@ -8961,6 +9108,63 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     // angle it detected. restoreSettings adopts that frame (side channel, not
     // part of the settings) instead of rotating the base a second time.
     let pendingImportRotation = null;
+    const geometryPool = createGeometryPool();
+    let geometryToken = 0;
+    let geometryJob = null;
+    let geometryBusyOwner = null;
+    let interimGeometry = null;
+    // Debug counters for tests and the smoke run: reads of plane pixels while
+    // a build was pending (must stay 0), synchronous full-frame fallbacks,
+    // full-resolution rotations adopted from or built by the auto-frame
+    // worker, and full-resolution rotations built on the main thread. The
+    // pool counts its own jobs (window.__ncGeometry.pool).
+    const geometryDiagnostics = { pendingReads: 0, frameSyncReads: 0, adoptedRotations: 0, workerRotations: 0, mainRotations: 0 };
+    if (typeof window !== 'undefined') {
+      window.__ncGeometry = {
+        diagnostics: geometryDiagnostics, main: geometryCounters, pool: geometryPool.counters,
+        disableWorkers: () => geometryPool.disableWorkers(),
+        pending: () => Boolean(state.geometryPending),
+        inspect: inspectGeometryState
+      };
+    }
+
+    // For the smoke run and the #230 memory scenario: the planes' hashes, the
+    // same chain built on this thread from the base, and the unique bytes
+    // held by state, history and photo sessions (once per ArrayBuffer).
+    function inspectGeometryState({ chain = false } = {}) {
+      const hash = data => {
+        let value = 2166136261;
+        for (let i = 0; i < data.length; i++) value = Math.imul(value ^ data[i], 16777619);
+        return value >>> 0;
+      };
+      const planes = state.croppedImageData || state.originalImageData;
+      const frame = state.originalImageData;
+      const base = state.loadedBaseImageData;
+      const held = backingBuffers([state, undoStack, redoStack]);
+      for (const buffer of photoSessions.buffers()) held.add(buffer);
+      let uniqueBytes = 0;
+      for (const buffer of held) uniqueBytes += buffer.byteLength;
+      const baseBuffers = new Set(base ? [base.data?.buffer, base.__image16?.data?.buffer] : []);
+      const frameBytes = frame ? frame.width * frame.height * 4 : 0;
+      const frameSized = [...held].filter(buffer => !baseBuffers.has(buffer)
+        && (buffer.byteLength === frameBytes || buffer.byteLength === frameBytes * 2)).length;
+      const result = {
+        pending: Boolean(state.geometryPending), descriptor: isGeometryFrame(frame),
+        rotationAngle: state.rotationAngle, mirrored: state.mirrored, cropRegion: state.cropRegion,
+        width: planes?.width || 0, height: planes?.height || 0,
+        hash8: planes && !isGeometryFrame(planes) ? hash(planes.data) : null,
+        hash16: planes?.__image16 && !isGeometryFrame(planes) ? hash(planes.__image16.data) : null,
+        frameSized, uniqueBytes, undoDepth: undoStack.length, coldEntries: undoStack.filter(entry => entry.refs.cold).length
+      };
+      if (chain && base) {
+        const expected = applyGeometryChainToImageData(base, {
+          rotationAngle: effectiveGeometryAngle(state.rotationAngle), mirrored: state.mirrored, cropRegion: state.cropRegion
+        }, exportGeometrySteps);
+        result.chainHash8 = hash(expected.data);
+        result.chainHash16 = expected.__image16 ? hash(expected.__image16.data) : null;
+      }
+      return result;
+    }
 
     function geometryBaseId(base) {
       let id = geometryBaseIds.get(base);
@@ -9011,6 +9215,10 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         && plane.height === image.height && plane.data.length === image.data?.length);
     }
 
+    function isGeometryFrame(image) {
+      return Boolean(image?.__geometryFrame);
+    }
+
     // A frame rotated elsewhere is adopted only when it is the one this thread
     // would build: the same base, the same angle, and the exact 16-bit kernel
     // (a worker's OffscreenCanvas may rasterise an 8-bit source differently).
@@ -9025,22 +9233,77 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       if (!image || image.width !== frame.width || image.height !== frame.height) return null;
       const exact = hasExactPlane16(base) && hasExactPlane16(image);
       if (!exact && !adopted.anySource) return null;
+      geometryDiagnostics.adoptedRotations++;
       return { image, exact };
     }
 
-    // The installed full frame when it was built for `key`'s rotation and mirror.
-    function installedFramePlanes(key) {
-      const installed = installedGeometryKey();
-      if (!installed || !key || installed.baseId !== key.baseId || installed.angle !== key.angle
-        || installed.mirrored !== key.mirrored || !state.originalImageData) return null;
-      return { frame: state.originalImageData, cropped: null };
+    // The whole rotated (and mirrored) frame of a crop, as size and recipe
+    // only. Its pixels are not kept: renderFrameSample and geometryFramePixels
+    // build what a reader needs. A synchronous read of `data` still works as
+    // a last resort (counted, built once on this thread).
+    function createGeometryFrame(base, key) {
+      const frame = { width: key.frameWidth, height: key.frameHeight };
+      const recipe = { base, key, pixels: null };
+      Object.defineProperties(frame, {
+        __geometryFrame: { value: recipe },
+        data: { get: () => materializeGeometryFrame(recipe).data },
+        __image16: { get: () => materializeGeometryFrame(recipe).__image16 }
+      });
+      return frame;
     }
 
-    function buildGeometryPlanes(base, key, adopted = null) {
-      let frame = base;
-      if (key.angle) frame = adopted?.image || applyRotationToImageData(base, key.angle);
+    function materializeGeometryFrame(recipe) {
+      if (!recipe.pixels) {
+        geometryDiagnostics.frameSyncReads++;
+        if (geometryDiagnostics.frameSyncReads === 1) console.warn('Geometry frame pixels were read synchronously; building them on the main thread.');
+        recipe.pixels = renderGeometryFrame(recipe.base, recipe.key) || recipe.base;
+      }
+      return recipe.pixels;
+    }
+
+    function geometryPlanFor(source, key, { crop = key.crop, step = 1, rotated = false } = {}) {
+      return planGeometry(source, {
+        rotationAngle: rotated ? 0 : key.angle, mirrored: key.mirrored, cropRegion: crop
+      }, { step });
+    }
+
+    // The full frame on this thread: the core, or the 2D canvas for 8-bit
+    // sources at a non-right angle.
+    function renderGeometryFrame(base, key) {
+      if (key.angle) geometryDiagnostics.mainRotations++;
+      const plan = geometryPlanFor(base, key, { crop: null });
+      if (plan) return renderGeometry(base, plan);
+      let frame = applyRotationToImageData(base, key.angle);
       if (key.mirrored) frame = mirrorImageDataHorizontal(frame);
-      return { frame, cropped: key.crop ? cropImageDataRegion(frame, key.crop) : null };
+      return frame;
+    }
+
+    // Planes for `key`: the crop window (or the frame when there is no crop)
+    // from the pool, and a frame descriptor beside a crop.
+    async function buildGeometryPlanes(base, key, adopted, isCurrent) {
+      if (adopted && !adopted.exact) {
+        // The Auto Frame button's worker rotation of an 8-bit source (its
+        // canvas): this thread could not rebuild it, so it stays the working
+        // frame as it always was.
+        const plan = geometryPlanFor(adopted.image, key, { crop: null, rotated: true });
+        const frame = plan && !plan.identity ? await geometryPool.render(adopted.image, plan, { isCurrent }) : adopted.image;
+        if (!frame || !isCurrent()) return null;
+        return { frame, cropped: key.crop ? cropImageDataRegion(frame, key.crop) : null };
+      }
+      const source = adopted ? adopted.image : base;
+      const plan = geometryPlanFor(source, key, { rotated: Boolean(adopted) });
+      if (!plan) {
+        // 8-bit source at a non-right angle: the canvas rotates here, as it
+        // always has; the rotated frame is then the only full-size plane.
+        await yieldToEventLoop();
+        if (!isCurrent()) return null;
+        const frame = renderGeometryFrame(base, key);
+        return { frame, cropped: key.crop ? cropImageDataRegion(frame, key.crop) : null };
+      }
+      const output = plan.identity ? source : await geometryPool.render(source, plan, { isCurrent });
+      if (!output || !isCurrent()) return null;
+      if (!key.crop) return { frame: output, cropped: null };
+      return { frame: createGeometryFrame(base, key), cropped: output };
     }
 
     function installGeometryPlanes(key, planes, { memo = true } = {}) {
@@ -9050,27 +9313,211 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       if (memo) geometryMemo.set(planes.cropped || planes.frame, key);
     }
 
+    function holdGeometryBusy(job) {
+      if (geometryBusyOwner || document.body.dataset.studioBusy) return;
+      geometryBusyOwner = job;
+      document.body.dataset.studioBusy = 'true';
+      studioWorkspace?.sync();
+    }
+
+    function releaseGeometryBusy(job) {
+      if (!job || geometryBusyOwner !== job) return;
+      geometryBusyOwner = null;
+      delete document.body.dataset.studioBusy;
+      studioWorkspace?.sync();
+    }
+
+    function endGeometryJob(job) {
+      if (geometryJob === job) {
+        geometryJob = null;
+        state.geometryPending = false;
+      }
+      releaseGeometryBusy(job);
+    }
+
+    // Supersedes a pending build: its later bands are skipped and its result
+    // is dropped. Undo, redo, file switches and new edits call this.
+    function cancelGeometryJob({ keepInterim = false } = {}) {
+      geometryToken++;
+      const job = geometryJob;
+      if (job) {
+        endGeometryJob(job);
+        job.finish(false);
+      }
+      if (!keepInterim) clearInterimGeometryDisplay();
+    }
+
+    async function whenGeometrySettled() {
+      while (geometryJob) await geometryJob.done;
+    }
+
+    // A read of the working planes while a build is pending sees the previous
+    // geometry. Every such reader awaits the build; this counts the ones
+    // that do not.
+    function noteGeometryPixelRead(reader) {
+      if (!geometryJob) return;
+      geometryDiagnostics.pendingReads++;
+      if (DEBUG_UI) console.error(`Geometry planes read while a build is pending: ${reader}`);
+    }
+
+    function startGeometryJob(base, key, adopted, refreshDisplay) {
+      cancelGeometryJob({ keepInterim: true });
+      const token = geometryToken;
+      const generation = loadGeneration;
+      let finish;
+      const job = { token, key, base, refreshDisplay, settled: false };
+      job.done = new Promise(resolve => { finish = resolve; });
+      job.finish = installed => {
+        if (job.settled) return;
+        job.settled = true;
+        finish(installed);
+      };
+      geometryJob = job;
+      state.geometryPending = true;
+      state.geometryReady = job.done;
+      holdGeometryBusy(job);
+      const isCurrent = () => geometryJob === job && token === geometryToken && isCurrentLoad(generation);
+      buildGeometryPlanes(base, key, adopted, isCurrent).then(planes => {
+        if (!planes || !isCurrent()) return false;
+        installGeometryPlanes(key, planes, { memo: !adopted || adopted.exact });
+        if (job.refreshDisplay) displayNegative(state.croppedImageData || state.originalImageData);
+        return true;
+      }).catch(error => {
+        console.error('Geometry build failed:', error);
+        return false;
+      }).then(installed => {
+        endGeometryJob(job);
+        job.finish(installed);
+      });
+      return job.done;
+    }
+
     // Builds (or keeps) the planes for state.rotationAngle / state.mirrored and
-    // `cropRegion`, which is sanitised against the frame. Returns whether a
-    // crop is in effect.
+    // `cropRegion`, which is sanitised against the frame at once. Resolves true
+    // when those planes are installed and still current.
     function applyGeometryFromBase({ cropRegion = state.cropRegion, refreshDisplay = false } = {}) {
       const base = state.loadedBaseImageData || state.originalImageData;
-      if (!base) {
+      if (!base || isGeometryFrame(base)) {
+        cancelGeometryJob();
         pendingImportRotation = null;
         state.cropRegion = null;
         state.croppedImageData = null;
-        return false;
+        return Promise.resolve(false);
       }
       const key = geometryKeyFor(base, { rotationAngle: state.rotationAngle, mirrored: state.mirrored, cropRegion });
-      if (sameGeometryKey(key, installedGeometryKey())) {
+      state.cropRegion = key.crop ? { ...key.crop } : null;
+      if (geometryJob && geometryJob.base === base && sameGeometryKey(geometryJob.key, key)) {
         pendingImportRotation = null;
-        state.cropRegion = key.crop ? { ...key.crop } : null;
-      } else {
-        const adopted = takeAdoptedRotation(base, key.angle);
-        installGeometryPlanes(key, buildGeometryPlanes(base, key, adopted), { memo: !adopted || adopted.exact });
+        if (refreshDisplay) geometryJob.refreshDisplay = true;
+        return geometryJob.done;
       }
-      if (refreshDisplay) displayNegative(state.croppedImageData || state.originalImageData);
-      return Boolean(key.crop);
+      if (sameGeometryKey(key, installedGeometryKey())) {
+        cancelGeometryJob();
+        pendingImportRotation = null;
+        if (refreshDisplay) displayNegative(state.croppedImageData || state.originalImageData);
+        return Promise.resolve(true);
+      }
+      if (!key.angle && !key.mirrored && !key.crop) {
+        // No geometry: the base is the working image.
+        cancelGeometryJob();
+        pendingImportRotation = null;
+        installGeometryPlanes(key, { frame: base, cropped: null });
+        if (refreshDisplay) displayNegative(base);
+        return Promise.resolve(true);
+      }
+      return startGeometryJob(base, key, takeAdoptedRotation(base, key.angle), refreshDisplay);
+    }
+
+    // Runs `then` once the planes an edit asked for are installed, unless a
+    // newer edit, an undo or another photo superseded it.
+    function afterGeometry(ready, then) {
+      const generation = loadGeneration;
+      const token = geometryToken;
+      const isCurrent = () => isCurrentLoad(generation) && token === geometryToken;
+      return ready.then(installed => {
+        if (!installed || !isCurrent()) return false;
+        return then(isCurrent);
+      }).catch(error => console.error('Geometry edit failed:', error));
+    }
+
+    // Exactly downsampleImageDataForMaxPixels(the whole working frame,
+    // maxPixels), without building that frame when it is not kept.
+    function renderFrameSample(maxPixels, { base = state.loadedBaseImageData, rotationAngle = state.rotationAngle, mirrored = state.mirrored } = {}) {
+      const frame = state.originalImageData;
+      // The installed working frame, when it has pixels and is this geometry,
+      // is what HEAD sampled (for 8-bit sources it may be the Auto Frame
+      // worker's canvas rotation, which this thread could not rebuild).
+      const current = !state.geometryPending && base === (state.loadedBaseImageData || null)
+        && effectiveGeometryAngle(rotationAngle) === effectiveGeometryAngle(state.rotationAngle)
+        && Boolean(mirrored) === Boolean(state.mirrored);
+      if (frame && !isGeometryFrame(frame) && !frame.released && (current || !base)) {
+        return downsampleImageDataForMaxPixels(frame, maxPixels) || frame;
+      }
+      const key = base ? geometryKeyFor(base, { rotationAngle, mirrored }) : null;
+      if (!key) return null;
+      const total = key.frameWidth * key.frameHeight;
+      const step = total > maxPixels ? Math.ceil(Math.sqrt(total / maxPixels)) : 1;
+      const plan = geometryPlanFor(base, key, { crop: null, step });
+      if (plan) return renderGeometry(base, plan);
+      const full = renderGeometryFrame(base, key);
+      return downsampleImageDataForMaxPixels(full, maxPixels) || full;
+    }
+
+    // The whole working frame's pixels for the rare reader that needs them
+    // (built in the pool, not kept in state).
+    async function geometryFramePixels() {
+      await whenGeometrySettled();
+      const frame = state.originalImageData;
+      if (!frame || !isGeometryFrame(frame)) return frame;
+      const { base, key } = frame.__geometryFrame;
+      if (frame.__geometryFrame.pixels) return frame.__geometryFrame.pixels;
+      const plan = geometryPlanFor(base, key, { crop: null });
+      if (!plan) return renderGeometryFrame(base, key);
+      const generation = loadGeneration;
+      return geometryPool.render(base, plan, { isCurrent: () => isCurrentLoad(generation) && state.originalImageData === frame });
+    }
+
+    // While a rotate or mirror builds, the current display is turned or
+    // flipped with CSS: a pure permutation of the pixels on screen, UI only
+    // (no measurement reads it). The first paint of the new planes removes it.
+    // Edits made before that paint compose: the state is rotate(t) scaleX(s).
+    function interimGeometryCss() {
+      return interimGeometry ? interimGeometry.css : '';
+    }
+
+    function showInterimGeometryDisplay({ rotate = 0, mirror = false } = {}) {
+      const width = parseFloat(canvasTransformWrapper.style.width) || canvasTransformWrapper.offsetWidth || 0;
+      const height = parseFloat(canvasTransformWrapper.style.height) || canvasTransformWrapper.offsetHeight || 0;
+      if (!geometryJob || !width || !height) return;
+      let turn = interimGeometry?.turn || 0;
+      let flip = interimGeometry?.flip || 1;
+      // Mirroring after a turn t equals turning by -t after the mirror.
+      if (mirror) { turn = -turn; flip = -flip; }
+      turn = normalizeAngleDegrees(turn + rotate);
+      const quarter = Math.abs(turn) === 90;
+      const visualWidth = quarter ? height : width;
+      const visualHeight = quarter ? width : height;
+      const maxWidth = Math.max(1, canvasContainer.clientWidth - 20);
+      const maxHeight = Math.max(1, canvasContainer.clientHeight - 20);
+      let scale = Math.min(maxWidth / visualWidth, maxHeight / visualHeight);
+      // A picture shown at its natural size stays at that size.
+      if (width < maxWidth - 1 && height < maxHeight - 1) scale = Math.min(scale, 1);
+      const css = `translate(${width / 2}px, ${height / 2}px) rotate(${turn}deg) scale(${scale}) scaleX(${flip}) translate(${-width / 2}px, ${-height / 2}px)`;
+      interimGeometry = { key: geometryJob.key, turn, flip, css };
+      applyZoomPanTransform();
+    }
+
+    function clearInterimGeometryDisplay() {
+      if (!interimGeometry) return;
+      interimGeometry = null;
+      applyZoomPanTransform();
+    }
+
+    // Called after every paint of the main canvases.
+    function settleInterimGeometryDisplay() {
+      if (interimGeometry && !geometryJob && sameGeometryKey(interimGeometry.key, installedGeometryKey())) {
+        clearInterimGeometryDisplay();
+      }
     }
 
     // Apply Crop draws on the current frame rotated once more by the draft
@@ -9117,18 +9564,28 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       const mappedCrop = sourceCrop ? mapCropRegionAfterRotation(
         sourceCrop, sourceFrame.width, sourceFrame.height, frame.width, frame.height, normalizedAngle
       ) : null;
-      applyGeometryFromBase({ cropRegion: mappedCrop });
+      const ready = applyGeometryFromBase({ cropRegion: mappedCrop });
       invalidateProcessedPipelineState();
       resetZoomPan();
-
-      if (state.currentStep >= 3) {
-        void processNegative();
-      } else {
-        displayNegative(state.croppedImageData || state.originalImageData);
-        updateCanvasVisibility();
-      }
-      setStep2Mode(suggestStep2Mode());
+      // The new framing shows at once; the exact planes follow from the pool.
+      showInterimGeometryDisplay({ rotate: normalizedAngle });
       markCurrentFileDirty();
+      return afterGeometry(ready, async isCurrent => {
+        setStep2Mode(suggestStep2Mode());
+        if (state.currentStep >= 3) {
+          await convertAfterGeometryEdit(isCurrent);
+        } else {
+          displayNegative(state.croppedImageData || state.originalImageData);
+          updateCanvasVisibility();
+        }
+      });
+    }
+
+    // A conversion already running belongs to the previous geometry: let it
+    // finish (it discards itself) and convert the new planes.
+    async function convertAfterGeometryEdit(isCurrent, options = {}) {
+      if (processNegativeInFlight) await processNegativeInFlight;
+      if (isCurrent()) await processNegative(options);
     }
 
     // base -> rotation -> mirror -> crop. Mirror used to be applied straight to
@@ -9143,8 +9600,8 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     }
 
     function rebuildGeometryFromBase() {
-      if (!(state.loadedBaseImageData || state.originalImageData)) return;
-      applyGeometryFromBase();
+      if (!(state.loadedBaseImageData || state.originalImageData)) return Promise.resolve(false);
+      return applyGeometryFromBase();
     }
 
     function applyMirror() {
@@ -9162,19 +9619,22 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
           left: frameWidth - (state.cropRegion.left + state.cropRegion.width)
         };
       }
-      rebuildGeometryFromBase();
-      const newImageData = state.croppedImageData || state.originalImageData;
+      const ready = applyGeometryFromBase();
 
       invalidateProcessedPipelineState();
       resetZoomPan();
-      if (state.currentStep >= 3) {
-        void processNegative();
-      } else {
-        displayNegative(newImageData);
-        updateCanvasVisibility();
-        renderHistogram(newImageData);
-      }
+      showInterimGeometryDisplay({ mirror: true });
       markCurrentFileDirty();
+      return afterGeometry(ready, async isCurrent => {
+        if (state.currentStep >= 3) {
+          await convertAfterGeometryEdit(isCurrent);
+        } else {
+          const newImageData = state.croppedImageData || state.originalImageData;
+          displayNegative(newImageData);
+          updateCanvasVisibility();
+          renderHistogram(newImageData);
+        }
+      });
     }
 
     document.getElementById('rotateLeftBtn').addEventListener('click', () => {
@@ -9222,7 +9682,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         if (result.confidenceLevel === 'low') {
           if (lowBehavior === 'rotateOnly') {
             if (Math.abs(result.angle) > 0.05 || state.autoFrame.rotate180Default) {
-              applied = applyAutoFrameRotationOnly(result, source);
+              applied = await applyAutoFrameRotationOnly(result, source);
               if (applied) {
                 const template = i18n[currentLang].autoFrameRotateOnlyApplied
                   || 'Low confidence: applied rotation only ({angle}°).';
@@ -9234,7 +9694,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
           } else if (lowBehavior === 'ignore') {
             void appAlert(i18n[currentLang].autoFrameNoReliableBorder || 'No reliable frame border detected. Please crop manually.');
           } else {
-            applied = applyAutoFrameResult(result, source);
+            applied = await applyAutoFrameResult(result, source);
             if (applied) {
               const template = i18n[currentLang].autoFrameLowConfidenceApplied
                 || 'Low confidence: crop applied. Please verify the result (confidence {confidence}).';
@@ -9243,7 +9703,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
             }
           }
         } else if (result.confidenceLevel === 'high' && state.autoFrame.autoApplyHighConfidence) {
-          applied = applyAutoFrameResult(result, source);
+          applied = await applyAutoFrameResult(result, source);
         } else {
           const title = i18n[currentLang].autoFramePreviewTitle || 'Reliable frame detected. Apply auto rotation and crop?';
           const confirmed = await appConfirm(`${title}\n${detail}`);
@@ -9251,7 +9711,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
           // background full-resolution decode can land while it is open and
           // replace the base the detection ran against.
           if (confirmed && (state.loadedBaseImageData || state.originalImageData) === source) {
-            applied = applyAutoFrameResult(result, source);
+            applied = await applyAutoFrameResult(result, source);
           }
         }
 
@@ -9799,7 +10259,11 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
 
     function createCropDraft(sourceImageData) {
       if (!sourceImageData) return null;
-      const previewSourceImageData = buildCropPreviewSourceImageData(sourceImageData);
+      // A sample of the whole frame; beside a crop the frame is not kept, so
+      // the sample is built from the base (#244).
+      const previewSourceImageData = sourceImageData === state.originalImageData
+        ? renderFrameSample(CROP_PREVIEW_MAX_PIXELS)
+        : buildCropPreviewSourceImageData(sourceImageData);
       const initialSourceRect = getDefaultCropRect(sourceImageData);
       if (!previewSourceImageData || !initialSourceRect) return null;
 
@@ -9895,9 +10359,11 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       studioWorkspace?.sync();
     }
 
-    function beginCropMode({ analysisOnly = false } = {}) {
+    async function beginCropMode({ analysisOnly = false } = {}) {
+      // The draft shows the whole frame: wait for a pending geometry build.
+      await whenGeometrySettled();
       const sourceImageData = state.originalImageData;
-      if (!sourceImageData) return;
+      if (!sourceImageData || state.cropping) return;
 
       exitBeforeAfter();
       state.samplingMode = null;
@@ -10492,10 +10958,6 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         draftFrame.height / previewRotatedImageData.height
       ), draftFrame, frame);
       if (!cropRegion) return;
-      const nextKey = geometryKeyFor(base, { ...nextGeometry, cropRegion });
-      // Without a straighten the frame is the one already installed.
-      let framePlanes = installedFramePlanes(nextKey);
-      const buildFrame = () => (framePlanes ||= buildGeometryPlanes(base, { ...nextKey, crop: null }));
 
       const generation = loadGeneration;
       let nextMeta = state.autoFrame.lastDiagnostics;
@@ -10521,7 +10983,12 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
           } else if (!isSameAnalysisFrame(nextMeta.imageArea, selectedArea)) {
             let points = null;
             try {
-              if (await ensureOpenCvReady()) points = detectCropImageArea(buildFrame().frame, cropRegion, Object.entries(AUTO_FRAME_FORMAT_RATIOS).map(([key, ratio]) => ({ key, ratio })));
+              if (await ensureOpenCvReady()) {
+                // The detector looks at a <=1 MP sample of the new frame; build
+                // exactly that sample instead of the whole rotated frame.
+                const preview = renderFrameSample(1000000, { base, ...nextGeometry });
+                points = detectCropImageArea(frame, cropRegion, Object.entries(AUTO_FRAME_FORMAT_RATIOS).map(([key, ratio]) => ({ key, ratio })), { preview });
+              }
             } catch (error) { console.warn('Crop analysis detection failed; keeping the previous color reference:', error); }
             if (points) {
               nextMeta.imageArea = workingPointsToBase(points, nextGeometry, base);
@@ -10543,25 +11010,29 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
 
       pushUndo('crop');
       state.autoFrame.lastDiagnostics = nextMeta;
+      let ready = Promise.resolve(true);
       if (!draft.analysisOnly) {
         state.rotationAngle = nextGeometry.rotationAngle;
-        const planes = buildFrame();
-        installGeometryPlanes(nextKey, { frame: planes.frame, cropped: cropImageDataRegion(planes.frame, nextKey.crop) });
+        // Only the crop window is resampled, in the pool.
+        ready = applyGeometryFromBase({ cropRegion });
       }
       invalidateProcessedPipelineState();
       resetZoomPan();
+      // With the crop in place this reads no pixels.
       setStep2Mode(suggestStep2Mode());
       markCurrentFileDirty();
       exitCropMode({ restore: false });
 
-      if (state.currentStep >= 3) {
-        await processNegative();
-      } else {
-        const sourceImageData = state.croppedImageData || state.originalImageData;
-        displayNegative(sourceImageData);
-        updateCanvasVisibility();
-        renderHistogram(sourceImageData);
-      }
+      await afterGeometry(ready, async isCurrent => {
+        if (state.currentStep >= 3) {
+          await convertAfterGeometryEdit(isCurrent);
+        } else {
+          const sourceImageData = state.croppedImageData || state.originalImageData;
+          displayNegative(sourceImageData);
+          updateCanvasVisibility();
+          renderHistogram(sourceImageData);
+        }
+      });
     });
 
     // Convert button (skip to step 2)
@@ -10676,6 +11147,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       exitBeforeAfter();
       resetZoomPan();
       if (state.loadedBaseImageData || state.originalImageData) {
+        cancelGeometryJob();
         state.originalImageData = state.loadedBaseImageData || state.originalImageData;
         state.rotationAngle = 0;
         state.mirrored = false;
@@ -11166,6 +11638,8 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       // background colour estimate must not replace the recipe mid-encode.
       manualEditRevision++;
       notifyReviewExport([currentItem].filter(Boolean));
+      // The linear DNG reads the geometry planes directly.
+      await whenGeometrySettled();
       if (processNegativeInFlight) await processNegativeInFlight;
       const lang = i18n[currentLang];
       const overlay = getLoadingOverlay();
@@ -11589,6 +12063,18 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       return cropImageDataRegion(imageData, sanitized);
     }
 
+    // The export geometry chain in the pool, bit-identical to
+    // applyGeometryChainToImageData. 8-bit sources at a non-right angle keep
+    // the canvas rotation on this thread.
+    async function renderGeometryChain(source, geometry, { isCurrent = () => true, maxInFlight = null } = {}) {
+      const plan = planGeometry(source, geometry, { sanitizeCrop: (crop, frame) => sanitizeCropRegionForImage(crop, frame) });
+      if (!plan) return applyGeometryChainToImageData(source, geometry, exportGeometrySteps);
+      if (plan.identity) return source;
+      const output = await geometryPool.render(source, plan, { isCurrent, maxInFlight });
+      assertRepairCurrent(isCurrent);
+      return output;
+    }
+
     // Step implementations for applyGeometryChainToImageData. crop(null,
     // region, bounds) only sanitises the region against `bounds`.
     const exportGeometrySteps = {
@@ -11865,9 +12351,12 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         && importRotation.image.height === rotatedDimensions(imageData.width, imageData.height, importRotation.angle).height
         ? importRotation.image : null;
       importRotation = null;
-      let workingData = adoptedRotation
-        ? applyGeometryChainToImageData(adoptedRotation, { ...geometry, rotationAngle: 0 }, exportGeometrySteps)
-        : applyGeometryChainToImageData(imageData, geometry, exportGeometrySteps);
+      // In the geometry pool: batch lanes, the contact sheet and the thumbnail
+      // lane no longer queue on the main thread for this step (#244).
+      let workingData = await renderGeometryChain(
+        adoptedRotation || imageData, adoptedRotation ? { ...geometry, rotationAngle: 0 } : geometry,
+        { isCurrent, maxInFlight: options.geometryBands }
+      );
       workingData = await applyLensCorrectionWithSettings(workingData, settings, { updateUi: false });
       assertRepairCurrent(isCurrent);
       const fullWorkingShortSide = Math.min(workingData.width, workingData.height);
@@ -12032,29 +12521,39 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
 
     // `nc_batch_lanes_v1` is a 1-4 lane ceiling for support/benchmarks; cores,
     // device memory and the largest decoded frame may require fewer lanes.
-    async function planBatchLanes(files) {
+    async function planBatchLaneBudget(files) {
       const pinned = Number.parseInt(safeStorageGet('nc_batch_lanes_v1') || '', 10);
       // Read a bounded header at a time so a long roll cannot flood IO either.
       let pixelsPerFile = 0;
       for (const file of files) pixelsPerFile = Math.max(pixelsPerFile, await imagePixelsForBatch(file));
-      return planBatchParallelism({
+      const lanes = planBatchParallelism({
         hardwareConcurrency: navigator.hardwareConcurrency,
         deviceMemory: navigator.deviceMemory,
         pixelsPerFile,
         fileCount: files.length,
         maxParallel: Number.isInteger(pinned) && pinned >= 1 && pinned <= 4 ? pinned : 4
       });
+      return { lanes, pixelsPerFile };
+    }
+
+    async function planBatchLanes(files) {
+      return (await planBatchLaneBudget(files)).lanes;
     }
 
     function planBatchExportLanes(jobs) {
-      return planBatchLanes(jobs.map(job => job.file));
+      return planBatchLaneBudget(jobs.map(job => job.file));
     }
 
     // Workers one batch shares and releases when it ends: `lanes` conversion
     // workers kept alive across frames (no per-file restart) and, with more
     // than one lane, as many export workers for the adjustment/encode stages.
-    function createBatchExportWorkers(lanes) {
+    function createBatchExportWorkers(lanes, { pixelsPerFile = 0 } = {}) {
       const dust = createDustWorkerClient();
+      // The lanes share the geometry pool; each keeps few enough bands in
+      // flight that their transient copies stay within the band budget.
+      const geometryBands = planGeometryBandsInFlight({
+        lanes, pixelsPerFile, poolSize: geometryPool.size, deviceMemory: navigator.deviceMemory
+      });
       const pool = !conversionWorkerBroken && usesSilverCoreConversion(state)
         ? createConversionWorkerPool({ size: lanes })
         : null;
@@ -12071,6 +12570,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         } : null,
         bridge,
         dust,
+        geometryBands,
         dispose() {
           dust.dispose();
           if (pool) pool.dispose();
@@ -12083,7 +12583,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     async function renderBatchExportFile(job, position, { exportInfo, workers, dustRemoval }, { transferGainMapPlane = true } = {}) {
       const { file, settings } = job;
       if (exportInfo.format === 'dng') {
-        const { source, settings: usedSettings } = await processFileWithSettings(file, settings, { stage: 'source', convert: workers.convert, silent: true });
+        const { source, settings: usedSettings } = await processFileWithSettings(file, settings, { stage: 'source', convert: workers.convert, geometryBands: workers.geometryBands, silent: true });
         return renderLinearDngBlob(source, usedSettings, position);
       }
       // The sprocket frame drops the map, so only a plain JPEG asks for one.
@@ -12098,6 +12598,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
           dustWorker: workers.dust,
           convert: workers.convert,
           bridge: workers.bridge,
+          geometryBands: workers.geometryBands,
           gainMap,
           transferGainMapPlane
         });
@@ -12127,10 +12628,11 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     // and releases the workers afterwards. `sink` writes one encoded frame and
     // throws to fail that frame; `signal` stops further frames from starting.
     async function runBatchExport(jobs, { exportInfo, sink, onProgress = null, signal = null, dustRemoval = null }) {
+      const { lanes: plannedLanes, pixelsPerFile } = await planBatchExportLanes(jobs);
       // The crash-loop guard runs a resumed batch in one lane.
-      const lanes = hiddenJobs.safeMode ? 1 : await planBatchExportLanes(jobs);
+      const lanes = hiddenJobs.safeMode ? 1 : plannedLanes;
       const bytes = await hiddenJobBytesFor(jobs.map(job => job.file));
-      const workers = createBatchExportWorkers(lanes);
+      const workers = createBatchExportWorkers(lanes, { pixelsPerFile });
       const trace = createPerfTrace('batchExport', { files: jobs.length, lanes });
       activeLongJobs += 1;
       try {
@@ -12673,10 +13175,11 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       // Leaving, restoring and the incoming tile would each refresh the whole
       // list. Refresh it once: before the cold feedback paints, or in finally.
       const flushFileList = deferFileListRefresh();
+      let released = null;
       if (leavingItem && leavingItem.file === state.loadedFile
         && (leavingItem.isDirty || leavingItem.settings || state.currentStep >= 3)) {
         persistCurrentFileSettings({ silent: true, force: true });
-        rememberPhotoSession(leavingItem);
+        if (rememberPhotoSession(leavingItem)) released = leavingItem;
       }
       state.currentFileIndex = index;
       state.photoSwitchTarget = null;
@@ -12703,14 +13206,26 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
           // Preview raster size depends on zoom. Restore it before rebuilding
           // display sources, not after sampling them at the outgoing photo's zoom.
           state.zoomLevel = cached.zoom; state.panX = cached.panX; state.panY = cached.panY;
-          restoreSnapshot(cached.snapshot, { reprocess: false, previewOnly: cached.previewOnly });
+          const restoring = restoreSnapshot(cached.snapshot, { reprocess: false, previewOnly: cached.previewOnly });
           state.fullResolutionPending = cached.fullResolutionPending;
           state.dustRemoval.particleCount = cached.particleCount;
           undoStack.splice(0, undoStack.length, ...cached.undo);
           redoStack.splice(0, redoStack.length, ...cached.redo);
           applyZoomPanTransform();
           updateUndoRedoButtons();
-          updatePreview();
+          if (restoring) {
+            // A session kept without its planes (#244): show the adjusted
+            // preview while the pool rebuilds them from the base.
+            const preview = photoPreviews.peek(fileItem);
+            if (preview?.key === photoSettingsKey(fileItem)) {
+              canvas.style.display = 'block'; glCanvas.style.display = 'none';
+              renderAdjustedImageDataToMainCanvas(preview.image, preview.image);
+            }
+            await restoring;
+            if (!isCurrentLoad(generation)) return;
+          } else {
+            updatePreview();
+          }
           // Its tile already shows these pixels unless the settings moved on.
           if (fileItem.thumbnail && fileItem.thumbnailKind === 'processed'
             && fileItem.thumbnailKey === photoSettingsKey(fileItem)) adoptStudioThumbnailInputs(fileItem);
@@ -12718,6 +13233,9 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
           if (state.fullResolutionPending) scheduleFullResolutionRender('photo-restored');
           return;
         }
+
+        // The outgoing photo lives in the session cache now.
+        if (released) releaseOutgoingPhotoPlanes();
 
         state.photoSwitchTarget = fileItem;
         state.photoSwitchPhase = 'loading';
@@ -12750,7 +13268,8 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
             state.currentFileIndex = state.fileQueue.findIndex(item => item.file === state.loadedFile);
             // A retained presentation proxy may already have been drawn for
             // this target. Restore the actual loaded image before revealing it.
-            if (state.loadedFile !== fileItem.file && state.originalImageData) updatePreview();
+            if (released) reactivateReleasedPhoto(released);
+            else if (state.loadedFile !== fileItem.file && state.originalImageData) updatePreview();
           }
           return;
         }
@@ -12771,7 +13290,8 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         fileItem.status = 'error';
         fileItem.error = String(error?.message || error);
         state.currentFileIndex = state.fileQueue.findIndex(item => item.file === state.loadedFile);
-        if (state.loadedFile !== fileItem.file && state.originalImageData) updatePreview();
+        if (released && state.loadedFile !== fileItem.file) reactivateReleasedPhoto(released);
+        else if (state.loadedFile !== fileItem.file && state.originalImageData) updatePreview();
         showToast(getLocalizedText('loadError', 'Error loading file'));
       } finally {
         // The warm switch's refresh is the one below.
@@ -13804,6 +14324,9 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
           showToast(i18n[currentLang][settings.filmTypeReason === 'monochrome' ? 'filmTypeMonochrome' : 'filmTypeUncertain'], 6500);
         }
         if (settings.filmEdge?.found) updateFileListUI();
+        // The border-mode suggestion of Step 2 reads the new planes.
+        await whenGeometrySettled();
+        if (!isCurrentLoad(generation)) return;
         goToStep(2);
         trace.mark('settings');
         await processNegative({ quiet });
@@ -16082,10 +16605,13 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
 
     // The film type always travels; every other key only when it differs
     // from this photo's automatic defaults, which keeps the code short.
-    function currentRecipeCode() {
+    // The defaults are measured on the whole working frame; beside a crop
+    // that frame is built in the pool for this (#244).
+    async function currentRecipeCode() {
       let defaults = null;
-      if (state.originalImageData) {
-        const { filmType, positiveMode, ...rest } = createDefaultSettings(state.originalImageData);
+      const frame = state.originalImageData ? await geometryFramePixels() : null;
+      if (frame) {
+        const { filmType, positiveMode, ...rest } = createDefaultSettings(frame);
         defaults = rest;
       }
       return encodeRecipe(extractCurrentSettings(), recipeTags(), { defaults });
@@ -16096,7 +16622,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         void appAlert(getLocalizedText('recipeNeedPhoto', 'Convert a photo first.'));
         return;
       }
-      const code = currentRecipeCode();
+      const code = await currentRecipeCode();
       const box = document.getElementById('recipeCode');
       if (box) box.value = code;
       try {
@@ -16131,14 +16657,14 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       canvas.hidden = false;
     }
 
-    function toggleRecipeQr() {
+    async function toggleRecipeQr() {
       const canvas = document.getElementById('recipeQrCanvas');
       if (!canvas) return;
       if (!canvas.hidden) { canvas.hidden = true; return; }
       const box = document.getElementById('recipeCode');
       let code = box?.value.trim() || '';
       if (!code && state.currentStep >= 3 && state.processedImageData) {
-        code = currentRecipeCode();
+        code = await currentRecipeCode();
         if (box) box.value = code;
       }
       if (code) drawRecipeQr(code);
@@ -16792,7 +17318,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
 
     // Sets the roll's flat field on the selected files (never on the blank
     // itself) and on the open file.
-    function applyFlatFieldToItems(id, items, { sourceFile = null } = {}) {
+    function applyFlatFieldToItems(id, items, { sourceFile = null, defaultsImage = null } = {}) {
       let count = 0;
       for (const item of items) {
         if (sourceFile && item.file === sourceFile) continue;
@@ -16810,12 +17336,19 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
             item.status = 'pending';
           }
         } else {
-          item.settings = { ...createDefaultSettings(state.originalImageData || { width: 1, height: 1 }), flatFieldId: id };
+          item.settings = { ...createDefaultSettings(defaultsImage || state.originalImageData || { width: 1, height: 1 }), flatFieldId: id };
           item.isDirty = false;
         }
         count++;
       }
       return count;
+    }
+
+    // Files without settings get defaults measured on the open frame; beside
+    // a crop that frame is built in the pool first (#244).
+    async function flatFieldDefaultsImage(items, sourceFile = null) {
+      const needed = items.some(item => !(sourceFile && item.file === sourceFile) && item.file !== state.loadedFile && !item.settings);
+      return needed && state.originalImageData ? geometryFramePixels() : null;
     }
 
     async function useCurrentAsFlatField() {
@@ -16829,10 +17362,12 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       }
       const map = buildFlatFieldMap(source, { source: currentItem?.file?.name || state.loadedFile?.name || 'current photo' });
       if (!map) return;
+      const targets = state.fileQueue.filter((item) => item.selected && item.file !== currentItem?.file);
+      const defaultsImage = await flatFieldDefaultsImage(targets, currentItem?.file || null);
+      if (getCurrentQueueItem() !== currentItem) return;
       pushUndo('flatField');
       registerFlatField(map);
-      const targets = state.fileQueue.filter((item) => item.selected && item.file !== currentItem?.file);
-      const count = applyFlatFieldToItems(map.id, targets, { sourceFile: currentItem?.file || null });
+      const count = applyFlatFieldToItems(map.id, targets, { sourceFile: currentItem?.file || null, defaultsImage });
       updateFlatFieldUI();
       updateFileListUI();
       showToast(getInterpolatedText('flatFieldApplied', { count: String(count) }, `Flat field applied to ${count} photo(s)`));
@@ -16867,10 +17402,12 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
           void appAlert(getLocalizedText('flatFieldDetectNone', 'No blank light-source frame found among the selected photos.'));
           return;
         }
+        const defaultsImage = await flatFieldDefaultsImage(selectedItems, best.item.file);
+        if (!isCurrentLoad(generation)) return;
         pushUndo('flatField');
         const map = buildFlatFieldMap(best.imageData, { source: best.item.file.name });
         registerFlatField(map);
-        const count = applyFlatFieldToItems(map.id, selectedItems, { sourceFile: best.item.file });
+        const count = applyFlatFieldToItems(map.id, selectedItems, { sourceFile: best.item.file, defaultsImage });
         showToast(getInterpolatedText('flatFieldDetected', { name: best.item.file.name }, `Blank frame found: ${best.item.file.name}`) + ' · ' + getInterpolatedText('flatFieldApplied', { count: String(count) }, `Flat field applied to ${count} photo(s)`), 3200);
       } finally {
         showBatchProgress(false);
@@ -16883,13 +17420,16 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       if (state.originalImageData && state.flatFieldId) scheduleSilverSourceRefresh({ immediate: true });
     }
 
-    function applyFlatFieldToSelected() {
+    async function applyFlatFieldToSelected() {
       const id = state.flatFieldActiveId;
       if (!id || !state.flatFields[id]) return;
-      pushUndo('flatField');
       const source = state.flatFields[id].source;
       const targets = state.fileQueue.filter((item) => item.selected && item.file.name !== source);
-      const count = applyFlatFieldToItems(id, targets);
+      const generation = loadGeneration;
+      const defaultsImage = await flatFieldDefaultsImage(targets);
+      if (!isCurrentLoad(generation) || state.flatFieldActiveId !== id) return;
+      pushUndo('flatField');
+      const count = applyFlatFieldToItems(id, targets, { defaultsImage });
       updateFlatFieldUI();
       updateFileListUI();
       showToast(getInterpolatedText('flatFieldApplied', { count: String(count) }, `Flat field applied to ${count} photo(s)`));
@@ -17529,7 +18069,9 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         onReset: () => {
           if (state.currentStep < 3) return;
           pushUndo('studioReset');
-          Object.assign(state, pickStudioColors(createDefaultSettings(state.originalImageData)));
+          // Studio colours never depend on the pixels createDefaultSettings
+          // analyses, so the working planes serve (no frame is built).
+          Object.assign(state, pickStudioColors(createDefaultSettings(state.croppedImageData || state.originalImageData)));
           refreshExpiredAfterColorReset();
           ['r', 'g', 'b'].forEach(ch => updateCurveFromPoints(ch));
           updateSlidersFromState();

@@ -57,6 +57,36 @@ export function planBatchParallelism({
   return Math.max(1, Math.min(byCores, byMemory, byFiles, maxParallel));
 }
 
+// A geometry band in flight (#244) holds a copy of its source rows and its
+// output rows: about 20 bytes per output pixel for a 16-bit frame. The lanes
+// share the geometry pool, so they share this transient budget too; WebKit's
+// content process has less headroom than Chrome. #258 owns the overall
+// memory ledger and may lower it.
+export const GEOMETRY_BAND_BUDGET_BYTES = 768 * 1024 * 1024;
+export const GEOMETRY_BAND_BUDGET_BYTES_LOW_MEMORY = 256 * 1024 * 1024;
+export const GEOMETRY_BYTES_PER_BAND_PIXEL = 20;
+
+/**
+ * How many geometry bands one lane may keep in flight.
+ *
+ * @param {object} options
+ * @param {number} [options.lanes] files processed at once
+ * @param {number} [options.pixelsPerFile] largest frame in the batch
+ * @param {number} [options.poolSize] geometry workers
+ * @param {number} [options.bandCount] bands per frame
+ * @param {number} [options.deviceMemory] navigator.deviceMemory (GB)
+ * @returns {number} 1..poolSize
+ */
+export function planGeometryBandsInFlight({ lanes = 1, pixelsPerFile, poolSize = 6, bandCount = 6, deviceMemory } = {}) {
+  const lowMemory = Number.isFinite(deviceMemory) && deviceMemory > 0 && deviceMemory <= BATCH_LOW_MEMORY_GB;
+  const budget = lowMemory ? GEOMETRY_BAND_BUDGET_BYTES_LOW_MEMORY : GEOMETRY_BAND_BUDGET_BYTES;
+  const pixels = Number.isFinite(pixelsPerFile) && pixelsPerFile > 0 ? pixelsPerFile : 60_000_000;
+  const bandBytes = Math.max(1, pixels / Math.max(1, bandCount)) * GEOMETRY_BYTES_PER_BAND_PIXEL;
+  const perLane = Math.floor(Math.floor(budget / bandBytes) / Math.max(1, Math.floor(lanes) || 1));
+  const workers = Math.max(1, Math.floor(poolSize) || 1);
+  return Math.max(1, Math.min(workers, perLane));
+}
+
 /**
  * Run `jobs` through `process` with bounded parallelism and hand each result
  * to `sink` in job order.

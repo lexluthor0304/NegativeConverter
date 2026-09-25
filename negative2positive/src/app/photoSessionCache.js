@@ -2,7 +2,10 @@ const DEFAULT_MAX_BYTES = 128 * 1024 * 1024;
 
 // Session snapshots are object/array graphs containing image planes and undo
 // history. Walk containers, never the numeric properties of individual pixels.
-// ImageData.data is a native getter, not an enumerable own property.
+// ImageData.data is a native getter, not an enumerable own property. A
+// geometry frame descriptor (#244) has pixel getters that would build the
+// frame; only its recipe (and pixels already built) is walked.
+// History uses the same walk to count the bytes it holds exclusively.
 // `buffers` lets a caller count several graphs once (#241 resident bytes).
 export function backingBuffers(value, buffers = new Set()) {
   const seen = new Set();
@@ -23,7 +26,7 @@ export function backingBuffers(value, buffers = new Set()) {
     // The original File/Blob is already held by the queue. It is not a decoded
     // pixel allocation, and must not consume this cache's retained-plane budget.
     if (typeof Blob !== 'undefined' && current instanceof Blob) continue;
-    if (ArrayBuffer.isView(current.data)) pending.push(current.data);
+    if (!current.__geometryFrame && ArrayBuffer.isView(current.data)) pending.push(current.data);
     if (current instanceof Map) {
       for (const [key, item] of current) pending.push(key, item);
     } else if (current instanceof Set) {

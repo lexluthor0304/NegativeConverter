@@ -19,8 +19,15 @@ planes and buffers shared with history. Its limit is 768 MiB, or 128 MiB on
 devices reporting at most 4 GiB of memory and unknown-memory touch devices.
 The desktop budget fits a 60 MP RAW base with its 8/16-bit planes and small
 editing previews; 512 MiB did not fit the measured 9536 × 6336 fixture.
-Oversized sessions retain only their
-decoded base if it fits. A separate 48 MiB cache holds small adjusted previews
+A session too large with its planes keeps its recipe, its history as
+scalars (cold entries) and its decoded base (#244); reopening it shows the
+adjusted preview at once while the geometry pool rebuilds the crop window
+from the base, then converts without new automatic measurements. Only when
+even that does not fit is the decoded base kept alone.
+Once the outgoing session is cached, a cold switch releases the outgoing
+photo's planes and undo/redo pins before decoding the target, so they are not
+reachable during the decode. A failed decode takes the outgoing session back
+from the cache through the normal warm or base-only activation. A separate 48 MiB cache holds small adjusted previews
 for revisits after full-session eviction. These are retained-buffer limits,
 not a total renderer-memory promise; the active editor, workers, native GPU
 resources and file storage are additional. While a job runs in a hidden

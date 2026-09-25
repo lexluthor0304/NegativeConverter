@@ -81,7 +81,7 @@ function fixture() {
     getLocalizedText: (key, fallback) => fallback,
     getInterpolatedText: (key, values, fallback) => fallback,
     applyDustResultToState: () => { state.processedImageData = state.dustRemoval.inpaintedImageData; },
-    cancelPendingTimers: noop, cancelScheduledFullResolutionRender: noop,
+    cancelPendingTimers: noop, cancelScheduledFullResolutionRender: noop, cancelGeometryJob: noop,
     getLoadingOverlay: () => ({ hide: noop }), noteCoreReprocessSettled: noop,
     assertRepairCurrent: valid => { if (!valid()) throw new DOMException('Superseded', 'AbortError'); },
     hiddenJobs: createHiddenJobGate({ isHidden: () => false }),

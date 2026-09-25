@@ -34,8 +34,10 @@ export function isSameAnalysisFrame(area, cropArea) {
     && Math.abs((a.t + a.b - b.t - b.b) / 2) < (a.b - a.t) * .45;
 }
 
-export function detectCropImageArea(image, crop, targets) {
-  const preview = downsampleImageDataForMaxPixels(image, 1000000);
+// `preview`, when given, must be downsampleImageDataForMaxPixels(image,
+// 1000000); `image` then only supplies the frame's size (#244).
+export function detectCropImageArea(image, crop, targets, { preview: sample = null } = {}) {
+  const preview = sample || downsampleImageDataForMaxPixels(image, 1000000);
   const sx = preview.width / image.width, sy = preview.height / image.height;
   // 裁切の少し外側も見る。端をきっちり切った場合でも四辺を検出できる。
   const left = Math.max(0, Math.floor((crop.left - crop.width * .12) * sx));

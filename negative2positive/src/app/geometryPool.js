@@ -193,7 +193,7 @@ export function createGeometryPool({
    * core (one band per task, yielding between them) when workers are
    * unavailable or fail.
    */
-  async function render(source, plan, { isCurrent = () => true, bands: bandCount = null } = {}) {
+  async function render(source, plan, { isCurrent = () => true, bands: bandCount = null, maxInFlight = null } = {}) {
     if (plan.identity) return source;
     const bands = planGeometryBands(plan, bandCount || geometryBandCount(plan, poolSize));
     const out8 = new Uint8ClampedArray(plan.outWidth * plan.outHeight * 4);
@@ -203,7 +203,7 @@ export function createGeometryPool({
       out8.set(part.data8, band.y0 * rowWords);
       if (out16) out16.set(part.data16, band.y0 * rowWords);
     };
-    const limit = Math.max(1, Math.min(poolSize, Number(maxBandsInFlight) || poolSize));
+    const limit = Math.max(1, Math.min(poolSize, Number(maxInFlight) || Number(maxBandsInFlight) || poolSize));
     const queue = bands.slice();
     const running = new Map();
     let token = 0;
@@ -257,6 +257,13 @@ export function createGeometryPool({
     get size() { return poolSize; },
     get available() { return !broken; },
     counters,
+    // Moves this pool to the synchronous path, as a worker failure would
+    // (tests and the smoke run compare both paths).
+    disableWorkers() {
+      broken = true;
+      for (const entry of workers.slice()) if (!entry.busy) terminate(entry, new Error('Geometry workers disabled'));
+      while (waiters.length) waiters.shift()(null);
+    },
     dispose() {
       clearTimeout(idleTimer);
       for (const entry of workers.slice()) terminate(entry, new DOMException('Geometry pool released', 'AbortError'));
