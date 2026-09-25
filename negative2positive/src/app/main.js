@@ -72,6 +72,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     import { convertAdjustedFrame } from '../pipeline/adjustedFrame.js';
     import { convertFrameInWorker, convertPreviewFrameInWorker, convertFullResolutionFrameInWorker, createConversionWorkerClient, createConversionWorkerPool, CONVERSION_FAILED, WORKER_CRASHED, WORKER_TIMEOUT, WORKER_UNAVAILABLE, WORKER_ABORTED, isConversionInputLost } from './conversionWorkerClient.js';
     import { routeCoreConversion, keepsFullPlaneOnDowngrade, fullResolutionIsStale, restoredFrameFlags, viewportRefreshBranch, repairsNeedSettling } from './fullResolutionRouting.js';
+    import { poolRepairMask } from './repairedPreview.js';
     import { planBatchParallelism, planPng16BandWorkers, runBatchPipeline, planGeometryBandsInFlight } from './batchExportScheduler.js';
     import { displayPreviewSize, resizeDisplayPreview, updateDisplayPreviewRect } from './displayPreview.js';
     import { createCoreReprocessGates, previewDispatchAction, CORE_FULL_REPROCESS_DELAY_MS } from './coreReprocessDispatcher.js';
@@ -6047,11 +6048,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return convertFrameWithRouter({ imageData, settings, options });
     }
 
-    async function convertFromCurrentSource(settings = state, { preview = false, interactive = false, includeAnalysisPreview = true, retain16 = false, signal = null, client = null } = {}) {
+    async function convertFromCurrentSource(settings = state, { preview = false, interactive = false, includeAnalysisPreview = true, retain16 = false, signal = null, client = null, previewSource = null } = {}) {
       const fullSource = state.conversionSourceImageData || state.croppedImageData || state.originalImageData;
       if (!fullSource) return null;
       if (!state.conversionSourceImageData) noteGeometryPixelRead('convertFromCurrentSource');
-      const source = (preview && state.conversionPreviewImageData) ? state.conversionPreviewImageData : fullSource;
+      // previewSource: the display preview source with its repairs filled
+      // (Phase 2 of #237), for interactive preview frames only.
+      const source = (preview && state.conversionPreviewImageData) ? (previewSource || state.conversionPreviewImageData) : fullSource;
       const request = {
         imageData: source,
         settings: buildRouterSettings(settings),
@@ -6289,6 +6292,107 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       });
     }
 
+    // Phase 2 of #237: while a drag waits for the idle repair pass, preview
+    // frames convert a copy of the display preview source whose specks and
+    // brushed areas are filled (TELEA) with the last full-resolution masks, so
+    // the dust does not flicker back. UI only: the settled view and every
+    // export come from the exact pass. The fill runs in a dust worker of its
+    // own, which keeps the full-resolution worker's cached source.
+    const previewRepairWorker = createDustWorkerClient();
+    // Masks of the last settled repair: { conversionSource, width, height,
+    // dustMask, strokes, dustEnabled }. They outlive the idle pass's reset:
+    // during the wait for new ones they are what the preview is filled with.
+    let repairedPreviewMasks = null;
+    let repairedPreview = null;
+    let repairedPreviewBuild = null;
+    // The display preview frame that was converted from a repaired source.
+    let repairedPreviewShown = null;
+
+    function rememberRepairMasks(source) {
+      const conversionSource = state.conversionSourceImageData;
+      if (!source || !conversionSource || !hasFrameRepairs() || !hasSeparateConversionPreview()) {
+        clearRepairedPreview();
+        return;
+      }
+      const dustEnabled = Boolean(state.dustRemoval.enabled);
+      repairedPreviewMasks = { conversionSource, width: source.width, height: source.height,
+        dustMask: dustEnabled ? state.dustRemoval.mask : null, strokes: state.repairStrokes, dustEnabled };
+      ensureRepairedPreview();
+    }
+
+    function clearRepairedPreview() {
+      repairedPreviewMasks = null;
+      repairedPreview = null;
+      repairedPreviewBuild = null;
+      repairedPreviewShown = null;
+    }
+
+    function repairedPreviewMatches(masks) {
+      return Boolean(masks && hasFrameRepairs() && masks.conversionSource === state.conversionSourceImageData
+        && masks.strokes === state.repairStrokes && masks.dustEnabled === Boolean(state.dustRemoval.enabled));
+    }
+
+    function repairedPreviewSourceFor(base) {
+      const entry = repairedPreview;
+      if (!entry || entry.base !== base || !repairedPreviewMatches(entry.masks)) return null;
+      return entry.image;
+    }
+
+    // Fills the current display preview source with the remembered masks,
+    // unless that is done or under way.
+    function ensureRepairedPreview() {
+      const masks = repairedPreviewMasks;
+      const base = state.conversionPreviewImageData;
+      if (!repairedPreviewMatches(masks) || !base || base === state.conversionSourceImageData) return;
+      if (repairedPreview?.base === base && repairedPreview.masks === masks) return;
+      if (repairedPreviewBuild?.base === base && repairedPreviewBuild.masks === masks) return;
+      const build = { base, masks };
+      repairedPreviewBuild = build;
+      void buildRepairedPreview(build).catch((error) => {
+        // An entry without an image: the next tick does not try again.
+        if (repairedPreviewBuild === build) {
+          repairedPreviewBuild = null;
+          repairedPreview = { base, masks, image: null };
+        }
+        if (error?.name !== 'AbortError') console.warn('Repaired preview failed:', error?.message || error);
+      });
+    }
+
+    async function buildRepairedPreview(build) {
+      const { base, masks } = build;
+      // Leave the task that asked: pooling reads the whole frame's mask.
+      await new Promise(resolve => setTimeout(resolve, 0));
+      if (repairedPreviewBuild !== build) return;
+      const pooled = new Uint8Array(base.width * base.height);
+      let any = poolRepairMask(masks.dustMask, masks.width, masks.height, pooled, base.width, base.height);
+      if (masks.strokes.length) {
+        const geometry = { ...localExposureGeometryFor(state), width: masks.width, height: masks.height };
+        const { mask, bounds } = buildRepairMask(masks.strokes, geometry, masks.conversionSource.__lensMapping || null);
+        if (bounds) any = poolRepairMask(mask, masks.width, masks.height, pooled, base.width, base.height, bounds) || any;
+      }
+      const image = any ? await previewRepairWorker.inpaint(base, pooled, 3) : null;
+      if (repairedPreviewBuild !== build) return;
+      repairedPreviewBuild = null;
+      // Nothing to fill is an entry too, so no tick builds it again.
+      repairedPreview = { base, masks, image };
+    }
+
+    // The exact frame of a repair pass, applied while the repaired preview
+    // stays on screen: detection replaces the view once it has repaired it.
+    function applyExactPlaneKeepingView(processed) {
+      state.processedImageData = processed;
+      state.processedImageDataIsPreview = false;
+      state.fullResolutionPending = false;
+      state.displayImageData = null;
+      if (state.cropping) return;
+      if (state.sprocketPreviewEnabled) {
+        const frameMetrics = getSprocketFrameMetrics(processed.width, processed.height);
+        setMainCanvasDimensions(frameMetrics.outputWidth, frameMetrics.outputHeight);
+      } else {
+        setMainCanvasDimensions(processed.width, processed.height);
+      }
+    }
+
     // Resolves true only when it actually rendered. Callers use that to decide
     // whether the display is up to date: a blocked or superseded call queues
     // itself and returns at once, and treating that as a completed render is
@@ -6347,8 +6451,14 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           if (generation !== coreReprocessGeneration) return false;
           if (token !== null && token !== coreReprocessToken) return false;
           if (sourceRef && state.conversionSourceImageData !== sourceRef) return false;
-          applyProcessedImageToState(processed);
-          updateFull();
+          if (hasFrameRepairs() && repairedPreviewShown && repairedPreviewShown === state.previewSourceImageData) {
+            // The repaired preview stays on screen until detection repairs
+            // this exact frame: no dusty full frame in between.
+            applyExactPlaneKeepingView(processed);
+          } else {
+            applyProcessedImageToState(processed);
+            updateFull();
+          }
           if (hasFrameRepairs()) {
             resetDustForCleanSource(processed);
             scheduleDustDetection();
@@ -6367,7 +6477,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           // plane may stay in the worker until committed; never when the
           // preview is the source, whose plane feeds the 16-bit export.
           const retain16 = CORE_RETAIN_PREVIEW_PLANE && Boolean(hasSmallPreview) && options.retain16 !== false;
-          const previewProcessed = await convertFromCurrentSource(state, { preview: hasSmallPreview, interactive: true, includeAnalysisPreview: false, retain16 });
+          const repairedSource = hasSmallPreview ? repairedPreviewSourceFor(state.conversionPreviewImageData) : null;
+          if (hasSmallPreview && !repairedSource) ensureRepairedPreview();
+          const previewProcessed = await convertFromCurrentSource(state, { preview: hasSmallPreview, interactive: true, includeAnalysisPreview: false, retain16,
+            previewSource: repairedSource });
           if (!previewProcessed) return false;
           if (reducedInput) reducedDisplayImages.add(previewProcessed);
           if (generation !== coreReprocessGeneration) return false;
@@ -6395,6 +6508,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
             carryStudioThumbnailSource(replacedSource);
             // Export owes this frame an exact render.
             if (downgraded) state.fullResolutionPending = true;
+            repairedPreviewShown = repairedSource ? state.previewSourceImageData : null;
             updatePreview();
             if (repairs) {
               // The exact conversion, detection and inpainting run once, after
@@ -6409,6 +6523,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
             // No downscaled preview (image already small) — treat as full
             applyProcessedImageToState(previewProcessed);
             carryStudioThumbnailSource(replacedSource);
+            repairedPreviewShown = null;
             updatePreview();
             // No need to schedule full update; we already processed at full
             // resolution. The zoom made the display preview the source itself:
@@ -7282,6 +7397,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         cancelFullUpdate();
         applyDustResultToState();
         updatePreview();
+        rememberRepairMasks(source);
       } catch (err) {
         if (!isCurrent()) return;
         console.error('Dust detection failed:', err);
@@ -7290,6 +7406,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         state.dustRemoval.inpaintedImageData = null;
         noteDustReplaced();
         updateDustStatusUI('Error: ' + (err.message || err));
+        // A repaired preview kept on screen for this pass shows what is not there.
+        if (repairedPreviewShown && repairedPreviewShown === state.previewSourceImageData && state.processedImageData) {
+          applyProcessedImageToState(state.processedImageData);
+          updateFull();
+        }
       } finally {
         if (isCurrentLoad(activation)) {
           state.dustRemoval.processing = false;
@@ -7319,6 +7440,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       dustPassCache = null;
       unpinDustWorker();
       disposeDustWorker();
+      clearRepairedPreview();
+      previewRepairWorker.dispose();
       if (dustDetectionTimer) clearTimeout(dustDetectionTimer);
       dustDetectionTimer = null;
       state.dustRemoval.mask = null;
@@ -7851,6 +7974,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         const patch = await strokeDustOffMainThread(source, stroke, isStrokeCurrent);
         if (!isStrokeCurrent() || !patch) return;
         commitDustStroke(patch, stroke);
+        rememberRepairMasks(source);
       } catch (err) {
         if (!isCurrent() || err?.name === 'AbortError') return;
         console.error('Dust brush failed:', err);
@@ -8618,6 +8742,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       coreReprocessGeneration += 1;
       coreReprocessToken += 1;
       abortSupersededFullResolutionConversion();
+      clearRepairedPreview();
       _coreReprocessPending = null;
       processNegativeInFlight = null;
       state.fullResolutionPromise = null;

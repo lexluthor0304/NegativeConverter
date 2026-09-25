@@ -45,7 +45,7 @@ function fixture({ enabled = false, mask = null } = {}) {
     // The export's repair barrier has its own test (fullResolutionRouting.main.test.mjs):
     // here export and detection deliberately overlap.
     ensureRepairsReadyForExport: async () => {},
-    dustDetectionRun: null, dustMaskSources: new WeakMap(),
+    dustDetectionRun: null, dustMaskSources: new WeakMap(), rememberRepairMasks: noop,
     aiRepairReady: () => true,
     inpaintForCommit: async (input, passMask) => {
       // Brushes patch the mask in place: the pass must read its own copy.

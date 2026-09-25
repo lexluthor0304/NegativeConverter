@@ -58,6 +58,7 @@ function fixture() {
     processNegativeInFlight: null, coreReprocessTimer: null, dustDetectionTimer: null,
     corePreviewRetained: null, corePreviewCommit: null,
     pendingBrushRepairs: 0, brushRepairWaiters: [], dustMaskSources: new WeakMap(), fullResolutionConversionAbort: null,
+    rememberRepairMasks: noop, clearRepairedPreview: noop,
     dustDrawing: false, undoStack: [], redoStack: [],
     coreReprocessGeneration: 3, coreReprocessToken: 4, dustDetectionRevision: 5,
     loadGeneration: 6, _coreReprocessPending: null, importDetectionAbort: null,

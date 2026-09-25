@@ -165,6 +165,7 @@ function schedulerFixture({ repairs = false, large = false } = {}) {
     routeCoreConversion, keepsFullPlaneOnDowngrade, isLargeImage: () => large, isAiBrushEnabled: () => false,
     fullResolutionConversionAbort: null, dustDetectionTimer: null, WORKER_ABORTED: 'WORKER_ABORTED',
     FULL_RESOLUTION_IDLE_DELAY_MS: 2500, ensureAiBrushPlane: () => {},
+    repairedPreviewShown: null, repairedPreviewSourceFor: () => null, ensureRepairedPreview: () => {},
     scheduleFullResolutionRender: reason => log.push(`idle:${reason}`),
     getDisplayPreviewSize: () => ({ ...displayTarget }),
     resizeDisplayPreview: (image, size) => ({ ...size, name: 'resized' }),

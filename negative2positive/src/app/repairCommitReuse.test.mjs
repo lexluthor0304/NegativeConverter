@@ -65,7 +65,7 @@ function fixture() {
     // #237: the export's repair barrier runs for real; every export here
     // follows a settled detection, so it waits for nothing.
     repairsNeedSettling, pendingBrushRepairs: 0, brushRepairWaiters: [], dustDetectionTimer: null,
-    dustDetectionRun: null, dustMaskSources: new WeakMap(),
+    dustDetectionRun: null, dustMaskSources: new WeakMap(), rememberRepairMasks() {},
     dustMaxParticleSizeFor: () => 40,
     detectDustOffMainThread: async () => { calls.detect++; return { mask: detectedMask(), particleCount: 2, _state: null }; },
     // Dust pass: changes pixels inside the mask's blocks only, as MI-GAN and TELEA do.

@@ -7,6 +7,7 @@ import {
   restoredFrameFlags, viewportRefreshBranch, repairsNeedSettling
 } from './fullResolutionRouting.js';
 import { isLargeImage } from './imageMemoryBudget.js';
+import { poolRepairMask } from './repairedPreview.js';
 
 // #237 in the app itself: the real routing, restore, viewport, Step-3 and
 // export-barrier functions of main.js (extracted with vm, as
@@ -45,10 +46,10 @@ function fakeClock() {
 const LARGE = { width: 9536, height: 6336 };
 const SMALL = { width: 4000, height: 2672 };
 
-function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, separatePreview = true } = {}) {
+function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, separatePreview = true, size: sourceSize = null, target: previewSize = null } = {}) {
   const clock = fakeClock();
-  const size = large ? LARGE : SMALL;
-  const target = large ? { width: 1809, height: 1202 } : { width: 1800, height: 1202 };
+  const size = sourceSize || (large ? LARGE : SMALL);
+  const target = previewSize || (large ? { width: 1809, height: 1202 } : { width: 1800, height: 1202 });
   const conversionSource = { ...size, name: 'conversion source' };
   const fullPlane = { ...size, name: 'full plane' };
   const shown = { ...target, name: 'shown preview' };
@@ -73,6 +74,7 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
     log.push(`convert:${kind}`);
   });
   const resampled = [];
+  const previewRepairs = [];
   // Each test tick is a new frame.
   const timeline = { currentTime: 0 };
   const context = vm.createContext({
@@ -120,6 +122,18 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
     waitForNextFrame: () => Promise.resolve(),
     createPerfTrace: (label, details) => { log.push(`render:${details.reason}`); return { end: noop, mark: noop }; },
     getImageDataPixelCount: image => (image ? image.width * image.height : 0),
+    // Phase 2: the preview-repair dust worker and the stroke mask builder.
+    poolRepairMask, previewRepairWorker: {
+      inpaint: (image, mask, radius) => new Promise(resolve => previewRepairs.push({ image, mask, radius, resolve })),
+      dispose: noop,
+    },
+    buildRepairMask: (strokes, geometry) => {
+      const mask = new Uint8Array(geometry.width * geometry.height);
+      mask[10 * geometry.width + 20] = 255;
+      return { mask, bounds: { x: 20, y: 10, width: 1, height: 1 } };
+    },
+    localExposureGeometryFor: () => ({}),
+    repairedPreviewMasks: null, repairedPreview: null, repairedPreviewBuild: null, repairedPreviewShown: null,
     runDustDetectionPass: () => {
       log.push('detect');
       state.dustRemoval.processing = true;
@@ -149,14 +163,15 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
     'scheduleFullUpdate', 'scheduleDisplayPreviewResize', 'refreshDisplayPreviewForViewport',
     'scheduleDustDetection', 'runDustDetection', 'ensureRepairsReadyForExport', 'dustMaskIsStale',
     'whenBrushRepairsSettled', 'noteBrushRepairSettled', 'getDustSource', 'cancelPendingTimers',
-    'trimHistorySnapshot',
+    'trimHistorySnapshot', 'rememberRepairMasks', 'clearRepairedPreview', 'repairedPreviewMatches',
+    'repairedPreviewSourceFor', 'ensureRepairedPreview', 'buildRepairedPreview', 'applyExactPlaneKeepingView',
   ].map(functionSource).join('\n'), context);
   const reply = (kind, index = -1) => {
     const entry = clients[kind].at(index);
     const { imageData } = entry.request;
     entry.resolve({ width: imageData.width, height: imageData.height, name: `${kind} result` });
   };
-  return { context, state, clock, log, clients, reply, resampled, fullPlane, shown, conversionSource,
+  return { context, state, clock, log, clients, reply, resampled, fullPlane, shown, conversionSource, previewRepairs,
     setTarget: size => { displayTarget = size; }, nextFrame: () => { timeline.currentTime += 1000 / 60; } };
 }
 const count = (f) => Object.fromEntries(Object.entries(f.clients).map(([kind, list]) => [kind, list.length]));
@@ -562,4 +577,75 @@ for (const large of [false, true]) {
   assert.equal(g.clients.shared[0].request.signal, null);
 }
 
-console.log('previewPathRouting: downgraded undo/reset routing, kept planes, idle repair pass, restore flags and paint, viewport branches, Step-3 gate, export repair waits and aborted exact renders passed');
+// ---- B, Phase 2: the repaired preview source ----
+
+{
+  // After a settled repair, preview ticks convert the display preview source
+  // with the remembered masks filled; the exact pass keeps that view until
+  // detection replaces it; the exact render and exports never read it.
+  const f = fixture({ large: false, repairs: true, strokes: 1, size: { width: 800, height: 600 }, target: { width: 400, height: 300 } });
+  const dustMask = new Uint8Array(800 * 600);
+  dustMask[300 * 800 + 500] = 255;
+  f.state.dustRemoval.mask = dustMask;
+  f.context.rememberRepairMasks(f.fullPlane);
+  assert.equal(f.previewRepairs.length, 0, 'pooling leaves the task that asked');
+  f.clock.run(0);
+  await settle();
+  assert.equal(f.previewRepairs.length, 1);
+  const { image: base, mask: pooled, radius } = f.previewRepairs[0];
+  assert.equal(base, f.state.conversionPreviewImageData, 'the display preview source is filled');
+  assert.equal(radius, 3);
+  const expected = new Uint8Array(400 * 300);
+  poolRepairMask(dustMask, 800, 600, expected, 400, 300);
+  poolRepairMask((() => { const m = new Uint8Array(800 * 600); m[10 * 800 + 20] = 255; return m; })(), 800, 600, expected, 400, 300);
+  assert.deepEqual([...pooled], [...expected], 'dust and stroke masks pooled to the preview size');
+  const repaired = { width: 400, height: 300, name: 'repaired preview source' };
+  f.previewRepairs[0].resolve(repaired);
+  await settle();
+
+  f.nextFrame();
+  f.context.scheduleCoreReprocess({ full: false });
+  await Promise.resolve();
+  await settle();
+  assert.equal(f.clients.preview.at(-1).request.imageData, repaired, 'a tick converts the repaired source');
+  f.reply('preview');
+  await settle();
+  const shownFrame = f.state.previewSourceImageData;
+  assert.equal(f.context.repairedPreviewShown, shownFrame);
+  // The idle pass converts the real source and keeps the repaired view.
+  f.log.length = 0;
+  f.clock.run(2500);
+  await settle();
+  assert.equal(f.clients.shared.at(-1).request.imageData, f.conversionSource, 'the exact render reads the real source');
+  f.reply('shared');
+  await settle(); await settle();
+  assert.equal(f.state.previewSourceImageData, shownFrame, 'the repaired preview stays on screen');
+  assert.equal(f.state.processedImageData.name, 'shared result');
+  assert.equal(f.state.processedImageDataIsPreview, false);
+  assert.ok(!f.log.includes('paint:full'), 'no dusty full frame is drawn');
+  assert.equal(f.state.dustRemoval.mask, null, 'detection starts over on the exact frame');
+  // Ticks during the wait still fill the preview with the remembered masks.
+  f.nextFrame();
+  f.context.scheduleCoreReprocess({ full: false });
+  await Promise.resolve();
+  await settle();
+  assert.equal(f.clients.preview.at(-1).request.imageData, repaired);
+  f.reply('preview');
+  await settle();
+  // New strokes: the remembered masks no longer match, the plain source is used.
+  f.state.repairStrokes = [...f.state.repairStrokes, { size: 0.02, points: [{ x: 0.2, y: 0.2 }] }];
+  f.nextFrame();
+  f.context.scheduleCoreReprocess({ full: false });
+  await Promise.resolve();
+  await settle();
+  assert.equal(f.clients.preview.at(-1).request.imageData, f.state.conversionPreviewImageData);
+  f.reply('preview');
+  await settle();
+  assert.equal(f.context.repairedPreviewShown, null);
+  // Export after the repair pass renders from the real planes.
+  assert.ok(f.clients.shared.every(entry => entry.request.imageData === f.conversionSource));
+  f.context.clearRepairedPreview();
+  assert.equal(f.context.repairedPreviewSourceFor(f.state.conversionPreviewImageData), null);
+}
+
+console.log('previewPathRouting: downgraded undo/reset routing, kept planes, idle repair pass, restore flags and paint, viewport branches, Step-3 gate, export repair waits, aborted exact renders and the repaired preview source passed');
