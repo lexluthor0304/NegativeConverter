@@ -82,7 +82,9 @@ function installTierProbe() {
       }
       record.pending.add(message.id);
       probe.inFlight++;
-      note('convert', { cache: !!message.cacheInput, width: message.width, height: message.height });
+      // A display target (#248) sends the level and the size it converts at.
+      const size = message.display?.target || message;
+      note('convert', { cache: !!message.cacheInput, width: size.width, height: size.height });
     }
     return original.post.call(this, message, ...args);
   };
