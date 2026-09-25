@@ -289,7 +289,7 @@ const plain = value => JSON.parse(JSON.stringify(value));
     const rect = { left: 11.3, top: 7.8, width: 52.4, height: 37.1 };
     h.state.cropping = true;
     h.state.cropDraft = {
-      sourceImageData: frameBefore, previewSourceImageData: preview, rotatedImageData: rotatedPreview,
+      sourceImageData: frameBefore, rotatedSize: { width: rotatedPreview.width, height: rotatedPreview.height },
       rect, rotationBase: 0, straightenAngle: draftAngle, analysisOnly: scenario === 'analysis'
     };
     const cropBefore = { ...h.state.cropRegion };

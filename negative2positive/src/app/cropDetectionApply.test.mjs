@@ -31,7 +31,7 @@ function headMissMeta(previous, state, cropRegion, nextGeometry) {
   return meta;
 }
 
-function setup({ expired = false, step = 3, points = null, previous = { analysisArea: null, imageArea: null, method: 'import' } } = {}) {
+function setup({ expired = false, step = 3, points = null, immediate = false, previous = { analysisArea: null, imageArea: null, method: 'import' } } = {}) {
   const h = createHarness(base);
   const c = h.context;
   const conversions = [];
@@ -49,7 +49,7 @@ function setup({ expired = false, step = 3, points = null, previous = { analysis
       detection.calls++;
       const input = await task.build();
       assert.ok(input.region.width > 0);
-      await new Promise(resolve => { detection.resolve = resolve; });
+      if (!immediate) await new Promise(resolve => { detection.resolve = resolve; });
       return typeof points === 'function' ? points(input) : points;
     },
     // A conversion that reads the diagnostics when it starts and when it
@@ -76,7 +76,7 @@ function setup({ expired = false, step = 3, points = null, previous = { analysis
   const openDraft = (rect = { left: 10.2, top: 8.6, width: 60.3, height: 40.1 }) => {
     const preview = c.renderFrameSample(700_000);
     h.state.cropping = true;
-    h.state.cropDraft = { sourceImageData: h.state.originalImageData, previewSourceImageData: preview, rotatedImageData: preview, rect, rotationBase: 0, straightenAngle: 0 };
+    h.state.cropDraft = { sourceImageData: h.state.originalImageData, rotatedSize: { width: preview.width, height: preview.height }, rect, rotationBase: 0, straightenAngle: 0 };
   };
   const finishConversion = async () => {
     for (let i = 0; i < 50 && !release; i++) await tick();
@@ -153,11 +153,11 @@ const hitPoints = input => {
 
 // ---- A hit before the conversion starts: one conversion, with the hit ----
 {
-  const t = setup({ points: hitPoints });
-  // The geometry is still building when the worker answers.
+  // The worker answers within the click's microtasks, while the geometry is
+  // still building in the pool.
+  const t = setup({ points: hitPoints, immediate: true });
   t.openDraft();
   const applying = t.c.applyCropHandler();
-  await t.answer();
   await t.finishConversion();
   await applying;
   await t.c.settlePendingCropDetection();

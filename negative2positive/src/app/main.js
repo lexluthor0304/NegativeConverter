@@ -41,6 +41,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     import { DEFAULT_CROP_RATIO_CHOICE, findCropRatioPreset, parseCropRatioChoice, serializeCropRatioChoice, fitRectToRatio, resizeRectWithRatio, drawRectWithRatio, preferredCropOrientation, flipOrientation } from './cropRatio.js';
     import { imageAreaFromDetection, resolveAnalysisRegion, analysisPixelBounds, imageAreaFromWorkingRect, sampleAnalysisArea } from './analysisRegion.js';
     import { buildCropDetectionInput, detectCropAreaInRegion, workingPointsToBase, isSameAnalysisFrame } from './cropColorAnalysis.js';
+    import { createAreaResampler } from './areaResample.js';
     import { pickStudioColors, mergeStudioColors, createStudioThumbnail } from './studioSettings.js';
     import {
       analyzeExpiredFilm, defaultExpiredRescueParams, sanitizeExpiredRescueParams, sanitizeExpiredAnalysis,
@@ -3267,6 +3268,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     const canvas = document.getElementById('canvas');
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     const glCanvas = document.getElementById('glCanvas');
+    // Crop mode's own surface (#245): no willReadFrequently, so it stays on
+    // the GPU and the draft angle is a transform of one drawImage.
+    const cropCanvas = document.getElementById('cropCanvas');
+    const cropCtx = cropCanvas.getContext('2d');
     const canvasContainer = document.getElementById('canvasContainer');
     const canvasTransformWrapper = document.getElementById('canvasTransformWrapper');
     // #canvasContainer's client size. A ResizeObserver keeps it current (see
@@ -5646,6 +5651,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     }
 
     function updateCanvasVisibility() {
+      // Crop mode draws on its own canvas (#245).
+      cropCanvas.style.display = state.cropping ? 'block' : 'none';
+      if (state.cropping) {
+        glCanvas.style.display = 'none';
+        canvas.style.display = 'none';
+        return;
+      }
       const showGL = isWebGLActive();
       glCanvas.style.display = showGL ? 'block' : 'none';
       canvas.style.display = showGL ? 'none' : 'block';
@@ -7390,6 +7402,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           state.dustRemoval.particleCount = 0;
           state.dustRemoval.cleanSource = null;
           goToStep(3);
+          // Crop mode's display proxy of this photo, at idle (#245).
+          scheduleCropViewProxy();
           syncBatchUIState({ reason: 'processNegative' });
           revealBatchFileList('processNegative');
           updatePreview();
@@ -8368,7 +8382,14 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // (SilverCore preview reprocess, downscaled WebGL source), the CSS box
       // must be fitted against this reference so the visible image keeps a
       // stable footprint instead of shrinking to the stand-in's pixel size.
-      if (state.cropping || state.currentStep < 3) return null;
+      if (state.cropping) {
+        // The crop canvas is fitted like the develop view: to the turned
+        // frame's full size, not capped at its own pixels (#245).
+        const turned = state.cropDraft?.draftFrame;
+        if (!turned || turned.width <= w || turned.height <= h) return null;
+        return { width: turned.width, height: turned.height };
+      }
+      if (state.currentStep < 3) return null;
       const full = (state.processedImageData && !state.processedImageDataIsPreview)
         ? state.processedImageData
         : state.conversionSourceImageData;
@@ -8425,6 +8446,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       canvas.style.height = cssH;
       glCanvas.style.width = cssW;
       glCanvas.style.height = cssH;
+      cropCanvas.style.width = cssW;
+      cropCanvas.style.height = cssH;
       canvasTransformWrapper.style.width = cssW;
       canvasTransformWrapper.style.height = cssH;
       // The GL drawing buffer follows the texture (resizeWebGLCanvas), so a
@@ -11867,7 +11890,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // box) unless `orientation` forces one, as the flip button does.
     function fitCropDraftToRatio(orientation = null) {
       const draft = state.cropDraft;
-      const imageData = draft?.rotatedImageData;
+      const imageData = draft?.rotatedSize;
       if (!draft?.rect || !imageData) return;
       draft.ratioOrientation = orientation || preferredCropOrientation(draft.rect, draft.ratioOrientation);
       const lock = getCropRatioLock();
@@ -11938,12 +11961,14 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     }
 
     function getCropDisplayScale() {
-      // Pre-transform CSS size of the canvas (unaffected by zoom)
-      const cssW = parseFloat(canvas.style.width) || canvas.width;
-      const cssH = parseFloat(canvas.style.height) || canvas.height;
+      // Pre-transform CSS size of the canvas (unaffected by zoom). The draft
+      // lives in the crop canvas's pixels.
+      const surface = state.cropping ? cropCanvas : canvas;
+      const cssW = parseFloat(surface.style.width) || surface.width;
+      const cssH = parseFloat(surface.style.height) || surface.height;
       return {
-        scaleX: canvas.width / cssW,
-        scaleY: canvas.height / cssH,
+        scaleX: surface.width / cssW,
+        scaleY: surface.height / cssH,
         cssW,
         cssH
       };
@@ -11970,10 +11995,6 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         width: rect.width * scaleX,
         height: rect.height * scaleY
       };
-    }
-
-    function buildCropPreviewSourceImageData(imageData) {
-      return downsampleImageDataForMaxPixels(imageData, CROP_PREVIEW_MAX_PIXELS) || imageData;
     }
 
     function getDefaultCropRect(imageData) {
@@ -12026,26 +12047,244 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return { left, top, width, height };
     }
 
-    function createCropDraft(sourceImageData) {
-      if (!sourceImageData) return null;
+    // ===========================================
+    // The crop view (#245)
+    // ===========================================
+    // Crop mode shows the negative, turned by the draft angle, on a canvas of
+    // its own: `cropCanvas`, a 2D context without willReadFrequently (the
+    // main one has it, which keeps it on the CPU in Chrome), so the draw is
+    // one GPU drawImage. The canvas is sized for the display (canvas area x
+    // DPR, 4 MP cap) and its CSS box is fitted like the develop view's
+    // (getFullResDisplayReference returns the turned frame's full size). The
+    // draft rectangle lives in the canvas's pixels; Apply maps it to the frame
+    // by the ratio of the turned frame's size to the canvas's.
+    //
+    // The picture drawn is an area-filtered 8-bit proxy of the base, built at
+    // idle in short row slices and kept per base image, turned and mirrored
+    // into the working frame by canvas transforms (base -> rotation -> mirror,
+    // then the draft angle). Until it is built, today's point sample of the
+    // working frame stands in and is swapped out when the proxy lands. An
+    // angle change redraws with a new transform: no pixel is rotated in JS
+    // and the histogram is drawn once, on entry.
+    const CROP_VIEW_SLICE_MS = 8;
+    const cropViewProxies = new WeakMap();
+    let cropViewBuild = null;
+    let cropViewIdle = null;
+    const cropViewStats = { builds: 0, standIns: 0, draws: 0 };
+
+    function cropViewDisplayOptions() {
+      const container = getCanvasContainerSize();
+      return {
+        viewportWidth: container.width - 20 || 1280,
+        viewportHeight: container.height - 20 || 900,
+        dpr: window.devicePixelRatio || 1,
+        zoom: 1,
+        maxDimension: webglState.maxTextureSize || 8192
+      };
+    }
+
+    // The crop canvas's pixel size for a turned frame: display resolution.
+    function cropCanvasSize(turned) {
+      return displayPreviewSize(turned.width, turned.height, cropViewDisplayOptions());
+    }
+
+    // What the proxy is made of: the base (turned and mirrored when drawn)
+    // when the working frame is derived from it, else the frame itself.
+    function cropViewSource(frame = state.originalImageData) {
+      const base = state.loadedBaseImageData;
+      if (frame && base && base.data && !base.released) {
+        const size = geometryFrameSize(base, state.rotationAngle);
+        if (size && size.width === frame.width && size.height === frame.height) {
+          return { image: base, space: 'base', rotationAngle: effectiveGeometryAngle(state.rotationAngle), mirrored: Boolean(state.mirrored) };
+        }
+      }
+      if (frame && frame.data && !isGeometryFrame(frame) && !frame.released) return { image: frame, space: 'frame', rotationAngle: 0, mirrored: false };
+      return null;
+    }
+
+    // Large enough for any turn of the image: the finer of the two
+    // orientations' fits, at zoom 1 (crop mode resets the zoom).
+    function cropViewProxySize(image) {
+      const options = cropViewDisplayOptions();
+      const upright = displayPreviewSize(image.width, image.height, options);
+      const turned = displayPreviewSize(image.height, image.width, options);
+      return upright.width * upright.height >= turned.width * turned.height
+        ? upright
+        : { width: Math.min(image.width, turned.height), height: Math.min(image.height, turned.width) };
+    }
+
+    function asImageData(image) {
+      return image instanceof ImageData ? image : new ImageData(image.data, image.width, image.height);
+    }
+
+    async function imageSurface(imageData) {
+      if (typeof createImageBitmap === 'function') {
+        try { return await createImageBitmap(asImageData(imageData)); } catch { /* a canvas below */ }
+      }
+      return canvasSurface(imageData);
+    }
+
+    function canvasSurface(imageData) {
+      const surface = document.createElement('canvas');
+      surface.width = imageData.width;
+      surface.height = imageData.height;
+      surface.getContext('2d').putImageData(asImageData(imageData), 0, 0);
+      return surface;
+    }
+
+    // The proxy of `image` when one is built and fine enough for the display.
+    function readyCropViewProxy(image) {
+      const entry = cropViewProxies.get(image);
+      if (!entry) return null;
+      const wanted = cropViewProxySize(image);
+      return entry.width >= wanted.width * 0.9 && entry.height >= wanted.height * 0.9 ? entry : null;
+    }
+
+    // Starts the proxy build for the current photo unless it is built or
+    // building. Rows are area-averaged in slices of about 8 ms.
+    function ensureCropViewProxy() {
+      const source = cropViewSource();
+      if (!source || readyCropViewProxy(source.image)) return;
+      const size = cropViewProxySize(source.image);
+      if (cropViewBuild && cropViewBuild.image === source.image && cropViewBuild.width >= size.width) return;
+      const generation = loadGeneration;
+      const build = { image: source.image, width: size.width, height: size.height };
+      cropViewBuild = build;
+      const isCurrent = () => cropViewBuild === build && isCurrentLoad(generation) && !source.image.released;
+      buildCropViewProxy(source.image, size, isCurrent).then(proxy => {
+        if (cropViewBuild === build) cropViewBuild = null;
+        if (!proxy) return;
+        cropViewProxies.set(source.image, proxy);
+        cropViewStats.builds++;
+        // Crop mode opened on the stand-in: swap the proxy in.
+        const draft = state.cropDraft;
+        if (state.cropping && draft && draft.view.space === 'frame' && draft.view.standIn) {
+          const view = cropViewFor(draft.sourceImageData);
+          if (view && view.image === source.image && !view.standIn) {
+            draft.view = view;
+            drawCropView();
+          }
+        }
+      }).catch(error => {
+        if (cropViewBuild === build) cropViewBuild = null;
+        console.warn('Crop view proxy failed:', error);
+      });
+    }
+
+    async function buildCropViewProxy(image, size, isCurrent) {
+      let pixels = image;
+      if (size.width < image.width || size.height < image.height) {
+        const resampler = createAreaResampler(image, size.width, size.height);
+        let y = 0;
+        while (y < size.height) {
+          const start = performance.now();
+          do {
+            resampler.rows(y, y + 1);
+            y++;
+          } while (y < size.height && performance.now() - start < CROP_VIEW_SLICE_MS);
+          if (y < size.height) {
+            await yieldTaskForJob();
+            if (!isCurrent()) return null;
+          }
+        }
+        pixels = new ImageData(resampler.data, size.width, size.height);
+      }
+      const surface = await imageSurface(pixels);
+      if (!isCurrent()) { surface.close?.(); return null; }
+      return { surface, width: pixels.width, height: pixels.height };
+    }
+
+    // At idle once a photo has settled, so crop mode usually opens on the
+    // proxy.
+    function scheduleCropViewProxy() {
+      if (cropViewIdle) return;
+      const run = () => { cropViewIdle = null; if (!state.cropping) ensureCropViewProxy(); };
+      cropViewIdle = typeof requestIdleCallback === 'function'
+        ? { idle: requestIdleCallback(run, { timeout: 4000 }) }
+        : { timer: setTimeout(run, 1500) };
+    }
+
+    // The picture crop mode draws for `frame`: the proxy when it is ready, or
+    // the point sample of the frame, which stands in until it is.
+    function cropViewFor(frame) {
+      const source = cropViewSource(frame);
+      const proxy = source && readyCropViewProxy(source.image);
+      if (proxy) {
+        return { surface: proxy.surface, image: source.image, space: source.space, width: source.image.width, height: source.image.height, rotationAngle: source.rotationAngle, mirrored: source.mirrored };
+      }
       // A sample of the whole frame; beside a crop the frame is not kept, so
       // the sample is built from the base (#244).
-      const previewSourceImageData = sourceImageData === state.originalImageData
+      const sample = frame === state.originalImageData
         ? renderFrameSample(CROP_PREVIEW_MAX_PIXELS)
-        : buildCropPreviewSourceImageData(sourceImageData);
+        : (downsampleImageDataForMaxPixels(frame, CROP_PREVIEW_MAX_PIXELS) || frame);
+      if (!sample) return null;
+      cropViewStats.standIns++;
+      return { surface: canvasSurface(sample), sample, image: frame, space: 'frame', standIn: true, width: frame.width, height: frame.height, rotationAngle: 0, mirrored: false };
+    }
+
+    function drawCropView() {
+      const draft = state.cropDraft;
+      const view = draft?.view;
+      if (!state.cropping || !view || !draft.rotatedSize) return;
+      const size = draft.rotatedSize;
+      if (cropCanvas.width !== size.width) cropCanvas.width = size.width;
+      if (cropCanvas.height !== size.height) cropCanvas.height = size.height;
+      const frame = draft.frameSize;
+      const turned = draft.draftFrame;
+      const c = cropCtx;
+      c.setTransform(1, 0, 0, 1, 0, 0);
+      c.clearRect(0, 0, size.width, size.height);
+      c.imageSmoothingEnabled = true;
+      // Turned frame (full-resolution pixels) -> canvas pixels, then the draft
+      // angle about the centre, as applyRotationToImageData draws it.
+      c.scale(size.width / turned.width, size.height / turned.height);
+      c.translate(turned.width / 2, turned.height / 2);
+      c.rotate(getCropDraftTotalAngle() * Math.PI / 180);
+      c.translate(-frame.width / 2, -frame.height / 2);
+      if (view.space === 'base') {
+        // The working frame from the base: rotation, then mirror. Outside the
+        // turned base the frame's pixels are black.
+        if (view.rotationAngle % 90 !== 0) {
+          c.fillStyle = '#000';
+          c.fillRect(0, 0, frame.width, frame.height);
+        }
+        if (view.mirrored) {
+          c.translate(frame.width, 0);
+          c.scale(-1, 1);
+        }
+        c.translate(frame.width / 2, frame.height / 2);
+        c.rotate(view.rotationAngle * Math.PI / 180);
+        c.translate(-view.width / 2, -view.height / 2);
+      }
+      c.drawImage(view.surface, 0, 0, view.width, view.height);
+      c.setTransform(1, 0, 0, 1, 0, 0);
+      cropViewStats.draws++;
+    }
+
+    function releaseCropCanvas() {
+      if (cropCanvas.width > 1 || cropCanvas.height > 1) cropCanvas.width = cropCanvas.height = 1;
+    }
+
+    function createCropDraft(sourceImageData) {
+      if (!sourceImageData) return null;
+      const frameSize = { width: sourceImageData.width, height: sourceImageData.height };
+      const rotatedSize = cropCanvasSize(frameSize);
       const initialSourceRect = getDefaultCropRect(sourceImageData);
-      if (!previewSourceImageData || !initialSourceRect) return null;
+      const view = cropViewFor(sourceImageData);
+      if (!view || !initialSourceRect) return null;
 
       const previewRect = scaleCropRect(
         initialSourceRect,
-        previewSourceImageData.width / sourceImageData.width,
-        previewSourceImageData.height / sourceImageData.height
+        rotatedSize.width / frameSize.width,
+        rotatedSize.height / frameSize.height
       );
 
       return {
         sourceImageData,
-        previewSourceImageData,
-        rotatedImageData: previewSourceImageData,
+        frameSize,
+        draftFrame: frameSize,
+        rotatedSize,
+        view,
         rect: previewRect,
         interaction: null,
         ratioOrientation: cropRatioChoice.orientation,
@@ -12055,9 +12294,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       };
     }
 
-    // The draft's coordinate space: the rotated preview it is drawn on.
+    // The draft's coordinate space: the pixels of the crop canvas it is
+    // drawn on.
     function getCropDraftSize(draft = state.cropDraft) {
-      const size = draft?.rotatedImageData;
+      const size = draft?.rotatedSize;
       return size ? { width: size.width, height: size.height } : null;
     }
 
@@ -12173,12 +12413,15 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       state.cropDraft.analysisOnly = analysisOnly;
       if (analysisOnly) {
         const roi = resolveAnalysisRegion({ ...state, cropRegion: null, autoFrameMeta: state.autoFrame.lastDiagnostics }, state.loadedBaseImageData || sourceImageData);
-        if (roi) state.cropDraft.rect = scaleCropRect(analysisPixelBounds(sourceImageData.width, sourceImageData.height, roi), state.cropDraft.previewSourceImageData.width / sourceImageData.width, state.cropDraft.previewSourceImageData.height / sourceImageData.height);
+        if (roi) state.cropDraft.rect = scaleCropRect(analysisPixelBounds(sourceImageData.width, sourceImageData.height, roi), state.cropDraft.rotatedSize.width / sourceImageData.width, state.cropDraft.rotatedSize.height / sourceImageData.height);
       }
       applyCropBtn.textContent = analysisOnly ? studioWorkspace.text('confirmAnalysis') : i18n[currentLang].applyCrop;
 
       setCropActionUi(true);
-      renderCropDraftPreview({ preserveRect: false });
+      // A picture of the frame at display resolution is on its way when the
+      // stand-in opens.
+      if (state.cropDraft.view.standIn) ensureCropViewProxy();
+      renderCropDraftPreview({ preserveRect: false, histogram: true });
       showCropModeHint();
       if (analysisOnly) {
         document.getElementById('cropModeHintTitle').textContent = studioWorkspace.text('confirmAnalysis');
@@ -12189,7 +12432,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     function updateCropOverlayFromDraft() {
       const draft = state.cropDraft;
-      const imageData = draft?.rotatedImageData;
+      const imageData = draft?.rotatedSize;
       if (!state.cropping || !draft || !imageData || !draft.rect) return;
 
       draft.rect = sanitizeDraftCropRect(draft.rect, imageData) || draft.rect;
@@ -12201,46 +12444,52 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       cropOverlay.style.height = (draft.rect.height / scaleY) + 'px';
     }
 
+    // Sizes the canvas for the draft angle, redraws and keeps the rectangle
+    // at the same fractions of the picture. No pixel work: the angle turns
+    // the drawn picture on the GPU. The histogram is drawn on entry only.
     function renderCropDraftPreview(options = {}) {
       const draft = state.cropDraft;
-      if (!state.cropping || !draft || !draft.previewSourceImageData) return;
+      if (!state.cropping || !draft || !draft.view) return;
 
-      const previousImage = draft.rotatedImageData;
+      const previousSize = draft.rotatedSize;
       const previousRect = draft.rect;
       let normalizedRect = null;
-      if (options.preserveRect && previousImage && previousRect) {
+      if (options.preserveRect && previousSize && previousRect) {
         normalizedRect = {
-          left: previousRect.left / previousImage.width,
-          top: previousRect.top / previousImage.height,
-          width: previousRect.width / previousImage.width,
-          height: previousRect.height / previousImage.height
+          left: previousRect.left / previousSize.width,
+          top: previousRect.top / previousSize.height,
+          width: previousRect.width / previousSize.width,
+          height: previousRect.height / previousSize.height
         };
       }
 
-      const angle = getCropDraftTotalAngle();
-      const rotatedImageData = Math.abs(angle) < 0.001
-        ? draft.previewSourceImageData
-        : applyRotationToImageData(draft.previewSourceImageData, angle);
-      if (!rotatedImageData) return;
-
-      draft.rotatedImageData = rotatedImageData;
-      displayNegative(rotatedImageData);
-      canvas.style.display = 'block';
-      glCanvas.style.display = 'none';
+      draft.draftFrame = rotatedDimensions(draft.frameSize.width, draft.frameSize.height, getCropDraftTotalAngle());
+      const size = cropCanvasSize(draft.draftFrame);
+      draft.rotatedSize = size;
+      drawCropView();
+      updateCanvasVisibility();
+      adjustCanvasDisplay(size.width, size.height);
+      cropCanvas.style.width = canvas.style.width;
+      cropCanvas.style.height = canvas.style.height;
 
       if (normalizedRect) {
         draft.rect = sanitizeDraftCropRect({
-          left: normalizedRect.left * rotatedImageData.width,
-          top: normalizedRect.top * rotatedImageData.height,
-          width: normalizedRect.width * rotatedImageData.width,
-          height: normalizedRect.height * rotatedImageData.height
-        }, rotatedImageData);
+          left: normalizedRect.left * size.width,
+          top: normalizedRect.top * size.height,
+          width: normalizedRect.width * size.width,
+          height: normalizedRect.height * size.height
+        }, size);
       } else {
-        draft.rect = sanitizeDraftCropRect(draft.rect || getDefaultCropRect(rotatedImageData), rotatedImageData);
+        draft.rect = sanitizeDraftCropRect(draft.rect || getDefaultCropRect(size), size);
       }
       fitCropDraftToRatio();
 
-      renderHistogram(rotatedImageData);
+      if (options.histogram) {
+        // The negative's histogram, once: the stand-in's sample, or a small
+        // point sample of the frame (none that would rotate a whole frame).
+        const sample = draft.view.sample || renderFrameSample(HISTOGRAM_MAX_SAMPLES, { fullFrame: false });
+        if (sample) renderHistogram(sample);
+      }
       updateCropOverlayFromDraft();
     }
 
@@ -12281,6 +12530,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       state.cropStart = null;
       state.cropDraft = null;
       activeCropPointerId = null;
+      releaseCropCanvas();
+      updateCanvasVisibility();
       hideCropModeHint();
       setCropActionUi(false);
       updateBeforeAfterButtonState();
@@ -12292,7 +12543,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     function getCropPointerPosition(clientX, clientY) {
       const draft = state.cropDraft;
-      const imageData = draft?.rotatedImageData;
+      const imageData = draft?.rotatedSize;
       if (!imageData) return null;
 
       const { scaleX, scaleY } = getCropDisplayScale();
@@ -12361,7 +12612,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     function resizeDraftRect(startRect, mode, position) {
       const draft = state.cropDraft;
-      const imageData = draft?.rotatedImageData;
+      const imageData = draft?.rotatedSize;
       if (!imageData || !startRect) return null;
 
       const minSize = getCropMinSize(imageData);
@@ -12403,7 +12654,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     function drawDraftRect(start, position) {
       const draft = state.cropDraft;
-      const imageData = draft?.rotatedImageData;
+      const imageData = draft?.rotatedSize;
       if (!imageData || !start || !position) return null;
 
       const lock = getCropRatioLock();
@@ -12517,7 +12768,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     function updateCropDrag(clientX, clientY) {
       const draft = state.cropDraft;
-      const imageData = draft?.rotatedImageData;
+      const imageData = draft?.rotatedSize;
       const interaction = draft?.interaction;
       if (!state.cropping || !state.croppingActive || !interaction || !imageData) return;
 
@@ -16339,13 +16590,15 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // the new size once the resize settles.
     function refitCanvasToContainer() {
       const texture = webglState.sourceSize;
-      if (isWebGLActive() && !state.beforeAfterActive && !state.cropping && texture.w > 0 && texture.h > 0) {
+      if (state.cropping) {
+        // The crop canvas follows the display: resized and redrawn next frame.
+        scheduleCropDraftPreview({ preserveRect: true });
+      } else if (isWebGLActive() && !state.beforeAfterActive && texture.w > 0 && texture.h > 0) {
         adjustCanvasDisplay(texture.w, texture.h);
         if (glCanvas.width !== texture.w || glCanvas.height !== texture.h) renderWebGL();
       } else if (canvas.width > 0 && canvas.height > 0) {
         adjustCanvasDisplay(canvas.width, canvas.height);
       }
-      if (state.cropping) updateCropOverlayFromDraft();
       scheduleDisplayPreviewResize();
     }
 
