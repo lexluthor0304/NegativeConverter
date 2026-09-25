@@ -9170,8 +9170,8 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         pending: Boolean(state.geometryPending), descriptor: isGeometryFrame(frame),
         rotationAngle: state.rotationAngle, mirrored: state.mirrored, cropRegion: state.cropRegion,
         width: planes?.width || 0, height: planes?.height || 0,
-        hash8: planes && !isGeometryFrame(planes) ? hash(planes.data) : null,
-        hash16: planes?.__image16 && !isGeometryFrame(planes) ? hash(planes.__image16.data) : null,
+        hash8: !isGeometryFrame(planes) && planes?.data ? hash(planes.data) : null,
+        hash16: !isGeometryFrame(planes) && planes?.__image16?.data ? hash(planes.__image16.data) : null,
         frameSized, uniqueBytes, undoDepth: undoStack.length, coldEntries: undoStack.filter(entry => entry.refs.cold).length
       };
       if (chain && base) {
