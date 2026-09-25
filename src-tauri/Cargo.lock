@@ -2303,6 +2303,7 @@ name = "negative-converter"
 version = "1.0.12"
 dependencies = [
  "base64 0.22.1",
+ "libc",
  "notify",
  "rfd",
  "serde",
@@ -2311,6 +2312,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-process",
  "tauri-plugin-updater",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

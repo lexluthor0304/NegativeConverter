@@ -10,6 +10,8 @@ use std::sync::Mutex;
 use tauri::State;
 mod export_stream;
 mod import_folder;
+mod memory_info;
+use memory_info::get_memory_info;
 use import_folder::{ImportWatch, watch_import_folder, stop_watch_import_folder, read_import_file};
 use export_stream::ExportStreams;
 
@@ -1211,6 +1213,8 @@ fn open_external_url(url: String) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let webview_compositing = apply_linux_appimage_compat_env();
+    // Before the first webview: what WebKitGTK's memory pressure runs with (#258).
+    memory_info::log_linux_memory_pressure_plan();
     let builder = tauri::Builder::default()
         .manage(webview_compositing)
         .manage(ExportGrants::default())
@@ -1263,6 +1267,7 @@ pub fn run() {
             write_export_file_to_path,
             write_export_file_to_directory,
             get_app_version,
+            get_memory_info,
             get_desktop_update_capability,
             get_webview_compositing,
             log_webview_diagnostics,
