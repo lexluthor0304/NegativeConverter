@@ -174,6 +174,43 @@ export async function runDarkroomSmoke({ send, evaluate, waitFor, wait, fail, in
   const burned = await canvasLuminance(region);
   console.log('darkroom burn:', JSON.stringify({ untouched, burned }));
   if (!(burned < untouched - 3)) fail(`burn stroke did not darken the region: ${untouched} -> ${burned}`);
+  // #234: per-frame settings rebuilds hit the stroke sanitiser caches after
+  // the first frame, and preview requests carry no repair strokes.
+  const strokeFrames = await evaluate(`(async () => {
+    const { strokeSanitizerStats } = await import('/src/app/localExposure.js');
+    const post = Worker.prototype.postMessage, requests = [];
+    Worker.prototype.postMessage = function (message, ...args) {
+      if (message?.type === 'convert') requests.push({ repairs: Object.hasOwn(message.settings || {}, 'repairStrokes'),
+        strokes: message.settings?.localExposure?.strokes?.length || 0, retained: Boolean(message.reuseLocalExposure) });
+      return post.call(this, message, ...args);
+    };
+    const slider = document.getElementById('coreExposure'), start = slider.value;
+    let firstFrame = null;
+    try {
+      for (let i = 0; i < 40; i++) {
+        slider.value = String(Number(start) + (i % 10) * 2 + 2);
+        slider.dispatchEvent(new Event('input', { bubbles: true }));
+        await new Promise(resolve => setTimeout(resolve, 40));
+        if (i === 0) firstFrame = strokeSanitizerStats.misses;
+      }
+      await new Promise(resolve => setTimeout(resolve, 600));
+      return { misses: strokeSanitizerStats.misses - firstFrame, requests: requests.length,
+        repairs: requests.filter(request => request.repairs).length,
+        strokes: requests.filter(request => request.strokes > 0 || request.retained).length,
+        retained: requests.filter(request => request.retained).length };
+    } finally {
+      Worker.prototype.postMessage = post;
+      slider.value = start;
+      slider.dispatchEvent(new Event('input', { bubbles: true }));
+      slider.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  })()`);
+  console.log('darkroom stroke frames:', JSON.stringify(strokeFrames));
+  if (!(strokeFrames.requests > 0 && strokeFrames.strokes === strokeFrames.requests)) fail('exposure drag did not convert with the stroke: ' + JSON.stringify(strokeFrames));
+  if (!strokeFrames.retained) fail('preview requests re-posted unchanged dodge-and-burn strokes: ' + JSON.stringify(strokeFrames));
+  if (strokeFrames.repairs) fail('preview requests carried repair strokes: ' + JSON.stringify(strokeFrames));
+  if (strokeFrames.misses) fail('stroke sanitiser missed its cache during the drag: ' + JSON.stringify(strokeFrames));
+  await wait(2500);
   await evaluate(`document.getElementById('dodgeBurnUndoStrokeBtn').click()`);
   await waitFor('stroke removed', `/No strokes/.test(document.getElementById('dodgeBurnStatus').textContent)`, 10_000);
   await wait(2500);

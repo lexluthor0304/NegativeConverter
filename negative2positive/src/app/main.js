@@ -2823,7 +2823,9 @@ import { frameNeedsReview } from './reviewQueue.js';
       updateLensCorrectionUI();
       updateFilmEdgeUI();
       state.localExposure = s.localExposure ? structuredClone(s.localExposure) : null;
-      state.repairStrokes = sanitizeRepairStrokes(s.repairStrokes);
+      // A fresh array per restore, as before the sanitiser cache: in-flight
+      // repairs compare state.repairStrokes by identity.
+      state.repairStrokes = sanitizeRepairStrokes(s.repairStrokes).slice();
       state.look = s.look ? structuredClone(s.look) : null;
       state.expiredAnalysis = s.expiredAnalysis ? structuredClone(s.expiredAnalysis) : null;
       state.frameMetadata = sanitizeFrameMetadata(s.frameMetadata);
@@ -4014,8 +4016,11 @@ import { frameNeedsReview } from './reviewQueue.js';
         : settings;
       const meta = settings === state ? state.autoFrame.lastDiagnostics : settings.autoFrameMeta;
       const flatField = router.flatFieldId ? state.flatFields[router.flatFieldId] || null : null;
+      // Repair strokes act on the converted positive (inpaintManualBrush); no
+      // converter reads them, so they are not cloned into worker requests.
+      const { repairStrokes, ...conversion } = router;
       return {
-        ...router,
+        ...conversion,
         analysisRegion: resolveAnalysisRegion({ ...settings, autoFrameMeta: meta }, source),
         // Dodge and burn strokes are stored on the unrotated base; the adapter
         // rasterises them for the working frame it converts.
@@ -4948,41 +4953,30 @@ import { frameNeedsReview } from './reviewQueue.js';
     function webglSetUniforms() {
       const gl = webglState.gl;
       if (!gl) return;
-      const safe = sanitizeSettings(state, {
-        fallbackSettings: state,
-        includeCurvePoints: false,
-        includeCurves: false
-      });
+      // The shader reads seven scalars. Sanitise just those, with the same
+      // arguments sanitizeSettings(state, { fallbackSettings: state }) uses,
+      // instead of rebuilding every setting (and both stroke sets) per draw.
+      // SilverCore bakes the legacy tone controls into the conversion
+      // (usesSilverCoreConversion is true for every film type), so their
+      // uniforms stay at the identity values.
+      const vibrance = sanitizeNumeric(state.vibrance, state.vibrance ?? 0, -100, 100);
+      const wbR = sanitizeNumeric(state.wbR, state.wbR ?? 1, 0.5, 2);
+      const wbG = sanitizeNumeric(state.wbG, state.wbG ?? 1, 0.5, 2);
+      const wbB = sanitizeNumeric(state.wbB, state.wbB ?? 1, 0.5, 2);
+      const cyan = sanitizeNumeric(state.cyan, state.cyan ?? 0, -100, 100);
+      const magenta = sanitizeNumeric(state.magenta, state.magenta ?? 0, -100, 100);
+      const yellow = sanitizeNumeric(state.yellow, state.yellow ?? 0, -100, 100);
 
-      const useLegacyTone = !usesSilverCoreConversion(safe);
-
-      const legacyExposure = useLegacyTone ? safe.exposure : 0;
-      const legacyContrast = useLegacyTone ? safe.contrast : 0;
-      const legacyHighlights = useLegacyTone ? safe.highlights : 0;
-      const legacyShadows = useLegacyTone ? safe.shadows : 0;
-      const legacyTemperature = useLegacyTone ? safe.temperature : 0;
-      const legacyTint = useLegacyTone ? safe.tint : 0;
-      const legacySaturation = useLegacyTone ? safe.saturation : 0;
-
-      const exposure = legacyExposure;
-      const contrast = 1 + (legacyContrast / 100);
-      const highlights = legacyHighlights / 100;
-      const shadows = legacyShadows / 100;
-      const tempFactor = legacyTemperature / 100;
-      const tintFactor = legacyTint / 100;
-      const satFactor = 1 + (legacySaturation / 100);
-      const vibFactor = safe.vibrance / 100;
-
-      gl.uniform3f(webglState.locations.uWb, safe.wbR, safe.wbG, safe.wbB);
-      gl.uniform1f(webglState.locations.uExposure, exposure);
-      gl.uniform1f(webglState.locations.uContrast, contrast);
-      gl.uniform1f(webglState.locations.uHighlights, highlights);
-      gl.uniform1f(webglState.locations.uShadows, shadows);
-      gl.uniform1f(webglState.locations.uTemp, tempFactor);
-      gl.uniform1f(webglState.locations.uTint, tintFactor);
-      gl.uniform1f(webglState.locations.uSat, satFactor);
-      gl.uniform1f(webglState.locations.uVib, vibFactor);
-      gl.uniform3f(webglState.locations.uCmy, safe.cyan / 100, safe.magenta / 100, safe.yellow / 100);
+      gl.uniform3f(webglState.locations.uWb, wbR, wbG, wbB);
+      gl.uniform1f(webglState.locations.uExposure, 0);
+      gl.uniform1f(webglState.locations.uContrast, 1);
+      gl.uniform1f(webglState.locations.uHighlights, 0);
+      gl.uniform1f(webglState.locations.uShadows, 0);
+      gl.uniform1f(webglState.locations.uTemp, 0);
+      gl.uniform1f(webglState.locations.uTint, 0);
+      gl.uniform1f(webglState.locations.uSat, 1);
+      gl.uniform1f(webglState.locations.uVib, vibrance / 100);
+      gl.uniform3f(webglState.locations.uCmy, cyan / 100, magenta / 100, yellow / 100);
     }
 
     function renderWebGL() {
@@ -12383,7 +12377,7 @@ import { frameNeedsReview } from './reviewQueue.js';
       state.corePaperToning = safe.corePaperToning || 'none';
       state.corePaperToningStrength = safe.corePaperToningStrength ?? 100;
       state.localExposure = safe.localExposure ? structuredClone(safe.localExposure) : null;
-      state.repairStrokes = sanitizeRepairStrokes(safe.repairStrokes);
+      state.repairStrokes = sanitizeRepairStrokes(safe.repairStrokes).slice();
       state.flatFieldId = safe.flatFieldId && state.flatFields[safe.flatFieldId] ? safe.flatFieldId : null;
       updateFlatFieldUI();
       state.look = safe.look ? structuredClone(safe.look) : null;

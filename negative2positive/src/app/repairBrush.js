@@ -1,10 +1,24 @@
-import { sanitizeLocalExposureForSettings, rasterizeExposureStops } from './localExposure.js';
+import { sanitizeLocalExposureStrokes, rasterizeExposureStops, strokeSanitizerStats } from './localExposure.js';
+
+// Cached by input array like sanitizeLocalExposureForSettings: every write
+// site assigns a new array, and a result is shared, never mutated.
+const sanitizedRepairStrokes = new WeakMap();
 
 // Reuse base-image coordinates so repair strokes follow rotation, mirror and crop.
 // These strokes are a selection, never exposure adjustments or automatic dust.
 export function sanitizeRepairStrokes(input) {
   if (!Array.isArray(input)) return [];
-  return sanitizeLocalExposureForSettings({ strokes: input.slice(0, 200).map(stroke => ({
+  let result = sanitizedRepairStrokes.get(input);
+  if (!result) {
+    strokeSanitizerStats.misses += 1;
+    result = sanitizeRepairStrokeList(input);
+    sanitizedRepairStrokes.set(input, result);
+  }
+  return result;
+}
+
+function sanitizeRepairStrokeList(input) {
+  return sanitizeLocalExposureStrokes({ strokes: input.slice(0, 200).map(stroke => ({
     ...stroke, stops: 1, feather: 0,
     points: stroke?.points?.length > 400
       ? Array.from({ length: 400 }, (_, i) => stroke.points[Math.round(i * (stroke.points.length - 1) / 399)])

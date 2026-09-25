@@ -111,4 +111,37 @@ for (const filmType of ['color', 'bw', 'positive']) {
   assert.ok(received.image16 && !received.retained16, 'a frame no larger than the histogram sample is sent whole');
 }
 
+
+// Unchanged dodge-and-burn strokes are posted once: later preview frames use
+// the retained copy and still match a conversion that receives them.
+{
+  const input = source(53);
+  const strokes = { strokes: [{ stops: 1.5, size: 0.3, feather: 0.5, points: [{ x: 0.3, y: 0.4, p: 1 }, { x: 0.7, y: 0.6, p: 1 }] }] };
+  const settings = { filmType: 'color', colorModel: 'standard', filmBase: { r: 210, g: 140, b: 90 },
+    localExposureGeometry: { baseWidth: 40, baseHeight: 30, rotatedWidth: 40, rotatedHeight: 30, rotationAngle: 0, mirrored: false, cropRegion: null } };
+  const options = { preview: true, includeAnalysisPreview: false };
+  const post = async (phase, localExposure, reuseLocalExposure) => {
+    const message = { type: 'convert', id: ++id, cacheInput: true, reuseSource: phase !== 'first', reuseAnalysis: false,
+      reuseLocalExposure, width: input.width, height: input.height,
+      settings: { ...settings, exposure: id * 2, localExposure }, options: { ...options } };
+    if (phase === 'first') message.image16 = input.data.buffer;
+    await self.onmessage({ data: structuredClone(message) });
+    return message;
+  };
+  for (const phase of ['first', 'reuse', 'reuse again']) {
+    const reuse = phase !== 'first';
+    const message = await post(phase, reuse ? null : strokes, reuse);
+    assert.equal(received.type, 'result', received.message);
+    const expected = await convertFrameWithRouter({ imageData: input, settings: { ...message.settings, localExposure: strokes },
+      options: { ...options, forceFullProcess: true } });
+    const plain = await convertFrameWithRouter({ imageData: input, settings: { ...message.settings, localExposure: null },
+      options: { ...options, forceFullProcess: true } });
+    assert.deepEqual(new Uint16Array(received.image16), expected.__image16.data, `${phase}: retained strokes are applied exactly`);
+    assert.notDeepEqual(expected.__image16.data, plain.__image16.data, 'the stroke changes the fixture');
+  }
+  await post('clear', null, false);
+  assert.equal(received.type, 'result');
+  await post('stale', null, true);
+  assert.equal(received.type, 'error', 'a reuse without retained strokes fails instead of converting without them');
+}
 console.log('conversionWorker: 実ルーター・転送後の再利用・解析参照切替・全モードの 16bit 一致、操作中の 16bit 保持と確定を検証');

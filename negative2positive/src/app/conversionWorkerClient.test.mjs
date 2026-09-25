@@ -146,3 +146,44 @@ console.log('conversionWorkerClient: 入力再利用・参照解除・再起動�
   await assert.rejects(pool({ imageData: input, settings: {}, options: {} }), { code: WORKER_UNAVAILABLE });
   console.log('conversionWorkerPool: least-busy dispatch, retained lanes, dispose verified');
 }
+
+// ---- preview lane: unchanged dodge-and-burn strokes are posted once ----
+{
+  const laneWorkers = [];
+  const lane = createConversionWorkerClient({ cacheInput: true, workerFactory: () => { const w = new FakeWorker(); laneWorkers.push(w); return w; } });
+  const strokes = { strokes: [{ stops: 1, size: 0.1, feather: 0.5, points: [{ x: 0.5, y: 0.5, p: 1 }] }] };
+  const send = async (settings, crash = false) => {
+    const pending = lane({ imageData: input, settings, options: {} });
+    const worker = laneWorkers.at(-1), message = worker.messages.at(-1);
+    if (crash) { worker.onerror(new Error('crash')); await assert.rejects(pending); }
+    else { worker.complete(); await pending; }
+    return message;
+  };
+  let message = await send({ exposure: 1, localExposure: strokes });
+  assert.equal(message.reuseLocalExposure, false);
+  assert.deepEqual(message.settings.localExposure, strokes, 'the first frame carries the strokes');
+  message = await send({ exposure: 2, localExposure: strokes });
+  assert.equal(message.reuseLocalExposure, true);
+  assert.equal(message.settings.localExposure, null, 'later frames do not clone them again');
+  assert.equal(message.settings.exposure, 2);
+  message = await send({ exposure: 3, localExposure: structuredClone(strokes) });
+  assert.equal(message.reuseLocalExposure, false, 'a replaced stroke set is posted');
+  message = await send({ exposure: 4, localExposure: null });
+  assert.equal(message.reuseLocalExposure, false);
+  assert.equal(message.settings.localExposure, null);
+  const kept = { strokes: [] };
+  await send({ localExposure: kept });
+  await send({ localExposure: kept }, true);
+  message = await send({ localExposure: kept });
+  assert.equal(laneWorkers.length, 2);
+  assert.equal(message.reuseLocalExposure, false, 'a new worker receives the strokes again');
+  const full = [];
+  const fullLane = createConversionWorkerClient({ workerFactory: () => { const w = new FakeWorker(); full.push(w); return w; } });
+  for (let i = 0; i < 2; i++) {
+    const pending = fullLane({ imageData: input, settings: { localExposure: strokes }, options: {} });
+    assert.equal(full[0].messages.at(-1).reuseLocalExposure, undefined, 'full-resolution requests always carry their strokes');
+    assert.deepEqual(full[0].messages.at(-1).settings.localExposure, strokes);
+    full[0].complete(); await pending;
+  }
+  console.log('conversionWorkerClient: preview lane posts unchanged dodge-and-burn strokes once per worker');
+}

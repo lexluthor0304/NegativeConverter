@@ -14,7 +14,29 @@ function clamp(value, min, max) {
   return value < min ? min : value > max ? max : value;
 }
 
+// sanitizeSettings runs per preview request, GL draw and tile rebuild, and
+// every write site assigns a new localExposure object (strokes are never
+// edited in place), so the result is cached by input identity. Only by input:
+// the sanitiser is not idempotent (a feather that clamps to 0 becomes 0.5 on
+// a second pass), so an output must not be returned for itself. Cached
+// results are shared and must not be mutated; stored settings copy them
+// (deepCopySanitizedSettings).
+const sanitizedLocalExposure = new WeakMap();
+// Cache misses of both stroke sanitisers (repair strokes: repairBrush.js),
+// read by tests and the darkroom smoke.
+export const strokeSanitizerStats = { misses: 0 };
+
 export function sanitizeLocalExposureForSettings(input) {
+  if (!input || typeof input !== 'object') return null;
+  if (sanitizedLocalExposure.has(input)) return sanitizedLocalExposure.get(input);
+  strokeSanitizerStats.misses += 1;
+  const result = sanitizeLocalExposureStrokes(input);
+  sanitizedLocalExposure.set(input, result);
+  return result;
+}
+
+// The uncached sanitiser, also used for repair strokes (repairBrush.js).
+export function sanitizeLocalExposureStrokes(input) {
   if (!input || typeof input !== 'object' || !Array.isArray(input.strokes)) return null;
   const strokes = [];
   for (const stroke of input.strokes.slice(0, MAX_STROKES)) {

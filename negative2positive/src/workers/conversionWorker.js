@@ -14,10 +14,18 @@ let cachedAnalysis = null;
 // when main commits it. `id` is the request that produced it.
 let retained = null;
 const DEFAULT_HISTOGRAM_SAMPLES = 24_576;
+let cachedLocalExposure = null;
 
 async function convert(msg) {
   const { id, width, height, rgba, image16, settings, options } = msg;
   try {
+    // Unchanged dodge-and-burn strokes are not posted again. Track every
+    // message, even one that fails below, as the client does.
+    if (msg.cacheInput && !msg.reuseLocalExposure) cachedLocalExposure = settings?.localExposure || null;
+    if (msg.reuseLocalExposure) {
+      if (!cachedLocalExposure) throw new Error('Missing dodge-and-burn strokes');
+      settings.localExposure = cachedLocalExposure;
+    }
     let imageData;
     if (msg.reuseSource) {
       if (!cachedSource || cachedSource.width !== width || cachedSource.height !== height) {

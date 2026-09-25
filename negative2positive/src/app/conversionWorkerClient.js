@@ -46,12 +46,14 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
   const retainedPlanes = new WeakMap();
   let lastSource = null;
   let lastAnalysis = null;
+  let lastLocalExposure = null;
   let releaseWhenIdle = false;
   function getWorker() {
     if (worker) return worker;
     worker = workerFactory();
     lastSource = null;
     lastAnalysis = null;
+    lastLocalExposure = null;
     const currentWorker = worker;
     worker.onmessage = (e) => {
       const msg = e.data;
@@ -66,7 +68,7 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
       if (releaseWhenIdle && !pending.size && worker === currentWorker) {
         currentWorker.terminate();
         worker = null;
-        lastSource = lastAnalysis = null;
+        lastSource = lastAnalysis = lastLocalExposure = null;
         releaseWhenIdle = false;
       }
     };
@@ -116,6 +118,12 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
       message.reuseSource = lastSource === imageData;
       message.reuseAnalysis = lastAnalysis === analysis;
       if (message.reuseAnalysis) delete message.options.analysisImageData;
+      // Dodge-and-burn strokes arrive as sanitised settings, which are shared
+      // and replaced on every edit, never changed in place: the same object is
+      // the same strokes, so the worker keeps the last set instead of a clone
+      // per slider frame.
+      message.reuseLocalExposure = Boolean(settings?.localExposure) && settings.localExposure === lastLocalExposure;
+      if (message.reuseLocalExposure) message.settings = { ...settings, localExposure: null };
     }
 
     // The adapter works from __image16 when present, so for genuinely 16-bit
@@ -159,6 +167,7 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
         if (cacheInput) {
           lastSource = imageData;
           lastAnalysis = analysis;
+          lastLocalExposure = settings?.localExposure || null;
         }
       } catch (err) {
         // A structured-clone failure means this worker can never take our data.
@@ -231,7 +240,7 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
   convert.dispose = () => {
     const dying = worker;
     worker = null;
-    lastSource = lastAnalysis = null;
+    lastSource = lastAnalysis = lastLocalExposure = null;
     releaseWhenIdle = false;
     for (const [id, entry] of pending) {
       pending.delete(id);

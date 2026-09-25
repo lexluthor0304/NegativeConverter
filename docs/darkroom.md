@@ -61,7 +61,10 @@ short side) and feather. Each stroke is stored as a vector path in normalised
 coordinates of the unrotated, unmirrored base image (`settings.localExposure`,
 sanitised by `localExposure.js`), so it survives later rotation, mirror and
 crop changes; `basePointToWorking` / `workingPointToBase` map through the
-geometry chain and are verified against `applyRotationToImageData`.
+geometry chain and are verified against `applyRotationToImageData`. Every
+edit replaces the stroke object (strokes are never changed in place), so the
+dodge-and-burn and repair sanitisers cache their result by input identity and
+per-frame settings rebuilds do not re-sanitise the paths (#234).
 
 The adapter rasterises the strokes for the buffer it converts
 (`rasterizeExposureStops`, cosine feather, one accumulation per stroke over
