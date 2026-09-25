@@ -63,12 +63,13 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
     fileQueue: items, currentFileIndex: 0, loadedFile: items[0].file,
     loadedBaseImageData: pixels(0), originalImageData: pixels(0),
     currentStep: 3, rollReference: { applyLock: false }, rollAnalysis: {},
-    importFilmTypeAuto: true, cropping: false, positiveMode: 'correct', rollMetadata: {}
+    importFilmTypeAuto: true, cropping: false, positiveMode: 'correct', rollMetadata: {},
+    autoFrame: { enabled: true }
   };
   const timers = new Map(), decoded = [], analyzed = [], groups = [], stores = [], restored = [], renders = [], undos = [];
   const markerMap = new Map();
   const markerStorage = { get: key => markerMap.get(key) ?? null, set: (key, value) => markerMap.set(key, value), remove: key => markerMap.delete(key) };
-  const toasts = [], frameTypes = [], samplesBuilt = [];
+  const toasts = [], frameTypes = [], samplesBuilt = [], importRequests = [];
   const frameRenders = [], flushed = [];
   const tileSources = new Map(), laneStarts = [], tileRenders = [];
   let frameWorkersDisposed = 0;
@@ -128,7 +129,9 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
     loadFileToImageData: async file => { const id = Number(file.name.split('.')[0]); decoded.push(id); return pixels(id); },
     createDefaultSettings: (_image, item) => make(item.id),
     analyzeStudioImportFrame: async (_image, settings, options = {}) => { frameTypes.push(options.filmType); return settings; },
-    analyzeImportFilmEdge: async (_image, settings) => ({ settings }),
+    // Frame and film edge of a lane's own decode in one request (#251).
+    runImportDetections: async (image, options) => { importRequests.push(options); return { image, detection: { result: null }, read: { result: null } }; },
+    mergeImportFilmEdge: async (_image, settings) => ({ settings }),
     learnedImportSettings: async settings => settings,
     groupAutomaticRollFrames, aggregateRollAnalysis, sanitizeRollFrameForSettings,
     notifyImportReview: noop, updateFileListUI: noop, scheduleProjectRecovery: () => { context.recoveryWrites++; },
@@ -237,7 +240,7 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
     items[index].settings = settings;
     for (const key of ['filmType', 'filmTypeSource', 'filmTypeConfidence', 'filmTypeReason']) state[key] = settings[key];
   };
-  return { context, state, items, timers, decoded, analyzed, groups, stores, restored, renders, undos, toasts, frameTypes, samplesBuilt, fire, navigate, make, prepareForeground, marker,
+  return { context, state, items, timers, decoded, analyzed, groups, stores, restored, renders, undos, toasts, frameTypes, samplesBuilt, importRequests, fire, navigate, make, prepareForeground, marker,
     frameRenders, flushed, frameWorkersDisposed: () => frameWorkersDisposed, tileSources, laneStarts, tileRenders };
 }
 
@@ -415,6 +418,15 @@ for (const change of ['recipe', 'edit', 'dirty', 'remove', 'cancel', 'off']) {
   assert.equal(f.renders[0].options.quiet, true);
   assert.equal(f.undos.filter(entry => entry.label !== 'rollAnalysis').length, 0, 'the decision adds no undo entry');
   assert.deepEqual(new Set(f.frameTypes), new Set(['positive']), 'auto-frame kept the film type pass 1 started with');
+  // #251: frame and film edge in one request per frame, on the lane's own
+  // analyzer. A lane's base is a shared decode the foreground may adopt
+  // (#243), so its 8-bit plane is copied, never transferred.
+  assert.equal(f.importRequests.length, 4);
+  assert.ok(f.importRequests.every(request => request.owned === false && request.frame === true && request.analyzer),
+    'lane requests copy the shared base');
+  assert.ok(f.importRequests.every(request => request.filmEdge === false), 'a recipe whose edge was read is not read again');
+  assert.deepEqual(new Set(f.importRequests.map(request => request.filmType)), new Set(['positive']), 'the roll decision scores the frame');
+  assert.deepEqual(f.importRequests.map(request => request.frameFilmType), ['bw', 'bw', 'bw', 'bw'], 'the frame\'s own type picks the line-search planes');
   const rollToasts = f.toasts.filter(toast => toast.action?.id === 'rollPositives');
   assert.equal(rollToasts.length, 1, 'one toast per import');
   assert.deepEqual(f.toasts.filter(toast => !toast.action).map(toast => toast.text.split(':')[0]), ['Roll analysis'], 'no per-frame film-type prompt');

@@ -85,6 +85,18 @@ export function primeFilmStats(imageData, { borderBufferPct, filmBase = null, fi
   if (filmType && typeof filmType === 'object') entry.filmType = { ...filmType };
 }
 
+/**
+ * `to` holds the very bytes of `from` (a frame whose buffer went to a
+ * worker and came back, #251): its statistics move with it instead of being
+ * computed again. Nothing moves when `from` has no valid entry.
+ */
+export function carryFilmStats(from, to) {
+  if (!cacheable(from) || !cacheable(to) || from === to) return;
+  const entry = entries.get(from);
+  if (!entry || entry.data !== from.data || entry.image16 !== (from.__image16 || null)) return;
+  entries.set(to, { data: to.data, image16: to.__image16 || null, filmBase: new Map(entry.filmBase), filmType: entry.filmType });
+}
+
 /** Drop everything cached for this ImageData (call after writing its pixels in place). */
 export function forgetFilmStats(imageData) {
   if (cacheable(imageData)) entries.delete(imageData);

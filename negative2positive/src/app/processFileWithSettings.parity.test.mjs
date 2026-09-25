@@ -1,10 +1,10 @@
 // The export branch of processFileWithSettings (no previewMaxDimension, no
 // tileMaxDimension) must behave exactly as it did before #247: the same
 // stage calls with the same arguments, the same returned pixels (8 and 16
-// bits), the same prepared settings and recipe writes. HEAD's function
-// (processFileWithSettings.reference.mjs) and the current one run side by
-// side against the same deterministic stages; the current one uses its real
-// helpers from main.js.
+// bits), the same prepared settings and recipe writes. The function as #251
+// left it (processFileWithSettings.reference.mjs) and the current one run
+// side by side against the same deterministic stages; the current one uses
+// its real helpers from main.js.
 // Run with: node negative2positive/src/app/processFileWithSettings.parity.test.mjs
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -155,8 +155,13 @@ function run(fn, { base, saved, options, dust, automatic }) {
       return { ...settings, autoFrameMeta: { imageArea: [{ x: 0.1, y: 0.1 }] }, ...(options.allowCrop ? { rotationAngle: 0.8, cropRegion: { left: 4, top: 3, width: 50, height: 30 } } : {}) };
     },
     expiredImportKeepsFullFrame: settings => Boolean(settings.expiredEnabled) && settings.filmType === 'positive',
-    analyzeImportFilmEdge: async (image, settings, options) => {
-      log.push(`edge:${JSON.stringify({ image: describe(image), options })}`);
+    // Frame and film edge in one request, then folded into the recipe (#251).
+    runImportDetections: async (image, options) => {
+      log.push(`detect:${JSON.stringify({ image: describe(image), ...options, reload: typeof options.reload })}`);
+      return { image, detection: { result: null }, read: { result: null } };
+    },
+    mergeImportFilmEdge: async (image, settings, read, options) => {
+      log.push(`edge:${JSON.stringify({ image: describe(image), read, options })}`);
       return { settings: { ...settings, filmEdge: { checked: true } } };
     },
     learnedImportSettings: async settings => ({ ...settings, learned: true }),
@@ -169,7 +174,8 @@ function run(fn, { base, saved, options, dust, automatic }) {
     createAdjustedPhotoPreview: () => { throw new Error('no preview on the export branch'); },
     markOwnedPlanes, planeBuffersOf
   });
-  vm.runInContext(fn, context);
+  // #251's in-place analysis-region sample, real in both runs.
+  vm.runInContext(`${functionSource('analysisRegionSample')}\n${fn}`, context);
   return { context, item, log, file };
 }
 

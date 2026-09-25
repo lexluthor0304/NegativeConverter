@@ -96,6 +96,9 @@ function lowResult(extra = {}) {
  * @param {{ data: Uint8ClampedArray|Uint8Array, width: number, height: number }} imageData
  *   The pre-WB positive (preview resolution is fine; gains are global ratios).
  * @param {Object} [options] - Overrides for DEFAULTS, mostly for tests/tuning.
+ *   `region` ({left, top, width, height}, already inside the image) samples
+ *   only that rectangle, at exactly the positions its cropped copy would
+ *   give, without making the copy (#251).
  * @returns {{ wbR: number, wbG: number, wbB: number,
  *             confidence: 'high'|'medium'|'low',
  *             coverage: number, disagreement: number }}
@@ -112,8 +115,15 @@ export function estimateAutoWhiteBalance(imageData, options = {}) {
   if (!imageData || !imageData.data || !imageData.width || !imageData.height) {
     return lowResult();
   }
-  const { data, width, height } = imageData;
-  const totalPixels = Math.floor(Math.min(data.length / 4, width * height));
+  const { data } = imageData;
+  const region = options.region || null;
+  const rowWidth = imageData.width;
+  const left = region ? region.left : 0;
+  const top = region ? region.top : 0;
+  const width = region ? region.width : imageData.width;
+  const height = region ? region.height : imageData.height;
+  // A cropped copy holds exactly width x height pixels.
+  const totalPixels = region ? width * height : Math.floor(Math.min(data.length / 4, width * height));
   if (totalPixels < 256) return lowResult();
 
   // Stride sampling: cap the pixel count without favoring any region.
@@ -126,7 +136,7 @@ export function estimateAutoWhiteBalance(imageData, options = {}) {
   let sampledCount = 0;
   let clippedHighCount = 0;
   for (let y = 0; y < height; y += stride) {
-    const row = y * width;
+    const row = (top + y) * rowWidth + left;
     for (let x = 0; x < width; x += stride) {
       const i = (row + x) * 4;
       const r = data[i];

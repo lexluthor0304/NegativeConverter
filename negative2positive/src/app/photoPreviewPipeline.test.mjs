@@ -214,8 +214,10 @@ for (const options of [{}, { lens: true }, { brush: true }]) {
     assert.equal(f2.calls.loads[0]?.halfSize, false, `no half-size decode: ${label}`);
   }
   const unsettled = fixture({ settled: false });
+  // Frame and film edge in one request (#251), then folded into the recipe.
+  unsettled.context.runImportDetections = async image => ({ image, detection: { result: null }, read: null });
   unsettled.context.analyzeStudioImportFrame = async (_image, settings) => settings;
-  unsettled.context.analyzeImportFilmEdge = async () => null;
+  unsettled.context.mergeImportFilmEdge = async () => null;
   await unsettled.context.processFileWithSettings(unsettled.file, unsettled.settings, { previewMaxDimension: 288, halfSizeDecode: true });
   assert.equal(unsettled.calls.loads[0].halfSize, false, 'no half-size decode while frame detection reads the pixels');
 }

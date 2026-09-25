@@ -374,11 +374,14 @@ function prepareFixture({ itemSettings = null, detectFrame = true, learned = 0 }
       options.signal.addEventListener('abort', () => reply.reject(new DOMException('superseded', 'AbortError')));
       return reply.promise;
     },
-    readImportFilmEdge: (source, options) => {
+    // One request for both analyses (#251): the frame half is answered
+    // through the analyzeStudioImportFrame stub above, the film-edge half here.
+    runImportDetections: (source, options) => {
+      if (!options.filmEdge) return Promise.resolve({ image: source });
       const reply = deferred();
       edges.push({ options, reply });
       options.signal.addEventListener('abort', () => reply.reject(new DOMException('superseded', 'AbortError')));
-      return reply.promise;
+      return reply.promise.then(read => ({ image: source, read }));
     },
     mergeImportFilmEdge: async (source, settings, read) => (read?.result
       ? { settings: { ...settings, id: `${settings.id}+edge`, filmEdge: { checked: true, found: true, filmName: 'KODAK' }, ...read.result.change }, toast: 'edge toast' }

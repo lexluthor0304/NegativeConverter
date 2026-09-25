@@ -1,6 +1,8 @@
-// processFileWithSettings as it was at 7d61dec (the integration tip #247
-// started from), frozen for processFileWithSettings.parity.test.mjs: the
-// export branch must stay the same. Two backticks in comments became quotes.
+// processFileWithSettings as it was on perf229/251 (#251 on 7d61dec, the
+// integration tip #247 started from), frozen for
+// processFileWithSettings.parity.test.mjs: the export branch must stay the
+// same once #247 is combined with #251. Two backticks in comments became
+// quotes.
 export const HEAD_PROCESS_FILE_WITH_SETTINGS = String.raw`
     async function processFileWithSettings(file, savedSettings, options = {}) {
       const isCurrent = options.isCurrent || (() => true);
@@ -26,7 +28,7 @@ export const HEAD_PROCESS_FILE_WITH_SETTINGS = String.raw`
         bytes: file?.size || 0
       });
       // Load the image
-      const imageData = options.sourceImageData || own(await loadFileToImageData(file, { filmStats: !savedSettings }));
+      let imageData = options.sourceImageData || own(await loadFileToImageData(file, { filmStats: !savedSettings }));
       assertRepairCurrent(isCurrent);
       options.onDecoded?.(imageData);
       trace.mark('load', {
@@ -41,16 +43,32 @@ export const HEAD_PROCESS_FILE_WITH_SETTINGS = String.raw`
       // every other frame in the roll.
       const studioColors = state.fileQueue.find(item => item.file === file)?.studioColors;
       let initialSettings = savedSettings || mergeStudioColors(createDefaultSettings(imageData, state.fileQueue.find(item => item.file === file)), studioColors || {});
-      let importRotation = null;
-      if (!initialSettings.autoFrameMeta && !initialSettings.cropRegion && !expiredImportKeepsFullFrame(initialSettings)) {
-        initialSettings = await analyzeStudioImportFrame(imageData, initialSettings, {
-          allowCrop: !savedSettings, silent, onRotation: rotation => { importRotation = rotation; }
+      const detectFrame = !initialSettings.autoFrameMeta && !initialSettings.cropRegion
+        && !expiredImportKeepsFullFrame(initialSettings) && state.autoFrame.enabled;
+      const readEdge = !initialSettings.filmEdge?.checked;
+      if (detectFrame || readEdge) {
+        // Frame and film edge in one worker request (#251). A decode this
+        // call made itself, which nothing else has seen, goes there without
+        // a copy and comes back as a new ImageData over the same buffer.
+        const owned = !options.sourceImageData && !options.onDecoded;
+        const analysed = await runImportDetections(imageData, {
+          frame: detectFrame, filmEdge: readEdge, owned, silent, frameFilmType: initialSettings.filmType,
+          reload: owned ? () => loadFileToImageData(file, { filmStats: !savedSettings }) : null
         });
-      }
-      assertRepairCurrent(isCurrent);
-      if (!initialSettings.filmEdge?.checked) {
-        const edge = await analyzeImportFilmEdge(imageData, initialSettings, { applyDefaults: !savedSettings && state.importFilmTypeAuto });
-        if (edge) initialSettings = edge.settings;
+        if (!analysed.image) throw analysed.detection?.error || new Error('The frame could not be decoded again');
+        if (analysed.image !== imageData) {
+          const stamped = ownedPlanes ? ownedPlanes.indexOf(imageData) : -1;
+          if (stamped >= 0) ownedPlanes.splice(stamped, 1);
+          imageData = own(analysed.image);
+        }
+        assertRepairCurrent(isCurrent);
+        if (detectFrame) {
+          initialSettings = await analyzeStudioImportFrame(imageData, initialSettings, { allowCrop: !savedSettings, detection: analysed.detection });
+        }
+        if (readEdge) {
+          const edge = await mergeImportFilmEdge(imageData, initialSettings, analysed.read, { applyDefaults: !savedSettings && state.importFilmTypeAuto });
+          if (edge) initialSettings = edge.settings;
+        }
       }
       if (!savedSettings) {
         const queued = state.fileQueue.find(item => item.file === file);
@@ -69,21 +87,11 @@ export const HEAD_PROCESS_FILE_WITH_SETTINGS = String.raw`
         mirrored: Boolean(settings.mirrored),
         cropRegion: settings.cropRegion || null
       };
-      // The auto-frame worker already rotated this decode by the same angle
-      // with the same exact kernel: mirror and crop that frame instead (#244).
-      const adoptedRotation = importRotation && importRotation.base === imageData && importRotation.angle
-        && importRotation.angle === normalizeAngleDegrees(geometry.rotationAngle)
-        && hasExactPlane16(imageData) && hasExactPlane16(importRotation.image)
-        && importRotation.image.width === rotatedDimensions(imageData.width, imageData.height, importRotation.angle).width
-        && importRotation.image.height === rotatedDimensions(imageData.width, imageData.height, importRotation.angle).height
-        ? importRotation.image : null;
-      importRotation = null;
       // In the geometry pool: batch lanes, the contact sheet and the thumbnail
-      // lane no longer queue on the main thread for this step (#244).
-      let workingData = own(await renderGeometryChain(
-        adoptedRotation || imageData, adoptedRotation ? { ...geometry, rotationAngle: 0 } : geometry,
-        { isCurrent, maxInFlight: options.geometryBands }
-      ), imageData);
+      // lane no longer queue on the main thread for this step (#244). The
+      // auto-frame worker sends no rotated frame back (#251), so this is the
+      // file's one rotation.
+      let workingData = own(await renderGeometryChain(imageData, geometry, { isCurrent, maxInFlight: options.geometryBands }), imageData);
       workingData = own(await applyLensCorrectionWithSettings(workingData, settings, { updateUi: false }), workingData);
       assertRepairCurrent(isCurrent);
       const fullWorkingShortSide = Math.min(workingData.width, workingData.height);
@@ -179,7 +187,8 @@ export const HEAD_PROCESS_FILE_WITH_SETTINGS = String.raw`
         const roi = resolveAnalysisRegion(settings, imageData);
         const estimate = settings.autoFrameMeta?.analysisNeedsReview ? { confidence: 'low' }
           : settings.semanticMap ? estimateAutoWhiteBalance(processed, { anchors: settings.semanticMap })
-          : estimateAutoWhiteBalance(processed.__analysisPreview || (roi ? cropImageData(processed, analysisPixelBounds(processed.width, processed.height, roi, 0.02)) : processed));
+          : processed.__analysisPreview ? estimateAutoWhiteBalance(processed.__analysisPreview)
+          : estimateAutoWhiteBalance(processed, analysisRegionSample(processed, roi));
         if (estimate.confidence !== 'low') {
           settings.wbR = estimate.wbR;
           settings.wbG = estimate.wbG;

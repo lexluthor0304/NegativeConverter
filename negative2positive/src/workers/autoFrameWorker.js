@@ -4,6 +4,7 @@ import { detectFrameAndRotation } from '../app/autoFrameAnalyzer.js';
 import { applyRotationToImageData } from '../app/imageGeometry.js';
 import { readFilmEdge, rectifyLaneBand } from '../app/filmEdgeReader.js';
 import { isOpenCvAnalysisType, runOpenCvAnalysisTask } from '../app/openCvAnalysisTasks.js';
+import { detectFrameForRequest, packFrameResult, runImportRequest } from './autoFrameImportTask.js';
 
 let ready;
 async function loadCv() {
@@ -13,6 +14,21 @@ async function loadCv() {
     if (!globalThis.cv?.Mat) throw new Error('OpenCV worker initialization failed');
   })();
   return ready;
+}
+
+// Perforation lanes and the DX edge barcode need no OpenCV; the result is
+// plain data (no ImageData), so it clones without transfers.
+async function readEdge(image, options) {
+  const result = readFilmEdge(image, options || {});
+  try {
+    await loadCv();
+    const textBands = result.geometry
+      ? result.geometry.lanes.map(lane => rectifyLaneBand(image, result.geometry, lane, { columnStepMm: 0.04, rowStepMm: 0.04 }))
+      : borderTextBands(image);
+    const text = readTextInBands(textBands, { cv: globalThis.cv });
+    if (text) { result.text = text; result.found = true; }
+  } catch (error) { console.warn('Film edge text unavailable:', error.message); }
+  return result;
 }
 
 self.onmessage = async ({ data: message }) => {
@@ -25,19 +41,15 @@ self.onmessage = async ({ data: message }) => {
       return;
     }
     if (message.type === 'read-film-edge') {
-      // Perforation lanes and the DX edge barcode need no OpenCV; the result
-      // is plain data (no ImageData), so it clones without transfers.
       const image = { width: message.width, height: message.height, data: message.rgba };
-      const result = readFilmEdge(image, message.options || {});
-      try {
-        await loadCv();
-        const textBands = result.geometry
-          ? result.geometry.lanes.map(lane => rectifyLaneBand(image, result.geometry, lane, { columnStepMm: 0.04, rowStepMm: 0.04 }))
-          : borderTextBands(image);
-        const text = readTextInBands(textBands, { cv: globalThis.cv });
-        if (text) { result.text = text; result.found = true; }
-      } catch (error) { console.warn('Film edge text unavailable:', error.message); }
-      self.postMessage({ id: message.id, result });
+      self.postMessage({ id: message.id, result: await readEdge(image, message.options) });
+      return;
+    }
+    if (message.type === 'analyze-import') {
+      const { reply, transfers } = await runImportRequest(message, {
+        loadCv, detect: detectFrameAndRotation, rotate: applyRotationToImageData, readEdge
+      });
+      self.postMessage({ id: message.id, result: reply }, transfers);
       return;
     }
     if (isOpenCvAnalysisType(message.type)) {
@@ -59,15 +71,10 @@ self.onmessage = async ({ data: message }) => {
     await loadCv();
     const image = new ImageData(message.rgba, message.width, message.height);
     if (message.image16) image.__image16 = { width: image.width, height: image.height, data: message.image16 };
-    const result = detectFrameAndRotation(image, { ...message.options, rotateImageData: applyRotationToImageData });
     const transfers = [];
-    if (result?.rotatedImageData) {
-      // ImageDataの拡張プロパティはstructured cloneに含まれないため明示する。
-      const rotated = result.rotatedImageData;
-      result.rotatedImageData = { width: rotated.width, height: rotated.height, data: rotated.data, image16: rotated.__image16?.data };
-      transfers.push(rotated.data.buffer);
-      if (rotated.__image16) transfers.push(rotated.__image16.data.buffer);
-    }
+    const result = packFrameResult(detectFrameForRequest(image, message, message.options, {
+      detect: detectFrameAndRotation, rotate: applyRotationToImageData
+    }), transfers);
     self.postMessage({ id: message.id, result }, transfers);
   } catch (error) {
     self.postMessage({ id: message.id, error: String(error?.message || error) });

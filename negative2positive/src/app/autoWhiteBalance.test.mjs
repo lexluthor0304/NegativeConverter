@@ -195,4 +195,54 @@ const between = (v, lo, hi) => v >= lo && v <= hi;
   assert.ok(est.wbB >= 0.5 && est.wbB <= 2, `wbB ${est.wbB}`);
 }
 
+// --- 9. `region` samples in place what a cropped copy would give (#251) ----
+{
+  globalThis.ImageData ??= class ImageData {
+    constructor(data, width, height) { this.data = data; this.width = width; this.height = height; }
+  };
+  const { cropImageDataRegion } = await import('./imageDataOps.js');
+  let seed = 9;
+  const random = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+  const scene = (width, height, with16) => {
+    const img = makeImage(width, height);
+    const castR = 0.8 + random() * 0.5, castB = 0.8 + random() * 0.5;
+    for (let i = 0; i < img.data.length; i += 4) {
+      const grey = 25 + random() * 200;
+      const saturated = random() < 0.3;
+      img.data[i] = grey * castR * (saturated ? 1.4 : 1) + (random() - 0.5) * 10;
+      img.data[i + 1] = grey + (random() - 0.5) * 10;
+      img.data[i + 2] = grey * castB * (saturated ? 0.6 : 1) + (random() - 0.5) * 10;
+      img.data[i + 3] = 255;
+    }
+    if (with16) img.__image16 = { width, height, data: Uint16Array.from(img.data, v => v * 257) };
+    return img;
+  };
+  let compared = 0, notLow = 0;
+  for (const [width, height] of [[97, 61], [61, 97], [257, 131], [33, 33]]) {
+    for (const with16 of [false, true]) {
+      const img = scene(width, height, with16);
+      const regions = [
+        { left: 0, top: 0, width, height },
+        { left: 0, top: 0, width: 19, height: height },
+        { left: width - 23, top: 0, width: 23, height: 17 },
+        { left: 0, top: height - 17, width: width, height: 17 },
+        { left: width - 31, top: height - 29, width: 31, height: 29 },
+      ];
+      for (let i = 0; i < 12; i++) {
+        const w = 16 + Math.floor(random() * (width - 16)), h = 16 + Math.floor(random() * (height - 16));
+        regions.push({ left: Math.floor(random() * (width - w + 1)), top: Math.floor(random() * (height - h + 1)), width: w, height: h });
+      }
+      for (const region of regions) {
+        for (const options of [{}, { maxSamples: 300 }]) {
+          const expected = estimateAutoWhiteBalance(cropImageDataRegion(img, region), options);
+          assert.deepEqual(estimateAutoWhiteBalance(img, { ...options, region }), expected, `${width}x${height} ${JSON.stringify(region)}`);
+          compared++;
+          if (expected.confidence !== 'low') notLow++;
+        }
+      }
+    }
+  }
+  assert.ok(notLow > compared / 4, `region comparison covers applied estimates (${notLow} of ${compared})`);
+}
+
 console.log('autoWhiteBalance tests: all passed');

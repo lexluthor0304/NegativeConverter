@@ -35,8 +35,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     import { writeDesktopBlob } from './desktopExportWriter.js';
     import { normalizeAngleDegrees, applyRotationToImageData, mirrorImageDataHorizontal, applyGeometryChainToImageData, rotatedDimensions, sanitizeCropRect, planGeometry, renderGeometry, geometryCounters } from './imageGeometry.js';
     import { createGeometryPool, yieldToEventLoop } from './geometryPool.js';
-    import { analyzeFrameInWorker, readFilmEdgeInWorker, createAutoFrameWorkerPool, warmUpAutoFrameWorker, runAnalysisInWorker } from './autoFrameWorkerClient.js';
-    import { detectFrameWithFallback } from './autoFrameExecution.js';
+    import { analyzeFrameInWorker, createAutoFrameWorkerPool, warmUpAutoFrameWorker, runAnalysisInWorker } from './autoFrameWorkerClient.js';
+    import { detectFrameWithFallback, runImportAnalyses } from './autoFrameExecution.js';
     import { importConversionKey } from './importDetection.js';
     import { createAnalysisSampleStore } from './analysisSampleStore.js';
     import { buildReducedGeometrySample, reducedTileGeometry, renderReducedGeometry, tileGeometryKey } from './reducedGeometry.js';
@@ -142,7 +142,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       sampleFilmBase as sampleFilmBaseRobust,
       sanitizeFilmBaseForSettings
     } from './filmBaseDetection.js';
-    import { cachedAutoDetectFilmBase, cachedDetectFilmType } from './filmStatsCache.js';
+    import { cachedAutoDetectFilmBase, cachedDetectFilmType, carryFilmStats } from './filmStatsCache.js';
     import { estimateAutoWhiteBalance } from './autoWhiteBalance.js';
     import {
       isRawLikeFileName,
@@ -2483,6 +2483,16 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         allowed120Formats: Object.fromEntries(AUTO_FRAME_DEFAULT_120_FORMATS.map(format => [format, true])),
         lowConfidenceBehavior: 'suggest', // 'suggest' | 'rotateOnly' | 'ignore'
         rotate180Default: false,
+        // #251 part 4b (a flagged detector change): the line search reads only
+        // the grey plane of a frame whose own film type is B&W or whose
+        // preview is neutral. Internal kill switch, no UI:
+        // localStorage nc_autoframe_neutral_lines_v1 = 'off'.
+        neutralLineSearch: safeStorageGet('nc_autoframe_neutral_lines_v1') !== 'off',
+        // #251 part 2 (flagged, off until signed off on real rolls and the
+        // macOS build): the detector's preview and its fallback rotations in
+        // integer JS, the same bytes in every engine, instead of a 2D canvas.
+        // localStorage nc_autoframe_js_preview_v1 = 'on'.
+        deterministicPreview: safeStorageGet('nc_autoframe_js_preview_v1') === 'on',
         lastDiagnostics: null
       },
 
@@ -2569,9 +2579,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     const geometryMemo = new WeakMap();
     const geometryBaseIds = new WeakMap();
     let nextGeometryBaseId = 1;
-    // The import's auto-frame worker already rotated a copy of the base by the
-    // angle it detected. restoreSettings adopts that frame (side channel, not
-    // part of the settings) instead of rotating the base a second time.
+    // The Auto Frame button's worker already rotated a copy of the base by the
+    // angle it detected. The geometry build adopts that frame (side channel,
+    // not part of the settings) instead of rotating the base a second time.
+    // Imports ask the worker for sizes only (#251) and build their one
+    // rotation from the base.
     let pendingImportRotation = null;
     const geometryPool = createGeometryPool();
     let geometryToken = 0;
@@ -5976,7 +5988,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const source = reference || state.previewSourceImageData || state.processedImageData;
       if (!source) return;
       const roi = resolveAnalysisRegion({ ...state, autoFrameMeta: state.autoFrame.lastDiagnostics }, state.loadedBaseImageData || state.originalImageData);
-      const estimate = state.semanticMap ? estimateAutoWhiteBalance(processed, { anchors: state.semanticMap }) : estimateAutoWhiteBalance(reference ? source : roi ? cropImageData(source, analysisPixelBounds(source.width, source.height, roi, 0.02)) : source);
+      const estimate = state.semanticMap ? estimateAutoWhiteBalance(processed, { anchors: state.semanticMap })
+        : estimateAutoWhiteBalance(source, reference ? {} : analysisRegionSample(source, roi));
       if (estimate.confidence === 'low') {
         // Only clear a previous auto estimate; user-owned gains stay put.
         if (state.wbAutoConfidence && state.wbAutoConfidence !== 'low') {
@@ -10799,17 +10812,44 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return 'low';
     }
 
-    // `silent` runs without the blocking overlay (background roll analysis
-    // must not cover the editor); `analyzeInWorker` picks a worker other than
-    // the shared one so several frames can be detected at once. The import
-    // path passes the auto-frame settings and film type of its snapshot, so a
-    // provisional render cannot change what the detector sees, and a signal
-    // that a superseded activation aborts.
-    async function detectFrameAndRotation(imageData, {
-      silent = false, analyzeInWorker = analyzeFrameInWorker,
-      autoFrame = state.autoFrame, filmType = state.filmType, signal = null
-    } = {}) {
-      if (!imageData) return null;
+    // The analyzer options of a detection. `filmType` chooses the density
+    // scoring profile (the import passes its snapshot's, the roll its
+    // decision); `frameFilmType` is the frame's own type, which may send the
+    // line search to the grey plane only (#251, state.autoFrame
+    // .neutralLineSearch). `rotatedOutput: 'none'` asks for the rotated
+    // frame's size only.
+    function autoFrameAnalyzerOptions({ autoFrame = state.autoFrame, filmType = state.filmType, frameFilmType = null, rotatedOutput = 'full' } = {}) {
+      return {
+        settings: {
+          ...autoFrame,
+          filmType
+        },
+        maxSide: AUTO_FRAME_MAX_SIDE,
+        formatRatios: AUTO_FRAME_FORMAT_RATIOS,
+        default120Formats: AUTO_FRAME_DEFAULT_120_FORMATS,
+        scoreWeights: AUTO_FRAME_SCORE_WEIGHTS,
+        rotatedOutput,
+        frameFilmType
+      };
+    }
+
+    // The detector on this thread (no worker, or the worker failed).
+    async function analyzeFrameOnMainThread(source, config) {
+      const { detectFrameAndRotation: analyzeFrameAndRotation } = await getAutoFrameAnalyzer();
+      return analyzeFrameAndRotation(source, {
+        ...config,
+        rotateImageData: (image, angle) => {
+          if (image === source) geometryDiagnostics.mainRotations++;
+          return applyRotationToImageData(image, angle);
+        },
+        sanitizeCropRegion: sanitizeCropRegionForImage
+      });
+    }
+
+    // The blocking "Detecting frame" overlay around `run`, unless `silent`
+    // (background roll analysis must not cover the editor) or another
+    // overlay is already up.
+    async function withDetectionOverlay(silent, run) {
       const overlay = getLoadingOverlay();
       const ownsOverlay = !silent && !overlay.isVisible;
       if (ownsOverlay) {
@@ -10818,44 +10858,74 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         await yieldForJob();
       }
       try {
-      const options = {
-        settings: {
-          ...autoFrame,
-          filmType
-        },
-        maxSide: AUTO_FRAME_MAX_SIDE,
-        formatRatios: AUTO_FRAME_FORMAT_RATIOS,
-        default120Formats: AUTO_FRAME_DEFAULT_120_FORMATS,
-        scoreWeights: AUTO_FRAME_SCORE_WEIGHTS
-      };
-      let mainThread = false;
-      const result = await detectFrameWithFallback(imageData, options, {
-        workerSupported: typeof Worker === 'function' && typeof OffscreenCanvas === 'function',
-        analyzeInWorker: signal ? (image, config) => analyzeInWorker(image, config, 'analyze-frame', { signal }) : analyzeInWorker,
-        ensureOpenCvReady,
-        onWorkerError: err => console.warn('Auto-frame worker unavailable, using fallback:', err),
-        analyzeOnMainThread: async (source, config) => {
-          mainThread = true;
-          const { detectFrameAndRotation: analyzeFrameAndRotation } = await getAutoFrameAnalyzer();
-          return analyzeFrameAndRotation(source, {
-            ...config,
-            rotateImageData: (image, angle) => {
-              if (image === source) geometryDiagnostics.mainRotations++;
-              return applyRotationToImageData(image, angle);
-            },
-            sanitizeCropRegion: sanitizeCropRegionForImage
-          });
-        }
-      });
-      // The debug count of full-resolution rotations (#244): the worker
-      // returns its rotated frame for every non-zero angle it applies.
-      if (!mainThread && result?.rotatedImageData && result.rotatedImageData.width !== imageData.width) {
-        geometryDiagnostics.workerRotations++;
-      }
-      return result;
+        return await run();
       } finally {
         if (ownsOverlay) overlay.hide();
       }
+    }
+
+    // The Auto Frame button's detection: both planes go to the worker and
+    // the rotated planes come back (`rotatedImageData`), because the button
+    // installs them as the working frame. `analyzeInWorker` picks a worker
+    // other than the shared one.
+    async function detectFrameAndRotation(imageData, {
+      silent = false, analyzeInWorker = analyzeFrameInWorker,
+      autoFrame = state.autoFrame, filmType = state.filmType, frameFilmType = state.filmType, signal = null
+    } = {}) {
+      if (!imageData) return null;
+      return withDetectionOverlay(silent, async () => {
+        const options = autoFrameAnalyzerOptions({ autoFrame, filmType, frameFilmType });
+        let mainThread = false;
+        const result = await detectFrameWithFallback(imageData, options, {
+          workerSupported: typeof Worker === 'function' && typeof OffscreenCanvas === 'function',
+          analyzeInWorker: signal ? (image, config) => analyzeInWorker(image, config, 'analyze-frame', { signal }) : analyzeInWorker,
+          ensureOpenCvReady,
+          onWorkerError: err => console.warn('Auto-frame worker unavailable, using fallback:', err),
+          analyzeOnMainThread: (source, config) => {
+            mainThread = true;
+            return analyzeFrameOnMainThread(source, config);
+          }
+        });
+        // The debug count of full-resolution rotations (#244): the worker
+        // returns its rotated frame for every non-zero angle it applies.
+        if (!mainThread && result?.rotatedImageData && result.rotatedImageData.width !== imageData.width) {
+          geometryDiagnostics.workerRotations++;
+        }
+        return result;
+      });
+    }
+
+    // The import analyses of one decoded frame (#251): the frame detection
+    // (sizes only) and the film-edge read in one worker request on one
+    // buffer, each falling back to this thread as it always did. `owned` (a
+    // decode nothing else references: a roll lane's, a batch file's)
+    // transfers the 8-bit plane instead of copying it; the result's `image`
+    // is then the frame to use from now on, and `reload` decodes it again if
+    // a failed worker kept its planes. Resolves { image, detection, read }
+    // (see runImportAnalyses).
+    async function runImportDetections(source, {
+      frame = true, filmEdge = false, owned = false, reload = null, analyzer = analyzeFrameInWorker,
+      silent = false, autoFrame = state.autoFrame, filmType = state.filmType, frameFilmType = null, signal = null
+    } = {}) {
+      const run = () => runImportAnalyses(source, {
+        frame: frame ? autoFrameAnalyzerOptions({ autoFrame, filmType, frameFilmType, rotatedOutput: 'none' }) : null,
+        filmEdge, owned, signal
+      }, {
+        frameWorkerSupported: typeof Worker === 'function' && typeof OffscreenCanvas === 'function',
+        edgeWorkerSupported: typeof Worker === 'function',
+        analyzeImport: (image, options) => analyzer.analyzeImport(image, options),
+        ensureOpenCvReady,
+        analyzeOnMainThread: analyzeFrameOnMainThread,
+        readOnMainThread: image => readFilmEdge(image, {}),
+        reload,
+        onWorkerError: err => console.warn('Auto-frame worker unavailable, using fallback:', err),
+        onReadError: err => console.warn('Film edge worker unavailable, reading on the main thread:', err)
+      });
+      const outcome = frame ? await withDetectionOverlay(silent, run) : await run();
+      // The frame came back over the same bytes: its cached film statistics
+      // stay valid.
+      if (owned && outcome.image && outcome.image !== source) carryFilmStats(source, outcome.image);
+      return outcome;
     }
 
     function formatAutoFrameDetail(result) {
@@ -11703,8 +11773,17 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           updateBatchProgress(i + 1, selectedItems.length, item.file.name);
 
           try {
-            const imageData = await loadFileToImageData(item.file, { filmStats: !item.settings });
-            const result = await detectFrameAndRotation(imageData);
+            const decode = () => loadFileToImageData(item.file, { filmStats: !item.settings });
+            // Only this loop holds the decode: it goes to the worker without
+            // a copy and comes back; only the rotated frame's size is read
+            // (#251).
+            const analysed = await runImportDetections(await decode(), {
+              owned: true, reload: decode, frameFilmType: item.settings?.filmType ?? null
+            });
+            const imageData = analysed.image;
+            if (!imageData) throw analysed.detection?.error || new Error('The frame could not be decoded again');
+            if (analysed.detection?.error) console.warn('Auto frame detection failed:', item.file.name, analysed.detection.error);
+            const result = analysed.detection?.result;
             if (!result || result.requiresReview) {
               failCount++;
               continue;
@@ -11713,7 +11792,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
             const existing = item.settings ? cloneSettings(item.settings) : settleImportFilmType(item, createDefaultSettings(imageData, item));
             const lowBehavior = state.autoFrame.lowConfidenceBehavior || 'suggest';
             const effectiveAngle = autoFrameEffectiveAngle(result.angle);
-            const frame = result.rotatedImageData || imageData;
+            const frame = { width: result.rotatedWidth, height: result.rotatedHeight };
             const effectiveCropRegion = !result.cropRegion
               ? null
               : (state.autoFrame.rotate180Default
@@ -14603,6 +14682,15 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return sanitizeCropRect(cropRegion, imageData);
     }
 
+    // The auto-WB sample of the analysis region: the rectangle cropImageData
+    // would copy, sampled in place (#251); the whole frame without a region
+    // or when it sanitises to nothing.
+    function analysisRegionSample(imageData, roi) {
+      if (!roi) return {};
+      const region = sanitizeCropRegionForImage(analysisPixelBounds(imageData.width, imageData.height, roi, 0.02), imageData);
+      return region ? { region } : {};
+    }
+
     function cropImageData(imageData, cropRegion) {
       const sanitized = sanitizeCropRegionForImage(cropRegion, imageData);
       if (!sanitized) return imageData;
@@ -14982,7 +15070,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const roi = resolveAnalysisRegion(settings, base);
       const estimate = settings.autoFrameMeta?.analysisNeedsReview ? { confidence: 'low' }
         : settings.semanticMap ? estimateAutoWhiteBalance(processed, { anchors: settings.semanticMap })
-        : estimateAutoWhiteBalance(processed.__analysisPreview || (roi ? cropImageData(processed, analysisPixelBounds(processed.width, processed.height, roi, 0.02)) : processed));
+        : processed.__analysisPreview ? estimateAutoWhiteBalance(processed.__analysisPreview)
+        : estimateAutoWhiteBalance(processed, analysisRegionSample(processed, roi));
       if (estimate.confidence !== 'low') {
         settings.wbR = estimate.wbR;
         settings.wbG = estimate.wbG;
@@ -15085,8 +15174,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // recipe's crop, strokes and analysis area refer to.
       const halfSize = Boolean(options.halfSizeDecode && savedSettings && previewMax && !options.sourceImageData
         && tileRecipeSettled(savedSettings) && !lensCorrectionActive(savedSettings));
-      const imageData = options.sourceImageData || own(await loadFileToImageData(file, { filmStats: !savedSettings, halfSize }));
-      const baseSize = previewMax && imageData.__fullSize ? imageData.__fullSize : imageData;
+      let imageData = options.sourceImageData || own(await loadFileToImageData(file, { filmStats: !savedSettings, halfSize }));
+      let baseSize = previewMax && imageData.__fullSize ? imageData.__fullSize : imageData;
       assertRepairCurrent(isCurrent);
       options.onDecoded?.(imageData);
       trace.mark('load', {
@@ -15101,23 +15190,40 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // every other frame in the roll.
       const studioColors = state.fileQueue.find(item => item.file === file)?.studioColors;
       let initialSettings = savedSettings || mergeStudioColors(createDefaultSettings(imageData, state.fileQueue.find(item => item.file === file)), studioColors || {});
-      let importRotation = null;
       // Background lanes (#243) pause before each main-thread-heavy step
       // while the foreground is busy (`beforeHeavyStep`, capped), and bring
       // their own frame analyzers so they never queue on the foreground's.
       const analyzers = options.analyzers || null;
-      if (!initialSettings.autoFrameMeta && !initialSettings.cropRegion && !expiredImportKeepsFullFrame(initialSettings)) {
+      const detectFrame = !initialSettings.autoFrameMeta && !initialSettings.cropRegion
+        && !expiredImportKeepsFullFrame(initialSettings) && state.autoFrame.enabled;
+      const readEdge = !initialSettings.filmEdge?.checked;
+      if (detectFrame || readEdge) {
         if (options.beforeHeavyStep) { await options.beforeHeavyStep('autoFrame'); assertRepairCurrent(isCurrent); }
-        initialSettings = await analyzeStudioImportFrame(imageData, initialSettings, {
-          allowCrop: !savedSettings, silent, onRotation: rotation => { importRotation = rotation; },
-          ...(analyzers ? { analyzeInWorker: analyzers.analyze } : {})
+        // Frame and film edge in one worker request (#251). A decode this
+        // call made itself, which nothing else has seen, goes there without
+        // a copy and comes back as a new ImageData over the same buffer. A
+        // base passed in (a lane's shared decode, #243) is copied.
+        const owned = !options.sourceImageData && !options.onDecoded;
+        const analysed = await runImportDetections(imageData, {
+          frame: detectFrame, filmEdge: readEdge, owned, silent, frameFilmType: initialSettings.filmType,
+          reload: owned ? () => loadFileToImageData(file, { filmStats: !savedSettings, halfSize }) : null,
+          ...(analyzers ? { analyzer: analyzers } : {})
         });
-      }
-      assertRepairCurrent(isCurrent);
-      if (!initialSettings.filmEdge?.checked) {
-        const edge = await analyzeImportFilmEdge(imageData, initialSettings, { applyDefaults: !savedSettings && state.importFilmTypeAuto,
-          ...(analyzers ? { readFilmEdge: analyzers.readFilmEdge } : {}) });
-        if (edge) initialSettings = edge.settings;
+        if (!analysed.image) throw analysed.detection?.error || new Error('The frame could not be decoded again');
+        if (analysed.image !== imageData) {
+          const stamped = ownedPlanes ? ownedPlanes.indexOf(imageData) : -1;
+          if (stamped >= 0) ownedPlanes.splice(stamped, 1);
+          imageData = own(analysed.image);
+          baseSize = previewMax && imageData.__fullSize ? imageData.__fullSize : imageData;
+        }
+        assertRepairCurrent(isCurrent);
+        if (detectFrame) {
+          initialSettings = await analyzeStudioImportFrame(imageData, initialSettings, { allowCrop: !savedSettings, detection: analysed.detection });
+        }
+        if (readEdge) {
+          const edge = await mergeImportFilmEdge(imageData, initialSettings, analysed.read, { applyDefaults: !savedSettings && state.importFilmTypeAuto });
+          if (edge) initialSettings = edge.settings;
+        }
       }
       if (!savedSettings) {
         const queued = state.fileQueue.find(item => item.file === file);
@@ -15142,29 +15248,18 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       let workingData;
       let fullWorkingShortSide;
       if (reducedGeometry) {
-        importRotation = null;
         const frame = reducedTileGeometry(baseSize, geometry, previewMax, { sanitizeCrop: sanitizeCropRegionForImage });
         workingData = own(renderReducedGeometry(imageData, geometry, {
           step: frame.step, fullWidth: baseSize.width, fullHeight: baseSize.height
         }), imageData);
         fullWorkingShortSide = Math.min(frame.width, frame.height);
       } else {
-        // The auto-frame worker already rotated this decode by the same angle
-        // with the same exact kernel: mirror and crop that frame instead (#244).
-        const adoptedRotation = importRotation && importRotation.base === imageData && importRotation.angle
-          && importRotation.angle === normalizeAngleDegrees(geometry.rotationAngle)
-          && hasExactPlane16(imageData) && hasExactPlane16(importRotation.image)
-          && importRotation.image.width === rotatedDimensions(imageData.width, imageData.height, importRotation.angle).width
-          && importRotation.image.height === rotatedDimensions(imageData.width, imageData.height, importRotation.angle).height
-          ? importRotation.image : null;
-        importRotation = null;
         if (options.beforeHeavyStep) { await options.beforeHeavyStep('geometry'); assertRepairCurrent(isCurrent); }
         // In the geometry pool: batch lanes, the contact sheet and the thumbnail
-        // lane no longer queue on the main thread for this step (#244).
-        workingData = own(await renderGeometryChain(
-          adoptedRotation || imageData, adoptedRotation ? { ...geometry, rotationAngle: 0 } : geometry,
-          { isCurrent, maxInFlight: options.geometryBands }
-        ), imageData);
+        // lane no longer queue on the main thread for this step (#244). The
+        // auto-frame worker sends no rotated frame back (#251), so this is the
+        // file's one rotation.
+        workingData = own(await renderGeometryChain(imageData, geometry, { isCurrent, maxInFlight: options.geometryBands }), imageData);
         workingData = own(await applyLensCorrectionWithSettings(workingData, settings, { updateUi: false }), workingData);
         assertRepairCurrent(isCurrent);
         fullWorkingShortSide = Math.min(workingData.width, workingData.height);
@@ -17887,19 +17982,28 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     }
 
     // Starts the frame and film-edge detections of a snapshot without awaiting
-    // them. They are queued from a zero-delay task so their main-thread plane
-    // copies overlap the provisional conversion instead of delaying its preview
-    // resize, and read their options from the snapshot, never from the state
-    // the provisional restore changes. Resolves [framedSettings, filmEdgeRead].
-    function startImportDetection(source, snapshot, { detectFrame, readEdge, allowCrop, autoFrame, signal, trace, onRotation = null }) {
+    // them: one worker request on one copy of the 8-bit plane (#251). It is
+    // queued from a zero-delay task so the plane copy overlaps the
+    // provisional conversion instead of delaying its preview resize, and
+    // reads its options from the snapshot, never from the state the
+    // provisional restore changes. Resolves [framedSettings, filmEdgeRead].
+    function startImportDetection(source, snapshot, { detectFrame, readEdge, allowCrop, autoFrame, signal, trace }) {
       const detected = new Promise(resolve => setTimeout(resolve, 0)).then(() => {
         if (signal.aborted) throw new DOMException('Superseded photo activation', 'AbortError');
+        const analysed = runImportDetections(source, {
+          frame: detectFrame, filmEdge: readEdge, silent: true, autoFrame,
+          filmType: snapshot.filmType, frameFilmType: snapshot.filmType, signal
+        });
+        const detection = analysed.then(outcome => outcome.detection);
+        analysed.catch(() => {});
+        detection.catch(() => {});
         const frame = detectFrame
-          ? analyzeStudioImportFrame(source, snapshot, { allowCrop, silent: true, autoFrame, filmType: snapshot.filmType, signal, onRotation })
-            .then(settings => { trace.mark('autoFrame', { applied: settings.autoFrameMeta?.appliedMode || 'none' }); return settings; })
+          ? analyzeStudioImportFrame(source, snapshot, {
+            allowCrop, silent: true, autoFrame, filmType: snapshot.filmType, signal, detection
+          }).then(settings => { trace.mark('autoFrame', { applied: settings.autoFrameMeta?.appliedMode || 'none' }); return settings; })
           : Promise.resolve(snapshot);
         const edge = readEdge
-          ? readImportFilmEdge(source, { signal })
+          ? analysed.then(outcome => outcome.read)
             .then(read => { trace.mark('filmEdge', { found: Boolean(read?.result?.found || read?.result?.text) }); return read; })
           : Promise.resolve(null);
         frame.catch(() => {});
@@ -17994,12 +18098,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           detection = new AbortController();
           importDetectionAbort = detection;
           const applyEdgeDefaults = freshFile && state.importFilmTypeAuto;
-          // The auto-frame worker's rotated frame: the final restore adopts it
-          // instead of rotating the base again (#244).
-          let importRotation = null;
           const detected = startImportDetection(source, snapshot, {
-            detectFrame, readEdge, allowCrop: freshFile, autoFrame: { ...state.autoFrame }, signal: detection.signal, trace,
-            onRotation: rotation => { importRotation = rotation; }
+            detectFrame, readEdge, allowCrop: freshFile, autoFrame: { ...state.autoFrame }, signal: detection.signal, trace
           });
           const provisional = freshFile ? await provisionalLearnedSettings(snapshot, item) : snapshot;
           if (!isCurrentLoad(generation)) return;
@@ -18046,7 +18146,6 @@ import { canPublishThumbnail } from './thumbnailRank.js';
               if (item.provisional === provisionalToken) delete item.provisional;
             }
             state.step2Mode = step2Mode;
-            pendingImportRotation = importRotation;
             restoreSettings(settings, { refreshDisplay: false });
             // The frame changed under the provisional view: fit it again.
             resetZoomPan();
@@ -18146,22 +18245,22 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       }, 0);
     }
 
-    // `onRotation` receives the worker's rotated frame of an applied result so
-    // the caller can adopt it instead of rotating the base again (#244).
+    // The auto-frame result of an import folded into `settings`. `detection`
+    // is the { result } or { error } of runImportDetections (or a promise of
+    // it); without one the frame is detected here (sizes only).
     // `autoFrame`/`filmType` default to the live state; the first-photo path
     // passes its snapshot's (see prepareStudioPhoto). An aborted request
     // rejects instead of keeping the full image.
     async function analyzeStudioImportFrame(source, settings, {
-      allowCrop = true, silent = false, analyzeInWorker = analyzeFrameInWorker, onRotation = null,
+      allowCrop = true, silent = false, analyzeInWorker = analyzeFrameInWorker, detection = undefined,
       autoFrame = state.autoFrame, filmType = state.filmType, signal = null
     } = {}) {
       if (!autoFrame.enabled || settings.cropRegion) return settings;
-      let result;
-      try { result = await detectFrameAndRotation(source, { silent, analyzeInWorker, autoFrame, filmType, signal }); }
-      catch (error) {
-        if (error?.name === 'AbortError') throw error;
-        console.warn('Import frame detection failed; keeping the full image:', error);
-      }
+      detection = await (detection ?? runImportDetections(source, {
+        silent, analyzer: analyzeInWorker, autoFrame, filmType, frameFilmType: settings.filmType, signal
+      }).then(outcome => outcome.detection));
+      if (detection?.error) console.warn('Import frame detection failed; keeping the full image:', detection.error);
+      const result = detection?.result;
       if (result?.stageMs) recordPerfStages('autoFrameStages', result.stageMs, { method: result.diagnostics?.method });
       const reliable = canAutoApplyImportFrame(result, autoFrame);
       const apply = reliable && autoFrame.onImport && allowCrop;
@@ -18180,9 +18279,6 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // Only the rotated frame's size is needed here: the one pixel build of
       // this geometry is restoreSettings' (#244), not a second rotation.
       const rotated = rotatedDimensions(source.width, source.height, angle);
-      if (onRotation && !autoFrame.rotate180Default && result.rotatedImageData) {
-        onRotation({ base: source, angle: effectiveGeometryAngle(angle), image: result.rotatedImageData });
-      }
       const cropRegion = autoFrame.rotate180Default
         ? rotate180CropRegion(result.cropRegion, rotated.width, rotated.height) : result.cropRegion;
       return { ...settings, rotationAngle: angle, mirrored: false, cropRegion, autoFrameMeta: meta };
@@ -18191,19 +18287,6 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // ===========================================
     // Film edge: perforation lanes, DX edge barcode, rebate film base
     // ===========================================
-    async function readFilmEdgeForImage(imageData, readInWorker = readFilmEdgeInWorker, { signal = null } = {}) {
-      if (!imageData) return null;
-      if (typeof Worker === 'function') {
-        try { return await (signal ? readInWorker(imageData, {}, { signal }) : readInWorker(imageData, {})); }
-        catch (error) {
-          // A superseded read must not repeat itself on the main thread.
-          if (error?.name === 'AbortError') throw error;
-          console.warn('Film edge worker unavailable, reading on the main thread:', error);
-        }
-      }
-      return readFilmEdge(imageData, {});
-    }
-
     // Mirrors applyFilmPresetSettingsToState for a detached settings object.
     async function applyFilmPresetToSettings(settings, presetId) {
       const filmPresets = await loadFilmPresets();
@@ -18230,32 +18313,15 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       next.cropRegion = { ...next.cropRegion, left: frame.width - next.cropRegion.left - next.cropRegion.width };
     }
 
-    // Reads the rebate of a loaded image and folds the result into `settings`.
-    // Returns { settings, toast } or null when the reader was unavailable.
-    // With applyDefaults the detected stock also sets the film type (B&W or
-    // slide film from the database). The matched preset and the rebate film
-    // base are only offered, through the Film edge buttons: applying both on
-    // import cost 0.7 stop and cooled the render on a real Ultra Max strip
-    // against the border auto-detect with no preset.
-    async function analyzeImportFilmEdge(source, settings, { applyDefaults = true, readFilmEdge = readFilmEdgeInWorker } = {}) {
-      if (!source || settings.filmEdge?.checked) return null;
-      return mergeImportFilmEdge(source, settings, await readImportFilmEdge(source, { readFilmEdge }), { applyDefaults });
-    }
-
-    // The read depends only on the pixels, so the first photo starts it before
-    // its provisional conversion. Resolves { result } (result may be null), or
-    // null when the reader failed; an abort rejects.
-    async function readImportFilmEdge(source, { readFilmEdge = readFilmEdgeInWorker, signal = null } = {}) {
-      try { return { result: await readFilmEdgeForImage(source, readFilmEdge, { signal }) }; }
-      catch (error) {
-        if (error?.name === 'AbortError') throw error;
-        console.warn('Film edge detection failed:', error);
-        return null;
-      }
-    }
-
-    // Folds a read into `settings` (after any auto-frame result, whose geometry
-    // the mirror flip follows). Sets the roll date as a side effect.
+    // Folds a read of the rebate (runImportDetections: { result }, or null
+    // when the reader failed) into `settings`, after any auto-frame result,
+    // whose geometry the mirror flip follows. Returns { settings, toast } or
+    // null when there was nothing to read. Sets the roll date as a side
+    // effect. With applyDefaults the detected stock also sets the film type
+    // (B&W or slide film from the database). The matched preset and the
+    // rebate film base are only offered, through the Film edge buttons:
+    // applying both on import cost 0.7 stop and cooled the render on a real
+    // Ultra Max strip against the border auto-detect with no preset.
     async function mergeImportFilmEdge(source, settings, read, { applyDefaults = true } = {}) {
       if (!source || settings.filmEdge?.checked || !read) return null;
       applyDefaults = applyDefaults && settings.filmTypeSource !== 'manual';
@@ -22296,9 +22362,19 @@ import { canPublishThumbnail } from './thumbnailRank.js';
                     if (!itemValid()) return null;
                     await step();
                     if (!itemValid()) return null;
-                    let settings = await analyzeStudioImportFrame(image, createDefaultSettings(image, item), { silent: true, analyzeInWorker: analyzers.analyze, filmType: frameFilmType ?? state.filmType });
+                    const defaults = createDefaultSettings(image, item);
+                    const filmType = frameFilmType ?? state.filmType;
+                    // Frame and film edge in one request on the lane's own
+                    // analyzer, sizes only (#251). The lane's base is shared
+                    // (the foreground may adopt it, #243), so its 8-bit plane
+                    // goes as one copy, never transferred.
+                    const analysed = await runImportDetections(image, {
+                      frame: state.autoFrame.enabled, filmEdge: !defaults.filmEdge?.checked, owned: false,
+                      analyzer: analyzers, silent: true, filmType, frameFilmType: defaults.filmType
+                    });
                     if (!itemValid()) return null;
-                    const edge = await analyzeImportFilmEdge(image, settings, { applyDefaults: state.importFilmTypeAuto, readFilmEdge: analyzers.readFilmEdge });
+                    let settings = await analyzeStudioImportFrame(image, defaults, { silent: true, filmType, detection: analysed.detection });
+                    const edge = await mergeImportFilmEdge(image, settings, analysed.read, { applyDefaults: state.importFilmTypeAuto });
                     if (!itemValid()) return null;
                     if (edge) settings = edge.settings;
                     settings = await learnedImportSettings(settleImportFilmType(item, settings), item);
@@ -22624,11 +22700,17 @@ import { canPublishThumbnail } from './thumbnailRank.js';
               // A decode is one gated item of this job (#241).
               const release = reuse ? null : await hiddenJobs.admit({ bytes: await hiddenJobBytesFor([item.file]) });
               try {
-                const imageData = reuse ? state.loadedBaseImageData || state.originalImageData : await loadFileToImageData(item.file, { filmStats: !item.settings });
+                const decode = () => loadFileToImageData(item.file, { filmStats: !item.settings });
+                let imageData = reuse ? state.loadedBaseImageData || state.originalImageData : await decode();
                 if (!isValid()) return { status: 'stale' };
                 settings = item.settings ? cloneSettings(item.settings) : createDefaultSettings(imageData, item);
                 if (!settings.filmEdge?.checked) {
-                  const edge = await analyzeImportFilmEdge(imageData, settings, { applyDefaults: !item.settings });
+                  // A decode of this pass is read without a copy (#251); the
+                  // loaded photo's planes are copied.
+                  const analysed = await runImportDetections(imageData, { frame: false, filmEdge: true, owned: !reuse, reload: reuse ? null : decode });
+                  if (!analysed.image) throw new Error('The frame could not be decoded again');
+                  imageData = analysed.image;
+                  const edge = await mergeImportFilmEdge(imageData, settings, analysed.read, { applyDefaults: !item.settings });
                   if (edge) settings = edge.settings;
                 }
                 if (!item.settings) settings = settleImportFilmType(item, settings);
