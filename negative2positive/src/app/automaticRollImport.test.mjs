@@ -17,6 +17,7 @@ import { SCHEDULER_FUNCTIONS } from './backgroundLanesHarness.mjs';
 import { createRollSampleCache } from './rollSampleCache.js';
 import { reducedTileGeometry, tileGeometryKey } from './reducedGeometry.js';
 import { sanitizeCropRect } from './imageGeometry.js';
+import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
 
 // Test the actual orchestration functions, not a second scheduler. Deferred
 // decoders/analysis replies make navigation and recipe races deterministic.
@@ -78,6 +79,8 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
   const noop = () => {};
   const context = vm.createContext({
     ...memoryGlobals(),
+    // #249: no photo here takes a display form.
+    ...displaySessionStubs(),
     state, console, Map, Set, AbortController, structuredClone,
     AUTO_ROLL_KEY: 'auto', automaticRollRevision: 0, automaticRollPendingItems: new Set(),
     automaticRollImportRunning: false, automaticRollAnalysisRunning: false,
@@ -208,7 +211,7 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
     },
   });
   context.sharedDecodes = createSharedDecodes({ decode: (file, { signal }) => context.decodeForBackground(file, signal) });
-  vm.runInContext(['getCurrentQueueItem', 'automaticRollItemKey', 'scheduleAutomaticRollImport', ...FILM_TYPE_FUNCTIONS,
+  vm.runInContext([...DISPLAY_SESSION_HELPERS, 'getCurrentQueueItem', 'automaticRollItemKey', 'scheduleAutomaticRollImport', ...FILM_TYPE_FUNCTIONS,
     'renderFrameAnalysisThumbnail', 'releaseFrameThumbnailWorkers', 'renderSampleTile', 'publishSampleTile', 'renderRollSampleTiles',
     ...(realRoll ? ['runRollAnalysis'] : []),
     ...SCHEDULER_FUNCTIONS.filter(name => name !== 'backgroundRest'), ...MEMORY_FUNCTIONS]

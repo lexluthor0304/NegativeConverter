@@ -10,6 +10,7 @@ import { previewTierMaxPixels, capBackingSize, PREVIEW_TIER_REDUCED_MAX_PIXELS }
 import { routeCoreConversion, keepsFullPlaneOnDowngrade, viewportRefreshBranch } from './fullResolutionRouting.js';
 import { isLargeImage } from './imageMemoryBudget.js';
 import { DISABLED_GPU_PREVIEW_SCHEDULER } from './gpuPreviewScheduler.js';
+import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
 
 // Drives the real preview-tier wiring of main.js (#263) together with the real
 // scheduler, reprocess and state-application functions, on synthetic images:
@@ -105,6 +106,8 @@ function fixture({ width = 3000, height = 2000, repairs = false, largePreviewFra
     end(reason) { this.ends.push(reason); this.active = false; context.onPreviewTierChange('normal'); } };
   const idleCallbacks = [];
   const context = vm.createContext({
+    // #249: no photo here takes a display form.
+    ...displaySessionStubs(),
     state, console: { error: () => {}, warn: () => {}, info: () => {} },
     window: { devicePixelRatio: DPR },
     document: { documentElement: { dataset: {} } },
@@ -171,6 +174,7 @@ function fixture({ width = 3000, height = 2000, repairs = false, largePreviewFra
     FULL_RESOLUTION_IDLE_DELAY_MS: 2500, scheduleFullResolutionRender: (reason) => { log.push(`full-render:${reason}`); return null; },
   });
   vm.runInContext([
+    ...DISPLAY_SESSION_HELPERS,
     'getDisplayPreviewSize', 'noteTierImage', 'buildPreviewSourceImageData', 'buildWebglSourceImageData',
     'histogramSourceFor', 'scheduleDisplayPreviewResize', 'ensureConversionPreviewForDisplay', 'displayIsReduced',
     'redrawForPreviewTier', 'leavePreviewTier', 'restoreNormalTierDisplay', 'onPreviewTierChange',

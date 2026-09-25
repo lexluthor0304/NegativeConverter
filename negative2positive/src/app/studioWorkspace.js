@@ -50,7 +50,7 @@ export const studioText = {
     settingsConfirm: '将当前照片的处理设置（包括片基、白平衡校正、镜头等）应用到其他所选照片？各照片的构图会保留。',
     borderScope: '边框与边码设置用于本次导出的所有所选照片。', quickColor: '快速定位调色工具',
     autoCrop: '自动裁切成像区域（关闭则保留边字与齿孔）', restoreFrame: '恢复完整画面', frameApplied: '已自动裁切 · 查看构图', frameReview: '未自动裁切 · 请确认构图',
-    detectingFrame: '正在识别成像区域与倾斜角度…', frameAnalysis: '颜色仅分析成像区域',
+    detectingFrame: '正在识别成像区域与倾斜角度…', frameAnalysis: '颜色仅分析成像区域', preparingOriginal: '正在准备原图…',
     frameIncomplete: '画格边界不完整 · 已保留全图，请手动确认构图',
     confirmAnalysis: '确认成像区域', analysisHint: '框住要处理的那一格画面，避开片边和齿孔。这里只改变颜色分析范围，不裁切输出，也不重新取样片基。', analysisReview: '成像区域待确认 · 保留原有颜色基准',
     expired: '过期卷', expiredHint: '专门处理放久了的胶卷：先看诊断，再用五个滑块决定去雾、中和偏色、交叉偏色、亮度和对比的强度。负片会先按常规转正，再进入这里。',
@@ -99,7 +99,7 @@ export const studioText = {
     settingsConfirm: 'Copy film base, WB gains, lens and other processing settings to the other selected photos? Their geometry will be preserved.',
     borderScope: 'These border and marking settings apply to all photos in this export.', quickColor: 'Jump to color tools',
     autoCrop: 'Crop image area (off: keep original film edges)', restoreFrame: 'Restore full image', frameApplied: 'Auto-cropped · Review framing', frameReview: 'Not auto-cropped · Review framing',
-    detectingFrame: 'Detecting the image area and tilt…', frameAnalysis: 'Color analysis uses the image area only',
+    detectingFrame: 'Detecting the image area and tilt…', frameAnalysis: 'Color analysis uses the image area only', preparingOriginal: 'Preparing original…',
     frameIncomplete: 'Incomplete frame edges · Full image kept; review framing manually',
     confirmAnalysis: 'Confirm image area', analysisHint: 'Frame the intended image, excluding film edges and holes. This changes color analysis only, not output framing or film-base sampling.', analysisReview: 'Confirm image area · Previous color reference retained',
     expired: 'Expired', expiredHint: 'For rolls that sat too long: read the diagnosis, then set how far fog removal, cast neutralising, crossover, brightness and contrast go. Negatives are converted first as usual, then rescued here.',
@@ -148,7 +148,7 @@ export const studioText = {
     settingsConfirm: 'ベース・WB補正・レンズなどの処理設定を他の選択写真にコピーしますか？各写真の構図は保持します。',
     borderScope: '枠と端文字の設定は、今回書き出す選択写真すべてに適用します。', quickColor: '色調整ツールへの移動',
     autoCrop: '撮影窓を切り抜く（オフで元の端文字・穴を保持）', restoreFrame: '画像全体に戻す', frameApplied: '自動切り抜き済み · 構図確認', frameReview: '未切り抜き · 構図を確認',
-    detectingFrame: '撮影窓と傾きを検出しています…', frameAnalysis: '撮影窓のみで色を解析',
+    detectingFrame: '撮影窓と傾きを検出しています…', frameAnalysis: '撮影窓のみで色を解析', preparingOriginal: '元画像を準備しています…',
     frameIncomplete: '画枠の端が不足 · 全体を保持しました。構図を確認してください',
     confirmAnalysis: '撮影窓を確認', analysisHint: '目的の一コマを、端や穴を除いて囲んでください。色の解析範囲のみ変更し、出力の構図やベース採取は変更しません。', analysisReview: '撮影窓の確認が必要 · 前の色基準を維持',
     expired: '期限切れ', expiredHint: '古くなったフィルム専用。診断を確認し、かぶり除去・色かぶり中和・クロスオーバー・明るさ・コントラストの強さを決めます。ネガは通常どおり先に変換してからここへ進みます。',
@@ -917,11 +917,13 @@ export function mountStudioWorkspace({ getState, getLanguage, getText, isExportL
     const frameMeta = state.autoFrame.lastDiagnostics;
     // The provisional positive is shown while the frame detection finishes.
     const detecting = body.dataset.studioDetecting;
+    // A photo restored without its original (#249) rebuilds it for a tool.
+    const preparing = body.dataset.studioPreparing === 'original';
     set(node.studioConfirmAnalysis, 'disabled', !loaded || locked || state.cropping || busy);
     set(node.studioAnalysisStatus, 'textContent', t(frameMeta?.analysisNeedsReview ? 'analysisReview' : 'analysisHint'));
-    set(node.studioFrameNotice, 'hidden', Boolean(switching) || !ready || (detecting !== 'frame' && !frameMeta?.importAuto) || Boolean(state.samplingMode));
-    set(node.studioFrameNotice, 'textContent', t(detecting === 'frame' ? 'detectingFrame' : frameMeta?.analysisNeedsReview ? 'analysisReview' : frameMeta?.appliedMode === 'crop' ? 'frameApplied' : frameMeta?.frameIncomplete ? 'frameIncomplete' : frameMeta?.imageArea ? 'frameAnalysis' : 'frameReview'));
-    set(node.studioFrameNotice, 'dataset.status', detecting === 'frame' ? 'detecting' : frameMeta?.appliedMode || '');
+    set(node.studioFrameNotice, 'hidden', Boolean(switching) || !ready || (!preparing && detecting !== 'frame' && !frameMeta?.importAuto) || Boolean(state.samplingMode));
+    set(node.studioFrameNotice, 'textContent', t(preparing ? 'preparingOriginal' : detecting === 'frame' ? 'detectingFrame' : frameMeta?.analysisNeedsReview ? 'analysisReview' : frameMeta?.appliedMode === 'crop' ? 'frameApplied' : frameMeta?.frameIncomplete ? 'frameIncomplete' : frameMeta?.imageArea ? 'frameAnalysis' : 'frameReview'));
+    set(node.studioFrameNotice, 'dataset.status', preparing ? 'preparing' : detecting === 'frame' ? 'detecting' : frameMeta?.appliedMode || '');
     set(node.studioFrameNotice, 'disabled', Boolean(state.cropping || busy));
     set(panel, 'inert', busy);
     // Photo activation locks editing, not navigation: rapid browsing must

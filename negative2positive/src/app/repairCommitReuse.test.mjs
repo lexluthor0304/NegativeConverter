@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { createRepairStamps, sameRepairStrokes, captureDustPass, dustPassMatches, restoreDustPass } from './repairReuse.js';
 import { repairsNeedSettling } from './fullResolutionRouting.js';
+import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
 
 globalThis.ImageData ||= class { constructor(data, width, height) { Object.assign(this, { data, width, height }); } };
 
@@ -54,6 +55,8 @@ function fixture() {
     return mask;
   };
   const c = vm.createContext({
+    // #249: no photo here takes a display form.
+    ...displaySessionStubs(),
     state, coreReprocessToken: 7, dustDetectionRevision: 11, loadGeneration: 3, dustPassCache: null,
     dustMaskTagSequence: 0, dustAiRefresh: { rects: [], timer: null }, syncDustWorkerPin() {},
     Uint8Array, DOMException, console,
@@ -97,7 +100,7 @@ function fixture() {
     setTimeout() { throw new Error('no timers in these tests'); },
     clearTimeout() {},
   });
-  vm.runInContext(['getDustSource', 'nextDustMaskTag', 'noteDustReplaced', 'hasFrameRepairs', 'isCurrentLoad', 'currentRepairRecipe',
+  vm.runInContext([...DISPLAY_SESSION_HELPERS, 'getDustSource', 'nextDustMaskTag', 'noteDustReplaced', 'hasFrameRepairs', 'isCurrentLoad', 'currentRepairRecipe',
     'stampRepairResult', 'carryRestoredRepairStamp', 'commitDustPass', 'aiRepairReady',
     'applyDustResultToState', 'runDustDetection', 'runDustDetectionPass', 'prepareCurrentImageForExport', 'renderCurrentImageDataForExport',
     'ensureRepairsReadyForExport', 'dustMaskIsStale', 'whenBrushRepairsSettled'].map(functionSource).join('\n'), c);

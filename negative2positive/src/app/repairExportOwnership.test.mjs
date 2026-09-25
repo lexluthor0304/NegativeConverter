@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { createRepairStamps, captureDustPass, dustPassMatches, restoreDustPass } from './repairReuse.js';
+import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
 
 // Execute real export/detection ownership, with deferred inference and a
 // manually advanced debounce. No wall-clock sleeps or duplicated guards.
@@ -34,6 +35,8 @@ function fixture({ enabled = false, mask = null } = {}) {
   const commits = [], manualCalls = [], observers = [], timers = new Map(), backgroundRuns = [], exportReads = [];
   let timerId = 0;
   const c = vm.createContext({
+    // #249: no photo here takes a display form.
+    ...displaySessionStubs(),
     state, coreReprocessToken: 7, dustDetectionRevision: 11, loadGeneration: 3,
     dustDetectionTimer: null, Uint8Array, dustMaskTagSequence: 0, dustAiRefresh: { rects: [] },
     syncDustWorkerPin: noop,
@@ -75,7 +78,7 @@ function fixture({ enabled = false, mask = null } = {}) {
     },
     clearTimeout(id) { timers.delete(id); },
   });
-  vm.runInContext(['getDustSource', 'nextDustMaskTag', 'noteDustReplaced', 'hasFrameRepairs', 'isCurrentLoad',
+  vm.runInContext([...DISPLAY_SESSION_HELPERS, 'getDustSource', 'nextDustMaskTag', 'noteDustReplaced', 'hasFrameRepairs', 'isCurrentLoad',
     'currentRepairRecipe', 'stampRepairResult', 'commitDustPass',
     'applyDustResultToState', 'runDustDetection', 'runDustDetectionPass', 'scheduleDustDetection',
     'prepareCurrentImageForExport', 'renderCurrentImageDataForExport'].map(functionSource).join('\n'), c);

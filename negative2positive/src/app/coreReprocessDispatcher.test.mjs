@@ -7,6 +7,7 @@ import {
 } from './coreReprocessDispatcher.js';
 import { routeCoreConversion, keepsFullPlaneOnDowngrade } from './fullResolutionRouting.js';
 import { DISABLED_GPU_PREVIEW_SCHEDULER, createGpuPreviewScheduler, GPU_SETTLE_IDLE_MS } from './gpuPreviewScheduler.js';
+import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
 
 // Drives the real scheduler, reprocess and slider functions from main.js (as
 // restartRender.test.mjs does) against a fake clock: timeouts and animation
@@ -140,6 +141,8 @@ function schedulerFixture({ repairs = false, large = false, gpu = null } = {}) {
     log.push('apply');
   };
   const context = vm.createContext({
+    // #249: no photo here takes a display form.
+    ...displaySessionStubs(),
     state, console: { error: () => {}, warn: () => {} },
     setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
     // No two-stage stand-in (#255).
@@ -194,6 +197,7 @@ function schedulerFixture({ repairs = false, large = false, gpu = null } = {}) {
     carryStudioThumbnailSource: previous => { if (previous) { log.push('carry'); carried.push(previous); } },
   });
   vm.runInContext([
+    ...DISPLAY_SESSION_HELPERS,
     'coreReprocessBusy', 'whenCoreReprocessIdle', 'noteCoreReprocessSettled', 'runCoreReprocess',
     'rerenderWithCoreControls', 'postPendingPreviewEarly', 'hasSeparateConversionPreview',
     'cancelScheduledFullResolutionRender', 'scheduleCoreReprocess', 'takeScheduledCoreReprocess',
@@ -484,7 +488,7 @@ for (const earlyPost of [false, true]) {
     samplePhotoPreviewSource: () => ({}), adjustPhotoPreviewSample: () => ({}), schedulePostPaintTask: () => {},
     hiddenJobs: { safeMode: false }, geometryDiagnostics: { coldSessions: false }, dustAiRefresh: { rects: [] },
   });
-  vm.runInContext(['rememberPhotoSession', 'displayIsReduced'].map(functionSource).join('\n'), f.context);
+  vm.runInContext([...DISPLAY_SESSION_HELPERS, 'rememberPhotoSession', 'displayIsReduced'].map(functionSource).join('\n'), f.context);
   f.request(1);
   f.context.rememberPhotoSession(item);
   assert.equal(stored.at(-1).snapshot, null, 'a request held to the end of the task is unsettled');
@@ -733,7 +737,7 @@ function sliderFixture(options) {
     captureSnapshot: () => ({}), commitUndoSnapshot: () => {}, updateUndoRedoButtons: () => {},
     pushUndo: () => {}, updateEnlargerUI: () => {},
   });
-  vm.runInContext(['getStepDecimals', 'normalizeSliderValue', 'formatSliderValue', 'setupSlider',
+  vm.runInContext([...DISPLAY_SESSION_HELPERS, 'getStepDecimals', 'normalizeSliderValue', 'formatSliderValue', 'setupSlider',
     'syncSliderFromState', 'coreReprocessHandlersFor'].map(functionSource).join('\n'), f.context);
   vm.runInContext(`setupSlider('coreExposure', 'coreExposure', coreReprocessHandlersFor('coreExposure'))`, f.context);
   const fire = (target, type) => listeners.get(`${target.id}:${type}`)({ key: 'Enter', preventDefault() {} });
@@ -903,7 +907,7 @@ function sliderFixture(options) {
     samplePhotoPreviewSource: () => ({}), adjustPhotoPreviewSample: () => ({}), schedulePostPaintTask: () => {},
     hiddenJobs: { safeMode: false }, geometryDiagnostics: { coldSessions: false }, dustAiRefresh: { rects: [] },
   });
-  vm.runInContext(['rememberPhotoSession', 'displayIsReduced'].map(functionSource).join('\n'), f.context);
+  vm.runInContext([...DISPLAY_SESSION_HELPERS, 'rememberPhotoSession', 'displayIsReduced'].map(functionSource).join('\n'), f.context);
   f.request(5);
   f.clock.runFrame();
   f.context.rememberPhotoSession(item);

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { normalizeFileListSort, orderedFileIndices, selectionRangeIndices } from './fileListOrder.js';
+import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
 
 // Run actual application handlers: sorted presentation must not renumber queue
 // ownership, schedule a photo activation, or associate edits with another File.
@@ -23,6 +24,8 @@ const storage = new Map();
 let sorts = 0, ui = null, syncs = 0, locked = false;
 const noop = () => {};
 const context = vm.createContext({
+    // #249: no photo here takes a display form.
+    ...displaySessionStubs(),
   state, normalizeFileListSort, selectionRangeIndices,
   orderedFileIndices: (...args) => { sorts++; return orderedFileIndices(...args); },
   singleExportActive: false, isDesktopBatchExportLocked: () => locked,

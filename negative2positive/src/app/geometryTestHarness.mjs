@@ -17,6 +17,10 @@ const { createGeometryPool, yieldToEventLoop } = await import('./geometryPool.js
 const { backingBuffers, createPhotoSessionCache } = await import('./photoSessionCache.js');
 const { planGeometryBandsInFlight } = await import('./batchExportScheduler.js');
 const { exactSettingsKey } = await import('./settingsKey.js');
+const displayProxy = await import('./displayProxy.js');
+const displayPreview = await import('./displayPreview.js');
+const analysisRegion = await import('./analysisRegion.js');
+const { DISPLAY_SESSION_HELPERS, displaySessionDiagnosticsStub, emptyDisplayProxySpill } = await import('./displaySessionHarness.mjs');
 
 export { geometry, imageDataOps, backingBuffers, createPhotoSessionCache };
 
@@ -89,7 +93,15 @@ const FUNCTIONS = [
   // Apply Crop's pending crop-area detection (#245).
   'getCropDraftSize', 'hasPendingCropDetection', 'noteConversionStarted', 'cancelCropDetection', 'sameCropRect',
   'isCurrentCropDetection', 'settlePendingCropDetection', 'startCropDetection', 'detectCropArea',
-  'applyCropDetectionOutcome'
+  'applyCropDetectionOutcome',
+  // Display-resolution sessions (#249).
+  ...DISPLAY_SESSION_HELPERS, 'applyGeometryWithoutBase', 'decodeRouteOf', 'describeBase', 'analysisAreaOf',
+  'displayProxyTarget', 'liveDisplayProxyKey', 'displaySessionEligible', 'coldHistory', 'displayStandIns',
+  'captureDisplaySession', 'tierASession', 'demoteDisplaySession', 'holdPreparingOriginal', 'ensureBase',
+  'ensureSource', 'prepareOriginalForTool', 'displayProxyMatches', 'requestSourceForDisplay',
+  'selfCheckDisplayProxy', 'spillDisplaySession', 'displaySessionMeta', 'forgetDisplayProxies',
+  'readSpilledDisplaySession', 'spilledDisplayEntry', 'activateDisplaySession', 'getColorAnalysisSample',
+  'hasSeparateConversionPreview'
 ];
 
 // The Apply Crop click handler, as a named function.
@@ -187,6 +199,32 @@ export function createHarness(base, { historyBudget = 768 * 1024 * 1024, session
     coreReprocessBusy: () => false, sanitizeRepairStrokes: strokes => strokes || [], sanitizeFrameMetadata: value => value || {},
     createSprocketEdgeSettings: value => value || {}, clearFullResolutionRenderState: () => {},
     geometryCounters: geometry.geometryCounters,
+    // #249: display-resolution sessions. Nothing spills unless a test gives
+    // a spill; decodes come from `target.decodeBase` (a lane's shared decode).
+    ensureSourcePromise: null, preparingOriginal: 0, displaySourceRequest: null,
+    displaySessionDiagnostics: displaySessionDiagnosticsStub(), displayProxySpill: emptyDisplayProxySpill(),
+    colorAnalysisSamples: new WeakMap(), displayProxyKey: displayProxy.displayProxyKey,
+    displayPlaneHash: displayProxy.displayPlaneHash, checksum32: displayProxy.checksum32,
+    displayPreviewSize: displayPreview.displayPreviewSize, resizeDisplayPreview: displayPreview.resizeDisplayPreview,
+    resizeDisplayPreviewInSlices: displayPreview.resizeDisplayPreviewInSlices,
+    previewTier: 'normal', previewTierMaxPixels: () => 4_000_000, webglState: {},
+    getCanvasContainerSize: () => ({ width: 1280, height: 920 }), window: { devicePixelRatio: 2 },
+    lensCorrectionActive: () => false, isRawLikeFileName: name => /\.(dng|nef|cr2|arw|rw2)$/.test(name),
+    usesSilverCoreConversion: () => true, hasFrameRepairs: () => false, isAiBrushEnabled: () => false,
+    requiresFilmBase: () => true, isLargeImage: image => Number(image?.width) * Number(image?.height) > target.largeImagePixels,
+    largeImagePixels: 16_000_000, photoActivation: null,
+    sharedDecodes: {
+      adopt: () => null,
+      open: () => {
+        const result = Promise.resolve(target.decodeBase ? target.decodeBase() : null).then(base => {
+          target.baseDecodes = (target.baseDecodes || 0) + 1;
+          return { base, rawMetadata: null };
+        });
+        return { result, release() {} };
+      }
+    },
+    applyLensCorrectionWithSettings: async source => source,
+    sampleAnalysisArea: analysisRegion.sampleAnalysisArea,
   };
   const context = vm.createContext(new Proxy(target, {
     has: () => true,

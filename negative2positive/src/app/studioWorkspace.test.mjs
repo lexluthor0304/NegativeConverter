@@ -222,7 +222,7 @@ assert.match(source, /photoSort\.sync\(\{ state, busy, photoSwitching: navigable
 // not navigation (#236): the strip stays usable while the panel is inert.
 assert.match(source, /const navigable = body\.dataset\.photoSwitching === 'true' \|\| Boolean\(detecting\);\n\s+set\(strip, 'inert', busy && !navigable\);/);
 assert.match(source, /set\(panel, 'inert', busy\);/);
-assert.match(source, /t\(detecting === 'frame' \? 'detectingFrame' :/, 'the frame notice reports the running detection');
+assert.match(source, /t\(preparing \? 'preparingOriginal' : detecting === 'frame' \? 'detectingFrame' :/, 'the frame notice reports the running detection, or the original being prepared (#249)');
 console.log('studioWorkspace: shared localized sort select, callback ownership and navigation locks passed');
 
 // #261: every sync() in one synchronous burst is one flush at the next

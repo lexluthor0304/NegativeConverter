@@ -29,11 +29,26 @@ function serializableSample(sample) {
 }
 
 export function createIndexedDbSampleBackend(indexedDB = globalThis.indexedDB, locks = globalThis.navigator?.locks) {
+  return createPrivateIndexedDbBackend({
+    prefix: ANALYSIS_SAMPLE_DATABASE_PREFIX, lockName, serialize: serializableSample, indexedDB, locks
+  });
+}
+
+/**
+ * A private, per-tab IndexedDB database (#214), reused by the display-proxy
+ * spill (#249) under its own prefix: the tab holds a Web Lock on its
+ * database for its lifetime, and a database of the prefix whose lock is free
+ * belongs to a closed or crashed tab and is deleted. Values pass through
+ * `serialize` on put. Null without IndexedDB.databases or Web Locks.
+ */
+export function createPrivateIndexedDbBackend({
+  prefix, lockName, serialize = value => value, indexedDB = globalThis.indexedDB, locks = globalThis.navigator?.locks
+}) {
   // Without both APIs a crashed tab's spill cannot be reclaimed safely. The
   // store still provides its bounded RAM cache and lossless decode fallback.
   if (!indexedDB || typeof indexedDB.databases !== 'function' || typeof locks?.request !== 'function') return null;
   const token = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const name = `${ANALYSIS_SAMPLE_DATABASE_PREFIX}${token}`;
+  const name = `${prefix}${token}`;
   let databasePromise = null;
   let releaseOwnership = null;
   let ownershipFinished = null;
@@ -66,7 +81,7 @@ export function createIndexedDbSampleBackend(indexedDB = globalThis.indexedDB, l
     try {
       for (const entry of await indexedDB.databases()) {
         const orphan = entry.name;
-        if (!orphan?.startsWith(ANALYSIS_SAMPLE_DATABASE_PREFIX) || orphan === name) continue;
+        if (!orphan?.startsWith(prefix) || orphan === name) continue;
         // The versioned prefix is reserved for this lock protocol. A live tab
         // owns the lock before its database exists; tab/process termination
         // releases it automatically, without relying on timestamps or unload.
@@ -121,7 +136,7 @@ export function createIndexedDbSampleBackend(indexedDB = globalThis.indexedDB, l
     });
   }
   return {
-    put: (key, sample) => transact('readwrite', store => store.put(serializableSample(sample), key)),
+    put: (key, sample) => transact('readwrite', store => store.put(serialize(sample), key)),
     get: key => transact('readonly', store => store.get(key)),
     delete: key => transact('readwrite', store => store.delete(key)),
     async clear() {

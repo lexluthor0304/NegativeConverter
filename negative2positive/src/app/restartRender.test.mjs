@@ -5,6 +5,7 @@ import { createCoreReprocessGates } from './coreReprocessDispatcher.js';
 import { routeCoreConversion, keepsFullPlaneOnDowngrade } from './fullResolutionRouting.js';
 import { DISABLED_GPU_PREVIEW_SCHEDULER } from './gpuPreviewScheduler.js';
 import { hasWindowEdits, geometryEdits, overlayWindowEdits } from './provisionalPhoto.js';
+import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
 
 // Exercise the actual browser lifecycle functions without loading a DOM,
 // OpenCV, or ONNX. Only their UI and expensive conversion dependencies are
@@ -35,6 +36,8 @@ function fixture({ repairs = true, locked = false, large = false } = {}) {
   const clearedTimers = [];
   const noop = () => {};
   const context = vm.createContext({
+    // #249: no photo here takes a display form.
+    ...displaySessionStubs(),
     state, coreReprocessToken: 1, coreReprocessGeneration: 0, loadGeneration: 1,
     _coreReprocessFullInFlight: false, _coreReprocessPreviewInFlight: false,
     _coreReprocessPending: null, _coreReprocessActive: 0,
@@ -89,6 +92,7 @@ function fixture({ repairs = true, locked = false, large = false } = {}) {
     },
   });
   vm.runInContext([
+    ...DISPLAY_SESSION_HELPERS,
     'clearFullResolutionRenderState', 'clearCoreReprocessTimer', 'cancelPendingTimers', 'clearDustState',
     'coreReprocessBusy', 'whenCoreReprocessIdle', 'noteCoreReprocessSettled',
     'runCoreReprocess', 'flushScheduledCoreReprocess',
@@ -343,6 +347,8 @@ function prepareFixture({ itemSettings = null, detectFrame = true, learned = 0 }
   const compareButton = { detecting: null };
   const noop = () => {};
   const context = vm.createContext({
+    // #249: no photo here takes a display form.
+    ...displaySessionStubs(),
     state, console, structuredClone, DOMException, AbortController, JSON, Promise,
     loadGeneration: 1, coreReprocessGeneration: 0, processNegativeInFlight: null, importDetectionAbort: null,
     fullResolutionRenderTimer: null, FULL_RESOLUTION_IDLE_DELAY_MS: 2500,
@@ -437,6 +443,7 @@ function prepareFixture({ itemSettings = null, detectFrame = true, learned = 0 }
     releaseBeforeAfterCanvas: noop,
   });
   vm.runInContext([
+    ...DISPLAY_SESSION_HELPERS,
     'prepareStudioPhoto', 'startImportDetection', 'buildFinalImportSettings', 'revealProvisionalPhoto',
     'armSettledConversion', 'processNegative', 'scheduleFullResolutionRender', 'withPendingEditsOf',
   ].map(functionSource).join('\n'), context);

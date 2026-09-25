@@ -12,6 +12,7 @@ import { DISABLED_GPU_PREVIEW_SCHEDULER } from './gpuPreviewScheduler.js';
 import { step3FrameReference } from './displayCanvas.js';
 import { getSprocketFrameLayout } from './sprocketFrame.js';
 import { displayTargetFor, isDisplayTarget, displaySizeServes, displayLevelGeometry, noteDisplayFilter, displayLevelFactor } from './displayPreview.js';
+import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
 
 // #237 in the app itself: the real routing, restore, viewport, Step-3 and
 // export-barrier functions of main.js (extracted with vm, as
@@ -94,6 +95,8 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
   // Each test tick is a new frame.
   const timeline = { currentTime: 0 };
   const context = vm.createContext({
+    // #249: no photo here takes a display form.
+    ...displaySessionStubs(),
     state, console: { error: noop, warn: noop, info: noop }, document: { timeline: null },
     // No two-stage stand-in (#255).
     provisionalUnits: () => false, ensureFullDecode: async () => true,
@@ -193,6 +196,7 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
     },
   });
   vm.runInContext([
+    ...DISPLAY_SESSION_HELPERS,
     'applyProcessedImageToState', 'applyPreviewProcessedImageToState',
     'fitStep3CanvasBox', 'setMainCanvasBox', 'displaySourceImageData', 'sprocketFrameSize', 'sprocketFrameReference',
     'applyRestoredImageToState', 'histogramSourceFor', 'buildPreviewSourceImageData',
@@ -378,7 +382,7 @@ function snapshotFixture(options) {
     lensCorrection: null, filmEdge: null, learnedDefaults: null, localExposure: null, look: null,
     expiredAnalysis: null, frameMetadata: null, autoFrame: { lastDiagnostics: null } });
   Object.assign(f.state.dustRemoval, { strength: 3, maxParticleSize: 40, brushSize: 5, showMask: false });
-  vm.runInContext(['captureSnapshot', 'restoreSnapshot'].map(functionSource).join('\n'), f.context);
+  vm.runInContext([...DISPLAY_SESSION_HELPERS, 'captureSnapshot', 'restoreSnapshot'].map(functionSource).join('\n'), f.context);
   return f;
 }
 
@@ -792,6 +796,66 @@ for (const large of [false, true]) {
   assert.ok(f.clients.shared.every(entry => entry.request.imageData === f.conversionSource));
   f.context.clearRepairedPreview();
   assert.equal(f.context.repairedPreviewSourceFor(f.state.conversionPreviewImageData), null);
+}
+
+// ---- #249: a Tier B session converts previews from its display proxy while
+// its source is pending; a full conversion and the export barrier wait for
+// ensureSource() ----
+{
+  const f = fixture();
+  const proxy = f.state.conversionPreviewImageData;
+  f.state.conversionSourceImageData = null;
+  f.state.sourcePending = { ...LARGE, key: 'proxy key' };
+  f.state.processedImageData = f.shown;
+  f.state.processedImageDataIsPreview = true;
+  f.state.fullResolutionPending = true;
+  assert.equal(f.context.hasSeparateConversionPreview(), true, 'the proxy is a separate preview: export owes the frame');
+  // A slider tick: a preview conversion of the proxy, no source needed.
+  f.nextFrame();
+  f.context.scheduleCoreReprocess({ full: false });
+  await Promise.resolve();
+  await settle();
+  assert.deepEqual(count(f), { preview: 1, shared: 0, exact: 0, mainThread: 0 });
+  assert.equal(f.clients.preview[0].request.imageData, proxy, 'the proxy is converted');
+  f.reply('preview');
+  await settle();
+  assert.equal(f.state.processedImageData.name, 'preview result', 'and shown');
+  assert.equal(f.state.processedImageDataIsPreview, true);
+  // An Undo/Reset asks for a full conversion: above 16 MP it is a display
+  // preview conversion too, still without the source.
+  const undone = f.context.rerenderWithCoreControls({ full: true });
+  await settle();
+  assert.equal(f.clients.preview.length, 2);
+  f.reply('preview');
+  assert.equal(await undone, true);
+  // The source being rebuilt while a preview converts keeps that preview.
+  let release;
+  f.context.ensureSource = () => new Promise(resolve => { release = resolve; });
+  f.nextFrame();
+  f.context.scheduleCoreReprocess({ full: false });
+  await Promise.resolve();
+  await settle();
+  f.state.conversionSourceImageData = f.conversionSource;
+  f.state.sourcePending = null;
+  f.reply('preview');
+  await settle();
+  assert.equal(f.state.processedImageData.name, 'preview result', 'a proxy frame still applies once the source is back');
+  // An exact render waits for ensureSource() before it converts.
+  f.state.conversionSourceImageData = null;
+  f.state.sourcePending = { ...LARGE, key: 'proxy key' };
+  const exporting = f.context.ensureFullResolutionReadyForExport();
+  await settle();
+  assert.equal(f.clients.exact.length + f.clients.shared.length, 0, 'nothing converts before the source is back');
+  f.state.conversionSourceImageData = f.conversionSource;
+  f.state.sourcePending = null;
+  release(true);
+  await settle();
+  await settle();
+  assert.equal(f.clients.exact.length, 1, 'then the exact render converts the source');
+  assert.equal(f.clients.exact[0].request.imageData, f.conversionSource);
+  f.reply('exact');
+  await exporting;
+  assert.equal(f.state.processedImageDataIsPreview, false);
 }
 
 console.log('previewPathRouting: downgraded undo/reset routing, kept planes, idle repair pass, restore flags and paint, viewport branches, Step-3 gate, export repair waits, aborted exact renders and the repaired preview source passed');

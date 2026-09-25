@@ -1,6 +1,8 @@
 import { applyAutomaticFilmType, applyFilmTypeOverride, sanitizeFilmTypeOverride } from './filmTypeOverride.js';
 import { decideRollFilmType, mergeRollDecision, ownFilmTypeVerdict, rollDecisionFrame, rollFilmTypeTarget, ROLL_MONOCHROME } from './rollFilmType.js';
 import { createPhotoSessionCache, backingBuffers } from './photoSessionCache.js';
+import { displayProxyKey, displayPlaneHash } from './displayProxy.js';
+import { createDisplayProxySpill, createDisplayProxyPort } from './displayProxyStore.js';
 import { createAdjustedPhotoPreview, samplePhotoPreviewSource, adjustPhotoPreviewSample } from './photoPreview.js';
 import { exactSettingsKey } from './settingsKey.js';
 import { sanitizeSemanticMap } from './semanticAnchors.js';
@@ -2387,6 +2389,14 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       provisional: null,
       fullDecode: null,
       rawDecodePending: false,
+      // A photo session restored without its decoded base (#249): the base's
+      // size and geometry id, until ensureBase() decodes it again. Planes the
+      // session dropped are size-only stand-ins ({ width, height, released }).
+      baseDescriptor: null,
+      // A display-resolution session (Tier B, #249): the conversion source's
+      // size and the key of the display proxy it restored, until
+      // ensureSource() rebuilds the source. Previews convert from the proxy.
+      sourcePending: null,
 
       // 16-bit pipeline (Stage 2+) — full-precision counterparts to the 8-bit fields above.
       // Shape: { width, height, data: Uint16Array }, RGBA, range [0, 65535].
@@ -2660,6 +2670,16 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // Smoke-run switch: cache photo sessions without their planes, as a
       // 60 MP session that does not fit the budget is.
       coldSessions: false
+    };
+    // Display-resolution sessions (#249), declared with the geometry state:
+    // what the tiers, the spill and the store did, for tests and the smoke
+    // run. `force` ('A' or 'B') skips the larger forms of a session, as a
+    // 60 MP photo that does not fit the budget would, so small fixtures
+    // exercise the tiers.
+    const displaySessionDiagnostics = {
+      tierA: 0, tierB: 0, demotions: 0, spills: 0, spillWrites: 0, spillFailures: 0, ramHits: 0, spillHits: 0, storeHits: 0,
+      recipeChanged: 0, provisional: 0, baseDecodes: 0, sourceBuilds: 0, baseMismatches: 0, selfChecks: 0,
+      selfCheckMismatches: 0, sampleMisses: 0, fills: 0, fillSkips: 0, force: null
     };
 
     function clearFullResolutionRenderState() {
@@ -3112,6 +3132,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       for (const key of SNAPSHOT_REF_KEYS) {
         state[key] = r[key];
       }
+      // A Tier A history entry keeps a stand-in for the frame (#249).
+      reviveFrameDescriptor();
       state.dustRemoval.mask = r.dustMask;
       state.dustRemoval.maskTag = r.dustMask ? (r.dustMaskTag ?? nextDustMaskTag()) : null;
       state.dustRemoval.inpaintedImageData = r.dustInpaintedImageData;
@@ -3854,6 +3876,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     function enterBeforeAfter(source = 'button') {
       if (state.beforeAfterActive) return;
       if (!canActivateBeforeAfter()) return;
+      // The reference is the full-resolution negative (#249): a Tier B session
+      // rebuilds it, and the next press compares.
+      if (state.sourcePending || isReleasedPlane(getBeforeAfterReferenceImageData())) {
+        void prepareOriginalForTool();
+        return;
+      }
 
       // Steps 1-2: the negative is already on screen, nothing to draw.
       const referenceImageData = state.currentStep >= 3 ? getBeforeAfterReferenceImageData() : null;
@@ -4546,7 +4574,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       };
     }
 
-    function buildRouterSettings(settings = state, source = state.loadedBaseImageData || state.originalImageData) {
+    function buildRouterSettings(settings = state, source = baseSizeSource()) {
       const router = usesSilverCoreConversion(settings)
         ? buildCoreConversionSettings(settings)
         : settings;
@@ -4569,7 +4597,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     // Geometry chain (base -> rotation -> mirror -> crop) for mapping strokes.
     // width/height are filled in by the adapter for the buffer it converts.
-    function localExposureGeometryFor(settings = state, source = state.loadedBaseImageData || state.originalImageData) {
+    function localExposureGeometryFor(settings = state, source = baseSizeSource()) {
       if (!source) return null;
       const live = settings === state;
       const angle = Number.isFinite(settings.rotationAngle) ? settings.rotationAngle : 0;
@@ -4589,7 +4617,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     }
 
     const colorAnalysisSamples = new WeakMap();
-    function getColorAnalysisSample(settings = state, source = state.loadedBaseImageData || state.originalImageData) {
+    function getColorAnalysisSample(settings = state, source = baseSizeSource()) {
       if (!source) return null;
       const meta = settings === state ? state.autoFrame.lastDiagnostics : settings.autoFrameMeta;
       const area = meta?.imageArea || meta?.analysisArea;
@@ -4597,6 +4625,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const key = JSON.stringify(area);
       const cached = colorAnalysisSamples.get(source);
       if (cached?.key === key) return cached.sample;
+      // A base descriptor (#249) carries the sample its session was left
+      // with; another area reads the base, which the tools changing it await.
+      if (source.released) {
+        displaySessionDiagnostics.sampleMisses++;
+        return null;
+      }
       const sample = sampleAnalysisArea(source, area);
       colorAnalysisSamples.set(source, { key, sample });
       return sample;
@@ -4616,7 +4650,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     // Two settings objects with the same key convert to the same pixels and
     // the same automatic analysis (see importDetection.js).
-    function conversionKey(settings, source = state.loadedBaseImageData || state.originalImageData) {
+    function conversionKey(settings, source = baseSizeSource()) {
       return importConversionKey({
         router: buildRouterSettings(settings, source),
         adjustment: buildAdjustmentSettings(settings),
@@ -4851,6 +4885,15 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // holds no pixels), and a display preview within the hysteresis band is kept.
     function refreshDisplayPreviewForViewport() {
       const source = state.conversionSourceImageData;
+      if (!source && state.sourcePending && state.currentStep >= 3 && !state.cropping && !state.beforeAfterActive
+        && previewTier !== 'reduced') {
+        // A Tier B session (#249): a display preview of another size needs
+        // the source; the proxy stays on screen until it is rebuilt.
+        const target = getDisplayPreviewSize(state.sourcePending);
+        const shown = state.conversionPreviewImageData;
+        if (shown?.width !== target.width || shown?.height !== target.height) requestSourceForDisplay();
+        return;
+      }
       if (!source || state.currentStep < 3 || state.cropping || state.beforeAfterActive) return;
       // A reduced preview-tier session (#263) sizes its own preview; its end
       // calls this again.
@@ -4895,7 +4938,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // level at the new size. At the normal tier nothing happens here; a viewport
     // change reaches the size through the settle hook, after the interaction.
     function ensureConversionPreviewForDisplay() {
-      const source = state.conversionSourceImageData;
+      // A Tier B session sizes by its pending source (#249).
+      const source = conversionSourceSize();
       const level = state.displayLevelImageData;
       if (!source || !level || previewTier !== 'reduced') return;
       const current = state.conversionPreviewImageData;
@@ -6740,7 +6784,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const positive = wbSample || state.previewSourceImageData || state.processedImageData;
       const source = reference || positive;
       if (!source) return;
-      const roi = resolveAnalysisRegion({ ...state, autoFrameMeta: state.autoFrame.lastDiagnostics }, state.loadedBaseImageData || state.originalImageData);
+      const roi = resolveAnalysisRegion({ ...state, autoFrameMeta: state.autoFrame.lastDiagnostics }, baseSizeSource());
       const estimate = state.semanticMap ? estimateAutoWhiteBalance(wbSample || processed, { anchors: state.semanticMap })
         : estimateAutoWhiteBalance(source, reference ? {} : analysisRegionSample(source, roi));
       if (estimate.confidence === 'low') {
@@ -6829,9 +6873,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // `wbSample` (processNegative's first frame): the worker also converts the
     // viewport-independent auto-WB sample of the source (#248 part 3).
     async function convertFromCurrentSource(settings = state, { preview = false, interactive = false, includeAnalysisPreview = true, retain16 = false, signal = null, client = null, previewSource = null, wbSample = false } = {}) {
-      const fullSource = state.conversionSourceImageData || state.croppedImageData || state.originalImageData;
-      if (!fullSource) return null;
-      if (!state.conversionSourceImageData) noteGeometryPixelRead('convertFromCurrentSource');
+      const fullSource = state.conversionSourceImageData || workingPlanes();
+      // A Tier B session (#249) converts previews from its display level while
+      // the source is pending; a full conversion awaits ensureSource().
+      if (!fullSource && !(preview && state.sourcePending && state.conversionPreviewImageData)) return null;
+      if (!state.conversionSourceImageData && fullSource) noteGeometryPixelRead('convertFromCurrentSource');
       // previewSource: the display preview source with its repairs filled
       // (Phase 2 of #237), for interactive preview frames only.
       const previewImage = preview ? state.conversionPreviewImageData : null;
@@ -6963,7 +7009,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // is not drawn from: the settle hook moves the target, and it is prepared
       // again. Measured at the normal tier (#263).
       if (preview) {
-        const target = getDisplayPreviewSize(state.conversionSourceImageData, undefined, 'normal');
+        const target = getDisplayPreviewSize(conversionSourceSize(), undefined, 'normal');
         if (!displaySizeServes(preview, target)) {
           if (previewTier === 'normal') scheduleDisplayPreviewResize();
           return false;
@@ -7425,7 +7471,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     function routeCoreRequest(request) {
       return routeCoreConversion({
         wantsFull: Boolean(request?.full), exact: request?.exact === true,
-        large: isLargeImage(state.conversionSourceImageData),
+        large: isLargeImage(conversionSourceSize()),
         repairs: hasFrameRepairs(), separatePreview: hasSeparateConversionPreview()
       });
     }
@@ -7434,7 +7480,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // as soon as the settings or the photo move on, instead of converting the
     // whole frame for a result that is thrown away.
     function beginFullResolutionConversion(options, token, generation) {
-      if (options.exact !== true || !isLargeImage(state.conversionSourceImageData)) return null;
+      if (options.exact !== true || !isLargeImage(conversionSourceSize())) return null;
       if (typeof AbortController !== 'function') return null;
       const entry = { controller: new AbortController(), token, generation };
       fullResolutionConversionAbort = entry;
@@ -7589,7 +7635,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const token = Number.isInteger(options.token) ? options.token : coreReprocessToken;
       const generation = options.generation ?? coreReprocessGeneration;
       const sourceRef = options.sourceRef || state.conversionSourceImageData;
-      if (generation !== coreReprocessGeneration || !usesSilverCoreConversion(state) || !state.conversionSourceImageData
+      if (generation !== coreReprocessGeneration || !usesSilverCoreConversion(state) || !conversionSourceSize()
         || (sourceRef && state.conversionSourceImageData !== sourceRef)) {
         // A request that can no longer render cannot settle a GPU frame either.
         gpuPreviewScheduler.flightEnded(token);
@@ -7622,6 +7668,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         if (full) {
           // Full-resolution path
           if (options.exact === true && token !== coreReprocessToken) return false;
+          // A Tier B session rebuilds its source first (#249).
+          if (!state.conversionSourceImageData && !(await ensureSource())) return false;
+          if (generation !== coreReprocessGeneration || (options.exact === true && token !== coreReprocessToken)) return false;
           const abort = beginFullResolutionConversion(options, token, generation);
           let processed;
           try {
@@ -7683,12 +7732,17 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           const retain16 = CORE_RETAIN_PREVIEW_PLANE && Boolean(hasSmallPreview) && options.retain16 !== false;
           const repairedSource = hasSmallPreview ? repairedPreviewSourceFor(state.conversionPreviewImageData) : null;
           if (hasSmallPreview && !repairedSource && repairedPreviewMasks) scheduleRepairedPreviewAfterInput();
+          const previewRef = state.conversionPreviewImageData;
           const previewProcessed = await convertFromCurrentSource(state, { preview: hasSmallPreview, interactive: true, includeAnalysisPreview: false, retain16,
             previewSource: repairedSource });
           if (!previewProcessed) return false;
           if (reducedInput) reducedDisplayImages.add(previewProcessed);
           if (generation !== coreReprocessGeneration) return false;
-          if (state.conversionSourceImageData !== sourceRef) return false;
+          // A Tier B frame converted from its proxy stays valid when
+          // ensureSource() installed the source meanwhile: it keeps the proxy
+          // as its display preview (#249).
+          if (state.conversionSourceImageData !== sourceRef
+            && !(sourceRef == null && state.conversionPreviewImageData === previewRef)) return false;
           // 連続入力中も完了したフレームを表示する。別画像の結果は破棄し、
           // 古い設定のフレームを「書き出し可能な原寸」としては扱わない。
           const superseded = token !== coreReprocessToken;
@@ -7906,9 +7960,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     // Decided by size, not identity (#248): the display target of a source of
     // at most ~16 MP resamples the source itself (its level), and is still a
-    // display-size conversion.
+    // display-size conversion. A Tier B session (#249) sizes by its pending
+    // source: its full-resolution frame is still owed.
     function hasSeparateConversionPreview() {
-      const source = state.conversionSourceImageData;
+      const source = conversionSourceSize();
       const preview = state.conversionPreviewImageData;
       return Boolean(source && preview && (preview.width < source.width || preview.height < source.height));
     }
@@ -7987,7 +8042,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // A 60 MP RAW plus its working 16-bit planes can exhaust WKWebView
       // before the user even exports. The display already has its own preview;
       // original-resolution export/repair calls startFullResolutionRender directly.
-      if (isLargeImage(sourceRef) && !hasFrameRepairs()) return null;
+      if (isLargeImage(conversionSourceSize()) && !hasFrameRepairs()) return null;
       fullResolutionRenderTimer = setTimeout(() => {
         fullResolutionRenderTimer = null;
         if (sourceRef && state.conversionSourceImageData !== sourceRef) return;
@@ -8021,6 +8076,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // A pending crop-area detection may still change the analysis area and
       // white balance (a hit converts again).
       await settlePendingCropDetection();
+      // A session restored without its original rebuilds it (#249).
+      if (state.baseDescriptor || state.sourcePending) await ensureSource();
       // Export reads the planes of the current geometry.
       await whenGeometrySettled();
       // Crop/analysis confirmation also runs processNegative directly. Its
@@ -8096,7 +8153,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     function scheduleCoreReprocess(options = {}) {
       const full = Boolean(options.full);
       if (!usesSilverCoreConversion(state)) return;
-      if (!state.conversionSourceImageData || state.currentStep < 3) return;
+      if (!conversionSourceSize() || state.currentStep < 3) return;
 
       // A display-only request (a zoom, window or DPR change on a preview-only
       // frame) converts unchanged settings at another size: it supersedes no
@@ -8241,13 +8298,30 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         // Convert the planes of the current geometry, never the previous one;
         // a build superseded while this waited is converted by its successor.
         if (!(await whenGeometrySettled()) || !isCurrentLoad(generation)) return;
-        const sourceData = state.croppedImageData || state.originalImageData;
-        if (!sourceData) return;
+        let sourceData = workingPlanes();
+        // A display-resolution session (#249) converts the display level it
+        // restored (#248), exactly as the source's own level would convert,
+        // while it still matches the geometry, lens and analysis area;
+        // otherwise the source is rebuilt first.
+        let proxy = null;
+        if (!sourceData && state.sourcePending) {
+          refreshCanvasContainerSize();
+          if (displayProxyMatches()) {
+            proxy = state.displayLevelImageData;
+          } else {
+            displaySessionDiagnostics.provisional++;
+            if (!(await ensureSource()) || !isCurrentLoad(generation)) return;
+            sourceData = workingPlanes();
+          }
+        }
+        if (!sourceData && !proxy) return;
+        const pendingSource = state.sourcePending;
         const isCurrentConversion = () => isCurrentLoad(generation)
           && processingGeneration === coreReprocessGeneration
-          && sourceData === (state.croppedImageData || state.originalImageData);
+          && (proxy ? state.sourcePending === pendingSource && state.displayLevelImageData === proxy
+            : sourceData === (state.croppedImageData || state.originalImageData));
         const trace = createPerfTrace('processNegative', {
-          pixels: getImageDataPixelCount(sourceData)
+          pixels: getImageDataPixelCount(sourceData || proxy)
         });
 
         const overlay = quiet ? quietLoadingOverlay : getLoadingOverlay();
@@ -8257,35 +8331,48 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         try {
           if (!isCurrentConversion()) return;
           overlay.updateProgress(10, lang.loadingConverting);
-          const correctedSourceData = await applyLensCorrectionWithSettings(sourceData, state, { updateUi: true });
-          if (!isCurrentConversion()) return;
-          trace.mark('lensCorrection', {
-            outputPixels: getImageDataPixelCount(correctedSourceData)
-          });
-          // The retained display level of this source (#248 part 3): the one the
-          // geometry pool built with the frame when lens correction left the
-          // frame as it is, else built here in row bands of about 12 ms before
-          // anything points at the new source.
-          const levelFactor = displayLevelFactor(correctedSourceData.width, correctedSourceData.height);
-          const prebuiltLevel = correctedSourceData.__displayLevel;
-          if (sourceData !== correctedSourceData && sourceData.__displayLevel) delete sourceData.__displayLevel;
-          const level = prebuiltLevel && displayLevelGeometry(prebuiltLevel).k === levelFactor ? prebuiltLevel
-            : await buildDisplayLevelInBands(correctedSourceData, levelFactor, { isCurrent: isCurrentConversion });
-          if (!level || !isCurrentConversion()) return;
-          trace.mark('displayLevel', { outputPixels: getImageDataPixelCount(level) });
-          invalidateSilverCoreCache();
-          // A GPU frame of the previous source has nothing left to settle.
-          gpuPreviewScheduler.cancel();
-          state.conversionSourceImageData = correctedSourceData;
-          state.displayLevelImageData = level;
-          state.autoWbSample = null;
-          // The comparison's reference was the previous source's.
-          if (!state.beforeAfterActive) releaseBeforeAfterCanvas();
-          // A new photo usually arrives with a layout change (panels, the
-          // loaded state) the observer has not reported yet; size its display
-          // preview from live layout once rather than convert it twice.
-          refreshCanvasContainerSize();
-          state.conversionPreviewImageData = conversionTargetFor(correctedSourceData, level, 'normal');
+          let correctedSourceData = null;
+          if (proxy) {
+            // The retained display level is the proxy (#249): the worker
+            // resamples it for the display target; the source stays pending.
+            invalidateSilverCoreCache();
+            gpuPreviewScheduler.cancel();
+            state.autoWbSample = null;
+            if (!state.beforeAfterActive) releaseBeforeAfterCanvas();
+            refreshCanvasContainerSize();
+            state.conversionPreviewImageData = conversionTargetFor(state.sourcePending, proxy, 'normal');
+          } else {
+            correctedSourceData = await applyLensCorrectionWithSettings(sourceData, state, { updateUi: true });
+            if (!isCurrentConversion()) return;
+            trace.mark('lensCorrection', {
+              outputPixels: getImageDataPixelCount(correctedSourceData)
+            });
+            // The retained display level of this source (#248 part 3): the one the
+            // geometry pool built with the frame when lens correction left the
+            // frame as it is, else built here in row bands of about 12 ms before
+            // anything points at the new source.
+            const levelFactor = displayLevelFactor(correctedSourceData.width, correctedSourceData.height);
+            const prebuiltLevel = correctedSourceData.__displayLevel;
+            if (sourceData !== correctedSourceData && sourceData.__displayLevel) delete sourceData.__displayLevel;
+            const level = prebuiltLevel && displayLevelGeometry(prebuiltLevel).k === levelFactor ? prebuiltLevel
+              : await buildDisplayLevelInBands(correctedSourceData, levelFactor, { isCurrent: isCurrentConversion });
+            if (!level || !isCurrentConversion()) return;
+            trace.mark('displayLevel', { outputPixels: getImageDataPixelCount(level) });
+            invalidateSilverCoreCache();
+            // A GPU frame of the previous source has nothing left to settle.
+            gpuPreviewScheduler.cancel();
+            state.conversionSourceImageData = correctedSourceData;
+            state.sourcePending = null;
+            state.displayLevelImageData = level;
+            state.autoWbSample = null;
+            // The comparison's reference was the previous source's.
+            if (!state.beforeAfterActive) releaseBeforeAfterCanvas();
+            // A new photo usually arrives with a layout change (panels, the
+            // loaded state) the observer has not reported yet; size its display
+            // preview from live layout once rather than convert it twice.
+            refreshCanvasContainerSize();
+            state.conversionPreviewImageData = conversionTargetFor(correctedSourceData, level, 'normal');
+          }
           const hasPreviewSource = usesSilverCoreConversion(state) && hasSeparateConversionPreview();
           overlay.updateProgress(hasPreviewSource ? 35 : 40, lang.loadingConverting);
 
@@ -8298,7 +8385,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
             return;
           }
           if (processed.__wbSample) {
-            state.autoWbSample = { source: correctedSourceData, image: processed.__wbSample };
+            // Keyed by the source, or by the level while it is pending (#249).
+            state.autoWbSample = { source: correctedSourceData || proxy, image: processed.__wbSample };
             delete processed.__wbSample;
           }
           trace.mark(hasPreviewSource ? 'previewConversion' : 'fullConversion', {
@@ -8320,8 +8408,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           state.dustRemoval.particleCount = 0;
           state.dustRemoval.cleanSource = null;
           goToStep(3);
-          // Crop mode's display proxy of this photo, at idle (#245).
-          scheduleCropViewProxy();
+          // Crop mode's display proxy of this photo, at idle (#245). A session
+          // without its base builds it once crop mode has the base (#249).
+          if (!state.baseDescriptor) scheduleCropViewProxy();
           syncBatchUIState({ reason: 'processNegative' });
           revealBatchFileList('processNegative');
           updatePreview();
@@ -8656,7 +8745,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           const modelRevision = aiRepair.revision;
           const dust = particleCount > 0 ? await commitDustPass(source, mask, isCurrent) : null;
           const inpainted = await inpaintManualBrush(dust ? dust.imageData : source, state,
-            state.loadedBaseImageData || state.originalImageData, lensMapping, isCurrent);
+            baseSizeSource(), lensMapping, isCurrent);
           if (!isCurrent() || source !== getDustSource()) return;
           state.dustRemoval.inpaintedImageData = inpainted;
           committed = { source, token, dustEnabled, dustMask: dustEnabled ? mask : null, strokes,
@@ -9518,6 +9607,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     }
 
     function displayNegative(imageData) {
+      // A size-only stand-in (#244, #249) has no pixels to draw.
+      if (!imageData || imageData.released || isGeometryFrame(imageData)) return;
       resetZoomPan();
       renderAdjustedImageDataToMainCanvas(imageData, imageData);
       updateSprocketControlsUI();
@@ -9574,7 +9665,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     const PHOTO_SESSION_BUDGET_BYTES = (lowMemoryPhotoDevice() ? 128 : 768) * 1024 * 1024;
     // Only inactive photos are retained here. Taking the destination before
     // storing the outgoing photo lets A -> B -> A fit a one-photo budget.
-    const photoSessions = createPhotoSessionCache({ maxBytes: PHOTO_SESSION_BUDGET_BYTES });
+    // An entry the budget pushes out is demoted to its display form, or
+    // spilled (#249), not dropped.
+    const photoSessions = createPhotoSessionCache({
+      maxBytes: PHOTO_SESSION_BUDGET_BYTES, onEvict: (item, value) => demoteDisplaySession(item, value)
+    });
     const photoPreviews = createPhotoSessionCache({ maxBytes: 48 * 1024 * 1024 });
     // The prefetched next photo (#243): one base-only entry of its own, so an
     // unvisited prefetch never evicts the photo the user just left (A/B/A).
@@ -10247,16 +10342,19 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (item?.provisional) return rememberPhotoBase(item);
       // A two-stage import before its full decode is converted keeps its base only (#255).
       if (item && state.provisional?.item === item) return rememberPhotoBase(item);
-      if (!item || item.file !== state.loadedFile || !state.loadedBaseImageData || state.rawDecodePending) return;
+      const base = state.loadedBaseImageData;
+      // A session restored without its base (#249) is remembered again too.
+      if (!item || item.file !== state.loadedFile || !(base || state.baseDescriptor) || state.rawDecodePending) return;
       // A reduced preview-tier frame (#263) is never a settled view, nor is
-      // one still waiting for its normal-size tick.
+      // one still waiting for its normal-size tick, nor one whose original is
+      // being rebuilt (#249).
       const settled = state.currentStep >= 3 && state.processedImageData && !processNegativeInFlight
-        && !state.geometryPending
+        && !state.geometryPending && !ensureSourcePromise && !state.baseDescriptor?.decoding
         && !coreReprocessBusy() && !coreReprocessTimer && !state.dustRemoval.processing
         && !dustDetectionTimer && !pendingBrushRepairs && !dustDrawing && !dustAiRefresh.rects.length
         && previewTier === 'normal' && !displayIsReduced();
       const entry = {
-        file: item.file, base: state.loadedBaseImageData, rawMetadata: state.rawMetadata,
+        file: item.file, base, baseDescriptor: describeBase(base), rawMetadata: state.rawMetadata,
         key: photoSettingsKey(item), snapshot: settled ? captureSnapshot('photoSession') : null,
         undo: settled ? undoStack.slice() : [], redo: settled ? redoStack.slice() : [],
         previewOnly: state.processedImageDataIsPreview, fullResolutionPending: state.fullResolutionPending,
@@ -10270,21 +10368,45 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         entry.snapshot.frame = { previewOnly: true, fullResolutionPending: true };
         entry.previewOnly = true;
       }
-      let stored = !geometryDiagnostics.coldSessions && photoSessions.put(item, entry);
-      if (!stored && entry.snapshot) {
+      // Every form of an eligible photo carries its display form (Tier B):
+      // an eviction demotes the entry to it (#249).
+      const display = settled ? captureDisplaySession(item, entry) : null;
+      if (display) entry.display = display;
+      const force = displaySessionDiagnostics.force;
+      // #244's smoke switch caches sessions without their planes.
+      const coldOnly = geometryDiagnostics.coldSessions;
+      let stored = Boolean(base) && !force && !coldOnly && !state.sourcePending && photoSessions.put(item, entry);
+      if (!stored && !coldOnly && force !== 'B' && !state.sourcePending && entry.snapshot) {
+        // Tier A: the conversion source and display planes, without the base
+        // and the rotated frame. History that pins its own display planes
+        // goes cold only when that is what keeps it in the budget.
+        for (const stripPinned of [false, true]) {
+          const tierA = tierASession(entry, { stripPinned });
+          if (!tierA) break;
+          if (photoSessions.put(item, tierA)) {
+            stored = true;
+            displaySessionDiagnostics.tierA++;
+            break;
+          }
+        }
+      }
+      if (!stored && base && entry.snapshot && !force) {
         // Too large with its planes (#244): keep the recipe, the history as
         // scalars and the base. Opening the photo again rebuilds the planes
         // from the base in the pool behind the adjusted preview kept below.
         const cold = snapshot => ({ ...snapshot, refs: { cold: true } });
-        // Dust-stroke entries (#259) only patch the planes they hold; a cold
-        // history rebuilds and re-detects instead.
-        const coldHistory = entries => entries.filter(entry => !entry.dustDelta).map(cold);
         stored = photoSessions.put(item, {
           ...entry, snapshot: cold(entry.snapshot), undo: coldHistory(entry.undo), redo: coldHistory(entry.redo),
           previewOnly: false, fullResolutionPending: false
         });
       }
-      if (!stored) {
+      if (!stored && display) {
+        // Tier B: the display planes only; spilled when even they do not fit.
+        stored = photoSessions.put(item, display);
+        if (stored) displaySessionDiagnostics.tierB++;
+        else stored = spillDisplaySession(item, display);
+      }
+      if (!stored && base && !force) {
         // Huge geometry/history must not prevent reuse of a base that fits.
         stored = photoSessions.put(item, { file: entry.file, base: entry.base, rawMetadata: entry.rawMetadata });
       }
@@ -10292,7 +10414,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         // The 1200 px proxy only serves a cold revisit after eviction, so the
         // click does not build it. Sample now (a few ms, and the deferred task
         // then pins no full-resolution plane) and adjust after the next paint,
-        // with the settings of this moment (curve LUTs change in place).
+        // with the settings of this moment (curve LUTs change in place). A
+        // spilled display session shows it while it converts (#249).
         const sample = samplePhotoPreviewSource(currentConvertedPreviewSource(), { maxSize: 1200 });
         const adjustments = buildAdjustmentSettings(state);
         const { r, g, b } = adjustments.curves;
@@ -10315,6 +10438,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       cancelGeometryJob();
       const frame = state.originalImageData;
       state.originalImageData = frame ? { width: frame.width, height: frame.height, released: true } : null;
+      // A session left without its base keeps its descriptors in the cache.
+      state.baseDescriptor = null;
+      state.sourcePending = null;
       for (const key of ['croppedImageData', 'processedImageData', 'displayImageData', 'conversionSourceImageData',
         'conversionPreviewImageData', 'displayLevelImageData', 'autoWbSample', 'previewSourceImageData', 'histogramSourceImageData',
         'webglSourceImageData']) {
@@ -10339,6 +10465,583 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       state.loadedFile = null;
       void switchToFile(index);
       return true;
+    }
+
+    // ===========================================
+    // Display-resolution sessions (#249)
+    // ===========================================
+    // A photo left while settled is cached in the largest form that fits the
+    // session budget:
+    //  - full: base, planes and history (#220);
+    //  - Tier A: its conversion source and display planes, without the base
+    //    and the whole rotated frame; history entries that pinned a dropped
+    //    plane keep their scalars (cold, #244), so the depth survives;
+    //  - cold (#244): base, recipe and scalar history;
+    //  - Tier B: only the display planes of a large frame whose settled view
+    //    is display-resolution (the display proxy, the processed preview, the
+    //    colour-analysis sample), history as scalars;
+    //  - the base alone.
+    // Every form of an eligible photo carries its Tier B form, so an evicted
+    // entry is demoted to it instead of dropped, and a Tier B entry that no
+    // longer fits spills to disk (the display proxy spill below).
+    //
+    // A session restored without its base keeps `state.baseDescriptor` (the
+    // base's size and geometry id) and size-only stand-ins for the planes it
+    // dropped; one restored without its source keeps `state.sourcePending`
+    // too. Proxies never become a base, a plane or a conversion source: every
+    // reader of the base awaits ensureBase(), every full-resolution reader
+    // ensureSource(), and previews convert from the proxy meanwhile.
+
+    // The base, or the size of the base a session without one was built from.
+    function baseSizeSource() {
+      return state.loadedBaseImageData || state.baseDescriptor || state.originalImageData;
+    }
+
+    // The conversion source, or the size of the one a Tier B session awaits.
+    function conversionSourceSize() {
+      return state.conversionSourceImageData || state.sourcePending || null;
+    }
+
+    function releasedPlane(width, height) {
+      return { width, height, released: true };
+    }
+
+    function isReleasedPlane(image) {
+      return Boolean(image?.released);
+    }
+
+    // The working planes (the crop, else the frame) when they hold pixels.
+    function workingPlanes() {
+      const planes = state.croppedImageData || state.originalImageData;
+      return planes && !planes.released && !isGeometryFrame(planes) ? planes : null;
+    }
+
+    // The geometry the installed planes or their stand-ins were built with.
+    function sessionGeometryKey() {
+      const installed = state.croppedImageData || state.originalImageData;
+      return installed ? geometryMemo.get(installed) || null : null;
+    }
+
+    // How the base was decoded: only LibRaw's full 16-bit output (sensor
+    // defects repaired) and the scan decoders are reproducible routes. An
+    // embedded-preview or half-size fallback is never persisted.
+    function decodeRouteOf(file, base) {
+      if (!base) return null;
+      const name = String(file?.name || '').toLowerCase();
+      const has16 = Boolean(base.__image16?.data);
+      if (isRawLikeFileName(name)) return has16 && !base.__fullSize ? 'libraw16' : 'raw-fallback';
+      if (/\.png$/.test(name)) return has16 ? 'png16' : 'png8';
+      return has16 ? 'scan16' : 'scan8';
+    }
+
+    // A size-only stand-in for the base: registered under the base's geometry
+    // id, with the base's colour-analysis sample, so the kept planes still
+    // match the memo and conversions read the same sample.
+    function describeBase(base, file = state.loadedFile) {
+      if (!base) return state.baseDescriptor;
+      if (base.released) return base;
+      const descriptor = { width: base.width, height: base.height, has16: Boolean(base.__image16?.data),
+        route: decodeRouteOf(file, base), released: true };
+      geometryBaseIds.set(descriptor, geometryBaseId(base));
+      const sample = colorAnalysisSamples.get(base);
+      if (sample) colorAnalysisSamples.set(descriptor, sample);
+      return descriptor;
+    }
+
+    // The lens remap applyLensCorrectionWithSettings runs, or null.
+    function lensSignature(settings = state) {
+      if (!lensCorrectionActive(settings)) return null;
+      const lens = resolveLensCorrection(settings);
+      return JSON.stringify([lens.selectedLens, lens.params, lens.modes]);
+    }
+
+    function analysisAreaOf(meta) {
+      const area = meta?.imageArea || meta?.analysisArea;
+      return area ? JSON.stringify(area) : null;
+    }
+
+    // The display preview's target for a conversion source of this size, with
+    // the inputs getDisplayPreviewSize reads (live viewport, DPR, zoom, tier
+    // and texture limit). Exactly its arithmetic.
+    function displayProxyTarget(source, { zoom = state.zoomLevel, tier = previewTier } = {}) {
+      const container = getCanvasContainerSize();
+      const inputs = {
+        viewportWidth: container.width - 20 || 1280, viewportHeight: container.height - 20 || 900,
+        dpr: window.devicePixelRatio || 1, zoom, maxPixels: previewTierMaxPixels(tier),
+        maxDimension: webglState.maxTextureSize || 8192
+      };
+      return { ...displayPreviewSize(source.width, source.height, inputs), ...inputs };
+    }
+
+    // The key of the display proxy the live photo's settled view converts.
+    function liveDisplayProxyKey(item = getCurrentQueueItem(), { target = null } = {}) {
+      const base = state.loadedBaseImageData ? describeBase(state.loadedBaseImageData) : state.baseDescriptor;
+      const source = conversionSourceSize();
+      if (!item || !base || !source) return null;
+      const key = geometryKeyFor(base, { rotationAngle: state.rotationAngle, mirrored: state.mirrored, cropRegion: state.cropRegion });
+      return displayProxyKey({
+        id: item.id, route: base.route, base, rotationAngle: key.angle, mirrored: key.mirrored, cropRegion: key.crop,
+        lens: lensSignature(state), area: analysisAreaOf(state.autoFrame.lastDiagnostics),
+        target: target || displayProxyTarget(source)
+      });
+    }
+
+    // Whether the live photo's settled view is exactly the preview conversion
+    // of its display preview: a conversion source over 16 MP without
+    // repairs, with a display preview of its own, and a recipe whose frame
+    // and film-edge detections are decided, so reopening it runs none. A
+    // colour frame without a crop reads its border pixels for Step 2's mode:
+    // it takes the exact path instead.
+    function displaySessionEligible(item) {
+      const source = conversionSourceSize();
+      const settings = item?.settings;
+      return Boolean(source && isLargeImage(source) && !hasFrameRepairs() && !isAiBrushEnabled()
+        && usesSilverCoreConversion(state) && state.conversionPreviewImageData
+        && state.conversionPreviewImageData !== state.conversionSourceImageData
+        && settings?.autoFrameMeta && settings.filmEdge?.checked
+        && (state.cropRegion || !requiresFilmBase()));
+    }
+
+    // History entries as scalars: dust-stroke entries (#259) patch the planes
+    // they hold and cannot go cold, so they are left out, as for #244's cold
+    // sessions.
+    function coldHistory(entries) {
+      return entries.filter(entry => !entry.dustDelta).map(entry => (entry.refs?.cold ? entry : { ...entry, refs: { cold: true } }));
+    }
+
+    // Stand-ins for a Tier B session's planes, with the memo of the geometry
+    // they stand for (a settings-only refresh compares against it).
+    function displayStandIns(key, frameSize, cropSize) {
+      const frame = releasedPlane(frameSize.width, frameSize.height);
+      const crop = key.crop ? releasedPlane(cropSize.width, cropSize.height) : null;
+      geometryMemo.set(crop || frame, key);
+      return { frame, crop };
+    }
+
+    // The Tier B form of the live photo (display planes only), or null.
+    function captureDisplaySession(item, entry) {
+      if (!entry.snapshot || !displaySessionEligible(item)) return null;
+      const base = entry.baseDescriptor;
+      const source = conversionSourceSize();
+      const key = geometryKeyFor(base, { rotationAngle: state.rotationAngle, mirrored: state.mirrored, cropRegion: state.cropRegion });
+      const frameSize = { width: key.frameWidth, height: key.frameHeight };
+      const cropPlanes = state.croppedImageData || state.originalImageData;
+      const { frame, crop } = displayStandIns(key, frameSize, cropPlanes);
+      // The processed preview is exactly the preview conversion only while
+      // it is one; a full-resolution plane (after an export) is converted
+      // again from the proxy on return.
+      const settledPreview = state.processedImageDataIsPreview && entry.snapshot.refs?.processedImageData === state.processedImageData;
+      const refs = {
+        originalImageData: frame, croppedImageData: crop,
+        processedImageData: settledPreview ? state.processedImageData : null,
+        conversionSourceImageData: null, conversionPreviewImageData: state.conversionPreviewImageData,
+        previewSourceImageData: settledPreview ? state.previewSourceImageData : null,
+        histogramSourceImageData: settledPreview ? state.histogramSourceImageData : null,
+        webglSourceImageData: settledPreview ? state.webglSourceImageData : null,
+        dustMask: null, dustMaskTag: null, dustInpaintedImageData: null, dustCleanSource: null, dustState: null
+      };
+      const sample = getColorAnalysisSample(state, base);
+      return {
+        tier: 'B', file: entry.file, base: null, baseDescriptor: base, rawMetadata: entry.rawMetadata, key: entry.key,
+        snapshot: { label: entry.snapshot.label, settings: entry.snapshot.settings, refs, frame: { previewOnly: true, fullResolutionPending: true } },
+        undo: coldHistory(entry.undo), redo: coldHistory(entry.redo), previewOnly: true, fullResolutionPending: true,
+        zoom: entry.zoom, panX: entry.panX, panY: entry.panY, filmEdge: entry.filmEdge, particleCount: 0,
+        sourcePending: { width: source.width, height: source.height, key: liveDisplayProxyKey(item), area: analysisAreaOf(state.autoFrame.lastDiagnostics) },
+        sample, geometry: key, frameSize, cropSize: crop ? { width: crop.width, height: crop.height } : null
+      };
+    }
+
+    // The Tier A form of `entry` (the live photo's full entry), or null when
+    // the base is the working image itself. The whole rotated frame beside a
+    // crop goes with the base (a size-only stand-in takes its place, in
+    // history too); so does a full-resolution positive of a large frame
+    // without repairs, which returns to its display preview (#237). History
+    // entries that still pin a dropped plane become cold; with `stripPinned`,
+    // so do the ones that pin display planes of their own.
+    function tierASession(entry, { stripPinned = false } = {}) {
+      if (!entry.snapshot || entry.snapshot.refs?.cold || !state.conversionSourceImageData) return null;
+      const standIns = new Map();
+      const releaseFrame = refs => {
+        const frame = refs.originalImageData;
+        if (!refs.croppedImageData || !frame || isReleasedPlane(frame)) return refs;
+        if (!standIns.has(frame)) standIns.set(frame, releasedPlane(frame.width, frame.height));
+        return { ...refs, originalImageData: standIns.get(frame) };
+      };
+      const refs = releaseFrame({ ...entry.snapshot.refs });
+      let frame = entry.snapshot.frame;
+      const planes = refs.croppedImageData || refs.originalImageData;
+      if (!planes || planes === entry.base || isReleasedPlane(planes)) return null;
+      const repairs = Boolean(entry.snapshot.settings?.dustRemoval?.enabled || entry.snapshot.settings?.repairStrokes?.length);
+      if (!frame?.previewOnly && isLargeImage(refs.conversionSourceImageData) && !repairs && !isAiBrushEnabled()
+        && refs.previewSourceImageData && refs.processedImageData && refs.previewSourceImageData !== refs.processedImageData) {
+        refs.processedImageData = refs.previewSourceImageData;
+        frame = { previewOnly: true, fullResolutionPending: true };
+      }
+      const kept = backingBuffers(refs);
+      const dropped = backingBuffers([entry.base, entry.snapshot.refs.originalImageData]);
+      for (const buffer of kept) dropped.delete(buffer);
+      const pinsDropped = value => {
+        for (const buffer of backingBuffers(value)) if (dropped.has(buffer)) return true;
+        return false;
+      };
+      const pinsOwn = value => {
+        for (const buffer of backingBuffers(value)) if (!kept.has(buffer)) return true;
+        return false;
+      };
+      const history = entries => entries.flatMap(snapshot => {
+        if (snapshot.dustDelta) return pinsDropped(snapshot.dustDelta) ? [] : [snapshot];
+        if (snapshot.refs?.cold) return [snapshot];
+        const hot = { ...snapshot, refs: releaseFrame(snapshot.refs) };
+        return pinsDropped(hot.refs) || (stripPinned && pinsOwn(hot.refs)) ? [{ ...snapshot, refs: { cold: true } }] : [hot];
+      });
+      return {
+        ...entry, tier: 'A', base: null, snapshot: { ...entry.snapshot, refs, frame },
+        undo: history(entry.undo), redo: history(entry.redo),
+        previewOnly: frame?.previewOnly ?? entry.previewOnly, fullResolutionPending: frame?.fullResolutionPending ?? entry.fullResolutionPending
+      };
+    }
+
+    // An entry the session budget pushed out: its Tier B form goes back in
+    // as the oldest entry when it fits, and spills to disk otherwise; a
+    // Tier B entry spills (#249).
+    function demoteDisplaySession(item, value) {
+      if (!value || !state.fileQueue.includes(item)) return;
+      const display = value.tier === 'B' ? value : value.display;
+      if (!display) return;
+      if (display !== value) {
+        displaySessionDiagnostics.demotions++;
+        if (photoSessions.putIfRoom(item, display, { oldest: true })) return;
+      }
+      spillDisplaySession(item, display);
+    }
+
+    // The display-proxy spill (#249). The worker starts on the first write.
+    // Until the desktop store takes it (part 3), the desktop app keeps no
+    // spill, so no pixels reach WebKit's origin storage there.
+    const displayProxySpill = createDisplayProxySpill({
+      port: createDisplayProxyPort({
+        workerFactory: typeof Worker === 'function' && !isTauriDesktop()
+          ? () => new Worker(new URL('../workers/displayProxyWorker.js', import.meta.url), { type: 'module' }) : null
+      }),
+      availableBytes: async () => {
+        const estimate = await navigator.storage?.estimate?.();
+        return estimate && Number.isFinite(estimate.quota) ? estimate.quota - (estimate.usage || 0) : null;
+      }
+    });
+
+    // Spills a Tier B entry: its display proxy, colour-analysis sample and
+    // what installs it again (sizes, geometry, keys). The recipe is not
+    // stored: it always comes from the queue item. A proxy of another zoom
+    // than 1 is not spilled (its zoom-1 plane would need the source).
+    function spillDisplaySession(item, display) {
+      if (!display?.snapshot || !state.fileQueue.includes(item) || display.zoom !== 1) return false;
+      const image = display.snapshot.refs.conversionPreviewImageData;
+      if (!image) return false;
+      const meta = displaySessionMeta(display);
+      displaySessionDiagnostics.spills++;
+      void displayProxySpill.put(item.id, { image, sample: display.sample, proxyKey: display.sourcePending.key, meta }).then(written => {
+        if (written) displaySessionDiagnostics.spillWrites++;
+        else displaySessionDiagnostics.spillFailures++;
+      });
+      return true;
+    }
+
+    // What installs a spilled or stored proxy again, besides the planes.
+    function displaySessionMeta(display) {
+      const base = display.baseDescriptor;
+      const key = display.geometry;
+      return {
+        base: { width: base.width, height: base.height, has16: base.has16, route: base.route },
+        geometry: { angle: key.angle, mirrored: key.mirrored, crop: key.crop, frameWidth: key.frameWidth, frameHeight: key.frameHeight },
+        cropSize: display.cropSize, source: { width: display.sourcePending.width, height: display.sourcePending.height },
+        area: display.sourcePending.area,
+        rawMetadata: display.rawMetadata || null, filmEdge: display.filmEdge || null
+      };
+    }
+
+    // Stored proxies of a photo are purged (a failed self-check, a decode
+    // that no longer matches).
+    function forgetDisplayProxies(item) {
+      if (!item) return;
+      const cached = photoSessions.get(item);
+      if (cached && !cached.base && (cached.tier === 'A' || cached.tier === 'B')) photoSessions.delete(item);
+      void displayProxySpill.delete(item.id);
+    }
+
+    // The spilled Tier B entry of `item` when it still fits the item's
+    // recipe geometry, as an entry the activation below installs.
+    async function readSpilledDisplaySession(item) {
+      if (!displayProxySpill.has(item.id)) return null;
+      const stored = await displayProxySpill.get(item.id);
+      if (!stored) return null;
+      return spilledDisplayEntry(item, stored);
+    }
+
+    function spilledDisplayEntry(item, { image, sample, meta }) {
+      const base = { width: meta.base.width, height: meta.base.height, has16: meta.base.has16, route: meta.base.route, released: true };
+      geometryBaseIds.set(base, nextGeometryBaseId++);
+      const key = geometryKeyFor(base, { rotationAngle: meta.geometry.angle, mirrored: meta.geometry.mirrored, cropRegion: meta.geometry.crop });
+      const { frame, crop } = displayStandIns(key, { width: key.frameWidth, height: key.frameHeight }, meta.cropSize || { width: 0, height: 0 });
+      if (sample && meta.area) colorAnalysisSamples.set(base, { key: meta.area, sample });
+      return {
+        tier: 'B', spilled: true, file: item.file, base: null, baseDescriptor: base, rawMetadata: meta.rawMetadata, filmEdge: meta.filmEdge,
+        planes: { frame, crop, proxy: image }, sample,
+        sourcePending: { width: meta.source.width, height: meta.source.height, key: displayProxySpill.proxyKey(item.id), area: meta.area }
+      };
+    }
+
+    // Opens a photo from its display form under the veil (#249): a Tier A or
+    // Tier B entry whose recipe changed while it was away (a roll commit,
+    // Sync colours), a Tier B entry without its settled preview, or one read
+    // back from the spill. The kept planes (or stand-ins and the proxy) are
+    // installed, the item's recipe restored over them, and the photo is
+    // prepared as a cold open would be: a geometry change decodes the base
+    // (ensureBase) behind the veil; the conversion reads the kept source, or
+    // the proxy while it still matches (processNegative).
+    async function activateDisplaySession(fileItem, entry, generation) {
+      displaySessionDiagnostics[entry.spilled ? 'spillHits' : 'recipeChanged']++;
+      state.loadedFile = fileItem.file;
+      state.loadedBaseImageData = null;
+      state.baseDescriptor = entry.baseDescriptor;
+      state.sourcePending = entry.sourcePending || null;
+      state.rawMetadata = entry.rawMetadata || null;
+      state.filmEdge = entry.filmEdge || null;
+      expiredAnalysisKey = null;
+      state.displayImageData = null;
+      state.samplingMode = null;
+      lensMapCache.clear();
+      invalidateSilverCoreCache();
+      state.zoomLevel = 1; state.panX = 0; state.panY = 0;
+      if (entry.snapshot) {
+        restoreSnapshot(entry.snapshot, { reprocess: false, previewOnly: entry.previewOnly });
+        undoStack.splice(0, undoStack.length, ...entry.undo);
+        redoStack.splice(0, redoStack.length, ...entry.redo);
+      } else {
+        // A spilled proxy: stand-ins for every plane, the proxy as the display preview.
+        clearFullResolutionRenderState();
+        state.originalImageData = entry.planes.frame;
+        state.croppedImageData = entry.planes.crop;
+        state.processedImageData = null;
+        state.conversionSourceImageData = null;
+        state.conversionPreviewImageData = entry.planes.proxy;
+        state.previewSourceImageData = null;
+        state.histogramSourceImageData = null;
+        state.webglSourceImageData = null;
+        clearDustState();
+        clearUndoHistory();
+        state.currentStep = 1;
+      }
+      state.fullResolutionPending = true;
+      updateUndoRedoButtons();
+      state.photoSwitchPhase = 'preparing';
+      studioWorkspace?.sync();
+      resetZoomPan();
+      if (fileItem.settings) {
+        restoreSettings(fileItem.settings, { refreshDisplay: false });
+        fileItem.isDirty = false;
+      }
+      // Detections a recipe still owes (the frame, the film edge) read the base.
+      if (!fileItem.settings?.autoFrameMeta || !fileItem.settings?.filmEdge?.checked) {
+        if (!(await ensureBase()) || !isCurrentLoad(generation)) return;
+      }
+      await prepareStudioPhoto(generation, fileItem, { quiet: true });
+    }
+
+    // Counts of the editor waiting on the original (ensureBase/ensureSource).
+    let preparingOriginal = 0;
+    function holdPreparingOriginal() {
+      preparingOriginal++;
+      document.body.dataset.studioPreparing = 'original';
+      studioWorkspace?.sync();
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        preparingOriginal--;
+        if (!preparingOriginal) delete document.body.dataset.studioPreparing;
+        studioWorkspace?.sync();
+      };
+    }
+
+    // The decoded base of a session restored without it: the normal loader's
+    // decode (joined with a lane's when one runs it, #243), checked against
+    // the stored size and plane depth, then installed under the geometry id
+    // the kept planes were built with, so they stay valid. Resolves the base,
+    // or null when the photo was left or the decode differs (the photo then
+    // reopens cold).
+    function ensureBase() {
+      if (state.loadedBaseImageData) return Promise.resolve(state.loadedBaseImageData);
+      const descriptor = state.baseDescriptor;
+      const file = state.loadedFile;
+      if (!descriptor || !file) return Promise.resolve(null);
+      if (descriptor.decoding) return descriptor.decoding;
+      const generation = loadGeneration;
+      const signal = photoActivation?.signal || null;
+      displaySessionDiagnostics.baseDecodes++;
+      const release = holdPreparingOriginal();
+      const decoding = (async () => {
+        const lease = sharedDecodes.adopt(file, { signal }) || sharedDecodes.open(file, { signal });
+        try {
+          const decoded = await lease.result;
+          if (!isCurrentLoad(generation) || state.baseDescriptor !== descriptor || state.loadedFile !== file) return null;
+          const base = decoded?.base;
+          if (!base || base.width !== descriptor.width || base.height !== descriptor.height
+            || Boolean(base.__image16?.data) !== descriptor.has16 || decodeRouteOf(file, base) !== descriptor.route) {
+            displaySessionDiagnostics.baseMismatches++;
+            console.warn('The decoded original differs from the one this photo was left with; opening it again.', file.name);
+            const item = getCurrentQueueItem();
+            if (item) forgetDisplayProxies(item);
+            if (item) reactivateReleasedPhoto(item);
+            return null;
+          }
+          geometryBaseIds.set(base, geometryBaseId(descriptor));
+          const sample = colorAnalysisSamples.get(descriptor);
+          if (sample) colorAnalysisSamples.set(base, sample);
+          state.loadedBaseImageData = base;
+          if (!state.rawMetadata && decoded.rawMetadata) state.rawMetadata = decoded.rawMetadata;
+          state.baseDescriptor = null;
+          reviveFrameDescriptor();
+          return base;
+        } catch (error) {
+          if (error?.name !== 'AbortError') console.warn('Decoding the original of a restored photo failed:', error);
+          return null;
+        } finally {
+          lease.release();
+          release();
+          if (descriptor.decoding === decoding) descriptor.decoding = null;
+        }
+      })();
+      descriptor.decoding = decoding;
+      return decoding;
+    }
+
+    // Beside a kept crop, a stand-in for the whole frame becomes a frame
+    // descriptor of the base again (#244) once the base is back.
+    function reviveFrameDescriptor() {
+      const base = state.loadedBaseImageData;
+      const crop = state.croppedImageData;
+      if (!base || !crop || isReleasedPlane(crop) || !isReleasedPlane(state.originalImageData)) return;
+      const key = geometryMemo.get(crop);
+      if (key && key.baseId === geometryBaseId(base)) state.originalImageData = createGeometryFrame(base, key);
+    }
+
+    // The full-resolution planes and conversion source of a session restored
+    // without them: the base (ensureBase), the geometry chain from it in the
+    // pool, then lens correction, exactly as a cold open builds them. The
+    // display proxy stays the conversion preview; the self-check compares it
+    // with the one the new source gives. Resolves whether they are in place.
+    let ensureSourcePromise = null;
+    function ensureSource() {
+      if (!state.baseDescriptor && !state.sourcePending) return Promise.resolve(true);
+      if (ensureSourcePromise) return ensureSourcePromise;
+      const generation = loadGeneration;
+      const pending = state.sourcePending;
+      const release = holdPreparingOriginal();
+      const promise = (async () => {
+        const base = await ensureBase();
+        if (!base || !isCurrentLoad(generation)) return false;
+        if (!state.sourcePending) return Boolean(state.conversionSourceImageData || workingPlanes());
+        // A geometry edit made meanwhile builds its planes from the same base.
+        if (state.geometryPending) await whenGeometrySettled();
+        if (!isCurrentLoad(generation)) return false;
+        if (!workingPlanes()) {
+          if (!(await applyGeometryFromBase({ cropRegion: state.cropRegion })) || !isCurrentLoad(generation)) return false;
+          await whenGeometrySettled();
+        }
+        const planes = workingPlanes();
+        if (!planes || !isCurrentLoad(generation)) return false;
+        if (state.sourcePending !== pending) return Boolean(state.conversionSourceImageData);
+        const corrected = await applyLensCorrectionWithSettings(planes, state, { updateUi: false });
+        if (!isCurrentLoad(generation) || state.sourcePending !== pending || workingPlanes() !== planes) {
+          return Boolean(state.conversionSourceImageData);
+        }
+        state.conversionSourceImageData = corrected;
+        state.sourcePending = null;
+        displaySessionDiagnostics.sourceBuilds++;
+        void selfCheckDisplayProxy(pending, corrected, generation);
+        return true;
+      })().catch(error => {
+        console.warn('Rebuilding the full-resolution source failed:', error);
+        return false;
+      }).finally(() => {
+        release();
+        if (ensureSourcePromise === promise) ensureSourcePromise = null;
+      });
+      ensureSourcePromise = promise;
+      return promise;
+    }
+
+    // A tool that reads the base or full-resolution planes (crop mode, Auto
+    // Frame, film-base sampling, the flat field, a restart) on a session
+    // without them: editing is locked and "Preparing original…" shown until
+    // ensureSource() is done. Resolves whether the tool may run now.
+    async function prepareOriginalForTool() {
+      if (!state.baseDescriptor && !state.sourcePending) return true;
+      const generation = loadGeneration;
+      const owned = !document.body.dataset.studioBusy;
+      if (owned) {
+        document.body.dataset.studioBusy = 'true';
+        studioWorkspace?.sync();
+      }
+      try {
+        return (await ensureSource()) && isCurrentLoad(generation) && !state.baseDescriptor && !state.sourcePending;
+      } finally {
+        if (owned && isCurrentLoad(generation) && !geometryBusyOwner) {
+          delete document.body.dataset.studioBusy;
+          studioWorkspace?.sync();
+        }
+      }
+    }
+
+    // Whether the stored display proxy is the display preview the live
+    // geometry, lens, analysis area and viewport would build.
+    function displayProxyMatches(item = getCurrentQueueItem()) {
+      const pending = state.sourcePending;
+      if (!pending || !state.conversionPreviewImageData) return false;
+      if (pending.area !== analysisAreaOf(state.autoFrame.lastDiagnostics)) return false;
+      return pending.key === liveDisplayProxyKey(item);
+    }
+
+    // The zoom, a window resize or a DPR change asked a Tier B session for a
+    // display preview of another size: the proxy stays on screen (resized by
+    // the canvas) while the source is rebuilt, then the refresh runs again.
+    let displaySourceRequest = null;
+    function requestSourceForDisplay() {
+      if (displaySourceRequest) return;
+      const generation = loadGeneration;
+      displaySourceRequest = ensureSource().then(ready => {
+        displaySourceRequest = null;
+        if (ready && isCurrentLoad(generation) && !state.sourcePending) refreshDisplayPreviewForViewport();
+      });
+    }
+
+    // When ensureSource() rebuilt the source of a frame opened from a proxy,
+    // the proxy must be the display level the new source gives (#248: the
+    // geometry pool builds it with the planes; else it is built here in
+    // bands). A match keeps the proxy (its identity is the preview worker's
+    // cached source); a mismatch purges the stored proxies of the photo and
+    // converts from the new level.
+    async function selfCheckDisplayProxy(pending, source, generation) {
+      const level = state.displayLevelImageData;
+      if (!level || !pending?.key) return;
+      const isCurrent = () => isCurrentLoad(generation) && state.conversionSourceImageData === source && state.displayLevelImageData === level;
+      const prebuilt = source.__displayLevel;
+      delete source.__displayLevel;
+      await yieldToEventLoop();
+      if (!isCurrent()) return;
+      const { k } = displayLevelGeometry(level);
+      const rebuilt = prebuilt && displayLevelGeometry(prebuilt).k === k ? prebuilt
+        : await buildDisplayLevelInBands(source, k, { isCurrent });
+      if (!rebuilt || !isCurrent()) return;
+      displaySessionDiagnostics.selfChecks++;
+      if (rebuilt.width === level.width && rebuilt.height === level.height && displayPlaneHash(rebuilt) === displayPlaneHash(level)) return;
+      displaySessionDiagnostics.selfCheckMismatches++;
+      console.error('A display proxy did not match its rebuilt source; its stored copies are purged.', state.loadedFile?.name);
+      const item = getCurrentQueueItem();
+      if (item) forgetDisplayProxies(item);
+      state.displayLevelImageData = rebuilt;
+      state.conversionPreviewImageData = conversionTargetFor(source, rebuilt, 'normal');
+      scheduleCoreReprocess({ full: false });
     }
 
     // Runs after the next paint (rAF, then a task); a hidden page paints no
@@ -10745,6 +11448,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         if (imageData) {
           state.loadedFile = file;
           state.loadedBaseImageData = imageData;
+          state.baseDescriptor = null;
+          state.sourcePending = null;
           state.originalImageData = imageData;
           state.croppedImageData = null;
           state.cropRegion = null;
@@ -11484,6 +12189,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
       const sourceData = state.croppedImageData || state.originalImageData;
       if (!sourceData) return 'border';
+      // A session restored without its planes (#249) keeps its mode; only
+      // frames with a crop (no pixel read above) restore that way.
+      if (sourceData.released) return state.step2Mode === 'noBorder' ? 'noBorder' : 'border';
       noteGeometryPixelRead('suggestStep2Mode');
       const suggestionBuffer = state.step2Mode === 'noBorder'
         ? state.coreBorderBufferBorderValue
@@ -11623,16 +12331,23 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       }
     }
 
-    document.getElementById('sampleBaseBtn').addEventListener('click', () => {
+    // Film-base sampling and detection read the negative's planes (#249).
+    function whenPlanesReadable(task) {
+      if (!state.baseDescriptor && !state.sourcePending) return task();
+      void prepareOriginalForTool().then(ready => { if (ready) task(); });
+      return undefined;
+    }
+
+    document.getElementById('sampleBaseBtn').addEventListener('click', () => whenPlanesReadable(() => {
       if (!requiresFilmBase()) return;
       if (state.step2Mode !== 'border') return;
       exitBeforeAfter();
       state.samplingMode = 'filmBase';
       updateSamplingModeUI();
       updateBeforeAfterButtonState();
-    });
+    }));
 
-    document.getElementById('autoDetectBtn').addEventListener('click', () => {
+    document.getElementById('autoDetectBtn').addEventListener('click', () => whenPlanesReadable(() => {
       if (!requiresFilmBase()) return;
       const sourceData = state.croppedImageData || state.originalImageData;
       if (!sourceData) return;
@@ -11643,7 +12358,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       updateFilmBasePreview();
       markCurrentFileDirty();
       scheduleSilverSourceRefresh({ immediate: true });
-    });
+    }));
 
     document.getElementById('useReferenceBtn').addEventListener('click', () => {
       if (!hasRollReference()) {
@@ -12981,9 +13696,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         && a.crop.width === b.crop.width && a.crop.height === b.crop.height;
     }
 
+    // The geometry of the installed planes; size-only stand-ins of a
+    // session restored without them (#249) are not installed planes.
     function installedGeometryKey() {
       const installed = state.croppedImageData || state.originalImageData;
-      return installed ? geometryMemo.get(installed) || null : null;
+      return installed && !installed.released ? geometryMemo.get(installed) || null : null;
     }
 
     function hasExactPlane16(image) {
@@ -13170,7 +13887,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       state.geometryReady = job.done;
       if (holdBusy) holdGeometryBusy(job);
       const isCurrent = () => geometryJob === job && token === geometryToken && isCurrentLoad(generation);
-      buildGeometryPlanes(base, key, adopted, isCurrent).then(planes => {
+      // A session restored without its base (#249) builds once ensureBase()
+      // has decoded it; the base is registered under the descriptor's id.
+      const decoded = base?.released ? ensureBase() : Promise.resolve(base);
+      decoded.then(real => (real && isCurrent() ? buildGeometryPlanes(real, key, adopted, isCurrent) : null)).then(planes => {
         if (!planes || !isCurrent()) return false;
         installGeometryPlanes(key, planes, { memo: !adopted || adopted.exact });
         if (job.refreshDisplay) displayNegative(state.croppedImageData || state.originalImageData);
@@ -13189,6 +13909,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // `cropRegion`, which is sanitised against the frame at once. Resolves true
     // when those planes are installed and still current.
     function applyGeometryFromBase({ cropRegion = state.cropRegion, refreshDisplay = false, holdBusy = true } = {}) {
+      if (!state.loadedBaseImageData && state.baseDescriptor) return applyGeometryWithoutBase({ cropRegion, refreshDisplay, holdBusy });
       const base = state.loadedBaseImageData || state.originalImageData;
       if (!base || isGeometryFrame(base)) {
         cancelGeometryJob();
@@ -13219,6 +13940,31 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         return Promise.resolve(true);
       }
       return startGeometryJob(base, key, takeAdoptedRotation(base, key.angle), refreshDisplay, holdBusy);
+    }
+
+    // applyGeometryFromBase for a session restored without its base (#249):
+    // the key is taken on the base descriptor, which carries the base's
+    // geometry id. The same geometry keeps the planes (or stand-ins) it has,
+    // as a settings-only refresh must, instead of clearing the crop; another
+    // one is built by a job that first decodes the base.
+    function applyGeometryWithoutBase({ cropRegion, refreshDisplay, holdBusy = true }) {
+      const descriptor = state.baseDescriptor;
+      const key = geometryKeyFor(descriptor, { rotationAngle: state.rotationAngle, mirrored: state.mirrored, cropRegion });
+      state.cropRegion = key.crop ? { ...key.crop } : null;
+      if (geometryJob && geometryJob.base === descriptor && sameGeometryKey(geometryJob.key, key)) {
+        pendingImportRotation = null;
+        if (refreshDisplay) geometryJob.refreshDisplay = true;
+        return geometryJob.done;
+      }
+      if (sameGeometryKey(key, sessionGeometryKey())) {
+        cancelGeometryJob();
+        pendingImportRotation = null;
+        const planes = workingPlanes();
+        if (refreshDisplay && planes) displayNegative(planes);
+        return Promise.resolve(true);
+      }
+      pendingImportRotation = null;
+      return startGeometryJob(descriptor, key, null, refreshDisplay, holdBusy);
     }
 
     // Runs `then` once the planes an edit asked for are installed, unless a
@@ -13263,6 +14009,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // The whole working frame's pixels for the rare reader that needs them
     // (built in the pool, not kept in state).
     async function geometryFramePixels() {
+      // A session restored without its planes rebuilds them first (#249).
+      if ((state.baseDescriptor || state.sourcePending) && !(await ensureSource())) return null;
       await whenGeometrySettled();
       const frame = state.originalImageData;
       if (!frame || !isGeometryFrame(frame)) return frame;
@@ -13354,8 +14102,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       pushUndo('rotation');
       // The new frame is the base rotated once by the total angle (#244), not
       // the current frame rotated again: restore and batch export build it
-      // that way, so single export now matches them.
-      const base = state.loadedBaseImageData || state.originalImageData;
+      // that way, so single export now matches them. A session without its
+      // base (#249) sizes the frames from its descriptor.
+      const base = baseSizeSource();
       // The scalars, not the installed planes (which lag behind a pending
       // build), say which frame the crop is on.
       const sourceFrame = geometryFrameSize(base, state.rotationAngle);
@@ -13401,7 +14150,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     }
 
     function rebuildGeometryFromBase() {
-      if (!(state.loadedBaseImageData || state.originalImageData)) return Promise.resolve(false);
+      if (!baseSizeSource()) return Promise.resolve(false);
       return applyGeometryFromBase();
     }
 
@@ -13414,7 +14163,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // The crop box was drawn on the pre-mirror view, so flip it to keep the
       // framed area over the same part of the picture.
       if (state.cropRegion) {
-        const frameWidth = geometryFrameSize(state.loadedBaseImageData || state.originalImageData, state.rotationAngle).width;
+        const frameWidth = geometryFrameSize(baseSizeSource(), state.rotationAngle).width;
         state.cropRegion = {
           ...state.cropRegion,
           left: frameWidth - (state.cropRegion.left + state.cropRegion.width)
@@ -13665,6 +14414,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     async function runStudioAutoFrame(selected) {
       if (document.body.dataset.studioBusy || state.cropping || isDesktopBatchExportLocked() || !state.originalImageData) return;
+      // The frame detector reads the base (#249).
+      if ((state.baseDescriptor || state.sourcePending) && !(await prepareOriginalForTool())) return;
+      if (document.body.dataset.studioBusy) return;
       const generation = loadGeneration;
       studioAutoFrameRunning = true;
       document.body.dataset.studioBusy = 'true';
@@ -14435,6 +15187,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     function beginCropMode(options = {}) {
       // Apply's crop-area detection runs in the auto-frame worker.
       void warmUpAutoFrameWorker();
+      // Crop mode draws and detects on the base (#249).
+      if (state.baseDescriptor || state.sourcePending) {
+        return prepareOriginalForTool().then(ready => (ready ? beginCropMode(options) : undefined));
+      }
       if (state.geometryPending) return whenGeometrySettled().then(() => openCropMode(options));
       openCropMode(options);
       return Promise.resolve();
@@ -15369,6 +16125,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     function restartPhotoProcessing() {
       if (isDesktopBatchExportLocked()) return;
+      // Reprocessing starts from the decoded base (#249).
+      if (!state.photoSwitchTarget && (state.baseDescriptor || state.sourcePending)) {
+        void prepareOriginalForTool().then(ready => { if (ready) restartPhotoProcessing(); });
+        return;
+      }
       if (state.photoSwitchTarget) {
         ++loadGeneration;
         supersedeActivation();
@@ -15449,6 +16210,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       photoPrefetch.clear();
       thumbnailSources.clear();
       watchRollSamples.clear();
+      // The spilled display proxies go with the session (#249).
+      void displayProxySpill.clear();
       state.photoSwitchTarget = null;
       state.photoSwitchPhase = null;
       delete document.body.dataset.photoSwitching;
@@ -15474,6 +16237,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // Reset all state
       state.loadedFile = null;
       state.loadedBaseImageData = null;
+      state.baseDescriptor = null;
+      state.sourcePending = null;
       state.originalImageData = null;
       state.croppedImageData = null;
       state.cropRegion = null;
@@ -16056,6 +16821,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       notifyReviewExport([currentItem].filter(Boolean));
       // The settings are persisted below: a pending crop-area hit first.
       await settlePendingCropDetection();
+      // A session restored without its original rebuilds it (#249): the
+      // linear DNG and every encode read full-resolution planes.
+      if ((state.baseDescriptor || state.sourcePending) && !(await ensureSource())) {
+        showToast(getLocalizedText('loadError', 'Error loading file'));
+        return;
+      }
       // The linear DNG reads the geometry planes directly.
       await whenGeometrySettled();
       if (processNegativeInFlight) await processNegativeInFlight;
@@ -18360,6 +19131,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       }
       photoSessions.retainKeys(state.fileQueue);
       photoPreviews.retainKeys(state.fileQueue);
+      void displayProxySpill.retain(state.fileQueue.map(item => item.id));
       thumbnailSources.retainKeys(state.fileQueue);
       watchRollSamples.retainKeys(state.fileQueue);
       syncEmbeddedPreviewQueue();
@@ -18511,9 +19283,17 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       try {
         // A settled cache hit is synchronous: do not paint a loading veil or
         // announce a new live-region message for an already available photo.
-        if (cached?.snapshot && cached.file === fileItem.file && cached.key === photoSettingsKey(fileItem)) {
+        // Tier A and B entries (#249) restore the same way, without their base
+        // (and a Tier B one without its source); a Tier B entry whose settled
+        // preview was a full-resolution plane converts again below.
+        const displayForm = cached && !cached.base && (cached.tier === 'A' || cached.tier === 'B') && cached.file === fileItem.file;
+        if (cached?.snapshot && cached.file === fileItem.file && cached.key === photoSettingsKey(fileItem)
+          && !(cached.tier === 'B' && !cached.snapshot.refs?.processedImageData)) {
           state.loadedFile = fileItem.file;
           state.loadedBaseImageData = cached.base;
+          state.baseDescriptor = cached.base ? null : cached.baseDescriptor || null;
+          state.sourcePending = cached.base ? null : cached.sourcePending || null;
+          if (displayForm) displaySessionDiagnostics.ramHits++;
           state.rawMetadata = cached.rawMetadata;
           state.filmEdge = cached.filmEdge;
           expiredAnalysisKey = null;
@@ -18567,11 +19347,23 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         // app holds any. An exact 1200 px copy needs no camera JPEG, and a
         // retained decoded base reaches the exact positive in ~0.3 s.
         const presented = presentRetainedPreview(fileItem);
-        if (presented !== 'cached' && !(cached?.base && cached.file === fileItem.file)) requestProvisionalFrame(fileItem);
+        const displayEntry = displayForm ? cached : null;
+        const spilled = !cached?.base && !displayEntry && displayProxySpill.has(fileItem.id);
+        if (presented !== 'cached' && !(cached?.base && cached.file === fileItem.file) && !displayEntry && !spilled) requestProvisionalFrame(fileItem);
         // Paint the target identity before decoder or cached-base preparation
         // can occupy the main thread. Hidden tabs need not await a paused rAF.
         await yieldToPaint();
         if (!isCurrentLoad(generation) || state.fileQueue[index] !== fileItem) return;
+        // A display-resolution session whose recipe changed while it was
+        // away, or one read back from the spill (#249): its planes are
+        // installed and converted under the item's recipe, without a decode.
+        const display = displayEntry || (spilled ? await readSpilledDisplaySession(fileItem) : null);
+        if (!isCurrentLoad(generation) || state.fileQueue[index] !== fileItem) return;
+        if (display) {
+          await activateDisplaySession(fileItem, display, generation);
+          return;
+        }
+        if (spilled) requestProvisionalFrame(fileItem);
         // A cold target waits a short dwell before its file is read: a double
         // click or a fast Arrow+Enter run supersedes it before the 79-95 MB
         // read, the SOI scan and the worker spawn (#243). Nothing to save
@@ -19534,9 +20326,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       }
     }
     function canReuseLoadedRollSource(item) {
-      // Never a two-stage import's half-size stand-in (#255).
-      return item === getCurrentQueueItem() && !state.rawDecodePending && !state.provisional
-        && !state.loadedBaseImageData?.__decodeScale;
+      // Never a two-stage import's half-size stand-in (#255). A photo
+      // restored without its base (#249) has nothing to reuse.
+      return item === getCurrentQueueItem() && Boolean(state.loadedBaseImageData) && !state.rawDecodePending
+        && !state.provisional && !state.loadedBaseImageData.__decodeScale;
     }
     function studioBackgroundReady() {
       // A two-stage import's roll persist and sample wait for its full decode (#255).
@@ -19823,7 +20616,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         direction: backgroundDirection,
         visible,
         needs: index => backgroundNeeds(state.fileQueue[index]),
-        hasSession: index => photoSessions.has(state.fileQueue[index]),
+        hasSession: index => photoSessions.has(state.fileQueue[index]) || displayProxySpill.has(state.fileQueue[index]?.id),
         canPrefetch: index => canPrefetchPhoto(state.fileQueue[index]),
         busy: index => busyFiles.has(state.fileQueue[index]?.file)
       });
@@ -19882,7 +20675,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (k < 0) return null;
       for (let position = k + backgroundDirection; position >= 0 && position < order.length; position += backgroundDirection) {
         const item = state.fileQueue[order[position]];
-        if (!photoSessions.has(item)) return item;
+        if (!photoSessions.has(item) && !displayProxySpill.has(item?.id)) return item;
       }
       return null;
     }
@@ -21070,7 +21863,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const centre = Number(state[axis.key]) || 0;
       const values = testStripValues(axis, centre, step, count);
       const small = testStripSample(source, 360);
-      const base = state.loadedBaseImageData || state.originalImageData;
+      const base = baseSizeSource();
       testStrip.rendering = true;
       testStrip.axisKey = axis.key;
       testStrip.values = values;
@@ -21576,7 +22369,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         const analysis = await measureExpiredAnalysisWithSpatial(
           current,
           { ...state, autoFrameMeta: state.autoFrame.lastDiagnostics },
-          state.loadedBaseImageData || state.originalImageData,
+          baseSizeSource(),
           { isCurrent }
         );
         expiredOpenCvState = 'ready';
@@ -21623,7 +22416,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const sample = expiredAnalysisSample(
         processed,
         { ...state, autoFrameMeta: state.autoFrame.lastDiagnostics },
-        state.loadedBaseImageData || state.originalImageData
+        baseSizeSource()
       );
       const analysis = analyzeExpiredFilm(sample.image, { ...sample.options, anchors: state.semanticMap, placement: sample.placement });
       if (!analysis) {
@@ -22122,7 +22915,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return new Promise(resolve => brushRepairWaiters.push(resolve));
     }
 
-    async function inpaintManualBrush(source, settings = state, base = state.loadedBaseImageData || state.originalImageData,
+    async function inpaintManualBrush(source, settings = state, base = baseSizeSource(),
       lensMapping = settings === state ? state.conversionSourceImageData?.__lensMapping : null, isCurrent = () => true,
       { memoInsert = true } = {}) {
       assertRepairCurrent(isCurrent);
@@ -22514,7 +23307,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const strokes = state.repairStrokes;
       const source = state.dustRemoval.cleanSource;
       if (dustRefreshRepairMask.strokes !== strokes || dustRefreshRepairMask.source !== source) {
-        const base = state.loadedBaseImageData || state.originalImageData;
+        const base = baseSizeSource();
         const geometry = { ...localExposureGeometryFor(state, base), width: target.width, height: target.height };
         dustRefreshRepairMask = { strokes, source,
           mask: buildRepairMask(strokes, geometry, state.conversionSourceImageData?.__lensMapping).mask };
@@ -24172,6 +24965,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         const item = getCurrentQueueItem();
         if (!await ensureFullDecodeWithNotice('flat-field') || getCurrentQueueItem() !== item) return;
       }
+      // The flat field is measured on the base (#249).
+      if ((state.baseDescriptor || state.sourcePending) && !(await prepareOriginalForTool())) return;
       const source = state.loadedBaseImageData || state.originalImageData;
       const currentItem = getCurrentQueueItem();
       if (!source || document.body.dataset.studioBusy) return;

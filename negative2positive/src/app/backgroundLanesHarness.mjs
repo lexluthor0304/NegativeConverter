@@ -16,6 +16,7 @@ import { createRollSampleCache } from './rollSampleCache.js';
 import { reducedTileGeometry, tileGeometryKey } from './reducedGeometry.js';
 import { sanitizeCropRect } from './imageGeometry.js';
 import { MEMORY_FUNCTIONS, memoryGlobals } from './memoryHarness.mjs';
+import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
 
 const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8');
 export function functionSource(name) {
@@ -109,6 +110,8 @@ export function createLaneFixture({ count = 5, order = null, current = 0, prefet
     // The memory budget (#258): real, large enough to admit everything.
     ...memoryGlobals({ budgetBytes: memoryBudgetBytes, setTimer: clock.setTimeout, clearTimer: clock.clearTimeout }),
     getPerfNow: clock.now,
+    // #249: no photo here takes a display form.
+    ...displaySessionStubs(),
     state, console: { warn: (...args) => warnings.push(args), error: noop, info: noop },
     Map, Set, WeakMap, Promise, AbortController, DOMException, structuredClone, JSON, Math, Number, Boolean, Array,
     setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,

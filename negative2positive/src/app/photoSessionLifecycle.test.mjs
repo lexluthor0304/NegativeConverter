@@ -7,6 +7,7 @@ import { createRollSampleCache } from './rollSampleCache.js';
 import { exactSettingsKey } from './settingsKey.js';
 import { createHiddenJobGate } from './hiddenJobGate.js';
 import { applyStrokePatch } from './dustStrokeHistory.js';
+import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
 
 // Execute the actual lifecycle control flow. Only DOM/decoder/AI dependencies
 // are stubbed; deferred worker replies expose intermediate ownership states.
@@ -115,8 +116,10 @@ function fixture() {
     getLoadingOverlay: () => ({ hide: noop }), noteCoreReprocessSettled: noop,
     assertRepairCurrent: valid => { if (!valid()) throw new DOMException('Superseded', 'AbortError'); },
     hiddenJobs: createHiddenJobGate({ isHidden: () => false }),
+    // #249: no photo here takes a display form.
+    ...displaySessionStubs(),
   });
-  vm.runInContext(['photoSettingsKey', 'rememberPhotoSession', 'invalidatePhotoActivation',
+  vm.runInContext([...DISPLAY_SESSION_HELPERS, 'photoSettingsKey', 'rememberPhotoSession', 'invalidatePhotoActivation',
     'cancelStudioThumbnailUpdate', 'isCurrentLoad', 'deferFileListRefresh', 'updateFileListUI',
     'refreshThumbnailStates', 'nextDustMaskTag', 'needsDustPrivateBuffer', 'installDustPrivateBuffer',
     'ensureDustPrivateBuffer', 'prepareDustPrivateBuffer', 'strokeDustOffMainThread',
