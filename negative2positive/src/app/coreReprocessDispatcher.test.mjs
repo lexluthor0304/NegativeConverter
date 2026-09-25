@@ -154,7 +154,7 @@ function schedulerFixture({ repairs = false, large = false, gpu = null } = {}) {
     buildPreviewSourceImageData: image => image,
     buildHistogramSourceImageData: image => ({ sampleOf: image }),
     webglState: { gl: null }, schedulePreviewUpdate: () => {},
-    gpuPreviewScheduler: DISABLED_GPU_PREVIEW_SCHEDULER, gpuPreviewCanTake: () => false,
+    gpuPreviewScheduler: DISABLED_GPU_PREVIEW_SCHEDULER, gpuPreviewCanTake: () => false, gpuPreview: { status: 'none' },
     coreReprocessTimer: null, coreReprocessScheduled: null,
     coreReprocessToken: 0, coreReprocessGeneration: 0,
     _coreReprocessFullInFlight: false, _coreReprocessPreviewInFlight: false,

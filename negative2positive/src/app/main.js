@@ -4465,6 +4465,17 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         state.histogramSourceImageData = buildHistogramSourceImageData(state.previewSourceImageData);
         state.webglSourceImageData = state.previewSourceImageData;
         if (webglState.gl) webglState.sourceDirty = true;
+        // The GPU preview (#239) draws SilverCore drags from the conversion
+        // preview: bring it to the new size too, so a drag is not drawn at the
+        // old one, and prepare it again at idle. It converts nothing.
+        if (GPU_PREVIEW_MODE !== 'off' && gpuApplyUsable()) {
+          const previewTarget = getDisplayPreviewSize(source);
+          const preview = state.conversionPreviewImageData;
+          if (preview && (preview.width !== previewTarget.width || preview.height !== previewTarget.height)) {
+            state.conversionPreviewImageData = resizeDisplayPreview(source, previewTarget);
+            scheduleGpuPreviewWarmup();
+          }
+        }
         // A CPU canvas already holding the full-resolution frame needs no
         // redraw: the zoom only scales it.
         if (isWebGLActive() || state.lastRenderQuality !== 'full') schedulePreviewUpdate();
@@ -6056,6 +6067,14 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (GPU_PREVIEW_MODE === 'off' || !gpuApplyUsable()) return false;
       const preview = state.conversionPreviewImageData;
       const { prepared, analysis } = gpuPreview;
+      // As the worker path checks on every tick, a display preview that no
+      // longer has the display's size (a DPR or viewport change no event
+      // reported) is not drawn from: the worker tick resizes it, and it is
+      // prepared again. Measured at the normal tier (#263).
+      if (preview) {
+        const target = getDisplayPreviewSize(state.conversionSourceImageData, undefined, 'normal');
+        if (preview.width !== target.width || preview.height !== target.height) return false;
+      }
       return Boolean(preview && prepared && prepared.previewId === gpuObjectId(preview) && prepared.generation === coreReprocessGeneration
         && analysis && analysis.previewId === prepared.previewId && analysis.generation === coreReprocessGeneration);
     }
@@ -6743,7 +6762,14 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         } else {
           // DPR の変更は CSS resize を発火しない場合もあるため、入力時にも確認。
           // The preview tier (#263) may also have changed since the last tick.
+          const previewBefore = state.conversionPreviewImageData;
           ensureConversionPreviewForDisplay();
+          // A resized display preview at the normal tier: the GPU preview (#239)
+          // prepares it now, ahead of this conversion, rather than at idle.
+          if (state.conversionPreviewImageData !== previewBefore && previewTier === 'normal' && gpuPreview.status === 'ready') {
+            requestGpuPrepare();
+            requestGpuAnalyze();
+          }
           // Check if preview source is actually smaller than full source
           const hasSmallPreview = state.conversionPreviewImageData
             && state.conversionPreviewImageData !== state.conversionSourceImageData;

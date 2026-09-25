@@ -91,7 +91,10 @@ unchanged (`silverAdapter.preview.test.mjs` checks them against the 1703835 adap
 The prepared texture is tagged with the display preview, the generation, the film-base
 / flat-field key and the strokes; any rebuild (geometry, zoom settle, photo switch,
 restart) invalidates it. Main keeps no copy after the upload; on context loss the
-next warm-up prepares again.
+next warm-up prepares again. A zoom, window or DPR settle on current full-resolution
+pixels (#237) converts nothing; while the GPU preview is in use it still resizes the
+display preview it draws from and prepares that at idle, so a drag after it is not
+drawn at the old size.
 
 Pre-saturation, border-buffer (and B&W mix) drags ask for an `analyze` per tick,
 newest wins, and draw with the previous analysis until it lands.

@@ -144,7 +144,8 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
     getCurrentQueueItem: () => null, cancelGeometryJob: noop, whenGeometrySettled: noop,
     noteDustReplaced: noop, syncDustWorkerPin: noop,
     // No GPU preview (#239): these frames take the worker path.
-    gpuPreviewScheduler: DISABLED_GPU_PREVIEW_SCHEDULER, gpuPreviewCanTake: () => false,
+    gpuPreviewScheduler: DISABLED_GPU_PREVIEW_SCHEDULER, gpuPreviewCanTake: () => false, gpuPreview: { status: 'none' },
+    GPU_PREVIEW_MODE: 'auto', gpuApplyUsable: () => false,
     runDustDetectionPass: () => {
       log.push('detect');
       state.dustRemoval.processing = true;
