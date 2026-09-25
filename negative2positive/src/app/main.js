@@ -9920,7 +9920,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return [
         // The active editor: never evicted, except the full-resolution
         // processedImageData (#250's demotion) under the rules below.
-        { name: 'editor', roots: () => [liveHistoryRoots(), fullAdjustedBuffer, previewAdjustedBuffer, parkedPhoto?.base] },
+        { name: 'editor', roots: () => [liveHistoryRoots(), settledAdjustedBuffer, previewAdjustedBuffer, parkedPhoto?.base] },
         { name: 'sessions', buffers: () => photoSessions.buffers() },
         { name: 'previews', buffers: () => photoPreviews.buffers() },
         // Only what nothing above holds (#244's exclusive count).
