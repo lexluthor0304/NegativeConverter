@@ -17,6 +17,8 @@ export async function createInpaintWorkerSession(modelBytes, options = {}, {
   catch (cause) { throw unavailable('AI repair worker is unavailable', cause); }
   let sequence = 0, closing = false, releasePromise = null, runQueue = Promise.resolve();
   let ready = false, resolveStartup, rejectStartup;
+  // The worker's WASM heap from its last reply (#258's ledger).
+  let heapBytes = 0;
   const startup = new Promise((resolve, reject) => { resolveStartup = resolve; rejectStartup = reject; });
   const startupTimer = setTimeout(() => stop(unavailable('AI repair worker startup timed out')), startupTimeoutMs);
   const pending = new Map();
@@ -38,6 +40,7 @@ export async function createInpaintWorkerSession(modelBytes, options = {}, {
   worker.onmessageerror = () => stop(ready ? new Error('Invalid AI repair worker message')
     : unavailable('Invalid AI repair worker startup message'));
   worker.onmessage = ({ data }) => {
+    if (Number.isFinite(data?.heapBytes)) heapBytes = data.heapBytes;
     if (!ready && data?.ready === true) {
       ready = true;
       clearTimeout(startupTimer);
@@ -104,7 +107,9 @@ export async function createInpaintWorkerSession(modelBytes, options = {}, {
   const trim = (bytes) => closing ? Promise.reject(new Error('AI repair session was released'))
     : request('trim', { bytes }).then(response => response.memo);
   return { provider: metadata.provider, inputNames: metadata.inputNames,
-    outputNames: metadata.outputNames, run, release, trim };
+    outputNames: metadata.outputNames, run, release, trim,
+    /** WASM heap bytes while the worker lives (0 once released). */
+    get residentBytes() { return worker ? heapBytes : 0; } };
 }
 
 export async function createInpaintSessionInWorker(modelBytes, options = {}, {

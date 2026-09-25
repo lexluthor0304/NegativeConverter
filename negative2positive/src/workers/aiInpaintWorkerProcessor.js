@@ -1,7 +1,13 @@
 import { createInpaintSession } from '../app/aiInpaint.js';
 
-export function createInpaintWorkerProcessor({ createSession = createInpaintSession } = {}) {
+// `heapBytes()`: the realm's WASM heap, added to each reply for the page's
+// memory ledger (#258).
+export function createInpaintWorkerProcessor({ createSession = createInpaintSession, heapBytes = null } = {}) {
   let session, pending = Promise.resolve();
+  const withHeap = (result) => {
+    if (typeof heapBytes === 'function') result.payload.heapBytes = heapBytes();
+    return result;
+  };
   async function process(message) {
     const { id, type } = message;
     if (type === 'initialize') {
@@ -25,7 +31,7 @@ export function createInpaintWorkerProcessor({ createSession = createInpaintSess
     return { payload: { id, output }, transfers: [output.buffer] };
   }
   return (message) => {
-    const task = pending.then(() => process(message));
+    const task = pending.then(() => process(message)).then(withHeap);
     pending = task.catch(() => {});
     return task;
   };

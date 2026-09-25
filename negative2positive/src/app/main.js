@@ -9908,9 +9908,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return bytes;
     }
 
-    // A warmed MI-GAN session reports no heap of its own; on WebKit's non-JSEP
-    // WASM it is an estimated 0.6-0.8 GB (#236), less on WebGPU, whose weights
-    // live in the GPU process. Calibrate with footprint traces.
+    // A warmed MI-GAN session in its worker reports its WASM heap with each
+    // reply. Before its first reply, and for a main-thread session, estimate:
+    // on WebKit's non-JSEP WASM an estimated 0.6-0.8 GB (#236), less on
+    // WebGPU, whose weights live in the GPU process.
     const AI_REPAIR_RESIDENT_ESTIMATE_BYTES = { wasm: 0.7e9, other: 0.25e9 };
     workerResidents.set('export', {
       residentBytes: () => exportWorkerResidentBytes(),
@@ -9924,8 +9925,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       release: () => analyzeFrameInWorker.releaseIdle()
     });
     workerResidents.set('aiRepair', {
-      residentBytes: () => (aiRepair.status === 'ready'
-        ? (aiRepair.provider === 'webgpu' ? AI_REPAIR_RESIDENT_ESTIMATE_BYTES.other : AI_REPAIR_RESIDENT_ESTIMATE_BYTES.wasm) : 0),
+      residentBytes: () => {
+        if (aiRepair.status !== 'ready') return 0;
+        const reported = Number(aiRepair.resident?.()) || 0;
+        if (reported > 0) return reported;
+        return aiRepair.provider === 'webgpu' ? AI_REPAIR_RESIDENT_ESTIMATE_BYTES.other : AI_REPAIR_RESIDENT_ESTIMATE_BYTES.wasm;
+      },
       // Only under #236's idle-release rule: no run for about 5 minutes, no
       // pending brush repair, no batch.
       idle: () => canReleaseIdleAiRepair(),
@@ -20934,7 +20939,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // ===========================================
     // AI repair: learned inpainting on the commit and export paths
     // ===========================================
-    const aiRepair = { release: null, trim: null, status: 'idle', provider: '', run: null, source: '', sourceRef: null, prefer: '', released: false, error: '', percent: 0, tiles: 0, ms: 0, revision: 0 };
+    const aiRepair = { release: null, trim: null, resident: null, status: 'idle', provider: '', run: null, source: '', sourceRef: null, prefer: '', released: false, error: '', percent: 0, tiles: 0, ms: 0, revision: 0 };
     let pendingBrushRepairs = 0;
     let aiRepairRunsInFlight = 0;
 
@@ -20950,6 +20955,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       aiRepair.run = null;
       aiRepair.trim = null;
       aiRepair.release = null;
+      aiRepair.resident = null;
       aiRepair.status = 'idle';
       aiRepair.released = true;
       updateAiRepairUI();
@@ -21240,6 +21246,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         aiRepair.trim = null;
         await aiRepair.release?.();
         aiRepair.release = null;
+        aiRepair.resident = null;
         let bytes; let label;
         if (source instanceof File) {
           bytes = await source.arrayBuffer();
@@ -21259,6 +21266,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         aiRepair.release = session.release;
         // Shrinks the session's tile memo (#258); resolves to its size.
         aiRepair.trim = session.trim || null;
+        // The worker's WASM heap for the memory ledger (#258); a main-thread
+        // session reports none.
+        aiRepair.resident = 'residentBytes' in session ? () => session.residentBytes : null;
         aiRepair.provider = session.provider;
         aiRepair.source = label;
         aiRepair.sourceRef = source;

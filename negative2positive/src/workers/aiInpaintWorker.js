@@ -1,5 +1,8 @@
+import { trackWasmMemories, wasmHeapBytes } from './wasmHeap.js';
 import { createInpaintWorkerProcessor } from './aiInpaintWorkerProcessor.js';
-const process = createInpaintWorkerProcessor();
+// ORT loads lazily, after this: its WASM heap is reported with each reply (#258).
+trackWasmMemories();
+const process = createInpaintWorkerProcessor({ heapBytes: wasmHeapBytes });
 self.onmessage = async ({ data }) => {
   try {
     const { payload, transfers } = await process(data);

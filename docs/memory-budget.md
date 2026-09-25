@@ -125,8 +125,11 @@ consumer that holds it:
 6. **workers**: long-lived worker residents: the default export bridge (the
    planes of its last request until it is terminated), the auto-frame
    worker's OpenCV heap (`cv.HEAPU8`, reported with each reply) and a warmed
-   MI-GAN session (an estimate: 0.7 GB on WASM, 0.25 GB on WebGPU). Workers
-   a lane owns are inside its reservation.
+   MI-GAN session (its worker's `WebAssembly.Memory` bytes, which
+   `workers/wasmHeap.js` tracks from before ONNX Runtime loads and each reply
+   carries; an estimate of 0.7 GB on WASM or 0.25 GB on WebGPU until the
+   first reply, or for a main-thread session). Workers a lane owns are inside
+   its reservation.
 
 It is computed on demand, at an admission and at an idle check, never per
 frame.
