@@ -43,6 +43,17 @@ export async function runSimplicitySmoke({ send, evaluate, waitFor, wait, fail, 
   })()`);
   if (!semantic || semantic.width !== 64 || semantic.labels !== 4096) fail('real semantic inference failed: '+JSON.stringify(semantic));
   console.log('semantic inference:', JSON.stringify(semantic));
+  // #262: the next photo reuses the page's model copy (a fresh worker, no model request).
+  const reuse = await evaluate(`(async () => {
+    const { analyzeSemanticPreview } = await import('/src/app/semanticModel.js');
+    const requests = () => performance.getEntriesByType('resource').filter(entry => /efficientvit-b1-ade20k/.test(entry.name)).length;
+    const before = requests();
+    const canvas = document.createElement('canvas'); canvas.width = canvas.height = 64;
+    const result = await analyzeSemanticPreview(canvas.getContext('2d').getImageData(0, 0, 64, 64));
+    return { labels: result?.labels?.length, loads: analyzeSemanticPreview.modelLoads(), newRequests: requests() - before };
+  })()`);
+  if (reuse.labels !== 4096 || reuse.loads !== 1 || reuse.newRequests !== 0) fail('semantic model not reused within the page session: '+JSON.stringify(reuse));
+  console.log('semantic model reused:', JSON.stringify(reuse));
   const review = await evaluate(`(async () => {
     const { renderFileList } = await import('/src/app/fileListView.js');
     const { frameNeedsReview } = await import('/src/app/reviewQueue.js');

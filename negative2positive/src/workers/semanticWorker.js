@@ -10,8 +10,11 @@ async function create(preferGpu) {
   session = await ort.InferenceSession.create(bytes, { executionProviders: provider === 'webgpu' ? ['webgpu', 'wasm'] : ['wasm'], graphOptimizationLevel: 'all' });
   await session.run({ image: new ort.Tensor('float32', new Float32Array(3 * 512 * 512), [1, 3, 512, 512]) });
 }
-self.onmessage = async ({ data: { image, modelUrl, preferGpu = true } }) => {
+self.onmessage = async ({ data: { image, modelUrl, model, preferGpu = true } }) => {
   try {
+    // The page posts its session copy of the model (a Blob, or an ArrayBuffer);
+    // only without one does this worker fetch the model itself.
+    if (!bytes && model) bytes = typeof model.arrayBuffer === 'function' ? await model.arrayBuffer() : model;
     if (!bytes) { const response = await fetch(modelUrl); if (!response.ok) throw new Error('Semantic model unavailable'); bytes = await response.arrayBuffer(); }
     if (!session) { try { await create(preferGpu); } catch { await create(false); } }
     const scale = Math.min(512 / image.width, 512 / image.height);

@@ -34,6 +34,11 @@ water cannot vote as neutrals; road/wall/building pixels receive more weight.
 Expired-film analysis accepts the same class weights. Source revision, model
 hash, tensor contract and reproduction instructions are in
 `negative2positive/public/models/README.md` and `scripts/export-semantic-model.py`.
+The ONNX file itself lives in `negative2positive/src/assets/models/`, so its URL
+carries a content hash. The page loads it at most once per session
+(`createSemanticAnalyzer`, IndexedDB copy on the web through `modelCache.js`)
+and posts the Blob to each short-lived semantic worker, which still ends with
+its photo; a worker fetches the model itself only when the page has no copy.
 
 ## Learned defaults
 
