@@ -8085,8 +8085,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // A pending crop-area detection may still change the analysis area and
       // white balance (a hit converts again).
       await settlePendingCropDetection();
-      // A session restored without its original rebuilds it (#249).
-      if (state.baseDescriptor || state.sourcePending) await ensureSource();
+      // A Tier B session rebuilds its source first (#249); a Tier A one exports
+      // from the source it kept, without its base.
+      if (state.sourcePending) await ensureSource();
       // Export reads the planes of the current geometry.
       await whenGeometrySettled();
       // Crop/analysis confirmation also runs processNegative directly. Its
@@ -17061,9 +17062,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       notifyReviewExport([currentItem].filter(Boolean));
       // The settings are persisted below: a pending crop-area hit first.
       await settlePendingCropDetection();
-      // A session restored without its original rebuilds it (#249): the
-      // linear DNG and every encode read full-resolution planes.
-      if ((state.baseDescriptor || state.sourcePending) && !(await ensureSource())) {
+      // A Tier B session rebuilds its source (#249): the linear DNG and every
+      // encode read full-resolution planes. Tier A kept its source.
+      if (state.sourcePending && !(await ensureSource())) {
         showToast(getLocalizedText('loadError', 'Error loading file'));
         return;
       }

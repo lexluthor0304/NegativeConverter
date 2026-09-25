@@ -858,4 +858,22 @@ for (const large of [false, true]) {
   assert.equal(f.state.processedImageDataIsPreview, false);
 }
 
+// ---- #249: a Tier A session (its base dropped, its source kept) exports
+// from that source without decoding its base ----
+{
+  const f = fixture();
+  f.state.baseDescriptor = { width: 9536, height: 6336, released: true };
+  let rebuilt = 0;
+  f.context.ensureSource = async () => { rebuilt++; return true; };
+  f.state.processedImageDataIsPreview = true;
+  f.state.fullResolutionPending = true;
+  const exporting = f.context.ensureFullResolutionReadyForExport();
+  await settle();
+  assert.equal(f.clients.exact.length, 1, 'the exact render converts the kept source');
+  assert.equal(f.clients.exact[0].request.imageData, f.conversionSource);
+  f.reply('exact');
+  await exporting;
+  assert.equal(rebuilt, 0, 'no decode of the base for an export');
+}
+
 console.log('previewPathRouting: downgraded undo/reset routing, kept planes, idle repair pass, restore flags and paint, viewport branches, Step-3 gate, export repair waits, aborted exact renders and the repaired preview source passed');
