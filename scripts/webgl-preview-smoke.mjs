@@ -402,8 +402,10 @@ export async function runWebglPreviewSmoke({ send, evaluate, waitFor, fail, inst
   await quiet('border preview closed');
 
   // ---- Resize and DPR change redraw without an undrawn resized buffer ----
+  // The display preview keeps serving a size within 15 % larger or 5 %
+  // smaller (#248), so the window shrinks well beyond that band here.
   const drawsBeforeResize = await evaluate('window.__webglProbe.draws');
-  await send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 860, deviceScaleFactor: 1, mobile: false });
+  await send('Emulation.setDeviceMetricsOverride', { width: 1000, height: 760, deviceScaleFactor: 1, mobile: false });
   await until('window resize redrew the GPU preview', `window.__webglProbe.draws > ${drawsBeforeResize}`);
   await quiet('window resize settled');
   await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 2, mobile: false });
