@@ -111,6 +111,9 @@ const brushAt = (x0, y0, r) => {
   const none = await tagged({ type: 'stroke', id: ++id, width, height, reuseSource: true,
     baseTag: 102, tag: 103, points: [{ x: -50, y: -50 }], brushRadius: 3, mode: 'direct' });
   assert.equal(none.payload.patch, null);
+  const after = await tagged({ type: 'stroke', id: ++id, width, height, reuseSource: true,
+    baseTag: 102, tag: 104, points: [{ x: 60, y: 60 }], brushRadius: 3, mode: 'direct' });
+  assert.ok(after.payload.patch, 'an empty stroke keeps the mask tag');
 }
 
 // Planes, including the source itself, can arrive in slices.

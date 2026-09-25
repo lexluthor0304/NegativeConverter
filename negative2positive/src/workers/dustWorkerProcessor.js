@@ -115,8 +115,9 @@ export function createDustWorkerProcessor({ loadCv = async () => {} } = {}) {
         throw error;
       }
       particleCount = state.particleCount;
-      maskTag = message.tag;
+      // A stroke that set no pixel leaves the mask, and so its tag, as it was.
       if (!patch) return { payload: { id, patch: null, particleCount }, transfers: [] };
+      maskTag = message.tag;
       const transfers = [patch.rgba8.buffer, patch.maskBytes.buffer];
       if (patch.rgba16) transfers.push(patch.rgba16.buffer);
       delete patch.maskBefore;

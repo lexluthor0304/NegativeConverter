@@ -237,7 +237,7 @@ export function createDustWorkerClient({
       const transfers = [];
       if (resend) { message.mask = resend; transfers.push(resend.buffer); }
       const reply = post(message, transfers, data => {
-        maskTag = tag;
+        maskTag = data.patch ? tag : baseTag;
         return data.patch;
       });
       maskTag = null;
