@@ -48,7 +48,8 @@ export default {
     const enterT = await clickElement(ctx, 'cropBtn');
     const enter = await afterAction(ctx, 's5.enterCrop', enterT, { observeMs: 1500 });
     if (enter) ctx.record('s5.enterCrop.firstDrawMs', round(enter.t - enterT));
-    ctx.record('s5.enterCrop.previewPx', enter?.w ? `${enter.w}×${enter.h}` : null);
+    // The crop view's own pixels when it draws on #cropCanvas (#245).
+    ctx.record('s5.enterCrop.previewPx', enter?.canvasW ? `${enter.canvasW}×${enter.canvasH}` : (enter?.w ? `${enter.w}×${enter.h}` : null));
     ctx.record('s5.enterCrop.showsPositive', enter ? String(enter.positive) : null);
     await session.endWindow();
 
@@ -92,11 +93,16 @@ export default {
       await session.endWindow();
     }
 
-    // Apply the crop.
+    // Apply the crop. Feedback and the positive are recorded apart (#245):
+    // the first frame whose overlay is fully opaque, the longest task before
+    // it, then the positive.
     await session.beginWindow('s5-apply');
     const applyT = await clickElement(ctx, 'applyCropBtn');
     await afterAction(ctx, 's5.applyCrop', applyT, { needPositive: true });
     await session.endWindow();
+    const opaque = byKind(session.events, 'vis').find(event => event.t >= applyT && event.ov && Number.isFinite(event.op) && event.op >= 0.99) || null;
+    ctx.record('s5.applyCrop.overlayOpaqueMs', opaque ? round(opaque.t - applyT) : null);
+    ctx.record('s5.applyCrop.maxTaskBeforeOverlayMs', opaque ? longTasks(ctx, applyT, opaque.t).maxMs : null);
 
     // Rotate 90° twice, then mirror.
     for (const name of ['rotate90a', 'rotate90b']) {

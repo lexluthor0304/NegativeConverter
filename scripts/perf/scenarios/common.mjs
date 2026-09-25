@@ -3,7 +3,7 @@
 // measured window, so first-reveal layout work is never measured.
 
 import {
-  byKind, dragMetrics, eventTimingP95, longTaskSummary, rafGapSummary, importMetrics, settledAt, pictures, GL_CANVAS, CPU_CANVAS
+  byKind, dragMetrics, eventTimingP95, longTaskSummary, rafGapSummary, importMetrics, settledAt, pictures, GL_CANVAS, CPU_CANVAS, CROP_CANVAS
 } from '../lib/metrics.mjs';
 import { round } from '../lib/stats.mjs';
 
@@ -231,7 +231,7 @@ export async function setWebGl(ctx, enabled) {
 
 /** All pictures on either display canvas, time-ordered. */
 export function allPictures(events) {
-  return [...pictures(events, GL_CANVAS), ...pictures(events, CPU_CANVAS)].sort((a, b) => a.t - b.t);
+  return [...pictures(events, GL_CANVAS), ...pictures(events, CPU_CANVAS), ...pictures(events, CROP_CANVAS)].sort((a, b) => a.t - b.t);
 }
 
 /** First event of `type` on `id` at or after `after` (page time). */

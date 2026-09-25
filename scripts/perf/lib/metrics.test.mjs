@@ -82,6 +82,18 @@ const sortT = events => events.sort((a, b) => a.t - b.t);
   assert.equal(pics[2].causeT, 10);
 }
 
+// ---- The crop view (#245): every draw on #cropCanvas is a picture ----
+{
+  const events = sortT([
+    { k: 'c2d', t: 10, c: 'cropCanvas', fn: 'drawImage', w: 9536, h: 6336, cw: 1809, ch: 1202, sig: 'same' },
+    { k: 'c2d', t: 50, c: 'cropCanvas', fn: 'drawImage', w: 9536, h: 6336, cw: 1822, ch: 1236, sig: 'same' }
+  ]);
+  const pics = pictures(events, 'cropCanvas');
+  assert.equal(pics.length, 2, 'an angle change redraws the same proxy: still a new picture');
+  assert.deepEqual([pics[0].canvasW, pics[0].canvasH], [1809, 1202]);
+  assert.equal(pics[1].positive, false);
+}
+
 // ---- GL positives: resized results match by order; uniform redraws are not new content ----
 {
   const events = sortT([

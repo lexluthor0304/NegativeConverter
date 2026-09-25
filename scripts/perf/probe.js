@@ -245,7 +245,7 @@
             var known = canvasContent.get(source);
             var token = known || ('s' + objectId(source) + ':' + (++seq));
             canvasContent.set(this.canvas, stringHash(token + ':' + w + 'x' + h));
-            push({ k: 'c2d', t: t0, fn: 'drawImage', c: name, w: Math.round(w), h: Math.round(h), sig: canvasContent.get(this.canvas), src: known || null });
+            push({ k: 'c2d', t: t0, fn: 'drawImage', c: name, w: Math.round(w), h: Math.round(h), cw: this.canvas.width, ch: this.canvas.height, sig: canvasContent.get(this.canvas), src: known || null });
           }
         } finally { selfMs += now() - t0; }
         return result;

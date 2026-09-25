@@ -17,6 +17,8 @@ import { distribution, median, max, sum, round } from './stats.mjs';
 
 export const GL_CANVAS = 'glCanvas';
 export const CPU_CANVAS = 'canvas';
+// Crop mode draws on a 2D canvas of its own (#245).
+export const CROP_CANVAS = 'cropCanvas';
 export const COVERAGE_GRACE_MS = 250;
 
 export function byKind(events, kind) {
@@ -48,8 +50,11 @@ export const SOURCE_TEXTURE_MIN_PX = 65536;
  *   Its result is the one whose pixels hash like the upload, else (when the
  *   app resized the result for display) the newest result before the upload.
  *   A uniform-only redraw is a picture but not new content.
- * - #canvas (CPU display path, negatives, crop view): a put/draw whose pixels
- *   hash like a conversion result is a positive.
+ * - #canvas (CPU display path, negatives): a put/draw whose pixels hash
+ *   like a conversion result is a positive.
+ * - #cropCanvas (the crop view, #245): every draw is a new picture (an angle
+ *   change redraws the same proxy with a new transform); `canvasW`/`canvasH`
+ *   are the canvas's own pixels.
  */
 export function pictures(events, canvasId = GL_CANVAS) {
   const results = conversionResultIndex(events);
@@ -60,15 +65,15 @@ export function pictures(events, canvasId = GL_CANVAS) {
     return found;
   };
   const out = [];
-  if (canvasId === CPU_CANVAS) {
+  if (canvasId === CPU_CANVAS || canvasId === CROP_CANVAS) {
     let lastSig = null;
     for (const event of events) {
       if (event.k !== 'c2d' || event.c !== canvasId) continue;
-      const sig = event.hash ?? event.sig ?? `${event.fn}:${event.t}`;
+      const sig = canvasId === CROP_CANVAS ? `${event.fn}:${event.t}` : (event.hash ?? event.sig ?? `${event.fn}:${event.t}`);
       if (sig === lastSig) continue;
       lastSig = sig;
       const res = results.get(event.hash ?? event.src) || null;
-      out.push({ t: event.t, causeT: res ? res.rt : event.t, contentT: event.t, positive: Boolean(res), res, w: event.w, h: event.h, kind: event.fn });
+      out.push({ t: event.t, causeT: res ? res.rt : event.t, contentT: event.t, positive: Boolean(res), res, w: event.w, h: event.h, canvasW: event.cw, canvasH: event.ch, kind: event.fn });
     }
     return out;
   }
