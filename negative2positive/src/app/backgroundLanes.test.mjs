@@ -73,6 +73,26 @@ import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
   await flush();
   assert.equal(f.decodes.length, 2, 'the next frame starts once the lane is gone');
 }
+{
+  // Granted as a switch starts (the superseded activation's claim goes then):
+  // the lane asks the gate again and gives the memory back meanwhile.
+  const f = createLaneFixture({ count: 3, current: 0, memoryBudgetBytes: 10e9 });
+  const budget = f.context.memoryBudget;
+  const opening = await budget.reserve(2e9, { priority: 'foreground', label: 'open 0.dng' });
+  f.context.kickBackgroundPhotoWork();
+  await f.clock.advance(2000);
+  assert.deepEqual(budget.snapshot().waiting.map(entry => entry.priority), ['background']);
+  f.context.document.body.dataset.photoSwitching = 'true';
+  opening.release();
+  await flush();
+  assert.equal(f.decodes.length, 0, 'no read inside the switch that released the memory');
+  assert.equal(budget.snapshot().background, 0, 'the memory is given back while the lane waits');
+  delete f.context.document.body.dataset.photoSwitching;
+  f.context.backgroundGate.bump();
+  await flush();
+  assert.deepEqual(f.started(), ['1.dng'], 'the frame starts once the switch is over');
+  assert.ok(budget.snapshot().background > 0, 'reserved again before its decode');
+}
 
 // --- the foreground gate: no decode starts while busy or within 400 ms of input ------
 {

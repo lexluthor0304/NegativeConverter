@@ -19990,15 +19990,24 @@ import { canPublishThumbnail } from './thumbnailRank.js';
             if (!wanted()) return false;
           }
         } else {
-          await backgroundGate.idle({ signal: controller.signal });
-          if (!wanted()) return false;
           // The frame's memory (#258): nothing starts while a photo is being
           // opened, and only what fits next to the caches (or one item alone).
-          memoryClaim = await reserveFrameClaim(createFrameClaim(item.file, {
-            priority: 'background', signal: controller.signal, label: `${needs.join('+')} ${item.file.name}`,
-            bytesFor: analysis ? laneReservationBytes : frameReservationBytes
-          }), item.file);
-          if (!wanted()) return false;
+          // A reservation that waited behind an opening photo is granted when
+          // that activation is superseded, which is when the next switch
+          // starts: the gate is asked again, and the memory given back while
+          // the lane waits for it.
+          for (;;) {
+            await backgroundGate.idle({ signal: controller.signal });
+            if (!wanted()) return false;
+            memoryClaim = await reserveFrameClaim(createFrameClaim(item.file, {
+              priority: 'background', signal: controller.signal, label: `${needs.join('+')} ${item.file.name}`,
+              bytesFor: analysis ? laneReservationBytes : frameReservationBytes
+            }), item.file);
+            if (!wanted()) return false;
+            if (backgroundGate.isIdle()) break;
+            memoryClaim.release();
+            memoryClaim = null;
+          }
           job.decoding = true;
           job.halfSize = Boolean(tile?.halfSize && !analysis && !prefetch);
           lease = analysis ? openAnalysisDecode(item, controller.signal, memoryClaim)

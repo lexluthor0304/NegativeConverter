@@ -184,7 +184,7 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
     scheduleTileFlush: item => flushed.push(item.id),
     // The background lanes (#243): an always idle gate, no photo caches or
     // prefetch, the display order is the queue order, no lane tiles.
-    DOMException, backgroundGate: { idle: async () => true, bump: noop, noteInput: noop },
+    DOMException, backgroundGate: { idle: async () => true, isIdle: () => true, bump: noop, noteInput: noop },
     photoSessions: createPhotoSessionCache({ maxBytes: 0 }), photoPreviews: createPhotoSessionCache({ maxBytes: 0 }),
     photoPrefetch: createPhotoSessionCache({ maxBytes: 0 }), lowMemoryPhotoDevice: () => true,
     backgroundLanes: { running: 0, active: new Map() }, rollPassRequests: new Set(), backgroundVisibleItems: new Set(),
