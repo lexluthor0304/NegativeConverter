@@ -322,7 +322,7 @@ async function withEventLoopAlive(fn) {
     const pending = cancelled.workerAdjust16AndEncode(other, identity(), { format: 'tiff', transferPlane: true, signal: controller.signal });
     await new Promise((resolve) => setTimeout(resolve, 0));
     controller.abort();
-    await assert.rejects(pending, (err) => isAbortError(err));
+    await assert.rejects(pending, (err) => isAbortError(err) && err.inputLost === true);
   } finally {
     console.error = errorLog;
     console.warn = warn;

@@ -238,7 +238,11 @@ function reclaimInput(err, returned, { transferred, byteLength, reattach, what }
     reattach(returned);
     return;
   }
-  if (isAbortError(err)) return;
+  if (isAbortError(err)) {
+    // The caller gave up on the frame; say that its input went with it.
+    err.inputLost = true;
+    return;
+  }
   throw inputLostError(what, err);
 }
 

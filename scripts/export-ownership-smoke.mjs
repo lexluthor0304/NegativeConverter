@@ -2,33 +2,56 @@
 // stubs cannot prove what Chrome's OffscreenCanvas encoder writes, that a Blob
 // outlives the worker that made it, or that a transferred plane really leaves
 // the page. Part 1 runs the real bridge and worker; part 2 exports through the
-// Studio on a generated 3.8 MP frame (above the 1 MP worker threshold, and
-// large enough for a separate display preview).
+// Studio on a generated 3.8 MP 16-bit frame (above the 1 MP worker
+// threshold, and large enough for a separate display preview).
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createRequire } from 'node:module';
+import { crc32, deflateSync } from 'node:zlib';
 
-const UPNG = createRequire(import.meta.url)('upng-js');
 const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`;
 
+// A 16-bit RGB PNG, so the frame carries a genuine 16-bit plane (8-bit
+// sources are never handed to the conversion lane).
 function writeNegativeFixture(dir) {
   const width = 2400;
   const height = 1600;
-  const rgba = new Uint8Array(width * height * 4);
-  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
-    const o = (y * width + x) * 4;
-    const t = x / (width - 1) * 0.65 + y / (height - 1) * 0.35;
-    // An orange-masked negative with a soft vignette and some texture.
-    const v = 1 - 0.18 * (((x - width / 2) / width) ** 2 + ((y - height / 2) / height) ** 2);
-    const grain = ((x * 7919 + y * 104729) % 13) - 6;
-    rgba[o] = Math.max(0, Math.min(255, Math.round((235 - t * 120) * v + grain)));
-    rgba[o + 1] = Math.max(0, Math.min(255, Math.round((170 - t * 95) * v + grain)));
-    rgba[o + 2] = Math.max(0, Math.min(255, Math.round((120 - t * 70) * v + grain)));
-    rgba[o + 3] = 255;
+  const raw = Buffer.alloc((width * 6 + 1) * height);
+  for (let y = 0; y < height; y++) {
+    const row = y * (width * 6 + 1);
+    raw[row] = 0;
+    for (let x = 0; x < width; x++) {
+      const t = x / (width - 1) * 0.65 + y / (height - 1) * 0.35;
+      // An orange-masked negative with a soft vignette and some texture.
+      const v = 1 - 0.18 * (((x - width / 2) / width) ** 2 + ((y - height / 2) / height) ** 2);
+      const grain = ((x * 7919 + y * 104729) % 97) - 48;
+      const o = row + 1 + x * 6;
+      raw.writeUInt16BE(Math.max(0, Math.min(65535, Math.round((60000 - t * 30000) * v + grain))), o);
+      raw.writeUInt16BE(Math.max(0, Math.min(65535, Math.round((43000 - t * 24000) * v + grain))), o + 2);
+      raw.writeUInt16BE(Math.max(0, Math.min(65535, Math.round((30000 - t * 17000) * v + grain))), o + 4);
+    }
   }
-  const path = join(dir, 'ownership-negative.png');
-  writeFileSync(path, Buffer.from(UPNG.encode([rgba.buffer], width, height, 0)));
+  const chunk = (type, data) => {
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(data.length);
+    const body = Buffer.concat([Buffer.from(type, 'latin1'), data]);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(crc32(body) >>> 0);
+    return Buffer.concat([length, body, crc]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 16; // bit depth
+  ihdr[9] = 2; // RGB
+  const png = Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    chunk('IHDR', ihdr),
+    chunk('IDAT', deflateSync(raw, { level: 3 })),
+    chunk('IEND', Buffer.alloc(0))
+  ]);
+  const path = join(dir, 'ownership-negative-16.png');
+  writeFileSync(path, png);
   return path;
 }
 
