@@ -418,6 +418,8 @@ function prepareFixture({ itemSettings = null, detectFrame = true, learned = 0 }
     isLargeImage: () => false, startFullResolutionRender: noop,
     appAlert: error => { throw new Error(error); }, getLocalizedText: (key, text) => text,
     refreshCanvasContainerSize: () => false, noteDustReplaced: noop,
+    // No GPU preview frame is ahead of its exact frame (#239).
+    gpuPreviewScheduler: DISABLED_GPU_PREVIEW_SCHEDULER,
   });
   vm.runInContext([
     'prepareStudioPhoto', 'startImportDetection', 'buildFinalImportSettings', 'revealProvisionalPhoto',

@@ -6,6 +6,7 @@ import { displayPreviewSize, resizeDisplayPreview } from './displayPreview.js';
 import { previewTierMaxPixels, capBackingSize, PREVIEW_TIER_REDUCED_MAX_PIXELS } from './previewTier.js';
 import { routeCoreConversion, keepsFullPlaneOnDowngrade, viewportRefreshBranch } from './fullResolutionRouting.js';
 import { isLargeImage } from './imageMemoryBudget.js';
+import { DISABLED_GPU_PREVIEW_SCHEDULER } from './gpuPreviewScheduler.js';
 
 // Drives the real preview-tier wiring of main.js (#263) together with the real
 // scheduler, reprocess and state-application functions, on synthetic images:
@@ -145,6 +146,8 @@ function fixture({ width = 3000, height = 2000, repairs = false, largePreviewFra
     fullResolutionConversionAbort: null, dustDetectionTimer: null, repairedPreviewShown: null, repairedPreviewMasks: null,
     isAiBrushEnabled: () => false, repairedPreviewSourceFor: () => null, ensureRepairedPreview: () => {},
     ensureAiBrushPlane: () => {},
+    // No GPU preview (#239): the tier's frames take the worker path.
+    gpuPreviewScheduler: DISABLED_GPU_PREVIEW_SCHEDULER, gpuPreviewCanTake: () => false,
     FULL_RESOLUTION_IDLE_DELAY_MS: 2500, scheduleFullResolutionRender: (reason) => { log.push(`full-render:${reason}`); return null; },
   });
   vm.runInContext([

@@ -8,6 +8,7 @@ import {
 } from './fullResolutionRouting.js';
 import { isLargeImage } from './imageMemoryBudget.js';
 import { poolRepairMask } from './repairedPreview.js';
+import { DISABLED_GPU_PREVIEW_SCHEDULER } from './gpuPreviewScheduler.js';
 
 // #237 in the app itself: the real routing, restore, viewport, Step-3 and
 // export-barrier functions of main.js (extracted with vm, as
@@ -142,6 +143,8 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
     // (#236), no pending geometry build (#244) and the dust bookkeeping of #259.
     getCurrentQueueItem: () => null, cancelGeometryJob: noop, whenGeometrySettled: noop,
     noteDustReplaced: noop, syncDustWorkerPin: noop,
+    // No GPU preview (#239): these frames take the worker path.
+    gpuPreviewScheduler: DISABLED_GPU_PREVIEW_SCHEDULER, gpuPreviewCanTake: () => false,
     runDustDetectionPass: () => {
       log.push('detect');
       state.dustRemoval.processing = true;

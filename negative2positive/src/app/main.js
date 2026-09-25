@@ -5122,6 +5122,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     const webglState = {
       gl: null,
+      // describeWebglRenderer() of the current context (#263); #239 and #253
+      // keep their shaders off software rasterisers.
+      renderer: null,
       // A WebGL2 context draws with render/gpuPreviewRenderer.js (#239); the fields
       // below `renderer2` belong to the WebGL1 fallback program.
       webgl2: false,
@@ -5144,10 +5147,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         uWb: null,
         uVib: null,
         uCmy: null
-      },
-      // describeWebglRenderer() of the current context (#263); #239 and #253
-      // keep their shaders off software rasterisers.
-      renderer: null
+      }
     };
 
     const webglCurveRgba = new Uint8Array(256 * 4);

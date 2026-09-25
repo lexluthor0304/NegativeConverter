@@ -17,9 +17,12 @@ const SOURCE = { width: 1800, height: 1200 };
 function installPreviewPathProbe() {
   const original = {
     post: Worker.prototype.postMessage, terminate: Worker.prototype.terminate,
-    draw: WebGLRenderingContext.prototype.drawArrays, click: HTMLAnchorElement.prototype.click,
+    click: HTMLAnchorElement.prototype.click,
     revoke: URL.revokeObjectURL, picker: window.showSaveFilePicker,
   };
+  // WebGL2 (#239) and the WebGL1 fallback have separate prototypes.
+  const glDraws = [WebGLRenderingContext.prototype, window.WebGL2RenderingContext?.prototype].filter(Boolean)
+    .map(proto => ({ proto, draw: proto.drawArrays }));
   const workers = new Map();
   const heldUrls = new Set();
   const probe = window.__previewPathProbe = {
@@ -59,11 +62,14 @@ function installPreviewPathProbe() {
     if (record) { probe.inFlight -= record.pending.size; record.pending.clear(); note('terminate'); }
     return original.terminate.apply(this, args);
   };
-  WebGLRenderingContext.prototype.drawArrays = function(...args) {
-    const result = original.draw.apply(this, args);
-    if (this.canvas?.id === 'glCanvas') { probe.draws++; note('draw'); }
-    return result;
-  };
+  for (const { proto, draw } of glDraws) {
+    proto.drawArrays = function(...args) {
+      const result = draw.apply(this, args);
+      // The GPU preview's self-test draws into its own framebuffer.
+      if (this.canvas?.id === 'glCanvas' && this.getParameter(this.FRAMEBUFFER_BINDING) === null) { probe.draws++; note('draw'); }
+      return result;
+    };
+  }
   window.showSaveFilePicker = undefined;
   URL.revokeObjectURL = function(url) { if (!heldUrls.has(url)) original.revoke.call(URL, url); };
   HTMLAnchorElement.prototype.click = function(...args) {
@@ -94,7 +100,7 @@ function installPreviewPathProbe() {
   };
   probe.restore = () => {
     Worker.prototype.postMessage = original.post; Worker.prototype.terminate = original.terminate;
-    WebGLRenderingContext.prototype.drawArrays = original.draw;
+    for (const { proto, draw } of glDraws) proto.drawArrays = draw;
     HTMLAnchorElement.prototype.click = original.click; URL.revokeObjectURL = original.revoke;
     window.showSaveFilePicker = original.picker;
     for (const [worker, record] of workers) worker.removeEventListener('message', record.receive);

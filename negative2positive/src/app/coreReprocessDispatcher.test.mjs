@@ -898,7 +898,7 @@ function sliderFixture(options) {
     samplePhotoPreviewSource: () => ({}), adjustPhotoPreviewSample: () => ({}), schedulePostPaintTask: () => {},
     hiddenJobs: { safeMode: false }, geometryDiagnostics: { coldSessions: false }, dustAiRefresh: { rects: [] },
   });
-  vm.runInContext(functionSource('rememberPhotoSession'), f.context);
+  vm.runInContext(['rememberPhotoSession', 'displayIsReduced'].map(functionSource).join('\n'), f.context);
   f.request(5);
   f.clock.runFrame();
   f.context.rememberPhotoSession(item);

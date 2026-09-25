@@ -18,9 +18,10 @@ const ready = `document.body.classList.contains('studio-ready') && !document.bod
 const REDUCED_MAX_PIXELS = 1_000_000;
 
 function installTierProbe() {
-  const glProto = WebGLRenderingContext.prototype;
+  // WebGL2 (#239) and the WebGL1 fallback have separate prototypes.
+  const glProtos = [WebGLRenderingContext.prototype, window.WebGL2RenderingContext?.prototype].filter(Boolean)
+    .map(proto => ({ proto, draw: proto.drawArrays, allocate: proto.texImage2D, update: proto.texSubImage2D }));
   const original = {
-    draw: glProto.drawArrays, allocate: glProto.texImage2D, update: glProto.texSubImage2D,
     post: Worker.prototype.postMessage, terminate: Worker.prototype.terminate,
     click: HTMLAnchorElement.prototype.click, revoke: URL.revokeObjectURL, picker: window.showSaveFilePicker,
   };
@@ -33,35 +34,41 @@ function installTierProbe() {
     probe.lastActivity = performance.now();
   };
   const onPreview = context => context?.canvas?.id === 'glCanvas';
-  glProto.drawArrays = function (...args) {
-    const result = original.draw.apply(this, args);
-    if (onPreview(this)) {
-      const width = this.drawingBufferWidth, height = this.drawingBufferHeight;
-      let hash = null;
-      if (probe.hashDraws) {
-        // The whole settled frame, read in the draw task.
-        const pixels = new Uint8Array(width * height * 4);
-        this.readPixels(0, 0, width, height, this.RGBA, this.UNSIGNED_BYTE, pixels);
-        let value = 2166136261;
-        for (let i = 0; i < pixels.length; i++) value = Math.imul(value ^ pixels[i], 16777619);
-        hash = value >>> 0;
-        probe.lastHash = { width, height, hash };
+  // Only the exact 8-bit frame counts: the GPU preview's integer textures are
+  // not frames on screen.
+  const exactFrame = (gl, args) => args[6] === gl.RGBA && args[7] === gl.UNSIGNED_BYTE;
+  for (const gl of glProtos) {
+    gl.proto.drawArrays = function (...args) {
+      const result = gl.draw.apply(this, args);
+      // The GPU preview's self-test draws into its own framebuffer.
+      if (onPreview(this) && this.getParameter(this.FRAMEBUFFER_BINDING) === null) {
+        const width = this.drawingBufferWidth, height = this.drawingBufferHeight;
+        let hash = null;
+        if (probe.hashDraws) {
+          // The whole settled frame, read in the draw task.
+          const pixels = new Uint8Array(width * height * 4);
+          this.readPixels(0, 0, width, height, this.RGBA, this.UNSIGNED_BYTE, pixels);
+          let value = 2166136261;
+          for (let i = 0; i < pixels.length; i++) value = Math.imul(value ^ pixels[i], 16777619);
+          hash = value >>> 0;
+          probe.lastHash = { width, height, hash };
+        }
+        note('draw', { width, height, texture: probe.texture ? [...probe.texture] : null, hash });
       }
-      note('draw', { width, height, texture: probe.texture ? [...probe.texture] : null, hash });
-    }
-    return result;
-  };
-  glProto.texImage2D = function (...args) {
-    if (onPreview(this) && args[3] > 256 && ArrayBuffer.isView(args[8])) {
-      probe.texture = [args[3], args[4]];
-      note('upload', { width: args[3], height: args[4] });
-    }
-    return original.allocate.apply(this, args);
-  };
-  glProto.texSubImage2D = function (...args) {
-    if (onPreview(this) && args[4] > 256 && ArrayBuffer.isView(args[8])) note('upload', { width: args[4], height: args[5] });
-    return original.update.apply(this, args);
-  };
+      return result;
+    };
+    gl.proto.texImage2D = function (...args) {
+      if (onPreview(this) && args[3] > 256 && ArrayBuffer.isView(args[8]) && exactFrame(this, args)) {
+        probe.texture = [args[3], args[4]];
+        note('upload', { width: args[3], height: args[4] });
+      }
+      return gl.allocate.apply(this, args);
+    };
+    gl.proto.texSubImage2D = function (...args) {
+      if (onPreview(this) && args[4] > 256 && ArrayBuffer.isView(args[8]) && exactFrame(this, args)) note('upload', { width: args[4], height: args[5] });
+      return gl.update.apply(this, args);
+    };
+  }
   Worker.prototype.postMessage = function (message, ...args) {
     if (message?.type === 'convert') {
       let record = workers.get(this);
@@ -109,7 +116,7 @@ function installTierProbe() {
       .finally(() => { heldUrls.delete(href); original.revoke.call(URL, href); });
   };
   probe.restore = () => {
-    Object.assign(glProto, { drawArrays: original.draw, texImage2D: original.allocate, texSubImage2D: original.update });
+    for (const gl of glProtos) Object.assign(gl.proto, { drawArrays: gl.draw, texImage2D: gl.allocate, texSubImage2D: gl.update });
     Worker.prototype.postMessage = original.post; Worker.prototype.terminate = original.terminate;
     HTMLAnchorElement.prototype.click = original.click; URL.revokeObjectURL = original.revoke;
     window.showSaveFilePicker = original.picker;
@@ -228,7 +235,9 @@ export async function runPreviewTierSmoke({ send, evaluate, waitFor, fail, insta
   for (const mode of ['normal', 'reduced']) {
     await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 2, mobile: false });
     const before = await evaluate('performance.timeOrigin');
-    await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en&previewTier=${mode}` });
+    // The tier is checked on the worker path: the GPU preview (#239) draws
+    // SilverCore drags without converting them. WebGL2 still draws Step 3.
+    await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en&previewTier=${mode}&gpuPreview=off` });
     await until(`${mode} tier workspace`, `performance.timeOrigin !== ${before} && document.readyState === 'complete' && !!document.getElementById('studioImportAutoCrop')`);
     await installDialogAutoAccept();
     await evaluate(`(${installTierProbe.toString()})()`);
