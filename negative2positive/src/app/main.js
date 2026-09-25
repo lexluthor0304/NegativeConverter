@@ -7031,8 +7031,9 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       return applyDustStroke({ source, mask: state.dustRemoval.mask.slice(), particleCount: null }, stroke);
     }
 
-    // Uploads one rect of the WebGL source texture. The texture is uploaded
-    // with UNPACK_FLIP_Y_WEBGL, so rows count from the bottom.
+    // Uploads one rect of the WebGL source texture. Rows are stored top-down
+    // and the shader flips them (#233), so the rect lands at its own y; the
+    // context's unpack state (alignment 1, no flip) is never changed.
     function webglUploadSourceRect(imageData, rect) {
       if (!webglState.gl || webglState.sourceDirty) return;
       if (webglState.sourceSize.w !== imageData.width || webglState.sourceSize.h !== imageData.height) {
@@ -7047,10 +7048,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       }
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, webglState.sourceTex);
-      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-      gl.texSubImage2D(gl.TEXTURE_2D, 0, rect.x, imageData.height - rect.y - rect.height,
-        rect.width, rect.height, gl.RGBA, gl.UNSIGNED_BYTE, rows);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, rect.x, rect.y, rect.width, rect.height, gl.RGBA, gl.UNSIGNED_BYTE, rows);
     }
 
     let dustHistogramTimer = null;
