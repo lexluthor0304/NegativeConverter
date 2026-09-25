@@ -20,6 +20,7 @@ import { ChromeSession, ScenarioAbort } from './session.mjs';
 import { createSourceMapper } from './sourcemap.mjs';
 import { createTraceAnalyzer, createTraceFileWriter, recordTrace } from './trace.mjs';
 import { summarizeRepetitions } from './stats.mjs';
+import { loafAttribution, workerTimingSummary } from './metrics.mjs';
 import { compareRuns, collectRunSummaries, renderCompareMarkdown, findMetricDef } from './compare.mjs';
 import { renderReport } from './report.mjs';
 import { resolveFixtureGroups, syntheticNamesFor, sha256File } from './fixture-sets.mjs';
@@ -119,10 +120,25 @@ async function runRepetition({ scenario, fixture, group, ref, rep, args, profile
     } catch (error) {
       result.notes.push(`trace: ${error.message}`);
     }
+    if (session.status === 'ok' && probe) {
+      try {
+        await session.drain();
+        result.appMemory = await session.evaluate('globalThis.__ncPerf.snapshot().memory');
+        await session.evaluate('globalThis.__ncPerf.clearUserTiming(); true');
+      } catch {}
+    }
     result.probeSelfMs = session.selfMs;
     result.counters = session.counters;
     result.observed = session.observed;
-    result.workerTimingSamples = session.workerTiming.length;
+    result.loaf = loafAttribution(session.events, mapper);
+    result.workerTiming = workerTimingSummary(session.events, session.workerTiming, session.pageTimeOrigin);
+    if (session.status !== 'ok' && session.lastMemorySample) {
+      result.lastMemorySample = {
+        rendererMB: Math.round(session.lastMemorySample.rendererBytes / 1048576),
+        gpuMB: Math.round(session.lastMemorySample.gpuBytes / 1048576),
+        totalMB: Math.round(session.lastMemorySample.totalBytes / 1048576)
+      };
+    }
     if (session.status === 'memory-ceiling') {
       result.memoryCeiling = {
         ...session.memoryCeiling,
@@ -365,6 +381,8 @@ export async function main(argv = process.argv.slice(2)) {
             summary: summarizeGroup(reps),
             routes: reps.flatMap(rep => rep.routes).filter((route, i, list) => list.findIndex(other => other.photo === route.photo) === i),
             profile: reps.find(rep => rep.profiled && rep.profile)?.profile || null,
+            loaf: reps.find(rep => !rep.profiled && rep.loaf?.length)?.loaf || null,
+            workerTiming: reps.find(rep => !rep.profiled && rep.workerTiming)?.workerTiming || null,
             notes: reps.flatMap(rep => rep.notes.map(note => `${rep.label}: ${note}`)),
             reps: reps.map(({ raw, ...rest }) => rest),
             raw: reps.map(rep => ({ label: rep.label, raw: rep.raw }))

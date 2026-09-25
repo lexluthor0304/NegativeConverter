@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {
   pictures, dragMetrics, dragInputs, settledAt, importMetrics, switchMetrics, zoomStepMetrics, panMetrics,
   rafGapSummary, busyFromTimerTicks, timerGapSummary, eventTimingP95, overlayHiddenAt, nextOverlayHidden,
-  longTaskSummary, flattenMetrics, newestInputIndex
+  longTaskSummary, flattenMetrics, newestInputIndex, loafAttribution, workerTimingSummary
 } from './metrics.mjs';
 
 const sortT = events => events.sort((a, b) => a.t - b.t);
@@ -200,5 +200,25 @@ assert.equal(eventTimingP95(Array.from({ length: 10 }, (_, i) => ({ k: 'et', n: 
 assert.deepEqual(longTaskSummary([{ k: 'lt', s: 10, d: 60 }, { k: 'lt', s: 500, d: 70 }], 0, 100), { n: 1, totalMs: 60, maxMs: 60 });
 
 assert.deepEqual(flattenMetrics('s1', { a: 1, b: { c: 'x', d: null, e: [1] } }), { 's1.a': 1, 's1.b.c': 'x' });
+
+// LoAF attribution through the source mapper; worker-side timing per class.
+{
+  const mapper = { mapCharPosition: (url, pos) => (pos === 10 ? { source: 'src/app/studioSettings.js', line: 25 } : null) };
+  const top = loafAttribution([
+    { k: 'loaf', t: 0, scripts: [{ u: 'http://x/assets/main.js', fn: 'createStudioThumbnail', cp: 10, d: 60, fsl: 5 }, { u: 'http://x/assets/main.js', cp: 99, d: 5 }] },
+    { k: 'loaf', t: 50, scripts: [{ u: 'http://x/assets/main.js', fn: 'createStudioThumbnail', cp: 10, d: 40 }] }
+  ], mapper);
+  assert.deepEqual(top[0], { label: 'createStudioThumbnail src/app/studioSettings.js:25', ms: 100, count: 2, forcedLayoutMs: 5 });
+  const summary = workerTimingSummary([
+    { k: 'req', t: 100, cls: 'convert', id: 3 },
+    { k: 'req', t: 200, cls: 'suppress', id: 1 }
+  ], [
+    { ph: 'start', id: 3, t: 10_000 + 104, session: 'w1' }, { ph: 'reply', id: 3, t: 10_000 + 130, session: 'w1' },
+    { ph: 'start', id: 1, t: 10_000 + 201, session: 'w2' }
+  ], 10_000);
+  assert.deepEqual(summary.convert, { n: 1, queueP50Ms: 4, handleP50Ms: 26, handleMaxMs: 26 });
+  assert.equal(summary.suppress.n, 1);
+  assert.equal(workerTimingSummary([], [], null), null);
+}
 
 console.log('metrics: pictures, drags, import, switch, zoom, pan, windows tests passed');

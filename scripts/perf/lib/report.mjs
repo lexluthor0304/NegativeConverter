@@ -59,6 +59,8 @@ export function renderReport(results, budgets) {
         if (group.routes?.length) out.push(`Film type / route per photo: ${group.routes.map(route => `${route.photo}: ${route.filmType ?? '?'} → ${route.route ?? '?'}`).join('; ')}.`, '');
         out.push(metricTable(group.summary, budgets), '');
         if (group.profile) out.push(hotTable(group.profile), '');
+        if (group.loaf?.length) out.push(`Long animation frame scripts (first repetition): ${group.loaf.slice(0, 8).map(entry => `\`${entry.label}\` ${entry.ms} ms ×${entry.count}`).join('; ')}.`, '');
+        if (group.workerTiming) out.push(`Worker queue / handling p50 (ms): ${Object.entries(group.workerTiming).map(([cls, entry]) => `${cls} ${entry.queueP50Ms} / ${entry.handleP50Ms}`).join('; ')}.`, '');
         if (group.notes?.length) out.push(...group.notes.map(note => `- ${note}`), '');
       }
     }

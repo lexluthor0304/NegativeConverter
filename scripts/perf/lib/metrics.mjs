@@ -456,3 +456,50 @@ export function flattenMetrics(prefix, object, out = {}) {
   }
   return out;
 }
+
+/**
+ * Long Animation Frame script attribution, aggregated by source-mapped
+ * location (`mapper.mapCharPosition`): where main-thread frames spent time.
+ */
+export function loafAttribution(events, mapper, { top = 12 } = {}) {
+  const totals = new Map();
+  for (const frame of byKind(events, 'loaf')) {
+    for (const script of frame.scripts || []) {
+      const mapped = mapper && script.u ? mapper.mapCharPosition(script.u, script.cp) : null;
+      const where = mapped ? `${mapped.source}:${mapped.line}` : `${String(script.u || '(unknown)').split('/').pop()}@${script.cp ?? '?'}`;
+      const key = `${script.fn || script.inv || '(anonymous)'} ${where}`;
+      const entry = totals.get(key) || { label: key, ms: 0, count: 0, forcedLayoutMs: 0 };
+      entry.ms += script.d || 0;
+      entry.forcedLayoutMs += script.fsl || 0;
+      entry.count++;
+      totals.set(key, entry);
+    }
+  }
+  return [...totals.values()].sort((a, b) => b.ms - a.ms).slice(0, top)
+    .map(entry => ({ ...entry, ms: round(entry.ms), forcedLayoutMs: round(entry.forcedLayoutMs) }));
+}
+
+/**
+ * Worker-side timing (Chrome worker probe, epoch ms) against the page's
+ * request records: queue delay (request → handler start) and handling time
+ * (start → reply) per request class.
+ */
+export function workerTimingSummary(events, workerTiming, pageTimeOrigin) {
+  if (!Number.isFinite(pageTimeOrigin) || !workerTiming?.length) return null;
+  const requests = byKind(events, 'req').filter(req => req.id !== undefined && req.id !== null);
+  const starts = workerTiming.filter(record => record.ph === 'start');
+  const replies = workerTiming.filter(record => record.ph === 'reply');
+  const perClass = {};
+  for (const start of starts) {
+    const t = start.t - pageTimeOrigin;
+    const req = requests.filter(entry => entry.id === start.id && entry.t <= t + 1).pop();
+    if (!req) continue;
+    const reply = replies.find(entry => entry.session === start.session && entry.id === start.id && entry.t >= start.t);
+    const bucket = perClass[req.cls] ||= { queue: [], handle: [] };
+    bucket.queue.push(t - req.t);
+    if (reply) bucket.handle.push(reply.t - start.t);
+  }
+  return Object.fromEntries(Object.entries(perClass).map(([cls, bucket]) => [cls, {
+    n: bucket.queue.length, queueP50Ms: round(median(bucket.queue)), handleP50Ms: round(median(bucket.handle)), handleMaxMs: round(max(bucket.handle))
+  }]));
+}

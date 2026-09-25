@@ -187,6 +187,7 @@ export class ChromeSession {
 
   #abort(status, detail) {
     if (this.status !== 'ok') return Promise.resolve();
+    this.lastMemorySample ||= this.sampler?.samples.at(-1) || null;
     this.status = status;
     this.abortReason = detail;
     this.options.log?.(`aborting: ${status} — ${detail}`);
