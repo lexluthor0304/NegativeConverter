@@ -6579,13 +6579,14 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     }
 
     if (typeof window !== 'undefined') {
-      window.__ncDisplay = {
+      // Beside the display-preview state of #248 on the same hook.
+      window.__ncDisplay = Object.assign(window.__ncDisplay || {}, {
         frame: describeDisplayFrame,
         imageHash: hashDisplayedImage,
         settledParity: verifySettledDisplay,
         counters: () => ({ ...displayDebugCounters }),
         resetCounters: () => { for (const key of Object.keys(displayDebugCounters)) displayDebugCounters[key] = 0; }
-      };
+      });
     }
 
     // `deferDisplay`: a whole-frame result of the same size as the frame on
