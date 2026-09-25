@@ -655,15 +655,19 @@ for (const [format, bitDepth] of [['jpeg', 8], ['png', 8], ['tiff', 16], ['png',
   // base; a lane goes on while its payload waits for the write; a
   // never-analysed frame reads the learned defaults only after an earlier
   // learning frame's write. 'serial' turns the stages off.
-  const run = async (mode) => {
+  const run = async (mode, { budgetBytes = null } = {}) => {
     const { f, exportInfo } = batchContext({ format: 'png', bitDepth: 8 });
     const log = [];
     const decoded = [];
     f.context.safeStorageGet = (key) => (key === 'nc_batch_pipeline_v1' ? mode : null);
     f.context.state.rollReference = { applyLock: false };
+    if (budgetBytes !== null) f.context.memoryBudget.setBudget(budgetBytes);
     f.context.loadFileToImageData = async (file, options) => {
       assert.ok(options.signal instanceof AbortSignal, 'a prepared decode can be aborted');
       assert.equal(options.filmStats, !fileSettings.get(file.name), 'the options the lane would decode with');
+      // Admitted at once against the memory budget's ceiling (#258); the
+      // decode reserves nothing a lane could be waiting on.
+      assert.equal(options.claim?.fixed, true, 'a prepared decode takes no reservation of its own');
       log.push(`decode-ahead:${file.name}`);
       const base = makeProcessed(5);
       decoded.push(base);
@@ -719,6 +723,11 @@ for (const [format, bitDepth] of [['jpeg', 8], ['png', 8], ['tiff', 16], ['png',
   assert.ok(staged.log.indexOf('learned:a.dng') < staged.log.indexOf('learned-read:c.dng:after'), staged.log.join());
   assert.equal(staged.diagnostics.decodeAhead.admitted, 3);
   assert.equal(staged.diagnostics.last.prepare.taken, 3);
+  // The memory budget (#258) is the ceiling: below one frame's estimate,
+  // every lane decodes its own frame.
+  const tight = await run(null, { budgetBytes: 1 });
+  assert.deepEqual(tight.log.filter((line) => line.startsWith('decode-ahead')), [], 'no decode-ahead over the budget');
+  assert.ok(tight.diagnostics.decodeAhead.refused.ceiling >= 1, 'refused by the ceiling');
   const serial = await run('serial');
   assert.deepEqual(serial.log.filter((line) => line.startsWith('decode-ahead')), [], 'serial: no decode-ahead');
   assert.equal(serial.diagnostics.last.earlyReleases, 0, 'serial: lanes held until their write');
@@ -749,6 +758,10 @@ for (const [format, bitDepth] of [['jpeg', 8], ['png', 8], ['tiff', 16], ['png',
   const run = async ({ format, bitDepth, mode, gainMap = 'off', frames = 1, role = 'derived' }) => {
     const f = createContext({ gainMap });
     f.context.safeStorageGet = (key) => (key === 'nc_batch_pipeline_v1' ? mode : key === 'nc_hdr_gain_map_v1' ? gainMap : null);
+    // Each lane decodes its own frame here: no decode-ahead, whichever of a
+    // lane's admission (#258's memory budget) and the next frame's offer
+    // settles first.
+    f.context.isRawLikeFileName = () => false;
     f.context.createConversionWorkerPool = () => {
       const lane = async (request) => markOwnedPlanes(await convertFrameWithRouter({ imageData: request.imageData, settings: request.settings, options: request.options }));
       lane.dispose = () => {};

@@ -163,9 +163,9 @@ export function planPng16BandWorkers({ lanes = 1, hardwareConcurrency } = {}) {
 // written. A 60 MP 16-bit TIFF is about 362 MB, a JPEG about 7 MB.
 export const EXPORT_MAX_UNWRITTEN_BYTES = 512 * 1024 * 1024;
 
-// Decode-ahead admission (#256 Part 3), in estimated bytes. The ceiling is a
-// placeholder until #258 supplies the renderer-wide budget; it is to be
-// re-set from the per-lane peak the #230 harness measures. With a 60 MP
+// Decode-ahead admission (#256 Part 3), in estimated bytes. The export passes
+// the renderer-wide memory budget (#258) as the ceiling; this default is the
+// placeholder used before it, for callers without one. With a 60 MP
 // photo open: the editor (~1.7 GB idle in the desktop app, measured) and its
 // photo sessions (<= 0.77 GB), one processing lane (~1.5 GB at 25 B/px), one
 // decode ahead (~1.8 GB) and one unwritten TIFF16 (0.36 GB) come to about

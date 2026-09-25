@@ -225,13 +225,18 @@ Budgets, in estimated bytes (`batchExportScheduler.js`):
 | decoded, waiting for its lane | 12 B/px, ~0.72 GB | `DECODED_BASE_BYTES_PER_PIXEL` |
 | one processing lane | 25 B/px, ~1.5 GB (code accounting) | `PROCESSING_SLOT_BYTES_PER_PIXEL` |
 | encoded, waiting for its write | the payload's size, at most 512 MiB in all | `EXPORT_MAX_UNWRITTEN_BYTES` |
-| the editor (open photo, sessions, previews) | resident bytes | `hiddenResidentBytes()` |
+| the editor (open photo, sessions, previews, stores, workers) | resident bytes | the memory ledger (`hiddenResidentBytes()`, #258) |
 
 The lane plan (`planBatchParallelism`) is unchanged: frames of 45 MP and
 more keep one processing lane, and the other cores go to decode-ahead and
 the band pool. The processing figure is code accounting until the #230
-harness measures the per-lane peak; the decode-ahead ceiling (6.5 GB) is a
-placeholder until #258 supplies the renderer-wide budget.
+harness measures the per-lane peak. The decode-ahead ceiling is the memory
+budget's (`docs/memory-budget.md`, #258: 6.0 GiB at 16 GiB of RAM, 3.6 GiB
+at 8 GiB or unknown), and the editor's bytes are its ledger's. A prepared
+decode takes no reservation of its own: a lane reserves before it claims a
+frame and then waits for that frame's prepare, so admission is a yes or no at
+once, and a refused frame is decoded by its lane inside the lane's
+reservation.
 
 - **Smaller lane** (Part 1). `processFileWithSettings` with `releaseEarly`
   (batch only) releases the decoded base and the geometry/lens outputs it

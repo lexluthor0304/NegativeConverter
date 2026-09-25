@@ -17733,6 +17733,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // two sub-stages in 'substages' mode), admitted by estimated bytes. RAW
     // and PNG decodes run off this thread; other formats decode in their lane
     // as before. The prepared base is the same decode the lane would make.
+    //
+    // The ceiling is the memory budget's (#258), and the estimate counts its
+    // ledger. The decode itself takes no reservation of its own: a lane
+    // reserves before it claims a frame and then waits for that frame's
+    // prepare, so a prepare waiting for memory the lane holds would never
+    // finish. Admission is a yes or no at once instead, and a frame it
+    // refuses is decoded by its lane inside the lane's reservation.
     function batchDecodeAhead(mode, { pixelsPerFile }) {
       if (mode === 'serial') return null;
       const decodesOffThread = (file) => isRawLikeFileName(String(file?.name || '').toLowerCase()) || isPngFile(file);
@@ -17764,7 +17771,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
             unwrittenBytes,
             residentBytes: hiddenResidentBytes(),
             deviceMemory: navigator.deviceMemory,
-            hiddenLimited: hidden.safeMode || (hidden.hidden && hidden.limited)
+            hiddenLimited: hidden.safeMode || (hidden.hidden && hidden.limited),
+            ceilingBytes: memoryBudget.budget
           });
           batchPipelineDiagnostics.decodeAhead.lastEstimate = plan.bytes;
           if (plan.admit) batchPipelineDiagnostics.decodeAhead.admitted += 1;
@@ -17779,7 +17787,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           if (isTauriDesktop()) await backgroundGate.idle({ signal, maxWaitMs: BACKGROUND_STEP_WAIT_CAP_MS, foregroundOnly: true });
           running += 1;
           try {
-            const base = await loadFileToImageData(job.file, { filmStats: !job.settings, signal, ...(subStages ? { onStage: stage } : {}) });
+            const base = await loadFileToImageData(job.file, {
+              filmStats: !job.settings, signal, claim: coveredMemoryClaim(), ...(subStages ? { onStage: stage } : {})
+            });
             return markOwnedPlanes(base);
           } finally {
             running -= 1;
