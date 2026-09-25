@@ -117,7 +117,10 @@ export function recordImportMetrics(ctx, prefix, metrics) {
   // Stage columns of the 2026-09-23 S1 table: the first request of each kind.
   const stage = (predicate) => metrics.stages.find(predicate)?.ms ?? null;
   ctx.record(`${prefix}.stage.librawDecodeMs`, stage(entry => entry.cls === 'libraw' && entry.fn === 'imageData'));
+  // Before #232 the shared sensor-defect worker got 'suppress'; since then a
+  // per-decode worker gets one 'process' request (pack, defects, mirror, stats).
   ctx.record(`${prefix}.stage.sensorDefectsMs`, stage(entry => entry.cls === 'suppress'));
+  ctx.record(`${prefix}.stage.rawPostDecodeMs`, stage(entry => entry.cls === 'process'));
   ctx.record(`${prefix}.stage.autoFrameMs`, stage(entry => entry.cls === 'analyze-frame'));
   ctx.record(`${prefix}.stage.filmEdgeMs`, stage(entry => entry.cls === 'read-film-edge'));
   ctx.record(`${prefix}.stage.scanDecodeMs`, stage(entry => entry.cls === 'decode'));
