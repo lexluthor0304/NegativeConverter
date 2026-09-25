@@ -4,6 +4,7 @@
 // prefetch slot and the hand-over of finished bases.
 import assert from 'node:assert/strict';
 import { createLaneFixture, flush } from './backgroundLanesHarness.mjs';
+import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
 
 // --- lane tiles follow the display order around the open photo -----------------
 {
@@ -38,6 +39,39 @@ import { createLaneFixture, flush } from './backgroundLanesHarness.mjs';
   assert.equal(f.context.backgroundLanes.running, 0, 'the lane ends when nothing is left');
   assert.deepEqual(f.pools(), { convertPools: 1, convertDisposed: 1, analyzerPools: 1, analyzerDisposed: 1 },
     'the lane\'s workers are released when it ends');
+}
+
+// --- the memory budget (#258): a lane frame waits while a photo is being
+// opened, reserves its frame before the decode and keeps it until the tile is written.
+{
+  const f = createLaneFixture({ count: 3, current: 0, memoryBudgetBytes: 10e9 });
+  const budget = f.context.memoryBudget;
+  const opening = await budget.reserve(2e9, { priority: 'foreground', label: 'open 0.dng' });
+  f.context.kickBackgroundPhotoWork();
+  await f.clock.advance(2000);
+  assert.equal(f.decodes.length, 0, 'no background decode while a photo is being opened');
+  assert.deepEqual(budget.snapshot().waiting.map(entry => entry.priority), ['background']);
+  opening.release();
+  await flush();
+  assert.deepEqual(f.started(), ['1.dng']);
+  const frame = estimateRawDecodeBytes(1e6, 1) + 1e6 * 12;
+  assert.equal(budget.snapshot().background, frame, 'a RAW tile: its decode peak plus the decoded planes');
+  const claim = f.decodeOf(1)[0].options.claim;
+  assert.ok(claim?.held, 'the decode is covered by the job\'s claim');
+  // The loader gate corrects the header estimate to the real size.
+  await claim.atDecode({ kind: 'raw', width: 2000, height: 1000, estimatedBytes: 5e8 });
+  assert.equal(budget.snapshot().background, 5e8 + 2e6 * 12);
+  await f.finishDecode(1);
+  assert.ok(budget.snapshot().background > 0, 'held while the tile renders');
+  await f.finishRender(1);
+  assert.equal(budget.snapshot().background, 0, 'released once the tile is written');
+  // A background frame that does not fit next to another job waits for it.
+  const exportLane = await budget.reserve(9.9e9, { priority: 'user', label: 'export lane' });
+  await f.clock.advance(30);
+  assert.equal(f.decodeOf(2).length + f.decodeOf(0).length, 0, 'behind the export lane');
+  exportLane.release();
+  await flush();
+  assert.equal(f.decodes.length, 2, 'the next frame starts once the lane is gone');
 }
 
 // --- the foreground gate: no decode starts while busy or within 400 ms of input ------

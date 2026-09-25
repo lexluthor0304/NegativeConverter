@@ -75,7 +75,7 @@ function fixture() {
     photoPrefetch: createPhotoSessionCache({ maxBytes: 4096 }), prefetchedItem: null,
     beginActivation: () => { context.activations.push(new AbortController()); return context.activations.at(-1).signal; },
     activations: [], notePhotoActivation: noop, activationDwell: async () => { context.dwells++; }, dwells: 0,
-    sharedDecodeInFlight: () => false, kickBackgroundPhotoWork: noop, supersedeActivation: noop,
+    sharedDecodeInFlight: () => false, kickBackgroundPhotoWork: noop, supersedeActivation: noop, releaseActivationClaim: noop,
     abortBackgroundDecodes: () => { context.backgroundAborts++; }, backgroundAborts: 0,
     studioThumbnailUpdateFrame: 0, cancelAnimationFrame: noop,
     studioThumbnailUpdateTimer: 0, clearTimeout: noop,

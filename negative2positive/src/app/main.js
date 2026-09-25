@@ -13,7 +13,8 @@ import { readLearnedDefaults, writeLearnedDefaults, resetLearnedDefaults } from 
 import { exportNameStem } from './exportFileName.js';
 import { frameNeedsReview } from './reviewQueue.js';
 import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
-import { createHiddenJobGate, hiddenJobLimitsApply, estimateHiddenJobBytes } from './hiddenJobGate.js';
+import { createHiddenJobGate, hiddenJobLimitsApply, estimateHiddenJobBytes, HIDDEN_BUDGET_BYTES } from './hiddenJobGate.js';
+import { createMemoryBudget, createRetainedLedger, createMemoryClaim, createIdleCheck, relievePressure, budgetFor, resolveMemoryRam, memoryEngine, hasPeriodicMemoryPurge, DECODED_BYTES_PER_PIXEL, IDLE_RETAINED_TARGET_BYTES, RAM_OVERRIDE_KEY } from './memoryBudget.js';
 import { createBackgroundGate, BACKGROUND_STEP_WAIT_CAP_MS } from './backgroundGate.js';
 import { createSharedDecodes } from './sharedDecodes.js';
 import { pickBackgroundJob, travelDirection, displayDistance } from './backgroundPhotoScheduler.js';
@@ -81,7 +82,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     import { convertFrameInWorker, convertPreviewFrameInWorker, convertFullResolutionFrameInWorker, createConversionWorkerClient, createConversionWorkerPool, CONVERSION_FAILED, WORKER_CRASHED, WORKER_TIMEOUT, WORKER_UNAVAILABLE, WORKER_ABORTED, isConversionInputLost } from './conversionWorkerClient.js';
     import { routeCoreConversion, keepsFullPlaneOnDowngrade, fullResolutionIsStale, restoredFrameFlags, viewportRefreshBranch, repairsNeedSettling } from './fullResolutionRouting.js';
     import { poolRepairMask } from './repairedPreview.js';
-    import { planBatchParallelism, planPng16BandWorkers, runBatchPipeline, planGeometryBandsInFlight } from './batchExportScheduler.js';
+    import { planBatchParallelism, planPng16BandWorkers, runBatchPipeline, planGeometryBandsInFlight, LANE_BYTES_PER_PIXEL } from './batchExportScheduler.js';
     import {
       displayPreviewSize, resizeDisplayPreview, resizeDisplayPreviewInBands, updateDisplayPreviewRect, noteDisplayFilter,
       displayLevelFactor, displayLevelGeometry, buildDisplayLevelInBands, resampleDisplayLevel, displayTargetFor, isDisplayTarget,
@@ -137,7 +138,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     import { renderFileList } from './fileListView.js';
     import { normalizeFileListSort, orderedFileIndices, selectionRangeIndices } from './fileListOrder.js';
     import { createSprocketFrameCache } from './sprocketFrameCache.js';
-    import { imagePixelsForBatch, rememberImageDimensions, knownImageDimensions } from './imageDimensions.js';
+    import { imagePixelsForBatch, imagePixelsWithSiblings, rememberImageDimensions, knownImageDimensions } from './imageDimensions.js';
     import {
       createDustWorkerClient, detectDustInWorker, inpaintDustInWorker, strokeDustInWorker, followDustMaskInWorker,
       pinDustWorker, unpinDustWorker, disposeDustWorker, dustMaskInfo, forgetDustMaskInfo
@@ -181,7 +182,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       createPng16BandPool,
       terminateWorker as terminateExportWorker,
       exportWorkerPendingCount,
-      isExportWorkerAlive
+      isExportWorkerAlive,
+      exportWorkerResidentBytes
     } from '../workers/workerBridge.js';
     import {
       markOwnedPlanes,
@@ -189,7 +191,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       releaseOwnedPlanes,
       setLiveReferenceProbe
     } from './planeRelease.js';
-    import { registerEvictablePlane } from './evictablePlanes.js';
+    import { registerEvictablePlane, evictPlane } from './evictablePlanes.js';
 
     const DEBUG_UI = new URLSearchParams(window.location.search).get('debug') === '1';
     const WEBGL_DEBUG_ERRORS = new URLSearchParams(window.location.search).has('debugGL');
@@ -363,7 +365,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     const hiddenJobs = createHiddenJobGate({
       isHidden: () => document.visibilityState === 'hidden',
       limitsApply: () => hiddenJobLimitsForced() || hiddenJobLimitsApply(),
-      residentBytes: () => hiddenResidentBytes(),
+      // The renderer-wide ledger (#258).
+      residentBytes: () => memoryLedger.retained(),
       onChange: () => {
         refreshHiddenJobStatus();
         if (hiddenJobs.paused) onHiddenJobPaused();
@@ -373,6 +376,19 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // A job that ends while hidden leaves nothing idle behind.
       onIdle: () => shedHiddenJobMemory()
     });
+    // One memory budget for the whole renderer (#258; see "Memory budget"
+    // below): every full-resolution decode, batch lane and background frame
+    // reserves its bytes here first, and one ledger counts what the open
+    // photo, the caches, history and long-lived workers retain. Sized from
+    // navigator.deviceMemory (or its override) until the desktop app's RAM
+    // query answers.
+    const memoryLedger = createRetainedLedger(() => memoryLedgerConsumers());
+    const memoryBudget = createMemoryBudget({
+      budgetBytes: budgetFor({ ramBytes: initialMemoryRam().ramBytes }),
+      retainedBytes: () => memoryLedger.retained(),
+      onPressure: (need, request) => relieveMemoryPressure(need, request),
+      onEvent: event => noteMemoryEvent(event)
+    });
     // Background photo work (#243; see "Background photo lanes" below). The
     // gate says when it may start: not during a switch, a conversion, a
     // full-resolution render or an export, and not within 400 ms of input.
@@ -381,7 +397,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // One decode per file for the background lanes and the foreground
     // (sharedDecodes.js). Background decodes always use the options a
     // foreground load would: full size, defects repaired, with rawMetadata.
-    const sharedDecodes = createSharedDecodes({ decode: (file, { signal }) => decodeForBackground(file, signal) });
+    const sharedDecodes = createSharedDecodes({ decode: (file, { signal, context }) => decodeForBackground(file, signal, context) });
     // Running lane loops, the job of each frame in work, roll-analysis passes
     // waiting for lanes, the direction of travel, visible tiles and the
     // prefetched photo.
@@ -3189,23 +3205,26 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return bytes;
     }
 
-    function pruneHistoryForMemory() {
+    // `limit`: the memory budget's pressure (#258) strips below the history
+    // budget; `stripOnly` keeps every step (no dust-stroke entry is dropped).
+    function pruneHistoryForMemory({ limit = HISTORY_MEMORY_BUDGET_BYTES, stripOnly = false } = {}) {
       const hot = hotGeometrySnapshot();
       // Oldest first: the bottom of the undo stack, then the far end of redo.
       const order = [...undoStack, ...redoStack.slice().reverse()];
       for (const snapshot of order) {
-        if (historyExclusiveBytes(hot) <= HISTORY_MEMORY_BUDGET_BYTES) return;
+        if (historyExclusiveBytes(hot) <= limit) return;
         if (snapshot === hot || snapshot.dustDelta || snapshot.refs.cold) continue;
         // Only references are dropped; buffers are never detached, so the
         // session cache and live state keep theirs.
         snapshot.refs = { cold: true };
       }
+      if (stripOnly) return;
       // A dust-stroke entry (#259) patches the objects it holds and cannot go
       // cold. One that still pins objects live state has let go of is dropped
       // with everything older on its stack, so undo and redo stay LIFO.
       for (const stack of [undoStack, redoStack]) {
         for (let i = 0; i < stack.length; i++) {
-          if (historyExclusiveBytes(hot) <= HISTORY_MEMORY_BUDGET_BYTES) return;
+          if (historyExclusiveBytes(hot) <= limit) return;
           if (!stack[i].dustDelta) continue;
           stack.splice(0, i + 1);
           i = -1;
@@ -9487,6 +9506,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (!photoActivation) return;
       photoActivation.abort(new DOMException('Superseded photo activation', 'AbortError'));
       photoActivation = null;
+      // Its decode's workers went with the abort; so does its reservation (#258).
+      releaseActivationClaim();
     }
     function beginActivation(file = null) {
       supersedeActivation();
@@ -9516,8 +9537,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     const photoPreviews = createPhotoSessionCache({ maxBytes: 48 * 1024 * 1024 });
     // The prefetched next photo (#243): one base-only entry of its own, so an
     // unvisited prefetch never evicts the photo the user just left (A/B/A).
-    // Desktop session budget only; off where memory is short (until #258
-    // owns the budget).
+    // Desktop session budget only; off where memory is short. Its base counts
+    // in the memory ledger, and the prefetch decode reserves like any lane
+    // frame (#258).
     const photoPrefetch = createPhotoSessionCache({ maxBytes: lowMemoryPhotoDevice() ? 0 : PHOTO_SESSION_BUDGET_BYTES });
     // Retained tile sources (#247 2d): a recipe change over unchanged geometry
     // re-renders a light-table tile from these instead of a new decode.
@@ -9593,30 +9615,18 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         || automaticRollImportRunning || automaticRollAnalysisRunning;
     }
 
-    // Unique backing buffers of the open photo's planes (each with its
-    // __image16), the undo history and both photo caches.
+    // What the page retains: the memory ledger's total (#258), which counts
+    // the open photo's planes, history, the photo caches, bounded stores and
+    // worker residents, each buffer once.
     function hiddenResidentBytes() {
-      const buffers = new Set();
-      backingBuffers([
-        state.loadedBaseImageData, state.originalImageData, state.croppedImageData, state.processedImageData,
-        state.conversionSourceImageData, state.conversionPreviewImageData, state.displayLevelImageData, state.previewSourceImageData,
-        state.histogramSourceImageData, state.webglSourceImageData, state.displayImageData,
-        state.dustRemoval.mask, state.dustRemoval.inpaintedImageData, state.dustRemoval.cleanSource,
-        undoStack, redoStack
-      ], buffers);
-      for (const cache of [photoSessions, photoPreviews, photoPrefetch, thumbnailSources, watchRollSamples]) {
-        for (const buffer of cache.buffers()) buffers.add(buffer);
-      }
-      let bytes = 0;
-      for (const buffer of buffers) bytes += buffer.byteLength;
-      return bytes;
+      return memoryLedger.retained();
     }
 
     // One item of these files: the larger of the RAW decode peak and the lane
     // peak, from header dimensions (the batch's largest frame).
     async function hiddenJobBytesFor(files) {
       let pixels = 0;
-      for (const file of files) pixels = Math.max(pixels, await imagePixelsForBatch(file));
+      for (const file of files) pixels = Math.max(pixels, await pixelsForMemory(file));
       return estimateHiddenJobBytes(pixels, estimateRawDecodeBytes(pixels, 1));
     }
 
@@ -9674,6 +9684,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     document.addEventListener('visibilitychange', () => {
       hiddenJobs.visibilityChanged();
+      // The hidden ceiling of the memory budget (#258).
+      applyMemoryCeiling();
       if (document.visibilityState === 'hidden') {
         // While a job runs, shed now; an idle window keeps its warm caches
         // until the grace period ends, so a quick app switch stays warm.
@@ -9789,6 +9801,380 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         return true;
       };
     }
+
+    // ===========================================
+    // Memory budget (#258)
+    // ===========================================
+    // One budget for the renderer (memoryBudget.js), sized from the machine's
+    // RAM: the desktop app asks Rust (get_memory_info), the web reads
+    // navigator.deviceMemory (8 GiB when unknown), and the localStorage key
+    // nc_memory_ram_gib_v1 overrides both for benchmarks and the 2-lane
+    // parity run. Who reserves:
+    // - the photo being opened (foreground): at the loader gate with the
+    //   decode's real size, held until the activation settles or a newer one
+    //   supersedes it; the deferred full-resolution decode of a heavy RAW
+    //   until it returns;
+    // - user jobs: each Export All lane (the lane constant over the batch's
+    //   largest frame, from admission until its sink ran), Auto Frame
+    //   Selected, multi-shot merge, blank-frame search, a manual Analyze
+    //   Roll and the contact sheet, one frame at a time;
+    // - background frames: lane tiles and the prefetch (decode + planes; 0
+    //   from a retained base), roll analysis (the lane constant) and the
+    //   automatic roll-analysis fallbacks.
+    // What stays resident is the ledger's: the open photo, then the photo
+    // sessions, previews, history, bounded stores, frames a job keeps and
+    // long-lived workers, each buffer counted once.
+    const memoryRuntime = { ...initialMemoryRam(), engine: memoryEngine(), desktop: null };
+    const memoryLogEnabled = DEBUG_UI || readPerfFlags(window.location.search).userTiming;
+    const MEMORY_EVENT_LOG_LIMIT = 2000;
+    const memoryEvents = [];
+
+    function initialMemoryRam() {
+      return resolveMemoryRam({ overrideGib: safeStorageGet(RAM_OVERRIDE_KEY), deviceMemory: navigator.deviceMemory });
+    }
+
+    // The budget without the hidden-window ceiling.
+    function baseMemoryBudget() {
+      return budgetFor({ ramBytes: memoryRuntime.ramBytes, engine: memoryRuntime.engine });
+    }
+
+    // While the window is hidden on the hosts #241 limits (macOS WebKit), the
+    // ceiling drops to that gate's hidden budget, under WebKit's 4 GiB
+    // inactive kill limit. Nothing granted is revoked.
+    function applyMemoryCeiling() {
+      const hiddenLimited = document.visibilityState === 'hidden' && hiddenJobs.status().limited;
+      memoryBudget.setBudget(hiddenLimited ? Math.min(baseMemoryBudget(), HIDDEN_BUDGET_BYTES) : baseMemoryBudget());
+    }
+
+    async function loadDesktopMemoryInfo() {
+      if (isTauriDesktop()) {
+        try {
+          const info = await window.__TAURI__.core.invoke('get_memory_info');
+          memoryRuntime.desktop = info && typeof info === 'object' ? info : null;
+        } catch (err) {
+          console.info('Desktop memory info unavailable:', err);
+        }
+      }
+      Object.assign(memoryRuntime, resolveMemoryRam({
+        overrideGib: safeStorageGet(RAM_OVERRIDE_KEY),
+        desktopTotalBytes: memoryRuntime.desktop?.totalBytes,
+        deviceMemory: navigator.deviceMemory
+      }), { engine: memoryEngine({ desktopEngine: memoryRuntime.desktop?.engine }) });
+      memoryIdleCheck.setEnabled(hasPeriodicMemoryPurge(memoryRuntime.engine));
+      applyMemoryCeiling();
+    }
+
+    // ---- The ledger ----------------------------------------------------------
+    // Frames a job keeps between its items (the blank-frame search's best
+    // candidate) and the roll-analysis sample stores in use.
+    const heldJobFrames = new Set();
+    const liveSampleStores = new Set();
+    // Long-lived workers: { residentBytes(), idle(), release() }. Workers a
+    // lane owns (batch pools, lane analysers) are inside its reservation.
+    const workerResidents = new Map();
+
+    function memoryLedgerConsumers() {
+      return [
+        // The active editor: never evicted, except the full-resolution
+        // processedImageData (#250's demotion) under the rules below.
+        { name: 'editor', roots: () => [liveHistoryRoots(), fullAdjustedBuffer, previewAdjustedBuffer, parkedPhoto?.base] },
+        { name: 'sessions', buffers: () => photoSessions.buffers() },
+        { name: 'previews', buffers: () => photoPreviews.buffers() },
+        // Only what nothing above holds (#244's exclusive count).
+        { name: 'history', roots: () => [...undoStack, ...redoStack].map(entry => entry.dustDelta || entry.refs) },
+        { name: 'stores', buffers: () => boundedStoreBuffers(), bytes: () => sampleStoreBytes() },
+        { name: 'jobs', roots: () => [...heldJobFrames] },
+        { name: 'workers', bytes: () => workerResidentBytes() }
+      ];
+    }
+
+    function* boundedStoreBuffers() {
+      yield* photoPrefetch.buffers();
+      yield* thumbnailSources.buffers();
+      yield* watchRollSamples.buffers();
+    }
+
+    function sampleStoreBytes() {
+      let bytes = 0;
+      for (const store of liveSampleStores) bytes += Number(store.bytes) || 0;
+      return bytes;
+    }
+
+    function workerResidentBytes() {
+      let bytes = 0;
+      for (const resident of workerResidents.values()) {
+        try { bytes += Math.max(0, Number(resident.residentBytes()) || 0); } catch { /* unknown counts as 0 */ }
+      }
+      return bytes;
+    }
+
+    // A warmed MI-GAN session reports no heap of its own; on WebKit's non-JSEP
+    // WASM it is an estimated 0.6-0.8 GB (#236), less on WebGPU, whose weights
+    // live in the GPU process. Calibrate with footprint traces.
+    const AI_REPAIR_RESIDENT_ESTIMATE_BYTES = { wasm: 0.7e9, other: 0.25e9 };
+    workerResidents.set('export', {
+      residentBytes: () => exportWorkerResidentBytes(),
+      // #250's default bridge releases itself 4 s after a large request.
+      idle: () => isExportWorkerAlive() && exportWorkerPendingCount() === 0,
+      release: () => terminateExportWorker()
+    });
+    workerResidents.set('opencv', {
+      residentBytes: () => analyzeFrameInWorker.residentBytes,
+      idle: () => analyzeFrameInWorker.alive && !analyzeFrameInWorker.busy,
+      release: () => analyzeFrameInWorker.releaseIdle()
+    });
+    workerResidents.set('aiRepair', {
+      residentBytes: () => (aiRepair.status === 'ready'
+        ? (aiRepair.provider === 'webgpu' ? AI_REPAIR_RESIDENT_ESTIMATE_BYTES.other : AI_REPAIR_RESIDENT_ESTIMATE_BYTES.wasm) : 0),
+      // Only under #236's idle-release rule: no run for about 5 minutes, no
+      // pending brush repair, no batch.
+      idle: () => canReleaseIdleAiRepair(),
+      release: () => { void releaseAiRepairSession(); }
+    });
+
+    // ---- Eviction ----------------------------------------------------------------
+    function freedByLedger(evict) {
+      const before = memoryLedger.retained();
+      evict();
+      return Math.max(0, before - memoryLedger.retained());
+    }
+
+    // The session the user just left stays: the warm 1-back switch (#222) is
+    // never traded for other work.
+    function trimPhotoSessions(remaining) {
+      return freedByLedger(() => photoSessions.trim(Math.max(0, photoSessions.bytes - remaining), { keep: [photoSessions.lastStoredKey] }));
+    }
+
+    function trimPhotoPreviews(remaining) {
+      return freedByLedger(() => photoPreviews.trim(Math.max(0, photoPreviews.bytes - remaining)));
+    }
+
+    // Only a large frame's plane: below LARGE_IMAGE_PIXELS the idle
+    // full-resolution render would bring it straight back. #250's rule
+    // refuses while an export, a repair or a full-resolution render needs it.
+    function demoteFullResolutionForMemory() {
+      if (!isLargeImage(state.conversionSourceImageData) || !canDemoteFullResolutionPlane()) return 0;
+      return freedByLedger(() => evictPlane('processedImageData'));
+    }
+
+    // History keeps its steps and loses the pixel references of its oldest
+    // snapshots (#244 3e), as its own budget does.
+    function stripHistoryForMemory(remaining) {
+      const held = historyExclusiveBytes(hotGeometrySnapshot());
+      if (held <= 0) return 0;
+      return freedByLedger(() => pruneHistoryForMemory({ limit: Math.max(0, held - remaining), stripOnly: true }));
+    }
+
+    // onPressure: a user or background request does not fit. Evict in order
+    // until `need` is freed: previews, sessions (not the one just left), the
+    // open photo's full-resolution plane, then history's pixel references.
+    function relieveMemoryPressure(need, request = {}) {
+      const freed = relievePressure(need, [
+        trimPhotoPreviews,
+        trimPhotoSessions,
+        demoteFullResolutionForMemory,
+        stripHistoryForMemory
+      ]);
+      if (freed > 0) {
+        noteMemoryEvent({ type: 'evicted', label: request.label, priority: request.priority, need, freed });
+        memoryBudget.poke();
+      }
+      return freed;
+    }
+
+    // ---- Reservations --------------------------------------------------------
+    // The photo being opened reserves its decode's peak; a frame a job keeps
+    // after its decode (a tile, a prefetch, Auto Frame Selected) that peak
+    // plus the decoded 8- and 16-bit planes; a batch or roll lane the lane
+    // constant. A decode without LibRaw (PNG, JPEG, TIFF) is its planes.
+    function decodePeakBytes({ pixels, decodeBytes, kind }) {
+      if (decodeBytes) return decodeBytes;
+      return kind === 'raw' ? estimateRawDecodeBytes(pixels, 1) : 0;
+    }
+    function decodeReservationBytes(size) {
+      return decodePeakBytes(size) || size.pixels * DECODED_BYTES_PER_PIXEL;
+    }
+    function frameReservationBytes(size) {
+      return decodePeakBytes(size) + size.pixels * DECODED_BYTES_PER_PIXEL;
+    }
+    function laneReservationBytes({ pixels }) {
+      return pixels * LANE_BYTES_PER_PIXEL;
+    }
+
+    // What LibRaw decodes (the loader's 'raw' branch), for reservations made
+    // before the decode says so.
+    function fileDecodeKind(file) {
+      const name = String(file?.name || '').toLowerCase();
+      return isRawLikeFileName(name) && !/\.tiff?$/.test(name) ? 'raw' : 'scan';
+    }
+
+    // Header pixels; a header without a size borrows a decoded sibling's.
+    function pixelsForMemory(file) {
+      return imagePixelsWithSiblings(file, state.fileQueue.map(item => item.file));
+    }
+
+    // A claim on one frame's memory, shared by a job and its loader.
+    function createFrameClaim(file, { priority = 'user', signal = null, label = '', bytesFor = frameReservationBytes } = {}) {
+      return createMemoryClaim(memoryBudget, {
+        priority, signal, bytesFor,
+        label: label || `${priority} ${file?.name || ''}`,
+        headerPixels: () => pixelsForMemory(file)
+      });
+    }
+
+    // A decode inside something that already reserved it (an Export All lane).
+    function coveredMemoryClaim() {
+      return createMemoryClaim(memoryBudget, { handle: { release() {} } });
+    }
+
+    // Reserve a claim up front from the file's header; the loader gate
+    // corrects it to the decode's real size.
+    async function reserveFrameClaim(claim, file) {
+      await claim.reserve(await pixelsForMemory(file), { kind: fileDecodeKind(file) });
+      return claim;
+    }
+
+    // An item of a long job: the hidden-job gate first (#241), then the
+    // budget, never the other way round: a lane holding memory never waits
+    // on the hidden gate's one item in flight.
+    async function admitJobItem({ hiddenBytes = 0, memoryBytes = 0, priority = 'user', label = '', signal = null } = {}) {
+      const releaseHidden = await hiddenJobs.admit({ bytes: hiddenBytes, signal });
+      let handle;
+      try {
+        handle = await memoryBudget.reserve(memoryBytes, { priority, signal, label });
+      } catch (error) {
+        releaseHidden();
+        throw error;
+      }
+      return () => {
+        handle.release();
+        releaseHidden();
+      };
+    }
+
+    // The photo being opened: one foreground claim per activation, taken at
+    // the loader gate and held until the activation settles (its decode,
+    // switch, first conversion and geometry are done) or a newer activation
+    // supersedes it. While it is out, no user or background request starts.
+    const ACTIVATION_SETTLE_POLL_MS = 250;
+    const ACTIVATION_CLAIM_MAX_MS = 30_000;
+    let activationClaim = null;
+
+    function claimForActivation(signal, file) {
+      // A superseded activation never displaces the newer one's claim.
+      if (signal?.aborted) return createFrameClaim(file, { priority: 'foreground', signal, bytesFor: decodeReservationBytes });
+      if (!activationClaim || activationClaim.signal !== signal) {
+        activationClaim?.claim.release();
+        activationClaim = {
+          signal,
+          settling: false,
+          claim: createFrameClaim(file, { priority: 'foreground', signal, label: `open ${file?.name || ''}`, bytesFor: decodeReservationBytes })
+        };
+      }
+      return activationClaim.claim;
+    }
+
+    function releaseActivationClaim() {
+      activationClaim?.claim.release();
+      activationClaim = null;
+    }
+
+    function activationSettled() {
+      return !document.body.dataset.photoSwitching && !processNegativeInFlight && !state.geometryPending
+        && !getCurrentQueueItem()?.provisional;
+    }
+
+    // After the activation's decode: release once the photo has settled for
+    // two polls in a row (a switch's conversion starts after the decode), at
+    // the latest after ACTIVATION_CLAIM_MAX_MS.
+    function settleActivationClaim(signal) {
+      const entry = activationClaim;
+      if (!entry || entry.signal !== signal || entry.settling) return;
+      entry.settling = true;
+      const finish = () => {
+        entry.claim.release();
+        if (activationClaim === entry) activationClaim = null;
+      };
+      if (!entry.claim.held) { finish(); return; }
+      void (async () => {
+        const deadline = getPerfNow() + ACTIVATION_CLAIM_MAX_MS;
+        let quiet = 0;
+        while (!signal?.aborted && quiet < 2 && getPerfNow() < deadline) {
+          await backgroundRest(ACTIVATION_SETTLE_POLL_MS);
+          quiet = activationSettled() ? quiet + 1 : 0;
+        }
+      })().finally(finish);
+    }
+
+    // ---- WebKit idle check ---------------------------------------------------
+    // WebKit's 30 s monitor (macOS 26.x/27.0 WKWebView, WebKitGTK) throws away
+    // JIT code, decoded images and font caches on every tick while WebContent
+    // holds 1.5 GiB or more. 10 s after the last release and input, release
+    // idle workers and trim the caches toward IDLE_RETAINED_TARGET_BYTES. The
+    // open photo's other planes, history and anything a job holds are never
+    // touched; everything released comes back lazily.
+    const memoryIdleCheck = createIdleCheck({
+      onIdle: () => runMemoryIdleCheck(),
+      canRun: () => memoryBudget.idle && !hiddenJobRunning() && !foregroundBusyForBackground()
+        && !state.dustRemoval.processing && !pendingBrushRepairs
+    });
+    memoryIdleCheck.setEnabled(hasPeriodicMemoryPurge(memoryRuntime.engine));
+
+    function runMemoryIdleCheck() {
+      const before = memoryLedger.retained();
+      const released = [];
+      for (const [name, resident] of workerResidents) {
+        try {
+          if (resident.idle()) {
+            resident.release();
+            released.push(name);
+          }
+        } catch (error) {
+          console.warn('Idle worker release failed:', name, error);
+        }
+      }
+      // The session just left stays until #249's Tier B can demote it: a
+      // cold 1-back switch costs more than the purge.
+      const excess = memoryLedger.retained() - IDLE_RETAINED_TARGET_BYTES;
+      const trimmed = excess > 0
+        ? relievePressure(excess, [trimPhotoPreviews, trimPhotoSessions, demoteFullResolutionForMemory])
+        : 0;
+      noteMemoryEvent({ type: 'idle', released, trimmed, before, after: memoryLedger.retained() });
+      if (released.length || trimmed) memoryBudget.poke();
+      return { released, trimmed };
+    }
+
+    // ---- Instrumentation -----------------------------------------------------
+    function noteMemoryEvent(event) {
+      if (event.type === 'release') memoryIdleCheck.note();
+      if (!memoryLogEnabled) return;
+      const entry = { t: Math.round(getPerfNow()), ...event };
+      memoryEvents.push(entry);
+      if (memoryEvents.length > MEMORY_EVENT_LOG_LIMIT) memoryEvents.shift();
+      if (DEBUG_UI && event.type !== 'resize') console.info('[memory]', entry);
+    }
+
+    // ?debug=1 or ?perf=1: the budget, the ledger breakdown and the grant /
+    // wait / release log, for the #230 harness to set next to the measured
+    // footprint.
+    if (memoryLogEnabled) {
+      window.__ncMemory = {
+        snapshot: () => ({
+          ...memoryBudget.snapshot(),
+          ledger: memoryLedger.measure().breakdown,
+          baseBudget: baseMemoryBudget(),
+          ramBytes: memoryRuntime.ramBytes,
+          ramSource: memoryRuntime.source,
+          engine: memoryRuntime.engine,
+          idleCheck: memoryIdleCheck.armed
+        }),
+        log: () => memoryEvents.slice(),
+        clearLog: () => { memoryEvents.length = 0; },
+        runIdleCheck: () => runMemoryIdleCheck()
+      };
+    }
+
+    void loadDesktopMemoryInfo();
 
     // Only the decoded base: used for a photo left while its import
     // detections still ran, whose provisional state must not be restored.
@@ -10192,16 +10578,24 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
         let imageData;
         let extractedRawMeta = decoded?.rawMetadata || null;
+        // The activation's foreground reservation (#258): taken at the loader
+        // gate with the decode's real size, held until the photo settles.
+        const memoryClaim = claimForActivation(signal, file);
+        const reserveDecode = size => memoryClaim.atDecode(size);
         // A background lane decoding this file right now, or holding its
         // finished decode (#243): adopt it instead of decoding again. Same
         // decode options (full, defects on), with its rawMetadata. A heavy
         // file skips its half-size stage for it.
+        const adoptsRunningDecode = !(decoded?.file === file && decoded.base) && sharedDecodes.inFlight(file);
         const shared = !(decoded?.file === file && decoded.base) ? adoptSharedDecode(file, { signal }) : null;
 
         if (decoded?.file === file && decoded.base) {
           imageData = decoded.base;
         } else if (shared) {
           overlay.updateProgress(30, lang.loadingProcessing);
+          // A lane's decode still running is the foreground's now: the lane
+          // may give up its own reservation before the decode ends.
+          if (adoptsRunningDecode) await memoryClaim.atDecode({ kind: fileDecodeKind(file) });
           try {
             const adopted = await shared.result;
             imageData = adopted.base;
@@ -10230,6 +10624,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
               sourceBlob: file,
               filmStats,
               signal,
+              reserveDecode,
+              ramBytes: memoryRuntime.ramBytes,
               onMetadata(meta) {
                 extractedRawMeta = meta;
               }
@@ -10248,6 +10644,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
               sourceBlob: file,
               filmStats,
               signal,
+              reserveDecode,
+              ramBytes: memoryRuntime.ramBytes,
               onMetadata(meta) {
                 extractedRawMeta = meta;
               }
@@ -10257,8 +10655,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         } else if (isPngFile(file)) {
           const arrayBuffer = await file.arrayBuffer();
           if (signal?.aborted || !isCurrentLoad(generation)) return { status: 'stale' };
+          await reserveDecode({ kind: 'scan' });
           imageData = await loadPngImageData(arrayBuffer, { signal });
         } else {
+          await reserveDecode({ kind: 'scan' });
           imageData = await loadStandardImage(file);
         }
 
@@ -10388,6 +10788,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       } finally {
         // Only the current import may remove its own opening feedback.
         if (openingItem && isCurrentLoad(generation)) endImportOpening(openingItem);
+        // The decode is over: the reservation goes once the photo settles.
+        settleActivationClaim(signal);
       }
     }
 
@@ -10431,6 +10833,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         console.info('[RAW] starting background full-res decode for', name, (buf.byteLength / 1024 / 1024).toFixed(0) + 'MB');
       }
 
+      // A foreground reservation of its own (#258), until the decode returns.
+      const memoryClaim = createFrameClaim(sourceFile, {
+        priority: 'foreground', signal, label: `full-resolution ${name}`, bytesFor: decodeReservationBytes
+      });
       try {
         const fullImageData = await loadRawImageData(buf, name, {
           // Its embedded-preview fallback re-reads the file instead of
@@ -10438,6 +10844,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           sourceBlob: sourceFile && sourceFile === state.loadedFile ? sourceFile : null,
           // Leaving the photo stops this decode (#243).
           signal,
+          reserveDecode: size => memoryClaim.atDecode(size),
+          ramBytes: memoryRuntime.ramBytes,
           onMetadata(meta) {
             if (isCurrentLoad(generation) && meta && !state.rawMetadata) {
               state.rawMetadata = meta;
@@ -10445,6 +10853,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
             }
           }
         });
+        memoryClaim.release();
         if (!fullImageData) return;
         // The decode takes tens of seconds to minutes. Anything the user did
         // in the meantime wins: a different file must not be replaced by this
@@ -10497,6 +10906,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         });
         if (DEBUG_UI) console.info('[RAW] background full-res decode complete');
       } catch (err) {
+        memoryClaim.release();
         if (err?.name === 'AbortError') return;
         console.warn('[RAW] background full-res decode failed, keeping preview', err.message);
         // Keep the preview — it's still usable.
@@ -12617,8 +13027,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           const item = selectedItems[i];
           updateBatchProgress(i + 1, selectedItems.length, item.file.name);
 
+          // One frame's memory at a time (#258), held until the frame is dropped.
+          const memoryClaim = createFrameClaim(item.file, { priority: 'user', label: `auto frame ${item.file.name}` });
           try {
-            const decode = () => loadFileToImageData(item.file, { filmStats: !item.settings });
+            const decode = () => loadFileToImageData(item.file, { filmStats: !item.settings, claim: memoryClaim });
             // Only this loop holds the decode: it goes to the worker without
             // a copy and comes back; only the rotated frame's size is read
             // (#251).
@@ -12688,6 +13100,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           } catch (err) {
             console.error('Auto frame batch item failed:', item.file.name, err);
             failCount++;
+          } finally {
+            memoryClaim.release();
           }
         }
       } finally {
@@ -15580,34 +15994,49 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // makes slower than on the full decode. The image carries `__fullSize`,
     // the size its recipe refers to, and its own size is never remembered:
     // batch lane planning reads the remembered size.
-    async function loadFileToImageData(file, { filmStats = false, signal = null, onMetadata = null, halfSize = false } = {}) {
+    //
+    // Every decode reserves memory (#258): `claim` is the caller's (a frame
+    // it keeps until it drops the frame, or a lane's that already covers the
+    // decode); without one the decode takes its own `priority` claim, which
+    // covers the decode only.
+    async function loadFileToImageData(file, { filmStats = false, signal = null, onMetadata = null, halfSize = false, claim = null, priority = 'user', label = '' } = {}) {
       const fileName = file.name.toLowerCase();
       const aborted = () => signal?.reason?.name === 'AbortError' ? signal.reason : new DOMException('Decode was aborted', 'AbortError');
+      const ownClaim = claim ? null : createFrameClaim(file, { priority, signal, label: label || `decode ${file.name}` });
+      const memoryClaim = claim || ownClaim;
       let image;
-      if (isRawLikeFileName(fileName)) {
-        const arrayBuffer = await file.arrayBuffer();
-        if (signal?.aborted) throw aborted();
-        image = await loadRawImageData(arrayBuffer, fileName, {
-          sourceBlob: file,
-          filmStats: filmStats ? { borderBufferPct: defaultFilmBaseBuffer() } : null,
-          signal,
-          ...(onMetadata ? { onMetadata } : {}),
-          ...(halfSize ? { halfSize: true, outputBps: 16, suppressSensorDefects: false } : {})
-        });
-        if (halfSize) {
-          // A full decode earlier in the session knows the size exactly.
-          const known = knownImageDimensions(file);
-          if (image.__fullSize && known && Math.abs(image.width - Math.ceil(known.width / 2)) <= 1
-            && Math.abs(image.height - Math.ceil(known.height / 2)) <= 1) image.__fullSize = known;
-          return image;
+      try {
+        if (isRawLikeFileName(fileName)) {
+          const arrayBuffer = await file.arrayBuffer();
+          if (signal?.aborted) throw aborted();
+          image = await loadRawImageData(arrayBuffer, fileName, {
+            sourceBlob: file,
+            filmStats: filmStats ? { borderBufferPct: defaultFilmBaseBuffer() } : null,
+            signal,
+            reserveDecode: size => memoryClaim.atDecode(size),
+            ramBytes: memoryRuntime.ramBytes,
+            ...(onMetadata ? { onMetadata } : {}),
+            ...(halfSize ? { halfSize: true, outputBps: 16, suppressSensorDefects: false } : {})
+          });
+          if (halfSize) {
+            // A full decode earlier in the session knows the size exactly.
+            const known = knownImageDimensions(file);
+            if (image.__fullSize && known && Math.abs(image.width - Math.ceil(known.width / 2)) <= 1
+              && Math.abs(image.height - Math.ceil(known.height / 2)) <= 1) image.__fullSize = known;
+            return image;
+          }
+        } else if (isPngFile(file)) {
+          const arrayBuffer = await file.arrayBuffer();
+          if (signal?.aborted) throw aborted();
+          await memoryClaim.atDecode({ kind: 'scan' });
+          image = await loadPngImageData(arrayBuffer, { signal });
+        } else {
+          await memoryClaim.atDecode({ kind: 'scan' });
+          image = await loadStandardImage(file);
+          if (signal?.aborted) throw aborted();
         }
-      } else if (isPngFile(file)) {
-        const arrayBuffer = await file.arrayBuffer();
-        if (signal?.aborted) throw aborted();
-        image = await loadPngImageData(arrayBuffer, { signal });
-      } else {
-        image = await loadStandardImage(file);
-        if (signal?.aborted) throw aborted();
+      } finally {
+        ownClaim?.release();
       }
       rememberImageDimensions(file, image);
       return image;
@@ -16014,7 +16443,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // recipe's crop, strokes and analysis area refer to.
       const halfSize = Boolean(options.halfSizeDecode && savedSettings && previewMax && !options.sourceImageData
         && tileRecipeSettled(savedSettings) && !lensCorrectionActive(savedSettings));
-      let imageData = options.sourceImageData || own(await loadFileToImageData(file, { filmStats: !savedSettings, halfSize }));
+      // The caller's memory claim (#258): a lane's covers the decode, a
+      // frame job's is held until it drops the frame.
+      const claim = options.memoryClaim ? { claim: options.memoryClaim } : {};
+      let imageData = options.sourceImageData || own(await loadFileToImageData(file, { filmStats: !savedSettings, halfSize, ...claim }));
       let baseSize = previewMax && imageData.__fullSize ? imageData.__fullSize : imageData;
       assertRepairCurrent(isCurrent);
       options.onDecoded?.(imageData);
@@ -16046,7 +16478,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         const owned = !options.sourceImageData && !options.onDecoded;
         const analysed = await runImportDetections(imageData, {
           frame: detectFrame, filmEdge: readEdge, owned, silent, frameFilmType: initialSettings.filmType,
-          reload: owned ? () => loadFileToImageData(file, { filmStats: !savedSettings, halfSize }) : null,
+          reload: owned ? () => loadFileToImageData(file, { filmStats: !savedSettings, halfSize, ...claim }) : null,
           ...(analyzers ? { analyzer: analyzers } : {})
         });
         if (!analysed.image) throw analysed.detection?.error || new Error('The frame could not be decoded again');
@@ -16287,10 +16719,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const pinned = Number.parseInt(safeStorageGet('nc_batch_lanes_v1') || '', 10);
       // Read a bounded header at a time so a long roll cannot flood IO either.
       let pixelsPerFile = 0;
-      for (const file of files) pixelsPerFile = Math.max(pixelsPerFile, await imagePixelsForBatch(file));
+      for (const file of files) pixelsPerFile = Math.max(pixelsPerFile, await pixelsForMemory(file));
+      // Planned in bytes against the machine's RAM when known (#258); the
+      // budget's reservations admit fewer lanes when the plan is optimistic.
       const lanes = planBatchParallelism({
         hardwareConcurrency: navigator.hardwareConcurrency,
         deviceMemory: navigator.deviceMemory,
+        ramBytes: memoryRuntime.ramBytes,
         pixelsPerFile,
         fileCount: files.length,
         maxParallel: Number.isInteger(pinned) && pinned >= 1 && pinned <= 4 ? pinned : 4
@@ -16372,7 +16807,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     async function renderBatchExportFile(job, position, { exportInfo, workers, dustRemoval }, { transferPlanes = true } = {}) {
       const { file, settings } = job;
       if (exportInfo.format === 'dng') {
-        const { source, settings: usedSettings } = await processFileWithSettings(file, settings, { stage: 'source', convert: workers.convert, geometryBands: workers.geometryBands, silent: true });
+        const { source, settings: usedSettings } = await processFileWithSettings(file, settings, { stage: 'source', convert: workers.convert, geometryBands: workers.geometryBands, silent: true, memoryClaim: coveredMemoryClaim() });
         return renderLinearDngBlobInSlices(source, usedSettings, position);
       }
       const sprocket = state.exportSprocketHolesEnabled;
@@ -16382,6 +16817,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         const { processed, settings: used } = await processFileWithSettings(file, settings, {
           stage: 'processed',
           silent: true,
+          // The lane's reservation covers the decode (runBatchExport).
+          memoryClaim: coveredMemoryClaim(),
           dustRemoval,
           dustWorker: workers.dust,
           convert: (transferPlanes && workers.convertHandoff) || workers.convert,
@@ -16455,6 +16892,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // The crash-loop guard runs a resumed batch in one lane.
       const lanes = hiddenJobs.safeMode ? 1 : plannedLanes;
       const bytes = await hiddenJobBytesFor(jobs.map(job => job.file));
+      // Each lane reserves the lane constant over the batch's largest frame
+      // (#258): the index is not claimed yet when it asks.
+      const laneBytes = laneReservationBytes({ pixels: pixelsPerFile });
       const workers = createBatchExportWorkers(lanes, { pixelsPerFile, exportInfo });
       const trace = createPerfTrace('batchExport', { files: jobs.length, lanes });
       activeLongJobs += 1;
@@ -16462,8 +16902,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         return await runBatchPipeline(jobs, {
           maxParallel: lanes,
           signal,
-          // Admission happens before a lane claims its next index (#241).
-          beforeStart: ({ signal: stop }) => hiddenJobs.admit({ bytes, signal: stop }),
+          // Admission happens before a lane claims its next index (#241):
+          // the hidden-job gate, then the memory budget; both are released
+          // once the claimed frame's sink has run.
+          beforeStart: ({ signal: stop }) => admitJobItem({
+            hiddenBytes: bytes, memoryBytes: laneBytes, priority: 'user', label: 'export lane', signal: stop
+          }),
           process: (job, index) => renderBatchExportFile(job, job.markerIndex ?? index, { exportInfo, workers, dustRemoval }),
           sink,
           onEvent: (event) => {
@@ -18162,7 +18606,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // field input. Hovering is not interaction; a drag (a pressed button or a
     // touch contact) is. Busy datasets that clear re-check the waiters at once.
     function installBackgroundInputTracking() {
-      const note = () => backgroundGate.noteInput();
+      // The memory idle check (#258) counts from the same input.
+      const note = () => {
+        backgroundGate.noteInput();
+        memoryIdleCheck.note();
+      };
       const options = { capture: true, passive: true };
       for (const type of ['pointerdown', 'pointerup', 'wheel', 'keydown', 'input']) document.addEventListener(type, note, options);
       document.addEventListener('pointermove', event => { if (event.buttons) note(); }, options);
@@ -18199,28 +18647,33 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // The same decode a foreground load would run (full size, defects
     // repaired), with the RAW metadata an adopted or prefetched base needs
     // for lens correction and EXIF.
-    async function decodeForBackground(file, signal) {
+    // `context.claim`: the memory claim of the job that opened the decode
+    // (#258), corrected to the real size at the loader gate.
+    async function decodeForBackground(file, signal, context = null) {
       let rawMetadata = null;
-      const base = await loadFileToImageData(file, { filmStats: true, signal, onMetadata: meta => { rawMetadata = meta; } });
+      const base = await loadFileToImageData(file, {
+        filmStats: true, signal, onMetadata: meta => { rawMetadata = meta; },
+        claim: context?.claim || null, priority: 'background'
+      });
       return { base, rawMetadata };
     }
 
     // Named by the job's first need: the folder-import smoke tells the
     // routes apart by these frames of the read's stack.
-    function openAnalysisDecode(item, signal) {
-      return sharedDecodes.open(item.file, { signal });
+    function openAnalysisDecode(item, signal, claim = null) {
+      return sharedDecodes.open(item.file, { signal, context: { claim } });
     }
-    function openTileDecode(item, signal) {
-      return sharedDecodes.open(item.file, { signal });
+    function openTileDecode(item, signal, claim = null) {
+      return sharedDecodes.open(item.file, { signal, context: { claim } });
     }
-    function openPrefetchDecode(item, signal) {
-      return sharedDecodes.open(item.file, { signal });
+    function openPrefetchDecode(item, signal, claim = null) {
+      return sharedDecodes.open(item.file, { signal, context: { claim } });
     }
     // A tile of a settled recipe with no tile source, when the job needs
     // nothing else of the frame: a half-size decode of its own (#247 1b). It
     // is never shared, adopted, retained or prefetched.
-    function openHalfSizeTileDecode(item, signal) {
-      const result = loadFileToImageData(item.file, { halfSize: true, signal }).then(base => ({ base, rawMetadata: null }));
+    function openHalfSizeTileDecode(item, signal, claim = null) {
+      const result = loadFileToImageData(item.file, { halfSize: true, signal, claim, priority: 'background' }).then(base => ({ base, rawMetadata: null }));
       result.catch(() => {});
       return { result, release() {} };
     }
@@ -18365,7 +18818,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return !(item.thumbnailErrorKey === key || (item.thumbnail && item.thumbnailKind === 'processed' && item.thumbnailKey === key));
     }
 
-    // Until #258 owns the budget: the desktop session budget only.
+    // The desktop session budget only; the prefetch decode itself waits for
+    // room in the memory budget (#258) like any background frame.
     function photoPrefetchEnabled() {
       return !hiddenJobs.safeMode && !lowMemoryPhotoDevice();
     }
@@ -18493,6 +18947,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       let release = null;
       let lease = null;
       let decoded = null;
+      let memoryClaim = null;
       try {
         if (light) {
           if (tile.valid()) await attempt(tile, () => tile.run(null, step));
@@ -18507,14 +18962,30 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           : photoPrefetch.has(item) ? photoPrefetch.peek(item) : null;
         if (retained?.base && retained.file === item.file) {
           decoded = { base: retained.base, rawMetadata: retained.rawMetadata || null, retained: true };
+          // A tile or prefetch of a retained base needs no reservation; the
+          // roll analysis of one still reserves its lane (#258).
+          if (analysis) {
+            memoryClaim = await reserveFrameClaim(createFrameClaim(item.file, {
+              priority: 'background', signal: controller.signal, label: `${needs.join('+')} ${item.file.name}`,
+              bytesFor: laneReservationBytes
+            }), item.file);
+            if (!wanted()) return false;
+          }
         } else {
           await backgroundGate.idle({ signal: controller.signal });
           if (!wanted()) return false;
+          // The frame's memory (#258): nothing starts while a photo is being
+          // opened, and only what fits next to the caches (or one item alone).
+          memoryClaim = await reserveFrameClaim(createFrameClaim(item.file, {
+            priority: 'background', signal: controller.signal, label: `${needs.join('+')} ${item.file.name}`,
+            bytesFor: analysis ? laneReservationBytes : frameReservationBytes
+          }), item.file);
+          if (!wanted()) return false;
           job.decoding = true;
           job.halfSize = Boolean(tile?.halfSize && !analysis && !prefetch);
-          lease = analysis ? openAnalysisDecode(item, controller.signal)
-            : job.halfSize ? openHalfSizeTileDecode(item, controller.signal)
-              : tile ? openTileDecode(item, controller.signal) : openPrefetchDecode(item, controller.signal);
+          lease = analysis ? openAnalysisDecode(item, controller.signal, memoryClaim)
+            : job.halfSize ? openHalfSizeTileDecode(item, controller.signal, memoryClaim)
+              : tile ? openTileDecode(item, controller.signal, memoryClaim) : openPrefetchDecode(item, controller.signal, memoryClaim);
           try {
             decoded = await lease.result;
           } catch (error) {
@@ -18541,6 +19012,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           if (decoded && !decoded.retained && !job.halfSize) handOverBackgroundBase(item, decoded, { prefetch: Boolean(prefetch?.valid()) });
           lease.release();
         }
+        // After the hand-over: a kept base now counts in the ledger.
+        memoryClaim?.release();
         analysis?.done();
       }
       return false;
@@ -21131,6 +21604,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           // The frame's full-resolution planes live only until its bitmap
           // exists (#250): released then, not at the next major GC.
           const ownedPlanes = [];
+          let memoryClaim = null;
           try {
             // Each full-resolution frame is one gated item (#241). A frame
             // whose base is already decoded (a cached photo session, or the
@@ -21142,8 +21616,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
                 ? state.loadedBaseImageData || state.originalImageData : null)
               || undefined;
             const bitmap = await runHiddenJobItem([item.file], async () => {
+              // A decoded frame's memory until its bitmap exists (#258).
+              if (!sourceImageData) memoryClaim = createFrameClaim(item.file, { priority: 'user', label: `contact sheet ${item.file.name}` });
               let adjusted = await processFileWithSettings(item.file, settingsForFile, {
-                ownedPlanes, tileMaxDimension: target, updateItemSettings: false, convert, sourceImageData
+                ownedPlanes, tileMaxDimension: target, updateItemSettings: false, convert, sourceImageData, memoryClaim
               });
               if (Math.max(adjusted.width, adjusted.height) > target) {
                 adjusted = markOwnedPlanes(downsampleImageDataForMaxDim(adjusted, target));
@@ -21163,6 +21639,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
             thumbs.push({ image: null, width: 1, height: 1, label });
           } finally {
             releaseOwnedPlanes(...ownedPlanes);
+            memoryClaim?.release();
           }
           await yieldForJob();
         }
@@ -22020,19 +22497,25 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         for (let i = 0; i < selectedItems.length; i++) {
           const item = selectedItems[i];
           if (uiOpen) showMultiShotProgress(progress.update({ stage: 'decode', index: i }), names);
-          const decoded = await Promise.race([
-            loadFileToImageData(item.file).then((imageData) => ({ imageData }), (error) => ({ error })),
-            job.failed
-          ]);
-          if (decoded.error) {
-            console.warn('Multi-shot decode failed for', item.file.name, decoded.error);
-            decodeSkipped++;
-            continue;
+          // One frame's memory at a time (#258), until the merge worker has it.
+          const memoryClaim = createFrameClaim(item.file, { priority: 'user', label: `multi-shot ${item.file.name}` });
+          try {
+            const decoded = await Promise.race([
+              loadFileToImageData(item.file, { claim: memoryClaim }).then((imageData) => ({ imageData }), (error) => ({ error })),
+              job.failed
+            ]);
+            if (decoded.error) {
+              console.warn('Multi-shot decode failed for', item.file.name, decoded.error);
+              decodeSkipped++;
+              continue;
+            }
+            let imageData = decoded.imageData;
+            decoded.imageData = null;
+            await job.addFrame(i, imageData);
+            imageData = null;
+          } finally {
+            memoryClaim.release();
           }
-          let imageData = decoded.imageData;
-          decoded.imageData = null;
-          await job.addFrame(i, imageData);
-          imageData = null;
         }
         if (job.framesPosted >= 2) result = await job.merge();
       } catch (error) {
@@ -22609,12 +23092,21 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         for (let i = 0; i < selectedItems.length; i++) {
           const item = selectedItems[i];
           updateBatchProgress(i + 1, selectedItems.length, item.file.name);
+          // One frame's memory at a time (#258); the best candidate so far is
+          // kept as retained, not reserved, so the next frame never waits on it.
+          const memoryClaim = createFrameClaim(item.file, { priority: 'user', label: `blank frame ${item.file.name}` });
           try {
-            const imageData = await loadFileToImageData(item.file);
+            const imageData = await loadFileToImageData(item.file, { claim: memoryClaim });
             const score = scoreBlankFrame(imageData);
-            if (score.blank && (!best || score.score > best.score.score)) best = { item, imageData, score };
+            if (score.blank && (!best || score.score > best.score.score)) {
+              if (best) heldJobFrames.delete(best.imageData);
+              best = { item, imageData, score };
+              heldJobFrames.add(imageData);
+            }
           } catch (error) {
             console.warn('Blank frame check failed for', item.file.name, error);
+          } finally {
+            memoryClaim.release();
           }
           await new Promise((resolve) => setTimeout(resolve, 0));
         }
@@ -22631,6 +23123,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         const count = applyFlatFieldToItems(map.id, selectedItems, { sourceFile: best.item.file, defaultsImage });
         showToast(getInterpolatedText('flatFieldDetected', { name: best.item.file.name }, `Blank frame found: ${best.item.file.name}`) + ' · ' + getInterpolatedText('flatFieldApplied', { count: String(count) }, `Flat field applied to ${count} photo(s)`), 3200);
       } finally {
+        if (best) heldJobFrames.delete(best.imageData);
         showBatchProgress(false);
         studioAutoFrameRunning = false;
         delete document.body.dataset.studioBusy;
@@ -23125,7 +23618,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         async put(item, sample) {
           const put = { key: automaticRollItemKey(item) };
           pendingPuts.set(item, put);
-          storage ||= createAnalysisSampleStore();
+          if (!storage) {
+            storage = createAnalysisSampleStore();
+            // Counted in the memory ledger until the import ends (#258).
+            liveSampleStores.add(storage);
+          }
           await storage.put(item, sample);
           if (pendingPuts.get(item) === put) pendingPuts.delete(item);
           sampleKeys.set(item, put.key);
@@ -23153,6 +23650,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         if (safeMode) hiddenJobs.setSafeMode(false);
         filmTypeRoll?.rekeys.delete(rekeySample);
         await storage?.clear();
+        if (storage) liveSampleStores.delete(storage);
         // Frames the import dropped or never reached get their tiles from the
         // lane, which waited for them (#247 2e).
         if (release && state.fileQueue.length) kickBackgroundPhotoWork();
@@ -23526,6 +24024,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (!automatic) showBatchProgress(true);
       const measurements = [];
       const analysisSamples = samples || createAnalysisSampleStore();
+      // The samples count in the memory ledger while the analysis runs (#258);
+      // a store passed in is its owner's to register.
+      if (!samples) liveSampleStores.add(analysisSamples);
+      // Its decodes: user work for a manual Analyze Roll, background for an
+      // automatic one (#258), one frame at a time.
+      const memoryPriority = automatic ? 'background' : 'user';
       let tileConvert = null;
       async function sampleForMeasurement(measurement) {
         const cached = await analysisSamples.get(measurement.item);
@@ -23539,11 +24043,16 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         }
         // A decode is one gated item of this job (#241).
         return runHiddenJobItem([measurement.item.file], async () => {
-          const image = await loadFileToImageData(measurement.item.file);
-          assertRepairCurrent(isValid);
-          const sample = buildRollSample(image, measurement.settings);
-          await analysisSamples.put(measurement.item, sample);
-          return sample;
+          const memoryClaim = createFrameClaim(measurement.item.file, { priority: memoryPriority, label: `roll sample ${measurement.item.file.name}` });
+          try {
+            const image = await loadFileToImageData(measurement.item.file, { claim: memoryClaim });
+            assertRepairCurrent(isValid);
+            const sample = buildRollSample(image, measurement.settings);
+            await analysisSamples.put(measurement.item, sample);
+            return sample;
+          } finally {
+            memoryClaim.release();
+          }
         });
       }
       let roll = null;
@@ -23564,10 +24073,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
             if (sample && item.settings) settings = cloneSettings(item.settings);
             else {
               const reuse = item.file === state.loadedFile && !state.rawDecodePending && canReuseLoadedRollSource(item);
-              // A decode is one gated item of this job (#241).
+              // A decode is one gated item of this job (#241) and one frame's
+              // memory (#258).
               const release = reuse ? null : await hiddenJobs.admit({ bytes: await hiddenJobBytesFor([item.file]) });
+              const memoryClaim = reuse ? null : createFrameClaim(item.file, { priority: memoryPriority, label: `roll analysis ${item.file.name}` });
               try {
-                const decode = () => loadFileToImageData(item.file, { filmStats: !item.settings });
+                const decode = () => loadFileToImageData(item.file, { filmStats: !item.settings, claim: memoryClaim });
                 let imageData = reuse ? state.loadedBaseImageData || state.originalImageData : await decode();
                 if (!isValid()) return { status: 'stale' };
                 settings = item.settings ? cloneSettings(item.settings) : createDefaultSettings(imageData, item);
@@ -23585,6 +24096,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
                 sample = buildRollSample(imageData, settings);
                 await analysisSamples.put(item, sample);
               } finally {
+                memoryClaim?.release();
                 release?.();
               }
             }
@@ -23700,7 +24212,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         invalidateSilverCoreCache();
       } finally {
         tileConvert?.dispose();
-        if (!samples) await analysisSamples.clear();
+        if (!samples) {
+          await analysisSamples.clear();
+          liveSampleStores.delete(analysisSamples);
+        }
         if (!automatic) showBatchProgress(false);
         if (button) {
           button.disabled = false;

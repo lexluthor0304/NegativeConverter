@@ -6,10 +6,10 @@ const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve()
 function harness() {
   const decodes = [];
   const shared = createSharedDecodes({
-    decode(file, { signal }) {
+    decode(file, { signal, context }) {
       let resolve, reject;
       const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
-      const record = { file, signal, resolve, reject, aborted: false };
+      const record = { file, signal, context, resolve, reject, aborted: false };
       signal.addEventListener('abort', () => { record.aborted = true; reject(signal.reason); }, { once: true });
       decodes.push(record);
       return promise;
@@ -150,6 +150,19 @@ const meta = { lensModel: 'Summilux', cameraModel: 'M11' };
   assert.equal(shared.size, 0);
   // Releasing twice is harmless.
   a.release();
+}
+
+// The lease that starts a decode hands its context (its memory claim, #258)
+// to decode(); a lease joining a running decode does not replace it.
+{
+  const { shared, decodes } = harness();
+  const claim = { name: 'lane claim' };
+  const lane = shared.open(fileB, { context: claim });
+  shared.open(fileB, { context: { name: 'other' } });
+  assert.equal(decodes.length, 1);
+  assert.equal(decodes[0].context, claim);
+  decodes[0].resolve({ base, rawMetadata: null });
+  await lane.result;
 }
 
 await flush();

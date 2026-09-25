@@ -14,6 +14,7 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { createSharedDecodes } from './sharedDecodes.js';
 import { WORKER_ABORTED, WORKER_CRASHED } from './conversionWorkerClient.js';
+import { MEMORY_FUNCTIONS, memoryGlobals } from './memoryHarness.mjs';
 
 const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8');
 function functionSource(name) {
@@ -64,6 +65,10 @@ function fixture() {
       return gate.promise;
     },
     usesSilverCoreConversion: () => true,
+    // The memory budget (#258), real.
+    ...memoryGlobals(),
+    getPerfNow: () => performance.now(),
+    backgroundRest: ms => new Promise(resolve => setTimeout(resolve, ms)),
   };
   const context = vm.createContext(new Proxy(target, {
     has: () => true,
@@ -76,7 +81,7 @@ function fixture() {
   }));
   target.sharedDecodes = createSharedDecodes({ decode: () => deferred().promise });
   vm.runInContext(['supersedeActivation', 'beginActivation', 'invalidatePhotoActivation', 'isCurrentLoad', 'loadFile',
-    'adoptSharedDecode', 'convertFrameOffMainThread', 'convertRequestOnMain'].map(functionSource).join('\n'), context);
+    'adoptSharedDecode', 'convertFrameOffMainThread', 'convertRequestOnMain', ...MEMORY_FUNCTIONS].map(functionSource).join('\n'), context);
   const file = name => ({ name, arrayBuffer: async () => { reads.push(name); return new ArrayBuffer(8); } });
   return { context, target, state, errors, toasts, rawLoads, reads, warmUps, file };
 }
@@ -194,6 +199,40 @@ function fixture() {
   f.target.lowMemoryPhotoDevice = () => false;
   f.context.beginActivation(a);
   assert.equal(aborted.length, 1, 'desktop lets them finish');
+}
+
+// The foreground reservation (#258): taken at the loader gate with the
+// decode's real size, never waiting, over budget if need be. While it is out
+// no background or user request starts; a newer activation releases it, and
+// a load that finished releases it once the photo has settled.
+{
+  const f = fixture();
+  const budget = f.target.memoryBudget;
+  budget.setBudget(500);
+  const first = f.context.loadFile(f.file('a.dng'), { autoConvert: false, quiet: true });
+  await flush();
+  assert.equal(typeof f.rawLoads[0].options.reserveDecode, 'function', 'the loader gets the gate');
+  await f.rawLoads[0].options.reserveDecode({ kind: 'raw', width: 100, height: 50, estimatedBytes: 1000 });
+  assert.equal(budget.snapshot().foreground, 1000, 'the decode peak, over the 500-byte budget');
+  let backgroundGranted = false;
+  const background = budget.reserve(1, { priority: 'background', label: 'tile' }).then(handle => { backgroundGranted = true; return handle; });
+  await flush();
+  assert.equal(backgroundGranted, false, 'background work waits while a photo opens');
+  const second = f.context.loadFile(f.file('b.dng'), { autoConvert: false, quiet: true });
+  assert.equal(budget.snapshot().foreground, 0, 'superseded: released with its decode');
+  assert.equal((await first).status, 'stale');
+  await flush();
+  assert.equal(backgroundGranted, true);
+  (await background).release();
+  // The second load finishes: its claim is released once the photo settles.
+  await f.rawLoads[1].options.reserveDecode({ kind: 'raw', width: 10, height: 10, estimatedBytes: 300 });
+  assert.equal(budget.snapshot().foreground, 300);
+  f.rawLoads[1].resolve({ width: 10, height: 10, data: new Uint8ClampedArray(400) });
+  await second;
+  assert.equal(budget.snapshot().foreground, 300, 'held until the photo settles');
+  await new Promise(resolve => setTimeout(resolve, 700));
+  assert.equal(budget.snapshot().foreground, 0, 'released after two settled polls');
+  assert.equal(budget.idle, true);
 }
 
 console.log('photoActivation tests passed');

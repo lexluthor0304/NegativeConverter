@@ -1,3 +1,4 @@
+import { MEMORY_FUNCTIONS, memoryGlobals } from './memoryHarness.mjs';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
@@ -76,6 +77,7 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
   let timerId = 0;
   const noop = () => {};
   const context = vm.createContext({
+    ...memoryGlobals(),
     state, console, Map, Set, AbortController, structuredClone,
     AUTO_ROLL_KEY: 'auto', automaticRollRevision: 0, automaticRollPendingItems: new Set(),
     automaticRollImportRunning: false, automaticRollAnalysisRunning: false,
@@ -209,7 +211,7 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
   vm.runInContext(['getCurrentQueueItem', 'automaticRollItemKey', 'scheduleAutomaticRollImport', ...FILM_TYPE_FUNCTIONS,
     'renderFrameAnalysisThumbnail', 'releaseFrameThumbnailWorkers', 'renderSampleTile', 'publishSampleTile', 'renderRollSampleTiles',
     ...(realRoll ? ['runRollAnalysis'] : []),
-    ...SCHEDULER_FUNCTIONS.filter(name => name !== 'backgroundRest')]
+    ...SCHEDULER_FUNCTIONS.filter(name => name !== 'backgroundRest'), ...MEMORY_FUNCTIONS]
     .map(functionSource).join('\n'), context);
   // Lanes rest a macrotask, not a timer; tiles are not part of these tests.
   context.backgroundRest = () => new Promise(resolve => setImmediate(resolve));

@@ -455,10 +455,13 @@ export function createMemoryClaim(budget, {
     get fixed() { return fixed; },
     get priority() { return priority; },
     get bytes() { return handle ? handle.bytes : 0; },
-    /** Reserve up front for a frame of about `pixels`. */
-    reserve(pixels, decodeBytes = null) {
+    /**
+     * Reserve up front for a frame of about `pixels` (a header's size); the
+     * loader gate corrects it once the decode knows the real one.
+     */
+    reserve(pixels, { decodeBytes = null, kind = 'raw' } = {}) {
       if (fixed || handle) return Promise.resolve(handle);
-      return take(bytesFor({ pixels: Math.max(0, Number(pixels) || 0), decodeBytes }));
+      return take(bytesFor({ pixels: Math.max(0, Number(pixels) || 0), decodeBytes, kind, fromHeader: true }));
     },
     /**
      * The loader gate: `kind` ('raw' for LibRaw, 'scan' for UTIF or the

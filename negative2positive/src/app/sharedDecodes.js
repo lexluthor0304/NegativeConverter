@@ -18,8 +18,10 @@
  *
  * The decoded base is shared read-only: nothing may mutate or transfer it
  * while a lease holds it (the host lists `bases()` among the buffers an export
- * never transfers). `decode(file, { signal })` must resolve
- * `{ base, rawMetadata }` from the same options every consumer would use.
+ * never transfers). `decode(file, { signal, context })` must resolve
+ * `{ base, rawMetadata }` from the same options every consumer would use;
+ * `context` is what the lease that started the decode passed to `open()`
+ * (its memory claim, #258).
  *
  * Pure: no DOM, no workers.
  */
@@ -93,12 +95,12 @@ export function createSharedDecodes({ decode }) {
     return lease;
   }
 
-  function start(file) {
+  function start(file, context) {
     const entry = { file, controller: new AbortController(), leases: new Set(), settled: false, value: null, error: null };
     entries.set(file, entry);
     let running;
     try {
-      running = Promise.resolve(decode(file, { signal: entry.controller.signal }));
+      running = Promise.resolve(decode(file, { signal: entry.controller.signal, context }));
     } catch (error) {
       running = Promise.reject(error);
     }
@@ -119,8 +121,8 @@ export function createSharedDecodes({ decode }) {
 
   return {
     /** A background job's lease: starts the decode, or joins the one running. */
-    open(file, { signal = null } = {}) {
-      const entry = entries.get(file) || start(file);
+    open(file, { signal = null, context = null } = {}) {
+      const entry = entries.get(file) || start(file, context);
       return createLease(entry, signal, 'lane');
     },
     /** The foreground's lease on a decode a lane started, or null. */

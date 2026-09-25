@@ -15,6 +15,7 @@ import { createThumbnailSourceCache } from './thumbnailSources.js';
 import { createRollSampleCache } from './rollSampleCache.js';
 import { reducedTileGeometry, tileGeometryKey } from './reducedGeometry.js';
 import { sanitizeCropRect } from './imageGeometry.js';
+import { MEMORY_FUNCTIONS, memoryGlobals } from './memoryHarness.mjs';
 
 const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8');
 export function functionSource(name) {
@@ -82,9 +83,11 @@ export function deferred() {
  * @param {boolean} [options.prefetch] prefetch slot enabled (desktop budget)
  * @param {number} [options.sessionBudget] photoSessions bytes
  * @param {boolean} [options.settings] every photo has a recipe
+ * @param {number} [options.memoryBudgetBytes] the memory budget (#258; every
+ *   file's header says 1 MP)
  */
 export function createLaneFixture({ count = 5, order = null, current = 0, prefetch = false, sessionBudget = 1 << 20,
-  settings = true, tilesDone = false } = {}) {
+  settings = true, tilesDone = false, memoryBudgetBytes = 1e15 } = {}) {
   const clock = fakeClock();
   const items = Array.from({ length: count }, (_, index) => ({
     id: index, file: { name: `${index}.dng` }, settings: settings ? { id: index } : null,
@@ -103,6 +106,9 @@ export function createLaneFixture({ count = 5, order = null, current = 0, prefet
   let convertPools = 0, convertDisposed = 0, analyzerPools = 0, analyzerDisposed = 0;
   const noop = () => {};
   const context = vm.createContext({
+    // The memory budget (#258): real, large enough to admit everything.
+    ...memoryGlobals({ budgetBytes: memoryBudgetBytes, setTimer: clock.setTimeout, clearTimer: clock.clearTimeout }),
+    getPerfNow: clock.now,
     state, console: { warn: (...args) => warnings.push(args), error: noop, info: noop },
     Map, Set, WeakMap, Promise, AbortController, DOMException, structuredClone, JSON, Math, Number, Boolean, Array,
     setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
@@ -166,8 +172,8 @@ export function createLaneFixture({ count = 5, order = null, current = 0, prefet
     isBusy: () => context.foregroundBusyForBackground(), now: clock.now,
     setTimer: clock.setTimeout, clearTimer: clock.clearTimeout
   });
-  context.sharedDecodes = createSharedDecodes({ decode: (file, { signal }) => context.decodeForBackground(file, signal) });
-  vm.runInContext([...SCHEDULER_FUNCTIONS, ...TILE_FUNCTIONS].map(functionSource).join('\n'), context);
+  context.sharedDecodes = createSharedDecodes({ decode: (file, { signal, context: opener }) => context.decodeForBackground(file, signal, opener) });
+  vm.runInContext([...SCHEDULER_FUNCTIONS, ...TILE_FUNCTIONS, ...MEMORY_FUNCTIONS].map(functionSource).join('\n'), context);
   const decodeOf = id => decodes.filter(record => record.file === items[id].file);
   const image = id => ({ id, width: 4, height: 4, data: new Uint8ClampedArray(64) });
   // Resolve the pending decode of photo `id` (with its metadata callback).

@@ -13,6 +13,7 @@
 // - A 1-lane batch uses a pool of one, disposes it, never the module bridge;
 //   it transfers the frame's planes; a lost plane re-renders the frame once
 //   with identical output; the frame's owned planes are released.
+import { MEMORY_FUNCTIONS, memoryGlobals } from './memoryHarness.mjs';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
@@ -98,7 +99,7 @@ const runtime = [
   'prepareCurrentImageForExport', 'renderCurrentImageDataForExport', 'encodeFused16', 'renderAndEncodeCurrentImage',
   'exportSingle', 'applyAdjustmentsWithSettings', 'applyPreparedAdjustmentsWithWorkers', 'startExportGainMap',
   'imageDataToBlob', 'png16EncodeSettings', 'makeExportCancelledError', 'createBatchExportWorkers',
-  'renderBatchExportFile', 'runBatchExport'
+  'renderBatchExportFile', 'runBatchExport', ...MEMORY_FUNCTIONS
 ].map(functionSource).join('\n')
   // vm scripts have no dynamic import: hand the module over directly.
   .replaceAll("await import('./gainMapJpeg.js')", 'await importGainMapJpeg()');
@@ -180,6 +181,7 @@ function createContext({ gainMap = 'on' } = {}) {
     planGeometryBandsInFlight: () => 2,
     geometryPool: { size: 1 },
     hiddenJobs: { safeMode: false, admit: async () => () => {} },
+    ...memoryGlobals(),
     hiddenJobBytesFor: async () => 0,
     activeLongJobs: 0,
     navigator: { deviceMemory: 8, hardwareConcurrency: 8 },
