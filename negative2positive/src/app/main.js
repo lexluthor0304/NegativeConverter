@@ -4492,7 +4492,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     }
 
     function onPreviewTierSessionEnd(summary) {
-      document.documentElement.dataset.previewTierLastSession = summary.reduced ? 'reduced' : 'normal';
+      const last = summary.reduced ? 'reduced' : 'normal';
+      if (document.documentElement.dataset.previewTierLastSession !== last) document.documentElement.dataset.previewTierLastSession = last;
       if (renderEnvironment.compositing?.frameLog) logWebviewDiagnostics(formatPreviewSessionLine(summary));
       updateDebugWidget();
     }
