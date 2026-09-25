@@ -208,7 +208,9 @@ export async function runRealtimePreviewSmoke({ send, evaluate, wait, fail }) {
       fail('interactive frames did not keep their 16-bit plane in the worker until committed: ' + JSON.stringify(retention));
     }
     if (!separatePreview && retention.retained > 0) fail('a preview that is the source must carry its 16-bit plane: ' + JSON.stringify(retention));
-    if (result.minimumWidth < result.width - 2 || result.minimumHeight < result.height - 2) fail('interactive preview lost display resolution: ' + JSON.stringify(result));
+    // A GPU drag uploads no converted frame (its sizes are checked above);
+    // Math.min over none arrives here as null.
+    if (!gpu && (result.minimumWidth < result.width - 2 || result.minimumHeight < result.height - 2)) fail('interactive preview lost display resolution: ' + JSON.stringify(result));
     const interactive = result.requests.filter(request => request.cache);
     if (!interactive.some(request => request.reuse) || interactive.at(-1)?.exposure !== 87
       || result.slider !== 87 || !result.converged) fail('preview worker did not reuse source / converge to latest displayed pixels: ' + JSON.stringify(result));
