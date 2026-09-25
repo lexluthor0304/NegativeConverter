@@ -50,7 +50,8 @@ export async function runStudioAutoCropSmoke({ send, evaluate, waitFor, wait, fa
       status: document.getElementById('studioFrameNotice').dataset.status,
       diagnostics: document.getElementById('autoFrameDiagnosticsBox').textContent,
       rotation: Number(document.getElementById('autoFrameDiagnosticsBox').dataset.angle),
-      size: [document.getElementById('canvas').width, document.getElementById('canvas').height],
+      // The frame's full-resolution size; #canvas holds a display-size frame (#242).
+      size: [window.__ncDisplay.frame().width, window.__ncDisplay.frame().height],
       expected: window.__autoCropExpected
     }))()`);
     console.log('auto crop evidence:', format, JSON.stringify(result));

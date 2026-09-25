@@ -650,7 +650,6 @@ for (const locked of [false, true]) {
     composeDisplaySprocketFrame: { clear: noop },
     sprocketPreviewFrameCache: { key: 'old', sourceRef: f.base, metrics: {} },
     sprocketPreviewFrameCanvas: { width: 100, height: 100 },
-    sprocketScratchCanvas: { width: 100, height: 100 },
     // The comparison canvas holds the last reference drawn into it (#242).
     beforeAfterCanvas: { width: 100, height: 80, style: { display: 'block' } }, beforeAfterCanvasSource: f.converted,
     zoomControls: { style: {} }, canvas: { style: {} }, glCanvas: { style: {} },

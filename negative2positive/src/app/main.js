@@ -6076,9 +6076,23 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return { equal, width: shown.width, height: shown.height };
     }
 
+    // The image the view shows, at full resolution (the processed plane in
+    // Step 3, the negative before), hashed over a sample of its bytes.
+    function hashDisplayedImage() {
+      const image = state.currentStep >= 3 && state.processedImageData
+        ? state.processedImageData : (state.croppedImageData || state.originalImageData);
+      if (!image?.data) return null;
+      const data = image.data;
+      const step = Math.max(1, Math.floor(data.length / 65536));
+      let hash = 2166136261;
+      for (let i = 0; i < data.length; i += step) hash = Math.imul(hash ^ data[i], 16777619);
+      return [image.width, image.height, hash >>> 0].join(':');
+    }
+
     if (typeof window !== 'undefined') {
       window.__ncDisplay = {
         frame: describeDisplayFrame,
+        imageHash: hashDisplayedImage,
         settledParity: verifySettledDisplay,
         counters: () => ({ ...displayDebugCounters }),
         resetCounters: () => { for (const key of Object.keys(displayDebugCounters)) displayDebugCounters[key] = 0; }

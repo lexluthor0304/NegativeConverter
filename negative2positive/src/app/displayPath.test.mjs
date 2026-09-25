@@ -38,7 +38,6 @@ function image(width, height, fill = 0) {
     state, ImageData: TestImageData,
     ensureFullResolutionReadyForExport: async () => {}, ensureRepairsReadyForExport: async () => {},
     applyAdjustmentsWithSettings: () => assert.fail('Steps 1-2 run no adjustment'),
-    isDisplayImageDataFullResolution: () => false,
     noteGeometryPixelRead: reader => reads.push(reader),
     canvas: { get width() { return assert.fail('#canvas is never read back'); } },
     ctx: { getImageData: () => assert.fail('#canvas is never read back') },

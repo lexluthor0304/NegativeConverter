@@ -70,7 +70,10 @@ export async function runGeometrySmoke({ send, evaluate, waitFor, wait, fail, in
     // Rotate 90: the new framing is on screen in the click's own task.
     await evaluate(`document.getElementById('studioTab-composition').click()`);
     const beforeRotate = await evaluate(counters);
-    const sizeBefore = await evaluate(`[document.getElementById('canvas').width, document.getElementById('canvas').height]`);
+    // The displayed frame's size: #canvas holds a display-size frame, and none
+    // while WebGL presents (#242).
+    const displayedSize = `(() => { const f = window.__ncDisplay.frame(); return [f.width, f.height]; })()`;
+    const sizeBefore = await evaluate(displayedSize);
     const interim = await evaluate(`(() => {
       const started = performance.now();
       document.getElementById('rotateRightBtn').click();
@@ -81,15 +84,14 @@ export async function runGeometrySmoke({ send, evaluate, waitFor, wait, fail, in
     await wait(500);
     const rotated = await evaluate(`window.__ncGeometry.inspect({ chain: true })`);
     const afterRotate = await evaluate(counters);
-    const sizeAfter = await evaluate(`[document.getElementById('canvas').width, document.getElementById('canvas').height]`);
+    const sizeAfter = await evaluate(displayedSize);
     if (rotated.hash16 !== rotated.chainHash16 || rotated.hash8 !== rotated.chainHash8) fail('rotated planes differ from the export chain: ' + JSON.stringify(rotated));
     if (afterRotate.poolRotations - beforeRotate.poolRotations !== 1 || afterRotate.mainRotations !== beforeRotate.mainRotations) fail('rotate 90 did not build its planes in the pool: ' + JSON.stringify({ beforeRotate, afterRotate }));
     // The crop box maps through the turn with floor/ceil, so a side may grow by a pixel.
     if (Math.abs(rotated.width - importState.height) > 2 || Math.abs(rotated.height - importState.width) > 2) {
       fail('rotate 90 did not swap the frame: ' + JSON.stringify({ before: [importState.width, importState.height], after: [rotated.width, rotated.height] }));
     }
-    // #canvas holds the display preview, sized to the view, so only its
-    // aspect ratio has to turn with the frame.
+    // Only the aspect ratio of the displayed frame has to turn with it.
     const aspect = ([w, h]) => w / h;
     if (Math.abs(aspect(sizeAfter) * aspect(sizeBefore) - 1) > 0.02) fail('rotate 90 did not swap the displayed frame: ' + JSON.stringify({ sizeBefore, sizeAfter }));
     if (/rotate/.test(await evaluate(`document.getElementById('canvasTransformWrapper').style.transform`))) fail('the interim turn outlived the new paint');

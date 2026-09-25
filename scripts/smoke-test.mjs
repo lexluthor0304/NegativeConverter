@@ -740,7 +740,17 @@ const redoState = await evaluate(`({ conversions: window.__brushConversions, det
 if (redoState.conversions !== 0 || redoState.detections !== 0 || dustCount(redoState.status) !== statusAfterStroke) {
   fail('redoing a dust stroke re-converted, re-detected or lost its count: ' + JSON.stringify(redoState));
 }
-console.log(`ok: dust detection ${dustSource.width}x${dustSource.height}, clean-source reset, pinned regional brush (${strokeMessages[0].bytes} B stroke), in-place undo/redo`);
+// #242: the dust-mask view (a CPU mode) of a repaired, full-resolution frame
+// is drawn at display size: #canvas, the tint layer and the frame under it.
+const dustDisplay = await evaluate(`window.__ncDisplay.frame()`);
+const displaySize = JSON.stringify(dustDisplay.display);
+if (dustDisplay.surface !== 'cpu' || JSON.stringify(dustDisplay.canvases.main) !== displaySize
+  || JSON.stringify(dustDisplay.handle) !== displaySize
+  || (dustDisplay.canvases.dustTint && JSON.stringify(dustDisplay.canvases.dustTint) !== displaySize)
+  || dustDisplay.display[0] * dustDisplay.display[1] > 4_000_000) {
+  fail('the dust-mask view is not drawn at display size: ' + JSON.stringify(dustDisplay));
+}
+console.log(`ok: dust detection ${dustSource.width}x${dustSource.height}, clean-source reset, pinned regional brush (${strokeMessages[0].bytes} B stroke), in-place undo/redo, display-size mask view ${displaySize}`);
 // 後続の色調検証ではマスクの色を重ねない。
 await evaluate(`window.__dustStatusObserver.disconnect(); document.getElementById('dustShowMask').click()`);
 if (await evaluate(`import('/src/app/dustWorkerClient.js').then(({ dustWorker }) => dustWorker.pinned)`)) {
@@ -964,13 +974,12 @@ const failureProbeSize = await evaluate(`(async () => {
   const bitmap = await createImageBitmap(await (await fetch('/test-fixtures/negative-sample-2.jpg')).blob());
   const size = [bitmap.width, bitmap.height]; bitmap.close(); return size;
 })()`);
-await waitFor('full-resolution canvas before failed switch', `document.getElementById('canvas').width === ${failureProbeSize[0]} && document.getElementById('canvas').height === ${failureProbeSize[1]}`, 30_000);
+// #canvas holds a display-size frame (none while WebGL presents, #242): the
+// frame and the image it shows come from the app's display probe.
+await waitFor('full-resolution frame before failed switch', `(() => { const f = window.__ncDisplay.frame(); return f.exact && f.width === ${failureProbeSize[0]} && f.height === ${failureProbeSize[1]}; })()`, 30_000);
 const canvasFingerprint = `(() => {
-  const c = document.getElementById('canvas');
-  const data = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
-  let hash = 2166136261;
-  for (const value of data) hash = Math.imul(hash ^ value, 16777619);
-  return [c.width, c.height, hash];
+  const f = window.__ncDisplay.frame();
+  return [f.width, f.height, window.__ncDisplay.imageHash()];
 })()`;
 const beforeFailure = await evaluate(canvasFingerprint);
 // Display order follows file modification time, not append/queue order.

@@ -7,7 +7,9 @@ export async function runExportCancelSmoke({ evaluate, waitFor, fail }) {
       const pixels = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
       let hash = 2166136261;
       for (const value of pixels) hash = Math.imul(hash ^ value, 16777619);
-      return JSON.stringify({ hash, width: c.width, height: c.height,
+      // #canvas holds a display-size frame, and none while WebGL presents
+      // (#242): the image itself is hashed too.
+      return JSON.stringify({ hash, width: c.width, height: c.height, image: window.__ncDisplay.imageHash(),
         file: document.getElementById('studioFilename').textContent,
         cyan: document.getElementById('cyan').value,
         exposure: document.getElementById('coreExposure').value,
