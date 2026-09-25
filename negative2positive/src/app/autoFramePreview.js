@@ -321,7 +321,8 @@ export function blockChromaP95(imageData) {
  * when the frame's own film type is black-and-white or its preview is
  * neutral (block chroma p95 < 10; an orange-mask negative sits near 90),
  * else grey, R, G and B. `enabled: false` (the kill switch) keeps all four.
- * The verdict is recorded as `diagnostics.lineSearch`.
+ * The analyzer asks only when the line search runs and records the verdict
+ * as `diagnostics.lineSearch`.
  */
 export function planLineSearch(preview, { enabled = false, filmType = null } = {}) {
   if (!enabled) return { channels: LINE_SEARCH_CHANNELS, record: { channels: 'rgb', reason: 'off', chromaP95: null } };

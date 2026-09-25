@@ -71,16 +71,26 @@ for (const degrees of [3, 0]) {
   else assert.deepEqual(Object.keys(deferredFull).sort(), ['needsFullResolution', 'stageMs']);
 }
 
-// The line-search verdict is recorded with the result.
+// The line-search verdict is recorded with the result, and only decided when
+// the line search runs (a contour window makes it unnecessary).
 {
   const image = frame(900, 640, 2);
-  const result = detectFrameAndRotation(image, { settings: { ...settings, neutralLineSearch: true }, frameFilmType: 'color', maxSide: 400, rotatedOutput: 'none', rotateImageData: applyRotationToImageData });
-  assert.equal(result.diagnostics.lineSearch.reason, 'colour');
-  const off = detectFrameAndRotation(image, { settings, maxSide: 400, rotatedOutput: 'none', rotateImageData: applyRotationToImageData });
-  assert.deepEqual(off.diagnostics.lineSearch, { channels: 'rgb', reason: 'off', chromaP95: null });
-  const bw = detectFrameAndRotation(image, { settings: { ...settings, neutralLineSearch: true }, frameFilmType: 'bw', maxSide: 400, rotatedOutput: 'none', rotateImageData: applyRotationToImageData });
-  assert.equal(bw.diagnostics.lineSearch.reason, 'bw-film');
-  assert.equal(summary({ ...bw, diagnostics: { ...bw.diagnostics, lineSearch: null } }), summary({ ...off, diagnostics: { ...off.diagnostics, lineSearch: null } }));
+  const withGate = { settings: { ...settings, neutralLineSearch: true }, maxSide: 400, rotatedOutput: 'none', rotateImageData: applyRotationToImageData };
+  const contour = detectFrameAndRotation(image, { ...withGate, frameFilmType: 'bw' });
+  assert.deepEqual(contour.diagnostics.lineSearch, { channels: null, reason: 'not-run', chromaP95: null });
+  const findContours = cv.findContours;
+  try {
+    cv.findContours = () => {};
+    const colour = detectFrameAndRotation(image, { ...withGate, frameFilmType: 'color' });
+    assert.equal(colour.diagnostics.lineSearch.reason, 'colour');
+    assert.ok(colour.diagnostics.lineSearch.chromaP95 > 10);
+    const off = detectFrameAndRotation(image, { settings, maxSide: 400, rotatedOutput: 'none', rotateImageData: applyRotationToImageData });
+    assert.deepEqual(off.diagnostics.lineSearch, { channels: 'rgb', reason: 'off', chromaP95: null });
+    const bw = detectFrameAndRotation(image, { ...withGate, frameFilmType: 'bw' });
+    assert.equal(bw.diagnostics.lineSearch.reason, 'bw-film');
+    const strip = r => summary({ ...r, diagnostics: { ...r.diagnostics, lineSearch: null } });
+    assert.equal(strip(colour), strip(off), 'colour material keeps the four-channel result');
+  } finally { cv.findContours = findContours; }
 }
 
 console.log('autoFrameAnalyzer rotated output: sizes without pixels, pixels on request, deferral on 8-bit planes, line-search verdict');

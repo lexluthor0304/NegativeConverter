@@ -85,7 +85,8 @@ export function boundaryEvidence(image, points, targeted = false, { consistentBa
 }
 
 // `lineChannels`: the planes the line search reads (default grey, R, G, B;
-// see findWindowLineQuads).
+// see findWindowLineQuads), or a function that returns them, called only when
+// the line search runs.
 export function detectImageWindow(image, targets, { targeted = false, lineChannels = undefined } = {}) {
   const cv = globalThis.cv;
   if (!cv?.Mat) return null;
@@ -137,8 +138,9 @@ export function detectImageWindow(image, targets, { targeted = false, lineChanne
         } finally { contour.delete(); approx.delete(); }
       }
     }
+    const channels = candidates.length ? null : (typeof lineChannels === 'function' ? lineChannels() : lineChannels);
     const lineResult = candidates.length ? { quads: [], incomplete: false }
-      : findWindowLineQuads(image, src, null, lineChannels ? { channels: lineChannels } : undefined);
+      : findWindowLineQuads(image, src, null, channels ? { channels } : undefined);
     for (const points of lineResult.quads) {
       if (points.some(p => p.x < 3 || p.y < 3 || p.x > image.width - 4 || p.y > image.height - 4)) continue;
       const lengths = points.map((p, i) => Math.hypot(p.x - points[(i + 1) % 4].x, p.y - points[(i + 1) % 4].y));

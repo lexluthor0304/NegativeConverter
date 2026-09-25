@@ -20,7 +20,7 @@
 - 「自動取景」ボタンだけは両プレーンを送り、回転済みプレーンを受け取って作業画像にする（角度 0 では基画像そのもの）。寸法の規則は `imageGeometry.js` の `rotatedDimensions` の 1 か所（#244）。
 - 線分探索の厳密な高速化: 中央値は型付き配列のソート、`lineEvidence` は支持なし差分 11 個または低差分 16 個で打ち切り、`walkLineSegments` は歩ごとの配列を作らず、`boundaryEvidence` は最初に失敗した辺で打ち切り、線分の四辺形は傾き判定を先に行う。同じバイト列の平面（R = G = B のグレースケール）は 1 回だけ探索する。HEAD の凍結コピー `imageWindowSearch.reference.mjs` との一致を `imageWindowSearch.parity.test.mjs` が検証する。
 - フラグ付きの変更（#229 で許容済み）:
-  - グレー平面だけの線分探索（part 4b、既定で有効）: フレーム自身のフィルム種別が白黒、またはプレビューの 4×4 ブロック平均の彩度（最大 − 最小）の p95 が 10 未満のとき。判定は `diagnostics.lineSearch` に記録する。橙色マスクのネガは p95 ≈ 126–142 で発火しない。キルスイッチ: `localStorage.nc_autoframe_neutral_lines_v1 = 'off'`（`state.autoFrame.neutralLineSearch`）。
+  - グレー平面だけの線分探索（part 4b、既定で有効）: フレーム自身のフィルム種別が白黒、またはプレビューの 4×4 ブロック平均の彩度（最大 − 最小）の p95 が 10 未満のとき。判定は線分探索を行うときだけ下し、`diagnostics.lineSearch` に記録する（輪郭で窓が見つかった場合は `not-run`）。橙色マスクのネガは p95 ≈ 126–142 で発火しない。キルスイッチ: `localStorage.nc_autoframe_neutral_lines_v1 = 'off'`（`state.autoFrame.neutralLineSearch`）。
   - 決定的プレビュー（part 2、既定で無効）: 整数演算の面積平均による縮小と、固定小数点の 8 bit 双線形回転（`autoFramePreview.js`）。V8 と JavaScriptCore で同じバイト列になる（`test-fixtures/autoFramePreviewGolden.mjs` の SHA-256 を Node とスモークの Chrome で照合）。有効化: `localStorage.nc_autoframe_js_preview_v1 = 'on'`。既定にする前に、2026-09-23 の M11 ロール 20 コマ以上と macOS ビルドでの承認が必要（自動適用と要確認の入れ替わりなし、裁切の移動が辺の 1 % 以内）。Node での速度は 60 MP 換算で約 135–145 ms（Chrome のキャンバス 77–88 ms の約 1.6 倍）。
 
 ### 段階別プロファイル（`stageMs`）

@@ -66,7 +66,7 @@ export async function runStudioRawAutoFrameSmoke({ send, evaluate, waitFor, fail
     writeFileSync(join(output, example.file + '-detected.png'), Buffer.from(row.overlay.split(',')[1], 'base64'));
     delete row.overlay;
     // The grey-only line search (#251 part 4b) never fires on colour film.
-    if (!example.bw && row.result && row.result.diagnostics?.lineSearch?.channels !== 'rgb') fail('the line search went grey-only on colour film: ' + JSON.stringify(row.result?.diagnostics));
+    if (!example.bw && row.result?.diagnostics?.lineSearch?.channels === 'grey') fail('the line search went grey-only on colour film: ' + JSON.stringify(row.result?.diagnostics));
     if (example.incomplete) {
       if (!row.result?.requiresReview || !row.result.diagnostics?.incomplete || row.result.cropRegion || row.autoApply) fail('不完全な RAW の切り抜きを停止できません: ' + JSON.stringify(row));
     } else {

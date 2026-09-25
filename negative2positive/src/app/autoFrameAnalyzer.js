@@ -1446,18 +1446,22 @@ export function detectFrameAndRotation(imageData, options = {}) {
     : resizeImageDataToMaxSide(imageData, context.maxSide);
   context.reusablePreview = previewData;
   clock.mark('preview');
-  const lineSearch = planLineSearch(previewData, {
+  // The line search's planes, decided once per frame and only if the
+  // search runs (a contour window makes it unnecessary).
+  let linePlan = null;
+  const planLines = () => (linePlan ||= planLineSearch(previewData, {
     enabled: context.settings.neutralLineSearch === true,
     filmType: options.frameFilmType ?? null
-  });
-  const window = detectImageWindow(previewData, getAutoFrameAspectTargets(context), { lineChannels: lineSearch.channels });
+  }));
+  const window = detectImageWindow(previewData, getAutoFrameAspectTargets(context), { lineChannels: () => planLines().channels });
+  const lineSearchRecord = () => (linePlan ? linePlan.record : { channels: null, reason: 'not-run', chromaP95: null });
   clock.mark('window');
   // 撮影範囲外の辺は比率で補完しない。密度テンプレートにもフォールバックせず、
   // 自動・一括処理のいずれも元画像を保持して手動確認へ回す。
   if (window?.incomplete || window?.requiresReview) return withStages({
     angle: 0, cropRegion: null, confidence: 0, confidenceLevel: 'low',
     detectedFormat: 'unknown', requiresReview: true, ...frameOutput(fullFrame(0)),
-    diagnostics: { method: window.ambiguous ? 'opencv-ambiguous-window' : 'opencv-incomplete-window', incomplete: Boolean(window.incomplete), lineSearch: lineSearch.record }
+    diagnostics: { method: window.ambiguous ? 'opencv-ambiguous-window' : 'opencv-incomplete-window', incomplete: Boolean(window.incomplete), lineSearch: lineSearchRecord() }
   });
   if (window) {
     const angle = Number(window.angle.toFixed(2));
@@ -1473,7 +1477,7 @@ export function detectFrameAndRotation(imageData, options = {}) {
       angle, cropRegion, confidence: window.confidence,
       confidenceLevel: inferAutoFrameConfidenceLevel(window.confidence, context.settings),
       detectedFormat: window.detectedFormat, ...frameOutput(frame),
-      diagnostics: { method: window.method || 'opencv-image-window', scoreBreakdown: window.evidence, lineSearch: lineSearch.record }
+      diagnostics: { method: window.method || 'opencv-image-window', scoreBreakdown: window.evidence, lineSearch: lineSearchRecord() }
     });
   }
   const previewCandidates = detectFrameCandidatesWithCv(previewData, context, { minAreaRatio: 0.04 });
@@ -1615,7 +1619,7 @@ export function detectFrameAndRotation(imageData, options = {}) {
       anglePenalty: Number(fullAnglePenalty.toFixed(3)),
       cropValidation: cropFull.validation || null,
       edgeContacts,
-      lineSearch: lineSearch.record
+      lineSearch: lineSearchRecord()
     }
   });
 }
