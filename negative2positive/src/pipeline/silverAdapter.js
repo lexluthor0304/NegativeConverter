@@ -10,7 +10,7 @@ import {
 import { applyFilmBaseCompensationToBuffer } from './filmBaseCompensation.js';
 import { analyzeImage, analyzeGreyImage, greyChannelLevels, adjustSaturation } from '../silvercore/engine/ImageProcessor.js';
 import { normalizePaperId, normalizeToningId } from '../silvercore/engine/PaperProfiles.js';
-import { applyExposureStopsToGrey, applyExposureStopsToGreyRect, applyExposureStopsToImage16Rect, hasExposureStops, exposureStopsCover } from '../silvercore/util/localExposure.js';
+import { applyExposureStopsToGrey, applyExposureStopsToGreyRect, applyExposureStopsToImage16Rect, hasExposureStops, exposureStopsCover, exposeRgbaRun, exposeGreyValue } from '../silvercore/util/localExposure.js';
 import {
   mixToGrey,
   allOpaque,
@@ -19,7 +19,7 @@ import {
   convertGreyFromSource,
   greyHistogramFromSource,
 } from '../silvercore/util/greyPlane.js';
-import { rasterizeExposureStopsTiled, updateExposureStopsMap, exposureMapKey, exposureStopsBytes } from '../app/localExposure.js';
+import { rasterizeExposureStopsTiled, updateExposureStopsMap, exposureMapKey, exposureStopsBytes, liveStrokeCoverageRect } from '../app/localExposure.js';
 import { applyFlatFieldToImage16 } from '../app/flatField.js';
 import { analysisPixelBounds } from '../app/analysisRegion.js';
 import { LARGE_IMAGE_PIXELS } from '../app/imageMemoryBudget.js';
@@ -309,8 +309,22 @@ export function toGrayscaleInPlace(image16, mixPreset) {
 // deliberately does NOT hold the buffer handed back to the caller — see
 // _takeWorkBuffer. Requests with forceFullProcess and images over LARGE_IMAGE_PIXELS
 // keep no plane at all (_transientWorkBuffer).
+// Every rebuild or drop of a slot's pristine or prepared planes takes a new
+// epoch, so a live dodge-and-burn request (#254) can tell that the planes of the
+// frame it paints over are still the ones in the slot.
+let _planeEpoch = 0;
+let _liveSeq = 0;
+
+function _bumpPlanes(slot) {
+  slot.planeEpoch = ++_planeEpoch;
+}
+
 function _createSlot() {
   return {
+    planeEpoch: ++_planeEpoch,
+    // What the last interactive conversion of this slot drew with, for live
+    // dodge-and-burn rectangles (#254 C): see renderLiveExposureRect.
+    live: null,
     engine: null,
     width: 0,
     height: 0,
@@ -336,7 +350,7 @@ function _createSlot() {
 // Counters for the tests: how often the expensive per-pixel prefix stages ran.
 // exposedUpdates: post-exposure levels updated inside a stroke's box only (#254);
 // exposureMaps: how the stops maps were made (full / extended / undone / tiled).
-const _stats = { preprocess: 0, preparedBuilds: 0, exposedBuilds: 0, exposedUpdates: 0,
+const _stats = { preprocess: 0, preparedBuilds: 0, exposedBuilds: 0, exposedUpdates: 0, liveRects: 0,
   exposureMaps: { full: 0, extended: 0, undone: 0, tiled: 0 } };
 
 function _levelBytes(level) {
@@ -528,6 +542,7 @@ function _pristineFor(slot, image16, filmBaseCompensation) {
   if (sizeChanged || sourceChanged || gainsChanged) {
     if (sizeChanged) slot.pristineBuffer = new Uint16Array(len);
     slot.pristineBuffer.set(sourceRef);
+    _bumpPlanes(slot);
     _preprocessBuffer(slot.pristineBuffer, image16.width, image16.height, filmBaseCompensation);
     slot.lastSourceRef = sourceRef;
     slot.lastFilmBaseGains = {
@@ -541,6 +556,8 @@ function _pristineFor(slot, image16, filmBaseCompensation) {
 }
 
 function _dropSlotPlanes(slot) {
+  _bumpPlanes(slot);
+  slot.live = null;
   slot.pristineBuffer = null;
   slot.lastSourceRef = null;
   slot.lastFilmBaseGains = null;
@@ -658,6 +675,37 @@ function _toResult(processed16) {
 // pre-exposure level (a plane of its own only when one of its stages is active) and
 // the post-exposure level (only while stops exist). A tick that changes neither key
 // reads the cached level straight into the fresh output buffer (Engine.applyTail).
+// The post-exposure level after the stops map changed in place (#254 D1, the
+// map's `change`): pixels inside the changed box are copied from the
+// pre-exposure level and exposed again, the rest are already right. False when
+// the level is not the one the change started from (it is then rebuilt).
+function _followExposureChange(slot, preparedKey, kind, pre, stops, change) {
+  const exposed = slot.exposed;
+  if (!change || !exposed || exposed.key !== `${preparedKey}|${change.fromKey}`) return false;
+  if (change.rect) {
+    const { x, y, width, height } = change.rect;
+    if (kind === 'grey') {
+      if (exposed.plane.length !== pre.grey.length) return false;
+      const frameWidth = exposed.plane.length / slot.height;
+      for (let row = y; row < y + height; row++) {
+        const from = row * frameWidth + x;
+        exposed.plane.set(pre.grey.subarray(from, from + width), from);
+      }
+      applyExposureStopsToGreyRect(exposed.plane, frameWidth, stops, change.rect);
+    } else {
+      if (exposed.plane.data.length !== pre.data.length) return false;
+      for (let row = y; row < y + height; row++) {
+        const from = (row * pre.width + x) * 4;
+        exposed.plane.data.set(pre.data.subarray(from, from + width * 4), from);
+      }
+      applyExposureStopsToImage16Rect(exposed.plane, stops, change.rect);
+    }
+  }
+  exposed.key = `${preparedKey}|${slot.exposureMap.key}`;
+  _stats.exposedUpdates++;
+  return true;
+}
+
 function _prepareRgba(ctx) {
   const { slot, engine, params, mode, input16, filmBaseCompensation, reference, needsFullProcess, analysisState } = ctx;
   const base = _pristineFor(slot, input16, filmBaseCompensation);
@@ -677,6 +725,7 @@ function _prepareRgba(ctx) {
     // pre-saturation in place and derives the statistics and the positive analysis.
     const recycled = slot.prepared?.plane?.data || null;
     slot.prepared = null;
+    _bumpPlanes(slot);
     slot.exposed = null;
     pre = mode === 'bw' || preSaturationActive ? copyOfBase(recycled) : base;
     engine.analyze(pre, params);
@@ -690,6 +739,7 @@ function _prepareRgba(ctx) {
     key = _preparedKey(analysisState, input16, mode, engine, 'rgba');
     slot.prepared = { key, kind: 'rgba', plane: pre === base ? null : pre, alpha: null };
     _stats.preparedBuilds++;
+    _bumpPlanes(slot);
   } else {
     key = _preparedKey(analysisState, input16, mode, engine, 'rgba');
     if (slot.prepared && slot.prepared.key === key) {
@@ -700,6 +750,7 @@ function _prepareRgba(ctx) {
       // because no analyze() ran on this buffer).
       const recycled = slot.prepared?.plane?.data || null;
       slot.prepared = null;
+      _bumpPlanes(slot);
       slot.exposed = null;
       pre = base;
       if (mode === 'bw' || preSaturationActive || !engine.positiveAnalysisIsIdentity()) {
@@ -709,9 +760,12 @@ function _prepareRgba(ctx) {
       }
       slot.prepared = { key, kind: 'rgba', plane: pre === base ? null : pre, alpha: null };
       _stats.preparedBuilds++;
+      _bumpPlanes(slot);
     }
   }
 
+  ctx.preLevel = pre;
+  ctx.preparedKey = key;
   const stops = params.localExposureStops;
   if (!(stops && stops.length === len / 4)) {
     slot.exposed = null;
@@ -720,21 +774,7 @@ function _prepareRgba(ctx) {
   const exposedKey = `${key}|${slot.exposureMap.key}`;
   if (slot.exposed && slot.exposed.key === exposedKey) return slot.exposed.plane;
   // A stroke added or undone in place (#254 D1): the level changes inside its box only.
-  const change = slot.exposureChange;
-  if (change && slot.exposed && slot.exposed.key === `${key}|${change.fromKey}` && slot.exposed.plane.data.length === len) {
-    const post = slot.exposed.plane;
-    if (change.rect) {
-      const { x, y, width, height } = change.rect;
-      for (let row = y; row < y + height; row++) {
-        const from = (row * pre.width + x) * 4;
-        post.data.set(pre.data.subarray(from, from + width * 4), from);
-      }
-      applyExposureStopsToImage16Rect(post, stops, change.rect);
-    }
-    slot.exposed.key = exposedKey;
-    _stats.exposedUpdates++;
-    return post;
-  }
+  if (_followExposureChange(slot, key, 'rgba', pre, stops, slot.exposureChange)) return slot.exposed.plane;
   // A stroke edit rebuilds only this level, from the pre-exposure level.
   const recycled = slot.exposed?.plane?.data || null;
   slot.exposed = null;
@@ -757,6 +797,7 @@ function _prepareGrey(ctx) {
   const build = () => {
     const recycled = slot.prepared?.kind === 'grey' ? slot.prepared.plane : null;
     slot.prepared = null;
+    _bumpPlanes(slot);
     slot.exposed = null;
     const grey = mixToGrey(base.data, weights, engine.preSaturationRamp(params), _recycledPlane(recycled, n));
     // Alpha passes through every stage untouched: keep a flag, or the plane it lives in.
@@ -771,6 +812,7 @@ function _prepareGrey(ctx) {
     key = _preparedKey(analysisState, input16, mode, engine, 'grey');
     slot.prepared = { key, kind: 'grey', plane: level.grey, alpha: level.alpha };
     _stats.preparedBuilds++;
+    _bumpPlanes(slot);
   } else {
     key = _preparedKey(analysisState, input16, mode, engine, 'grey');
     if (slot.prepared && slot.prepared.key === key) {
@@ -779,9 +821,12 @@ function _prepareGrey(ctx) {
       level = build();
       slot.prepared = { key, kind: 'grey', plane: level.grey, alpha: level.alpha };
       _stats.preparedBuilds++;
+      _bumpPlanes(slot);
     }
   }
 
+  ctx.preLevel = level;
+  ctx.preparedKey = key;
   const stops = params.localExposureStops;
   if (!(stops && stops.length === n)) {
     slot.exposed = null;
@@ -789,21 +834,7 @@ function _prepareGrey(ctx) {
   }
   const exposedKey = `${key}|${slot.exposureMap.key}`;
   if (slot.exposed && slot.exposed.key === exposedKey) return { grey: slot.exposed.plane, alpha: level.alpha };
-  const change = slot.exposureChange;
-  if (change && slot.exposed && slot.exposed.key === `${key}|${change.fromKey}` && slot.exposed.plane.length === n) {
-    const post = slot.exposed.plane;
-    if (change.rect) {
-      const { x, y, width, height } = change.rect;
-      for (let row = y; row < y + height; row++) {
-        const from = row * base.width + x;
-        post.set(level.grey.subarray(from, from + width), from);
-      }
-      applyExposureStopsToGreyRect(post, base.width, stops, change.rect);
-    }
-    slot.exposed.key = exposedKey;
-    _stats.exposedUpdates++;
-    return { grey: post, alpha: level.alpha };
-  }
+  if (_followExposureChange(slot, key, 'grey', level, stops, slot.exposureChange)) return { grey: slot.exposed.plane, alpha: level.alpha };
   const recycled = slot.exposed?.plane || null;
   slot.exposed = null;
   const post = _recycledPlane(recycled, n);
@@ -963,6 +994,7 @@ async function runSilverCore(imageData, settings, mode, options) {
   } else if (greyPath) {
     const level = _prepareGrey(ctx);
     const table = packGreyTable(analysisPreview ? engine.buildCurrentGreyTable(params) : engine.buildGreyTable(params));
+    ctx.greyTable = table;
     result = _greyResult(input16.width, input16.height, (out16, out8) => writeGreyOutput(level.grey, level.alpha, table, out16, out8),
       _reusableOutput(slot, options?.workBuffer16, planeLength, input16, reference));
   } else {
@@ -972,6 +1004,27 @@ async function runSilverCore(imageData, settings, mode, options) {
     const dst = { width: src.width, height: src.height, data: reuse || new Uint16Array(src.data.length) };
     result = _toResult(analysisPreview ? engine.applyCurrentTail(src, dst, params) : engine.applyTail(src, dst, params));
   }
+
+  // What a live dodge-and-burn rectangle over this frame needs (#254 C): the
+  // pre-exposure level, the tables and settings the tail ran with, and the
+  // working geometry of the strokes. References only: the planes are the slot's.
+  slot.live = !transient && !region && ctx.preLevel && settings?.localExposureGeometry ? {
+    seq: ++_liveSeq,
+    epoch: slot.planeEpoch,
+    kind: greyPath ? 'grey' : 'rgba',
+    width: input16.width,
+    height: input16.height,
+    preparedKey: ctx.preparedKey,
+    pre: ctx.preLevel,
+    greyTable: ctx.greyTable || null,
+    engine,
+    luts: engine.lastLuts,
+    settings: engine.lastSettings,
+    enhancedLut: engine.enhancedLut,
+    params,
+    geometry: { ...settings.localExposureGeometry, width: input16.width, height: input16.height },
+  } : null;
+  if (slot.live) result.__liveFrame = slot.live.seq;
 
   if (needsFullProcess) slot.analysis = analysisState;
   if (analysisPreview) result.__analysisPreview = analysisPreview;
@@ -1024,6 +1077,8 @@ export function releaseSlotBuffers(which = 'full') {
   slot.exposureChange = null;
   slot.prepared = null;
   slot.exposed = null;
+  slot.live = null;
+  _bumpPlanes(slot);
 }
 
 /** Test hook: the retained fields of a slot. */
@@ -1195,6 +1250,103 @@ export async function loadSilverCoreProfile(engine, params) {
     params.enhancedProfile = 'none';
     params.profileStrength = 0;
   }
+}
+
+// ---- Live dodge and burn (#254 C) ----
+//
+// While a stroke is painted, the preview worker converts only the rectangle its
+// new segments touched, over the frame the last interactive conversion of a slot
+// produced: the stops there are the committed map plus the live stroke's coverage
+// times its stops (the committed raster's own expression), and the rectangle runs
+// the same exposure and tail arithmetic as the frame, so for the same points it
+// is exactly the rectangle of the frame the stroke will have once stored.
+
+/** The working geometry of the slot's live frame `frameSeq`, or null when stale. */
+export function liveExposureGeometry(which, frameSeq) {
+  const slot = _cache[which];
+  const live = slot && slot.live;
+  return live && live.seq === frameSeq && live.epoch === slot.planeEpoch ? live.geometry : null;
+}
+
+function _liveRectPixels(live, rect, rectStops) {
+  const n = rect.width * rect.height;
+  const W = live.width;
+  if (live.kind === 'grey') {
+    const { grey, alpha } = live.pre;
+    const values = new Uint16Array(n);
+    const alphaRect = alpha ? new Uint16Array(n * 4) : null;
+    for (let y = 0; y < rect.height; y++) {
+      const from = (rect.y + y) * W + rect.x;
+      values.set(grey.subarray(from, from + rect.width), y * rect.width);
+      if (alphaRect) alphaRect.set(alpha.subarray(from * 4, (from + rect.width) * 4), y * rect.width * 4);
+    }
+    for (let k = 0; k < n; k++) {
+      const s = rectStops[k];
+      if (s !== 0) values[k] = exposeGreyValue(values[k], s);
+    }
+    const out16 = new Uint16Array(n * 4);
+    const out8 = new Uint8ClampedArray(n * 4);
+    writeGreyOutput(values, alphaRect, live.greyTable, out16, out8);
+    return out8;
+  }
+  const pre = live.pre;
+  const data = new Uint16Array(n * 4);
+  for (let y = 0; y < rect.height; y++) {
+    const from = ((rect.y + y) * W + rect.x) * 4;
+    data.set(pre.data.subarray(from, from + rect.width * 4), y * rect.width * 4);
+  }
+  const image = { width: rect.width, height: rect.height, data };
+  exposeRgbaRun(data, 0, rectStops, 0, n);
+  live.engine.applyLutsWith(image, live.luts, live.params, live.settings, live.enhancedLut);
+  return toImageData8(image).data;
+}
+
+/**
+ * Converts `rect` (frame pixels) of the slot's live frame `frameSeq` with the
+ * committed strokes `committed` (sanitised settings.localExposure, or null) and
+ * the stroke being painted (`store`, createLiveStrokeCoverage). A committed list
+ * that has moved on since that frame (a stroke stored before its pen-up frame
+ * ran) is brought into the slot's map first, in place when it extends it.
+ * Returns { rect, rgba } (8-bit RGBA of the rectangle) and, with
+ * `withCommitted`, `committedRgba`: the same rectangle without the live stroke.
+ * { stale: true } when the slot no longer holds that frame's planes.
+ */
+export function renderLiveExposureRect(which, { frameSeq, committed = null, store, rect, withCommitted = false }) {
+  const slot = _cache[which];
+  const live = slot && slot.live;
+  if (!live || live.seq !== frameSeq || live.epoch !== slot.planeEpoch) return { stale: true };
+  let stops = null;
+  if (committed?.strokes?.length) {
+    const previous = slot.exposureMap && !slot.exposureMap.tiled ? slot.exposureMap : null;
+    const { map, change } = updateExposureStopsMap(previous, committed, live.geometry, _stats.exposureMaps);
+    slot.exposureMap = map;
+    // The post-exposure level follows the map, or is rebuilt by the next frame.
+    if (change && slot.prepared?.key === live.preparedKey) {
+      _followExposureChange(slot, live.preparedKey, live.kind, live.pre, map.stops, change);
+    }
+    stops = map.stops;
+  }
+  const n = rect.width * rect.height;
+  const coverage = liveStrokeCoverageRect(store, rect);
+  const strokeStops = store.stroke.stops;
+  const liveStops = new Float32Array(n);
+  const committedStops = withCommitted ? new Float32Array(n) : null;
+  for (let y = 0; y < rect.height; y++) {
+    const row = (rect.y + y) * live.width + rect.x;
+    for (let x = 0; x < rect.width; x++) {
+      const k = y * rect.width + x;
+      const base = stops ? stops[row + x] : 0;
+      const c = coverage[k];
+      liveStops[k] = c > 0 ? base + strokeStops * c : base;
+      if (committedStops) committedStops[k] = base;
+    }
+  }
+  _stats.liveRects++;
+  return {
+    rect,
+    rgba: _liveRectPixels(live, rect, liveStops),
+    committedRgba: committedStops ? _liveRectPixels(live, rect, committedStops) : null,
+  };
 }
 
 export function invalidateSilverCoreCache() {

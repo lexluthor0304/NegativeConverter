@@ -10,7 +10,8 @@
  */
 import './isolationProbe.js'; // first: answers the page's isolation probe (#264)
 import { convertFrameWithRouter, resolveConversionMode } from '../pipeline/conversionRouter.js';
-import { releaseSlotBuffers, prepareSilverCorePreview, analyzeSilverCorePreview } from '../pipeline/silverAdapter.js';
+import { releaseSlotBuffers, prepareSilverCorePreview, analyzeSilverCorePreview, renderLiveExposureRect, liveExposureGeometry } from '../pipeline/silverAdapter.js';
+import { createLiveStrokeCoverage, addLiveStrokePoints, unionRect } from '../app/localExposure.js';
 import { convertAdjustedFrame } from '../pipeline/adjustedFrame.js';
 import { createAdjustmentLutScratch } from '../app/adjustmentPipeline.js';
 import { fromImageData8 } from '../silvercore/util/image16.js';
@@ -37,6 +38,10 @@ let displayNegatives = [];
 const MAX_DISPLAY_NEGATIVES = 2;
 // The auto-WB sample: the level reduced to this long side (#248 part 3).
 const WB_SAMPLE_LONG_SIDE = 1024;
+// The dodge-and-burn stroke being painted (#254 C): { slot, frameSeq, store },
+// and the committed strokes main last sent with a live request.
+let liveStroke = null;
+let liveCommitted = null;
 
 function planeOf(image) {
   if (image.data instanceof Uint16Array) return image;
@@ -203,6 +208,8 @@ async function convert(msg) {
       height: result.height,
       rgba: result.data.buffer
     };
+    // An interactive frame a live dodge-and-burn stroke can be painted over (#254).
+    if (Number.isInteger(result.__liveFrame)) payload.liveFrame = { seq: result.__liveFrame, slot: slotNameFor(options) };
     const transfers = [result.data.buffer];
     if (result.__analysisPreview) {
       const sample = result.__analysisPreview;
@@ -436,6 +443,49 @@ async function roi(msg) {
   }
 }
 
+// One step of a live dodge-and-burn stroke (#254 C): adds the new points to
+// the stroke's coverage and converts the rectangle they touched over the live
+// frame `frameSeq` of `slot`. Messages run in order behind any conversion, so a
+// request never interleaves with one. Replies { rect, rgba, committedRgba },
+// { stale } when the slot no longer holds that frame, { needsReset } when the
+// stroke has to be sent again from its first point.
+function exposureLive(msg) {
+  const { id, slot, frameSeq } = msg;
+  try {
+    if ('committed' in msg) liveCommitted = msg.committed || null;
+    const geometry = liveExposureGeometry(slot, frameSeq);
+    if (!geometry) {
+      liveStroke = null;
+      self.postMessage({ type: 'exposureLive', id, stale: true });
+      return;
+    }
+    if (msg.reset) liveStroke = { slot, frameSeq, store: createLiveStrokeCoverage(msg.stroke, geometry) };
+    if (!liveStroke || liveStroke.slot !== slot || liveStroke.frameSeq !== frameSeq) {
+      self.postMessage({ type: 'exposureLive', id, needsReset: true });
+      return;
+    }
+    const { store } = liveStroke;
+    let rect = addLiveStrokePoints(store, msg.points || []);
+    if (msg.fullStroke) rect = unionRect(rect, store.bounds);
+    if (!rect) {
+      self.postMessage({ type: 'exposureLive', id, rect: null });
+      return;
+    }
+    const reply = renderLiveExposureRect(slot, { frameSeq, committed: liveCommitted, store, rect, withCommitted: Boolean(msg.withCommitted) });
+    if (reply.stale) {
+      liveStroke = null;
+      self.postMessage({ type: 'exposureLive', id, stale: true });
+      return;
+    }
+    const transfers = [reply.rgba.buffer];
+    if (reply.committedRgba) transfers.push(reply.committedRgba.buffer);
+    self.postMessage({ type: 'exposureLive', id, rect, rgba: reply.rgba.buffer,
+      committedRgba: reply.committedRgba ? reply.committedRgba.buffer : null }, transfers);
+  } catch (err) {
+    self.postMessage({ type: 'error', id, message: err?.message || String(err) });
+  }
+}
+
 // Hands the retained plane of request `resultId` to main, or null when a
 // newer request has taken it over (main then converts that frame again).
 function commit(msg) {
@@ -461,6 +511,7 @@ async function handleMessage(msg) {
   if (msg.type === 'displayNegative') return displayNegative(msg);
   if (msg.type === 'resample') return resample(msg);
   if (msg.type === 'roi') return roi(msg);
+  if (msg.type === 'exposureLive') return exposureLive(msg);
   self.postMessage({ type: 'error', id: msg.id, message: `Unknown message type: ${msg.type}` });
 }
 

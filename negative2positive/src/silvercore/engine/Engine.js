@@ -258,6 +258,26 @@ export class Engine {
     return !analysis || (analysis.gain === 1 && analysis.wb.every(value => value === 1))
   }
 
+  /**
+   * _applyLuts() in place with the tables, settings and 3D profile of an earlier
+   * tick (#254: a live dodge-and-burn rectangle converted with the frame on
+   * screen). Only for pointwise tails, where a rectangle converts as it would
+   * inside the whole frame.
+   */
+  applyLutsWith(imageData, luts, params, settings, enhancedLut) {
+    if (!tailIsPointwise(settings)) throw new Error('A neighbourhood stage cannot convert a rectangle alone')
+    const lastSettings = this.lastSettings
+    const lut = this.enhancedLut
+    this.lastSettings = settings
+    this.enhancedLut = enhancedLut
+    try {
+      return this._applyLuts(imageData, luts, params)
+    } finally {
+      this.lastSettings = lastSettings
+      this.enhancedLut = lut
+    }
+  }
+
   _positiveFold(luts, params, width, height) {
     const analysis = this.positiveAnalysis
     if (this.positiveAnalysisIsIdentity() || analysis.gain !== 1) return null

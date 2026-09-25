@@ -60,6 +60,10 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
   // Results whose 16-bit plane stayed in the worker (#233), keyed by the
   // ImageData handed to the caller: { id, worker }.
   const retainedPlanes = new WeakMap();
+  // Frames of the slot's last interactive conversion (#254): { seq, slot, worker }.
+  const liveFrames = new WeakMap();
+  // The committed strokes the worker last received with a live request.
+  let liveCommittedSent = null;
   let lastSource = null;
   let lastAnalysis = null;
   let lastLocalExposure = null;
@@ -79,7 +83,7 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
       if (!entry) return;
       pending.delete(msg.id);
       if (msg.type === 'result' || msg.type === 'committed' || msg.type === 'ready' || msg.type === 'prepared' || msg.type === 'analyzed'
-        || msg.type === 'displayNegative' || msg.type === 'resampled' || msg.type === 'roi') entry.resolve(msg);
+        || msg.type === 'displayNegative' || msg.type === 'resampled' || msg.type === 'roi' || msg.type === 'exposureLive') entry.resolve(msg);
       else {
         const err = workerError(msg.message || 'Conversion worker error', CONVERSION_FAILED);
         // A lent source the worker hands back with its error.
@@ -328,6 +332,8 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
       out.__retained16 = true;
       retainedPlanes.set(out, { id, worker: w });
     }
+    // A frame the worker can paint a live dodge-and-burn stroke over (#254).
+    if (result.liveFrame) liveFrames.set(out, { ...result.liveFrame, worker: w });
     if (result.histogram) {
       const sample = result.histogram;
       const histogram = new ImageData(new Uint8ClampedArray(sample.rgba), sample.width, sample.height);
@@ -471,6 +477,36 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
     const reply = await postUncached('roi', body, transfers, region.slotWidth * region.slotHeight, signal);
     if (reply.warm) return null;
     return new ImageData(new Uint8ClampedArray(reply.rgba), reply.width, reply.height);
+  };
+
+  // The live frame a conversion result stands for in this client's current
+  // worker (#254), or null: { seq, slot }.
+  convert.liveFrameOf = (image) => {
+    const frame = image ? liveFrames.get(image) : null;
+    return frame && frame.worker === worker ? { seq: frame.seq, slot: frame.slot } : null;
+  };
+
+  // One step of a live dodge-and-burn stroke (#254 C) over the live frame
+  // `frame` ({ seq, slot }): the new base-normalised points, the sanitised
+  // stroke { stops, size, feather }, and the committed strokes (sent only when
+  // they changed). `reset` starts the stroke over (all points so far),
+  // `fullStroke` asks for its whole box again. Resolves to { rect, rgba,
+  // committedRgba } (8-bit RGBA of the rectangle, typed arrays) or { stale }.
+  convert.exposureLive = async ({ frame, stroke, points, committed = null, reset = false, fullStroke = false, withCommitted = false, signal = null }) => {
+    const body = { slot: frame.slot, frameSeq: frame.seq, stroke, points, reset, fullStroke, withCommitted };
+    let w;
+    try { w = getWorker(); } catch { w = null; }
+    if (!liveCommittedSent || liveCommittedSent.worker !== w || liveCommittedSent.committed !== committed) {
+      body.committed = committed;
+      liveCommittedSent = { worker: w, committed };
+    }
+    const reply = await postUncached('exposureLive', body, [], 1, signal);
+    if (reply.stale || reply.needsReset || !reply.rect) return { stale: Boolean(reply.stale), needsReset: Boolean(reply.needsReset), rect: null };
+    return {
+      rect: reply.rect,
+      rgba: new Uint8ClampedArray(reply.rgba),
+      committedRgba: reply.committedRgba ? new Uint8ClampedArray(reply.committedRgba) : null,
+    };
   };
 
   // Brings back the 16-bit plane a retaining conversion left in the worker.

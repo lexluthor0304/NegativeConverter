@@ -547,3 +547,98 @@ export function updateExposureStopsMap(previous, localExposure, geometry, stats 
 }
 
 export { applyExposureStopsToImage16, hasExposureStops, isTiledStops, exposureStopsCover } from '../silvercore/util/localExposure.js';
+
+// ---- A stroke being painted (#254 C) ----
+//
+// The coverage of the stroke under the pointer, kept as sparse tiles of the
+// working frame and grown one segment at a time: each new segment's falloff is
+// maxed into the tiles (segmentCoverageInto, the stored raster's arithmetic), and
+// the box it touched is the rectangle to convert again. A one-point stroke is its
+// disc; the second point replaces the disc with the first segment, as the stored
+// raster does, so for the same points the store holds exactly the coverage the
+// stroke gets once it is stored.
+
+// The brush of a sanitised stroke in a working geometry: radius and hard core
+// (prepareStrokeCoverage's, which depend on the geometry and the stroke only).
+export function strokeBrush(stroke, geometry) {
+  const scale = basePointToWorking({ x: 0.5, y: 0.5 }, geometry).scale
+    / Math.min(geometry.cropRegion ? geometry.cropRegion.width : (geometry.rotatedWidth || geometry.baseWidth), geometry.cropRegion ? geometry.cropRegion.height : (geometry.rotatedHeight || geometry.baseHeight));
+  const shortSide = Math.min(geometry.baseWidth, geometry.baseHeight);
+  const radius = Math.max(1, stroke.size * shortSide * scale / 2);
+  const feather = clamp(stroke.feather ?? 0.5, 0, 1);
+  return { radius, hard: radius * (1 - feather) };
+}
+
+export function createLiveStrokeCoverage(stroke, geometry, tileSize = 64) {
+  const { radius, hard } = strokeBrush(stroke, geometry);
+  return {
+    stroke, geometry, tileSize, radius, hard,
+    columns: Math.ceil(geometry.width / tileSize),
+    points: [],
+    tiles: new Map(),
+    // Union of the boxes painted so far (frame pixels), or null.
+    bounds: null,
+  };
+}
+
+function paintLiveSegment(store, a, b) {
+  const { geometry, tileSize, radius, hard } = store;
+  const r = radius * Math.max(a.p, b.p);
+  const x0 = Math.max(0, Math.floor(Math.min(a.x, b.x) - r)); const x1 = Math.min(geometry.width - 1, Math.ceil(Math.max(a.x, b.x) + r));
+  const y0 = Math.max(0, Math.floor(Math.min(a.y, b.y) - r)); const y1 = Math.min(geometry.height - 1, Math.ceil(Math.max(a.y, b.y) + r));
+  if (x1 < x0 || y1 < y0) return null;
+  for (let row = Math.floor(y0 / tileSize); row <= Math.floor(y1 / tileSize); row++) {
+    for (let column = Math.floor(x0 / tileSize); column <= Math.floor(x1 / tileSize); column++) {
+      const index = row * store.columns + column;
+      let tile = store.tiles.get(index);
+      if (!tile) store.tiles.set(index, tile = new Float32Array(tileSize * tileSize));
+      const tx = column * tileSize; const ty = row * tileSize;
+      segmentCoverageInto(tile, tx, ty, tileSize, Math.max(x0, tx), Math.max(y0, ty),
+        Math.min(x1, tx + tileSize - 1), Math.min(y1, ty + tileSize - 1), a, b, radius, hard);
+    }
+  }
+  const box = { x: x0, y: y0, width: x1 - x0 + 1, height: y1 - y0 + 1 };
+  store.bounds = unionRect(store.bounds, box);
+  return box;
+}
+
+// Adds base-normalised points (sanitised as stored strokes are) and returns the
+// rectangle whose coverage changed, or null.
+export function addLiveStrokePoints(store, basePoints) {
+  let dirty = null;
+  for (const point of basePoints) {
+    const working = { ...basePointToWorking(point, store.geometry), p: point.p ?? 1 };
+    const points = store.points;
+    points.push(working);
+    if (points.length === 1) {
+      dirty = unionRect(dirty, paintLiveSegment(store, working, working));
+      continue;
+    }
+    if (points.length === 2) {
+      // The disc gives way to the first segment.
+      dirty = unionRect(dirty, store.bounds);
+      store.tiles.clear();
+      store.bounds = null;
+    }
+    dirty = unionRect(dirty, paintLiveSegment(store, points[points.length - 2], working));
+  }
+  return dirty;
+}
+
+// The store's coverage over `rect` (frame pixels), 0 where nothing was painted.
+export function liveStrokeCoverageRect(store, rect) {
+  const { tileSize, columns, tiles } = store;
+  const out = new Float32Array(rect.width * rect.height);
+  for (let y = 0; y < rect.height; y++) {
+    const fy = rect.y + y;
+    const row = Math.floor(fy / tileSize);
+    const ty = (fy - row * tileSize) * tileSize;
+    for (let x = 0; x < rect.width; x++) {
+      const fx = rect.x + x;
+      const column = Math.floor(fx / tileSize);
+      const tile = tiles.get(row * columns + column);
+      if (tile) out[y * rect.width + x] = tile[ty + fx - column * tileSize];
+    }
+  }
+  return out;
+}
