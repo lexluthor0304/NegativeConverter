@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { createRepairStamps, sameRepairStrokes, captureDustPass, dustPassMatches, restoreDustPass } from './repairReuse.js';
+import { repairsNeedSettling } from './fullResolutionRouting.js';
 
 globalThis.ImageData ||= class { constructor(data, width, height) { Object.assign(this, { data, width, height }); } };
 
@@ -60,7 +61,11 @@ function fixture() {
     repairStamps: createRepairStamps(), sameRepairStrokes, captureDustPass, dustPassMatches, restoreDustPass,
     dustMaskInfo: (mask) => infos.get(mask) || null,
     assertRepairCurrent(isCurrent) { if (!isCurrent()) throw new DOMException('Repair superseded', 'AbortError'); },
-    ensureFullResolutionReadyForExport: async () => {},
+    ensureFullResolutionReadyForExport: async () => {}, flushScheduledCoreReprocess: async () => {},
+    // #237: the export's repair barrier runs for real; every export here
+    // follows a settled detection, so it waits for nothing.
+    repairsNeedSettling, pendingBrushRepairs: 0, brushRepairWaiters: [], dustDetectionTimer: null,
+    dustDetectionRun: null, dustMaskSources: new WeakMap(),
     dustMaxParticleSizeFor: () => 40,
     detectDustOffMainThread: async () => { calls.detect++; return { mask: detectedMask(), particleCount: 2, _state: null }; },
     // Dust pass: changes pixels inside the mask's blocks only, as MI-GAN and TELEA do.
@@ -96,7 +101,8 @@ function fixture() {
   });
   vm.runInContext(['getDustSource', 'nextDustMaskTag', 'noteDustReplaced', 'hasFrameRepairs', 'isCurrentLoad', 'currentRepairRecipe',
     'stampRepairResult', 'carryRestoredRepairStamp', 'commitDustPass', 'aiRepairReady',
-    'applyDustResultToState', 'runDustDetection', 'prepareCurrentImageForExport', 'renderCurrentImageDataForExport'].map(functionSource).join('\n'), c);
+    'applyDustResultToState', 'runDustDetection', 'runDustDetectionPass', 'prepareCurrentImageForExport', 'renderCurrentImageDataForExport',
+    'ensureRepairsReadyForExport', 'dustMaskIsStale', 'whenBrushRepairsSettled'].map(functionSource).join('\n'), c);
   return { c, state, clean, lens, calls, detectedMask, infos, bumpNextStrokePass: () => { bumpDuringStrokes = true; },
     exportImage: () => c.renderCurrentImageDataForExport({ format: 'png', bitDepth: 8 }) };
 }

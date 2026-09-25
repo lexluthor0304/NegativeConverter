@@ -70,7 +70,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     import { convertFrameWithRouter, resolveConversionMode } from '../pipeline/conversionRouter.js';
     import { convertAdjustedFrame } from '../pipeline/adjustedFrame.js';
-    import { convertFrameInWorker, convertPreviewFrameInWorker, createConversionWorkerClient, createConversionWorkerPool, CONVERSION_FAILED, WORKER_CRASHED, WORKER_TIMEOUT, WORKER_UNAVAILABLE, isConversionInputLost } from './conversionWorkerClient.js';
+    import { convertFrameInWorker, convertPreviewFrameInWorker, convertFullResolutionFrameInWorker, createConversionWorkerClient, createConversionWorkerPool, CONVERSION_FAILED, WORKER_CRASHED, WORKER_TIMEOUT, WORKER_UNAVAILABLE, WORKER_ABORTED, isConversionInputLost } from './conversionWorkerClient.js';
+    import { routeCoreConversion, keepsFullPlaneOnDowngrade, fullResolutionIsStale, restoredFrameFlags, viewportRefreshBranch, repairsNeedSettling } from './fullResolutionRouting.js';
     import { planBatchParallelism, planPng16BandWorkers, runBatchPipeline, planGeometryBandsInFlight } from './batchExportScheduler.js';
     import { displayPreviewSize, resizeDisplayPreview, updateDisplayPreviewRect } from './displayPreview.js';
     import { createCoreReprocessGates, previewDispatchAction, CORE_FULL_REPROCESS_DELAY_MS } from './coreReprocessDispatcher.js';
@@ -2844,8 +2845,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       refs.dustInpaintedImageData = state.dustRemoval.inpaintedImageData;
       refs.dustCleanSource = state.dustRemoval.cleanSource || null;
       refs.dustState = state.dustRemoval._state;
+      // Whether processedImageData is a display preview, and whether it lags
+      // the settings: restoring the plane without them could export a
+      // display-sized plane or skip a render export still owes.
+      const frame = { previewOnly: Boolean(state.processedImageDataIsPreview), fullResolutionPending: Boolean(state.fullResolutionPending) };
 
-      return { label, settings, refs };
+      return { label, settings, refs, frame };
     }
 
     function cancelPendingTimers() {
@@ -2861,9 +2866,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     // Returns a promise when the snapshot kept no pixels (a cold entry, #244):
     // it resolves once the planes are rebuilt and converted.
-    function restoreSnapshot(snapshot, { reprocess = true, previewOnly = false } = {}) {
+    function restoreSnapshot(snapshot, { reprocess = true, previewOnly } = {}) {
       cancelPendingTimers();
       coreReprocessToken += 1;
+      abortSupersededFullResolutionConversion();
       // A pending geometry build belongs to the state being replaced.
       cancelGeometryJob();
 
@@ -2948,13 +2954,21 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
       // Re-render
       if (state.processedImageData) {
-        applyProcessedImageToState(state.processedImageData, { previewOnly });
+        applyRestoredImageToState(state.processedImageData, restoredFrameFlags({
+          frame: snapshot.frame, previewOnly,
+          processedImageData: state.processedImageData, conversionSourceImageData: state.conversionSourceImageData
+        }));
         if (reprocess && usesSilverCoreConversion(state)) {
-          rerenderWithCoreControls({
-            full: true, token: coreReprocessToken, sourceRef: state.conversionSourceImageData
-          }).catch(() => {});
+          // The restored frame is on screen in the next frame. Its pixels can
+          // still lag its settings (captured while a reprocess was pending),
+          // so convert once; above 16 MP that is a display-preview conversion.
+          updatePreview();
+          void runCoreReprocess({ full: true, token: coreReprocessToken, sourceRef: state.conversionSourceImageData });
         } else {
           updateFull();
+          // A photo session restores the display planes it left with; the
+          // window may have changed size since.
+          scheduleDisplayPreviewResize();
         }
       } else {
         const sourceData = state.croppedImageData || state.originalImageData;
@@ -3073,8 +3087,26 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       }
     }
 
+    // Above 16 MP, a restored step without repairs or the AI brush converts
+    // the display preview and drops any full-resolution plane (#237). History
+    // keeps the display plane in its place, so no undo or redo step pins a
+    // 60 MP plane that nothing would read. Repairs keep theirs: the dust mask
+    // and the brushes work on that plane.
+    function trimHistorySnapshot(snapshot) {
+      const refs = snapshot?.refs;
+      if (!refs || !snapshot.frame || snapshot.frame.previewOnly) return snapshot;
+      const settings = snapshot.settings || {};
+      const repairs = Boolean(settings.dustRemoval?.enabled || settings.repairStrokes?.length);
+      if (!isLargeImage(refs.conversionSourceImageData) || repairs || isAiBrushEnabled()) return snapshot;
+      const preview = refs.previewSourceImageData;
+      if (!preview || !refs.processedImageData || preview === refs.processedImageData) return snapshot;
+      refs.processedImageData = preview;
+      snapshot.frame = { previewOnly: true, fullResolutionPending: true };
+      return snapshot;
+    }
+
     function commitUndoSnapshot(snapshot) {
-      undoStack.push(snapshot);
+      undoStack.push(trimHistorySnapshot(snapshot));
       if (undoStack.length > MAX_UNDO) undoStack.shift();
       pruneHistoryForMemory();
       redoStack.length = 0;
@@ -3121,7 +3153,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       } else {
         // Carry the action's own label across so the redo toast names the
         // action rather than the literal word "undo".
-        redoStack.push(captureSnapshot(snapshot.label));
+        redoStack.push(trimHistorySnapshot(captureSnapshot(snapshot.label)));
         restoring = restoreSnapshot(snapshot);
       }
       const actionName = getUndoLabel(snapshot.label);
@@ -3140,7 +3172,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       manualEditRevision++;
       if (getCurrentQueueItem()) getCurrentQueueItem().userEdited = true;
       const snapshot = redoStack.pop();
-      undoStack.push(snapshot.dustDelta ? snapshot : captureSnapshot(snapshot.label));
+      undoStack.push(snapshot.dustDelta ? snapshot : trimHistorySnapshot(captureSnapshot(snapshot.label)));
       if (undoStack.length > MAX_UNDO) undoStack.shift();
       pruneHistoryForMemory();
       let restoring = null;
@@ -4373,16 +4405,53 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (displayPreviewResizeTimer) clearTimeout(displayPreviewResizeTimer);
       displayPreviewResizeTimer = setTimeout(() => {
         displayPreviewResizeTimer = null;
-        const source = state.conversionSourceImageData;
-        if (!source || state.currentStep < 3 || state.cropping || state.beforeAfterActive) return;
-        // A reduced session sizes its own preview; its end calls this again.
-        if (previewTier === 'reduced') return;
-        const target = getDisplayPreviewSize(source);
-        const previous = state.conversionPreviewImageData;
-        if (previous?.width === target.width && previous?.height === target.height) return;
-        state.conversionPreviewImageData = resizeDisplayPreview(source, target);
-        scheduleCoreReprocess({ full: false, displayResize: true });
+        refreshDisplayPreviewForViewport();
       }, 100);
+    }
+
+    // A zoom, window resize or DPR change needs display planes of another
+    // size, never new conversion inputs (#237). It supersedes nothing: no
+    // token bump, so detection, brush repairs and an export's AI step carry on,
+    // and the mask and inpainted pixels stay as they are.
+    function refreshDisplayPreviewForViewport() {
+      const source = state.conversionSourceImageData;
+      if (!source || state.currentStep < 3 || state.cropping || state.beforeAfterActive) return;
+      // A reduced preview-tier session (#263) sizes its own preview; its end
+      // calls this again.
+      if (previewTier === 'reduced') return;
+      const processed = state.processedImageData;
+      const branch = viewportRefreshBranch({
+        processedImageData: processed, processedImageDataIsPreview: state.processedImageDataIsPreview,
+        fullResolutionPending: state.fullResolutionPending, repairs: hasFrameRepairs()
+      });
+      if (branch === 'resample') {
+        // The full-resolution pixels are current: resample the display fields
+        // from them. The conversion preview resizes itself when a conversion
+        // next needs it.
+        const target = getDisplayPreviewSize(processed);
+        const shown = state.previewSourceImageData;
+        if (shown?.width === target.width && shown?.height === target.height) return;
+        state.previewSourceImageData = resizeDisplayPreview(processed, target);
+        state.histogramSourceImageData = buildHistogramSourceImageData(state.previewSourceImageData);
+        state.webglSourceImageData = state.previewSourceImageData;
+        if (webglState.gl) webglState.sourceDirty = true;
+        // A CPU canvas already holding the full-resolution frame needs no
+        // redraw: the zoom only scales it.
+        if (isWebGLActive() || state.lastRenderQuality !== 'full') schedulePreviewUpdate();
+        return;
+      }
+      if (branch === 'repair-pass') {
+        // The pending or running repair pass builds the display fields at the
+        // current size when it lands.
+        if (!fullResolutionRenderTimer && !state.fullResolutionPromise) scheduleFullResolutionRender('repair-idle');
+        return;
+      }
+      // A preview-only frame: convert the display preview again at the new size.
+      const target = getDisplayPreviewSize(source);
+      const previous = state.conversionPreviewImageData;
+      if (previous?.width === target.width && previous?.height === target.height) return;
+      state.conversionPreviewImageData = resizeDisplayPreview(source, target);
+      scheduleCoreReprocess({ full: false, displayOnly: true });
     }
 
     // ===========================================
@@ -5628,16 +5697,21 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // Full-res CPU rendering can be expensive on large scans; debounce aggressively.
       fullUpdateTimer = setTimeout(() => {
         fullUpdateTimer = null;
+        const separatePreview = usesSilverCoreConversion(state) && hasSeparateConversionPreview();
+        // Only a conversion input leaves the full-resolution pixels stale; a
+        // Step-3 commit (WB gains, C/M/Y, curves, rescue, look, crop cancel)
+        // never feeds the conversion and invalidates nothing (#237).
+        if (separatePreview && fullResolutionIsStale(state)) {
+          scheduleFullResolutionRender('scheduleFullUpdate', FULL_RESOLUTION_INTERACTIVE_DELAY_MS);
+          return;
+        }
         if (hasFrameRepairs() && state.dustRemoval.cleanSource) {
           updateFull();
           return;
         }
-        // If SilverCore mode and we were using preview-resolution, run full reprocess
-        if (usesSilverCoreConversion(state) && state.conversionSourceImageData
-          && state.conversionPreviewImageData && state.conversionPreviewImageData !== state.conversionSourceImageData) {
-          scheduleFullResolutionRender('scheduleFullUpdate', FULL_RESOLUTION_INTERACTIVE_DELAY_MS);
-          return;
-        }
+        // Current pixels above 16 MP keep the display preview: no
+        // full-resolution Step-3 pass on the main thread.
+        if (separatePreview && isLargeImage(state.conversionSourceImageData)) return;
         updateFull();
       }, 1200);
     }
@@ -5867,6 +5941,33 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       }
     }
 
+    // Undo, Redo and a photo-session restore put back the display planes the
+    // snapshot captured with its pixels. Paint those: rebuilding them from a
+    // full-resolution plane is a main-thread resample of the whole frame, and
+    // from a stale one would show older pixels than the preview did.
+    function applyRestoredImageToState(processed, { previewOnly, fullResolutionPending }) {
+      if (!processed) return;
+      releaseCorePreviewRetained(processed);
+      state.processedImageData = processed;
+      state.processedImageDataIsPreview = previewOnly;
+      state.fullResolutionPending = fullResolutionPending;
+      state.displayImageData = null;
+      if (!state.previewSourceImageData) state.previewSourceImageData = buildPreviewSourceImageData(processed);
+      if (!state.histogramSourceImageData) state.histogramSourceImageData = histogramSourceFor(processed);
+      if (!state.webglSourceImageData) state.webglSourceImageData = state.previewSourceImageData;
+      if (initWebGLRenderer()) {
+        webglState.sourceDirty = true;
+        webglState.curveDirty = true;
+      }
+      if (state.cropping) return;
+      if (state.sprocketPreviewEnabled) {
+        const frameMetrics = getSprocketFrameMetrics(processed.width, processed.height);
+        setMainCanvasDimensions(frameMetrics.outputWidth, frameMetrics.outputHeight);
+      } else {
+        setMainCanvasDimensions(processed.width, processed.height);
+      }
+    }
+
     // Automatic gray point: estimate WB gains from the freshly converted
     // positive so most images never need a manual gray-point click. Runs only
     // when a NEW positive is produced (processNegative) — never on preview
@@ -5913,11 +6014,14 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // freeze the UI for seconds. Interactive previews have a separate worker.
     let conversionWorkerBroken = false;
     let conversionWorkerTimeouts = 0;
-    async function convertFrameOffMainThread({ imageData, settings, options }) {
+    async function convertFrameOffMainThread({ imageData, settings, options, signal = null, client = null }) {
       if (!conversionWorkerBroken && usesSilverCoreConversion(state)) {
         try {
-          return await convertFrameInWorker({ imageData, settings, options });
+          return await (client || convertFrameInWorker)({ imageData, settings, options, signal });
         } catch (err) {
+          // A superseded request was abandoned on purpose: the worker is fine,
+          // and nobody wants its pixels on the main thread either.
+          if (err?.code === WORKER_ABORTED) throw err;
           // Only retire the worker for infrastructure failures. A conversion
           // that threw inside it will throw on the main thread too, and
           // disabling the worker for that costs every later full-resolution
@@ -5943,7 +6047,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return convertFrameWithRouter({ imageData, settings, options });
     }
 
-    async function convertFromCurrentSource(settings = state, { preview = false, interactive = false, includeAnalysisPreview = true, retain16 = false } = {}) {
+    async function convertFromCurrentSource(settings = state, { preview = false, interactive = false, includeAnalysisPreview = true, retain16 = false, signal = null, client = null } = {}) {
       const fullSource = state.conversionSourceImageData || state.croppedImageData || state.originalImageData;
       if (!fullSource) return null;
       if (!state.conversionSourceImageData) noteGeometryPixelRead('convertFromCurrentSource');
@@ -5969,7 +6073,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           return await convertFrameWithRouter(request);
         }
       }
-      return await convertFrameOffMainThread(request);
+      return await convertFrameOffMainThread({ ...request, signal, client });
     }
 
     // The armed dispatch gate (see coreReprocessDispatcher.js): truthy while a
@@ -6134,12 +6238,63 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       state.dustRemoval.particleCount = 0;
     }
 
+    // The AI brush paints on the full-resolution plane, whichever tab is open.
+    function isAiBrushEnabled() {
+      return Boolean(document.getElementById('aiBrushEnabled')?.checked);
+    }
+
+    // The one rule for full-resolution conversions (#237). A caller's `full`
+    // is a wish: above 16 MP it becomes a display-preview conversion unless it
+    // is `exact` (startFullResolutionRender: export, the dust-detection and
+    // AI-brush barriers, idle and repair passes). Repairs settle on idle,
+    // except on a frame without a separate display preview.
+    function routeCoreRequest(request) {
+      return routeCoreConversion({
+        wantsFull: Boolean(request?.full), exact: request?.exact === true,
+        large: isLargeImage(state.conversionSourceImageData),
+        repairs: hasFrameRepairs(), separatePreview: hasSeparateConversionPreview()
+      });
+    }
+
+    // An exact render above 16 MP runs on a worker of its own and is abandoned
+    // as soon as the settings or the photo move on, instead of converting the
+    // whole frame for a result that is thrown away.
+    let fullResolutionConversionAbort = null;
+    function beginFullResolutionConversion(options, token, generation) {
+      if (options.exact !== true || !isLargeImage(state.conversionSourceImageData)) return null;
+      if (typeof AbortController !== 'function') return null;
+      const entry = { controller: new AbortController(), token, generation };
+      fullResolutionConversionAbort = entry;
+      return entry;
+    }
+
+    function endFullResolutionConversion(entry) {
+      if (entry && fullResolutionConversionAbort === entry) fullResolutionConversionAbort = null;
+    }
+
+    function abortSupersededFullResolutionConversion() {
+      const entry = fullResolutionConversionAbort;
+      if (!entry || (entry.token === coreReprocessToken && entry.generation === coreReprocessGeneration)) return;
+      fullResolutionConversionAbort = null;
+      entry.controller.abort();
+    }
+
+    // The AI brush paints on the full-resolution plane. A frame left without
+    // one (Undo back past the moment the brush was switched on) fetches it
+    // again, as switching the brush on does.
+    function ensureAiBrushPlane() {
+      if (!isAiBrushEnabled() || !state.processedImageDataIsPreview) return;
+      void ensureFullResolutionReadyForExport({ reason: 'ai-brush' }).catch((err) => {
+        console.warn('Full-resolution render for the AI brush failed:', err?.message || err);
+      });
+    }
+
     // Resolves true only when it actually rendered. Callers use that to decide
     // whether the display is up to date: a blocked or superseded call queues
     // itself and returns at once, and treating that as a completed render is
     // how a stale frame reached the exporter.
     async function rerenderWithCoreControls(options = {}) {
-      const full = Boolean(options.full) || hasFrameRepairs();
+      const { full, downgraded } = routeCoreRequest(options);
       const token = Number.isInteger(options.token) ? options.token : coreReprocessToken;
       const generation = options.generation ?? coreReprocessGeneration;
       const sourceRef = options.sourceRef || state.conversionSourceImageData;
@@ -6160,7 +6315,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           && (!_coreReprocessPending || _coreReprocessPending.displayResize === true);
         const displayResizeFrom = displayResize
           ? _coreReprocessPending?.displayResizeFrom || options.displayResizeFrom || null : null;
-        _coreReprocessPending = { ...options, full, token, sourceRef, generation, displayResize, displayResizeFrom };
+        // The caller's full and exact, not the routed value: the queued
+        // request is routed again when it runs.
+        _coreReprocessPending = { ...options, full: Boolean(options.full), exact: options.exact === true,
+          token, sourceRef, generation, displayResize, displayResizeFrom };
         return false;
       }
       const previewFlight = full ? null : {};
@@ -6170,7 +6328,21 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       try {
         if (full) {
           // Full-resolution path
-          const processed = await convertFromCurrentSource(state, { preview: false, includeAnalysisPreview: false });
+          if (options.exact === true && token !== coreReprocessToken) return false;
+          const abort = beginFullResolutionConversion(options, token, generation);
+          let processed;
+          try {
+            processed = await convertFromCurrentSource(state, {
+              preview: false, includeAnalysisPreview: false,
+              signal: abort?.controller.signal || null, client: abort ? convertFullResolutionFrameInWorker : null
+            });
+          } catch (err) {
+            // Superseded while converting: the same outcome as a stale token.
+            if (err?.code === WORKER_ABORTED) return false;
+            throw err;
+          } finally {
+            endFullResolutionConversion(abort);
+          }
           if (!processed) return false;
           if (generation !== coreReprocessGeneration) return false;
           if (token !== null && token !== coreReprocessToken) return false;
@@ -6204,24 +6376,47 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           // 古い設定のフレームを「書き出し可能な原寸」としては扱わない。
           const superseded = token !== coreReprocessToken;
           const nextPreview = coreReprocessScheduled || _coreReprocessPending;
-          if (superseded && (!nextPreview || nextPreview.full || nextPreview.token !== coreReprocessToken)) return false;
+          if (superseded && (!nextPreview || routeCoreRequest(nextPreview).full || nextPreview.token !== coreReprocessToken)) return false;
           // Start the worker on the next frame before this one is applied and
           // drawn, so it does not sit idle through the result handling.
           postPendingPreviewEarly(previewFlight);
 
           const replacedSource = displayResizeReplaces(options);
+          const repairs = hasFrameRepairs();
           if (hasSmallPreview || superseded) {
-            // Preview source is smaller — update preview display path only
-            applyPreviewProcessedImageToState(previewProcessed);
+            // Preview source is smaller — update preview display path only.
+            // A downgraded request (>16 MP) drops a full-resolution plane it
+            // would leave stale, unless a brush paints on that plane.
+            if (downgraded && !keepsFullPlaneOnDowngrade({ repairs, aiBrush: isAiBrushEnabled() })) {
+              applyProcessedImageToState(previewProcessed, { previewOnly: true });
+            } else {
+              applyPreviewProcessedImageToState(previewProcessed);
+            }
             carryStudioThumbnailSource(replacedSource);
+            // Export owes this frame an exact render.
+            if (downgraded) state.fullResolutionPending = true;
             updatePreview();
-            scheduleFullUpdate();
+            if (repairs) {
+              // The exact conversion, detection and inpainting run once, after
+              // input has been idle; every tick cancels the timer again.
+              scheduleFullResolutionRender('repair-idle', FULL_RESOLUTION_IDLE_DELAY_MS);
+            } else if (downgraded) {
+              ensureAiBrushPlane();
+            } else {
+              scheduleFullUpdate();
+            }
           } else {
             // No downscaled preview (image already small) — treat as full
             applyProcessedImageToState(previewProcessed);
             carryStudioThumbnailSource(replacedSource);
             updatePreview();
-            // No need to schedule full update; we already processed at full resolution
+            // No need to schedule full update; we already processed at full
+            // resolution. The zoom made the display preview the source itself:
+            // its repairs start over from these pixels.
+            if (repairs) {
+              resetDustForCleanSource(previewProcessed);
+              scheduleDustDetection();
+            }
           }
           if (previewProcessed.__retained16) retainCorePreviewPlane(previewProcessed);
           return true;
@@ -6260,7 +6455,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // for finally.
     function postPendingPreviewEarly(flight) {
       const pending = _coreReprocessPending;
-      if (!pending || pending.full || !flight || _coreReprocessPreviewInFlight !== flight) return false;
+      if (!pending || !flight || _coreReprocessPreviewInFlight !== flight || routeCoreRequest(pending).full) return false;
       if (pending.generation !== coreReprocessGeneration) return false;
       const source = state.conversionSourceImageData;
       if (!source || (pending.sourceRef && pending.sourceRef !== source)) return false;
@@ -6412,7 +6607,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
       let rendered = false;
       const promise = waitForNextFrame()
-        .then(() => rerenderWithCoreControls({ full: true, sourceRef, token, generation }))
+        .then(() => rerenderWithCoreControls({ full: true, exact: true, sourceRef, token, generation }))
         .then((didRender) => {
           rendered = didRender === true;
           trace.end({
@@ -6430,8 +6625,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           state.fullResolutionPending = rendered ? Boolean(state.processedImageDataIsPreview) : true;
           // Settings changed while this render was in flight, so its result
           // was discarded. Schedule another pass so the display converges on
-          // the latest settings instead of staying at preview quality.
-          if (token !== coreReprocessToken && state.conversionSourceImageData === sourceRef) {
+          // the latest settings instead of staying at preview quality. A pass
+          // the newer input already armed (repairs wait for idle) stands.
+          if (token !== coreReprocessToken && state.conversionSourceImageData === sourceRef
+            && !fullResolutionRenderTimer) {
             scheduleFullResolutionRender('stale-retry', FULL_RESOLUTION_INTERACTIVE_DELAY_MS);
           }
         });
@@ -6482,7 +6679,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       }
     }
 
-    async function ensureFullResolutionReadyForExport() {
+    async function ensureFullResolutionReadyForExport({ reason = 'export' } = {}) {
       // Export reads the planes of the current geometry.
       await whenGeometrySettled();
       // Crop/analysis confirmation also runs processNegative directly. Its
@@ -6494,17 +6691,20 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // because startFullResolutionRender hands back the queued render whose
       // promise resolves before the new pixels exist.
       await flushScheduledCoreReprocess();
-      if (!state.processedImageDataIsPreview && !state.fullResolutionPending) return;
+      // Besides the flags, a plane that is not the size of the conversion
+      // source counts as stale: flagged full resolution by mistake, it would
+      // be exported at display size.
+      if (!fullResolutionIsStale(state)) return;
       if (fullResolutionRenderTimer) {
         clearTimeout(fullResolutionRenderTimer);
         fullResolutionRenderTimer = null;
       }
       for (let attempt = 0; attempt < 3; attempt++) {
-        const pending = state.fullResolutionPromise || startFullResolutionRender('export');
+        const pending = state.fullResolutionPromise || startFullResolutionRender(reason);
         if (!pending) break;
         await pending;
         await flushScheduledCoreReprocess();
-        if (!state.processedImageDataIsPreview && !state.fullResolutionPending) return;
+        if (!fullResolutionIsStale(state)) return;
       }
       if (state.processedImageDataIsPreview) {
         throw new Error('Full-resolution processing is not ready yet. Please wait for the background render to finish.');
@@ -6559,11 +6759,27 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (!usesSilverCoreConversion(state)) return;
       if (!state.conversionSourceImageData || state.currentStep < 3) return;
 
-      const token = ++coreReprocessToken;
-      cancelScheduledFullResolutionRender();
+      // A display-only request (a zoom, window or DPR change on a preview-only
+      // frame) converts unchanged settings at another size: it supersedes no
+      // work and marks nothing stale. A request already held or queued
+      // converts at the new size anyway when it starts.
+      const displayOnly = options.displayOnly === true;
+      if (displayOnly && (coreReprocessScheduled || _coreReprocessPending)) return;
+      let token = coreReprocessToken;
+      if (!displayOnly) {
+        token = ++coreReprocessToken;
+        abortSupersededFullResolutionConversion();
+        cancelScheduledFullResolutionRender();
+        // Detection queued before this input would enter its barrier and start
+        // a full-resolution render mid-drag; the idle repair pass queues it again.
+        if (dustDetectionTimer) {
+          clearTimeout(dustDetectionTimer);
+          dustDetectionTimer = null;
+        }
+      }
       // A display-preview resize converts unchanged settings at another size
       // (carryStudioThumbnailSource), but only while no other request merges in.
-      const displayResize = Boolean(options.displayResize)
+      const displayResize = Boolean(options.displayResize || displayOnly)
         && (!coreReprocessScheduled || coreReprocessScheduled.displayResize === true);
       const displayResizeFrom = displayResize
         ? coreReprocessScheduled?.displayResizeFrom || displayResizeOrigin() : null;
@@ -6571,7 +6787,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // while it is still full resolution. Mark it stale here rather than
       // waiting for the debounce to fire, so an export issued in between waits
       // for the new conversion instead of writing the previous one.
-      if (hasSeparateConversionPreview()) state.fullResolutionPending = true;
+      if (!displayOnly && hasSeparateConversionPreview()) state.fullResolutionPending = true;
       const wasFull = coreReprocessScheduled?.full;
       coreReprocessScheduled = { full, token, sourceRef: state.conversionSourceImageData, displayResize, displayResizeFrom };
       if (full) {
@@ -6965,7 +7181,25 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       }
     }
 
-    async function runDustDetection() {
+    // One detection at a time, handed out as one promise: the export barrier
+    // (ensureRepairsReadyForExport) awaits the run in flight instead of
+    // starting another.
+    let dustDetectionRun = null;
+    // The clean source each mask was built on, to tell a stale mask.
+    const dustMaskSources = new WeakMap();
+
+    function runDustDetection() {
+      if (state.dustRemoval.processing && dustDetectionRun) {
+        scheduleDustDetection();
+        return dustDetectionRun;
+      }
+      const run = runDustDetectionPass();
+      dustDetectionRun = run;
+      void run.finally(() => { if (dustDetectionRun === run) dustDetectionRun = null; });
+      return run;
+    }
+
+    async function runDustDetectionPass() {
       if (!hasFrameRepairs() || !state.processedImageData) return;
       if (state.dustRemoval.processing) {
         scheduleDustDetection();
@@ -6986,8 +7220,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       updateDustStatusUI(getLocalizedText('dustStatusProcessing', 'Processing...'));
 
       try {
+        // Input that arrived after this run was queued supersedes it: the idle
+        // repair pass queues detection again. Checking before the barrier keeps
+        // it from starting a full-resolution render in the middle of a drag.
+        await flushScheduledCoreReprocess();
+        if (!isCurrent()) return;
         // プレビューに作ったマスクを原寸画像へ適用しない。
-        await ensureFullResolutionReadyForExport();
+        await ensureFullResolutionReadyForExport({ reason: 'dust-detection' });
         // 原寸レンダリングが新しい検出を予約した場合はそちらへ引き継ぐ。
         if (!isCurrent()) return;
         const source = getDustSource();
@@ -7010,6 +7249,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         if (!isCurrent() || source !== getDustSource()) return;
         state.dustRemoval.mask = mask;
         state.dustRemoval.maskTag = maskTag;
+        dustMaskSources.set(mask, source);
         state.dustRemoval.particleCount = particleCount;
         state.dustRemoval._state = _state;
         noteDustReplaced();
@@ -7373,7 +7613,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (canPaintAiBrush()) return;
       if (!state.dustRemoval.enabled || !state.dustRemoval.showMask) return;
       if (!state.dustRemoval.mask || !state.processedImageData) return;
-      if (state.dustRemoval.processing || state.processedImageDataIsPreview) return;
+      // A pending repair pass is about to replace this mask (#237).
+      if (state.dustRemoval.processing || state.processedImageDataIsPreview || state.fullResolutionPending) return;
       if (state.samplingMode || state.cropping) return;
 
       e.preventDefault();
@@ -7615,7 +7856,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         console.error('Dust brush failed:', err);
         updateDustStatusUI('Error: ' + (err.message || err));
       } finally {
-        pendingBrushRepairs -= 1;
+        noteBrushRepairSettled();
         releaseTurn();
       }
     }
@@ -8118,6 +8359,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         // Full pixels can intentionally lag a newer slider preview. Never
         // restore those older pixels under the newer saved settings.
         entry.snapshot.refs.processedImageData = state.previewSourceImageData;
+        entry.snapshot.frame = { previewOnly: true, fullResolutionPending: true };
         entry.previewOnly = true;
       }
       let stored = !geometryDiagnostics.coldSessions && photoSessions.put(item, entry);
@@ -8375,6 +8617,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       cancelScheduledFullResolutionRender();
       coreReprocessGeneration += 1;
       coreReprocessToken += 1;
+      abortSupersededFullResolutionConversion();
       _coreReprocessPending = null;
       processNegativeInFlight = null;
       state.fullResolutionPromise = null;
@@ -9808,8 +10051,15 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     setupSelect('coreCurvePrecision', 'coreCurvePrecision', {
       onChange: () => scheduleCoreReprocess({ full: true })
     });
+    // The engine ignores useWebGL: the toggle only switches the display path,
+    // so it converts nothing at any size. With current pixels, a full-quality
+    // CPU view follows as after a Step-3 commit.
     setupCheckbox('coreUseWebGL', 'coreUseWebGL', {
-      onChange: () => scheduleCoreReprocess({ full: true })
+      onChange: () => {
+        updateCanvasVisibility();
+        updatePreview();
+        if (!fullResolutionIsStale(state)) scheduleFullUpdate();
+      }
     });
 
     // A manual RGB-gain drag hands WB ownership to the user: the automatic
@@ -12167,6 +12417,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // identity alone cannot distinguish a discarded render from this reset.
       coreReprocessGeneration += 1;
       coreReprocessToken += 1;
+      abortSupersededFullResolutionConversion();
       cancelPendingTimers();
       _coreReprocessPending = null;
       processNegativeInFlight = null;
@@ -12560,10 +12811,44 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return markOwnedPlanes(composeSprocketFrame(imageData, options));
     }
 
+    // Repairs settle once on idle, after the exact render (#237). An export
+    // fired inside that window waits for them, instead of writing the frame
+    // uncleaned or repaired at the previous tone.
+    async function ensureRepairsReadyForExport() {
+      for (let attempt = 0; attempt < 4; attempt++) {
+        const needed = repairsNeedSettling({
+          repairs: hasFrameRepairs() && Boolean(state.processedImageData) && !state.processedImageDataIsPreview,
+          mask: state.dustRemoval.mask, maskStale: dustMaskIsStale(),
+          detectionScheduled: Boolean(dustDetectionTimer), processing: Boolean(state.dustRemoval.processing),
+          pendingBrushRepairs
+        });
+        if (!needed) return;
+        if (pendingBrushRepairs > 0) {
+          await whenBrushRepairsSettled();
+          continue;
+        }
+        if (state.dustRemoval.processing && dustDetectionRun) {
+          await dustDetectionRun;
+          continue;
+        }
+        if (dustDetectionTimer) {
+          clearTimeout(dustDetectionTimer);
+          dustDetectionTimer = null;
+        }
+        await runDustDetection();
+      }
+    }
+
+    function dustMaskIsStale() {
+      const mask = state.dustRemoval.mask;
+      return Boolean(mask && dustMaskSources.has(mask) && dustMaskSources.get(mask) !== getDustSource());
+    }
+
     // `planeOnly` (#250): a 16-bit TIFF/PNG without the sprocket frame reads
     // only the adjusted plane, so no 8-bit mirror is built for it.
     async function getCurrentExportImageData({ bitDepth = 8, bridge = null, planeOnly = false } = {}) {
       await ensureFullResolutionReadyForExport();
+      await ensureRepairsReadyForExport();
       // A 16-bit export re-runs the adjustment stage on the engine's 16-bit
       // plane instead of reusing the 8-bit display buffer.
       if (bitDepth === 16 && state.currentStep >= 3 && state.processedImageData?.__image16) {
@@ -12589,6 +12874,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // The prepare step of a single export: full resolution plus AI/dust repair.
     async function prepareCurrentImageForExport() {
       await ensureFullResolutionReadyForExport();
+      await ensureRepairsReadyForExport();
       // A quick export after a stroke must use MI-GAN, not its temporary preview.
       // A committed repair stamped with the current recipe is that result
       // already; only a TELEA stand-in or an outdated result is repaired again.
@@ -17416,6 +17702,21 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return releaseAiRepairSession();
     }
 
+    let brushRepairWaiters = [];
+
+    function noteBrushRepairSettled() {
+      pendingBrushRepairs = Math.max(0, pendingBrushRepairs - 1);
+      if (pendingBrushRepairs) return;
+      const waiters = brushRepairWaiters;
+      brushRepairWaiters = [];
+      for (const resolve of waiters) resolve();
+    }
+
+    function whenBrushRepairsSettled() {
+      if (!pendingBrushRepairs) return Promise.resolve();
+      return new Promise(resolve => brushRepairWaiters.push(resolve));
+    }
+
     async function inpaintManualBrush(source, settings = state, base = state.loadedBaseImageData || state.originalImageData,
       lensMapping = settings === state ? state.conversionSourceImageData?.__lensMapping : null, isCurrent = () => true,
       { memoInsert = true } = {}) {
@@ -17563,7 +17864,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         updatePreview();
         syncDustWorkerPin();
         updateAiRepairUI();
-        await ensureFullResolutionReadyForExport();
+        await ensureFullResolutionReadyForExport({ reason: 'ai-brush' });
         if (aiRepair.status !== 'ready') await loadAiRepairModel(...aiRepairLoadArgs());
       } else {
         if (aiBrushDrawing) finishAiBrush({ pointerId: aiBrushDrawing.pointerId }, true);
@@ -17868,7 +18169,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         }
         throw error;
       } finally {
-        pendingBrushRepairs -= 1;
+        noteBrushRepairSettled();
       }
     }
 

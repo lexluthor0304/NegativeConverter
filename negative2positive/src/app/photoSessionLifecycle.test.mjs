@@ -57,7 +57,8 @@ function fixture() {
     aiRepair: { revision: 2, status: 'ready', provider: 'wasm', run: noop, release: noop },
     processNegativeInFlight: null, coreReprocessTimer: null, dustDetectionTimer: null,
     corePreviewRetained: null, corePreviewCommit: null,
-    pendingBrushRepairs: 0, dustDrawing: false, undoStack: [], redoStack: [],
+    pendingBrushRepairs: 0, brushRepairWaiters: [], dustMaskSources: new WeakMap(), fullResolutionConversionAbort: null,
+    dustDrawing: false, undoStack: [], redoStack: [],
     coreReprocessGeneration: 3, coreReprocessToken: 4, dustDetectionRevision: 5,
     loadGeneration: 6, _coreReprocessPending: null, importDetectionAbort: null,
     studioThumbnailUpdateFrame: 0, cancelAnimationFrame: noop,
@@ -99,7 +100,8 @@ function fixture() {
     'cancelStudioThumbnailUpdate', 'isCurrentLoad', 'deferFileListRefresh', 'updateFileListUI',
     'refreshThumbnailStates', 'nextDustMaskTag', 'needsDustPrivateBuffer', 'installDustPrivateBuffer',
     'ensureDustPrivateBuffer', 'prepareDustPrivateBuffer', 'strokeDustOffMainThread',
-    'commitDustStroke', 'onDustBrushEnd'].map(functionSource).join('\n'), context);
+    'commitDustStroke', 'onDustBrushEnd', 'noteBrushRepairSettled', 'whenBrushRepairsSettled',
+    'abortSupersededFullResolutionConversion'].map(functionSource).join('\n'), context);
   const paint = () => { for (const task of postPaint.splice(0)) task(); };
   return { context, state, item, photoSessions, photoPreviews, base, converted, mask, element, postPaint, paint };
 }
@@ -503,7 +505,8 @@ for (const warm of [true, false]) {
   });
   f.state.coreExposure = 20;
   f.state.cyan = 10;
-  vm.runInContext(['performUndo', 'performRedo', 'consoleChannelsEnabled', 'consoleColorKeysEnabled',
+  Object.assign(c, { isLargeImage: () => false, isAiBrushEnabled: () => false });
+  vm.runInContext(['performUndo', 'performRedo', 'trimHistorySnapshot', 'consoleChannelsEnabled', 'consoleColorKeysEnabled',
     'consoleChannelSteps', 'nudgeConsoleChannel', 'resetConsoleChannels', 'canActivateBeforeAfter']
     .map(functionSource).join('\n'), c);
   c.document.body.dataset.photoSwitching = 'true';

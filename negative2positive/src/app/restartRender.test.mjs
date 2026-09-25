@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { createCoreReprocessGates } from './coreReprocessDispatcher.js';
+import { routeCoreConversion, keepsFullPlaneOnDowngrade } from './fullResolutionRouting.js';
 
 // Exercise the actual browser lifecycle functions without loading a DOM,
 // OpenCV, or ONNX. Only their UI and expensive conversion dependencies are
@@ -15,7 +16,7 @@ function functionSource(name) {
   return source.slice(match.index, end + '\n    }'.length);
 }
 
-function fixture({ repairs = true, locked = false } = {}) {
+function fixture({ repairs = true, locked = false, large = false } = {}) {
   const base = { width: 2, height: 2, name: 'same original source object' };
   const oldPixels = { width: 2, height: 2, exposure: 24 };
   const newPixels = { width: 2, height: 2, exposure: 0 };
@@ -61,6 +62,11 @@ function fixture({ repairs = true, locked = false } = {}) {
     resetExpiredStrengthsInState: noop, initCurves: noop, renderCurve: noop,
     usesSilverCoreConversion: () => true,
     hasFrameRepairs: () => state.dustRemoval.enabled || state.repairStrokes.length > 0,
+    // #237 routing: a 2x2 fixture stands in for a >16 MP frame when `large`.
+    routeCoreConversion, keepsFullPlaneOnDowngrade, isLargeImage: () => large,
+    hasSeparateConversionPreview: () => false, isAiBrushEnabled: () => false,
+    fullResolutionConversionAbort: null, WORKER_ABORTED: 'WORKER_ABORTED',
+    FULL_RESOLUTION_IDLE_DELAY_MS: 2500, scheduleFullResolutionRender: noop, ensureAiBrushPlane: noop,
     getDisplayPreviewSize: () => ({ width: 2, height: 2 }),
     previewTier: 'normal', previewTierKept: null, previewTierPrebuilt: null, reducedDisplayImages: new WeakSet(),
     resizeDisplayPreview: (image, size) => ({ ...size, data: image.data }),
@@ -82,6 +88,8 @@ function fixture({ repairs = true, locked = false } = {}) {
     'coreReprocessBusy', 'whenCoreReprocessIdle', 'noteCoreReprocessSettled',
     'runCoreReprocess', 'flushScheduledCoreReprocess',
     'resetAllAdjustments', 'rerenderWithCoreControls', 'postPendingPreviewEarly', 'restartPhotoProcessing',
+    'routeCoreRequest', 'beginFullResolutionConversion', 'endFullResolutionConversion',
+    'abortSupersededFullResolutionConversion',
     'retainCorePreviewPlane', 'armCorePreviewCommitTimer', 'releaseCorePreviewRetained', 'requestCorePreviewCommit',
     'maybeCommitCorePreviewPlane', 'settleCorePreviewWaiters', 'ensureConversionPreviewForDisplay',
   ].map(functionSource).join('\n'), context);

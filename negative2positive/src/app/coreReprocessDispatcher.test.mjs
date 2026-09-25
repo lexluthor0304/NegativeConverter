@@ -5,6 +5,7 @@ import {
   createCoreReprocessGates, previewDispatchAction,
   CORE_FULL_REPROCESS_DELAY_MS, CORE_FRAME_GATE_FALLBACK_MS
 } from './coreReprocessDispatcher.js';
+import { routeCoreConversion, keepsFullPlaneOnDowngrade } from './fullResolutionRouting.js';
 
 // Drives the real scheduler, reprocess and slider functions from main.js (as
 // restartRender.test.mjs does) against a fake clock: timeouts and animation
@@ -116,7 +117,7 @@ assert.equal(previewDispatchAction({ laneBusy: false, gateArmed: false, postedTh
 
 // ---- The real scheduler ----
 
-function schedulerFixture({ repairs = false } = {}) {
+function schedulerFixture({ repairs = false, large = false } = {}) {
   const clock = fakeClock();
   const base = { width: 400, height: 300, name: 'source' };
   const state = {
@@ -160,6 +161,11 @@ function schedulerFixture({ repairs = false } = {}) {
     coreSliderCommitRecord: null, fullResolutionRenderTimer: null,
     usesSilverCoreConversion: () => true,
     hasFrameRepairs: () => state.dustRemoval.enabled,
+    // #237 routing: the 400x300 source stands in for a >16 MP frame when `large`.
+    routeCoreConversion, keepsFullPlaneOnDowngrade, isLargeImage: () => large, isAiBrushEnabled: () => false,
+    fullResolutionConversionAbort: null, dustDetectionTimer: null, WORKER_ABORTED: 'WORKER_ABORTED',
+    FULL_RESOLUTION_IDLE_DELAY_MS: 2500, ensureAiBrushPlane: () => {},
+    scheduleFullResolutionRender: reason => log.push(`idle:${reason}`),
     getDisplayPreviewSize: () => ({ ...displayTarget }),
     resizeDisplayPreview: (image, size) => ({ ...size, name: 'resized' }),
     // #263: outside a reduced preview-tier session the preview is sized as before.
@@ -190,6 +196,8 @@ function schedulerFixture({ repairs = false } = {}) {
     'maybeCommitCorePreviewPlane', 'settleCorePreviewWaiters', 'settleCorePreviewPlane', 'histogramSourceFor',
     'currentConvertedPreviewSource', 'displayResizeOrigin', 'displayResizeReplaces',
     'ensureConversionPreviewForDisplay',
+    'routeCoreRequest', 'beginFullResolutionConversion', 'endFullResolutionConversion',
+    'abortSupersededFullResolutionConversion',
   ].map(functionSource).join('\n'), context);
   const request = (exposure, options = { full: false }) => {
     if (exposure !== undefined) state.coreExposure = exposure;
@@ -780,21 +788,44 @@ function sliderFixture(options) {
 }
 
 {
-  // With repairs on every reprocess is full resolution. A release that lands
-  // while the final value converts neither restarts it nor discards it, so
-  // dust detection follows that one conversion.
+  // #237: with repairs on, a frame with a separate display preview converts
+  // the preview on every tick; the exact conversion, detection and inpainting
+  // wait for the idle pass. A release that lands while the final value
+  // converts adds no conversion.
   const f = sliderFixture({ repairs: true });
   f.clock.nextFrame();
   f.slider.value = '25';
   f.fire(f.slider, 'input');
   await Promise.resolve();
   assert.equal(f.conversions.length, 1);
+  assert.equal(f.conversions[0].full, false, 'the tick converts the display preview');
+  f.fire(f.slider, 'change');
+  await Promise.resolve();
+  await settle();
+  assert.equal(f.conversions.length, 1, 'no second conversion of the same value');
+  f.conversions[0].resolve(f.result());
+  await settle();
+  assert.deepEqual(f.log.filter(entry => entry === 'dust'), [], 'no dust detection while input may continue');
+  assert.deepEqual(f.log.filter(entry => entry.startsWith('idle:')), ['idle:repair-idle'], 'the idle repair pass is armed');
+  assert.equal(f.context.coreReprocessBusy(), false);
+}
+
+{
+  // Without a separate display preview the frame is display-sized: repairs
+  // still convert it in full, and exactly one dust detection follows.
+  const f = sliderFixture({ repairs: true });
+  f.state.conversionPreviewImageData = f.state.conversionSourceImageData;
+  f.setTarget({ width: 400, height: 300 });
+  f.clock.nextFrame();
+  f.slider.value = '25';
+  f.fire(f.slider, 'input');
+  await Promise.resolve();
   assert.equal(f.conversions[0].full, true);
   f.fire(f.slider, 'change');
   await Promise.resolve();
   await settle();
-  assert.equal(f.conversions.length, 1, 'no second full-resolution conversion of the same value');
-  f.conversions[0].resolve(f.result());
+  assert.equal(f.conversions.length, 1);
+  f.conversions[0].resolve({ width: 400, height: 300 });
   await settle();
   assert.deepEqual(f.log.filter(entry => entry === 'dust'), ['dust'], 'exactly one dust detection follows');
   assert.equal(f.context.coreReprocessBusy(), false);

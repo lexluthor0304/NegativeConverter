@@ -41,7 +41,11 @@ function fixture({ enabled = false, mask = null } = {}) {
     dustMaskInfo: () => null, captureDustPass, dustPassMatches, restoreDustPass,
     assertRepairCurrent(isCurrent) { if (!isCurrent()) throw new DOMException('Repair superseded', 'AbortError'); },
     console: { error: (...args) => assert.fail(`Unexpected background error: ${args.join(' ')}`) },
-    ensureFullResolutionReadyForExport: async () => {},
+    ensureFullResolutionReadyForExport: async () => {}, flushScheduledCoreReprocess: async () => {},
+    // The export's repair barrier has its own test (fullResolutionRouting.main.test.mjs):
+    // here export and detection deliberately overlap.
+    ensureRepairsReadyForExport: async () => {},
+    dustDetectionRun: null, dustMaskSources: new WeakMap(),
     aiRepairReady: () => true,
     inpaintForCommit: async (input, passMask) => {
       // Brushes patch the mask in place: the pass must read its own copy.
@@ -73,7 +77,7 @@ function fixture({ enabled = false, mask = null } = {}) {
   });
   vm.runInContext(['getDustSource', 'nextDustMaskTag', 'noteDustReplaced', 'hasFrameRepairs', 'isCurrentLoad',
     'currentRepairRecipe', 'stampRepairResult', 'commitDustPass',
-    'applyDustResultToState', 'runDustDetection', 'scheduleDustDetection',
+    'applyDustResultToState', 'runDustDetection', 'runDustDetectionPass', 'scheduleDustDetection',
     'prepareCurrentImageForExport', 'renderCurrentImageDataForExport'].map(functionSource).join('\n'), c);
   const actualRunDustDetection = c.runDustDetection;
   c.runDustDetection = () => {
