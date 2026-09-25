@@ -39,6 +39,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     import { detectFrameWithFallback } from './autoFrameExecution.js';
     import { importConversionKey } from './importDetection.js';
     import { createAnalysisSampleStore } from './analysisSampleStore.js';
+    import { buildReducedGeometrySample, reducedTileGeometry, renderReducedGeometry, tileGeometryKey } from './reducedGeometry.js';
+    import { createThumbnailSourceCache, TILE_ANALYSIS_REFERENCE_PIXELS } from './thumbnailSources.js';
+    import { createRollSampleCache } from './rollSampleCache.js';
     import { mountStudioWorkspace } from './studioWorkspace.js';
     import { AUTO_FRAME_FORMAT_RATIOS, AUTO_FRAME_DEFAULT_120_FORMATS, canAutoApplyImportFrame } from './autoFrameFormats.js';
     import { DEFAULT_CROP_RATIO_CHOICE, findCropRatioPreset, parseCropRatioChoice, serializeCropRatioChoice, fitRectToRatio, resizeRectWithRatio, drawRectWithRatio, preferredCropOrientation, flipOrientation } from './cropRatio.js';
@@ -68,7 +71,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     import { MultiShotError, describeMultiShotError } from './multiShotErrors.js';
     import { sanitizeRollMetadata, sanitizeFrameMetadata, buildExportMetadata, frameNumberFor } from './analogMetadata.js';
     import { attachMetadataToBlob } from './exportMetadata.js';
-    import { buildRollProject, serializeRollProject, parseRollProject, matchProjectFiles, hashFileForProject, projectFileName, isProjectFileName, saveProjectRecovery, loadProjectRecovery, clearProjectRecovery } from './rollProject.js';
+    import { buildRollProject, serializeRollProject, parseRollProject, matchProjectFiles, hashFileForProject, projectFileName, isProjectFileName, saveProjectRecovery, loadProjectRecovery, clearProjectRecovery, projectThumbnailContext, restorableProjectThumbnail } from './rollProject.js';
     import { encodeRecipe, decodeRecipe, recipeDiff, describeRecipeChange, RECIPE_KEYS } from './recipes.js';
     import qrcode from 'qrcode-generator';
     import { layoutContactSheet, pagesFor, renderContactSheetPage, contactSheetHeader, normalizeLayoutId, normalizePageId } from './contactSheet.js';
@@ -127,7 +130,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     import { renderFileList } from './fileListView.js';
     import { normalizeFileListSort, orderedFileIndices, selectionRangeIndices } from './fileListOrder.js';
     import { createSprocketFrameCache } from './sprocketFrameCache.js';
-    import { imagePixelsForBatch, rememberImageDimensions } from './imageDimensions.js';
+    import { imagePixelsForBatch, rememberImageDimensions, knownImageDimensions } from './imageDimensions.js';
     import {
       createDustWorkerClient, detectDustInWorker, inpaintDustInWorker, strokeDustInWorker, followDustMaskInWorker,
       pinDustWorker, unpinDustWorker, disposeDustWorker, dustMaskInfo, forgetDustMaskInfo
@@ -1504,14 +1507,26 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return output;
     }
 
-    async function applyLensCorrectionWithSettings(imageData, settings, options = {}) {
-      const { updateUi = false } = options;
-      const safeSettings = sanitizeSettings(settings, {
+    // The lens block a frame converts with: its own, or the global one when it
+    // has none (sanitised with `state` as fallback).
+    function resolveLensCorrection(settings) {
+      return sanitizeSettings(settings, {
         fallbackSettings: state,
         includeCurvePoints: false,
         includeCurves: false
-      });
-      const lensCorrection = safeSettings.lensCorrection;
+      }).lensCorrection;
+    }
+
+    // Whether applyLensCorrectionWithSettings corrects this frame: enabled, with
+    // a selected lens. Such frames keep their native-resolution tile path (#247).
+    function lensCorrectionActive(settings) {
+      const lensCorrection = resolveLensCorrection(settings);
+      return Boolean(lensCorrection.enabled && lensCorrection.selectedLens?.handle);
+    }
+
+    async function applyLensCorrectionWithSettings(imageData, settings, options = {}) {
+      const { updateUi = false } = options;
+      const lensCorrection = resolveLensCorrection(settings);
       const selectedLens = lensCorrection.selectedLens;
 
       if (!lensCorrection.enabled) {
@@ -5717,6 +5732,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // (roll-transaction undo) shows up as a different data URL.
     const studioThumbnailInputs = new WeakMap();
     const STUDIO_THUMBNAIL_SETTLE_MS = 250;
+    // Long side of the light-table lane's render before the 144 px tile.
+    const STUDIO_TILE_PREVIEW_MAX = 288;
     let studioThumbnailUpdateTimer = 0;
     let studioThumbnailUpdateFrame = 0;
 
@@ -8633,6 +8650,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // (up to 8 s of work that would have to be redone). Where memory is
       // short, the activation takes its place.
       if (lowMemoryPhotoDevice()) abortBackgroundDecodes({ except: file });
+      // A lane's half-size tile decode of this photo is not adoptable: stop it
+      // rather than decode the file twice at once (#247 1b).
+      if (file) abortHalfSizeTileDecode(file);
       return photoActivation.signal;
     }
     const quietLoadingOverlay = { show: async () => {}, updateProgress() {}, hide() {} };
@@ -8654,6 +8674,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // Desktop session budget only; off where memory is short (until #258
     // owns the budget).
     const photoPrefetch = createPhotoSessionCache({ maxBytes: lowMemoryPhotoDevice() ? 0 : PHOTO_SESSION_BUDGET_BYTES });
+    // Retained tile sources (#247 2d): a recipe change over unchanged geometry
+    // re-renders a light-table tile from these instead of a new decode.
+    const thumbnailSources = createThumbnailSourceCache();
+    // 900 px roll samples of trickled watch-folder frames, kept from the
+    // lane's one decode until a roll import takes them (#247 part 4).
+    const watchRollSamples = createRollSampleCache(64 * 1024 * 1024);
 
     // Every buffer the editor still references (#250): live `state.*` planes,
     // the display buffers, the dust planes, history snapshots and photo
@@ -8733,7 +8759,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         state.dustRemoval.mask, state.dustRemoval.inpaintedImageData, state.dustRemoval.cleanSource,
         undoStack, redoStack
       ], buffers);
-      for (const cache of [photoSessions, photoPreviews, photoPrefetch]) {
+      for (const cache of [photoSessions, photoPreviews, photoPrefetch, thumbnailSources]) {
         for (const buffer of cache.buffers()) buffers.add(buffer);
       }
       let bytes = 0;
@@ -8773,6 +8799,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       photoSessions.clear();
       photoPreviews.clear();
       photoPrefetch.clear();
+      thumbnailSources.clear();
+      watchRollSamples.clear();
       if (!exportWorkerPendingCount()) terminateExportWorker();
       // RAW post-decode workers live only for their decode (#232): none idles.
       if (!hiddenJobUsesAiRepair()) void releaseAiRepairSession();
@@ -13528,6 +13556,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       photoSessions.clear();
       photoPreviews.clear();
       photoPrefetch.clear();
+      thumbnailSources.clear();
+      watchRollSamples.clear();
       state.photoSwitchTarget = null;
       state.photoSwitchPhase = null;
       delete document.body.dataset.photoSwitching;
@@ -14616,7 +14646,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // a RAW decode's worker computes the film statistics alongside the planes.
     // `signal` (#243) aborts the decode (see loadRawFile); `onMetadata`
     // receives a RAW file's lens/camera metadata as loadFile's does.
-    async function loadFileToImageData(file, { filmStats = false, signal = null, onMetadata = null } = {}) {
+    // `halfSize` (#247 1b, light-table tiles of frames with a recipe only): a
+    // half-size 16-bit LibRaw decode without the sensor-defect pass, which
+    // single-photosite defects do not need at tile size and which binned data
+    // makes slower than on the full decode. The image carries `__fullSize`,
+    // the size its recipe refers to, and its own size is never remembered:
+    // batch lane planning reads the remembered size.
+    async function loadFileToImageData(file, { filmStats = false, signal = null, onMetadata = null, halfSize = false } = {}) {
       const fileName = file.name.toLowerCase();
       const aborted = () => signal?.reason?.name === 'AbortError' ? signal.reason : new DOMException('Decode was aborted', 'AbortError');
       let image;
@@ -14627,8 +14663,16 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           sourceBlob: file,
           filmStats: filmStats ? { borderBufferPct: defaultFilmBaseBuffer() } : null,
           signal,
-          ...(onMetadata ? { onMetadata } : {})
+          ...(onMetadata ? { onMetadata } : {}),
+          ...(halfSize ? { halfSize: true, outputBps: 16, suppressSensorDefects: false } : {})
         });
+        if (halfSize) {
+          // A full decode earlier in the session knows the size exactly.
+          const known = knownImageDimensions(file);
+          if (image.__fullSize && known && Math.abs(image.width - Math.ceil(known.width / 2)) <= 1
+            && Math.abs(image.height - Math.ceil(known.height / 2)) <= 1) image.__fullSize = known;
+          return image;
+        }
       } else if (isPngFile(file)) {
         const arrayBuffer = await file.arrayBuffer();
         if (signal?.aborted) throw aborted();
@@ -14898,9 +14942,124 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // `options.ownedPlanes` (an array), pushes them there for the caller to
     // release after its last use. `stage: 'processed'` stops before the
     // adjustment stage and returns `{ processed, settings }`.
+    // Dust removal on a converted frame. `scaleFrom`, the short side of the
+    // full-resolution working frame, scales the particle size to a
+    // preview-size frame (never below three pixels).
+    async function removeFrameDust(processed, { dustRemoval, scaleFrom = 0, isCurrent = () => true, dustWorker = null, own = plane => plane, trace = null }) {
+      const strength = Number.isFinite(dustRemoval.strength) ? dustRemoval.strength : state.dustRemoval.strength;
+      let maxParticleSize = Number.isFinite(dustRemoval.maxParticleSize)
+        ? dustRemoval.maxParticleSize
+        : state.dustRemoval.maxParticleSize;
+      const processedShortSide = Math.min(processed.width, processed.height);
+      if (scaleFrom && processedShortSide > 0 && processedShortSide < scaleFrom) {
+        maxParticleSize = Math.max(3, Math.round(maxParticleSize * processedShortSide / scaleFrom));
+      }
+      const { mask, particleCount } = await detectDustOffMainThread(processed, { strength, maxParticleSize }, null, isCurrent, dustWorker);
+      let result = processed;
+      // Batch lanes and thumbnails reuse the open photo's tiles but never
+      // evict them (lookups only).
+      if (particleCount > 0) result = own(await withAiRepairTurn(() => inpaintForCommit(processed, mask, isCurrent, dustWorker, { memoInsert: false })), processed);
+      trace?.mark('dustRemoval', {
+        pixels: getImageDataPixelCount(result)
+      });
+      return result;
+    }
+
+    // The automatic gray point applies unless the recipe owns its white
+    // balance (settings only; callers add whose recipe it is).
+    function frameWantsAutoWhiteBalance(settings) {
+      return !settings.wbUserOverride
+        && !settings.wbSemanticApplied
+        && usesSilverCoreConversion(settings)
+        && sanitizePresetType(settings.filmType || 'color') === 'color'
+        && !settings.grayPointSampled
+        && !settings.expiredEnabled;
+    }
+
+    // Bakes the frame's automatic gray point into `settings`. `base` is read
+    // for its size only (the analysis region).
+    function applyFrameAutoWhiteBalance(processed, settings, base, trace = null) {
+      const roi = resolveAnalysisRegion(settings, base);
+      const estimate = settings.autoFrameMeta?.analysisNeedsReview ? { confidence: 'low' }
+        : settings.semanticMap ? estimateAutoWhiteBalance(processed, { anchors: settings.semanticMap })
+        : estimateAutoWhiteBalance(processed.__analysisPreview || (roi ? cropImageData(processed, analysisPixelBounds(processed.width, processed.height, roi, 0.02)) : processed));
+      if (estimate.confidence !== 'low') {
+        settings.wbR = estimate.wbR;
+        settings.wbG = estimate.wbG;
+        settings.wbB = estimate.wbB;
+        settings.wbAutoConfidence = estimate.confidence;
+      }
+      settings.wbAutoConfidence = estimate.confidence;
+      trace?.mark('autoWhiteBalance', { confidence: estimate.confidence });
+    }
+
+    // The expired-film measurement of a frame nobody opened, from its own
+    // positive. `base` is read for its size only (the analysis region).
+    async function applyFrameExpiredAnalysis(processed, settings, base, trace = null) {
+      const analysis = await measureExpiredAnalysisForExport(processed, settings, base);
+      if (analysis) applyExpiredAnalysisDefaults(settings, analysis);
+      trace?.mark('expiredRescue', { analysed: Boolean(analysis), spatial: Boolean(analysis?.spatial) });
+    }
+
+    // The small 16-bit analysis reference a tile is converted with away from
+    // its base (#247): roll samples and retained tile sources carry it.
+    function tileAnalysisReference(settings, base) {
+      const area = settings.autoFrameMeta?.imageArea || settings.autoFrameMeta?.analysisArea;
+      return area ? sampleAnalysisArea(base, area, TILE_ANALYSIS_REFERENCE_PIXELS) : null;
+    }
+
+    // One renderer for every preview-size tile (#247 2a): the lane's renders,
+    // tiles from roll samples and re-renders from a retained tile source.
+    // `working` is the geometry-applied frame at tile scale. Stages that read
+    // the base read only its size (`baseSize`), or the analysis reference
+    // (`analysisImageData`) the conversion's levels come from, so no
+    // full-resolution plane is needed. It bakes the automatic gray point and
+    // the expired-film measurement into `settings` as the export stages do,
+    // and never writes item.settings.
+    async function renderPreviewFromWorkingImage(working, settings, ctx) {
+      const {
+        baseSize, analysisImageData = null, maxSize, fullWorkingShortSide = Math.min(working.width, working.height),
+        preview = true, lensMapping = null, convert = convertFrameOffMainThread, sourceRole = 'derived',
+        isCurrent = () => true, dustRemoval = state.dustRemoval, dustWorker = null, automaticWhiteBalance = false,
+        own = plane => plane, trace = null
+      } = ctx;
+      let processed = own(await convert({
+        imageData: working,
+        settings: buildRouterSettings(settings, baseSize),
+        options: { preview, forceFullProcess: true, analysisImageData },
+        sourceRole
+      }), working);
+      assertRepairCurrent(isCurrent);
+      trace?.mark('convert', {
+        pixels: getImageDataPixelCount(processed)
+      });
+      if (dustRemoval && dustRemoval.enabled && processed) {
+        processed = await removeFrameDust(processed, { dustRemoval, scaleFrom: fullWorkingShortSide, isCurrent, dustWorker, own, trace });
+      }
+      if (settings.repairStrokes?.length) {
+        const brushSource = processed;
+        processed = own(await withAiRepairTurn(() => inpaintManualBrush(brushSource, settings, baseSize, lensMapping, isCurrent, { memoInsert: false })), brushSource);
+      }
+      if (automaticWhiteBalance && processed && frameWantsAutoWhiteBalance(settings)) {
+        applyFrameAutoWhiteBalance(processed, settings, baseSize, trace);
+      }
+      if (settings.expiredEnabled && !settings.expiredAnalysis && processed) {
+        await applyFrameExpiredAnalysis(processed, settings, baseSize, trace);
+      }
+      assertRepairCurrent(isCurrent);
+      const adjusted = createAdjustedPhotoPreview(processed, buildAdjustmentSettings(settings), { maxSize });
+      trace?.mark('adjustments', {
+        pixels: getImageDataPixelCount(adjusted)
+      });
+      return adjusted;
+    }
+
     async function processFileWithSettings(file, savedSettings, options = {}) {
       const isCurrent = options.isCurrent || (() => true);
       const previewMax = Math.max(0, Number(options.previewMaxDimension) || 0);
+      // Contact-sheet cells (#247 part 3): geometry and lens correction as for
+      // an export, then conversion and 8-bit adjustments at the cell's size.
+      const tileMax = previewMax ? 0 : Math.max(0, Number(options.tileMaxDimension) || 0);
       // Batch jobs run without the blocking "Detecting frame" overlay and its
       // frame wait: they must keep going in a hidden window (#241). Detection
       // inputs, thresholds and geometry are the same either way.
@@ -14921,8 +15080,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         file: file?.name || '',
         bytes: file?.size || 0
       });
-      // Load the image
-      const imageData = options.sourceImageData || own(await loadFileToImageData(file, { filmStats: !savedSettings }));
+      // Load the image. A light-table tile of a frame with a recipe may take a
+      // half-size decode (#247 1b); `baseSize` is then the full size its
+      // recipe's crop, strokes and analysis area refer to.
+      const halfSize = Boolean(options.halfSizeDecode && savedSettings && previewMax && !options.sourceImageData
+        && tileRecipeSettled(savedSettings) && !lensCorrectionActive(savedSettings));
+      const imageData = options.sourceImageData || own(await loadFileToImageData(file, { filmStats: !savedSettings, halfSize }));
+      const baseSize = previewMax && imageData.__fullSize ? imageData.__fullSize : imageData;
       assertRepairCurrent(isCurrent);
       options.onDecoded?.(imageData);
       trace.mark('load', {
@@ -14960,9 +15124,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         initialSettings = await learnedImportSettings(settleImportFilmType(queued, initialSettings), queued);
       }
       assertRepairCurrent(isCurrent);
-      const settings = sanitizeSettings(initialSettings, {
-        fallbackSettings: { ...state, cropRegion: null, autoFrameMeta: null, rotationAngle: 0, mirrored: false }
-      });
+      const settings = sanitizeSettings(initialSettings, { fallbackSettings: perPhotoSettingsFallback() });
 
       // Geometry chain (base -> rotation -> mirror -> crop). One pass that
       // only resamples the cropped window: rotating a whole 24 MP scan to keep
@@ -14972,32 +15134,52 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         mirrored: Boolean(settings.mirrored),
         cropRegion: settings.cropRegion || null
       };
-      // The auto-frame worker already rotated this decode by the same angle
-      // with the same exact kernel: mirror and crop that frame instead (#244).
-      const adoptedRotation = importRotation && importRotation.base === imageData && importRotation.angle
-        && importRotation.angle === normalizeAngleDegrees(geometry.rotationAngle)
-        && hasExactPlane16(imageData) && hasExactPlane16(importRotation.image)
-        && importRotation.image.width === rotatedDimensions(imageData.width, imageData.height, importRotation.angle).width
-        && importRotation.image.height === rotatedDimensions(imageData.width, imageData.height, importRotation.angle).height
-        ? importRotation.image : null;
-      importRotation = null;
-      if (options.beforeHeavyStep) { await options.beforeHeavyStep('geometry'); assertRepairCurrent(isCurrent); }
-      // In the geometry pool: batch lanes, the contact sheet and the thumbnail
-      // lane no longer queue on the main thread for this step (#244).
-      let workingData = own(await renderGeometryChain(
-        adoptedRotation || imageData, adoptedRotation ? { ...geometry, rotationAngle: 0 } : geometry,
-        { isCurrent, maxInFlight: options.geometryBands }
-      ), imageData);
-      workingData = own(await applyLensCorrectionWithSettings(workingData, settings, { updateUi: false }), workingData);
-      assertRepairCurrent(isCurrent);
-      const fullWorkingShortSide = Math.min(workingData.width, workingData.height);
+      // A light-table tile without active lens correction never builds the
+      // full-resolution frame (#247 part 1): the post-geometry size is known
+      // from the base size, and the working image is taken at the step the
+      // preview downsample would have applied to that frame.
+      const reducedGeometry = Boolean(previewMax) && !options.stage && !lensCorrectionActive(settings);
+      let workingData;
+      let fullWorkingShortSide;
+      if (reducedGeometry) {
+        importRotation = null;
+        const frame = reducedTileGeometry(baseSize, geometry, previewMax, { sanitizeCrop: sanitizeCropRegionForImage });
+        workingData = own(renderReducedGeometry(imageData, geometry, {
+          step: frame.step, fullWidth: baseSize.width, fullHeight: baseSize.height
+        }), imageData);
+        fullWorkingShortSide = Math.min(frame.width, frame.height);
+      } else {
+        // The auto-frame worker already rotated this decode by the same angle
+        // with the same exact kernel: mirror and crop that frame instead (#244).
+        const adoptedRotation = importRotation && importRotation.base === imageData && importRotation.angle
+          && importRotation.angle === normalizeAngleDegrees(geometry.rotationAngle)
+          && hasExactPlane16(imageData) && hasExactPlane16(importRotation.image)
+          && importRotation.image.width === rotatedDimensions(imageData.width, imageData.height, importRotation.angle).width
+          && importRotation.image.height === rotatedDimensions(imageData.width, imageData.height, importRotation.angle).height
+          ? importRotation.image : null;
+        importRotation = null;
+        if (options.beforeHeavyStep) { await options.beforeHeavyStep('geometry'); assertRepairCurrent(isCurrent); }
+        // In the geometry pool: batch lanes, the contact sheet and the thumbnail
+        // lane no longer queue on the main thread for this step (#244).
+        workingData = own(await renderGeometryChain(
+          adoptedRotation || imageData, adoptedRotation ? { ...geometry, rotationAngle: 0 } : geometry,
+          { isCurrent, maxInFlight: options.geometryBands }
+        ), imageData);
+        workingData = own(await applyLensCorrectionWithSettings(workingData, settings, { updateUi: false }), workingData);
+        assertRepairCurrent(isCurrent);
+        fullWorkingShortSide = Math.min(workingData.width, workingData.height);
+      }
       // Lensfun's repair mapping is expressed in native working pixels.
       // Downsampling drops that map; reusing it unscaled would also misplace
       // strokes. Keep this combination native until repair, then shrink only
       // the final adjusted thumbnail. Other previews retain the small path.
       const nativeMappedRepair = Boolean(workingData.__lensMapping && settings.repairStrokes?.length);
       const reducedPreview = Boolean(previewMax && !nativeMappedRepair);
-      if (reducedPreview) workingData = downsampleImageDataForMaxDim(workingData, previewMax);
+      if (reducedPreview && !reducedGeometry) workingData = downsampleImageDataForMaxDim(workingData, previewMax);
+      // A contact-sheet cell converts at its own size, under the same
+      // exception (#247 part 3).
+      const reducedTile = Boolean(tileMax && !nativeMappedRepair);
+      if (reducedTile) workingData = own(downsampleImageDataForMaxDim(workingData, tileMax), workingData);
       trace.mark('transform', {
         pixels: getImageDataPixelCount(workingData)
       });
@@ -15028,6 +15210,44 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const baseBuffers = planeBuffersOf(imageData);
       const sourceRole = workingData !== imageData && !planeBuffersOf(workingData).some((buffer) => baseBuffers.includes(buffer))
         ? 'derived' : 'base';
+
+      // Every preview-size render goes through the one tile renderer (#247
+      // 2a). A reduced render's working image is also what a later recipe
+      // change re-renders the tile from (`onTileSource`, 2d).
+      if (previewMax) {
+        const tileSource = reducedGeometry && typeof options.onTileSource === 'function' ? {
+          working: workingData, baseSize, geometryKey: tileGeometryKey(settings, baseSize),
+          reference: tileAnalysisReference(settings, imageData)
+        } : null;
+        const adjusted = await renderPreviewFromWorkingImage(workingData, settings, {
+          baseSize,
+          analysisImageData: getColorAnalysisSample(settings, imageData),
+          maxSize: previewMax,
+          fullWorkingShortSide,
+          preview: reducedPreview,
+          lensMapping: workingData.__lensMapping || null,
+          convert,
+          sourceRole,
+          isCurrent,
+          dustRemoval: options.dustRemoval || state.dustRemoval,
+          dustWorker: options.dustWorker,
+          automaticWhiteBalance: !savedSettings || Boolean(state.fileQueue.find(item => item.file === file)?.automaticSettings),
+          own,
+          trace
+        });
+        trace.end({
+          outputPixels: getImageDataPixelCount(adjusted)
+        });
+        assertRepairCurrent(isCurrent);
+        if (tileSource) options.onTileSource(tileSource);
+        options.onPreparedSettings?.(settings);
+        if (!savedSettings && options.updateItemSettings !== false) {
+          const item = state.fileQueue.find(item => item.file === file);
+          if (item) item.settings = cloneSettings(settings);
+        }
+        return adjusted;
+      }
+
       let processed = own(await convert({
         imageData: workingData,
         settings: buildRouterSettings(settings, imageData),
@@ -15039,25 +15259,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         pixels: getImageDataPixelCount(processed)
       });
 
-      // Apply dust removal if enabled (full resolution for export)
+      // Apply dust removal if enabled (full resolution for export). A contact
+      // sheet leaves it out (a flagged proof-sheet approximation, #247).
       const dustRemoval = options.dustRemoval || state.dustRemoval;
-      if (dustRemoval && dustRemoval.enabled && processed) {
-        const strength = Number.isFinite(dustRemoval.strength) ? dustRemoval.strength : state.dustRemoval.strength;
-        let maxParticleSize = Number.isFinite(dustRemoval.maxParticleSize)
-          ? dustRemoval.maxParticleSize
-          : state.dustRemoval.maxParticleSize;
-        const processedShortSide = Math.min(processed.width, processed.height);
-        if (previewMax && processedShortSide > 0 && processedShortSide < fullWorkingShortSide) {
-          maxParticleSize = Math.max(3, Math.round(maxParticleSize * processedShortSide / fullWorkingShortSide));
-        }
-        const { mask, particleCount } = await detectDustOffMainThread(processed, { strength, maxParticleSize }, null, isCurrent, options.dustWorker);
-        const dustSource = processed;
-        // Batch lanes and thumbnails reuse the open photo's tiles but never
-        // evict them (lookups only).
-        if (particleCount > 0) processed = own(await withAiRepairTurn(() => inpaintForCommit(dustSource, mask, isCurrent, options.dustWorker, { memoInsert: false })), dustSource);
-        trace.mark('dustRemoval', {
-          pixels: getImageDataPixelCount(processed)
-        });
+      if (!tileMax && dustRemoval && dustRemoval.enabled && processed) {
+        processed = await removeFrameDust(processed, { dustRemoval, isCurrent, dustWorker: options.dustWorker, own, trace });
       }
 
       if (settings.repairStrokes?.length) {
@@ -15070,37 +15276,16 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // BEFORE the adjustment stage (which may run in the export worker).
       // Saved settings are always respected as-is: they already hold manual,
       // auto, or roll-applied gains.
-      if (
-        (!savedSettings || state.fileQueue.find(item => item.file === file)?.automaticSettings)
-        && !settings.wbUserOverride
-        && !settings.wbSemanticApplied
-        && processed
-        && usesSilverCoreConversion(settings)
-        && sanitizePresetType(settings.filmType || 'color') === 'color'
-        && !settings.grayPointSampled
-        && !settings.expiredEnabled
-      ) {
-        const roi = resolveAnalysisRegion(settings, imageData);
-        const estimate = settings.autoFrameMeta?.analysisNeedsReview ? { confidence: 'low' }
-          : settings.semanticMap ? estimateAutoWhiteBalance(processed, { anchors: settings.semanticMap })
-          : estimateAutoWhiteBalance(processed.__analysisPreview || (roi ? cropImageData(processed, analysisPixelBounds(processed.width, processed.height, roi, 0.02)) : processed));
-        if (estimate.confidence !== 'low') {
-          settings.wbR = estimate.wbR;
-          settings.wbG = estimate.wbG;
-          settings.wbB = estimate.wbB;
-          settings.wbAutoConfidence = estimate.confidence;
-        }
-        settings.wbAutoConfidence = estimate.confidence;
-        trace.mark('autoWhiteBalance', { confidence: estimate.confidence });
+      if ((!savedSettings || state.fileQueue.find(item => item.file === file)?.automaticSettings)
+        && processed && frameWantsAutoWhiteBalance(settings)) {
+        applyFrameAutoWhiteBalance(processed, settings, imageData, trace);
       }
 
       // Expired-film rescue: a frame the user never opened carries no
       // measurement yet, so take it from this frame's own positive (with the
       // OpenCV fog map when OpenCV is available).
       if (settings.expiredEnabled && !settings.expiredAnalysis && processed) {
-        const analysis = await measureExpiredAnalysisForExport(processed, settings, imageData);
-        if (analysis) applyExpiredAnalysisDefaults(settings, analysis);
-        trace.mark('expiredRescue', { analysed: Boolean(analysis), spatial: Boolean(analysis?.spatial) });
+        await applyFrameExpiredAnalysis(processed, settings, imageData, trace);
       }
 
       // A batch export adjusts, composes and encodes the frame itself (#250),
@@ -15116,12 +15301,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         return { processed, settings };
       }
 
-      // Apply adjustments (at 16 bits when the export asks for it)
+      // Apply adjustments (at 16 bits when the export asks for it). A contact
+      // sheet's reduced cell stays under 1 MP, so it runs here at full quality.
       assertRepairCurrent(isCurrent);
-      const adjusted = previewMax
-        ? createAdjustedPhotoPreview(processed, buildAdjustmentSettings(settings), { maxSize: previewMax })
-        : await applyAdjustmentsWithSettings(processed, settings, { bitDepth: options.bitDepth === 16 ? 16 : 8, bridge: options.bridge });
-      if (!previewMax) ownedPlanes?.push(adjusted);
+      const adjusted = await applyAdjustmentsWithSettings(processed, settings, { bitDepth: options.bitDepth === 16 ? 16 : 8, bridge: options.bridge });
+      ownedPlanes?.push(adjusted);
       trace.mark('adjustments', {
         pixels: getImageDataPixelCount(adjusted)
       });
@@ -15739,7 +15923,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       }
     }
     function notifyImportReview(items) {
-      const converted = items.filter(item => item?.status === 'done');
+      // Watch-folder arrivals get their recipe from the light-table lane or
+      // the roll import, never a 'done' status (#247): they count once they
+      // have one.
+      const converted = items.filter(item => item?.status === 'done'
+        || (String(item?.importId || '').startsWith('watch:') && item.settings));
       const review = converted.filter(item => reviewForItem(item).needs).length;
       if (review) showToast(getInterpolatedText('reviewImport', { count: converted.length, review }, `Converted ${converted.length} · ${review} need review`), 5000);
     }
@@ -15784,7 +15972,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       }
       photoSessions.retainKeys(state.fileQueue);
       photoPreviews.retainKeys(state.fileQueue);
-      photoPrefetch.retainKeys(state.fileQueue);
+      thumbnailSources.retainKeys(state.fileQueue);
+      watchRollSamples.retainKeys(state.fileQueue);
       syncEmbeddedPreviewQueue();
       const container = document.getElementById('fileListItems');
       const countEl = document.getElementById('fileListCount');
@@ -16513,7 +16702,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return `${file.name}::${file.size}::${file.lastModified || 0}`;
     }
 
-    function addFilesToQueue(files) {
+    // `importId` names the import transaction (watch-folder arrivals share
+    // their session's). Returns the queue items it added.
+    function addFilesToQueue(files, { importId: importIdOption = null } = {}) {
       // Filter for supported image files
       const supportedExtensions = ['.cr2', '.cr3', '.crw', '.nef', '.nrw', '.arw', '.dng', '.raf', '.raw', '.rw2', '.pef', '.srw', '.3fr', '.mef', '.orf', '.rwl', '.iiq', '.x3f', '.mrw', '.kdc', '.dcr', '.tif', '.tiff', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.heic', '.heif', '.hif'];
       const validFiles = files.filter(file => {
@@ -16521,10 +16712,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         return supportedExtensions.includes(ext) || file.type.startsWith('image/');
       });
 
-      if (validFiles.length === 0) return;
+      if (validFiles.length === 0) return [];
 
       const imported = [];
-      const importId = crypto.randomUUID();
+      const importId = importIdOption || crypto.randomUUID();
       const queuedIds = new Set(state.fileQueue.map(item => item.id));
       // Add files to queue
       for (const file of validFiles) {
@@ -16569,6 +16760,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       updateExportButtons();
       kickBackgroundPhotoWork();
       scheduleProjectRecovery();
+      return imported;
     }
 
     // ===========================================
@@ -16945,6 +17137,68 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         && !document.body.dataset.studioBusy && !processNegativeInFlight
         && !isDesktopBatchExportLocked();
     }
+    // A saved recipe processFileWithSettings renders without reading the
+    // decoded pixels for detection: frame detection and the film-edge read
+    // are settled (#247). Only such recipes render from a tile source or a
+    // half-size decode.
+    function tileRecipeSettled(settings) {
+      return Boolean(settings
+        && (settings.autoFrameMeta || settings.cropRegion || expiredImportKeepsFullFrame(settings) || !state.autoFrame.enabled)
+        && settings.filmEdge?.checked);
+    }
+
+    // The item's retained tile source with the recipe it would render, when
+    // the recipe still frames it the same way and converts it without lens
+    // correction (#247 2d). Null means a decode.
+    function tileSourceFor(item) {
+      if (!item.settings || !tileRecipeSettled(item.settings)) return null;
+      const settings = sanitizeSettings(item.settings, { fallbackSettings: perPhotoSettingsFallback() });
+      if (lensCorrectionActive(settings)) return null;
+      const source = thumbnailSources.lookup(item, baseSize => tileGeometryKey(settings, baseSize));
+      return source ? { ...source, settings } : null;
+    }
+
+    // The lane's render of a frame from its tile source: what
+    // processFileWithSettings renders from a decode, without one.
+    function renderTileFromSource(item, { settings, working, reference, baseSize }, { convert, isCurrent }) {
+      const geometry = {
+        rotationAngle: Number.isFinite(settings.rotationAngle) ? settings.rotationAngle : 0,
+        mirrored: Boolean(settings.mirrored),
+        cropRegion: settings.cropRegion || null
+      };
+      const frame = reducedTileGeometry(baseSize, geometry, STUDIO_TILE_PREVIEW_MAX, { sanitizeCrop: sanitizeCropRegionForImage });
+      return renderPreviewFromWorkingImage(working, settings, {
+        baseSize, analysisImageData: reference, maxSize: STUDIO_TILE_PREVIEW_MAX,
+        fullWorkingShortSide: Math.min(frame.width, frame.height), convert, isCurrent,
+        automaticWhiteBalance: Boolean(item.automaticSettings)
+      });
+    }
+
+    // The fallback when no tile source exists (after a reopen followed by a
+    // recipe change, or after eviction): a half-size decode of a RAW frame
+    // whose recipe is settled and has no active lens correction (#247 1b).
+    // Never for frames without a recipe: auto-frame would then store
+    // half-scale crops.
+    function canDecodeTileHalfSize(item) {
+      return Boolean(item.settings && isRawLikeFileName(item.file.name.toLowerCase())
+        && tileRecipeSettled(item.settings) && !lensCorrectionActive(item.settings));
+    }
+
+    // A trickled watch-folder frame no roll analysis has covered yet keeps the
+    // 900 px roll sample of its lane decode (#247 part 4), keyed by its recipe:
+    // the roll the quiet timer may form later measures it without decoding it
+    // again. The sample is exactly the one roll analysis would build.
+    function keepsWatchRollSample(item) {
+      return String(item.importId || '').startsWith('watch:') && !item.savedSettings && !item.settings?.rollFrame
+        && !automaticRollPendingItems.has(item);
+    }
+    function keepWatchRollSample(item, base) {
+      if (!item.settings || base.__fullSize || !keepsWatchRollSample(item)) return;
+      const sample = buildRollSample(base, item.settings);
+      sample.__itemKey = automaticRollItemKey(item);
+      watchRollSamples.put(item, sample);
+    }
+
     // ===========================================
     // Background photo lanes (#243)
     // ===========================================
@@ -17024,6 +17278,22 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     function openPrefetchDecode(item, signal) {
       return sharedDecodes.open(item.file, { signal });
     }
+    // A tile of a settled recipe with no tile source, when the job needs
+    // nothing else of the frame: a half-size decode of its own (#247 1b). It
+    // is never shared, adopted, retained or prefetched.
+    function openHalfSizeTileDecode(item, signal) {
+      const result = loadFileToImageData(item.file, { halfSize: true, signal }).then(base => ({ base, rawMetadata: null }));
+      result.catch(() => {});
+      return { result, release() {} };
+    }
+
+    function abortHalfSizeTileDecode(file) {
+      for (const job of backgroundLanes.active.values()) {
+        if (job.decoding && job.halfSize && job.item.file === file) {
+          job.controller.abort(new DOMException('The photo was opened', 'AbortError'));
+        }
+      }
+    }
 
     // Where memory is short, a foreground activation aborts the lanes'
     // decodes in flight (except the one it may adopt).
@@ -17081,8 +17351,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
             await backgroundRest(BACKGROUND_LANE_POLL_MS);
             continue;
           }
-          await runBackgroundPhotoJob(job);
-          await backgroundRest(BACKGROUND_LANE_REST_MS);
+          // A tile-source render is a few milliseconds of work: yield a task,
+          // not the pause between decodes (#247).
+          const light = await runBackgroundPhotoJob(job);
+          await backgroundRest(light ? 0 : BACKGROUND_LANE_REST_MS);
         }
       } catch (error) {
         // Never an unhandled rejection; the next kick starts a fresh lane.
@@ -17144,11 +17416,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     function laneTileWanted(item) {
       if (automaticRollImportRunning || studioAutoFrameRunning) return false;
       if (item === getCurrentQueueItem() || item === state.fileQueue[state.currentFileIndex]) return false;
-      // A scheduled roll import prepares these frames' recipes and samples
-      // (and their analysis tiles). A tile recipe set in the gap before it
-      // starts would leave its roll analysis without a pass-1 sample and
-      // decode the frame again, so they wait.
-      if (!item.settings && automaticRollPendingItems.has(item)) return false;
+      // A scheduled, unfinished roll import owns its frames (#247 2e): it
+      // prepares their recipes and samples and gives them their tiles. A
+      // decode here, in the gap before it starts or between its attempts,
+      // would be the unused concurrent decode; a tile recipe would also leave
+      // its roll analysis without a pass-1 sample (#231). They wait until the
+      // import releases them.
+      if (automaticRollPendingItems.has(item)) return false;
       const key = photoSettingsKey(item);
       return !(item.thumbnailErrorKey === key || (item.thumbnail && item.thumbnailKind === 'processed' && item.thumbnailKey === key));
     }
@@ -17253,11 +17527,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     }
 
     // One job: one frame, one decode (or a retained base), every need of it.
+    // A tile alone that renders from its tile source needs no base at all
+    // (#247 2d); the job then returns true (light work).
     async function runBackgroundPhotoJob({ index, needs }) {
       const item = state.fileQueue[index];
-      if (!item) return;
+      if (!item) return false;
       const controller = new AbortController();
-      const job = { item, needs, controller, decoding: false };
+      const job = { item, needs, controller, decoding: false, halfSize: false };
       backgroundLanes.active.set(item, job);
       const analysis = needs.includes('analysis') ? beginRollPassFrame(item) : null;
       const tile = needs.includes('tile') ? beginLaneTile(item) : null;
@@ -17275,13 +17551,18 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           if (error?.name !== 'AbortError') need.fail(error);
         }
       };
+      const light = Boolean(tile?.source && !analysis && !prefetch);
       let release = null;
       let lease = null;
       let decoded = null;
       try {
+        if (light) {
+          if (tile.valid()) await attempt(tile, () => tile.run(null, step));
+          return true;
+        }
         // One gated item (#241); a lane that waited while hidden re-checks.
         release = await hiddenJobs.admit({ bytes: await hiddenJobBytesFor([item.file]), signal: controller.signal });
-        if (!wanted()) return;
+        if (!wanted()) return false;
         // The base: a retained session or the prefetch slot, or one decode
         // shared with any other consumer (the foreground may adopt it).
         const retained = photoSessions.has(item) ? photoSessions.peek(item)
@@ -17290,17 +17571,19 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           decoded = { base: retained.base, rawMetadata: retained.rawMetadata || null, retained: true };
         } else {
           await backgroundGate.idle({ signal: controller.signal });
-          if (!wanted()) return;
+          if (!wanted()) return false;
           job.decoding = true;
+          job.halfSize = Boolean(tile?.halfSize && !analysis && !prefetch);
           lease = analysis ? openAnalysisDecode(item, controller.signal)
-            : tile ? openTileDecode(item, controller.signal) : openPrefetchDecode(item, controller.signal);
+            : job.halfSize ? openHalfSizeTileDecode(item, controller.signal)
+              : tile ? openTileDecode(item, controller.signal) : openPrefetchDecode(item, controller.signal);
           try {
             decoded = await lease.result;
           } catch (error) {
             if (!controller.signal.aborted && error?.name !== 'AbortError') {
               for (const need of [analysis, tile, prefetch]) if (need?.valid()) need.fail(error);
             }
-            return;
+            return false;
           } finally {
             job.decoding = false;
           }
@@ -17316,16 +17599,22 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         backgroundLanes.active.delete(item);
         release?.();
         if (lease) {
-          if (decoded && !decoded.retained) handOverBackgroundBase(item, decoded, { prefetch: Boolean(prefetch?.valid()) });
+          // A half-size base serves this tile only.
+          if (decoded && !decoded.retained && !job.halfSize) handOverBackgroundBase(item, decoded, { prefetch: Boolean(prefetch?.valid()) });
           lease.release();
         }
         analysis?.done();
       }
+      return false;
     }
 
-    // A lane tile: the canonical recipe rendered at tile size.
+    // A lane tile: the canonical recipe rendered at tile size. A recipe
+    // change over retained geometry renders from the frame's tile source
+    // (#247 2d); without one, a settled recipe may take a half-size decode
+    // (1b). Every render offers its working image as the next tile source.
     function beginLaneTile(item) {
       const key = photoSettingsKey(item);
+      const source = tileSourceFor(item);
       const rollRevision = automaticRollRevision;
       let superseded = false;
       // A roll analysis that takes over owns the frame's recipe; a late tile
@@ -17341,14 +17630,20 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       };
       return {
         valid,
+        source,
+        halfSize: !source && canDecodeTileHalfSize(item),
         async run(base, step) {
           let prepared;
-          const image = await processFileWithSettings(item.file, item.settings, {
-            previewMaxDimension: 288, updateItemSettings: false, sourceImageData: base,
-            isCurrent: valid, convert: request => backgroundConvert(request),
-            analyzers: backgroundAnalyzers(), beforeHeavyStep: step,
-            onPreparedSettings: settings => { prepared = settings; }
-          });
+          let tileSource = null;
+          const image = source
+            ? await renderTileFromSource(item, source, { convert: request => backgroundConvert(request), isCurrent: valid })
+            : await processFileWithSettings(item.file, item.settings, {
+              previewMaxDimension: STUDIO_TILE_PREVIEW_MAX, updateItemSettings: false, sourceImageData: base,
+              isCurrent: valid, convert: request => backgroundConvert(request),
+              analyzers: backgroundAnalyzers(), beforeHeavyStep: step,
+              onPreparedSettings: settings => { prepared = settings; },
+              onTileSource: entry => { tileSource = entry; }
+            });
           if (!valid()) return;
           // Before the tile encode.
           await step();
@@ -17357,6 +17652,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
             item.settings = cloneSettings(prepared);
             item.automaticSettings = true;
           }
+          if (tileSource) thumbnailSources.put(item, tileSource);
+          // A trickled watch-folder frame keeps its roll sample (#247 part 4).
+          if (base) keepWatchRollSample(item, base);
           item.thumbnail = thumbnailDataUrl(image);
           item.thumbnailKind = 'processed';
           item.thumbnailKey = photoSettingsKey(item);
@@ -18610,24 +18908,23 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     }
 
     // Downsampled, geometry-applied negative used for the roll measurements.
+    // Its pixels feed recipes and so exports: they must not change (#247).
     function buildRollAnalysisSample(imageData, settings) {
-      const reduced = downsampleImageDataForMaxDim(imageData, 900);
-      const factor = reduced.width / imageData.width;
-      let working = reduced;
-      const angle = Number.isFinite(settings.rotationAngle) ? settings.rotationAngle : 0;
-      if (Math.abs(angle) > 0.001) working = applyRotationToImageData(working, angle);
-      if (settings.mirrored) working = mirrorImageDataHorizontal(working);
-      if (settings.cropRegion) {
-        const scaled = {
-          left: (settings.cropRegion.left ?? settings.cropRegion.x ?? 0) * factor,
-          top: (settings.cropRegion.top ?? settings.cropRegion.y ?? 0) * factor,
-          width: settings.cropRegion.width * factor,
-          height: settings.cropRegion.height * factor
-        };
-        const region = sanitizeCropRegionForImage(scaled, working);
-        if (region) working = cropImageData(working, region);
-      }
-      return working;
+      return buildReducedGeometrySample(imageData, settings, { maxDim: 900 });
+    }
+
+    // The roll sample plus what its canonical tile needs (#247 2b), taken while
+    // the decoded base is in hand: the base's size and a small 16-bit analysis
+    // reference of the image area. A sample that is the base itself (a small
+    // frame without geometry) is wrapped, so the base gains no fields.
+    function buildRollSample(base, settings) {
+      const built = buildRollAnalysisSample(base, settings);
+      const sample = built !== base ? built
+        : { width: base.width, height: base.height, data: base.data, ...(base.__image16 ? { __image16: base.__image16 } : {}) };
+      const area = settings.autoFrameMeta?.imageArea || settings.autoFrameMeta?.analysisArea;
+      sample.__baseSize = { width: base.width, height: base.height };
+      sample.__analysisReference = area ? sampleAnalysisArea(base, area, TILE_ANALYSIS_REFERENCE_PIXELS) : null;
+      return sample;
     }
 
     // ===========================================
@@ -19852,9 +20149,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     // Renders the selected photos in roll order onto 300 dpi pages: header from
     // the roll metadata, frame numbers under each frame, optional sprocket
-    // borders through the same renderer as the sprocket export. Frames are
-    // converted through the batch path and downscaled twice the cell size
-    // before drawing; TIFF when that is the export format, otherwise PNG.
+    // borders through the same renderer as the sprocket export. Each frame's
+    // geometry and lens correction run as for an export; it is then reduced
+    // to twice the cell size and converted and adjusted at that size (#247,
+    // a flagged proof-sheet approximation: spatial effects and measurements
+    // are evaluated at cell scale, and dust is not removed). TIFF when that is
+    // the export format, otherwise PNG.
     async function exportContactSheet() {
       if (isDesktopBatchExportLocked()) return;
       await settlePendingCropDetection();
@@ -19870,8 +20170,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const pages = [];
       await overlay.show({ title: lang.loadingExporting });
       activeLongJobs += 1;
+      // One conversion worker for the whole sheet, released with it.
+      let convert = null;
       try {
         persistCurrentFileSettings({ silent: true, force: true });
+        convert = createTileConverter();
         const probe = layoutContactSheet({ pageId, layoutId, count: selected.length });
         const cell = probe.cells[0].frame;
         const target = Math.max(cell.width, cell.height) * 2;
@@ -19884,9 +20187,19 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           // exists (#250): released then, not at the next major GC.
           const ownedPlanes = [];
           try {
-            // Each full-resolution frame is one gated item (#241).
+            // Each full-resolution frame is one gated item (#241). A frame
+            // whose base is already decoded (a cached photo session, or the
+            // open photo when its full-resolution base is loaded) is not
+            // decoded again. The sheet never writes a recipe: a cell-scale
+            // measurement must not become a frame's saved settings.
+            const sourceImageData = photoSessions.peek(item)?.base
+              || (item === getCurrentQueueItem() && !state.rawDecodePending && canReuseLoadedRollSource(item)
+                ? state.loadedBaseImageData || state.originalImageData : null)
+              || undefined;
             const bitmap = await runHiddenJobItem([item.file], async () => {
-              let adjusted = await processFileWithSettings(item.file, settingsForFile, { ownedPlanes });
+              let adjusted = await processFileWithSettings(item.file, settingsForFile, {
+                ownedPlanes, tileMaxDimension: target, updateItemSettings: false, convert, sourceImageData
+              });
               if (Math.max(adjusted.width, adjusted.height) > target) {
                 adjusted = markOwnedPlanes(downsampleImageDataForMaxDim(adjusted, target));
                 ownedPlanes.push(adjusted);
@@ -19931,6 +20244,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         }
         overlay.updateProgress(100, lang.loadingComplete);
       } finally {
+        convert?.dispose();
         activeLongJobs -= 1;
         batchOverlayProgress = null;
         overlay.hide();
@@ -20025,7 +20339,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         settings: item === current && state.originalImageData && !persist && !item.provisional ? extractCurrentSettings() : (item.settings || null),
         studioColors: item.studioColors || null,
         filmTypeOverride: sanitizeFilmTypeOverride(item.filmTypeOverride),
-        selected: item.selected !== false
+        selected: item.selected !== false,
+        ...savedProjectThumbnail(item, { skip: !persist && item === current })
       }));
       return buildRollProject({
         files,
@@ -20034,6 +20349,31 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         rollAnalysis: state.rollAnalysis,
         lensCorrection: state.lensCorrection
       });
+    }
+
+    // What a tile's render depended on besides the frame's recipe (#247
+    // part 5). A reopened frame converts without the automatic gray point
+    // (its recipe is restored as saved), so a tile that had it is rendered
+    // again rather than restored.
+    function frameThumbnailContext(item) {
+      const settings = item.settings ? sanitizeSettings(item.settings, { fallbackSettings: perPhotoSettingsFallback() }) : null;
+      return projectThumbnailContext({
+        dust: [state.dustRemoval.enabled, state.dustRemoval.strength, state.dustRemoval.maxParticleSize, state.dustRemoval.ai],
+        flatFieldId: state.flatFields[item.settings?.flatFieldId]?.id || null,
+        autoWhiteBalance: Boolean(item.automaticSettings && settings && frameWantsAutoWhiteBalance(settings))
+      });
+    }
+
+    // A frame's final tile goes into the project with its context when it is
+    // current for the recipe being saved. Tiles whose key holds this
+    // session's AI-repair revision (dust removal on, repair strokes) are not
+    // saved, nor the open photo's in the recovery copy (`skip`): its live
+    // settings are not the ones its key covers.
+    function savedProjectThumbnail(item, { skip = false } = {}) {
+      if (skip || !item.settings || !item.thumbnail || item.thumbnailKind !== 'processed') return {};
+      if (state.dustRemoval.enabled || item.settings.repairStrokes?.length) return {};
+      if (item.thumbnailKey !== photoSettingsKey(item)) return {};
+      return { thumbnail: item.thumbnail, thumbnailContext: frameThumbnailContext(item) };
     }
 
     async function saveProject() {
@@ -20130,6 +20470,19 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const restored = ordered.map((o) => o.item);
       // An interrupted roll analysis resumes over its frames (#241).
       const rollFrames = interruptedRollFrames(restored);
+      // Saved tiles of frames matched by content, once their recipes are
+      // back, when they were rendered under what the frame renders under now
+      // (#247 part 5). Changed originals and everything else re-render.
+      for (const { entry, file } of result.matched) {
+        const item = byFile.get(file);
+        if (!item || rollFrames.includes(item) || !item.settings || item.settings.repairStrokes?.length) continue;
+        const thumbnail = restorableProjectThumbnail(entry, frameThumbnailContext(item));
+        if (!thumbnail) continue;
+        item.thumbnail = thumbnail;
+        item.thumbnailKind = 'processed';
+        item.thumbnailKey = photoSettingsKey(item);
+        item.thumbnailErrorKey = null;
+      }
       state.fileQueue = [...restored, ...result.extra.map((file) => byFile.get(file)).filter(Boolean)];
       state.rollMetadata = sanitizeRollMetadata(project.roll?.metadata);
       const reference = project.roll?.reference;
@@ -20257,6 +20610,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         photoSessions.clear();
         photoPreviews.clear();
         photoPrefetch.clear();
+        thumbnailSources.clear();
         hiddenJobs.setSafeMode(true);
       }
       try {
@@ -21397,8 +21751,14 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     queueMicrotask(mountHotFolderUI);
     let hotFolder = null, hotFolderUnlisten = null, hotFolderEpoch = 0, hotFolderFiles = [], hotFolderQuiet;
     let hotFolderImports = Promise.resolve();
+    // Arrivals read but not yet queued, and the timer that queues them as one
+    // batch (#247): the sampler emits a whole folder scan within milliseconds.
+    let hotFolderBatch = [], hotFolderBatchTimer = null;
+    const HOT_FOLDER_BATCH_MS = 1000;
     async function stopHotFolder() {
       hotFolderEpoch++; hotFolder = null; hotFolderFiles = []; clearTimeout(hotFolderQuiet);
+      watchRollSamples.clear();
+      hotFolderBatch = []; clearTimeout(hotFolderBatchTimer); hotFolderBatchTimer = null;
       if (hotFolderUnlisten) { hotFolderUnlisten(); hotFolderUnlisten = null; }
       if (isTauriDesktop()) await window.__TAURI__.core.invoke('stop_watch_import_folder');
       updateHotFolderUI();
@@ -21410,6 +21770,67 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (existing) existing.disabled = Boolean(hotFolder);
       button.textContent = hotFolder ? getInterpolatedText('watchFolderActive', { folder: hotFolder.path.split(/[\\/]/).pop() }, `Watching ${hotFolder.path} · Stop`) : getLocalizedText('watchFolder', 'Watch a folder…');
     }
+    // One stable file of the watched folder: read it (unless its name and
+    // size are already queued or read for this batch) and hold it for the
+    // batch that is queued a second after the last arrival.
+    function receiveHotFolderArrival(payload, epoch) {
+      hotFolderImports = hotFolderImports.then(async () => {
+        if (epoch !== hotFolderEpoch || payload.session !== hotFolder?.session) return;
+        if (hotFolderHas(payload.name, payload.size)) return;
+        const file = await readDesktopImportFile(payload, window.__TAURI__.core.invoke, () => epoch === hotFolderEpoch);
+        if (epoch !== hotFolderEpoch || hotFolderHas(file.name, file.size)) return;
+        hotFolderBatch.push({ file, session: payload.session });
+        clearTimeout(hotFolderBatchTimer);
+        hotFolderBatchTimer = setTimeout(() => queueHotFolderBatch(epoch), HOT_FOLDER_BATCH_MS);
+      }).catch(error => { console.warn('Hot folder import failed:', error); showToast(getLocalizedText('watchFolderFailed', 'Could not import the new file.')); });
+    }
+
+    function hotFolderHas(name, size) {
+      return state.fileQueue.some(item => item.file.name === name && item.file.size === size)
+        || hotFolderBatch.some(entry => entry.file.name === name && entry.file.size === size);
+    }
+
+    // Watch-folder arrivals take the normal import path (#247 part 4): one
+    // addFilesToQueue call per batch, no conversion here. The light-table
+    // lane then prepares each frame's recipe and its keyed tile from one
+    // silent background decode, or a roll import of three or more does.
+    function queueHotFolderBatch(epoch) {
+      hotFolderBatchTimer = null;
+      const batch = hotFolderBatch;
+      hotFolderBatch = [];
+      if (epoch !== hotFolderEpoch || !batch.length) return;
+      hotFolderImports = hotFolderImports.then(async () => {
+        if (epoch !== hotFolderEpoch) return;
+        const files = batch.map(entry => entry.file)
+          .filter(file => !state.fileQueue.some(item => item.file.name === file.name && item.file.size === file.size));
+        const imported = files.length ? addFilesToQueue(files, { importId: `watch:${batch[0].session}` }) : [];
+        if (!imported.length) return;
+        showToast(imported.length === 1
+          ? getInterpolatedText('watchFolderArrival', { name: imported[0].file.name }, `Imported ${imported[0].file.name}`)
+          : getInterpolatedText('watchFolderArrivals', { count: String(imported.length) }, `Imported ${imported.length} files`));
+        // A batch of three or more is already a scheduled roll import
+        // (addFilesToQueue). Trickled captures wait for the quiet timer.
+        if (imported.length < 3) {
+          hotFolderFiles.push(...imported);
+          scheduleHotFolderRoll();
+        }
+        if (!state.originalImageData) await switchToFile(state.fileQueue.indexOf(imported[0]));
+      }).catch(error => { console.warn('Hot folder import failed:', error); showToast(getLocalizedText('watchFolderFailed', 'Could not import the new file.')); });
+    }
+
+    // Trickled captures: 2.5 s after the last one, the session's watch frames
+    // that no roll analysis has covered and no roll import owns form a roll
+    // once there are three. Fewer stay counted for the next capture.
+    function scheduleHotFolderRoll() {
+      clearTimeout(hotFolderQuiet);
+      hotFolderQuiet = setTimeout(() => {
+        const arrived = hotFolderFiles.filter(item => state.fileQueue.includes(item) && !item.savedSettings
+          && !item.userEdited && !item.settings?.rollFrame && !automaticRollPendingItems.has(item));
+        hotFolderFiles = arrived.length >= 3 ? [] : arrived;
+        if (arrived.length >= 3) scheduleAutomaticRollImport(arrived, { prepared: true });
+      }, 2500);
+    }
+
     function mountHotFolderUI() {
       if (!isTauriDesktop()) return;
       const button = document.createElement('button'); button.type = 'button'; button.id = 'studioWatchFolder';
@@ -21424,35 +21845,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         warmImportPipeline();
         try {
           const epoch = ++hotFolderEpoch;
-          hotFolderUnlisten = await window.__TAURI__.event.listen('import-folder-file', ({ payload }) => {
-            hotFolderImports = hotFolderImports.then(async () => {
-              if (epoch !== hotFolderEpoch || payload.session !== hotFolder?.session) return;
-              const file = await readDesktopImportFile(payload, window.__TAURI__.core.invoke, () => epoch === hotFolderEpoch);
-              if (state.fileQueue.some(item => item.file.name === file.name && item.file.size === file.size)) return;
-              addFilesToQueue([file]);
-              const item = state.fileQueue.find(item => item.file === file);
-              if (!item) return;
-              item.importId = `watch:${payload.session}`;
-              if (!state.originalImageData) await switchToFile(state.fileQueue.indexOf(item));
-              else {
-                // The full-resolution planes serve only the thumbnail (#250).
-                const ownedPlanes = [];
-                try {
-                  const image = await processFileWithSettings(file, null, { bitDepth: 8, ownedPlanes });
-                  if (epoch !== hotFolderEpoch || !state.fileQueue.includes(item)) return;
-                  item.thumbnail = thumbnailDataUrl(image); item.status = 'done'; updateFileListUI();
-                } finally {
-                  releaseOwnedPlanes(...ownedPlanes);
-                }
-              }
-              showToast(getInterpolatedText('watchFolderArrival', { name: file.name }, `Imported ${file.name}`));
-              hotFolderFiles.push(item); clearTimeout(hotFolderQuiet);
-              hotFolderQuiet = setTimeout(() => {
-                const arrived = hotFolderFiles; hotFolderFiles = [];
-                if (arrived.length >= 3) scheduleAutomaticRollImport(arrived, { prepared: true });
-              }, 2500);
-            }).catch(error => { console.warn('Hot folder import failed:', error); showToast(getLocalizedText('watchFolderFailed', 'Could not import the new file.')); });
-          });
+          hotFolderUnlisten = await window.__TAURI__.event.listen('import-folder-file', ({ payload }) => receiveHotFolderArrival(payload, epoch));
           hotFolder = await window.__TAURI__.core.invoke('watch_import_folder', { importExisting: document.getElementById('studioWatchExisting').checked });
           if (!hotFolder && hotFolderUnlisten) { hotFolderUnlisten(); hotFolderUnlisten = null; }
           updateHotFolderUI();
@@ -21805,7 +22198,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       };
       filmTypeRoll?.rekeys.add(rekeySample);
       const finish = async () => {
-        if (!finished) for (const item of pending) automaticRollPendingItems.delete(item);
+        const release = !finished;
+        if (release) for (const item of pending) automaticRollPendingItems.delete(item);
         finished = true;
         if (timer !== null) clearTimeout(timer);
         timer = null;
@@ -21814,6 +22208,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         if (safeMode) hiddenJobs.setSafeMode(false);
         filmTypeRoll?.rekeys.delete(rekeySample);
         await storage?.clear();
+        // Frames the import dropped or never reached get their tiles from the
+        // lane, which waited for them (#247 2e).
+        if (release && state.fileQueue.length) kickBackgroundPhotoWork();
       };
       const schedule = delay => {
         if (finished || timer !== null) return;
@@ -21844,10 +22241,18 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         }
         try {
           persistCurrentFileSettings({ silent: true, force: true });
+          // Trickled watch-folder frames bring the samples the lane kept from
+          // their decodes, while their recipes are unchanged (#247 part 4).
+          for (const item of pending) {
+            const kept = watchRollSamples.take(item);
+            if (kept && eligible(item) && kept.__itemKey === automaticRollItemKey(item) && !await samples.get(item)) {
+              await samples.put(item, kept);
+            }
+          }
           const current = getCurrentQueueItem();
           if (pending.includes(current) && eligible(current) && current.settings && canReuseLoadedRollSource(current)
             && !await samples.get(current)) {
-            await samples.put(current, buildRollAnalysisSample(state.loadedBaseImageData || state.originalImageData, current.settings));
+            await samples.put(current, buildRollSample(state.loadedBaseImageData || state.originalImageData, current.settings));
           }
           // Frames are decoded and measured by the background lanes (#243):
           // one job per frame in display order from the open photo (its
@@ -21888,7 +22293,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
                     if (!itemValid()) return null;
                     await step();
                     if (!itemValid()) return null;
-                    return { settings, sample: buildRollAnalysisSample(image, settings), key };
+                    return { settings, sample: buildRollSample(image, settings), key };
                   }
                 };
               },
@@ -21911,6 +22316,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
               onError: (item, error) => {
                 if (!valid() || !eligible(item) || item.settings || item === state.fileQueue[state.currentFileIndex]) return;
                 failed.add(item);
+                automaticRollPendingItems.delete(item);
                 item.status = 'error'; item.error = error?.message || String(error);
               }
             });
@@ -21926,11 +22332,20 @@ import { canPublishThumbnail } from './thumbnailRank.js';
             await finalizeImportFilmType(filmTypeRoll, valid);
             if (!valid()) return;
           }
-          for (const group of groupAutomaticRollFrames(pending.filter(eligible), { referenceLocked: state.rollReference.applyLock })) {
+          const groups = groupAutomaticRollFrames(pending.filter(eligible), { referenceLocked: state.rollReference.applyLock });
+          for (const group of groups) {
             if (!valid()) return;
             const result = await runRollAnalysis({ items: group, automatic: true, samples });
             if (result?.status === 'deferred' || result?.status === 'stale') retry = true;
           }
+          if (!valid()) return;
+          // Frames no group took keep the recipe pass 1 gave them: positives,
+          // mixed stocks and groups of fewer than three. Their canonical tiles
+          // come from the retained samples now, before finish() drops them.
+          const grouped = new Set(groups.flat());
+          await renderRollSampleTiles(pending.filter(item => eligible(item) && !grouped.has(item)), {
+            samples, valid, key: automaticRollItemKey
+          });
           if (!valid()) return;
           // A foreground load owns its recipe while it is being prepared.
           // Resume once it settles instead of permanently dropping the roll.
@@ -21945,6 +22360,110 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         }
       };
       schedule(1200);
+    }
+
+    // A size-1 conversion pool for tile and proof-sheet renders (#247): its
+    // worker lives for one job and is released with it. An infrastructure
+    // failure converts on the main thread, as convertFrameOffMainThread does.
+    function createTileConverter() {
+      const pool = !conversionWorkerBroken && usesSilverCoreConversion(state) ? createConversionWorkerPool({ size: 1 }) : null;
+      const convert = async (request) => {
+        if (pool) {
+          try {
+            return await pool(request);
+          } catch (err) {
+            if (isConversionInputLost(err)) throw err;
+            console.warn('Tile conversion worker failed, converting on the main thread:', err?.message || err);
+          }
+        }
+        return convertFrameWithRouter(request);
+      };
+      convert.dispose = () => pool?.dispose();
+      return convert;
+    }
+
+    // A canonical tile from a roll sample (#247 2b/2c): the lane's render of
+    // the frame, on the sample reduced to tile size, with the base size and
+    // analysis reference pass 1 kept. Null when the sample lacks them or the
+    // frame does not convert through SilverCore. `renderKey` is the settings
+    // key the tile was rendered for; `source` is its tile source.
+    async function renderSampleTile(item, recipe, sample, { convert, isCurrent = () => true }) {
+      if (!sample?.__baseSize || !usesSilverCoreConversion(recipe)) return null;
+      const settings = sanitizeSettings(recipe, { fallbackSettings: perPhotoSettingsFallback() });
+      const renderKey = photoSettingsKey({ ...item, settings: recipe });
+      const baseSize = { width: sample.__baseSize.width, height: sample.__baseSize.height };
+      const reference = sample.__analysisReference || null;
+      const working = downsampleImageDataForMaxDim(sample, STUDIO_TILE_PREVIEW_MAX);
+      const frame = reducedTileGeometry(baseSize, {
+        rotationAngle: Number.isFinite(settings.rotationAngle) ? settings.rotationAngle : 0,
+        mirrored: Boolean(settings.mirrored),
+        cropRegion: settings.cropRegion || null
+      }, STUDIO_TILE_PREVIEW_MAX, { sanitizeCrop: sanitizeCropRegionForImage });
+      const lensActive = lensCorrectionActive(settings);
+      const image = await renderPreviewFromWorkingImage(working, settings, {
+        baseSize, analysisImageData: reference, maxSize: STUDIO_TILE_PREVIEW_MAX,
+        fullWorkingShortSide: Math.min(frame.width, frame.height), convert, isCurrent,
+        automaticWhiteBalance: Boolean(item.automaticSettings)
+      });
+      return {
+        thumbnail: thumbnailDataUrl(image), renderKey, lensActive,
+        source: lensActive ? null : { working, reference, baseSize, geometryKey: tileGeometryKey(settings, baseSize) }
+      };
+    }
+
+    // A sample tile is canonical when its frame converts without lens
+    // correction and nothing its key covers changed while it was rendered or
+    // waited for the commit (global dust, AI repair, flat field). Otherwise
+    // it stays provisional and the lane renders the frame again, from its
+    // tile source when it has one. `replace: false` never replaces a
+    // processed tile with a provisional one.
+    function publishSampleTile(item, tile, { replace = true } = {}) {
+      if (tile.source) thumbnailSources.put(item, tile.source);
+      const canonical = !tile.lensActive && photoSettingsKey(item) === tile.renderKey;
+      if (!canonical && !replace && item.thumbnail && item.thumbnailKind === 'processed') return false;
+      item.thumbnail = tile.thumbnail;
+      item.thumbnailKind = canonical ? 'processed' : 'analysis';
+      item.thumbnailKey = canonical ? tile.renderKey : null;
+      if (canonical) item.thumbnailErrorKey = null;
+      return canonical;
+    }
+
+    // Canonical tiles for frames an automatic import measured but no roll
+    // group took (#247 2c), from their retained samples, one at a time.
+    // Each frame leaves the import's ownership once it has its tile.
+    async function renderRollSampleTiles(items, { samples, valid, key }) {
+      let convert = null;
+      try {
+        for (const item of items) {
+          if (!valid()) return;
+          if (!item.settings || item === getCurrentQueueItem() || item === state.fileQueue[state.currentFileIndex]) continue;
+          if (item.thumbnail && item.thumbnailKind === 'processed' && item.thumbnailKey === photoSettingsKey(item)) {
+            automaticRollPendingItems.delete(item);
+            continue;
+          }
+          const sample = await samples.get(item);
+          if (!sample || !valid()) continue;
+          const itemKey = key(item);
+          const current = () => valid() && state.fileQueue.includes(item) && key(item) === itemKey
+            && item !== getCurrentQueueItem();
+          convert ||= createTileConverter();
+          let tile = null;
+          try {
+            tile = await renderSampleTile(item, item.settings, sample, { convert, isCurrent: current });
+          } catch (error) {
+            if (error?.name !== 'AbortError') console.warn('Roll tile failed for', item.file?.name, error);
+          }
+          if (tile && current()) {
+            publishSampleTile(item, tile, { replace: false });
+            automaticRollPendingItems.delete(item);
+            updateFileThumbnail(item);
+          }
+          // Hidden windows clamp setTimeout to 1 s or more (#241).
+          await yieldTaskForJob();
+        }
+      } finally {
+        convert?.dispose();
+      }
     }
 
     // Per-frame `analysis` tiles during automatic roll import, rendered from
@@ -22052,13 +22571,14 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (!automatic) showBatchProgress(true);
       const measurements = [];
       const analysisSamples = samples || createAnalysisSampleStore();
+      let tileConvert = null;
       async function sampleForMeasurement(measurement) {
         const cached = await analysisSamples.get(measurement.item);
         if (cached) return cached;
         // Storage-disabled/private-mode fallback stays bounded and lossless.
         if (measurement.item.file === state.loadedFile && !state.rawDecodePending && canReuseLoadedRollSource(measurement.item)) {
           assertRepairCurrent(isValid);
-          const sample = buildRollAnalysisSample(state.loadedBaseImageData || state.originalImageData, measurement.settings);
+          const sample = buildRollSample(state.loadedBaseImageData || state.originalImageData, measurement.settings);
           await analysisSamples.put(measurement.item, sample);
           return sample;
         }
@@ -22066,7 +22586,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         return runHiddenJobItem([measurement.item.file], async () => {
           const image = await loadFileToImageData(measurement.item.file);
           assertRepairCurrent(isValid);
-          const sample = buildRollAnalysisSample(image, measurement.settings);
+          const sample = buildRollSample(image, measurement.settings);
           await analysisSamples.put(measurement.item, sample);
           return sample;
         });
@@ -22101,7 +22621,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
                 }
                 if (!item.settings) settings = settleImportFilmType(item, settings);
                 if (!isValid()) return { status: 'stale' };
-                sample = buildRollAnalysisSample(imageData, settings);
+                sample = buildRollSample(imageData, settings);
                 await analysisSamples.put(item, sample);
               } finally {
                 release?.();
@@ -22166,25 +22686,27 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           }
 
         }
-        // The light table shows the roll as it will convert. Automatic imports
-        // retain byte-bounded samples until commit, so a deferred group can reuse
-        // them; an explicit analysis releases each sample after its thumbnail.
+        // The light table shows the roll as it will convert: each frame's tile
+        // is the lane's render of its roll recipe (#247 2b), from its sample on
+        // a size-1 conversion pool. Automatic imports retain byte-bounded
+        // samples until commit, so a deferred group can reuse them; an explicit
+        // analysis releases each sample after its thumbnail.
+        tileConvert = createTileConverter();
         for (const m of measurements) {
           if (!isValid()) return { status: 'stale' };
           if (!usesSilverCoreConversion(m.settings)) continue;
           try {
-            const thumbSource = downsampleImageDataForMaxDim(await sampleForMeasurement(m), 288);
+            const sample = await sampleForMeasurement(m);
             if (!isValid()) return { status: 'stale' };
-            const converted = await convertFrameWithRouter({
-              imageData: thumbSource,
-              settings: { ...buildCoreConversionSettings(m.settings), analysisRegion: null },
-              options: { preview: true, includeAnalysisPreview: false }
-            });
-            if (converted) m.thumbnail = thumbnailDataUrl(createAdjustedPhotoPreview(converted, buildAdjustmentSettings(m.settings)));
+            m.tile = await renderSampleTile(m.item, m.settings, sample, { convert: tileConvert, isCurrent: isValid });
           } catch (error) {
-            console.warn('Roll thumbnail failed for', m.item.file.name, error);
+            if (error?.name !== 'AbortError') console.warn('Roll thumbnail failed for', m.item.file.name, error);
           } finally { if (!automatic) await analysisSamples.delete(m.item); }
+          // Hidden windows clamp setTimeout to 1 s or more (#241).
+          await yieldTaskForJob();
         }
+        tileConvert.dispose();
+        tileConvert = null;
         if (!isValid()) return { status: 'stale' };
         // Measurements can continue across navigation, but the atomic undo
         // snapshot and live recipe adoption must belong to a settled editor.
@@ -22206,17 +22728,17 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         };
         for (const m of measurements) {
           m.item.settings = m.settings; m.item.isDirty = false; m.item.status = 'pending';
-          if (m.thumbnail) {
-            m.item.thumbnail = m.thumbnail;
-            // Roll samples omit lens correction, repairs and per-photo WB.
-            // Keep the useful first preview, then let the canonical lane finish.
-            m.item.thumbnailKind = 'analysis';
-            m.item.thumbnailKey = null;
-          }
+          // Canonical unless lens correction is active or the global dust, AI
+          // or flat-field state moved while the commit waited: then the lane
+          // renders the frame again. Either way the roll has given the frame
+          // its tile, so the import releases it.
+          if (m.tile) publishSampleTile(m.item, m.tile);
+          automaticRollPendingItems.delete(m.item);
         }
         committed = true;
         invalidateSilverCoreCache();
       } finally {
+        tileConvert?.dispose();
         if (!samples) await analysisSamples.clear();
         if (!automatic) showBatchProgress(false);
         if (button) {

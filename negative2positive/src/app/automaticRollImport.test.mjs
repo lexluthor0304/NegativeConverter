@@ -13,6 +13,9 @@ import { createSharedDecodes } from './sharedDecodes.js';
 import { pickBackgroundJob, travelDirection, displayDistance } from './backgroundPhotoScheduler.js';
 import { createPhotoSessionCache } from './photoSessionCache.js';
 import { SCHEDULER_FUNCTIONS } from './backgroundLanesHarness.mjs';
+import { createRollSampleCache } from './rollSampleCache.js';
+import { reducedTileGeometry, tileGeometryKey } from './reducedGeometry.js';
+import { sanitizeCropRect } from './imageGeometry.js';
 
 // Test the actual orchestration functions, not a second scheduler. Deferred
 // decoders/analysis replies make navigation and recipe races deterministic.
@@ -67,6 +70,7 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
   const markerStorage = { get: key => markerMap.get(key) ?? null, set: (key, value) => markerMap.set(key, value), remove: key => markerMap.delete(key) };
   const toasts = [], frameTypes = [], samplesBuilt = [];
   const frameRenders = [], flushed = [];
+  const tileSources = new Map(), laneStarts = [], tileRenders = [];
   let frameWorkersDisposed = 0;
   let timerId = 0;
   const noop = () => {};
@@ -113,7 +117,11 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
       stores.push(store);
       return store;
     },
-    buildRollAnalysisSample: (image) => { samplesBuilt.push(image.id); return image; },
+    // Roll samples carry their tile context (#247 2b).
+    buildRollSample: (image) => {
+      samplesBuilt.push(image.id);
+      return { ...image, __baseSize: { width: image.width, height: image.height }, __analysisReference: null };
+    },
     planBatchLanes: async () => 1,
     createAutoFrameWorkerPool: () => ({ analyze: noop, readFilmEdge: noop, dispose: noop }),
     createPerfTrace: () => ({ end: noop }), runBatchPipeline,
@@ -179,15 +187,33 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
     BACKGROUND_LANE_REST_MS: 30, BACKGROUND_LANE_POLL_MS: 250, ACTIVATION_DWELL_MS: 120, BACKGROUND_STEP_WAIT_CAP_MS: 2000,
     pickBackgroundJob, travelDirection, displayDistance,
     getFileListOrder: () => state.fileQueue.map((_, index) => index), reviewFilter: false, reviewForItem: () => ({ needs: false }),
+    // Canonical tiles from roll samples (#247): the real render/publish
+    // orchestration around a recording renderer on the tile converter.
+    thumbnailSources: { put: (item, source) => tileSources.set(item, source) },
+    watchRollSamples: createRollSampleCache(1024 * 1024),
+    updateFileThumbnail: noop, STUDIO_TILE_PREVIEW_MAX: 288, reducedTileGeometry, tileGeometryKey,
+    sanitizeCropRegionForImage: sanitizeCropRect, sanitizeSettings: settings => structuredClone(settings),
+    perPhotoSettingsFallback: () => ({}), lensCorrectionActive: settings => Boolean(settings.lensActive),
+    createTileConverter: () => Object.assign(request => context.convertFrameWithRouter(request), { dispose: noop }),
+    renderPreviewFromWorkingImage: async (working, settings, ctx) => {
+      tileRenders.push({ id: working.id, settings, ctx });
+      const converted = await ctx.convert({ imageData: working, settings, options: {} });
+      if (!ctx.isCurrent()) throw Object.assign(new Error('stale'), { name: 'AbortError' });
+      return converted;
+    },
   });
   context.sharedDecodes = createSharedDecodes({ decode: (file, { signal }) => context.decodeForBackground(file, signal) });
   vm.runInContext(['getCurrentQueueItem', 'automaticRollItemKey', 'scheduleAutomaticRollImport', ...FILM_TYPE_FUNCTIONS,
-    'renderFrameAnalysisThumbnail', 'releaseFrameThumbnailWorkers', ...(realRoll ? ['runRollAnalysis'] : []),
+    'renderFrameAnalysisThumbnail', 'releaseFrameThumbnailWorkers', 'renderSampleTile', 'publishSampleTile', 'renderRollSampleTiles',
+    ...(realRoll ? ['runRollAnalysis'] : []),
     ...SCHEDULER_FUNCTIONS.filter(name => name !== 'backgroundRest')]
     .map(functionSource).join('\n'), context);
   // Lanes rest a macrotask, not a timer; tiles are not part of these tests.
   context.backgroundRest = () => new Promise(resolve => setImmediate(resolve));
   context.laneTileWanted = () => false;
+  // Lane starts, with the frames the import still owns at each (#247 2e).
+  const kick = context.kickBackgroundPhotoWork;
+  context.kickBackgroundPhotoWork = () => { laneStarts.push(context.automaticRollPendingItems.size); kick(); };
   const fire = async (ms) => {
     const entry = [...timers].find(([, timer]) => ms === undefined || timer.ms === ms);
     assert.ok(entry, `scheduled timer ${ms ?? 'any'} exists`);
@@ -212,7 +238,7 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
     for (const key of ['filmType', 'filmTypeSource', 'filmTypeConfidence', 'filmTypeReason']) state[key] = settings[key];
   };
   return { context, state, items, timers, decoded, analyzed, groups, stores, restored, renders, undos, toasts, frameTypes, samplesBuilt, fire, navigate, make, prepareForeground, marker,
-    frameRenders, flushed, frameWorkersDisposed: () => frameWorkersDisposed };
+    frameRenders, flushed, frameWorkersDisposed: () => frameWorkersDisposed, tileSources, laneStarts, tileRenders };
 }
 
 // Exactly two imported photos must leave the thumbnail queue independent.
@@ -312,8 +338,12 @@ for (const destination of [1, 3]) {
   const result = await pending;
   assert.equal(result.status, 'committed');
   assert.equal(f.items.slice(0, 3).filter(item => item.settings.rollFrame?.locked).length, 3);
-  assert.ok(f.items.slice(0, 3).every(item => item.thumbnailKind === 'analysis' && item.thumbnailKey === null),
-    'roll-only thumbnails are provisional until lens, dust, WB and repair stages run');
+  // #247 2b: the roll renders each frame's tile as the lane would (dust,
+  // repair, per-photo WB, analysis reference), so default recipes are final.
+  assert.ok(f.items.slice(0, 3).every(item => item.thumbnailKind === 'processed'
+    && item.thumbnailKey === f.context.photoSettingsKey(item) && item.thumbnail === `thumbnail:${item.id}`),
+    'roll tiles of default recipes are canonical');
+  assert.ok(f.items.slice(0, 3).every(item => f.tileSources.get(item)?.geometryKey), 'and each keeps its tile source');
   assert.deepEqual(f.analyzed, [0, 1, 2]);
   assert.deepEqual(f.restored, destination === 1 ? [1] : [], 'never restore an unrelated photo');
   assert.equal(f.renders.length, destination === 1 ? 1 : 0, 'never reconvert an unrelated photo');
@@ -547,6 +577,107 @@ for (const verdicts of [['noMask', 'mono', 'mono', 'mono', 'mono'], ['mono', 'mo
     assert.equal(outcome.samples, outcomes[0].samples, `${outcome.order}: identical samples`);
     assert.equal(outcome.groups, outcomes[0].groups, `${outcome.order}: identical roll groups`);
   }
+}
+
+// #247 2b: lens-corrected frames stay provisional (the lane renders them
+// natively); a global dust change while the commit waits leaves every tile
+// provisional, and the lane re-renders them from their tile sources.
+{
+  const f = fixture({ prepared: true, realRoll: true });
+  f.items[1].settings.lensActive = true;
+  const result = await f.context.runRollAnalysis({ items: f.items.slice(0, 3), automatic: true });
+  assert.equal(result.status, 'committed');
+  assert.deepEqual(f.items.slice(0, 3).map(item => item.thumbnailKind), ['processed', 'analysis', 'processed']);
+  assert.equal(f.items[1].thumbnailKey, null);
+  assert.equal(f.tileSources.has(f.items[1]), false, 'no tile source for a lens-corrected frame');
+}
+{
+  const f = fixture({ prepared: true, realRoll: true });
+  f.context.dust = false;
+  f.context.photoSettingsKey = item => JSON.stringify([item.settings, f.context.dust]);
+  const held = deferred();
+  const convert = f.context.convertFrameWithRouter;
+  f.context.convertFrameWithRouter = async request => {
+    if (request.imageData.id === 2) await held.promise;
+    return convert(request);
+  };
+  const pending = f.context.runRollAnalysis({ items: f.items.slice(0, 3), automatic: true });
+  await flush();
+  f.navigate(3, { busy: true });
+  held.resolve(); await flush();
+  assert.equal(f.tileRenders.length, 3, 'the tiles rendered before the commit waited');
+  f.context.dust = true;
+  f.navigate(3);
+  await f.fire(250);
+  assert.equal((await pending).status, 'committed');
+  assert.ok(f.items.slice(0, 3).every(item => item.thumbnailKind === 'analysis' && item.thumbnailKey === null),
+    'a global dust change during the wait keeps the tiles provisional');
+  assert.equal(f.tileSources.size, 3, 'their tile sources let the lane re-render without a decode');
+}
+
+// #247 part 4: trickled watch-folder frames bring the samples the lane kept
+// from their decodes; a roll the quiet timer forms measures them without
+// decoding them again. A sample whose recipe changed since is not used.
+{
+  const f = fixture({ prepared: true, realRoll: true });
+  const sample = id => ({ width: 10, height: 10, id, data: new Uint8ClampedArray(400), __baseSize: { width: 10, height: 10 }, __analysisReference: null });
+  for (const item of f.items.slice(1)) {
+    const kept = sample(item.id);
+    kept.__itemKey = f.context.automaticRollItemKey(item);
+    f.context.watchRollSamples.put(item, kept);
+  }
+  f.items[3].settings = { ...f.items[3].settings, coreExposure: 4 };
+  f.context.scheduleAutomaticRollImport(f.items.slice(1), { prepared: true });
+  await f.fire(1200);
+  assert.equal(f.groups.length, 0, 'the real roll analysis ran');
+  assert.ok(f.items.slice(1).every(item => item.settings.rollFrame?.locked));
+  assert.deepEqual(f.decoded, [3], 'only the frame whose recipe changed is decoded again');
+  assert.equal(f.context.watchRollSamples.bytes, 0, 'the import took every kept sample');
+}
+
+// #247 2c/2e: frames no group took (positives among a colour roll here) get
+// canonical tiles from their pass-1 samples before the import finishes; the
+// import releases its frames as they get tiles and restarts the lane at the
+// end, once, for whatever is left.
+{
+  const f = fixture({ verdicts: ['orange', 'orange', 'orange', 'noMask', 'orange'], realRoll: true });
+  f.context.scheduleAutomaticRollImport(f.items);
+  f.prepareForeground(0);
+  await f.fire(1200);
+  assert.deepEqual(f.decoded, [1, 2, 3, 4], 'one decode per background frame');
+  const grouped = f.groups.flat();
+  const ungrouped = f.items.slice(1).filter(item => !grouped.includes(item.id));
+  assert.ok(ungrouped.length >= 1, 'a frame outside the roll group');
+  for (const item of f.items.slice(1)) {
+    assert.equal(item.thumbnailKind, 'processed', `frame ${item.id} is final`);
+    assert.equal(item.thumbnailKey, f.context.photoSettingsKey(item));
+  }
+  assert.equal(f.decoded.length, 4, 'no decode for the ungrouped tiles');
+  assert.equal(f.context.automaticRollPendingItems.size, 0);
+  // The roll pass kicks the lanes too (#243); finish restarts them once
+  // every frame is released.
+  assert.equal(f.laneStarts.at(-1), 0, 'finish restarts the lane after releasing every frame');
+}
+{
+  // A frame that fails in pass 1 leaves the import's ownership at once.
+  const f = fixture({ count: 4 });
+  f.context.loadFileToImageData = async file => {
+    const id = Number(file.name.split('.')[0]);
+    if (id === 2) throw new Error('decoder failure');
+    f.decoded.push(id); return { width: 10, height: 10, id };
+  };
+  const held = deferred();
+  const analyze = f.context.analyzeStudioImportFrame;
+  f.context.analyzeStudioImportFrame = async (image, settings, options) => {
+    if (image.id === 3) await held.promise;
+    return analyze(image, settings, options);
+  };
+  f.context.scheduleAutomaticRollImport(f.items);
+  await f.fire(1200);
+  assert.equal(f.items[2].status, 'error');
+  assert.equal(f.context.automaticRollPendingItems.has(f.items[2]), false, 'released while the import still runs');
+  assert.equal(f.context.automaticRollPendingItems.has(f.items[3]), true);
+  held.resolve(); await flush();
 }
 
 console.log('automaticRollImport tests passed');

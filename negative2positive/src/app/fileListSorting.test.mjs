@@ -29,6 +29,7 @@ const context = vm.createContext({
   safeStorageSet: (key, value) => storage.set(key, value),
   studioWorkspace: { sync: () => syncs++, markRowsChanged: noop }, uiDebugCounters: { fileListRenders: 0 },
   photoSessions: { retainKeys: noop }, photoPreviews: { retainKeys: noop }, photoPrefetch: { retainKeys: noop },
+  thumbnailSources: { retainKeys: noop }, watchRollSamples: { retainKeys: noop },
   document: { getElementById: id => ({ id }), body: { dataset: {} } },
   updateReviewFilter: noop, renderFileList: options => { ui = options; },
   reviewForItem: item => ({ needs: item.needs }),

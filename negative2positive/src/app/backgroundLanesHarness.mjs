@@ -11,6 +11,10 @@ import { createSharedDecodes } from './sharedDecodes.js';
 import { pickBackgroundJob, travelDirection, displayDistance } from './backgroundPhotoScheduler.js';
 import { createPhotoSessionCache } from './photoSessionCache.js';
 import { createHiddenJobGate } from './hiddenJobGate.js';
+import { createThumbnailSourceCache } from './thumbnailSources.js';
+import { createRollSampleCache } from './rollSampleCache.js';
+import { reducedTileGeometry, tileGeometryKey } from './reducedGeometry.js';
+import { sanitizeCropRect } from './imageGeometry.js';
 
 const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8');
 export function functionSource(name) {
@@ -22,7 +26,8 @@ export function functionSource(name) {
 
 export const SCHEDULER_FUNCTIONS = [
   'foregroundBusyForBackground', 'backgroundRest', 'decodeForBackground',
-  'openAnalysisDecode', 'openTileDecode', 'openPrefetchDecode', 'abortBackgroundDecodes', 'backgroundLanesRunning',
+  'openAnalysisDecode', 'openTileDecode', 'openPrefetchDecode', 'openHalfSizeTileDecode', 'abortHalfSizeTileDecode',
+  'abortBackgroundDecodes', 'backgroundLanesRunning',
   'kickBackgroundPhotoWork', 'backgroundLaneTarget', 'backgroundWorkPending', 'runBackgroundLane',
   'backgroundDisplayOrder', 'pickNextBackgroundJob', 'backgroundNeeds', 'laneTileWanted', 'photoPrefetchEnabled',
   'currentPhotoSettled', 'canPrefetchPhoto', 'prefetchTargetItem', 'holdPrefetchedBase', 'dropDistantPrefetch',
@@ -30,6 +35,9 @@ export const SCHEDULER_FUNCTIONS = [
   'releaseBackgroundWorkers', 'runBackgroundPhotoJob', 'beginLaneTile', 'beginPrefetch', 'runRollAnalysisPass',
   'beginRollPassFrame', 'settleRollPassRequests', 'activationDwell'
 ];
+// How lane tiles are made (#247): tile sources, half-size decodes and the
+// roll samples kept for watch-folder frames.
+export const TILE_FUNCTIONS = ['tileSourceFor', 'renderTileFromSource', 'canDecodeTileHalfSize', 'keepsWatchRollSample', 'keepWatchRollSample'];
 
 // Timers fire only when the test advances the clock.
 export function fakeClock() {
@@ -91,6 +99,7 @@ export function createLaneFixture({ count = 5, order = null, current = 0, prefet
   const published = [];
   const warnings = [];
   const rowRefreshes = [];
+  const sourceRenders = []; // renderPreviewFromWorkingImage calls (tile-source renders)
   let convertPools = 0, convertDisposed = 0, analyzerPools = 0, analyzerDisposed = 0;
   const noop = () => {};
   const context = vm.createContext({
@@ -138,13 +147,27 @@ export function createLaneFixture({ count = 5, order = null, current = 0, prefet
     thumbnailDataUrl: image => image.preview,
     updateFileThumbnail: item => published.push({ id: item.id, thumbnail: item.thumbnail }),
     refreshThumbnailRow: item => rowRefreshes.push(item.id),
+    // Tile sources and half-size decodes (#247): off unless a test settles a
+    // recipe (tileRecipeSettled) or puts a source. The tile renderer records.
+    STUDIO_TILE_PREVIEW_MAX: 288, thumbnailSources: createThumbnailSourceCache(), watchRollSamples: createRollSampleCache(1 << 20),
+    tileRecipeSettled: () => false, lensCorrectionActive: settings => Boolean(settings?.lens),
+    sanitizeSettings: settings => structuredClone(settings), perPhotoSettingsFallback: () => ({}),
+    tileGeometryKey, reducedTileGeometry, sanitizeCropRegionForImage: sanitizeCropRect,
+    isRawLikeFileName: name => /\.(dng|nef|cr2|arw)$/.test(name),
+    automaticRollItemKey: item => JSON.stringify(item.settings ?? null),
+    buildRollSample: (base, settings) => ({ width: 1, height: 1, data: new Uint8ClampedArray(4), base, settings }),
+    renderPreviewFromWorkingImage: async (working, settings, ctx) => {
+      sourceRenders.push({ working, settings, ctx });
+      if (!ctx.isCurrent()) throw new DOMException('stale', 'AbortError');
+      return { preview: `source:${settings.owner}` };
+    },
   });
   context.backgroundGate = createBackgroundGate({
     isBusy: () => context.foregroundBusyForBackground(), now: clock.now,
     setTimer: clock.setTimeout, clearTimer: clock.clearTimeout
   });
   context.sharedDecodes = createSharedDecodes({ decode: (file, { signal }) => context.decodeForBackground(file, signal) });
-  vm.runInContext(SCHEDULER_FUNCTIONS.map(functionSource).join('\n'), context);
+  vm.runInContext([...SCHEDULER_FUNCTIONS, ...TILE_FUNCTIONS].map(functionSource).join('\n'), context);
   const decodeOf = id => decodes.filter(record => record.file === items[id].file);
   const image = id => ({ id, width: 4, height: 4, data: new Uint8ClampedArray(64) });
   // Resolve the pending decode of photo `id` (with its metadata callback).
@@ -176,7 +199,7 @@ export function createLaneFixture({ count = 5, order = null, current = 0, prefet
   };
   const started = () => decodes.map(record => record.file.name);
   return {
-    context, state, items, clock, decodes, renders, published, warnings, rowRefreshes, decodeOf, renderOf, finishDecode,
+    context, state, items, clock, decodes, renders, published, warnings, rowRefreshes, sourceRenders, decodeOf, renderOf, finishDecode,
     finishRender, image, open, started,
     pools: () => ({ convertPools, convertDisposed, analyzerPools, analyzerDisposed })
   };

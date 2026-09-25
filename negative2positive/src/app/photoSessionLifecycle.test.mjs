@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { createPhotoSessionCache } from './photoSessionCache.js';
+import { createThumbnailSourceCache } from './thumbnailSources.js';
+import { createRollSampleCache } from './rollSampleCache.js';
 import { exactSettingsKey } from './settingsKey.js';
 import { createHiddenJobGate } from './hiddenJobGate.js';
 import { applyStrokePatch } from './dustStrokeHistory.js';
@@ -44,6 +46,10 @@ function fixture() {
   };
   const photoSessions = createPhotoSessionCache({ maxBytes: 4096 });
   const photoPreviews = createPhotoSessionCache({ maxBytes: 4096 });
+  const thumbnailSources = createThumbnailSourceCache();
+  thumbnailSources.put(item, { working: base, baseSize: { width: base.width, height: base.height }, geometryKey: 'k' });
+  const watchRollSamples = createRollSampleCache(1024 * 1024);
+  watchRollSamples.put(item, { data: new Uint8ClampedArray(4) });
   const postPaint = [];
   const elements = new Map();
   const element = id => {
@@ -51,7 +57,7 @@ function fixture() {
     return elements.get(id);
   };
   const context = vm.createContext({
-    state, photoSessions, photoPreviews, console: { warn: noop, error: noop },
+    state, photoSessions, photoPreviews, thumbnailSources, watchRollSamples, console: { warn: noop, error: noop },
     document: { body: { dataset: {} }, getElementById: element },
     File: globalThis.File, performance, Uint8Array, structuredClone, DOMException, AbortController,
     aiRepair: { revision: 2, status: 'ready', provider: 'wasm', run: noop, release: noop },
@@ -112,7 +118,7 @@ function fixture() {
     'commitDustStroke', 'onDustBrushEnd', 'noteBrushRepairSettled', 'whenBrushRepairsSettled',
     'abortSupersededFullResolutionConversion'].map(functionSource).join('\n'), context);
   const paint = () => { for (const task of postPaint.splice(0)) task(); };
-  return { context, state, item, photoSessions, photoPreviews, base, converted, mask, element, postPaint, paint };
+  return { context, state, item, photoSessions, photoPreviews, thumbnailSources, watchRollSamples, base, converted, mask, element, postPaint, paint };
 }
 
 for (const outcome of ['success', 'stale', 'abort']) {
@@ -370,6 +376,7 @@ for (const outcome of ['success', 'load-error', 'prepare-error']) {
   const f = coldFixture(), c = f.context;
   c.photoActivation = null;
   c.lowMemoryPhotoDevice = () => false;
+  c.abortHalfSizeTileDecode = () => {};
   vm.runInContext(['supersedeActivation', 'beginActivation'].map(functionSource).join('\n'), c);
   const first = c.switchToFile(1);
   const firstSignal = c.photoActivation.signal;
@@ -396,6 +403,7 @@ for (const outcome of ['success', 'load-error', 'prepare-error']) {
   const f = coldFixture(), c = f.context;
   c.photoActivation = null;
   c.lowMemoryPhotoDevice = () => false;
+  c.abortHalfSizeTileDecode = () => {};
   vm.runInContext(['supersedeActivation', 'beginActivation'].map(functionSource).join('\n'), c);
   let release;
   c.activationDwell = () => new Promise(resolve => { release = resolve; });
@@ -670,6 +678,8 @@ for (const locked of [false, true]) {
     assert.equal(f.photoSessions.size + f.photoPreviews.size, 0);
     assert.equal(c.photoPrefetch.size, 0, 'and the prefetch slot');
     assert.equal(c.backgroundAborts, 1, 'the lanes\' decodes of the closed session stop');
+    assert.equal(f.thumbnailSources.size, 0, 'close releases retained tile sources (#247)');
+    assert.equal(f.watchRollSamples.bytes, 0, 'and kept watch-folder roll samples');
     assert.equal(f.state.loadedFile, null);
     assert.equal(f.state.loadedBaseImageData, null);
     assert.equal(f.state._pendingFullResBuffer, null);
