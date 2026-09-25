@@ -77,8 +77,71 @@ of its sources.
   contribute nothing. The result is expressed at the darkest bracket's
   exposure, so anything a frame captured unclipped stays unclipped; the
   conversion's film-base analysis normalises the brightness afterwards.
+  `mergeRows` merges a band of rows with the same arithmetic; rows are
+  independent, so banding is exact.
 - `coverageRect` — trims the wedges a warp leaves along the edges so the
   merged frame is fully covered.
+
+The kernels read two 65,536-entry Float64 tables (`LIN`, the linear value of
+every 16-bit sample, and `HAT`, its HDR weight) that hold exactly what the
+per-sample interpolation computed, so the rewrite of #260 is bit-identical to
+the first implementation (`multiShot.reference.mjs` keeps it for the parity
+tests).
+
+### Merge worker (#260)
+
+The page only decodes. Everything else runs in a disposable module worker,
+one per merge (`workers/multiShotWorker.js` hosting
+`multiShotWorkerProcessor.js`, driven by `app/multiShotWorkerClient.js`),
+so a 60 MP merge neither blocks the page nor grows the page's OpenCV heap,
+which Emscripten never shrinks:
+
+1. **Page, per selected file:** decode, sample the grey proxy the alignment
+   needs (`sampleAlignmentGray`, longest side
+   `min(1200, longest side of both frames)`; a reference under 1200 px keeps
+   a small copy so it can be sampled again when a larger frame follows), and
+   post the frame, transferring the 16-bit plane (or the 8-bit samples when
+   the file has none). The page keeps no reference to the plane.
+2. **Worker, per frame:** the first frame is the reference; each later one is
+   matched (`matchAlignment`: ORB, BFMatcher, RANSAC; a failed match skips
+   the frame as before), warped and given its exposure ratio. A 16-bit plane
+   is warped alone (`warpPlane16`): only the source and destination 16-bit
+   Mats live on the OpenCV heap (16 B/px, 967 MB at 60.4 MP, under the 1 GiB
+   cap), where warping the 8-bit image alongside needed 24 B/px and failed
+   above about 44 MP. 8-bit sources keep the 8-bit warp and ×257 widening.
+3. **Worker, merge and encode:** `coverageRect`, then `mergeRows` in 64-row
+   bands with a progress message per band, then the export worker's
+   `encodePng16Blob(data, w, h, pako.deflate)`. The Blob crosses back
+   without a copy; the page adds the sRGB iCCP chunk with
+   `attachMetadataToBlob` and queues the file.
+
+The worker posts progress after each stage (align, warp, exposure, each
+merge band, encode); the progress modal shows the stage and a fraction and
+has a **Cancel** button, which terminates the worker and releases the Studio
+at once (a decode still running finishes unobserved and is dropped). The
+worker is terminated after the result, on any failure and on Cancel, which
+releases its heap and planes.
+
+Failures are classified before they leave the worker: OpenCV.js throws C++
+exceptions as numeric pointers, readable only through
+`cv.exceptionFromPtr(ptr).msg` in the realm that owns the heap. `StsNoMem`
+("Insufficient memory", "Failed to allocate"), a `RangeError` from an
+allocation and a worker crash or silence are memory failures and show the
+`multiShotMemory` alert; OpenCV failing to load shows `multiShotOpenCv`;
+anything else is logged and shows `multiShotFailed`. If the module worker
+cannot start at all (no handshake), the same processor runs on the main
+thread with the page's OpenCV, yielding between merge bands.
+
+Memory at 60.4 MP (estimate): each stored frame is a 483 MB plane, plus the
+output and the worker's idle heap — about 3.0 GB for 3 frames, 4.0 GB for 5
+(`estimateMultiShotWorkerBytes`). A merge is refused up front when that does
+not fit the renderer's memory budget (#258 supplies the budget; until then
+the failure is reported when it happens).
+
+Test hook: a `fault: 'warp-memory'` field in the worker's `start` message
+makes the next warp request an over-cap Mat, a genuine OpenCV `StsNoMem`
+pointer; the camera smoke uses it to check the alert, the released UI and
+the terminated worker.
 
 ## Live loupe (#156)
 

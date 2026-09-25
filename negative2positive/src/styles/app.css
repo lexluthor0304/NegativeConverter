@@ -2816,6 +2816,28 @@ body.dodge-burn-active #glCanvas {
   white-space: nowrap;
 }
 
+/* Only jobs that can stop at once (the multi-shot merge worker) show it. */
+.batch-progress-cancel {
+  display: block;
+  margin: 16px auto 0;
+  padding: 6px 18px;
+  background: transparent;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.batch-progress-cancel:hover {
+  background: var(--accent);
+  color: var(--bg-primary, #000);
+}
+
+.batch-progress-cancel[hidden] {
+  display: none;
+}
+
 /* Loading Overlay — spinning film reel + sprocket progress strip */
 .loading-overlay {
   position: fixed;

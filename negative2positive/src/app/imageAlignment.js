@@ -109,16 +109,17 @@ export function applyHomography(h, x, y) {
 // Warps a 16-bit RGBA plane ({ width, height, data: Uint16Array }) into the
 // reference frame of `width` x `height` pixels. Only the two 16-bit Mats live
 // on the OpenCV heap (16 bytes per pixel), and the source Mat is freed before
-// the result is copied out. `onCopied` runs once the source samples are on the
-// heap, so the caller can drop its own copy before the output is allocated.
-export function warpPlane16(plane, homography, width, height, { onCopied = null } = {}) {
+// the result is copied out. With `consume`, `plane.data` is dropped once the
+// samples are on the heap, so a caller that holds no other reference lets the
+// source go before the output is allocated.
+export function warpPlane16(plane, homography, width, height, { consume = false } = {}) {
   const cv = getCv();
   const H = cv.matFromArray(3, 3, cv.CV_64F, homography);
   let src16 = null; let dst16 = null;
   try {
     src16 = new cv.Mat(plane.height, plane.width, cv.CV_16UC4);
     src16.data16U.set(plane.data);
-    onCopied?.();
+    if (consume) plane.data = null;
     dst16 = new cv.Mat();
     cv.warpPerspective(src16, dst16, H, new cv.Size(width, height), cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar(0, 0, 0, 0));
     src16.delete(); src16 = null;

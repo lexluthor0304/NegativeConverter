@@ -150,9 +150,9 @@ const sameArray = (a, b, label) => {
   assert.equal(planeOnly.data, undefined, 'planeOnly returns no 8-bit samples');
   assert.equal(planeOnly.__image16.width, W);
   sameArray(planeOnly.__image16.data, full.__image16.data, 'planeOnly == warpImageData().__image16');
-  let copied = 0;
-  const direct = warpPlane16(detailed.__image16, perspective, W, H, { onCopied: () => copied++ });
-  assert.equal(copied, 1, 'onCopied runs once the source is on the heap');
+  const consumed = { width: W, height: H, data: detailed.__image16.data.slice() };
+  const direct = warpPlane16(consumed, perspective, W, H, { consume: true });
+  assert.equal(consumed.data, null, 'consume drops the source samples');
   sameArray(direct.data, full.__image16.data, 'warpPlane16 == warpImageData().__image16');
 
   // With matFromImageData unusable the plane warp still succeeds: it never

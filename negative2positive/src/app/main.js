@@ -47,7 +47,9 @@ import { frameNeedsReview } from './reviewQueue.js';
     import { buildFlatFieldMap, scoreBlankFrame } from './flatField.js';
     import { estimateAlignment, warpImageData } from './imageAlignment.js';
     import { collectPairs, fitLook, sanitizeLookForSettings } from './labMatch.js';
-    import { estimateExposureRatio, mergeFrames, coverageRect, toImage16, image16ToImageData } from './multiShot.js';
+    import { toImage16 } from './multiShot.js';
+    import { createMultiShotMergeJob, createMultiShotProgress, multiShotFitsBudget } from './multiShotWorkerClient.js';
+    import { MultiShotError, describeMultiShotError } from './multiShotErrors.js';
     import { sanitizeRollMetadata, sanitizeFrameMetadata, buildExportMetadata, frameNumberFor } from './analogMetadata.js';
     import { attachMetadataToBlob } from './exportMetadata.js';
     import { buildRollProject, serializeRollProject, parseRollProject, matchProjectFiles, hashFileForProject, projectFileName, isProjectFileName, saveProjectRecovery, loadProjectRecovery, clearProjectRecovery } from './rollProject.js';
@@ -15703,68 +15705,126 @@ import { frameNeedsReview } from './reviewQueue.js';
     // ===========================================
     const MULTI_SHOT_MAX = 5;
 
+    // Renderer-wide memory budget for a merge's worker, in bytes. #258 supplies
+    // it; until then every selection is attempted and an allocation failure
+    // is reported when it happens.
+    function multiShotBudgetBytes() {
+      return Infinity;
+    }
+
+    function setBatchProgressCancel(onCancel) {
+      const button = document.getElementById('batchProgressCancel');
+      if (!button) return;
+      button.hidden = !onCancel;
+      button.onclick = onCancel ? () => onCancel() : null;
+    }
+
+    function showMultiShotProgress(view, names) {
+      document.getElementById('batchProgressFill').style.width = `${Math.round(view.fraction * 100)}%`;
+      if (view.key) document.getElementById('batchProgressText').textContent = getInterpolatedText(view.key, view.params, view.fallback);
+      document.getElementById('batchProgressCurrent').textContent = Number.isInteger(view.index) ? names[view.index] || '' : '';
+    }
+
     // Aligns the selected shots to the first one, merges them in linear light
     // and adds the result to the queue as a 16-bit PNG, opened and selected in
-    // place of its sources.
+    // place of its sources. Alignment, warps, merge and encoding run in a
+    // disposable worker (multiShotWorkerClient.js); the page only decodes.
     async function mergeSelectedShots(mode = 'average') {
       if (document.body.dataset.studioBusy || state.cropping || isDesktopBatchExportLocked()) return;
       const selectedItems = state.fileQueue.filter((item) => item.selected);
       if (selectedItems.length < 2 || selectedItems.length > MULTI_SHOT_MAX) return;
-      if (!(await ensureOpenCvReady())) {
-        void appAlert(getLocalizedText('multiShotOpenCv', 'Alignment needs OpenCV, which could not be loaded.'));
-        return;
-      }
+      const memoryText = () => getLocalizedText('multiShotMemory', 'These shots are too large to merge with the memory available. Merge fewer shots or close other apps.');
       studioAutoFrameRunning = true;
       document.body.dataset.studioBusy = 'true';
       studioWorkspace?.sync();
-      showBatchProgress(true);
-      let merged = null; let used = 0; let skipped = 0;
-      try {
-        persistCurrentFileSettings({ silent: true, force: true });
-        let reference = null;
-        const frames = [];
-        for (let i = 0; i < selectedItems.length; i++) {
-          const item = selectedItems[i];
-          updateBatchProgress(i + 1, selectedItems.length + 1, item.file.name);
-          let imageData;
-          try {
-            imageData = await loadFileToImageData(item.file);
-          } catch (error) {
-            console.warn('Multi-shot decode failed for', item.file.name, error);
-            skipped++;
-            continue;
-          }
-          if (!reference) {
-            reference = imageData;
-            frames.push({ image16: toImage16(imageData), ratio: 1 });
-          } else {
-            let alignment = null;
-            try { alignment = estimateAlignment(reference, imageData, { maxSide: 1200 }); }
-            catch (error) { console.warn('Multi-shot alignment failed for', item.file.name, error); }
-            if (!alignment) { skipped++; continue; }
-            const warped = warpImageData(imageData, alignment.homography, reference.width, reference.height);
-            const image16 = toImage16(warped);
-            frames.push({ image16, ratio: estimateExposureRatio(frames[0].image16, image16) });
-          }
-          await new Promise((resolve) => setTimeout(resolve, 0));
-        }
-        if (frames.length >= 2) {
-          updateBatchProgress(selectedItems.length + 1, selectedItems.length + 1, getLocalizedText('multiShotMerging', 'Merging…'));
-          await new Promise((resolve) => setTimeout(resolve, 0));
-          merged = mergeFrames(frames, { mode, region: coverageRect(frames), opaque: true });
-          used = frames.length;
-        }
-      } finally {
+      let uiOpen = true;
+      const closeUi = () => {
+        if (!uiOpen) return;
+        uiOpen = false;
+        setBatchProgressCancel(null);
         showBatchProgress(false);
         studioAutoFrameRunning = false;
         delete document.body.dataset.studioBusy;
         studioWorkspace?.sync();
+      };
+      // The worker holds every frame at 16 bits plus its OpenCV heap: refuse a
+      // selection the budget cannot hold before anything is decoded.
+      const budgetBytes = multiShotBudgetBytes();
+      if (Number.isFinite(budgetBytes)) {
+        const pixels = await Promise.all(selectedItems.map((item) => imagePixelsForBatch(item.file)));
+        if (!multiShotFitsBudget(pixels, budgetBytes)) {
+          closeUi();
+          void appAlert(memoryText());
+          return;
+        }
       }
-      if (!merged) {
+      const names = selectedItems.map((item) => item.file.name);
+      const progress = createMultiShotProgress(selectedItems.length);
+      const job = createMultiShotMergeJob({
+        mode,
+        onProgress: (event) => { if (uiOpen) showMultiShotProgress(progress.update(event), names); },
+        // Used only when the module worker cannot start: the same pipeline on
+        // this thread with the page's OpenCV, yielding between merge bands.
+        createInlineProcessor: async ({ post, signal }) => {
+          if (!(await ensureOpenCvReady())) return null;
+          const { createMultiShotWorkerProcessor } = await import('../workers/multiShotWorkerProcessor.js');
+          return createMultiShotWorkerProcessor({ post, signal, pause: () => new Promise((resolve) => setTimeout(resolve, 0)) });
+        }
+      });
+      // Cancel ends the merge at once: the worker is terminated and the UI is
+      // released; a decode still running finishes unobserved and is dropped.
+      setBatchProgressCancel(() => { job.cancel(); closeUi(); });
+      showBatchProgress(true);
+      let result = null; let decodeSkipped = 0; let failure = null;
+      try {
+        persistCurrentFileSettings({ silent: true, force: true });
+        for (let i = 0; i < selectedItems.length; i++) {
+          const item = selectedItems[i];
+          if (uiOpen) showMultiShotProgress(progress.update({ stage: 'decode', index: i }), names);
+          const decoded = await Promise.race([
+            loadFileToImageData(item.file).then((imageData) => ({ imageData }), (error) => ({ error })),
+            job.failed
+          ]);
+          if (decoded.error) {
+            console.warn('Multi-shot decode failed for', item.file.name, decoded.error);
+            decodeSkipped++;
+            continue;
+          }
+          let imageData = decoded.imageData;
+          decoded.imageData = null;
+          await job.addFrame(i, imageData);
+          imageData = null;
+        }
+        if (job.framesPosted >= 2) result = await job.merge();
+      } catch (error) {
+        failure = error;
+      } finally {
+        job.dispose();
+        closeUi();
+      }
+      if (failure) {
+        const { code, message } = failure instanceof MultiShotError ? failure : describeMultiShotError(failure);
+        if (code === 'cancelled') return;
+        if (code === 'memory') {
+          console.warn('Multi-shot merge ran out of memory:', message);
+          void appAlert(memoryText());
+        } else if (code === 'opencv') {
+          void appAlert(getLocalizedText('multiShotOpenCv', 'Alignment needs OpenCV, which could not be loaded.'));
+        } else {
+          console.error('Multi-shot merge failed:', failure);
+          void appAlert(getLocalizedText('multiShotFailed', 'The selected shots could not be aligned, so nothing was merged.'));
+        }
+        return;
+      }
+      if (!result?.blob) {
         void appAlert(getLocalizedText('multiShotFailed', 'The selected shots could not be aligned, so nothing was merged.'));
         return;
       }
-      const blob = await imageDataToBlob(image16ToImageData(merged), 'png', null, 16);
+      // The worker encoded exactly what the 16-bit PNG export writes; the page
+      // adds the sRGB iCCP chunk, as imageDataToBlob does.
+      const blob = await attachMetadataToBlob(result.blob, 'png', null);
+      const used = result.used;
+      const skipped = decodeSkipped + result.skipped;
       const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, '').replace('T', '-');
       const name = `merged-${mode}-${stamp}.png`;
       const file = new File([blob], name, { type: 'image/png', lastModified: Date.now() });
@@ -16854,7 +16914,12 @@ import { frameNeedsReview } from './reviewQueue.js';
           void processNegative();
         },
         onConfirmAnalysis: () => beginCropMode({ analysisOnly: true }),
-        onMergeShots: (mode) => { void mergeSelectedShots(mode); },
+        onMergeShots: (mode) => {
+          mergeSelectedShots(mode).catch((error) => {
+            console.error('Multi-shot merge failed:', error);
+            void appAlert(getLocalizedText('multiShotFailed', 'The selected shots could not be aligned, so nothing was merged.'));
+          });
+        },
         onLoupe: () => { void openLoupe(); },
         onSaveProject: () => { void saveProject(); },
         onOpenProject: () => { const input = document.getElementById('projectInput'); if (input) { input.value = ''; input.click(); } },
