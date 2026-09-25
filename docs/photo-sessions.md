@@ -4,7 +4,8 @@ Issues: [#220](https://github.com/lexluthor0304/NegativeConverter/issues/220),
 [#221](https://github.com/lexluthor0304/NegativeConverter/issues/221),
 [#223](https://github.com/lexluthor0304/NegativeConverter/issues/223),
 [#224](https://github.com/lexluthor0304/NegativeConverter/issues/224),
-[#234](https://github.com/lexluthor0304/NegativeConverter/issues/234).
+[#234](https://github.com/lexluthor0304/NegativeConverter/issues/234),
+[#243](https://github.com/lexluthor0304/NegativeConverter/issues/243).
 
 ## Ownership and invalidation
 
@@ -31,8 +32,8 @@ from the cache through the normal warm or base-only activation. A separate 48 Mi
 for revisits after full-session eviction. These are retained-buffer limits,
 not a total renderer-memory promise; the active editor, workers, native GPU
 resources and file storage are additional. While a job runs in a hidden
-macOS window, or once an idle window has been hidden for five minutes, both
-caches are emptied to stay under WebKit's inactive memory limit; they refill
+macOS window, or once an idle window has been hidden for five minutes, these
+caches and the prefetch slot (#243) are emptied to stay under WebKit's inactive memory limit; they refill
 on use (`docs/hidden-window-jobs.md`).
 
 Keys include the per-file recipe, film-type override, repair configuration,
@@ -57,6 +58,24 @@ metadata callback cannot replace the newly selected image. Quiet cold loads
 do not impose the loading-overlay dwell or deliberately display a negative
 between processed views. Cache misses still require real processing; no
 unbounded cache or promise of instant first opens is made.
+
+Latest wins (#243). Each activation (a switch, or any `loadFile` a switch did
+not start) owns an `AbortController`; beginning the next one aborts it. The
+signal reaches the decode: `loadRawFile` disposes LibRaw (a pending open,
+metadata or imageData rejects at once) and terminates the per-decode
+post-decode worker in the same task, skips every later stage and never takes
+an embedded-preview fallback for an abort; a scan decode keeps its input
+before dispatch and terminates its worker after; a heavy file's background
+full-resolution decode stops with it. The superseded load ends `stale`
+without an error or a marked item. `invalidatePhotoActivation` also aborts the
+full-resolution render's worker request (`WORKER_ABORTED`, never counted
+against the worker) and the detection requests; a detection worker that owed
+nothing else is terminated with its plane copies, and the next cold load warms
+a fresh one while it decodes. A cold switch target waits a 120 ms dwell after
+the veil's paint before reading its file, so a double click or a fast
+Arrow+Enter run never reads the targets it skips; the dwell is skipped when the
+target's base is retained, prefetched or being decoded by a lane. The
+generation checks stay as a second line of defence.
 
 Cold navigation immediately identifies the target in the status bar and tile,
 and paints a viewer-local loading surface before starting expensive work.
@@ -154,11 +173,71 @@ the next paint; it is stored only while the photo is still queued under the
 same key. Row refreshes compute one key per row and touch only their row when
 a single tile changes.
 
-Other photos use a single background preview lane through
+Other photos get their tiles from the background photo lanes (below) through
 `processFileWithSettings`, with bounded output size and stale-result guards. The previous tile stays visible
 during invalidation, accompanied by a pending indicator; a failed preview is
 marked rather than retried indefinitely. This includes two-photo imports,
 which do not run automatic roll analysis.
+
+### Background photo lanes (#243)
+
+One pull-based scheduler in `main.js` runs every background decode: pass 1 of
+an automatic roll import (`runRollAnalysisPass`), lane tiles that still need a
+decode, and the prefetch of the next photo. Lanes are planned with
+`planBatchLanes` (one for tiles and prefetch; a roll pass brings its own
+count). Each time a lane frees up it picks one job with `pickBackgroundJob`
+(`backgroundPhotoScheduler.js`), recomputed on every pick so it follows
+navigation at once. For display position k of the open photo and direction of
+travel d (the sign of the last step in the shared display order, +1 when
+unknown): k+d first (for the prefetch, the next photo in that direction
+without a retained session), then k−d, then tiles visible in the strip or
+light table (an `IntersectionObserver` on `#fileListItems` with a one-row
+margin), then everything else by display distance. Photos the review filter
+hides come last. No job starts on a file another lane is working on.
+
+- **When.** A lane waits for `backgroundGate.idle()` (`backgroundGate.js`)
+  before every pick and before its decode: no photo switch, no busy editor,
+  no conversion, core reprocess or full-resolution render (in flight or
+  scheduled), no export, and no pointer, wheel, key or slider input for
+  400 ms (passive capture listeners; hovering does not count). A job mid-way
+  waits again, at most 2 s, before each main-thread-heavy step (frame
+  detection, geometry, the tile encode), so a paused job does not hold a
+  decoded frame through a foreground decode. A hidden window is not busy here;
+  hidden admission is `hiddenJobGate.js` (#241), which every job also passes.
+- **One decode.** Background decodes go through `sharedDecodes.js`: the
+  foreground's options (full size, defects repaired) with the RAW metadata,
+  so an adopted base carries lens and EXIF data exactly like a cold open. A
+  job's decode serves every need of its frame (analysis, tile, prefetch), and
+  a retained session or prefetched base is used instead of a decode. When the
+  user opens a frame a lane is decoding, or still holds while it analyses it,
+  `loadFile` adopts that decode instead of reading the file again (a heavy
+  file skips its half-size stage); the lane's analysis of the now-current frame
+  stops and the foreground analyses it, as before. Leases are reference
+  counted: a superseded adopter detaches without cancelling the lane's decode,
+  and the entry lives until the owning job releases the base.
+- **In-flight decodes.** With the desktop session budget, a cold activation
+  lets a lane's decode finish (it would have to be redone); on low-memory
+  devices the activation aborts the lanes' decodes, except the target's own.
+- **After a job.** Its base becomes a base-only `photoSessions` entry only if
+  it fits without evicting anything (`putIfRoom`); otherwise it goes to the
+  prefetch slot when the frame is the next photo, or is dropped. Tiles and
+  prefetch previews use the lanes' own conversion and frame-detection
+  workers, never the foreground's.
+- **Prefetch.** A separate one-entry session cache (`photoPrefetch`, the
+  desktop session budget; off on low-memory devices until #258 owns the
+  budget) holds the next photo's base-only entry `{ file, base, rawMetadata }`,
+  so an unvisited prefetch never evicts the photo just left (A/B/A stays
+  warm). Once the open photo has settled, the lane decodes the next photo,
+  keeps its base, and renders a 1200 px `photoPreviews` entry of its recipe
+  with `processFileWithSettings(previewMaxDimension: 1200)` on its own pool.
+  `switchToFile` takes a session or the prefetched base, so the next photo
+  opens without a read or decode: the veil shows the matching preview in the
+  click's task and the exact positive follows from the base. A new recipe (a
+  roll commit) re-renders the preview from the held base; the slot is dropped
+  once the user is two photos away from it.
+- **Buffers.** A shared, retained or prefetched base is read-only: it is
+  listed among the editor's live buffers, so no export transfers it (#244 and
+  #249 copy instead).
 
 The expanded light table uses the entire allocated row below its header.
 Its grid is the only vertical scrollport; the legacy file panel's 200px cap
@@ -169,15 +248,18 @@ reveals the complete tile, including its border, rather than its inset button.
 If roll analysis takes ownership while a thumbnail is in flight, that
 thumbnail stays invalid even after analysis becomes idle. It cannot publish
 prepared settings or errors over the analysis result; a fresh preview job
-refreshes the tile. The folder regression tracks foreground, analysis and
-thumbnail reads separately, and requires exactly one foreground/analysis
-decode per photo while allowing the separate final-recipe preview lane.
+refreshes the tile. The folder regression tracks foreground, analysis,
+thumbnail and prefetch reads separately (the lanes open their decode through
+`openAnalysisDecode`, `openTileDecode` or `openPrefetchDecode`), and requires
+exactly one foreground/analysis decode per photo while allowing the separate
+final-recipe preview lane.
 
 ## Verification
 
 ```sh
 npm test
 PORT=5214 CDP_PORT=9238 npm run test:smoke -- --photo-session-only
+PORT=5214 CDP_PORT=9238 npm run test:smoke -- --photo-activation-only
 PORT=5214 CDP_PORT=9238 npm run test:smoke -- --light-table-only
 PHOTO_SESSION_RAW_FILES='["/absolute/a.dng","/absolute/b.nef"]' npm run test:smoke -- --photo-session-raw-only
 npm run test:smoke

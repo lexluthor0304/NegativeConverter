@@ -25,7 +25,7 @@ detected stocks and roll outliers are visible at a glance.
   `data-preview-state="pending"`. During automatic roll import each measured
   frame then gets a converted `analysis` tile from its 900 px sample, rendered
   in a conversion worker without delaying the next decode; the roll commit and
-  the canonical lane (`loadStudioThumbnails`, final recipe) replace them, and a
+  the canonical lane (the background photo lanes, #243, final recipe) replace them, and a
   tile never moves back from `processed` or `analysis` to `embedded`
   (`data-thumbnail-kind` on each tile). CR3, RAF and other non-TIFF containers
   keep their numbered tile until a converted preview exists. Where workers

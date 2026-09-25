@@ -188,11 +188,17 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
   a killed export can be named at boot and resumed under the same names; see
   `docs/hidden-window-jobs.md`.
 
-The automatic roll analysis after a multi-file import uses the same scheduler
-and lane planning, with one auto-frame worker per lane
-(`createAutoFrameWorkerPool`), and runs frame detection silently: it used to
-show the blocking "Detecting the image area and tilt…" overlay for every file
-in the background pass, covering the editor for minutes on a long roll.
+The automatic roll analysis after a multi-file import uses the same lane
+planning, with one auto-frame worker per lane (`createAutoFrameWorkerPool`),
+and runs frame detection silently: it used to show the blocking "Detecting the
+image area and tilt…" overlay for every file in the background pass, covering
+the editor for minutes on a long roll. Its pass 1 no longer runs through
+`runBatchPipeline` (#243): the background photo lanes pull one frame at a time
+in display order around the open photo, wait for the foreground before each
+decode, and share each decode with the foreground and the tile and prefetch
+needs of that frame (`docs/photo-sessions.md`). The per-frame measurements and
+the group commit, built from `pending` in import order, are unchanged, and
+`runBatchPipeline`'s export sink order and cancellation are untouched.
 
 The exact 900px geometry-applied roll samples now live in
 `analysisSampleStore.js`, with a 128 MiB retained-RAM budget. Samples that do

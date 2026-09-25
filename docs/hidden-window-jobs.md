@@ -28,18 +28,19 @@ a kill recoverable.
   roll-analysis frame loop. Batch exports call `processFileWithSettings` with
   `silent: true`, so a never-analysed frame is detected without the blocking
   overlay and its frame wait; detection inputs and geometry are unchanged.
-  Readiness polls (the thumbnail lane, roll-analysis retries) stay on timers.
+  Readiness polls (the background photo lanes, roll-analysis retries) stay on timers.
 - No Web Lock (Chrome's Energy Saver ignores one that blocks nothing outside
   the page) and no `NSProcessInfo` activity (it had no effect in the probe).
 
 ## 2. The hidden-job gate
 
 `hiddenJobGate.js` (pure, unit-tested) decides when a job's next item may
-start. Every long job asks it: batch exports and automatic roll analysis
-through `runBatchPipeline`'s `beforeStart` hook, which a lane awaits **before**
-it claims an index (a lane that waits holds no index later sinks wait for) and
-releases after that index's sink; the thumbnail lane, roll-analysis decodes
-and contact-sheet frames directly. It counts in-flight items across callers.
+start. Every long job asks it: batch exports through `runBatchPipeline`'s
+`beforeStart` hook, which a lane awaits **before** it claims an index (a lane
+that waits holds no index later sinks wait for) and releases after that
+index's sink; the background photo lanes (roll-analysis pass 1, tiles and the
+prefetch, #243) before each job's decode, and roll-analysis decodes and
+contact-sheet frames directly. It counts in-flight items across callers.
 
 | window | rule |
 |---|---|
@@ -57,7 +58,7 @@ UI-process `MemoryFootprintMonitor` ships). #258 replaces the local estimate:
   frame (header dimensions; `rawDecodeEstimate.js` keeps the RAW figure
   importable without LibRaw);
 - resident: unique backing buffers of the open photo's planes, the undo
-  history and both photo caches (`backingBuffers` from `photoSessionCache.js`).
+  history and the photo caches, the prefetch slot included (`backingBuffers` from `photoSessionCache.js`).
 
 While the gate holds an item back, the header export strip, the roll-analysis
 status and the browser batch overlay read "Paused while the window is hidden",
@@ -65,7 +66,7 @@ and the page logs the resident breakdown (`[hidden-job] paused while hidden`).
 
 **Shedding.** On macOS WebKit, while a job runs when the window hides, before
 each hidden admission, when a hidden job ends, and at the end of the grace
-period when idle, the page drops the photo-session and preview caches,
+period when idle, the page drops the photo-session, preview and prefetch caches,
 terminates the export-worker singleton when it has no request in flight, and
 releases the MI-GAN session unless the running job may use AI repair. (The
 RAW post-decode worker, which runs the sensor-defect pass, lives only for its
@@ -73,7 +74,7 @@ own decode since #232, so there is no idle one to terminate.) MI-GAN keeps its `
 same model on the same provider on demand without bumping `aiRepair.revision`,
 so photo keys and thumbnails stay valid. An idle window that is only briefly
 hidden keeps its warm caches. Showing the window releases waiting items and
-restarts the thumbnail lane; caches refill and workers respawn lazily.
+restarts the background photo lanes; caches (the prefetch slot too) refill and workers respawn lazily.
 
 **Parking (opt-in).** With `localStorage nc_hidden_park_v1 = 'on'`, a held
 item also parks the open photo: its recipe is persisted, only the decoded base
