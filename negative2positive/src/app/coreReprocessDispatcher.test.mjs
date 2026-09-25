@@ -175,6 +175,9 @@ function schedulerFixture({ repairs = false } = {}) {
     scheduleFullUpdate: () => {},
     resetDustForCleanSource: () => {},
     scheduleDustDetection: () => log.push('dust'),
+    // #234: a display-preview resize hands the replaced source to the tile.
+    currentConvertedPreviewSource: () => state.processedImageData,
+    carryStudioThumbnailSource: previous => { if (previous) log.push('carry'); },
   });
   vm.runInContext([
     'coreReprocessBusy', 'whenCoreReprocessIdle', 'noteCoreReprocessSettled', 'runCoreReprocess',
@@ -209,6 +212,41 @@ function schedulerFixture({ repairs = false } = {}) {
   assert.equal(f.context.coreReprocessTimer, null);
   f.conversions[0].resolve(f.result());
   await settle();
+  assert.equal(f.context.coreReprocessBusy(), false);
+}
+
+{
+  // #234: a display-preview resize keeps the active tile only while no
+  // settings request merges into it, at the end-of-task gate and in the
+  // busy lane's newest-wins slot alike.
+  const f = schedulerFixture();
+  f.request(undefined, { full: false, displayResize: true });
+  await Promise.resolve();
+  f.conversions[0].resolve(f.result());
+  await settle();
+  assert.deepEqual(f.log, ['post:0', 'apply', 'carry', 'draw'], 'a lone resize carries the tile source');
+  f.log.length = 0;
+  f.clock.nextFrame();
+  f.request(undefined, { full: false, displayResize: true });
+  f.request(5);
+  await Promise.resolve();
+  f.conversions[1].resolve(f.result());
+  await settle();
+  assert.deepEqual(f.log, ['post:5', 'apply', 'draw'], 'a settings request merged at the gate rebuilds the tile');
+  f.log.length = 0;
+  f.clock.nextFrame();
+  f.request(6);
+  await Promise.resolve();
+  f.clock.nextFrame();
+  f.request(undefined, { full: false, displayResize: true });
+  assert.equal(f.context._coreReprocessPending.displayResize, true);
+  f.request(7);
+  assert.equal(f.context._coreReprocessPending.displayResize, false, 'a settings request merged in the slot clears it');
+  f.conversions[2].resolve(f.result());
+  await settle();
+  f.conversions[3].resolve(f.result());
+  await settle();
+  assert.ok(!f.log.includes('carry'));
   assert.equal(f.context.coreReprocessBusy(), false);
 }
 
@@ -375,7 +413,9 @@ for (const earlyPost of [false, true]) {
     undoStack: [], redoStack: [], photoSettingsKey: () => 'key', captureSnapshot: () => ({ refs: {} }),
     photoSessions: { put: (key, entry) => { stored.push(entry); return true; } },
     photoPreviews: { put: () => true }, createAdjustedPhotoPreview: () => ({}),
-    currentConvertedPreviewSource: () => null, buildAdjustmentSettings: () => ({}),
+    currentConvertedPreviewSource: () => null,
+    buildAdjustmentSettings: () => ({ curves: { r: new Uint8Array(256), g: new Uint8Array(256), b: new Uint8Array(256) } }),
+    samplePhotoPreviewSource: () => ({}), adjustPhotoPreviewSample: () => ({}), schedulePostPaintTask: () => {},
   });
   vm.runInContext(functionSource('rememberPhotoSession'), f.context);
   f.request(1);
