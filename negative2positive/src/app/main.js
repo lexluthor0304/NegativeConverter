@@ -8164,10 +8164,15 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           trace.mark('lensCorrection', {
             outputPixels: getImageDataPixelCount(correctedSourceData)
           });
-          // The retained display level of this source (#248 part 3), built in
-          // row bands of about 12 ms before anything points at the new source.
-          const level = await buildDisplayLevelInBands(correctedSourceData,
-            displayLevelFactor(correctedSourceData.width, correctedSourceData.height), { isCurrent: isCurrentConversion });
+          // The retained display level of this source (#248 part 3): the one the
+          // geometry pool built with the frame when lens correction left the
+          // frame as it is, else built here in row bands of about 12 ms before
+          // anything points at the new source.
+          const levelFactor = displayLevelFactor(correctedSourceData.width, correctedSourceData.height);
+          const prebuiltLevel = correctedSourceData.__displayLevel;
+          if (sourceData !== correctedSourceData && sourceData.__displayLevel) delete sourceData.__displayLevel;
+          const level = prebuiltLevel && displayLevelGeometry(prebuiltLevel).k === levelFactor ? prebuiltLevel
+            : await buildDisplayLevelInBands(correctedSourceData, levelFactor, { isCurrent: isCurrentConversion });
           if (!level || !isCurrentConversion()) return;
           trace.mark('displayLevel', { outputPixels: getImageDataPixelCount(level) });
           invalidateSilverCoreCache();
@@ -12096,7 +12101,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         const frame = renderGeometryFrame(base, key);
         return { frame, cropped: key.crop ? cropImageDataRegion(frame, key.crop) : null };
       }
-      const output = plan.identity ? source : await geometryPool.render(source, plan, { isCurrent, maxInFlight: interactiveGeometryBands(plan) });
+      // The pool builds the frame's display level with its bands (#248), so
+      // processNegative does not box-filter the whole frame on this thread.
+      const output = plan.identity ? source
+        : await geometryPool.render(source, plan, { isCurrent, maxInFlight: interactiveGeometryBands(plan), level: true });
       if (!output || !isCurrent()) return null;
       if (!key.crop) return { frame: output, cropped: null };
       return { frame: createGeometryFrame(base, key), cropped: output };

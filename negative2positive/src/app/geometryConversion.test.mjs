@@ -35,4 +35,28 @@ const recipe = { rotationAngle: 2.2, mirrored: false, cropRegion: { left: 5, top
   assert.equal(h.state.croppedImageData, null, 'the superseded result never lands');
 }
 
+// #248: a frame the geometry pool built with its display level converts
+// with that level; lens correction (a new frame) builds its own and lets
+// the frame's go.
+for (const lens of [false, true]) {
+  const base = makeBase(64, 48, 33);
+  const h = createHarness(base, { realProcessNegative: true }), c = h.context;
+  c.restoreSettings(recipe);
+  await c.whenGeometrySettled();
+  const frame = h.state.croppedImageData || h.state.originalImageData;
+  const prebuilt = { width: 21, height: 10, geometry: { k: 3 } };
+  frame.__displayLevel = prebuilt;
+  let banded = 0;
+  Object.assign(h.target, {
+    displayLevelFactor: () => 3, displayLevelGeometry: level => level.geometry || { k: 1 },
+    buildDisplayLevelInBands: async () => { banded++; return { width: 21, height: 10, geometry: { k: 3 } }; },
+    // A corrected frame is a new image, as the lens pass makes one.
+    applyLensCorrectionWithSettings: async source => (lens ? { width: source.width, height: source.height, data: source.data, corrected: true } : source),
+  });
+  await c.processNegative();
+  assert.equal(banded, lens ? 1 : 0, lens ? 'a lens-corrected frame builds its own level' : 'the pool-built level is adopted');
+  assert.equal(h.state.displayLevelImageData === prebuilt, !lens);
+  assert.equal('__displayLevel' in frame, !lens, 'an unused pool level is let go');
+}
+
 console.log('geometry conversion tests passed');

@@ -246,9 +246,12 @@ export function geometrySourceRect(plan, y0, y1) {
 
 // Splits the output into at most `count` row bands, each with its source
 // rectangle.
-export function planGeometryBands(plan, count = 1) {
+export function planGeometryBands(plan, count = 1, align = 1) {
   const bands = Math.max(1, Math.min(plan.outHeight, Math.floor(count) || 1));
-  const rows = Math.ceil(plan.outHeight / bands);
+  let rows = Math.ceil(plan.outHeight / bands);
+  // Bands that start on multiples of `align` (#248: the display level's box
+  // rows, built per band). Where a band ends does not change its pixels.
+  if (align > 1) rows = Math.ceil(rows / align) * align;
   const result = [];
   for (let y0 = 0; y0 < plan.outHeight; y0 += rows) {
     const y1 = Math.min(plan.outHeight, y0 + rows);

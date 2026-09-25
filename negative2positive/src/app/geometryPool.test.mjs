@@ -207,4 +207,34 @@ assert.equal(geometryBandCount({ outWidth: 4000, outHeight: 2000 }, 6), 6);
   await Promise.all(threads.map(thread => thread.terminate()));
 }
 
+// #248: the pool builds the output's display level with the bands (bands
+// start on multiples of k), on workers and on this thread, and the output
+// pixels do not change.
+{
+  const { buildDisplayLevel, displayLevelGeometry } = await import('./displayPreview.js');
+  for (const k of [2, 3]) {
+    for (const geometry of [geometries[0], geometries[2], geometries[4]]) {
+      const plan = planGeometry(source, geometry);
+      const expected = renderGeometry(source, plan);
+      const expectedLevel = buildDisplayLevel(expected, k);
+      for (const [label, options] of [['workers', {}], ['this thread', { throwOnPost: true }]]) {
+        const log = [];
+        const pool = createGeometryPool({ workerFactory: fakeWorkerFactory(log, options), workersSupported: true, size: 3, onError: () => {} });
+        const actual = await pool.render(source, plan, { bands: 5, level: k });
+        assertSame(actual, expected, `level ${k} ${label}: output unchanged`);
+        const level = actual.__displayLevel;
+        assert.ok(level, `level ${k} ${label}: built with the bands`);
+        assert.deepEqual(displayLevelGeometry(level), { sourceWidth: plan.outWidth, sourceHeight: plan.outHeight, k });
+        assert.ok(bytes(level.__image16.data).equals(bytes(expectedLevel.__image16.data)), `level ${k} ${label}: equals the whole-frame level`);
+        if (label === 'workers') assert.ok(log.every(entry => entry.y0 % k === 0), 'bands start on multiples of k');
+        pool.dispose();
+      }
+    }
+  }
+  // Without `level` nothing is built (batch export) and bands are as before.
+  const pool = createGeometryPool({ workerFactory: fakeWorkerFactory([]), workersSupported: true, size: 2 });
+  assert.equal((await pool.render(source, planGeometry(source, geometries[0]), { bands: 4 })).__displayLevel, undefined);
+  pool.dispose();
+}
+
 console.log('geometry pool tests passed');

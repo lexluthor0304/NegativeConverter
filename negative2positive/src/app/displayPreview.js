@@ -233,6 +233,25 @@ function boxLevelRows(image, k, lx0, lx1, ly0, ly1, out, outWidth) {
   }
 }
 
+/**
+ * The level rows of a band of a frame whose first row is a multiple of k
+ * (#248: the geometry pool builds them with the band): rows [0, floor(height /
+ * k)) of the band's level, `levelWidth` wide.
+ */
+export function displayLevelRows(image, k, levelWidth = Math.floor(image.width / k)) {
+  const rows = Math.floor(image.height / k);
+  const out = new Uint16Array(levelWidth * rows * 4);
+  boxLevelRows(image, k, 0, levelWidth, 0, rows, out, levelWidth);
+  return out;
+}
+
+/** A level assembled elsewhere (the geometry pool), with its source geometry. */
+export function adoptDisplayLevel(data, width, height, geometry) {
+  const level = { width, height, __image16: { width, height, data } };
+  displayLevels.set(level, { sourceWidth: geometry.sourceWidth, sourceHeight: geometry.sourceHeight, k: geometry.k });
+  return level;
+}
+
 /** The whole level of `image` at once; `image` itself when k is 1. */
 export function buildDisplayLevel(image, k = displayLevelFactor(image.width, image.height)) {
   if (k <= 1) return image;
