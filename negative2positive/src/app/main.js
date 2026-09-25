@@ -12500,7 +12500,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       if (exportInfo.format === 'tiff') {
         // Try Worker first for TIFF encoding
         if (exportWorkers.isWorkerAvailable()) {
-          blob = await exportWorkers.workerEncodeTiff(imageData, exportInfo.bitDepth, onProgress, metadata);
+          blob = await exportWorkers.workerEncodeTiff(imageData, exportInfo.bitDepth, { onProgress, signal }, metadata);
           if (blob) {
             trace.end({ bytes: blob.size || 0, worker: true });
             return blob;
