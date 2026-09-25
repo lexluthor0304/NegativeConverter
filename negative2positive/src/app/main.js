@@ -10134,6 +10134,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           updateWBSliders();
         }
         setFilmTypeButtons(state.filmType);
+        // The paper list is per film kind: offer this type's papers now. The
+        // stored paper stays; a conversion ignores one of another kind.
+        populatePaperOptions();
         let modeUpdated = false;
         if (requiresFilmBase()) {
           setStep2Mode(suggestStep2Mode());
