@@ -1,5 +1,5 @@
 import { Engine } from '../silvercore/engine/Engine.js';
-import { loadFilmPresets } from '../silvercore/engine/filmPresetsLoader.js';
+import { loadFilmPresets, getLoadedFilmPresets } from '../silvercore/engine/filmPresetsLoader.js';
 import { bwMixWeights, toneProfiles } from '../silvercore/engine/Presets.js';
 import { PROFILES as ENHANCED_PROFILE_NAMES } from '../silvercore/engine/EnhancedProfiles.js';
 import {
@@ -10,7 +10,7 @@ import {
 import { applyFilmBaseCompensationToBuffer } from './filmBaseCompensation.js';
 import { analyzeImage, analyzeGreyImage, greyChannelLevels, adjustSaturation } from '../silvercore/engine/ImageProcessor.js';
 import { normalizePaperId, normalizeToningId } from '../silvercore/engine/PaperProfiles.js';
-import { applyExposureStopsToGrey } from '../silvercore/util/localExposure.js';
+import { applyExposureStopsToGrey, hasExposureStops } from '../silvercore/util/localExposure.js';
 import {
   mixToGrey,
   allOpaque,
@@ -168,9 +168,12 @@ function mergeFilmPresetSettings(baseSettings, presetSettings) {
   return merged;
 }
 
-async function applyFilmPreset(baseSettings, presetId) {
+function namesFilmPreset(settings) {
+  return Boolean(settings.filmPreset && settings.filmPreset !== 'none');
+}
+
+function applyFilmPresetFrom(filmPresets, baseSettings, presetId) {
   if (!presetId || presetId === 'none') return baseSettings;
-  const filmPresets = await loadFilmPresets();
   const preset = filmPresets[presetId];
   if (!preset || !preset.settings) return baseSettings;
   return mergeFilmPresetSettings(baseSettings, preset.settings);
@@ -179,7 +182,26 @@ async function applyFilmPreset(baseSettings, presetId) {
 // Exported for tests and introspection: resolves caller settings + film preset into the
 // flat, range-checked parameter object the engine consumes.
 export async function buildSilverCoreParams(mode, settings = {}) {
-  const merged = await applyFilmPreset(settings, settings.filmPreset);
+  return resolveSilverCoreParams(mode, settings, namesFilmPreset(settings) ? await loadFilmPresets() : null);
+}
+
+// buildSilverCoreParams() for callers that must not wait (the GPU preview draws in the
+// animation frame, #239): null while a named film preset's table has not loaded yet,
+// whose load it then starts.
+export function trySilverCoreParams(mode, settings = {}) {
+  if (!namesFilmPreset(settings)) return resolveSilverCoreParams(mode, settings, null);
+  const filmPresets = getLoadedFilmPresets();
+  if (!filmPresets) {
+    void loadFilmPresets().catch(() => {});
+    return null;
+  }
+  return resolveSilverCoreParams(mode, settings, filmPresets);
+}
+
+// The synchronous body of buildSilverCoreParams, with the film-preset table given.
+export function resolveSilverCoreParams(mode, settings = {}, filmPresets = null) {
+  if (namesFilmPreset(settings) && !filmPresets) throw new Error('Film presets are not loaded');
+  const merged = applyFilmPresetFrom(filmPresets, settings, settings.filmPreset);
   const colorModel = String(merged.colorModel || 'standard');
   // Standard negatives carry a blue hue correction; positive scans already
   // have positive colour, so their neutral starting model must be identity.
@@ -246,7 +268,7 @@ export async function buildSilverCoreParams(mode, settings = {}) {
   };
 }
 
-function toGrayscaleInPlace(image16, mixPreset) {
+export function toGrayscaleInPlace(image16, mixPreset) {
   const weights = bwMixWeights[mixPreset] || bwMixWeights.standard;
   const data = image16.data;
   for (let i = 0; i < data.length; i += 4) {
@@ -350,6 +372,42 @@ function flatFieldKeyOf(settings) {
   const g = settings.flatFieldGeometry || {};
   const crop = g.cropRegion ? `${g.cropRegion.left ?? g.cropRegion.x}|${g.cropRegion.top ?? g.cropRegion.y}|${g.cropRegion.width}|${g.cropRegion.height}` : '';
   return `${map.id || 'map'}|${g.baseWidth}x${g.baseHeight}|${g.rotationAngle || 0}|${g.mirrored ? 1 : 0}|${crop}`;
+}
+
+// The film-base / flat-field preprocessing a conversion of `settings` in `mode` bakes
+// into its pristine plane, or null when there is none.
+//
+// Film-base compensation cancels the orange mask, which only colour negative film
+// has. B&W film has no mask (and the Step-2 UI hides the control for it) and slide
+// film has none either — but the app still sends a filmBase object, so B&W scans were
+// multiplied by the default {210,140,90} base (r 0.70 / g 1.05 / b 1.63 in linear
+// mode, clipping blue above ~61% of range) or by whatever colour negative happened to
+// be sampled last, making the same file convert differently from run to run.
+// The flat field (camera-scan light pad) applies to every mode; it is baked
+// into the same cached buffer as the film base compensation.
+function filmBaseCompensationFor(settings, mode) {
+  const flatFieldKey = flatFieldKeyOf(settings);
+  return (mode === 'color' && settings && settings.filmBase) || flatFieldKey
+    ? {
+        base: mode === 'color' && settings && settings.filmBase ? settings.filmBase : null,
+        options: {
+          method: settings.filmBaseCompensation || settings.filmBaseMethod || 'density',
+          strength: settings.filmBaseStrength ?? 1
+        },
+        flatField: flatFieldKey ? settings.flatField : null,
+        flatFieldGeometry: flatFieldKey ? settings.flatFieldGeometry : null,
+        flatFieldKey
+      }
+    : null;
+}
+
+// The part of the analysis state that describes the preprocessing.
+function filmBaseKeyOf(filmBaseCompensation) {
+  const base = filmBaseCompensation ? filmBaseCompensation.base : null;
+  const options = filmBaseCompensation ? filmBaseCompensation.options : null;
+  return (base
+    ? `${base.r}|${base.g}|${base.b}|${base.r16}|${base.g16}|${base.b16}|${options.method}|${options.strength}`
+    : '') + (filmBaseCompensation && filmBaseCompensation.flatFieldKey ? `|ff:${filmBaseCompensation.flatFieldKey}` : '');
 }
 
 // Preprocessing that is baked into the cached pristine buffer: the flat field
@@ -502,8 +560,6 @@ function _reusableOutput(slot, reuse, length, input16, reference) {
 // pre-tone saturation and, in B&W, the channel mix. Every other parameter only reshapes
 // the LUTs and can go through the cheap reprocess() path.
 function _analysisStateFor(params, filmBaseCompensation, sourceRef, mode, reference = null) {
-  const base = filmBaseCompensation ? filmBaseCompensation.base : null;
-  const options = filmBaseCompensation ? filmBaseCompensation.options : null;
   return {
     sourceId: _bufferId(sourceRef),
     referenceSize: reference ? `${reference.width}x${reference.height}` : null,
@@ -515,9 +571,7 @@ function _analysisStateFor(params, filmBaseCompensation, sourceRef, mode, refere
     preSaturation: params.preSaturation,
     bwMix: mode === 'bw' ? params.bwMix : null,
     analysisOverrideKey: params.analysisOverride ? JSON.stringify(params.analysisOverride) : '',
-    filmBaseKey: (base
-      ? `${base.r}|${base.g}|${base.b}|${base.r16}|${base.g16}|${base.b16}|${options.method}|${options.strength}`
-      : '') + (filmBaseCompensation && filmBaseCompensation.flatFieldKey ? `|ff:${filmBaseCompensation.flatFieldKey}` : ''),
+    filmBaseKey: filmBaseKeyOf(filmBaseCompensation),
   };
 }
 
@@ -734,6 +788,12 @@ function _transientGrey(ctx) {
   return result;
 }
 
+// The analysis sample a request carries, when it is a usable Image16.
+function _validReference(candidate) {
+  return candidate?.data instanceof Uint16Array
+    && candidate.data.length === candidate.width * candidate.height * 4 ? candidate : null;
+}
+
 async function runSilverCore(imageData, settings, mode, options) {
   const slot = _slotFor(options);
   const params = await buildSilverCoreParams(mode, settings);
@@ -763,31 +823,9 @@ async function runSilverCore(imageData, settings, mode, options) {
     params.profileStrength = 0;
   }
 
-  // Film-base compensation cancels the orange mask, which only colour negative film
-  // has. B&W film has no mask (and the Step-2 UI hides the control for it) and slide
-  // film has none either — but the app still sends a filmBase object, so B&W scans were
-  // multiplied by the default {210,140,90} base (r 0.70 / g 1.05 / b 1.63 in linear
-  // mode, clipping blue above ~61% of range) or by whatever colour negative happened to
-  // be sampled last, making the same file convert differently from run to run.
-  // The flat field (camera-scan light pad) applies to every mode; it is baked
-  // into the same cached buffer as the film base compensation.
-  const flatFieldKey = flatFieldKeyOf(settings);
-  const filmBaseCompensation = (mode === 'color' && settings && settings.filmBase) || flatFieldKey
-    ? {
-        base: mode === 'color' && settings && settings.filmBase ? settings.filmBase : null,
-        options: {
-          method: settings.filmBaseCompensation || settings.filmBaseMethod || 'density',
-          strength: settings.filmBaseStrength ?? 1
-        },
-        flatField: flatFieldKey ? settings.flatField : null,
-        flatFieldGeometry: flatFieldKey ? settings.flatFieldGeometry : null,
-        flatFieldKey
-      }
-    : null;
+  const filmBaseCompensation = filmBaseCompensationFor(settings, mode);
 
-  const candidate = options?.analysisImageData;
-  const reference = candidate?.data instanceof Uint16Array
-    && candidate.data.length === candidate.width * candidate.height * 4 ? candidate : null;
+  const reference = _validReference(options?.analysisImageData);
   const analysisParams = reference ? { ...params, analysisRegion: null, excludeTransparent: true } : params;
   const analysisState = _analysisStateFor(analysisParams, filmBaseCompensation, reference ? reference.data : input16.data, mode, reference);
   const needsFullProcess = _needsFullProcess(slot, options, analysisState);
@@ -924,6 +962,124 @@ export function inspectSlotBuffers(which = 'full') {
     prepared: slot.prepared,
     exposed: slot.exposed,
   } : null;
+}
+
+// ---- GPU preview inputs (#239) ----
+//
+// The interactive GPU preview runs the per-tick stages (B&W mix → pre-saturation →
+// positive gain/WB → stops → curves → HSL → 3D profile → saturation → paper) as one
+// shader on the display-size negative, while the settle frame and every export stay
+// on runSilverCore. These three functions give main what the shader needs from the
+// same slot and cache the following exact frame uses, so preparing and analysing
+// here leave that frame's pixels unchanged (it then reuses the pristine plane and the
+// analysis, as the next tick of a drag does).
+
+// Identity of the plane a preview shader starts from, apart from the source itself:
+// the film base and flat field the pristine plane is compensated with.
+export function silverCorePreparedKey(settings = {}, mode = 'color') {
+  return `${mode}|${filmBaseKeyOf(filmBaseCompensationFor(settings, mode))}`;
+}
+
+// The analysis state a conversion of these parameters is analysed under, as a string:
+// equal keys mean the worker's analysis (channelData, autoColor, positiveAnalysis)
+// is the same. `source` stands for the converted pixels by identity (main passes its
+// display preview object; the worker compares its own buffers).
+export function silverCoreAnalysisKey(mode, params, settings, source, analysisImageData = null) {
+  const reference = _validReference(analysisImageData);
+  const analysisParams = reference ? { ...params, analysisRegion: null, excludeTransparent: true } : params;
+  return JSON.stringify(_analysisStateFor(analysisParams, filmBaseCompensationFor(settings, mode),
+    reference ? reference.data : source, mode, reference));
+}
+
+// Point samples at the positions downsampleImageDataForMaxPixels takes (every
+// `step`-th pixel and row from 0), of an RGBA16 plane and its stops.
+function _pointSample(plane, stops, maxPixels) {
+  const { width, height, data } = plane;
+  const total = width * height;
+  const step = total <= maxPixels ? 1 : Math.ceil(Math.sqrt(total / maxPixels));
+  const outW = step === 1 ? width : Math.max(1, Math.floor(width / step));
+  const outH = step === 1 ? height : Math.max(1, Math.floor(height / step));
+  const out = new Uint16Array(outW * outH * 4);
+  const outStops = stops ? new Float32Array(outW * outH) : null;
+  for (let y = 0; y < outH; y++) {
+    const srcY = Math.min(height - 1, y * step);
+    for (let x = 0; x < outW; x++) {
+      const srcX = Math.min(width - 1, x * step);
+      const p = srcY * width + srcX;
+      const o = y * outW + x;
+      out.set(data.subarray(p * 4, p * 4 + 4), o * 4);
+      if (outStops) outStops[o] = stops[p];
+    }
+  }
+  return { width: outW, height: outH, data: out, stops: outStops };
+}
+
+function _previewSlot(imageData, options) {
+  const slot = _slotFor(options);
+  const sourceShape = imageData.__image16?.data instanceof Uint16Array ? imageData.__image16 : imageData;
+  if (options?.forceFullProcess || sourceShape.width * sourceShape.height > _largeImagePixels) {
+    throw new Error('The GPU preview only takes interactive frames');
+  }
+  const engine = _getOrCreateEngine(slot, sourceShape.width, sourceShape.height);
+  const { image: input16 } = toImage16ForSlot(slot, imageData, false);
+  return { slot, engine, input16 };
+}
+
+/**
+ * What the GPU preview uploads for a display-size frame: the prepared negative (a
+ * copy of the film-base / flat-field compensated plane; null without compensation,
+ * when the caller's own source is that plane), the dodge-and-burn stops (null when
+ * every stop is 0) and point samples of both for the CPU histogram.
+ */
+export function prepareSilverCorePreview(imageData, settings = {}, mode = 'color', options = {}) {
+  const { slot, input16 } = _previewSlot(imageData, options);
+  const filmBaseCompensation = filmBaseCompensationFor(settings, mode);
+  const base = _pristineFor(slot, input16, filmBaseCompensation);
+  const stops = localExposureStopsForSlot(slot, settings, input16.width, input16.height);
+  const activeStops = stops && hasExposureStops(stops) ? stops : null;
+  return {
+    width: input16.width,
+    height: input16.height,
+    pristine: filmBaseCompensation ? new Uint16Array(base.data) : null,
+    stops: activeStops ? new Float32Array(activeStops) : null,
+    histogram: _pointSample(base, activeStops, Number(options.histogramSamples) || 24_576),
+  };
+}
+
+/**
+ * The analysis a frame of these settings would use, run exactly as runSilverCore runs
+ * it (on the analysis sample when there is one) and kept in the slot, so the frame
+ * that follows skips it. Returns the ~200 bytes the GPU preview seeds its engine with.
+ */
+export async function analyzeSilverCorePreview(imageData, settings = {}, mode = 'color', options = {}) {
+  const params = await buildSilverCoreParams(mode, settings);
+  const { slot, engine, input16 } = _previewSlot(imageData, options);
+  const filmBaseCompensation = filmBaseCompensationFor(settings, mode);
+  const reference = _validReference(options?.analysisImageData);
+  const analysisParams = reference ? { ...params, analysisRegion: null, excludeTransparent: true } : params;
+  const analysisState = _analysisStateFor(analysisParams, filmBaseCompensation, reference ? reference.data : input16.data, mode, reference);
+  const needsFullProcess = _needsFullProcess(slot, options, analysisState);
+  if (needsFullProcess) {
+    // The stops come after the analysis; the frame builds their level itself.
+    params.localExposureStops = null;
+    if (reference) {
+      const sample = _takeWorkBuffer(slot.referencePixels, reference, filmBaseCompensation);
+      if (mode === 'bw') toGrayscaleInPlace(sample, params.bwMix);
+      engine.analyze(sample, analysisParams);
+    } else {
+      const ctx = { slot, engine, params, mode, input16, owned: false, filmBaseCompensation, reference, needsFullProcess, analysisState, analysisPreview: null };
+      if (mode === 'bw' && engine.greyTableAvailable(params)) _prepareGrey(ctx);
+      else _prepareRgba(ctx);
+    }
+    slot.analysis = analysisState;
+  }
+  if (!reference) slot.referencePixels = {};
+  return {
+    channelData: engine.channelData.map((channel) => ({ ...channel })),
+    autoColor: engine.autoColor ? { ...engine.autoColor } : null,
+    positiveAnalysis: engine.positiveAnalysis
+      ? { gain: engine.positiveAnalysis.gain, wb: [...engine.positiveAnalysis.wb] } : null,
+  };
 }
 
 export function invalidateSilverCoreCache() {

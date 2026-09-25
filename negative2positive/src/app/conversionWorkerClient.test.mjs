@@ -294,3 +294,51 @@ console.log('conversionWorkerClient: 入力再利用・参照解除・再起動�
   await other;
   console.log('conversionWorkerClient: superseded exact renders abort with WORKER_ABORTED and stop an idle worker');
 }
+
+// #239: prepare and analyze go through the same cached-source contract as frames and
+// hand back typed arrays; the source, sample and strokes are sent only when changed.
+{
+  const previewWorkers = [];
+  const preview = createConversionWorkerClient({ cacheInput: true, workerFactory: () => { const w = new FakeWorker(); previewWorkers.push(w); return w; } });
+  const image = new ImageData(new Uint8ClampedArray([10, 20, 30, 255, 40, 50, 60, 255]), 2, 1);
+  const sample = new ImageData(image.data.slice(), 2, 1);
+  const strokes = { strokes: [{ stops: 1 }] };
+  const frame = { imageData: image, settings: { localExposure: strokes }, options: { analysisImageData: sample } };
+  const worker = () => previewWorkers[0];
+  let pending = preview.prepare(frame);
+  let message = worker().messages.at(-1);
+  assert.equal(message.type, 'prepare');
+  assert.equal(message.reuseSource, false);
+  assert.ok(message.rgba && message.options.analysisImageData);
+  worker().onmessage({ data: { id: message.id, type: 'prepared', width: 2, height: 1,
+    pristine: new Uint16Array(8).fill(7).buffer, stops: new Float32Array([0, 1]).buffer,
+    histogram: { width: 1, height: 1, image16: new Uint16Array([1, 2, 3, 4]).buffer, stops: null } } });
+  const prepared = await pending;
+  assert.ok(prepared.pristine instanceof Uint16Array && prepared.pristine[0] === 7);
+  assert.ok(prepared.stops instanceof Float32Array && prepared.stops[1] === 1);
+  assert.deepEqual([...prepared.histogram.data], [1, 2, 3, 4]);
+  assert.equal(prepared.histogram.stops, null);
+
+  pending = preview.analyze(frame, 'key-1');
+  message = worker().messages.at(-1);
+  assert.equal(message.type, 'analyze');
+  assert.equal(message.key, 'key-1');
+  assert.equal(message.reuseSource, true);
+  assert.equal(message.reuseAnalysis, true);
+  assert.equal(message.reuseLocalExposure, true);
+  assert.ok(!('rgba' in message) && !('analysisImageData' in message.options));
+  worker().onmessage({ data: { id: message.id, type: 'analyzed', key: 'key-1', channelData: [{ whitePointOrigin: 1 }], autoColor: null, positiveAnalysis: { gain: 1, wb: [1, 1, 1] } } });
+  assert.deepEqual(await pending, { key: 'key-1', channelData: [{ whitePointOrigin: 1 }], autoColor: null, positiveAnalysis: { gain: 1, wb: [1, 1, 1] } });
+
+  // A frame after them reuses everything as well.
+  pending = preview(frame);
+  message = worker().messages.at(-1);
+  assert.equal(message.type, 'convert');
+  assert.equal(message.reuseSource, true);
+  worker().complete(); await pending;
+
+  pending = preview.analyze(frame, 'key-2');
+  worker().complete('error');
+  await assert.rejects(pending, { code: CONVERSION_FAILED });
+  console.log('conversionWorkerClient: prepare/analyze share the preview contract');
+}

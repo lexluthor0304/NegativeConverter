@@ -8,8 +8,8 @@
  * the result into it). `releaseAfter` drops the slot's cached planes once the
  * result is posted, so a lane holds no source or pristine plane between frames.
  */
-import { convertFrameWithRouter } from '../pipeline/conversionRouter.js';
-import { releaseSlotBuffers } from '../pipeline/silverAdapter.js';
+import { convertFrameWithRouter, resolveConversionMode } from '../pipeline/conversionRouter.js';
+import { releaseSlotBuffers, prepareSilverCorePreview, analyzeSilverCorePreview } from '../pipeline/silverAdapter.js';
 import { convertAdjustedFrame } from '../pipeline/adjustedFrame.js';
 import { createAdjustmentLutScratch } from '../app/adjustmentPipeline.js';
 import { fromImageData8 } from '../silvercore/util/image16.js';
@@ -34,8 +34,52 @@ function slotNameFor(options) {
   return options && options.preview ? 'preview' : 'full';
 }
 
+// The source, settings and options of a request, with the cached source, analysis
+// sample and strokes of the preview worker's contract filled in (and updated).
+// `settings` is the loupe's cached recipe when the request reuses one.
+function resolveRequest(msg, settings = msg.settings) {
+  const { width, height, rgba, image16, options } = msg;
+  // Unchanged dodge-and-burn strokes are not posted again. Track every
+  // message, even one that fails below, as the client does.
+  if (msg.cacheInput && !msg.reuseLocalExposure) cachedLocalExposure = settings?.localExposure || null;
+  if (msg.reuseLocalExposure) {
+    if (!cachedLocalExposure) throw new Error('Missing dodge-and-burn strokes');
+    settings.localExposure = cachedLocalExposure;
+  }
+  let imageData;
+  if (msg.reuseSource) {
+    if (!cachedSource || cachedSource.width !== width || cachedSource.height !== height) {
+      throw new Error('Missing preview source');
+    }
+    imageData = cachedSource;
+  } else if (rgba) {
+    imageData = new ImageData(new Uint8ClampedArray(rgba), width, height);
+    if (image16) {
+      imageData.__image16 = { width, height, data: new Uint16Array(image16) };
+    } else if (msg.cacheInput) {
+      // JPEG 等の 8bit 入力も一度だけ昇格し、操作ごとの再コピーを避ける。
+      imageData.__image16 = fromImageData8(imageData);
+    }
+  } else {
+    // 16-bit-only payload (RAW / 16-bit PNG). The adapter reads input via
+    // toImage16, which accepts this shape directly — no need to allocate a
+    // redundant RGBA plane for a 90+ MP scan.
+    imageData = { width, height, data: new Uint16Array(image16) };
+  }
+
+  const conversionOptions = { ...options };
+  delete conversionOptions.retain16;
+  delete conversionOptions.histogramSamples;
+  if (msg.cacheInput) {
+    cachedSource = imageData;
+    if (!msg.reuseAnalysis) cachedAnalysis = options.analysisImageData || null;
+    conversionOptions.analysisImageData = cachedAnalysis;
+  }
+  return { imageData, settings, conversionOptions };
+}
+
 async function convert(msg) {
-  const { id, width, height, rgba, image16, options } = msg;
+  const { id, image16, options } = msg;
   let { settings } = msg;
   let adjust = msg.adjust || null;
   // A lent source goes back whatever happens; nothing here writes it.
@@ -46,42 +90,9 @@ async function convert(msg) {
       if (!cachedRecipe) throw new Error('Missing loupe recipe');
       ({ settings, adjust } = cachedRecipe);
     }
-    // Unchanged dodge-and-burn strokes are not posted again. Track every
-    // message, even one that fails below, as the client does.
-    if (msg.cacheInput && !msg.reuseLocalExposure) cachedLocalExposure = settings?.localExposure || null;
-    if (msg.reuseLocalExposure) {
-      if (!cachedLocalExposure) throw new Error('Missing dodge-and-burn strokes');
-      settings.localExposure = cachedLocalExposure;
-    }
-    let imageData;
-    if (msg.reuseSource) {
-      if (!cachedSource || cachedSource.width !== width || cachedSource.height !== height) {
-        throw new Error('Missing preview source');
-      }
-      imageData = cachedSource;
-    } else if (rgba) {
-      imageData = new ImageData(new Uint8ClampedArray(rgba), width, height);
-      if (image16) {
-        imageData.__image16 = { width, height, data: new Uint16Array(image16) };
-      } else if (msg.cacheInput) {
-        // JPEG 等の 8bit 入力も一度だけ昇格し、操作ごとの再コピーを避ける。
-        imageData.__image16 = fromImageData8(imageData);
-      }
-    } else {
-      // 16-bit-only payload (RAW / 16-bit PNG). The adapter reads input via
-      // toImage16, which accepts this shape directly — no need to allocate a
-      // redundant RGBA plane for a 90+ MP scan.
-      imageData = { width, height, data: new Uint16Array(image16) };
-    }
-
-    const conversionOptions = { ...options };
-    delete conversionOptions.retain16;
-    delete conversionOptions.histogramSamples;
-    if (msg.cacheInput) {
-      cachedSource = imageData;
-      if (!msg.reuseAnalysis) cachedAnalysis = options.analysisImageData || null;
-      conversionOptions.analysisImageData = cachedAnalysis;
-    }
+    const resolved = resolveRequest(msg, settings);
+    const { imageData, conversionOptions } = resolved;
+    settings = resolved.settings;
     // A newer frame supersedes the retained one. A retaining request writes
     // its output into that plane; any other request just lets it go.
     const reuse = retained;
@@ -150,6 +161,41 @@ async function convert(msg) {
   }
 }
 
+// The GPU preview's inputs (#239): the prepared display-size negative, its stops
+// and their histogram samples. Nothing here writes to the retained plane.
+async function prepare(msg) {
+  const { id, options } = msg;
+  try {
+    const { imageData, settings, conversionOptions } = resolveRequest(msg);
+    const prepared = prepareSilverCorePreview(imageData, settings, resolveConversionMode(settings),
+      { ...conversionOptions, histogramSamples: options?.histogramSamples });
+    const { histogram } = prepared;
+    const payload = {
+      type: 'prepared', id, width: prepared.width, height: prepared.height,
+      pristine: prepared.pristine ? prepared.pristine.buffer : null,
+      stops: prepared.stops ? prepared.stops.buffer : null,
+      histogram: { width: histogram.width, height: histogram.height, image16: histogram.data.buffer,
+        stops: histogram.stops ? histogram.stops.buffer : null },
+    };
+    const transfers = [payload.pristine, payload.stops, payload.histogram.image16, payload.histogram.stops].filter(Boolean);
+    self.postMessage(payload, transfers);
+  } catch (err) {
+    self.postMessage({ type: 'error', id, message: err?.message || String(err) });
+  }
+}
+
+// The analysis the next frame of these settings uses, run now and kept for it.
+async function analyze(msg) {
+  const { id } = msg;
+  try {
+    const { imageData, settings, conversionOptions } = resolveRequest(msg);
+    const analysis = await analyzeSilverCorePreview(imageData, settings, resolveConversionMode(settings), conversionOptions);
+    self.postMessage({ type: 'analyzed', id, key: msg.key ?? null, ...analysis });
+  } catch (err) {
+    self.postMessage({ type: 'error', id, message: err?.message || String(err) });
+  }
+}
+
 // Hands the retained plane of request `resultId` to main, or null when a
 // newer request has taken it over (main then converts that frame again).
 function commit(msg) {
@@ -170,6 +216,8 @@ async function handleMessage(msg) {
   }
   if (msg.type === 'convert') return convert(msg);
   if (msg.type === 'commit') return commit(msg);
+  if (msg.type === 'prepare') return prepare(msg);
+  if (msg.type === 'analyze') return analyze(msg);
   self.postMessage({ type: 'error', id: msg.id, message: `Unknown message type: ${msg.type}` });
 }
 

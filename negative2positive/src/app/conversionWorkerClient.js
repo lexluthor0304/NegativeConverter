@@ -75,7 +75,7 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
       const entry = pending.get(msg.id);
       if (!entry) return;
       pending.delete(msg.id);
-      if (msg.type === 'result' || msg.type === 'committed' || msg.type === 'ready') entry.resolve(msg);
+      if (msg.type === 'result' || msg.type === 'committed' || msg.type === 'ready' || msg.type === 'prepared' || msg.type === 'analyzed') entry.resolve(msg);
       else {
         const err = workerError(msg.message || 'Conversion worker error', CONVERSION_FAILED);
         // A lent source the worker hands back with its error.
@@ -106,8 +106,10 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
   }
 
   /**
-   * Run convertFrameWithRouter in the worker.
-   * Returns an ImageData with __image16 attached (same contract as the router).
+   * Posts one request carrying a frame (convert, or the GPU preview's prepare
+   * and analyze, #239) and resolves with the worker's reply. With cacheInput
+   * the source, the analysis sample and the strokes are sent only when they
+   * changed.
    *
    * `handoff` (#250, batch export only) moves a genuine 16-bit source to the
    * worker instead of cloning it, when its buffer is export-owned and nothing
@@ -124,7 +126,7 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
    * same recipe is passed again. `transfer` hands the frame's 8-bit pixels to
    * the worker instead of copying them; the caller must not read them afterwards.
    */
-  async function convert({ imageData, settings, options = {}, handoff = null, releaseAfter = false, adjust = null, recipe = null, transfer = false, signal = null }) {
+  async function request(type, { imageData, settings, options = {}, handoff = null, releaseAfter = false, adjust = null, recipe = null, transfer = false, signal = null }, extra = null) {
     if (signal?.aborted) throw workerError('Conversion was aborted', WORKER_ABORTED);
 
     let w;
@@ -138,12 +140,13 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
     // worker per frame re-fetches the engine and rebuilds its tables.
     if (!cacheInput && !retainWorker && isLargeImage(imageData)) releaseWhenIdle = true;
     const message = {
-      type: 'convert',
+      type,
       id,
       width: imageData.width,
       height: imageData.height,
       settings,
-      options: { ...options }
+      options: { ...options },
+      ...extra
     };
     if (recipe && recipe === lastRecipe) {
       message.reuseRecipe = true;
@@ -280,7 +283,15 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
         throw workerError('Conversion worker did not return the lent source', INPUT_LOST);
       }
     }
+    return { result, w, id };
+  }
 
+  /**
+   * Run convertFrameWithRouter in the worker.
+   * Returns an ImageData with __image16 attached (same contract as the router).
+   */
+  async function convert(frame) {
+    const { result, w, id } = await request('convert', frame);
     const out = new ImageData(
       new Uint8ClampedArray(result.rgba),
       result.width,
@@ -311,6 +322,33 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
     markOwnedPlanes(out);
     return out;
   }
+
+  // The GPU preview's inputs for this frame (#239), from the same cached source:
+  // { width, height, pristine, stops, histogram } with typed arrays, where
+  // pristine and stops are null when there is nothing to upload.
+  convert.prepare = async (frame) => {
+    const { result } = await request('prepare', frame);
+    const { histogram } = result;
+    return {
+      width: result.width,
+      height: result.height,
+      pristine: result.pristine ? new Uint16Array(result.pristine) : null,
+      stops: result.stops ? new Float32Array(result.stops) : null,
+      histogram: {
+        width: histogram.width,
+        height: histogram.height,
+        data: new Uint16Array(histogram.image16),
+        stops: histogram.stops ? new Float32Array(histogram.stops) : null,
+      },
+    };
+  };
+
+  // Runs the analysis the next frame of these settings uses and returns it:
+  // { key, channelData, autoColor, positiveAnalysis }. `key` is echoed.
+  convert.analyze = async (frame, key = null) => {
+    const { result } = await request('analyze', frame, { key });
+    return { key: result.key, channelData: result.channelData, autoColor: result.autoColor, positiveAnalysis: result.positiveAnalysis };
+  };
 
   // Brings back the 16-bit plane a retaining conversion left in the worker.
   // Resolves to the Uint16Array, or null when the plane is gone: a newer
