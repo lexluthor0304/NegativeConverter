@@ -2,7 +2,7 @@
 from fontTools import subset
 from fontTools.ttLib import TTFont
 from pathlib import Path
-root = Path(__file__).resolve().parents[1] / 'negative2positive/public/fonts/fusion-pixel'
+root = Path(__file__).resolve().parents[1] / 'negative2positive/src/assets/fonts/fusion-pixel'
 font = TTFont(root / 'fusion-pixel-12px-proportional-zh_hans.otf.woff2')
 options = subset.Options()
 options.flavor = 'woff2'

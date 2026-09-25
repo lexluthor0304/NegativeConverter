@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { ensureNativePixelFont, isNativePixelFontReady, nativePixelFontFamily, nativePixelFontLocale, hasNativePixelGlyph } from './nativePixelFont.js';
 
 for (const [locale, expected] of [['en', 'sc'], ['zh-CN', 'sc'], ['zh-Hant', 'tc'], ['zh-TW', 'tc'], ['ja-JP', 'ja'], ['ko-KR', 'ko']]) {
@@ -22,6 +23,9 @@ try {
   assert.equal(isNativePixelFontReady('ja'), false);
   assert.equal(installed.length, 0);
   assert.match(requests[0].url, /fusion-pixel-12px-proportional-ja\.otf\.woff2/);
+  // Under Node, new URL(…, import.meta.url) resolves to the source file that
+  // Vite fingerprints into /assets; the face must exist at that path.
+  assert.ok(existsSync(new URL(/^url\("(.+)"\)$/.exec(requests[0].url)[1])), 'bundled face resolves to the asset source');
   assert.equal(requests[0].descriptors.weight, '400');
   finish();
   await first;

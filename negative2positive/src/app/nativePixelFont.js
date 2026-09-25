@@ -1,7 +1,15 @@
 import { nativePixelFontCoverage } from './nativePixelFontCoverage.js';
 
 export const NATIVE_PIXEL_SIZE = 12;
-const variants = { sc: 'zh_hans', tc: 'zh_hant', ja: 'ja', ko: 'ko' };
+// Literal new URL() calls, so Vite fingerprints each face into immutable
+// /assets. pixel-fonts.css references the same files, so the UI and the
+// film-edge canvas text share one URL, and one download, per face.
+const faceUrls = {
+  sc: new URL('../assets/fonts/fusion-pixel/fusion-pixel-12px-proportional-zh_hans.otf.woff2', import.meta.url).href,
+  tc: new URL('../assets/fonts/fusion-pixel/fusion-pixel-12px-proportional-zh_hant.otf.woff2', import.meta.url).href,
+  ja: new URL('../assets/fonts/fusion-pixel/fusion-pixel-12px-proportional-ja.otf.woff2', import.meta.url).href,
+  ko: new URL('../assets/fonts/fusion-pixel/fusion-pixel-12px-proportional-ko.otf.woff2', import.meta.url).href,
+};
 const pendingFonts = new Map();
 const readyFonts = new Set();
 
@@ -44,7 +52,7 @@ export function ensureNativePixelFont(locale) {
   if (typeof FontFace !== 'function' || !fontSet) {
     return Promise.reject(new Error('Native film-edge font loading is unavailable.'));
   }
-  const url = `/fonts/fusion-pixel/fusion-pixel-12px-proportional-${variants[key]}.otf.woff2`;
+  const url = faceUrls[key];
   const face = new FontFace(nativePixelFontFamily(key), `url("${url}")`, { weight: '400', style: 'normal' });
   const pending = face.load().then(loaded => {
     fontSet.add(loaded);

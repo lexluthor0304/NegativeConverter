@@ -2,7 +2,7 @@
    It also carries the five Geometric Shapes the Studio draws (▶ ▸ ▼ ▾ ●). */
 @font-face {
   font-family: 'NC Studio Latin';
-  src: url('/fonts/fusion-pixel/nc-studio-latin.woff2') format('woff2');
+  src: url('../assets/fonts/fusion-pixel/nc-studio-latin.woff2') format('woff2');
   font-style: normal;
   font-weight: 400;
   font-display: swap;
@@ -13,7 +13,7 @@
    monospace, where they rendered anyway, instead of downloading a whole face. */
 @font-face {
   font-family: 'Fusion Pixel SC';
-  src: url('/fonts/fusion-pixel/fusion-pixel-12px-proportional-zh_hans.otf.woff2') format('woff2');
+  src: url('../assets/fonts/fusion-pixel/fusion-pixel-12px-proportional-zh_hans.otf.woff2') format('woff2');
   font-style: normal;
   font-weight: 400;
   font-display: swap;
@@ -21,7 +21,7 @@
 }
 @font-face {
   font-family: 'Fusion Pixel TC';
-  src: url('/fonts/fusion-pixel/fusion-pixel-12px-proportional-zh_hant.otf.woff2') format('woff2');
+  src: url('../assets/fonts/fusion-pixel/fusion-pixel-12px-proportional-zh_hant.otf.woff2') format('woff2');
   font-style: normal;
   font-weight: 400;
   font-display: swap;
@@ -29,7 +29,7 @@
 }
 @font-face {
   font-family: 'Fusion Pixel JP';
-  src: url('/fonts/fusion-pixel/fusion-pixel-12px-proportional-ja.otf.woff2') format('woff2');
+  src: url('../assets/fonts/fusion-pixel/fusion-pixel-12px-proportional-ja.otf.woff2') format('woff2');
   font-style: normal;
   font-weight: 400;
   font-display: swap;
@@ -37,7 +37,7 @@
 }
 @font-face {
   font-family: 'Fusion Pixel KR';
-  src: url('/fonts/fusion-pixel/fusion-pixel-12px-proportional-ko.otf.woff2') format('woff2');
+  src: url('../assets/fonts/fusion-pixel/fusion-pixel-12px-proportional-ko.otf.woff2') format('woff2');
   font-style: normal;
   font-weight: 400;
   font-display: swap;

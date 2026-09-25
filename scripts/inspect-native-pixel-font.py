@@ -4,7 +4,7 @@ from pathlib import Path
 from fontTools.ttLib import TTFont
 
 root = Path(__file__).resolve().parents[1]
-fonts = root / 'negative2positive/public/fonts/fusion-pixel'
+fonts = root / 'negative2positive/src/assets/fonts/fusion-pixel'
 coverage = None
 for locale in ('zh_hans', 'zh_hant', 'ja', 'ko'):
     font = TTFont(fonts / f'fusion-pixel-12px-proportional-{locale}.otf.woff2')

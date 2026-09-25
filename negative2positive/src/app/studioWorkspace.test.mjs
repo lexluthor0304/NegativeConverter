@@ -19,7 +19,7 @@ assert.match(source, /<span class="studio-mark">NeoAnalogLab<\/span>/, 'ブラ�
 const mainSource = readFileSync(new URL('./main.js', import.meta.url), 'utf8');
 assert.doesNotMatch(mainSource, /STUDIO_MODE|studioPreviewLink/, '旧画面への分岐を復活させない');
 for (const locale of ['zh_hans', 'zh_hant', 'ja', 'ko']) {
-  const font = readFileSync(new URL(`../../public/fonts/fusion-pixel/fusion-pixel-12px-proportional-${locale}.otf.woff2`, import.meta.url));
+  const font = readFileSync(new URL(`../assets/fonts/fusion-pixel/fusion-pixel-12px-proportional-${locale}.otf.woff2`, import.meta.url));
   assert.equal(font.subarray(0, 4).toString(), 'wOF2', locale + ': 同梱フォントの形式');
 }
 assert.match(readFileSync(new URL('../../public/fonts/fusion-pixel/OFL.txt', import.meta.url), 'utf8'), /SIL OPEN FONT LICENSE/);
