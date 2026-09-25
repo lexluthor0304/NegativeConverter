@@ -448,6 +448,11 @@ Remaining performance proposals below are not claims of completed work.
 
 ## Other
 
+- **low/export** — A Chrome JPEG export carries two ICC profiles
+  `negative2positive/src/app/exportMetadata.js:attachMetadataToBlob`
+  Chrome's canvas JPEG encoder (main-thread canvas and `OffscreenCanvas` in the export worker alike) already writes an sRGB `ICC_PROFILE` APP2 segment. `attachMetadataToBlob` inserts its own after APP0 and keeps the encoder's, so the file has two ICC_PROFILE sequences, each numbered 1 of 1 (found by the #250 export-ownership smoke; baseline behaviour, both paths identical). The PNG path already replaces the encoder's colour chunks with its `iCCP`.
+  _Suggested fix:_ Drop the encoder's APP2 `ICC_PROFILE` segments before the scan when inserting the sRGB profile, as the PNG path does. Pixels are unchanged; JPEG file bytes change, so re-check every JPEG hash comparison (gain-map, export-ownership, batch/single parity smokes).
+
 
 - **low/research** — Interactive full-resolution conversion preserves an independent source by copying it into the worker
   `negative2positive/src/app/conversionWorkerClient.js:createConversionWorkerClient`

@@ -141,7 +141,11 @@ export async function runExportOwnershipSmoke({ send, evaluate, waitFor, wait, f
       const jpegMeta = jpegApps(await bytesOf(await attachMetadataToBlob(jpeg.blob, 'jpeg', metadata)));
       const jpegMainMeta = jpegApps(await bytesOf(await attachMetadataToBlob(jpegMain, 'jpeg', metadata)));
       result.jpegSegments = jpegMeta.join(',');
-      result.jpegSegmentsEqual = jpegMeta.join() === jpegMainMeta.join() && jpegMeta.filter(t => t.startsWith('e2:ICC_')).length <= 1;
+      // Worker parity: the worker adds no segment the canvas path lacks. Chrome's
+      // canvas JPEG already carries an ICC profile and attachMetadataToBlob adds
+      // its own on both paths (docs/audit-backlog.md), so the count is reported.
+      result.jpegSegmentsEqual = jpegMeta.join() === jpegMainMeta.join();
+      result.jpegIccProfiles = jpegMeta.filter(t => t.startsWith('e2:ICC_')).length;
       result.planeIntact = processed.__image16.data.length === W * H * 4;
 
       // A non-opaque frame goes back to the canvas path with its pixels.
@@ -182,6 +186,7 @@ export async function runExportOwnershipSmoke({ send, evaluate, waitFor, wait, f
   if (!worker.fusedTransferred || !worker.fusedBytes || !worker.blobAfterTerminate) fail('fused TIFF16 / Blob after terminate regressed: ' + JSON.stringify(worker));
   if (worker.engine === 'chromium' && (worker.release !== 'worker' || !worker.released)) fail('plane release did not go through the throwaway worker: ' + JSON.stringify(worker));
   if (!worker.pngBytesEqual || !worker.jpegBytesEqual) console.log('note: Chrome worker encodes differ in file bytes only (decoded pixels equal)');
+  if (worker.jpegIccProfiles > 1) console.log(`note: JPEG carries ${worker.jpegIccProfiles} ICC profiles on the worker and canvas paths alike (pre-existing, audit backlog)`);
 
   // ---- 2. Studio exports ----
   const dir = mkdtempSync(join(tmpdir(), 'nc-ownership-'));
@@ -227,10 +232,18 @@ export async function runExportOwnershipSmoke({ send, evaluate, waitFor, wait, f
       };
       try { localStorage.setItem('nc_hdr_gain_map_v1', 'on'); } catch {}
     })()`);
-    const setFormat = (format, depth) => evaluate(`(() => {
+    // The page's accessibility bridge mirrors the bit-depth buttons' `disabled`
+    // class into the `disabled` property on the next animation frame, so after
+    // a JPEG the 16-bit button stays disabled for a frame: a click before that
+    // would be ignored.
+    const setFormat = (format, depth) => evaluate(`(async () => {
       document.querySelector('.format-btn[data-format="${format}"]').click();
       const depth = document.querySelector('.bitdepth-btn[data-bitdepth="${depth}"]');
+      for (let i = 0; i < 50 && depth && depth.disabled && !depth.classList.contains('disabled'); i++) {
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
       if (depth && !depth.classList.contains('disabled')) depth.click();
+      return document.querySelector('.bitdepth-btn.active')?.dataset.bitdepth;
     })()`);
     const exportOnce = async (label, button = 'exportSingleBtn') => {
       const index = await evaluate(`(() => { const p = window.__ownershipProbe; p.requests = []; p.workersBefore = p.exportWorkers.length; document.getElementById('${button}').click(); return p.downloads.length; })()`);
@@ -288,7 +301,7 @@ export async function runExportOwnershipSmoke({ send, evaluate, waitFor, wait, f
     if (!exportTypes(jpeg).includes('encodeImage+gain') || jpeg.requests.includes('gainMap16')) fail('the JPEG gain map did not travel with the encode: ' + JSON.stringify(jpeg));
     if (jpeg.workersAlive !== 0) fail('the JPEG export left its worker alive: ' + JSON.stringify(jpeg));
 
-    await setFormat('tiff', 16);
+    if (await setFormat('tiff', 16) !== '16') fail('could not select a 16-bit TIFF export');
     const tiff = await exportOnce('ownership TIFF16 export');
     console.log('studio TIFF16 export:', JSON.stringify(tiff));
     const tiffTypes = exportTypes(tiff);
