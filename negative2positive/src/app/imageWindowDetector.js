@@ -1,7 +1,7 @@
-import { findWindowLineQuads } from './imageWindowLines.js';
+import { findWindowLineQuads, sampleMedian } from './imageWindowLines.js';
 
 // OpenCV の四辺形から実際の撮影窓を求める。画幅比率のテンプレートで切り抜かない。
-const median = values => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
+const median = values => sampleMedian(values);
 const axisAngle = angle => {
   while (angle > 45) angle -= 90;
   while (angle <= -45) angle += 90;
@@ -43,8 +43,13 @@ export function boundaryEvidence(image, points, targeted = false, { consistentBa
       signed.push(inside.reduce((sum, v, c) => sum + v - out[c], 0));
       deltas.push(Math.max(...inside.map((v, c) => Math.abs(v - out[c]))));
     }
-    contrasts.push(median(deltas));
-    supports.push(deltas.filter(v => v >= (targeted ? 10 : 22)).length / deltas.length);
+    const sideContrast = median(deltas);
+    const sideSupport = deltas.filter(v => v >= (targeted ? 10 : 22)).length / deltas.length;
+    // The result needs every side's contrast and support (their minimum is
+    // tested below), so the first failing side decides it (#251).
+    if (sideContrast < (targeted ? 12 : 25) || sideSupport < (targeted ? .6 : .74)) return null;
+    contrasts.push(sideContrast);
+    supports.push(sideSupport);
     outerEdges.push([0, 1, 2].map(c => median(edgeOutside.map(p => p[c]))));
     polarities.push(Math.sign(median(signed)));
   }
@@ -79,7 +84,9 @@ export function boundaryEvidence(image, points, targeted = false, { consistentBa
   return { contrast, support, variation };
 }
 
-export function detectImageWindow(image, targets, { targeted = false } = {}) {
+// `lineChannels`: the planes the line search reads (default grey, R, G, B;
+// see findWindowLineQuads).
+export function detectImageWindow(image, targets, { targeted = false, lineChannels = undefined } = {}) {
   const cv = globalThis.cv;
   if (!cv?.Mat) return null;
   const src = cv.matFromImageData(image), gray = new cv.Mat(), smooth = new cv.Mat();
@@ -130,7 +137,8 @@ export function detectImageWindow(image, targets, { targeted = false } = {}) {
         } finally { contour.delete(); approx.delete(); }
       }
     }
-    const lineResult = candidates.length ? { quads: [], incomplete: false } : findWindowLineQuads(image, src);
+    const lineResult = candidates.length ? { quads: [], incomplete: false }
+      : findWindowLineQuads(image, src, null, lineChannels ? { channels: lineChannels } : undefined);
     for (const points of lineResult.quads) {
       if (points.some(p => p.x < 3 || p.y < 3 || p.x > image.width - 4 || p.y > image.height - 4)) continue;
       const lengths = points.map((p, i) => Math.hypot(p.x - points[(i + 1) % 4].x, p.y - points[(i + 1) % 4].y));
@@ -140,17 +148,18 @@ export function detectImageWindow(image, targets, { targeted = false } = {}) {
       const ratio = Math.max(width, height) / Math.min(width, height);
       const match = targets.map(target => ({ ...target, delta: Math.abs(ratio / target.ratio - 1) })).sort((a, b) => a.delta - b.delta)[0];
       if (!match || match.delta > .09) continue;
-      const evidence = boundaryEvidence(image, points, targeted, { consistentBase: true })
-        // 黒いホルダーの薄い反射縁は数画素外で再確認する。四辺の外側が
-        // 本当に黒く均一な場合だけ許可し、橙色片基の条件は緩めない。
-        || boundaryEvidence(image, points, targeted, { consistentBase: true, gapRatio: .012, darkHolder: true });
-      if (!evidence) continue;
+      // The pure tilt check first: it rejects without sampling (#251).
       const angles = points.map((p, i) => {
         const q = points[(i + 1) % 4];
         return axisAngle(Math.atan2(q.y - p.y, q.x - p.x) * 180 / Math.PI);
       });
       const tilt = windowTilt(points);
       if (angles.some(angle => Math.abs(angle - tilt) > 2.5)) continue;
+      const evidence = boundaryEvidence(image, points, targeted, { consistentBase: true })
+        // 黒いホルダーの薄い反射縁は数画素外で再確認する。四辺の外側が
+        // 本当に黒く均一な場合だけ許可し、橙色片基の条件は緩めない。
+        || boundaryEvidence(image, points, targeted, { consistentBase: true, gapRatio: .012, darkHolder: true });
+      if (!evidence) continue;
       candidates.push({ points, angle: Math.abs(tilt) < .12 ? 0 : -tilt, detectedFormat: match.key,
         confidence: Math.min(.94, .84 + evidence.support * .08 - match.delta),
         score: coverage * .45 + evidence.support * .25 + .20 + (1 - match.delta) * .10,

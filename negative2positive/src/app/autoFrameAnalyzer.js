@@ -493,10 +493,10 @@ function scoreInteriorGapPresence(crop, analysis) {
   }
   if (edges.length < 6) return 0;
 
-  const sortedEdges = [...edges].sort((a, b) => a - b);
-  const sortedLumas = [...lumas].sort((a, b) => a - b);
-  const medianEdge = sortedEdges[Math.floor(sortedEdges.length / 2)];
-  const medianLuma = sortedLumas[Math.floor(sortedLumas.length / 2)];
+  // Region means are finite, so native typed sorts give the same medians as
+  // the comparator sorts of copies (#251).
+  const medianEdge = Float64Array.from(edges).sort()[edges.length >> 1];
+  const medianLuma = Float64Array.from(lumas).sort()[lumas.length >> 1];
   if (medianEdge < 2.5) return 0; // essentially featureless crop — cannot judge
 
   // A gap window is BOTH quieter than the frame content AND clearly brighter
