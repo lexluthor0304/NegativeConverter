@@ -31,8 +31,9 @@ import { readSwapUsage, readPowerConditions } from './guards.mjs';
 import { git } from './worktree.mjs';
 import { S2_SLIDERS } from '../scenarios/s2-sliders.mjs';
 
+import { sleep } from '../scenarios/common.mjs';
+
 export const WEBKIT_SCENARIOS = { safari: ['s1', 's2', 's4', 's7'], tauri: ['s1', 's2', 's7'] };
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 const REVEAL = `
   const element = document.getElementById(arguments[0]);
@@ -201,7 +202,7 @@ async function safariDrag(wd, events, id, prefix, record) {
   await safariPoll(wd, READY);
 }
 
-async function safariScenario(id, { wd, origin, fixture, roll, record, note }) {
+export async function safariScenario(id, { wd, origin, fixture, roll, record, note }) {
   const events = [];
   await safariBoot(wd, origin);
   const dpr = Math.round(await wd.execute('return devicePixelRatio'));
