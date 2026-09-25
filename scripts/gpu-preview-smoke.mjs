@@ -414,6 +414,21 @@ export async function runGpuPreviewSmoke({ send, evaluate, waitFor, fail, instal
     await until('fresh GPU preview workspace', `performance.timeOrigin !== ${origin} && document.readyState === 'complete' && !!document.getElementById('studioImportAutoCrop')`);
     await installDialogAutoAccept();
     await evaluate(`(${installGpuProbe.toString()})()`);
+    // Exports of earlier smokes teach defaults, Step-3 values among them; the
+    // parity checks compare against a conversion with Step 3 at identity.
+    await until('learned-default reset control mounted', `!!document.getElementById('resetLearnedDefaults')`);
+    await evaluate(`(() => {
+      window.__gpuLearnedReset = false;
+      const label = document.getElementById('learnedDefaultsCount');
+      const observer = new MutationObserver(() => {
+        if (label.textContent.trim() === 'Learned defaults: 0 stocks' && !document.querySelector('[data-app-dialog-confirm]')) {
+          window.__gpuLearnedReset = true; observer.disconnect();
+        }
+      });
+      observer.observe(label, { childList: true, subtree: true, characterData: true });
+      document.getElementById('resetLearnedDefaults').click();
+    })()`);
+    await until('learned defaults reset', `window.__gpuLearnedReset && document.getElementById('learnedDefaultsCount').textContent.trim() === 'Learned defaults: 0 stocks'`);
     await evaluate(`(${importSyntheticNegative.toString()})(${JSON.stringify(name)})`);
     await until(`${name} converted`, `${ready} && document.getElementById('studioFilename').textContent === ${JSON.stringify(name)}`, 120_000);
     await evaluate(`(() => {
