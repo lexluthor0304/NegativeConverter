@@ -12677,7 +12677,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       applyCropBtn.textContent = analysisOnly ? studioWorkspace.text('confirmAnalysis') : i18n[currentLang].applyCrop;
 
       setCropActionUi(true);
-      renderCropDraftPreview({ preserveRect: false, histogram: true });
+      // The crop toolbar (the ratio controls) can change the container's size
+      // in this task. Size the crop canvas for the layout it opens into, not
+      // the observer's last report (#261 caches it), keeping the default
+      // rectangle's fractions, so it is drawn once at its final size.
+      refreshCanvasContainerSize();
+      renderCropDraftPreview({ preserveRect: true, histogram: true });
       // Opened on the stand-in: the display-resolution picture is built from
       // the next task on, in slices, and swapped in when it lands.
       if (state.cropDraft.view.standIn) void yieldTaskForJob().then(ensureCropViewProxy);
