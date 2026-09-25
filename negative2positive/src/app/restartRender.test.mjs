@@ -4,6 +4,7 @@ import vm from 'node:vm';
 import { createCoreReprocessGates } from './coreReprocessDispatcher.js';
 import { routeCoreConversion, keepsFullPlaneOnDowngrade } from './fullResolutionRouting.js';
 import { DISABLED_GPU_PREVIEW_SCHEDULER } from './gpuPreviewScheduler.js';
+import { hasWindowEdits, geometryEdits, overlayWindowEdits } from './provisionalPhoto.js';
 
 // Exercise the actual browser lifecycle functions without loading a DOM,
 // OpenCV, or ONNX. Only their UI and expensive conversion dependencies are
@@ -402,6 +403,8 @@ function prepareFixture({ itemSettings = null, detectFrame = true, learned = 0 }
     scheduleProjectRecovery: noop, scheduleAiRepairPreloadForRecipe: noop, resetZoomPan: noop,
     // Outside a roll import (#231), with the geometry already built (#244).
     settleImportFilmType: (target, settings) => settings, deferImportFilmTypeToast: () => false,
+    // Not a two-stage stand-in and no window edits (#255).
+    hasWindowEdits, geometryEdits, overlayWindowEdits, defaultSettingsInputs: () => ({}), startProvisionalSettle: noop,
     reviewForItem: () => ({ reasons: [] }), whenGeometrySettled: async () => true, pendingImportRotation: null,
     // Apply Crop's crop-area detection counter and crop view proxy (#245).
     noteConversionStarted: noop, scheduleCropViewProxy: noop,
@@ -435,7 +438,7 @@ function prepareFixture({ itemSettings = null, detectFrame = true, learned = 0 }
   });
   vm.runInContext([
     'prepareStudioPhoto', 'startImportDetection', 'buildFinalImportSettings', 'revealProvisionalPhoto',
-    'armSettledConversion', 'processNegative', 'scheduleFullResolutionRender',
+    'armSettledConversion', 'processNegative', 'scheduleFullResolutionRender', 'withPendingEditsOf',
   ].map(functionSource).join('\n'), context);
   const answer = async (index = conversions.length - 1) => {
     conversions[index].reply.resolve({ width: 8, height: 6, id: `converted:${conversions[index].settings.id}` });
@@ -576,6 +579,44 @@ for (const timing of ['during', 'after']) {
   assert.equal(f.context.document.body.dataset.studioDetecting, undefined);
 }
 
+// A two-stage import's stand-in (#255): the same pass with its side effects
+// held back (no automaticDefaults, no roll vote or date, no semantic colour),
+// its inputs and settled settings recorded, and the settle on the full
+// decode started once the tail ends.
+{
+  const f = prepareFixture({ learned: 2 });
+  const record = { id: 'full decode' };
+  const settles = [], typed = [], edgeOptions = [];
+  const toExact = settings => ({ cropRegion: settings.cropRegion ? { ...settings.cropRegion, exact: true } : null, rotationAngle: settings.rotationAngle, mirrored: settings.mirrored });
+  f.state.provisional = { generation: 1, swapped: false, item: f.item, record, geometry: { toExact }, start: null, settledSnapshot: null, passDone: null };
+  f.context.startProvisionalSettle = target => settles.push(target);
+  f.context.settleImportFilmType = (target, settings, options) => { typed.push(options); return settings; };
+  const mergeEdge = f.context.mergeImportFilmEdge;
+  f.context.mergeImportFilmEdge = (source, settings, read, options) => { edgeOptions.push(options); return mergeEdge(source, settings, read, options); };
+  const done = f.context.prepareStudioPhoto(1, f.item, { quiet: true });
+  await settle();
+  assert.equal(f.state.provisional.start.fresh, true);
+  assert.equal(f.state.provisional.start.detectFrame, true);
+  assert.equal(f.state.provisional.start.readEdge, true);
+  assert.equal(f.state.provisional.start.snapshot.id, 'defaults', 'the snapshot the settle starts from');
+  assert.ok(f.state.provisional.passDone, 'the settle waits for this pass');
+  f.frames[0].reply.resolve(cropped(f.frames[0].settings));
+  f.edges[0].reply.resolve({ result: { change: {} } });
+  await f.answer(0);
+  await settle();
+  await f.answer(1);
+  await done;
+  assert.equal(f.log.filter(entry => entry.learned).length, 0, 'no automaticDefaults from the stand-in');
+  assert.equal(f.item.automaticDefaults, undefined);
+  assert.deepEqual(typed.map(options => options.record), [false], 'the stand-in does not vote into the roll decision');
+  assert.deepEqual(edgeOptions.map(options => options.rollDate), [false], 'nor sets the roll date');
+  assert.ok(!f.log.includes('semantic'), 'semantic colour waits for the full decode');
+  assert.equal(f.conversions[1].settings.cropRegion.exact, true, 'the final settings are back in full-resolution units');
+  assert.equal(f.state.provisional.settledSnapshot.id, f.state.live.id, 'the window edits are measured from the settled settings');
+  assert.equal(f.state.provisional.passDone, null);
+  assert.deepEqual(settles, [record], 'the settle starts once the tail has ended');
+}
+
 // A load that is gone before any conversion hides its overlay (loadFile left
 // it up for the conversion).
 {
@@ -585,4 +626,4 @@ for (const timing of ['during', 'after']) {
   assert.equal(f.overlay.hides, 1);
 }
 
-console.log('restartRender: stale replies and queues rejected, direct-render export barrier and promise ownership preserved, valid renders and export lock respected, provisional first-photo render and single re-render ordered');
+console.log('restartRender: stale replies and queues rejected, direct-render export barrier and promise ownership preserved, valid renders and export lock respected, provisional first-photo render and single re-render ordered, the two-stage stand-in pass held back');

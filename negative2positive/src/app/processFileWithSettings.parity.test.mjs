@@ -136,6 +136,8 @@ function run(fn, { base, saved, options, dust, automatic }) {
   const file = { name: 'frame.dng', size: 1 };
   const item = { file, settings: saved ? structuredClone(saved) : null, automaticSettings: automatic, studioColors: { coreExposure: 7 } };
   const context = vm.createContext({
+    // A photo left inside a two-stage window (#255): none here.
+    pendingGeometryEdits: () => null, withPendingEdits: (item, settings) => settings,
     state: { fileQueue: [item], dustRemoval: { enabled: dust, strength: 4, maxParticleSize: 30 }, autoFrame: { enabled: true },
       importFilmTypeAuto: true, lensCorrection: { enabled: false } },
     ...stages(log, { automatic }),

@@ -55,6 +55,8 @@ function fixture({ lens = false, brush = false, dust = false, width = 600, heigh
   const calls = { conversions: [], dust: [], brushes: [], adjustments: [], previews: [], downsample: [], decoded: 0,
     loads: [], geometry: 0, lens: 0 };
   const context = vm.createContext({
+    // A photo left inside a two-stage window (#255): none here.
+    pendingGeometryEdits: () => null, withPendingEdits: (item, settings) => settings,
     state: { fileQueue: [{ file, settings }], dustRemoval: { enabled: dust, strength: 3, maxParticleSize: 40 }, exportFormat: 'png',
       autoFrame: { enabled: true } },
     createPerfTrace: () => ({ mark: noop, end: noop }),

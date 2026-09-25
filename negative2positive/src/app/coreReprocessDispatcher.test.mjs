@@ -142,6 +142,8 @@ function schedulerFixture({ repairs = false, large = false, gpu = null } = {}) {
   const context = vm.createContext({
     state, console: { error: () => {}, warn: () => {} },
     setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
+    // No two-stage stand-in (#255).
+    provisionalUnits: () => false,
     coreReprocessGates: createCoreReprocessGates(clock),
     previewDispatchAction, CORE_FULL_REPROCESS_DELAY_MS,
     CORE_RETAIN_PREVIEW_PLANE: true, CORE_PREVIEW_COMMIT_IDLE_MS: 150,

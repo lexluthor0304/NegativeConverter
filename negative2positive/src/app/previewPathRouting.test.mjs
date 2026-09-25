@@ -95,6 +95,8 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
   const timeline = { currentTime: 0 };
   const context = vm.createContext({
     state, console: { error: noop, warn: noop, info: noop }, document: { timeline: null },
+    // No two-stage stand-in (#255).
+    provisionalUnits: () => false, ensureFullDecode: async () => true,
     setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, AbortController,
     coreReprocessGates: createCoreReprocessGates({ setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
       requestAnimationFrame: () => 0, cancelAnimationFrame: noop, timeline, isHidden: () => false }),

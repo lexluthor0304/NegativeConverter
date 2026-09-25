@@ -71,6 +71,8 @@ function run(image, recipe, convertWith, { dust = false } = {}) {
   const adjusted = [];
   const conversions = [];
   const context = vm.createContext({
+    // A photo left inside a two-stage window (#255): none here.
+    pendingGeometryEdits: () => null, withPendingEdits: (item, settings) => settings,
     state: { fileQueue: [{ file, settings: null }], dustRemoval: { enabled: dust, strength: 3, maxParticleSize: 40 }, autoFrame: { enabled: true } },
     createPerfTrace: () => ({ mark() {}, end() {} }),
     getImageDataPixelCount: img => img.width * img.height,

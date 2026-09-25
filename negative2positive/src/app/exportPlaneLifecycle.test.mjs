@@ -160,6 +160,8 @@ function createContext({ gainMap = 'on' } = {}) {
   const context = vm.createContext({
     state, console, Blob, Uint8ClampedArray: CountingUint8ClampedArray, Uint16Array, Promise, Error, Object, Array, Number, Boolean, Math, JSON,
     ImageData: TestImageData,
+    // Not a two-stage import's stand-in (#255).
+    ensureFullDecode: async () => true,
     setTimeout: (fn) => setImmediate(fn),
     manualEditRevision: 0,
     i18n: { en: { loadingExporting: 'e', loadingAdjusting: 'a', loadingEncoding: 'n', loadingComplete: 'c' } },

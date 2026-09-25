@@ -15,6 +15,7 @@ import vm from 'node:vm';
 import { createSharedDecodes } from './sharedDecodes.js';
 import { WORKER_ABORTED, WORKER_CRASHED } from './conversionWorkerClient.js';
 import { MEMORY_FUNCTIONS, memoryGlobals } from './memoryHarness.mjs';
+import { rawDecodePlan } from './imageDimensions.js';
 
 const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8');
 function functionSource(name) {
@@ -69,6 +70,8 @@ function fixture() {
     ...memoryGlobals(),
     getPerfNow: () => performance.now(),
     backgroundRest: ms => new Promise(resolve => setTimeout(resolve, ms)),
+    // One decode per open: the plan's size rule for these small files (#255).
+    rawDecodePlan, twoStageMinPixelsSetting: () => null,
   };
   const context = vm.createContext(new Proxy(target, {
     has: () => true,

@@ -15,7 +15,7 @@ import { frameNeedsReview } from './reviewQueue.js';
 import { yieldForJob, yieldToPaint, yieldTaskForJob } from './yieldToPaint.js';
 import { createHiddenJobGate, hiddenJobLimitsApply, estimateHiddenJobBytes, HIDDEN_BUDGET_BYTES } from './hiddenJobGate.js';
 import { createMemoryBudget, createRetainedLedger, createMemoryClaim, createIdleCheck, relievePressure, budgetFor, resolveMemoryRam, memoryEngine, hasPeriodicMemoryPurge, DECODED_BYTES_PER_PIXEL, IDLE_RETAINED_TARGET_BYTES, RAM_OVERRIDE_KEY } from './memoryBudget.js';
-import { createBackgroundGate, BACKGROUND_STEP_WAIT_CAP_MS } from './backgroundGate.js';
+import { createBackgroundGate, BACKGROUND_STEP_WAIT_CAP_MS, BACKGROUND_INPUT_QUIET_MS, BACKGROUND_BUSY_POLL_MS } from './backgroundGate.js';
 import { createSharedDecodes } from './sharedDecodes.js';
 import { pickBackgroundJob, travelDirection, displayDistance } from './backgroundPhotoScheduler.js';
 import { createJobMarker, readJobMarkers, clearJobMarker, matchJobFiles, planResumedExport, resumedJobMarker, jobNeedsSafeMode } from './jobMarker.js';
@@ -138,7 +138,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     import { renderFileList } from './fileListView.js';
     import { normalizeFileListSort, orderedFileIndices, selectionRangeIndices } from './fileListOrder.js';
     import { createSprocketFrameCache } from './sprocketFrameCache.js';
-    import { imagePixelsForBatch, imagePixelsWithSiblings, rememberImageDimensions, knownImageDimensions } from './imageDimensions.js';
+    import { imagePixelsForBatch, imagePixelsWithSiblings, rememberImageDimensions, knownImageDimensions, rawDecodePlan } from './imageDimensions.js';
+    import {
+      TWO_STAGE_MIN_MP_DEFAULT, twoStageMinPixels, stageTwoStartMode, createExactGeometry, windowEdits, overlayWindowEdits,
+      geometryEdits, hasWindowEdits
+    } from './provisionalPhoto.js';
     import {
       createDustWorkerClient, detectDustInWorker, inpaintDustInWorker, strokeDustInWorker, followDustMaskInWorker,
       pinDustWorker, unpinDustWorker, disposeDustWorker, dustMaskInfo, forgetDustMaskInfo
@@ -216,6 +220,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // Apply Crop's pending crop-area detection (#245; see startCropDetection).
     // Declared before any init-time code can reach pushUndo or restoreSnapshot.
     let cropDetection = null;
+    // A two-stage import's swap waits for an open crop draft (#255).
+    let cropModeWaiters = [];
     const cropDetectionStats = { started: 0, hits: 0, misses: 0, stale: 0, reconversions: 0, conversions: 0 };
     // Full-resolution renders run in a worker and no longer block interactive
     // preview reprocessing, so they can start soon after the user pauses; a
@@ -2361,6 +2367,15 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // hold the previous geometry until geometryReady resolves.
       geometryPending: false,
       geometryReady: Promise.resolve(true),
+      // A two-stage RAW import (#255): `provisional` while the loaded base is
+      // the half-size stand-in (and until the full decode's settings are
+      // installed), `fullDecode` the exact decode behind it (see "Two-stage
+      // RAW imports"). `rawDecodePending` is true from the stand-in until the
+      // full base is installed or the photo is left; only the fullDecode
+      // helpers write it.
+      provisional: null,
+      fullDecode: null,
+      rawDecodePending: false,
 
       // 16-bit pipeline (Stage 2+) — full-precision counterparts to the 8-bit fields above.
       // Shape: { width, height, data: Uint16Array }, RGBA, range [0, 65535].
@@ -2962,6 +2977,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       settings.expiredAnalysis = state.expiredAnalysis ? structuredClone(state.expiredAnalysis) : null;
       settings.frameMetadata = sanitizeFrameMetadata(state.frameMetadata);
       settings.autoFrameMeta = state.autoFrame.lastDiagnostics ? structuredClone(state.autoFrame.lastDiagnostics) : null;
+      // On a half-size stand-in (#255) the crop above is in its units; the
+      // entry also keeps the exact geometry, which the swap installs.
+      if (provisionalUnits()) {
+        state.provisional.geometry.exact(liveGeometry());
+        settings.provisionalGeometry = state.provisional.geometry.save();
+      }
 
       // Category B: references. While geometry is being rebuilt the planes
       // still belong to the previous geometry, so the snapshot keeps only its
@@ -3036,6 +3057,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       updateFileListUI();
       state.filmBase = s.filmBase ? { ...s.filmBase } : { r: 210, g: 140, b: 90 };
       state.cropRegion = s.cropRegion ? { ...s.cropRegion } : null;
+      // An entry of a stand-in's window brings its exact geometry back (#255).
+      if (provisionalUnits()) state.provisional.geometry.restore(s.provisionalGeometry || null, liveGeometry());
       state.curves = {
         r: s.curves.r ? new Uint8Array(s.curves.r) : null,
         g: s.curves.g ? new Uint8Array(s.curves.g) : null,
@@ -7979,6 +8002,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     }
 
     async function ensureFullResolutionReadyForExport({ reason = 'export' } = {}) {
+      // Never the half-size stand-in of a two-stage import (#255): its full
+      // decode is installed and converted first.
+      await ensureFullDecode({ reason });
       // A pending crop-area detection may still change the analysis area and
       // white balance (a hit converts again).
       await settlePendingCropDetection();
@@ -8988,6 +9014,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // A pending repair pass is about to replace this mask (#237).
       if (state.dustRemoval.processing || state.processedImageDataIsPreview || state.fullResolutionPending) return;
       if (state.samplingMode || state.cropping) return;
+      // Its mask belongs to the full decode (#255).
+      if (!currentPhotoExact()) { void ensureFullDecodeWithNotice('dust-brush'); return; }
 
       e.preventDefault();
       e.stopPropagation();
@@ -9589,7 +9617,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         state.dustRemoval.enabled, state.dustRemoval.strength, state.dustRemoval.maxParticleSize,
         state.dustRemoval.ai,
         state.dustRemoval.enabled || item.settings?.repairStrokes?.length ? aiRepair.revision : null,
-        state.flatFields[item.settings?.flatFieldId]?.id || null], 2);
+        state.flatFields[item.settings?.flatFieldId]?.id || null,
+        // A photo left inside a two-stage window keeps its edits apart (#255).
+        ...(!item.settings && item.pendingEdits ? [item.pendingEdits] : [])], 2);
     }
 
     // ===========================================
@@ -9726,7 +9756,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     function parkOpenPhotoForHiddenJob() {
       if (parkedPhoto || !hiddenParkEnabled() || document.visibilityState !== 'hidden') return false;
       const item = getCurrentQueueItem();
-      if (!item || item.file !== state.loadedFile || !state.loadedBaseImageData || state.rawDecodePending
+      if (!item || item.file !== state.loadedFile || !state.loadedBaseImageData || state.rawDecodePending || state.provisional
         || state.currentStep < 3 || state.cropping || document.body.dataset.studioBusy || document.body.dataset.photoSwitching
         || processNegativeInFlight || coreReprocessBusy() || coreReprocessTimer || state.dustRemoval.processing
         || dustDetectionTimer || pendingBrushRepairs || dustDrawing) return false;
@@ -10185,7 +10215,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // detections still ran, whose provisional state must not be restored.
     function rememberPhotoBase(item) {
       if (hiddenJobs.safeMode) return false;
-      if (!item || item.file !== state.loadedFile || !state.loadedBaseImageData || state.rawDecodePending) return false;
+      // Never a two-stage import's half-size stand-in (#255).
+      if (!item || item.file !== state.loadedFile || !state.loadedBaseImageData || state.rawDecodePending
+        || state.loadedBaseImageData.__decodeScale) return false;
       return photoSessions.put(item, { file: item.file, base: state.loadedBaseImageData, rawMetadata: state.rawMetadata });
     }
 
@@ -10193,6 +10225,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // The crash-loop guard runs a resumed job with the caches off.
       if (hiddenJobs.safeMode) return;
       if (item?.provisional) return rememberPhotoBase(item);
+      // A two-stage import before its full decode is converted keeps its base only (#255).
+      if (item && state.provisional?.item === item) return rememberPhotoBase(item);
       if (!item || item.file !== state.loadedFile || !state.loadedBaseImageData || state.rawDecodePending) return;
       // A reduced preview-tier frame (#263) is never a settled view, nor is
       // one still waiting for its normal-size tick.
@@ -10484,7 +10518,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       fullResolutionRenderAbort = null;
       state.fullResolutionPromise = null;
       state.dustRemoval.processing = false;
-      state.rawDecodePending = false;
+      // A stand-in's full decode goes with its photo (#255): its LibRaw and
+      // post-decode workers are disposed in this task.
+      abandonFullDecode();
       // The outgoing photo's background detections are dropped with it. A
       // detection worker that owed nothing else is terminated with its plane
       // copies; the next cold load warms a fresh one while it decodes.
@@ -10552,11 +10588,6 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (state.cropping) exitCropMode({ restore: false });
       if (state.beforeAfterActive) exitBeforeAfter();
       state.samplingMode = null;
-      // Any background full-resolution decode still queued belongs to the file
-      // being replaced.
-      state._pendingFullResBuffer = null;
-      state._pendingFullResFileName = null;
-      state._pendingFullResFile = null;
       // Correction maps are keyed by image dimensions, so the outgoing file's
       // entries can never be reused; they just hold Float32Array grids.
       lensMapCache.clear();
@@ -10587,6 +10618,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         // gate with the decode's real size, held until the photo settles.
         const memoryClaim = claimForActivation(signal, file);
         const reserveDecode = size => memoryClaim.atDecode(size);
+        // A two-stage import's exact decode (#255), null for one stage.
+        let fullDecode = null;
         // A background lane decoding this file right now, or holding its
         // finished decode (#243): adopt it instead of decoding again. Same
         // decode options (full, defects on), with its rawMetadata. A heavy
@@ -10612,37 +10645,52 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         } else if (isRawLikeFile) {
           const arrayBuffer = await file.arrayBuffer();
           if (signal?.aborted || !isCurrentLoad(generation)) return { status: 'stale' };
-          const isHeavy = arrayBuffer.byteLength > 100 * 1024 * 1024 && !/\.tiff?$/.test(fileName);
+          // One plan from the header (#255), read before any decode can
+          // detach the buffer: the whole file is in hand, so an IFD0 at its
+          // end is found too.
+          const plan = await rawDecodePlan(file, { buffer: arrayBuffer, minPixels: twoStageMinPixelsSetting() });
+          if (signal?.aborted || !isCurrentLoad(generation)) return { status: 'stale' };
+          noteTwoStagePlan(file, plan);
           // A photo without settings gets createDefaultSettings right after
           // this load; let the decode's worker compute its film statistics.
           const loadingItem = state.fileQueue.find(entry => entry.file === file);
           const filmStats = loadingItem?.settings ? null : { borderBufferPct: defaultFilmBaseBuffer() };
 
-          if (isHeavy) {
-            // Two-stage loading: show fast half-size preview immediately,
-            // then decode full resolution in the background.
-            // The preview stage gets a COPY: LibRaw transfers its input buffer
-            // to a worker, which would detach arrayBuffer and break the
-            // full-resolution decode scheduled below.
+          if (plan.stages === 2) {
+            // Two stages (#255): a half-size 16-bit stand-in without the
+            // defect pass now, the exact decode behind it (see "Two-stage RAW
+            // imports"). Stage 1 takes this buffer; stage 2 reads the file
+            // again.
             overlay.updateProgress(20, lang.loadingProcessing);
-            imageData = await loadRawImageDataPreview(arrayBuffer.slice(0), fileName, {
-              sourceBlob: file,
-              filmStats,
-              signal,
-              reserveDecode,
-              ramBytes: memoryRuntime.ramBytes,
-              onMetadata(meta) {
-                extractedRawMeta = meta;
-              }
-            });
+            fullDecode = createFullDecode({ file, fileName, generation, signal, filmStats, plan });
+            if (fullDecode.mode === 'concurrent') fullDecode.start();
+            const record = fullDecode;
+            try {
+              imageData = await loadRawImageDataPreview(arrayBuffer, fileName, {
+                halfSize: true,
+                outputBps: 16,
+                suppressSensorDefects: false,
+                sourceBlob: file,
+                filmStats,
+                signal,
+                reserveDecode,
+                ramBytes: memoryRuntime.ramBytes,
+                // Sequential devices: stage 2 once stage 1's LibRaw heap is gone.
+                onLibRawReleased: () => record.start(),
+                onMetadata(meta) {
+                  extractedRawMeta = meta;
+                }
+              });
+            } catch (err) {
+              if (err?.name === 'AbortError' || signal?.aborted) throw err;
+              // Without a stand-in the full decode is this load.
+              console.warn('[RAW] half-size stand-in failed; waiting for the full decode:', err?.message || err);
+              fullDecode = null;
+              imageData = await record.decoded();
+              extractedRawMeta = record.rawMetadata || extractedRawMeta;
+            }
             if (!isCurrentLoad(generation)) return { status: 'stale' };
             overlay.updateProgress(60, lang.loadingProcessing);
-
-            // Schedule full-res decode. Store buffer so it stays alive.
-            state._pendingFullResBuffer = arrayBuffer;
-            state._pendingFullResFileName = fileName;
-            state._pendingFullResFile = file;
-            state.rawDecodePending = true;
           } else {
             overlay.updateProgress(30, lang.loadingProcessing);
             imageData = await loadRawImageData(arrayBuffer, fileName, {
@@ -10682,6 +10730,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           state.cropRegion = null;
           state.rotationAngle = 0;
           state.mirrored = false;
+          // A stand-in stays provisional until its full decode is installed.
+          beginProvisionalPhoto(fullDecode, imageData, generation, state.fileQueue.find(entry => entry.file === file) || null);
           updateMirrorButtonState();
           state.processedImageData = null;
           state.displayImageData = null;
@@ -10742,16 +10792,6 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           // One overlay session from decode to positive: with autoConvert the
           // conversion re-titles this overlay and hides it after the paint.
           if (!autoConvert && isCurrentLoad(generation)) overlay.hide();
-          // Schedule background full-resolution decode if we used fast preview
-          if (state._pendingFullResBuffer) {
-            if (isCurrentLoad(generation)) {
-              scheduleBackgroundFullResDecode(generation, signal);
-            } else {
-              state._pendingFullResBuffer = null;
-              state._pendingFullResFileName = null;
-              state._pendingFullResFile = null;
-            }
-          }
         }
         if (autoConvert && isCurrentLoad(generation)) {
           await prepareStudioPhoto(generation, undefined, { quiet: quiet || Boolean(openingItem) });
@@ -10824,98 +10864,535 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       studioWorkspace?.sync();
     }
 
-    async function scheduleBackgroundFullResDecode(generation = loadGeneration, signal = null) {
-      const buf = state._pendingFullResBuffer;
-      const name = state._pendingFullResFileName;
-      const sourceFile = state._pendingFullResFile;
-      if (!buf || !name) return;
-      if (!isCurrentLoad(generation)) return;
-      state._pendingFullResBuffer = null;
-      state._pendingFullResFileName = null;
-      state._pendingFullResFile = null;
+    // ===========================================
+    // Two-stage RAW imports (#255)
+    // ===========================================
+    // A RAW the decode plan (rawDecodePlan) sends to two stages opens from a
+    // half-size 16-bit LibRaw decode without the sensor-defect pass (stage 1)
+    // while the exact full decode runs behind it (stage 2): together with
+    // stage 1 where two LibRaw heaps fit (Chromium reporting 8 GB and 6
+    // threads), otherwise as soon as stage 1's LibRaw worker is gone. Until
+    // settleProvisionalPhoto has installed the full decode, the photo is
+    // provisional:
+    // - live geometry is in the stand-in's units and every settings object in
+    //   full-resolution units: restoreSettings, extractCurrentSettings and the
+    //   history convert at that boundary (state.provisional.geometry,
+    //   provisionalPhoto.js);
+    // - the stand-in's automatic analyses are held back (never persisted,
+    //   learned or voted into the roll; no roll date, no semantic colour) and
+    //   computed again on the full decode, where what the user changed in the
+    //   window wins and everything else takes the full decode's values;
+    // - exact consumers (exports, repairs, the flat field, roll analysis,
+    //   settings sync) await ensureFullDecode(), which never hands them the
+    //   stand-in; sessions and roll samples refuse it.
+    // Leaving the photo aborts stage 2 with the activation (#243).
+    const TWO_STAGE_MIN_MP_KEY = 'nc_two_stage_min_mp';
+    const twoStageDiagnostics = { plans: [], stage1: [], stage2: [], swaps: 0, failures: 0, retries: 0, abandoned: 0, leftEarly: 0 };
+    // ?debug=1 only: the next N full decodes fail (smoke: export after a failure).
+    let failNextFullDecodes = 0;
 
-      if (DEBUG_UI) {
-        console.info('[RAW] starting background full-res decode for', name, (buf.byteLength / 1024 / 1024).toFixed(0) + 'MB');
-      }
+    function twoStageMinPixelsSetting() {
+      const params = new URLSearchParams(window.location.search);
+      if (params.has('twoStageMinMp')) return twoStageMinPixels(params.get('twoStageMinMp'));
+      return twoStageMinPixels(safeStorageGet(TWO_STAGE_MIN_MP_KEY) ?? TWO_STAGE_MIN_MP_DEFAULT);
+    }
 
-      // A foreground reservation of its own (#258), until the decode returns.
-      const memoryClaim = createFrameClaim(sourceFile, {
-        priority: 'foreground', signal, label: `full-resolution ${name}`, bytesFor: decodeReservationBytes
+    function stageTwoMode() {
+      return stageTwoStartMode({
+        deviceMemory: navigator.deviceMemory,
+        hardwareConcurrency: navigator.hardwareConcurrency,
+        override: new URLSearchParams(window.location.search).get('twoStageMode')
       });
-      try {
-        const fullImageData = await loadRawImageData(buf, name, {
-          // Its embedded-preview fallback re-reads the file instead of
-          // scanning and copying the preview up front.
-          sourceBlob: sourceFile && sourceFile === state.loadedFile ? sourceFile : null,
-          // Leaving the photo stops this decode (#243).
-          signal,
-          reserveDecode: size => memoryClaim.atDecode(size),
-          ramBytes: memoryRuntime.ramBytes,
-          onMetadata(meta) {
-            if (isCurrentLoad(generation) && meta && !state.rawMetadata) {
-              state.rawMetadata = meta;
-              applyLensMetadataPrefill(meta);
+    }
+
+    function noteTwoStagePlan(file, plan) {
+      twoStageDiagnostics.plans.push({ file: file.name, ...plan });
+      if (twoStageDiagnostics.plans.length > 64) twoStageDiagnostics.plans.shift();
+      if (DEBUG_UI) console.info('[RAW] decode plan', file.name, plan);
+    }
+
+    function noteTwoStageEvent(list, entry) {
+      list.push(entry);
+      if (list.length > 64) list.shift();
+      return entry;
+    }
+
+    // Live geometry, in the units of the installed base.
+    function liveGeometry() {
+      return { cropRegion: state.cropRegion ? { ...state.cropRegion } : null, rotationAngle: state.rotationAngle, mirrored: state.mirrored };
+    }
+
+    // The loaded base is a stand-in and live geometry is in its units.
+    function provisionalUnits() {
+      return Boolean(state.provisional && !state.provisional.swapped);
+    }
+
+    // The exact decode of a two-stage import. `start()` begins it once (at
+    // once where both stages fit, else on stage 1's LibRaw release);
+    // `decoded()` is the current attempt. Its controller follows the
+    // activation, so leaving the photo, or abandoning the record, disposes
+    // its LibRaw and post-decode workers.
+    function createFullDecode({ file, fileName, generation, signal, filmStats, plan }) {
+      const abort = new AbortController();
+      if (signal?.aborted) abort.abort(signal.reason);
+      else signal?.addEventListener?.('abort', () => abort.abort(signal.reason), { once: true });
+      const record = {
+        file, fileName, generation, plan, filmStats, abort, mode: stageTwoMode(),
+        status: 'waiting', started: false, attempt: null, error: null, rawMetadata: null,
+        settle: null, urgent: false, wake: null, waiters: []
+      };
+      record.start = () => {
+        if (record.started || abort.signal.aborted) return;
+        record.started = true;
+        beginFullDecodeAttempt(record);
+      };
+      record.decoded = () => {
+        record.start();
+        return record.attempt || Promise.reject(abort.signal.reason || new DOMException('The full decode was abandoned', 'AbortError'));
+      };
+      return record;
+    }
+
+    function beginFullDecodeAttempt(record) {
+      record.status = 'running';
+      record.error = null;
+      const started = performance.now();
+      const entry = noteTwoStageEvent(twoStageDiagnostics.stage2, { file: record.file.name, mode: record.mode, ms: null, failed: false });
+      const attempt = (async () => {
+        const signal = record.abort.signal;
+        if (DEBUG_UI && failNextFullDecodes > 0) {
+          failNextFullDecodes--;
+          await new Promise(resolve => setTimeout(resolve, 50));
+          throw new Error('Full decode failed (debug)');
+        }
+        // A second read of the file: nothing is copied on the main thread and
+        // no buffer stays pinned in state.
+        const buffer = await record.file.arrayBuffer();
+        if (signal.aborted) throw signal.reason;
+        // A foreground reservation of its own (#258), until the decode returns.
+        const memoryClaim = createFrameClaim(record.file, {
+          priority: 'foreground', signal, label: `full-resolution ${record.fileName}`, bytesFor: decodeReservationBytes
+        });
+        let image;
+        try {
+          image = await loadRawImageData(buffer, record.fileName, {
+            sourceBlob: record.file,
+            filmStats: record.filmStats,
+            signal,
+            reserveDecode: size => memoryClaim.atDecode(size),
+            ramBytes: memoryRuntime.ramBytes,
+            onMetadata(meta) {
+              record.rawMetadata = meta;
+              if (state.fullDecode === record && meta && !state.rawMetadata) {
+                state.rawMetadata = meta;
+                applyLensMetadataPrefill(meta);
+              }
             }
+          });
+        } finally {
+          memoryClaim.release();
+        }
+        if (!image) throw new Error('The full decode returned no pixels');
+        return image;
+      })();
+      record.attempt = attempt;
+      attempt.then(() => {
+        if (record.attempt !== attempt || record.status !== 'running') return;
+        entry.ms = Math.round(performance.now() - started);
+        record.status = 'decoded';
+        noteFullDecodeChange(record);
+      }, error => {
+        if (record.attempt !== attempt) return;
+        entry.failed = true;
+        if (record.abort.signal.aborted) return;
+        failFullDecode(record, error, attempt);
+      });
+      return attempt;
+    }
+
+    function noteFullDecodeChange(record) {
+      for (const resolve of record.waiters.splice(0)) resolve();
+    }
+
+    function nextFullDecodeChange(record) {
+      return new Promise(resolve => record.waiters.push(resolve));
+    }
+
+    // Stage 2 failed (or its settings could not be installed): the photo stays
+    // provisional, and the next exact consumer decodes again (ensureFullDecode).
+    // `attempt` is the decode the failure belongs to; a newer one wins.
+    function failFullDecode(record, error, attempt = record.attempt) {
+      if (state.fullDecode !== record || record.attempt !== attempt) return;
+      if (['abandoned', 'installed', 'failed'].includes(record.status)) return;
+      record.status = 'failed';
+      record.error = error;
+      twoStageDiagnostics.failures++;
+      console.warn('[RAW] full-resolution decode failed; the photo stays provisional:', error?.message || error);
+      showToast(getLocalizedText('fullResolutionFailed', 'Full resolution could not be loaded; export will retry'), 6000);
+      noteFullDecodeChange(record);
+    }
+
+    function retryFullDecode(record) {
+      twoStageDiagnostics.retries++;
+      record.started = true;
+      beginFullDecodeAttempt(record);
+      startProvisionalSettle(record);
+    }
+
+    // loadFile, once the stand-in (or a single-stage decode, record null) is
+    // the loaded base.
+    function beginProvisionalPhoto(record, stageOne, generation, item) {
+      state.fullDecode = record;
+      state.rawDecodePending = Boolean(record);
+      state.provisional = null;
+      if (!record) return;
+      const size = { width: stageOne.width, height: stageOne.height };
+      // LibRaw's own full size, else the header's (orientation matched), else
+      // the stand-in's own: a stand-in LibRaw did not halve is still not
+      // exact (no defect pass), and stage 2 still runs.
+      const plan = record.plan;
+      const header = plan?.width && plan?.height
+        ? ((plan.width >= plan.height) === (size.width >= size.height) ? { width: plan.width, height: plan.height } : { width: plan.height, height: plan.width })
+        : null;
+      const fullSize = stageOne.__fullSize ? { ...stageOne.__fullSize } : (header && header.width > size.width * 1.2 ? header : size);
+      if (!stageOne.__decodeScale) console.info('[RAW] the stand-in came back at full size; the full decode still runs:', record.fileName);
+      noteTwoStageEvent(twoStageDiagnostics.stage1, { file: record.file.name, width: size.width, height: size.height, scale: stageOne.__decodeScale || 1, mode: record.mode });
+      const geometry = createExactGeometry({ size, fullSize });
+      geometry.installed({ cropRegion: null, rotationAngle: 0, mirrored: false });
+      state.provisional = {
+        generation, item, record, size, fullSize, geometry,
+        // The provisional pass's inputs and result (prepareStudioPhoto).
+        start: null, settledSnapshot: null, passDone: null,
+        // After the swap, until the conversion of the full decode lands.
+        swapped: false, swapEdits: null, swapBaseline: null
+      };
+    }
+
+    // The photo is left (invalidatePhotoActivation) or replaced: its stage 2
+    // is aborted and anyone waiting for it is released.
+    function abandonFullDecode() {
+      const record = state.fullDecode;
+      state.fullDecode = null;
+      state.provisional = null;
+      state.rawDecodePending = false;
+      if (!record || record.status === 'installed') return;
+      record.status = 'abandoned';
+      twoStageDiagnostics.abandoned++;
+      record.abort.abort(new DOMException('The photo was left', 'AbortError'));
+      noteFullDecodeChange(record);
+    }
+
+    // The photo on screen is exact: no stand-in, or its full decode installed
+    // and converted.
+    function currentPhotoExact() {
+      return !state.fullDecode || state.fullDecode.status === 'installed';
+    }
+
+    /**
+     * The barrier of every exact consumer: resolves true once the photo on
+     * screen is its exact full decode, converted; false when the photo was
+     * left meanwhile. A failed stage 2 is decoded once more (in the
+     * foreground, behind the caller's overlay); a second failure throws. The
+     * stand-in is never handed out.
+     */
+    async function ensureFullDecode({ reason = 'export' } = {}) {
+      const record = state.fullDecode;
+      if (!record || record.status === 'installed') return true;
+      let retried = false;
+      for (;;) {
+        if (state.fullDecode !== record || record.status === 'abandoned') return false;
+        if (record.status === 'installed') return true;
+        if (record.status === 'failed') {
+          if (retried) {
+            const error = new Error(getLocalizedText('fullResolutionFailed', 'Full resolution could not be loaded; export will retry'));
+            error.code = 'FULL_DECODE_FAILED';
+            error.cause = record.error;
+            throw error;
           }
-        });
-        memoryClaim.release();
-        if (!fullImageData) return;
-        // The decode takes tens of seconds to minutes. Anything the user did
-        // in the meantime wins: a different file must not be replaced by this
-        // one, and a crop draft in progress must not be yanked out from under
-        // the pointer.
-        if (!isCurrentLoad(generation)) return;
-        if (state.cropping) return;
-
-        // Replace the preview with the full-res image. Rotation and crop were
-        // set against the half-size preview, so they have to be re-applied to
-        // the full-size decode — the crop rectangle in particular is in
-        // preview pixels and would otherwise cut out the top-left quadrant and
-        // keep the export at half resolution.
-        const preview = state.loadedBaseImageData;
-        const scaleX = preview && preview.width ? fullImageData.width / preview.width : 1;
-        const scaleY = preview && preview.height ? fullImageData.height / preview.height : 1;
-        const previewCropRegion = state.cropRegion;
-
-        state.loadedBaseImageData = fullImageData;
-        state.rawDecodePending = false;
-        // A new base: the chain is rebuilt from it (the memo cannot match).
-        // The preview's planes stay installed until the full ones land.
-        const ready = applyGeometryFromBase({
-          cropRegion: previewCropRegion ? {
-            left: previewCropRegion.left * scaleX,
-            top: previewCropRegion.top * scaleY,
-            width: previewCropRegion.width * scaleX,
-            height: previewCropRegion.height * scaleY
-          } : null
-        });
-
-        clearFullResolutionRenderState();
-        invalidateSilverCoreCache();
-        state.conversionSourceImageData = null;
-        state.conversionPreviewImageData = null;
-        state.displayLevelImageData = null;
-        state.autoWbSample = null;
-
-        await afterGeometry(ready, async isCurrent => {
-          if (state.currentStep >= 3) {
-            // Already converted against the preview: redo the conversion at full
-            // resolution rather than painting the raw negative over the result.
-            await convertAfterGeometryEdit(isCurrent).catch((err) => {
-              console.error('Re-conversion after full-res decode failed:', err);
-            });
-          } else {
-            displayNegative(state.croppedImageData || state.originalImageData);
-            updateCanvasVisibility();
-          }
-        });
-        if (DEBUG_UI) console.info('[RAW] background full-res decode complete');
-      } catch (err) {
-        memoryClaim.release();
-        if (err?.name === 'AbortError') return;
-        console.warn('[RAW] background full-res decode failed, keeping preview', err.message);
-        // Keep the preview — it's still usable.
+          retried = true;
+          retryFullDecode(record);
+        }
+        if (DEBUG_UI) console.info('[RAW] waiting for the full decode:', reason);
+        // Someone waits: the swap no longer waits for the input to go quiet.
+        record.urgent = true;
+        record.wake?.();
+        record.start();
+        startProvisionalSettle(record);
+        await nextFullDecodeChange(record);
       }
+    }
+
+    // Exact consumers that act on the photo directly (brushes, flat field)
+    // say why they wait.
+    async function ensureFullDecodeWithNotice(reason) {
+      if (currentPhotoExact()) return true;
+      showToast(getLocalizedText('preparingFullResolution', 'Preparing full resolution…'), 2500);
+      try {
+        return await ensureFullDecode({ reason });
+      } catch (error) {
+        showToast(error?.message || String(error), 4000);
+        return false;
+      }
+    }
+
+    function whenCropModeClosed() {
+      if (!state.cropping) return Promise.resolve();
+      return new Promise(resolve => cropModeWaiters.push(resolve));
+    }
+
+    function startProvisionalSettle(record) {
+      if (!record || state.fullDecode !== record || !state.provisional || state.provisional.record !== record) return null;
+      if (record.settle) return record.settle;
+      const generation = record.generation;
+      const settle = settleProvisionalPhoto(record, generation).catch(error => {
+        if (error?.name === 'AbortError' || state.fullDecode !== record || !isCurrentLoad(generation)) return;
+        console.error('[RAW] could not install the full decode:', error);
+        failFullDecode(record, error);
+      }).finally(() => {
+        if (record.settle === settle && record.status !== 'installed') record.settle = null;
+      });
+      record.settle = settle;
+      return settle;
+    }
+
+    // Waits until the swap can land without cutting into an interaction: the
+    // stand-in's own pass is over, no crop draft is open, no conversion,
+    // geometry build or crop-area detection is running, and (unless an exact
+    // consumer is waiting) no input came for the background gate's quiet
+    // period, so the rebuild never lands inside a drag.
+    async function waitForProvisionalSwap(record, provisional, current) {
+      for (;;) {
+        if (!current()) return;
+        if (provisional.passDone) { await provisional.passDone; continue; }
+        if (state.cropping) { await whenCropModeClosed(); continue; }
+        if (processNegativeInFlight) { await processNegativeInFlight.catch(() => {}); continue; }
+        if (state.geometryPending) { await whenGeometrySettled(); continue; }
+        if (hasPendingCropDetection()) { await settlePendingCropDetection(); continue; }
+        if (!record.urgent) {
+          const quiet = BACKGROUND_INPUT_QUIET_MS - (performance.now() - backgroundGate.lastInputAt);
+          const busy = coreReprocessBusy() || Boolean(coreReprocessTimer) || dustDrawing || Boolean(aiBrushDrawing);
+          if (quiet > 0 || busy) {
+            await new Promise(resolve => {
+              const timer = setTimeout(done, busy ? BACKGROUND_BUSY_POLL_MS : quiet);
+              function done() { clearTimeout(timer); if (record.wake === done) record.wake = null; resolve(); }
+              record.wake = done;
+            });
+            continue;
+          }
+        }
+        return;
+      }
+    }
+
+    // The settings today's single decode would have given this photo, built
+    // on the full decode off-state: the same createDefaultSettings (its
+    // pixel-derived fields; the rest is the snapshot the stand-in's pass
+    // started from), the same frame and film-edge detections and the same
+    // film-edge, roll film-type and learned-default steps, from the inputs
+    // captured when that pass began. The detection takes the full decode
+    // without a copy (nothing else has seen it) and hands back `image`.
+    async function settledImportSettings(image, item, provisional, record) {
+      const start = provisional.start;
+      if (!start?.snapshot) return { settings: extractCurrentSettings(), image, analysed: false };
+      let snapshot = start.snapshot;
+      if (start.fresh) {
+        const defaults = mergeStudioColors(createDefaultSettings(image, item, start.inputs), item?.studioColors || {});
+        const safe = sanitizeSettings(defaults, { fallbackSettings: { ...snapshot, filmBase: { ...DEFAULT_FILM_BASE } } });
+        snapshot = { ...snapshot };
+        for (const key of ['filmType', 'positiveMode', 'filmTypeSource', 'filmTypeConfidence', 'filmTypeReason']) snapshot[key] = safe[key];
+        snapshot.filmBase = { ...safe.filmBase };
+      }
+      let settings = snapshot;
+      if (start.detectFrame || start.readEdge) {
+        const signal = record.abort.signal;
+        const reload = async () => loadRawImageData(await record.file.arrayBuffer(), record.fileName, { sourceBlob: record.file, signal });
+        const analysed = await runImportDetections(image, {
+          frame: start.detectFrame, filmEdge: start.readEdge, owned: true, reload, silent: true,
+          autoFrame: start.autoFrame, filmType: snapshot.filmType, frameFilmType: snapshot.filmType, signal
+        });
+        if (!analysed.image) throw analysed.detection?.error || new Error('The full decode was lost');
+        image = analysed.image;
+        const framed = start.detectFrame
+          ? await analyzeStudioImportFrame(image, snapshot, {
+            allowCrop: start.fresh, silent: true, autoFrame: start.autoFrame, filmType: snapshot.filmType, signal, detection: analysed.detection
+          })
+          : snapshot;
+        const final = await buildFinalImportSettings(image, framed, analysed.read, item, {
+          readEdge: start.readEdge, freshFile: start.fresh, applyEdgeDefaults: start.applyEdgeDefaults, userEdited: start.userEdited
+        });
+        settings = final.settings;
+      } else if (start.fresh) {
+        settings = await learnedImportSettings(settleImportFilmType(item, settings, { userEdited: start.userEdited }), item, { userEdited: start.userEdited });
+      }
+      return { settings: overlayWindowEdits(settings, start.pendingEdits), image, analysed: true };
+    }
+
+    // Exact entries: every undo/redo entry was taken in the window (loadFile
+    // cleared the history). They keep their scalars, their crop goes to full
+    // units (the exact crop, or a window edit converted against the real
+    // size) and their pixels are rebuilt from the full base on restore (#244
+    // cold entries). Dust-stroke entries patch the stand-in's planes: they go,
+    // with everything older on their stack.
+    function rebaseProvisionalHistory(provisional, realSize) {
+      for (const stack of [undoStack, redoStack]) {
+        for (let i = 0; i < stack.length; i++) {
+          if (stack[i].dustDelta) { stack.splice(0, i + 1); i = -1; }
+        }
+        for (const entry of stack) {
+          const s = entry.settings;
+          if (s?.provisionalGeometry) {
+            const geometry = createExactGeometry({ size: provisional.size, fullSize: provisional.fullSize });
+            const live = { cropRegion: s.cropRegion, rotationAngle: s.rotationAngle, mirrored: s.mirrored };
+            geometry.restore(s.provisionalGeometry, live);
+            s.cropRegion = geometry.rebase(realSize, live).cropRegion;
+            delete s.provisionalGeometry;
+          }
+          entry.refs = { cold: true };
+          delete entry.frame;
+        }
+      }
+      updateUndoRedoButtons();
+    }
+
+    // The swap, in one task: the user's window edits over `settled`, the
+    // history rebased, the full base installed and its geometry started in
+    // the pool (no studioBusy, the stand-in stays on screen until it lands).
+    function installFullDecode(record, provisional, image, settled) {
+      const realSize = { width: image.width, height: image.height };
+      // Both sides mapped with the same full-size estimate; a window crop is
+      // then converted against the real frame.
+      const live = extractCurrentSettings();
+      const edits = provisional.settledSnapshot ? windowEdits(provisional.settledSnapshot, live) : {};
+      if ('cropRegion' in edits) Object.assign(edits, provisional.geometry.rebase(realSize, liveGeometry()));
+      const merged = overlayWindowEdits(settled, edits);
+      rebaseProvisionalHistory(provisional, realSize);
+      provisional.swapped = true;
+      provisional.swapEdits = edits;
+      state.loadedBaseImageData = image;
+      state.rawDecodePending = false;
+      record.status = 'swapped';
+      twoStageDiagnostics.swaps++;
+      // The stand-in's renders and conversions go with it.
+      coreReprocessGeneration += 1;
+      coreReprocessToken += 1;
+      cancelPendingTimers();
+      fullResolutionRenderAbort?.abort();
+      fullResolutionRenderAbort = null;
+      clearFullResolutionRenderState();
+      invalidateSilverCoreCache();
+      state.conversionSourceImageData = null;
+      state.conversionPreviewImageData = null;
+      state.displayLevelImageData = null;
+      state.autoWbSample = null;
+      const step2Mode = state.step2Mode;
+      restoreSettings(merged, { refreshDisplay: false, holdBusy: false });
+      state.step2Mode = step2Mode;
+      provisional.swapBaseline = extractCurrentSettings();
+      noteFullDecodeChange(record);
+    }
+
+    // From the full decode to the exact photo (#255): HEAD's settings for it
+    // computed off-state, the swap, one conversion of the full base with the
+    // automatic measurements of today's import. A background job: no
+    // overlay, no studioBusy, no toasts; the user keeps editing, and what
+    // they change meanwhile wins at the swap.
+    async function settleProvisionalPhoto(record, generation) {
+      const provisional = state.provisional;
+      if (!provisional || provisional.record !== record) return;
+      const item = provisional.item;
+      const current = () => state.fullDecode === record && state.provisional === provisional && isCurrentLoad(generation);
+      const trace = createPerfTrace('twoStageSettle', { file: record.file.name, mode: record.mode });
+      try {
+        if (provisional.passDone) await provisional.passDone;
+        let image;
+        // A failed decode reports itself (beginFullDecodeAttempt).
+        try { image = await record.decoded(); } catch { return; }
+        if (!current()) return;
+        trace.mark('decoded', { pixels: getImageDataPixelCount(image) });
+        const computed = await settledImportSettings(image, item, provisional, record);
+        if (!current()) return;
+        image = computed.image;
+        trace.mark('settings', { analysed: computed.analysed });
+        await waitForProvisionalSwap(record, provisional, current);
+        if (!current()) return;
+        const step = state.currentStep;
+        installFullDecode(record, provisional, image, computed.settings);
+        trace.mark('swap');
+        await whenGeometrySettled();
+        if (!current()) return;
+        if (step >= 3) {
+          await processNegative({ quiet: true });
+        } else {
+          const sourceData = state.croppedImageData || state.originalImageData;
+          if (sourceData) { displayNegative(sourceData); updateCanvasVisibility(); }
+        }
+        if (!current()) return;
+        trace.mark('converted');
+        record.status = 'installed';
+        state.provisional = null;
+        noteFullDecodeChange(record);
+        if (provisional.start?.fresh) scheduleSemanticColour(item, generation);
+        updateAutoFrameButtons();
+        updateBeforeAfterButtonState();
+        updateFileListUI();
+        studioWorkspace?.sync();
+        backgroundGate.bump();
+        kickBackgroundPhotoWork();
+      } finally {
+        trace.end({ status: record.status });
+      }
+    }
+
+    // Left before the full decode was installed and converted: the saved
+    // recipe stays as it was plus what the user changed in the window. A
+    // photo without one keeps only those edits (`pendingEdits`); the next
+    // decode of it (switch-back, batch export, roll analysis) computes the
+    // automatic fields as for a fresh file and puts them on top.
+    function leaveProvisionalPhoto(item) {
+      const provisional = state.provisional;
+      if (!provisional) return;
+      twoStageDiagnostics.leftEarly++;
+      let edits = null;
+      if (provisional.swapped && provisional.swapBaseline) {
+        edits = { ...(provisional.swapEdits || {}), ...windowEdits(provisional.swapBaseline, extractCurrentSettings()) };
+      } else if (provisional.settledSnapshot) {
+        edits = windowEdits(provisional.settledSnapshot, extractCurrentSettings());
+      }
+      if (!hasWindowEdits(edits)) return;
+      if (item.settings) item.settings = cloneSettings(overlayWindowEdits(item.settings, edits));
+      else item.pendingEdits = { ...(item.pendingEdits || {}), ...structuredClone(edits) };
+      item.isDirty = false;
+    }
+
+    // A photo's window edits (see leaveProvisionalPhoto) over settings
+    // computed for it from scratch.
+    function withPendingEdits(item, settings) {
+      return item && !item.settings && hasWindowEdits(item.pendingEdits) ? overlayWindowEdits(settings, item.pendingEdits) : settings;
+    }
+
+    function pendingGeometryEdits(item) {
+      return item && !item.settings ? geometryEdits(item.pendingEdits) : null;
+    }
+
+    if (typeof window !== 'undefined') {
+      window.__ncTwoStage = {
+        diagnostics: twoStageDiagnostics,
+        status: () => ({
+          pending: Boolean(state.rawDecodePending),
+          provisional: Boolean(state.provisional),
+          swapped: Boolean(state.provisional?.swapped),
+          fullDecode: state.fullDecode ? state.fullDecode.status : null,
+          mode: state.fullDecode ? state.fullDecode.mode : null,
+          base: state.loadedBaseImageData ? {
+            width: state.loadedBaseImageData.width, height: state.loadedBaseImageData.height,
+            scale: state.loadedBaseImageData.__decodeScale || 1
+          } : null,
+          settings: state.originalImageData ? extractCurrentSettings() : null,
+          liveCrop: state.cropRegion ? { ...state.cropRegion } : null
+        }),
+        exact: () => ensureFullDecode({ reason: 'debug' }),
+        ...(DEBUG_UI ? { failNextFullDecodes: (count = 1) => { failNextFullDecodes = Math.max(0, count | 0); } } : {})
+      };
     }
 
     function showImageUI() {
@@ -12623,7 +13100,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (DEBUG_UI) console.error(`Geometry planes read while a build is pending: ${reader}`);
     }
 
-    function startGeometryJob(base, key, adopted, refreshDisplay) {
+    function startGeometryJob(base, key, adopted, refreshDisplay, holdBusy = true) {
       cancelGeometryJob({ keepInterim: true });
       const token = geometryToken;
       const generation = loadGeneration;
@@ -12638,7 +13115,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       geometryJob = job;
       state.geometryPending = true;
       state.geometryReady = job.done;
-      holdGeometryBusy(job);
+      if (holdBusy) holdGeometryBusy(job);
       const isCurrent = () => geometryJob === job && token === geometryToken && isCurrentLoad(generation);
       buildGeometryPlanes(base, key, adopted, isCurrent).then(planes => {
         if (!planes || !isCurrent()) return false;
@@ -12658,7 +13135,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // Builds (or keeps) the planes for state.rotationAngle / state.mirrored and
     // `cropRegion`, which is sanitised against the frame at once. Resolves true
     // when those planes are installed and still current.
-    function applyGeometryFromBase({ cropRegion = state.cropRegion, refreshDisplay = false } = {}) {
+    function applyGeometryFromBase({ cropRegion = state.cropRegion, refreshDisplay = false, holdBusy = true } = {}) {
       const base = state.loadedBaseImageData || state.originalImageData;
       if (!base || isGeometryFrame(base)) {
         cancelGeometryJob();
@@ -12688,7 +13165,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         if (refreshDisplay) displayNegative(base);
         return Promise.resolve(true);
       }
-      return startGeometryJob(base, key, takeAdoptedRotation(base, key.angle), refreshDisplay);
+      return startGeometryJob(base, key, takeAdoptedRotation(base, key.angle), refreshDisplay, holdBusy);
     }
 
     // Runs `then` once the planes an edit asked for are installed, unless a
@@ -13051,7 +13528,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
               continue;
             }
 
-            const existing = item.settings ? cloneSettings(item.settings) : settleImportFilmType(item, createDefaultSettings(imageData, item));
+            const existing = item.settings ? cloneSettings(item.settings) : withPendingEdits(item, settleImportFilmType(item, createDefaultSettings(imageData, item)));
             const lowBehavior = state.autoFrame.lowConfidenceBehavior || 'suggest';
             const effectiveAngle = autoFrameEffectiveAngle(result.angle);
             const frame = { width: result.rotatedWidth, height: result.rotatedHeight };
@@ -14077,6 +14554,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (options.restore) {
         restoreDisplayAfterCropDraft();
       }
+      // A full decode that landed during the draft installs now; from the
+      // next task, once an Apply has written its crop (#255).
+      if (cropModeWaiters.length) {
+        const waiters = cropModeWaiters;
+        cropModeWaiters = [];
+        setTimeout(() => { for (const resolve of waiters) resolve(); }, 0);
+      }
     }
 
     function getCropPointerPosition(clientX, clientY) {
@@ -14936,9 +15420,6 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       zoomControls.style.display = 'none';
       // Reset all state
       state.loadedFile = null;
-      state._pendingFullResBuffer = null;
-      state._pendingFullResFileName = null;
-      state._pendingFullResFile = null;
       state.loadedBaseImageData = null;
       state.originalImageData = null;
       state.croppedImageData = null;
@@ -15475,6 +15956,14 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       let result;
 
       await overlay.show({ title: lang.loadingExporting });
+      // A two-stage import's stand-in is never exported or persisted (#255):
+      // its full decode is installed first (decoded again if it failed).
+      try {
+        if (!await ensureFullDecode({ reason: 'export' })) throw new Error('Photo changed while exporting. Please export again.');
+      } catch (error) {
+        overlay.hide();
+        throw error;
+      }
       // This export's own worker, terminated when the export ends (#250): its
       // dead planes go with it instead of waiting for the next export. Every
       // request is awaited before the `finally`, so terminating there rejects
@@ -15686,6 +16175,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // ===========================================
     function extractCurrentSettings() {
       const safe = sanitizeSettings(state, { fallbackSettings: state });
+      // Settings are in full-resolution units, also while a half-size
+      // stand-in is loaded (#255): its saved geometry exactly, or a window
+      // edit converted once.
+      if (provisionalUnits()) Object.assign(safe, state.provisional.geometry.exact(liveGeometry()));
       return deepCopySanitizedSettings(safe, {
         autoFrameMeta: state.autoFrame.lastDiagnostics
       });
@@ -15735,12 +16228,17 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const item = getCurrentQueueItem();
       if (!item) return false;
       // Provisional import settings (detections still running) are never
-      // saved; `isDirty` cannot tell, since their automatic WB sets it.
+      // saved; `isDirty` cannot tell, since their automatic WB sets it. Nor
+      // are a two-stage import's before its full decode is installed and
+      // converted (#255): leaving keeps only the user's edits.
       if (item.provisional) return false;
+      if (state.provisional && state.provisional.item === item) return false;
       if (!state.originalImageData) return false;
       if (!force && !item.isDirty && item.settings) return false;
 
       item.settings = extractCurrentSettings();
+      // Window edits kept from an earlier visit (#255) are in these settings now.
+      delete item.pendingEdits;
       updateStudioThumbnail();
       item.isDirty = false;
       updateFileListUI();
@@ -15803,6 +16301,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         void appAlert(i18n[currentLang].noSelectedFiles || 'No selected images to apply settings.');
         return;
       }
+      // Copied from the full decode's settings, not a stand-in's (#255).
+      if (!await ensureFullDecodeWithNotice('sync')) return;
 
       const baseSettings = extractCurrentSettings();
       if (!await appConfirm(studioWorkspace.text('settingsConfirm'))) return;
@@ -15813,11 +16313,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       void appAlert(template.replace('{count}', String(selectedItems.length)));
     }
 
-    function setRollReferenceFromCurrent() {
+    async function setRollReferenceFromCurrent() {
       if (state.currentStep < 3 || !state.processedImageData) {
         void appAlert(i18n[currentLang].finishProcessing || 'Please complete the workflow (step 3) before saving settings.');
         return;
       }
+      // The reference is the full decode's recipe (#255).
+      if (!await ensureFullDecodeWithNotice('roll-reference')) return;
       const currentItem = getCurrentQueueItem();
       state.rollReference.enabled = true;
       state.rollReference.sourceFileId = currentItem ? currentItem.id : null;
@@ -16213,11 +16715,23 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return sanitizeNumeric(state.coreBorderBuffer, 10, 0, 30);
     }
 
-    function createDefaultSettings(imageData, item = null) {
-      const trace = createPerfTrace('createDefaultSettings', { pixels: getImageDataPixelCount(imageData) });
+    // What createDefaultSettings reads from the state besides the pixels. A
+    // two-stage import (#255) captures them when the stand-in's pass begins
+    // and measures the full decode with the same inputs.
+    function defaultSettingsInputs(item = null) {
       const choice = sanitizeFilmTypeOverride(item?.filmTypeOverride);
-      const importSettings = detectedImportSettings(imageData, { automatic: !choice && state.importFilmTypeAuto, filmType: choice?.filmType || state.filmType, positiveMode: choice?.positiveMode || state.positiveMode, detect: cachedDetectFilmType });
-      const borderBuffer = defaultFilmBaseBuffer();
+      return {
+        automatic: !choice && state.importFilmTypeAuto,
+        filmType: choice?.filmType || state.filmType,
+        positiveMode: choice?.positiveMode || state.positiveMode,
+        borderBuffer: defaultFilmBaseBuffer()
+      };
+    }
+
+    function createDefaultSettings(imageData, item = null, inputs = defaultSettingsInputs(item)) {
+      const trace = createPerfTrace('createDefaultSettings', { pixels: getImageDataPixelCount(imageData) });
+      const importSettings = detectedImportSettings(imageData, { automatic: inputs.automatic, filmType: inputs.filmType, positiveMode: inputs.positiveMode, detect: cachedDetectFilmType });
+      const borderBuffer = inputs.borderBuffer;
       const borderBufferBorderValue = sanitizeNumeric(state.coreBorderBufferBorderValue, 10, 0, 30);
       const filmBase = autoDetectFilmBase(imageData, borderBuffer);
       trace.end();
@@ -16466,12 +16980,18 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // never-cropped file carries, so the live crop would be stamped onto
       // every other frame in the roll.
       const studioColors = state.fileQueue.find(item => item.file === file)?.studioColors;
+      // A photo left inside a two-stage window (#255) computes its automatic
+      // fields as a fresh file, its user's geometry before the detections and
+      // the other edits on top.
+      const pendingItem = savedSettings ? null : state.fileQueue.find(item => item.file === file) || null;
+      const userGeometry = pendingGeometryEdits(pendingItem);
       let initialSettings = savedSettings || mergeStudioColors(createDefaultSettings(imageData, state.fileQueue.find(item => item.file === file)), studioColors || {});
+      if (userGeometry) initialSettings = { ...initialSettings, ...userGeometry };
       // Background lanes (#243) pause before each main-thread-heavy step
       // while the foreground is busy (`beforeHeavyStep`, capped), and bring
       // their own frame analyzers so they never queue on the foreground's.
       const analyzers = options.analyzers || null;
-      const detectFrame = !initialSettings.autoFrameMeta && !initialSettings.cropRegion
+      const detectFrame = !userGeometry && !initialSettings.autoFrameMeta && !initialSettings.cropRegion
         && !expiredImportKeepsFullFrame(initialSettings) && state.autoFrame.enabled;
       const readEdge = !initialSettings.filmEdge?.checked;
       if (detectFrame || readEdge) {
@@ -16504,7 +17024,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       }
       if (!savedSettings) {
         const queued = state.fileQueue.find(item => item.file === file);
-        initialSettings = await learnedImportSettings(settleImportFilmType(queued, initialSettings), queued);
+        initialSettings = withPendingEdits(pendingItem, await learnedImportSettings(settleImportFilmType(queued, initialSettings), queued));
       }
       assertRepairCurrent(isCurrent);
       const settings = sanitizeSettings(initialSettings, { fallbackSettings: perPhotoSettingsFallback() });
@@ -17063,8 +17583,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     }
 
     async function exportBatchAsZip() {
-      // The open photo's settings are read for its file.
+      // The open photo's settings are read for its file: its full decode's (#255).
       await settlePendingCropDetection();
+      await ensureFullDecode({ reason: 'export-all' });
       notifyReviewExport();
       const selectedFiles = getSelectedFiles();
       if (selectedFiles.length < 1) return;
@@ -17258,6 +17779,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     async function exportBatchIndividually() {
       await settlePendingCropDetection();
+      await ensureFullDecode({ reason: 'export-all' });
       notifyReviewExport();
       if (isTauriDesktop()) {
         await exportBatchIndividuallyDesktop();
@@ -17484,6 +18006,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         leavingItem.isDirty = leavingItem.provisional.wasDirty;
         if (rememberPhotoBase(leavingItem)) released = leavingItem;
         delete leavingItem.provisional;
+      } else if (leavingItem && state.provisional?.item === leavingItem && leavingItem.file === state.loadedFile) {
+        // Left before its full decode was installed and converted (#255):
+        // only what the user changed in the window is kept, and only a full
+        // base is (after the swap).
+        leaveProvisionalPhoto(leavingItem);
+        if (rememberPhotoBase(leavingItem)) released = leavingItem;
       } else if (leavingItem && leavingItem.file === state.loadedFile
         && (leavingItem.isDirty || leavingItem.settings || state.currentStep >= 3)) {
         persistCurrentFileSettings({ silent: true, force: true });
@@ -17502,9 +18030,6 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         // A settled cache hit is synchronous: do not paint a loading veil or
         // announce a new live-region message for an already available photo.
         if (cached?.snapshot && cached.file === fileItem.file && cached.key === photoSettingsKey(fileItem)) {
-          state._pendingFullResBuffer = null;
-          state._pendingFullResFileName = null;
-          state._pendingFullResFile = null;
           state.loadedFile = fileItem.file;
           state.loadedBaseImageData = cached.base;
           state.rawMetadata = cached.rawMetadata;
@@ -17632,8 +18157,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       }
     }
 
-    // Save current settings to the current file's queue entry
-    function saveCurrentFileSettings() {
+    // Save current settings to the current file's queue entry (a two-stage
+    // import's once its full decode is installed, #255).
+    async function saveCurrentFileSettings() {
+      if (!await ensureFullDecodeWithNotice('save')) return;
       persistCurrentFileSettings({ silent: false, force: true });
       void learnFromExport(getCurrentQueueItem());
     }
@@ -17682,8 +18209,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       studioWorkspace?.sync();
     }
 
-    // Restore settings from a saved settings object
-    function restoreSettings(settings, { refreshDisplay = true } = {}) {
+    // Restore settings from a saved settings object. `holdBusy: false` (the
+    // swap to a full decode, #255) rebuilds the geometry without locking
+    // editing.
+    function restoreSettings(settings, { refreshDisplay = true, holdBusy = true } = {}) {
       if (!settings) return;
       const safe = sanitizeSettings(settings, { fallbackSettings: state });
 
@@ -17692,9 +18221,17 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       updateMirrorButtonState();
 
       // Rotation, mirror and crop from the base; kept as is when the
-      // installed planes were already built for this geometry.
-      applyGeometryFromBase({ cropRegion: safe.cropRegion, refreshDisplay });
-      if (state.originalImageData) {
+      // installed planes were already built for this geometry. On a
+      // half-size stand-in (#255) the saved full-resolution crop is projected
+      // onto its frame for display, rounded outward, and kept exactly: the
+      // projection is never written back to the settings.
+      const exact = provisionalUnits() ? state.provisional.geometry : null;
+      const cropRegion = exact
+        ? exact.project({ cropRegion: safe.cropRegion, rotationAngle: state.rotationAngle, mirrored: state.mirrored })
+        : safe.cropRegion;
+      applyGeometryFromBase({ cropRegion, refreshDisplay, holdBusy });
+      if (exact) exact.installed(liveGeometry());
+      else if (state.originalImageData) {
         safe.rotationAngle = state.rotationAngle;
         safe.cropRegion = state.cropRegion ? { ...state.cropRegion } : null;
       }
@@ -17997,7 +18534,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         void appAlert(i18n[currentLang].finishProcessing || 'Please complete the workflow (step 3) before saving settings.');
         return;
       }
-      saveCurrentFileSettings();
+      void saveCurrentFileSettings();
     });
 
     // Both copy the open photo's settings: a pending crop-area hit first.
@@ -18008,7 +18545,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     document.getElementById('setRollReferenceBtn').addEventListener('click', async () => {
       await settlePendingCropDetection();
-      setRollReferenceFromCurrent();
+      await setRollReferenceFromCurrent();
     });
 
     document.getElementById('applyRollReferenceBtn').addEventListener('click', () => {
@@ -18515,14 +19052,15 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       }
     }
     function canReuseLoadedRollSource(item) {
-      // Large RAW imports may still hold a temporary half-size preview.
-      return item === getCurrentQueueItem() && (!isRawLikeFileName(item.file.name.toLowerCase())
-        || item.file.size <= 100 * 1024 * 1024);
+      // Never a two-stage import's half-size stand-in (#255).
+      return item === getCurrentQueueItem() && !state.rawDecodePending && !state.provisional
+        && !state.loadedBaseImageData?.__decodeScale;
     }
     function studioBackgroundReady() {
+      // A two-stage import's roll persist and sample wait for its full decode (#255).
       return state.currentStep >= 3 && getCurrentQueueItem()?.file === state.loadedFile
         && !document.body.dataset.studioBusy && !processNegativeInFlight
-        && !isDesktopBatchExportLocked();
+        && !isDesktopBatchExportLocked() && !state.rawDecodePending && !state.provisional;
     }
     // A saved recipe processFileWithSettings renders without reading the
     // decoded pixels for detection: frame detection and the film-edge read
@@ -18601,6 +19139,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     // The foreground is switching, converting, rendering or exporting.
     function foregroundBusyForBackground() {
+      // A two-stage import's full decode and settle run first (#255); a
+      // failed one does not hold the lanes.
+      if (state.provisional && state.fullDecode?.status !== 'failed') return true;
       return Boolean(document.body.dataset.photoSwitching || document.body.dataset.studioBusy)
         || Boolean(processNegativeInFlight) || coreReprocessBusy() || Boolean(coreReprocessTimer)
         || Boolean(state.fullResolutionPromise) || Boolean(fullResolutionRenderTimer)
@@ -19339,16 +19880,23 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // pre-provisional snapshot: the auto-frame result, the film edge (with its
     // roll-date side effect), then learned defaults, which alone record
     // `automaticDefaults`.
-    async function buildFinalImportSettings(source, framed, read, item, { readEdge, freshFile, applyEdgeDefaults }) {
+    // `provisional` (a two-stage import's stand-in, #255): the same steps
+    // with their side effects held back: no roll date, no verdict recorded
+    // into the roll's film-type decision, no `automaticDefaults`. The settle
+    // on the full decode passes the `userEdited` of the moment the pass began.
+    async function buildFinalImportSettings(source, framed, read, item, { readEdge, freshFile, applyEdgeDefaults, provisional = false, userEdited = item?.userEdited }) {
       let settings = framed;
       let toast = null;
       if (readEdge) {
-        const edge = await mergeImportFilmEdge(source, settings, read, { applyDefaults: applyEdgeDefaults });
+        const edge = await mergeImportFilmEdge(source, settings, read, { applyDefaults: applyEdgeDefaults, rollDate: !provisional });
         if (edge) { settings = edge.settings; toast = edge.toast; }
       }
       // The frame's own verdict (after DX and edge text) joins the import's
       // roll film-type decision (#231), which then applies to it.
-      if (freshFile) settings = await learnedImportSettings(settleImportFilmType(item, settings), item);
+      if (freshFile) {
+        const typed = settleImportFilmType(item, settings, { record: !provisional, userEdited });
+        settings = provisional ? await provisionalLearnedSettings(typed, item) : await learnedImportSettings(typed, item, { userEdited });
+      }
       return { settings, toast };
     }
 
@@ -19393,10 +19941,24 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         if (isCurrentLoad(generation)) overlay.hide();
         return;
       }
+      // A two-stage import's stand-in (#255): this pass is provisional. Its
+      // inputs are recorded for the settle on the full decode, and its side
+      // effects (persist, learning, roll vote and date, semantic colour) are
+      // held back.
+      const provisional = state.provisional && state.provisional.generation === generation && !state.provisional.swapped
+        ? state.provisional : null;
+      // Edits the user made to this photo in an earlier provisional window
+      // (leaveProvisionalPhoto): geometry before the detections, the rest on
+      // top of the automatic values.
+      const pendingEdits = item && !item.settings && hasWindowEdits(item.pendingEdits) ? item.pendingEdits : null;
+      const userGeometry = geometryEdits(pendingEdits);
       // Every restore below is followed by processNegative, which paints the
       // positive: loadFile's paint is the one negative write of an import.
       if (!item?.settings) {
-        restoreSettings(mergeStudioColors(createDefaultSettings(state.originalImageData, item), item?.studioColors || {}), { refreshDisplay: false });
+        const inputs = defaultSettingsInputs(item);
+        if (provisional) provisional.start = { fresh: true, inputs };
+        const defaults = mergeStudioColors(createDefaultSettings(state.originalImageData, item, inputs), item?.studioColors || {});
+        restoreSettings(userGeometry ? { ...defaults, ...userGeometry } : defaults, { refreshDisplay: false });
       }
       document.body.dataset.studioBusy = 'true';
       studioWorkspace?.sync();
@@ -19408,32 +19970,43 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // are never persisted, cached as a session or read by the roll lane.
       const provisionalToken = { wasDirty: Boolean(item?.isDirty) };
       let detection = null;
+      let passEnded = null;
+      if (provisional) provisional.passDone = new Promise(resolve => { passEnded = resolve; });
       try {
         const source = state.loadedBaseImageData || state.originalImageData;
         const freshFile = !item?.settings;
         const snapshot = extractCurrentSettings();
-        const detectFrame = !item?.settings?.autoFrameMeta && !state.cropRegion && state.autoFrame.enabled && !expiredImportKeepsFullFrame(snapshot);
+        const detectFrame = !userGeometry && !item?.settings?.autoFrameMeta && !state.cropRegion && state.autoFrame.enabled && !expiredImportKeepsFullFrame(snapshot);
         // Read the rebate once per file: perforations, DX edge barcode, film base.
         const readEdge = !snapshot.filmEdge?.checked;
+        const applyEdgeDefaults = freshFile && state.importFilmTypeAuto;
+        if (provisional) {
+          if (item) provisional.item = item;
+          provisional.start = {
+            ...(provisional.start || { fresh: false }), snapshot, detectFrame, readEdge, applyEdgeDefaults,
+            autoFrame: { ...state.autoFrame }, userEdited: Boolean(item?.userEdited), pendingEdits
+          };
+        }
+        // The stand-in's analyses work in its units: the crop installed on it.
+        const analysisSnapshot = provisional ? { ...snapshot, cropRegion: state.cropRegion ? { ...state.cropRegion } : null } : snapshot;
         let settings = snapshot;
         let filmEdgeToast = null;
         if (detectFrame || readEdge) {
           detection = new AbortController();
           importDetectionAbort = detection;
-          const applyEdgeDefaults = freshFile && state.importFilmTypeAuto;
-          const detected = startImportDetection(source, snapshot, {
+          const detected = startImportDetection(source, analysisSnapshot, {
             detectFrame, readEdge, allowCrop: freshFile, autoFrame: { ...state.autoFrame }, signal: detection.signal, trace
           });
-          const provisional = freshFile ? await provisionalLearnedSettings(snapshot, item) : snapshot;
+          const provisionalSettings = withPendingEditsOf(pendingEdits, freshFile ? await provisionalLearnedSettings(snapshot, item) : snapshot);
           if (!isCurrentLoad(generation)) return;
           if (item) item.provisional = provisionalToken;
           const step2Mode = state.step2Mode;
-          restoreSettings(provisional, { refreshDisplay: false });
+          restoreSettings(provisionalSettings, { refreshDisplay: false });
           // The border-mode suggestion of Step 2 reads the new planes.
           await whenGeometrySettled();
           if (!isCurrentLoad(generation)) return;
           goToStep(2);
-          const provisionalKey = conversionKey(provisional, source);
+          const provisionalKey = conversionKey(provisionalSettings, source);
           trace.mark('provisionalSettings');
           await processNegative({ quiet, provisional: true });
           painted = true;
@@ -19447,9 +20020,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
             throw error;
           }
           if (!isCurrentLoad(generation)) return;
-          const final = await buildFinalImportSettings(source, framed, read, item, { readEdge, freshFile, applyEdgeDefaults });
+          const final = await buildFinalImportSettings(source, framed, read, item, { readEdge, freshFile, applyEdgeDefaults, provisional: Boolean(provisional) });
           if (!isCurrentLoad(generation)) return;
           settings = final.settings;
+          // Back in full-resolution units: the saved crop where the stand-in
+          // kept it, else the detection's crop converted.
+          if (provisional) settings = { ...settings, ...provisional.geometry.toExact(settings) };
+          settings = withPendingEditsOf(pendingEdits, settings);
           filmEdgeToast = final.toast;
           trace.mark('settings', { found: Boolean(settings.filmEdge?.found) });
           if (conversionKey(settings, source) === provisionalKey) {
@@ -19479,7 +20056,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
             trace.mark('processNegative');
           }
         } else {
-          if (freshFile) settings = await learnedImportSettings(settleImportFilmType(item, settings), item);
+          if (freshFile) {
+            settings = provisional
+              ? await provisionalLearnedSettings(settleImportFilmType(item, settings, { record: false }), item)
+              : await learnedImportSettings(settleImportFilmType(item, settings), item);
+            settings = withPendingEditsOf(pendingEdits, settings);
+          }
           if (!isCurrentLoad(generation)) return;
           if (freshFile) restoreSettings(settings, { refreshDisplay: false });
           await whenGeometrySettled();
@@ -19499,7 +20081,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         }
         if (settings.filmEdge?.found) updateFileListUI();
         if (freshFile) {
-          scheduleSemanticColour(item, generation);
+          // A stand-in's colour map would be measured on its preview; the
+          // settle schedules it on the full decode (#255).
+          if (!provisional) scheduleSemanticColour(item, generation);
           // A deferred film-type prompt is not repeated as a review toast.
           if (!filmTypeDeferred || reviewForItem(item).reasons.some(reason => reason !== 'reviewFilmType')) notifyImportReview([item]);
         }
@@ -19524,7 +20108,19 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           updateExpiredRescueUI();
           studioWorkspace?.sync();
         }
+        if (provisional) {
+          // What the window's edits are measured against, then the settle on
+          // the full decode (#255).
+          if (state.provisional === provisional && isCurrentLoad(generation)) provisional.settledSnapshot = extractCurrentSettings();
+          provisional.passDone = null;
+          passEnded();
+          if (state.provisional === provisional && isCurrentLoad(generation)) startProvisionalSettle(provisional.record);
+        }
       }
+    }
+
+    function withPendingEditsOf(edits, settings) {
+      return edits ? overlayWindowEdits(settings, edits) : settings;
     }
 
     function scheduleSemanticColour(item, generation) {
@@ -19643,19 +20239,20 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // when the reader failed) into `settings`, after any auto-frame result,
     // whose geometry the mirror flip follows. Returns { settings, toast } or
     // null when there was nothing to read. Sets the roll date as a side
-    // effect. With applyDefaults the detected stock also sets the film type
+    // effect (unless `rollDate` is false: a stand-in's read, #255). With
+    // applyDefaults the detected stock also sets the film type
     // (B&W or slide film from the database). The matched preset and the
     // rebate film base are only offered, through the Film edge buttons:
     // applying both on import cost 0.7 stop and cooled the render on a real
     // Ultra Max strip against the border auto-detect with no preset.
-    async function mergeImportFilmEdge(source, settings, read, { applyDefaults = true } = {}) {
+    async function mergeImportFilmEdge(source, settings, read, { applyDefaults = true, rollDate = true } = {}) {
       if (!source || settings.filmEdge?.checked || !read) return null;
       applyDefaults = applyDefaults && settings.filmTypeSource !== 'manual';
       const result = read.result;
       if (result?.text && !result.dx) {
         const text = result.text;
         const next = { ...settings, filmEdge: sanitizeFilmEdgeForSettings({ ...text, found: true, shortName: text.filmName, text: text.text }) };
-        if (applyDefaults && text.year && !state.rollMetadata.date) { state.rollMetadata.date = String(text.year); updateMetadataUI(); }
+        if (rollDate && applyDefaults && text.year && !state.rollMetadata.date) { state.rollMetadata.date = String(text.year); updateMetadataUI(); }
         if (applyDefaults && text.filmKind) {
           next.filmType = text.filmKind; next.filmTypeSource = 'auto'; next.filmTypeConfidence = 'high'; next.filmTypeReason = 'edge-text';
         }
@@ -21136,6 +21733,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
             : getLocalizedText('aiBrushModelLoading', 'The repair model is still loading. Paint again once it is ready.'), 3000);
           return;
         }
+        // Strokes repair the full decode, never a two-stage stand-in (#255).
+        if (!currentPhotoExact()) { void ensureFullDecodeWithNotice('ai-brush'); return; }
         if (state.processedImageDataIsPreview || state.dustRemoval.processing) return;
         const source = state.processedImageData;
         const rect = surface.getBoundingClientRect();
@@ -21586,6 +22185,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     async function exportContactSheet() {
       if (isDesktopBatchExportLocked()) return;
       await settlePendingCropDetection();
+      await ensureFullDecode({ reason: 'contact-sheet' });
       const selected = getSelectedFiles();
       if (!selected.length) return;
       const layoutId = normalizeLayoutId(document.getElementById('contactSheetLayout')?.value);
@@ -21768,7 +22368,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         lastModified: item.file.lastModified || 0,
         path: item.file.path || '',
         hash: item.hash || '',
-        settings: item === current && state.originalImageData && !persist && !item.provisional ? extractCurrentSettings() : (item.settings || null),
+        settings: item === current && state.originalImageData && !persist && !item.provisional && !state.provisional ? extractCurrentSettings() : (item.settings || null),
         studioColors: item.studioColors || null,
         filmTypeOverride: sanitizeFilmTypeOverride(item.filmTypeOverride),
         selected: item.selected !== false,
@@ -23050,7 +23650,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
             item.status = 'pending';
           }
         } else {
-          item.settings = { ...createDefaultSettings(defaultsImage || state.originalImageData || { width: 1, height: 1 }), flatFieldId: id };
+          item.settings = { ...withPendingEdits(item, createDefaultSettings(defaultsImage || state.originalImageData || { width: 1, height: 1 })), flatFieldId: id };
           item.isDirty = false;
         }
         count++;
@@ -23066,6 +23666,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     }
 
     async function useCurrentAsFlatField() {
+      // The gain map is measured on the full decode, never on a stand-in (#255).
+      if (!currentPhotoExact()) {
+        const item = getCurrentQueueItem();
+        if (!await ensureFullDecodeWithNotice('flat-field') || getCurrentQueueItem() !== item) return;
+      }
       const source = state.loadedBaseImageData || state.originalImageData;
       const currentItem = getCurrentQueueItem();
       if (!source || document.body.dataset.studioBusy) return;
@@ -23307,11 +23912,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       for (const record of records) learnedRecords.set(record.key, record);
       updateLearningUI();
     }).catch(error => console.warn('Learned defaults storage unavailable:', error));
-    function learnsImportDefaults(item) {
-      return Boolean(item && !item.savedSettings && !state.rollReference.applyLock && !item.userEdited);
+    // `userEdited` lets the settle of a two-stage import (#255) decide as the
+    // import did when its provisional pass began.
+    function learnsImportDefaults(item, userEdited = item?.userEdited) {
+      return Boolean(item && !item.savedSettings && !state.rollReference.applyLock && !userEdited);
     }
-    async function learnedImportSettings(settings, item) {
-      if (!learnsImportDefaults(item)) return settings;
+    async function learnedImportSettings(settings, item, { userEdited = item?.userEdited } = {}) {
+      if (!learnsImportDefaults(item, userEdited)) return settings;
       await learnedReady;
       item.automaticDefaults ||= structuredClone(settings);
       const key = learnedDefaultsKey(settings, state.rollMetadata);
@@ -23403,9 +24010,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     function liveImportSettings(item) {
       return item && item === getCurrentQueueItem() && state.originalImageData ? state : item?.settings || null;
     }
-    function importFilmTypeLocked(item) {
+    function importFilmTypeLocked(item, { userEdited = item.userEdited } = {}) {
       const settings = liveImportSettings(item);
-      return Boolean(item.savedSettings || item.userEdited || sanitizeFilmTypeOverride(item.filmTypeOverride)
+      return Boolean(item.savedSettings || userEdited || sanitizeFilmTypeOverride(item.filmTypeOverride)
         || (settings && settings.filmTypeSource !== 'auto'));
     }
     function refreshImportFilmTypeDecision(record) {
@@ -23428,15 +24035,21 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // returns it with the import's decision applied. Frames that get settings
     // outside pass 1 (batch export, batch auto-frame, the thumbnail lane) take
     // the same decision.
-    function settleImportFilmType(item, settings) {
+    // `record: false` (a two-stage import's stand-in, #255) applies the
+    // decision as it stands without voting: the full decode's verdict votes.
+    function settleImportFilmType(item, settings, { record: vote = true, userEdited = item?.userEdited } = {}) {
       const record = importFilmTypeRoll(item);
       if (!record || !settings || !record.items.includes(item)) return settings;
       const own = ownFilmTypeVerdict(settings);
+      if (!vote) {
+        const target = !record.corrected && own && !own.manual && !importFilmTypeLocked(item, { userEdited }) ? record.typed.get(item) : null;
+        return target ? applyAutomaticFilmType(settings, target) : settings;
+      }
       if (own) record.verdicts.set(item, own);
       if (record.corrected) return settings;
       refreshImportFilmTypeDecision(record);
       if (importFilmTypeActive(record)) scheduleImportFilmTypeUpdate(record);
-      const target = own && !own.manual && !importFilmTypeLocked(item) ? record.typed.get(item) : null;
+      const target = own && !own.manual && !importFilmTypeLocked(item, { userEdited }) ? record.typed.get(item) : null;
       return target ? applyAutomaticFilmType(settings, target) : settings;
     }
     function scheduleImportFilmTypeUpdate(record, delay = 0) {
@@ -23583,7 +24196,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       // Navigation alone does not invalidate detached measurements. Unsaved
       // edits to the live photo do: its queue recipe has not caught up yet.
       return JSON.stringify([item.settings, item.studioColors, item.filmTypeOverride,
-        item.file === state.loadedFile && item.isDirty && !item.provisional ? extractCurrentSettings() : null]);
+        item.file === state.loadedFile && item.isDirty && !item.provisional && !state.provisional ? extractCurrentSettings() : null]);
     }
 
     // `resumeAttempt` and `safeMode` resume an interrupted analysis (#241).
@@ -24091,7 +24704,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
                 const decode = () => loadFileToImageData(item.file, { filmStats: !item.settings, claim: memoryClaim });
                 let imageData = reuse ? state.loadedBaseImageData || state.originalImageData : await decode();
                 if (!isValid()) return { status: 'stale' };
-                settings = item.settings ? cloneSettings(item.settings) : createDefaultSettings(imageData, item);
+                settings = item.settings ? cloneSettings(item.settings) : withPendingEdits(item, createDefaultSettings(imageData, item));
                 if (!settings.filmEdge?.checked) {
                   // A decode of this pass is read without a copy (#251); the
                   // loaded photo's planes are copied.
@@ -24328,8 +24941,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         },
         onSync: async () => {
           // The colours copied include white balance: a pending crop-area
-          // hit first.
+          // hit first, and a two-stage import's full decode (#255).
           await settlePendingCropDetection();
+          if (!await ensureFullDecodeWithNotice('sync')) return;
           if (state.currentStep < 3 || isDesktopBatchExportLocked()) return;
           const colors = pickStudioColors(state);
           const targets = state.fileQueue.filter(item => item.selected && item.file !== state.loadedFile);

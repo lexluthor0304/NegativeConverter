@@ -58,6 +58,8 @@ function fixture() {
   };
   const context = vm.createContext({
     state, photoSessions, photoPreviews, thumbnailSources, watchRollSamples, console: { warn: noop, error: noop },
+    // No two-stage import here (#255).
+    abandonFullDecode: noop, leaveProvisionalPhoto: noop,
     document: { body: { dataset: {} }, getElementById: element },
     File: globalThis.File, performance, Uint8Array, structuredClone, DOMException, AbortController,
     aiRepair: { revision: 2, status: 'ready', provider: 'wasm', run: noop, release: noop },
@@ -644,8 +646,11 @@ for (const locked of [false, true]) {
   c.rememberPhotoSession(f.item);
   f.paint();
   assert.ok(f.photoSessions.bytes > 0 && f.photoPreviews.bytes > 0);
-  let pickerOpened = 0, emptyListRefreshes = 0;
+  let pickerOpened = 0, emptyListRefreshes = 0, abandoned = 0;
+  // A two-stage import's full decode goes with the session (#255).
+  f.state.rawDecodePending = true;
   Object.assign(c, {
+    abandonFullDecode: () => { abandoned++; f.state.fullDecode = null; f.state.provisional = null; f.state.rawDecodePending = false; },
     isDesktopBatchExportLocked: () => locked,
     clearDustState: noop, clearUndoHistory: noop, clearProjectRecovery: noop, cancelCropDetection: noop,
     exitCropMode: noop, exitBeforeAfter: noop, resetZoomPan: noop, supersedeSettledDisplay: noop,
@@ -687,7 +692,8 @@ for (const locked of [false, true]) {
     assert.equal(f.watchRollSamples.bytes, 0, 'and kept watch-folder roll samples');
     assert.equal(f.state.loadedFile, null);
     assert.equal(f.state.loadedBaseImageData, null);
-    assert.equal(f.state._pendingFullResBuffer, null);
+    assert.equal(abandoned, 1, 'a two-stage full decode is abandoned with the session');
+    assert.equal(f.state.rawDecodePending, false);
     assert.equal(c.isCurrentLoad(oldGeneration), false);
     assert.ok(c.coreReprocessToken > oldToken);
     assert.equal(c.document.body.dataset.photoSwitching, undefined);
