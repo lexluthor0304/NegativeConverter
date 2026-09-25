@@ -50,6 +50,7 @@ import { runRawPostDecodeSmoke, runRawParitySmoke } from './raw-post-decode-smok
 import { runExportOwnershipSmoke } from './export-ownership-smoke.mjs';
 import { runFirstPhotoSmoke } from './first-photo-smoke.mjs';
 import { runImportParitySmoke } from './import-parity-smoke.mjs';
+import { runStudioSyncSmoke } from './studio-sync-smoke.mjs';
 
 // UPNG is already a runtime dependency of the app; reuse it to decode screenshots.
 const UPNG = createRequire(import.meta.url)('upng-js');
@@ -316,6 +317,12 @@ if (process.argv.includes('--raw-parity-only')) {
   // Recording on 1703835 (RAW_PARITY_RECORD=1) only needs loadRawFile there.
   if (process.env.RAW_PARITY_RECORD !== '1') await runRawPostDecodeSmoke({ evaluate, fail });
   await runRawParitySmoke({ send, evaluate, waitFor, fail, port: PORT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
+
+if (process.argv.includes('--studio-sync-only')) {
+  await runStudioSyncSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
   if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
   console.log('SMOKE PASS'); process.exit(0);
 }
@@ -954,6 +961,7 @@ if (!process.argv.some(arg => arg.endsWith('-only'))) {
   await runPhotoSessionSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
   await runWebglPreviewSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
   await runPreviewTierSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
+  await runStudioSyncSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
 }
 if (!process.argv.includes('--auto-crop-only') && !process.argv.includes('--color-analysis-only') && !process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) await runStudioSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, fixtures: [FIXTURE, FIXTURE2], root: ROOT });
 if (!process.argv.includes('--color-analysis-only') && !process.argv.includes('--film-edge-only') && !process.argv.includes('--darkroom-only') && !process.argv.includes('--camera-only') && !process.argv.includes('--roll-home-only') && !process.argv.includes('--technical-only')) await runStudioAutoCropSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
