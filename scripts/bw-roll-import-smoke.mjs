@@ -11,6 +11,12 @@ export async function runBwRollImportSmoke({ send, evaluate, waitFor, wait, fail
   await waitFor('bw roll boot', `!!document.getElementById('autoRollOnImport')&&!!document.getElementById('studioImportAutoCrop')`);
   await installDialogAutoAccept();
   await wait(1500);
+  // The roll decision needs automatic roll import. Earlier scenarios (photo
+  // sessions, light table, camera) switch it off and the choice is persisted.
+  // The app reads the stored value when an import starts, so set it there
+  // instead of clicking the checkbox, whose listener may not be bound yet.
+  // The previous value is restored at the end for the scenarios after this.
+  const autoRollBefore = await evaluate(`(()=>{const key='nc_auto_roll_import_v1',before=localStorage.getItem(key);localStorage.setItem(key,'on');document.getElementById('autoRollOnImport').checked=true;return before})()`);
   await evaluate(`(async()=>{
     const crop=document.getElementById('studioImportAutoCrop'); if(crop.checked) crop.click();
     const p=window.__bwRoll={toasts:[],actions:[],rollReads:0,projects:[]};
@@ -78,4 +84,5 @@ export async function runBwRollImportSmoke({ send, evaluate, waitFor, wait, fail
   const undone = await save();
   if (undone.files.some(file => file.filmTypeOverride || file.settings?.filmType !== 'bw')) fail('undoing the correction did not restore B&W on every frame');
   console.log('ok: These are positives sets exactly the typed frames in one undo step');
+  await evaluate(`(()=>{const key='nc_auto_roll_import_v1',before=${JSON.stringify(autoRollBefore ?? null)};if(before===null)localStorage.removeItem(key);else localStorage.setItem(key,before)})()`);
 }
