@@ -2,8 +2,9 @@
 // app: multiplies a 16-bit RGBA negative by 2^stops per pixel in linear light.
 // The data is display-encoded (gamma 2.2); pixels with 0 stops are untouched.
 
-const LINEAR_STEPS = 4096;
-const LINEAR_LUT = new Float32Array(LINEAR_STEPS + 1);
+// Exported for the GPU preview (#239), which uploads the table as it is.
+export const LINEAR_STEPS = 4096;
+export const LINEAR_LUT = new Float32Array(LINEAR_STEPS + 1);
 for (let i = 0; i <= LINEAR_STEPS; i++) LINEAR_LUT[i] = Math.pow(i / LINEAR_STEPS, 2.2);
 
 export function applyExposureStopsToImage16(image16, stops) {

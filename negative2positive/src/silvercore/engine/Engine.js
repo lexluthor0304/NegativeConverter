@@ -8,7 +8,6 @@ import { analyzeImage, applyLUT, applyLUTInto, applyFoldedLUT, adjustSaturation,
 import { generateCurves } from './CurveEngine.js'
 import { computeAutoColor } from './WhiteBalance.js'
 import { colorModelToToneProfile, colorModels, toneProfiles, filmWBPresets } from './Presets.js'
-import { WebGLRenderer } from './WebGLRenderer.js'
 import { loadProfile, applyLut3D } from './EnhancedProfiles.js'
 import { applyUnsharpMask } from './Sharpening.js'
 import { buildPaperLuts, applyPaperLuts } from './PaperProfiles.js'
@@ -17,7 +16,7 @@ import { applyExposureStopsToImage16 } from '../util/localExposure.js'
 // A 65536 × 1 RGBA16 grey ramp (R = G = B = v). Stages that only map a pixel's own
 // value can be evaluated once over it instead of over every pixel of a grey image.
 let greyRamp = null
-function freshGreyRamp() {
+function greyRampSource() {
   if (!greyRamp) {
     greyRamp = new Uint16Array(65536 * 4)
     for (let v = 0; v < 65536; v++) {
@@ -25,10 +24,33 @@ function freshGreyRamp() {
       greyRamp[v * 4 + 3] = 65535
     }
   }
-  return { width: 65536, height: 1, data: new Uint16Array(greyRamp) }
+  return greyRamp
+}
+
+function freshGreyRamp() {
+  return { width: 65536, height: 1, data: new Uint16Array(greyRampSource()) }
+}
+
+// The ramp refilled into a plane the caller keeps (the GPU preview's ticks, #239).
+function refilledGreyRamp(plane) {
+  const target = plane || { width: 65536, height: 1, data: new Uint16Array(65536 * 4) }
+  target.data.set(greyRampSource())
+  return target
 }
 
 let preSaturationRampCache = null
+let saturationRampCache = null
+let saturationRampScratch = null
+
+// S[v] = adjustSaturation of the grey pixel (v, v, v), computed by the unchanged
+// adjustSaturation (its truncation drift included).
+function greySaturationRamp(amount) {
+  const ramp = saturationRampScratch = refilledGreyRamp(saturationRampScratch)
+  adjustSaturation(ramp, amount)
+  const table = new Uint16Array(65536)
+  for (let v = 0; v < 65536; v++) table[v] = ramp.data[v * 4]
+  return table
+}
 
 // Whether every stage after the curves maps a pixel from its own value alone.
 // Sharpening reads neighbours; any future spatial stage belongs here too.
@@ -49,21 +71,8 @@ export class Engine {
     this.height = height
     this.channelData = null
     this.autoColor = null
-    this.glRenderer = null
     this.lastLuts = null
     this.enhancedLut = null
-  }
-
-  /**
-   * Initialize WebGL renderer (call after canvas is ready).
-   */
-  initWebGL(canvas) {
-    try {
-      this.glRenderer = new WebGLRenderer(canvas)
-      if (!this.glRenderer.available) this.glRenderer = null
-    } catch {
-      this.glRenderer = null
-    }
   }
 
   /**
@@ -73,11 +82,65 @@ export class Engine {
   async setEnhancedProfile(name) {
     if (name === 'none') {
       this.enhancedLut = null
-      if (this.glRenderer) this.glRenderer.uploadLut3D(null)
       return
     }
     this.enhancedLut = await loadProfile(name)
-    if (this.glRenderer) this.glRenderer.uploadLut3D(this.enhancedLut)
+  }
+
+  /**
+   * Adopt an analysis made elsewhere (the preview worker's `analyze` reply, #239):
+   * what analyze() leaves behind, without the pixels.
+   */
+  seedAnalysis({ channelData, autoColor, positiveAnalysis }) {
+    this.channelData = channelData.map((channel) => ({ ...channel }))
+    this.autoColor = autoColor ? { ...autoColor } : null
+    this.positiveAnalysis = positiveAnalysis ? { gain: positiveAnalysis.gain, wb: [...positiveAnalysis.wb] } : null
+    this.lastLuts = null
+  }
+
+  /**
+   * The slider-dependent tables and factors of one tick (#239): what applyTail()
+   * builds before its pixel passes, with the same settings and LUT bookkeeping, for
+   * the GPU preview and its CPU histogram. `grey` adds the B&W grey → RGB table
+   * (buildGreyTable). `pointwise` is false when a stage reads neighbours; the GPU
+   * preview then does not draw.
+   */
+  previewPlan(params, { grey = false } = {}) {
+    const settings = this.buildSettings(params)
+    this.lastSettings = settings
+    const luts = generateCurves(this.channelData, settings)
+    this.lastLuts = luts
+    const pointwise = tailIsPointwise(settings)
+    const paper = settings.paper && settings.paper !== 'none' ? this._paperLuts(settings) : null
+    return {
+      settings,
+      luts,
+      pointwise,
+      hsl: settings.hslAdjustments,
+      lutStrength: this.enhancedLut ? (params.profileStrength ?? 100) : 0,
+      saturation: params.saturation ?? 100,
+      preSaturation: params.preSaturation ?? 100,
+      paper,
+      paperKey: paper ? this._paperCache.key : null,
+      greyTable: grey && pointwise ? this._previewGreyTable(luts, params) : null,
+    }
+  }
+
+  // _greyTable() into buffers this engine keeps: the same _applyLuts over the same
+  // ramp, without allocating 900 KB per tick. The tables are overwritten next tick.
+  _previewGreyTable(luts, params) {
+    const scratch = this._previewGrey || (this._previewGrey = {
+      ramp: null, r: new Uint16Array(65536), g: new Uint16Array(65536), b: new Uint16Array(65536),
+    })
+    scratch.ramp = refilledGreyRamp(scratch.ramp)
+    const ramp = this._applyLuts(scratch.ramp, luts, params).data
+    const { r, g, b } = scratch
+    for (let v = 0; v < 65536; v++) {
+      r[v] = ramp[v * 4]
+      g[v] = ramp[v * 4 + 1]
+      b[v] = ramp[v * 4 + 2]
+    }
+    return { r, g, b }
   }
 
   /**
@@ -221,13 +284,20 @@ export class Engine {
     const preSaturation = params.preSaturation ?? 100
     if (preSaturation === 100) return null
     if (!preSaturationRampCache || preSaturationRampCache.amount !== preSaturation) {
-      const ramp = freshGreyRamp()
-      adjustSaturation(ramp, preSaturation)
-      const table = new Uint16Array(65536)
-      for (let v = 0; v < 65536; v++) table[v] = ramp.data[v * 4]
-      preSaturationRampCache = { amount: preSaturation, table }
+      preSaturationRampCache = { amount: preSaturation, table: greySaturationRamp(preSaturation) }
     }
     return preSaturationRampCache.table
+  }
+
+  // The same ramp for the saturation stage after the curves (the GPU preview reads
+  // exact greys from it, #239), or null at 100.
+  saturationRamp(params) {
+    const saturation = params.saturation ?? 100
+    if (saturation === 100) return null
+    if (!saturationRampCache || saturationRampCache.amount !== saturation) {
+      saturationRampCache = { amount: saturation, table: greySaturationRamp(saturation) }
+    }
+    return saturationRampCache.table
   }
 
   // B&W analysis from a grey plane: analyze() without the pixel stages, which the
@@ -315,10 +385,9 @@ export class Engine {
   }
 
   /**
-   * Apply 1D LUTs, optional 3D LUT, and saturation — full CPU 16-bit.
-   * WebGL path is currently disabled in the 16-bit pipeline (shaders + LUT textures
-   * are 8-bit; preserving full precision requires GPU upgrade work that is out of
-   * scope for this stage).
+   * Apply 1D LUTs, optional 3D LUT, and saturation — full CPU 16-bit. This is the
+   * reference and the only producer of settled and exported pixels; the interactive
+   * GPU preview (render/previewShader.js) runs the same stages on display pixels.
    * With `dst`, the first pass reads `src` and writes `dst`; with `fold` (see
    * _positiveFold) it maps pixels with alpha ≠ 0 through the folded tables.
    */

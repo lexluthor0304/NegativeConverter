@@ -358,8 +358,9 @@ export function negateImage(imageData) {
 }
 
 // Pre-computed hue weight lookup tables (Phase 3)
-// 3600 entries for 0.1° resolution in [0,1] hue space
-const HUE_TABLE_SIZE = 3600
+// 3600 entries for 0.1° resolution in [0,1] hue space. The GPU preview (#239) uploads
+// these tables as they are, so its shader reads the same weights.
+export const HUE_TABLE_SIZE = 3600
 const hueWeightTableR = new Float32Array(HUE_TABLE_SIZE) // Red center at 0
 const hueWeightTableG = new Float32Array(HUE_TABLE_SIZE) // Green center at 1/3
 const hueWeightTableB = new Float32Array(HUE_TABLE_SIZE) // Blue center at 2/3
@@ -434,6 +435,12 @@ export function checkHueBandSupport(tables = [hueWeightTableR, hueWeightTableG, 
 }
 
 export const HUE_BANDS_STRICT = checkHueBandSupport()
+
+// The three band tables (red, green, blue centre), for the GPU preview's texture.
+// Read-only: applyHSLAdjustments uses the same arrays.
+export function hueWeightTables() {
+  return [hueWeightTableR, hueWeightTableG, hueWeightTableB]
+}
 let hueBandSkip = HUE_BANDS_STRICT
 
 // Tests force the unskipped loop to prove the pre-test changes no pixel.
@@ -556,6 +563,12 @@ function hue2rgb(p, q, t) {
   return p
 }
 
+// Rec. 601 luma weights of adjustSaturation; the GPU preview's shader is generated
+// from these values.
+export const LUMA_R = 0.299;
+export const LUMA_G = 0.587;
+export const LUMA_B = 0.114;
+
 /**
  * Adjust saturation of image.
  * @param {Image16} imageData - 16-bit RGBA
@@ -567,7 +580,7 @@ export function adjustSaturation(imageData, amount) {
   const { data } = imageData;
   for (let i = 0; i < data.length; i += 4) {
     const r = data[i], g = data[i + 1], b = data[i + 2];
-    const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+    const lum = LUMA_R * r + LUMA_G * g + LUMA_B * b;
     data[i] = Math.max(0, Math.min(MAX_16, lum + factor * (r - lum)));
     data[i + 1] = Math.max(0, Math.min(MAX_16, lum + factor * (g - lum)));
     data[i + 2] = Math.max(0, Math.min(MAX_16, lum + factor * (b - lum)));
