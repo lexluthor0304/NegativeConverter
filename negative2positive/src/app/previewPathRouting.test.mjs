@@ -142,6 +142,8 @@ function fixture({ large = true, repairs = false, strokes = 0, aiBrush = false, 
     // Integration-branch state these functions read: no provisional import
     // (#236), no pending geometry build (#244) and the dust bookkeeping of #259.
     getCurrentQueueItem: () => null, cancelGeometryJob: noop, whenGeometrySettled: noop,
+    // No pending crop-area detection (#245).
+    cancelCropDetection: noop, settlePendingCropDetection: async () => {},
     noteDustReplaced: noop, syncDustWorkerPin: noop,
     // No GPU preview (#239): these frames take the worker path.
     gpuPreviewScheduler: DISABLED_GPU_PREVIEW_SCHEDULER, gpuPreviewCanTake: () => false, gpuPreview: { status: 'none' },

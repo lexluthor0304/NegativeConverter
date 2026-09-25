@@ -173,6 +173,7 @@ function createContext({ gainMap = 'on' } = {}) {
     // #257 PNG16 band pool, single-export Cancel).
     AbortController,
     whenGeometrySettled: async () => {},
+    settlePendingCropDetection: async () => {},
     getLocalizedText: (key, fallback) => fallback,
     isAbortError: bridgeModule.isAbortError,
     createOperationPng16Pool: (lanes = 1) => (png16PoolFactory ? png16PoolFactory(lanes) : null),

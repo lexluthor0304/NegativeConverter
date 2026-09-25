@@ -398,6 +398,8 @@ function prepareFixture({ itemSettings = null, detectFrame = true, learned = 0 }
     // Outside a roll import (#231), with the geometry already built (#244).
     settleImportFilmType: (target, settings) => settings, deferImportFilmTypeToast: () => false,
     reviewForItem: () => ({ reasons: [] }), whenGeometrySettled: async () => true, pendingImportRotation: null,
+    // Apply Crop's crop-area detection counter and crop view proxy (#245).
+    noteConversionStarted: noop, scheduleCropViewProxy: noop,
     // processNegative's own dependencies.
     applyLensCorrectionWithSettings: async image => image,
     invalidateSilverCoreCache: noop,
