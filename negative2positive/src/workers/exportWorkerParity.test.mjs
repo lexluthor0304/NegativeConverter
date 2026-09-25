@@ -59,7 +59,7 @@ class InProcessWorker {
 const { createExportWorkerBridge } = await import('./workerBridge.js');
 const { requestExportGainMap } = await import('../app/exportGainMap.js');
 const { applyPreparedAdjustmentsToPlane16 } = await import('../app/adjustmentPipeline.js');
-const { markOwnedPlanes } = await import('../app/planeRelease.js');
+const { markOwnedPlanes, configurePlaneRelease } = await import('../app/planeRelease.js');
 const bridge = createExportWorkerBridge({ workerFactory: () => new InProcessWorker() });
 
 // ------------------------------------------ frozen references (HEAD 1703835)
@@ -285,6 +285,21 @@ for (const [name, settings] of Object.entries(recipes)) {
   });
   const expected = frozenComputeGainMap(sdr, reference.__image16);
   sameSamples(map.data, expected.data, 'fallback after a worker failure');
+
+  // The fallback's own adjusted plane is released once the map exists (#250).
+  configurePlaneRelease({ engine: 'webkit' });
+  let high = null;
+  const released = await requestExportGainMap({
+    processed, sdr, adjustmentSettings: settings, workers: failing,
+    adjustPlane16: async (prepared) => {
+      high = { width: W, height: H, __image16: markOwnedPlanes(applyPreparedAdjustmentsToPlane16(processed, prepared)) };
+      return high;
+    }
+  });
+  sameSamples(released.data, expected.data, 'the map is computed before the release');
+  assert.equal(high.__image16.data.byteLength, 0, 'the fallback plane is released');
+  assert.equal(processed.__image16.data.length, W * H * 4, 'the source plane is not');
+  configurePlaneRelease();
 
   // Inputs that never produced a map still produce none, without any pass.
   const mismatched = await requestExportGainMap({

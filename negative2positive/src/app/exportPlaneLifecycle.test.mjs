@@ -146,8 +146,17 @@ function createContext({ gainMap = 'on' } = {}) {
   setLiveReferenceProbe(() => new Set([...planeBuffersOf(state.processedImageData), ...planeBuffersOf(state.displayImageData)]));
   const moduleBridgeUse = [];
   const guardedDefault = new Proxy({}, { get: (_, key) => () => { moduleBridgeUse.push(key); throw new Error(`module bridge used: ${String(key)}`); } });
+  // Counts full-frame 8-bit allocations made by the main.js functions (#250:
+  // none in the adjust or encode stages of a 16-bit TIFF/PNG or a gain map).
+  const CountingUint8ClampedArray = new Proxy(Uint8ClampedArray, {
+    construct(target, args) {
+      const array = new target(...args);
+      if (array.length >= W * H * 4 && !(args[0] instanceof ArrayBuffer)) fullFrameAllocations.push(array.length);
+      return array;
+    }
+  });
   const context = vm.createContext({
-    state, console, Blob, Uint8ClampedArray, Uint16Array, Promise, Error, Object, Array, Number, Boolean, Math, JSON,
+    state, console, Blob, Uint8ClampedArray: CountingUint8ClampedArray, Uint16Array, Promise, Error, Object, Array, Number, Boolean, Math, JSON,
     ImageData: TestImageData,
     setTimeout: (fn) => setImmediate(fn),
     manualEditRevision: 0,
@@ -235,6 +244,7 @@ function createContext({ gainMap = 'on' } = {}) {
   return { context, state, processed, moduleBridgeUse };
 }
 const traces = [];
+const fullFrameAllocations = [];
 const attached = [];
 const canvasEncodes = [];
 const pools = [];
@@ -262,7 +272,11 @@ for (const [format, bitDepth] of [['tiff', 16], ['png', 16], ['png', 8], ['jpeg'
   canvasEncodes.length = 0;
   saved.length = 0;
   released.length = 0;
+  fullFrameAllocations.length = 0;
   const result = await f.context.exportSingle();
+  if (bitDepth === 16 || format === 'jpeg') {
+    assert.deepEqual(fullFrameAllocations, [], `${label}: no full-frame 8-bit array on the main thread`);
+  }
   assert.equal(released.length, 1, `${label}: one release when the export ends`);
   assert.equal(result.saved, true, `${label}: saved`);
   const record = bridges.at(-1);
@@ -391,8 +405,10 @@ for (const [format, bitDepth] of [['jpeg', 8], ['png', 8], ['tiff', 16], ['png',
   released.length = 0;
   workerPosts.length = 0;
   const written = [];
+  fullFrameAllocations.length = 0;
   const result = await f.context.runBatchExport(jobs, { exportInfo, sink: async (job, blob) => { written.push(blob); } });
   assert.equal(result.successCount, 1, `${label}: exported`);
+  assert.deepEqual(fullFrameAllocations, [], `${label}: no full-frame 8-bit array on the main thread`);
   assert.equal(pools.length, 1, `${label}: one pool for the batch`);
   assert.equal(pools[0].size, 1, `${label}: a pool of one for one lane`);
   assert.equal(pools[0].disposed, 1, `${label}: disposed when the batch ends`);

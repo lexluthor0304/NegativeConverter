@@ -4,6 +4,7 @@
 // same `computeGainMap` run on the main thread. Either way the map is the one
 // the main thread computed before (#240): same plane, same tables, same order.
 import { computeGainMap } from '../workers/gainMap.js';
+import { releaseOwnedPlanes } from './planeRelease.js';
 
 /**
  * True when `processed` carries a 16-bit plane of its own size and `sdr` is a
@@ -53,7 +54,11 @@ export function requestExportGainMap({
       if (map) return map;
     }
     const high = await adjustPlane16(adjustmentSettings);
-    return high && high.__image16 ? computeGainMap(sdr, high.__image16) : null;
+    const map = high && high.__image16 ? computeGainMap(sdr, high.__image16) : null;
+    // The fallback's adjusted plane exists only for the map (#250): free it
+    // now rather than at the next major GC (only if this export owns it).
+    releaseOwnedPlanes(high);
+    return map;
   };
   const pending = run();
   pending.catch(() => {});
