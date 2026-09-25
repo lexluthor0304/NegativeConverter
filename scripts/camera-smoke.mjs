@@ -182,6 +182,9 @@ async function runLabMatchScenario({ send, evaluate, waitFor, wait, fail, instal
   }
   const status = await evaluate(`document.getElementById('labMatchStatus').textContent`);
   console.log('camera lab match:', status);
+  // Alignment and warp ran in the auto-frame worker (#245).
+  const labRealm = await evaluate(`({ cv: typeof window.cv, script: !!document.querySelector('script[data-opencv-loader]'), tasks: { ...window.__ncAnalysis.tasks } })`);
+  if (labRealm.cv !== 'undefined' || labRealm.script || labRealm.tasks.fallback || labRealm.tasks.worker < 1) fail('lab match loaded OpenCV in the page: ' + JSON.stringify(labRealm));
   console.log('camera lab match log:', await evaluate(`JSON.stringify({ cv: typeof window.cv, cvMat: !!(window.cv && window.cv.Mat), log: (window.__labLog || []).slice(-6) })`));
   const inliers = Number((status.match(/aligned \((\d+) inliers\)/) || [])[1]);
   if (!(inliers >= 12)) fail('lab scan was not aligned: ' + status);

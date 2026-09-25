@@ -44,7 +44,8 @@ export async function runStudioColorAnalysisSmoke({ send, evaluate, waitFor, wai
   await evaluate(`document.getElementById('studioTab-composition').click(); document.getElementById('cropBtn').click()`);
   await wait(400);
   for (const [corner, tx, ty] of [[0,84/640,84/480],[1,556/640,396/480]]) {
-    const p = await evaluate(`(()=>{const a=document.getElementById('cropOverlay').getBoundingClientRect(),b=document.getElementById('canvas').getBoundingClientRect();return {x:${corner ? 'a.right-2' : 'a.left+2'},y:${corner ? 'a.bottom-2' : 'a.top+2'},tx:b.left+b.width*${tx},ty:b.top+b.height*${ty}}})()`);
+    // Crop mode draws on its own canvas (#245).
+    const p = await evaluate(`(()=>{const a=document.getElementById('cropOverlay').getBoundingClientRect(),b=document.getElementById('cropCanvas').getBoundingClientRect();return {x:${corner ? 'a.right-2' : 'a.left+2'},y:${corner ? 'a.bottom-2' : 'a.top+2'},tx:b.left+b.width*${tx},ty:b.top+b.height*${ty}}})()`);
     await send('Input.dispatchMouseEvent',{type:'mousePressed',x:p.x,y:p.y,button:'left',clickCount:1});
     await send('Input.dispatchMouseEvent',{type:'mouseMoved',x:p.tx,y:p.ty,button:'left',buttons:1});
     await send('Input.dispatchMouseEvent',{type:'mouseReleased',x:p.tx,y:p.ty,button:'left',clickCount:1});
@@ -52,6 +53,10 @@ export async function runStudioColorAnalysisSmoke({ send, evaluate, waitFor, wai
   await evaluate(`document.getElementById('applyCropBtn').click()`);
   await waitFor('color crop completed', `!document.body.dataset.studioBusy && !document.getElementById('canvasContainer').classList.contains('crop-mode')`,120000);
   await wait(600);
+  // The crop-area detection ran in the auto-frame worker (#245): the export
+  // below waits for it, and the page never booted its own OpenCV.
+  const detection = await evaluate(`window.__ncAnalysis.settle().then(() => ({ ...window.__ncAnalysis.detection, tasks: { ...window.__ncAnalysis.tasks }, cv: typeof window.cv, script: !!document.querySelector('script[data-opencv-loader]') }))`);
+  if (detection.started < 1 || detection.hits + detection.misses < 1 || detection.tasks.fallback || detection.cv !== 'undefined' || detection.script) fail('crop-area detection did not run in the worker: ' + JSON.stringify(detection));
   const cropped = await exportImage();
   const afterWB = await evaluate(`['wbR','wbG','wbB'].map(id=>document.getElementById(id).value)`);
   if (JSON.stringify(beforeWB) !== JSON.stringify(afterWB)) fail('output cropping changed automatic WB');

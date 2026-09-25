@@ -53,6 +53,7 @@ import { runExportOwnershipSmoke } from './export-ownership-smoke.mjs';
 import { runFirstPhotoSmoke } from './first-photo-smoke.mjs';
 import { runImportParitySmoke } from './import-parity-smoke.mjs';
 import { runStudioSyncSmoke } from './studio-sync-smoke.mjs';
+import { runCropApplySmoke } from './crop-apply-smoke.mjs';
 
 // UPNG is already a runtime dependency of the app; reuse it to decode screenshots.
 const UPNG = createRequire(import.meta.url)('upng-js');
@@ -483,6 +484,11 @@ if (process.argv.includes('--embedded-preview-only')) {
   await runEmbeddedPreviewSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
   if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
   console.log('SMOKE PASS (embedded previews)'); process.exit(0);
+}
+if (process.argv.includes('--crop-apply-only')) {
+  await runCropApplySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
 }
 if (process.argv.includes('--expired-only')) {
   await runExpiredFilmSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
@@ -1012,6 +1018,7 @@ if (!process.argv.some(arg => arg.endsWith('-only'))) await runGeometrySmoke({ s
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runPerfHarnessSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runFirstPhotoSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runEmbeddedPreviewSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
+if (!process.argv.some(arg => arg.endsWith('-only'))) await runCropApplySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
 
 // ---- no uncaught page errors across both scenarios ----
 const realErrors = pageErrors.filter((e) => !/ResizeObserver loop/.test(e));

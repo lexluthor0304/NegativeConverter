@@ -222,7 +222,15 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // Crop-area detection, the expired fog surface and lab match run their
     // OpenCV half in the warm auto-frame worker; the page loads OpenCV only
     // when that request fails (#245, openCvAnalysisTasks.js).
-    const runOpenCvTask = createOpenCvTaskRunner({ runInWorker: runAnalysisInWorker, ensureOpenCvReady });
+    // The smoke run can make the worker request fail, as a missing Worker
+    // would (window.__ncAnalysis.failWorker).
+    let analysisWorkerFailing = false;
+    const runOpenCvTask = createOpenCvTaskRunner({
+      runInWorker: (type, payload, transfers) => analysisWorkerFailing
+        ? Promise.reject(new Error('Analysis worker disabled'))
+        : runAnalysisInWorker(type, payload, transfers),
+      ensureOpenCvReady
+    });
     const AUTO_FRAME_MAX_SIDE = 1600;
     const AUTO_FRAME_SCORE_WEIGHTS = {
       area: 0.18,
@@ -12070,7 +12078,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     const cropViewProxies = new WeakMap();
     let cropViewBuild = null;
     let cropViewIdle = null;
-    const cropViewStats = { builds: 0, standIns: 0, draws: 0 };
+    const cropViewStats = { builds: 0, standIns: 0, draws: 0, histograms: 0, lastRenderMs: 0 };
 
     function cropViewDisplayOptions() {
       const container = getCanvasContainerSize();
@@ -12098,7 +12106,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           return { image: base, space: 'base', rotationAngle: effectiveGeometryAngle(state.rotationAngle), mirrored: Boolean(state.mirrored) };
         }
       }
-      if (frame && frame.data && !isGeometryFrame(frame) && !frame.released) return { image: frame, space: 'frame', rotationAngle: 0, mirrored: false };
+      // (A frame descriptor's pixels are never touched here.)
+      if (frame && !isGeometryFrame(frame) && !frame.released && frame.data) return { image: frame, space: 'frame', rotationAngle: 0, mirrored: false };
       return null;
     }
 
@@ -12263,6 +12272,30 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     function releaseCropCanvas() {
       if (cropCanvas.width > 1 || cropCanvas.height > 1) cropCanvas.width = cropCanvas.height = 1;
+    }
+
+    // Counters for the smoke run and #230's scenarios (#245): the page's
+    // OpenCV analyses (worker or page fallback), Apply Crop's detection and
+    // the crop view.
+    if (typeof window !== 'undefined') {
+      window.__ncAnalysis = {
+        tasks: runOpenCvTask.stats, detection: cropDetectionStats, cropView: cropViewStats,
+        pendingDetection: () => Boolean(cropDetection),
+        settle: () => settlePendingCropDetection(),
+        failWorker: (failing = true) => { analysisWorkerFailing = Boolean(failing); },
+        proxyReady: () => {
+          const source = cropViewSource();
+          return Boolean(source && readyCropViewProxy(source.image));
+        },
+        draftView: () => {
+          const draft = state.cropDraft;
+          return draft ? { standIn: Boolean(draft.view?.standIn), space: draft.view?.space || null, size: { ...draft.rotatedSize }, frame: { ...draft.draftFrame } } : null;
+        },
+        diagnostics: () => structuredClone(state.autoFrame.lastDiagnostics),
+        whiteBalance: () => ({ wbR: state.wbR, wbG: state.wbG, wbB: state.wbB, wbAutoConfidence: state.wbAutoConfidence }),
+        fullResolution: () => Boolean(state.processedImageData) && !state.processedImageDataIsPreview && !state.fullResolutionPending,
+        expiredAnalysis: () => (state.expiredAnalysis ? JSON.parse(JSON.stringify(state.expiredAnalysis)) : null)
+      };
     }
 
     function createCropDraft(sourceImageData) {
@@ -12450,6 +12483,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     function renderCropDraftPreview(options = {}) {
       const draft = state.cropDraft;
       if (!state.cropping || !draft || !draft.view) return;
+      const started = performance.now();
 
       const previousSize = draft.rotatedSize;
       const previousRect = draft.rect;
@@ -12488,9 +12522,13 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         // The negative's histogram, once: the stand-in's sample, or a small
         // point sample of the frame (none that would rotate a whole frame).
         const sample = draft.view.sample || renderFrameSample(HISTOGRAM_MAX_SAMPLES, { fullFrame: false });
-        if (sample) renderHistogram(sample);
+        if (sample) {
+          renderHistogram(sample);
+          cropViewStats.histograms++;
+        }
       }
       updateCropOverlayFromDraft();
+      cropViewStats.lastRenderMs = performance.now() - started;
     }
 
     function scheduleCropDraftPreview(options = {}) {
