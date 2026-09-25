@@ -259,7 +259,10 @@ function restore8(imageData, buffer, opts) {
     return;
   }
   const frame = new ImageData(new Uint8ClampedArray(buffer), imageData.width, imageData.height);
-  for (const key of Object.keys(imageData)) frame[key] = imageData[key];
+  // Carry the attachments (`__image16`, `__gainMapSource`, ...). Chrome lists
+  // `data` among an ImageData's own keys and makes it read-only: the new
+  // frame's own fields stay.
+  for (const key of Object.keys(imageData)) if (!(key in frame)) frame[key] = imageData[key];
   markOwnedPlanes(frame.data);
   opts.onRestore(frame);
 }

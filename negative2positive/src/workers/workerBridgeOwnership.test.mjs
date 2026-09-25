@@ -47,26 +47,18 @@ class FakeWorker {
 }
 
 globalThis.Worker = FakeWorker;
+// A real ImageData's fields are read-only. Chrome reports them as own,
+// enumerable, non-writable properties: model that, so a bridge that tried to
+// refill one in place, or copied them onto a new frame, would fail here.
 globalThis.ImageData = class ImageData {
   constructor(data, width, height) {
     if (!(data instanceof Uint8ClampedArray)) throw new TypeError('ImageData needs a Uint8ClampedArray');
     if (data.length !== 4 * width * height) throw new DOMException('bad length', 'IndexSizeError');
-    this.data = data;
-    this.width = width;
-    this.height = height;
+    for (const [key, value] of Object.entries({ data, width, height })) {
+      Object.defineProperty(this, key, { value, enumerable: true, writable: false, configurable: false });
+    }
   }
 };
-// A real ImageData's `data` is a read-only accessor: model that, so a bridge
-// that tried to refill one in place would fail here.
-const imageDataPixels = new WeakMap();
-Object.defineProperty(globalThis.ImageData.prototype, 'data', {
-  get() { return imageDataPixels.get(this); },
-  set(value) {
-    if (imageDataPixels.has(this)) throw new TypeError('ImageData.data is read-only');
-    imageDataPixels.set(this, value);
-  },
-  configurable: true
-});
 
 const bridgeModule = await import('./workerBridge.js');
 const {
