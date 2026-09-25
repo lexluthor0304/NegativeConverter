@@ -37,6 +37,7 @@ import { runTechnicalDepthSmoke } from './technical-depth-smoke.mjs';
 import { runExpiredFilmSmoke } from './expired-film-smoke.mjs';
 import { runNativeFilmFontSmoke } from './native-film-font-smoke.mjs';
 import { runExportGainMapSmoke } from './export-gain-map-smoke.mjs';
+import { runSilverCoreCacheSmoke } from './silvercore-cache-smoke.mjs';
 
 // UPNG is already a runtime dependency of the app; reuse it to decode screenshots.
 const UPNG = createRequire(import.meta.url)('upng-js');
@@ -293,6 +294,12 @@ await evaluate(`document.getElementById('studioImportAutoCrop').click()`);
 
 if (process.argv.includes('--performance-only')) {
   await runPerformanceUiSmoke({ evaluate, fail });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
+
+if (process.argv.includes('--silvercore-cache-only')) {
+  await runSilverCoreCacheSmoke({ evaluate, fail });
   if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
   console.log('SMOKE PASS'); process.exit(0);
 }
@@ -795,6 +802,7 @@ console.log('ok: failed decode preserves the previous image and active file');
 
 await runPerformanceUiSmoke({ evaluate, fail });
 if (!process.argv.some(arg => arg.endsWith('-only'))) {
+  await runSilverCoreCacheSmoke({ evaluate, fail });
   await runComparePreviewSmoke({ send, evaluate, waitFor, wait, fail, port: PORT });
   await runRestartRenderSmoke({ send, evaluate, waitFor, fail, port: PORT });
   await runPhotoSessionSmoke({ send, evaluate, waitFor, fail, installDialogAutoAccept, port: PORT });
