@@ -14,8 +14,14 @@ export function createInpaintWorkerProcessor({ createSession = createInpaintSess
       session = null;
       return { payload: { id, released: true }, transfers: [] };
     }
+    if (type === 'trim') {
+      // Shrinks the tile memo to `bytes` and reports what it holds (#258).
+      const memo = session?.trim ? session.trim(message.bytes) : null;
+      return { payload: { id, memo }, transfers: [] };
+    }
     if (type !== 'run' || !session) throw new Error('AI repair session is not ready');
-    const output = await session.run(message.image, message.mask, message.size);
+    // Batch lanes look tiles up without evicting the open photo's (`insert: false`).
+    const output = await session.run(message.image, message.mask, message.size, { insert: message.insert !== false });
     return { payload: { id, output }, transfers: [output.buffer] };
   }
   return (message) => {

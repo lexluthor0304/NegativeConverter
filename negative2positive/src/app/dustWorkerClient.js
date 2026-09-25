@@ -1,3 +1,10 @@
+// Content hash and occupied blocks of each mask the worker returned, keyed by
+// the mask object. A mask made on the page (the OpenCV fallback) has none.
+const maskInfos = new WeakMap();
+export function dustMaskInfo(mask) {
+  return (mask && maskInfos.get(mask)) || null;
+}
+
 /** Reusable full-resolution dust worker; source pixels and morphology stay there. */
 export function createDustWorkerClient({
   workerFactory = () => new Worker(new URL('../workers/dustWorker.js', import.meta.url), { type: 'module' }),
@@ -34,6 +41,7 @@ export function createDustWorkerClient({
         return;
       }
       try {
+        if (data.mask && data.maskInfo) maskInfos.set(data.mask, data.maskInfo);
         if (data.image) {
           const raw = data.image;
           const image = new ImageData(raw.data, raw.width, raw.height);

@@ -72,7 +72,7 @@ export async function createInpaintWorkerSession(modelBytes, options = {}, {
     // session retries. Tile and result buffers use transfers below.
     metadata = await request('initialize', { modelBytes, options });
   } catch (error) { stop(error); throw error; }
-  const run = (image, mask, size, { transferInputs = false, signal = null, shouldContinue = null } = {}) => {
+  const run = (image, mask, size, { transferInputs = false, signal = null, shouldContinue = null, insert = true } = {}) => {
     if (closing) return Promise.reject(new Error('AI repair session was released'));
     const task = runQueue.then(async () => {
       if (signal?.aborted || (shouldContinue && !shouldContinue())) {
@@ -81,7 +81,7 @@ export async function createInpaintWorkerSession(modelBytes, options = {}, {
       const transferable = (data) => transferInputs && data.byteOffset === 0 && data.byteLength === data.buffer.byteLength
         ? data : data.slice();
       const rgb = transferable(image), repair = transferable(mask);
-      const response = await request('run', { image: rgb, mask: repair, size }, [rgb.buffer, repair.buffer]);
+      const response = await request('run', { image: rgb, mask: repair, size, insert }, [rgb.buffer, repair.buffer]);
       return response.output;
     });
     runQueue = task.catch(() => {});
@@ -98,8 +98,13 @@ export async function createInpaintWorkerSession(modelBytes, options = {}, {
     })();
     return releasePromise;
   };
+  // The tile memo lives with the model in the worker. `trim(bytes)` shrinks it
+  // to at most `bytes` right after the tile in flight and resolves to its size
+  // and hit counts; `trim(Infinity)` only reports them.
+  const trim = (bytes) => closing ? Promise.reject(new Error('AI repair session was released'))
+    : request('trim', { bytes }).then(response => response.memo);
   return { provider: metadata.provider, inputNames: metadata.inputNames,
-    outputNames: metadata.outputNames, run, release };
+    outputNames: metadata.outputNames, run, release, trim };
 }
 
 export async function createInpaintSessionInWorker(modelBytes, options = {}, {

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { createDustWorkerProcessor } from './dustWorkerProcessor.js';
+import { createDustWorkerProcessor, summarizeDustMask } from './dustWorkerProcessor.js';
+import { murmurHash3x86_128 } from '../app/contentHash.js';
 import {
   buildBinaryIntegralImage, detectDust, inpaintMasked,
   refineMaskIntelligent, refineMaskDirect, refineMaskRemove
@@ -27,6 +28,7 @@ for (const strength of [1, 3, 5, 10]) {
     reuseSource: id > 1, rgba: source.data.slice(), strength });
   assert.deepEqual(payload.mask, direct.mask, `worker mask equals direct detector at strength ${strength}`);
   assert.equal(payload.particleCount, direct.particleCount);
+  assert.deepEqual(payload.maskInfo, summarizeDustMask(direct.mask, width, height), 'detection reports the mask summary');
 }
 const mask = detectDust(source, { strength: 5 }).mask;
 const directRepair = inpaintMasked(source, mask, 3);
@@ -44,6 +46,7 @@ for (const mode of ['intelligent', 'direct', 'remove']) {
   const { payload: refined } = await worker({ type: 'refine', id: ++id, width, height,
     reuseSource: true, mask, brushMask: brush, mode, radius: 3 });
   assert.deepEqual(refined.mask, expectedMask, `${mode} brush mask is unchanged`);
+  assert.deepEqual(refined.maskInfo, summarizeDustMask(expectedMask, width, height), `${mode} refine reports the mask summary`);
   assert.deepEqual(refined.image.data, expected.data);
   assert.deepEqual(refined.image.image16, expected.__image16.data);
   assert.ok(Number.isInteger(refined.particleCount));
@@ -72,4 +75,14 @@ for (let y = 0; y <= 41; y++) for (let x = 0; x <= 53; x++) {
   assert.equal(prefix[y * 54 + x], expected, 'integer prefix counts are exact');
 }
 await assert.rejects(createDustWorkerProcessor()({ type: 'detect', width, height, reuseSource: true }), /Missing/);
+{
+  // Summary: content hash, and exactly the 64 px blocks holding a masked pixel.
+  const sparse = new Uint8Array(200 * 130);
+  sparse[5 * 200 + 7] = 255; sparse[129 * 200 + 199] = 255; sparse[70 * 200 + 64] = 1;
+  const summary = summarizeDustMask(sparse, 200, 130);
+  assert.equal(summary.hash, murmurHash3x86_128(sparse, 200));
+  assert.deepEqual(summary.blocks, { size: 64, columns: 4, keys: Uint32Array.of(0, 5, 11) });
+  const moved = sparse.slice(); moved[5 * 200 + 7] = 0; moved[5 * 200 + 8] = 255;
+  assert.notEqual(summarizeDustMask(moved, 200, 130).hash, summary.hash, 'the hash follows the content');
+}
 console.log('Dust worker output equals direct OpenCV masks and 8/16-bit repair; prefix memory halved');

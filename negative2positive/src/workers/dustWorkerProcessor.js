@@ -2,6 +2,22 @@ import {
   detectDust, updateDustStrength, inpaintMasked,
   refineMaskIntelligent, refineMaskDirect, refineMaskRemove
 } from '../silvercore/engine/DustRemoval.js';
+import { murmurHash3x86_128 } from '../app/contentHash.js';
+
+// What the page needs to reuse a dust pass without scanning a 60 MP mask on
+// its own thread: a hash of the mask's content, and the 64 px blocks holding a
+// masked pixel (the only pixels TELEA changes).
+export function summarizeDustMask(mask, width, height, blockSize = 64) {
+  const columns = Math.ceil(width / blockSize), rows = Math.ceil(height / blockSize);
+  const occupied = new Uint8Array(columns * rows);
+  for (let y = 0; y < height; y++) {
+    const line = y * width, row = ((y / blockSize) | 0) * columns;
+    for (let x = 0; x < width; x++) if (mask[line + x]) occupied[row + ((x / blockSize) | 0)] = 1;
+  }
+  const keys = [];
+  for (let key = 0; key < occupied.length; key++) if (occupied[key]) keys.push(key);
+  return { hash: murmurHash3x86_128(mask, width), blocks: { size: blockSize, columns, keys: Uint32Array.from(keys) } };
+}
 
 function countParticles(mask, width, height) {
   const cv = globalThis.cv;
@@ -35,7 +51,8 @@ export function createDustWorkerProcessor({ loadCv = async () => {} } = {}) {
         ? updateDustStrength(source, detectionState, message.strength ?? 3, message.maxParticleSize)
         : detectDust(source, { strength: message.strength, maxParticleSize: message.maxParticleSize });
       detectionState = result._state;
-      return { payload: { id, mask: result.mask, particleCount: result.particleCount }, transfers: [result.mask.buffer] };
+      return { payload: { id, mask: result.mask, particleCount: result.particleCount,
+        maskInfo: summarizeDustMask(result.mask, width, height) }, transfers: [result.mask.buffer] };
     }
     let mask = message.mask;
     if (message.type === 'refine') {
@@ -52,6 +69,7 @@ export function createDustWorkerProcessor({ loadCv = async () => {} } = {}) {
     if (message.type === 'refine') {
       payload.mask = mask;
       payload.particleCount = countParticles(mask, width, height);
+      payload.maskInfo = summarizeDustMask(mask, width, height);
       transfers.push(mask.buffer);
     }
     return { payload, transfers };

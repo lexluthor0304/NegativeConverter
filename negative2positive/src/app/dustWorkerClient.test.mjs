@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createDustWorkerClient } from './dustWorkerClient.js';
+import { createDustWorkerClient, dustMaskInfo } from './dustWorkerClient.js';
 globalThis.ImageData ||= class { constructor(data, width, height) { Object.assign(this, { data, width, height }); } };
 const image = new ImageData(new Uint8ClampedArray([80, 100, 120, 255]), 1, 1);
 image.__image16 = { width: 1, height: 1, data: new Uint16Array([20123, 25234, 30345, 65535]) };
@@ -59,4 +59,22 @@ const idle = createDustWorkerClient({ idleTimeoutMs: 5, workerFactory: () => idl
 } });
 await idle.detect(image); await new Promise(resolve => setTimeout(resolve, 10));
 assert.equal(idleWorker.terminated, true, 'idle OpenCV/source heap is released');
+{
+  // The worker's content hash and blocks follow the mask object it returned;
+  // a mask without them (or made on the page) never matches a dust pass.
+  const info = { hash: 'a'.repeat(32), blocks: { size: 64, columns: 1, keys: Uint32Array.of(0) } };
+  let summarize = true;
+  const summarizing = createDustWorkerClient({ workerFactory: () => ({
+    postMessage(message) {
+      const data = { id: message.id, mask: new Uint8Array([255]), particleCount: 1, ...(summarize ? { maskInfo: info } : {}) };
+      queueMicrotask(() => this.onmessage({ data }));
+    },
+    terminate() {}
+  }) });
+  assert.deepEqual(dustMaskInfo((await summarizing.detect(image)).mask), info);
+  summarize = false;
+  assert.equal(dustMaskInfo((await summarizing.detect(image)).mask), null);
+  assert.equal(dustMaskInfo(new Uint8Array([255])), null);
+  summarizing.dispose();
+}
 console.log('Dust worker client source reuse, precision, timeout, cancellation and cleanup passed');
