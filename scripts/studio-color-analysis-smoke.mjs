@@ -5,10 +5,11 @@ export async function runStudioColorAnalysisSmoke({ send, evaluate, waitFor, wai
   await installDialogAutoAccept(); await wait(300);
   await evaluate(`(async () => {
     document.getElementById('studioImportAutoCrop').click();
-    window.__colorExports = []; window.showSaveFilePicker = undefined;
+    window.__colorExports = []; window.__colorExportNames = []; window.showSaveFilePicker = undefined;
     const click = HTMLAnchorElement.prototype.click;
     HTMLAnchorElement.prototype.click = function () {
       if (!this.download || !this.href.startsWith('blob:')) return click.call(this);
+      window.__colorExportNames.push(this.download);
       window.__colorExports.push(fetch(this.href).then(r => r.blob()).then(createImageBitmap).then(bitmap => {
         const c = document.createElement('canvas'); c.width = bitmap.width; c.height = bitmap.height;
         const ctx = c.getContext('2d'); ctx.drawImage(bitmap, 0, 0); bitmap.close();
@@ -85,8 +86,17 @@ export async function runStudioColorAnalysisSmoke({ send, evaluate, waitFor, wai
   const batchStart = await evaluate('window.__colorExports.length');
   await evaluate(`document.getElementById('exportAllBtn').click()`);
   await waitFor('analysis-aware batch exports', `window.__colorExports.length >= ${batchStart + 2}`,120000);
-  const batchMatches = await evaluate(`(async()=>{const a=await window.__colorExports[${confirmedIndex}],b=await window.__colorExports[${batchStart}];return a.width===b.width&&a.height===b.height&&a.data.every((v,i)=>v===b.data[i]);})()`);
-  if (!batchMatches) fail('batch export differs from the saved per-photo color reference');
+  // The batch writes in the film strip's order, newest File.lastModified
+  // first (#228). Both Files above are created within a few milliseconds, so
+  // which one comes first depends on a clock tick: find each output by name.
+  const batchOutput = (prefix) => evaluate(`window.__colorExportNames.findIndex((name, i) => i >= ${batchStart} && name.startsWith(${JSON.stringify(prefix)}))`);
+  const firstBatch = await batchOutput('color-reference_');
+  const secondBatch = await batchOutput('color-reference-2_');
+  if (firstBatch < 0 || secondBatch < 0) fail('batch export names: ' + JSON.stringify(await evaluate(`window.__colorExportNames.slice(${batchStart})`)));
+  const same = (a, b) => `(async()=>{const a=await window.__colorExports[${a}],b=await window.__colorExports[${b}];return a.width===b.width&&a.height===b.height&&a.data.every((v,i)=>v===b.data[i]);})()`;
+  if (!await evaluate(same(confirmedIndex, firstBatch))) fail('batch export differs from the saved per-photo color reference');
+  const secondSize = await evaluate(`window.__colorExports[${secondBatch}].then(p=>[p.width,p.height])`);
+  if (String(secondSize) !== '640,480') fail('batch export stamped the open photo\'s crop onto the second photo: ' + secondSize);
   console.log('ok: retained-edge and cropped PNGs match (mean error '+delta+'); WB stable; analysis confirmation/undo/redo preserve output geometry');
   console.log('ok: switching/reopening retains color analysis; the second photo keeps its own geometry; batch and individual PNGs match');
 }
