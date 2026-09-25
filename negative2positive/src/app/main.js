@@ -26,7 +26,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     import { computeZoomGeometry, clampPanValues } from './zoomGeometry.js';
     import { showToast } from '../ui/toast.js';
     import { writeDesktopBlob } from './desktopExportWriter.js';
-    import { normalizeAngleDegrees, applyRotationToImageData, mirrorImageDataHorizontal, applyGeometryChainToImageData } from './imageGeometry.js';
+    import { normalizeAngleDegrees, applyRotationToImageData, mirrorImageDataHorizontal, applyGeometryChainToImageData, rotatedDimensions, sanitizeCropRect } from './imageGeometry.js';
     import { analyzeFrameInWorker, readFilmEdgeInWorker, createAutoFrameWorkerPool, warmUpAutoFrameWorker } from './autoFrameWorkerClient.js';
     import { detectFrameWithFallback } from './autoFrameExecution.js';
     import { createAnalysisSampleStore } from './analysisSampleStore.js';
@@ -45,7 +45,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     import { loadDxFilmTable, describeDxFilm, shortFilmName } from './dxFilmDatabase.js';
     import { groupAutomaticRollFrames, aggregateRollAnalysis, measureNegativeMean, sanitizeRollFrameForSettings, rollFrameExposureUnits } from './rollAnalysis.js';
     import { filtrationFromSliders, slidersFromFiltration, stopsFromExposureUnits, exposureUnitsFromStops, contrastForGradeValue, gradeValueForContrast, gradeLabelForValue, TEST_STRIP_AXES, formatAxisValue, testStripValues } from './enlarger.js';
-    import { sanitizeLocalExposureForSettings, workingPointToBase, basePointToWorking, rotatedDimensions } from './localExposure.js';
+    import { sanitizeLocalExposureForSettings, workingPointToBase, basePointToWorking } from './localExposure.js';
     import { sanitizeRepairStrokes, buildRepairMask, pointerToRepairPoint, lensSourcePoint } from './repairBrush.js';
     import { createRepairStamps, sameRepairStrokes, captureDustPass, dustPassMatches, restoreDustPass } from './repairReuse.js';
     import { paperProfiles, paperIdsForFilmKind, normalizePaperId, normalizeToningId } from '../silvercore/engine/PaperProfiles.js';
@@ -11470,30 +11470,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
     }
 
     function sanitizeCropRegionForImage(cropRegion, imageData) {
-      if (!cropRegion || !imageData) return null;
-      const imageWidth = imageData.width | 0;
-      const imageHeight = imageData.height | 0;
-      if (imageWidth < 1 || imageHeight < 1) return null;
-
-      const leftRaw = Number(cropRegion.left);
-      const topRaw = Number(cropRegion.top);
-      const widthRaw = Number(cropRegion.width);
-      const heightRaw = Number(cropRegion.height);
-      if (!Number.isFinite(leftRaw) || !Number.isFinite(topRaw) || !Number.isFinite(widthRaw) || !Number.isFinite(heightRaw)) {
-        return null;
-      }
-
-      const left = clampBetween(Math.floor(leftRaw), 0, imageWidth - 1);
-      const top = clampBetween(Math.floor(topRaw), 0, imageHeight - 1);
-      const maxWidth = imageWidth - left;
-      const maxHeight = imageHeight - top;
-      if (maxWidth < 1 || maxHeight < 1) return null;
-
-      const width = clampBetween(Math.floor(widthRaw), 1, maxWidth);
-      const height = clampBetween(Math.floor(heightRaw), 1, maxHeight);
-      if (width < 1 || height < 1) return null;
-
-      return { left, top, width, height };
+      return sanitizeCropRect(cropRegion, imageData);
     }
 
     function applyCropRegionToLoadedImage(cropRegion, options = {}) {
@@ -13797,7 +13774,9 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       };
       if (!apply) return { ...settings, autoFrameMeta: meta };
       const angle = autoFrameEffectiveAngle(result.angle);
-      const rotated = computeAutoFrameRotatedImage(result, angle, source);
+      // Only the rotated frame's size is needed here: the one pixel build of
+      // this geometry is restoreSettings' (#244), not a second rotation.
+      const rotated = rotatedDimensions(source.width, source.height, angle);
       const cropRegion = state.autoFrame.rotate180Default
         ? rotate180CropRegion(result.cropRegion, rotated.width, rotated.height) : result.cropRegion;
       return { ...settings, rotationAngle: angle, mirrored: false, cropRegion, autoFrameMeta: meta };
@@ -13832,6 +13811,15 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       return sanitizeFilmBaseForSettings({ ...filmBase, method: 'rebate', confidence: 0.92, precision: 8 });
     }
 
+    // Mirroring flips the crop box across the rotated frame. Only the frame's
+    // width is needed, so no pixels are rotated for it.
+    function mirrorCropForRotatedFrame(source, next) {
+      if (!next.cropRegion) return;
+      const frame = Math.abs(next.rotationAngle || 0) > 0.001
+        ? rotatedDimensions(source.width, source.height, next.rotationAngle) : source;
+      next.cropRegion = { ...next.cropRegion, left: frame.width - next.cropRegion.left - next.cropRegion.width };
+    }
+
     // Reads the rebate of a loaded image and folds the result into `settings`.
     // Returns { settings, toast } or null when the reader was unavailable.
     // With applyDefaults the detected stock also sets the film type (B&W or
@@ -13855,10 +13843,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
         if (!next.frameMetadata?.frameNumber && text.frameNumber) next.frameMetadata = { ...next.frameMetadata, frameNumber: text.frameNumber };
         if (applyDefaults && text.mirrorDetected && !settings.mirrored) {
           next.mirrored = true;
-          if (next.cropRegion) {
-            const rotated = Math.abs(next.rotationAngle || 0) > 0.001 ? applyRotationToImageData(source, next.rotationAngle) : source;
-            next.cropRegion = { ...next.cropRegion, left: rotated.width - next.cropRegion.left - next.cropRegion.width };
-          }
+          mirrorCropForRotatedFrame(source, next);
         }
         return { settings: next, toast: getInterpolatedText('filmEdgeTextDetected', { text: text.text, frame: text.frameNumber || '' }, `Film edge: ${text.text} ${text.frameNumber || ''}`) };
       }
@@ -13902,10 +13887,7 @@ import { disposeIdleSensorDefectsWorker, isSensorDefectsWorkerAlive } from './se
       }
       if (applyDefaults && result.text?.mirrorDetected && !settings.mirrored) {
         next.mirrored = true;
-        if (next.cropRegion) {
-          const rotated = Math.abs(next.rotationAngle || 0) > 0.001 ? applyRotationToImageData(source, next.rotationAngle) : source;
-          next.cropRegion = { ...next.cropRegion, left: rotated.width - next.cropRegion.left - next.cropRegion.width };
-        }
+        mirrorCropForRotatedFrame(source, next);
       }
       next.filmEdge = sanitizeFilmEdgeForSettings(record);
       if (!next.frameMetadata?.frameNumber && record.frameNumber) next.frameMetadata = { ...next.frameMetadata, frameNumber: record.frameNumber };

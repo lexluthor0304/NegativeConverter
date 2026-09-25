@@ -7,6 +7,49 @@ export function normalizeAngleDegrees(angle) {
   return normalized;
 }
 
+// Size of the frame applyRotationToImageData produces: nothing below 0.001°,
+// right angles swap the sides, other angles grow the canvas to the rotated
+// bounds. Readers that only need the frame's size use this instead of
+// rotating pixels.
+export function rotatedDimensions(width, height, angle) {
+  const normalized = normalizeAngleDegrees(Number(angle) || 0);
+  if (Math.abs(normalized) < 0.001) return { width, height };
+  const rightAngle = Math.round(normalized / 90) * 90;
+  if (Math.abs(normalized - rightAngle) < 0.001 && Math.abs(rightAngle) % 90 === 0) {
+    return Math.abs(rightAngle) === 90 ? { width: height, height: width } : { width, height };
+  }
+  const rad = normalized * Math.PI / 180;
+  const cos = Math.abs(Math.cos(rad));
+  const sin = Math.abs(Math.sin(rad));
+  return { width: Math.max(1, Math.ceil(width * cos + height * sin)), height: Math.max(1, Math.ceil(width * sin + height * cos)) };
+}
+
+// Integer crop rectangle inside a frame of `frame.width` x `frame.height`, or
+// null when nothing usable remains (main.js sanitizeCropRegionForImage).
+export function sanitizeCropRect(cropRegion, frame) {
+  if (!cropRegion || !frame) return null;
+  const imageWidth = frame.width | 0;
+  const imageHeight = frame.height | 0;
+  if (imageWidth < 1 || imageHeight < 1) return null;
+  const leftRaw = Number(cropRegion.left);
+  const topRaw = Number(cropRegion.top);
+  const widthRaw = Number(cropRegion.width);
+  const heightRaw = Number(cropRegion.height);
+  if (!Number.isFinite(leftRaw) || !Number.isFinite(topRaw) || !Number.isFinite(widthRaw) || !Number.isFinite(heightRaw)) {
+    return null;
+  }
+  const clamp = (v, min, max) => (v < min ? min : (v > max ? max : v));
+  const left = clamp(Math.floor(leftRaw), 0, imageWidth - 1);
+  const top = clamp(Math.floor(topRaw), 0, imageHeight - 1);
+  const maxWidth = imageWidth - left;
+  const maxHeight = imageHeight - top;
+  if (maxWidth < 1 || maxHeight < 1) return null;
+  const width = clamp(Math.floor(widthRaw), 1, maxWidth);
+  const height = clamp(Math.floor(heightRaw), 1, maxHeight);
+  if (width < 1 || height < 1) return null;
+  return { left, top, width, height };
+}
+
 export function copyRotatedRgbaBuffer(source, width, height, angle) {
   const normalized = normalizeAngleDegrees(angle);
   const rightAngle = Math.round(normalized / 90) * 90;
@@ -99,10 +142,7 @@ export function applyRotationToImageData(imageData, angle) {
   const rad = normalized * Math.PI / 180;
   const w = imageData.width;
   const h = imageData.height;
-  const cos = Math.abs(Math.cos(rad));
-  const sin = Math.abs(Math.sin(rad));
-  const newW = Math.max(1, Math.ceil(w * cos + h * sin));
-  const newH = Math.max(1, Math.ceil(w * sin + h * cos));
+  const { width: newW, height: newH } = rotatedDimensions(w, h, normalized);
 
   // A 2D canvas is 8-bit only, so straightening a RAW or 16-bit scan by a
   // non-right angle (which is what auto-frame does on nearly every frame)
@@ -259,10 +299,7 @@ export function applyGeometryChainToImageData(imageData, geometry, steps) {
   }
 
   const rad = angle * Math.PI / 180;
-  const cosA = Math.abs(Math.cos(rad));
-  const sinA = Math.abs(Math.sin(rad));
-  const rotatedW = Math.max(1, Math.ceil(w * cosA + h * sinA));
-  const rotatedH = Math.max(1, Math.ceil(w * sinA + h * cosA));
+  const { width: rotatedW, height: rotatedH } = rotatedDimensions(w, h, angle);
   const rect = steps.crop(null, crop, { width: rotatedW, height: rotatedH });
   if (!rect) {
     // An unusable crop keeps the whole rotated frame, as the step chain would.

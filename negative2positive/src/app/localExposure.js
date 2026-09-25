@@ -63,21 +63,8 @@ export function sanitizeLocalExposureStrokes(input) {
   return { strokes };
 }
 
-// Size of the frame after applyRotationToImageData (imageGeometry.js): right
-// angles swap the sides, other angles grow the canvas to the rotated bounds.
-export function rotatedDimensions(width, height, angle) {
-  let normalized = ((Number(angle) || 0) + 180) % 360;
-  if (normalized < 0) normalized += 360;
-  normalized -= 180;
-  if (Math.abs(normalized) < 0.001) return { width, height };
-  const rightAngle = Math.round(normalized / 90) * 90;
-  if (Math.abs(normalized - rightAngle) < 0.001) {
-    return Math.abs(rightAngle) % 180 === 90 ? { width: height, height: width } : { width, height };
-  }
-  const rad = normalized * Math.PI / 180;
-  const cos = Math.abs(Math.cos(rad)); const sin = Math.abs(Math.sin(rad));
-  return { width: Math.max(1, Math.ceil(width * cos + height * sin)), height: Math.max(1, Math.ceil(width * sin + height * cos)) };
-}
+// One size rule for the rotated frame lives in imageGeometry.js.
+export { rotatedDimensions } from './imageGeometry.js';
 
 // Maps a base-normalised point through the geometry chain to working-frame
 // pixel coordinates. `geometry` = { baseWidth, baseHeight, rotationAngle,
