@@ -196,7 +196,10 @@ export async function runDisplaySessionSmoke({ send, evaluate, waitFor, fail, in
   } catch (error) {
     failure = error;
   } finally {
-    await send('Emulation.clearDeviceMetricsOverride').catch(() => {});
+    // Back to the layout smoke-test.mjs pins for every scenario: clearing the
+    // override would leave the fake camera's 1440 x 757 viewport to the steps
+    // that follow.
+    await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }).catch(() => {});
     await evaluate('window.__restorePhotoSessionProbe?.(); window.__displaySessionVeilObserver?.disconnect(); window.__ncDisplaySessions?.force(null)').catch(() => {});
   }
   if (failure) fail(`display-session smoke: ${failure.message}`);
