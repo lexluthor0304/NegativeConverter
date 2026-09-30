@@ -232,9 +232,16 @@ export function createHarness(base, { historyBudget = 768 * 1024 * 1024, session
     usesSilverCoreConversion: () => true, hasFrameRepairs: () => false, isAiBrushEnabled: () => false,
     requiresFilmBase: () => true, isLargeImage: image => Number(image?.width) * Number(image?.height) > target.largeImagePixels,
     largeImagePixels: 16_000_000, photoActivation: null,
+    // A memory claim (#258) that records how it was taken and released.
+    createFrameClaim: (file, options = {}) => {
+      const claim = { file, priority: options.priority, label: options.label, released: false, release() { claim.released = true; }, atDecode: async () => {} };
+      (target.frameClaims ||= []).push(claim);
+      return claim;
+    },
     sharedDecodes: {
       adopt: () => null,
-      open: () => {
+      open: (file, options = {}) => {
+        target.decodeOpens = [...(target.decodeOpens || []), { file, context: options.context || null }];
         const result = Promise.resolve(target.decodeBase ? target.decodeBase() : null).then(base => {
           target.baseDecodes = (target.baseDecodes || 0) + 1;
           return { base, rawMetadata: null };

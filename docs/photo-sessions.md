@@ -114,7 +114,9 @@ area; no viewport, since the level serves any window.
   own level (k = 1, only below the large-image size with a debug threshold)
   whose window needs the source's own pixels rebuilds the source instead.
 - **Barriers.** `ensureBase()` decodes the original through the normal loader
-  (joining a lane's decode, #243), checks its size, depth and route against
+  (joining a lane's decode, #243) under a foreground reservation of its own
+  until the decode returns (#258: the photo on screen waits for it, so it never
+  queues behind lanes), checks its size, depth and route against
   the descriptor and installs it under the same geometry id, so the kept planes
   stay valid; a decode that differs purges the photo's proxies and reopens it
   cold. `ensureSource()` adds the geometry chain from the base (pool) and lens

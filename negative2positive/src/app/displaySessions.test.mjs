@@ -146,6 +146,10 @@ function wireSwitching(h, items) {
   await rotating;
   await settle();
   assert.equal(h.target.baseDecodes, 1, 'one decode');
+  // Inside a foreground reservation of its own (#258), released once it returned.
+  const { claim } = h.target.decodeOpens.at(-1).context;
+  assert.equal(claim.priority, 'foreground', 'the photo on screen waits for it: never a background claim');
+  assert.equal(claim.released, true);
   assert.equal(h.state.loadedBaseImageData, base, 'the base is back');
   assert.equal(h.state.baseDescriptor, null);
   assert.equal(h.target.document.body.dataset.studioPreparing, undefined);

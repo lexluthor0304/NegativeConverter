@@ -11652,8 +11652,14 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const signal = photoActivation?.signal || null;
       displaySessionDiagnostics.baseDecodes++;
       const release = holdPreparingOriginal();
+      // The photo on screen waits for it: a foreground reservation of its own
+      // (#258) until the decode returns, as a two-stage import's full decode
+      // takes; a lane's decode it adopts is inside that lane's claim.
+      const claim = createFrameClaim(file, {
+        priority: 'foreground', signal, label: `original ${file.name}`, bytesFor: decodeReservationBytes
+      });
       const decoding = (async () => {
-        const lease = sharedDecodes.adopt(file, { signal }) || sharedDecodes.open(file, { signal });
+        const lease = sharedDecodes.adopt(file, { signal }) || sharedDecodes.open(file, { signal, context: { claim } });
         try {
           const decoded = await lease.result;
           if (!isCurrentLoad(generation) || state.baseDescriptor !== descriptor || state.loadedFile !== file) return null;
@@ -11680,6 +11686,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           return null;
         } finally {
           lease.release();
+          claim.release();
           release();
           if (descriptor.decoding === decoding) descriptor.decoding = null;
         }
