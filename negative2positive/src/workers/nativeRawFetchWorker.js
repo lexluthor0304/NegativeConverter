@@ -4,6 +4,7 @@
  * `rawdecode://` scheme into one buffer and transfers it back, so the page's
  * thread never copies the pixels (nativeRawTransfer.js).
  */
+import './isolationProbe.js'; // first: answers the page's isolation probe (#264)
 import { handleNativePlaneMessage } from '../app/nativeRawTransfer.js';
 
 self.onmessage = (event) => {
