@@ -47,6 +47,8 @@ Where the RAM figure comes from (`resolveMemoryRam`):
 4. unknown: 8 GiB.
 
 The page starts with 3 and 1, and re-sizes once the desktop command answers.
+Roll-analysis planning (#252, `planRollAnalysis`) waits for that answer and
+plans with the same figure.
 While the window is hidden on the hosts `hiddenJobGate.js` limits (macOS
 WebKit), the ceiling drops to that gate's `HIDDEN_BUDGET_BYTES` (3.3 GB, under
 WebKit's 4 GiB inactive limit); nothing granted is revoked. The RAW decoder's

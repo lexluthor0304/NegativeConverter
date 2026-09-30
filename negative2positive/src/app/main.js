@@ -10375,7 +10375,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       };
     }
 
-    void loadDesktopMemoryInfo();
+    // Roll-analysis planning (#252) waits for the same RAM figure.
+    const desktopMemoryInfoReady = loadDesktopMemoryInfo().catch(error => console.warn('Memory info unavailable:', error));
 
     // Only the decoded base: used for a photo left while its import
     // detections still ran, whose provisional state must not be restored.
@@ -18567,25 +18568,14 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       return (await planBatchLaneBudget(files)).lanes;
     }
 
-    // The machine's RAM (#252 part 1): the desktop app's get_memory_info
-    // (every WebView), else navigator.deviceMemory (Chrome 147+ reports up to
-    // 32 GB), else unknown. `nc_memory_ram_gib_v1` overrides it for
-    // benchmarks and the two-lane parity run, as #258 reads it.
-    let machineRamRead = null;
-    function machineRamBytes() {
-      const override = Number.parseFloat(safeStorageGet('nc_memory_ram_gib_v1') || '');
-      if (Number.isFinite(override) && override > 0) return Promise.resolve(override * 1024 ** 3);
-      machineRamRead ||= (async () => {
-        if (isTauriDesktop()) {
-          try {
-            const info = await window.__TAURI__.core.invoke('get_memory_info');
-            if (Number.isFinite(info?.totalBytes) && info.totalBytes > 0) return info.totalBytes;
-          } catch (error) { console.warn('get_memory_info unavailable:', error); }
-        }
-        const gb = Number(navigator.deviceMemory);
-        return Number.isFinite(gb) && gb > 0 ? gb * 1024 ** 3 : NaN;
-      })();
-      return machineRamRead;
+    // The machine's RAM (#252 part 1), as the memory budget resolves it
+    // (#258): `nc_memory_ram_gib_v1` (benchmarks and the two-lane parity
+    // run), else the desktop app's get_memory_info (every WebView), else
+    // navigator.deviceMemory (Chrome 147+ reports up to 32 GB); NaN when
+    // unknown.
+    async function machineRamBytes() {
+      await desktopMemoryInfoReady;
+      return memoryRuntime.ramBytes > 0 ? memoryRuntime.ramBytes : NaN;
     }
 
     // Roll analysis lanes (#252 part 1): `framesInFlight` lanes sharing

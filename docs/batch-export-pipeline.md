@@ -347,9 +347,10 @@ Roll analysis has its own lane plan and its own per-frame worker (#252):
   decode estimate (1.84 GB at 60.4 MP), a frame in analysis 14 B/px plus one
   OpenCV realm (about 1.0 GB). The planned bytes stay within a quarter of the
   machine's RAM and the slots leave two cores free; 16 GB at 60 MP gives 1
-  decoder and 2 frames in flight, 32 GB gives 2 and 4. The RAM comes from the
-  desktop `get_memory_info` command (every WebView) or
-  `navigator.deviceMemory` (`nc_memory_ram_gib_v1` overrides it); without a
+  decoder and 2 frames in flight, 32 GB gives 2 and 4. The RAM is the memory
+  budget's (`resolveMemoryRam`, `docs/memory-budget.md`: the
+  `nc_memory_ram_gib_v1` override, the desktop `get_memory_info` command or
+  `navigator.deviceMemory`), once the desktop command has answered; without a
   known RAM above 8 GiB the plan is exactly the export planner's lanes, and
   it is never below them. `nc_batch_lanes_v1` stays the ceiling. A RAW whose
   header yields no size takes the decoded size of a same-extension file of
