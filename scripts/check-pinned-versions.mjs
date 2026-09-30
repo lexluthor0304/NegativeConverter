@@ -6,9 +6,9 @@
 // silently leave the runtime on the old dist, so this catches that drift.
 //
 // Ranges are compared on their declared version (the caret is stripped), which is
-// what an automated bump rewrites. A pin marked `locked` must also equal the
-// version package-lock.json installs, which a lockfile-only update can move
-// inside a caret range.
+// what an automated bump rewrites. A pin marked `locked` must be declared as
+// an exact version and equal the version package-lock.json installs: a caret
+// range would let a lockfile-only update move it.
 //
 //   node scripts/check-pinned-versions.mjs
 import { readFileSync } from 'node:fs';
@@ -22,7 +22,8 @@ const lock = JSON.parse(readFileSync(join(repoRoot, 'package-lock.json'), 'utf8'
 const pins = [
   { dependency: 'libheif-js', constant: 'HEIF_PACKAGE_VERSION', file: 'negative2positive/src/app/heifLoader.js' },
   // The native desktop decoder is enabled only against the libraw-wasm release
-  // it was verified bit-identical to (#264): the page must know which one it runs.
+  // it was verified bit-identical to (#264): the page must know which one it
+  // runs, and nothing may move it without the gate noticing.
   { dependency: 'libraw-wasm', constant: 'LIBRAW_WASM_VERSION', file: 'negative2positive/src/app/nativeRawDecoder.js', locked: true },
   {
     dependency: '@neoanaloglabkk/lensfun-wasm',
@@ -52,6 +53,12 @@ for (const { dependency, constant, file, locked = false } of pins) {
     );
   }
   const installed = lock.packages?.[`node_modules/${dependency}`]?.version;
+  if (locked && range !== declared) {
+    problems.push(`package.json declares ${dependency}@${range}; ${constant} (${file}) needs it pinned exactly`);
+  }
+  if (locked && lock.packages?.['']?.dependencies?.[dependency] !== range) {
+    problems.push(`package-lock.json's root declares ${dependency}@${lock.packages?.['']?.dependencies?.[dependency]}, package.json ${range}`);
+  }
   if (locked && installed !== match[1]) {
     problems.push(`${file}: ${constant} is '${match[1]}' but package-lock.json installs ${dependency}@${installed}`);
   }
