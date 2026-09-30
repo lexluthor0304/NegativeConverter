@@ -33,7 +33,10 @@ keeps the copy path it always had, with the same pixels.
   where the plane is built: RAW files in the post-decode worker, 16-bit TIFF
   and PNG scans in the scan decode worker. The geometry pool builds the
   working frame of such a base in shared memory too; its bands read the base
-  through views and write their rows of the frame in place. Batch-export and
+  through views and write their rows of the frame in place. The display
+  level (#248) of a shared frame is shared as well, built where it is
+  assembled (the geometry pool or `buildDisplayLevel*`), so the preview
+  conversion posts it without a copy. Batch-export and
   pass decodes stay plain: they hand their planes over by transfer (#250,
   #256).
   - The conversion clients post the shared plane itself: no copy, no
@@ -162,3 +165,18 @@ metadata every time, and the same 8- and 16-bit PNG exports, in 4 of 4 runs.
 One earlier run (12:31, before the decode probe existed) exported a
 different PNG on the isolated page; it did not recur and its cause is not
 known.
+
+Page-thread copies during a fresh import, from file selection until the
+photo settles (`ISOLATION_IMPORT_PROFILE`, the isolation smoke step's copy
+log: every slice / postMessage clone / structuredClone of 1 MB or more;
+two runs each, load average 11-21):
+
+| file | shared planes | copy path (`?sharedPlanes=0`) |
+|---|---|---|
+| `_DSC5290.dng` (24.3 MP) | 0.2-0.3 ms in all: the 1.9 MB analysis sample | 47-48 ms in all, longest 22-25 ms: the cropped frame's 107 MB 16-bit plane, the 93 MB 8-bit slice for auto-frame, the 46 MB display level |
+| `_DSC3111.NEF` (10.7 MP) | 0.3-0.4 ms | 32-34 ms, longest 15 ms |
+
+The analysis sample is capped at 250 000 pixels, so a 60 MP import should
+stay far inside #264's budget (no copy over 10 ms, 20 ms in all); that run
+(M11 files) is still to be made: `ISOLATION_IMPORT_PROFILE=/abs/L1000618.DNG
+node scripts/smoke-test.mjs --isolation-only`.

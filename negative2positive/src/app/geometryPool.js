@@ -313,7 +313,9 @@ export function createGeometryPool({
     if (sharedBands) guarded.guard = guardSharedPlanes('geometry bands', [source.__image16.data]);
     const levelWidth = Math.floor(plan.outWidth / k);
     const levelHeight = Math.floor(plan.outHeight / k);
-    const level16 = k > 1 ? new Uint16Array(levelWidth * levelHeight * 4) : null;
+    // The display level of a shared frame is shared too (#264), assembled
+    // here like the frame.
+    const level16 = k > 1 ? allocPlane16(levelWidth * levelHeight * 4, { shared }) : null;
     const place = (band, part) => {
       if (out8) out8.set(part.data8, band.y0 * rowWords);
       if (out16 && part.data16) out16.set(part.data16, band.y0 * rowWords);

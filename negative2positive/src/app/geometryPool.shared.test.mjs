@@ -92,6 +92,27 @@ for (const derived of [true, false]) {
   pool.dispose();
 }
 
+// The display level of a shared frame (#248 levels, #264): shared too, from
+// the pool's bands and from the level builder, with the same samples as a
+// plain one; a plain frame keeps a plain level.
+{
+  const { buildDisplayLevel } = await import('./displayPreview.js');
+  const big = { crop: { cropRegion: { left: 10, top: 6, width: 2600, height: 1500 } } };
+  const base = makeSource(2800, 1700);
+  const plan = planGeometry(base, big.crop);
+  const pool = createGeometryPool({ workerFactory, workersSupported: true, size: 2 });
+  const output = await pool.render(base, plan, { bands: 2, level: 2, shared: true });
+  const level = output.__displayLevel;
+  assert.ok(level && isSharedPlane(level.__image16.data), 'the pool builds a shared level for a shared frame');
+  const plainLevel = buildDisplayLevel(renderGeometry(makeSource(2800, 1700, { shared: false }), plan), 2);
+  assert.ok(!isSharedPlane(plainLevel.__image16.data), 'a plain frame gets a plain level');
+  assert.ok(bytes(level.__image16.data).equals(bytes(plainLevel.__image16.data)), 'the same level samples');
+  const built = buildDisplayLevel(output, 2);
+  assert.ok(isSharedPlane(built.__image16.data), 'the level builder shares the level of a shared frame');
+  assert.ok(bytes(built.__image16.data).equals(bytes(plainLevel.__image16.data)));
+  pool.dispose();
+}
+
 assert.equal(planeGuardReport().violations.length, 0);
 if (isolated) Object.defineProperty(globalThis, 'crossOriginIsolated', isolated);
 else delete globalThis.crossOriginIsolated;

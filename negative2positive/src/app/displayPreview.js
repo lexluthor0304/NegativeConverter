@@ -1,3 +1,5 @@
+import { allocPlane16, isSharedPlane, sharedPlanesAvailable } from './crossOriginIsolation.js';
+
 // 表示領域の物理ピクセルに合わせる。解析用の縮小画像とは独立させる。
 export function displayPreviewSize(width, height, {
   viewportWidth = 1280, viewportHeight = 900, dpr = 1, zoom = 1,
@@ -200,7 +202,9 @@ export function displayLevelGeometry(level) {
 function levelShape(image, k) {
   const width = Math.floor(image.width / k);
   const height = Math.floor(image.height / k);
-  const data = new Uint16Array(width * height * 4);
+  // The level of a shared frame is shared too (#264): the preview conversion
+  // then posts it without a copy. It is built here, before anything reads it.
+  const data = allocPlane16(width * height * 4, { shared: isSharedPlane(image.__image16?.data) && sharedPlanesAvailable() });
   const level = { width, height, __image16: { width, height, data } };
   displayLevels.set(level, { sourceWidth: image.width, sourceHeight: image.height, k });
   return level;
