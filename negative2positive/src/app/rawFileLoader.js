@@ -246,6 +246,7 @@ async function loadTiffBuffer(buffer, signal = null, sharedPlanes = false) {
  *   per-decode one (same run/terminate interface). When it keeps the planes
  *   (`held`), the result is `{ held: true, width, height }` instead of an
  *   ImageData: the analysis and the sample run in that worker.
+ *
  * `options.sharedPlanes` (#264): the RGBA16 plane is allocated in shared
  * memory where the page is cross-origin isolated, for decodes the editor
  * keeps (its workers then read the plane without a copy). Batch and pass
@@ -549,8 +550,10 @@ export async function loadRawFile(buffer, fileName, options = {}) {
         suppressSensorDefects: options.suppressSensorDefects !== false,
         filmStats: filmStatsRequest,
         // The editor's decodes (#264): the RGBA16 plane in shared memory
-        // where the page is cross-origin isolated.
-        sharedPlanes: options.sharedPlanes === true
+        // where the page is cross-origin isolated. Only they carry the flag:
+        // a roll lane's frame worker (#252) is handed the lane's options as
+        // they were.
+        ...(options.sharedPlanes === true ? { sharedPlanes: true } : {})
       }, { signal });
       result = null;
       outcome = await running;
