@@ -18342,6 +18342,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             background: priority === 'background',
             reserveDecode: size => memoryClaim.atDecode(size),
             ramBytes: memoryRuntime.ramBytes,
+            priority,
             ...(onMetadata ? { onMetadata } : {}),
             ...(onStage ? { onStage } : {}),
             ...(halfSize ? { halfSize: true, outputBps: 16, suppressSensorDefects: false } : {}),

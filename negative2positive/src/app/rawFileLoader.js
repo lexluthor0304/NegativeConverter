@@ -10,6 +10,7 @@ import { primeFilmStats } from './filmStatsCache.js';
 import { tryNefJpegPreview, createEmbeddedPreviewSource, decodeNefPreviewJpeg } from './nefJpegPreview.js';
 import { sniffImageKind, loadStandardImage, loadPngImageData } from './imageFileLoaders.js';
 import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
+import { createRawDecoder } from './nativeRawDecoder.js';
 import { halfDecodeFullSize, RAW_SIZE_HEAVY, isIPhoneDngHeader } from './imageDimensions.js';
 export { estimateRawDecodeBytes };
 export { rawResultToRgb16 } from './rawResultToRgb16.js';
@@ -231,6 +232,9 @@ async function loadTiffBuffer(buffer, signal = null, sharedPlanes = false) {
  * keeps (its workers then read the plane without a copy). Batch and pass
  * decodes leave it off: they hand their planes over by transfer.
  * `options.background`: a lane's decode, whose LibRaw threads are capped.
+ *
+ * `options.priority` (#264): 'background' caps a native desktop decode's
+ * threads so the photo on screen keeps the cores.
  */
 export async function loadRawFile(buffer, fileName, options = {}) {
   const normalizedFileName = String(fileName || '').toLowerCase();
@@ -321,7 +325,13 @@ export async function loadRawFile(buffer, fileName, options = {}) {
   let raw;
   let librawThreads = 1;
   try {
-    ({ raw, threads: librawThreads } = createLibRaw({ background: options.background === true }));
+    // A desktop whose native LibRaw is verified identical decodes natively,
+    // with libraw-wasm as its fallback (#264; nativeRawDecoder.js).
+    raw = await createRawDecoder(() => {
+      const made = createLibRaw({ background: options.background === true });
+      librawThreads = made.threads;
+      return made.raw;
+    }, { priority: options.priority, openTimeoutMs, decodeTimeoutMs });
   } catch (err) {
     throw new Error(`module worker not supported: ${err?.message || err}`);
   }
