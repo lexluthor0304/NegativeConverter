@@ -116,6 +116,32 @@ const brushAt = (x0, y0, r) => {
   assert.ok(after.payload.patch, 'an empty stroke keeps the mask tag');
 }
 
+// #254 B: detection and strokes return the display tint, pooled from the mask
+// (a detection's whole tint; a stroke's cells over the rect it changed).
+{
+  const { buildDustTint, buildDustTintRect } = await import('../app/dustTint.js');
+  const tinted = createDustWorkerProcessor();
+  const tint = { width: 97, height: 73 };
+  const { payload: detected, transfers: detectTransfers } = await tinted({ type: 'detect', id: 1, width, height, reuseSource: false,
+    rgba: source.data.slice(), strength: 5, maskTag: 1, pinned: true, tint });
+  assert.equal(detectTransfers.length, 2, 'mask and tint are transferred');
+  assert.deepEqual([detected.tint.width, detected.tint.height], [97, 73]);
+  assert.deepEqual(detected.tint.rgba, buildDustTint(detected.mask, width, height, 97, 73));
+  const current = detected.mask.slice();
+  const { payload: stroked } = await tinted({ type: 'stroke', id: 2, width, height, reuseSource: true, baseTag: 1, tag: 2,
+    points: [{ x: 60, y: 60 }], brushRadius: 4, mode: 'direct', radius: 3, tint });
+  const { patch } = stroked;
+  for (let row = 0; row < patch.maskRect.height; row++) {
+    current.set(patch.maskBytes.subarray(row * patch.maskRect.width, (row + 1) * patch.maskRect.width),
+      (patch.maskRect.y + row) * width + patch.maskRect.x);
+  }
+  const expected = buildDustTintRect(current, width, height, 97, 73, patch.maskRect);
+  assert.deepEqual({ ...patch.tint, rgba: [...patch.tint.rgba] }, { ...expected, rgba: [...expected.rgba], tintWidth: 97, tintHeight: 73 });
+  // No tint asked for (or one larger than the frame): none sent.
+  const plain = await tinted({ type: 'detect', id: 3, width, height, reuseSource: true, strength: 5, tint: { width: width + 1, height: 10 } });
+  assert.equal(plain.payload.tint, null);
+}
+
 // Planes, including the source itself, can arrive in slices.
 {
   const sliced = createDustWorkerProcessor();

@@ -2,6 +2,15 @@ import { detectDust, updateDustStrength, inpaintMasked } from '../silvercore/eng
 import { applyDustStroke, countMaskParticles, pasteMaskRect } from '../silvercore/engine/DustBrush.js';
 import { murmurHash3x86_128 } from '../app/contentHash.js';
 import { deriveEightBit } from '../app/crossOriginIsolation.js';
+import { buildDustTint, buildDustTintRect } from '../app/dustTint.js';
+
+// The display-size tint a request asks for (#254 B): { width, height } no
+// larger than the frame, or null.
+function tintSize(message, width, height) {
+  const tint = message.tint;
+  if (!tint || !(tint.width > 0) || !(tint.height > 0) || tint.width > width || tint.height > height) return null;
+  return { width: Math.floor(tint.width), height: Math.floor(tint.height) };
+}
 
 // What the page needs to reuse a dust pass without scanning a 60 MP mask on
 // its own thread: a hash of the mask's content, and the 64 px blocks holding a
@@ -109,8 +118,13 @@ export function createDustWorkerProcessor({ loadCv = async () => {} } = {}) {
       // A tagged request keeps its mask here for the brush (the reply's copy
       // is transferred to the page).
       if (message.maskTag != null) adoptMask(result.mask.slice(), message.maskTag, null, message.pinned);
+      // The mask's display tint, pooled here so the page only draws it.
+      const size = tintSize(message, width, height);
+      const tint = size ? { ...size, rgba: buildDustTint(result.mask, width, height, size.width, size.height) } : null;
+      const transfers = [result.mask.buffer];
+      if (tint) transfers.push(tint.rgba.buffer);
       return { payload: { id, mask: result.mask, particleCount: result.particleCount,
-        maskInfo: summarizeDustMask(result.mask, width, height) }, transfers: [result.mask.buffer] };
+        maskInfo: summarizeDustMask(result.mask, width, height), tint }, transfers };
     }
     if (message.type === 'stroke') {
       if (message.mask) adoptMask(message.mask, message.baseTag, message.particleCount, false);
@@ -132,6 +146,13 @@ export function createDustWorkerProcessor({ loadCv = async () => {} } = {}) {
       maskTag = message.tag;
       const transfers = [patch.rgba8.buffer, patch.maskBytes.buffer];
       if (patch.rgba16) transfers.push(patch.rgba16.buffer);
+      // The tint cells over the rect the stroke changed (#254 B).
+      const size = tintSize(message, width, height);
+      const tint = size && patch.maskRect ? buildDustTintRect(mask, width, height, size.width, size.height, patch.maskRect) : null;
+      if (tint) {
+        patch.tint = { ...tint, tintWidth: size.width, tintHeight: size.height };
+        transfers.push(tint.rgba.buffer);
+      }
       delete patch.maskBefore;
       return { payload: { id, patch }, transfers };
     }

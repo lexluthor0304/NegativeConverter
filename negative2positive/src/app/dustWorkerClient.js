@@ -233,7 +233,7 @@ export function createDustWorkerClient({
     const { maskTag: tag = null, ...settings } = options;
     const reply = request('detect', image, { ...settings, maskTag: tag, pinned }, data => {
       if (tag != null) maskTag = tag;
-      return { mask: data.mask, particleCount: data.particleCount, _state: null };
+      return { mask: data.mask, particleCount: data.particleCount, _state: null, tint: data.tint || null };
     });
     // Brush strokes need the 16-bit plane; send it now, behind detection.
     if (pinned) seed(image).catch(() => {});
@@ -254,10 +254,10 @@ export function createDustWorkerClient({
    * `mask` is sent once. Resolves to the patch, or null when the stroke set
    * no pixel. A worker holding another mask rejects with `staleMask`.
    */
-  function stroke(image, { baseTag, tag, mask, points, brushRadius, mode, radius = 3, forceMask = false }) {
+  function stroke(image, { baseTag, tag, mask, points, brushRadius, mode, radius = 3, forceMask = false, tint = null }) {
     if (source !== image || (image.__image16 && precision !== image.__image16.data)) seed(image).catch(() => {});
     const resend = forceMask || maskTag !== baseTag ? mask.slice() : null;
-    const options = { baseTag, tag, points, brushRadius, mode, radius };
+    const options = { baseTag, tag, points, brushRadius, mode, radius, tint };
     return schedule(() => {
       if (source !== image) {
         return { reply: Promise.reject(Object.assign(new Error('Dust worker lost its source'), { staleMask: true })) };
