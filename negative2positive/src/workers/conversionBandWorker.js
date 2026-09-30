@@ -155,6 +155,11 @@ async function handle(message) {
       let band = state.bands.get(message.index);
       if (!band) {
         band = bandFrom(message);
+        // Shared planes: the 8-bit rows sent now are the pool's 8-bit plane,
+        // adjusted in place, as a sent slice is. Deriving them from the
+        // 16-bit rows instead read zeros when only the 8-bit pass was sent
+        // (an 8-bit export's Step 3 came out black on isolated pages, #264).
+        if (message.bits8 && !band.data8 && band.shared8) band.data8 = band.shared8;
         state.bands.set(message.index, band);
       }
       const bits16 = Boolean(message.bits16);

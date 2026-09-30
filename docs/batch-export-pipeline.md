@@ -304,7 +304,11 @@ reservation.
   cross-origin isolation (#264) the bands share one plane instead of being
   sliced; a source that is itself shared (the editor's RAW frame) is copied
   into it by the bands in their workers ('load' with `sourceRows`), never on
-  the main thread. A pool that fails falls back to the lane or the single worker
+  the main thread. An 8-bit Step 3 on shared planes adjusts the 8-bit rows
+  it was sent (the pool's 8-bit plane); until #264 turned isolation on for
+  the dev server nothing ran this mode in a browser, and it derived those
+  rows from the unsent 16-bit plane instead: black 8-bit exports of every
+  non-resident frame. A pool that fails falls back to the lane or the single worker
   with the same pixels and is not used again; a released geometry output
   is rebuilt from the base; lost resident bands re-render the frame. The
   pool is released at batch end and after each single export.

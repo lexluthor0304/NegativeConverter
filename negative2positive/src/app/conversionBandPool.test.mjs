@@ -145,6 +145,18 @@ for (const shared of [false, true]) {
     const planes = await pool.adjust({ width: W, height: H, data16: expected.__image16.data, data8: expected.data }, structuredClone(adjustment), { bits16: true, bits8: true, bands: 5 });
     assert.equal(sha(planes.data16), sha(reference.out16), `${name}: Step 3 on sliced planes, 16-bit`);
     assert.equal(sha(planes.data8), sha(reference.out8), `${name}: Step 3 on sliced planes, 8-bit`);
+    // The 8-bit pass alone (an 8-bit export's Step 3, #264: black on shared
+    // planes when the workers derived its input from the 16-bit rows).
+    const eight = await pool.adjust({ width: W, height: H, data8: expected.data }, structuredClone(adjustment), { bits8: true, bands: 3 });
+    assert.equal(eight.data16, null);
+    assert.equal(sha(eight.data8), sha(reference.out8), `${shared ? 'shared ' : ''}${name}: Step 3 on sliced planes, 8-bit only`);
+    // Both passes read their own input: an 8-bit plane that is not the
+    // 16-bit one >>> 8 keeps its own pixels.
+    const other8 = Uint8ClampedArray.from(expected.data, (v, i) => (i & 3) === 3 ? v : 255 - v);
+    const otherReference = adjustWhole({ width: W, height: H, data: other8, __image16: expected.__image16 }, adjustment);
+    const mixed = await pool.adjust({ width: W, height: H, data16: expected.__image16.data, data8: other8 }, structuredClone(adjustment), { bits16: true, bits8: true, bands: 2 });
+    assert.equal(sha(mixed.data16), sha(otherReference.out16), `${shared ? 'shared ' : ''}${name}: 16-bit pass of both`);
+    assert.equal(sha(mixed.data8), sha(otherReference.out8), `${shared ? 'shared ' : ''}${name}: 8-bit pass of both reads the 8-bit plane`);
   }
   // Between frames the workers hold no band and no job.
   await new Promise((resolve) => setTimeout(resolve, 20));
