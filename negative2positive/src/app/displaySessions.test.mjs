@@ -291,6 +291,29 @@ for (const tier of ['A', 'B']) {
   assert.equal(h.target.displaySessionDiagnostics.selfCheckMismatches, 0);
 }
 
+// ---- Tier B of a photo whose full plane lags a newer preview (an edit after
+// an export, #242): the preview is its settled frame, so it comes back in the
+// click's task too ----
+{
+  const probe = await convertedPhoto({ sessionBudget: 1 << 30 });
+  const budget = Math.floor((bytesOf([probe.crop, probe.proxy, probe.processed]) + bytesOf([probe.proxy, probe.processed, probe.sample])) / 2);
+  const { h, c, crop, processed, item } = await convertedPhoto({ sessionBudget: budget });
+  // The exported full-resolution plane, stale since a slider moved; the
+  // preview conversion of the new settings is on screen.
+  const exported = makeBase(crop.width, crop.height, 13);
+  Object.assign(h.state, { processedImageData: exported, processedImageDataIsPreview: false, fullResolutionPending: true });
+  wireSwitching(h, [item, { id: 2, file: { name: 'b.dng' }, settings: null }]);
+  await c.switchToFile(1);
+  const entry = h.target.photoSessions.get(item);
+  assert.equal(entry.tier, 'B');
+  assert.equal(entry.snapshot.refs.processedImageData, processed, 'the newer preview, never the stale full plane');
+  await c.switchToFile(0);
+  assert.equal(h.state.processedImageData, processed, 'the settled preview in the same task');
+  assert.equal(h.target.document.body.dataset.photoSwitching, undefined, 'an in-RAM Tier B hit shows no veil');
+  assert.equal(h.target.baseDecodes, undefined, 'no decode');
+  assert.equal(h.target.displaySessionDiagnostics.ramHits, 1);
+}
+
 // ---- Undo on a Tier B photo: a slider step converts the proxy again, with
 // no decode; a geometry step waits for the original ----
 {

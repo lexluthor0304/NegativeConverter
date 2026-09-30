@@ -11200,15 +11200,21 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const { frame, crop } = displayStandIns(key, frameSize, cropPlanes);
       // The processed preview is exactly the preview conversion only while
       // it is one; a full-resolution plane (after an export) is converted
-      // again from the proxy on return. The display level (#248) is the
-      // proxy; the conversion preview is a display target on it (no pixels),
-      // and the auto-WB sample is keyed by the level from now on.
+      // again from the proxy on return. A full plane that lags a newer
+      // preview (an edit after an export, #242) was swapped for that preview
+      // by rememberPhotoSession: the preview is the settled frame here too.
+      // The display level (#248) is the proxy; the conversion preview is a
+      // display target on it (no pixels), and the auto-WB sample is keyed by
+      // the level from now on.
       const refs0 = entry.snapshot.refs;
-      const settledPreview = state.processedImageDataIsPreview && (!refs0 || refs0.cold || refs0.processedImageData === state.processedImageData);
+      const lagging = !state.processedImageDataIsPreview && state.fullResolutionPending
+        && Boolean(state.previewSourceImageData) && refs0?.processedImageData === state.previewSourceImageData;
+      const settledPreview = lagging
+        || (state.processedImageDataIsPreview && (!refs0 || refs0.cold || refs0.processedImageData === state.processedImageData));
       const wbSample = autoWbSampleFor(autoWbSampleKey());
       const refs = {
         originalImageData: frame, croppedImageData: crop,
-        processedImageData: settledPreview ? state.processedImageData : null,
+        processedImageData: settledPreview ? (lagging ? state.previewSourceImageData : state.processedImageData) : null,
         conversionSourceImageData: null, conversionPreviewImageData: target,
         displayLevelImageData: level, autoWbSample: wbSample ? { source: level, image: wbSample } : null,
         previewSourceImageData: settledPreview ? state.previewSourceImageData : null,
