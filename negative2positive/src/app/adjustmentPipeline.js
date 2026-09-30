@@ -92,14 +92,20 @@ export function applyPreparedAdjustmentsToPlane16(imageData, adjustmentSettings,
   return { width: plane.width, height: plane.height, data: out16 };
 }
 
+// `options.region` ({ x, y, frameWidth, frameHeight }): `imageData` is that
+// rectangle of a frame of frameWidth x frameHeight (#254's live dodge
+// rectangles), so position-dependent stages see each pixel at its place.
 export function applyPreparedAdjustmentsToBuffer(imageData, adjustmentSettings, output, options = {}) {
   const {
     quality = 'full',
     lutScratch = null,
     onProgress = null,
-    chunkSize = 500000
+    chunkSize = 500000,
+    region = null
   } = options;
-  const params = computeAdjustmentParams(adjustmentSettings, { width: imageData.width, height: imageData.height });
+  const params = computeAdjustmentParams(adjustmentSettings, region
+    ? { width: region.frameWidth, height: region.frameHeight, region: { x: region.x, y: region.y, width: imageData.width } }
+    : { width: imageData.width, height: imageData.height });
 
   applyAdjustmentsToPixels(
     imageData.data,

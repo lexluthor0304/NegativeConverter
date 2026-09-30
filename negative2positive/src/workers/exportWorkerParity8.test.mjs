@@ -191,8 +191,24 @@ for (const [width, height] of sizes) {
     const live = new ImageData(new Uint8ClampedArray(frame.data.length), width, height);
     applyPreparedAdjustmentsToBuffer(frame, settings, live, { quality: 'full', lutScratch: sharedScratch });
     sameBytes(live.data, reference.data, `${label}: applyPreparedAdjustmentsToBuffer == frozen stage`);
+
+    // #254: a rectangle adjusted on its own, at its place in the frame (the
+    // live dodge rectangles on a CPU display), equals that rectangle of the frame.
+    for (const rect of [{ x: 0, y: 0, w: 7, h: 5 }, { x: Math.floor(width / 3), y: Math.floor(height / 2), w: Math.floor(width / 4), h: 3 }, { x: width - 5, y: height - 4, w: 5, h: 4 }]) {
+      const part = new ImageData(new Uint8ClampedArray(rect.w * rect.h * 4), rect.w, rect.h);
+      for (let row = 0; row < rect.h; row++) {
+        part.data.set(frame.data.subarray(((rect.y + row) * width + rect.x) * 4, ((rect.y + row) * width + rect.x + rect.w) * 4), row * rect.w * 4);
+      }
+      const out = new ImageData(new Uint8ClampedArray(part.data.length), rect.w, rect.h);
+      applyPreparedAdjustmentsToBuffer(part, settings, out, { quality: 'full', lutScratch: sharedScratch,
+        region: { x: rect.x, y: rect.y, frameWidth: width, frameHeight: height } });
+      for (let row = 0; row < rect.h; row++) {
+        sameBytes(out.data.subarray(row * rect.w * 4, (row + 1) * rect.w * 4),
+          reference.data.subarray(((rect.y + row) * width + rect.x) * 4, ((rect.y + row) * width + rect.x + rect.w) * 4), `${label}: rectangle ${JSON.stringify(rect)} row ${row}`);
+      }
+    }
   }
 }
 
 bridge.terminateWorker();
-console.log('exportWorkerParity8: worker applyAdjustments == main-thread Step 3 (identity, LUT, look, vibrance/saturation, rescue + fog) passed');
+console.log('exportWorkerParity8: worker applyAdjustments == main-thread Step 3 (identity, LUT, look, vibrance/saturation, rescue + fog), rectangles at their place passed');

@@ -93,7 +93,8 @@ export function applyAdjustmentsToPixels(inputData, outputData, pixelCount, para
     cmyRShift, cmyGShift, cmyBShift, doCMY,
     curveR, curveG, curveB,
     doLook, doLookMatrix, lookMatrix, lookOffset, lookR, lookG, lookB,
-    rescueR, rescueG, rescueB, doRescueSpatial, rescueSpatial, doRescuePixel, rescueStages, frameWidth, frameHeight, frameStartRow
+    rescueR, rescueG, rescueB, doRescueSpatial, rescueSpatial, doRescuePixel, rescueStages, frameWidth, frameHeight, frameStartRow,
+    regionX = 0, regionY = 0, regionWidth = 0
   } = params;
 
   const lumaScale = 2 / 255;
@@ -152,9 +153,13 @@ export function applyAdjustmentsToPixels(inputData, outputData, pixelCount, para
   const spatialWidth = doRescueSpatial && frameWidth > 0 ? frameWidth : 0;
   const spatialHeight = doRescueSpatial && frameHeight > 0 ? frameHeight : 1;
   const rescuePx = doRescueSpatial || doRescuePixel ? new Float32Array(3) : null;
-  let px = 0;
-  // A row band (#256) starts at its frame row.
-  let py = frameStartRow || 0;
+  // A row band (#256) starts at its frame row. A rectangle of the frame
+  // (#254's live dodge rectangles) starts at its own place in it and wraps at
+  // its own width; a whole frame starts at 0.
+  const rowStart = regionX;
+  const rowEnd = regionX + (regionWidth > 0 ? regionWidth : spatialWidth);
+  let px = rowStart;
+  let py = regionWidth > 0 ? regionY : (frameStartRow || 0);
   for (let i = 0; i < totalBytes; i += 4) {
     let r;
     let g;
@@ -165,7 +170,7 @@ export function applyAdjustmentsToPixels(inputData, outputData, pixelCount, para
       rescuePx[2] = inputData[i + 2];
       if (spatialWidth) {
         applyExpiredSpatial(rescueSpatial, (px + 0.5) / spatialWidth, (py + 0.5) / spatialHeight, rescuePx);
-        if (++px === spatialWidth) { px = 0; py++; }
+        if (++px === rowEnd) { px = rowStart; py++; }
       }
       if (doRescuePixel) {
         applyExpiredTone(rescueStages, rescuePx);
@@ -419,6 +424,8 @@ export function computeAdjustmentParams(settings, frame = null) {
   const doRescuePixel = Boolean(rescueStages && !rescueStages.composed);
   const frameWidth = frame && Number.isFinite(frame.width) ? frame.width | 0 : 0;
   const frameHeight = frame && Number.isFinite(frame.height) ? frame.height | 0 : 0;
+  // `frame.region` ({ x, y, width }): the pixels are that rectangle of the frame.
+  const region = frame && frame.region ? frame.region : null;
   const rescueSpatial = rescueStages && frameWidth > 0 && frameHeight > 0 ? buildExpiredSpatialStage(settings) : null;
   const doRescueSpatial = Boolean(rescueSpatial);
   const frameStartRow = frame && Number.isFinite(frame.startRow) ? Math.max(0, frame.startRow | 0) : 0;
@@ -449,6 +456,9 @@ export function computeAdjustmentParams(settings, frame = null) {
     rescueStages,
     frameWidth,
     frameHeight,
-    frameStartRow
+    frameStartRow,
+    regionX: region ? region.x | 0 : 0,
+    regionY: region ? region.y | 0 : 0,
+    regionWidth: region ? region.width | 0 : 0
   };
 }
