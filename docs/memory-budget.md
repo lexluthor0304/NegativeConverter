@@ -182,7 +182,8 @@ is running:
 
 1. release idle workers: the default export bridge when it is still alive with
    nothing pending (#250 releases it itself 4 s after a large request), the
-   auto-frame/OpenCV worker, and MI-GAN only under #236's idle-release rule;
+   auto-frame/OpenCV worker unless a roll analysis holds it warm (#252's
+   `holdIdle`), and MI-GAN only under #236's idle-release rule;
    semantic analysis already ends with each photo. Each comes back lazily.
 2. trim while the ledger exceeds `IDLE_RETAINED_TARGET_BYTES` (1 GiB, to be
    calibrated against the logged footprint): previews, then sessions, demoted

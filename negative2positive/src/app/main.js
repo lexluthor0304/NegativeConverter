@@ -10111,7 +10111,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     });
     workerResidents.set('opencv', {
       residentBytes: () => analyzeFrameInWorker.residentBytes,
-      idle: () => analyzeFrameInWorker.alive && !analyzeFrameInWorker.busy,
+      idle: () => analyzeFrameInWorker.alive && !analyzeFrameInWorker.busy && !analyzeFrameInWorker.held,
       release: () => analyzeFrameInWorker.releaseIdle()
     });
     workerResidents.set('aiRepair', {

@@ -195,6 +195,18 @@ assert.equal(timedWorker.terminated, true);
   releaseB();
   await new Promise(resolve => setTimeout(resolve, 20));
   assert.equal(spawned[0].terminated, true, 'the last release re-arms the idle release');
+  // The memory idle check (#258) does not release a held worker either.
+  const hold = client.holdIdle();
+  const warm = client(source, {}, 'read-film-edge');
+  spawned[1].onmessage({ data: { id: posted.at(-1).id, result: { found: true } } });
+  assert.deepEqual(await warm, { found: true });
+  assert.equal(client.held, true);
+  assert.equal(client.releaseIdle(), false, 'held by a roll analysis');
+  assert.equal(spawned[1].terminated, undefined);
+  hold();
+  assert.equal(client.held, false);
+  assert.equal(client.releaseIdle(), true, 'released once the hold ends');
+  assert.equal(spawned[1].terminated, true);
 }
 // #252 part 4: the shared worker's two detection helpers. Started next to a
 // running worker, each gets a port and a warm-up, the worker gets the other

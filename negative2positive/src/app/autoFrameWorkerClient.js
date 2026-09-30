@@ -332,8 +332,10 @@ export function createAutoFrameWorkerClient({
   // (the next request starts a fresh worker).
   Object.defineProperty(request, 'residentBytes', { get: () => (worker ? heapBytes : 0) });
   Object.defineProperty(request, 'busy', { get: () => pending.size > 0 });
+  Object.defineProperty(request, 'held', { get: () => idleHolds > 0 });
+  // A roll analysis's hold (#252) keeps it through the idle check too.
   request.releaseIdle = () => {
-    if (!worker || pending.size) return false;
+    if (!worker || pending.size || idleHolds) return false;
     fail(new Error('Auto-frame worker released while idle'));
     return true;
   };
