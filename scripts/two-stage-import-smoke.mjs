@@ -8,7 +8,9 @@
 //   decode is installed behind it without studioBusy; the settled recipe and
 //   every export are byte-identical to the reference;
 // - an export clicked while stage 2 is held waits, then matches;
-// - crop mode open when stage 2 lands: the swap waits for it to close;
+// - crop mode open when stage 2 lands: the swap waits for it to close, and
+//   meanwhile the memory ledger (#258) counts the full decode with the open
+//   photo;
 // - stage 2 fails: a toast, the photo stays provisional, the export decodes
 //   again and matches;
 // - switching away before stage 2 completes aborts it, and Export All of both
@@ -196,10 +198,22 @@ export async function runTwoStageImportSmoke({ send, evaluate, waitFor, wait, fa
     await waitFor('stand-in shown', `${ready} && ${status}.pending`, 300_000);
     await evaluate(`document.getElementById('studioTab-composition').click(); document.getElementById('cropBtn').click()`);
     await waitFor('crop mode', `document.getElementById('canvasContainer').classList.contains('crop-mode')`, 30_000);
+    const editorBefore = await evaluate('window.__ncMemory.snapshot().ledger.editor');
     await evaluate('window.__ncTwoStage.releaseFullDecodes()');
     await wait(1500);
     const during = await evaluate(status);
     if (during.fullDecode === 'installed' || !during.provisional) fail('the full decode was installed under an open crop draft: ' + JSON.stringify(during));
+    // Decoded, waiting for the draft: no plane holds it yet, but the ledger
+    // counts its 8- and 16-bit planes (12 B/px) with the open photo (polled:
+    // the settle's detections borrow the planes for a moment).
+    const fullBytes = size.width * size.height * 12;
+    const counted = `${status}.fullDecode === 'decoded' && window.__ncMemory.snapshot().ledger.editor - ${editorBefore} >= ${0.9 * fullBytes}`;
+    await waitFor('stage 2 decoded under the crop draft', counted, 60_000, { soft: true });
+    const editorDuring = await evaluate('window.__ncMemory.snapshot().ledger.editor');
+    console.log('two-stage smoke ledger:', JSON.stringify({ editorBefore, editorDuring, fullBytes, fullDecode: (await evaluate(status)).fullDecode }));
+    if (!(await evaluate(counted))) {
+      fail('the memory ledger does not count the full decode waiting for the swap: ' + JSON.stringify({ editorBefore, editorDuring, fullBytes }));
+    }
     await evaluate(`document.getElementById('cancelCropBtn').click()`);
     await waitFor('installed after crop mode', `${ready} && ${exact}`, 300_000);
     same('the recipe after crop mode', pick(await settledRecipe()), reference.recipe);

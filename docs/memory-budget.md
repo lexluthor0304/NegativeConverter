@@ -117,7 +117,9 @@ consumer that holds it:
 
 1. **editor**: `loadedBaseImageData`, the `SNAPSHOT_REF_KEYS` planes,
    `displayImageData`, the dust planes and the CPU display buffers (each with
-   its `__image16`), a parked photo's base;
+   its `__image16`), a parked photo's base, and a two-stage import's full
+   decode from its return until the swap installs it (#255; no plane holds it
+   in between, and its own reservation ends with the decode);
 2. **sessions**, then **previews** (`photoSessionCache.js`);
 3. **history**: only what nothing above holds (#244's exclusive count);
 4. **stores**: the prefetch slot, tile sources, watch-folder roll samples and

@@ -15,7 +15,9 @@
 //   5736} of it); a window crop converts once; undo entries are rebased to
 //   full units and cold;
 // - the settle computes the settings off-state on the full decode and keeps
-//   what the user changed in the window, never touching studioBusy.
+//   what the user changed in the window, never touching studioBusy;
+// - the memory ledger (#258) counts the full decode with the open photo from
+//   its return to the swap, and nothing of it once the photo is left.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
@@ -28,6 +30,7 @@ import {
 import { rotatedDimensions, sanitizeCropRect, normalizeAngleDegrees } from './imageGeometry.js';
 import { mergeStudioColors } from './studioSettings.js';
 import { MEMORY_FUNCTIONS, memoryGlobals } from './memoryHarness.mjs';
+import { backingBuffers } from './photoSessionCache.js';
 
 const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8');
 function functionSource(name) {
@@ -36,6 +39,7 @@ function functionSource(name) {
   const end = source.indexOf('\n    }', match.index);
   return source.slice(match.index, end + 6);
 }
+const SNAPSHOT_REF_KEYS = vm.runInNewContext(/const SNAPSHOT_REF_KEYS = (\[[^\]]+\]);/.exec(source)[1]);
 const flush = async (rounds = 20) => { for (let i = 0; i < rounds; i++) await new Promise(setImmediate); };
 const deferred = () => {
   let resolve, reject;
@@ -76,6 +80,7 @@ function fixture({ search = '?twoStageMinMp=40&twoStageMode=sequential', settled
     backgroundRest: ms => new Promise(resolve => setTimeout(resolve, ms)),
     state, loadGeneration: 0, photoActivation: null, rewarmAutoFrameWorker: false, importDetectionAbort: null,
     fullResolutionRenderAbort: null, parkedPhoto: null, pendingImportRotation: null,
+    SNAPSHOT_REF_KEYS, settledAdjustedBuffer: null, previewAdjustedBuffer: null,
     coreReprocessGeneration: 0, coreReprocessToken: 0, _coreReprocessPending: null, processNegativeInFlight: null,
     coreReprocessTimer: null, dustDrawing: false, aiBrushDrawing: null, undoStack: [], redoStack: [],
     cropModeWaiters: [], failNextFullDecodes: 0, fullDecodeHold: null, DEBUG_UI: false, TWO_STAGE_MIN_MP_KEY: 'nc_two_stage_min_mp',
@@ -184,7 +189,7 @@ function fixture({ search = '?twoStageMinMp=40&twoStageMode=sequential', settled
     'settledImportSettings', 'rebaseProvisionalHistory', 'installFullDecode', 'settleProvisionalPhoto',
     'leaveProvisionalPhoto', 'withPendingEdits', 'pendingGeometryEdits', 'extractCurrentSettings', 'restoreSettings',
     'persistCurrentFileSettings', 'canReuseLoadedRollSource', 'studioBackgroundReady', 'rememberPhotoBase',
-    'buildFinalImportSettings', 'getCurrentQueueItem', ...MEMORY_FUNCTIONS
+    'buildFinalImportSettings', 'getCurrentQueueItem', 'liveHistoryRoots', 'openPhotoMemoryRoots', ...MEMORY_FUNCTIONS
   ].map(functionSource).join('\n'), context);
   target.photoSessions = { put: () => { log.push(['session']); return true; } };
   target.hiddenJobs = { safeMode: false };
@@ -396,6 +401,49 @@ const SAVED = { left: 400, top: 300, width: 8700, height: 5800 };
   assert.equal(f.state.rawDecodePending, false);
 }
 {
+  // The memory ledger's open photo (#258): the stand-in, then the full decode
+  // from its return (the swap waits for crop mode here), then the base that
+  // holds it; a photo left drops its full decode.
+  const f = fixture();
+  const stage2 = await loadedStandIn(f);
+  f.state.provisional.start = { fresh: false, snapshot: f.context.extractCurrentSettings(), detectFrame: false, readEdge: false };
+  f.state.provisional.settledSnapshot = f.context.extractCurrentSettings();
+  const counted = () => backingBuffers(f.context.openPhotoMemoryRoots());
+  assert.ok(counted().has(f.state.loadedBaseImageData.data.buffer), 'the stand-in counts as the open photo');
+  const full = image(FULL);
+  stage2.resolve(full);
+  await flush();
+  assert.equal(f.state.fullDecode.status, 'decoded');
+  assert.ok(counted().has(full.data.buffer), 'the full decode counts from its return, before any plane holds it');
+  f.state.cropping = true;
+  f.context.startProvisionalSettle(f.state.fullDecode);
+  await flush();
+  assert.equal(f.state.fullDecode.status, 'decoded', 'the swap waits for crop mode');
+  assert.ok(counted().has(full.data.buffer), 'and while the swap waits');
+  f.state.cropping = false;
+  for (const resolve of f.target.cropModeWaiters.splice(0)) resolve();
+  await flush(40);
+  assert.equal(f.state.loadedBaseImageData, full, 'swapped');
+  assert.equal(f.state.fullDecode.decodedImage, null, 'the base holds it now');
+  assert.ok(counted().has(full.data.buffer));
+
+  const left = fixture();
+  const leftStage2 = await loadedStandIn(left);
+  const record = left.state.fullDecode;
+  left.state.provisional.start = { fresh: false, snapshot: left.context.extractCurrentSettings(), detectFrame: false, readEdge: false };
+  left.state.provisional.settledSnapshot = left.context.extractCurrentSettings();
+  left.state.cropping = true;
+  left.context.startProvisionalSettle(record);
+  const orphan = image(FULL);
+  leftStage2.resolve(orphan);
+  await flush();
+  assert.equal(record.decodedImage, orphan);
+  left.context.beginActivation(null);
+  left.context.invalidatePhotoActivation();
+  assert.equal(record.decodedImage, null, 'a photo left drops its full decode');
+  assert.equal(backingBuffers(left.context.openPhotoMemoryRoots()).has(orphan.data.buffer), false);
+}
+{
   // Leaving early: only the window edits are kept; a waiting export is released.
   const f = fixture();
   await loadedStandIn(f);
@@ -413,4 +461,4 @@ const SAVED = { left: 400, top: 300, width: 8700, height: 5800 };
   assert.equal(f.context.pendingGeometryEdits(f.item), null);
 }
 
-console.log('twoStageImport: header routing, stage options and start, abort on switch, barrier, retry, exact crop across the swap, history rebase and window edits passed');
+console.log('twoStageImport: header routing, stage options and start, abort on switch, barrier, retry, exact crop across the swap, history rebase, window edits and the ledger\'s open photo passed');

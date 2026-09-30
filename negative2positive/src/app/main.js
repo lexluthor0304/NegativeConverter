@@ -9916,11 +9916,18 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // lane owns (batch pools, lane analysers) are inside its reservation.
     const workerResidents = new Map();
 
+    // The open photo: history's live roots (its planes), the display
+    // buffers, a parked photo's base, and a two-stage import's full decode
+    // from its return to the swap (#255), which no plane holds yet.
+    function openPhotoMemoryRoots() {
+      return [liveHistoryRoots(), settledAdjustedBuffer, previewAdjustedBuffer, parkedPhoto?.base, state.fullDecode?.decodedImage];
+    }
+
     function memoryLedgerConsumers() {
       return [
         // The active editor: never evicted, except the full-resolution
         // processedImageData (#250's demotion) under the rules below.
-        { name: 'editor', roots: () => [liveHistoryRoots(), settledAdjustedBuffer, previewAdjustedBuffer, parkedPhoto?.base] },
+        { name: 'editor', roots: () => openPhotoMemoryRoots() },
         { name: 'sessions', buffers: () => photoSessions.buffers() },
         { name: 'previews', buffers: () => photoPreviews.buffers() },
         // Only what nothing above holds (#244's exclusive count).
@@ -10956,6 +10963,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       const record = {
         file, fileName, generation, plan, filmStats, abort, mode: stageTwoMode(),
         status: 'waiting', started: false, attempt: null, error: null, rawMetadata: null,
+        // The decoded full base from its return to the swap: no plane holds
+        // it yet, so the memory ledger counts it with the open photo (#258).
+        decodedImage: null,
         settle: null, urgent: false, wake: null, waiters: []
       };
       record.start = () => {
@@ -10973,6 +10983,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     function beginFullDecodeAttempt(record) {
       record.status = 'running';
       record.error = null;
+      record.decodedImage = null;
       const started = performance.now();
       const entry = noteTwoStageEvent(twoStageDiagnostics.stage2, { file: record.file.name, mode: record.mode, ms: null, failed: false });
       const attempt = (async () => {
@@ -11015,10 +11026,11 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         return image;
       })();
       record.attempt = attempt;
-      attempt.then(() => {
+      attempt.then(image => {
         if (record.attempt !== attempt || record.status !== 'running') return;
         entry.ms = Math.round(performance.now() - started);
         record.status = 'decoded';
+        record.decodedImage = image;
         noteFullDecodeChange(record);
       }, error => {
         if (record.attempt !== attempt) return;
@@ -11096,6 +11108,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       state.rawDecodePending = false;
       if (!record || record.status === 'installed') return;
       record.status = 'abandoned';
+      record.decodedImage = null;
       twoStageDiagnostics.abandoned++;
       record.abort.abort(new DOMException('The photo was left', 'AbortError'));
       noteFullDecodeChange(record);
@@ -11289,6 +11302,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       provisional.swapped = true;
       provisional.swapEdits = edits;
       state.loadedBaseImageData = image;
+      record.decodedImage = null;
       state.rawDecodePending = false;
       record.status = 'swapped';
       twoStageDiagnostics.swaps++;
@@ -11332,6 +11346,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         const computed = await settledImportSettings(image, item, provisional, record);
         if (!current()) return;
         image = computed.image;
+        record.decodedImage = image;
         trace.mark('settings', { analysed: computed.analysed });
         await waitForProvisionalSwap(record, provisional, current);
         if (!current()) return;

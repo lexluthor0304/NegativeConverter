@@ -65,8 +65,10 @@ stage 2 to crop mode or a failure.
 - **Memory** (#258): stage 1 takes the activation's foreground reservation at
   the loader gate with its half-size decode peak. Stage 2 takes a foreground
   reservation of its own there with the full size, released when its decode
-  returns. Foreground requests never wait, so the budget does not choose
-  between the concurrent and the sequential start.
+  returns. From then until the swap the ledger counts the decoded full base
+  with the open photo (`record.decodedImage`). Foreground requests never
+  wait, so the budget does not choose between the concurrent and the
+  sequential start.
 - A lane's decode of the same file (#243 `sharedDecodes`) is adopted instead
   of both stages.
 
