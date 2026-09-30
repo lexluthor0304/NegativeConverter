@@ -36,8 +36,14 @@ export default defineConfig({
     // the desktop app's own headers (tauri.conf.json) do not apply there.
     headers: { ...CROSS_ORIGIN_ISOLATION_HEADERS },
     // Isolated worktrees may share node_modules via a symlink. LibRaw's
-    // nested workers need their real package path in the dev-server allowlist.
-    fs: { allow: [resolve(__dirname, '..'), realpathSync(resolve(__dirname, '../node_modules/libraw-wasm'))] },
+    // nested workers and the bundled lensfun assets (`?url` imports, which
+    // the app loads before its CDN fallback) need their real package paths in
+    // the dev-server allowlist.
+    fs: { allow: [
+      resolve(__dirname, '..'),
+      realpathSync(resolve(__dirname, '../node_modules/libraw-wasm')),
+      realpathSync(resolve(__dirname, '../node_modules/@neoanaloglabkk/lensfun-wasm'))
+    ] },
   },
   preview: {
     host: '127.0.0.1',

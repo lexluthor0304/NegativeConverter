@@ -63,6 +63,7 @@ import { runStudioSyncSmoke } from './studio-sync-smoke.mjs';
 import { runCropApplySmoke } from './crop-apply-smoke.mjs';
 import { runAutoFrameImportSmoke } from './autoframe-import-smoke.mjs';
 import { runTwoStageImportSmoke } from './two-stage-import-smoke.mjs';
+import { runIsolationSmoke } from './isolation-smoke.mjs';
 
 // UPNG is already a runtime dependency of the app; reuse it to decode screenshots.
 const UPNG = createRequire(import.meta.url)('upng-js');
@@ -180,6 +181,15 @@ ws.onclose = (event) => {
 let msgId = 0;
 const pending = new Map();
 const pageErrors = [];
+// Steps that need raw CDP events (worker targets, Fetch) subscribe here.
+const cdpEventListeners = new Set();
+function onCdpEvent(listener) {
+  cdpEventListeners.add(listener);
+  return () => cdpEventListeners.delete(listener);
+}
+// Requests the cross-origin isolated page (#264) had blocked by COEP, CORP or
+// COOP, over the whole run: the Audits domain reports each as an issue.
+const isolationBlocks = [];
 ws.onmessage = (e) => {
   const msg = JSON.parse(e.data);
   if (msg.id && pending.has(msg.id)) {
@@ -191,6 +201,13 @@ ws.onmessage = (e) => {
     inspectorEvent = `${msg.method} ${JSON.stringify(msg.params || {})}`;
     console.error(`page ${inspectorEvent}`);
   }
+  for (const listener of cdpEventListeners) {
+    try { listener(msg); } catch (error) { console.error('CDP listener failed:', error); }
+  }
+  if (msg.method === 'Audits.issueAdded' && msg.params?.issue?.code === 'BlockedByResponseIssue' && !msg.sessionId) {
+    const details = msg.params.issue.details?.blockedByResponseIssueDetails;
+    isolationBlocks.push(`${details?.reason || 'blocked'}: ${details?.request?.url || '?'}`);
+  }
   if (msg.method === 'Runtime.exceptionThrown') {
     pageErrors.push(msg.params?.exceptionDetails?.exception?.description
       || msg.params?.exceptionDetails?.text || 'unknown exception');
@@ -201,6 +218,8 @@ ws.onmessage = (e) => {
     if (/\[W:onnxruntime:/.test(message)) return;
     console.error('page console error:', message);
     if (/^Export failed:/.test(message)) pageErrors.push(message);
+    // The shared-plane hash check (#264) must never fire in a smoke run.
+    if (/shared plane changed during a worker job/.test(message)) pageErrors.push(message);
     const frames = msg.params.stackTrace?.callFrames || [];
     if (frames.length) console.error(frames.slice(0, 5).map(frame => `  ${frame.functionName} (${frame.url}:${frame.lineNumber + 1})`).join('\n'));
   }
@@ -225,6 +244,13 @@ const send = (method, params = {}) => new Promise((resolve) => {
   const timeout = setTimeout(() => fail(`Chrome command timed out: ${method}`), 180_000);
   pending.set(id, (m) => { clearTimeout(timeout); resolve(m); });
   ws.send(JSON.stringify({ id, method, params }));
+});
+// A command to an attached target's session (flat mode: a worker, #264).
+const sendTo = (sessionId, method, params = {}) => new Promise((resolve) => {
+  const id = ++msgId;
+  const timeout = setTimeout(() => { pending.delete(id); resolve({ error: { message: `timed out: ${method}` } }); }, 30_000);
+  pending.set(id, (m) => { clearTimeout(timeout); resolve(m); });
+  ws.send(JSON.stringify({ id, method, params, sessionId }));
 });
 async function evaluate(expression) {
   const res = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
@@ -322,6 +348,7 @@ async function previewLuminance() {
 await send('Page.enable');
 await send('Runtime.enable');
 await send('Inspector.enable');
+await send('Audits.enable');
 // The fake-camera flags make headless Chrome reserve part of the window (the
 // viewport came out 1440x757); pin the layout the scenarios were written for.
 await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
@@ -330,6 +357,13 @@ await waitFor('app boot', `!!document.getElementById('studioImportAutoCrop')`);
 await installDialogAutoAccept();
 await wait(1500); // let main.js finish wiring
 await evaluate(`document.getElementById('studioImportAutoCrop').click()`);
+
+if (process.argv.includes('--isolation-only')) {
+  await runIsolationSmoke({ send, sendTo, onCdpEvent, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+  if (isolationBlocks.length) fail(`requests blocked by COEP/CORP/COOP:\n${isolationBlocks.join('\n')}`);
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
 
 if (process.argv.includes('--performance-only')) {
   await runPerformanceUiSmoke({ evaluate, fail });
@@ -1128,6 +1162,10 @@ if (!process.argv.some(arg => arg.endsWith('-only'))) await runTwoStageImportSmo
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runFirstPhotoSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runEmbeddedPreviewSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
 if (!process.argv.some(arg => arg.endsWith('-only'))) await runCropApplySmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT });
+if (!process.argv.some(arg => arg.endsWith('-only'))) await runIsolationSmoke({ send, sendTo, onCdpEvent, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+
+// ---- nothing the isolated page loads is blocked (#264) ----
+if (isolationBlocks.length) fail(`requests blocked by COEP/CORP/COOP:\n${isolationBlocks.join('\n')}`);
 
 // ---- no uncaught page errors across both scenarios ----
 const realErrors = pageErrors.filter((e) => !/ResizeObserver loop/.test(e));
