@@ -518,6 +518,11 @@ Remaining performance proposals below are not claims of completed work.
   At <=900px the grid rows are `minmax(220px, 1.08fr) minmax(0, 1fr)` and only the `.app-main:has(> .controls-panel[style*="none"])` rule collapses the second row while the panel is hidden. `:has()` is unsupported in Firefox < 121 (Dec 2023, incl. some Firefox Android builds), Safari/iOS < 15.4 and Chrome < 105; there the empty controls row keeps ~48% of the height and the drop/upload placeholder is…  
   _Suggested fix:_ Toggle a class from JS instead (`appMain.classList.toggle('panel-hidden', controlsPanel.style.display === 'none')` in showImageUI/hide paths) and write the rule as `.app-main.panel-hidden { grid-template-rows: 1fr 0; }`.
 
+- **low/bug** — Every LibRaw file reports its lens model as "[object Object]"
+  `negative2positive/src/app/rawFileLoader.js:extractRawLensMetadata`
+  The breadth-first key search matches libraw-wasm's top-level `lens` object in `metadata(true)` (normalised key `lens`) before it reaches `lens.Lens`, and `String()` of the object is "[object Object]"; `main.js` then pre-fills the lens-correction search with it (`search.lensModel = metadata.lensModel`). Seen on all six RAW fixtures with libraw-wasm 1.6.0 and #264's deterministic build (found by #264 part C, whose native decoder reproduces the same metadata object on purpose, so desktop and web agree).
+  _Suggested fix:_ Read `lens.Lens`, else `lens.makernotes.Lens`, as strings before the generic search, and skip object values in `findMetadataValue`. The lens-correction search and anything that reads `rawMetadata.lensModel` change for RAW files.
+
 ## Test coverage
 
 - **medium/test** — settingsSnapshot test fixture is hand-written, already stale (wbAutoConfidence), and cannot detect keys silently dropped by the copier _(verified)_  

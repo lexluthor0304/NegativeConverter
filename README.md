@@ -232,3 +232,5 @@ which made it possible to support various raw image formats such as `.cr2`, `.ne
 Your work was an essential reference and greatly accelerated development.
 
 HEIC/HEIF decoding uses the browser when supported, then the bundled libheif WASM decoder in a worker. See `negative2positive/public/codecs/README.md` for licence and replacement instructions.
+
+The desktop app can decode RAW files with LibRaw 0.22.1 linked natively (used under CDDL-1.0; source in `src-tauri/vendor/libraw`, notices in `negative2positive/public/licenses/raw-decoder-notices.txt`). See `docs/native-raw-decode.md`.

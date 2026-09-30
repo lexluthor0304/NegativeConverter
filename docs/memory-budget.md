@@ -94,7 +94,10 @@ memory is really gone.
 **One chokepoint.** `loadRawFile` awaits `options.reserveDecode(size)` before
 every branch decodes: with LibRaw's `width`, `height` and `estimatedBytes`
 after `metadata()`, and without a size before a UTIF, embedded-preview or
-browser decode. `loadFileToImageData(file, { claim })` passes the caller's
+browser decode. A native desktop decode (`docs/native-raw-decode.md`)
+reserves the same estimate at the same point, before the shell unpacks;
+its LibRaw heap lives in the app process, so the reservation over-counts
+WebContent on that path. `loadFileToImageData(file, { claim })` passes the caller's
 claim (`createMemoryClaim`): a claim reserved up front from the header is
 corrected there to the real size (never waiting), an Export All lane's is
 `fixed`, and a decode without a claim takes its own. Nothing decodes
