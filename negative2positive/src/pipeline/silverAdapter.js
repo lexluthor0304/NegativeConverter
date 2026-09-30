@@ -102,9 +102,9 @@ function _bufferId(buffer) {
 function localExposureStopsForSlot(slot, settings, width, height, region = null, transient = false) {
   const exposure = settings?.localExposure;
   const geometry = settings?.localExposureGeometry;
-  slot.exposureChange = null;
   if (!geometry || !exposure?.strokes?.length) {
     slot.exposureMap = null;
+    slot.exposureChange = null;
     return null;
   }
   const workingGeometry = region
@@ -116,14 +116,17 @@ function localExposureStopsForSlot(slot, settings, width, height, region = null,
     const key = exposureMapKey(exposure, workingGeometry);
     if (!slot.exposureMap || slot.exposureMap.key !== key) {
       slot.exposureMap = { key, tiled: true, stops: rasterizeExposureStopsTiled(exposure, workingGeometry) };
+      slot.exposureChange = null;
       _stats.exposureMaps.tiled++;
     }
     return slot.exposureMap.stops;
   }
   const previous = slot.exposureMap && !slot.exposureMap.tiled ? slot.exposureMap : null;
   const { map, change } = updateExposureStopsMap(previous, exposure, workingGeometry, _stats.exposureMaps);
+  // An unchanged map keeps the last change: the level may not have followed it
+  // yet (the GPU preview's prepare updates the map before the next frame).
+  if (map !== previous || change) slot.exposureChange = change;
   slot.exposureMap = map;
-  slot.exposureChange = change;
   return map.stops;
 }
 

@@ -68,9 +68,21 @@ for (const mode of ['color', 'bw', 'positive']) {
     for (let count = all.length - 1; count >= all.length - 3; count--) {
       await expectSame(`${mode} undo ${count}`, mode, image, structuredClone(settingsFor(count)), { preview: true, includeAnalysisPreview: false });
     }
+    // The GPU preview's prepare (#239) updates the map before the next frame:
+    // that frame still updates its level inside the new stroke's box only.
+    {
+      const extra = { ...all[0], stops: -all[0].stops };
+      const updatesBefore = live.getSilverCoreCacheStats().exposedUpdates;
+      const withExtra = { ...BASE[mode], localExposure: sanitizeLocalExposureForSettings({ strokes: [...all, extra] }), localExposureGeometry: geometry };
+      live.prepareSilverCorePreview(image, structuredClone(withExtra), mode, { preview: true });
+      await expectSame(`${mode} after prepare`, mode, image, structuredClone(withExtra), { preview: true, includeAnalysisPreview: false });
+      assert.equal(live.getSilverCoreCacheStats().exposedUpdates, updatesBefore + 1, `${mode}: the level follows a change the prepare made`);
+      await expectSame(`${mode} back`, mode, image, structuredClone(settingsFor(all.length)), { preview: true, includeAnalysisPreview: false });
+    }
     const after = live.getSilverCoreCacheStats();
     const maps = (key) => after.exposureMaps[key] - before.exposureMaps[key];
-    assert.equal(maps('extended'), all.length - 1, `${mode}: every stroke after the first extends the map`);
+    // Every stroke after the first, and the extra one the prepare added.
+    assert.equal(maps('extended'), all.length, `${mode}: every stroke after the first extends the map`);
     assert.ok(maps('undone') >= 1, `${mode}: the last stroke is undone in place`);
     assert.ok(maps('full') <= 4, `${mode}: full rasters only for the first stroke and multi-step undos (${maps('full')})`);
     assert.ok(after.exposedUpdates - before.exposedUpdates >= all.length - 1, `${mode}: the post-exposure level follows each stroke inside its box`);
