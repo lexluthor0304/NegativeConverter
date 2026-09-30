@@ -287,7 +287,10 @@ export async function runComparePreviewSmoke({ send, evaluate, waitFor, wait, fa
     await evaluate(`document.querySelector('[data-app-dialog-confirm]').click()`);
     await waitFor('compare session closed', `!document.body.classList.contains('studio-ready') && document.getElementById('beforeAfterBtn').disabled`);
     const released = await frame();
-    if (released.canvases.comparison.join('x') !== '1x1' || released.canvases.borderFrame.join('x') !== '1x1' || released.comparison.cached) {
+    const area = size => (size ? size[0] * size[1] : 0);
+    // The GL border underlay's texture (#253) goes with the session too.
+    if (released.canvases.comparison.join('x') !== '1x1' || released.canvases.borderFrame.join('x') !== '1x1' || released.comparison.cached
+      || area(released.canvases.glBorder) > 1) {
       fail('session close retained compare/border canvas backing stores: ' + JSON.stringify(released));
     }
     await evaluate(`(() => {
@@ -305,8 +308,11 @@ export async function runComparePreviewSmoke({ send, evaluate, waitFor, wait, fa
       compare.click();
       return { before, after: window.__comparePreviewHash(), during, frame: window.__ncDisplay.frame() };
     })()`);
-    if (regenerated.before !== regenerated.after || regenerated.during.canvases.comparison[0] * regenerated.during.canvases.comparison[1] <= 1
-      || regenerated.frame.canvases.borderFrame[0] * regenerated.frame.canvases.borderFrame[1] <= 1) {
+    // The new session shows the photo on the GPU again (coreUseWebGL is a
+    // recipe setting), where the border is a GL underlay (#253), not the 2D
+    // border canvas: the border regenerates on whichever surface shows it.
+    const shownBorder = regenerated.frame.surface === 'gl' ? regenerated.frame.canvases.glBorder : regenerated.frame.canvases.borderFrame;
+    if (regenerated.before !== regenerated.after || area(regenerated.during.canvases.comparison) <= 1 || area(shownBorder) <= 1) {
       fail('border/compare canvases did not regenerate after reopen: ' + JSON.stringify(regenerated));
     }
     console.log('ok: settled CPU frames are exact, display-size and worker-made; #canvas holds the drawn buffer; one negative write per import; the comparison is a cached display-size element released on switch and close');
