@@ -6,8 +6,8 @@
 //
 //   npm run build:web && PORT=5331 CDP_PORT=9331 node scripts/isolation-preview-check.mjs
 //
-// Checks: the page and every worker are isolated (window.__ncIsolation.report(),
-// and CDP on every worker target that starts, nested ones included); a
+// Checks: the page and every worker are isolated (window.__ncIsolation.report();
+// with ISOLATION_CDP_WORKERS=1 also CDP on every worker target that starts); a
 // generated CFA DNG decodes through LibRaw's bundled worker and exports as a
 // 16-bit PNG; no request is blocked by COEP, CORP or COOP.
 import { spawn } from 'node:child_process';
@@ -138,10 +138,9 @@ if (!page.isolated || !page.sab) fail(`the production build is not isolated: ${J
 const report = await evaluate(`window.__ncIsolation.report()`);
 console.log('preview isolation report:', JSON.stringify(report.workers));
 if (!report.allIsolated) fail(`not every worker is isolated: ${JSON.stringify(report.workers)}`);
-// From here on, CDP also reads the isolation of the workers the app starts
-// for a real decode (the LibRaw worker and, with a threaded build, its
-// pthreads); attached after boot, so the page itself is never held up.
-await send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true });
+// CDP auto-attach to worker targets is opt-in (ISOLATION_CDP_WORKERS=1): in
+// Chrome 154 attaching to them held up the page (see isolation-smoke.mjs).
+if (process.env.ISOLATION_CDP_WORKERS === '1') await send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true });
 
 // A LibRaw decode on the built bundle and a 16-bit PNG export.
 const dng = join(dir, 'preview.dng');

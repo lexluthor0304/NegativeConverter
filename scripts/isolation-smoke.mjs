@@ -193,6 +193,30 @@ export async function runIsolationSmoke({ send, sendTo, onCdpEvent, evaluate, wa
     await waitFor('export settled', `!document.getElementById('exportSingleBtn').disabled`, 300_000);
     return entry.sha256;
   };
+  // The LibRaw decode itself, through the app's loader, on the file handed to a
+  // probe <input>: both planes' SHA-256 and the metadata the app keeps.
+  const rawProbe = async (file) => {
+    await evaluate(`(() => {
+      if (document.getElementById('__isolationProbeInput')) return true;
+      const input = document.createElement('input');
+      input.type = 'file'; input.id = '__isolationProbeInput'; input.hidden = true;
+      document.body.appendChild(input);
+      return true;
+    })()`);
+    const doc = await send('DOM.getDocument');
+    const input = await send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector: '#__isolationProbeInput' });
+    await send('DOM.setFileInputFiles', { files: [file], nodeId: input.result.nodeId });
+    return evaluate(`(async () => {
+      const { loadRawFile } = await import('/src/app/rawFileLoader.js');
+      const file = document.getElementById('__isolationProbeInput').files[0];
+      const bytes = await file.arrayBuffer();
+      let meta = null;
+      const image = await loadRawFile(bytes, file.name, { sharedPlanes: true, onMetadata: (value) => { meta = value; } });
+      const hex = async (view) => [...new Uint8Array(await crypto.subtle.digest('SHA-256', view.slice().buffer))].map((b) => b.toString(16).padStart(2, '0')).join('');
+      return { width: image.width, height: image.height, shared: image.__image16.data.buffer instanceof SharedArrayBuffer,
+        image16: await hex(image.__image16.data), image8: await hex(image.data), meta: JSON.stringify(meta) };
+    })()`);
+  };
   const decodeAndExport = async (file, label) => {
     await importFiles([file]);
     await waitFor(`${label}: RAW import converted`, ready, 180_000);
@@ -268,6 +292,7 @@ export async function runIsolationSmoke({ send, sendTo, onCdpEvent, evaluate, wa
 
     // ---- 3. a LibRaw decode and its exports, isolated
     step('LibRaw decode, isolated');
+    const isolatedDecode = await rawProbe(dng);
     const isolatedExports = await decodeAndExport(dng, 'isolated');
     const guard = await evaluate(`window.__ncIsolation.planeGuard()`);
     if (!guard.enabled) fail('the shared-plane hash check is off on the dev server');
@@ -356,8 +381,14 @@ export async function runIsolationSmoke({ send, sendTo, onCdpEvent, evaluate, wa
     const failedToStart = Object.entries(plainReport.workers).filter(([, answer]) => answer.error);
     if (failedToStart.length) fail(`workers failed on the page that is not isolated: ${JSON.stringify(failedToStart)}`);
     if (Object.values(plainReport.workers).some((answer) => answer.crossOriginIsolated)) fail(`a worker of a page that is not isolated reports isolation: ${JSON.stringify(plainReport.workers)}`);
+    const plainDecode = await rawProbe(dng);
     const plainExports = await decodeAndExport(dng, 'not isolated');
+    console.log('isolation decodes:', JSON.stringify({ isolated: isolatedDecode, notIsolated: plainDecode }));
     console.log('isolation exports:', JSON.stringify({ isolated: isolatedExports, notIsolated: plainExports }));
+    if (!isolatedDecode.shared || plainDecode.shared) fail(`shared planes are not tied to isolation: ${JSON.stringify({ isolatedDecode, plainDecode })}`);
+    for (const key of ['width', 'height', 'image16', 'image8', 'meta']) {
+      if (isolatedDecode[key] !== plainDecode[key]) fail(`the LibRaw decode differs between the isolated page and the copy path (${key}): ${JSON.stringify({ isolatedDecode, plainDecode })}`);
+    }
     if (plainExports.png8 !== isolatedExports.png8 || plainExports.png16 !== isolatedExports.png16) {
       fail(`exports differ between the isolated page and the copy path: ${JSON.stringify({ isolatedExports, plainExports })}`);
     }
