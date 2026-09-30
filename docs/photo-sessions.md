@@ -159,7 +159,10 @@ the crop-window rows of k × 16 level rows and box-averaging them with
 `buildDisplayLevel`'s own sums (`renderDisplayLevel`, bit-identical to the
 whole level of the export chain's crop). Frames with lens correction, repairs,
 an undecided recipe, an 8-bit RAW fallback or no level smaller than
-themselves (k = 1) are skipped.
+themselves (k = 1) are skipped. A roll frame measured in its lane's roll-frame
+worker (#252) stays there, so `displayProxyFillPlan` decides from its size
+alone whether it has a proxy to fill; only then do its planes come back to
+the page with its roll sample for the fill.
 
 **The store** (across restarts and project reopens). The same records, keyed by
 the file's content (size, date, SHA-256 of the first MiB plus the size, SHA-256

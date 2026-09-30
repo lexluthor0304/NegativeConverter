@@ -40,7 +40,7 @@ export function displaySessionStubs(overrides = {}) {
     coldHistory: entries => entries.filter(entry => !entry.dustDelta).map(entry => ({ ...entry, refs: { cold: true } })),
     requestSourceForDisplay: () => {}, ensureSource: async () => true, ensureBase: async () => null,
     forgetDisplayProxies: () => {}, readSpilledDisplaySession: async () => null,
-    fillDisplayProxy: async () => false,
+    fillDisplayProxy: async () => false, displayProxyFillPlan: () => null,
     // Part 3: no persistent store.
     displayProxyStore: null, persistDisplayProxy: async () => false, readStoredDisplaySession: async () => null,
     persistPresentationPreview: async () => false, presentStoredPreview: async () => {},

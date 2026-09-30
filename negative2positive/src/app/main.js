@@ -10973,6 +10973,39 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // ===========================================
     // Display proxy fills (#249)
     // ===========================================
+    // The decoded base as displayProxyFillPlan reads it: its size, whether
+    // it has a 16-bit plane, and its decode route.
+    function displayProxyShape(item, base) {
+      return { width: base.width, height: base.height, has16: Boolean(base.__image16?.data), route: decodeRouteOf(item?.file, base) };
+    }
+
+    // What fillDisplayProxy keeps for `item` from a decoded base of `shape`
+    // (displayProxyShape), decided before any pixel is read: null when fills
+    // are off or the item is gone, `{ skip: true }` for a frame a fill passes
+    // over, else the geometry key, the level's factor and the proxy key,
+    // `kept` when the spill holds that key already. A roll frame held in its
+    // worker (#252) comes back to the page only when there is a proxy to
+    // fill.
+    function displayProxyFillPlan(item, shape, settings) {
+      if (!(displayProxySpill.enabled || displayProxyStore) || !item || !shape || !state.fileQueue.includes(item)) return null;
+      const skip = { skip: true };
+      if (!settings?.autoFrameMeta || !settings.filmEdge?.checked || lensCorrectionActive(settings)) return skip;
+      if (!usesSilverCoreConversion(settings) || state.dustRemoval.enabled || settings.repairStrokes?.length) return skip;
+      if (shape.route === 'raw-fallback') return skip;
+      const key = geometryKeyFor(shape, { rotationAngle: settings.rotationAngle, mirrored: settings.mirrored, cropRegion: settings.cropRegion });
+      // Step 2's border mode of a colour frame without a crop reads its pixels.
+      if (!key.crop && requiresFilmBase(settings)) return skip;
+      const source = key.crop ? { width: key.crop.width, height: key.crop.height } : { width: key.frameWidth, height: key.frameHeight };
+      const k = displayLevelFactor(source.width, source.height);
+      if (!isLargeImage(source) || k <= 1) return skip;
+      const descriptor = { width: shape.width, height: shape.height, has16: Boolean(shape.has16), route: shape.route };
+      const area = analysisAreaOf(settings.autoFrameMeta);
+      const proxyKey = displayProxyKey({
+        id: null, route: shape.route, base: descriptor, rotationAngle: key.angle, mirrored: key.mirrored, cropRegion: key.crop, lens: null, area
+      });
+      return { key, source, k, descriptor, area, proxyKey, kept: displayProxySpill.proxyKey(item.id) === proxyKey };
+    }
+
     // Roll analysis and the lanes decode frames the editor has not opened.
     // While such a decode is in hand, the display proxy a cold open of the
     // frame would convert, its display level (#248), is rendered from it in
@@ -10985,23 +11018,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // proxy of that key is kept.
     async function fillDisplayProxy(item, base, settings, { isCurrent = () => true } = {}) {
       const skip = () => { displaySessionDiagnostics.fillSkips++; return false; };
-      if (!(displayProxySpill.enabled || displayProxyStore) || !item || !base?.data || isReleasedPlane(base) || !state.fileQueue.includes(item)) return false;
-      if (!settings?.autoFrameMeta || !settings.filmEdge?.checked || lensCorrectionActive(settings)) return skip();
-      if (!usesSilverCoreConversion(settings) || state.dustRemoval.enabled || settings.repairStrokes?.length) return skip();
-      const route = decodeRouteOf(item.file, base);
-      if (route === 'raw-fallback') return skip();
-      const key = geometryKeyFor(base, { rotationAngle: settings.rotationAngle, mirrored: settings.mirrored, cropRegion: settings.cropRegion });
-      // Step 2's border mode of a colour frame without a crop reads its pixels.
-      if (!key.crop && requiresFilmBase(settings)) return skip();
-      const source = key.crop ? { width: key.crop.width, height: key.crop.height } : { width: key.frameWidth, height: key.frameHeight };
-      const k = displayLevelFactor(source.width, source.height);
-      if (!isLargeImage(source) || k <= 1) return skip();
-      const descriptor = { width: base.width, height: base.height, has16: Boolean(base.__image16?.data), route };
-      const area = analysisAreaOf(settings.autoFrameMeta);
-      const proxyKey = displayProxyKey({
-        id: null, route, base: descriptor, rotationAngle: key.angle, mirrored: key.mirrored, cropRegion: key.crop, lens: null, area
-      });
-      if (displayProxySpill.proxyKey(item.id) === proxyKey) return true;
+      if (!base?.data || isReleasedPlane(base)) return false;
+      const fill = displayProxyFillPlan(item, displayProxyShape(item, base), settings);
+      if (!fill) return false;
+      if (fill.skip) return skip();
+      if (fill.kept) return true;
+      const { key, source, k, descriptor, area, proxyKey } = fill;
       const plan = geometryPlanFor(base, key);
       if (!plan) return skip();
       const level = await geometryPool.renderDisplayLevel(base, plan, { k, isCurrent });
@@ -26325,26 +26347,37 @@ import { canPublishThumbnail } from './thumbnailRank.js';
                         settings = await learnedImportSettings(settleImportFilmType(item, settings), item);
                         if (!itemValid()) return null;
                         let sample = null;
+                        let planes = image;
                         if (image) {
                           // The planes came back (a prefetch, or room in the photo sessions).
                           await step();
                           if (!itemValid()) return null;
                           sample = buildRollSample(image, settings);
                         } else {
+                          // A frame whose display proxy is still to be filled
+                          // (#249) comes back to the page with its sample. The
+                          // worker holds only LibRaw's exact 16-bit decodes.
+                          const fill = displayProxyFillPlan(item, {
+                            width: decoded.held.width, height: decoded.held.height, has16: true, route: 'libraw16'
+                          }, settings);
                           let built;
-                          try { built = await decoded.held.sample(rollSampleSettings(settings), { tileMax: STUDIO_TILE_PREVIEW_MAX }); }
-                          catch (error) {
+                          try {
+                            built = await decoded.held.sample(rollSampleSettings(settings), {
+                              tileMax: STUDIO_TILE_PREVIEW_MAX, returnPlanes: Boolean(fill && !fill.skip && !fill.kept)
+                            });
+                          } catch (error) {
                             // The worker went with the frame: measure it again.
                             workerFailures.set(item, (workerFailures.get(item) || 0) + 1);
                             console.warn('Roll frame sample failed in its worker; measuring it again:', item.file?.name, error);
                             return null;
                           }
                           sample = built.sample || buildRollSample(built.base, settings);
+                          planes = built.base || null;
                         }
                         if (!itemValid()) return null;
                         // While the planes are on the page, the display proxy
                         // the frame's first open converts (#249).
-                        if (image && !(await fillRollFrameProxy(item, image, settings, step, itemValid))) return null;
+                        if (planes && !(await fillRollFrameProxy(item, planes, settings, step, itemValid))) return null;
                         return { settings, sample, key };
                       }
                       await step();

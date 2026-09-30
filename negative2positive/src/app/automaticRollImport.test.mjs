@@ -747,7 +747,9 @@ function workerRoll(f, { analysisFor = () => ({}), dng = true } = {}) {
       id, width: 10, height: 10, samples: [], released: false,
       async sample(settings, options) {
         held.samples.push({ settings, options });
-        return { sample: { id, width: 10, height: 10, fromWorker: true, __baseSize: { width: 10, height: 10 }, __analysisReference: null } };
+        const sample = { id, width: 10, height: 10, fromWorker: true, __baseSize: { width: 10, height: 10 }, __analysisReference: null };
+        // Asked for them, the worker hands the planes back with the sample.
+        return options?.returnPlanes ? { sample, base: { id, width: 10, height: 10, planesFromWorker: true } } : { sample };
       },
       release() { held.released = true; }
     };
@@ -790,6 +792,38 @@ function workerRoll(f, { analysisFor = () => ({}), dng = true } = {}) {
   assert.equal(pool.warmed, 1, 'its workers are started ahead of the first frame');
   assert.equal(pool.disposed, true, 'and released when the roll ends');
   assert.deepEqual(f.idleHolds, [true, false], 'the shared auto-frame worker stays warm while the roll runs');
+}
+
+{
+  // #249 on #252's worker path: a held frame whose display proxy is still to
+  // be filled comes back to the page with its sample and is filled from those
+  // planes; a frame the fill passes over (or already has) stays in its worker.
+  const f = fixture();
+  const { heldFrames, pageReads } = workerRoll(f);
+  const plans = [];
+  f.context.displayProxyFillPlan = (item, shape, settings) => {
+    plans.push({ id: item.id, shape, settings });
+    return item.id === 2 ? { kept: false } : item.id === 3 ? { kept: true } : { skip: true };
+  };
+  const fills = [];
+  f.context.fillDisplayProxy = async (item, base, settings, { isCurrent }) => {
+    fills.push({ id: item.id, base, settings, current: isCurrent() });
+    return true;
+  };
+  f.context.scheduleAutomaticRollImport(f.items);
+  await f.fire(1200);
+  assert.deepEqual(pageReads, [], 'every frame was measured in its worker');
+  assert.deepEqual(plans.map(plan => plan.id).sort(), [1, 2, 3], 'each held frame is planned once, before its sample');
+  assert.ok(plans.every(plan => plan.shape.width === 10 && plan.shape.height === 10 && plan.shape.route === 'libraw16' && plan.shape.has16),
+    'planned on the held frame\'s size as an exact 16-bit LibRaw decode');
+  const asked = Object.fromEntries(heldFrames.map(held => [held.id, Boolean(held.samples[0].options.returnPlanes)]));
+  assert.deepEqual(asked, { 1: false, 2: true, 3: false }, 'only a frame with a proxy to fill asks for its planes');
+  assert.equal(fills.length, 1);
+  assert.equal(fills[0].id, 2);
+  assert.equal(fills[0].base.planesFromWorker, true, 'filled from the planes the worker handed back');
+  assert.equal(fills[0].current, true);
+  assert.equal(fills[0].settings.id, 2, 'with the recipe measured for that frame');
+  assert.ok(f.items.every(item => item.settings), 'every frame measured');
 }
 
 {

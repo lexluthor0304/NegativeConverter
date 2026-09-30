@@ -527,8 +527,15 @@ for (const tier of ['A', 'B']) {
     const item = { id: 7, file: { name: 'roll-07.dng' }, settings: { ...geometry, autoFrameMeta: { imageArea: AREA }, filmEdge: { checked: true } } };
     h.state.fileQueue = [{ id: 1, file: { name: 'open.dng' } }, item];
     h.state.currentFileIndex = 0;
+    const shape = { width: 120, height: 80, has16: true, route: 'libraw16' };
+    const planned = c.displayProxyFillPlan(item, shape, item.settings);
+    assert.equal(planned.kept, false, 'a fill is planned from the size alone (#252 held frames)');
     assert.equal(await c.fillDisplayProxy(item, base, item.settings), true, `filled ${JSON.stringify(geometry)}`);
     assert.equal(h.target.displaySessionDiagnostics.fills, 1);
+    const again = c.displayProxyFillPlan(item, shape, item.settings);
+    assert.equal(again.proxyKey, planned.proxyKey);
+    assert.equal(again.proxyKey, h.target.displayProxySpill.proxyKey(item.id), 'the planned key is the one the fill kept');
+    assert.equal(again.kept, true, 'then kept: a held frame is not asked for its planes again');
     const stored = await h.target.displayProxySpill.get(item.id);
     // What processNegative builds on a cold open: the display level of the
     // (lens-free) conversion source, whatever the window.
@@ -558,11 +565,14 @@ for (const tier of ['A', 'B']) {
   h.state.fileQueue = [item];
   h.target.lensCorrectionActive = () => true;
   assert.equal(await c.fillDisplayProxy(item, base, item.settings), false, 'lens-corrected frames are skipped');
+  assert.equal(c.displayProxyFillPlan(item, { width: 120, height: 80, has16: true, route: 'libraw16' }, item.settings).skip, true,
+    'and planned as skipped');
   h.target.lensCorrectionActive = () => false;
   assert.equal(await c.fillDisplayProxy(item, base, { ...item.settings, repairStrokes: [{}] }), false, 'repaired frames are skipped');
   const eight = makeBase(120, 80, 21);
   delete eight.__image16;
   assert.equal(await c.fillDisplayProxy(item, eight, item.settings), false, 'an 8-bit RAW fallback is not reproducible');
+  assert.equal(c.displayProxyFillPlan(item, c.displayProxyShape(item, eight), item.settings).skip, true);
   assert.equal(await c.fillDisplayProxy(item, base, { ...item.settings, filmEdge: null }), false, 'undecided recipes are skipped');
   h.target.displayLevelFactor = () => 1;
   assert.equal(await c.fillDisplayProxy(item, base, item.settings), false, 'a frame that is its own level needs no proxy');
