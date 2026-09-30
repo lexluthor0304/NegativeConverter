@@ -21,9 +21,10 @@ does not implement `credentialless`.
 
 ## What isolation turns on
 
-Everything below is decided at runtime from `crossOriginIsolated`; a page or
-webview that is not isolated keeps the copy path it always had, with the same
-pixels.
+Everything below is decided at runtime from `sharedMemoryAvailable()`:
+`crossOriginIsolated` **and** a `SharedArrayBuffer` constructor (macOS
+WKWebView has the first without the second). A page or webview without both
+keeps the copy path it always had, with the same pixels.
 
 - **Shared 16-bit planes** (`src/app/crossOriginIsolation.js`). The editor's
   decodes (`sharedPlanes: true`: the photo that is opened, its two-stage full
@@ -57,7 +58,7 @@ pixels.
   - **The guard.** In dev (every smoke run), `?debug=1` and `?planeGuard=1`,
     every shared plane posted to a worker is hashed before and after the job;
     a change is logged, recorded in `window.__ncIsolation.planeGuard()` and
-    fails the smoke run. Planes over 256 MB (about 32 MP) are hashed only with
+    fails the smoke run. Planes over 64 MB (about 8 MP) are hashed only with
     `?planeGuard=1`; `?planeGuard=0` turns it off.
   - `?sharedPlanes=0` keeps the copy path on an isolated page.
 - **ONNX Runtime threads** (`src/app/inferenceRuntime.js`): min(4, cores - 2)
@@ -85,34 +86,55 @@ COOP `same-origin` severs `window.opener`; the app's one `window.open` passes
 
 ## Per platform
 
-| target | isolated | how it was checked |
-|---|---|---|
-| Chrome, Vite dev server | yes: page and every worker, ORT pthreads included | `npm run test:smoke -- --isolation-only` (2026-09-30, Chrome 154) |
-| Chrome, Vite preview / production build | see below | `scripts/isolation-preview-check.mjs` |
-| macOS WKWebView (`tauri://localhost`) | see below | the desktop log line |
-| Windows WebView2 (`http://tauri.localhost`) | not checked (no Windows machine) | the desktop log line |
-| Linux WebKitGTK | not checked (no Linux machine) | the desktop log line |
+| target | isolated | SharedArrayBuffer | how it was checked |
+|---|---|---|---|
+| Chrome, Vite dev server | yes: page and every worker | yes | `npm run test:smoke -- --isolation-only` (2026-09-30, Chrome 154, M1 Pro) |
+| Chrome, Vite preview (production build) | yes: page and every worker | yes | `scripts/isolation-preview-check.mjs` (same day): a LibRaw decode and a 16-bit PNG export on the built bundle |
+| production web (Vercel) | expected as the preview (same headers) | expected | not deployed from this branch |
+| macOS WKWebView (`tauri://localhost`) | page, module and classic workers report `crossOriginIsolated === true`; blob: workers do not | **no** | the desktop log line of a debug build with embedded assets (`cargo build --features tauri/custom-protocol`), 2026-09-30, macOS 27 |
+| Windows WebView2 (`http://tauri.localhost`) | not checked (no Windows machine) | | the desktop log line |
+| Linux WebKitGTK | not checked (no Linux machine) | | the desktop log line |
+
+macOS WKWebView honours the headers for `crossOriginIsolated` but does not
+expose `SharedArrayBuffer` to the custom-scheme app webview (Safari exposes it
+only in the WebContent processes it launches for isolated pages). Every
+consumer therefore gates on `sharedMemoryAvailable()` (isolated **and** a
+`SharedArrayBuffer` constructor), not on the flag alone: the macOS desktop app
+runs the copy path, single-threaded ONNX Runtime and the single-threaded
+LibRaw build, with no errors, and gets its decode speed from native LibRaw
+(#264 Part C) instead.
 
 How to check a platform: the desktop app writes one line to its terminal log
-about 15 s after launch, e.g.
+about 15 s after launch, e.g. (macOS)
 
 ```
-[webview] isolation page=1 sab=1 secure=1 workers: geometry=1 heif=1 blob=1
+[webview] isolation page=1 sab=0 secure=1 workers: geometry=1/0 heif=1/0 blob=0/0
 ```
 
-(with `?debug=1`, every worker and LibRaw). In a browser,
-`await window.__ncIsolation.report()` lists every worker. A target where
-`page=0` runs the copy path and single-threaded ORT with no errors.
+(each worker reads `crossOriginIsolated/SharedArrayBuffer`; with `?debug=1`,
+every worker and LibRaw). In a browser, `await window.__ncIsolation.report()`
+lists every worker. A target without shared memory runs the copy path and
+single-threaded ORT and LibRaw with no errors.
 
 ## Measurements (M1 Pro, Chrome 154, CPU WASM)
 
 ONNX Runtime, one realm per thread count (`inferenceThreads.harness.mjs`):
 
-| model | 1 thread | 4 threads | output |
-|---|---|---|---|
-| MI-GAN, one 512 px tile | 1112-1136 ms | 506-546 ms | identical (0 of 786432 samples differ) |
-| EfficientViT-B1, 512 px | 260-272 ms | 145-153 ms | 512879 of 614400 logits differ, at most 4.1e-6; label maps equal |
+| model | 1 thread | 2 threads | 4 threads | output |
+|---|---|---|---|---|
+| MI-GAN, one 512 px tile | 1085-1136 ms | 594-755 ms | 380-580 ms | identical at 2 and 4 threads (0 of 786432 samples differ) |
+| EfficientViT-B1, 512 px | 248-281 ms | 173-225 ms | 134-195 ms | identical at 2 threads; at 4, 512879 of 614400 logits differ (at most 4.1e-6), label maps equal |
 
 The semantic map's labels and confidence go into the recipe and the white
 balance, so EfficientViT keeps one thread and no export depends on the
 thread count. MI-GAN's per-tile memo (#246) needs no thread count in its key.
+
+LibRaw through the app's loader (`loadRawFile`, 16-bit full size, median of
+3; other agents loading the machine), with libraw-wasm 1.6.0 and with the
+threaded build of #264 Part B on the isolated page (8 threads; its pool
+starts in 31-62 ms per decode):
+
+| file | 1.6.0, one thread | threaded build, 8 threads |
+|---|---|---|
+| `_DSC3111.NEF` (10.7 MP) | 1256 ms | 865 ms |
+| `_DSC5290.dng` (24.3 MP) | 2502 ms | 2224 ms (1796-2622) |

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {
-  isCrossOriginIsolated, sharedPlanesAvailable, isSharedPlane, allocPlane16, hashPlane,
+  isCrossOriginIsolated, sharedMemoryAvailable, sharedPlanesAvailable, isSharedPlane, allocPlane16, hashPlane,
   guardSharedPlanes, configurePlaneGuard, planeGuardReport, describeRealmIsolation, ISOLATION_PROBE
 } from './crossOriginIsolation.js';
 
@@ -13,6 +13,11 @@ assert.equal(isCrossOriginIsolated(plain), false);
 assert.equal(isCrossOriginIsolated({}), false, 'undefined is not isolated');
 assert.equal(isCrossOriginIsolated(null), false);
 assert.equal(isCrossOriginIsolated(), false, 'Node is not isolated');
+assert.equal(sharedMemoryAvailable(isolated), true);
+assert.equal(sharedMemoryAvailable({ crossOriginIsolated: true }), false, 'WKWebView: isolated without SharedArrayBuffer');
+assert.equal(sharedMemoryAvailable(plain), false);
+assert.equal(sharedPlanesAvailable({ crossOriginIsolated: true }), false);
+assert.equal(allocPlane16(4, { shared: true, env: { crossOriginIsolated: true } }).buffer instanceof ArrayBuffer, true);
 assert.equal(sharedPlanesAvailable(isolated), true);
 assert.equal(sharedPlanesAvailable(plain), false);
 assert.equal(sharedPlanesAvailable({ crossOriginIsolated: true, location: { search: '' } }), false, 'no SharedArrayBuffer constructor');

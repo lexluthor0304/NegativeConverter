@@ -13,7 +13,7 @@
 // The contract this detects is written down in notes/264.md ("Track A ->
 // Track B"); `librawThreadSupport` is the only place that reads it.
 import LibRaw from 'libraw-wasm';
-import { isCrossOriginIsolated } from './crossOriginIsolation.js';
+import { isCrossOriginIsolated, sharedMemoryAvailable } from './crossOriginIsolation.js';
 
 // The foreground decode may use every core up to this; the spec's pool is
 // min(cores, 8) - 1 workers plus the calling thread.
@@ -52,7 +52,9 @@ export function planLibRawThreads({ isolated = false, hardwareConcurrency = 4, b
  */
 export function createLibRaw({ background = false, LibRawClass = LibRaw, env = globalThis } = {}) {
   const support = librawThreadSupport(LibRawClass);
-  const isolated = isCrossOriginIsolated(env);
+  // Threads need shared memory, not only the isolation flag: macOS WKWebView
+  // reports crossOriginIsolated without a SharedArrayBuffer constructor.
+  const isolated = sharedMemoryAvailable(env);
   if (!support || !isolated) return { raw: new LibRawClass(), threads: 1, threaded: false };
   const threads = planLibRawThreads({
     isolated, background, maxThreads: support.maxThreads,

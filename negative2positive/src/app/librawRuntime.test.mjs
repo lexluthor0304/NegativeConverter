@@ -29,8 +29,10 @@ class Recorder {
 }
 Recorder.calls = [];
 const Threaded = Object.assign(class extends Recorder {}, { features: { threads: true } });
-const isolatedEnv = { crossOriginIsolated: true, navigator: { hardwareConcurrency: 8 } };
-const plainEnv = { crossOriginIsolated: false, navigator: { hardwareConcurrency: 8 } };
+const isolatedEnv = { crossOriginIsolated: true, SharedArrayBuffer, navigator: { hardwareConcurrency: 8 } };
+const plainEnv = { crossOriginIsolated: false, SharedArrayBuffer, navigator: { hardwareConcurrency: 8 } };
+// macOS WKWebView: isolated, but no SharedArrayBuffer constructor.
+const webkitEnv = { crossOriginIsolated: true, navigator: { hardwareConcurrency: 8 } };
 {
   Recorder.calls = [];
   const plain = createLibRaw({ LibRawClass: Recorder, env: isolatedEnv });
@@ -42,6 +44,11 @@ const plainEnv = { crossOriginIsolated: false, navigator: { hardwareConcurrency:
   const notIsolated = createLibRaw({ LibRawClass: Threaded, env: plainEnv });
   assert.deepEqual(Recorder.calls, [[]], 'a threaded build on a page that is not isolated: no argument either');
   assert.equal(notIsolated.threaded, false);
+
+  Recorder.calls = [];
+  const noSharedMemory = createLibRaw({ LibRawClass: Threaded, env: webkitEnv });
+  assert.deepEqual(Recorder.calls, [[]], 'isolated without SharedArrayBuffer (WKWebView): no threads');
+  assert.equal(noSharedMemory.threaded, false);
 
   Recorder.calls = [];
   const foreground = createLibRaw({ LibRawClass: Threaded, env: isolatedEnv });

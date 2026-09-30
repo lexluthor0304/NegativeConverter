@@ -44,13 +44,21 @@ function sharedPlanesDisabledByPage(env) {
 }
 
 /**
+ * Whether WASM threads can run here: isolated AND a SharedArrayBuffer
+ * constructor. macOS WKWebView (the desktop app on tauri://localhost) reports
+ * `crossOriginIsolated === true` without exposing SharedArrayBuffer, so the
+ * flag alone is not enough.
+ */
+export function sharedMemoryAvailable(env = globalThis) {
+  return isCrossOriginIsolated(env) && typeof env?.SharedArrayBuffer === 'function';
+}
+
+/**
  * Whether 16-bit planes may be allocated in shared memory here: isolated,
  * with a SharedArrayBuffer constructor, and not switched off on the page.
  */
 export function sharedPlanesAvailable(env = globalThis) {
-  return isCrossOriginIsolated(env)
-    && typeof env.SharedArrayBuffer === 'function'
-    && !sharedPlanesDisabledByPage(env);
+  return sharedMemoryAvailable(env) && !sharedPlanesDisabledByPage(env);
 }
 
 /** True when `view` is backed by a SharedArrayBuffer. */
@@ -68,7 +76,7 @@ export function isSharedPlane(view) {
  */
 export function allocPlane16(length, { shared = false, env = globalThis } = {}) {
   const count = Math.max(0, Math.floor(Number(length) || 0));
-  if (shared && isCrossOriginIsolated(env) && typeof env.SharedArrayBuffer === 'function') {
+  if (shared && sharedMemoryAvailable(env)) {
     return new Uint16Array(new env.SharedArrayBuffer(count * 2));
   }
   return new Uint16Array(count);
@@ -114,8 +122,8 @@ const guardState = {
 };
 
 // Dev (every browser smoke run), `?debug=1` and `?planeGuard=1` hash; above
-// 256 MB (about 32 MP) only an explicit `?planeGuard=1` does, so a dev session
-// on 60 MP files is not slowed by it. `?planeGuard=0` turns it off.
+// 64 MB (about 8 MP) only an explicit `?planeGuard=1` does, so a dev session
+// on camera files is not slowed by it. `?planeGuard=0` turns it off.
 function readGuardConfig(env = globalThis) {
   let param = null;
   let debug = false;
@@ -128,7 +136,7 @@ function readGuardConfig(env = globalThis) {
   try { dev = Boolean(import.meta.env?.DEV); } catch { dev = false; }
   if (param === '0') return { enabled: false, maxBytes: 0 };
   if (param === '1') return { enabled: true, maxBytes: Infinity };
-  return { enabled: dev || debug, maxBytes: 256 * 1024 * 1024 };
+  return { enabled: dev || debug, maxBytes: 64 * 1024 * 1024 };
 }
 
 /** Test and smoke hook: force the guard on or off (null re-reads the page). */

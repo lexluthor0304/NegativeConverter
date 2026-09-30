@@ -1,18 +1,19 @@
 import { defaultInferencePreference } from './inferenceBackend.js';
-import { isCrossOriginIsolated } from './crossOriginIsolation.js';
+import { sharedMemoryAvailable } from './crossOriginIsolation.js';
 
 const inWorkerRealm = () => typeof globalThis.WorkerGlobalScope === 'function'
   && globalThis instanceof globalThis.WorkerGlobalScope;
 
 /**
  * ONNX Runtime's WASM threads for this realm (#264 Part A phase 1): with
- * cross-origin isolation the threaded runtime can start its pthreads, so a
- * worker gets min(4, cores - 2), at least 1; everywhere else, and on the
- * page's main thread (the inference fallback, which must not block on its
+ * cross-origin isolation and SharedArrayBuffer the threaded runtime can start
+ * its pthreads, so a worker gets min(4, cores - 2), at least 1; everywhere
+ * else (macOS WKWebView reports isolation without SharedArrayBuffer), and on
+ * the page's main thread (the inference fallback, which must not block on its
  * pool), one thread as before.
  */
 export function inferenceThreadCount({
-  isolated = isCrossOriginIsolated(),
+  isolated = sharedMemoryAvailable(),
   hardwareConcurrency = globalThis.navigator?.hardwareConcurrency,
   worker = inWorkerRealm()
 } = {}) {

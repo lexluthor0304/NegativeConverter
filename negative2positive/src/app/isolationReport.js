@@ -114,9 +114,14 @@ export async function collectIsolationReport({ names = null, probes = WORKER_PRO
   };
 }
 
-/** One line for the desktop's terminal log (log_webview_diagnostics). */
+/**
+ * One line for the desktop's terminal log (log_webview_diagnostics). Each
+ * worker reads `<crossOriginIsolated>/<SharedArrayBuffer>`: macOS WKWebView
+ * reports isolation without SharedArrayBuffer.
+ */
 export function formatIsolationLine(report) {
-  const flag = (answer) => (answer?.error ? `error(${answer.error})` : answer?.crossOriginIsolated ? '1' : '0');
+  const flag = (answer) => (answer?.error ? `error(${answer.error})`
+    : `${answer?.crossOriginIsolated ? 1 : 0}/${answer?.sharedArrayBuffer ? 1 : 0}`);
   const workers = Object.entries(report?.workers || {})
     .map(([name, answer]) => `${name}=${flag(answer)}${answer?.inferred ? '~' : ''}`)
     .join(' ');

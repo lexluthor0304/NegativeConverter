@@ -76,8 +76,9 @@ class FakeWorker {
   const only = await collectIsolationReport({ probes, names: ['a'], libraw: false });
   assert.deepEqual(Object.keys(only.workers), ['a']);
   const line = formatIsolationLine({ page: { crossOriginIsolated: true, sharedArrayBuffer: true, secureContext: true },
-    workers: { a: { crossOriginIsolated: true }, libraw: { crossOriginIsolated: true, inferred: true }, heif: { error: 'no answer' } } });
-  assert.equal(line, 'isolation page=1 sab=1 secure=1 workers: a=1 libraw=1~ heif=error(no answer)');
+    workers: { a: { crossOriginIsolated: true, sharedArrayBuffer: true }, b: { crossOriginIsolated: true, sharedArrayBuffer: false },
+      libraw: { crossOriginIsolated: true, inferred: true }, heif: { error: 'no answer' } } });
+  assert.equal(line, 'isolation page=1 sab=1 secure=1 workers: a=1/1 b=1/0 libraw=1/0~ heif=error(no answer)');
 }
 
 // ---- every worker entry answers the probe, and the report knows every worker
