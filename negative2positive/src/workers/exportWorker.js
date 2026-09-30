@@ -11,6 +11,7 @@
  * bridge reports the plane as lost.
  */
 // pako 3.x dropped the default export — use named imports.
+import './isolationProbe.js'; // first: answers the page's isolation probe (#264)
 import * as pako from 'pako';
 import { applyAdjustmentsToPixels, computeAdjustmentParams } from './pixelAdjustments.js';
 import { applyAdjustmentsToPixels16, downconvertPlane16 } from './pixelAdjustments16.js';

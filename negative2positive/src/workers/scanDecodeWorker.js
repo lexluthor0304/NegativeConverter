@@ -3,6 +3,7 @@
 // Scan jobs keep one worker per decode (the client terminates it after the
 // planes arrive). Image jobs are multiplexed by id: the embedded-preview pool
 // keeps up to two of these workers alive while it has work.
+import './isolationProbe.js'; // first: answers the page's isolation probe (#264)
 import { fromImageData8 } from '../silvercore/util/image16.js';
 import { renderEmbeddedPreview } from '../app/embeddedPreviewRender.js';
 

@@ -1,5 +1,6 @@
 // Geometry pool worker (#244): renders one row band of a geometry plan from
 // the source rows posted with it, and transfers the band back.
+import './isolationProbe.js'; // first: answers the page's isolation probe (#264)
 import { runGeometryBand } from '../app/geometryPool.js';
 
 self.onmessage = ({ data }) => {

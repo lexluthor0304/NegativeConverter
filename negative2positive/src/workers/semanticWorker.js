@@ -1,3 +1,4 @@
+import './isolationProbe.js'; // first: answers the page's isolation probe (#264)
 import { loadInferenceRuntime } from '../app/inferenceRuntime.js';
 import { defaultInferencePreference } from '../app/inferenceBackend.js';
 let ort;

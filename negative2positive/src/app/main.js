@@ -27,6 +27,7 @@ import { createEmbeddedPreviewPool } from './scanDecodeClient.js';
 import { isTiffContainerRawName } from './rawEmbeddedPreview.js';
 import { renderEmbeddedPreview, createDocumentPreviewEnv } from './embeddedPreviewRender.js';
 import { canPublishThumbnail } from './thumbnailRank.js';
+import { describeRealmIsolation, planeGuardReport } from './crossOriginIsolation.js';
     import { detectedImportSettings } from './filmTypeDetection.js';
     import { createAiModelLoader } from './aiModelLoading.js';
     import { opencvGlueUrl, installPageOpenCvHook } from './opencvModule.js';
@@ -5628,6 +5629,38 @@ import { canPublishThumbnail } from './thumbnailRank.js';
 
     setupPreviewTierSessions();
     void loadWebviewCompositing();
+
+    // ---- Cross-origin isolation (#264): what the page and its workers run with ----
+    // `report()` spawns one worker of each kind and asks it (isolationReport.js);
+    // the smoke run and ?debug=1 read it, the desktop logs a short form once.
+    window.__ncIsolation = {
+      page: () => describeRealmIsolation(),
+      report: (options) => import('./isolationReport.js').then(module => module.collectIsolationReport(options)),
+      planeGuard: () => planeGuardReport()
+    };
+    logIsolationWhenIdle();
+
+    // One terminal line per desktop launch (log_webview_diagnostics), once the
+    // app has settled: the page and a module, a classic and a blob: worker,
+    // which is what the per-platform check (docs/cross-origin-isolation.md)
+    // needs; every worker and LibRaw with ?debug=1.
+    function logIsolationWhenIdle() {
+      if (!isTauriDesktop() && !DEBUG_UI) return;
+      const run = async () => {
+        try {
+          const { collectIsolationReport, formatIsolationLine } = await import('./isolationReport.js');
+          const report = await collectIsolationReport(DEBUG_UI ? {} : { names: ['geometry', 'heif', 'blob'], libraw: false, concurrency: 1 });
+          logWebviewDiagnostics(formatIsolationLine(report));
+          if (DEBUG_UI) console.info('[isolation]', report);
+        } catch (err) {
+          console.info('Isolation report unavailable:', err?.message || err);
+        }
+      };
+      setTimeout(() => {
+        if (typeof requestIdleCallback === 'function') requestIdleCallback(() => { void run(); }, { timeout: 10_000 });
+        else void run();
+      }, 15_000);
+    }
 
     function disableWebGLByError(err) {
       const message = err && err.message ? err.message : String(err);

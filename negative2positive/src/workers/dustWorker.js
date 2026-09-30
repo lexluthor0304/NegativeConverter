@@ -1,3 +1,4 @@
+import './isolationProbe.js'; // first: answers the page's isolation probe (#264)
 import { acceptOpenCvMessage, loadOpenCv } from './opencvWorkerRuntime.js';
 import { createDustWorkerProcessor } from './dustWorkerProcessor.js';
 

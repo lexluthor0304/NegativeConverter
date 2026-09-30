@@ -1,3 +1,4 @@
+import './isolationProbe.js'; // first: answers the page's isolation probe (#264)
 import { trackWasmMemories, wasmHeapBytes } from './wasmHeap.js';
 import { createInpaintWorkerProcessor } from './aiInpaintWorkerProcessor.js';
 // ORT loads lazily, after this: its WASM heap is reported with each reply (#258).

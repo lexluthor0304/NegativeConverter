@@ -8,6 +8,7 @@
  * the result into it). `releaseAfter` drops the slot's cached planes once the
  * result is posted, so a lane holds no source or pristine plane between frames.
  */
+import './isolationProbe.js'; // first: answers the page's isolation probe (#264)
 import { convertFrameWithRouter, resolveConversionMode } from '../pipeline/conversionRouter.js';
 import { releaseSlotBuffers, prepareSilverCorePreview, analyzeSilverCorePreview } from '../pipeline/silverAdapter.js';
 import { convertAdjustedFrame } from '../pipeline/adjustedFrame.js';

@@ -1,4 +1,12 @@
 /* libheif 1.19.8 is a separate, replaceable LGPL library; see README.md. */
+// Answers the page's isolation probe (#264) before the decode handler sees it;
+// the classic-worker twin of src/workers/isolationProbe.js.
+self.addEventListener('message', event => {
+  if (event.data?.type !== 'nc-isolation-probe') return;
+  event.stopImmediatePropagation();
+  self.postMessage({ type: 'nc-isolation-probe', id: event.data.id, crossOriginIsolated: self.crossOriginIsolated === true,
+    sharedArrayBuffer: typeof SharedArrayBuffer === 'function', secureContext: self.isSecureContext === true });
+});
 importScripts('./libheif.js');
 self.onmessage = async ({ data: { file } }) => {
   try {

@@ -1,3 +1,4 @@
+import './isolationProbe.js'; // first: answers the page's isolation probe (#264)
 import { acceptOpenCvMessage, loadOpenCv, openCvRealmStats } from './opencvWorkerRuntime.js';
 import { detectFrameAndRotation } from '../app/autoFrameAnalyzer.js';
 import { applyRotationToImageData } from '../app/imageGeometry.js';

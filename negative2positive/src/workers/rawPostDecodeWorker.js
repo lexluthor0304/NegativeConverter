@@ -8,6 +8,7 @@
  * ping overlap the decode, and terminates it on every exit, so a foreground
  * decode never queues behind anyone else's pass.
  */
+import './isolationProbe.js'; // first: answers the page's isolation probe (#264)
 import { handleRawPostDecodeMessage } from '../app/rawPostDecode.js';
 
 self.onmessage = (event) => {

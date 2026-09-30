@@ -12,6 +12,7 @@
  *
  * Messages are handled one at a time, in arrival order.
  */
+import './isolationProbe.js'; // first: answers the page's isolation probe (#264)
 import {
   planSilverCoreBands, prepareSilverCoreBand, buildBandTables, applySilverCoreBand, sharpenSilverCoreBand,
   bandOutput8, adjustBand, copyBandRows
