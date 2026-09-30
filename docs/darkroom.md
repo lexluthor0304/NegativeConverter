@@ -109,7 +109,9 @@ and the page puts it into the exact frame's texture on the GPU display, or runs
 Step 3 on the rectangle at its place in the frame and puts it on a CPU display.
 For the same points it is exactly the frame the stored stroke gets, so the
 pen-up frame replaces it without a jump; a stroke of more than 400 points is
-resampled at pen-up (the repair strokes' index formula) and keeps its end. When
+resampled at pen-up (the repair strokes' index formula) and keeps its end
+(its settled frame then differs from the live one at the edge, within 1/255
+for mouse strokes; see Limits). When
 the frame on screen is not that conversion (a repaired full-resolution frame,
 say), the worker also returns the rectangle without the stroke and the screen
 shows displayed + (live - committed) until pen-up. A stroke stored before its
@@ -118,7 +120,9 @@ never hides the first. `?liveDodge=0` turns the live effect off. The stored
 strokes (orange = burn, blue = dodge) are drawn on `#displayOverlay` in the
 transform wrapper at display size while the brush is active (#253), each at the
 width its raster paints, redrawn only when the strokes, the geometry or the
-size change. The tool keeps the GPU display.
+size change. The tool keeps the GPU display; the detail layer (#248) stays off
+while it is active, since the live rectangles go into the base frame's
+texture. Escape cancels the stroke being painted.
 
 ## Paper emulation (#152)
 
@@ -164,6 +168,11 @@ node scripts/smoke-test.mjs --darkroom-only
 
 - The brushes map through the photo inside the sprocket border (#254), so
   strokes land on the image with the border preview on too.
+- A stroke of more than 400 points is stored resampled to 400. With a mouse
+  the settled frame stays within 1/255 of the live one; pen pressure that
+  changes within a few hundred samples cannot be carried by 400 points, so the
+  feather edge can change by a few levels at pen-up
+  (`silverAdapter.live.test.mjs` logs the measured difference).
 - Test strip patches analyse the 360 px copy themselves; the auto white
   balance can differ slightly from the main preview.
 - Paper curves are parametric approximations; no split-grade printing; the

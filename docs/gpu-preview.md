@@ -183,7 +183,10 @@ surface at 2.2–4 MP, in Node). They now stay on the GPU.
   change; the photo is never redrawn for an overlay, and both display paths use it.
   The stroke being painted, by any brush, is on `#brushFeedback` outside the wrapper
   (#254, `brushFeedback.js`), and the brushes map through the photo rectangle inside
-  the border on both canvases.
+  the border on both canvases. With the border the overlay's box is fractional, and the
+  compositor places the layer on its own pixel grid: at 381 % zoom the smoke measures
+  the drawn stroke 1.3 screen px off its point (a third of a layout pixel), with the
+  overlay's own pixels exact.
 - **Histogram.** Unchanged: the GL path's sample (≤ 24,576 px) goes through the same
   look, rescue and hold-to-compare rules, every 260 ms and at each settle, including
   above 16 MP where `updateFull` does not run.
