@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { uiFontsPlugin } from '../scripts/build-ui-fonts.mjs';
 import { displayProxyBuildHashes } from '../scripts/display-proxy-hashes.mjs';
 import { opencvAssetsPlugin } from '../scripts/opencv-assets.mjs';
+import { CROSS_ORIGIN_ISOLATION_HEADERS } from '../scripts/cross-origin-isolation.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -30,6 +31,10 @@ export default defineConfig({
     host: '127.0.0.1',
     port: 4173,
     strictPort: true,
+    // Cross-origin isolation (#264): on every response, including worker
+    // scripts, which need COEP on their own. `tauri dev` loads this server, so
+    // the desktop app's own headers (tauri.conf.json) do not apply there.
+    headers: { ...CROSS_ORIGIN_ISOLATION_HEADERS },
     // Isolated worktrees may share node_modules via a symlink. LibRaw's
     // nested workers need their real package path in the dev-server allowlist.
     fs: { allow: [resolve(__dirname, '..'), realpathSync(resolve(__dirname, '../node_modules/libraw-wasm'))] },
@@ -38,6 +43,7 @@ export default defineConfig({
     host: '127.0.0.1',
     port: 4173,
     strictPort: true,
+    headers: { ...CROSS_ORIGIN_ISOLATION_HEADERS },
   },
   // libraw-wasm ships a Web Worker that itself uses `new Worker(new URL(...))`.
   // Vite's dev-mode dep optimizer rewrites the entry but can't follow the

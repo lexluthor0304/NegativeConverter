@@ -1273,6 +1273,9 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         }
 
         const script = document.createElement('script');
+        // A CORS request: the cross-origin isolated page (#264) accepts a
+        // cross-origin classic script only in CORS mode or with a CORP header.
+        script.crossOrigin = 'anonymous';
         script.src = url;
         script.async = true;
         script.dataset.lensfunSrc = url;
@@ -1309,6 +1312,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (!window.LensfunWasm || typeof window.LensfunWasm.createLensfun !== 'function') {
         throw new Error('LensfunWasm global is unavailable');
       }
+      // The IIFE would load the core module with a <script> of its own, without
+      // `crossorigin`; loaded here first, in CORS mode, it defines the global
+      // factory the IIFE then uses. Its wasm and data are CORS fetches.
+      await loadLensScript(assets.moduleJsUrl);
 
       const client = await window.LensfunWasm.createLensfun({
         moduleJsUrl: assets.moduleJsUrl,
