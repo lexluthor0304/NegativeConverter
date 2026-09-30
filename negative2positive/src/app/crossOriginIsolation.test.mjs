@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {
-  isCrossOriginIsolated, sharedMemoryAvailable, sharedPlanesAvailable, isSharedPlane, allocPlane16, hashPlane,
+  isCrossOriginIsolated, sharedMemoryAvailable, sharedPlanesAvailable, isSharedPlane, allocPlane16, hashPlane, hashPlaneSample,
   guardSharedPlanes, configurePlaneGuard, planeGuardReport, describeRealmIsolation, ISOLATION_PROBE
 } from './crossOriginIsolation.js';
 
@@ -66,6 +66,41 @@ assert.equal(typeof ISOLATION_PROBE, 'string');
   assert.equal(hashPlane(null), '');
 }
 
+// ---- the guard's page sample: whole up to the budget, every stride-th 4 KB page above
+{
+  const plane = new Uint16Array(64 * 1024 / 2); // 64 KB = 16 pages
+  for (let i = 0; i < plane.length; i++) plane[i] = (i * 40503) & 0xFFFF;
+  assert.equal(hashPlaneSample(plane, 64 * 1024), hashPlane(plane), 'within the budget: the whole plane');
+  assert.equal(hashPlaneSample(plane), hashPlane(plane), 'no budget: the whole plane');
+  // A 16 KB budget reads 4 pages' worth: stride 4, pages 0, 4, 8, 12 and the last (15).
+  const h = hashPlaneSample(plane, 16 * 1024);
+  assert.notEqual(h, hashPlane(plane));
+  assert.equal(hashPlaneSample(plane, 16 * 1024), h, 'the same pages every time');
+  const word = (page, offset = 0) => page * 2048 + offset;
+  plane[word(1, 5)] ^= 1;
+  assert.equal(hashPlaneSample(plane, 16 * 1024), h, 'a write inside an unsampled page is not seen (documented)');
+  plane[word(1, 5)] ^= 1;
+  for (const page of [0, 4, 12, 15]) {
+    plane[word(page, 7)] ^= 0x100;
+    assert.notEqual(hashPlaneSample(plane, 16 * 1024), h, `a write in sampled page ${page} is seen`);
+    plane[word(page, 7)] ^= 0x100;
+  }
+  // Any write spanning `stride` pages touches a sampled one.
+  for (let first = 0; first + 4 <= 16; first++) {
+    const saved = plane.slice(word(first), word(first + 4));
+    plane.fill(7, word(first), word(first + 4));
+    assert.notEqual(hashPlaneSample(plane, 16 * 1024), h, `a 4-page write from page ${first} is seen`);
+    plane.set(saved, word(first));
+  }
+  assert.equal(hashPlaneSample(plane, 16 * 1024), h);
+  // Unaligned views sample the same bytes as a copy of them.
+  const bytes = new Uint8Array(40 * 1024 + 3);
+  for (let i = 0; i < bytes.length; i++) bytes[i] = (i * 131) & 0xFF;
+  const unaligned = new Uint8Array(bytes.buffer, 1, bytes.length - 1);
+  assert.equal(hashPlaneSample(unaligned, 8 * 1024), hashPlaneSample(new Uint8Array(unaligned), 8 * 1024));
+  assert.equal(hashPlaneSample(null, 16), '');
+}
+
 // ---- the guard
 {
   configurePlaneGuard({ enabled: false });
@@ -103,12 +138,20 @@ assert.equal(typeof ISOLATION_PROBE, 'string');
   assert.equal(report.violations.at(-1).bytes, 128);
   assert.equal(logged.length, 1);
 
-  configurePlaneGuard({ enabled: true, maxBytes: 64 });
-  const skippedBefore = planeGuardReport().skipped;
-  const big = guardSharedPlanes('big', [shared]);
-  shared[11] = 1;
-  assert.equal(big.verify(), true, 'above the size cap the plane is skipped');
-  assert.equal(planeGuardReport().skipped, skippedBefore + 1);
+  // Above `fullBytes` a plane is sampled, not skipped: a band-sized write is seen.
+  const large = allocPlane16(64 * 1024 / 2, { shared: true, env: isolated });
+  configurePlaneGuard({ enabled: true, fullBytes: 16 * 1024 });
+  const sampledBefore = planeGuardReport().sampled;
+  const originalError2 = console.error;
+  console.error = () => {};
+  try {
+    const band = guardSharedPlanes('band write', [large]);
+    large.fill(3, 2048 * 5, 2048 * 9);
+    assert.equal(band.verify(), false, 'a write spanning the stride is seen in a sampled plane');
+  } finally {
+    console.error = originalError2;
+  }
+  assert.equal(planeGuardReport().sampled, sampledBefore + 1);
   configurePlaneGuard({ enabled: null });
 }
 

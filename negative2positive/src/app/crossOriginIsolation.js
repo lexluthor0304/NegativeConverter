@@ -86,6 +86,40 @@ export function allocPlane16(length, { shared = false, env = globalThis } = {}) 
 
 const LITTLE_ENDIAN = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
 
+// The guard's hash state: two 32-bit lanes over little-endian words, and the
+// bytes of each range that do not fill a word.
+function hashState(seed) {
+  return { h1: 0x2F0F1CE5 ^ seed, h2: 0x85EBCA6B, tail: 0 };
+}
+
+function mixRange(state, buffer, byteOffset, byteLength) {
+  const wordCount = Math.floor(byteLength / 4);
+  let { h1, h2 } = state;
+  if (LITTLE_ENDIAN && byteOffset % 4 === 0) {
+    const words = new Uint32Array(buffer, byteOffset, wordCount);
+    for (let i = 0; i < wordCount; i++) {
+      const w = words[i];
+      h1 = Math.imul(h1 ^ w, 0x01000193);
+      h2 = Math.imul((h2 << 5) | (h2 >>> 27), 5) ^ w;
+    }
+  } else {
+    const bytes = new Uint8Array(buffer, byteOffset, wordCount * 4);
+    for (let i = 0; i < bytes.length; i += 4) {
+      const w = (bytes[i] | (bytes[i + 1] << 8) | (bytes[i + 2] << 16) | (bytes[i + 3] << 24)) >>> 0;
+      h1 = Math.imul(h1 ^ w, 0x01000193);
+      h2 = Math.imul((h2 << 5) | (h2 >>> 27), 5) ^ w;
+    }
+  }
+  const rest = new Uint8Array(buffer, byteOffset + wordCount * 4, byteLength - wordCount * 4);
+  let tail = state.tail;
+  for (let i = 0; i < rest.length; i++) tail = Math.imul(tail ^ rest[i], 0x01000193);
+  Object.assign(state, { h1, h2, tail });
+}
+
+function hashString(state, suffix) {
+  return `${(state.h1 >>> 0).toString(16)}${(state.h2 >>> 0).toString(16)}:${(state.tail >>> 0).toString(16)}:${suffix}`;
+}
+
 /**
  * A content hash of a typed-array view (every byte, in little-endian 32-bit
  * words), for the guard and tests. Not cryptographic: it only has to notice
@@ -93,37 +127,51 @@ const LITTLE_ENDIAN = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
  */
 export function hashPlane(view) {
   if (!view || !ArrayBuffer.isView(view)) return '';
-  const wordCount = Math.floor(view.byteLength / 4);
-  let h1 = 0x2F0F1CE5 ^ wordCount;
-  let h2 = 0x85EBCA6B;
-  const mix = (w) => {
-    h1 = Math.imul(h1 ^ w, 0x01000193);
-    h2 = Math.imul((h2 << 5) | (h2 >>> 27), 5) ^ w;
+  const state = hashState(Math.floor(view.byteLength / 4));
+  mixRange(state, view.buffer, view.byteOffset, view.byteLength);
+  return hashString(state, view.byteLength);
+}
+
+// The guard samples planes in pages of this size.
+const GUARD_PAGE_BYTES = 4096;
+
+/**
+ * `hashPlane` for the guard: a view of up to `budgetBytes` whole; a larger one
+ * by every `stride`-th 4 KB page and its last page, the stride chosen so that
+ * about `budgetBytes` are read. Any write that spans `stride` pages or more
+ * (at 4 MP, two rows of RGBA16) changes the sampled hash; the same view and
+ * budget always sample the same pages.
+ */
+export function hashPlaneSample(view, budgetBytes = Infinity) {
+  if (!view || !ArrayBuffer.isView(view)) return '';
+  if (!(view.byteLength > budgetBytes)) return hashPlane(view);
+  const pages = Math.ceil(view.byteLength / GUARD_PAGE_BYTES);
+  const stride = Math.max(1, Math.ceil(pages / Math.max(1, Math.floor(budgetBytes / GUARD_PAGE_BYTES))));
+  const state = hashState(pages);
+  const mixPage = (page) => {
+    const start = page * GUARD_PAGE_BYTES;
+    mixRange(state, view.buffer, view.byteOffset + start, Math.min(GUARD_PAGE_BYTES, view.byteLength - start));
   };
-  if (LITTLE_ENDIAN && view.byteOffset % 4 === 0) {
-    const words = new Uint32Array(view.buffer, view.byteOffset, wordCount);
-    for (let i = 0; i < wordCount; i++) mix(words[i]);
-  } else {
-    const bytes = new Uint8Array(view.buffer, view.byteOffset, wordCount * 4);
-    for (let i = 0; i < bytes.length; i += 4) mix((bytes[i] | (bytes[i + 1] << 8) | (bytes[i + 2] << 16) | (bytes[i + 3] << 24)) >>> 0);
-  }
-  let tail = 0;
-  const rest = new Uint8Array(view.buffer, view.byteOffset + wordCount * 4, view.byteLength - wordCount * 4);
-  for (let i = 0; i < rest.length; i++) tail = Math.imul(tail ^ rest[i], 0x01000193);
-  return `${(h1 >>> 0).toString(16)}${(h2 >>> 0).toString(16)}:${(tail >>> 0).toString(16)}:${view.byteLength}`;
+  for (let page = 0; page < pages; page += stride) mixPage(page);
+  if ((pages - 1) % stride !== 0) mixPage(pages - 1);
+  return hashString(state, `${view.byteLength}/${stride}`);
 }
 
 const guardState = {
   enabled: null,
-  maxBytes: 0,
+  fullBytes: 0,
   checks: 0,
-  skipped: 0,
+  sampled: 0,
   violations: []
 };
 
-// Dev (every browser smoke run), `?debug=1` and `?planeGuard=1` hash; above
-// 64 MB (about 8 MP) only an explicit `?planeGuard=1` does, so a dev session
-// on camera files is not slowed by it. `?planeGuard=0` turns it off.
+// Dev (every browser smoke run), `?debug=1` and `?planeGuard=1` hash. A plane
+// of up to 4 MB is hashed whole, a larger one by a page sample of about 4 MB
+// (hashPlaneSample), so the guard costs an interaction a few milliseconds,
+// not the ~50 ms a whole 4 MP plane takes; `?planeGuard=1` hashes every byte
+// of every plane, `?planeGuard=0` turns the guard off.
+const GUARD_SAMPLE_BYTES = 4 * 1024 * 1024;
+
 function readGuardConfig(env = globalThis) {
   let param = null;
   let debug = false;
@@ -134,26 +182,29 @@ function readGuardConfig(env = globalThis) {
   } catch { /* no location: a worker or Node */ }
   let dev = false;
   try { dev = Boolean(import.meta.env?.DEV); } catch { dev = false; }
-  if (param === '0') return { enabled: false, maxBytes: 0 };
-  if (param === '1') return { enabled: true, maxBytes: Infinity };
-  return { enabled: dev || debug, maxBytes: 64 * 1024 * 1024 };
+  if (param === '0') return { enabled: false, fullBytes: 0 };
+  if (param === '1') return { enabled: true, fullBytes: Infinity };
+  return { enabled: dev || debug, fullBytes: GUARD_SAMPLE_BYTES };
 }
 
-/** Test and smoke hook: force the guard on or off (null re-reads the page). */
-export function configurePlaneGuard({ enabled = null, maxBytes = Infinity } = {}) {
+/**
+ * Test and smoke hook: force the guard on or off (null re-reads the page).
+ * `fullBytes`: planes up to this size are hashed whole, larger ones sampled.
+ */
+export function configurePlaneGuard({ enabled = null, fullBytes = Infinity } = {}) {
   if (enabled === null) {
     guardState.enabled = null;
     return;
   }
   guardState.enabled = Boolean(enabled);
-  guardState.maxBytes = maxBytes;
+  guardState.fullBytes = fullBytes;
 }
 
 function guardConfig() {
   if (guardState.enabled === null) {
     const config = readGuardConfig();
     guardState.enabled = config.enabled;
-    guardState.maxBytes = config.maxBytes;
+    guardState.fullBytes = config.fullBytes;
   }
   return guardState;
 }
@@ -171,13 +222,11 @@ export function guardSharedPlanes(label, views) {
   const config = guardConfig();
   if (!config.enabled) return { verify: () => true };
   const watched = [];
+  const budget = config.fullBytes;
   for (const view of views || []) {
     if (!isSharedPlane(view) || watched.some((entry) => entry.view === view)) continue;
-    if (view.byteLength > config.maxBytes) {
-      config.skipped++;
-      continue;
-    }
-    watched.push({ view, before: hashPlane(view) });
+    if (view.byteLength > budget) config.sampled++;
+    watched.push({ view, before: hashPlaneSample(view, budget) });
   }
   if (!watched.length) return { verify: () => true };
   let done = false;
@@ -188,7 +237,7 @@ export function guardSharedPlanes(label, views) {
       let intact = true;
       for (const entry of watched) {
         config.checks++;
-        const after = hashPlane(entry.view);
+        const after = hashPlaneSample(entry.view, budget);
         if (after === entry.before) continue;
         intact = false;
         const violation = { label, bytes: entry.view.byteLength, before: entry.before, after };
@@ -200,13 +249,13 @@ export function guardSharedPlanes(label, views) {
   };
 }
 
-/** What the guard has done: { enabled, checks, skipped, violations }. */
+/** What the guard has done: { enabled, checks, sampled, violations }. */
 export function planeGuardReport() {
   const config = guardConfig();
   return {
     enabled: config.enabled,
     checks: config.checks,
-    skipped: config.skipped,
+    sampled: config.sampled,
     violations: config.violations.slice()
   };
 }

@@ -58,8 +58,13 @@ keeps the copy path it always had, with the same pixels.
   - **The guard.** In dev (every smoke run), `?debug=1` and `?planeGuard=1`,
     every shared plane posted to a worker is hashed before and after the job;
     a change is logged, recorded in `window.__ncIsolation.planeGuard()` and
-    fails the smoke run. Planes over 64 MB (about 8 MP) are hashed only with
-    `?planeGuard=1`; `?planeGuard=0` turns it off.
+    fails the smoke run. A plane of up to 4 MB is hashed whole; a larger
+    one by a sample of about 4 MB (every n-th 4 KB page and the last), which
+    any write spanning n pages changes (at 4 MP, two rows): a whole 4 MP plane
+    takes ~50 ms to hash on the page thread, which slowed a rotate click past
+    the geometry smoke's 100 ms. `?planeGuard=1` hashes every byte of every
+    plane (the isolation smoke step runs with it); `?planeGuard=0` turns the
+    guard off.
   - `?sharedPlanes=0` keeps the copy path on an isolated page.
 - **ONNX Runtime threads** (`src/app/inferenceRuntime.js`): min(4, cores - 2)
   in an isolated worker, one elsewhere and on the main thread. MI-GAN (AI
