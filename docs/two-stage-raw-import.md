@@ -1,8 +1,9 @@
 # Two-stage RAW imports (#255)
 
-A 60 MP RAW takes about 5 s to decode fully in LibRaw (WASM), plus the
-defect pass (a verified desktop decodes natively instead,
-`docs/native-raw-decode.md`). A half-size 16-bit decode of the same file takes about 2 s. The
+A 60 MP RAW takes about 5 s to decode fully in LibRaw (WASM, one thread),
+plus the defect pass (a verified desktop decodes natively instead, and a page
+with shared memory runs libraw-wasm's threaded build once a release ships it:
+`docs/raw-decoding.md`). A half-size 16-bit decode of the same file takes about 2 s. The
 two-stage import shows an editable half-size stand-in first and installs the
 exact full decode behind it. Exports and every other exact consumer only
 ever see the full decode.

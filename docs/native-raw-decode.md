@@ -10,8 +10,12 @@ default (see [The gate](#the-gate)).
 
 ## What runs where
 
+How this decoder fits with libraw-wasm's single- and multi-threaded builds,
+and what each target runs, is in `docs/raw-decoding.md`.
+
 ```
-rawFileLoader.js ── createRawDecoder() ──► libraw-wasm      (web, unverified desktops)
+rawFileLoader.js ── createRawDecoder() ──► libraw-wasm      (web, unverified desktops;
+                                      │                      createLibRaw: threaded or not)
                                       └──► nativeRawDecoder.js (verified desktops)
                                               │ native_raw_begin / _append (8 MiB raw invoke bodies)
                                               │ native_raw_open            (open_buffer + metadata)
@@ -60,7 +64,11 @@ rawFileLoader.js ── createRawDecoder() ──► libraw-wasm      (web, unve
 - `sharedPlane` (off): where the page is cross-origin isolated (#264 Part A)
   the worker can allocate the plane in shared memory and post it without a
   transfer list. It stays off until the post-decode pass keeps a shared
-  4-channel plane instead of copying it (`rawResultToRgb16`).
+  4-channel plane instead of copying it (`rawResultToRgb16`), and nothing
+  would use it yet: native decoding is enabled only on macOS, whose WKWebView
+  has no `SharedArrayBuffer`. Where both meet later (WebView2), the editor's
+  decodes still end in shared memory: the post-decode worker builds their
+  shared plane from the transferred one, in the worker, as for a WASM decode.
 - The metadata object mirrors libraw-wasm's `metadata(true)` for every key the
   loader reads (size, camera, lens), in the same key order, with LibRaw's
   `float`s widened exactly as embind does. `extractRawLensMetadata` searches
@@ -75,7 +83,7 @@ rawFileLoader.js ── createRawDecoder() ──► libraw-wasm      (web, unve
 | what fails | libraw-wasm does | the native path does |
 |---|---|---|
 | LibRaw rejects the file itself: unsupported (the HE-compressed Nikon NEFs, `unpack` −2), corrupt or truncated data, beyond LibRaw's size limits | its worker swallows the C++ exception; `open()`/`imageData()` resolve `undefined`; the loader takes the embedded-JPEG path | resolves the same way; the loader takes the same path with **no second LibRaw attempt** (`librawError`) |
-| anything else: IPC, a refused session, the transfer, a step timeout (open 10 s, decode 20 s, transfer 20 s, each at most a third of the loader's budget), out of memory, an unexpected exception or sample layout | — | decodes the same bytes and settings with libraw-wasm (`needsWasm`) |
+| anything else: IPC, a refused session, the transfer, a step timeout (open 10 s, decode 20 s, transfer 20 s, each at most a third of the loader's budget), out of memory, an unexpected exception or sample layout | — | decodes the same bytes and settings with libraw-wasm (`needsWasm`), built by `createLibRaw` like any web decode (the threaded build where the page has shared memory, with the lane's thread cap) |
 | a file this build decodes differently: lossy DNG / Kodak JPEG (no libjpeg natively: `LIBRAW_WARN_NO_JPEGLIB` at open) | — | libraw-wasm |
 | abort (#243) | the worker is disposed | the session is released: LibRaw's cancel flag, a progress handler and the plane packing stop it at their next check |
 
@@ -171,13 +179,12 @@ were not decoded here.
 
 Today `librawWasm` is `null`: the app still runs libraw-wasm 1.6.0, whose
 output differs from the deterministic build (the flagged decoder change of
-part B), so desktops keep decoding with WASM. When the deterministic
-libraw-wasm is released and pinned exactly in `package.json`:
-
-1. record its hashes and metadata for the fixtures in
-   `src-tauri/native/wasm-parity-hashes.json` (Part B's gate) and run
-   `npm run test:rust` with the fixtures on each platform to enable;
-2. set `LIBRAW_WASM_VERSION` and `NATIVE_RAW_PARITY.librawWasm` to it.
+part B), so desktops keep decoding with WASM. `package.json` pins 1.6.0
+exactly. When the deterministic libraw-wasm is released, follow
+`docs/raw-decoding.md` ("When the deterministic libraw-wasm is released"):
+pin it, run the WASM RGB16 gate (`--raw-decode-gate-only`) against
+`src-tauri/native/wasm-parity-hashes.json`, run `npm run test:rust` with the
+fixtures on each platform, then set `NATIVE_RAW_PARITY.librawWasm` to it.
 
 macOS arm64 and x86_64 then decode natively. Add another platform after its
 parity test passes there.
@@ -189,7 +196,8 @@ natively wherever the decoder is built in (even unverified), `'off'` never.
 
 - Foreground decodes use every core; `priority: 'background'`
   (`loadFileToImageData`) uses 2 threads, so a background lane leaves the
-  cores to the photo on screen. The thread count never changes the output.
+  cores to the photo on screen; the same flag caps libraw-wasm's threaded
+  build. The thread count never changes the output.
 - Memory, in the app process: the file bytes are freed once `dcraw_process()`
   is done, before the plane is allocated, and LibRaw's image and raw buffers
   right after the plane is written. At 60 MP the peak is LibRaw's image

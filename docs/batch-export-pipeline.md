@@ -143,9 +143,11 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
   chunk.
 - PNG16 and scanner TIFF decode run in disposable workers with transferred
   input/output planes. The existing decoder is the fallback when a worker
-  cannot start. RAW demosaic remains in LibRaw's dedicated worker, or, on a
-  desktop whose native LibRaw passes the parity gate, in the shell on every
-  core; background decodes there use 2 threads (`docs/native-raw-decode.md`).
+  cannot start. RAW demosaic remains in LibRaw's dedicated worker (on a page
+  with shared memory and a libraw-wasm that ships the threaded build, on its
+  pthread pool), or, on a desktop whose native LibRaw passes the parity gate,
+  in the shell; a background lane's decode uses 2 threads on either
+  (`docs/raw-decoding.md`).
 - Everything after LibRaw's result (RGB16 → RGBA16 packing, the garbled
   check, the sensor-defect pass, the 8-bit mirror) runs in a disposable
   post-decode worker that each RAW decode owns (`rawPostDecodeClient.js`,

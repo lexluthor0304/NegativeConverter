@@ -81,10 +81,14 @@ keeps the copy path it always had, with the same pixels.
   libraw-wasm ships one (`LibRaw.features.threads`): `new LibRaw({ threads })`
   only where shared memory is available (min(cores, 8) in the foreground, 2
   in a background lane); everywhere else, and with libraw-wasm 1.6.0,
-  `new LibRaw()` exactly as before. Its report entry comes from inside the
-  LibRaw worker (`runtimeInfo()`: isolation, threads, pool size). Its
-  pthread workers share that worker's memory, so a pool that starts at all
-  is isolated; `ISOLATION_CDP_WORKERS=1` also reads each of them over CDP.
+  `new LibRaw()` exactly as before. An instance that does not start (its
+  worker, pool or shared memory; no answer in 8 s) decodes on `new LibRaw()`
+  instead and the page stops asking for threads. Its report entry comes from
+  inside the LibRaw worker (`runtimeInfo()`: isolation, threads, pool size).
+  Its pthread workers share that worker's memory, so a pool that starts at
+  all is isolated; `ISOLATION_CDP_WORKERS=1` also reads each of them over
+  CDP. How this and the desktop's native decoder are chosen:
+  `docs/raw-decoding.md`.
 
 ## Third-party loads under COEP
 
@@ -107,7 +111,7 @@ COOP `same-origin` severs `window.opener`; the app's one `window.open` passes
 
 | target | isolated | SharedArrayBuffer | how it was checked |
 |---|---|---|---|
-| Chrome, Vite dev server | yes: page and every worker | yes | `npm run test:smoke -- --isolation-only` (2026-09-30, Chrome 154, M1 Pro) |
+| Chrome, Vite dev server | yes: page and every worker | yes | `npm run test:smoke -- --isolation-only` (2026-09-30, Chrome 154, M1 Pro; since the integration with #264 Part C, 15 worker scripts including the native plane transfer worker) |
 | Chrome, Vite preview (production build) | yes: page and every worker | yes | `scripts/isolation-preview-check.mjs` (same day): a LibRaw decode and a 16-bit PNG export on the built bundle; built with #264 Part B's threaded libraw-wasm, its pthread pool starts from the bundled chunks (8 threads, pool 7), and MI-GAN repairs dust with 4 ONNX Runtime threads |
 | production web (Vercel) | expected as the preview (same headers) | expected | not deployed from this branch |
 | macOS WKWebView (`tauri://localhost`) | page, module and classic workers report `crossOriginIsolated === true`; blob: workers do not | **no** | the desktop log line of a debug build with embedded assets (`cargo build --features tauri/custom-protocol`), 2026-09-30, macOS 27 |

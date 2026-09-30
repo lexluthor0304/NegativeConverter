@@ -341,9 +341,10 @@ export async function loadRawFile(buffer, fileName, options = {}) {
   // output is verified identical to the page's libraw-wasm
   // (nativeRawDecoder.js); else libraw-wasm, its threaded build where the
   // page has shared memory and the package ships one (librawRuntime.js),
-  // else `new LibRaw()` as it always was. Each falls back to the next with
-  // the same bytes and settings, and all of them decode to the same pixels.
-  // One flag caps a background lane's threads on either decoder.
+  // else `new LibRaw()` as it always was. Where one fails for any reason but
+  // the file itself, the next decodes the same bytes with the same settings;
+  // all of them decode to the same pixels. One flag caps a background lane's
+  // threads on either decoder.
   const background = options.priority === 'background';
   let raw;
   let wasmDecoder = null;

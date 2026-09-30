@@ -109,7 +109,10 @@ src-tauri/                      # Tauri desktop packaging
 - **libraw-wasm** (npm) for RAW file decoding (CR2, NEF, ARW, DNG, RW2). The desktop build also
   links the same LibRaw natively (`src-tauri/vendor/libraw`, built by `src-tauri/native/build_libraw.rs`,
   so `npm run test:rust` compiles it); `nativeRawDecoder.js` uses it only where its output is verified
-  identical to the page's libraw-wasm (`docs/native-raw-decode.md`)
+  identical to the page's libraw-wasm (`docs/native-raw-decode.md`). Which decoder runs where (native,
+  libraw-wasm's threaded build on pages with shared memory, `new LibRaw()`) and the RGB16 gates that hold
+  them to the same pixels: `docs/raw-decoding.md`. `libraw-wasm` is pinned exactly; the native gate names
+  that release
 - **Web Workers** for non-blocking RAW processing and export encoding
 - **UPNG.js** (npm: `upng-js`) for 16-bit PNG support
 - **UTIF.js** (npm: `utif`) for TIFF/DNG parsing (iPhone ProRaw)
