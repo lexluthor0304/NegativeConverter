@@ -4,12 +4,13 @@
 // smaller one. Spread `memoryGlobals()` into the vm context and add
 // MEMORY_FUNCTIONS to the functions it evaluates.
 import { createMemoryBudget, createMemoryClaim, DECODED_BYTES_PER_PIXEL } from './memoryBudget.js';
-import { LANE_BYTES_PER_PIXEL } from './batchExportScheduler.js';
+import { LANE_BYTES_PER_PIXEL, rollAnalysisFootprint } from './batchExportScheduler.js';
 import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
 import { isRawLikeFileName } from './imageFileLoaders.js';
 
 export const MEMORY_FUNCTIONS = [
-  'decodePeakBytes', 'decodeReservationBytes', 'frameReservationBytes', 'laneReservationBytes', 'fileDecodeKind',
+  'decodePeakBytes', 'decodeReservationBytes', 'frameReservationBytes', 'laneReservationBytes', 'rollFrameReservationBytes',
+  'settleRollFrameClaim', 'fileDecodeKind',
   'pixelsForMemory', 'createFrameClaim', 'coveredMemoryClaim', 'reserveFrameClaim', 'admitJobItem',
   'claimForActivation', 'releaseActivationClaim', 'activationSettled', 'settleActivationClaim'
 ];
@@ -38,6 +39,7 @@ export function memoryGlobals({ budgetBytes = 1e15, pixels = 1e6, setTimer = (fn
     isRawLikeFileName,
     DECODED_BYTES_PER_PIXEL,
     LANE_BYTES_PER_PIXEL,
+    rollAnalysisFootprint,
     imagePixelsWithSiblings: async () => pixels
   };
 }

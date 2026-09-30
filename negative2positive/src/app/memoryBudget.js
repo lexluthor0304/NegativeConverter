@@ -484,6 +484,15 @@ export function createMemoryClaim(budget, {
       const header = Math.max(0, Number(await headerPixels()) || 0);
       await take(bytesFor({ pixels: header, decodeBytes: null, kind, fromHeader: true }));
     },
+    /**
+     * Resize a held claim from a new size (bytesFor's argument), never
+     * waiting: part of its frame's memory is gone (#252: a roll frame's
+     * decode once its planes are packed).
+     */
+    settle(size = {}) {
+      if (released || fixed || !handle) return;
+      handle.resize?.(bytesFor({ pixels: 0, decodeBytes: null, kind: 'raw', ...size }));
+    },
     release() {
       if (released) return;
       released = true;

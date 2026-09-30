@@ -18,7 +18,7 @@ import { createRollSampleCache } from './rollSampleCache.js';
 import { reducedTileGeometry, tileGeometryKey } from './reducedGeometry.js';
 import { sanitizeCropRect, rotatedDimensions } from './imageGeometry.js';
 import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
-import { createDecodeSlots } from './batchExportScheduler.js';
+import { createDecodeSlots, rollAnalysisFootprint } from './batchExportScheduler.js';
 import { primeFilmStats } from './filmStatsCache.js';
 import { rollSampleSettings } from './rollSample.js';
 
@@ -754,9 +754,11 @@ function workerRoll(f, { analysisFor = () => ({}), dng = true } = {}) {
   f.context.rollFramePoolFactory = () => pool;
   const pageReads = [];
   const heldFrames = [];
-  f.context.loadFileToImageData = async (file, { postDecode = null } = {}) => {
+  f.context.loadFileToImageData = async (file, { postDecode = null, claim = null } = {}) => {
     const id = Number(file.name.split('.')[0]);
     f.decoded.push(id);
+    // The loader gate: LibRaw's size and decode estimate.
+    await claim?.atDecode({ kind: 'raw', width: 10, height: 10, estimatedBytes: 5000 });
     if (!postDecode) { pageReads.push(id); return { width: 10, height: 10, id }; }
     const extra = analysisFor(id, postDecode.options) || {};
     postDecode.analysis = {
@@ -812,6 +814,25 @@ function workerRoll(f, { analysisFor = () => ({}), dng = true } = {}) {
   assert.equal(pool.warmed, 1, 'its workers are started ahead of the first frame');
   assert.equal(pool.disposed, true, 'and released when the roll ends');
   assert.deepEqual(f.idleHolds, [true, false], 'the shared auto-frame worker stays warm while the roll runs');
+}
+
+{
+  // #252 + #258: a roll frame measured in its worker reserves that plan's
+  // footprint, not the export lane's 50 B/px: the frame in analysis from
+  // admission to its sink, plus its decode from the loader gate until its
+  // planes are packed.
+  const f = fixture();
+  workerRoll(f);
+  f.context.scheduleAutomaticRollImport(f.items);
+  await f.fire(1200);
+  assert.ok(f.items.every(item => item.settings), 'every frame measured');
+  const header = rollAnalysisFootprint(1e6).frameBytes;
+  const frame = rollAnalysisFootprint(100).frameBytes;
+  for (const id of [1, 2, 3]) {
+    const events = f.context.memoryEvents.filter(event => event.label?.endsWith(` ${id}.dng`) && event.priority === 'background');
+    assert.deepEqual(events.map(event => [event.type, event.bytes]),
+      [['grant', header], ['resize', frame + 5000], ['resize', frame], ['release', frame]], `frame ${id}`);
+  }
 }
 
 {

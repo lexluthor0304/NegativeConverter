@@ -355,7 +355,10 @@ Roll analysis has its own lane plan and its own per-frame worker (#252):
   it is never below them. `nc_batch_lanes_v1` stays the ceiling. A RAW whose
   header yields no size takes the decoded size of a same-extension file of
   the import (the foreground photo records its size too), and pass 1 plans
-  again after its first frame.
+  again after its first frame. The memory budget (#258) reserves each lane
+  by the same footprint: the frame in analysis from admission to its sink,
+  plus its decode from the loader gate until its planes are packed, so the
+  two agree on 2 frames in flight at 16 GB.
 - **Decode slots.** `createDecodeSlots` is the semaphore the lanes share. A
   lane opens the file and LibRaw's metadata while another demosaics, then
   reserves its frame's real decode bytes (`loadRawFile`'s `decodeSlot`) and

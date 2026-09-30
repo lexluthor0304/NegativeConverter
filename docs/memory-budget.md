@@ -86,7 +86,7 @@ memory is really gone.
 | stage 2 of a two-stage RAW import (the full decode behind the stand-in, #255) | foreground | same | until the decode returns |
 | Export All lanes (`runBatchExport`) | user | 50 B/px (`LANE_BYTES_PER_PIXEL`) × the batch's largest frame | from `beforeStart` (after the hidden-job gate, before the lane claims an index) until that index's sink ran |
 | Export All decode-ahead (#256, the next frame decoded before a lane claims it) | none | admitted at once by its estimate (`planDecodeAhead`) against this budget's ceiling, with the ledger as the editor's bytes; a lane reserves before it claims a frame and then waits for that frame's prepare, so a waiting prepare could never finish | — |
-| background lanes: roll analysis (pass 1) | background | 50 B/px of the frame | from before the decode until the job ends |
+| background lanes: roll analysis (pass 1) | background | 50 B/px of the frame; in the automatic roll import (#252, frames measured in roll-frame workers) that plan's footprint instead: 14 B/px plus one OpenCV realm (`rollAnalysisFootprint`, about 1.0 GB at 60.4 MP), plus the decode's peak from the loader gate until the frame's planes are packed (`claim.settle`) | from before the decode until the job ends |
 | background lanes: tiles, including Sync colour re-renders, and the prefetch | background | decode peak + 12 B/px; nothing when the base is a retained session or the prefetch slot | until the tile is written or the base handed over |
 | Auto Frame Selected, multi-shot merge, blank-frame search, manual Analyze Roll, contact sheet | user | decode peak + 12 B/px | one frame at a time, until it is dropped |
 | automatic roll-analysis decodes and sample fallbacks | background | same | same |
@@ -99,7 +99,9 @@ claim (`createMemoryClaim`): a claim reserved up front from the header is
 corrected there to the real size (never waiting), an Export All lane's is
 `fixed`, and a decode without a claim takes its own. Nothing decodes
 unreserved and nothing is counted twice. Background decodes reserve through
-the shared decode (`sharedDecodes.open(file, { context: { claim } })`). A
+the shared decode (`sharedDecodes.open(file, { context: { claim } })`), and a
+roll pass's own decode (#252's roll-frame worker, or its page fallback) runs
+inside the same lane claim. A
 header without dimensions borrows those of a decoded file with the same
 extension in the queue (`imagePixelsWithSiblings`); the progress rule covers
 the rest.

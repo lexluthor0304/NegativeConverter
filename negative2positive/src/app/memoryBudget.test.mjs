@@ -369,6 +369,20 @@ assert.equal(hasPeriodicMemoryPurge('chromium'), false);
   assert.equal(env.budget.snapshot().background, 2e9 + 24e6 * 12, 'resized to the real size, without waiting');
   lane.release();
 
+  // settle (#252): part of a held claim's frame is gone; resized without
+  // waiting, and nothing for a claim not held, released or fixed.
+  const roll = ({ pixels, decodeBytes, packed }) => pixels * 14 + (packed ? 0 : decodeBytes ?? 0);
+  const rolling = createMemoryClaim(env.budget, { priority: 'background', bytesFor: roll });
+  rolling.settle({ pixels: 10, packed: true });
+  assert.equal(rolling.held, false, 'settle takes nothing');
+  await rolling.atDecode({ width: 6000, height: 4000, estimatedBytes: 2e9 });
+  assert.equal(env.budget.snapshot().background, 24e6 * 14 + 2e9);
+  rolling.settle({ pixels: 24e6, packed: true });
+  assert.equal(env.budget.snapshot().background, 24e6 * 14, 'the decode left the claim');
+  rolling.release();
+  rolling.settle({ pixels: 24e6 });
+  assert.equal(env.budget.snapshot().background, 0);
+
   // A decode without a size of its own uses the header.
   const scan = createMemoryClaim(env.budget, { priority: 'foreground', bytesFor: frame, headerPixels: async () => 1000 });
   await scan.atDecode({});
@@ -379,6 +393,7 @@ assert.equal(hasPeriodicMemoryPurge('chromium'), false);
   const laneHandle = await env.budget.reserve(3e9, { priority: 'user', label: 'lane' });
   const fixed = createMemoryClaim(env.budget, { handle: laneHandle });
   await fixed.atDecode({ width: 10, height: 10, estimatedBytes: 1 });
+  fixed.settle({ pixels: 10, packed: true });
   assert.equal(env.budget.snapshot().user, 3e9);
   fixed.release();
   assert.equal(laneHandle.released, false, 'the lane releases its own reservation after its sink');

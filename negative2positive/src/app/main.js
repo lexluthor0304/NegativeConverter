@@ -89,7 +89,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     import { poolRepairMask } from './repairedPreview.js';
     import {
       planBatchParallelism, planPng16BandWorkers, runBatchPipeline, planGeometryBandsInFlight, LANE_BYTES_PER_PIXEL,
-      createLearningBarrier, planDecodeAhead, EXPORT_MAX_UNWRITTEN_BYTES, planRollAnalysis, createDecodeSlots, ROLL_ANALYSIS_MIN_RAM_BYTES
+      createLearningBarrier, planDecodeAhead, EXPORT_MAX_UNWRITTEN_BYTES, planRollAnalysis, createDecodeSlots, ROLL_ANALYSIS_MIN_RAM_BYTES,
+      rollAnalysisFootprint
     } from './batchExportScheduler.js';
     import {
       displayPreviewSize, resizeDisplayPreview, resizeDisplayPreviewInBands, updateDisplayPreviewRect, noteDisplayFilter,
@@ -10700,6 +10701,21 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     }
     function laneReservationBytes({ pixels }) {
       return pixels * LANE_BYTES_PER_PIXEL;
+    }
+    // A frame of #252's roll pass, which decodes into its lane's roll-frame
+    // worker: that plan's footprint instead of the export lane's constant,
+    // so both give the same frames in flight. The frame in analysis (14 B/px
+    // plus one OpenCV realm) from admission to its sink, and its decode (the
+    // RAW decode estimate) from the loader gate until its planes are packed.
+    function rollFrameReservationBytes(size) {
+      const { frameBytes } = rollAnalysisFootprint(size.pixels);
+      return size.fromHeader || size.packed ? frameBytes : frameBytes + decodePeakBytes(size);
+    }
+    // The decode of a roll frame (#252) is over: its lane's claim keeps the
+    // frame's analysis bytes only.
+    function settleRollFrameClaim(claim, image) {
+      const pixels = Math.max(0, Number(image?.width) || 0) * Math.max(0, Number(image?.height) || 0);
+      if (pixels > 0) claim?.settle?.({ pixels, packed: true });
     }
 
     // What LibRaw decodes (the loader's 'raw' branch), for reservations made
@@ -21455,6 +21471,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         claim: context?.claim || null, priority: 'background',
         ...(half ? { halfSize: true } : {})
       }).then((image) => {
+        // Packed: the lane's claim keeps the frame's analysis bytes.
+        settleRollFrameClaim(context?.claim, image);
         if (image?.held) {
           return { base: null, held: adapter.held, analysis: adapter.analysis, optionsKey, rawMetadata, fullSize: image.fullSize || null, half };
         }
@@ -21780,7 +21798,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           if (analysis) {
             memoryClaim = await reserveFrameClaim(createFrameClaim(item.file, {
               priority: 'background', signal: controller.signal, label: `${needs.join('+')} ${item.file.name}`,
-              bytesFor: laneReservationBytes
+              bytesFor: analysis.decode ? rollFrameReservationBytes : laneReservationBytes
             }), item.file);
             if (!wanted()) return false;
           }
@@ -21796,7 +21814,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
             if (!wanted()) return false;
             memoryClaim = await reserveFrameClaim(createFrameClaim(item.file, {
               priority: 'background', signal: controller.signal, label: `${needs.join('+')} ${item.file.name}`,
-              bytesFor: analysis ? laneReservationBytes : frameReservationBytes
+              bytesFor: !analysis ? frameReservationBytes : analysis.decode ? rollFrameReservationBytes : laneReservationBytes
             }), item.file);
             if (!wanted()) return false;
             if (backgroundGate.isIdle()) break;
@@ -26793,7 +26811,10 @@ import { canPublishThumbnail } from './thumbnailRank.js';
               decode: (item, file, context) => {
                 if (!rollFrameWorkerUsable() || (workerFailures.get(item) || 0) >= 2 || !rollFrameDecodable(file)) {
                   // Inside the lane's memory claim (#258), as the shared decode.
-                  return decodeForBackground(file, context.signal, context.context);
+                  return decodeForBackground(file, context.signal, context.context).then((decoded) => {
+                    settleRollFrameClaim(context.context?.claim, decoded?.base);
+                    return decoded;
+                  });
                 }
                 const options = rollFrameOptions(item);
                 return decodeRollFrame(file, { ...context, frames, slots, options, optionsKey: rollFrameOptionsKey(options) });
