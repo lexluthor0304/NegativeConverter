@@ -3595,6 +3595,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // The preview worker's newest interactive frame: { frame: { seq, slot },
     // token, generation, width, height }.
     let lastLiveFrame = null;
+    // Live frames the worker has answered stale for (its slot's planes moved on
+    // while the frame stayed on screen): never painted over again.
+    const staleLiveFrames = new Set();
     // The stroke being painted, or the last one until its pen-up frame lands.
     let liveDodge = null;
     // Bumped whenever the frame on screen is drawn in full again (a CPU
@@ -4683,8 +4686,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         ...conversion,
         analysisRegion: resolveAnalysisRegion({ ...settings, autoFrameMeta: meta }, source),
         // Dodge and burn strokes are stored on the unrotated base; the adapter
-        // rasterises them for the working frame it converts.
-        localExposureGeometry: router.localExposure ? localExposureGeometryFor(settings, source) : null,
+        // rasterises them for the working frame it converts. Sent without
+        // strokes too: the first live stroke (#254 C) paints over a frame that
+        // knows its geometry. The adapter ignores it when there are no strokes.
+        localExposureGeometry: localExposureGeometryFor(settings, source),
         // Flat field gain map (session registry) with the same frame geometry.
         flatField,
         flatFieldGeometry: flatField ? localExposureGeometryFor(settings, source) : null
@@ -23483,9 +23488,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (!LIVE_DODGE_ENABLED || !display || !usesSilverCoreConversion(state)) return null;
       if (coreReprocessScheduled || _coreReprocessPending || _coreReprocessPreviewInFlight || gpuPreviewScheduler.isAhead()) return null;
       const own = convertPreviewFrameInWorker.liveFrameOf?.(display.shown);
-      if (own && displayedFrameToken === coreReprocessToken) return { frame: own, mode: 'exact' };
+      if (own && !staleLiveFrames.has(own.seq) && displayedFrameToken === coreReprocessToken) return { frame: own, mode: 'exact' };
       const last = lastLiveFrame;
-      if (last && last.token === coreReprocessToken && last.generation === coreReprocessGeneration
+      if (last && !staleLiveFrames.has(last.frame.seq) && last.token === coreReprocessToken && last.generation === coreReprocessGeneration
         && last.width === display.shown.width && last.height === display.shown.height) return { frame: last.frame, mode: 'delta' };
       return null;
     }
@@ -23550,7 +23555,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       session.inFlight = true;
       liveDodgeCounters.requests++;
       convertPreviewFrameInWorker.exposureLive(request)
-        .then((reply) => applyLiveDodgeReply(session, reply), (error) => {
+        .then((reply) => applyLiveDodgeReply(session, reply, request.frame), (error) => {
           console.warn('Live dodge and burn failed:', error?.message || error);
           session.target = null;
         })
@@ -23576,10 +23581,17 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return out;
     }
 
-    function applyLiveDodgeReply(session, reply) {
+    // `frame`: the live frame the request painted over.
+    function applyLiveDodgeReply(session, reply, frame) {
+      if (reply.stale) {
+        liveDodgeCounters.stale++;
+        // Retargeting must never pick that frame again (a request loop): the
+        // next target is a newer or a warmed frame.
+        if (frame) staleLiveFrames.add(frame.seq);
+        if (staleLiveFrames.size > 32) staleLiveFrames.delete(staleLiveFrames.values().next().value);
+      }
       if (session.ended === 'cancel') return;
       if (reply.stale || reply.needsReset) {
-        if (reply.stale) liveDodgeCounters.stale++;
         if (session.ended) return;
         if (reply.needsReset) session.reset = true;
         else retargetLiveDodge(session);

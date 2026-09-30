@@ -197,6 +197,7 @@ function liveFixture({ delta = false } = {}) {
   const context = vm.createContext({
     state, webglState, glCanvas: { style: { display: 'block' } }, console, Math, Uint8ClampedArray,
     convertPreviewFrameInWorker: client, LIVE_DODGE_ENABLED: true, lastLiveFrame: null, liveDodge: null, liveDisplaySerial: 0,
+    staleLiveFrames: new Set(),
     liveDodgeCounters: { strokes: 0, requests: 0, rects: 0, deltaRects: 0, stale: 0, warmups: 0, uploads: 0, puts: 0, maxRectPixels: 0, restored: 0, lastRect: null },
     isWebGLActive: () => true, usesSilverCoreConversion: () => true,
     displaySourceImageData: () => state.previewSourceImageData || state.processedImageData,
@@ -262,6 +263,31 @@ for (const mode of ['exact', 'delta']) {
   f.context.flushLiveDodge(f.context.liveDodge);
   await drain();
   assert.equal(f.texture.uploads.length, before, 'no rectangle over a newer frame');
+}
+
+// A live frame the worker answers stale for (its slot's planes moved on while
+// the frame stayed on screen) is never painted over again: the stroke asks for
+// a fresh frame instead of re-sending to the same one.
+{
+  adapter.invalidateSilverCoreCache();
+  const f = liveFixture();
+  const frame = await adapter.convertColorWithSilverCore(negative(), structuredClone(settingsFor(committed)), { preview: true, includeAnalysisPreview: false });
+  frame.__liveSeq = frame.__liveFrame;
+  Object.assign(f.state, { previewSourceImageData: frame, processedImageData: frame, webglSourceImageData: frame });
+  f.texture.data = new Uint8ClampedArray(frame.data);
+  // Another conversion in the slot moves its planes on: the frame is stale.
+  await adapter.convertColorWithSilverCore(negative(), { ...structuredClone(settingsFor(committed)), contrast: 25 }, { preview: true, includeAnalysisPreview: false });
+  let warms = 0;
+  f.context.warmLiveDodge = () => { warms++; };
+  f.context.beginLiveDodge({ stops: 1, size: 0.2, feather: 0.5 }, { ...geometry, width: W, height: H }, { x: 45, y: 30, p: 1 });
+  await drain();
+  for (let k = 1; k < 6; k++) { f.context.addLiveDodgePoints([{ x: 45 + k * 3, y: 30, p: 1 }]); await drain(); }
+  assert.equal(f.worker.requests, 1, 'one request to the stale frame, no loop');
+  assert.equal(f.context.liveDodgeCounters.stale, 1);
+  assert.ok(f.context.staleLiveFrames.has(frame.__liveFrame));
+  assert.ok(warms >= 1, 'a fresh frame is asked for');
+  assert.equal(f.texture.uploads.length, 0);
+  f.context.endLiveDodge(false);
 }
 
 // A cancelled stroke draws the frame on screen again.
