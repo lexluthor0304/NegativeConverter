@@ -339,7 +339,8 @@ export async function runIsolationSmoke({ send, sendTo, onCdpEvent, evaluate, wa
     console.log('isolation report:', JSON.stringify(report.workers));
     const notIsolated = Object.entries(report.workers).filter(([, answer]) => answer.crossOriginIsolated !== true);
     if (!report.allIsolated || notIsolated.length) fail(`workers not cross-origin isolated: ${JSON.stringify(notIsolated)}`);
-    for (const name of ['conversion', 'conversionBand', 'geometry', 'rawPostDecode', 'autoFrame', 'dust', 'aiInpaint', 'semantic', 'scanDecode', 'multiShot', 'export', 'heif', 'blob', 'libraw']) {
+    for (const name of ['conversion', 'conversionBand', 'geometry', 'rawPostDecode', 'autoFrame', 'dust', 'aiInpaint', 'semantic', 'scanDecode', 'multiShot', 'export',
+      'rollFrame', 'autoFrameHelper', 'displayProxy', 'heif', 'blob', 'libraw']) {
       if (!report.workers[name]) fail(`the isolation report has no ${name} worker`);
     }
     const threadedLibRaw = report.workers.libraw.threaded === true;

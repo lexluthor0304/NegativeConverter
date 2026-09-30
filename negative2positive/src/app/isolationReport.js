@@ -25,6 +25,11 @@ export const WORKER_PROBES = Object.freeze({
   scanDecode: () => new Worker(new URL('../workers/scanDecodeWorker.js', import.meta.url), { type: 'module' }),
   multiShot: () => new Worker(new URL('../workers/multiShotWorker.js', import.meta.url), { type: 'module' }),
   export: () => new Worker(new URL('../workers/exportWorker.js', import.meta.url), { type: 'module' }),
+  // The roll analysis's frame workers and the detection helpers (#252), and
+  // the display proxy store (#249).
+  rollFrame: () => new Worker(new URL('../workers/rollFrameWorker.js', import.meta.url), { type: 'module' }),
+  autoFrameHelper: () => new Worker(new URL('../workers/autoFrameHelperWorker.js', import.meta.url), { type: 'module' }),
+  displayProxy: () => new Worker(new URL('../workers/displayProxyWorker.js', import.meta.url), { type: 'module' }),
   // The desktop's native RAW plane transfer (nativeRawTransfer.js).
   nativeRawFetch: () => new Worker(new URL('../workers/nativeRawFetchWorker.js', import.meta.url), { type: 'module' }),
   // A classic worker from public/codecs (it answers the probe inline).

@@ -5,6 +5,7 @@
  * run on this worker's own planes (rollFrameTask.js), so the 60 MP planes
  * never travel back to the page. OpenCV is the page's compiled module.
  */
+import './isolationProbe.js'; // first: answers the page's isolation probe (#264)
 import { acceptOpenCvMessage, loadOpenCv, openCvRealmStats } from './opencvWorkerRuntime.js';
 import { detectFrameAndRotation } from '../app/autoFrameAnalyzer.js';
 import { applyRotationToImageData } from '../app/imageGeometry.js';

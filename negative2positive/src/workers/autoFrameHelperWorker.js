@@ -5,6 +5,7 @@
  * preview and answers with plain data (autoFrameHelperTask.js). OpenCV is
  * the page's compiled module.
  */
+import './isolationProbe.js'; // first: answers the page's isolation probe (#264)
 import { acceptOpenCvMessage, loadOpenCv, openCvRealmStats } from './opencvWorkerRuntime.js';
 import { applyRotationToImageData } from '../app/imageGeometry.js';
 import { createAutoFrameHelperTask } from './autoFrameHelperTask.js';
