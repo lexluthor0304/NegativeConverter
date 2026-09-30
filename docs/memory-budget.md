@@ -142,7 +142,9 @@ the shortfall is freed, then `poke()`:
 
 1. `photoPreviews`;
 2. `photoSessions`, except the entry stored last (`lastStoredKey`): the warm
-   1-back switch is never traded for other work;
+   1-back switch is never traded for other work. A trimmed session reaches the
+   cache's `onEvict` like one a put pushed out, so it is demoted to its
+   display form (#249's Tier B, or the spill) rather than dropped;
 3. the open photo's full-resolution `processedImageData`, demoted to the
    preview plane by #250's `demoteFullResolutionPlane`, only for a large frame
    (above `LARGE_IMAGE_PIXELS`, where no idle render brings it back) and only
@@ -181,9 +183,10 @@ is running:
    auto-frame/OpenCV worker, and MI-GAN only under #236's idle-release rule;
    semantic analysis already ends with each photo. Each comes back lazily.
 2. trim while the ledger exceeds `IDLE_RETAINED_TARGET_BYTES` (1 GiB, to be
-   calibrated against the logged footprint): previews, then sessions except
-   the one just left (until #249's Tier B can demote it instead), then the
-   large open photo's full-resolution plane.
+   calibrated against the logged footprint): previews, then sessions, demoted
+   to their display form (#249) where they have one; the one just left is
+   demoted too when it has one and otherwise stays; then the large open
+   photo's full-resolution plane.
 3. never the open photo's other planes, history or anything a job holds.
 
 With #236 (no eager MI-GAN) one idle 60 MP photo should sit at about

@@ -222,4 +222,33 @@ if (typeof SharedArrayBuffer !== 'undefined') {
   console.warn = quiet;
 }
 
+// #258 + #249: the entries a trim lets go reach onEvict too, after the trim,
+// so a trimmed session is demoted to its small form instead of dropped; the
+// kept key is never handed over, and the trim returns what it freed net of
+// the demoted forms stored again.
+{
+  const evicted = [];
+  let cache;
+  cache = createPhotoSessionCache({
+    maxBytes: 200,
+    onEvict: (key, value) => {
+      evicted.push(key);
+      if (value.small) cache.putIfRoom(key + "'", { small: value.small }, { oldest: true });
+    }
+  });
+  cache.put('a', { base: new Uint8Array(40), small: new Uint8Array(10) });
+  cache.put('b', { base: new Uint8Array(40) });
+  cache.put('c', { base: new Uint8Array(40), small: new Uint8Array(5) });
+  assert.equal(cache.bytes, 135);
+  const freed = cache.trim(0, { keep: [cache.lastStoredKey] });
+  assert.deepEqual(evicted, ['a', 'b'], 'oldest first; the kept key is not handed over');
+  assert.deepEqual(cache.keys(), ["a'", 'c'], 'a is demoted; b had no small form and is gone');
+  assert.equal(cache.bytes, 55);
+  assert.equal(freed, 80, 'freed net of the demoted form stored again');
+  assert.equal(cache.lastStoredKey, 'c', 'a demoted form is not the entry stored last');
+  evicted.length = 0;
+  assert.equal(cache.trim(1000), 0, 'nothing to trim below the target');
+  assert.deepEqual(evicted, []);
+}
+
 console.log('photoSessionCache: shared backing stores/history, LRU, ownership, replacement, limits and cleanup passed');

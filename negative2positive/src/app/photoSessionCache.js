@@ -57,10 +57,10 @@ export function backingBuffers(value, buffers = new Set()) {
  * A zero budget disables storage, including entries without pixel buffers.
  *
  * `onEvict(key, value)` (#249) is called for each entry a put pushed out of
- * the budget, once that put is complete, oldest first; never for take,
- * delete, clear or retainKeys. The callback may store a smaller form of the
- * entry again (`putIfRoom(key, value, { oldest: true })`, which never
- * displaces a more recent entry) or keep it elsewhere.
+ * the budget or a trim let go (#258), once that put or trim is complete,
+ * oldest first; never for take, delete, clear or retainKeys. The callback may
+ * store a smaller form of the entry again (`putIfRoom(key, value, { oldest:
+ * true })`, which never displaces a more recent entry) or keep it elsewhere.
  */
 export function createPhotoSessionCache({ maxBytes = DEFAULT_MAX_BYTES, onEvict = null } = {}) {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
@@ -184,18 +184,25 @@ export function createPhotoSessionCache({ maxBytes = DEFAULT_MAX_BYTES, onEvict 
     },
     /**
      * Evict least recently used entries until at most `targetBytes` are
-     * retained, never one of the keys in `keep` (#258). Returns the bytes
-     * this cache let go; a buffer another retained entry shares stays.
+     * retained, never one of the keys in `keep` (#258). The entries it lets
+     * go reach onEvict like a put's, so a session is demoted to its display
+     * form rather than dropped (#249). Returns the bytes this cache let go,
+     * net of what onEvict stored again; a buffer another retained entry
+     * shares stays.
      */
     trim(targetBytes, { keep = [] } = {}) {
       const target = Math.max(0, Number(targetBytes) || 0);
       const kept = new Set(keep);
       const before = bytes;
+      const evicted = [];
       for (const key of [...entries.keys()]) {
         if (bytes <= target) break;
-        if (!kept.has(key)) remove(key);
+        if (kept.has(key)) continue;
+        const entry = remove(key);
+        if (entry) evicted.push([key, entry.value]);
       }
-      return before - bytes;
+      notifyEvicted(evicted);
+      return Math.max(0, before - bytes);
     },
     /** The unique backing buffers retained, to count them with other graphs. */
     buffers() { return owners.keys(); },

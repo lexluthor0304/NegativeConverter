@@ -37,8 +37,10 @@ not a total renderer-memory promise on their own; the renderer-wide memory
 budget (#258, `docs/memory-budget.md`) counts them with the active editor,
 history, bounded stores and worker residents in one ledger. When a lane or a
 job needs room, it evicts previews first, then sessions except the one stored
-last (the warm 1-back switch stays), and on WebKit the idle check trims them
-toward 1 GiB of ledger bytes the same way. Native GPU resources and file
+last (the warm 1-back switch stays), each demoted to its display form (Tier B
+below) where it has one, and on WebKit the idle check trims them toward 1 GiB
+of ledger bytes the same way, demoting the one stored last too when it has a
+display form. Native GPU resources and file
 storage are not counted. While a job runs in a hidden
 macOS window, or once an idle window has been hidden for five minutes, these
 caches and the prefetch slot (#243) are emptied to stay under WebKit's inactive memory limit; they refill

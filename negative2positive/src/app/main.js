@@ -10129,9 +10129,14 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     }
 
     // The session the user just left stays: the warm 1-back switch (#222) is
-    // never traded for other work.
-    function trimPhotoSessions(remaining) {
-      return freedByLedger(() => photoSessions.trim(Math.max(0, photoSessions.bytes - remaining), { keep: [photoSessions.lastStoredKey] }));
+    // never traded for other work. Trimmed sessions are demoted to their
+    // display form (#249) through the cache's onEvict. `demoteLast` (the idle
+    // check) lets the one just left go too when it has a display form to be
+    // demoted to; without one it stays.
+    function trimPhotoSessions(remaining, { demoteLast = false } = {}) {
+      const last = photoSessions.lastStoredKey;
+      const keep = demoteLast && photoSessions.get(last)?.display ? [] : [last];
+      return freedByLedger(() => photoSessions.trim(Math.max(0, photoSessions.bytes - remaining), { keep }));
     }
 
     function trimPhotoPreviews(remaining) {
@@ -10322,11 +10327,12 @@ import { canPublishThumbnail } from './thumbnailRank.js';
           console.warn('Idle worker release failed:', name, error);
         }
       }
-      // The session just left stays until #249's Tier B can demote it: a
-      // cold 1-back switch costs more than the purge.
+      // The session just left is demoted to its display form (#249) when it
+      // has one; without one it stays: a cold 1-back switch costs more than
+      // the purge.
       const excess = memoryLedger.retained() - IDLE_RETAINED_TARGET_BYTES;
       const trimmed = excess > 0
-        ? relievePressure(excess, [trimPhotoPreviews, trimPhotoSessions, demoteFullResolutionForMemory])
+        ? relievePressure(excess, [trimPhotoPreviews, remaining => trimPhotoSessions(remaining, { demoteLast: true }), demoteFullResolutionForMemory])
         : 0;
       noteMemoryEvent({ type: 'idle', released, trimmed, before, after: memoryLedger.retained() });
       if (released.length || trimmed) memoryBudget.poke();
