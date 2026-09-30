@@ -68,7 +68,7 @@ What each target runs today (libraw-wasm 1.6.0 pinned, the native gate off):
   | `_DSC5290.dng` | half | 114 of 18,252,864 | 114 | 65,535 (1.6.0's black white-point samples) |
 
   The 60 MP M11 DNGs (`L1009967.dng`, the 2026-09-23 roll) are still to be
-  measured, on a machine that may decode them.
+  measured: they were not decoded on the machine these numbers come from.
 
 ## Gates
 
@@ -96,8 +96,8 @@ always uses the installed package.
    published build decodes differently from the one recorded here (built
    with other flags or another toolchain), stop: record its hashes, then
    re-run the native parity tests against them.
-3. Add the M11 DNGs and `L1009967.dng` to the gate on a machine that may
-   decode 60 MP files, and record them.
+3. Add the M11 DNGs and `L1009967.dng` to the gate and record them (the
+   #264 work could not decode 60 MP files).
 4. `npm run test:rust` with the fixtures on each desktop platform; then set
    `NATIVE_RAW_PARITY.librawWasm = 'X.Y.Z'`. macOS (arm64 and x86_64)
    then decodes natively.
