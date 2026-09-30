@@ -15,9 +15,10 @@
 //    equal composeSprocketFrame at display size, the photo rectangle meets the
 //    budget.
 // 4. The overlay layer: a dodge stroke lands on the same image point whether GL or
-//    #canvas shows the photo, and is drawn within 1 CSS px of that point at 100 %
-//    and about 400 % zoom, with and without the border; the layer's backing is the
-//    display photo's size and its box is the photo's rectangle.
+//    #canvas shows the photo; the overlay draws it within 0.5 backing pixels of
+//    that point, and on screen within max(1, zoom / 2) CSS px at 100 % and about
+//    400 % zoom, with and without the border; the layer's backing is the display
+//    photo's size and its box is the photo's rectangle.
 // The rescue in the app (fog from OpenCV, local contrast, drags, hold-to-compare)
 // is checked by expired-film-smoke.mjs on its aged positive.
 import { createRequire } from 'node:module';
@@ -391,7 +392,7 @@ export async function runDisplayModesSmoke({ send, evaluate, waitFor, fail, inst
   await clearStrokes();
   await setDodge(false);
   await settle('dodge tool off', 1000);
-  console.log('ok: dodge strokes land on the same image points on GL and #canvas and the overlay draws them within 1 CSS px '
+  console.log('ok: dodge strokes land on the same image points on GL and #canvas and the overlay draws them at those points '
     + JSON.stringify({ borderedAlignment, plainAlignment, borderedMapping, plainMapping }));
 
   // ---- 3b. Portrait border ----
