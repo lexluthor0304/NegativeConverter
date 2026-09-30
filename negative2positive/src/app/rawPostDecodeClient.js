@@ -24,6 +24,7 @@ import {
   viewFromDescription,
   isTransferableRawData
 } from './rawPostDecode.js';
+import { isSharedPlane } from './crossOriginIsolation.js';
 
 const READY_TIMEOUT_MS = 5000;
 
@@ -138,7 +139,11 @@ export function startRawPostDecode({ readyTimeoutMs = READY_TIMEOUT_MS } = {}) {
       return runRawPostDecode({ ...shape, data: viewFromDescription(reply.input) }, options);
     }
     if (reply.rgba16) {
-      const image16 = { width: shape.width, height: shape.height, data: viewFromDescription(reply.rgba16) };
+      const data16 = viewFromDescription(reply.rgba16);
+      // A shared plane (#264) the worker may have been repairing when it
+      // failed is lost: running the pass again on it would not be exact.
+      if (reply.stage !== 'repaired' && isSharedPlane(data16)) throw lostError(reply.message || 'RAW post-decode worker failed on a shared plane');
+      const image16 = { width: shape.width, height: shape.height, data: data16 };
       return finishRawPostDecode(image16, options, {
         from: reply.stage === 'repaired' ? 'repaired' : 'packed',
         defects: reply.defects || null

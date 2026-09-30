@@ -1,6 +1,7 @@
 import { detectDust, updateDustStrength, inpaintMasked } from '../silvercore/engine/DustRemoval.js';
 import { applyDustStroke, countMaskParticles, pasteMaskRect } from '../silvercore/engine/DustBrush.js';
 import { murmurHash3x86_128 } from '../app/contentHash.js';
+import { deriveEightBit } from '../app/crossOriginIsolation.js';
 
 // What the page needs to reuse a dust pass without scanning a 60 MP mask on
 // its own thread: a hash of the mask's content, and the 64 px blocks holding a
@@ -44,21 +45,32 @@ export function createDustWorkerProcessor({ loadCv = async () => {} } = {}) {
     countWanted = Boolean(pinned) && particleCount === null;
   }
 
-  // A plane arrives in slices so no single copy blocks the page.
+  // A plane arrives in slices so no single copy blocks the page. A plane that
+  // arrives whole in one message (a shared plane, #264) is kept as it came;
+  // `derive8` makes the 8-bit source from a 16-bit plane (>>> 8).
   function receivePlane(message) {
     const { kind, offset, total, chunk, width, height } = message;
     const Type = PLANE_TYPES[kind];
     if (!Type) throw new Error('Unknown dust worker plane');
-    if (offset === 0) upload = { kind, data: new Type(total) };
-    else if (!upload || upload.kind !== kind || upload.data.length !== total) {
-      throw new Error('Dust worker plane arrived out of order');
+    if (offset === 0 && message.done && chunk instanceof Type && chunk.length === total) {
+      upload = { kind, data: chunk };
+    } else {
+      if (offset === 0) upload = { kind, data: new Type(total) };
+      else if (!upload || upload.kind !== kind || upload.data.length !== total) {
+        throw new Error('Dust worker plane arrived out of order');
+      }
+      upload.data.set(chunk, offset);
+      if (!message.done) return;
     }
-    upload.data.set(chunk, offset);
-    if (!message.done) return;
     const { data } = upload;
     upload = null;
     if (kind === 'rgba') {
       resetSource(new ImageData(data, width, height));
+      return;
+    }
+    if (kind === 'image16' && message.derive8) {
+      resetSource(new ImageData(deriveEightBit(data), width, height));
+      source.__image16 = { width, height, data };
       return;
     }
     if (!source || source.width !== width || source.height !== height) throw new Error('Missing dust worker source');
@@ -84,7 +96,7 @@ export function createDustWorkerProcessor({ loadCv = async () => {} } = {}) {
     if (!['detect', 'inpaint', 'stroke'].includes(message.type)) throw new Error('Unknown dust worker request');
     await loadCv();
     if (!message.reuseSource) {
-      resetSource(new ImageData(message.rgba, width, height));
+      resetSource(new ImageData(message.derive8 ? deriveEightBit(message.image16) : message.rgba, width, height));
     } else if (!source || source.width !== width || source.height !== height) {
       throw new Error('Missing dust worker source');
     }

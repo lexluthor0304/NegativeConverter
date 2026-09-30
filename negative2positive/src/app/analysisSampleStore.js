@@ -16,9 +16,13 @@ function sampleBytes(sample) {
 // ImageData's custom __image16 property is not preserved by native structured
 // cloning. Store an explicit plain container to retain the attached precision,
 // and what the sample's canonical tile needs (#247): the base's size, the
-// small analysis reference taken from it and the tile's working image.
-function serializableSample(sample) {
-  const plane = value => ({ width: value.width, height: value.height, data: value.data });
+// small analysis reference taken from it and the tile's working image. A
+// sample of a small base references the base's planes, which may live in
+// shared memory (#264): IndexedDB cannot store a SharedArrayBuffer, so such a
+// plane is stored as a copy.
+const storable = data => (typeof SharedArrayBuffer === 'function' && data?.buffer instanceof SharedArrayBuffer ? data.slice() : data);
+export function serializableSample(sample) {
+  const plane = value => ({ width: value.width, height: value.height, data: storable(value.data) });
   const image = value => ({ ...plane(value), ...(value.__image16 ? { __image16: plane(value.__image16) } : {}) });
   return {
     ...image(sample),

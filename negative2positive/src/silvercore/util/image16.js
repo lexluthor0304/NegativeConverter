@@ -90,16 +90,21 @@ export function cloneImage16(image16) {
 }
 
 // Pack {data: Uint16Array RGB or RGBA, channels} into a full RGBA Image16.
-// Used by loaders that get RGB-only output from a decoder.
-export function packRGBToImage16(width, height, rgb16, channels) {
+// Used by loaders that get RGB-only output from a decoder. `alloc(length)`
+// makes the RGBA plane (#264: the RAW post-decode worker's shared plane); a
+// 4-channel source is wrapped as it is unless an allocator is given.
+export function packRGBToImage16(width, height, rgb16, channels, alloc = null) {
   if (channels === 4) {
-    return wrapImage16(width, height, rgb16);
+    if (!alloc) return wrapImage16(width, height, rgb16);
+    const plane = alloc(width * height * 4);
+    plane.set(rgb16.subarray(0, width * height * 4));
+    return wrapImage16(width, height, plane);
   }
   if (channels !== 3 && channels !== 1) {
     throw new RangeError(`packRGBToImage16: unsupported channel count ${channels}`);
   }
   const pixelCount = width * height;
-  const dst = new Uint16Array(pixelCount * 4);
+  const dst = alloc ? alloc(pixelCount * 4) : new Uint16Array(pixelCount * 4);
   if (channels === 3) {
     for (let i = 0; i < pixelCount; i++) {
       dst[i * 4]     = rgb16[i * 3];

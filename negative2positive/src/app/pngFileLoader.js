@@ -34,7 +34,9 @@ export function isNativeSixteenBitPng(colorType, depth) {
  * ImageData with no 16-bit mirror — silverAdapter promotes on demand, on the
  * cropped region, instead of paying a full-resolution ×257 upscale at load.
  */
-export function loadPngFile(buffer) {
+// `alloc(length)` makes the RGBA16 plane of a 16-bit PNG (#264: shared
+// memory for the editor's scans on a cross-origin isolated page).
+export function loadPngFile(buffer, { alloc = null } = {}) {
   const decoded = UPNG.decode(buffer);
   const { width, height, ctype, depth, data } = decoded;
   const pixelCount = width * height;
@@ -49,7 +51,7 @@ export function loadPngFile(buffer) {
 
   const channels = pngChannelCount(ctype);
   const hasAlpha = ctype === 4 || ctype === 6;
-  const rgba16 = new Uint16Array(pixelCount * 4);
+  const rgba16 = alloc ? alloc(pixelCount * 4) : new Uint16Array(pixelCount * 4);
   const final8 = new Uint8ClampedArray(pixelCount * 4);
 
   for (let i = 0; i < pixelCount; i++) {

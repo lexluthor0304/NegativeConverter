@@ -4,7 +4,7 @@ import { detectFrameAndRotation } from '../app/autoFrameAnalyzer.js';
 import { applyRotationToImageData } from '../app/imageGeometry.js';
 import { createFilmEdgeReader } from './filmEdgeRead.js';
 import { isOpenCvAnalysisType, runOpenCvAnalysisTask } from '../app/openCvAnalysisTasks.js';
-import { detectFrameForRequest, packFrameResult, runImportRequest } from './autoFrameImportTask.js';
+import { detectFrameForRequest, packFrameResult, runImportRequest, requestRgba } from './autoFrameImportTask.js';
 import { createHelperLink, detectFrameAndRotationParallel } from './autoFrameParallel.js';
 
 // The page's compiled OpenCV module, instantiated here (#252 part 5).
@@ -45,7 +45,7 @@ self.onmessage = async ({ data: message }) => {
       return;
     }
     if (message.type === 'read-film-edge') {
-      const image = { width: message.width, height: message.height, data: message.rgba };
+      const image = { width: message.width, height: message.height, data: requestRgba(message) };
       postReply({ id: message.id, result: await readEdge(image, message.options) });
       return;
     }
@@ -77,7 +77,7 @@ self.onmessage = async ({ data: message }) => {
     }
     if (message.type !== 'analyze-frame') throw new Error(`Unknown auto-frame worker request: ${message.type}`);
     await loadCv();
-    const image = new ImageData(message.rgba, message.width, message.height);
+    const image = new ImageData(requestRgba(message), message.width, message.height);
     if (message.image16) image.__image16 = { width: image.width, height: image.height, data: message.image16 };
     const transfers = [];
     const result = packFrameResult(await detectFrameForRequest(image, message, message.options, {

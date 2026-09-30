@@ -141,6 +141,12 @@ consumer that holds it:
 It is computed on demand, at an admission and at an idle check, never per
 frame.
 
+A 16-bit plane in shared memory (#264, `docs/cross-origin-isolation.md`) is a
+`SharedArrayBuffer` the ledger counts like an `ArrayBuffer`: once, for the
+first consumer that holds it. The workers that read it hold views, not
+copies, and report nothing for it; no worker posts a shared plane back to the
+page, so the page never holds two objects for one allocation.
+
 **Eviction under pressure** (`relieveMemoryPressure`), in order, stopping once
 the shortfall is freed, then `poke()`:
 

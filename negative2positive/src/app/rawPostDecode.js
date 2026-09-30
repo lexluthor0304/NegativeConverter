@@ -16,6 +16,7 @@ import { looksLikeBayerSnow } from '../silvercore/util/garbledCheck.js';
 import { suppressSensorDefects } from '../silvercore/util/sensorDefects.js';
 import { detectFilmType } from './filmTypeDetection.js';
 import { autoDetectFilmBase, normalizeBorderBufferPct } from './filmBaseDetection.js';
+import { allocPlane16, sharedPlanesAvailable } from './crossOriginIsolation.js';
 
 function noDefects() {
   return { repaired: 0, dead: 0, hot: 0, perChannel: [0, 0, 0] };
@@ -36,11 +37,17 @@ function detachBuffer(buffer) {
  * plane does not live in is detached as soon as packing is done: the RGB16
  * plane and an 8-bit source. A 4-channel source is wrapped rather than copied,
  * so its buffer IS the RGBA16 plane and is never detached.
+ *
+ * `sharedPlanes` (#264): where this realm is cross-origin isolated the RGBA16
+ * plane is allocated in shared memory, here where it is built, so the page
+ * and its workers read it without a copy. Nothing writes it once this pass
+ * is done (the write-once rule of crossOriginIsolation.js).
  */
-export function packRawResult(result, { releaseSource = true } = {}) {
+export function packRawResult(result, { releaseSource = true, sharedPlanes = false } = {}) {
   const source = result?.data;
   const { rgb16, channels } = rawResultToRgb16(result);
-  const image16 = packRGBToImage16(result.width, result.height, rgb16, channels);
+  const alloc = sharedPlanes && sharedPlanesAvailable() ? (length) => allocPlane16(length, { shared: true }) : null;
+  const image16 = packRGBToImage16(result.width, result.height, rgb16, channels, alloc);
   if (releaseSource) {
     const kept = image16.data.buffer;
     if (rgb16.buffer !== kept) detachBuffer(rgb16.buffer);
@@ -94,7 +101,8 @@ export function finishRawPostDecode(image16, options = {}, { from = 'packed', de
 }
 
 /**
- * All steps. `options`: `{ suppressSensorDefects?: boolean, filmStats?: { borderBufferPct } | null }`.
+ * All steps. `options`: `{ suppressSensorDefects?: boolean, filmStats?: { borderBufferPct } | null,
+ * sharedPlanes?: boolean }`.
  */
 export function runRawPostDecode(result, options = {}, progress = null) {
   const image16 = packRawResult(result, options);
@@ -124,6 +132,11 @@ export function viewFromDescription(desc) {
   const Type = VIEW_TYPES[desc?.kind];
   if (!Type || !desc.buffer) throw new TypeError(`Unsupported view: ${desc?.kind}`);
   return new Type(desc.buffer, desc.byteOffset, desc.length);
+}
+
+/** Only ArrayBuffers go in a transfer list: a shared plane is posted as it is. */
+function transferListOf(...buffers) {
+  return buffers.filter((buffer) => typeof ArrayBuffer !== 'undefined' && buffer instanceof ArrayBuffer && buffer.byteLength > 0);
 }
 
 /** Whether a LibRaw result's samples can be transferred to the worker. */
@@ -182,7 +195,7 @@ export function handleRawPostDecodeMessage(msg, reply) {
       rgba8,
       defects: outcome.defects,
       filmStats: outcome.filmStats
-    }, [rgba16.buffer, rgba8.buffer]);
+    }, transferListOf(rgba16.buffer, rgba8.buffer));
   } catch (err) {
     const message = {
       type: 'error',
@@ -201,7 +214,7 @@ export function handleRawPostDecodeMessage(msg, reply) {
     } else if (progress.image16?.data?.buffer?.byteLength > 0) {
       message.rgba16 = describeView(progress.image16.data);
       if (progress.stage === 'repaired') message.defects = progress.defects;
-      transfer.push(message.rgba16.buffer);
+      transfer.push(...transferListOf(message.rgba16.buffer));
     }
     reply(message, transfer);
   }

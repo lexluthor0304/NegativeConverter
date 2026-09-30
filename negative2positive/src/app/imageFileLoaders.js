@@ -140,7 +140,7 @@ export async function loadRawImageDataPreview(buffer, fileName, options) {
  * 1/2/4-bit, interlaced, tRNS — is handed to the browser decoder, which is
  * off-thread, handles every colour type correctly and costs ~1/5 the memory.
  */
-export async function loadPngImageData(buffer, { signal = null } = {}) {
+export async function loadPngImageData(buffer, { signal = null, sharedPlanes = false } = {}) {
   const aborted = () => signal?.reason?.name === 'AbortError' ? signal.reason
     : new DOMException('PNG decode was aborted', 'AbortError');
   if (signal?.aborted) throw aborted();
@@ -160,11 +160,18 @@ export async function loadPngImageData(buffer, { signal = null } = {}) {
   }
 
   const { decodeScanInWorker } = await import('./scanDecodeClient.js');
-  const decoded = await decodeScanInWorker(buffer, 'png', { signal });
+  // `sharedPlanes` (#264): a 16-bit PNG's plane in shared memory where the
+  // page is cross-origin isolated (the editor's scans).
+  const decoded = await decodeScanInWorker(buffer, 'png', { signal, sharedPlanes });
   if (decoded) return decoded;
   if (signal?.aborted) throw aborted();
-  const { loadPngFile } = await import('./pngFileLoader.js');
-  return loadPngFile(buffer);
+  const [{ loadPngFile }, { allocPlane16, sharedPlanesAvailable, markDerivedEightBit }] = await Promise.all([
+    import('./pngFileLoader.js'), import('./crossOriginIsolation.js')
+  ]);
+  const alloc = sharedPlanes && sharedPlanesAvailable() ? (length) => allocPlane16(length, { shared: true }) : null;
+  const image = loadPngFile(buffer, { alloc });
+  if (image.__image16) markDerivedEightBit(image);
+  return image;
 }
 
 // No eager __image16 in either path below: an 8-bit source holds no extra

@@ -1,4 +1,5 @@
 import { answerOpenCvWorker } from './opencvRuntime.js';
+import { isSharedPlane, hasDerivedEightBit, guardSharedPlanes } from './crossOriginIsolation.js';
 
 // Content hash and occupied blocks of each mask the worker returned, keyed by
 // the mask object. A mask made on the page (the OpenCV fallback) has none.
@@ -126,6 +127,16 @@ export function createDustWorkerClient({
 
   function uploadPlane(kind, image, array, extra = {}) {
     const run = generation;
+    // A shared plane (#264) is posted whole, without a copy or a transfer;
+    // the worker keeps that view. `derive8` also makes the worker's 8-bit
+    // source from it (the frame's 8-bit plane is the 16-bit one >>> 8).
+    if (isSharedPlane(array)) {
+      const guard = guardSharedPlanes(`dust plane ${kind}`, [array]);
+      const reply = post({ type: 'plane', kind, width: image.width, height: image.height,
+        offset: 0, total: array.length, chunk: array, done: true, ...extra }, [], data => data);
+      reply.then(() => guard.verify(), () => guard.verify());
+      return { posted: reply.then(() => undefined, () => undefined), reply };
+    }
     const step = Math.max(1, Math.floor(planeSliceBytes / array.BYTES_PER_ELEMENT));
     let reply;
     const posted = (async () => {
@@ -149,10 +160,16 @@ export function createDustWorkerClient({
   // lacks is decided when the plane's turn comes, so repeated calls are cheap.
   function seed(image, maskInfo = null) {
     const skip = () => ({ reply: Promise.resolve() });
+    const plane16 = image.__image16?.data;
+    // A shared 16-bit plane whose >>> 8 is the frame's 8-bit plane seeds
+    // both at once: no 8-bit copy either (#264).
+    const derive8 = isSharedPlane(plane16) && hasDerivedEightBit(image);
     const replies = [schedule(() => {
       if (source === image) return skip();
-      const out = uploadPlane('rgba', image, image.data);
-      source = image; precision = null; maskTag = null;
+      const out = derive8
+        ? uploadPlane('image16', image, plane16, { derive8: true })
+        : uploadPlane('rgba', image, image.data);
+      source = image; precision = derive8 ? plane16 : null; maskTag = null;
       return out;
     })];
     if (image.__image16?.data) {
@@ -187,16 +204,24 @@ export function createDustWorkerClient({
       const reuseSource = source === image;
       const message = { type, width: image.width, height: image.height, reuseSource, ...extra };
       const moved = transfers.slice();
-      if (!reuseSource) {
+      const plane16 = image.__image16?.data;
+      // A shared 16-bit plane is sent as it is (#264), and derives the 8-bit
+      // source too where it can; plain planes are copied as before.
+      const shared16 = isSharedPlane(plane16) ? plane16 : null;
+      const derive8 = !reuseSource && Boolean(shared16) && hasDerivedEightBit(image);
+      if (!reuseSource && !derive8) {
         message.rgba = image.data.slice();
         moved.push(message.rgba.buffer);
       }
-      const image16 = type === 'detect' ? null : image.__image16?.data;
+      const image16 = type === 'detect' && !shared16 ? null : plane16;
       if (image16 && (!reuseSource || precision !== image16)) {
-        message.image16 = image16.slice();
-        moved.push(message.image16.buffer);
+        message.image16 = shared16 || image16.slice();
+        if (!shared16) moved.push(message.image16.buffer);
       }
+      if (derive8) message.derive8 = true;
+      const guard = guardSharedPlanes(`dust ${type}`, [shared16]);
       const reply = post(message, moved, decode);
+      reply.then(() => guard.verify(), () => guard.verify());
       source = image;
       precision = image16 || (reuseSource ? precision : null);
       if (!reuseSource) maskTag = null;

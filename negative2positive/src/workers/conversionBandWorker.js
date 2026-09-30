@@ -110,6 +110,10 @@ async function handle(message) {
     }
     case 'load': {
       const band = bandFrom(message, { plan: message.plan });
+      // Rows of a shared source (#264): copied here into this band's rows of
+      // the pool's plane, which the band then converts in place. The source
+      // itself is only read.
+      if (message.sourceRows && band.shared) band.data.set(sharedView(Uint16Array, message.sourceRows));
       const partial = prepareSilverCoreBand(message.plan, band, band.y0);
       jobState(job).bands.set(message.index, band);
       return { reply: { id, partial } };

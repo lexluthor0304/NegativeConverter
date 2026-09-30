@@ -1,4 +1,5 @@
 import { createLibRaw } from './librawRuntime.js';
+import { markDerivedEightBit, allocPlane16, sharedPlanesAvailable } from './crossOriginIsolation.js';
 import { decodeTiffBuffer } from './tiffFileLoader.js';
 import { decodeScanInWorker } from './scanDecodeClient.js';
 export { tiffIfdToRgb16 } from './tiffFileLoader.js';
@@ -177,11 +178,15 @@ function asDecodeMemoryError(err, width, height) {
  * no 16-bit mirror, so nothing downstream can mistake ×257 padding for real
  * precision (silverAdapter promotes on demand for those).
  */
-async function loadTiffBuffer(buffer, signal = null) {
-  const decoded = await decodeScanInWorker(buffer, 'tiff', { signal });
+async function loadTiffBuffer(buffer, signal = null, sharedPlanes = false) {
+  const decoded = await decodeScanInWorker(buffer, 'tiff', { signal, sharedPlanes });
   if (decoded) return decoded;
   throwIfAborted(signal);
-  return decodeTiffBuffer(buffer);
+  // Built here, so a shared plane (#264) is allocated here.
+  const alloc = sharedPlanes && sharedPlanesAvailable() ? (length) => allocPlane16(length, { shared: true }) : null;
+  const image = decodeTiffBuffer(buffer, { alloc });
+  if (image.__image16) markDerivedEightBit(image);
+  return image;
 }
 
 /**
@@ -221,6 +226,11 @@ async function loadTiffBuffer(buffer, signal = null) {
  *   per-decode one (same run/terminate interface). When it keeps the planes
  *   (`held`), the result is `{ held: true, width, height }` instead of an
  *   ImageData: the analysis and the sample run in that worker.
+ * `options.sharedPlanes` (#264): the RGBA16 plane is allocated in shared
+ * memory where the page is cross-origin isolated, for decodes the editor
+ * keeps (its workers then read the plane without a copy). Batch and pass
+ * decodes leave it off: they hand their planes over by transfer.
+ * `options.background`: a lane's decode, whose LibRaw threads are capped.
  */
 export async function loadRawFile(buffer, fileName, options = {}) {
   const normalizedFileName = String(fileName || '').toLowerCase();
@@ -244,13 +254,13 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     if (sniffed && sniffed.kind !== 'tiff') {
       console.warn(`[TIFF] ${fileName} is actually ${sniffed.kind}; decoding it as such`);
       if (onMetadata) onMetadata(null);
-      if (sniffed.kind === 'png') return await loadPngImageData(buffer, { signal });
+      if (sniffed.kind === 'png') return await loadPngImageData(buffer, { signal, sharedPlanes: options.sharedPlanes === true });
       const image = await loadStandardImage(new Blob([buffer]));
       throwIfAborted(signal);
       return image;
     }
     try {
-      const imageData = await loadTiffBuffer(buffer, signal);
+      const imageData = await loadTiffBuffer(buffer, signal, options.sharedPlanes === true);
       if (onMetadata) onMetadata(null);
       return imageData;
     } catch (err) {
@@ -266,7 +276,7 @@ export async function loadRawFile(buffer, fileName, options = {}) {
       try {
         // Preserve the original container for LibRaw if this is a CFA DNG
         // rather than a scanner-style TIFF that UTIF can actually render.
-        const imageData = await loadTiffBuffer(buffer.slice(0), signal);
+        const imageData = await loadTiffBuffer(buffer.slice(0), signal, options.sharedPlanes === true);
         if (onMetadata) onMetadata(null);
         return imageData;
       } catch (err) {
@@ -512,7 +522,10 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     try {
       const running = postDecode.run(result, {
         suppressSensorDefects: options.suppressSensorDefects !== false,
-        filmStats: filmStatsRequest
+        filmStats: filmStatsRequest,
+        // The editor's decodes (#264): the RGBA16 plane in shared memory
+        // where the page is cross-origin isolated.
+        sharedPlanes: options.sharedPlanes === true
       }, { signal });
       result = null;
       outcome = await running;
@@ -570,6 +583,8 @@ export async function loadRawFile(buffer, fileName, options = {}) {
       throw asDecodeMemoryError(err, width, height);
     }
     imageData.__image16 = { width: outcome.width, height: outcome.height, data: outcome.rgba16 };
+    // The post-decode pass built the 8-bit plane as the 16-bit one >>> 8.
+    markDerivedEightBit(imageData);
     if (outcome.filmStats) primeFilmStats(imageData, outcome.filmStats);
     // The size the recipe's crop, strokes and analysis area refer to. LibRaw
     // shrinks only mosaic data: a result at the metadata's full size was not

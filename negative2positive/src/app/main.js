@@ -27,7 +27,7 @@ import { createEmbeddedPreviewPool } from './scanDecodeClient.js';
 import { isTiffContainerRawName } from './rawEmbeddedPreview.js';
 import { renderEmbeddedPreview, createDocumentPreviewEnv } from './embeddedPreviewRender.js';
 import { canPublishThumbnail } from './thumbnailRank.js';
-import { describeRealmIsolation, planeGuardReport } from './crossOriginIsolation.js';
+import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isSharedPlane } from './crossOriginIsolation.js';
     import { detectedImportSettings } from './filmTypeDetection.js';
     import { createAiModelLoader } from './aiModelLoading.js';
     import { opencvGlueUrl, installPageOpenCvHook } from './opencvModule.js';
@@ -12243,6 +12243,7 @@ import { describeRealmIsolation, planeGuardReport } from './crossOriginIsolation
                 sourceBlob: file,
                 filmStats,
                 signal,
+                sharedPlanes: sharedPlanesAvailable(),
                 reserveDecode,
                 ramBytes: memoryRuntime.ramBytes,
                 // Sequential devices: stage 2 once stage 1's LibRaw heap is gone.
@@ -12267,6 +12268,9 @@ import { describeRealmIsolation, planeGuardReport } from './crossOriginIsolation
               sourceBlob: file,
               filmStats,
               signal,
+              // The editor's photo: its 16-bit plane in shared memory where
+              // the page is cross-origin isolated (#264).
+              sharedPlanes: sharedPlanesAvailable(),
               reserveDecode,
               ramBytes: memoryRuntime.ramBytes,
               onMetadata(meta) {
@@ -12282,7 +12286,7 @@ import { describeRealmIsolation, planeGuardReport } from './crossOriginIsolation
           const arrayBuffer = await file.arrayBuffer();
           if (signal?.aborted || !isCurrentLoad(generation)) return { status: 'stale' };
           await reserveDecode({ kind: 'scan' });
-          imageData = await loadPngImageData(arrayBuffer, { signal });
+          imageData = await loadPngImageData(arrayBuffer, { signal, sharedPlanes: sharedPlanesAvailable() });
         } else {
           await reserveDecode({ kind: 'scan' });
           imageData = await loadStandardImage(file);
@@ -12564,6 +12568,7 @@ import { describeRealmIsolation, planeGuardReport } from './crossOriginIsolation
             sourceBlob: record.file,
             filmStats: record.filmStats,
             signal,
+            sharedPlanes: sharedPlanesAvailable(),
             reserveDecode: size => memoryClaim.atDecode(size),
             ramBytes: memoryRuntime.ramBytes,
             onMetadata(meta) {
@@ -12796,7 +12801,7 @@ import { describeRealmIsolation, planeGuardReport } from './crossOriginIsolation
       if (start.detectFrame || start.readEdge) {
         const signal = record.abort.signal;
         // A decode again reserves like stage 2 (#258).
-        const reload = () => loadFileToImageData(record.file, { signal, priority: 'foreground', label: `full-resolution ${record.fileName}` });
+        const reload = () => loadFileToImageData(record.file, { signal, priority: 'foreground', label: `full-resolution ${record.fileName}`, sharedPlanes: true });
         const analysed = await runImportDetections(image, {
           frame: start.detectFrame, filmEdge: start.readEdge, owned: true, reload, silent: true,
           autoFrame: start.autoFrame, filmType: snapshot.filmType, frameFilmType: snapshot.filmType, signal
@@ -14699,8 +14704,13 @@ import { describeRealmIsolation, planeGuardReport } from './crossOriginIsolation
       }
       // The pool builds the frame's display level with its bands (#248), so
       // processNegative does not box-filter the whole frame on this thread.
+      // The frame of a shared base is shared too (#264): the editor's workers
+      // then read it without a copy.
       const output = plan.identity ? source
-        : await geometryPool.render(source, plan, { isCurrent, maxInFlight: interactiveGeometryBands(plan), level: true });
+        : await geometryPool.render(source, plan, {
+          isCurrent, maxInFlight: interactiveGeometryBands(plan), level: true,
+          shared: isSharedPlane(source.__image16?.data) && sharedPlanesAvailable()
+        });
       if (!output || !isCurrent()) return null;
       if (!key.crop) return { frame: output, cropped: null };
       return { frame: createGeometryFrame(base, key), cropped: output };
@@ -18309,9 +18319,11 @@ import { describeRealmIsolation, planeGuardReport } from './crossOriginIsolation
     // `postDecode`/`decodeSlot` (#252): a roll lane's frame worker and the
     // decode slots its lanes share (see loadRawFile). With a frame worker that
     // keeps the planes, a RAW resolves `{ held: true, width, height }`.
+    // `sharedPlanes` (#264): a decode the editor keeps, its 16-bit plane in
+    // shared memory where the page is cross-origin isolated.
     async function loadFileToImageData(file, {
       filmStats = false, signal = null, onMetadata = null, halfSize = false, onStage = null, claim = null, priority = 'user', label = '',
-      postDecode = null, decodeSlot = null
+      postDecode = null, decodeSlot = null, sharedPlanes = false
     } = {}) {
       const fileName = file.name.toLowerCase();
       const aborted = () => signal?.reason?.name === 'AbortError' ? signal.reason : new DOMException('Decode was aborted', 'AbortError');
@@ -18326,6 +18338,8 @@ import { describeRealmIsolation, planeGuardReport } from './crossOriginIsolation
             sourceBlob: file,
             filmStats: filmStats ? { borderBufferPct: defaultFilmBaseBuffer() } : null,
             signal,
+            sharedPlanes: sharedPlanes && sharedPlanesAvailable(),
+            background: priority === 'background',
             reserveDecode: size => memoryClaim.atDecode(size),
             ramBytes: memoryRuntime.ramBytes,
             ...(onMetadata ? { onMetadata } : {}),
@@ -18345,7 +18359,7 @@ import { describeRealmIsolation, planeGuardReport } from './crossOriginIsolation
           const arrayBuffer = await file.arrayBuffer();
           if (signal?.aborted) throw aborted();
           await memoryClaim.atDecode({ kind: 'scan' });
-          image = await loadPngImageData(arrayBuffer, { signal });
+          image = await loadPngImageData(arrayBuffer, { signal, sharedPlanes: sharedPlanes && sharedPlanesAvailable() });
         } else {
           await memoryClaim.atDecode({ kind: 'scan' });
           image = await loadStandardImage(file);
@@ -21500,7 +21514,9 @@ import { describeRealmIsolation, planeGuardReport } from './crossOriginIsolation
       let rawMetadata = null;
       const base = await loadFileToImageData(file, {
         filmStats: true, signal, onMetadata: meta => { rawMetadata = meta; },
-        claim: context?.claim || null, priority: 'background'
+        claim: context?.claim || null, priority: 'background',
+        // Adopted, prefetched or analysed for the editor: shared where it can be (#264).
+        sharedPlanes: true
       });
       return { base, rawMetadata };
     }

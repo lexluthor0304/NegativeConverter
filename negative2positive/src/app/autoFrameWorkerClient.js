@@ -1,6 +1,23 @@
 import { answerOpenCvWorker } from './opencvRuntime.js';
+import { isSharedPlane, hasDerivedEightBit, guardSharedPlanes } from './crossOriginIsolation.js';
 
 const abortError = () => new DOMException('Auto-frame request was superseded', 'AbortError');
+
+// The planes of one request (#264). A shared 16-bit plane goes as it is: no
+// copy and no transfer, and a frame whose 8-bit plane is that plane >>> 8
+// sends no 8-bit bytes at all (`derive8`: the worker derives them). Otherwise
+// the 8-bit plane (and a plain 16-bit one, when asked for) goes as before.
+function framePlanes(image, { with16 = false, owned = false } = {}) {
+  const data16 = image.__image16?.data;
+  const shared16 = isSharedPlane(data16) ? data16 : null;
+  const derive8 = Boolean(shared16) && hasDerivedEightBit(image);
+  const rgba = derive8 ? undefined : (owned ? image.data : image.data.slice());
+  const image16 = shared16 || (with16 && data16 ? (owned ? data16 : data16.slice()) : undefined);
+  const transfers = [];
+  if (rgba) transfers.push(rgba.buffer);
+  if (image16 && !shared16) transfers.push(image16.buffer);
+  return { rgba, image16, derive8, shared16, transfers };
+}
 
 function isDetached(buffer) {
   return typeof buffer.detached === 'boolean' ? buffer.detached : buffer.byteLength === 0;
@@ -177,17 +194,18 @@ export function createAutoFrameWorkerClient({
 
   // One analysis on copies of the planes: an aborted request never copies.
   // 'analyze-frame' sends both planes (the Auto Frame button installs the
-  // rotated 16-bit planes it gets back); 'read-film-edge' the 8-bit one.
+  // rotated 16-bit planes it gets back); 'read-film-edge' the 8-bit one. A
+  // shared 16-bit plane is sent instead of copies where it can be (#264).
   const request = (image, options, type = 'analyze-frame', { signal = null } = {}) => {
     if (signal?.aborted) return Promise.reject(abortError());
-    let rgba, image16;
+    let planes;
     try {
-      rgba = image.data.slice();
-      image16 = type === 'analyze-frame' ? image.__image16?.data.slice() : undefined;
+      planes = framePlanes(image, { with16: type === 'analyze-frame' });
     } catch (error) { return Promise.reject(error); }
-    const transfers = [rgba.buffer];
-    if (image16) transfers.push(image16.buffer);
-    return post({ type, width: image.width, height: image.height, rgba, image16, options }, transfers, { signal })
+    const { rgba, image16, derive8, transfers } = planes;
+    const guard = guardSharedPlanes(`auto-frame ${type}`, [planes.shared16]);
+    return post({ type, width: image.width, height: image.height, rgba, image16, derive8, options }, transfers, { signal })
+      .finally(() => guard.verify())
       .then(result => (type === 'analyze-frame' ? restoreFrameResult(result, image, options) : result));
   };
 
@@ -216,20 +234,24 @@ export function createAutoFrameWorkerClient({
     const send = async (withImage16, askFrame, askEdge) => {
       if (signal?.aborted) throw abortError();
       const current = outcome.image;
-      const rgba = owned ? current.data : current.data.slice();
-      const image16 = withImage16 && has16 ? (owned ? current.__image16.data : current.__image16.data.slice()) : undefined;
-      const transfers = [rgba.buffer];
-      if (image16) transfers.push(image16.buffer);
+      // A shared 16-bit plane (#264) goes with every request, without a copy
+      // or a transfer, so the worker can rotate at full resolution at once;
+      // nothing else is moved, and the frame stays the caller's.
+      const { rgba, image16, derive8, shared16, transfers } = framePlanes(current, { with16: withImage16, owned });
+      const moved = owned && transfers.length > 0;
+      const guard = guardSharedPlanes('auto-frame analyze-import', [shared16]);
       try {
         const reply = await post({
-          type: 'analyze-import', width: current.width, height: current.height, rgba, image16,
-          frame: askFrame, filmEdge: askEdge, image16Omitted: has16 && !image16, returnPlanes: owned
+          type: 'analyze-import', width: current.width, height: current.height, rgba, image16, derive8,
+          frame: askFrame, filmEdge: askEdge, image16Omitted: has16 && !image16, returnPlanes: moved
         }, transfers, { signal });
-        if (owned) outcome.image = rebuildTransferredImage(current, reply.rgba, reply.image16 || null);
+        if (moved) outcome.image = rebuildTransferredImage(current, rgba ? reply.rgba : current.data, shared16 ? null : (reply.image16 || null));
         return reply;
       } catch (error) {
-        if (owned && (isDetached(rgba.buffer) || (image16 && isDetached(image16.buffer)))) outcome.imageLost = true;
+        if (moved && ((rgba && isDetached(rgba.buffer)) || (image16 && !shared16 && isDetached(image16.buffer)))) outcome.imageLost = true;
         throw error;
+      } finally {
+        guard.verify();
       }
     };
     let reply;

@@ -42,7 +42,7 @@ npm run test:rust
 ```
 
 実際の Chrome / CDP で唯一の Studio 画面に画像を読み込み、自動変換・除塵・曲線・
-履歴・一括書き出し・裁切時の色解析・ピクセル字体を検証する。
+履歴・一括書き出し・裁切時の色解析・ピクセル字体・クロスオリジン分離を検証する。
 `main.js`、パイプライン、画面構成を変更したら実行する:
 ```bash
 npm run test:smoke
@@ -67,6 +67,13 @@ its own `PORT`/`CDP_PORT` instead.
 
 Known issues that were reviewed but not fixed are queued in
 `docs/audit-backlog.md`; delete an entry when it is done.
+
+The app is cross-origin isolated (COOP `same-origin` + COEP `require-corp` from
+the Vite servers, both `vercel.json` files and the desktop app; one source,
+`scripts/cross-origin-isolation.mjs`), so 16-bit planes can be shared with
+workers without copies. A new cross-origin load must be a CORS request or come
+with `Cross-Origin-Resource-Policy: cross-origin`, and a shared plane is never
+written after it is published; see `docs/cross-origin-isolation.md`.
 
 Batch export and the post-import roll analysis run several files at once
 through `batchExportScheduler.js` (lane planning by cores/memory/file size,

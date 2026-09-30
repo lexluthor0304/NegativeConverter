@@ -1,3 +1,4 @@
+import { markDerivedEightBit } from './crossOriginIsolation.js';
 function createScanDecodeWorker() {
   return new Worker(new URL('../workers/scanDecodeWorker.js', import.meta.url), { type: 'module' });
 }
@@ -16,7 +17,9 @@ function abortError(signal) {
 export async function decodeScanInWorker(buffer, format, {
   workerFactory = defaultWorkerFactory,
   timeoutMs = 120000,
-  signal = null
+  signal = null,
+  // The 16-bit plane in shared memory where the page is isolated (#264).
+  sharedPlanes = false
 } = {}) {
   if (signal?.aborted) throw abortError(signal);
   if (!workerFactory) return null;
@@ -48,7 +51,7 @@ export async function decodeScanInWorker(buffer, format, {
     worker.onmessage = ({ data }) => {
       if (data.ready && !dispatched) {
         dispatched = true;
-        try { worker.postMessage({ buffer, format }, [buffer]); }
+        try { worker.postMessage({ buffer, format, sharedPlanes }, [buffer]); }
         catch (error) {
           if (buffer.byteLength) finish(null, null);
           else finish(error);
@@ -59,7 +62,11 @@ export async function decodeScanInWorker(buffer, format, {
       if (data.error) return finish(Object.assign(new Error(data.error), { code: data.code }));
       try {
         const result = new ImageData(data.data, data.width, data.height);
-        if (data.image16) result.__image16 = data.image16;
+        if (data.image16) {
+          result.__image16 = data.image16;
+          // A 16-bit TIFF or PNG: the 8-bit plane is the 16-bit one >>> 8.
+          markDerivedEightBit(result);
+        }
         finish(null, result);
       } catch (error) { finish(error); }
     };

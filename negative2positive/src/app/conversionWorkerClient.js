@@ -1,5 +1,6 @@
 import { isLargeImage } from './imageMemoryBudget.js';
 import { markOwnedPlanes, mayTransferBuffer, releaseOwnedPlanes } from './planeRelease.js';
+import { isSharedPlane, guardSharedPlanes } from './crossOriginIsolation.js';
 import { planConversionBands, haloFor } from '../pipeline/silverBands.js';
 import { unsharpMaskHaloRows } from '../silvercore/engine/Sharpening.js';
 
@@ -212,6 +213,9 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
     // seconds-long conversion itself.
     if (transfer && message.rgba) transfers.push(message.rgba);
     const expectedSourceBytes = moving ? src16.data.byteLength : 0;
+    // A shared source (#264) is posted as it is, without a copy: the worker
+    // reads it and nothing writes it (checked in dev, debug and smoke runs).
+    const guard = guardSharedPlanes(`conversion ${type}`, [isSharedPlane(src16?.data) && message.image16 ? src16.data : null]);
 
     const timeoutMs = conversionTimeoutMs(imageData.width * imageData.height);
     let result;
@@ -284,6 +288,8 @@ export function createConversionWorkerClient({ cacheInput = false, retainWorker 
       }
       if (err && err.returnedSource) delete err.returnedSource;
       throw err;
+    } finally {
+      guard.verify();
     }
 
     if (lent) {
@@ -855,6 +861,7 @@ export function createConversionBandPool({
     const useShared = Boolean(shared);
     let sourceReleased = false;
     let kept = false;
+    let guard = null;
     try {
       checkAbort(signal);
       const options = request.options || {};
@@ -863,12 +870,17 @@ export function createConversionBandPool({
         reference: options.analysisImageData || null, includeAnalysisPreview: options.includeAnalysisPreview !== false
       }, [], length / 4);
       planning.catch(() => {});
-      // Slice while worker 0 plans (#256: steps of a few milliseconds).
+      // Slice while worker 0 plans (#256: steps of a few milliseconds). A
+      // source that is itself shared (#264, the editor's plane) is not copied
+      // here: each band copies its own rows into the pool's plane in its
+      // worker ('load'), so nothing is copied into shared memory on this thread.
       let planes = null;
       const slices = [];
+      const sourceShared = useShared && isSharedPlane(source.data);
+      if (sourceShared) guard = guardSharedPlanes('band pool convert', [source.data]);
       if (useShared) {
         planes = sharedPlanes(length);
-        await copy(planes.data16, 0, source.data, 0, length, signal);
+        if (!sourceShared) await copy(planes.data16, 0, source.data, 0, length, signal);
       } else {
         for (const { y0, y1 } of plan) {
           const slice = new Uint16Array((y1 - y0) * rowWords);
@@ -883,11 +895,16 @@ export function createConversionBandPool({
       const planned = await untilAborted(planning, signal);
       const loads = plan.map(({ y0, y1 }, index) => {
         const rows = useShared ? sharedRows(planes, width, y0, y1) : { data16: slices[index].buffer };
+        if (sourceShared) {
+          rows.sourceRows = { buffer: source.data.buffer, offset: source.data.byteOffset + y0 * rowWords * 2, length: (y1 - y0) * rowWords };
+        }
         return post(index, { type: 'load', job, index, plan: planned.plan, width, y0, y1, ...rows },
           useShared ? [] : [slices[index].buffer], (y1 - y0) * width);
       });
       slices.length = 0;
       const partials = (await untilAborted(Promise.all(loads), signal)).map((reply) => reply.partial);
+      // Every band has its rows: the source is not read again.
+      guard?.verify();
       const tables = planned.tables || (await untilAborted(post(0, { type: 'tables', job, partials }, [], length / 4), signal)).tables;
       const halo = tables.sharpen ? unsharpMaskHaloRows(tables.sharpen) : 0;
       let replies = await untilAborted(Promise.all(plan.map(({ y0, y1 }, index) =>
@@ -917,6 +934,7 @@ export function createConversionBandPool({
       return frameOf(width, height, data16, data8, preview);
     } catch (err) {
       kept = false;
+      guard?.verify();
       releaseJob(job);
       if (sourceReleased && err?.code !== WORKER_ABORTED) {
         const lost = workerError(`The frame's source was lost with the band pool: ${err?.message || err}`, INPUT_LOST);

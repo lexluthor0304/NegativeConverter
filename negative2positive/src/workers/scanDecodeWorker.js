@@ -6,12 +6,13 @@
 import './isolationProbe.js'; // first: answers the page's isolation probe (#264)
 import { fromImageData8 } from '../silvercore/util/image16.js';
 import { renderEmbeddedPreview } from '../app/embeddedPreviewRender.js';
+import { allocPlane16, sharedPlanesAvailable } from '../app/crossOriginIsolation.js';
 
 // UPNG and UTIF load only when a scan job needs them, so an image-only worker
 // starts without paying for them.
 const scanLoaders = {
-  png: () => import('../app/pngFileLoader.js').then(module => buffer => module.loadPngFile(buffer)),
-  tiff: () => import('../app/tiffFileLoader.js').then(module => buffer => module.decodeTiffBuffer(buffer)),
+  png: () => import('../app/pngFileLoader.js').then(module => (buffer, options) => module.loadPngFile(buffer, options)),
+  tiff: () => import('../app/tiffFileLoader.js').then(module => (buffer, options) => module.decodeTiffBuffer(buffer, options)),
 };
 
 // A real 1x1 baseline JPEG (libjpeg, with EOI). Decoding it and drawing it into an OffscreenCanvas
@@ -104,13 +105,16 @@ async function embeddedPreview(message) {
   }
 }
 
-async function scan({ buffer, format }) {
+async function scan({ buffer, format, sharedPlanes = false }) {
   try {
     const decode = await (format === 'png' ? scanLoaders.png() : scanLoaders.tiff());
-    const result = decode(buffer);
+    // The editor's scan (#264): its 16-bit plane in shared memory, built here;
+    // a shared buffer is posted as it is, never in the transfer list.
+    const alloc = sharedPlanes && sharedPlanesAvailable() ? (length) => allocPlane16(length, { shared: true }) : null;
+    const result = decode(buffer, { alloc });
     const image16 = result.__image16;
     const transfers = [result.data.buffer];
-    if (image16) transfers.push(image16.data.buffer);
+    if (image16 && image16.data.buffer instanceof ArrayBuffer) transfers.push(image16.data.buffer);
     self.postMessage({ width: result.width, height: result.height, data: result.data, image16 }, transfers);
   } catch (error) {
     self.postMessage({ error: error.message || String(error), code: error.code });

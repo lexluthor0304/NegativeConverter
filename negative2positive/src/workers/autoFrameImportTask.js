@@ -1,5 +1,19 @@
 // The auto-frame worker's requests that carry a frame (#251), kept apart
 // from the worker shell so they run in Node tests with the real analyzer.
+import { deriveEightBit } from '../app/crossOriginIsolation.js';
+
+/**
+ * The 8-bit plane of a request: posted, or (`derive8`, #264) derived here from
+ * the shared 16-bit plane the page sent instead, exactly as the page's own
+ * plane was made (>>> 8).
+ */
+export function requestRgba(message) {
+  if (message.derive8 && message.image16) return deriveEightBit(message.image16);
+  return message.rgba;
+}
+
+// Only ArrayBuffers can be transferred; a shared plane is posted as it is.
+const transferable = (buffer) => buffer instanceof ArrayBuffer;
 
 // A frame result for posting. A rotated frame goes back as its planes
 // (ImageDataの拡張プロパティはstructured cloneに含まれないため明示する);
@@ -34,7 +48,7 @@ export function detectFrameForRequest(image, message, options, { detect, rotate 
  * Resolves { reply, transfers }.
  */
 export async function runImportRequest(message, { loadCv, detect, rotate, readEdge }) {
-  const image = new ImageData(message.rgba, message.width, message.height);
+  const image = new ImageData(requestRgba(message), message.width, message.height);
   if (message.image16) image.__image16 = { width: image.width, height: image.height, data: message.image16 };
   const reply = {};
   const transfers = [];
@@ -50,9 +64,12 @@ export async function runImportRequest(message, { loadCv, detect, rotate, readEd
     catch (error) { reply.filmEdgeError = String(error?.message || error); }
   }
   if (message.returnPlanes) {
-    reply.rgba = message.rgba;
-    transfers.push(message.rgba.buffer);
-    if (message.image16) {
+    if (message.rgba) {
+      reply.rgba = message.rgba;
+      transfers.push(message.rgba.buffer);
+    }
+    // A shared 16-bit plane stayed the page's: it is not sent back.
+    if (message.image16 && transferable(message.image16.buffer)) {
       reply.image16 = message.image16;
       transfers.push(message.image16.buffer);
     }

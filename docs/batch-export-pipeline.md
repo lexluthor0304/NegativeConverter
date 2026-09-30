@@ -302,7 +302,9 @@ reservation.
   thread. A single export keeps them too without dust or repairs; the plane
   that becomes `state.processedImageData` comes back as a copy. With
   cross-origin isolation (#264) the bands share one plane instead of being
-  sliced. A pool that fails falls back to the lane or the single worker
+  sliced; a source that is itself shared (the editor's RAW frame) is copied
+  into it by the bands in their workers ('load' with `sourceRows`), never on
+  the main thread. A pool that fails falls back to the lane or the single worker
   with the same pixels and is not used again; a released geometry output
   is rebuilt from the base; lost resident bands re-render the frame. The
   pool is released at batch end and after each single export.

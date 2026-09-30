@@ -8,6 +8,7 @@ import {
   planGeometryBands, sliceGeometrySource, renderGeometryRows, wrapGeometryOutput, geometrySourceRect
 } from './imageGeometry.js';
 import { displayLevelFactor, displayLevelRows, adoptDisplayLevel } from './displayPreview.js';
+import { allocPlane16, hasDerivedEightBit, markDerivedEightBit, isSharedPlane, deriveEightBit, guardSharedPlanes } from './crossOriginIsolation.js';
 
 // Below this many output pixels a band is not worth a worker round trip.
 const MIN_BAND_PIXELS = 1_000_000;
@@ -65,10 +66,23 @@ function renderRows16(plan, src, data16, y0, y1) {
   }
 }
 
+// A band's source when the base is shared (#264): full-width rows [y, y +
+// height) of the base, as a view of its shared 16-bit plane (no copy), and
+// the 8-bit rows an index plan reads, derived here (`derive8`) or posted.
+function bandSource(src) {
+  if (!src.shared16) return src;
+  const data16 = new Uint16Array(src.shared16.buffer, src.shared16.byteOffset, src.shared16.length);
+  const data8 = src.needs8 ? (src.derive8 ? deriveEightBit(data16) : src.data8) : null;
+  return { x: src.x, y: src.y, width: src.width, height: src.height, data8, data16 };
+}
+
 // The worker side: one band of one plan, and with `levelFactor` > 1 its rows
 // of the display level (#248); with `planes16` (#256) its 16-bit rows only.
+// `out16` (#264): the band's rows of a shared output plane, written in place
+// (only the 8-bit rows go back).
 export function runGeometryBand(message) {
-  const { id, plan, y0, y1, src, levelFactor = 1, planes16 = false, levelOnly = false } = message;
+  const { id, plan, y0, y1, levelFactor = 1, planes16 = false, levelOnly = false } = message;
+  const src = bandSource(message.src);
   const length = (y1 - y0) * plan.outWidth * 4;
   if (planes16 && plan.has16) {
     const data16 = new Uint16Array(length);
@@ -76,7 +90,8 @@ export function runGeometryBand(message) {
     return { payload: { id, data8: null, data16 }, transfers: [data16.buffer] };
   }
   const data8 = new Uint8ClampedArray(length);
-  const data16 = plan.has16 ? new Uint16Array(length) : null;
+  const sharedOut = plan.has16 && message.out16 ? new Uint16Array(message.out16.buffer, message.out16.byteOffset, message.out16.length) : null;
+  const data16 = sharedOut || (plan.has16 ? new Uint16Array(length) : null);
   renderGeometryRows(plan, src, { data8, data16 }, y0, y1);
   // A display proxy band (#249) sends back its level rows only.
   if (levelOnly) {
@@ -84,13 +99,30 @@ export function runGeometryBand(message) {
     return { payload: { id, level16 }, transfers: [level16.buffer] };
   }
   const transfers = [data8.buffer];
-  if (data16) transfers.push(data16.buffer);
-  const payload = { id, data8, data16 };
+  if (data16 && !sharedOut) transfers.push(data16.buffer);
+  const payload = { id, data8, data16: sharedOut ? null : data16 };
   if (levelFactor > 1) {
     payload.level16 = bandLevelRows(plan, { y0, y1 }, { data8, data16 }, levelFactor);
     transfers.push(payload.level16.buffer);
   }
   return { payload, transfers };
+}
+
+// What a band posts for a shared base (#264): a view description of its
+// full-width source rows, and for index plans the 8-bit rows (derived in the
+// worker when the base's 8-bit plane is its 16-bit one >>> 8, else copied).
+function sharedBandSlice(source, plan, rect) {
+  const width = plan.baseWidth;
+  const data16 = source.__image16.data;
+  const rowWords = width * 4;
+  const needs8 = plan.kind === 'index';
+  const derive8 = needs8 && hasDerivedEightBit(source);
+  return {
+    x: 0, y: rect.y, width, height: rect.height,
+    shared16: { buffer: data16.buffer, byteOffset: data16.byteOffset + rect.y * rowWords * 2, length: rect.height * rowWords },
+    needs8, derive8,
+    data8: needs8 && !derive8 ? source.data.slice(rect.y * rowWords, (rect.y + rect.height) * rowWords) : null
+  };
 }
 
 function renderBandHere(source, plan, band, planes16 = false) {
@@ -220,7 +252,7 @@ export function createGeometryPool({
     return new Promise(resolve => waiters.push(resolve));
   }
 
-  function postBand(entry, plan, band, src, levelFactor = 1, { planes16 = false, levelOnly = false } = {}) {
+  function postBand(entry, plan, band, src, levelFactor = 1, { planes16 = false, levelOnly = false, out16 = null } = {}) {
     return new Promise((resolve, reject) => {
       const id = ++sequence;
       const timer = setTimeout(() => fail(entry, new Error('Geometry worker timed out')), timeoutMs);
@@ -231,7 +263,7 @@ export function createGeometryPool({
       try {
         entry.worker.postMessage({
           type: 'geometry-band', id, plan, y0: band.y0, y1: band.y1, src, levelFactor,
-          ...(planes16 ? { planes16: true } : {}), ...(levelOnly ? { levelOnly: true } : {})
+          ...(planes16 ? { planes16: true } : {}), ...(levelOnly ? { levelOnly: true } : {}), ...(out16 ? { out16 } : {})
         }, transfers);
       } catch (error) {
         fail(entry, error);
@@ -248,10 +280,22 @@ export function createGeometryPool({
    * factor) also builds the display level of the output with the bands, as
    * `__displayLevel`; the bands then start on multiples of its k. `planes:
    * '16'` (#256, a 16-bit source) builds the 16-bit plane only, without a
-   * display level, and resolves `{ width, height, __image16 }`.
+   * display level, and resolves `{ width, height, __image16 }`. `shared`
+   * (#264, the editor's frame on a cross-origin isolated page) builds the
+   * 16-bit output in shared memory, here where it is assembled; nothing
+   * writes it once it is returned.
    */
-  async function render(source, plan, { isCurrent = () => true, bands: bandCount = null, maxInFlight = null, level = false, planes = null } = {}) {
+  async function render(source, plan, options = {}) {
     if (plan.identity) return source;
+    const guarded = { guard: null };
+    try {
+      return await renderBands(source, plan, options, guarded);
+    } finally {
+      guarded.guard?.verify();
+    }
+  }
+
+  async function renderBands(source, plan, { isCurrent = () => true, bands: bandCount = null, maxInFlight = null, level = false, planes = null, shared = false } = {}, guarded = {}) {
     const planes16 = planes === '16' && plan.has16;
     const k = planes16 ? 1 : (level === true ? displayLevelFactor(plan.outWidth, plan.outHeight) : Math.max(1, Math.floor(Number(level) || 1)));
     const requested = bandCount || geometryBandCount(plan, poolSize);
@@ -260,14 +304,19 @@ export function createGeometryPool({
       : requested, k);
     const length = plan.outWidth * plan.outHeight * 4;
     const out8 = planes16 ? null : new Uint8ClampedArray(length);
-    const out16 = plan.has16 ? new Uint16Array(length) : null;
+    const out16 = plan.has16 ? allocPlane16(length, { shared }) : null;
     const rowWords = plan.outWidth * 4;
+    // A shared base and a shared output (#264): the bands read the base's
+    // rows through views and write their 16-bit rows into the output in
+    // place; neither 16-bit plane is copied on this thread.
+    const sharedBands = !planes16 && isSharedPlane(out16) && isSharedPlane(source.__image16?.data);
+    if (sharedBands) guarded.guard = guardSharedPlanes('geometry bands', [source.__image16.data]);
     const levelWidth = Math.floor(plan.outWidth / k);
     const levelHeight = Math.floor(plan.outHeight / k);
     const level16 = k > 1 ? new Uint16Array(levelWidth * levelHeight * 4) : null;
     const place = (band, part) => {
       if (out8) out8.set(part.data8, band.y0 * rowWords);
-      if (out16) out16.set(part.data16, band.y0 * rowWords);
+      if (out16 && part.data16) out16.set(part.data16, band.y0 * rowWords);
       if (level16) level16.set(part.level16 || bandLevelRows(plan, band, part, k), (band.y0 / k) * levelWidth * 4);
     };
     const limit = Math.max(1, Math.min(poolSize, Number(maxInFlight) || Number(maxBandsInFlight) || poolSize));
@@ -288,9 +337,13 @@ export function createGeometryPool({
           counters.syncBands++;
         } else {
           // Copy the band's rows now; the base itself is never transferred.
-          const slice = sliceGeometrySource(source, plan, band.rect);
+          // A shared base is not copied at all (#264).
+          const slice = sharedBands ? sharedBandSlice(source, plan, band.rect) : sliceGeometrySource(source, plan, band.rect);
+          const outRows = sharedBands
+            ? { buffer: out16.buffer, byteOffset: out16.byteOffset + band.y0 * rowWords * 2, length: (band.y1 - band.y0) * rowWords }
+            : null;
           const key = ++token;
-          running.set(key, postBand(entry, plan, band, slice, k, { planes16 }).then(
+          running.set(key, postBand(entry, plan, band, slice, k, { planes16, out16: outRows }).then(
             part => ({ key, band, part }),
             error => ({ key, band, error })
           ));
@@ -321,6 +374,9 @@ export function createGeometryPool({
     if (level16) {
       output.__displayLevel = adoptDisplayLevel(level16, levelWidth, levelHeight, { sourceWidth: plan.outWidth, sourceHeight: plan.outHeight, k });
     }
+    // The kernels copy or derive both planes alike: the output's 8-bit plane
+    // is its 16-bit one >>> 8 whenever the source's was (#264).
+    if (out16 && hasDerivedEightBit(source)) markDerivedEightBit(output);
     return output;
   }
 

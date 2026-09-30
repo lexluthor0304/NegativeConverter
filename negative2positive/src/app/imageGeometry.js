@@ -1,4 +1,5 @@
 import { createImageCanvas } from './imageDataOps.js';
+import { allocPlane16, hasDerivedEightBit, markDerivedEightBit } from './crossOriginIsolation.js';
 
 const LITTLE_ENDIAN = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
 // Alpha is the fourth byte of an RGBA8 pixel, i.e. the top byte of its word.
@@ -475,8 +476,9 @@ const SCRATCH16_ROWS = 64;
 // Builds the whole output of `plan` on this thread. `with16: false` returns
 // the 8-bit view only: the kernels still compute the 16-bit samples (the
 // 8-bit bytes derive from them), band by band into one reused scratch buffer,
-// so the 8-bit bytes are the same and no 16-bit plane is allocated.
-export function renderGeometry(source, plan, { with16 = true } = {}) {
+// so the 8-bit bytes are the same and no 16-bit plane is allocated. `shared`
+// (#264) allocates the 16-bit output in shared memory where it can be.
+export function renderGeometry(source, plan, { with16 = true, shared = false } = {}) {
   if (plan.identity) return source;
   const out8 = new Uint8ClampedArray(plan.outWidth * plan.outHeight * 4);
   const src = {
@@ -496,13 +498,17 @@ export function renderGeometry(source, plan, { with16 = true } = {}) {
     }
     return new ImageData(out8, plan.outWidth, plan.outHeight);
   }
-  const out16 = plan.has16 ? new Uint16Array(out8.length) : null;
+  const out16 = plan.has16 ? allocPlane16(out8.length, { shared }) : null;
   renderGeometryRows(plan, src, { data8: out8, data16: out16 }, 0, plan.outHeight);
   if (plan.step === 1) {
     if (plan.rotates) geometryCounters.rotations++;
     else geometryCounters.copies++;
   }
-  return wrapGeometryOutput(plan, out8, out16);
+  const output = wrapGeometryOutput(plan, out8, out16);
+  // Both planes are copied or derived alike: a derived source gives a
+  // derived output (#264).
+  if (out16 && hasDerivedEightBit(source)) markDerivedEightBit(output);
+  return output;
 }
 
 export function wrapGeometryOutput(plan, out8, out16) {

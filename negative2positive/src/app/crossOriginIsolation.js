@@ -202,3 +202,34 @@ export function planeGuardReport() {
     violations: config.violations.slice()
   };
 }
+
+// ------------------------------------------------------ derived 8-bit planes
+
+// ImageData whose 8-bit plane is its 16-bit plane `>>> 8`, sample for sample:
+// a fresh RAW decode (the post-decode pass builds its mirror that way) and the
+// geometry outputs of such a frame (the kernels copy or derive both planes
+// alike). A worker that holds the shared 16-bit plane derives the 8-bit bytes
+// itself instead of receiving a copy of them (#264). The mark holds while
+// `__image16.data` is the plane it was made from: a published plane is not
+// written again (the write-once rule).
+const derivedEightBit = new WeakMap();
+
+/** Marks `image` as carrying an 8-bit plane derived from its 16-bit one. Returns it. */
+export function markDerivedEightBit(image) {
+  const data16 = image?.__image16?.data;
+  if (image && typeof image === 'object' && data16) derivedEightBit.set(image, data16);
+  return image;
+}
+
+/** True when `image`'s 8-bit plane is its current 16-bit plane `>>> 8`. */
+export function hasDerivedEightBit(image) {
+  const data16 = image?.__image16?.data;
+  return Boolean(data16) && derivedEightBit.get(image) === data16;
+}
+
+/** The 8-bit RGBA bytes of a 16-bit plane (`>>> 8`), as toImageData8 makes them. */
+export function deriveEightBit(data16) {
+  const out = new Uint8ClampedArray(data16.length);
+  for (let i = 0; i < data16.length; i++) out[i] = data16[i] >>> 8;
+  return out;
+}
