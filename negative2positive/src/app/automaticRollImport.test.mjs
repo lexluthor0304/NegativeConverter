@@ -715,6 +715,26 @@ for (const verdicts of [['noMask', 'mono', 'mono', 'mono', 'mono'], ['mono', 'mo
   held.resolve(); await flush();
 }
 
+{
+  // #252 + #258: a frame the roll pass measures on the page (a scan, or a RAW
+  // whose worker is unusable) decodes inside its lane's memory claim, like
+  // the shared decode, never under a second claim of its own: a budget below
+  // one frame could never grant that one next to the lane's.
+  const f = fixture();
+  const claims = [];
+  const load = f.context.loadFileToImageData;
+  f.context.loadFileToImageData = async (file, options = {}) => {
+    const claim = options.claim || null;
+    claims.push(claim && { priority: claim.priority, held: claim.held, bytes: claim.bytes });
+    return load(file, options);
+  };
+  f.context.scheduleAutomaticRollImport(f.items);
+  await f.fire(1200);
+  assert.ok(f.items.every(item => item.settings), 'every frame measured');
+  assert.equal(claims.length, 3, 'one decode per background frame');
+  assert.ok(claims.every(claim => claim && claim.priority === 'background' && claim.held), 'each inside its lane\'s held claim');
+}
+
 // #252: RAW frames decode into their lane's roll-frame worker, which keeps
 // the planes, detects the frame and reads the edge; the page merges its
 // results with today's functions and the worker builds the sample.

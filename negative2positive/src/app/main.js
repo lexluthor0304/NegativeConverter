@@ -26792,7 +26792,8 @@ import { canPublishThumbnail } from './thumbnailRank.js';
               // worker analysis already failed twice (then the page, as before).
               decode: (item, file, context) => {
                 if (!rollFrameWorkerUsable() || (workerFailures.get(item) || 0) >= 2 || !rollFrameDecodable(file)) {
-                  return decodeForBackground(file, context.signal);
+                  // Inside the lane's memory claim (#258), as the shared decode.
+                  return decodeForBackground(file, context.signal, context.context);
                 }
                 const options = rollFrameOptions(item);
                 return decodeRollFrame(file, { ...context, frames, slots, options, optionsKey: rollFrameOptionsKey(options) });
