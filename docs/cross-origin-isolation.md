@@ -42,7 +42,11 @@ keeps the copy path it always had, with the same pixels.
     under a millisecond and its worker reads a view, not a second copy.
   - The conversion band pool (#256): the bands of a shared source copy their
     own rows into the pool's plane in their workers; nothing is copied into
-    shared memory on the main thread.
+    shared memory on the main thread. The pool's own shared planes (#256
+    turned them on wherever the page is isolated) first ran in a browser
+    here: an 8-bit Step 3 on bands sent now read zeros and exported black
+    frames until the band adjusted the 8-bit rows it was sent
+    (`docs/batch-export-pipeline.md`).
   - The auto-frame and film-edge worker and the dust worker receive the
     shared plane and, where the frame's 8-bit plane is by construction that
     plane `>>> 8` (a fresh decode and its geometry frames, marked with
@@ -71,7 +75,13 @@ keeps the copy path it always had, with the same pixels.
   repair) uses them; EfficientViT (semantic colour) stays on one thread
   because its logits depend on the thread count (see below).
 - **A threaded LibRaw build** (`src/app/librawRuntime.js`, #264 Part D), once
-  libraw-wasm ships one: threads only on an isolated page.
+  libraw-wasm ships one (`LibRaw.features.threads`): `new LibRaw({ threads })`
+  only where shared memory is available (min(cores, 8) in the foreground, 2
+  in a background lane); everywhere else, and with libraw-wasm 1.6.0,
+  `new LibRaw()` exactly as before. Its report entry comes from inside the
+  LibRaw worker (`runtimeInfo()`: isolation, threads, pool size). Its
+  pthread workers share that worker's memory, so a pool that starts at all
+  is isolated; `ISOLATION_CDP_WORKERS=1` also reads each of them over CDP.
 
 ## Third-party loads under COEP
 
@@ -79,8 +89,9 @@ keeps the copy path it always had, with the same pixels.
 |---|---|
 | lensfun (bundled, `lensfunLoader.js`) | same origin |
 | lensfun web fallback, jsDelivr | loaded in CORS mode (`crossOrigin = 'anonymous'`, the core module loaded by the app before the IIFE); jsDelivr sends `Access-Control-Allow-Origin: *` and `Cross-Origin-Resource-Policy: cross-origin` |
-| GitHub star count (`api.github.com`) | CORS `fetch`, `Access-Control-Allow-Origin: *` |
-| update manifest (`download.neoanaloglab.com`, the site) | CORS `fetch`, `Access-Control-Allow-Origin: *` |
+| GitHub star count (`api.github.com`) | CORS `fetch`, `Access-Control-Allow-Origin: *` (the smoke's isolation step checks it renders, unless offline or rate limited) |
+| update manifest (`download.neoanaloglab.com`, the site), in the app and on `download.html` | CORS `fetch`, `Access-Control-Allow-Origin: *` |
+| the static SEO pages (`guide.html` and the others) | no cross-origin subresources: only links, canonical/alternate `<link>`s and metadata |
 | feedback form | web: same origin; desktop: CORS `fetch`, the API reflects the desktop origins |
 | Vercel Analytics | production loads the same-origin `/_vercel/insights/script.js`; not injected under `vite dev`, where it would load a cross-origin classic script without `crossorigin` |
 | Tauri IPC (`ipc://localhost`, `http://ipc.localhost`) | CORS requests (the IPC answers with `Access-Control-Allow-Origin`) or the postMessage fallback |
@@ -94,7 +105,7 @@ COOP `same-origin` severs `window.opener`; the app's one `window.open` passes
 | target | isolated | SharedArrayBuffer | how it was checked |
 |---|---|---|---|
 | Chrome, Vite dev server | yes: page and every worker | yes | `npm run test:smoke -- --isolation-only` (2026-09-30, Chrome 154, M1 Pro) |
-| Chrome, Vite preview (production build) | yes: page and every worker | yes | `scripts/isolation-preview-check.mjs` (same day): a LibRaw decode and a 16-bit PNG export on the built bundle |
+| Chrome, Vite preview (production build) | yes: page and every worker | yes | `scripts/isolation-preview-check.mjs` (same day): a LibRaw decode and a 16-bit PNG export on the built bundle; built with #264 Part B's threaded libraw-wasm, its pthread pool starts from the bundled chunks (8 threads, pool 7), and MI-GAN repairs dust with 4 ONNX Runtime threads |
 | production web (Vercel) | expected as the preview (same headers) | expected | not deployed from this branch |
 | macOS WKWebView (`tauri://localhost`) | page, module and classic workers report `crossOriginIsolated === true`; blob: workers do not | **no** | the desktop log line of a debug build with embedded assets (`cargo build --features tauri/custom-protocol`), 2026-09-30, macOS 27 |
 | Windows WebView2 (`http://tauri.localhost`) | not checked (no Windows machine) | | the desktop log line |
@@ -143,3 +154,11 @@ starts in 31-62 ms per decode):
 |---|---|---|
 | `_DSC3111.NEF` (10.7 MP) | 1256 ms | 865 ms |
 | `_DSC5290.dng` (24.3 MP) | 2502 ms | 2224 ms (1796-2622) |
+
+With the threaded build the isolation smoke step decodes its generated DNG
+three times on the isolated page (8 threads) and once on a page without
+isolation (the single-threaded build): the same RGBA16 and 8-bit planes and
+metadata every time, and the same 8- and 16-bit PNG exports, in 4 of 4 runs.
+One earlier run (12:31, before the decode probe existed) exported a
+different PNG on the isolated page; it did not recur and its cause is not
+known.

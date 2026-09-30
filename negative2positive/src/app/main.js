@@ -5633,11 +5633,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // ---- Cross-origin isolation (#264): what the page and its workers run with ----
     // `report()` spawns one worker of each kind and asks it (isolationReport.js);
     // the smoke run and ?debug=1 read it, the desktop logs a short form once.
-    window.__ncIsolation = {
+    window.__ncIsolation = Object.assign(window.__ncIsolation || {}, {
       page: () => describeRealmIsolation(),
       report: (options) => import('./isolationReport.js').then(module => module.collectIsolationReport(options)),
       planeGuard: () => planeGuardReport()
-    };
+    });
     logIsolationWhenIdle();
 
     // One terminal line per desktop launch (log_webview_diagnostics), once the
@@ -23915,6 +23915,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // AI repair: learned inpainting on the commit and export paths
     // ===========================================
     const aiRepair = { release: null, trim: null, resident: null, status: 'idle', provider: '', run: null, source: '', sourceRef: null, prefer: '', released: false, error: '', percent: 0, tiles: 0, ms: 0, revision: 0 };
+    // The session's provider and ONNX Runtime threads, for the isolation checks (#264).
+    window.__ncIsolation = Object.assign(window.__ncIsolation || {}, {
+      aiRepair: () => ({ provider: aiRepair.provider, threads: aiRepair.threads || 1, status: aiRepair.status, tiles: aiRepair.tiles })
+    });
     let pendingBrushRepairs = 0;
     let aiRepairRunsInFlight = 0;
 
@@ -24247,6 +24251,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         // session reports none.
         aiRepair.resident = 'residentBytes' in session ? () => session.residentBytes : null;
         aiRepair.provider = session.provider;
+        aiRepair.threads = session.threads || 1;
         aiRepair.source = label;
         aiRepair.sourceRef = source;
         aiRepair.prefer = prefer;

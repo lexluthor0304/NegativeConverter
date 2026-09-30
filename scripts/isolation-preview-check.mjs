@@ -9,7 +9,10 @@
 // Checks: the page and every worker are isolated (window.__ncIsolation.report();
 // with ISOLATION_CDP_WORKERS=1 also CDP on every worker target that starts); a
 // generated CFA DNG decodes through LibRaw's bundled worker and exports as a
-// 16-bit PNG; no request is blocked by COEP, CORP or COOP.
+// 16-bit PNG (with a threaded libraw-wasm installed, its pthread pool starts
+// from the bundled chunks); dust removal repairs a photo with MI-GAN on more
+// than one ONNX Runtime thread (its pthreads start from the bundled chunks
+// too); no request is blocked by COEP, CORP or COOP.
 import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -138,6 +141,11 @@ if (!page.isolated || !page.sab) fail(`the production build is not isolated: ${J
 const report = await evaluate(`window.__ncIsolation.report()`);
 console.log('preview isolation report:', JSON.stringify(report.workers));
 if (!report.allIsolated) fail(`not every worker is isolated: ${JSON.stringify(report.workers)}`);
+// A threaded libraw-wasm (#264 Part D) starts its pthread pool from the
+// bundled worker chunks: more than one thread here means the nested workers
+// resolved in the production build.
+const libraw = report.workers.libraw || {};
+if (libraw.threaded && !(libraw.threads > 1 && libraw.poolSize > 0)) fail(`the threaded LibRaw build did not start its pool in the production build: ${JSON.stringify(libraw)}`);
 // CDP auto-attach to worker targets is opt-in (ISOLATION_CDP_WORKERS=1): in
 // Chrome 154 attaching to them held up the page (see isolation-smoke.mjs).
 if (process.env.ISOLATION_CDP_WORKERS === '1') await send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true });
@@ -170,7 +178,23 @@ const checked = (await Promise.all(workers)).filter((entry) => !entry.gone);
 const notIsolated = checked.filter((entry) => !entry.isolated);
 console.log(`preview: ${checked.length} worker targets, LibRaw: ${checked.filter((entry) => /worker-[\w-]+\.js|libraw/i.test(entry.url)).length}, guard ${JSON.stringify({ checks: guard.checks, violations: guard.violations.length })}`);
 if (notIsolated.length) fail(`worker targets not isolated: ${JSON.stringify(notIsolated)}`);
-if (blocked.length) fail(`requests blocked by COEP/CORP/COOP: ${JSON.stringify(blocked.slice(0, 5))}`);
 if (guard.violations.length) fail(`shared-plane check fired: ${JSON.stringify(guard.violations)}`);
-console.log(`ok: production build isolated in the page and ${checked.length} workers; RAW decode and 16-bit export (${bytes} bytes) work`);
+
+// ONNX Runtime's pthreads start from the bundled chunks: dust removal loads
+// MI-GAN on its own and repairs a photo with dust, on min(4, cores - 2)
+// threads (#264 Part A phase 1: "ORT's threaded .mjs resolves under Vite").
+await send('Page.navigate', { url: `http://127.0.0.1:${PORT}/?lang=en&debug=1` });
+await waitFor('app boot for AI repair', `document.readyState === 'complete' && !!window.__ncIsolation?.aiRepair && /No model loaded/.test(document.getElementById('dustAiStatus')?.textContent || '')`);
+await wait(500);
+const dustDoc = await send('DOM.getDocument');
+const dustInput = await send('DOM.querySelector', { nodeId: dustDoc.result.root.nodeId, selector: '#fileInput' });
+await send('DOM.setFileInputFiles', { files: [join(ROOT, 'negative2positive/test-fixtures/negative-sample.jpg')], nodeId: dustInput.result.nodeId });
+await waitFor('photo with dust', `${ready} && document.getElementById('studioFilename').textContent === 'negative-sample.jpg'`, 150_000);
+await evaluate(`document.getElementById('studioTab-repair').click(); document.getElementById('dustRemovalEnabled').click()`);
+await waitFor('MI-GAN loads and repairs', `/Model ready.*last run [1-9]/.test(document.getElementById('dustAiStatus').textContent)`, 180_000);
+const ai = await evaluate(`({ ...window.__ncIsolation.aiRepair(), cores: navigator.hardwareConcurrency, status: document.getElementById('dustAiStatus').textContent })`);
+console.log('preview AI repair:', JSON.stringify(ai));
+if (ai.cores >= 4 && !(ai.threads > 1)) fail(`ONNX Runtime runs on one thread in the isolated production build: ${JSON.stringify(ai)}`);
+if (blocked.length) fail(`requests blocked by COEP/CORP/COOP: ${JSON.stringify(blocked.slice(0, 5))}`);
+console.log(`ok: production build isolated in the page and ${checked.length} workers; RAW decode and 16-bit export (${bytes} bytes) work; MI-GAN repairs on ${ai.provider} with ${ai.threads} ORT threads`);
 process.exit(0);

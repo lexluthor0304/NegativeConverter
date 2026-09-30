@@ -9,11 +9,12 @@
 //    COEP header, or answered from inside a threaded build). With
 //    ISOLATION_CDP_WORKERS=1, CDP also evaluates `self.crossOriginIsolated` in
 //    every worker target that starts during the step, nested ones included.
-// 2. Lens correction loads its bundled lensfun profiles under COEP, Vercel
-//    Analytics' cross-origin debug script is not injected in dev, and no
-//    request of this step is blocked by COEP, CORP or COOP (the Audits domain's
-//    BlockedByResponse issues and blocked network loads; smoke-test.mjs also
-//    watches the issues for the whole run).
+// 2. Lens correction loads its bundled lensfun profiles under COEP, the
+//    GitHub star count's CORS fetch is not blocked (rendered unless offline or
+//    rate limited), Vercel Analytics' cross-origin debug script is not
+//    injected in dev, and no request of this step is blocked by COEP, CORP or
+//    COOP (the Audits domain's BlockedByResponse issues and blocked network
+//    loads; smoke-test.mjs also watches the issues for the whole run).
 // 3. A generated CFA DNG (LibRaw) is imported and exported as 8- and 16-bit
 //    PNG on the isolated page and again on a page whose document the step
 //    serves without COOP/COEP (CDP Fetch): not isolated, every worker still
@@ -24,7 +25,11 @@
 // D), the LibRaw entry reports its threads from inside its worker and its
 // pthread workers must be isolated too. Opt-in, real files (never in the
 // repo): ISOLATION_RAW_TIMING=/abs/a.dng:/abs/b.nef times loadRawFile on
-// each (median of 3, 16-bit full size) with the installed decoder build.
+// each (median of 3, 16-bit full size) with the installed decoder build;
+// ISOLATION_IMPORT_PROFILE=/abs/a.dng imports each file into a fresh page
+// with shared planes and again with ?sharedPlanes=0 and reports the page
+// thread's time in whole-buffer copies: slice and structured clones of 1 MB
+// or more (#264: at 60 MP no copy task over 10 ms, 20 ms in all).
 import { mkdtempSync, rmSync, mkdirSync, copyFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, basename } from 'node:path';
@@ -106,8 +111,78 @@ const LENSFUN_CHECK = `(async () => {
 // carry COEP.
 const NOT_ISOLATED_MARK = 'isolation=off';
 
+// index.html's star count (cached for 6 h in localStorage under this key).
+const STAR_COUNT_API = /^https:\/\/api\.github\.com\/repos\/lexluthor0304\/NegativeConverter\/?$/;
+const STAR_COUNT_CACHE_KEY = 'nc_github_stars';
+
+// The page thread's whole-buffer copies, timed where they are made: every
+// call of TypedArray/ArrayBuffer slice, postMessage (the structured clone of
+// what is not transferred or shared) and structuredClone that moves 1 MB or
+// more is logged with its size and duration. Installed before the page's own
+// scripts (a V8 CPU profile does not attribute these builtins: its control
+// below saw 0 ms of a 36 ms clone + slice). Receiving a clone is not counted.
+const COPY_LOG = `(() => {
+  const log = window.__ncCopyLog = [];
+  const MIN_BYTES = 1 << 20;
+  const copiedBytes = (message, transfer) => {
+    const moved = new Set(Array.isArray(transfer) ? transfer : (transfer && transfer.transfer) || []);
+    const walk = (value, depth) => {
+      if (!value || typeof value !== 'object' || depth > 3) return 0;
+      if (value instanceof ArrayBuffer) return moved.has(value) ? 0 : value.byteLength;
+      if (ArrayBuffer.isView(value)) {
+        const buffer = value.buffer;
+        if (typeof SharedArrayBuffer === 'function' && buffer instanceof SharedArrayBuffer) return 0;
+        return moved.has(buffer) ? 0 : value.byteLength;
+      }
+      if (typeof ImageData === 'function' && value instanceof ImageData) return walk(value.data, depth + 1);
+      let bytes = 0;
+      for (const key of Object.keys(value)) bytes += walk(value[key], depth + 1);
+      return bytes;
+    };
+    return walk(message, 0);
+  };
+  const wrap = (owner, name, label, bytesOf) => {
+    const original = owner && owner[name];
+    if (typeof original !== 'function') return;
+    Object.defineProperty(owner, name, { configurable: true, writable: true, value: function (...args) {
+      let bytes = 0;
+      try { bytes = bytesOf(this, args); } catch { bytes = 0; }
+      if (!(bytes >= MIN_BYTES)) return original.apply(this, args);
+      const started = performance.now();
+      try { return original.apply(this, args); } finally {
+        const entry = { call: label, bytes, ms: performance.now() - started };
+        // Where the large ones come from.
+        if (bytes >= 8 * MIN_BYTES) entry.at = String(new Error().stack || '').split('\\n').slice(2, 5).map((line) => line.trim().replace(/^at /, '').replace(/\\?[^:)]*/, '')).join(' < ');
+        log.push(entry);
+      }
+    } });
+  };
+  const sliceBytes = (view, [start = 0, end = view.length]) => {
+    const n = view.length;
+    const s = start < 0 ? Math.max(n + start, 0) : Math.min(start, n);
+    const e = end < 0 ? Math.max(n + end, 0) : Math.min(end, n);
+    return Math.max(0, e - s) * view.BYTES_PER_ELEMENT;
+  };
+  wrap(Object.getPrototypeOf(Uint8Array.prototype), 'slice', 'slice', sliceBytes);
+  wrap(ArrayBuffer.prototype, 'slice', 'slice', (buffer, [start = 0, end = buffer.byteLength]) => Math.max(0, Math.min(end, buffer.byteLength) - Math.max(0, start)));
+  wrap(Worker.prototype, 'postMessage', 'postMessage', (_, [message, transfer]) => copiedBytes(message, transfer));
+  wrap(MessagePort.prototype, 'postMessage', 'postMessage', (_, [message, transfer]) => copiedBytes(message, transfer));
+  wrap(window, 'structuredClone', 'structuredClone', (_, [value, options]) => copiedBytes(value, options));
+})()`;
+
+// Sums the log: every copy, the longest, and the largest few.
+export function summarizeCopies(log = []) {
+  const round = (value) => Math.round(value * 10) / 10;
+  const total = log.reduce((sum, entry) => sum + entry.ms, 0);
+  const longest = log.reduce((max, entry) => Math.max(max, entry.ms), 0);
+  const top = [...log].sort((a, b) => b.ms - a.ms).slice(0, 5)
+    .map((entry) => ({ call: entry.call, mb: round(entry.bytes / 1048576), ms: round(entry.ms), ...(entry.at ? { at: entry.at } : {}) }));
+  return { copies: log.length, copyMs: round(total), longestMs: round(longest), top };
+}
+
 export async function runIsolationSmoke({ send, sendTo, onCdpEvent, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, root,
   timingFiles = (process.env.ISOLATION_RAW_TIMING || '').split(':').filter(Boolean),
+  profileFiles = (process.env.ISOLATION_IMPORT_PROFILE || '').split(':').filter(Boolean),
   cdpWorkers = process.env.ISOLATION_CDP_WORKERS === '1' }) {
   const started = Date.now();
   const step = (label) => console.log(`isolation [${((Date.now() - started) / 1000).toFixed(1)} s] ${label}`);
@@ -118,11 +193,26 @@ export async function runIsolationSmoke({ send, sendTo, onCdpEvent, evaluate, wa
   // Workers that ended before they could be evaluated (a probe's LibRaw
   // instance is disposed at once): not a finding.
   const detached = new Set();
+  // The GitHub star count's request at boot (a CORS fetch to api.github.com).
+  const starRequests = new Map();
   const stopListening = onCdpEvent((msg) => {
     if (msg.method === 'Audits.issueAdded') {
       const issue = msg.params?.issue;
       if (issue?.code === 'BlockedByResponseIssue') blocked.push({ kind: 'issue', details: issue.details?.blockedByResponseIssueDetails });
       return;
+    }
+    if (!msg.sessionId && msg.method === 'Network.requestWillBeSent' && STAR_COUNT_API.test(msg.params?.request?.url || '')) {
+      starRequests.set(msg.params.requestId, { url: msg.params.request.url });
+      return;
+    }
+    if (!msg.sessionId && msg.method === 'Network.responseReceived' && starRequests.has(msg.params?.requestId)) {
+      Object.assign(starRequests.get(msg.params.requestId), { status: msg.params.response?.status });
+      return;
+    }
+    if (!msg.sessionId && msg.method === 'Network.loadingFailed' && starRequests.has(msg.params?.requestId)) {
+      Object.assign(starRequests.get(msg.params.requestId), {
+        failed: msg.params.errorText, blockedReason: msg.params.blockedReason, cors: msg.params.corsErrorStatus?.corsError
+      });
     }
     if (msg.method === 'Network.loadingFailed' && /coep|coop|corp/i.test(msg.params?.blockedReason || '')) {
       blocked.push({ kind: 'network', reason: msg.params.blockedReason, error: msg.params.errorText });
@@ -213,7 +303,7 @@ export async function runIsolationSmoke({ send, sendTo, onCdpEvent, evaluate, wa
       let meta = null;
       const image = await loadRawFile(bytes, file.name, { sharedPlanes: true, onMetadata: (value) => { meta = value; } });
       const hex = async (view) => [...new Uint8Array(await crypto.subtle.digest('SHA-256', view.slice().buffer))].map((b) => b.toString(16).padStart(2, '0')).join('');
-      return { width: image.width, height: image.height, shared: image.__image16.data.buffer instanceof SharedArrayBuffer,
+      return { width: image.width, height: image.height, shared: typeof SharedArrayBuffer === 'function' && image.__image16.data.buffer instanceof SharedArrayBuffer,
         image16: await hex(image.__image16.data), image8: await hex(image.data), meta: JSON.stringify(meta) };
     })()`);
   };
@@ -238,7 +328,10 @@ export async function runIsolationSmoke({ send, sendTo, onCdpEvent, evaluate, wa
 
     // ---- 1. isolated page and workers
     step('isolated boot');
-    await boot('');
+    // Uncached, so the boot fetches the star count again. The hash check
+    // reads every byte of every shared plane here (no timing is checked).
+    await evaluate(`(() => { try { localStorage.removeItem(${JSON.stringify(STAR_COUNT_CACHE_KEY)}); } catch {} return true; })()`);
+    await boot('&planeGuard=1');
     const page = await evaluate(`({ isolated: self.crossOriginIsolated === true, sab: typeof SharedArrayBuffer === 'function',
       report: window.__ncIsolation.page() })`);
     if (!page.isolated || !page.sab) fail(`the page is not cross-origin isolated on the Vite dev server: ${JSON.stringify(page)}`);
@@ -256,6 +349,15 @@ export async function runIsolationSmoke({ send, sendTo, onCdpEvent, evaluate, wa
     step('third-party loads');
     const analytics = await evaluate(`[...document.scripts].map(s => s.src).filter(src => /vercel|insights/.test(src))`);
     if (analytics.length) fail(`Vercel Analytics injected a script in dev: ${JSON.stringify(analytics)}`);
+    // The star count: rendered from api.github.com under COEP. Offline or a
+    // rate limit (403) is only noted; a CORS or COEP failure fails the step.
+    await waitFor('GitHub star count', `!document.getElementById('githubStarCount')?.hidden`, 20_000, { soft: true });
+    const starCount = await evaluate(`(() => { const el = document.getElementById('githubStarCount'); return { shown: !!el && !el.hidden, text: el?.textContent || '' }; })()`);
+    const starFetches = [...starRequests.values()];
+    console.log('isolation star count:', JSON.stringify({ ...starCount, requests: starFetches }));
+    const starBlocked = starFetches.filter((entry) => entry.blockedReason || entry.cors);
+    if (starBlocked.length) fail(`the GitHub star count request was blocked on the isolated page: ${JSON.stringify(starBlocked)}`);
+    if (!starCount.shown) console.log(`note: the GitHub star count was not rendered (offline or rate limited?): ${JSON.stringify(starFetches)}`);
     await evaluate(`(() => {
       document.getElementById('lensLensMakerInput').value = 'Nikon';
       document.getElementById('lensLensModelInput').value = 'AF-S Nikkor 50mm f/1.8G';
@@ -292,7 +394,15 @@ export async function runIsolationSmoke({ send, sendTo, onCdpEvent, evaluate, wa
 
     // ---- 3. a LibRaw decode and its exports, isolated
     step('LibRaw decode, isolated');
+    // Three decodes of the same file on the isolated page (a threaded LibRaw
+    // build runs its pool there): the output must not change between them.
     const isolatedDecode = await rawProbe(dng);
+    for (let repeat = 2; repeat <= 3; repeat++) {
+      const again = await rawProbe(dng);
+      if (again.image16 !== isolatedDecode.image16 || again.image8 !== isolatedDecode.image8 || again.meta !== isolatedDecode.meta) {
+        fail(`LibRaw decode ${repeat} of the same file differs on the isolated page: ${JSON.stringify({ first: isolatedDecode, again })}`);
+      }
+    }
     const isolatedExports = await decodeAndExport(dng, 'isolated');
     const guard = await evaluate(`window.__ncIsolation.planeGuard()`);
     if (!guard.enabled) fail('the shared-plane hash check is off on the dev server');
@@ -351,6 +461,50 @@ export async function runIsolationSmoke({ send, sendTo, onCdpEvent, evaluate, wa
         }
       } finally {
         rmSync(fixtures, { recursive: true, force: true });
+      }
+    }
+
+    // ---- opt-in: the page thread's plane copies during a fresh import, with
+    // shared planes and with the copy path (?sharedPlanes=0), each on a fresh
+    // page (the hash check off: it is not part of the import).
+    if (profileFiles.length) {
+      const installed = await send('Page.addScriptToEvaluateOnNewDocument', { source: COPY_LOG });
+      try {
+        await boot('&planeGuard=0');
+        // The method's control: a 64 MB plane posted to a worker without a
+        // transfer and sliced once, and the same plane shared.
+        const control = await evaluate(`(() => {
+          window.__ncCopyLog.length = 0;
+          const worker = new Worker(URL.createObjectURL(new Blob(['onmessage = () => {}'], { type: 'text/javascript' })));
+          const plane = new Uint16Array(32 * 1024 * 1024);
+          worker.postMessage(plane);
+          plane.slice();
+          worker.postMessage(new Uint16Array(new SharedArrayBuffer(64 * 1024 * 1024)));
+          worker.terminate();
+          return window.__ncCopyLog.splice(0);
+        })()`);
+        const controlSummary = summarizeCopies(control);
+        console.log('isolation import profile control (64 MB clone, slice, shared post):', JSON.stringify(controlSummary));
+        if (controlSummary.copies !== 2) fail(`the copy log missed the control's clone and slice, or counted the shared post: ${JSON.stringify(control)}`);
+        for (const file of profileFiles) {
+          const result = { file: basename(file) };
+          for (const [label, query] of [['shared', '&planeGuard=0'], ['copy', '&planeGuard=0&sharedPlanes=0']]) {
+            await boot(query);
+            const importStarted = Date.now();
+            await evaluate('window.__ncCopyLog.length = 0');
+            await importFiles([file]);
+            await waitFor(`${label} profile: import converted`, ready, 600_000);
+            await wait(1500);
+            await waitFor(`${label} profile: settled`, ready, 600_000);
+            result[label] = { ms: Date.now() - importStarted, ...summarizeCopies(await evaluate('window.__ncCopyLog.splice(0)')) };
+          }
+          const within = result.shared.longestMs <= 10 && result.shared.copyMs <= 20;
+          console.log('isolation import profile:', JSON.stringify(result));
+          console.log(`${within ? 'ok' : 'note'}: ${result.file} shared planes: page-thread copies ${result.shared.copyMs} ms in all, longest ${result.shared.longestMs} ms`
+            + ` (copy path: ${result.copy.copyMs} ms, longest ${result.copy.longestMs} ms)${within ? '' : ' -- over the #264 budget (10 ms per copy, 20 ms in all)'}`);
+        }
+      } finally {
+        if (installed.result?.identifier) await send('Page.removeScriptToEvaluateOnNewDocument', { identifier: installed.result.identifier });
       }
     }
 
