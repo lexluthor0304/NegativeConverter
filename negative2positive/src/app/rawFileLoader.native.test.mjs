@@ -9,7 +9,17 @@
 // with no WASM attempt; every other native failure (open refused, IPC error,
 // transfer error, step timeout) decodes the same bytes with WASM instead; an
 // abort cancels the native session; background decodes ask for fewer threads.
+//
+// Decoder selection end to end (#264, docs/raw-decoding.md): libraw-wasm is
+// the installed package behind a module hook whose class can advertise the
+// threaded build (`LibRaw.features.threads`) and record how it is built, so
+// the same file also covers the threaded build on an isolated page (every
+// core in the foreground, two in a background lane, from the same flag the
+// native decoder reads), a threaded build that does not start (the same
+// decode on `new LibRaw()`), the native fallback building the threaded WASM
+// decoder, and a desktop whose gate is off.
 import assert from 'node:assert/strict';
+import { registerHooks } from 'node:module';
 import { handleRawPostDecodeMessage } from './rawPostDecode.js';
 import { handleNativePlaneMessage, resetNativePlaneTransport } from './nativeRawTransfer.js';
 import { makeRawResult, cloneRawResult } from './rawPostDecode.fixtures.mjs';
@@ -221,7 +231,43 @@ class FakeWorker {
 }
 globalThis.Worker = FakeWorker;
 
+// libraw-wasm as installed (1.6.0), as a subclass that can advertise the
+// threaded build and records its constructor argument ('single' for none).
+const librawTest = globalThis.__ncLibRawTest = { features: undefined, constructed: [], startup: null };
+{
+  const real = import.meta.resolve('libraw-wasm');
+  const fake = 'nc-test:libraw-wasm';
+  registerHooks({
+    resolve(specifier, context, nextResolve) {
+      if (specifier === 'libraw-wasm' && context.parentURL !== fake) return { url: fake, shortCircuit: true };
+      return nextResolve(specifier, context);
+    },
+    load(url, context, nextLoad) {
+      if (url !== fake) return nextLoad(url, context);
+      return {
+        format: 'module',
+        shortCircuit: true,
+        source: `import Installed from ${JSON.stringify(real)};
+          export default class LibRaw extends Installed {
+            static get features() { return globalThis.__ncLibRawTest.features; }
+            constructor(options) {
+              super();
+              this.options = options;
+              globalThis.__ncLibRawTest.constructed.push(options === undefined ? 'single' : options);
+            }
+            runtimeInfo() {
+              const startup = globalThis.__ncLibRawTest.startup;
+              return startup ? startup(this.options) : Promise.resolve({ threaded: this.options !== undefined, threads: this.options?.threads ?? 1 });
+            }
+          }`
+      };
+    }
+  });
+}
+
 const { loadRawFile } = await import('./rawFileLoader.js');
+const { planLibRawThreads, resetLibRawRuntime } = await import('./librawRuntime.js');
+const { resetNativeRawProbe } = await import('./nativeRawDecoder.js');
 
 const workersOf = kind => scene.workers.filter(worker => worker.kind === kind);
 
@@ -350,5 +396,94 @@ for (const [label, overrides] of [
   assert.equal(workersOf('libraw').length, 0, 'abort: no fallback');
   assert.equal(bitmapDecodes, 0);
 }
+
+// --- decoder selection (#264) --------------------------------------------------------
+// Until here the page was not isolated and the package had no threaded build:
+// every WASM decode above was `new LibRaw()`, exactly as before.
+assert.ok(librawTest.constructed.length > 0 && librawTest.constructed.every(made => made === 'single'),
+  `libraw-wasm is constructed without an argument: ${JSON.stringify(librawTest.constructed)}`);
+
+const savedWindow = globalThis.window;
+const savedStorage = globalThis.localStorage;
+const cores = navigator.hardwareConcurrency;
+const foregroundThreads = planLibRawThreads({ isolated: true, hardwareConcurrency: cores });
+function isolate(on) {
+  if (on) globalThis.crossOriginIsolated = true;
+  else delete globalThis.crossOriginIsolated;
+}
+
+// The web, isolated, with a threaded build: every core in the foreground, two
+// in a background lane, no desktop in sight.
+{
+  globalThis.window = {};
+  isolate(true);
+  librawTest.features = Object.freeze({ threads: true, maxThreads: 16 });
+  try {
+    reset();
+    librawTest.constructed = [];
+    assertPlanes(await loadRawFile(makeContainer().buffer, 'frame.nef'), 'threaded WASM');
+    assert.deepEqual(librawTest.constructed, [{ threads: foregroundThreads }], 'the foreground decode asks for every core');
+    assert.equal(workersOf('libraw').length, 1);
+    librawTest.constructed = [];
+    assertPlanes(await loadRawFile(makeContainer().buffer, 'frame.nef', { priority: 'background' }), 'threaded WASM, background');
+    assert.deepEqual(librawTest.constructed, [{ threads: Math.min(2, foregroundThreads) }], 'a background lane asks for two');
+
+    // A threaded instance that does not start: the same bytes on `new LibRaw()`,
+    // and the page stops asking for threads.
+    reset();
+    librawTest.constructed = [];
+    librawTest.startup = () => Promise.reject(new Error('pthread pool failed to start'));
+    const container = makeContainer();
+    assertPlanes(await loadRawFile(container.buffer.slice(0), 'frame.nef'), 'threaded start failure');
+    assert.deepEqual(librawTest.constructed, [{ threads: foregroundThreads }, 'single']);
+    assert.deepEqual(scene.wasmOpenBytes, container, 'the single-threaded build gets the untouched file bytes');
+    assert.equal(workersOf('libraw').filter(worker => worker.received.includes('open')).length, 1, 'only one LibRaw instance opens the file');
+    librawTest.constructed = [];
+    assertPlanes(await loadRawFile(makeContainer().buffer, 'frame.nef'), 'after a start failure');
+    assert.deepEqual(librawTest.constructed, ['single'], 'later decodes go straight to the single-threaded build');
+  } finally {
+    librawTest.startup = null;
+    resetLibRawRuntime();
+  }
+}
+
+// The desktop with native decoding on: a background decode caps the native
+// threads and, when native fails, the threaded WASM fallback's threads alike.
+{
+  globalThis.window = savedWindow;
+  globalThis.localStorage = savedStorage;
+  resetNativeRawProbe();
+  reset({ process: 'throw' });
+  librawTest.constructed = [];
+  const container = makeContainer();
+  assertPlanes(await loadRawFile(container.buffer.slice(0), 'frame.nef', { priority: 'background' }), 'native fallback, threaded WASM');
+  assert.deepEqual(scene.threads, [2], 'native: two threads for a background lane');
+  assert.deepEqual(librawTest.constructed, [{ threads: Math.min(2, foregroundThreads) }], 'its WASM fallback: the threaded build, two threads');
+  assert.deepEqual(scene.wasmOpenBytes, container);
+}
+
+// The desktop with the gate off (what ships until the deterministic
+// libraw-wasm is pinned) and a webview without SharedArrayBuffer (macOS
+// WKWebView reports isolation without it): `new LibRaw()` and nothing native
+// beyond the probe.
+{
+  globalThis.localStorage = { getItem: () => null };
+  resetNativeRawProbe();
+  reset();
+  librawTest.constructed = [];
+  const SavedSharedArrayBuffer = globalThis.SharedArrayBuffer;
+  delete globalThis.SharedArrayBuffer;
+  try {
+    assertPlanes(await loadRawFile(makeContainer().buffer, 'frame.nef', { priority: 'background' }), 'gate off, no shared memory');
+  } finally {
+    globalThis.SharedArrayBuffer = SavedSharedArrayBuffer;
+  }
+  assert.deepEqual(scene.calls, ['native_raw_info'], 'the gate is asked, nothing is decoded natively');
+  assert.deepEqual(librawTest.constructed, ['single']);
+  globalThis.localStorage = savedStorage;
+  resetNativeRawProbe();
+}
+isolate(false);
+librawTest.features = undefined;
 
 console.log('rawFileLoader.native.test.mjs passed');

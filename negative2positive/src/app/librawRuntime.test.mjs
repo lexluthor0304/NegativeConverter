@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import LibRaw from 'libraw-wasm';
-import { librawThreadSupport, planLibRawThreads, createLibRaw, probeLibRawWorker } from './librawRuntime.js';
+import { librawThreadSupport, planLibRawThreads, createLibRaw, probeLibRawWorker, resetLibRawRuntime, THREADED_START_TIMEOUT_MS } from './librawRuntime.js';
 
 // The published libraw-wasm (1.6.0) has no thread flag: the app keeps
 // constructing it exactly as before.
@@ -59,6 +59,106 @@ const webkitEnv = { crossOriginIsolated: true, navigator: { hardwareConcurrency:
   Recorder.calls = [];
   createLibRaw({ LibRawClass: Threaded, env: isolatedEnv, background: true });
   assert.deepEqual(Recorder.calls, [[{ threads: 2 }]]);
+}
+
+// ---- a threaded instance that does not start: the same decode on `new LibRaw()`
+{
+  console.warn = () => {};
+  // libraw-wasm's client: calls are answered in order, `open()` detaches the
+  // bytes it is given, dispose() rejects what is pending.
+  const log = [];
+  const makeClass = (startup) => {
+    class Fake {
+      constructor(options) {
+        this.threads = options?.threads ?? null;
+        this.pending = new Set();
+        log.push(['new', this.threads]);
+      }
+      track(promise) {
+        return new Promise((resolve, reject) => {
+          const entry = { reject };
+          this.pending.add(entry);
+          promise.then((v) => { this.pending.delete(entry); resolve(v); }, (e) => { this.pending.delete(entry); reject(e); });
+        });
+      }
+      runtimeInfo() {
+        log.push(['runtimeInfo', this.threads]);
+        if (this.threads === null) return Promise.resolve({ threaded: false, threads: 1 });
+        return this.track(startup());
+      }
+      open(bytes, settings) {
+        log.push(['open', this.threads, bytes.byteLength, settings.halfSize]);
+        structuredClone(bytes.buffer, { transfer: [bytes.buffer] });
+        return Promise.resolve();
+      }
+      metadata() { log.push(['metadata', this.threads]); return Promise.resolve({ width: 4, height: 2 }); }
+      imageData() { log.push(['imageData', this.threads]); return Promise.resolve({ width: 4, height: 2, colors: 3, bits: 16, data: new Uint16Array(24) }); }
+      dispose() {
+        log.push(['dispose', this.threads]);
+        for (const entry of this.pending) entry.reject(new Error('LibRaw disposed'));
+        this.pending.clear();
+      }
+    }
+    return Object.assign(Fake, { features: { threads: true, maxThreads: 16 } });
+  };
+  const decodeWith = async (raw) => {
+    const bytes = new Uint8Array(64).fill(7);
+    await raw.open(bytes, { halfSize: false });
+    assert.equal(bytes.byteLength, 0, 'open() took the bytes');
+    await raw.metadata(true);
+    return raw.imageData();
+  };
+  assert.ok(THREADED_START_TIMEOUT_MS >= 1000 && THREADED_START_TIMEOUT_MS <= 10_000);
+
+  // It starts: every call goes to the threaded instance.
+  resetLibRawRuntime();
+  log.length = 0;
+  const Starts = makeClass(() => Promise.resolve({ threaded: true, crossOriginIsolated: true, poolSize: 7, threads: 8 }));
+  const ok = createLibRaw({ LibRawClass: Starts, env: isolatedEnv });
+  assert.equal(ok.threaded, true);
+  assert.equal((await decodeWith(ok.raw)).width, 4);
+  assert.deepEqual(log, [['new', 8], ['runtimeInfo', 8], ['open', 8, 64, false], ['metadata', 8], ['imageData', 8]]);
+  assert.equal(ok.raw.threads, 8);
+  ok.raw.dispose();
+
+  // Its module or pool fails: the decode runs on the single-threaded build with
+  // the untouched bytes, and the page stops asking for threads.
+  resetLibRawRuntime();
+  log.length = 0;
+  const Fails = makeClass(() => Promise.reject(new Error('RangeError: WebAssembly.Memory(): could not allocate memory')));
+  const failed = createLibRaw({ LibRawClass: Fails, env: isolatedEnv });
+  assert.equal((await decodeWith(failed.raw)).width, 4);
+  assert.deepEqual(log, [['new', 8], ['runtimeInfo', 8], ['dispose', 8], ['new', null],
+    ['open', null, 64, false], ['metadata', null], ['imageData', null]]);
+  assert.equal(failed.raw.threads, 1);
+  assert.equal(failed.raw.threaded, false);
+  log.length = 0;
+  const next = createLibRaw({ LibRawClass: Fails, env: isolatedEnv, background: true });
+  assert.equal(next.threaded, false, 'later decodes go straight to the single-threaded build');
+  assert.deepEqual(log, [['new', null]]);
+  next.raw.dispose?.();
+
+  // It never answers (a pool worker that does not load): the same, after the timeout.
+  resetLibRawRuntime();
+  log.length = 0;
+  const Hangs = makeClass(() => new Promise(() => {}));
+  const hung = createLibRaw({ LibRawClass: Hangs, env: isolatedEnv, background: true, startTimeoutMs: 20 });
+  assert.equal(hung.threads, 2);
+  assert.equal((await decodeWith(hung.raw)).width, 4);
+  assert.deepEqual(log.map((entry) => entry.slice(0, 2)), [['new', 2], ['runtimeInfo', 2], ['dispose', 2], ['new', null],
+    ['open', null], ['metadata', null], ['imageData', null]]);
+
+  // An abort while it starts is no failure: "LibRaw disposed", no fallback, threads stay on.
+  resetLibRawRuntime();
+  log.length = 0;
+  const aborted = createLibRaw({ LibRawClass: Hangs, env: isolatedEnv });
+  const opening = aborted.raw.open(new Uint8Array(8), { halfSize: true });
+  await Promise.resolve();
+  aborted.raw.dispose();
+  await assert.rejects(opening, /LibRaw disposed/);
+  assert.deepEqual(log, [['new', 8], ['runtimeInfo', 8], ['dispose', 8]]);
+  assert.equal(createLibRaw({ LibRawClass: Starts, env: isolatedEnv }).threaded, true);
+  resetLibRawRuntime();
 }
 
 // ---- the report entry

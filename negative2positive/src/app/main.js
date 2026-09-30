@@ -18339,9 +18339,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             filmStats: filmStats ? { borderBufferPct: defaultFilmBaseBuffer() } : null,
             signal,
             sharedPlanes: sharedPlanes && sharedPlanesAvailable(),
-            background: priority === 'background',
             reserveDecode: size => memoryClaim.atDecode(size),
             ramBytes: memoryRuntime.ramBytes,
+            // A background lane's decode leaves the cores to the photo on
+            // screen (#264: native and threaded WASM alike).
             priority,
             ...(onMetadata ? { onMetadata } : {}),
             ...(onStage ? { onStage } : {}),

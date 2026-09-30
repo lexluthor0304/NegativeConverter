@@ -19,6 +19,16 @@ import { readNativePlane, fetchNativePlane, handleNativePlaneMessage, resetNativ
 
 // rawFileLoader.js's decode settings (decodeWithLibRaw).
 const LOADER_SETTINGS = { noInterpolation: false, useAutoWb: true, useCameraWb: true, useCameraMatrix: 3, outputColor: 1, outputBps: 16, halfSize: false };
+{
+  // Every combination the loader asks for is one the shell reproduces.
+  const { librawDecodeSettings } = await import('./rawFileLoader.js');
+  assert.deepEqual(librawDecodeSettings(), LOADER_SETTINGS);
+  for (const outputBps of [8, 16]) {
+    for (const halfSize of [false, true]) {
+      assert.deepEqual(nativeDecodeOptions(librawDecodeSettings({ outputBps, halfSize })), { halfSize, outputBps });
+    }
+  }
+}
 
 console.info = () => {};
 console.warn = () => {};

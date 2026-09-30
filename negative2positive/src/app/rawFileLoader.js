@@ -15,6 +15,25 @@ import { halfDecodeFullSize, RAW_SIZE_HEAVY, isIPhoneDngHeader } from './imageDi
 export { estimateRawDecodeBytes };
 export { rawResultToRgb16 } from './rawResultToRgb16.js';
 
+/**
+ * LibRaw's settings for every decode: the camera's white balance (automatic
+ * where the file has none) and colour matrix, AHD, sRGB output, `outputBps`
+ * 16 or 8, optionally half size. The native desktop decoder reproduces exactly
+ * these (nativeRawDecoder.js) and the RGB16 gate decodes with them (#264,
+ * scripts/raw-decode-gate-smoke.mjs).
+ */
+export function librawDecodeSettings({ outputBps = 16, halfSize = false } = {}) {
+  return {
+    noInterpolation: false,
+    useAutoWb: true,
+    useCameraWb: true,
+    useCameraMatrix: 3,
+    outputColor: 1,
+    outputBps,
+    halfSize
+  };
+}
+
 // Only devices that actually report a small budget are gated, and only at a
 // generous fraction of it — a false rejection is worse than a slow decode.
 const RAW_LOW_MEMORY_GB = 4;
@@ -231,10 +250,9 @@ async function loadTiffBuffer(buffer, signal = null, sharedPlanes = false) {
  * memory where the page is cross-origin isolated, for decodes the editor
  * keeps (its workers then read the plane without a copy). Batch and pass
  * decodes leave it off: they hand their planes over by transfer.
- * `options.background`: a lane's decode, whose LibRaw threads are capped.
  *
- * `options.priority` (#264): 'background' caps a native desktop decode's
- * threads so the photo on screen keeps the cores.
+ * `options.priority` (#264): 'background' (a lane's decode) caps the
+ * decoder's threads, native or WASM, so the photo on screen keeps the cores.
  */
 export async function loadRawFile(buffer, fileName, options = {}) {
   const normalizedFileName = String(fileName || '').toLowerCase();
@@ -319,19 +337,21 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     ? Math.min(bufBytes > RAW_SIZE_HUGE ? RAW_DECODE_TIMEOUT_MS_HUGE : RAW_DECODE_TIMEOUT_MS, 30_000)
     : (bufBytes > RAW_SIZE_HUGE ? RAW_DECODE_TIMEOUT_MS_HUGE : RAW_DECODE_TIMEOUT_MS);
 
-  // A threaded LibRaw build on a cross-origin isolated page gets threads
-  // (#264 Part D; `options.background` caps a lane's); otherwise this is
-  // `new LibRaw()` as it always was.
+  // The decoder (#264, docs/raw-decoding.md): native LibRaw on a desktop whose
+  // output is verified identical to the page's libraw-wasm
+  // (nativeRawDecoder.js); else libraw-wasm, its threaded build where the
+  // page has shared memory and the package ships one (librawRuntime.js),
+  // else `new LibRaw()` as it always was. Each falls back to the next with
+  // the same bytes and settings, and all of them decode to the same pixels.
+  // One flag caps a background lane's threads on either decoder.
+  const background = options.priority === 'background';
   let raw;
-  let librawThreads = 1;
+  let wasmDecoder = null;
   try {
-    // A desktop whose native LibRaw is verified identical decodes natively,
-    // with libraw-wasm as its fallback (#264; nativeRawDecoder.js).
     raw = await createRawDecoder(() => {
-      const made = createLibRaw({ background: options.background === true });
-      librawThreads = made.threads;
-      return made.raw;
-    }, { priority: options.priority, openTimeoutMs, decodeTimeoutMs });
+      wasmDecoder = createLibRaw({ background });
+      return wasmDecoder.raw;
+    }, { priority: background ? 'background' : 'user', openTimeoutMs, decodeTimeoutMs });
   } catch (err) {
     throw new Error(`module worker not supported: ${err?.message || err}`);
   }
@@ -419,15 +439,7 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     try {
       const libRawInput = new Uint8Array(buffer);
       await withTimeout(
-        raw.open(libRawInput, {
-          noInterpolation: false,
-          useAutoWb: true,
-          useCameraWb: true,
-          useCameraMatrix: 3,
-          outputColor: 1,
-          outputBps: use8Bit ? 8 : 16,
-          halfSize: useHalfSize
-        }),
+        raw.open(libRawInput, librawDecodeSettings({ outputBps: use8Bit ? 8 : 16, halfSize: useHalfSize })),
         openTimeoutMs,
         killWorker,
       );
@@ -457,7 +469,9 @@ export async function loadRawFile(buffer, fileName, options = {}) {
         tiff_bps: rawMetadata.tiff_bps,
         width: rawMetadata.width,
         height: rawMetadata.height,
-        threads: librawThreads,
+        // Native decodes log their threads when they finish (nativeRawDecoder.js).
+        decoder: raw.native ? 'native' : 'libraw-wasm',
+        threads: raw.native ? null : (wasmDecoder?.raw?.threads ?? wasmDecoder?.threads ?? 1),
       });
     }
     if (onMetadata) {

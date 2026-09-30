@@ -12,6 +12,13 @@
 //
 // The contract this detects is written down in notes/264.md ("Track A ->
 // Track B"); `librawThreadSupport` is the only place that reads it.
+//
+// A threaded instance that cannot start (its worker, its pthread pool or its
+// 4 GB shared memory: nested workers and large shared reservations are what
+// the single-threaded build does not need) falls back to `new LibRaw()` for
+// the same decode, before any bytes are handed over, and the page stops
+// asking for threads. Both builds decode to the same pixels, so this changes
+// only the speed.
 import LibRaw from 'libraw-wasm';
 import { isCrossOriginIsolated, sharedMemoryAvailable } from './crossOriginIsolation.js';
 
@@ -21,6 +28,20 @@ const MAX_LIBRAW_THREADS = 8;
 // A background lane (roll analysis, batch export, warm switching) decodes
 // while the user works and while other lanes decode.
 const BACKGROUND_LIBRAW_THREADS = 2;
+// How long a threaded instance may take to answer its first call (its module
+// and pool are up then; 31-62 ms per decode on an M1 Pro): long enough for a
+// slow compile, short enough that the single-threaded retry still fits the
+// loader's 15 s open budget of a preview decode.
+export const THREADED_START_TIMEOUT_MS = 8_000;
+
+// Set when a threaded instance did not start on this page: later decodes go
+// straight to the single-threaded build.
+let threadedStartFailed = false;
+
+/** Tests: forget that a threaded instance failed to start. */
+export function resetLibRawRuntime() {
+  threadedStartFailed = false;
+}
 
 /**
  * `{ threads, maxThreads }` when `LibRawClass` is a threaded build, else null
@@ -48,19 +69,89 @@ export function planLibRawThreads({ isolated = false, hardwareConcurrency = 4, b
 
 /**
  * The LibRaw instance for one decode, and how it was chosen:
- * `{ raw, threads, threaded }`. `background`: a lane's decode (capped).
+ * `{ raw, threads, threaded }`. `background`: a lane's decode (capped). A
+ * threaded `raw` is a wrapper with libraw-wasm's interface whose first call
+ * waits for the instance to start (`startTimeoutMs`) and otherwise runs the
+ * decode on `new LibRaw()`; its `threads` then reads 1.
  */
-export function createLibRaw({ background = false, LibRawClass = LibRaw, env = globalThis } = {}) {
+export function createLibRaw({ background = false, LibRawClass = LibRaw, env = globalThis, startTimeoutMs = THREADED_START_TIMEOUT_MS } = {}) {
   const support = librawThreadSupport(LibRawClass);
   // Threads need shared memory, not only the isolation flag: macOS WKWebView
   // reports crossOriginIsolated without a SharedArrayBuffer constructor.
   const isolated = sharedMemoryAvailable(env);
-  if (!support || !isolated) return { raw: new LibRawClass(), threads: 1, threaded: false };
+  if (!support || !isolated || threadedStartFailed) return { raw: new LibRawClass(), threads: 1, threaded: false };
   const threads = planLibRawThreads({
     isolated, background, maxThreads: support.maxThreads,
     hardwareConcurrency: env?.navigator?.hardwareConcurrency
   });
-  return { raw: new LibRawClass({ threads }), threads, threaded: true };
+  return { raw: threadedLibRaw(LibRawClass, threads, startTimeoutMs), threads, threaded: true };
+}
+
+// `new LibRaw({ threads })` behind libraw-wasm's interface. The instance's
+// first call (`runtimeInfo()`, queued behind the pool size the constructor
+// sends) answers once its module and pool are up; until then nothing else is
+// posted, so the bytes `open()` transfers are still here when the instance
+// fails to start, and the single-threaded build decodes them instead.
+function threadedLibRaw(LibRawClass, threads, startTimeoutMs) {
+  let current = new LibRawClass({ threads });
+  let started = null;
+  let disposed = false;
+  const decoder = {
+    threads,
+    threaded: true,
+    open: (...args) => call('open', args),
+    metadata: (...args) => call('metadata', args),
+    imageData: () => call('imageData', []),
+    runtimeInfo: () => call('runtimeInfo', []),
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      disposeInstance(current);
+    }
+  };
+
+  function start() {
+    started ??= (async () => {
+      if (typeof current.runtimeInfo !== 'function') return;
+      let timer = null;
+      try {
+        await Promise.race([
+          current.runtimeInfo(),
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error(`no answer in ${startTimeoutMs} ms`)), startTimeoutMs);
+          })
+        ]);
+      } catch (err) {
+        // A dispose (an abort) rejects the pending call: that is no failure.
+        if (disposed) throw err;
+        threadedStartFailed = true;
+        console.warn('[RAW] the threaded LibRaw build did not start; decoding with the single-threaded build:', err?.message || err);
+        disposeInstance(current);
+        current = new LibRawClass();
+        decoder.threads = 1;
+        decoder.threaded = false;
+      } finally {
+        clearTimeout(timer);
+      }
+    })();
+    return started;
+  }
+
+  async function call(fn, args) {
+    await start();
+    if (disposed) throw new Error('LibRaw disposed');
+    if (typeof current[fn] !== 'function') return undefined;
+    return current[fn](...args);
+  }
+
+  return decoder;
+}
+
+function disposeInstance(raw) {
+  try {
+    if (typeof raw?.dispose === 'function') raw.dispose();
+    else raw?.worker?.terminate?.();
+  } catch { /* gone */ }
 }
 
 // The script URL LibRaw starts its worker from: constructed once with the
@@ -107,7 +198,9 @@ export async function probeLibRawWorker({ pageIsolated = isCrossOriginIsolated()
             sharedArrayBuffer: info?.crossOriginIsolated === true,
             threads: Number(info?.threads) || 1,
             poolSize: Number(info?.poolSize) || 0,
-            threaded: true
+            // False on a page without shared memory, or when the threaded
+            // build did not start: the single-threaded one answered.
+            threaded: typeof info?.threaded === 'boolean' ? info.threaded : raw.threaded === true
           };
         }
       } finally {
