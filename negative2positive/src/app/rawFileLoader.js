@@ -1,4 +1,4 @@
-import LibRaw from 'libraw-wasm';
+import { createLibRaw } from './librawRuntime.js';
 import { decodeTiffBuffer } from './tiffFileLoader.js';
 import { decodeScanInWorker } from './scanDecodeClient.js';
 export { tiffIfdToRgb16 } from './tiffFileLoader.js';
@@ -305,9 +305,13 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     ? Math.min(bufBytes > RAW_SIZE_HUGE ? RAW_DECODE_TIMEOUT_MS_HUGE : RAW_DECODE_TIMEOUT_MS, 30_000)
     : (bufBytes > RAW_SIZE_HUGE ? RAW_DECODE_TIMEOUT_MS_HUGE : RAW_DECODE_TIMEOUT_MS);
 
+  // A threaded LibRaw build on a cross-origin isolated page gets threads
+  // (#264 Part D; `options.background` caps a lane's); otherwise this is
+  // `new LibRaw()` as it always was.
   let raw;
+  let librawThreads = 1;
   try {
-    raw = new LibRaw();
+    ({ raw, threads: librawThreads } = createLibRaw({ background: options.background === true }));
   } catch (err) {
     throw new Error(`module worker not supported: ${err?.message || err}`);
   }
@@ -433,6 +437,7 @@ export async function loadRawFile(buffer, fileName, options = {}) {
         tiff_bps: rawMetadata.tiff_bps,
         width: rawMetadata.width,
         height: rawMetadata.height,
+        threads: librawThreads,
       });
     }
     if (onMetadata) {
