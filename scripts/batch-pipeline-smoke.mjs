@@ -98,6 +98,14 @@ export async function runBatchPipelineSmoke({ send, evaluate, waitFor, wait, fai
       };
       const terminate = OriginalWorker.prototype.terminate;
       OriginalWorker.prototype.terminate = function () { this.__terminated = true; return terminate.call(this); };
+      // With ?debug=1 the app's idle isolation report (#264) starts one worker
+      // of every script once, a band worker too, and posts it only the probe:
+      // such a worker is not the band pool's.
+      const postMessage = OriginalWorker.prototype.postMessage;
+      OriginalWorker.prototype.postMessage = function (message, ...rest) {
+        if (message && message.type === 'nc-isolation-probe') this.__isolationProbe = true;
+        return postMessage.call(this, message, ...rest);
+      };
       const click = HTMLAnchorElement.prototype.click;
       HTMLAnchorElement.prototype.click = function () {
         if (!this.download || !this.href.startsWith('blob:')) return click.call(this);
@@ -110,6 +118,7 @@ export async function runBatchPipelineSmoke({ send, evaluate, waitFor, wait, fai
       probe.restore = () => {
         window.Worker = OriginalWorker;
         OriginalWorker.prototype.terminate = terminate;
+        OriginalWorker.prototype.postMessage = postMessage;
         HTMLAnchorElement.prototype.click = click;
       };
       // Every photo takes part.
@@ -154,11 +163,12 @@ export async function runBatchPipelineSmoke({ send, evaluate, waitFor, wait, fai
       const files = await hashAll(from);
       const stages = await evaluate(`(() => {
         const p = window.__batchPipelineProbe;
-        const created = p.bandWorkers.slice(p.bandWorkersBefore);
+        const created = p.bandWorkers.slice(p.bandWorkersBefore).filter(w => !w.__isolationProbe);
         const d = window.__ncBatchPipeline?.diagnostics || {};
         return {
           last: d.last, bands: d.bands, residentFrames: d.residentFrames, decodeAhead: d.decodeAhead,
           bandWorkers: created.length, bandWorkersAlive: created.filter(w => !w.__terminated).length,
+          isolationProbes: p.bandWorkers.slice(p.bandWorkersBefore).length - created.length,
           longestTask: p.longTasks.length ? Math.max(...p.longTasks) : 0,
           cores: navigator.hardwareConcurrency
         };
@@ -209,7 +219,7 @@ export async function runBatchPipelineSmoke({ send, evaluate, waitFor, wait, fai
       const [file] = await hashAll(from);
       const pool = await evaluate(`(() => {
         const p = window.__batchPipelineProbe;
-        const created = p.bandWorkers.slice(p.bandWorkersBefore);
+        const created = p.bandWorkers.slice(p.bandWorkersBefore).filter(w => !w.__isolationProbe);
         return { stats: window.__ncBatchPipeline?.diagnostics?.singleExport || null, workers: created.length, alive: created.filter(w => !w.__terminated).length };
       })()`);
       return { file, pool };
