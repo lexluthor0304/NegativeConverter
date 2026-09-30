@@ -253,6 +253,9 @@ for (const tier of ['A', 'B']) {
   await c.switchToFile(0);
   assert.equal(h.state.processedImageData, processed, 'the settled preview in the same task');
   assert.equal(h.state.conversionSourceImageData, null);
+  const shownFor = c.displayFrameReference();
+  assert.deepEqual([shownFor.width, shownFor.height], [crop.width, crop.height],
+    'the display is fitted to the source it stands for, not to its preview');
   assert.equal(h.state.displayLevelImageData, proxy);
   assert.equal(h.state.conversionPreviewImageData.__displayOf, proxy);
   assert.equal(h.state.sourcePending.width, crop.width);

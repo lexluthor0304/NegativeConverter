@@ -58,7 +58,7 @@ function fixture({ source: size = { width: 9536, height: 6336 }, container = { w
     constSource('ZOOM_MIN'), constSource('ZOOM_MAX_FIT'), constSource('ZOOM_DOUBLE_CLICK_FACTOR'),
     'const canvasDisplayFit = { w: 0, h: 0, containerW: 0, containerH: 0, zoom: 0, dpr: 0, scale: 0 };',
     'let displayPreviewResizeTimer = null;',
-    ...['getFullResDisplayReference', 'adjustCanvasDisplay', 'actualPixelsZoom', 'zoomMax', 'zoomIndicatorText',
+    ...['getFullResDisplayReference', 'displayFrameReference', 'conversionSourceSize', 'adjustCanvasDisplay', 'actualPixelsZoom', 'zoomMax', 'zoomIndicatorText',
       'applyZoomPanTransform', 'getZoomGeometry', 'clampPan', 'resetZoomPan', 'resetUserZoom',
       'toggleActualPixels', 'zoomAtPoint', 'scheduleDisplayPreviewResize'].map(functionSource)
   ].join('\n'), context);

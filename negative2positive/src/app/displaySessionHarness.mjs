@@ -6,7 +6,7 @@
 // Helpers every reader of the base, the source or the working planes calls.
 export const DISPLAY_SESSION_HELPERS = [
   'baseSizeSource', 'conversionSourceSize', 'releasedPlane', 'isReleasedPlane', 'workingPlanes', 'sessionGeometryKey',
-  'reviveFrameDescriptor', 'autoWbSampleKey', 'pendingConversionTarget'
+  'reviveFrameDescriptor', 'autoWbSampleKey', 'pendingConversionTarget', 'displayFrameReference'
 ];
 
 export function displaySessionDiagnosticsStub() {

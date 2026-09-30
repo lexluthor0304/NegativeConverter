@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { DISABLED_GPU_PREVIEW_SCHEDULER } from './gpuPreviewScheduler.js';
+import { step3FrameReference } from './displayCanvas.js';
 
 if (!globalThis.ImageData) {
   globalThis.ImageData = class ImageData {
@@ -232,6 +233,8 @@ export function createHarness(base, { historyBudget = 768 * 1024 * 1024, session
     usesSilverCoreConversion: () => true, hasFrameRepairs: () => false, isAiBrushEnabled: () => false,
     requiresFilmBase: () => true, isLargeImage: image => Number(image?.width) * Number(image?.height) > target.largeImagePixels,
     largeImagePixels: 16_000_000, photoActivation: null,
+    // The frame the Step-3 display stands for (displayCanvas.js).
+    step3FrameReference,
     // A memory claim (#258) that records how it was taken and released.
     createFrameClaim: (file, options = {}) => {
       const claim = { file, priority: options.priority, label: options.label, released: false, release() { claim.released = true; }, atDecode: async () => {} };

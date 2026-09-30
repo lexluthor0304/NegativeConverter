@@ -4162,12 +4162,22 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       };
     }
 
+    // The frame the Step-3 display stands for (step3FrameReference). A Tier B
+    // session (#249) stands for the source it rebuilds, whose size it keeps.
+    function displayFrameReference() {
+      return step3FrameReference({
+        processedImageData: state.processedImageData,
+        processedImageDataIsPreview: state.processedImageDataIsPreview,
+        conversionSourceImageData: conversionSourceSize()
+      });
+    }
+
     // The CSS box of the Step-3 frame, which the GL canvas shares. The 2D
     // backing is sized only when a frame is presented, so a settle still in
     // the worker never exposes a cleared canvas.
     function fitStep3CanvasBox() {
       const shown = displaySourceImageData();
-      const reference = step3FrameReference(state);
+      const reference = displayFrameReference();
       if (!shown || !reference || state.cropping) return;
       if (state.sprocketPreviewEnabled) {
         const framed = sprocketFrameSize(shown.width, shown.height);
@@ -6033,7 +6043,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
       if (!state.sprocketPreviewEnabled) return { width, height, layout: null, reference: undefined };
       const composeOptions = getSprocketFrameComposeOptions();
       const layout = getSprocketFrameLayout(width, height, composeOptions);
-      const full = step3FrameReference(state);
+      const full = displayFrameReference();
       return {
         width: layout.frameWidth, height: layout.frameHeight, layout,
         reference: full ? sprocketFrameReference({ width, height }, full, composeOptions) : null
@@ -6793,7 +6803,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // while WebGL presents; no export reads it.
     function presentCpuFrame(adjusted, options = {}) {
       state.displayImageData = adjusted;
-      renderAdjustedImageDataToMainCanvas(adjusted, step3FrameReference(state), options);
+      renderAdjustedImageDataToMainCanvas(adjusted, displayFrameReference(), options);
       // The tint and the strokes are on their own layer (#253).
       syncDisplayOverlay();
     }
@@ -6886,7 +6896,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
     // compares it with the one on screen.
     function describeDisplayFrame() {
       const step3 = Boolean(state.currentStep >= 3 && state.processedImageData);
-      const image = step3 ? step3FrameReference(state) : (state.croppedImageData || state.originalImageData);
+      const image = step3 ? displayFrameReference() : (state.croppedImageData || state.originalImageData);
       const shown = step3 ? displaySourceImageData() : null;
       const size = (value) => (value ? [value.width, value.height] : null);
       return {
@@ -9952,7 +9962,7 @@ import { canPublishThumbnail } from './thumbnailRank.js';
         return { width: turned.width, height: turned.height };
       }
       if (state.currentStep < 3) return null;
-      const full = step3FrameReference(state);
+      const full = displayFrameReference();
       if (!full || !(full.width > 0) || !(full.height > 0)) return null;
       // Portrait- and marking-aware, as composeSprocketFrame frames it.
       const reference = state.sprocketPreviewEnabled ? sprocketFrameSize(full.width, full.height) : full;

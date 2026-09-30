@@ -91,7 +91,7 @@ class TestImageData {
     }),
   });
   vm.runInContext(['sprocketFrameSize', 'sprocketFrameReference', 'glFrameSize', 'glBorderSmearSource', 'drawGlBorder', 'dropGlBorder',
-    'releaseGlBorder'].map(functionSource).join('\n'), context);
+    'releaseGlBorder', 'displayFrameReference', 'conversionSourceSize'].map(functionSource).join('\n'), context);
   const framed = context.glFrameSize(900, 600);
   const layout = getSprocketFrameLayout(900, 600, { edgeMarkings: edge });
   assert.deepEqual([framed.width, framed.height], [layout.frameWidth, layout.frameHeight], 'the buffer is the framed display size');
