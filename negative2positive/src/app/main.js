@@ -3455,20 +3455,21 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     const ctx = canvas.getContext('2d');
     // Writes into #canvas, read by the smoke tests (#254): a brush stroke on
     // the GPU display writes none, and on a CPU display only rectangles of the
-    // live dodge effect.
+    // live dodge effect. The counting methods look the context's own methods
+    // up on its prototype at each call, so a probe a smoke installs there after
+    // boot still sees every #canvas write.
     const mainCanvasWrites = { put: 0, draw: 0, maxPutPixels: 0 };
     {
-      const put = ctx.putImageData.bind(ctx);
-      const draw = ctx.drawImage.bind(ctx);
+      const methods = Object.getPrototypeOf(ctx);
       ctx.putImageData = (image, ...rest) => {
         mainCanvasWrites.put++;
         const pixels = rest.length >= 6 ? rest[4] * rest[5] : image.width * image.height;
         if (pixels > mainCanvasWrites.maxPutPixels) mainCanvasWrites.maxPutPixels = pixels;
-        return put(image, ...rest);
+        return methods.putImageData.call(ctx, image, ...rest);
       };
       ctx.drawImage = (...args) => {
         mainCanvasWrites.draw++;
-        return draw(...args);
+        return methods.drawImage.apply(ctx, args);
       };
     }
     const glCanvas = document.getElementById('glCanvas');
