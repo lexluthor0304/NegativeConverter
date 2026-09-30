@@ -19,6 +19,10 @@ function localLibRawPlugin(dist) {
     name: 'nc-local-libraw-wasm',
     apply: 'serve',
     enforce: 'pre',
+    // Stored display proxies (#249) name the decoder that actually runs.
+    config() {
+      return { define: { __NC_DISPLAY_PROXY_HASHES__: JSON.stringify(displayProxyBuildHashes(__dirname, { librawDist: dist })) } };
+    },
     configureServer() {
       console.warn(`[vite] libraw-wasm resolves to ${dist} (LIBRAW_WASM_DIST, test only)`);
     },

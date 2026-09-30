@@ -170,7 +170,9 @@ the page with its roll sample for the fill.
 the file's content (size, date, SHA-256 of the first MiB plus the size, SHA-256
 of the last 64 KiB, hashed only when size and date match an index entry), the
 build's LibRaw and code hashes (`scripts/display-proxy-hashes.mjs`, stamped by
-`vite.config.js`) and the proxy's key. Only reproducible decode routes are
+`vite.config.js`; #264's decoders count too: the decoder choice, the desktop's
+native plane and its transfer, libraw-wasm's threaded build, and on the dev
+server the `LIBRAW_WASM_DIST` package it resolves) and the proxy's key. Only reproducible decode routes are
 stored, never a recipe; a record carries its full key and checksum, verified
 on read. The desktop app keeps records in `app_cache_dir()/display-proxies`
 through `src-tauri/src/display_proxy_store.rs` (chunked atomic writes and
