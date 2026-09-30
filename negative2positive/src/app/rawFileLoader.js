@@ -527,10 +527,12 @@ export async function loadRawFile(buffer, fileName, options = {}) {
     throwIfAborted(signal);
 
     // A roll lane's worker keeps the planes and analyses them there (#252).
+    // A half-size one carries its full size, as a half-size image does below.
     if (outcome.held) {
       return {
         held: true, width: outcome.width, height: outcome.height,
-        ...(explicitHalfSize && useHalfSize ? { fullSize: halfDecodeFullSize(outcome.width, outcome.height, metaWidth, metaHeight) } : {})
+        ...(useHalfSize && !matchesFullSize(outcome.width, outcome.height, metaWidth, metaHeight)
+          ? { fullSize: halfDecodeFullSize(outcome.width, outcome.height, metaWidth, metaHeight) } : {})
       };
     }
 
