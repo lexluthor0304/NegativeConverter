@@ -3,10 +3,15 @@ import { loadInferenceRuntime } from '../app/inferenceRuntime.js';
 import { defaultInferencePreference } from '../app/inferenceBackend.js';
 let ort;
 let session, bytes, provider;
+// One WASM thread (#264): at 4 threads EfficientViT's logits differ from one
+// thread's by up to 4e-6 (label maps equal, measured by
+// scripts/isolation-smoke.mjs); the map's labels and confidence go into the
+// recipe and the white balance, so they must not depend on the machine.
+// MI-GAN's output is identical and does use threads (inferenceRuntime.js).
+const SEMANTIC_THREADS = 1;
 async function create(preferGpu) {
   if (session) await session.release().catch(() => {});
-  ort ||= await loadInferenceRuntime();
-  ort.env.wasm.numThreads = 1;
+  ort ||= await loadInferenceRuntime({ numThreads: SEMANTIC_THREADS });
   provider = defaultInferencePreference() !== 'wasm' && preferGpu && navigator.gpu ? 'webgpu' : 'wasm';
   session = await ort.InferenceSession.create(bytes, { executionProviders: provider === 'webgpu' ? ['webgpu', 'wasm'] : ['wasm'], graphOptimizationLevel: 'all' });
   // The worker is single-use, so a WASM warm-up only doubled the one real run.
@@ -46,6 +51,6 @@ self.onmessage = async ({ data: { image, modelUrl, model, preferGpu = true } }) 
       let sum = 0; for (let c = 0; c < 150; c++) sum += Math.exp(logits.data[c * 4096 + pos] - max);
       const probability = 1 / sum; labels[y * 64 + x] = probability >= 0.55 ? best : 255; confidence += probability;
     }
-    self.postMessage({ width: 64, height: 64, labels: Array.from(labels), confidence: confidence / 4096, provider });
+    self.postMessage({ width: 64, height: 64, labels: Array.from(labels), confidence: confidence / 4096, provider, threads: ort.env.wasm.numThreads || 1 });
   } catch (error) { self.postMessage({ error: error.message }); }
 };

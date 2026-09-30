@@ -13,7 +13,7 @@ export function createInpaintWorkerProcessor({ createSession = createInpaintSess
     if (type === 'initialize') {
       await session?.release();
       session = await createSession(message.modelBytes, message.options);
-      return { payload: { id, provider: session.provider, inputNames: session.inputNames, outputNames: session.outputNames }, transfers: [] };
+      return { payload: { id, provider: session.provider, threads: session.threads || 1, inputNames: session.inputNames, outputNames: session.outputNames }, transfers: [] };
     }
     if (type === 'release') {
       await session?.release();

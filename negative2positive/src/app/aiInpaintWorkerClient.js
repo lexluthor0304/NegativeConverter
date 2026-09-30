@@ -106,7 +106,7 @@ export async function createInpaintWorkerSession(modelBytes, options = {}, {
   // and hit counts; `trim(Infinity)` only reports them.
   const trim = (bytes) => closing ? Promise.reject(new Error('AI repair session was released'))
     : request('trim', { bytes }).then(response => response.memo);
-  return { provider: metadata.provider, inputNames: metadata.inputNames,
+  return { provider: metadata.provider, threads: metadata.threads || 1, inputNames: metadata.inputNames,
     outputNames: metadata.outputNames, run, release, trim,
     /** WASM heap bytes while the worker lives (0 once released). */
     get residentBytes() { return worker ? heapBytes : 0; } };

@@ -510,7 +510,10 @@ export async function createInpaintSession(modelBytes, {
         mask[(TILE / 2) * TILE + TILE / 2] = 1;
         await run(new Float32Array(3 * TILE * TILE).fill(0.5), mask, TILE, { insert: false });
       }
-      return { session, release, provider: executionProviders[0], run, inputNames: session.inputNames, outputNames: session.outputNames,
+      // ORT's WASM threads in this realm (#264): more than one only when the
+      // realm is cross-origin isolated.
+      const threads = Number(ort.env?.wasm?.numThreads) || 1;
+      return { session, release, provider: executionProviders[0], threads, run, inputNames: session.inputNames, outputNames: session.outputNames,
         trim: (bytes) => memo.trim(bytes), memoStats: () => memo.stats() };
     } catch (error) {
       lastError = error;
