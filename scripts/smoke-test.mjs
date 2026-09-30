@@ -164,7 +164,15 @@ async function getWsUrl() {
 
 const ws = new WebSocket(await getWsUrl());
 await new Promise((r, j) => { ws.onopen = r; ws.onerror = j; });
-ws.onclose = () => fail(`Chrome debugging connection closed: ${chromeDiagnostics}`);
+// Why the connection went: the close code, Chrome's own detach or crash
+// event, whether the browser still runs, and the last command sent.
+let inspectorEvent = null;
+let lastCommand = null;
+ws.onclose = (event) => {
+  const running = chrome.exitCode === null && chrome.signalCode === null;
+  fail(`Chrome debugging connection closed (code ${event.code}${event.reason ? ` "${event.reason}"` : ''}; Chrome ${running ? 'still running' : `gone: ${chrome.exitCode ?? chrome.signalCode}`}; `
+    + `${inspectorEvent || 'no Inspector event'}; last command ${lastCommand || 'none'}): ${chromeDiagnostics}`);
+};
 
 let msgId = 0;
 const pending = new Map();
@@ -175,6 +183,10 @@ ws.onmessage = (e) => {
     pending.get(msg.id)(msg);
     pending.delete(msg.id);
     return;
+  }
+  if (msg.method === 'Inspector.detached' || msg.method === 'Inspector.targetCrashed') {
+    inspectorEvent = `${msg.method} ${JSON.stringify(msg.params || {})}`;
+    console.error(`page ${inspectorEvent}`);
   }
   if (msg.method === 'Runtime.exceptionThrown') {
     pageErrors.push(msg.params?.exceptionDetails?.exception?.description
@@ -206,6 +218,7 @@ ws.onmessage = (e) => {
 };
 const send = (method, params = {}) => new Promise((resolve) => {
   const id = ++msgId;
+  lastCommand = method;
   const timeout = setTimeout(() => fail(`Chrome command timed out: ${method}`), 180_000);
   pending.set(id, (m) => { clearTimeout(timeout); resolve(m); });
   ws.send(JSON.stringify({ id, method, params }));
@@ -305,6 +318,7 @@ async function previewLuminance() {
 
 await send('Page.enable');
 await send('Runtime.enable');
+await send('Inspector.enable');
 // The fake-camera flags make headless Chrome reserve part of the window (the
 // viewport came out 1440x757); pin the layout the scenarios were written for.
 await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
