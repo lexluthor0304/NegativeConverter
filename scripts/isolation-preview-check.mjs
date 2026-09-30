@@ -114,8 +114,9 @@ listeners.push((msg) => {
     return;
   }
   workers.push((async () => {
-    void send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }, sessionId);
-    if (waitingForDebugger) await send('Runtime.runIfWaitingForDebugger', {}, sessionId);
+    // Not paused: a paused worker holds up a threaded runtime's pool start.
+    void send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, sessionId);
+    if (waitingForDebugger) void send('Runtime.runIfWaitingForDebugger', {}, sessionId);
     const reply = await send('Runtime.evaluate', {
       expression: `(async () => { for (let i = 0; i < 150 && self.onmessage === null; i++) await new Promise(r => setTimeout(r, 20));
         return { isolated: self.crossOriginIsolated === true, name: self.name || '' }; })()`,
@@ -129,7 +130,6 @@ listeners.push((msg) => {
 await send('Page.enable');
 await send('Runtime.enable');
 await send('Audits.enable');
-await send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true });
 await send('Page.navigate', { url: `http://127.0.0.1:${PORT}/?lang=en&debug=1` });
 await waitFor('app boot', `document.readyState === 'complete' && !!window.__ncIsolation && !!document.getElementById('fileInput')`);
 await wait(1500);
@@ -138,6 +138,10 @@ if (!page.isolated || !page.sab) fail(`the production build is not isolated: ${J
 const report = await evaluate(`window.__ncIsolation.report()`);
 console.log('preview isolation report:', JSON.stringify(report.workers));
 if (!report.allIsolated) fail(`not every worker is isolated: ${JSON.stringify(report.workers)}`);
+// From here on, CDP also reads the isolation of the workers the app starts
+// for a real decode (the LibRaw worker and, with a threaded build, its
+// pthreads); attached after boot, so the page itself is never held up.
+await send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true });
 
 // A LibRaw decode on the built bundle and a 16-bit PNG export.
 const dng = join(dir, 'preview.dng');

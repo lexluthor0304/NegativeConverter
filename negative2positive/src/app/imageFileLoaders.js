@@ -1,3 +1,5 @@
+import { allocPlane16, sharedPlanesAvailable, markDerivedEightBit } from './crossOriginIsolation.js';
+
 export const RAW_LIKE_EXTENSIONS = [
   '.cr2', '.cr3', '.crw', '.nef', '.nrw', '.arw', '.dng', '.raf', '.raw', '.rw2',
   '.pef', '.srw', '.3fr', '.mef', '.orf', '.rwl', '.iiq', '.x3f', '.mrw', '.kdc',
@@ -165,9 +167,7 @@ export async function loadPngImageData(buffer, { signal = null, sharedPlanes = f
   const decoded = await decodeScanInWorker(buffer, 'png', { signal, sharedPlanes });
   if (decoded) return decoded;
   if (signal?.aborted) throw aborted();
-  const [{ loadPngFile }, { allocPlane16, sharedPlanesAvailable, markDerivedEightBit }] = await Promise.all([
-    import('./pngFileLoader.js'), import('./crossOriginIsolation.js')
-  ]);
+  const { loadPngFile } = await import('./pngFileLoader.js');
   const alloc = sharedPlanes && sharedPlanesAvailable() ? (length) => allocPlane16(length, { shared: true }) : null;
   const image = loadPngFile(buffer, { alloc });
   if (image.__image16) markDerivedEightBit(image);
