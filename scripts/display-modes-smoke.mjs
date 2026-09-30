@@ -259,7 +259,9 @@ export async function runDisplayModesSmoke({ send, evaluate, waitFor, fail, inst
     const overlay = document.getElementById('dodgeBurnShowOverlay'); if (!overlay.checked) overlay.click();
   })()`);
   const clearStrokes = () => evaluate(`(() => { const b = document.getElementById('dodgeBurnClearBtn'); if (b && !b.disabled) b.click(); })()`);
-  // The photo point a stroke at `fraction` of the photo rectangle stores.
+  // The photo point a stroke at `fraction` of the photo rectangle stores. The
+  // brushes map through the photo inside the border (#254 A.2): the stored
+  // point is the clicked one, within a display pixel.
   const strokeAt = async (fx, fy) => {
     const before = await probe();
     const x = before.photo.left + before.photo.width * fx, y = before.photo.top + before.photo.height * fy;
@@ -268,6 +270,10 @@ export async function runDisplayModesSmoke({ send, evaluate, waitFor, fail, inst
     const after = await probe();
     const points = after.strokes.at(-1);
     expect(points && points.length >= 1, 'the dodge stroke was not recorded: ' + JSON.stringify(after));
+    const tolerance = after.working.width / (await frame()).display[0] + 0.5;
+    const want = { x: fx * after.working.width, y: fy * after.working.height };
+    expect(Math.abs(points[0].x - want.x) <= tolerance && Math.abs(points[0].y - want.y) <= tolerance,
+      'the stroke is not stored at the clicked photo point: ' + JSON.stringify({ stored: points[0], want, tolerance, photo: after.photo }));
     return { client: { x, y }, point: points[0], probe: after };
   };
   // Where the overlay draws a point, from a screenshot with and without the saved
@@ -358,7 +364,8 @@ export async function runDisplayModesSmoke({ send, evaluate, waitFor, fail, inst
       `${label}: the overlay backing is not the display photo's size: ` + JSON.stringify({ backing: state.overlayBacking, display: (await frame()).display }));
     return results;
   };
-  // GL vs CPU: the same click stores the same image point (HEAD's ratio mapping).
+  // GL vs CPU: the same click stores the same image point, through the photo
+  // rectangle inside the border on both canvases (#254 A.2).
   const pointerMapping = async (label) => {
     await clearStrokes();
     await settle(`${label} cleared`, 800);

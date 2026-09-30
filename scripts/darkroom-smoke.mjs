@@ -177,6 +177,8 @@ export async function runDarkroomSmoke({ send, evaluate, waitFor, wait, fail, in
   })()`);
   const mouse = (type, x, y) => send('Input.dispatchMouseEvent', { type, x, y, button: 'left', clickCount: type === 'mousePressed' ? 1 : 0, buttons: type === 'mouseReleased' ? 0 : 1 });
   const y = rect.y + rect.height * 0.5;
+  // The frame on screen before the stroke, to compare outside its box mid-drag.
+  await evaluate(`(() => { window.__darkroomBeforeStroke = window.__ncDisplay.shownFrame(); })()`);
   await evaluate('window.__ncBrush.resetCounters()');
   await mouse('mousePressed', rect.x + rect.width * 0.35, y);
   for (let i = 1; i <= 8; i++) { await mouse('mouseMoved', rect.x + rect.width * (0.35 + 0.3 * i / 8), y); await wait(30); }
@@ -184,10 +186,25 @@ export async function runDarkroomSmoke({ send, evaluate, waitFor, wait, fail, in
   await waitFor('live dodge rectangles', `window.__ncBrush.state().live.rects > 0 && window.__ncBrush.state().live.session?.touched`, 10_000);
   await wait(300);
   const during = await evaluate(`window.__ncBrush.state()`);
+  // Pixels outside the rectangles the stroke drew are unchanged mid-drag: no
+  // redraw of the photo, no WB or curve flash.
+  const outside = await evaluate(`(() => {
+    const before = window.__darkroomBeforeStroke, now = window.__ncDisplay.shownFrame(), box = window.__ncBrush.state().live.box;
+    delete window.__darkroomBeforeStroke;
+    if (!before || !now || before.width !== now.width || before.height !== now.height || !box) return { error: 'frames', box, sizes: [before?.width, now?.width] };
+    let changed = 0, inside = 0;
+    for (let y = 0; y < now.height; y++) for (let x = 0; x < now.width; x++) {
+      const i = (y * now.width + x) * 4;
+      if (before.data[i] === now.data[i] && before.data[i + 1] === now.data[i + 1] && before.data[i + 2] === now.data[i + 2]) continue;
+      if (x >= box.x && x < box.x + box.width && y >= box.y && y < box.y + box.height) inside++; else changed++;
+    }
+    return { changed, inside, box, surface: now.surface };
+  })()`);
+  if (outside.error || outside.changed || !outside.inside) fail('the photo changed outside the stroke while painting: ' + JSON.stringify(outside));
   await evaluate(`document.getElementById('brushFeedback').style.visibility = 'hidden'`);
   const live = await canvasLuminance(region);
   await evaluate(`document.getElementById('brushFeedback').style.visibility = ''`);
-  console.log('darkroom live burn:', JSON.stringify({ untouched, live, surface: during.surface, live: during.live, writes: during.canvasWrites }));
+  console.log('darkroom live burn:', JSON.stringify({ untouched, live, surface: during.surface, live: during.live, writes: during.canvasWrites, outside }));
   if (!(live < untouched - 3)) fail(`the burn did not show under the brush while painting: ${untouched} -> ${live}`);
   if (!during.feedback.drawing || during.feedback.counters.frames < 2) fail('the stroke is not drawn frame by frame on the overlay: ' + JSON.stringify(during.feedback));
   if (during.surface === 'gl' && (during.canvasWrites.put || during.canvasWrites.draw)) {
@@ -250,8 +267,44 @@ export async function runDarkroomSmoke({ send, evaluate, waitFor, wait, fail, in
   await wait(2500);
   const cleared = await canvasLuminance(region);
   if (Math.abs(cleared - untouched) > 1.5) fail(`removing the stroke did not restore the region: ${untouched} -> ${cleared}`);
+
+  // #254's third brush session: dodge with dust removal on. The frame on
+  // screen is the repaired full-resolution frame's display preview, so the
+  // effect shows as displayed + (live - committed) of the preview worker's
+  // frame (#237 keeps its slot warm); the GPU display takes no #canvas writes.
+  await evaluate(`(() => {
+    window.__darkroomDustUpdates = 0;
+    window.__darkroomDustObserver = new MutationObserver(() => window.__darkroomDustUpdates++);
+    window.__darkroomDustObserver.observe(document.getElementById('dustStatus'), { childList: true });
+    document.getElementById('dustRemovalEnabled').click();
+  })()`);
+  await waitFor('dust removal settled under the dodge tool', `window.__darkroomDustUpdates > 0
+    && /^(Detected [0-9]+ dust particles|No dust detected)/.test(document.getElementById('dustStatus').textContent)`, 90_000);
+  await wait(2500);
+  const repairedRect = await evaluate(`(() => {
+    const surface = [...document.querySelectorAll('#canvas, #glCanvas')].find(el => getComputedStyle(el).display !== 'none');
+    const r = surface.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height };
+  })()`);
+  const ry = repairedRect.y + repairedRect.height * 0.5;
+  await evaluate('window.__ncBrush.resetCounters()');
+  await mouse('mousePressed', repairedRect.x + repairedRect.width * 0.35, ry);
+  for (let i = 1; i <= 8; i++) { await mouse('mouseMoved', repairedRect.x + repairedRect.width * (0.35 + 0.3 * i / 8), ry); await wait(30); }
+  await waitFor('live dodge rectangles over the repaired frame', `window.__ncBrush.state().live.rects > 0 && window.__ncBrush.state().live.session?.touched`, 30_000);
+  const repairedLive = await evaluate(`window.__ncBrush.state()`);
+  console.log('darkroom repaired live burn:', JSON.stringify({ surface: repairedLive.surface, live: repairedLive.live, writes: repairedLive.canvasWrites }));
+  if (repairedLive.surface === 'gl' && (repairedLive.canvasWrites.put || repairedLive.canvasWrites.draw)) {
+    fail('#canvas was written during a repaired-frame stroke on the GPU display: ' + JSON.stringify(repairedLive.canvasWrites));
+  }
+  await mouse('mouseReleased', repairedRect.x + repairedRect.width * 0.65, ry);
+  await waitFor('repaired-frame stroke recorded', `/1 stroke/.test(document.getElementById('dodgeBurnStatus').textContent)`, 10_000);
+  await wait(3000);
+  await evaluate(`document.getElementById('dodgeBurnUndoStrokeBtn').click()`);
+  await waitFor('repaired-frame stroke removed', `/No strokes/.test(document.getElementById('dodgeBurnStatus').textContent)`, 10_000);
+  await evaluate(`window.__darkroomDustObserver.disconnect(); document.getElementById('dustRemovalEnabled').click()`);
+  await wait(3000);
+
   await evaluate(`(() => { const el = document.getElementById('dodgeBurnEnabled'); el.checked = false; el.dispatchEvent(new Event('change', { bubbles: true })); })()`);
   await waitFor('dodge burn inactive', `!document.body.classList.contains('dodge-burn-active')`, 5_000);
 
-  console.log('ok: test strip renders and applies with undo, enlarger filtration maps to the core sliders both ways, paper emulation changes and restores the print, a burn stroke darkens its region and can be removed');
+  console.log('ok: test strip renders and applies with undo, enlarger filtration maps to the core sliders both ways, paper emulation changes and restores the print, a burn stroke shows under the brush (also over a repaired frame), darkens its region and can be removed');
 }

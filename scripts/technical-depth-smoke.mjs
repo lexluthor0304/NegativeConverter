@@ -191,13 +191,14 @@ async function runAiRepairScenario({ send, evaluate, waitFor, wait, fail, instal
     window.__aiBrushRuns = 0;
     new MutationObserver(() => { window.__aiBrushRuns++; }).observe(document.getElementById('dustAiStatus'), { childList: true });
     if (!document.getElementById('dustShowMask').checked) document.getElementById('dustShowMask').click();
-    // A shown mask keeps the GL display (#253): paint on the canvas on screen.
+    // A shown mask keeps the GL display (#253): paint on the canvas on screen,
+    // with pointer events, which the dust brush takes since #254.
     const canvas = document.getElementById(document.getElementById('glCanvas').style.display === 'block' ? 'glCanvas' : 'canvas');
     const rect = canvas.getBoundingClientRect();
-    const options = { bubbles: true, clientX: rect.x + rect.width / 2,
-      clientY: rect.y + rect.height / 2, button: 0, altKey: true };
-    canvas.dispatchEvent(new MouseEvent('mousedown', options));
-    document.dispatchEvent(new MouseEvent('mouseup', options));
+    const options = { bubbles: true, cancelable: true, pointerId: 9, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1,
+      clientX: rect.x + rect.width / 2, clientY: rect.y + rect.height / 2, altKey: true };
+    canvas.dispatchEvent(new PointerEvent('pointerdown', options));
+    canvas.dispatchEvent(new PointerEvent('pointerup', { ...options, buttons: 0 }));
   })()`);
   await waitFor('MI-GAN replaces brush preview', `window.__aiBrushRuns > 0 && /last run/.test(document.getElementById('dustAiStatus').textContent)`, 120_000);
   await evaluate(`document.getElementById('dustShowMask').click()`);
@@ -425,14 +426,21 @@ async function runManualBrushSmoke({ send, evaluate, waitFor, wait, fail, instal
       fail('Touch brush target is not ready at its original coordinates: ' + JSON.stringify(beforeTouch));
     }
     const touchTransform = beforeTouch.transform;
-    await evaluate(`window.__manualBrushUi.arm('touch')`);
+    await evaluate(`window.__manualBrushUi.arm('touch'); window.__ncBrush.resetCounters()`);
     await send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: location.x, y: location.y + 55 }] });
     const touchStart = await evaluate(brushDiagnostics);
     if (!touchStart.alpha) fail('Touch start was not admitted by the brush: ' + JSON.stringify(touchStart));
     await send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: location.x + 30, y: location.y + 55 }] });
     const touchMove = await evaluate(brushDiagnostics);
     if (touchMove.alpha <= touchStart.alpha) fail('Touch move did not extend the admitted brush stroke: ' + JSON.stringify({ touchStart, touchMove }));
-    console.log('manual brush touch admitted:', JSON.stringify({ startAlpha: touchStart.alpha, moveAlpha: touchMove.alpha }));
+    // #254: the stroke is drawn on the feedback overlay only; #canvas takes no
+    // put or draw between pointerdown and pointerup, and the overlay is at most
+    // the view's size at device resolution.
+    const aiStroke = await evaluate(`window.__ncBrush.state()`);
+    if (aiStroke.canvasWrites.put || aiStroke.canvasWrites.draw) fail('the AI brush wrote into #canvas while painting: ' + JSON.stringify(aiStroke.canvasWrites));
+    const aiView = await evaluate(`(() => { const c = document.getElementById('canvasContainer'); const d = window.devicePixelRatio || 1; return Math.ceil(c.clientWidth * d) * Math.ceil(c.clientHeight * d); })()`);
+    if (aiStroke.feedback.width * aiStroke.feedback.height > aiView) fail('the AI brush overlay is larger than the view: ' + JSON.stringify(aiStroke.feedback));
+    console.log('manual brush touch admitted:', JSON.stringify({ startAlpha: touchStart.alpha, moveAlpha: touchMove.alpha, writes: aiStroke.canvasWrites, overlay: [aiStroke.feedback.width, aiStroke.feedback.height] }));
     await send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
     await awaitBrushCycle('touch background repair completed before export');
     const touched = await exportWithoutRepair('touch repair');

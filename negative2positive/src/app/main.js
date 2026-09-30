@@ -3603,8 +3603,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // Bumped whenever the frame on screen is drawn in full again (a CPU
     // present, an exact-texture upload), which drops live rectangles.
     let liveDisplaySerial = 0;
+    // `box`: the union of the rectangles drawn since the counters were reset.
     const liveDodgeCounters = { strokes: 0, requests: 0, rects: 0, deltaRects: 0, stale: 0, warmups: 0,
-      uploads: 0, puts: 0, maxRectPixels: 0, restored: 0, lastRect: null };
+      uploads: 0, puts: 0, maxRectPixels: 0, restored: 0, lastRect: null, box: null };
     const brushFeedback = createBrushFeedback({
       canvas: brushFeedbackCanvas,
       measure: () => {
@@ -23606,6 +23607,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       liveDodgeCounters.rects++;
       liveDodgeCounters.maxRectPixels = Math.max(liveDodgeCounters.maxRectPixels, rect.width * rect.height);
       liveDodgeCounters.lastRect = { ...rect };
+      const box = liveDodgeCounters.box;
+      liveDodgeCounters.box = !box ? { ...rect } : {
+        x: Math.min(box.x, rect.x), y: Math.min(box.y, rect.y),
+        width: Math.max(box.x + box.width, rect.x + rect.width) - Math.min(box.x, rect.x),
+        height: Math.max(box.y + box.height, rect.y + rect.height) - Math.min(box.y, rect.y)
+      };
       if (session.display.gl) {
         if (!webglUploadRectRows(rect, rows, shown.width, shown.height)) {
           session.target = null;
@@ -23687,7 +23694,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }),
       resetCounters: () => {
         mainCanvasWrites.put = 0; mainCanvasWrites.draw = 0; mainCanvasWrites.maxPutPixels = 0;
-        for (const key of Object.keys(liveDodgeCounters)) liveDodgeCounters[key] = key === 'lastRect' ? null : 0;
+        for (const key of Object.keys(liveDodgeCounters)) liveDodgeCounters[key] = key === 'lastRect' || key === 'box' ? null : 0;
       }
     };
 
