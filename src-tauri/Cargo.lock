@@ -2303,11 +2303,13 @@ name = "negative-converter"
 version = "1.0.12"
 dependencies = [
  "base64 0.22.1",
+ "cc",
  "libc",
  "notify",
  "rfd",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-process",

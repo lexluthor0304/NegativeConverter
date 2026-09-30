@@ -16,6 +16,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# Compiles the vendored LibRaw for the native RAW decoder (#264). Already in
+# Cargo.lock (objc2-exception-helper, embed-resource and others build C with it).
+cc = "1"
 
 [features]
 default = ["updater"]
@@ -41,3 +44,12 @@ libc = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation"] }
+
+[dev-dependencies]
+# RGB16 hashes in the native decoder's parity tests (#264). Already in
+# Cargo.lock (tauri-codegen, wry).
+sha2 = "0.10"
+# The parity tests compare LibRaw's floats with the ones libraw-wasm reported
+# (native/wasm-parity-hashes.json): parse them correctly rounded, not to the
+# default best-effort precision (off by one ulp for some values). Tests only.
+serde_json = { version = "1", features = ["float_roundtrip"] }

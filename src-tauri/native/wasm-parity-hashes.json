@@ -1,0 +1,439 @@
+{
+  "about": "What the native decoder must reproduce (#264): the RGB16 SHA-256 of libraw-wasm's deterministic rebuild (LibRaw 0.22.1, no fast-math, -ffp-contract=off, musl 1.2.6 libm; #264 part B, libraw-wasm branch perf229-264 @ 14af432, not released yet), identical for its single-threaded build and its threaded build at 1-8 threads, and the metadata(true) fields the page reads. Hashes are over imageData().data (width*height*3 native-endian uint16) with rawFileLoader.js's options, outputBps 16; halfRgb16 with halfSize. `metadata` is the worker's metadata(true) object before index.js post-processes thumb_format, desc and timestamp, restricted to the keys the native object has (native_raw.rs RawMetadata); libraw-wasm 1.6.0 and the deterministic build report the same values for every file here. The HE-compressed NEFs have no hashes: LibRaw cannot decode them. Files are matched by name and size; the camera files are not in the repository.",
+  "files": {
+    "_DSC3111.NEF": {
+      "bytes": 13727369,
+      "size": "4000x2672",
+      "rgb16": "807257b75b965db6b10495080fa2a36dac63910e1a1e77203dc6f15d0d03b7b3",
+      "halfRgb16": "dd11ed909621be5eb9c9496fef6ff45b1eaeb0742969497a41212cf8f0ec2dac",
+      "libraw-wasm 1.6.0": {
+        "rgb16": "c49338e290c4fc0c9ee563ab199e18bfbb0e38df96c810838186e852314c454f",
+        "halfRgb16": "377ca191acf42d00d8cd578cd43404ac642124465dc3bf42c4aaea7b63cd1afe"
+      },
+      "metadata": {
+        "width": 4000,
+        "height": 2672,
+        "raw_width": 4000,
+        "raw_height": 2672,
+        "top_margin": 0,
+        "left_margin": 0,
+        "flip": 0,
+        "camera_make": "Nikon",
+        "camera_model": "Z f",
+        "iso_speed": 100,
+        "shutter": 0.004000000189989805,
+        "aperture": 4,
+        "focal_len": 35,
+        "timestamp": 1762479513,
+        "shot_order": 0,
+        "desc": "",
+        "artist": "",
+        "gps_data": {
+          "latitude": [
+            0,
+            0,
+            0
+          ],
+          "longitude": [
+            0,
+            0,
+            0
+          ],
+          "altitude": 0,
+          "latref": null,
+          "longref": null,
+          "altref": 0,
+          "gpsstatus": null,
+          "gpsparsed": true
+        },
+        "thumb_width": 3984,
+        "thumb_height": 2656,
+        "thumb_format": 0,
+        "lens": {
+          "Lens": "Nikon K35/2.8",
+          "LensMake": "",
+          "LensSerial": "",
+          "InternalLensSerial": "",
+          "MinFocal": 0,
+          "MaxFocal": 0,
+          "MaxAp4MinFocal": 0,
+          "MaxAp4MaxFocal": 0,
+          "EXIF_MaxAp": 0,
+          "FocalLengthIn35mmFormat": 52,
+          "makernotes": {
+            "Lens": "",
+            "LensID": 0,
+            "MinFocal": 0,
+            "MaxFocal": 0,
+            "MaxAp": 0,
+            "MinAp": 0,
+            "CurFocal": 0,
+            "CurAp": 0.5,
+            "FocalLengthIn35mmFormat": 0,
+            "MinFocusDistance": 0,
+            "LensMount": 28,
+            "CameraMount": 28,
+            "body": ""
+          }
+        }
+      }
+    },
+    "_DSC5290.dng": {
+      "bytes": 17288224,
+      "size": "6048x4024",
+      "rgb16": "1ef215b7834e0d69bcc2810e6e7f89f0d3db4aabe940642c0ab1f63b9715fa1b",
+      "halfRgb16": "7a9568c76d45d765d441c6e9cacba8b413c46d0475e186fd0c2e7d5d8c9c8b90",
+      "libraw-wasm 1.6.0": {
+        "rgb16": "651852cdce41728641791f1084d55c09d184d01cf049f06c6e29f4768023e55b",
+        "halfRgb16": "ccd8e8fa83aea819a2e33b82d8e180e5df1340e96b28e891bfd8a76a3bdf19d6"
+      },
+      "metadata": {
+        "width": 6048,
+        "height": 4024,
+        "raw_width": 6048,
+        "raw_height": 4024,
+        "top_margin": 0,
+        "left_margin": 0,
+        "flip": 0,
+        "camera_make": "Sony",
+        "camera_model": "ILCE-7M2",
+        "iso_speed": 100,
+        "shutter": 0.0062500000931322575,
+        "aperture": 11,
+        "focal_len": 50,
+        "timestamp": 1735381282,
+        "shot_order": 0,
+        "desc": "",
+        "artist": "",
+        "gps_data": {
+          "latitude": [
+            0,
+            0,
+            0
+          ],
+          "longitude": [
+            0,
+            0,
+            0
+          ],
+          "altitude": 0,
+          "latref": null,
+          "longref": null,
+          "altref": 0,
+          "gpsstatus": null,
+          "gpsparsed": false
+        },
+        "thumb_width": 1024,
+        "thumb_height": 683,
+        "thumb_format": 0,
+        "lens": {
+          "Lens": "FE 50mm F2.8 Macro",
+          "LensMake": "",
+          "LensSerial": "",
+          "InternalLensSerial": "",
+          "MinFocal": 50,
+          "MaxFocal": 50,
+          "MaxAp4MinFocal": 2.799999952316284,
+          "MaxAp4MaxFocal": 2.799999952316284,
+          "EXIF_MaxAp": 2.797959327697754,
+          "FocalLengthIn35mmFormat": 50,
+          "makernotes": {
+            "Lens": "",
+            "LensID": 32812,
+            "MinFocal": 50,
+            "MaxFocal": 0,
+            "MaxAp": 0,
+            "MinAp": 0,
+            "CurFocal": 0,
+            "CurAp": 11.313708305358887,
+            "FocalLengthIn35mmFormat": 0,
+            "MinFocusDistance": 0,
+            "LensMount": 40,
+            "CameraMount": 40,
+            "body": ""
+          }
+        }
+      }
+    },
+    "DSC_8800.NEF": {
+      "bytes": 17929216,
+      "metadata": {
+        "width": 6064,
+        "height": 4040,
+        "raw_width": 6064,
+        "raw_height": 4040,
+        "top_margin": 0,
+        "left_margin": 0,
+        "flip": 0,
+        "camera_make": "Nikon",
+        "camera_model": "Z f",
+        "iso_speed": 800,
+        "shutter": 0.0012499999720603228,
+        "aperture": 0,
+        "focal_len": 0,
+        "timestamp": 1779801603,
+        "shot_order": 0,
+        "desc": "",
+        "artist": "",
+        "gps_data": {
+          "latitude": [
+            0,
+            0,
+            0
+          ],
+          "longitude": [
+            0,
+            0,
+            0
+          ],
+          "altitude": 0,
+          "latref": null,
+          "longref": null,
+          "altref": 0,
+          "gpsstatus": null,
+          "gpsparsed": true
+        },
+        "thumb_width": 6048,
+        "thumb_height": 4032,
+        "thumb_format": 0,
+        "lens": {
+          "Lens": " ",
+          "LensMake": "",
+          "LensSerial": "",
+          "InternalLensSerial": "",
+          "MinFocal": 0,
+          "MaxFocal": 0,
+          "MaxAp4MinFocal": 0,
+          "MaxAp4MaxFocal": 0,
+          "EXIF_MaxAp": 0,
+          "FocalLengthIn35mmFormat": 0,
+          "makernotes": {
+            "Lens": "",
+            "LensID": 0,
+            "MinFocal": 0,
+            "MaxFocal": 0,
+            "MaxAp": 0,
+            "MinAp": 0,
+            "CurFocal": 0,
+            "CurAp": 0.5,
+            "FocalLengthIn35mmFormat": 0,
+            "MinFocusDistance": 0,
+            "LensMount": 28,
+            "CameraMount": 28,
+            "body": ""
+          }
+        }
+      }
+    },
+    "DSC_8798.NEF": {
+      "bytes": 17298944,
+      "metadata": {
+        "width": 6064,
+        "height": 4040,
+        "raw_width": 6064,
+        "raw_height": 4040,
+        "top_margin": 0,
+        "left_margin": 0,
+        "flip": 0,
+        "camera_make": "Nikon",
+        "camera_model": "Z f",
+        "iso_speed": 800,
+        "shutter": 0.0012499999720603228,
+        "aperture": 0,
+        "focal_len": 0,
+        "timestamp": 1779801485,
+        "shot_order": 0,
+        "desc": "",
+        "artist": "",
+        "gps_data": {
+          "latitude": [
+            0,
+            0,
+            0
+          ],
+          "longitude": [
+            0,
+            0,
+            0
+          ],
+          "altitude": 0,
+          "latref": null,
+          "longref": null,
+          "altref": 0,
+          "gpsstatus": null,
+          "gpsparsed": true
+        },
+        "thumb_width": 6048,
+        "thumb_height": 4032,
+        "thumb_format": 0,
+        "lens": {
+          "Lens": " ",
+          "LensMake": "",
+          "LensSerial": "",
+          "InternalLensSerial": "",
+          "MinFocal": 0,
+          "MaxFocal": 0,
+          "MaxAp4MinFocal": 0,
+          "MaxAp4MaxFocal": 0,
+          "EXIF_MaxAp": 0,
+          "FocalLengthIn35mmFormat": 0,
+          "makernotes": {
+            "Lens": "",
+            "LensID": 0,
+            "MinFocal": 0,
+            "MaxFocal": 0,
+            "MaxAp": 0,
+            "MinAp": 0,
+            "CurFocal": 0,
+            "CurAp": 0.5,
+            "FocalLengthIn35mmFormat": 0,
+            "MinFocusDistance": 0,
+            "LensMount": 28,
+            "CameraMount": 28,
+            "body": ""
+          }
+        }
+      }
+    },
+    "DSC_8806.NEF": {
+      "bytes": 17516544,
+      "metadata": {
+        "width": 6064,
+        "height": 4040,
+        "raw_width": 6064,
+        "raw_height": 4040,
+        "top_margin": 0,
+        "left_margin": 0,
+        "flip": 0,
+        "camera_make": "Nikon",
+        "camera_model": "Z f",
+        "iso_speed": 800,
+        "shutter": 0.0012499999720603228,
+        "aperture": 0,
+        "focal_len": 0,
+        "timestamp": 1779801747,
+        "shot_order": 0,
+        "desc": "",
+        "artist": "",
+        "gps_data": {
+          "latitude": [
+            0,
+            0,
+            0
+          ],
+          "longitude": [
+            0,
+            0,
+            0
+          ],
+          "altitude": 0,
+          "latref": null,
+          "longref": null,
+          "altref": 0,
+          "gpsstatus": null,
+          "gpsparsed": true
+        },
+        "thumb_width": 6048,
+        "thumb_height": 4032,
+        "thumb_format": 0,
+        "lens": {
+          "Lens": " ",
+          "LensMake": "",
+          "LensSerial": "",
+          "InternalLensSerial": "",
+          "MinFocal": 0,
+          "MaxFocal": 0,
+          "MaxAp4MinFocal": 0,
+          "MaxAp4MaxFocal": 0,
+          "EXIF_MaxAp": 0,
+          "FocalLengthIn35mmFormat": 0,
+          "makernotes": {
+            "Lens": "",
+            "LensID": 0,
+            "MinFocal": 0,
+            "MaxFocal": 0,
+            "MaxAp": 0,
+            "MinAp": 0,
+            "CurFocal": 0,
+            "CurAp": 0.5,
+            "FocalLengthIn35mmFormat": 0,
+            "MinFocusDistance": 0,
+            "LensMount": 28,
+            "CameraMount": 28,
+            "body": ""
+          }
+        }
+      }
+    },
+    "DSC_4127.NEF": {
+      "bytes": 18321408,
+      "metadata": {
+        "width": 6064,
+        "height": 4040,
+        "raw_width": 6064,
+        "raw_height": 4040,
+        "top_margin": 0,
+        "left_margin": 0,
+        "flip": 0,
+        "camera_make": "Nikon",
+        "camera_model": "Z f",
+        "iso_speed": 100,
+        "shutter": 0.012500000186264515,
+        "aperture": 1.399999976158142,
+        "focal_len": 35,
+        "timestamp": 1776694988,
+        "shot_order": 0,
+        "desc": "",
+        "artist": "",
+        "gps_data": {
+          "latitude": [
+            0,
+            0,
+            0
+          ],
+          "longitude": [
+            0,
+            0,
+            0
+          ],
+          "altitude": 0,
+          "latref": null,
+          "longref": null,
+          "altref": 0,
+          "gpsstatus": null,
+          "gpsparsed": true
+        },
+        "thumb_width": 6048,
+        "thumb_height": 4032,
+        "thumb_format": 0,
+        "lens": {
+          "Lens": "VM351.4",
+          "LensMake": "",
+          "LensSerial": "",
+          "InternalLensSerial": "",
+          "MinFocal": 0,
+          "MaxFocal": 0,
+          "MaxAp4MinFocal": 0,
+          "MaxAp4MaxFocal": 0,
+          "EXIF_MaxAp": 0,
+          "FocalLengthIn35mmFormat": 35,
+          "makernotes": {
+            "Lens": "",
+            "LensID": 0,
+            "MinFocal": 0,
+            "MaxFocal": 0,
+            "MaxAp": 0,
+            "MinAp": 0,
+            "CurFocal": 0,
+            "CurAp": 0.5,
+            "FocalLengthIn35mmFormat": 0,
+            "MinFocusDistance": 0,
+            "LensMount": 28,
+            "CameraMount": 28,
+            "body": ""
+          }
+        }
+      }
+    }
+  }
+}

@@ -12,9 +12,11 @@ mod display_proxy_store;
 mod export_stream;
 mod import_folder;
 mod memory_info;
+mod native_raw;
 use memory_info::get_memory_info;
 use import_folder::{ImportWatch, watch_import_folder, stop_watch_import_folder, read_import_file};
 use export_stream::ExportStreams;
+use native_raw::{NativeRawDecodes, native_raw_info, native_raw_begin, native_raw_append, native_raw_open, native_raw_process, native_raw_release};
 
 #[derive(Serialize)]
 struct SaveResult {
@@ -654,6 +656,10 @@ fn reset_page_owned_state<R: tauri::Runtime, M: tauri::Manager<R>>(manager: &M) 
         eprintln!("[export] dropped {cleared} unfinished export stream(s) from the previous page");
     }
     manager.state::<ImportWatch>().stop();
+    let decodes = manager.state::<NativeRawDecodes>().clear();
+    if decodes > 0 {
+        eprintln!("[raw] cancelled {decodes} native RAW decode(s) of the previous page");
+    }
 }
 
 fn parse_bool_flag(value: &str) -> Option<bool> {
@@ -1222,6 +1228,16 @@ pub fn run() {
         .manage(ExportStreams::default())
         .manage(ImportWatch::default())
         .manage(WebContentTerminations::default())
+        .manage(NativeRawDecodes::default())
+        // Decoded RAW planes for the page's workers (#264). The copy of a
+        // part runs off the main thread, which WKWebView calls this from.
+        .register_asynchronous_uri_scheme_protocol(native_raw::PIXEL_SCHEME, |ctx, request, responder| {
+            let app = ctx.app_handle().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let decodes = tauri::Manager::state::<NativeRawDecodes>(&app);
+                responder.respond(native_raw::pixel_response(&decodes, &request));
+            });
+        })
         .on_page_load(|webview, payload| {
             if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
                 reset_page_owned_state(webview);
@@ -1285,6 +1301,12 @@ pub fn run() {
             write_export_file_to_directory,
             get_app_version,
             get_memory_info,
+            native_raw_info,
+            native_raw_begin,
+            native_raw_append,
+            native_raw_open,
+            native_raw_process,
+            native_raw_release,
             get_desktop_update_capability,
             get_webview_compositing,
             log_webview_diagnostics,
