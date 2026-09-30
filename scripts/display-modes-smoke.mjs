@@ -309,6 +309,19 @@ export async function runDisplayModesSmoke({ send, evaluate, waitFor, fail, inst
     }
     await settle(`zoom ${level}`, 1000);
   };
+  // Where the overlay drew the stroke in its own backing pixels: the
+  // alpha-weighted centroid, content- and compositor-independent.
+  const backingCentroid = () => evaluate(`(() => {
+    const c = document.getElementById('displayOverlay');
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    let sx = 0, sy = 0, sw = 0;
+    for (let y = 0; y < c.height; y++) for (let x = 0; x < c.width; x++) {
+      const a = d[(y * c.width + x) * 4 + 3];
+      if (a) { sx += (x + 0.5) * a; sy += (y + 0.5) * a; sw += a; }
+    }
+    return sw ? { x: sx / sw, y: sy / sw, width: c.width, height: c.height } : null;
+  })()`);
+  const zoomOf = () => evaluate(`Number(/matrix\\(([\\d.]+)/.exec(document.getElementById('canvasTransformWrapper').style.transform)?.[1] || 1)`);
   const overlayAlignment = async (label) => {
     await clearStrokes();
     await settle(`${label} strokes cleared`, 800);
@@ -320,11 +333,23 @@ export async function runDisplayModesSmoke({ send, evaluate, waitFor, fail, inst
       expect(state.overlay && Math.abs(state.overlay.left - state.photo.left) <= 1 && Math.abs(state.overlay.top - state.photo.top) <= 1
         && Math.abs(state.overlay.width - state.photo.width) <= 1 && Math.abs(state.overlay.height - state.photo.height) <= 1,
       `${label} zoom ${level}: the overlay is not over the photo: ` + JSON.stringify(state));
+      // The stroke is drawn exactly at its image point on the overlay's backing.
+      const backing = await backingCentroid();
+      const wantBacking = backing && { x: point.x / state.working.width * backing.width, y: point.y / state.working.height * backing.height };
+      expect(backing && Math.abs(backing.x - wantBacking.x) <= 0.5 && Math.abs(backing.y - wantBacking.y) <= 0.5,
+        `${label} zoom ${level}: the overlay draws the stroke off its image point: ` + JSON.stringify({ backing, wantBacking }));
+      // On screen, within a pixel, plus half a layout pixel at the zoom: the
+      // compositor places the overlay's fractional box (the photo rectangle in
+      // the border) on its own pixel grid, which the zoom magnifies (measured
+      // 1.3 px at 381 % with an exact backing).
+      const zoom = await zoomOf();
+      const tolerance = Math.max(1, zoom / 2);
       const drawn = await drawnCentroid(state);
       const want = expectedClient(state, point);
-      expect(drawn && Math.abs(drawn.x - want.x) <= 1 && Math.abs(drawn.y - want.y) <= 1,
-        `${label} zoom ${level}: the stroke is drawn off its image point: ` + JSON.stringify({ drawn, want, state }));
-      results.push({ level, dx: Math.round((drawn.x - want.x) * 100) / 100, dy: Math.round((drawn.y - want.y) * 100) / 100 });
+      expect(drawn && Math.abs(drawn.x - want.x) <= tolerance && Math.abs(drawn.y - want.y) <= tolerance,
+        `${label} zoom ${level}: the stroke is drawn off its image point: ` + JSON.stringify({ drawn, want, tolerance, backing, state }));
+      results.push({ level, zoom: Math.round(zoom * 100) / 100, dx: Math.round((drawn.x - want.x) * 100) / 100, dy: Math.round((drawn.y - want.y) * 100) / 100,
+        backing: [Math.round((backing.x - wantBacking.x) * 1000) / 1000, Math.round((backing.y - wantBacking.y) * 1000) / 1000] });
     }
     await zoomTo(1);
     const state = await probe();
