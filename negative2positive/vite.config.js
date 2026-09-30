@@ -1,6 +1,6 @@
 import { defineConfig } from 'vite';
 import { realpathSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { uiFontsPlugin } from '../scripts/build-ui-fonts.mjs';
 import { displayProxyBuildHashes } from '../scripts/display-proxy-hashes.mjs';
@@ -8,6 +8,25 @@ import { opencvAssetsPlugin } from '../scripts/opencv-assets.mjs';
 import { CROSS_ORIGIN_ISOLATION_HEADERS } from '../scripts/cross-origin-isolation.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// Test-only (#264): LIBRAW_WASM_DIST=/abs/libraw-wasm/dist makes the dev
+// server resolve `libraw-wasm` to a locally built package instead of the
+// installed release, so the smoke steps (the RGB16 gate above all) can run an
+// unreleased decoder build. Never applied to `vite build` or `vite preview`.
+const localLibRawDist = process.env.LIBRAW_WASM_DIST ? realpathSync(resolve(process.env.LIBRAW_WASM_DIST)) : null;
+function localLibRawPlugin(dist) {
+  return {
+    name: 'nc-local-libraw-wasm',
+    apply: 'serve',
+    enforce: 'pre',
+    configureServer() {
+      console.warn(`[vite] libraw-wasm resolves to ${dist} (LIBRAW_WASM_DIST, test only)`);
+    },
+    resolveId(source) {
+      return source === 'libraw-wasm' ? join(dist, 'index.js') : null;
+    }
+  };
+}
 
 // Stamped into the bundle so the debug badge and the diagnostics dump identify
 // the build that is actually running, instead of a string edited by hand.
@@ -26,7 +45,7 @@ export default defineConfig({
   // build start (scripts/build-ui-fonts.mjs, #262).
   // OpenCV as one compiled-once wasm file plus a small glue (#252 part 5),
   // for the page and for the worker bundles that import it.
-  plugins: [uiFontsPlugin(), opencvAssetsPlugin()],
+  plugins: [uiFontsPlugin(), opencvAssetsPlugin(), ...(localLibRawDist ? [localLibRawPlugin(localLibRawDist)] : [])],
   server: {
     host: '127.0.0.1',
     port: 4173,
@@ -42,7 +61,8 @@ export default defineConfig({
     fs: { allow: [
       resolve(__dirname, '..'),
       realpathSync(resolve(__dirname, '../node_modules/libraw-wasm')),
-      realpathSync(resolve(__dirname, '../node_modules/@neoanaloglabkk/lensfun-wasm'))
+      realpathSync(resolve(__dirname, '../node_modules/@neoanaloglabkk/lensfun-wasm')),
+      ...(localLibRawDist ? [localLibRawDist] : [])
     ] },
   },
   preview: {

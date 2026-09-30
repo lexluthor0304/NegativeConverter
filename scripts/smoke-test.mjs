@@ -55,6 +55,7 @@ import { runGeometrySmoke } from './geometry-smoke.mjs';
 import { runPng16BandSmoke } from './png16-band-smoke.mjs';
 import { runRawPostDecodeSmoke, runRawParitySmoke } from './raw-post-decode-smoke.mjs';
 import { runRollFrameSmoke } from './roll-frame-smoke.mjs';
+import { runRawDecodeGateSmoke } from './raw-decode-gate-smoke.mjs';
 import { runExportOwnershipSmoke } from './export-ownership-smoke.mjs';
 import { runBatchPipelineSmoke } from './batch-pipeline-smoke.mjs';
 import { runFirstPhotoSmoke } from './first-photo-smoke.mjs';
@@ -384,6 +385,15 @@ if (process.argv.includes('--raw-parity-only')) {
   // Recording on 1703835 (RAW_PARITY_RECORD=1) only needs loadRawFile there.
   if (process.env.RAW_PARITY_RECORD !== '1') await runRawPostDecodeSmoke({ evaluate, fail });
   await runRawParitySmoke({ send, evaluate, waitFor, fail, port: PORT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS'); process.exit(0);
+}
+
+// Opt-in: the RGB16 gate over every decoder configuration (#264), real RAW
+// files, see scripts/raw-decode-gate-smoke.mjs.
+if (process.argv.includes('--raw-decode-gate-only')) {
+  await runRawDecodeGateSmoke({ send, onCdpEvent, evaluate, waitFor, fail, port: PORT, root: ROOT });
+  if (isolationBlocks.length) fail(`requests blocked by COEP/CORP/COOP:\n${isolationBlocks.join('\n')}`);
   if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
   console.log('SMOKE PASS'); process.exit(0);
 }

@@ -1,5 +1,5 @@
 {
-  "about": "What the native decoder must reproduce (#264): the RGB16 SHA-256 of libraw-wasm's deterministic rebuild (LibRaw 0.22.1, no fast-math, -ffp-contract=off, musl 1.2.6 libm; #264 part B, libraw-wasm branch perf229-264 @ 14af432, not released yet), identical for its single-threaded build and its threaded build at 1-8 threads, and the metadata(true) fields the page reads. Hashes are over imageData().data (width*height*3 native-endian uint16) with rawFileLoader.js's options, outputBps 16; halfRgb16 with halfSize. `metadata` is the worker's metadata(true) object before index.js post-processes thumb_format, desc and timestamp, restricted to the keys the native object has (native_raw.rs RawMetadata); libraw-wasm 1.6.0 and the deterministic build report the same values for every file here. The HE-compressed NEFs have no hashes: LibRaw cannot decode them. Files are matched by name and size; the camera files are not in the repository.",
+  "about": "What the native decoder must reproduce (#264): the RGB16 SHA-256 of libraw-wasm's deterministic rebuild (LibRaw 0.22.1, no fast-math, -ffp-contract=off, musl 1.2.6 libm; #264 part B, libraw-wasm branch perf229-264 @ 14af432, not released yet), identical for its single-threaded build and its threaded build at 1-8 threads, and the metadata(true) fields the page reads. Hashes are over imageData().data (width*height*3 native-endian uint16) with rawFileLoader.js's options, outputBps 16; halfRgb16 with halfSize. `metadata` is the worker's metadata(true) object before index.js post-processes thumb_format, desc and timestamp, restricted to the keys the native object has (native_raw.rs RawMetadata); libraw-wasm 1.6.0 and the deterministic build report the same values for every file here. The HE-compressed NEFs have no hashes: LibRaw cannot decode them; their `embeddedPreview` is what the app's loader falls back to, the embedded JPEG at 1703835 (SHA-256 of the 8-bit plane decoded by Chrome), which the WASM RGB16 gate holds (scripts/raw-decode-gate-smoke.mjs, `--raw-decode-gate-only`). Files are matched by name and size; the camera files are not in the repository.",
   "files": {
     "_DSC3111.NEF": {
       "bytes": 13727369,
@@ -157,6 +157,10 @@
     },
     "DSC_8800.NEF": {
       "bytes": 17929216,
+      "embeddedPreview": {
+        "size": "6048x4032",
+        "rgba8": "b3514b6addeec2701c9361e824a6e6b84a9e571ad284b5a73d7e085f02a34529"
+      },
       "metadata": {
         "width": 6064,
         "height": 4040,
@@ -227,6 +231,10 @@
     },
     "DSC_8798.NEF": {
       "bytes": 17298944,
+      "embeddedPreview": {
+        "size": "6048x4032",
+        "rgba8": "ca5aa60895b7d618f1b5091ce8d8861d0a9196fdaef6dfcc7ce55619b9fa7485"
+      },
       "metadata": {
         "width": 6064,
         "height": 4040,
@@ -297,6 +305,10 @@
     },
     "DSC_8806.NEF": {
       "bytes": 17516544,
+      "embeddedPreview": {
+        "size": "6048x4032",
+        "rgba8": "cca0f3d60d10591f1a7aa1f097422bf134010f3cc77c3d76614183fe329e87a7"
+      },
       "metadata": {
         "width": 6064,
         "height": 4040,
@@ -367,6 +379,10 @@
     },
     "DSC_4127.NEF": {
       "bytes": 18321408,
+      "embeddedPreview": {
+        "size": "6048x4032",
+        "rgba8": "3194c15a2431e10e7ef0b76ea6081a241db8ecebdb0709c4589ad10f51ec2200"
+      },
       "metadata": {
         "width": 6064,
         "height": 4040,
