@@ -550,6 +550,12 @@ if (process.argv.includes('--expired-only')) {
   console.log('SMOKE PASS');
   process.exit(0);
 }
+if (process.argv.includes('--workspace-ui-only')) {
+  await runWorkspaceUiSmoke({ send, evaluate, waitFor, fail, port: PORT, root: ROOT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS');
+  process.exit(0);
+}
 
 // The historical JPEG fixture is a finished positive. This scenario
 // deliberately exercises negative inversion, so choose the import type explicitly.
