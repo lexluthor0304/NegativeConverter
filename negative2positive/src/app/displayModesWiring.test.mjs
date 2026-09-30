@@ -138,62 +138,68 @@ class TestImageData {
 
 // ---- the overlay layer ----
 {
+  const { buildDustTint, buildDustTintRect, buildDustTintInBands } = await import('./dustTint.js');
+  const { strokeBrush, basePointToWorking } = await import('./localExposure.js');
   const shown = new TestImageData(1200, 800);
   const style = {};
-  const overlay = { width: 1, height: 1, style, paints: 0, getContext: () => ({ clearRect: () => { overlay.paints++; }, drawImage: () => {}, save() {}, restore() {}, beginPath() {}, arc() {}, fill() {}, moveTo() {}, lineTo() {}, stroke() {} }) };
+  const overlay = { width: 1, height: 1, style, getContext: () => ({ clearRect() {}, putImageData() {}, save() {}, restore() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {} }) };
+  const mask = new Uint8Array(4800 * 3200);
+  mask[1000 * 4800 + 2000] = 255;
   const state = {
-    cropping: false, currentStep: 3, processedImageData: { width: 4800, height: 3200 }, sprocketPreviewEnabled: false,
-    dustRemoval: { showMask: true, mask: new Uint8Array(4), revision: 1, brushSize: 5 }, dodgeBurn: { active: false, showOverlay: true, mode: 'dodge', size: 12 },
+    cropping: false, beforeAfterActive: false, currentStep: 3, processedImageData: { width: 4800, height: 3200 }, sprocketPreviewEnabled: false,
+    dustRemoval: { showMask: true, mask, maskTag: 1, brushSize: 5 }, dodgeBurn: { active: false, showOverlay: true },
     localExposure: null
   };
   const ids = new WeakMap(); let next = 1;
-  const tint = { width: 0, height: 0 };
+  const geometry = { baseWidth: 4800, baseHeight: 3200, rotatedWidth: 4800, rotatedHeight: 3200, rotationAngle: 0, mirrored: false, cropRegion: null };
   const context = vm.createContext({
-    state, JSON, displayOverlay: overlay, displayOverlayState: { key: null, frame: 0, placed: '' },
-    dodgeBurnDrawing: false, dodgeBurnPoints: [], dustDrawing: false, dustBrushPoints: [], dustBrushMode: 'intelligent',
-    displayDebugCounters: { overlayPaints: 0 }, displaySourceImageData: () => shown,
+    state, JSON, Math, Boolean, console, ImageData: TestImageData, displayOverlay: overlay,
+    displayOverlayState: { key: null, placed: '', plan: null, tint: null, counters: { tintRects: 0, bandedBuilds: 0, workerTints: 0 } },
+    dustTint: { mask: null, tag: null, width: 0, height: 0, image: null, building: null },
+    displayDebugCounters: { overlayPaints: 0 }, displaySourceImageData: () => shown, getDisplayPreviewSize: () => ({ width: 1200, height: 800 }),
     getSprocketFrameLayout, getSprocketFrameComposeOptions: () => ({ edgeMarkings: {} }), photoRectPercent,
     gpuObjectId: object => { if (!ids.has(object)) ids.set(object, next++); return ids.get(object); },
-    dodgeBurnGeometry: () => ({ rotation: 0 }), basePointToWorking: p => p,
-    getDustMaskOverlayCanvas: (w, h) => { Object.assign(tint, { width: w, height: h }); return {}; },
-    requestAnimationFrame: () => 1, cancelAnimationFrame: () => {},
+    dodgeBurnGeometry: () => ({ ...geometry, width: 4800, height: 3200 }), localExposureGeometryFor: () => geometry,
+    strokeBrush, basePointToWorking, buildDustTintRect, buildDustTintInBands, yieldTaskForJob: async () => {},
   });
-  vm.runInContext(['displayOverlayPlan', 'displayOverlayKey', 'paintDisplayOverlay', 'syncDisplayOverlay', 'releaseDisplayOverlay',
-    'drawDustBrushDots', 'drawDodgeBurnPath', 'renderDodgeBurnOverlay'].map(functionSource).join('\n'), context);
+  vm.runInContext(['displayOverlaySize', 'dustTintWanted', 'dodgeStrokesWanted', 'dustTintCurrent', 'adoptDustTint', 'patchDustTint',
+    'ensureDustTint', 'displayOverlayPlan', 'displayOverlayKey', 'paintDisplayOverlay', 'syncDisplayOverlay', 'releaseDisplayOverlay',
+    'renderDodgeBurnOverlay'].map(functionSource).join('\n'), context);
+  context.adoptDustTint(mask, 1, { width: 1200, height: 800, rgba: buildDustTint(mask, 4800, 3200, 1200, 800) });
   context.syncDisplayOverlay();
   assert.deepEqual([overlay.width, overlay.height], [1200, 800], 'the backing is the display photo, never the image');
-  assert.deepEqual([tint.width, tint.height], [1200, 800], 'and so is the tint layer');
+  assert.deepEqual([context.dustTint.width, context.dustTint.height], [1200, 800], 'and so is the tint');
   assert.equal(style.display, 'block');
   assert.deepEqual([style.left, style.top, style.width, style.height], ['0px', '0px', '100%', '100%']);
   const paints = context.displayDebugCounters.overlayPaints;
   for (let i = 0; i < 5; i++) context.syncDisplayOverlay();
   assert.equal(context.displayDebugCounters.overlayPaints, paints, 'an unchanged overlay is not repainted on every photo frame');
-  state.dustRemoval.revision++;
+  // A mask with a new tag: pooled in bands, then painted once.
+  state.dustRemoval.maskTag = 2;
   context.syncDisplayOverlay();
-  assert.equal(context.displayDebugCounters.overlayPaints, paints + 1, 'a patched mask repaints it');
+  for (let i = 0; i < 50 && !context.dustTintCurrent({ width: 1200, height: 800 }); i++) await new Promise(resolve => setImmediate(resolve));
+  context.syncDisplayOverlay();
+  assert.equal(context.displayOverlayState.counters.bandedBuilds, 1);
+  assert.ok(context.displayDebugCounters.overlayPaints >= paints + 1, 'a new mask repaints it');
+  const settled = context.displayDebugCounters.overlayPaints;
+  context.syncDisplayOverlay();
+  assert.equal(context.displayDebugCounters.overlayPaints, settled);
   // The border: over the photo's rectangle.
   state.sprocketPreviewEnabled = true;
   context.syncDisplayOverlay();
   const box = photoRectPercent(getSprocketFrameLayout(1200, 800, { edgeMarkings: {} }));
   assert.deepEqual([style.left, style.top, style.width, style.height], [box.left, box.top, box.width, box.height]);
-  // A live stroke repaints every time and leaves no key behind.
-  context.dustDrawing = true;
-  context.dustBrushPoints = [{ x: 10, y: 10 }];
-  const before = context.displayDebugCounters.overlayPaints;
-  context.syncDisplayOverlay();
-  context.syncDisplayOverlay();
-  assert.equal(context.displayDebugCounters.overlayPaints, before + 2);
-  context.dustDrawing = false;
-  context.syncDisplayOverlay();
-  assert.equal(context.displayDebugCounters.overlayPaints, before + 3, 'the stroke end repaints without it');
   // Nothing to show: hidden, and the backing goes.
   state.dustRemoval.showMask = false;
   context.syncDisplayOverlay();
   assert.equal(style.display, 'none');
   assert.deepEqual([overlay.width, overlay.height], [1, 1]);
-  // Cropping hides it.
+  // Cropping and the comparison hide it.
   state.dustRemoval.showMask = true;
   state.cropping = true;
+  assert.equal(context.displayOverlayPlan(), null);
+  state.cropping = false;
+  state.beforeAfterActive = true;
   assert.equal(context.displayOverlayPlan(), null);
 }
 

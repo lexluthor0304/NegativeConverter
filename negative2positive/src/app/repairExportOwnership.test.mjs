@@ -37,6 +37,11 @@ function fixture({ enabled = false, mask = null } = {}) {
   const c = vm.createContext({
     // #249: no photo here takes a display form.
     ...displaySessionStubs(),
+    // #254 stand-ins: the live dodge frame note, the dust tint, the overlays.
+    noteLiveFrame: () => {}, adoptDustTint: () => {}, patchDustTint: () => {}, displayOverlaySize: () => null,
+    syncBrushTools: () => {}, cancelDustBrush: () => {},
+    brushFeedback: { drawing: false, end: () => {}, cancel: () => {}, sync: () => {} }, remapBrushStroke: () => {},
+    liveDisplaySerial: 0,
     state, coreReprocessToken: 7, dustDetectionRevision: 11, loadGeneration: 3,
     dustDetectionTimer: null, Uint8Array, dustMaskTagSequence: 0, dustAiRefresh: { rects: [] },
     syncDustWorkerPin: noop,

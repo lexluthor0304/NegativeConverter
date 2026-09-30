@@ -377,10 +377,12 @@ async function runManualBrushSmoke({ send, evaluate, waitFor, wait, fail, instal
     probe.observer.observe(status, { childList: true, subtree: true, characterData: true });
     probe.arm('redo');
   })()`);
-  const brushDiagnostics = `(() => {
+  // #254: the stroke is drawn on the view's feedback overlay at the next frame.
+  const brushDiagnostics = `(async () => {
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     const surface = [...document.querySelectorAll('#canvas, #glCanvas')].find(el => getComputedStyle(el).display !== 'none');
     const points = [{ x: ${location.x}, y: ${location.y + 55} }, { x: ${location.x + 30}, y: ${location.y + 55} }];
-    const overlay = document.getElementById('aiBrushOverlay');
+    const overlay = document.getElementById('brushFeedback');
     let alpha = 0;
     if (overlay.width && overlay.height) {
       const pixels = overlay.getContext('2d').getImageData(0, 0, overlay.width, overlay.height).data;

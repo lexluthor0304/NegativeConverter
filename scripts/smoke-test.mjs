@@ -819,17 +819,33 @@ await waitFor('dust worker pinned with its planes', `(async () => {
 await wait(500);
 const dustCount = text => /No dust/.test(text) ? 0 : Number(/(\d+)/.exec(text)?.[1]);
 const statusBeforeStroke = dustCount(await evaluate(`document.getElementById('dustStatus').textContent`));
-await evaluate(`(() => {
+// #254: the brush takes pointer events on the surface on screen (the GL
+// canvas stays on while the mask is shown), draws the stroke on its overlay
+// and writes nothing into #canvas while it paints.
+const brushBefore = await evaluate(`(async () => {
   window.__dustMessages = [];
   window.__dustStatusUpdates = 0;
-  // A shown mask keeps the GL display (#253): paint on the canvas on screen.
-  const canvas = document.getElementById(document.getElementById('glCanvas').style.display === 'block' ? 'glCanvas' : 'canvas');
-  const rect = canvas.getBoundingClientRect();
-  const options = { bubbles: true, clientX: rect.x + rect.width / 2,
-    clientY: rect.y + rect.height / 2, button: 0, altKey: true };
-  canvas.dispatchEvent(new MouseEvent('mousedown', options));
-  document.dispatchEvent(new MouseEvent('mouseup', options));
+  window.__ncBrush.resetCounters();
+  const surface = [...document.querySelectorAll('#canvas, #glCanvas')].find(el => getComputedStyle(el).display !== 'none');
+  const rect = surface.getBoundingClientRect();
+  const at = (dx) => ({ bubbles: true, cancelable: true, pointerId: 7, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1,
+    clientX: rect.x + rect.width / 2 + dx, clientY: rect.y + rect.height / 2, altKey: true });
+  surface.dispatchEvent(new PointerEvent('pointerdown', at(0)));
+  surface.dispatchEvent(new PointerEvent('pointermove', at(3)));
+  surface.dispatchEvent(new PointerEvent('pointermove', at(6)));
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  const during = window.__ncBrush.state();
+  surface.dispatchEvent(new PointerEvent('pointerup', { ...at(6), buttons: 0 }));
+  return { surface: surface.id, during, after: window.__ncBrush.state() };
 })()`);
+if (!brushBefore.during.feedback.drawing || brushBefore.during.feedback.counters.frames < 1 || brushBefore.during.feedback.points < 2) {
+  fail('the dust brush did not draw its stroke on the feedback overlay: ' + JSON.stringify(brushBefore.during.feedback));
+}
+if (brushBefore.during.canvasWrites.put || brushBefore.during.canvasWrites.draw) {
+  fail('the dust brush wrote into #canvas while painting: ' + JSON.stringify(brushBefore.during.canvasWrites));
+}
+if (!brushBefore.during.containerClass) fail('the view did not take touch-action: none for the dust brush');
+if (brushBefore.after.feedback.drawing) fail('pen-up did not end the overlay stroke');
 await waitFor('dust brush stroke', `window.__dustSources.some(source => source.type === 'stroke')`, 30_000);
 await waitForDustSettled('dust brush repair committed', { freshStatus: true });
 if (await evaluate(`window.__brushConversions !== 0`)) fail('dust brush reconverted the full image');
@@ -859,20 +875,54 @@ const redoState = await evaluate(`({ conversions: window.__brushConversions, det
 if (redoState.conversions !== 0 || redoState.detections !== 0 || dustCount(redoState.status) !== statusAfterStroke) {
   fail('redoing a dust stroke re-converted, re-detected or lost its count: ' + JSON.stringify(redoState));
 }
-// #242/#253: the dust-mask view of a repaired, full-resolution frame is drawn
-// at display size: the tint on its own overlay layer over the photo, which
-// stays on the GL display (or #canvas without WebGL).
+// #254: a finger paints a dust-brush stroke: pointer events, captured, with
+// touch-action: none on the view, and the photo does not pan.
+await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 2 });
+try {
+  const touchAt = await evaluate(`(() => {
+    const surface = [...document.querySelectorAll('#canvas, #glCanvas')].find(el => getComputedStyle(el).display !== 'none');
+    const r = surface.getBoundingClientRect();
+    window.__dustSources = [];
+    window.__dustStatusUpdates = 0;
+    return { x: r.x + r.width * 0.3, y: r.y + r.height * 0.3, transform: document.getElementById('canvasTransformWrapper').style.transform };
+  })()`);
+  await send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: touchAt.x, y: touchAt.y }] });
+  await send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: touchAt.x + 20, y: touchAt.y + 4 }] });
+  const touching = await evaluate(`(async () => {
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    return window.__ncBrush.state();
+  })()`);
+  await send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  if (!touching.feedback.drawing || touching.feedback.points < 2 || !touching.containerClass) {
+    fail('a touch drag did not paint a dust-brush stroke: ' + JSON.stringify(touching.feedback));
+  }
+  await waitFor('touch dust stroke', `window.__dustSources.some(source => source.type === 'stroke')`, 30_000);
+  await waitForDustSettled('touch dust stroke committed', { freshStatus: true });
+  const transformAfter = await evaluate(`document.getElementById('canvasTransformWrapper').style.transform`);
+  if (transformAfter !== touchAt.transform) fail('the touch dust brush panned the photo: ' + JSON.stringify({ before: touchAt.transform, after: transformAfter }));
+} finally {
+  await send('Emulation.setTouchEmulationEnabled', { enabled: false });
+}
+// #242/#253/#254: the dust-mask view of a repaired, full-resolution frame is
+// drawn at display size: the tint, max-pooled at the display frame's size, on
+// the display overlay over the photo, which stays on the GL display (or
+// #canvas without WebGL).
 const dustDisplay = await evaluate(`window.__ncDisplay.frame()`);
 const displaySize = JSON.stringify(dustDisplay.display);
+const dustBrushState = await evaluate(`window.__ncBrush.state()`);
 const dustFrameOk = dustDisplay.surface === 'gl'
   ? JSON.stringify(dustDisplay.canvases.gl) === displaySize && dustDisplay.canvases.main.join('x') === '1x1'
   : JSON.stringify(dustDisplay.canvases.main) === displaySize && JSON.stringify(dustDisplay.handle) === displaySize;
 if (!dustFrameOk || JSON.stringify(dustDisplay.canvases.overlay) !== displaySize
-  || (dustDisplay.canvases.dustTint && JSON.stringify(dustDisplay.canvases.dustTint) !== displaySize)
+  || JSON.stringify(dustDisplay.canvases.dustTint) !== displaySize || !dustBrushState.tint?.current
   || dustDisplay.display[0] * dustDisplay.display[1] > 4_000_000) {
-  fail('the dust-mask view is not drawn at display size: ' + JSON.stringify(dustDisplay));
+  fail('the dust-mask view is not drawn at display size: ' + JSON.stringify({ dustDisplay, layer: dustBrushState.layer, tint: dustBrushState.tint }));
 }
-console.log(`ok: dust detection ${dustSource.width}x${dustSource.height}, clean-source reset, pinned regional brush (${strokeMessages[0].bytes} B stroke), in-place undo/redo, display-size mask view ${displaySize}`);
+if (dustBrushState.webgl !== (dustDisplay.surface === 'gl')) fail('the dust mask turned the GPU display off: ' + JSON.stringify(dustBrushState));
+const overlayPixels = dustBrushState.feedback.width * dustBrushState.feedback.height;
+const containerPixels = await evaluate(`(() => { const c = document.getElementById('canvasContainer'); const d = window.devicePixelRatio || 1; return Math.ceil(c.clientWidth * d) * Math.ceil(c.clientHeight * d); })()`);
+if (overlayPixels > containerPixels) fail(`the brush overlay is larger than the view: ${overlayPixels} > ${containerPixels}`);
+console.log(`ok: dust detection ${dustSource.width}x${dustSource.height}, clean-source reset, pinned regional brush (${strokeMessages[0].bytes} B stroke, pointer events, overlay only while painting), in-place undo/redo, display-size mask view ${displaySize} on ${dustDisplay.surface}`);
 // 後続の色調検証ではマスクの色を重ねない。
 await evaluate(`window.__dustStatusObserver.disconnect(); document.getElementById('dustShowMask').click()`);
 if (await evaluate(`import('/src/app/dustWorkerClient.js').then(({ dustWorker }) => dustWorker.pinned)`)) {

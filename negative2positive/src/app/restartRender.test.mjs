@@ -38,6 +38,11 @@ function fixture({ repairs = true, locked = false, large = false } = {}) {
   const context = vm.createContext({
     // #249: no photo here takes a display form.
     ...displaySessionStubs(),
+    // #254 stand-ins: the live dodge frame note, the dust tint, the overlays.
+    noteLiveFrame: () => {}, adoptDustTint: () => {}, patchDustTint: () => {}, displayOverlaySize: () => null,
+    syncBrushTools: () => {}, cancelDustBrush: () => {},
+    brushFeedback: { drawing: false, end: () => {}, cancel: () => {}, sync: () => {} }, remapBrushStroke: () => {},
+    liveDisplaySerial: 0,
     state, coreReprocessToken: 1, coreReprocessGeneration: 0, loadGeneration: 1,
     _coreReprocessFullInFlight: false, _coreReprocessPreviewInFlight: false,
     _coreReprocessPending: null, _coreReprocessActive: 0,
@@ -349,6 +354,11 @@ function prepareFixture({ itemSettings = null, detectFrame = true, learned = 0 }
   const context = vm.createContext({
     // #249: no photo here takes a display form.
     ...displaySessionStubs(),
+    // #254 stand-ins: the live dodge frame note, the dust tint, the overlays.
+    noteLiveFrame: () => {}, adoptDustTint: () => {}, patchDustTint: () => {}, displayOverlaySize: () => null,
+    syncBrushTools: () => {}, cancelDustBrush: () => {},
+    brushFeedback: { drawing: false, end: () => {}, cancel: () => {}, sync: () => {} }, remapBrushStroke: () => {},
+    liveDisplaySerial: 0,
     state, console, structuredClone, DOMException, AbortController, JSON, Promise,
     loadGeneration: 1, coreReprocessGeneration: 0, processNegativeInFlight: null, importDetectionAbort: null,
     fullResolutionRenderTimer: null, FULL_RESOLUTION_IDLE_DELAY_MS: 2500,

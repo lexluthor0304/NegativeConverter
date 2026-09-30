@@ -96,9 +96,29 @@ adapter frames against the frozen adapter. Timings:
 `node scripts/bench-exposure-maps.mjs` (one default stroke at 2449 x 1628:
 105 → 26 ms; stroke 21 after 20: 26 ms instead of a 2 s full raster; undo
 0.3 ms; a stroke over 7 % of a 12 MP frame: 7 MB of tiles instead of 46 MB).
-Strokes are part of undo, of the per-file settings and of batch export; the
-overlay draws them on the 2D canvas (orange = burn, blue = dodge) while the
-brush is active.
+Strokes are part of undo, of the per-file settings and of batch export.
+
+Painting (#254). The stroke under the pointer is drawn on `#brushFeedback`, a
+canvas over the whole view at device resolution (`brushFeedback.js`): coalesced
+pointer samples at least a device pixel apart, one draw per animation frame of
+the new segments, orange for burn and blue for dodge. Its exposure change shows
+under the brush while it is painted: the preview worker converts only the
+rectangle the new segments touched over the frame its last interactive
+conversion produced (`renderLiveExposureRect`, the stored raster's arithmetic),
+and the page puts it into the exact frame's texture on the GPU display, or runs
+Step 3 on the rectangle at its place in the frame and puts it on a CPU display.
+For the same points it is exactly the frame the stored stroke gets, so the
+pen-up frame replaces it without a jump; a stroke of more than 400 points is
+resampled at pen-up (the repair strokes' index formula) and keeps its end. When
+the frame on screen is not that conversion (a repaired full-resolution frame,
+say), the worker also returns the rectangle without the stroke and the screen
+shows displayed + (live - committed) until pen-up. A stroke stored before its
+pen-up frame ran is added to the worker's map first, so a quick second stroke
+never hides the first. `?liveDodge=0` turns the live effect off. The stored
+strokes (orange = burn, blue = dodge) are drawn on `#displayOverlay` in the
+transform wrapper at display size while the brush is active (#253), each at the
+width its raster paints, redrawn only when the strokes, the geometry or the
+size change. The tool keeps the GPU display.
 
 ## Paper emulation (#152)
 
@@ -142,8 +162,8 @@ node scripts/smoke-test.mjs --darkroom-only
 
 ## Limits
 
-- The brush maps through `canvasToImageCoords`, like the dust brush, so a
-  sprocket-border preview shifts stroke positions; paint with the border off.
+- The brushes map through the photo inside the sprocket border (#254), so
+  strokes land on the image with the border preview on too.
 - Test strip patches analyse the 360 px copy themselves; the auto white
   balance can differ slightly from the main preview.
 - Paper curves are parametric approximations; no split-grade printing; the

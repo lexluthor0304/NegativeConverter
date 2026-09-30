@@ -99,6 +99,9 @@ function fixture() {
     getDustSource: () => state.dustRemoval.cleanSource,
     dustBrushSource: converted, dustBrushToken: 4, dustBrushPoints: [{ x: 1, y: 1 }],
     dustBrushMode: 'direct', dustBrushTurn: Promise.resolve(),
+    // #254: pointer events, the feedback overlay and the display overlay's tint.
+    dustBrushPointerId: 1, releaseDustBrushPointer: noop, brushFeedback: { end: noop },
+    displayOverlaySize: () => ({ width: 2, height: 2 }), patchDustTint: noop,
     pushUndo: noop, pushUndoDelta: (label, delta) => { context.deltas.push(delta); }, deltas: [],
     applyStrokePatch, showDustParticleCount: noop, refreshDustDisplay: noop, queueDustAiRefresh: noop,
     dustMaskTagSequence: 0, dustAiRefresh: { rects: [] }, unpinDustWorker: noop, dustPrivateClone: null,
@@ -143,7 +146,7 @@ for (const outcome of ['success', 'stale', 'abort']) {
     assert.deepEqual(stroke.points, [{ x: 1, y: 1 }], 'only the stroke itself travels to the worker');
     return refinement.promise;
   };
-  const pending = c.onDustBrushEnd({});
+  const pending = c.onDustBrushEnd({ pointerId: 1 });
   assert.equal(c.pendingBrushRepairs, 1, 'the legacy turn is counted before awaiting its predecessor');
   c.rememberPhotoSession(item);
   assert.equal(photoSessions.peek(item).snapshot, null);

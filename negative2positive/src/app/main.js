@@ -64,7 +64,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     import { loadDxFilmTable, describeDxFilm, shortFilmName } from './dxFilmDatabase.js';
     import { groupAutomaticRollFrames, aggregateRollAnalysis, measureNegativeMean, sanitizeRollFrameForSettings, rollFrameExposureUnits } from './rollAnalysis.js';
     import { filtrationFromSliders, slidersFromFiltration, stopsFromExposureUnits, exposureUnitsFromStops, contrastForGradeValue, gradeValueForContrast, gradeLabelForValue, TEST_STRIP_AXES, formatAxisValue, testStripValues } from './enlarger.js';
-    import { sanitizeLocalExposureForSettings, workingPointToBase, basePointToWorking } from './localExposure.js';
+    import { sanitizeLocalExposureForSettings, sanitizeLocalExposureStrokes, sanitizeStrokePoint, workingPointToBase, basePointToWorking, strokeBrush } from './localExposure.js';
+    import { createBrushFeedback, BRUSH_FEEDBACK_STYLES, pointerSamples, movedEnough, resampleStrokePoints } from './brushFeedback.js';
+    import { buildDustTintRect, buildDustTintInBands } from './dustTint.js';
     import { sanitizeRepairStrokes, buildRepairMask, pointerToRepairPoint, lensSourcePoint } from './repairBrush.js';
     import { createRepairStamps, sameRepairStrokes, captureDustPass, dustPassMatches, restoreDustPass } from './repairReuse.js';
     import { paperProfiles, paperIdsForFilmKind, normalizePaperId, normalizeToningId } from '../silvercore/engine/PaperProfiles.js';
@@ -3451,6 +3453,24 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // the 2D context in software (Chrome) or off the accelerated buffer
     // (WebKit), so every scaled draw and composite ran on the CPU.
     const ctx = canvas.getContext('2d');
+    // Writes into #canvas, read by the smoke tests (#254): a brush stroke on
+    // the GPU display writes none, and on a CPU display only rectangles of the
+    // live dodge effect.
+    const mainCanvasWrites = { put: 0, draw: 0, maxPutPixels: 0 };
+    {
+      const put = ctx.putImageData.bind(ctx);
+      const draw = ctx.drawImage.bind(ctx);
+      ctx.putImageData = (image, ...rest) => {
+        mainCanvasWrites.put++;
+        const pixels = rest.length >= 6 ? rest[4] * rest[5] : image.width * image.height;
+        if (pixels > mainCanvasWrites.maxPutPixels) mainCanvasWrites.maxPutPixels = pixels;
+        return put(image, ...rest);
+      };
+      ctx.drawImage = (...args) => {
+        mainCanvasWrites.draw++;
+        return draw(...args);
+      };
+    }
     const glCanvas = document.getElementById('glCanvas');
     // The detail layer's canvas (#248 part 5), over glCanvas in the wrapper,
     // and its state (see the Detail layer section). Declared this early: zoom
@@ -3458,7 +3478,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     const glDetailCanvas = document.getElementById('glDetailCanvas');
     // The dust tint and dodge-and-burn strokes over the photo (#253 C).
     const displayOverlay = document.getElementById('displayOverlay');
-    const displayOverlayState = { key: null, frame: 0, placed: '' };
+    // `plan` and `tint`: what the last paint drew (a stroke's tint patch is put
+    // straight onto an overlay that shows the tint alone).
+    const displayOverlayState = { key: null, placed: '', plan: null, tint: null,
+      counters: { tintRects: 0, bandedBuilds: 0, workerTints: 0 } };
     const DETAIL_LAYER_ENABLED = new URLSearchParams(window.location.search).get('detailLayer') !== '0';
     const detailLayer = {
       renderer: null, failed: false, timer: null, request: null, shown: null, visible: false, warmed: null, modesPoll: 0,
@@ -3560,6 +3583,35 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       metrics: null
     };
     const composeDisplaySprocketFrame = createSprocketFrameCache();
+    // #254: the stroke being painted, by any of the three brushes, on an
+    // overlay of the whole view at device resolution (brushFeedback.js); the
+    // stored marks are on #displayOverlay (see the Display overlay section).
+    const brushFeedbackCanvas = document.getElementById('brushFeedback');
+    // The display overlay's dust tint, pooled at the overlay's size
+    // (dustTint.js): { mask, tag, width, height, image, building }.
+    const dustTint = { mask: null, tag: null, width: 0, height: 0, image: null, building: null };
+    // Live dodge and burn (see its section).
+    const LIVE_DODGE_ENABLED = new URLSearchParams(window.location.search).get('liveDodge') !== '0';
+    // The preview worker's newest interactive frame: { frame: { seq, slot },
+    // token, generation, width, height }.
+    let lastLiveFrame = null;
+    // The stroke being painted, or the last one until its pen-up frame lands.
+    let liveDodge = null;
+    // Bumped whenever the frame on screen is drawn in full again (a CPU
+    // present, an exact-texture upload), which drops live rectangles.
+    let liveDisplaySerial = 0;
+    const liveDodgeCounters = { strokes: 0, requests: 0, rects: 0, deltaRects: 0, stale: 0, warmups: 0,
+      uploads: 0, puts: 0, maxRectPixels: 0, restored: 0, lastRect: null };
+    const brushFeedback = createBrushFeedback({
+      canvas: brushFeedbackCanvas,
+      measure: () => {
+        const rect = canvasContainer.getBoundingClientRect();
+        const width = canvasContainer.clientWidth;
+        const height = canvasContainer.clientHeight;
+        return { width, height, dpr: window.devicePixelRatio || 1,
+          box: { left: rect.left + canvasContainer.clientLeft, top: rect.top + canvasContainer.clientTop, width, height } };
+      }
+    });
 
     // ===========================================
     // Workflow Management
@@ -3921,6 +3973,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         beforeAfterBtn.setAttribute('aria-pressed', 'true');
       }
       updateSprocketControlsUI();
+      // Brush marks and the live overlay describe the adjusted image (#254).
+      syncBrushTools();
       if (showBeforeAfterReference(referenceImageData)) renderHistogram(referenceImageData);
     }
 
@@ -3936,6 +3990,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         beforeAfterBtn.setAttribute('aria-pressed', 'false');
       }
       updateSprocketControlsUI();
+      syncBrushTools();
 
       if (state.currentStep >= 3 && state.processedImageData) {
         // Edits made while the comparison was shown were not drawn.
@@ -5875,9 +5930,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     // The film border, the dodge-and-burn tool and a shown dust mask are drawn
-    // around or over the GL canvas (#253), so only these keep the CPU display:
-    // cropping, WebGL off, no or a failed context, and a look or a rescue before
-    // the mode programs are ready.
+    // around or over the GL canvas (#253, #254), so only these keep the CPU
+    // display: cropping, WebGL off, no or a failed context, and a look or a
+    // rescue before the mode programs are ready.
     function isWebGLActive() {
       if (state.cropping) return false;
       if (state.coreUseWebGL === false) return false;
@@ -5924,6 +5979,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function webglUploadSource(imageData) {
       if (!webglState.gl) return;
       if (!imageData) return;
+      liveDisplaySerial++;
 
       const gl = webglState.gl;
       gl.activeTexture(gl.TEXTURE0);
@@ -6194,6 +6250,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         adjustCanvasDisplay(framed.width, framed.height, framed.reference);
         const resized = webglState.sourceSize.w !== source.width || webglState.sourceSize.h !== source.height;
         if (webglState.sourceDirty || resized) {
+          liveDisplaySerial++;
           if (!renderer.uploadExact(source, resized)) {
             webglState.sourceSize = { w: 0, h: 0 };
             return false;
@@ -6299,13 +6356,17 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         glCanvas.style.display = 'none';
         canvas.style.display = 'none';
         hideDetailLayer();
-        releaseDisplayOverlay();
+        // No brush paints in crop mode; the display overlay is released.
+        syncBrushTools();
         return;
       }
       const showGL = isWebGLActive();
       glCanvas.style.display = showGL ? 'block' : 'none';
       canvas.style.display = showGL ? 'none' : 'block';
       if (!showGL) hideDetailLayer();
+      // The brush feedback overlay and the display overlay follow the tools
+      // and the step (#254).
+      syncBrushTools();
     }
 
     // ===========================================
@@ -6323,6 +6384,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function detailLayerAllowed() {
       if (!DETAIL_LAYER_ENABLED || !glDetailCanvas || detailLayer.failed) return false;
       if (!webglState.webgl2 || !isWebGLActive() || state.beforeAfterActive || state.samplingMode || canPaintAiBrush()) return false;
+      // The brush modes stay on the GPU (#254) but paint on the base image:
+      // live dodge rectangles and dust patches go into its texture.
+      if (state.dodgeBurn?.active || (state.dustRemoval.enabled && state.dustRemoval.showMask)) return false;
       if (state.geometryPending || previewTier !== 'normal' || state.currentStep < 3 || state.sprocketPreviewEnabled) return false;
       // A Tier B session (#249) draws regions from its level; native ones
       // rebuild its source first (detailFromSource).
@@ -6839,12 +6903,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     // The adjusted display-size frame on screen in CPU modes (#242): the one
-    // handle the dust overlay, the dodge paint and the histogram read. Null
-    // while WebGL presents; no export reads it.
+    // handle the histogram and the live dodge rectangles read. Null while
+    // WebGL presents; no export reads it. Brush marks are on their own layer.
     function presentCpuFrame(adjusted, options = {}) {
       state.displayImageData = adjusted;
+      liveDisplaySerial++;
       renderAdjustedImageDataToMainCanvas(adjusted, displayFrameReference(), options);
-      // The tint and the strokes are on their own layer (#253).
+      // The tint and the strokes are on their own layer (#253, #254).
       syncDisplayOverlay();
     }
 
@@ -6946,7 +7011,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         surface: glCanvas.style.display === 'block' ? 'gl' : 'cpu',
         canvases: {
           main: size(canvas), comparison: size(beforeAfterCanvas),
-          dustTint: size(dustMaskOverlayCache.canvas), aiBrush: size(brushOverlay),
+          // The dust tint pooled for the overlay, the live brush overlay (#254).
+          dustTint: dustTint.image ? [dustTint.width, dustTint.height] : null, brushFeedback: size(brushFeedbackCanvas),
           borderFrame: size(sprocketPreviewFrameCanvas), gl: size(glCanvas),
           overlay: displayOverlay && displayOverlay.style.display === 'block' ? size(displayOverlay) : null,
           glBorder: webglState.borderUnderlay ? size(webglState.borderUnderlay.size()) : null
@@ -7089,7 +7155,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
             overlay: displayOverlay.style.display === 'block' ? rect(displayOverlay) : null,
             overlayBacking: [displayOverlay.width, displayOverlay.height],
             surface: surface === glCanvas ? 'gl' : 'cpu', surfaceRect: box, photo,
-            tint: dustMaskOverlayCache.canvas ? [dustMaskOverlayCache.width, dustMaskOverlayCache.height] : null
+            tint: dustTint.image ? [dustTint.width, dustTint.height] : null
           };
         },
         modes: () => ({
@@ -8244,6 +8310,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           const previewProcessed = await convertFromCurrentSource(state, { preview: hasSmallPreview, interactive: true, includeAnalysisPreview: false, retain16,
             previewSource: repairedSource });
           if (!previewProcessed) return false;
+          // The worker's newest frame, which a dodge stroke can paint over (#254).
+          if (generation === coreReprocessGeneration) noteLiveFrame(previewProcessed, token, generation);
           if (reducedInput) reducedDisplayImages.add(previewProcessed);
           if (generation !== coreReprocessGeneration) return false;
           // A Tier B frame converted from its proxy stays valid when
@@ -9238,9 +9306,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         const dustEnabled = Boolean(state.dustRemoval.enabled);
         // The worker keeps the mask it returns under this tag for the brush.
         const maskTag = nextDustMaskTag();
-        const { mask, particleCount, _state } = !dustEnabled
+        const detected = !dustEnabled
           ? { mask: new Uint8Array(source.width * source.height), particleCount: 0, _state: null }
-          : await detectDustOffMainThread(source, { strength: state.dustRemoval.strength, maxParticleSize, maskTag }, prevState, isCurrent);
+          : await detectDustOffMainThread(source, { strength: state.dustRemoval.strength, maxParticleSize, maskTag,
+            // The worker pools the display tint while the mask is shown (#254 B).
+            tint: state.dustRemoval.showMask ? displayOverlaySize() : null }, prevState, isCurrent);
+        const { mask, particleCount, _state } = detected;
         if (!isCurrent() || source !== getDustSource()) return;
         state.dustRemoval.mask = mask;
         state.dustRemoval.maskTag = maskTag;
@@ -9248,6 +9319,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         state.dustRemoval.particleCount = particleCount;
         state.dustRemoval._state = _state;
         noteDustReplaced();
+        adoptDustTint(mask, maskTag, detected.tint);
         const maskRevision = state.dustRemoval.revision;
 
         let committed = null;
@@ -9335,154 +9407,146 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       updateDustStatusUI(getLocalizedText('dustStatusIdle', 'Ready'));
     }
 
-    // The mask tint is cached as its own canvas: it only changes when the mask
-    // or the overlay size changes, so a brush drag composites a ready-made layer
-    // instead of running a full-canvas getImageData, per-pixel JS loop and
-    // putImageData on every pointer move.
-    // The brush patches the mask in place, so the layer is keyed by the dust
-    // revision as well as the mask object (#259). It is built at the display
-    // overlay's size (#253), never the image's.
-    const dustMaskOverlayCache = { canvas: null, mask: null, revision: -1, width: 0, height: 0 };
+    // ===========================================
+    // Display overlay (#253 C, #254 B)
+    // ===========================================
+    // The dust-mask tint and the saved dodge-and-burn strokes are drawn on their
+    // own transparent canvas in the transform wrapper, above whichever canvas
+    // shows the photo (#glCanvas and the detail layer, or #canvas), never into
+    // the photo's context, so a shown mask or the dodge tool no longer takes the
+    // display off the GPU. The backing is the display photo's size (at most the
+    // display-preview cap), never the image's; with the film border it covers
+    // the photo's rectangle. It is repainted only when the tint, the strokes,
+    // the geometry, the size or the box change: never for a photo frame or a
+    // pointer move. The stroke being painted is on #brushFeedback
+    // (brushFeedback.js, see the brush section).
+    //
+    // The tint is max-pooled (dustTint.js): a cell is tinted when any mask pixel
+    // inside it is set, so one-pixel specks show at fit. The dust worker pools
+    // it (a detection's whole tint, a stroke's cells over the mask box it
+    // changed) and the page only puts it; a mask that changes without such a
+    // reply (a restored session, a new display size, the page fallback) is
+    // pooled here in row bands of about 8 ms, and an undo or redo pools the
+    // stroke's box alone. (dustTint is declared with the canvases: the display
+    // paths reach it from the start.)
 
-    function getDustMaskOverlayCanvas(w, h) {
-      const mask = state.dustRemoval.mask;
-      if (!mask || !state.processedImageData) return null;
-      if (!w || !h) return null;
-
-      if (
-        dustMaskOverlayCache.canvas
-        && dustMaskOverlayCache.mask === mask
-        && dustMaskOverlayCache.revision === state.dustRemoval.revision
-        && dustMaskOverlayCache.width === w
-        && dustMaskOverlayCache.height === h
-      ) {
-        return dustMaskOverlayCache.canvas;
-      }
-
-      const { width, height } = state.processedImageData;
-      const layer = dustMaskOverlayCache.canvas && dustMaskOverlayCache.width === w && dustMaskOverlayCache.height === h
-        ? dustMaskOverlayCache.canvas
-        : document.createElement('canvas');
-      layer.width = w;
-      layer.height = h;
-      const layerCtx = layer.getContext('2d', { willReadFrequently: false });
-      if (!layerCtx) return null;
-      layerCtx.clearRect(0, 0, w, h);
-
-      const tint = layerCtx.createImageData(w, h);
-      const data = tint.data;
-      const scaleX = width / w;
-      const scaleY = height / h;
-      for (let cy = 0; cy < h; cy++) {
-        const my = Math.min(height - 1, Math.round(cy * scaleY));
-        const rowOffset = my * width;
-        for (let cx = 0; cx < w; cx++) {
-          const mx = Math.min(width - 1, Math.round(cx * scaleX));
-          if (mask[rowOffset + mx] > 0) {
-            const idx = (cy * w + cx) * 4;
-            data[idx] = 255;
-            data[idx + 3] = 128; // 50% red, composited over the image below
-          }
-        }
-      }
-      layerCtx.putImageData(tint, 0, 0);
-
-      dustMaskOverlayCache.canvas = layer;
-      dustMaskOverlayCache.mask = mask;
-      dustMaskOverlayCache.revision = state.dustRemoval.revision;
-      dustMaskOverlayCache.width = w;
-      dustMaskOverlayCache.height = h;
-      return layer;
+    // The overlay's backing: the display frame, at most the display-preview cap.
+    function displayOverlaySize() {
+      const frame = displaySourceImageData();
+      if (!frame) return null;
+      if (frame !== state.processedImageData) return { width: frame.width, height: frame.height };
+      const target = getDisplayPreviewSize(frame, undefined, 'normal');
+      return { width: Math.min(frame.width, target.width), height: Math.min(frame.height, target.height) };
     }
 
-    // After a brush patch at `revision`, redraws only the tint cells whose
-    // nearest mask sample lies in `rect` (image pixels), with the same rule
-    // as the full layer. A layer that was not current is rebuilt on demand.
-    function updateDustTintRect(rect, revision) {
-      const cache = dustMaskOverlayCache;
-      const mask = state.dustRemoval.mask;
+    function dustTintWanted() {
+      return Boolean(state.dustRemoval.showMask && state.dustRemoval.mask && state.processedImageData);
+    }
+
+    function dodgeStrokesWanted() {
+      return Boolean(state.dodgeBurn?.active && state.dodgeBurn.showOverlay && state.localExposure?.strokes?.length);
+    }
+
+    function dustTintCurrent(size) {
+      return Boolean(dustTint.image && dustTint.mask === state.dustRemoval.mask && dustTint.tag === state.dustRemoval.maskTag
+        && dustTint.width === size.width && dustTint.height === size.height);
+    }
+
+    // The worker's tint of a detection's mask, when it is of the overlay's size.
+    function adoptDustTint(mask, tag, tint) {
+      const size = displayOverlaySize();
+      if (!tint || !size || tint.width !== size.width || tint.height !== size.height) return;
+      dustTint.mask = mask;
+      dustTint.tag = tag;
+      dustTint.width = tint.width;
+      dustTint.height = tint.height;
+      dustTint.image = new ImageData(tint.rgba, tint.width, tint.height);
+      dustTint.building = null;
+      displayOverlayState.counters.workerTints++;
+    }
+
+    // A brush stroke (or its undo) moved the mask from `fromTag` to `toTag`
+    // inside `maskRect`: patch those cells (the worker's `cells`, or pooled
+    // here, a few thousand pixels) and, when the overlay shows the tint alone,
+    // put only them. A tint of another mask is pooled again by the next sync.
+    function patchDustTint(mask, fromTag, toTag, maskRect, cells = null) {
+      if (!dustTint.image || dustTint.mask !== mask || dustTint.tag !== fromTag || !maskRect) return;
       const image = state.processedImageData;
-      if (!cache.canvas || !mask || !image || cache.mask !== mask || cache.revision !== revision - 1) return;
-      const { width, height } = image;
-      const w = cache.width, h = cache.height;
-      const scaleX = width / w, scaleY = height / h;
-      const span = (start, end, scale, count, limit) => {
-        let first = -1, last = -1;
-        for (let i = Math.max(0, Math.floor((start - 1) / scale)); i < count; i++) {
-          const m = Math.min(limit - 1, Math.round(i * scale));
-          if (m >= end) break;
-          if (m < start) continue;
-          if (first < 0) first = i;
-          last = i;
-        }
-        return first < 0 ? null : [first, last + 1];
-      };
-      const columns = span(rect.x, rect.x + rect.width, scaleX, w, width);
-      const rows = span(rect.y, rect.y + rect.height, scaleY, h, height);
-      if (columns && rows) {
-        const layerCtx = cache.canvas.getContext('2d', { willReadFrequently: false });
-        if (!layerCtx) return;
-        const tw = columns[1] - columns[0], th = rows[1] - rows[0];
-        const tint = layerCtx.createImageData(tw, th);
-        for (let cy = rows[0]; cy < rows[1]; cy++) {
-          const rowOffset = Math.min(height - 1, Math.round(cy * scaleY)) * width;
-          for (let cx = columns[0]; cx < columns[1]; cx++) {
-            if (mask[rowOffset + Math.min(width - 1, Math.round(cx * scaleX))] > 0) {
-              const idx = ((cy - rows[0]) * tw + (cx - columns[0])) * 4;
-              tint.data[idx] = 255;
-              tint.data[idx + 3] = 128;
-            }
-          }
-        }
-        layerCtx.putImageData(tint, columns[0], rows[0]);
+      if (!image || image.width * image.height !== mask.length) return;
+      const patch = cells && cells.tintWidth === dustTint.width && cells.tintHeight === dustTint.height ? cells
+        : buildDustTintRect(mask, image.width, image.height, dustTint.width, dustTint.height, maskRect);
+      dustTint.tag = toTag;
+      if (!patch) return;
+      for (let row = 0; row < patch.height; row++) {
+        dustTint.image.data.set(patch.rgba.subarray(row * patch.width * 4, (row + 1) * patch.width * 4),
+          ((patch.y + row) * dustTint.width + patch.x) * 4);
       }
-      cache.revision = revision;
+      displayOverlayState.counters.tintRects++;
+      const shown = displayOverlayState.plan;
+      if (shown && shown.tint && !shown.strokes && displayOverlayState.tint === dustTint.image) {
+        displayOverlay.getContext('2d').putImageData(dustTint.image, 0, 0, patch.x, patch.y, patch.width, patch.height);
+        displayOverlayState.key = displayOverlayKey(shown);
+      }
     }
 
-    // ===========================================
-    // Display overlay (#253 C)
-    // ===========================================
-    // The dust-mask tint, the dodge-and-burn strokes (saved and live) and the
-    // dust brush's dots are drawn on their own transparent canvas in the
-    // transform wrapper, above whichever canvas shows the photo (#glCanvas and
-    // the detail layer, or #canvas), never into the photo's context. A repaint
-    // clears the layer instead of redrawing the photo underneath, so a shown
-    // mask or the dodge tool no longer takes the display off the GPU, and a
-    // tint can no longer be composited over the previous tint. The backing is
-    // the display photo's size, never the image's; with the film border it
-    // covers the photo's rectangle. Live strokes redraw once per animation
-    // frame (#254 makes them incremental and moves them to a screen overlay).
+    // Pools the current mask for the overlay in row bands (no long task at 60 MP).
+    function ensureDustTint(size) {
+      const mask = state.dustRemoval.mask;
+      const tag = state.dustRemoval.maskTag;
+      const image = state.processedImageData;
+      if (!mask || !image || image.width * image.height !== mask.length) return;
+      const building = dustTint.building;
+      if (building && building.mask === mask && building.tag === tag && building.width === size.width && building.height === size.height) return;
+      const job = { mask, tag, width: size.width, height: size.height };
+      dustTint.building = job;
+      displayOverlayState.counters.bandedBuilds++;
+      const isCurrent = () => dustTint.building === job && state.dustRemoval.mask === mask && state.dustRemoval.maskTag === tag;
+      void buildDustTintInBands(mask, image.width, image.height, size.width, size.height, { isCurrent, yieldTask: yieldTaskForJob })
+        .then((rgba) => {
+          if (!rgba || !isCurrent()) return;
+          dustTint.mask = mask;
+          dustTint.tag = tag;
+          dustTint.width = size.width;
+          dustTint.height = size.height;
+          dustTint.image = new ImageData(rgba, size.width, size.height);
+          dustTint.building = null;
+          syncDisplayOverlay();
+        }, (error) => console.warn('Dust tint failed:', error?.message || error));
+    }
 
     // The overlay's backing and CSS box for the photo on screen, or null when it
-    // has nothing to show.
+    // has nothing to show. A tint that is not pooled yet is asked for here.
     function displayOverlayPlan() {
-      if (!displayOverlay || state.cropping || state.currentStep < 3 || !state.processedImageData) return null;
-      const tint = Boolean(state.dustRemoval.showMask && state.dustRemoval.mask);
-      const strokes = Boolean(state.dodgeBurn?.active && state.dodgeBurn.showOverlay && state.localExposure?.strokes?.length);
-      const live = Boolean((dodgeBurnDrawing && dodgeBurnPoints.length) || (dustDrawing && dustBrushPoints.length && state.dustRemoval.showMask));
-      if (!tint && !strokes && !live) return null;
+      if (!displayOverlay || state.cropping || state.beforeAfterActive || state.currentStep < 3 || !state.processedImageData) return null;
+      const size = displayOverlaySize();
+      if (!size) return null;
+      const tintWanted = dustTintWanted();
+      if (tintWanted && !dustTintCurrent(size)) ensureDustTint(size);
+      const tint = tintWanted && dustTintCurrent(size);
+      const strokes = dodgeStrokesWanted();
+      if (!tint && !strokes) return null;
       const shown = displaySourceImageData();
-      if (!shown) return null;
       const layout = state.sprocketPreviewEnabled ? getSprocketFrameLayout(shown.width, shown.height, getSprocketFrameComposeOptions()) : null;
       return {
-        width: shown.width, height: shown.height, tint, strokes, live,
+        width: size.width, height: size.height, tint, strokes,
         box: layout ? photoRectPercent(layout) : { left: '0px', top: '0px', width: '100%', height: '100%' }
       };
     }
 
     // What a repaint draws, so an unchanged overlay is left alone on every photo
-    // frame. Live strokes always repaint.
+    // frame.
     function displayOverlayKey(plan) {
       if (!plan) return 'none';
       const geometry = plan.strokes ? dodgeBurnGeometry() : null;
       return [plan.width, plan.height, plan.box.left, plan.box.top, plan.box.width, plan.box.height,
-        plan.tint ? `${gpuObjectId(state.dustRemoval.mask)}:${state.dustRemoval.revision}` : '',
+        plan.tint ? `${gpuObjectId(dustTint.image)}:${dustTint.tag}` : '',
         plan.strokes ? `${gpuObjectId(state.localExposure)}:${JSON.stringify(geometry)}` : ''].join('|');
     }
 
     function paintDisplayOverlay(plan = displayOverlayPlan()) {
-      // A live stroke leaves no key: the next sync repaints without it.
-      displayOverlayState.key = plan?.live ? null : displayOverlayKey(plan);
+      displayOverlayState.key = displayOverlayKey(plan);
+      displayOverlayState.plan = plan;
+      displayOverlayState.tint = plan?.tint ? dustTint.image : null;
       if (!plan) {
         releaseDisplayOverlay(false);
         return;
@@ -9498,15 +9562,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }
       const context = displayOverlay.getContext('2d');
       context.clearRect(0, 0, plan.width, plan.height);
-      if (plan.tint) {
-        const layer = getDustMaskOverlayCanvas(plan.width, plan.height);
-        if (layer) context.drawImage(layer, 0, 0);
-      }
+      if (plan.tint) context.putImageData(dustTint.image, 0, 0);
       if (plan.strokes) renderDodgeBurnOverlay(context, plan.width, plan.height);
-      if (dodgeBurnDrawing && dodgeBurnPoints.length) {
-        drawDodgeBurnPath(context, plan.width, plan.height, dodgeBurnPoints, state.dodgeBurn.mode === 'dodge' ? -1 : 1, true);
-      }
-      if (dustDrawing && dustBrushPoints.length && state.dustRemoval.showMask) drawDustBrushDots(context, plan.width, plan.height);
       displayOverlay.style.display = 'block';
       displayDebugCounters.overlayPaints++;
     }
@@ -9514,53 +9571,23 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // After a photo frame or a change of what the overlay shows.
     function syncDisplayOverlay() {
       const plan = displayOverlayPlan();
-      if (!plan?.live && displayOverlayKey(plan) === displayOverlayState.key) return;
+      if (displayOverlayKey(plan) === displayOverlayState.key) return;
       paintDisplayOverlay(plan);
-    }
-
-    // Live strokes: one repaint per animation frame.
-    function scheduleDisplayOverlayPaint() {
-      if (displayOverlayState.frame) return;
-      displayOverlayState.frame = requestAnimationFrame(() => {
-        displayOverlayState.frame = 0;
-        paintDisplayOverlay();
-      });
     }
 
     // Nothing to show, or the photo is gone: the backing goes too.
     function releaseDisplayOverlay(resetKey = true) {
       if (!displayOverlay) return;
-      if (displayOverlayState.frame) cancelAnimationFrame(displayOverlayState.frame);
-      displayOverlayState.frame = 0;
-      if (resetKey) displayOverlayState.key = null;
+      if (resetKey) {
+        displayOverlayState.key = null;
+        displayOverlayState.plan = null;
+        displayOverlayState.tint = null;
+      }
       displayOverlay.style.display = 'none';
       if (displayOverlay.width !== 1 || displayOverlay.height !== 1) {
         displayOverlay.width = 1;
         displayOverlay.height = 1;
       }
-    }
-
-    function renderDustMaskOverlay() {
-      syncDisplayOverlay();
-    }
-
-    // The dots of the stroke in progress, in the brush mode's colour.
-    function drawDustBrushDots(context, width, height) {
-      const image = state.processedImageData;
-      if (!image) return;
-      const scaleX = width / image.width;
-      const scaleY = height / image.height;
-      const r = state.dustRemoval.brushSize * scaleX;
-      context.save();
-      context.globalAlpha = 0.4;
-      context.fillStyle = dustBrushMode === 'direct' ? '#ff0000'
-        : dustBrushMode === 'remove' ? '#0066ff' : '#ffff00';
-      for (const pt of dustBrushPoints) {
-        context.beginPath();
-        context.arc(pt.x * scaleX, pt.y * scaleY, r, 0, Math.PI * 2);
-        context.fill();
-      }
-      context.restore();
     }
 
     // ── Dust Removal UI Event Handlers ───────────────────────────────────────
@@ -9581,10 +9608,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         state.dustRemoval.showMask = false;
         const showMaskCheckbox = document.getElementById('dustShowMask');
         if (showMaskCheckbox) showMaskCheckbox.checked = false;
+        cancelDustBrush();
         clearDustState();
         updateCanvasVisibility();
         void rerenderWithCoreControls({ full: true });
       }
+      syncBrushTools();
       syncDustWorkerPin();
     });
 
@@ -9660,14 +9689,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     document.getElementById('dustShowMask')?.addEventListener('change', function () {
       state.dustRemoval.showMask = this.checked;
       if (this.checked) document.getElementById('aiBrushEnabled').checked = false;
+      if (!this.checked) cancelDustBrush();
       updateDustControlsVisibility();
       updateCanvasVisibility();
-      if (state.dustRemoval.showMask) {
-        updatePreview();           // render image on 2D canvas first
-        requestAnimationFrame(() => renderDustMaskOverlay());
-      } else {
-        updatePreview();           // restore normal render path (may switch back to WebGL)
-      }
+      // The tint is on the display overlay (#253, #254), so the display stays
+      // on its surface; the next frame drops or asks for the detail layer.
+      updatePreview();
+      syncBrushTools();
       // The brush paints only while the mask is shown: keep the worker ready.
       syncDustWorkerPin();
     });
@@ -9702,6 +9730,39 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     // ── Brush drawing on canvas ──────────────────────────────────────────────
 
+    // Where the image lies on screen, in client pixels: the canvas on screen
+    // (its rect already includes the zoom and pan transform), or the photo
+    // inside the film border drawn around it on either canvas (#253 D, #254
+    // A.2), so brush points and the live stroke land on the image, not on the
+    // frame margins.
+    function brushSurfaceRect() {
+      const gl = glCanvas.style.display === 'block';
+      const surface = gl ? glCanvas : canvas;
+      const rect = surface.getBoundingClientRect();
+      const photo = !state.sprocketPreviewEnabled ? null : gl ? glBorder.photo
+        : canvas.style.display !== 'none' ? mainCanvasPhoto : null;
+      if (!photo || !(photo.frameWidth > 0) || !(photo.frameHeight > 0)) {
+        return { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+      }
+      return {
+        left: rect.left + rect.width * photo.x / photo.frameWidth,
+        top: rect.top + rect.height * photo.y / photo.frameHeight,
+        width: rect.width * photo.width / photo.frameWidth,
+        height: rect.height * photo.height / photo.frameHeight
+      };
+    }
+
+    // A pointer position in pixels of the processed frame, rounded as the
+    // brushes have always recorded it.
+    function clientToImageCoords(clientX, clientY, rect) {
+      const source = state.processedImageData;
+      if (!source || !rect || !(rect.width > 0) || !(rect.height > 0)) return null;
+      return {
+        x: Math.round((clientX - rect.left) * (source.width / rect.width)),
+        y: Math.round((clientY - rect.top) * (source.height / rect.height))
+      };
+    }
+
     function canvasToImageCoords(canvasX, canvasY) {
       const source = state.processedImageData;
       if (!source) return null;
@@ -9713,14 +9774,64 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       };
     }
 
+    // Captures a brush's pointer; a pointer the browser does not know (a
+    // synthetic event) cannot be captured and paints without it.
+    function captureBrushPointer(element, pointerId) {
+      try { element.setPointerCapture?.(pointerId); } catch { /* not an active pointer */ }
+    }
+
+    // Brush tools and their overlays (#254 A): the view's touch action and the
+    // feedback overlay's backing follow whether a brush can paint; the display
+    // overlay follows the tint and the strokes it shows.
+    function dustBrushToolActive() {
+      return Boolean(state.dustRemoval.enabled && state.dustRemoval.showMask && state.currentStep >= 3
+        && !state.cropping && !state.beforeAfterActive);
+    }
+
+    function dodgeToolActive() {
+      return Boolean(state.dodgeBurn?.active && state.currentStep >= 3 && !state.cropping && !state.beforeAfterActive);
+    }
+
+    function brushToolActive() {
+      return dustBrushToolActive() || dodgeToolActive() || (canPaintAiBrush() && !state.beforeAfterActive);
+    }
+
+    function syncBrushTools({ resize = false } = {}) {
+      const active = brushToolActive();
+      canvasContainer.classList.toggle('brush-tool-active', active);
+      brushFeedback.sync(active, { resize });
+      // A new view size or DPR moves the image under a stroke being painted.
+      if (resize && brushFeedback.drawing) remapBrushStroke();
+      syncDisplayOverlay();
+    }
+
+    // Zoom or pan moved the image under a stroke being painted.
+    function remapBrushStroke() {
+      if (!brushFeedback.drawing) return;
+      const rect = brushSurfaceRect();
+      if (dustDrawing) dustBrushRect = rect;
+      if (dodgeBurnDrawing) dodgeBurnRect = rect;
+      if (aiBrushDrawing) aiBrushDrawing.rect = rect;
+      brushFeedback.remap(rect);
+    }
+
     let dustBrushPoints = [];
     let dustBrushSource = null;
     let dustBrushToken = null;
+    let dustBrushPointerId = null;
+    let dustBrushSurface = null;
+    let dustBrushRect = null;
+    let dustBrushLastSample = null;
 
+    // Pointer events (#254 A.3): a finger or a pen paints too. The pointer is
+    // captured and the container's touch pan never starts.
     function onDustBrushStart(e) {
-      if (canPaintAiBrush()) return;
+      // The AI brush and the dodge tool take the stroke when they are active,
+      // as their pointerdown always has.
+      if (canPaintAiBrush() || canPaintDodgeBurn()) return;
       if (!state.dustRemoval.enabled || !state.dustRemoval.showMask) return;
       if (!state.dustRemoval.mask || !state.processedImageData) return;
+      if (dustDrawing || (e.pointerType === 'mouse' && e.button !== 0)) return;
       // A pending repair pass is about to replace this mask (#237).
       if (state.dustRemoval.processing || state.processedImageDataIsPreview || state.fullResolutionPending) return;
       if (state.samplingMode || state.cropping) return;
@@ -9728,11 +9839,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (!currentPhotoExact()) { void ensureFullDecodeWithNotice('dust-brush'); return; }
 
       e.preventDefault();
-      e.stopPropagation();
+      e.stopImmediatePropagation();
       dustDrawing = true;
       dustBrushPoints = [];
       dustBrushSource = getDustSource();
       dustBrushToken = coreReprocessToken;
+      dustBrushPointerId = e.pointerId;
+      dustBrushSurface = e.currentTarget;
+      captureBrushPointer(dustBrushSurface, e.pointerId);
 
       // Determine mode
       if (e.altKey) {
@@ -9743,25 +9857,53 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         dustBrushMode = 'intelligent';
       }
 
-      const target = e.currentTarget;
-      const rect = target.getBoundingClientRect();
-      const cx = (e.clientX - rect.left) * (canvas.width / rect.width);
-      const cy = (e.clientY - rect.top) * (canvas.height / rect.height);
-      const imgCoord = canvasToImageCoords(cx, cy);
-      if (imgCoord) dustBrushPoints.push(imgCoord);
+      dustBrushRect = brushSurfaceRect();
+      dustBrushLastSample = null;
+      const image = state.processedImageData;
+      brushFeedback.begin({ tool: 'dust', color: BRUSH_FEEDBACK_STYLES.dust.colors[dustBrushMode],
+        radius: state.dustRemoval.brushSize, frameWidth: image.width, frameHeight: image.height, surface: dustBrushRect });
+      addDustBrushSamples([e]);
+    }
+
+    // Records the samples at least a device pixel apart; the overlay draws
+    // them at the next frame. The committed stroke is discs of the brush along
+    // them, which the round-capped line of width 2r shows.
+    function addDustBrushSamples(samples) {
+      const dpr = window.devicePixelRatio || 1;
+      const added = [];
+      for (const sample of samples) {
+        if (!movedEnough(dustBrushLastSample, sample.clientX, sample.clientY, dpr)) continue;
+        const point = clientToImageCoords(sample.clientX, sample.clientY, dustBrushRect);
+        if (!point) continue;
+        dustBrushLastSample = { clientX: sample.clientX, clientY: sample.clientY };
+        dustBrushPoints.push(point);
+        added.push(point);
+      }
+      if (added.length) brushFeedback.add(added);
     }
 
     function onDustBrushMove(e) {
-      if (!dustDrawing) return;
-      const activeCanvas = isWebGLActive() ? glCanvas : canvas;
-      const rect = activeCanvas.getBoundingClientRect();
-      const cx = (e.clientX - rect.left) * (canvas.width / rect.width);
-      const cy = (e.clientY - rect.top) * (canvas.height / rect.height);
-      const imgCoord = canvasToImageCoords(cx, cy);
-      if (imgCoord) dustBrushPoints.push(imgCoord);
+      if (!dustDrawing || e.pointerId !== dustBrushPointerId) return;
+      e.preventDefault();
+      addDustBrushSamples(pointerSamples(e));
+    }
 
-      // Visual feedback on the display overlay, once per frame (#253).
-      if (state.dustRemoval.showMask) scheduleDisplayOverlayPaint();
+    function releaseDustBrushPointer() {
+      const surface = dustBrushSurface;
+      const pointerId = dustBrushPointerId;
+      dustBrushSurface = null;
+      dustBrushPointerId = null;
+      if (surface && pointerId !== null && surface.hasPointerCapture?.(pointerId)) surface.releasePointerCapture(pointerId);
+    }
+
+    // Escape, a cancelled pointer or a lost capture: no stroke is committed.
+    function cancelDustBrush(e) {
+      if (!dustDrawing || (e && e.pointerId !== undefined && e.pointerId !== dustBrushPointerId)) return;
+      dustDrawing = false;
+      dustBrushPoints = [];
+      dustBrushSource = null;
+      releaseDustBrushPointer();
+      brushFeedback.cancel();
     }
 
     let dustBrushTurn = Promise.resolve();
@@ -9797,20 +9939,26 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         webglState.sourceDirty = true;
         return;
       }
-      const gl = webglState.gl;
       const rows = new Uint8Array(rect.width * rect.height * 4);
       for (let y = 0; y < rect.height; y++) {
         const start = ((rect.y + y) * imageData.width + rect.x) * 4;
         rows.set(imageData.data.subarray(start, start + rect.width * 4), y * rect.width * 4);
       }
+      if (!webglUploadRectRows(rect, rows, imageData.width, imageData.height)) webglState.sourceDirty = true;
+    }
+
+    // `rows` (RGBA8, top-down) into `rect` of the exact frame's texture, when
+    // it holds a width x height frame. False when it does not.
+    function webglUploadRectRows(rect, rows, width, height) {
+      if (!webglState.gl || webglState.sourceDirty) return false;
+      if (webglState.sourceSize.w !== width || webglState.sourceSize.h !== height) return false;
       // WebGL2 (#239): the exact frame's texture belongs to the renderer.
-      if (webglState.webgl2) {
-        if (!webglState.renderer2.uploadExactRect(rect, rows)) webglState.sourceDirty = true;
-        return;
-      }
+      if (webglState.webgl2) return webglState.renderer2.uploadExactRect(rect, rows);
+      const gl = webglState.gl;
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, webglState.sourceTex);
       gl.texSubImage2D(gl.TEXTURE_2D, 0, rect.x, rect.y, rect.width, rect.height, gl.RGBA, gl.UNSIGNED_BYTE, rows);
+      return true;
     }
 
     let dustHistogramTimer = null;
@@ -9826,10 +9974,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     // After in-place patches of the repaired image inside `rects`, updates
-    // what the display derives from it (preview source, WebGL texture, tint,
+    // what the display derives from it (preview source, WebGL texture,
     // histogram on idle) for those rects only, then repaints. A repaired
-    // image that is not the one on screen is shown the ordinary way.
-    function refreshDustDisplay(target, rects, maskRect, revision) {
+    // image that is not the one on screen is shown the ordinary way. The
+    // caller patches the tint (patchDustTint).
+    function refreshDustDisplay(target, rects) {
       if (state.processedImageData !== target || state.processedImageDataIsPreview) {
         applyProcessedImageToState(target, { deferDisplay: true });
         updatePreview();
@@ -9845,7 +9994,6 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         }
       }
       state.displayImageData = null;
-      if (maskRect) updateDustTintRect(maskRect, revision);
       scheduleDustHistogramRefresh();
       updatePreview();
     }
@@ -9872,7 +10020,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       dust.revision += 1;
       pushUndoDelta('dustBrushStroke', delta);
       showDustParticleCount();
-      refreshDustDisplay(target, [patch.rect], patch.maskRect, dust.revision);
+      // The worker pooled the tint cells over the rect it changed (#254 B).
+      patchDustTint(dust.mask, stroke.baseTag, stroke.tag, patch.maskRect, patch.tint || null);
+      refreshDustDisplay(target, [patch.rect]);
       // TELEA now stands in over any MI-GAN pixels inside the rect.
       if (aiRepairReady() || state.repairStrokes.length) queueDustAiRefresh([patch.rect]);
     }
@@ -9888,13 +10038,16 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       forgetDustMaskInfo(delta.mask);
       const restored = applyDustDelta(delta, direction);
       const displayed = state.processedImageData === restored.target && dust.mask === restored.mask;
+      const tagBefore = dust.maskTag;
       dust.cleanSource = restored.cleanSource;
       dust.inpaintedImageData = restored.target;
       dust.mask = restored.mask;
       dust.particleCount = restored.particleCount;
       dust.maskTag = restored.maskTag;
       dust.revision += 1;
-      if (displayed) refreshDustDisplay(restored.target, restored.rects, delta.maskRect, dust.revision);
+      // The tint follows inside the stroke's rect (pooled here: a small rect).
+      patchDustTint(restored.mask, tagBefore, restored.maskTag, delta.maskRect);
+      if (displayed) refreshDustDisplay(restored.target, restored.rects);
       else {
         applyProcessedImageToState(restored.target, { deferDisplay: true });
         updatePreview();
@@ -9907,13 +10060,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     async function onDustBrushEnd(e) {
-      if (!dustDrawing) return;
+      if (!dustDrawing || e.pointerId !== dustBrushPointerId) return;
       dustDrawing = false;
+      releaseDustBrushPointer();
+      brushFeedback.end();
 
       if (dustBrushPoints.length === 0 || !state.processedImageData || !state.dustRemoval.mask) {
         dustBrushPoints = [];
         dustBrushSource = null;
-        paintDisplayOverlay();
         return;
       }
       const source = getDustSource();
@@ -9921,7 +10075,6 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         || coreReprocessToken !== dustBrushToken) {
         dustBrushPoints = [];
         dustBrushSource = null;
-        paintDisplayOverlay();
         return;
       }
       const points = dustBrushPoints;
@@ -9947,7 +10100,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         if (dust.maskTag == null) dust.maskTag = nextDustMaskTag();
         const dustRevision = dust.revision;
         const stroke = { baseTag: dust.maskTag, tag: nextDustMaskTag(), mask: dust.mask,
-          points, brushRadius: brushSize, mode, radius: 3 };
+          points, brushRadius: brushSize, mode, radius: 3, tint: displayOverlaySize() };
         const isStrokeCurrent = () => isCurrent() && dust.revision === dustRevision;
         const patch = await strokeDustOffMainThread(source, stroke, isStrokeCurrent);
         if (!isStrokeCurrent() || !patch) return;
@@ -9964,10 +10117,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     // Attach brush handlers
-    canvas.addEventListener('mousedown', onDustBrushStart);
-    glCanvas.addEventListener('mousedown', onDustBrushStart);
-    document.addEventListener('mousemove', onDustBrushMove);
-    document.addEventListener('mouseup', onDustBrushEnd);
+    for (const surface of [canvas, glCanvas]) {
+      surface.addEventListener('pointerdown', onDustBrushStart, { passive: false });
+      surface.addEventListener('pointermove', onDustBrushMove, { passive: false });
+      surface.addEventListener('pointerup', onDustBrushEnd);
+      surface.addEventListener('pointercancel', cancelDustBrush);
+      surface.addEventListener('lostpointercapture', cancelDustBrush);
+    }
 
     // Ctrl+scroll to adjust brush size
     const dustWheelHandler = (e) => {
@@ -10092,6 +10248,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function applyZoomPanTransform() {
       const z = state.zoomLevel;
       canvasTransformWrapper.style.transform = `matrix(${z}, 0, 0, ${z}, ${state.panX}, ${state.panY}) ${interimGeometryCss()}`.trim();
+      // A stroke being painted follows the image it is painted on (#254).
+      if (brushFeedback.drawing) remapBrushStroke();
       if (z > 1) {
         zoomIndicator.textContent = zoomIndicatorText(z);
         zoomIndicator.style.display = 'block';
@@ -15504,11 +15662,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         showToast(getLocalizedText('cancelledSampling', 'Exited sampling mode'));
         return;
       }
-      if (dustDrawing) {
+      // A stroke being painted by any brush (#254): nothing is stored and the
+      // stroke leaves the feedback overlay; the photo was never drawn over.
+      if (dustDrawing || dodgeBurnDrawing || aiBrushDrawing) {
         event.preventDefault();
-        dustDrawing = false;
-        dustBrushPoints = [];
-        paintDisplayOverlay();
+        if (dustDrawing) cancelDustBrush();
+        if (dodgeBurnDrawing) cancelDodgeBurnStroke();
+        if (aiBrushDrawing) finishAiBrush({ pointerId: aiBrushDrawing.pointerId }, true);
         showToast(getLocalizedText('cancelledBrush', 'Brush cancelled'));
         return;
       }
@@ -16070,6 +16230,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       canvasContainer.classList.toggle('crop-mode', active);
       canvasContainer.classList.toggle('straighten-line-mode', false);
       canvasContainer.style.touchAction = active ? 'none' : '';
+      // No brush paints in crop mode: the overlay and the brush layer hide.
+      syncBrushTools();
       canvasContainer.style.cursor = active ? 'crosshair' : '';
       if (!active && straightenGuideLine) straightenGuideLine.style.display = 'none';
 
@@ -21240,6 +21402,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         } else if (entry.target === curveCanvas) curve = true;
       }
       if (container) refreshCanvasContainerSize();
+      if (container) syncBrushTools({ resize: true });
       if (histogramWidth !== null) {
         // Hidden (another tab): keep the last width rather than shrink to 1.
         if (histogramWidth > 0) histogramLayout.width = Math.max(1, Math.round(histogramWidth - histogramPaddingX()));
@@ -21292,6 +21455,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         watchDevicePixelRatio();
         invalidateCanvasDisplayFit();
         scheduleDisplayPreviewResize();
+        syncBrushTools({ resize: true });
       };
       if (query.addEventListener) query.addEventListener('change', onChange);
       else query.addListener?.(onChange);
@@ -23104,9 +23268,19 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // ===========================================
     // Dodge and burn brush (Retouch tab)
     // ===========================================
+    // The stroke under the pointer is drawn on the feedback overlay (#254 A)
+    // and its exposure change shows under the brush while it is painted
+    // (#254 C, see Live dodge and burn below). The photo canvases are written
+    // only with those live rectangles.
     let dodgeBurnDrawing = false;
     let dodgeBurnPointerId = null;
     let dodgeBurnPoints = [];
+    let dodgeBurnSurface = null;
+    let dodgeBurnRect = null;
+    let dodgeBurnLastSample = null;
+    // The brush as the stroke started ({ stops, size, feather }, the UI's
+    // values): the stored stroke is the one the live effect painted.
+    let dodgeBurnBrush = null;
 
     function dodgeBurnGeometry() {
       const geometry = localExposureGeometryFor(state);
@@ -23120,103 +23294,390 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         && !state.samplingMode && !state.cropping && !document.body.dataset.studioBusy && usesSilverCoreConversion(state));
     }
 
-    function pointerToWorkingPoint(event) {
-      const activeCanvas = isWebGLActive() ? glCanvas : canvas;
-      const rect = activeCanvas.getBoundingClientRect();
-      if (rect.width <= 0 || rect.height <= 0) return null;
-      const cx = (event.clientX - rect.left) * (canvas.width / rect.width);
-      const cy = (event.clientY - rect.top) * (canvas.height / rect.height);
-      const point = canvasToImageCoords(cx, cy);
+    // The tool's brush as a stroke stores it, before the sanitiser.
+    function dodgeBurnBrushValues() {
+      const brush = state.dodgeBurn;
+      return {
+        stops: brush.mode === 'dodge' ? -Math.abs(brush.stops) : Math.abs(brush.stops),
+        size: brush.size / 100,
+        feather: brush.feather / 100
+      };
+    }
+
+    // The stroke's parameters as they will be stored: through the sanitiser,
+    // which maps a feather of 0 to 0.5, so the live effect is the stored one.
+    function dodgeBurnStrokeParameters(brush) {
+      const stored = sanitizeLocalExposureStrokes({ strokes: [{ ...brush, points: [{ x: 0.5, y: 0.5 }] }] });
+      if (!stored) return null;
+      const { stops, size, feather } = stored.strokes[0];
+      return { stops, size, feather };
+    }
+
+    function pointerToWorkingPoint(sample, rect) {
+      const point = clientToImageCoords(sample.clientX, sample.clientY, rect);
       if (!point) return null;
-      return { x: point.x, y: point.y, p: event.pressure && event.pressure > 0 && event.pointerType === 'pen' ? event.pressure : 1 };
+      return { x: point.x, y: point.y, p: sample.pressure && sample.pressure > 0 && sample.pointerType === 'pen' ? sample.pressure : 1 };
     }
 
     function onDodgeBurnPointerDown(event) {
-      if (!canPaintDodgeBurn() || (event.button !== 0 && event.pointerType === 'mouse')) return;
-      const point = pointerToWorkingPoint(event);
-      if (!point) return;
+      if (dodgeBurnDrawing || dustDrawing || !canPaintDodgeBurn() || (event.button !== 0 && event.pointerType === 'mouse')) return;
+      const rect = brushSurfaceRect();
+      const point = pointerToWorkingPoint(event, rect);
+      const brush = dodgeBurnBrushValues();
+      const parameters = dodgeBurnStrokeParameters(brush);
+      const geometry = dodgeBurnGeometry();
+      if (!point || !parameters || !geometry) return;
       event.preventDefault();
-      event.currentTarget.setPointerCapture?.(event.pointerId);
+      // The container's touch pan must not start under the brush.
+      event.stopPropagation();
+      captureBrushPointer(event.currentTarget, event.pointerId);
       dodgeBurnDrawing = true;
       dodgeBurnPointerId = event.pointerId;
+      dodgeBurnSurface = event.currentTarget;
+      dodgeBurnRect = rect;
+      dodgeBurnBrush = brush;
       dodgeBurnPoints = [point];
-      scheduleDodgeBurnLivePaint();
+      dodgeBurnLastSample = { clientX: event.clientX, clientY: event.clientY };
+      brushFeedback.begin({ tool: 'dodge', color: BRUSH_FEEDBACK_STYLES.dodge.colors[parameters.stops < 0 ? 'dodge' : 'burn'],
+        radius: strokeBrush(parameters, geometry).radius, frameWidth: geometry.width, frameHeight: geometry.height, surface: rect });
+      brushFeedback.add([point]);
+      beginLiveDodge(parameters, geometry, point);
     }
 
     function onDodgeBurnPointerMove(event) {
       if (!dodgeBurnDrawing || event.pointerId !== dodgeBurnPointerId) return;
-      const point = pointerToWorkingPoint(event);
-      if (!point) return;
-      const last = dodgeBurnPoints[dodgeBurnPoints.length - 1];
-      if (last && Math.hypot(point.x - last.x, point.y - last.y) < 2) return;
-      dodgeBurnPoints.push(point);
-      scheduleDodgeBurnLivePaint();
+      const dpr = window.devicePixelRatio || 1;
+      const added = [];
+      for (const sample of pointerSamples(event)) {
+        // At least a device pixel apart (#254 A.3): coalesced samples make a
+        // fast stroke a curve instead of a few long chords.
+        if (!movedEnough(dodgeBurnLastSample, sample.clientX, sample.clientY, dpr)) continue;
+        const point = pointerToWorkingPoint(sample, dodgeBurnRect);
+        if (!point) continue;
+        dodgeBurnLastSample = { clientX: sample.clientX, clientY: sample.clientY };
+        dodgeBurnPoints.push(point);
+        added.push(point);
+      }
+      if (!added.length) return;
+      brushFeedback.add(added);
+      addLiveDodgePoints(added);
+    }
+
+    function releaseDodgeBurnPointer() {
+      const surface = dodgeBurnSurface;
+      const pointerId = dodgeBurnPointerId;
+      dodgeBurnDrawing = false;
+      dodgeBurnPointerId = null;
+      dodgeBurnSurface = null;
+      if (surface && pointerId !== null && surface.hasPointerCapture?.(pointerId)) surface.releasePointerCapture(pointerId);
+      brushFeedback.end();
     }
 
     function onDodgeBurnPointerUp(event) {
       if (!dodgeBurnDrawing || event.pointerId !== dodgeBurnPointerId) return;
-      dodgeBurnDrawing = false;
-      dodgeBurnPointerId = null;
+      releaseDodgeBurnPointer();
       const points = dodgeBurnPoints;
       dodgeBurnPoints = [];
       const geometry = dodgeBurnGeometry();
-      if (!points.length || !geometry) { paintDisplayOverlay(); return; }
+      if (!points.length || !geometry) { endLiveDodge(false); return; }
+      // More than 400 points are resampled, as repair strokes are, so the
+      // stroke keeps its end; the sanitiser itself stays as it is (#254 A.6).
+      const kept = resampleStrokePoints(points);
       const stroke = {
-        stops: state.dodgeBurn.mode === 'dodge' ? -Math.abs(state.dodgeBurn.stops) : Math.abs(state.dodgeBurn.stops),
-        size: state.dodgeBurn.size / 100,
-        feather: state.dodgeBurn.feather / 100,
-        points: points.map((p) => ({ ...workingPointToBase(p, geometry), p: p.p }))
+        ...(dodgeBurnBrush || dodgeBurnBrushValues()),
+        points: kept.map((p) => ({ ...workingPointToBase(p, geometry), p: p.p }))
       };
       pushUndo('dodgeBurn');
       const strokes = [...(state.localExposure?.strokes || []), stroke];
       state.localExposure = sanitizeLocalExposureForSettings({ strokes });
       markCurrentFileDirty();
       updateDodgeBurnUI();
-      // The live path gives way to the saved stroke on the overlay.
-      paintDisplayOverlay();
+      // The live rectangles stay on screen until this frame replaces them; the
+      // stored stroke joins the display overlay.
+      endLiveDodge(true);
       scheduleCoreReprocess({ full: false });
+      syncDisplayOverlay();
     }
 
-    // The stroke in progress on the display overlay (#253), once per frame; the
-    // photo underneath is not redrawn.
-    function scheduleDodgeBurnLivePaint() {
-      scheduleDisplayOverlayPaint();
+    // Escape, a cancelled pointer, a lost capture or the tool turned off:
+    // nothing is stored, and the live rectangles go.
+    function cancelDodgeBurnStroke() {
+      if (!dodgeBurnDrawing) return;
+      releaseDodgeBurnPointer();
+      dodgeBurnPoints = [];
+      endLiveDodge(false);
     }
 
-    // Draws one stroke path (working-frame pixel points) into a `width` x
-    // `height` overlay context over the photo. `size`: the brush size in percent
-    // of the short side (the tool's by default).
-    function drawDodgeBurnPath(context, width, height, points, sign, live = false, size = state.dodgeBurn.size) {
-      const image = state.processedImageData;
-      if (!points.length || !image) return;
-      const scaleX = width / image.width;
-      const scaleY = height / image.height;
-      const shortSide = Math.min(image.width, image.height);
-      const lineWidth = Math.max(2, size / 100 * shortSide * Math.min(scaleX, scaleY));
+    function onDodgeBurnPointerCancel(event) {
+      if (!dodgeBurnDrawing || event.pointerId !== dodgeBurnPointerId) return;
+      cancelDodgeBurnStroke();
+    }
+
+    // The saved strokes on the display overlay (`width` x `height` over the
+    // photo), each one translucent path of the width the raster paints
+    // (strokeBrush, relative to the base's short side as stored).
+    function renderDodgeBurnOverlay(context, width, height) {
+      const strokes = state.localExposure?.strokes;
+      const geometry = localExposureGeometryFor(state);
+      if (!Array.isArray(strokes) || !strokes.length || !geometry) return;
+      const working = { ...geometry, width, height };
       context.save();
       context.lineCap = 'round';
       context.lineJoin = 'round';
-      context.lineWidth = lineWidth;
-      context.strokeStyle = sign < 0 ? `rgba(120, 200, 255, ${live ? 0.45 : 0.3})` : `rgba(255, 170, 0, ${live ? 0.45 : 0.3})`;
-      context.beginPath();
-      points.forEach((p, i) => { if (i === 0) context.moveTo(p.x * scaleX, p.y * scaleY); else context.lineTo(p.x * scaleX, p.y * scaleY); });
-      if (points.length === 1) context.lineTo(points[0].x * scaleX + 0.01, points[0].y * scaleY);
-      context.stroke();
+      for (const stroke of strokes) {
+        const { radius } = strokeBrush(stroke, working);
+        const points = stroke.points.map((p) => basePointToWorking(p, working));
+        context.lineWidth = Math.max(2, radius * 2);
+        context.strokeStyle = stroke.stops < 0 ? 'rgba(120, 200, 255, 0.3)' : 'rgba(255, 170, 0, 0.3)';
+        context.beginPath();
+        points.forEach((p, i) => { if (i === 0) context.moveTo(p.x, p.y); else context.lineTo(p.x, p.y); });
+        if (points.length === 1) context.lineTo(points[0].x + 0.01, points[0].y);
+        context.stroke();
+      }
       context.restore();
     }
 
-    // The saved strokes, mapped from the base into the working frame.
-    function renderDodgeBurnOverlay(context, width, height) {
-      if (!state.dodgeBurn?.active || !state.dodgeBurn.showOverlay) return;
-      const strokes = state.localExposure?.strokes;
-      if (!Array.isArray(strokes) || !strokes.length || !state.processedImageData) return;
-      const geometry = dodgeBurnGeometry();
-      if (!geometry) return;
-      for (const stroke of strokes) {
-        const points = stroke.points.map((p) => basePointToWorking(p, geometry));
-        drawDodgeBurnPath(context, width, height, points, stroke.stops < 0 ? -1 : 1, false, stroke.size * 100);
-      }
+    // ===========================================
+    // Live dodge and burn (#254 C)
+    // ===========================================
+    // While a stroke is painted, the preview worker converts only the
+    // rectangle its new segments touched, over the frame of its last
+    // interactive conversion (renderLiveExposureRect): for the same points,
+    // exactly the pixels the stroke has once stored. On the GPU display the
+    // rectangle goes into the exact frame's texture and the Step-3 shader draws
+    // it; on a CPU display Step 3 runs on the rectangle at its place in the
+    // frame and only it is put. When the frame on screen is not that
+    // conversion (a repaired full-resolution frame, or a display rebuilt from
+    // another frame), the worker also returns the rectangle without the stroke
+    // and the screen gets displayed + (live - committed), an 8-bit
+    // approximation until the pen-up frame. One request is in flight at a
+    // time; points gather meanwhile. The pen-up frame replaces every
+    // rectangle. ?liveDodge=0 turns it off.
+    // (State declared with the brush overlay near the canvas section.)
+
+    function noteLiveFrame(processed, token, generation) {
+      const frame = processed ? convertPreviewFrameInWorker.liveFrameOf?.(processed) : null;
+      if (frame) lastLiveFrame = { frame, token, generation, width: processed.width, height: processed.height };
     }
+
+    // The display a live rectangle goes into: the pre-Step-3 frame on screen
+    // and whether the GPU shows it. Null when neither surface holds it whole.
+    function liveDodgeDisplay() {
+      const shown = displaySourceImageData();
+      if (!shown || state.cropping || state.beforeAfterActive || state.currentStep < 3) return null;
+      if (isWebGLActive() && glCanvas.style.display === 'block') {
+        if (state.webglSourceImageData !== shown || webglState.sourceDirty
+          || webglState.sourceSize.w !== shown.width || webglState.sourceSize.h !== shown.height) return null;
+        return { shown, gl: true, serial: liveDisplaySerial };
+      }
+      const adjusted = state.displayImageData;
+      if (!adjusted || adjusted.width !== shown.width || adjusted.height !== shown.height) return null;
+      return { shown, gl: false, serial: liveDisplaySerial };
+    }
+
+    // The worker frame a stroke paints over: the frame on screen when it is
+    // the worker's live frame of the current settings ('exact'), else the
+    // worker's newest frame of the current settings and the same size
+    // ('delta'). Null while a newer frame is on its way.
+    function liveDodgeTarget(display) {
+      if (!LIVE_DODGE_ENABLED || !display || !usesSilverCoreConversion(state)) return null;
+      if (coreReprocessScheduled || _coreReprocessPending || _coreReprocessPreviewInFlight || gpuPreviewScheduler.isAhead()) return null;
+      const own = convertPreviewFrameInWorker.liveFrameOf?.(display.shown);
+      if (own && displayedFrameToken === coreReprocessToken) return { frame: own, mode: 'exact' };
+      const last = lastLiveFrame;
+      if (last && last.token === coreReprocessToken && last.generation === coreReprocessGeneration
+        && last.width === display.shown.width && last.height === display.shown.height) return { frame: last.frame, mode: 'delta' };
+      return null;
+    }
+
+    function beginLiveDodge(parameters, geometry, firstPoint) {
+      if (!LIVE_DODGE_ENABLED) return;
+      const display = liveDodgeDisplay();
+      const session = { parameters, geometry, display, target: liveDodgeTarget(display),
+        // The stored strokes this one is painted over; the pen-up adds it to them.
+        committed: state.localExposure || null,
+        base: [], sent: 0, inFlight: false, reset: true, fullStroke: false, ended: null, touched: false, warming: false };
+      liveDodge = session;
+      liveDodgeCounters.strokes++;
+      addLiveDodgePoints([firstPoint]);
+      // Nothing to paint over yet: convert the frame now, guides meanwhile.
+      if (!session.target && display) warmLiveDodge(session);
+    }
+
+    function addLiveDodgePoints(points) {
+      const session = liveDodge;
+      if (!session || session.ended) return;
+      for (const point of points) {
+        const base = sanitizeStrokePoint({ ...workingPointToBase(point, session.geometry), p: point.p });
+        if (base) session.base.push(base);
+      }
+      flushLiveDodge(session);
+    }
+
+    // Whether the frame the session paints on is still the one shown, drawn
+    // as it was. A full redraw of the same frame asks for the stroke's box again.
+    function liveDodgeStillShown(session) {
+      const display = liveDodgeDisplay();
+      if (!display || !session.display || display.shown !== session.display.shown || display.gl !== session.display.gl) return false;
+      if (display.serial !== session.display.serial) {
+        session.display = display;
+        session.fullStroke = true;
+      }
+      return true;
+    }
+
+    function retargetLiveDodge(session) {
+      session.display = liveDodgeDisplay();
+      session.target = liveDodgeTarget(session.display);
+      session.reset = true;
+      if (!session.target && session.display && !session.ended) warmLiveDodge(session);
+    }
+
+    function flushLiveDodge(session) {
+      if (session.inFlight || session.ended === 'cancel') return;
+      if (!liveDodgeStillShown(session)) {
+        if (session.ended) return;
+        retargetLiveDodge(session);
+      }
+      if (!session.target) return;
+      const points = session.reset ? session.base.slice() : session.base.slice(session.sent);
+      if (!points.length && !session.reset && !session.fullStroke) return;
+      const request = { frame: session.target.frame, stroke: session.parameters, points, committed: session.committed,
+        reset: session.reset, fullStroke: session.fullStroke, withCommitted: session.target.mode === 'delta' };
+      session.sent = session.base.length;
+      session.reset = false;
+      session.fullStroke = false;
+      session.inFlight = true;
+      liveDodgeCounters.requests++;
+      convertPreviewFrameInWorker.exposureLive(request)
+        .then((reply) => applyLiveDodgeReply(session, reply), (error) => {
+          console.warn('Live dodge and burn failed:', error?.message || error);
+          session.target = null;
+        })
+        .finally(() => {
+          session.inFlight = false;
+          // Points that arrived meanwhile, or the rest of an ended stroke.
+          if (session.base.length > session.sent || session.reset || session.fullStroke) flushLiveDodge(session);
+        });
+    }
+
+    // displayed + (live - committed) over the rectangle, alpha as displayed.
+    function liveDeltaRows(shown, rect, live, committed) {
+      const out = new Uint8ClampedArray(live.length);
+      for (let y = 0; y < rect.height; y++) {
+        let j = ((rect.y + y) * shown.width + rect.x) * 4;
+        for (let i = y * rect.width * 4, end = i + rect.width * 4; i < end; i += 4, j += 4) {
+          out[i] = shown.data[j] + live[i] - committed[i];
+          out[i + 1] = shown.data[j + 1] + live[i + 1] - committed[i + 1];
+          out[i + 2] = shown.data[j + 2] + live[i + 2] - committed[i + 2];
+          out[i + 3] = shown.data[j + 3];
+        }
+      }
+      return out;
+    }
+
+    function applyLiveDodgeReply(session, reply) {
+      if (session.ended === 'cancel') return;
+      if (reply.stale || reply.needsReset) {
+        if (reply.stale) liveDodgeCounters.stale++;
+        if (session.ended) return;
+        if (reply.needsReset) session.reset = true;
+        else retargetLiveDodge(session);
+        return;
+      }
+      if (!reply.rect || !liveDodgeStillShown(session)) return;
+      const { rect } = reply;
+      const shown = session.display.shown;
+      const rows = session.target?.mode === 'delta' && reply.committedRgba
+        ? liveDeltaRows(shown, rect, reply.rgba, reply.committedRgba) : reply.rgba;
+      if (session.target?.mode === 'delta') liveDodgeCounters.deltaRects++;
+      liveDodgeCounters.rects++;
+      liveDodgeCounters.maxRectPixels = Math.max(liveDodgeCounters.maxRectPixels, rect.width * rect.height);
+      liveDodgeCounters.lastRect = { ...rect };
+      if (session.display.gl) {
+        if (!webglUploadRectRows(rect, rows, shown.width, shown.height)) {
+          session.target = null;
+          return;
+        }
+        session.touched = true;
+        liveDodgeCounters.uploads++;
+        renderWebGL();
+        return;
+      }
+      // A CPU display: Step 3 on the rectangle at its place in the frame.
+      const part = new ImageData(rows, rect.width, rect.height);
+      const adjusted = new ImageData(rect.width, rect.height);
+      applyPreparedAdjustmentsToBuffer(part, buildDisplayAdjustmentSettings(), adjusted, {
+        quality: 'full', lutScratch: adjustmentLutScratch,
+        region: { x: rect.x, y: rect.y, frameWidth: shown.width, frameHeight: shown.height }
+      });
+      const photo = state.sprocketPreviewEnabled ? mainCanvasPhoto : null;
+      ctx.putImageData(adjusted, (photo ? photo.x : 0) + rect.x, (photo ? photo.y : 0) + rect.y);
+      session.touched = true;
+      liveDodgeCounters.puts++;
+    }
+
+    // Pen-up keeps the rectangles (and sends the last points) until the new
+    // frame replaces them; a cancelled stroke draws the frame on screen again.
+    function endLiveDodge(committed) {
+      const session = liveDodge;
+      if (!session) return;
+      if (committed) {
+        session.ended = 'commit';
+        flushLiveDodge(session);
+        return;
+      }
+      session.ended = 'cancel';
+      liveDodge = null;
+      if (!session.touched) return;
+      liveDodgeCounters.restored++;
+      if (session.display?.gl) webglState.sourceDirty = true;
+      updatePreview();
+    }
+
+    // Converts the frame on screen's settings in the preview worker, without
+    // showing it, so a stroke has a frame to paint over (delta mode).
+    function warmLiveDodge(session) {
+      if (session.warming || corePreviewRetained || corePreviewCommit || !state.conversionSourceImageData) return;
+      session.warming = true;
+      liveDodgeCounters.warmups++;
+      const token = coreReprocessToken;
+      const generation = coreReprocessGeneration;
+      const separate = hasSeparateConversionPreview();
+      const previewSource = separate ? repairedPreviewSourceFor(state.conversionPreviewImageData) : null;
+      void convertFromCurrentSource(state, { preview: separate, interactive: true, includeAnalysisPreview: false, previewSource })
+        .then((processed) => {
+          if (generation !== coreReprocessGeneration) return;
+          noteLiveFrame(processed, token, generation);
+          if (liveDodge !== session || session.ended || token !== coreReprocessToken) return;
+          retargetLiveDodge(session);
+          flushLiveDodge(session);
+        }, (error) => console.warn('Live dodge and burn frame failed:', error?.message || error))
+        .finally(() => { session.warming = false; });
+    }
+
+    // Read by the smoke tests (#254): the feedback overlay, the display
+    // overlay, the live dodge rectangles and every write into #canvas.
+    window.__ncBrush = {
+      state: () => ({
+        webgl: isWebGLActive(),
+        surface: glCanvas.style.display === 'block' ? 'gl' : 'cpu',
+        containerClass: canvasContainer.classList.contains('brush-tool-active'),
+        feedback: brushFeedback.state(),
+        layer: { visible: displayOverlay.style.display === 'block', width: displayOverlay.width, height: displayOverlay.height,
+          box: ['left', 'top', 'width', 'height'].map(key => displayOverlay.style[key]),
+          counters: { ...displayOverlayState.counters, paints: displayDebugCounters.overlayPaints } },
+        tint: dustTint.image ? { width: dustTint.width, height: dustTint.height, current: Boolean(dustTint.mask === state.dustRemoval.mask && dustTint.tag === state.dustRemoval.maskTag) } : null,
+        live: { ...liveDodgeCounters, enabled: LIVE_DODGE_ENABLED,
+          session: liveDodge ? { mode: liveDodge.target?.mode || null, ended: liveDodge.ended, points: liveDodge.base.length, touched: liveDodge.touched } : null },
+        canvasWrites: { ...mainCanvasWrites },
+        photoRect: (() => { const rect = brushSurfaceRect(); return { left: rect.left, top: rect.top, width: rect.width, height: rect.height }; })()
+      }),
+      resetCounters: () => {
+        mainCanvasWrites.put = 0; mainCanvasWrites.draw = 0; mainCanvasWrites.maxPutPixels = 0;
+        for (const key of Object.keys(liveDodgeCounters)) liveDodgeCounters[key] = key === 'lastRect' ? null : 0;
+      }
+    };
 
     function updateDodgeBurnUI() {
       if (!stateReady) return;
@@ -23250,7 +23711,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function setDodgeBurnActive(active) {
       state.dodgeBurn.active = Boolean(active);
       if (active) document.getElementById('aiBrushEnabled').checked = false;
+      if (!active) cancelDodgeBurnStroke();
       updateDodgeBurnUI();
+      // The GPU display stays on (#253, #254): the overlays follow the tool, and
+      // the next frame drops or asks for the detail layer (detailLayerAllowed).
+      syncBrushTools();
       updatePreview();
     }
 
@@ -23289,11 +23754,13 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     bindDodgeBurnNumber('dodgeBurnSize', 'size');
     bindDodgeBurnNumber('dodgeBurnFeather', 'feather');
     for (const surface of [canvas, glCanvas]) {
-      surface.addEventListener('pointerdown', onDodgeBurnPointerDown);
+      surface.addEventListener('pointerdown', onDodgeBurnPointerDown, { passive: false });
+      surface.addEventListener('pointermove', onDodgeBurnPointerMove);
+      surface.addEventListener('pointerup', onDodgeBurnPointerUp);
+      surface.addEventListener('pointercancel', onDodgeBurnPointerCancel);
+      surface.addEventListener('lostpointercapture', onDodgeBurnPointerCancel);
     }
-    document.addEventListener('pointermove', onDodgeBurnPointerMove);
-    document.addEventListener('pointerup', onDodgeBurnPointerUp);
-    document.addEventListener('pointercancel', onDodgeBurnPointerUp);
+
 
     // ===========================================
     // Roll analysis: one film base and one tone analysis for the whole roll
@@ -24055,38 +24522,21 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         && state.currentStep >= 3 && !state.cropping && !state.samplingMode);
     }
 
+    // The stroke is drawn on the feedback overlay (#254 A): no image-size
+    // canvas, and only the new segments each frame.
     let aiBrushDrawing = null;
-    const brushOverlay = document.createElement('canvas');
-    brushOverlay.id = 'aiBrushOverlay';
-    brushOverlay.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:20;';
-    document.getElementById('canvasTransformWrapper').append(brushOverlay);
 
-    function paintAiBrushOverlay() {
-      // The size of the display canvas on screen: the GL one in GL mode,
-      // #canvas otherwise (each holds a display-size frame, #242).
-      const surface = glCanvas.style.display === 'block' ? glCanvas : canvas;
-      brushOverlay.width = surface.width;
-      brushOverlay.height = surface.height;
-      if (!aiBrushDrawing) return;
-      const ctx = brushOverlay.getContext('2d');
-      const { geometry, points, size } = aiBrushDrawing;
+    function aiBrushRadius(drawing) {
+      const { geometry, size } = drawing;
       const cropShort = Math.min(geometry.cropRegion?.width || geometry.rotatedWidth, geometry.cropRegion?.height || geometry.rotatedHeight);
-      const radius = size * Math.min(geometry.baseWidth, geometry.baseHeight) * Math.min(geometry.width, geometry.height) / cropShort / 2;
-      ctx.scale(brushOverlay.width / geometry.width, brushOverlay.height / geometry.height);
-      ctx.lineWidth = radius * 2;
-      ctx.lineCap = ctx.lineJoin = 'round';
-      ctx.strokeStyle = ctx.fillStyle = 'rgba(244, 180, 105, 0.55)';
-      ctx.beginPath();
-      points.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
-      ctx.stroke();
-      if (points.length === 1) { ctx.beginPath(); ctx.arc(points[0].x, points[0].y, radius, 0, Math.PI * 2); ctx.fill(); }
+      return size * Math.min(geometry.baseWidth, geometry.baseHeight) * Math.min(geometry.width, geometry.height) / cropShort / 2;
     }
 
     function finishAiBrush(event, cancelled = false) {
       const drawing = aiBrushDrawing;
       if (!drawing || event.pointerId !== drawing.pointerId) return;
       aiBrushDrawing = null;
-      paintAiBrushOverlay();
+      brushFeedback.end();
       if (drawing.surface.hasPointerCapture?.(event.pointerId)) drawing.surface.releasePointerCapture(event.pointerId);
       if (cancelled || !canPaintAiBrush() || drawing.source !== state.conversionSourceImageData || drawing.token !== coreReprocessToken) return;
       pushUndo('dustBrushStroke');
@@ -24121,26 +24571,38 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         if (!currentPhotoExact()) { void ensureFullDecodeWithNotice('ai-brush'); return; }
         if (state.processedImageDataIsPreview || state.dustRemoval.processing) return;
         const source = state.processedImageData;
-        const rect = surface.getBoundingClientRect();
+        const rect = brushSurfaceRect();
         const point = pointerToRepairPoint(event, rect, source.width, source.height);
         if (!point) return;
         aiBrushDrawing = {
           pointerId: event.pointerId, surface, rect, source: state.conversionSourceImageData, token: coreReprocessToken,
           geometry: { ...localExposureGeometryFor(state), width: source.width, height: source.height },
           lensMapping: state.conversionSourceImageData?.__lensMapping,
-          points: [point], size: Number(document.getElementById('aiBrushSize').value) / 100
+          points: [point], size: Number(document.getElementById('aiBrushSize').value) / 100,
+          last: { clientX: event.clientX, clientY: event.clientY }
         };
-        surface.setPointerCapture?.(event.pointerId);
-        paintAiBrushOverlay();
+        captureBrushPointer(surface, event.pointerId);
+        brushFeedback.begin({ tool: 'ai', color: BRUSH_FEEDBACK_STYLES.ai.colors.repair, radius: aiBrushRadius(aiBrushDrawing),
+          frameWidth: source.width, frameHeight: source.height, surface: rect });
+        brushFeedback.add([point]);
       }, { capture: true, passive: false });
       surface.addEventListener('pointermove', event => {
-        if (!aiBrushDrawing || event.pointerId !== aiBrushDrawing.pointerId) return;
+        const drawing = aiBrushDrawing;
+        if (!drawing || event.pointerId !== drawing.pointerId) return;
         event.preventDefault();
         event.stopPropagation();
-        const { geometry, rect } = aiBrushDrawing;
-        const point = pointerToRepairPoint(event, rect, geometry.width, geometry.height);
-        if (point) aiBrushDrawing.points.push(point);
-        paintAiBrushOverlay();
+        const { geometry, rect } = drawing;
+        const dpr = window.devicePixelRatio || 1;
+        const added = [];
+        for (const sample of pointerSamples(event)) {
+          if (!movedEnough(drawing.last, sample.clientX, sample.clientY, dpr)) continue;
+          const point = pointerToRepairPoint(sample, rect, geometry.width, geometry.height);
+          if (!point) continue;
+          drawing.last = { clientX: sample.clientX, clientY: sample.clientY };
+          drawing.points.push(point);
+          added.push(point);
+        }
+        if (added.length) brushFeedback.add(added);
       }, { passive: false });
       surface.addEventListener('pointerup', event => finishAiBrush(event));
       surface.addEventListener('pointercancel', event => finishAiBrush(event, true));
@@ -24152,15 +24614,18 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         updateDodgeBurnUI();
         state.dustRemoval.showMask = false;
         document.getElementById('dustShowMask').checked = false;
+        cancelDustBrush();
         updateDustControlsVisibility();
         updateCanvasVisibility();
         updatePreview();
+        syncBrushTools();
         syncDustWorkerPin();
         updateAiRepairUI();
         await ensureFullResolutionReadyForExport({ reason: 'ai-brush' });
         if (aiRepair.status !== 'ready') await loadAiRepairModel(...aiRepairLoadArgs());
       } else {
         if (aiBrushDrawing) finishAiBrush({ pointerId: aiBrushDrawing.pointerId }, true);
+        syncBrushTools();
         updateAiRepairUI();
       }
     });
@@ -27545,7 +28010,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         isExportLocked: () => singleExportActive || isDesktopBatchExportLocked(),
         // Opening the Repair tab is the usual intent to repair: load MI-GAN
         // then, so the first stroke rarely waits for it.
-        onTabSelect: key => { if (key === 'repair') ensureAiRepairPreload(); },
+        onTabSelect: key => { if (key === 'repair') ensureAiRepairPreload(); syncBrushTools(); },
         onResetAll: resetAllAdjustments,
         onRestart: restartPhotoProcessing,
         onNewSession: closePhotoSession,

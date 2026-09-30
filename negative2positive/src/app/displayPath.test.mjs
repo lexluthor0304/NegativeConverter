@@ -193,8 +193,10 @@ function settleFixture({ width = 1200, height = 900, worker = 'real', gl = false
     buildAdjustmentSettings: () => ({ ...recipe }),
     applyPreparedAdjustmentsToBuffer, adjustmentLutScratch: createAdjustmentLutScratch(),
     renderAdjustedImageDataToMainCanvas: (imageData, reference, options) => drawn.push({ imageData, reference, options }),
-    // #253: the tint and the strokes are on their own layer, synced per frame.
+    // #253, #254: the tint and the strokes are on their own layer, synced per
+    // frame; a full frame drops the live dodge rectangles.
     syncDisplayOverlay: () => overlaySyncs.push(drawn.length), scheduleDisplayModesWarmup: noop, refreshGlBorderSmear: noop,
+    liveDisplaySerial: 0,
     renderHistogram: imageData => histograms.push(imageData),
     isWebGLActive: () => glActive,
     // updateFull's own dependencies.
@@ -303,8 +305,8 @@ for (const worker of ['none', 'failing']) {
 
 {
   // The preview frame: the handle is the display-size frame on screen; the
-  // overlays are synced on their own layer after it (#253), never drawn into
-  // the photo's canvas and never redrawn from the unadjusted positive.
+  // overlays are synced on their own layer after it (#253, #254), never drawn
+  // into the photo's canvas and never redrawn from the unadjusted positive.
   const f = settleFixture({ width: 64, height: 48 });
   f.context.updatePreviewCpu();
   const handle = f.state.displayImageData;
@@ -312,6 +314,7 @@ for (const worker of ['none', 'failing']) {
   assert.equal(f.drawn.at(-1).imageData, handle);
   assert.equal(f.drawn.at(-1).options.fastSprocketPreview, true);
   assert.deepEqual(f.overlaySyncs, [1], 'the overlay layer is synced after the frame, which alone went to #canvas');
+  assert.equal(f.context.liveDisplaySerial, 1, 'a full frame drops the live dodge rectangles');
   f.state.displayImageData = null;
   assert.equal(f.context.getCurrentHistogramSource(), null, 'never the unadjusted positive');
   f.context.redrawHistogramIfPossible();

@@ -143,6 +143,11 @@ function schedulerFixture({ repairs = false, large = false, gpu = null } = {}) {
   const context = vm.createContext({
     // #249: no photo here takes a display form.
     ...displaySessionStubs(),
+    // #254 stand-ins: the live dodge frame note, the dust tint, the overlays.
+    noteLiveFrame: () => {}, adoptDustTint: () => {}, patchDustTint: () => {}, displayOverlaySize: () => null,
+    syncBrushTools: () => {}, cancelDustBrush: () => {},
+    brushFeedback: { drawing: false, end: () => {}, cancel: () => {}, sync: () => {} }, remapBrushStroke: () => {},
+    liveDisplaySerial: 0,
     state, console: { error: () => {}, warn: () => {} },
     setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
     // No two-stage stand-in (#255).

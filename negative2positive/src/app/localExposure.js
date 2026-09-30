@@ -35,6 +35,17 @@ export function sanitizeLocalExposureForSettings(input) {
   return result;
 }
 
+// One base-normalised point as stored strokes keep it (clamped just outside
+// the frame, 5 decimals, pressure 0.05-1 to 3 decimals), or null. The live
+// dodge-and-burn request rounds its points with it too (#254), so the stroke
+// painted is the stroke stored.
+export function sanitizeStrokePoint(point) {
+  const x = Number(point?.x); const y = Number(point?.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  const pressure = Number(point?.p);
+  return { x: Number(clamp(x, -0.5, 1.5).toFixed(5)), y: Number(clamp(y, -0.5, 1.5).toFixed(5)), p: Number.isFinite(pressure) ? Number(clamp(pressure, 0.05, 1).toFixed(3)) : 1 };
+}
+
 // The uncached sanitiser, also used for repair strokes (repairBrush.js).
 export function sanitizeLocalExposureStrokes(input) {
   if (!input || typeof input !== 'object' || !Array.isArray(input.strokes)) return null;
@@ -46,10 +57,8 @@ export function sanitizeLocalExposureStrokes(input) {
     if (!Number.isFinite(stops) || !Number.isFinite(size)) continue;
     const points = [];
     for (const point of stroke.points.slice(0, MAX_POINTS)) {
-      const x = Number(point?.x); const y = Number(point?.y);
-      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-      const pressure = Number(point?.p);
-      points.push({ x: Number(clamp(x, -0.5, 1.5).toFixed(5)), y: Number(clamp(y, -0.5, 1.5).toFixed(5)), p: Number.isFinite(pressure) ? Number(clamp(pressure, 0.05, 1).toFixed(3)) : 1 });
+      const clean = sanitizeStrokePoint(point);
+      if (clean) points.push(clean);
     }
     if (!points.length) continue;
     strokes.push({

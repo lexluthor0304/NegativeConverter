@@ -632,11 +632,12 @@ body {
   z-index: 10;
 }
 
-/* The display overlay (#253): the dust-mask tint and the dodge-and-burn
-   strokes over the photo, whichever canvas shows it, following zoom and pan
-   with the wrapper. main.js sizes its backing to the display photo and places
-   it over the photo's rectangle when the film border is shown. Under the
-   comparison (z-index 10) and the AI-brush overlay (20). */
+/* The display overlay (#253, #254): the dust-mask tint and the saved
+   dodge-and-burn strokes over the photo, whichever canvas shows it, following
+   zoom and pan with the wrapper. main.js sizes its backing to the display
+   photo and places it over the photo's rectangle when the film border is
+   shown. Under the comparison (z-index 10); the stroke being painted is on
+   .brush-feedback, outside the wrapper. */
 .display-overlay {
   position: absolute;
   left: 0;
@@ -657,6 +658,24 @@ body {
   top: 0;
   display: none;
   pointer-events: none;
+}
+
+/* The stroke being painted (#254): over the whole view at device resolution,
+   outside the zoom transform, so it stays sharp at any zoom; main.js sets its
+   opacity per brush. */
+.brush-feedback {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: none;
+  pointer-events: none;
+  z-index: 20;
+}
+
+/* While a brush can paint, a touch or pen drag paints instead of panning. */
+.canvas-container.brush-tool-active {
+  touch-action: none;
 }
 
 .canvas-transform-wrapper {
@@ -1776,7 +1795,6 @@ body.studio-enlarger #studioSliders {
 
 body.dodge-burn-active #canvas,
 body.dodge-burn-active #glCanvas {
-  touch-action: none;
   cursor: crosshair;
 }
 

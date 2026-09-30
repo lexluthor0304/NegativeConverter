@@ -154,6 +154,7 @@ export async function runDarkroomSmoke({ send, evaluate, waitFor, wait, fail, in
   if (Math.abs(restored - plain) > 1) fail(`paper "none" did not restore the image: ${plain} -> ${restored}`);
 
   // ---- 4. Dodge and burn ----
+  const webglBeforeTool = await evaluate(`window.__ncBrush.state().webgl`);
   await evaluate(`document.getElementById('studioTab-repair').click(); document.getElementById('studioDodgeBurn').open = true;`);
   await evaluate(`(() => { const el = document.getElementById('dodgeBurnEnabled'); el.checked = true; el.dispatchEvent(new Event('change', { bubbles: true })); })()`);
   await waitFor('dodge burn active', `document.body.classList.contains('dodge-burn-active')`, 5_000);
@@ -163,22 +164,50 @@ export async function runDarkroomSmoke({ send, evaluate, waitFor, wait, fail, in
   await wait(500);
   const region = { x: 0.3, y: 0.3, w: 0.4, h: 0.4 };
   const untouched = await canvasLuminance(region);
-  // The dodge tool keeps the GL display (#253): paint on the canvas on screen.
+  // The dodge tool keeps the GPU display (#253); the stroke is drawn on the
+  // feedback overlay and its exposure change shows under the brush while it is
+  // painted (#254). Paint on the canvas on screen.
+  const toolState = await evaluate(`window.__ncBrush.state()`);
+  if (webglBeforeTool && toolState.webgl !== true) {
+    fail('the dodge-and-burn tool turned the GPU display off: ' + JSON.stringify(toolState));
+  }
   const rect = await evaluate(`(() => {
-    const gl = document.getElementById('glCanvas');
-    const el = gl && getComputedStyle(gl).display !== 'none' ? gl : document.getElementById('canvas');
-    const r = el.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height };
+    const surface = [...document.querySelectorAll('#canvas, #glCanvas')].find(el => getComputedStyle(el).display !== 'none');
+    const r = surface.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height };
   })()`);
   const mouse = (type, x, y) => send('Input.dispatchMouseEvent', { type, x, y, button: 'left', clickCount: type === 'mousePressed' ? 1 : 0, buttons: type === 'mouseReleased' ? 0 : 1 });
   const y = rect.y + rect.height * 0.5;
+  await evaluate('window.__ncBrush.resetCounters()');
   await mouse('mousePressed', rect.x + rect.width * 0.35, y);
   for (let i = 1; i <= 8; i++) { await mouse('mouseMoved', rect.x + rect.width * (0.35 + 0.3 * i / 8), y); await wait(30); }
+  // Mid-stroke: the live rectangles land (overlay hidden for the measurement).
+  await waitFor('live dodge rectangles', `window.__ncBrush.state().live.rects > 0 && window.__ncBrush.state().live.session?.touched`, 10_000);
+  await wait(300);
+  const during = await evaluate(`window.__ncBrush.state()`);
+  await evaluate(`document.getElementById('brushFeedback').style.visibility = 'hidden'`);
+  const live = await canvasLuminance(region);
+  await evaluate(`document.getElementById('brushFeedback').style.visibility = ''`);
+  console.log('darkroom live burn:', JSON.stringify({ untouched, live, surface: during.surface, live: during.live, writes: during.canvasWrites }));
+  if (!(live < untouched - 3)) fail(`the burn did not show under the brush while painting: ${untouched} -> ${live}`);
+  if (!during.feedback.drawing || during.feedback.counters.frames < 2) fail('the stroke is not drawn frame by frame on the overlay: ' + JSON.stringify(during.feedback));
+  if (during.surface === 'gl' && (during.canvasWrites.put || during.canvasWrites.draw)) {
+    fail('#canvas was written during a stroke on the GPU display: ' + JSON.stringify(during.canvasWrites));
+  }
+  if (during.surface === 'cpu') {
+    const display = await evaluate(`window.__ncDisplay.frame().display`);
+    const diameter = 0.3 * Math.min(display[0], display[1]);
+    if (during.canvasWrites.draw || during.canvasWrites.maxPutPixels > (2 * diameter) ** 2) {
+      fail('a CPU-display stroke wrote more than its rectangles: ' + JSON.stringify(during.canvasWrites));
+    }
+  }
   await mouse('mouseReleased', rect.x + rect.width * 0.65, y);
   await waitFor('stroke recorded', `/1 stroke/.test(document.getElementById('dodgeBurnStatus').textContent)`, 10_000);
   await wait(2500);
   const burned = await canvasLuminance(region);
-  console.log('darkroom burn:', JSON.stringify({ untouched, burned }));
+  console.log('darkroom burn:', JSON.stringify({ untouched, live, burned }));
   if (!(burned < untouched - 3)) fail(`burn stroke did not darken the region: ${untouched} -> ${burned}`);
+  // The settled frame replaces the live rectangles without a visible jump.
+  if (Math.abs(burned - live) > 1.5) fail(`the settled burn differs from the live one: ${live} -> ${burned}`);
   // #234: per-frame settings rebuilds hit the stroke sanitiser caches after
   // the first frame, and preview requests carry no repair strokes.
   const strokeFrames = await evaluate(`(async () => {

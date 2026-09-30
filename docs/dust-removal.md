@@ -90,8 +90,9 @@ the count, all transferred. `DustBrush.test.mjs` checks 200+ random strokes
   place; `cleanSource` is never patched. When there is no repaired image yet,
   the clean source is cloned once, at pin time.
 - **Revision.** `state.dustRemoval.revision` changes on every patch, undo, redo,
-  detection and clear. The tint layer, export and the learned-repair refresh
-  compare it instead of mask identity. Export reads a copy of the mask.
+  detection and clear. Export and the learned-repair refresh compare it
+  instead of mask identity; the tint follows the mask's tag. Export reads a
+  copy of the mask.
   A committed repair's export recipe (#246, `repairReuse.js`) records the
   revision too, and a patch, undo or redo forgets the stamp of the image it
   writes and the content hash of the mask it writes, so an export after a
@@ -109,8 +110,24 @@ the count, all transferred. `DustBrush.test.mjs` checks 200+ random strokes
   planes keeps no stroke entries.
 - **Display.** Only the preview pixels whose bilinear taps fall in R are
   recomputed (`updateDisplayPreviewRect`, exact), the WebGL source texture gets
-  a `texSubImage2D` of that rect, the tint layer is redrawn in the stroke box,
-  and the histogram source is rebuilt on idle.
+  a `texSubImage2D` of that rect, the tint cells over the mask box are put on
+  the display overlay, and the histogram source is rebuilt on idle.
+- **Tint and brush feedback (#253, #254).** The mask is shown on
+  `#displayOverlay`, a canvas in the transform wrapper at the display frame's
+  size (at most the display-preview cap), so zoom and pan only move it and the
+  view stays on the GPU. A tint cell is set when any mask pixel inside it is
+  set (max-pooling, `dustTint.js`), so one-pixel specks show at fit. The dust
+  worker pools it: `detect` (while the mask is shown) and `stroke` requests
+  carry the overlay's size, and the replies carry the whole tint or the cells
+  over the stroke's mask box; the page only puts them. A mask that changes
+  without such a reply (a restored session, a new display size, the page
+  fallback) is pooled on the page in row bands of about 8 ms; an undo or redo
+  pools the stroke's box alone. The
+  stroke being painted is drawn on `#brushFeedback` (`brushFeedback.js`):
+  pointer events (touch and pen paint too, `touch-action: none` on the view
+  while a brush is active), coalesced samples at least a device pixel apart,
+  one draw per animation frame of the new segments only, round-capped lines of
+  the brush's width. `#canvas` is not written while a stroke is painted.
 - **AI repair on, or repair strokes present.** The TELEA patch also overwrote
   MI-GAN pixels inside R. After a 200 ms debounce only the tiles over queued
   rects are inferred again, on a window of the repaired image, and only the
@@ -121,9 +138,5 @@ the count, all transferred. `DustBrush.test.mjs` checks 200+ random strokes
 
 ## Known limits
 
-- With Show mask on, the view uses the CPU path: `#canvas` and the tint layer
-  are display-size (#242), but a stroke still repaints the display frame under
-  the tint on every move (#254 gives it its own layer; #253 moves these modes
-  to the GPU).
 - Batch export still re-detects dust per file and ignores brush edits
   (`audit-backlog.md`).

@@ -108,6 +108,11 @@ function fixture({ width = 3000, height = 2000, repairs = false, largePreviewFra
   const context = vm.createContext({
     // #249: no photo here takes a display form.
     ...displaySessionStubs(),
+    // #254 stand-ins: the live dodge frame note, the dust tint, the overlays.
+    noteLiveFrame: () => {}, adoptDustTint: () => {}, patchDustTint: () => {}, displayOverlaySize: () => null,
+    syncBrushTools: () => {}, cancelDustBrush: () => {},
+    brushFeedback: { drawing: false, end: () => {}, cancel: () => {}, sync: () => {} }, remapBrushStroke: () => {},
+    liveDisplaySerial: 0,
     state, console: { error: () => {}, warn: () => {}, info: () => {} },
     window: { devicePixelRatio: DPR },
     document: { documentElement: { dataset: {} } },

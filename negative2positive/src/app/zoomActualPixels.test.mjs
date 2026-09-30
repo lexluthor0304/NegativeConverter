@@ -50,6 +50,8 @@ function fixture({ source: size = { width: 9536, height: 6336 }, container = { w
     postponeFullResolutionRenderForInteraction: () => {},
     // The detail layer (#248 part 5) follows zoom and pan on its own.
     noteDetailViewChanged: () => {}, dropDetailLayer: () => {},
+    // A brush stroke follows zoom and pan on the overlay (#254).
+    brushFeedback: { drawing: false }, remapBrushStroke: () => {},
     refreshDisplayPreviewForViewport: () => refreshed.push(state.conversionSourceImageData),
     setTimeout: (callback, delay) => { const id = nextTimer++; timers.set(id, { callback, delay }); return id; },
     clearTimeout: id => timers.delete(id),

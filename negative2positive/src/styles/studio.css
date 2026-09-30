@@ -140,7 +140,7 @@ body.studio {
 .studio-drawer-hint { margin: 0 10px 14px; color: var(--text-secondary); font-size: 12px; line-height: 1.8; }
 .studio .control-section { border: 0; background: transparent; box-shadow: none; margin-bottom: 8px; }
 .studio .section-header { background: transparent; }
-.studio:has(#aiBrushEnabled:checked):has(#studioTab-repair[aria-selected="true"]) #canvasContainer { cursor: crosshair; touch-action: none; }
+.studio:has(#aiBrushEnabled:checked):has(#studioTab-repair[aria-selected="true"]) #canvasContainer { cursor: crosshair; }
 /* The brush is disabled until its model is ready; the status line shows the load. */
 .studio:has(#aiBrushSection[data-model-pending]):has(#studioTab-repair[aria-selected="true"]) #canvasContainer { cursor: progress; }
 .studio #aiBrushSection[data-model-pending] #aiBrushSize { opacity: .5; }

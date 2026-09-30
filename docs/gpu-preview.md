@@ -176,13 +176,14 @@ surface at 2.2–4 MP, in Node). They now stay on the GPU.
   keeps the last background during a drag and is recomposed after each settle from an
   exact display-size frame adjusted in the export worker (a UI-only approximation that
   lags by one settle). The WebGL1 fallback draws the same underlay.
-- **Overlays.** The dust tint, the saved and live dodge strokes and the dust brush's
-  dots are drawn on `#displayOverlay`, a transparent canvas in the transform wrapper
-  above the photo, backed at the display photo's size and placed over the photo's
-  rectangle with the border. A repaint clears it; the photo is never redrawn for an
-  overlay, and both display paths use it. Pointer mapping is unchanged (in border mode
-  it still divides by the whole framed box, as on the CPU path; #254 maps the brushes
-  through the photo rectangle).
+- **Overlays.** The dust tint and the saved dodge strokes are drawn on
+  `#displayOverlay`, a transparent canvas in the transform wrapper above the photo,
+  backed at the display photo's size and placed over the photo's rectangle with the
+  border. It is repainted only when the tint, the strokes, the geometry or the size
+  change; the photo is never redrawn for an overlay, and both display paths use it.
+  The stroke being painted, by any brush, is on `#brushFeedback` outside the wrapper
+  (#254, `brushFeedback.js`), and the brushes map through the photo rectangle inside
+  the border on both canvases.
 - **Histogram.** Unchanged: the GL path's sample (≤ 24,576 px) goes through the same
   look, rescue and hold-to-compare rules, every 260 ms and at each settle, including
   above 16 MP where `updateFull` does not run.
@@ -193,8 +194,11 @@ Excluded, with today's per-tick worker frames: crop, a look or rescue before the
 programs are ready (`isWebGLActive`), frame repairs (`hasFrameRepairs()`, so dust-mask
 core drags keep the worker path), before/after, WebGL off. The border preview, the
 dodge-and-burn tool and a shown dust mask draw applyProgram frames like a default
-session. Failures fall back to WebGL1 Step 3 or the CPU display. A lost context drops
-to the worker path; on restore the programs are compiled, tested and fed again.
+session. While the dodge tool or a shown dust mask is active the detail layer stays
+off: a live dodge stroke's rectangles (#254) and a dust stroke's patches go into the
+base frame's texture. Failures fall back to WebGL1 Step 3 or the CPU display. A lost
+context drops to the worker path; on restore the programs are compiled, tested and fed
+again.
 
 Not done: the optional row-band split of the fallback `convert` across workers (the
 fallback keeps one worker; #256 splits export conversions).
