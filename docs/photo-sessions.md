@@ -202,14 +202,27 @@ window and zoom the editor has.
 **Fills.** While roll analysis (`analyze` of the roll pass) or a lane job
 holds a frame's full decode, `fillDisplayProxy` renders the level a first open
 would convert: in the geometry pool, band by band, each band rendering only
-the crop-window rows of k × 16 level rows and box-averaging them with
-`buildDisplayLevel`'s own sums (`renderDisplayLevel`, bit-identical to the
-whole level of the export chain's crop). Frames with lens correction, repairs,
-an undecided recipe, an 8-bit RAW fallback or no level smaller than
-themselves (k = 1) are skipped. A roll frame measured in its lane's roll-frame
-worker (#252) stays there, so `displayProxyFillPlan` decides from its size
-alone whether it has a proxy to fill; only then do its planes come back to
-the page with its roll sample for the fill.
+crop-window rows, 16 level rows at a time into one scratch band, and
+box-averaging them with `buildDisplayLevel`'s own sums (`renderDisplayLevel`,
+bit-identical to the whole level of the export chain's crop). A base in
+shared memory (#264, a lane decode on an isolated page) is read through
+views, so nothing is copied on the main thread. A plain one (a roll frame's
+planes from its worker, every base in the macOS app) is copied once per band,
+only the plane the level reads (the 16-bit one). A tilted band also copies
+the rows its output rows span, so these bands are planned by the bytes they
+copy (`planDisplayLevelBands`, R2-003): as many run at once as 2 bytes per
+base pixel hold (what a roll frame's #258 claim leaves beside its planes on
+the page), each copying at most a third more than its own rows. Where that does
+not fit (about 3.5-5° at 60 MP) one band at a time takes the whole budget
+while it copies each row at most twice, and a steeper angle takes one band
+that reads the window once. At 60 MP a fill copies 357 MiB untilted and
+469-491 MiB at 0.6-1.3°, where bands of 16 level rows copied 535 MiB-1.9 GiB
+(`__ncGeometry.pool.copiedBytes` counts them). Frames with lens correction,
+repairs, an undecided recipe, an 8-bit RAW fallback or no level smaller than
+themselves (k = 1) are skipped. A roll frame measured in its lane's
+roll-frame worker (#252) stays there, so `displayProxyFillPlan` decides from
+its size alone whether it has a proxy to fill; only then do its planes come
+back to the page with its roll sample for the fill.
 
 **The store** (across restarts and project reopens). The same records, keyed by
 the file's content (size, date, SHA-256 of the first MiB plus the size, SHA-256

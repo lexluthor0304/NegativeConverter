@@ -33,7 +33,10 @@ keeps the copy path it always had, with the same pixels.
   where the plane is built: RAW files in the post-decode worker, 16-bit TIFF
   and PNG scans in the scan decode worker. The geometry pool builds the
   working frame of such a base in shared memory too; its bands read the base
-  through views and write their rows of the frame in place. The display
+  through views and write their rows of the frame in place, and a display
+  proxy fill's bands (#249) read it through views as well, so a fill copies
+  nothing on the main thread (a roll frame's planes from its worker stay
+  plain and are copied, `docs/photo-sessions.md`). The display
   level (#248) of a shared frame is shared as well, built where it is
   assembled (the geometry pool or `buildDisplayLevel*`), so the preview
   conversion posts it without a copy. Batch-export and

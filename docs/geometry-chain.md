@@ -51,7 +51,12 @@ renders the remaining bands on the main thread with the same core, at most
 (#248, `render(..., { level: true })`): the bands then start on multiples of
 its k, and each band returns its level rows, so the working frame arrives with
 the k × k box level the preview worker resamples display images from. Batch
-export asks for none.
+export asks for none. A display proxy fill (#249) asks for the level alone
+(`renderDisplayLevel`): its bands read a shared base through views and copy
+only the plane the level reads from a plain one, in bands planned by the
+bytes they copy (`planDisplayLevelBands`, `docs/photo-sessions.md`).
+`counters.copiedBytes` counts every band row the main thread copies, for
+both kinds of job.
 
 In `main.js` the scalars change synchronously and the planes follow:
 

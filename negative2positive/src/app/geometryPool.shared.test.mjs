@@ -4,6 +4,7 @@
 // the main thread; index plans derive their 8-bit source rows in the worker
 // when the base's 8-bit plane is its 16-bit one >>> 8. The output equals the
 // synchronous core byte for byte and is marked derived; the base is only read.
+// A display level's bands (#249, R2-003) read such views too and copy nothing.
 import assert from 'node:assert/strict';
 
 globalThis.ImageData = class ImageData {
@@ -35,7 +36,7 @@ function workerFactory() {
     postMessage(message, transfers) {
       // A shared buffer in a transfer list would throw here, as in a browser.
       const copy = structuredClone(message, { transfer: transfers });
-      posted.push({ src: copy.src, out16: Boolean(copy.out16), transfers: transfers.length });
+      posted.push({ src: copy.src, out16: Boolean(copy.out16), transfers: transfers.length, levelOnly: Boolean(copy.levelOnly) });
       setTimeout(() => {
         const { payload, transfers: back } = runGeometryBand(copy);
         worker.onmessage?.({ data: structuredClone(payload, { transfer: back }) });
@@ -74,6 +75,8 @@ for (const derived of [true, false]) {
       if (plan.kind === 'index') assert.equal(Boolean(band.src.data8), !derived, `${label}: 8-bit rows ${derived ? 'derived' : 'copied'}`);
       assert.equal(band.transfers, band.src.data8 ? 1 : 0);
     }
+    assert.equal(pool.counters.copiedBytes, posted.reduce((sum, band) => sum + (band.src.data8?.byteLength || 0), 0),
+      `${label}: only 8-bit rows that are not derived are copied here`);
     pool.dispose();
   }
 }
@@ -111,6 +114,43 @@ for (const derived of [true, false]) {
   assert.ok(isSharedPlane(built.__image16.data), 'the level builder shares the level of a shared frame');
   assert.ok(bytes(built.__image16.data).equals(bytes(plainLevel.__image16.data)));
   pool.dispose();
+}
+
+// A display level (#249) of a shared base (R2-003): its bands read views of
+// the base and send back their level rows, so nothing is copied here, for
+// index and bilinear plans whether or not the 8-bit plane is derived (the
+// level of a 16-bit frame reads its 16-bit rows only); the level is the one
+// a plain base gives, and the base is only read. A plain base in the same
+// pool is copied, band by band.
+{
+  const { buildDisplayLevel } = await import('./displayPreview.js');
+  for (const derived of [true, false]) {
+    for (const [name, geometry] of Object.entries(geometries)) {
+      const base = makeSource(W, H, { derived });
+      const baseHash = hashPlane(base.__image16.data);
+      const plan = planGeometry(base, geometry);
+      const plain = makeSource(W, H, { shared: false, derived });
+      const expected = buildDisplayLevel(renderGeometry(plain, plan), 2);
+      const label = `level, ${name}${derived ? '' : ' (8-bit not derived)'}`;
+      posted.length = 0;
+      const pool = createGeometryPool({ workerFactory, workersSupported: true, size: 3 });
+      const level = await pool.renderDisplayLevel(base, plan, { k: 2 });
+      assert.ok(bytes(level.__image16.data).equals(bytes(expected.__image16.data)), `${label}: the plain base's level`);
+      assert.equal(hashPlane(base.__image16.data), baseHash, `${label}: the base was only read`);
+      assert.ok(posted.length >= 2 && posted.every(band => band.levelOnly), `${label}: level bands`);
+      for (const band of posted) {
+        assert.ok(band.src.shared16 && !band.src.data16 && !band.src.data8, `${label}: a view, no rows`);
+        assert.equal(band.transfers, 0);
+      }
+      assert.equal(pool.counters.copiedBytes, 0, `${label}: no copies on this thread`);
+      posted.length = 0;
+      const copied = await pool.renderDisplayLevel(plain, plan, { k: 2 });
+      assert.ok(bytes(copied.__image16.data).equals(bytes(expected.__image16.data)), `${label}: plain base`);
+      assert.ok(posted.every(band => band.src.data16 && !band.src.shared16), `${label}: a plain base is copied`);
+      assert.equal(pool.counters.copiedBytes, posted.reduce((sum, band) => sum + band.src.data16.byteLength, 0));
+      pool.dispose();
+    }
+  }
 }
 
 assert.equal(planeGuardReport().violations.length, 0);

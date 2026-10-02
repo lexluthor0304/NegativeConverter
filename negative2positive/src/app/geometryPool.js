@@ -14,6 +14,17 @@ import { allocPlane16, hasDerivedEightBit, markDerivedEightBit, isSharedPlane, d
 const MIN_BAND_PIXELS = 1_000_000;
 // Without workers each band is one main-thread task: keep them short.
 const SYNC_BAND_PIXELS = 1_000_000;
+// A display level's band (#249) renders this many level rows at a time into
+// scratch, so a band of any height never holds its output rows (R2-003).
+const LEVEL_ROWS_PER_PASS = 16;
+// The copies of a display level's bands in flight (R2-003) stay within this
+// many bytes per base pixel: what a roll frame's claim (#258,
+// rollAnalysisFootprint: 14 B/px) leaves beside its planes on the page
+// (12 B/px) while its proxy is filled from them.
+export const LEVEL_BAND_BYTES_PER_BASE_PIXEL = 2;
+// A tilted band also copies the rows its output rows span (outWidth x |sin|
+// of them): a level's band copies at most this much more than its own rows.
+const LEVEL_BAND_MAX_OVERLAP = 1 / 3;
 
 export function defaultGeometryPoolSize(hardwareConcurrency = globalThis.navigator?.hardwareConcurrency) {
   const cores = Number(hardwareConcurrency) || 4;
@@ -25,6 +36,52 @@ export function geometryBandCount(plan, poolSize = defaultGeometryPoolSize()) {
   const bySize = Math.max(1, Math.floor((plan.outWidth * plan.outHeight) / MIN_BAND_PIXELS));
   const target = Math.max(4, Math.min(6, poolSize));
   return Math.max(1, Math.min(plan.outHeight, bySize, target));
+}
+
+/**
+ * The bands of a display level (#249) whose source rows are copied here,
+ * planned by the bytes they copy (R2-003). A band of a tilted plan copies the
+ * rows its output rows span besides its own, so thin bands copied that
+ * overlap many times over (16 level rows: 0.5-1.9 GiB per 60 MP fill). As
+ * many bands run at once as `maxBytes` holds, each as tall as its share of
+ * it allows (at most one band per worker), while a band copies at most a
+ * third more than its own rows. When no band in flight keeps to that, one at
+ * a time takes the whole budget while that copies each row at most twice;
+ * beyond that (steep angles) one band reads the window once.
+ *
+ * @returns {{ rows: number, inFlight: number }} output rows per band (a
+ *   multiple of k) and bands in flight
+ */
+export function planDisplayLevelBands(plan, k, { workers = 1, maxBytes, bytesPerPixel = plan.has16 ? 8 : 4 } = {}) {
+  const groups = Math.floor(plan.outHeight / k);
+  if (groups < 1) return { rows: k, inFlight: 1 };
+  const middle = Math.floor(groups / 2);
+  // The copy of a band of `count` k-row groups at the window's middle, where
+  // a band's rectangle is the tallest (the base clamps it near its edges).
+  const copy = count => {
+    const y0 = Math.max(0, Math.min(middle, groups - count)) * k;
+    const rect = geometrySourceRect(plan, y0, y0 + count * k);
+    return rect.width * rect.height * bytesPerPixel;
+  };
+  const own = count => count * k * plan.step * plan.outWidth * plan.step * bytesPerPixel;
+  // The most groups (up to `cap`) whose copy fits `budget`; 0 if none does.
+  const tallest = (budget, cap) => {
+    let low = 0;
+    let high = cap;
+    while (low < high) {
+      const mid = Math.ceil((low + high) / 2);
+      if (copy(mid) <= budget) low = mid;
+      else high = mid - 1;
+    }
+    return low;
+  };
+  for (let inFlight = Math.max(1, Math.floor(workers) || 1); inFlight >= 1; inFlight--) {
+    const count = tallest(maxBytes / inFlight, Math.ceil(groups / inFlight));
+    if (count && copy(count) <= own(count) * (1 + LEVEL_BAND_MAX_OVERLAP)) return { rows: count * k, inFlight };
+  }
+  const count = tallest(maxBytes, groups);
+  if (count && copy(count) <= own(count) * 2) return { rows: count * k, inFlight: 1 };
+  return { rows: groups * k, inFlight: 1 };
 }
 
 // A macrotask boundary that is not throttled like chained timers in hidden
@@ -47,6 +104,39 @@ function bandLevelRows(plan, band, part, k) {
   const image = { width: plan.outWidth, height: band.y1 - band.y0, data: part.data8,
     __image16: part.data16 ? { data: part.data16 } : undefined };
   return displayLevelRows(image, k, Math.floor(plan.outWidth / k));
+}
+
+// The display level rows of output rows [y0, y1) (whole k-row groups),
+// rendered LEVEL_ROWS_PER_PASS level rows at a time into one scratch band
+// (R2-003), zeroed between passes as a fresh output is (the bilinear kernel
+// leaves pixels outside the base as it finds them).
+function renderLevelRows(plan, src, y0, y1, k) {
+  const levelWidth = Math.floor(plan.outWidth / k);
+  const out = new Uint16Array(((y1 - y0) / k) * levelWidth * 4);
+  const pass = LEVEL_ROWS_PER_PASS * k;
+  const rowLength = plan.outWidth * 4;
+  const scratch8 = new Uint8ClampedArray(Math.min(pass, y1 - y0) * rowLength);
+  const scratch16 = plan.has16 ? new Uint16Array(scratch8.length) : null;
+  for (let a = y0; a < y1; a += pass) {
+    const b = Math.min(y1, a + pass);
+    const length = (b - a) * rowLength;
+    if (a > y0) {
+      scratch8.fill(0, 0, length);
+      scratch16?.fill(0, 0, length);
+    }
+    const part = { data8: scratch8.subarray(0, length), data16: scratch16 ? scratch16.subarray(0, length) : null };
+    renderGeometryRows(plan, src, part, a, b);
+    out.set(bandLevelRows(plan, { y0: a, y1: b }, part, k), ((a - y0) / k) * levelWidth * 4);
+  }
+  return out;
+}
+
+// The level of a 16-bit frame reads its 16-bit rows only (R2-003): an index
+// plan's level band gets no 8-bit rows, and its kernels, which still write
+// 8-bit bytes into scratch, read a byte view of the band's 16-bit rows.
+function levelBandSource(plan, src) {
+  if (src.data8 || plan.kind !== 'index' || !src.data16) return src;
+  return { ...src, data8: new Uint8ClampedArray(src.data16.buffer, src.data16.byteOffset, src.data16.length) };
 }
 
 // Rows [y0, y1) of the 16-bit output only (#256: a batch frame whose later
@@ -77,12 +167,18 @@ function bandSource(src) {
 }
 
 // The worker side: one band of one plan, and with `levelFactor` > 1 its rows
-// of the display level (#248); with `planes16` (#256) its 16-bit rows only.
-// `out16` (#264): the band's rows of a shared output plane, written in place
-// (only the 8-bit rows go back).
+// of the display level (#248); with `levelOnly` (#249) those level rows
+// alone; with `planes16` (#256) its 16-bit rows only. `out16` (#264): the
+// band's rows of a shared output plane, written in place (only the 8-bit
+// rows go back).
 export function runGeometryBand(message) {
   const { id, plan, y0, y1, levelFactor = 1, planes16 = false, levelOnly = false } = message;
   const src = bandSource(message.src);
+  // A display proxy band (#249) sends back its level rows only.
+  if (levelOnly) {
+    const level16 = renderLevelRows(plan, levelBandSource(plan, src), y0, y1, levelFactor);
+    return { payload: { id, level16 }, transfers: [level16.buffer] };
+  }
   const length = (y1 - y0) * plan.outWidth * 4;
   if (planes16 && plan.has16) {
     const data16 = new Uint16Array(length);
@@ -93,11 +189,6 @@ export function runGeometryBand(message) {
   const sharedOut = plan.has16 && message.out16 ? new Uint16Array(message.out16.buffer, message.out16.byteOffset, message.out16.length) : null;
   const data16 = sharedOut || (plan.has16 ? new Uint16Array(length) : null);
   renderGeometryRows(plan, src, { data8, data16 }, y0, y1);
-  // A display proxy band (#249) sends back its level rows only.
-  if (levelOnly) {
-    const level16 = bandLevelRows(plan, { y0, y1 }, { data8, data16 }, levelFactor);
-    return { payload: { id, level16 }, transfers: [level16.buffer] };
-  }
   const transfers = [data8.buffer];
   if (data16 && !sharedOut) transfers.push(data16.buffer);
   const payload = { id, data8, data16: sharedOut ? null : data16 };
@@ -110,12 +201,12 @@ export function runGeometryBand(message) {
 
 // What a band posts for a shared base (#264): a view description of its
 // full-width source rows, and for index plans the 8-bit rows (derived in the
-// worker when the base's 8-bit plane is its 16-bit one >>> 8, else copied).
-function sharedBandSlice(source, plan, rect) {
+// worker when the base's 8-bit plane is its 16-bit one >>> 8, else copied;
+// none for a display level, `needs8` false, R2-003).
+function sharedBandSlice(source, plan, rect, { needs8 = plan.kind === 'index' } = {}) {
   const width = plan.baseWidth;
   const data16 = source.__image16.data;
   const rowWords = width * 4;
-  const needs8 = plan.kind === 'index';
   const derive8 = needs8 && hasDerivedEightBit(source);
   return {
     x: 0, y: rect.y, width, height: rect.height,
@@ -123,6 +214,11 @@ function sharedBandSlice(source, plan, rect) {
     needs8, derive8,
     data8: needs8 && !derive8 ? source.data.slice(rect.y * rowWords, (rect.y + rect.height) * rowWords) : null
   };
+}
+
+// The bytes a band's slice copied here (a shared base's view is no copy).
+function copiedBytes(slice) {
+  return (slice.data8?.byteLength || 0) + (slice.data16?.byteLength || 0);
 }
 
 function renderBandHere(source, plan, band, planes16 = false) {
@@ -158,7 +254,8 @@ export function createGeometryPool({
   let sequence = 0;
   let broken = !workersSupported;
   let idleTimer = null;
-  const counters = { jobs: 0, rotations: 0, copies: 0, workerBands: 0, syncBands: 0, fallbacks: 0 };
+  // `copiedBytes`: band source rows copied on this thread (R2-003).
+  const counters = { jobs: 0, rotations: 0, copies: 0, workerBands: 0, syncBands: 0, fallbacks: 0, levels: 0, copiedBytes: 0 };
 
   function scheduleIdle() {
     clearTimeout(idleTimer);
@@ -341,6 +438,7 @@ export function createGeometryPool({
           // Copy the band's rows now; the base itself is never transferred.
           // A shared base is not copied at all (#264).
           const slice = sharedBands ? sharedBandSlice(source, plan, band.rect) : sliceGeometrySource(source, plan, band.rect);
+          counters.copiedBytes += copiedBytes(slice);
           const outRows = sharedBands
             ? { buffer: out16.buffer, byteOffset: out16.byteOffset + band.y0 * rowWords * 2, length: (band.y1 - band.y0) * rowWords }
             : null;
@@ -387,33 +485,69 @@ export function createGeometryPool({
    * building that output (#249: display proxies of roll-analysed and lane
    * frames): each band renders only whole k-row groups of the output and
    * sends back their box-averaged level rows, the same arithmetic as
-   * buildDisplayLevel of the whole output. The base rows are copied per
-   * band, never transferred. Resolves the level (adopted with its source
-   * geometry), null once `isCurrent()` turned false, or null for k = 1
-   * (such a level is the output itself).
+   * buildDisplayLevel of the whole output. The base is never transferred. A
+   * shared base (#264) is read through views, so nothing is copied here; a
+   * plain one is copied once per band, the plane the level reads only (its
+   * 16-bit rows when it has them), in bands planned by planDisplayLevelBands
+   * within `maxBytesInFlight` (R2-003). `levelRowsPerBand` fixes the bands
+   * instead (tests). Resolves the level (adopted with its source geometry),
+   * null once `isCurrent()` turned false, or null for k = 1 (such a level is
+   * the output itself).
    */
-  async function renderDisplayLevel(source, plan, { k = displayLevelFactor(plan.outWidth, plan.outHeight), isCurrent = () => true, levelRowsPerBand = 16, maxInFlight = null } = {}) {
+  async function renderDisplayLevel(source, plan, options = {}) {
+    const guarded = { guard: null };
+    try {
+      return await renderLevelBands(source, plan, options, guarded);
+    } finally {
+      guarded.guard?.verify();
+    }
+  }
+
+  async function renderLevelBands(source, plan, {
+    k = displayLevelFactor(plan.outWidth, plan.outHeight), isCurrent = () => true, levelRowsPerBand = null,
+    maxInFlight = null, maxBytesInFlight = null
+  } = {}, guarded = {}) {
     if (!(k > 1)) return null;
     const levelWidth = Math.floor(plan.outWidth / k);
     const levelHeight = Math.floor(plan.outHeight / k);
     const level16 = new Uint16Array(levelWidth * levelHeight * 4);
-    const step = Math.max(1, levelRowsPerBand) * k;
+    const limit = Math.max(1, Math.min(poolSize, Number(maxInFlight) || Number(maxBandsInFlight) || poolSize));
+    const shared = plan.has16 && isSharedPlane(source.__image16?.data);
+    if (shared) guarded.guard = guardSharedPlanes('display level bands', [source.__image16.data]);
+    // Bands that copy nothing here (a shared base, or no workers) keep a few
+    // level rows each, as short tasks.
+    const fixed = Math.floor(Number(levelRowsPerBand)) || (shared || broken ? LEVEL_ROWS_PER_PASS : 0);
+    const bands = fixed > 0 ? { rows: fixed * k, inFlight: limit } : planDisplayLevelBands(plan, k, {
+      workers: limit,
+      maxBytes: Number(maxBytesInFlight) || LEVEL_BAND_BYTES_PER_BASE_PIXEL * plan.baseWidth * plan.baseHeight
+    });
     const queue = [];
-    for (let y0 = 0; y0 < levelHeight * k; y0 += step) {
-      const y1 = Math.min(levelHeight * k, y0 + step);
+    for (let y0 = 0; y0 < levelHeight * k; y0 += bands.rows) {
+      const y1 = Math.min(levelHeight * k, y0 + bands.rows);
       queue.push({ y0, y1, rect: geometrySourceRect(plan, y0, y1) });
     }
     const place = (band, rows) => level16.set(rows, (band.y0 / k) * levelWidth * 4);
-    const here = band => runGeometryBand({
-      id: 0, plan, y0: band.y0, y1: band.y1, levelFactor: k, levelOnly: true,
-      src: { x: 0, y: 0, width: plan.baseWidth, height: plan.baseHeight, data8: source.data, data16: plan.has16 ? source.__image16.data : null }
-    }).payload.level16;
-    const limit = Math.max(1, Math.min(poolSize, Number(maxInFlight) || Number(maxBandsInFlight) || poolSize));
+    const base = { x: 0, y: 0, width: plan.baseWidth, height: plan.baseHeight, data8: source.data, data16: plan.has16 ? source.__image16.data : null };
+    // A band on this thread (no workers, or its worker failed), a few level
+    // rows per task; null once the job is stale.
+    const here = async band => {
+      const rows = new Uint16Array(((band.y1 - band.y0) / k) * levelWidth * 4);
+      const pass = LEVEL_ROWS_PER_PASS * k;
+      for (let a = band.y0; a < band.y1; a += pass) {
+        if (a > band.y0) {
+          await yieldTask();
+          if (!isCurrent()) return null;
+        }
+        rows.set(renderLevelRows(plan, base, a, Math.min(band.y1, a + pass), k), ((a - band.y0) / k) * levelWidth * 4);
+      }
+      counters.syncBands++;
+      return rows;
+    };
     const running = new Map();
     let token = 0;
     while (queue.length || running.size) {
       if (!isCurrent()) return null;
-      if (queue.length && running.size < limit) {
+      if (queue.length && running.size < bands.inFlight) {
         const entry = await acquire();
         if (!isCurrent()) {
           if (entry) handOver(entry);
@@ -421,10 +555,13 @@ export function createGeometryPool({
         }
         const band = queue.shift();
         if (!entry) {
-          place(band, here(band));
-          counters.syncBands++;
+          const rows = await here(band);
+          if (!rows) return null;
+          place(band, rows);
         } else {
-          const slice = sliceGeometrySource(source, plan, band.rect);
+          const slice = shared ? sharedBandSlice(source, plan, band.rect, { needs8: false })
+            : sliceGeometrySource(source, plan, band.rect, { with8: !plan.has16 });
+          counters.copiedBytes += copiedBytes(slice);
           const key = ++token;
           running.set(key, postBand(entry, plan, band, slice, k, { levelOnly: true }).then(
             part => ({ key, band, part }),
@@ -438,12 +575,13 @@ export function createGeometryPool({
       const settled = await Promise.race(running.values());
       running.delete(settled.key);
       if (!isCurrent()) return null;
-      place(settled.band, settled.error || !settled.part.level16 ? here(settled.band) : settled.part.level16);
-      if (settled.error) counters.syncBands++;
+      const rows = settled.error || !settled.part.level16 ? await here(settled.band) : settled.part.level16;
+      if (!rows) return null;
+      place(settled.band, rows);
       await yieldTask();
     }
     if (!isCurrent()) return null;
-    counters.levels = (counters.levels || 0) + 1;
+    counters.levels++;
     return adoptDisplayLevel(level16, levelWidth, levelHeight, { sourceWidth: plan.outWidth, sourceHeight: plan.outHeight, k });
   }
 
