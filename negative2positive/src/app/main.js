@@ -11443,8 +11443,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const display = settled ? captureDisplaySession(item, entry) : null;
       if (display) entry.display = display;
       // The persistent store keeps the display proxy of an exact route across
-      // restarts (part 3), after the next paint (the planes are copied).
-      if (display && displayProxyStore) {
+      // restarts (part 3), after the next paint (the planes are copied). Not
+      // with lens correction, which the fills skip too: a cold open looks a
+      // stored proxy up without it (expectedStoredProxyKey), so this one could
+      // never be read back and would only push readable ones out (R2-006).
+      if (display && displayProxyStore && !lensCorrectionActive(state)) {
         const proxy = { image: display.snapshot.refs.displayLevelImageData, sample: display.sample,
           proxyKey: display.sourcePending.key, meta: displaySessionMeta(display) };
         schedulePostPaintTask(() => { void persistDisplayProxy(item, proxy); });

@@ -691,6 +691,49 @@ for (const tier of ['A', 'B']) {
   }
 }
 
+// ---- A lens-corrected photo's display proxy is not stored (R2-006): a cold
+// open looks a stored proxy up without lens correction
+// (expectedStoredProxyKey), so its record could never be read back and would
+// only push readable ones out of the store's budget. Its Tier B form still
+// spills, and opens again from the spill ----
+for (const lens of [true, false]) {
+  const records = new Map();
+  const backend = {
+    async put(key, value) { records.set(key, value); }, async get(key) { return records.get(key) || null; },
+    async delete(key) { records.delete(key); }, async clear() { records.clear(); }
+  };
+  const { h, c, proxy, item } = await convertedPhoto({ sessionBudget: 1024 });
+  vm.runInContext(functionSource('lensSignature'), h.context);
+  const persisted = [];
+  const painted = [];
+  Object.assign(h.target, {
+    displayProxySpill: createDisplayProxySpill({ port: createDisplayProxyPort({ core: createDisplayProxyWorkerCore({ backend }) }) }),
+    displayProxyStore: { load: async () => {}, hasCandidate: () => false },
+    persistDisplayProxy: async (target, entry) => { persisted.push({ target, entry }); return true; },
+    schedulePostPaintTask: task => { painted.push(task); },
+    lensCorrectionActive: () => lens,
+    resolveLensCorrection: () => ({ enabled: lens, selectedLens: { handle: 1, name: 'Lens 50mm' }, params: { distortion: 1 }, modes: { distortion: true } })
+  });
+  const itemB = { id: 2, file: { name: 'b.dng' }, settings: null };
+  wireSwitching(h, [item, itemB]);
+  await c.switchToFile(1);
+  for (const task of painted.splice(0)) task();
+  await h.target.displayProxySpill.settled();
+  assert.equal(h.target.displaySessionDiagnostics.spillWrites, 1, `lens ${lens}: the Tier B form spills`);
+  if (lens) {
+    assert.deepEqual(persisted, [], 'no display proxy of a lens-corrected photo is stored');
+  } else {
+    assert.equal(persisted.length, 1, 'without lens correction its proxy is stored');
+    assert.equal(persisted[0].target, item);
+    assert.equal(JSON.parse(persisted[0].entry.proxyKey)[7], null, 'under a key without a lens part');
+  }
+  h.target.prepareStudioPhoto = async () => {};
+  await c.switchToFile(0);
+  assert.equal(h.target.displaySessionDiagnostics.spillHits, 1, `lens ${lens}: back from the spill`);
+  assert.equal(h.target.baseDecodes, undefined, `lens ${lens}: without a decode`);
+  sameLevel(h.state.displayLevelImageData, proxy, `lens ${lens}: the spilled level`);
+}
+
 // ---- A proxy the persistent store already holds is not filled again
 // (R2-003): after a restart or a project reopen, a roll pass, lane or
 // prefetch decode of a stored frame plans it as kept, before any pixel is

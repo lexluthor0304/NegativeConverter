@@ -249,12 +249,15 @@ imports) and fails on when a module is missing. Decoders the browser runs
 hashed: the checks of `ensureBase()` and `ensureSource()` above catch their
 drift once the original is decoded again. Only reproducible decode routes are
 stored, never a recipe; a record carries its full key and checksum, verified
-on read. The desktop app keeps records in `app_cache_dir()/display-proxies`
-through `src-tauri/src/display_proxy_store.rs` (chunked atomic writes and
-reads, the volume's free space, `CACHEDIR.TAG` and Time Machine's exclusion;
-the spill of an earlier run is removed at start), so no pixels reach WebKit's
-origin storage; the web keeps them in the origin-private file system from the
-worker (IndexedDB where sync access handles are missing). WebKit before
+on read. A frame with active lens correction is not stored, whether filled or
+left (R2-006): a cold open looks its proxy up without lens correction, so
+the record could never be read back. The desktop app keeps records in
+`app_cache_dir()/display-proxies` through `src-tauri/src/display_proxy_store.rs`
+(chunked atomic writes and reads, the volume's free space, `CACHEDIR.TAG` and
+Time Machine's exclusion; the spill of an earlier run is removed at start),
+so no pixels reach WebKit's origin storage; the web keeps them in the
+origin-private file system from the worker (IndexedDB where sync access
+handles are missing). WebKit before
 Safari 17 returns promises from four of a sync access handle's methods
 (`getSize`, `truncate`, `flush` and `close`): they are awaited, and a record
 that exists but cannot be read rejects instead of reading as absent (R2-067:
