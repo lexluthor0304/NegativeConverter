@@ -223,4 +223,98 @@ const stroke = { size: 0.01, points: [{ x: 0.35, y: 0.275 }] };
   applyDustDelta(entry, 'undo');
 }
 
-console.log(`Dust AI refresh: 1 tile instead of ${wholeMaskTiles} after a stroke; amended history, dropped when overtaken; TELEA only with AI repair off or failed, a released model is loaded and refreshes the dust and the repair strokes; runs count as use`);
+// With repair strokes and a model that failed (to load, or before), the
+// strokes cannot be inferred again: the queue empties so the photo settles,
+// and the repaired image keeps no stamp, so export repairs it from scratch.
+// Nothing loads the failed model again.
+{
+  const { context, runs } = setup({ strokes: [stroke] });
+  Object.assign(context.aiRepair, { status: 'error', run: null, error: 'Failed to fetch' });
+  let loads = 0;
+  context.loadAiRepairModel = async () => { loads++; };
+  context.repairStamps.stamp(repaired, { strokes: [stroke] });
+  context.queueDustAiRefresh([rect]);
+  await context.runDustAiRefresh();
+  assert.equal(runs(), 0);
+  assert.equal(loads, 0, 'a failed model is not loaded again by a stroke');
+  assert.equal(context.dustAiRefresh.rects.length, 0, 'the queue empties');
+  assert.equal(context.repairStamps.recipeOf(repaired), null, 'the repaired image is marked for a from-scratch pass');
+  assert.equal(context.pendingBrushRepairs, 0);
+}
+
+// One load per release, not one per stroke: a reload that fails leaves the
+// model failed, the queue drains, and the next stroke loads nothing.
+{
+  const { context, timers, runs } = setup({ strokes: [stroke] });
+  Object.assign(context.aiRepair, { status: 'idle', released: true, run: null, sourceRef: '/m.onnx', prefer: 'wasm' });
+  let loads = 0;
+  context.loadAiRepairModel = async () => {
+    loads++;
+    Object.assign(context.aiRepair, { status: 'error', error: 'Failed to fetch', released: false });
+  };
+  context.queueDustAiRefresh([rect]);
+  timers.length = 0;
+  await context.runDustAiRefresh();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(loads, 1);
+  assert.equal(timers.length, 1, 'the refresh runs again after the failed load');
+  await timers.shift()();
+  assert.equal(context.dustAiRefresh.rects.length, 0, 'and drains the queue');
+  context.queueDustAiRefresh([rect]);
+  await timers.shift()();
+  assert.equal(loads, 1, 'the next stroke does not load the failed model again');
+  assert.equal(context.dustAiRefresh.rects.length, 0);
+  assert.equal(runs(), 0);
+}
+
+// A run that fails: on WASM the model is marked failed as on the commit path
+// (a new revision), the refresh runs again and drains the queue, and the error
+// is reported. A WebGPU session is rebuilt on WASM once; when that reload
+// fails too, the queue still drains. A model loaded meanwhile is not marked.
+{
+  const { context, timers } = setup({ strokes: [stroke] });
+  Object.assign(context.aiRepair, { provider: 'wasm', revision: 7, run: async () => { throw new Error('worker lost'); } });
+  context.queueDustAiRefresh([rect]);
+  timers.length = 0;
+  await assert.rejects(context.runDustAiRefresh(), /worker lost/);
+  assert.equal(context.aiRepair.status, 'error');
+  assert.equal(context.aiRepair.revision, 8, 'a failed model is a new revision');
+  assert.equal(context.aiRepair.run, null);
+  assert.equal(context.pendingBrushRepairs, 0);
+  assert.equal(timers.length, 1);
+  await timers.shift()();
+  assert.equal(context.dustAiRefresh.rects.length, 0, 'the queue drains');
+}
+{
+  const { context, timers } = setup({ strokes: [stroke] });
+  Object.assign(context.aiRepair, { provider: 'webgpu', sourceRef: '/m.onnx', run: async () => { throw new Error('device lost'); } });
+  const loads = [];
+  context.loadAiRepairModel = async (...args) => {
+    loads.push(args);
+    Object.assign(context.aiRepair, { status: 'error', error: 'no WASM either', run: null });
+  };
+  context.queueDustAiRefresh([rect]);
+  timers.length = 0;
+  await context.runDustAiRefresh();
+  assert.equal(JSON.stringify(loads), JSON.stringify([['/m.onnx', { prefer: 'wasm', refresh: false }]]), 'rebuilt on WASM once');
+  assert.equal(timers.length, 1, 'armed again although the reload failed');
+  await timers.shift()();
+  assert.equal(context.dustAiRefresh.rects.length, 0, 'the queue drains');
+}
+{
+  const { context, timers } = setup({ strokes: [stroke] });
+  Object.assign(context.aiRepair, { provider: 'wasm', revision: 3, run: async () => {
+    // A model the user picks meanwhile releases this one.
+    Object.assign(context.aiRepair, { status: 'loading', run: null });
+    throw new Error('session released');
+  } });
+  context.queueDustAiRefresh([rect]);
+  timers.length = 0;
+  await context.runDustAiRefresh();
+  assert.equal(context.aiRepair.status, 'loading', 'the model loading meanwhile is not marked failed');
+  assert.equal(context.aiRepair.revision, 3);
+  assert.equal(timers.length, 1, 'the next refresh runs with it');
+  assert.equal(JSON.stringify(context.dustAiRefresh.rects), JSON.stringify([rect]));
+}
+
+console.log(`Dust AI refresh: 1 tile instead of ${wholeMaskTiles} after a stroke; amended history, dropped when overtaken; TELEA only with AI repair off or failed, a released model is loaded and refreshes the dust and the repair strokes; a failed model drains the queue and marks a from-scratch pass, one load per release; runs count as use`);

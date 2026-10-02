@@ -140,12 +140,17 @@ the count, all transferred. `DustBrush.test.mjs` checks 200+ random strokes
   present, a model that the idle rule or the hidden window released is still
   the repair's inpainter, never a reason to take TELEA as the repair: a stroke
   queues its rect, and the refresh keeps it queued, loads the model again (on
-  its provider, under its revision) and runs once it is back (a failed load
-  leaves TELEA for the dust, as an error state does). An export after a stroke
-  loads the model too, with the load on its overlay, and repairs from scratch;
-  when the model cannot be loaded (offline without a cached copy) the export
-  fails with a message instead of shipping TELEA in its place. A settled
-  repair keeps its stamp across the release and is exported without a load.
+  its provider, under its revision) and runs once it is back. A failed load
+  leaves the model failed, and no stroke loads it again on its own: the next
+  refresh drains the queue, with TELEA for the dust and the repair strokes in
+  the rects as the stroke left them (the repaired image has no stamp, so export
+  repairs from scratch). A refresh run that fails marks the model failed the
+  same way. So the queue always drains, the photo settles and a photo switch
+  keeps its view and history. An export after a stroke loads the model too,
+  with the load on its overlay, and repairs from scratch; when the model cannot
+  be loaded (offline without a cached copy) the export fails with a message
+  instead of shipping TELEA in its place. A settled repair keeps its stamp
+  across the release and is exported without a load.
 
 ## Known limits
 

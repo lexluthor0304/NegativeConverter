@@ -25011,7 +25011,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         // loading: the rects stay queued, the model is loaded the way a
         // commit loads it, and they are refreshed once the load ends. A failed
         // load leaves 'error', which no stroke loads again on its own (one
-        // load per release, not one per stroke).
+        // load per release, not one per stroke): that refresh drains them.
         const rearm = () => { if (dustAiRefresh.rects.length) queueDustAiRefresh([]); };
         void settleAiRepairModel().then(rearm, rearm);
         return;
@@ -25022,8 +25022,17 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         dustAiRefresh.rects.length = 0;
         return;
       }
-      if (strokes.length && aiRepair.status !== 'ready') return;
-      const revision = dust.revision, token = coreReprocessToken, mask = dust.mask;
+      if (aiRepair.status !== 'ready') {
+        // Repair strokes and a model that failed: their pixels in the rects
+        // stay as the stroke left them. The rects leave the queue, so the
+        // photo settles with its history, and the repaired image keeps no
+        // stamp: export repairs it from scratch (loading the model again, or
+        // failing with the reason).
+        dustAiRefresh.rects.length = 0;
+        repairStamps.forget(target);
+        return;
+      }
+      const revision = dust.revision, token = coreReprocessToken, mask = dust.mask, run = aiRepair.run;
       const isCurrent = () => dust.revision === revision && dust.inpaintedImageData === target
         && coreReprocessToken === token && state.repairStrokes === strokes;
       pendingBrushRepairs += 1;
@@ -25064,12 +25073,23 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         refreshDustDisplay(target, results.map(result => result.rect), null, dust.revision);
       } catch (error) {
         if (error?.name === 'AbortError' || !isCurrent()) return;
-        // A WebGPU session that fails mid-run is rebuilt on WASM once.
+        // A model loaded meanwhile released the one that failed: the next
+        // refresh runs with the new one.
+        if (aiRepair.run !== run) { queueDustAiRefresh([]); return; }
+        // A WebGPU session that fails mid-run is rebuilt on WASM once; any
+        // other failure marks the model failed, as on the commit path. Either
+        // way the next refresh drains the rects (MI-GAN again, or as above).
         if (aiRepair.provider === 'webgpu' && aiRepair.sourceRef) {
           await loadAiRepairModel(aiRepair.sourceRef, { prefer: 'wasm', refresh: false });
-          if (aiRepair.status === 'ready' && isCurrent()) queueDustAiRefresh([]);
+          if (isCurrent()) queueDustAiRefresh([]);
           return;
         }
+        aiRepair.status = 'error';
+        aiRepair.revision += 1;
+        aiRepair.error = error?.message || String(error);
+        aiRepair.run = null;
+        updateAiRepairUI();
+        queueDustAiRefresh([]);
         throw error;
       } finally {
         noteBrushRepairSettled();
