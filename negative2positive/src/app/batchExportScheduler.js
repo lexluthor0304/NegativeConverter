@@ -691,11 +691,15 @@ export function createLearningBarrier(count, mayLearn = () => false) {
  *   frames prepared for jobs not yet started are aborted and never written
  * @param {(event: {type: string, job: TJob, index: number, error?: Error, done: number, total: number}) => void} [options.onEvent]
  * @param {(context: {signal: AbortSignal|null, index: number}) => Promise<(() => void)|void>} [options.beforeStart]
- *   admission (the hidden-job gate, #241): awaited by a lane before it claims
- *   the next index, never after, so a lane waiting here holds no index that
- *   later sinks wait for. `index` is only the next unclaimed one at the time
- *   of the call. The returned release runs once the claimed job's payload has
- *   been sunk; a rejection while `signal` is aborted counts as cancellation
+ *   admission (the hidden-job gate, #241, then the memory budget, #258):
+ *   awaited by a lane before it claims the next index, never after, so a
+ *   lane waiting here holds no index that later sinks wait for. `index` is
+ *   only the next unclaimed one at the time of the call. The returned
+ *   release runs once the claimed job's payload has been sunk; when the byte
+ *   cap lets the lane go on before that, its `early(bytes)` method, if any,
+ *   is called first with the payload's size (the frame is gone, only the
+ *   payload waits). A rejection while `signal` is aborted counts as
+ *   cancellation
  * @param {(payload: TPayload) => number} [options.payloadBytes] size of a payload
  * @param {number} [options.maxUnwrittenBytes] 0 (default): a lane is held
  *   until its own payload has been sunk (#199). Otherwise a lane is released
@@ -709,7 +713,9 @@ export function createLearningBarrier(count, mayLearn = () => false) {
  *   the lanes hold)
  * @param {(value: any, job: TJob) => void} [options.disposePrepared]
  * @param {object} [options.stats] filled with `peakUnwrittenBytes`,
- *   `earlyReleases` and the prepare stage's counters
+ *   `earlyReleases` (payloads released before their write whose lane started
+ *   its next frame before their sink ended: the writes a frame overlapped)
+ *   and the prepare stage's counters
  * @returns {Promise<{successCount: number, failCount: number, cancelled: boolean, results: Array<{job: TJob, index: number, ok: boolean, error?: Error}>}>}
  */
 export async function runBatchPipeline(jobs, {
@@ -735,6 +741,11 @@ export async function runBatchPipeline(jobs, {
   let unwrittenBytes = 0;
   let peakUnwrittenBytes = 0;
   let earlyReleases = 0;
+  // Payloads released before their write whose sink has not ended. A lane
+  // that starts its next frame meanwhile overlaps that write with the frame,
+  // which is what releasing it early is for; only such a release counts in
+  // `earlyReleases` (another lane's frame would have started anyway).
+  const unwrittenEarly = new Set();
   // Jobs the lanes hold, and those among them still decoding their own frame.
   let processing = 0;
   let selfDecoding = 0;
@@ -796,6 +807,7 @@ export async function runBatchPipeline(jobs, {
         entry.payload = null;
         if (entry.early) {
           unwrittenBytes -= entry.bytes;
+          unwrittenEarly.delete(entry);
           offerPrepare();
         }
         // A lane held for its payload is freed only now: a later frame may
@@ -809,8 +821,9 @@ export async function runBatchPipeline(jobs, {
   };
 
   // Resolves null once the job's payload has been consumed (the lane is held
-  // until then), or with `{ consumed }`, a promise of that, when the payload
-  // fits the byte cap and the lane may go on.
+  // until then), or with `{ consumed, bytes, entry }` (a promise of that, the
+  // payload's size and its place in the sink queue) when the payload fits
+  // the byte cap and the lane may go on.
   const runOne = async (index) => {
     const job = jobs[index];
     emit({ type: 'start', job, index, done, total });
@@ -871,12 +884,13 @@ export async function runBatchPipeline(jobs, {
       entry.bytes = bytes;
       unwrittenBytes += bytes;
       peakUnwrittenBytes = Math.max(peakUnwrittenBytes, unwrittenBytes);
-      earlyReleases += 1;
+      // A failed job has no write to overlap.
+      if (entry.ok) unwrittenEarly.add(entry);
     }
     sinkQueue.set(index, entry);
     if (early) {
       void drain();
-      return { consumed };
+      return { consumed, bytes, entry };
     }
     await drain();
     await consumed;
@@ -884,6 +898,8 @@ export async function runBatchPipeline(jobs, {
   };
 
   const worker = async () => {
+    // This lane's last payload, when the lane went on before its write.
+    let waiting = null;
     while (nextToStart < total) {
       if (isCancelled()) { cancelled = true; return; }
       let release = null;
@@ -904,17 +920,30 @@ export async function runBatchPipeline(jobs, {
       }
       const index = nextToStart;
       nextToStart += 1;
+      // The lane starts this frame while its last payload still waits for,
+      // or is in, its write: the early release overlapped that write.
+      if (waiting && unwrittenEarly.delete(waiting)) earlyReleases += 1;
+      waiting = null;
       let early = null;
       try {
         early = await runOne(index);
       } finally {
         // An admission lasts until the payload has been sunk, even when the
-        // byte cap let the lane go on before.
+        // byte cap let the lane go on before; it may shrink to the payload
+        // then (`early`: the memory budget keeps only what still waits, while
+        // the hidden-job gate's admission lasts until the sink).
         if (typeof release === 'function') {
-          if (early) early.consumed.then(release);
-          else release();
+          if (early) {
+            if (typeof release.early === 'function') {
+              try { release.early(early.bytes); } catch { /* the admission keeps its size */ }
+            }
+            early.consumed.then(release);
+          } else {
+            release();
+          }
         }
       }
+      if (early) waiting = early.entry;
     }
   };
 

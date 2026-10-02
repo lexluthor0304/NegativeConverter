@@ -8,7 +8,12 @@
 // runs, for PNG8 and TIFF16. The run also reads what the stages did
 // (window.__ncBatchPipeline), counts the band workers (never more than
 // min(6, cores - 2), all gone after the batch), and a single export of the
-// open photo (Step 3 on the band pool) must match its serial export.
+// open photo (Step 3 on the band pool) must match its serial export. Last, a
+// staged ZIP whose writes take real time (a save picker whose writable writes
+// at 20 MB/s): frames 1 and 2 must start while frames 0 and 1 are still being
+// written, and the pipeline must count exactly those two overlaps
+// (earlyReleases). The downloads above end in the same task as their sink,
+// so whether the next frame starts first is not checked there.
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -191,7 +196,7 @@ export async function runBatchPipelineSmoke({ send, evaluate, waitFor, wait, fai
       }
       const { last, bands } = staged.stages;
       if (!last || last.mode !== 'default' || last.lanes !== 1) fail(`${format}${depth}: the staged run did not run one default lane: ` + JSON.stringify(staged.stages));
-      if (!(last.earlyReleases >= 1)) fail(`${format}${depth}: no lane was released before its write: ` + JSON.stringify(last));
+      if (!(last.peakUnwrittenBytes > 0)) fail(`${format}${depth}: no lane was released before its write: ` + JSON.stringify(last));
       if (!(last.prepare && last.prepare.taken >= 1)) fail(`${format}${depth}: no frame was decoded ahead: ` + JSON.stringify(last));
       if (!(bands && bands.frames >= 1)) fail(`${format}${depth}: no frame converted in bands: ` + JSON.stringify(bands));
       const maxWorkers = Math.min(6, Math.max(0, (staged.stages.cores || 4) - 2));
@@ -233,9 +238,43 @@ export async function runBatchPipelineSmoke({ send, evaluate, waitFor, wait, fai
     if (singleSerial.file.sha !== singleBanded.file.sha) fail('the banded single export differs from the serial one: ' + JSON.stringify({ singleSerial, singleBanded }));
     if (!(singleBanded.pool.stats && singleBanded.pool.stats.adjusts >= 1)) console.log('WARN: the single export did not adjust on the band pool (a CPU display buffer at full resolution needs no adjustment)');
     if (singleBanded.pool.alive !== 0) fail('band workers outlived the single export');
+
+    // Part 2's overlap in Chrome: a ZIP whose writes take real time, like a
+    // slow disk or the CRC pass over a large frame.
+    if (String(await setFormat('png', 8)) !== '8') fail('could not select PNG8');
+    await setMode(null);
+    await evaluate(`(() => {
+      const p = window.__batchPipelineProbe;
+      p.zip = { writes: 0, bytes: 0, closed: false };
+      window.showSaveFilePicker = async () => ({
+        name: 'pipeline-overlap.zip',
+        createWritable: async () => ({
+          write: async (chunk) => {
+            const bytes = chunk.byteLength ?? chunk.size ?? 0;
+            p.zip.writes += 1;
+            p.zip.bytes += bytes;
+            await new Promise(resolve => setTimeout(resolve, Math.max(2, bytes / 20e6 * 1000)));
+          },
+          close: async () => { p.zip.closed = true; },
+          abort: async () => {}
+        })
+      });
+      document.getElementById('exportZipBtn').click();
+    })()`);
+    await waitFor('staged ZIP with slow writes', `window.__batchPipelineProbe.zip.closed && !document.getElementById('exportZipBtn').disabled && !document.body.dataset.studioBusy`, 300_000);
+    const zip = await evaluate(`(() => {
+      window.showSaveFilePicker = undefined;
+      return { zip: window.__batchPipelineProbe.zip, last: window.__ncBatchPipeline?.diagnostics?.last || null };
+    })()`);
+    console.log('batch pipeline ZIP overlap:', JSON.stringify(zip));
+    if (!zip.last || zip.last.mode !== 'default' || zip.last.lanes !== 1) fail('the ZIP did not run one default lane: ' + JSON.stringify(zip));
+    if (zip.last.earlyReleases !== 2) {
+      fail(`frames 1 and 2 must start while 0 and 1 are written (2 overlaps), counted ${zip.last.earlyReleases}: ` + JSON.stringify(zip));
+    }
   } finally {
     await evaluate(`(() => {
       window.__batchPipelineProbe?.restore();
+      window.showSaveFilePicker = undefined;
       try {
         localStorage.removeItem('nc_batch_lanes_v1');
         localStorage.removeItem('nc_batch_pipeline_v1');
@@ -247,5 +286,5 @@ export async function runBatchPipelineSmoke({ send, evaluate, waitFor, wait, fai
     })()`).catch(() => {});
     rmSync(dir, { recursive: true, force: true });
   }
-  console.log('ok: Export All with early release, decode-ahead and the band pool writes the serial run\'s files, byte for byte');
+  console.log('ok: Export All with early release, decode-ahead and the band pool writes the serial run\'s files, byte for byte; the next frame overlaps a slow write');
 }

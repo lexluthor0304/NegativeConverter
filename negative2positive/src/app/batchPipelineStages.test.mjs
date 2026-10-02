@@ -1,10 +1,13 @@
 // Standalone Node test for the #256 stages of batchExportScheduler.js: the
-// byte cap on unwritten payloads (Part 2), the learning barrier, the
-// decode-ahead prepare stage and its admission (Part 3), and the
-// decode / post-decode sub-stages (Part 4). The #199 lane rule and the rest
-// of runBatchPipeline are covered, unchanged, by batchExportScheduler.test.mjs.
+// byte cap on unwritten payloads (Part 2), also against the memory budget
+// with main.js's admitJobItem, the learning barrier, the decode-ahead prepare
+// stage and its admission (Part 3), and the decode / post-decode sub-stages
+// (Part 4). The #199 lane rule and the rest of runBatchPipeline are covered,
+// unchanged, by batchExportScheduler.test.mjs.
 // Run with: node negative2positive/src/app/batchPipelineStages.test.mjs
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import vm from 'node:vm';
 import {
   runBatchPipeline,
   createPrepareStage,
@@ -13,17 +16,31 @@ import {
   EXPORT_MAX_UNWRITTEN_BYTES,
   DECODE_AHEAD_CEILING_BYTES,
   PROCESSING_SLOT_BYTES_PER_PIXEL,
-  BAND_POOL_BYTES_PER_PIXEL
+  BAND_POOL_BYTES_PER_PIXEL,
+  LANE_BYTES_PER_PIXEL
 } from './batchExportScheduler.js';
-import { budgetFor, GIB } from './memoryBudget.js';
+import { createMemoryBudget, budgetFor, GIB } from './memoryBudget.js';
+import { createHiddenJobGate } from './hiddenJobGate.js';
 
 const tick = () => new Promise(resolve => setTimeout(resolve, 0));
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Writes the lane's next frame overlapped: frame i + 1 started before frame
+// i's write ended (one lane, which starts its frames in order).
+function overlappedWrites(events, count) {
+  let overlaps = 0;
+  for (let i = 0; i + 1 < count; i++) {
+    if (events.indexOf(`process:${i + 1}`) < events.indexOf(`written:${i}`)) overlaps += 1;
+  }
+  return overlaps;
+}
 
 // ---- Part 2: byte cap ----------------------------------------------------------
 
 // A payload that fits the cap frees its lane at once; the next frame is
 // processed while the payload waits for its (slow) write. Order is kept.
+// earlyReleases counts the writes the lane's next frame overlapped: frames 0
+// and 1, not the last one's.
 {
   const events = [];
   const stats = {};
@@ -38,8 +55,67 @@ const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
   assert.equal(result.successCount, 3);
   assert.ok(events.indexOf('process:1') < events.indexOf('written:0'), 'frame 1 is processed while frame 0 is written');
   assert.deepEqual(events.filter(e => e.startsWith('written')), ['written:0', 'written:1', 'written:2']);
-  assert.equal(stats.earlyReleases, 3);
+  assert.equal(stats.earlyReleases, overlappedWrites(events, 3));
+  assert.equal(stats.earlyReleases, 2);
   assert.ok(stats.peakUnwrittenBytes <= 1000);
+}
+
+// A lane released early whose write ends before the next frame starts (the
+// admission took longer) overlapped nothing and is not counted.
+{
+  const stats = {};
+  await runBatchPipeline([0, 1, 2], {
+    maxParallel: 1,
+    maxUnwrittenBytes: 1000,
+    payloadBytes: () => 10,
+    stats,
+    beforeStart: async () => { await sleep(10); },
+    process: async (job) => job,
+    sink: async () => {}
+  });
+  assert.ok(stats.peakUnwrittenBytes > 0, 'the lanes went on before their writes');
+  assert.equal(stats.earlyReleases, 0);
+}
+
+// Two lanes: an early release counts only when its own lane starts a frame
+// before the payload's write ends. Here each lane's next admission waits for
+// its own last write (as a reservation kept until the sink would), while the
+// other lane's frame starts during that write: frames overlap both writes,
+// yet no lane went on before its own, so nothing is counted.
+{
+  const events = [];
+  const stats = {};
+  const writes = new Map();
+  const writeOf = (job) => {
+    if (!writes.has(job)) {
+      let resolve;
+      const promise = new Promise((done) => { resolve = done; });
+      writes.set(job, { promise, resolve });
+    }
+    return writes.get(job);
+  };
+  let calls = 0;
+  const result = await runBatchPipeline([0, 1, 2], {
+    maxParallel: 2,
+    maxUnwrittenBytes: 1000,
+    payloadBytes: () => 10,
+    stats,
+    beforeStart: async () => {
+      const call = calls++;
+      // Lane B starts frame 1 while frame 0 is written; lane A's next
+      // admission (call 2) waits for frame 0's write, lane B's (call 3) for
+      // frame 1's.
+      if (call === 1) await sleep(10);
+      else if (call >= 2) { await writeOf(call - 2).promise; await sleep(2); }
+    },
+    process: async (job) => { events.push(`process:${job}`); await sleep(1); return job; },
+    sink: async (job) => { events.push(`sink:${job}`); await sleep(40); events.push(`written:${job}`); writeOf(job).resolve(); }
+  });
+  assert.equal(result.successCount, 3);
+  assert.ok(events.indexOf('process:1') < events.indexOf('written:0'), events.join());
+  assert.ok(events.indexOf('process:2') < events.indexOf('written:1'), events.join());
+  assert.ok(stats.peakUnwrittenBytes > 0, 'both lanes went on before their writes');
+  assert.equal(stats.earlyReleases, 0, 'no lane started a frame before its own write ended');
 }
 
 // A stalled first sink: the lanes go on only while the waiting payloads fit
@@ -85,7 +161,9 @@ for (const lanes of [1, 2]) {
     sink: async (job) => { await sleep(5); events.push(`written:${job}`); }
   });
   assert.ok(events.indexOf('written:big') < events.indexOf('process:bad'), 'an oversized payload holds its lane');
-  assert.equal(stats.earlyReleases, 2);
+  // 'bad' has no bytes and no write to overlap; 'small' is the last frame.
+  assert.equal(stats.peakUnwrittenBytes, 1);
+  assert.equal(stats.earlyReleases, 0);
 }
 
 // The hidden-job admission still lasts until the payload is written.
@@ -104,6 +182,79 @@ for (const lanes of [1, 2]) {
 }
 
 assert.equal(EXPORT_MAX_UNWRITTEN_BYTES, 512 * 1024 * 1024);
+
+// ---- Part 2 against the memory budget (#258) --------------------------------------
+
+// The reference configuration: 60.4 MP frames on a 16 GiB machine (a 6.44e9
+// budget), each lane admitted by main.js's admitJobItem (the hidden-job gate,
+// then LANE_BYTES_PER_PIXEL x 60.4e6 = 3.02e9 from the budget), a 181 MB
+// payload, 100 ms of processing and a 300 ms write. Byte accounting only: no
+// frame is allocated. A lane that goes on before its write keeps the
+// payload's bytes only, so the next lane fits beside it and frame N + 1
+// starts while frame N is written, with the open photo's 1.7 GB in the ledger
+// and with 0.5 GB. A reservation kept at 3.02e9 until the sink (a release
+// without `early`) makes the next lane wait for that sink in both cases.
+{
+  const mainSource = readFileSync(new URL('./main.js', import.meta.url), 'utf8');
+  const start = /^    async function admitJobItem\(/m.exec(mainSource)?.index;
+  assert.notEqual(start, undefined, 'admitJobItem exists in main.js');
+  const admitSource = mainSource.slice(start, mainSource.indexOf('\n    }', start) + '\n    }'.length);
+  const laneBytes = 60.4e6 * LANE_BYTES_PER_PIXEL;
+  const payloadBytes = 181e6;
+  const run = async ({ retained, early }) => {
+    const log = [];
+    const budget = createMemoryBudget({
+      budgetBytes: budgetFor({ ramBytes: 16 * GIB }),
+      retainedBytes: () => retained,
+      onEvent: (event) => { if (event.type === 'resize') log.push(`resize:${event.previous}->${event.bytes}`); }
+    });
+    const gate = createHiddenJobGate({ isHidden: () => false, limitsApply: () => false, setTimer: () => 0, clearTimer: () => {} });
+    let items = 0;
+    const hiddenJobs = {
+      admit: async (options) => {
+        const release = await gate.admit(options);
+        const item = items++;
+        return () => { log.push(`hidden-release:${item}`); release(); };
+      }
+    };
+    const context = vm.createContext({ hiddenJobs, memoryBudget: budget, Math, Number });
+    vm.runInContext(admitSource, context);
+    const stats = {};
+    const result = await runBatchPipeline([0, 1, 2], {
+      maxParallel: 1,
+      maxUnwrittenBytes: EXPORT_MAX_UNWRITTEN_BYTES,
+      payloadBytes: (payload) => payload.bytes,
+      stats,
+      beforeStart: async ({ signal }) => {
+        const release = await context.admitJobItem({ hiddenBytes: 1, memoryBytes: laneBytes, priority: 'user', label: 'export lane', signal });
+        return early ? release : () => release();
+      },
+      process: async (job) => { log.push(`process:${job}`); await sleep(100); return { job, bytes: payloadBytes }; },
+      sink: async (job) => { log.push(`sink:${job}`); await sleep(300); log.push(`written:${job}`); }
+    });
+    assert.equal(result.successCount, 3);
+    assert.equal(budget.idle, true, 'every reservation is released after its sink');
+    assert.equal(gate.inFlight, 0, 'every hidden-job admission is released after its sink');
+    budget.dispose();
+    return { log, stats };
+  };
+  assert.equal(budgetFor({ ramBytes: 16 * GIB }), 6 * GIB);
+  for (const retained of [1.7e9, 0.5e9]) {
+    const { log, stats } = await run({ retained, early: true });
+    assert.ok(log.indexOf('process:1') < log.indexOf('written:0'), `${retained}: frame 1 starts while frame 0 is written: ${log.join()}`);
+    assert.ok(log.indexOf('process:2') < log.indexOf('written:1'), `${retained}: ${log.join()}`);
+    assert.ok(log.indexOf(`resize:${laneBytes}->${payloadBytes}`) < log.indexOf('process:1'), `${retained}: the lane keeps the payload's bytes: ${log.join()}`);
+    assert.equal(stats.earlyReleases, overlappedWrites(log, 3), 'the overlap count is the overlaps that happened');
+    assert.equal(stats.earlyReleases, 2);
+    // The hidden-job admission lasts until the sink.
+    for (const i of [0, 1, 2]) assert.ok(log.indexOf(`written:${i}`) < log.indexOf(`hidden-release:${i}`), `${retained}: ${log.join()}`);
+
+    const held = await run({ retained, early: false });
+    assert.ok(held.log.indexOf('process:1') > held.log.indexOf('written:0'), `${retained}: at 3.02e9 the next lane waits for the write: ${held.log.join()}`);
+    assert.equal(held.stats.earlyReleases, 0);
+    assert.equal(held.stats.earlyReleases, overlappedWrites(held.log, 3));
+  }
+}
 
 // ---- Part 2: learning barrier ------------------------------------------------------
 

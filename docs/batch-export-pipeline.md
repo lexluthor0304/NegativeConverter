@@ -44,9 +44,12 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
   `docs/hidden-window-jobs.md`, then the memory budget's lane reservation,
   `docs/memory-budget.md`) is awaited before a lane claims its next index
   and released after that index's sink, so a lane held back while the window
-  is hidden or memory is short never blocks the in-order sink. The stages a
-  frame goes through (decode ahead, process, wait for the write) are
-  budgeted apart; see "Stages of a frame" below.
+  is hidden or memory is short never blocks the in-order sink. A lane that
+  goes on before its payload's write keeps only the payload's bytes of its
+  memory reservation (the release's `early`); the hidden-window admission
+  lasts until the sink. The stages a frame goes through (decode ahead,
+  process, wait for the write) are budgeted apart; see "Stages of a frame"
+  below.
 - Each batch owns a pool of conversion workers
   (`createConversionWorkerPool`, kept alive across frames instead of
   restarting per file) and a pool of export workers (`createExportWorkerPool`,
@@ -281,7 +284,16 @@ or the batch drops it, so the budget's other requests see it.
   1703835, ~2.0 GB with #250, ~1.2-1.5 GB now.
 - **Byte cap** (Part 2). A lane is released as soon as its payload fits
   `EXPORT_MAX_UNWRITTEN_BYTES` (one 60 MP TIFF16 is ~362 MB, a JPEG ~7 MB),
-  so the desktop write or the ZIP CRC of frame N overlaps frame N+1.
+  so the desktop write or the ZIP CRC of frame N overlaps frame N+1. Its
+  memory reservation (50 B/px of the batch's largest frame) shrinks to the
+  payload's size then: at 60 MP on 16 GiB two full reservations (6.04e9)
+  leave only 0.4 GB of the 6.44e9 budget for the ledger, so frame N+1's lane
+  would otherwise wait for N's sink. `earlyReleases` (the diagnostics' `last`
+  and the `batchExport` trace) counts the writes a frame overlapped: the lane
+  released before frame N's write started its next frame before N's sink
+  ended. A lane whose next frame starts after that write (a browser download
+  ends in the same task as its sink; a lane still waiting for memory) is not
+  counted, nor is another lane's frame.
   Learned defaults keep a one-lane batch's order: the folder and download
   sinks hand over their `learnFromExport` promise, and a never-analysed
   frame awaits every earlier learning frame's write (`createLearningBarrier`)
@@ -521,7 +533,7 @@ npm run test:smoke  # batch export scenario (ZIP fallback to individual download
 npm run test:smoke -- --gain-map-only  # real-worker 16-bit result and gain map, gain-map requests per export intent
 npm run test:smoke -- --png16-only     # PNG16 band pool in real workers: same bytes for 1/2/6 workers, one worker and the main thread
 npm run test:smoke -- --export-ownership-only  # worker PNG8/JPEG parity, per-export workers, plane hand-off
-npm run test:smoke -- --batch-pipeline-only    # Export All serial vs staged (byte cap, decode-ahead, band pool), banded single export
+npm run test:smoke -- --batch-pipeline-only    # Export All serial vs staged (byte cap, decode-ahead, band pool), banded single export, overlap count of a slow-write ZIP
 node scripts/performance-io-benchmark.mjs /path/to/baseline
 ```
 

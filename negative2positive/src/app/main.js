@@ -11264,8 +11264,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     // An item of a long job: the hidden-job gate first (#241), then the
     // budget, never the other way round: a lane holding memory never waits
-    // on the hidden gate's one item in flight. `memory` is the budget's
-    // handle.
+    // on the hidden gate's one item in flight. The release's `early(bytes)`
+    // is for an item whose frame is gone while its output still waits (an
+    // Export All payload going to its write behind the next frame, #256
+    // Part 2): its memory shrinks to those bytes at once, and the hidden-job
+    // admission lasts until the release. `memory` is the budget's handle.
     async function admitJobItem({ hiddenBytes = 0, memoryBytes = 0, priority = 'user', label = '', signal = null } = {}) {
       const releaseHidden = await hiddenJobs.admit({ bytes: hiddenBytes, signal });
       let handle;
@@ -11278,6 +11281,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const release = () => {
         handle.release();
         releaseHidden();
+      };
+      release.early = (bytes) => {
+        const size = Math.max(0, Number(bytes) || 0);
+        if (size < handle.bytes) handle.resize(size);
       };
       release.memory = handle;
       return release;
@@ -20850,7 +20857,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const lanes = hiddenJobs.safeMode ? 1 : plannedLanes;
       const bytes = await hiddenJobBytesFor(jobs.map(job => job.file));
       // Each lane reserves the lane constant over the batch's largest frame
-      // (#258): the index is not claimed yet when it asks.
+      // (#258): the index is not claimed yet when it asks. A lane that goes
+      // on before its payload's write keeps the payload's bytes only.
       const laneBytes = laneReservationBytes({ pixels: pixelsPerFile });
       // The lanes' own reservations: decode-ahead counts the budget's other
       // holders, and these lanes' frames and payloads apart.
@@ -20888,7 +20896,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           } : {}),
           // Admission happens before a lane claims its next index (#241):
           // the hidden-job gate, then the memory budget; both are released
-          // once the claimed frame's sink has run.
+          // once the claimed frame's sink has run, and the memory shrinks to
+          // the payload when the lane goes on before that (`early`, #256).
           beforeStart: async ({ signal: stop }) => {
             const release = await admitJobItem({
               hiddenBytes: bytes, memoryBytes: laneBytes, priority: 'user', label: 'export lane', signal: stop
@@ -20934,6 +20943,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         activeLongJobs -= 1;
         workers.dispose();
         batchPipelineDiagnostics.last = { mode, lanes, ...stats };
+        // earlyReleases: writes the lane's next frame overlapped (#256 Part 2).
         trace.end({ peakUnwrittenBytes: stats.peakUnwrittenBytes || 0, earlyReleases: stats.earlyReleases || 0,
           decodedAhead: stats.prepare?.taken || 0 });
       }
