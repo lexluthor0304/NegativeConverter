@@ -20675,16 +20675,19 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // footprint within a quarter of the RAM, never below those lanes, which
     // count the RAM too (#258) where the analysis plan's own floor does not:
     // if the analysis plan would run fewer frames or decoders, those lanes
-    // run, each with a decoder of its own (#229 review R2-013). A header-less
-    // RAW takes the size of a decoded file of the same import and extension
-    // (`siblings`), not the unknown-size worst case.
+    // run, each with a decoder of its own (#229 review R2-013). They also run
+    // where the roll-frame worker cannot (no OffscreenCanvas in workers, as
+    // in Catalina's WebKit): every frame is then decoded and measured on the
+    // page, which the analysis footprint does not describe (R2-014). A
+    // header-less RAW takes the size of a decoded file of the same import and
+    // extension (`siblings`), not the unknown-size worst case.
     async function planRollAnalysisLanes(files, siblings = files) {
       const ramBytes = await machineRamBytes();
       // Today's lanes, each with a decoder of its own: the slots do not
       // limit them.
       const lanes = await planBatchLanes(files);
       const today = { decodeSlots: lanes, framesInFlight: lanes, slotBytes: Infinity };
-      if (!(ramBytes > ROLL_ANALYSIS_MIN_RAM_BYTES)) return today;
+      if (!(ramBytes > ROLL_ANALYSIS_MIN_RAM_BYTES) || !rollFrameWorkerUsable()) return today;
       const pinned = Number.parseInt(safeStorageGet('nc_batch_lanes_v1') || '', 10);
       const plan = planRollAnalysis({
         pixels: await importPixelsForRoll(files, { siblings }),
@@ -20743,15 +20746,19 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function createRollAnalysisWorkers(plan, { warm = false } = {}) {
       const frames = createRollFramePool({ size: plan.framesInFlight });
       const slots = createDecodeSlots({ slots: plan.decodeSlots, budgetBytes: plan.slotBytes });
-      // Frames measured on the page: every frame of a roll of scans, only the
-      // odd fallback of a RAW roll (one analyzer then keeps the OpenCV realms
-      // at the frames in flight plus the foreground's).
-      const analyzers = createAutoFrameWorkerPool({ size: warm ? 1 : plan.framesInFlight });
+      // A roll of LibRaw files on a host with the roll-frame worker; a roll
+      // of scans, or any roll without that worker, never uses it.
+      const workerFrames = warm && rollFrameWorkerUsable();
+      // Frames measured on the page: every frame of a roll of scans or of a
+      // host without the roll-frame worker, one lane's analyzer each as
+      // before #252; only the odd fallback of a RAW roll otherwise (one
+      // analyzer then keeps the OpenCV realms at the frames in flight plus
+      // the foreground's).
+      const analyzers = createAutoFrameWorkerPool({ size: workerFrames ? 1 : plan.framesInFlight });
       const releaseIdleHold = analyzeFrameInWorker.holdIdle();
       let disposed = false;
-      // A roll of LibRaw files starts its workers (and OpenCV) ahead of the
-      // first frame; a roll of scans never uses them.
-      if (warm && rollFrameWorkerUsable()) frames.warm(plan.framesInFlight);
+      // Such a roll starts its workers (and OpenCV) ahead of the first frame.
+      if (workerFrames) frames.warm(plan.framesInFlight);
       return {
         frames, slots, analyzers,
         configure(next) {
@@ -23186,6 +23193,25 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         adapter.done();
         throw error;
       });
+    }
+
+    // A roll-analysis frame measured on the page (#252: a scan, a frame the
+    // roll-frame worker cannot take, or a RAW whose worker analysis failed
+    // twice): the shared decode's load (decodeForBackground's options: full
+    // size, defects repaired, shareable planes), inside the lane's memory
+    // claim, settled once the planes are built. A LibRaw decode takes the
+    // lane's decode slot like the worker path's, so no two background
+    // demosaics overlap where the plan shares the slots (#229 review
+    // R2-014). The file is read in this same call chain.
+    async function decodeRollFrameOnPage(file, { signal, context = null, slots = null }) {
+      let rawMetadata = null;
+      const base = await loadFileToImageData(file, {
+        filmStats: true, signal, onMetadata: meta => { rawMetadata = meta; },
+        claim: context?.claim || null, priority: 'background', sharedPlanes: true,
+        ...(slots ? { decodeSlot: slots } : {})
+      });
+      settleRollFrameClaim(context?.claim, base);
+      return { base, rawMetadata };
     }
 
     // Named by the job's first need: the folder-import smoke tells the
@@ -29321,11 +29347,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
               // worker analysis already failed twice (then the page, as before).
               decode: (item, file, context) => {
                 if (!rollFrameWorkerUsable() || (workerFailures.get(item) || 0) >= 2 || !rollFrameDecodable(file)) {
-                  // Inside the lane's memory claim (#258), as the shared decode.
-                  return decodeForBackground(file, context.signal, context.context).then((decoded) => {
-                    settleRollFrameClaim(context.context?.claim, decoded?.base);
-                    return decoded;
-                  });
+                  // Inside the lane's memory claim (#258) and decode slot.
+                  return decodeRollFrameOnPage(file, { signal: context.signal, context: context.context, slots });
                 }
                 const options = rollFrameOptions(item);
                 return decodeRollFrame(file, { ...context, frames, slots, options, optionsKey: rollFrameOptionsKey(options) });

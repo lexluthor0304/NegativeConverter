@@ -19,7 +19,7 @@ import { createRollSampleCache } from './rollSampleCache.js';
 import { reducedTileGeometry, tileGeometryKey } from './reducedGeometry.js';
 import { sanitizeCropRect, rotatedDimensions } from './imageGeometry.js';
 import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
-import { createDecodeSlots, rollAnalysisFootprint } from './batchExportScheduler.js';
+import { createDecodeSlots, rollAnalysisFootprint, planBatchParallelism, planRollAnalysis, ROLL_ANALYSIS_MIN_RAM_BYTES } from './batchExportScheduler.js';
 import { primeFilmStats } from './filmStatsCache.js';
 import { rollSampleSettings } from './rollSample.js';
 
@@ -243,7 +243,7 @@ function fixture({ count = 4, prepared = false, realRoll = false, verdicts = nul
     },
   });
   context.sharedDecodes = createSharedDecodes({ decode: (file, { signal }) => context.decodeForBackground(file, signal) });
-  vm.runInContext([...DISPLAY_SESSION_HELPERS, 'getCurrentQueueItem', 'noteManualEdit', 'pushUndo', 'automaticRollItemKey', 'scheduleAutomaticRollImport', 'createRollAnalysisWorkers', 'decodeRollFrame',
+  vm.runInContext([...DISPLAY_SESSION_HELPERS, 'getCurrentQueueItem', 'noteManualEdit', 'pushUndo', 'automaticRollItemKey', 'scheduleAutomaticRollImport', 'createRollAnalysisWorkers', 'decodeRollFrame', 'decodeRollFrameOnPage',
     'rollAnalysisHalfSize', 'scaleHalfSizeCrop', ...FILM_TYPE_FUNCTIONS,
     'renderFrameAnalysisThumbnail', 'releaseFrameThumbnailWorkers', 'renderSampleTile', 'publishSampleTile', 'renderRollSampleTiles',
     ...(realRoll ? ['runRollAnalysis'] : []),
@@ -1053,6 +1053,120 @@ function workerRoll(f, { analysisFor = () => ({}), dng = true } = {}) {
   assert.deepEqual([...f.decoded].sort(), [1, 2, 3, 4]);
   assert.ok(f.items.every(item => item.settings), 'every frame measured');
   assert.equal(f.groups.length, 1);
+}
+
+// #229 review R2-014: the plan main.js really makes (planRollAnalysisLanes
+// with the export planner's lanes), on a 16 GiB machine with 8 cores.
+function realRollPlan(f, { pixels, worker }) {
+  const GiB = 1024 ** 3;
+  Object.assign(f.context, {
+    navigator: { hardwareConcurrency: 8, deviceMemory: 16 }, desktopMemoryInfoReady: Promise.resolve(),
+    imagePixelsWithSiblings: async () => pixels, importPixelsForRoll: async () => pixels,
+    planBatchParallelism, planRollAnalysis, ROLL_ANALYSIS_MIN_RAM_BYTES
+  });
+  f.context.memoryRuntime.ramBytes = 16 * GiB;
+  vm.runInContext(['planBatchLaneBudget', 'planBatchLanes', 'machineRamBytes', 'planRollAnalysisLanes'].map(functionSource).join('\n'), f.context);
+  f.context.rollFrameWorkerUsable = () => worker;
+  const plans = [];
+  const plan = f.context.planRollAnalysisLanes;
+  f.context.planRollAnalysisLanes = async (...args) => {
+    const next = await plan(...args);
+    plans.push([next.decodeSlots, next.framesInFlight, next.slotBytes]);
+    return next;
+  };
+  const sizes = [];
+  f.context.createAutoFrameWorkerPool = ({ size }) => {
+    sizes.push(size);
+    f.analyzerPools.created++;
+    return { analyze: () => {}, analyzeImport: () => {}, dispose: () => { f.analyzerPools.disposed++; } };
+  };
+  return { plans, analyzerSizes: sizes };
+}
+
+// A loader whose demosaic (between its decode slot, when it has one, and
+// the slot's release) waits for the test, recording how many run at once.
+function gatedDemosaics(f, load = f.context.loadFileToImageData) {
+  const record = { active: 0, peak: 0, gates: [], slotted: [] };
+  f.context.loadFileToImageData = async (file, options = {}) => {
+    record.slotted.push(Boolean(options.decodeSlot));
+    const release = options.decodeSlot ? await options.decodeSlot.acquire({ bytes: 5000 }) : null;
+    record.active++;
+    record.peak = Math.max(record.peak, record.active);
+    const gate = deferred();
+    record.gates.push(gate);
+    await gate.promise;
+    record.active--;
+    release?.();
+    return load(file, options);
+  };
+  record.drain = async (done) => {
+    for (let round = 0; round < 40 && !done(); round++) {
+      for (const gate of record.gates.splice(0)) gate.resolve();
+      await flush();
+    }
+  };
+  return record;
+}
+
+{
+  // A host without the roll-frame worker (no OffscreenCanvas in workers, as
+  // in Catalina's WebKit) decodes and measures every RAW on the page: the
+  // export planner's lanes, each with its own decoder and analyzer, as
+  // before #252. At 60 MP on 16 GiB that is one lane, so no two full page
+  // decodes overlap (the analysis plan alone: 2 frames on 1 decoder, whose
+  // page decodes overlapped without a slot).
+  const f = fixture({ count: 5 });
+  for (const item of f.items) item.file.name = `${item.id}.dng`;
+  const { plans, analyzerSizes } = realRollPlan(f, { pixels: 60.4e6, worker: false });
+  const demosaics = gatedDemosaics(f);
+  f.context.scheduleAutomaticRollImport(f.items);
+  await f.fire(1200);
+  await demosaics.drain(() => f.items.every(item => item.settings));
+  assert.ok(f.items.every(item => item.settings), 'every frame measured');
+  assert.deepEqual(plans[0], [1, 1, Infinity], 'the export planner\'s lanes');
+  assert.equal(demosaics.peak, 1, 'no two page decodes overlap');
+  assert.deepEqual(analyzerSizes, [1]);
+  // 24 MP: three lanes, each with its own decoder and frame analyzer.
+  const g = fixture({ count: 5 });
+  for (const item of g.items) item.file.name = `${item.id}.dng`;
+  const real = realRollPlan(g, { pixels: 24e6, worker: false });
+  g.context.scheduleAutomaticRollImport(g.items);
+  await g.fire(1200);
+  assert.ok(g.items.every(item => item.settings));
+  const lanes = planBatchParallelism({ hardwareConcurrency: 8, deviceMemory: 16, ramBytes: 16 * 1024 ** 3, pixelsPerFile: 24e6, fileCount: 4 });
+  assert.equal(lanes, 3);
+  assert.deepEqual(real.plans[0], [3, 3, Infinity]);
+  assert.deepEqual(real.analyzerSizes, [3], 'one frame analyzer per lane, as before #252');
+}
+
+{
+  // The same machine with the worker plans 2 frames in flight on one decode
+  // slot. A RAW whose worker analysis failed twice is decoded on the page
+  // through that slot too (#229 review R2-014): no two demosaics overlap,
+  // on the worker path or on the page.
+  const f = fixture({ count: 5 });
+  const failures = new Map();
+  const { pageReads } = workerRoll(f, {
+    analysisFor: id => {
+      failures.set(id, (failures.get(id) || 0) + 1);
+      return failures.get(id) <= 2 ? { detectionError: 'OpenCV aborted' } : {};
+    }
+  });
+  const { plans, analyzerSizes } = realRollPlan(f, { pixels: 60.4e6, worker: true });
+  const demosaics = gatedDemosaics(f);
+  const warn = console.warn; console.warn = () => {};
+  try {
+    f.context.scheduleAutomaticRollImport(f.items);
+    await f.fire(1200);
+    await demosaics.drain(() => f.items.every(item => item.settings));
+  } finally { console.warn = warn; }
+  assert.ok(f.items.every(item => item.settings), 'every frame measured');
+  assert.equal(plans[0][0], 1);
+  assert.equal(plans[0][1], 2);
+  assert.deepEqual(analyzerSizes, [1]);
+  assert.deepEqual([...pageReads].sort(), [1, 2, 3, 4], 'each frame ends on the page after two worker failures');
+  assert.ok(demosaics.slotted.every(Boolean), 'every decode, worker or page, takes the lane\'s slot');
+  assert.equal(demosaics.peak, 1, 'no two demosaics overlap');
 }
 
 {

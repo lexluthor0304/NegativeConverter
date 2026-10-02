@@ -415,7 +415,11 @@ Roll analysis has its own lane plan and its own per-frame worker (#252):
   plan's own floor does not, so where the analysis plan would run fewer
   frames or decoders (24 MP on 8 cores and 24 GiB: 3 and 3 against 4 lanes),
   the export planner's lanes run, each with its own decoder
-  (`planRollAnalysisLanes`). `nc_batch_lanes_v1` stays the ceiling. A RAW whose
+  (`planRollAnalysisLanes`). So do they, each lane with its own frame
+  analyzer as before #252, on a host where the roll-frame worker cannot run
+  (no `OffscreenCanvas` in workers, as in Catalina's WebKit): every frame is
+  then decoded and measured on the page, which the analysis footprint does
+  not describe. `nc_batch_lanes_v1` stays the ceiling. A RAW whose
   header yields no size takes the decoded size of a same-extension file of
   the import (the foreground photo records its size too), and pass 1 plans
   again after its first frame. The memory budget (#258) reserves each lane
@@ -426,9 +430,11 @@ Roll analysis has its own lane plan and its own per-frame worker (#252):
   lane opens the file and LibRaw's metadata while another demosaics, then
   reserves its frame's real decode bytes (`loadRawFile`'s `decodeSlot`) and
   gives the slot back as soon as `imageData()` returns; a frame larger than
-  planned waits there instead of overcommitting. With one slot no two
-  background demosaics overlap, and frame N is measured while frame N+1
-  decodes. (Export decode-ahead, #256, admits its prepared decodes
+  planned waits there instead of overcommitting. A RAW the lane decodes on
+  the page (its worker analysis failed twice) takes the same slot
+  (`decodeRollFrameOnPage`). With one slot no two background demosaics
+  overlap, and frame N is measured while frame N+1 decodes. (Export
+  decode-ahead, #256, admits its prepared decodes
   separately: `planDecodeAhead` and the prepare stage's one decoder.)
 - **Roll-frame worker.** One `workers/rollFrameWorker.js` per frame in
   flight, created once per roll and held across retry attempts
