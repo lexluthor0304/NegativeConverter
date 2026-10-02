@@ -156,6 +156,16 @@ and every count equals a full recount.
   recomputed (`updateDisplayPreviewRect`, exact), the WebGL source texture gets
   a `texSubImage2D` of that rect, the tint cells over the mask box are put on
   the display overlay, and the histogram source is rebuilt on idle.
+- **Repaired preview (#237 phase 2).** The stroke hands its mask box to
+  `rememberRepairMasks(source, patch.maskRect)`, which pools only that box into
+  the kept display-size pool (`repoolRepairMaskRect`: equal to pooling the
+  whole mask again). The fill itself is made again once input pauses for
+  300 ms, from the display negative the preview repair worker kept, so the
+  stroke scans no whole mask, asks the preview worker for nothing and posts
+  nothing; the fill after it posts the display-size mask only (#229 review
+  R1-104, `repairedPreviewStroke.test.mjs`). An undo or redo of a stroke
+  leaves the fill as it was, as before; the next stroke's fill pools the whole
+  mask again, since `revision` moved by more than that stroke.
 - **Tint and brush feedback (#253, #254).** The mask is shown on
   `#displayOverlay`, a canvas in the transform wrapper at the display frame's
   size (at most the display-preview cap), so zoom and pan only move it and the
