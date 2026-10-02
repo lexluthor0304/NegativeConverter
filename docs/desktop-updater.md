@@ -27,6 +27,19 @@ capability out of the ACL.
    appears. If `updater.json` has no signed entry for the running build, or
    the download fails, the app falls back to the download page.
 
+## Where the manifests live
+
+The release workflows upload `latest.json` and `updater.json` to
+`https://download.neoanaloglab.com/negative-converter/release/` (the R2
+bucket's public origin, which answers with `Access-Control-Allow-Origin: *`)
+and nowhere else. `main.js`'s daily check and `download.html` read
+`latest.json` there and `plugins.updater.endpoints` names `updater.json`
+there; `scripts/check-updater-manifest.mjs` fails when `main.js` or
+`tauri.conf.json` names another URL. The site has no copy, so there is no
+fallback: when the bucket cannot be reached, the daily check gives up
+quietly and runs again a day later, and the download page shows its Mac App
+Store and GitHub Releases links.
+
 ## Manifest keys
 
 `.github/scripts/r2_sync_release.py` derives `updater.json` from the release

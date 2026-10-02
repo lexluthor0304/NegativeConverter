@@ -316,9 +316,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     const DESKTOP_UPDATE_LAST_SEEN_LATEST_KEY = 'nc_desktop_update_last_seen_latest';
     const DESKTOP_UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
     const DESKTOP_UPDATE_FETCH_TIMEOUT_MS = 5000;
+    // Only the release bucket serves latest.json (the release workflows upload
+    // it there, scripts/check-updater-manifest.mjs); the site has no copy.
     const DESKTOP_UPDATE_MANIFEST_URLS = [
-      'https://download.neoanaloglab.com/negative-converter/release/latest.json',
-      'https://negative-converter.tokugai.com/negative-converter/release/latest.json'
+      'https://download.neoanaloglab.com/negative-converter/release/latest.json'
     ];
     const DESKTOP_UPDATE_PAGE_URL = 'https://negative-converter.tokugai.com/download.html';
     const LENSFUN_PACKAGE_VERSION = '0.1.3';

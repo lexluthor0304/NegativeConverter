@@ -4,8 +4,9 @@
 // out, URLs are absolute and percent-encoded, and latest.json keeps offering
 // installers only.
 //
-// Then the site endpoints the desktop app uses: the feedback POST reaches the
-// function without a redirect.
+// Then the endpoints the clients use: the feedback POST reaches the function
+// without a redirect, and every URL the desktop app reads a manifest from is
+// one the release workflows publish it at.
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -132,3 +133,52 @@ const connectSrc = String(tauriConf?.app?.security?.csp || '').split(';')
   .find(([name]) => name === 'connect-src')?.slice(1) || [];
 assert.ok(connectSrc.includes(SITE_ORIGIN), `tauri.conf.json: connect-src must allow ${SITE_ORIGIN}`);
 console.log(`feedback endpoint: ok (desktop ${desktopFeedback}, web ${webFeedback})`);
+
+// Release manifests (#229 review R2-048). The release workflows upload
+// latest.json and updater.json to <public base>/<prefix>/ of the release
+// bucket and nowhere else, so that is the only place a client may read them
+// from: a fallback elsewhere can only fail (the site's copy never existed,
+// and its 404 carries no CORS header either).
+function publishedManifestDirs() {
+  const dirs = new Set();
+  for (const workflow of ['desktop-release.yml', 'r2-sync.yml']) {
+    const calls = read('.github', 'workflows', workflow).split('.github/scripts/r2_sync_release.py').slice(1);
+    assert.ok(calls.length, `${workflow}: no r2_sync_release.py call`);
+    for (const call of calls) {
+      // The call's own lines, up to the first one that does not continue.
+      const lines = [];
+      for (const line of call.split('\n')) {
+        lines.push(line);
+        if (!line.trimEnd().endsWith('\\')) break;
+      }
+      const args = lines.join(' ');
+      const prefix = args.match(/--prefix\s+"([^"]+)"/)?.[1];
+      const base = args.match(/--public-base-url\s+"([^"]+)"/)?.[1];
+      assert.ok(prefix && base, `${workflow}: r2_sync_release.py is called without an explicit --prefix and --public-base-url`);
+      dirs.add(`${base.replace(/\/+$/, '')}/${prefix.replace(/^\/+|\/+$/g, '')}`);
+    }
+  }
+  return [...dirs];
+}
+const manifestDirs = publishedManifestDirs();
+const publishedAt = (name) => manifestDirs.map((dir) => `${dir}/${name}`);
+function assertPublished(urls, name, where) {
+  assert.ok(urls.length, `${where}: no ${name} URL`);
+  for (const url of urls) {
+    assert.ok(publishedAt(name).includes(url),
+      `${where}: ${url} does not serve ${name}; the release workflows publish it at ${publishedAt(name).join(', ')}`);
+  }
+}
+
+const desktopList = mainJs.match(/const DESKTOP_UPDATE_MANIFEST_URLS = \[([^\]]*)\];/)?.[1];
+assert.ok(desktopList !== undefined, 'main.js: `const DESKTOP_UPDATE_MANIFEST_URLS = [...];` not found');
+assert.equal(desktopList.replace(/'[^']*'/g, '').replace(/\/\/[^\n]*/g, '').replace(/[\s,]/g, ''), '',
+  'main.js: DESKTOP_UPDATE_MANIFEST_URLS must list plain string URLs');
+const desktopManifestUrls = [...desktopList.matchAll(/'([^']*)'/g)].map((m) => m[1]);
+assertPublished(desktopManifestUrls, 'latest.json', 'main.js DESKTOP_UPDATE_MANIFEST_URLS');
+for (const url of desktopManifestUrls) {
+  const { origin } = new URL(url);
+  assert.ok(connectSrc.includes(origin), `tauri.conf.json: connect-src must allow ${origin}`);
+}
+assertPublished(tauriConf?.plugins?.updater?.endpoints || [], 'updater.json', 'tauri.conf.json plugins.updater.endpoints');
+console.log(`release manifests: ok (${publishedAt('latest.json').join(', ')})`);
