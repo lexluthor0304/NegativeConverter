@@ -24537,6 +24537,17 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }
       return releaseAiRepairSession();
     }
+    // Smoke tests (?debug=1): the session's state, the release #236's idle
+    // rule and #241's hidden window make (without the five-minute wait), and
+    // a load on a chosen provider (the WASM parity runs).
+    if (DEBUG_UI) {
+      window.__ncAiRepair = {
+        state: () => ({ status: aiRepair.status, provider: aiRepair.provider, revision: aiRepair.revision,
+          released: aiRepair.released, tiles: aiRepair.tiles }),
+        release: () => releaseAiRepairSession(),
+        load: (prefer) => loadAiRepairModel(DEFAULT_MODEL_URL, { prefer, refresh: false })
+      };
+    }
 
     let brushRepairWaiters = [];
 

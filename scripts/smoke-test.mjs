@@ -57,6 +57,7 @@ import { runRawPostDecodeSmoke, runRawParitySmoke } from './raw-post-decode-smok
 import { runRollFrameSmoke } from './roll-frame-smoke.mjs';
 import { runRawDecodeGateSmoke } from './raw-decode-gate-smoke.mjs';
 import { runExportOwnershipSmoke } from './export-ownership-smoke.mjs';
+import { runRepairReleaseSmoke } from './repair-release-smoke.mjs';
 import { runBatchPipelineSmoke } from './batch-pipeline-smoke.mjs';
 import { runFirstPhotoSmoke } from './first-photo-smoke.mjs';
 import { runImportParitySmoke } from './import-parity-smoke.mjs';
@@ -531,6 +532,12 @@ if (process.argv.includes('--folder-only')) {
 }
 if (process.argv.includes('--export-ownership-only')) {
   await runExportOwnershipSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
+  if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
+  console.log('SMOKE PASS');
+  process.exit(0);
+}
+if (process.argv.includes('--repair-release-only')) {
+  await runRepairReleaseSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port: PORT, root: ROOT });
   if (pageErrors.filter(e => !/ResizeObserver loop/.test(e)).length) fail(pageErrors.join('\n'));
   console.log('SMOKE PASS');
   process.exit(0);
