@@ -251,14 +251,16 @@ locked (`studioBusy`). The final settings are then built in the old order
 provisional one only the detection descriptions are applied, otherwise the
 photo is rendered once more. A provisional photo is never persisted, cached
 as a session snapshot or read by roll analysis: leaving it mid-tail keeps its
-decoded base only, and its settings stay as they were.
+decoded base only, and its settings stay as they were. Its tile keeps the
+provisional render but not the settings key it was stamped with, so it is
+pending again and the lane renders the photo's own recipe.
 
 A large RAW may open from a half-size stand-in while its exact decode runs
 behind it (two-stage-raw-import.md, #255). Until that decode is installed and
 converted the photo is provisional in the same sense and longer: no session
 snapshot or base is kept of the stand-in, nothing is persisted, and leaving
 keeps only what the user changed (a photo without a recipe carries those
-edits as `pendingEdits`).
+edits as `pendingEdits`); its tile loses its settings key the same way.
 Global history, color-console and zoom shortcuts cannot change the outgoing
 photo while another target is loading; the history controls are locked too.
 

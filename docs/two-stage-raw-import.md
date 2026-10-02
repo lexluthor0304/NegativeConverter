@@ -184,7 +184,9 @@ quiet.
   export (`processFileWithSettings`), roll analysis, Auto Frame Selected and
   the flat field compute the automatic fields as for a fresh file. They apply
   the user's geometry before the detections and the other edits on top.
-  `photoSettingsKey` includes the edits of a photo without a recipe.
+  `photoSettingsKey` includes the edits of a photo without a recipe. The
+  photo's tile keeps the stand-in's render without its settings key, so the
+  lane renders the photo again.
 
 ## Flagged approximations (display only, never exported)
 

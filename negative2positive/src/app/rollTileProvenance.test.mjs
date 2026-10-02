@@ -1,10 +1,12 @@
 // Tile provenance across an automatic roll import (#229 review: R1-029,
-// R1-033), on the real main.js functions:
+// R1-033, R1-036), on the real main.js functions:
 // 1. a frame's per-frame `analysis` tile is the roll's own tile recipe, so
 //    the commit's tile of the same recipe has the same pixels;
 // 2. undo and redo of a roll commit bring each tile back with its kind and
 //    settings key, so a restored camera-JPEG tile is neither counted as
-//    converted nor used as a colour-match target.
+//    converted nor used as a colour-match target;
+// 3. a photo left before its import detections (or its full decode) settled
+//    keeps no settings key on its provisional tile, so the lane renders it.
 // Run with: node negative2positive/src/app/rollTileProvenance.test.mjs
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -232,6 +234,53 @@ function negative(width, height, seed = 17) {
   const snapshot = c.captureSnapshot('rollFilmType');
   assert.deepEqual(snapshot.settings.rollTransaction.frames.map(frame => [frame.thumbnailKind, frame.thumbnailKey]),
     h.state.fileQueue.map(item => [item.thumbnailKind, item.thumbnailKey]), 'a film-type transaction records the tiles\' kind and key too');
+}
+
+// ---- 3. R1-036: a photo left before its preparation settled ---------------
+// The provisional render paints the active tile and stamps it with the
+// item's settings key while the item's settings are still null (or are not
+// what the window rendered). Leaving keeps those settings, so the lane must
+// render the frame's own recipe instead of counting that tile as ready.
+for (const window of ['detection tail (#236)', 'two-stage stand-in (#255)', 'settled (control)']) {
+  const { createHarness, makeBase } = await import('./geometryTestHarness.mjs');
+  const h = createHarness(makeBase(40, 30)), c = h.context;
+  const left = { id: 'a', file: { name: 'a.nef' }, settings: null, isDirty: true };
+  const next = { id: 'b', file: { name: 'b.nef' }, settings: null };
+  Object.assign(h.state, { fileQueue: [left, next], currentFileIndex: 0, loadedFile: left.file, currentStep: 3 });
+  const thumbnails = [];
+  Object.assign(h.target, {
+    automaticRollImportRunning: false, automaticRollPendingItems: new Set(),
+    getCurrentQueueItem: () => (h.state.fileQueue[h.state.currentFileIndex]?.file === h.state.loadedFile ? h.state.fileQueue[h.state.currentFileIndex] : null),
+    studioThumbnailInputs: new WeakMap(), rasterIdentities: new WeakMap(), nextRasterIdentity: 1, convertedPixelsRevision: 0,
+    createAdjustedPhotoPreview: image => image, thumbnailDataUrl: image => { thumbnails.push(image); return `data:tile:${thumbnails.length}`; },
+    twoStageDiagnostics: { leftEarly: 0 }, hasWindowEdits: edits => Boolean(edits && Object.keys(edits).length),
+    // A settled photo is persisted on leave, which restamps its tile.
+    persistCurrentFileSettings: () => { left.settings = { filmType: 'color', exposure: 4 }; c.updateStudioThumbnail(); return true; },
+  });
+  vm.runInContext(['updateStudioThumbnail', 'studioThumbnailSignature', 'rasterIdentity', 'currentConvertedPreviewSource',
+    'laneTileWanted', 'leaveProvisionalPhoto'].map(functionSource).join('\n'), c);
+  // The positive on screen: the provisional render, or the settled one.
+  h.state.processedImageData = makeBase(40, 30, 9);
+  if (window.startsWith('detection')) left.provisional = { wasDirty: false };
+  if (window.startsWith('two-stage')) h.state.provisional = { item: left, swapped: false, settledSnapshot: null, start: { fresh: true } };
+  if (window.startsWith('settled')) left.settings = { filmType: 'color', exposure: 4 };
+  c.updateStudioThumbnail();
+  const tile = left.thumbnail;
+  assert.equal(left.thumbnailKind, 'processed', `${window}: the active tile shows the photo's positive`);
+  assert.equal(left.thumbnailKey, c.photoSettingsKey(left), `${window}: stamped with the item's settings key`);
+
+  await c.switchToFile(1);
+  assert.equal(h.state.currentFileIndex, 1, `${window}: the next photo is opened`);
+  assert.equal(left.thumbnail, tile, `${window}: the left photo keeps its tile image`);
+  if (window.startsWith('settled')) {
+    assert.equal(c.laneTileWanted(left), false, 'a settled photo left with its recipe keeps a ready tile');
+    continue;
+  }
+  assert.equal(left.settings, null, `${window}: its settings stay as they were`);
+  assert.equal(left.provisional, undefined);
+  assert.equal(left.thumbnailKey, null, `${window}: no settings key describes the provisional render`);
+  assert.equal(c.laneTileWanted(left), true, `${window}: the lane renders the photo's own recipe`);
+  assert.equal(left.thumbnailKind, 'processed', `${window}: still a converted look, never replaced by a lower rank`);
 }
 
 console.log('roll tile provenance tests passed');

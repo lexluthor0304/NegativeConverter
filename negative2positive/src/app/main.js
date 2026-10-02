@@ -20676,12 +20676,19 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         leavingItem.isDirty = leavingItem.provisional.wasDirty;
         if (rememberPhotoBase(leavingItem)) released = leavingItem;
         delete leavingItem.provisional;
+        // Its tile shows the provisional render, stamped with the item's
+        // settings key although no persist gives the item those settings:
+        // it keeps its image and rank, and is pending again, so the lane
+        // renders the photo's own recipe.
+        leavingItem.thumbnailKey = null;
       } else if (leavingItem && state.provisional?.item === leavingItem && leavingItem.file === state.loadedFile) {
         // Left before its full decode was installed and converted (#255):
         // only what the user changed in the window is kept, and only a full
-        // base is (after the swap).
+        // base is (after the swap). Its tile is the stand-in's render (see
+        // above).
         leaveProvisionalPhoto(leavingItem);
         if (rememberPhotoBase(leavingItem)) released = leavingItem;
+        leavingItem.thumbnailKey = null;
       } else if (leavingItem && leavingItem.file === state.loadedFile
         && (leavingItem.isDirty || leavingItem.settings || state.currentStep >= 3)) {
         persistCurrentFileSettings({ silent: true, force: true });
