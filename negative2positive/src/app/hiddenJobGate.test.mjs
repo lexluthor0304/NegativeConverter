@@ -9,7 +9,8 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
 const GB = 1e9;
 
 function harness({ limits = true, resident = 0, hidden = false } = {}) {
-  const env = { hidden, limits, resident, time: 0, timers: new Map(), nextTimer: 0, changes: [], hiddenAdmits: 0, graceExpired: 0, idle: 0 };
+  const env = { hidden, limits, resident, time: 0, timers: new Map(), nextTimer: 0, changes: [], hiddenAdmits: 0, graceExpired: 0, idle: 0,
+    budgetHolds: 0, log: [], shed: null };
   env.gate = createHiddenJobGate({
     isHidden: () => env.hidden,
     limitsApply: () => env.limits,
@@ -17,10 +18,12 @@ function harness({ limits = true, resident = 0, hidden = false } = {}) {
     now: () => env.time,
     setTimer: (fn, ms) => { const id = ++env.nextTimer; env.timers.set(id, { fn, at: env.time + ms }); return id; },
     clearTimer: id => env.timers.delete(id),
-    onChange: status => env.changes.push(status.paused),
+    onChange: status => { env.changes.push(status.paused); env.log.push(status.paused ? 'paused' : 'resumed'); },
     onHiddenAdmit: () => { env.hiddenAdmits += 1; },
     onGraceExpired: () => { env.graceExpired += 1; },
-    onIdle: () => { env.idle += 1; }
+    onIdle: () => { env.idle += 1; },
+    // What a page sheds before an item is held for its bytes (`env.shed`).
+    onBudgetHold: () => { env.budgetHolds += 1; env.log.push('shed'); env.shed?.(); }
   });
   env.hide = () => { env.hidden = true; env.gate.visibilityChanged(); };
   env.show = () => { env.hidden = false; env.gate.visibilityChanged(); };
@@ -112,6 +115,7 @@ assert.equal(estimateHiddenJobBytes(NaN, NaN), 0);
   assert.equal(held.settled, false, '0.73 + 3.0 GB does not fit 3.3 GB');
   assert.equal(env.gate.paused, true);
   assert.deepEqual(env.changes, [true], 'the pause is announced once');
+  assert.deepEqual(env.log, ['shed', 'paused'], 'and only after the page was asked to shed');
   env.show();
   await tick();
   assert.equal(held.settled, true, 'visible again releases the waiting item at once');
@@ -135,6 +139,49 @@ assert.equal(estimateHiddenJobBytes(NaN, NaN), 0);
   held.value();
   const small = await env.gate.admit({ bytes: 1 * GB });
   small();
+}
+
+// #229 review R1-053: before an item is held for its bytes the page sheds
+// (caches, idle workers), and the item is checked again: what was shed can
+// let it start, with no pause announced. Within the grace period, or behind a
+// running item, nothing is shed for it.
+{
+  const env = harness({ resident: 2.5 * GB });
+  env.hide();
+  const running = await env.gate.admit({ bytes: 1.2 * GB });
+  const queued = track(env.gate.admit({ bytes: 1.2 * GB }));
+  await tick();
+  assert.equal(env.budgetHolds, 0, 'one-in-flight and the grace period hold nothing for bytes');
+  env.advance(HIDDEN_GRACE_MS);
+  env.shed = () => {
+    env.resident = 1.9 * GB;
+    // A shed asks for a recheck itself: that is this same pass.
+    env.gate.recheck();
+  };
+  running();
+  await tick();
+  assert.equal(queued.settled, true, '1.9 + 1.2 GB fits once the page has shed');
+  assert.equal(env.budgetHolds, 1, 'one shed for the item');
+  assert.deepEqual(env.changes, [], 'and no pause');
+  queued.value();
+  // Still over after the shed: held, and the pause follows the shed.
+  env.resident = 2.5 * GB;
+  env.shed = () => { env.resident = 2.4 * GB; };
+  const held = track(env.gate.admit({ bytes: 1.2 * GB }));
+  await tick();
+  assert.equal(held.settled, false, '2.4 + 1.2 GB still does not fit');
+  assert.deepEqual(env.log, ['shed', 'shed', 'paused']);
+  assert.equal(env.gate.status().heldBytes, 1.2 * GB);
+  // Every later check sheds once more before it keeps the item held.
+  env.gate.recheck();
+  assert.equal(env.budgetHolds, 3);
+  assert.deepEqual(env.changes, [true], 'the pause is announced once');
+  env.shed = () => { env.resident = 2 * GB; };
+  env.gate.recheck();
+  await tick();
+  assert.equal(held.settled, true, 'a later shed that makes room admits it');
+  assert.deepEqual(env.changes, [true, false]);
+  held.value();
 }
 
 // Hiding again restarts the grace period (WebKit restarts its 8-minute delay too).

@@ -14,8 +14,9 @@
  * - hidden on macOS WebKit: one item in flight across all callers; for the
  *   first HIDDEN_GRACE_MS the active 8 GiB limit still applies, so no byte
  *   check; after that only when resident + estimated bytes fit HIDDEN_BUDGET,
- *   otherwise the item waits until the window is visible again or its signal
- *   aborts (running items finish);
+ *   checked again after the caller shed what it can (onBudgetHold), otherwise
+ *   the item waits until the window is visible again or its signal aborts
+ *   (running items finish);
  * - hidden on Chromium or WebKitGTK: the normal plan (no per-renderer limit
  *   for hidden pages there).
  *
@@ -91,6 +92,9 @@ function abortError() {
  * @param {() => void} [options.onGraceExpired] hidden for graceMs
  * @param {() => void} [options.onIdle] the last admitted item was released and
  *   nothing waits (a job ended)
+ * @param {() => void} [options.onBudgetHold] before an item is held back for
+ *   its bytes: shed what the hidden window does not need. The gate then checks
+ *   that item again, so what was shed can let it start.
  */
 export function createHiddenJobGate({
   isHidden,
@@ -104,7 +108,8 @@ export function createHiddenJobGate({
   onChange = () => {},
   onHiddenAdmit = () => {},
   onGraceExpired = () => {},
-  onIdle = () => {}
+  onIdle = () => {},
+  onBudgetHold = () => {}
 } = {}) {
   if (typeof isHidden !== 'function') throw new TypeError('createHiddenJobGate needs isHidden()');
   const waiters = [];
@@ -156,9 +161,18 @@ export function createHiddenJobGate({
     pumping = true;
     try {
       let held = false;
+      let shed = false;
       while (waiters.length) {
         const waiter = waiters[0];
-        const reason = holdReason(waiter.bytes);
+        let reason = holdReason(waiter.bytes);
+        // The resident bytes can include caches and idle workers that are
+        // only shed on admission: shed them first, once per pass (#229
+        // review R1-053). A recheck the shed asks for is this pass.
+        if (reason === 'budget' && !shed) {
+          shed = true;
+          onBudgetHold();
+          reason = holdReason(waiter.bytes);
+        }
         if (reason) { held = reason === 'budget'; break; }
         waiters.shift();
         waiter.signal?.removeEventListener?.('abort', waiter.onAbort);

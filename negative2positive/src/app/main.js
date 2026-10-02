@@ -400,7 +400,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       onHiddenAdmit: () => shedHiddenJobMemory(),
       onGraceExpired: () => shedHiddenJobMemory(),
       // A job that ends while hidden leaves nothing idle behind.
-      onIdle: () => shedHiddenJobMemory()
+      onIdle: () => shedHiddenJobMemory(),
+      // Nor does an item held back for its bytes, first (R1-053).
+      onBudgetHold: () => shedHiddenJobMemory()
     });
     // One memory budget for the whole renderer (#258; see "Memory budget"
     // below): every full-resolution decode, batch lane and background frame
