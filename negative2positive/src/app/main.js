@@ -16932,6 +16932,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         },
         diagnostics: () => structuredClone(state.autoFrame.lastDiagnostics),
         whiteBalance: () => ({ wbR: state.wbR, wbG: state.wbG, wbB: state.wbB, wbAutoConfidence: state.wbAutoConfidence }),
+        // The 16-bit plane of the frame on screen (#233): kept in the preview
+        // worker, on its way back, or attached.
+        plane: () => ({ retained: Boolean(corePreviewRetained), committing: Boolean(corePreviewCommit),
+          attached: Boolean(state.processedImageData?.__image16), preview: Boolean(state.processedImageDataIsPreview) }),
         fullResolution: () => Boolean(state.processedImageData) && !state.processedImageDataIsPreview && !state.fullResolutionPending,
         expiredAnalysis: () => (state.expiredAnalysis ? JSON.parse(JSON.stringify(state.expiredAnalysis)) : null),
         // The open photo's import record (R1-034): an edit, the automatic

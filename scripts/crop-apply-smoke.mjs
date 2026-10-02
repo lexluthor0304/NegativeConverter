@@ -12,7 +12,11 @@
 //   with the worker forced to fail it falls back to the page's OpenCV with
 //   the same analysis and one warning;
 // - an edit made while the detection runs leaves the exports, and those after
-//   undoing it, as waiting for a hit would (runEditWhileDetecting).
+//   undoing it, as waiting for a hit would (runEditWhileDetecting);
+// - the gray-point click and one-click colour correction made while the
+//   detection runs, or right after a slider release while the frame's 16-bit
+//   plane is still in the preview worker, wait for them and export what the
+//   same clicks made after waiting export (runMeasureWhileWaiting).
 
 // Imports the synthetic negative without auto crop, in a page expression: an
 // orange rebate around a dark, textured frame.
@@ -161,6 +165,7 @@ export async function runCropApplySmoke({ send, evaluate, waitFor, wait, fail, i
   console.log('ok: colour correct measured in the worker; a forced worker failure falls back to the page with the same analysis and one warning');
 
   await runEditWhileDetecting({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port });
+  await runMeasureWhileWaiting({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port });
 }
 
 // An edit made while the crop-area detection runs (R1-070, R1-072, R1-134).
@@ -292,4 +297,185 @@ async function runEditWhileDetecting({ send, evaluate, waitFor, wait, fail, inst
     }
   }
   console.log(`ok: an edit made while the detection ran (a magenta drag across the hit) exports, and after undo exports, the same PNG8 and TIFF16 as one made after it (${atOnce.editedFiles.tiff16.sha256.slice(0, 12)}, ${atOnce.undoneFiles.tiff16.sha256.slice(0, 12)})`);
+}
+
+// Measurements made while their inputs are pending (R1-023, R1-071). Each run
+// makes one of the two measurements (the gray-point click, one-click colour
+// correction) while Apply's crop-area detection is held, and the other right
+// after a core exposure release while the preview worker's plane commit is
+// held; the fixture is "large" (?largeImagePixels), so the display preview
+// stays the frame both measure, as on a 60 MP scan. The clicks wait (Studio
+// busy, nothing measured) until the request is let go; the settings and the
+// PNG8 and TIFF16 exports then equal those of the same clicks made after the
+// hit and after the plane is back. Core exposure, the gray point and the
+// rescue are not learned defaults, so no run teaches the next one.
+async function runMeasureWhileWaiting({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port }) {
+  const cropMode = `document.getElementById('canvasContainer').classList.contains('crop-mode')`;
+  const view = `({ diagnostics: window.__ncAnalysis.diagnostics(), whiteBalance: window.__ncAnalysis.whiteBalance(),
+    expired: window.__ncAnalysis.expiredAnalysis(), rescue: document.getElementById('expiredEnabled').checked,
+    exposure: document.getElementById('coreExposure').value, sampling: document.getElementById('sampleWBBtn').classList.contains('active') })`;
+  const exportOnce = async (label, format, depth) => {
+    const index = await evaluate(`(async () => {
+      document.querySelector('.format-btn[data-format="${format}"]').click();
+      const depth = document.querySelector('.bitdepth-btn[data-bitdepth="${depth}"]');
+      for (let i = 0; i < 50 && depth && depth.disabled && !depth.classList.contains('disabled'); i++) await new Promise(r => setTimeout(r, 20));
+      if (depth && !depth.classList.contains('disabled')) depth.click();
+      if (document.querySelector('.bitdepth-btn.active')?.dataset.bitdepth !== '${depth}') return null;
+      const index = window.__measureProbe.downloads.length;
+      document.getElementById('exportSingleBtn').click();
+      return index;
+    })()`);
+    if (index === null) fail(`${label}: could not select ${format} ${depth}-bit`);
+    await waitFor(label, `window.__measureProbe.downloads.length > ${index} && !document.getElementById('exportSingleBtn').disabled && !document.body.dataset.studioBusy`, 180_000);
+    return evaluate(`(async () => {
+      const blob = await window.__measureProbe.downloads[${index}];
+      const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer()));
+      return { type: blob.type, size: blob.size, sha256: Array.from(digest, b => b.toString(16).padStart(2, '0')).join('') };
+    })()`);
+  };
+  // The gray-point click lands on the photo at the same place in every run.
+  const measure = async kind => {
+    if (kind === 'colourCorrect') {
+      await evaluate(`document.getElementById('studioTab-edit').click(); document.getElementById('studioColorCorrect').click()`);
+      return;
+    }
+    const point = await evaluate(`(() => {
+      document.getElementById('studioTab-edit').click();
+      document.getElementById('sampleWBBtn').click();
+      const gl = document.getElementById('glCanvas');
+      const el = gl.style.display !== 'none' && gl.getBoundingClientRect().width > 0 ? gl : document.getElementById('canvas');
+      const r = el.getBoundingClientRect();
+      return { x: r.left + r.width * 0.42, y: r.top + r.height * 0.47 };
+    })()`);
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 });
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 });
+  };
+  const landed = kind => (kind === 'colourCorrect'
+    ? `!document.body.dataset.studioBusy && !!(window.__ncAnalysis.expiredAnalysis() || {}).spatial`
+    : `!document.body.dataset.studioBusy && !document.getElementById('sampleWBBtn').classList.contains('active')`);
+  // The click waits: Studio busy, and nothing measured yet.
+  const expectWaiting = async (label, before) => {
+    await wait(300);
+    const now = await evaluate(`({ busy: document.body.dataset.studioBusy || null, view: ${view} })`);
+    if (now.busy !== 'true' || JSON.stringify({ ...now.view, sampling: null }) !== JSON.stringify({ ...before, sampling: null })) {
+      fail(label + ': the click did not wait: ' + JSON.stringify({ before, now }));
+    }
+  };
+  const run = async ({ atOnce, detecting }) => {
+    const released = detecting === 'grayPoint' ? 'colourCorrect' : 'grayPoint';
+    const label = `${detecting} while detecting, ${released} after a release, ${atOnce ? 'at once' : 'after waiting'}`;
+    await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en&largeImagePixels=100000&previewTier=normal` });
+    await waitFor(label + ': boot', `!!document.getElementById('studioImportAutoCrop') && !!window.__ncAnalysis && !!window.__ncGeometry`);
+    await installDialogAutoAccept();
+    await wait(300);
+    await evaluate(`(async () => {
+      // Holds worker requests of the given types until the test lets them
+      // go, and keeps the exported files instead of downloading them.
+      const probe = window.__measureProbe = { hold: new Set(), held: [], downloads: [] };
+      const post = Worker.prototype.postMessage;
+      Worker.prototype.postMessage = function (message, transfer) {
+        if (message && probe.hold.has(message.type)) { probe.held.push({ type: message.type, deliver: () => post.call(this, message, transfer) }); return; }
+        return post.apply(this, arguments);
+      };
+      probe.count = type => probe.held.filter(entry => entry.type === type).length;
+      probe.release = type => {
+        probe.hold.delete(type);
+        for (const entry of probe.held.filter(entry => entry.type === type)) { probe.held.splice(probe.held.indexOf(entry), 1); entry.deliver(); }
+      };
+      try { delete window.showSaveFilePicker; } catch {}
+      window.showSaveFilePicker = undefined;
+      const click = HTMLAnchorElement.prototype.click;
+      HTMLAnchorElement.prototype.click = function () {
+        if (!this.download || !this.href.startsWith('blob:')) return click.call(this);
+        probe.downloads.push(fetch(this.href).then(r => r.blob()));
+      };
+      ${IMPORT_FIXTURE}
+    })()`);
+    await waitFor(label + ': fixture converted', `${READY} && document.getElementById('studioFilename').textContent === 'crop-apply.png'`, 150_000);
+    await wait(1200);
+    // As in runEditWhileDetecting: an off-centre image area, then the default
+    // draft around the window, which is detected again and hits.
+    await evaluate(`document.getElementById('studioTab-composition').click(); document.getElementById('studioConfirmAnalysis').click()`);
+    await waitFor(label + ': image area mode', cropMode, 30_000);
+    await wait(200);
+    const corner = await evaluate(`(() => { const r = document.getElementById('cropOverlay').getBoundingClientRect(); return { x: r.x + r.width - 2, y: r.y + r.height - 2, toX: r.x + r.width * 0.4, toY: r.y + r.height * 0.4 }; })()`);
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: corner.x, y: corner.y, button: 'left', clickCount: 1 });
+    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: corner.toX, y: corner.toY, button: 'left', buttons: 1 });
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: corner.toX, y: corner.toY, button: 'left', clickCount: 1 });
+    await evaluate(`document.getElementById('applyCropBtn').click()`);
+    await waitFor(label + ': image area confirmed', `${READY} && !${cropMode} && !window.__ncAnalysis.converting() && window.__ncAnalysis.diagnostics()?.method === 'manual-analysis-area'`, 60_000);
+    await wait(500);
+    await evaluate(`document.getElementById('cropBtn').click()`);
+    await waitFor(label + ': crop mode', cropMode, 30_000);
+    await wait(200);
+
+    // ---- One measurement while the crop-area detection runs ----
+    // Both runs hold the request until the provisional positive is on
+    // screen; one clicks before letting it go, the other after the hit.
+    await evaluate(`window.__measureProbe.hold.add('detect-crop-area'); document.getElementById('applyCropBtn').click()`);
+    if (!await waitFor(label + ': provisional positive', `${READY} && !${cropMode} && !window.__ncAnalysis.converting() && window.__ncAnalysis.pendingDetection() && window.__measureProbe.count('detect-crop-area') === 1`, 120_000, { soft: true })) {
+      fail(label + ': no provisional positive with the detection held');
+    }
+    const provisional = await evaluate(view);
+    if (!provisional.diagnostics?.analysisNeedsReview) fail(label + ': the provisional conversion did not use the miss outcome: ' + JSON.stringify(provisional));
+    if (atOnce) {
+      await measure(detecting);
+      await expectWaiting(label + ' (detection)', provisional);
+    }
+    await evaluate(`window.__measureProbe.release('detect-crop-area')`);
+    await evaluate(`window.__ncAnalysis.settle()`);
+    if (!atOnce) {
+      await waitFor(label + ': hit converted', `${READY} && !window.__ncAnalysis.converting() && !window.__ncAnalysis.pendingDetection()`, 120_000);
+      await measure(detecting);
+    }
+    await waitFor(label + ': ' + detecting + ' landed', landed(detecting), 120_000);
+    await wait(500);
+    const hit = await evaluate(`window.__ncAnalysis.diagnostics()`);
+    if (hit?.method !== 'manual-image-window' || hit?.analysisNeedsReview) fail(label + ': the detection did not hit: ' + JSON.stringify(hit));
+
+    // ---- The other right after a core exposure release ----
+    // Both runs hold the plane's commit until the released frame is on
+    // screen; one clicks before letting it go, the other once it is back.
+    await evaluate(`window.__measureProbe.hold.add('commit')`);
+    await evaluate(`(() => {
+      const el = document.getElementById('coreExposure');
+      el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+      el.value = '15';
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    if (!await waitFor(label + ': plane in the worker', `window.__measureProbe.count('commit') >= 1 && window.__ncAnalysis.plane().retained && !window.__ncAnalysis.plane().attached`, 60_000, { soft: true })) {
+      fail(label + ': no retained frame with its commit held: ' + JSON.stringify(await evaluate(`({ plane: window.__ncAnalysis.plane(), held: window.__measureProbe.held.map(entry => entry.type) })`)));
+    }
+    const retained = await evaluate(view);
+    if (retained.exposure !== '15') fail(label + ': the release did not reach the frame: ' + JSON.stringify(retained));
+    if (atOnce) {
+      await measure(released);
+      await expectWaiting(label + ' (plane)', retained);
+    }
+    await evaluate(`window.__measureProbe.release('commit')`);
+    if (!atOnce) {
+      await waitFor(label + ': plane back', `(() => { const p = window.__ncAnalysis.plane(); return !p.retained && !p.committing && p.attached && p.preview; })()`, 60_000);
+      await measure(released);
+    }
+    await waitFor(label + ': ' + released + ' landed', landed(released), 120_000);
+    await wait(800);
+    const settled = await evaluate(view);
+    const plane = await evaluate(`window.__ncAnalysis.plane()`);
+    if (!plane.preview) fail(label + ': the display preview is no longer the frame on screen: ' + JSON.stringify(plane));
+    const files = { png8: await exportOnce(label + ' PNG8', 'png', 8), tiff16: await exportOnce(label + ' TIFF16', 'tiff', 16) };
+    return { settled, files };
+  };
+  for (const detecting of ['grayPoint', 'colourCorrect']) {
+    const atOnce = await run({ atOnce: true, detecting });
+    const waited = await run({ atOnce: false, detecting });
+    if (JSON.stringify(atOnce.settled) !== JSON.stringify(waited.settled)) {
+      fail(`${detecting} while detecting: the settings differ from the same clicks made after waiting: ` + JSON.stringify({ atOnce: atOnce.settled, waited: waited.settled }));
+    }
+    for (const format of ['png8', 'tiff16']) {
+      const a = atOnce.files[format], b = waited.files[format];
+      if (!a.size || a.sha256 !== b.sha256) fail(`${detecting} while detecting: ${format} differs from the same clicks made after waiting: ` + JSON.stringify({ atOnce: a, waited: b }));
+    }
+    console.log(`ok: ${detecting === 'grayPoint' ? 'the gray-point click' : 'colour correct'} while the detection runs and ${detecting === 'grayPoint' ? 'colour correct' : 'the gray-point click'} right after a release wait for the hit and the plane; PNG8 and TIFF16 equal the same clicks made after waiting (${atOnce.files.png8.sha256.slice(0, 12)}, ${atOnce.files.tiff16.sha256.slice(0, 12)})`);
+  }
 }
