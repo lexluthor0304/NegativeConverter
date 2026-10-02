@@ -468,6 +468,110 @@ for (const edit of ['rotation', 'mirror']) {
   await c.ensureFullResolutionReadyForExport();
 }
 
+// ---- 3e with Undo and Redo (R1-064, R1-066): the budget covers the redo
+// stack, and the geometry the user left last stays hot ----
+// Two slider steps on the base (which live state holds anyway), then three
+// rotations of the whole frame.
+const frameBytes = 90 * 70 * 12;
+async function rotatedThrice(budget) {
+  const base = makeBase(90, 70, 41);
+  const h = createHarness(base, { historyBudget: budget }), c = h.context;
+  for (let i = 0; i < 2; i++) { c.pushUndo('exposure'); h.state.exposure = i + 1; }
+  const planes = [h.state.originalImageData];
+  for (let i = 0; i < 3; i++) {
+    await c.applyRotation(90);
+    planes.push(h.state.originalImageData);
+  }
+  return { h, c, planes, undo: h.target.undoStack, redo: h.target.redoStack };
+}
+const fitsBudget = (c, budget, label) => {
+  assert.ok(c.historyExclusiveBytes(c.hotGeometrySnapshot()) <= budget, `${label}: history holds at most its budget beside the hot entry`);
+};
+// Which rotation's planes each entry holds ('cold' when stripped).
+const heldPlanes = (entries, planes) => entries.map(entry => (entry.refs.cold ? 'cold' : planes.indexOf(entry.refs.originalImageData)));
+
+// Room for one frame beside the hot entry: three Undos keep the redo stack
+// in the budget, from its far end, and the next redo hot.
+{
+  const budget = frameBytes + 64;
+  const { h, c, planes, undo, redo } = await rotatedThrice(budget);
+  assert.deepEqual(heldPlanes(undo, planes), [0, 0, 0, 1, 2], 'nothing is over the budget before the Undos');
+  for (let i = 1; i <= 3; i++) {
+    const jobs = h.jobs();
+    c.performUndo();
+    assert.equal(h.state.geometryPending, false, `undo ${i}: a reference swap`);
+    assert.equal(h.state.originalImageData, planes[3 - i]);
+    assert.equal(h.jobs(), jobs);
+    fitsBudget(c, budget, `undo ${i}`);
+    assert.equal(c.hotGeometrySnapshot(), redo.at(-1), `undo ${i}: the state just left is the hot entry`);
+  }
+  assert.deepEqual(heldPlanes(redo, planes), ['cold', 2, 1], 'the far end of redo goes cold first; the next redo stays hot');
+  assert.deepEqual(heldPlanes(undo, planes), [0, 0], 'slider steps on the planes on screen stay hot');
+  // Redo, Undo and Redo twice: reference swaps.
+  const jobs = h.jobs();
+  c.performRedo();
+  assert.equal(h.state.originalImageData, planes[1]);
+  fitsBudget(c, budget, 'redo');
+  c.performUndo();
+  assert.equal(h.state.originalImageData, planes[0]);
+  c.performRedo();
+  c.performRedo();
+  assert.equal(h.state.originalImageData, planes[2]);
+  assert.equal(h.jobs(), jobs, 'redo and undo of hot entries build nothing');
+  fitsBudget(c, budget, 'redo twice');
+  // A slider edit ends the redo branch: every step stays hot.
+  c.performUndo();
+  c.performUndo();
+  c.pushUndo('exposure');
+  assert.equal(redo.length, 0);
+  assert.deepEqual(heldPlanes(undo, planes), [0, 0, 0], 'a slider edit after the Undos keeps every step hot');
+  fitsBudget(c, budget, 'slider edit');
+}
+
+// A new geometry edit after an Undo: the redo branch it ends is not counted
+// against the steps that stay (R1-066).
+{
+  const budget = frameBytes + 64;
+  const { h, c, planes, undo } = await rotatedThrice(budget);
+  c.performUndo();
+  await c.applyRotation(90);
+  assert.deepEqual(heldPlanes(undo, planes), [0, 0, 0, 1, 2], 'the second rotation keeps its planes');
+  fitsBudget(c, budget, 'rotation after an Undo');
+  const jobs = h.jobs();
+  c.performUndo();
+  c.performUndo();
+  assert.equal(h.state.originalImageData, planes[1]);
+  assert.equal(h.jobs(), jobs, 'both Undos are reference swaps');
+}
+
+// A budget below one geometry snapshot, as on a 60 MP frame: the step the
+// user just left is the one kept hot, so Undo and Redo of it stay swaps.
+{
+  const budget = 64;
+  const { h, c, planes, undo, redo } = await rotatedThrice(budget);
+  assert.deepEqual(heldPlanes(undo, planes), [0, 0, 0, 'cold', 2], 'only the newest geometry step is kept beside the budget');
+  const jobs = h.jobs();
+  c.performUndo();
+  assert.deepEqual(heldPlanes(redo, planes), [3], 'the redo of the step just undone stays hot');
+  c.performRedo();
+  assert.equal(h.state.originalImageData, planes[3]);
+  c.performUndo();
+  assert.equal(h.state.originalImageData, planes[2]);
+  assert.equal(h.jobs(), jobs, 'Undo, Redo and Undo of the last step are reference swaps');
+  fitsBudget(c, budget, 'toggling');
+  // The stripped step rebuilds; the step left for it stays hot.
+  const restoring = c.performUndo();
+  await restoring;
+  await settle();
+  samePixels(h.state.originalImageData, exportChain(h.state.loadedBaseImageData, settingsFor(h.state)), 'the stripped step rebuilds its planes');
+  fitsBudget(c, budget, 'cold undo');
+  assert.deepEqual(heldPlanes(redo, planes), ['cold', 2]);
+  const rebuilt = h.jobs();
+  c.performRedo();
+  assert.equal(h.state.originalImageData, planes[2]);
+  assert.equal(h.jobs(), rebuilt, 'its redo is a reference swap');
+}
+
 // ---- The film border's paints end the interim turn too (R1-063) ----
 // The real paint of the main canvas, with the border composed or drawn over
 // its cached background (a drag frame); the border's pixels do not matter.

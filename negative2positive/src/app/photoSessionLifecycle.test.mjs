@@ -609,7 +609,7 @@ for (const warm of [true, false]) {
   f.state.coreExposure = 20;
   f.state.cyan = 10;
   Object.assign(c, { isLargeImage: () => false, isAiBrushEnabled: () => false });
-  vm.runInContext(['performUndo', 'performRedo', 'trimHistorySnapshot', 'consoleChannelsEnabled', 'consoleColorKeysEnabled',
+  vm.runInContext(['performUndo', 'performRedo', 'pushHistoryEntry', 'trimHistorySnapshot', 'consoleChannelsEnabled', 'consoleColorKeysEnabled',
     'consoleChannelSteps', 'nudgeConsoleChannel', 'resetConsoleChannels', 'canActivateBeforeAfter']
     .map(functionSource).join('\n'), c);
   c.document.body.dataset.photoSwitching = 'true';

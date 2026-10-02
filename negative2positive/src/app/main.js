@@ -3283,7 +3283,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // their pixel references and become cold instead of being dropped; a cold
     // entry restores its exact scalars and rebuilds its pixels from the base.
     // The most recent geometry entry stays hot, so undoing the last geometry
-    // edit remains an instant reference swap.
+    // edit remains an instant reference swap, and so does redoing the one
+    // just undone.
     const HISTORY_MEMORY_BUDGET_BYTES = 768 * 1024 * 1024;
     const GEOMETRY_UNDO_LABELS = new Set(['crop', 'rotation', 'mirror', 'autoFrame', 'restoreFullFrame']);
 
@@ -3294,11 +3295,29 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       ];
     }
 
+    // Every entry an edit, Undo or Redo pushes is numbered, so history knows
+    // which one holds the state the user left last.
+    function pushHistoryEntry(stack, entry) {
+      let newest = 0;
+      for (const other of undoStack) newest = Math.max(newest, other.pushed || 0);
+      for (const other of redoStack) newest = Math.max(newest, other.pushed || 0);
+      entry.pushed = newest + 1;
+      stack.push(entry);
+      return entry;
+    }
+
+    // The geometry entry pushed last, on either stack: the geometry the last
+    // edit, Undo or Redo left (R1-064). After an edit it is the newest
+    // geometry entry of the undo stack; after an Undo of a geometry edit, the
+    // redo entry of the state just left. Null when it is cold. Entries pushed
+    // without a number tie, and the later one (redo over undo, top over
+    // bottom) wins.
     function hotGeometrySnapshot() {
-      for (let i = undoStack.length - 1; i >= 0; i--) {
-        if (GEOMETRY_UNDO_LABELS.has(undoStack[i].label)) return undoStack[i].refs.cold ? null : undoStack[i];
+      let hot = null;
+      for (const entry of [...undoStack, ...redoStack]) {
+        if (GEOMETRY_UNDO_LABELS.has(entry.label) && (!hot || (entry.pushed || 0) >= (hot.pushed || 0))) hot = entry;
       }
-      return null;
+      return hot && !hot.refs.cold ? hot : null;
     }
 
     // Bytes reachable only through history, once per ArrayBuffer. `spared`
@@ -3318,11 +3337,16 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // budget; `stripOnly` keeps every step (no dust-stroke entry is dropped).
     function pruneHistoryForMemory({ limit = HISTORY_MEMORY_BUDGET_BYTES, stripOnly = false } = {}) {
       const hot = hotGeometrySnapshot();
-      // Oldest first: the bottom of the undo stack, then the far end of redo.
-      const order = [...undoStack, ...redoStack.slice().reverse()];
-      for (const snapshot of order) {
+      // An entry that holds nothing but what live state and the hot entry
+      // hold anyway frees nothing when stripped (R1-066): a slider step on
+      // the planes on screen stays hot.
+      const owned = backingBuffers([liveHistoryRoots(), hot?.refs || null]);
+      // Oldest first: the bottom of the undo stack, then the far end of redo
+      // (redoStack[0]; the next redo is its last entry).
+      for (const snapshot of [...undoStack, ...redoStack]) {
         if (historyExclusiveBytes(hot) <= limit) return;
         if (snapshot === hot || snapshot.dustDelta || snapshot.refs.cold) continue;
+        if (![...backingBuffers(snapshot.refs)].some(buffer => !owned.has(buffer))) continue;
         // Only references are dropped; buffers are never detached, so the
         // session cache and live state keep theirs.
         snapshot.refs = { cold: true };
@@ -3361,10 +3385,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     function commitUndoSnapshot(snapshot) {
       const entry = trimHistorySnapshot(snapshot);
-      undoStack.push(entry);
+      // A new step ends the redo branch first: what the branch held must not
+      // count against the steps that stay (R1-066).
+      redoStack.length = 0;
+      pushHistoryEntry(undoStack, entry);
       if (undoStack.length > MAX_UNDO) undoStack.shift();
       pruneHistoryForMemory();
-      redoStack.length = 0;
       updateUndoRedoButtons();
       return entry;
     }
@@ -3412,13 +3438,17 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (snapshot.dustDelta) {
         // In place, without a conversion or a new detection (#259).
         restoreDustDelta(snapshot.dustDelta, 'undo');
-        redoStack.push(snapshot);
+        pushHistoryEntry(redoStack, snapshot);
       } else {
         // Carry the action's own label across so the redo toast names the
         // action rather than the literal word "undo".
-        redoStack.push(trimHistorySnapshot(captureSnapshot(snapshot.label)));
+        pushHistoryEntry(redoStack, trimHistorySnapshot(captureSnapshot(snapshot.label)));
         restoring = restoreSnapshot(snapshot);
       }
+      // Only the redo entry holds the state just left now: the budget covers
+      // redo as it covers undo (R1-064). That entry is the hot one when it
+      // is a geometry step, so Redo stays an instant swap.
+      pruneHistoryForMemory();
       const actionName = getUndoLabel(snapshot.label);
       const tmpl = getLocalizedText('undone', 'Undone: {action}');
       showToast(tmpl.replace('{action}', actionName));
@@ -3435,7 +3465,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       manualEditRevision++;
       if (getCurrentQueueItem()) getCurrentQueueItem().userEdited = true;
       const snapshot = redoStack.pop();
-      undoStack.push(snapshot.dustDelta ? snapshot : trimHistorySnapshot(captureSnapshot(snapshot.label)));
+      pushHistoryEntry(undoStack, snapshot.dustDelta ? snapshot : trimHistorySnapshot(captureSnapshot(snapshot.label)));
       if (undoStack.length > MAX_UNDO) undoStack.shift();
       pruneHistoryForMemory();
       let restoring = null;
