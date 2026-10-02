@@ -25,6 +25,9 @@ export const LEVEL_BAND_BYTES_PER_BASE_PIXEL = 2;
 // A tilted band also copies the rows its output rows span (outWidth x |sin|
 // of them): a level's band copies at most this much more than its own rows.
 const LEVEL_BAND_MAX_OVERLAP = 1 / 3;
+// A level band's rows are copied at most this many bytes per main-thread
+// task (a steep angle's single band holds the whole window's rows).
+const LEVEL_COPY_TASK_BYTES = 32 * 1024 * 1024;
 
 export function defaultGeometryPoolSize(hardwareConcurrency = globalThis.navigator?.hardwareConcurrency) {
   const cores = Number(hardwareConcurrency) || 4;
@@ -221,17 +224,23 @@ function sharedBandSlice(source, plan, rect, { needs8 = plan.kind === 'index' } 
 
 // The rows a display level's band reads, of the plane the level reads (the
 // 16-bit one of a 16-bit frame, R2-003), copied here into a buffer an
-// earlier band's worker handed back when one is large enough: its pages are
-// mapped already, so the copy takes about 40 % less time than one into a new
-// array.
-function sliceLevelSource(source, plan, rect, spare) {
+// earlier band's worker handed back when one is large enough (its pages are
+// mapped already, so the copy takes about 40 % less time than one into a
+// new array), `taskBytes` per task. Null once `isCurrent()` turned false
+// between tasks.
+async function sliceLevelSource(source, plan, rect, spare, { taskBytes, pause, isCurrent }) {
   const plane = plan.has16 ? source.__image16.data : source.data;
   const Type = plan.has16 ? Uint16Array : Uint8ClampedArray;
   const rowLength = rect.width * 4;
   const length = rowLength * rect.height;
   const index = spare.findIndex(buffer => buffer.byteLength >= length * Type.BYTES_PER_ELEMENT);
   const rows = index >= 0 ? new Type(spare.splice(index, 1)[0], 0, length) : new Type(length);
+  const rowsPerTask = Math.max(1, Math.floor(taskBytes / (rowLength * Type.BYTES_PER_ELEMENT)));
   for (let row = 0; row < rect.height; row++) {
+    if (row && row % rowsPerTask === 0) {
+      await pause();
+      if (!isCurrent()) return null;
+    }
     const start = ((rect.y + row) * plan.baseWidth + rect.x) * 4;
     rows.set(plane.subarray(start, start + rowLength), row * rowLength);
   }
@@ -511,10 +520,10 @@ export function createGeometryPool({
    * shared base (#264) is read through views, so nothing is copied here; a
    * plain one is copied once per band, the plane the level reads only (its
    * 16-bit rows when it has them), in bands planned by planDisplayLevelBands
-   * within `maxBytesInFlight` (R2-003). `levelRowsPerBand` fixes the bands
-   * instead (tests). Resolves the level (adopted with its source geometry),
-   * null once `isCurrent()` turned false, or null for k = 1 (such a level is
-   * the output itself).
+   * within `maxBytesInFlight` (R2-003), at most `copyTaskBytes` per task.
+   * `levelRowsPerBand` fixes the bands instead (tests). Resolves the level
+   * (adopted with its source geometry), null once `isCurrent()` turned
+   * false, or null for k = 1 (such a level is the output itself).
    */
   async function renderDisplayLevel(source, plan, options = {}) {
     const guarded = { guard: null };
@@ -527,7 +536,7 @@ export function createGeometryPool({
 
   async function renderLevelBands(source, plan, {
     k = displayLevelFactor(plan.outWidth, plan.outHeight), isCurrent = () => true, levelRowsPerBand = null,
-    maxInFlight = null, maxBytesInFlight = null
+    maxInFlight = null, maxBytesInFlight = null, copyTaskBytes = LEVEL_COPY_TASK_BYTES
   } = {}, guarded = {}) {
     if (!(k > 1)) return null;
     const levelWidth = Math.floor(plan.outWidth / k);
@@ -583,7 +592,12 @@ export function createGeometryPool({
           if (!rows) return null;
           place(band, rows);
         } else {
-          const slice = shared ? sharedBandSlice(source, plan, band.rect, { needs8: false }) : sliceLevelSource(source, plan, band.rect, spare);
+          const slice = shared ? sharedBandSlice(source, plan, band.rect, { needs8: false })
+            : await sliceLevelSource(source, plan, band.rect, spare, { taskBytes: copyTaskBytes, pause: yieldTask, isCurrent });
+          if (!slice) {
+            handOver(entry);
+            return null;
+          }
           counters.copiedBytes += copiedBytes(slice);
           const key = ++token;
           running.set(key, postBand(entry, plan, band, slice, k, { levelOnly: true }).then(

@@ -325,6 +325,36 @@ for (const failure of [{ failOn: 1 }, { crashOn: 0 }, { throwOnPost: true }]) {
   pool.dispose();
 }
 
+// A band's rows are copied a bounded number of bytes per main-thread task
+// (no long task, R2-003): with 64 KiB per task the job yields inside each
+// band's copy and the level is the same; a job that goes stale inside a copy
+// resolves null and gives its worker back (the next job of a one-worker
+// pool runs).
+{
+  const frame = makeSource(600, 400, 29);
+  const plan = planGeometry(frame, { rotationAngle: 1.3, mirrored: false, cropRegion: { left: 20, top: 15, width: 560, height: 370 } });
+  const expected = buildDisplayLevel(renderGeometry(frame, plan), 2);
+  let yields = 0;
+  let stale = false;
+  let current = true;
+  const pool = createGeometryPool({
+    workerFactory: fakeWorkerFactory([]), workersSupported: true, size: 1,
+    yieldTask: async () => { yields++; if (stale) current = false; await yieldToEventLoop(); }
+  });
+  const level = await pool.renderDisplayLevel(frame, plan, { k: 2, copyTaskBytes: 64 * 1024 });
+  assert.ok(bytes(level.__image16.data).equals(bytes(expected.__image16.data)), 'the same level');
+  const bands = pool.counters.workerBands;
+  assert.ok(yields >= 2 * bands + Math.floor(pool.counters.copiedBytes / (64 * 1024)) - bands, `${yields} yields for ${bands} bands`);
+  stale = true;
+  assert.equal(await pool.renderDisplayLevel(frame, plan, { k: 2, copyTaskBytes: 64 * 1024, isCurrent: () => current }), null, 'stale inside a copy');
+  assert.equal(pool.counters.workerBands, bands, 'nothing was posted');
+  stale = false;
+  const next = await Promise.race([pool.renderDisplayLevel(frame, plan, { k: 2 }), new Promise(resolve => setTimeout(() => resolve('stuck'), 2000))]);
+  assert.notEqual(next, 'stuck', 'the worker was handed back');
+  assert.ok(bytes(next.__image16.data).equals(bytes(expected.__image16.data)));
+  pool.dispose();
+}
+
 // The plan on a 60 MP frame's geometry (sizes only: the planner reads no
 // pixels), 88 % of the turned frame: bands of 16 level rows copied 0.5-1.9
 // GiB per fill (both planes without a tilt); the planned bands copy at most
