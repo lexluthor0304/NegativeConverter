@@ -78,7 +78,8 @@ function fixture() {
     photoPrefetch: createPhotoSessionCache({ maxBytes: 4096 }), prefetchedItem: null,
     beginActivation: () => { context.activations.push(new AbortController()); return context.activations.at(-1).signal; },
     activations: [], notePhotoActivation: noop, activationDwell: async () => { context.dwells++; }, dwells: 0,
-    sharedDecodeInFlight: () => false, kickBackgroundPhotoWork: noop, supersedeActivation: noop, releaseActivationClaim: noop,
+    sharedDecodeInFlight: () => false, adoptSharedDecode: () => null,
+    kickBackgroundPhotoWork: noop, supersedeActivation: noop, releaseActivationClaim: noop,
     abortBackgroundDecodes: () => { context.backgroundAborts++; }, backgroundAborts: 0,
     studioThumbnailUpdateFrame: 0, cancelAnimationFrame: noop,
     studioThumbnailUpdateTimer: 0, clearTimeout: noop,
@@ -438,7 +439,18 @@ for (const outcome of ['success', 'load-error', 'prepare-error']) {
     const f = coldFixture(), c = f.context;
     const base = image();
     if (kind === 'session') f.photoSessions.put(f.second, { file: f.second.file, base, rawMetadata: null });
-    if (kind === 'shared') c.sharedDecodeInFlight = file => file === f.second.file;
+    // The switch takes its lease on the lane's decode as it begins (R1-061)
+    // and hands it to loadFile.
+    const lease = { releases: 0, release() { this.releases++; } };
+    if (kind === 'shared') {
+      c.sharedDecodeInFlight = file => file === f.second.file;
+      c.adoptSharedDecode = (file, { signal }) => {
+        assert.equal(file, f.second.file);
+        assert.equal(signal, c.activations.at(-1).signal, 'under the switch\'s activation');
+        assert.equal(f.frames.length, 0, 'before the switch yields to paint');
+        return lease;
+      };
+    }
     if (kind === 'prefetch') {
       c.photoPrefetch.put(f.second, { file: f.second.file, base, rawMetadata: { lensModel: 'x' } });
       c.prefetchedItem = f.second;
@@ -452,8 +464,11 @@ for (const outcome of ['success', 'load-error', 'prepare-error']) {
       assert.equal(c.prefetchedItem, null);
       assert.deepEqual({ ...f.loads[0].options.decoded.rawMetadata }, { lensModel: 'x' }, 'with its rawMetadata');
     }
+    if (kind === 'shared') assert.equal(f.loads[0].options.adoption, lease, 'loadFile adopts through the switch\'s lease');
+    else assert.equal(f.loads[0].options.adoption, null, `${kind}: no lease beside a retained base`);
     f.loads[0].resolve({ status: 'loaded' }); await tick();
     f.preparations[0].resolve(); await pending;
+    if (kind === 'shared') assert.equal(lease.releases, 1, 'and releases it after the load');
   }
 }
 

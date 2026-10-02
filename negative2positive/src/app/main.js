@@ -12880,7 +12880,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       status.style.display = text ? '' : 'none';
     }
 
-    async function loadFile(file, { autoConvert = true, decoded = null, quiet = false, signal: activationSignal = null } = {}) {
+    // `adoption`: a switch's lease on a lane's decode of this file, taken
+    // when the switch began (R1-061); the caller releases it too.
+    async function loadFile(file, { autoConvert = true, decoded = null, quiet = false, signal: activationSignal = null, adoption = null } = {}) {
       const generation = ++loadGeneration;
       // A switch passes the activation it began; every other load is one.
       const signal = activationSignal || beginActivation(file);
@@ -12953,7 +12955,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         // decode options (full, defects on), with its rawMetadata. A heavy
         // file skips its half-size stage for it.
         const adoptsRunningDecode = !(decoded?.file === file && decoded.base) && sharedDecodes.inFlight(file);
-        const shared = !(decoded?.file === file && decoded.base) ? adoptSharedDecode(file, { signal }) : null;
+        const shared = !(decoded?.file === file && decoded.base) ? adoption || adoptSharedDecode(file, { signal }) : null;
 
         if (decoded?.file === file && decoded.base) {
           imageData = decoded.base;
@@ -21590,6 +21592,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       const signal = beginActivation(fileItem.file);
       invalidatePhotoActivation();
       notePhotoActivation(leavingItem, fileItem);
+      let adoption = null;
       try {
         // A settled cache hit is synchronous: do not paint a loading veil or
         // announce a new live-region message for an already available photo.
@@ -21643,6 +21646,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           return;
         }
 
+        // A lane decoding this photo, or holding its decode while it still
+        // analyses it (#243), keeps it for this switch from here on: a lane
+        // step that ends while the switch paints or reads a display form
+        // would otherwise drop the decode loadFile adopts below, and the file
+        // would be read and decoded again (R1-061). loadFile takes the lease
+        // over; a switch that ends another way releases it.
+        if (!(cached?.base && cached.file === fileItem.file)) adoption = adoptSharedDecode(fileItem.file, { signal });
+
         // The outgoing photo lives in the session cache now.
         if (released) releaseOutgoingPhotoPlanes();
 
@@ -21679,6 +21690,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           if (!isCurrentLoad(generation) || state.fileQueue[index] !== fileItem) return;
         }
         if (display) {
+          adoption?.release();
           await activateDisplaySession(fileItem, display, generation);
           return;
         }
@@ -21693,7 +21705,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         }
 
         // Load the file
-        const loading = loadFile(fileItem.file, { autoConvert: false, decoded: cached, quiet: true, signal });
+        const loading = loadFile(fileItem.file, { autoConvert: false, decoded: cached, quiet: true, signal, adoption });
         generation = loadGeneration;
         const result = await loading;
 
@@ -21734,6 +21746,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         if (released && state.loadedFile !== fileItem.file) reactivateReleasedPhoto(released);
         showToast(getLocalizedText('loadError', 'Error loading file'));
       } finally {
+        // A switch that ended before its load (superseded) holds no decode.
+        adoption?.release();
         // The warm switch's refresh is the one below.
         flushFileList({ flush: !isCurrentLoad(generation) });
         // An old completion must never clear the newest target's feedback.

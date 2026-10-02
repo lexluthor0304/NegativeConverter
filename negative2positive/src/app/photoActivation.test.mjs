@@ -154,6 +154,32 @@ function fixture() {
   assert.equal(f.target.sharedDecodes.size, 0, 'both leases released');
 }
 
+// A switch passes the lease it took when it began (#229 review R1-061):
+// loadFile reads the base through it, adopts nothing itself and lets go of it.
+{
+  const f = fixture();
+  const lane = deferred();
+  f.target.sharedDecodes = createSharedDecodes({ decode: () => lane.promise });
+  const a = f.file('a.dng');
+  const laneLease = f.target.sharedDecodes.open(a);
+  const signal = f.context.beginActivation(a);
+  const adoption = f.target.sharedDecodes.adopt(a, { signal });
+  let releases = 0;
+  const release = adoption.release;
+  adoption.release = () => { releases++; release(); };
+  const adopt = f.target.sharedDecodes.adopt;
+  f.target.sharedDecodes.adopt = () => assert.fail('loadFile adopts nothing beside the switch\'s lease');
+  const base = { width: 2, height: 2, data: new Uint8ClampedArray(16) };
+  lane.resolve({ base, rawMetadata: null });
+  laneLease.release();
+  assert.equal((await f.context.loadFile(a, { autoConvert: false, quiet: true, signal, adoption })).status, 'loaded');
+  assert.equal(f.state.loadedBaseImageData, base);
+  assert.deepEqual([f.reads.length, f.rawLoads.length], [0, 0], 'no read, no decode');
+  assert.equal(releases, 1, 'the lease is released once the base is in');
+  assert.equal(f.target.sharedDecodes.size, 0);
+  f.target.sharedDecodes.adopt = adopt;
+}
+
 // invalidatePhotoActivation: the full-resolution render's request is aborted,
 // and a detection worker released by the abort is warmed by the next cold load.
 {
