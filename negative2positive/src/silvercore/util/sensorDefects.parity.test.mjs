@@ -1,7 +1,8 @@
 // Differential test for the exact fast sensor-defect kernel (#232): the new
 // kernel must produce byte-identical pixels and identical stats to the frozen
-// 1703835 kernel on every seed. Frames are small (well under 1 MP) so the
-// whole sweep runs in a few seconds.
+// 1703835 kernel on every seed, and on fixed frames at the boundaries the
+// seeds do not reach. Frames are small (well under 1 MP) so the whole sweep
+// runs in a few seconds.
 import assert from 'node:assert/strict';
 import { suppressSensorDefects } from './sensorDefects.js';
 import { suppressSensorDefectsReference } from './sensorDefects.reference.mjs';
@@ -195,6 +196,45 @@ assert.ok(floorRings > 1000 && clipRings > 1000, `floor ${floorRings}, clip ${cl
 // Guards behave the same.
 for (const input of [null, { width: 3, height: 3, data: new Uint16Array(36) }, { width: 8, height: 8, data: new Uint8ClampedArray(256) }]) {
   assert.deepEqual(suppressSensorDefects(input), suppressSensorDefectsReference(input));
+}
+
+// Fixed 9x9 frames on two boundaries no seed reaches (#229 review, R1-022).
+// Every channel is flat apart from the centre pixel (and, in the black-floor
+// frames, its 8 neighbours), so the scan meets exactly one candidate: the
+// reference's verdict is pinned here and the kernel must match it byte for
+// byte. Each boundary is pinned from both sides.
+function flatFrame(levels, centre, neighbours = levels) {
+  const size = 9;
+  const data = new Uint16Array(size * size * 4);
+  for (let i = 0; i < data.length; i += 4) { data.set(levels, i); data[i + 3] = 65535; }
+  for (let dy = -1; dy <= 1; dy++) {
+    for (let dx = -1; dx <= 1; dx++) data.set(dx || dy ? neighbours : centre, ((4 + dy) * size + 4 + dx) * 4);
+  }
+  return { width: size, height: size, data };
+}
+const BOUNDARY_FRAMES = [
+  // The correlation test is `>=` (sensorDefects.js 184 and 187): R is 4000 off
+  // its ring at the default threshold, and G moving exactly a quarter of that
+  // the same way marks the point as real content. One code value less and R
+  // is repaired.
+  { label: 'dead R, G exactly a quarter lower', options: {}, frame: flatFrame([20000, 30000, 40000], [16000, 29000, 40000]), repaired: 0 },
+  { label: 'dead R, G one short of a quarter', options: {}, frame: flatFrame([20000, 30000, 40000], [16000, 29001, 40000]), repaired: 1 },
+  { label: 'hot R, G exactly a quarter higher', options: {}, frame: flatFrame([20000, 30000, 40000], [24000, 31000, 40000]), repaired: 0 },
+  { label: 'hot R, G one short of a quarter', options: {}, frame: flatFrame([20000, 30000, 40000], [24000, 30999, 40000]), repaired: 1 },
+  // The hot black-floor prescreen (sensorDefects.js 149) with absoluteThreshold
+  // 9000: the ring (6000) is under abs, so a hot candidate's floor is
+  // BLACK_FLOOR_HOT_THRESHOLD (6553.5), below abs. The neighbours sit at 3000,
+  // so the centre still clears all four of them by more than abs.
+  { label: 'hot R 6554 over a black-floor ring, abs 9000', options: { absoluteThreshold: 9000 }, frame: flatFrame([6000, 30000, 40000], [12554, 30000, 40000], [3000, 30000, 40000]), repaired: 1 },
+  { label: 'hot R 6553 over a black-floor ring, abs 9000', options: { absoluteThreshold: 9000 }, frame: flatFrame([6000, 30000, 40000], [12553, 30000, 40000], [3000, 30000, 40000]), repaired: 0 },
+];
+for (const { label, options, frame, repaired } of BOUNDARY_FRAMES) {
+  const reference = { ...frame, data: new Uint16Array(frame.data) };
+  const candidate = { ...frame, data: new Uint16Array(frame.data) };
+  const want = suppressSensorDefectsReference(reference, options);
+  assert.equal(want.repaired, repaired, `${label}: the reference repairs ${want.repaired}, expected ${repaired}`);
+  assert.deepEqual(suppressSensorDefects(candidate, options), want, `${label}: stats differ from the reference`);
+  assert.ok(Buffer.compare(Buffer.from(candidate.data.buffer), Buffer.from(reference.data.buffer)) === 0, `${label}: pixels differ from the reference`);
 }
 
 console.log(`sensorDefects parity passed (${SEEDS} seeds, ${totalRepairs} repairs, ${straddlePixels} straddles)`);
