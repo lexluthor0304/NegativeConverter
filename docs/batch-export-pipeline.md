@@ -191,6 +191,10 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
     the JPEG gain map (JPEG, gain map on, no sprocket frame) travels in the
     same request with the unadjusted plane, and only the map's JPEG comes
     back. The contact sheet and watch-folder imports never start a map.
+    Where the worker cannot encode (no `OffscreenCanvas` encode before
+    WebKit 16.4, a non-opaque frame), it hands the frame and the map's plane
+    back: the restored frame is encoded on the main thread's canvas and the
+    map runs on its own `gainMap16` request with the re-attached plane.
   If a worker dies holding a plane (`ExportInputLostError`, or `INPUT_LOST`
   from the conversion lane), the frame is rendered once more from decode
   with copies, so the file never depends on the failure. The failed

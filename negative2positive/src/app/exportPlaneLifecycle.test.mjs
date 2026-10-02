@@ -15,6 +15,10 @@
 //   with identical output; the frame's owned planes are released.
 // - The dust-repaired image the editor patches in place (#259) is marked for
 //   a one-task copy before a single export hands it over, with the same bytes.
+// - Without OffscreenCanvas in the worker (WebKit before 16.4), single and
+//   batch PNG8 and JPEG encode through the canvas: the frame and the map's
+//   plane come back from the worker, the canvas encodes the restored frame,
+//   and the map has its own request, equal to the main-thread map.
 // - A batch frame rendered again after a lost plane frees the failed
 //   attempt's planes before it decodes again.
 import { MEMORY_FUNCTIONS, memoryGlobals } from './memoryHarness.mjs';
@@ -65,7 +69,8 @@ class InProcessWorker {
     workerInstances.push(this);
   }
   postMessage(message, transfers = []) {
-    workerPosts.push({ type: message.type, transfers: transfers.slice(), worker: this });
+    // `sizes`: the transferred buffers' lengths when posted (they detach here).
+    workerPosts.push({ type: message.type, transfers: transfers.slice(), sizes: transfers.map((buffer) => buffer.byteLength), worker: this });
     const received = structuredClone(message, { transfer: transfers });
     if (crashNext && crashNext(message)) {
       crashNext = null;
@@ -88,7 +93,8 @@ const { bandsSupported } = await import('../pipeline/silverBands.js');
 
 const bridgeModule = await import('../workers/workerBridge.js');
 const {
-  markOwnedPlanes, planeBuffersOf, releaseOwnedPlanes, setLiveReferenceProbe, configurePlaneRelease, markLiveMutableBuffer, isLiveMutableBuffer
+  markOwnedPlanes, planeBuffersOf, releaseOwnedPlanes, setLiveReferenceProbe, configurePlaneRelease, markLiveMutableBuffer, isLiveMutableBuffer,
+  isOwnedBuffer
 } = await import('./planeRelease.js');
 const { requestExportGainMap, gainMapInputsMatch } = await import('./exportGainMap.js');
 const adjustment = await import('./adjustmentPipeline.js');
@@ -216,6 +222,7 @@ function createContext({ gainMap = 'on' } = {}) {
     getExportImageEncoders: async () => encoders,
     imageDataToCanvasBlob: async (image, type, quality) => {
       canvasEncodes.push(type);
+      canvasImages.push(image);
       return new Blob([`${type}|${quality}|`, new Uint8ClampedArray(image.data)], { type });
     },
     importGainMapJpeg: async () => ({
@@ -302,6 +309,7 @@ const traces = [];
 const fullFrameAllocations = [];
 const attached = [];
 const canvasEncodes = [];
+const canvasImages = [];
 const pools = [];
 
 // Main-thread references.
@@ -958,6 +966,109 @@ for (const [format, bitDepth] of [['jpeg', 8], ['png', 8], ['tiff', 16], ['png',
     bandMinPixels = 4_000_000;
     bandPoolFactory = () => assert.fail('no band pool in this fixture');
     await Promise.all(bandThreads.map((thread) => thread.terminate()));
+  }
+}
+
+// ================================== no OffscreenCanvas in the export worker
+// #250 Part 3's fallback, the normal path on the macOS 10.15-12 system WebKit
+// (no OffscreenCanvas encode in workers before Safari 16.4). The worker
+// refuses the encode and hands back the frame, and the map's plane, it was
+// given; the frame is restored (an ImageData cannot be refilled: a new one),
+// the main thread's canvas encodes it, and the JPEG gain map runs on its own
+// `gainMap16` request. Checked here (#229 R1-096): the canvas encodes the
+// restored frame's bytes, the map equals the main-thread reference, and a
+// transferred map plane is re-attached before the map's request takes it.
+{
+  const offscreen = globalThis.OffscreenCanvas;
+  const offscreenWorker = self.onmessage;
+  // The worker's own module instance, which looks for OffscreenCanvas on its
+  // first encode.
+  delete globalThis.OffscreenCanvas;
+  await import('../workers/exportWorker.js?no-offscreen');
+  const expectedFile = async (processed, settings, format) => {
+    const sdr = referenceAdjusted8(processed, settings);
+    const parts = [format === 'jpeg' ? 'image/jpeg|0.92|' : 'image/png|undefined|', sdr.data];
+    if (format === 'jpeg') {
+      const map = computeGainMap(sdr, referencePlane16(processed, settings));
+      parts.push('|GAIN|', 'image/jpeg|0.85|', map.data, `|${map.gainMax}|${map.gainMin}`);
+    }
+    return { bytes: new Uint8Array(await new Blob(parts).arrayBuffer()), sdr };
+  };
+  const reset = () => {
+    // The page learns "no OffscreenCanvas encode" from the worker's first
+    // refusal; forget it, so each export below hands its frame over.
+    bridgeModule.resetEncodeImageSupport();
+    workerPosts.length = 0;
+    canvasEncodes.length = 0;
+    canvasImages.length = 0;
+    saved.length = 0;
+    released.length = 0;
+  };
+  try {
+    for (const format of ['jpeg', 'png']) {
+      const requests = format === 'jpeg' ? ['applyAdjustments', 'encodeImage', 'gainMap16'] : ['applyAdjustments', 'encodeImage'];
+      const encodes = format === 'jpeg' ? ['image/jpeg', 'image/jpeg'] : ['image/png'];
+
+      // A single export.
+      let label = `no OffscreenCanvas: single ${format}8`;
+      reset();
+      const f = createContext();
+      f.state.exportFormat = format;
+      f.state.exportBitDepth = 8;
+      const plane = f.state.processedImageData.__image16;
+      const planeBefore = plane.data.slice();
+      assert.equal((await f.context.exportSingle()).saved, true, label);
+      assert.equal(bridgeModule.encodeImageSupported(), false, `${label}: the worker refused the encode`);
+      assert.deepEqual(workerPosts.map((p) => p.type), requests, `${label}: requests`);
+      const [adjusted] = released.at(-1);
+      assert.equal(workerPosts[1].transfers[0], adjusted.data.buffer, `${label}: the adjusted frame went to the worker`);
+      assert.deepEqual(canvasEncodes, encodes, `${label}: encoded on the canvas`);
+      const restored = canvasImages[0];
+      assert.notEqual(restored, adjusted, `${label}: the canvas encodes the frame the worker handed back`);
+      assert.ok(isOwnedBuffer(restored.data.buffer), `${label}: restored as a frame this export owns`);
+      let expected = await expectedFile(f.state.processedImageData, f.state.recipe, format);
+      assert.ok(same(restored.data, expected.sdr.data), `${label}: the restored frame holds the adjusted pixels`);
+      assert.ok(same(await stubBlobText(saved[0]), expected.bytes), `${label}: the file (SDR, and the map == the main-thread map)`);
+      for (const post of workerPosts) assert.ok(!post.transfers.includes(plane.data.buffer), `${label}: ${post.type} names no editor buffer`);
+      assert.ok(same(plane.data, planeBefore), `${label}: the editor's plane is intact`);
+      assert.equal(bridges.at(-1).terminated, 1, `${label}: the bridge ends with the export`);
+      // The next export knows: its frame never goes to the worker.
+      workerPosts.length = 0;
+      saved.length = 0;
+      assert.equal((await f.context.exportSingle()).saved, true);
+      assert.deepEqual(workerPosts.map((p) => p.type), requests.filter((type) => type !== 'encodeImage'), `${label}: not asked again`);
+      assert.ok(same(await stubBlobText(saved[0]), expected.bytes), `${label}: the same file`);
+
+      // A batch frame: every plane is the frame's own and moves.
+      label = `no OffscreenCanvas: batch ${format}8`;
+      reset();
+      const { f: b, frames, exportInfo, jobs } = batchContext({ format, bitDepth: 8 });
+      const written = [];
+      assert.equal((await b.context.runBatchExport(jobs, { exportInfo, sink: async (job, blob) => { written.push(blob); } })).successCount, 1, label);
+      assert.deepEqual(workerPosts.map((p) => p.type), requests, `${label}: requests`);
+      assert.deepEqual(canvasEncodes, encodes, `${label}: encoded on the canvas`);
+      const encode = workerPosts[1];
+      assert.equal(encode.transfers.length, format === 'jpeg' ? 2 : 1, `${label}: the SDR frame${format === 'jpeg' ? ' and the map\'s plane' : ''} went to the worker`);
+      expected = await expectedFile(makeProcessed(3), jobs[0].settings.recipe, format);
+      assert.notEqual(canvasImages[0].data.buffer, encode.transfers[0], `${label}: the canvas encodes the frame handed back`);
+      assert.ok(same(canvasImages[0].data, expected.sdr.data), `${label}: the restored frame's bytes`);
+      assert.ok(same(await stubBlobText(written[0]), expected.bytes), `${label}: the file (SDR, and the map == the main-thread map)`);
+      if (format === 'jpeg') {
+        const [frame] = frames;
+        const map = workerPosts[2];
+        assert.notEqual(map.transfers[0], encode.transfers[1], `${label}: the map's request takes the plane the worker handed back`);
+        assert.equal(map.transfers[0], frame.__image16.data.buffer, `${label}: re-attached to the frame's plane`);
+        assert.equal(map.sizes[0], W * H * 8, `${label}: whole when the map's request took it`);
+        assert.equal(frame.__image16.data.byteLength, 0, `${label}: and moved into that request`);
+      } else {
+        assert.equal(frames[0].__image16, null, `${label}: no plane for an 8-bit file`);
+      }
+      assert.equal(pools.at(-1).disposed, 1);
+    }
+  } finally {
+    globalThis.OffscreenCanvas = offscreen;
+    self.onmessage = offscreenWorker;
+    bridgeModule.resetEncodeImageSupport();
   }
 }
 
