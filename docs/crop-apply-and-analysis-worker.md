@@ -20,6 +20,15 @@ the same task. Every early return goes through the `finally` that clears the
 busy state. Apply sets `studioBusy` only when it is free and clears only a lock
 it set: one another task holds (a photo's detection tail) stays with it.
 
+The crop-apply smoke reads the first frame after the click in a
+ResizeObserver's first notification, which comes after all of that frame's
+animation-frame callbacks (and the microtasks each queues) and before its
+paint. There the overlay must be visible and opaque, and neither the
+geometry build nor the detection may have started. A rAF of the smoke's own
+would run before the handler's, which asks for its frame only once
+`overlay.show()` has resolved, so it could not tell `yieldToPaint()` from a
+bare rAF, which starts the work inside that frame.
+
 ## Converting without waiting for the crop-area detection
 
 When the applied frame differs from the stored image area

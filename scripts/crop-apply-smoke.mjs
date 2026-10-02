@@ -150,15 +150,26 @@ export async function runCropApplySmoke({ send, evaluate, waitFor, wait, fail, i
   const firstFrame = await evaluate(`(async () => {
     const before = { started: window.__ncAnalysis.detection.started, jobs: window.__ncGeometry.pool.jobs, conversions: window.__ncAnalysis.detection.conversions };
     window.__cropApplyBefore = before;
+    // Read in the first frame after the click once all its animation-frame
+    // callbacks, and the microtasks each queues, have run, before the paint:
+    // a ResizeObserver's first notification comes then. The handler asks
+    // for its yield's frame only after overlay.show() resolves, so a rAF
+    // asked for here would run first and miss work that a bare-rAF yield
+    // starts before the paint (R1-075).
+    const read = new Promise(resolve => {
+      const observer = new ResizeObserver(() => {
+        observer.disconnect();
+        const overlay = document.querySelector('.loading-overlay');
+        const style = overlay && getComputedStyle(overlay);
+        resolve({ ms: performance.now() - clicked, visible: !!overlay && overlay.classList.contains('visible'),
+          immediate: !!overlay && overlay.classList.contains('loading-overlay-immediate'), opacity: style && style.opacity,
+          detectionStarted: window.__ncAnalysis.detection.started - before.started, geometryJobs: window.__ncGeometry.pool.jobs - before.jobs });
+      });
+      observer.observe(document.documentElement);
+    });
     const clicked = performance.now();
     document.getElementById('applyCropBtn').click();
-    // rAF callbacks run in the first frame after the click, before its paint.
-    await new Promise(r => requestAnimationFrame(r));
-    const overlay = document.querySelector('.loading-overlay');
-    const style = overlay && getComputedStyle(overlay);
-    return { ms: performance.now() - clicked, visible: !!overlay && overlay.classList.contains('visible'),
-      immediate: !!overlay && overlay.classList.contains('loading-overlay-immediate'), opacity: style && style.opacity,
-      detectionStarted: window.__ncAnalysis.detection.started - before.started, geometryJobs: window.__ncGeometry.pool.jobs - before.jobs };
+    return read;
   })()`);
   if (!firstFrame.visible || !firstFrame.immediate || firstFrame.opacity !== '1' || firstFrame.detectionStarted || firstFrame.geometryJobs || firstFrame.ms > 100) {
     fail('the Apply overlay was not opaque in the first frame, before any work: ' + JSON.stringify(firstFrame));
