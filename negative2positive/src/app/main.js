@@ -12952,16 +12952,24 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
 
     // Stage 2 failed (or its settings could not be installed): the photo stays
     // provisional, and the next exact consumer decodes again (ensureFullDecode).
-    // `attempt` is the decode the failure belongs to; a newer one wins.
+    // `attempt` is the decode the failure belongs to; a newer one wins. A
+    // concurrent stage 2 can fail before its stand-in is on screen (the
+    // record is not state.fullDecode yet): the record keeps the failure and
+    // beginProvisionalPhoto reports it. Dropped, it left the photo 'running'
+    // for good, and an export waited forever.
     function failFullDecode(record, error, attempt = record.attempt) {
-      if (state.fullDecode !== record || record.attempt !== attempt) return;
+      if (record.attempt !== attempt || record.abort.signal.aborted) return;
       if (['abandoned', 'installed', 'failed'].includes(record.status)) return;
       record.status = 'failed';
       record.error = error;
       twoStageDiagnostics.failures++;
       console.warn('[RAW] full-resolution decode failed; the photo stays provisional:', error?.message || error);
-      showToast(getLocalizedText('fullResolutionFailed', 'Full resolution could not be loaded; export will retry'), 6000);
+      if (state.fullDecode === record) reportFullDecodeFailure();
       noteFullDecodeChange(record);
+    }
+
+    function reportFullDecodeFailure() {
+      showToast(getLocalizedText('fullResolutionFailed', 'Full resolution could not be loaded; export will retry'), 6000);
     }
 
     function retryFullDecode(record) {
@@ -12998,6 +13006,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         // After the swap, until the conversion of the full decode lands.
         swapped: false, swapEdits: null, swapBaseline: null
       };
+      // A concurrent stage 2 that failed while the stand-in decoded.
+      if (record.status === 'failed') reportFullDecodeFailure();
     }
 
     // The photo is left (invalidatePhotoActivation) or replaced: its stage 2

@@ -191,7 +191,9 @@ quiet.
 - **Failure**: a toast ("Full resolution could not be loaded; export will
   retry"). The status becomes `failed` and the photo stays provisional. The
   next exact consumer decodes again in the foreground, and a second failure
-  fails that consumer. It never falls back to the stand-in.
+  fails that consumer. It never falls back to the stand-in. A concurrent
+  stage 2 can fail while the stand-in still decodes: its record keeps the
+  failure, and the toast comes when the stand-in is installed.
 - **Abort**: the record's controller follows the activation (#243). A switch
   disposes stage 2's LibRaw and post-decode workers in the same task
   (`abandonFullDecode`).
@@ -236,8 +238,8 @@ quiet.
   image area as edits of `autoFrameMeta`'s analysis fields.
 - `twoStageImport.test.mjs`: the real main.js functions (loadFile routing and
   stage options, sequential and concurrent start, abort on switch, the
-  barrier with retry and failure, the settle with its history rebase, and
-  leaving early). The settle and a photo left with a window edit decide as
+  barrier with retry and failure, a concurrent stage 2 failing before the
+  stand-in shows, the settle with its history rebase, and leaving early). The settle and a photo left with a window edit decide as
   their pass began (learned defaults, the roll's film type): one decode's
   recipe plus the edit; outside the window every roll decision and recipe
   equals the old functions' (synthetic rolls). Analyze roll, Auto Frame

@@ -9,7 +9,8 @@
 //   in the same task; a failed stand-in makes the full decode the load;
 // - the barrier: exact consumers wait for the installed, converted full
 //   decode, a failure is retried once, a second failure throws, a left photo
-//   answers false; nothing is persisted, remembered or reused meanwhile;
+//   answers false; nothing is persisted, remembered or reused meanwhile; a
+//   concurrent stage 2 failing before the stand-in shows is kept and retried;
 // - the saved crop {400, 300, 8700, 5800} restored on the stand-in, edited
 //   around and swapped keeps exactly that crop (HEAD made {800, 600, 8736,
 //   5736} of it); a window crop converts once; undo entries are rebased to
@@ -201,7 +202,7 @@ function fixture({ search = '?twoStageMinMp=40&twoStageMode=sequential', settled
   vm.runInContext([
     'supersedeActivation', 'beginActivation', 'invalidatePhotoActivation', 'isCurrentLoad', 'loadFile', 'adoptSharedDecode',
     'twoStageMinPixelsSetting', 'stageTwoMode', 'noteTwoStagePlan', 'noteTwoStageEvent', 'liveGeometry', 'provisionalUnits',
-    'createFullDecode', 'beginFullDecodeAttempt', 'noteFullDecodeChange', 'nextFullDecodeChange', 'failFullDecode',
+    'createFullDecode', 'beginFullDecodeAttempt', 'noteFullDecodeChange', 'nextFullDecodeChange', 'failFullDecode', 'reportFullDecodeFailure',
     'retryFullDecode', 'beginProvisionalPhoto', 'abandonFullDecode', 'currentPhotoExact', 'ensureFullDecode',
     'ensureFullDecodeWithNotice', 'whenCropModeClosed', 'startProvisionalSettle', 'waitForProvisionalSwap',
     'settledImportSettings', 'rebaseProvisionalHistory', 'windowFrameMetaOnFull', 'appliedCropDiagnostics', 'geometryFrameSize',
@@ -418,6 +419,50 @@ const SAVED = { left: 400, top: 300, width: 8700, height: 5800 };
   f.stage2[2].resolve(image(FULL));
   assert.equal(await again, true);
   assert.equal(f.state.rawDecodePending, false);
+}
+{
+  // A concurrent stage 2 that fails while the stand-in still decodes (a
+  // second LibRaw heap that cannot be had): the record keeps the failure,
+  // the toast comes with the stand-in, and the export decodes again. Before,
+  // the failure was dropped (its record was not state.fullDecode yet): the
+  // photo stayed 'running' and an export waited forever.
+  const early = async ({ old = false } = {}) => {
+    const f = fixture({ search: '?twoStageMinMp=40' });
+    if (old) {
+      vm.runInContext(functionSource('failFullDecode')
+        .replace('if (record.attempt !== attempt || record.abort.signal.aborted) return;', 'if (state.fullDecode !== record || record.attempt !== attempt) return;')
+        .replace('if (state.fullDecode === record) reportFullDecodeFailure();', 'reportFullDecodeFailure();'), f.context);
+    }
+    const loading = f.context.loadFile(f.file(), { autoConvert: false, quiet: true });
+    await flush();
+    assert.equal(f.stage2.length, 1, 'stage 2 starts with stage 1');
+    f.stage2[0].reject(new Error('second LibRaw heap failed'));
+    await flush();
+    assert.deepEqual([f.toasts.length, f.state.fullDecode], [0, null], 'no stand-in on screen yet, nothing said');
+    f.stage1[0].resolve(image(HALF, { __decodeScale: 0.5, __fullSize: { ...FULL } }));
+    await loading;
+    f.state.provisional.start = { fresh: false, snapshot: f.context.extractCurrentSettings(), detectFrame: false, readEdge: false };
+    f.state.provisional.settledSnapshot = f.context.extractCurrentSettings();
+    f.context.startProvisionalSettle(f.state.fullDecode);
+    await flush();
+    let exported = null;
+    const exporting = f.context.ensureFullDecode({ reason: 'export' }).then(value => { exported = value; });
+    await flush(40);
+    return { f, exporting, exported: () => exported };
+  };
+  const { f, exporting } = await early();
+  assert.equal(f.target.twoStageDiagnostics.failures, 1);
+  assert.equal(f.toasts.length, 1, 'the failure is reported with the stand-in');
+  assert.equal(f.stage2.length, 2, 'the export decodes again');
+  assert.equal(f.state.rawDecodePending, true, 'the stand-in is never handed out');
+  f.stage2[1].resolve(image(FULL));
+  await exporting;
+  assert.equal(f.state.loadedBaseImageData.width, FULL.width);
+  assert.equal(f.state.fullDecode.status, 'installed');
+  // Control: the old failFullDecode.
+  const control = await early({ old: true });
+  assert.deepEqual([control.f.state.fullDecode.status, control.f.toasts.length, control.f.stage2.length, control.exported()], ['running', 0, 1, null],
+    'control: the failure is lost and the export waits for good');
 }
 {
   // The memory ledger's open photo (#258): the stand-in, then the full decode
