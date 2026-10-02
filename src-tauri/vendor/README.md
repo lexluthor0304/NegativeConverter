@@ -30,7 +30,11 @@ Compiled into the desktop app by `src-tauri/native/build_libraw.rs`; see
   - `include/features.h` `c400ec04072f56261b3739832883bda5a3090206b23573864d101370564a4718`
   - `(cd musl && cat $(ls *.c *.h | sort) | shasum -a 256)`
     `0ac4775ed249adce05e909ecf77e2a26bf6bd82fe414d0e92def1f6886166354`
-- Licence: MIT (`musl/COPYRIGHT`).
+- Licence: MIT (`musl/COPYRIGHT`). The math files carry their own notices
+  (Arm Limited's MIT, Sun Microsystems'), which musl's COPYRIGHT refers to;
+  both are reproduced in `negative2positive/public/licenses/raw-decoder-notices.txt`,
+  and `scripts/check-third-party-notices.mjs` fails when a vendored file's
+  notice is missing there.
 - Must stay identical to the copy the page's libraw-wasm release was built
   with, or native and WASM output diverge.
 

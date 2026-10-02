@@ -32,6 +32,7 @@ tests.push(join(scriptsDir, 'check-vercel-config.mjs'));
 tests.push(join(scriptsDir, 'check-appstore-screenshots.mjs'));
 tests.push(join(scriptsDir, 'check-updater-manifest.mjs'));
 tests.push(join(scriptsDir, 'check-tauri-config.mjs'));
+tests.push(join(scriptsDir, 'check-third-party-notices.mjs'));
 // Its real check needs a build (CI runs it after `npm run build:web`).
 tests.push([join(scriptsDir, 'check-dist-asset-names.mjs'), '--self-test']);
 

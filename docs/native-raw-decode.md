@@ -272,12 +272,18 @@ licence text, and recipients of the executable are told where), with no
 relinking requirement, which suits a statically linked App Store binary.
 LGPL-2.1 would add the duty to let users relink with a modified LibRaw.
 `negative2positive/public/licenses/raw-decoder-notices.txt` (bundled with the
-web and desktop apps) carries the notices: LibRaw's COPYRIGHT, the BSD
-licences of DCB/FBDD and the X3F tools, the MIT notice of the DNG SDK code,
-musl's MIT licence, the CDDL text, and the OpenMP runtime's licence file
-(Apache-2.0 with LLVM Exceptions; its legacy parts from Intel's runtime are
-under the University of Illinois/NCSA or MIT licence, which ask for the
-notice in binary distributions).
+web and desktop apps) carries the notices: LibRaw's COPYRIGHT and the
+copyright lines of its source files, the BSD licences of DCB/FBDD and the X3F
+tools, the MIT notice of the DNG SDK code, musl's COPYRIGHT in full with the
+notices of the compiled math files (Arm Limited's MIT for pow, exp, log, powf,
+logf and their tables; Sun Microsystems' for cos and its kernels, "provided
+that this notice is preserved"), the CDDL text, and the OpenMP runtime's
+licence file (Apache-2.0 with LLVM Exceptions; its legacy parts from Intel's
+runtime are under the University of Illinois/NCSA or MIT licence, which ask
+for the notice in binary distributions). `scripts/check-third-party-notices.mjs`
+(part of `npm test`) fails when a copyright or SPDX line or a permission
+notice in the header of a vendored source, or a vendored licence file, is
+missing from it.
 
 ## Measured
 
