@@ -647,9 +647,9 @@ fn take_web_content_termination(state: State<'_, WebContentTerminations>) -> Opt
     state.take()
 }
 
-/// A page that starts loading owns no export stream and no folder watch: the
-/// previous page (killed, crashed or navigated away) can no longer finish or
-/// listen to them.
+/// A page that starts loading owns no export stream, no folder watch and no
+/// spilled display proxy: the previous page (killed, crashed or navigated
+/// away) can no longer finish, listen to or read them.
 fn reset_page_owned_state<R: tauri::Runtime, M: tauri::Manager<R>>(manager: &M) {
     let cleared = manager.state::<ExportStreams>().clear();
     if cleared > 0 {
@@ -659,6 +659,13 @@ fn reset_page_owned_state<R: tauri::Runtime, M: tauri::Manager<R>>(manager: &M) 
     let decodes = manager.state::<NativeRawDecodes>().clear();
     if decodes > 0 {
         eprintln!("[raw] cancelled {decodes} native RAW decode(s) of the previous page");
+    }
+    // Its spill index went with it (#249, R2-008); the store stays.
+    if let Ok(root) = display_proxy_store::root_for(manager.app_handle()) {
+        let spilled = display_proxy_store::reset_spill(&root);
+        if spilled > 0 {
+            eprintln!("[display-proxies] dropped {spilled} spilled record(s) of the previous page");
+        }
     }
 }
 

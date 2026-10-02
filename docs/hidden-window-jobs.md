@@ -103,12 +103,14 @@ state, cache bytes, live workers, the MI-GAN session and `aiRepair.revision`.
 ## 3. A kill is recoverable
 
 - **Native.** When a page starts loading, `lib.rs` clears every unfinished
-  export stream (`ExportStreams::clear`, deleting its `.part` file) and stops
-  the folder watch: a reloaded page could never finish them, and four orphans
-  refused every export. On macOS the app registers
+  export stream (`ExportStreams::clear`, deleting its `.part` file), stops
+  the folder watch and drops the display proxies the page before spilled
+  (`display_proxy_store::reset_spill`; the store stays): a reloaded page
+  could never finish or read them, and four orphan streams refused every
+  export. On macOS the app registers
   `on_web_content_process_terminate`, which records `{ at, count }`, clears the
-  streams and reloads the webview itself (registering the hook replaces
-  Tauri's default reload). The page reads the record once at boot
+  streams and the spill and reloads the webview itself (registering the hook
+  replaces Tauri's default reload). The page reads the record once at boot
   (`take_web_content_termination`). Folder grants live in the app process, so
   they survive a WebContent reload; after a full restart the folder is picked
   again.

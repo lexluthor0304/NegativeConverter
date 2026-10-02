@@ -10,7 +10,8 @@
 // writes them atomically (a `.part` file, then a rename), reads them back in
 // chunks, lists, deletes and reports free space. Names are 64 lowercase hex
 // digits (a hash of the record's key) or `index`, so no request can name a
-// path. The spill of an earlier run is removed at start.
+// path. The spill of an earlier run is removed at start, and the spill of the
+// page before whenever a page starts loading.
 use serde::Serialize;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -83,6 +84,25 @@ pub fn prepare_root(root: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Removes the spill of the page before, best effort, and returns how many
+/// records (or partial writes) went. A page that starts loading (a reload,
+/// or the one after macOS terminated WebContent) has an empty spill index,
+/// so what an earlier page spilled is unreachable (R2-008). It runs before
+/// that page's script, so none of its own records are here yet. The store
+/// is kept.
+pub fn reset_spill(root: &Path) -> usize {
+    let Ok(dir) = fs::read_dir(scope_dir(root, Scope::Spill)) else { return 0 };
+    let mut removed = 0;
+    for entry in dir.flatten() {
+        let path = entry.path();
+        let ext = path.extension().and_then(|e| e.to_str());
+        if (ext == Some("ncdp") || ext == Some("part")) && fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 // Time Machine's sticky exclusion, the attribute `tmutil addexclusion` sets.
@@ -387,6 +407,28 @@ mod tests {
         clear(&root, Scope::Store).unwrap();
         assert!(list(&root, Scope::Store).is_empty());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resetting_page_owned_state_drops_the_spill_and_keeps_the_store() {
+        let root = temp_root("page");
+        prepare_root(&root).unwrap();
+        write_chunk(&root, Scope::Store, NAME, 0, b"kept", true).unwrap();
+        write_chunk(&root, Scope::Store, "index", 0, b"{}", true).unwrap();
+        write_chunk(&root, Scope::Spill, NAME, 0, b"previous page", true).unwrap();
+        write_chunk(&root, Scope::Spill, "index", 0, b"half", false).unwrap();
+        assert_eq!(reset_spill(&root), 2, "a record and a partial write");
+        assert!(list(&root, Scope::Spill).is_empty(), "the previous page's spill is gone");
+        assert!(!part_path(&root, Scope::Spill, "index").unwrap().exists(), "with its partial writes");
+        assert_eq!(list(&root, Scope::Store).len(), 2, "the store is kept");
+        assert_eq!(read_chunk(&root, Scope::Store, NAME, 0, 16).unwrap(), b"kept");
+        // The new page spills as before, and its own records go at the next reset.
+        write_chunk(&root, Scope::Spill, NAME, 0, b"this page", true).unwrap();
+        assert_eq!(read_chunk(&root, Scope::Spill, NAME, 0, 16).unwrap(), b"this page");
+        assert_eq!(reset_spill(&root), 1);
+        assert_eq!(reset_spill(&root), 0);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(reset_spill(&temp_root("page-none")), 0, "nothing to drop before the cache exists");
     }
 
     #[test]
