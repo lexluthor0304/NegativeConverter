@@ -3,7 +3,7 @@
 // worker is the real exportWorker.js running in-process (every message
 // crosses a structured clone with its transfer list, both ways).
 //
-// - exportSingle creates its own bridge, terminates it exactly once after the
+// - exportSingle creates its own bridge, disposes of it exactly once after the
 //   last request settled, and rejects no request; it never touches the
 //   module-level bridge.
 // - A 16-bit TIFF/PNG single export is one adjust16AndEncode request whose
@@ -18,7 +18,9 @@
 // - Without OffscreenCanvas in the worker (WebKit before 16.4), single and
 //   batch PNG8 and JPEG encode through the canvas: the frame and the map's
 //   plane come back from the worker, the canvas encodes the restored frame,
-//   and the map has its own request, equal to the main-thread map.
+//   and the map has its own request, equal to the main-thread map. That map
+//   stops with the export (Cancel, a failed encode): no fallback, no worker
+//   after the bridge was disposed of.
 // - A batch frame rendered again after a lost plane frees the failed
 //   attempt's planes before it decodes again.
 import { MEMORY_FUNCTIONS, memoryGlobals } from './memoryHarness.mjs';
@@ -77,12 +79,18 @@ class InProcessWorker {
       queueMicrotask(() => this.onerror(new Error('worker crashed')));
       return;
     }
+    // A long pass: the request is received and never answered.
+    if (holdNext && holdNext(message)) {
+      holdNext = null;
+      return;
+    }
     activeWorker = this;
     queueMicrotask(() => { if (!this.terminated) self.onmessage({ data: received }); });
   }
   terminate() { this.terminated = true; }
 }
 let crashNext = null;
+let holdNext = null;
 // #256: the band pool a test installs (none by default).
 let bandPoolSize = 0;
 let bandMinPixels = 4_000_000;
@@ -191,7 +199,11 @@ function createContext({ gainMap = 'on' } = {}) {
     buildActiveExportFileName: () => 'frame.out',
     isTauriDesktop: () => false,
     notifyReviewExport: () => {},
-    getLoadingOverlay: () => ({ show: async () => {}, updateProgress: () => {}, setCancelable: () => {}, hide: () => {} }),
+    // The export's Cancel button: `overlayCancel()` presses it once offered.
+    getLoadingOverlay: () => ({
+      show: async () => {}, updateProgress: () => {}, hide: () => {},
+      setCancelable: (on, options) => { overlayCancel = on && options && options.onCancel ? options.onCancel : null; }
+    }),
     // The integration branch's export path (#241 hidden jobs, #244 geometry,
     // #257 PNG16 band pool, single-export Cancel).
     AbortController,
@@ -241,14 +253,19 @@ function createContext({ gainMap = 'on' } = {}) {
     defaultExportWorkers: guardedDefault,
     createExportWorkerBridge: () => {
       const bridge = bridgeModule.createExportWorkerBridge({ workerFactory: () => new InProcessWorker() });
-      const record = { bridge, terminated: 0, pendingAtTerminate: [], rejected: 0 };
+      const record = { bridge, disposed: 0, pendingAtDispose: [], terminated: 0, rejected: 0, workersAtDispose: null };
       const spied = {};
       for (const [key, value] of Object.entries(bridge)) {
         if (typeof value !== 'function') continue;
         spied[key] = (...args) => {
+          if (key === 'dispose') {
+            record.disposed++;
+            record.pendingAtDispose.push(bridge.pendingCount);
+            record.workersAtDispose = workerInstances.length;
+            return value(...args);
+          }
           if (key === 'terminateWorker') {
             record.terminated++;
-            record.pendingAtTerminate.push(bridge.pendingCount);
             return value(...args);
           }
           const result = value(...args);
@@ -311,6 +328,7 @@ const attached = [];
 const canvasEncodes = [];
 const canvasImages = [];
 const pools = [];
+let overlayCancel = null;
 
 // Main-thread references.
 function referenceAdjusted8(processed, settings) {
@@ -343,8 +361,9 @@ for (const [format, bitDepth] of [['tiff', 16], ['png', 16], ['png', 8], ['jpeg'
   assert.equal(released.length, 1, `${label}: one release when the export ends`);
   assert.equal(result.saved, true, `${label}: saved`);
   const record = bridges.at(-1);
-  assert.equal(record.terminated, 1, `${label}: the per-export bridge is terminated exactly once`);
-  assert.deepEqual(record.pendingAtTerminate, [0], `${label}: after its last request settled`);
+  assert.equal(record.disposed, 1, `${label}: the per-export bridge is disposed of exactly once`);
+  assert.deepEqual(record.pendingAtDispose, [0], `${label}: after its last request settled`);
+  assert.equal(record.terminated, 0, `${label}: never merely terminated (that bridge would start a worker again)`);
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(record.rejected, 0, `${label}: no request was rejected`);
   assert.deepEqual(f.moduleBridgeUse, [], `${label}: the module-level bridge is never used`);
@@ -533,7 +552,7 @@ for (const [format, bitDepth] of [['tiff', 16], ['png', 16], ['png', 8], ['jpeg'
       assert.ok(same(bytes.subarray(head.length, head.length + sdr.data.length), sdr.data),
         `${format}${bitDepth}: the exported pixels are the worker's adjustment, not the display frame`);
     }
-    assert.equal(bridges.at(-1).terminated, 1);
+    assert.equal(bridges.at(-1).disposed, 1);
   }
 }
 
@@ -557,7 +576,7 @@ for (const [format, bitDepth] of [['tiff', 16], ['png', 16], ['png', 8], ['jpeg'
   }
   assert.equal(crashes, 1);
   assert.equal(saved.length, 1, 'the export still saves one file');
-  assert.equal(bridges.at(-1).terminated, 1);
+  assert.equal(bridges.at(-1).disposed, 1);
 }
 
 // ============================================================ batch export
@@ -724,7 +743,7 @@ for (const [format, bitDepth] of [['jpeg', 8], ['png', 8], ['tiff', 16], ['png',
     bandedOnly(workerPosts.map((p) => p.type), 'single PNG16 with a pool');
     assert.equal(png16Pools.length, 1, 'single PNG16: one band pool');
     assert.equal(png16Pools[0].disposed, 1, 'single PNG16: the pool ends with the export');
-    assert.equal(bridges.at(-1).terminated, 1);
+    assert.equal(bridges.at(-1).disposed, 1);
     assert.ok(same(await stubBlobText(saved[0]), await expectedBytes(f.state.processedImageData, f.state.recipe)), 'single PNG16: banded bytes == fused bytes');
 
     const { f: b, frames, exportInfo, jobs } = batchContext({ format: 'png', bitDepth: 16 });
@@ -978,6 +997,9 @@ for (const [format, bitDepth] of [['jpeg', 8], ['png', 8], ['tiff', 16], ['png',
 // `gainMap16` request. Checked here (#229 R1-096): the canvas encodes the
 // restored frame's bytes, the map equals the main-thread reference, and a
 // transferred map plane is re-attached before the map's request takes it.
+// The map stops with the export (R1-050): Cancel reaches it, and after a
+// failed canvas encode the disposed bridge cancels it, with no fallback and
+// no worker started after the export.
 {
   const offscreen = globalThis.OffscreenCanvas;
   const offscreenWorker = self.onmessage;
@@ -1031,7 +1053,7 @@ for (const [format, bitDepth] of [['jpeg', 8], ['png', 8], ['tiff', 16], ['png',
       assert.ok(same(await stubBlobText(saved[0]), expected.bytes), `${label}: the file (SDR, and the map == the main-thread map)`);
       for (const post of workerPosts) assert.ok(!post.transfers.includes(plane.data.buffer), `${label}: ${post.type} names no editor buffer`);
       assert.ok(same(plane.data, planeBefore), `${label}: the editor's plane is intact`);
-      assert.equal(bridges.at(-1).terminated, 1, `${label}: the bridge ends with the export`);
+      assert.equal(bridges.at(-1).disposed, 1, `${label}: the bridge ends with the export`);
       // The next export knows: its frame never goes to the worker.
       workerPosts.length = 0;
       saved.length = 0;
@@ -1065,10 +1087,73 @@ for (const [format, bitDepth] of [['jpeg', 8], ['png', 8], ['tiff', 16], ['png',
       }
       assert.equal(pools.at(-1).disposed, 1);
     }
+
+    // The canvas encode fails while the map's pass is still in the worker:
+    // the export fails, and disposing of its bridge cancels the map. Before
+    // (terminateWorker), the map took that as a worker failure: it used up
+    // the once-per-session warning and fell back to the plane-only pass,
+    // which started a worker on the terminated bridge.
+    reset();
+    bridgeModule.resetWorkerFallbackWarnings();
+    const failing = createContext();
+    failing.state.exportFormat = 'jpeg';
+    failing.context.imageDataToCanvasBlob = async () => { throw new Error('Failed to render export image.'); };
+    holdNext = (message) => message.type === 'gainMap16';
+    const warnings = [];
+    const warn = console.warn;
+    console.warn = (...args) => { warnings.push(args.map(String).join(' ')); };
+    let failure = null;
+    try {
+      await failing.context.exportSingle();
+    } catch (err) {
+      failure = err;
+    } finally {
+      holdNext = null;
+    }
+    try {
+      for (let i = 0; i < 10; i++) await new Promise((resolve) => setImmediate(resolve));
+    } finally {
+      console.warn = warn;
+    }
+    assert.match(String(failure && failure.message), /Failed to render export image/, 'the export fails');
+    const record = bridges.at(-1);
+    assert.equal(record.disposed, 1);
+    assert.deepEqual(workerPosts.map((p) => p.type), ['applyAdjustments', 'encodeImage', 'gainMap16'], 'no fallback pass for the map');
+    assert.equal(workerInstances.length, record.workersAtDispose, 'no worker started after the export');
+    assert.ok(workerInstances.at(-1).terminated, 'the map\'s worker is gone');
+    assert.equal(record.bridge.hasWorker, false);
+    assert.deepEqual(warnings.filter((text) => /gainMap16|applyAdjustments16/.test(text)), [], 'no fallback warning is used up');
+
+    // Cancel while the map's pass runs: the export ends at once.
+    reset();
+    const cancelled = createContext();
+    cancelled.state.exportFormat = 'jpeg';
+    holdNext = (message) => {
+      if (message.type !== 'gainMap16') return false;
+      setImmediate(() => overlayCancel());
+      return true;
+    };
+    let timer = null;
+    let outcome;
+    try {
+      outcome = await Promise.race([
+        cancelled.context.exportSingle(),
+        new Promise((resolve) => { timer = setTimeout(() => resolve('still waiting'), 3000); })
+      ]);
+    } finally {
+      clearTimeout(timer);
+      holdNext = null;
+    }
+    assert.deepEqual(outcome === 'still waiting' ? outcome : { ...outcome }, { saved: false, path: null }, 'Cancel ends the export during the map\'s pass');
+    assert.equal(saved.length, 0);
+    assert.deepEqual(workerPosts.map((p) => p.type), ['applyAdjustments', 'encodeImage', 'gainMap16'], 'no fallback pass');
+    assert.ok(workerInstances.at(-1).terminated, 'the map\'s worker is terminated');
+    assert.equal(bridges.at(-1).disposed, 1);
   } finally {
     globalThis.OffscreenCanvas = offscreen;
     self.onmessage = offscreenWorker;
     bridgeModule.resetEncodeImageSupport();
+    holdNext = null;
   }
 }
 

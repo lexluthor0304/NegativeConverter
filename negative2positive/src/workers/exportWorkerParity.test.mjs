@@ -333,6 +333,23 @@ for (const [name, settings] of Object.entries(recipes)) {
   await new Promise((resolve) => setTimeout(resolve, 10));
   process.off('unhandledRejection', onUnhandled);
   assert.equal(unhandled, 0, 'the pending map always has a rejection handler');
+
+  // The export is over (#229 R1-050): a cancelled export, or one whose
+  // bridge was disposed of, starts no fallback pass for a map nobody reads.
+  const cancelled = new AbortController();
+  cancelled.abort();
+  await assert.rejects(requestExportGainMap({
+    processed, sdr, adjustmentSettings: settings, workers: failing, signal: cancelled.signal,
+    adjustPlane16: () => assert.fail('no fallback for a cancelled export')
+  }), (err) => err.name === 'AbortError', 'a cancelled export');
+  let started = 0;
+  const ended = createExportWorkerBridge({ workerFactory: () => { started++; throw new Error('a disposed bridge starts no worker'); } });
+  ended.dispose();
+  await assert.rejects(requestExportGainMap({
+    processed, sdr, adjustmentSettings: settings, workers: ended,
+    adjustPlane16: () => assert.fail('no fallback on a disposed bridge')
+  }), (err) => err.name === 'AbortError', 'a disposed bridge');
+  assert.equal(started, 0, 'a disposed bridge starts no worker');
 }
 
 bridge.terminateWorker();

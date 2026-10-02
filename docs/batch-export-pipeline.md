@@ -53,7 +53,10 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
   one per lane, a single lane included) for the adjustment and encode stages.
   Both are released when the batch ends, so a one-lane batch (every frame
   over 40 MP) no longer leaves its export worker, and its dead planes, in
-  the module-level bridge (#250). The on-device AI repair session is shared,
+  the module-level bridge (#250). The export pool is disposed of: no lane
+  starts a worker again, and a request still in flight, still copying its
+  inputs or made later is cancelled (an AbortError) instead of falling back
+  to the main thread. The on-device AI repair session is shared,
   so lanes take turns with it (`withAiRepairTurn`). Lanes look tiles up in
   the session's tile memo but never insert (`memoInsert: false`), so a roll
   export does not evict the open photo's tiles (#246).
@@ -212,7 +215,9 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
   released (`liveEditorBuffers` in `main.js` names them with the
   `backingBuffers` walk, which never builds a geometry frame descriptor's
   pixels, `docs/geometry-chain.md`). Single export does the same with a
-  bridge of its own that it terminates when the export ends; the contact
+  bridge of its own that it disposes of when the export ends (no worker
+  starts on it afterwards; a gain map left running by a failed canvas
+  encode is cancelled there, and Cancel reaches that map too); the contact
   sheet releases a frame's full-resolution planes once its cell exists (the
   watch folder no longer renders arrivals, #247).
 - Batch frames run frame detection silently (`processFileWithSettings`

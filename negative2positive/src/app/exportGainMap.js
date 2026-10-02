@@ -6,6 +6,12 @@
 import { computeGainMap } from '../workers/gainMap.js';
 import { releaseOwnedPlanes } from './planeRelease.js';
 
+function abortError() {
+  const err = new Error('Gain map request aborted');
+  err.name = 'AbortError';
+  return err;
+}
+
 /**
  * True when `processed` carries a 16-bit plane of its own size and `sdr` is a
  * frame of that size. Anything else produced no map before either: the
@@ -23,18 +29,21 @@ export function gainMapInputsMatch(processed, sdr) {
 
 /**
  * Start the gain map for `sdr`. The returned promise settles to the map or
- * null (no map), and rejects only with the bridge's AbortError or
- * ExportInputLostError. It always carries a rejection handler, so a caller
- * that never awaits it (an export that failed before encoding) does not
- * produce an unhandled rejection; awaiting it still sees the rejection.
+ * null (no map), and rejects only with an AbortError (the export's signal,
+ * or its bridge disposed) or the bridge's ExportInputLostError. It always
+ * carries a rejection handler, so a caller that never awaits it (an export
+ * that failed before encoding) does not produce an unhandled rejection;
+ * awaiting it still sees the rejection.
  *
  * @param {object} request
  * @param {ImageData} request.processed - the conversion result carrying `__image16`
  * @param {ImageData} request.sdr - the 8-bit frame being encoded
  * @param {object} request.adjustmentSettings - buildAdjustmentSettings(...), captured now
  * @param {object} [request.workers] - bridge or pool with workerGainMap16 / isWorkerAvailable
+ *   (and `disposed`, true once its export is over)
  * @param {boolean} [request.transferPlane] - hand the plane to the worker without a copy
- * @param {AbortSignal} [request.signal]
+ * @param {AbortSignal} [request.signal] - the export's Cancel; a cancelled
+ *   export starts no fallback pass
  * @param {(adjustmentSettings: object) => Promise<{__image16?: object}|null>} request.adjustPlane16
  *   the plane-only 16-bit pass for the fallback
  */
@@ -53,6 +62,9 @@ export function requestExportGainMap({
       const map = await workers.workerGainMap16(processed, sdr, adjustmentSettings, { transferPlane, signal });
       if (map) return map;
     }
+    // Nobody reads the map of a cancelled export, or of one whose bridge was
+    // disposed of: no second pass for it.
+    if ((signal && signal.aborted) || (workers && workers.disposed)) throw abortError();
     const high = await adjustPlane16(adjustmentSettings);
     const map = high && high.__image16 ? computeGainMap(sdr, high.__image16) : null;
     // The fallback's adjusted plane exists only for the map (#250): free it

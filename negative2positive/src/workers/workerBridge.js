@@ -8,9 +8,13 @@
  * the export overlay spinning forever.
  *
  * `createExportWorkerBridge()` builds an independent bridge with its own
- * Worker. A single export makes one for itself and terminates it when the
+ * Worker. A single export makes one for itself and disposes of it when the
  * export ends, and a batch export runs a pool of them (`createExportWorkerPool`)
- * for the batch's lifetime (#250). The module-level functions are the default
+ * for the batch's lifetime (#250). A disposed bridge never starts a worker
+ * again: a request in flight when it is disposed of, one still copying its
+ * inputs (the copy stops at its next slice) and any later one reject with an
+ * AbortError, so nothing falls back to the main thread for a file that is no
+ * longer being written. The module-level functions are the default
  * bridge for the remaining callers (contact sheet, multi-shot merge); it
  * releases its worker a few seconds after a large request leaves it idle.
  * `createPng16BandPool` spreads the row bands of one 16-bit PNG across
@@ -60,6 +64,14 @@ function makeError(message, name) {
 
 export function isAbortError(err) {
   return Boolean(err) && err.name === 'AbortError';
+}
+
+// A request to a disposed bridge: nothing was posted, so its inputs are
+// still the caller's (see reclaimUnlessNotPosted).
+function disposedBridgeError() {
+  const err = makeError('Export worker bridge disposed', 'AbortError');
+  err.notPosted = true;
+  return err;
 }
 
 export function isWorkerTimeoutError(err) {
@@ -350,6 +362,8 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory,
   const pending = new Map();
   let idleTimer = null;
   let largeSinceIdle = false;
+  // Set by dispose(): the export that owned the bridge is over.
+  let disposed = false;
   // The planes of the last request stay in the worker's heap until it is
   // terminated (the memory ledger's worker resident, #258).
   let lastJobBytes = 0;
@@ -461,6 +475,7 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory,
 
   function getWorker() {
     if (worker) return worker;
+    if (disposed) return null;
     try {
       worker = workerFactory();
       worker.onmessage = handleWorkerMessage;
@@ -495,6 +510,13 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory,
       const { signal } = options;
       if (signal && signal.aborted) {
         reject(makeError('Worker request aborted', 'AbortError'));
+        return;
+      }
+      // A request that gets here after the bridge was disposed of (made
+      // later, or its input copy ended just then) neither starts a worker
+      // nor falls back.
+      if (disposed) {
+        reject(disposedBridgeError());
         return;
       }
 
@@ -563,6 +585,13 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory,
     reclaimInput(err, returned, input);
   }
 
+  // A request's inputs are prepared under its own signal and the bridge's
+  // end: once the bridge is disposed of, a copy still running stops at its
+  // next slice (an AbortError) instead of copying the rest for nothing.
+  function prepareRequestInput(view, { transfer = false, signal = null } = {}) {
+    return prepareInput(view, { transfer, signal: { get aborted() { return disposed || Boolean(signal && signal.aborted); } } });
+  }
+
   /**
    * Apply adjustments to image data via Worker. The worker adjusts its input
    * in place and hands the same buffer back.
@@ -581,7 +610,7 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory,
     const opts = normalizeRequestOptions(onProgressOrOptions);
     const { width, height } = imageData;
     const byteLength = imageData.data.byteLength;
-    let input = prepareInput(imageData.data, { transfer: mayTransfer8(imageData, opts), signal: opts.signal });
+    let input = prepareRequestInput(imageData.data, { transfer: mayTransfer8(imageData, opts), signal: opts.signal });
     if (isPromise(input)) input = await input;
     const { buffer: inputBuffer, transferred } = input;
 
@@ -641,7 +670,7 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory,
     const serializedSettings = serializeSettings(settings);
     // Copied unless the caller hands over an export-owned plane: the caller's
     // fallback, and later frames, may still read it.
-    let input = prepareInput(plane.data, { transfer: opts.transferPlane, signal: opts.signal });
+    let input = prepareRequestInput(plane.data, { transfer: opts.transferPlane, signal: opts.signal });
     if (isPromise(input)) input = await input;
     const { buffer: inputBuffer, transferred } = input;
     try {
@@ -714,9 +743,9 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory,
     const { width, height } = plane;
     if (sdr.width !== width || sdr.height !== height || !sdr.data || sdr.data.length !== width * height * 4) return null;
     const serializedSettings = serializeSettings(settings);
-    let sdrInput = prepareInput(sdr.data, { signal: opts.signal });
+    let sdrInput = prepareRequestInput(sdr.data, { signal: opts.signal });
     if (isPromise(sdrInput)) sdrInput = await sdrInput;
-    let input = prepareInput(plane.data, { transfer: opts.transferPlane, signal: opts.signal });
+    let input = prepareRequestInput(plane.data, { transfer: opts.transferPlane, signal: opts.signal });
     if (isPromise(input)) input = await input;
     const sdrBuffer = sdrInput.buffer;
     const { buffer: inputBuffer, transferred } = input;
@@ -774,7 +803,7 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory,
     if ((format !== 'tiff' && format !== 'png') || !plane || !isRgbaPlaneOf(plane, source.width, source.height)) return null;
     const { width, height } = plane;
     const serializedSettings = serializeSettings(settings);
-    let input = prepareInput(plane.data, { transfer: opts.transferPlane, signal: opts.signal });
+    let input = prepareRequestInput(plane.data, { transfer: opts.transferPlane, signal: opts.signal });
     if (isPromise(input)) input = await input;
     const { buffer: inputBuffer, transferred } = input;
     try {
@@ -843,9 +872,9 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory,
     const withGain = Boolean(gainPlane) && isRgbaPlaneOf(gainPlane, width, height);
     const serializedGainSettings = withGain && gainRequest.settings ? serializeSettings(gainRequest.settings) : null;
     const byteLength = imageData.data.byteLength;
-    let pixelsInput = prepareInput(imageData.data, { transfer: mayTransfer8(imageData, opts), signal: opts.signal });
+    let pixelsInput = prepareRequestInput(imageData.data, { transfer: mayTransfer8(imageData, opts), signal: opts.signal });
     if (isPromise(pixelsInput)) pixelsInput = await pixelsInput;
-    let planeInput = withGain ? prepareInput(gainPlane.data, { transfer: Boolean(gainRequest.transferPlane), signal: opts.signal }) : null;
+    let planeInput = withGain ? prepareRequestInput(gainPlane.data, { transfer: Boolean(gainRequest.transferPlane), signal: opts.signal }) : null;
     if (isPromise(planeInput)) planeInput = await planeInput;
     const transfers = [pixelsInput.buffer];
     if (planeInput) transfers.push(planeInput.buffer);
@@ -898,7 +927,7 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory,
     const plane = is16 ? imageData.__image16 : null;
     const transfer = is16 ? Boolean(opts.transferPlane) : mayTransfer8(imageData, opts);
     const byteLength = samples.byteLength;
-    let input = prepareInput(samples, { transfer, signal: opts.signal });
+    let input = prepareRequestInput(samples, { transfer, signal: opts.signal });
     if (isPromise(input)) input = await input;
     const { buffer, transferred } = input;
     try {
@@ -994,11 +1023,27 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory,
   }
 
   /**
-   * Terminate the worker (cleanup).
+   * Terminate the worker (cleanup). In-flight requests fail and fall back;
+   * the next request starts a fresh worker.
    */
   function terminateWorker() {
     disposeWorker();
     rejectAllPending(new Error('Worker terminated'));
+  }
+
+  /**
+   * End the bridge for good, when the export that owns it is over (#250).
+   * The worker is terminated, and every request still in flight, still
+   * copying its inputs (at its next slice) or made later rejects with an
+   * AbortError: none of them starts a worker again or falls back to the
+   * main thread, and isWorkerAvailable() is false from then on. Per-export
+   * bridges and pool lanes release no worker on their own: a worker started
+   * after the export would keep its planes until the bridge is collected.
+   */
+  function dispose() {
+    disposed = true;
+    disposeWorker();
+    rejectAllPending(makeError('Export worker bridge disposed', 'AbortError'));
   }
 
   return {
@@ -1013,6 +1058,9 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory,
     isWorkerAvailable,
     cancelWorkerRequests,
     terminateWorker,
+    dispose,
+    /** True once dispose() ran. */
+    get disposed() { return disposed; },
     /** Requests in flight on this bridge (for least-busy dispatch). */
     get pendingCount() { return pending.size; },
     /** Whether a Worker currently exists (never spawns one, unlike isWorkerAvailable). */
@@ -1026,8 +1074,9 @@ export function createExportWorkerBridge({ workerFactory = defaultWorkerFactory,
 
 /**
  * Several bridges for a batch export. Each call goes to the bridge with the
- * fewest requests in flight; `dispose()` terminates every worker once the
- * batch is over. The same API as a single bridge, so callers can take either.
+ * fewest requests in flight; `dispose()` disposes of every lane once the
+ * batch is over (no lane starts a worker again). The same API as a single
+ * bridge, so callers can take either.
  */
 export function createExportWorkerPool({ size = 2, workerFactory } = {}) {
   const laneCount = Math.max(1, Math.floor(size) || 1);
@@ -1046,7 +1095,8 @@ export function createExportWorkerPool({ size = 2, workerFactory } = {}) {
     isWorkerAvailable: () => lanes.every(lane => lane.isWorkerAvailable()),
     cancelWorkerRequests: (reason) => lanes.forEach(lane => lane.cancelWorkerRequests(reason)),
     terminateWorker: () => lanes.forEach(lane => lane.terminateWorker()),
-    dispose: () => lanes.forEach(lane => lane.terminateWorker()),
+    dispose: () => lanes.forEach(lane => lane.dispose()),
+    get disposed() { return lanes.every(lane => lane.disposed); },
     get pendingCount() { return lanes.reduce((sum, lane) => sum + lane.pendingCount, 0); }
   };
 }

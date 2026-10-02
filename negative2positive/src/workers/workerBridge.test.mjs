@@ -685,7 +685,15 @@ console.log('workerBridge.test.mjs passed');
   assert.equal(workers[1].posts.length, 1);
   assert.equal(pool.pendingCount, 3);
   pool.dispose();
-  assert.deepEqual(await Promise.all([r1, r2, r3]), [null, null, null]);
+  // The batch is over (#229 R1-093): its requests are cancelled, not failed
+  // (a null result is the cue to redo the work on the main thread), and no
+  // lane starts a worker again.
+  const settled = await Promise.allSettled([r1, r2, r3]);
+  assert.ok(settled.every((s) => s.status === 'rejected' && isAbortError(s.reason)), 'dispose cancels the requests in flight');
   assert.ok(workers.every(w => w.terminated), 'dispose terminates every lane');
+  assert.equal(pool.disposed, true);
+  await assert.rejects(pool.workerEncodeTiff(createImageData(), 8), (err) => isAbortError(err), 'a request after dispose is cancelled');
+  assert.equal(pool.isWorkerAvailable(), false);
+  assert.equal(workers.length, 2, 'a disposed pool starts no worker');
   console.log('workerBridge: independent bridges and pool dispatch verified');
 }

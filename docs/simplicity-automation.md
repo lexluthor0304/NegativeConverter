@@ -70,7 +70,9 @@ done, the worker runs the 16-bit adjustment pass on the unadjusted plane,
 `workers/gainMap.js`, and a second encode for the map. Where the worker cannot
 encode (no `OffscreenCanvas.convertToBlob`, a non-opaque frame), the main
 thread encodes with a canvas and the map runs beside it in the worker
-(`gainMap16`). The sRGB
+(`gainMap16`). That map ends with the export: Cancel stops it, and when a
+single export's canvas encode fails, disposing of the export's worker cancels
+it without a fallback pass. The sRGB
 EOTF comes from exact Float64 tables over the 256 and 65536 integer codes,
 summed in the original order, so the map bytes and `GainMapMax` are the ones
 the per-sample `** 2.4` produced. A sprocket-frame export computes no map,

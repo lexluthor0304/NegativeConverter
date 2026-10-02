@@ -18257,10 +18257,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         overlay.hide();
         throw error;
       }
-      // This export's own worker, terminated when the export ends (#250): its
-      // dead planes go with it instead of waiting for the next export. Every
-      // request is awaited before the `finally`, so terminating there rejects
-      // nothing on the normal path.
+      // This export's own worker, disposed of when the export ends (#250): its
+      // dead planes go with it instead of waiting for the next export, and no
+      // worker starts on it afterwards. Every request is awaited before the
+      // `finally`, so disposing there rejects nothing on the normal path; it
+      // cancels only a gain map left running by a failed canvas encode.
       const workerBridge = createExportWorkerBridge();
       // Its PNG16 band pool (#257), for the same lifetime.
       const png16Pool = exportInfo.format === 'png' && exportInfo.bitDepth === 16 ? createOperationPng16Pool(1) : null;
@@ -18339,7 +18340,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         throw err;
       } finally {
         overlay.setCancelable(false);
-        workerBridge.terminateWorker();
+        workerBridge.dispose();
         if (png16Pool) png16Pool.dispose();
         if (exportBands) {
           exportBands.dispose();
@@ -18701,12 +18702,12 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // `{ width, height, __image16 }` for callers that read only the plane.
     // `transferPlane` (#250) lets the worker take the input plane when this
     // export owns it and nothing reads it again; it may then reject with
-    // ExportInputLostError.
+    // ExportInputLostError. `signal` cancels the worker pass (AbortError).
     async function applyAdjustmentsWithSettings(imageData, settings, options = {}) {
       return applyPreparedAdjustmentsWithWorkers(imageData, buildAdjustmentSettings(settings), options);
     }
 
-    async function applyPreparedAdjustmentsWithWorkers(imageData, adjustmentSettings, { bitDepth = 8, bridge = null, planeOnly = false, transferPlane = false } = {}) {
+    async function applyPreparedAdjustmentsWithWorkers(imageData, adjustmentSettings, { bitDepth = 8, bridge = null, planeOnly = false, transferPlane = false, signal = null } = {}) {
       const wants16 = bitDepth === 16 && Boolean(imageData.__image16 && imageData.__image16.data instanceof Uint16Array);
       const planeOnlyPass = wants16 && planeOnly;
       const exportWorkers = bridge || defaultExportWorkers;
@@ -18716,8 +18717,8 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // Try Worker for large images (>1MP)
       if (imageData.width * imageData.height > 1_000_000 && exportWorkers.isWorkerAvailable()) {
         const result = wants16
-          ? await exportWorkers.workerApplyAdjustments16(imageData, adjustmentSettings, 'full', { planeOnly: planeOnlyPass, transferPlane })
-          : await exportWorkers.workerApplyAdjustments(imageData, adjustmentSettings, 'full', { transferPlane, onRestore: (frame) => { source = frame; } });
+          ? await exportWorkers.workerApplyAdjustments16(imageData, adjustmentSettings, 'full', { planeOnly: planeOnlyPass, transferPlane, signal })
+          : await exportWorkers.workerApplyAdjustments(imageData, adjustmentSettings, 'full', { transferPlane, signal, onRestore: (frame) => { source = frame; } });
         if (result) return result;
       }
 
@@ -18751,14 +18752,16 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // map still overlaps that encode. The export worker runs the 16-bit pass
     // and the map; without it the plane-only pass and the same table map run
     // here. `adjustmentSettings` is the recipe captured at the adjust stage.
-    function startExportGainMap(processed, sdr, adjustmentSettings, { bridge = null, transferPlane = false } = {}) {
+    // `signal` is the export's: Cancel stops the map's worker pass too.
+    function startExportGainMap(processed, sdr, adjustmentSettings, { bridge = null, transferPlane = false, signal = null } = {}) {
       return requestExportGainMap({
         processed,
         sdr,
         adjustmentSettings,
         workers: bridge || defaultExportWorkers,
         transferPlane,
-        adjustPlane16: (prepared) => applyPreparedAdjustmentsWithWorkers(processed, prepared, { bitDepth: 16, bridge, planeOnly: true })
+        signal,
+        adjustPlane16: (prepared) => applyPreparedAdjustmentsWithWorkers(processed, prepared, { bitDepth: 16, bridge, planeOnly: true, signal })
       });
     }
 
@@ -18999,9 +19002,16 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }
 
       // Main-thread canvas encode. The gain map's own worker pass starts first
-      // so it still overlaps the canvas encode.
+      // so it still overlaps the canvas encode. It ends with the export:
+      // Cancel (`signal`) reaches it, and when the encode fails, the single
+      // export disposes of its bridge in its `finally`, which cancels the map
+      // (its copies stop; it never falls back or starts a worker for a file
+      // that is not written). It is not aborted here: an aborted request
+      // terminates its worker, and a batch frame's map shares a pool lane with
+      // other frames' requests. It runs on unread there until it ends or the
+      // batch disposes of the pool.
       const pendingMap = gainRequest && gainRequest.source
-        ? startExportGainMap(gainRequest.source, frame, gainRequest.settings, { bridge, transferPlane: gainRequest.transferPlane })
+        ? startExportGainMap(gainRequest.source, frame, gainRequest.settings, { bridge, transferPlane: gainRequest.transferPlane, signal })
         : null;
       blob = await imageDataToCanvasBlob(frame, mimeType, canvasQuality);
       trace.end({ bytes: blob.size || 0, worker: false });

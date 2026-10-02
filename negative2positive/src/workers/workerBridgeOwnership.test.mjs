@@ -625,6 +625,92 @@ async function withEventLoopAlive(fn) {
   assert.equal(bridgeModule.defaultExportBridge.hasWorker, false);
 }
 
+// --------------------------------------------------------------- dispose
+
+{
+  // #229 R1-093: an export's `finally` ends its bridge while a gain-map
+  // request is still copying its SDR frame in slices, so the request is not
+  // in flight yet (the canvas path after a failed encode). The copy stops at
+  // its next slice and the request is cancelled: the plane (the editor's, as
+  // a single export sends it: copied, in slices too) is never copied, and no
+  // worker starts on the disposed bridge. The control is terminateWorker, the
+  // call an export used to end with: the bridge stays usable, both copies go
+  // on and the request starts a worker after the export.
+  const width = 2048;
+  const height = Math.floor(COPY_SLICE_BYTES / (width * 4)) + 2;
+  const sdr = new ImageData(new Uint8ClampedArray(width * height * 4).fill(255), width, height);
+  assert.ok(sdr.data.byteLength > COPY_SLICE_BYTES, 'the SDR frame is copied in slices');
+  const source = { width, height, __image16: { width, height, data: new Uint16Array(width * height * 4).fill(40000) } };
+  const plane = source.__image16.data;
+  assert.ok(plane.byteLength > 2 * COPY_SLICE_BYTES, 'and the plane in three');
+  // Every slice after the first yields through a MessageChannel.
+  const RealMessageChannel = globalThis.MessageChannel;
+  let yields = 0;
+  globalThis.MessageChannel = class extends RealMessageChannel {
+    constructor() {
+      super();
+      yields++;
+    }
+  };
+  try {
+    for (const end of ['dispose', 'terminateWorker']) {
+      const bridge = fresh(() => ({ kind: 'hang' }));
+      yields = 0;
+      const request = bridge.workerGainMap16(source, sdr, identity());
+      assert.equal(lastPost, null, `${end}: the request is still copying`);
+      assert.equal(yields, 1, `${end}: the SDR frame's first slice is copied`);
+      bridge[end]();
+      if (end === 'dispose') {
+        await assert.rejects(request, (err) => isAbortError(err), 'the request is cancelled');
+        assert.equal(yields, 1, 'the copy stopped at its next slice: nothing more was copied');
+        assert.equal(workers.length, 0, 'no worker is started for it');
+        assert.equal(source.__image16.data, plane, 'the caller\'s plane is untouched');
+        assert.equal(plane.length, width * height * 4);
+        assert.equal(bridge.isWorkerAvailable(), false, 'a disposed bridge has no worker to offer');
+        assert.equal(workers.length, 0);
+      } else {
+        for (let i = 0; i < 100 && !lastPost; i++) await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(yields, 3, 'control: the SDR frame\'s second slice and the plane\'s three were copied');
+        assert.equal(workers.length, 1, 'control: the terminated bridge starts a worker for the request');
+        assert.equal(lastPost.message.type, 'gainMap16');
+        bridge.dispose();
+        await assert.rejects(request, (err) => isAbortError(err));
+      }
+    }
+  } finally {
+    globalThis.MessageChannel = RealMessageChannel;
+  }
+}
+
+{
+  // A request in flight when the bridge is disposed of is cancelled, not
+  // failed (terminateWorker's null makes callers redo the work on the main
+  // thread, and uses up the once-per-session warning); every later request
+  // is cancelled without a worker.
+  const bridge = fresh(() => ({ kind: 'hang' }));
+  const warn = console.warn;
+  let warnings = 0;
+  console.warn = () => { warnings++; };
+  try {
+    const inFlight = bridge.workerGainMap16(frame16(), frame8(), identity());
+    assert.equal(workers.length, 1);
+    bridge.dispose();
+    await assert.rejects(inFlight, (err) => isAbortError(err));
+    assert.ok(workers[0].terminated, 'the worker is terminated');
+    assert.equal(bridge.disposed, true);
+    await assert.rejects(bridge.workerEncodeTiff(frame8(), 8), (err) => isAbortError(err), 'a later request is cancelled');
+    await assert.rejects(bridge.workerApplyAdjustments16(frame16(), identity(), 'full', { planeOnly: true }), (err) => isAbortError(err));
+    const owned = markOwnedPlanes(frame8());
+    await assert.rejects(bridge.workerEncodeImage(owned, { mimeType: 'image/png', transferPlane: true, onRestore: () => assert.fail('nothing was posted') }), (err) => isAbortError(err));
+    assert.equal(owned.data.length, N, 'an input it would have transferred stays attached');
+    assert.equal(workers.length, 1, 'no worker after dispose');
+    assert.equal(bridge.hasWorker, false);
+    assert.equal(warnings, 0, 'no fallback warning');
+  } finally {
+    console.warn = warn;
+  }
+}
+
 // ------------------------------------------------------------------ pool
 
 {
@@ -636,6 +722,9 @@ async function withEventLoopAlive(fn) {
   assert.ok(await pool.workerAdjust16AndEncode(frame16(), identity(), { format: 'png' }));
   pool.dispose();
   assert.ok(workers.every((w) => w.terminated), 'dispose releases a size-1 pool too');
+  // Its lanes are disposed of: nothing starts a worker after the batch.
+  await assert.rejects(pool.workerAdjust16AndEncode(frame16(), identity(), { format: 'png' }), (err) => isAbortError(err));
+  assert.equal(workers.length, 1, 'a disposed pool starts no worker');
 }
 
 console.log('workerBridgeOwnership.test.mjs passed');
