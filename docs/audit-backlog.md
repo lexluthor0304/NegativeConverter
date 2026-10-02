@@ -301,6 +301,21 @@ Remaining performance proposals below are not claims of completed work.
   `supportsFolderPicker()` returns `'webkitdirectory' in folderInput`, which is true on every Chromium/WebKit/Gecko build because the property exists on the prototype regardless of whether the engine can actually present a directory chooser. Two concrete platforms expose this: (1) Linux Tauri/AppImage: WebKitGTK's default file chooser (`webkitWebViewRunFileChooser` in WebKitWebViewGtk.cpp) always cr…  
   _Suggested fix:_ Strengthen the detection instead of relying on property presence: (a) on Linux desktop (`isTauriDesktop()` plus a tiny `get_platform` command, or `navigator.platform`/`navigator.userAgent` containing 'Linux'), treat the folder picker as unsupported and run the existing `applyFold…
 
+- **low/bug** — reactivateReleasedPhoto clears `state.loadedFile` before switchToFile, which returns at once while an export, Apply Crop / Auto Frame (`studioAutoFrameRunning`) or a desktop batch export is running: the photo is then left without a loaded file  
+  `negative2positive/src/app/main.js:11385`  
+  Reached when ensureBase meets an original that decodes differently while such a job waits for it, e.g. a single export whose colour-analysis barrier (ensureColorAnalysisSample) decodes the original of a Tier A session. getCurrentQueueItem() is then null until the user switches photos: edits are not marked dirty or saved and the export fails. Found while fixing R2-005 (#229 review); present before it.  
+  _Suggested fix:_ When a switch cannot start, keep `loadedFile` and defer the reopen until the lock clears (or have the job's own failure path reopen the photo once it has ended).
+
+- **low/ux** — A settings refresh whose geometry cannot be built (restoreSettings on open, a roll commit, Sync) keeps the geometry of the planes on screen, and leaving the photo saves it, so a transient allocation failure drops the saved crop  
+  `negative2positive/src/app/main.js:15316`  
+  rollBackFailedGeometry (R1-065) makes the settings name the planes' geometry for every failed build, so a conversion, an export and the saved recipe agree. For an edit that is an undo; for a settings refresh the recipe's own geometry is lost once the photo is left (switchToFile saves the live settings), with only the toast to say so.  
+  _Suggested fix:_ For builds no edit asked for, hold the recipe's geometry: keep it in what persistCurrentFileSettings saves, refuse single export while it is held, and build it again on the next open.
+
+- **low/ux** — A geometry edit that fails is undone without a redo step, but the redo entries its push cleared do not come back  
+  `negative2positive/src/app/main.js:3334`  
+  commitUndoSnapshot clears the redo stack for every new entry; rollBackFailedGeometry pops the failed edit's entry only.  
+  _Suggested fix:_ Keep the cleared redo entries with a geometry edit's entry until its build lands (counted by the history budget) and put them back on a rollback.
+
 ## Engine and rendering
 
 - **medium/bug** — softHigh/softLow (profile defaultSoftHigh/-SoftLow) are 8-bit offsets added to 16-bit clip points, and softClipLayer divides 16-bit overflow by 255  
