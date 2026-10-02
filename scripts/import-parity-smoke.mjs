@@ -26,6 +26,24 @@
 // rescue's measurement (expiredAnalysis with its fog surface, the strengths
 // it set, the semantic map). PNG16 file bytes differ by #257's stream; TIFF16
 // compares the same 16-bit pixels.
+//
+// Recipes the light-table lane makes (#229 review, #247). Both modes compare
+// the saved project's recipes of every file and the SHA-256 of each file an
+// Export All writes (PNG8, TIFF8, TIFF16), so the frames nobody opened are
+// exported with the recipes the lane gave them. #251 part 4b (the neutral line
+// search, flagged) is switched off for the detector to read what 1703835 read.
+// IMPORT_PARITY_LANE=1 (R1-081): the listed files are imported together, with
+// Auto Frame on (its straighten is the point: 8-bit JPEGs tilted by a few
+// tenths of a degree to a few degrees); the first opens, the others get their
+// recipes from the lane and are never opened. With IMPORT_PARITY_EXPIRED=1 the
+// session is an expired-roll one (Auto Frame stays on).
+// IMPORT_PARITY_WATCH=1 (R1-082, R1-124): the desktop IPC is stubbed before
+// the app boots, so 'Watch a folder…' exists; the first file opens with the
+// picker, the folder watch starts and the other files (under 1 MiB, one read
+// each) arrive through it at once. Once their tiles are ready the stub is
+// removed and the recipes and exports take the browser's download path.
+// Auto Frame stays on; with IMPORT_PARITY_EXPIRED=1 the session is an
+// expired-roll one.
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename } from 'node:path';
 
@@ -87,9 +105,13 @@ export async function runImportParitySmoke({ send, evaluate, waitFor, wait, fail
   files = (process.env.IMPORT_PARITY_FILES || '').split(':').filter(Boolean),
   baselinePath = process.env.IMPORT_PARITY_BASELINE, outPath = process.env.IMPORT_PARITY_OUT,
   cropDuringSemantic = process.env.IMPORT_PARITY_CROP_DURING_SEMANTIC === '1',
-  expired = process.env.IMPORT_PARITY_EXPIRED === '1' }) {
+  expired = process.env.IMPORT_PARITY_EXPIRED === '1',
+  lane = process.env.IMPORT_PARITY_LANE === '1', watch = process.env.IMPORT_PARITY_WATCH === '1' }) {
   if (!files.length) fail('IMPORT_PARITY_FILES lists no files');
   const baseline = baselinePath ? JSON.parse(readFileSync(baselinePath, 'utf8')) : null;
+  if (lane || watch) {
+    return runLaneRecipeParity({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, files, baseline, outPath, expired, watch });
+  }
   const rows = [];
   for (const path of files) {
     if (!existsSync(path)) fail('parity file missing: ' + path);
@@ -168,5 +190,138 @@ export async function runImportParitySmoke({ send, evaluate, waitFor, wait, fail
   if (outPath) {
     writeFileSync(outPath, JSON.stringify(rows, null, 2));
     console.log('import parity written to', outPath);
+  }
+}
+
+// Runs in the page before the app boots: a desktop IPC that knows the folder
+// watch and answers everything else the boot asks with nothing.
+const WATCH_STUB = `(() => {
+  const w = window.__parityWatch = { calls: [], files: new Map(), handler: null, session: 'parity-watch' };
+  window.__TAURI__ = {
+    core: { invoke: async (command, args = {}) => {
+      w.calls.push(command);
+      if (command === 'watch_import_folder') return { session: w.session, path: '/parity/watched' };
+      if (command === 'read_import_file') {
+        const bytes = w.files.get(args.path);
+        if (!bytes || args.session !== w.session) throw new Error('unknown watched file ' + args.path);
+        return bytes.slice(args.offset).buffer;
+      }
+      if (command === 'display_proxy_list') return [];
+      if (command === 'display_proxy_space') return { freeBytes: 0, totalBytes: 0 };
+      return null;
+    } },
+    event: { listen: async (name, handler) => {
+      if (name === 'import-folder-file') w.handler = handler;
+      return () => { if (w.handler === handler) w.handler = null; };
+    } }
+  };
+  w.remove = () => { delete window.__TAURI__; };
+})()`;
+
+async function runLaneRecipeParity({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, files, baseline, outPath, expired, watch }) {
+  const names = files.map(path => basename(path));
+  for (const path of files) if (!existsSync(path)) fail('parity file missing: ' + path);
+  if (watch) {
+    if (files.length < 2) fail('the watch mode opens the first file and watches the others arrive');
+    for (const path of files.slice(1)) if (readFileSync(path).length >= 1024 * 1024) fail('a watched file must be under 1 MiB (one read): ' + path);
+    await send('Page.addScriptToEvaluateOnNewDocument', { source: WATCH_STUB });
+  }
+  // The detector's #251 part 4b input is read at boot.
+  await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
+  await waitFor('parity boot', `!!document.getElementById('studioImportAutoCrop')`);
+  await evaluate(`localStorage.setItem('nc_autoframe_neutral_lines_v1', 'off')`);
+  await send('Page.navigate', { url: `http://127.0.0.1:${port}/?lang=en` });
+  await waitFor('parity boot', `!!document.getElementById('studioImportAutoCrop')`);
+  await installDialogAutoAccept();
+  await wait(500);
+  await evaluate(CAPTURE);
+  const setup = await evaluate(`(() => {
+    const crop = document.getElementById('studioImportAutoCrop'); if (!crop.checked) crop.click();
+    const frame = document.getElementById('autoFrameEnabledInput');
+    if (!frame.checked) { frame.checked = true; frame.dispatchEvent(new Event('change', { bubbles: true })); }
+    if (${expired}) {
+      const label = document.getElementById('uploadExpiredBtn');
+      label.addEventListener('click', event => event.preventDefault(), { once: true });
+      label.click();
+    }
+    return { autoCrop: crop.checked, autoFrame: frame.checked, watchButton: !!document.getElementById('studioWatchFolder') };
+  })()`);
+  if (expired) await waitFor('the expired-roll session', `document.body.classList.contains('studio-expired')`, 10_000);
+  if (watch && !setup.watchButton) fail('the stubbed desktop shows no Watch a folder entry');
+  const doc = await send('DOM.getDocument');
+  const input = await send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector: '#fileInput' });
+  await send('DOM.setFileInputFiles', { files: watch ? [files[0]] : files, nodeId: input.result.nodeId });
+  await waitFor('parity import ' + names[0], `${ready} && document.getElementById('studioFilename').textContent === ${JSON.stringify(names[0])}`, 600_000);
+  if (watch) {
+    await evaluate(`document.getElementById('studioWatchFolder').click()`);
+    await waitFor('folder watch started', `window.__parityWatch.calls.includes('watch_import_folder') && !!window.__parityWatch.handler`, 30_000);
+    await wait(500);
+    for (const path of files.slice(1)) {
+      const name = basename(path);
+      const bytes = readFileSync(path).toString('base64');
+      await evaluate(`(() => {
+        const bytes = Uint8Array.from(atob(${JSON.stringify(bytes)}), c => c.charCodeAt(0));
+        window.__parityWatch.files.set('/parity/watched/' + ${JSON.stringify(name)}, bytes);
+      })()`);
+    }
+    // One sampler scan: every arrival within a few milliseconds.
+    await evaluate(`(() => {
+      const w = window.__parityWatch;
+      for (const [path, bytes] of w.files) {
+        w.handler({ payload: { name: path.split('/').pop(), size: bytes.length, path, session: w.session, modified: '1700000000000000000' } });
+      }
+    })()`);
+  }
+  const rows = `[...document.querySelectorAll('#fileListItems .file-list-name')]`;
+  await waitFor('every tile ready', `${ready} && ${rows}.length === ${names.length} && ${rows}.every(row => row.dataset.previewState === 'ready')`, 600_000);
+  if (expired) {
+    await waitFor('parity rescue measured ' + names[0], `document.getElementById('expiredDiagnosis').dataset.state === 'analysed'
+      && [...document.querySelectorAll('#expiredDiagnosis li')].some(li => /^Uneven fog:/.test(li.textContent))`, 120_000);
+  }
+  await wait(expired ? 20_000 : 10_000);
+  await waitFor('parity settled', `${ready} && ${rows}.every(row => row.dataset.previewState === 'ready')`, 120_000);
+  const open = await evaluate(`document.getElementById('studioFilename').textContent`);
+  if (open !== names[0]) fail('another photo was opened: ' + open);
+  let desktop = null;
+  if (watch) desktop = await evaluate(`(() => { const calls = [...new Set(window.__parityWatch.calls)]; window.__parityWatch.remove(); return calls; })()`);
+  const take = async label => {
+    await waitFor(label, `window.__parityDownloads.length > 0`, 600_000);
+    return evaluate(`window.__parityDownloads.shift()`);
+  };
+  await evaluate(`document.getElementById('studioSaveProject').click()`);
+  const project = JSON.parse((await take('parity project')).text);
+  const settings = {};
+  for (const name of names) {
+    settings[name] = project.files.find(file => file.name === name)?.settings;
+    if (!settings[name]) fail('saved project has no settings for ' + name);
+  }
+  const exports = {};
+  for (const [format, depth] of [['png', 8], ['tiff', 8], ['tiff', 16]]) {
+    await evaluate(`document.querySelector('.format-btn[data-format="${format}"]').click(); document.querySelector('.bitdepth-btn[data-bitdepth="${depth}"]').click()`);
+    await wait(300);
+    await evaluate(`document.getElementById('exportAllBtn').click()`);
+    for (let i = 0; i < names.length; i++) {
+      const entry = await take(`parity Export All ${format}${depth} (${i + 1}/${names.length})`);
+      exports[`${entry.name} ${format}${depth}`] = entry.sha256;
+    }
+    await waitFor('Export All settled', `${ready} && !document.getElementById('exportAllBtn').disabled`, 600_000);
+    await wait(500);
+  }
+  const mode = watch ? 'watch' : 'lane';
+  const row = { mode, expired, files: names, settings, exports, desktop };
+  const geometry = Object.fromEntries(names.map(name => [name, { rotationAngle: settings[name].rotationAngle, cropRegion: settings[name].cropRegion,
+    expired: Boolean(settings[name].expiredAnalysis), wb: [settings[name].wbR, settings[name].wbG, settings[name].wbB, settings[name].wbAutoConfidence] }]));
+  console.log(`import parity (${mode}${expired ? ', expired' : ''}):`, JSON.stringify({ geometry, exports, desktop }));
+  if (outPath) {
+    writeFileSync(outPath, JSON.stringify([row], null, 2));
+    console.log('import parity written to', outPath);
+  }
+  const reference = baseline?.find(entry => entry.mode === mode && entry.expired === expired);
+  if (baseline && !reference) fail(`baseline has no ${mode} entry`);
+  if (reference) {
+    const diff = [...differences(reference.settings, settings).map(line => 'settings.' + line),
+      ...differences(reference.exports, exports).map(line => 'exports.' + line)];
+    if (diff.length) fail(`import parity (${mode}) differs:\n${diff.join('\n')}`);
+    console.log(`ok: recipes and Export All PNG8/TIFF8/TIFF16 match the baseline (${mode}${expired ? ', expired' : ''})`);
   }
 }
