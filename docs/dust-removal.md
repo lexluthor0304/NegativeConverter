@@ -204,7 +204,8 @@ and every count equals a full recount.
 
 - Batch export still re-detects dust per file and ignores brush edits
   (`audit-backlog.md`).
-- A history entry the memory budget made cold (#244: after a later edit or
-  under memory pressure, typically from about 30 MP, where history holds the
-  only copies of the step's clean source and repaired image) keeps no dust
-  state: its undo rebuilds the planes from the base and detects dust again.
+- A history entry the memory budget made cold (#244: after a later edit, an
+  Undo or a Redo, or under memory pressure, typically from about 30 MP, where
+  history holds the only copies of the step's clean source and repaired image)
+  keeps no dust state: its undo rebuilds the planes from the base and detects
+  dust again.
