@@ -20672,17 +20672,19 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // Roll analysis lanes (#252 part 1): `framesInFlight` lanes sharing
     // `decodeSlots` decoders. Without a known RAM above 8 GiB it is exactly
     // the export planner's lanes for these files; above, the analysis
-    // footprint within a quarter of the RAM, never below those lanes. A
-    // header-less RAW takes the size of a decoded file of the same import
-    // and extension (`siblings`), not the unknown-size worst case.
+    // footprint within a quarter of the RAM, never below those lanes, which
+    // count the RAM too (#258) where the analysis plan's own floor does not:
+    // if the analysis plan would run fewer frames or decoders, those lanes
+    // run, each with a decoder of its own (#229 review R2-013). A header-less
+    // RAW takes the size of a decoded file of the same import and extension
+    // (`siblings`), not the unknown-size worst case.
     async function planRollAnalysisLanes(files, siblings = files) {
       const ramBytes = await machineRamBytes();
-      if (!(ramBytes > ROLL_ANALYSIS_MIN_RAM_BYTES)) {
-        // Today's lanes, each with a decoder of its own: the slots do not
-        // limit them.
-        const lanes = await planBatchLanes(files);
-        return { decodeSlots: lanes, framesInFlight: lanes, slotBytes: Infinity };
-      }
+      // Today's lanes, each with a decoder of its own: the slots do not
+      // limit them.
+      const lanes = await planBatchLanes(files);
+      const today = { decodeSlots: lanes, framesInFlight: lanes, slotBytes: Infinity };
+      if (!(ramBytes > ROLL_ANALYSIS_MIN_RAM_BYTES)) return today;
       const pinned = Number.parseInt(safeStorageGet('nc_batch_lanes_v1') || '', 10);
       const plan = planRollAnalysis({
         pixels: await importPixelsForRoll(files, { siblings }),
@@ -20692,6 +20694,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
         fileCount: files.length,
         maxParallel: Number.isInteger(pinned) && pinned >= 1 && pinned <= 4 ? pinned : 4
       });
+      if (plan.decodeSlots < lanes || plan.framesInFlight < lanes) return today;
       // A frame larger than planned waits at its decode checkpoint.
       return { ...plan, slotBytes: plan.decodeSlots * plan.decodeBytes };
     }

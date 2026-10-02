@@ -2,9 +2,11 @@
 // share (part 3): never below the export planner, exactly today's plan
 // without a known RAM above 8 GiB, and 2 frames in flight at 60 MP on 16 GB.
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import vm from 'node:vm';
 import {
   planRollAnalysis, planBatchParallelism, rollAnalysisFootprint, createDecodeSlots,
-  ROLL_ANALYSIS_RAM_SHARE
+  ROLL_ANALYSIS_RAM_SHARE, ROLL_ANALYSIS_MIN_RAM_BYTES
 } from './batchExportScheduler.js';
 import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
 import { importPixelsForRoll, rememberImageDimensions, UNKNOWN_IMAGE_PIXELS } from './imageDimensions.js';
@@ -86,6 +88,85 @@ function pick(plan) { return [plan.decodeSlots, plan.framesInFlight]; }
   // The plan follows: from today's single lane to 2 frames in flight.
   const plan = planRollAnalysis({ pixels: await importPixelsForRoll([a, b, c]), ramBytes: 16 * GiB, hardwareConcurrency: 8, fileCount: 3 });
   assert.deepEqual(pick(plan), [1, 2]);
+}
+
+// The app's plan (main.js planRollAnalysisLanes) is never below the export
+// planner's lanes for the same files, which count the machine's RAM since
+// #258 where planRollAnalysis's own floor does not (#229 review R2-013):
+// where the analysis plan would run fewer frames or decoders, those lanes
+// run, each with its own decoder. The reviewers' 24-50 MP x 16/24/32/64 GiB
+// configurations on 8 cores, at every integer MP, with the web's capped
+// deviceMemory and without one (the desktop app's WebViews).
+const mainSource = readFileSync(new URL('./main.js', import.meta.url), 'utf8');
+function mainFunction(name) {
+  const match = new RegExp(`^    (?:async )?function ${name}\\(`, 'm').exec(mainSource);
+  assert.ok(match, `${name} exists`);
+  const end = mainSource.indexOf('\n    }\n', match.index);
+  return mainSource.slice(match.index, end + 6);
+}
+function planContext({ worker = true } = {}) {
+  const context = vm.createContext({
+    navigator: { hardwareConcurrency: 8, deviceMemory: undefined },
+    memoryRuntime: { ramBytes: NaN }, desktopMemoryInfoReady: Promise.resolve(),
+    safeStorageGet: () => null, pixels: 0,
+    pixelsForMemory: async () => context.pixels,
+    importPixelsForRoll: async () => context.pixels,
+    planBatchParallelism, planRollAnalysis, ROLL_ANALYSIS_MIN_RAM_BYTES,
+    ...(worker ? { Worker: function Worker() {}, OffscreenCanvas: function OffscreenCanvas() {} } : {})
+  });
+  vm.runInContext(['planBatchLaneBudget', 'planBatchLanes', 'machineRamBytes', 'rollFrameWorkerUsable', 'planRollAnalysisLanes']
+    .map(mainFunction).join('\n'), context);
+  return context;
+}
+{
+  const context = planContext();
+  const files = Array.from({ length: 20 }, (_, i) => ({ name: `L${i}.NEF` }));
+  let configurations = 0, raised = 0;
+  for (const gb of [16, 24, 32, 64]) {
+    for (const deviceMemory of [undefined, Math.min(gb, 32)]) {
+      for (let mp = 24; mp <= 50; mp++) {
+        configurations++;
+        const pixels = mp * 1e6;
+        Object.assign(context, { pixels });
+        context.memoryRuntime.ramBytes = gb * GiB;
+        context.navigator.deviceMemory = deviceMemory;
+        const lanes = planBatchParallelism({ hardwareConcurrency: 8, deviceMemory, ramBytes: gb * GiB, pixelsPerFile: pixels, fileCount: 20 });
+        const plan = await context.planRollAnalysisLanes(files);
+        const at = `${mp} MP / ${gb} GiB / deviceMemory ${deviceMemory}`;
+        assert.ok(plan.decodeSlots >= lanes && plan.framesInFlight >= lanes,
+          `never below the export planner's ${lanes} lanes at ${at}: ${plan.decodeSlots}/${plan.framesInFlight}`);
+        const analysis = planRollAnalysis({ pixels, ramBytes: gb * GiB, hardwareConcurrency: 8, deviceMemory, fileCount: 20 });
+        if (analysis.decodeSlots >= lanes && analysis.framesInFlight >= lanes) {
+          assert.deepEqual(pick(plan), pick(analysis), `the analysis plan where it is not below them at ${at}`);
+          assert.equal(plan.slotBytes, analysis.decodeSlots * analysis.decodeBytes);
+        } else {
+          raised++;
+          assert.deepEqual([plan.decodeSlots, plan.framesInFlight, plan.slotBytes], [lanes, lanes, Infinity],
+            `else those lanes, each with its own decoder, at ${at}`);
+        }
+      }
+    }
+  }
+  assert.equal(configurations, 216);
+  assert.ok(raised >= 52, `the analysis plan alone fell below the export planner in ${raised} configurations`);
+  // The reviewers' example: a 24 MP NEF roll on 8 cores and 24 GiB keeps
+  // its 4 lanes (the analysis plan alone: 3 decoders, 3 frames).
+  Object.assign(context, { pixels: 24e6 });
+  context.memoryRuntime.ramBytes = 24 * GiB;
+  context.navigator.deviceMemory = undefined;
+  assert.deepEqual(pick(planRollAnalysis({ pixels: 24e6, ramBytes: 24 * GiB, hardwareConcurrency: 8, fileCount: 20 })), [3, 3]);
+  assert.deepEqual(pick(await context.planRollAnalysisLanes(files)), [4, 4]);
+  // 60 MP on 16 GiB keeps the analysis plan's 2 frames in flight on 1 decoder.
+  Object.assign(context, { pixels: 60.4e6 });
+  context.memoryRuntime.ramBytes = 16 * GiB;
+  assert.deepEqual(pick(await context.planRollAnalysisLanes(files)), [1, 2]);
+  // Unknown RAM or 8 GiB: exactly the export planner's lanes.
+  for (const ram of [NaN, 8 * GiB]) {
+    context.memoryRuntime.ramBytes = ram;
+    const lanes = planBatchParallelism({ hardwareConcurrency: 8, ramBytes: ram, pixelsPerFile: 60.4e6, fileCount: 20 });
+    const plan = await context.planRollAnalysisLanes(files);
+    assert.deepEqual([plan.decodeSlots, plan.framesInFlight, plan.slotBytes], [lanes, lanes, Infinity]);
+  }
 }
 
 // Decode slots: granted up to the slot count and byte budget, in order; a

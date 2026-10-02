@@ -411,7 +411,11 @@ Roll analysis has its own lane plan and its own per-frame worker (#252):
   `nc_memory_ram_gib_v1` override, the desktop `get_memory_info` command or
   `navigator.deviceMemory`), once the desktop command has answered; without a
   known RAM above 8 GiB the plan is exactly the export planner's lanes, and
-  it is never below them. `nc_batch_lanes_v1` stays the ceiling. A RAW whose
+  it is never below them: those lanes count the RAM too (#258), the analysis
+  plan's own floor does not, so where the analysis plan would run fewer
+  frames or decoders (24 MP on 8 cores and 24 GiB: 3 and 3 against 4 lanes),
+  the export planner's lanes run, each with its own decoder
+  (`planRollAnalysisLanes`). `nc_batch_lanes_v1` stays the ceiling. A RAW whose
   header yields no size takes the decoded size of a same-extension file of
   the import (the foreground photo records its size too), and pass 1 plans
   again after its first frame. The memory budget (#258) reserves each lane
