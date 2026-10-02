@@ -28,8 +28,9 @@ import { isCrossOriginIsolated, sharedMemoryAvailable } from './crossOriginIsola
 // The foreground decode may use every core up to this; the spec's pool is
 // min(cores, 8) - 1 workers plus the calling thread.
 const MAX_LIBRAW_THREADS = 8;
-// A background lane (roll analysis, batch export, warm switching) decodes
-// while the user works and while other lanes decode.
+// A background lane (roll analysis, the prefetch and the shared decodes the
+// editor adopts, light-table tiles) decodes while the user works and while
+// other lanes decode. Export All's decodes run at 'user' priority.
 const BACKGROUND_LIBRAW_THREADS = 2;
 // How long a threaded instance may take to answer its first call (its module
 // and pool are up then; 31-62 ms per decode on an M1 Pro): long enough for a

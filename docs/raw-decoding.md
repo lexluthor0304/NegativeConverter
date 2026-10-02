@@ -37,8 +37,11 @@ failed one and rejects its calls with the loader's timeout code, where
 libraw-wasm 1.6.0 left `open()` to wait out its 30 s (#229 review R2-046).
 
 One flag caps a background lane on either decoder: `loadFileToImageData`'s
-`priority: 'background'` (roll analysis, Export All, warm switching). The
-photo on screen keeps the cores.
+`priority: 'background'`, which only the background lanes pass: roll
+analysis, the prefetch and the shared decodes the editor adopts, and
+light-table tiles. While they decode, the photo on screen keeps the cores.
+Export All's decodes (`processFileWithSettings` and the decode-ahead
+`prepare`) run at `'user'` priority, uncapped.
 
 What each target runs today (libraw-wasm 1.6.0 pinned, the native gate off):
 

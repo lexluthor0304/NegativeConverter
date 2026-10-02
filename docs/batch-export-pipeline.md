@@ -154,8 +154,9 @@ Now one driver (`runBatchExport` in `main.js`) runs the per-file pipeline
   cannot start. RAW demosaic remains in LibRaw's dedicated worker (on a page
   with shared memory and a libraw-wasm that ships the threaded build, on its
   pthread pool), or, on a desktop whose native LibRaw passes the parity gate,
-  in the shell; a background lane's decode uses 2 threads on either
-  (`docs/raw-decoding.md`).
+  in the shell. Export All's decodes run at `'user'` priority, uncapped on
+  either; only the background lanes' decodes (roll analysis, prefetch and
+  adoption, light-table tiles) use 2 threads (`docs/raw-decoding.md`).
 - Everything after LibRaw's result (RGB16 → RGBA16 packing, the garbled
   check, the sensor-defect pass, the 8-bit mirror) runs in a disposable
   post-decode worker that each RAW decode owns (`rawPostDecodeClient.js`,
