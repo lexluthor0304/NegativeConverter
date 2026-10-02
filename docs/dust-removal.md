@@ -82,7 +82,7 @@ The reply carries R's 8-bit and 16-bit bytes, the stroke box's mask bytes and
 the count, all transferred. `DustBrush.test.mjs` checks 200+ random strokes
 (all modes, edges, corners, points off the frame) against the full-frame path:
 `createBrushMask` + `refineMask*`, full-frame TELEA and full-frame
-`findContours`.
+`findContours`, and that each stroke box is the tight bounds of its brush.
 
 ## Page side (`main.js`, `dustStrokeHistory.js`)
 

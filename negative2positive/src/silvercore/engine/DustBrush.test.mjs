@@ -100,6 +100,18 @@ function makeSource(width, height) {
   return image;
 }
 
+// The bounds of a plane's set pixels, or null.
+function bounds(mask, width, height) {
+  let x0 = width, y0 = height, x1 = -1, y1 = -1;
+  for (let p = 0; p < mask.length; p++) {
+    if (!mask[p]) continue;
+    const x = p % width, y = (p - x) / width;
+    if (x < x0) x0 = x; if (x > x1) x1 = x;
+    if (y < y0) y0 = y; if (y > y1) y1 = y;
+  }
+  return x1 < 0 ? null : { x: x0, y: y0, width: x1 - x0 + 1, height: y1 - y0 + 1 };
+}
+
 function disc(mask, width, height, cx, cy, r, value = 255) {
   for (let y = cy - r; y <= cy + r; y++) for (let x = cx - r; x <= cx + r; x++) {
     if (x >= 0 && y >= 0 && x < width && y < height && (x - cx) ** 2 + (y - cy) ** 2 <= r * r) mask[y * width + x] = value;
@@ -168,11 +180,9 @@ async function run(width, height, specks, count, { exactOracle }) {
   let fullCountCalls = 0;
   for (let n = 0; n < count; n++) {
     const stroke = randomStroke(width, height, near);
-    const expectedMask = (() => {
-      const brush = createBrushMask(stroke.points, stroke.brushRadius, width, height);
-      return stroke.mode === 'intelligent' ? refineMaskIntelligent(source, mask, brush)
-        : stroke.mode === 'direct' ? refineMaskDirect(mask, brush) : refineMaskRemove(mask, brush);
-    })();
+    const brush = createBrushMask(stroke.points, stroke.brushRadius, width, height);
+    const expectedMask = stroke.mode === 'intelligent' ? refineMaskIntelligent(source, mask, brush)
+      : stroke.mode === 'direct' ? refineMaskDirect(mask, brush) : refineMaskRemove(mask, brush);
     const before = worker.particleCount;
     const patch = applyDustStroke(worker, stroke);
     strokes++;
@@ -189,6 +199,9 @@ async function run(width, height, specks, count, { exactOracle }) {
       buffer.data.set(patch.rgba8.subarray(row * rect.width * 4, (row + 1) * rect.width * 4), start);
       buffer.__image16.data.set(patch.rgba16.subarray(row * rect.width * 4, (row + 1) * rect.width * 4), start);
     }
+    // The stroke box is the brush raster's tight bounds (the intelligent mode
+    // normalises edges over exactly that crop).
+    assert.deepEqual(patch.maskRect, bounds(brush, width, height), `stroke ${n}: tight stroke box`);
     assert.deepEqual(patch.maskBefore, copyMaskRect(mask, width, patch.maskRect));
     pasteMaskRect(mask, width, patch.maskRect, patch.maskBytes);
 
@@ -242,7 +255,13 @@ assert.ok(emptyStrokes < strokes / 4);
       const back = new Uint8Array(width * height);
       pasteMaskRect(back, width, raster.rect, raster.brush);
       assert.deepEqual(back, full);
-      assert.equal(raster.brush[0] | raster.brush.at(-1) | 1, 1 | raster.brush[0] | raster.brush.at(-1));
+      // Tight: the rect is the bounds of the set pixels, so its first and last
+      // rows and columns each hold one.
+      assert.deepEqual(raster.rect, bounds(full, width, height), `tight rect for r=${radius}`);
+      const { width: w, height: h } = raster.rect;
+      const rowSet = (y) => raster.brush.subarray(y * w, (y + 1) * w).some(Boolean);
+      const columnSet = (x) => { for (let y = 0; y < h; y++) if (raster.brush[y * w + x]) return true; return false; };
+      assert.ok(rowSet(0) && rowSet(h - 1) && columnSet(0) && columnSet(w - 1), `no empty border row or column for r=${radius}`);
     }
   }
 }
