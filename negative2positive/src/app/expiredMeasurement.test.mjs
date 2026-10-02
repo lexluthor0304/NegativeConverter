@@ -1,6 +1,6 @@
 // Standalone Node test: what the expired rescue's stored measurement is
-// taken on (#229 review R1-074). Runs the real main.js functions, with the
-// real opencv-js build for the fog surface - run with:
+// taken on (#229 review R1-074, R1-017). Runs the real main.js functions,
+// with the real opencv-js build for the fog surface - run with:
 // node negative2positive/src/app/expiredMeasurement.test.mjs
 //
 // - R1-074: a fog-surface request joins the run in flight only when it
@@ -8,11 +8,20 @@
 //   colour correct resets, a new semantic map, analysis area or plane)
 //   measures again and supersedes it, so the stored measurement is the one
 //   1703835 took: every request measured with the settings of its call.
+// - R1-017: an automatic retype (#231's flip of the open photo) and "These
+//   are positives" measure the frame in its new mode, with the strengths that
+//   measurement sets, as a photo opened in that mode is; strengths the user
+//   moved stay. The flip converts through processNegative, which measures;
+//   "These are positives" only converts again and is measured once that
+//   frame has settled.
 
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import vm from 'node:vm';
-import { functionSource, settle } from './geometryTestHarness.mjs';
+import { createHarness, makeBase, functionSource, settle } from './geometryTestHarness.mjs';
+import { applyAutomaticFilmType, applyFilmTypeOverride, sanitizeFilmTypeOverride } from './filmTypeOverride.js';
+import { ROLL_MONOCHROME } from './rollFilmType.js';
+import { withoutLearnedDefaults } from './learnedDefaults.js';
 import { resolveAnalysisRegion, analysisPixelBounds } from './analysisRegion.js';
 import { downsampleImageDataForMaxPixels } from './imageDataOps.js';
 import {
@@ -38,8 +47,9 @@ async function until(condition, label) {
 const strengthsOf = state => [state.expiredBrightness, state.expiredContrast];
 
 // An aged positive (16-bit): a textured ramp under fog that grows towards the
-// left edge, with per-layer gamma and a warm lean.
-function agedPositive({ width = 240, height = 160, seed = 0 } = {}) {
+// left edge, with per-layer gamma and a warm lean. `grey` gives the scene
+// inverted to grey instead, the way a B&W negative of it converts.
+function agedPositive({ width = 240, height = 160, seed = 0, grey = false } = {}) {
   const data8 = new Uint8ClampedArray(width * height * 4);
   const data16 = new Uint16Array(width * height * 4);
   for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
@@ -47,7 +57,8 @@ function agedPositive({ width = 240, height = 160, seed = 0 } = {}) {
     const scene = ((x * 7 + y * 3 + seed) % 40) / 39;
     const fog = 0.10 + 0.14 * (1 - x / (width - 1));
     for (let c = 0; c < 3; c++) {
-      const v = Math.min(1, (fog + (0.86 - fog) * Math.pow(scene, [0.9, 1, 1.1][c])) * [1, 0.94, 0.86][c]);
+      const v = grey ? 0.08 + 0.8 * (1 - scene) * (1 - fog)
+        : Math.min(1, (fog + (0.86 - fog) * Math.pow(scene, [0.9, 1, 1.1][c])) * [1, 0.94, 0.86][c]);
       data16[o + c] = Math.round(v * 65535);
       data8[o + c] = data16[o + c] >>> 8;
     }
@@ -76,7 +87,7 @@ function proxyContext(target) {
 // ---------------------------------------------------------------------------
 
 const SPATIAL_FUNCTIONS = [
-  'isCurrentLoad', 'expiredSourceKey', 'baseSizeSource', 'sanitizeNumeric', 'clampBetween', 'expiredAnalysisSample',
+  'isCurrentLoad', 'expiredSourceKey', 'expiredInterpretation', 'baseSizeSource', 'sanitizeNumeric', 'clampBetween', 'expiredAnalysisSample',
   'measureExpiredAnalysisWithSpatial', 'expiredSpatialInputs', 'runExpiredSpatialAnalysis', 'measureExpiredSpatialAnalysis',
   'applyExpiredAnalysisDefaults', 'resetExpiredStrengthsInState', 'runExpiredAnalysis'
 ];
@@ -159,7 +170,7 @@ const SOURCE_1703835 = String.raw`
       return true;
     }`;
 const UNCHANGED_SINCE_1703835 = [
-  'isCurrentLoad', 'expiredSourceKey', 'sanitizeNumeric', 'clampBetween', 'expiredAnalysisSample', 'applyExpiredAnalysisDefaults',
+  'isCurrentLoad', 'expiredSourceKey', 'expiredInterpretation', 'sanitizeNumeric', 'clampBetween', 'expiredAnalysisSample', 'applyExpiredAnalysisDefaults',
   'resetExpiredStrengthsInState'
 ];
 
@@ -267,3 +278,145 @@ for (const order of [[0, 1], [1, 0]]) {
   assert.ok(landed.spatial);
 }
 console.log('expiredMeasurement: a fog-surface request with other inputs measures again; the stored measurement is 1703835\'s (R1-074)');
+
+// ---------------------------------------------------------------------------
+// R1-017: the open photo retyped
+// ---------------------------------------------------------------------------
+
+const RETYPE_FUNCTIONS = [
+  'expiredSourceKey', 'expiredInterpretation', 'hasCurrentExpiredAnalysis', 'expiredAnalysisSample', 'runExpiredAnalysis',
+  'maybeAnalyzeExpiredRescue', 'applyExpiredAnalysisDefaults', 'remeasureExpiredAfterRetype', 'measurementInputsPending',
+  'settleMeasurementInputs', 'sanitizeNumeric', 'clampBetween', 'flipImportPhoto', 'retypeImportItem', 'applyImportPositives'
+];
+// The positive each interpretation converts to (the conversion is a stand-in:
+// a positive scan shows the frame as it is, a B&W negative inverts to grey).
+const SCAN = agedPositive({ width: 96, height: 64, seed: 3 });
+const AS_BW = agedPositive({ width: 96, height: 64, seed: 3, grey: true });
+const positiveOf = filmType => {
+  const frame = filmType === 'bw' ? AS_BW : SCAN;
+  const copy = { width: frame.width, height: frame.height, data: frame.data.slice() };
+  copy.__image16 = { width: frame.width, height: frame.height, data: frame.__image16.data.slice() };
+  return copy;
+};
+const RECIPE_KEYS = ['filmType', 'positiveMode', 'filmTypeSource', 'filmTypeConfidence', 'filmTypeReason', 'expiredAnalysis', ...EXPIRED_RESCUE_KEYS];
+
+// The open photo of a rescue session, converted by the real processNegative.
+// `convert` holds a conversion until released when `holdConversions` is set.
+async function openRescued(filmType, { filmTypeReason = filmType === 'positive' ? 'noMask' : 'rollMonochrome', holdConversions = false } = {}) {
+  const base = makeBase(96, 64, 9);
+  const h = createHarness(base, { realProcessNegative: true });
+  const c = h.context;
+  const item = { id: 1, file: { name: 'leader.png' } };
+  const measured = [];
+  const heldConversions = [];
+  // The roll's decision (#231): the frames are B&W negatives.
+  const target = { filmType: 'bw', confidence: 'medium', reason: ROLL_MONOCHROME.reason };
+  const record = { flipping: false, items: [item], rekeys: [], typed: new Map([[item, target]]) };
+  let refreshes = 0;
+  delete h.target.maybeAnalyzeExpiredRescue;
+  Object.assign(h.state, {
+    loadedFile: item.file, filmType, positiveMode: 'correct', filmTypeSource: 'auto', filmTypeConfidence: 'low', filmTypeReason,
+    ...EXPIRED_RESCUE_DEFAULTS, expiredEnabled: true, expiredAnalysis: null, semanticMap: null, coreBorderBuffer: 10,
+    fileQueue: [item], currentFileIndex: 0
+  });
+  Object.assign(h.target, {
+    EXPIRED_RESCUE_KEYS, EXPIRED_RESCUE_DEFAULTS, defaultExpiredRescueParams, sanitizeExpiredRescueParams, resolveAnalysisRegion,
+    analysisPixelBounds, downsampleImageDataForMaxPixels, applyAutomaticFilmType, applyFilmTypeOverride, sanitizeFilmTypeOverride,
+    ROLL_MONOCHROME, withoutLearnedDefaults, getCurrentQueueItem: () => item,
+    analyzeExpiredFilm: (image, options) => { measured.push(image); return analyzeExpiredFilm(image, options); },
+    // The fog surface is R1-074's (above); here the global measurement.
+    runExpiredSpatialAnalysis: () => Promise.resolve(false),
+    usesSilverCoreConversion: () => true, studioBackgroundReady: () => true, importFilmTypeActive: () => true,
+    importFilmTypeTarget: () => record.typed.get(item) || null, relearnImportSettings: settings => settings,
+    automaticRollItemKey: () => '', automaticRollRevision: 0,
+    persistCurrentFileSettings: () => { item.settings = Object.fromEntries(RECIPE_KEYS.map(key => [key, structuredClone(h.state[key])])); return true; },
+    convertFromCurrentSource: async () => {
+      h.conversions.push({ source: h.state.conversionSourceImageData });
+      if (holdConversions) await new Promise(resolve => heldConversions.push(resolve));
+      return positiveOf(h.state.filmType);
+    },
+    // "These are positives" converts again through the core reprocess; the
+    // flush (an export's barrier) lands its frame.
+    scheduleSilverSourceRefresh: () => { h.target.coreReprocessToken++; refreshes++; },
+    displayedFrameToken: 0,
+    flushScheduledCoreReprocess: async () => {
+      await tick();
+      if (h.target.displayedFrameToken === h.target.coreReprocessToken) return;
+      h.target.displayedFrameToken = h.target.coreReprocessToken;
+      h.state.processedImageData = positiveOf(h.state.filmType);
+    },
+    hasPendingCropDetection: () => false
+  });
+  vm.runInContext(RETYPE_FUNCTIONS.map(functionSource).join('\n'), c);
+  const opening = c.processNegative();
+  if (holdConversions) { await until(() => heldConversions.length === 1, 'converting'); heldConversions.shift()(); }
+  await opening;
+  await settle();
+  return { h, c, state: h.state, item, record, measured, heldConversions, refreshes: () => refreshes };
+}
+
+const fresh = { bw: await openRescued('bw'), positive: await openRescued('positive') };
+for (const [type, opened] of Object.entries(fresh)) {
+  assert.ok(opened.state.expiredAnalysis, `opened as ${type}: measured`);
+  assert.deepEqual(strengthsOf(opened.state), strengthsOf(defaultExpiredRescueParams(opened.state.expiredAnalysis)), `opened as ${type}: its strengths`);
+}
+assert.notDeepEqual(fresh.bw.state.expiredAnalysis, fresh.positive.state.expiredAnalysis, 'the fixture: the modes measure differently');
+
+// The flip of the open photo (#231): processNegative measures the new mode.
+for (const moved of [false, true]) {
+  const leader = await openRescued('positive', { holdConversions: true });
+  if (moved) leader.state.expiredBrightness += 9;
+  const movedBrightness = leader.state.expiredBrightness;
+  const flipping = leader.c.flipImportPhoto(leader.record);
+  await until(() => leader.heldConversions.length === 1, 'the flip converts the new mode');
+  await tick(); await tick();
+  assert.equal(leader.measured.length, 1, 'nothing is measured before the new frame (the retype re-measure waits for processNegative)');
+  leader.heldConversions.shift()();
+  assert.equal(await flipping, true);
+  await settle(); await tick();
+  assert.equal(leader.state.filmType, 'bw');
+  assert.equal(leader.measured.length, 2, 'one measurement of the new mode');
+  assert.deepEqual(leader.state.expiredAnalysis, fresh.bw.state.expiredAnalysis, 'the B&W frame is measured, as when opened as B&W');
+  assert.deepEqual(strengthsOf(leader.state), moved
+    ? [movedBrightness, fresh.bw.state.expiredContrast] : strengthsOf(fresh.bw.state),
+  moved ? 'a moved brightness stays, contrast follows the new measurement' : 'with the strengths it sets');
+  assert.equal(leader.item.settings.expiredAnalysis, null, 'the recipe dropped the positive measurement');
+}
+
+// "These are positives" on the flipped leader: no processNegative; the
+// frame of the new mode is measured once it has settled, Studio busy until.
+{
+  const leader = await openRescued('positive');
+  await leader.c.flipImportPhoto(leader.record);
+  await settle();
+  assert.deepEqual(leader.state.expiredAnalysis, fresh.bw.state.expiredAnalysis);
+  leader.item.settings = null;
+  leader.c.applyImportPositives(leader.record);
+  assert.equal(leader.state.filmType, 'positive');
+  assert.equal(leader.state.expiredAnalysis, null, 'the B&W measurement is dropped');
+  assert.equal(leader.refreshes(), 1, 'the new mode converts again');
+  const busy = () => leader.h.target.document.body.dataset.studioBusy;
+  await until(() => busy() === 'true', 'busy until the new frame is measured');
+  assert.equal(leader.state.expiredAnalysis, null);
+  await until(() => leader.state.expiredAnalysis, 'the new mode is measured');
+  await until(() => busy() === undefined, 'and free again');
+  assert.deepEqual(leader.state.expiredAnalysis, fresh.positive.state.expiredAnalysis, 'the positive frame is measured, as when opened as a positive');
+  assert.deepEqual(strengthsOf(leader.state), strengthsOf(fresh.positive.state));
+  assert.equal(leader.measured.length, 3, 'once per mode');
+}
+
+// The re-measure never reads a frame of the old mode: without a frame
+// converted after the retype nothing is measured.
+{
+  const leader = await openRescued('bw');
+  leader.item.settings = null;
+  leader.h.target.scheduleSilverSourceRefresh = () => {};
+  leader.c.applyImportPositives(leader.record);
+  const busy = () => leader.h.target.document.body.dataset.studioBusy;
+  await until(() => busy() === 'true', 'the retype waits for a frame of the new mode');
+  await until(() => busy() === undefined, 'and gives up when none is converted');
+  await settle();
+  assert.equal(leader.state.expiredAnalysis, null, 'the B&W frame on screen is not measured as a positive');
+  assert.equal(leader.measured.length, 1);
+}
+console.log('expiredMeasurement: a retype of the open photo measures its new mode and fills the strengths that measurement sets (R1-017)');

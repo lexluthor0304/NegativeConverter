@@ -21669,6 +21669,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function restoreSettings(settings, { refreshDisplay = true, holdBusy = true } = {}) {
       if (!settings) return;
       const safe = sanitizeSettings(settings, { fallbackSettings: state });
+      // The measured interpretation of the converted photo these settings
+      // replace (the expired rescue's, below).
+      const measuredInterpretation = state.expiredAnalysis && state.processedImageData ? expiredInterpretation() : null;
 
       state.rotationAngle = Number.isFinite(safe.rotationAngle) ? normalizeAngleDegrees(safe.rotationAngle) : 0;
       state.mirrored = Boolean(safe.mirrored);
@@ -21756,6 +21759,11 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       state.expiredAnalysis = safe.expiredAnalysis ? structuredClone(safe.expiredAnalysis) : null;
       // A saved measurement belongs to this file; adopt it instead of re-measuring.
       expiredAnalysisKey = null;
+      // A retype dropped the measurement of the old interpretation
+      // (filmTypeOverride.js): the new one is measured once converted.
+      if (measuredInterpretation && measuredInterpretation !== expiredInterpretation() && state.expiredEnabled && !state.expiredAnalysis) {
+        remeasureExpiredAfterRetype();
+      }
       state.frameMetadata = sanitizeFrameMetadata(safe.frameMetadata);
       prefillRollStockFromFilmEdge();
       updateMetadataUI();
@@ -23718,11 +23726,15 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // The anchors are estimated on the auto-WB sample, which does not follow
       // the viewport (#248), whenever it belongs to this source.
       const sampleSource = autoWbSampleFor(autoWbSampleKey()) || source;
-      // What stays false once false (the photo left or edited, the user's own
-      // white balance, a saved recipe) ends the inference early; passing
-      // states (crop mode, Auto Frame, a roll import) count before and after
-      // it only, as they always did.
-      const wanted = () => isCurrentLoad(generation) && item === getCurrentQueueItem() && revision === manualEditRevision && !state.wbUserOverride && !state.grayPointSampled && !state.rollReference.applyLock && !item.savedSettings;
+      // The interpretation the map and the rescue's measurement are of: an
+      // automatic retype (#231) changes it without an edit (R1-017).
+      const interpretation = expiredInterpretation();
+      // What stays false once false (the photo left, edited or retyped, the
+      // user's own white balance, a saved recipe) ends the inference early;
+      // passing states (crop mode, Auto Frame, a roll import) count before
+      // and after it only, as they always did.
+      const wanted = () => isCurrentLoad(generation) && item === getCurrentQueueItem() && revision === manualEditRevision && !state.wbUserOverride && !state.grayPointSampled && !state.rollReference.applyLock && !item.savedSettings
+        && interpretation === expiredInterpretation();
       const valid = () => wanted() && !state.cropping && !studioAutoFrameRunning && !automaticRollImportRunning && !state.rollFrame?.locked;
       // Whole converted preview coordinates are used for both WB and rescue.
       const preview = downsampleImageDataForMaxDim(sampleSource, 512);
@@ -24828,7 +24840,54 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     function expiredSourceKey() {
       const source = state.croppedImageData || state.originalImageData;
       if (!source) return null;
-      return `${state.loadedFile?.name || ''}|${source.width}x${source.height}|${state.filmType}|${state.positiveMode}`;
+      return `${state.loadedFile?.name || ''}|${source.width}x${source.height}|${expiredInterpretation()}`;
+    }
+
+    // How the source is read (film type, positive mode): a measurement of one
+    // interpretation does not describe another.
+    function expiredInterpretation() {
+      return `${state.filmType}|${state.positiveMode}`;
+    }
+
+    // A retype of the converted photo through its settings (an automatic
+    // retype of #231, "These are positives") dropped the measurement of the
+    // old interpretation (filmTypeOverride.js; #229 review R1-017).
+    // processNegative measures its first frame itself; a retype that only
+    // converts again is measured here once the frame of the new mode has
+    // settled, with its 16-bit plane. Studio is busy until then, as for any
+    // measurement wait, so an export cannot take the frame without its rescue.
+    function remeasureExpiredAfterRetype() {
+      const generation = loadGeneration;
+      const token = coreReprocessToken;
+      const owed = () => isCurrentLoad(generation) && !processNegativeInFlight && state.expiredEnabled && !state.expiredAnalysis;
+      setTimeout(async () => {
+        if (!owed()) return;
+        const owned = !document.body.dataset.studioBusy;
+        if (owned) {
+          document.body.dataset.studioBusy = 'true';
+          studioWorkspace?.sync();
+        }
+        try {
+          await flushScheduledCoreReprocess();
+        } catch (error) {
+          console.warn('Expired film: the retyped frame did not settle', error);
+        } finally {
+          if (owned && isCurrentLoad(generation) && !geometryBusyOwner) {
+            delete document.body.dataset.studioBusy;
+            studioWorkspace?.sync();
+          }
+        }
+        // Only a frame converted after the retype is of the new mode.
+        if (!owed() || displayedFrameToken <= token || !state.processedImageData) {
+          updateExpiredRescueUI();
+          return;
+        }
+        void settleMeasurementInputs(() => {
+          maybeAnalyzeExpiredRescue(state.processedImageData);
+          schedulePreviewUpdate();
+          scheduleFullUpdate();
+        }, owed);
+      }, 0);
     }
 
     // A fogged, borderless positive scan (a lab's JPEG of an expired roll) has

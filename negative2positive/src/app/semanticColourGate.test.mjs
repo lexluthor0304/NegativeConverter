@@ -36,7 +36,7 @@ function run({ filmType = 'color', positiveMode = 'correct', expiredEnabled = fa
     sanitizeSemanticMap: map => map,
     setTimeout: fn => timers.push(fn),
   });
-  vm.runInContext([...DISPLAY_SESSION_HELPERS, 'autoWbSampleFor', 'scheduleSemanticColour'].map(functionSource).join('\n'), context);
+  vm.runInContext([...DISPLAY_SESSION_HELPERS, 'autoWbSampleFor', 'expiredInterpretation', 'scheduleSemanticColour'].map(functionSource).join('\n'), context);
   context.scheduleSemanticColour(item, 1);
   return { item, downsamples, analyses, timers, state };
 }

@@ -138,7 +138,7 @@ console.log('Semantic model loads once per page session and reaches each worker 
     return source.slice(match.index, source.indexOf('\n    }', match.index) + 6);
   };
   const answer = { width: 2, height: 2, labels: [0, 0, 1, 1], confidence: 0.9 };
-  const pass = () => {
+  const pass = ({ filmType = 'color', expiredEnabled = false } = {}) => {
     const item = { id: 1 };
     const workers = [];
     const analyzer = createSemanticAnalyzer({ modelUrl: () => '/model.onnx', loadModel: async () => model, workerFactory: () => {
@@ -146,8 +146,9 @@ console.log('Semantic model loads once per page session and reaches each worker 
       workers.push(worker);
       return worker;
     } });
+    const measured = [];
     const state = {
-      filmType: 'color', positiveMode: 'correct', expiredEnabled: false, cropping: false, wbUserOverride: false, grayPointSampled: false,
+      filmType, positiveMode: 'correct', expiredEnabled, cropping: false, wbUserOverride: false, grayPointSampled: false, autoFrame: { lastDiagnostics: null },
       rollReference: { applyLock: false }, filmBase: { method: 'auto' }, wbR: 1, wbG: 1, wbB: 1, wbSemanticApplied: false,
       processedImageData: { width: 8, height: 8, data: new Uint8ClampedArray(256) }, conversionSourceImageData: null, autoWbSample: null
     };
@@ -160,12 +161,14 @@ console.log('Semantic model loads once per page session and reaches each worker 
       analyzeSemanticPreview: (image, options) => analyzer(image, { ...options, pollMs: 5 }),
       sanitizeSemanticMap,
       estimateAutoWhiteBalance: (image, { anchors }) => ({ anchored: Boolean(anchors), confidence: 'high', wbR: 1.25, wbG: 1, wbB: 0.8 }),
+      measureExpiredAnalysisForExport: async (image, settings) => { measured.push({ image, settings }); return { version: 3 }; },
+      applyExpiredAnalysisDefaults: (target, analysis) => { target.expiredAnalysis = analysis; }, updateExpiredRescueUI() {},
       pushUndo() {}, updateWBSliders() {}, updateGrayPointGuideUI() {}, markCurrentFileDirty() {},
       persistCurrentFileSettings() {}, schedulePreviewUpdate() {}
     });
-    vm.runInContext([...DISPLAY_SESSION_HELPERS, 'autoWbSampleFor', 'scheduleSemanticColour'].map(functionSource).join('\n'), context);
+    vm.runInContext([...DISPLAY_SESSION_HELPERS, 'autoWbSampleFor', 'expiredInterpretation', 'scheduleSemanticColour'].map(functionSource).join('\n'), context);
     context.scheduleSemanticColour(item, 1);
-    return { context, state, workers };
+    return { context, state, workers, measured };
   };
   const started = async run => {
     await new Promise(resolve => setTimeout(resolve, 5));
@@ -201,5 +204,29 @@ console.log('Semantic model loads once per page session and reaches each worker 
   await flush();
   assert.equal(open.state.wbSemanticApplied, false, 'crop mode still open at the answer drops it, as before');
   assert.deepEqual(wb(open.state), [1, 1, 1]);
+
+  // R1-017: an automatic retype (#231's flip, no edit, no new load) mid-
+  // inference: the map and the rescue's measurement would be of the old
+  // interpretation's frame. The worker ends at the next tick; nothing lands.
+  const leader = pass({ filmType: 'positive', expiredEnabled: true });
+  const leaderWorker = await started(leader);
+  leader.state.filmType = 'bw';
+  await ticks();
+  assert.equal(leaderWorker.terminated, true, 'a retype mid-inference ends the worker');
+  leaderWorker.onmessage?.({ data: answer });
+  await flush();
+  assert.deepEqual([leader.measured.length, leader.state.expiredAnalysis ?? null, leader.state.semanticMap ?? null], [0, null, null], 'no measurement of the positive frame lands');
+  const rescued = pass({ filmType: 'bw', expiredEnabled: true });
+  const rescuedWorker = await started(rescued);
+  rescuedWorker.onmessage({ data: answer });
+  await flush();
+  assert.equal(rescued.measured.length, 1, 'control: an unchanged rescue pass measures');
+  assert.equal(rescued.measured[0].image, rescued.state.processedImageData);
+  assert.deepEqual(rescued.state.expiredAnalysis, { version: 3 });
+  const recoloured = pass();
+  const recolouredWorker = await started(recoloured);
+  recoloured.state.positiveMode = 'edit';
+  await ticks();
+  assert.equal(recolouredWorker.terminated, true, 'another positive mode is another interpretation too');
 }
-console.log('Semantic colour polls only what stays false: crop mode opened and cancelled mid-inference keeps the map; an edit ends the worker');
+console.log('Semantic colour polls only what stays false: crop mode opened and cancelled mid-inference keeps the map; an edit or a retype ends the worker');
