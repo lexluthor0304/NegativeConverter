@@ -17,7 +17,10 @@
 // - the settle computes the settings off-state on the full decode and keeps
 //   what the user changed in the window, never touching studioBusy;
 // - the memory ledger (#258) counts the full decode with the open photo from
-//   its return to the swap, and nothing of it once the photo is left.
+//   its return to the swap, and nothing of it once the photo is left;
+// - the settle, and the fresh recipe of a photo left in the window with an
+//   edit, decide as their pass began (learned defaults, the roll's film type):
+//   one decode's recipe plus the edit.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
@@ -31,6 +34,9 @@ import { rotatedDimensions, sanitizeCropRect, normalizeAngleDegrees } from './im
 import { mergeStudioColors } from './studioSettings.js';
 import { MEMORY_FUNCTIONS, memoryGlobals } from './memoryHarness.mjs';
 import { backingBuffers } from './photoSessionCache.js';
+import { applyAutomaticFilmType, sanitizeFilmTypeOverride } from './filmTypeOverride.js';
+import { applyLearnedDefaults, learnedDefaultsKey } from './learnedDefaults.js';
+import { decideRollFilmType, mergeRollDecision, ownFilmTypeVerdict, rollDecisionFrame, rollFilmTypeTarget, ROLL_MONOCHROME } from './rollFilmType.js';
 
 const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8');
 function functionSource(name) {
@@ -459,6 +465,260 @@ const SAVED = { left: 400, top: 300, width: 8700, height: 5800 };
   assert.equal(await waiting, false, 'the photo was left');
   assert.equal(JSON.stringify(f.context.withPendingEdits(f.item, { coreExposure: 0, filmType: 'color' })), '{"coreExposure":18,"filmType":"color"}');
   assert.equal(f.context.pendingGeometryEdits(f.item), null);
+}
+
+// ---- the recipe in the two-stage window, against one decode (#255 review) ----------------
+// The real main.js functions run twice: on one decode, and on a stand-in
+// whose full decode lands later. The import pass is prepareStudioPhoto's for
+// a fresh photo (its inputs and results, below) with real learned defaults:
+// one earlier roll whose user raised the contrast by 20 adds +5.
+const LEARNED_KEY = learnedDefaultsKey({ filmType: 'color' });
+const learnedRecord = key => ({ version: 1, key, rolls: [{ id: 'roll-1', frames: { f1: { coreContrast: 20 } } }] });
+const RECIPE_FUNCTIONS = ['importUserEdited', 'learnsImportDefaults', 'learnedImportSettings', 'provisionalLearnedSettings'];
+function flowFixture({ twoStage, learnedKeys = [LEARNED_KEY] }) {
+  const f = fixture({ search: twoStage ? '?twoStageMinMp=40&twoStageMode=sequential' : '' });
+  const { target, state } = f;
+  // The recipe keys these cases read besides the fixture's.
+  const sanitize = target.sanitizeSettings;
+  target.sanitizeSettings = (raw, options = {}) => ({
+    ...sanitize(raw, options), coreContrast: raw?.coreContrast ?? options.fallbackSettings?.coreContrast ?? 0,
+    learnedDefaults: raw?.learnedDefaults ?? null, rollFrame: raw?.rollFrame ?? null
+  });
+  const defaults = target.createDefaultSettings;
+  target.createDefaultSettings = (...args) => ({ ...defaults(...args), coreContrast: 0 });
+  Object.assign(f.item, { id: 'a', selected: true });
+  state.fileQueue.push(...['B.DNG', 'C.DNG'].map((name, i) => ({ id: `other-${i}`, file: { name, size: 1 }, selected: true, settings: null, isDirty: false })));
+  Object.assign(target, {
+    manualEditRevision: 0, automaticRollRevision: 0,
+    learnedReady: Promise.resolve(), learnedRecords: new Map(learnedKeys.map(key => [key, learnedRecord(key)])),
+    applyLearnedDefaults, learnedDefaultsKey
+  });
+  vm.runInContext(RECIPE_FUNCTIONS.map(functionSource).join('\n'), f.context);
+  return f;
+}
+async function loadedSingle(f) {
+  const loading = f.context.loadFile(f.file(), { autoConvert: false, quiet: true });
+  await flush();
+  f.stage2[0].resolve(image(FULL));
+  await loading;
+  await flush();
+}
+// A fresh photo's import pass as prepareStudioPhoto runs it on the loaded
+// base: defaults, the auto-frame result, the film edge and learned defaults.
+// On a stand-in it records its inputs, keeps the crop in full units, learns
+// nothing, and the settle starts once it ends.
+async function importPass(f) {
+  const base = f.state.loadedBaseImageData;
+  const provisional = f.state.provisional;
+  const inputs = { automatic: true };
+  f.context.restoreSettings(f.target.createDefaultSettings(base, f.item, inputs), { refreshDisplay: false });
+  const snapshot = f.context.extractCurrentSettings();
+  if (provisional) {
+    provisional.start = { fresh: true, inputs, snapshot, detectFrame: true, readEdge: true, applyEdgeDefaults: true,
+      autoFrame: { enabled: true }, userEdited: f.context.importUserEdited(f.item), pendingEdits: null };
+  }
+  const framed = await f.target.analyzeStudioImportFrame(base, provisional ? { ...snapshot, cropRegion: f.state.cropRegion } : snapshot);
+  let { settings } = await f.context.buildFinalImportSettings(base, framed, null, f.item, {
+    readEdge: true, freshFile: true, applyEdgeDefaults: true, provisional: Boolean(provisional)
+  });
+  if (provisional) settings = { ...settings, ...provisional.geometry.toExact(settings) };
+  f.context.restoreSettings(settings, { refreshDisplay: false });
+  f.state.currentStep = 3;
+  if (provisional) {
+    provisional.settledSnapshot = f.context.extractCurrentSettings();
+    f.context.startProvisionalSettle(f.state.fullDecode);
+  }
+}
+
+// ---- the pass-start userEdited (#255 review R2-031) ---------------------------------------
+// An edit made in the window must not change what the import itself decides
+// for the photo: learned defaults and the roll's film type, which one decode
+// applied before any edit was possible. Here three B&W frames follow a frame
+// without film evidence (noMask): the roll types it B&W unless the frame is
+// locked, and a learned record for B&W stock adds +5 contrast.
+const ROLL_FUNCTIONS = ['importFilmTypeRoll', 'importFilmTypeActive', 'createImportFilmTypeRoll', 'liveImportSettings',
+  'importFilmTypeLocked', 'refreshImportFilmTypeDecision', 'settleImportFilmType'];
+const NO_MASK = { filmType: 'positive', filmTypeSource: 'auto', filmTypeConfidence: 'medium', filmTypeReason: 'noMask' };
+const MONOCHROME = { filmType: 'bw', filmTypeSource: 'auto', filmTypeConfidence: 'low', filmTypeReason: 'monochrome' };
+async function rollFixture({ twoStage }) {
+  const f = flowFixture({ twoStage, learnedKeys: [learnedDefaultsKey({ filmType: 'bw' })] });
+  const defaults = f.target.createDefaultSettings;
+  f.target.createDefaultSettings = (...args) => ({ ...defaults(...args), ...NO_MASK });
+  Object.assign(f.target, { importFilmTypeRolls: new Map(), decideRollFilmType, mergeRollDecision, ownFilmTypeVerdict, rollDecisionFrame,
+    rollFilmTypeTarget, ROLL_MONOCHROME, applyAutomaticFilmType, sanitizeFilmTypeOverride, scheduleImportFilmTypeUpdate: () => {} });
+  vm.runInContext(ROLL_FUNCTIONS.map(functionSource).join('\n'), f.context);
+  f.state.fileQueue.push({ id: 'other-2', file: { name: 'D.DNG', size: 1 }, selected: true, isDirty: false });
+  for (const item of f.state.fileQueue) item.importId = 'import-1';
+  for (const item of f.state.fileQueue.slice(1)) item.settings = { ...MONOCHROME, filmBase: { r: 205, g: 141, b: 92 }, filmEdge: { checked: true } };
+  f.context.createImportFilmTypeRoll(f.state.fileQueue);
+  f.stage2Entry = twoStage ? await loadedStandIn(f) : (await loadedSingle(f), null);
+  await importPass(f);
+  // The user nudges the exposure.
+  f.item.userEdited = true;
+  f.state.coreExposure = 18;
+  return f;
+}
+const DECIDED = ['filmType', 'filmTypeSource', 'filmTypeConfidence', 'filmTypeReason', 'coreContrast', 'learnedDefaults', 'coreExposure', 'rotationAngle'];
+const decided = settings => JSON.stringify(Object.fromEntries(DECIDED.map(key => [key, settings?.[key] ?? null])));
+// One decode: the import typed and learned before the edit; the edit is on top.
+const reference = await (async () => decided((await rollFixture({ twoStage: false })).context.extractCurrentSettings()))();
+assert.equal(JSON.parse(reference).filmType, 'bw', 'the roll types the frame B&W');
+assert.equal(JSON.parse(reference).coreContrast, 5, 'with the learned contrast of B&W stock');
+assert.equal(JSON.parse(reference).coreExposure, 18);
+{
+  // The settle on the full decode, with the edit made in the window.
+  const f = await rollFixture({ twoStage: true });
+  const waiting = f.context.ensureFullDecode({ reason: 'export' });
+  f.stage2Entry.resolve(image(FULL));
+  assert.equal(await waiting, true);
+  assert.equal(decided(f.context.extractCurrentSettings()), reference, 'the settled photo decides as its pass began, with the edit on top');
+  // Control: the roll decision reading the window's userEdited locks the frame.
+  const control = await rollFixture({ twoStage: true });
+  const refresh = control.target.refreshImportFilmTypeDecision;
+  control.target.refreshImportFilmTypeDecision = record => refresh(record);
+  const controlWaiting = control.context.ensureFullDecode({ reason: 'export' });
+  control.stage2Entry.resolve(image(FULL));
+  await controlWaiting;
+  assert.equal(JSON.parse(decided(control.context.extractCurrentSettings())).filmType, 'positive', 'control: a locked frame keeps its own type');
+}
+{
+  // Left before stage 2: only the edit is kept, with the userEdited the pass
+  // began with. The fresh recipe of the next decode (switch-back's
+  // buildFinalImportSettings, Export All's learned + film-type steps) decides
+  // as that pass did, so it equals one decode's recipe plus the edit.
+  const f = await rollFixture({ twoStage: true });
+  f.context.leaveProvisionalPhoto(f.item);
+  f.context.beginActivation(null);
+  f.context.invalidatePhotoActivation();
+  f.state.currentFileIndex = -1;
+  assert.equal(JSON.stringify(f.item.pendingEdits), '{"coreExposure":18}');
+  assert.equal(f.item.pendingUserEdited, false, 'the pass began unedited');
+  assert.equal(f.item.userEdited, true, 'the photo stays edited: the automatic roll import leaves it alone, as after one decode');
+  assert.equal(f.context.importUserEdited(f.item), false);
+  const fresh = async item => {
+    const defaults = f.target.createDefaultSettings(image(FULL), item);
+    return f.target.analyzeStudioImportFrame(image(FULL), defaults);
+  };
+  const switchBack = overlayWindowEdits((await f.context.buildFinalImportSettings(image(FULL), await fresh(f.item), null, f.item,
+    { readEdge: true, freshFile: true, applyEdgeDefaults: true })).settings, f.item.pendingEdits);
+  assert.equal(decided(switchBack), reference, 'switch-back: learned defaults, the roll type and the edit');
+  const exportAll = f.context.withPendingEdits(f.item, await f.context.learnedImportSettings(f.context.settleImportFilmType(f.item, await fresh(f.item)), f.item));
+  assert.equal(decided(exportAll), reference, 'Export All: the same recipe');
+  assert.ok(f.item.automaticDefaults, 'the automatic recipe is recorded for learning from this photo\'s edit');
+  // Control: without the pass-start value the edit decides (no learned
+  // defaults, the frame locked out of the roll's type).
+  const control = await rollFixture({ twoStage: true });
+  control.context.leaveProvisionalPhoto(control.item);
+  delete control.item.pendingUserEdited;
+  const controlRecipe = await control.context.learnedImportSettings(control.context.settleImportFilmType(control.item, await fresh(control.item)), control.item);
+  assert.deepEqual([controlRecipe.filmType, controlRecipe.coreContrast], ['positive', 0], 'control: the window edit decided');
+  // A recipe again (persisted) ends the pass-start value.
+  f.state.currentFileIndex = 0;
+  f.state.loadedFile = f.item.file;
+  f.item.settings = null;
+  f.context.persistCurrentFileSettings({ silent: true, force: true });
+  assert.equal(f.item.pendingUserEdited, undefined);
+  assert.equal(f.context.importUserEdited(f.item), true);
+}
+
+
+{
+  // Old against new on synthetic rolls: outside the window (no
+  // pendingUserEdited, the caller's own userEdited) every roll decision and
+  // every recipe is what 7235c39's functions gave. Frames of five verdict
+  // patterns, each frame in turn edited, saved, overridden or typed by hand.
+  const OLD = `
+    function learnsImportDefaults(item, userEdited = item?.userEdited) {
+      return Boolean(item && !item.savedSettings && !state.rollReference.applyLock && !userEdited);
+    }
+    async function learnedImportSettings(settings, item, { userEdited = item?.userEdited } = {}) {
+      if (!learnsImportDefaults(item, userEdited)) return settings;
+      await learnedReady;
+      item.automaticDefaults ||= structuredClone(settings);
+      const key = learnedDefaultsKey(settings, state.rollMetadata);
+      return applyLearnedDefaults(settings, learnedRecords.get(key));
+    }
+    function refreshImportFilmTypeDecision(record) {
+      const { typed } = decideRollFilmType(record.items.map(item => {
+        const own = state.fileQueue.includes(item) ? record.verdicts.get(item) || null : null;
+        return rollDecisionFrame(item.id, own, { locked: importFilmTypeLocked(item), live: liveImportSettings(item) });
+      }));
+      const next = new Map();
+      for (const item of record.items) {
+        const entry = typed.get(item.id);
+        if (entry) next.set(item, { filmType: entry.filmType, confidence: entry.confidence, reason: entry.reason });
+      }
+      record.typed = mergeRollDecision(record.typed, next, { final: record.final });
+    }
+    function settleImportFilmType(item, settings, { record: vote = true, userEdited = item?.userEdited } = {}) {
+      const record = importFilmTypeRoll(item);
+      if (!record || !settings || !record.items.includes(item)) return settings;
+      const own = ownFilmTypeVerdict(settings);
+      if (!vote) {
+        const target = !record.corrected && own && !own.manual && !importFilmTypeLocked(item, { userEdited }) ? record.typed.get(item) : null;
+        return target ? applyAutomaticFilmType(settings, target) : settings;
+      }
+      if (own) record.verdicts.set(item, own);
+      if (record.corrected) return settings;
+      refreshImportFilmTypeDecision(record);
+      if (importFilmTypeActive(record)) scheduleImportFilmTypeUpdate(record);
+      const target = own && !own.manual && !importFilmTypeLocked(item, { userEdited }) ? record.typed.get(item) : null;
+      return target ? applyAutomaticFilmType(settings, target) : settings;
+    }`;
+  const VERDICTS = { mono: MONOCHROME, noMask: NO_MASK, color: { filmType: 'color', filmTypeSource: 'auto', filmTypeConfidence: 'high', filmTypeReason: 'orangeMask' } };
+  const PATTERNS = [['mono', 'noMask', 'mono', 'mono', 'color'], ['noMask', 'mono', 'mono', 'noMask', 'mono'], ['mono', 'mono', 'noMask', 'mono', 'mono'],
+    ['color', 'mono', 'noMask', 'mono', 'mono'], ['noMask', 'noMask', 'mono', 'mono', 'mono']];
+  const LOCKS = [null, 'userEdited', 'savedSettings', 'override', 'manual'];
+  // `leftInWindow`: edited in a two-stage window and left before its recipe;
+  // `editedAfter`: one decode's photo, edited once its pass had run.
+  const decide = async (functions, pattern, lockAt, lock, { leftInWindow = false, editedAfter = false } = {}) => {
+    const items = pattern.map((_verdict, i) => ({ id: `f${i}`, importId: 'import-1', file: { name: `${i}.dng` }, settings: null }));
+    if (lock === 'userEdited') items[lockAt].userEdited = true;
+    if (lock === 'savedSettings') items[lockAt].savedSettings = true;
+    if (lock === 'override') items[lockAt].filmTypeOverride = { filmType: 'bw', positiveMode: 'correct' };
+    if (leftInWindow) Object.assign(items[lockAt], { userEdited: true, pendingUserEdited: false });
+    const state = { fileQueue: items, importFilmTypeAuto: true, rollReference: { applyLock: false }, rollMetadata: {} };
+    const context = vm.createContext({
+      state, structuredClone, Map, Set, Promise, automaticRollRevision: 0, importFilmTypeRolls: new Map(),
+      learnedReady: Promise.resolve(), learnedRecords: new Map(['color', 'bw', 'positive'].map(type => learnedDefaultsKey({ filmType: type }))
+        .map(key => [key, learnedRecord(key)])), applyLearnedDefaults, learnedDefaultsKey,
+      decideRollFilmType, mergeRollDecision, ownFilmTypeVerdict, rollDecisionFrame, rollFilmTypeTarget, ROLL_MONOCHROME,
+      applyAutomaticFilmType, sanitizeFilmTypeOverride, scheduleImportFilmTypeUpdate: () => {}, getCurrentQueueItem: () => null
+    });
+    vm.runInContext(['importFilmTypeRoll', 'importFilmTypeActive', 'createImportFilmTypeRoll', 'liveImportSettings', 'importFilmTypeLocked']
+      .map(functionSource).join('\n') + '\n' + functions, context);
+    context.createImportFilmTypeRoll(items);
+    const recipes = [];
+    // A roll import's frames get their recipes in turn, as pass 1 and the
+    // lanes give them.
+    for (const [i, item] of items.entries()) {
+      let settings = { coreContrast: 0, ...VERDICTS[pattern[i]] };
+      if (lock === 'manual' && i === lockAt) settings = { ...settings, filmTypeSource: 'manual' };
+      settings = await context.learnedImportSettings(context.settleImportFilmType(item, settings), item);
+      item.settings = settings;
+      if (editedAfter && i === lockAt) item.userEdited = true;
+      recipes.push(settings);
+    }
+    const record = context.importFilmTypeRoll(items[0]);
+    return JSON.stringify({ recipes, typed: [...record.typed].map(([item, target]) => [item.id, target]) });
+  };
+  const NEW = ['importUserEdited', 'learnsImportDefaults', 'learnedImportSettings', 'refreshImportFilmTypeDecision', 'settleImportFilmType']
+    .map(functionSource).join('\n');
+  let cases = 0;
+  for (const pattern of PATTERNS) for (const lock of LOCKS) for (let lockAt = 0; lockAt < pattern.length; lockAt++) {
+    assert.equal(await decide(NEW, pattern, lockAt, lock), await decide(OLD, pattern, lockAt, lock), `${pattern} ${lock}@${lockAt}`);
+    cases++;
+    if (!lock) break;
+  }
+  // The one difference: a frame left inside the window decides as its pass
+  // began, like one decode's photo edited after its pass; before, the edit
+  // decided its recipe.
+  for (const pattern of PATTERNS) for (let at = 0; at < pattern.length; at++) {
+    const left = await decide(NEW, pattern, at, null, { leftInWindow: true });
+    assert.equal(left, await decide(OLD, pattern, at, null, { editedAfter: true }), `${pattern} left@${at}: one decode's recipe`);
+    assert.notEqual(left, await decide(OLD, pattern, at, null, { leftInWindow: true }), `${pattern} left@${at}: not the edit's`);
+  }
+  assert.equal(cases, PATTERNS.length * (1 + (LOCKS.length - 1) * 5));
 }
 
 console.log('twoStageImport: header routing, stage options and start, abort on switch, barrier, retry, exact crop across the swap, history rebase, window edits and the ledger\'s open photo passed');

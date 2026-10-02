@@ -13288,11 +13288,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // recipe stays as it was plus what the user changed in the window. A
     // photo without one keeps only those edits (`pendingEdits`); the next
     // decode of it (switch-back, batch export, roll analysis) computes the
-    // automatic fields as for a fresh file and puts them on top.
+    // automatic fields as for a fresh file and puts them on top. That fresh
+    // recipe decides as this window's pass began (`pendingUserEdited`, read
+    // by importUserEdited), not as the window's edits left `userEdited`.
     function leaveProvisionalPhoto(item) {
       const provisional = state.provisional;
       if (!provisional) return;
       twoStageDiagnostics.leftEarly++;
+      if (!item.settings && provisional.start) item.pendingUserEdited = Boolean(provisional.start.userEdited);
       let edits = null;
       if (provisional.swapped && provisional.swapBaseline) {
         edits = { ...(provisional.swapEdits || {}), ...windowEdits(provisional.swapBaseline, extractCurrentSettings()) };
@@ -18460,6 +18463,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       item.settings = extractCurrentSettings();
       // Window edits kept from an earlier visit (#255) are in these settings now.
       delete item.pendingEdits;
+      delete item.pendingUserEdited;
       updateStudioThumbnail();
       item.isDirty = false;
       updateFileListUI();
@@ -22736,7 +22740,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // with their side effects held back: no roll date, no verdict recorded
     // into the roll's film-type decision, no `automaticDefaults`. The settle
     // on the full decode passes the `userEdited` of the moment the pass began.
-    async function buildFinalImportSettings(source, framed, read, item, { readEdge, freshFile, applyEdgeDefaults, provisional = false, userEdited = item?.userEdited }) {
+    async function buildFinalImportSettings(source, framed, read, item, { readEdge, freshFile, applyEdgeDefaults, provisional = false, userEdited = importUserEdited(item) }) {
       let settings = framed;
       let toast = null;
       if (readEdge) {
@@ -22836,7 +22840,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           if (item) provisional.item = item;
           provisional.start = {
             ...(provisional.start || { fresh: false }), snapshot, detectFrame, readEdge, applyEdgeDefaults,
-            autoFrame: { ...state.autoFrame }, userEdited: Boolean(item?.userEdited), pendingEdits
+            autoFrame: { ...state.autoFrame }, userEdited: importUserEdited(item), pendingEdits
           };
         }
         // The stand-in's analyses work in its units: the crop installed on it.
@@ -27233,12 +27237,21 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       for (const record of records) learnedRecords.set(record.key, record);
       updateLearningUI();
     }).catch(error => console.warn('Learned defaults storage unavailable:', error));
+    // The `userEdited` a recipe computed for `item` as for a fresh file
+    // decides with (learned defaults, the roll's film type). A photo left
+    // inside a two-stage window without a recipe (#255) decides as that
+    // window's pass began (`pendingUserEdited`, leaveProvisionalPhoto): its
+    // edits come back through `pendingEdits`, and its own `userEdited` stays
+    // set, so the automatic roll import still leaves it alone.
+    function importUserEdited(item) {
+      return Boolean(item && !item.settings && typeof item.pendingUserEdited === 'boolean' ? item.pendingUserEdited : item?.userEdited);
+    }
     // `userEdited` lets the settle of a two-stage import (#255) decide as the
     // import did when its provisional pass began.
-    function learnsImportDefaults(item, userEdited = item?.userEdited) {
+    function learnsImportDefaults(item, userEdited = importUserEdited(item)) {
       return Boolean(item && !item.savedSettings && !state.rollReference.applyLock && !userEdited);
     }
-    async function learnedImportSettings(settings, item, { userEdited = item?.userEdited } = {}) {
+    async function learnedImportSettings(settings, item, { userEdited = importUserEdited(item) } = {}) {
       if (!learnsImportDefaults(item, userEdited)) return settings;
       await learnedReady;
       item.automaticDefaults ||= structuredClone(settings);
@@ -27394,10 +27407,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       return Boolean(item.savedSettings || userEdited || sanitizeFilmTypeOverride(item.filmTypeOverride)
         || (settings && settings.filmTypeSource !== 'auto'));
     }
-    function refreshImportFilmTypeDecision(record) {
+    // `voter` ({ item, userEdited }): the frame whose recipe is being settled
+    // is locked as that recipe decides (settleImportFilmType), not by edits
+    // made since (#255: a two-stage window's).
+    function refreshImportFilmTypeDecision(record, voter = null) {
       const { typed } = decideRollFilmType(record.items.map(item => {
         const own = state.fileQueue.includes(item) ? record.verdicts.get(item) || null : null;
-        return rollDecisionFrame(item.id, own, { locked: importFilmTypeLocked(item), live: liveImportSettings(item) });
+        const locked = importFilmTypeLocked(item, voter?.item === item ? { userEdited: voter.userEdited } : undefined);
+        return rollDecisionFrame(item.id, own, { locked, live: liveImportSettings(item) });
       }));
       const next = new Map();
       for (const item of record.items) {
@@ -27416,7 +27433,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // the same decision.
     // `record: false` (a two-stage import's stand-in, #255) applies the
     // decision as it stands without voting: the full decode's verdict votes.
-    function settleImportFilmType(item, settings, { record: vote = true, userEdited = item?.userEdited } = {}) {
+    function settleImportFilmType(item, settings, { record: vote = true, userEdited = importUserEdited(item) } = {}) {
       const record = importFilmTypeRoll(item);
       if (!record || !settings || !record.items.includes(item)) return settings;
       const own = ownFilmTypeVerdict(settings);
@@ -27426,7 +27443,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       }
       if (own) record.verdicts.set(item, own);
       if (record.corrected) return settings;
-      refreshImportFilmTypeDecision(record);
+      refreshImportFilmTypeDecision(record, { item, userEdited });
       if (importFilmTypeActive(record)) scheduleImportFilmTypeUpdate(record);
       const target = own && !own.manual && !importFilmTypeLocked(item, { userEdited }) ? record.typed.get(item) : null;
       return target ? applyAutomaticFilmType(settings, target) : settings;

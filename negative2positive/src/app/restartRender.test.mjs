@@ -6,6 +6,9 @@ import { routeCoreConversion, keepsFullPlaneOnDowngrade } from './fullResolution
 import { DISABLED_GPU_PREVIEW_SCHEDULER } from './gpuPreviewScheduler.js';
 import { hasWindowEdits, geometryEdits, overlayWindowEdits } from './provisionalPhoto.js';
 import { displaySessionStubs, DISPLAY_SESSION_HELPERS } from './displaySessionHarness.mjs';
+import { applyLearnedDefaults, learnedDefaultsKey } from './learnedDefaults.js';
+import { decideRollFilmType, mergeRollDecision, ownFilmTypeVerdict, rollDecisionFrame, rollFilmTypeTarget, ROLL_MONOCHROME } from './rollFilmType.js';
+import { applyAutomaticFilmType, sanitizeFilmTypeOverride } from './filmTypeOverride.js';
 
 // Exercise the actual browser lifecycle functions without loading a DOM,
 // OpenCV, or ONNX. Only their UI and expensive conversion dependencies are
@@ -454,7 +457,7 @@ function prepareFixture({ itemSettings = null, detectFrame = true, learned = 0 }
   });
   vm.runInContext([
     ...DISPLAY_SESSION_HELPERS,
-    'prepareStudioPhoto', 'startImportDetection', 'buildFinalImportSettings', 'revealProvisionalPhoto',
+    'prepareStudioPhoto', 'startImportDetection', 'buildFinalImportSettings', 'importUserEdited', 'revealProvisionalPhoto',
     'armSettledConversion', 'processNegative', 'scheduleFullResolutionRender', 'withPendingEditsOf',
   ].map(functionSource).join('\n'), context);
   const answer = async (index = conversions.length - 1) => {
@@ -634,6 +637,62 @@ for (const timing of ['during', 'after']) {
   assert.deepEqual(settles, [record], 'the settle starts once the tail has ended');
 }
 
+// Switch-back to a photo left inside a two-stage window (#255 review R2-031):
+// no recipe, its window edit in pendingEdits, userEdited set by that edit and
+// pendingUserEdited false (its pass began unedited). The real pass computes
+// it as for a fresh file and decides as that pass began: the roll types the
+// noMask frame B&W between B&W neighbours and learned defaults of the B&W
+// stock apply, as on the first visit of one decode; the edit goes on top.
+{
+  const FILM_KEYS = ['filmType', 'filmTypeSource', 'filmTypeConfidence', 'filmTypeReason'];
+  const LEARNED_KEY = learnedDefaultsKey({ filmType: 'bw' });
+  const revisit = async ({ edited, pendingUserEdited }) => {
+    const f = prepareFixture();
+    const neighbours = ['b', 'c', 'd'].map(id => ({ id, importId: 'roll', file: { name: `${id}.dng` }, settings: {
+      filmType: 'bw', filmTypeSource: 'auto', filmTypeConfidence: 'low', filmTypeReason: 'monochrome', filmEdge: { checked: true } } }));
+    Object.assign(f.item, { id: 'a', importId: 'roll' });
+    if (edited) Object.assign(f.item, { userEdited: true, pendingEdits: { coreExposure: 18 } });
+    if (pendingUserEdited !== undefined) f.item.pendingUserEdited = pendingUserEdited;
+    f.state.fileQueue = [f.item, ...neighbours];
+    f.state.rollReference = { applyLock: false };
+    f.state.rollMetadata = {};
+    const defaults = f.context.createDefaultSettings;
+    const restore = f.context.restoreSettings;
+    Object.assign(f.context, {
+      // The frame's own verdict has no film evidence; the live state carries
+      // the film-type fields the roll decision reads.
+      createDefaultSettings: () => ({ ...defaults(), filmType: 'positive', filmTypeReason: 'noMask' }),
+      restoreSettings: (settings, options) => { restore(settings, options); for (const key of FILM_KEYS) f.state[key] = settings[key]; },
+      learnedReady: Promise.resolve(), learnedRecords: new Map([[LEARNED_KEY, { version: 1, key: LEARNED_KEY, rolls: [{ id: 'r1', frames: { f1: { coreTemperature: 20 } } }] }]]),
+      applyLearnedDefaults, learnedDefaultsKey, importFilmTypeRolls: new Map(), automaticRollRevision: 0,
+      decideRollFilmType, mergeRollDecision, ownFilmTypeVerdict, rollDecisionFrame, rollFilmTypeTarget, ROLL_MONOCHROME,
+      applyAutomaticFilmType, sanitizeFilmTypeOverride, scheduleImportFilmTypeUpdate: () => {}
+    });
+    vm.runInContext(['learnsImportDefaults', 'learnedImportSettings', 'provisionalLearnedSettings',
+      'importFilmTypeRoll', 'importFilmTypeActive', 'createImportFilmTypeRoll', 'liveImportSettings', 'importFilmTypeLocked',
+      'refreshImportFilmTypeDecision', 'settleImportFilmType'].map(functionSource).join('\n'), f.context);
+    f.context.createImportFilmTypeRoll(f.state.fileQueue);
+    const done = f.context.prepareStudioPhoto(1, f.item, { quiet: true });
+    await settle();
+    f.frames[0].reply.resolve(cropped(f.frames[0].settings));
+    // No rebate text: the frame has no film evidence of its own.
+    f.edges[0].reply.resolve({ result: null });
+    for (let answered = 0; answered < f.conversions.length; answered++) await f.answer(answered);
+    await done;
+    const keys = [...FILM_KEYS, 'coreTemperature', 'learnedDefaults', 'coreExposure', 'cropRegion', 'rotationAngle'];
+    return JSON.stringify(Object.fromEntries(keys.map(key => [key, f.state.live[key] ?? null])));
+  };
+  // One decode: the first visit's pass, then the user's edit.
+  const first = JSON.parse(await revisit({ edited: false }));
+  assert.deepEqual([first.filmType, first.filmTypeReason, first.coreTemperature], ['bw', 'rollMonochrome', 5], 'the roll types the frame and learned defaults apply');
+  const reference = JSON.stringify({ ...first, coreExposure: 18 });
+  assert.equal(await revisit({ edited: true, pendingUserEdited: false }), reference, 'switch-back decides as the window\'s pass began, with the edit on top');
+  // Control: the edit's userEdited deciding locks the frame out of the roll
+  // type (and so out of the B&W stock's learned defaults).
+  const control = JSON.parse(await revisit({ edited: true }));
+  assert.deepEqual([control.filmType, control.coreTemperature, control.coreExposure], ['positive', 0, 18], 'control: without the pass-start value');
+}
+
 // A load that is gone before any conversion hides its overlay (loadFile left
 // it up for the conversion).
 {
@@ -643,4 +702,4 @@ for (const timing of ['during', 'after']) {
   assert.equal(f.overlay.hides, 1);
 }
 
-console.log('restartRender: stale replies and queues rejected, direct-render export barrier and promise ownership preserved, valid renders and export lock respected, provisional first-photo render and single re-render ordered, the two-stage stand-in pass held back');
+console.log('restartRender: stale replies and queues rejected, direct-render export barrier and promise ownership preserved, valid renders and export lock respected, provisional first-photo render and single re-render ordered, the two-stage stand-in pass held back, a window-left photo\'s switch-back decides as its pass began');

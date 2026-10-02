@@ -130,10 +130,13 @@ today's single decode would have given on the full decode: the pixel-derived
 fields of createDefaultSettings with the recorded inputs, the same
 detections (the full decode goes to the worker without a copy, `owned`), and
 the same film-edge, roll film-type and learned-default steps (these vote,
-learn and set the roll date). It waits until the swap cannot cut into an
-interaction: the pass is over, no crop draft is open, no conversion,
-geometry build or crop-area detection is running, and input has been quiet
-for 400 ms, unless an exact consumer is waiting. It then swaps in one task:
+learn and set the roll date). Those steps decide with the `userEdited` the
+pass began with: an edit made in the window neither drops the learned
+defaults nor locks the frame out of the roll's film-type decision. It waits
+until the swap cannot cut into an interaction: the pass is over, no crop
+draft is open, no conversion, geometry build or crop-area detection is
+running, and input has been quiet for 400 ms, unless an exact consumer is
+waiting. It then swaps in one task:
 
 1. The user's window edits (`windowEdits`, the diff between the pass's settled
    settings and now) go over the new automatic settings. Geometry, film type
@@ -184,6 +187,13 @@ quiet.
   export (`processFileWithSettings`), roll analysis, Auto Frame Selected and
   the flat field compute the automatic fields as for a fresh file. They apply
   the user's geometry before the detections and the other edits on top.
+  That fresh recipe decides as the window's pass began: leaving records the
+  pass's `userEdited` as `item.pendingUserEdited`, which `importUserEdited`
+  hands to the recipe's learned-default and film-type steps until the photo
+  has a recipe again. Everywhere else the photo counts as edited
+  (`item.userEdited` stays set): the automatic roll import leaves it alone,
+  as after one decode, and never builds it a recipe without its pending
+  edits; the roll's decisions for other frames treat it as edited.
   `photoSettingsKey` includes the edits of a photo without a recipe. The
   photo's tile keeps the stand-in's render without its settings key, so the
   lane renders the photo again.
@@ -208,8 +218,15 @@ quiet.
 - `twoStageImport.test.mjs`: the real main.js functions (loadFile routing and
   stage options, sequential and concurrent start, abort on switch, the
   barrier with retry and failure, the settle with its history rebase, and
-  leaving early).
-- `restartRender.test.mjs`: the provisional pass holds its side effects back.
+  leaving early). The settle and a photo left with a window edit decide as
+  their pass began (learned defaults, the roll's film type): one decode's
+  recipe plus the edit; outside the window every roll decision and recipe
+  equals the old functions' (synthetic rolls). Each window case has a control
+  without the fix.
+- `restartRender.test.mjs`: the provisional pass holds its side effects back;
+  switch-back to a photo left in the window decides as its pass began.
+- `processFileWithSettings.parity.test.mjs`: Export All of a photo left in
+  the window writes the recipe, and the pixels, of one decode plus the edit.
 - `rawFileLoader.postDecode.test.mjs`: explicit half-size options,
   `__decodeScale`, and the `onLibRawReleased` timing.
 - Smoke (`scripts/two-stage-import-smoke.mjs`, `--two-stage-only`): generated

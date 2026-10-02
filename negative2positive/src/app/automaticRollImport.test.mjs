@@ -41,8 +41,9 @@ const flush = async () => { for (let i = 0; i < 80; i++) await new Promise(setIm
 const recipe = id => ({ filmType: 'color', filmBase: { r: 210, g: 140, b: 90, method: 'auto' }, filmEdge: { checked: true }, id });
 const channels = [0, 1, 2].map(() => ({ whitePointOrigin: 50000, blackPointOrigin: 500, meanPoint: 0.5 }));
 
-// Film-type orchestration (#231) is evaluated with the roll import it feeds.
-const FILM_TYPE_FUNCTIONS = ['importFilmTypeRoll', 'importFilmTypeActive', 'createImportFilmTypeRoll', 'liveImportSettings',
+// Film-type orchestration (#231) is evaluated with the roll import it feeds;
+// importUserEdited is the userEdited a fresh recipe decides with (#255).
+const FILM_TYPE_FUNCTIONS = ['importUserEdited', 'importFilmTypeRoll', 'importFilmTypeActive', 'createImportFilmTypeRoll', 'liveImportSettings',
   'importFilmTypeLocked', 'refreshImportFilmTypeDecision', 'importFilmTypeTarget', 'settleImportFilmType',
   'scheduleImportFilmTypeUpdate', 'relearnImportSettings', 'retypeImportItem', 'applyImportFilmTypeDecision',
   'flipImportPhoto', 'finalizeImportFilmType', 'deferImportFilmTypeToast', 'showImportFilmTypeToast', 'applyImportPositives'];

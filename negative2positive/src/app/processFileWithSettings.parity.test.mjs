@@ -293,6 +293,63 @@ for (const [label, saved] of [...Object.entries(recipes), ['no recipe', null]]) 
 }
 console.log(`processFileWithSettings batch options: ${batchCases} cases match HEAD`);
 
+// Export All of a photo left inside a two-stage window (#255 review R2-031):
+// no recipe, its window edit in pendingEdits, userEdited set by that edit and
+// pendingUserEdited false (its pass began unedited). The real export branch
+// computes it as for a fresh file and decides as that pass began: the roll
+// types the noMask frame B&W between B&W neighbours and the B&W stock's
+// learned contrast applies, with the edit on top. Pixels and settings equal
+// the export of the recipe one decode persisted (its first pass, then the
+// edit); before the fix the edit's userEdited decided (no roll type, no
+// learned contrast).
+{
+  const { hasWindowEdits, overlayWindowEdits, geometryEdits } = await import('./provisionalPhoto.js');
+  const { applyLearnedDefaults, learnedDefaultsKey } = await import('./learnedDefaults.js');
+  const { decideRollFilmType, mergeRollDecision, ownFilmTypeVerdict, rollDecisionFrame, rollFilmTypeTarget, ROLL_MONOCHROME } = await import('./rollFilmType.js');
+  const { applyAutomaticFilmType, sanitizeFilmTypeOverride } = await import('./filmTypeOverride.js');
+  const learnedKey = learnedDefaultsKey({ filmType: 'bw' });
+  const exportOf = async ({ saved = null, edited = false, pendingUserEdited }) => {
+    const r = run(current, { base: makeBase(64, 40, 77), saved, options: {}, dust: false, automatic: false });
+    const { context, item } = r;
+    Object.assign(item, { id: 'a', importId: 'roll' });
+    if (edited) Object.assign(item, { userEdited: true, pendingEdits: { coreExposure: 18 } });
+    if (pendingUserEdited !== undefined) item.pendingUserEdited = pendingUserEdited;
+    context.state.fileQueue.push(...['b', 'c', 'd'].map(id => ({ id, importId: 'roll', file: { name: `${id}.dng`, size: 1 }, settings: {
+      filmType: 'bw', filmTypeSource: 'auto', filmTypeConfidence: 'low', filmTypeReason: 'monochrome', filmEdge: { checked: true } } })));
+    Object.assign(context.state, { rollReference: { applyLock: false }, rollMetadata: {} });
+    const defaults = context.createDefaultSettings;
+    Object.assign(context, {
+      createDefaultSettings: (image, queued) => ({ ...defaults(image, queued), contrast: 0, filmType: 'positive', filmTypeSource: 'auto',
+        filmTypeConfidence: 'medium', filmTypeReason: 'noMask' }),
+      structuredClone, hasWindowEdits, overlayWindowEdits, geometryEdits, getCurrentQueueItem: () => null,
+      learnedReady: Promise.resolve(), learnedRecords: new Map([[learnedKey, { version: 1, key: learnedKey, rolls: [{ id: 'r1', frames: { f1: { contrast: 20 } } }] }]]),
+      applyLearnedDefaults, learnedDefaultsKey, importFilmTypeRolls: new Map(), automaticRollRevision: 0,
+      decideRollFilmType, mergeRollDecision, ownFilmTypeVerdict, rollDecisionFrame, rollFilmTypeTarget, ROLL_MONOCHROME,
+      applyAutomaticFilmType, sanitizeFilmTypeOverride, scheduleImportFilmTypeUpdate: () => {}
+    });
+    vm.runInContext(['withPendingEdits', 'pendingGeometryEdits', 'importUserEdited', 'learnsImportDefaults', 'learnedImportSettings',
+      'importFilmTypeRoll', 'importFilmTypeActive', 'createImportFilmTypeRoll', 'liveImportSettings', 'importFilmTypeLocked',
+      'refreshImportFilmTypeDecision', 'settleImportFilmType'].map(functionSource).join('\n'), context);
+    context.createImportFilmTypeRoll(context.state.fileQueue);
+    let prepared = null;
+    const result = await context.processFileWithSettings(r.file, saved ? structuredClone(saved) : null,
+      { bitDepth: 16, onPreparedSettings: settings => { prepared = settings; } });
+    return { pixels: describe(result), settings: JSON.stringify(prepared), item };
+  };
+  const first = await exportOf({});
+  const recipe = { ...JSON.parse(first.settings), coreExposure: 18 };
+  assert.deepEqual([recipe.filmType, recipe.filmTypeReason, recipe.contrast], ['bw', 'rollMonochrome', 5], 'one decode: the roll type and the learned contrast');
+  const persisted = await exportOf({ saved: recipe });
+  const left = await exportOf({ edited: true, pendingUserEdited: false });
+  assert.equal(left.settings, persisted.settings, 'Export All of the window-left photo: the recipe one decode persisted');
+  assert.equal(left.pixels, persisted.pixels, 'and the same pixels');
+  assert.equal(JSON.stringify(left.item.settings), left.settings, 'the export writes that recipe to the photo');
+  const control = await exportOf({ edited: true });
+  assert.deepEqual([JSON.parse(control.settings).filmType, JSON.parse(control.settings).contrast], ['positive', 0], 'control: the edit decided');
+  assert.notEqual(control.pixels, persisted.pixels);
+  console.log('processFileWithSettings: a window-left photo exports the recipe one decode persisted (pixels and settings)');
+}
+
 // #256 acceptance: once the conversion has resolved, the frame's decoded base
 // and its working planes (geometry and lens outputs) hold no memory, before
 // dust removal, repairs, auto WB and the encode run. The probe runs in the
