@@ -24917,43 +24917,63 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     let expiredOpenCvState = 'idle';
-    // The measurement in flight, so a second request for the same source and
-    // positive (a conversion finishing while one runs) joins it.
+    // The measurement in flight, so a second request for the same source,
+    // positive and inputs (a conversion finishing while one runs) joins it.
     let expiredSpatialRun = null;
+
+    // What the fog-surface measurement reads besides the positive's pixels
+    // (expiredAnalysisSample, expiredAnalysisFromMaps): the plane it samples,
+    // the analysis region and border buffer, the uneven-fog strength of the
+    // flattening stage and the semantic anchors. Local contrast is left out
+    // of that stage. 1703835 measured every request with the settings of its
+    // call (#229 review R1-074).
+    function expiredSpatialInputs(current, settings, source) {
+      return {
+        image: current,
+        plane: current?.__image16?.data instanceof Uint16Array ? current.__image16.data : null,
+        analysisPreview: current?.__analysisPreview || null,
+        region: JSON.stringify(resolveAnalysisRegion(settings, source)),
+        borderBuffer: sanitizeNumeric(settings.coreBorderBuffer, 10, 0, 30),
+        unevenFog: sanitizeExpiredRescueParams(settings).expiredUnevenFog,
+        semanticMap: settings.semanticMap || null
+      };
+    }
 
     // Phase two of the interactive measurement. The global result is on
     // screen immediately; the frame is then re-measured with its fog surface
     // (sampled in slices here, measured in the auto-frame worker), replacing
     // the analysis in place. A newer photo or conversion source ends it
-    // between slices.
+    // between slices. A request with the same inputs joins the run in
+    // flight; one whose inputs differ (a strength reset by colour correct, a
+    // new semantic map, area or plane) measures again and supersedes it, so
+    // only the newest request's measurement lands.
     function runExpiredSpatialAnalysis() {
       const key = expiredSourceKey();
       const current = state.processedImageData;
-      if (expiredSpatialRun && expiredSpatialRun.key === key && expiredSpatialRun.image === current
-        && expiredSpatialRun.generation === loadGeneration) return expiredSpatialRun.promise;
-      const run = { key, image: current, generation: loadGeneration };
-      run.promise = measureExpiredSpatialAnalysis(key, current).finally(() => {
+      const settings = { ...state, autoFrameMeta: state.autoFrame.lastDiagnostics };
+      const source = baseSizeSource();
+      const inputs = expiredSpatialInputs(current, settings, source);
+      const running = expiredSpatialRun;
+      if (running && running.key === key && running.generation === loadGeneration
+        && Object.keys(inputs).every(name => running.inputs[name] === inputs[name])) return running.promise;
+      const run = { key, generation: loadGeneration, inputs };
+      run.promise = measureExpiredSpatialAnalysis(key, current, settings, source, () => expiredSpatialRun === run).finally(() => {
         if (expiredSpatialRun === run) expiredSpatialRun = null;
       });
       expiredSpatialRun = run;
       return run.promise;
     }
 
-    async function measureExpiredSpatialAnalysis(key, current) {
+    async function measureExpiredSpatialAnalysis(key, current, settings, source, isLatest) {
       const generation = loadGeneration;
       if (!current || !state.expiredEnabled || !state.expiredAnalysis) return false;
       if (expiredOpenCvState !== 'ready') {
         expiredOpenCvState = 'loading';
         updateExpiredRescueUI();
       }
-      const isCurrent = () => isCurrentLoad(generation) && key === expiredSourceKey();
+      const isCurrent = () => isCurrentLoad(generation) && key === expiredSourceKey() && isLatest();
       try {
-        const analysis = await measureExpiredAnalysisWithSpatial(
-          current,
-          { ...state, autoFrameMeta: state.autoFrame.lastDiagnostics },
-          baseSizeSource(),
-          { isCurrent }
-        );
+        const analysis = await measureExpiredAnalysisWithSpatial(current, settings, source, { isCurrent });
         expiredOpenCvState = 'ready';
         if (!analysis || !isCurrent() || !state.expiredEnabled || !state.expiredAnalysis) {
           updateExpiredRescueUI();
