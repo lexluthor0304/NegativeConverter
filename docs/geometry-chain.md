@@ -92,7 +92,11 @@ In `main.js` the scalars change synchronously and the planes follow:
   built. The rare reader of the whole frame's pixels (recipe defaults, flat
   field defaults) awaits `geometryFramePixels()`; a synchronous read still
   works but is counted (`window.__ncGeometry.diagnostics.frameSyncReads`).
-  Without a crop the working frame is the output itself.
+  Walks over state and history never read the pixel getters
+  (`backingBuffers`): the session and history byte counts, and the probe
+  that keeps an export from transferring or releasing an editor plane
+  (#250), which counts the base and any pixels a reader already built as
+  live. Without a crop the working frame is the output itself.
 - History counts only the bytes it holds exclusively (`backingBuffers` over
   undo/redo minus live state). Over 768 MiB the oldest entries become cold
   (pixel references dropped, scalars kept) instead of being removed; the

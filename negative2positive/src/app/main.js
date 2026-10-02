@@ -10583,28 +10583,27 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     const watchRollSamples = createRollSampleCache(64 * 1024 * 1024);
 
     // Every buffer the editor still references (#250): live `state.*` planes,
-    // the display buffers, the dust planes, history snapshots and photo
-    // sessions. An export never transfers or releases one of these, whatever
-    // stamp it carries. Compared by buffer: an identity recipe shares the
-    // processed plane.
+    // the display buffers, the dust planes, history (snapshots and dust-stroke
+    // entries) and photo sessions. An export never transfers or releases one
+    // of these, whatever stamp it carries. Compared by buffer: an identity
+    // recipe shares the processed plane. Images are walked by backingBuffers,
+    // the walk sessions and the history budget count bytes with: a geometry
+    // frame descriptor (#244) adds its base and the frame pixels it already
+    // holds, and its pixel getters, which would build the whole rotated frame
+    // on this thread and keep it, are never read.
     function liveEditorBuffers() {
       const buffers = new Set();
       const addPlanes = (value) => {
         if (!value || typeof value !== 'object') return;
-        if (value instanceof ArrayBuffer) { buffers.add(value); return; }
-        if (ArrayBuffer.isView(value)) { if (value.buffer instanceof ArrayBuffer) buffers.add(value.buffer); return; }
-        const hasPlane = ArrayBuffer.isView(value.data) || (value.__image16 && ArrayBuffer.isView(value.__image16.data));
-        if (!hasPlane) return;
-        for (const buffer of planeBuffersOf(value)) buffers.add(buffer);
-        if (value.__analysisPreview) for (const buffer of planeBuffersOf(value.__analysisPreview)) buffers.add(buffer);
+        const image = value instanceof ArrayBuffer || ArrayBuffer.isView(value) || value.__geometryFrame
+          || ArrayBuffer.isView(value.data) || ArrayBuffer.isView(value.__image16?.data);
+        if (image) backingBuffers(value, buffers);
       };
       for (const value of Object.values(state)) addPlanes(value);
       for (const value of Object.values(state.dustRemoval || {})) addPlanes(value);
       addPlanes(previewAdjustedBuffer);
       addPlanes(settledAdjustedBuffer);
-      for (const snapshot of [...undoStack, ...redoStack]) {
-        for (const value of Object.values(snapshot?.refs || {})) addPlanes(value);
-      }
+      backingBuffers([...undoStack, ...redoStack].map(entry => entry.dustDelta || entry.refs), buffers);
       for (const cache of [photoSessions, photoPreviews, photoPrefetch]) {
         const held = typeof cache.buffers === 'function' ? cache.buffers() : cache.buffers;
         for (const buffer of held || []) buffers.add(buffer);
