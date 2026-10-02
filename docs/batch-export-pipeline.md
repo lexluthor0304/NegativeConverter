@@ -248,6 +248,7 @@ Budgets, in estimated bytes (`batchExportScheduler.js`):
 | decoding (LibRaw heap, packing, post-decode) | 256 MB + 26 B/px, ~1.8 GB at 60 MP | `estimateRawDecodeBytes` |
 | decoded, waiting for its lane | 12 B/px, ~0.72 GB | `DECODED_BASE_BYTES_PER_PIXEL` |
 | one processing lane | 25 B/px, ~1.5 GB (code accounting) | `PROCESSING_SLOT_BYTES_PER_PIXEL` |
+| a lane converting in the band pool, on top | 10 B/px, ~0.6 GB (code accounting: the assembled planes beside the bands' outputs, 12 B per converted pixel at an 81 % crop) | `BAND_POOL_BYTES_PER_PIXEL` |
 | encoded, waiting for its write | the payload's size, at most 512 MiB in all | `EXPORT_MAX_UNWRITTEN_BYTES` |
 | the editor (open photo, sessions, previews, stores, workers) | resident bytes | the memory ledger (`hiddenResidentBytes()`, #258) |
 
@@ -286,9 +287,15 @@ reservation.
   sheet): at most one frame ahead, one decoder at a time, started only once
   every lane's frame has its base. Each frame is admitted by
   `planDecodeAhead` (the table above against the ceiling; off at
-  `deviceMemory` <= 4, while the hidden-window gate limits jobs, and in
-  safe mode; WebKit reports no `deviceMemory`, so the estimate decides
-  there). RAW and PNG files only, whose decodes run off the main thread.
+  `deviceMemory` <= 4, on WebKit engines, while the hidden-window gate
+  limits jobs, and in safe mode; the refusals are counted by reason in
+  `decodeAhead.refused`). On WebKit (`wkwebview`, `webkitgtk`, Safari's
+  `webkit`; `memoryRuntime.engine`, read at each admission because the
+  desktop's answer arrives after boot) the spec enables it only once the
+  #230 harness has measured the per-lane `phys_footprint` and
+  `PROCESSING_SLOT_BYTES_PER_PIXEL` is set from it; until then every lane
+  there decodes its own frame, as before #256. RAW and PNG files only, whose
+  decodes run off the main thread.
   The prepared base is `loadFileToImageData` with the options the lane
   would use, so it is the same decode. On the desktop a prepare waits for
   the background gate's foreground conditions only (input in the last

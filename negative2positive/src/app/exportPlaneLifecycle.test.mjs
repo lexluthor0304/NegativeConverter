@@ -292,7 +292,7 @@ function createContext({ gainMap = 'on' } = {}) {
     // #256 stages: decode-ahead only for RAW names here, never admitted by
     // default (the fixture decodes nothing); tests below switch it on.
     batchPipelineDiagnostics: { batches: 0, droppedPlanes16: 0, residentFrames: 0, bandBridge: {}, bands: null, singleExport: null,
-      decodeAhead: { admitted: 0, refused: { ceiling: 0, 'low-memory': 0, hidden: 0, format: 0 } } },
+      decodeAhead: { admitted: 0, refused: { ceiling: 0, 'low-memory': 0, engine: 0, hidden: 0, format: 0 } } },
     // #256 band pool: none in this fixture (a 1 MP frame, and no pool size),
     // unless a test below sets one.
     exportBands: null,
@@ -768,14 +768,16 @@ for (const [format, bitDepth] of [['jpeg', 8], ['png', 8], ['tiff', 16], ['png',
   // (one at a time, one frame ahead) and handed over as the frame's owned
   // base; a lane goes on while its payload waits for the write; a
   // never-analysed frame reads the learned defaults only after an earlier
-  // learning frame's write. 'serial' turns the stages off.
-  const run = async (mode, { budgetBytes = null } = {}) => {
+  // learning frame's write. 'serial' turns the stages off. `engine` is the
+  // page's memoryEngine().
+  const run = async (mode, { budgetBytes = null, engine = null } = {}) => {
     const { f, exportInfo } = batchContext({ format: 'png', bitDepth: 8 });
     const log = [];
     const decoded = [];
     f.context.safeStorageGet = (key) => (key === 'nc_batch_pipeline_v1' ? mode : null);
     f.context.state.rollReference = { applyLock: false };
     if (budgetBytes !== null) f.context.memoryBudget.setBudget(budgetBytes);
+    if (engine) f.context.memoryRuntime.engine = engine;
     f.context.loadFileToImageData = async (file, options) => {
       assert.ok(options.signal instanceof AbortSignal, 'a prepared decode can be aborted');
       assert.equal(options.filmStats, !fileSettings.get(file.name), 'the options the lane would decode with');
@@ -846,6 +848,17 @@ for (const [format, bitDepth] of [['jpeg', 8], ['png', 8], ['tiff', 16], ['png',
   assert.deepEqual(serial.log.filter((line) => line.startsWith('decode-ahead')), [], 'serial: no decode-ahead');
   assert.equal(serial.diagnostics.last.earlyReleases, 0, 'serial: lanes held until their write');
   assert.ok(serial.log.includes('learned-read:c.dng:after'));
+
+  const selfOnly = ['process:a.dng:self', 'process:b.dng:self', 'process:c.dng:self', 'process:d.dng:self'];
+
+  // WebKit engines decode every frame in its lane until the #230 harness has
+  // measured one (#256 Part 3); the engine is read at the batch's admissions.
+  for (const engine of ['wkwebview', 'webkitgtk', 'webkit']) {
+    const webkit = await run(null, { engine });
+    assert.deepEqual(webkit.log.filter((line) => line.startsWith('process:')), selfOnly, engine);
+    assert.equal(webkit.diagnostics.decodeAhead.admitted, 0, engine);
+    assert.ok(webkit.diagnostics.decodeAhead.refused.engine >= 1, engine);
+  }
 }
 
 {

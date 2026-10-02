@@ -18,7 +18,7 @@
  * decoded ahead of the lanes (the prepare stage), the frames the lanes
  * process, and encoded payloads waiting for their write (the byte cap).
  */
-import { budgetFor, LOW_MEMORY_RAM_BYTES } from './memoryBudget.js';
+import { budgetFor, hasPeriodicMemoryPurge, LOW_MEMORY_RAM_BYTES } from './memoryBudget.js';
 import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
 
 // One in-flight frame keeps roughly 50 bytes per pixel alive across the RAW
@@ -333,14 +333,22 @@ export const EXPORT_MAX_UNWRITTEN_BYTES = 512 * 1024 * 1024;
 // photo open: the editor (~1.7 GB idle in the desktop app, measured) and its
 // photo sessions (<= 0.77 GB), one processing lane (~1.5 GB at 25 B/px), one
 // decode ahead (~1.8 GB) and one unwritten TIFF16 (0.36 GB) come to about
-// 6.1 GB and are admitted; the pre-#256 lane (50 B/px) would reach 7.6 GB,
-// at WebKit's 8 GB WebContent kill limit, and is refused.
+// 6.1 GB and are admitted; a lane converting in the band pool (~2.1 GB)
+// brings that to 6.7 GB and is refused, as is the pre-#256 lane (50 B/px:
+// 7.6 GB, at WebKit's 8 GB WebContent kill limit).
 export const DECODE_AHEAD_CEILING_BYTES = 6.5e9;
 // A decoded frame waiting for its lane: the RGBA16 plane and its 8-bit mirror.
 export const DECODED_BASE_BYTES_PER_PIXEL = 12;
 // One processing lane after #250 and #256 Part 1, by code accounting
 // (1.2-1.5 GB at 60 MP). Replace with the #230 harness measurement.
 export const PROCESSING_SLOT_BYTES_PER_PIXEL = 25;
+// A lane that converts in the band pool (#256 Part 5) holds more than the
+// single-worker lane above, by the same accounting: the source's band slices
+// next to the source (8 bytes per converted pixel) and then the frame's
+// assembled 16- and 8-bit planes next to the bands' outputs (12 bytes), or
+// the pool's shared planes next to that copy. The larger, 12 bytes per
+// converted pixel, is about 10 B/px of the frame at the reference 81 % crop.
+export const BAND_POOL_BYTES_PER_PIXEL = 10;
 
 /**
  * Whether one more frame may be decoded ahead of the lanes.
@@ -350,36 +358,48 @@ export const PROCESSING_SLOT_BYTES_PER_PIXEL = 25;
  * @param {number[]} [options.decodingPixels] frames prepared and still decoding
  * @param {number[]} [options.waitingPixels] frames prepared and waiting for a lane
  * @param {number[]} [options.processingPixels] frames the lanes are processing
+ * @param {boolean} [options.processingInBands] the lanes convert in the band
+ *   pool (BAND_POOL_BYTES_PER_PIXEL more each)
  * @param {number} [options.unwrittenBytes] encoded payloads waiting for their write
  * @param {number} [options.residentBytes] the editor's planes and photo caches
  * @param {number} [options.deviceMemory] navigator.deviceMemory (GB); WebKit reports none
+ * @param {string|null} [options.engine] memoryEngine() of the page
  * @param {boolean} [options.hiddenLimited] the hidden-window gate limits jobs (#241)
  * @param {number} [options.ceilingBytes]
- * @returns {{admit: boolean, bytes: number, reason: 'fits'|'ceiling'|'low-memory'|'hidden'}}
+ * @returns {{admit: boolean, bytes: number, reason: 'fits'|'ceiling'|'low-memory'|'engine'|'hidden'}}
  */
 export function planDecodeAhead({
   candidatePixels,
   decodingPixels = [],
   waitingPixels = [],
   processingPixels = [],
+  processingInBands = false,
   unwrittenBytes = 0,
   residentBytes = 0,
   deviceMemory,
+  engine = null,
   hiddenLimited = false,
   ceilingBytes = DECODE_AHEAD_CEILING_BYTES
 } = {}) {
   if (Number.isFinite(deviceMemory) && deviceMemory > 0 && deviceMemory <= BATCH_LOW_MEMORY_GB) {
     return { admit: false, bytes: 0, reason: 'low-memory' };
   }
+  // WebKit (WKWebView, WebKitGTK, Safari) kills its WebContent process at
+  // its active limit, and the estimates here are code accounting: #256 Part 3
+  // enables decode-ahead there only once the #230 harness has measured the
+  // per-lane phys_footprint and PROCESSING_SLOT_BYTES_PER_PIXEL is set from
+  // it. Until then each lane decodes its own frame there, as before #256.
+  if (hasPeriodicMemoryPurge(engine)) return { admit: false, bytes: 0, reason: 'engine' };
   // A hidden macOS window runs one item at a time (hiddenJobGate.js); the
   // lane's frame is that item.
   if (hiddenLimited) return { admit: false, bytes: 0, reason: 'hidden' };
   const count = (value) => Math.max(0, Number(value) || 0);
   const decode = (pixels) => estimateRawDecodeBytes(count(pixels), 1);
+  const slotBytes = PROCESSING_SLOT_BYTES_PER_PIXEL + (processingInBands ? BAND_POOL_BYTES_PER_PIXEL : 0);
   let bytes = decode(candidatePixels);
   for (const pixels of decodingPixels) bytes += decode(pixels);
   for (const pixels of waitingPixels) bytes += count(pixels) * DECODED_BASE_BYTES_PER_PIXEL;
-  for (const pixels of processingPixels) bytes += count(pixels) * PROCESSING_SLOT_BYTES_PER_PIXEL;
+  for (const pixels of processingPixels) bytes += count(pixels) * slotBytes;
   bytes += count(unwrittenBytes) + count(residentBytes);
   const admit = bytes <= count(ceilingBytes);
   return { admit, bytes, reason: admit ? 'fits' : 'ceiling' };

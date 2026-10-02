@@ -20693,7 +20693,7 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     const batchPipelineDiagnostics = {
       batches: 0, lastMode: null, lastLanes: 0, droppedPlanes16: 0, rebuilds: 0, residentFrames: 0,
       bandBridge: {}, bands: null, singleExport: null,
-      decodeAhead: { admitted: 0, refused: { ceiling: 0, 'low-memory': 0, hidden: 0, format: 0 }, lastEstimate: 0 },
+      decodeAhead: { admitted: 0, refused: { ceiling: 0, 'low-memory': 0, engine: 0, hidden: 0, format: 0 }, lastEstimate: 0 },
       last: null
     };
     if (typeof window !== 'undefined') window.__ncBatchPipeline = { diagnostics: batchPipelineDiagnostics };
@@ -20709,8 +20709,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     // reserves before it claims a frame and then waits for that frame's
     // prepare, so a prepare waiting for memory the lane holds would never
     // finish. Admission is a yes or no at once instead, and a frame it
-    // refuses is decoded by its lane inside the lane's reservation.
-    function batchDecodeAhead(mode, { pixelsPerFile }) {
+    // refuses is decoded by its lane inside the lane's reservation. It
+    // refuses every frame on WebKit engines until the #230 harness has
+    // measured a lane.
+    function batchDecodeAhead(mode, { pixelsPerFile, convertsInBands = () => false }) {
       if (mode === 'serial') return null;
       const decodesOffThread = (file) => isRawLikeFileName(String(file?.name || '').toLowerCase()) || isPngFile(file);
       const subStages = mode === 'substages';
@@ -20733,14 +20735,17 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
           const waitingPixels = [];
           for (const entry of prepared) (entry.stage === 'ready' ? waitingPixels : decodingPixels).push(await pixelsOf(entry.job.file));
           const hidden = hiddenJobs.status();
+          // Read at each admission: the desktop's engine arrives after boot.
           const plan = planDecodeAhead({
             candidatePixels: await pixelsOf(job.file),
             decodingPixels,
             waitingPixels,
             processingPixels: Array.from({ length: processing }, () => pixelsPerFile),
+            processingInBands: convertsInBands(),
             unwrittenBytes,
             residentBytes: hiddenResidentBytes(),
             deviceMemory: navigator.deviceMemory,
+            engine: memoryRuntime.engine,
             hiddenLimited: hidden.safeMode || (hidden.hidden && hidden.limited),
             ceilingBytes: memoryBudget.budget
           });
@@ -20830,7 +20835,10 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       // (#258): the index is not claimed yet when it asks.
       const laneBytes = laneReservationBytes({ pixels: pixelsPerFile });
       const mode = batchPipelineMode();
-      const decodeAhead = batchDecodeAhead(mode, { pixelsPerFile });
+      // `workers` (below) is read at each admission, once the batch runs.
+      const decodeAhead = batchDecodeAhead(mode, {
+        pixelsPerFile, convertsInBands: () => Boolean(workers.bandPool?.available)
+      });
       const workers = createBatchExportWorkers(lanes, { pixelsPerFile, exportInfo, mode, decodesInFlight: () => decodeAhead?.running() || 0 });
       const trace = createPerfTrace('batchExport', { files: jobs.length, lanes, mode });
       const learning = createLearningBarrier(jobs.length, (index) => learnsInSink && mayLearnFromExport(jobs[index].item));

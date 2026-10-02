@@ -12,7 +12,8 @@ import {
   planDecodeAhead,
   EXPORT_MAX_UNWRITTEN_BYTES,
   DECODE_AHEAD_CEILING_BYTES,
-  PROCESSING_SLOT_BYTES_PER_PIXEL
+  PROCESSING_SLOT_BYTES_PER_PIXEL,
+  BAND_POOL_BYTES_PER_PIXEL
 } from './batchExportScheduler.js';
 
 const tick = () => new Promise(resolve => setTimeout(resolve, 0));
@@ -405,11 +406,20 @@ for (const readyBeforeCancel of [false, true]) {
   assert.equal(planDecodeAhead({ candidatePixels: 1e6, deviceMemory: 4 }).reason, 'low-memory');
   assert.equal(planDecodeAhead({ candidatePixels: 1e6, deviceMemory: 8 }).admit, true);
   assert.equal(planDecodeAhead({ candidatePixels: 1e6, hiddenLimited: true }).reason, 'hidden');
-  // WebKit reports no deviceMemory: the estimate alone decides.
+  // Without deviceMemory the estimate alone decides.
   assert.equal(planDecodeAhead({ candidatePixels: px60, residentBytes: DECODE_AHEAD_CEILING_BYTES }).admit, false);
   // A second frame decoded ahead counts its decoder.
   assert.ok(planDecodeAhead({ candidatePixels: px60, decodingPixels: [px60] }).bytes
     > planDecodeAhead({ candidatePixels: px60, waitingPixels: [px60] }).bytes);
+  // WebKit engines decode in their lanes until the #230 harness has measured
+  // a lane (#256 Part 3), whatever the estimate.
+  for (const engine of ['wkwebview', 'webkitgtk', 'webkit']) {
+    assert.deepEqual(planDecodeAhead({ candidatePixels: 1e6, engine }), { admit: false, bytes: 0, reason: 'engine' }, engine);
+  }
+  for (const engine of ['chromium', 'webview2', 'gecko', null]) assert.equal(planDecodeAhead({ candidatePixels: 1e6, engine }).admit, true, String(engine));
+  // A lane converting in the band pool counts the pool's copies.
+  assert.equal(planDecodeAhead({ candidatePixels: px60, processingPixels: [px60], processingInBands: true }).bytes
+    - planDecodeAhead({ candidatePixels: px60, processingPixels: [px60] }).bytes, px60 * BAND_POOL_BYTES_PER_PIXEL);
 }
 
 console.log('batch pipeline stage tests passed');
