@@ -300,7 +300,9 @@ quiet.
   DNG. The two-stage runs use `?twoStageMinMp=40`
   (`TWO_STAGE_PARITY_MIN_MP` sets another threshold, so smaller RAWs can go
   two-stage too). Run one 60 MP file at a time: a file takes several
-  minutes.
+  minutes. So far it has passed on `_DSC3111.NEF` (10.7 MP, concurrent
+  mode) with `TWO_STAGE_PARITY_MIN_MP=1`; the 60 MP files with the default
+  threshold are still to run.
 - Latency and memory: the #230 benchmark (S1 import on `L1000617.DNG`, S7 cold
   switches over `L1000617…628.DNG`), with and without `?twoStageMinMp=40`, in
   concurrent and in forced sequential mode (`&twoStageMode=sequential`). Take
