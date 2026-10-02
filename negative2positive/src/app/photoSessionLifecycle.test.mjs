@@ -87,6 +87,8 @@ function fixture() {
     fileListRefreshDeferrals: 0, fileListRefreshDeferred: false, queueMicrotask,
     renderFileListUI: noop,
     coreReprocessBusy: () => false,
+    // No GPU frame is ahead of its exact frame (#239).
+    gpuPreviewScheduler: { busy: () => false },
     // #263: no reduced preview-tier session is open.
     previewTier: 'normal', displayIsReduced: () => false, resetPreviewTierForActivation: noop,
     captureSnapshot: () => ({ refs: {

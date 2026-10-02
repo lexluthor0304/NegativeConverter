@@ -21623,6 +21623,14 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
       if (studioAutoFrameRunning || isDesktopBatchExportLocked() || singleExportActive) return;
       if (index < 0 || index >= state.fileQueue.length) return;
       if (index === state.currentFileIndex && state.fileQueue[index].file === state.loadedFile) return;
+      // A GPU frame ahead of its exact frame (#239): that frame leaves now,
+      // and the photo being left is remembered once it and its plane have
+      // landed, as on the worker path (#229 review R1-048).
+      if (gpuPreviewScheduler.busy()) {
+        settleCoreInput();
+        await whenCoreReprocessIdle();
+        return switchToFile(index);
+      }
       // A dragged frame's 16-bit plane may still be in the preview worker. The
       // photo being left is remembered only once it is back.
       if (corePreviewRetained || corePreviewCommit) {
