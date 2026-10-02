@@ -300,7 +300,10 @@ equal only when the plain JSON would be; nothing is memoised, because curve
 LUTs change in place. A pending RAW upgrade, conversion,
 dust detection or brush refinement is not a settled session, nor is an open
 reduced preview-tier drag or a reduced frame still waiting for its normal-size
-tick (#263). Preview-only
+tick (#263), nor a full-resolution plane kept while its render waits for idle
+(#237's idle repair window: the plane lags its settings and its repairs are
+owed). A display preview waiting for its render (a photo just opened or
+restored) is settled. Preview-only
 restoration keeps the full-resolution pending flag: export must still pass the
 existing full-resolution barrier. Every snapshot records whether its plane is a
 display preview and whether it lags its settings (#237); a session that swaps
