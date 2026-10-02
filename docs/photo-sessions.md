@@ -518,8 +518,9 @@ The lanes render a tile without a new decode whenever they can (#247):
   reads that). LibRaw halves only mosaic data: a LinearRaw, monochrome or sRAW
   frame comes back at its full size, which the loader recognises from
   LibRaw's metadata size or, without one, the header's raw IFD, so its tile
-  is framed on the full frame (#229 review R1-080). When the tile is the job's only need, this decode is the
-  job's own (`openHalfSizeTileDecode`): never shared through
+  is framed on the full frame (#229 review R1-080). When the tile is the
+  job's only need, this decode is the job's own (`openHalfSizeTileDecode`):
+  never shared through
   `sharedDecodes`, adopted, retained or prefetched, and opening that photo
   aborts it so the file is never decoded twice at once. Frames without a
   recipe, and jobs that also analyse or prefetch the frame, take the full

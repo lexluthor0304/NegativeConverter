@@ -432,11 +432,11 @@ Roll analysis has its own lane plan and its own per-frame worker (#252):
   reserves its frame's real decode bytes (`loadRawFile`'s `decodeSlot`) and
   gives the slot back as soon as `imageData()` returns; a frame larger than
   planned waits there instead of overcommitting. A RAW the lane decodes on
-  the page (its worker analysis failed twice) takes the same slot
-  (`decodeRollFrameOnPage`). With one slot no two background demosaics
-  overlap, and frame N is measured while frame N+1 decodes. (Export
-  decode-ahead, #256, admits its prepared decodes
-  separately: `planDecodeAhead` and the prepare stage's one decoder.)
+  the page (no roll-frame worker, or its worker analysis failed twice) takes
+  the same slot (`decodeRollFrameOnPage`). With one slot no two background
+  demosaics overlap, and frame N is measured while frame N+1 decodes.
+  (Export decode-ahead, #256, admits its prepared decodes separately:
+  `planDecodeAhead` and the prepare stage's one decoder.)
 - **Roll-frame worker.** One `workers/rollFrameWorker.js` per frame in
   flight, created once per roll and held across retry attempts
   (`createRollAnalysisWorkers`, disposed when the roll ends). LibRaw's result
@@ -449,8 +449,8 @@ Roll analysis has its own lane plan and its own per-frame worker (#252):
   the plain results with today's functions in today's order
   (`createDefaultSettings` on a pixel-less frame primed with the worker's
   statistics, `analyzeStudioImportFrame`, `mergeImportFilmEdge`, learned
-  settings); then the worker builds the roll
-  sample (`rollSample.js`, the page's own builder) and drops the frame. No
+  settings); then the worker builds the roll sample (`rollSample.js`, the
+  page's own builder) and drops the frame. No
   plane of the frame travels back to the page and no main-thread loop runs
   over it, except for a frame whose display proxy is still to be filled
   (#249: neither the spill nor the persistent store holds it): its planes
