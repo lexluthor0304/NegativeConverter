@@ -129,7 +129,10 @@ the count, all transferred. `DustBrush.test.mjs` checks 200+ random strokes
   snapshot had not settled (that mark travels with the restored state),
   other dust inputs or another inpainter. `dustUndoKeep.test.mjs` runs
   main.js's history, conversion landing, detection and export repair step on
-  real OpenCV detection, TELEA and strokes.
+  real OpenCV detection, TELEA and strokes; in the browser,
+  `dust-undo-smoke.mjs` (full run; alone `--dust-undo-only`) undoes an
+  Exposure drag after a stroke and compares the PNG 8-bit and TIFF 16-bit
+  exports with those made before the drag.
 - **Display.** Only the preview pixels whose bilinear taps fall in R are
   recomputed (`updateDisplayPreviewRect`, exact), the WebGL source texture gets
   a `texSubImage2D` of that rect, the tint cells over the mask box are put on
