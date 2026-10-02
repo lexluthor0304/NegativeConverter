@@ -3,6 +3,8 @@
 // photo switch, the filmstrip stays navigable during the detection tail, and a
 // default import creates neither the MI-GAN repair worker nor (for a roll of
 // three or more) a semantic worker. Opening the Repair tab loads MI-GAN.
+// The colour photo of scenario 1 runs the semantic pass, which reads the same
+// model store: the store check looks for MI-GAN's model in particular (R1-039).
 import { join } from 'node:path';
 
 const ready = `document.body.classList.contains('studio-ready') && !document.body.dataset.studioBusy`;
@@ -10,13 +12,22 @@ const ready = `document.body.classList.contains('studio-ready') && !document.bod
 // Installed before the app's own scripts on every navigation of this scenario.
 const PROBE = `(() => {
   if (window.__firstPhotoProbe) return;
-  const probe = window.__firstPhotoProbe = { workers: [], databases: [], overlay: [], detecting: [], maxOpacity: 0 };
+  const probe = window.__firstPhotoProbe = { workers: [], databases: [], modelReads: [], overlay: [], detecting: [], maxOpacity: 0 };
   const NativeWorker = window.Worker;
   window.Worker = class extends NativeWorker {
     constructor(url, options) { probe.workers.push(String(url)); super(url, options); }
   };
   const open = indexedDB.open.bind(indexedDB);
   indexedDB.open = (name, ...rest) => { probe.databases.push(String(name)); return open(name, ...rest); };
+  // Which model a read is for: IndexedDB keys and fetched URLs (modelCache.js).
+  const get = IDBObjectStore.prototype.get;
+  IDBObjectStore.prototype.get = function (key) { probe.modelReads.push({ via: 'idb', key: String(key) }); return get.call(this, key); };
+  const fetchPage = window.fetch;
+  window.fetch = function (input, init) {
+    const url = String(typeof input === 'string' ? input : input?.url || '');
+    if (/\.onnx\b/.test(url)) probe.modelReads.push({ via: 'fetch', key: url });
+    return fetchPage.apply(this, arguments);
+  };
   new MutationObserver(records => {
     for (const record of records) {
       const target = record.target;
@@ -57,9 +68,14 @@ const PROBE = `(() => {
   requestAnimationFrame(sample);
 })()`;
 
+const MIGAN = /migan_pipeline_v2/;
+const SEMANTIC = /efficientvit-b1-ade20k/;
+
 export async function runFirstPhotoSmoke({ send, evaluate, waitFor, wait, fail, installDialogAutoAccept, port, root }) {
   const fixtures = join(root, 'negative2positive', 'test-fixtures');
   const files = ['negative-sample.jpg', 'negative-sample-2.jpg', 'negative-plain.png'].map(name => join(fixtures, name));
+  // Typed colour on import (orange mask), unlike negative-sample.jpg (positive).
+  const colourPhoto = join(fixtures, 'negative-textured.png');
   const script = await send('Page.addScriptToEvaluateOnNewDocument', { source: PROBE });
   let autoRollBefore;
   try {
@@ -67,7 +83,7 @@ export async function runFirstPhotoSmoke({ send, evaluate, waitFor, wait, fail, 
     await waitFor('first photo boot', `!!window.__firstPhotoProbe && !!document.getElementById('studioImportAutoCrop') && /No model loaded/.test(document.getElementById('dustAiStatus')?.textContent)`);
     await installDialogAutoAccept();
     await wait(300);
-    const probeReset = `(() => { const p = window.__firstPhotoProbe; p.workers = []; p.databases = []; p.overlay = []; p.detecting = []; p.maxOpacity = 0; })()`;
+    const probeReset = `(() => { const p = window.__firstPhotoProbe; p.workers = []; p.databases = []; p.modelReads = []; p.overlay = []; p.detecting = []; p.maxOpacity = 0; })()`;
     const importFiles = async (paths) => {
       const doc = await send('DOM.getDocument');
       const input = await send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector: '#fileInput' });
@@ -84,18 +100,26 @@ export async function runFirstPhotoSmoke({ send, evaluate, waitFor, wait, fail, 
     };
 
     // 1. One colour photo: convert first, detect in the background, no MI-GAN.
+    // Its semantic colour pass reads the shared model store (#262), so the
+    // store is checked for MI-GAN's model key, not for the database.
     await evaluate(probeReset);
-    await importFiles([files[0]]);
+    await importFiles([colourPhoto]);
     await waitFor('first photo settled', `${ready} && !!document.getElementById('studioFilename').textContent`, 150_000);
-    await wait(3000);
+    const filmType = await evaluate(`window.__ncTwoStage.status().settings?.filmType`);
+    if (filmType !== 'color') fail('the colour photo was not typed colour: ' + filmType);
+    await waitFor('the colour photo\'s semantic pass', `window.__firstPhotoProbe.workers.some(url => /semanticWorker/.test(url)) && !window.__ncTwoStage.status().semanticPending`, 60_000);
+    await wait(1000);
     let probe = await read();
-    console.log('first photo evidence:', JSON.stringify({ detecting: probe.detecting, overlay: probe.overlay, maxOpacity: probe.maxOpacity, workers: probe.workers.map(url => url.split('/').pop().split('?')[0]) }));
+    const reads = probe.modelReads.map(entry => `${entry.via}:${entry.key.split('/').pop()}`);
+    console.log('first photo evidence:', JSON.stringify({ detecting: probe.detecting, overlay: probe.overlay, maxOpacity: probe.maxOpacity, workers: probe.workers.map(url => url.split('/').pop().split('?')[0]), reads }));
     if (!probe.detecting.length) fail('the first photo was not revealed before its detections ended');
     checkTail(probe, 'first photo');
     const shown = probe.overlay.filter(entry => entry.visible).length;
     if (shown > 1) fail('a first import shows the overlay at most once: ' + JSON.stringify(probe.overlay));
     if (probe.workers.some(url => /aiInpaintWorker/.test(url))) fail('a default import must not start the MI-GAN worker');
-    if (probe.databases.includes('nc_ai_models')) fail('a default import must not read the AI model store');
+    if (probe.modelReads.some(entry => MIGAN.test(entry.key))) fail('a default import must not read the MI-GAN model: ' + JSON.stringify(reads));
+    // The colour path ran: the semantic model came from the same store.
+    if (!probe.modelReads.some(entry => SEMANTIC.test(entry.key))) fail('the colour import did not read the semantic model, so the store check saw no colour import: ' + JSON.stringify(reads));
     const idle = await evaluate(`document.getElementById('dustAiStatus').textContent`);
     if (!/No model loaded/.test(idle)) fail('MI-GAN loaded without intent: ' + idle);
     if (await evaluate(`[...document.querySelectorAll('.toast-message')].some(t => /AI repair model loaded/.test(t.textContent))`)) fail('an implicit model load must not toast');
@@ -105,8 +129,10 @@ export async function runFirstPhotoSmoke({ send, evaluate, waitFor, wait, fail, 
     await waitFor('MI-GAN ready after the Repair tab', `/Model ready/.test(document.getElementById('dustAiStatus').textContent)`, 180_000);
     probe = await read();
     if (!probe.workers.some(url => /aiInpaintWorker/.test(url))) fail('the Repair tab did not start the MI-GAN worker');
+    // The probe sees a MI-GAN read when there is one, so the check above holds.
+    if (!probe.modelReads.some(entry => MIGAN.test(entry.key))) fail('the probe missed the MI-GAN model read of the Repair tab: ' + JSON.stringify(probe.modelReads));
     if (await evaluate(`[...document.querySelectorAll('.toast-message')].some(t => /AI repair model loaded/.test(t.textContent))`)) fail('an implicit model load must not toast');
-    console.log('ok: first photo converts before detection ends, no detection overlay, MI-GAN loads on the Repair tab only');
+    console.log('ok: a colour photo converts before detection ends, no detection overlay, its semantic pass reads the model store but not MI-GAN, which loads on the Repair tab only');
 
     // 2. The strip is clicked as soon as the first photo's provisional
     // positive shows (normally inside its detection tail). The unanalysed
