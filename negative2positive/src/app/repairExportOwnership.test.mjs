@@ -229,6 +229,23 @@ function releasedFixture() {
   assert.equal(f.state.dustRemoval.inpaintedImageData, patched);
 }
 
+// A clean frame (a dust mask with nothing set) needs no pass: a released
+// model is not loaded for it, and the frame on screen is exported.
+{
+  const { f, patched } = releasedFixture();
+  f.state.dustRemoval.mask.fill(0);
+  const value = await f.c.renderCurrentImageDataForExport({ format: 'png', bitDepth: 8 });
+  assert.deepEqual([f.loadRequests.length, f.dustPasses.length], [0, 0], 'no load and no pass');
+  assert.equal(value, patched);
+  // The scan reads 32-bit words where the view allows, and the bytes after them.
+  const bytes = new Uint8Array(23);
+  for (const [offset, length, set] of [[0, 23, 22], [1, 21, 21], [3, 9, 4], [4, 16, null]]) {
+    bytes.fill(0);
+    if (set !== null) bytes[set] = 1;
+    assert.equal(f.c.dustMaskHasPixels(new Uint8Array(bytes.buffer, offset, length)), set !== null, `mask view ${offset}+${length}`);
+  }
+}
+
 // A model that had failed before the export (status 'error', TELEA on
 // screen) is not loaded for the dust: TELEA is that repair, run from scratch
 // over a copy of the mask instead of encoding the patched image.
