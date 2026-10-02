@@ -21,7 +21,7 @@ import { createMemoryBudget, createRetainedLedger, createMemoryClaim, createIdle
 import { createBackgroundGate, BACKGROUND_STEP_WAIT_CAP_MS, BACKGROUND_INPUT_QUIET_MS, BACKGROUND_BUSY_POLL_MS } from './backgroundGate.js';
 import { createSharedDecodes } from './sharedDecodes.js';
 import { pickBackgroundJob, travelDirection, displayDistance } from './backgroundPhotoScheduler.js';
-import { createJobMarker, readJobMarkers, clearJobMarker, matchJobFiles, planResumedExport, resumedJobMarker, jobNeedsSafeMode } from './jobMarker.js';
+import { createJobMarker, readJobMarkers, clearJobMarker, matchJobFiles, planResumedExport, resumedJobMarker, jobNeedsSafeMode, interruptedJobMessage } from './jobMarker.js';
 import { estimateRawDecodeBytes } from './rawDecodeEstimate.js';
 import { createEmbeddedPreviewPool } from './scanDecodeClient.js';
 import { isTiffContainerRawName } from './rawEmbeddedPreview.js';
@@ -25822,14 +25822,9 @@ import { describeRealmIsolation, planeGuardReport, sharedPlanesAvailable, isShar
     }
 
     function describeInterruptedJob(marker) {
-      const values = { total: String(marker.files.length), done: String(marker.written.length) };
-      if (marker.kind === 'export-folder') {
-        const folder = summarizePathForUi(marker.destination) || marker.destination;
-        return getInterpolatedText('interruptedExportFolder', { ...values, folder }, `Export of ${values.total} photos to ${folder} stopped after ${values.done}.`);
-      }
-      if (marker.kind === 'export-zip') return getInterpolatedText('interruptedExportZip', values, `ZIP export of ${values.total} photos stopped after ${values.done}. A partial ZIP cannot be resumed.`);
-      if (marker.kind === 'roll-analysis') return getInterpolatedText('interruptedRollAnalysis', values, `Roll analysis of ${values.total} photos stopped after ${values.done}.`);
-      return getInterpolatedText('interruptedExportDownloads', values, `Export of ${values.total} photos stopped after ${values.done}.`);
+      const folder = marker.kind === 'export-folder' ? (summarizePathForUi(marker.destination) || marker.destination) : '';
+      const { key, values, fallback } = interruptedJobMessage(marker, { folder });
+      return getInterpolatedText(key, values, fallback);
     }
 
     // Once at boot: name the jobs that stopped, and say when macOS stopped

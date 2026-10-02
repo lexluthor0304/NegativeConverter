@@ -118,9 +118,11 @@ state, cache bytes, live workers, the MI-GAN session and `aiRepair.revision`.
   deleted when the job ends or is cancelled. Each export sink and each analysed
   roll frame schedules the recovery copy.
 - **Boot.** A marker left over names the job ("Export of 116 photos to Scans
-  stopped after 47"), adds that macOS stopped the web process when the native
-  record is present, and points to the recovery flow. After the originals are
-  added again and the roll restored:
+  stopped after 47", "…stopped before any was written" when none finished;
+  the count is of finished frames, which lanes finish out of order), adds that
+  macOS stopped the web process when the native record is present, and points
+  to the recovery flow. After the originals are added again and the roll
+  restored:
   - a desktop-folder or download export offers to resume: the full original
     job list with the same names, positions and automatic-recipe flags,
     skipping frames recorded as written whose file still exists

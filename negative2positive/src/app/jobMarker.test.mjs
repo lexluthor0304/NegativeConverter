@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import {
   createJobMarker, readJobMarker, readJobMarkers, clearJobMarker, sanitizeJobMarker, matchJobFiles, planResumedExport,
-  resumedJobMarker, jobNeedsSafeMode, JOB_MARKER_KEY, JOB_MARKER_KEYS, JOB_MARKER_MAX_AGE_MS
+  resumedJobMarker, jobNeedsSafeMode, interruptedJobMessage, JOB_MARKER_KEY, JOB_MARKER_KEYS, JOB_MARKER_MAX_AGE_MS, JOB_KINDS
 } from './jobMarker.js';
+import { i18n } from './i18n.js';
+import { interpolateText } from './textUtils.js';
 
 function memoryStorage() {
   const map = new Map();
@@ -188,6 +190,37 @@ const now = () => clock;
   const next = resumedJobMarker(interrupted, { keep: [0, 1, 3] });
   assert.deepEqual(next.written, [[0, '/out/0'], [1, '/out/1'], [3, '/out/3']]);
   assert.equal(next.attempt, 1);
+}
+
+// The boot sentence counts finished frames (R1-150): never a frame position,
+// and its own sentence when none finished, in every language.
+{
+  const render = (lang, marker) => {
+    const { key, values } = interruptedJobMessage(marker, { folder: 'Scans' });
+    assert.ok(i18n[lang][key], `${lang}.${key} exists`);
+    return interpolateText(i18n[lang][key], values);
+  };
+  const markerOf = (kind, done) => ({ kind, files: roll, written: Array.from({ length: done }, (_, i) => [i, '']) });
+  for (const kind of JOB_KINDS) {
+    for (const lang of ['zh', 'en', 'ja']) {
+      const none = render(lang, markerOf(kind, 0));
+      const some = render(lang, markerOf(kind, 47));
+      assert.ok(none.includes('116') && some.includes('116'), `${lang} ${kind}: names the total`);
+      assert.ok(!/(^|[^0-9])0([^0-9]|$)/.test(none), `${lang} ${kind}: no "0" when none finished: ${none}`);
+      assert.ok(some.includes('47'), `${lang} ${kind}: names the count`);
+      assert.ok(!/第\s*47|47\s*枚目|47(st|nd|rd|th)/.test(some), `${lang} ${kind}: a count, not a position: ${some}`);
+      if (kind === 'export-folder') assert.ok(none.includes('Scans') && some.includes('Scans'));
+    }
+  }
+  assert.equal(render('en', markerOf('export-folder', 47)), 'Export of 116 photos to Scans stopped after 47.');
+  assert.equal(render('en', markerOf('export-folder', 0)), 'Export of 116 photos to Scans stopped before any was written.');
+  assert.equal(render('zh', markerOf('export-folder', 47)), '导出 116 张照片到 Scans 时，已完成 47 张后中断。');
+  assert.equal(render('zh', markerOf('export-zip', 0)), '116 张照片的 ZIP 导出尚未写入任何一张就中断了。不完整的 ZIP 无法续传。');
+  assert.equal(render('ja', markerOf('export-folder', 47)), 'Scans への 116 枚の書き出しは、47 枚を書き出した後に止まりました。');
+  assert.equal(render('ja', markerOf('roll-analysis', 0)), '116 枚のロール解析は、1 枚も解析しないうちに止まりました。');
+  // The English fallbacks (a missing key) read the same way.
+  assert.equal(interruptedJobMessage(markerOf('export-downloads', 0)).fallback, 'Export of 116 photos stopped before any was saved.');
+  assert.equal(interruptedJobMessage(markerOf('export-downloads', 47)).fallback, 'Export of 116 photos stopped after 47.');
 }
 
 console.log('jobMarker tests passed');

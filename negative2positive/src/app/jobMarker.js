@@ -238,6 +238,45 @@ export function readJobMarkers(storage, { now = Date.now() } = {}) {
 }
 
 /**
+ * The boot message's sentence for an interrupted job: `{ key, values,
+ * fallback }` for the page's translator. `done` is a count of finished
+ * frames, not a position (lanes finish frames out of order); none finished
+ * has its own sentence.
+ */
+export function interruptedJobMessage(marker, { folder = '' } = {}) {
+  const total = String(marker.files.length);
+  const count = marker.written.length;
+  const done = String(count);
+  const none = count === 0;
+  if (marker.kind === 'export-folder') {
+    return {
+      key: none ? 'interruptedExportFolderNone' : 'interruptedExportFolder',
+      values: { total, done, folder },
+      fallback: none ? `Export of ${total} photos to ${folder} stopped before any was written.` : `Export of ${total} photos to ${folder} stopped after ${done}.`
+    };
+  }
+  if (marker.kind === 'export-zip') {
+    return {
+      key: none ? 'interruptedExportZipNone' : 'interruptedExportZip',
+      values: { total, done },
+      fallback: (none ? `ZIP export of ${total} photos stopped before any was added.` : `ZIP export of ${total} photos stopped after ${done}.`) + ' A partial ZIP cannot be resumed.'
+    };
+  }
+  if (marker.kind === 'roll-analysis') {
+    return {
+      key: none ? 'interruptedRollAnalysisNone' : 'interruptedRollAnalysis',
+      values: { total, done },
+      fallback: none ? `Roll analysis of ${total} photos stopped before any was analysed.` : `Roll analysis of ${total} photos stopped after ${done}.`
+    };
+  }
+  return {
+    key: none ? 'interruptedExportDownloadsNone' : 'interruptedExportDownloads',
+    values: { total, done },
+    fallback: none ? `Export of ${total} photos stopped before any was saved.` : `Export of ${total} photos stopped after ${done}.`
+  };
+}
+
+/**
  * A resumed job that was killed again runs its next attempt with the hidden
  * limits even while visible (one lane, caches off).
  */
